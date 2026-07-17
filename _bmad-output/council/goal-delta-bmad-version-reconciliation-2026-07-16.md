@@ -1,9 +1,36 @@
 # Goal Delta: BMAD Version Reconciliation
 
 **Mission:** `mission-1784224747161` "Single BMAD Install + Council Memory Re-home + Plugin Version-Awareness"
-**Scoped by:** Yui (task planner) - **Routed by:** Alya - **Date:** 2026-07-16
-**Status:** RECOMMENDATION - awaiting Tim's approval. `missions.json` NOT modified.
+**Scoped by:** Yui (task planner) - **Routed by:** Alya - **Date:** 2026-07-16 (amended 2026-07-17)
+**Status:** AMENDED per Tim's rulings (routed via Alya 2026-07-17). `missions.json` NOT modified - Tim still approves before any mutation.
 **Spec amended:** `_bmad-output/council/mission-draft-bmad-consolidation-2026-07-15.md`
+
+---
+
+## AMENDMENT 2026-07-17 - Tim's rulings on the six questions
+
+Tim ruled on all six. Amendments applied in place below; original reasoning kept
+where it stands, superseded reasoning struck through with a SUPERSEDED note.
+Summary of what changed:
+
+1. **Q1 (version): 6.9.0 - LOCKED.** Matches original rec. No change.
+2. **Q4 (gds/wds): OVERRULED - gds AND wds are BUNDLED framework, not project-local.**
+   Tim: "gds is the base game development skills/agents/workflows from bmad that
+   should still be available after consolidation." The current G2 branch shipped
+   ZERO gds/wds skills, so the bundle is not merely inert (C1) but **incomplete by
+   46 skills** (33 gds + 13 wds). This changes bundle CONTENT -> flips Q6.
+3. **G5 deletion scope NARROWED: only `dpsue-*` and `dpsbe-*` disappear** (the two
+   legacy per-domain council skill generations). Everything else stays.
+4. **Authoritative source: the BMAD installer output.** Tim runs the 6.9.0
+   installer into a clean scratch dir (gds included, custom excluded); that
+   `_bmad/` + `.claude/skills/` becomes the content manifest. G2 VENDORS from it
+   (mirror + C1 rewire), not hand-assembly. Resolves Q5 provenance automatically.
+5. **Q6 (sequencing): REVERSED - G2 is HELD** until the installer output exists,
+   because bundle content now changes (item 2). Sequence: installer (Tim) -> G2
+   re-run vendors + C1 rewire -> gate.
+6. **NEW requirement: project-name auto-detection** (p4 stream > github repo >
+   folder fallback). Recommendation on where it lands: **G3 sub-requirement** - see
+   the new "Q7" section.
 
 ---
 
@@ -113,7 +140,28 @@ G5 item 4 says "delete per-project `_bmad/` framework modules - leaving ONLY
 those particular skills, so the end state is sound - but the instruction as
 written is not safe to hand a human without this caveat.
 
-### F6 - The bundle ships zero `gds-*` and zero `wds-*` skills (the mixed-version island)
+### F6 - The bundle ships zero `gds-*` and zero `wds-*` skills
+
+**[AMENDED 2026-07-17] This is now a BUNDLE-INCOMPLETENESS finding, not a
+mixed-version-island finding.** Tim ruled gds + wds must be bundled (they are
+base game-dev framework that must survive consolidation). So the current G2
+branch is not just inert-per-C1 - it is **missing 46 skills** it must ship.
+The "leave project-local" recommendation below is SUPERSEDED; kept for the
+coupling data, which now sizes the C1 rewire instead of an island.
+
+**C1 rewire scope grows (verified on ClaudeOS 6.9.0, the version being bundled):**
+- `gds-*`: 33 skills; **45 files reference `resolve_customization`**, 49 reference
+  `{project-root}/_bmad` -> these need the SAME C1 path rewire as the bmad-* skills.
+- `wds-*`: 13 skills; 2 reference the resolver, 18 reference `{project-root}/_bmad`.
+
+So G2's C1 rewire is no longer "105 bmad skills." It is **bmad-* + gds-* + wds-***,
+and the vendoring-from-installer approach (Tim's item 4) must apply the rewire
+across all three sets. This is real added scope on an already-blocked goal - flag
+it to whoever re-runs G2.
+
+---
+
+### F6 (original, SUPERSEDED) - mixed-version island reasoning
 
 Bundle contents on `feat/mission-single-bmad-instal-bundle-bmad-core-into-the-dps-council-pl`:
 
@@ -269,7 +317,10 @@ Recorded because two of them change an answer.
   a half-migrated `core/` (F5). Bundling 6.6.0 would mean re-doing C1 against an
   older, messier base.
 
-**Consequence for Q6:** the bundle content does not change. G2 does not need to wait.
+**Ruling: 6.9.0 LOCKED** (Tim, 2026-07-17), as the *initial* bundled version - G6/G7
+will move it forward over time. ~~Consequence for Q6: the bundle content does not
+change, G2 does not need to wait.~~ **SUPERSEDED** - the gds/wds bundling ruling
+(Q4) DOES change bundle content, which reverses Q6. See Q6.
 
 ### Q2 - What regresses: **re-run through the corrected lens. Five items; the top one is not a regression at all, and the worst one lands on the repos nobody was watching.**
 
@@ -286,8 +337,8 @@ contains a false premise. Corrected framing, per F2/F8/F9:
 | **R0** | **G5 deletes `_bmad/scripts/` -> bundled skills silently drop `custom/` overrides** (F8) | **ClaudeOS, kraken_main** | **HIGH if C1 unfixed; ZERO if fixed** | **G2's C1 fix is a hard prerequisite of G5.** Already in G2's re-run guidance. |
 | R1 | Six skills disappear (F3) | Tools, Kraken-Backend | **Unknown - see OQ2** | Confirm non-use, or follow-up port |
 | R2 | Two skills disappear (F3) | kraken_main | **Unknown - see OQ2** | Same |
-| R3 | `project_name` unset (F4) | Tools, Kraken-Backend | **Low** - degrades to blank, never blocks | One config line per repo |
-| R4 | Mixed-version `gds-*` island (F6) | all four | **Moderate** | Name it; keep module `config.yaml`; accept this mission |
+| R3 | `project_name` stale/unset (F4) | Tools, Kraken-Backend (blank); kraken_main (wrong) | **Low->Moderate** - blank/wrong name mis-keys G3 T2 pools | Auto-detect + backfill (new Q7) |
+| R4 | ~~Mixed-version `gds-*` island~~ **VOID** (F6) | - | - | **Superseded: gds/wds are bundled (Q4). No island.** |
 | R5 | Override model arrives unannounced (F9) | Tools, Kraken-Backend | **Low** - comms, not correctness | G9 documents the arrival |
 
 **Explicit zeroes:**
@@ -333,12 +384,13 @@ already owned by G2's existing re-run guidance - so this delta's job on Q2 is to
    this doc's counts as current.)
 3. For each lost skill, record a disposition: consolidated-into-X / unused /
    needs-port. **Explicit zero required** - no skill leaves the list unlabelled.
-4. Add `project_name` to Tools' and Kraken-Backend's `_bmad/core/config.yaml`
-   (Perforce: staged to a numbered CL awaiting Tim's submit; never auto-submit,
-   never `p4 revert`).
-5. Name the `gds-*`/`wds-*` mixed-version island explicitly and record the
-   accepted decision (recommended: leave project-local this mission).
-6. Emit the **keep-list** G5 consumes: exactly which paths survive per repo.
+4. `project_name` backfill folded into the Q7 auto-detection work (was a manual
+   config edit here; now driven by the detector - see Q7). G9 still owns applying
+   the detected value to each repo's `_bmad/core/config.yaml` (Perforce: staged to
+   a numbered CL awaiting Tim's submit; never auto-submit, never `p4 revert`).
+5. ~~Name the gds/wds island~~ **VOID** (Q4 ruling: gds/wds are bundled).
+6. Emit the **keep-list** G5 consumes: exactly which paths survive per repo -
+   built around the narrowed deletion target (only `dpsue-*` + `dpsbe-*`).
 7. **Announce the net-new override model** (F9) for Tools + Kraken-Backend: those
    projects gain a resolver + three-layer `custom/` model they have never had.
    One short note per repo - what it is, that it is inert until used.
@@ -348,10 +400,11 @@ already owned by G2's existing re-run guidance - so this delta's job on Q2 is to
 **AC**
 - Version decision recorded with rationale; target-state doc updated.
 - Per-repo delta ledger exists; every lost skill carries a disposition (explicit zero enforced).
-- `project_name` present in all four `_bmad/core/config.yaml` (Perforce changes staged, not submitted).
-- Mixed-version `gds-*`/`wds-*` decision recorded; if "leave project-local", the
-  keep-list retains each surviving module's own `config.yaml`.
-- G5's keep-list is explicit and unambiguous (see Q4).
+- `project_name` correct in all four `_bmad/core/config.yaml` via the Q7 detector
+  (Perforce changes staged, not submitted).
+- G5's keep-list is explicit and unambiguous (see Q4): deletes ONLY `dpsue-*` +
+  `dpsbe-*` (skills + `.agents` mirror + `_bmad/memory` pools, gated by G4);
+  retains bmad/gds/wds/dps skills + every module's own `config.yaml`.
 - No deletions in this goal.
 
 **G5 prompt amendments:**
@@ -363,65 +416,128 @@ already owned by G2's existing re-run guidance - so this delta's job on Q2 is to
   line in this delta.**
 - The F5 caveat: on 6.2.2 repos `_bmad/core/` holds live skills, not just framework.
 
-### Q4 - Does G5 grow: **yes, but not where the brief expected.**
+### Q4 - Does G5 grow: **RE-DECIDED per Tim's ruling. G5 SHRINKS to a two-target delete; gds/wds move to G2 (bundled).**
 
-1. **`.agents/skills/` - already covered.** No growth needed (Correction 2).
-   Worth correcting the count to all four repos in G5's text.
-2. **`gds-*`/`wds-*` in `.claude/skills/` - the real gap.** G5 item 3 deletes only
-   `bmad-*`, so 33-40 `gds-*` per repo (+13 `wds-*` in ClaudeOS) survive.
-   **Recommendation: leave them project-local for this mission and say so.**
-   Bundling `gds-*`/`wds-*` is real scope growth on G2 (which is already blocked
-   and already carries a C1 rewire across 105 skills) - it belongs in a follow-up
-   mission, not here. But the survival must be *deliberate and written*, not
-   incidental.
-3. **G5's "leaving ONLY `config.yaml`" is ambiguous and must become an enumerated
-   keep-list.** Every module ships its own `config.yaml` - verified for `gds`,
-   `wds`, `automator`. If "config.yaml" means only `_bmad/core/config.yaml`, then
-   the surviving `gds-*` skills lose `_bmad/gds/config.yaml` and break. G9 emits
-   the explicit keep-list; G5 executes it.
-4. **G5 gains the F5 caveat** for 6.2.2 repos (`_bmad/core/` holds live skills).
+Tim narrowed the deletion scope. G5 deletes **only the two legacy per-domain
+council generations** - `dpsue-*` and `dpsbe-*`. Everything else stays: bmad/gds/
+wds/cis/tea/bmb/automator/core from the bundle; dps-* council skills from the
+plugin. My earlier "leave gds/wds project-local" is SUPERSEDED - they are bundled.
 
-### Q5 - Bundle version provenance: **a G2 add. Not its own goal.** (Confirms Alya's item 11.)
+**Deletion target, verified on disk 2026-07-17 (cleanly isolated):**
 
-The provenance artifact **already exists and is BMAD-native**:
-`_bmad/_config/manifest.yaml` records `installation.version` **and** per-module
-versions - including modules on independent version lines (ClaudeOS: `tea`
-v1.19.0, `bmb` v1.8.0, `core`/`bmm` 6.9.0). It is strictly richer than a
-hand-rolled version stamp, and it is already correct in the source install.
+| Target | `.claude/skills/` | `.agents/` mirror | `_bmad/memory/` pools |
+|---|---|---|---|
+| `dpsue-*` | kraken_main: 14 (elsewhere 0) | matching mirror | kraken_main: `dpsue` + 6 `dpsue-agent-*` |
+| `dpsbe-*` | Kraken-Backend: 16 (elsewhere 0) | matching mirror | Kraken-Backend: `dpsbe` + 4 `dpsbe-agent-*` |
 
-Verified: **the bundle ships no `_config/` at all.** The entire fix is to copy the
-source install's `_bmad/_config/manifest.yaml` to
-`plugins/dps-council/bmad/_config/manifest.yaml`, plus a README line. That is a
-file copy - it does not merit a goal.
+So G5 is per-repo and narrow: **kraken_main deletes the `dpsue` family, Kraken-Backend
+deletes the `dpsbe` family, ClaudeOS + Tools have neither** (explicit zero). All of
+it still G4-gated - the `_bmad/memory/dpsbe*` pools are the ONLY copy of that
+project's council history (the mission's top constraint), so **nothing deletes
+until Reina clears it.**
 
-- **G2 gains:** ship `bmad/_config/manifest.yaml`; AC - the bundled BMAD version is
-  readable from disk without inference.
-- **G6 gains one AC line:** the dry-run reports the **BMAD version delta**
-  alongside the plugin version delta (they move independently - plugin 0.7.0 says
-  nothing about BMAD 6.9.0, which is the exact gap Alya identified).
+**Three things G5 still needs (unchanged by the narrowing):**
+1. **`.agents/skills/` + `.cursor/`** stay in scope (G5 item 1) - but note this is
+   the *Cursor-mirror* teardown, separate from the dpsue/dpsbe delete. All four
+   repos (Correction 2). Whether the whole mirror goes or only the dpsue/dpsbe
+   slices of it is an OQ - see OQ6.
+2. **Keep-list must be enumerated, not "leave only config.yaml."** Every module
+   ships its own `config.yaml` (verified gds/wds/automator). G9 emits the explicit
+   keep-list; G5 executes it.
+3. **F5 caveat** for the 6.2.2 repos (`_bmad/core/` holds live skills) - still applies
+   if any `_bmad/` teardown touches core there.
+
+**New tension surfaced by the ruling (OQ7):** Tim said "dps-* council skills come
+from the plugin," yet ruled the local unprefixed `dps-*` skills STAY. Verified:
+kraken_main, Tools, and Kraken-Backend each carry **10 local `dps-*` skills** that
+now duplicate the plugin's `dps-council:dps-*` (shipped in G0). Leaving them is a
+defensible transitional choice, but it is a knowing duplication - flag for Tim,
+do not silently reconcile (OQ7).
+
+### Q5 - Bundle version provenance: **RESOLVED by Tim's item 4 - vendoring from the installer makes it automatic.**
+
+Original rec (copy `_bmad/_config/manifest.yaml` into the bundle) still holds, but
+Tim's authoritative-source ruling makes it fall out for free: G2 **vendors from the
+installer's scratch output**, so mirroring that `_bmad/` brings `_config/manifest.yaml`
+along in the same operation. No separate copy step.
+
+The manifest is BMAD-native and richer than any hand-rolled stamp: it records
+`installation.version` **and** per-module versions on independent lines (ClaudeOS
+sample: `tea` v1.19.0, `bmb` v1.8.0, `core`/`bmm` 6.9.0). Vendoring it verbatim
+guarantees the bundled version matches what Tim actually installed.
+
+- **G2 gains an AC:** the vendored bundle includes `bmad/_config/manifest.yaml`; the
+  bundled BMAD version is readable from disk without inference.
+- **G6 gains one AC line:** the dry-run reports the **BMAD version delta** alongside
+  the plugin version delta (they move independently - plugin 0.7.0 says nothing
+  about BMAD 6.9.0).
 - **G7 gains one AC line:** the version-check reads the bundled BMAD version and
   surfaces it in the notify.
 
-Two AC lines and a file copy. No new goal.
+**Authoritative-source decision (Tim, item 4), folded in:** the bundle is
+**vendored from Tim's installer output** (clean 6.9.0 scratch install, gds included,
+custom excluded) - NOT hand-assembled from any existing repo. G2 mirrors that
+`_bmad/` + `.claude/skills/` into `plugins/dps-council/{bmad,skills}/` and applies
+the C1 rewire. This guarantees version consistency and a single source of truth for
+what "the bundle is."
 
-### Q6 - Hold the G2 re-run: **I disagree with Alya - do not hold it. Release it on Q1 alone.**
+### Q6 - Hold the G2 re-run: **REVERSED. Hold G2 until the installer output exists.**
 
-Alya's reasoning is sound *conditionally*: if the answer were "pin at 6.6.0", G2's
-bundle content changes and Tim runs it twice. But the answer is 6.9.0 (Q1), and
-6.9.0 is the bundle as-built - so **G2's content does not change**. The C1
-resolver rewire is orthogonal to the version question: it is about *where* skills
-find the resolver, not *which version* of it.
+~~My earlier answer: release G2 on the Q1 ruling alone, because 6.9.0 is the bundle
+as-built so content does not change.~~ **SUPERSEDED by Tim's Q4 ruling.** Bundling
+gds + wds **does** change the bundle content: it must gain 46 skills (33 gds + 13
+wds) plus their C1 rewire (F6: 45 gds + 2 wds skills reference the resolver). So my
+"content does not change" premise is now false, and Alya's instinct to hold was
+right for a reason neither of us had yet: not the version, but the gds/wds addition.
 
-Holding G2 behind full approval of this delta costs a serialization for a decision
-that does not touch it. The dependency is narrower than Alya framed it:
+**Corrected sequence:**
+1. **Tim runs the 6.9.0 BMAD installer** into a clean scratch dir (gds included,
+   custom excluded) -> authoritative content manifest. *[manual, Tim, blocks G2]*
+2. **G2 re-runs**, vendoring from that output into `plugins/dps-council/{bmad,skills}/`,
+   applying the C1 path rewire across bmad-* + gds-* + wds-* + the smaller findings.
+3. **Gate** (rule 6 review of the diff before merge).
 
-- **G2 needs one thing from Tim: the Q1 ruling.** Confirm 6.9.0 -> re-run G2
-  immediately with the existing guidance plus the manifest item (Q5).
-- **If Tim overrules to 6.6.0 -> Alya is right, hold G2** and re-scope the bundle.
+G2 is correctly BLOCKED until step 1 produces the installer output. The remaining
+delta items (G9, G5 narrowing, Q7, G6/G7 AC lines) do not block G2 and can be
+approved on their own timeline.
 
-So: **release G2 on the Q1 ruling, not on approval of the whole delta.** G9, the
-G5 amendments, and the G6/G7 AC lines can be approved on their own timeline
-without blocking G2 - none of them change what G2 builds.
+### Q7 (Tim's new requirement) - project-name auto-detection: **G3 sub-requirement, not its own goal.**
+
+Tim's rule: detect `project_name` from **p4 stream name > github repo name >
+folder-name fallback**. Verified state (why this matters): the stored fields are
+stale - blank in Kraken-Backend + Tools, `"kraken"` (not `kraken_main`) in
+kraken_main, only ClaudeOS correct. A per-project T2 pool keyed on a blank or wrong
+name **collides or mis-files** - so this is a correctness dependency of G3's
+namespacing, not cosmetic.
+
+**Recommendation: fold it into G3 as a sub-requirement.** Reasons:
+1. **G3 is the consumer.** G3 stands up the per-user store and defines T2 as
+   per-project-namespaced. The namespace key *is* the detected project name.
+   Splitting detection into its own goal means G3 could ship a namespacing scheme
+   keyed on a field another goal hasn't fixed yet - a self-inflicted ordering hazard.
+2. **It is small.** A resolver helper (three ordered sources) + a backfill of four
+   config fields. Not goal-sized on its own.
+3. **It unifies with G9's `project_name` backfill.** The same detected value
+   backfills both the council T2 key AND BMAD's `_bmad/core/config.yaml` field
+   (148 files in 6.9.0 read it). One detector, one source of truth, two consumers.
+   So G9's R3/item-4 config edit becomes "apply the G3 detector's output," not a
+   hand-typed value.
+
+**G3 sub-requirement (proposed):**
+- A `project_name` detector: p4 stream name -> github repo name -> folder basename,
+  first hit wins. Deterministic, no network beyond local VCS metadata.
+- On store/pool init, key the T2 per-project namespace on the detected value.
+- Backfill each repo's `_bmad/core/config.yaml` `project_name` from the detector
+  (Perforce staged, not submitted).
+- AC: all four repos resolve a correct, non-blank `project_name`; T2 pools are keyed
+  on it and do not collide across the four projects.
+
+**Caveat I cannot close from here:** Perforce MCP is not connected in this workspace,
+so I could not read the actual p4 stream names for kraken_main/Tools. Tim states
+folder == VCS name for all four (his verification), which makes the folder fallback
+safe today - but the detector's *primary* source for the two Perforce repos is the
+stream name, which I have not seen. G3 should confirm stream-name output matches
+before trusting it over the fallback. Flagged, not assumed.
 
 ### Also-flagged: the standalone silent-config-drop fix
 
@@ -436,62 +552,90 @@ interlock line added to G5.
 
 ---
 
-## Delta summary (what changes if approved)
+## Delta summary (what changes if approved) [AMENDED 2026-07-17 per Tim's rulings]
 
 | Target | Change | Blocking? |
 |---|---|---|
-| **NEW G9** | BMAD version reconciliation. Depends G2, blocks G5, parallel G3/G4. `actor: hermes`. | Blocks G5 |
-| **G2** | Add: ship `bmad/_config/manifest.yaml` (provenance). Content otherwise unchanged. | No - re-run on Q1 ruling |
-| **G5** | Add: **C1-fix-verified hard prerequisite (F8 - highest value)**; consume G9's keep-list; enumerate keep-list explicitly (per-module `config.yaml`); record `gds-*`/`wds-*` survive project-local; add F5 caveat (6.2.2 `core/` holds live skills); correct `.agents/` scope to all four repos. | No |
+| **Tim (manual)** | **Run the 6.9.0 BMAD installer** into a clean scratch dir (gds in, custom out) -> authoritative content manifest that G2 vendors from. | **Blocks G2** |
+| **G2** | **Bundle content grows: +33 gds +13 wds skills** (Tim ruling 2). **Vendor from the installer output** (ruling 4), not hand-assembly; apply C1 rewire across bmad-* + gds-* + wds-*. Ship `bmad/_config/manifest.yaml` (comes free with the vendored `_bmad/`). | **HELD** until installer output exists |
+| **NEW G9** | BMAD version reconciliation + keep-list. Depends G2, blocks G5, parallel G3/G4. `actor: hermes`. | Blocks G5 |
+| **G5** | **NARROWED: delete ONLY `dpsue-*` (kraken_main) + `dpsbe-*` (Kraken-Backend)** - skills + `.agents` mirror + `_bmad/memory` pools, all G4-gated. Add: **C1-fix-verified hard prerequisite (F8)**; enumerate keep-list (per-module `config.yaml`, all bundle/plugin skills retained); F5 caveat; `.cursor/`-mirror teardown scope decision (OQ6). | No |
+| **G3** | **NEW sub-requirement: `project_name` auto-detector** (p4 stream > github > folder) keying T2 namespacing + backfilling all four configs (Q7). | No |
 | **G6** | Add AC: dry-run reports BMAD version delta alongside plugin version delta. | No |
 | **G7** | Add AC: version-check reads + surfaces bundled BMAD version. | No |
-| **G1 doc** | Record the 6.9.0 pin + rationale. | No |
-| **No change** | G3, G4, G8. | - |
+| **G1 doc** | Record the 6.9.0 initial-pin + rationale. | No |
+| **No change** | G4, G8. | - |
 
-`missions.json` NOT modified. Nothing here is applied.
+`missions.json` NOT modified. Nothing here is applied - Tim approves first.
 
 ---
 
 ## Open questions for Tim
 
-1. **Q1 ruling - confirm 6.9.0?** This is the only decision gating the G2 re-run.
-   Everything else in this delta can be approved later without blocking anything.
+**Resolved by Tim's 2026-07-17 rulings** (kept for the record): OQ1 (version ->
+6.9.0), OQ3 (gds/wds -> bundle them). Remaining and new:
 
-2. **Are the disappearing skills in use?** I verified *presence*, not *usage* -
-   I cannot see who runs what. `bmad-distillator` and `bmad-create-ux-design`
-   disappear for kraken_main, Tools, AND Kraken-Backend (all three non-ClaudeOS
-   repos). `bmad-agent-sm`, `bmad-agent-qa`, `bmad-agent-quick-flow-solo-dev`,
-   `bmad-init` disappear for the 6.2.2 pair. If any are live, G9 gains a port
-   task. **This is the largest unquantified risk in the delta.**
-
-3. **`gds-*`/`wds-*` - leave project-local (my recommendation) or grow G2 to bundle
-   them?** Leaving them means an accepted mixed-version install. Bundling them is
-   meaningful G2 scope growth on an already-blocked goal.
+2. **Are the disappearing skills in use?** Still open, but **lower stakes after
+   the narrowing** - G5 no longer deletes bmad/gds/wds. This is now only about the
+   6.9.0 skill-set differences carried by the *bundle* (e.g. `bmad-distillator`,
+   `bmad-create-ux-design` are not in 6.9.0). If a repo's workflow relied on one,
+   it is simply absent from the bundle - a follow-up port, not a deletion loss.
+   I verified presence, not usage.
 
 4. **Are Tools and Kraken-Backend actually active?** Both still carry
-   `user_name: Captain` - the never-customized installer placeholder - and both
-   are pinned at 6.2.2 from 2026-04-09. If they are dormant, R1's severity drops
-   to near-zero and G9 shrinks to a bookkeeping pass. I cannot determine usage
-   from the filesystem. This single answer moves the delta's risk profile more
-   than any other.
+   `user_name: Captain` (never-customized installer placeholder), pinned 6.2.2
+   since 2026-04-09. If dormant, the whole delta's risk profile collapses. I cannot
+   determine usage from the filesystem. Still the single highest-leverage answer.
 
-5. **`_bmad/wds/skills/` exists in ClaudeOS's source** (the module ships a `skills`
-   subdir). I did not trace whether those are the same 13 `wds-*` skills as in
-   `.claude/skills/` or a distinct set. Flagged rather than guessed; G9 resolves
-   it while building the ledger.
+5. **`_bmad/wds/skills/` exists in ClaudeOS's source** (the wds module ships a
+   `skills` subdir). Now that wds is bundled, G2/G9 must confirm whether those are
+   the same 13 `.claude/skills/wds-*` or a distinct set, so the vendoring does not
+   double-ship or miss them. Flagged, not guessed.
 
-## Surfaces accounted for (explicit)
+6. **[NEW] `.cursor/` + `.agents/` mirror teardown scope.** G5 item 1 tears down
+   the Cursor mirror. With the deletion narrowed to dpsue/dpsbe, does Tim want the
+   WHOLE `.agents/skills/` + `.cursor/` removed (they mirror `.claude/skills/`
+   1:1 in all four repos and are Cursor-era dead weight), or only the dpsue/dpsbe
+   slices of them? My lean: remove the whole mirror - it is a byte-identical
+   Cursor artifact and the council runs from `.claude/` + the plugin now. But it
+   is a scope call, not mine to make.
 
-- **Mission state** (`~/.hermes/missions.json`): +1 goal (`-9`), 4 goal-prompt
-  amendments (G2, G5, G6, G7). **NOT WRITTEN - Tim applies or authorizes.**
-- **Plugin** (`plugins/dps-council/bmad/_config/`): new `manifest.yaml`. G2.
-- **Tools + Kraken-Backend** `_bmad/core/config.yaml`: `project_name` added.
-  Perforce (Tools) -> numbered CL awaiting Tim's submit. G9.
-- **kraken_main**: no config change needed (`project_name: kraken` present).
-- **ClaudeOS**: no config change needed. This doc only.
-- **Canonical**: no change. Nothing here is promoted knowledge yet - if the 6.9.0
-  pin holds, it is a Reina candidate for `commons/` after G8.
-- **Explicit zeroes:** no change to G3, G4, G8; no code changes in G9; no
-  deletions in G9; no standalone silent-config-drop fix (dismissed, F2).
+7. **[NEW] Local unprefixed `dps-*` skills now duplicate the plugin.** Tim ruled
+   they stay, yet also said "dps-* council skills come from the plugin." kraken_main,
+   Tools, and Kraken-Backend each carry **10 local `dps-*` skills** that now
+   duplicate `dps-council:dps-*` (shipped in G0). Leaving them is a defensible
+   transitional state, but it is a knowing duplication and a future-drift source
+   (local copy vs plugin copy diverging). Confirm: intentional for now, or fold
+   into G5's delete once the plugin path is proven in those repos?
+
+8. **[NEW] `project_name` detector - Perforce stream names unverified.** The Q7
+   detector's primary source for the two Perforce repos is the p4 stream name,
+   which I cannot read here (no Perforce MCP). Tim states folder == VCS name for
+   all four, making the fallback safe - but G3 should confirm the stream-name path
+   before trusting it over the folder fallback.
+
+## Surfaces accounted for (explicit) [AMENDED 2026-07-17]
+
+- **Mission state** (`~/.hermes/missions.json`): +1 goal (`-9`), goal-prompt
+  amendments to G2 (bundle grows + vendor-from-installer), G3 (project-name
+  detector), G5 (narrowed to dpsue/dpsbe + interlock), G6, G7. **NOT WRITTEN -
+  Tim applies or authorizes.**
+- **Tim's environment (manual precondition):** a clean 6.9.0 BMAD installer run
+  into a scratch dir -> the authoritative bundle content. Blocks G2.
+- **Plugin** (`plugins/dps-council/{bmad,skills}/`): vendored from the installer
+  output - gains bmad-* + gds-* + wds-* + framework modules + `bmad/_config/manifest.yaml`;
+  C1 path rewire across all bundled skill sets. G2.
+- **All four repos** `_bmad/core/config.yaml`: `project_name` backfilled from the
+  G3 detector (blank in Tools + Kraken-Backend; `kraken`->correct in kraken_main;
+  ClaudeOS already correct). Perforce (Tools, kraken_main) -> numbered CLs awaiting
+  Tim's submit. G3.
+- **kraken_main**: `dpsue-*` skills + `.agents` mirror + `_bmad/memory/dpsue*` pools
+  deleted (G4-gated). Kraken-Backend: same for `dpsbe-*`. ClaudeOS + Tools: neither
+  present (explicit zero). G5.
+- **Canonical**: no change. Nothing here is promoted knowledge yet - Reina candidate
+  for `commons/` after G8.
+- **Explicit zeroes:** no change to G4, G8; no code changes in G9; no deletions in
+  G9; no standalone silent-config-drop fix (dismissed, F2); no gds/wds deletion
+  (they are now bundled and retained).
 - **Rules honored:** no `p4 revert`; no P4 submit without approval; ASCII-only;
   one deliverable file, no scratch files; `missions.json` not mutated.
