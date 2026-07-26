@@ -168,3 +168,591 @@ Accumulated telemetry and human reports flow through the PR membrane into consol
 ### Epic 8: Plan Where the Team Plans
 A project rebinds from local planning to Jira through the designed migration with verification, and the same planning flows keep working — promote and status pull-back against Atlassian Cloud, headless-safe.
 **FRs covered:** FR15, FR16
+
+## Epic 1: Install Once, Stay in Lockstep
+
+An operator clones the repo, trusts the folder, and gets the studio plugin plus a pinned BMad base with one guided flow; every activation proves the fleet is drift-free, base updates are one reviewable motion, and every install/drift event is measured from day one. (AD-1, AD-12, AD-13; dual-mode ACs per AD-11 apply to every skill story in every epic.)
+
+### Story 1.1: Install the Studio Plugin from the Repo
+
+As an operator,
+I want cloning and trusting the tk-studio repo to auto-prompt installation of the studio plugin,
+So that a new machine or teammate gets the studio layer with zero manual marketplace setup.
+
+**Acceptance Criteria:**
+
+**Given** a fresh clone of the tk-studio repo on a machine with Claude Code
+**When** the operator trusts the folder
+**Then** the marketplace defined in `.claude-plugin/marketplace.json` is auto-prompted via `extraKnownMarketplaces` in the repo's `.claude/settings.json`
+**And** accepting installs the `tk-studio` plugin whose `plugin.json` version is in lockstep with `marketplace.json` (`plugins[].version`)
+
+**Given** the plugin skeleton in `plugins/tk-studio/`
+**When** the plugin is installed
+**Then** `skills/`, `agents/`, `contracts/`, and `bmad.lock` locations exist per the spine's structural seed, and a placeholder skill resolves `{skill-root}` correctly machine-wide
+
+### Story 1.2: Measurement Foundation — Taxonomy and Ledger
+
+As an operator,
+I want every studio surface able to append sanitized events to my local measurement ledger,
+So that the system instruments itself from the first install instead of speculating about defects.
+
+**Acceptance Criteria:**
+
+**Given** the event-taxonomy schema shipped at `contracts/` (v1: install-outcome, drift-detection, activation-failure, headless-failure, onboarding-funnel, observation, report)
+**When** any studio skill emits an event through the shared ledger library
+**Then** one JSON object (`{ts, event, user, machine, project?, payload}`) appends atomically to `~/.tk-studio/measurements/<user>-<machine>.jsonl`
+**And** the payload matches that event type's schema, which names exactly one emitter class per type
+
+**Given** an event payload containing credential-shaped content or a non-allowlisted absolute path
+**When** it is emitted
+**Then** sanitization strips or masks it at emission, before the line lands in the ledger
+
+**Given** two concurrent emitters on one machine
+**When** both write
+**Then** no line is interleaved or lost (atomic append semantics)
+
+### Story 1.3: Pin the Base — bmad.lock and tk install
+
+As an operator,
+I want `tk install` to install the BMad base at the committed pin with my project's module set,
+So that every repo and teammate runs the identical base with zero forks.
+
+**Acceptance Criteria:**
+
+**Given** a committed `bmad.lock` pinning the BMad core version, per-module versions/channels, and install flags
+**When** the operator runs the `tk-studio-install` skill in a project
+**Then** the upstream installer runs non-interactively at the pinned core version with the project's configured module set
+**And** an `install-outcome` event (success or failure, with step detail) is emitted
+
+**Given** the same lockfile and module set on two machines
+**When** both run the flow
+**Then** both produce the same `_bmad/_config` manifest versions (deterministic install)
+
+**Given** a headless invocation
+**When** the skill runs
+**Then** it completes without prompting and ends with the JSON status block
+
+### Story 1.4: Activation Health and Drift Check
+
+As an operator,
+I want activation to prove both planes are current — read-only and loud,
+So that version skew is caught at the front door instead of debugged as ghosts.
+
+**Acceptance Criteria:**
+
+**Given** an installed BMad base and studio plugin
+**When** the `tk-studio-activate` check runs
+**Then** it compares installed `_bmad` manifest versions against `bmad.lock` and the installed plugin version against `marketplace.json`
+**And** reports drift with the exact guided fix (`tk install` / `/plugin marketplace update`) without mutating anything
+**And** emits `drift-detection` (on drift) or a clean-pass event, plus `onboarding-funnel` timings when run in guided onboarding mode
+
+**Given** a machine where a check step itself fails (unreadable manifest, missing store)
+**When** the check runs
+**Then** the failure is reported as `activation-failure` with the failing step named, and the skill still ends with a valid JSON status block
+
+### Story 1.5: tk report — Human Defect Reports
+
+As an operator,
+I want a one-verb way to record "the skill did the wrong thing,"
+So that human-observed defects enter the same measurement stream as telemetry.
+
+**Acceptance Criteria:**
+
+**Given** an operator invoking `tk-studio-report` with a free-text description
+**When** the skill runs
+**Then** a `report` event lands in the local ledger carrying description, suspected surface, and context (project, skill, session mode)
+**And** the flow works identically attended (prompted elaboration) and headless (payload-supplied), per AD-11
+
+### Story 1.6: Base Update as a Reviewable Motion
+
+As an operator,
+I want a base update to be one skill run that produces an integration PR,
+So that the team adopts upstream changes in lockstep with a reviewable diff and no fork.
+
+**Acceptance Criteria:**
+
+**Given** a new upstream BMad release
+**When** the `tk-studio-base-update` skill runs with the target version
+**Then** it bumps `bmad.lock` (core and/or per-module pins), reruns the upstream installer at the new pin in this repo, and opens a feature-branch PR containing lockfile + resulting install diff
+**And** the PR body summarizes upstream changes and flags any install warnings; nothing merges automatically
+
+**Given** the installer fails at the new pin
+**When** the skill runs
+**Then** the working tree is left restorable (branch isolation), the failure is emitted as `install-outcome: failure`, and the status block reports `blocked` with the reason
+
+## Epic 2: Data Lands Where It Belongs
+
+Onboarding a project stands up the full Taxonomy: per-user store, tracked project config, registry entry, agent-first `kb/` with index, and the Obsidian vault window. (AD-3, AD-8, AD-15, AD-18, AD-20.)
+
+### Story 2.1: Per-User Store Standup
+
+As an operator,
+I want my working data, role, and machine identity in one off-VCS store,
+So that scratch and identity never hit shared version control and teammates never collide.
+
+**Acceptance Criteria:**
+
+**Given** a machine without `~/.tk-studio/`
+**When** any studio surface first needs the store
+**Then** the store skeleton (`config.yaml`, `registry/`, `projects/`, `measurements/`) is created at the OS-resolved path (`%USERPROFILE%\.tk-studio\` on Windows)
+**And** `config.yaml` records user_name, role (default: developer), machine_id, and optional obsidian_vault
+
+**Given** an existing store
+**When** standup runs again
+**Then** it is idempotent — nothing is overwritten or lost
+
+### Story 2.2: Project Config and Resolution
+
+As an operator,
+I want tracked project configuration with a per-dev local overlay and one resolution order,
+So that every skill resolves the same key the same way and no machine path lands on shared VCS.
+
+**Acceptance Criteria:**
+
+**Given** a project being onboarded
+**When** config is written
+**Then** `.tk-studio/config.yaml` (tracked: project_id?, vcs, planning binding, working_set, jobs) and `.tk-studio/config.local.yaml` (ignored; P4IGNORE guidance emitted for Perforce projects) exist with schema comments
+
+**Given** a key defined at multiple scopes
+**When** any surface resolves it through the shared config library
+**Then** precedence is runtime override > project local > project tracked > user > studio default, verified by test fixtures
+
+**Given** a tracked file about to be written
+**When** it would contain an absolute machine path or credential
+**Then** the write is refused with a classification error (AD-3)
+
+### Story 2.3: Project Registry
+
+As an operator,
+I want every known project registered in one canonical map,
+So that cross-project queries have a single authoritative read path.
+
+**Acceptance Criteria:**
+
+**Given** the registry schema published in `contracts/` (map keyed by project_id: root path, bindings, VCS, working-set ref, vault-link state)
+**When** onboarding registers a project
+**Then** the entry is written atomically to `~/.tk-studio/registry/projects.yaml` by the single-writer path (onboard/activate only)
+
+**Given** a project whose basename collides with an existing project_id
+**When** registration runs
+**Then** it fails with a demand for an explicit `project_id` — never a silent second identity
+
+**Given** any other surface (orchestrator, jobs, measurement)
+**When** it needs project data
+**Then** it reads the registry and never writes it
+
+### Story 2.4: Agent-First Knowledge Base
+
+As an operator,
+I want each project's knowledge in `kb/` with a ranked index,
+So that agents retrieve project knowledge in one hop and humans read the same files.
+
+**Acceptance Criteria:**
+
+**Given** an onboarded project without `kb/`
+**When** kb standup runs
+**Then** `{project-root}/kb/` is created with an llms.txt-style `index.md` (ranked links + one-line descriptions)
+
+**Given** kb content changes
+**When** index generation reruns (manually or as a job)
+**Then** `index.md` reflects current files without human reordering, and the diff is review-friendly
+
+### Story 2.5: Obsidian Vault Window
+
+As an operator,
+I want each project's kb and backlog visible in my vault under one folder,
+So that I get one human window over all projects without the vault becoming a database.
+
+**Acceptance Criteria:**
+
+**Given** a user config with `obsidian_vault` set
+**When** onboarding links a project
+**Then** `<vault>/projects/<name>/` exists containing links: `kb` → `{project-root}/kb/`, `backlog` → the bound planning folder — directory junctions on Windows (no admin), symlinks elsewhere
+
+**Given** a broken or missing link
+**When** activation runs
+**Then** the vault-link state is reported (and recorded in the registry entry) with a guided fix — never auto-recreated silently
+
+**Given** no vault is configured
+**When** onboarding runs
+**Then** linking is skipped cleanly and everything else proceeds (vault is a view, never a dependency)
+
+## Epic 3: Plan Locally, Canonically
+
+Stock BMad planning flows keep working untouched while the adapter canonicalizes their artifacts, owns ids, and projects them into a Backlog.md kanban. (AD-4, AD-5, AD-6.)
+
+### Story 3.1: Canonical Interchange Schema
+
+As a developer using planning skills,
+I want the canonical epic/story/task shape published as a versioned schema,
+So that every backend adapter and migration maps to one authoritative contract.
+
+**Acceptance Criteria:**
+
+**Given** the interchange schema (`shape_version: 1`) in `contracts/`
+**When** an entity file is validated against it
+**Then** required keys (id, type, title, status enum, created/updated) and optional keys (parent, depends_on, priority, assignee, labels, external map) are enforced, with the status enum closed (draft|ready|in-progress|blocked|review|done|dropped)
+
+**Given** a validation library shipped with the plugin
+**When** any adapter or skill checks an entity
+**Then** it uses this library (stdlib-only Python, `uv run`) — no adapter ships its own parser
+
+### Story 3.2: Normalize Pass and Id Authority
+
+As a developer running stock BMad planning flows,
+I want the adapter to canonicalize what those flows produce,
+So that untouched upstream skills still yield one canonical local representation with collision-free ids.
+
+**Acceptance Criteria:**
+
+**Given** BMad-native planning artifacts freshly written by stock skills (epics, story files, sprint status)
+**When** the `tk-studio-plan-sync` normalize pass runs
+**Then** canonical frontmatter is stamped/repaired on those artifacts in place (artifacts edited, BMad code untouched — AD-4), preserving all upstream content
+
+**Given** entities without ids
+**When** normalization mints them
+**Then** ids come only from the committed per-project counter (`EP-/ST-/TA-NNN`), and the counter advances atomically
+
+**Given** a merge that lands a duplicate id
+**When** sync next runs
+**Then** it blocks with both file paths named until renumbered — never auto-picks a survivor
+
+### Story 3.3: bmad-files Fallback Backend
+
+As a developer on a project with no extra tooling,
+I want the canonical files alone to be a fully working backend,
+So that planning works offline in any repo with zero additional installs.
+
+**Acceptance Criteria:**
+
+**Given** a project bound to `bmad-files`
+**When** planning flows and `tk-studio-plan-sync` run
+**Then** normalize + validate + index generation happen with no projection, and the sync verb reports cleanly (no-op projection is first-class, not an error)
+
+**Given** the same planning skill flow
+**When** run against `bmad-files` and later against another binding
+**Then** skill behavior is unchanged (binding decides projection only) — the brief's adapter success criterion
+
+### Story 3.4: Backlog.md Projection
+
+As an operator,
+I want canonical entities projected into a Backlog.md kanban,
+So that I get a board and CLI over planning data without those files becoming a second source of truth.
+
+**Acceptance Criteria:**
+
+**Given** a project bound to `backlog-md`
+**When** promote runs
+**Then** canonical entities project into a Backlog.md-compatible `backlog/` folder (epic → milestone + label; story/task → tasks), recording per-entity `external.backlog-md` state (key, synced_at, content_hash)
+**And** the build first verifies Backlog.md's handling of unknown frontmatter keys, falling back to native-keys+id-label projection if unsupported (spine Deferred item)
+
+**Given** a human edit on the kanban (status drag, assignee)
+**When** pull-back runs
+**Then** only status-class fields update canonical files, with echo suppression (unchanged-vs-snapshot ignored) and both-changed conflicts surfaced for a human
+
+**Given** a canonical status Backlog.md cannot represent (e.g. `review`)
+**When** a promote+pull-back round trip occurs with no external change
+**Then** the canonical status is unchanged (round-trip stability, AD-5)
+
+## Epic 4: The Studio Knows Your Project
+
+The studio inventories what exists, detects what a project is with evidence, and proposes a role × project working set the operator explicitly confirms. (AD-17, AD-8.)
+
+### Story 4.1: Resource Inventory
+
+As an operator,
+I want an inventory of everything installable and everything I've authored,
+So that recommendations draw from the full resource universe, not just what's installed.
+
+**Acceptance Criteria:**
+
+**Given** a machine + project
+**When** `tk-studio-detect` inventories
+**Then** it enumerates installed BMad modules/skills (from `_bmad/_config` manifests), known-but-uninstalled official modules (from the installer registry), and user-authored resources (project `.claude/skills`, `_bmad/custom/`, project agents)
+**And** the output is a structured, data-only artifact (JSON) with provenance per resource
+
+### Story 4.2: Read-Only Project Detection
+
+As an operator onboarding a brownfield repo,
+I want the studio to detect what the project is with evidence and a confidence floor,
+So that recommendations are grounded and never silently guessed.
+
+**Acceptance Criteria:**
+
+**Given** a project root
+**When** detection runs
+**Then** weighted markers (files, manifests, VCS type) score candidate project types; below the confidence floor the result is "unknown — ask", never a guess (tk detector discipline)
+**And** detection performs zero writes and lists the evidence behind every scored marker
+
+### Story 4.3: Recommend, Confirm, Record
+
+As an operator with a role,
+I want a role × project working set proposed with evidence and recorded only on my confirmation,
+So that activation is deterministic afterward and an engineer and an artist get different sets on the same repo.
+
+**Acceptance Criteria:**
+
+**Given** inventory + detection results and the operator's role (per-user store)
+**When** `tk-studio-onboard` proposes a working set
+**Then** every proposed resource carries its evidence, and dry-run mode shows the full plan without writing
+
+**Given** explicit confirmation
+**When** the set is recorded
+**Then** it lands in tracked project config under `working_set.<role>` (role-keyed map — AD-17), and re-running onboarding is idempotent
+
+**Given** a second role confirming later on the same project
+**When** their set is recorded
+**Then** the first role's entry is untouched
+
+### Story 4.4: Evolve — Observe and Log
+
+As an operator,
+I want repeated manual toil and retrospective signals logged as observations,
+So that the future evolve loop has real data without v1 building proposal automation.
+
+**Acceptance Criteria:**
+
+**Given** an observation source (retrospective output, repeated-manual-work note, research-job finding)
+**When** an observation is recorded
+**Then** an `observation` event lands in the measurement ledger with source, project, and a structured description
+**And** no automated proposal or skill drafting is triggered (v1 boundary, AD-8)
+
+## Epic 5: One Front Door, Any Mode
+
+The operator enters through a role-aware orchestrator (council shell attended), and every studio surface proves identical attended/headless behavior via the shipped conformance suite and published driver contract. (AD-2, AD-9, AD-11, AD-17, AD-19.)
+
+### Story 5.1: Role-Aware Orchestrator Core
+
+As an operator,
+I want one entry point that resolves who I am, what this project needs, and routes,
+So that a direction-giver and a developer each get the right workflows from the same door.
+
+**Acceptance Criteria:**
+
+**Given** a per-user store with a role and a project with a confirmed working set
+**When** `tk-studio-orchestrator` activates
+**Then** it resolves role → `working_set.<role>` → routes to resources by name-based handoff (stock BMad skills included), statelessly
+**And** with role `direction-giver` it offers delegation/synthesis framing; with `developer` it offers execution workflows
+
+**Given** a missing role or unconfirmed working set
+**When** activation occurs
+**Then** the orchestrator routes into onboarding (attended) or halts `blocked` naming the gap (headless) — it never invents a working set
+
+### Story 5.2: The Council Shell
+
+As an operator in an attended session,
+I want a distinctive persona shell with "convene the council" as its signature interaction,
+So that attended sessions feel like a studio while the core stays stateless.
+
+**Acceptance Criteria:**
+
+**Given** an attended orchestrator session
+**When** the shell loads
+**Then** persona voice and the convene interaction (multi-perspective deliberation over installed agents) come from data assets — no identity state, no sanctum/rebirth machinery (AD-9)
+
+**Given** the same request attended and headless
+**When** both run
+**Then** routing decisions and produced artifacts are identical; only presentation differs, proven by a comparison test
+
+### Story 5.3: Publish the Driver Contract
+
+As a harness author (ClaudeOS connector, future),
+I want a versioned contract covering everything needed to drive the studio,
+So that connector work can start cold without reading studio internals.
+
+**Acceptance Criteria:**
+
+**Given** `contracts/` in the plugin
+**When** the driver contract v1 is published
+**Then** it contains: per-skill headless invocation surface (payload in, artifacts out), the JSON status schema, job/scheduler verbs (submit, status, cancel, wake), the model/effort override API, and drift-check invocation — each with schema + example
+**And** the contract carries its own semver and a change policy (breaking change ⇒ major bump)
+
+**Given** the A7 integration dossier requirements
+**When** the contract is reviewed against them
+**Then** every dossier item the connector must consume is covered or explicitly deferred with a named seam
+
+### Story 5.4: Conformance Suite
+
+As an operator,
+I want every studio surface proven headless-clean by a shipped suite,
+So that dual-mode parity is a tested guarantee, not a habit.
+
+**Acceptance Criteria:**
+
+**Given** `contracts/conformance/` in the plugin
+**When** the suite runs against every shipped studio skill
+**Then** each is driven headless (direct invocation), asserting: valid JSON status block, no interactive prompt, auth preflight before any external call, and `blocked` (not a hang) on ambiguity
+**And** failures emit `headless-failure` events naming the surface and assertion
+
+**Given** a new studio skill added later
+**When** it registers in the plugin
+**Then** the suite discovers it automatically (manifest-driven) — unregistered surfaces fail the suite
+
+## Epic 6: Work Runs While Nobody Watches
+
+Jobs are data, executed on harness-native substrates with guards, including the first research and maintenance job types, with model/effort routing and session discipline. (AD-10, AD-14; AD-11 conformance applies.)
+
+### Story 6.1: Job Model as Data
+
+As an operator,
+I want jobs declared as data with guards and stop conditions,
+So that unattended work is portable across substrates and never runs away.
+
+**Acceptance Criteria:**
+
+**Given** the job-definition schema in `contracts/` (id, target skill + payload, trigger one-shot|cron|loop, cadence fixed|self-paced, budget guards, stop conditions, model/effort)
+**When** a job is defined
+**Then** generic job types load from the plugin, per-project instances from project config `jobs[]`, and validation rejects a job missing guards or stop conditions
+
+**Given** a job run
+**When** it starts
+**Then** run state persists in `~/.tk-studio/projects/<key>/runs/<run-id>/`, resumable after interruption
+
+### Story 6.2: Harness-Native Execution
+
+As an operator,
+I want `tk-studio-job` to run any declared job on the harness's own primitives,
+So that scheduling rides the ecosystem instead of a bespoke runner.
+
+**Acceptance Criteria:**
+
+**Given** a declared job and the harness-native binding
+**When** the job verbs run (submit / status / cancel)
+**Then** one-shot jobs execute immediately or at their time; recurring jobs bind to harness scheduling (cron/loop/self-paced wakeup) with declared cadence
+**And** budget guards and stop conditions terminate the run with a `partial` status and reason when hit
+
+**Given** the session-scoped nature of local harness schedules
+**When** a job is declared durable-recurring
+**Then** the definition records the durability requirement and the binding surfaces the constraint (cloud routine or external harness needed) instead of silently losing the schedule
+
+### Story 6.3: First Maintenance Job — Scheduled Conformance
+
+As an operator,
+I want the conformance suite runnable as a recurring maintenance job,
+So that dual-mode parity is re-proven continuously without me remembering to run it.
+
+**Acceptance Criteria:**
+
+**Given** the conformance suite (5.4) and the job model (6.1)
+**When** the shipped `maintenance-conformance` job type is instantiated on a project
+**Then** it runs the suite on its declared cadence within budget, emits results as measurement events, and produces a run summary in the run workspace
+
+### Story 6.4: First Research Job — Ecosystem Watch
+
+As an operator,
+I want a recurring research job that surveys agentic-dev practice and tool discovery for my project's domain,
+So that the studio keeps itself current and feeds the evolve loop real findings.
+
+**Acceptance Criteria:**
+
+**Given** the shipped `research-ecosystem` job type with a scoped charter (topics, sources, budget)
+**When** it runs unattended
+**Then** it produces an evidence-graded findings artifact in the run workspace and emits `observation` events for recommendation-worthy findings
+**And** a full unsupervised run completing end to end with at least one actionable observation satisfies success criterion 7's pathway
+
+### Story 6.5: Model and Effort Routing
+
+As an operator,
+I want conservative model/effort defaults with clean override precedence,
+So that escalation is deliberate and unattended work stays cheap.
+
+**Acceptance Criteria:**
+
+**Given** every shipped studio resource declaring defaults in its `customize.toml`
+**When** the orchestrator or job runner invokes a resource
+**Then** effective model/effort resolves runtime override > project config > resource default, and the chosen values are visible in run output
+
+**Given** a job or convene spanning multiple resources
+**When** routing occurs
+**Then** each resource keeps its own resolved values (no silent inheritance of a more expensive setting)
+
+### Story 6.6: Session Discipline
+
+As an operator,
+I want long work to split at boundaries with compact handoffs and resumable workspaces,
+So that a fresh session continues without replaying history or blowing budgets.
+
+**Acceptance Criteria:**
+
+**Given** a multi-session workflow reaching a declared boundary (epic/story/phase) or its token budget
+**When** the boundary triggers
+**Then** a compact handoff artifact is written to the run workspace and the session is directed to end and resume fresh
+
+**Given** a fresh session pointed at a run workspace
+**When** it resumes
+**Then** work continues from the handoff + workspace state alone (success criterion 8), verified by an integration test on a seeded workspace
+
+## Epic 7: The Studio Measures and Fixes Itself
+
+Accumulated telemetry and human reports flow through the PR membrane into consolidated issues that lead to specific fixes. (AD-12.)
+
+### Story 7.1: Measurement Push
+
+As a teammate,
+I want my local ledger pushed as a PR into the shared repo,
+So that individual installs report through plain git governance with review as the membrane.
+
+**Acceptance Criteria:**
+
+**Given** a local ledger with unpushed events
+**When** `tk-studio-measure-push` runs
+**Then** it creates a feature branch, commits the ledger to `measurements/<user>-<machine>.jsonl`, and opens a PR — never pushing to main, never merging itself
+**And** a sanitization re-check runs pre-commit; a credential-shaped finding blocks the push
+
+**Given** repeated pushes from the same machine
+**When** the skill runs again
+**Then** it appends/updates that machine's file only (per-user-per-machine, never a shared file) and handles an open prior PR gracefully
+
+### Story 7.2: Consolidation into Issues
+
+As an operator,
+I want accumulated measurement PRs consolidated into ledger issues that lead to fixes,
+So that the measurement loop actually corrects the system (the O1 revision channel).
+
+**Acceptance Criteria:**
+
+**Given** merged measurement data in `measurements/`
+**When** `tk-studio-consolidate` runs
+**Then** it clusters events into candidate defects and appends `issues/ledger.md` entries (stable `ISS-NNN`, severity, status, expected-vs-actual, tk row discipline — update in place, never delete)
+**And** each new issue names the evidence events and, where clear, a specific fix candidate (including "revise the distribution mechanism" when evidence points there)
+
+## Epic 8: Plan Where the Team Plans
+
+A project rebinds from local planning to Jira through the designed migration with verification. (AD-5, AD-6, AD-7, AD-16.)
+
+### Story 8.1: Jira Backend Adapter
+
+As a teammate on Atlassian Cloud,
+I want promote and status pull-back against Jira through the official MCP,
+So that the same planning flows work when the team's tracker is the backend.
+
+**Acceptance Criteria:**
+
+**Given** a project bound to `jira` (site, project key in binding config)
+**When** promote runs
+**Then** canonical entities create/update Jira issues per the default mapping (epic→Epic, story→Story, task→Sub-task — confirmed against the org's issue-type scheme at setup), recording `external.jira` state
+**And** pull-back updates status-class fields only, with echo suppression and conflict surfacing identical to the local projection (AD-5)
+
+**Given** a headless run
+**When** the adapter authenticates
+**Then** it uses API-token auth with a preflight that verifies the token works and the org toggle is enabled — an auth failure is a named `blocked` status, never a silent 401
+
+### Story 8.2: Designed Migration Local → Jira
+
+As an operator,
+I want rebinding a project to Jira to be a verified migration, not a copy,
+So that nothing is lost and the local backend remains until I clear it.
+
+**Acceptance Criteria:**
+
+**Given** a project bound locally with canonical planning data
+**When** `tk-studio-migrate` runs toward Jira
+**Then** it executes export (canonical shape) → transform → import → verification (entity counts, id map, content hashes, spot round-trip) with a closed inventory taken first
+
+**Given** verification passes
+**When** cutover happens
+**Then** the binding flips copy-then-verify-then-flag (flag last); the local backend stays read-only until the operator explicitly clears it (no-delete-before-clearance)
+
+**Given** any verification mismatch
+**When** detected
+**Then** migration halts `blocked` with the discrepancy listed; no partial state reads as migrated (AD-16)
