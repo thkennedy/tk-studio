@@ -11,6 +11,8 @@ Depth preserved from the [concept seed](../../../council/legacy-council-concept-
 
 ## A1. Distribution mechanism — full option analysis (feeds O1)
 
+> **O1 RULED (2026-07-26):** composite mechanism (studio-as-plugin + thin lockfile pin for the BMad base), measurement subsystem first-class, the M1-vs-M2 pre-measurement experiment dropped. Full ruling: [o1-decision-2026-07-26.md](o1-decision-2026-07-26.md). The analysis below stands as background record.
+
 **O1 broadened (Tim's ruling, 2026-07-25):** the mechanism must distribute BOTH the BMad base and the tk-studio layer + tooling, decided together and FIRST — before architecture — so everything is built with the distribution method in mind (absorbs former O6). **Simplicity bias:** nothing complicated is required; npx flows or plain release archives are acceptable if they deliver lockstep + the drift check.
 
 | Mechanism | How lockstep works | Pros | Cons |
