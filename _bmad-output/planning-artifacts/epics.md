@@ -1,5 +1,6 @@
 ---
-stepsCompleted: [1]
+stepsCompleted: [1, 2, 3, 4]
+status: complete
 inputDocuments:
   - _bmad-output/planning-artifacts/briefs/brief-tk-studio-2026-07-25/brief.md
   - _bmad-output/planning-artifacts/briefs/brief-tk-studio-2026-07-25/addendum.md
