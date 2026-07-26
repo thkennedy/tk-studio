@@ -38,7 +38,7 @@ companions: []
 
 - **Binds:** all — Lockstep
 - **Prevents:** per-developer unmanaged installs; a BMad fork
-- **Rule:** tk-studio ships as a Claude Code plugin from this repo's git marketplace (`extraKnownMarketplaces` auto-prompt on folder trust). The BMad base is never vendored or forked: a committed `bmad.lock` pins version + module registry + install flags, and install/update always runs the upstream installer at the pin (`npx bmad-method@<pin> install`, non-interactive). Base updates go through the base-update skill: bump the pin → run the upstream installer → open an **integration PR** for review (the reviewable upstream diff, without owning a fork). Ruled 2026-07-26 as the working answer: not re-litigated pre-build; revised only on measurement-loop evidence through the AD-12 consolidation channel.
+- **Rule:** tk-studio ships as a Claude Code plugin from this repo's git marketplace (`extraKnownMarketplaces` auto-prompt on folder trust). The BMad base is never vendored or forked: a committed `bmad.lock` pins the core version, the module set **with per-module version pins** (external modules — bmb, cis, gds, tea, wds, bmad-loop — version and channel independently of core), and install flags; install/update always runs the upstream installer at the pin (`npx bmad-method@<pin> install`, non-interactive). No bootstrap script in the repo (ruled 2026-07-26): clone + folder trust auto-prompts the plugin install, and the base install is plain `npx` — `tk install` is a plugin skill only. Base updates go through the base-update skill: bump the pin → run the upstream installer → open an **integration PR** for review (the reviewable upstream diff, without owning a fork). Ruled 2026-07-26 as the working answer: not re-litigated pre-build; revised only on measurement-loop evidence through the AD-12 consolidation channel.
 
 ### AD-2 — Layer dependency direction
 
@@ -254,6 +254,6 @@ tk-studio/
 - **Persona lore / tk overlay content** (11 personas, Perforce stream skills, UE content) — future overlay; the shell seam is AD-9.
 - **Distribution hardening** (permissions, security review, public distribution) — deliberately later per brief.
 - **Research→Knowledge Lifecycle port** (mission spine/seed, anchored deltas, JSONL reconciliation queue, promotion gate — verified built in tk/ClaudeOS) — the named session-discipline upgrade. v1 ships only boundary handoffs + resumable run workspaces; the port moves the runner-side halves council-side behind the driver contract, ClaudeOS as first driver.
-- **`bmad.lock` file format, final skill names, `tk install` CLI-shim question** — module-builder decisions; the bootstrap-script question is logged as open (a machine with no plugin cannot run a plugin skill).
+- **`bmad.lock` file format and final skill names** — module-builder decisions. (The bootstrap-script question is closed — see AD-1: no bootstrap script.)
 - **Backlog.md projection fidelity** — verify at adapter build that Backlog.md preserves unknown frontmatter keys; if not, the projection writes only Backlog.md-native keys + the canonical id as a label (canonical files are unaffected either way — AD-5 makes the projection non-authoritative).
 - **beads as an alternative local backend** — revisit only if dependency-graph queries become the bottleneck and its storage stabilizes.
