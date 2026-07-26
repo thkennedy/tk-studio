@@ -2,7 +2,7 @@
 
 Generalized role-aware orchestration layer on pure BMad.
 
-Product brief: `_bmad-output/planning-artifacts/briefs/brief-tk-studio-2026-07-25/` in the ClaudeOS repo (pillars, rulings, O1 distribution decision).
+Product brief: [`_bmad-output/planning-artifacts/briefs/brief-tk-studio-2026-07-25/`](_bmad-output/planning-artifacts/briefs/brief-tk-studio-2026-07-25/) — migrated here from ClaudeOS with full history on 2026-07-26 (pillars, rulings, [O1 distribution decision](_bmad-output/planning-artifacts/briefs/brief-tk-studio-2026-07-25/o1-decision-2026-07-26.md)). The council doc lineage lives in [`_bmad-output/council/`](_bmad-output/council/).
 
 ## Reference material (local-only, not pushed)
 
