@@ -13,13 +13,19 @@ committed per-project counter at `.tk-studio/plan-counter.yaml`).
 
 ## Behavior (both modes)
 
-1. Normalize, then validate, through the plugin root:
+1. Run the full adapter verb through the plugin root:
 
    ```bash
-   uv run "${CLAUDE_PLUGIN_ROOT}/lib/plansync.py" normalize --directory <project-root>
+   uv run "${CLAUDE_PLUGIN_ROOT}/lib/plansync.py" sync --directory <project-root>
    ```
 
-   Add `--dry-run` to preview the full plan without writing. The pass:
+   `sync` = normalize → validate → plan index → projection, where only the
+   projection step is binding-driven (resolved from `planning.backend`,
+   AD-15 order; `--backend NAME` is the runtime override). Under
+   `bmad-files` the canonical files are the backend: projection is a clean,
+   first-class no-op (FR14). `normalize --directory <root>` runs the
+   canonicalization pass alone. Add `--dry-run` to preview without writing.
+   The normalize pass:
    - derives/repairs one canonical entity file per epic/story under
      `_bmad-output/planning-artifacts/plan/<ID>.md` from `epics.md` (matched
      across runs by the `source` key — ids never move; `epics.md` itself is
@@ -58,5 +64,7 @@ committed per-project counter at `.tk-studio/plan-counter.yaml`).
   via `lib/interchange.py` — the single shipped validator.
 - Backend projection (promote / status pull-back) is binding-driven and
   arrives with the backend adapters; `bmad-files` means normalize + validate
-  with no projection — a first-class no-op, not an error.
+  + index with no projection — a first-class no-op, not an error.
+- `plan/index.md` is generated — a foreign index.md in its place is refused,
+  never overwritten.
 - All paths resolve through `${CLAUDE_PLUGIN_ROOT}`.
