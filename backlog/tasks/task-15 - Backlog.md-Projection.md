@@ -1,11 +1,11 @@
 ---
 id: TASK-15
 title: Backlog.md Projection
-status: In Progress
+status: Done
 assignee:
   - tim
 created_date: '2026-07-27 03:35'
-updated_date: '2026-07-27 03:47'
+updated_date: '2026-07-27 03:49'
 labels:
   - ST-015
 milestone: Plan Locally, Canonically
