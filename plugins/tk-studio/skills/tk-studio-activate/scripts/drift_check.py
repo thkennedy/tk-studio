@@ -32,12 +32,11 @@ sys.path.insert(0, str(PLUGIN_ROOT / "lib"))
 
 import bmadlock  # noqa: E402
 import ledger  # noqa: E402
+import store  # noqa: E402
 
 FIX_BMAD = "run tk-studio-install (tk install) to reinstall the base at the pin"
 FIX_PLUGIN = "run /plugin marketplace update tk-studio, then reinstall/update the tk-studio plugin"
-FIX_STORE = "run tk-studio onboarding to stand up the per-user store (Epic 2)"
-
-STORE_SKELETON = ["config.yaml", "registry", "projects", "measurements"]
+FIX_STORE = "run the store standup: uv run <plugin>/lib/store.py standup (idempotent, ST-2.1)"
 
 
 def check_bmad_base(directory: Path, lock_path: Path) -> dict:
@@ -107,17 +106,28 @@ def check_plugin(directory: Path, marketplace_path: Path | None) -> dict:
 
 def check_store() -> dict:
     plane = {"plane": "store", "status": "ok", "detail": ""}
-    root = ledger.store_root()
-    if not root.is_dir():
+    health = store.check_store()
+    root = health["root"]
+    if not health["exists"]:
         plane.update(status="missing", detail=f"per-user store {root} does not exist",
                      fix=FIX_STORE)
         return plane
-    absent = [n for n in STORE_SKELETON if not (root / n).exists()]
-    if absent:
-        plane.update(status="drift",
-                     detail=f"store {root} missing: {', '.join(absent)}", fix=FIX_STORE)
+    if not health["complete"]:
+        problems = []
+        if health["missing_dirs"]:
+            problems.append(f"missing: {', '.join(health['missing_dirs'])}")
+        if not health["config_present"]:
+            problems.append("config.yaml absent")
+        elif health["config_error"]:
+            problems.append(f"config.yaml unreadable: {health['config_error']}")
+        elif health["missing_config_keys"]:
+            problems.append(
+                f"config.yaml missing keys: {', '.join(health['missing_config_keys'])}")
+        plane.update(status="drift", detail=f"store {root} — {'; '.join(problems)}",
+                     fix=FIX_STORE)
     else:
-        plane["detail"] = f"store {root} skeleton complete (junction checks arrive with Epic 2)"
+        plane["detail"] = (f"store {root} skeleton + config complete "
+                           f"(vault-link checks arrive with ST-2.5)")
     return plane
 
 
