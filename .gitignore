@@ -2,3 +2,4 @@
 dps-council/
 __pycache__/
 *.pyc
+.tk-studio/config.local.yaml

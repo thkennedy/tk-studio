@@ -1,0 +1,24 @@
+{
+  "registry_schema_version": 1,
+  "description": "Project registry (AD-20) — the canonical cross-project read path, at ~/.tk-studio/registry/projects.yaml in the per-user store (never on any VCS). One schema, one writer: only onboarding/activation surfaces register or amend entries, always via lib/registry.py with atomic whole-file replace; every other surface reads. 'projects' is a map keyed by project_id — never a list. A project_id collision (same key, different root) fails registration and demands an explicit project_id: one project, one registry identity, one run-workspace tree, one measurement key.",
+  "file": {
+    "required": ["registry_version", "projects"],
+    "fields": {
+      "registry_version": { "type": "number", "const": 1 },
+      "projects": { "type": "object", "note": "map: project_id -> entry; project_id defaults to the project root's basename, overridden explicitly on collision (AD-20)" }
+    }
+  },
+  "entry": {
+    "required": ["root", "vcs", "planning_backend", "working_set_ref", "vault_link", "registered_at", "updated_at"],
+    "fields": {
+      "root": { "type": "string", "note": "absolute project root on this machine — machine paths are fine here, the store never lands on VCS (AD-3)" },
+      "vcs": { "type": "string", "enum": ["git", "perforce"], "note": "the project's VCS binding (AD-18)" },
+      "planning_backend": { "type": "string", "enum": ["bmad-files", "backlog-md", "jira"], "note": "the project's planning binding (AD-4), as resolved at registration/amend time" },
+      "working_set_ref": { "type": "string", "note": "pointer to the role-keyed working-set map — always the project's tracked config (.tk-studio/config.yaml#working_set); the registry never copies its content" },
+      "vault_link": { "type": "string", "enum": ["unconfigured", "linked", "broken", "unlinked"], "note": "Obsidian vault window state (ST-2.5): unconfigured = no vault in user config; unlinked = vault configured, link not yet created; linked = verified; broken = target or link missing at last activation" },
+      "vault_link_detail": { "type": "string", "required": false, "note": "human detail for broken/unlinked states" },
+      "registered_at": { "type": "string", "format": "ISO-8601 UTC" },
+      "updated_at": { "type": "string", "format": "ISO-8601 UTC" }
+    }
+  }
+}
