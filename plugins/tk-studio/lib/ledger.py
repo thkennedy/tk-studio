@@ -39,6 +39,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import classify as _classify
 import store as _store
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -52,34 +53,13 @@ _TYPE_MAP = {
     "array": list,
 }
 
-REDACTED = "\u00abredacted\u00bb"
-MASKED_PATH = "\u00abpath\u00bb"
-
-# Keys whose values are always redacted wholesale.
-_CREDENTIAL_KEY_RE = re.compile(
-    r"(?i)(token|secret|passw|api[_-]?key|credential|private[_-]?key|auth)"
-)
-
-# Credential-shaped value patterns (well-known prefixes; kept explicit so
-# legitimate content hashes and ids survive).
-_CREDENTIAL_VALUE_RES = [
-    re.compile(r"(?i)bearer\s+[A-Za-z0-9._\-]{8,}"),
-    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{16,}\b"),
-    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
-    re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{8,}\b"),
-    re.compile(r"\bsk-[A-Za-z0-9_\-]{16,}\b"),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9._\-]{10,}\b"),  # JWT
-    re.compile(r"(?i)-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-]
-
-# Absolute paths: Windows drive-letter or UNC, and Unix roots that imply a
-# machine-specific location.
-_ABS_PATH_RE = re.compile(
-    r"(?:[A-Za-z]:[\\/][^\s\"'|<>]*"
-    r"|\\\\[^\s\"'|<>]+"
-    r"|(?<![\w./])/(?:home|Users|root|etc|var|opt|tmp|mnt|srv|usr)/[^\s\"'|<>]*)"
-)
+# Patterns live in classify.py (shared with the AD-3 tracked-write guard);
+# these aliases are the stable public names for tests and callers.
+REDACTED = _classify.REDACTED
+MASKED_PATH = _classify.MASKED_PATH
+_CREDENTIAL_KEY_RE = _classify.CREDENTIAL_KEY_RE
+_CREDENTIAL_VALUE_RES = _classify.CREDENTIAL_VALUE_RES
+_ABS_PATH_RE = _classify.ABS_PATH_RE
 
 
 class LedgerError(Exception):
