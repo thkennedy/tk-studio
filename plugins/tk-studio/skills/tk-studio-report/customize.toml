@@ -1,0 +1,11 @@
+# Customization surface for tk-studio-report.
+#
+# Override files (not edited here):
+#   {project-root}/_bmad/custom/tk-studio-report.toml         (team)
+#   {project-root}/_bmad/custom/tk-studio-report.user.toml    (personal)
+
+# Model/effort defaults (AD-14). Precedence: runtime override > project config
+# > this resource default. Recording a report is mechanical.
+[model]
+default = "claude-haiku-4-5"
+effort = "low"
