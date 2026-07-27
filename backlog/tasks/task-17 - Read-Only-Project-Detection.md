@@ -1,9 +1,10 @@
 ---
 id: TASK-17
 title: Read-Only Project Detection
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-27 03:35'
+updated_date: '2026-07-27 06:30'
 labels:
   - ST-017
 milestone: The Studio Knows Your Project
