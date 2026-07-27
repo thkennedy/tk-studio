@@ -1,0 +1,13 @@
+{
+  "extraKnownMarketplaces": {
+    "tk-studio": {
+      "source": {
+        "source": "directory",
+        "path": "./"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "tk-studio@tk-studio": true
+  }
+}
