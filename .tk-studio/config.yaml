@@ -1,0 +1,25 @@
+# tk-studio project configuration — tracked, shared with the team (AD-15).
+# Machine paths and credentials never land here (AD-3); per-dev values go in
+# config.local.yaml (ignored). Resolution: runtime > config.local.yaml > this
+# file > ~/.tk-studio/config.yaml > studio defaults shipped with the plugin.
+
+# Stable project identity for the registry (AD-20); defaults to the repo
+# basename. Required explicitly when two projects would share a basename.
+# project_id: my-project
+
+# Version control this project's team-shared data binds to (AD-18): git | perforce
+vcs: git
+
+# planning:
+#   # Planning backend binding (AD-4): bmad-files | backlog-md | jira.
+#   # Unset, the studio default applies (backlog-md).
+#   backend: backlog-md
+
+# Role-keyed working sets (AD-17) — recorded only on explicit confirmation
+# by tk-studio-onboard (ST-4.3); no role's entry overwrites another's.
+# working_set:
+#   developer:
+#     - resource-name
+
+# Per-project job instances (AD-10; Epic 6).
+# jobs:
