@@ -1,48 +1,55 @@
 ---
 name: tk-studio-activate
-description: Studio activation front door — verifies the installed studio plugin and BMad base are healthy and current. Use when the user says "activate the studio", "tk activate", or "studio status". (v0 skeleton — reports plugin identity and pin; the full three-way drift check lands with ST-1.4.)
+description: Studio activation front door — three-way health/drift check proving the BMad base, the studio plugin, and the per-user store are current. Read-only, loud, guided fixes. Use when the user says "activate the studio", "tk activate", "studio status", or "check for drift".
 ---
 
-# tk-studio-activate (v0 skeleton)
+# tk-studio-activate
 
-Activation front door for the studio (AD-13). This v0 proves the plugin is
-installed and resolvable machine-wide; the full three-way drift/health check
-(installed `_bmad` vs `bmad.lock`, installed plugin vs `marketplace.json`,
-store/junction health) arrives with ST-1.4.
+Activation cross-checks both planes plus the store (AD-13) and reports — it
+never mutates anything. Version skew is caught here, at the front door,
+instead of debugged later as ghosts.
 
 ## Behavior (both modes)
 
-1. Run the info script — it must be addressed through the plugin root so it
-   works from any install location:
+1. Run the drift check through the plugin root:
 
    ```bash
-   uv run "${CLAUDE_PLUGIN_ROOT}/skills/tk-studio-activate/scripts/plugin_info.py"
+   uv run "${CLAUDE_PLUGIN_ROOT}/skills/tk-studio-activate/scripts/drift_check.py" --directory <project-root>
    ```
 
-2. The script prints one JSON object: plugin root, plugin name/version, and the
-   `bmad.lock` core pin. Treat a non-zero exit or malformed output as a failed
-   activation step.
+   Add `--guided` only when running as part of guided onboarding — it
+   additionally emits `onboarding-funnel` timing events per plane.
 
-3. Report the result:
-   - **Attended:** one short paragraph — plugin version, where it resolved
-     from, the pinned BMad core version.
-   - **Headless:** no prompts, no questions (AD-11). End the run with exactly
-     one JSON status block:
+2. The script checks three planes and emits its own measurement events
+   (`drift-detection` on clean or drift; `activation-failure` if a check step
+   itself fails):
+
+   | Plane | Compares | Guided fix on drift |
+   | --- | --- | --- |
+   | `bmad-base` | installed `_bmad/_config/manifest.yaml` vs `bmad.lock` pins | `tk install` |
+   | `plugin` | installed `plugin.json` vs marketplace catalog `plugins[].version` | `/plugin marketplace update tk-studio` |
+   | `store` | `~/.tk-studio` skeleton | onboarding (Epic 2) |
+
+   Exit codes: 0 clean, 1 drift found, 2 check-step error.
+
+3. Report:
+   - **Attended:** state each plane's status in one line each; on drift, give
+     the exact fix commands from the `fixes` array and stop — the fix is the
+     operator's move, never applied silently (NFR6).
+   - **Headless:** no prompts (AD-11). End with the status block:
+     `complete` on exit 0 or 1 (a drift *report* is a completed check —
+     the drift itself goes in `reason`), `blocked` on exit 2 with the failing
+     step as `reason`:
 
      ```json
-     {
-       "status": "complete",
-       "intent": "tk-studio-activate",
-       "artifacts": [],
-       "reason": null
-     }
+     {"status": "complete", "intent": "tk-studio-activate", "artifacts": [], "reason": "drift: bmad-base — tea pinned v1.19.1, installed v1.20.0"}
      ```
-
-     On script failure use `"status": "blocked"` and put the failing step in
-     `reason`. Never hang, never prompt.
 
 ## Rules
 
-- Read-only: this skill mutates nothing, ever (AD-13).
+- Read-only, always (AD-13). If a fix is needed, name it; never run it from
+  this skill.
 - All paths resolve through `${CLAUDE_PLUGIN_ROOT}` — never assume the plugin
   lives inside the current repo.
+- `scripts/plugin_info.py` remains the lightweight identity probe (plugin
+  root/version only) for callers that don't need the full check.
