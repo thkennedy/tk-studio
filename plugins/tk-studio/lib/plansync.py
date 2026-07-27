@@ -58,6 +58,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+import backlogmd
 import config as configlib
 import interchange
 import miniyaml
@@ -579,19 +580,22 @@ def sync(project_root: Path, dry_run: bool = False,
                        "reason": norm.get("reason", "normalize failed")})
         return result
 
-    result["index"] = generate_plan_index(project_root, dry_run=dry_run)
-
     if binding == "bmad-files":
         result["projection"] = {
             "binding": binding, "action": "none",
             "note": "bmad-files: the canonical files are the backend — "
                     "no projection, by design (FR14)"}
+    elif binding == "backlog-md":
+        result["projection"] = backlogmd.project(
+            project_root, plan_dir(project_root), dry_run=dry_run)
     else:
         result.update({"blocked": True,
                        "reason": f"projection for binding '{binding}' is not "
                                  f"installed in this version"})
         return result
 
+    # Index last: pull-back may have updated canonical statuses.
+    result["index"] = generate_plan_index(project_root, dry_run=dry_run)
     result["ok"] = True
     return result
 

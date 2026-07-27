@@ -19,13 +19,21 @@ committed per-project counter at `.tk-studio/plan-counter.yaml`).
    uv run "${CLAUDE_PLUGIN_ROOT}/lib/plansync.py" sync --directory <project-root>
    ```
 
-   `sync` = normalize → validate → plan index → projection, where only the
+   `sync` = normalize → validate → projection → plan index, where only the
    projection step is binding-driven (resolved from `planning.backend`,
    AD-15 order; `--backend NAME` is the runtime override). Under
    `bmad-files` the canonical files are the backend: projection is a clean,
-   first-class no-op (FR14). `normalize --directory <root>` runs the
-   canonicalization pass alone. Add `--dry-run` to preview without writing.
-   The normalize pass:
+   first-class no-op (FR14). Under `backlog-md` the projection is pull-back
+   → promote (AD-5): backend status-class changes (status, assignee) land on
+   canonical files first — echo-suppressed against the `external.backlog-md`
+   snapshot, both-changed entities surfaced as **conflicts** for a human,
+   never resolved silently — then canonical entities project into a
+   Backlog.md-compatible `backlog/` (epic → milestone + label linkage;
+   story/task → task files, native keys only with the canonical id as the
+   first label — Backlog.md 1.48.0 verifiably drops unknown frontmatter
+   keys; see `kb/backlog-md-verified-behavior.md`). `normalize --directory
+   <root>` runs the canonicalization pass alone. Add `--dry-run` to preview
+   without writing. The normalize pass:
    - derives/repairs one canonical entity file per epic/story under
      `_bmad-output/planning-artifacts/plan/<ID>.md` from `epics.md` (matched
      across runs by the `source` key — ids never move; `epics.md` itself is
@@ -49,8 +57,12 @@ committed per-project counter at `.tk-studio/plan-counter.yaml`).
    - **Attended:** summarize actions (created/repaired/unchanged, minted
      ids, stamps, notes); on a block, show the exact file paths and what to
      fix — never fix ids silently.
+   - On **conflicts** (both sides changed since the last sync): list each
+     conflicted entity with both values and both file paths; the human picks
+     a side by editing one of them, then reruns sync.
    - **Headless:** no prompts (AD-11). End with the status block —
-     `complete` on exit 0, `blocked` on exit 2 with the blocking reason:
+     `complete` on exit 0 (report conflicts as `partial` with the conflict
+     list in `reason`), `blocked` on exit 2 with the blocking reason:
 
      ```json
      {"status": "complete", "intent": "tk-studio-plan-sync", "artifacts": ["_bmad-output/planning-artifacts/plan/"], "reason": null}
