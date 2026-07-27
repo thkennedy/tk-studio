@@ -1,0 +1,34 @@
+---
+id: TASK-2
+title: Measurement Foundation — Taxonomy and Ledger
+status: Done
+assignee: []
+created_date: '2026-07-27 03:35'
+labels:
+  - ST-002
+milestone: Install Once, Stay in Lockstep
+dependencies: []
+---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+As an operator,
+I want every studio surface able to append sanitized events to my local measurement ledger,
+So that the system instruments itself from the first install instead of speculating about defects.
+
+**Acceptance Criteria:**
+
+**Given** the event-taxonomy schema shipped at `contracts/` (v1: install-outcome, drift-detection, activation-failure, headless-failure, onboarding-funnel, observation, report)
+**When** any studio skill emits an event through the shared ledger library
+**Then** one JSON object (`{ts, event, user, machine, project?, payload}`) appends atomically to `~/.tk-studio/measurements/<user>-<machine>.jsonl`
+**And** the payload matches that event type's schema, which names exactly one emitter class per type
+
+**Given** an event payload containing credential-shaped content or a non-allowlisted absolute path
+**When** it is emitted
+**Then** sanitization strips or masks it at emission, before the line lands in the ledger
+
+**Given** two concurrent emitters on one machine
+**When** both write
+**Then** no line is interleaved or lost (atomic append semantics)
+<!-- SECTION:DESCRIPTION:END -->
