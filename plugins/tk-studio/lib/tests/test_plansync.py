@@ -1,8 +1,10 @@
-"""Tests for the normalize pass + id authority (ST-3.2 acceptance criteria)."""
+"""Tests for the planning adapter: normalize + id authority (ST-3.2) and the
+bmad-files fallback sync verb (ST-3.3)."""
 from __future__ import annotations
 
 import io
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -263,6 +265,96 @@ class SprintStatusTests(PlanSyncTestCase):
         self.assertEqual(self._front("ST-002")["status"], "ready")
         self.assertEqual(self._front("ST-003")["status"], "draft")
         self.assertTrue(any("weird-state" in n for n in result["notes"]))
+
+
+class SyncTests(PlanSyncTestCase):
+    """ST-3.3: bmad-files fallback — no projection, first-class, not an error."""
+
+    def setUp(self):
+        super().setUp()
+        self._old_home = os.environ.get("TK_STUDIO_HOME")
+        os.environ["TK_STUDIO_HOME"] = str(Path(self._tmp.name) / "store")
+        conf_dir = self.root / ".tk-studio"
+        conf_dir.mkdir(parents=True, exist_ok=True)
+        (conf_dir / "config.yaml").write_text(
+            "planning:\n  backend: bmad-files\n",
+            encoding="utf-8", newline="\n")
+
+    def tearDown(self):
+        if self._old_home is None:
+            os.environ.pop("TK_STUDIO_HOME", None)
+        else:
+            os.environ["TK_STUDIO_HOME"] = self._old_home
+        super().tearDown()
+
+    def _index_text(self) -> str:
+        return (plansync.plan_dir(self.root) / "index.md").read_text(encoding="utf-8")
+
+    def test_sync_is_clean_with_no_op_projection(self):
+        result = plansync.sync(self.root)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["binding"], "bmad-files")
+        self.assertEqual(result["binding_scope"], "project-tracked")
+        self.assertEqual(result["projection"]["action"], "none")
+        self.assertNotIn("blocked", result)
+        text = self._index_text()
+        self.assertIn(plansync.GENERATED_MARKER, text)
+        self.assertIn("[`ST-001`](ST-001.md)", text)
+        self.assertIn("## EP-001 — First Epic", text)
+
+    def test_second_sync_is_idempotent(self):
+        plansync.sync(self.root)
+        result = plansync.sync(self.root)
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["index"]["changed"])
+        self.assertEqual(result["normalize"]["actions"]["unchanged"], 5)
+
+    def test_binding_decides_projection_only(self):
+        first = plansync.sync(self.root)
+        index_after_bmad = self._index_text()
+        second = plansync.sync(self.root,
+                               runtime={"planning": {"backend": "jira"}})
+        self.assertEqual(second["binding"], "jira")
+        self.assertTrue(second.get("blocked"))
+        self.assertEqual(second["normalize"]["actions"],
+                         {"created": 0, "repaired": 0, "unchanged": 5})
+        self.assertEqual(self._index_text(), index_after_bmad)
+        self.assertEqual(first["normalize"]["validation"],
+                         second["normalize"]["validation"])
+
+    def test_studio_default_binding_resolves(self):
+        (self.root / ".tk-studio" / "config.yaml").write_text(
+            "# no planning key\n", encoding="utf-8", newline="\n")
+        result = plansync.sync(self.root)
+        self.assertEqual(result["binding"], "backlog-md")
+        self.assertEqual(result["binding_scope"], "studio")
+
+    def test_foreign_index_is_refused(self):
+        plansync.sync(self.root)
+        index = plansync.plan_dir(self.root) / "index.md"
+        index.write_text("# hand-authored board\n", encoding="utf-8")
+        with self.assertRaises(plansync.PlanSyncError):
+            plansync.sync(self.root)
+        self.assertEqual(index.read_text(encoding="utf-8"),
+                         "# hand-authored board\n")
+
+    def test_normalize_block_propagates_through_sync(self):
+        plansync.sync(self.root)
+        source = plansync.plan_dir(self.root) / "ST-001.md"
+        shutil.copy(source, plansync.plan_dir(self.root) / "dup.md")
+        result = plansync.sync(self.root)
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["blocked"])
+        self.assertIn("duplicate", result["reason"])
+
+    def test_sync_cli(self):
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = plansync.main(["sync", "--directory", str(self.root)])
+        self.assertEqual(code, 0)
+        out = json.loads(buffer.getvalue())
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["projection"]["action"], "none")
 
 
 class CliTests(PlanSyncTestCase):
