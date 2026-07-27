@@ -1,0 +1,16 @@
+# tk-studio studio-scope defaults — the lowest-precedence config scope (AD-15),
+# shipped with the plugin. Resolution: runtime > project local > project
+# tracked > user > this file. Edit per-project values in .tk-studio/config.yaml,
+# never here.
+
+# Version control team-shared data binds to (AD-18).
+vcs: git
+
+planning:
+  # Planning backend binding (AD-4): bmad-files | backlog-md | jira.
+  # backlog-md is the v1 default; bmad-files is the zero-install fallback.
+  backend: backlog-md
+
+scheduler:
+  # Job execution substrate (AD-10, O8).
+  substrate: harness-native
