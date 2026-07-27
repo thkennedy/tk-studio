@@ -1,0 +1,12 @@
+# Customization surface for tk-studio-install.
+#
+# Override files (not edited here):
+#   {project-root}/_bmad/custom/tk-studio-install.toml         (team)
+#   {project-root}/_bmad/custom/tk-studio-install.user.toml    (personal)
+
+# Model/effort defaults (AD-14). Precedence: runtime override > project config
+# > this resource default. The script does the work — the model only renders
+# the invocation and reports.
+[model]
+default = "claude-haiku-4-5"
+effort = "low"

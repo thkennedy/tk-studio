@@ -1,2 +1,4 @@
 # Local-only reference copy of the legacy-council repo (design model, not part of tk-studio)
 legacy-council/
+__pycache__/
+*.pyc
