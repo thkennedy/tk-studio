@@ -1,0 +1,18 @@
+{
+  "id": "python-app",
+  "display_name": "Python application/library",
+  "suggests": ["bmm", "tea"],
+  "detection": {
+    "confidence_min": 4,
+    "markers": [
+      {"kind": "file_glob", "pattern": "pyproject.toml", "max_depth": 1, "weight": 3,
+       "evidence": "pyproject.toml at the root"},
+      {"kind": "file_glob", "pattern": "setup.py", "max_depth": 1, "weight": 2,
+       "evidence": "setup.py at the root"},
+      {"kind": "file_glob", "pattern": "requirements*.txt", "max_depth": 1, "weight": 1,
+       "evidence": "requirements file at the root"},
+      {"kind": "file_glob", "pattern": "*.py", "max_depth": 2, "weight": 1,
+       "evidence": "Python sources"}
+    ]
+  }
+}
