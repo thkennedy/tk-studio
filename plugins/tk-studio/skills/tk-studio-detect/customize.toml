@@ -1,0 +1,12 @@
+# Customization surface for tk-studio-detect.
+#
+# Override files (not edited here):
+#   {project-root}/_bmad/custom/tk-studio-detect.toml         (team)
+#   {project-root}/_bmad/custom/tk-studio-detect.user.toml    (personal)
+
+# Model/effort defaults (AD-14). Precedence: runtime override > project config
+# > this resource default. Inventory + detection are mechanical read-only
+# scans — keep them cheap.
+[model]
+default = "claude-haiku-4-5"
+effort = "low"

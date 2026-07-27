@@ -1,0 +1,12 @@
+# Customization surface for tk-studio-onboard.
+#
+# Override files (not edited here):
+#   {project-root}/_bmad/custom/tk-studio-onboard.toml         (team)
+#   {project-root}/_bmad/custom/tk-studio-onboard.user.toml    (personal)
+
+# Model/effort defaults (AD-14). Precedence: runtime override > project config
+# > this resource default. Onboarding presents evidence and negotiates a
+# working set with the operator — worth a mid-tier model, still conservative.
+[model]
+default = "claude-sonnet-5"
+effort = "medium"
