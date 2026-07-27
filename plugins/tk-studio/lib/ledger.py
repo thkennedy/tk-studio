@@ -39,6 +39,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import store as _store
+
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 TAXONOMY_PATH = PLUGIN_ROOT / "contracts" / "events" / "taxonomy.v1.json"
 
@@ -174,12 +176,11 @@ def sanitize(value):
 # ---------------------------------------------------------------- emission
 
 def store_root() -> Path:
-    override = os.environ.get("TK_STUDIO_HOME")
-    return Path(override) if override else Path.home() / ".tk-studio"
+    return _store.store_root()  # single authority for the store root (ST-2.1)
 
 
 def _safe_name(name: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._\-]", "_", name) or "unknown"
+    return _store.safe_name(name)
 
 
 def ledger_path() -> Path:
@@ -231,6 +232,7 @@ def emit(event: str, payload: dict, project: str | None = None,
         envelope["project"] = _sanitize_string(project)
     envelope["payload"] = sanitize(payload)
     if not dry_run:
+        _store.ensure_store()  # first surface to need the store stands it up (ST-2.1)
         line = json.dumps(envelope, ensure_ascii=False, separators=(",", ":")) + "\n"
         _locked_append(ledger_path(), line)
     return envelope
