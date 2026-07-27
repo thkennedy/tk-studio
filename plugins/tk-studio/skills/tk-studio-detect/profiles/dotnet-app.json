@@ -1,0 +1,18 @@
+{
+  "id": "dotnet-app",
+  "display_name": ".NET application",
+  "suggests": ["bmm", "tea"],
+  "detection": {
+    "confidence_min": 4,
+    "markers": [
+      {"kind": "file_glob", "pattern": "*.sln", "max_depth": 1, "weight": 2,
+       "evidence": "solution file at the root"},
+      {"kind": "file_glob", "pattern": "*.csproj", "max_depth": 2, "weight": 2,
+       "evidence": "C# project file"},
+      {"kind": "file_glob", "pattern": "global.json", "max_depth": 1, "weight": 1,
+       "evidence": "global.json SDK pin"},
+      {"kind": "file_glob", "pattern": "Directory.Build.props", "max_depth": 1, "weight": 1,
+       "evidence": "Directory.Build.props at the root"}
+    ]
+  }
+}

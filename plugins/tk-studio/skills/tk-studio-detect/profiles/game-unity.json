@@ -1,0 +1,18 @@
+{
+  "id": "game-unity",
+  "display_name": "Unity game project",
+  "suggests": ["gds", "tea"],
+  "detection": {
+    "confidence_min": 4,
+    "markers": [
+      {"kind": "dir_exists", "pattern": "Assets", "max_depth": 1, "weight": 2,
+       "evidence": "Assets/ tree at the root"},
+      {"kind": "dir_exists", "pattern": "ProjectSettings", "max_depth": 1, "weight": 2,
+       "evidence": "ProjectSettings/ tree at the root"},
+      {"kind": "file_glob", "pattern": "ProjectVersion.txt", "max_depth": 2, "weight": 2,
+       "evidence": "ProjectSettings/ProjectVersion.txt engine pin"},
+      {"kind": "dir_exists", "pattern": "Packages", "max_depth": 1, "weight": 1,
+       "evidence": "Packages/ manifest tree"}
+    ]
+  }
+}

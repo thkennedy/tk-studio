@@ -1,0 +1,18 @@
+{
+  "id": "game-unreal",
+  "display_name": "Unreal Engine game project",
+  "suggests": ["gds", "tea"],
+  "detection": {
+    "confidence_min": 4,
+    "markers": [
+      {"kind": "file_glob", "pattern": "*.uproject", "max_depth": 1, "weight": 4,
+       "evidence": ".uproject descriptor at the root"},
+      {"kind": "dir_exists", "pattern": "Source", "max_depth": 1, "weight": 2,
+       "evidence": "Source/ C++ module tree"},
+      {"kind": "dir_exists", "pattern": "Config", "max_depth": 1, "weight": 1,
+       "evidence": "Config/ engine ini tree"},
+      {"kind": "file_glob", "pattern": "*.uplugin", "max_depth": 3, "weight": 2,
+       "evidence": ".uplugin descriptor (plugin project)"}
+    ]
+  }
+}

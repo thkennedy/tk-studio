@@ -32,6 +32,31 @@ manifests) without failing the scan; a project with no `_bmad/` still
 inventories cleanly. Add `--out FILE` to also save the artifact (e.g. into a
 run workspace) — without it the scan writes nothing anywhere.
 
+### detect — what this project is, with evidence (ST-4.2)
+
+```bash
+uv run "${CLAUDE_PLUGIN_ROOT}/lib/detect.py" scan --directory <project-root>
+```
+
+Scores candidate project types against the shipped profile registry
+(`profiles/*.json` in this skill: weighted `file_glob` / `dir_exists` /
+`file_content` / `vcs` markers, per-profile confidence floor). The result
+lists every candidate ranked, with the concrete evidence — marker text,
+weight, and the file/dir that matched — behind every point scored, plus the
+project's VCS type.
+
+Outcomes (tk detector discipline — never a silent guess):
+
+| Outcome | Meaning | Downstream move |
+| --- | --- | --- |
+| `confident` | floor met AND clear margin over the runner-up | propose `top_candidate` |
+| `ambiguous — ask` | scored, but floor/margin unmet | show ranked candidates, ask the human |
+| `unknown — ask` | nothing scored past the floor | ask the human what the project is |
+
+`top_candidate` on an ask outcome is the best lead to *name in the question*,
+never an answer to act on. Profiles carry `suggests` (module names) as data
+for the recommendation step — detect never acts on them.
+
 ## Report
 
 - **Attended:** summarize counts per plane, list known-but-uninstalled

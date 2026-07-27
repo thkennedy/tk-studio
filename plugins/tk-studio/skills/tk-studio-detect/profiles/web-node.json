@@ -1,0 +1,19 @@
+{
+  "id": "web-node",
+  "display_name": "Node/TypeScript web project",
+  "suggests": ["wds", "bmm", "tea"],
+  "detection": {
+    "confidence_min": 4,
+    "markers": [
+      {"kind": "file_glob", "pattern": "package.json", "max_depth": 1, "weight": 2,
+       "evidence": "package.json at the root"},
+      {"kind": "file_content", "pattern": "package.json", "max_depth": 1, "weight": 2,
+       "probe": "\"(react|next|vue|svelte|@angular/core|astro|vite)\"",
+       "evidence": "web framework in package.json dependencies"},
+      {"kind": "file_glob", "pattern": "tsconfig.json", "max_depth": 1, "weight": 1,
+       "evidence": "tsconfig.json at the root"},
+      {"kind": "dir_exists", "pattern": "public", "max_depth": 1, "weight": 1,
+       "evidence": "public/ static asset tree"}
+    ]
+  }
+}
