@@ -1,9 +1,10 @@
 ---
 id: TASK-18
 title: Recommend, Confirm, Record
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-27 03:35'
+updated_date: '2026-07-27 06:30'
 labels:
   - ST-018
 milestone: The Studio Knows Your Project
