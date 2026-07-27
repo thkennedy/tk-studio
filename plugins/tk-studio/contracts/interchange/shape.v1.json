@@ -1,0 +1,41 @@
+{
+  "shape_version": 1,
+  "description": "Canonical planning interchange shape (AD-6) — one entity per markdown file, YAML frontmatter, body markdown. The normalized _bmad-output/ planning artifacts carrying this shape are the single canonical local representation under every binding (AD-4); every backend adapter and migration maps to this contract and never extends it. The single shipped validator is lib/interchange.py — no adapter ships its own parser. Ids are minted only by the adapter from the committed per-project counter (AD-4); stable, never reused. Frontmatter must stay inside the lib/miniyaml.py subset: nested maps and lists of scalars only.",
+  "entity": {
+    "required": ["shape_version", "id", "type", "title", "status", "created", "updated"],
+    "optional": ["parent", "depends_on", "priority", "assignee", "labels", "external"],
+    "unknown_keys": "preserved and ignored — normalization repairs canonical keys in place without dropping upstream content (AD-4)",
+    "fields": {
+      "shape_version": { "type": "number", "const": 1 },
+      "id": { "type": "string", "pattern": "^(EP|ST|TA)-\\d{3,}$", "note": "prefix must match type: EP-epic, ST-story, TA-task; minted only by the adapter, stable, never reused" },
+      "type": { "type": "string", "enum": ["epic", "story", "task"] },
+      "title": { "type": "string", "note": "non-empty" },
+      "status": { "type": "string", "enum": ["draft", "ready", "in-progress", "blocked", "review", "done", "dropped"], "note": "CLOSED enum — adapters map onto backend states and never extend it; an unmappable backend state maps to the nearest canonical value with the original preserved under external.<binding>" },
+      "created": { "type": "string", "format": "ISO-8601" },
+      "updated": { "type": "string", "format": "ISO-8601" },
+      "parent": { "type": "string", "note": "story -> its epic (EP-NNN); task -> its story (ST-NNN); an epic has no parent" },
+      "depends_on": { "type": "array", "items": "entity id", "note": "list of entity ids; no self-dependency, no duplicates" },
+      "priority": { "type": "string", "enum": ["P0", "P1", "P2", "P3"] },
+      "assignee": { "type": "string", "note": "non-empty" },
+      "labels": { "type": "array", "items": "string", "note": "non-empty strings" },
+      "external": { "type": "object", "note": "map: binding name -> sync snapshot (see external_entry); written only by the adapter's promote/pull-back (AD-5 echo suppression reads this snapshot)" }
+    }
+  },
+  "external_entry": {
+    "required": ["key", "synced_at", "content_hash"],
+    "fields": {
+      "key": { "type": "string", "note": "backend-native identity (e.g. Backlog.md task id, Jira issue key)" },
+      "synced_at": { "type": "string", "format": "ISO-8601" },
+      "content_hash": { "type": "string", "note": "hash of the canonical content at last promote" }
+    },
+    "unknown_keys": "allowed — backend-specific state (e.g. the original unmappable status) is preserved here"
+  },
+  "body": {
+    "format": "markdown",
+    "acceptance_criteria": "convention: a '## Acceptance Criteria' section holding a markdown checklist; not enforced by the validator"
+  },
+  "backend_mappings": {
+    "note": "epic has no native entity in Backlog.md (-> milestone + label) and none in Linear (-> Project); in Jira epic->Epic, story->Story, task->Sub-task (AD-6, AD-7)"
+  },
+  "entity_marker": "a markdown file is an interchange entity iff its frontmatter carries shape_version; files without it are skipped by directory validation (pre-normalization artifacts are stamped by the ST-3.2 normalize pass)"
+}
