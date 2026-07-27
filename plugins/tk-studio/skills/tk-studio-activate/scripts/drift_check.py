@@ -5,6 +5,10 @@ Planes checked:
   plugin     installed plugin.json version vs the repo marketplace.json entry
              (catalog lockstep), when a marketplace catalog is present
   store      per-user store presence + skeleton (~/.tk-studio)
+  vault      Obsidian vault window links for this project, when registered
+             (ST-2.5) — observed state is recorded in the registry entry
+             (writer: activate), the one sanctioned bookkeeping write; links
+             are never repaired here (fix is the explicit vault link verb)
 
 Per-plane status: ok | drift | missing | error. Overall:
   clean  → exit 0, drift-detection{result: clean}
@@ -32,7 +36,9 @@ sys.path.insert(0, str(PLUGIN_ROOT / "lib"))
 
 import bmadlock  # noqa: E402
 import ledger  # noqa: E402
+import registry  # noqa: E402
 import store  # noqa: E402
+import vault  # noqa: E402
 
 FIX_BMAD = "run tk-studio-install (tk install) to reinstall the base at the pin"
 FIX_PLUGIN = "run /plugin marketplace update tk-studio, then reinstall/update the tk-studio plugin"
@@ -126,8 +132,39 @@ def check_store() -> dict:
         plane.update(status="drift", detail=f"store {root} — {'; '.join(problems)}",
                      fix=FIX_STORE)
     else:
-        plane["detail"] = (f"store {root} skeleton + config complete "
-                           f"(vault-link checks arrive with ST-2.5)")
+        plane["detail"] = f"store {root} skeleton + config complete"
+    return plane
+
+
+def check_vault(directory: Path) -> dict:
+    plane = {"plane": "vault", "status": "ok", "detail": ""}
+    try:
+        projects = registry.list_projects()
+    except registry.RegistryError as exc:
+        plane.update(status="error", detail=f"registry unreadable: {exc}")
+        return plane
+    project_id = next(
+        (pid for pid, e in projects.items() if Path(e["root"]) == directory), None)
+    if project_id is None:
+        plane["detail"] = (f"{directory.name} not registered — vault window "
+                           f"not applicable until onboarding registers it")
+        return plane
+    try:
+        result = vault.check_links(project_id, record=True)
+    except (vault.VaultError, registry.RegistryError) as exc:
+        plane.update(status="error", detail=str(exc))
+        return plane
+    state = result["state"]
+    if state in ("linked", "unconfigured"):
+        plane["detail"] = (f"vault window {state} for {project_id}"
+                           + (f" ({result.get('detail')})" if state == "unconfigured" else ""))
+    else:
+        plane.update(status="drift",
+                     detail=f"vault window {state} for {project_id}: "
+                            f"{result.get('detail', '')}",
+                     fix=result.get("fix", ""))
+    if result.get("recorded"):
+        plane["detail"] += " — state recorded in registry entry"
     return plane
 
 
@@ -149,6 +186,7 @@ def main(argv: list[str] | None = None) -> int:
         lambda: check_bmad_base(directory, lock_path),
         lambda: check_plugin(directory, marketplace_path),
         check_store,
+        lambda: check_vault(directory),
     ):
         started = time.monotonic()
         plane = check()

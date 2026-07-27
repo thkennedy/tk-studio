@@ -1,6 +1,6 @@
 ---
 name: tk-studio-activate
-description: Studio activation front door — three-way health/drift check proving the BMad base, the studio plugin, and the per-user store are current. Read-only, loud, guided fixes. Use when the user says "activate the studio", "tk activate", "studio status", or "check for drift".
+description: Studio activation front door — health/drift check proving the BMad base, the studio plugin, the per-user store, and the vault window are current. Read-only, loud, guided fixes. Use when the user says "activate the studio", "tk activate", "studio status", or "check for drift".
 ---
 
 # tk-studio-activate
@@ -20,7 +20,7 @@ instead of debugged later as ghosts.
    Add `--guided` only when running as part of guided onboarding — it
    additionally emits `onboarding-funnel` timing events per plane.
 
-2. The script checks three planes and emits its own measurement events
+2. The script checks four planes and emits its own measurement events
    (`drift-detection` on clean or drift; `activation-failure` if a check step
    itself fails):
 
@@ -28,9 +28,13 @@ instead of debugged later as ghosts.
    | --- | --- | --- |
    | `bmad-base` | installed `_bmad/_config/manifest.yaml` vs `bmad.lock` pins | `tk install` |
    | `plugin` | installed `plugin.json` vs marketplace catalog `plugins[].version` | `/plugin marketplace update tk-studio` |
-   | `store` | `~/.tk-studio` skeleton | onboarding (Epic 2) |
+   | `store` | `~/.tk-studio` skeleton + config keys | `uv run <plugin>/lib/store.py standup` |
+   | `vault` | vault window links for this project (when registered) | `uv run <plugin>/lib/vault.py link --project-id <id>` |
 
-   Exit codes: 0 clean, 1 drift found, 2 check-step error.
+   Exit codes: 0 clean, 1 drift found, 2 check-step error. The vault plane
+   records its observed state in the registry entry (writer: activate) — the
+   one sanctioned bookkeeping write; unconfigured is clean (the vault is a
+   view, never a dependency), and links are never repaired here.
 
 3. Report:
    - **Attended:** state each plane's status in one line each; on drift, give
