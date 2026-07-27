@@ -1,0 +1,63 @@
+# bmad.lock — the BMad base pin (AD-1: composite distribution).
+#
+# Single source of truth for what BMad base every machine must run.
+# Writers: tk-studio-install (consume-only) and tk-studio-base-update (the only
+# skill that bumps pins). Never edited by hand outside a base-update PR.
+#
+# External modules version and channel independently of core — each carries its
+# own pin. `sha` is the resolved commit recorded at install time (verification
+# datum for the drift check, not an input to the installer).
+lock_version: 1
+core:
+  package: bmad-method
+  version: 6.10.0
+install:
+  # Upstream installer invocation shape (non-interactive; AD-1: plain npx, no bootstrap script):
+  #   npx bmad-method@<core.version> install <flags> --modules <module list>
+  flags:
+    - --non-interactive
+modules:
+  bmm:
+    version: 6.10.0
+    source: built-in
+  bmb:
+    version: v2.1.0
+    source: external
+    npmPackage: bmad-builder
+    repoUrl: https://github.com/bmad-code-org/bmad-builder
+    channel: stable
+    sha: d54981a8ba3b990148256455ccf4e6c1cb4918f0
+  cis:
+    version: v0.2.1
+    source: external
+    npmPackage: bmad-creative-intelligence-suite
+    repoUrl: https://github.com/bmad-code-org/bmad-creative-intelligence-suite
+    channel: stable
+    sha: 07a8dd03d196a762f21c241d985293fe5b0f90e7
+  gds:
+    version: v0.6.0
+    source: external
+    npmPackage: bmad-game-dev-studio
+    repoUrl: https://github.com/bmad-code-org/bmad-game-dev-studio
+    channel: stable
+    sha: 966fbc54db686f77fd0d68cae4164dce8cc98113
+  tea:
+    version: v1.19.1
+    source: external
+    npmPackage: bmad-method-test-architecture-enterprise
+    repoUrl: https://github.com/bmad-code-org/bmad-method-test-architecture-enterprise
+    channel: stable
+    sha: 74cf6e6adf5a6f46614788f184f340ea58336157
+  wds:
+    version: v0.4.3
+    source: external
+    npmPackage: bmad-wds
+    repoUrl: https://github.com/bmad-code-org/bmad-wds
+    channel: stable
+    sha: cc16f09fcfab26d35635af1491f36a38a8431c8d
+  bmad-loop:
+    version: v0.9.0
+    source: external
+    repoUrl: https://github.com/bmad-code-org/bmad-loop
+    channel: stable
+    sha: 72551742617b4e1c9cb72d2038dc67ce973f7eea

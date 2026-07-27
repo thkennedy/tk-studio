@@ -1,0 +1,13 @@
+{
+  "name": "tk-studio",
+  "displayName": "tk-studio",
+  "description": "AI dev-studio layer over a pinned BMad base: lockstep installs, data taxonomy, planning adapter, recommendation, and unattended operations.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Tim Kennedy",
+    "email": "kennedy.timothyh@gmail.com"
+  },
+  "repository": "https://github.com/thkennedy/tk-studio",
+  "license": "UNLICENSED",
+  "keywords": ["bmad", "studio", "orchestration"]
+}
