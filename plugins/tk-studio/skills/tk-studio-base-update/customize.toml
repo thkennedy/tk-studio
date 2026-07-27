@@ -1,0 +1,12 @@
+# Customization surface for tk-studio-base-update.
+#
+# Override files (not edited here):
+#   {project-root}/_bmad/custom/tk-studio-base-update.toml         (team)
+#   {project-root}/_bmad/custom/tk-studio-base-update.user.toml    (personal)
+
+# Model/effort defaults (AD-14). Precedence: runtime override > project config
+# > this resource default. Slightly above floor: attended runs may summarize
+# upstream release notes into the PR body.
+[model]
+default = "claude-sonnet-5"
+effort = "medium"
