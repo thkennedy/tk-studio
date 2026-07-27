@@ -1,0 +1,12 @@
+# Customization surface for tk-studio-plan-sync.
+#
+# Override files (not edited here):
+#   {project-root}/_bmad/custom/tk-studio-plan-sync.toml         (team)
+#   {project-root}/_bmad/custom/tk-studio-plan-sync.user.toml    (personal)
+
+# Model/effort defaults (AD-14). Precedence: runtime override > project config
+# > this resource default. Sync is mechanical (the library does the work);
+# conflict explanation is the only judgment moment — keep it cheap.
+[model]
+default = "claude-haiku-4-5"
+effort = "low"

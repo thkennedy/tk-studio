@@ -1,0 +1,11 @@
+# Customization surface for tk-studio-observe.
+#
+# Override files (not edited here):
+#   {project-root}/_bmad/custom/tk-studio-observe.toml         (team)
+#   {project-root}/_bmad/custom/tk-studio-observe.user.toml    (personal)
+
+# Model/effort defaults (AD-14). Precedence: runtime override > project config
+# > this resource default. Recording an observation is mechanical.
+[model]
+default = "claude-haiku-4-5"
+effort = "low"
