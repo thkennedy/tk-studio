@@ -170,7 +170,8 @@ def main(argv: list[str] | None = None) -> int:
     # 3. bump + commit (so a failed install diffs against the bumped lock)
     LOCK_PATH.write_text(new_lock, encoding="utf-8", newline="\n")
     _git(directory, "add", str(LOCK_PATH))
-    _git(directory, "commit", "-q", "-m", f"chore(base-update): bump bmad.lock — {bump_desc}")
+    _git(directory, "commit", "-q", "--allow-empty", "-m",
+         f"chore(base-update): bump bmad.lock — {bump_desc}")
 
     # 4. install at the new pin (install_base verifies + emits install-outcome)
     proc = subprocess.run(
