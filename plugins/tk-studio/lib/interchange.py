@@ -51,7 +51,7 @@ CANONICAL_ORDER = ("shape_version", "id", "type", "title", "status", "created",
                    "updated", "parent", "depends_on", "priority", "assignee",
                    "labels", "external")
 
-_FRONTMATTER_RE = re.compile(r"^---\r?\n(.*?)^---\s*\r?\n?", re.DOTALL | re.MULTILINE)
+_FRONTMATTER_RE = re.compile(r"^---\r?\n(.*?)^---[ \t]*\r?\n?", re.DOTALL | re.MULTILINE)
 
 
 class InterchangeError(Exception):
