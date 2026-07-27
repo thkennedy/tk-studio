@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tk-studio/contracts/status-block/v1",
+  "title": "tk-studio headless status block",
+  "description": "Terminal JSON block ending every headless studio run (AD-11). BMad-style: status + intent + artifacts, with reason on anything other than a clean completion.",
+  "type": "object",
+  "required": ["status", "intent", "artifacts"],
+  "additionalProperties": false,
+  "properties": {
+    "status": {
+      "enum": ["complete", "partial", "blocked"]
+    },
+    "intent": {
+      "type": "string",
+      "description": "The skill/surface that ran, e.g. 'tk-studio-activate'."
+    },
+    "artifacts": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Paths or identifiers of artifacts produced. Empty for read-only runs."
+    },
+    "reason": {
+      "type": ["string", "null"],
+      "description": "Required (non-null) when status is 'partial' or 'blocked': the guard hit, the ambiguity, or the failing step."
+    }
+  }
+}

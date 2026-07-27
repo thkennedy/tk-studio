@@ -1,0 +1,77 @@
+{
+  "taxonomy_version": 1,
+  "description": "Measurement event taxonomy (AD-12). Every event is one JSON object per line in the per-user-per-machine ledger ~/.tk-studio/measurements/<user>-<machine>.jsonl. Exactly one emitter class per event type: a skill emits its own surface events; the job wrapper alone emits job-level events — never both for one failure. Extending this taxonomy rides the PR membrane.",
+  "envelope": {
+    "required": ["ts", "event", "user", "machine", "payload"],
+    "optional": ["project"],
+    "fields": {
+      "ts": { "type": "string", "format": "ISO-8601 UTC" },
+      "event": { "type": "string", "enum-source": "events keys below" },
+      "user": { "type": "string" },
+      "machine": { "type": "string" },
+      "project": { "type": "string", "note": "project key from the registry; omitted for machine-scoped events" },
+      "payload": { "type": "object", "note": "shape fixed per event type below" }
+    }
+  },
+  "events": {
+    "install-outcome": {
+      "emitter": "installer (tk-studio-install; tk-studio-base-update when it reruns the installer)",
+      "payload": {
+        "outcome": { "type": "string", "enum": ["success", "failure"], "required": true },
+        "core_version": { "type": "string", "required": true },
+        "modules": { "type": "object", "required": false, "note": "module -> pinned version actually installed" },
+        "step": { "type": "string", "required": false, "note": "failing step on failure" },
+        "detail": { "type": "string", "required": false }
+      }
+    },
+    "drift-detection": {
+      "emitter": "activation (tk-studio-activate)",
+      "payload": {
+        "result": { "type": "string", "enum": ["clean", "drift"], "required": true },
+        "planes": { "type": "array", "required": true, "note": "per-plane results: bmad-base, plugin, store" },
+        "detail": { "type": "string", "required": false }
+      }
+    },
+    "activation-failure": {
+      "emitter": "activation (tk-studio-activate)",
+      "payload": {
+        "step": { "type": "string", "required": true },
+        "error": { "type": "string", "required": true }
+      }
+    },
+    "headless-failure": {
+      "emitter": "conformance runner (contracts/conformance suite)",
+      "payload": {
+        "surface": { "type": "string", "required": true },
+        "assertion": { "type": "string", "required": true },
+        "detail": { "type": "string", "required": false }
+      }
+    },
+    "onboarding-funnel": {
+      "emitter": "onboarding (tk-studio-onboard; tk-studio-activate in guided mode)",
+      "payload": {
+        "stage": { "type": "string", "required": true },
+        "ok": { "type": "boolean", "required": true },
+        "elapsed_ms": { "type": "number", "required": false },
+        "retries": { "type": "number", "required": false },
+        "detail": { "type": "string", "required": false }
+      }
+    },
+    "observation": {
+      "emitter": "evolve loop (research job types; tk-studio surfaces logging observed toil)",
+      "payload": {
+        "source": { "type": "string", "required": true, "note": "retrospective | repeated-manual-work | research-job | other" },
+        "description": { "type": "string", "required": true },
+        "evidence": { "type": "string", "required": false }
+      }
+    },
+    "report": {
+      "emitter": "reporter (tk-studio-report — the human-authored defect verb)",
+      "payload": {
+        "description": { "type": "string", "required": true },
+        "surface": { "type": "string", "required": false, "note": "suspected skill/surface" },
+        "context": { "type": "object", "required": false, "note": "project, skill, session mode" }
+      }
+    }
+  }
+}
