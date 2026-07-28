@@ -1,9 +1,10 @@
 ---
 id: TASK-22
 title: Publish the Driver Contract
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-27 03:35'
+updated_date: '2026-07-28 03:46'
 labels:
   - ST-022
 milestone: One Front Door, Any Mode
