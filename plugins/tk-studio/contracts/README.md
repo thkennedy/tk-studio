@@ -10,7 +10,7 @@ Single home for the studio's versioned contracts (AD-11, AD-12, AD-19; NFR8):
 | `registry.schema.json` — project registry (`registry/projects.yaml`) | ST-2.3 | shipped |
 | `job.schema.json` — declarative job model | ST-6.1 | pending |
 | `driver-contract.md` — versioned harness driver contract (v1.0.0, own semver; breaking ⇒ major) | ST-5.3 | shipped |
-| `conformance/` — dual-mode conformance suite | ST-5.4 | pending |
+| `conformance/` — dual-mode conformance suite: `manifest.json` (per-surface drives + preflight postures) + `runner.py` (discovery from skills/, headless drives, `headless-failure` emission) | ST-5.4 | shipped |
 
 Every schema carries its own version; breaking change ⇒ major bump. Nothing in
 this tree is advisory — skills validate against these, and the conformance
