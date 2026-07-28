@@ -1,0 +1,131 @@
+{
+  "conformance_version": 1,
+  "description": "Conformance manifest (ST-5.4, AD-19). Every shipped studio skill MUST have an entry here — the runner discovers surfaces from the plugin's skills/ tree and fails any surface missing from this manifest (and any manifest entry with no shipped skill behind it). Drives run the surface's deterministic core headless in a throwaway sandbox project with an isolated store: stdin closed, wall-clock bounded, output must be machine-readable. argv[0] is plugin-root-relative; {sandbox} substitutes the sandbox project directory.",
+  "expect_semantics": {
+    "json": "process completes within the timeout and stdout parses as JSON",
+    "refusal": "process completes within the timeout and refuses cleanly: nonzero exit, or JSON with ok=false, or the declared marker in stdout — never a prompt, never a hang"
+  },
+  "surfaces": {
+    "tk-studio-activate": {
+      "external_calls": false,
+      "auth_preflight": "none needed — read-only local three-way check; harness auth is the driver's preflight (driver-contract §1)",
+      "drives": [
+        {
+          "assertion": "headless-clean",
+          "argv": ["skills/tk-studio-activate/scripts/drift_check.py", "--directory", "{sandbox}"],
+          "expect": "json"
+        }
+      ]
+    },
+    "tk-studio-install": {
+      "external_calls": true,
+      "auth_preflight": "npm registry only (npx at the bmad.lock pin) — no Anthropic auth in the surface itself; installer verifies the manifest against the pin after install",
+      "drives": [
+        {
+          "assertion": "headless-clean",
+          "argv": ["skills/tk-studio-install/scripts/install_base.py", "--directory", "{sandbox}", "--dry-run"],
+          "expect": "json"
+        }
+      ]
+    },
+    "tk-studio-base-update": {
+      "external_calls": true,
+      "auth_preflight": "npm registry (installer rerun at the new pin) + VCS remote for the integration PR; both verified by failing loud, never hanging",
+      "drives": [
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["skills/tk-studio-base-update/scripts/base_update.py", "--directory", "{sandbox}", "--dry-run"],
+          "expect": "refusal"
+        }
+      ]
+    },
+    "tk-studio-detect": {
+      "external_calls": false,
+      "auth_preflight": "none needed — pure read of the project tree",
+      "drives": [
+        {
+          "assertion": "headless-clean",
+          "argv": ["lib/inventory.py", "scan", "--directory", "{sandbox}"],
+          "expect": "json"
+        },
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/detect.py", "scan", "--directory", "{sandbox}"],
+          "expect": "refusal",
+          "marker": "ask"
+        }
+      ]
+    },
+    "tk-studio-onboard": {
+      "external_calls": false,
+      "auth_preflight": "none needed — local standup + propose/record; vault linking skips cleanly when unconfigured",
+      "drives": [
+        {
+          "assertion": "headless-clean",
+          "argv": ["lib/recommend.py", "propose", "--directory", "{sandbox}"],
+          "expect": "json"
+        },
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/recommend.py", "record", "--directory", "{sandbox}", "--role", "developer", "--resources", ","],
+          "expect": "refusal"
+        }
+      ]
+    },
+    "tk-studio-orchestrator": {
+      "external_calls": false,
+      "auth_preflight": "none needed — stateless read of store + project config",
+      "drives": [
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/orchestrate.py", "resolve", "--directory", "{sandbox}"],
+          "expect": "refusal",
+          "marker": "needs-onboarding"
+        }
+      ]
+    },
+    "tk-studio-plan-sync": {
+      "external_calls": false,
+      "auth_preflight": "local backends need none; the jira binding (AD-7) requires the API-token preflight incl. the org-admin toggle check before any backend call",
+      "drives": [
+        {
+          "assertion": "headless-clean",
+          "argv": ["lib/plansync.py", "sync", "--directory", "{sandbox}", "--dry-run"],
+          "expect": "json"
+        }
+      ]
+    },
+    "tk-studio-observe": {
+      "external_calls": false,
+      "auth_preflight": "none needed — local ledger append only",
+      "drives": [
+        {
+          "assertion": "headless-clean",
+          "argv": ["lib/observe.py", "record", "--source", "other", "--description", "conformance probe (sandbox store)"],
+          "expect": "json"
+        },
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/observe.py", "record", "--source", "other"],
+          "expect": "refusal"
+        }
+      ]
+    },
+    "tk-studio-report": {
+      "external_calls": false,
+      "auth_preflight": "none needed — local ledger append only",
+      "drives": [
+        {
+          "assertion": "headless-clean",
+          "argv": ["skills/tk-studio-report/scripts/report.py", "--description", "conformance probe (sandbox store)", "--mode", "headless"],
+          "expect": "json"
+        },
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["skills/tk-studio-report/scripts/report.py", "--mode", "headless"],
+          "expect": "refusal"
+        }
+      ]
+    }
+  }
+}
