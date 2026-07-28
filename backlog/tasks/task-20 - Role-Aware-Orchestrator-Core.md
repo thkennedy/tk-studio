@@ -1,9 +1,10 @@
 ---
 id: TASK-20
 title: Role-Aware Orchestrator Core
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-27 03:35'
+updated_date: '2026-07-28 03:46'
 labels:
   - ST-020
 milestone: One Front Door, Any Mode
