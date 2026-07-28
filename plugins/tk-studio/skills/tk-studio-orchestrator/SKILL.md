@@ -22,7 +22,20 @@ persona shell (ST-5.2) on top; routing never lives in the shell.
    the working set comes from tracked config `working_set.<role>` — only the
    caller's role's entry, never another role's.
 
-2. **On `ready`** — present the role framing and route by name-based handoff:
+2. **Attended only — load the council shell** (ST-5.2), after resolution:
+
+   ```bash
+   uv run "${CLAUDE_PLUGIN_ROOT}/lib/orchestrate.py" shell
+   ```
+
+   The shell (`council/shell.md`, `council/convene.md`) is presentation
+   data: persona voice and the "convene the council" interaction — routes
+   presented as seats, multi-perspective deliberation over installed agents,
+   one synthesis. It carries no state, writes nothing, and never alters a
+   routing decision. **Headless runs skip this step entirely** and must
+   produce identical routing and artifacts.
+
+3. **On `ready`** — present the role framing and route by name-based handoff:
    - `developer` → execution framing: offer the working set's implementation
      workflows (dev-story, code review, sprint status, direct dev).
    - `direction-giver` → delegation/synthesis framing: offer shaping,
@@ -32,7 +45,7 @@ persona shell (ST-5.2) on top; routing never lives in the shell.
      `known-uninstalled` are surfaced with their note (fix-guided, e.g.
      `tk install`), never silently dropped or substituted.
 
-3. **On `needs-onboarding`** — the gap is named in `gaps[]`; a working set is
+4. **On `needs-onboarding`** — the gap is named in `gaps[]`; a working set is
    **never invented** (AD-17):
    - **Attended:** route into `tk-studio-onboard` to close the gap (set the
      role in the store config / propose-confirm-record a working set), then
