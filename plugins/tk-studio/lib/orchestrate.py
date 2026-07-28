@@ -45,6 +45,9 @@ import store as storelib
 
 ORCHESTRATE_VERSION = 1
 
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+SHELL_DIR = PLUGIN_ROOT / "skills" / "tk-studio-orchestrator" / "council"
+
 OUTCOME_READY = "ready"
 OUTCOME_NEEDS_ONBOARDING = "needs-onboarding"
 
@@ -183,6 +186,26 @@ def resolve(project_root: Path, role: str | None = None,
     return result
 
 
+# ------------------------------------------------------------------- shell
+
+def load_shell(shell_dir: Path | None = None) -> dict:
+    """The council persona shell — presentation data, attended only (ST-5.2).
+
+    A pure read of the markdown data assets under the orchestrator skill's
+    council/ directory. resolve() never consults this and this never
+    consults resolve(): the shell cannot influence routing, and loading it
+    (or not) is the entire attended/headless difference (AD-9, AD-11).
+    """
+    directory = Path(shell_dir) if shell_dir else SHELL_DIR
+    if not directory.is_dir():
+        raise OrchestrateError(f"council shell assets missing at {directory}")
+    assets = {path.stem: path.read_text(encoding="utf-8")
+              for path in sorted(directory.glob("*.md"))}
+    if not assets:
+        raise OrchestrateError(f"no shell data assets under {directory}")
+    return {"shell_version": 1, "source": str(directory), "assets": assets}
+
+
 # --------------------------------------------------------------------- CLI
 
 def main(argv: list[str] | None = None) -> int:
@@ -193,11 +216,16 @@ def main(argv: list[str] | None = None) -> int:
     cmd.add_argument("--directory", required=True, help="project root")
     cmd.add_argument("--role", help="override the per-user store role")
     cmd.add_argument("--lock", help="module-registry path (tests)")
+    sub.add_parser("shell",
+                   help="load the council persona shell (attended only)")
     args = parser.parse_args(argv)
 
     try:
-        result = resolve(Path(args.directory), role=args.role,
-                         lock_path=args.lock)
+        if args.command == "shell":
+            result = load_shell()
+        else:
+            result = resolve(Path(args.directory), role=args.role,
+                             lock_path=args.lock)
     except (OrchestrateError, inventorylib.InventoryError,
             configlib.ConfigError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
