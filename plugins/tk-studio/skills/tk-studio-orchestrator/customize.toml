@@ -1,0 +1,12 @@
+# Customization surface for tk-studio-orchestrator.
+#
+# Override files (not edited here):
+#   {project-root}/_bmad/custom/tk-studio-orchestrator.toml         (team)
+#   {project-root}/_bmad/custom/tk-studio-orchestrator.user.toml    (personal)
+
+# Model/effort defaults (AD-14). Precedence: runtime override > project config
+# > this resource default. Resolution itself is a deterministic script; the
+# model only presents framing and routes — a mid-tier default is plenty.
+[model]
+default = "claude-sonnet-5"
+effort = "medium"
