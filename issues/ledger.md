@@ -30,3 +30,4 @@ specific fixes (the O1 revision channel).
 
 | ID | Sev | Status | Issue | Expected vs Actual | Evidence | Fix candidate | Key | Opened | Updated |
 |----|-----|--------|-------|--------------------|----------|---------------|-----|--------|---------|
+| ISS-001 | Medium | Open | bmad-method 6.10.0 --yes reinstall produces no-op churn | Expected: reinstall at pin is a no-op. Actual: installer re-serializes list-valued module config options as JSON strings (primary_platform [a,b] becomes a quoted string) and rewrites all installed files with LF endings — large no-op git churn that must be reverted/normalized after every verify run. | 1× report from tim-Tim-PC (2026-08-06) | Teach tk-studio-base-update's verify step to auto-normalize the known churn classes (list re-serialization, LF rewrites) before diffing, and file the re-serialization defect upstream with bmad-method. | report:tk-studio-base-update | 2026-08-06 | 2026-08-06 |
