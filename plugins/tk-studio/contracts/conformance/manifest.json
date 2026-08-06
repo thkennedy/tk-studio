@@ -161,6 +161,23 @@
         }
       ]
     },
+    "tk-studio-consolidate": {
+      "external_calls": false,
+      "auth_preflight": "none needed — reads the merged measurements/ files and writes issues/ledger.md locally; no network, no backend",
+      "drives": [
+        {
+          "assertion": "headless-clean",
+          "argv": ["lib/consolidate.py", "run", "--directory", "{sandbox}", "--dry-run"],
+          "expect": "json"
+        },
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/consolidate.py", "run", "--directory", "{sandbox}/nowhere"],
+          "expect": "refusal",
+          "marker": "does not exist"
+        }
+      ]
+    },
     "tk-studio-report": {
       "external_calls": false,
       "auth_preflight": "none needed — local ledger append only",

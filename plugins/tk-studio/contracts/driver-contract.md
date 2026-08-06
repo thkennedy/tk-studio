@@ -2,8 +2,8 @@
 
 | | |
 | --- | --- |
-| **Contract version** | **1.3.0** (semver — see [Change policy](#change-policy); 1.1.0 added the `tk-studio-job` surface and the shipped `job.schema.json`, 1.2.0 added `tk-studio-research`, 1.3.0 adds `tk-studio-measure-push` — additive, MINOR) |
-| Story / rulings | ST-5.3, ST-6.2, ST-7.1; AD-2, AD-10, AD-11, AD-12, AD-13, AD-14 |
+| **Contract version** | **1.4.0** (semver — see [Change policy](#change-policy); 1.1.0 added the `tk-studio-job` surface and the shipped `job.schema.json`, 1.2.0 added `tk-studio-research`, 1.3.0 added `tk-studio-measure-push`, 1.4.0 adds `tk-studio-consolidate` — each additive, MINOR) |
+| Story / rulings | ST-5.3, ST-6.2, ST-7.1, ST-7.2; AD-2, AD-10, AD-11, AD-12, AD-13, AD-14 |
 | Audience | any harness that drives tk-studio unattended — first consumer: the ClaudeOS MCP connector (ClaudeOS-side, later) |
 | Companion schemas | `status-block.schema.json`, `events/taxonomy.v1.json`, `registry.schema.json`, `interchange/shape.v1.json`, `job.schema.json` (v1, shipped ST-6.1) |
 
@@ -71,7 +71,7 @@ historical failure. A driver MUST ensure before invoking:
    verified enabled. Verification failure → `blocked` before any backend
    call.
 
-## 2. Skill invocation surface (v1.3.0)
+## 2. Skill invocation surface (v1.4.0)
 
 Payload fields map 1:1 onto the named CLI's flags. "Artifacts out" lists
 what a `complete` run reports in `artifacts[]`; every skill may instead end
@@ -88,6 +88,7 @@ what a `complete` run reports in `artifacts[]`; every skill may instead end
 | `tk-studio-job` | verb (`submit\|status\|cancel\|wake`); `directory`; `id`/`job_id`; `run_id?` | `lib/jobrun.py submit\|status\|cancel\|wake` (plus `account`/`finish` for the executing wrapper) | run workspace `~/.tk-studio/projects/<key>/runs/<run-id>/`; `job-run` ledger events | unknown or invalid job id (a stop-condition refusal is `accepted: false`, an answer — not blocked) |
 | `tk-studio-plan-sync` | `directory`; `backend?` (runtime override); `dry_run?`; `normalize_only?` | `lib/plansync.py sync|normalize` | normalized planning artifacts, backend projection | duplicate id (blocks until renumbered, AD-4); promote/pull-back conflict (human conflict, AD-5) |
 | `tk-studio-research` | `charter` (`{topics[], sources[], max_findings?, notes?}`); `directory`; `run_id?` (job runs) | `lib/research.py charter\|record` | `findings.json` + `findings.md` in the run workspace; `observation` ledger events for recommendation-carrying findings | charter missing/unscoped; run already terminal |
+| `tk-studio-consolidate` | `directory` (studio repo root); `dry_run?` | `lib/consolidate.py run` | `issues/ledger.md` synced in place (stable `ISS-NNN` rows: severity, status, expected-vs-actual, named evidence events, fix candidates — never a deleted row); no ledger events (derives, not emits — AD-12) | directory missing; measurements outside the studio repo (AD-3); unparseable issues ledger (refuses to rewrite what it cannot update in place) |
 | `tk-studio-measure-push` | `directory` (studio repo root); `base?`; `dry_run?`; `no_pr?` | `lib/measurepush.py check\|push` | feature branch `measurements/<user>-<machine>` + membrane PR updating `measurements/<user>-<machine>.jsonl` — no ledger events (a mover, not an emitter, AD-12); never a base-branch push, never a merge | not the studio repo root; dirty working tree; sanitization re-check finding (credential-shaped content blocks pre-commit) |
 | `tk-studio-observe` | `source` (`retrospective\|repeated-manual-work\|research-job\|other`); `description`; `evidence?`; `project?` | `lib/observe.py record` | ledger line (`observation` event) | required field missing |
 | `tk-studio-report` | `description`; `surface?`; `project?`; `skill?`; `mode` | `skills/tk-studio-report/scripts/` | ledger line (`report` event) | `description` missing |
