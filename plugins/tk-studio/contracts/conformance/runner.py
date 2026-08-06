@@ -240,6 +240,10 @@ def run_suite(skills_dir: Path | None = None, manifest_path: Path | None = None,
 # -------------------------------------------------------------------- CLI
 
 def main(argv: list[str] | None = None) -> int:
+    # Headless output must survive a cp1252 Windows console: payloads are
+    # arbitrary unicode and must always print (AD-11).
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="tk-studio conformance suite")
     sub = parser.add_subparsers(dest="command", required=True)
     cmd = sub.add_parser("run", help="drive every shipped surface headless")

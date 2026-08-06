@@ -408,6 +408,10 @@ def consolidate(directory: Path, dry_run: bool = False) -> dict:
 # ---------------------------------------------------------------------- CLI
 
 def main(argv: list[str] | None = None) -> int:
+    # Headless output must survive a cp1252 Windows console: payloads are
+    # arbitrary unicode and must always print (AD-11).
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="tk-studio consolidation")
     sub = parser.add_subparsers(dest="command", required=True)
     cmd = sub.add_parser("run", help="cluster measurements/ into issues/ledger.md")
