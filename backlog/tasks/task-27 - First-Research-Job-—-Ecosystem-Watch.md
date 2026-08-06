@@ -1,9 +1,10 @@
 ---
 id: TASK-27
 title: First Research Job — Ecosystem Watch
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-27 03:35'
+updated_date: '2026-08-06 18:43'
 labels:
   - ST-027
 milestone: Work Runs While Nobody Watches

@@ -1,9 +1,10 @@
 ---
 id: TASK-29
 title: Session Discipline
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-27 03:35'
+updated_date: '2026-08-06 18:43'
 labels:
   - ST-029
 milestone: Work Runs While Nobody Watches
