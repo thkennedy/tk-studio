@@ -76,4 +76,10 @@ lives in resumable run workspaces under the per-user store.
 - Every terminal run leaves `summary.json` in its workspace (core runs also
   land the full parsed result as `output.json`); point the operator there,
   never paste whole reports into chat.
+- Long work splits at declared boundaries (ST-6.6): at an epic/story/phase
+  boundary or a budget trigger, land the handoff and END the session —
+  `uv run "${CLAUDE_PLUGIN_ROOT}/lib/session.py" handoff --directory <root>
+  --run-id <rid> --boundary <kind> --name <id> --done ... --next ...`; a
+  fresh session continues via `session.py resume` from the workspace alone,
+  never by replaying history. Ending the session never ends the run.
 - All paths resolve through `${CLAUDE_PLUGIN_ROOT}`.
