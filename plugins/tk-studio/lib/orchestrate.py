@@ -41,6 +41,7 @@ from pathlib import Path
 import config as configlib
 import inventory as inventorylib
 import recommend as recommendlib
+import routing as routinglib
 import store as storelib
 
 ORCHESTRATE_VERSION = 1
@@ -132,6 +133,9 @@ def _resolve_routes(project_root: Path, working_set: list[str],
                 route["path"] = resource["path"]
             if resource.get("description"):
                 route["description"] = resource["description"]
+            # budget visibility (AD-14, ST-6.5): each routed resource keeps
+            # its own resolved model/effort — never a neighbor's
+            route["routing"] = routinglib.resolve_routing(name, project_root)
         routes.append(route)
     return routes, notes
 

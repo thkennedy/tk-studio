@@ -53,6 +53,7 @@ from pathlib import Path
 
 import job as joblib
 import ledger
+import routing as routinglib
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 
@@ -133,6 +134,20 @@ def _directive(defn: dict) -> dict:
     if "hint_seconds" in cadence:
         directive["hint_seconds"] = cadence["hint_seconds"]
     return directive
+
+
+def _job_routing(defn: dict, project_root: Path) -> dict:
+    """The run's effective model/effort (AD-14, §5): the definition's own
+    model/effort fields are the runtime override; the executing resource is
+    the target skill (tk-studio-job itself for core targets)."""
+    resource = defn["target"].get("skill") or "tk-studio-job"
+    runtime: dict = {}
+    if defn.get("model"):
+        runtime.setdefault("model", {})["default"] = defn["model"]
+    if defn.get("effort"):
+        runtime.setdefault("model", {})["effort"] = defn["effort"]
+    return routinglib.resolve_routing(resource, project_root=project_root,
+                                      runtime=runtime)
 
 
 def _payload_flags(payload: dict) -> list[str]:
@@ -256,14 +271,18 @@ def submit(project_root: Path, job_id: str) -> dict:
         return {"job_id": job_id, "run_id": None, "accepted": False,
                 "reason": stop_reason}
 
+    routing = _job_routing(defn, root)
     result: dict = {"job_id": job_id, "run_id": None, "accepted": True,
                     "substrate": "harness-native",
-                    "directive": _directive(defn)}
+                    "directive": _directive(defn),
+                    "routing": routing}
     if defn.get("durable") and defn["trigger"] != "one-shot":
         result["durability_constraint"] = DURABILITY_CONSTRAINT
 
     if defn["trigger"] == "one-shot":
         record = joblib.create_run(defn, key)
+        record = joblib.update_run(key, record["run_id"],
+                                   {"routing": routing})
         result["run_id"] = record["run_id"]
         due_now = not defn.get("at") or _parse_iso(defn["at"]) <= _now()
         if due_now and "core" in defn["target"]:
@@ -346,8 +365,10 @@ def wake(project_root: Path, job_id: str) -> dict:
     stop_reason = evaluate_stop(defn, joblib.list_runs(key, job_id=job_id))
     if stop_reason:
         return {"woken": False, "run_id": None, "reason": stop_reason}
+    routing = _job_routing(defn, root)
     record = joblib.create_run(defn, key)
-    result = {"woken": True, "run_id": record["run_id"]}
+    record = joblib.update_run(key, record["run_id"], {"routing": routing})
+    result = {"woken": True, "run_id": record["run_id"], "routing": routing}
     if "core" in defn["target"]:
         record = execute_core(key, record)
         result["state"] = record["state"]
