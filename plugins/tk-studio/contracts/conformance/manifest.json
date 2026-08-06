@@ -95,6 +95,23 @@
         }
       ]
     },
+    "tk-studio-job": {
+      "external_calls": false,
+      "auth_preflight": "none needed — local run-state reads/writes and substrate directives only; when a run invokes a target skill, that skill's own preflight posture applies (one surface, one preflight)",
+      "drives": [
+        {
+          "assertion": "headless-clean",
+          "argv": ["lib/jobrun.py", "status", "--directory", "{sandbox}", "--job-id", "maintenance-conformance"],
+          "expect": "json"
+        },
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/jobrun.py", "submit", "--directory", "{sandbox}", "--id", "ghost-job"],
+          "expect": "refusal",
+          "marker": "no definition"
+        }
+      ]
+    },
     "tk-studio-observe": {
       "external_calls": false,
       "auth_preflight": "none needed — local ledger append only",
