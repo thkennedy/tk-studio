@@ -1,0 +1,13 @@
+# Customization surface for tk-studio-job.
+#
+# Override files (not edited here):
+#   {project-root}/_bmad/custom/tk-studio-job.toml         (team)
+#   {project-root}/_bmad/custom/tk-studio-job.user.toml    (personal)
+
+# Model/effort defaults (AD-14). Precedence: runtime override > project config
+# > this resource default. The verbs are deterministic scripts and unattended
+# work stays cheap by default — a job definition escalates deliberately via
+# its own model/effort fields (driver-contract §5).
+[model]
+default = "claude-sonnet-5"
+effort = "low"

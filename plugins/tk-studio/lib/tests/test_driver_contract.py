@@ -65,7 +65,8 @@ class DriverContractTestCase(unittest.TestCase):
     # --- AC 1b: own semver + change policy
 
     def test_carries_its_own_semver_and_change_policy(self):
-        self.assertRegex(self.text, r"\*\*1\.0\.0\*\*")
+        # 1.1.0 = ST-6.2's additive tk-studio-job surface (MINOR per policy)
+        self.assertRegex(self.text, r"\*\*1\.1\.0\*\*")
         self.assertIn("Change policy", self.text)
         self.assertIn("MAJOR", self.text)
         self.assertRegex(self.text, r"[Bb]reaking")

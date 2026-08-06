@@ -2,10 +2,10 @@
 
 | | |
 | --- | --- |
-| **Contract version** | **1.0.0** (semver — see [Change policy](#change-policy)) |
-| Story / rulings | ST-5.3; AD-2, AD-10, AD-11, AD-13, AD-14 |
+| **Contract version** | **1.1.0** (semver — see [Change policy](#change-policy); 1.1.0 adds the `tk-studio-job` surface and the shipped `job.schema.json` — additive, MINOR) |
+| Story / rulings | ST-5.3, ST-6.2; AD-2, AD-10, AD-11, AD-13, AD-14 |
 | Audience | any harness that drives tk-studio unattended — first consumer: the ClaudeOS MCP connector (ClaudeOS-side, later) |
-| Companion schemas | `status-block.schema.json`, `events/taxonomy.v1.json`, `registry.schema.json`, `interchange/shape.v1.json`; `job.schema.json` ships ST-6.1 |
+| Companion schemas | `status-block.schema.json`, `events/taxonomy.v1.json`, `registry.schema.json`, `interchange/shape.v1.json`, `job.schema.json` (v1, shipped ST-6.1) |
 
 This document is everything a connector needs to drive the studio **without
 reading studio internals** (AD-2: tk-studio never imports the harness; the
@@ -71,7 +71,7 @@ historical failure. A driver MUST ensure before invoking:
    verified enabled. Verification failure → `blocked` before any backend
    call.
 
-## 2. Skill invocation surface (v1.0.0)
+## 2. Skill invocation surface (v1.1.0)
 
 Payload fields map 1:1 onto the named CLI's flags. "Artifacts out" lists
 what a `complete` run reports in `artifacts[]`; every skill may instead end
@@ -85,6 +85,7 @@ what a `complete` run reports in `artifacts[]`; every skill may instead end
 | `tk-studio-detect` | `directory`; `out?` | `lib/inventory.py scan`, `lib/detect.py scan` | none unless `out` given (read-only) | project root unreadable |
 | `tk-studio-onboard` | `directory`; `vcs?`; `project_id?`; `role?`; `resources?` (explicit confirmed list) | `lib/{store,config,registry,kb,vault,recommend}.py` | `.tk-studio/config.yaml` (+local), registry entry, `kb/`, vault links; `working_set.<role>` only when `resources` present | `project_id` collision; classification refusal (AD-3); recording requested without explicit `resources` |
 | `tk-studio-orchestrator` | `directory`; `role?`; `target?` (route to act on) | `lib/orchestrate.py resolve` | whatever the routed resource produces; none for resolve alone | `needs-onboarding` (missing role / unconfirmed `working_set.<role>`) — gap named in `reason` |
+| `tk-studio-job` | verb (`submit\|status\|cancel\|wake`); `directory`; `id`/`job_id`; `run_id?` | `lib/jobrun.py submit\|status\|cancel\|wake` (plus `account`/`finish` for the executing wrapper) | run workspace `~/.tk-studio/projects/<key>/runs/<run-id>/`; `job-run` ledger events | unknown or invalid job id (a stop-condition refusal is `accepted: false`, an answer — not blocked) |
 | `tk-studio-plan-sync` | `directory`; `backend?` (runtime override); `dry_run?`; `normalize_only?` | `lib/plansync.py sync|normalize` | normalized planning artifacts, backend projection | duplicate id (blocks until renumbered, AD-4); promote/pull-back conflict (human conflict, AD-5) |
 | `tk-studio-observe` | `source` (`retrospective\|repeated-manual-work\|research-job\|other`); `description`; `evidence?`; `project?` | `lib/observe.py record` | ledger line (`observation` event) | required field missing |
 | `tk-studio-report` | `description`; `surface?`; `project?`; `skill?`; `mode` | `skills/tk-studio-report/scripts/` | ledger line (`report` event) | `description` missing |
@@ -132,10 +133,11 @@ event, ST-5.4).
 ## 4. Job model and scheduler verbs
 
 Jobs are **data**; the substrate executes (AD-10, O8 hybrid ruling). The job
-definition schema (`job.schema.json` — id, target skill + payload, trigger
+definition schema (`job.schema.json` v1 — id, target skill + payload, trigger
 `one-shot|cron|loop`, cadence fixed|self-paced, budget guards, stop
-conditions, model/effort) ships with ST-6.1; this contract fixes the **verb
-surface** a driver implements or consumes now:
+conditions, model/effort) shipped with ST-6.1; `lib/jobrun.py` (the
+`tk-studio-job` deterministic core, ST-6.2) implements this **verb surface**
+on the harness-native substrate:
 
 | Verb | Request | Response | Semantics |
 | --- | --- | --- | --- |

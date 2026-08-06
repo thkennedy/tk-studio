@@ -57,6 +57,17 @@
         "detail": { "type": "string", "required": false }
       }
     },
+    "job-run": {
+      "emitter": "job wrapper alone (tk-studio-job — lib/jobrun.py), one event per terminal run transition; the target skill emits its own surface events — never both for one failure (AD-12)",
+      "payload": {
+        "job_id": { "type": "string", "required": true },
+        "run_id": { "type": "string", "required": true },
+        "state": { "type": "string", "enum": ["complete", "partial", "blocked", "cancelled"], "required": true },
+        "reason": { "type": "string", "required": false, "note": "the guard, stop condition, or gap that ended a partial|blocked|cancelled run" },
+        "elapsed_ms": { "type": "number", "required": false },
+        "detail": { "type": "string", "required": false }
+      }
+    },
     "observation": {
       "emitter": "evolve loop (research job types; tk-studio surfaces logging observed toil)",
       "payload": {
