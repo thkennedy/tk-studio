@@ -1,0 +1,13 @@
+# Customization surface for tk-studio-research.
+#
+# Override files (not edited here):
+#   {project-root}/_bmad/custom/tk-studio-research.toml         (team)
+#   {project-root}/_bmad/custom/tk-studio-research.user.toml    (personal)
+
+# Model/effort defaults (AD-14). Precedence: runtime override > project config
+# > this resource default. Research needs real reasoning but runs unattended
+# on a budget — mid-tier by default; a job definition escalates deliberately
+# via its model/effort fields (driver-contract §5).
+[model]
+default = "claude-sonnet-5"
+effort = "medium"

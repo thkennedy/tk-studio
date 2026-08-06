@@ -128,6 +128,22 @@
         }
       ]
     },
+    "tk-studio-research": {
+      "external_calls": false,
+      "auth_preflight": "none needed in the deterministic core — charter validation and workspace writes are local; the researching agent's web access rides the harness's own auth (driver-contract §1 preflight)",
+      "drives": [
+        {
+          "assertion": "headless-clean",
+          "argv": ["lib/research.py", "charter", "--charter", "{\"topics\": [\"conformance probe\"], \"sources\": [\"web-search\"]}"],
+          "expect": "json"
+        },
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/research.py", "charter", "--charter", "{}"],
+          "expect": "refusal"
+        }
+      ]
+    },
     "tk-studio-report": {
       "external_calls": false,
       "auth_preflight": "none needed — local ledger append only",
