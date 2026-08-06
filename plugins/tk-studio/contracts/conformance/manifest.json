@@ -140,7 +140,7 @@
       "drives": [
         {
           "assertion": "headless-clean",
-          "argv": ["lib/research.py", "charter", "--charter", "{\"topics\": [\"conformance probe\"], \"sources\": [\"web-search\"]}"],
+          "argv": ["lib/research.py", "charter", "--charter", "{\"topics\": [\"conformance probe\"], \"sources\": [\"web-search\"], \"max_findings\": 1, \"notes\": \"conformance probe - keep minimal\"}"],
           "expect": "json"
         },
         {
