@@ -1,9 +1,10 @@
 ---
 id: TASK-32
 title: Jira Backend Adapter
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-27 03:35'
+updated_date: '2026-08-06 19:51'
 labels:
   - ST-032
 milestone: Plan Where the Team Plans

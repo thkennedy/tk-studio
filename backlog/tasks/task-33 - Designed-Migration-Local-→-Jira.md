@@ -1,9 +1,10 @@
 ---
 id: TASK-33
 title: Designed Migration Local → Jira
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-27 03:35'
+updated_date: '2026-08-06 19:51'
 labels:
   - ST-033
 milestone: Plan Where the Team Plans
