@@ -1,0 +1,22 @@
+{
+  "job_schema_version": 1,
+  "id": "maintenance-conformance",
+  "description": "v1 maintenance job type (AD-19, ST-6.3): run the shipped conformance suite on a cadence, re-proving dual-mode parity without an operator remembering to. Failures emit headless-failure events from the runner itself (its sole emitter); the job wrapper emits only run-level events (AD-12).",
+  "target": {
+    "core": ["contracts/conformance/runner.py", "run"],
+    "payload": {}
+  },
+  "trigger": "cron",
+  "cadence": {
+    "mode": "fixed",
+    "schedule": "0 6 * * 1-5"
+  },
+  "durable": true,
+  "guards": {
+    "max_wall_clock_seconds": 900
+  },
+  "stop": {
+    "on_status": ["blocked"]
+  },
+  "effort": "low"
+}
