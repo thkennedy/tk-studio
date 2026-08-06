@@ -1,0 +1,12 @@
+# Customization surface for tk-studio-measure-push.
+#
+# Override files (not edited here):
+#   {project-root}/_bmad/custom/tk-studio-measure-push.toml         (team)
+#   {project-root}/_bmad/custom/tk-studio-measure-push.user.toml    (personal)
+
+# Model/effort defaults (AD-14). Precedence: runtime override > project config
+# > this resource default. Moving the ledger through the membrane is
+# mechanical — the deterministic core does the work.
+[model]
+default = "claude-haiku-4-5"
+effort = "low"

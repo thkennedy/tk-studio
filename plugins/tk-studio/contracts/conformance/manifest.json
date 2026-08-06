@@ -144,6 +144,23 @@
         }
       ]
     },
+    "tk-studio-measure-push": {
+      "external_calls": true,
+      "auth_preflight": "VCS remote + gh only at the push/PR step, both failing loud (a push failure lands the branch commit locally and says so; a gh failure reports the branch as pushed with manual-PR guidance) — the sanitization re-check and unpushed computation are local and need no auth",
+      "drives": [
+        {
+          "assertion": "headless-clean",
+          "argv": ["lib/measurepush.py", "check", "--directory", "{sandbox}"],
+          "expect": "json"
+        },
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/measurepush.py", "push", "--directory", "{sandbox}", "--dry-run"],
+          "expect": "refusal",
+          "marker": "not the studio repo root"
+        }
+      ]
+    },
     "tk-studio-report": {
       "external_calls": false,
       "auth_preflight": "none needed — local ledger append only",

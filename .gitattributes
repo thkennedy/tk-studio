@@ -1,0 +1,3 @@
+# Measurement ledgers are byte-stable JSONL — never CRLF-converted, so the
+# append-only diff discipline (AD-12) survives every platform.
+measurements/*.jsonl text eol=lf
