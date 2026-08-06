@@ -79,7 +79,7 @@ def _parse_iso(value: str) -> datetime:
     return parsed
 
 
-def _emit_job_event(record: dict, key: str) -> None:
+def _emit_job_event(record: dict, key: str, detail: str | None = None) -> None:
     """One job-run event per terminal transition — this wrapper is the sole
     emitter of job-level events (AD-12); emission never masks the verb."""
     payload = {
@@ -89,6 +89,8 @@ def _emit_job_event(record: dict, key: str) -> None:
     }
     if record.get("reason"):
         payload["reason"] = record["reason"]
+    if detail:
+        payload["detail"] = detail
     if record.get("started") and record.get("ended"):
         elapsed = (_parse_iso(record["ended"])
                    - _parse_iso(record["started"])).total_seconds() * 1000
@@ -150,12 +152,45 @@ def _payload_flags(payload: dict) -> list[str]:
 
 # -------------------------------------------------------------- execution
 
+def _summarize_result(parsed: dict | None, exit_code: int | None) -> tuple[dict, str]:
+    """Compact summary + one-line headline from a core's parsed output.
+
+    Well-known report keys (the conformance runner's among them) surface in
+    the summary; everything else stays in the workspace's output.json."""
+    summary: dict = {}
+    if exit_code is not None:
+        summary["exit_code"] = exit_code
+    if isinstance(parsed, dict):
+        for known in ("ok", "surfaces_checked", "checks_run"):
+            if known in parsed:
+                summary[known] = parsed[known]
+        if isinstance(parsed.get("failures"), list):
+            summary["failure_count"] = len(parsed["failures"])
+    headline = " ".join(f"{k}={v}" for k, v in summary.items()) or "no output"
+    return summary, headline
+
+
+def _land_summary(key: str, record: dict, summary: dict) -> None:
+    """The run summary artifact every terminal run leaves in its workspace."""
+    joblib.write_workspace_json(key, record["run_id"], "summary.json", {
+        "job_id": record["job_id"],
+        "run_id": record["run_id"],
+        "state": record["state"],
+        "reason": record.get("reason"),
+        "started": record.get("started"),
+        "ended": record.get("ended"),
+        **summary,
+    })
+
+
 def execute_core(key: str, record: dict) -> dict:
     """Run a core-target run to a terminal state, wall-clock guarded.
 
-    Outcome mapping: machine-readable stdout → complete (the parsed result
-    lands in status_block, exit code preserved); timeout → partial with the
-    guard named; anything unparseable → blocked, never a guess.
+    Outcome mapping: machine-readable stdout → complete; timeout → partial
+    with the guard named; anything unparseable → blocked, never a guess.
+    Every terminal path lands summary.json in the workspace; a parsed
+    result additionally lands in full as output.json (run.json keeps only
+    the compact status block).
     """
     defn = record["job"]
     core = defn["target"]["core"]
@@ -172,6 +207,7 @@ def execute_core(key: str, record: dict) -> dict:
         record = joblib.update_run(key, record["run_id"], {
             "state": "partial",
             "reason": f"guard: max_wall_clock_seconds ({timeout}s)"})
+        _land_summary(key, record, {})
         _emit_job_event(record, key)
         return record
     parsed = None
@@ -187,12 +223,16 @@ def execute_core(key: str, record: dict) -> dict:
             "state": "blocked",
             "reason": f"core produced no machine-readable output "
                       f"(exit {proc.returncode})"})
-    else:
-        record = joblib.update_run(key, record["run_id"], {
-            "state": "complete",
-            "status_block": {"result": parsed,
-                             "exit_code": proc.returncode}})
-    _emit_job_event(record, key)
+        _land_summary(key, record, {"exit_code": proc.returncode})
+        _emit_job_event(record, key)
+        return record
+    summary, headline = _summarize_result(parsed, proc.returncode)
+    if isinstance(parsed, dict):
+        joblib.write_workspace_json(key, record["run_id"], "output.json", parsed)
+    record = joblib.update_run(key, record["run_id"], {
+        "state": "complete", "status_block": {"summary": summary}})
+    _land_summary(key, record, summary)
+    _emit_job_event(record, key, detail=headline)
     return record
 
 
@@ -280,6 +320,7 @@ def cancel(project_root: Path, job_id: str, run_id: str | None = None) -> dict:
         if record.get("state") in joblib.RESUMABLE_STATES:
             record = joblib.update_run(key, record["run_id"], {
                 "state": "partial", "reason": "cancelled"})
+            _land_summary(key, record, {})
             _emit_job_event(record, key)
             ended.append(record["run_id"])
     return {"cancelled": True, "runs_ended": ended,
@@ -362,6 +403,7 @@ def finish(project_root: Path, run_id: str, state: str,
         changes["status_block"] = status_block
     record = joblib.update_run(key, run_id, changes)
     if record["state"] in joblib.TERMINAL_STATES:
+        _land_summary(key, record, {})
         _emit_job_event(record, key)
     return {"run_id": run_id, "state": record["state"],
             "reason": record.get("reason")}

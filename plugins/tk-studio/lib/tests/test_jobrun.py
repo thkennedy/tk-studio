@@ -110,7 +110,7 @@ class JobRunTestCase(unittest.TestCase):
         self.assertEqual(result["state"], "complete")
         record = joblib.read_run("proj", result["run_id"])
         self.assertEqual(record["state"], "complete")
-        self.assertIn("result", record["status_block"])
+        self.assertIn("summary", record["status_block"])
         self.assertTrue(record["started"] and record["ended"])
         events = [e for e in self._ledger_events() if e["event"] == "job-run"]
         self.assertEqual(len(events), 1)

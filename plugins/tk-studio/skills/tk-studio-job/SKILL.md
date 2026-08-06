@@ -73,4 +73,7 @@ lives in resumable run workspaces under the per-user store.
   verdicts immediately; a job never runs away (AD-10).
 - Run workspaces are the resumable truth: a fresh session continues a
   `queued|running` run from `run.json` alone (snapshot + checkpoint).
+- Every terminal run leaves `summary.json` in its workspace (core runs also
+  land the full parsed result as `output.json`); point the operator there,
+  never paste whole reports into chat.
 - All paths resolve through `${CLAUDE_PLUGIN_ROOT}`.

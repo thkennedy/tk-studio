@@ -491,8 +491,22 @@ def create_run(defn: dict, key: str) -> dict:
     return record
 
 
+def workspace_path(key: str, run_id: str) -> Path:
+    return runs_root(key) / run_id
+
+
+def write_workspace_json(key: str, run_id: str, name: str, data: dict) -> Path:
+    """Land a JSON artifact in a run workspace (atomic, same discipline as
+    run.json). The workspace must already exist — create_run minted it."""
+    path = workspace_path(key, run_id) / name
+    if not path.parent.is_dir():
+        raise JobError(f"run '{run_id}' has no workspace for project '{key}'")
+    _atomic_write_json(path, data)
+    return path
+
+
 def run_path(key: str, run_id: str) -> Path:
-    return runs_root(key) / run_id / "run.json"
+    return workspace_path(key, run_id) / "run.json"
 
 
 def read_run(key: str, run_id: str) -> dict:
