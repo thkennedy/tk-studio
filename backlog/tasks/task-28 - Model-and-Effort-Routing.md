@@ -1,9 +1,10 @@
 ---
 id: TASK-28
 title: Model and Effort Routing
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-27 03:35'
+updated_date: '2026-08-06 18:43'
 labels:
   - ST-028
 milestone: Work Runs While Nobody Watches
