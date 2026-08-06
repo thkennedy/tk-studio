@@ -85,13 +85,19 @@
       ]
     },
     "tk-studio-plan-sync": {
-      "external_calls": false,
-      "auth_preflight": "local backends need none; the jira binding (AD-7) requires the API-token preflight incl. the org-admin toggle check before any backend call",
+      "external_calls": true,
+      "auth_preflight": "local backends need none; the jira binding (AD-7) runs the API-token preflight before any backend call — GET /myself proves the token AND the org-admin toggle in one probe, then the issue-type scheme is confirmed against the AD-6 default mapping; unconfigured/unauthenticated runs block named, never a silent 401 (the sandbox drive below proves the block without any network)",
       "drives": [
         {
           "assertion": "headless-clean",
           "argv": ["lib/plansync.py", "sync", "--directory", "{sandbox}", "--dry-run"],
           "expect": "json"
+        },
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/plansync.py", "sync", "--directory", "{sandbox}", "--backend", "jira"],
+          "expect": "refusal",
+          "marker": "planning.jira.site"
         }
       ]
     },

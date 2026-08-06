@@ -163,6 +163,12 @@ vcs: {vcs}
 #   # Planning backend binding (AD-4): bmad-files | backlog-md | jira.
 #   # Unset, the studio default applies (backlog-md).
 #   backend: backlog-md
+#   # jira binding config (AD-7) — site + project key are team-shared; the
+#   # account email may ride JIRA_EMAIL or planning.jira.email; the API token
+#   # rides JIRA_API_TOKEN only, never any config file (AD-3).
+#   jira:
+#     site: myorg.atlassian.net
+#     project_key: PROJ
 
 # Role-keyed working sets (AD-17) — recorded only on explicit confirmation
 # by tk-studio-onboard (ST-4.3); no role's entry overwrites another's.
