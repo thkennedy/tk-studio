@@ -1,0 +1,13 @@
+# Customization surface for tk-studio-consolidate.
+#
+# Override files (not edited here):
+#   {project-root}/_bmad/custom/tk-studio-consolidate.toml         (team)
+#   {project-root}/_bmad/custom/tk-studio-consolidate.user.toml    (personal)
+
+# Model/effort defaults (AD-14). Precedence: runtime override > project config
+# > this resource default. The clustering is deterministic, but reading what a
+# cluster means — severity judgment, refining fix candidates — takes real
+# reasoning; mid-tier, escalation stays deliberate (driver-contract §5).
+[model]
+default = "claude-sonnet-5"
+effort = "medium"
