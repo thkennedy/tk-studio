@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| **Contract version** | **1.1.0** (semver — see [Change policy](#change-policy); 1.1.0 adds the `tk-studio-job` surface and the shipped `job.schema.json` — additive, MINOR) |
+| **Contract version** | **1.2.0** (semver — see [Change policy](#change-policy); 1.1.0 added the `tk-studio-job` surface and the shipped `job.schema.json`, 1.2.0 adds `tk-studio-research` — additive, MINOR) |
 | Story / rulings | ST-5.3, ST-6.2; AD-2, AD-10, AD-11, AD-13, AD-14 |
 | Audience | any harness that drives tk-studio unattended — first consumer: the ClaudeOS MCP connector (ClaudeOS-side, later) |
 | Companion schemas | `status-block.schema.json`, `events/taxonomy.v1.json`, `registry.schema.json`, `interchange/shape.v1.json`, `job.schema.json` (v1, shipped ST-6.1) |
@@ -71,7 +71,7 @@ historical failure. A driver MUST ensure before invoking:
    verified enabled. Verification failure → `blocked` before any backend
    call.
 
-## 2. Skill invocation surface (v1.1.0)
+## 2. Skill invocation surface (v1.2.0)
 
 Payload fields map 1:1 onto the named CLI's flags. "Artifacts out" lists
 what a `complete` run reports in `artifacts[]`; every skill may instead end
@@ -87,6 +87,7 @@ what a `complete` run reports in `artifacts[]`; every skill may instead end
 | `tk-studio-orchestrator` | `directory`; `role?`; `target?` (route to act on) | `lib/orchestrate.py resolve` | whatever the routed resource produces; none for resolve alone | `needs-onboarding` (missing role / unconfirmed `working_set.<role>`) — gap named in `reason` |
 | `tk-studio-job` | verb (`submit\|status\|cancel\|wake`); `directory`; `id`/`job_id`; `run_id?` | `lib/jobrun.py submit\|status\|cancel\|wake` (plus `account`/`finish` for the executing wrapper) | run workspace `~/.tk-studio/projects/<key>/runs/<run-id>/`; `job-run` ledger events | unknown or invalid job id (a stop-condition refusal is `accepted: false`, an answer — not blocked) |
 | `tk-studio-plan-sync` | `directory`; `backend?` (runtime override); `dry_run?`; `normalize_only?` | `lib/plansync.py sync|normalize` | normalized planning artifacts, backend projection | duplicate id (blocks until renumbered, AD-4); promote/pull-back conflict (human conflict, AD-5) |
+| `tk-studio-research` | `charter` (`{topics[], sources[], max_findings?, notes?}`); `directory`; `run_id?` (job runs) | `lib/research.py charter\|record` | `findings.json` + `findings.md` in the run workspace; `observation` ledger events for recommendation-carrying findings | charter missing/unscoped; run already terminal |
 | `tk-studio-observe` | `source` (`retrospective\|repeated-manual-work\|research-job\|other`); `description`; `evidence?`; `project?` | `lib/observe.py record` | ledger line (`observation` event) | required field missing |
 | `tk-studio-report` | `description`; `surface?`; `project?`; `skill?`; `mode` | `skills/tk-studio-report/scripts/` | ledger line (`report` event) | `description` missing |
 

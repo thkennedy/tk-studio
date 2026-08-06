@@ -1,0 +1,36 @@
+{
+  "job_schema_version": 1,
+  "id": "research-ecosystem",
+  "description": "v1 research job type (AD-10, ST-6.4): recurring ecosystem watch — survey agentic-dev practice and tool discovery for the project's domain under a scoped charter, land evidence-graded findings in the run workspace, and feed the evolve loop through observation events (the v1 evolve loop observes and logs only — AD-8). Instances override the charter topics for their domain.",
+  "target": {
+    "skill": "tk-studio-research",
+    "payload": {
+      "charter": {
+        "topics": [
+          "agentic development practice",
+          "tooling and MCP servers relevant to the project domain"
+        ],
+        "sources": [
+          "web-search",
+          "release-notes",
+          "community-discussion"
+        ],
+        "max_findings": 8
+      }
+    }
+  },
+  "trigger": "loop",
+  "cadence": {
+    "mode": "self-paced",
+    "hint_seconds": 604800
+  },
+  "durable": true,
+  "guards": {
+    "max_turns": 40,
+    "max_wall_clock_seconds": 3600
+  },
+  "stop": {
+    "on_status": ["blocked"]
+  },
+  "effort": "medium"
+}

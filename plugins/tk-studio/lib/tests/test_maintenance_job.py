@@ -84,10 +84,10 @@ class MaintenanceJobTestCase(unittest.TestCase):
 
     def test_summarize_result_extracts_conformance_headline(self):
         summary, headline = jobrun._summarize_result(
-            {"ok": True, "surfaces_checked": 10, "checks_run": 45,
+            {"ok": True, "surfaces_checked": 11, "checks_run": 50,
              "failures": []}, 0)
         self.assertEqual(summary, {"exit_code": 0, "ok": True,
-                                   "surfaces_checked": 10, "checks_run": 45,
+                                   "surfaces_checked": 11, "checks_run": 50,
                                    "failure_count": 0})
         self.assertIn("ok=True", headline)
 
@@ -140,7 +140,8 @@ class MaintenanceJobTestCase(unittest.TestCase):
         # results reach the ledger through the wrapper's one job-run event
         (event,) = self._events("job-run")
         self.assertEqual(event["payload"]["state"], "complete")
-        self.assertIn("checks_run=45", event["payload"]["detail"])
+        self.assertIn("checks_run=", event["payload"]["detail"])
+        self.assertIn("ok=True", event["payload"]["detail"])
 
 
 if __name__ == "__main__":
