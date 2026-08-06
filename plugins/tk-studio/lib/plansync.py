@@ -607,6 +607,10 @@ def sync(project_root: Path, dry_run: bool = False,
 # --------------------------------------------------------------------- CLI
 
 def main(argv: list[str] | None = None) -> int:
+    # Headless output must survive a cp1252 Windows console: entity titles
+    # are arbitrary unicode and the status JSON must always print (AD-11).
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="tk-studio planning adapter")
     sub = parser.add_subparsers(dest="command", required=True)
     norm = sub.add_parser("normalize")
