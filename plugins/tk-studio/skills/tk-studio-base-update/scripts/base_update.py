@@ -106,6 +106,10 @@ def read_manifest_shas(manifest_path: Path) -> dict[str, str]:
 # -------------------------------------------------------------------- flow
 
 def main(argv: list[str] | None = None) -> int:
+    # Headless output must survive a cp1252 Windows console: payloads are
+    # arbitrary unicode and must always print (AD-11).
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser()
     parser.add_argument("--core", help="new core version, e.g. 6.11.0")
     parser.add_argument("--pin", action="append", default=[],

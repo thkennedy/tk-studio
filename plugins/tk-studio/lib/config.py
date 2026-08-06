@@ -239,6 +239,10 @@ def standup_project_config(project_root: Path, vcs: str = "git",
 # --------------------------------------------------------------------- CLI
 
 def main(argv: list[str] | None = None) -> int:
+    # Headless output must survive a cp1252 Windows console: payloads are
+    # arbitrary unicode and must always print (AD-11).
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="tk-studio config resolution")
     sub = parser.add_subparsers(dest="command", required=True)
 

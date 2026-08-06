@@ -169,6 +169,10 @@ def check_vault(directory: Path) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Headless output must survive a cp1252 Windows console: payloads are
+    # arbitrary unicode and must always print (AD-11).
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser()
     parser.add_argument("--directory", default=".")
     parser.add_argument("--guided", action="store_true",
