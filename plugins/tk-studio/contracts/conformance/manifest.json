@@ -184,6 +184,23 @@
         }
       ]
     },
+    "tk-studio-migrate": {
+      "external_calls": true,
+      "auth_preflight": "the import step runs the jira adapter's API-token preflight (token + org-admin toggle + issue-type scheme) before any backend write; inventory, verification bookkeeping, and the cutover flag are local — an unconfigured/empty project blocks named before any network (the drives below prove it)",
+      "drives": [
+        {
+          "assertion": "headless-clean",
+          "argv": ["lib/migrate.py", "status", "--directory", "{sandbox}"],
+          "expect": "json"
+        },
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/migrate.py", "run", "--directory", "{sandbox}", "--dry-run"],
+          "expect": "refusal",
+          "marker": "nothing to migrate"
+        }
+      ]
+    },
     "tk-studio-report": {
       "external_calls": false,
       "auth_preflight": "none needed — local ledger append only",

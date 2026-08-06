@@ -87,7 +87,9 @@ class FakeJira:
             return 200, {"key": key, "fields": {
                 "status": {"name": name,
                            "statusCategory": {"key": self.STATUSES[name]}},
-                "assignee": issue["assignee"]}}
+                "assignee": issue["assignee"],
+                "summary": issue["fields"].get("summary"),
+                "labels": issue["fields"].get("labels") or []}}
         assign_m = re.match(r"^/issue/([^/]+)/assignee$", path)
         if assign_m and method == "PUT":
             account_id = body.get("accountId")
