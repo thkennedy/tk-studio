@@ -1,0 +1,14 @@
+# Customization surface for tk-studio-migrate.
+#
+# Override files (not edited here):
+#   {project-root}/_bmad/custom/tk-studio-migrate.toml         (team)
+#   {project-root}/_bmad/custom/tk-studio-migrate.user.toml    (personal)
+
+# Model/effort defaults (AD-14). Precedence: runtime override > project config
+# > this resource default. The migration pipeline is fully deterministic —
+# the skill's judgment is limited to reading reports and relaying the AD-16
+# clearance conversation; small tier, escalation stays deliberate
+# (driver-contract §5).
+[model]
+default = "claude-sonnet-5"
+effort = "medium"

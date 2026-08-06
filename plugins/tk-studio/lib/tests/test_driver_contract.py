@@ -65,8 +65,8 @@ class DriverContractTestCase(unittest.TestCase):
     # --- AC 1b: own semver + change policy
 
     def test_carries_its_own_semver_and_change_policy(self):
-        # 1.1.0..1.5.0 = ST-6.2/6.4/7.1/7.2/8.1 additive surfaces (MINOR per policy)
-        self.assertRegex(self.text, r"\*\*1\.5\.0\*\*")
+        # 1.1.0..1.6.0 = ST-6.2/6.4/7.1/7.2/8.1/8.2 additive surfaces (MINOR per policy)
+        self.assertRegex(self.text, r"\*\*1\.6\.0\*\*")
         self.assertIn("Change policy", self.text)
         self.assertIn("MAJOR", self.text)
         self.assertRegex(self.text, r"[Bb]reaking")

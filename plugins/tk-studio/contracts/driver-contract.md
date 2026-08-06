@@ -2,8 +2,8 @@
 
 | | |
 | --- | --- |
-| **Contract version** | **1.5.0** (semver — see [Change policy](#change-policy); 1.1.0 added the `tk-studio-job` surface and the shipped `job.schema.json`, 1.2.0 added `tk-studio-research`, 1.3.0 added `tk-studio-measure-push`, 1.4.0 added `tk-studio-consolidate`, 1.5.0 installs the `jira` planning binding behind `tk-studio-plan-sync` — each additive, MINOR) |
-| Story / rulings | ST-5.3, ST-6.2, ST-7.1, ST-7.2, ST-8.1; AD-2, AD-7, AD-10, AD-11, AD-12, AD-13, AD-14 |
+| **Contract version** | **1.6.0** (semver — see [Change policy](#change-policy); 1.1.0 added the `tk-studio-job` surface and the shipped `job.schema.json`, 1.2.0 added `tk-studio-research`, 1.3.0 added `tk-studio-measure-push`, 1.4.0 added `tk-studio-consolidate`, 1.5.0 installed the `jira` planning binding behind `tk-studio-plan-sync`, 1.6.0 adds `tk-studio-migrate` — each additive, MINOR) |
+| Story / rulings | ST-5.3, ST-6.2, ST-7.1, ST-7.2, ST-8.1, ST-8.2; AD-2, AD-7, AD-10, AD-11, AD-12, AD-13, AD-14, AD-16 |
 | Audience | any harness that drives tk-studio unattended — first consumer: the ClaudeOS MCP connector (ClaudeOS-side, later) |
 | Companion schemas | `status-block.schema.json`, `events/taxonomy.v1.json`, `registry.schema.json`, `interchange/shape.v1.json`, `job.schema.json` (v1, shipped ST-6.1) |
 
@@ -71,7 +71,7 @@ historical failure. A driver MUST ensure before invoking:
    verified enabled. Verification failure → `blocked` before any backend
    call.
 
-## 2. Skill invocation surface (v1.5.0)
+## 2. Skill invocation surface (v1.6.0)
 
 Payload fields map 1:1 onto the named CLI's flags. "Artifacts out" lists
 what a `complete` run reports in `artifacts[]`; every skill may instead end
@@ -87,6 +87,7 @@ what a `complete` run reports in `artifacts[]`; every skill may instead end
 | `tk-studio-orchestrator` | `directory`; `role?`; `target?` (route to act on) | `lib/orchestrate.py resolve` | whatever the routed resource produces; none for resolve alone | `needs-onboarding` (missing role / unconfirmed `working_set.<role>`) — gap named in `reason` |
 | `tk-studio-job` | verb (`submit\|status\|cancel\|wake`); `directory`; `id`/`job_id`; `run_id?` | `lib/jobrun.py submit\|status\|cancel\|wake` (plus `account`/`finish` for the executing wrapper) | run workspace `~/.tk-studio/projects/<key>/runs/<run-id>/`; `job-run` ledger events | unknown or invalid job id (a stop-condition refusal is `accepted: false`, an answer — not blocked) |
 | `tk-studio-plan-sync` | `directory`; `backend?` (runtime override); `dry_run?`; `normalize_only?` | `lib/plansync.py sync|normalize` | normalized planning artifacts, backend projection (`backlog/` locally; Jira issues under the `jira` binding, AD-7) | duplicate id (blocks until renumbered, AD-4); promote/pull-back conflict (human conflict, AD-5); `jira` binding preflight failure — missing `planning.jira.site`/`project_key`, missing `JIRA_EMAIL`/`JIRA_API_TOKEN`, 401/403 (token or org-admin toggle), or an issue-type scheme missing a default-mapping target — every gap named, never a silent 401 (AD-7/AD-11) |
+| `tk-studio-migrate` | verb (`run\|status\|clear`); `directory`; `dry_run?` (run); `confirm?` (clear — the recorded operator clearance) | `lib/migrate.py run\|status\|clear` | closed inventory + migration record `.tk-studio/migrations/jira.json` (id map, hashes, verification, clearance state); Jira issues imported via the adapter; cutover flag (`planning.backend: jira` in tracked config) written last; source projection retained read-only | nothing to migrate; canonical export invalid; jira preflight failure (named, AD-7); **any verification mismatch** — counts, id map, content hashes, or spot round-trip — with each discrepancy listed (AD-16); cutover flag overridden by a local overlay; `clear` without `confirm` (no-delete-before-clearance) |
 | `tk-studio-research` | `charter` (`{topics[], sources[], max_findings?, notes?}`); `directory`; `run_id?` (job runs) | `lib/research.py charter\|record` | `findings.json` + `findings.md` in the run workspace; `observation` ledger events for recommendation-carrying findings | charter missing/unscoped; run already terminal |
 | `tk-studio-consolidate` | `directory` (studio repo root); `dry_run?` | `lib/consolidate.py run` | `issues/ledger.md` synced in place (stable `ISS-NNN` rows: severity, status, expected-vs-actual, named evidence events, fix candidates — never a deleted row); no ledger events (derives, not emits — AD-12) | directory missing; measurements outside the studio repo (AD-3); unparseable issues ledger (refuses to rewrite what it cannot update in place) |
 | `tk-studio-measure-push` | `directory` (studio repo root); `base?`; `dry_run?`; `no_pr?` | `lib/measurepush.py check\|push` | feature branch `measurements/<user>-<machine>` + membrane PR updating `measurements/<user>-<machine>.jsonl` — no ledger events (a mover, not an emitter, AD-12); never a base-branch push, never a merge | not the studio repo root; dirty working tree; sanitization re-check finding (credential-shaped content blocks pre-commit) |
