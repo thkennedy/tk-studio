@@ -35,14 +35,21 @@ emitted by their one named emitter.
    machine's file, pushes, and opens the PR — or recognizes the open one the
    push just updated (repeat pushes update the same PR, never a duplicate).
 
+   A `dry_run` payload rides the core's own flag — `push --dry-run` — which
+   walks every gate (studio-root check, dirty tree, sanitization) without
+   landing a branch, commit, or PR. Never substitute a check-only summary
+   for the push verb: the check step reports, only `push` enforces.
+
 3. **Attended:** summarize what moved — event count, branch, PR URL — and
    surface a `committed-local` result (offline push) or `unavailable` PR
    step as the retry guidance the core returned.
    **Headless:** a `PushBlocked` refusal (exit 2 — wrong directory, dirty
    tree, sanitization finding) ends `blocked` with the core's error as
-   `reason`; a push or PR step that could not reach the remote ends
-   `partial` (useful work landed: the local branch commit) — never a prompt
-   (AD-11). End headless runs with the status block:
+   `reason` — identically under `dry_run: true`: the core refusing a
+   dry-run push is still a refusal, never downgraded to `complete`; a push
+   or PR step that could not reach the remote ends `partial` (useful work
+   landed: the local branch commit) — never a prompt (AD-11). End headless
+   runs with the status block:
 
    ```json
    {"status": "complete", "intent": "tk-studio-measure-push", "artifacts": ["measurements/<user>-<machine>.jsonl"], "reason": null}
