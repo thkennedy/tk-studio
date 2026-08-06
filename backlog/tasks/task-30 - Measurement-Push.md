@@ -1,9 +1,10 @@
 ---
 id: TASK-30
 title: Measurement Push
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-27 03:35'
+updated_date: '2026-08-06 19:26'
 labels:
   - ST-030
 milestone: The Studio Measures and Fixes Itself
