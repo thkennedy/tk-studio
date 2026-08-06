@@ -1,0 +1,75 @@
+{
+  "job_schema_version": 1,
+  "description": "Declarative job model (AD-10, O8 hybrid ruling; driver-contract §4). A job is data; the bound substrate executes it (v1 default: harness-native primitives). Generic job types ship with the plugin as jobs/<type-id>.json; per-project instances are .tk-studio/jobs/<job-id>.json files named by the tracked config's jobs[] list of scalar ids — the config surface stays inside the miniyaml subset, never inline job mappings. lib/job.py is the one validator (no other surface parses definitions); validation rejects any definition missing budget guards or stop conditions — a job never runs away. Run state lives in resumable run workspaces ~/.tk-studio/projects/<key>/runs/<run-id>/run.json (working data, never on any VCS — AD-3). The run state enum matches the driver-contract §4 status verb exactly.",
+  "definition": {
+    "required": ["job_schema_version", "id", "target", "trigger", "guards", "stop"],
+    "fields": {
+      "job_schema_version": { "type": "number", "const": 1 },
+      "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$", "note": "stable job identity; must equal the definition file's stem" },
+      "description": { "type": "string", "required": false },
+      "type": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$", "required": false, "note": "id of a shipped generic job type this instance extends: instance fields override the type's, target keys overlay the type's target, payload shallow-merges with instance keys winning" },
+      "target": {
+        "type": "object",
+        "note": "what the job executes; at least one of skill|core",
+        "fields": {
+          "skill": { "type": "string", "required": false, "note": "a contract surface by name (driver-contract §2); payload maps 1:1 onto its flags" },
+          "core": { "type": "array", "items": "string", "required": false, "note": "plugin-root-relative deterministic-core argv (same shape as conformance drives) for pure-data jobs; never an absolute path" },
+          "payload": { "type": "object", "required": false, "note": "arguments for the target; defaults to {}" }
+        }
+      },
+      "trigger": { "type": "string", "enum": ["one-shot", "cron", "loop"] },
+      "at": { "type": "string", "format": "ISO-8601 UTC", "required": false, "note": "one-shot only: execute at this time instead of immediately" },
+      "cadence": {
+        "type": "object",
+        "required": "for trigger cron|loop; forbidden for one-shot",
+        "fields": {
+          "mode": { "type": "string", "enum": ["fixed", "self-paced"], "note": "cron is inherently fixed — self-paced is valid only for loop" },
+          "schedule": { "type": "string", "required": "when trigger is cron", "note": "5-field cron expression, substrate-interpreted" },
+          "interval_seconds": { "type": "number", "required": "when trigger is loop and mode is fixed", "note": "> 0" },
+          "hint_seconds": { "type": "number", "required": false, "note": "self-paced pacing hint; the substrate decides (> 0)" }
+        }
+      },
+      "durable": { "type": "boolean", "required": false, "note": "durable-recurring requirement: local harness schedules are session-scoped, so a session-scoped binding MUST surface this constraint (cloud routine or external harness needed) instead of silently losing the schedule (ST-6.2)" },
+      "guards": {
+        "type": "object",
+        "note": "budget guards — at least one required, values > 0; a guard hit ends the run partial with the guard named in reason (§4)",
+        "fields": {
+          "max_tokens": { "type": "number", "required": false },
+          "max_turns": { "type": "number", "required": false },
+          "max_wall_clock_seconds": { "type": "number", "required": false }
+        }
+      },
+      "stop": {
+        "type": "object",
+        "note": "stop conditions — at least one required; ends scheduling, distinct from per-run budget guards",
+        "fields": {
+          "max_runs": { "type": "number", "required": false, "note": "integer > 0: stop scheduling after this many runs" },
+          "until": { "type": "string", "format": "ISO-8601 UTC", "required": false, "note": "stop scheduling at this time" },
+          "on_status": { "type": "array", "items": "string", "enum": ["partial", "blocked"], "required": false, "note": "stop scheduling after a run ends in one of these states" }
+        }
+      },
+      "model": { "type": "string", "required": false, "note": "Claude model override the wrapper passes down (driver-contract §5 runtime override); absent = the target resource's customize.toml default resolves (AD-14)" },
+      "effort": { "type": "string", "enum": ["low", "medium", "high"], "required": false, "note": "reasoning-effort override, same precedence as model" }
+    }
+  },
+  "run": {
+    "file": "~/.tk-studio/projects/<key>/runs/<run-id>/run.json",
+    "required": ["run_schema_version", "run_id", "job_id", "project", "state", "created", "updated"],
+    "fields": {
+      "run_schema_version": { "type": "number", "const": 1 },
+      "run_id": { "type": "string", "note": "<job-id>-<UTC compact timestamp>, suffixed on collision; equals the workspace directory name" },
+      "job_id": { "type": "string" },
+      "project": { "type": "string", "note": "project key: explicit project_id from tracked config, else the root basename — the same identity as the registry (AD-20)" },
+      "state": { "type": "string", "enum": ["queued", "running", "complete", "partial", "blocked", "cancelled"], "note": "§4 status-verb states; queued|running are resumable, the rest are terminal and immutable" },
+      "created": { "type": "string", "format": "ISO-8601 UTC" },
+      "updated": { "type": "string", "format": "ISO-8601 UTC" },
+      "started": { "type": "string", "format": "ISO-8601 UTC", "required": false },
+      "ended": { "type": "string", "format": "ISO-8601 UTC", "required": false },
+      "reason": { "type": "string", "required": false, "note": "required by §4 semantics when state is partial|blocked|cancelled — names the guard, stop condition, or gap" },
+      "status_block": { "type": "object", "required": false, "note": "the terminal §3 JSON status block of the run" },
+      "job": { "type": "object", "required": false, "note": "resolved definition snapshot at submit time — resumability means a fresh process continues from the workspace alone, never re-reading project config mid-run" },
+      "checkpoint": { "type": "object", "required": false, "note": "free-form resumable progress state, owned by the executing wrapper" },
+      "counters": { "type": "object", "required": false, "note": "budget accounting toward guards: tokens, turns, wall_clock_seconds" }
+    }
+  }
+}

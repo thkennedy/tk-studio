@@ -170,8 +170,11 @@ vcs: {vcs}
 #   developer:
 #     - resource-name
 
-# Per-project job instances (AD-10; Epic 6).
+# Per-project job instances (AD-10, ST-6.1): a list of job ids, each naming a
+# definition at .tk-studio/jobs/<id>.json (contracts/job.schema.json) or a
+# generic type shipped with the plugin — always scalar refs, never inline jobs.
 # jobs:
+#   - maintenance-conformance
 """
 
 _LOCAL_TEMPLATE = """\
