@@ -61,6 +61,7 @@ from pathlib import Path
 import backlogmd
 import config as configlib
 import interchange
+import jirabackend
 import miniyaml
 
 COUNTER_VERSION = 1
@@ -588,11 +589,14 @@ def sync(project_root: Path, dry_run: bool = False,
     elif binding == "backlog-md":
         result["projection"] = backlogmd.project(
             project_root, plan_dir(project_root), dry_run=dry_run)
-    else:
-        result.update({"blocked": True,
-                       "reason": f"projection for binding '{binding}' is not "
-                                 f"installed in this version"})
-        return result
+    else:  # jira (AD-7): the adapter alone talks to the backend (AD-4)
+        result["projection"] = jirabackend.project(
+            project_root, plan_dir(project_root), dry_run=dry_run,
+            runtime=runtime)
+        if result["projection"].get("blocked"):
+            result.update({"blocked": True,
+                           "reason": result["projection"]["reason"]})
+            return result
 
     # Index last: pull-back may have updated canonical statuses.
     result["index"] = generate_plan_index(project_root, dry_run=dry_run)
