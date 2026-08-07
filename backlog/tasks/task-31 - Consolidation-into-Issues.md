@@ -4,7 +4,7 @@ title: Consolidation into Issues
 status: Done
 assignee: []
 created_date: '2026-07-27 03:35'
-updated_date: '2026-08-06 19:26'
+updated_date: '2026-08-07 04:34'
 labels:
   - ST-031
 milestone: The Studio Measures and Fixes Itself
