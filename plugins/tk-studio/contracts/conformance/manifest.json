@@ -118,6 +118,34 @@
         }
       ]
     },
+    "tk-studio-session": {
+      "external_calls": false,
+      "auth_preflight": "none needed — local run-workspace reads/writes only; delta validation is pure (lib/knowledge.py)",
+      "drives": [
+        {
+          "assertion": "headless-clean",
+          "argv": ["lib/job.py", "run-init", "--directory", "{sandbox}", "--id", "maintenance-conformance"],
+          "expect": "json",
+          "note": "mints the resumable run the boundary drives below split (drives share the sandbox/store and run in order); the timestamped run id is why the session drives select via --job-id"
+        },
+        {
+          "assertion": "headless-clean",
+          "argv": ["lib/session.py", "handoff", "--directory", "{sandbox}", "--job-id", "maintenance-conformance", "--boundary", "phase", "--name", "conformance probe", "--done", "probe landed", "--next", "resume drive reads this"],
+          "expect": "json"
+        },
+        {
+          "assertion": "headless-clean",
+          "argv": ["lib/session.py", "resume", "--directory", "{sandbox}", "--job-id", "maintenance-conformance"],
+          "expect": "json"
+        },
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/session.py", "handoff", "--directory", "{sandbox}", "--job-id", "maintenance-conformance", "--boundary", "phase", "--name", "conformance probe", "--done", "d", "--next", "n", "--delta", "{\"anchor\": \"SEED-probe-A1\", \"verdict\": \"WRONG\", \"reality\": \"probe\", \"evidence\": \"probe\", \"tier\": \"run-local\"}"],
+          "expect": "refusal",
+          "marker": "dangling"
+        }
+      ]
+    },
     "tk-studio-observe": {
       "external_calls": false,
       "auth_preflight": "none needed — local ledger append only",

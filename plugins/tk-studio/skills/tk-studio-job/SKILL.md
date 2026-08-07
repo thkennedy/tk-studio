@@ -78,10 +78,12 @@ If the deterministic core is unrunnable — a tool call denied by permissions, `
 - Every terminal run leaves `summary.json` in its workspace (core runs also
   land the full parsed result as `output.json`); point the operator there,
   never paste whole reports into chat.
-- Long work splits at declared boundaries (ST-6.6): at an epic/story/phase
-  boundary or a budget trigger, land the handoff and END the session —
+- Long work splits at declared boundaries (ST-6.6; surface:
+  `tk-studio-session`, ST-9.2): at an epic/story/phase boundary or a budget
+  trigger, land the handoff and END the session —
   `uv run "${CLAUDE_PLUGIN_ROOT}/lib/session.py" handoff --directory <root>
-  --run-id <rid> --boundary <kind> --name <id> --done ... --next ...`; a
-  fresh session continues via `session.py resume` from the workspace alone,
+  --run-id <rid> --boundary <kind> --name <id> --done ... --next ...`
+  (optionally `--delta` corrections against the workspace seed); a fresh
+  session continues via `session.py resume` from the workspace alone,
   never by replaying history. Ending the session never ends the run.
 - All paths resolve through `${CLAUDE_PLUGIN_ROOT}`.
