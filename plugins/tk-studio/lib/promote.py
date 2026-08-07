@@ -24,6 +24,15 @@ write (D3).
           knowledge/<user>-<machine>, pushes, opens the membrane PR — or
           recognizes the open one the draft just updated — and records the
           draft in the per-user promotions record.
+  emit    the D4 measurement verb (ST-9.6). Reconciles the promotions
+          record against what actually merged: a recorded draft whose kb
+          file now exists on its base branch has crossed the membrane, and
+          the batch of newly-merged drafts — one merged promotion PR's
+          worth — emits exactly ONE `knowledge-promotion` taxonomy event,
+          then an emitted marker line in the record so no draft ever
+          emits twice. An empty or fully-marked record is a clean no-op
+          answered before any git read, and detecting the merge needs only
+          the local repo (post-fetch) — never gh, never the PR API.
 
 Append-only everywhere: a draft never edits or deletes an existing kb file
 (each draft is a new dated file), never rewrites the queue, and the
@@ -32,17 +41,18 @@ routing doc/promotions record) stays in the per-user store (AD-3); the
 drafted kb file is the one thing that crosses, through the PR.
 
 Measurement (D4): the `knowledge-promotion` taxonomy event — sole emitter
-this skill — lands with contract 1.7.0 (ST-9.6): extending the taxonomy is
-a contract-visible MINOR change, and lib/ledger.py refuses un-rowed event
-types by construction, so emission cannot precede the row. Until then a
-draft emits nothing (this module is a mover, AD-12). The promotions record
-written here is the exactly-once baseline 9.6 emission reconciles against
-(one merged promotion PR, one event).
+this skill, through the emit verb alone — landed with contract 1.7.0
+(ST-9.6) together with its taxonomy row (lib/ledger.py refuses un-rowed
+event types by construction, so emission could not precede the row). A
+draft still emits nothing (drafting is a mover, AD-12); the promotions
+record written at draft time is the exactly-once baseline emit reconciles
+against (one merged promotion PR, one event).
 
 CLI:
   uv run promote.py check --directory DIR
   uv run promote.py draft --directory DIR [--base BRANCH] [--dry-run]
                           [--no-pr] [--redraft]
+  uv run promote.py emit  --directory DIR [--dry-run]
 
 Exit codes: 0 ok (incl. clean no-op) / 1 git failure mid-motion / 2 blocked
 (no routing doc, not a git work tree, dirty tree, sanitization finding).
@@ -165,15 +175,18 @@ def _default_base(directory: Path) -> str:
 # ----------------------------------------------------- the promotions record
 
 def read_record(key: str) -> dict:
-    """The promotions record as data: {path, drafts[], invalid[], keys} —
-    keys is the promoted baseline (every drafted correction's delta_key).
+    """The promotions record as data: {path, drafts[], emitted[], invalid[],
+    keys, emitted_files} — keys is the promoted baseline (every drafted
+    correction's delta_key); emitted_files is the emission baseline (every
+    draft file an emitted marker already covers — ST-9.6 exactly-once).
     Tolerant read: an unparseable line is reported, never dropped or
-    repaired (append-only, like the queue); a line whose `type` is not
-    `draft` is a forward-compatible other kind (9.6 adds emission marking),
-    counted but never invalid."""
+    repaired (append-only, like the queue); a line whose `type` is neither
+    `draft` nor `emitted` is a forward-compatible other kind, counted but
+    never invalid."""
     path = record_path(key)
-    result: dict = {"path": str(path), "drafts": [], "invalid": [],
-                    "other": 0, "keys": set()}
+    result: dict = {"path": str(path), "drafts": [], "emitted": [],
+                    "invalid": [], "other": 0, "keys": set(),
+                    "emitted_files": set()}
     if not path.is_file():
         if path.exists():
             # a directory (or other non-file) at the record path is broken
@@ -200,6 +213,19 @@ def read_record(key: str) -> dict:
         if not isinstance(line, dict) or not isinstance(line.get("type"), str):
             result["invalid"].append({"line": number,
                                       "error": "record line has no type"})
+            continue
+        if line["type"] == "emitted":
+            if not (isinstance(line.get("files"), list)
+                    and all(isinstance(item, str) for item in line["files"])):
+                # a malformed emitted marker drops out of the baseline,
+                # reported — its drafts would re-emit (duplicate-over-loss,
+                # visible in the ledger), never silently vanish
+                result["invalid"].append({"line": number,
+                                          "error": "emitted record carries "
+                                                   "no files list"})
+                continue
+            result["emitted"].append(line)
+            result["emitted_files"].update(line["files"])
             continue
         if line["type"] != "draft":
             result["other"] += 1
@@ -232,6 +258,15 @@ def _record_draft(key: str, drafted_at: str, branch: str, base: str,
     line = {"type": "draft", "drafted_at": drafted_at, "branch": branch,
             "base": base, "file": file_rel,
             "keys": [list(k) for k in keys]}
+    _locked_append(record_path(key),
+                   json.dumps(line, ensure_ascii=False,
+                              separators=(",", ":")) + "\n")
+
+
+def _record_emitted(key: str, emitted_at: str, branch: str, base: str,
+                    files: list[str], corrections: int) -> None:
+    line = {"type": "emitted", "emitted_at": emitted_at, "branch": branch,
+            "base": base, "files": files, "corrections": corrections}
     _locked_append(record_path(key),
                    json.dumps(line, ensure_ascii=False,
                               separators=(",", ":")) + "\n")
@@ -278,8 +313,107 @@ def check(project_root: Path) -> dict:
             "promoted": len(state["deduped"]) - len(state["unpromoted"]),
             "unpromoted": len(state["unpromoted"]),
         },
+        "emission": {
+            "emitted": len(state["record"]["emitted"]),
+            "drafts_unemitted": sum(
+                1 for entry in state["record"]["drafts"]
+                if entry["file"] not in state["record"]["emitted_files"]),
+        },
         "record": state["record"]["path"],
     }
+
+
+# --------------------------------------------------------------------- emit
+
+def emit(project_root: Path, dry_run: bool = False) -> dict:
+    """The D4 measurement verb (ST-9.6): reconcile the promotions record
+    against what actually merged and emit the `knowledge-promotion` event —
+    exactly once per merged promotion PR, this module the sole emitter.
+
+    Merge detection is local git only: a recorded draft whose kb file
+    exists on its recorded base branch (origin/<base> when it exists) has
+    crossed the membrane. The batch of newly-merged drafts sharing one
+    (branch, base) — one merged PR's worth, since repeat drafts update the
+    same PR — emits ONE event, then an emitted marker line in the record;
+    a marked draft file never emits again (exactly-once baseline). Event
+    first, marker second: a marker that fails to land is a loud warning
+    and a possible duplicate on the retry (duplicate-over-loss, visible in
+    the ledger) — never a silently lost event.
+
+    Raises PromoteBlocked when drafts await emission but merge state is
+    undeterminable (not a git work tree)."""
+    root = Path(project_root).resolve()
+    if not root.is_dir():
+        raise PromoteBlocked("preflight",
+                             f"project root {root} is not a directory")
+    key = joblib.project_key(root)
+    record = read_record(key)
+    result: dict = {"ok": True, "project": key}
+    if record["invalid"]:
+        result["record_invalid"] = record["invalid"]
+    pending = [d for d in record["drafts"]
+               if d["file"] not in record["emitted_files"]]
+    if not pending:
+        result.update(result_state="no-op",
+                      detail=("every recorded draft is already emitted — "
+                              "nothing to reconcile" if record["drafts"]
+                              else "no recorded drafts — nothing to emit"))
+        return result
+
+    if _git(root, "rev-parse", "--is-inside-work-tree",
+            check=False).stdout.strip() != "true":
+        raise PromoteBlocked(
+            "preflight",
+            f"{root} is not a git work tree — merge state of "
+            f"{len(pending)} recorded draft(s) cannot be determined")
+    # best-effort freshness, same posture as draft: offline still answers
+    # from the last-fetched refs
+    _git(root, "fetch", "--prune", "origin", check=False)
+
+    merged: dict[tuple, list[dict]] = {}
+    waiting: list[str] = []
+    for entry in pending:
+        base = entry.get("base") or _default_base(root)
+        base_ref = (f"origin/{base}" if _ref_exists(root, f"origin/{base}")
+                    else base)
+        on_base = _ref_exists(root, base_ref) and _git(
+            root, "cat-file", "-e", f"{base_ref}:{entry['file']}",
+            check=False).returncode == 0
+        if on_base:
+            merged.setdefault((entry.get("branch") or branch_name(), base),
+                              []).append(entry)
+        else:
+            waiting.append(entry["file"])
+    if waiting:
+        result["waiting"] = waiting
+    if not merged:
+        result.update(result_state="waiting",
+                      detail=f"{len(waiting)} recorded draft(s) not yet "
+                             "merged — the PR is still the gate")
+        return result
+
+    emitted: list[dict] = []
+    warnings: list[str] = []
+    for (branch, base), entries in sorted(merged.items()):
+        files = [entry["file"] for entry in entries]
+        keys = {tuple(k) for entry in entries for k in entry["keys"]}
+        event = {"files": files, "corrections": len(keys),
+                 "branch": branch, "base": base}
+        if not dry_run:
+            ledger.emit("knowledge-promotion", dict(event), project=key)
+            try:
+                _record_emitted(key, _now(), branch, base, files, len(keys))
+            except OSError as exc:
+                warnings.append(
+                    f"event emitted but the record marker failed to land "
+                    f"({exc}) — repair the promotions record before the "
+                    f"next emit or these drafts will emit again")
+        emitted.append(event)
+    result.update(result_state="dry-run" if dry_run else "emitted",
+                  emitted=emitted)
+    if warnings:
+        result["record_warning"] = "; ".join(warnings)
+    return result
 
 
 # -------------------------------------------------------------------- draft
@@ -620,11 +754,20 @@ def main(argv: list[str] | None = None) -> int:
     cmd.add_argument("--redraft", action="store_true",
                      help="ignore the promoted baseline and draft every "
                           "valid correction")
+    cmd = sub.add_parser("emit", help="the D4 measurement verb: emit one "
+                                      "knowledge-promotion event per merged "
+                                      "promotion PR, reconciled against the "
+                                      "promotions record")
+    cmd.add_argument("--directory", required=True, help="project root")
+    cmd.add_argument("--dry-run", action="store_true",
+                     help="report what would emit; no event, no marker")
     args = parser.parse_args(argv)
 
     try:
         if args.command == "check":
             result = check(Path(args.directory))
+        elif args.command == "emit":
+            result = emit(Path(args.directory), dry_run=args.dry_run)
         else:
             result = draft(Path(args.directory), base=args.base,
                            dry_run=args.dry_run, no_pr=args.no_pr,
@@ -633,8 +776,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"ok": False, "step": exc.step, "error": str(exc),
                           "findings": exc.findings}, ensure_ascii=False))
         return 2
-    except (reconcilelib.ReconcileError, joblib.JobError, OSError,
-            UnicodeDecodeError) as exc:
+    except (reconcilelib.ReconcileError, joblib.JobError, ledger.LedgerError,
+            OSError, UnicodeDecodeError) as exc:
         # OSError: an unreadable/locked store refuses named, never a
         # traceback (AD-11)
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))

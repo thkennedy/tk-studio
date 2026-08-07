@@ -2,10 +2,10 @@
 
 | | |
 | --- | --- |
-| **Contract version** | **1.6.0** (semver — see [Change policy](#change-policy); 1.1.0 added the `tk-studio-job` surface and the shipped `job.schema.json`, 1.2.0 added `tk-studio-research`, 1.3.0 added `tk-studio-measure-push`, 1.4.0 added `tk-studio-consolidate`, 1.5.0 installed the `jira` planning binding behind `tk-studio-plan-sync`, 1.6.0 adds `tk-studio-migrate` — each additive, MINOR) |
-| Story / rulings | ST-5.3, ST-6.2, ST-7.1, ST-7.2, ST-8.1, ST-8.2; AD-2, AD-7, AD-10, AD-11, AD-12, AD-13, AD-14, AD-16 |
+| **Contract version** | **1.7.0** (semver — see [Change policy](#change-policy); 1.1.0 added the `tk-studio-job` surface and the shipped `job.schema.json`, 1.2.0 added `tk-studio-research`, 1.3.0 added `tk-studio-measure-push`, 1.4.0 added `tk-studio-consolidate`, 1.5.0 installed the `jira` planning binding behind `tk-studio-plan-sync`, 1.6.0 added `tk-studio-migrate`, 1.7.0 publishes the Research→Knowledge Lifecycle port (Epic 9): the `tk-studio-session` and `tk-studio-knowledge` surfaces, the research anchor/seed surface, the run-finish capture note, the KB-injection directive, and the `knowledge-promotion` taxonomy event — each additive, MINOR) |
+| Story / rulings | ST-5.3, ST-6.2, ST-7.1, ST-7.2, ST-8.1, ST-8.2, ST-9.6 (Epic 9, D1–D5 ruled 2026-08-06); AD-2, AD-3, AD-7, AD-8, AD-10, AD-11, AD-12, AD-13, AD-14, AD-16 |
 | Audience | any harness that drives tk-studio unattended — first consumer: the ClaudeOS MCP connector (ClaudeOS-side, later) |
-| Companion schemas | `status-block.schema.json`, `events/taxonomy.v1.json`, `registry.schema.json`, `interchange/shape.v1.json`, `job.schema.json` (v1, shipped ST-6.1) |
+| Companion schemas | `status-block.schema.json`, `events/taxonomy.v1.json`, `registry.schema.json`, `interchange/shape.v1.json`, `job.schema.json` (v1, shipped ST-6.1), `knowledge.schema.json` (v1, shipped ST-9.1 — spine/seed frontmatter, anchors, deltas, queue and promotions-record lines) |
 
 This document is everything a connector needs to drive the studio **without
 reading studio internals** (AD-2: tk-studio never imports the harness; the
@@ -71,7 +71,7 @@ historical failure. A driver MUST ensure before invoking:
    verified enabled. Verification failure → `blocked` before any backend
    call.
 
-## 2. Skill invocation surface (v1.6.0)
+## 2. Skill invocation surface (v1.7.0)
 
 Payload fields map 1:1 onto the named CLI's flags. "Artifacts out" lists
 what a `complete` run reports in `artifacts[]`; every skill may instead end
@@ -88,7 +88,9 @@ what a `complete` run reports in `artifacts[]`; every skill may instead end
 | `tk-studio-job` | verb (`submit\|status\|cancel\|wake`); `directory`; `id`/`job_id`; `run_id?` | `lib/jobrun.py submit\|status\|cancel\|wake` (plus `account`/`finish` for the executing wrapper) | run workspace `~/.tk-studio/projects/<key>/runs/<run-id>/`; `job-run` ledger events | unknown or invalid job id (a stop-condition refusal is `accepted: false`, an answer — not blocked) |
 | `tk-studio-plan-sync` | `directory`; `backend?` (runtime override); `dry_run?`; `normalize_only?` | `lib/plansync.py sync|normalize` | normalized planning artifacts, backend projection (`backlog/` locally; Jira issues under the `jira` binding, AD-7) | duplicate id (blocks until renumbered, AD-4); promote/pull-back conflict (human conflict, AD-5); `jira` binding preflight failure — missing `planning.jira.site`/`project_key`, missing `JIRA_EMAIL`/`JIRA_API_TOKEN`, 401/403 (token or org-admin toggle), or an issue-type scheme missing a default-mapping target — every gap named, never a silent 401 (AD-7/AD-11) |
 | `tk-studio-migrate` | verb (`run\|status\|clear`); `directory`; `dry_run?` (run); `confirm?` (clear — the recorded operator clearance) | `lib/migrate.py run\|status\|clear` | closed inventory + migration record `.tk-studio/migrations/jira.json` (id map, hashes, verification, clearance state); Jira issues imported via the adapter; cutover flag (`planning.backend: jira` in tracked config) written last; source projection retained read-only | nothing to migrate; canonical export invalid; jira preflight failure (named, AD-7); **any verification mismatch** — counts, id map, content hashes, or spot round-trip — with each discrepancy listed (AD-16); cutover flag overridden by a local overlay; `clear` without `confirm` (no-delete-before-clearance) |
-| `tk-studio-research` | `charter` (`{topics[], sources[], max_findings?, notes?}`); `directory`; `run_id?` (job runs) | `lib/research.py charter\|record` | `findings.json` + `findings.md` in the run workspace; `observation` ledger events for recommendation-carrying findings | charter missing/unscoped; run already terminal |
+| `tk-studio-research` | `charter` (`{topics[], sources[], max_findings?, notes?}`); `directory`; `run_id?` (job runs) | `lib/research.py charter\|record\|seed\|spine` | `findings.json` + `findings.md` in the run workspace (a finding optionally cites a seed `anchor` — dangling citations are named rejections, per `knowledge.schema.json`); `seed.md` in the run workspace and the project spine `knowledge/spine.md` in the per-user store (aid, not gate — a missing spine is reported, never blocking; anchor ids append-only); `observation` ledger events for recommendation-carrying findings | charter missing/unscoped; run already terminal; invalid knowledge artifact (frontmatter, supersede header, anchor grammar — named rejection) |
+| `tk-studio-session` | verb (`handoff\|resume`); `directory`; run selection: exactly one of `run_id` \| `job_id` (`job_id` resolves the job's sole resumable run — zero or several is a named refusal); handoff: `boundary` (`epic\|story\|phase`), `name`, `done[]`, `next[]`, `gotcha?[]`, `artifact?[]`, `delta?[]` (the `knowledge.schema.json` delta shape) | `lib/session.py handoff\|resume` | `handoff.json` in the run workspace — 16 KB budget, one per run, overwritten per boundary; a delta-carrying boundary also captures into the per-project reconciliation queue (best-effort — the handoff never fails on a capture problem); `resume` answers from the workspace alone | unknown or terminal run; ambiguous `job_id` resolution; handoff over the 16 KB budget or the 16-delta cap; dangling, unanchored, or within-handoff-duplicate deltas — named rejections (only the delta-carrying handoff refuses; the run stays resumable and a delta-free handoff always lands) |
+| `tk-studio-knowledge` | verb (`check\|draft\|emit`); `directory`; draft: `base?`, `dry_run?`, `no_pr?`, `redraft?`; emit: `dry_run?` | `lib/promote.py check\|draft\|emit` | draft: ONE new dated `kb/reconciliation-<date>.md` on the stable branch `knowledge/<user>-<machine>` + the membrane PR (review is the gate — never a base push, never a merge, nothing auto-applies; D3/AD-12) and a draft line in the per-user promotions record; emit: one `knowledge-promotion` ledger event per merged promotion PR, sole emitter this surface, reconciled against the promotions record (exactly-once; a draft emits nothing) | no routing doc (named rejection — the routing doc is the human's promotion-decision surface); not a git work tree; dirty tree; diverged promotion branch; detached HEAD; sanitization finding (NFR5, blocks pre-commit) |
 | `tk-studio-consolidate` | `directory` (studio repo root); `dry_run?` | `lib/consolidate.py run` | `issues/ledger.md` synced in place (stable `ISS-NNN` rows: severity, status, expected-vs-actual, named evidence events, fix candidates — never a deleted row); no ledger events (derives, not emits — AD-12) | directory missing; measurements outside the studio repo (AD-3); unparseable issues ledger (refuses to rewrite what it cannot update in place) |
 | `tk-studio-measure-push` | `directory` (studio repo root); `base?`; `dry_run?`; `no_pr?` | `lib/measurepush.py check\|push` | feature branch `measurements/<user>-<machine>` + membrane PR updating `measurements/<user>-<machine>.jsonl` — no ledger events (a mover, not an emitter, AD-12); never a base-branch push, never a merge | not the studio repo root; dirty working tree; sanitization re-check finding (credential-shaped content blocks pre-commit) |
 | `tk-studio-observe` | `source` (`retrospective\|repeated-manual-work\|research-job\|other`); `description`; `evidence?`; `project?` | `lib/observe.py record` | ledger line (`observation` event) | required field missing |
@@ -145,7 +147,7 @@ on the harness-native substrate:
 
 | Verb | Request | Response | Semantics |
 | --- | --- | --- | --- |
-| `submit` | a job definition (or the id of a shipped/project job instance) | `{job_id, run_id, accepted: bool, reason?}` | schedule per the job's trigger on the bound substrate; validation rejects a definition missing guards or stop conditions |
+| `submit` | the id of a shipped/project job instance (id-only — the definition already lives at the `job.schema.json`-published locations; a full-definition submit form is not part of this surface. DW-1 fold-in, 1.7.0) | `{job_id, run_id, accepted: bool, reason?}` | schedule per the job's trigger on the bound substrate; validation rejects a definition missing guards or stop conditions |
 | `status` | `{job_id, run_id?}` | `{job_id, runs: [{run_id, state: queued\|running\|complete\|partial\|blocked\|cancelled, status_block?, started?, ended?}]}` | read-only; run state lives in `~/.tk-studio/projects/<key>/runs/<run-id>/` |
 | `cancel` | `{job_id, run_id?}` | `{cancelled: bool, reason?}` | stop scheduling; a running run terminates `partial` with reason `cancelled` |
 | `wake` | `{job_id}` | `{woken: bool, run_id?}` | fire a self-paced/loop job's next iteration now (the mission-runner "tick" maps here) |
@@ -160,6 +162,34 @@ Guarantees a driver can rely on:
   silently losing the schedule.
 - Job-level events are emitted by the job wrapper alone; a skill emits its
   own surface events — never both for one failure (AD-12).
+- **Run-finish capture (1.7.0):** the executing wrapper's every terminal
+  transition (`finish`, `cancel`, core close) captures the run handoff's
+  `deltas[]` into the per-project reconciliation queue
+  (`~/.tk-studio/projects/<key>/knowledge/reconciliation-queue.jsonl`,
+  deduped per `knowledge.schema.json`). Boundary handoffs capture too
+  (`tk-studio-session`), so both hooks are idempotent by the dedupe key; a
+  capture problem never fails the run — no new driver verb is required,
+  capture rides `finish`.
+
+### KB-injection directive (1.7.0)
+
+An `invoke-skill` directive (submit/wake above) names the run's
+provisional-knowledge artifacts in a `knowledge` field:
+
+```json
+"knowledge": {
+  "spine": {"path": "~/.tk-studio/projects/<key>/knowledge/spine.md", "present": true},
+  "seed":  {"path": "~/.tk-studio/projects/<key>/runs/<run-id>/seed.md", "present": false}
+}
+```
+
+A driver SHOULD inject the contents of each `present` artifact into the
+prompt/context of the segment it executes — provisional knowledge
+supersedes canonical in-flight, and the artifact carries its own supersede
+header (`knowledge.schema.json`). The injection *act* stays driver-side
+(AD-2): the studio names the paths and never renders another harness's
+prompts. Aid, not gate: an absent, stale, or invalid artifact is never a
+reason to skip, delay, or fail the run.
 
 ## 5. Model & effort override API
 
@@ -182,7 +212,9 @@ value.
 
 ## 6. Drift-check invocation
 
-The AD-13 activation check — three-way, loud, read-only:
+The AD-13 activation check — four-plane (bmad-base; plugin, including
+harness loadability; store; vault), loud, read-only (DW-3 wording fold-in,
+1.7.0):
 
 ```bash
 uv run "$PLUGIN_ROOT/skills/tk-studio-activate/scripts/drift_check.py" --directory <project-root> [--guided]
@@ -207,7 +239,7 @@ named seam:
 | 1 | Ownership: connector is a ClaudeOS plugin; tk-studio never imports ClaudeOS | **Covered** — AD-2 boundary; this contract is the entire interface |
 | 2 | The driver contract surface: per-skill headless invocation, status schema, job/scheduler model, model/effort API, drift-check | **Covered** — §2, §3, §4, §5, §6 |
 | 3 | Reference-harness role: mission runner is the conformance target; direct headless invocation until then | **Covered** — §1 (direct invocation is a conforming driver); suite in `conformance/` (ST-5.4) |
-| 4 | ClaudeOS mechanics to bridge: mission tick ↔ `wake` (§4); missions.json ↔ job definitions (`job.schema.json`, ST-6.1 seam); handoff protocol ↔ resumable run workspaces (`~/.tk-studio/projects/<key>/runs/`); auth preflight (§1); runner sharp edges (e.g. dirty-tree silent-skip) stay connector-side | **Covered/seamed** — mappings named; Research→Knowledge Lifecycle port is **deferred** (spine Deferred list: runner-side halves move council-side behind this contract, ClaudeOS as first driver) and is landing story-by-story as Epic 9: the session surface (`tk-studio-session`, ST-9.2 — handoff/resume with `deltas[]` per `knowledge.schema.json`), the research anchor surface (ST-9.3 — findings optionally cite seed anchors; `research.py seed|spine` land the per-run seed and the project spine per `knowledge.schema.json`), the capture/queue/routing surface (ST-9.4 — boundary handoffs and the wrapper's every terminal transition capture handoff deltas into the per-project reconciliation queue, deduped per `knowledge.schema.json`; `reconcile.py route` renders the routing doc beside it, pure, applying nothing), and the promotion gate (ST-9.5 — `tk-studio-knowledge`'s promote-draft verb drafts queued corrections from the rendered routing doc into ordinary `kb/` files on a feature branch behind a membrane PR: review is the gate, nothing auto-applies; the `knowledge-promotion` taxonomy event and its emission land together at 1.7.0, sole emitter the promotion skill) ship plugin-side with their conformance manifest rows as their driver-visible definitions; the §2 rows and the knowledge surfaces arrive with the deliberate 1.7.0 MINOR bump (ST-9.6, DW-1/DW-3 fold in) |
+| 4 | ClaudeOS mechanics to bridge: mission tick ↔ `wake` (§4); missions.json ↔ job definitions (`job.schema.json`, ST-6.1 seam); handoff protocol ↔ resumable run workspaces (`~/.tk-studio/projects/<key>/runs/`); auth preflight (§1); runner sharp edges (e.g. dirty-tree silent-skip) stay connector-side | **Covered** (1.7.0) — mappings named; the Research→Knowledge Lifecycle port (spine Deferred list: runner-side halves move council-side behind this contract, ClaudeOS as first driver), deferred through 1.6.0, landed story-by-story as Epic 9 and is published here at 1.7.0 (ST-9.6): the session surface (`tk-studio-session` §2 row — handoff/resume with `deltas[]` per `knowledge.schema.json`), the research anchor surface (changed `tk-studio-research` §2 row — `research.py seed\|spine`, findings optionally citing seed anchors), run-finish capture riding the wrapper's terminal transitions (§4 note — no new verb), the KB-injection directive (§4 — spine/seed paths named on `invoke-skill` directives, the injection act driver-side per AD-2), and the promotion gate (`tk-studio-knowledge` §2 row — drafts behind the membrane PR; `emit` the sole `knowledge-promotion` emitter, exactly once per merged promotion PR, reconciled against the promotions record) |
 | 5 | O8 linkage: generalized runner lands council-side, ClaudeOS first driver | **Covered** — AD-10 hybrid ruled; §4 is the substrate-neutral surface the runner binds to |
 | 6 | ClaudeOS remains the multi-project UI; the studio grows no UI | **Covered** — this contract exposes machine-readable status only (status blocks, verbs, registry/ledger schemas); dashboards read, studio serves |
 
@@ -216,7 +248,11 @@ named seam:
 A surface is not done until the shipped suite (`conformance/`, ST-5.4)
 proves it against this contract: valid terminal status block, no interactive
 prompt, auth preflight before any external call, `blocked` (not a hang) on
-ambiguity. Failures emit `headless-failure` events naming surface and
+ambiguity, and the suite's `unrunnable-core` assertion — every SKILL.md
+carries the canonical unrunnable-core discipline paragraph (a denied or
+unavailable deterministic core ends `blocked` with the block naming it,
+never a question; DW-3 fold-in, 1.7.0). Failures emit `headless-failure`
+events naming surface and
 assertion (taxonomy §`headless-failure`). A connector implementing this
 contract SHOULD run the same suite through itself — passing it is the
 definition of a conforming driver.
