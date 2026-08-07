@@ -65,14 +65,18 @@ class DriverContractTestCase(unittest.TestCase):
     # --- AC 1b: own semver + change policy
 
     def test_carries_its_own_semver_and_change_policy(self):
-        # 1.1.0..1.7.0 = ST-6.2/6.4/7.1/7.2/8.1/8.2/9.6 additive surfaces
-        # (MINOR per policy; 1.7.0 is the Epic 9 knowledge-port bump)
-        self.assertRegex(self.text, r"\*\*1\.7\.0\*\*")
+        # 0.1.1..0.1.7 = ST-6.2/6.4/7.1/7.2/8.1/8.2/9.6 additive surfaces
+        # (0.1.7 is the Epic 9 knowledge-port bump; renumbered 2026-08-07
+        # from the 1.x line — pre-1.0 semver for a new product, 1.N.0 →
+        # 0.1.N, the 0.1 line the compatibility pin)
+        self.assertRegex(self.text, r"\*\*0\.1\.7\*\*")
         self.assertIn("Change policy", self.text)
         self.assertIn("MAJOR", self.text)
         self.assertRegex(self.text, r"[Bb]reaking")
+        # the renumber mapping stays documented — old references resolve
+        self.assertIn("1.N.0 → 0.1.N", self.text)
 
-    # --- ST-9.6: the 1.7.0 knowledge-port surfaces are published
+    # --- ST-9.6: the 0.1.7 knowledge-port surfaces are published
 
     def test_publishes_the_knowledge_port_rows(self):
         # the §2 rows name their deterministic cores and verbs
@@ -121,8 +125,8 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertEqual([r[0] for r in rows], ["1", "2", "3", "4", "5", "6"])
 
     def test_deferred_items_name_their_seam(self):
-        # the port's deferral history stays named (deferred through 1.6.0,
-        # landed at 1.7.0) — a reader can trace the seam's closure
+        # the port's deferral history stays named (deferred through 0.1.6,
+        # landed at 0.1.7) — a reader can trace the seam's closure
         self.assertIn("deferred", self.text.lower())
         self.assertIn("Research→Knowledge Lifecycle", self.text)
         self.assertIn("landed story-by-story as Epic 9", self.text)
