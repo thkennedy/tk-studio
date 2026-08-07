@@ -491,6 +491,25 @@ def create_run(defn: dict, key: str) -> dict:
     return record
 
 
+def atomic_write_text(path: Path, text: str) -> None:
+    """Land a text artifact atomically (mkstemp + fsync + replace — the same
+    discipline as run.json): a killed process never leaves a torn file. The
+    knowledge artifacts ride this because their append-only anchor checks
+    read the previous file back — a truncated write would silently shrink
+    the anchor record (invariant 1)."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name,
+                               suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
 def workspace_path(key: str, run_id: str) -> Path:
     return runs_root(key) / run_id
 
