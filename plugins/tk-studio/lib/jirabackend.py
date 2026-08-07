@@ -19,7 +19,7 @@ round-trip stable (AD-5): canonical `review` promotes as a transition into
 the in-progress category, and an unchanged backend status on pull-back is an
 echo, so the finer local value survives.
 
-Auth (AD-7, dps ISS-008): API token only, never OAuth. The token comes from
+Auth (AD-7, tk-council ISS-008): API token only, never OAuth. The token comes from
 the JIRA_API_TOKEN environment variable alone — never any config file
 (AD-3); the account email from JIRA_EMAIL or `planning.jira.email`; site and
 project key from `planning.jira.site` / `planning.jira.project_key`. The
@@ -517,7 +517,7 @@ def _resolve_settings(project_root: Path, runtime: dict | None) -> tuple[dict, l
         settings["token"] = token
     else:
         gaps.append(f"{TOKEN_ENV} is not set (headless Jira auth is "
-                    f"API-token, never OAuth — AD-7, dps ISS-008)")
+                    f"API-token, never OAuth — AD-7, tk-council ISS-008)")
     return settings, gaps
 
 

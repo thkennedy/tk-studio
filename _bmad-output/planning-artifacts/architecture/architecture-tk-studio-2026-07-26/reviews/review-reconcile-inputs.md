@@ -28,7 +28,7 @@ Method: each input read in full; every requirement, ruling, and constraint check
 - **Roles:** role-before-routing, role × project two-dimensional recommendation, evidence + explicit confirmation, v1 = direction-giver + developer, new roles as configuration (AD-17).
 - **Layer stack / ClaudeOS separation:** depends-downward-only, driver contract as the sole upward surface, fully usable without ClaudeOS, connector deferred ClaudeOS-side (AD-2, AD-11, Deferred).
 - **Operations:** dual-mode invariant with JSON status block and no-prompt/blocked-halt (AD-11); job-as-data hybrid (AD-10) matching the O8 framing and the job-definition placement question (generic types → plugin, instances → project config, run state → working data); model/effort conservative defaults with the exact precedence chain (AD-14); session discipline — boundary handoffs, resumable run workspaces (conventions).
-- **Scope-out honored:** no dps personas/UE content, no bespoke runner, no cross-project KB (O4 out with seam reserved), connector out / contract in, distribution hardening deferred.
+- **Scope-out honored:** no tk-council personas/UE content, no bespoke runner, no cross-project KB (O4 out with seam reserved), connector out / contract in, distribution hardening deferred.
 - **Success criteria 1–6, 8** each have a traceable home (AD-13/17, AD-1/13, AD-3, AD-4/16, AD-9 + Deferred overlay seam, AD-11, conventions).
 
 ### Did NOT land / landed weakened
@@ -61,7 +61,7 @@ Method: each input read in full; every requirement, ruling, and constraint check
 1. **CONTRADICTION — AD-1's "do not reopen" inverts the ruling's own framing.** The O1 ruling is explicit, twice: it is "blessed as the **working answer**" and "This is the working answer the experiment will correct — **not a final answer; the measurement loop exists to revise it**." Revisability-by-measurement is the ruling's governing reframe (its first section is titled "The reframe (governs everything below)"). AD-1 closes with "Ruled 2026-07-26; **do not reopen**" — foreclosing exactly the revision channel the ruling institutionalizes. The spine must honor O1 exactly; this clause contradicts its letter and its spirit. Fix: replace with something like "Ruled 2026-07-26; revisit only on evidence from the measurement loop (AD-12), not by relitigation."
 2. **Base-update integration PR — DROPPED.** The ruling's base-update design: "bump the pin, run the upstream installer, **produce an integration PR for review**. This recovers M1's one genuine virtue (a reviewable upstream diff) without owning a fork." The spine names `tk-studio-base-update` (roster + capability map) and AD-1 covers running the installer at the pin, but the PR-for-review mechanic appears nowhere — AD-12's PR membrane covers only measurement ledgers. The reviewable-upstream-diff virtue the ruling deliberately recovered is lost as stated.
 3. **Wrapper disposability tone softened.** "the wrapper stays thin and **disposable (v7 horizon)**" — the spine keeps the wrapper thin structurally but never records the disposability intent or the v7 horizon, which is the design pressure that keeps Lockstep thin against upstream collision (also a brief moat mitigation). Minor.
-4. **Unblocker task (dps-council extraction) untracked.** "Unblocker task (**not optional**): Extract dps-council from `D:\ClaudeOS\dps-council.rar` into its own new private git repo … Frees the harvest." The spine adopts harvested patterns whose source this task frees (issue-ledger discipline in AD-12, migration safety in AD-16) but neither lists the extraction as a precondition nor mentions it in Deferred. Arguably backlog material rather than spine material — but the spine's Deferred list does carry comparable operational notes, and this one is flagged "not optional." Minor.
+4. **Unblocker task (tk-council extraction) untracked.** "Unblocker task (**not optional**): Extract tk-council from `D:\ClaudeOS\tk-council.rar` into its own new private git repo … Frees the harvest." The spine adopts harvested patterns whose source this task frees (issue-ledger discipline in AD-12, migration safety in AD-16) but neither lists the extraction as a precondition nor mentions it in Deferred. Arguably backlog material rather than spine material — but the spine's Deferred list does carry comparable operational notes, and this one is flagged "not optional." Minor.
 
 ---
 
@@ -109,7 +109,7 @@ AD-4 declares stock BMad artifacts in `_bmad-output/` "ARE the canonical local r
 | 7 | Low | Wrapper "disposable (v7 horizon)" intent unrecorded | o1-decision | AD-1 |
 | 8 | Low | Routing table + plan-headroom-aware defaults not carried | A6 model routing | AD-14 |
 | 9 | Low | Notification-driven wakeups vs blind polling not stated | A6 loops | AD-10 |
-| 10 | Low | O1 "not optional" unblocker (dps-council extraction) untracked | o1-decision | Deferred |
+| 10 | Low | O1 "not optional" unblocker (tk-council extraction) untracked | o1-decision | Deferred |
 | 11 | Low | "No studio UI; dashboards stay ClaudeOS" constraint not restated | A7 dossier item 6 | — |
 | 12 | Low | Canonical-plane ambiguity under default backlog-md binding (internal, flagged for clarity) | — | AD-4 / seed |
 

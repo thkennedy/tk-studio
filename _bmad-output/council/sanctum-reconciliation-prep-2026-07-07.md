@@ -33,7 +33,7 @@ piecemeal moves are unsafe while members run in parallel windows.
 - **ISS-007** (High) -- OS-role sanctum void on the shared root: only Alya's sanctum
   exists there; Yui's is empty (she scoped a mission blind); Reina's was born
   per-project in ClaudeOS. Disk path: `<canonical_root>/commons/issues-ledger.md`
-- `<canonical_root>` on this machine = `C:/Users/kenne/Perforce/dps-council/canonical`
+- `<canonical_root>` on this machine = `C:/Users/kenne/Perforce/tk-council/canonical`
 
 ## Three constraints Alya holds (fixed AC for whoever scopes this)
 
@@ -70,11 +70,11 @@ piecemeal moves are unsafe while members run in parallel windows.
 
 ## NEW FINDING (2026-07-07, Alya) -- blocks the ADR-0002 premise
 
-The dps-council repo `.gitignore` ignores **both** `canonical/` (line 2) and
+The tk-council repo `.gitignore` ignores **both** `canonical/` (line 2) and
 `shared-memory/` (line 1). Consequences:
 
 - Reina's ADR-0001, ADR-0002, and ISS-007 exist on disk but are **not under git
-  version control** -- they cannot be committed to the dps-council repo as-is.
+  version control** -- they cannot be committed to the tk-council repo as-is.
 - Every shared-root sanctum (Alya's, and any future member's) is likewise
   **gitignored** -- so the "distributed via the git plugin" model that ADR-0002
   assumes **does not exist yet**.
@@ -86,7 +86,7 @@ via git" needs a separate distribution repo or a different mechanism. Either way
 a structural distribution decision, deliberately left for a fresh session.
 
 **Issues-ledger candidate (Reina to record, her domain):** "ISS-008 -- shared-root
-and canonical are gitignored in the dps-council plugin repo; contradicts ADR-0002's
+and canonical are gitignored in the tk-council plugin repo; contradicts ADR-0002's
 git-distribution premise." Not written to the ledger yet because the ledger itself
 lives under the gitignored `canonical/` -- logging it there would not make it durable
 either. Captured HERE (ClaudeOS repo, tracked) so it survives.

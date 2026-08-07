@@ -1,13 +1,13 @@
-# Evaluation: dps-council Plugin + Packaging Fork (2026-07-25)
+# Evaluation: tk-council Plugin + Packaging Fork (2026-07-25)
 
 - **Status:** Evaluation only. No decision made; the packaging direction goes to a
   council debate (forge-idea / party-mode) before any process starts. Tim's ruling
   2026-07-25: "debate it first, evaluation report only for now."
-- **Source inspected:** `dps-council.rar` (added to `D:\ClaudeOS`), a full extract of
+- **Source inspected:** `tk-council.rar` (added to `D:\ClaudeOS`), a full extract of
   the marketplace repo at `main` @ `d26a67f` -- including the git-ignored,
   Perforce-shared trees (`canonical/`, `shared-memory/`, `_bmad/`, `.agents/`,
-  `.claude/`). Real repo home: the Perforce working dir (`...\Perforce\dps-council`,
-  git origin `DirtyPearlStudios/claude-plugins`).
+  `.claude/`). Real repo home: the Perforce working dir (`...\Perforce\tk-council`,
+  git origin: the pre-rename upstream `claude-plugins`).
 - **Purpose:** (1) ground-truth inventory, (2) debts worth fixing under ANY direction,
   (3) frame the packaging fork so the debate argues about the right thing.
 - ASCII-only.
@@ -16,13 +16,13 @@
 
 ## 1. What exists (inventory summary)
 
-The repo is the `dps-local` marketplace hosting one plugin, `dps-council` v0.7.1
+The repo is the `tk-local` marketplace hosting one plugin, `tk-council` v0.7.1
 (1,521 tracked files of 1,548 total tracked; ~3,600 files on disk counting the
 ignored trees).
 
 | Layer | Content | Verdict |
 |---|---|---|
-| Council IP | 17 `dps-*` skills (11 persona-agent + 6 workflow), 11 thin `agents/` subagent wrappers, domain-profile registry + detector/onboarder scripts | The real asset. Keep the design. |
+| Council IP | 17 `tk-*` skills (11 persona-agent + 6 workflow), 11 thin `agents/` subagent wrappers, domain-profile registry + detector/onboarder scripts | The real asset. Keep the design. |
 | Vendored BMad | 104 skills (71 `bmad-*`, 33 `gds-*`) + 7 framework modules, BMad 6.10.0, produced by `tools/vendor_bmad.py` | The packaging question. G2 of the in-flight mission, merged 2026-07-23. |
 | Knowledge base | `canonical/` (103 files, 25 MB, Perforce-shared, git-ignored) | Only `ue/` (heavily) and `commons/` (lightly) hold real content. See section 3. |
 | Legacy memory | `shared-memory/` = Alya's sanctum only (T1 on shared VCS -- the defect the mission exists to fix) | G3-G5 NOT STARTED; per-user store designed but unmerged. |
@@ -35,7 +35,7 @@ Key mechanical facts:
   No hooks, no commands, no MCP config, no settings. Everything wires by directory
   convention (`skills/`, `agents/`). Only path variable used: `${CLAUDE_PLUGIN_ROOT}`.
 - The 11 `agents/*.md` are ~1 KB delegation wrappers ("invoke Skill
-  `dps-council:<name>` as your FIRST action"), deliberately NOT `skills:` frontmatter
+  `tk-council:<name>` as your FIRST action"), deliberately NOT `skills:` frontmatter
   preloads (bare paths would rebase and the rebirth ritual would be skipped).
 - Routing is data-driven end to end: Alya builds the live roster from
   `domain-profiles/<council_domain>.json`; the tables in her SKILL.md are renders of
@@ -47,8 +47,8 @@ Key mechanical facts:
 
 ## 2. Strengths (preserve under any direction)
 
-1. **Clean separation already exists.** The 104 vendored skills carry ZERO dps
-   contamination (verified by grep for `dps-council|dps_|council_domain` -- one
+1. **Clean separation already exists.** The 104 vendored skills carry ZERO tk-council
+   contamination (verified by grep for `tk-council|tk_|council_domain` -- one
    incidental substring hit in a gds knowledge doc). All coupling is machine-applied
    by `vendor_bmad.py`: path rewrites (178 files), 2 quirk patches, 1 resolver patch.
    Consequence: re-packaging is cheap. The council does not actually depend on WHERE
@@ -71,11 +71,11 @@ Key mechanical facts:
 
 | # | Debt | Where | Severity |
 |---|---|---|---|
-| D1 | Three memory models coexist: Alya cross-project on shared VCS; 10 specialists project-local (`{project-root}/_bmad/memory/dps-agent-*/`); designed per-user store (`~/.dps-council/`) implemented ONLY on an unmerged branch (`feat/mission-single-bmad-instal-stand-up-per-user-council-store-generali`) that is not an ancestor of main. On main, `lib/` holds nothing but stale bytecode. Store dir provisioned but EMPTY. | plugin `lib/`, `shared-memory/`, project repos | HIGH |
-| D2 | SECURITY: Alya's `MEMORY.md` (shared-memory, Perforce-shared) contains an Atlassian MCP token suffix and a dead-token list. Same class as the Hermes key leak. Scrub now; do not wait for the G4 re-home. | `shared-memory/dps-agent-orchestrator/MEMORY.md` | HIGH |
-| D3 | Shipped dead weight: 14 `__pycache__` dirs inside the plugin incl. bytecode for `test_check_plugin_version` whose SOURCE exists nowhere in the repo; empty `lib/` on main. | `plugins/dps-council/**` | MED |
+| D1 | Three memory models coexist: Alya cross-project on shared VCS; 10 specialists project-local (`{project-root}/_bmad/memory/tk-agent-*/`); designed per-user store (`~/.tk-council/`) implemented ONLY on an unmerged branch (`feat/mission-single-bmad-instal-stand-up-per-user-council-store-generali`) that is not an ancestor of main. On main, `lib/` holds nothing but stale bytecode. Store dir provisioned but EMPTY. | plugin `lib/`, `shared-memory/`, project repos | HIGH |
+| D2 | SECURITY: Alya's `MEMORY.md` (shared-memory, Perforce-shared) contains an Atlassian MCP token suffix and a dead-token list. Same class as the Hermes key leak. Scrub now; do not wait for the G4 re-home. | `shared-memory/tk-agent-orchestrator/MEMORY.md` | HIGH |
+| D3 | Shipped dead weight: 14 `__pycache__` dirs inside the plugin incl. bytecode for `test_check_plugin_version` whose SOURCE exists nowhere in the repo; empty `lib/` on main. | `plugins/tk-council/**` | MED |
 | D4 | Doc drift: `skills/README.md` stale by 1 agent + 6 workflow skills and contradicts `tools.json`; BUILD-CONTRACT cites dead `plugin/skills/` layout; `kenne`-era absolute paths pervade docs; repo README self-name mismatch; TWO conflicting G0-G8 numberings (MIGRATION-RUNBOOK cutover vs mission spec) both live. | root docs, `skills/README.md` | MED |
-| D5 | Alya's SKILL.md routing tables duplicate the profile JSONs (documented as renders, but they already drifted once vs `tools.json`). Consider generating them or trimming to pointers. | `dps-agent-orchestrator/SKILL.md` | LOW |
+| D5 | Alya's SKILL.md routing tables duplicate the profile JSONs (documented as renders, but they already drifted once vs `tools.json`). Consider generating them or trimming to pointers. | `tk-agent-orchestrator/SKILL.md` | LOW |
 | D6 | ~42 MB duplicated vendor source (`.agents/` + `.claude/`, byte-identical) at repo root; only `vendor_bmad.py --source` consumes it. Under a slim-plugin direction it disappears; under bundling, consider a throwaway staging dir instead. | repo root | LOW |
 | D7 | Vendor-tool nits from the G2 gate (all LOW, still open): dead `FRAMEWORK_EXCLUDE` constant, unused `verify(source)` param, `--check` cannot detect content drift. Plus open question: how the resolver fix was authored-but-uncommitted. | `tools/vendor_bmad.py`, MISSION-STATUS | LOW |
 | D8 | Stale 0.7.0 plugin cache hazard (documented in MISSION-STATUS): old cache carries `_bmad/` incl. `core/` at its root and a plain-upstream resolver -> silent wrong-config for ~4 legacy-path skills. G6/G7 (update + version awareness) are the durable fix. | user plugin cache | MED |
@@ -99,7 +99,7 @@ The debate should settle this ONCE, with the reversal cost on the table.
 ### 4.2 Options
 
 **A. Slim plugin over stock BMad** (evaluator's recommendation, matches Path A)
-- Plugin ships ONLY dps content (~120 files): 17 skills, 11 agents, profiles, lib.
+- Plugin ships ONLY tk-council content (~120 files): 17 skills, 11 agents, profiles, lib.
 - BMad installed per project via upstream installer; coupling by SKILL NAME
   (already proven by the external-roster profiles), never by path.
 - Kills: the vendor pipeline, the resolver fork, the 42 MB vendor source, D6/D7/D8's
@@ -116,18 +116,18 @@ The debate should settle this ONCE, with the reversal cost on the table.
   and every upstream layout change lands on the anchored patches first.
 
 **C. BMad external module(s) + micro-plugin**
-- Repackage dps as a proper external module (like tea v1.19.0 / gds v0.6.0):
+- Repackage tk-council as a proper external module (like tea v1.19.0 / gds v0.6.0):
   installer-managed versioning, `bmad install` handles upgrades -- modules are the
   sanctioned extension point ("back to modules" literally).
 - BUT: no machine-wide install, and BMad modules cannot ship Claude Code `agents/`
   subagent wrappers -- a micro-plugin is needed anyway. Effectively A with extra
-  packaging; viable as a PHASE 2 of A (the dps skills already use `customize.toml`
+  packaging; viable as a PHASE 2 of A (the tk-council skills already use `customize.toml`
   and the help-CSV conventions, so emitting a module manifest later is incremental).
 
 ### 4.3 What is orthogonal (carries forward under ALL options)
 
 - The three-tier memory design (G1 doc, gate-cleared): per-user store, promotion is
-  the membrane, `dps_shared_root -> dps_user_root` rename (RATIFIED 2026-07-20),
+  the membrane, `tk_shared_root -> tk_user_root` rename (RATIFIED 2026-07-20),
   closed-inventory + no-delete-before-clearance ordering, sanctum-collapse merge
   contract. Nothing in the packaging fork touches it.
 - The domain-profile registry and adaptive onboarding.
@@ -150,7 +150,7 @@ The debate should settle this ONCE, with the reversal cost on the table.
    (advanced-elicitation, party-mode)?
 5. If A wins: what is the de-vendoring teardown ordering, and does it gate on the
    same closed-inventory rules as G5? (It should.)
-6. If C ever runs: which parts of dps are BMad-module-shaped (config, help,
+6. If C ever runs: which parts of tk-council are BMad-module-shaped (config, help,
    customize) vs plugin-shaped (agents, marketplace), and is the split worth two
    artifacts?
 

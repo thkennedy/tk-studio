@@ -3,18 +3,18 @@
 **Scoped by:** Yui (task planner) · **Routed by:** Alya · **Date:** 2026-07-15
 **Status:** DRAFT — awaiting Tim's review of open questions before mission creation
 **Source brief:** `_bmad-output/council/brief-bmad-consolidation-2026-07-15.md`
-**target_repo:** `dps-council` (plugin + canonical live there); several goals also touch the 4 project repos.
+**target_repo:** `tk-council` (plugin + canonical live there); several goals also touch the 4 project repos.
 
 ## Intent
 
-Collapse the studio's BMAD + council footprint to a single source of truth: BMAD core bundled into the dps-council plugin, delivered once per machine, with council memory re-homed onto a three-tier model that is team-safe (multi-user) from day one. Eliminate ~548 duplicated skill copies, three coexisting council generations, and the Cursor-era `.agents` mirror — without losing a byte of real council history. Add the plugin-maintenance loop that keeps every dev current: agent-driven updates plus an orchestrator version-check on birth/rebirth.
+Collapse the studio's BMAD + council footprint to a single source of truth: BMAD core bundled into the tk-council plugin, delivered once per machine, with council memory re-homed onto a three-tier model that is team-safe (multi-user) from day one. Eliminate ~548 duplicated skill copies, three coexisting council generations, and the Cursor-era `.agents` mirror — without losing a byte of real council history. Add the plugin-maintenance loop that keeps every dev current: agent-driven updates plus an orchestrator version-check on birth/rebirth.
 
 ## Locked decisions (fixed constraints — not reopened by this mission)
 
-1. BMAD core is **bundled into the dps-council plugin** (shared release cycle with the council).
+1. BMAD core is **bundled into the tk-council plugin** (shared release cycle with the council).
 2. **Three-tier memory model**, governed by *promotion is the membrane*: T1 Identity (sanctums, per-user cross-project), T2 Working state (per-user-per-project-per-session), T3a Promoted project-specific (project VCS), T3b Promoted domain-general (`canonical/<domain>`).
 3. **Sanctums are per-user, not per-team.** Team learning happens only through promotion (T3).
-4. **Multi-user fix:** T1 + T2 move to a per-user store OFF the shared repo; the shared dps-council repo holds only T3b.
+4. **Multi-user fix:** T1 + T2 move to a per-user store OFF the shared repo; the shared tk-council repo holds only T3b.
 
 ## Governing ordering rule (inviolable)
 
@@ -28,19 +28,19 @@ Collapse the studio's BMAD + council footprint to a single source of truth: BMAD
 *Owner: plugin maintainer (dev); verify mechanics with the claude-code-guide agent.*
 Depends on: nothing. **Blocks the council's Route/Convene model** — should land BEFORE the rest of this mission, or ship as its own standalone mission first.
 
-Rationale (verified 2026-07-15): the plugin ships 17 skills and ZERO agents, so `Agent(subagent_type: "dps-council:dps-agent-*")` fails ("Agent type not found"). The orchestrator cannot spawn specialists, so Route/Synthesize/Convene collapse to an in-conversation Skill handoff (no multi-specialist Convene). Confirmed docs: plugins CAN ship subagents via an auto-discovered `agents/` dir, namespaced `dps-council:<name>`.
+Rationale (verified 2026-07-15): the plugin ships 17 skills and ZERO agents, so `Agent(subagent_type: "tk-council:tk-agent-*")` fails ("Agent type not found"). The orchestrator cannot spawn specialists, so Route/Synthesize/Convene collapse to an in-conversation Skill handoff (no multi-specialist Convene). Confirmed docs: plugins CAN ship subagents via an auto-discovered `agents/` dir, namespaced `tk-council:<name>`.
 
-1. Add an `agents/` dir to the plugin source (`C:/Users/kenne/Perforce/dps-council/plugins/dps-council/agents/`) with one **thin wrapper agent per persona specialist** (the 11 `dps-agent-*` skills). Frontmatter `name` = skill basename; description/model sourced from the skill's `customize.toml [agent]`.
+1. Add an `agents/` dir to the plugin source (`C:/Users/kenne/Perforce/tk-council/plugins/tk-council/agents/`) with one **thin wrapper agent per persona specialist** (the 11 `tk-agent-*` skills). Frontmatter `name` = skill basename; description/model sourced from the skill's `customize.toml [agent]`.
 2. Each wrapper **delegates to its skill** — skills stay the single source of truth for persona/sanctum. Prefer the agent frontmatter `skills:` preload field, or a Skill-tool invocation — whichever correctly preserves the skill's **root-relative path resolution + rebirth ritual**. VERIFY: skills use bare paths resolving from skill root, so a naive `Read` of SKILL.md into an agent body would break internal `references/...` refs.
 3. Do NOT fork persona text into agent files. Do NOT modify the 17 skills — this ADDS agents.
-4. Bump version in BOTH `plugins/dps-council/.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` (lockstep, confirmed pattern); reinstall so the read-only cache re-syncs.
+4. Bump version in BOTH `plugins/tk-council/.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` (lockstep, confirmed pattern); reinstall so the read-only cache re-syncs.
 
 **AC**
-- The Agent tool resolves `dps-council:dps-agent-task-planner` and every persona specialist.
+- The Agent tool resolves `tk-council:tk-agent-task-planner` and every persona specialist.
 - A spawned specialist runs its OWN rebirth from the per-user store and returns real output to a still-live orchestrator.
 - RT and CN work: a Convene dispatches >=2 specialists (in parallel) and Alya synthesizes their returns.
-- `/dps-council:<skill>` slash + Skill-tool invocation still work — no regression on the 17 skills.
-- Branch + PR on the git source (origin: `DirtyPearlStudios/claude-plugins`); ASCII-only; code-review before merge.
+- `/tk-council:<skill>` slash + Skill-tool invocation still work — no regression on the 17 skills.
+- Branch + PR on the git source (origin: the pre-rename upstream (`claude-plugins`)); ASCII-only; code-review before merge.
 - (Non-blocking) file the "phantom agent-type advertising" behavior via `/feedback`.
 
 Note: G0 is intentionally independent of the memory/BMAD work. It can be pulled out as its own mission that ships first — recommended, since it unblocks ALL council multi-specialist work, not just this mission.
@@ -55,10 +55,10 @@ Depends on: nothing (entry point).
 **AC**
 - Target-state doc exists and is Tim-approved.
 - All three open parameters have decided, written values.
-- Config schema delta enumerated: new/changed keys, `dps_shared_root` semantics, per-user-store key, T3a-location key. Migration of existing `config.local.yaml` files specified.
+- Config schema delta enumerated: new/changed keys, `tk_shared_root` semantics, per-user-store key, T3a-location key. Migration of existing `config.local.yaml` files specified.
 - No code changes in this goal — design only.
 
-### G2 — Bundle BMAD core into the dps-council plugin
+### G2 — Bundle BMAD core into the tk-council plugin
 *Owner: plugin maintainer (dev).*
 Depends on: G1. **Precedes** all per-project BMAD deletions (G5).
 
@@ -67,7 +67,7 @@ Depends on: G1. **Precedes** all per-project BMAD deletions (G5).
 3. Verify plugin-hosted BMAD resolves `{project-root}/_bmad/core/config.yaml` (pattern already proven by Alya's 2026-07-15 web onboarding — add a regression test that pins it).
 
 **AC**
-- Plugin ships the bmad-* skills + framework; `dps-local` source updated and installable.
+- Plugin ships the bmad-* skills + framework; `tk-local` source updated and installable.
 - A project with **no** local `bmad-*` skills runs a representative BMAD workflow via the plugin, reading its own local config. Demonstrated on ClaudeOS.
 - Plugin version bumped; plugin loads clean; any plugin-level tests/typecheck green.
 - Regression test asserts `{project-root}` config resolution from a plugin-hosted skill.
@@ -77,14 +77,14 @@ Depends on: G1. **Precedes** all per-project BMAD deletions (G5).
 Depends on: G1. **Precedes** G4 (needs a home to move T1/T2 into) and G7.
 
 1. Create the per-user store layout at the G1-decided path.
-2. Re-home `dps_shared_root` from the shared Perforce repo to the per-user store; keep `canonical_root` pointed at the shared repo (now the only thing shared there).
+2. Re-home `tk_shared_root` from the shared Perforce repo to the per-user store; keep `canonical_root` pointed at the shared repo (now the only thing shared there).
 3. Generalize Alya's shared-sanctum model to ALL specialists: every specialist's sanctum becomes per-user, cross-project, in the per-user store. Define T2 pool location as per-user-store, namespaced by project.
 
 **AC**
 - Per-user store exists with the decided layout; documented.
 - Alya AND every specialist First-Breathe/Rebirth from the per-user store, not project-local dirs.
 - A specialist activating in two different projects shares one sanctum (identity) but keeps separate per-project T2 pools.
-- `config.local.yaml` across all 4 repos updated to the new `dps_shared_root`; old shared-memory path no longer written to.
+- `config.local.yaml` across all 4 repos updated to the new `tk_shared_root`; old shared-memory path no longer written to.
 
 ### G4 — Memory migration + Reina promotion pass (GATED)
 *Owner: Reina (sole writer of promoted knowledge).*
@@ -96,15 +96,15 @@ Depends on: G3. **Is the gate** for every deletion in G5.
 4. Emit a **migration ledger**: what moved where, and an explicit per-target "cleared-to-delete" list.
 
 Priority order (by history-loss risk):
-- **Kraken-Backend `dpsbe`** (ONLY record of that project's council history — highest risk).
-- **kraken_main `dpsue`** + legacy `dpsue-agent-*` pools.
-- kraken_main / Tools / ClaudeOS new-gen `dps` pools (relocate to per-user store).
+- **Kraken-Backend `tkbe`** (ONLY record of that project's council history — highest risk).
+- **kraken_main `tkue`** + legacy `tkue-agent-*` pools.
+- kraken_main / Tools / ClaudeOS new-gen `tk-council` pools (relocate to per-user store).
 
 **AC**
 - Every pool inventoried; nothing skipped silently (explicit zero where empty).
 - Reina's promotion decisions recorded; promoted knowledge committed to the correct tier (project VCS commits are PR-gated per CLAUDE.md rule 6).
 - Migration ledger complete; **nothing deleted in this goal.**
-- Kraken-Backend `dpsbe` fully accounted for before it appears on any cleared-to-delete list.
+- Kraken-Backend `tkbe` fully accounted for before it appears on any cleared-to-delete list.
 
 ### G5 — Retirement / deletion (per-repo, gated)
 *Owner: dev, per repo.*
@@ -112,7 +112,7 @@ Depends on: G2 (for bmad-skill deletions) + G4 (for memory deletions).
 
 Per repo, delete only what is cleared:
 1. `.agents/skills/` (byte-identical Cursor mirror) and `.cursor/` dirs.
-2. Dead council generations: `dpsue-*`, `dpsbe-*`, unprefixed `dps-*`.
+2. Dead council generations: `tkue-*`, `tkbe-*`, unprefixed `tk-*`.
 3. Per-project `bmad-*` skills (now plugin-provided).
 4. Per-project `_bmad/` framework modules — leaving ONLY `config.yaml` + `config.local.yaml` (+ any T3a promoted-knowledge dir).
 
@@ -126,7 +126,7 @@ Per repo, delete only what is cleared:
 *Owner: plugin maintainer (dev).*
 Depends on: G2. Parallelizable with G3-G5.
 
-1. A skill/workflow (+ hooks as needed) that updates the installed dps-council plugin — including bundled BMAD — from the `dps-local` source to a target version, via agent interaction.
+1. A skill/workflow (+ hooks as needed) that updates the installed tk-council plugin — including bundled BMAD — from the `tk-local` source to a target version, via agent interaction.
 2. Preview/dry-run of what will change; confirm-before-apply guardrail.
 3. Handle the reload/restart seam: an updated plugin takes effect next session; the flow states this and, where possible, triggers/《prompts》 the reload.
 
@@ -146,7 +146,7 @@ Depends on: G1 (discovery mechanism), G3 (birth/rebirth touches the store), G6 (
 - On activation with a newer version available, Alya surfaces a clear notify + ask before starting work.
 - When up-to-date, no prompt (no false positives).
 - Decline path proceeds cleanly on the current version; accept path invokes G6.
-- Version compare handles the `dps-local` versioning scheme decided in G1.
+- Version compare handles the `tk-local` versioning scheme decided in G1.
 
 ### G8 — End-to-end validation + team-safe rollout proof (attended capstone)
 *Owner: Alya + Tim.*
@@ -177,22 +177,22 @@ Suggested branch-sized mini-goal count: ~2-4 per goal; G4 and G5 fan out per-rep
 
 ## Resolved parameters (Tim, 2026-07-15)
 
-1. **Per-user store path:** OS-specific — `%USERPROFILE%\.dps-council\` (Windows), `~/.dps-council/` (macOS/Linux). The resolver picks per-OS. Confirmed OFF shared VCS. (drives G1/G3)
+1. **Per-user store path:** OS-specific — `%USERPROFILE%\.tk-council\` (Windows), `~/.tk-council/` (macOS/Linux). The resolver picks per-OS. Confirmed OFF shared VCS. (drives G1/G3)
 2. **T3a promoted project-knowledge location:** under the project's `/docs/`, organized by **functional area** — NOT a `/council` subdir. Rationale (Tim): this is the *project's* knowledge, not just the council's. Reina's gate routes project-specific -> `{project}/docs/<functional-area>/`; domain-general -> `canonical/<domain>` (T3b). (drives G4/G5)
-3. **Version discovery:** compare the installed version (`installed_plugins.json`, or the cache path segment `.../0.5.0/`) against the marketplace source of record `C:/Users/kenne/Perforce/dps-council/.claude-plugin/marketplace.json` -> `plugins[].version` (kept in lockstep with the plugin's own `plugin.json` on every bump; there are no git tags). **Reload-to-apply is accepted** — plugins load at session start; the agent must clearly COMMUNICATE that a restart is needed after update, never apply silently. Optional finer signal: `gitCommitSha` in `installed_plugins.json` vs source HEAD catches same-version content drift (the cache is currently 1 commit behind source). (drives G6/G7)
+3. **Version discovery:** compare the installed version (`installed_plugins.json`, or the cache path segment `.../0.5.0/`) against the marketplace source of record `C:/Users/kenne/Perforce/tk-council/.claude-plugin/marketplace.json` -> `plugins[].version` (kept in lockstep with the plugin's own `plugin.json` on every bump; there are no git tags). **Reload-to-apply is accepted** — plugins load at session start; the agent must clearly COMMUNICATE that a restart is needed after update, never apply silently. Optional finer signal: `gitCommitSha` in `installed_plugins.json` vs source HEAD catches same-version content drift (the cache is currently 1 commit behind source). (drives G6/G7)
 4. **Subagent spawnability:** RESOLVED into new prerequisite goal **G0** (add plugin `agents/` wrappers). Verified this session: the plugin ships 17 skills / 0 agents, so specialists cannot be spawned. See G0.
 5. **Destructive-operation policy (global):** destructive ops (deletions, `p4`/git removals, marketplace overwrites) are **strongly suggested for a human to run OUTSIDE headless sessions**. The agent PROVIDES THE EXACT COMMAND it would run; the human either runs it themselves OR explicitly approves the agent to run it in-session. This supersedes the earlier "stage to CLs" framing — same spirit, generalized to all repos and all destructive steps. (governs G5 + all teardown)
 
 ## Residual minor items
 - `AGENTS.md` disposition (keep as a cross-tool convention vs remove with the non-Claude layer) — decide during G5.
-- PR target confirmed: `origin` of `C:/Users/kenne/Perforce/dps-council` is `github.com/DirtyPearlStudios/claude-plugins` (the local dir is named `dps-council`; the GitHub repo is `claude-plugins`).
+- PR target confirmed: `origin` of `C:/Users/kenne/Perforce/tk-council` is the pre-rename upstream `claude-plugins` (the local dir is named `tk-council`; the GitHub repo is `claude-plugins`).
 
 ## Surfaces accounted for (explicit)
 
-- **Plugin:** `~/.claude/plugins/cache/dps-local/dps-council/<version>/` — gains bmad-* + framework; version bump; new update skill/workflow/hooks; Alya birth/rebirth version-check.
+- **Plugin:** `~/.claude/plugins/cache/tk-local/tk-council/<version>/` — gains bmad-* + framework; version bump; new update skill/workflow/hooks; Alya birth/rebirth version-check.
 - **Per-user store (new):** T1 sanctums (all specialists) + T2 pools (per-project namespaced).
-- **Shared dps-council repo:** retains only `canonical/<domain>` (T3b); loses the per-user shared-memory role.
+- **Shared tk-council repo:** retains only `canonical/<domain>` (T3b); loses the per-user shared-memory role.
 - **Each project repo:** keeps `config.yaml` + `config.local.yaml`; gains a T3a promoted-knowledge dir; loses `.agents/`, `.cursor/`, dead council gens, `bmad-*` skills, `_bmad/` framework.
-- **Config keys:** `dps_shared_root` (re-homed), `canonical_root` (unchanged), new per-user-store + T3a-location keys.
-- **Mission runner:** consumes this as a `dps-council`-target mission; goals map to branches.
+- **Config keys:** `tk_shared_root` (re-homed), `canonical_root` (unchanged), new per-user-store + T3a-location keys.
+- **Mission runner:** consumes this as a `tk-council`-target mission; goals map to branches.
 - **Rules honored:** CLAUDE.md rule 6 (review before merge), no `p4 revert`, no P4 submit without approval, ASCII-only source.

@@ -28,7 +28,7 @@ are (their role) and what this project runs on (their confirmed working set).
 
 - Not memory: the shell carries no state between sessions and writes
   nothing, anywhere, ever. Each convening starts cold from the core's
-  resolution. No sanctum, no rebirth, no identity files (AD-9 — the dps
+  resolution. No sanctum, no rebirth, no identity files (AD-9 — the tk-council
   lesson).
 - Not a router: if the shell's presentation and the core's resolution ever
   disagree, the resolution is right and the shell is wrong.

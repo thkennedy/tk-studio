@@ -1,5 +1,5 @@
-# Local-only reference copy of the dps-council repo (design model, not part of tk-studio)
-dps-council/
+# Local-only reference copy of the tk-council repo (design model, not part of tk-studio)
+tk-council/
 __pycache__/
 *.pyc
 .tk-studio/config.local.yaml
