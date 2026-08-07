@@ -3,6 +3,7 @@
   "description": "Conformance manifest (ST-5.4, AD-19). Every shipped studio skill MUST have an entry here — the runner discovers surfaces from the plugin's skills/ tree and fails any surface missing from this manifest (and any manifest entry with no shipped skill behind it). Drives run the surface's deterministic core headless in a throwaway sandbox project with an isolated store: stdin closed, wall-clock bounded, output must be machine-readable. argv[0] is plugin-root-relative; {sandbox} substitutes the sandbox project directory.",
   "expect_semantics": {
     "json": "process completes within the timeout and stdout parses as JSON",
+    "ok": "process completes within the timeout, stdout parses as JSON, AND the parsed object carries ok=true — the drive's internal assertions all held (e2e drives whose value is the chain succeeding, not merely answering)",
     "refusal": "process completes within the timeout and refuses cleanly — nonzero exit, JSON with ok=false, or an in-band structured block proven by the declared marker (detect's ask, orchestrate's needs-onboarding) — and when a marker is declared the refusal MUST name it in stdout: an unnamed refusal (a crash, an unrelated error) gives the skill layer nothing to surface as blocked (ISS-002); never a prompt, never a hang"
   },
   "surfaces": {
@@ -115,6 +116,19 @@
           "argv": ["lib/jobrun.py", "submit", "--directory", "{sandbox}", "--id", "ghost-job"],
           "expect": "refusal",
           "marker": "no definition"
+        },
+        {
+          "assertion": "headless-clean",
+          "argv": ["contracts/conformance/e2e_knowledge.py", "--directory", "{sandbox}"],
+          "expect": "ok",
+          "note": "the ST-9.4 e2e drive — the run the source lifecycle never had: run-init -> seed -> boundary handoff with deltas -> the wrapper's finish -> queue materialized (deduped on the knowledge.schema.json key) -> routing doc rendered; every step asserted, expect ok means the chain succeeded, not merely answered"
+        },
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/reconcile.py", "capture", "--directory", "{sandbox}", "--run-id", "ghost-run"],
+          "expect": "refusal",
+          "marker": "no workspace",
+          "note": "the capture verb refuses an unknown run named — never a guess, never a silently empty queue"
         }
       ]
     },
