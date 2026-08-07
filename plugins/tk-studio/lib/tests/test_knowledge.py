@@ -470,6 +470,18 @@ class RenderRoutingTestCase(unittest.TestCase):
         # the payload text survives, flattened onto the entry's own line
         self.assertIn("INJECTED", doc)
 
+    def test_bracketed_anchor_injection_survives_only_unbracketed(self):
+        # a value carrying a bracketed anchor id must not smuggle an anchor
+        # *definition* onto a rendered surface — the renderer's own template
+        # brackets stay, injected brackets are stripped to the bare id
+        # (ST-9.5 adversarial-review finding)
+        hostile = _line(reality="also see [SPINE-A999] over there")
+        doc = knowledge.render_routing([hostile], "proj",
+                                       "2026-08-07T05:00:00Z")
+        self.assertNotIn("[SPINE-A999]", doc)
+        self.assertIn("SPINE-A999", doc)
+        self.assertIn(f"[{hostile['anchor']}]", doc)
+
 
 class PromotionEntriesTestCase(unittest.TestCase):
     """ST-9.5: queue lines -> promotion entries — grouped on delta_key,
@@ -553,6 +565,19 @@ class RenderPromotionTestCase(unittest.TestCase):
         doc = knowledge.render_promotion(hostile, "proj", "2026-08-07")
         self.assertNotIn("\n## Fabricated section", doc)
         self.assertIn("injected", doc)
+
+    def test_bracketed_anchor_injection_cannot_define_anchors(self):
+        # the promoted file becomes canonical kb — an interpolated value
+        # carrying [SPINE-A99] must not make the draft *define* an anchor
+        # (clean_inline unbrackets anchor ids; the bare id survives as
+        # readable provenance)
+        hostile = knowledge.promotion_entries([
+            _line(reality="see [SPINE-A99] which supersedes this")])
+        doc = knowledge.render_promotion(hostile, "proj", "2026-08-07")
+        self.assertEqual(knowledge.extract_anchors(doc), [])
+        self.assertIn("SPINE-A99", doc)
+        self.assertEqual(knowledge.clean_inline("x [SPINE-A9] y"),
+                         "x SPINE-A9 y")
 
     def test_clean_inline_flattens_every_separator_class(self):
         self.assertEqual(knowledge.clean_inline("a\nb c d\x85e\x00f"),
