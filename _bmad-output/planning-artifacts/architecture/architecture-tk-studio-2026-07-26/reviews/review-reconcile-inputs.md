@@ -28,7 +28,7 @@ Method: each input read in full; every requirement, ruling, and constraint check
 - **Roles:** role-before-routing, role × project two-dimensional recommendation, evidence + explicit confirmation, v1 = direction-giver + developer, new roles as configuration (AD-17).
 - **Layer stack / ClaudeOS separation:** depends-downward-only, driver contract as the sole upward surface, fully usable without ClaudeOS, connector deferred ClaudeOS-side (AD-2, AD-11, Deferred).
 - **Operations:** dual-mode invariant with JSON status block and no-prompt/blocked-halt (AD-11); job-as-data hybrid (AD-10) matching the O8 framing and the job-definition placement question (generic types → plugin, instances → project config, run state → working data); model/effort conservative defaults with the exact precedence chain (AD-14); session discipline — boundary handoffs, resumable run workspaces (conventions).
-- **Scope-out honored:** no tk personas/UE content, no bespoke runner, no cross-project KB (O4 out with seam reserved), connector out / contract in, distribution hardening deferred.
+- **Scope-out honored:** no legacy-council personas/UE content, no bespoke runner, no cross-project KB (O4 out with seam reserved), connector out / contract in, distribution hardening deferred.
 - **Success criteria 1–6, 8** each have a traceable home (AD-13/17, AD-1/13, AD-3, AD-4/16, AD-9 + Deferred overlay seam, AD-11, conventions).
 
 ### Did NOT land / landed weakened

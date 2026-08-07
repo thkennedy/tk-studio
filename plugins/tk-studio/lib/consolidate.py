@@ -3,7 +3,7 @@
 The closing half of the measurement loop: reads the merged per-user-per-machine
 files under measurements/ (they arrived through the PR membrane), clusters
 defect-shaped events into candidate defects, and maintains the living issues
-ledger with the tk row discipline — stable ISS-NNN ids assigned in order and
+ledger with the legacy-council row discipline — stable ISS-NNN ids assigned in order and
 never reused, severity High/Medium/Low, status Open/Mitigated/Resolved/Wontfix,
 rows updated in place and never deleted. Each issue names its evidence events
 and, where the evidence makes it clear, a specific fix candidate — including

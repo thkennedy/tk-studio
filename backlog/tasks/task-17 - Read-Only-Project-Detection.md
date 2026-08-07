@@ -22,6 +22,6 @@ So that recommendations are grounded and never silently guessed.
 
 **Given** a project root
 **When** detection runs
-**Then** weighted markers (files, manifests, VCS type) score candidate project types; below the confidence floor the result is "unknown — ask", never a guess (tk detector discipline)
+**Then** weighted markers (files, manifests, VCS type) score candidate project types; below the confidence floor the result is "unknown — ask", never a guess (legacy-council detector discipline)
 **And** detection performs zero writes and lists the evidence behind every scored marker
 <!-- SECTION:DESCRIPTION:END -->
