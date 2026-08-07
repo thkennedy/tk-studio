@@ -35,7 +35,7 @@ lives in resumable run workspaces under the per-user store.
    report the outcome with `finish`. Each firing of a recurring job is one
    `wake`. An `invoke-skill` directive also names the run's
    provisional-knowledge artifacts (`knowledge`: spine/seed paths with
-   `present` flags — the §4 KB-injection directive, contract 1.7.0):
+   `present` flags — the §4 KB-injection directive, contract 0.1.7):
    inject each present artifact's contents into the segment you invoke.
    Aid, not gate — an absent artifact never skips or fails the run.
 
