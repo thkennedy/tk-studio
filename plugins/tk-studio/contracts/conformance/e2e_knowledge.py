@@ -8,7 +8,9 @@ a contract driver would:
 
     run-init → seed lands → boundary handoff carries deltas → the wrapper's
     finish closes the run → the queue holds the corrections, deduped → the
-    routing doc renders beside it
+    routing doc renders beside it → the promotion gate opens (ST-9.5:
+    check sees the routing doc and the unpromoted corrections; a dry-run
+    draft walks every data gate clean)
 
 Every step is asserted; the drive prints one JSON object {ok, steps[]} and
 exits nonzero on any failed assertion, so a manifest entry with
@@ -146,6 +148,30 @@ def run(directory: str) -> dict:
                   and "applies nothing" in doc)
         detail = f"entries={routed.get('entries')}, doc={doc_path.name}"
     if not step("routing-doc", doc_ok, detail):
+        return {"ok": False, "steps": steps}
+
+    # 7 — the promotion gate sees the routing doc and the corrections
+    #     (ST-9.5: check is read-only; nothing promoted yet)
+    checked = _cli("lib/promote.py", "check", "--directory", directory)
+    corrections = checked.get("corrections") or {}
+    if not step("promotion-check", checked.get("ok") is True
+                and (checked.get("routing") or {}).get("present") is True
+                and corrections.get("unpromoted") == 2,
+                f"unpromoted={corrections.get('unpromoted')}"
+                if checked.get("ok") else checked.get("error", "")):
+        return {"ok": False, "steps": steps}
+
+    # 8 — a dry-run draft walks every data gate clean (routing doc, queue,
+    #     promoted baseline, sanitization) — the gate is open; the git
+    #     motion itself is the lib suite's job (the sandbox is not a repo)
+    drafted = _cli("lib/promote.py", "draft", "--directory", directory,
+                   "--dry-run")
+    if not step("promotion-dry-run", drafted.get("ok") is True
+                and drafted.get("result_state") == "dry-run"
+                and drafted.get("corrections") == 2
+                and drafted.get("sanitization") == "clean",
+                f"corrections={drafted.get('corrections')}"
+                if drafted.get("ok") else drafted.get("error", "")):
         return {"ok": False, "steps": steps}
 
     return {"ok": True, "run_id": run_id, "steps": steps}
