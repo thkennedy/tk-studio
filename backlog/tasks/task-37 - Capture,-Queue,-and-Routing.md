@@ -1,10 +1,10 @@
 ---
 id: TASK-37
 title: Capture, Queue, and Routing
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-08-07 04:34'
-updated_date: '2026-08-07 06:29'
+updated_date: '2026-08-07 06:30'
 labels:
   - ST-037
 milestone: Research Becomes Knowledge
