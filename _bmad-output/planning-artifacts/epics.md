@@ -175,6 +175,10 @@ A project rebinds from local planning to Jira through the designed migration wit
 The Research→Knowledge Lifecycle port (spine Deferred entry, planning pass 2026-08-06, D1–D5 ruled): research findings anchor to a per-project spine and per-run seeds, corrections ride handoffs as anchored deltas into a per-project reconciliation queue, and a routing doc drives human-gated promotion into `kb/` through the PR membrane — closing the missing findings→kb edge. Ships the deliberate contract 1.7.0 bump (DW-1, DW-3 fold in).
 **Requirements source:** planning-pass-research-knowledge-port-2026-08-06.md (no FR row — post-v1 deferred scope)
 
+### Epic 10: Observation Becomes Proposal
+Evolve-loop automation (spine Deferred entry, planning pass 2026-08-07, D1–D5 ruled): accumulated observation events cluster into evidenced, stable-id proposals in an in-repo ledger the machine drafts and only a human adopts — completing the loop AD-8 scoped, behind the proven membrane. Ships the additive contract 0.1.9 bump.
+**Requirements source:** planning-pass-evolve-loop-automation-2026-08-07.md (no FR row — post-v1 deferred scope)
+
 ## Epic 1: Install Once, Stay in Lockstep
 
 An operator clones the repo, trusts the folder, and gets the studio plugin plus a pinned BMad base with one guided flow; every activation proves the fleet is drift-free, base updates are one reviewable motion, and every install/drift event is measured from day one. (AD-1, AD-12, AD-13; dual-mode ACs per AD-11 apply to every skill story in every epic.)
@@ -876,3 +880,57 @@ So that drivers consume the lifecycle through the contract alone (AD-2) and stan
 **Given** the ClaudeOS connector
 **When** its pin bumps to 1.7.0
 **Then** `studio-jobs-tick`/`tk_invoke` honor the injection directive, connector tests stay green, and the through-connector conformance suite passes at the new check count (connector milestone)
+
+## Epic 10: Observation Becomes Proposal
+
+Evolve-loop automation per the ruled planning pass (2026-08-07): `lib/evolve.py` reads merged observation events and maintains `proposals/ledger.md` (stable `PROP-NNN` rows, consolidate-twin discipline), the `tk-studio-evolve` surface drafts on demand, and a shipped-but-undeclared recurring job type arrives with the additive contract 0.1.9 bump. (AD-3, AD-8, AD-11, AD-12; rulings: D1 proposal docs only, D2 in-repo ledger derive-only with no new taxonomy event, D3 on-demand verb + undeclared job type, D4 folded into D2, D5 declared 2026-08-07.) Drafting triggers nothing: proposals move to Adopted/Declined by human hand alone. At epic close the spine's Deferred entry *and* AD-8's "in v1" rule sentence gain the landed annotation. Contract pin stays 0.1.8 until story 10.3.
+
+### Story 10.1: Proposal Model and Ledger
+
+As a developer,
+I want a proposal core that clusters observation events into stable-id rows with the issues-ledger discipline,
+So that observed toil accumulates into an evidenced, updatable record instead of stranding unconsumed in the measurement ledger.
+
+**Acceptance Criteria:**
+
+**Given** `lib/evolve.py` (stdlib-only) and merged `measurements/*.jsonl` containing observation events
+**When** a draft run executes
+**Then** observation-shaped events cluster into candidate proposals and `proposals/ledger.md` gains or updates stable `PROP-NNN` rows (ids assigned in order, never reused; rows update in place, never deleted; Impact, Status `Draft|Under-review|Adopted|Declined`, Evidence naming events, Candidate change, Affected surfaces, Key, Opened/Updated columns per the ledger header) while defect-shaped events stay consolidate's
+**And** reruns are idempotent — stamps derive from evidence-event dates, never the wall clock — and a hand-edited Candidate-change cell is never overwritten (per-column ownership, consolidate-twin)
+
+**Given** an unparseable proposals ledger
+**When** a draft run executes
+**Then** it refuses to rewrite what it cannot update in place (named block)
+
+### Story 10.2: The Evolve Surface and the First Real Draft
+
+As an operator,
+I want a `tk-studio-evolve` skill drafting proposals on demand with per-outcome headless postures,
+So that the ledger's real accumulated observations become triageable proposals through one contract-shaped surface.
+
+**Acceptance Criteria:**
+
+**Given** the `tk-studio-evolve` skill (`draft` verb; payload `directory`, `dry_run?`)
+**When** invoked attended or headless
+**Then** behavior is identical (AD-11), the headless posture states its refusal behavior per-outcome — never a blanket exit-code rule (team agreement 5) — and every headless run ends with the JSON status block
+
+**Given** the real merged measurement data
+**When** the first draft runs
+**Then** genuine PROP rows derive from the accumulated events (the planning pass §5 grounding classes expected) and the drafting run triggers nothing beyond the ledger sync — no auto-apply, no scaffolding, no follow-on writes (D1)
+
+### Story 10.3: Contract 0.1.9, Conformance, and the Job Type
+
+As a harness author,
+I want the evolve surface published as an additive bump with conformance coverage and a shipped recurring job type,
+So that drivers reach the whole loop through the contract and recurring drafting stays one operator declaration away.
+
+**Acceptance Criteria:**
+
+**Given** driver-contract.md at 0.1.8
+**When** the bump lands
+**Then** 0.1.9 adds the `tk-studio-evolve` §2 row (blocked: directory missing; measurements outside the studio repo (AD-3); unparseable proposals ledger), `test_driver_contract.py` pins 0.1.9, a conformance manifest row drives the surface including the unparseable-ledger refusal drive, and the taxonomy is untouched (D2)
+**And** the shipped `evolve-proposals` job type lands in `jobs/` undeclared — instance declaration stays an operator call (D3) — carrying explicit `trigger` + `cadence` (the 2026-08-07 type-resolution observation)
+
+**Given** the ClaudeOS connector pinned to the 0.1 line
+**When** the through-connector suite spot-checks the new surface
+**Then** the check passes with no connector change (additive patch, same line)
