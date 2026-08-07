@@ -34,6 +34,17 @@ compact; the byte budget enforces the total), and the list is capped at
 MAX_HANDOFF_DELTAS: a boundary carrying more than 16 corrections is not a
 handoff, it is a sign the seed needs re-research.
 
+Capture (ST-9.4): a delta-carrying handoff is also captured into the
+per-project reconciliation queue at the boundary (lib/reconcile.py,
+best-effort — the handoff never fails on a capture problem; the result
+rides the response's `capture` key). Boundary capture exists because
+handoff.json is overwritten per boundary: without it, a mid-run boundary's
+corrections would vanish when the next boundary lands. The wrapper's finish
+captures again at run close; the queue's dedupe key makes both hooks
+idempotent. Duplicate identical deltas within one handoff (same anchor,
+verdict, reality — the 9.2 review's deferred finding) are a named
+rejection: one correction, stated once.
+
 Run selection: both verbs take exactly one of --run-id or --job-id. A driver
 that submitted a job knows the job id, not the minted run id; --job-id
 resolves the job's sole resumable run (zero or several → named refusal,
@@ -65,6 +76,7 @@ from pathlib import Path
 
 import job as joblib
 import knowledge
+import reconcile as reconcilelib
 
 HANDOFF_NAME = "handoff.json"
 SEED_NAME = "seed.md"
@@ -147,6 +159,17 @@ def _validated_deltas(deltas, workspace: Path) -> list[dict]:
             f"handoff carries {len(items)} deltas (max {MAX_HANDOFF_DELTAS})"
             " — deltas are pointers; a boundary with more corrections than "
             "that needs the seed re-researched, not a bigger handoff")
+    seen: dict[tuple, int] = {}
+    for index, delta in enumerate(items):
+        key = knowledge.delta_key(delta)
+        if key in seen:
+            raise SessionError(
+                f"deltas[{seen[key]}] and deltas[{index}] are the same "
+                f"correction (anchor '{key[0]}', same verdict and reality) "
+                "— one correction, stated once (the queue dedupes on "
+                "(run_id, anchor, verdict, reality); an identical repeat "
+                "adds nothing)")
+        seen[key] = index
     seed_path = workspace / SEED_NAME
     seed_text = ""
     if seed_path.is_file():
@@ -202,8 +225,17 @@ def write_handoff(project_root: Path, run_id: str, boundary_kind: str,
     checkpoint["boundary"] = handoff["boundary"]
     checkpoint["handoffs"] = checkpoint.get("handoffs", 0) + 1
     joblib.update_run(key, run_id, {"checkpoint": checkpoint})
-    return {"handoff": handoff, "path": str(path), "bytes": size,
-            "directive": END_DIRECTIVE}
+    result = {"handoff": handoff, "path": str(path), "bytes": size,
+              "directive": END_DIRECTIVE}
+    if handoff["deltas"]:
+        # boundary capture (ST-9.4): the next boundary overwrites this
+        # handoff, so its corrections go durable now. Best-effort — the
+        # handoff already landed; a capture problem is reported, not raised.
+        try:
+            result["capture"] = reconcilelib.capture(key, run_id)
+        except Exception as exc:
+            result["capture"] = {"captured": 0, "errors": [str(exc)]}
+    return result
 
 
 def read_resume(project_root: Path, run_id: str) -> dict:

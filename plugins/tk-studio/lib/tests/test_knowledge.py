@@ -351,6 +351,83 @@ class SchemaDocTestCase(unittest.TestCase):
         self.assertEqual(mapping["Deduced"], "C")
         self.assertEqual(mapping["Hypothesized"], "D")
 
+    def test_schema_doc_queue_line_matches_the_validator_keys(self):
+        self.assertEqual(tuple(self.schema["queue_line"]["required"]),
+                         knowledge.QUEUE_LINE_KEYS)
+
+
+def _line(**overrides) -> dict:
+    line = {"run_id": RUN, "captured_at": "2026-08-07T05:00:00Z",
+            "anchor": f"SEED-{RUN}-A1", "verdict": "WRONG",
+            "reality": "the adapter also reads the local overlay",
+            "evidence": "lib/config.py:81", "tier": "run-local"}
+    line.update(overrides)
+    return line
+
+
+class QueueLineTestCase(unittest.TestCase):
+    """ST-9.4: the queue-line shape and its dedupe keys, pure."""
+
+    def test_accepts_a_valid_queue_line(self):
+        self.assertEqual(knowledge.validate_queue_line(_line()), [])
+
+    def test_rejects_missing_and_malformed_fields(self):
+        self.assertTrue(knowledge.validate_queue_line("not-an-object"))
+        for bad in (_line(verdict="MAYBE"), _line(tier="global"),
+                    _line(anchor="not-an-anchor"), _line(reality="  "),
+                    _line(evidence=""), _line(captured_at="yesterday"),
+                    _line(run_id=""), _line(extra="field")):
+            problems = knowledge.validate_queue_line(bad)
+            self.assertTrue(problems, f"expected a rejection for {bad}")
+
+    def test_dedupe_keys_match_the_schema_quadruple(self):
+        line = _line()
+        self.assertEqual(knowledge.queue_key(line),
+                         (RUN, line["anchor"], "WRONG", line["reality"]))
+        # evidence and captured_at stay outside the key: re-observing the
+        # same correction elsewhere/later is the same correction
+        self.assertEqual(knowledge.queue_key(line),
+                         knowledge.queue_key(_line(
+                             evidence="elsewhere.py:9",
+                             captured_at="2027-01-01T00:00:00Z")))
+        self.assertNotEqual(knowledge.queue_key(line),
+                            knowledge.queue_key(_line(reality="different")))
+        self.assertEqual(knowledge.delta_key(line),
+                         (line["anchor"], "WRONG", line["reality"]))
+
+
+class RenderRoutingTestCase(unittest.TestCase):
+    """ST-9.4: the routing renderer — pure, applies nothing."""
+
+    def test_renders_spine_first_grouped_by_verdict(self):
+        doc = knowledge.render_routing(
+            [_line(),
+             _line(anchor="SPINE-A1", tier="spine", verdict="STALE",
+                   reality="the pin moved")],
+            "proj", "2026-08-07T05:00:00Z")
+        self.assertIn("applies nothing", doc)
+        self.assertLess(doc.index("Spine corrections"),
+                        doc.index("Run-local corrections"))
+        self.assertIn("[SPINE-A1]", doc)
+        self.assertIn(f"[SEED-{RUN}-A1]", doc)
+        self.assertIn("### STALE", doc)
+        self.assertIn("corrections: 2", doc)
+
+    def test_dedupes_on_the_queue_key(self):
+        doc = knowledge.render_routing(
+            [_line(), _line(captured_at="2027-01-01T00:00:00Z",
+                            evidence="elsewhere.py:9")],
+            "proj", "2026-08-07T05:00:00Z")
+        self.assertIn("corrections: 1", doc)
+
+    def test_surfaces_invalid_lines_never_drops_them(self):
+        doc = knowledge.render_routing(
+            [], "proj", "2026-08-07T05:00:00Z",
+            invalid=[{"line": 3, "error": "not valid JSON"}])
+        self.assertIn("never silently dropped", doc)
+        self.assertIn("line 3", doc)
+        self.assertIn("no valid corrections", doc)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -27,6 +27,14 @@ The four ported invariants this module enforces (planning pass §3):
   4. Nothing here writes anything — capture (9.4) and promotion (9.5) build
      on these verbs; only a human writes canonical (D3).
 
+ST-9.4 adds the queue/routing halves of the shape set, still pure: the
+reconciliation-queue line shape (validate_queue_line, queue_key — the
+dedupe key (run_id, anchor, verdict, reality)), the within-handoff dedupe
+key (delta_key — the 9.2 review's deferred finding: duplicate identical
+deltas in one handoff refuse), and the routing renderer (render_routing —
+a pure function of queue lines; it applies nothing, D3). File reads and
+appends live in lib/reconcile.py.
+
 Grades stay the studio's A/B/C/D (D1); the source-vocabulary mapping is
 published in the schema doc, not enforced here (the source validator never
 graded either). Aid-not-gate: validation failure informs — callers must
@@ -50,6 +58,14 @@ DELTA_TIERS = ("run-local", "spine")
 SEED_TIERS = ("spine", "seed")
 
 _DELTA_KEYS = ("anchor", "verdict", "reality", "evidence", "tier")
+
+# The reconciliation-queue line shape (knowledge.schema.json `queue_line`,
+# ST-9.4): a captured delta plus its provenance. The dedupe key is the
+# schema-named quadruple — `captured_at` and `evidence` deliberately stay
+# outside it (re-capturing the same correction later, or citing a second
+# place it was observed, is the same correction).
+QUEUE_LINE_KEYS = ("run_id", "captured_at", "anchor", "verdict", "reality",
+                   "evidence", "tier")
 
 # Anchor id grammar: a bracketed token beginning SPINE|SEED, ending in
 # -A<digits>, arbitrary hyphenated middle (the run id for seeds). Examples:
@@ -249,3 +265,100 @@ def validate_knowledge(seed_text: str, deltas: object | None = None) -> dict:
     if deltas is not None:
         errors.extend(validate_deltas(deltas, seed_text)["errors"])
     return {"valid": not errors, "errors": errors}
+
+
+# ------------------------------------------- queue lines + routing (ST-9.4)
+
+def delta_key(delta: dict) -> tuple:
+    """The within-handoff dedupe key: (anchor, verdict, reality) — the queue
+    key minus run_id, which is constant inside one handoff. Two deltas that
+    share it are one correction stated twice (the 9.2 review's deferred
+    finding); a differing reality is a genuinely different claim."""
+    return (delta.get("anchor"), delta.get("verdict"), delta.get("reality"))
+
+
+def queue_key(line: dict) -> tuple:
+    """The queue dedupe key, verbatim from the schema:
+    (run_id, anchor, verdict, reality)."""
+    return (line.get("run_id"), line.get("anchor"), line.get("verdict"),
+            line.get("reality"))
+
+
+def validate_queue_line(line: object) -> list[str]:
+    """Every problem with one reconciliation-queue line (the closed
+    knowledge.schema.json `queue_line` shape); empty list = valid."""
+    if not isinstance(line, dict):
+        return ["queue line must be a JSON object"]
+    problems = []
+    unknown = set(line) - set(QUEUE_LINE_KEYS)
+    if unknown:
+        problems.append(f"unknown field(s): {', '.join(sorted(unknown))}")
+    for field in ("run_id", "reality", "evidence"):
+        if not isinstance(line.get(field), str) or not line.get(field, "").strip():
+            problems.append(f"needs a non-empty '{field}' string")
+    captured = line.get("captured_at")
+    if not isinstance(captured, str) or not _ISO_8601_RE.match(captured):
+        problems.append("'captured_at' must be an ISO-8601 timestamp")
+    if not is_anchor_id(line.get("anchor")):
+        problems.append("'anchor' must be a bare anchor id (SPINE-A<n> or "
+                        "SEED-<run-id>-A<n>)")
+    if line.get("verdict") not in VERDICTS:
+        problems.append(f"'verdict' must be one of {', '.join(VERDICTS)}")
+    if line.get("tier") not in DELTA_TIERS:
+        problems.append(f"'tier' must be one of {', '.join(DELTA_TIERS)}")
+    return problems
+
+
+def render_routing(lines: list[dict], project: str, generated: str,
+                   invalid: list[dict] | None = None) -> str:
+    """The routing doc — a pure render of the reconciliation queue, applying
+    nothing (D3: only a human writes canonical; promotion is ST-9.5's PR
+    membrane). Deduped on queue_key; spine-tier corrections lead (they
+    challenge the project spine every future seed inherits from), run-local
+    follow; WRONG before STALE before CONFIRMED inside each tier. Invalid
+    queue lines are surfaced in their own section, never silently dropped.
+    Pure: the caller supplies the timestamp; nothing here reads a clock."""
+    deduped: dict[tuple, dict] = {}
+    for line in lines:
+        deduped.setdefault(queue_key(line), line)
+    entries = list(deduped.values())
+    out = [
+        "# Reconciliation routing",
+        "",
+        f"Project: {project} · generated: {generated} · "
+        f"corrections: {len(entries)}",
+        "",
+        "A pure render of `reconciliation-queue.jsonl` — this document",
+        "**applies nothing**. Promotion into project `kb/` is a drafted",
+        "branch behind PR review (D3, AD-12); only a human writes canonical.",
+        "",
+    ]
+    tiers = (("spine", "Spine corrections — challenge the project spine "
+                       "(every future seed inherits it)"),
+             ("run-local", "Run-local corrections — scoped to one run's "
+                           "seed"))
+    for tier, heading in tiers:
+        tiered = [e for e in entries if e.get("tier") == tier]
+        if not tiered:
+            continue
+        out += [f"## {heading}", ""]
+        for verdict in VERDICTS:
+            group = [e for e in tiered if e.get("verdict") == verdict]
+            if not group:
+                continue
+            out += [f"### {verdict}", ""]
+            for entry in group:
+                out += [f"- **[{entry.get('anchor')}]** "
+                        f"{entry.get('reality')}",
+                        f"  - evidence: {entry.get('evidence')}",
+                        f"  - run: {entry.get('run_id')} · captured: "
+                        f"{entry.get('captured_at')}"]
+            out.append("")
+    if not entries:
+        out += ["_The queue holds no valid corrections._", ""]
+    if invalid:
+        out += ["## Unreadable queue lines — never silently dropped", ""]
+        for item in invalid:
+            out.append(f"- line {item.get('line')}: {item.get('error')}")
+        out.append("")
+    return "\n".join(out).rstrip() + "\n"
