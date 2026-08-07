@@ -1,9 +1,10 @@
 ---
 id: TASK-36
 title: Research Anchors and Seeds
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-07 04:34'
+updated_date: '2026-08-07 05:49'
 labels:
   - ST-036
 milestone: Research Becomes Knowledge
