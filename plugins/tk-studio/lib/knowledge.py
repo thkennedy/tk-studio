@@ -29,11 +29,15 @@ The four ported invariants this module enforces (planning pass §3):
 
 ST-9.4 adds the queue/routing halves of the shape set, still pure: the
 reconciliation-queue line shape (validate_queue_line, queue_key — the
-dedupe key (run_id, anchor, verdict, reality)), the within-handoff dedupe
-key (delta_key — the 9.2 review's deferred finding: duplicate identical
-deltas in one handoff refuse), and the routing renderer (render_routing —
-a pure function of queue lines; it applies nothing, D3). File reads and
-appends live in lib/reconcile.py.
+dedupe key (run_id, anchor, verdict, reality, tier)), the within-handoff
+dedupe key (delta_key — the 9.2 review's deferred finding: duplicate
+identical deltas in one handoff refuse), and the routing renderer
+(render_routing — a pure function of queue lines; it applies nothing, D3).
+reality/evidence are single-line pointers, enforced: control and
+line-separator characters refuse at validation and are stripped at render
+(the queue is line-oriented JSONL; the routing doc is the human's
+promotion-decision surface). File reads and appends live in
+lib/reconcile.py.
 
 Grades stay the studio's A/B/C/D (D1); the source-vocabulary mapping is
 published in the schema doc, not enforced here (the source validator never
@@ -60,10 +64,13 @@ SEED_TIERS = ("spine", "seed")
 _DELTA_KEYS = ("anchor", "verdict", "reality", "evidence", "tier")
 
 # The reconciliation-queue line shape (knowledge.schema.json `queue_line`,
-# ST-9.4): a captured delta plus its provenance. The dedupe key is the
-# schema-named quadruple — `captured_at` and `evidence` deliberately stay
-# outside it (re-capturing the same correction later, or citing a second
-# place it was observed, is the same correction).
+# ST-9.4): a captured delta plus its provenance. The dedupe key is
+# (run_id, anchor, verdict, reality, tier) — `captured_at` and `evidence`
+# deliberately stay outside it (re-capturing the same correction later, or
+# citing a second place it was observed, is the same correction); `tier` is
+# deliberately inside it (the tier names which artifact the correction
+# targets — an escalation of a run-local correction to spine tier is a
+# distinct routing event, not a duplicate; review finding, PR #16).
 QUEUE_LINE_KEYS = ("run_id", "captured_at", "anchor", "verdict", "reality",
                    "evidence", "tier")
 
@@ -80,6 +87,15 @@ ANCHOR_ID_RE = re.compile(r"(?:SPINE|SEED)(?:-[A-Za-z0-9]+)*-A\d+\Z")
 def is_anchor_id(value: object) -> bool:
     """True when value is a bare anchor id (the citation form)."""
     return isinstance(value, str) and bool(ANCHOR_ID_RE.match(value))
+
+# Control characters (C0+C1) and the unicode line/paragraph separators.
+# reality/evidence must be single-line pointers: the queue is line-oriented
+# JSONL (U+2028/U+2029/U+0085 split Python's splitlines and would shear a
+# written line into unparseable fragments, defeating dedupe), and the
+# routing doc renders these strings — an embedded newline could forge
+# sections and anchors on the human's promotion-decision surface (review
+# finding, PR #16).
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 
 # ISO-8601 date or datetime (date-only, or time + optional offset/Z).
 _ISO_8601_RE = re.compile(
@@ -237,9 +253,16 @@ def _validate_delta(index: int, delta: object, available: set[str]) -> list[str]
         problems.append(f"{label} ('{anchor}') has invalid/missing tier "
                         f"(expected one of {', '.join(DELTA_TIERS)})")
     for field in ("reality", "evidence"):
-        if not isinstance(delta.get(field), str) or not delta.get(field, "").strip():
+        value = delta.get(field)
+        if not isinstance(value, str) or not value.strip():
             problems.append(f"{label} ('{anchor}') needs a non-empty "
                             f"'{field}' string")
+        elif _CONTROL_RE.search(value):
+            problems.append(
+                f"{label} ('{anchor}') has control or line-separator "
+                f"characters in '{field}' — deltas are single-line "
+                "pointers (the queue is line-oriented; the routing doc "
+                "renders these verbatim)")
     return problems
 
 
@@ -270,18 +293,20 @@ def validate_knowledge(seed_text: str, deltas: object | None = None) -> dict:
 # ------------------------------------------- queue lines + routing (ST-9.4)
 
 def delta_key(delta: dict) -> tuple:
-    """The within-handoff dedupe key: (anchor, verdict, reality) — the queue
-    key minus run_id, which is constant inside one handoff. Two deltas that
-    share it are one correction stated twice (the 9.2 review's deferred
-    finding); a differing reality is a genuinely different claim."""
-    return (delta.get("anchor"), delta.get("verdict"), delta.get("reality"))
+    """The within-handoff dedupe key: (anchor, verdict, reality, tier) —
+    the queue key minus run_id, which is constant inside one handoff. Two
+    deltas that share it are one correction stated twice (the 9.2 review's
+    deferred finding); a differing reality is a genuinely different claim,
+    and a differing tier targets a different artifact."""
+    return (delta.get("anchor"), delta.get("verdict"),
+            delta.get("reality"), delta.get("tier"))
 
 
 def queue_key(line: dict) -> tuple:
     """The queue dedupe key, verbatim from the schema:
-    (run_id, anchor, verdict, reality)."""
+    (run_id, anchor, verdict, reality, tier)."""
     return (line.get("run_id"), line.get("anchor"), line.get("verdict"),
-            line.get("reality"))
+            line.get("reality"), line.get("tier"))
 
 
 def validate_queue_line(line: object) -> list[str]:
@@ -294,8 +319,13 @@ def validate_queue_line(line: object) -> list[str]:
     if unknown:
         problems.append(f"unknown field(s): {', '.join(sorted(unknown))}")
     for field in ("run_id", "reality", "evidence"):
-        if not isinstance(line.get(field), str) or not line.get(field, "").strip():
+        value = line.get(field)
+        if not isinstance(value, str) or not value.strip():
             problems.append(f"needs a non-empty '{field}' string")
+        elif _CONTROL_RE.search(value):
+            problems.append(f"'{field}' has control or line-separator "
+                            "characters — queue lines are single-line "
+                            "JSONL and the routing doc renders them")
     captured = line.get("captured_at")
     if not isinstance(captured, str) or not _ISO_8601_RE.match(captured):
         problems.append("'captured_at' must be an ISO-8601 timestamp")
@@ -317,7 +347,14 @@ def render_routing(lines: list[dict], project: str, generated: str,
     challenge the project spine every future seed inherits from), run-local
     follow; WRONG before STALE before CONFIRMED inside each tier. Invalid
     queue lines are surfaced in their own section, never silently dropped.
-    Pure: the caller supplies the timestamp; nothing here reads a clock."""
+    Pure: the caller supplies the timestamp; nothing here reads a clock.
+    Defense in depth: every interpolated string is stripped of control and
+    line-separator characters at render — validation refuses them on entry,
+    but a hand-edited queue line must still be unable to forge sections or
+    anchors on this surface."""
+    def _clean(value: object) -> str:
+        return _CONTROL_RE.sub(" ", str(value))
+
     deduped: dict[tuple, dict] = {}
     for line in lines:
         deduped.setdefault(queue_key(line), line)
@@ -348,17 +385,18 @@ def render_routing(lines: list[dict], project: str, generated: str,
                 continue
             out += [f"### {verdict}", ""]
             for entry in group:
-                out += [f"- **[{entry.get('anchor')}]** "
-                        f"{entry.get('reality')}",
-                        f"  - evidence: {entry.get('evidence')}",
-                        f"  - run: {entry.get('run_id')} · captured: "
-                        f"{entry.get('captured_at')}"]
+                out += [f"- **[{_clean(entry.get('anchor'))}]** "
+                        f"{_clean(entry.get('reality'))}",
+                        f"  - evidence: {_clean(entry.get('evidence'))}",
+                        f"  - run: {_clean(entry.get('run_id'))} · captured: "
+                        f"{_clean(entry.get('captured_at'))}"]
             out.append("")
     if not entries:
         out += ["_The queue holds no valid corrections._", ""]
     if invalid:
         out += ["## Unreadable queue lines — never silently dropped", ""]
         for item in invalid:
-            out.append(f"- line {item.get('line')}: {item.get('error')}")
+            out.append(f"- line {_clean(item.get('line'))}: "
+                       f"{_clean(item.get('error'))}")
         out.append("")
     return "\n".join(out).rstrip() + "\n"
