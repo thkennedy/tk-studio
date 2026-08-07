@@ -23,9 +23,12 @@ AD-8's rule sentence carries the boundary: "The evolve loop only observes
 and logs in v1." The Deferred entry is that boundary's named exit: the "in
 v1" qualifier anticipates exactly this motion. Building it does not amend
 AD-8's core rule (cross-project knowledge stays out; `scope:` stays reserved
-and unread; only a human writes canonical) — it completes the loop AD-8
-scoped. The spine's Deferred entry gets its "landed" annotation at epic
-close, as the knowledge port's did.
+and unread; promotion through a human gate stays the only path to
+canonical, per the D3 membrane ruling of the knowledge port) — it completes
+the loop AD-8 scoped. At epic close the spine's Deferred entry *and* AD-8's
+"in v1" rule sentence both get the "landed" annotation (the knowledge-port
+precedent annotated only its Deferred entry; the rule sentence would
+otherwise read stale).
 
 **What "automation" means here, precisely:** the machine drafts *proposals*
 from accumulated observations — clustered, evidenced, costed candidate
@@ -42,7 +45,7 @@ the load-bearing invariant; the automation ends where a human review begins.
   other`.
 - **`tk-studio-report`**: human *defect* reports (`report` events) — a
   separate channel by emitter discipline; defects flow to the issues ledger.
-- **`tk-studio-research`** (0.1.7): emits one `observation` event per
+- **`tk-studio-research`** (added 0.1.2, extended 0.1.7): emits one `observation` event per
   recommendation-carrying finding — the research-ecosystem job (instance
   declared 2026-08-07, weekly self-paced) now feeds this channel on a
   schedule.
@@ -53,11 +56,14 @@ the load-bearing invariant; the automation ends where a human review begins.
   read `observation` events** — its severity map covers defect shapes only.
 - **The missing edge, precisely:** `observation` events have no consumer.
   Ten real events exist today (8 observations, 2 reports on this machine's
-  ledger) — installer churn, cp1252 crash-class sweeps, drift-check plane
-  gaps, headless-permission gaps, two ISS-002-class posture finds, the
-  retro's recurring-pattern emission, and the job-instance type-resolution
-  gap found declaring the research job today. Each states toil or a
-  candidate change; none has anywhere to go. The evolve loop's product
+  ledger) — installer churn (observation + report twin), a cp1252
+  crash-class sweep, drift-check plane gaps, a headless-permission gap, the
+  measure-push posture find (observation + report twin; the detect instance
+  of the same pattern is named only inside the retro's recurring-pattern
+  emission, not as its own event), the retro emission itself, one ST-4.4
+  live-verification test emit, and the job-instance type-resolution gap
+  found declaring the research job today. All but the test emit state toil
+  or a candidate change; none has a consumer. The evolve loop's product
   value is exactly this edge: observations → clustered, evidenced
   proposals → human ruling → adopted change.
 
