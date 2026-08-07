@@ -179,7 +179,7 @@
         {
           "assertion": "headless-clean",
           "argv": ["lib/promote.py", "emit", "--directory", "{sandbox}", "--dry-run"],
-          "expect": "json",
+          "expect": "ok",
           "note": "the ST-9.6 emission verb (D4) — reconciles the promotions record against merged promotion PRs, exactly once per PR; a sandbox with no recorded drafts answers a clean no-op before any git read, never an error"
         }
       ]

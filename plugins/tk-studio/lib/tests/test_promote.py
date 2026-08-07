@@ -550,11 +550,17 @@ class PromoteTestCase(unittest.TestCase):
         self._seed_two_corrections()
         promote.draft(self.repo, no_pr=True)
         self._merge_promotion()
+        # a dry run has NO side effects: it must answer even with the
+        # remote gone (no fetch), and take no lock, mark no record
+        self._break_remote()
         result = promote.emit(self.repo, dry_run=True)
         self.assertEqual(result["result_state"], "dry-run")
         self.assertEqual(len(result["emitted"]), 1)
         self.assertEqual(self._ledger_events("knowledge-promotion"), [])
         self.assertEqual(promote.read_record(self.key)["emitted"], [])
+        lock = promote.record_path(self.key).with_name(
+            promote.RECORD_NAME + ".lock")
+        self.assertFalse(lock.exists(), "a dry run takes no lock")
 
     def test_emit_refuses_without_git_when_drafts_are_pending(self):
         plain = Path(self._tmp.name) / "emitplain"
@@ -581,6 +587,27 @@ class PromoteTestCase(unittest.TestCase):
         self.assertIn("no files list", record["invalid"][0]["error"])
         result = promote.emit(self.repo)
         self.assertEqual(result["result_state"], "emitted")
+        self.assertIn("record_invalid", result)
+
+    def test_draft_record_without_file_reports_never_crashes(self):
+        # adversarial review (ST-9.6 must-fix): the record_warning guidance
+        # invites hand-repair of the promotions record — a draft line
+        # missing its file must report invalid, never KeyError check/emit
+        self._seed_two_corrections()
+        promote.draft(self.repo, no_pr=True)
+        with open(promote.record_path(self.key), "a", encoding="utf-8",
+                  newline="\n") as handle:
+            handle.write('{"type":"draft","keys":[["a","WRONG","r",'
+                         '"run-local"]]}\n')
+            handle.write('{"type":"draft","drafted_at":"x","branch":"b",'
+                         '"base":"main","file":null,"keys":[]}\n')
+        record = promote.read_record(self.key)
+        self.assertEqual(len(record["drafts"]), 1)
+        self.assertEqual(len(record["invalid"]), 2)
+        for entry in record["invalid"]:
+            self.assertIn("no file", entry["error"])
+        self.assertTrue(promote.check(self.repo)["ok"])
+        result = promote.emit(self.repo)
         self.assertIn("record_invalid", result)
 
     def test_check_reports_the_emission_state(self):

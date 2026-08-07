@@ -85,7 +85,9 @@ class DriverContractTestCase(unittest.TestCase):
 
     def test_publishes_the_kb_injection_directive(self):
         # §4: spine/seed paths named; the injection act stays driver-side
-        section = self.text[self.text.index("KB-injection directive"):]
+        # (anchor on the section HEADING — the version-table row upstream
+        # also says "KB-injection directive" and must not satisfy this)
+        section = self.text[self.text.index("### KB-injection directive"):]
         self.assertIn("knowledge/spine.md", section)
         self.assertIn("seed.md", section)
         self.assertIn("driver-side", section)

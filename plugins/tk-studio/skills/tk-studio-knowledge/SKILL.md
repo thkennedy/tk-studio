@@ -55,12 +55,13 @@ pushes a base branch, never merges, never closes or approves the PR.
 
    Reconciles the promotions record against what actually merged: a
    recorded draft whose kb file now exists on its base branch has crossed
-   the membrane, and each merged promotion PR's worth of drafts emits
-   exactly ONE `knowledge-promotion` ledger event, then an emitted marker
-   in the record so nothing ever emits twice. Run it whenever this skill
-   is invoked — `no-op` (nothing drafted or all emitted) and `waiting`
-   (PR still open) are first-class answers, not errors. Merge detection is
-   local git only; never query the PR API for this.
+   the membrane, and each batch of newly-merged drafts — at this cadence,
+   one merged promotion PR's worth — emits ONE `knowledge-promotion`
+   ledger event, then an emitted marker in the record so nothing ever
+   emits twice. Run it whenever this skill is invoked — `no-op` (nothing
+   drafted or all emitted) and `waiting` (PR still open) are first-class
+   answers, not errors. Merge detection is local git only; never query
+   the PR API for this.
 
 4. **Attended:** summarize what was drafted — correction count, file,
    branch, PR URL — and remind the operator the drafted file is ordinary kb

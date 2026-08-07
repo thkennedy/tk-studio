@@ -27,12 +27,17 @@ write (D3).
   emit    the D4 measurement verb (ST-9.6). Reconciles the promotions
           record against what actually merged: a recorded draft whose kb
           file now exists on its base branch has crossed the membrane, and
-          the batch of newly-merged drafts — one merged promotion PR's
-          worth — emits exactly ONE `knowledge-promotion` taxonomy event,
-          then an emitted marker line in the record so no draft ever
-          emits twice. An empty or fully-marked record is a clean no-op
-          answered before any git read, and detecting the merge needs only
-          the local repo (post-fetch) — never gh, never the PR API.
+          each batch of newly-merged drafts per (branch, base) — at the
+          skill's cadence, one merged promotion PR's worth — emits ONE
+          `knowledge-promotion` taxonomy event, then an emitted marker
+          line in the record so no draft ever emits twice (two PRs merged
+          between emits collapse into one event, never into a duplicate).
+          The reconcile is serialized (sidecar lock + re-read) so
+          concurrent emits cannot double-emit. An empty or fully-marked
+          record is a clean no-op answered before any git read, and
+          detecting the merge needs only the local repo (post-fetch) —
+          never gh, never the PR API. A dry run has no side effects at
+          all: no fetch, no lock, no event, no marker.
 
 Append-only everywhere: a draft never edits or deletes an existing kb file
 (each draft is a new dated file), never rewrites the queue, and the
@@ -68,6 +73,7 @@ import json
 import os
 import subprocess
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -230,6 +236,16 @@ def read_record(key: str) -> dict:
         if line["type"] != "draft":
             result["other"] += 1
             continue
+        if not (isinstance(line.get("file"), str) and line["file"]):
+            # a draft without its file is unusable everywhere downstream
+            # (baseline display, merge detection) — reported like every
+            # other malformed line, never a KeyError from check/emit
+            # (adversarial-review finding, ST-9.6: the record_warning
+            # guidance invites hand-repair, and a botched repair must
+            # never brick the read-only verb)
+            result["invalid"].append({"line": number,
+                                      "error": "draft record has no file"})
+            continue
         if not isinstance(line.get("keys"), list):
             result["invalid"].append({"line": number,
                                       "error": "draft record has no keys list"})
@@ -261,6 +277,39 @@ def _record_draft(key: str, drafted_at: str, branch: str, base: str,
     _locked_append(record_path(key),
                    json.dumps(line, ensure_ascii=False,
                               separators=(",", ":")) + "\n")
+
+
+@contextmanager
+def _emit_lock(key: str):
+    """Serialize emit reconciles across processes: read-decide-emit-mark
+    must be one atomic motion or two concurrent emits both see the same
+    pending drafts and both emit before either marker lands (adversarial-
+    review finding, ST-9.6 — the SKILL.md's "run it whenever invoked"
+    makes a tick+attended race realistic). A sidecar lock file, never the
+    record itself (the append lock uses that handle). Windows LK_LOCK
+    gives up after ~10s with OSError — surfaced as a named refusal, never
+    a hang (AD-11)."""
+    path = record_path(key).with_name(RECORD_NAME + ".lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as handle:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _record_emitted(key: str, emitted_at: str, branch: str, base: str,
@@ -328,14 +377,16 @@ def check(project_root: Path) -> dict:
 def emit(project_root: Path, dry_run: bool = False) -> dict:
     """The D4 measurement verb (ST-9.6): reconcile the promotions record
     against what actually merged and emit the `knowledge-promotion` event —
-    exactly once per merged promotion PR, this module the sole emitter.
+    this module the sole emitter, exactly-once per draft file.
 
     Merge detection is local git only: a recorded draft whose kb file
     exists on its recorded base branch (origin/<base> when it exists) has
-    crossed the membrane. The batch of newly-merged drafts sharing one
-    (branch, base) — one merged PR's worth, since repeat drafts update the
-    same PR — emits ONE event, then an emitted marker line in the record;
-    a marked draft file never emits again (exactly-once baseline). Event
+    crossed the membrane. Each batch of newly-merged drafts sharing one
+    (branch, base) — at the skill's cadence, one merged PR's worth, since
+    repeat drafts update the same PR — emits ONE event, then an emitted
+    marker line in the record; a marked draft file never emits again
+    (exactly-once baseline), and the whole reconcile runs under a sidecar
+    lock with a re-read so a concurrent emit cannot double-emit. Event
     first, marker second: a marker that fails to land is a loud warning
     and a possible duplicate on the retry (duplicate-over-loss, visible in
     the ledger) — never a silently lost event.
@@ -347,17 +398,51 @@ def emit(project_root: Path, dry_run: bool = False) -> dict:
         raise PromoteBlocked("preflight",
                              f"project root {root} is not a directory")
     key = joblib.project_key(root)
+
+    def _pending(record: dict) -> list[dict]:
+        return [d for d in record["drafts"]
+                if d["file"] not in record["emitted_files"]]
+
+    def _noop(record: dict) -> dict:
+        return {"result_state": "no-op",
+                "detail": ("every recorded draft is already emitted — "
+                           "nothing to reconcile" if record["drafts"]
+                           else "no recorded drafts — nothing to emit")}
+
+    def _partition(pending: list[dict]) -> tuple[dict, list[str]]:
+        merged: dict[tuple, list[dict]] = {}
+        waiting: list[str] = []
+        for entry in pending:
+            base = entry.get("base") or _default_base(root)
+            base_ref = (f"origin/{base}"
+                        if _ref_exists(root, f"origin/{base}") else base)
+            on_base = _ref_exists(root, base_ref) and _git(
+                root, "cat-file", "-e", f"{base_ref}:{entry['file']}",
+                check=False).returncode == 0
+            if on_base:
+                merged.setdefault(
+                    (entry.get("branch") or branch_name(), base),
+                    []).append(entry)
+            else:
+                waiting.append(entry["file"])
+        return merged, waiting
+
+    def _events(merged: dict) -> list[dict]:
+        return [{"files": [entry["file"] for entry in entries],
+                 "corrections": len({tuple(k) for entry in entries
+                                     for k in entry["keys"]}),
+                 "branch": branch, "base": base}
+                for (branch, base), entries in sorted(merged.items())]
+
     record = read_record(key)
     result: dict = {"ok": True, "project": key}
     if record["invalid"]:
         result["record_invalid"] = record["invalid"]
-    pending = [d for d in record["drafts"]
-               if d["file"] not in record["emitted_files"]]
+    pending = _pending(record)
     if not pending:
-        result.update(result_state="no-op",
-                      detail=("every recorded draft is already emitted — "
-                              "nothing to reconcile" if record["drafts"]
-                              else "no recorded drafts — nothing to emit"))
+        # answered before any git read, lock, or store write — the
+        # conformance sandbox path
+        result.update(_noop(record))
         return result
 
     if _git(root, "rev-parse", "--is-inside-work-tree",
@@ -366,51 +451,58 @@ def emit(project_root: Path, dry_run: bool = False) -> dict:
             "preflight",
             f"{root} is not a git work tree — merge state of "
             f"{len(pending)} recorded draft(s) cannot be determined")
+
+    if dry_run:
+        # a dry run has NO side effects: no fetch (it answers from the
+        # last-fetched refs), no lock, no event, no marker
+        merged, waiting = _partition(pending)
+        if waiting:
+            result["waiting"] = waiting
+        if not merged:
+            result.update(result_state="waiting",
+                          detail=f"{len(waiting)} recorded draft(s) not "
+                                 "yet merged — the PR is still the gate")
+            return result
+        result.update(result_state="dry-run", emitted=_events(merged))
+        return result
+
     # best-effort freshness, same posture as draft: offline still answers
     # from the last-fetched refs
     _git(root, "fetch", "--prune", "origin", check=False)
 
-    merged: dict[tuple, list[dict]] = {}
-    waiting: list[str] = []
-    for entry in pending:
-        base = entry.get("base") or _default_base(root)
-        base_ref = (f"origin/{base}" if _ref_exists(root, f"origin/{base}")
-                    else base)
-        on_base = _ref_exists(root, base_ref) and _git(
-            root, "cat-file", "-e", f"{base_ref}:{entry['file']}",
-            check=False).returncode == 0
-        if on_base:
-            merged.setdefault((entry.get("branch") or branch_name(), base),
-                              []).append(entry)
-        else:
-            waiting.append(entry["file"])
-    if waiting:
-        result["waiting"] = waiting
-    if not merged:
-        result.update(result_state="waiting",
-                      detail=f"{len(waiting)} recorded draft(s) not yet "
-                             "merged — the PR is still the gate")
-        return result
+    with _emit_lock(key):
+        # re-read under the lock: a concurrent emit may have marked these
+        # drafts between our first read and here (exactly-once must hold
+        # under steady-state concurrency, not just crash windows)
+        record = read_record(key)
+        if record["invalid"]:
+            result["record_invalid"] = record["invalid"]
+        pending = _pending(record)
+        if not pending:
+            result.update(_noop(record))
+            return result
+        merged, waiting = _partition(pending)
+        if waiting:
+            result["waiting"] = waiting
+        if not merged:
+            result.update(result_state="waiting",
+                          detail=f"{len(waiting)} recorded draft(s) not "
+                                 "yet merged — the PR is still the gate")
+            return result
 
-    emitted: list[dict] = []
-    warnings: list[str] = []
-    for (branch, base), entries in sorted(merged.items()):
-        files = [entry["file"] for entry in entries]
-        keys = {tuple(k) for entry in entries for k in entry["keys"]}
-        event = {"files": files, "corrections": len(keys),
-                 "branch": branch, "base": base}
-        if not dry_run:
+        emitted = _events(merged)
+        warnings: list[str] = []
+        for event in emitted:
             ledger.emit("knowledge-promotion", dict(event), project=key)
             try:
-                _record_emitted(key, _now(), branch, base, files, len(keys))
+                _record_emitted(key, _now(), event["branch"], event["base"],
+                                event["files"], event["corrections"])
             except OSError as exc:
                 warnings.append(
                     f"event emitted but the record marker failed to land "
                     f"({exc}) — repair the promotions record before the "
                     f"next emit or these drafts will emit again")
-        emitted.append(event)
-    result.update(result_state="dry-run" if dry_run else "emitted",
-                  emitted=emitted)
+    result.update(result_state="emitted", emitted=emitted)
     if warnings:
         result["record_warning"] = "; ".join(warnings)
     return result
@@ -760,7 +852,8 @@ def main(argv: list[str] | None = None) -> int:
                                       "promotions record")
     cmd.add_argument("--directory", required=True, help="project root")
     cmd.add_argument("--dry-run", action="store_true",
-                     help="report what would emit; no event, no marker")
+                     help="report what would emit; no side effects — no "
+                          "fetch, no lock, no event, no marker")
     args = parser.parse_args(argv)
 
     try:
