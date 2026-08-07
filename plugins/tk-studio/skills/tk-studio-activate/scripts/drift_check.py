@@ -1,9 +1,13 @@
-"""tk-studio-activate — three-way health/drift check (AD-13). Read-only, loud.
+"""tk-studio-activate — four-plane health/drift check (AD-13). Read-only, loud.
 
 Planes checked:
   bmad-base  installed _bmad/_config/manifest.yaml versions vs the bmad.lock pins
   plugin     installed plugin.json version vs the repo marketplace.json entry
-             (catalog lockstep), when a marketplace catalog is present
+             (catalog lockstep), when a marketplace catalog is present — plus
+             harness loadability: the harness's own install record
+             (installed_plugins.json) must hold the plugin at the repo version,
+             or headless /tk-studio:<skill> is 'Unknown command' while the
+             repo looks healthy (AD-13)
   store      per-user store presence + skeleton (~/.tk-studio)
   vault      Obsidian vault window links for this project, when registered
              (ST-2.5) — observed state is recorded in the registry entry
@@ -19,7 +23,7 @@ Per-plane status: ok | drift | missing | error. Overall:
 (the instrumented onboarding funnel, AD-13). This script mutates nothing, ever.
 
 Usage:
-  uv run drift_check.py [--directory DIR] [--guided] [--lock PATH] [--marketplace PATH]
+  uv run drift_check.py [--directory DIR] [--guided] [--lock PATH] [--marketplace PATH] [--claude-home DIR]
 
 Stdlib-only (NFR9); no prompts (AD-11).
 """
@@ -27,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -42,6 +47,8 @@ import vault  # noqa: E402
 
 FIX_BMAD = "run tk-studio-install (tk install) to reinstall the base at the pin"
 FIX_PLUGIN = "run /plugin marketplace update tk-studio, then reinstall/update the tk-studio plugin"
+FIX_HARNESS = ("install the plugin into the harness (AD-1 flow): claude plugin "
+               "marketplace add <studio repo>, then claude plugin install tk-studio")
 FIX_STORE = "run the store standup: uv run <plugin>/lib/store.py standup (idempotent, ST-2.1)"
 
 
@@ -76,7 +83,80 @@ def check_bmad_base(directory: Path, lock_path: Path) -> dict:
     return plane
 
 
-def check_plugin(directory: Path, marketplace_path: Path | None) -> dict:
+def _harness_loadability(name: str, version: str,
+                         claude_home: Path | None = None,
+                         directory: Path | None = None) -> dict:
+    """AD-13: catalog lockstep proves the repo and marketplace agree; it says
+    nothing about whether the harness can load the plugin at all. An absent
+    installed_plugins.json entry means every headless /tk-studio:<skill>
+    invocation is 'Unknown command' while the repo looks healthy.
+
+    The record is an externally-owned file — only its v2 shape
+    ({"plugins": {"<name>@<marketplace>": [entries]}}) is understood; any
+    other shape is an error, never a crash. The comparison baseline is the
+    plugin.json of the copy running this script, so a harness-cache
+    invocation compares against itself and only a studio-repo checkout can
+    surface staleness."""
+    home = claude_home or Path(os.environ.get("CLAUDE_CONFIG_DIR")
+                               or Path.home() / ".claude")
+    record = home / "plugins" / "installed_plugins.json"
+    if not record.is_file():
+        return {"status": "drift",
+                "detail": f"plugin not installed in the harness (no {record})",
+                "fix": FIX_HARNESS}
+    try:
+        data = json.loads(record.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"status": "error",
+                "detail": f"harness install record unreadable: {exc}"}
+    plugins = data.get("plugins") if isinstance(data, dict) else None
+    if not isinstance(plugins, dict) or not all(
+            isinstance(lst, list) and all(isinstance(e, dict) for e in lst)
+            for lst in plugins.values()):
+        return {"status": "error",
+                "detail": (f"harness install record {record} is not the v2 "
+                           "shape this probe understands — cannot judge "
+                           "loadability")}
+    entries = [e for key, lst in plugins.items()
+               if key == name or key.startswith(f"{name}@")
+               for e in lst]
+    # only entries loadable from the checked project count: user scope
+    # (or unscoped) always, project scope only for this directory
+    def _loadable_here(e: dict) -> bool:
+        if e.get("scope", "user") != "project":
+            return True
+        project = e.get("projectPath")
+        return bool(project and directory
+                    and Path(project).resolve() == Path(directory).resolve())
+    entries = [e for e in entries if _loadable_here(e)]
+    if not entries:
+        return {"status": "drift",
+                "detail": (f"plugin not installed in the harness ({record.name} "
+                           f"has no {name} entry loadable from this project — "
+                           f"headless /{name}:<skill> is 'Unknown command')"),
+                "fix": FIX_HARNESS}
+    at_version = [e for e in entries if e.get("version") == version]
+    if not at_version:
+        held = ", ".join(sorted({"v" + str(e.get("version"))
+                                 for e in entries}))
+        return {"status": "drift",
+                "detail": (f"harness holds {held}, repo plugin is v{version} "
+                           "(harness and repo out of step)"),
+                "fix": FIX_HARNESS}
+    if not any(e.get("installPath") and Path(e["installPath"]).is_dir()
+               for e in at_version):
+        return {"status": "drift",
+                "detail": (f"harness entry v{version} installPath missing "
+                           "(cache evicted)"),
+                "fix": FIX_HARNESS}
+    return {"status": "ok", "detail": f"harness-loadable (v{version} installed)"}
+
+
+_STATUS_RANK = {"ok": 0, "drift": 1, "missing": 1, "error": 2}
+
+
+def check_plugin(directory: Path, marketplace_path: Path | None,
+                 claude_home: Path | None = None) -> dict:
     plane = {"plane": "plugin", "status": "ok", "detail": ""}
     plugin_json = PLUGIN_ROOT / ".claude-plugin" / "plugin.json"
     try:
@@ -90,23 +170,33 @@ def check_plugin(directory: Path, marketplace_path: Path | None) -> dict:
             f"installed plugin v{installed.get('version')}; no marketplace catalog at "
             f"{catalog} — catalog lockstep not checkable from this project"
         )
-        return plane
-    try:
-        market = json.loads(catalog.read_text(encoding="utf-8"))
-        entry = next(p for p in market["plugins"] if p["name"] == installed.get("name"))
-    except (OSError, json.JSONDecodeError, KeyError, StopIteration) as exc:
-        plane.update(status="error",
-                     detail=f"marketplace catalog unreadable or missing entry: {exc}")
-        return plane
-    if entry.get("version") != installed.get("version"):
-        plane.update(
-            status="drift",
-            detail=(f"installed plugin v{installed.get('version')} vs marketplace "
-                    f"catalog v{entry.get('version')} (lockstep broken)"),
-            fix=FIX_PLUGIN,
-        )
     else:
-        plane["detail"] = f"plugin v{installed.get('version')} in lockstep with catalog"
+        try:
+            market = json.loads(catalog.read_text(encoding="utf-8"))
+            entry = next(p for p in market["plugins"] if p["name"] == installed.get("name"))
+        except (OSError, json.JSONDecodeError, KeyError, StopIteration) as exc:
+            # a broken catalog is an error but not a reason to skip the
+            # harness probe — the two concerns are independent
+            plane.update(status="error",
+                         detail=f"marketplace catalog unreadable or missing entry: {exc}")
+        else:
+            if entry.get("version") != installed.get("version"):
+                plane.update(
+                    status="drift",
+                    detail=(f"installed plugin v{installed.get('version')} vs marketplace "
+                            f"catalog v{entry.get('version')} (lockstep broken)"),
+                    fix=FIX_PLUGIN,
+                )
+            else:
+                plane["detail"] = f"plugin v{installed.get('version')} in lockstep with catalog"
+
+    probe = _harness_loadability(installed.get("name"), installed.get("version"),
+                                 claude_home, directory)
+    if _STATUS_RANK[probe["status"]] > _STATUS_RANK[plane["status"]]:
+        plane["status"] = probe["status"]
+    plane["detail"] = "; ".join(x for x in (plane["detail"], probe["detail"]) if x)
+    if probe.get("fix"):
+        plane["fix"] = "; ".join(x for x in (plane.get("fix"), probe["fix"]) if x)
     return plane
 
 
@@ -179,16 +269,20 @@ def main(argv: list[str] | None = None) -> int:
                         help="onboarding mode: also emit onboarding-funnel timings")
     parser.add_argument("--lock", help="override bmad.lock path (tests)")
     parser.add_argument("--marketplace", help="override marketplace.json path (tests)")
+    parser.add_argument("--claude-home",
+                        help="override the harness config dir (tests; default "
+                             "CLAUDE_CONFIG_DIR or ~/.claude)")
     args = parser.parse_args(argv)
 
     directory = Path(args.directory).resolve()
     lock_path = Path(args.lock) if args.lock else PLUGIN_ROOT / "bmad.lock"
     marketplace_path = Path(args.marketplace) if args.marketplace else None
+    claude_home = Path(args.claude_home) if args.claude_home else None
 
     planes = []
     for check in (
         lambda: check_bmad_base(directory, lock_path),
-        lambda: check_plugin(directory, marketplace_path),
+        lambda: check_plugin(directory, marketplace_path, claude_home),
         check_store,
         lambda: check_vault(directory),
     ):
