@@ -161,11 +161,17 @@ def _run_drive(surface: str, drive: dict, sandbox: Path, store: Path,
         refused = (proc.returncode != 0
                    or (isinstance(parsed, dict) and parsed.get("ok") is False)
                    or (marker is not None and marker in stdout))
-        if refused:
+        # A declared marker is a requirement, not an alternative: the refusal
+        # must name its reason, or the skill layer has nothing to surface
+        # (ISS-002 — a crash or unrelated error is not a clean refusal).
+        if marker is not None and marker not in stdout:
+            check["detail"] = (f"refusal does not name the declared marker "
+                              f"{marker!r} (exit {proc.returncode}) — an "
+                              "unnamed refusal cannot be surfaced as blocked")
+        elif refused:
             check["ok"] = True
         else:
-            check["detail"] = ("expected a clean refusal, got exit 0 with "
-                              f"ok!=false{' and no marker ' + repr(marker) if marker else ''}")
+            check["detail"] = "expected a clean refusal, got exit 0 with ok!=false"
     else:
         check["detail"] = f"manifest declares unknown expect '{expect}'"
     return check

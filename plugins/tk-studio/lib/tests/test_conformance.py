@@ -135,6 +135,39 @@ class ConformanceHarnessTestCase(unittest.TestCase):
         self.assertIn("blocked-on-ambiguity",
                       {f["assertion"] for f in report["failures"]})
 
+    def test_refusal_must_name_its_declared_marker(self):
+        # ISS-002 residual: a nonzero exit with an unrelated error is not a
+        # clean refusal when the drive declares a marker — the refusal must
+        # name its reason or the skill layer has nothing to surface as blocked
+        script = Path(self._tmp.name) / "crashy.py"
+        script.write_text(
+            "import sys; print('unrelated traceback'); sys.exit(1)",
+            encoding="utf-8")
+        self._make_skill("tk-studio-fake")
+        self._write_manifest({"tk-studio-fake": self._entry(drives=[{
+            "assertion": "blocked-on-ambiguity",
+            "argv": [str(script)], "expect": "refusal",
+            "marker": "not the studio repo root"}])})
+        report = self._run()
+        failure = next(f for f in report["failures"]
+                       if f["assertion"] == "blocked-on-ambiguity")
+        self.assertIn("declared marker", failure["detail"])
+
+    def test_refusal_naming_its_marker_passes(self):
+        script = Path(self._tmp.name) / "refusey.py"
+        script.write_text(
+            "import json, sys; "
+            "print(json.dumps({'ok': False, "
+            "'error': 'x is not the studio repo root'})); sys.exit(2)",
+            encoding="utf-8")
+        self._make_skill("tk-studio-fake")
+        self._write_manifest({"tk-studio-fake": self._entry(drives=[{
+            "assertion": "blocked-on-ambiguity",
+            "argv": [str(script)], "expect": "refusal",
+            "marker": "not the studio repo root"}])})
+        report = self._run()
+        self.assertTrue(report["ok"], report["failures"])
+
     def test_hanging_drive_fails_no_prompt_assertion(self):
         script = Path(self._tmp.name) / "prompty.py"
         script.write_text("input('never allowed headless: ')",
