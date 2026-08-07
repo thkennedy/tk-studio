@@ -122,10 +122,13 @@ def _check_unrunnable_core_doc(surface: str, skills_dir: Path) -> dict:
     no terminal status block."""
     check = {"assertion": "unrunnable-core", "ok": False, "detail": ""}
     text = (skills_dir / surface / "SKILL.md").read_text(encoding="utf-8")
-    if "unrunnable" not in text or "blocked" not in text:
+    # the canonical sentence prefix, not a loose substring — every SKILL.md
+    # already says "blocked" somewhere, so anything weaker is vacuous
+    if "If the deterministic core is unrunnable" not in text:
         check["detail"] = ("SKILL.md does not document the unrunnable-core "
-                           "discipline (end blocked with the status block "
-                           "when the deterministic core cannot run — AD-11)")
+                           "discipline (the canonical 'If the deterministic "
+                           "core is unrunnable' paragraph — end blocked with "
+                           "the status block naming the gap, AD-11)")
         return check
     check["ok"] = True
     return check
