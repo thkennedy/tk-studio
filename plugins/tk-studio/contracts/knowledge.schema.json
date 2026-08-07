@@ -20,7 +20,7 @@
     "note": "anchor ids are the join (immutable, append-only, never renumbered): SPINE-A<n> on the spine, SEED-<run-id>-A<n> on seeds. Deltas cite identity, not location, so corrections survive every edit. At least one anchor per artifact; duplicates reject; tier prefix must match the artifact tier (seeds may also cite inherited SPINE- ids)."
   },
   "delta": {
-    "note": "the closed correction shape. Deltas ride handoff.json as structured objects (deltas[] - session surface, ST-9.2); unanchored and dangling deltas are named rejections, never silently dropped.",
+    "note": "the closed correction shape. Deltas ride handoff.json as structured objects (deltas[] - session surface, shipped ST-9.2, validated against the run workspace's seed.md); unanchored and dangling deltas are named rejections, never silently dropped. Budget ruling (ST-9.2): the 16 KB handoff budget does not grow - deltas share it and the list is capped at 16 per handoff (lib/session.py MAX_HANDOFF_DELTAS).",
     "required": ["anchor", "verdict", "reality", "evidence", "tier"],
     "fields": {
       "anchor": { "type": "string", "note": "an anchor id in the seed's available set (defined + inherited)" },
