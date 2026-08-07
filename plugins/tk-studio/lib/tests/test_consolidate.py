@@ -1,6 +1,6 @@
 """Tests for consolidation into issues (ST-7.2 acceptance criteria).
 
-Merged measurement events cluster into issues/ledger.md entries with the tk
+Merged measurement events cluster into issues/ledger.md entries with the legacy-council
 row discipline: stable ISS-NNN ids assigned in order and never reused,
 severity, status, expected-vs-actual, rows updated in place and never
 deleted, evidence events named, and a specific fix candidate where the

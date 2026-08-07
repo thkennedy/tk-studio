@@ -6,8 +6,8 @@ Product brief: [`_bmad-output/planning-artifacts/briefs/brief-tk-studio-2026-07-
 
 ## Reference material (local-only, not pushed)
 
-`legacy-council/` holds a full working copy of the legacy council marketplace repo
-(`LegacyStudios/claude-plugins`, main @ `d26a67f`) used as the design model
+`legacy-council/` holds a full working copy of the TK council marketplace repo
+(the pre-rename upstream `claude-plugins` repo, main @ `d26a67f`) used as the design model
 for tk-studio. It keeps its own `.git/` with complete history for local
 reference, but the entire directory is gitignored here — tk-studio is a clean
 repo, not a rehome of legacy-council.

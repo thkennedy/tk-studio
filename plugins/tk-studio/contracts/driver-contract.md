@@ -67,7 +67,7 @@ historical failure. A driver MUST ensure before invoking:
    a 401 fails the run immediately as `blocked`, never silently.
 2. Backend auth, when the flow will touch an external planning backend
    (AD-7): API tokens, **not OAuth** (MCP OAuth cannot complete
-   non-interactively — tk ISS-008), and the org-admin API-token toggle
+   non-interactively — legacy-council ISS-008), and the org-admin API-token toggle
    verified enabled. Verification failure → `blocked` before any backend
    call.
 

@@ -45,7 +45,7 @@ lists every candidate ranked, with the concrete evidence — marker text,
 weight, and the file/dir that matched — behind every point scored, plus the
 project's VCS type.
 
-Outcomes (tk detector discipline — never a silent guess):
+Outcomes (legacy-council detector discipline — never a silent guess):
 
 | Outcome | Meaning | Downstream move |
 | --- | --- | --- |

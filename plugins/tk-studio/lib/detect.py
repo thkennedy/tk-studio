@@ -3,7 +3,7 @@
 Given a project root, scores candidate project types against the profile
 registry shipped with the plugin (skills/tk-studio-detect/profiles/*.json)
 and reports ranked candidates with the concrete evidence behind every scored
-marker. tk detector discipline, ported: detection is a pure read, and below
+marker. legacy-council detector discipline, ported: detection is a pure read, and below
 the confidence floor the answer is "unknown — ask" — never a silent guess.
 
 Outcomes:

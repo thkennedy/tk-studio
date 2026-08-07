@@ -1,7 +1,7 @@
 """Designed migration local -> Jira (ST-8.2, AD-16).
 
 Rebinding a project's planning backend to Jira is a verified migration, not
-a copy. The tk safety rules are ported verbatim (AD-16):
+a copy. The legacy-council safety rules are ported verbatim (AD-16):
 
   - **Closed inventory first**: canonical entities (validated against the
     interchange shape) plus every file of the current backend projection,

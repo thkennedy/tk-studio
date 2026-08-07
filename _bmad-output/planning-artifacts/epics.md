@@ -42,7 +42,7 @@ FR12: The adapter is the sole id authority: `EP-/ST-/TA-NNN` minted from a commi
 FR13: The `backlog-md` backend (v1 default local binding) projects canonical entities into a Backlog.md-compatible `backlog/` folder with promote + status-class pull-back, echo suppression, and round-trip-stable status mapping.
 FR14: The `bmad-files` fallback backend is first-class: canonical files stand alone with index generation and no projection.
 FR15: The `jira` backend promotes to Jira (Atlassian Cloud) via the official Atlassian MCP and pulls status back; headless auth is API-token with an enabled-toggle preflight.
-FR16: Backend migration is a designed operation — export (canonical shape) → transform → import → verification (counts, id map, content hashes, spot round-trip) — under the ported tk safety rules (closed inventory, no-delete-before-clearance, copy-verify-flag).
+FR16: Backend migration is a designed operation — export (canonical shape) → transform → import → verification (counts, id map, content hashes, spot round-trip) — under the ported legacy-council safety rules (closed inventory, no-delete-before-clearance, copy-verify-flag).
 
 **Recommendation**
 
@@ -65,7 +65,7 @@ FR26: A conformance suite ships in the plugin (`contracts/conformance/`) driving
 FR27: Studio surfaces emit taxonomy events (`install-outcome`, `drift-detection`, `activation-failure`, `headless-failure`, `onboarding-funnel`, `observation`, `report`) to the per-user-per-machine JSONL ledger — atomic, sanitized at emission, exactly one emitter per event type.
 FR28: `tk report` captures human-authored defect reports as `report` events.
 FR29: A measurement-push skill turns the local ledger into a feature branch + PR into the shared repo's `measurements/`.
-FR30: A consolidation skill examines accumulated measurement PRs and creates `issues/ledger.md` entries (`ISS-NNN`, tk discipline) leading to specific fixes.
+FR30: A consolidation skill examines accumulated measurement PRs and creates `issues/ledger.md` entries (`ISS-NNN`, legacy-council discipline) leading to specific fixes.
 
 **Orchestration**
 
@@ -94,7 +94,7 @@ NFR10: The studio is fully usable with or without ClaudeOS attached; the connect
 - Per-VCS expression of conventions (git default, Perforce first-class) for anything that assumes branching/commit discipline (AD-18).
 - Session/token discipline generalizes the ClaudeOS handoff protocol; the Research→Knowledge Lifecycle port is explicitly deferred (spine Deferred).
 - Headless auth preflight is mandatory (silent-401 is the known #1 headless failure).
-- tk harvest sources for implementation: `vendor_bmad.py` verify discipline (drift check), issues-ledger format, JSONL reconciliation-queue pattern, detect/onboard scripts, three-tier store design (local gitignored copy `legacy-council/`; never commit or push it).
+- legacy-council harvest sources for implementation: `vendor_bmad.py` verify discipline (drift check), issues-ledger format, JSONL reconciliation-queue pattern, detect/onboard scripts, three-tier store design (local gitignored copy `legacy-council/`; never commit or push it).
 
 ### UX Design Requirements
 
@@ -482,7 +482,7 @@ So that recommendations are grounded and never silently guessed.
 
 **Given** a project root
 **When** detection runs
-**Then** weighted markers (files, manifests, VCS type) score candidate project types; below the confidence floor the result is "unknown — ask", never a guess (tk detector discipline)
+**Then** weighted markers (files, manifests, VCS type) score candidate project types; below the confidence floor the result is "unknown — ask", never a guess (legacy-council detector discipline)
 **And** detection performs zero writes and lists the evidence behind every scored marker
 
 ### Story 4.3: Recommend, Confirm, Record
@@ -714,7 +714,7 @@ So that the measurement loop actually corrects the system (the O1 revision chann
 
 **Given** merged measurement data in `measurements/`
 **When** `tk-studio-consolidate` runs
-**Then** it clusters events into candidate defects and appends `issues/ledger.md` entries (stable `ISS-NNN`, severity, status, expected-vs-actual, tk row discipline — update in place, never delete)
+**Then** it clusters events into candidate defects and appends `issues/ledger.md` entries (stable `ISS-NNN`, severity, status, expected-vs-actual, legacy-council row discipline — update in place, never delete)
 **And** each new issue names the evidence events and, where clear, a specific fix candidate (including "revise the distribution mechanism" when evidence points there)
 
 ## Epic 8: Plan Where the Team Plans

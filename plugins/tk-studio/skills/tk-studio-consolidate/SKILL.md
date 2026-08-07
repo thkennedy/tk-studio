@@ -53,7 +53,7 @@ If the deterministic core is unrunnable — a tool call denied by permissions, `
 
 ## Rules
 
-- Rows update in place, never delete (tk discipline); ids are stable and
+- Rows update in place, never delete (legacy-council discipline); ids are stable and
   never reused — a wrong finding is corrected with an edit, never erased.
 - Not an emitter: consolidation derives from events already emitted by
   their one named emitter each (AD-12); it appends nothing to any ledger
