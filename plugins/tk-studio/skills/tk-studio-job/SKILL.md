@@ -46,7 +46,14 @@ lives in resumable run workspaces under the per-user store.
 
    `finish` records the terminal state and emits the run's `job-run` event —
    this wrapper alone emits job-level events; the target skill emits its own
-   surface events, never both for one failure (AD-12).
+   surface events, never both for one failure (AD-12). Every terminal
+   transition also captures the run's handoff deltas into the per-project
+   reconciliation queue (ST-9.4, `lib/reconcile.py` — deduped, idempotent,
+   per-user store only); the capture evidence rides `summary.json` and the
+   `finish` response, and a capture problem is recorded there, never a
+   failed verb. `uv run "${CLAUDE_PLUGIN_ROOT}/lib/reconcile.py" route
+   --directory <root>` renders the routing doc beside the queue — a pure
+   render that applies nothing (promotion is ST-9.5's PR membrane).
 
 4. **Durability is surfaced, never silently lost.** A `durable: true`
    recurring job on this session-scoped substrate gets a

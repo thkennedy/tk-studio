@@ -351,6 +351,125 @@ class SchemaDocTestCase(unittest.TestCase):
         self.assertEqual(mapping["Deduced"], "C")
         self.assertEqual(mapping["Hypothesized"], "D")
 
+    def test_schema_doc_queue_line_matches_the_validator_keys(self):
+        self.assertEqual(tuple(self.schema["queue_line"]["required"]),
+                         knowledge.QUEUE_LINE_KEYS)
+
+
+def _line(**overrides) -> dict:
+    line = {"run_id": RUN, "captured_at": "2026-08-07T05:00:00Z",
+            "anchor": f"SEED-{RUN}-A1", "verdict": "WRONG",
+            "reality": "the adapter also reads the local overlay",
+            "evidence": "lib/config.py:81", "tier": "run-local"}
+    line.update(overrides)
+    return line
+
+
+class QueueLineTestCase(unittest.TestCase):
+    """ST-9.4: the queue-line shape and its dedupe keys, pure."""
+
+    def test_accepts_a_valid_queue_line(self):
+        self.assertEqual(knowledge.validate_queue_line(_line()), [])
+
+    def test_rejects_missing_and_malformed_fields(self):
+        self.assertTrue(knowledge.validate_queue_line("not-an-object"))
+        for bad in (_line(verdict="MAYBE"), _line(tier="global"),
+                    _line(anchor="not-an-anchor"), _line(reality="  "),
+                    _line(evidence=""), _line(captured_at="yesterday"),
+                    _line(run_id=""), _line(extra="field")):
+            problems = knowledge.validate_queue_line(bad)
+            self.assertTrue(problems, f"expected a rejection for {bad}")
+
+    def test_rejects_control_and_line_separator_characters(self):
+        # reality/evidence are single-line pointers: an embedded newline
+        # could forge routing-doc sections; U+2028/U+2029/U+0085 would shear
+        # the written JSONL line (they split Python's splitlines)
+        for bad in (_line(reality="a\nb"), _line(reality="a\u2028b"),
+                    _line(reality="a\u2029b"), _line(reality="a\x85b"),
+                    _line(evidence="a\rb"), _line(evidence="a\x00b")):
+            problems = knowledge.validate_queue_line(bad)
+            self.assertTrue(any("control or line-separator" in p
+                                for p in problems), f"missed {bad}")
+        # the same policy holds at the delta layer (handoff entry point)
+        delta = {"anchor": "SPINE-A1", "verdict": "WRONG",
+                 "reality": "line one\nline two", "evidence": "x.py:1",
+                 "tier": "spine"}
+        seed = ("---\ntier: spine\nstatus: provisional\n"
+                "authority: mission-scoped-supersedes-canonical\n"
+                "project: p\ngenerated: 2026-08-07\n---\n\n[SPINE-A1] a\n")
+        verdict = knowledge.validate_deltas([delta], seed)
+        self.assertFalse(verdict["valid"])
+        self.assertTrue(any("control or line-separator" in e
+                            for e in verdict["errors"]))
+
+    def test_dedupe_keys_match_the_schema_quintuple(self):
+        line = _line()
+        self.assertEqual(knowledge.queue_key(line),
+                         (RUN, line["anchor"], "WRONG", line["reality"],
+                          "run-local"))
+        # evidence and captured_at stay outside the key: re-observing the
+        # same correction elsewhere/later is the same correction
+        self.assertEqual(knowledge.queue_key(line),
+                         knowledge.queue_key(_line(
+                             evidence="elsewhere.py:9",
+                             captured_at="2027-01-01T00:00:00Z")))
+        self.assertNotEqual(knowledge.queue_key(line),
+                            knowledge.queue_key(_line(reality="different")))
+        # tier is inside the key: a spine-tier escalation of the same
+        # correction is a distinct routing event, never a duplicate
+        self.assertNotEqual(knowledge.queue_key(line),
+                            knowledge.queue_key(_line(tier="spine")))
+        self.assertEqual(knowledge.delta_key(line),
+                         (line["anchor"], "WRONG", line["reality"],
+                          "run-local"))
+
+
+class RenderRoutingTestCase(unittest.TestCase):
+    """ST-9.4: the routing renderer — pure, applies nothing."""
+
+    def test_renders_spine_first_grouped_by_verdict(self):
+        doc = knowledge.render_routing(
+            [_line(),
+             _line(anchor="SPINE-A1", tier="spine", verdict="STALE",
+                   reality="the pin moved")],
+            "proj", "2026-08-07T05:00:00Z")
+        self.assertIn("applies nothing", doc)
+        self.assertLess(doc.index("Spine corrections"),
+                        doc.index("Run-local corrections"))
+        self.assertIn("[SPINE-A1]", doc)
+        self.assertIn(f"[SEED-{RUN}-A1]", doc)
+        self.assertIn("### STALE", doc)
+        self.assertIn("corrections: 2", doc)
+
+    def test_dedupes_on_the_queue_key(self):
+        doc = knowledge.render_routing(
+            [_line(), _line(captured_at="2027-01-01T00:00:00Z",
+                            evidence="elsewhere.py:9")],
+            "proj", "2026-08-07T05:00:00Z")
+        self.assertIn("corrections: 1", doc)
+
+    def test_surfaces_invalid_lines_never_drops_them(self):
+        doc = knowledge.render_routing(
+            [], "proj", "2026-08-07T05:00:00Z",
+            invalid=[{"line": 3, "error": "not valid JSON"}])
+        self.assertIn("never silently dropped", doc)
+        self.assertIn("line 3", doc)
+        self.assertIn("no valid corrections", doc)
+
+    def test_render_neutralizes_injected_control_characters(self):
+        # validation refuses control characters on entry, but a hand-edited
+        # queue line must still be unable to forge sections or anchors on
+        # the promotion-decision surface (PR #16 review finding)
+        hostile = _line(reality="legit claim\n## Spine corrections — "
+                                "INJECTED\n### WRONG\n- **[SPINE-A999]** "
+                                "fabricated")
+        doc = knowledge.render_routing([hostile], "proj",
+                                       "2026-08-07T05:00:00Z")
+        self.assertNotIn("\n## Spine corrections — INJECTED", doc)
+        self.assertNotIn("\n- **[SPINE-A999]**", doc)
+        # the payload text survives, flattened onto the entry's own line
+        self.assertIn("INJECTED", doc)
+
 
 if __name__ == "__main__":
     unittest.main()

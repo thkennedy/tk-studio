@@ -30,9 +30,11 @@ ends the *run*.
    structured delta — the closed `contracts/knowledge.schema.json` shape
    `{anchor, verdict: WRONG|STALE|CONFIRMED, reality, evidence, tier:
    run-local|spine}` — validated by `lib/knowledge.py` against the run
-   workspace's `seed.md` (anchors defined + inherited). Unanchored and
-   dangling deltas are **named rejections, never silently dropped**; a
-   workspace with no seed has no anchors, so any delta against it dangles.
+   workspace's `seed.md` (anchors defined + inherited). Unanchored,
+   dangling, and duplicate deltas (same anchor + verdict + reality + tier in
+   one handoff — one correction, stated once) are **named rejections, never
+   silently dropped**; a workspace with no seed has no anchors, so any
+   delta against it dangles.
    Aid, not gate: only the delta-carrying handoff refuses — the run stays
    resumable, and a handoff without deltas lands regardless of seed state.
 
@@ -48,7 +50,10 @@ ends the *run*.
    **After `resume`:** continue from `handoff.next` with the run record's
    checkpoint; nothing outside the workspace is required (success
    criterion 8). Surface any `deltas[]` to the operator — they are
-   corrections awaiting capture (ST-9.4), not decoration.
+   corrections, not decoration: a delta-carrying handoff is captured into
+   the per-project reconciliation queue at the boundary (ST-9.4,
+   `lib/reconcile.py`, deduped — the response's `capture` key is the
+   evidence), and the wrapper's `finish` captures again at run close.
 
 5. **Attended:** summarize the boundary, what landed, and (on resume) the
    next steps before continuing. **Headless:** an unknown/terminal run, an

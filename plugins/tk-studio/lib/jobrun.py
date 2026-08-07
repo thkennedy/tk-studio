@@ -26,6 +26,11 @@ Guarantees implemented here, verbatim from the contract:
   - Job-level events: this wrapper alone emits `job-run` (one event per
     terminal transition); target skills emit their own surface events —
     never both for one failure (AD-12).
+  - Delta capture rides every terminal transition (ST-9.4): the run's
+    handoff deltas append to the per-project reconciliation queue
+    (lib/reconcile.py, deduped on the knowledge.schema.json key), the
+    capture evidence lands in summary.json, and a capture failure is
+    recorded there — never a masked verb, never a raised finish.
 
 CLI (all verbs end with JSON on stdout; never prompts — AD-11):
   uv run jobrun.py submit  --directory DIR --id JOB_ID
@@ -53,6 +58,7 @@ from pathlib import Path
 
 import job as joblib
 import ledger
+import reconcile as reconcilelib
 import routing as routinglib
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -198,6 +204,23 @@ def _land_summary(key: str, record: dict, summary: dict) -> None:
     })
 
 
+def _finalize_run(key: str, record: dict, summary: dict,
+                  detail: str | None = None) -> dict:
+    """Every terminal transition's closing motion: capture the run's handoff
+    deltas into the project reconciliation queue (ST-9.4 — the capture hook
+    riding the wrapper's close; idempotent by the queue's dedupe key, so a
+    boundary capture already landed is just duplicates here), land
+    summary.json with the capture evidence, emit the job-run event. Capture
+    never masks the transition — a failure is recorded, not raised."""
+    try:
+        captured = reconcilelib.capture(key, record["run_id"])
+    except Exception as exc:
+        captured = {"captured": 0, "errors": [str(exc)]}
+    _land_summary(key, record, {**summary, "capture": captured})
+    _emit_job_event(record, key, detail=detail)
+    return captured
+
+
 def execute_core(key: str, record: dict) -> dict:
     """Run a core-target run to a terminal state, wall-clock guarded.
 
@@ -222,8 +245,7 @@ def execute_core(key: str, record: dict) -> dict:
         record = joblib.update_run(key, record["run_id"], {
             "state": "partial",
             "reason": f"guard: max_wall_clock_seconds ({timeout}s)"})
-        _land_summary(key, record, {})
-        _emit_job_event(record, key)
+        _finalize_run(key, record, {})
         return record
     parsed = None
     stdout = proc.stdout.strip()
@@ -238,16 +260,14 @@ def execute_core(key: str, record: dict) -> dict:
             "state": "blocked",
             "reason": f"core produced no machine-readable output "
                       f"(exit {proc.returncode})"})
-        _land_summary(key, record, {"exit_code": proc.returncode})
-        _emit_job_event(record, key)
+        _finalize_run(key, record, {"exit_code": proc.returncode})
         return record
     summary, headline = _summarize_result(parsed, proc.returncode)
     if isinstance(parsed, dict):
         joblib.write_workspace_json(key, record["run_id"], "output.json", parsed)
     record = joblib.update_run(key, record["run_id"], {
         "state": "complete", "status_block": {"summary": summary}})
-    _land_summary(key, record, summary)
-    _emit_job_event(record, key, detail=headline)
+    _finalize_run(key, record, summary, detail=headline)
     return record
 
 
@@ -339,8 +359,7 @@ def cancel(project_root: Path, job_id: str, run_id: str | None = None) -> dict:
         if record.get("state") in joblib.RESUMABLE_STATES:
             record = joblib.update_run(key, record["run_id"], {
                 "state": "partial", "reason": "cancelled"})
-            _land_summary(key, record, {})
-            _emit_job_event(record, key)
+            _finalize_run(key, record, {})
             ended.append(record["run_id"])
     return {"cancelled": True, "runs_ended": ended,
             "directive": {"kind": "unbind",
@@ -423,11 +442,11 @@ def finish(project_root: Path, run_id: str, state: str,
     if status_block is not None:
         changes["status_block"] = status_block
     record = joblib.update_run(key, run_id, changes)
+    result = {"run_id": run_id, "state": record["state"],
+              "reason": record.get("reason")}
     if record["state"] in joblib.TERMINAL_STATES:
-        _land_summary(key, record, {})
-        _emit_job_event(record, key)
-    return {"run_id": run_id, "state": record["state"],
-            "reason": record.get("reason")}
+        result["capture"] = _finalize_run(key, record, {})
+    return result
 
 
 # --------------------------------------------------------------------- CLI

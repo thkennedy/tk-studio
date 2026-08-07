@@ -28,11 +28,11 @@ GUARD_CALL = 'sys.stdout.reconfigure(encoding="utf-8")'
 
 def _cli_modules() -> list[Path]:
     """Every shipped python entry point: lib/*.py, skills/*/scripts/*.py,
-    and the conformance runner. A module counts as a CLI iff it defines
-    main()."""
+    and the conformance scripts (runner + drives). A module counts as a CLI
+    iff it defines main()."""
     candidates = sorted(LIB.glob("*.py"))
     candidates += sorted(PLUGIN_ROOT.glob("skills/*/scripts/*.py"))
-    candidates.append(PLUGIN_ROOT / "contracts" / "conformance" / "runner.py")
+    candidates += sorted(PLUGIN_ROOT.glob("contracts/conformance/*.py"))
     out = []
     for path in candidates:
         if re.search(r"^def main\(", path.read_text(encoding="utf-8"),
