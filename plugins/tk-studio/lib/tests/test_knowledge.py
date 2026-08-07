@@ -130,9 +130,11 @@ class ValidateSeedAcceptanceTestCase(unittest.TestCase):
         self.assertTrue(result["valid"])
 
     def test_accepts_a_bom_prefixed_artifact(self):
-        # Artifacts cross Windows consoles; a BOM must not hide frontmatter.
-        result = knowledge.validate_seed("﻿" + VALID_SPINE)
-        self.assertEqual(result["errors"], [])
+        # Artifacts cross Windows consoles; BOMs must not hide frontmatter —
+        # including a double BOM (re-encoding artifact) or whitespace-BOM mix.
+        for prefix in ("﻿", "﻿﻿", "\n﻿"):
+            result = knowledge.validate_seed(prefix + VALID_SPINE)
+            self.assertEqual(result["errors"], [])
 
 
 class ValidateSeedRejectionTestCase(unittest.TestCase):
@@ -317,11 +319,17 @@ class SchemaDocTestCase(unittest.TestCase):
         delta = self.schema["delta"]["fields"]
         self.assertEqual(tuple(delta["verdict"]["enum"]), knowledge.VERDICTS)
         self.assertEqual(tuple(delta["tier"]["enum"]), knowledge.DELTA_TIERS)
+        queue = self.schema["queue_line"]["fields"]
+        self.assertEqual(tuple(queue["verdict"]["enum"]), knowledge.VERDICTS)
+        self.assertEqual(tuple(queue["tier"]["enum"]), knowledge.DELTA_TIERS)
         fm = self.schema["artifact_frontmatter"]["fields"]
         self.assertEqual(fm["status"]["const"], knowledge.PROVISIONAL_STATUS)
         self.assertEqual(fm["authority"]["const"],
                          knowledge.SUPERSEDE_AUTHORITY)
         self.assertEqual(list(fm["tier"]["enum"]), list(knowledge.SEED_TIERS))
+        self.assertEqual(self.schema["artifact_frontmatter"]["required"],
+                         ["tier", "status", "authority", "project",
+                          "generated"])
 
     def test_schema_doc_anchor_pattern_matches_the_validator(self):
         self.assertEqual(self.schema["anchors"]["pattern"],

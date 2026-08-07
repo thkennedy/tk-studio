@@ -59,12 +59,13 @@ ANCHOR_RE = re.compile(r"\[((?:SPINE|SEED)(?:-[A-Za-z0-9]+)*-A\d+)\]")
 # ISO-8601 date or datetime (date-only, or time + optional offset/Z).
 _ISO_8601_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}"
-    r"([T ]\d{2}:\d{2}(:\d{2})?(\.\d{1,9})?(Z|[+-]\d{2}:?\d{2})?)?$")
+    r"([T ]\d{2}:\d{2}(:\d{2})?(\.\d{1,9})?(Z|[+-]\d{2}:?\d{2})?)?\Z")
 
-# Frontmatter block: first non-whitespace content (a BOM is tolerated —
-# artifacts cross Windows consoles; comments before the block are not).
+# Frontmatter block: first non-whitespace content (BOMs are tolerated in any
+# mix with whitespace — artifacts cross Windows consoles and re-encoding can
+# stack them; comments before the block are not allowed).
 _FRONTMATTER_RE = re.compile(
-    "^﻿?\\s*---\r?\n([\\s\\S]*?)\r?\n---[ \t]*\r?\n?([\\s\\S]*)$")
+    "^[﻿\\s]*---\r?\n([\\s\\S]*?)\r?\n---[ \t]*\r?\n?([\\s\\S]*)$")
 
 
 def _extract_anchors_raw(text: str) -> list[str]:
@@ -87,7 +88,7 @@ def _parse_frontmatter(fm: str) -> dict:
     """Flat `key: value` parser — strips comments, reads `[a, b]` lists.
     Minimal and pure on purpose: no YAML library, no date coercion."""
     out: dict = {}
-    for raw_line in fm.splitlines():
+    for raw_line in re.split(r"\r?\n", fm):
         if not raw_line.strip() or raw_line.strip().startswith("#"):
             continue
         line = re.sub(r"\s+#.*$", "", raw_line)
