@@ -5,9 +5,10 @@ description: Studio activation front door — health/drift check proving the BMa
 
 # tk-studio-activate
 
-Activation cross-checks both planes plus the store (AD-13) and reports — it
-never mutates anything. Version skew is caught here, at the front door,
-instead of debugged later as ghosts.
+Activation cross-checks four planes — base, plugin (catalog lockstep and
+harness loadability), store, vault (AD-13) — and reports; it never mutates
+anything. Version skew is caught here, at the front door, instead of
+debugged later as ghosts.
 
 ## Behavior (both modes)
 
