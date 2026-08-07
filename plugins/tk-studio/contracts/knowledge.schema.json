@@ -57,6 +57,18 @@
     "note": "the routing doc renders beside the queue as reconciliation-routing.md (shipped ST-9.4; reconcile.py route) - a pure render (knowledge.render_routing) of the queue that APPLIES NOTHING (D3: only a human writes canonical). Deduped on the queue key; spine-tier corrections lead (they challenge the project spine every future seed inherits), run-local follow; WRONG before STALE before CONFIRMED inside each tier; invalid queue lines surface in their own section, never silently dropped. An absent or empty queue answers rendered=false - an answer, not an error."
   },
   "promotion": {
-    "note": "promotion is drafted from the rendered routing doc into ordinary kb/ files on a branch; PR review is the human gate (D3) - nothing auto-applies, only a human writes canonical. kb frontmatter gains nothing; scope: stays reserved and unread (AD-8). Emits exactly one knowledge-promotion taxonomy event, sole emitter the promotion skill (D4) - taxonomy row lands with contract 1.7.0 (ST-9.5/9.6)."
+    "note": "promotion is drafted from the rendered routing doc into ordinary kb/ files on a branch; PR review is the human gate (D3) - nothing auto-applies, only a human writes canonical (shipped ST-9.5: lib/promote.py draft, the tk-studio-knowledge skill's promote-draft verb; a promotion attempt without a routing doc is a named rejection). kb frontmatter gains nothing; scope: stays reserved and unread (AD-8). Each draft is ONE NEW dated kb file - append-only: a draft never edits or deletes existing kb content. Corrections group one entry per (anchor, verdict, reality, tier) - the delta_key; run provenance merges rather than duplicating - and a correction once drafted never re-drafts (the promotions record below is the baseline; the redraft flag overrides). Emits exactly one knowledge-promotion taxonomy event per merged promotion PR, sole emitter the promotion skill (D4) - the taxonomy row AND emission land together with contract 1.7.0 (ST-9.6): extending the taxonomy is a contract-visible MINOR change and lib/ledger.py refuses un-rowed event types by construction, so emission cannot precede the row; the promotions record is the exactly-once baseline 9.6 emission reconciles against.",
+    "record_line": {
+      "note": "one JSON object per line in the per-project promotions record ~/.tk-studio/projects/<key>/knowledge/promotions.jsonl (per-user store only, never project VCS; append-only, locked appends, \\n-only reads). `type` discriminates line kinds: ST-9.5 writes type=draft; ST-9.6 adds the emission-marking kind (unknown types read forward-compatibly, never as invalid).",
+      "required": ["type", "drafted_at", "branch", "base", "file", "keys"],
+      "fields": {
+        "type": { "type": "string", "note": "\"draft\" (ST-9.5)" },
+        "drafted_at": { "type": "string", "format": "ISO-8601 UTC" },
+        "branch": { "type": "string", "note": "knowledge/<user>-<machine> - the stable membrane branch; a repeat draft updates it and its open PR" },
+        "base": { "type": "string", "note": "the PR base branch" },
+        "file": { "type": "string", "note": "project-relative kb path the draft landed as (kb/reconciliation-<date>.md, serial-suffixed on collision)" },
+        "keys": { "type": "array", "items": "[anchor, verdict, reality, tier]", "note": "the drafted corrections' identity keys (delta_key - run provenance excluded: a later run re-observing a drafted correction is the same correction, not a new promotion)" }
+      }
+    }
   }
 }

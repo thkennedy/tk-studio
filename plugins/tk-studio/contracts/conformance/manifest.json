@@ -121,7 +121,7 @@
           "assertion": "headless-clean",
           "argv": ["contracts/conformance/e2e_knowledge.py", "--directory", "{sandbox}"],
           "expect": "ok",
-          "note": "the ST-9.4 e2e drive — the run the source lifecycle never had: run-init -> seed -> boundary handoff with deltas -> the wrapper's finish -> queue materialized (deduped on the knowledge.schema.json key) -> routing doc rendered; every step asserted, expect ok means the chain succeeded, not merely answered"
+          "note": "the ST-9.4 e2e drive — the run the source lifecycle never had: run-init -> seed -> boundary handoff with deltas -> the wrapper's finish -> queue materialized (deduped on the knowledge.schema.json key) -> routing doc rendered -> the promotion gate opens (ST-9.5: check + dry-run draft walk clean); every step asserted, expect ok means the chain succeeded, not merely answered"
         },
         {
           "assertion": "blocked-on-ambiguity",
@@ -157,6 +157,24 @@
           "argv": ["lib/session.py", "handoff", "--directory", "{sandbox}", "--job-id", "maintenance-conformance", "--boundary", "phase", "--name", "conformance probe", "--done", "d", "--next", "n", "--delta", "{\"anchor\": \"SEED-probe-A1\", \"verdict\": \"WRONG\", \"reality\": \"probe\", \"evidence\": \"probe\", \"tier\": \"run-local\"}"],
           "expect": "refusal",
           "marker": "dangling"
+        }
+      ]
+    },
+    "tk-studio-knowledge": {
+      "external_calls": true,
+      "auth_preflight": "VCS remote + gh only at the push/PR step, both failing loud (a push failure lands the draft commit locally and says so; a gh failure reports the branch as pushed with manual-PR guidance) — the routing-doc gate, queue read, promoted-baseline dedupe, and sanitization scan are local and need no auth",
+      "drives": [
+        {
+          "assertion": "headless-clean",
+          "argv": ["lib/promote.py", "check", "--directory", "{sandbox}"],
+          "expect": "json"
+        },
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/promote.py", "draft", "--directory", "{sandbox}", "--dry-run"],
+          "expect": "refusal",
+          "marker": "no routing doc",
+          "note": "the ST-9.5 refusal drive — a promotion attempt without a rendered routing doc refuses named (the routing doc is the human's promotion-decision surface; D3): a promotion drafted from data no human has seen is not a gated promotion"
         }
       ]
     },
