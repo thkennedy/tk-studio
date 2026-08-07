@@ -1,0 +1,29 @@
+{
+  "job_schema_version": 1,
+  "id": "research-ecosystem",
+  "type": "research-ecosystem",
+  "description": "tk-studio instance of the ecosystem watch (retro AI-2, declared 2026-08-07): weekly self-paced survey of the toolchain the studio itself is built on, feeding the evolve loop through observation events. Charter scoped to the studio's domain; budget guards and stop conditions inherit from the shipped type. trigger/cadence restated explicitly (same values as the type): substrate-side discovery reads the raw instance file and cannot resolve type extension (AD-2) — see the 2026-08-07 observation event.",
+  "trigger": "loop",
+  "cadence": {
+    "mode": "self-paced",
+    "hint_seconds": 604800
+  },
+  "target": {
+    "payload": {
+      "charter": {
+        "topics": [
+          "Claude Code / harness ecosystem: plugin, skill, agent, and scheduling-primitive changes a studio driver could consume",
+          "BMad method releases and module ecosystem movement (the studio's base pin — bmad.lock currency, installer behavior per ISS-001)",
+          "MCP servers and agentic-dev tooling relevant to studio surfaces: planning backends, measurement, knowledge and research loops",
+          "agentic development practice: unattended loops, conformance suites, session-boundary and knowledge-promotion discipline"
+        ],
+        "sources": [
+          "web-search",
+          "release-notes",
+          "community-discussion"
+        ],
+        "max_findings": 8
+      }
+    }
+  }
+}

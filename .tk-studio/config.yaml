@@ -22,4 +22,5 @@ vcs: git
 #     - resource-name
 
 # Per-project job instances (AD-10; Epic 6).
-# jobs:
+jobs:
+  - research-ecosystem
