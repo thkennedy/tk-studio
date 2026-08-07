@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| **Contract version** | **1.7.0** (semver — see [Change policy](#change-policy); 1.1.0 added the `tk-studio-job` surface and the shipped `job.schema.json`, 1.2.0 added `tk-studio-research`, 1.3.0 added `tk-studio-measure-push`, 1.4.0 added `tk-studio-consolidate`, 1.5.0 installed the `jira` planning binding behind `tk-studio-plan-sync`, 1.6.0 added `tk-studio-migrate`, 1.7.0 publishes the Research→Knowledge Lifecycle port (Epic 9): the `tk-studio-session` and `tk-studio-knowledge` surfaces, the research anchor/seed surface, the run-finish capture note, the KB-injection directive, and the `knowledge-promotion` taxonomy event — each additive, MINOR) |
+| **Contract version** | **0.1.7** (pre-1.0 semver — a new product still stabilizing; see [Change policy](#change-policy). Renumbered 2026-08-07 from the 1.x line, mapped `1.N.0 → 0.1.N` for continuity: 0.1.1 added the `tk-studio-job` surface and the shipped `job.schema.json`, 0.1.2 added `tk-studio-research`, 0.1.3 added `tk-studio-measure-push`, 0.1.4 added `tk-studio-consolidate`, 0.1.5 installed the `jira` planning binding behind `tk-studio-plan-sync`, 0.1.6 added `tk-studio-migrate`, 0.1.7 publishes the Research→Knowledge Lifecycle port (Epic 9): the `tk-studio-session` and `tk-studio-knowledge` surfaces, the research anchor/seed surface, the run-finish capture note, the KB-injection directive, and the `knowledge-promotion` taxonomy event — each additive) |
 | Story / rulings | ST-5.3, ST-6.2, ST-7.1, ST-7.2, ST-8.1, ST-8.2, ST-9.6 (Epic 9, D1–D5 ruled 2026-08-06); AD-2, AD-3, AD-7, AD-8, AD-10, AD-11, AD-12, AD-13, AD-14, AD-16 |
 | Audience | any harness that drives tk-studio unattended — first consumer: the ClaudeOS MCP connector (ClaudeOS-side, later) |
 | Companion schemas | `status-block.schema.json`, `events/taxonomy.v1.json`, `registry.schema.json`, `interchange/shape.v1.json`, `job.schema.json` (v1, shipped ST-6.1), `knowledge.schema.json` (v1, shipped ST-9.1 — spine/seed frontmatter, anchors, deltas, queue and promotions-record lines) |
@@ -16,14 +16,23 @@ drives every surface until a connector exists.
 
 ## Change policy
 
-The contract carries its own semver, independent of the plugin version:
+The contract carries its own semver, independent of the plugin version.
+**Pre-1.0 (current):** this is a new product; the compatibility line a
+consumer pins is `0.MINOR` (today: `0.1`):
 
-- **MAJOR** — any breaking change: removing/renaming a verb, skill intent, or
-  status field; changing a payload field's meaning or type; tightening a
-  required field. A consumer pinned to `1.x` must never be broken by a `1.y`.
-- **MINOR** — additive: new skills in the surface table, new optional payload
-  fields, new verbs, new event types.
-- **PATCH** — clarifications and examples; no shape changes.
+- **Breaking** — removing/renaming a verb, skill intent, or status field;
+  changing a payload field's meaning or type; tightening a required field —
+  bumps the minor: `0.1.x` → `0.2.0`. A consumer pinned to the `0.1` line
+  must never be broken by a `0.1.y`.
+- **Additive** — new skills in the surface table, new optional payload
+  fields, new verbs, new event types — bumps the patch: `0.1.7` → `0.1.8`.
+- **Clarifications** — wording and examples, no shape changes — also bump
+  the patch; the version-history line names which kind each bump was.
+
+At `1.0.0` the standard MAJOR/MINOR/PATCH mapping resumes (breaking/
+additive/clarifying respectively). Renumbered 2026-08-07: versions before
+the renumber shipped as `1.1.0`–`1.7.0`, mapped `1.N.0 → 0.1.N` — old
+references to `1.N.0` in merged PRs and planning history mean `0.1.N`.
 
 Schema files named above version independently (each carries its own
 version); this contract pins which versions it speaks. Extending the event
@@ -71,7 +80,7 @@ historical failure. A driver MUST ensure before invoking:
    verified enabled. Verification failure → `blocked` before any backend
    call.
 
-## 2. Skill invocation surface (v1.7.0)
+## 2. Skill invocation surface (v0.1.7)
 
 Payload fields map 1:1 onto the named CLI's flags. "Artifacts out" lists
 what a `complete` run reports in `artifacts[]`; every skill may instead end
@@ -96,7 +105,7 @@ what a `complete` run reports in `artifacts[]`; every skill may instead end
 | `tk-studio-observe` | `source` (`retrospective\|repeated-manual-work\|research-job\|other`); `description`; `evidence?`; `project?` | `lib/observe.py record` | ledger line (`observation` event) | required field missing |
 | `tk-studio-report` | `description`; `surface?`; `project?`; `skill?`; `mode` | `skills/tk-studio-report/scripts/` | ledger line (`report` event) | `description` missing |
 
-Additions land as MINOR bumps; the conformance suite discovers surfaces from
+Additions land as additive bumps (patch-position while pre-1.0); the conformance suite discovers surfaces from
 the plugin manifest, so an unregistered skill fails conformance rather than
 silently extending this table (ST-5.4).
 
@@ -147,7 +156,7 @@ on the harness-native substrate:
 
 | Verb | Request | Response | Semantics |
 | --- | --- | --- | --- |
-| `submit` | the id of a shipped/project job instance (id-only — the definition already lives at the `job.schema.json`-published locations; a full-definition submit form is not part of this surface. DW-1 fold-in, 1.7.0) | `{job_id, run_id, accepted: bool, reason?}` | schedule per the job's trigger on the bound substrate; validation rejects a definition missing guards or stop conditions |
+| `submit` | the id of a shipped/project job instance (id-only — the definition already lives at the `job.schema.json`-published locations; a full-definition submit form is not part of this surface. DW-1 fold-in, 0.1.7) | `{job_id, run_id, accepted: bool, reason?}` | schedule per the job's trigger on the bound substrate; validation rejects a definition missing guards or stop conditions |
 | `status` | `{job_id, run_id?}` | `{job_id, runs: [{run_id, state: queued\|running\|complete\|partial\|blocked\|cancelled, status_block?, started?, ended?}]}` | read-only; run state lives in `~/.tk-studio/projects/<key>/runs/<run-id>/` |
 | `cancel` | `{job_id, run_id?}` | `{cancelled: bool, reason?}` | stop scheduling; a running run terminates `partial` with reason `cancelled` |
 | `wake` | `{job_id}` | `{woken: bool, run_id?}` | fire a self-paced/loop job's next iteration now (the mission-runner "tick" maps here) |
@@ -162,7 +171,7 @@ Guarantees a driver can rely on:
   silently losing the schedule.
 - Job-level events are emitted by the job wrapper alone; a skill emits its
   own surface events — never both for one failure (AD-12).
-- **Run-finish capture (1.7.0):** the executing wrapper's every terminal
+- **Run-finish capture (0.1.7):** the executing wrapper's every terminal
   transition (`finish`, `cancel`, core close) captures the run handoff's
   `deltas[]` into the per-project reconciliation queue
   (`~/.tk-studio/projects/<key>/knowledge/reconciliation-queue.jsonl`,
@@ -171,7 +180,7 @@ Guarantees a driver can rely on:
   capture problem never fails the run — no new driver verb is required,
   capture rides `finish`.
 
-### KB-injection directive (1.7.0)
+### KB-injection directive (0.1.7)
 
 An `invoke-skill` directive (submit/wake above) names the run's
 provisional-knowledge artifacts in a `knowledge` field:
@@ -214,7 +223,7 @@ value.
 
 The AD-13 activation check — four-plane (bmad-base; plugin, including
 harness loadability; store; vault), loud, read-only (DW-3 wording fold-in,
-1.7.0):
+0.1.7):
 
 ```bash
 uv run "$PLUGIN_ROOT/skills/tk-studio-activate/scripts/drift_check.py" --directory <project-root> [--guided]
@@ -239,7 +248,7 @@ named seam:
 | 1 | Ownership: connector is a ClaudeOS plugin; tk-studio never imports ClaudeOS | **Covered** — AD-2 boundary; this contract is the entire interface |
 | 2 | The driver contract surface: per-skill headless invocation, status schema, job/scheduler model, model/effort API, drift-check | **Covered** — §2, §3, §4, §5, §6 |
 | 3 | Reference-harness role: mission runner is the conformance target; direct headless invocation until then | **Covered** — §1 (direct invocation is a conforming driver); suite in `conformance/` (ST-5.4) |
-| 4 | ClaudeOS mechanics to bridge: mission tick ↔ `wake` (§4); missions.json ↔ job definitions (`job.schema.json`, ST-6.1 seam); handoff protocol ↔ resumable run workspaces (`~/.tk-studio/projects/<key>/runs/`); auth preflight (§1); runner sharp edges (e.g. dirty-tree silent-skip) stay connector-side | **Covered** (1.7.0) — mappings named; the Research→Knowledge Lifecycle port (spine Deferred list: runner-side halves move council-side behind this contract, ClaudeOS as first driver), deferred through 1.6.0, landed story-by-story as Epic 9 and is published here at 1.7.0 (ST-9.6): the session surface (`tk-studio-session` §2 row — handoff/resume with `deltas[]` per `knowledge.schema.json`), the research anchor surface (changed `tk-studio-research` §2 row — `research.py seed\|spine`, findings optionally citing seed anchors), run-finish capture riding the wrapper's terminal transitions (§4 note — no new verb), the KB-injection directive (§4 — spine/seed paths named on `invoke-skill` directives, the injection act driver-side per AD-2), and the promotion gate (`tk-studio-knowledge` §2 row — drafts behind the membrane PR; `emit` the sole `knowledge-promotion` emitter, exactly once per merged promotion PR, reconciled against the promotions record) |
+| 4 | ClaudeOS mechanics to bridge: mission tick ↔ `wake` (§4); missions.json ↔ job definitions (`job.schema.json`, ST-6.1 seam); handoff protocol ↔ resumable run workspaces (`~/.tk-studio/projects/<key>/runs/`); auth preflight (§1); runner sharp edges (e.g. dirty-tree silent-skip) stay connector-side | **Covered** (0.1.7) — mappings named; the Research→Knowledge Lifecycle port (spine Deferred list: runner-side halves move council-side behind this contract, ClaudeOS as first driver), deferred through 0.1.6, landed story-by-story as Epic 9 and is published here at 0.1.7 (ST-9.6): the session surface (`tk-studio-session` §2 row — handoff/resume with `deltas[]` per `knowledge.schema.json`), the research anchor surface (changed `tk-studio-research` §2 row — `research.py seed\|spine`, findings optionally citing seed anchors), run-finish capture riding the wrapper's terminal transitions (§4 note — no new verb), the KB-injection directive (§4 — spine/seed paths named on `invoke-skill` directives, the injection act driver-side per AD-2), and the promotion gate (`tk-studio-knowledge` §2 row — drafts behind the membrane PR; `emit` the sole `knowledge-promotion` emitter, exactly once per merged promotion PR, reconciled against the promotions record) |
 | 5 | O8 linkage: generalized runner lands council-side, ClaudeOS first driver | **Covered** — AD-10 hybrid ruled; §4 is the substrate-neutral surface the runner binds to |
 | 6 | ClaudeOS remains the multi-project UI; the studio grows no UI | **Covered** — this contract exposes machine-readable status only (status blocks, verbs, registry/ledger schemas); dashboards read, studio serves |
 
@@ -251,7 +260,7 @@ prompt, auth preflight before any external call, `blocked` (not a hang) on
 ambiguity, and the suite's `unrunnable-core` assertion — every SKILL.md
 carries the canonical unrunnable-core discipline paragraph (a denied or
 unavailable deterministic core ends `blocked` with the block naming it,
-never a question; DW-3 fold-in, 1.7.0). Failures emit `headless-failure`
+never a question; DW-3 fold-in, 0.1.7). Failures emit `headless-failure`
 events naming surface and
 assertion (taxonomy §`headless-failure`). A connector implementing this
 contract SHOULD run the same suite through itself — passing it is the
