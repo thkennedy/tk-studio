@@ -152,7 +152,10 @@ def _validated_deltas(deltas, workspace: Path) -> list[dict]:
     if seed_path.is_file():
         try:
             seed_text = seed_path.read_text(encoding="utf-8")
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
+            # UnicodeDecodeError is a ValueError, not an OSError — a
+            # UTF-16/ANSI-re-encoded seed (the PowerShell default trap)
+            # must refuse named, never die with a traceback (AD-11).
             raise SessionError(f"{SEED_NAME} unreadable: {exc}") from exc
     verdict = knowledge.validate_deltas(items, seed_text)
     if not verdict["valid"]:
