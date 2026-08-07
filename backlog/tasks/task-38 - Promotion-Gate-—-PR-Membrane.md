@@ -1,9 +1,10 @@
 ---
 id: TASK-38
 title: Promotion Gate — PR Membrane
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-07 04:34'
+updated_date: '2026-08-07 08:41'
 labels:
   - ST-038
 milestone: Research Becomes Knowledge
