@@ -33,7 +33,11 @@ lives in resumable run workspaces under the per-user store.
    `{"kind": "self-paced", ...}` → its loop/wakeup primitives; `{"kind":
    "invoke-skill", ...}` → invoke the named skill with the payload, then
    report the outcome with `finish`. Each firing of a recurring job is one
-   `wake`.
+   `wake`. An `invoke-skill` directive also names the run's
+   provisional-knowledge artifacts (`knowledge`: spine/seed paths with
+   `present` flags — the §4 KB-injection directive, contract 1.7.0):
+   inject each present artifact's contents into the segment you invoke.
+   Aid, not gate — an absent artifact never skips or fails the run.
 
 3. **Skill-target runs stay honest.** While executing an `invoke-skill`
    directive, call `account --run-id <rid> --turns 1 [--tokens N]` every

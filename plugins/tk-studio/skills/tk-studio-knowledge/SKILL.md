@@ -47,7 +47,23 @@ pushes a base branch, never merges, never closes or approves the PR.
    correction. Never substitute a check-only summary for the draft verb:
    the check step reports, only `draft` enforces.
 
-3. **Attended:** summarize what was drafted — correction count, file,
+3. **Emit after merges** (the D4 measurement verb, ST-9.6):
+
+   ```bash
+   uv run "${CLAUDE_PLUGIN_ROOT}/lib/promote.py" emit --directory <project-root>
+   ```
+
+   Reconciles the promotions record against what actually merged: a
+   recorded draft whose kb file now exists on its base branch has crossed
+   the membrane, and each batch of newly-merged drafts — at this cadence,
+   one merged promotion PR's worth — emits ONE `knowledge-promotion`
+   ledger event, then an emitted marker in the record so nothing ever
+   emits twice. Run it whenever this skill is invoked — `no-op` (nothing
+   drafted or all emitted) and `waiting` (PR still open) are first-class
+   answers, not errors. Merge detection is local git only; never query
+   the PR API for this.
+
+4. **Attended:** summarize what was drafted — correction count, file,
    branch, PR URL — and remind the operator the drafted file is ordinary kb
    markdown they can edit on the branch before merging. Surface a
    `committed-local` result (offline push) or `unavailable` PR step as the
@@ -81,8 +97,8 @@ If the deterministic core is unrunnable — a tool call denied by permissions, `
   flagged correction, re-draft; never hand-edit the finding away on the
   branch (NFR5).
 - Measurement (D4): the `knowledge-promotion` event — sole emitter this
-  skill — lands with contract 1.7.0 (ST-9.6) alongside its taxonomy row;
-  the ledger refuses un-rowed event types, so emission cannot precede the
-  row. Until then a draft emits nothing (a mover, not an emitter, AD-12);
-  the promotions record is the exactly-once baseline 9.6 reconciles.
+  skill, through the `emit` verb alone (contract 1.7.0, ST-9.6). A draft
+  emits nothing (a mover, AD-12); the promotions record is the
+  exactly-once baseline emit reconciles against — one merged promotion
+  PR, one event, never a duplicate.
 - All paths resolve through `${CLAUDE_PLUGIN_ROOT}`.
