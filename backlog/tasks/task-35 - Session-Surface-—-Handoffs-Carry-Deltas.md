@@ -1,10 +1,10 @@
 ---
 id: TASK-35
 title: Session Surface — Handoffs Carry Deltas
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-08-07 04:34'
-updated_date: '2026-08-07 05:00'
+updated_date: '2026-08-07 05:16'
 labels:
   - ST-035
 milestone: Research Becomes Knowledge
