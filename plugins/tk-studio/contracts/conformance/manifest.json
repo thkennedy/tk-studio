@@ -162,7 +162,7 @@
     },
     "tk-studio-knowledge": {
       "external_calls": true,
-      "auth_preflight": "VCS remote + gh only at the push/PR step, both failing loud (a push failure lands the draft commit locally and says so; a gh failure reports the branch as pushed with manual-PR guidance) — the routing-doc gate, queue read, promoted-baseline dedupe, and sanitization scan are local and need no auth",
+      "auth_preflight": "VCS remote + gh only at the push/PR step, both failing loud (a push failure lands the draft commit locally and says so; a gh failure reports the branch as pushed with manual-PR guidance); emit's fetch is best-effort (offline answers from last-fetched refs) — the routing-doc gate, queue read, promoted-baseline dedupe, emission baseline, and sanitization scan are local and need no auth",
       "drives": [
         {
           "assertion": "headless-clean",
@@ -175,6 +175,12 @@
           "expect": "refusal",
           "marker": "no routing doc",
           "note": "the ST-9.5 refusal drive — a promotion attempt without a rendered routing doc refuses named (the routing doc is the human's promotion-decision surface; D3): a promotion drafted from data no human has seen is not a gated promotion"
+        },
+        {
+          "assertion": "headless-clean",
+          "argv": ["lib/promote.py", "emit", "--directory", "{sandbox}", "--dry-run"],
+          "expect": "json",
+          "note": "the ST-9.6 emission verb (D4) — reconciles the promotions record against merged promotion PRs, exactly once per PR; a sandbox with no recorded drafts answers a clean no-op before any git read, never an error"
         }
       ]
     },

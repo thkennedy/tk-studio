@@ -65,11 +65,50 @@ class DriverContractTestCase(unittest.TestCase):
     # --- AC 1b: own semver + change policy
 
     def test_carries_its_own_semver_and_change_policy(self):
-        # 1.1.0..1.6.0 = ST-6.2/6.4/7.1/7.2/8.1/8.2 additive surfaces (MINOR per policy)
-        self.assertRegex(self.text, r"\*\*1\.6\.0\*\*")
+        # 1.1.0..1.7.0 = ST-6.2/6.4/7.1/7.2/8.1/8.2/9.6 additive surfaces
+        # (MINOR per policy; 1.7.0 is the Epic 9 knowledge-port bump)
+        self.assertRegex(self.text, r"\*\*1\.7\.0\*\*")
         self.assertIn("Change policy", self.text)
         self.assertIn("MAJOR", self.text)
         self.assertRegex(self.text, r"[Bb]reaking")
+
+    # --- ST-9.6: the 1.7.0 knowledge-port surfaces are published
+
+    def test_publishes_the_knowledge_port_rows(self):
+        # the §2 rows name their deterministic cores and verbs
+        self.assertIn("`lib/session.py handoff\\|resume`", self.text)
+        self.assertIn("`lib/promote.py check\\|draft\\|emit`", self.text)
+        self.assertIn("`lib/research.py charter\\|record\\|seed\\|spine`",
+                      self.text)
+        self.assertIn("knowledge.schema.json", self.text)
+        self.assertIn("seed.md", self.text)
+
+    def test_publishes_the_kb_injection_directive(self):
+        # §4: spine/seed paths named; the injection act stays driver-side
+        section = self.text[self.text.index("KB-injection directive"):]
+        self.assertIn("knowledge/spine.md", section)
+        self.assertIn("seed.md", section)
+        self.assertIn("driver-side", section)
+        self.assertRegex(section, r"[Aa]id, not gate")
+
+    def test_publishes_the_knowledge_promotion_event(self):
+        # the taxonomy row and the contract mention land together (D4):
+        # ledger.py refuses un-rowed events, so the row must exist
+        self.assertIn("knowledge-promotion", self.text)
+        taxonomy = json.loads(
+            (PLUGIN_ROOT / "contracts" / "events" / "taxonomy.v1.json")
+            .read_text(encoding="utf-8"))
+        self.assertIn("knowledge-promotion", taxonomy["events"])
+        self.assertIn("tk-studio-knowledge",
+                      taxonomy["events"]["knowledge-promotion"]["emitter"])
+
+    def test_folds_in_the_deferred_wording(self):
+        # DW-1: §4 submit is id-only; DW-3: four-plane + unrunnable-core
+        self.assertNotIn("a job definition (or the id", self.text)
+        self.assertIn("id-only", self.text)
+        self.assertIn("four-plane", self.text)
+        self.assertNotIn("three-way", self.text)
+        self.assertIn("unrunnable-core", self.text)
 
     # --- AC 2: A7 dossier items covered or explicitly deferred with a seam
 
@@ -80,9 +119,11 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertEqual([r[0] for r in rows], ["1", "2", "3", "4", "5", "6"])
 
     def test_deferred_items_name_their_seam(self):
-        # the one deferral (Research→Knowledge Lifecycle port) names its seam
+        # the port's deferral history stays named (deferred through 1.6.0,
+        # landed at 1.7.0) — a reader can trace the seam's closure
         self.assertIn("deferred", self.text.lower())
         self.assertIn("Research→Knowledge Lifecycle", self.text)
+        self.assertIn("landed story-by-story as Epic 9", self.text)
 
 
 if __name__ == "__main__":

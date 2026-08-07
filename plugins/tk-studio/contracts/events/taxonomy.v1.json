@@ -76,6 +76,16 @@
         "evidence": { "type": "string", "required": false }
       }
     },
+    "knowledge-promotion": {
+      "emitter": "promotion skill alone (tk-studio-knowledge — lib/promote.py emit; D4, ST-9.6): exactly one event per merged promotion PR, reconciled against the per-project promotions record (knowledge.schema.json record_line) — a draft file already covered by an emitted marker never re-emits. Drafting emits nothing (a draft is a mover, AD-12); only the merge-detected emission lands here.",
+      "payload": {
+        "files": { "type": "array", "required": true, "note": "project-relative kb/ files the merged promotion PR landed" },
+        "corrections": { "type": "number", "required": true, "note": "distinct correction identities (delta_key) across the emitted drafts" },
+        "branch": { "type": "string", "required": true, "note": "the membrane branch knowledge/<user>-<machine>" },
+        "base": { "type": "string", "required": false, "note": "the branch the PR merged into" },
+        "detail": { "type": "string", "required": false }
+      }
+    },
     "report": {
       "emitter": "reporter (tk-studio-report — the human-authored defect verb)",
       "payload": {
