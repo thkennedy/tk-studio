@@ -2,8 +2,8 @@
 
 The suite is manifest-driven over surfaces discovered from the plugin's own
 skills tree: every shipped skill is driven headless with status-block,
-no-prompt, auth-preflight, and blocked-not-hang assertions; failures emit
-headless-failure events; unregistered surfaces fail the suite.
+unrunnable-core, no-prompt, auth-preflight, and blocked-not-hang assertions;
+failures emit headless-failure events; unregistered surfaces fail the suite.
 """
 from __future__ import annotations
 
@@ -29,6 +29,9 @@ description: Fake surface for conformance tests.
 Headless runs end with the status block:
 
   {{"status": "complete", "intent": "{name}", "artifacts": [], "reason": null}}
+
+If the deterministic core is unrunnable, end blocked with the status block
+naming the gap (AD-11).
 """
 
 
@@ -113,6 +116,28 @@ class ConformanceHarnessTestCase(unittest.TestCase):
         report = self._run()
         self.assertIn("status-block",
                       {f["assertion"] for f in report["failures"]})
+
+    def test_skill_must_document_unrunnable_core_discipline(self):
+        # AD-11: a permission-denied core once left a skill asking a question
+        # with no terminal status block — every SKILL.md must document that
+        # an unrunnable core ends blocked with the block naming the gap
+        d = self.skills / "tk-studio-fake"
+        d.mkdir()
+        # "blocked" is present (as in every real SKILL.md) — only the
+        # canonical unrunnable-core paragraph is missing, so this pins that
+        # the check discriminates on the paragraph, not the word "blocked"
+        (d / "SKILL.md").write_text(
+            "---\nname: tk-studio-fake\ndescription: no discipline.\n---\n\n"
+            "Ambiguity ends blocked, never a prompt.\n\n"
+            'Headless runs end with the status block:\n\n'
+            '  {"status": "complete", "intent": "tk-studio-fake", '
+            '"artifacts": [], "reason": null}\n',
+            encoding="utf-8")
+        self._write_manifest({"tk-studio-fake": self._entry()})
+        report = self._run()
+        failure = next(f for f in report["failures"]
+                       if f["assertion"] == "unrunnable-core")
+        self.assertIn("unrunnable-core", failure["detail"])
 
     def test_external_surface_may_not_declare_no_preflight(self):
         self._make_skill("tk-studio-fake")
@@ -292,10 +317,11 @@ class ConformanceRealPluginTestCase(unittest.TestCase):
         self.assertTrue(report["ok"], json.dumps(report["failures"], indent=2))
         shipped = runner.discover_surfaces()
         self.assertEqual(sorted(report["surfaces"]), shipped)
-        # every surface carries the three structural assertions
+        # every surface carries the four structural assertions
         for surface, checks in report["surfaces"].items():
             names = [c["assertion"] for c in checks]
-            for required in ("registered", "status-block", "auth-preflight"):
+            for required in ("registered", "status-block", "unrunnable-core",
+                             "auth-preflight"):
                 self.assertIn(required, names, f"{surface} missing {required}")
 
     def test_every_shipped_surface_has_at_least_one_headless_drive(self):

@@ -70,6 +70,8 @@ for the recommendation step — detect never acts on them.
   {"status": "complete", "intent": "tk-studio-detect", "artifacts": [], "reason": null}
   ```
 
+If the deterministic core is unrunnable — a tool call denied by permissions, `uv`/python unavailable — end `blocked` with the status block naming the unrunnable core as `reason`: never a question, never a headless run that ends without the block (AD-11).
+
 ## Rules
 
 - Read-only, always: zero writes to the project or the store unless the

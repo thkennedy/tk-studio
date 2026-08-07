@@ -85,6 +85,8 @@ committed per-project counter at `.tk-studio/plan-counter.yaml`).
      {"status": "complete", "intent": "tk-studio-plan-sync", "artifacts": ["_bmad-output/planning-artifacts/plan/"], "reason": null}
      ```
 
+If the deterministic core is unrunnable — a tool call denied by permissions, `uv`/python unavailable — end `blocked` with the status block naming the unrunnable core as `reason`: never a question, never a headless run that ends without the block (AD-11).
+
 ## Rules
 
 - Only this skill (via `lib/plansync.py`) mints ids or writes canonical

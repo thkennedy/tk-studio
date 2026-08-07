@@ -10,6 +10,11 @@ alone) the runner asserts, per the driver contract:
   status-block            the SKILL.md documents its terminal status block
                           and the example validates against
                           status-block.schema.json with the right intent
+  unrunnable-core         the SKILL.md documents the unrunnable-core
+                          discipline: a core the skill cannot run (tool call
+                          denied, interpreter unavailable) ends blocked with
+                          the status block naming the gap — never a question
+                          (AD-11)
   auth-preflight          the manifest declares how the surface satisfies
                           the auth preflight; a surface making external
                           calls may not declare "none"
@@ -103,6 +108,27 @@ def _check_status_block_doc(surface: str, skills_dir: Path) -> dict:
     if block["intent"] != surface:
         check["detail"] = (f"example intent '{block['intent']}' does not name "
                            f"the surface '{surface}'")
+        return check
+    check["ok"] = True
+    return check
+
+
+def _check_unrunnable_core_doc(surface: str, skills_dir: Path) -> dict:
+    """SKILL.md documents the unrunnable-core discipline: a core the skill
+    cannot run (tool call denied, interpreter unavailable) ends blocked with
+    the status block naming the gap — never a question, never a run that
+    ends without the block (AD-11). Surfaced by the connector's live probe:
+    a permission-denied core left a skill asking the user a question with
+    no terminal status block."""
+    check = {"assertion": "unrunnable-core", "ok": False, "detail": ""}
+    text = (skills_dir / surface / "SKILL.md").read_text(encoding="utf-8")
+    # the canonical sentence prefix, not a loose substring — every SKILL.md
+    # already says "blocked" somewhere, so anything weaker is vacuous
+    if "If the deterministic core is unrunnable" not in text:
+        check["detail"] = ("SKILL.md does not document the unrunnable-core "
+                           "discipline (the canonical 'If the deterministic "
+                           "core is unrunnable' paragraph — end blocked with "
+                           "the status block naming the gap, AD-11)")
         return check
     check["ok"] = True
     return check
@@ -210,6 +236,7 @@ def run_suite(skills_dir: Path | None = None, manifest_path: Path | None = None,
             continue
         checks.append({"assertion": "registered", "ok": True, "detail": ""})
         checks.append(_check_status_block_doc(surface, skills))
+        checks.append(_check_unrunnable_core_doc(surface, skills))
         checks.append(_check_auth_preflight(entry))
         with tempfile.TemporaryDirectory(prefix="tk-conformance-") as tmp:
             sandbox = Path(tmp) / "project"

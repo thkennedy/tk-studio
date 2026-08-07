@@ -63,6 +63,8 @@ persona shell (ST-5.2) on top; routing never lives in the shell.
   {"status": "blocked", "intent": "tk-studio-orchestrator", "artifacts": [], "reason": "needs-onboarding: working_set.developer unconfirmed"}
   ```
 
+If the deterministic core is unrunnable — a tool call denied by permissions, `uv`/python unavailable — end `blocked` with the status block naming the unrunnable core as `reason`: never a question, never a headless run that ends without the block (AD-11).
+
 ## Rules
 
 - The core is stateless (AD-9): nothing is written anywhere — no run state,
