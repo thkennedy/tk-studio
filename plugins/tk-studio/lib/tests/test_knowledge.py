@@ -136,6 +136,15 @@ class ValidateSeedAcceptanceTestCase(unittest.TestCase):
             result = knowledge.validate_seed(prefix + VALID_SPINE)
             self.assertEqual(result["errors"], [])
 
+    def test_bare_anchor_id_grammar(self):
+        # The citation form (ST-9.3): what deltas and finding anchors carry.
+        self.assertTrue(knowledge.is_anchor_id("SPINE-A1"))
+        self.assertTrue(knowledge.is_anchor_id(f"SEED-{RUN}-A2"))
+        self.assertTrue(knowledge.is_anchor_id("SEED-A3"))
+        for bad in ("", "SPINE-A", "[SPINE-A1]", "SEED-A1x", "spine-A1",
+                    "SPINE-A1 ", None, 3):
+            self.assertFalse(knowledge.is_anchor_id(bad))
+
 
 class ValidateSeedRejectionTestCase(unittest.TestCase):
     def test_rejects_a_seed_missing_the_supersede_header(self):
