@@ -3,7 +3,7 @@
   "description": "Conformance manifest (ST-5.4, AD-19). Every shipped studio skill MUST have an entry here — the runner discovers surfaces from the plugin's skills/ tree and fails any surface missing from this manifest (and any manifest entry with no shipped skill behind it). Drives run the surface's deterministic core headless in a throwaway sandbox project with an isolated store: stdin closed, wall-clock bounded, output must be machine-readable. argv[0] is plugin-root-relative; {sandbox} substitutes the sandbox project directory.",
   "expect_semantics": {
     "json": "process completes within the timeout and stdout parses as JSON",
-    "refusal": "process completes within the timeout and refuses cleanly: nonzero exit, or JSON with ok=false, or the declared marker in stdout — and when a marker is declared the refusal MUST name it in stdout (an unnamed refusal cannot be surfaced as blocked — ISS-002); never a prompt, never a hang"
+    "refusal": "process completes within the timeout and refuses cleanly — nonzero exit, JSON with ok=false, or an in-band structured block proven by the declared marker (detect's ask, orchestrate's needs-onboarding) — and when a marker is declared the refusal MUST name it in stdout: an unnamed refusal (a crash, an unrelated error) gives the skill layer nothing to surface as blocked (ISS-002); never a prompt, never a hang"
   },
   "surfaces": {
     "tk-studio-activate": {

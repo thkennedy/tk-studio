@@ -168,6 +168,66 @@ class ConformanceHarnessTestCase(unittest.TestCase):
         report = self._run()
         self.assertTrue(report["ok"], report["failures"])
 
+    def test_inband_structured_block_named_by_marker_passes(self):
+        # detect/orchestrate/jobrun refuse in-band by design: exit 0, ok=true,
+        # the block reported as data — the declared marker is what proves the
+        # named block is present
+        script = Path(self._tmp.name) / "inband.py"
+        script.write_text(
+            "import json; "
+            "print(json.dumps({'ok': True, 'outcome': 'needs-onboarding', "
+            "'gaps': ['working_set.developer']}))",
+            encoding="utf-8")
+        self._make_skill("tk-studio-fake")
+        self._write_manifest({"tk-studio-fake": self._entry(drives=[{
+            "assertion": "blocked-on-ambiguity",
+            "argv": [str(script)], "expect": "refusal",
+            "marker": "needs-onboarding"}])})
+        report = self._run()
+        self.assertTrue(report["ok"], report["failures"])
+
+    def test_plain_success_without_marker_or_refusal_fails(self):
+        # exit 0, ok=true, marker absent: nothing refused and nothing named
+        script = Path(self._tmp.name) / "happy2.py"
+        script.write_text(
+            "import json; print(json.dumps({'ok': True, 'summary': 'done'}))",
+            encoding="utf-8")
+        self._make_skill("tk-studio-fake")
+        self._write_manifest({"tk-studio-fake": self._entry(drives=[{
+            "assertion": "blocked-on-ambiguity",
+            "argv": [str(script)], "expect": "refusal",
+            "marker": "not the studio repo root"}])})
+        report = self._run()
+        failure = next(f for f in report["failures"]
+                       if f["assertion"] == "blocked-on-ambiguity")
+        self.assertIn("declared marker", failure["detail"])
+
+    def test_markerless_refusal_still_passes_on_nonzero_exit(self):
+        script = Path(self._tmp.name) / "plain.py"
+        script.write_text("import sys; print('cannot proceed'); sys.exit(1)",
+                          encoding="utf-8")
+        self._make_skill("tk-studio-fake")
+        self._write_manifest({"tk-studio-fake": self._entry(drives=[{
+            "assertion": "blocked-on-ambiguity",
+            "argv": [str(script)], "expect": "refusal"}])})
+        report = self._run()
+        self.assertTrue(report["ok"], report["failures"])
+
+    def test_exit_zero_ok_false_with_marker_passes(self):
+        # a core may refuse via JSON ok=false without a nonzero exit
+        script = Path(self._tmp.name) / "softref.py"
+        script.write_text(
+            "import json; print(json.dumps({'ok': False, "
+            "'error': 'x is not the studio repo root'}))",
+            encoding="utf-8")
+        self._make_skill("tk-studio-fake")
+        self._write_manifest({"tk-studio-fake": self._entry(drives=[{
+            "assertion": "blocked-on-ambiguity",
+            "argv": [str(script)], "expect": "refusal",
+            "marker": "not the studio repo root"}])})
+        report = self._run()
+        self.assertTrue(report["ok"], report["failures"])
+
     def test_hanging_drive_fails_no_prompt_assertion(self):
         script = Path(self._tmp.name) / "prompty.py"
         script.write_text("input('never allowed headless: ')",

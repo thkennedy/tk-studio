@@ -133,9 +133,13 @@ def _run_drive(surface: str, drive: dict, sandbox: Path, store: Path,
         return check
     env = dict(os.environ, TK_STUDIO_HOME=str(store))
     try:
+        # Every shipped CLI reconfigures its stdout to utf-8 (AD-11, enforced
+        # by test_utf8_guard) — decode the same way, or Windows' cp1252
+        # default mangles markers and can crash the suite on stray bytes.
         proc = subprocess.run(
             [sys.executable, str(script), *argv[1:]],
             stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
             timeout=timeout, env=env, cwd=str(PLUGIN_ROOT))
     except subprocess.TimeoutExpired:
         check["detail"] = (f"hung past {timeout}s — a prompt or wait, never "
@@ -157,13 +161,17 @@ def _run_drive(surface: str, drive: dict, sandbox: Path, store: Path,
         else:
             check["ok"] = True
     elif expect == "refusal":
-        marker = drive.get("marker")
+        marker = drive.get("marker") or None  # empty marker declares nothing
+        # A refusal is either out-of-band (nonzero exit / JSON ok=false) or
+        # in-band: the core reports the block as data — detect's ask,
+        # orchestrate's needs-onboarding — proven by the declared marker.
+        # Either way a declared marker is a requirement, not an alternative:
+        # the refusal must name its reason, or the skill layer has nothing
+        # to surface as blocked (ISS-002 — a crash or unrelated error is
+        # not a clean refusal).
         refused = (proc.returncode != 0
                    or (isinstance(parsed, dict) and parsed.get("ok") is False)
                    or (marker is not None and marker in stdout))
-        # A declared marker is a requirement, not an alternative: the refusal
-        # must name its reason, or the skill layer has nothing to surface
-        # (ISS-002 — a crash or unrelated error is not a clean refusal).
         if marker is not None and marker not in stdout:
             check["detail"] = (f"refusal does not name the declared marker "
                               f"{marker!r} (exit {proc.returncode}) — an "
@@ -171,7 +179,8 @@ def _run_drive(surface: str, drive: dict, sandbox: Path, store: Path,
         elif refused:
             check["ok"] = True
         else:
-            check["detail"] = "expected a clean refusal, got exit 0 with ok!=false"
+            check["detail"] = ("expected a clean refusal, got exit 0 with "
+                              "ok!=false")
     else:
         check["detail"] = f"manifest declares unknown expect '{expect}'"
     return check
