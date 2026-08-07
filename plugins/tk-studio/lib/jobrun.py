@@ -142,6 +142,29 @@ def _directive(defn: dict) -> dict:
     return directive
 
 
+def _tilde(path: Path) -> str:
+    """Home-relativize a per-user-store path for emission (~/... — the §1
+    sanitization posture); a store outside home (tests) emits as-is."""
+    try:
+        return "~/" + path.relative_to(Path.home()).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _knowledge_directive(key: str, run_id: str) -> dict:
+    """The §4 KB-injection directive (ST-9.6): the project spine and the
+    run's seed named by path so any driver can inject their contents into
+    the segment prompt it executes. The injection ACT stays driver-side
+    (AD-2 — the studio never renders another harness's prompts); aid, not
+    gate — an absent file is never a reason to skip or fail the run."""
+    spine = reconcilelib.knowledge_dir(key) / "spine.md"
+    seed = joblib.workspace_path(key, run_id) / "seed.md"
+    return {
+        "spine": {"path": _tilde(spine), "present": spine.is_file()},
+        "seed": {"path": _tilde(seed), "present": seed.is_file()},
+    }
+
+
 def _job_routing(defn: dict, project_root: Path) -> dict:
     """The run's effective model/effort (AD-14, §5): the definition's own
     model/effort fields are the runtime override; the executing resource is
@@ -315,6 +338,7 @@ def submit(project_root: Path, job_id: str) -> dict:
             result["directive"] = {
                 "kind": "invoke-skill", "skill": defn["target"]["skill"],
                 "payload": defn["target"].get("payload") or {},
+                "knowledge": _knowledge_directive(key, record["run_id"]),
                 "then": f"jobrun.py finish --run-id {record['run_id']}"}
         else:
             result["state"] = "queued"
@@ -398,6 +422,7 @@ def wake(project_root: Path, job_id: str) -> dict:
         result["directive"] = {
             "kind": "invoke-skill", "skill": defn["target"]["skill"],
             "payload": defn["target"].get("payload") or {},
+            "knowledge": _knowledge_directive(key, record["run_id"]),
             "then": f"jobrun.py finish --run-id {record['run_id']}"}
     return result
 

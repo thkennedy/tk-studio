@@ -26,6 +26,7 @@ import config as configlib  # noqa: E402
 import job as joblib  # noqa: E402
 import jobrun  # noqa: E402
 import ledger  # noqa: E402
+import reconcile as reconcilelib  # noqa: E402
 
 
 class JobRunTestCase(unittest.TestCase):
@@ -182,6 +183,31 @@ class JobRunTestCase(unittest.TestCase):
         self.assertEqual(ended["state"], "partial")
         with self.assertRaises(jobrun.JobRunError):
             jobrun.account(self.root, run_id, turns=1)
+
+    def test_invoke_skill_directive_names_knowledge_paths(self):
+        # ST-9.6: the §4 KB-injection directive — spine/seed paths named so
+        # any driver can inject them into the segment prompt it executes;
+        # absence is a reported flag, never a gate
+        self._declare("agentic", self._skill_defn("agentic"))
+        submitted = jobrun.submit(self.root, "agentic")
+        knowledge = submitted["directive"]["knowledge"]
+        self.assertFalse(knowledge["spine"]["present"])
+        self.assertFalse(knowledge["seed"]["present"])
+        self.assertTrue(
+            knowledge["spine"]["path"].endswith("knowledge/spine.md"))
+        self.assertTrue(knowledge["seed"]["path"].endswith(
+            f"runs/{submitted['run_id']}/seed.md"),
+            "the seed path is the run's own workspace — prospective at "
+            "mint time (the run authors it), present on later segments")
+
+        spine = reconcilelib.knowledge_dir("proj") / "spine.md"
+        spine.parent.mkdir(parents=True, exist_ok=True)
+        spine.write_text("provisional stub\n", encoding="utf-8")
+        self._declare("looper", self._skill_defn(
+            "looper", trigger="loop", cadence={"mode": "self-paced"}))
+        woken = jobrun.wake(self.root, "looper")
+        self.assertTrue(woken["woken"], woken)
+        self.assertTrue(woken["directive"]["knowledge"]["spine"]["present"])
 
     def test_finish_completes_skill_run_and_emits_once(self):
         self._declare("agentic", self._skill_defn("agentic"))

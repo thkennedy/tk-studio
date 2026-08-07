@@ -78,7 +78,7 @@ If the deterministic core is unrunnable — a tool call denied by permissions, `
 - Provisional knowledge stays in the per-user store (AD-3): `seed.md`
   lives in the workspace, deltas ride `handoff.json` — nothing here
   touches project `kb/` (promotion is ST-9.5's PR membrane, D3).
-- The contract's §2 row for this surface lands with the 1.7.0 bump
-  (ST-9.6); until then the conformance manifest row is the driver-visible
-  definition.
+- The contract's §2 row for this surface shipped with the 1.7.0 bump
+  (ST-9.6) — the row and the conformance manifest drives together are the
+  driver-visible definition.
 - All paths resolve through `${CLAUDE_PLUGIN_ROOT}`.

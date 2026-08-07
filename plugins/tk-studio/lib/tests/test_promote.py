@@ -4,10 +4,10 @@ Routing doc -> ONE new dated kb file on the stable knowledge branch ->
 membrane PR: a promotion attempt without a routing doc is a named rejection;
 drafted files are ordinary kb markdown (no new frontmatter keys — AD-8);
 nothing auto-applies and no base branch is ever pushed (D3, AD-12); the
-promoted baseline (promotions record) makes repeat drafts incremental; and
-the surface is a mover, not an emitter — no ledger event lands in ST-9.5
-(the knowledge-promotion event and its taxonomy row arrive together at
-contract 1.7.0, ST-9.6).
+promoted baseline (promotions record) makes repeat drafts incremental; a
+draft is a mover, not an emitter — no ledger event lands at draft time; and
+the emit verb (ST-9.6, D4) emits exactly one knowledge-promotion event per
+merged promotion PR, reconciled against the promotions record.
 """
 from __future__ import annotations
 
@@ -404,7 +404,7 @@ class PromoteTestCase(unittest.TestCase):
         contracts = Path(__file__).resolve().parents[2] / "contracts"
         schema = json.loads((contracts / "knowledge.schema.json")
                             .read_text(encoding="utf-8"))
-        required = schema["promotion"]["record_line"]["required"]
+        required = schema["promotion"]["record_line"]["draft"]["required"]
         self.assertEqual(sorted(record), sorted(required),
                          "the record writes exactly the published fields")
         self.assertEqual(record["type"], "draft")
@@ -455,7 +455,7 @@ class PromoteTestCase(unittest.TestCase):
         self.assertEqual(again["result_state"], "no-op")
         self.assertIn("record_invalid", again)
 
-    # --- AD-12: a mover, not an emitter (until the 1.7.0 row lands)
+    # --- AD-12: a draft is a mover, not an emitter — only emit emits
 
     def test_draft_emits_no_ledger_event(self):
         self._seed_two_corrections()
@@ -465,8 +465,167 @@ class PromoteTestCase(unittest.TestCase):
         after = (ledger.ledger_path().read_bytes()
                  if ledger.ledger_path().is_file() else b"")
         self.assertEqual(before, after,
-                         "the knowledge-promotion event lands at 1.7.0 "
-                         "(ST-9.6), not before")
+                         "only the emit verb emits (ST-9.6) — a draft "
+                         "moves, never emits")
+
+    # --- ST-9.6 (D4): emit — exactly once per merged promotion PR
+
+    def _ledger_events(self, event: str) -> list[dict]:
+        path = ledger.ledger_path()
+        if not path.is_file():
+            return []
+        return [json.loads(t) for t in
+                path.read_text(encoding="utf-8").split("\n")
+                if t.strip() and json.loads(t).get("event") == event]
+
+    def _merge_promotion(self) -> None:
+        """Merge the promotion PR as review would (merge + branch delete)."""
+        _git(self.repo, "checkout", "-q", "main")
+        _git(self.repo, "merge", "-q", "--no-ff", "-m", "merge promotion",
+             f"origin/{self.branch}")
+        _git(self.repo, "push", "-q", "origin", "main")
+        _git(self.repo, "push", "-q", "origin", "--delete", self.branch)
+
+    def test_emit_noops_on_an_empty_record_before_any_git_read(self):
+        plain = Path(self._tmp.name) / "emitnogit"
+        plain.mkdir()
+        result = promote.emit(plain)
+        self.assertEqual(result["result_state"], "no-op")
+        self.assertIn("no recorded drafts", result["detail"])
+
+    def test_emit_waits_while_the_pr_is_open(self):
+        self._seed_two_corrections()
+        promote.draft(self.repo, no_pr=True)
+        result = promote.emit(self.repo)
+        self.assertEqual(result["result_state"], "waiting")
+        self.assertEqual(len(result["waiting"]), 1)
+        self.assertEqual(self._ledger_events("knowledge-promotion"), [],
+                         "an open PR is still the gate — nothing emits")
+
+    def test_emit_after_merge_emits_exactly_once(self):
+        self._seed_two_corrections()
+        drafted = promote.draft(self.repo, no_pr=True)
+        self._merge_promotion()
+
+        result = promote.emit(self.repo)
+        self.assertEqual(result["result_state"], "emitted")
+        self.assertEqual(result["emitted"], [{
+            "files": [drafted["file"]], "corrections": 2,
+            "branch": self.branch, "base": "main"}])
+        events = self._ledger_events("knowledge-promotion")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["payload"]["files"], [drafted["file"]])
+        self.assertEqual(events[0]["payload"]["corrections"], 2)
+        self.assertEqual(events[0]["project"], self.key)
+        record = promote.read_record(self.key)
+        self.assertEqual(len(record["emitted"]), 1)
+        self.assertEqual(record["emitted"][0]["files"], [drafted["file"]])
+
+        again = promote.emit(self.repo)
+        self.assertEqual(again["result_state"], "no-op")
+        self.assertIn("already emitted", again["detail"])
+        self.assertEqual(len(self._ledger_events("knowledge-promotion")), 1,
+                         "exactly once per merged promotion PR — never a "
+                         "duplicate")
+
+    def test_emit_batches_one_merged_prs_drafts_into_one_event(self):
+        # two drafts ride the same branch/PR; one merge -> ONE event
+        self._seed_two_corrections()
+        first = promote.draft(self.repo, no_pr=True)
+        self._queue(_line(anchor="SPINE-A2", tier="spine",
+                          reality="second draft correction"))
+        self._route()
+        second = promote.draft(self.repo, no_pr=True)
+        self._merge_promotion()
+
+        result = promote.emit(self.repo)
+        self.assertEqual(result["result_state"], "emitted")
+        self.assertEqual(len(result["emitted"]), 1)
+        self.assertEqual(sorted(result["emitted"][0]["files"]),
+                         sorted([first["file"], second["file"]]))
+        self.assertEqual(result["emitted"][0]["corrections"], 3)
+        self.assertEqual(len(self._ledger_events("knowledge-promotion")), 1)
+
+    def test_emit_dry_run_reports_and_marks_nothing(self):
+        self._seed_two_corrections()
+        promote.draft(self.repo, no_pr=True)
+        self._merge_promotion()
+        # a dry run has NO side effects: it must answer even with the
+        # remote gone (no fetch), and take no lock, mark no record
+        self._break_remote()
+        result = promote.emit(self.repo, dry_run=True)
+        self.assertEqual(result["result_state"], "dry-run")
+        self.assertEqual(len(result["emitted"]), 1)
+        self.assertEqual(self._ledger_events("knowledge-promotion"), [])
+        self.assertEqual(promote.read_record(self.key)["emitted"], [])
+        lock = promote.record_path(self.key).with_name(
+            promote.RECORD_NAME + ".lock")
+        self.assertFalse(lock.exists(), "a dry run takes no lock")
+
+    def test_emit_refuses_without_git_when_drafts_are_pending(self):
+        plain = Path(self._tmp.name) / "emitplain"
+        plain.mkdir()
+        key = "emitplain"
+        promote._record_draft(key, "2026-08-07T00:00:00.000+00:00",
+                              self.branch, "main", "kb/x.md",
+                              [("a", "WRONG", "r", "run-local")])
+        with self.assertRaises(promote.PromoteBlocked) as caught:
+            promote.emit(plain)
+        self.assertIn("not a git work tree", str(caught.exception))
+
+    def test_malformed_emitted_marker_reports_and_reemits(self):
+        # a marker without a files list drops out of the emission baseline:
+        # its drafts re-emit (duplicate-over-loss, visible in the ledger)
+        self._seed_two_corrections()
+        promote.draft(self.repo, no_pr=True)
+        self._merge_promotion()
+        with open(promote.record_path(self.key), "a", encoding="utf-8",
+                  newline="\n") as handle:
+            handle.write('{"type":"emitted","emitted_at":"x"}\n')
+        record = promote.read_record(self.key)
+        self.assertEqual(len(record["invalid"]), 1)
+        self.assertIn("no files list", record["invalid"][0]["error"])
+        result = promote.emit(self.repo)
+        self.assertEqual(result["result_state"], "emitted")
+        self.assertIn("record_invalid", result)
+
+    def test_draft_record_without_file_reports_never_crashes(self):
+        # adversarial review (ST-9.6 must-fix): the record_warning guidance
+        # invites hand-repair of the promotions record — a draft line
+        # missing its file must report invalid, never KeyError check/emit
+        self._seed_two_corrections()
+        promote.draft(self.repo, no_pr=True)
+        with open(promote.record_path(self.key), "a", encoding="utf-8",
+                  newline="\n") as handle:
+            handle.write('{"type":"draft","keys":[["a","WRONG","r",'
+                         '"run-local"]]}\n')
+            handle.write('{"type":"draft","drafted_at":"x","branch":"b",'
+                         '"base":"main","file":null,"keys":[]}\n')
+        record = promote.read_record(self.key)
+        self.assertEqual(len(record["drafts"]), 1)
+        self.assertEqual(len(record["invalid"]), 2)
+        for entry in record["invalid"]:
+            self.assertIn("no file", entry["error"])
+        self.assertTrue(promote.check(self.repo)["ok"])
+        result = promote.emit(self.repo)
+        self.assertIn("record_invalid", result)
+
+    def test_check_reports_the_emission_state(self):
+        self._seed_two_corrections()
+        promote.draft(self.repo, no_pr=True)
+        drafted = promote.check(self.repo)
+        self.assertEqual(drafted["emission"],
+                         {"emitted": 0, "drafts_unemitted": 1})
+        self._merge_promotion()
+        promote.emit(self.repo)
+        emitted = promote.check(self.repo)
+        self.assertEqual(emitted["emission"],
+                         {"emitted": 1, "drafts_unemitted": 0})
+
+    def test_cli_emit_answers_json(self):
+        result = self._cli("emit", "--directory", str(self.repo))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["result_state"], "no-op")
 
     # --- check: read-only gate state
 
