@@ -1,6 +1,6 @@
 # Research→Knowledge Lifecycle port — planning pass
 
-**Date:** 2026-08-06 · **Status:** for operator review — plans only, no code
+**Date:** 2026-08-06 · **Status:** ruled 2026-08-06 — see §9; plans only, no code
 **Against:** ARCHITECTURE-SPINE.md Deferred entry ("Research→Knowledge Lifecycle
 port") · driver-contract.md §7 dossier row 4 · connectors/tk-studio/DESIGN.md
 Deferred seam ("run-workspace ↔ handoff mapping")
@@ -17,7 +17,7 @@ bump that DW-1 folds into.
 ## 1. What the Deferred entry names, verified
 
 > **Research→Knowledge Lifecycle port** (mission spine/seed, anchored deltas,
-> JSONL reconciliation queue, promotion gate — verified built in dps/ClaudeOS)
+> JSONL reconciliation queue, promotion gate — verified built in tk-council/ClaudeOS)
 > — the named session-discipline upgrade. v1 ships only boundary handoffs +
 > resumable run workspaces; the port moves the runner-side halves council-side
 > behind the driver contract, ClaudeOS as first driver. (spine:256)
@@ -27,15 +27,15 @@ reason for the port (dossier item 4, addendum.md:147):
 
 | Lifecycle stage | Side today | File |
 |---|---|---|
-| research pass (method, evidence grading, anchor rules) | council | `dps-investigate/SKILL.md` |
-| artifact template (seed, supersede header) | council | `dps-investigate/references/seed-template.md` |
+| research pass (method, evidence grading, anchor rules) | council | `tk-investigate/SKILL.md` |
+| artifact template (seed, supersede header) | council | `tk-investigate/references/seed-template.md` |
 | schema validator | **runner** | `D:\ClaudeOS\scripts\knowledge-schema.ts` |
 | spine pass orchestration + budget | **runner** | `mission-spine-pass.ts` |
 | decompose → notify-gate → seed | **runner** | `mission-mg-start-pass.ts` |
 | KB injection into segments | **runner** | `mission-runner.ts:487` (`renderKnowledgeBase`) |
 | delta capture → JSONL queue | **runner** | `mission-reconciliation-queue.ts` |
 | mission-close routing + GC | **runner** | `mission-reconciliation-queue.ts` |
-| promotion gate (human, sole canonical writer) | council | `dps-agent-custodian/references/promotion-gate.md` |
+| promotion gate (human, sole canonical writer) | council | `tk-agent-custodian/references/promotion-gate.md` |
 
 "Moves the runner-side halves council-side" = rows 3–8 leave
 `D:\ClaudeOS\scripts\*.ts` and re-home **studio-side behind the driver
@@ -95,7 +95,7 @@ These are the actual IP; every design choice below preserves them:
    provisional knowledge is authoritative in-flight and structurally
    incapable of becoming canonical by accident.
 3. **Research sits behind a gate.** Scope approval precedes research spend
-   (dps: decompose → notify-gate → seed; studio analog: the charter is
+   (tk-council: decompose → notify-gate → seed; studio analog: the charter is
    already the gate — `no charter, no run` — plus job budget guards).
 4. **Only a human writes canonical.** The renderer routes and applies
    nothing; promotion is explicit per-item human approval. The studio
@@ -103,10 +103,10 @@ These are the actual IP; every design choice below preserves them:
 
 ## 4. Proposed target shape
 
-Concept mapping (dps → studio), riding existing studio primitives wherever
+Concept mapping (tk-council → studio), riding existing studio primitives wherever
 one fits:
 
-| dps concept | Studio home (proposed) | Notes |
+| tk-council concept | Studio home (proposed) | Notes |
 |---|---|---|
 | mission | job run (research job) or epic-scoped engagement | the studio's unit of long work is the run |
 | mission workspace `.mission/<ws>/` | run workspace `~/.tk-studio/projects/<key>/runs/<run-id>/` | already resumable, already contract-named (§2 job row) |
@@ -116,7 +116,7 @@ one fits:
 | anchored deltas in handoff | `handoff.json` gains optional `deltas[]` (closed shape: `{anchor, verdict: WRONG\|STALE\|CONFIRMED, reality, evidence, tier: run-local\|spine}`) | structured JSON beats the source's heading-agnostic markdown scan; 16 KB budget: deltas are pointers, cap list length, price in ST |
 | reconciliation queue (JSONL, per-mission, post-merge capture) | per-project queue in the per-user store: `~/.tk-studio/projects/<key>/knowledge/reconciliation-queue.jsonl`; capture on run finish (`tk_job finish` / wrapper close), deduped `(run_id, anchor, verdict, note)` | AD-3: per-user data never lands on the project VCS uninvited |
 | mission-close routing (`reina-reconciliation.md`) | rendered routing doc beside the queue; produced by the consolidation-shaped verb of the new knowledge core | pure renderer, applies nothing |
-| promotion gate (Reina, Perforce CL staging) | **PR membrane + custodian-shaped skill**: a `tk-studio-knowledge` skill drafts promotions from the routing doc into `kb/` files on a branch; PR review is the human gate | replaces the soft dps join (human-reads-markdown + p4) with the studio's proven membrane (AD-12 pattern); kb frontmatter gains nothing — promoted files are ordinary kb files |
+| promotion gate (Reina, Perforce CL staging) | **PR membrane + custodian-shaped skill**: a `tk-studio-knowledge` skill drafts promotions from the routing doc into `kb/` files on a branch; PR review is the human gate | replaces the soft tk-council join (human-reads-markdown + p4) with the studio's proven membrane (AD-12 pattern); kb frontmatter gains nothing — promoted files are ordinary kb files |
 | schema validator (`knowledge-schema.ts`, pure) | new stdlib-only `lib/knowledge.py` — validate/capture/route verbs | direct port; the source module is explicitly pure ("no fs, no I/O, no globals") |
 | KB injection (`renderKnowledgeBase`) | contract-published: a **driver-visible directive** — the §2 research row (and job wake directives) name spine/seed paths so any driver can inject them into segment prompts | the injection *contract* ports; the injection *act* stays driver-side (AD-2) |
 | aid-not-gate discipline | preserved verbatim: a red/absent spine or seed never blocks a run | matches the source's one-exception rule (only the scope gate pauses) |
@@ -182,11 +182,11 @@ Six stories, each independently green, back half explicitly e2e-proven:
 
 ## 7. Decision points for the operator (genuine forks)
 
-- **D1 — Grade vocabulary.** Studio ships `A/B/C/D`; dps uses
+- **D1 — Grade vocabulary.** Studio ships `A/B/C/D`; tk-council uses
   `Confirmed/Deduced/Hypothesized`. Recommendation: keep `A/B/C/D`
   (contract-shipped since 1.2.0), publish the mapping
   (Confirmed→A, independent-agreement→B, Deduced→C, Hypothesized→D) in the
-  knowledge schema doc. The alternative (adopt dps vocabulary) breaks a
+  knowledge schema doc. The alternative (adopt tk-council vocabulary) breaks a
   shipped surface for naming-fidelity only.
 - **D2 — Spine scope.** Per-project spine in the per-user store (proposed)
   vs. per-epic/per-job spines. Per-project matches "map, not territory" and
@@ -194,7 +194,7 @@ Six stories, each independently green, back half explicitly e2e-proven:
 - **D3 — Promotion membrane.** PR-review-as-gate (proposed; matches AD-12
   and replaces the source's unwired human join) vs. porting a
   custodian-persona interactive gate. The persona overlay is spine-deferred
-  (dps overlay content); the PR membrane needs no new trust machinery.
+  (tk-council overlay content); the PR membrane needs no new trust machinery.
 - **D4 — Measurement.** Should promotions emit a new taxonomy event
   (`knowledge-promotion`, sole emitter the promotion skill), or is git
   history enough? Cheap either way; taxonomy addition is a contract-visible
@@ -207,17 +207,34 @@ Six stories, each independently green, back half explicitly e2e-proven:
 
 No code, no schema files, no contract edits, no new skills, no job
 declarations (a real research-ecosystem instance starts weekly burns —
-operator call). The dps-council material is harvested as reference only and
+operator call). The tk-council material is harvested as reference only and
 none of it is committed (gitignored, per standing rule).
+
+## 9. Operator rulings (2026-08-06)
+
+Rulings taken via in-session operator Q&A; the durable record is the PR #7
+rulings comment. Summary:
+
+- **D1 — keep `A/B/C/D`**; publish the source-vocabulary mapping
+  (Confirmed→A, independent-agreement→B, Deduced→C, Hypothesized→D) in the
+  knowledge schema doc. Rider: the old company initials are scrubbed from
+  all tracked artifacts and replaced with "tk" (this brief included; a
+  repo-wide scrub PR follows this merge).
+- **D2 — per-project spine** in the per-user store; per-run seeds carry the
+  narrow tier.
+- **D3 — PR-review-as-gate** (AD-12 pattern); no custodian-persona port.
+- **D4 — add the `knowledge-promotion` taxonomy event**, sole emitter the
+  promotion skill, folded into the 1.7.0 bump.
+- **D5 — epic declared** at merge; story 1 starts immediately.
 
 ---
 
 *Sources: ARCHITECTURE-SPINE.md (Deferred, AD-2/3/8/10/11/12);
 driver-contract.md 1.6.0 §1/§2/§4/§7; connectors/tk-studio/DESIGN.md;
-addendum.md A7 (dossier items 4–5); dps-council-inventory-2026-07-25.md §2;
+addendum.md A7 (dossier items 4–5); tk-council-inventory-2026-07-25.md §2;
 D:\ClaudeOS scripts (knowledge-schema.ts, mission-spine-pass.ts,
 mission-mg-start-pass.ts, mission-reconciliation-queue.ts,
-mission-runner.ts); dps-council/plugins/dps-council/skills
-(dps-investigate, dps-agent-custodian); plugins/tk-studio/lib
+mission-runner.ts); tk-council/plugins/tk-council/skills
+(tk-investigate, tk-agent-custodian); plugins/tk-studio/lib
 (research.py, session.py, kb.py, job.py); live artifacts under
 D:\ClaudeOS\.mission\*.*
