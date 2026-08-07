@@ -68,13 +68,36 @@ class DriverContractTestCase(unittest.TestCase):
         # 0.1.1..0.1.7 = ST-6.2/6.4/7.1/7.2/8.1/8.2/9.6 additive surfaces
         # (0.1.7 is the Epic 9 knowledge-port bump; renumbered 2026-08-07
         # from the 1.x line — pre-1.0 semver for a new product, 1.N.0 →
-        # 0.1.N, the 0.1 line the compatibility pin)
-        self.assertRegex(self.text, r"\*\*0\.1\.7\*\*")
+        # 0.1.N, the 0.1 line the compatibility pin); 0.1.8 is the §2
+        # clarification patch (detect ask posture, plan-sync partial —
+        # chipped at PR #21 review)
+        self.assertRegex(self.text, r"\*\*0\.1\.8\*\*")
         self.assertIn("Change policy", self.text)
         self.assertIn("MAJOR", self.text)
         self.assertRegex(self.text, r"[Bb]reaking")
         # the renumber mapping stays documented — old references resolve
         self.assertIn("1.N.0 → 0.1.N", self.text)
+
+    # --- 0.1.8: §2 clarifications stay pinned (chipped at PR #21 review)
+
+    def test_detect_row_names_the_ask_outcome_as_blocked(self):
+        # the detect core's in-band ask (exit 0) is a refusal, never a
+        # downgrade to complete — the §2 row must say so, matching the
+        # SKILL.md posture hardened in PR #21 (ISS-002 class)
+        row = next(line for line in self.text.splitlines()
+                   if line.startswith("| `tk-studio-detect`"))
+        self.assertIn("`ask` outcome", row)
+        self.assertIn("`blocked`", row)
+        self.assertIn("refusal", row)
+
+    def test_plan_sync_row_states_conflicts_end_partial(self):
+        # both-changed promote/pull-back conflicts end partial with the
+        # conflict list in reason (AD-5) — they were mis-listed as blocked
+        row = next(line for line in self.text.splitlines()
+                   if line.startswith("| `tk-studio-plan-sync`"))
+        self.assertIn("`partial`", row)
+        self.assertNotIn("promote/pull-back conflict (human conflict, AD-5)",
+                         row)
 
     # --- ST-9.6: the 0.1.7 knowledge-port surfaces are published
 
