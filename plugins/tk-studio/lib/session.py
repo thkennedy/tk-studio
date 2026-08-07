@@ -18,16 +18,38 @@ Two verbs, one contract:
             workspace file listing. Nothing outside the workspace is read;
             a terminal run refuses — there is nothing to resume.
 
+Deltas (ST-9.2, Epic 9): a handoff optionally carries deltas[] — the closed
+correction shape from contracts/knowledge.schema.json ({anchor, verdict
+WRONG|STALE|CONFIRMED, reality, evidence, tier run-local|spine}) — validated
+by lib/knowledge.py against the run workspace's seed.md (available set =
+defined + inherited anchors). Unanchored and dangling deltas are named
+rejections, never silently dropped; a workspace with no seed has no anchors,
+so any delta against it dangles by construction. Aid, not gate: only the
+delta-carrying handoff is refused — the run stays resumable and a handoff
+without deltas always lands regardless of seed state.
+
+Budget ruling (ST-9.2, made here): the 16 KB handoff budget does NOT grow —
+deltas share it. Deltas are pointers, not essays (reality/evidence stay
+compact; the byte budget enforces the total), and the list is capped at
+MAX_HANDOFF_DELTAS: a boundary carrying more than 16 corrections is not a
+handoff, it is a sign the seed needs re-research.
+
+Run selection: both verbs take exactly one of --run-id or --job-id. A driver
+that submitted a job knows the job id, not the minted run id; --job-id
+resolves the job's sole resumable run (zero or several → named refusal,
+never a guess) — mirrors the §4 status verb's {job_id, run_id?} shape.
+
 The run stays in its resumable state across the split: ending the *session*
 never ends the *run* (finish/cancel do that, through jobrun).
 
 CLI:
-  uv run session.py handoff --directory DIR --run-id RID
+  uv run session.py handoff --directory DIR (--run-id RID | --job-id JID)
                             --boundary KIND --name NAME
                             --done ITEM [--done ITEM ...]
                             --next ITEM [--next ITEM ...]
                             [--gotcha ITEM ...] [--artifact PATH ...]
-  uv run session.py resume  --directory DIR --run-id RID
+                            [--delta JSON ...]
+  uv run session.py resume  --directory DIR (--run-id RID | --job-id JID)
 
 Exit codes: 0 ok; 2 invalid boundary/handoff or unknown/terminal run;
 1 unexpected failure. Env: TK_STUDIO_HOME overrides the store root (tests).
@@ -42,10 +64,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import job as joblib
+import knowledge
 
 HANDOFF_NAME = "handoff.json"
+SEED_NAME = "seed.md"
 BOUNDARY_KINDS = ("epic", "story", "phase", "budget")
 MAX_HANDOFF_BYTES = 16384
+# Budget ruling (ST-9.2): deltas share the 16 KB, list length capped —
+# 16 pointer-shaped deltas cost well under a third of the budget.
+MAX_HANDOFF_DELTAS = 16
 
 END_DIRECTIVE = {
     "end_session": True,
@@ -82,9 +109,64 @@ def _open_run(project_root: Path, run_id: str) -> tuple[str, dict]:
     return key, record
 
 
+def resolve_run_id(project_root: Path, run_id: str | None,
+                   job_id: str | None) -> str:
+    """Exactly one selector. A driver that submitted a job knows the job id,
+    not the minted run id; --job-id resolves the job's sole resumable run —
+    zero or several is a named refusal, never a guess (AD-11)."""
+    if bool(run_id) == bool(job_id):
+        raise SessionError("exactly one of --run-id or --job-id selects the "
+                           "run")
+    if run_id:
+        return run_id
+    key = joblib.project_key(Path(project_root))
+    candidates = [r for r in joblib.list_runs(key, job_id=job_id)
+                  if r.get("state") in joblib.RESUMABLE_STATES]
+    if not candidates:
+        raise SessionError(f"job '{job_id}' has no resumable run for "
+                           f"project '{key}'")
+    if len(candidates) > 1:
+        ids = ", ".join(r["run_id"] for r in candidates)
+        raise SessionError(f"job '{job_id}' has {len(candidates)} resumable "
+                           f"runs ({ids}) — name the run id explicitly")
+    return candidates[0]["run_id"]
+
+
+def _validated_deltas(deltas, workspace: Path) -> list[dict]:
+    """The closed correction shape, checked against the workspace's seed.
+    Every problem is a named rejection (invariant 3) — the handoff refuses,
+    the run is untouched."""
+    items = list(deltas or [])
+    if not items:
+        return []
+    if not all(isinstance(d, dict) for d in items):
+        raise SessionError("each delta must be a JSON object (the closed "
+                           "shape: anchor, verdict, reality, evidence, tier)")
+    if len(items) > MAX_HANDOFF_DELTAS:
+        raise SessionError(
+            f"handoff carries {len(items)} deltas (max {MAX_HANDOFF_DELTAS})"
+            " — deltas are pointers; a boundary with more corrections than "
+            "that needs the seed re-researched, not a bigger handoff")
+    seed_path = workspace / SEED_NAME
+    seed_text = ""
+    if seed_path.is_file():
+        try:
+            seed_text = seed_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise SessionError(f"{SEED_NAME} unreadable: {exc}") from exc
+    verdict = knowledge.validate_deltas(items, seed_text)
+    if not verdict["valid"]:
+        context = ("" if seed_path.is_file() else
+                   f" [workspace has no {SEED_NAME} — no anchors exist to "
+                   "cite]")
+        raise SessionError("deltas rejected, never silently dropped"
+                           f"{context}: " + "; ".join(verdict["errors"]))
+    return items
+
+
 def write_handoff(project_root: Path, run_id: str, boundary_kind: str,
                   boundary_name: str, done, next_steps,
-                  gotchas=(), artifacts=()) -> dict:
+                  gotchas=(), artifacts=(), deltas=()) -> dict:
     """Land the boundary handoff and direct the session to end."""
     if boundary_kind not in BOUNDARY_KINDS:
         raise SessionError(
@@ -94,6 +176,7 @@ def write_handoff(project_root: Path, run_id: str, boundary_kind: str,
         raise SessionError("the boundary needs a name (e.g. 'ST-6.6', "
                            "'token budget 80%')")
     key, record = _open_run(project_root, run_id)
+    workspace = joblib.workspace_path(key, run_id)
     handoff = {
         "handoff_version": 1,
         "run_id": run_id,
@@ -104,6 +187,7 @@ def write_handoff(project_root: Path, run_id: str, boundary_kind: str,
         "next": _str_list(next_steps, "next", required=True),
         "gotchas": _str_list(gotchas, "gotchas", required=False),
         "artifacts": _str_list(artifacts, "artifacts", required=False),
+        "deltas": _validated_deltas(deltas, workspace),
     }
     size = len(json.dumps(handoff, ensure_ascii=False).encode("utf-8"))
     if size > MAX_HANDOFF_BYTES:
@@ -160,7 +244,9 @@ def main(argv: list[str] | None = None) -> int:
     hand = sub.add_parser("handoff", help="land a boundary handoff, end the "
                                           "session")
     hand.add_argument("--directory", required=True, help="project root")
-    hand.add_argument("--run-id", required=True)
+    hand.add_argument("--run-id", help="the run (or select via --job-id)")
+    hand.add_argument("--job-id", help="the job whose sole resumable run "
+                                       "this hands off")
     hand.add_argument("--boundary", required=True,
                       choices=list(BOUNDARY_KINDS))
     hand.add_argument("--name", required=True,
@@ -172,20 +258,36 @@ def main(argv: list[str] | None = None) -> int:
                       dest="gotchas", metavar="ITEM")
     hand.add_argument("--artifact", action="append", default=[],
                       dest="artifacts", metavar="PATH")
+    hand.add_argument("--delta", action="append", default=[],
+                      dest="deltas", metavar="JSON",
+                      help="one delta object (knowledge.schema.json shape); "
+                           "repeatable")
 
     res = sub.add_parser("resume", help="continue from a workspace alone")
     res.add_argument("--directory", required=True, help="project root")
-    res.add_argument("--run-id", required=True)
+    res.add_argument("--run-id", help="the run (or select via --job-id)")
+    res.add_argument("--job-id", help="the job whose sole resumable run "
+                                      "this resumes")
 
     args = parser.parse_args(argv)
     try:
+        root = Path(args.directory)
+        run_id = resolve_run_id(root, args.run_id, args.job_id)
         if args.command == "handoff":
-            result = write_handoff(Path(args.directory), args.run_id,
+            deltas = []
+            for raw in args.deltas:
+                try:
+                    deltas.append(json.loads(raw))
+                except json.JSONDecodeError as exc:
+                    raise SessionError(
+                        f"--delta is not valid JSON ({exc}) — pass one "
+                        "object per flag, the knowledge.schema.json shape")
+            result = write_handoff(root, run_id,
                                    args.boundary, args.name, args.done,
                                    args.next_steps, gotchas=args.gotchas,
-                                   artifacts=args.artifacts)
+                                   artifacts=args.artifacts, deltas=deltas)
         else:
-            result = read_resume(Path(args.directory), args.run_id)
+            result = read_resume(root, run_id)
     except (SessionError, joblib.JobError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
         return 2
