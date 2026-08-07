@@ -293,6 +293,16 @@ class SessionTestCase(unittest.TestCase):
         with self.assertRaises(session.SessionError):
             self._handoff(run_id, deltas=["not-an-object"])
 
+    def test_undecodable_seed_refuses_named_not_traceback(self):
+        # a UTF-16/ANSI-re-encoded seed (the PowerShell default trap) must
+        # end in a named refusal, never an unhandled UnicodeDecodeError
+        run_id = self._open_run()
+        workspace = joblib.workspace_path("proj", run_id)
+        (workspace / "seed.md").write_bytes(b"\xff\xfe-- not utf-8 --")
+        with self.assertRaises(session.SessionError) as ctx:
+            self._handoff(run_id, deltas=[self._delta(run_id)])
+        self.assertIn("unreadable", str(ctx.exception))
+
     def test_delta_list_is_capped(self):
         run_id = self._open_run()
         self._write_seed(run_id)
