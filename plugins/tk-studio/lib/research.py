@@ -25,10 +25,11 @@ module keeps it honest at both ends:
             ~/.tk-studio/projects/<key>/knowledge/spine.md in the per-user
             store (D2, AD-3 — provisional knowledge never lands on the
             project VCS). Spine authoring is a chartered research-run
-            flavor: the verb requires an open run, so the charter gate and
-            the job's budget guards cover the authoring pass. Anchor ids
-            are append-only — a re-authored spine that drops or renumbers
-            an existing anchor refuses.
+            flavor, enforced: the verb requires an open run whose job
+            carries a charter (target.payload.charter), so scope approval
+            and the job's budget guards cover the authoring pass. Anchor
+            ids are append-only — a re-authored spine that drops or
+            renumbers an existing anchor refuses.
 
 Anchors (ST-9.3, Epic 9): findings optionally cite an `anchor` — a bare
 anchor id from the run's seed (defined + inherited set, same rule as
@@ -60,6 +61,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -121,8 +123,10 @@ def _read_spine(key: str) -> tuple[str | None, dict]:
         return None, {"present": True, "path": str(path),
                       "note": f"spine unreadable: {exc}"}
     verdict = knowledge.validate_seed(text)
+    # Body-only anchors (parse_seed), never a full-text scan: a frontmatter
+    # note mentioning [SPINE-A1] defines nothing.
     report = {"present": True, "path": str(path),
-              "anchors": knowledge.extract_anchors(text),
+              "anchors": knowledge.parse_seed(text)["anchors"],
               "valid": verdict["valid"]}
     if not verdict["valid"]:
         report["problems"] = verdict["errors"]
@@ -373,15 +377,15 @@ def emit_seed(project_root: Path, run_id: str, text: str) -> dict:
     if fm.get("project") != key:
         problems.append(f"seed project '{fm.get('project')}' does not match "
                         f"project '{key}'")
-    own_prefix = f"SEED-{run_id}-A"
+    own_anchor = re.compile(rf"SEED-{re.escape(run_id)}-A\d+\Z")
     for anchor in seed["anchors"]:
-        if anchor.startswith("SEED-") and not anchor.startswith(own_prefix):
-            problems.append(f"seed anchor '{anchor}' must carry the owning "
-                            f"run id ('{own_prefix}<n>') — anchor ids join "
-                            "across runs, collisions poison the join")
+        if anchor.startswith("SEED-") and not own_anchor.match(anchor):
+            problems.append(f"seed anchor '{anchor}' must be exactly "
+                            f"'SEED-{run_id}-A<n>' — anchor ids join across "
+                            "runs, collisions poison the join")
     spine_text, spine_report = _read_spine(key)
     if seed["inherits"] and spine_text is not None:
-        spine_anchors = set(knowledge.extract_anchors(spine_text))
+        spine_anchors = set(knowledge.parse_seed(spine_text)["anchors"])
         dangling = [a for a in seed["inherits"] if a not in spine_anchors]
         if dangling:
             problems.append("inherited anchor(s) not defined by the project "
@@ -407,7 +411,7 @@ def emit_seed(project_root: Path, run_id: str, text: str) -> dict:
         raise ResearchError("seed rejected, never silently landed: "
                             + "; ".join(problems))
 
-    path.write_text(text, encoding="utf-8", newline="\n")
+    joblib.atomic_write_text(path, text)
     return {
         "run_id": run_id,
         "path": str(path),
@@ -420,11 +424,12 @@ def emit_seed(project_root: Path, run_id: str, text: str) -> dict:
 
 def emit_spine(project_root: Path, run_id: str, text: str) -> dict:
     """Validate and land the project research spine at project scope in the
-    per-user store (D2). Spine authoring is a chartered research-run flavor:
-    an open run is required, so the charter gate and the job's budget guards
-    cover the pass. Anchor ids are append-only — a new text that drops an
-    existing anchor refuses (queued deltas cite identity; dropping an id
-    strands them)."""
+    per-user store (D2). Spine authoring is a chartered research-run flavor,
+    enforced: the run must be open AND its job must carry a charter
+    (target.payload.charter) — scope approval precedes the authoring spend
+    (invariant 3); the job's budget guards cover the pass. Anchor ids are
+    append-only — a new text that drops an existing anchor refuses (queued
+    deltas cite identity; dropping an id strands them)."""
     verdict = knowledge.validate_seed(text)
     parsed = knowledge.parse_seed(text)
     problems = list(verdict["errors"])
@@ -435,7 +440,13 @@ def emit_spine(project_root: Path, run_id: str, text: str) -> dict:
         raise ResearchError("spine rejected, never silently landed: "
                             + "; ".join(problems))
 
-    key, _ = _open_run(project_root, run_id)
+    key, run = _open_run(project_root, run_id)
+    charter = ((run.get("job") or {}).get("target") or {}) \
+        .get("payload", {}).get("charter")
+    if not charter:
+        problems.append("spine authoring is a chartered research-run flavor "
+                        "— this run's job carries no charter "
+                        "(target.payload.charter)")
     if parsed["frontmatter"].get("project") != key:
         problems.append(f"spine project "
                         f"'{parsed['frontmatter'].get('project')}' does not "
@@ -444,8 +455,10 @@ def emit_spine(project_root: Path, run_id: str, text: str) -> dict:
     previous: list[str] = []
     if path.is_file():
         try:
-            previous = knowledge.extract_anchors(
-                path.read_text(encoding="utf-8"))
+            # Body-only (parse_seed) to mirror the current set — a phantom
+            # frontmatter mention must never wedge the append-only check.
+            previous = knowledge.parse_seed(
+                path.read_text(encoding="utf-8"))["anchors"]
         except (OSError, UnicodeDecodeError) as exc:
             raise ResearchError(
                 f"existing spine unreadable: {exc} — refusing to overwrite "
@@ -462,7 +475,7 @@ def emit_spine(project_root: Path, run_id: str, text: str) -> dict:
                             + "; ".join(problems))
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8", newline="\n")
+    joblib.atomic_write_text(path, text)
     return {
         "run_id": run_id,
         "path": str(path),
@@ -525,10 +538,10 @@ def main(argv: list[str] | None = None) -> int:
             result = record(Path(args.directory), args.run_id, findings,
                             emit=not args.no_emit)
         else:
-            if bool(args.text) == bool(args.file):
+            if (args.text is None) == (args.file is None):
                 raise ResearchError(f"{args.command} takes exactly one of "
                                     "--text or --file")
-            text = (args.text if args.text
+            text = (args.text if args.text is not None
                     else Path(args.file).read_text(encoding="utf-8"))
             handler = emit_seed if args.command == "seed" else emit_spine
             result = handler(Path(args.directory), args.run_id, text)

@@ -255,15 +255,25 @@ class ResearchTestCase(unittest.TestCase):
         run_id = self._wake()
         cases = (
             self._seed_text(run_id, run_id_field="other-run"),
-            self._seed_text(run_id, project="ghost"),
             self._seed_text(run_id).replace(
                 f"[SEED-{run_id}-A1]", "[SEED-foreign-run-A1]"),
+            # ownership is an exact match, not a prefix: an id whose middle
+            # merely BEGINS with the run id belongs to another namespace
+            self._seed_text(run_id).replace(
+                f"[SEED-{run_id}-A1]", f"[SEED-{run_id}-A1-bogus-A9]"),
             self._spine_text(),  # tier: spine never lands in a workspace
             "no frontmatter at all",
         )
         for text in cases:
             with self.assertRaises(research.ResearchError):
                 research.emit_seed(self.root, run_id, text)
+        # the project cross-check, pinned independently of spine_ref
+        mismatched = self._seed_text(run_id, project="ghost").replace(
+            "projects/ghost/knowledge/spine.md",
+            "projects/proj/knowledge/spine.md")
+        with self.assertRaisesRegex(research.ResearchError,
+                                    "does not match project"):
+            research.emit_seed(self.root, run_id, mismatched)
         self.assertFalse(
             (joblib.workspace_path("proj", run_id) / "seed.md").is_file())
 
@@ -309,11 +319,37 @@ class ResearchTestCase(unittest.TestCase):
         self.assertEqual(grown["appended"], ["SPINE-A3"])
         self.assertTrue(grown["replaced_existing"])
 
+    def test_spine_frontmatter_mentions_define_nothing(self):
+        # A frontmatter note citing [SPINE-A1] is prose, not a definition:
+        # it must neither wedge the append-only check on re-emission nor
+        # satisfy a seed's inherits.
+        run_id = self._wake()
+        phantom = self._spine_text(anchors=("A2",)).replace(
+            "generated: 2026-08-07",
+            "generated: 2026-08-07\n"
+            "note: supersedes the old [SPINE-A1] wording")
+        first = research.emit_spine(self.root, run_id, phantom)
+        self.assertEqual(first["anchors"], ["SPINE-A2"])
+        again = research.emit_spine(self.root, run_id, phantom)
+        self.assertEqual(again["appended"], [])
+        with self.assertRaisesRegex(research.ResearchError, "SPINE-A1"):
+            research.emit_seed(self.root, run_id,
+                               self._seed_text(run_id,
+                                               inherits=("SPINE-A1",)))
+
     def test_spine_authoring_rides_the_chartered_run_gate(self):
         run_id = self._wake()
         with self.assertRaisesRegex(research.ResearchError, "ghost"):
             research.emit_spine(self.root, run_id,
                                 self._spine_text(project="ghost"))
+        # a charter-less run never authors the spine (invariant 3: scope
+        # approval precedes the spend) — but it may still land a seed
+        # (any run's handoff deltas need one)
+        defn = joblib.load_types()["maintenance-conformance"]["definition"]
+        bare = joblib.create_run(defn, "proj")["run_id"]
+        with self.assertRaisesRegex(research.ResearchError, "no charter"):
+            research.emit_spine(self.root, bare, self._spine_text())
+        research.emit_seed(self.root, bare, self._seed_text(bare))
         jobrun.finish(self.root, run_id, "complete", status_block={
             "status": "complete", "intent": "tk-studio-research",
             "artifacts": [], "reason": None})
