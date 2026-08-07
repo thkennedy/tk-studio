@@ -1,0 +1,58 @@
+{
+  "knowledge_schema_version": 1,
+  "description": "Knowledge lifecycle shapes (Epic 9, planning pass 2026-08-06, D1-D5 ruled). Provisional knowledge lives in the per-user store only (AD-3): the per-project spine at ~/.tk-studio/projects/<key>/knowledge/spine.md (D2) and per-run seeds as seed.md in run workspaces. lib/knowledge.py is the one validator (pure - no fs, no I/O); no other surface parses these shapes. Only promoted knowledge crosses to the project VCS, as ordinary kb/ files through a PR - review is the gate (D3, AD-12). Aid, not gate: a red or absent spine/seed never blocks a run.",
+  "artifact_frontmatter": {
+    "note": "spine.md / seed.md are markdown with flat YAML frontmatter; the body defines anchors as bracketed ids. Two tiers share the schema.",
+    "required": ["tier", "status", "authority", "project", "generated"],
+    "fields": {
+      "tier": { "type": "string", "enum": ["spine", "seed"], "note": "spine: broad, once per project; seed: narrow, per run, inherits the spine" },
+      "status": { "type": "string", "const": "provisional", "note": "supersede header, verbatim - provisional knowledge is never canonical" },
+      "authority": { "type": "string", "const": "mission-scoped-supersedes-canonical", "note": "supersede header, verbatim (ported wire value, unchanged across drivers): authoritative in-flight, structurally incapable of becoming canonical by accident" },
+      "project": { "type": "string", "note": "the project key (registry identity)" },
+      "generated": { "type": "string", "format": "ISO-8601", "note": "date or datetime" },
+      "run_id": { "type": "string", "required": "seed tier only", "note": "the owning run; also the anchor-id middle" },
+      "spine_ref": { "type": "string", "required": "seed tier only", "note": "store-relative path to the project spine this seed inherits from" },
+      "inherits": { "type": "array", "items": "string", "required": false, "note": "spine anchor ids this seed reuses verbatim; deltas may cite them" }
+    }
+  },
+  "anchors": {
+    "pattern": "\\[((?:SPINE|SEED)(?:-[A-Za-z0-9]+)*-A\\d+)\\]",
+    "note": "anchor ids are the join (immutable, append-only, never renumbered): SPINE-A<n> on the spine, SEED-<run-id>-A<n> on seeds. Deltas cite identity, not location, so corrections survive every edit. At least one anchor per artifact; duplicates reject; tier prefix must match the artifact tier (seeds may also cite inherited SPINE- ids)."
+  },
+  "delta": {
+    "note": "the closed correction shape. Deltas ride handoff.json as structured objects (deltas[] - session surface, ST-9.2); unanchored and dangling deltas are named rejections, never silently dropped.",
+    "required": ["anchor", "verdict", "reality", "evidence", "tier"],
+    "fields": {
+      "anchor": { "type": "string", "note": "an anchor id in the seed's available set (defined + inherited)" },
+      "verdict": { "type": "string", "enum": ["WRONG", "STALE", "CONFIRMED"] },
+      "reality": { "type": "string", "note": "what is actually true, compactly - deltas are pointers, not essays (handoff budget)" },
+      "evidence": { "type": "string", "note": "where reality was observed, e.g. path:line or a URL" },
+      "tier": { "type": "string", "enum": ["run-local", "spine"], "note": "run-local corrects the seed; spine flags a project-spine assumption (source vocabulary mg-local renamed run-local in the port)" }
+    }
+  },
+  "queue_line": {
+    "note": "one JSON object per line in the per-project reconciliation queue ~/.tk-studio/projects/<key>/knowledge/reconciliation-queue.jsonl (capture story ST-9.4; per-user store only, never project VCS). Dedupe key: (run_id, anchor, verdict, reality).",
+    "required": ["run_id", "captured_at", "anchor", "verdict", "reality", "evidence", "tier"],
+    "fields": {
+      "run_id": { "type": "string", "note": "the run whose handoff carried the delta" },
+      "captured_at": { "type": "string", "format": "ISO-8601 UTC" },
+      "anchor": { "type": "string" },
+      "verdict": { "type": "string", "enum": ["WRONG", "STALE", "CONFIRMED"] },
+      "reality": { "type": "string" },
+      "evidence": { "type": "string" },
+      "tier": { "type": "string", "enum": ["run-local", "spine"] }
+    }
+  },
+  "grades": {
+    "note": "evidence grades on knowledge stay the studio's shipped A/B/C/D vocabulary (D1 ruling; contracts since 1.2.0 - see lib/research.py). Grade markers in artifact bodies are documentation, not validated shape. Source-vocabulary mapping for readers of first-driver artifacts:",
+    "mapping": {
+      "Confirmed": "A",
+      "independent-agreement": "B",
+      "Deduced": "C",
+      "Hypothesized": "D"
+    }
+  },
+  "promotion": {
+    "note": "promotion is drafted from the rendered routing doc into ordinary kb/ files on a branch; PR review is the human gate (D3) - nothing auto-applies, only a human writes canonical. kb frontmatter gains nothing; scope: stays reserved and unread (AD-8). Emits exactly one knowledge-promotion taxonomy event, sole emitter the promotion skill (D4) - taxonomy row lands with contract 1.7.0 (ST-9.5/9.6)."
+  }
+}
