@@ -290,6 +290,15 @@ def validate_knowledge(seed_text: str, deltas: object | None = None) -> dict:
     return {"valid": not errors, "errors": errors}
 
 
+def clean_inline(value: object) -> str:
+    """Control and line-separator characters replaced with spaces — the
+    defense-in-depth cleaning every human-facing render applies. Validation
+    refuses these characters on entry (validate_queue_line, _validate_delta);
+    cleaning again at render means a hand-edited line still cannot forge
+    headings or anchors on a decision or canonical surface."""
+    return _CONTROL_RE.sub(" ", str(value))
+
+
 # ------------------------------------------- queue lines + routing (ST-9.4)
 
 def delta_key(delta: dict) -> tuple:
@@ -352,8 +361,7 @@ def render_routing(lines: list[dict], project: str, generated: str,
     line-separator characters at render — validation refuses them on entry,
     but a hand-edited queue line must still be unable to forge sections or
     anchors on this surface."""
-    def _clean(value: object) -> str:
-        return _CONTROL_RE.sub(" ", str(value))
+    _clean = clean_inline
 
     deduped: dict[tuple, dict] = {}
     for line in lines:
@@ -368,6 +376,8 @@ def render_routing(lines: list[dict], project: str, generated: str,
         "A pure render of `reconciliation-queue.jsonl` — this document",
         "**applies nothing**. Promotion into project `kb/` is a drafted",
         "branch behind PR review (D3, AD-12); only a human writes canonical.",
+        "Draft it: the `tk-studio-knowledge` skill's promote-draft verb",
+        "(`promote.py draft`).",
         "",
     ]
     tiers = (("spine", "Spine corrections — challenge the project spine "
@@ -399,4 +409,93 @@ def render_routing(lines: list[dict], project: str, generated: str,
             out.append(f"- line {_clean(item.get('line'))}: "
                        f"{_clean(item.get('error'))}")
         out.append("")
+    return "\n".join(out).rstrip() + "\n"
+
+
+# ------------------------------------------------- promotion draft (ST-9.5)
+
+def promotion_entries(lines: list[dict]) -> list[dict]:
+    """Queue lines grouped into promotion entries: one entry per correction
+    identity (delta_key — anchor, verdict, reality, tier; run provenance
+    deliberately outside it: a later run re-observing a drafted correction
+    is the same correction, so it merges rather than duplicating). Evidence
+    and runs accumulate in first-seen order. Entry order mirrors the routing
+    doc — spine tier leads, WRONG|STALE|CONFIRMED inside each tier — so the
+    reviewer sees the same shape they decided from."""
+    grouped: dict[tuple, dict] = {}
+    for line in lines:
+        entry = grouped.setdefault(delta_key(line), {
+            "anchor": line.get("anchor"), "verdict": line.get("verdict"),
+            "reality": line.get("reality"), "tier": line.get("tier"),
+            "evidence": [], "runs": []})
+        evidence = line.get("evidence")
+        if evidence and evidence not in entry["evidence"]:
+            entry["evidence"].append(evidence)
+        run_id = line.get("run_id")
+        if run_id not in [r["run_id"] for r in entry["runs"]]:
+            entry["runs"].append({"run_id": run_id,
+                                  "captured_at": line.get("captured_at")})
+    tier_rank = {tier: i for i, tier in enumerate(("spine", "run-local"))}
+    verdict_rank = {verdict: i for i, verdict in enumerate(VERDICTS)}
+    return sorted(grouped.values(),  # stable: first-seen order inside groups
+                  key=lambda e: (tier_rank.get(e["tier"], len(tier_rank)),
+                                 verdict_rank.get(e["verdict"],
+                                                  len(verdict_rank))))
+
+
+def render_promotion(entries: list[dict], project: str, label: str) -> str:
+    """The promotion draft — ONE ordinary kb markdown file (D3: drafting
+    applies nothing; the PR that carries this file is the gate, and merging
+    it is the human's one canonical write). Frontmatter is ordinary kb
+    metadata only — title/description, no new keys; `scope:` stays reserved
+    and unread (AD-8). Anchor ids render unbracketed on purpose: they are
+    provenance (which spine/seed assumption each correction targets), and
+    this file must define no anchors of its own. Pure: the caller supplies
+    project and label; every interpolated string is cleaned (defense in
+    depth — a hand-edited queue line must not forge headings in what will
+    become canonical kb)."""
+    title = f"Reconciled corrections — {clean_inline(label)}"
+    out = [
+        "---",
+        f"title: {title}",
+        "description: Corrections promoted from the reconciliation queue — "
+        "anchored deltas with run evidence, gated by PR review",
+        "---",
+        "",
+        f"# {title}",
+        "",
+        f"Drafted from the `{clean_inline(project)}` reconciliation queue by",
+        "`tk-studio-knowledge` (promote-draft). PR review gated this file",
+        "into `kb/` — it is ordinary project knowledge now: edit it, fold it",
+        "into topical docs, or prune it freely. Anchor ids are provenance",
+        "(the spine/seed assumption each correction targets), deliberately",
+        "unbracketed — this file defines no anchors.",
+        "",
+    ]
+    tiers = (("spine", "Spine corrections — the project spine was challenged "
+                       "here (every future seed inherits it)"),
+             ("run-local", "Run-local corrections — scoped to one run's "
+                           "seed"))
+    for tier, heading in tiers:
+        tiered = [e for e in entries if e.get("tier") == tier]
+        if not tiered:
+            continue
+        out += [f"## {heading}", ""]
+        for verdict in VERDICTS:
+            group = [e for e in tiered if e.get("verdict") == verdict]
+            if not group:
+                continue
+            out += [f"### {verdict}", ""]
+            for entry in group:
+                evidence = "; ".join(clean_inline(v)
+                                     for v in entry.get("evidence", []))
+                runs = ", ".join(
+                    f"{clean_inline(r.get('run_id'))} "
+                    f"(captured {clean_inline(r.get('captured_at'))})"
+                    for r in entry.get("runs", []))
+                out += [f"- `{clean_inline(entry.get('anchor'))}` — "
+                        f"{clean_inline(entry.get('reality'))}",
+                        f"  - evidence: {evidence or '—'}",
+                        f"  - runs: {runs or '—'}"]
+            out.append("")
     return "\n".join(out).rstrip() + "\n"

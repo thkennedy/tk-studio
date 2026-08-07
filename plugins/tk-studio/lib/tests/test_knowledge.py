@@ -471,5 +471,93 @@ class RenderRoutingTestCase(unittest.TestCase):
         self.assertIn("INJECTED", doc)
 
 
+class PromotionEntriesTestCase(unittest.TestCase):
+    """ST-9.5: queue lines -> promotion entries — grouped on delta_key,
+    provenance merged, routing-doc order."""
+
+    def test_groups_by_delta_key_and_merges_provenance(self):
+        entries = knowledge.promotion_entries([
+            _line(),
+            _line(run_id="r-other", captured_at="2026-08-08T00:00:00Z",
+                  evidence="elsewhere.py:9")])
+        self.assertEqual(len(entries), 1)
+        entry = entries[0]
+        self.assertEqual(entry["anchor"], f"SEED-{RUN}-A1")
+        self.assertEqual(entry["evidence"],
+                         ["lib/config.py:81", "elsewhere.py:9"])
+        self.assertEqual([r["run_id"] for r in entry["runs"]],
+                         [RUN, "r-other"])
+
+    def test_literal_duplicates_do_not_duplicate_provenance(self):
+        entries = knowledge.promotion_entries([_line(), _line()])
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(len(entries[0]["evidence"]), 1)
+        self.assertEqual(len(entries[0]["runs"]), 1)
+
+    def test_orders_spine_first_then_by_verdict_rank(self):
+        entries = knowledge.promotion_entries([
+            _line(),  # run-local WRONG
+            _line(anchor="SPINE-A2", tier="spine", verdict="CONFIRMED",
+                  reality="held up"),
+            _line(anchor="SPINE-A1", tier="spine", verdict="STALE",
+                  reality="the pin moved")])
+        self.assertEqual([(e["tier"], e["verdict"]) for e in entries],
+                         [("spine", "STALE"), ("spine", "CONFIRMED"),
+                          ("run-local", "WRONG")])
+
+
+class RenderPromotionTestCase(unittest.TestCase):
+    """ST-9.5: the promotion draft renderer — ordinary kb markdown, pure,
+    defines no anchors of its own."""
+
+    def _entries(self):
+        return knowledge.promotion_entries([
+            _line(),
+            _line(anchor="SPINE-A1", tier="spine", verdict="STALE",
+                  reality="the pin moved")])
+
+    def test_frontmatter_is_ordinary_kb_metadata_only(self):
+        doc = knowledge.render_promotion(self._entries(), "proj",
+                                         "2026-08-07")
+        blocks = doc.split("---\n")
+        self.assertGreaterEqual(len(blocks), 3, "frontmatter block present")
+        keys = [line.split(":", 1)[0] for line in blocks[1].strip().split("\n")
+                if ":" in line]
+        self.assertEqual(keys, ["title", "description"],
+                         "no new frontmatter keys (AD-8)")
+        self.assertNotIn("scope:", doc)
+
+    def test_defines_no_anchors_but_carries_ids_as_provenance(self):
+        doc = knowledge.render_promotion(self._entries(), "proj",
+                                         "2026-08-07")
+        self.assertEqual(knowledge.extract_anchors(doc), [],
+                         "the renderer never brackets an anchor id")
+        self.assertIn("`SPINE-A1`", doc)
+        self.assertIn(f"`SEED-{RUN}-A1`", doc)
+        self.assertIn("lib/config.py:81", doc)
+        self.assertIn(RUN, doc)
+
+    def test_spine_leads_and_verdicts_group_like_the_routing_doc(self):
+        doc = knowledge.render_promotion(self._entries(), "proj",
+                                         "2026-08-07")
+        self.assertLess(doc.index("Spine corrections"),
+                        doc.index("Run-local corrections"))
+        self.assertIn("### STALE", doc)
+        self.assertIn("### WRONG", doc)
+
+    def test_render_neutralizes_injected_control_characters(self):
+        # validation refuses control characters on entry, but a hand-edited
+        # queue line must not forge headings in what becomes canonical kb
+        hostile = knowledge.promotion_entries([
+            _line(reality="legit claim\n## Fabricated section\ninjected")])
+        doc = knowledge.render_promotion(hostile, "proj", "2026-08-07")
+        self.assertNotIn("\n## Fabricated section", doc)
+        self.assertIn("injected", doc)
+
+    def test_clean_inline_flattens_every_separator_class(self):
+        self.assertEqual(knowledge.clean_inline("a\nb c d\x85e\x00f"),
+                         "a b c d e f")
+
+
 if __name__ == "__main__":
     unittest.main()
