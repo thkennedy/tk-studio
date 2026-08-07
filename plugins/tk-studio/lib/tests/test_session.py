@@ -1,12 +1,18 @@
-"""Tests for session discipline (ST-6.6 acceptance criteria).
+"""Tests for session discipline (ST-6.6 + ST-9.2 acceptance criteria).
 
-AC 1: at a declared boundary (epic/story/phase) or a budget trigger, a
-compact handoff artifact lands in the run workspace and the session is
-directed to end and resume fresh.
+AC 1 (ST-6.6): at a declared boundary (epic/story/phase) or a budget
+trigger, a compact handoff artifact lands in the run workspace and the
+session is directed to end and resume fresh.
 
-AC 2: a fresh session pointed at a run workspace continues from the handoff
-+ workspace state alone (success criterion 8) — verified by an integration
-test on a seeded workspace.
+AC 2 (ST-6.6): a fresh session pointed at a run workspace continues from
+the handoff + workspace state alone (success criterion 8) — verified by an
+integration test on a seeded workspace.
+
+ST-9.2 (Epic 9, session surface): handoff.json accepts an optional deltas[]
+(the knowledge.schema.json closed shape) validated against the workspace's
+seed.md; unanchored/dangling deltas are named rejections; deltas share the
+16 KB budget with the list capped; --job-id selects a job's sole resumable
+run for drivers that never saw the minted run id.
 """
 from __future__ import annotations
 
@@ -199,6 +205,143 @@ class SessionTestCase(unittest.TestCase):
                               reason="guard: max_turns")
         self.assertEqual(ended["state"], "partial")
 
+    # ------------------------- ST-9.2: handoffs carry deltas (validated)
+
+    SEED = (
+        "---\n"
+        "tier: seed\n"
+        "status: provisional\n"
+        "authority: mission-scoped-supersedes-canonical\n"
+        "project: proj\n"
+        "generated: 2026-08-07\n"
+        "run_id: {run_id}\n"
+        "spine_ref: projects/proj/knowledge/spine.md\n"
+        "inherits: [SPINE-A1]\n"
+        "---\n"
+        "\n"
+        "- [SEED-{run_id}-A1] the adapter reads tracked config only\n"
+        "- [SEED-{run_id}-A2] the backend preserves unknown keys\n")
+
+    def _write_seed(self, run_id: str) -> None:
+        workspace = joblib.workspace_path("proj", run_id)
+        (workspace / "seed.md").write_text(
+            self.SEED.format(run_id=run_id), encoding="utf-8", newline="\n")
+
+    def _delta(self, run_id: str, **overrides) -> dict:
+        delta = {"anchor": f"SEED-{run_id}-A1", "verdict": "WRONG",
+                 "reality": "it also reads the local overlay",
+                 "evidence": "lib/config.py:81", "tier": "run-local"}
+        delta.update(overrides)
+        return delta
+
+    def test_handoff_carries_validated_deltas(self):
+        run_id = self._open_run()
+        self._write_seed(run_id)
+        deltas = [self._delta(run_id),
+                  {"anchor": "SPINE-A1", "verdict": "STALE",
+                   "reality": "the pin moved to 6.10.0",
+                   "evidence": "bmad.lock", "tier": "spine"}]
+        self._handoff(run_id, deltas=deltas)
+        workspace = joblib.workspace_path("proj", run_id)
+        handoff = json.loads((workspace / "handoff.json").read_text(
+            encoding="utf-8"))
+        self.assertEqual(handoff["deltas"], deltas)
+        # resume surfaces the corrections with everything else
+        resumed = session.read_resume(self.root, run_id)
+        self.assertEqual(resumed["handoff"]["deltas"][1]["anchor"],
+                         "SPINE-A1")
+
+    def test_handoff_without_deltas_never_gated_by_seed_state(self):
+        # aid, not gate: no seed.md, no deltas — the handoff still lands
+        run_id = self._open_run()
+        result = self._handoff(run_id)
+        self.assertEqual(result["handoff"]["deltas"], [])
+
+    def test_dangling_delta_is_a_named_rejection(self):
+        run_id = self._open_run()
+        self._write_seed(run_id)
+        self._handoff(run_id)  # a good boundary already landed
+        with self.assertRaises(session.SessionError) as ctx:
+            self._handoff(run_id,
+                          deltas=[self._delta(run_id,
+                                              anchor=f"SEED-{run_id}-A9")])
+        self.assertIn("dangling", str(ctx.exception))
+        # the refusal touched nothing: prior handoff intact, run untouched
+        resumed = session.read_resume(self.root, run_id)
+        self.assertEqual(resumed["handoff"]["deltas"], [])
+        record = joblib.read_run("proj", run_id)
+        self.assertEqual(record["checkpoint"]["handoffs"], 1)
+
+    def test_deltas_without_a_seed_all_dangle(self):
+        run_id = self._open_run()
+        with self.assertRaises(session.SessionError) as ctx:
+            self._handoff(run_id, deltas=[self._delta(run_id)])
+        self.assertIn("no seed.md", str(ctx.exception))
+        self.assertIn("dangling", str(ctx.exception))
+
+    def test_unanchored_and_malformed_deltas_reject(self):
+        run_id = self._open_run()
+        self._write_seed(run_id)
+        unanchored = self._delta(run_id)
+        del unanchored["anchor"]
+        with self.assertRaises(session.SessionError) as ctx:
+            self._handoff(run_id, deltas=[unanchored])
+        self.assertIn("unanchored", str(ctx.exception))
+        with self.assertRaises(session.SessionError):
+            self._handoff(run_id,
+                          deltas=[self._delta(run_id, verdict="MAYBE")])
+        with self.assertRaises(session.SessionError):
+            self._handoff(run_id, deltas=["not-an-object"])
+
+    def test_undecodable_seed_refuses_named_not_traceback(self):
+        # a UTF-16/ANSI-re-encoded seed (the PowerShell default trap) must
+        # end in a named refusal, never an unhandled UnicodeDecodeError
+        run_id = self._open_run()
+        workspace = joblib.workspace_path("proj", run_id)
+        (workspace / "seed.md").write_bytes(b"\xff\xfe-- not utf-8 --")
+        with self.assertRaises(session.SessionError) as ctx:
+            self._handoff(run_id, deltas=[self._delta(run_id)])
+        self.assertIn("unreadable", str(ctx.exception))
+
+    def test_delta_list_is_capped(self):
+        run_id = self._open_run()
+        self._write_seed(run_id)
+        too_many = [self._delta(run_id) for _ in range(17)]
+        with self.assertRaises(session.SessionError) as ctx:
+            self._handoff(run_id, deltas=too_many)
+        self.assertIn("max 16", str(ctx.exception))
+
+    def test_deltas_share_the_16kb_budget(self):
+        run_id = self._open_run()
+        self._write_seed(run_id)
+        fat = self._delta(run_id, reality="x" * 20000)
+        with self.assertRaises(session.SessionError) as ctx:
+            self._handoff(run_id, deltas=[fat])
+        self.assertIn("compact", str(ctx.exception))
+
+    # --------------------- ST-9.2: --job-id selects the sole resumable run
+
+    def test_job_id_resolves_the_sole_resumable_run(self):
+        run_id = self._open_run()
+        self.assertEqual(
+            session.resolve_run_id(self.root, None, "long-work"), run_id)
+
+    def test_job_id_refuses_zero_and_many(self):
+        with self.assertRaises(session.SessionError) as ctx:
+            session.resolve_run_id(self.root, None, "long-work")
+        self.assertIn("no resumable run", str(ctx.exception))
+        self._open_run()
+        self._open_run()
+        with self.assertRaises(session.SessionError) as ctx:
+            session.resolve_run_id(self.root, None, "long-work")
+        self.assertIn("2 resumable runs", str(ctx.exception))
+
+    def test_exactly_one_selector(self):
+        with self.assertRaises(session.SessionError):
+            session.resolve_run_id(self.root, None, None)
+        with self.assertRaises(session.SessionError):
+            session.resolve_run_id(self.root, "rid", "jid")
+
     # ---------------------------------------------------------------- CLI
 
     def _cli(self, *argv: str) -> tuple[int, dict]:
@@ -223,6 +366,40 @@ class SessionTestCase(unittest.TestCase):
                               "--run-id", "missing-run")
         self.assertEqual(code, 2)
         self.assertFalse(out["ok"])
+
+    def test_cli_deltas_and_job_id_selector(self):
+        run_id = self._open_run()
+        self._write_seed(run_id)
+        code, out = self._cli(
+            "handoff", "--directory", str(self.root),
+            "--job-id", "long-work",
+            "--boundary", "story", "--name", "ST-9.2",
+            "--done", "surface built", "--next", "capture story",
+            "--delta", json.dumps(self._delta(run_id)))
+        self.assertEqual(code, 0)
+        self.assertEqual(out["handoff"]["deltas"][0]["verdict"], "WRONG")
+        code, out = self._cli("resume", "--directory", str(self.root),
+                              "--job-id", "long-work")
+        self.assertEqual(code, 0)
+        self.assertEqual(len(out["handoff"]["deltas"]), 1)
+
+    def test_cli_refusals_are_named(self):
+        run_id = self._open_run()
+        # malformed --delta JSON
+        code, out = self._cli(
+            "handoff", "--directory", str(self.root), "--run-id", run_id,
+            "--boundary", "story", "--name", "ST-9.2",
+            "--done", "d", "--next", "n", "--delta", "{not json")
+        self.assertEqual(code, 2)
+        self.assertIn("not valid JSON", out["error"])
+        # both selectors / neither selector
+        code, out = self._cli("resume", "--directory", str(self.root),
+                              "--run-id", run_id, "--job-id", "long-work")
+        self.assertEqual(code, 2)
+        self.assertIn("exactly one", out["error"])
+        code, out = self._cli("resume", "--directory", str(self.root))
+        self.assertEqual(code, 2)
+        self.assertIn("exactly one", out["error"])
 
 
 if __name__ == "__main__":

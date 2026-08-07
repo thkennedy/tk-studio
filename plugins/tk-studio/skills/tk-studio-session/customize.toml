@@ -1,0 +1,13 @@
+# Customization surface for tk-studio-session.
+#
+# Override files (not edited here):
+#   {project-root}/_bmad/custom/tk-studio-session.toml         (team)
+#   {project-root}/_bmad/custom/tk-studio-session.user.toml    (personal)
+
+# Model/effort defaults (AD-14). Precedence: runtime override > project config
+# > this resource default. Handoff/resume is mechanical relay around a
+# deterministic core — the small tier is deliberate; escalation comes from a
+# job definition's model/effort fields (driver-contract §5), never by default.
+[model]
+default = "claude-haiku-4-5"
+effort = "low"
