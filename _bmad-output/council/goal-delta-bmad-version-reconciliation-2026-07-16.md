@@ -19,7 +19,7 @@ Summary of what changed:
    should still be available after consolidation." The current G2 branch shipped
    ZERO gds/wds skills, so the bundle is not merely inert (C1) but **incomplete by
    46 skills** (33 gds + 13 wds). This changes bundle CONTENT -> flips Q6.
-3. **G5 deletion scope NARROWED: only `dpsue-*` and `dpsbe-*` disappear** (the two
+3. **G5 deletion scope NARROWED: only `tkue-*` and `tkbe-*` disappear** (the two
    legacy per-domain council skill generations). Everything else stays.
 4. **Authoritative source: the BMAD installer output.** Tim runs the 6.9.0
    installer into a clean scratch dir (gds included, custom excluded); that
@@ -163,10 +163,10 @@ it to whoever re-runs G2.
 
 ### F6 (original, SUPERSEDED) - mixed-version island reasoning
 
-Bundle contents on `feat/mission-single-bmad-instal-bundle-bmad-core-into-the-dps-council-pl`:
+Bundle contents on `feat/mission-single-bmad-instal-bundle-bmad-core-into-the-tk-council-pl`:
 
-- `plugins/dps-council/skills/`: **73 `bmad-*` + 17 `dps-*` + README. No `gds-*`. No `wds-*`.**
-- `plugins/dps-council/bmad/`: module assets DO ship - `gds` 16 files, `wds` 49, `tea` 2, and `core`/`bmm`/`cis`/`bmb`/`automator` 1 each.
+- `plugins/tk-council/skills/`: **73 `bmad-*` + 17 `tk-*` + README. No `gds-*`. No `wds-*`.**
+- `plugins/tk-council/bmad/`: module assets DO ship - `gds` 16 files, `wds` 49, `tea` 2, and `core`/`bmm`/`cis`/`bmb`/`automator` 1 each.
 
 The one-file modules are correct (the reviewer's rejected hypothesis holds -
 `module-help.csv` is the menu manifest; the missing file vs source in each case is
@@ -390,7 +390,7 @@ already owned by G2's existing re-run guidance - so this delta's job on Q2 is to
    a numbered CL awaiting Tim's submit; never auto-submit, never `p4 revert`).
 5. ~~Name the gds/wds island~~ **VOID** (Q4 ruling: gds/wds are bundled).
 6. Emit the **keep-list** G5 consumes: exactly which paths survive per repo -
-   built around the narrowed deletion target (only `dpsue-*` + `dpsbe-*`).
+   built around the narrowed deletion target (only `tkue-*` + `tkbe-*`).
 7. **Announce the net-new override model** (F9) for Tools + Kraken-Backend: those
    projects gain a resolver + three-layer `custom/` model they have never had.
    One short note per repo - what it is, that it is inert until used.
@@ -402,9 +402,9 @@ already owned by G2's existing re-run guidance - so this delta's job on Q2 is to
 - Per-repo delta ledger exists; every lost skill carries a disposition (explicit zero enforced).
 - `project_name` correct in all four `_bmad/core/config.yaml` via the Q7 detector
   (Perforce changes staged, not submitted).
-- G5's keep-list is explicit and unambiguous (see Q4): deletes ONLY `dpsue-*` +
-  `dpsbe-*` (skills + `.agents` mirror + `_bmad/memory` pools, gated by G4);
-  retains bmad/gds/wds/dps skills + every module's own `config.yaml`.
+- G5's keep-list is explicit and unambiguous (see Q4): deletes ONLY `tkue-*` +
+  `tkbe-*` (skills + `.agents` mirror + `_bmad/memory` pools, gated by G4);
+  retains bmad/gds/wds/tk-council skills + every module's own `config.yaml`.
 - No deletions in this goal.
 
 **G5 prompt amendments:**
@@ -419,27 +419,27 @@ already owned by G2's existing re-run guidance - so this delta's job on Q2 is to
 ### Q4 - Does G5 grow: **RE-DECIDED per Tim's ruling. G5 SHRINKS to a two-target delete; gds/wds move to G2 (bundled).**
 
 Tim narrowed the deletion scope. G5 deletes **only the two legacy per-domain
-council generations** - `dpsue-*` and `dpsbe-*`. Everything else stays: bmad/gds/
-wds/cis/tea/bmb/automator/core from the bundle; dps-* council skills from the
+council generations** - `tkue-*` and `tkbe-*`. Everything else stays: bmad/gds/
+wds/cis/tea/bmb/automator/core from the bundle; tk-* council skills from the
 plugin. My earlier "leave gds/wds project-local" is SUPERSEDED - they are bundled.
 
 **Deletion target, verified on disk 2026-07-17 (cleanly isolated):**
 
 | Target | `.claude/skills/` | `.agents/` mirror | `_bmad/memory/` pools |
 |---|---|---|---|
-| `dpsue-*` | kraken_main: 14 (elsewhere 0) | matching mirror | kraken_main: `dpsue` + 6 `dpsue-agent-*` |
-| `dpsbe-*` | Kraken-Backend: 16 (elsewhere 0) | matching mirror | Kraken-Backend: `dpsbe` + 4 `dpsbe-agent-*` |
+| `tkue-*` | kraken_main: 14 (elsewhere 0) | matching mirror | kraken_main: `tkue` + 6 `tkue-agent-*` |
+| `tkbe-*` | Kraken-Backend: 16 (elsewhere 0) | matching mirror | Kraken-Backend: `tkbe` + 4 `tkbe-agent-*` |
 
-So G5 is per-repo and narrow: **kraken_main deletes the `dpsue` family, Kraken-Backend
-deletes the `dpsbe` family, ClaudeOS + Tools have neither** (explicit zero). All of
-it still G4-gated - the `_bmad/memory/dpsbe*` pools are the ONLY copy of that
+So G5 is per-repo and narrow: **kraken_main deletes the `tkue` family, Kraken-Backend
+deletes the `tkbe` family, ClaudeOS + Tools have neither** (explicit zero). All of
+it still G4-gated - the `_bmad/memory/tkbe*` pools are the ONLY copy of that
 project's council history (the mission's top constraint), so **nothing deletes
 until Reina clears it.**
 
 **Three things G5 still needs (unchanged by the narrowing):**
 1. **`.agents/skills/` + `.cursor/`** stay in scope (G5 item 1) - but note this is
-   the *Cursor-mirror* teardown, separate from the dpsue/dpsbe delete. All four
-   repos (Correction 2). Whether the whole mirror goes or only the dpsue/dpsbe
+   the *Cursor-mirror* teardown, separate from the tkue/tkbe delete. All four
+   repos (Correction 2). Whether the whole mirror goes or only the tkue/tkbe
    slices of it is an OQ - see OQ6.
 2. **Keep-list must be enumerated, not "leave only config.yaml."** Every module
    ships its own `config.yaml` (verified gds/wds/automator). G9 emits the explicit
@@ -447,10 +447,10 @@ until Reina clears it.**
 3. **F5 caveat** for the 6.2.2 repos (`_bmad/core/` holds live skills) - still applies
    if any `_bmad/` teardown touches core there.
 
-**New tension surfaced by the ruling (OQ7):** Tim said "dps-* council skills come
-from the plugin," yet ruled the local unprefixed `dps-*` skills STAY. Verified:
-kraken_main, Tools, and Kraken-Backend each carry **10 local `dps-*` skills** that
-now duplicate the plugin's `dps-council:dps-*` (shipped in G0). Leaving them is a
+**New tension surfaced by the ruling (OQ7):** Tim said "tk-* council skills come
+from the plugin," yet ruled the local unprefixed `tk-*` skills STAY. Verified:
+kraken_main, Tools, and Kraken-Backend each carry **10 local `tk-*` skills** that
+now duplicate the plugin's `tk-council:tk-*` (shipped in G0). Leaving them is a
 defensible transitional choice, but it is a knowing duplication - flag for Tim,
 do not silently reconcile (OQ7).
 
@@ -477,7 +477,7 @@ guarantees the bundled version matches what Tim actually installed.
 **Authoritative-source decision (Tim, item 4), folded in:** the bundle is
 **vendored from Tim's installer output** (clean 6.9.0 scratch install, gds included,
 custom excluded) - NOT hand-assembled from any existing repo. G2 mirrors that
-`_bmad/` + `.claude/skills/` into `plugins/dps-council/{bmad,skills}/` and applies
+`_bmad/` + `.claude/skills/` into `plugins/tk-council/{bmad,skills}/` and applies
 the C1 rewire. This guarantees version consistency and a single source of truth for
 what "the bundle is."
 
@@ -493,7 +493,7 @@ right for a reason neither of us had yet: not the version, but the gds/wds addit
 **Corrected sequence:**
 1. **Tim runs the 6.9.0 BMAD installer** into a clean scratch dir (gds included,
    custom excluded) -> authoritative content manifest. *[manual, Tim, blocks G2]*
-2. **G2 re-runs**, vendoring from that output into `plugins/dps-council/{bmad,skills}/`,
+2. **G2 re-runs**, vendoring from that output into `plugins/tk-council/{bmad,skills}/`,
    applying the C1 path rewire across bmad-* + gds-* + wds-* + the smaller findings.
 3. **Gate** (rule 6 review of the diff before merge).
 
@@ -559,7 +559,7 @@ interlock line added to G5.
 | **Tim (manual)** | **Run the 6.9.0 BMAD installer** into a clean scratch dir (gds in, custom out) -> authoritative content manifest that G2 vendors from. | **Blocks G2** |
 | **G2** | **Bundle content grows: +33 gds +13 wds skills** (Tim ruling 2). **Vendor from the installer output** (ruling 4), not hand-assembly; apply C1 rewire across bmad-* + gds-* + wds-*. Ship `bmad/_config/manifest.yaml` (comes free with the vendored `_bmad/`). | **HELD** until installer output exists |
 | **NEW G9** | BMAD version reconciliation + keep-list. Depends G2, blocks G5, parallel G3/G4. `actor: hermes`. | Blocks G5 |
-| **G5** | **NARROWED: delete ONLY `dpsue-*` (kraken_main) + `dpsbe-*` (Kraken-Backend)** - skills + `.agents` mirror + `_bmad/memory` pools, all G4-gated. Add: **C1-fix-verified hard prerequisite (F8)**; enumerate keep-list (per-module `config.yaml`, all bundle/plugin skills retained); F5 caveat; `.cursor/`-mirror teardown scope decision (OQ6). | No |
+| **G5** | **NARROWED: delete ONLY `tkue-*` (kraken_main) + `tkbe-*` (Kraken-Backend)** - skills + `.agents` mirror + `_bmad/memory` pools, all G4-gated. Add: **C1-fix-verified hard prerequisite (F8)**; enumerate keep-list (per-module `config.yaml`, all bundle/plugin skills retained); F5 caveat; `.cursor/`-mirror teardown scope decision (OQ6). | No |
 | **G3** | **NEW sub-requirement: `project_name` auto-detector** (p4 stream > github > folder) keying T2 namespacing + backfilling all four configs (Q7). | No |
 | **G6** | Add AC: dry-run reports BMAD version delta alongside plugin version delta. | No |
 | **G7** | Add AC: version-check reads + surfaces bundled BMAD version. | No |
@@ -593,17 +593,17 @@ interlock line added to G5.
    double-ship or miss them. Flagged, not guessed.
 
 6. **[NEW] `.cursor/` + `.agents/` mirror teardown scope.** G5 item 1 tears down
-   the Cursor mirror. With the deletion narrowed to dpsue/dpsbe, does Tim want the
+   the Cursor mirror. With the deletion narrowed to tkue/tkbe, does Tim want the
    WHOLE `.agents/skills/` + `.cursor/` removed (they mirror `.claude/skills/`
-   1:1 in all four repos and are Cursor-era dead weight), or only the dpsue/dpsbe
+   1:1 in all four repos and are Cursor-era dead weight), or only the tkue/tkbe
    slices of them? My lean: remove the whole mirror - it is a byte-identical
    Cursor artifact and the council runs from `.claude/` + the plugin now. But it
    is a scope call, not mine to make.
 
-7. **[NEW] Local unprefixed `dps-*` skills now duplicate the plugin.** Tim ruled
-   they stay, yet also said "dps-* council skills come from the plugin." kraken_main,
-   Tools, and Kraken-Backend each carry **10 local `dps-*` skills** that now
-   duplicate `dps-council:dps-*` (shipped in G0). Leaving them is a defensible
+7. **[NEW] Local unprefixed `tk-*` skills now duplicate the plugin.** Tim ruled
+   they stay, yet also said "tk-* council skills come from the plugin." kraken_main,
+   Tools, and Kraken-Backend each carry **10 local `tk-*` skills** that now
+   duplicate `tk-council:tk-*` (shipped in G0). Leaving them is a defensible
    transitional state, but it is a knowing duplication and a future-drift source
    (local copy vs plugin copy diverging). Confirm: intentional for now, or fold
    into G5's delete once the plugin path is proven in those repos?
@@ -618,19 +618,19 @@ interlock line added to G5.
 
 - **Mission state** (`~/.hermes/missions.json`): +1 goal (`-9`), goal-prompt
   amendments to G2 (bundle grows + vendor-from-installer), G3 (project-name
-  detector), G5 (narrowed to dpsue/dpsbe + interlock), G6, G7. **NOT WRITTEN -
+  detector), G5 (narrowed to tkue/tkbe + interlock), G6, G7. **NOT WRITTEN -
   Tim applies or authorizes.**
 - **Tim's environment (manual precondition):** a clean 6.9.0 BMAD installer run
   into a scratch dir -> the authoritative bundle content. Blocks G2.
-- **Plugin** (`plugins/dps-council/{bmad,skills}/`): vendored from the installer
+- **Plugin** (`plugins/tk-council/{bmad,skills}/`): vendored from the installer
   output - gains bmad-* + gds-* + wds-* + framework modules + `bmad/_config/manifest.yaml`;
   C1 path rewire across all bundled skill sets. G2.
 - **All four repos** `_bmad/core/config.yaml`: `project_name` backfilled from the
   G3 detector (blank in Tools + Kraken-Backend; `kraken`->correct in kraken_main;
   ClaudeOS already correct). Perforce (Tools, kraken_main) -> numbered CLs awaiting
   Tim's submit. G3.
-- **kraken_main**: `dpsue-*` skills + `.agents` mirror + `_bmad/memory/dpsue*` pools
-  deleted (G4-gated). Kraken-Backend: same for `dpsbe-*`. ClaudeOS + Tools: neither
+- **kraken_main**: `tkue-*` skills + `.agents` mirror + `_bmad/memory/tkue*` pools
+  deleted (G4-gated). Kraken-Backend: same for `tkbe-*`. ClaudeOS + Tools: neither
   present (explicit zero). G5.
 - **Canonical**: no change. Nothing here is promoted knowledge yet - Reina candidate
   for `commons/` after G8.

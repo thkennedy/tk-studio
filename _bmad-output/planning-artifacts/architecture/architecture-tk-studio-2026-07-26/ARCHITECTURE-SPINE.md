@@ -14,7 +14,7 @@ sources:
   - ../../briefs/brief-tk-studio-2026-07-25/addendum.md
   - ../../briefs/brief-tk-studio-2026-07-25/o1-decision-2026-07-26.md
   - ../../briefs/brief-tk-studio-2026-07-25/planning-backend-research-2026-07-25.md
-  - ../../briefs/brief-tk-studio-2026-07-25/dps-council-inventory-2026-07-25.md
+  - ../../briefs/brief-tk-studio-2026-07-25/tk-council-inventory-2026-07-25.md
 companions: []
 ---
 
@@ -85,19 +85,19 @@ graph TD
 
 - **Binds:** planning adapter roadmap; Operations headless paths
 - **Prevents:** betting the first integration on an unofficial bridge
-- **Rule:** O3 ruling — the first external planning backend is **Jira (Atlassian Cloud)** through the official Atlassian Rovo MCP Server (formerly "Remote MCP"), shipped only after the local backends are stable, via the designed migration (AD-16). Headless flows MUST authenticate with API tokens, not OAuth (dps ISS-008: MCP OAuth cannot complete non-interactively); API-token access is an org-admin-enabled toggle — verifying it is enabled is part of the headless auth preflight (AD-11). The epic→Epic / story→Story / task→Sub-task mapping is the default — confirm against the target org's issue-type scheme at adapter build. Confluence publishing of `kb/` and Linear are later adapters under the same contract.
+- **Rule:** O3 ruling — the first external planning backend is **Jira (Atlassian Cloud)** through the official Atlassian Rovo MCP Server (formerly "Remote MCP"), shipped only after the local backends are stable, via the designed migration (AD-16). Headless flows MUST authenticate with API tokens, not OAuth (tk-council ISS-008: MCP OAuth cannot complete non-interactively); API-token access is an org-admin-enabled toggle — verifying it is enabled is part of the headless auth preflight (AD-11). The epic→Epic / story→Story / task→Sub-task mapping is the default — confirm against the target org's issue-type scheme at adapter build. Confluence publishing of `kb/` and Linear are later adapters under the same contract.
 
 ### AD-8 — Cross-project knowledge stays out of v1 (O4)
 
 - **Binds:** Taxonomy, Recommendation evolve loop
 - **Prevents:** building a canonical-KB subsystem before per-project KB has proven itself
-- **Rule:** O4 ruling — **out.** Knowledge is per-project (`kb/`). Cross-project reads are served by the **project registry** in working data (the canonical path for "status of all projects") plus the Obsidian vault as the human window. The seam stays open: kb frontmatter reserves `scope:`, and the promotion-gate pattern (dps custodian membrane) is the named v2 mechanism. The evolve loop only observes and logs in v1.
+- **Rule:** O4 ruling — **out.** Knowledge is per-project (`kb/`). Cross-project reads are served by the **project registry** in working data (the canonical path for "status of all projects") plus the Obsidian vault as the human window. The seam stays open: kb frontmatter reserves `scope:`, and the promotion-gate pattern (tk-council custodian membrane) is the named v2 mechanism. The evolve loop only observes and logs in v1.
 
 ### AD-9 — Stateless orchestrator core, optional persona shell (O5)
 
 - **Binds:** the orchestrated entry point, all roles
-- **Prevents:** identity/persona state entangled with routing logic (the dps lesson)
-- **Rule:** O5 ruling — the orchestrator core is **stateless**: resolve role (from the per-user store) → resolve project working set (from project config) → route/convene/synthesize. The persona shell ("convene the council") is data — persona assets loaded only in attended sessions. Headless bypasses the shell entirely and must produce identical routing and artifacts. No sanctum/rebirth machinery in the studio core; that is dps-overlay material.
+- **Prevents:** identity/persona state entangled with routing logic (the tk-council lesson)
+- **Rule:** O5 ruling — the orchestrator core is **stateless**: resolve role (from the per-user store) → resolve project working set (from project config) → route/convene/synthesize. The persona shell ("convene the council") is data — persona assets loaded only in attended sessions. Headless bypasses the shell entirely and must produce identical routing and artifacts. No sanctum/rebirth machinery in the studio core; that is tk-council overlay material.
 
 ### AD-10 — Job model is data; substrate executes (O8)
 
@@ -115,7 +115,7 @@ graph TD
 
 - **Binds:** all studio surfaces; the shared repo
 - **Prevents:** speculative pre-measurement; telemetry collisions; unsanitized data on the team repo
-- **Rule:** per O1 — instrument, don't predict. Events (`install-outcome`, `drift-detection`, `activation-failure`, `headless-failure`, `onboarding-funnel`, `observation`, `report`) append as one JSON object per line to the per-user-per-machine ledger `~/.tk-studio/measurements/<user>-<machine>.jsonl` — atomic writes, never a shared file, sanitized at emission. The event taxonomy is a versioned schema in `contracts/` that names **exactly one emitter per event type** (a skill emits its own surface events; the job wrapper alone emits job-level events — never both for one failure) and fixes each event's payload shape; extending the taxonomy rides the same PR membrane. `tk report` is the explicit human-authored defect verb; `observation` is the evolve loop's observe-and-log event. Reconciliation rides plain git governance: measurement-push (ledger → branch → PR into `measurements/`), consolidation (PRs → `issues/ledger.md` entries → fix candidates), PR review as the promotion membrane. The issues ledger keeps the dps discipline: stable `ISS-NNN` ids, severity High/Medium/Low, status Open/Mitigated/Resolved/Wontfix, rows updated in place, never deleted.
+- **Rule:** per O1 — instrument, don't predict. Events (`install-outcome`, `drift-detection`, `activation-failure`, `headless-failure`, `onboarding-funnel`, `observation`, `report`) append as one JSON object per line to the per-user-per-machine ledger `~/.tk-studio/measurements/<user>-<machine>.jsonl` — atomic writes, never a shared file, sanitized at emission. The event taxonomy is a versioned schema in `contracts/` that names **exactly one emitter per event type** (a skill emits its own surface events; the job wrapper alone emits job-level events — never both for one failure) and fixes each event's payload shape; extending the taxonomy rides the same PR membrane. `tk report` is the explicit human-authored defect verb; `observation` is the evolve loop's observe-and-log event. Reconciliation rides plain git governance: measurement-push (ledger → branch → PR into `measurements/`), consolidation (PRs → `issues/ledger.md` entries → fix candidates), PR review as the promotion membrane. The issues ledger keeps the tk-council discipline: stable `ISS-NNN` ids, severity High/Medium/Low, status Open/Mitigated/Resolved/Wontfix, rows updated in place, never deleted.
 
 ### AD-13 — Drift check at activation: three-way, loud, read-only
 
@@ -135,11 +135,11 @@ graph TD
 - **Prevents:** two skills resolving the same key differently; machine paths on shared VCS
 - **Rule:** scopes are **user** (`~/.tk-studio/config.yaml`), **project** (`{project-root}/.tk-studio/config.yaml` tracked + `.tk-studio/config.local.yaml` per-dev, ignored), **studio** (defaults shipped in the plugin, incl. `bmad.lock`). Resolution: runtime override > project local > project tracked > user > studio default. No absolute machine paths in tracked files; on Perforce projects the local overlay is P4IGNORE-excluded (the git-ignore is not the safety mechanism — the off-repo store is).
 
-### AD-16 — Migration is a designed operation with dps safety rules `[ADOPTED]`
+### AD-16 — Migration is a designed operation with tk-council safety rules `[ADOPTED]`
 
 - **Binds:** backend switches, store moves, any data relocation
 - **Prevents:** history loss; half-migrated states that read as migrated
-- **Rule:** ported verbatim from dps: **closed inventory** before any move (nothing not on the inventory may be deleted); **no-delete-before-clearance** (source retained read-only until migrated AND verified AND user-cleared); **copy-then-verify-then-flag** with the cutover flag written last, so a crash mid-copy still reads from the source. Backend migration is export (canonical shape) → transform → import → verification (counts, id map, content hashes, spot round-trip).
+- **Rule:** ported verbatim from tk-council: **closed inventory** before any move (nothing not on the inventory may be deleted); **no-delete-before-clearance** (source retained read-only until migrated AND verified AND user-cleared); **copy-then-verify-then-flag** with the cutover flag written last, so a crash mid-copy still reads from the source. Backend migration is export (canonical shape) → transform → import → verification (counts, id map, content hashes, spot round-trip).
 
 ### AD-17 — Role resolves before routing
 
@@ -251,9 +251,9 @@ tk-studio/
 - **Linear adapter, Confluence kb publishing** — after Jira stabilizes, same contract (AD-6/AD-7).
 - **Evolve-loop automation** (proposal drafting from observed toil) — v1 observes and logs only.
 - **Execution roles beyond developer** (artist/designer/PR/custom) — arrive with the team as configuration (AD-17).
-- **Persona lore / dps overlay content** (11 personas, Perforce stream skills, UE content) — future overlay; the shell seam is AD-9.
+- **Persona lore / tk-council overlay content** (11 personas, Perforce stream skills, UE content) — future overlay; the shell seam is AD-9.
 - **Distribution hardening** (permissions, security review, public distribution) — deliberately later per brief.
-- **Research→Knowledge Lifecycle port** (mission spine/seed, anchored deltas, JSONL reconciliation queue, promotion gate — verified built in dps/ClaudeOS) — the named session-discipline upgrade. v1 ships only boundary handoffs + resumable run workspaces; the port moves the runner-side halves council-side behind the driver contract, ClaudeOS as first driver.
+- **Research→Knowledge Lifecycle port** (mission spine/seed, anchored deltas, JSONL reconciliation queue, promotion gate — verified built in tk-council/ClaudeOS) — the named session-discipline upgrade. v1 ships only boundary handoffs + resumable run workspaces; the port moves the runner-side halves council-side behind the driver contract, ClaudeOS as first driver.
 - **`bmad.lock` file format and final skill names** — module-builder decisions. (The bootstrap-script question is closed — see AD-1: no bootstrap script.)
 - **Backlog.md projection fidelity** — verify at adapter build that Backlog.md preserves unknown frontmatter keys; if not, the projection writes only Backlog.md-native keys + the canonical id as a label (canonical files are unaffected either way — AD-5 makes the projection non-authoritative).
 - **beads as an alternative local backend** — revisit only if dependency-graph queries become the bottleneck and its storage stabilizes.

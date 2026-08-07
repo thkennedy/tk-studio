@@ -87,5 +87,5 @@ surface), with **Sora** owning the seed + delta schema as a named deliverable an
 owning the seed↔canonical wall + promotion gate as acceptance criteria. Cross-repo (C).
 
 **Still needs Tim (one input):** does the planning-phase research run as a dedicated
-investigate pass (`bmad-investigate` / `dps-investigate`) or inline inside the planning
+investigate pass (`bmad-investigate` / `tk-investigate`) or inline inside the planning
 agent? Determines whether the seed pass is its own runner step or folded into decomposition.

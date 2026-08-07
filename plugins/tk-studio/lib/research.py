@@ -16,7 +16,7 @@ module keeps it honest at both ends:
             taxonomy names research job types as an observation emitter —
             the job wrapper's job-run event stays separate, AD-12).
 
-Evidence grades (dps discipline — ungraded findings refuse):
+Evidence grades (tk-council discipline — ungraded findings refuse):
   A  primary source, verified directly
   B  multiple independent sources agree
   C  single credible source

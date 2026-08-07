@@ -43,7 +43,7 @@ committed per-project counter at `.tk-studio/plan-counter.yaml`).
    keeps mapping round-trip stable). Binding config: `planning.jira.site` +
    `planning.jira.project_key` (tracked), account email from `JIRA_EMAIL`
    or `planning.jira.email`, token from `JIRA_API_TOKEN` **only** — never
-   any config file (AD-3). Auth is API-token, never OAuth (dps ISS-008);
+   any config file (AD-3). Auth is API-token, never OAuth (tk-council ISS-008);
    any gap or 401/403 blocks with every cause named — never a silent 401
    (AD-11). `normalize --directory <root>` runs the canonicalization pass
    alone. Add `--dry-run` to preview without writing (under `jira` a

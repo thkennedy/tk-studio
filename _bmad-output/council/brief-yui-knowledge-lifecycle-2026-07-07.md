@@ -46,9 +46,9 @@ Today a continued segment sees ONLY the prior handoff — no first-segment conte
 
 Council owns the knowledge brain (Yui decompose + gate; Sora seed/delta schema; Reina
 seed↔canonical wall + promotion gate); the ClaudeOS runner wires it + owns the notify gate.
-Likely repo split: reusable planning/seed/investigate skills → dps-council plugin repo;
+Likely repo split: reusable planning/seed/investigate skills → tk-council plugin repo;
 runner wiring (pass steps, seed injection into `renderStory`, the gate, delta capture in
-handoffs) → `C:/Github/ClaudeOS`. Roots: `C:/Users/kenne/Perforce/dps-council/{canonical,shared-memory}`.
+handoffs) → `C:/Github/ClaudeOS`. Roots: `C:/Users/kenne/Perforce/tk-council/{canonical,shared-memory}`.
 Flag exact target_repo split as an open question — don't guess.
 
 ## Relationship to existing work
@@ -70,7 +70,7 @@ belongs on the existing mission instead, say so.
    spine pass before MG pass; a headless proof before any attended capstone).
 3. **AC per component**, honoring the 4 constraints + two-tier passes.
 4. **Open questions for Tim** (flag, don't guess) — at minimum: (a) seed research as a
-   dedicated `bmad-investigate`/`dps-investigate` pass (Tim leans dedicated) vs inline in the
+   dedicated `bmad-investigate`/`tk-investigate` pass (Tim leans dedicated) vs inline in the
    planning agent, and the wiring implication; (b) exact repo split; (c) tunables (gate
    threshold, spine-pass budget).
 5. **Risks** (seed staleness, gate decision inheriting seed error bars, cross-repo execution).
