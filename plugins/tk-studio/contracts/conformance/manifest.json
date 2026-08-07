@@ -8,7 +8,7 @@
   "surfaces": {
     "tk-studio-activate": {
       "external_calls": false,
-      "auth_preflight": "none needed — read-only local three-way check; harness auth is the driver's preflight (driver-contract §1)",
+      "auth_preflight": "none needed — read-only local four-plane check; harness auth is the driver's preflight (driver-contract §1)",
       "drives": [
         {
           "assertion": "headless-clean",

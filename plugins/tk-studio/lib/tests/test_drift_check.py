@@ -70,7 +70,7 @@ class HarnessLoadabilityTestCase(unittest.TestCase):
         self._write_record({f"{NAME}@{NAME}": [self._install_entry("0.0.1")]})
         probe = drift_check._harness_loadability(NAME, VERSION, self.home)
         self.assertEqual(probe["status"], "drift")
-        self.assertIn("stale harness install", probe["detail"])
+        self.assertIn("harness and repo out of step", probe["detail"])
 
     def test_evicted_cache_path_is_drift(self):
         gone = self.home / "cache" / "gone"
@@ -86,6 +86,73 @@ class HarnessLoadabilityTestCase(unittest.TestCase):
         probe = drift_check._harness_loadability(NAME, VERSION, self.home)
         self.assertEqual(probe["status"], "error")
 
+    def test_wrong_shape_record_is_error_not_a_crash(self):
+        # the record is externally owned — a legacy/foreign shape (dict
+        # entries instead of lists, a top-level list) must degrade to error
+        for wrong in ({"version": 1, "plugins": {f"{NAME}@m": {"version": "1"}}},
+                      ["not", "a", "dict"],
+                      {"plugins": {f"{NAME}@m": ["not-a-dict-entry"]}}):
+            (self.home / "plugins" / "installed_plugins.json").write_text(
+                json.dumps(wrong), encoding="utf-8")
+            probe = drift_check._harness_loadability(NAME, VERSION, self.home)
+            self.assertEqual(probe["status"], "error", wrong)
+            self.assertIn("shape", probe["detail"])
+
+    def test_missing_install_path_is_drift_not_vacuous_ok(self):
+        # Path("") is cwd — an entry without installPath must not pass as
+        # loadable
+        entry = {"scope": "user", "version": VERSION}
+        self._write_record({f"{NAME}@{NAME}": [entry]})
+        probe = drift_check._harness_loadability(NAME, VERSION, self.home)
+        self.assertEqual(probe["status"], "drift")
+        self.assertIn("installPath missing", probe["detail"])
+
+    def test_project_scoped_install_for_another_project_is_drift(self):
+        entry = self._install_entry(VERSION)
+        entry.update(scope="project", projectPath=str(self.home / "elsewhere"))
+        self._write_record({f"{NAME}@{NAME}": [entry]})
+        with tempfile.TemporaryDirectory() as project:
+            probe = drift_check._harness_loadability(
+                NAME, VERSION, self.home, Path(project))
+        self.assertEqual(probe["status"], "drift")
+        self.assertIn("loadable from this project", probe["detail"])
+
+    def test_project_scoped_install_for_this_project_is_ok(self):
+        with tempfile.TemporaryDirectory() as project:
+            entry = self._install_entry(VERSION)
+            entry.update(scope="project", projectPath=project)
+            self._write_record({f"{NAME}@{NAME}": [entry]})
+            probe = drift_check._harness_loadability(
+                NAME, VERSION, self.home, Path(project))
+        self.assertEqual(probe["status"], "ok")
+
+    def test_claude_config_dir_env_resolves_the_default_home(self):
+        import os
+        self._write_record({f"{NAME}@{NAME}": [self._install_entry(VERSION)]})
+        old = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = str(self.home)
+        try:
+            probe = drift_check._harness_loadability(NAME, VERSION, None)
+        finally:
+            if old is None:
+                os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            else:
+                os.environ["CLAUDE_CONFIG_DIR"] = old
+        self.assertEqual(probe["status"], "ok")
+
+    def test_broken_catalog_still_runs_the_probe(self):
+        # a broken catalog is an error, but the harness probe still reports —
+        # the two concerns are independent
+        with tempfile.TemporaryDirectory() as project:
+            bad = Path(project) / ".claude-plugin"
+            bad.mkdir()
+            (bad / "marketplace.json").write_text("{broken", encoding="utf-8")
+            plane = drift_check.check_plugin(Path(project), None, self.home)
+        self.assertEqual(plane["status"], "error")
+        self.assertIn("marketplace catalog unreadable", plane["detail"])
+        self.assertIn("not installed in the harness", plane["detail"])
+        self.assertIn("claude plugin install", plane["fix"])
+
     def test_check_plugin_merges_probe_into_the_plane(self):
         # a project without a marketplace catalog still gets the harness
         # probe — its drift elevates the plane and both details survive
@@ -99,6 +166,9 @@ class HarnessLoadabilityTestCase(unittest.TestCase):
 
     def test_check_plugin_stays_ok_when_harness_loadable(self):
         self._write_record({f"{NAME}@{NAME}": [self._install_entry(VERSION)]})
+        # PLUGIN_ROOT.parents[1] is the studio repo root: the lockstep half
+        # runs for real against the repo's marketplace.json, so this also
+        # holds the repo to its plugin/catalog lockstep invariant
         plane = drift_check.check_plugin(
             PLUGIN_ROOT.parents[1], None, self.home)
         self.assertEqual(plane["status"], "ok")

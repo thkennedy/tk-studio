@@ -1,4 +1,4 @@
-"""tk-studio-activate — three-way health/drift check (AD-13). Read-only, loud.
+"""tk-studio-activate — four-plane health/drift check (AD-13). Read-only, loud.
 
 Planes checked:
   bmad-base  installed _bmad/_config/manifest.yaml versions vs the bmad.lock pins
@@ -84,11 +84,19 @@ def check_bmad_base(directory: Path, lock_path: Path) -> dict:
 
 
 def _harness_loadability(name: str, version: str,
-                         claude_home: Path | None = None) -> dict:
+                         claude_home: Path | None = None,
+                         directory: Path | None = None) -> dict:
     """AD-13: catalog lockstep proves the repo and marketplace agree; it says
     nothing about whether the harness can load the plugin at all. An absent
     installed_plugins.json entry means every headless /tk-studio:<skill>
-    invocation is 'Unknown command' while the repo looks healthy."""
+    invocation is 'Unknown command' while the repo looks healthy.
+
+    The record is an externally-owned file — only its v2 shape
+    ({"plugins": {"<name>@<marketplace>": [entries]}}) is understood; any
+    other shape is an error, never a crash. The comparison baseline is the
+    plugin.json of the copy running this script, so a harness-cache
+    invocation compares against itself and only a studio-repo checkout can
+    surface staleness."""
     home = claude_home or Path(os.environ.get("CLAUDE_CONFIG_DIR")
                                or Path.home() / ".claude")
     record = home / "plugins" / "installed_plugins.json"
@@ -101,23 +109,42 @@ def _harness_loadability(name: str, version: str,
     except (OSError, json.JSONDecodeError) as exc:
         return {"status": "error",
                 "detail": f"harness install record unreadable: {exc}"}
-    entries = [e for key, lst in (data.get("plugins") or {}).items()
+    plugins = data.get("plugins") if isinstance(data, dict) else None
+    if not isinstance(plugins, dict) or not all(
+            isinstance(lst, list) and all(isinstance(e, dict) for e in lst)
+            for lst in plugins.values()):
+        return {"status": "error",
+                "detail": (f"harness install record {record} is not the v2 "
+                           "shape this probe understands — cannot judge "
+                           "loadability")}
+    entries = [e for key, lst in plugins.items()
                if key == name or key.startswith(f"{name}@")
                for e in lst]
+    # only entries loadable from the checked project count: user scope
+    # (or unscoped) always, project scope only for this directory
+    def _loadable_here(e: dict) -> bool:
+        if e.get("scope", "user") != "project":
+            return True
+        project = e.get("projectPath")
+        return bool(project and directory
+                    and Path(project).resolve() == Path(directory).resolve())
+    entries = [e for e in entries if _loadable_here(e)]
     if not entries:
         return {"status": "drift",
                 "detail": (f"plugin not installed in the harness ({record.name} "
-                           f"has no {name} entry — headless /{name}:<skill> is "
-                           "'Unknown command')"),
+                           f"has no {name} entry loadable from this project — "
+                           f"headless /{name}:<skill> is 'Unknown command')"),
                 "fix": FIX_HARNESS}
     at_version = [e for e in entries if e.get("version") == version]
     if not at_version:
-        held = ", ".join(sorted({str(e.get("version")) for e in entries}))
+        held = ", ".join(sorted({"v" + str(e.get("version"))
+                                 for e in entries}))
         return {"status": "drift",
-                "detail": (f"harness holds v{held} but repo plugin is "
-                           f"v{version} (stale harness install)"),
+                "detail": (f"harness holds {held}, repo plugin is v{version} "
+                           "(harness and repo out of step)"),
                 "fix": FIX_HARNESS}
-    if not any(Path(e.get("installPath", "")).is_dir() for e in at_version):
+    if not any(e.get("installPath") and Path(e["installPath"]).is_dir()
+               for e in at_version):
         return {"status": "drift",
                 "detail": (f"harness entry v{version} installPath missing "
                            "(cache evicted)"),
@@ -148,21 +175,23 @@ def check_plugin(directory: Path, marketplace_path: Path | None,
             market = json.loads(catalog.read_text(encoding="utf-8"))
             entry = next(p for p in market["plugins"] if p["name"] == installed.get("name"))
         except (OSError, json.JSONDecodeError, KeyError, StopIteration) as exc:
+            # a broken catalog is an error but not a reason to skip the
+            # harness probe — the two concerns are independent
             plane.update(status="error",
                          detail=f"marketplace catalog unreadable or missing entry: {exc}")
-            return plane
-        if entry.get("version") != installed.get("version"):
-            plane.update(
-                status="drift",
-                detail=(f"installed plugin v{installed.get('version')} vs marketplace "
-                        f"catalog v{entry.get('version')} (lockstep broken)"),
-                fix=FIX_PLUGIN,
-            )
         else:
-            plane["detail"] = f"plugin v{installed.get('version')} in lockstep with catalog"
+            if entry.get("version") != installed.get("version"):
+                plane.update(
+                    status="drift",
+                    detail=(f"installed plugin v{installed.get('version')} vs marketplace "
+                            f"catalog v{entry.get('version')} (lockstep broken)"),
+                    fix=FIX_PLUGIN,
+                )
+            else:
+                plane["detail"] = f"plugin v{installed.get('version')} in lockstep with catalog"
 
     probe = _harness_loadability(installed.get("name"), installed.get("version"),
-                                 claude_home)
+                                 claude_home, directory)
     if _STATUS_RANK[probe["status"]] > _STATUS_RANK[plane["status"]]:
         plane["status"] = probe["status"]
     plane["detail"] = "; ".join(x for x in (plane["detail"], probe["detail"]) if x)
