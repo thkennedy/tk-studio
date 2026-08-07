@@ -1,5 +1,8 @@
 # Evaluation: tk-council Plugin + Packaging Fork (2026-07-25)
 
+- **Naming (scrub note, 2026-08-06):** every "tk-council" in this document names
+  the legacy (pre-rename) council repo under evaluation — not the later tk-studio
+  product, whose working title was also "tk-council" (see the concept seed).
 - **Status:** Evaluation only. No decision made; the packaging direction goes to a
   council debate (forge-idea / party-mode) before any process starts. Tim's ruling
   2026-07-25: "debate it first, evaluation report only for now."
