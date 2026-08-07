@@ -45,7 +45,7 @@
     }
   },
   "grades": {
-    "note": "evidence grades on knowledge stay the studio's shipped A/B/C/D vocabulary (D1 ruling; contracts since 1.2.0 - see lib/research.py). Grade markers in artifact bodies are documentation, not validated shape. Source-vocabulary mapping for readers of first-driver artifacts:",
+    "note": "evidence grades on knowledge stay the studio's shipped A/B/C/D vocabulary (D1 ruling; contracts since 0.1.2 - see lib/research.py). Grade markers in artifact bodies are documentation, not validated shape. Source-vocabulary mapping for readers of first-driver artifacts:",
     "mapping": {
       "Confirmed": "A",
       "independent-agreement": "B",
