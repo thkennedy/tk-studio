@@ -15,6 +15,27 @@ module keeps it honest at both ends:
             recommendation-carrying finding (source `research-job`; the
             taxonomy names research job types as an observation emitter —
             the job wrapper's job-run event stays separate, AD-12).
+  seed      validates an agent-authored per-run seed (knowledge.schema.json
+            shape, checked via lib/knowledge.py) and lands it as seed.md in
+            the run workspace — the anchor surface findings and handoff
+            deltas cite. Inherited spine anchors are verified against the
+            project spine when one exists; a missing spine is reported,
+            never a gate.
+  spine     validates and lands the project research spine at project scope:
+            ~/.tk-studio/projects/<key>/knowledge/spine.md in the per-user
+            store (D2, AD-3 — provisional knowledge never lands on the
+            project VCS). Spine authoring is a chartered research-run
+            flavor, enforced: the verb requires an open run whose job
+            carries a charter (target.payload.charter), so scope approval
+            and the job's budget guards cover the authoring pass. Anchor
+            ids are append-only — a re-authored spine that drops or
+            renumbers an existing anchor refuses.
+
+Anchors (ST-9.3, Epic 9): findings optionally cite an `anchor` — a bare
+anchor id from the run's seed (defined + inherited set, same rule as
+handoff deltas). Dangling citations are named rejections, never silently
+dropped; findings without anchors land regardless of seed state (aid, not
+gate — only the invalid artifact refuses, the run is untouched).
 
 Evidence grades (tk-council discipline — ungraded findings refuse):
   A  primary source, verified directly
@@ -27,20 +48,27 @@ CLI:
   uv run research.py record --directory DIR --run-id RID
                             (--findings JSON | --findings-file PATH)
                             [--no-emit]
+  uv run research.py seed   --directory DIR --run-id RID
+                            (--text TEXT | --file PATH)
+  uv run research.py spine  --directory DIR --run-id RID
+                            (--text TEXT | --file PATH)
 
-Exit codes: 0 ok; 2 invalid charter/findings or unknown run; 1 unexpected
-failure. Env: TK_STUDIO_HOME overrides the store root (tests).
+Exit codes: 0 ok; 2 invalid charter/findings/artifact or unknown run;
+1 unexpected failure. Env: TK_STUDIO_HOME overrides the store root (tests).
 Stdlib-only (NFR9); never prompts (AD-11).
 """
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
 import job as joblib
+import knowledge
 import ledger
+import store as storelib
 
 GRADES = {
     "A": "primary source, verified directly",
@@ -50,13 +78,59 @@ GRADES = {
 }
 
 _CHARTER_KEYS = ("topics", "sources", "max_findings", "notes")
-_FINDING_KEYS = ("title", "summary", "grade", "evidence", "recommendation")
+_FINDING_KEYS = ("title", "summary", "grade", "evidence", "recommendation",
+                 "anchor")
 _EVIDENCE_KEYS = ("source", "url", "note")
 _RECOMMENDATION_KEYS = ("action", "target")
 
+SEED_NAME = "seed.md"
+
 
 class ResearchError(Exception):
-    """Invalid charter or findings; message is safe to surface."""
+    """Invalid charter, findings, or knowledge artifact; message is safe to
+    surface."""
+
+
+def spine_path(key: str) -> Path:
+    """The project research spine — per-user store, project scope (D2)."""
+    return storelib.store_root() / "projects" / key / "knowledge" / "spine.md"
+
+
+def spine_ref_value(key: str) -> str:
+    """The store-relative spine path a seed's `spine_ref` must carry."""
+    return f"projects/{key}/knowledge/spine.md"
+
+
+def _open_run(project_root: Path, run_id: str) -> tuple[str, dict]:
+    key = joblib.project_key(Path(project_root))
+    run = joblib.read_run(key, run_id)
+    if run["state"] not in joblib.RESUMABLE_STATES:
+        raise ResearchError(f"run '{run_id}' already ended {run['state']}")
+    return key, run
+
+
+def _read_spine(key: str) -> tuple[str | None, dict]:
+    """(text, report) for the project spine. Aid, not gate: missing or
+    unreadable is reported to the caller, never raised."""
+    path = spine_path(key)
+    if not path.is_file():
+        return None, {"present": False, "path": str(path),
+                      "note": "no project spine — author one via a chartered "
+                              "research run (research.py spine)"}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return None, {"present": True, "path": str(path),
+                      "note": f"spine unreadable: {exc}"}
+    verdict = knowledge.validate_seed(text)
+    # Body-only anchors (parse_seed), never a full-text scan: a frontmatter
+    # note mentioning [SPINE-A1] defines nothing.
+    report = {"present": True, "path": str(path),
+              "anchors": knowledge.parse_seed(text)["anchors"],
+              "valid": verdict["valid"]}
+    if not verdict["valid"]:
+        report["problems"] = verdict["errors"]
+    return text, report
 
 
 # ---------------------------------------------------------------- charter
@@ -142,6 +216,9 @@ def _validate_finding(index: int, finding: object) -> list[str]:
         elif set(rec) - set(_RECOMMENDATION_KEYS):
             problems.append(f"{label}.recommendation has unknown field(s): "
                             f"{', '.join(sorted(set(rec) - set(_RECOMMENDATION_KEYS)))}")
+    if "anchor" in finding and not knowledge.is_anchor_id(finding["anchor"]):
+        problems.append(f"{label}.anchor must be a bare anchor id "
+                        "(SPINE-A<n> or SEED-<run-id>-A<n>)")
     return problems
 
 
@@ -177,6 +254,8 @@ def render_findings_md(findings: list[dict], charter: dict | None = None) -> str
             lines.append("")
             lines.append(finding["summary"])
             lines.append("")
+            if finding.get("anchor"):
+                lines.append(f"- anchor: `{finding['anchor']}`")
             for item in finding["evidence"]:
                 pointer = item["source"]
                 if item.get("url"):
@@ -192,15 +271,44 @@ def render_findings_md(findings: list[dict], charter: dict | None = None) -> str
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _check_anchored(findings: list[dict], workspace: Path) -> int:
+    """Anchored findings must cite the run seed's available set (defined +
+    inherited) — the same rule handoff deltas obey. Dangling citations are
+    named rejections; unanchored findings are untouched by seed state."""
+    anchored = [f for f in findings if f.get("anchor")]
+    if not anchored:
+        return 0
+    seed_path = workspace / SEED_NAME
+    seed_text = ""
+    if seed_path.is_file():
+        try:
+            seed_text = seed_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            # A UTF-16/ANSI-re-encoded seed (the PowerShell default trap)
+            # must refuse named, never die with a traceback (AD-11).
+            raise ResearchError(f"{SEED_NAME} unreadable: {exc}") from exc
+    available = set(knowledge.parse_seed(seed_text)["available"]) \
+        if seed_text else set()
+    dangling = sorted({f["anchor"] for f in anchored
+                       if f["anchor"] not in available})
+    if dangling:
+        context = ("" if seed_path.is_file() else
+                   f" [workspace has no {SEED_NAME} — no anchors exist to "
+                   "cite; land one via research.py seed first]")
+        raise ResearchError(
+            f"anchored findings rejected, never silently dropped{context}: "
+            "dangling anchor(s) " + ", ".join(dangling))
+    return len(anchored)
+
+
 def record(project_root: Path, run_id: str, findings: list[dict],
            emit: bool = True) -> dict:
     """Land a run's findings in its workspace and emit observations for the
     recommendation-carrying ones. The run must exist and still be open."""
     findings = validate_findings(findings)
-    key = joblib.project_key(Path(project_root))
-    run = joblib.read_run(key, run_id)
-    if run["state"] not in joblib.RESUMABLE_STATES:
-        raise ResearchError(f"run '{run_id}' already ended {run['state']}")
+    key, run = _open_run(project_root, run_id)
+    anchored = _check_anchored(findings,
+                               joblib.workspace_path(key, run_id))
     charter = ((run.get("job") or {}).get("target") or {}) \
         .get("payload", {}).get("charter")
     joblib.write_workspace_json(key, run_id, "findings.json",
@@ -223,13 +331,157 @@ def record(project_root: Path, run_id: str, findings: list[dict],
         if emit:
             ledger.emit("observation", payload, project=key)
         observations += 1
+    _, spine_report = _read_spine(key)
     return {
         "run_id": run_id,
         "findings": len(findings),
         "graded": {g: sum(1 for f in findings if f["grade"] == g)
                    for g in GRADES},
+        "anchored": anchored,
         "observations_emitted": observations if emit else 0,
         "artifacts": ["findings.json", "findings.md"],
+        "spine": spine_report,
+    }
+
+
+# ----------------------------------------------------------- seed / spine
+
+def emit_seed(project_root: Path, run_id: str, text: str) -> dict:
+    """Validate an agent-authored per-run seed and land it as seed.md in the
+    run workspace. Intrinsic artifact validity refuses before any run or
+    store read; cross-checks (run identity, spine inheritance) accumulate
+    after. A missing project spine is reported, never a gate."""
+    verdict = knowledge.validate_seed(text)
+    seed = knowledge.parse_seed(text)
+    problems = list(verdict["errors"])
+    if seed["tier"] == "spine":
+        problems.append("run workspaces carry tier: seed artifacts — the "
+                        "project spine lands via research.py spine")
+    for inherited in seed["inherits"]:
+        if not knowledge.is_anchor_id(inherited):
+            problems.append(f"inherits entry '{inherited}' is not an "
+                            "anchor id")
+    if problems:
+        raise ResearchError("seed rejected, never silently landed: "
+                            + "; ".join(problems))
+
+    key, _ = _open_run(project_root, run_id)
+    fm = seed["frontmatter"]
+    if fm.get("run_id") != run_id:
+        problems.append(f"seed run_id '{fm.get('run_id')}' does not match "
+                        f"run '{run_id}'")
+    expected_ref = spine_ref_value(key)
+    if fm.get("spine_ref") != expected_ref:
+        problems.append("spine_ref must be the store-relative project spine "
+                        f"path '{expected_ref}'")
+    if fm.get("project") != key:
+        problems.append(f"seed project '{fm.get('project')}' does not match "
+                        f"project '{key}'")
+    own_anchor = re.compile(rf"SEED-{re.escape(run_id)}-A\d+\Z")
+    for anchor in seed["anchors"]:
+        if anchor.startswith("SEED-") and not own_anchor.match(anchor):
+            problems.append(f"seed anchor '{anchor}' must be exactly "
+                            f"'SEED-{run_id}-A<n>' — anchor ids join across "
+                            "runs, collisions poison the join")
+    spine_text, spine_report = _read_spine(key)
+    if seed["inherits"] and spine_text is not None:
+        spine_anchors = set(knowledge.parse_seed(spine_text)["anchors"])
+        dangling = [a for a in seed["inherits"] if a not in spine_anchors]
+        if dangling:
+            problems.append("inherited anchor(s) not defined by the project "
+                            "spine: " + ", ".join(dangling))
+    path = joblib.workspace_path(key, run_id) / SEED_NAME
+    if path.is_file():
+        try:
+            previous = knowledge.parse_seed(
+                path.read_text(encoding="utf-8"))["available"]
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ResearchError(
+                f"existing {SEED_NAME} unreadable: {exc} — refusing to "
+                "overwrite what cannot be checked (anchor ids are "
+                "append-only)") from exc
+        current = set(seed["available"])
+        dropped = [a for a in previous if a not in current]
+        if dropped:
+            problems.append("existing seed anchor(s) missing from the new "
+                            "text (anchor ids are append-only, never "
+                            "renumbered — landed findings cite them): "
+                            + ", ".join(dropped))
+    if problems:
+        raise ResearchError("seed rejected, never silently landed: "
+                            + "; ".join(problems))
+
+    joblib.atomic_write_text(path, text)
+    return {
+        "run_id": run_id,
+        "path": str(path),
+        "anchors": seed["anchors"],
+        "inherits": seed["inherits"],
+        "inherits_verified": spine_text is not None,
+        "spine": spine_report,
+    }
+
+
+def emit_spine(project_root: Path, run_id: str, text: str) -> dict:
+    """Validate and land the project research spine at project scope in the
+    per-user store (D2). Spine authoring is a chartered research-run flavor,
+    enforced: the run must be open AND its job must carry a charter
+    (target.payload.charter) — scope approval precedes the authoring spend
+    (invariant 3); the job's budget guards cover the pass. Anchor ids are
+    append-only — a new text that drops an existing anchor refuses (queued
+    deltas cite identity; dropping an id strands them)."""
+    verdict = knowledge.validate_seed(text)
+    parsed = knowledge.parse_seed(text)
+    problems = list(verdict["errors"])
+    if parsed["tier"] == "seed":
+        problems.append("the project spine carries tier: spine — per-run "
+                        "seeds land via research.py seed")
+    if problems:
+        raise ResearchError("spine rejected, never silently landed: "
+                            + "; ".join(problems))
+
+    key, run = _open_run(project_root, run_id)
+    charter = ((run.get("job") or {}).get("target") or {}) \
+        .get("payload", {}).get("charter")
+    if not charter:
+        problems.append("spine authoring is a chartered research-run flavor "
+                        "— this run's job carries no charter "
+                        "(target.payload.charter)")
+    if parsed["frontmatter"].get("project") != key:
+        problems.append(f"spine project "
+                        f"'{parsed['frontmatter'].get('project')}' does not "
+                        f"match project '{key}'")
+    path = spine_path(key)
+    previous: list[str] = []
+    if path.is_file():
+        try:
+            # Body-only (parse_seed) to mirror the current set — a phantom
+            # frontmatter mention must never wedge the append-only check.
+            previous = knowledge.parse_seed(
+                path.read_text(encoding="utf-8"))["anchors"]
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ResearchError(
+                f"existing spine unreadable: {exc} — refusing to overwrite "
+                "what cannot be checked (anchor ids are append-only)"
+            ) from exc
+        current = set(parsed["anchors"])
+        dropped = [a for a in previous if a not in current]
+        if dropped:
+            problems.append("existing spine anchor(s) missing from the new "
+                            "text (anchor ids are append-only, never "
+                            "renumbered): " + ", ".join(dropped))
+    if problems:
+        raise ResearchError("spine rejected, never silently landed: "
+                            + "; ".join(problems))
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    joblib.atomic_write_text(path, text)
+    return {
+        "run_id": run_id,
+        "path": str(path),
+        "anchors": parsed["anchors"],
+        "appended": [a for a in parsed["anchors"] if a not in set(previous)],
+        "replaced_existing": bool(previous),
     }
 
 
@@ -256,6 +508,15 @@ def main(argv: list[str] | None = None) -> int:
     rec.add_argument("--no-emit", action="store_true",
                      help="land artifacts without ledger emission (debugging)")
 
+    for verb, description in (
+            ("seed", "validate + land seed.md in the run workspace"),
+            ("spine", "validate + land the project spine (per-user store)")):
+        art = sub.add_parser(verb, help=description)
+        art.add_argument("--directory", required=True, help="project root")
+        art.add_argument("--run-id", required=True)
+        art.add_argument("--text", help="artifact text inline")
+        art.add_argument("--file", help="path to the artifact text")
+
     args = parser.parse_args(argv)
     try:
         if args.command == "charter":
@@ -264,7 +525,7 @@ def main(argv: list[str] | None = None) -> int:
             except json.JSONDecodeError as exc:
                 raise ResearchError(f"charter is not valid JSON: {exc}")
             result = {"charter": validate_charter(charter)}
-        else:
+        elif args.command == "record":
             if bool(args.findings) == bool(args.findings_file):
                 raise ResearchError("record takes exactly one of --findings "
                                     "or --findings-file")
@@ -276,7 +537,18 @@ def main(argv: list[str] | None = None) -> int:
                 raise ResearchError(f"findings are not valid JSON: {exc}")
             result = record(Path(args.directory), args.run_id, findings,
                             emit=not args.no_emit)
-    except (ResearchError, joblib.JobError, OSError) as exc:
+        else:
+            if (args.text is None) == (args.file is None):
+                raise ResearchError(f"{args.command} takes exactly one of "
+                                    "--text or --file")
+            text = (args.text if args.text is not None
+                    else Path(args.file).read_text(encoding="utf-8"))
+            handler = emit_seed if args.command == "seed" else emit_spine
+            result = handler(Path(args.directory), args.run_id, text)
+    except (ResearchError, joblib.JobError, OSError,
+            UnicodeDecodeError) as exc:
+        # UnicodeDecodeError: a re-encoded --file/--findings-file (the
+        # PowerShell default trap) refuses named, never a traceback (AD-11).
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
         return 2
     print(json.dumps({"ok": True, **result}, ensure_ascii=False, indent=2))
