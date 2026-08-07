@@ -175,6 +175,12 @@ def read_record(key: str) -> dict:
     result: dict = {"path": str(path), "drafts": [], "invalid": [],
                     "other": 0, "keys": set()}
     if not path.is_file():
+        if path.exists():
+            # a directory (or other non-file) at the record path is broken
+            # store state, never "empty" — an empty baseline would silently
+            # re-draft everything (same posture as reconcile.read_queue)
+            raise PromoteBlocked("record", f"{RECORD_NAME} path exists but "
+                                           f"is not a file: {path}")
         return result
     try:
         raw = path.read_text(encoding="utf-8")
@@ -202,10 +208,22 @@ def read_record(key: str) -> dict:
             result["invalid"].append({"line": number,
                                       "error": "draft record has no keys list"})
             continue
+        if not all(isinstance(entry, list) and len(entry) == 4
+                   and all(isinstance(item, str) for item in entry)
+                   for entry in line["keys"]):
+            # a malformed key entry invalidates its whole line, reported —
+            # excluding it from the baseline re-drafts those corrections
+            # (duplicate-over-loss, visible in review); tolerating it here
+            # keeps one corrupt line from bricking the surface (a nested
+            # list would make tuple() unhashable — adversarial-review
+            # finding, ST-9.5)
+            result["invalid"].append({"line": number,
+                                      "error": "draft record carries "
+                                               "malformed key entries"})
+            continue
         result["drafts"].append(line)
         for entry in line["keys"]:
-            if isinstance(entry, list) and len(entry) == 4:
-                result["keys"].add(tuple(entry))
+            result["keys"].add(tuple(entry))
     return result
 
 
@@ -302,6 +320,14 @@ def draft(project_root: Path, base: str | None = None, dry_run: bool = False,
                               if state["deduped"] else
                               "the reconciliation queue holds no valid "
                               "corrections — nothing to promote"))
+        if not dry_run:
+            # a committed-local draft leaves the promotion branch ahead of
+            # origin; the natural retry is re-running this verb, so a no-op
+            # run completes the interrupted push instead of stranding it
+            # (adversarial-review finding, ST-9.5)
+            flushed = _flush_waiting(root, key, no_pr)
+            if flushed:
+                result.update(flushed)
         return result
 
     lines = [line for k in state["unpromoted"] for line in state["deduped"][k]]
@@ -332,7 +358,10 @@ def draft(project_root: Path, base: str | None = None, dry_run: bool = False,
                       "tier": e["tier"]} for e in entries])
         return result
 
-    # Git membrane motion (the measurepush shape, proven ST-7.1)
+    # Git membrane motion (the measurepush shape, proven ST-7.1 — with the
+    # branch-selection logic hardened: promote's dedupe baseline is the
+    # local promotions record, not remote file content, so a reset that
+    # orphans an unpushed commit would strand recorded corrections forever)
     if _git(root, "rev-parse", "--is-inside-work-tree",
             check=False).stdout.strip() != "true":
         raise PromoteBlocked(
@@ -342,7 +371,9 @@ def draft(project_root: Path, base: str | None = None, dry_run: bool = False,
     if _git(root, "status", "--porcelain").stdout.strip():
         raise PromoteBlocked("preflight",
                              "working tree not clean — commit or stash first")
-    _git(root, "fetch", "origin", check=False)  # best-effort: offline still commits
+    # prune so a remote branch deleted post-merge does not linger as a
+    # stale base for the next draft; best-effort: offline still commits
+    _git(root, "fetch", "--prune", "origin", check=False)
     base = base or _default_base(root)
     if branch == base:
         raise PromoteBlocked(
@@ -352,21 +383,15 @@ def draft(project_root: Path, base: str | None = None, dry_run: bool = False,
     result["base"] = base
     start_branch = _git(root, "rev-parse", "--abbrev-ref",
                         "HEAD").stdout.strip()
+    if start_branch == "HEAD":
+        raise PromoteBlocked(
+            "preflight",
+            "repository is in a detached-HEAD state — check out a branch "
+            "first (the draft motion must restore your checkout when it "
+            "finishes)")
 
     try:
-        # branch to the shared state: the open PR branch when it exists (a
-        # repeat draft updates it), else fresh off base
-        if _ref_exists(root, f"origin/{branch}"):
-            _git(root, "checkout", "-B", branch, f"origin/{branch}")
-        elif _ref_exists(root, branch):
-            _git(root, "checkout", branch)
-        else:
-            base_ref = (f"origin/{base}"
-                        if _ref_exists(root, f"origin/{base}") else base)
-            if not _ref_exists(root, base_ref):
-                raise PromoteBlocked("preflight",
-                                     f"base branch '{base}' not found")
-            _git(root, "checkout", "-b", branch, base_ref)
+        _checkout_promotion_branch(root, branch, base)
 
         # ONE new dated file — never an edit or delete of existing kb content
         drafted_at = _now()
@@ -379,38 +404,57 @@ def draft(project_root: Path, base: str | None = None, dry_run: bool = False,
             stem = f"reconciliation-{date}-{serial}"
         label = date if serial == 1 else f"{date} ({serial})"
         file_rel = f"kb/{stem}.md"
-        content = knowledge.render_promotion(entries, key, label)
-        (kb_root / f"{stem}.md").write_text(content, encoding="utf-8",
-                                            newline="\n")
-        result["file"] = file_rel
-
-        staged = [file_rel]
+        drafted_path = kb_root / f"{stem}.md"
         try:
-            index = kblib.generate_index(root)
-            result["index"] = {"state": ("regenerated" if index["changed"]
-                                         else "unchanged")}
-            if index["changed"]:
-                staged.append("kb/index.md")
-        except kblib.KbError as exc:
-            # a foreign (hand-authored) index is surfaced, never clobbered
-            # and never a gate — the draft still lands
-            result["index"] = {"state": "skipped", "detail": str(exc)}
+            content = knowledge.render_promotion(entries, key, label)
+            drafted_path.write_text(content, encoding="utf-8", newline="\n")
+            result["file"] = file_rel
 
-        _git(root, "add", "--", *staged)  # the draft (+ index), nothing else
-        _git(root, "commit", "-q", "-m",
-             f"docs(kb): promotion draft — {len(entries)} "
-             f"correction{'s' if len(entries) != 1 else ''} from the "
-             "reconciliation queue")
-        _record_draft(key, drafted_at, branch, base, file_rel,
-                      [knowledge.delta_key(entry) for entry in entries])
+            staged = [file_rel]
+            try:
+                index = kblib.generate_index(root)
+                result["index"] = {"state": ("regenerated" if index["changed"]
+                                             else "unchanged")}
+                if index["changed"]:
+                    staged.append("kb/index.md")
+            except kblib.KbError as exc:
+                # a foreign (hand-authored) index is surfaced, never
+                # clobbered and never a gate — the draft still lands
+                result["index"] = {"state": "skipped", "detail": str(exc)}
+
+            _git(root, "add", "--", *staged)  # the draft (+ index), nothing else
+            _git(root, "commit", "-q", "-m",
+                 f"docs(kb): promotion draft — {len(entries)} "
+                 f"correction{'s' if len(entries) != 1 else ''} from the "
+                 "reconciliation queue")
+        except BaseException:
+            # a failure between the write and the commit must leave the
+            # tree as found — the tree was clean at entry and these writes
+            # were the only changes, so a hard reset plus removing the
+            # untracked draft restores it (the finally below restores the
+            # start branch)
+            drafted_path.unlink(missing_ok=True)
+            _git(root, "reset", "--hard", check=False)
+            raise
+        try:
+            _record_draft(key, drafted_at, branch, base, file_rel,
+                          [knowledge.delta_key(entry) for entry in entries])
+        except OSError as exc:
+            # a locked/unwritable record after a landed commit is a warning,
+            # not a refusal: the motion continues, and the next draft
+            # re-drafts these corrections into a new file on the same PR —
+            # duplicate-over-loss, visible in review
+            result["record_warning"] = ("promotions record append failed: "
+                                        f"{exc}")
 
         pushed = _git(root, "push", "-u", "origin", branch, check=False)
         if pushed.returncode != 0:
             result.update(
                 result_state="committed-local",
                 detail=f"push failed: {pushed.stderr.strip()[:200]} — draft "
-                       f"committed on '{branch}' and recorded; push the "
-                       "branch and open the PR when the remote is reachable")
+                       f"committed on '{branch}' and recorded; rerun the "
+                       "verb when the remote is reachable (a no-op run "
+                       "pushes the waiting branch)")
             return result
         result["result_state"] = "pushed"
 
@@ -423,10 +467,96 @@ def draft(project_root: Path, base: str | None = None, dry_run: bool = False,
         _git(root, "checkout", start_branch, check=False)
 
 
+def _checkout_promotion_branch(root: Path, branch: str, base: str) -> None:
+    """Move to the promotion branch without ever orphaning a recorded
+    draft. A local branch ahead of origin carries a committed-local draft
+    the record already lists — resetting onto origin would strand those
+    corrections forever (the baseline blocks a re-draft), so the local
+    branch wins and the push fast-forwards origin. A genuine divergence is
+    a named refusal, never a silent reset; a fully-merged local leftover
+    (its remote deleted post-merge) restarts from base."""
+    origin_ref = f"origin/{branch}"
+    base_ref = f"origin/{base}" if _ref_exists(root, f"origin/{base}") else base
+    if _ref_exists(root, origin_ref):
+        if _ref_exists(root, branch):
+            ahead = _git(root, "merge-base", "--is-ancestor", origin_ref,
+                         branch, check=False).returncode == 0
+            behind = _git(root, "merge-base", "--is-ancestor", branch,
+                          origin_ref, check=False).returncode == 0
+            if ahead and not behind:
+                _git(root, "checkout", branch)
+                return
+            if not ahead and not behind:
+                raise PromoteBlocked(
+                    "preflight",
+                    f"local branch '{branch}' and '{origin_ref}' have "
+                    "diverged — reconcile them by hand before drafting "
+                    "(neither side is reset silently)")
+        _git(root, "checkout", "-B", branch, origin_ref)
+        return
+    if _ref_exists(root, branch):
+        if _ref_exists(root, base_ref) and _git(
+                root, "merge-base", "--is-ancestor", branch, base_ref,
+                check=False).returncode == 0:
+            # fully merged into base and its remote is gone — restart
+            # fresh; a branch carrying unpushed work never reaches here
+            # (it is not an ancestor of base)
+            _git(root, "checkout", "-B", branch, base_ref)
+        else:
+            _git(root, "checkout", branch)
+        return
+    if not _ref_exists(root, base_ref):
+        raise PromoteBlocked("preflight", f"base branch '{base}' not found")
+    _git(root, "checkout", "-b", branch, base_ref)
+
+
+def _flush_waiting(root: Path, key: str, no_pr: bool) -> dict | None:
+    """Complete an interrupted committed-local draft: with nothing new to
+    draft, a promotion branch still ahead of origin is pushed and its PR
+    opened or recognized — re-running the verb finishes the motion instead
+    of stranding it behind a no-op. Returns None when nothing is waiting.
+    Push-only: no checkout, no tree requirements."""
+    if _git(root, "rev-parse", "--is-inside-work-tree",
+            check=False).stdout.strip() != "true":
+        return None
+    branch = branch_name()
+    if not _ref_exists(root, branch):
+        return None
+    base = _default_base(root)
+    base_ref = f"origin/{base}" if _ref_exists(root, f"origin/{base}") else base
+    if _ref_exists(root, base_ref) and _git(
+            root, "merge-base", "--is-ancestor", branch, base_ref,
+            check=False).returncode == 0:
+        return None  # fully merged leftover — nothing waiting
+    origin_ref = f"origin/{branch}"
+    if _ref_exists(root, origin_ref):
+        same = (_git(root, "rev-parse", branch).stdout.strip()
+                == _git(root, "rev-parse", origin_ref).stdout.strip())
+        ahead = _git(root, "merge-base", "--is-ancestor", origin_ref, branch,
+                     check=False).returncode == 0
+        if same or not ahead:
+            return None
+    pushed = _git(root, "push", "-u", "origin", branch, check=False)
+    if pushed.returncode != 0:
+        return {"result_state": "committed-local",
+                "detail": "a drafted branch is still waiting and the push "
+                          f"failed again: {pushed.stderr.strip()[:200]}"}
+    flushed: dict = {
+        "result_state": "pushed",
+        "detail": "no new corrections; pushed the waiting draft branch"}
+    if no_pr:
+        flushed["pr"] = {"state": "skipped", "detail": "--no-pr"}
+    else:
+        flushed["pr"] = _pr_step(root, branch, base, key, None)
+    return flushed
+
+
 def _pr_step(directory: Path, branch: str, base: str, key: str,
-             count: int) -> dict:
+             count: int | None) -> dict:
     """Open the membrane PR — or recognize the open one the draft just
-    updated. Never merges; review is the gate (D3, AD-12)."""
+    updated. Never merges; review is the gate (D3, AD-12). count is None
+    when flushing a waiting branch (the correction count rode the
+    interrupted draft's result, not this one)."""
     listing = _gh(directory, "pr", "list", "--head", branch, "--state",
                   "open", "--json", "number,url")
     if listing.returncode == 0:
@@ -438,9 +568,11 @@ def _pr_step(directory: Path, branch: str, base: str, key: str,
             return {"state": "updated-existing",
                     "number": open_prs[0].get("number"),
                     "url": open_prs[0].get("url")}
+    drafted = (f"{count} correction(s) drafted" if count is not None
+               else "Correction draft(s) pushed")
     body = (
         f"## Knowledge promotion draft: `{key}`\n\n"
-        f"{count} correction(s) drafted from the reconciliation queue into "
+        f"{drafted} from the reconciliation queue into "
         f"`kb/` — the AD-12 membrane PR. Review is the gate (D3): nothing "
         f"auto-applies, and merging this PR is the one canonical write.\n\n"
         f"- The drafted file is ordinary kb markdown — edit it freely on "

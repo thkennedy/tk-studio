@@ -291,12 +291,18 @@ def validate_knowledge(seed_text: str, deltas: object | None = None) -> dict:
 
 
 def clean_inline(value: object) -> str:
-    """Control and line-separator characters replaced with spaces — the
-    defense-in-depth cleaning every human-facing render applies. Validation
-    refuses these characters on entry (validate_queue_line, _validate_delta);
-    cleaning again at render means a hand-edited line still cannot forge
-    headings or anchors on a decision or canonical surface."""
-    return _CONTROL_RE.sub(" ", str(value))
+    """Control and line-separator characters replaced with spaces, and
+    bracketed anchor ids unbracketed — the defense-in-depth cleaning every
+    human-facing render applies. Validation refuses control characters on
+    entry (validate_queue_line, _validate_delta); cleaning again at render
+    means a hand-edited line still cannot forge headings on a decision or
+    canonical surface. The anchor unbracketing keeps the other half of that
+    claim true: an interpolated value carrying `[SPINE-A99]` must never
+    *define* an anchor on a rendered surface (extract_anchors reads the
+    bracketed form) — the bare id survives as readable provenance, and
+    renderers that mean to show a bracketed anchor add the brackets in
+    their own template (adversarial-review finding, ST-9.5)."""
+    return ANCHOR_RE.sub(r"\1", _CONTROL_RE.sub(" ", str(value)))
 
 
 # ------------------------------------------- queue lines + routing (ST-9.4)

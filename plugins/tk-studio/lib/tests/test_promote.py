@@ -280,6 +280,116 @@ class PromoteTestCase(unittest.TestCase):
         self.assertIn("reconciliation", self._file_on(
             f"origin/{self.branch}", result["file"]))
 
+    # --- recovery: a recorded draft is never orphaned (adversarial review)
+
+    def _break_remote(self) -> None:
+        _git(self.repo, "remote", "set-url", "origin",
+             str(Path(self._tmp.name) / "nowhere.git"))
+
+    def _fix_remote(self) -> None:
+        _git(self.repo, "remote", "set-url", "origin", str(self.origin))
+
+    def test_committed_local_draft_survives_a_later_draft(self):
+        # must-fix: a later draft's branch selection must never reset away
+        # a recorded-but-unpushed draft — the record baseline would block
+        # those corrections from ever re-drafting (silent, permanent loss)
+        self._seed_two_corrections()
+        first = promote.draft(self.repo, no_pr=True)
+
+        self._break_remote()
+        self._queue(_line(anchor="SPINE-A2", tier="spine",
+                          reality="unpushed correction B"))
+        self._route()
+        second = promote.draft(self.repo, no_pr=True)
+        self.assertEqual(second["result_state"], "committed-local")
+
+        self._fix_remote()
+        self._queue(_line(anchor="SPINE-A3", tier="spine",
+                          reality="fresh correction C"))
+        self._route()
+        third = promote.draft(self.repo, no_pr=True)
+        self.assertEqual(third["result_state"], "pushed")
+
+        tip_files = _git(self.repo, "ls-tree", "-r", "--name-only",
+                         f"origin/{self.branch}").stdout
+        for result in (first, second, third):
+            self.assertIn(result["file"], tip_files,
+                          "no draft is ever orphaned")
+        self.assertIn("unpushed correction B",
+                      self._file_on(f"origin/{self.branch}", second["file"]))
+
+    def test_noop_run_pushes_a_waiting_branch(self):
+        # the committed-local recovery is re-running the verb — a no-op run
+        # completes the interrupted push instead of stranding it
+        self._seed_two_corrections()
+        promote.draft(self.repo, no_pr=True)
+        self._break_remote()
+        self._queue(_line(anchor="SPINE-A2", tier="spine",
+                          reality="offline correction"))
+        self._route()
+        stuck = promote.draft(self.repo, no_pr=True)
+        self.assertEqual(stuck["result_state"], "committed-local")
+
+        self._fix_remote()
+        retry = promote.draft(self.repo, no_pr=True)
+        self.assertEqual(retry["result_state"], "pushed")
+        self.assertEqual(retry["corrections"], 0)
+        self.assertIn("waiting", retry["detail"])
+        self.assertIn(stuck["file"],
+                      _git(self.repo, "ls-tree", "-r", "--name-only",
+                           f"origin/{self.branch}").stdout)
+
+    def test_diverged_promotion_branch_refuses_named(self):
+        self._seed_two_corrections()
+        promote.draft(self.repo, no_pr=True)
+        # origin advances (a review edit) while local rewinds and advances
+        # differently — neither side may be reset silently
+        _git(self.repo, "checkout", "-q", self.branch)
+        _git(self.repo, "commit", "--allow-empty", "-q", "-m", "review edit")
+        _git(self.repo, "push", "-q", "origin", self.branch)
+        _git(self.repo, "reset", "--hard", "-q", "HEAD~1")
+        _git(self.repo, "commit", "--allow-empty", "-q", "-m", "local only")
+        _git(self.repo, "checkout", "-q", "main")
+        self._queue(_line(anchor="SPINE-A2", tier="spine", reality="new"))
+        self._route()
+        with self.assertRaises(promote.PromoteBlocked) as caught:
+            promote.draft(self.repo, no_pr=True)
+        self.assertIn("diverged", str(caught.exception))
+
+    def test_merged_branch_with_deleted_remote_restarts_from_base(self):
+        self._seed_two_corrections()
+        first = promote.draft(self.repo, no_pr=True)
+        # merge the promotion PR and delete its branch, as review would
+        _git(self.repo, "checkout", "-q", "main")
+        _git(self.repo, "merge", "-q", "--no-ff", "-m", "merge promotion",
+             self.branch)
+        _git(self.repo, "push", "-q", "origin", "main")
+        _git(self.repo, "push", "-q", "origin", "--delete", self.branch)
+
+        self._queue(_line(anchor="SPINE-A2", tier="spine",
+                          reality="post-merge correction"))
+        self._route()
+        second = promote.draft(self.repo, no_pr=True)
+        self.assertEqual(second["result_state"], "pushed")
+        self.assertEqual(
+            _git(self.repo, "rev-list", "--count", f"origin/{self.branch}",
+                 "^origin/main").stdout.strip(),
+            "1", "the stale local branch restarted fresh off base")
+        tip_files = _git(self.repo, "ls-tree", "-r", "--name-only",
+                         f"origin/{self.branch}").stdout
+        self.assertIn(first["file"], tip_files)  # merged draft rides base
+        self.assertIn(second["file"], tip_files)
+
+    def test_detached_head_refuses_named(self):
+        self._seed_two_corrections()
+        _git(self.repo, "checkout", "-q", "--detach", "HEAD")
+        try:
+            with self.assertRaises(promote.PromoteBlocked) as caught:
+                promote.draft(self.repo, no_pr=True)
+            self.assertIn("detached", str(caught.exception))
+        finally:
+            _git(self.repo, "checkout", "-q", "main")
+
     # --- the promotions record: the exactly-once baseline for 9.6
 
     def test_record_line_matches_the_published_shape(self):
@@ -306,6 +416,28 @@ class PromoteTestCase(unittest.TestCase):
             self.assertEqual(len(key), 4, "delta_key: run provenance excluded")
         parsed = promote.read_record(self.key)
         self.assertEqual(len(parsed["keys"]), 2)
+
+    def test_record_tolerates_malformed_key_entries_without_crashing(self):
+        # a nested list inside keys would make tuple() unhashable — one
+        # corrupt line must report as invalid, never brick the surface
+        self._seed_two_corrections()
+        promote.draft(self.repo, no_pr=True)
+        with open(promote.record_path(self.key), "a", encoding="utf-8",
+                  newline="\n") as handle:
+            handle.write('{"type":"draft","drafted_at":"x","branch":"b",'
+                         '"base":"main","file":"kb/x.md",'
+                         '"keys":[[["nested"],"b","c","d"]]}\n')
+        record = promote.read_record(self.key)
+        self.assertEqual(len(record["drafts"]), 1)
+        self.assertEqual(len(record["invalid"]), 1)
+        self.assertIn("malformed key", record["invalid"][0]["error"])
+        self.assertTrue(promote.check(self.repo)["ok"])
+
+    def test_record_path_as_directory_is_broken_store_state(self):
+        promote.record_path(self.key).mkdir(parents=True)
+        with self.assertRaises(promote.PromoteBlocked) as caught:
+            promote.check(self.repo)
+        self.assertIn("not a file", str(caught.exception))
 
     def test_record_reads_forward_compatibly(self):
         self._seed_two_corrections()
