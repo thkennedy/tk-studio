@@ -5,9 +5,10 @@ description: Studio activation front door — health/drift check proving the BMa
 
 # tk-studio-activate
 
-Activation cross-checks both planes plus the store (AD-13) and reports — it
-never mutates anything. Version skew is caught here, at the front door,
-instead of debugged later as ghosts.
+Activation cross-checks four planes — base, plugin (catalog lockstep and
+harness loadability), store, vault (AD-13) — and reports; it never mutates
+anything. Version skew is caught here, at the front door, instead of
+debugged later as ghosts.
 
 ## Behavior (both modes)
 
@@ -27,7 +28,7 @@ instead of debugged later as ghosts.
    | Plane | Compares | Guided fix on drift |
    | --- | --- | --- |
    | `bmad-base` | installed `_bmad/_config/manifest.yaml` vs `bmad.lock` pins | `tk install` |
-   | `plugin` | installed `plugin.json` vs marketplace catalog `plugins[].version` | `/plugin marketplace update tk-studio` |
+   | `plugin` | installed `plugin.json` vs marketplace catalog `plugins[].version`, plus harness loadability — the harness install record (`installed_plugins.json`) holds the plugin at the repo version (AD-13) | `/plugin marketplace update tk-studio`; if not harness-installed: `claude plugin marketplace add` + `claude plugin install tk-studio` |
    | `store` | `~/.tk-studio` skeleton + config keys | `uv run <plugin>/lib/store.py standup` |
    | `vault` | vault window links for this project (when registered) | `uv run <plugin>/lib/vault.py link --project-id <id>` |
 
