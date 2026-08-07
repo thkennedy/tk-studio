@@ -253,6 +253,28 @@ class ConsolidateTest(unittest.TestCase):
         self.assertEqual(result["skipped_lines"], 1)
         self.assertEqual(len(result["created"]), 1)
 
+    def test_unicode_line_separators_do_not_shear_measurement_lines(self):
+        # ledger.py emits ensure_ascii=False, so U+2028/U+2029/U+0085 sit raw
+        # inside JSON strings; the reader must split on \n only or one event
+        # shears into unparseable fragments (same class as the PR #16 fix
+        # in reconcile.py)
+        detail = "before\u2028middle\u2029after\x85end"
+        event = _env("report", {"description": detail,
+                                "surface": "tk-studio-job"})
+        (self.repo / "measurements" / "alice-m1.jsonl").write_text(
+            json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+            + "\n", encoding="utf-8", newline="")
+
+        events, skipped = consolidate.read_events(self.repo / "measurements")
+
+        self.assertEqual(skipped, 0, "no fragment ever fails to parse")
+        self.assertEqual(len(events), 1, "one written event stays one event")
+        self.assertEqual(events[0]["payload"]["description"], detail)
+
+        result = consolidate.consolidate(self.repo)
+        self.assertEqual(result["skipped_lines"], 0)
+        self.assertEqual([c["id"] for c in result["created"]], ["ISS-001"])
+
 
 if __name__ == "__main__":
     unittest.main()

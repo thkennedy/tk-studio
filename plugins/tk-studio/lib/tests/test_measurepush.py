@@ -75,8 +75,10 @@ class MeasurePushTest(unittest.TestCase):
         return sorted(line for line in out.splitlines() if line)
 
     def _file_on(self, ref: str) -> list[str]:
+        # \n-only split, like the code under test: splitlines() would mask a
+        # U+2028-sheared file by re-shearing it the same way here
         out = _git(self.repo, "show", f"{ref}:{self.path}").stdout
-        return [line for line in out.splitlines() if line.strip()]
+        return [line for line in out.split("\n") if line.strip()]
 
     # --- AC 1: branch, per-machine file, PR — never main, never a merge
 
@@ -111,6 +113,31 @@ class MeasurePushTest(unittest.TestCase):
         self.assertEqual(len(set(lines)), 2, "no duplicated lines")
         descriptions = [json.loads(line)["payload"]["description"] for line in lines]
         self.assertEqual(descriptions, ["first event", "second event"])
+
+    def test_unicode_line_separator_event_pushes_as_one_line(self):
+        # ledger.emit writes ensure_ascii=False, so a U+2028-class character
+        # lands raw in the JSONL; reading it back must not shear the line
+        # (that would corrupt the pushed file and break baseline dedupe —
+        # same class as the PR #16 reconcile.py fix)
+        detail = "sheared\u2028half\u2029more\x85end"
+        self._emit("plain event")
+        self._emit(detail)
+
+        result = measurepush.push(self.repo, no_pr=True)
+
+        self.assertEqual(result["result_state"], "pushed")
+        self.assertEqual(result["new_events"], 2)
+        lines = self._file_on(f"origin/{self.branch}")
+        self.assertEqual(len(lines), 2, "each event is exactly one line")
+        self.assertEqual(
+            [json.loads(line)["payload"]["description"] for line in lines],
+            ["plain event", detail], "the separator round-trips intact")
+
+        # repeat push dedupes against the baseline read back from git —
+        # a sheared baseline would count the same event as unpushed forever
+        again = measurepush.push(self.repo, no_pr=True)
+        self.assertEqual(again["result_state"], "no-op")
+        self.assertEqual(again["new_events"], 0)
 
     def test_only_this_machines_file_is_touched(self):
         other = self.repo / "measurements" / "somebody-else.jsonl"
