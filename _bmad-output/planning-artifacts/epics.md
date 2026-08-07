@@ -6,6 +6,7 @@ inputDocuments:
   - _bmad-output/planning-artifacts/briefs/brief-tk-studio-2026-07-25/addendum.md
   - _bmad-output/planning-artifacts/briefs/brief-tk-studio-2026-07-25/o1-decision-2026-07-26.md
   - _bmad-output/planning-artifacts/architecture/architecture-tk-studio-2026-07-26/ARCHITECTURE-SPINE.md
+  - _bmad-output/planning-artifacts/briefs/planning-pass-research-knowledge-port-2026-08-06.md
 note: No PRD exists by design (A8 process goes brief -> O1 -> architecture -> epics); FRs/NFRs are extracted from the brief + O1 ruling, with the architecture spine (20 ADs, binding) as the technical input. No UX document — agent/CLI product, no UI of its own (brief: dashboards stay ClaudeOS).
 ---
 
@@ -169,6 +170,10 @@ Accumulated telemetry and human reports flow through the PR membrane into consol
 ### Epic 8: Plan Where the Team Plans
 A project rebinds from local planning to Jira through the designed migration with verification, and the same planning flows keep working — promote and status pull-back against Atlassian Cloud, headless-safe.
 **FRs covered:** FR15, FR16
+
+### Epic 9: Research Becomes Knowledge
+The Research→Knowledge Lifecycle port (spine Deferred entry, planning pass 2026-08-06, D1–D5 ruled): research findings anchor to a per-project spine and per-run seeds, corrections ride handoffs as anchored deltas into a per-project reconciliation queue, and a routing doc drives human-gated promotion into `kb/` through the PR membrane — closing the missing findings→kb edge. Ships the deliberate contract 1.7.0 bump (DW-1, DW-3 fold in).
+**Requirements source:** planning-pass-research-knowledge-port-2026-08-06.md (no FR row — post-v1 deferred scope)
 
 ## Epic 1: Install Once, Stay in Lockstep
 
@@ -757,3 +762,117 @@ So that nothing is lost and the local backend remains until I clear it.
 **Given** any verification mismatch
 **When** detected
 **Then** migration halts `blocked` with the discrepancy listed; no partial state reads as migrated (AD-16)
+
+## Epic 9: Research Becomes Knowledge
+
+The Research→Knowledge Lifecycle port per the ruled planning pass (2026-08-06): anchored provisional knowledge in the per-user store, delta capture through handoffs into a per-project reconciliation queue, and human-gated promotion into `kb/` via the PR membrane. (AD-2, AD-3, AD-8, AD-11, AD-12; rulings: D1 A/B/C/D grades + mapping, D2 per-project spine, D3 PR membrane, D4 `knowledge-promotion` event, D5 declared 2026-08-06.) The back half is design-verified but execution-unproven in the source — its definition of done includes the e2e run the source never had. Aid-not-gate: a red or absent spine/seed never blocks a run. Contract pin stays 1.6.0 until story 9.6.
+
+### Story 9.1: Knowledge Core and Schemas
+
+As a developer,
+I want a pure knowledge validator and published schemas for spines, seeds, deltas, and the queue,
+So that every later story builds on one authoritative shape with the source's proven rejection rules.
+
+**Acceptance Criteria:**
+
+**Given** `lib/knowledge.py` (stdlib-only, pure — no fs, no I/O, no globals) and `knowledge.schema.json` in `contracts/`
+**When** a spine or seed artifact is validated
+**Then** the supersede header is enforced verbatim (`status: provisional` + `authority: mission-scoped-supersedes-canonical`), anchor ids match the grammar `SPINE-A<n>` / `SEED-<run-id>-A<n>` (append-only), and tier rules hold
+**And** the A/B/C/D grade vocabulary applies, with the source-vocabulary mapping (Confirmed→A, independent-agreement→B, Deduced→C, Hypothesized→D) documented in the schema doc (D1)
+
+**Given** a delta citing an anchor
+**When** it is parsed
+**Then** the closed shape `{anchor, verdict: WRONG|STALE|CONFIRMED, reality, evidence, tier: run-local|spine}` is enforced, and unanchored or dangling deltas are named rejections — never silently dropped
+
+**Given** the source validator's unit cases (ported from the first driver's `knowledge-schema.ts`)
+**When** the test suite runs
+**Then** every ported case passes against `lib/knowledge.py`
+
+### Story 9.2: Session Surface — Handoffs Carry Deltas
+
+As a driver author,
+I want the session/handoff surface contract-visible with structured deltas,
+So that any harness can invoke handoff/resume and corrections survive session boundaries.
+
+**Acceptance Criteria:**
+
+**Given** the `tk-studio-session` skill (new §2 row at 9.6; surface built here)
+**When** a handoff is written
+**Then** `handoff.json` accepts an optional `deltas[]` (story 9.1 shape), stays within the 16 KB budget (deltas are pointers; list length capped), and one handoff per run overwrites per boundary
+
+**Given** a headless invocation of the session surface
+**When** it runs
+**Then** it completes with the JSON status block and a conformance manifest row drives it (including a refusal drive: dangling-delta rejection)
+
+### Story 9.3: Research Anchors and Seeds
+
+As an operator running chartered research,
+I want findings to cite anchors and runs to carry seeds inheriting the project spine,
+So that research output joins the knowledge lifecycle instead of stranding in the run workspace.
+
+**Acceptance Criteria:**
+
+**Given** `lib/research.py` findings
+**When** a finding is recorded
+**Then** the finding shape gains an optional `anchor` citation, and run workspaces gain `seed.md` (with `inherits:` spine anchors) — blocked conditions unchanged
+
+**Given** a project without a spine
+**When** a research run executes
+**Then** the run proceeds (aid, not gate) and the missing spine is reported, with the spine authored as a chartered research-run flavor at project scope (`knowledge/spine.md` in the per-user store — D2)
+
+### Story 9.4: Capture, Queue, and Routing
+
+As an operator,
+I want run-finish delta capture into a per-project queue with a rendered routing doc,
+So that corrections accumulate durably off-VCS and a human can see what wants promotion.
+
+**Acceptance Criteria:**
+
+**Given** a run finishing with deltas in its handoff
+**When** the capture hook runs (riding the executing wrapper's finish)
+**Then** deltas append to `~/.tk-studio/projects/<key>/knowledge/reconciliation-queue.jsonl`, deduped on `(run_id, anchor, verdict, note)` — per-user store only, never project VCS (AD-3)
+
+**Given** a populated queue
+**When** the routing renderer runs
+**Then** a routing doc renders beside the queue — pure renderer, applies nothing
+
+**Given** a sandbox project
+**When** the e2e drive runs (the run the source never had)
+**Then** a run emits deltas → the queue materializes → the routing doc renders, asserted end to end
+
+### Story 9.5: Promotion Gate — PR Membrane
+
+As an operator,
+I want promotions drafted from the routing doc into `kb/` on a branch with PR review as the gate,
+So that only a human writes canonical knowledge (D3), through the studio's proven membrane (AD-12).
+
+**Acceptance Criteria:**
+
+**Given** the `tk-studio-knowledge` skill's promote-draft verb and a rendered routing doc
+**When** promotion drafting runs
+**Then** drafted `kb/` changes land on a feature branch as ordinary kb files (no new frontmatter keys; `scope:` stays reserved — AD-8) and a PR opens; nothing auto-applies
+
+**Given** a promotion attempt without a routing doc
+**When** the verb runs
+**Then** it refuses as a named rejection (conformance refusal drive)
+
+**Given** a merged promotion PR
+**When** the event is emitted
+**Then** exactly one `knowledge-promotion` taxonomy event lands in the ledger, sole emitter the promotion skill (D4), taxonomy extended in the same 1.7.0 bump
+
+### Story 9.6: Contract 1.7.0 and the Driver Wiring
+
+As a harness author,
+I want the port's surfaces published in a deliberate MINOR contract bump with the connector driving them,
+So that drivers consume the lifecycle through the contract alone (AD-2) and standing deferrals close.
+
+**Acceptance Criteria:**
+
+**Given** driver-contract.md at 1.6.0
+**When** the bump lands
+**Then** 1.7.0 adds §2 rows for `tk-studio-session` and `tk-studio-knowledge`, the changed `tk-studio-research` row (anchor, seed.md), the §4 run-finish capture note, the KB-injection directive (spine/seed paths named so any driver can inject them — the act stays driver-side), and folds in DW-1 (§4 submit wording) and DW-3 (§6/§8 wording)
+**And** `test_driver_contract.py` pins 1.7.0 and new conformance manifest rows cover both new surfaces plus the session-discipline row
+
+**Given** the ClaudeOS connector
+**When** its pin bumps to 1.7.0
+**Then** `studio-jobs-tick`/`tk_invoke` honor the injection directive, connector tests stay green, and the through-connector conformance suite passes at the new check count (connector milestone)
