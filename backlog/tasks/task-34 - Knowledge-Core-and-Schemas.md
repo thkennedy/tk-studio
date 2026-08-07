@@ -1,9 +1,10 @@
 ---
 id: TASK-34
 title: Knowledge Core and Schemas
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-07 04:34'
+updated_date: '2026-08-07 04:40'
 labels:
   - ST-034
 milestone: Research Becomes Knowledge
