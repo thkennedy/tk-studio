@@ -117,7 +117,11 @@ def read_events(measurements: Path) -> tuple[list[dict], int]:
     events: list[dict] = []
     skipped = 0
     for path in sorted(measurements.glob("*.jsonl")):
-        for line in path.read_text(encoding="utf-8").splitlines():
+        # split on \n ONLY — never splitlines(), which also splits on
+        # U+2028/U+2029/U+0085; ledger.py emits ensure_ascii=False, so those
+        # can sit raw inside a JSON string and would shear the line into
+        # unparseable fragments (json.loads tolerates a trailing \r)
+        for line in path.read_text(encoding="utf-8").split("\n"):
             if not line.strip():
                 continue
             try:
