@@ -32,7 +32,7 @@
     }
   },
   "queue_line": {
-    "note": "one JSON object per line in the per-project reconciliation queue ~/.tk-studio/projects/<key>/knowledge/reconciliation-queue.jsonl (capture story ST-9.4; per-user store only, never project VCS). Dedupe key: (run_id, anchor, verdict, reality).",
+    "note": "one JSON object per line in the per-project reconciliation queue ~/.tk-studio/projects/<key>/knowledge/reconciliation-queue.jsonl (shipped ST-9.4; per-user store only, never project VCS). Dedupe key: (run_id, anchor, verdict, reality, tier) - captured_at and evidence deliberately outside it (re-observing the same correction later or elsewhere is the same correction); tier deliberately inside it (tier names which artifact the correction targets - escalating a run-local correction to spine tier is a distinct routing event, not a duplicate). reality/evidence are single-line pointers: control and line-separator characters refuse at validation (the queue is line-oriented JSONL; the routing doc renders these strings). Capture (lib/reconcile.py) rides two idempotent hooks: each delta-carrying boundary handoff (a later boundary overwrites handoff.json, so corrections go durable at the boundary) and the executing wrapper's every terminal transition (finish/cancel/core close). The queue is append-only - a bad line is reported, never dropped or repaired; duplicate identical deltas within one handoff refuse at the session surface (same anchor+verdict+reality+tier - one correction, stated once).",
     "required": ["run_id", "captured_at", "anchor", "verdict", "reality", "evidence", "tier"],
     "fields": {
       "run_id": { "type": "string", "note": "the run whose handoff carried the delta" },
@@ -52,6 +52,9 @@
       "Deduced": "C",
       "Hypothesized": "D"
     }
+  },
+  "routing": {
+    "note": "the routing doc renders beside the queue as reconciliation-routing.md (shipped ST-9.4; reconcile.py route) - a pure render (knowledge.render_routing) of the queue that APPLIES NOTHING (D3: only a human writes canonical). Deduped on the queue key; spine-tier corrections lead (they challenge the project spine every future seed inherits), run-local follow; WRONG before STALE before CONFIRMED inside each tier; invalid queue lines surface in their own section, never silently dropped. An absent or empty queue answers rendered=false - an answer, not an error."
   },
   "promotion": {
     "note": "promotion is drafted from the rendered routing doc into ordinary kb/ files on a branch; PR review is the human gate (D3) - nothing auto-applies, only a human writes canonical. kb frontmatter gains nothing; scope: stays reserved and unread (AD-8). Emits exactly one knowledge-promotion taxonomy event, sole emitter the promotion skill (D4) - taxonomy row lands with contract 1.7.0 (ST-9.5/9.6)."

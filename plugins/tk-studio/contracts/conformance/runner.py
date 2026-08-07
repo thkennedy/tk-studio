@@ -186,6 +186,23 @@ def _run_drive(surface: str, drive: dict, sandbox: Path, store: Path,
             check["detail"] = f"stdout is not JSON (exit {proc.returncode})"
         else:
             check["ok"] = True
+    elif expect == "ok":
+        # json with teeth: the drive's own assertions must all have held
+        # (ok=true in the parsed output) — used by e2e drives whose value
+        # is the chain succeeding, not merely answering
+        if parsed is None:
+            check["detail"] = f"stdout is not JSON (exit {proc.returncode})"
+        elif not (isinstance(parsed, dict) and parsed.get("ok") is True):
+            failed = ""
+            if isinstance(parsed, dict):
+                failed = (parsed.get("error")
+                          or "; ".join(f"{s.get('step')}: {s.get('detail')}"
+                                       for s in parsed.get("steps", [])
+                                       if not s.get("ok")))
+            check["detail"] = (f"drive assertions failed (exit "
+                              f"{proc.returncode}): {failed or 'ok!=true'}")
+        else:
+            check["ok"] = True
     elif expect == "refusal":
         marker = drive.get("marker") or None  # empty marker declares nothing
         # A refusal is either out-of-band (nonzero exit / JSON ok=false) or
