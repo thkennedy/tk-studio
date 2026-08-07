@@ -16,7 +16,7 @@ ordinary kb/ files through a PR (ST-9.5, D3).
 
   capture   read a run workspace's handoff.json and append its deltas[] to
             the queue as knowledge.schema.json queue lines, deduped on
-            (run_id, anchor, verdict, reality). The queue is append-only:
+            (run_id, anchor, verdict, reality, tier). Append-only:
             capture never rewrites a line, and a pre-existing unparseable
             line is reported, never dropped or repaired. Idempotent by the
             dedupe key, so it safely rides every hook: the executing
@@ -117,12 +117,20 @@ def read_queue(key: str) -> dict:
     path = queue_path(key)
     result: dict = {"path": str(path), "lines": [], "invalid": []}
     if not path.is_file():
+        if path.exists():
+            # a directory (or other non-file) at the queue path is broken
+            # store state, never "empty"
+            raise ReconcileError(f"{QUEUE_NAME} path exists but is not a "
+                                 f"file: {path}")
         return result
     try:
         raw = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise ReconcileError(f"{QUEUE_NAME} unreadable: {exc}") from exc
-    for number, text in enumerate(raw.splitlines(), start=1):
+    # split on \n ONLY — never splitlines(), which also splits on
+    # U+2028/U+2029/U+0085 and would shear a JSON line carrying them into
+    # unparseable fragments (json.loads tolerates a trailing \r)
+    for number, text in enumerate(raw.split("\n"), start=1):
         if not text.strip():
             continue
         try:
@@ -146,7 +154,13 @@ def capture(key: str, run_id: str) -> dict:
     Works on any run that has a workspace — resumable (a boundary capture)
     or terminal (the wrapper's finish hook): corrections stay true whatever
     the run's outcome. No handoff, or a handoff without deltas, captures
-    zero — an answer, never an error (aid, not gate)."""
+    zero — an answer, never an error (aid, not gate).
+
+    Concurrency: the locked append guarantees lines never interleave or
+    tear; dedupe is best-effort (the existing-key read happens before the
+    lock), so two simultaneous captures of the same key can both land — the
+    renderer dedupes again, so duplicates are cosmetic, never routed
+    twice."""
     joblib.read_run(key, run_id)  # unknown run refuses named, via joblib
     handoff_path = joblib.workspace_path(key, run_id) / HANDOFF_NAME
     result: dict = {"run_id": run_id, "queue": str(queue_path(key)),
@@ -182,8 +196,10 @@ def capture(key: str, run_id: str) -> dict:
         }
         problems = knowledge.validate_queue_line(line)
         if problems:
-            # a hand-edited handoff.json is the only way here — the session
-            # surface validated deltas at write time (named, never silent)
+            # unreachable through the shipped landing path (the session
+            # surface validates deltas at write time), but a hand-edited
+            # handoff.json — or a seed whose hand-placed `inherits` carries
+            # a non-grammar entry — refuses named here, never silent
             result["rejected"].append({"delta": index,
                                        "error": "; ".join(problems)})
             continue
@@ -254,7 +270,11 @@ def main(argv: list[str] | None = None) -> int:
             result = capture_run(Path(args.directory), args.run_id)
         else:
             result = route_project(Path(args.directory))
-    except (ReconcileError, joblib.JobError) as exc:
+    except (ReconcileError, joblib.JobError, OSError,
+            UnicodeDecodeError) as exc:
+        # OSError: an unwritable/locked queue (read-only store, AV hold,
+        # >10s Windows lock contention) refuses named, never a traceback
+        # (AD-11).
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
         return 2
     print(json.dumps({"ok": True, **result}, ensure_ascii=False, indent=2))

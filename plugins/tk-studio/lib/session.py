@@ -42,7 +42,7 @@ handoff.json is overwritten per boundary: without it, a mid-run boundary's
 corrections would vanish when the next boundary lands. The wrapper's finish
 captures again at run close; the queue's dedupe key makes both hooks
 idempotent. Duplicate identical deltas within one handoff (same anchor,
-verdict, reality — the 9.2 review's deferred finding) are a named
+verdict, reality, tier — the 9.2 review's deferred finding) are a named
 rejection: one correction, stated once.
 
 Run selection: both verbs take exactly one of --run-id or --job-id. A driver
@@ -165,10 +165,10 @@ def _validated_deltas(deltas, workspace: Path) -> list[dict]:
         if key in seen:
             raise SessionError(
                 f"deltas[{seen[key]}] and deltas[{index}] are the same "
-                f"correction (anchor '{key[0]}', same verdict and reality) "
-                "— one correction, stated once (the queue dedupes on "
-                "(run_id, anchor, verdict, reality); an identical repeat "
-                "adds nothing)")
+                f"correction (anchor '{key[0]}', same verdict, reality, "
+                "and tier) — one correction, stated once (the queue "
+                "dedupes on (run_id, anchor, verdict, reality, tier); an "
+                "identical repeat adds nothing)")
         seen[key] = index
     seed_path = workspace / SEED_NAME
     seed_text = ""

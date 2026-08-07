@@ -3,7 +3,8 @@ criteria, Epic 9).
 
 AC 1: a run finishing with deltas in its handoff appends them to the
 per-project reconciliation queue in the per-user store, deduped on
-(run_id, anchor, verdict, reality) — riding the executing wrapper's finish
+(run_id, anchor, verdict, reality, tier) — riding the executing wrapper's
+finish
 (and every other terminal transition), plus each boundary handoff so an
 overwritten handoff never loses corrections.
 
@@ -152,6 +153,59 @@ class ReconcileTestCase(unittest.TestCase):
         result = reconcile.capture("proj", run_id)
         self.assertEqual(result["captured"], 1)
         self.assertEqual(len(self._queue_lines()), 2)
+
+    def test_tier_escalation_is_a_distinct_routing_event(self):
+        # a correction first captured run-local, later escalated to spine
+        # tier, must land again — tier is inside the dedupe key (PR #16
+        # review finding: the swallow would hide it from the spine section
+        # of the routing doc forever)
+        run_id = self._open_run()
+        self._write_handoff(run_id, [self._delta(run_id, anchor="SPINE-A1",
+                                                 tier="run-local")])
+        reconcile.capture("proj", run_id)
+        self._write_handoff(run_id, [self._delta(run_id, anchor="SPINE-A1",
+                                                 tier="spine")])
+        result = reconcile.capture("proj", run_id)
+        self.assertEqual(result["captured"], 1)
+        self.assertEqual({line["tier"] for line in self._queue_lines()},
+                         {"run-local", "spine"})
+
+    def test_unicode_line_separators_cannot_shear_or_grow_the_queue(self):
+        # the PR #16 must-fix pair: (a) new deltas carrying U+2028-class
+        # characters refuse at the session/queue-line layer; (b) a
+        # hand-edited queue line carrying one stays ONE line to the reader
+        # (\n-only split), surfaces as invalid, and repeated captures never
+        # grow the queue
+        run_id = self._open_run()
+        self._write_seed(run_id)
+        with self.assertRaises(session.SessionError) as ctx:
+            session.write_handoff(
+                self.root, run_id, "phase", "sep", ["d"], ["n"],
+                deltas=[self._delta(run_id, reality="a\u2028b")])
+        self.assertIn("control or line-separator", str(ctx.exception))
+        # hand-edit a line-separator-carrying line into the queue
+        path = reconcile.queue_path("proj")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        hostile = json.dumps({
+            "run_id": run_id, "captured_at": "2026-08-07T05:00:00Z",
+            "anchor": f"SEED-{run_id}-A1", "verdict": "WRONG",
+            "reality": "sheared\u2028half", "evidence": "x.py:1",
+            "tier": "run-local"}, ensure_ascii=False)
+        path.write_text(hostile + "\n", encoding="utf-8", newline="")
+        queue = reconcile.read_queue("proj")
+        self.assertEqual(queue["lines"], [])
+        self.assertEqual([i["line"] for i in queue["invalid"]], [1])
+        self.assertIn("control or line-separator",
+                      queue["invalid"][0]["error"])
+        # captures against this queue stay bounded: a fresh valid delta
+        # lands once, then dedupes; the hostile line is reported, untouched
+        self._write_handoff(run_id, [self._delta(run_id)])
+        self.assertEqual(reconcile.capture("proj", run_id)["captured"], 1)
+        again = reconcile.capture("proj", run_id)
+        self.assertEqual((again["captured"], again["duplicates"]), (0, 1))
+        raw = path.read_text(encoding="utf-8")
+        self.assertTrue(raw.startswith(hostile))
+        self.assertEqual(raw.count("\n"), 2)
 
     def test_capture_without_handoff_or_deltas_answers_zero(self):
         run_id = self._open_run()

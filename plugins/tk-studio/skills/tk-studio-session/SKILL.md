@@ -31,7 +31,7 @@ ends the *run*.
    `{anchor, verdict: WRONG|STALE|CONFIRMED, reality, evidence, tier:
    run-local|spine}` — validated by `lib/knowledge.py` against the run
    workspace's `seed.md` (anchors defined + inherited). Unanchored,
-   dangling, and duplicate deltas (same anchor + verdict + reality twice in
+   dangling, and duplicate deltas (same anchor + verdict + reality + tier in
    one handoff — one correction, stated once) are **named rejections, never
    silently dropped**; a workspace with no seed has no anchors, so any
    delta against it dangles.
