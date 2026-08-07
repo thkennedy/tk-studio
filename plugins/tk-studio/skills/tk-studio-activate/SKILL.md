@@ -49,6 +49,8 @@ instead of debugged later as ghosts.
      {"status": "complete", "intent": "tk-studio-activate", "artifacts": [], "reason": "drift: bmad-base — tea pinned v1.19.1, installed v1.20.0"}
      ```
 
+If the deterministic core is unrunnable — a tool call denied by permissions, `uv`/python unavailable — end `blocked` with the status block naming the unrunnable core as `reason`: never a question, never a headless run that ends without the block (AD-11).
+
 ## Rules
 
 - Read-only, always (AD-13). If a fix is needed, name it; never run it from

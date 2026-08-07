@@ -49,6 +49,8 @@ stays with you and the reviewer.
    {"status": "complete", "intent": "tk-studio-consolidate", "artifacts": ["issues/ledger.md"], "reason": null}
    ```
 
+If the deterministic core is unrunnable — a tool call denied by permissions, `uv`/python unavailable — end `blocked` with the status block naming the unrunnable core as `reason`: never a question, never a headless run that ends without the block (AD-11).
+
 ## Rules
 
 - Rows update in place, never delete (dps discipline); ids are stable and

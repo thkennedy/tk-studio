@@ -71,6 +71,8 @@ Run each step through the plugin root; all are idempotent.
   {"status": "complete", "intent": "tk-studio-onboard", "artifacts": [".tk-studio/config.yaml"], "reason": null}
   ```
 
+If the deterministic core is unrunnable — a tool call denied by permissions, `uv`/python unavailable — end `blocked` with the status block naming the unrunnable core as `reason`: never a question, never a headless run that ends without the block (AD-11).
+
 ## Rules
 
 - Recording is the only write to `working_set` and happens only on explicit
