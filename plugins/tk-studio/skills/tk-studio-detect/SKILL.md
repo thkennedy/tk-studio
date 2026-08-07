@@ -63,11 +63,15 @@ for the recommendation step — detect never acts on them.
   modules and user-authored resources by name (those are the recommendation
   candidates), and surface every `notes` entry.
 - **Headless:** no prompts (AD-11). End with the status block — `complete`
-  on exit 0, `blocked` on exit 2 (bad project root / unreadable registry)
-  with the error as `reason`:
+  only on exit 0 **with a decided outcome** (`confident`); an `ask` outcome
+  (`ambiguous`/`unknown` — the core exits 0, the ask is in-band) is a
+  refusal to guess and ends `blocked` with the ask named in `reason`
+  (contract §1: ambiguity ends the run blocked, never a downgrade to
+  complete — ISS-002 posture); `blocked` on exit 2 (bad project root /
+  unreadable registry) with the error as `reason`:
 
   ```json
-  {"status": "complete", "intent": "tk-studio-detect", "artifacts": [], "reason": null}
+  {"status": "blocked", "intent": "tk-studio-detect", "artifacts": [], "reason": "unknown — ask: nothing scored past the floor; candidates ranked in the scan output"}
   ```
 
 If the deterministic core is unrunnable — a tool call denied by permissions, `uv`/python unavailable — end `blocked` with the status block naming the unrunnable core as `reason`: never a question, never a headless run that ends without the block (AD-11).
