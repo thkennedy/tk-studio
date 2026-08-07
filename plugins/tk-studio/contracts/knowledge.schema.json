@@ -17,7 +17,8 @@
   },
   "anchors": {
     "pattern": "\\[((?:SPINE|SEED)(?:-[A-Za-z0-9]+)*-A\\d+)\\]",
-    "note": "anchor ids are the join (immutable, append-only, never renumbered): SPINE-A<n> on the spine, SEED-<run-id>-A<n> on seeds. Deltas cite identity, not location, so corrections survive every edit. At least one anchor per artifact; duplicates reject; tier prefix must match the artifact tier (seeds may also cite inherited SPINE- ids)."
+    "note": "anchor ids are the join (immutable, append-only, never renumbered): SPINE-A<n> on the spine, SEED-<run-id>-A<n> on seeds. Deltas cite identity, not location, so corrections survive every edit. At least one anchor per artifact; duplicates reject; tier prefix must match the artifact tier (seeds may also cite inherited SPINE- ids).",
+    "citations": "the bare-id form (no brackets) is what citations carry: handoff deltas (anchor field) and research findings (optional anchor field, ST-9.3 — validated at record time against the run seed's available set, defined + inherited; dangling citations are named rejections). Artifacts land through research.py seed|spine only: the seed verb enforces run identity (run_id, spine_ref, SEED-<run-id>- anchor middles) and verifies inherits against the spine when one exists (missing spine reported, never a gate); both verbs enforce append-only anchors on re-emission."
   },
   "delta": {
     "note": "the closed correction shape. Deltas ride handoff.json as structured objects (deltas[] - session surface, shipped ST-9.2, validated against the run workspace's seed.md); unanchored and dangling deltas are named rejections, never silently dropped. Budget ruling (ST-9.2): the 16 KB handoff budget does not grow - deltas share it and the list is capped at 16 per handoff (lib/session.py MAX_HANDOFF_DELTAS).",

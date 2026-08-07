@@ -56,6 +56,15 @@ _DELTA_KEYS = ("anchor", "verdict", "reality", "evidence", "tier")
 #   [SPINE-A1]  [SEED-r-20260807-abc123-A2]
 ANCHOR_RE = re.compile(r"\[((?:SPINE|SEED)(?:-[A-Za-z0-9]+)*-A\d+)\]")
 
+# The same grammar as a bare id (no brackets) — what deltas and finding
+# citations carry (ST-9.3: research findings gain an optional `anchor`).
+ANCHOR_ID_RE = re.compile(r"(?:SPINE|SEED)(?:-[A-Za-z0-9]+)*-A\d+\Z")
+
+
+def is_anchor_id(value: object) -> bool:
+    """True when value is a bare anchor id (the citation form)."""
+    return isinstance(value, str) and bool(ANCHOR_ID_RE.match(value))
+
 # ISO-8601 date or datetime (date-only, or time + optional offset/Z).
 _ISO_8601_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}"

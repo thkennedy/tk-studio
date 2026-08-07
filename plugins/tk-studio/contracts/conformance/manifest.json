@@ -175,6 +175,13 @@
           "assertion": "blocked-on-ambiguity",
           "argv": ["lib/research.py", "charter", "--charter", "{}"],
           "expect": "refusal"
+        },
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/research.py", "seed", "--directory", "{sandbox}", "--run-id", "ghost-run", "--text", "no frontmatter at all"],
+          "expect": "refusal",
+          "marker": "frontmatter",
+          "note": "the ST-9.3 seed surface: an invalid artifact refuses named before any run or store read (a knowledge.schema.json-shaped seed against a real run is exercised by the lib suite; intrinsic invalidity is the driver-visible posture)"
         }
       ]
     },
