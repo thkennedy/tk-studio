@@ -68,11 +68,11 @@ Requirements as captured:
 
 **LEAVE (tk-specific, future overlay):** the 11 personas and their lore; Perforce stream skills (`tk-stream-*`); changelog/newsletter skills; UE/Jenkins specialist content; canonical/ue garden.
 
-## A4. Relationship to legacy-council (context)
+## A4. Relationship to the legacy council (context)
 
-- tk-studio (working title "legacy-council" in earlier documents) is **not** an import or restructuring of legacy-council; it is a new, generalized personal system harvesting legacy-council's proven concepts.
-- The legacy-council packaging debate (eval doc `eval-legacy-council-packaging-2026-07-25.md` §4) is **superseded** by this direction; that eval's inventory and debts sections still stand for the legacy-council repo itself.
-- Long-term, legacy-council re-bases as a thin game-company overlay on tk-studio.
+- tk-studio (working title "legacy-council" in earlier documents) is **not** an import or restructuring of the legacy council; it is a new, generalized personal system harvesting the legacy council's proven concepts.
+- The legacy-council packaging debate (eval doc `eval-legacy-council-packaging-2026-07-25.md` §4) is **superseded** by this direction; that eval's inventory and debts sections still stand for the legacy council repo itself.
+- Long-term, the legacy council re-bases as a thin game-company overlay on tk-studio.
 - Inventory (2026-07-25) headline: plugin v0.7.1, 1,543 files — 17 tk-* skills (11 persona + 6 workflow), 71 bmad-* + 33 gds-* vendored skills, 11 agent wrappers, 5 domain profiles + detect/onboard scripts. It also **reconfirmed the eval's urgent flag**: `shared-memory/` contains a token leak — scrub before any harvest or publication. Per-user store code remains stranded on the unmerged branch (`lib/` holds stale bytecode only).
 - Operational note: no live legacy-council checkout exists on this machine — the inventory's source of record is `D:\ClaudeOS\legacy-council.rar` (repo `main` @ d26a67f); the real working copy lives on another machine (Perforce workspace). Plan harvest work accordingly.
 
@@ -131,7 +131,7 @@ Related question O8 also settles: where job definitions live in the Taxonomy (li
 - The Recommendation engine suggests tooling for the configured VCS — chiefly MCP servers.
 - The tk-studio repo itself and base distribution remain git regardless of project VCS.
 - Naming guard (resolved 2026-07-25): pillar ids dropped in favor of named pillars — **Lockstep, Taxonomy, Recommendation, Operations** — after "P4" was misread as Perforce during review. Write "Perforce" in full everywhere regardless.
-- Product naming (settled 2026-07-25): **tk-studio**, with `tk-studio-*` as the agent/skill prefix; "council" survives as the interaction mechanism (convene the council — see O5 persona shell). All references to "legacy-council" in earlier-dated documents (the seed, the legacy-council eval) are the working title of this same product.
+- Product naming (settled 2026-07-25): **tk-studio**, with `tk-studio-*` as the agent/skill prefix; "council" survives as the interaction mechanism (convene the council — see O5 persona shell). References to "legacy-council" in the seed are the working title of this same product; the pre-rename company's council system appears there as "the legacy council" (name scrub, 2026-08-06). The legacy-council eval predates the product and its "legacy-council" names the legacy repo throughout — see the naming note at its top.
 
 **Layer stack (Tim's ruling, 2026-07-25 — confirmed):**
 - Four layers: **BMad** (agent/skill/tooling base) → **tk-studio** (smart coordinator expanding BMad) → **ClaudeOS MCP connector** (studio ↔ ClaudeOS interface) → **ClaudeOS** (project-level surface: multi-project interactions + development UI).
