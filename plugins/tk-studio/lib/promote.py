@@ -46,7 +46,7 @@ routing doc/promotions record) stays in the per-user store (AD-3); the
 drafted kb file is the one thing that crosses, through the PR.
 
 Measurement (D4): the `knowledge-promotion` taxonomy event — sole emitter
-this skill, through the emit verb alone — landed with contract 1.7.0
+this skill, through the emit verb alone — landed with contract 0.1.7
 (ST-9.6) together with its taxonomy row (lib/ledger.py refuses un-rowed
 event types by construction, so emission could not precede the row). A
 draft still emits nothing (drafting is a mover, AD-12); the promotions

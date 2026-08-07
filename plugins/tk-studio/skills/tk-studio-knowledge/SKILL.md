@@ -97,7 +97,7 @@ If the deterministic core is unrunnable — a tool call denied by permissions, `
   flagged correction, re-draft; never hand-edit the finding away on the
   branch (NFR5).
 - Measurement (D4): the `knowledge-promotion` event — sole emitter this
-  skill, through the `emit` verb alone (contract 1.7.0, ST-9.6). A draft
+  skill, through the `emit` verb alone (contract 0.1.7, ST-9.6). A draft
   emits nothing (a mover, AD-12); the promotions record is the
   exactly-once baseline emit reconciles against — one merged promotion
   PR, one event, never a duplicate.
