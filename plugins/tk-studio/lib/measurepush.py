@@ -70,7 +70,10 @@ def ledger_lines() -> list[str]:
     path = ledger.ledger_path()
     if not path.is_file():
         return []
-    return [line for line in path.read_text(encoding="utf-8").splitlines()
+    # split on \n ONLY — splitlines() also splits on U+2028/U+2029/U+0085,
+    # which ledger.py's ensure_ascii=False emission leaves raw inside JSON
+    # strings; shearing here would corrupt the pushed file and the dedupe
+    return [line for line in path.read_text(encoding="utf-8").split("\n")
             if line.strip()]
 
 
@@ -104,7 +107,9 @@ def _file_at_ref(directory: Path, ref: str, path: str) -> list[str]:
     proc = _git(directory, "show", f"{ref}:{path}", check=False)
     if proc.returncode != 0:
         return []
-    return [line for line in proc.stdout.splitlines() if line.strip()]
+    # \n-only split, same policy as ledger_lines(): baseline lines must stay
+    # byte-identical to what was pushed or the dedupe misfires
+    return [line for line in proc.stdout.split("\n") if line.strip()]
 
 
 def _is_studio_repo(directory: Path) -> bool:
