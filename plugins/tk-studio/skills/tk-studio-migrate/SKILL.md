@@ -62,6 +62,8 @@ shortcut around them.
    {"status": "complete", "intent": "tk-studio-migrate", "artifacts": [".tk-studio/migrations/jira.json"], "reason": null}
    ```
 
+If the deterministic core is unrunnable — a tool call denied by permissions, `uv`/python unavailable — end `blocked` with the status block naming the unrunnable core as `reason`: never a question, never a headless run that ends without the block (AD-11).
+
 ## Rules
 
 - No-delete-before-clearance and the closed inventory are absolute (AD-16);

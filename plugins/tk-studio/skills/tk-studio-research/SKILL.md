@@ -55,6 +55,8 @@ no evidence grade, no finding.
    {"status": "complete", "intent": "tk-studio-research", "artifacts": ["findings.json", "findings.md"], "reason": null}
    ```
 
+If the deterministic core is unrunnable — a tool call denied by permissions, `uv`/python unavailable — end `blocked` with the status block naming the unrunnable core as `reason`: never a question, never a headless run that ends without the block (AD-11).
+
 ## Rules
 
 - Observe and log is the boundary (AD-8): findings and observations only —

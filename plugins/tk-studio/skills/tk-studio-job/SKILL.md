@@ -65,6 +65,8 @@ lives in resumable run workspaces under the per-user store.
    {"status": "complete", "intent": "tk-studio-job", "artifacts": ["~/.tk-studio/projects/<key>/runs/<run-id>/"], "reason": null}
    ```
 
+If the deterministic core is unrunnable — a tool call denied by permissions, `uv`/python unavailable — end `blocked` with the status block naming the unrunnable core as `reason`: never a question, never a headless run that ends without the block (AD-11).
+
 ## Rules
 
 - The job model is data; never invent, widen, or hot-patch a definition —

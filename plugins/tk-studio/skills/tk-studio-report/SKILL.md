@@ -33,6 +33,8 @@ status block:
 {"status": "complete", "intent": "tk-studio-report", "artifacts": ["~/.tk-studio/measurements/<user>-<machine>.jsonl"], "reason": null}
 ```
 
+If the deterministic core is unrunnable — a tool call denied by permissions, `uv`/python unavailable — end `blocked` with the status block naming the unrunnable core as `reason`: never a question, never a headless run that ends without the block (AD-11).
+
 ## Rules
 
 - The description is the operator's account, not your diagnosis — record what
