@@ -1,9 +1,10 @@
 ---
 id: TASK-44
 title: Upstream Filing and Cycle Closure
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-08 04:22'
+updated_date: '2026-08-08 23:18'
 labels:
   - ST-044
 milestone: Proposal Becomes Change
