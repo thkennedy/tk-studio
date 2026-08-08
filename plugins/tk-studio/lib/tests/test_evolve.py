@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import consolidate  # noqa: E402
 import evolve  # noqa: E402
+import job as joblib  # noqa: E402
 
 
 def _env(event: str, payload: dict, ts: str = "2026-08-01T10:00:00+00:00",
@@ -427,6 +428,22 @@ class EvolveTest(unittest.TestCase):
         self.assertEqual(out["rows"], 3)
         self.assertEqual(out["by_status"], {"Draft": 3})
         self.assertEqual(out["proposals"][0]["id"], "PROP-001")
+
+    # --- ST-042: the shipped evolve-proposals job type (D3)
+
+    def test_shipped_job_type_is_valid_and_self_describing(self):
+        entry = joblib.load_types()["evolve-proposals"]
+        self.assertEqual(entry["problems"], [])
+        defn = entry["definition"]
+        self.assertEqual(defn["target"]["skill"], "tk-studio-evolve")
+        # explicit trigger + cadence: substrate discovery reads raw instance
+        # JSON, so a type-extending instance must be self-describing — the
+        # shipped type models the full shape (2026-08-07 observation)
+        self.assertEqual(defn["trigger"], "loop")
+        self.assertEqual(defn["cadence"]["mode"], "self-paced")
+        self.assertIn("max_turns", defn["guards"])
+        self.assertIn("blocked", defn["stop"]["on_status"])
+        self.assertTrue(defn["durable"])
 
 
 if __name__ == "__main__":

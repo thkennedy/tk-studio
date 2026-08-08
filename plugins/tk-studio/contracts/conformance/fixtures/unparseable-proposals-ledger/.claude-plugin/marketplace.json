@@ -1,0 +1,3 @@
+{
+  "_comment": "conformance fixture only — marks this directory as a studio-repo-root lookalike so the evolve refusal drive reaches the ledger-parse step (AD-3 gate passed, ledger gate refuses)"
+}

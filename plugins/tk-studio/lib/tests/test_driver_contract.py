@@ -70,8 +70,9 @@ class DriverContractTestCase(unittest.TestCase):
         # from the 1.x line — pre-1.0 semver for a new product, 1.N.0 →
         # 0.1.N, the 0.1 line the compatibility pin); 0.1.8 is the §2
         # clarification patch (detect ask posture, plan-sync partial —
-        # chipped at PR #21 review)
-        self.assertRegex(self.text, r"\*\*0\.1\.8\*\*")
+        # chipped at PR #21 review); 0.1.9 adds the tk-studio-evolve
+        # surface + the shipped evolve-proposals job type (EP-010, additive)
+        self.assertRegex(self.text, r"\*\*0\.1\.9\*\*")
         self.assertIn("Change policy", self.text)
         self.assertIn("MAJOR", self.text)
         self.assertRegex(self.text, r"[Bb]reaking")
@@ -98,6 +99,21 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertIn("`partial`", row)
         self.assertNotIn("promote/pull-back conflict (human conflict, AD-5)",
                          row)
+
+    # --- ST-042: the 0.1.9 evolve drafting surface is published (EP-010)
+
+    def test_publishes_the_evolve_row(self):
+        row = next(line for line in self.text.splitlines()
+                   if line.startswith("| `tk-studio-evolve`"))
+        self.assertIn("`lib/evolve.py draft\\|status`", row)
+        self.assertIn("PROP-NNN", row)
+        # the blocked cell names the consolidate-twin refusal family
+        self.assertIn("AD-3", row)
+        self.assertIn("unparseable proposals ledger", row)
+        # D1: documents only — drafting triggers nothing, adoption is human
+        self.assertIn("triggers nothing", row)
+        # D2: derive-only, no taxonomy event
+        self.assertIn("derives, not emits", row)
 
     # --- ST-9.6: the 0.1.7 knowledge-port surfaces are published
 
