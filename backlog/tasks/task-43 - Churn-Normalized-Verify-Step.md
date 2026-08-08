@@ -1,9 +1,10 @@
 ---
 id: TASK-43
 title: Churn-Normalized Verify Step
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-08 04:22'
+updated_date: '2026-08-08 07:35'
 labels:
   - ST-043
 milestone: Proposal Becomes Change
