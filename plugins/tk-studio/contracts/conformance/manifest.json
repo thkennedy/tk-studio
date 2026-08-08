@@ -257,6 +257,29 @@
         }
       ]
     },
+    "tk-studio-evolve": {
+      "external_calls": false,
+      "auth_preflight": "none needed — reads the merged measurements/ files (and issues/ledger.md as cross-link context) and writes proposals/ledger.md locally; no network, no backend",
+      "drives": [
+        {
+          "assertion": "headless-clean",
+          "argv": ["lib/evolve.py", "draft", "--directory", "{sandbox}", "--dry-run"],
+          "expect": "json"
+        },
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/evolve.py", "draft", "--directory", "{sandbox}/nowhere"],
+          "expect": "refusal",
+          "marker": "does not exist"
+        },
+        {
+          "assertion": "unparseable-ledger-refusal",
+          "argv": ["lib/evolve.py", "draft", "--directory", "contracts/conformance/fixtures/unparseable-proposals-ledger", "--dry-run"],
+          "expect": "refusal",
+          "marker": "cannot parse"
+        }
+      ]
+    },
     "tk-studio-migrate": {
       "external_calls": true,
       "auth_preflight": "the import step runs the jira adapter's API-token preflight (token + org-admin toggle + issue-type scheme) before any backend write; inventory, verification bookkeeping, and the cutover flag are local — an unconfigured/empty project blocks named before any network (the drives below prove it)",

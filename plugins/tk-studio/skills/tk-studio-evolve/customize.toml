@@ -1,0 +1,14 @@
+# Customization surface for tk-studio-evolve.
+#
+# Override files (not edited here):
+#   {project-root}/_bmad/custom/tk-studio-evolve.toml         (team)
+#   {project-root}/_bmad/custom/tk-studio-evolve.user.toml    (personal)
+
+# Model/effort defaults (AD-14). Precedence: runtime override > project config
+# > this resource default. The clustering and row discipline are wholly
+# deterministic; the skill layer only runs the core and summarizes — the real
+# reasoning (triage) is the operator's. Mid-tier model, low effort; escalation
+# stays deliberate (driver-contract §5).
+[model]
+default = "claude-sonnet-5"
+effort = "low"
