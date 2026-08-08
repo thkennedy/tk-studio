@@ -45,7 +45,7 @@ modules:
     channel: stable
     sha: 966fbc54db686f77fd0d68cae4164dce8cc98113
   tea:
-    version: v1.19.1
+    version: v1.21.7
     source: external
     npmPackage: bmad-method-test-architecture-enterprise
     repoUrl: https://github.com/bmad-code-org/bmad-method-test-architecture-enterprise
@@ -59,7 +59,7 @@ modules:
     channel: stable
     sha: cc16f09fcfab26d35635af1491f36a38a8431c8d
   bmad-loop:
-    version: v0.9.0
+    version: v0.9.1
     source: external
     repoUrl: https://github.com/bmad-code-org/bmad-loop
     channel: stable
