@@ -1,9 +1,10 @@
 ---
 id: TASK-41
 title: The Evolve Surface and the First Real Draft
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-08-07 23:49'
+updated_date: '2026-08-08 01:28'
 labels:
   - ST-041
 milestone: Observation Becomes Proposal
