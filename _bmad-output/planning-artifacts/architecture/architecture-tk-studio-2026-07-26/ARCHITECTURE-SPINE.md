@@ -91,7 +91,7 @@ graph TD
 
 - **Binds:** Taxonomy, Recommendation evolve loop
 - **Prevents:** building a canonical-KB subsystem before per-project KB has proven itself
-- **Rule:** O4 ruling — **out.** Knowledge is per-project (`kb/`). Cross-project reads are served by the **project registry** in working data (the canonical path for "status of all projects") plus the Obsidian vault as the human window. The seam stays open: kb frontmatter reserves `scope:`, and the promotion-gate pattern (tk-council custodian membrane) is the named v2 mechanism. The evolve loop only observes and logs in v1.
+- **Rule:** O4 ruling — **out.** Knowledge is per-project (`kb/`). Cross-project reads are served by the **project registry** in working data (the canonical path for "status of all projects") plus the Obsidian vault as the human window. The seam stays open: kb frontmatter reserves `scope:`, and the promotion-gate pattern (tk-council custodian membrane) is the named v2 mechanism. The evolve loop only observes and logs in v1 *(landed 2026-08-08, Epic 10: the drafting half now derives `proposals/ledger.md` PROP rows from accumulated observations at contract 0.1.9 — documents only, adoption human-initiated per D1; the cross-project boundary this rule carries is unchanged)*.
 
 ### AD-9 — Stateless orchestrator core, optional persona shell (O5)
 
@@ -249,7 +249,7 @@ tk-studio/
 - **ClaudeOS MCP connector** — ClaudeOS-side deliverable; only the driver contract ships here (AD-11). Conformance runs by direct headless invocation until it exists.
 - **Cross-project canonical knowledge + promotion gate** — v2; seam reserved in AD-8.
 - **Linear adapter, Confluence kb publishing** — after Jira stabilizes, same contract (AD-6/AD-7).
-- **Evolve-loop automation** (proposal drafting from observed toil) — v1 observes and logs only.
+- **Evolve-loop automation** (proposal drafting from observed toil) — v1 observes and logs only. **Landed 2026-08-08 as Epic 10 (ST-040–ST-042), published at driver-contract 0.1.9** — `lib/evolve.py` observation clustering + `proposals/ledger.md` stable `PROP-NNN` rows (consolidate-twin discipline, ISS cross-links), the `tk-studio-evolve` surface (draft + read-only status, per-outcome headless postures), and the shipped-but-undeclared `evolve-proposals` job type (instance declaration stays an operator call, D3). Drafting triggers nothing (D1): proposals are documents; adoption and implementation stay human-initiated through the membrane. AD-8's cross-project tier remains deferred (`scope:` reserved and unread).
 - **Execution roles beyond developer** (artist/designer/PR/custom) — arrive with the team as configuration (AD-17).
 - **Persona lore / tk-council overlay content** (11 personas, Perforce stream skills, UE content) — future overlay; the shell seam is AD-9.
 - **Distribution hardening** (permissions, security review, public distribution) — deliberately later per brief.
