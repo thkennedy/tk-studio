@@ -1,10 +1,10 @@
 ---
 id: TASK-42
 title: Contract 0.1.9, Conformance, and the Job Type
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-08-07 23:49'
-updated_date: '2026-08-08 01:28'
+updated_date: '2026-08-08 03:17'
 labels:
   - ST-042
 milestone: Observation Becomes Proposal
