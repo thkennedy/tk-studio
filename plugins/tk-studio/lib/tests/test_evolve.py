@@ -300,6 +300,60 @@ class EvolveTest(unittest.TestCase):
         self.assertEqual(rows["PROP-001"][8], "2026-08-01",
                          "Opened reflects the earliest evidence")
 
+    def test_distinct_clusters_never_collide_on_a_key(self):
+        # two token-empty observations slug to the same readable head; the
+        # identity digest must keep their keys distinct or every rerun would
+        # cross-contaminate the rows and mint a duplicate (review finding,
+        # PR #24)
+        self._write("alice-m1.jsonl", [
+            _obs("is it ok?", ts="2026-08-01T10:00:00+00:00"),
+            _obs("so be it", ts="2026-08-02T10:00:00+00:00"),
+        ])
+        result = evolve.draft(self.repo)
+        self.assertEqual(len(result["created"]), 2)
+        rows = self._rows()
+        self.assertNotEqual(rows["PROP-001"][7], rows["PROP-002"][7],
+                            "keys stay distinct across dissimilar clusters")
+        before = self.ledger.read_bytes()
+
+        result = evolve.draft(self.repo)
+
+        self.assertEqual(result["created"], [])
+        self.assertEqual(result["updated"], [])
+        self.assertEqual(self.ledger.read_bytes(), before,
+                         "rerun mints no duplicate and rewrites nothing")
+
+    def test_cluster_merge_reports_the_stranded_row(self):
+        # a later-merged earlier event similar to both seeds fuses two
+        # clusters; the row the fused cluster does not claim is stranded —
+        # never deleted, but the run must name it for the operator
+        self._write("alice-m1.jsonl", [
+            _obs("alpha bravo charlie delta", ts="2026-08-02T10:00:00+00:00"),
+            _obs("echo foxtrot golf hotel", ts="2026-08-03T10:00:00+00:00"),
+        ])
+        first = evolve.draft(self.repo)
+        self.assertEqual(len(first["created"]), 2)
+        self.assertEqual(first["stranded"], [])
+        self._write("bob-m2.jsonl", [
+            _obs("alpha bravo charlie delta echo foxtrot golf hotel",
+                 ts="2026-08-01T09:00:00+00:00", user="bob", machine="m2")])
+
+        result = evolve.draft(self.repo)
+
+        self.assertEqual(result["created"], [], "no duplicate row minted")
+        self.assertEqual(result["updated"], ["PROP-001"])
+        self.assertEqual(result["stranded"], ["PROP-002"])
+        rows = self._rows()
+        self.assertEqual(len(rows), 2, "the stranded row is never deleted")
+
+    def test_candidate_extracted_from_a_multiline_description(self):
+        self._write("alice-m1.jsonl", [
+            _obs("Toil observed in verify.\nCandidate: normalize the verify "
+                 "step.\nSeen twice this week.")])
+        evolve.draft(self.repo)
+        self.assertEqual(self._rows()["PROP-001"][5],
+                         "normalize the verify step.")
+
     def test_dry_run_writes_nothing(self):
         self._seed()
         result = evolve.draft(self.repo, dry_run=True)
