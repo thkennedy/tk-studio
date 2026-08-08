@@ -122,6 +122,30 @@ class ChurnClassTestCase(unittest.TestCase):
             base_update.churn_class("_bmad/gds/config.yaml", YAML_OLD,
                                     b"nested:\n  - broken\n misindent: [\n"))
 
+    def test_scalar_type_change_stays(self):
+        # review chip: Python cross-type equality (True == 1) must not make
+        # a genuine yaml type change disappear — scalars compare type-strict
+        old = b"debug: 1\nuser_name: Tim\n"
+        new = b"debug: true\nuser_name: Tim\n"
+        self.assertIsNone(
+            base_update.churn_class("_bmad/gds/config.yaml", old, new))
+
+    def test_list_element_type_change_stays(self):
+        old = b"flags:\n  - true\n"
+        new = b"flags: '[1]'\n"
+        self.assertIsNone(
+            base_update.churn_class("_bmad/gds/config.yaml", old, new))
+
+    def test_comment_only_changes_are_churn_by_ruling(self):
+        # pinned deliberately: the 2026-08-08 full-signature ruling ignores
+        # ALL comment content in installer-generated config files, including
+        # a regenerated `# Version:` header on a real core bump
+        old = b"# Version: 6.10.0\nuser_name: Tim\n"
+        new = b"# Version: 6.11.0\n# new upstream note\nuser_name: Tim\n"
+        self.assertEqual(
+            base_update.churn_class("_bmad/gds/config.yaml", old, new),
+            "config-values-unchanged")
+
 
 class FilesManifestTestCase(unittest.TestCase):
     OLD = (b'type,name,module,path,hash\n'
@@ -189,7 +213,8 @@ class NormalizeChurnTestCase(unittest.TestCase):
 
         result = base_update.normalize_churn(self.repo)
 
-        self.assertEqual(result["reverted"], 3)
+        self.assertEqual(result["reverted"], 2)
+        self.assertEqual(result["backups_dropped"], 1)
         self.assertEqual(result["by_class"], {
             "line-endings-only": 1,
             "config-values-unchanged": 1,

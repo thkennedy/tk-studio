@@ -151,19 +151,28 @@ def _git_show(directory: Path, path: str) -> bytes | None:
 
 def _values_equal_with_list_coercion(old: object, new: object) -> bool:
     """Equal values, allowing new to be old's list re-serialized as a JSON
-    string (the ISS-001 defect: [a, b] becomes '["a", "b"]')."""
-    if old == new:
-        return True
-    if isinstance(old, list) and isinstance(new, str):
-        try:
-            return json.loads(new) == old
-        except ValueError:
-            return False
+    string (the ISS-001 defect: [a, b] becomes '["a", "b"]'). Scalars must
+    match type exactly — `true` never equals `1`, so a genuine type change
+    in a config value always shows in the diff (D2)."""
     if isinstance(old, dict) and isinstance(new, dict):
         return old.keys() == new.keys() and all(
             _values_equal_with_list_coercion(old[k], new[k]) for k in old
         )
-    return False
+    if isinstance(old, list):
+        if isinstance(new, str):
+            try:
+                parsed = json.loads(new)
+            except ValueError:
+                return False
+            return isinstance(parsed, list) and _values_equal_with_list_coercion(old, parsed)
+        if isinstance(new, list):
+            return len(old) == len(new) and all(
+                _values_equal_with_list_coercion(o, n) for o, n in zip(old, new)
+            )
+        return False
+    if isinstance(old, bool) or isinstance(new, bool):
+        return isinstance(old, bool) and isinstance(new, bool) and old == new
+    return type(old) is type(new) and old == new
 
 
 def churn_class(path: str, old: bytes, new: bytes) -> str | None:
@@ -178,8 +187,11 @@ def churn_class(path: str, old: bytes, new: bytes) -> str | None:
             n = miniyaml.loads(new.decode("utf-8"))
         except (miniyaml.MiniYamlError, UnicodeDecodeError):
             return None
-        # value-level equality: comment timestamps and key order are the
-        # installer's serialization artifacts, invisible to the parse
+        # value-level equality per the 2026-08-08 ruling: comments and key
+        # order in these installer-GENERATED files are serialization
+        # artifacts, ignored entirely. Known trade-off: on a real core bump
+        # with unchanged values, the regenerated `# Version:` header comment
+        # is also reverted, leaving the old provenance comment in the tree.
         return "config-values-unchanged" if _values_equal_with_list_coercion(o, n) else None
     if path in _CONFIG_TOML:
         try:
@@ -220,7 +232,11 @@ def _files_manifest_derivative(old: bytes, new: bytes, reverted: set[str]) -> bo
 
 def normalize_churn(directory: Path) -> dict:
     """Step 4.5: revert churn-only files, delete installer backup drops.
-    Returns {"reverted": N, "by_class": {class: count}} for the result JSON."""
+    Returns {"reverted": N, "backups_dropped": M, "by_class": {...}} for the
+    result JSON. Precondition: nothing is staged (step 3 committed the bump
+    and nothing runs `git add` before this step), so porcelain -z entries are
+    single-field ` M`/`??`/` D` records — rename/copy two-field records
+    cannot occur. Anything with an unexpected code is left untouched."""
     status = _git(directory, "status", "--porcelain", "-z", "--", *CHURN_ROOTS).stdout
     modified, baks = [], []
     for entry in (e for e in status.split("\0") if len(e) > 3):
@@ -261,13 +277,17 @@ def normalize_churn(directory: Path) -> dict:
     dropped = 0
     for path in baks:
         head = _git_show(directory, path[:-len(".bak")])
-        if head is not None and _norm_eol(head) == _norm_eol((directory / path).read_bytes()):
-            (directory / path).unlink()
-            dropped += 1
+        try:
+            if head is not None and _norm_eol(head) == _norm_eol((directory / path).read_bytes()):
+                (directory / path).unlink()
+                dropped += 1
+        except OSError:
+            pass  # unreadable/locked backup stays; it shows as untracked
     if dropped:
         by_class["installer-backup-dropped"] = dropped
 
-    return {"reverted": len(reverted) + dropped, "by_class": by_class}
+    return {"reverted": len(reverted), "backups_dropped": dropped,
+            "by_class": by_class}
 
 
 # -------------------------------------------------------------------- flow
@@ -374,8 +394,22 @@ def main(argv: list[str] | None = None) -> int:
         }, ensure_ascii=False))
         return 1
 
-    # 4.5 revert provable no-op churn before the diff commits (EP-011 D2)
-    normalized = normalize_churn(directory)
+    # 4.5 revert provable no-op churn before the diff commits (EP-011 D2).
+    # Same failure posture as step 4: a crash mid-revert (a locked file, an
+    # unreadable path) must not leave a mutilated tree or a dead process
+    # with no JSON — restore, return to the starting branch, report.
+    try:
+        normalized = normalize_churn(directory)
+    except (RuntimeError, OSError) as exc:
+        _git(directory, "reset", "--hard", "HEAD", check=False)
+        _git(directory, "clean", "-fdq", "--", *CHURN_ROOTS, check=False)
+        _git(directory, "checkout", start_branch, check=False)
+        print(json.dumps({
+            "ok": False, "step": "normalize-churn",
+            "branch_left_for_inspection": branch,
+            "restored_to": start_branch, "error": str(exc)[:300],
+        }, ensure_ascii=False))
+        return 1
 
     # 5. sync shas from the fresh manifest, commit the churn-normalized diff
     manifest = directory / "_bmad" / "_config" / "manifest.yaml"
@@ -387,17 +421,27 @@ def main(argv: list[str] | None = None) -> int:
     # D3: a same-version re-affirmation whose install diff is empty after
     # normalization ends complete reporting the verified no-op — no branch
     # pushed, no PR opened; the bump branch (one empty commit) is dropped.
-    if not _git(directory, "status", "--porcelain").stdout.strip():
-        _git(directory, "checkout", start_branch, check=False)
-        _git(directory, "branch", "-D", branch, check=False)
-        print(json.dumps({
+    # Both legs are required: an empty status only proves the tree matches
+    # the BUMP commit — the lock must also be byte-identical to its
+    # pre-bump text, or the run carried a real pin change (e.g. repairing
+    # committed drift) and must land its PR like any other.
+    if synced == old_lock and not _git(directory, "status", "--porcelain").stdout.strip():
+        back = _git(directory, "checkout", start_branch, check=False)
+        result = {
             "ok": True, "outcome": "verified-no-op", "bump": bump_desc,
             "normalized": normalized,
             "installed": install_json.get("modules", {}),
             "core": install_json.get("core"), "branch": None,
             "pr": "none (verified no-op — empty install diff after churn "
                   "normalization; no branch pushed)",
-        }, ensure_ascii=False))
+        }
+        if back.returncode == 0:
+            _git(directory, "branch", "-D", branch, check=False)
+        else:
+            result["branch"] = branch
+            result["warning"] = (f"checkout back to {start_branch} failed; "
+                                 f"branch {branch} left checked out")
+        print(json.dumps(result, ensure_ascii=False))
         return 0
 
     _git(directory, "commit", "-q", "-m",
