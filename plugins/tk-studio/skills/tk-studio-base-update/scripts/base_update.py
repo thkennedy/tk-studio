@@ -6,8 +6,18 @@ Flow (all on an isolated feature branch; the starting branch is never touched):
   3. bump         edit bmad.lock pins (core and/or per-module), commit the bump
   4. install      run tk-studio-install's script at the new pin (it verifies
                   against the pins and emits the install-outcome event)
+  4.5 normalize   revert provably churn-only files the installer rewrote
+                  (EP-011 D2): every revert requires old ≡ new under a named
+                  equivalence — line endings, config values (list values
+                  re-serialized as JSON strings parse back equal), manifest
+                  lastUpdated stamps, derivative files-manifest hash rows,
+                  dropped *.bak copies of pre-install files. Real changes and
+                  unknown churn stay untouched and show in the diff.
   5. sync         refresh lock shas from the freshly installed manifest, commit
-                  lockfile + full install diff
+                  lockfile + churn-normalized install diff. A same-version
+                  re-affirmation whose diff is empty after normalization ends
+                  complete reporting the verified no-op — no branch pushed,
+                  no PR opened (EP-011 D3).
   6. pr           push and open the integration PR via gh (skipped with --no-pr)
 
 On installer/verify failure: the working tree is restored (reset --hard to the
@@ -27,10 +37,13 @@ Stdlib-only (NFR9); no prompts (AD-11).
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import re
 import subprocess
 import sys
+import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,6 +51,7 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(PLUGIN_ROOT / "lib"))
 
 import bmadlock  # noqa: E402
+import miniyaml  # noqa: E402
 
 LOCK_PATH = PLUGIN_ROOT / "bmad.lock"
 INSTALL_SCRIPT = PLUGIN_ROOT / "skills" / "tk-studio-install" / "scripts" / "install_base.py"
@@ -101,6 +115,159 @@ def read_manifest_shas(manifest_path: Path) -> dict[str, str]:
         if m and current:
             shas[current] = m.group(1)
     return shas
+
+
+# ------------------------------------------- churn normalization (step 4.5)
+#
+# The upstream installer's --yes reinstall rewrites files it did not change
+# (ISS-001): LF line endings everywhere, config values re-serialized (lists
+# become quoted JSON strings), comment timestamps and key order shuffled,
+# manifest lastUpdated stamps, and *.bak copies of the pre-install files.
+# Step 4.5 reverts a file only when old ≡ new under one of the named,
+# provable equivalences below (EP-011 D2 — full no-op signature, ruled
+# 2026-08-08); a file carrying any real change stays fully untouched, and
+# unknown churn is never guessed at — it shows in the integration diff.
+
+CHURN_ROOTS = ("_bmad", ".claude/skills")
+_CONFIG_YAML = re.compile(r"_bmad/(?:[\w.\-]+/)?config\.yaml$")
+_CONFIG_TOML = ("_bmad/config.toml", "_bmad/config.user.toml")
+_FILES_MANIFEST = "_bmad/_config/files-manifest.csv"
+_MODULE_MANIFEST = "_bmad/_config/manifest.yaml"
+_TS_LINE = re.compile(rb"(?m)^(\s*lastUpdated:).*$")
+
+
+def _norm_eol(data: bytes) -> bytes:
+    return data.replace(b"\r\n", b"\n")
+
+
+def _git_show(directory: Path, path: str) -> bytes | None:
+    """The pre-install bytes of *path* (HEAD blob), or None if not in HEAD."""
+    proc = subprocess.run(
+        ["git", "show", f"HEAD:{path}"], cwd=str(directory),
+        stdin=subprocess.DEVNULL, capture_output=True,
+    )
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def _values_equal_with_list_coercion(old: object, new: object) -> bool:
+    """Equal values, allowing new to be old's list re-serialized as a JSON
+    string (the ISS-001 defect: [a, b] becomes '["a", "b"]')."""
+    if old == new:
+        return True
+    if isinstance(old, list) and isinstance(new, str):
+        try:
+            return json.loads(new) == old
+        except ValueError:
+            return False
+    if isinstance(old, dict) and isinstance(new, dict):
+        return old.keys() == new.keys() and all(
+            _values_equal_with_list_coercion(old[k], new[k]) for k in old
+        )
+    return False
+
+
+def churn_class(path: str, old: bytes, new: bytes) -> str | None:
+    """Name the provable churn class making old ≡ new, or None (real change /
+    unknown churn — the file stays). files-manifest.csv is classified
+    separately (it is derivative of the other reverts)."""
+    if _norm_eol(old) == _norm_eol(new):
+        return "line-endings-only"
+    if _CONFIG_YAML.search(path):
+        try:
+            o = miniyaml.loads(old.decode("utf-8"))
+            n = miniyaml.loads(new.decode("utf-8"))
+        except (miniyaml.MiniYamlError, UnicodeDecodeError):
+            return None
+        # value-level equality: comment timestamps and key order are the
+        # installer's serialization artifacts, invisible to the parse
+        return "config-values-unchanged" if _values_equal_with_list_coercion(o, n) else None
+    if path in _CONFIG_TOML:
+        try:
+            o = tomllib.loads(old.decode("utf-8"))
+            n = tomllib.loads(new.decode("utf-8"))
+        except (tomllib.TOMLDecodeError, UnicodeDecodeError):
+            return None
+        return "config-values-unchanged" if _values_equal_with_list_coercion(o, n) else None
+    if path == _MODULE_MANIFEST:
+        if _TS_LINE.sub(rb"\1", _norm_eol(old)) == _TS_LINE.sub(rb"\1", _norm_eol(new)):
+            return "manifest-timestamps-only"
+        return None
+    return None
+
+
+def _files_manifest_derivative(old: bytes, new: bytes, reverted: set[str]) -> bool:
+    """True when every changed row differs only in its hash column and names a
+    path that was itself reverted — the csv change is then pure derivative."""
+    old_lines = _norm_eol(old).decode("utf-8", "replace").splitlines()
+    new_lines = _norm_eol(new).decode("utf-8", "replace").splitlines()
+    if len(old_lines) != len(new_lines):
+        return False  # rows added or removed — real change
+    for o, n in zip(old_lines, new_lines):
+        if o == n:
+            continue
+        try:
+            ro = next(csv.reader(io.StringIO(o)))
+            rn = next(csv.reader(io.StringIO(n)))
+        except (csv.Error, StopIteration):
+            return False
+        # row shape: type,name,module,path,hash — only the hash may differ
+        if len(ro) != 5 or len(rn) != 5 or ro[:4] != rn[:4]:
+            return False
+        if f"_bmad/{ro[3]}" not in reverted:
+            return False
+    return True
+
+
+def normalize_churn(directory: Path) -> dict:
+    """Step 4.5: revert churn-only files, delete installer backup drops.
+    Returns {"reverted": N, "by_class": {class: count}} for the result JSON."""
+    status = _git(directory, "status", "--porcelain", "-z", "--", *CHURN_ROOTS).stdout
+    modified, baks = [], []
+    for entry in (e for e in status.split("\0") if len(e) > 3):
+        code, path = entry[:2], entry[3:]
+        if code == " M":
+            modified.append(path)
+        elif code == "??" and path.endswith(".bak"):
+            baks.append(path)
+
+    by_class: dict[str, int] = {}
+    reverted: list[str] = []
+    for path in modified:
+        if path == _FILES_MANIFEST:
+            continue  # classified last — derivative of the other reverts
+        old = _git_show(directory, path)
+        if old is None:
+            continue
+        cls = churn_class(path, old, (directory / path).read_bytes())
+        if cls:
+            reverted.append(path)
+            by_class[cls] = by_class.get(cls, 0) + 1
+    if _FILES_MANIFEST in modified:
+        old = _git_show(directory, _FILES_MANIFEST)
+        if old is not None and _files_manifest_derivative(
+            old, (directory / _FILES_MANIFEST).read_bytes(), set(reverted)
+        ):
+            reverted.append(_FILES_MANIFEST)
+            by_class["files-manifest-derivative"] = 1
+
+    # unlink before checkout so git always rewrites the working-tree file —
+    # under core.autocrlf a bare checkout can no-op and leave the file
+    # status-dirty (endings-only files are exactly that case)
+    for path in reverted:
+        (directory / path).unlink(missing_ok=True)
+    for i in range(0, len(reverted), 50):
+        _git(directory, "checkout", "--", *reverted[i:i + 50])
+
+    dropped = 0
+    for path in baks:
+        head = _git_show(directory, path[:-len(".bak")])
+        if head is not None and _norm_eol(head) == _norm_eol((directory / path).read_bytes()):
+            (directory / path).unlink()
+            dropped += 1
+    if dropped:
+        by_class["installer-backup-dropped"] = dropped
+
+    return {"reverted": len(reverted) + dropped, "by_class": by_class}
 
 
 # -------------------------------------------------------------------- flow
@@ -207,16 +374,37 @@ def main(argv: list[str] | None = None) -> int:
         }, ensure_ascii=False))
         return 1
 
-    # 5. sync shas from the fresh manifest, commit the full install diff
+    # 4.5 revert provable no-op churn before the diff commits (EP-011 D2)
+    normalized = normalize_churn(directory)
+
+    # 5. sync shas from the fresh manifest, commit the churn-normalized diff
     manifest = directory / "_bmad" / "_config" / "manifest.yaml"
     synced = sync_shas_text(LOCK_PATH.read_text(encoding="utf-8"),
                             read_manifest_shas(manifest))
     LOCK_PATH.write_text(synced, encoding="utf-8", newline="\n")
     _git(directory, "add", "-A")
+
+    # D3: a same-version re-affirmation whose install diff is empty after
+    # normalization ends complete reporting the verified no-op — no branch
+    # pushed, no PR opened; the bump branch (one empty commit) is dropped.
+    if not _git(directory, "status", "--porcelain").stdout.strip():
+        _git(directory, "checkout", start_branch, check=False)
+        _git(directory, "branch", "-D", branch, check=False)
+        print(json.dumps({
+            "ok": True, "outcome": "verified-no-op", "bump": bump_desc,
+            "normalized": normalized,
+            "installed": install_json.get("modules", {}),
+            "core": install_json.get("core"), "branch": None,
+            "pr": "none (verified no-op — empty install diff after churn "
+                  "normalization; no branch pushed)",
+        }, ensure_ascii=False))
+        return 0
+
     _git(directory, "commit", "-q", "-m",
          f"chore(base-update): install diff at new pin — {bump_desc}", check=False)
 
     result = {"ok": True, "branch": branch, "bump": bump_desc,
+              "normalized": normalized,
               "installed": install_json.get("modules", {}),
               "core": install_json.get("core")}
 

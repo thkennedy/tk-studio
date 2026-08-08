@@ -71,8 +71,10 @@ class DriverContractTestCase(unittest.TestCase):
         # 0.1.N, the 0.1 line the compatibility pin); 0.1.8 is the §2
         # clarification patch (detect ask posture, plan-sync partial —
         # chipped at PR #21 review); 0.1.9 adds the tk-studio-evolve
-        # surface + the shipped evolve-proposals job type (EP-010, additive)
-        self.assertRegex(self.text, r"\*\*0\.1\.9\*\*")
+        # surface + the shipped evolve-proposals job type (EP-010, additive);
+        # 0.1.10 is the §2 base-update clarification (churn-normalized
+        # verify + the verified no-op outcome, EP-011 ST-043)
+        self.assertRegex(self.text, r"\*\*0\.1\.10\*\*")
         self.assertIn("Change policy", self.text)
         self.assertIn("MAJOR", self.text)
         self.assertRegex(self.text, r"[Bb]reaking")
@@ -99,6 +101,20 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertIn("`partial`", row)
         self.assertNotIn("promote/pull-back conflict (human conflict, AD-5)",
                          row)
+
+    # --- ST-043: the 0.1.10 base-update clarification stays pinned (EP-011)
+
+    def test_base_update_row_names_the_churn_normalized_no_op(self):
+        # D2: the install diff commits churn-normalized, counts in the
+        # result JSON; D3: an empty post-normalization diff on a same-version
+        # re-affirmation ends complete — no branch pushed, no PR opened
+        row = next(line for line in self.text.splitlines()
+                   if line.startswith("| `tk-studio-base-update`"))
+        self.assertIn("`normalized`", row)
+        self.assertIn("churn-only", row)
+        self.assertIn("verified no-op", row)
+        self.assertIn("`complete`", row)
+        self.assertIn("no PR opened", row)
 
     # --- ST-042: the 0.1.9 evolve drafting surface is published (EP-010)
 
