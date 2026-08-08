@@ -44,6 +44,7 @@ studio repo, unparseable proposals ledger). Stdlib-only (NFR9); never prompts
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -152,13 +153,26 @@ def _similar(a: frozenset, b: frozenset) -> bool:
 
 
 def _slug(envelope: dict) -> str:
-    """The bounded cluster key an event would seed: obs:<first salient tokens>."""
-    salient = [t for t in re.findall(r"[a-z0-9][a-z0-9.\-_/]*",
-                                     _text(envelope).lower())
+    """The bounded cluster key an event would seed: obs:<salient tokens>-<hash>.
+
+    The readable head is lossy (first six tokens), so a digest of the full
+    token set disambiguates it: identical token sets always co-cluster
+    (overlap 1.0), so two *distinct* clusters can never share a key — the
+    collision would strand rows and mint duplicates on every rerun. A
+    token-empty observation hashes its envelope identity instead, so two
+    unrelated unstated observations never collide either.
+    """
+    text = _text(envelope)
+    toks = _tokens(text)
+    salient = [t for t in re.findall(r"[a-z0-9][a-z0-9.\-_/]*", text.lower())
                if len(t) >= 3 and t not in _STOPWORDS]
     ordered_unique = list(dict.fromkeys(salient))[:6]
-    return _cell("obs:" + "-".join(ordered_unique) if ordered_unique
-                 else "obs:unstated", 120)
+    head = _cell("obs:" + "-".join(ordered_unique) if ordered_unique
+                 else "obs:unstated", 110)
+    basis = (" ".join(sorted(toks)) if toks
+             else json.dumps([envelope.get("ts"), envelope.get("user"),
+                              envelope.get("machine"), text]))
+    return f"{head}-{hashlib.sha1(basis.encode('utf-8')).hexdigest()[:6]}"
 
 
 def cluster(events: list[dict]) -> list[dict]:
@@ -203,7 +217,7 @@ def _dates(members: list[dict]) -> tuple[str, str]:
 
 _SURFACE_RE = re.compile(r"tk-studio-[a-z][a-z0-9-]*"
                          r"|(?:lib|scripts|contracts)/[^\s,;)]+")
-_CANDIDATE_RE = re.compile(r"candidate:\s*(.+)$", re.IGNORECASE)
+_CANDIDATE_RE = re.compile(r"candidate:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
 
 
 def _candidate(envelope: dict) -> str:
@@ -218,10 +232,14 @@ def _candidate(envelope: dict) -> str:
     return ""
 
 
+def _surface_set(members: list[dict]) -> set[str]:
+    return {m.group(0).rstrip(".,;:")
+            for e in members
+            for m in _SURFACE_RE.finditer(_text(e))}
+
+
 def _surfaces(members: list[dict]) -> str:
-    found = sorted({m.group(0).rstrip(".,;:")
-                    for e in members
-                    for m in _SURFACE_RE.finditer(_text(e))})
+    found = sorted(_surface_set(members))
     return _cell(", ".join(found), 160) if found else "unspecified"
 
 
@@ -243,7 +261,7 @@ def _issue_rows(directory: Path) -> dict[str, str]:
 def _issue_links(entry: dict, reports: list[dict],
                  issues_by_key: dict[str, str]) -> list[str]:
     """ISS ids whose report evidence twins this cluster's observations."""
-    surfaces = _surfaces(entry["members"])
+    surfaces = _surface_set(entry["members"])
     linked = set()
     for report in reports:
         payload = report.get("payload") or {}
@@ -251,7 +269,9 @@ def _issue_links(entry: dict, reports: list[dict],
         named = surface != "unspecified" and surface in surfaces
         if not (named or _similar(entry["tokens"], _tokens(_text(report)))):
             continue
-        issue_id = issues_by_key.get(f"report:{surface}")
+        # mirror consolidate's key-cell transform so long or pipe-bearing
+        # surfaces still find their row
+        issue_id = issues_by_key.get(_cell(f"report:{surface}", 120))
         if issue_id:
             linked.add(issue_id)
     return sorted(linked)
@@ -426,6 +446,11 @@ def draft(directory: Path, dry_run: bool = False) -> dict:
         else:
             result["unchanged"] += 1
 
+    # a cluster merge can leave a machine-keyed row no cluster claims; rows
+    # are never deleted, so surface it for the operator to Decline by hand
+    result["stranded"] = sorted(
+        cells[0] for cells in rows.values()
+        if cells[7].startswith("obs:") and cells[7] not in claimed)
     result["dry_run"] = dry_run
     if changed and not dry_run:
         _atomic_write(ledger_path, "\n".join(lines) + "\n")
