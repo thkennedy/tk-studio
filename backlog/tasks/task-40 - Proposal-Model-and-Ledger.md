@@ -1,9 +1,10 @@
 ---
 id: TASK-40
 title: Proposal Model and Ledger
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-07 23:49'
+updated_date: '2026-08-08 01:09'
 labels:
   - ST-040
 milestone: Observation Becomes Proposal
