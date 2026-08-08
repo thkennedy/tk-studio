@@ -27,8 +27,20 @@ unreviewed mutation of `main`.
 
    The script: preflight (clean tree) → isolated `base-update/*` branch → lock
    bump commit → pinned non-interactive reinstall with verify (emits
-   `install-outcome`) → sha sync + install-diff commit → push + `gh pr create`.
+   `install-outcome`) → churn normalization (provably churn-only files the
+   installer rewrote are reverted; per-class revert counts land in the result
+   JSON `normalized`; real changes and unknown churn always show) → sha sync +
+   install-diff commit → push + `gh pr create`.
    `--dry-run` previews; `--no-pr` stops after the local commits.
+
+   A same-version re-affirmation whose install diff is empty after
+   normalization ends **complete reporting the verified no-op** — no branch
+   pushed, no PR opened, the bump branch dropped (the result JSON says
+   `"outcome": "verified-no-op"`):
+
+   ```json
+   {"status": "complete", "intent": "tk-studio-base-update", "artifacts": [], "reason": null}
+   ```
 
 3. On success, attended: optionally enrich the PR description with a summary
    of the upstream release notes (`gh pr edit`). Nothing merges automatically —
