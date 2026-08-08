@@ -25,7 +25,7 @@ consumer pins is `0.MINOR` (today: `0.1`):
   bumps the minor: `0.1.x` → `0.2.0`. A consumer pinned to the `0.1` line
   must never be broken by a `0.1.y`.
 - **Additive** — new skills in the surface table, new optional payload
-  fields, new verbs, new event types — bumps the patch: `0.1.8` → `0.1.9`.
+  fields, new verbs, new event types — bumps the patch: `0.1.9` → `0.1.10`.
 - **Clarifications** — wording and examples, no shape changes — also bump
   the patch; the version-history line names which kind each bump was.
 
