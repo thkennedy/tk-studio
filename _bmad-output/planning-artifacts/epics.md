@@ -934,3 +934,44 @@ So that drivers reach the whole loop through the contract and recurring drafting
 **Given** the ClaudeOS connector pinned to the 0.1 line
 **When** the through-connector suite spot-checks the new surface
 **Then** the check passes with no connector change (additive patch, same line)
+
+## Epic 11: Proposal Becomes Change
+
+The adopted-proposals epic per the ruled planning pass (2026-08-08): PROP-001's churn-normalized base-update verify step plus the operator-gated upstream defect filing, and PROP-003 closing with evidence — the evolve loop's first full observe→draft→adopt→implement cycle. (AD-1, AD-11, AD-12; rulings: D1 PROP-003 closes with evidence — the sweep landed at `3ee9117` mid-Epic-9, two-layer enforced by `test_utf8_guard.py`; D2 revert churn-only files, real changes untouched; D3 empty diff ends complete with no PR at a 0.1.10 clarification; D4 draft + gated upstream filing; D5 declared 2026-08-08.) Ledger closing motions are operator hand-edits — the machine never touches Impact/Status. Contract pin stays 0.1.9 until story 11.1 rings the clarification.
+
+### Story 11.1: Churn-Normalized Verify Step
+
+As an operator adopting upstream releases,
+I want base-update's verify step to revert the known no-op churn classes before committing the install diff,
+So that the integration PR shows only the genuine upstream diff (AD-1's reviewable motion) and a reinstall at pin proves itself a no-op.
+
+**Acceptance Criteria:**
+
+**Given** `base_update.py`'s install step completing over an existing install
+**When** the verify step examines the working tree before the install-diff commit
+**Then** files whose old and new content are equal after normalizing the named churn classes — line-endings-only rewrites, and list-valued config options re-serialized as JSON strings that parse back to the old list (`_bmad/**` config yaml only) — are reverted, per-class revert counts land in the result JSON, and any file carrying a real change stays fully untouched; unknown churn is never guessed at — it shows in the diff (D2)
+
+**Given** a same-version re-affirmation run whose install diff is empty after normalization
+**When** the motion completes
+**Then** it ends complete reporting the verified no-op — no branch pushed, no PR opened (D3) — and driver-contract 0.1.10 lands the clarification sentence on the §2 base-update row (doc + README + `test_driver_contract.py` pin move together, the 0.1.8 precedent)
+
+**Given** the normalizer's equivalence function
+**When** the unit suite runs
+**Then** `base_update.py`'s first unit tests cover endings-only reverted, re-serialization reverted, mixed real-change untouched, and unknown-churn untouched
+**And** a live same-version re-affirmation run over this repo showing a churn-free outcome is the acceptance evidence
+
+### Story 11.2: Upstream Filing and Cycle Closure
+
+As an operator,
+I want the re-serialization defect drafted for bmad-method and the ledger rows closed with evidence in hand,
+So that the root cause travels upstream and the loop's first full cycle is recorded honestly.
+
+**Acceptance Criteria:**
+
+**Given** ISS-001's evidence and the landed normalizer
+**When** the upstream artifact is drafted
+**Then** a bmad-method issue draft lands as an epic artifact — list re-serialization as the defect with a 6.10.0 `--yes`-reinstall reproduction, the LF rewrite posed as a question — and filing on the upstream tracker happens only on explicit in-session operator go-ahead (D4), never unilaterally
+
+**Given** the implementation evidence (the normalizer, and PROP-003's `3ee9117` + `test_utf8_guard.py`)
+**When** the operator closes the cycle
+**Then** ISS-001 moves Open→Resolved and PROP-001/PROP-003 gain prose annotations naming the landed evidence — all by operator hand, statuses staying Adopted (the proposals ledger has no implemented state by design; implementation lives in planning records), the machine never editing Impact/Status (AD-12 ownership)
