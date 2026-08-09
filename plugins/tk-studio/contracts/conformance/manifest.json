@@ -125,6 +125,18 @@
         },
         {
           "assertion": "headless-clean",
+          "argv": ["lib/jobrun.py", "resolve", "--directory", "{sandbox}"],
+          "expect": "json",
+          "note": "the ST-052 read surface: declared jobs served fully resolved (type extension applied) — what substrate-side recurring classification consumes instead of raw instance files (PROP-008)"
+        },
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/jobrun.py", "resolve", "--directory", "{sandbox}", "--job-id", "ghost-job"],
+          "expect": "refusal",
+          "marker": "no definition"
+        },
+        {
+          "assertion": "headless-clean",
           "argv": ["contracts/conformance/e2e_knowledge.py", "--directory", "{sandbox}"],
           "expect": "ok",
           "note": "the ST-9.4 e2e drive — the run the source lifecycle never had: run-init -> seed -> boundary handoff with deltas -> the wrapper's finish -> queue materialized (deduped on the knowledge.schema.json key) -> routing doc rendered -> the promotion gate opens (ST-9.5: check + dry-run draft walk clean); every step asserted, expect ok means the chain succeeded, not merely answered"
