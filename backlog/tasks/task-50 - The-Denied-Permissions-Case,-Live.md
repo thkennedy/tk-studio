@@ -1,10 +1,10 @@
 ---
 id: TASK-50
 title: The Denied-Permissions Case, Live
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-08-09 10:07'
-updated_date: '2026-08-09 10:16'
+updated_date: '2026-08-09 10:22'
 labels:
   - ST-050
 milestone: Denied Permissions Refuse Loudly
