@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -329,6 +330,64 @@ class ConformanceHarnessTestCase(unittest.TestCase):
                        if f["assertion"] == "denied-core-refusal")
         self.assertIn("claude CLI not on PATH", failure["detail"])
 
+    # --- ST-050: the harness pass is named in the report, never silent
+
+    def test_report_names_harness_pass_state(self):
+        self._make_skill("tk-studio-fake")
+        harness_drive = {"assertion": "denied-core-refusal",
+                         "prompt": "/tk-studio:tk-studio-fake",
+                         "expect": "harness-blocked"}
+        # no harness drives declared at all
+        self._write_manifest({"tk-studio-fake": self._entry()})
+        report = self._run()
+        self.assertEqual(report["harness_pass"],
+                         {"declared": 0, "state": "none declared"})
+        # declared but not opted in: skipped by flag, named at the top level
+        self._write_manifest({"tk-studio-fake":
+                              self._entry(drives=[harness_drive])})
+        report = self._run()
+        self.assertEqual(report["harness_pass"]["declared"], 1)
+        self.assertIn("skipped: --harness not given",
+                      report["harness_pass"]["state"])
+        # opted in: the pass ran (here against a machine with no CLI —
+        # the drive fails loud, but the pass itself is named as run)
+        with mock.patch.object(runner.shutil, "which", return_value=None):
+            report = runner.run_suite(skills_dir=self.skills,
+                                      manifest_path=self.manifest,
+                                      emit=False, harness=True)
+        self.assertEqual(report["harness_pass"]["state"], "ran")
+
+    def test_harness_drive_isolates_store_and_resolves_settings(self):
+        # the child env must never point at the real per-user store, and the
+        # settings profile resolves relative to the conformance dir
+        captured = {}
+
+        def fake_run(argv, **kwargs):
+            captured["argv"] = argv
+            captured["env"] = kwargs.get("env")
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=BLOCKED_TRANSCRIPT_BLOCK, stderr="")
+
+        drive = {"assertion": "denied-core-refusal",
+                 "prompt": "/tk-studio:tk-studio-detect",
+                 "settings": "fixtures/harness-deny-core.settings.json",
+                 "expect": "harness-blocked"}
+        with mock.patch.object(runner.shutil, "which",
+                               return_value="claude-exe"), \
+                mock.patch.object(runner.subprocess, "run",
+                                  side_effect=fake_run):
+            check = runner._run_harness_drive("tk-studio-detect", drive,
+                                              runner.HARNESS_TIMEOUT)
+        self.assertTrue(check["ok"], check["detail"])
+        self.assertEqual(captured["argv"][:3],
+                         ["claude-exe", "-p", "/tk-studio:tk-studio-detect"])
+        settings_arg = captured["argv"][captured["argv"].index("--settings") + 1]
+        self.assertTrue(Path(settings_arg).is_file(),
+                        f"settings profile does not resolve: {settings_arg}")
+        child_store = captured["env"]["TK_STUDIO_HOME"]
+        self.assertNotEqual(child_store, os.environ.get("TK_STUDIO_HOME"))
+        self.assertIn("tk-harness-", child_store)
+
 
 BLOCKED_TRANSCRIPT_BLOCK = (
     '{"status": "blocked", "intent": "tk-studio-detect", "artifacts": [], '
@@ -459,6 +518,24 @@ class ConformanceRealPluginTestCase(unittest.TestCase):
         for surface in runner.discover_surfaces():
             self.assertTrue(manifest["surfaces"][surface]["drives"],
                             f"{surface} is never actually driven headless")
+
+    def test_denied_permissions_case_is_declared(self):
+        # ST-050: the PROP-005 enforcement case exists in the shipped
+        # manifest — detect carries a harness drive whose settings profile
+        # resolves and denies the core's tool calls
+        manifest = runner.load_manifest()
+        drives = manifest["surfaces"]["tk-studio-detect"]["drives"]
+        harness = [d for d in drives if d.get("expect") == "harness-blocked"]
+        self.assertTrue(harness, "tk-studio-detect declares no harness drive")
+        drive = harness[0]
+        self.assertEqual(drive["prompt"], "/tk-studio:tk-studio-detect")
+        profile = (Path(runner.__file__).resolve().parent / drive["settings"])
+        self.assertTrue(profile.is_file(),
+                        f"settings profile missing: {profile}")
+        denied = json.loads(profile.read_text(encoding="utf-8"))[
+            "permissions"]["deny"]
+        self.assertIn("Bash", denied)
+        self.assertIn("PowerShell", denied)
 
 
 if __name__ == "__main__":
