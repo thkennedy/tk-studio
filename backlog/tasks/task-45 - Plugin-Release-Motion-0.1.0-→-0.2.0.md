@@ -1,10 +1,10 @@
 ---
 id: TASK-45
 title: Plugin Release Motion 0.1.0 → 0.2.0
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-08-09 03:16'
-updated_date: '2026-08-09 03:21'
+updated_date: '2026-08-09 05:10'
 labels:
   - ST-045
 milestone: Release What Shipped
