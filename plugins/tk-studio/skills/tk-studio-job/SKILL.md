@@ -17,16 +17,23 @@ lives in resumable run workspaces under the per-user store.
 1. Every verb goes through the deterministic core (the one §4 surface):
 
    ```bash
-   uv run "${CLAUDE_PLUGIN_ROOT}/lib/jobrun.py" submit --directory <root> --id <job-id>
-   uv run "${CLAUDE_PLUGIN_ROOT}/lib/jobrun.py" status --directory <root> --job-id <id> [--run-id <rid>]
-   uv run "${CLAUDE_PLUGIN_ROOT}/lib/jobrun.py" cancel --directory <root> --job-id <id> [--run-id <rid>]
-   uv run "${CLAUDE_PLUGIN_ROOT}/lib/jobrun.py" wake   --directory <root> --job-id <id>
+   uv run "${CLAUDE_PLUGIN_ROOT}/lib/jobrun.py" submit  --directory <root> --id <job-id>
+   uv run "${CLAUDE_PLUGIN_ROOT}/lib/jobrun.py" status  --directory <root> --job-id <id> [--run-id <rid>]
+   uv run "${CLAUDE_PLUGIN_ROOT}/lib/jobrun.py" resolve --directory <root> [--job-id <id>]
+   uv run "${CLAUDE_PLUGIN_ROOT}/lib/jobrun.py" cancel  --directory <root> --job-id <id> [--run-id <rid>]
+   uv run "${CLAUDE_PLUGIN_ROOT}/lib/jobrun.py" wake    --directory <root> --job-id <id>
    ```
 
    `submit` validates (a job missing guards or stop conditions is rejected,
    `accepted: false`), gates on stop conditions, and answers with a
    **directive**. Core-target one-shots execute immediately, wall-clock
    guarded. An `accepted`/`woken` `false` is an answer — relay the reason.
+   `resolve` is read-only: it serves every declared job (or one, by id)
+   **fully resolved** — type extension applied by the one resolver — so a
+   substrate-side driver classifies recurring work from the trigger/cadence
+   served here and never raw-reads `.tk-studio/jobs/<id>.json` (PROP-008);
+   an entry's problems ride it named in place, an unknown id is a named
+   refusal.
 
 2. **Bind the directive to the harness.** `{"kind": "cron", "schedule": ...}`
    → the harness's scheduled-task primitive; `{"kind": "loop", ...}` /

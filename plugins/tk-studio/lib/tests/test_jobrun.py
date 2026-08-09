@@ -287,6 +287,64 @@ class JobRunTestCase(unittest.TestCase):
         self.assertTrue(again["cancelled"])
         self.assertEqual(again["runs_ended"], [])
 
+    # ---------------------------------------- resolve (ST-052, PROP-008)
+
+    def test_resolve_serves_inherited_trigger_and_cadence(self):
+        # The PROP-008 case: the instance omits trigger/cadence, inheriting
+        # its shipped type's — the resolved output must carry them so a
+        # substrate-side driver classifies the job without merging.
+        self._declare("nightly", {
+            "job_schema_version": 1,
+            "id": "nightly",
+            "type": "maintenance-conformance",
+            "target": {"payload": {"timeout": 120}},
+        })
+        result = jobrun.resolve(self.root)
+        (entry,) = result["jobs"]
+        self.assertEqual(entry["job_id"], "nightly")
+        self.assertEqual(entry["source"], "instance")
+        self.assertEqual(entry["extends"], "maintenance-conformance")
+        self.assertEqual(entry["problems"], [])
+        self.assertEqual(entry["resolved"]["trigger"], "cron")
+        self.assertEqual(entry["resolved"]["cadence"]["schedule"],
+                         "0 6 * * 1-5")
+        self.assertEqual(result["problems"], [])
+
+    def test_resolve_single_id_and_unknown_id_refusal(self):
+        self._declare("checkup", self._core_defn("checkup"))
+        result = jobrun.resolve(self.root, "checkup")
+        self.assertEqual(result["job_id"], "checkup")
+        self.assertEqual(result["source"], "instance")
+        self.assertEqual(result["resolved"]["id"], "checkup")
+        with self.assertRaises(jobrun.JobRunError) as ctx:
+            jobrun.resolve(self.root, "ghost-job")
+        self.assertIn("no definition", str(ctx.exception))
+
+    def test_resolve_names_invalid_definition_problems_in_place(self):
+        broken = self._core_defn("broken")
+        del broken["guards"]
+        self._declare("broken", broken)
+        self._declare("checkup", self._core_defn("checkup"))
+        result = jobrun.resolve(self.root)
+        self.assertEqual([e["job_id"] for e in result["jobs"]],
+                         ["broken", "checkup"])  # config order kept
+        first, second = result["jobs"]
+        self.assertTrue(any("guards" in p for p in first["problems"]))
+        self.assertIsNotNone(first["resolved"])  # served, gaps named
+        self.assertEqual(second["problems"], [])
+
+    def test_cli_resolve(self):
+        self._declare("checkup", self._core_defn("checkup"))
+        code, out = self._cli("resolve", "--directory", str(self.root))
+        self.assertEqual(code, 0)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["jobs"][0]["job_id"], "checkup")
+        code, out = self._cli("resolve", "--directory", str(self.root),
+                              "--job-id", "ghost-job")
+        self.assertEqual(code, 2)
+        self.assertFalse(out["ok"])
+        self.assertIn("no definition", out["error"])
+
     # ------------------------------------------------- taxonomy & CLI
 
     def test_job_run_event_type_is_in_the_taxonomy(self):

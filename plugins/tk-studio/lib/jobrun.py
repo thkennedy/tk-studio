@@ -2,9 +2,9 @@
 (ST-6.2, AD-10, AD-11, AD-12).
 
 The job model is data (lib/job.py, ST-6.1); this module is the execution
-half the driver contract fixes: submit / status / cancel / wake, plus the
-two wrapper verbs the agent side of tk-studio-job uses to keep skill-target
-runs honest (account, finish). Scheduling itself is delegated: recurring
+half the driver contract fixes: submit / status / resolve / cancel / wake,
+plus the two wrapper verbs the agent side of tk-studio-job uses to keep
+skill-target runs honest (account, finish). Scheduling itself is delegated: recurring
 triggers return a machine-readable *directive* the bound substrate (v1:
 harness-native primitives — scheduled tasks, loop skills, self-paced
 wakeups) binds outside this process. Nothing here owns a clock.
@@ -23,6 +23,9 @@ Guarantees implemented here, verbatim from the contract:
   - A job declared durable records the requirement; a session-scoped
     binding surfaces the constraint in the submit response — the schedule
     is never silently lost.
+  - resolve serves every declared job with type extension applied — the
+    read surface substrate-side recurring classification consumes; a driver
+    never merges or raw-reads instance files (PROP-008, ST-052).
   - Job-level events: this wrapper alone emits `job-run` (one event per
     terminal transition); target skills emit their own surface events —
     never both for one failure (AD-12).
@@ -35,6 +38,7 @@ Guarantees implemented here, verbatim from the contract:
 CLI (all verbs end with JSON on stdout; never prompts — AD-11):
   uv run jobrun.py submit  --directory DIR --id JOB_ID
   uv run jobrun.py status  --directory DIR --job-id ID [--run-id RID]
+  uv run jobrun.py resolve --directory DIR [--job-id ID]
   uv run jobrun.py cancel  --directory DIR --job-id ID [--run-id RID]
   uv run jobrun.py wake    --directory DIR --job-id ID
   uv run jobrun.py account --directory DIR --run-id RID [--turns N] [--tokens N]
@@ -367,6 +371,36 @@ def status(project_root: Path, job_id: str, run_id: str | None = None) -> dict:
         for r in runs]}
 
 
+def _resolved_entry(entry: dict) -> dict:
+    """One declared job in the resolve response: the merged definition (the
+    one resolver's output — lib/job.py) plus where it came from. Problems
+    ride the entry named in place — an invalid job is served with its gaps,
+    never silently dropped."""
+    return {"job_id": entry["id"], "source": entry["source"],
+            "extends": entry["extends"], "path": entry["path"],
+            "problems": entry["problems"], "resolved": entry["definition"]}
+
+
+def resolve(project_root: Path, job_id: str | None = None) -> dict:
+    """§4 resolve: read-only; serve declared jobs fully resolved.
+
+    Type extension is studio-side (lib/job.py, the sole resolver) — a
+    substrate-side driver classifies recurring work from the trigger/cadence
+    served here and never merges or raw-reads instance files (PROP-008: an
+    instance inheriting trigger/cadence from its shipped type read as
+    trigger-less through the raw file). Without a job id: every declared
+    job in config order. An unknown id is a named refusal."""
+    root = Path(project_root)
+    if job_id is not None:
+        entry = joblib.load_instance(root, job_id)
+        if entry["definition"] is None:
+            raise JobRunError("; ".join(entry["problems"]))
+        return _resolved_entry(entry)
+    declared = joblib.load_instances(root)
+    return {"jobs": [_resolved_entry(e) for e in declared["jobs"]],
+            "problems": declared["problems"]}
+
+
 def cancel(project_root: Path, job_id: str, run_id: str | None = None) -> dict:
     """§4 cancel: stop scheduling; resumable runs terminate partial with
     reason `cancelled`. Idempotent — nothing left to cancel still answers."""
@@ -486,11 +520,14 @@ def main(argv: list[str] | None = None) -> int:
                     "the harness-native substrate")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    for name in ("submit", "status", "cancel", "wake", "account", "finish"):
+    for name in ("submit", "status", "resolve", "cancel", "wake", "account",
+                 "finish"):
         cmd = sub.add_parser(name)
         cmd.add_argument("--directory", required=True, help="project root")
         if name == "submit":
             cmd.add_argument("--id", required=True, help="job id")
+        elif name == "resolve":
+            cmd.add_argument("--job-id", help="one job (default: all declared)")
         elif name in ("status", "cancel", "wake"):
             cmd.add_argument("--job-id", required=True)
             if name != "wake":
@@ -512,6 +549,8 @@ def main(argv: list[str] | None = None) -> int:
             result = submit(Path(args.directory), args.id)
         elif args.command == "status":
             result = status(Path(args.directory), args.job_id, args.run_id)
+        elif args.command == "resolve":
+            result = resolve(Path(args.directory), args.job_id)
         elif args.command == "cancel":
             result = cancel(Path(args.directory), args.job_id, args.run_id)
         elif args.command == "wake":
