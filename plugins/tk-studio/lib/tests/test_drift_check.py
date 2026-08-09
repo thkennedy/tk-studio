@@ -6,6 +6,10 @@ plugin. The observed false-ok: installed_plugins.json empty, headless
 '/tk-studio:<skill>' returning 'Unknown command', drift reporting plugin
 plane ok. The probe reads the harness's own install record and drifts when
 the plugin is absent, stale, or its cache path is gone.
+
+Fix guidance follows SKILL.md's guided-fix table: FIX_HARNESS (fresh-install
+flow) only when no loadable entry exists at all; FIX_PLUGIN (update flow)
+when the plugin is installed but stale or its cache is gone (ST-046).
 """
 from __future__ import annotations
 
@@ -51,7 +55,7 @@ class HarnessLoadabilityTestCase(unittest.TestCase):
         probe = drift_check._harness_loadability(NAME, VERSION, self.home)
         self.assertEqual(probe["status"], "drift")
         self.assertIn("not installed in the harness", probe["detail"])
-        self.assertIn("claude plugin install", probe["fix"])
+        self.assertEqual(probe["fix"], drift_check.FIX_HARNESS)
 
     def test_record_without_the_plugin_is_drift(self):
         # the observed false-ok: record exists but holds no tk-studio entry
@@ -59,6 +63,7 @@ class HarnessLoadabilityTestCase(unittest.TestCase):
         probe = drift_check._harness_loadability(NAME, VERSION, self.home)
         self.assertEqual(probe["status"], "drift")
         self.assertIn("Unknown command", probe["detail"])
+        self.assertEqual(probe["fix"], drift_check.FIX_HARNESS)
 
     def test_installed_at_repo_version_is_ok(self):
         self._write_record({f"{NAME}@{NAME}": [self._install_entry(VERSION)]})
@@ -66,11 +71,15 @@ class HarnessLoadabilityTestCase(unittest.TestCase):
         self.assertEqual(probe["status"], "ok")
         self.assertIn("harness-loadable", probe["detail"])
 
-    def test_stale_harness_version_is_drift(self):
+    def test_stale_harness_version_is_drift_with_the_update_flow(self):
+        # installed-but-stale names the update flow, not the fresh-install
+        # flow — the case SKILL.md's fix table promises FIX_PLUGIN for
         self._write_record({f"{NAME}@{NAME}": [self._install_entry("0.0.1")]})
         probe = drift_check._harness_loadability(NAME, VERSION, self.home)
         self.assertEqual(probe["status"], "drift")
         self.assertIn("harness and repo out of step", probe["detail"])
+        self.assertEqual(probe["fix"], drift_check.FIX_PLUGIN)
+        self.assertIn("marketplace update", probe["fix"])
 
     def test_evicted_cache_path_is_drift(self):
         gone = self.home / "cache" / "gone"
@@ -79,6 +88,9 @@ class HarnessLoadabilityTestCase(unittest.TestCase):
         probe = drift_check._harness_loadability(NAME, VERSION, self.home)
         self.assertEqual(probe["status"], "drift")
         self.assertIn("installPath missing", probe["detail"])
+        # installed at version, payload gone: still the update flow —
+        # the harness knows the plugin, only the cache needs repopulating
+        self.assertEqual(probe["fix"], drift_check.FIX_PLUGIN)
 
     def test_unreadable_record_is_error(self):
         (self.home / "plugins" / "installed_plugins.json").write_text(
@@ -106,6 +118,7 @@ class HarnessLoadabilityTestCase(unittest.TestCase):
         probe = drift_check._harness_loadability(NAME, VERSION, self.home)
         self.assertEqual(probe["status"], "drift")
         self.assertIn("installPath missing", probe["detail"])
+        self.assertEqual(probe["fix"], drift_check.FIX_PLUGIN)
 
     def test_project_scoped_install_for_another_project_is_drift(self):
         entry = self._install_entry(VERSION)
@@ -116,6 +129,7 @@ class HarnessLoadabilityTestCase(unittest.TestCase):
                 NAME, VERSION, self.home, Path(project))
         self.assertEqual(probe["status"], "drift")
         self.assertIn("loadable from this project", probe["detail"])
+        self.assertEqual(probe["fix"], drift_check.FIX_HARNESS)
 
     def test_project_scoped_install_for_this_project_is_ok(self):
         with tempfile.TemporaryDirectory() as project:
