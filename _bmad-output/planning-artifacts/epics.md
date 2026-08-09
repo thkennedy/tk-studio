@@ -1055,3 +1055,67 @@ So that a shipped-but-undelivered surface like the EP-012 three-skill gap cannot
 **Given** the release commit for this epic
 **When** the suites run
 **Then** lib unit and conformance suites stay green, and the drift check on a healthy machine still reports all four planes clean
+
+## Epic 14: Denied Permissions Refuse Loudly
+
+PROP-005 (Adopted 2026-08-09, operator boundary triage) names the AD-11 gap observed live 2026-08-06: driving `tk-studio-detect` headless via `claude -p` with default permissions, the core's uv/python tool calls were denied and the run ended as a question with no terminal status block. The instruction-layer half is already landed — every SKILL.md carries the canonical unrunnable-core paragraph and the suite's doc-level `unrunnable-core` assertion pins it (DW-3 fold-in, 0.1.7) — but nothing today drives a surface through the real harness under denial and proves the refusal: the shipped drives invoke the deterministic cores directly, below the layer that failed. This epic lands the enforcement half: a harness-drive check class whose assertion logic is unit-pinned against fake transcripts (14.1), the live denied-permissions case for detect — opt-in, spend-bearing, degrading loudly (14.2), and the §8 contract publication as an additive 0.1.11 bump, version + pin test + README in lockstep (14.3). Declined PROP-006 and PROP-007 both routed their surviving enforcement concern to exactly this work. (AD-11 dual-mode invariant; AD-19 conformance as a shipped artifact; AD-12 evidence discipline.)
+
+### Story 14.1: Harness-Drive Check Class
+
+As a maintainer of the conformance suite,
+I want a check class that drives a surface through the real harness under a permission profile denying its deterministic core,
+So that the layer where PROP-005's failure actually happened — the skill instruction layer above the core — is the layer the suite proves.
+
+**Acceptance Criteria:**
+
+**Given** a harness run transcript ending in a valid terminal status block with `status: blocked` whose reason names the unrunnable core
+**When** the harness-drive assertion evaluates it
+**Then** the check passes — and a transcript that asks a question, ends without the block, or exceeds the wall-clock bound fails with the gap named in the check detail
+
+**Given** the lib unit suite
+**When** it runs
+**Then** the assertion logic is pinned against fake transcripts for each outcome class (blocked-with-block passes; question-without-block, missing block, and timeout each fail) with no live harness invocation and no spend, and the suite stays green
+
+### Story 14.2: The Denied-Permissions Case, Live
+
+As an operator running the conformance suite,
+I want the detect surface — the PROP-005 observation's subject — driven live under a denying permission profile when I opt in,
+So that the refusal discipline is proven against the real harness, not only documented.
+
+**Acceptance Criteria:**
+
+**Given** the harness pass invoked opted-in on a machine with the claude CLI available
+**When** detect is driven through the harness under the denying profile
+**Then** the run ends within the bound with a `blocked` status block naming the denied core, the check result rides the existing surfaces/failures report shape, and a failure emits a `headless-failure` event naming surface and assertion
+
+**Given** the default suite invocation with no opt-in
+**When** it runs
+**Then** no harness drive executes and the report names the harness pass as skipped by flag — loud, never silent
+
+**Given** a machine without the claude CLI
+**When** the harness pass is requested
+**Then** it ends blocked naming the missing CLI — never a hang, never a crash
+
+**Given** this story's landing
+**When** the opted-in pass runs once for real
+**Then** the live run is recorded green as the story's closing evidence
+
+### Story 14.3: Contract §8 Publishes the Harness Pass
+
+As a driver author consuming the contract,
+I want §8 to describe the harness-drive check class and its opt-in spend posture,
+So that a conforming driver knows the suite can reach through it and what a passing refusal looks like.
+
+**Acceptance Criteria:**
+
+**Given** the contract after 14.1 and 14.2 land
+**When** §8 is read
+**Then** it describes the harness-drive check class, the opt-in posture, and the denied-permissions case; the version history names 0.1.11 as an additive bump; the §2 surface table is untouched
+
+**Given** the lib suite
+**When** it runs
+**Then** the contract pin test asserts 0.1.11 and the contracts README row moves in the same commit — version, pin test, and README in lockstep
+
+**Given** the suites at the epic's close
+**When** lib unit and conformance run and the drift check runs on a healthy machine
+**Then** both suites are green and all four planes report clean
