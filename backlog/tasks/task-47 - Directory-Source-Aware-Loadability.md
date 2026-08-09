@@ -1,9 +1,10 @@
 ---
 id: TASK-47
 title: Directory-Source-Aware Loadability
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-08-09 05:23'
+updated_date: '2026-08-09 06:23'
 labels:
   - ST-047
 milestone: The Drift Check Tells the Truth
