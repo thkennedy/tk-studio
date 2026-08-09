@@ -117,9 +117,9 @@ def _harness_loadability(name: str, version: str,
                 "detail": (f"harness install record {record} is not the v2 "
                            "shape this probe understands — cannot judge "
                            "loadability")}
-    entries = [e for key, lst in plugins.items()
-               if key == name or key.startswith(f"{name}@")
-               for e in lst]
+    matched = {key: lst for key, lst in plugins.items()
+               if key == name or key.startswith(f"{name}@")}
+    entries = [e for lst in matched.values() for e in lst]
     # only entries loadable from the checked project count: user scope
     # (or unscoped) always, project scope only for this directory
     def _loadable_here(e: dict) -> bool:
@@ -145,11 +145,61 @@ def _harness_loadability(name: str, version: str,
                 "fix": FIX_PLUGIN}
     if not any(e.get("installPath") and Path(e["installPath"]).is_dir()
                for e in at_version):
+        markets = [key.split("@", 1)[1] for key in matched if "@" in key]
+        served = _directory_source_serves(name, version, home, markets)
+        if served:
+            return {"status": "ok", "detail": served}
         return {"status": "drift",
                 "detail": (f"harness entry v{version} installPath missing "
                            "(cache evicted)"),
                 "fix": FIX_PLUGIN}
     return {"status": "ok", "detail": f"harness-loadable (v{version} installed)"}
+
+
+def _directory_source_serves(name: str, version: str, home: Path,
+                             marketplaces: list[str]) -> str | None:
+    """A dangling installPath is not drift when the harness serves the plugin
+    straight from a directory-source marketplace carrying it at the checked
+    version — the 2.1.201 marketplace-update path records a cache path it
+    never materializes while every skill loads from the source directory
+    (PROP-017, studio-side half). A genuine eviction — no directory source,
+    or the source no longer at this version — still drifts. Every record
+    read here is externally owned: unreadable or unexpected shapes mean the
+    fallback simply does not apply, never an error."""
+    record = home / "plugins" / "known_marketplaces.json"
+    try:
+        known = json.loads(record.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(known, dict):
+        return None
+    for market in marketplaces:
+        entry = known.get(market)
+        if not isinstance(entry, dict):
+            continue
+        source = entry.get("source")
+        if not isinstance(source, dict) or source.get("source") != "directory":
+            continue
+        root = source.get("path")
+        if not root:
+            continue
+        catalog = Path(root) / ".claude-plugin" / "marketplace.json"
+        try:
+            market_doc = json.loads(catalog.read_text(encoding="utf-8"))
+            plug = next(p for p in market_doc["plugins"]
+                        if isinstance(p, dict) and p.get("name") == name)
+            plugin_dir = Path(root) / plug["source"]
+            manifest = json.loads(
+                (plugin_dir / ".claude-plugin" / "plugin.json")
+                .read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError, KeyError,
+                StopIteration):
+            continue
+        if manifest.get("version") == version:
+            return (f"harness-loadable (v{version} served from "
+                    f"directory-source marketplace {market}; recorded "
+                    "installPath unmaterialized)")
+    return None
 
 
 _STATUS_RANK = {"ok": 0, "drift": 1, "missing": 1, "error": 2}
