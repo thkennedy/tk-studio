@@ -1,10 +1,10 @@
 ---
 id: TASK-46
 title: Stale-Case Guidance Wires FIX_PLUGIN
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-08-09 05:23'
-updated_date: '2026-08-09 06:17'
+updated_date: '2026-08-09 06:21'
 labels:
   - ST-046
 milestone: The Drift Check Tells the Truth
