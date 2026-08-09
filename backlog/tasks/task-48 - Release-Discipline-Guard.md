@@ -1,10 +1,10 @@
 ---
 id: TASK-48
 title: Release-Discipline Guard
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-08-09 05:23'
-updated_date: '2026-08-09 06:29'
+updated_date: '2026-08-09 06:35'
 labels:
   - ST-048
 milestone: The Drift Check Tells the Truth
