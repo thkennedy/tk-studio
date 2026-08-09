@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -110,6 +111,58 @@ class IdempotenceTests(StoreTestCase):
         self.assertFalse(result["complete"])
         self.assertEqual(config.read_text(encoding="utf-8"), "a: {broken flow\n")
         self.assertIsNotNone(store.check_store()["config_error"])
+
+
+class ReadRetryTests(StoreTestCase):
+    """The config read outlasts a concurrent atomic replace (ST-054, PROP-019)."""
+
+    def _flaky_read_text(self, failures: int) -> tuple[dict, object]:
+        """Path.read_text stand-in: PermissionError for `failures` calls, then real."""
+        real = Path.read_text
+        state = {"calls": 0}
+
+        def read_text(path, *args, **kwargs):
+            state["calls"] += 1
+            if state["calls"] <= failures:
+                raise PermissionError(13, "sharing violation")
+            return real(path, *args, **kwargs)
+
+        return state, read_text
+
+    def test_transient_sharing_violation_healed(self):
+        store.ensure_store()
+        state, read_text = self._flaky_read_text(failures=2)
+        sleeps: list[float] = []
+        with mock.patch.object(Path, "read_text", read_text), \
+                mock.patch.object(store.time, "sleep", sleeps.append):
+            config = store.read_config()
+        self.assertEqual(config["role"], "developer")  # parsed despite the race
+        self.assertEqual(state["calls"], 3)
+        self.assertEqual(len(sleeps), 2)  # backed off, bounded
+
+    def test_persistent_denial_raises_after_bounded_attempts(self):
+        store.ensure_store()
+        state, read_text = self._flaky_read_text(failures=10 ** 6)
+        sleeps: list[float] = []
+        with mock.patch.object(Path, "read_text", read_text), \
+                mock.patch.object(store.time, "sleep", sleeps.append):
+            with self.assertRaises(PermissionError):
+                store.read_config()
+        self.assertEqual(state["calls"], store._READ_ATTEMPTS)  # never infinite
+        self.assertEqual(len(sleeps), store._READ_ATTEMPTS - 1)
+
+    def test_ensure_store_survives_transient_during_key_append(self):
+        # The evidenced frame: ensure_store's config parse racing a sibling's
+        # replace. A transient on the existing-config read must not fail standup.
+        self.root.mkdir(parents=True)
+        (self.root / "config.yaml").write_text("user_name: tim\n", encoding="utf-8")
+        state, read_text = self._flaky_read_text(failures=1)
+        with mock.patch.object(Path, "read_text", read_text), \
+                mock.patch.object(store.time, "sleep", lambda s: None):
+            result = store.ensure_store()
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["appended_keys"], ["role", "machine_id"])
+        self.assertEqual(store.read_config()["user_name"], "tim")
 
 
 class SurfaceWiringTests(StoreTestCase):
