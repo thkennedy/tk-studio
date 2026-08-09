@@ -23,6 +23,14 @@ alone) the runner asserts, per the driver contract:
                           closed, wall-clock bounded): output is JSON, and
                           ambiguity ends in a clean refusal — blocked, not
                           a hang, never a prompt (AD-11)
+  harness drives          (opt-in: --harness) the surface is driven through
+                          the real harness (claude -p) under a permission
+                          profile denying its deterministic core; the
+                          transcript must end in a `blocked` terminal status
+                          block naming the gap — the layer PROP-005's live
+                          failure escaped: a denied core left the skill
+                          asking a question with no block (ST-049, AD-11).
+                          Spend-bearing, so never part of the default pass.
 
 Every failed check emits a `headless-failure` measurement event naming the
 surface and assertion (taxonomy §headless-failure — this runner is that
@@ -41,6 +49,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -53,6 +62,7 @@ MANIFEST_PATH = Path(__file__).resolve().parent / "manifest.json"
 STATUS_SCHEMA_PATH = PLUGIN_ROOT / "contracts" / "status-block.schema.json"
 
 DEFAULT_TIMEOUT = 60
+HARNESS_TIMEOUT = 180  # harness drives carry an LLM turn — a wider bound
 
 
 class ConformanceError(Exception):
@@ -229,12 +239,111 @@ def _run_drive(surface: str, drive: dict, sandbox: Path, store: Path,
     return check
 
 
+# ---------------------------------------------------------- harness drives
+
+def evaluate_harness_transcript(stdout: str, *, assertion: str = "harness-blocked",
+                                surface: str | None = None,
+                                timed_out: bool = False, timeout: int = 0,
+                                marker: str | None = None) -> dict:
+    """Assert a harness transcript ends in a `blocked` terminal status block.
+
+    The layer under test is the skill instruction layer above the
+    deterministic core: under a permission profile denying the core, the
+    run must end with the block naming the gap. A question, free text, or
+    silence is exactly the failure PROP-005 observed live (AD-11) — and a
+    `complete` block under a denied core is a lie, not a pass."""
+    check = {"assertion": assertion, "ok": False, "detail": ""}
+    if timed_out:
+        check["detail"] = (f"hung past {timeout}s — a prompt or wait, never "
+                           "allowed headless (AD-11)")
+        return check
+    block = None
+    for line in reversed(stdout.strip().splitlines()):
+        line = line.strip()
+        if line.startswith('{"status"'):
+            try:
+                block = json.loads(line)
+            except json.JSONDecodeError:
+                pass  # a broken terminal block is no terminal block
+            break
+    if block is None:
+        check["detail"] = ("transcript ends without a terminal status block "
+                           "— a question or free text is not a refusal "
+                           "(AD-11: the block names the gap)")
+        return check
+    schema = json.loads(STATUS_SCHEMA_PATH.read_text(encoding="utf-8"))
+    props = set(schema["properties"])
+    missing = [k for k in schema["required"] if k not in block]
+    extra = [k for k in block if k not in props]
+    if missing or extra:
+        check["detail"] = (f"terminal block vs schema: missing {missing}, "
+                           f"extra {extra}")
+        return check
+    if block["status"] != "blocked":
+        check["detail"] = (f"expected status 'blocked' under a denied core, "
+                           f"got '{block['status']}'")
+        return check
+    if surface is not None and block.get("intent") != surface:
+        check["detail"] = (f"block intent '{block.get('intent')}' does not "
+                           f"name the surface '{surface}'")
+        return check
+    reason = block.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        check["detail"] = ("blocked block carries no reason naming the "
+                           "unrunnable core")
+        return check
+    if marker is not None and marker not in reason:
+        check["detail"] = (f"reason does not name the declared marker "
+                           f"{marker!r}: got {reason[:120]!r}")
+        return check
+    check["ok"] = True
+    return check
+
+
+def _run_harness_drive(surface: str, drive: dict, timeout: int) -> dict:
+    """One harness drive: the surface driven through the real harness
+    (claude -p) under the drive's permission profile; the transcript is
+    judged by evaluate_harness_transcript. Spend-bearing — reached only
+    through the opt-in harness pass, never the default suite."""
+    assertion = drive.get("assertion", "harness-blocked")
+    bound = int(drive.get("timeout", timeout))
+    exe = shutil.which("claude")
+    if exe is None:
+        return {"assertion": assertion, "ok": False,
+                "detail": "claude CLI not on PATH — the harness pass "
+                          "cannot run on this machine"}
+    argv = [exe, "-p", drive["prompt"], "--output-format", "text"]
+    settings = drive.get("settings")
+    if settings:
+        argv += ["--settings",
+                 str(Path(__file__).resolve().parent / settings)]
+    # harness drives run where the plugin is loadable: the repo root above
+    # the plugin when this is the studio repo, else the plugin root itself
+    repo_root = PLUGIN_ROOT.parent.parent
+    cwd = repo_root if (repo_root / ".claude-plugin").is_dir() else PLUGIN_ROOT
+    try:
+        proc = subprocess.run(
+            argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=bound, cwd=str(cwd))
+    except subprocess.TimeoutExpired:
+        return evaluate_harness_transcript(
+            "", assertion=assertion, surface=surface,
+            timed_out=True, timeout=bound)
+    return evaluate_harness_transcript(
+        proc.stdout, assertion=assertion, surface=surface,
+        marker=drive.get("marker") or None)
+
+
 # -------------------------------------------------------------------- run
 
 def run_suite(skills_dir: Path | None = None, manifest_path: Path | None = None,
-              timeout: int = DEFAULT_TIMEOUT, emit: bool = True) -> dict:
+              timeout: int = DEFAULT_TIMEOUT, emit: bool = True,
+              harness: bool = False) -> dict:
     """Drive every shipped surface; return the report. Emits headless-failure
-    events for every failed check unless emit=False."""
+    events for every failed check unless emit=False. Harness drives
+    (expect: harness-blocked) are spend-bearing and run only when
+    harness=True; otherwise each is reported as a named skip — loud,
+    never silent (ST-049)."""
     skills = Path(skills_dir) if skills_dir else PLUGIN_ROOT / "skills"
     shipped = discover_surfaces(skills)
     manifest = load_manifest(manifest_path)
@@ -261,6 +370,18 @@ def run_suite(skills_dir: Path | None = None, manifest_path: Path | None = None,
             sandbox.mkdir()
             store.mkdir()
             for drive in entry.get("drives", []):
+                if drive.get("expect") == "harness-blocked":
+                    if harness:
+                        checks.append(_run_harness_drive(
+                            surface, drive, HARNESS_TIMEOUT))
+                    else:
+                        checks.append({
+                            "assertion": drive.get("assertion",
+                                                   "harness-blocked"),
+                            "ok": True,
+                            "detail": "skipped: harness pass not enabled "
+                                      "(--harness) — spend-bearing drive"})
+                    continue
                 checks.append(_run_drive(surface, drive, sandbox, store,
                                          timeout))
         surfaces[surface] = checks
@@ -310,10 +431,15 @@ def main(argv: list[str] | None = None) -> int:
                      help="do not emit headless-failure events (local debugging)")
     cmd.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT,
                      help="per-drive wall clock in seconds")
+    cmd.add_argument("--harness", action="store_true",
+                     help="include spend-bearing harness drives (the surface "
+                          "driven through the real claude CLI under a "
+                          "denying permission profile)")
     args = parser.parse_args(argv)
 
     try:
-        report = run_suite(timeout=args.timeout, emit=not args.no_emit)
+        report = run_suite(timeout=args.timeout, emit=not args.no_emit,
+                           harness=args.harness)
     except ConformanceError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
         return 2
