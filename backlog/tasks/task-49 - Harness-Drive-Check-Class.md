@@ -1,9 +1,10 @@
 ---
 id: TASK-49
 title: Harness-Drive Check Class
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-08-09 10:07'
+updated_date: '2026-08-09 10:08'
 labels:
   - ST-049
 milestone: Denied Permissions Refuse Loudly
