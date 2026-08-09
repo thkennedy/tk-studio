@@ -2,7 +2,7 @@
   "job_schema_version": 1,
   "id": "research-ecosystem",
   "type": "research-ecosystem",
-  "description": "tk-studio instance of the ecosystem watch (retro AI-2, declared 2026-08-07): weekly self-paced survey of the toolchain the studio itself is built on, feeding the evolve loop through observation events. Charter scoped to the studio's domain; budget guards and stop conditions inherit from the shipped type. trigger/cadence restated explicitly (same values as the type): substrate-side discovery reads the raw instance file and cannot resolve type extension (AD-2) — see the 2026-08-07 observation event.",
+  "description": "tk-studio instance of the ecosystem watch (retro AI-2, declared 2026-08-07): weekly self-paced survey of the toolchain the studio itself is built on, feeding the evolve loop through observation events. Charter scoped to the studio's domain; budget guards and stop conditions inherit from the shipped type. trigger/cadence restated explicitly (same values as the type): the 2026-08-07 workaround for substrate-side discovery raw-reading this file — retire the restatement once the driving harness reads declared jobs through the §4 resolve verb (contract 0.1.12, EP-015, PROP-008 resolved); until then the duplication keeps the raw-reading tick classifying this job.",
   "trigger": "loop",
   "cadence": {
     "mode": "self-paced",

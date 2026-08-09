@@ -43,7 +43,7 @@ class DriverContractTestCase(unittest.TestCase):
             self.assertIn(value, self.text)
 
     def test_covers_scheduler_verbs(self):
-        for verb in ("submit", "status", "cancel", "wake"):
+        for verb in ("submit", "status", "resolve", "cancel", "wake"):
             self.assertRegex(self.text, rf"`{verb}`",
                              f"scheduler verb {verb} missing")
 
@@ -74,8 +74,9 @@ class DriverContractTestCase(unittest.TestCase):
         # surface + the shipped evolve-proposals job type (EP-010, additive);
         # 0.1.10 is the §2 base-update clarification (churn-normalized
         # verify + the verified no-op outcome, EP-011 ST-043); 0.1.11 adds
-        # the §8 conformance harness pass (EP-014 ST-051, additive)
-        self.assertRegex(self.text, r"\*\*0\.1\.11\*\*")
+        # the §8 conformance harness pass (EP-014 ST-051, additive); 0.1.12
+        # adds the §4 resolve verb (EP-015 ST-053, PROP-008, additive)
+        self.assertRegex(self.text, r"\*\*0\.1\.12\*\*")
         self.assertIn("Change policy", self.text)
         self.assertIn("MAJOR", self.text)
         self.assertRegex(self.text, r"[Bb]reaking")
@@ -181,6 +182,26 @@ class DriverContractTestCase(unittest.TestCase):
         # the shipped case is named with its denying profile
         self.assertIn("tk-studio-detect", section)
         self.assertIn("harness-deny-core.settings.json", section)
+
+    # --- ST-053: the 0.1.12 §4 resolve verb stays published (EP-015)
+
+    def test_publishes_the_resolve_verb(self):
+        # the §4 row: request/response shape, read-only, type extension
+        # studio-side — drivers never merge or raw-read instance files
+        row = next(line for line in self.text.splitlines()
+                   if line.startswith("| `resolve`"))
+        self.assertIn("{job_id?}", row)
+        self.assertIn("resolved", row)
+        self.assertIn("read-only", row)
+        self.assertIn("one resolver", row)
+        self.assertIn("PROP-008", row)
+        self.assertIn("named refusal", row)
+        # the §2 tk-studio-job row names the verb in payload and core
+        job_row = next(line for line in self.text.splitlines()
+                       if line.startswith("| `tk-studio-job`"))
+        self.assertIn("resolve", job_row)
+        # the driver guarantee: raw instance files are not a driver surface
+        self.assertIn("not a driver surface", self.text)
 
     def test_folds_in_the_deferred_wording(self):
         # DW-1: §4 submit is id-only; DW-3: four-plane + unrunnable-core
