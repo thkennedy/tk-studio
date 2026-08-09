@@ -12,6 +12,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 import sys
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
@@ -295,6 +296,135 @@ class ConformanceHarnessTestCase(unittest.TestCase):
         self.assertTrue(report["ok"])
         self.assertEqual(list((self.store / "measurements").glob("*.jsonl"))
                          if (self.store / "measurements").is_dir() else [], [])
+
+    # --- ST-049: harness drives are opt-in and never silent
+
+    def test_harness_drive_skipped_loud_without_opt_in(self):
+        # spend-bearing drives never run in the default pass — but the skip
+        # is named in the check detail, never a silent omission
+        self._make_skill("tk-studio-fake")
+        self._write_manifest({"tk-studio-fake": self._entry(drives=[{
+            "assertion": "denied-core-refusal",
+            "prompt": "/tk-studio:tk-studio-fake",
+            "expect": "harness-blocked"}])})
+        report = self._run()  # harness not enabled
+        self.assertTrue(report["ok"], report["failures"])
+        skip = next(c for c in report["surfaces"]["tk-studio-fake"]
+                    if c["assertion"] == "denied-core-refusal")
+        self.assertIn("skipped", skip["detail"])
+        self.assertIn("--harness", skip["detail"])
+
+    def test_harness_drive_without_cli_fails_loud(self):
+        # opt-in on a machine with no claude CLI: a named failure, no spend
+        self._make_skill("tk-studio-fake")
+        self._write_manifest({"tk-studio-fake": self._entry(drives=[{
+            "assertion": "denied-core-refusal",
+            "prompt": "/tk-studio:tk-studio-fake",
+            "expect": "harness-blocked"}])})
+        with mock.patch.object(runner.shutil, "which", return_value=None):
+            report = runner.run_suite(skills_dir=self.skills,
+                                      manifest_path=self.manifest,
+                                      emit=False, harness=True)
+        failure = next(f for f in report["failures"]
+                       if f["assertion"] == "denied-core-refusal")
+        self.assertIn("claude CLI not on PATH", failure["detail"])
+
+
+BLOCKED_TRANSCRIPT_BLOCK = (
+    '{"status": "blocked", "intent": "tk-studio-detect", "artifacts": [], '
+    '"reason": "deterministic core unrunnable: uv run denied by harness '
+    'permissions"}')
+
+
+class HarnessTranscriptTestCase(unittest.TestCase):
+    """ST-049: the harness-drive assertion pinned on fake transcripts —
+    every outcome class, no live harness invocation, no spend."""
+
+    def test_blocked_with_terminal_block_passes(self):
+        transcript = ("The Bash tool call was denied by permissions.\n\n"
+                      + BLOCKED_TRANSCRIPT_BLOCK + "\n")
+        check = runner.evaluate_harness_transcript(transcript)
+        self.assertTrue(check["ok"], check["detail"])
+
+    def test_intent_must_name_the_surface_when_given(self):
+        check = runner.evaluate_harness_transcript(
+            BLOCKED_TRANSCRIPT_BLOCK, surface="tk-studio-detect")
+        self.assertTrue(check["ok"], check["detail"])
+        check = runner.evaluate_harness_transcript(
+            BLOCKED_TRANSCRIPT_BLOCK, surface="tk-studio-onboard")
+        self.assertFalse(check["ok"])
+        self.assertIn("does not name the surface", check["detail"])
+
+    def test_question_without_block_fails(self):
+        # the PROP-005 live failure shape: a denied core left the skill
+        # asking a question with no terminal status block
+        transcript = ("I could not run the detect core because the uv tool "
+                      "call requires approval. Would you like me to retry "
+                      "with permissions granted?\n")
+        check = runner.evaluate_harness_transcript(transcript)
+        self.assertFalse(check["ok"])
+        self.assertIn("without a terminal status block", check["detail"])
+
+    def test_empty_transcript_fails(self):
+        check = runner.evaluate_harness_transcript("")
+        self.assertFalse(check["ok"])
+        self.assertIn("without a terminal status block", check["detail"])
+
+    def test_timeout_fails(self):
+        check = runner.evaluate_harness_transcript(
+            "", timed_out=True, timeout=180)
+        self.assertFalse(check["ok"])
+        self.assertIn("hung past 180s", check["detail"])
+
+    def test_complete_under_denial_fails(self):
+        # a complete block under a denied core is a lie, not a pass
+        transcript = ('{"status": "complete", "intent": "tk-studio-detect", '
+                      '"artifacts": [], "reason": null}')
+        check = runner.evaluate_harness_transcript(transcript)
+        self.assertFalse(check["ok"])
+        self.assertIn("expected status 'blocked'", check["detail"])
+
+    def test_blocked_without_reason_fails(self):
+        transcript = ('{"status": "blocked", "intent": "tk-studio-detect", '
+                      '"artifacts": [], "reason": null}')
+        check = runner.evaluate_harness_transcript(transcript)
+        self.assertFalse(check["ok"])
+        self.assertIn("no reason naming", check["detail"])
+
+    def test_marker_in_reason_passes_and_absent_fails(self):
+        check = runner.evaluate_harness_transcript(
+            BLOCKED_TRANSCRIPT_BLOCK, marker="denied by harness permissions")
+        self.assertTrue(check["ok"], check["detail"])
+        check = runner.evaluate_harness_transcript(
+            BLOCKED_TRANSCRIPT_BLOCK, marker="a phrase the reason lacks")
+        self.assertFalse(check["ok"])
+        self.assertIn("declared marker", check["detail"])
+
+    def test_broken_terminal_block_fails(self):
+        # a {"status"-shaped line that is not valid JSON is no block at all
+        transcript = '{"status": "blocked", "intent": '
+        check = runner.evaluate_harness_transcript(transcript)
+        self.assertFalse(check["ok"])
+        self.assertIn("without a terminal status block", check["detail"])
+
+    def test_off_schema_block_fails(self):
+        transcript = ('{"status": "blocked", "intent": "tk-studio-detect", '
+                      '"artifacts": [], "reason": "denied", '
+                      '"note": "not in the schema"}')
+        check = runner.evaluate_harness_transcript(transcript)
+        self.assertFalse(check["ok"])
+        self.assertIn("vs schema", check["detail"])
+
+    def test_last_block_in_transcript_wins(self):
+        # the terminal block is the judged one, not an earlier example the
+        # skill may have echoed from its own SKILL.md
+        transcript = (
+            '{"status": "complete", "intent": "tk-studio-detect", '
+            '"artifacts": [], "reason": null}\n'
+            "…the run then hit the denied tool call…\n"
+            + BLOCKED_TRANSCRIPT_BLOCK + "\n")
+        check = runner.evaluate_harness_transcript(transcript)
+        self.assertTrue(check["ok"], check["detail"])
 
 
 class ConformanceRealPluginTestCase(unittest.TestCase):
