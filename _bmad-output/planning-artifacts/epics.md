@@ -1163,3 +1163,27 @@ So that a conforming driver classifies recurring work from the contract surface 
 **Given** the suites at the epic's close
 **When** lib unit and conformance run and the drift check runs on a healthy machine
 **Then** both suites are green and all four planes report clean
+
+## Epic 16: The Store-Standup Read Retry
+
+PROP-019 (Adopted 2026-08-09, operator boundary triage) names the flake observed 2026-08-09: under multiprocessing concurrency, `ledger.emit` → `store.ensure_store`'s `config.yaml` read (`miniyaml.load` → `Path.read_text`) hit `PermissionError` (Errno 13, sharing violation) — on Windows a concurrent racer's atomic `os.replace` onto the same path makes the destination transiently unreadable, so first-emit standup races its own siblings; twice in a row on one boundary run, then consecutive green reruns, uncorrelated with any code change. This epic lands the ruled candidate: a bounded retry-on-sharing-violation on `store.py`'s config read path — the reader is the victim, so the reader heals (16.1). `miniyaml` stays a pure parser with no timing policy, and the `test_ledger` concurrency test stays untouched as the live race probe — the fix serializes nothing and masks nothing. No contract change: the store's surface and semantics are unchanged (AD-3 one store authority; AD-11 identical dual-mode behavior; platform envelope Windows-first).
+
+### Story 16.1: The Config Read Outlasts the Concurrent Replace
+
+As a studio surface emitting my first measurement event while sibling processes stand up the same store,
+I want the store's config read to outlast a concurrent atomic replace,
+So that a transient Windows sharing violation never fails an emit that would have succeeded a moment later.
+
+**Acceptance Criteria:**
+
+**Given** a config.yaml read that hits a transient PermissionError while a concurrent standup replaces the file
+**When** read_config or ensure_store reads it
+**Then** the read retries with bounded backoff and returns the parsed config once the replace settles — the transient never reaches the caller
+
+**Given** a PermissionError that persists past the retry budget
+**When** the read path exhausts its bounded attempts
+**Then** the error raises to the caller unchanged — never an infinite wait, never a swallowed real denial
+
+**Given** the lib suite
+**When** it runs
+**Then** the retry is unit-pinned (transient-then-success returns the parsed config; persistent raises after the bounded attempts), the test_ledger concurrency test stays untouched as the live race probe, miniyaml carries no retry, and the full suite is green

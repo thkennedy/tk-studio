@@ -35,6 +35,7 @@ import platform
 import re
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import miniyaml
@@ -86,12 +87,35 @@ def config_path() -> Path:
     return store_root() / "config.yaml"
 
 
+# Bounded backoff for config reads racing a concurrent standup's os.replace:
+# on Windows the destination is transiently unreadable during the replace
+# (ERROR_SHARING_VIOLATION surfaces as PermissionError). 5 attempts, 10ms
+# doubling — worst case ~150ms of waiting before the error is the caller's.
+_READ_ATTEMPTS = 5
+_READ_BACKOFF_S = 0.01
+
+
+def _read_text_retry(path: Path) -> str:
+    """read_text that outlasts a concurrent atomic replace of the same file.
+
+    Retries only PermissionError — the transient a racer's os.replace causes.
+    A denial that persists past the bounded attempts raises unchanged: a real
+    permission problem is never swallowed (ST-054, PROP-019).
+    """
+    for attempt in range(_READ_ATTEMPTS - 1):
+        try:
+            return path.read_text(encoding="utf-8")
+        except PermissionError:
+            time.sleep(_READ_BACKOFF_S * (2 ** attempt))
+    return path.read_text(encoding="utf-8")
+
+
 def read_config() -> dict:
     """Parsed user config; {} when the file does not exist."""
     path = config_path()
     if not path.is_file():
         return {}
-    return miniyaml.load(path)
+    return miniyaml.loads(_read_text_retry(path))
 
 
 def default_config_values() -> dict:
@@ -220,13 +244,13 @@ def ensure_store() -> dict:
             created.append("config.yaml")
     else:
         try:
-            config = miniyaml.load(path)
+            config = miniyaml.loads(_read_text_retry(path))
         except miniyaml.MiniYamlError:
             config = None  # unreadable → report via check_store, never rewrite
         if config is not None:
             missing = [k for k in REQUIRED_CONFIG_KEYS if config.get(k) in (None, "")]
             if missing:
-                existing = path.read_text(encoding="utf-8")
+                existing = _read_text_retry(path)
                 block = "" if existing.endswith("\n") or not existing else "\n"
                 for key in missing:
                     block += "\n".join(_render_key_lines(key, values)) + "\n"
