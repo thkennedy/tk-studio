@@ -999,3 +999,59 @@ So that a fresh or updated install actually has the evolve, knowledge, and sessi
 **Given** the release commit
 **When** the suites run
 **Then** the lib unit suite and the conformance suite stay green — no contract change rides the release (the version gate is delivery metadata, not a surface change)
+
+## Epic 13: The Drift Check Tells the Truth
+
+Three adopted proposals from the EP-012 closure corpus (operator triage 2026-08-09: PROP-015/016/017 Adopted, ISS-004 Resolved) converge on one surface: the AD-13 drift check must diagnose the plugin plane truthfully and name the right fix. Two defects surfaced live during the ST-045 release motion — the installed-but-stale case returns the fresh-install guidance (`FIX_HARNESS`) while the existing `FIX_PLUGIN` constant sits unreferenced (`drift_check.py` ~138-145, PROP-016), and the loadability probe false-drifts on a dangling `installPath` after every version bump because the 2.1.201 marketplace-update path records a cache directory it never materializes while the harness happily serves all 17 skills from the directory-source marketplace (lines 146-151, PROP-017 studio-side; the possible upstream defect stays held for filing until reproduced past CLI 2.1.201 — D4 posture). The third story lands the guard EP-012 deferred to the evolve loop: shipped surfaces must not outrun the version gate again (PROP-015). Fix strings and new drift cases ride the existing `{ok, result, planes[], fixes[]}` shape — no contract shape change expected; if §6 wording is touched, contract version + pin test + README move together (the 0.1.8 precedent). (AD-13 drift check; AD-1 composite distribution; AD-12 evidence discipline.)
+
+### Story 13.1: Stale-Case Guidance Wires FIX_PLUGIN
+
+As an operator running the activation drift check,
+I want the installed-but-stale case to name the update flow, not the fresh-install flow,
+So that the guided fix I follow is the one SKILL.md's fix table already promises for exactly this case.
+
+**Acceptance Criteria:**
+
+**Given** a harness install record holding the plugin at vX while the repo plugin is vY (X ≠ Y)
+**When** the drift check's loadability probe runs
+**Then** the plugin plane reports drift with `fix: FIX_PLUGIN` (`/plugin marketplace update tk-studio` + reinstall/update guidance), matching SKILL.md's guided-fix table — `FIX_HARNESS` remains the fix for the not-installed and no-loadable-entry cases only
+
+**Given** the activate script's unit suite
+**When** it runs
+**Then** the stale case (version-mismatch → FIX_PLUGIN) and the not-installed cases (→ FIX_HARNESS) are each covered, and the suite stays green
+
+### Story 13.2: Directory-Source-Aware Loadability
+
+As an operator whose harness serves the plugin from a directory-source marketplace,
+I want a dangling `installPath` to stop reporting as drift while every skill demonstrably loads,
+So that the drift check does not cry wolf after each version bump until an install-flow run happens to repopulate the cache.
+
+**Acceptance Criteria:**
+
+**Given** a version-matched harness entry whose `installPath` does not exist on disk
+**When** the marketplace source for the plugin is a local directory that carries the plugin at that same version
+**Then** the plugin plane reports ok, its detail naming directory-source serving — and a genuinely evicted cache with no such source directory still reports drift (the probe's regression test reproduces the ST-045 record shape: v0.2.0 entry, unmaterialized cache path, source dir present)
+
+**Given** the upstream half of PROP-017 (the v2 install record updated to a path never materialized)
+**When** this story lands
+**Then** no upstream filing occurs — reproduction past CLI 2.1.201 and the filing itself stay operator-gated (D4 posture), the studio-side fallback standing on its own
+
+### Story 13.3: Release-Discipline Guard
+
+As a maintainer shipping studio surfaces,
+I want the repo to go loud the moment the skill roster outruns the version gate,
+So that a shipped-but-undelivered surface like the EP-012 three-skill gap cannot recur silently.
+
+**Acceptance Criteria:**
+
+**Given** a committed released-roster record riding the lockstep release motion (version + skill list, third file of the gate)
+**When** the lib unit suite runs after `skills/` changes without a version-gate pull
+**Then** the suite goes red naming the roster delta — red exactly in the EP-012 gap shape (roster grew, version unchanged), green again when the release motion bumps the gate and roster together
+
+**Given** the drift check's plugin plane
+**When** the repo roster disagrees with the released roster at an unchanged version gate
+**Then** the plane reports drift with guidance naming the release motion (the lockstep bump), riding the existing planes/fixes shape
+
+**Given** the release commit for this epic
+**When** the suites run
+**Then** lib unit and conformance suites stay green, and the drift check on a healthy machine still reports all four planes clean
