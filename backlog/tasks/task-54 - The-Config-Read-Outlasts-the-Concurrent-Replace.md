@@ -1,9 +1,10 @@
 ---
 id: TASK-54
 title: The Config Read Outlasts the Concurrent Replace
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-09 23:23'
+updated_date: '2026-08-09 23:28'
 labels:
   - ST-054
 milestone: The Store-Standup Read Retry
