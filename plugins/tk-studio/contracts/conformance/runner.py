@@ -321,14 +321,19 @@ def _run_harness_drive(surface: str, drive: dict, timeout: int) -> dict:
     # the plugin when this is the studio repo, else the plugin root itself
     repo_root = PLUGIN_ROOT.parent.parent
     cwd = repo_root if (repo_root / ".claude-plugin").is_dir() else PLUGIN_ROOT
-    try:
-        proc = subprocess.run(
-            argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=bound, cwd=str(cwd))
-    except subprocess.TimeoutExpired:
-        return evaluate_harness_transcript(
-            "", assertion=assertion, surface=surface,
-            timed_out=True, timeout=bound)
+    # the child gets an isolated store: even a mis-denying profile must not
+    # let a live drive write measurement or run state into the real one
+    with tempfile.TemporaryDirectory(prefix="tk-harness-") as tmp:
+        env = dict(os.environ, TK_STUDIO_HOME=str(Path(tmp) / "store"))
+        try:
+            proc = subprocess.run(
+                argv, stdin=subprocess.DEVNULL, capture_output=True,
+                text=True, encoding="utf-8", errors="replace",
+                timeout=bound, cwd=str(cwd), env=env)
+        except subprocess.TimeoutExpired:
+            return evaluate_harness_transcript(
+                "", assertion=assertion, surface=surface,
+                timed_out=True, timeout=bound)
     return evaluate_harness_transcript(
         proc.stdout, assertion=assertion, surface=surface,
         marker=drive.get("marker") or None)
@@ -350,6 +355,7 @@ def run_suite(skills_dir: Path | None = None, manifest_path: Path | None = None,
     registered = manifest["surfaces"]
 
     surfaces: dict[str, list[dict]] = {}
+    harness_declared = 0
     for surface in shipped:
         checks: list[dict] = []
         entry = registered.get(surface)
@@ -371,6 +377,7 @@ def run_suite(skills_dir: Path | None = None, manifest_path: Path | None = None,
             store.mkdir()
             for drive in entry.get("drives", []):
                 if drive.get("expect") == "harness-blocked":
+                    harness_declared += 1
                     if harness:
                         checks.append(_run_harness_drive(
                             surface, drive, HARNESS_TIMEOUT))
@@ -407,11 +414,22 @@ def run_suite(skills_dir: Path | None = None, manifest_path: Path | None = None,
             except Exception as exc:  # emission must never mask the report
                 failure["emit_error"] = str(exc)
 
+    if harness_declared == 0:
+        harness_state = "none declared"
+    elif harness:
+        harness_state = "ran"
+    else:
+        harness_state = "skipped: --harness not given (spend-bearing)"
+
     return {
         "conformance_version": manifest.get("conformance_version", 1),
         "ok": not failures,
         "surfaces_checked": len(surfaces),
         "checks_run": sum(len(c) for c in surfaces.values()),
+        # the harness pass is never a silent cap: the report always names
+        # whether spend-bearing drives ran, were skipped, or don't exist
+        "harness_pass": {"declared": harness_declared,
+                         "state": harness_state},
         "failures": failures,
         "surfaces": surfaces,
     }
