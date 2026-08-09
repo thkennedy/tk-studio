@@ -1,10 +1,10 @@
 ---
 id: TASK-51
 title: Contract §8 Publishes the Harness Pass
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-08-09 10:07'
-updated_date: '2026-08-09 10:22'
+updated_date: '2026-08-09 10:27'
 labels:
   - ST-051
 milestone: Denied Permissions Refuse Loudly
