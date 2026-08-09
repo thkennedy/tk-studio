@@ -142,13 +142,13 @@ def _harness_loadability(name: str, version: str,
         return {"status": "drift",
                 "detail": (f"harness holds {held}, repo plugin is v{version} "
                            "(harness and repo out of step)"),
-                "fix": FIX_HARNESS}
+                "fix": FIX_PLUGIN}
     if not any(e.get("installPath") and Path(e["installPath"]).is_dir()
                for e in at_version):
         return {"status": "drift",
                 "detail": (f"harness entry v{version} installPath missing "
                            "(cache evicted)"),
-                "fix": FIX_HARNESS}
+                "fix": FIX_PLUGIN}
     return {"status": "ok", "detail": f"harness-loadable (v{version} installed)"}
 
 
