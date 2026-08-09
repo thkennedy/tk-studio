@@ -1,0 +1,22 @@
+{
+  "version": "0.2.0",
+  "skills": [
+    "tk-studio-activate",
+    "tk-studio-base-update",
+    "tk-studio-consolidate",
+    "tk-studio-detect",
+    "tk-studio-evolve",
+    "tk-studio-install",
+    "tk-studio-job",
+    "tk-studio-knowledge",
+    "tk-studio-measure-push",
+    "tk-studio-migrate",
+    "tk-studio-observe",
+    "tk-studio-onboard",
+    "tk-studio-orchestrator",
+    "tk-studio-plan-sync",
+    "tk-studio-report",
+    "tk-studio-research",
+    "tk-studio-session"
+  ]
+}
