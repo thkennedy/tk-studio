@@ -1,7 +1,7 @@
 {
   "job_schema_version": 1,
   "id": "evolve-proposals",
-  "description": "recurring evolve-loop drafting (EP-010, D3): cluster merged observation events from measurements/ into proposals/ledger.md PROP-NNN rows through tk-studio-evolve — documents only, adoption stays human (D1). Shipped undeclared: instance declaration is an operator call (as research-ecosystem was), and an instance must carry its own explicit trigger + cadence — substrate discovery reads raw instance JSON, never this type (AD-2; 2026-08-07 observation).",
+  "description": "recurring evolve-loop drafting (EP-010, D3): cluster merged observation events from measurements/ into proposals/ledger.md PROP-NNN rows through tk-studio-evolve — documents only, adoption stays human (D1). Shipped undeclared: instance declaration is an operator call (as research-ecosystem was). Substrate-side discovery reads declared jobs through the §4 resolve verb (contract 0.1.12), which serves the merged definition — an instance may inherit trigger + cadence from this type (PROP-008 resolved, EP-015; the raw instance file is not a driver surface).",
   "target": {
     "skill": "tk-studio-evolve",
     "payload": {
