@@ -73,8 +73,9 @@ class DriverContractTestCase(unittest.TestCase):
         # chipped at PR #21 review); 0.1.9 adds the tk-studio-evolve
         # surface + the shipped evolve-proposals job type (EP-010, additive);
         # 0.1.10 is the §2 base-update clarification (churn-normalized
-        # verify + the verified no-op outcome, EP-011 ST-043)
-        self.assertRegex(self.text, r"\*\*0\.1\.10\*\*")
+        # verify + the verified no-op outcome, EP-011 ST-043); 0.1.11 adds
+        # the §8 conformance harness pass (EP-014 ST-051, additive)
+        self.assertRegex(self.text, r"\*\*0\.1\.11\*\*")
         self.assertIn("Change policy", self.text)
         self.assertIn("MAJOR", self.text)
         self.assertRegex(self.text, r"[Bb]reaking")
@@ -162,6 +163,24 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertIn("knowledge-promotion", taxonomy["events"])
         self.assertIn("tk-studio-knowledge",
                       taxonomy["events"]["knowledge-promotion"]["emitter"])
+
+    # --- ST-051: the 0.1.11 §8 harness pass stays published (EP-014)
+
+    def test_publishes_the_harness_pass(self):
+        # anchor on §8's body, not the version-history line upstream
+        section = self.text[self.text.index("## 8. Conformance"):]
+        self.assertIn("harness pass", section)
+        self.assertIn("harness-blocked", section)
+        self.assertIn("--harness", section)
+        self.assertIn("harness_pass", section)
+        self.assertIn("spend-bearing", section)
+        # the judged shape: blocked block, surface intent, reason names core
+        self.assertIn("naming the unrunnable core", section)
+        # the opt-in posture is never a silent cap
+        self.assertIn("never a silent cap", section)
+        # the shipped case is named with its denying profile
+        self.assertIn("tk-studio-detect", section)
+        self.assertIn("harness-deny-core.settings.json", section)
 
     def test_folds_in_the_deferred_wording(self):
         # DW-1: §4 submit is id-only; DW-3: four-plane + unrunnable-core
