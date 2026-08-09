@@ -54,6 +54,12 @@
           "argv": ["lib/detect.py", "scan", "--directory", "{sandbox}"],
           "expect": "refusal",
           "marker": "ask"
+        },
+        {
+          "assertion": "denied-core-refusal",
+          "prompt": "/tk-studio:tk-studio-detect",
+          "settings": "fixtures/harness-deny-core.settings.json",
+          "expect": "harness-blocked"
         }
       ]
     },
