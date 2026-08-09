@@ -51,6 +51,25 @@ class HarnessLoadabilityTestCase(unittest.TestCase):
         return {"scope": "user", "installPath": str(install_path),
                 "version": version}
 
+    def _write_marketplaces(self, marketplaces: dict):
+        (self.home / "plugins" / "known_marketplaces.json").write_text(
+            json.dumps(marketplaces), encoding="utf-8")
+
+    def _directory_source_repo(self, version: str = VERSION) -> Path:
+        # a studio-repo-shaped marketplace root carrying the plugin at
+        # `version` under the catalog's relative source path
+        root = self.home / "source-repo"
+        (root / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+        (root / ".claude-plugin" / "marketplace.json").write_text(json.dumps({
+            "name": NAME,
+            "plugins": [{"name": NAME, "source": f"./plugins/{NAME}",
+                         "version": version}]}), encoding="utf-8")
+        manifest_dir = root / "plugins" / NAME / ".claude-plugin"
+        manifest_dir.mkdir(parents=True, exist_ok=True)
+        (manifest_dir / "plugin.json").write_text(json.dumps(
+            {"name": NAME, "version": version}), encoding="utf-8")
+        return root
+
     def test_no_install_record_is_drift(self):
         probe = drift_check._harness_loadability(NAME, VERSION, self.home)
         self.assertEqual(probe["status"], "drift")
@@ -91,6 +110,64 @@ class HarnessLoadabilityTestCase(unittest.TestCase):
         # installed at version, payload gone: still the update flow —
         # the harness knows the plugin, only the cache needs repopulating
         self.assertEqual(probe["fix"], drift_check.FIX_PLUGIN)
+
+    def test_dangling_install_path_with_directory_source_is_ok(self):
+        # the ST-045 record shape: version-matched project-scope entry, the
+        # marketplace-update path's never-materialized cache installPath —
+        # while a directory-source marketplace carries the plugin at that
+        # same version, so every skill loads and this is not drift
+        with tempfile.TemporaryDirectory() as project:
+            entry = {"scope": "project", "projectPath": project,
+                     "installPath": str(self.home / "cache" / NAME / VERSION),
+                     "version": VERSION}
+            self._write_record({f"{NAME}@{NAME}": [entry]})
+            self._write_marketplaces({NAME: {
+                "source": {"source": "directory",
+                           "path": str(self._directory_source_repo())},
+                "autoUpdate": True}})
+            probe = drift_check._harness_loadability(
+                NAME, VERSION, self.home, Path(project))
+        self.assertEqual(probe["status"], "ok")
+        self.assertIn("directory-source", probe["detail"])
+
+    def test_dangling_install_path_with_no_source_dir_is_still_drift(self):
+        # a genuinely evicted cache: the marketplace record names a
+        # directory that no longer exists on disk
+        self._write_record({f"{NAME}@{NAME}": [
+            {"scope": "user", "version": VERSION,
+             "installPath": str(self.home / "cache" / "gone")}]})
+        self._write_marketplaces({NAME: {
+            "source": {"source": "directory",
+                       "path": str(self.home / "vanished-repo")}}})
+        probe = drift_check._harness_loadability(NAME, VERSION, self.home)
+        self.assertEqual(probe["status"], "drift")
+        self.assertIn("cache evicted", probe["detail"])
+        self.assertEqual(probe["fix"], drift_check.FIX_PLUGIN)
+
+    def test_dangling_install_path_with_git_source_is_drift(self):
+        # only a directory source can serve without the cache — a github
+        # marketplace with an evicted cache is a real eviction
+        self._write_record({f"{NAME}@{NAME}": [
+            {"scope": "user", "version": VERSION,
+             "installPath": str(self.home / "cache" / "gone")}]})
+        self._write_marketplaces({NAME: {
+            "source": {"source": "github", "repo": "someone/somewhere"}}})
+        probe = drift_check._harness_loadability(NAME, VERSION, self.home)
+        self.assertEqual(probe["status"], "drift")
+        self.assertEqual(probe["fix"], drift_check.FIX_PLUGIN)
+
+    def test_directory_source_at_another_version_is_drift(self):
+        # the source dir moved on (or behind) — it does not carry the
+        # checked version, so the dangling cache path is real drift
+        self._write_record({f"{NAME}@{NAME}": [
+            {"scope": "user", "version": VERSION,
+             "installPath": str(self.home / "cache" / "gone")}]})
+        self._write_marketplaces({NAME: {
+            "source": {"source": "directory",
+                       "path": str(self._directory_source_repo("0.0.1"))}}})
+        probe = drift_check._harness_loadability(NAME, VERSION, self.home)
+        self.assertEqual(probe["status"], "drift")
+        self.assertIn("cache evicted", probe["detail"])
 
     def test_unreadable_record_is_error(self):
         (self.home / "plugins" / "installed_plugins.json").write_text(
