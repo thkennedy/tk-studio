@@ -1,9 +1,10 @@
 ---
 id: TASK-53
 title: Contract §4 Publishes the Read Surface
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-08-09 20:03'
+updated_date: '2026-08-09 20:11'
 labels:
   - ST-053
 milestone: The Resolved-Definition Read Surface

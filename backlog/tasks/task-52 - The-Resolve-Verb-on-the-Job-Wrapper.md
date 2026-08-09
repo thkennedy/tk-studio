@@ -1,10 +1,10 @@
 ---
 id: TASK-52
 title: The Resolve Verb on the Job Wrapper
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-08-09 20:03'
-updated_date: '2026-08-09 20:04'
+updated_date: '2026-08-09 20:11'
 labels:
   - ST-052
 milestone: The Resolved-Definition Read Surface
