@@ -1119,3 +1119,47 @@ So that a conforming driver knows the suite can reach through it and what a pass
 **Given** the suites at the epic's close
 **When** lib unit and conformance run and the drift check runs on a healthy machine
 **Then** both suites are green and all four planes report clean
+
+## Epic 15: The Resolved-Definition Read Surface
+
+PROP-008 (Adopted 2026-08-09, operator boundary triage) names the gap observed 2026-08-07: a substrate-side driver reads the raw `.tk-studio/jobs/<id>.json` instance file — per AD-2 it cannot call studio-side `lib/job.py`, the sole owner of type extension — so an instance inheriting trigger/cadence from its shipped type is skipped by recurring classification as trigger-less; the recorded workaround restates trigger/cadence in the instance file. The fork recorded at refinement was ruled at adoption: publish the resolved-definition read surface as a driver-contract verb (additive motion; type extension keeps its zero-duplication value, the raw-file read is replaced by a real contract surface), not the schema tightening. This epic lands it: a read-only `resolve` verb on the §4 job wrapper serving merged definitions from the one resolver (15.1), and the contract publication as an additive 0.1.12 bump, version + pin test + README in lockstep (15.2). (AD-2 the contract is the entire interface; AD-10 jobs are data, one validator; AD-11 dual-mode; AD-19 a surface is not done until conformance proves it.)
+
+### Story 15.1: The Resolve Verb on the Job Wrapper
+
+As a driver classifying recurring work substrate-side,
+I want a read-only resolve verb on the job wrapper that serves every declared job's fully resolved definition,
+So that recurring classification reads trigger and cadence from the contract surface instead of raw instance files it cannot resolve.
+
+**Acceptance Criteria:**
+
+**Given** a project declaring a type-extending instance that inherits trigger and cadence from its shipped type
+**When** resolve is invoked without a job id
+**Then** the response lists every declared job in config order with its merged definition — the inherited trigger and cadence present, source and extends named — and an entry with problems carries them named in place, never silently dropped
+
+**Given** a single job id
+**When** resolve is invoked with it
+**Then** the response carries that job's resolved definition, and an unknown id is a named refusal — an answer, never a hang, never a guess
+
+**Given** the lib unit suite, the conformance manifest, and the tk-studio-job skill
+**When** the suites run
+**Then** resolve's outcomes are unit-pinned (type-extension merge visible in the output, unknown id refused, an invalid definition's problems named), the manifest drives the verb headless-clean plus refusal-with-marker, the SKILL.md verb block names resolve, and both suites stay green
+
+### Story 15.2: Contract §4 Publishes the Read Surface
+
+As a driver author consuming the contract,
+I want §4's verb table to carry resolve with its read-only resolved-definition semantics,
+So that a conforming driver classifies recurring work from the contract surface and never re-implements type extension.
+
+**Acceptance Criteria:**
+
+**Given** the contract after 15.1 lands
+**When** §4 is read
+**Then** the verb table carries resolve — request, response, and read-only semantics naming type extension as studio-side, drivers never merge — the §2 tk-studio-job row names the verb, and the version history names 0.1.12 as an additive bump
+
+**Given** the lib suite
+**When** it runs
+**Then** the contract pin test asserts 0.1.12 and the contracts README row moves in the same commit — version, pin test, and README in lockstep
+
+**Given** the suites at the epic's close
+**When** lib unit and conformance run and the drift check runs on a healthy machine
+**Then** both suites are green and all four planes report clean
