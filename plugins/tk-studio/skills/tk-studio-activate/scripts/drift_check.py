@@ -4,6 +4,8 @@ Planes checked:
   bmad-base  installed _bmad/_config/manifest.yaml versions vs the bmad.lock pins
   plugin     installed plugin.json version vs the repo marketplace.json entry
              (catalog lockstep), when a marketplace catalog is present — plus
+             the release-discipline guard: skills/ vs released-roster.json,
+             the version gate's third file (ST-048) — plus
              harness loadability: the harness's own install record
              (installed_plugins.json) must hold the plugin at the repo version,
              or headless /tk-studio:<skill> is 'Unknown command' while the
@@ -50,6 +52,8 @@ FIX_PLUGIN = "run /plugin marketplace update tk-studio, then reinstall/update th
 FIX_HARNESS = ("install the plugin into the harness (AD-1 flow): claude plugin "
                "marketplace add <studio repo>, then claude plugin install tk-studio")
 FIX_STORE = "run the store standup: uv run <plugin>/lib/store.py standup (idempotent, ST-2.1)"
+FIX_RELEASE = ("run the release motion: bump plugin.json, marketplace.json, and "
+               "released-roster.json in lockstep (version gate + skill roster together)")
 
 
 def check_bmad_base(directory: Path, lock_path: Path) -> dict:
@@ -156,6 +160,49 @@ def _harness_loadability(name: str, version: str,
     return {"status": "ok", "detail": f"harness-loadable (v{version} installed)"}
 
 
+def _released_roster_check(plugin_root: Path, version: str) -> dict:
+    """ST-048 release-discipline guard: the skill roster must never outrun
+    the version gate. released-roster.json is the gate's third file — the
+    skill list delivered at the recorded version, bumped in lockstep with
+    plugin.json and marketplace.json by the release motion. A repo whose
+    skills/ disagrees with the record at an unchanged version is exactly the
+    EP-012 gap (shipped surfaces the installed plugin never delivered)."""
+    record_path = plugin_root / ".claude-plugin" / "released-roster.json"
+    if not record_path.is_file():
+        return {"status": "drift",
+                "detail": ("released-roster.json missing — the version "
+                           "gate's third file (skill roster unguarded)"),
+                "fix": FIX_RELEASE}
+    try:
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        recorded_version = record["version"]
+        recorded = set(record["skills"])
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        return {"status": "error",
+                "detail": f"released-roster.json unreadable: {exc}"}
+    skills_dir = plugin_root / "skills"
+    actual = {p.name for p in skills_dir.iterdir()
+              if p.is_dir() and (p / "SKILL.md").is_file()} \
+        if skills_dir.is_dir() else set()
+    if recorded_version != version:
+        return {"status": "drift",
+                "detail": (f"released-roster.json records v{recorded_version} "
+                           f"but the version gate is v{version} (gate's third "
+                           "file out of lockstep)"),
+                "fix": FIX_RELEASE}
+    if actual != recorded:
+        grew = ", ".join(f"+{s}" for s in sorted(actual - recorded))
+        shrank = ", ".join(f"-{s}" for s in sorted(recorded - actual))
+        delta = ", ".join(x for x in (grew, shrank) if x)
+        return {"status": "drift",
+                "detail": (f"skill roster outran the version gate: {delta} at "
+                           f"unchanged v{version} (the EP-012 gap shape — "
+                           "shipped surfaces the gate never delivered)"),
+                "fix": FIX_RELEASE}
+    return {"status": "ok",
+            "detail": f"released roster {len(recorded)} skills at the gate"}
+
+
 def _directory_source_serves(name: str, version: str, home: Path,
                              marketplaces: list[str]) -> str | None:
     """A dangling installPath is not drift when the harness serves the plugin
@@ -240,13 +287,16 @@ def check_plugin(directory: Path, marketplace_path: Path | None,
             else:
                 plane["detail"] = f"plugin v{installed.get('version')} in lockstep with catalog"
 
-    probe = _harness_loadability(installed.get("name"), installed.get("version"),
-                                 claude_home, directory)
-    if _STATUS_RANK[probe["status"]] > _STATUS_RANK[plane["status"]]:
-        plane["status"] = probe["status"]
-    plane["detail"] = "; ".join(x for x in (plane["detail"], probe["detail"]) if x)
-    if probe.get("fix"):
-        plane["fix"] = "; ".join(x for x in (plane.get("fix"), probe["fix"]) if x)
+    for sub in (
+        _released_roster_check(PLUGIN_ROOT, installed.get("version")),
+        _harness_loadability(installed.get("name"), installed.get("version"),
+                             claude_home, directory),
+    ):
+        if _STATUS_RANK[sub["status"]] > _STATUS_RANK[plane["status"]]:
+            plane["status"] = sub["status"]
+        plane["detail"] = "; ".join(x for x in (plane["detail"], sub["detail"]) if x)
+        if sub.get("fix"):
+            plane["fix"] = "; ".join(x for x in (plane.get("fix"), sub["fix"]) if x)
     return plane
 
 
