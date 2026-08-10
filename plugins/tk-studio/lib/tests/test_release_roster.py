@@ -22,6 +22,9 @@ sys.path.insert(0, str(PLUGIN_ROOT / "skills" / "tk-studio-activate" / "scripts"
 
 import drift_check  # noqa: E402
 
+sys.path.insert(0, str(PLUGIN_ROOT.parents[1] / "tools"))
+import release_archive  # noqa: E402  (repo-side, like the gate reads above)
+
 REPO_PLUGIN = json.loads(
     (PLUGIN_ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
 REPO_MARKETPLACE = json.loads(
@@ -66,6 +69,145 @@ class RealRepoGateTestCase(unittest.TestCase):
             {REPO_PLUGIN["version"]},
             "plugin.json, marketplace.json, and released-roster.json must "
             "bump together (the release motion)")
+
+
+ARCHIVE_FLOOR = (0, 2, 6)
+"""First version released under the archive-backstop discipline (ST-057).
+
+From this floor on, the roster must record the release's published
+archive — ``archive: {url, sha256}`` — written by
+``tools/release_archive.py`` after the asset is published and verified.
+The record trails its tag by one commit (a zip cannot contain its own
+digest), so this pin validates the repo tip, not historical checkouts:
+the tagged commit itself legitimately predates its record.
+"""
+
+
+def _version_tuple(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in version.split("."))
+
+
+def _archive_record_problems(record: dict) -> list[str]:
+    """Shape problems in a roster's archive record, [] when well-formed
+    (or legitimately absent below the floor)."""
+    version = record.get("version", "")
+    archive = record.get("archive")
+    problems: list[str] = []
+    if archive is None:
+        if _version_tuple(version) >= ARCHIVE_FLOOR:
+            problems.append(
+                f"version {version} is at or beyond the archive-backstop "
+                f"floor but records no archive — run "
+                f"tools/release_archive.py in the release motion")
+        return problems
+    sha = archive.get("sha256", "")
+    if not (isinstance(sha, str) and len(sha) == 64
+            and all(c in "0123456789abcdef" for c in sha.lower())):
+        problems.append(f"archive.sha256 is not a 64-hex digest: {sha!r}")
+    url = archive.get("url", "")
+    expected_tag = f"tk-studio--v{version}"
+    if not (isinstance(url, str) and url.startswith("https://")
+            and expected_tag in url):
+        problems.append(
+            f"archive.url must be https and name the release tag "
+            f"{expected_tag}: {url!r}")
+    return problems
+
+
+class ArchiveRecordPinTestCase(unittest.TestCase):
+    """ST-057: from the 0.2.6 floor on, every release records its
+    published archive in the roster, well-formed — red on a missing or
+    malformed record."""
+
+    def test_real_repo_roster_archive_rides_the_floor(self):
+        record = json.loads(ROSTER_RECORD.read_text(encoding="utf-8"))
+        problems = _archive_record_problems(record)
+        self.assertEqual(problems, [], "; ".join(problems))
+
+    def test_missing_record_at_the_floor_is_red(self):
+        problems = _archive_record_problems(
+            {"version": "0.2.6", "skills": []})
+        self.assertEqual(len(problems), 1)
+        self.assertIn("records no archive", problems[0])
+
+    def test_missing_record_below_the_floor_is_green(self):
+        self.assertEqual(_archive_record_problems(
+            {"version": "0.2.5", "skills": []}), [])
+
+    def test_malformed_record_is_red_even_below_the_floor(self):
+        problems = _archive_record_problems(
+            {"version": "0.2.5", "skills": [],
+             "archive": {"url": "https://x/tk-studio--v0.2.5/p.zip",
+                         "sha256": "abc123"}})
+        self.assertEqual(len(problems), 1)
+        self.assertIn("64-hex", problems[0])
+
+    def test_url_must_name_the_versions_release_tag(self):
+        problems = _archive_record_problems(
+            {"version": "0.2.6", "skills": [],
+             "archive": {"url": "https://x/tk-studio--v0.2.5/p.zip",
+                         "sha256": "0" * 64}})
+        self.assertEqual(len(problems), 1)
+        self.assertIn("tk-studio--v0.2.6", problems[0])
+
+    def test_http_url_is_red(self):
+        problems = _archive_record_problems(
+            {"version": "0.2.6", "skills": [],
+             "archive": {"url": "http://x/tk-studio--v0.2.6/p.zip",
+                         "sha256": "0" * 64}})
+        self.assertEqual(len(problems), 1)
+        self.assertIn("https", problems[0])
+
+    def test_well_formed_record_at_the_floor_is_green(self):
+        self.assertEqual(_archive_record_problems(
+            {"version": "0.2.6", "skills": [],
+             "archive": {"url": "https://github.com/x/y/releases/download/"
+                                "tk-studio--v0.2.6/tk-studio-0.2.6.zip",
+                         "sha256": "d1" * 32}}), [])
+
+
+class NormalizeZipTestCase(unittest.TestCase):
+    """ST-057: the published zip's bytes depend only on (tree, commit) —
+    the property raw ``git archive <ref>:subdir`` lacks (tree archives
+    are stamped with the archiving wall clock, probed live 2026-08-10)."""
+
+    @staticmethod
+    def _source_zip(path: Path, order: list[str], stamp: tuple) -> None:
+        import zipfile
+        entries = {"b.txt": b"beta", "a/c.txt": b"gamma", "a.txt": b"alpha"}
+        with zipfile.ZipFile(path, "w") as z:
+            for name in order:
+                info = zipfile.ZipInfo(name, date_time=stamp)
+                z.writestr(info, entries[name])
+
+    def test_output_depends_only_on_content_and_epoch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            self._source_zip(tmp / "s1.zip", ["b.txt", "a/c.txt", "a.txt"],
+                             (2026, 1, 1, 0, 0, 0))
+            self._source_zip(tmp / "s2.zip", ["a.txt", "b.txt", "a/c.txt"],
+                             (2026, 8, 10, 12, 34, 56))
+            release_archive.normalize_zip(tmp / "s1.zip", tmp / "n1.zip",
+                                          1754000000)
+            release_archive.normalize_zip(tmp / "s2.zip", tmp / "n2.zip",
+                                          1754000000)
+            self.assertEqual((tmp / "n1.zip").read_bytes(),
+                             (tmp / "n2.zip").read_bytes(),
+                             "normalized bytes must not depend on source "
+                             "entry order or mtimes")
+
+    def test_contents_and_names_survive_normalization(self):
+        import zipfile
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            self._source_zip(tmp / "s.zip", ["b.txt", "a/c.txt", "a.txt"],
+                             (2026, 1, 1, 0, 0, 0))
+            release_archive.normalize_zip(tmp / "s.zip", tmp / "n.zip",
+                                          1754000000)
+            with zipfile.ZipFile(tmp / "n.zip") as z:
+                self.assertEqual(z.namelist(),
+                                 ["a.txt", "a/c.txt", "b.txt"])
+                self.assertEqual(z.read("a/c.txt"), b"gamma")
 
 
 class RosterGuardShapeTestCase(unittest.TestCase):
