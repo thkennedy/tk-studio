@@ -31,8 +31,11 @@ archive shape:
   hosts are rejected; every redirect hop must satisfy the same rules;
   mismatch refuses install with "Plugin archive integrity check failed";
   `.zip` only, ≤ 256 MiB, `.claude-plugin/` at the archive root or exactly
-  one folder deep; **the digest doubles as the version when none is
-  declared, so the version must bump whenever the zip changes**.
+  one folder deep. Versioning splits by case (docs): **with no declared
+  version the digest IS the version** and tracks the zip automatically;
+  **with a declared version (tk-studio's case) that string is the update
+  signal — bump it whenever the zip changes, or users keep the cached
+  copy**.
 
 ## Local zip load — proven live, zero network
 
@@ -45,7 +48,9 @@ claude --plugin-dir <path>\tk-studio-<version>.zip plugin details tk-studio
 ```
 
 served the full component inventory — **17 skills + 2 agents at 0.2.5**
-(`Source: tk-studio@inline`), matching `released-roster.json` exactly.
+(`Source: tk-studio@inline`); the 17 skills match `released-roster.json`
+exactly (the roster records skills only — agents have no roster
+counterpart).
 `--plugin-dir` is session-scoped (per docs), so this is the **session-level
 offline path**: no marketplace, no network, no install record.
 
@@ -66,8 +71,12 @@ marketplace clone, and the fully materialized
    half delivered separately (the container docs assume the image provides
    it).
 2. **The seed's install record holds an absolute `installPath` into the
-   seed** — the seed must land at the same absolute path on the target, or
-   the record dangles.
+   seed** (observed). Whether runtime resolution follows that stored path
+   or probes by seed location is unproven here — the docs claim
+   relocation-safe resolution (content located by probing
+   `$CLAUDE_CODE_PLUGIN_SEED_DIR/...` at runtime, "not by trusting paths
+   stored inside the seed's JSON"), and their documented seed layout does
+   not even include `installed_plugins.json`.
 
 **Runtime (gap, pinned live):** at 2.1.226 the plugin management verbs
 (`plugin list`, `plugin details`, `plugin install`, `plugin marketplace
@@ -81,11 +90,17 @@ needs harness auth inside an isolated config home and is spend-bearing
 
 ## The private-repo constraint
 
-This repo is **private**, and the archive source type fetches
-anonymously over HTTPS. Neither a GitHub release asset nor a raw URL of a
-private repo is anonymously fetchable, so **the marketplace `archive`
-source entry cannot serve this plugin today**. The seam that activates it:
-public hosting (repo made public, or assets published to a public host).
+This repo is **private**. Archive downloads are unauthenticated by
+default; the one documented auth seam is marketplace-declared `headers`
+(an `extraKnownMarketplaces` URL-source entry), sent only while the
+download shares the marketplace URL's origin and **dropped on
+cross-origin redirect** — and GitHub release-asset downloads redirect
+off-origin, so headers cannot ride them. Neither a GitHub release asset
+nor a raw URL of a private repo is therefore fetchable by the archive
+source type, and **the marketplace `archive` source entry cannot serve
+this plugin today**. The seams that activate it: public hosting (repo
+made public, or assets on a public host), or a private artifact host
+that serves same-origin with header auth.
 Until then the backstop that works is the verified local zip — sneakernet
 the asset (authenticated `gh release download` on a connected machine),
 verify the SHA-256 out-of-band against `released-roster.json`'s record,
