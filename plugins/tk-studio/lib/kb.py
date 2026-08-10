@@ -53,16 +53,20 @@ def index_path(project_root: Path) -> Path:
 
 # ------------------------------------------------------------- file metadata
 
-def _parse_frontmatter(text: str) -> tuple[dict, str]:
-    """(frontmatter, body). Broken or absent frontmatter → ({}, whole text)."""
+def _parse_frontmatter(text: str) -> tuple[dict, str, str | None]:
+    """(frontmatter, body, error). Absent frontmatter → ({}, whole text,
+    None); broken frontmatter → ({}, body, the parse error) — the caller
+    surfaces it loudly (ST-059: swallowing it left a mis-indexed file with
+    no signal)."""
     if text.startswith("---\n") or text.startswith("---\r\n"):
         parts = re.split(r"^---\s*$", text, maxsplit=2, flags=re.MULTILINE)
         if len(parts) >= 3:
             try:
-                return miniyaml.loads(parts[1]) or {}, parts[2]
-            except miniyaml.MiniYamlError:
-                return {}, parts[2]
-    return {}, text
+                return miniyaml.loads(parts[1]) or {}, parts[2], None
+            except miniyaml.MiniYamlError as exc:
+                return {}, parts[2], str(exc)
+        return {}, text, "frontmatter fence never closes"
+    return {}, text, None
 
 
 def _first_heading(body: str) -> str | None:
@@ -83,7 +87,7 @@ def _first_paragraph_line(body: str) -> str | None:
 
 def _entry_for(kb_root: Path, path: Path) -> dict:
     text = path.read_text(encoding="utf-8", errors="replace")
-    front, body = _parse_frontmatter(text)
+    front, body, error = _parse_frontmatter(text)
     title = str(front.get("title") or _first_heading(body) or path.stem)
     description = str(front.get("description") or _first_paragraph_line(body) or "")
     description = " ".join(description.split())
@@ -92,12 +96,16 @@ def _entry_for(kb_root: Path, path: Path) -> dict:
     rank = front.get("rank")
     if not isinstance(rank, (int, float)) or isinstance(rank, bool):
         rank = DEFAULT_RANK
-    return {
+    entry = {
         "path": path.relative_to(kb_root).as_posix(),
         "title": title,
         "description": description,
         "rank": rank,
     }
+    if error:
+        entry["warning"] = (f"{entry['path']}: frontmatter ignored "
+                            f"(indexed on fallbacks) — {error}")
+    return entry
 
 
 def scan(project_root: Path) -> list[dict]:
@@ -164,7 +172,9 @@ def generate_index(project_root: Path) -> dict:
     changed = not target.exists() or target.read_text(encoding="utf-8") != content
     if changed:
         _atomic_write(target, content)
-    return {"index": str(target), "entries": len(entries), "changed": changed}
+    warnings = [e["warning"] for e in entries if "warning" in e]
+    return {"index": str(target), "entries": len(entries), "changed": changed,
+            "warnings": warnings}
 
 
 def standup_kb(project_root: Path) -> dict:
