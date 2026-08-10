@@ -1,6 +1,6 @@
 ---
 title: Claude Code plugin archive-install envelope — verified at CLI 2.1.226
-description: Live-probed facts for the EP-018 archive backstop — the validator's accepted archive shape, the --plugin-dir zip load proof, seed-dir mechanics and gaps, and the private-repo constraint on the archive source type.
+description: Live-probed facts for the EP-018 archive backstop — the accepted archive-source shape, mismatch refusal and version-gate behavior, the --plugin-dir zip load proof, seed-dir serve mechanics and gaps, and the private-repo constraint on the archive source type.
 rank: 30
 ---
 
@@ -29,13 +29,40 @@ archive shape:
   digests, and `type` in place of the `source` key.
 - Docs add (not re-probed live): loopback, link-local, and cloud-metadata
   hosts are rejected; every redirect hop must satisfy the same rules;
-  mismatch refuses install with "Plugin archive integrity check failed";
   `.zip` only, ≤ 256 MiB, `.claude-plugin/` at the archive root or exactly
   one folder deep. Versioning splits by case (docs): **with no declared
   version the digest IS the version** and tracks the zip automatically;
   **with a declared version (tk-studio's case) that string is the update
   signal — bump it whenever the zip changes, or users keep the cached
   copy**.
+
+## Live fetch, mismatch refusal, version gate — proven 2026-08-10
+
+The first operator-gated probe ran against a disposable dummy plugin
+(`probe-dummy`, public repo `thkennedy/plugin-archive-probe`, release
+assets on GitHub's default host) declared archive-source by a local
+directory marketplace, in isolated config homes. Four cells, all live:
+
+- **Fetch:** `plugin install` from a public-HTTPS GitHub release asset
+  succeeds — the off-origin asset redirect
+  (`objects.githubusercontent.com`) is tolerated, the digest verifies, and
+  the cache materializes fully (`cache/<mkt>/<plugin>/<version>/`, `.in_use`
+  markers, component inventory served).
+- **Mismatch refusal:** a wrong 64-hex `sha256` refuses with exactly
+  `Plugin archive integrity check failed for <url>: expected sha256 <a>,
+  got <b>. The archive was not installed.` — exit 1, nothing lands in the
+  cache. The docs' claim is now a live fact.
+- **Same declared version, changed bytes at the same URL:** invisible.
+  `marketplace update` + `plugin update` report "already at the latest
+  version"; no refetch, so the pinned `sha256` is **never re-checked after
+  first materialization**. Consequence: republishing an asset without a
+  version bump reaches nobody — the release motion's version-bump
+  discipline (and its never-mutate-a-published-asset corollary) is
+  load-bearing, not cosmetic.
+- **Declared version bump:** updating the marketplace entry (version +
+  url + sha256) and running the scoped update fetches the new asset,
+  verifies the new digest, and materializes the new version alongside the
+  old — the studio's release path, proven end to end.
 
 ## Local zip load — proven live, zero network
 
@@ -82,11 +109,29 @@ marketplace clone, and the fully materialized
 (`plugin list`, `plugin details`, `plugin install`, `plugin marketplace
 list`) do **not** consult `CLAUDE_CODE_PLUGIN_SEED_DIR` — all report
 empty/not-found even with the seed fully populated and the settings
-enablement present. The docs frame the seed as a session-start mechanism
-("starts with marketplaces and plugins already available"); whether a live
-session actually serves seeded plugins is **unproven here** — the probe
-needs harness auth inside an isolated config home and is spend-bearing
-(operator-gated, below).
+enablement present.
+
+**Live-session serve (proven 2026-08-10, second operator-gated probe):**
+a `claude -p` run under `CLAUDE_CODE_PLUGIN_SEED_DIR` with the settings
+enablement present, in an authenticated config home holding **no plugin
+cache and an empty install record**, splits cleanly:
+
+- **Explicit invocation works.** `/<plugin>:<skill>` resolves and loads
+  the seeded skill body — zero network, zero cache materialization in the
+  run home (its `plugins/installed_plugins.json` stays `{}` after the
+  run; the seed's cache is the only copy of the content on the machine).
+  Headless drives that name their skill exactly — the driver contract's
+  invocation form — are served by a seed alone.
+- **Advertisement does not.** The seeded skill is absent from the
+  session's available-skills surface: asked identically, the seeded
+  session denies the skill exists while a `--plugin-dir` session (positive
+  control, same question, same model) confirms it. Discovery-driven flows
+  — the model electing a skill it can see — will not find seeded plugins;
+  attended discovery UX still needs `--plugin-dir` or a real install.
+
+The seed's absolute-`installPath` question (above) stays open: here the
+stored path pointed into the seed, so path-following and probe-by-location
+resolution coincide — the probe cannot distinguish them.
 
 ## The private-repo constraint
 
@@ -107,12 +152,15 @@ verify the SHA-256 out-of-band against `released-roster.json`'s record,
 consume via `--plugin-dir <zip>` (session) or a seeded cache (persistent,
 subject to the runtime gap above).
 
-## Operator-gated probes (named, not skipped)
+## Operator-gated probes — both run 2026-08-10
+
+Released by the operator at the 2026-08-10 boundary triage and run the
+same day (results folded into the sections above):
 
 - **Live archive-source fetch, checksum-mismatch refusal, and
-  version-gate interaction** — need a plugin zip on a public HTTPS host;
-  publishing studio content (or even a dummy artifact) to a public host is
-  an operator call.
-- **Live-session seed serve** — a `claude -p` run under
-  `CLAUDE_CODE_PLUGIN_SEED_DIR` with an isolated, authenticated config
-  home; spend-bearing.
+  version-gate interaction** — run against a dummy artifact on a public
+  host (`thkennedy/plugin-archive-probe`, disposable, safe to delete); no
+  studio content was published.
+- **Live-session seed serve** — run spend-bearing with a positive control
+  validating the detection method; serve-on-explicit-invocation proven,
+  advertisement gap pinned.
