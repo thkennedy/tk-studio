@@ -12,7 +12,7 @@
       "name": "tk-studio",
       "source": "./plugins/tk-studio",
       "description": "AI dev-studio layer over a pinned BMad base: lockstep installs, data taxonomy, planning adapter, recommendation, and unattended operations.",
-      "version": "0.2.4"
+      "version": "0.2.5"
     }
   ]
 }
