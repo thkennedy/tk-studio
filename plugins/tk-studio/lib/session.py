@@ -32,7 +32,9 @@ Budget ruling (ST-9.2, made here): the 16 KB handoff budget does NOT grow —
 deltas share it. Deltas are pointers, not essays (reality/evidence stay
 compact; the byte budget enforces the total), and the list is capped at
 MAX_HANDOFF_DELTAS: a boundary carrying more than 16 corrections is not a
-handoff, it is a sign the seed needs re-research.
+handoff, it is a sign the seed needs re-research. The budget measures the
+artifact as written — the indent=2 + trailing-newline bytes that land on
+disk (ST-058), not a compact re-serialization.
 
 Capture (ST-9.4): a delta-carrying handoff is also captured into the
 per-project reconciliation queue at the boundary (lib/reconcile.py,
@@ -83,7 +85,8 @@ SEED_NAME = "seed.md"
 BOUNDARY_KINDS = ("epic", "story", "phase", "budget")
 MAX_HANDOFF_BYTES = 16384
 # Budget ruling (ST-9.2): deltas share the 16 KB, list length capped —
-# 16 pointer-shaped deltas cost well under a third of the budget.
+# 16 pointer-shaped deltas cost well under half the budget as written
+# (the ST-058 measurement is the landed indent=2 form).
 MAX_HANDOFF_DELTAS = 16
 
 END_DIRECTIVE = {
@@ -215,12 +218,18 @@ def write_handoff(project_root: Path, run_id: str, boundary_kind: str,
         "artifacts": _str_list(artifacts, "artifacts", required=False),
         "deltas": _validated_deltas(deltas, workspace),
     }
-    size = len(json.dumps(handoff, ensure_ascii=False).encode("utf-8"))
+    text = joblib.dump_workspace_json(handoff)
+    try:
+        size = len(text.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise SessionError(
+            f"handoff text is not UTF-8-encodable (lone surrogate?): {exc}"
+        ) from exc
     if size > MAX_HANDOFF_BYTES:
         raise SessionError(
             f"handoff is {size} bytes (max {MAX_HANDOFF_BYTES}) — compact "
             "means compact: point at artifacts instead of inlining them")
-    path = joblib.write_workspace_json(key, run_id, HANDOFF_NAME, handoff)
+    path = joblib.write_workspace_text(key, run_id, HANDOFF_NAME, text)
     checkpoint = dict(record.get("checkpoint") or {})
     checkpoint["boundary"] = handoff["boundary"]
     checkpoint["handoffs"] = checkpoint.get("handoffs", 0) + 1

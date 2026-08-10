@@ -40,10 +40,13 @@ ends the *run*.
 
 3. **Compact is enforced.** The 16 KB budget did not grow for deltas
    (ST-9.2 ruling): deltas share it, the list is capped at 16, and
-   `reality`/`evidence` are pointers (`path:line`, a URL), not essays. Past
-   either limit the handoff refuses — point at artifacts instead of
-   inlining them. One `handoff.json` per run, overwritten each boundary;
-   the latest boundary is the resume point.
+   `reality`/`evidence` are pointers (`path:line`, a URL), not essays. The
+   budget measures the artifact as written to disk (ST-058) — the result's
+   `bytes` is the on-disk size, so payloads that once passed near the
+   ceiling on a compact measurement now refuse honestly. Past either limit
+   the handoff refuses — point at artifacts instead of inlining them. One
+   `handoff.json` per run, overwritten each boundary; the latest boundary
+   is the resume point.
 
 4. **After `handoff`: END the session.** Relay the core's directive and
    stop — a handoff that keeps working is a history replay in the making.
