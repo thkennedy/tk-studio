@@ -77,15 +77,22 @@ Then consume it:
   The CLI loads the zip directly — the full skill roster, no
   marketplace, no install record. Repeat the flag per session.
 
-- **Persistent (seed mechanism — session-start only):** pre-populate a
-  seed on the connected machine
+- **Persistent (seed mechanism — explicit invocation only):**
+  pre-populate a seed on the connected machine
   (`CLAUDE_CODE_PLUGIN_CACHE_DIR=<seed>` + marketplace add + plugin
   install), carry the seed directory, and run with
   `CLAUDE_CODE_PLUGIN_SEED_DIR=<seed>` plus a `settings.json` carrying
   the `extraKnownMarketplaces`/`enabledPlugins` halves (they never enter
-  the seed). Known gap at CLI 2.1.226: the `claude plugin …` management
-  verbs do not read the seed — only session start consumes it, and the
-  live-session proof is still operator-gated (see the envelope record).
+  the seed). The serve split, proven live 2026-08-10 (ST-056 probes —
+  see the envelope record for the evidence): a seeded session serves
+  plugin skills on **explicit `/plugin:skill` invocation only**, zero
+  network, and never advertises them to the session — the model cannot
+  discover a seeded skill on its own. That is sufficient for
+  driver-contract headless drives, which name their skill exactly
+  (§2's invocation form), and insufficient for attended discovery,
+  which needs `--plugin-dir` or a real install. Unchanged gap at CLI
+  2.1.226: the `claude plugin …` management verbs do not read the seed
+  either.
 
 ## The archive marketplace source (the named seam)
 
