@@ -438,12 +438,18 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
+def dump_workspace_json(data: dict) -> str:
+    """The exact text a workspace JSON write lands — anything sizing an
+    artifact against a byte budget must measure this, not a re-serialization
+    (ST-058: the handoff budget once measured the compact form)."""
+    return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+
+
 def _atomic_write_json(path: Path, data: dict) -> None:
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-            json.dump(data, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
+            handle.write(dump_workspace_json(data))
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)
