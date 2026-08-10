@@ -16,11 +16,12 @@ the release motion's archive step is `tools/release_archive.py`.
 From 0.2.6 on, the release motion publishes a GitHub release
 `tk-studio--v<version>` carrying `tk-studio-<version>.zip` — the plugin
 tree at the tagged commit, contents at the zip root, **normalized to
-byte-determinism** (raw `git archive <tag>:subdir` output is
-time-varying: subtree archives are tree objects, which git stamps with
-the archiving wall clock, probed live 2026-08-10 — so the tool rewrites
-entries sorted and dated by the commit) — and records its digest in the
-roster:
+byte-determinism** (raw `git archive <tag>:subdir` output varies with
+the archiving wall clock — subtree archives are tree objects — and with
+local `core.autocrlf`; both probed live 2026-08-10, so the tool archives
+with eol conversion pinned off and rewrites entries sorted, dated by the
+commit, STORED not deflated, `create_system` pinned — machine- and
+platform-independent bytes) — and records its digest in the roster:
 
 ```json
 "archive": {
@@ -51,8 +52,10 @@ gh release download tk-studio--v<version> --pattern "tk-studio-<version>.zip" --
 ```
 
 Carry the zip to the target machine along with the expected digest
-(read it from `released-roster.json` at the same tag — a second channel,
-not the zip itself).
+(read it from `released-roster.json` at the **archive-record commit
+immediately after the tag** — repo tip, in practice; the roster at the
+tag itself predates its own record by design — a second channel, not
+the zip itself).
 
 On the **target machine**, verify out-of-band before use:
 
@@ -71,8 +74,8 @@ Then consume it:
   claude --plugin-dir path/to/tk-studio-<version>.zip
   ```
 
-  The CLI loads the zip directly — full 17-skill roster, no marketplace,
-  no install record. Repeat the flag per session.
+  The CLI loads the zip directly — the full skill roster, no
+  marketplace, no install record. Repeat the flag per session.
 
 - **Persistent (seed mechanism — session-start only):** pre-populate a
   seed on the connected machine

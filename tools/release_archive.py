@@ -46,8 +46,11 @@ PLUGIN_MANIFEST = REPO_ROOT / PLUGIN_SUBDIR / ".claude-plugin" / "plugin.json"
 
 
 def _run(args: list[str], **kw) -> subprocess.CompletedProcess:
-    return subprocess.run(args, capture_output=True, text=True,
-                          cwd=str(REPO_ROOT), **kw)
+    try:
+        return subprocess.run(args, capture_output=True, text=True,
+                              cwd=str(REPO_ROOT), **kw)
+    except FileNotFoundError:
+        _fail(f"{args[0]} not found on PATH")
 
 
 def _fail(reason: str) -> None:
@@ -75,15 +78,22 @@ def normalize_zip(raw: Path, out: Path, commit_epoch: int) -> None:
     prefix the plugin loader rejects. So determinism is restored here:
     entries re-written sorted, dated by the commit, permissions
     preserved, no extra fields, no comment.
+
+    Entries are STORED, not deflated: compressed bytes depend on the
+    zlib implementation (CPython 3.14's Windows builds moved to zlib-ng),
+    and ``create_system`` is pinned to 3 (UNIX): CPython derives it from
+    the build platform, and POSIX unzip honors ``external_attr`` mode
+    bits only under it — both probed/reviewed 2026-08-10 (PR #47).
     """
     stamp = time.gmtime(commit_epoch)[:6]
     with zipfile.ZipFile(raw) as src, \
-            zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+            zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as dst:
         for name in sorted(src.namelist()):
             entry = src.getinfo(name)
             info = zipfile.ZipInfo(name, date_time=stamp)
             info.external_attr = entry.external_attr
-            info.compress_type = zipfile.ZIP_DEFLATED
+            info.create_system = 3
+            info.compress_type = zipfile.ZIP_STORED
             dst.writestr(info, src.read(name))
 
 
@@ -92,25 +102,49 @@ def run(dry_run: bool) -> dict:
     tag = f"tk-studio--v{version}"
     asset = f"tk-studio-{version}.zip"
 
+    # Lockstep before any work — and long before any gh mutation: a
+    # partial gate bump must fail here, not after a release is created.
+    try:
+        roster = json.loads(ROSTER.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        _fail(f"released-roster.json unreadable: {exc}")
+    if roster["version"] != version:
+        _fail(f"roster version {roster['version']} != plugin.json "
+              f"{version} — run the gate bump first (lockstep)")
+
     if not _run(["git", "tag", "-l", tag]).stdout.strip():
         _fail(f"tag {tag} not found — mint it first: claude plugin tag")
-    commit = _run(["git", "rev-list", "-n", "1", tag]).stdout.strip()
+    proc = _run(["git", "rev-list", "-n", "1", tag])
+    if proc.returncode != 0:
+        _fail(f"git rev-list failed: {proc.stderr.strip()}")
+    commit = proc.stdout.strip()
 
+    # Cosmetic in dry-run (the URL is only recorded on publish), so a
+    # missing/unauthenticated gh must not block digest re-derivation.
     proc = _run(["gh", "repo", "view", "--json", "nameWithOwner",
                  "-q", ".nameWithOwner"])
     if proc.returncode != 0:
-        _fail(f"gh repo view failed: {proc.stderr.strip()}")
-    name_with_owner = proc.stdout.strip()
-    url = (f"https://github.com/{name_with_owner}/releases/download/"
-           f"{tag}/{asset}")
+        if not dry_run:
+            _fail(f"gh repo view failed: {proc.stderr.strip()}")
+        url = None
+    else:
+        name_with_owner = proc.stdout.strip()
+        url = (f"https://github.com/{name_with_owner}/releases/download/"
+               f"{tag}/{asset}")
 
-    commit_epoch = int(_run(["git", "show", "-s", "--format=%ct",
-                             commit]).stdout.strip())
+    proc = _run(["git", "show", "-s", "--format=%ct", commit])
+    if proc.returncode != 0:
+        _fail(f"git show failed: {proc.stderr.strip()}")
+    commit_epoch = int(proc.stdout.strip())
 
     with tempfile.TemporaryDirectory() as tmp:
         raw_path = Path(tmp) / f"raw-{asset}"
         zip_path = Path(tmp) / asset
-        proc = _run(["git", "archive", "--format=zip", "-o", str(raw_path),
+        # -c core.autocrlf=false: archives apply worktree eol conversion,
+        # so unpinned config would CRLF-convert every text entry on this
+        # machine and the digest would not reproduce elsewhere (PR #47).
+        proc = _run(["git", "-c", "core.autocrlf=false", "archive",
+                     "--format=zip", "-o", str(raw_path),
                      f"{tag}:{PLUGIN_SUBDIR}"])
         if proc.returncode != 0:
             _fail(f"git archive failed: {proc.stderr.strip()}")
@@ -151,10 +185,6 @@ def run(dry_run: bool) -> dict:
                   f"downloaded {published_sha} — not recording")
         result["verified"] = True
 
-    roster = json.loads(ROSTER.read_text(encoding="utf-8"))
-    if roster["version"] != version:
-        _fail(f"roster version {roster['version']} != plugin.json "
-              f"{version} — run the gate bump first (lockstep)")
     roster["archive"] = {"url": url, "sha256": sha}
     with ROSTER.open("w", encoding="utf-8", newline="\n") as fh:
         json.dump(roster, fh, indent=2)
