@@ -7,9 +7,13 @@ deliberately small subset so a stdlib-only parser stays trustworthy (NFR9):
     deeper indent on load)
   - lists of scalars ("- item" lines)
   - scalars: null/~, true/false, int, float, single/double-quoted or plain
-    strings
+    strings. Quoting is positional (ST-059): a quote quotes only where a
+    scalar can begin — at the start of a value — so plain prose keeps
+    mid-word apostrophes and unpaired quotes literally ("the validator's
+    shape", "rock 'n roll"); a value that STARTS with a quote must be a
+    well-formed quoted scalar and is rejected loud otherwise
   - full-line and trailing comments ("# ..." — a space before '#' required for
-    trailing)
+    trailing; a ' # ' inside plain prose starts a comment, as in YAML proper)
 
 Anything outside the subset (anchors, flow collections, multiline strings,
 lists of mappings, tabs) raises MiniYamlError rather than guessing — the same
@@ -39,16 +43,41 @@ _SAFE_PLAIN_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_\-./ @+()\\:~]*$")
 # -------------------------------------------------------------------- load
 
 def _strip_comment(line: str) -> str:
-    """Remove a trailing comment, honoring quoted strings."""
+    """Remove a trailing comment, honoring quoted strings. A quote opens a
+    region only where a quoted scalar can begin — at line start or after
+    whitespace — and only when a same-char mate exists later on the line:
+    a mid-word apostrophe or an unpaired quote is literal prose (ST-059).
+    Inside a region the scalar escapes are honored — `''` in single
+    quotes, backslash-escaped `"` (with backslash-run parity) in double
+    quotes — and a region left open at end of line raises: an opened
+    quote that dangles is malformed input, not prose."""
     quote = None
-    for i, ch in enumerate(line):
-        if quote:
-            if ch == quote:
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if quote == "'":
+            if ch == "'":
+                if i + 1 < n and line[i + 1] == "'":
+                    i += 2  # '' — escaped quote, region stays open
+                    continue
                 quote = None
+        elif quote == '"':
+            if ch == '"':
+                backslashes = 0
+                j = i - 1
+                while j >= 0 and line[j] == "\\":
+                    backslashes += 1
+                    j -= 1
+                if backslashes % 2 == 0:
+                    quote = None
         elif ch in "'\"":
-            quote = ch
+            begins_scalar = i == 0 or line[i - 1] in " \t"
+            if begins_scalar and line.find(ch, i + 1) != -1:
+                quote = ch
         elif ch == "#" and (i == 0 or line[i - 1] in " \t"):
             return line[:i]
+        i += 1
     if quote:
         raise MiniYamlError(f"unterminated quote: {line.strip()!r}")
     return line
@@ -71,7 +100,13 @@ def _parse_scalar(text: str) -> object:
             raise MiniYamlError(f"malformed quoted scalar: {text!r}")
         body = text[1:-1]
         if text[0] == "'":
+            # a bare quote mid-body means the scalar really closed early
+            # and junk followed ("'x' y'") — reject, never guess (ST-059)
+            if "'" in body.replace("''", ""):
+                raise MiniYamlError(f"malformed quoted scalar: {text!r}")
             return body.replace("''", "'")
+        if '"' in body.replace("\\\\", "").replace('\\"', ""):
+            raise MiniYamlError(f"malformed quoted scalar: {text!r}")
         return body.replace('\\"', '"').replace("\\\\", "\\")
     for forbidden in ("{", "[", "&", "*", "|", ">"):
         if text.startswith(forbidden):

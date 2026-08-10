@@ -104,6 +104,48 @@ class IndexTests(KbTestCase):
         self.assertIn("…", text)
         self.assertNotIn(long_desc, text)
 
+    def test_apostrophe_prose_indexes_at_declared_rank_warning_free(self):
+        # ST-059 (PROP-022): the envelope-shaped regression — an unquoted
+        # description holding a possessive indexes on its own frontmatter,
+        # not on silent fallbacks.
+        kb.standup_kb(self.project)
+        self._write("envelope.md", (
+            "---\n"
+            "title: The Validator's Envelope\n"
+            "description: the validator's accepted shape, pinned live\n"
+            "rank: 30\n"
+            "---\n"
+            "# Body Heading\n\nBody paragraph.\n"
+        ))
+        self._write("other.md", "---\nrank: 40\ntitle: Other\n---\n# O\n\nText.\n")
+        result = kb.generate_index(self.project)
+        self.assertEqual(result["warnings"], [])
+        lines = [l for l in self._index().splitlines() if l.startswith("- [")]
+        self.assertEqual(lines[0], "- [The Validator's Envelope](envelope.md)"
+                                   " — the validator's accepted shape, pinned live")
+
+    def test_unclosed_fence_warns_loud(self):
+        # ST-059 review chips: a fence that opens and never closes was the
+        # surviving silent-mis-index shape — it now names itself.
+        kb.standup_kb(self.project)
+        self._write("unterm.md", "---\ntitle: Should Be Title\n")
+        result = kb.generate_index(self.project)
+        self.assertEqual(len(result["warnings"]), 1)
+        self.assertIn("unterm.md", result["warnings"][0])
+        self.assertIn("never closes", result["warnings"][0])
+
+    def test_broken_frontmatter_warns_loud_and_falls_back(self):
+        # ST-059 (PROP-022): the silence is the defect — a parse failure
+        # names the file and the error in the result while the entry lands
+        # on today's fallbacks.
+        kb.standup_kb(self.project)
+        self._write("broken.md", "---\na: {broken\n---\n# Broken Front\n\nStill indexed.\n")
+        result = kb.generate_index(self.project)
+        self.assertEqual(len(result["warnings"]), 1)
+        self.assertIn("broken.md", result["warnings"][0])
+        self.assertIn("frontmatter ignored", result["warnings"][0])
+        self.assertIn("- [Broken Front](broken.md) — Still indexed.", self._index())
+
     def test_index_requires_kb(self):
         with self.assertRaises(kb.KbError):
             kb.generate_index(self.project)
