@@ -1,9 +1,10 @@
 ---
 id: TASK-57
 title: The Release Motion Publishes the Pinned Archive
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-10 08:37'
+updated_date: '2026-08-10 09:21'
 labels:
   - ST-057
 milestone: The Release Ships a Pinned Archive Backstop
