@@ -221,6 +221,10 @@ class PromoteTests(JiraTestCase):
         result = self._project()
         self.assertEqual(result["action"], "projected")
         self.assertEqual(len(result["promote"]["created"]), 5)
+        # EP-017: every promote entry names the canonical file it rewrote
+        # (external snapshot) so sync's written[] roll-up can carry it.
+        for entry in result["promote"]["created"]:
+            self.assertTrue(entry.get("path", "").endswith(f"{entry['id']}.md"))
         epic = self.fake.issues[self._jira_key("EP-001")]
         self.assertEqual(epic["fields"]["issuetype"], {"name": "Epic"})
         self.assertEqual(epic["fields"]["summary"], "First Epic")

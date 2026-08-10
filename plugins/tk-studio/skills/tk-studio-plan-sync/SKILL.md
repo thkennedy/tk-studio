@@ -60,6 +60,12 @@ committed per-project counter at `.tk-studio/plan-counter.yaml`).
    - pulls story status from `sprint-status.yaml` when present, mapped onto
      the closed canonical enum (unmappable states reported, never guessed).
 
+   The result names **every file the run wrote** — `written[]` at both
+   levels (counter, entity files, story-file stamps, projection writes,
+   index) with `normalize.counter` naming the committed id counter — so
+   commit staging derives from the response alone: stage exactly the
+   `written[]` paths, nothing recalled by hand (EP-017, PROP-020).
+
 2. Blocking conditions (exit 2, nothing written):
    - **duplicate ids** anywhere under `_bmad-output/` — both paths are named;
      a human renumbers, then sync reruns (AD-4: never auto-pick a survivor);

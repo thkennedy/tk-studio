@@ -477,7 +477,7 @@ def promote(plan_dir: Path, client: JiraClient | None, project_key: str,
         front.setdefault("external", {})[BINDING] = snapshot
         front["updated"] = _now_iso()
         _atomic_write(path, interchange.render_entity(front, body))
-        bucket.append({"id": front["id"], "key": key})
+        bucket.append({"id": front["id"], "key": key, "path": str(path)})
 
     return {"created": created, "updated": updated, "notes": notes,
             "entities": len(entities), "project_key": project_key}
