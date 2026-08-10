@@ -1187,3 +1187,31 @@ So that a transient Windows sharing violation never fails an emit that would hav
 **Given** the lib suite
 **When** it runs
 **Then** the retry is unit-pinned (transient-then-success returns the parsed config; persistent raises after the bounded attempts), the test_ledger concurrency test stays untouched as the live race probe, miniyaml carries no retry, and the full suite is green
+
+## Epic 17: The Sync Result Names Every Written File
+
+PROP-020 (Adopted 2026-08-10, operator boundary triage) names the staging gap observed 2026-08-09: `plansync sync` moves `.tk-studio/plan-counter.yaml` (the AD-4 committed id counter) on every mint, but the result JSON does not name it — `normalize.files[]` lists only plan entities, so the EP-015 planning commit staged from the response and missed the counter (aeba4e1, follow-up 20555fa). This epic lands the ruled candidate: the sync result names every file the run wrote, counter included, so commit staging derives from the response alone. Normalize gains a `counter` object (the committed counter's path plus whether this run persisted it) and a `written[]` list (counter, created/repaired entity files, stamped story files); sync aggregates a top-level `written[]` over normalize's writes, the projection writes the adapters name (both backends' pull-back entries already carry paths; jira promote entries gain one), and the regenerated index when it changed. An additive result-shape change published at driver-contract 0.1.13 — version, pin test, and contracts README move together. A rerun on unchanged data stays a byte-identical no-op reporting nothing written.
+
+### Story 17.1: Staging Derives from the Response Alone
+
+As an operator staging a planning commit from a sync response,
+I want the result JSON to name every file the run wrote — counter included,
+So that commit staging derives from the response alone and the hand-staged counter gotcha retires.
+
+**Acceptance Criteria:**
+
+**Given** a sync run that mints ids
+**When** the result returns
+**Then** normalize carries a `counter` object naming the committed counter's path with `written` true, and a `written[]` list naming the counter, every created or repaired entity file, and every stamped story file — and under `--dry-run` the same lists name what the run would write while nothing lands
+
+**Given** a rerun on unchanged data
+**When** normalize runs again
+**Then** `counter.written` is false and `written[]` is empty — the no-op stays byte-identical and reports nothing written
+
+**Given** the sync verb under a bound backend
+**When** projection and index write files
+**Then** the sync-level `written[]` aggregates normalize's writes, every projection write the adapters name — jira promote entries gain a `path` so canonical snapshot rewrites are named too — and the index when it changed, deduplicated in write order
+
+**Given** the lib suite and the contract
+**When** they run
+**Then** the new fields are unit-pinned, §2's plan-sync row states the result names every written file, the version history names 0.1.13 as an additive bump with the pin test and contracts README moving in the same commit, and the full suite is green
