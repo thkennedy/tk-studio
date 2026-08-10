@@ -18,5 +18,9 @@
     "tk-studio-report",
     "tk-studio-research",
     "tk-studio-session"
-  ]
+  ],
+  "archive": {
+    "url": "https://github.com/thkennedy/tk-studio/releases/download/tk-studio--v0.2.6/tk-studio-0.2.6.zip",
+    "sha256": "190cbfd847c3abd612b7716743bf6094bfc4f048fc69dc82a4064be029c243f4"
+  }
 }
