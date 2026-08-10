@@ -1,9 +1,10 @@
 ---
 id: TASK-59
 title: Frontmatter Prose Survives Apostrophes and Indexing Fails Loud
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-10 19:08'
+updated_date: '2026-08-10 19:47'
 labels:
   - ST-059
 milestone: Three Small Truths from the Boundary Loop
