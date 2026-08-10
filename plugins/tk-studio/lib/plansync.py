@@ -41,8 +41,10 @@ in its place.
 
 Both verbs name every file they wrote in `written[]` — the counter included,
 with `counter` naming the committed id counter's path and whether this run
-persisted it — so commit staging derives from the response alone (EP-017,
-PROP-020). Under `--dry-run` the same lists name what the run would write.
+persisted it — and sync names replaced projection files in `removed[]`, so
+commit staging derives from the response alone (EP-017, PROP-020). Under
+`--dry-run` the same lists name what the run would write or remove. A sync
+blocked at the projection still names normalize's landed writes.
 
 CLI:
   uv run plansync.py normalize --directory ROOT [--dry-run]
@@ -633,6 +635,10 @@ def sync(project_root: Path, dry_run: bool = False,
         if result["projection"].get("blocked"):
             result.update({"blocked": True,
                            "reason": result["projection"]["reason"]})
+            # Normalize's writes already landed — a projection block must
+            # still name them or staging misses the minted files (EP-017).
+            result["written"] = list(norm.get("written") or [])
+            result["removed"] = []
             return result
 
     # Index last: pull-back may have updated canonical statuses.
@@ -649,6 +655,10 @@ def sync(project_root: Path, dry_run: bool = False,
     seen: set[str] = set()
     result["written"] = [p for p in written
                          if not (p in seen or seen.add(p))]
+    # Only the projection removes files (a rename replaces its backlog
+    # file); normalize and the index never delete.
+    result["removed"] = list(
+        (result["projection"].get("promote") or {}).get("removed") or [])
     result["ok"] = True
     return result
 

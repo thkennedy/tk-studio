@@ -375,6 +375,36 @@ class SyncTests(PlanSyncTestCase):
         self.assertEqual(
             result["written"],
             result["normalize"]["written"] + [result["index"]["index"]])
+        self.assertEqual(result["removed"], [])
+
+    def test_backlog_sync_names_snapshot_rewrites(self):
+        # EP-017 review chip: promote rewrites each projected entity's
+        # canonical file (external snapshot) — written[] must carry both
+        # sides or staging misses half the sync.
+        runtime = {"planning": {"backend": "backlog-md"}}
+        result = plansync.sync(self.root, runtime=runtime)
+        self.assertTrue(result["ok"])
+        written = result["written"]
+        self.assertTrue(any(os.sep + "backlog" + os.sep in p for p in written))
+        for entity_id in ("EP-001", "ST-001", "ST-002", "EP-002", "ST-003"):
+            self.assertIn(str(self._plan_file(entity_id)), written)
+        self.assertEqual(result["removed"], [])
+        rerun = plansync.sync(self.root, runtime=runtime)
+        self.assertEqual(rerun["written"], [])
+        self.assertEqual(rerun["removed"], [])
+
+    def test_projection_rename_names_removed_file(self):
+        runtime = {"planning": {"backend": "backlog-md"}}
+        plansync.sync(self.root, runtime=runtime)
+        self.epics.write_text(
+            self.epics.read_text(encoding="utf-8").replace(
+                "Story 1.1: Alpha Story", "Story 1.1: Alpha Prime Story"),
+            encoding="utf-8", newline="\n")
+        result = plansync.sync(self.root, runtime=runtime)
+        self.assertTrue(result["ok"])
+        self.assertTrue(any("Alpha-Story" in p for p in result["removed"]))
+        self.assertTrue(any("Alpha-Prime-Story" in p
+                            for p in result["written"]))
 
     def test_binding_decides_projection_only(self):
         first = plansync.sync(self.root)

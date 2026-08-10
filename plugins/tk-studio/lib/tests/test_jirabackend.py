@@ -369,6 +369,10 @@ class DryRunTests(JiraTestCase):
         self.assertEqual(result["action"], "dry-run")
         self.assertEqual(len(result["promote"]["created"]), 5)
         self.assertEqual(self.fake.calls, [])
+        # EP-017: dry-run entries name the would-rewritten canonical file
+        # too — "the same lists name what the run would write".
+        for entry in result["promote"]["created"]:
+            self.assertTrue(entry.get("path", "").endswith(f"{entry['id']}.md"))
 
     def test_dry_run_without_credentials_still_plans(self):
         os.environ.pop(jirabackend.TOKEN_ENV, None)
