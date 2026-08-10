@@ -75,8 +75,10 @@ class DriverContractTestCase(unittest.TestCase):
         # 0.1.10 is the §2 base-update clarification (churn-normalized
         # verify + the verified no-op outcome, EP-011 ST-043); 0.1.11 adds
         # the §8 conformance harness pass (EP-014 ST-051, additive); 0.1.12
-        # adds the §4 resolve verb (EP-015 ST-053, PROP-008, additive)
-        self.assertRegex(self.text, r"\*\*0\.1\.12\*\*")
+        # adds the §4 resolve verb (EP-015 ST-053, PROP-008, additive);
+        # 0.1.13 adds the planning adapter's named-write reporting
+        # (EP-017 ST-055, PROP-020, additive)
+        self.assertRegex(self.text, r"\*\*0\.1\.13\*\*")
         self.assertIn("Change policy", self.text)
         self.assertIn("MAJOR", self.text)
         self.assertRegex(self.text, r"[Bb]reaking")
@@ -103,6 +105,17 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertIn("`partial`", row)
         self.assertNotIn("promote/pull-back conflict (human conflict, AD-5)",
                          row)
+
+    # --- ST-055: the 0.1.13 named-write reporting stays published (EP-017)
+
+    def test_plan_sync_row_names_every_written_file(self):
+        # PROP-020: the result names every file the run wrote — written[]
+        # plus normalize.counter — so staging derives from the response alone
+        row = next(line for line in self.text.splitlines()
+                   if line.startswith("| `tk-studio-plan-sync`"))
+        self.assertIn("`written[]`", row)
+        self.assertIn("`normalize.counter`", row)
+        self.assertIn("every file the run wrote", row)
 
     # --- ST-043: the 0.1.10 base-update clarification stays pinned (EP-011)
 

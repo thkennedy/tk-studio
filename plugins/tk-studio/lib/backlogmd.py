@@ -325,12 +325,13 @@ def promote(project_root: Path, plan_dir: Path, dry_run: bool = False) -> dict:
     """Project canonical entities into backlog/ and record snapshots."""
     root = backlog_root(project_root)
     entities = _load_entities(plan_dir)
-    notes, written = [], []
+    notes, written, removed = [], [], []
 
     config = root / "config.yml"
-    if not config.exists() and not dry_run:
-        _atomic_write(config, CONFIG_TEMPLATE.format(
-            name=Path(project_root).resolve().name))
+    if not config.exists():
+        if not dry_run:
+            _atomic_write(config, CONFIG_TEMPLATE.format(
+                name=Path(project_root).resolve().name))
         written.append(str(config))
 
     task_alloc = KeyAllocator(1, _existing_numbers(
@@ -397,6 +398,8 @@ def promote(project_root: Path, plan_dir: Path, dry_run: bool = False) -> dict:
             if existing is not None and existing != target:
                 existing.unlink()  # projection rename; never authoritative
         written.append(str(target))
+        if existing is not None and existing != target:
+            removed.append(str(existing))
 
         snapshot.update({"key": key, "synced_at": _now_iso(),
                          "content_hash": content_hash})
@@ -407,8 +410,11 @@ def promote(project_root: Path, plan_dir: Path, dry_run: bool = False) -> dict:
         front.setdefault("external", {})[BINDING] = snapshot
         front["updated"] = _now_iso()
         _write_canonical(path, front, body, dry_run)
+        # The snapshot rewrite is a write of this run too — name it, or
+        # staging derived from the response misses half the sync (EP-017).
+        written.append(str(path))
 
-    return {"written": written, "notes": notes,
+    return {"written": written, "removed": removed, "notes": notes,
             "entities": len(entities), "backlog": str(root)}
 
 

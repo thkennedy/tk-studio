@@ -39,6 +39,13 @@ projection step is a first-class no-op, reported cleanly, never an error
 entities — regenerated deterministically, refused if a foreign index.md sits
 in its place.
 
+Both verbs name every file they wrote in `written[]` — the counter included,
+with `counter` naming the committed id counter's path and whether this run
+persisted it — and sync names replaced projection files in `removed[]`, so
+commit staging derives from the response alone (EP-017, PROP-020). Under
+`--dry-run` the same lists name what the run would write or remove. A sync
+blocked at the projection still names normalize's landed writes.
+
 CLI:
   uv run plansync.py normalize --directory ROOT [--dry-run]
   uv run plansync.py sync --directory ROOT [--dry-run] [--backend NAME]
@@ -431,6 +438,14 @@ def normalize(project_root: Path, dry_run: bool = False) -> dict:
                       "action": _stamp_story_file(p, i, dry_run)}
                      for p, i in stamps]
 
+    # Every file this run wrote (would write under dry_run), in write order,
+    # counter included — commit staging derives from the response alone
+    # (EP-017, PROP-020).
+    counter_written = bool(minter.minted or minter.skipped)
+    written = [str(counter_path(project_root))] if counter_written else []
+    written += [str(p["path"]) for p in planned if p["action"] != "unchanged"]
+    written += [s["path"] for s in stamp_results if s["action"] == "stamped"]
+
     if dry_run or not bmad_output.is_dir():
         post = {"ok": True, "entities": len(planned), "set_errors": [], "files": []}
     else:
@@ -442,6 +457,9 @@ def normalize(project_root: Path, dry_run: bool = False) -> dict:
     return {"ok": post["ok"], "dry_run": dry_run,
             "plan_dir": str(target_dir), "entities": len(planned),
             "actions": actions, "minted": minter.minted,
+            "counter": {"path": str(counter_path(project_root)),
+                        "written": counter_written},
+            "written": written,
             "files": [{"path": str(p["path"]), "id": p["front"]["id"],
                        "action": p["action"]} for p in planned],
             "story_file_stamps": stamp_results, "notes": notes,
@@ -554,6 +572,27 @@ def generate_plan_index(project_root: Path, dry_run: bool = False) -> dict:
 
 # --------------------------------------------------------------------- sync
 
+def _projection_written(projection: dict) -> list[str]:
+    """Local files a projection round reports writing, in write order.
+
+    Both adapters name their canonical-file writes: pull-back ``applied``
+    entries carry ``path``, backlog-md promote reports ``written``, jira
+    promote entries carry ``path``. Remote-only operations name no local
+    file; a projection with no writes yields an empty list.
+    """
+    paths: list[str] = []
+    for entry in (projection.get("pull_back") or {}).get("applied") or []:
+        if isinstance(entry, dict) and entry.get("path"):
+            paths.append(entry["path"])
+    promote = projection.get("promote") or {}
+    paths.extend(promote.get("written") or [])
+    for bucket in ("created", "updated"):
+        for entry in promote.get(bucket) or []:
+            if isinstance(entry, dict) and entry.get("path"):
+                paths.append(entry["path"])
+    return paths
+
+
 def sync(project_root: Path, dry_run: bool = False,
          runtime: dict | None = None) -> dict:
     """normalize -> validate -> index -> binding-driven projection (AD-4).
@@ -596,10 +635,30 @@ def sync(project_root: Path, dry_run: bool = False,
         if result["projection"].get("blocked"):
             result.update({"blocked": True,
                            "reason": result["projection"]["reason"]})
+            # Normalize's writes already landed — a projection block must
+            # still name them or staging misses the minted files (EP-017).
+            result["written"] = list(norm.get("written") or [])
+            result["removed"] = []
             return result
 
     # Index last: pull-back may have updated canonical statuses.
     result["index"] = generate_plan_index(project_root, dry_run=dry_run)
+
+    # Sync-level roll-up of every file the run wrote (would write under
+    # dry_run): normalize's writes, the projection's named writes, the index
+    # when it changed — commit staging derives from the response alone
+    # (EP-017, PROP-020).
+    written = list(norm.get("written") or [])
+    written += _projection_written(result["projection"])
+    if result["index"]["changed"]:
+        written.append(result["index"]["index"])
+    seen: set[str] = set()
+    result["written"] = [p for p in written
+                         if not (p in seen or seen.add(p))]
+    # Only the projection removes files (a rename replaces its backlog
+    # file); normalize and the index never delete.
+    result["removed"] = list(
+        (result["projection"].get("promote") or {}).get("removed") or [])
     result["ok"] = True
     return result
 
