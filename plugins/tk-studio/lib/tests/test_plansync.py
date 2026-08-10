@@ -252,6 +252,63 @@ class StoryFileTests(PlanSyncTestCase):
         self.assertTrue(any("story-9.9.md" in n for n in result["notes"]))
 
 
+class WrittenTests(PlanSyncTestCase):
+    """EP-017 (PROP-020): the result names every file the run wrote —
+    counter included — so commit staging derives from the response alone."""
+
+    def test_mint_run_names_counter_and_created_files(self):
+        result = plansync.normalize(self.root)
+        self.assertTrue(result["ok"])
+        counter = str(plansync.counter_path(self.root))
+        self.assertEqual(result["counter"], {"path": counter, "written": True})
+        expected = [counter] + [
+            str(self._plan_file(i))
+            for i in ("EP-001", "ST-001", "ST-002", "EP-002", "ST-003")]
+        self.assertEqual(result["written"], expected)
+
+    def test_rerun_reports_nothing_written(self):
+        plansync.normalize(self.root)
+        result = plansync.normalize(self.root)
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["counter"]["written"])
+        self.assertEqual(result["written"], [])
+
+    def test_dry_run_names_would_writes_without_landing(self):
+        result = plansync.normalize(self.root, dry_run=True)
+        self.assertTrue(result["dry_run"])
+        self.assertTrue(result["counter"]["written"])
+        self.assertEqual(len(result["written"]), 6)
+        self.assertFalse(plansync.plan_dir(self.root).exists())
+        self.assertFalse(plansync.counter_path(self.root).exists())
+
+    def test_stamped_story_file_is_named(self):
+        self.impl.mkdir(parents=True)
+        story = self.impl / "story-1.1.md"
+        story.write_text("---\nstatus: draft\n---\n\nDev notes.\n",
+                         encoding="utf-8", newline="\n")
+        result = plansync.normalize(self.root)
+        self.assertIn(str(story), result["written"])
+        rerun = plansync.normalize(self.root)
+        self.assertNotIn(str(story), rerun["written"])
+
+    def test_projection_written_collects_adapter_shapes(self):
+        # pull-back applied entries carry path (both adapters); backlog-md
+        # promote reports written; jira promote entries carry path.
+        projection = {
+            "pull_back": {"applied": [
+                {"id": "ST-001", "fields": ["status"], "path": "plan/ST-001.md"}]},
+            "promote": {
+                "written": ["backlog/tasks/task-1.md"],
+                "created": [{"id": "EP-001", "key": "TK-1",
+                             "path": "plan/EP-001.md"}],
+                "updated": [{"id": "ST-001", "key": "TK-2"}]},
+        }
+        self.assertEqual(
+            plansync._projection_written(projection),
+            ["plan/ST-001.md", "backlog/tasks/task-1.md", "plan/EP-001.md"])
+        self.assertEqual(plansync._projection_written({"action": "none"}), [])
+
+
 class SprintStatusTests(PlanSyncTestCase):
     def test_sprint_status_pulls_mapped_states(self):
         self.impl.mkdir(parents=True)
@@ -308,6 +365,46 @@ class SyncTests(PlanSyncTestCase):
         self.assertTrue(result["ok"])
         self.assertFalse(result["index"]["changed"])
         self.assertEqual(result["normalize"]["actions"]["unchanged"], 5)
+        self.assertEqual(result["written"], [])
+
+    def test_sync_written_rolls_up_normalize_and_index(self):
+        # EP-017: the sync-level written[] carries normalize's writes plus
+        # the regenerated index; bmad-files projection names no files.
+        result = plansync.sync(self.root)
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            result["written"],
+            result["normalize"]["written"] + [result["index"]["index"]])
+        self.assertEqual(result["removed"], [])
+
+    def test_backlog_sync_names_snapshot_rewrites(self):
+        # EP-017 review chip: promote rewrites each projected entity's
+        # canonical file (external snapshot) — written[] must carry both
+        # sides or staging misses half the sync.
+        runtime = {"planning": {"backend": "backlog-md"}}
+        result = plansync.sync(self.root, runtime=runtime)
+        self.assertTrue(result["ok"])
+        written = result["written"]
+        self.assertTrue(any(os.sep + "backlog" + os.sep in p for p in written))
+        for entity_id in ("EP-001", "ST-001", "ST-002", "EP-002", "ST-003"):
+            self.assertIn(str(self._plan_file(entity_id)), written)
+        self.assertEqual(result["removed"], [])
+        rerun = plansync.sync(self.root, runtime=runtime)
+        self.assertEqual(rerun["written"], [])
+        self.assertEqual(rerun["removed"], [])
+
+    def test_projection_rename_names_removed_file(self):
+        runtime = {"planning": {"backend": "backlog-md"}}
+        plansync.sync(self.root, runtime=runtime)
+        self.epics.write_text(
+            self.epics.read_text(encoding="utf-8").replace(
+                "Story 1.1: Alpha Story", "Story 1.1: Alpha Prime Story"),
+            encoding="utf-8", newline="\n")
+        result = plansync.sync(self.root, runtime=runtime)
+        self.assertTrue(result["ok"])
+        self.assertTrue(any("Alpha-Story" in p for p in result["removed"]))
+        self.assertTrue(any("Alpha-Prime-Story" in p
+                            for p in result["written"]))
 
     def test_binding_decides_projection_only(self):
         first = plansync.sync(self.root)
