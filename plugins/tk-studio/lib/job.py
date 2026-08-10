@@ -438,18 +438,28 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
-def _atomic_write_json(path: Path, data: dict) -> None:
+def dump_workspace_json(data: dict) -> str:
+    """The exact text a workspace JSON write lands — anything sizing an
+    artifact against a byte budget must measure this, not a re-serialization
+    (ST-058: the handoff budget once measured the compact form)."""
+    return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-            json.dump(data, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
+            handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
+
+
+def _atomic_write_json(path: Path, data: dict) -> None:
+    _atomic_write_text(path, dump_workspace_json(data))
 
 
 def create_run(defn: dict, key: str) -> dict:
@@ -517,10 +527,17 @@ def workspace_path(key: str, run_id: str) -> Path:
 def write_workspace_json(key: str, run_id: str, name: str, data: dict) -> Path:
     """Land a JSON artifact in a run workspace (atomic, same discipline as
     run.json). The workspace must already exist — create_run minted it."""
+    return write_workspace_text(key, run_id, name, dump_workspace_json(data))
+
+
+def write_workspace_text(key: str, run_id: str, name: str, text: str) -> Path:
+    """Land pre-serialized workspace text — a caller that measured a byte
+    budget writes the exact string it measured (ST-058), never a
+    re-serialization that could drift from the measurement."""
     path = workspace_path(key, run_id) / name
     if not path.parent.is_dir():
         raise JobError(f"run '{run_id}' has no workspace for project '{key}'")
-    _atomic_write_json(path, data)
+    _atomic_write_text(path, text)
     return path
 
 

@@ -22,6 +22,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 import sys
 
@@ -66,12 +67,16 @@ class SessionTestCase(unittest.TestCase):
         joblib.update_run("proj", record["run_id"], {"state": "running"})
         return record["run_id"]
 
+    HANDOFF_DEFAULTS = {
+        "boundary_kind": "story", "boundary_name": "ST-014",
+        "done": ["implemented the adapter"],
+        "next_steps": ["wire the projection", "run the suite"],
+        "gotchas": ["BOM breaks frontmatter"],
+        "artifacts": ["findings.md"],
+    }
+
     def _handoff(self, run_id: str, **overrides) -> dict:
-        kwargs = dict(boundary_kind="story", boundary_name="ST-014",
-                      done=["implemented the adapter"],
-                      next_steps=["wire the projection", "run the suite"],
-                      gotchas=["BOM breaks frontmatter"],
-                      artifacts=["findings.md"])
+        kwargs = dict(self.HANDOFF_DEFAULTS)
         kwargs.update(overrides)
         return session.write_handoff(self.root, run_id, **kwargs)
 
@@ -113,6 +118,55 @@ class SessionTestCase(unittest.TestCase):
         run_id = self._open_run()
         with self.assertRaises(session.SessionError):
             self._handoff(run_id, done=["x" * 20000])
+
+    def test_budget_measures_the_bytes_landed(self):
+        # ST-058 (PROP-021): the reported size IS the on-disk artifact size,
+        # multibyte content included — never a compact re-serialization.
+        run_id = self._open_run()
+        result = self._handoff(run_id, done=["café landed ✓ — naïve résumé"])
+        workspace = joblib.workspace_path("proj", run_id)
+        self.assertEqual(result["bytes"],
+                         (workspace / "handoff.json").stat().st_size)
+
+    def test_a_skew_shaped_handoff_refuses_at_the_written_size(self):
+        # ST-058 (PROP-021): compact form fits the budget, written (indent=2)
+        # form exceeds it — exactly the handoff the old measurement passed.
+        # The premise guard sizes the FULL envelope write_handoff builds
+        # (created is a fixed-width stamp), not the done list alone.
+        run_id = self._open_run()
+        done = ["x"] * 2600
+        envelope = {
+            "handoff_version": 1, "run_id": run_id, "job_id": "long-work",
+            "boundary": {"kind": self.HANDOFF_DEFAULTS["boundary_kind"],
+                         "name": self.HANDOFF_DEFAULTS["boundary_name"]},
+            "created": "2026-08-10T00:00:00.000+00:00",
+            "done": done,
+            "next": self.HANDOFF_DEFAULTS["next_steps"],
+            "gotchas": self.HANDOFF_DEFAULTS["gotchas"],
+            "artifacts": self.HANDOFF_DEFAULTS["artifacts"],
+            "deltas": [],
+        }
+        compact = len(json.dumps(envelope, ensure_ascii=False).encode("utf-8"))
+        self.assertLess(compact, session.MAX_HANDOFF_BYTES)
+        with self.assertRaises(session.SessionError):
+            self._handoff(run_id, done=done)
+
+    def test_the_budget_boundary_is_inclusive(self):
+        # size == MAX lands, size == MAX+1-shaped (MAX shrunk by one) refuses.
+        run_id = self._open_run()
+        exact = self._handoff(run_id)["bytes"]
+        with mock.patch.object(session, "MAX_HANDOFF_BYTES", exact):
+            self._handoff(run_id)
+        with mock.patch.object(session, "MAX_HANDOFF_BYTES", exact - 1):
+            with self.assertRaises(session.SessionError):
+                self._handoff(run_id)
+
+    def test_a_lone_surrogate_refuses_named_not_traceback(self):
+        # json.dumps happily emits an unpaired surrogate; the encode must
+        # refuse as a SessionError (AD-11), never a UnicodeEncodeError.
+        run_id = self._open_run()
+        with self.assertRaisesRegex(session.SessionError, "UTF-8"):
+            self._handoff(run_id, done=["\ud800 escaped upstream"])
 
     def test_handoff_validation_refuses_empty_boundaries(self):
         run_id = self._open_run()
