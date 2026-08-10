@@ -1215,3 +1215,59 @@ So that commit staging derives from the response alone and the hand-staged count
 **Given** the lib suite and the contract
 **When** they run
 **Then** the new fields are unit-pinned, §2's plan-sync row states the result names every written file, the version history names 0.1.13 as an additive bump with the pin test and contracts README moving in the same commit, and the full suite is green
+
+## Epic 18: The Release Ships a Pinned Archive Backstop
+
+PROP-012 (Adopted 2026-08-10, operator boundary triage) graduates the 2026-08-08 research finding: Claude Code v2.1.224 added an archive plugin source — a zip fetched over HTTPS with optional SHA-256 pinning — mirroring at the harness's own plugin layer the pinning discipline AD-1 already trusts for external BMad modules. Forks ruled 2026-08-10: the artifact lives as a GitHub release asset under per-release tags (`claude plugin tag` mints `tk-studio--v<version>` validating gate lockstep), and the backstop is tooled into the release motion with `released-roster.json` — the gate's third file — as the backstop manifest, plus a lib-suite guard. The evaluation already pinned the envelope's shape half live at CLI 2.1.226: the validator accepts only `{"source": "archive", "url": <https>, "sha256"?: <64-hex>}` — local paths, `http://`, `file://`, and malformed or prefixed shas all rejected — while `--plugin-dir` accepts a local zip session-scoped and the seed-dir mechanism is the documented persistent offline path. The honest constraint rides the epic: this repo is private, and the archive source type fetches anonymously, so the marketplace archive entry cannot serve this plugin until public hosting exists — the seam is named, not built. What lands is the discipline that works today: every release ships a deterministic zip of the plugin tree, SHA-256 verified, published as the tag's release asset and recorded in the roster, with the sneakernet runbook (authenticated download, out-of-band verify, seed-dir or `--plugin-dir` consumption) as the offline install path. No driver-contract bump — the motion is operator-facing (EP-013 precedent); the release gate stays three files.
+
+### Story 18.1: The Archive Envelope Is Pinned Live
+
+As an operator deciding install paths for the studio plugin,
+I want the current CLI's archive-source and offline-install envelope pinned as recorded facts with live evidence,
+So that the backstop is built on what the harness actually supports rather than changelog phrasing.
+
+**Acceptance Criteria:**
+
+**Given** the marketplace-entry validator at the current CLI
+**When** the archive-shape probe matrix runs (https+sha, https bare, http, file scheme, relative and absolute paths, short/non-hex/prefixed shas, type-for-source key)
+**Then** the accepted envelope is recorded — `{"source": "archive", "url": <https>, "sha256"?: <64-hex>}` only, sha optional, every other shape a named rejection — in a kb evaluation record naming the CLI version probed
+
+**Given** a versioned zip built from the plugin tree
+**When** it is loaded via `--plugin-dir <zip>`
+**Then** the full released roster is served from the archive session-scoped with no network, proven live and recorded
+
+**Given** the seed-dir mechanism (`CLAUDE_CODE_PLUGIN_CACHE_DIR` pre-populate, `CLAUDE_CODE_PLUGIN_SEED_DIR` runtime)
+**When** the flow is driven with the built zip
+**Then** the persistent offline path is proven live or its gaps named in the record — never assumed from docs
+
+**Given** the repo's private visibility
+**When** the evaluation records the marketplace archive-source constraint
+**Then** the record states the source type cannot fetch this repo's assets anonymously at the current CLI, names the public-hosting seam, and names every probe requiring a public HTTPS host (live fetch, checksum-mismatch refusal, version-gate interaction) as operator-gated future work rather than silently skipping it
+
+### Story 18.2: The Release Motion Publishes the Pinned Archive
+
+As an operator running the release motion,
+I want the motion to tag, build, verify, publish, and record the archive backstop in one discipline,
+So that every release ships a SHA-256-pinned offline artifact that cannot silently rot.
+
+**Acceptance Criteria:**
+
+**Given** a release at version X
+**When** the motion runs
+**Then** `claude plugin tag` mints `tk-studio--v<X>` validating plugin.json and marketplace lockstep, the release-archive tool (stdlib-only Python, gh for transport) builds the plugin-tree zip deterministically at the release commit via `git archive`, computes its SHA-256, uploads it as the tag's release asset, re-downloads the published asset, and verifies the digest matches before recording — a mismatch fails the motion loud
+
+**Given** `released-roster.json` as the gate's third file
+**When** the release records the backstop
+**Then** the roster entry carries `archive: {url, sha256}` for the released version — the roster is the backstop manifest and no fourth gate file is minted
+
+**Given** the lib suite
+**When** it runs
+**Then** the roster guard also pins the archive record — present for every recorded version at or beyond the discipline's 0.2.6 floor, `sha256` a 64-hex string, `url` naming the version's release tag — red on a missing or malformed record, and the full suite is green
+
+**Given** an air-gapped or git-less machine
+**When** the kb runbook is followed
+**Then** it documents the sneakernet path end to end — authenticated asset download on a connected machine, out-of-band SHA-256 verification, consumption via seed-dir (persistent) or `--plugin-dir <zip>` (session) — with the marketplace archive-source entry named as the seam that activates on public hosting
+
+**Given** the epic's changes land
+**When** the release motion runs 0.2.5 → 0.2.6 through the new discipline
+**Then** the first tagged release ships — tag, verified asset, roster archive record, gate ×3 in lockstep — the scoped plugin update lands the new version, and the four planes check clean

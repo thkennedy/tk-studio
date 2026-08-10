@@ -1,0 +1,37 @@
+---
+id: TASK-56
+title: The Archive Envelope Is Pinned Live
+status: To Do
+assignee: []
+created_date: '2026-08-10 08:37'
+labels:
+  - ST-056
+milestone: The Release Ships a Pinned Archive Backstop
+dependencies: []
+---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+As an operator deciding install paths for the studio plugin,
+I want the current CLI's archive-source and offline-install envelope pinned as recorded facts with live evidence,
+So that the backstop is built on what the harness actually supports rather than changelog phrasing.
+
+**Acceptance Criteria:**
+
+**Given** the marketplace-entry validator at the current CLI
+**When** the archive-shape probe matrix runs (https+sha, https bare, http, file scheme, relative and absolute paths, short/non-hex/prefixed shas, type-for-source key)
+**Then** the accepted envelope is recorded — `{"source": "archive", "url": <https>, "sha256"?: <64-hex>}` only, sha optional, every other shape a named rejection — in a kb evaluation record naming the CLI version probed
+
+**Given** a versioned zip built from the plugin tree
+**When** it is loaded via `--plugin-dir <zip>`
+**Then** the full released roster is served from the archive session-scoped with no network, proven live and recorded
+
+**Given** the seed-dir mechanism (`CLAUDE_CODE_PLUGIN_CACHE_DIR` pre-populate, `CLAUDE_CODE_PLUGIN_SEED_DIR` runtime)
+**When** the flow is driven with the built zip
+**Then** the persistent offline path is proven live or its gaps named in the record — never assumed from docs
+
+**Given** the repo's private visibility
+**When** the evaluation records the marketplace archive-source constraint
+**Then** the record states the source type cannot fetch this repo's assets anonymously at the current CLI, names the public-hosting seam, and names every probe requiring a public HTTPS host (live fetch, checksum-mismatch refusal, version-gate interaction) as operator-gated future work rather than silently skipping it
+<!-- SECTION:DESCRIPTION:END -->
