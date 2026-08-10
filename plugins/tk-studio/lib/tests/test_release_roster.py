@@ -83,8 +83,13 @@ the tagged commit itself legitimately predates its record.
 """
 
 
-def _version_tuple(version: str) -> tuple[int, ...]:
-    return tuple(int(part) for part in version.split("."))
+def _version_tuple(version: str) -> tuple[int, ...] | None:
+    """x.y.z as an int tuple; None when unparseable — the guard must go
+    cleanly red on a pre-release-styled or missing version, never crash."""
+    parts = version.split(".")
+    if len(parts) != 3 or not all(p.isdigit() for p in parts):
+        return None
+    return tuple(int(p) for p in parts)
 
 
 def _archive_record_problems(record: dict) -> list[str]:
@@ -93,8 +98,12 @@ def _archive_record_problems(record: dict) -> list[str]:
     version = record.get("version", "")
     archive = record.get("archive")
     problems: list[str] = []
+    parsed = _version_tuple(version)
+    if parsed is None:
+        problems.append(f"roster version is not plain x.y.z: {version!r}")
+        return problems
     if archive is None:
-        if _version_tuple(version) >= ARCHIVE_FLOOR:
+        if parsed >= ARCHIVE_FLOOR:
             problems.append(
                 f"version {version} is at or beyond the archive-backstop "
                 f"floor but records no archive — run "
@@ -157,6 +166,13 @@ class ArchiveRecordPinTestCase(unittest.TestCase):
                          "sha256": "0" * 64}})
         self.assertEqual(len(problems), 1)
         self.assertIn("https", problems[0])
+
+    def test_unparseable_version_is_a_named_red_not_a_crash(self):
+        for version in ("0.2.6-rc1", "0.3.0.dev1", ""):
+            problems = _archive_record_problems(
+                {"version": version, "skills": []})
+            self.assertEqual(len(problems), 1, version)
+            self.assertIn("not plain x.y.z", problems[0])
 
     def test_well_formed_record_at_the_floor_is_green(self):
         self.assertEqual(_archive_record_problems(
