@@ -407,7 +407,8 @@ def promote(plan_dir: Path, client: JiraClient | None, project_key: str,
 
         if dry_run:
             (updated if key else created).append(
-                {"id": front["id"], "key": key or "(new)"})
+                {"id": front["id"], "key": key or "(new)",
+                 "path": str(path)})
             continue
 
         fields = {"summary": front["title"],
