@@ -1,9 +1,10 @@
 ---
 id: TASK-56
 title: The Archive Envelope Is Pinned Live
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-10 08:37'
+updated_date: '2026-08-10 08:48'
 labels:
   - ST-056
 milestone: The Release Ships a Pinned Archive Backstop
