@@ -215,7 +215,7 @@ def write_handoff(project_root: Path, run_id: str, boundary_kind: str,
         "artifacts": _str_list(artifacts, "artifacts", required=False),
         "deltas": _validated_deltas(deltas, workspace),
     }
-    size = len(json.dumps(handoff, ensure_ascii=False).encode("utf-8"))
+    size = len(joblib.dump_workspace_json(handoff).encode("utf-8"))
     if size > MAX_HANDOFF_BYTES:
         raise SessionError(
             f"handoff is {size} bytes (max {MAX_HANDOFF_BYTES}) — compact "

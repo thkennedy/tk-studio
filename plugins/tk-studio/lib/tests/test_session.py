@@ -114,6 +114,26 @@ class SessionTestCase(unittest.TestCase):
         with self.assertRaises(session.SessionError):
             self._handoff(run_id, done=["x" * 20000])
 
+    def test_budget_measures_the_bytes_landed(self):
+        # ST-058 (PROP-021): the reported size IS the on-disk artifact size,
+        # multibyte content included — never a compact re-serialization.
+        run_id = self._open_run()
+        result = self._handoff(run_id, done=["café landed ✓ — naïve résumé"])
+        workspace = joblib.workspace_path("proj", run_id)
+        self.assertEqual(result["bytes"],
+                         (workspace / "handoff.json").stat().st_size)
+
+    def test_a_skew_shaped_handoff_refuses_at_the_written_size(self):
+        # ST-058 (PROP-021): compact form fits the budget, written (indent=2)
+        # form exceeds it — exactly the handoff the old measurement passed.
+        run_id = self._open_run()
+        done = ["x"] * 2600
+        compact = len(json.dumps({"done": done},
+                                 ensure_ascii=False).encode("utf-8"))
+        self.assertLess(compact + 1000, session.MAX_HANDOFF_BYTES)
+        with self.assertRaises(session.SessionError):
+            self._handoff(run_id, done=done)
+
     def test_handoff_validation_refuses_empty_boundaries(self):
         run_id = self._open_run()
         with self.assertRaises(session.SessionError):
