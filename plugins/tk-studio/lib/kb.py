@@ -65,6 +65,7 @@ def _parse_frontmatter(text: str) -> tuple[dict, str, str | None]:
                 return miniyaml.loads(parts[1]) or {}, parts[2], None
             except miniyaml.MiniYamlError as exc:
                 return {}, parts[2], str(exc)
+        return {}, text, "frontmatter fence never closes"
     return {}, text, None
 
 

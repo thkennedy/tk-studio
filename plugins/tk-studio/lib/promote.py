@@ -641,6 +641,10 @@ def draft(project_root: Path, base: str | None = None, dry_run: bool = False,
                 index = kblib.generate_index(root)
                 result["index"] = {"state": ("regenerated" if index["changed"]
                                              else "unchanged")}
+                if index.get("warnings"):
+                    # loudness survives this call frame (ST-059) — a
+                    # mis-parsed kb file is named in the promotion result
+                    result["index"]["warnings"] = index["warnings"]
                 if index["changed"]:
                     staged.append("kb/index.md")
             except kblib.KbError as exc:

@@ -124,6 +124,16 @@ class IndexTests(KbTestCase):
         self.assertEqual(lines[0], "- [The Validator's Envelope](envelope.md)"
                                    " — the validator's accepted shape, pinned live")
 
+    def test_unclosed_fence_warns_loud(self):
+        # ST-059 review chips: a fence that opens and never closes was the
+        # surviving silent-mis-index shape — it now names itself.
+        kb.standup_kb(self.project)
+        self._write("unterm.md", "---\ntitle: Should Be Title\n")
+        result = kb.generate_index(self.project)
+        self.assertEqual(len(result["warnings"]), 1)
+        self.assertIn("unterm.md", result["warnings"][0])
+        self.assertIn("never closes", result["warnings"][0])
+
     def test_broken_frontmatter_warns_loud_and_falls_back(self):
         # ST-059 (PROP-022): the silence is the defect — a parse failure
         # names the file and the error in the result while the entry lands
