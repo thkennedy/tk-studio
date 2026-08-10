@@ -39,18 +39,23 @@ _SAFE_PLAIN_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_\-./ @+()\\:~]*$")
 # -------------------------------------------------------------------- load
 
 def _strip_comment(line: str) -> str:
-    """Remove a trailing comment, honoring quoted strings."""
+    """Remove a trailing comment, honoring quoted strings. A quote guards a
+    region only where a quoted scalar can begin — at line start or after
+    whitespace — and only when a closing mate exists later on the line;
+    a mid-word apostrophe or an unpaired quote is literal prose, never an
+    error here (ST-059 — a malformed leading-quote scalar stays
+    _parse_scalar's named rejection)."""
     quote = None
     for i, ch in enumerate(line):
         if quote:
             if ch == quote:
                 quote = None
         elif ch in "'\"":
-            quote = ch
+            begins_scalar = i == 0 or line[i - 1] in " \t"
+            if begins_scalar and line.find(ch, i + 1) != -1:
+                quote = ch
         elif ch == "#" and (i == 0 or line[i - 1] in " \t"):
             return line[:i]
-    if quote:
-        raise MiniYamlError(f"unterminated quote: {line.strip()!r}")
     return line
 
 

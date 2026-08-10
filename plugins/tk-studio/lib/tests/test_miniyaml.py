@@ -50,6 +50,21 @@ class LoadTests(unittest.TestCase):
     def test_hash_without_leading_space_not_comment(self):
         self.assertEqual(miniyaml.loads("a: value#tail\n"), {"a": "value#tail"})
 
+    def test_apostrophes_in_plain_prose_are_literal(self):
+        # ST-059 (PROP-022): a mid-word or unpaired quote never opens a
+        # quoted region — the kb envelope's description failed exactly here
+        # ("unterminated quote" on the possessive).
+        text = (
+            "description: the validator's accepted shape\n"
+            "lyric: rock 'n roll all night\n"
+            'aside: the "quoted" word stays  # comment goes\n'
+        )
+        self.assertEqual(miniyaml.loads(text), {
+            "description": "the validator's accepted shape",
+            "lyric": "rock 'n roll all night",
+            "aside": 'the "quoted" word stays',
+        })
+
     def test_windows_path_value(self):
         self.assertEqual(
             miniyaml.loads("vault: C:\\Users\\tim\\vault\n"),
