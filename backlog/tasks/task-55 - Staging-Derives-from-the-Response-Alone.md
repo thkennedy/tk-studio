@@ -1,9 +1,10 @@
 ---
 id: TASK-55
 title: Staging Derives from the Response Alone
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-10 06:06'
+updated_date: '2026-08-10 06:24'
 labels:
   - ST-055
 milestone: The Sync Result Names Every Written File
