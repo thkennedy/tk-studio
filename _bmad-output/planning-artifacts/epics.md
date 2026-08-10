@@ -1271,3 +1271,67 @@ So that every release ships a SHA-256-pinned offline artifact that cannot silent
 **Given** the epic's changes land
 **When** the release motion runs 0.2.5 → 0.2.6 through the new discipline
 **Then** the first tagged release ships — tag, verified asset, roster archive record, gate ×3 in lockstep — the scoped plugin update lands the new version, and the four planes check clean
+
+## Epic 19: Three Small Truths from the Boundary Loop
+
+PROP-021/022/023 (all Adopted 2026-08-10, operator boundary triage) graduate together — three small motions the 2026-08-10 housekeeping loop itself surfaced, the measurement channel working end to end: a carried operator chip whose substance was recovered and verified (PROP-021 — the Epic-9 handoff byte budget measures the compact serialization at `session.py` while `_atomic_write_json` lands `indent=2` plus a newline, so a near-ceiling handoff passes the check yet exceeds 16 KB on disk and the result's `bytes` wears the smaller number), an incidental live find (PROP-022 — miniyaml's `_strip_comment` treats any mid-line quote char as opening a quoted region, so plain prose containing an apostrophe raises `unterminated quote`, and kb.py swallows the error into silent rank-100/body-line defaults — the envelope kb file was mis-indexed from landing until the probe session caught it; `dump()` is already safe, double-quoting unsafe values, so the exposure is human-authored plain values), and a probe result worth its runbook sentence (PROP-023 — a seeded session serves plugins on explicit `/plugin:skill` invocation only, never advertising them). Graduation shape ruled at adoption: one epic, a story per row, single release at the close. No driver-contract bump — the §2 session row's "16 KB budget" names no serialization and the fix makes the enforced meaning exactly the bytes landed (the wording stands), kb.py's `warnings[]` is an additive field on an internal lib result below the contract surface, and the runbook is kb. (AD-11 dual-mode; AD-12 evidence discipline; ST-9.2 no-grow ruling honored; platform envelope stdlib-only.)
+
+### Story 19.1: The Handoff Budget Measures What Lands
+
+As an operator relying on the 16 KB handoff ceiling,
+I want the enforced budget to measure the exact bytes the workspace write lands,
+So that a handoff that passes the check is the handoff on disk — never a larger artifact wearing a smaller number.
+
+**Acceptance Criteria:**
+
+**Given** a handoff assembled by `write_handoff`
+**When** the budget check sizes it
+**Then** the measured size is the byte length of the serialization `_atomic_write_json` lands — `indent=2`, `ensure_ascii=False`, trailing newline — and the result's `bytes` equals the written `handoff.json`'s on-disk size exactly, multibyte content included
+
+**Given** the ST-9.2 ruling
+**When** the fix lands
+**Then** `MAX_HANDOFF_BYTES` stays 16384 and the 16-delta cap is untouched — the budget does not grow, it tells the truth
+
+**Given** the lib suite
+**When** it runs
+**Then** a case pins measured == on-disk bytes for a landed handoff carrying non-ASCII content, a case pins the refusal of a handoff whose compact form fits the budget but whose written form exceeds it (the skew shape itself), and the full suite is green
+
+### Story 19.2: Frontmatter Prose Survives Apostrophes and Indexing Fails Loud
+
+As a kb author writing plain-prose frontmatter,
+I want mid-word quote characters read as literal text and a frontmatter parse failure surfaced in the index result,
+So that a description containing an apostrophe neither crashes the parse nor silently mis-indexes the file.
+
+**Acceptance Criteria:**
+
+**Given** an unquoted scalar containing a mid-word quote char (an apostrophe in prose, a quoted aside mid-sentence)
+**When** miniyaml loads the line
+**Then** the value parses with the quote chars literal — a quote opens a quoted region only where a scalar can begin (start of the value or after whitespace) — and trailing-comment stripping still honors genuinely quoted scalars that contain `#`
+
+**Given** the parser's existing envelope
+**When** the suite runs
+**Then** every current miniyaml case stays green — leading-quote scalars, escaped quotes, `#` inside quotes, trailing comments — and `dump()`'s quoting of unsafe values is unchanged
+
+**Given** a kb file whose frontmatter fails to parse
+**When** `kb.py` builds the index
+**Then** the result carries `warnings[]` naming the file and the parse error while the entry still lands on today's fallback — and the envelope-shaped regression is pinned: a file whose description holds an apostrophe indexes at its declared rank with its declared description, warning-free
+
+**Given** the lib suite at the story's close
+**When** it runs
+**Then** both layers are unit-pinned and the full suite is green
+
+### Story 19.3: The Runbook Names the Seed's Serve Envelope
+
+As an operator provisioning an offline machine,
+I want the runbook's persistent path to state the proven serve split,
+So that offline installs are planned on what a seeded session actually does, not on hedged pre-probe wording.
+
+**Acceptance Criteria:**
+
+**Given** the 2026-08-10 probe results recorded in the archive-install envelope kb
+**When** the runbook's seed-mechanism section is read
+**Then** it states the serve split plainly — a seeded session serves plugins on explicit `/plugin:skill` invocation only (zero network), never advertises them to the session, and the management verbs still do not read the seed — sufficient for driver-contract headless drives, insufficient for attended discovery, which needs `--plugin-dir` or a real install — and cross-links the envelope record for the probe evidence
+
+**Given** the story's docs-only scope
+**When** it lands
+**Then** no code, schema, or contract file changes — the kb index regenerates only if frontmatter moved
