@@ -1,9 +1,10 @@
 ---
 id: TASK-58
 title: The Handoff Budget Measures What Lands
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-10 19:08'
+updated_date: '2026-08-10 19:47'
 labels:
   - ST-058
 milestone: Three Small Truths from the Boundary Loop
