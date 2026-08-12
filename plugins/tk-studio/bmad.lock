@@ -10,7 +10,7 @@
 lock_version: 1
 core:
   package: bmad-method
-  version: 6.10.0
+  version: 6.11.0
 install:
   # Upstream installer invocation shape (non-interactive; AD-1: plain npx, no bootstrap script):
   #   npx bmad-method@<core.version> install --directory <project> \
@@ -21,7 +21,7 @@ install:
     - --yes
 modules:
   bmm:
-    version: 6.10.0
+    version: 6.11.0
     source: built-in
   bmb:
     version: v2.1.0
@@ -45,7 +45,7 @@ modules:
     channel: stable
     sha: 966fbc54db686f77fd0d68cae4164dce8cc98113
   tea:
-    version: v1.21.7
+    version: v1.22.0
     source: external
     npmPackage: bmad-method-test-architecture-enterprise
     repoUrl: https://github.com/bmad-code-org/bmad-method-test-architecture-enterprise
