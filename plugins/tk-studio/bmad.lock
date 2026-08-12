@@ -50,7 +50,7 @@ modules:
     npmPackage: bmad-method-test-architecture-enterprise
     repoUrl: https://github.com/bmad-code-org/bmad-method-test-architecture-enterprise
     channel: stable
-    sha: 2882e9c8972a94f48d5e848039eec435436f2459
+    sha: 5f5a8eb5db08a5e4d9e9ed7956ff31892534e911
   wds:
     version: v0.4.3
     source: external
