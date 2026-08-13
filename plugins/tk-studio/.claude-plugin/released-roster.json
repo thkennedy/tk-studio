@@ -20,7 +20,7 @@
     "tk-studio-session"
   ],
   "archive": {
-    "url": "https://github.com/thkennedy/tk-studio/releases/download/tk-studio--v0.2.7/tk-studio-0.2.7.zip",
-    "sha256": "0c825c7c824d01c9f465835cc78e973e1a89ecce5b6b2c80392bc3b771b05757"
+    "url": "https://github.com/thkennedy/tk-studio/releases/download/tk-studio--v0.2.8/tk-studio-0.2.8.zip",
+    "sha256": "56ca844ed85c8f169a9d068354a4e256ed15e35ffe4cf7ee142e347602e8ba22"
   }
 }
