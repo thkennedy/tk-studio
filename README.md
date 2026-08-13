@@ -6,9 +6,9 @@ tk-studio adds the discipline BMad leaves to the team: version-pinned installs t
 
 | | |
 | --- | --- |
-| Plugin release | **0.2.7** (marketplace catalog is the version gate) |
+| Plugin release | **0.2.8** (marketplace catalog is the version gate) |
 | Driver contract | **0.1.13** — [`plugins/tk-studio/contracts/driver-contract.md`](plugins/tk-studio/contracts/driver-contract.md) |
-| BMad base pin | core **6.10.0** + 6 external modules — [`plugins/tk-studio/bmad.lock`](plugins/tk-studio/bmad.lock) |
+| BMad base pin | core **6.11.0** + 6 external modules — [`plugins/tk-studio/bmad.lock`](plugins/tk-studio/bmad.lock) |
 | Platform | Windows-first (junctions, no admin); macOS/Linux via symlinks |
 | Test state | 639 lib tests green; conformance suite covers all 17 surfaces |
 
@@ -26,11 +26,11 @@ The pinned module set (external modules version independently of core):
 
 | Module | Pin | Upstream |
 | --- | --- | --- |
-| `bmm` (BMad core method) | 6.10.0 | [BMAD-METHOD](https://github.com/bmad-code-org/BMAD-METHOD) |
+| `bmm` (BMad core method) | 6.11.0 | [BMAD-METHOD](https://github.com/bmad-code-org/BMAD-METHOD) |
 | `bmb` (Builder) | v2.1.0 | [bmad-builder](https://github.com/bmad-code-org/bmad-builder) |
 | `cis` (Creative Intelligence Suite) | v0.2.1 | [bmad-module-creative-intelligence-suite](https://github.com/bmad-code-org/bmad-module-creative-intelligence-suite) |
 | `gds` (Game Dev Studio) | v0.6.0 | [bmad-module-game-dev-studio](https://github.com/bmad-code-org/bmad-module-game-dev-studio) |
-| `tea` (Test Architecture Enterprise) | v1.21.7 | [bmad-method-test-architecture-enterprise](https://github.com/bmad-code-org/bmad-method-test-architecture-enterprise) |
+| `tea` (Test Architecture Enterprise) | v1.22.0 | [bmad-method-test-architecture-enterprise](https://github.com/bmad-code-org/bmad-method-test-architecture-enterprise) |
 | `wds` (Web Design Studio) | v0.4.3 | [bmad-method-wds-expansion](https://github.com/bmad-code-org/bmad-method-wds-expansion) |
 | `bmad-loop` | v0.9.1 | [bmad-loop](https://github.com/bmad-code-org/bmad-loop) |
 
@@ -118,7 +118,7 @@ All 17 studio surfaces, grouped by pillar. Every one runs attended **and** headl
 | `tk-studio-install` | "tk install" | Installs the BMad base at the `bmad.lock` pin — non-interactive, deterministic, verify-at-pin. |
 | `tk-studio-base-update` | "base update", "adopt the new BMad release" | Adopts a new upstream release as one reviewable motion: bump the pin → rerun the upstream installer → open the integration PR. Its verify step auto-normalizes known upstream installer churn (list re-serialization, LF rewrites) so the diff you review is the real diff. |
 
-> Known upstream behavior: BMad 6.10.0's quick-update ignores `--pin` and floats stable modules to the latest non-major tag. A `verify-at-pin` failure right after an upstream release is drift, not a studio bug — the fix is a pin-bump motion (see [issues/ledger.md](issues/ledger.md), ISS-003).
+> Known upstream behavior: through core 6.10.0 the quick-update ignored `--pin` and floated stable modules to the latest non-major tag (fixed in 6.11.0's installer, upstream #2680). A `verify-at-pin` failure right after an upstream release is still drift, not a studio bug — the fix is a pin-bump motion (see [issues/ledger.md](issues/ledger.md), ISS-003).
 
 ### Project setup and recommendation
 
