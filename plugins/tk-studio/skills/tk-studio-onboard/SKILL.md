@@ -27,6 +27,17 @@ Run each step through the plugin root; all are idempotent.
    (AD-20) — surface it, never invent one. No vault configured → linking
    skips cleanly (the vault is a view, never a dependency).
 
+   Attended, after standup: if the store config has no `display_name`, ask
+   how the operator wants the studio to address them and record the answer:
+
+   ```bash
+   uv run "${CLAUDE_PLUGIN_ROOT}/lib/store.py" set-name "<name>"
+   ```
+
+   "Use my assistant preference" records the literal `assistant-preference`
+   — the fallback, chosen, so no surface asks again. Headless never prompts
+   and skips this (address is presentation-only).
+
 2. **Propose** (read-only — this IS the dry run; it shows the full plan and
    writes nothing):
 

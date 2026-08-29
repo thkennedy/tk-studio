@@ -20,7 +20,23 @@ persona shell (ST-5.2) on top; routing never lives in the shell.
 
    Role comes from the per-user store (`--role` is the runtime override);
    the working set comes from tracked config `working_set.<role>` — only the
-   caller's role's entry, never another role's.
+   caller's role's entry, never another role's. The payload also carries
+   `display_name` — the operator's chosen form of address from the same
+   store: a name, the literal `assistant-preference` (recorded choice to
+   follow the operator's own assistant name preference), or null (not yet
+   chosen).
+
+   **Attended, when `display_name` is null** — this is the last surface
+   allowed to leave it unset: ask once how the operator wants the studio to
+   address them, then record the answer before proceeding:
+
+   ```bash
+   uv run "${CLAUDE_PLUGIN_ROOT}/lib/store.py" set-name "<name>"
+   ```
+
+   "Use my assistant preference" records the literal `assistant-preference`
+   so no surface asks again. **Headless never asks** — `display_name` is
+   presentation-only and a null changes no routing decision (AD-11).
 
 2. **Attended only — load the council shell** (ST-5.2), after resolution:
 
@@ -55,7 +71,9 @@ persona shell (ST-5.2) on top; routing never lives in the shell.
 ## Report
 
 - **Attended:** who you are (role + source), the framing, then the routes as
-  an offer list; notes verbatim.
+  an offer list; notes verbatim. Address the operator by `display_name`,
+  falling back to the name their own assistant preferences configure —
+  the role names the framing, never the operator.
 - **Headless:** act on the routed payload if the invocation named a target;
   end with the status block:
 
@@ -68,7 +86,10 @@ If the deterministic core is unrunnable — a tool call denied by permissions, `
 ## Rules
 
 - The core is stateless (AD-9): nothing is written anywhere — no run state,
-  no persona state, no cached resolution. Re-invocation re-resolves.
+  no persona state, no cached resolution. Re-invocation re-resolves. The
+  one attended-session write this skill may make is `store.py set-name` —
+  recording the operator's form of address in per-user working data, once,
+  on their explicit answer, never guessed.
 - Routing decisions must be identical attended and headless (AD-11); only
   presentation differs. The shell is presentation.
 - This skill never writes `working_set` (that is `recommend.py record`,

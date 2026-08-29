@@ -46,8 +46,10 @@ class FreshStandupTests(StoreTestCase):
         self.assertEqual(config["role"], "developer")
         self.assertTrue(config["machine_id"])
         self.assertNotIn("obsidian_vault", config)  # optional, commented placeholder only
+        self.assertNotIn("display_name", config)
         text = (self.root / "config.yaml").read_text(encoding="utf-8")
         self.assertIn("# obsidian_vault:", text)
+        self.assertIn("# display_name:", text)
 
     def test_check_reports_missing_then_complete(self):
         self.assertFalse(store.check_store()["complete"])
@@ -111,6 +113,72 @@ class IdempotenceTests(StoreTestCase):
         self.assertFalse(result["complete"])
         self.assertEqual(config.read_text(encoding="utf-8"), "a: {broken flow\n")
         self.assertIsNotNone(store.check_store()["config_error"])
+
+
+class SetNameTests(StoreTestCase):
+    """set-name records the operator's form of address (name or the explicit
+    assistant-preference fallback) preserving every other line byte-for-byte."""
+
+    def test_fresh_store_records_name_next_to_its_docs(self):
+        result = store.set_display_name("Tim")
+        self.assertEqual(result["action"], "created")
+        self.assertEqual(store.read_config()["display_name"], "Tim")
+        text = (self.root / "config.yaml").read_text(encoding="utf-8")
+        # lands right under the commented placeholder, docs adjacent
+        self.assertIn("# display_name: Tim\ndisplay_name: Tim\n", text)
+
+    def test_update_in_place_everything_else_untouched(self):
+        store.set_display_name("Tim")
+        before = (self.root / "config.yaml").read_text(encoding="utf-8")
+        result = store.set_display_name("Tim-Senpai")
+        self.assertEqual(result["action"], "updated")
+        after = (self.root / "config.yaml").read_text(encoding="utf-8")
+        self.assertEqual(after, before.replace("\ndisplay_name: Tim\n",
+                                               "\ndisplay_name: Tim-Senpai\n"))
+
+    def test_same_value_is_a_no_op(self):
+        store.set_display_name("Tim")
+        before = (self.root / "config.yaml").read_bytes()
+        self.assertEqual(store.set_display_name("Tim")["action"], "unchanged")
+        self.assertEqual((self.root / "config.yaml").read_bytes(), before)
+
+    def test_assistant_preference_sentinel_round_trips(self):
+        store.set_display_name(store.DISPLAY_NAME_ASSISTANT)
+        self.assertEqual(store.read_config()["display_name"],
+                         "assistant-preference")
+
+    def test_config_without_placeholder_gets_key_appended(self):
+        self.root.mkdir(parents=True)
+        (self.root / "config.yaml").write_text(
+            "user_name: tim\nrole: developer\nmachine_id: box\n",
+            encoding="utf-8")
+        store.set_display_name("Tim")
+        self.assertEqual(store.read_config()["display_name"], "Tim")
+        self.assertEqual(store.read_config()["role"], "developer")
+
+    def test_values_that_break_the_config_parse_are_refused(self):
+        for bad in ("", "  ", "two\nlines", "Tim # trailing comment eats this"):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                store.set_display_name(bad)
+        self.assertNotIn("display_name", store.read_config())
+
+    def test_unparseable_config_reported_never_rewritten(self):
+        self.root.mkdir(parents=True)
+        config = self.root / "config.yaml"
+        config.write_text("a: {broken flow\n", encoding="utf-8")
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(store.main(["set-name", "Tim"]), 1)
+        self.assertEqual(config.read_text(encoding="utf-8"), "a: {broken flow\n")
+
+    def test_cli_set_name_exit_codes(self):
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(store.main(["set-name", "Tim"]), 0)
+            self.assertEqual(store.main(["set-name", "bad # value"]), 1)
+        self.assertEqual(store.read_config()["display_name"], "Tim")
 
 
 class ReadRetryTests(StoreTestCase):
