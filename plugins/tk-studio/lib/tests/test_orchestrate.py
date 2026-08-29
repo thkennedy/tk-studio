@@ -156,6 +156,45 @@ class OrchestrateTestCase(unittest.TestCase):
         self.assertEqual((route["name"], route["kind"], route["status"]),
                          ("my-reviewer", "skill", "installed"))
 
+    # --- addressing: display_name rides along from the store (never the role)
+
+    def _store_with_display_name(self, role="developer", name="Tim-Senpai"):
+        self.store.mkdir(parents=True, exist_ok=True)
+        (self.store / "config.yaml").write_text(
+            f"user_name: tester\nrole: {role}\nmachine_id: box\n"
+            f"display_name: {name}\n", encoding="utf-8")
+
+    def test_display_name_rides_along_from_store(self):
+        self._store_with_display_name()
+        self._confirmed_set()
+        self._install_bmad()
+        result = self._resolve()
+        self.assertEqual(result["display_name"], "Tim-Senpai")
+
+    def test_display_name_null_when_unset(self):
+        self._store_with_role("developer")
+        self._confirmed_set()
+        result = self._resolve()
+        self.assertIsNone(result["display_name"])
+
+    def test_recorded_fallback_choice_surfaces_verbatim(self):
+        # "assistant-preference" is a settled choice, not an unset — the
+        # attended flow must see the difference to know not to ask again
+        self._store_with_display_name(name="assistant-preference")
+        self._confirmed_set()
+        result = self._resolve()
+        self.assertEqual(result["display_name"], "assistant-preference")
+
+    def test_display_name_survives_role_override_and_gaps(self):
+        # the address is independent of the role: an override doesn't drop
+        # it, and a needs-onboarding outcome still carries it (the greeting
+        # happens before the gap is closed)
+        self._store_with_display_name(role="developer")
+        result = self._resolve(role="direction-giver")
+        self.assertEqual(result["outcome"], "needs-onboarding")
+        self.assertEqual(result["role_source"], "override")
+        self.assertEqual(result["display_name"], "Tim-Senpai")
+
     # --- AC 1b: role-specific framing from the same door
 
     def test_developer_gets_execution_framing(self):

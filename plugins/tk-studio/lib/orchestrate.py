@@ -147,9 +147,10 @@ def resolve(project_root: Path, role: str | None = None,
     if not root.is_dir():
         raise OrchestrateError(f"project root {root} is not a directory")
 
+    store_config = storelib.read_config()
     role_source = "override"
     if role is None:
-        role = storelib.read_config().get("role") or None
+        role = store_config.get("role") or None
         role_source = "user-store" if role else None
     if role is not None and not _ROLE_TOKEN_RE.match(role):
         raise OrchestrateError(f"role '{role}' is not a valid role token")
@@ -168,6 +169,12 @@ def resolve(project_root: Path, role: str | None = None,
         "project_root": str(root),
         "role": role,
         "role_source": role_source,
+        # How the operator asked to be addressed (per-user store). null →
+        # not yet chosen: presentation falls back to the operator's own
+        # assistant name preference and attended flows ask once (store.py
+        # set-name); "assistant-preference" → that fallback, chosen — never
+        # re-asked. The role is framing, never a form of address.
+        "display_name": store_config.get("display_name") or None,
         "working_set": working_set,
         "framing": role_framing(role) if role else None,
         "outcome": OUTCOME_NEEDS_ONBOARDING if gaps else OUTCOME_READY,

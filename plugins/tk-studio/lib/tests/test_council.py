@@ -71,6 +71,10 @@ class CouncilShellTestCase(unittest.TestCase):
         self.assertIn("convene the council", shell["assets"]["shell"].lower())
         # deliberation is over installed agents, and only installed ones
         self.assertIn("installed", shell["assets"]["convene"].lower())
+        # the operator is addressed by chosen name — the role is framing,
+        # never a form of address
+        self.assertIn("display_name", shell["assets"]["shell"])
+        self.assertIn("never by role", shell["assets"]["shell"])
 
     def test_shell_carries_no_identity_state_machinery(self):
         # AD-9: loading the shell touches no file anywhere — no identity

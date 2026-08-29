@@ -45,6 +45,11 @@ STORE_DIRS = ("registry", "projects", "measurements")
 ROLES = ("direction-giver", "developer")
 DEFAULT_ROLE = "developer"
 
+# Recorded choice to follow the operator's own assistant name preference —
+# distinct from unset (unset means "not yet chosen"; attended setup surfaces
+# ask once, then record either a name or this sentinel so nobody asks again).
+DISPLAY_NAME_ASSISTANT = "assistant-preference"
+
 # Required config keys with the comment block written above each on standup.
 _CONFIG_KEY_LINES = {
     "user_name": [
@@ -68,6 +73,10 @@ _CONFIG_HEADER = [
 ]
 
 _CONFIG_OPTIONAL_LINES = [
+    "# How the studio addresses you in attended sessions. Set a name, or the",
+    "# literal 'assistant-preference' to follow your assistant's own configured",
+    "# name preference. Unset = not yet chosen: setup surfaces ask once.",
+    "# display_name: Tim",
     "# Optional: absolute path to your Obsidian vault root — enables the vault window (ST-2.5).",
     "# obsidian_vault: C:/path/to/vault",
 ]
@@ -183,6 +192,67 @@ def _locked_append(path: Path, text: str) -> None:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+def _atomic_replace(path: Path, content: str) -> None:
+    """Overwrite path atomically (tempfile + os.replace, fsynced)."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def set_display_name(value: str) -> dict:
+    """Record how the operator wants to be addressed (attended flows only).
+
+    The value is a name, or DISPLAY_NAME_ASSISTANT to record the explicit
+    choice to follow the assistant's own name preference. Preservation-first:
+    only the display_name line changes; every other line, comment included,
+    survives byte-for-byte. Raises ValueError on a value that would not
+    round-trip through the config parse.
+    """
+    value = value.strip()
+    if not value or "\n" in value or "\r" in value:
+        raise ValueError("display_name must be a non-empty single line")
+    try:
+        parsed = miniyaml.loads(f"display_name: {value}")
+    except miniyaml.MiniYamlError as exc:
+        raise ValueError(f"display_name {value!r} does not parse: {exc}") from exc
+    if parsed.get("display_name") != value:
+        raise ValueError(f"display_name {value!r} does not survive the "
+                         "config round-trip — use a plainer spelling")
+
+    ensure_store()
+    path = config_path()
+    text = _read_text_retry(path)
+    if miniyaml.loads(text).get("display_name") == value:
+        return {"display_name": value, "action": "unchanged"}
+
+    lines = text.splitlines()
+    new_line = f"display_name: {value}"
+    key_re = re.compile(r"^display_name\s*:")
+    placeholder_re = re.compile(r"^#\s*display_name\s*:")
+    action = "updated"
+    for i, line in enumerate(lines):
+        if key_re.match(line):
+            lines[i] = new_line
+            break
+    else:
+        action = "created"
+        for i, line in enumerate(lines):
+            if placeholder_re.match(line):
+                lines.insert(i + 1, new_line)
+                break
+        else:
+            lines.append(new_line)
+    _atomic_replace(path, "\n".join(lines) + "\n")
+    return {"display_name": value, "action": action}
+
+
 def check_store() -> dict:
     """Read-only skeleton + config health. Never mutates (AD-13 store plane)."""
     root = store_root()
@@ -276,6 +346,10 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("standup", help="create/complete the store skeleton (idempotent)")
     sub.add_parser("check", help="read-only skeleton + config health")
+    setter = sub.add_parser(
+        "set-name", help="record how the studio addresses you (a name, or "
+        f"'{DISPLAY_NAME_ASSISTANT}' to follow your assistant's preference)")
+    setter.add_argument("name", help="the display name to record")
     args = parser.parse_args(argv)
 
     try:
@@ -284,11 +358,17 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"ok": True, "mutated": False, **result},
                              ensure_ascii=False, indent=2))
             return 0 if result["complete"] else 1
+        if args.command == "set-name":
+            result = set_display_name(args.name)
+            print(json.dumps({"ok": True,
+                              "mutated": result["action"] != "unchanged",
+                              **result}, ensure_ascii=False, indent=2))
+            return 0
         result = ensure_store()
         print(json.dumps({"ok": True, "mutated": bool(result["created"] or result["appended_keys"]),
                           **result}, ensure_ascii=False, indent=2))
         return 0 if result["complete"] else 1
-    except OSError as exc:
+    except (OSError, ValueError, miniyaml.MiniYamlError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}))
         return 1
 
