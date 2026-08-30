@@ -47,6 +47,12 @@ def build_command(lock: dict, directory: Path, modules: list[str]) -> list[str]:
         "--tools", ",".join(lock["install"].get("tools", ["claude-code"])),
     ]
     cmd += lock["install"].get("flags", [])
+    # With an existing _bmad tree, the upstream installer defaults --yes runs
+    # to its quick-update action, which ignores --modules and --pin entirely
+    # (upstream ui.js: only --custom-source forces the full path). Name the
+    # action explicitly so the pinned invocation stays pinned on reinstalls.
+    if (directory / "_bmad").is_dir():
+        cmd += ["--action", "update"]
     for name in modules:
         spec = lock["modules"][name]
         if isinstance(spec, dict) and spec.get("source") == "external":
