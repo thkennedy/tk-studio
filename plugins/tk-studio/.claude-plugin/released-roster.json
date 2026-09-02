@@ -1,5 +1,5 @@
 {
-  "version": "0.2.10",
+  "version": "0.2.11",
   "skills": [
     "tk-studio-activate",
     "tk-studio-base-update",
@@ -9,6 +9,7 @@
     "tk-studio-install",
     "tk-studio-job",
     "tk-studio-knowledge",
+    "tk-studio-launch",
     "tk-studio-measure-push",
     "tk-studio-migrate",
     "tk-studio-observe",

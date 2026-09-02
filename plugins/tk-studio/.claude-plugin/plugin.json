@@ -2,7 +2,7 @@
   "name": "tk-studio",
   "displayName": "tk-studio",
   "description": "AI dev-studio layer over a pinned BMad base: lockstep installs, data taxonomy, planning adapter, recommendation, and unattended operations.",
-  "version": "0.2.10",
+  "version": "0.2.11",
   "author": {
     "name": "Tim Kennedy",
     "email": "kennedy.timothyh@gmail.com"
