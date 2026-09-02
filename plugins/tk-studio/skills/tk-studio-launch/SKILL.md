@@ -28,6 +28,10 @@ checkout until it finishes, pauses, or is stopped.
 
 ### `start`
 
+0. **Resolve the inputs before anything runs** (headless: a gap here ends `blocked`, never a guess):
+   - `<spec_folder>` = the payload's `spec_folder`, else `_bmad-output/specs/spec-epic-<epic>` (the core's `--epic` flag applies the same default); with neither `epic` nor `spec_folder`, end `blocked`: `spec folder unresolvable: neither epic nor spec_folder given`.
+   - `<story>` = the payload's `story`, else the first entry under `## Stories` in `<root>/_bmad-output/implementation-artifacts/epic-<epic>-context.md` (`Story N.M: …` → `N-M`), else the first `### Story N.M` heading of the epic's section in `<root>/_bmad-output/planning-artifacts/epics.md`; with none of these, end `blocked`: `first story unresolvable for epic <epic>`.
+
 1. **Readiness first, and never guess around a gap.** Run:
 
    ```bash
@@ -48,7 +52,7 @@ checkout until it finishes, pauses, or is stopped.
 
    The core mints the run id, spawns `bmad-loop run --spec … --run-id …` detached and console-less with its output in `~/.tk-studio/projects/<key>/launches/<run-id>.log`, and answers `ok` only once the engine has written `.bmad-loop/runs/<run-id>/state.json`. A launch it could not confirm answers `ok: false` with the pid and log named — report that as `blocked` with the reason; do not launch again.
 
-5. **Report.** Attended: the run id, the spec folder, the first story planned, and how to watch it (`bmad-loop tui`, the ClaudeOS Queue). Headless: end with the status block — `artifacts[]` names the run dir, the spec folder, and any SPEC/plan files this session wrote.
+5. **Report.** Attended: the run id, the spec folder, the first story planned, and how to watch it (`bmad-loop tui`, the ClaudeOS Queue). Headless: end with the status block — `artifacts[]` names the run dir (the core's project-relative `run_dir`, never `run_dir_abs` or the store `log` path — §3 forbids absolute local paths in artifacts), the spec folder, and any SPEC/plan files this session wrote.
 
 ### `status`
 
