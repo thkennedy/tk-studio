@@ -45,10 +45,12 @@ class _FakeSubstrate:
     """Scripted bmad-loop: list/validate/status/stop answers + a spawner
     that optionally writes the engine's state.json to acknowledge."""
 
-    def __init__(self, *, runs=None, validate_ok=True, acknowledge=True):
+    def __init__(self, *, runs=None, validate_ok=True, acknowledge=True,
+                 stop_ok=True):
         self.runs = runs or []
         self.validate_ok = validate_ok
         self.acknowledge = acknowledge
+        self.stop_ok = stop_ok
         self.calls: list[list[str]] = []
         self.spawned: list[dict] = []
 
@@ -68,7 +70,9 @@ class _FakeSubstrate:
                                       {"story_key": "2-1-1", "phase": "dev-running",
                                        "attempt": 1, "review_cycle": 0}]}), ""
         if verb == "stop":
-            return 0, "stopped", ""
+            if self.stop_ok:
+                return 0, "stopped", ""
+            return 1, "", f"no such run: {args[-1]}"
         return 1, "", f"unknown verb {verb}"
 
     def spawn_detached(self, args, *, cwd, log_path):
@@ -252,6 +256,99 @@ class LaunchTestCase(unittest.TestCase):
         parsed = json.loads(out.getvalue())
         self.assertTrue(parsed["ok"])
         self.assertTrue(re.match(r"^\d{8}-\d{6}-[0-9a-f]{4}$", parsed["run_id"]))
+
+    # ---- review-driven pins (PR #58 adversarial pass)
+
+    def test_terminal_statuses_never_own_the_checkout_even_with_a_stale_pause(self):
+        root, spec = _project(self.tmp, ran_before=True)
+        self._wire(_FakeSubstrate(runs=[
+            {"run_id": "20260901-000000-aaaa", "status": "stopped", "paused_stage": "escalation"},
+            {"run_id": "20260901-000001-bbbb", "status": "interrupted", "paused_stage": ""},
+            {"run_id": "20260901-000002-cccc", "status": "crashed", "paused_stage": "story-gate"},
+            {"run_id": "20260901-000003-dddd", "status": "finished", "paused_stage": ""}]))
+        self.assertTrue(launch.check(root, spec)["ok"])
+        self.assertEqual(launch.live_runs([{"status": s} for s in launch.TERMINAL_STATUSES]), [])
+
+    def test_missing_project_directory_is_a_named_gap_not_a_crash(self):
+        result = launch.check(self.tmp / "absent", "x")
+        self.assertFalse(result["ok"])
+        self.assertTrue(any(g.startswith("project:") for g in result["gaps"]))
+
+    def test_absolute_spec_folder_reaches_validate_and_run_relativized(self):
+        root, spec = _project(self.tmp)
+        fake = self._wire(_FakeSubstrate())
+        absolute = str((root / spec).resolve())
+        result = launch.start(root, absolute, wait_s=2)
+        self.assertTrue(result["ok"], result)
+        validate = next(c for c in fake.calls if c[0] == "validate")
+        given = validate[validate.index("--spec") + 1]
+        self.assertFalse(Path(given).is_absolute())
+        run_args = fake.spawned[0]["args"]
+        self.assertEqual(run_args[run_args.index("--spec") + 1], given)
+        self.assertEqual(result["spec_folder"], given)
+
+    def test_run_dir_in_the_result_is_project_relative(self):
+        root, spec = _project(self.tmp)
+        self._wire(_FakeSubstrate())
+        result = launch.start(root, spec, wait_s=2)
+        self.assertEqual(result["run_dir"], f".bmad-loop/runs/{result['run_id']}")
+        self.assertTrue(Path(result["run_dir_abs"]).is_absolute())
+
+    def test_cli_epic_applies_the_default_spec_folder(self):
+        root, spec = _project(self.tmp)
+        fake = self._wire(_FakeSubstrate())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = launch.main(["check", "--directory", str(root), "--epic", "2"])
+        self.assertEqual(code, 0)
+        self.assertTrue(json.loads(out.getvalue())["ok"])
+        validate = next(c for c in fake.calls if c[0] == "validate")
+        self.assertEqual(validate[validate.index("--spec") + 1], spec)
+        self.assertEqual(launch.default_spec_folder(7), "_bmad-output/specs/spec-epic-7")
+
+    def test_cli_without_spec_or_epic_is_a_refusal(self):
+        root, _ = _project(self.tmp)
+        self._wire(_FakeSubstrate())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = launch.main(["start", "--directory", str(root)])
+        self.assertEqual(code, 2)
+        self.assertIn("--spec or --epic", json.loads(out.getvalue())["error"])
+
+    def test_cli_status_and_stop_keep_the_house_shape(self):
+        root, _ = _project(self.tmp, ran_before=True)
+        self._wire(_FakeSubstrate(runs=[
+            {"run_id": "20260902-022928-ef8c", "status": "in-progress", "paused_stage": ""}]))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = launch.main(["status", "--directory", str(root)])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out.getvalue())["run"]["run_id"], "20260902-022928-ef8c")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = launch.main(["stop", "--directory", str(root),
+                                "--run-id", "20260902-022928-ef8c", "--graceful"])
+        self.assertEqual(code, 0)
+        self.assertTrue(json.loads(out.getvalue())["ok"])
+
+    def test_stop_refusal_from_the_substrate_is_exit_2(self):
+        root, _ = _project(self.tmp, ran_before=True)
+        self._wire(_FakeSubstrate(stop_ok=False))
+        with self.assertRaises(launch.LaunchError):
+            launch.stop(root, "20260901-000000-aaaa")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = launch.main(["stop", "--directory", str(root), "--run-id", "20260901-000000-aaaa"])
+        self.assertEqual(code, 2)
+        parsed = json.loads(out.getvalue())
+        self.assertFalse(parsed["ok"])
+        self.assertIn("no such run", parsed["error"])
+
+    def test_manifest_count_tolerates_indented_top_level_list(self):
+        path = self.tmp / "stories.yaml"
+        path.write_text('  - id: "1-1-1"\n    title: a\n  - id: "1-1-2"\n    title: b\n',
+                        encoding="utf-8")
+        self.assertEqual(launch._manifest_entry_count(path), 2)
 
     def test_cli_refusal_is_exit_2_with_ok_false(self):
         root, _ = _project(self.tmp)

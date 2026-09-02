@@ -125,14 +125,33 @@ def mint_run_id(now: datetime | None = None) -> str:
 
 
 def _manifest_entry_count(path: Path) -> int:
-    """Top-level `- id:` entries of a stories.yaml, without a YAML parser —
-    the substrate validates the manifest properly; this only answers
-    "is there anything to dispatch"."""
+    """`- id:` entries of a stories.yaml (a top-level list by the substrate's
+    schema; leading indentation tolerated), without a YAML parser — the
+    substrate validates the manifest properly; this only answers "is there
+    anything to dispatch"."""
     count = 0
     for line in path.read_text(encoding="utf-8").splitlines():
-        if re.match(r"^-\s+id:\s*\S", line):
+        if re.match(r"^\s*-\s+id:\s*\S", line):
             count += 1
     return count
+
+
+def default_spec_folder(epic: int) -> str:
+    """The epic's spec folder when the payload names only the epic number
+    (the skill's documented default)."""
+    return f"_bmad-output/specs/spec-epic-{int(epic)}"
+
+
+def _spec_paths(root: Path, spec_folder: str) -> tuple[Path, str]:
+    """(absolute folder, the project-relative spelling handed to the
+    substrate). A relative spelling is passed through verbatim — Path()
+    would rewrite separators on Windows — and an absolute one is
+    relativized once, here, so `validate` and `run` always see the same
+    argument."""
+    folder = Path(spec_folder)
+    if folder.is_absolute():
+        return folder, os.path.relpath(folder, root)
+    return root / folder, spec_folder
 
 
 def launches_dir(project_root: Path) -> Path:
@@ -152,9 +171,11 @@ def list_runs(project_root: Path) -> list[dict]:
 
 
 def live_runs(runs: list[dict]) -> list[dict]:
-    return [r for r in runs
-            if str(r.get("status", "")) not in TERMINAL_STATUSES
-            or r.get("paused_stage")]
+    """Runs whose engine still owns the checkout: any non-terminal status
+    (a paused engine is a live process). Terminal is decided by status
+    alone — a stale `paused_stage` on a finished run must never block
+    every later launch."""
+    return [r for r in runs if str(r.get("status", "")) not in TERMINAL_STATUSES]
 
 
 # --------------------------------------------------------------------- verbs
@@ -175,8 +196,7 @@ def check(project_root: Path, spec_folder: str) -> dict:
     if not root.is_dir():
         return {"ok": False, "checks": checks, "gaps": gaps}
 
-    folder = Path(spec_folder)
-    folder_abs = folder if folder.is_absolute() else root / folder
+    folder_abs, rel = _spec_paths(root, spec_folder)
     spec_md = folder_abs / "SPEC.md"
     manifest = folder_abs / "stories.yaml"
     add("spec folder", folder_abs.is_dir(),
@@ -210,9 +230,6 @@ def check(project_root: Path, spec_folder: str) -> dict:
             "none" if not live else "a run already owns this checkout: "
             + ", ".join(f"{r.get('run_id')} ({r.get('status')})" for r in live))
 
-    # the operator's spelling goes to the substrate verbatim (Path() would
-    # rewrite separators on Windows); only an absolute folder is relativized
-    rel = spec_folder if not folder.is_absolute() else os.path.relpath(folder_abs, root)
     try:
         rc, out, err = run_cli(["validate", "--json", "--project", str(root), "--spec", rel])
     except LaunchError as exc:
@@ -245,7 +262,8 @@ def start(project_root: Path, spec_folder: str, *, run_id: str | None = None,
     if run_dir.exists():
         raise LaunchError(f"run id already exists: {run_dir}")
     log_path = launches_dir(root) / f"{rid}.log"
-    args = ["run", "--project", str(root), "--spec", spec_folder, "--run-id", rid]
+    _, rel = _spec_paths(root, spec_folder)
+    args = ["run", "--project", str(root), "--spec", rel, "--run-id", rid]
     pid = spawn_detached(args, cwd=root, log_path=log_path)
     state = run_dir / "state.json"
     deadline = time.monotonic() + max(0.0, wait_s)
@@ -256,10 +274,13 @@ def start(project_root: Path, spec_folder: str, *, run_id: str | None = None,
     result = {
         "ok": seen,
         "run_id": rid,
-        "run_dir": str(run_dir),
+        # project-relative, so it can go into a status block's artifacts[]
+        # verbatim (driver-contract §3: never an absolute local path)
+        "run_dir": f".bmad-loop/runs/{rid}",
+        "run_dir_abs": str(run_dir),
         "log": str(log_path),
         "pid": pid,
-        "spec_folder": spec_folder,
+        "spec_folder": rel,
         "state_seen": seen,
         "checks": readiness["checks"],
     }
@@ -306,7 +327,12 @@ def stop(project_root: Path, run_id: str, *, graceful: bool = False) -> dict:
         args.append("--graceful")
     args += ["--project", str(root), run_id]
     rc, out, err = run_cli(args)
-    return {"ok": rc == 0, "run_id": run_id, "graceful": graceful,
+    if rc != 0:
+        # an unknown or already-terminal run is a refusal the substrate
+        # names, not an unexpected failure — surface it as one (exit 2)
+        raise LaunchError(f"bmad-loop stop {run_id} refused (exit {rc}): "
+                          f"{(out + err).strip()[:400]}")
+    return {"ok": True, "run_id": run_id, "graceful": graceful,
             "output": (out + err).strip()[:800]}
 
 
@@ -319,16 +345,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="tk-studio launch — the execution substrate for one epic")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("check", help="readiness gates; launches nothing")
-    p.add_argument("--directory", required=True)
-    p.add_argument("--spec", required=True, help="epic spec folder (project-relative)")
-
-    p = sub.add_parser("start", help="launch the engine detached for the epic's manifest")
-    p.add_argument("--directory", required=True)
-    p.add_argument("--spec", required=True, help="epic spec folder (project-relative)")
-    p.add_argument("--run-id", help="pre-minted run id (default: minted here)")
-    p.add_argument("--wait", type=float, default=DEFAULT_WAIT_S,
-                   help="seconds to wait for the engine's state.json")
+    for name, help_text in (("check", "readiness gates; launches nothing"),
+                            ("start", "launch the engine detached for the epic's manifest")):
+        p = sub.add_parser(name, help=help_text)
+        p.add_argument("--directory", required=True)
+        p.add_argument("--spec", help="epic spec folder (project-relative); "
+                                      "default from --epic: _bmad-output/specs/spec-epic-<N>")
+        p.add_argument("--epic", type=int, help="epic number (names the default spec folder)")
+        if name == "start":
+            p.add_argument("--run-id", help="pre-minted run id (default: minted here)")
+            p.add_argument("--wait", type=float, default=DEFAULT_WAIT_S,
+                           help="seconds to wait for the engine's state.json")
 
     p = sub.add_parser("status", help="runs on the checkout; detail for the live or named run")
     p.add_argument("--directory", required=True)
@@ -342,21 +369,27 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     root = Path(args.directory)
     try:
+        if args.command in ("check", "start"):
+            spec = args.spec
+            if not spec:
+                if args.epic is None:
+                    raise LaunchError("give --spec or --epic (the spec folder is required)")
+                spec = default_spec_folder(args.epic)
         if args.command == "check":
-            result = check(root, args.spec)
+            result = check(root, spec)
             print(json.dumps(result, ensure_ascii=False))
             return 0
         if args.command == "start":
-            result = start(root, args.spec, run_id=args.run_id, wait_s=args.wait)
+            result = start(root, spec, run_id=args.run_id, wait_s=args.wait)
             print(json.dumps(result, ensure_ascii=False))
             return 0 if result["ok"] else 1
         if args.command == "status":
             print(json.dumps(status(root, args.run_id), ensure_ascii=False))
             return 0
         if args.command == "stop":
-            result = stop(root, args.run_id, graceful=args.graceful)
-            print(json.dumps(result, ensure_ascii=False))
-            return 0 if result["ok"] else 1
+            print(json.dumps(stop(root, args.run_id, graceful=args.graceful),
+                             ensure_ascii=False))
+            return 0
     except LaunchError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
         return 2
