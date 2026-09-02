@@ -1,0 +1,21 @@
+{
+  "job_schema_version": 1,
+  "id": "run-epic",
+  "description": "Studio pipeline job type (decision 5, 2026-09-02): run one project epic on the execution substrate through the studio. The run-epic instance names the epic; the tk-studio-launch surface distills the epic SPEC and bootstraps the first story's task manifest at the planner tier, then starts bmad-loop detached with a pre-minted run id. One-shot: the engine owns the checkout after launch; its progress is read from the substrate's own run files, not from this job's run.",
+  "target": {
+    "skill": "tk-studio-launch",
+    "payload": {
+      "verb": "start",
+      "bootstrap": true
+    }
+  },
+  "trigger": "one-shot",
+  "guards": {
+    "max_turns": 80,
+    "max_wall_clock_seconds": 3600
+  },
+  "stop": {
+    "on_status": ["blocked"]
+  },
+  "effort": "high"
+}

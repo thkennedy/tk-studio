@@ -77,8 +77,10 @@ class DriverContractTestCase(unittest.TestCase):
         # the §8 conformance harness pass (EP-014 ST-051, additive); 0.1.12
         # adds the §4 resolve verb (EP-015 ST-053, PROP-008, additive);
         # 0.1.13 adds the planning adapter's named-write reporting
-        # (EP-017 ST-055, PROP-020, additive)
-        self.assertRegex(self.text, r"\*\*0\.1\.13\*\*")
+        # (EP-017 ST-055, PROP-020, additive); 0.1.14 adds the
+        # tk-studio-launch surface + the run-epic job type (studio
+        # pipeline decision 5, additive)
+        self.assertRegex(self.text, r"\*\*0\.1\.14\*\*")
         self.assertIn("Change policy", self.text)
         self.assertIn("MAJOR", self.text)
         self.assertRegex(self.text, r"[Bb]reaking")

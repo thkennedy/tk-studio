@@ -79,6 +79,23 @@
         }
       ]
     },
+    "tk-studio-launch": {
+      "external_calls": false,
+      "auth_preflight": "none needed in the surface — the substrate is a local CLI (bmad-loop); the engine's own sessions carry the harness auth preflight (driver-contract §1), and the skill's planner-tier steps run inside the invoking session",
+      "drives": [
+        {
+          "assertion": "headless-clean",
+          "argv": ["lib/launch.py", "status", "--directory", "{sandbox}"],
+          "expect": "json"
+        },
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/launch.py", "start", "--directory", "{sandbox}", "--spec", "_bmad-output/specs/spec-none", "--wait", "0"],
+          "expect": "refusal",
+          "marker": "spec folder"
+        }
+      ]
+    },
     "tk-studio-orchestrator": {
       "external_calls": false,
       "auth_preflight": "none needed — stateless read of store + project config",
