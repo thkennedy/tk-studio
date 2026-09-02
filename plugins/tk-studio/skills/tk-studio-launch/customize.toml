@@ -1,0 +1,15 @@
+# Customization surface for tk-studio-launch.
+#
+# Override files (not edited here):
+#   {project-root}/_bmad/custom/tk-studio-launch.toml         (team)
+#   {project-root}/_bmad/custom/tk-studio-launch.user.toml    (personal)
+
+# Model/effort defaults (AD-14). Precedence: runtime override > project config
+# > this resource default. The only LLM work this surface does is the studio
+# pipeline's planner-tier leg — distilling the epic SPEC and breaking the
+# first story into dispatchable tasks — so it sits on the planner tier by
+# rule; execution-tier work happens inside the engine's sessions, not here.
+# A project that must conserve budget pins a lower model in its config.
+[model]
+default = "claude-fable-5-1"
+effort = "high"
