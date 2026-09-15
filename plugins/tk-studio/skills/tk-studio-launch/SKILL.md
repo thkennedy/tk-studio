@@ -32,19 +32,27 @@ checkout until it finishes, pauses, or is stopped.
    - `<spec_folder>` = the payload's `spec_folder`, else `_bmad-output/specs/spec-epic-<epic>` (the core's `--epic` flag applies the same default); with neither `epic` nor `spec_folder`, end `blocked`: `spec folder unresolvable: neither epic nor spec_folder given`.
    - `<story>` = the payload's `story`, else the first entry under `## Stories` in `<root>/_bmad-output/implementation-artifacts/epic-<epic>-context.md` (`Story N.M: …` → `N-M`), else the first `### Story N.M` heading of the epic's section in `<root>/_bmad-output/planning-artifacts/epics.md`; with none of these, end `blocked`: `first story unresolvable for epic <epic>`.
 
-1. **Readiness first, and never guess around a gap.** Run:
+1. **Route the epic's first story** — the model and effort every leg of the run uses (the session, its implementer / reviewer / consult subagents, the seam check, the review and triage stages, the supervisor pass), resolved runtime > the project's `.bmad-loop/routing.toml` > the shipped measured defaults in this skill's `customize.toml` `[pipeline]` (AD-14; `kb/execution-pipeline-model-routing.md` carries the numbers). Run:
+
+   ```bash
+   uv run "${CLAUDE_PLUGIN_ROOT}/lib/pipeline.py" apply --directory <root> --story <epic>-<story>
+   ```
+
+   It writes exactly the managed block in `.bmad-loop/policy.toml`, the subagent-model line in the tracked Claude profile when the project has one, and `.bmad-loop/routing.current.json`; nothing else. Read `writes` and `unignored[]`. A non-empty `unignored[]` names a file this write would leave dirty in the tree — the engine's preflight refuses a dirty tree — so end `blocked` naming it (`routing write not gitignored: <path>`); never add the ignore line yourself in a headless run, and never launch around it. A refusal (`ok: false` — the policy is missing, the project's routing table is invalid) ends `blocked` with its `error` verbatim: the route is never invented. Report the route's session / implementer / reviewers / consult models in the launch report.
+
+2. **Readiness first, and never guess around a gap.** Run:
 
    ```bash
    uv run "${CLAUDE_PLUGIN_ROOT}/lib/launch.py" check --directory <root> --spec <spec_folder>
    ```
 
-   Read `gaps[]`. Gaps you may close in this session (only when `bootstrap` is true): a missing `SPEC.md` (step 2) and an empty or missing task manifest (step 3). Every other gap — a live engine already on the checkout, `bmad-loop` not installed, a failing `bmad-loop validate` (a dirty tree, a broken policy) — ends the run `blocked` with the gap verbatim in `reason`. Never stop another run to make room; never clean a tree.
+   Read `gaps[]`. Gaps you may close in this session (only when `bootstrap` is true): a missing `SPEC.md` (step 3) and an empty or missing task manifest (step 4). Every other gap — a live engine already on the checkout, `bmad-loop` not installed, a failing `bmad-loop validate` (a dirty tree, a broken policy) — ends the run `blocked` with the gap verbatim in `reason`. Never stop another run to make room; never clean a tree.
 
-2. **Epic SPEC (when missing).** Invoke the project's own `bmad-spec` skill by name, headless, on the epic: input = the epic's section of `_bmad-output/planning-artifacts/epics.md` plus `_bmad-output/implementation-artifacts/epic-<N>-context.md` when present; slug `epic-<N>`, so it lands at `<spec_folder>/SPEC.md`. Express mode: gaps become `open_questions[]`, never invented answers. The stock skill is invoked untouched (AD-4); if it is not installed in the project, end `blocked` naming it.
+3. **Epic SPEC (when missing).** Invoke the project's own `bmad-spec` skill by name, headless, on the epic: input = the epic's section of `_bmad-output/planning-artifacts/epics.md` plus `_bmad-output/implementation-artifacts/epic-<N>-context.md` when present; slug `epic-<N>`, so it lands at `<spec_folder>/SPEC.md`. Express mode: gaps become `open_questions[]`, never invented answers. The stock skill is invoked untouched (AD-4); if it is not installed in the project, end `blocked` naming it.
 
-3. **First story's tasks (when the manifest is empty).** The task-planning instructions are a **project resource**: `<root>/.bmad-loop/plugins/studio-pipeline/task-planning.md` (the studio pipeline's gate plugin). Read it and follow it as "bootstrap story `<epic>-<story>`" — it appends the story's tasks to `<spec_folder>/stories.yaml` and writes `<spec_folder>/plans/<epic>-<story>.md`, then validates with `bmad-loop validate`. This is planner-tier work and the reason this surface's model default is the top tier. If the file is absent, end `blocked` naming it: this surface never invents a task breakdown of its own.
+4. **First story's tasks (when the manifest is empty).** The task-planning instructions are a **project resource**: `<root>/.bmad-loop/plugins/studio-pipeline/task-planning.md` (the studio pipeline's gate plugin). Read it and follow it as "bootstrap story `<epic>-<story>`" — it appends the story's tasks to `<spec_folder>/stories.yaml` and writes `<spec_folder>/plans/<epic>-<story>.md`, then validates with `bmad-loop validate`. This is planner-tier work and the reason this surface's model default is the top tier. If the file is absent, end `blocked` naming it: this surface never invents a task breakdown of its own.
 
-4. **Launch.** Re-run `check`; when it answers `ok`, start the engine:
+5. **Launch.** Re-run `check`; when it answers `ok`, start the engine:
 
    ```bash
    uv run "${CLAUDE_PLUGIN_ROOT}/lib/launch.py" start --directory <root> --spec <spec_folder>
@@ -52,7 +60,7 @@ checkout until it finishes, pauses, or is stopped.
 
    The core mints the run id, spawns `bmad-loop run --spec … --run-id …` detached and console-less with its output in `~/.tk-studio/projects/<key>/launches/<run-id>.log`, and answers `ok` only once the engine has written `.bmad-loop/runs/<run-id>/state.json`. A launch it could not confirm answers `ok: false` with the pid and log named — report that as `blocked` with the reason; do not launch again.
 
-5. **Report.** Attended: the run id, the spec folder, the first story planned, and how to watch it (`bmad-loop tui`, the ClaudeOS Queue). Headless: end with the status block — `artifacts[]` names the run dir (the core's project-relative `run_dir`, never `run_dir_abs` or the store `log` path — §3 forbids absolute local paths in artifacts), the spec folder, and any SPEC/plan files this session wrote.
+6. **Report.** Attended: the run id, the spec folder, the first story planned, the route (session / implementer / reviewers / consult models and where each came from), and how to watch it (`bmad-loop tui`, the ClaudeOS Queue). Headless: end with the status block — `artifacts[]` names the run dir (the core's project-relative `run_dir`, never `run_dir_abs` or the store `log` path — §3 forbids absolute local paths in artifacts), the spec folder, and any SPEC/plan files this session wrote.
 
 ### `status`
 
@@ -87,5 +95,6 @@ If the deterministic core is unrunnable — a tool call denied by permissions, `
 - One engine per checkout: the core refuses a launch while any run owns the checkout; this skill never stops one to make room.
 - The core never writes into the project tree: run state is the engine's, launch logs live in the per-user store (AD-3).
 - SPEC.md comes from `bmad-spec`, the task manifest from the project's task-planning instructions — this surface authors neither.
+- The route comes from `lib/pipeline.py` — the shipped legs are measured defaults (AD-14 resource tier); a project overrides them in `.bmad-loop/routing.toml`, a driver per invocation with `--set leg.field=value`. Escalation is deliberate: this surface never routes a leg onto a larger model than the resolved value, and never launches a subagent on the planner tier.
 - Job-level events belong to the job wrapper (`job-run`); this surface emits none of its own (AD-12).
 - All paths resolve through `${CLAUDE_PLUGIN_ROOT}`.

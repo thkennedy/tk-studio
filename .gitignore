@@ -1,5 +1,5 @@
-# Local-only reference copy of the legacy-council repo (design model, not part of tk-studio)
-legacy-council/
 __pycache__/
 *.pyc
 .tk-studio/config.local.yaml
+# BMad installer mirror of .claude/skills for other agent tools (generated, not source)
+.agents/

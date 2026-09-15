@@ -1,4 +1,4 @@
-# Planning-Data Backend Research — tk-studio (legacy-council)
+# Planning-Data Backend Research — tk-studio
 
 **Date:** 2026-07-25
 **Purpose:** Inform the brief's planning-data subsystem decision: (a) default LOCAL task-tracking + knowledge-base backend (file-based/in-repo, BMad-shaped), (b) clean later migration to Atlassian Cloud (team standard) and/or Linear, with every skill going through an adapter over a canonical epic/story/task interchange shape.

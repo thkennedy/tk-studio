@@ -17,7 +17,7 @@ bump that DW-1 folds into.
 ## 1. What the Deferred entry names, verified
 
 > **Research→Knowledge Lifecycle port** (mission spine/seed, anchored deltas,
-> JSONL reconciliation queue, promotion gate — verified built in legacy-council/ClaudeOS)
+> JSONL reconciliation queue, promotion gate — verified built in the legacy council/ClaudeOS)
 > — the named session-discipline upgrade. v1 ships only boundary handoffs +
 > resumable run workspaces; the port moves the runner-side halves council-side
 > behind the driver contract, ClaudeOS as first driver. (spine:256)
@@ -29,7 +29,7 @@ reason for the port (dossier item 4, addendum.md:147):
 |---|---|---|
 | research pass (method, evidence grading, anchor rules) | council | `tk-investigate/SKILL.md` |
 | artifact template (seed, supersede header) | council | `tk-investigate/references/seed-template.md` |
-| schema validator | **runner** | `D:\ClaudeOS\scripts\knowledge-schema.ts` |
+| schema validator | **runner** | `ClaudeOS/scripts/knowledge-schema.ts` |
 | spine pass orchestration + budget | **runner** | `mission-spine-pass.ts` |
 | decompose → notify-gate → seed | **runner** | `mission-mg-start-pass.ts` |
 | KB injection into segments | **runner** | `mission-runner.ts:487` (`renderKnowledgeBase`) |
@@ -38,16 +38,16 @@ reason for the port (dossier item 4, addendum.md:147):
 | promotion gate (human, sole canonical writer) | council | `tk-agent-custodian/references/promotion-gate.md` |
 
 "Moves the runner-side halves council-side" = rows 3–8 leave
-`D:\ClaudeOS\scripts\*.ts` and re-home **studio-side behind the driver
+`ClaudeOS/scripts/*.ts` and re-home **studio-side behind the driver
 contract** (harness-agnostic, AD-2), with ClaudeOS driving them through the
 MCP connector instead of owning them.
 
 **Maturity check — "verified built" needs one asterisk.** Mechanisms 1–2
 (spine/seed, anchored deltas) are exercised in production: real
 schema-conformant spines, seeds, and emitted deltas exist under
-`D:\ClaudeOS\.mission\*`. Mechanisms 3–4 (queue, promotion gate) are built
+`ClaudeOS/.mission/*`. Mechanisms 3–4 (queue, promotion gate) are built
 and unit-green but were **never run end-to-end**: no
-`reconciliation-queue.jsonl` or `reina-reconciliation.md` exists anywhere on
+`reconciliation-queue.jsonl` or the legacy routing doc exists anywhere on
 disk (the capture code shipped in the same mini-goal that emitted the first
 deltas, so the queue never materialized), and the council-side promotion gate
 as written reads daily-logs and stages via Perforce — it has **no reference
@@ -115,8 +115,8 @@ one fits:
 | anchor grammar | unchanged, generalized prefix: `SPINE-A<n>` / `SEED-<run-id>-A<n>` | keep the regex; ids append-only |
 | anchored deltas in handoff | `handoff.json` gains optional `deltas[]` (closed shape: `{anchor, verdict: WRONG\|STALE\|CONFIRMED, reality, evidence, tier: run-local\|spine}`) | structured JSON beats the source's heading-agnostic markdown scan; 16 KB budget: deltas are pointers, cap list length, price in ST |
 | reconciliation queue (JSONL, per-mission, post-merge capture) | per-project queue in the per-user store: `~/.tk-studio/projects/<key>/knowledge/reconciliation-queue.jsonl`; capture on run finish (`tk_job finish` / wrapper close), deduped `(run_id, anchor, verdict, note)` | AD-3: per-user data never lands on the project VCS uninvited |
-| mission-close routing (`reina-reconciliation.md`) | rendered routing doc beside the queue; produced by the consolidation-shaped verb of the new knowledge core | pure renderer, applies nothing |
-| promotion gate (Reina, Perforce CL staging) | **PR membrane + custodian-shaped skill**: a `tk-studio-knowledge` skill drafts promotions from the routing doc into `kb/` files on a branch; PR review is the human gate | replaces the soft legacy-council join (human-reads-markdown + p4) with the studio's proven membrane (AD-12 pattern); kb frontmatter gains nothing — promoted files are ordinary kb files |
+| mission-close routing (the legacy routing doc) | rendered routing doc beside the queue; produced by the consolidation-shaped verb of the new knowledge core | pure renderer, applies nothing |
+| promotion gate (custodian persona, Perforce CL staging) | **PR membrane + custodian-shaped skill**: a `tk-studio-knowledge` skill drafts promotions from the routing doc into `kb/` files on a branch; PR review is the human gate | replaces the soft legacy-council join (human-reads-markdown + p4) with the studio's proven membrane (AD-12 pattern); kb frontmatter gains nothing — promoted files are ordinary kb files |
 | schema validator (`knowledge-schema.ts`, pure) | new stdlib-only `lib/knowledge.py` — validate/capture/route verbs | direct port; the source module is explicitly pure ("no fs, no I/O, no globals") |
 | KB injection (`renderKnowledgeBase`) | contract-published: a **driver-visible directive** — the §2 research row (and job wake directives) name spine/seed paths so any driver can inject them into segment prompts | the injection *contract* ports; the injection *act* stays driver-side (AD-2) |
 | aid-not-gate discipline | preserved verbatim: a red/absent spine or seed never blocks a run | matches the source's one-exception rule (only the scope gate pauses) |
@@ -232,9 +232,9 @@ rulings comment. Summary:
 *Sources: ARCHITECTURE-SPINE.md (Deferred, AD-2/3/8/10/11/12);
 driver-contract.md 1.6.0 §1/§2/§4/§7; connectors/tk-studio/DESIGN.md;
 addendum.md A7 (dossier items 4–5); legacy-council-inventory-2026-07-25.md §2;
-D:\ClaudeOS scripts (knowledge-schema.ts, mission-spine-pass.ts,
+ClaudeOS scripts (knowledge-schema.ts, mission-spine-pass.ts,
 mission-mg-start-pass.ts, mission-reconciliation-queue.ts,
 mission-runner.ts); legacy-council/plugins/legacy-council/skills
 (tk-investigate, tk-agent-custodian); plugins/tk-studio/lib
 (research.py, session.py, kb.py, job.py); live artifacts under
-D:\ClaudeOS\.mission\*.*
+ClaudeOS/.mission/*.*

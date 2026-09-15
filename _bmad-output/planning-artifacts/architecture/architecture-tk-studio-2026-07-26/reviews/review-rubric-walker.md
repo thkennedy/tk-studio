@@ -91,7 +91,7 @@ The spine's operational surface is otherwise better than most domain-focused dra
 - The port/binding table up front is exactly the right altitude artifact: every variable dependency named, bound, and given v1 adapters.
 - AD-5's one-way promote + status pull-back correctly encodes the research finding instead of hand-waving "sync."
 - AD-12 riding plain git governance (PR membrane) instead of new infrastructure is the O1 ruling faithfully translated, including the ISS-NNN ledger discipline.
-- AD-16 porting the legacy-council migration safety rules verbatim (closed inventory, no-delete-before-clearance, copy-verify-flag) is the strongest single AD in the document.
+- AD-16 porting the legacy council migration safety rules verbatim (closed inventory, no-delete-before-clearance, copy-verify-flag) is the strongest single AD in the document.
 - The Capability → Architecture map gives the epic-decomposition step a ready-made traceability skeleton.
 
 ## Recommended disposition

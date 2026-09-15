@@ -7,7 +7,7 @@ updated: 2026-07-25
 
 # tk-studio Brief — Addendum
 
-Depth preserved from the [concept seed](../../../council/legacy-council-concept-seed-2026-07-25.md) for downstream consumers (forge-idea on O1, `bmad-architecture`, module-builder). Not required reading for the brief itself.
+Depth preserved from the concept seed (2026-07-25; not retained in this repository) for downstream consumers (forge-idea on O1, `bmad-architecture`, module-builder). Not required reading for the brief itself.
 
 ## A1. Distribution mechanism — full option analysis (feeds O1)
 
@@ -23,7 +23,7 @@ Depth preserved from the [concept seed](../../../council/legacy-council-concept-
 
 **Composite note:** M3 composes with M2 — council-as-plugin for the orchestration layer + lockfile-wrapper for the BMad base may be the "builds on top of pure BMad" sweet spot. A drift check on activation ("installed BMad ≠ lockfile pin → prompt") gives the lockstep guarantee teeth either way.
 
-**Seed's evaluation plan:** measure M1's real per-release cost (run the legacy-council 6.9→6.10 vendor cycle) against an M2 prototype before deciding. As of 2026-07-25 this experiment is live: BMad v6.10.0 shipped July 3, so that vendor cycle can now be measured for real.
+**Seed's evaluation plan:** measure M1's real per-release cost (run the legacy council 6.9→6.10 vendor cycle) against an M2 prototype before deciding. As of 2026-07-25 this experiment is live: BMad v6.10.0 shipped July 3, so that vendor cycle can now be measured for real.
 
 **M3 mechanics (verified 2026-07-25):** Claude Code plugin marketplaces are git-hosted `marketplace.json` catalogs; the plugin `version` field (or an exact commit `sha` pin) controls when users see updates. A repo's `.claude/settings.json` can auto-prompt teammates to install a marketplace on folder trust (`extraKnownMarketplaces`, with `strictKnownMarketplaces` for lockdown). Updates are pull-based (bump + `/plugin marketplace update`), not push — so the activation drift check (composite note above) is required regardless of mechanism.
 
@@ -54,7 +54,7 @@ Requirements as captured:
   2. **Customize** — `customize.toml` overrides on each skill.
   3. **Sync layer** — bidirectional backend ↔ fallback-file sync; skills stay untouched. Keeps BMad purest.
 
-## A3. Harvest map from legacy-council
+## A3. Harvest map from the legacy council
 
 **PORT (concept proven, generalize):**
 - Domain-profile registry → resource inventory/recommendation engine (Recommendation pillar); keep data-only JSON profiles, read-only detector, dry-run onboarding, explicit confirm.
@@ -62,19 +62,19 @@ Requirements as captured:
 - Vendor tooling discipline (deterministic rules, verify phase, sentinel-anchored patches, timestamp-free manifests) → whichever Lockstep mechanism wins; even M2's wrapper wants the verify/drift-check half.
 - Thin `agents/` wrapper pattern (subagent → Skill delegation) if plugin delivery is chosen.
 - Governance: promotion membrane, gate reviews, issue ledger — adapt to solo/team scale.
-- **Research→Knowledge Lifecycle** (multi-session anti-drift — VERIFIED BUILT, 2026-07-25 inventory): `tk-investigate` produces a mission-start research spine plus per-mini-goal seeds with anchored, evidence-graded findings; working segments never edit the doc directly — they emit anchored deltas in handoffs into a JSONL reconciliation queue that the custodian persona (Reina) promotes through a gate. Port as the Operations pillar's session-discipline backbone. Caveat: half the machinery lives in the ClaudeOS mission runner today (see A7 dossier).
+- **Research→Knowledge Lifecycle** (multi-session anti-drift — VERIFIED BUILT, 2026-07-25 inventory): `tk-investigate` produces a mission-start research spine plus per-mini-goal seeds with anchored, evidence-graded findings; working segments never edit the doc directly — they emit anchored deltas in handoffs into a JSONL reconciliation queue that a custodian persona promotes through a gate. Port as the Operations pillar's session-discipline backbone. Caveat: half the machinery lives in the ClaudeOS mission runner today (see A7 dossier).
 
-**ADAPT:** orchestrator (Alya) routing/synthesis/convene capabilities — minus game-company personas. External-roster handoff (name-based coupling to stock BMad skills) becomes the DEFAULT coupling model everywhere.
+**ADAPT:** orchestrator-persona routing/synthesis/convene capabilities — minus game-company personas. External-roster handoff (name-based coupling to stock BMad skills) becomes the DEFAULT coupling model everywhere.
 
 **LEAVE (tk-specific, future overlay):** the 11 personas and their lore; Perforce stream skills (`tk-stream-*`); changelog/newsletter skills; UE/Jenkins specialist content; canonical/ue garden.
 
 ## A4. Relationship to the legacy council (context)
 
-- tk-studio (working title "legacy-council" in earlier documents) is **not** an import or restructuring of the legacy council; it is a new, generalized personal system harvesting the legacy council's proven concepts.
-- The legacy-council packaging debate (eval doc `eval-legacy-council-packaging-2026-07-25.md` §4) is **superseded** by this direction; that eval's inventory and debts sections still stand for the legacy council repo itself.
+- tk-studio (under its working title in earlier documents) is **not** an import or restructuring of the legacy council; it is a new, generalized personal system harvesting the legacy council's proven concepts.
+- The legacy-council packaging debate (the legacy-council packaging eval of 2026-07-25, not retained here, §4) is **superseded** by this direction; that eval's inventory and debts sections still stand for the legacy council repo itself.
 - Long-term, the legacy council re-bases as a thin game-company overlay on tk-studio.
 - Inventory (2026-07-25) headline: plugin v0.7.1, 1,543 files — 17 tk-* skills (11 persona + 6 workflow), 71 bmad-* + 33 gds-* vendored skills, 11 agent wrappers, 5 domain profiles + detect/onboard scripts. It also **reconfirmed the eval's urgent flag**: `shared-memory/` contains a token leak — scrub before any harvest or publication. Per-user store code remains stranded on the unmerged branch (`lib/` holds stale bytecode only).
-- Operational note: no live legacy-council checkout exists on this machine — the inventory's source of record is `D:\ClaudeOS\legacy-council.rar` (repo `main` @ d26a67f); the real working copy lives on another machine (Perforce workspace). Plan harvest work accordingly.
+- Operational note: no live legacy-council checkout exists on this machine — the inventory's source of record is an archived extract; the real working copy lives on another machine (Perforce workspace). Plan harvest work accordingly.
 
 ## A5. Landscape research digest (2026-07-25)
 
@@ -114,7 +114,7 @@ Added by Tim during brief review, 2026-07-25. New subsystem #3; precedent is Cla
 **Session & token discipline (added 2nd review round):**
 - Formalizes the local handoff protocol as a council requirement: at epic/story/phase boundaries, write a compact handoff artifact, end the session, resume fresh.
 - Runs persist in-progress state in **resumable run workspaces** (bmm precedent: memlog + run folders — this brief's own workspace is an instance of the pattern).
-- legacy-council precedent — **VERIFIED (2026-07-25 inventory): the process EXISTS and was built**, as the "Research→Knowledge Lifecycle": `tk-investigate` generates a research spine at mission start (plus per-mini-goal seeds, anchored evidence-graded findings); working segments emit anchored deltas via handoffs → JSONL reconciliation queue → promotion gate owned by **Reina (custodian — not tech-writer; Sora is tech-writer, Yui is planner/decompose-gate)**. Wired into the ClaudeOS runner (`mission-spine-pass.ts`, `mission-mg-start-pass.ts`, `knowledge-schema.ts`, `mission-reconciliation-queue.ts`). Now on A3's PORT list; full detail in [legacy-council-inventory-2026-07-25.md](legacy-council-inventory-2026-07-25.md).
+- legacy-council precedent — **VERIFIED (2026-07-25 inventory): the process EXISTS and was built**, as the "Research→Knowledge Lifecycle": `tk-investigate` generates a research spine at mission start (plus per-mini-goal seeds, anchored evidence-graded findings); working segments emit anchored deltas via handoffs → JSONL reconciliation queue → promotion gate owned by **a custodian persona (not the tech-writer persona; a planner persona owns decompose-gate)**. Wired into the ClaudeOS runner (`mission-spine-pass.ts`, `mission-mg-start-pass.ts`, `knowledge-schema.ts`, `mission-reconciliation-queue.ts`). Now on A3's PORT list; full detail was in the legacy-council inventory of 2026-07-25 (not retained in this repository).
 - Token awareness: the orchestrator sees budget and spend when routing; scheduled jobs (Operations) declare token budgets; session splits are triggered by boundaries *and* budget, not context exhaustion.
 
 **O8 framing (substrate decision, architecture venue):**
@@ -127,7 +127,7 @@ Related question O8 also settles: where job definitions live in the Taxonomy (li
 
 **Per-project VCS (Tim's ruling, 2026-07-25 — settled, not open):**
 - VCS is strictly tied to project configuration. Git is the default; **Perforce is first-class** even though Tim doesn't use it personally right now.
-- Perforce note: the legacy-council development process uses **task streams** mirroring git's feature-branch + commit-often approach — same discipline, different mechanics. Council conventions that assume git semantics (branch-per-goal, frequent commits, review-before-merge) must be expressible per-VCS, not hardcoded.
+- Perforce note: the legacy council development process uses **task streams** mirroring git's feature-branch + commit-often approach — same discipline, different mechanics. Council conventions that assume git semantics (branch-per-goal, frequent commits, review-before-merge) must be expressible per-VCS, not hardcoded.
 - The Recommendation engine suggests tooling for the configured VCS — chiefly MCP servers.
 - The tk-studio repo itself and base distribution remain git regardless of project VCS.
 - Naming guard (resolved 2026-07-25): pillar ids dropped in favor of named pillars — **Lockstep, Taxonomy, Recommendation, Operations** — after "P4" was misread as Perforce during review. Write "Perforce" in full everywhere regardless.
@@ -144,7 +144,7 @@ Related question O8 also settles: where job definitions live in the Taxonomy (li
 1. **Ownership:** connector = ClaudeOS plugin, in the ClaudeOS repo, not tk-studio's. tk-studio never imports ClaudeOS anything.
 2. **Driver contract the connector will consume** (tk-studio's deliverable, defined at architecture): headless invocation surface for every studio skill; JSON status schema (BMad-style status blocks); the job/scheduler model (submit, tick/wake, status, cancel); the model/effort override API; drift-check invocation.
 3. **Reference-harness role:** the ClaudeOS/Hermes mission runner is the conformance target for success criterion 6 (headless parity). Until the connector exists, conformance tests drive skills via direct headless invocation.
-4. **Known ClaudeOS mechanics the connector must bridge** (state as of 2026-07-25): mission runner tick + missions.json; daily Dream cron pattern; the handoff protocol (boundary handoff → fresh session); headless auth preflight requirement (`claude -p` needs `ANTHROPIC_API_KEY`/`setup-token` — silent-401 is the #1 historical failure); mission-runner sharp edges must stay behind the connector (e.g. dirty-tree silent-skip), not leak into council design. Additionally: the legacy-council Research→Knowledge Lifecycle is currently **split across** the legacy-council skill (`tk-investigate`) and ClaudeOS runner passes (`mission-spine-pass.ts`, `mission-mg-start-pass.ts`, `knowledge-schema.ts`, `mission-reconciliation-queue.ts`) — generalizing it means moving the runner-side halves council-side behind the driver contract, with ClaudeOS as first driver.
+4. **Known ClaudeOS mechanics the connector must bridge** (state as of 2026-07-25): mission runner tick + missions.json; daily Dream cron pattern; the handoff protocol (boundary handoff → fresh session); headless auth preflight requirement (`claude -p` needs `ANTHROPIC_API_KEY`/`setup-token` — silent-401 is the #1 historical failure); mission-runner sharp edges must stay behind the connector (e.g. dirty-tree silent-skip), not leak into council design. Additionally: the legacy council Research→Knowledge Lifecycle is currently **split across** the legacy council skill (`tk-investigate`) and ClaudeOS runner passes (`mission-spine-pass.ts`, `mission-mg-start-pass.ts`, `knowledge-schema.ts`, `mission-reconciliation-queue.ts`) — generalizing it means moving the runner-side halves council-side behind the driver contract, with ClaudeOS as first driver.
 5. **O8 linkage:** if O8 chooses "generalize the mission runner" or "hybrid," the generalized runner code likely *originates* from ClaudeOS but must land council-side (harness-agnostic) with ClaudeOS as first driver.
 6. **ClaudeOS remains the multi-project UI** — the council does not grow a UI of its own; attended interaction happens in sessions (see O5 persona shell), dashboards stay ClaudeOS.
 
@@ -155,4 +155,4 @@ Related question O8 also settles: where job definitions live in the Taxonomy (li
 3. `bmad-architecture` — target state: repo layout, config schema, adapter contract, store paths, driver contract, O2/O3/O4/O5/O8 rulings.
 4. `bmad-module-builder` / epics-and-stories → Mission Control, greenfield repo.
 
-Research inputs — both landed 2026-07-25 in this workspace: [legacy-council-inventory-2026-07-25.md](legacy-council-inventory-2026-07-25.md) (full plugin inventory; anti-drift process verdict: EXISTS, built) and [planning-backend-research-2026-07-25.md](planning-backend-research-2026-07-25.md) (tracker/KB landscape; v1 = markdown + frontmatter schema, one-way promote for migration).
+Research inputs — both landed 2026-07-25 in this workspace: the legacy-council inventory (2026-07-25; not retained in this repository — full plugin inventory; anti-drift process verdict: EXISTS, built) and [planning-backend-research-2026-07-25.md](planning-backend-research-2026-07-25.md) (tracker/KB landscape; v1 = markdown + frontmatter schema, one-way promote for migration).

@@ -79,8 +79,12 @@ class DriverContractTestCase(unittest.TestCase):
         # 0.1.13 adds the planning adapter's named-write reporting
         # (EP-017 ST-055, PROP-020, additive); 0.1.14 adds the
         # tk-studio-launch surface + the run-epic job type (studio
-        # pipeline decision 5, additive)
-        self.assertRegex(self.text, r"\*\*0\.1\.14\*\*")
+        # pipeline decision 5, additive); 0.1.15 adds the per-leg
+        # execution-pipeline routing (§5.1, lib/pipeline.py, the measured
+        # pipeline-v2 defaults — additive)
+        self.assertRegex(self.text, r"\*\*0\.1\.15\*\*")
+        self.assertIn("### 5.1 Execution-pipeline legs", self.text)
+        self.assertIn("lib/pipeline.py", self.text)
         self.assertIn("Change policy", self.text)
         self.assertIn("MAJOR", self.text)
         self.assertRegex(self.text, r"[Bb]reaking")

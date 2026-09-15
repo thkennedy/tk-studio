@@ -10,7 +10,7 @@ tk-studio adds the discipline BMad leaves to the team: version-pinned installs t
 | Driver contract | **0.1.13** — [`plugins/tk-studio/contracts/driver-contract.md`](plugins/tk-studio/contracts/driver-contract.md) |
 | BMad base pin | core **6.11.0** + 6 external modules — [`plugins/tk-studio/bmad.lock`](plugins/tk-studio/bmad.lock) |
 | Platform | Windows-first (junctions, no admin); macOS/Linux via symlinks |
-| Test state | 639 lib tests green; conformance suite covers all 17 surfaces |
+| Test state | 691 lib tests green; conformance suite covers all 18 surfaces |
 
 ---
 
@@ -108,7 +108,7 @@ That's the loop: **activate → install → onboard → enter**, then work throu
 
 ## Feature reference
 
-All 17 studio surfaces, grouped by pillar. Every one runs attended **and** headless with identical behavior (AD-11); headless runs end with a JSON status block and never prompt. Say the trigger phrase in a Claude Code session to use one.
+All 18 studio surfaces, grouped by pillar. Every one runs attended **and** headless with identical behavior (AD-11); headless runs end with a JSON status block and never prompt. Say the trigger phrase in a Claude Code session to use one.
 
 ### Lockstep — pinned installs and drift
 
@@ -159,6 +159,9 @@ Project knowledge lives in `kb/` with an llms.txt-style ranked [index](kb/index.
 | --- | --- | --- |
 | `tk-studio-session` | "tk session", "hand off this run" | Session discipline as a surface: land a byte-budgeted boundary handoff (optionally carrying knowledge deltas) and end the session, or resume a fresh session from a run workspace alone. |
 | `tk-studio-job` | "tk job", "submit a job" | Declarative jobs (id, target skill + payload, trigger `one-shot|cron|loop`, budget guards, stop conditions, model/effort) executed on the harness's own scheduling primitives, with a `resolve` verb serving fully-resolved definitions to external drivers. |
+| `tk-studio-launch` | "tk launch", "launch epic N", "run status" | The studio's one way to start the execution substrate (bmad-loop) for a project epic: route the epic's first story per leg, distill the epic SPEC and bootstrap the first story's tasks at the planner tier, then start the engine detached with a pre-minted run id. Ships as the `run-epic` job type. |
+
+**Execution-pipeline routing.** Every leg of a bmad-loop run — the monitor session, its implementer / reviewer / consult subagents, the pre-dispatch seam check, the review and triage stages, the conditional supervisor pass — carries a measured model/effort default (pipeline v2: a mid-tier session that never decides, mid-tier builders and refuters, the top execution tier consulted on objective triggers only). The numbers are in [kb/execution-pipeline-model-routing.md](kb/execution-pipeline-model-routing.md); a project overrides per story in `.bmad-loop/routing.toml`, a driver per invocation with `--set`, and `lib/pipeline.py` writes the result where the engine reads it (AD-14).
 
 Any harness can drive the studio unattended through the [driver contract](plugins/tk-studio/contracts/driver-contract.md) — versioned, with JSON schemas for the status block, job model, interchange shape, event taxonomy, registry, and knowledge artifacts. The shipped [conformance suite](plugins/tk-studio/contracts/conformance/) proves every surface's headless behavior (including a spend-bearing opt-in pass through the real harness under denied permissions).
 
@@ -207,7 +210,7 @@ tk-studio/
   .claude-plugin/marketplace.json    # catalog; plugins[].version = the update gate
   plugins/tk-studio/
     .claude-plugin/plugin.json       # plugin version (lockstep with the catalog)
-    skills/tk-studio-*/              # the 17 studio surfaces
+    skills/tk-studio-*/              # the 18 studio surfaces
     agents/                          # thin role wrappers: developer, direction-giver
     lib/                             # deterministic cores (stdlib-only Python, uv run)
     contracts/                       # driver contract + schemas + conformance suite
@@ -222,13 +225,13 @@ tk-studio/
 
 ## Development
 
-Run the lib suite (639 tests):
+Run the lib suite (691 tests):
 
 ```bash
 cd plugins/tk-studio/lib && uv run python -m unittest discover tests
 ```
 
-Run conformance (all 17 surfaces, direct headless drive):
+Run conformance (all 18 surfaces, direct headless drive):
 
 ```bash
 cd plugins/tk-studio && uv run contracts/conformance/runner.py run
@@ -244,6 +247,3 @@ Add `--harness` for the spend-bearing pass through the real harness (opt-in). Th
 - [Product brief](_bmad-output/planning-artifacts/briefs/brief-tk-studio-2026-07-25/) — pillars, rulings, and the O1 distribution decision
 - [BMAD-METHOD](https://github.com/bmad-code-org/BMAD-METHOD) · [BMad docs](https://docs.bmad-method.org) — the upstream method this studio builds on
 
-## Reference material (local-only, not pushed)
-
-`legacy-council/` holds a gitignored working copy of the pre-studio TK council marketplace repo used as tk-studio's design model. It keeps its own `.git/` for local reference and is never committed here.

@@ -93,6 +93,17 @@
           "argv": ["lib/launch.py", "start", "--directory", "{sandbox}", "--spec", "_bmad-output/specs/spec-none", "--wait", "0"],
           "expect": "refusal",
           "marker": "spec folder"
+        },
+        {
+          "assertion": "headless-clean",
+          "argv": ["lib/pipeline.py", "resolve", "--directory", "{sandbox}", "--story", "1-1-conformance"],
+          "expect": "json"
+        },
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/pipeline.py", "apply", "--directory", "{sandbox}", "--story", "1-1-conformance", "--dry-run"],
+          "expect": "refusal",
+          "marker": "policy missing"
         }
       ]
     },

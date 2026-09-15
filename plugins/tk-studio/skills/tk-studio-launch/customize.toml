@@ -13,3 +13,71 @@
 [model]
 default = "claude-fable-5-1"
 effort = "high"
+
+# ---------------------------------------------------------------------------
+# Execution-pipeline legs — the model and effort each role of a bmad-loop run
+# uses (resource-default tier of AD-14 for the substrate; `lib/pipeline.py`
+# resolves runtime `--set` > the project's `.bmad-loop/routing.toml` > this
+# table and writes the result where the engine reads it).
+#
+# These are MEASURED defaults, not guesses ("pipeline v2", 2026-09-11..13,
+# 25 stories on a C#/Godot game project; see kb/execution-pipeline-model-
+# routing.md for the numbers). The shape that held: a mid-tier session that
+# MONITORS and never decides; mid-tier implementer and reviewers; the top
+# execution tier consulted only on objective triggers and for the pre-dispatch
+# seam check; the post-hoc supervisor pass conditional and cheap. Result:
+# about 3–4x cheaper per landed story than an Opus session with an Opus pass,
+# every story landing on attempt 1, with the attended cost moved to planner
+# seams rather than dollars.
+#
+# Legs (bmad-loop stage in parentheses where one exists):
+#   session      (adapter.dev)    the dev session — a monitor: follows the
+#                                 workflow, launches subagents, integrates,
+#                                 verifies, writes the spec; consults, never rules
+#   implementer                   the coding subagent the session launches
+#   reviewers                     the review-hunter subagents (one layer for an
+#                                 S-band story, two otherwise)
+#   consult                       a subagent launched on an objective trigger only
+#                                 (`[pipeline.consult] triggers`); rules within
+#                                 scope; every ruling logged
+#   seam                          the read-only pre-dispatch check of the NEXT
+#                                 story's pinned files / signatures / tests
+#                                 against the tree (dispatch | text-fix | escalate)
+#   review       (adapter.review) bmad-loop's follow-up review session (projects
+#                                 that keep it enabled; the inline layers are the
+#                                 review by default)
+#   triage       (adapter.triage) bmad-loop sweep / triage / resolve sessions
+#   supervise                     the post-hoc supervisor pass — only on a DRIFT
+#                                 line, an engine-directory touch, or an escalation
+#   planner                       the attended planning session (a fresh session
+#                                 per quiet point; never a subagent)
+#
+# Subagent legs (implementer, reviewers, consult) carry no `effort`: the
+# harness passes no effort flag to a subagent. Model ids and efforts are
+# validated by `pipeline.py check`; an unknown value refuses, never guesses.
+[pipeline.legs]
+session     = { model = "claude-sonnet-5", effort = "medium", skill = "bmad-build-auto" }
+implementer = { model = "claude-sonnet-5" }
+reviewers   = { model = "claude-sonnet-5" }
+consult     = { model = "claude-opus-5" }
+seam        = { model = "claude-opus-5",   effort = "medium" }
+review      = { model = "claude-opus-5",   effort = "high" }
+triage      = { model = "claude-opus-5",   effort = "high" }
+supervise   = { model = "claude-sonnet-5", effort = "low" }
+planner     = { model = "claude-fable-5-1", effort = "high" }
+
+# The objective triggers on which the session may consult, and the ruling's
+# scope. Never launched on judgment alone; a project may narrow or extend the
+# list in its `.bmad-loop/routing.toml` `[consult]` table.
+[pipeline.consult]
+triggers = [
+  "verify-red",               # the verify gate is red after the implementer's own fix attempt
+  "halt",                     # the session is about to HALT blocked
+  "deviation-gt-0",           # the implementer reports a deviation score above 0
+  "high-severity-finding",    # a review finding the session would grade high
+  "tripwire",                 # a size or cost tripwire line the session must act on
+  "seam-text-fix",            # a seam-check text fix conflicts with what the tree shows
+  "file-outside-files",       # a file outside the story's Files list was or would be touched
+]
+scope = "resolve a contradiction between pinned facts; choose between two readings of the story; accept or reject a deviation. Never a design number, a product behaviour, or an architecture invariant — those return `escalate` and the session HALTs (CRITICAL stays human)."
+log = "spec `## Consult Log` entry + one observation event (tk-studio-observe, source `other`, description prefixed `consult:`)"

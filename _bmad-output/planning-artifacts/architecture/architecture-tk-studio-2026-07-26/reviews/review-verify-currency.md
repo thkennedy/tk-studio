@@ -3,7 +3,7 @@
 - **Target:** `ARCHITECTURE-SPINE.md` (architecture-tk-studio-2026-07-26)
 - **Lens:** every committed decision web-researched or reality-checked, not asserted from training data
 - **Reviewer pass date:** 2026-07-26
-- **Evidence used:** run memlog (web-verification entry, 2026-07-26), installed BMad at `D:\Code\tk-studio\_bmad\_config\manifest.yaml`, fresh WebSearch spot-checks (npm bmad-method, MrLesk/Backlog.md, Atlassian MCP docs/community)
+- **Evidence used:** run memlog (web-verification entry, 2026-07-26), installed BMad at `_bmad/_config/manifest.yaml`, fresh WebSearch spot-checks (npm bmad-method, MrLesk/Backlog.md, Atlassian MCP docs/community)
 
 ## Verdict
 

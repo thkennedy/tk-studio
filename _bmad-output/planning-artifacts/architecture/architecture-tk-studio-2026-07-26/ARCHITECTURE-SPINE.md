@@ -14,7 +14,6 @@ sources:
   - ../../briefs/brief-tk-studio-2026-07-25/addendum.md
   - ../../briefs/brief-tk-studio-2026-07-25/o1-decision-2026-07-26.md
   - ../../briefs/brief-tk-studio-2026-07-25/planning-backend-research-2026-07-25.md
-  - ../../briefs/brief-tk-studio-2026-07-25/legacy-council-inventory-2026-07-25.md
 companions: []
 ---
 
@@ -96,7 +95,7 @@ graph TD
 ### AD-9 — Stateless orchestrator core, optional persona shell (O5)
 
 - **Binds:** the orchestrated entry point, all roles
-- **Prevents:** identity/persona state entangled with routing logic (the legacy-council lesson)
+- **Prevents:** identity/persona state entangled with routing logic (the legacy council lesson)
 - **Rule:** O5 ruling — the orchestrator core is **stateless**: resolve role (from the per-user store) → resolve project working set (from project config) → route/convene/synthesize. The persona shell ("convene the council") is data — persona assets loaded only in attended sessions. Headless bypasses the shell entirely and must produce identical routing and artifacts. No sanctum/rebirth machinery in the studio core; that is legacy-council overlay material.
 
 ### AD-10 — Job model is data; substrate executes (O8)
@@ -115,7 +114,7 @@ graph TD
 
 - **Binds:** all studio surfaces; the shared repo
 - **Prevents:** speculative pre-measurement; telemetry collisions; unsanitized data on the team repo
-- **Rule:** per O1 — instrument, don't predict. Events (`install-outcome`, `drift-detection`, `activation-failure`, `headless-failure`, `onboarding-funnel`, `observation`, `report`) append as one JSON object per line to the per-user-per-machine ledger `~/.tk-studio/measurements/<user>-<machine>.jsonl` — atomic writes, never a shared file, sanitized at emission. The event taxonomy is a versioned schema in `contracts/` that names **exactly one emitter per event type** (a skill emits its own surface events; the job wrapper alone emits job-level events — never both for one failure) and fixes each event's payload shape; extending the taxonomy rides the same PR membrane. `tk report` is the explicit human-authored defect verb; `observation` is the evolve loop's observe-and-log event. Reconciliation rides plain git governance: measurement-push (ledger → branch → PR into `measurements/`), consolidation (PRs → `issues/ledger.md` entries → fix candidates), PR review as the promotion membrane. The issues ledger keeps the legacy-council discipline: stable `ISS-NNN` ids, severity High/Medium/Low, status Open/Mitigated/Resolved/Wontfix, rows updated in place, never deleted.
+- **Rule:** per O1 — instrument, don't predict. Events (`install-outcome`, `drift-detection`, `activation-failure`, `headless-failure`, `onboarding-funnel`, `observation`, `report`) append as one JSON object per line to the per-user-per-machine ledger `~/.tk-studio/measurements/<user>-<machine>.jsonl` — atomic writes, never a shared file, sanitized at emission. The event taxonomy is a versioned schema in `contracts/` that names **exactly one emitter per event type** (a skill emits its own surface events; the job wrapper alone emits job-level events — never both for one failure) and fixes each event's payload shape; extending the taxonomy rides the same PR membrane. `tk report` is the explicit human-authored defect verb; `observation` is the evolve loop's observe-and-log event. Reconciliation rides plain git governance: measurement-push (ledger → branch → PR into `measurements/`), consolidation (PRs → `issues/ledger.md` entries → fix candidates), PR review as the promotion membrane. The issues ledger keeps the legacy council discipline: stable `ISS-NNN` ids, severity High/Medium/Low, status Open/Mitigated/Resolved/Wontfix, rows updated in place, never deleted.
 
 ### AD-13 — Drift check at activation: three-way, loud, read-only
 
@@ -139,7 +138,7 @@ graph TD
 
 - **Binds:** backend switches, store moves, any data relocation
 - **Prevents:** history loss; half-migrated states that read as migrated
-- **Rule:** ported verbatim from legacy-council: **closed inventory** before any move (nothing not on the inventory may be deleted); **no-delete-before-clearance** (source retained read-only until migrated AND verified AND user-cleared); **copy-then-verify-then-flag** with the cutover flag written last, so a crash mid-copy still reads from the source. Backend migration is export (canonical shape) → transform → import → verification (counts, id map, content hashes, spot round-trip).
+- **Rule:** ported verbatim from the legacy council: **closed inventory** before any move (nothing not on the inventory may be deleted); **no-delete-before-clearance** (source retained read-only until migrated AND verified AND user-cleared); **copy-then-verify-then-flag** with the cutover flag written last, so a crash mid-copy still reads from the source. Backend migration is export (canonical shape) → transform → import → verification (counts, id map, content hashes, spot round-trip).
 
 ### AD-17 — Role resolves before routing
 
@@ -253,7 +252,7 @@ tk-studio/
 - **Execution roles beyond developer** (artist/designer/PR/custom) — arrive with the team as configuration (AD-17).
 - **Persona lore / legacy-council overlay content** (11 personas, Perforce stream skills, UE content) — future overlay; the shell seam is AD-9.
 - **Distribution hardening** (permissions, security review, public distribution) — deliberately later per brief.
-- **Research→Knowledge Lifecycle port** (mission spine/seed, anchored deltas, JSONL reconciliation queue, promotion gate — verified built in legacy-council/ClaudeOS) — the named session-discipline upgrade. v1 ships only boundary handoffs + resumable run workspaces; the port moves the runner-side halves council-side behind the driver contract, ClaudeOS as first driver. **Landed 2026-08-07 as Epic 9 (ST-9.1–9.6), published at driver-contract 0.1.7** (renumbered same day from 1.7.0 — pre-1.0 semver for a new product, `1.N.0 → 0.1.N`) — spine/seed + anchored deltas (`knowledge.schema.json`, `lib/knowledge.py`), capture/queue/routing, the PR-membrane promotion gate, and the KB-injection directive; per-project `kb/` stays the only knowledge target (AD-8's cross-project tier remains deferred, `scope:` reserved and unread).
+- **Research→Knowledge Lifecycle port** (mission spine/seed, anchored deltas, JSONL reconciliation queue, promotion gate — verified built in the legacy council/ClaudeOS) — the named session-discipline upgrade. v1 ships only boundary handoffs + resumable run workspaces; the port moves the runner-side halves council-side behind the driver contract, ClaudeOS as first driver. **Landed 2026-08-07 as Epic 9 (ST-9.1–9.6), published at driver-contract 0.1.7** (renumbered same day from 1.7.0 — pre-1.0 semver for a new product, `1.N.0 → 0.1.N`) — spine/seed + anchored deltas (`knowledge.schema.json`, `lib/knowledge.py`), capture/queue/routing, the PR-membrane promotion gate, and the KB-injection directive; per-project `kb/` stays the only knowledge target (AD-8's cross-project tier remains deferred, `scope:` reserved and unread).
 - **`bmad.lock` file format and final skill names** — module-builder decisions. (The bootstrap-script question is closed — see AD-1: no bootstrap script.)
 - **Backlog.md projection fidelity** — verify at adapter build that Backlog.md preserves unknown frontmatter keys; if not, the projection writes only Backlog.md-native keys + the canonical id as a label (canonical files are unaffected either way — AD-5 makes the projection non-authoritative).
 - **beads as an alternative local backend** — revisit only if dependency-graph queries become the bottleneck and its storage stabilizes.
