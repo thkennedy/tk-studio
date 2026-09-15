@@ -8,6 +8,6 @@
     "email": "kennedy.timothyh@gmail.com"
   },
   "repository": "https://github.com/thkennedy/tk-studio",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "keywords": ["bmad", "studio", "orchestration"]
 }

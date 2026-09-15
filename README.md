@@ -247,3 +247,7 @@ Add `--harness` for the spend-bearing pass through the real harness (opt-in). Th
 - [Product brief](_bmad-output/planning-artifacts/briefs/brief-tk-studio-2026-07-25/) — pillars, rulings, and the O1 distribution decision
 - [BMAD-METHOD](https://github.com/bmad-code-org/BMAD-METHOD) · [BMad docs](https://docs.bmad-method.org) — the upstream method this studio builds on
 
+## License
+
+[MIT](LICENSE). The vendored BMad base under `_bmad/` and `.claude/skills/` keeps its upstream license.
+
