@@ -43,7 +43,7 @@ For what BMad itself does — agents, workflows, the method — start with the [
 - **Claude Code** ≥ 2.1.223 (verified at 2.1.226) — CLI, desktop, or IDE
 - **Node.js 20+** — `npx` runs the upstream BMad installer
 - **[uv](https://docs.astral.sh/uv/)** — every studio script is stdlib-only Python 3.12+ run via `uv run` (uv fetches the interpreter if needed)
-- **git**, plus access to this repository; the **[gh](https://cli.github.com/) CLI** authenticated (measurement pushes open PRs)
+- **git**; the **[gh](https://cli.github.com/) CLI** authenticated (measurement pushes open PRs)
 - Optional: **Obsidian** — the studio can maintain a vault window into each project's knowledge and planning folders
 
 No admin rights are required on Windows; the store uses directory junctions.

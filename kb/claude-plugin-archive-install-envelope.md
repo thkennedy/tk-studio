@@ -133,21 +133,24 @@ The seed's absolute-`installPath` question (above) stays open: here the
 stored path pointed into the seed, so path-following and probe-by-location
 resolution coincide — the probe cannot distinguish them.
 
-## The private-repo constraint
+## The private-repo constraint (lifted 2026-09-15)
 
-This repo is **private**. Archive downloads are unauthenticated by
+This repo was **private** until 2026-09-15; the facts below were probed
+while it was, and still hold for any private host. Archive downloads are unauthenticated by
 default; the one documented auth seam is marketplace-declared `headers`
 (an `extraKnownMarketplaces` URL-source entry), sent only while the
 download shares the marketplace URL's origin and **dropped on
 cross-origin redirect** — and GitHub release-asset downloads redirect
 off-origin, so headers cannot ride them. Neither a GitHub release asset
 nor a raw URL of a private repo is therefore fetchable by the archive
-source type, and **the marketplace `archive` source entry cannot serve
-this plugin today**. The seams that activate it: public hosting (repo
-made public, or assets on a public host), or a private artifact host
-that serves same-origin with header auth.
-Until then the backstop that works is the verified local zip — sneakernet
-the asset (authenticated `gh release download` on a connected machine),
+source type, and **the marketplace `archive` source entry could not serve
+this plugin while the repo was private**. The seams that activate it:
+public hosting (repo made public, or assets on a public host), or a
+private artifact host that serves same-origin with header auth. The
+first seam is now open — the repo is public — but the archive-source
+install has not been re-probed live against the public asset.
+Until it is, the backstop that works is the verified local zip — sneakernet
+the asset (`gh release download` on a connected machine),
 verify the SHA-256 out-of-band against `released-roster.json`'s record,
 consume via `--plugin-dir <zip>` (session) or a seeded cache (persistent,
 subject to the runtime gap above).
