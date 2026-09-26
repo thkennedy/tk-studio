@@ -265,6 +265,7 @@ phase's acceptance run is measured before the next phase starts.
 | Thing | Location |
 |---|---|
 | This plan | `_bmad-output/planning-artifacts/briefs/planning-pass-agent-pc-and-supervisor-2026-09-26.md` |
+| Dev-machine handoff (read first on the agent PC) | `_bmad-output/implementation-artifacts/handoff-agent-pc-2026-09-26.md` |
 | Provisioning runbook | `kb/agent-pc-setup-runbook.md` |
 | Research and evidence | `_bmad-output/planning-artifacts/research/agent-studio-next-level-2026-09-26/` |
 | Contract to patch | `plugins/tk-studio/contracts/driver-contract.md` §2, §7 row 6 |
