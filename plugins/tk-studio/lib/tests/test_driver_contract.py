@@ -81,8 +81,10 @@ class DriverContractTestCase(unittest.TestCase):
         # tk-studio-launch surface + the run-epic job type (studio
         # pipeline decision 5, additive); 0.1.15 adds the per-leg
         # execution-pipeline routing (§5.1, lib/pipeline.py, the measured
-        # pipeline-v2 defaults — additive)
-        self.assertRegex(self.text, r"\*\*0\.1\.15\*\*")
+        # pipeline-v2 defaults — additive); 0.1.16 adds tk-studio-install's
+        # optional no_normalize payload and states its churn normalization
+        # (the same-pin install no-op fix — additive)
+        self.assertRegex(self.text, r"\*\*0\.1\.16\*\*")
         self.assertIn("### 5.1 Execution-pipeline legs", self.text)
         self.assertIn("lib/pipeline.py", self.text)
         self.assertIn("Change policy", self.text)
@@ -122,6 +124,19 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertIn("`written[]`", row)
         self.assertIn("`normalize.counter`", row)
         self.assertIn("every file the run wrote", row)
+
+    # --- 0.1.16: tk-studio-install's churn normalization stays published
+
+    def test_install_row_names_normalization_and_its_opt_out(self):
+        # a verified same-pin install normalizes the reinstall's provable
+        # churn in the project tree — a working-tree side effect a driver
+        # must be able to see and to turn off
+        row = next(line for line in self.text.splitlines()
+                   if line.startswith("| `tk-studio-install`"))
+        self.assertIn("`no_normalize?`", row)
+        self.assertIn("`normalized`", row)
+        self.assertIn("`remaining`", row)
+        self.assertIn("dirty before the run are never touched", row)
 
     # --- ST-043: the 0.1.10 base-update clarification stays pinned (EP-011)
 

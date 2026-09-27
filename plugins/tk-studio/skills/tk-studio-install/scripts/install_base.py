@@ -5,13 +5,23 @@ bmad-method@<pin> install` invocation from the committed lock, runs it, then
 verifies the resulting _bmad/_config/manifest.yaml against the pins and emits
 one install-outcome measurement event.
 
-Usage:
-  uv run install_base.py [--directory DIR] [--modules a,b,c] [--dry-run] [--timeout SECS]
+A verified install then normalizes the reinstall's no-op churn (EP-011 D2,
+lib/bmadchurn.py) when the project root is a git top-level: files upstream
+rewrote to something provably equivalent to the committed blob are restored,
+and its *.bak copies of committed files are dropped — so installing at the
+pin over a tree committed at that pin leaves `git status` clean. Paths that
+were already dirty before the run are never touched; real changes stay and
+are counted in `normalized.remaining`.
 
-  --directory  project root to install into (default: cwd)
-  --modules    subset of the lock's module set (default: all pinned modules)
-  --dry-run    print the command and verification plan without running anything
-               (no event is emitted)
+Usage:
+  uv run install_base.py [--directory DIR] [--modules a,b,c] [--dry-run]
+                         [--timeout SECS] [--no-normalize]
+
+  --directory     project root to install into (default: cwd)
+  --modules       subset of the lock's module set (default: all pinned modules)
+  --dry-run       print the command and verification plan without running
+                  anything (no event is emitted)
+  --no-normalize  leave the upstream installer's output exactly as written
 
 Output: one JSON object on stdout. Exit 0 = installed and verified at pin;
 2 = usage/lock error; 1 = install or verification failure.
@@ -29,6 +39,7 @@ from pathlib import Path
 PLUGIN_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(PLUGIN_ROOT / "lib"))
 
+import bmadchurn  # noqa: E402
 import bmadlock  # noqa: E402
 import ledger  # noqa: E402
 
@@ -77,6 +88,31 @@ def verify_installed(directory: Path, lock: dict, modules: list[str]) -> list[st
     return problems
 
 
+def pre_install_snapshot(directory: Path) -> tuple[frozenset[str] | None, str | None]:
+    """(paths already dirty under the churn roots, None) when normalization
+    can run after the install, else (None, reason it cannot)."""
+    reason = bmadchurn.unavailable_reason(directory)
+    if reason:
+        return None, reason
+    try:
+        return bmadchurn.dirty_paths(directory), None
+    except RuntimeError as exc:
+        return None, str(exc)[:200]
+
+
+def normalize_after_install(directory: Path, preserve: frozenset[str]) -> dict:
+    """Normalize a verified install. A failure here never fails the install
+    (it is verified at pin already). A failed checkout writes its batch back,
+    so the tree stays whole; the error names any file it could not."""
+    try:
+        result = bmadchurn.normalize_churn(directory, preserve)
+    except (RuntimeError, OSError) as exc:
+        return {"error": f"normalization stopped: {str(exc)[:400]}"}
+    if preserve:
+        result["preserved"] = len(preserve)
+    return result
+
+
 def emit_outcome(outcome: str, lock: dict, modules: list[str],
                  step: str | None = None, detail: str | None = None) -> None:
     payload = {
@@ -104,6 +140,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--modules", help="comma-separated subset of the lock's modules")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--timeout", type=int, default=900)
+    parser.add_argument("--no-normalize", action="store_true",
+                        help="leave the upstream installer's output exactly as written")
     args = parser.parse_args(argv)
 
     directory = Path(args.directory).resolve()
@@ -122,11 +160,19 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.dry_run:
+        skip = "--no-normalize" if args.no_normalize else bmadchurn.unavailable_reason(directory)
         print(json.dumps({
             "ok": True, "dry_run": True, "command": cmd,
             "verify": f"compare {directory / '_bmad/_config/manifest.yaml'} against lock pins",
+            "normalize": (f"skipped: {skip}" if skip else
+                          f"revert provable churn under {', '.join(bmadchurn.CHURN_ROOTS)}"),
         }))
         return 0
+
+    if args.no_normalize:
+        preserve, skip = None, "--no-normalize"
+    else:
+        preserve, skip = pre_install_snapshot(directory)
 
     try:
         proc = subprocess.run(
@@ -159,11 +205,14 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     emit_outcome("success", lock, modules)
+    normalized = ({"skipped": skip} if preserve is None
+                  else normalize_after_install(directory, preserve))
     print(json.dumps({
         "ok": True,
         "core": lock["core"]["version"],
         "modules": {m: bmadlock.lock_pins(lock)[m] for m in modules},
         "directory": str(directory),
+        "normalized": normalized,
     }))
     return 0
 

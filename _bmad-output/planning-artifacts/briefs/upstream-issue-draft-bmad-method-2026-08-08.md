@@ -1,10 +1,16 @@
 # Upstream issue draft — bmad-method (ST-044, EP-011)
 
-**Status:** DRAFT — not filed. Filing on the bmad-method tracker happens only
-on explicit in-session operator go-ahead (D4). Scope per the 2026-08-08
-in-session ruling: one issue, both defects (the re-serialization defect as
-ruled, plus the `--pin`-ignored/stable-float defect confirmed live this
-session), the LF rewrite posed as a question.
+**Status:** FILED 2026-09-27 on the operator's in-session go-ahead (D4) as
+[bmad-code-org/BMAD-METHOD#2978](https://github.com/bmad-code-org/BMAD-METHOD/issues/2978).
+The filed scope is narrower than this draft: defect 1 plus the line-ending
+question. Defect 2 was left out because it no longer reproduces on 6.12.0
+(see the addendum). The body below is the 2026-08-08 draft, kept as
+written; the filed text is the issue itself.
+
+Original scope per the 2026-08-08 in-session ruling: one issue, both
+defects (the re-serialization defect as ruled, plus the
+`--pin`-ignored/stable-float defect confirmed live that session), the LF
+rewrite posed as a question.
 
 **Target tracker:** https://github.com/bmad-code-org/BMAD-METHOD/issues
 
@@ -115,3 +121,53 @@ and 2026-08-06 measurement events, and the 2026-08-08 live corpus (session
 evidence: 292 modified + 27 untracked files on a same-version reinstall;
 installer source inspected in the npx cache). The 2026-08-08 watchdog
 research tick verified no existing upstream issue covers either defect.*
+
+---
+
+## Addendum 2026-09-27 — defect 1 root-caused; defect 2 fixed upstream in 6.12.0
+
+Re-observed on a same-pin `tk install` (bmad-method **6.11.0**, now with
+`--action update`, which the studio passes since PR #57 so `--pin` is
+honored). Both defects were re-run live in scratch projects:
+
+- **Defect 1 reproduces on 6.12.0** (the current `latest`): a fresh
+  `--modules gds` install writes a YAML list and a TOML array, and the
+  first `--yes` reinstall turns both into JSON strings.
+- **Defect 2 is fixed in 6.12.0.** A module recorded `channel: stable` at
+  v0.3.2, reinstalled with `--yes --pin cis=v0.3.1`, stays on v0.3.2 under
+  6.11.0 but moves to v0.3.1 (`channel: pinned`) under 6.12.0, still on the
+  quick-update path. The `--action update` in `install_base.py` stays
+  needed while the lock pins 6.11.0; revisit it on the 6.12.0 base-update.
+
+Installer source read in the npx cache:
+
+- **Root cause of defect 1:** `parseCentralToml` in
+  `tools/installer/modules/official-modules.js` (the loader for the
+  existing `_bmad/config.toml` / `config.user.toml` answers) handles quoted
+  strings, booleans and numbers only — a TOML array such as
+  `primary_platform = ["unity", "unreal"]` falls through to `value = raw`
+  and comes back as the *string* `["unity", "unreal"]`. That string is then
+  the "existing answer" for the multi-select, so every module
+  `config.yaml` gets `primary_platform: '["unity", ...]'` and the TOML
+  mirror is rewritten as a quoted string. Once the string form is written
+  it is a fixed point (no double-encoding on later reinstalls).
+- **Still present in 6.12.0** (current `latest`): the parser has no array
+  branch.
+- Suggested fix for the body: parse `[...]` values as TOML arrays (or use a
+  real TOML parser) in `parseCentralToml`.
+
+Unaffected by the fix, and **not** defects (verified 2026-09-27): the
+6.11.0 full-update path rewrites `output_folder: _bmad-output` to
+`"{project-root}/_bmad-output"` (core `module.yaml` declares
+`result: "{project-root}/{value}"`) and records `channel: pinned` for
+modules installed via `--pin` — both converge after one committed
+regeneration.
+
+Local line-ending churn observed this time runs the other way from the
+original question (the installer wrote CRLF over LF-committed files).
+Installed files follow the working-tree endings of upstream's module cache
+(`~/.bmad/cache/external-modules/*`). On the agent PC those clones were
+made 2026-09-26 18:06 under Git for Windows' system `core.autocrlf=true`,
+about 30 minutes before the user-level `autocrlf=false` override was set,
+and the CRLF checkouts persisted. Environment-dependent, so still a question
+for upstream rather than a defect.
