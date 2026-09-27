@@ -17,11 +17,18 @@ independent supervisor served on this box over HTTP to the main PC, iPad and
 phone · Hermes = front door and dispatcher only · ClaudeOS retired as driver.
 
 Conventions: `%AGENT_WORK%` is `D:\agent-work` (use `C:\agent-work` on a
-single-drive box). The studio runs under a **standard** local account named
-`agent`; your own admin account is only for setup. Commands marked **(admin)**
-run in an elevated PowerShell from the admin account; everything else runs as
-`agent`. Steps marked *verify on first run* were not exercised here and should
-be confirmed when you do them.
+single-drive box). Two account models:
+
+- **Hardened** (the default below): the studio runs under a **standard** local
+  account named `agent`; your own admin account is only for setup.
+- **Single-account**: the studio runs under your own account, and the `agent`
+  steps are skipped (§1.6). The first agent PC runs this way (decided
+  2026-09-27). The trade-off is spelled out in §1.6.
+
+Commands marked **(admin)** run in an elevated PowerShell; everything else runs
+as the *studio account* (`agent`, or yourself on a single-account box). Steps
+marked *verify on first run* were not exercised here and should be confirmed
+when you do them.
 
 ---
 
@@ -79,39 +86,64 @@ be confirmed when you do them.
    profile, its `~/.ssh` and cloud credentials are already out of the agent's
    reach. Keep it that way: never sign your personal accounts in as `agent`.
 
-7. Auto-logon for `agent`, so the interactive session (and its console
-   window-station) exists after a reboot. This is what lets the supervisor run
-   `claude -p` reliably; headless Task Scheduler runs of `claude -p` hang with
-   no console (anthropics/claude-code#96932).
+   *Single-account box:* skip this step and create only the work folder. Your
+   profile, `~/.ssh` and signed-in credentials are then within the agent's
+   reach, and a UAC prompt is the only barrier to admin actions, so the §3.2
+   deny list and the no-bypass-on-host rule are the main guard.
+
+7. Auto-logon for the studio account, so the interactive session (and its
+   console window-station) exists after a reboot. This is what lets the
+   supervisor run `claude -p` reliably; headless Task Scheduler runs of
+   `claude -p` hang with no console (anthropics/claude-code#96932).
 
    ```powershell
    winget install --id Microsoft.Sysinternals.Autologon -e
    ```
 
-   Run `Autologon.exe`, enter `agent`, the computer name and the password.
+   Run `Autologon.exe`, enter the studio account, the computer name and the
+   password.
    Trade-off: an auto-logged-on, unlocked desktop is only acceptable on a box
    in your own home. Do not set a screen-saver lock; a locked session breaks
    screenshot-based verification. Turn the monitor off instead.
 
 ## 2. Tooling (admin, one elevated PowerShell)
 
-All IDs verified against winget on 2026-09-26.
+**If `winget` is not recognised.** Some clean Windows 11 images ship without
+App Installer registered, and registering it by family name can fail with
+0x80073CF9. Install it with Microsoft's WinGet module from a normal
+(non-elevated) Windows PowerShell, then open a new terminal:
 
 ```powershell
-winget install --id Git.Git -e
-winget install --id OpenJS.NodeJS.LTS -e
-winget install --id astral-sh.uv -e
-winget install --id Python.Python.3.12 -e
-winget install --id Oven-sh.Bun -e
-winget install --id GitHub.cli -e
-winget install --id Microsoft.WindowsTerminal -e
-winget install --id Microsoft.PowerShell -e
-winget install --id Tailscale.Tailscale -e
-winget install --id GodotEngine.GodotEngine.Mono -e
-winget install --id Microsoft.DotNet.SDK.8 -e
-winget install --id Gyan.FFmpeg -e
-winget install --id Docker.sbx -e
+Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force
+Install-Module -Name Microsoft.WinGet.Client -Scope CurrentUser -Force
+Repair-WinGetPackageManager -Latest -Force
+winget --version
 ```
+
+All IDs verified against winget on 2026-09-26; every one has a machine-scope
+installer (checked 2026-09-27).
+
+```powershell
+winget install --id Git.Git -e --scope machine
+winget install --id OpenJS.NodeJS.LTS -e --scope machine
+winget install --id astral-sh.uv -e --scope machine
+winget install --id Python.Python.3.12 -e --scope machine
+winget install --id Oven-sh.Bun -e --scope machine
+winget install --id GitHub.cli -e --scope machine
+winget install --id Microsoft.WindowsTerminal -e --scope machine
+winget install --id Microsoft.PowerShell -e --scope machine
+winget install --id Tailscale.Tailscale -e --scope machine
+winget install --id GodotEngine.GodotEngine.Mono -e --scope machine
+winget install --id Microsoft.DotNet.SDK.8 -e --scope machine
+winget install --id Gyan.FFmpeg -e --scope machine
+winget install --id Docker.sbx -e --scope machine
+```
+
+`--scope machine` matters: without it, the portable packages (uv, Bun, FFmpeg,
+Godot) install per-user into whichever account runs the elevated shell, where
+the `agent` account cannot see them. Docker.sbx installs per-user
+(`%LOCALAPPDATA%\DockerSandboxes`) even at machine scope; on the hardened
+model, install it again as `agent` (*verify on first run*).
 
 Why each: Git for Windows gives Claude Code its Bash tool and `git`; Node runs
 the upstream BMad installer (`npx bmad-method@<pin>`); uv + Python run the
@@ -122,13 +154,20 @@ tier for bypass-permission runs (microVM, no GPU).
 
 **Godot console binary.** Headless verification needs the `*_console.exe`
 build so stdout is readable on Windows (the ClaudeOS mission-runner's Godot
-check depended on it). Download the official Windows zip for the version the
-project pins and unpack it to `%AGENT_WORK%\tools\godot\`; the zip carries both
+check depended on it). The winget package ships it: `godot_console` is on PATH
+next to `godot` (the GUI build, which prints nothing). Check with
+`godot_console --version` (4.7.2 on 2026-09-27). Only when a project pins a
+different version, download the official Windows zip and unpack it to
+`%AGENT_WORK%\tools\godot\`; the zip carries both
 `Godot_v4.x_mono_win64.exe` and `Godot_v4.x_mono_win64_console.exe`.
 
 **Blender.** winget ships 5.2.1 today; headless glTF export was broken by the
 bundled NumPy until 5.2.2 (research digest 02). Install 5.2.2 or newer from
-blender.org, or the portable zip into `%AGENT_WORK%\tools\blender\`. Verify:
+blender.org, or the portable zip into `%AGENT_WORK%\tools\blender\`. Download
+it in a browser: blender.org serves scripted downloads a bot-check page. The
+installer does not add Blender to PATH, so add its folder
+(`C:\Program Files\Blender Foundation\Blender 5.2`, or the unpacked zip) to
+the studio account's PATH and open a new terminal. Verify:
 
 ```powershell
 blender -b --version
@@ -136,9 +175,10 @@ blender -b --version
 
 EEVEE has no headless mode on Windows; QA renders use Workbench or Cycles.
 
-## 3. Sign in as `agent` for everything below
+## 3. Sign in as the studio account for everything below
 
-Log off, log on as `agent`. Open Windows Terminal (PowerShell 7).
+Hardened model: log off, log on as `agent`. Single-account box: stay signed
+in. Open Windows Terminal (PowerShell 7).
 
 ### 3.1 GitHub and the work tree
 
@@ -149,6 +189,21 @@ git config --global user.email "kennedy.timothyh@gmail.com"
 git config --global core.autocrlf false
 ```
 
+Git for Windows' system config sets `core.autocrlf=true`, so a repo cloned
+before this line (by GitHub Desktop, say) has a CRLF checkout. Every file the
+BMad installer then rewrites in LF shows as modified although its content is
+unchanged; on the first agent PC that was all 242 files under
+`.claude/skills/`. On a clean tree, rewrite the checkout once and confirm
+`git ls-files --eol` shows only `w/lf`:
+
+```powershell
+git rm --cached -r -q .
+git checkout HEAD -- .
+```
+
+(`git checkout-index --force --all` is not enough: it skips files whose
+cached stat still matches.)
+
 Use a fine-grained GitHub token or the `gh` OAuth flow scoped to the repos the
 agent works on. Protect `main` on every repo the agent touches (PR-only,
 required checks); the supervisor merges nothing itself.
@@ -156,8 +211,14 @@ required checks); the supervisor merges nothing itself.
 ### 3.2 Claude Code under the Max plan
 
 ```powershell
-irm https://claude.ai/install.ps1 | iex
+& ([scriptblock]::Create((irm https://claude.ai/install.ps1))) stable
 ```
+
+Pass `stable`: the bare `irm https://claude.ai/install.ps1 | iex` installs the
+latest build and rewrites `autoUpdatesChannel` in `settings.json` to `latest`,
+overriding the stable pin below. The installer also does not put
+`%USERPROFILE%\.local\bin` (where `claude.exe` lands) on PATH; add it to the
+studio account's user PATH.
 
 Open a new terminal, then:
 
@@ -208,6 +269,11 @@ tailscale up
 tailscale ip -4
 ```
 
+Sign up with a personal email: that gets the free Personal plan (up to 6
+users, unlimited devices) with no end date. A custom-domain sign-up starts a
+14-day Business trial that needs a plan chosen when it ends
+(tailscale.com/pricing, 2026-09-27).
+
 Note the tailnet IP and MagicDNS name; every UI below binds to that address.
 No router port-forwards, ever. Enable Remote Desktop (Settings → System →
 Remote Desktop) and scope its firewall rule to the tailnet **(admin)**:
@@ -229,8 +295,19 @@ claude
 ```
 
 Trust the folder. The repo's `extraKnownMarketplaces` entry prompts to add the
-`tk-studio` marketplace and install the plugin; accept both. Then, inside the
-session, in this order:
+`tk-studio` marketplace and install the plugin; accept both. The Claude
+desktop app loads the plugin's skills without recording a CLI install, so if
+you set up from the app (or skipped the prompt), "tk activate" reports plugin
+drift ("not installed in the harness") and headless `claude -p /tk-studio:…`
+answers "Unknown command". Fix it from the repo root:
+
+```powershell
+claude plugin install tk-studio@tk-studio --scope project
+git restore .claude/settings.json
+```
+
+The install rewrites `.claude/settings.json` with its keys reordered (same
+content), hence the restore. Then, inside the session, in this order:
 
 1. **"tk activate"** — read-only health check. On a fresh machine it guides the
    per-user store standup (`~/.tk-studio`, registry, ledger). Follow the exact
@@ -249,13 +326,26 @@ fails on current CLIs).
 
 ### 3.5 Docker Sandboxes (the bypass tier)
 
-Installed in §2; needs the hypervisor features from §1 and a reboot.
+Installed in §2; needs the hypervisor features from §1 and a reboot. The
+daemon is not running after install, the global network policy must be
+initialised once before the first sandbox, and `sbx` needs a Docker sign-in:
 
 ```powershell
-sbx --version
+sbx version
+sbx daemon start -d
+sbx policy init balanced
+sbx login
+sbx diagnose
 cd D:\agent-work\<repo>
 sbx run claude
 ```
+
+`balanced` is deny-by-default plus an allow list of AI services and package
+registries (`allow-all` and `deny-all` are the alternatives; `sbx policy
+reset` starts over). `sbx diagnose` should end with no failures. The CLI has
+no `--version` flag. Whether the daemon comes back on its own after a reboot
+is *verify on first run*; if not, the supervisor's `start.ps1` (§4) runs
+`sbx daemon start -d`.
 
 *Verify on first run.* Inside the microVM Claude Code may run with bypass;
 `~/.ssh` and cloud credential folders are blocked by default and there is no
@@ -361,9 +451,9 @@ cd <supervisor-repo>
 bun install
 ```
 
-Run it **console-hosted in the interactive `agent` session**, never as a
-"run whether user is logged on or not" task. Simplest: a shortcut in
-`shell:startup` for the `agent` user that runs
+Run it **console-hosted in the studio account's interactive session**, never
+as a "run whether user is logged on or not" task. Simplest: a shortcut in
+`shell:startup` for the studio account that runs
 
 ```text
 wt.exe -w studio nt --title supervisor pwsh -NoExit -File D:\agent-work\<supervisor-repo>\start.ps1
@@ -379,7 +469,9 @@ curl -H "Authorization: Bearer <token>" http://<tailscale-ip>:<port>/status
 
 ## 5. Hardening checklist
 
-- [ ] `agent` is a standard user; admin account never signs into agent tools.
+- [ ] Hardened model: `agent` is a standard user; admin account never signs
+      into agent tools. Single-account box: the trade-off in §1.6 is accepted
+      and the deny list below is in place.
 - [ ] Inbound firewall: nothing open except RDP scoped to `100.64.0.0/10`; no
       router forwards; Tailscale ACL limited to your devices.
 - [ ] Optional outbound allowlist for the `agent` account (Anthropic, GitHub,
@@ -401,17 +493,19 @@ curl -H "Authorization: Bearer <token>" http://<tailscale-ip>:<port>/status
 schtasks /Create /SC DAILY /ST 03:30 /RU agent /TN "Claude transcript backup" /TR "robocopy \"%USERPROFILE%\.claude\projects\" \"D:\agent-work\backups\claude-projects\" /MIR /R:2 /W:5 /LOG+:D:\agent-work\backups\robocopy.log"
 ```
 
+On a single-account box, `/RU` is your own account name.
+
 Keep `~/.tk-studio` in the same job once the store exists (add a second
 `robocopy` line to a `.cmd` and point the task at it).
 
-## 7. Smoke checklist (all as `agent`)
+## 7. Smoke checklist (all as the studio account)
 
 | Check | Command | Pass looks like |
 |---|---|---|
 | Claude Code | `claude doctor` | version, auto-update stable, no settings errors |
 | Studio health | in Claude Code: "tk activate" | four planes green, no drift |
 | Lib + conformance | `cd tk-studio\plugins\tk-studio\lib; uv run python -m unittest discover tests` then `uv run ..\contracts\conformance\runner.py run` | all tests pass; conformance ok over every surface |
-| Godot headless | console exe `--headless --path <proj> --quit` | exits 0, prints engine banner |
+| Godot headless | `godot_console --headless --path <proj> --quit` | exits 0, prints engine banner |
 | Blender headless | `blender -b --version` | ≥ 5.2.2 |
 | Sandbox tier | `sbx run claude` in a repo | Claude Code prompt inside the microVM |
 | Tailnet reach | from iPad: RDP to the MagicDNS name | desktop visible |
@@ -433,6 +527,13 @@ Keep `~/.tk-studio` in the same job once the store exists (add a second
 | Hermes dashboard Chat tab needs a PTY | Hermes windows-native docs | use Telegram to talk; dashboard for viewing (§3.7) |
 | Hermes hub on Claude OAuth drains extra-usage credits | NousResearch/hermes-agent#47260 | hub on Nous Portal, worker on Max (§3.7) |
 | Windows Update restarts mid-run | — | active hours + notify-only policy (§1.4) |
+| `winget` missing on a clean image; App Installer registration fails 0x80073CF9 | first agent PC, 2026-09-26 | `Repair-WinGetPackageManager` (§2) |
+| Portable winget packages install per-user into the elevated account | winget default scope | `--scope machine` on every install (§2) |
+| Claude desktop app sessions write into a private AppData copy: files created under `%LOCALAPPDATA%`/`%APPDATA%` land in `Packages\Claude_<id>\LocalCache` and no other program sees them | MSIX file-write virtualisation, first agent PC 2026-09-26 | install tools only with winget or installers that write outside AppData; never unpack tools into AppData from an app session |
+| Desktop app's Bash tool gets an unparseable mixed `;`/`:` PATH; nothing resolves | first agent PC, 2026-09-26 (portable Git, no `CLAUDE_CODE_GIT_BASH_PATH`) | not seen again with winget `Git.Git` plus the §3.2 setting |
+| Bare Claude installer switches `settings.json` to the `latest` channel and leaves `~\.local\bin` off PATH | first agent PC, 2026-09-27 | install with the `stable` argument; add the PATH entry (§3.2) |
+| CRLF checkout makes every BMad-installer rewrite show as modified | first agent PC, 2026-09-26 | `core.autocrlf false` before cloning; one-time re-checkout otherwise (§3.1) |
+| Plugin skills work in the desktop app but headless `claude -p /tk-studio:…` is "Unknown command" (no CLI install record) | first agent PC, 2026-09-27; "tk activate" plugin plane | `claude plugin install tk-studio@tk-studio --scope project` (§3.4) |
 
 ## 9. Retiring ClaudeOS on the main PC (done 2026-09-26, one step left)
 
