@@ -295,8 +295,19 @@ claude
 ```
 
 Trust the folder. The repo's `extraKnownMarketplaces` entry prompts to add the
-`tk-studio` marketplace and install the plugin; accept both. Then, inside the
-session, in this order:
+`tk-studio` marketplace and install the plugin; accept both. The Claude
+desktop app loads the plugin's skills without recording a CLI install, so if
+you set up from the app (or skipped the prompt), "tk activate" reports plugin
+drift ("not installed in the harness") and headless `claude -p /tk-studio:…`
+answers "Unknown command". Fix it from the repo root:
+
+```powershell
+claude plugin install tk-studio@tk-studio --scope project
+git restore .claude/settings.json
+```
+
+The install rewrites `.claude/settings.json` with its keys reordered (same
+content), hence the restore. Then, inside the session, in this order:
 
 1. **"tk activate"** — read-only health check. On a fresh machine it guides the
    per-user store standup (`~/.tk-studio`, registry, ledger). Follow the exact
@@ -315,13 +326,26 @@ fails on current CLIs).
 
 ### 3.5 Docker Sandboxes (the bypass tier)
 
-Installed in §2; needs the hypervisor features from §1 and a reboot.
+Installed in §2; needs the hypervisor features from §1 and a reboot. The
+daemon is not running after install, the global network policy must be
+initialised once before the first sandbox, and `sbx` needs a Docker sign-in:
 
 ```powershell
-sbx --version
+sbx version
+sbx daemon start -d
+sbx policy init balanced
+sbx login
+sbx diagnose
 cd D:\agent-work\<repo>
 sbx run claude
 ```
+
+`balanced` is deny-by-default plus an allow list of AI services and package
+registries (`allow-all` and `deny-all` are the alternatives; `sbx policy
+reset` starts over). `sbx diagnose` should end with no failures. The CLI has
+no `--version` flag. Whether the daemon comes back on its own after a reboot
+is *verify on first run*; if not, the supervisor's `start.ps1` (§4) runs
+`sbx daemon start -d`.
 
 *Verify on first run.* Inside the microVM Claude Code may run with bypass;
 `~/.ssh` and cloud credential folders are blocked by default and there is no
@@ -509,6 +533,7 @@ Keep `~/.tk-studio` in the same job once the store exists (add a second
 | Desktop app's Bash tool gets an unparseable mixed `;`/`:` PATH; nothing resolves | first agent PC, 2026-09-26 (portable Git, no `CLAUDE_CODE_GIT_BASH_PATH`) | not seen again with winget `Git.Git` plus the §3.2 setting |
 | Bare Claude installer switches `settings.json` to the `latest` channel and leaves `~\.local\bin` off PATH | first agent PC, 2026-09-27 | install with the `stable` argument; add the PATH entry (§3.2) |
 | CRLF checkout makes every BMad-installer rewrite show as modified | first agent PC, 2026-09-26 | `core.autocrlf false` before cloning; one-time re-checkout otherwise (§3.1) |
+| Plugin skills work in the desktop app but headless `claude -p /tk-studio:…` is "Unknown command" (no CLI install record) | first agent PC, 2026-09-27; "tk activate" plugin plane | `claude plugin install tk-studio@tk-studio --scope project` (§3.4) |
 
 ## 9. Retiring ClaudeOS on the main PC (done 2026-09-26, one step left)
 
