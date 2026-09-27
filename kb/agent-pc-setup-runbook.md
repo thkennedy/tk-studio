@@ -301,7 +301,7 @@ node. RDP from the iPad or laptop is your break-glass path to the desktop.
 
 Ending an RDP session with a plain disconnect leaves the box's own screen
 locked, which breaks screenshot-based verification. Hand the session back
-instead, from an elevated PowerShell inside it (*verify on first run*):
+instead, from an elevated PowerShell inside it:
 
 ```powershell
 tscon (Get-Process -Id $PID).SessionId /dest:console
@@ -309,7 +309,12 @@ tscon (Get-Process -Id $PID).SessionId /dest:console
 
 The first agent PC keeps this as a one-click
 `C:\agent-work\tools\return-to-console.bat` with a desktop shortcut. It
-elevates itself and does nothing when run on the box's own screen.
+elevates itself and does nothing when run on the box's own screen. It was
+verified on 2026-09-27 from an iPad (Windows App over Tailscale): the RDP
+client disconnects and the session reattaches to the console unlocked. The
+LocalSessionManager log shows event 25, "reconnection succeeded", from
+`LOCAL`. The next RDP reconnect briefly shows an "Unlocking PC" screen while
+the session moves back; that's expected.
 
 ### 3.4 tk-studio and the BMad base
 
@@ -380,13 +385,26 @@ before starting it.
 `balanced` is deny-by-default plus an allow list of AI services and package
 registries (`allow-all` and `deny-all` are the alternatives; `sbx policy
 reset` starts over). `sbx diagnose` should end with no failures. The CLI has
-no `--version` flag. Whether the daemon comes back on its own after a reboot
-is *verify on first run*; if not, the supervisor's `start.ps1` (§4) runs
-`sbx daemon start -d` after setting a writable working directory.
+no `--version` flag.
 
-*Verify on first run.* Inside the microVM Claude Code may run with bypass;
-`~/.ssh` and cloud credential folders are blocked by default and there is no
-GPU, so this tier is for code and asset-script work, not engine runs.
+The daemon does **not** come back on its own after a reboot (verified
+2026-09-27). Until the supervisor's `start.ps1` (§4) starts it, register a
+sign-in task that starts it from the home folder. Task Scheduler launches it
+outside any Claude desktop app session, and the daemon outlives the task:
+
+```powershell
+$action    = New-ScheduledTaskAction -Execute "$env:LOCALAPPDATA\DockerSandboxes\bin\sbx.exe" -Argument "daemon start -d" -WorkingDirectory $env:USERPROFILE
+$trigger   = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"; $trigger.Delay = "PT30S"
+$settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -MultipleInstances IgnoreNew
+$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive
+Register-ScheduledTask -TaskName "Docker Sandboxes daemon" -Action $action -Trigger $trigger -Settings $settings -Principal $principal
+```
+
+`sbx run claude` reaching a Claude prompt inside the microVM was verified on
+2026-09-27. Still *verify on first run*: inside the microVM Claude Code may
+run with bypass, and `~/.ssh` and cloud credential folders are blocked by
+default. There is no GPU, so this tier is for code and asset-script work,
+not engine runs.
 
 ### 3.6 The first Godot project ("slice zero")
 
