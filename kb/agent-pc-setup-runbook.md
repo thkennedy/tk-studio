@@ -154,9 +154,23 @@ tier for bypass-permission runs (microVM, no GPU).
 
 **Godot console binary.** Headless verification needs the `*_console.exe`
 build so stdout is readable on Windows (the ClaudeOS mission-runner's Godot
-check depended on it). The winget package ships it: `godot_console` is on PATH
-next to `godot` (the GUI build, which prints nothing). Check with
-`godot_console --version` (4.7.2 on 2026-09-27). Only when a project pins a
+check depended on it). The winget package ships it, but **don't run the
+.NET build through the `godot` / `godot_console` links winget puts on
+PATH**. Godot looks for its `GodotSharp` assemblies next to the path it was
+started from, which is the link in `C:\Program Files\WinGet\Links`. Any C#
+project then crashes at startup with `.NET: Assemblies not found` and
+signal 11 (only `--version` still works). Point the `GODOT` user
+environment variable at the real console exe instead. That's the
+Chickensoft convention The Universe Awaits' scripts and launch configs
+already use:
+
+```powershell
+[Environment]::SetEnvironmentVariable("GODOT", "C:\Program Files\WinGet\Packages\GodotEngine.GodotEngine.Mono_Microsoft.Winget.Source_8wekyb3d8bbwe\Godot_v4.7.2-stable_mono_win64\Godot_v4.7.2-stable_mono_win64_console.exe", "User")
+```
+
+Open a new terminal and check with `& $env:GODOT --version`. The folder name
+carries the version, so update `GODOT` after every
+`winget upgrade GodotEngine.GodotEngine.Mono`. Only when a project pins a
 different version, download the official Windows zip and unpack it to
 `%AGENT_WORK%\tools\godot\`; the zip carries both
 `Godot_v4.x_mono_win64.exe` and `Godot_v4.x_mono_win64_console.exe`.
@@ -285,6 +299,18 @@ Set-NetFirewallRule -DisplayGroup "Remote Desktop" -RemoteAddress 100.64.0.0/10
 In the Tailscale admin console, restrict ACLs so only your devices reach this
 node. RDP from the iPad or laptop is your break-glass path to the desktop.
 
+Ending an RDP session with a plain disconnect leaves the box's own screen
+locked, which breaks screenshot-based verification. Hand the session back
+instead, from an elevated PowerShell inside it (*verify on first run*):
+
+```powershell
+tscon (Get-Process -Id $PID).SessionId /dest:console
+```
+
+The first agent PC keeps this as a one-click
+`C:\agent-work\tools\return-to-console.bat` with a desktop shortcut. It
+elevates itself and does nothing when run on the box's own screen.
+
 ### 3.4 tk-studio and the BMad base
 
 ```powershell
@@ -332,20 +358,31 @@ initialised once before the first sandbox, and `sbx` needs a Docker sign-in:
 
 ```powershell
 sbx version
+sbx login
+cd $HOME
 sbx daemon start -d
 sbx policy init balanced
-sbx login
 sbx diagnose
 cd D:\agent-work\<repo>
 sbx run claude
 ```
+
+**Start the daemon from a writable working directory**, as with `cd $HOME`
+above. It keeps the directory it was started from, and its layer unpacker
+(`mkfs.erofs`) creates its temp file there, ignoring `TEMP` and `TMPDIR`.
+Started from `C:\Windows\System32` (an admin terminal's default), every image
+pull fails with `failed to initialize diskbuf: No space left on device`
+(reproduced 2026-09-27 on sbx v0.45.1). Don't start it from a Claude desktop
+app session either: a daemon started that way never reached its internal
+engine (`Cannot connect to the Docker daemon at …docker.sock`). Sign in
+before starting it.
 
 `balanced` is deny-by-default plus an allow list of AI services and package
 registries (`allow-all` and `deny-all` are the alternatives; `sbx policy
 reset` starts over). `sbx diagnose` should end with no failures. The CLI has
 no `--version` flag. Whether the daemon comes back on its own after a reboot
 is *verify on first run*; if not, the supervisor's `start.ps1` (§4) runs
-`sbx daemon start -d`.
+`sbx daemon start -d` after setting a writable working directory.
 
 *Verify on first run.* Inside the microVM Claude Code may run with bypass;
 `~/.ssh` and cloud credential folders are blocked by default and there is no
@@ -359,12 +396,20 @@ protected, then `tk install` and `tk onboard` it (§3.4). Confirm headless
 launches work with the console binary:
 
 ```powershell
-& "D:\agent-work\tools\godot\Godot_v4.7-stable_mono_win64_console.exe" --headless --path D:\agent-work\slice-zero --quit
+& $env:GODOT --headless --path D:\agent-work\slice-zero --quit
 ```
 
 This is the target for the supervisor's acceptance run (plan §3, Phase 1).
 `the-universe-awaits` is the measured C#/Godot reference project if you want a
 non-empty target later.
+
+*The first agent PC skipped slice zero:* its target is The Universe Awaits,
+cloned to `C:\GitHub\the-universe-awaits`, where the Godot project lives under
+`game\`. Build it once (`dotnet build TheUniverseAwaits.sln`), then run
+`& $env:GODOT --headless --path game --quit`, which prints `TUA.Game shell
+ready` and exits 0. Do both first runs from your own terminal: they create
+Godot's and NuGet's AppData folders, which a Claude desktop app session would
+create privately (§8).
 
 ### 3.7 Hermes (front door only)
 
@@ -489,14 +534,45 @@ curl -H "Authorization: Bearer <token>" http://<tailscale-ip>:<port>/status
 
 ## 6. Nightly transcript backup (robocopy needs no console)
 
-```powershell
-schtasks /Create /SC DAILY /ST 03:30 /RU agent /TN "Claude transcript backup" /TR "robocopy \"%USERPROFILE%\.claude\projects\" \"D:\agent-work\backups\claude-projects\" /MIR /R:2 /W:5 /LOG+:D:\agent-work\backups\robocopy.log"
+Back up `~/.claude/projects` and `~/.tk-studio` to the work drive every
+night. Copy with `/E`, never `/MIR`: `/MIR` mirrors deletions, so a
+transcript GC (#62041) or a bad cleanup would be copied into the backup the
+next night and the copy lost too. `/E` only adds and updates; prune the
+backup by hand if it ever grows too large.
+
+`D:\agent-work\tools\nightly-backup.cmd` (`C:\agent-work` on a single-drive
+box):
+
+```bat
+@echo off
+set "DEST=D:\agent-work\backups"
+set "LOG=%DEST%\robocopy.log"
+set RC=0
+robocopy "%USERPROFILE%\.claude\projects" "%DEST%\claude-projects" /E /R:2 /W:5 /NP /LOG+:"%LOG%"
+if %ERRORLEVEL% GEQ 8 set RC=1
+robocopy "%USERPROFILE%\.tk-studio" "%DEST%\tk-studio" /E /R:2 /W:5 /NP /LOG+:"%LOG%"
+if %ERRORLEVEL% GEQ 8 set RC=1
+exit /b %RC%
 ```
 
-On a single-account box, `/RU` is your own account name.
+Robocopy exit codes 0–7 mean success; the script maps 8 and above to 1, so
+Task Scheduler's *Last Run Result* only shows a failure for a real one.
+Register the task as the studio account. It needs no stored password: it
+runs while that account is signed in, which auto-logon (§1.7) guarantees,
+and a run missed while the box was off happens at the next start.
 
-Keep `~/.tk-studio` in the same job once the store exists (add a second
-`robocopy` line to a `.cmd` and point the task at it).
+```powershell
+$action    = New-ScheduledTaskAction -Execute cmd.exe -Argument '/c "D:\agent-work\tools\nightly-backup.cmd"'
+$trigger   = New-ScheduledTaskTrigger -Daily -At 3:30am
+$settings  = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 1) -MultipleInstances IgnoreNew
+$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive
+Register-ScheduledTask -TaskName "Claude transcript backup" -Action $action -Trigger $trigger -Settings $settings -Principal $principal
+Start-ScheduledTask -TaskName "Claude transcript backup"
+```
+
+Check that `(Get-ScheduledTaskInfo "Claude transcript backup").LastTaskResult`
+is `0` and the transcripts are under `backups\claude-projects`. Verified on
+the first agent PC on 2026-09-27 (with `C:\agent-work`).
 
 ## 7. Smoke checklist (all as the studio account)
 
@@ -505,7 +581,7 @@ Keep `~/.tk-studio` in the same job once the store exists (add a second
 | Claude Code | `claude doctor` | version, auto-update stable, no settings errors |
 | Studio health | in Claude Code: "tk activate" | four planes green, no drift |
 | Lib + conformance | `cd tk-studio\plugins\tk-studio\lib; uv run python -m unittest discover tests` then `uv run ..\contracts\conformance\runner.py run` | all tests pass; conformance ok over every surface |
-| Godot headless | `godot_console --headless --path <proj> --quit` | exits 0, prints engine banner |
+| Godot headless | `& $env:GODOT --headless --path <proj> --quit` | exits 0, prints engine banner |
 | Blender headless | `blender -b --version` | ≥ 5.2.2 |
 | Sandbox tier | `sbx run claude` in a repo | Claude Code prompt inside the microVM |
 | Tailnet reach | from iPad: RDP to the MagicDNS name | desktop visible |
@@ -520,9 +596,10 @@ Keep `~/.tk-studio` in the same job once the store exists (add a second
 | `claude -p` from Task Scheduler hangs with no console window-station | anthropics/claude-code#96932 (open 2026-09-25) | auto-logon + Startup-folder console host (§1.7, §4) |
 | Silent REPL exit after 10–30 min of dense Bash | #55424 | supervisor resumes from the `.jsonl` transcript; dense scripted work goes to the `sbx` tier |
 | Native installer resolves `bash` to the WSL stub; hooks hang | #37634 | `CLAUDE_CODE_GIT_BASH_PATH` set (§3.2) |
-| Startup GC deleted transcripts | #62041 | nightly robocopy (§6) |
+| Startup GC deleted transcripts | #62041 | nightly robocopy with `/E`, never `/MIR`, which would mirror the deletion into the backup (§6) |
 | Cleanup script followed junctions and deleted 48k files | r/ClaudeAI, 2026-09-25 | standard user, deny list, no bypass on host, no junctions in agent worktrees, snapshots |
 | Blender headless glTF export fails on 5.2.1 | research digest 02 | install ≥ 5.2.2 (§2) |
+| Godot .NET started through winget's `godot_console` link crashes: `.NET: Assemblies not found`, signal 11 | first agent PC, 2026-09-27 | `GODOT` user env var pointing at the real console exe (§2) |
 | EEVEE cannot render headless on Windows | research digest 02 | Workbench/Cycles for QA renders |
 | Hermes dashboard Chat tab needs a PTY | Hermes windows-native docs | use Telegram to talk; dashboard for viewing (§3.7) |
 | Hermes hub on Claude OAuth drains extra-usage credits | NousResearch/hermes-agent#47260 | hub on Nous Portal, worker on Max (§3.7) |
