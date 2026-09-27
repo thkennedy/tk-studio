@@ -154,9 +154,23 @@ tier for bypass-permission runs (microVM, no GPU).
 
 **Godot console binary.** Headless verification needs the `*_console.exe`
 build so stdout is readable on Windows (the ClaudeOS mission-runner's Godot
-check depended on it). The winget package ships it: `godot_console` is on PATH
-next to `godot` (the GUI build, which prints nothing). Check with
-`godot_console --version` (4.7.2 on 2026-09-27). Only when a project pins a
+check depended on it). The winget package ships it, but **don't run the
+.NET build through the `godot` / `godot_console` links winget puts on
+PATH**. Godot looks for its `GodotSharp` assemblies next to the path it was
+started from, which is the link in `C:\Program Files\WinGet\Links`. Any C#
+project then crashes at startup with `.NET: Assemblies not found` and
+signal 11 (only `--version` still works). Point the `GODOT` user
+environment variable at the real console exe instead. That's the
+Chickensoft convention The Universe Awaits' scripts and launch configs
+already use:
+
+```powershell
+[Environment]::SetEnvironmentVariable("GODOT", "C:\Program Files\WinGet\Packages\GodotEngine.GodotEngine.Mono_Microsoft.Winget.Source_8wekyb3d8bbwe\Godot_v4.7.2-stable_mono_win64\Godot_v4.7.2-stable_mono_win64_console.exe", "User")
+```
+
+Open a new terminal and check with `& $env:GODOT --version`. The folder name
+carries the version, so update `GODOT` after every
+`winget upgrade GodotEngine.GodotEngine.Mono`. Only when a project pins a
 different version, download the official Windows zip and unpack it to
 `%AGENT_WORK%\tools\godot\`; the zip carries both
 `Godot_v4.x_mono_win64.exe` and `Godot_v4.x_mono_win64_console.exe`.
@@ -382,12 +396,20 @@ protected, then `tk install` and `tk onboard` it (§3.4). Confirm headless
 launches work with the console binary:
 
 ```powershell
-& "D:\agent-work\tools\godot\Godot_v4.7-stable_mono_win64_console.exe" --headless --path D:\agent-work\slice-zero --quit
+& $env:GODOT --headless --path D:\agent-work\slice-zero --quit
 ```
 
 This is the target for the supervisor's acceptance run (plan §3, Phase 1).
 `the-universe-awaits` is the measured C#/Godot reference project if you want a
 non-empty target later.
+
+*The first agent PC skipped slice zero:* its target is The Universe Awaits,
+cloned to `C:\GitHub\the-universe-awaits`, where the Godot project lives under
+`game\`. Build it once (`dotnet build TheUniverseAwaits.sln`), then run
+`& $env:GODOT --headless --path game --quit`, which prints `TUA.Game shell
+ready` and exits 0. Do both first runs from your own terminal: they create
+Godot's and NuGet's AppData folders, which a Claude desktop app session would
+create privately (§8).
 
 ### 3.7 Hermes (front door only)
 
@@ -559,7 +581,7 @@ the first agent PC on 2026-09-27 (with `C:\agent-work`).
 | Claude Code | `claude doctor` | version, auto-update stable, no settings errors |
 | Studio health | in Claude Code: "tk activate" | four planes green, no drift |
 | Lib + conformance | `cd tk-studio\plugins\tk-studio\lib; uv run python -m unittest discover tests` then `uv run ..\contracts\conformance\runner.py run` | all tests pass; conformance ok over every surface |
-| Godot headless | `godot_console --headless --path <proj> --quit` | exits 0, prints engine banner |
+| Godot headless | `& $env:GODOT --headless --path <proj> --quit` | exits 0, prints engine banner |
 | Blender headless | `blender -b --version` | ≥ 5.2.2 |
 | Sandbox tier | `sbx run claude` in a repo | Claude Code prompt inside the microVM |
 | Tailnet reach | from iPad: RDP to the MagicDNS name | desktop visible |
@@ -577,6 +599,7 @@ the first agent PC on 2026-09-27 (with `C:\agent-work`).
 | Startup GC deleted transcripts | #62041 | nightly robocopy with `/E`, never `/MIR`, which would mirror the deletion into the backup (§6) |
 | Cleanup script followed junctions and deleted 48k files | r/ClaudeAI, 2026-09-25 | standard user, deny list, no bypass on host, no junctions in agent worktrees, snapshots |
 | Blender headless glTF export fails on 5.2.1 | research digest 02 | install ≥ 5.2.2 (§2) |
+| Godot .NET started through winget's `godot_console` link crashes: `.NET: Assemblies not found`, signal 11 | first agent PC, 2026-09-27 | `GODOT` user env var pointing at the real console exe (§2) |
 | EEVEE cannot render headless on Windows | research digest 02 | Workbench/Cycles for QA renders |
 | Hermes dashboard Chat tab needs a PTY | Hermes windows-native docs | use Telegram to talk; dashboard for viewing (§3.7) |
 | Hermes hub on Claude OAuth drains extra-usage credits | NousResearch/hermes-agent#47260 | hub on Nous Portal, worker on Max (§3.7) |
