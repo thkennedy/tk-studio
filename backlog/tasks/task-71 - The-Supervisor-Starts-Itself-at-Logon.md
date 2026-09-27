@@ -1,0 +1,41 @@
+---
+id: TASK-71
+title: The Supervisor Starts Itself at Logon
+status: To Do
+assignee: []
+created_date: '2026-09-27 23:44'
+labels:
+  - ST-071
+milestone: Reachable from the Phone
+dependencies: []
+---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+As the operator,
+I want the supervisor console-hosted at logon with the box's run hygiene built in,
+So that it is always up after a reboot and never runs under the conditions that hang `claude -p`.
+
+**Acceptance Criteria:**
+
+**Given** `start.ps1` in the repo
+**When** it runs
+**Then** it reads the bind address and token from the user environment, starts the sbx daemon from `$HOME` when it is not already running (so the "Docker Sandboxes daemon" sign-in task can later be retired by the operator), and starts the API and the pacer
+
+**Given** the logon path
+**When** the story hands it over
+**Then** the operator receives the exact command for the `shell:startup` shortcut (`wt.exe -w studio nt --title supervisor pwsh -NoExit -File <repo>\start.ps1`, runbook §4); nothing registers a "run whether user is logged on or not" task, and nothing starts the supervisor from a Claude desktop-app session
+
+**Given** a run flagged as editor-in-the-loop on a Godot project
+**When** it is about to start
+**Then** a `robocopy /E` snapshot (never `/MIR`) of the project lands in the work folder and its path is recorded on the run
+
+**Given** any terminal run
+**When** it ends
+**Then** a notification goes out (ntfy or Telegram, chosen by the environment) naming the run, its status, its reason, and its PR when there is one, and the run's session transcript is copied to the backup folder (the nightly task remains the catch-all)
+
+**Given** a reboot of the agent PC
+**When** auto-logon completes
+**Then** `curl -H "Authorization: Bearer <token>" http://<tailscale-ip>:<port>/status` from another device answers
+<!-- SECTION:DESCRIPTION:END -->
