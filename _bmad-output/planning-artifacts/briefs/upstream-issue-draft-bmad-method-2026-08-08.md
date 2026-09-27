@@ -1,10 +1,16 @@
 # Upstream issue draft — bmad-method (ST-044, EP-011)
 
-**Status:** DRAFT — not filed. Filing on the bmad-method tracker happens only
-on explicit in-session operator go-ahead (D4). Scope per the 2026-08-08
-in-session ruling: one issue, both defects (the re-serialization defect as
-ruled, plus the `--pin`-ignored/stable-float defect confirmed live this
-session), the LF rewrite posed as a question.
+**Status:** FILED 2026-09-27 on the operator's in-session go-ahead (D4) as
+[bmad-code-org/BMAD-METHOD#2978](https://github.com/bmad-code-org/BMAD-METHOD/issues/2978).
+The filed scope is narrower than this draft: defect 1 plus the line-ending
+question. Defect 2 was left out because it no longer reproduces on 6.12.0
+(see the addendum). The body below is the 2026-08-08 draft, kept as
+written; the filed text is the issue itself.
+
+Original scope per the 2026-08-08 in-session ruling: one issue, both
+defects (the re-serialization defect as ruled, plus the
+`--pin`-ignored/stable-float defect confirmed live that session), the LF
+rewrite posed as a question.
 
 **Target tracker:** https://github.com/bmad-code-org/BMAD-METHOD/issues
 
@@ -118,12 +124,22 @@ research tick verified no existing upstream issue covers either defect.*
 
 ---
 
-## Addendum 2026-09-27 — defect 1 root-caused at 6.11.0 (still unfiled)
+## Addendum 2026-09-27 — defect 1 root-caused; defect 2 fixed upstream in 6.12.0
 
 Re-observed on a same-pin `tk install` (bmad-method **6.11.0**, now with
 `--action update`, which the studio passes since PR #57 so `--pin` is
-honored — that path sidesteps defect 2 for us, the quick-update defect
-itself stands). Installer source read in the npx cache:
+honored). Both defects were re-run live in scratch projects:
+
+- **Defect 1 reproduces on 6.12.0** (the current `latest`): a fresh
+  `--modules gds` install writes a YAML list and a TOML array, and the
+  first `--yes` reinstall turns both into JSON strings.
+- **Defect 2 is fixed in 6.12.0.** A module recorded `channel: stable` at
+  v0.3.2, reinstalled with `--yes --pin cis=v0.3.1`, stays on v0.3.2 under
+  6.11.0 but moves to v0.3.1 (`channel: pinned`) under 6.12.0, still on the
+  quick-update path. The `--action update` in `install_base.py` stays
+  needed while the lock pins 6.11.0; revisit it on the 6.12.0 base-update.
+
+Installer source read in the npx cache:
 
 - **Root cause of defect 1:** `parseCentralToml` in
   `tools/installer/modules/official-modules.js` (the loader for the
