@@ -344,20 +344,31 @@ initialised once before the first sandbox, and `sbx` needs a Docker sign-in:
 
 ```powershell
 sbx version
+sbx login
+cd $HOME
 sbx daemon start -d
 sbx policy init balanced
-sbx login
 sbx diagnose
 cd D:\agent-work\<repo>
 sbx run claude
 ```
+
+**Start the daemon from a writable working directory**, as with `cd $HOME`
+above. It keeps the directory it was started from, and its layer unpacker
+(`mkfs.erofs`) creates its temp file there, ignoring `TEMP` and `TMPDIR`.
+Started from `C:\Windows\System32` (an admin terminal's default), every image
+pull fails with `failed to initialize diskbuf: No space left on device`
+(reproduced 2026-09-27 on sbx v0.45.1). Don't start it from a Claude desktop
+app session either: a daemon started that way never reached its internal
+engine (`Cannot connect to the Docker daemon at …docker.sock`). Sign in
+before starting it.
 
 `balanced` is deny-by-default plus an allow list of AI services and package
 registries (`allow-all` and `deny-all` are the alternatives; `sbx policy
 reset` starts over). `sbx diagnose` should end with no failures. The CLI has
 no `--version` flag. Whether the daemon comes back on its own after a reboot
 is *verify on first run*; if not, the supervisor's `start.ps1` (§4) runs
-`sbx daemon start -d`.
+`sbx daemon start -d` after setting a writable working directory.
 
 *Verify on first run.* Inside the microVM Claude Code may run with bypass;
 `~/.ssh` and cloud credential folders are blocked by default and there is no
