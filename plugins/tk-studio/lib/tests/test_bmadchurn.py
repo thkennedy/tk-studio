@@ -180,8 +180,9 @@ class NormalizeChurnTestCase(unittest.TestCase):
     """End-to-end over a real temp git repo: churn reverted, real kept."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.repo = Path(self._tmp.name)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = Path(tmp.name)
         self._git("init", "-q")
         self._git("config", "core.autocrlf", "false")
         self._git("config", "user.email", "t@t")
@@ -197,9 +198,6 @@ class NormalizeChurnTestCase(unittest.TestCase):
         self.real.write_bytes(b"# skill\r\n")
         self._git("add", "-A")
         self._git("commit", "-q", "-m", "seed")
-
-    def tearDown(self):
-        self._tmp.cleanup()
 
     def _git(self, *args):
         subprocess.run(["git", *args], cwd=str(self.repo), check=True,
@@ -264,35 +262,100 @@ class NormalizeChurnTestCase(unittest.TestCase):
                                   "by_class": {}, "remaining": 0})
 
 
+    def test_failed_checkout_writes_the_batch_back(self):
+        # an IDE's background git can hold index.lock at the wrong moment:
+        # the batch was already unlinked, so its bytes must be put back —
+        # a stop never leaves tracked files deleted from the user's tree
+        self.endings.write_bytes(b"print('hi')\n")
+        self.config.write_bytes(YAML_CHURN)
+        real_git = bmadchurn._git
+
+        def flaky(directory, *args):
+            if "checkout" in args:
+                raise RuntimeError("git checkout failed: Unable to create index.lock")
+            return real_git(directory, *args)
+
+        with mock.patch.object(bmadchurn, "_git", side_effect=flaky):
+            with self.assertRaisesRegex(RuntimeError, "index.lock"):
+                bmadchurn.normalize_churn(self.repo)
+        self.assertEqual(self.endings.read_bytes(), b"print('hi')\n")
+        self.assertEqual(self.config.read_bytes(), YAML_CHURN)
+
+    def test_glob_characters_in_paths_are_literal(self):
+        # `[x].py` is a file name, not a pattern: a glob pathspec would also
+        # match `x.py` and clobber its real change on checkout
+        bracket = self.repo / "_bmad" / "scripts" / "[x].py"
+        plain = self.repo / "_bmad" / "scripts" / "x.py"
+        bracket.write_bytes(b"a = 1\r\n")
+        plain.write_bytes(b"b = 1\r\n")
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "bracketed name")
+        bracket.write_bytes(b"a = 1\n")                           # churn
+        plain.write_bytes(b"b = 2\r\n")                           # real
+
+        result = bmadchurn.normalize_churn(self.repo)
+
+        self.assertEqual(result["by_class"], {"line-endings-only": 1})
+        self.assertEqual(bracket.read_bytes(), b"a = 1\r\n")
+        self.assertEqual(plain.read_bytes(), b"b = 2\r\n")
+
+    def test_status_parsing_handles_renames_and_untracked_files(self):
+        # -z rename records carry the source path as a second NUL field, and
+        # untracked files are listed one by one (a collapsed directory entry
+        # would hide what an install adds inside it)
+        self._git("mv", "_bmad/scripts/tool.py", "_bmad/scripts/renamed.py")
+        extra = self.repo / ".claude" / "skills" / "new"
+        extra.mkdir()
+        (extra / "a.md").write_bytes(b"a\n")
+        (extra / "b.md").write_bytes(b"b\n")
+
+        self.assertEqual(bmadchurn.dirty_paths(self.repo), frozenset({
+            "_bmad/scripts/renamed.py", "_bmad/scripts/tool.py",
+            ".claude/skills/new/a.md", ".claude/skills/new/b.md",
+        }))
+
+
 class UnavailableReasonTestCase(unittest.TestCase):
     """Status paths are repo-root-relative and the churn classes name
-    `_bmad/...` paths: only a project root that IS the git top-level can be
-    normalized; everything else says why, and nothing is touched."""
+    `_bmad/...` paths: only a project root that IS the git top-level, with
+    `_bmad/` tracked, can be normalized; everything else says why, and
+    nothing is touched."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.base = Path(self._tmp.name)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(tmp.name)
         # never let discovery climb out of the sandbox into a real repo
-        self._env = mock.patch.dict(os.environ,
-                                    {"GIT_CEILING_DIRECTORIES": str(self.base)})
-        self._env.start()
+        env = mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": str(self.base)})
+        env.start()
+        self.addCleanup(env.stop)
 
-    def tearDown(self):
-        self._env.stop()
-        self._tmp.cleanup()
-
-    def test_git_top_level_is_normalizable(self):
-        repo = self.base / "repo"
-        repo.mkdir()
-        subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True,
-                       stdin=subprocess.DEVNULL, capture_output=True)
-        self.assertIsNone(bmadchurn.unavailable_reason(repo))
-
-    def test_subdirectory_of_a_repo_is_not(self):
+    def _repo(self, *, track_bmad: bool) -> Path:
         repo = self.base / "repo"
         (repo / "project").mkdir(parents=True)
-        subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True,
-                       stdin=subprocess.DEVNULL, capture_output=True)
+        for args in (["init", "-q"], ["config", "user.email", "t@t"],
+                     ["config", "user.name", "t"]):
+            subprocess.run(["git", *args], cwd=str(repo), check=True,
+                           stdin=subprocess.DEVNULL, capture_output=True)
+        if track_bmad:
+            (repo / "_bmad").mkdir()
+            (repo / "_bmad" / "config.toml").write_bytes(b"[core]\n")
+            for args in (["add", "-A"], ["commit", "-q", "-m", "seed"]):
+                subprocess.run(["git", *args], cwd=str(repo), check=True,
+                               stdin=subprocess.DEVNULL, capture_output=True)
+        return repo
+
+    def test_git_top_level_with_tracked_bmad_is_normalizable(self):
+        self.assertIsNone(bmadchurn.unavailable_reason(self._repo(track_bmad=True)))
+
+    def test_untracked_bmad_is_not(self):
+        # an ignored or never-committed _bmad/ shows nothing in git status:
+        # normalizing would report a no-op no matter what the install wrote
+        self.assertEqual(bmadchurn.unavailable_reason(self._repo(track_bmad=False)),
+                         "_bmad/ is not tracked in git")
+
+    def test_subdirectory_of_a_repo_is_not(self):
+        repo = self._repo(track_bmad=True)
         self.assertEqual(bmadchurn.unavailable_reason(repo / "project"),
                          "project root is not the git top-level")
 
@@ -300,6 +363,10 @@ class UnavailableReasonTestCase(unittest.TestCase):
         plain = self.base / "plain"
         plain.mkdir()
         self.assertEqual(bmadchurn.unavailable_reason(plain), "not a git work tree")
+
+    def test_missing_directory_is_not(self):
+        self.assertEqual(bmadchurn.unavailable_reason(self.base / "not-yet"),
+                         "project root does not exist yet")
 
 
 if __name__ == "__main__":

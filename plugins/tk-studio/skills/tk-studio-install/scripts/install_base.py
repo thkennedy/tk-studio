@@ -102,15 +102,12 @@ def pre_install_snapshot(directory: Path) -> tuple[frozenset[str] | None, str | 
 
 def normalize_after_install(directory: Path, preserve: frozenset[str]) -> dict:
     """Normalize a verified install. A failure here never fails the install
-    (it is verified at pin already); it is reported with the one recovery
-    step, since a stop mid-checkout can leave its batch of files deleted."""
+    (it is verified at pin already). A failed checkout writes its batch back,
+    so the tree stays whole; the error names any file it could not."""
     try:
         result = bmadchurn.normalize_churn(directory, preserve)
     except (RuntimeError, OSError) as exc:
-        return {"error": f"normalization stopped: {str(exc)[:300]}",
-                "recover": "files shown deleted by `git status` were being "
-                           "restored to their committed copy — `git restore` "
-                           "them to finish"}
+        return {"error": f"normalization stopped: {str(exc)[:400]}"}
     if preserve:
         result["preserved"] = len(preserve)
     return result

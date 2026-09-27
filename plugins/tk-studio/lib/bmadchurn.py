@@ -49,22 +49,48 @@ def _norm_eol(data: bytes) -> bytes:
     return data.replace(b"\r\n", b"\n")
 
 
-def _git_show(directory: Path, path: str) -> bytes | None:
-    """The committed bytes of *path* (HEAD blob), or None if not in HEAD."""
+def _head_blobs(directory: Path, paths: list[str]) -> dict[str, bytes | None]:
+    """The committed bytes (HEAD blob) of every path, read through one
+    `git cat-file --batch` process — a `git show` per file is ~1.8k process
+    spawns on a full reinstall. None for a path not in HEAD."""
+    wanted = [p for p in dict.fromkeys(paths) if "\n" not in p]  # batch is line-framed
+    blobs: dict[str, bytes | None] = dict.fromkeys(paths)
+    if not wanted:
+        return blobs
     proc = subprocess.run(
-        ["git", "show", f"HEAD:{path}"], cwd=str(directory),
-        stdin=subprocess.DEVNULL, capture_output=True,
+        ["git", "cat-file", "--batch"], cwd=str(directory),
+        input="".join(f"HEAD:{p}\n" for p in wanted).encode("utf-8"),
+        capture_output=True,
     )
-    return proc.stdout if proc.returncode == 0 else None
+    if proc.returncode != 0:
+        raise RuntimeError("git cat-file --batch failed: "
+                           + proc.stderr.decode("utf-8", "replace").strip()[:300])
+    out, pos = proc.stdout, 0
+    for path in wanted:
+        end = out.index(b"\n", pos)
+        header = out[pos:end].split(b" ")
+        pos = end + 1
+        # "<oid> <type> <size>" is followed by <size> bytes and a newline;
+        # "<spec> missing" / "<spec> ambiguous" carry no content
+        if len(header) == 3 and header[2].isdigit() and header[1] in (
+                b"blob", b"tree", b"commit", b"tag"):
+            size = int(header[2])
+            if header[1] == b"blob":
+                blobs[path] = out[pos:pos + size]
+            pos += size + 1
+    return blobs
 
 
 def unavailable_reason(directory: Path) -> str | None:
     """Why *directory* cannot be normalized, or None when it can. Status
     paths are repo-root-relative and the churn classes name `_bmad/...`
-    paths, so the project root must be the git top-level itself."""
+    paths, so the project root must be the git top-level itself — and
+    `_bmad/` must be tracked, or an empty status would pass for a no-op."""
+    if not Path(directory).is_dir():
+        return "project root does not exist yet"
     try:
         proc = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"], cwd=str(directory),
+            ["git", "rev-parse", "--show-prefix"], cwd=str(directory),
             stdin=subprocess.DEVNULL, capture_output=True,
             encoding="utf-8", errors="replace",
         )
@@ -72,22 +98,44 @@ def unavailable_reason(directory: Path) -> str | None:
         return "git unavailable"
     if proc.returncode != 0:
         return "not a git work tree"
-    if Path(proc.stdout.strip()).resolve() != Path(directory).resolve():
+    if proc.stdout.strip():
         return "project root is not the git top-level"
+    try:
+        tracked = _git(directory, "ls-files", "-z", "--", "_bmad")
+    except RuntimeError:
+        return "not a git work tree"
+    if not tracked:
+        return "_bmad/ is not tracked in git"
     return None
 
 
-def _status_entries(directory: Path) -> list[tuple[str, str]]:
-    """(code, path) for every porcelain -z entry under the churn roots."""
-    status = _git(directory, "status", "--porcelain", "-z", "--", *CHURN_ROOTS)
-    return [(e[:2], e[3:]) for e in status.split("\0") if len(e) > 3]
+def _status_entries(directory: Path) -> list[tuple[str, str, str | None]]:
+    """(code, path, orig) per porcelain -z record under the churn roots. A
+    staged rename/copy carries its source path as the next NUL field (orig);
+    untracked files are listed one by one, never as a collapsed directory."""
+    fields = _git(directory, "status", "--porcelain", "-z", "--untracked-files=all",
+                  "--", *CHURN_ROOTS).split("\0")
+    entries: list[tuple[str, str, str | None]] = []
+    i = 0
+    while i < len(fields):
+        record = fields[i]
+        i += 1
+        if len(record) < 4:
+            continue
+        code, orig = record[:2], None
+        if "R" in code or "C" in code:
+            orig = fields[i] if i < len(fields) else None
+            i += 1
+        entries.append((code, record[3:], orig))
+    return entries
 
 
 def dirty_paths(directory: Path) -> frozenset[str]:
     """Every path under the churn roots that differs from HEAD right now —
     snapshot before an install so normalization never touches what the
     install did not dirty."""
-    return frozenset(path for _, path in _status_entries(directory))
+    return frozenset(p for _, path, orig in _status_entries(directory)
+                     for p in (path, orig) if p)
 
 
 def _values_equal_with_list_coercion(old: object, new: object) -> bool:
@@ -176,10 +224,10 @@ def normalize_churn(directory: Path, preserve: frozenset[str] = frozenset()) -> 
     churn roots. Paths in *preserve* (dirty before the install ran) are never
     touched. Returns {"reverted", "backups_dropped", "by_class", "remaining"}
     — remaining counts the entries still differing from HEAD afterwards,
-    preserved ones excluded. Only single-field ` M`/`??` records are acted on;
-    staged entries, renames, and any other code are left untouched."""
+    preserved ones excluded. Only ` M`/`??` records are acted on; staged
+    entries, renames, and any other code are left untouched."""
     modified, baks = [], []
-    for code, path in _status_entries(directory):
+    for code, path, _ in _status_entries(directory):
         if path in preserve:
             continue
         if code == " M":
@@ -187,39 +235,60 @@ def normalize_churn(directory: Path, preserve: frozenset[str] = frozenset()) -> 
         elif code == "??" and path.endswith(".bak"):
             baks.append(path)
 
+    heads = _head_blobs(directory, modified + [p[:-len(".bak")] for p in baks])
     by_class: dict[str, int] = {}
     reverted: list[str] = []
+    current: dict[str, bytes] = {}
     for path in modified:
         if path == _FILES_MANIFEST:
             continue  # classified last — derivative of the other reverts
-        old = _git_show(directory, path)
+        old = heads.get(path)
         if old is None:
             continue
-        cls = churn_class(path, old, (directory / path).read_bytes())
+        new = (directory / path).read_bytes()
+        cls = churn_class(path, old, new)
         if cls:
             reverted.append(path)
+            current[path] = new
             by_class[cls] = by_class.get(cls, 0) + 1
     if _FILES_MANIFEST in modified:
-        old = _git_show(directory, _FILES_MANIFEST)
-        if old is not None and _files_manifest_derivative(
-            old, (directory / _FILES_MANIFEST).read_bytes(), set(reverted)
-        ):
+        old = heads.get(_FILES_MANIFEST)
+        new = (directory / _FILES_MANIFEST).read_bytes()
+        if old is not None and _files_manifest_derivative(old, new, set(reverted)):
             reverted.append(_FILES_MANIFEST)
+            current[_FILES_MANIFEST] = new
             by_class["files-manifest-derivative"] = 1
 
     # unlink before checkout so git always rewrites the working-tree file —
     # under core.autocrlf a bare checkout can no-op and leave the file
-    # status-dirty (endings-only files are exactly that case). Batch by
-    # batch, so a failing checkout strands at most one batch as deleted.
+    # status-dirty (endings-only files are exactly that case). Pathspecs are
+    # literal (a `[id].md` is a file name, not a glob), and a failed checkout
+    # (index.lock held by an IDE's git, ...) writes its batch's bytes back,
+    # so a stop never leaves tracked files deleted.
     for i in range(0, len(reverted), 50):
         batch = reverted[i:i + 50]
         for path in batch:
             (directory / path).unlink(missing_ok=True)
-        _git(directory, "checkout", "--", *batch)
+        try:
+            _git(directory, "--literal-pathspecs", "checkout", "--", *batch)
+        except RuntimeError as exc:
+            lost = []
+            for path in batch:
+                try:
+                    if not (directory / path).exists():
+                        (directory / path).write_bytes(current[path])
+                except OSError:
+                    lost.append(path)
+            if lost:
+                raise RuntimeError(
+                    f"{exc}; {len(lost)} file(s) could not be written back — "
+                    f"`git restore -- {' '.join(lost[:5])}`"
+                    f"{' ...' if len(lost) > 5 else ''}") from exc
+            raise
 
     dropped = 0
     for path in baks:
-        head = _git_show(directory, path[:-len(".bak")])
+        head = heads.get(path[:-len(".bak")])
         try:
             if head is not None and _norm_eol(head) == _norm_eol((directory / path).read_bytes()):
                 (directory / path).unlink()
@@ -229,6 +298,6 @@ def normalize_churn(directory: Path, preserve: frozenset[str] = frozenset()) -> 
     if dropped:
         by_class["installer-backup-dropped"] = dropped
 
-    remaining = sum(1 for _, p in _status_entries(directory) if p not in preserve)
+    remaining = sum(1 for _, p, _ in _status_entries(directory) if p not in preserve)
     return {"reverted": len(reverted), "backups_dropped": dropped,
             "by_class": by_class, "remaining": remaining}

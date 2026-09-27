@@ -30,8 +30,9 @@ pinned invocation, verifies the result, and measures the outcome.
    output; do not re-run the installer by hand.
 
    Normalization (EP-011 D2, shared with `tk-studio-base-update`) runs only
-   after verify-at-pin passes and only when the project root is a git
-   top-level. It restores files upstream rewrote to something provably
+   after verify-at-pin passes, and only when the project root is a git
+   top-level with `_bmad/` tracked. An untracked or ignored `_bmad/` has no
+   committed tree to be a no-op against. It restores files upstream rewrote to something provably
    equivalent to the committed blob — line endings, list values re-serialized
    as JSON strings, manifest `lastUpdated` stamps, derivative
    `files-manifest.csv` hashes — and drops `*.bak` copies identical to the

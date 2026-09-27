@@ -94,17 +94,18 @@ tool.write_bytes(b"print('hi')\n")
 
 class InstallBaseTestCase(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        base = Path(self._tmp.name)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        base = Path(tmp.name)
         self.repo = base / "project"
         self.repo.mkdir()
         fake = base / "fake_installer.py"
         fake.write_text(f"CONFIG_CHURN = {CONFIG_CHURN!r}\n" + FAKE_INSTALLER,
                         encoding="utf-8")
         self.fake = fake
-        self._env = mock.patch.dict(os.environ,
-                                    {"GIT_CEILING_DIRECTORIES": str(base)})
-        self._env.start()
+        env = mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": str(base)})
+        env.start()
+        self.addCleanup(env.stop)
         self._git("init", "-q")
         self._git("config", "core.autocrlf", "false")
         self._git("config", "user.email", "t@t")
@@ -119,13 +120,9 @@ class InstallBaseTestCase(unittest.TestCase):
         self._git("add", "-A")
         self._git("commit", "-q", "-m", "installed at the pin")
         # never write a real install-outcome event from a test
-        self._emit = mock.patch.object(install_base.ledger, "emit")
-        self.emit = self._emit.start()
-
-    def tearDown(self):
-        self._emit.stop()
-        self._env.stop()
-        self._tmp.cleanup()
+        emit = mock.patch.object(install_base.ledger, "emit")
+        self.emit = emit.start()
+        self.addCleanup(emit.stop)
 
     def _git(self, *args) -> str:
         return subprocess.run(["git", *args], cwd=str(self.repo), check=True,
@@ -214,7 +211,6 @@ class InstallBaseTestCase(unittest.TestCase):
         self.assertEqual(code, 0, result)
         self.assertTrue(result["ok"])
         self.assertIn("git checkout failed", result["normalized"]["error"])
-        self.assertIn("git restore", result["normalized"]["recover"])
         self.assertEqual(self.emit.call_args.args[1]["outcome"], "success")
 
     def test_outside_a_git_top_level_normalization_is_skipped(self):
@@ -243,15 +239,12 @@ class BuildCommandTestCase(unittest.TestCase):
     forces the full update path, the only one that honors --pin)."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.dir = Path(self._tmp.name)
-        self._which = mock.patch.object(install_base.shutil, "which",
-                                        return_value="npx")
-        self._which.start()
-
-    def tearDown(self):
-        self._which.stop()
-        self._tmp.cleanup()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+        which = mock.patch.object(install_base.shutil, "which", return_value="npx")
+        which.start()
+        self.addCleanup(which.stop)
 
     def test_fresh_install_pins_every_external_module(self):
         cmd = install_base.build_command(LOCK, self.dir, list(LOCK["modules"]))
