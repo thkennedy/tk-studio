@@ -24,3 +24,13 @@ vcs: git
 # Per-project job instances (AD-10; Epic 6).
 jobs:
   - research-ecosystem
+
+# Role-keyed working sets (AD-17) — recorded only on explicit
+# confirmation via tk-studio-onboard; one entry per role.
+working_set:
+  developer:
+    - bmm
+    - tea
+    - bmb
+    - bmad-loop
+    - gds
