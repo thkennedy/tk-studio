@@ -6,6 +6,7 @@ set is a needs-onboarding outcome naming the gap — never an invented set.
 """
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -62,16 +63,22 @@ class OrchestrateTestCase(unittest.TestCase):
         self._old_home = os.environ.get("TK_STUDIO_HOME")
         self.store = base / "store"
         os.environ["TK_STUDIO_HOME"] = str(self.store)
+        # hermetic: never read the real ~/.claude.json (assistant profile)
+        self._old_claude = os.environ.get("CLAUDE_CONFIG_DIR")
+        self.claude_dir = base / "claude"
+        os.environ["CLAUDE_CONFIG_DIR"] = str(self.claude_dir)
         self.root = base / "proj"
         self.root.mkdir()
         self.lock = base / "bmad.lock"
         self.lock.write_text(LOCK, encoding="utf-8", newline="\n")
 
     def tearDown(self):
-        if self._old_home is None:
-            os.environ.pop("TK_STUDIO_HOME", None)
-        else:
-            os.environ["TK_STUDIO_HOME"] = self._old_home
+        for key, old in (("TK_STUDIO_HOME", self._old_home),
+                         ("CLAUDE_CONFIG_DIR", self._old_claude)):
+            if old is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old
         self._tmp.cleanup()
 
     def _store_with_role(self, role="developer"):
@@ -194,6 +201,79 @@ class OrchestrateTestCase(unittest.TestCase):
         self.assertEqual(result["outcome"], "needs-onboarding")
         self.assertEqual(result["role_source"], "override")
         self.assertEqual(result["display_name"], "Tim-Senpai")
+
+    # --- address: resolved in the core, not guessed by presentation
+
+    def _claude_profile(self, text):
+        self.claude_dir.mkdir(parents=True, exist_ok=True)
+        (self.claude_dir / ".claude.json").write_text(text, encoding="utf-8")
+
+    def _profile_name(self, name):
+        self._claude_profile(json.dumps(
+            {"oauthAccount": {"displayName": name, "emailAddress": "x@y.z"},
+             "projects": {}}))
+
+    def test_recorded_name_wins_over_assistant_profile(self):
+        self._store_with_display_name(name="Tim")
+        self._profile_name("Profile-Name")
+        result = self._resolve()
+        self.assertEqual((result["address"], result["address_source"]),
+                         ("Tim", "display_name"))
+
+    def test_assistant_preference_resolves_to_profile_name(self):
+        # the recorded fallback choice must yield the name the Claude app
+        # shows, not leave presentation to guess it (the model is never told)
+        self._store_with_display_name(name="assistant-preference")
+        self._profile_name("Tim-Senpai")
+        self._confirmed_set()
+        result = self._resolve()
+        self.assertEqual(result["display_name"], "assistant-preference")
+        self.assertEqual((result["address"], result["address_source"]),
+                         ("Tim-Senpai", "assistant-profile"))
+
+    def test_unset_display_name_also_follows_profile(self):
+        self._store_with_role("developer")
+        self._profile_name("Tim-Senpai")
+        result = self._resolve()
+        self.assertIsNone(result["display_name"])
+        self.assertEqual(result["address"], "Tim-Senpai")
+
+    def test_no_usable_profile_name_addresses_plainly(self):
+        self._store_with_display_name(name="assistant-preference")
+        self._confirmed_set()
+        cases = {
+            "no file": None,
+            "malformed json": "{not json",
+            "not an object": "[1, 2]",
+            "no oauthAccount": json.dumps({"projects": {}}),
+            "oauthAccount not an object": json.dumps({"oauthAccount": "x"}),
+            "no displayName": json.dumps({"oauthAccount": {}}),
+            "non-string": json.dumps({"oauthAccount": {"displayName": 7}}),
+            "blank": json.dumps({"oauthAccount": {"displayName": "  "}}),
+            "multi-line": json.dumps({"oauthAccount": {"displayName": "a\nb"}}),
+        }
+        for label, text in cases.items():
+            with self.subTest(label):
+                path = self.claude_dir / ".claude.json"
+                if text is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    self._claude_profile(text)
+                result = self._resolve()
+                self.assertEqual(result["outcome"], "ready")
+                self.assertIsNone(result["address"])
+                self.assertIsNone(result["address_source"])
+
+    def test_profile_name_is_trimmed(self):
+        self._profile_name("  Tim-Senpai ")
+        self.assertEqual(orchestrate.assistant_display_name(), "Tim-Senpai")
+
+    def test_claude_config_path_follows_claude_config_dir(self):
+        self.assertEqual(orchestrate.claude_global_config_path(),
+                         self.claude_dir / ".claude.json")
+        os.environ.pop("CLAUDE_CONFIG_DIR")
+        self.assertEqual(orchestrate.claude_global_config_path(),
+                         Path.home() / ".claude.json")
 
     # --- AC 1b: role-specific framing from the same door
 

@@ -12,8 +12,9 @@ routes by name — one deterministic pass, no session state, no persona:
                 to its installed skills, stock BMad skills included
 
 Statelessness is literal (AD-9, O5 ruling): resolve() is a pure read of the
-store + project planes and its output carries no timestamps — the same inputs
-produce byte-identical output every call. The council persona shell (ST-5.2)
+store + project planes (plus, for the form of address only, the operator's
+Claude Code account profile) and its output carries no timestamps — the same
+inputs produce byte-identical output every call. The council persona shell (ST-5.2)
 is data layered on top in attended sessions only; headless bypasses it and
 gets identical routing because routing lives here, not in the shell.
 
@@ -34,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -140,6 +142,54 @@ def _resolve_routes(project_root: Path, working_set: list[str],
     return routes, notes
 
 
+# ----------------------------------------------------------------- address
+
+ADDRESS_SOURCE_STORE = "display_name"
+ADDRESS_SOURCE_ASSISTANT = "assistant-profile"
+
+
+def claude_global_config_path() -> Path:
+    """Claude Code's global config: $CLAUDE_CONFIG_DIR/.claude.json when set,
+    else ~/.claude.json (the home directory, not ~/.claude/)."""
+    base = os.environ.get("CLAUDE_CONFIG_DIR")
+    return Path(base) / ".claude.json" if base else Path.home() / ".claude.json"
+
+
+def assistant_display_name(config_path: Path | None = None) -> str | None:
+    """The name the operator's assistant is set to call them: the Claude
+    account profile's display name (what the Claude app shows), cached by
+    Claude Code as oauthAccount.displayName. Only that one field is read.
+
+    The file is externally owned: unreadable, malformed, absent or non-string
+    means None (address plainly), never an error — presentation must not be
+    able to break resolution."""
+    path = config_path or claude_global_config_path()
+    try:
+        name = json.loads(path.read_text(encoding="utf-8"))["oauthAccount"][
+            "displayName"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not isinstance(name, str):
+        return None
+    name = name.strip()
+    if not name or "\n" in name or "\r" in name:
+        return None
+    return name
+
+
+def resolve_address(display_name: str | None,
+                    config_path: Path | None = None
+                    ) -> tuple[str | None, str | None]:
+    """(address, source). A recorded name wins; the recorded
+    "assistant-preference" choice and an unset display_name both follow the
+    operator's assistant profile; with neither, (None, None) — address
+    plainly, unnamed. Never the role."""
+    if display_name and display_name != storelib.DISPLAY_NAME_ASSISTANT:
+        return display_name, ADDRESS_SOURCE_STORE
+    name = assistant_display_name(config_path)
+    return (name, ADDRESS_SOURCE_ASSISTANT) if name else (None, None)
+
+
 def resolve(project_root: Path, role: str | None = None,
             lock_path: Path | None = None) -> dict:
     """One stateless pass: role → working_set.<role> → routes. Pure read."""
@@ -164,6 +214,9 @@ def resolve(project_root: Path, role: str | None = None,
         if not working_set:
             gaps.append(f"working_set.{role}")
 
+    display_name = store_config.get("display_name") or None
+    address, address_source = resolve_address(display_name)
+
     result = {
         "orchestrate_version": ORCHESTRATE_VERSION,
         "project_root": str(root),
@@ -174,7 +227,12 @@ def resolve(project_root: Path, role: str | None = None,
         # assistant name preference and attended flows ask once (store.py
         # set-name); "assistant-preference" → that fallback, chosen — never
         # re-asked. The role is framing, never a form of address.
-        "display_name": store_config.get("display_name") or None,
+        "display_name": display_name,
+        # What presentation actually calls the operator, already resolved:
+        # the recorded name, else the assistant profile's name (source
+        # "assistant-profile"), else null → address plainly, unnamed.
+        "address": address,
+        "address_source": address_source,
         "working_set": working_set,
         "framing": role_framing(role) if role else None,
         "outcome": OUTCOME_NEEDS_ONBOARDING if gaps else OUTCOME_READY,
