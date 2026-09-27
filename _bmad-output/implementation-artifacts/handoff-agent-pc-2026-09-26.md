@@ -1,5 +1,10 @@
 # Handoff — pick up on the agent PC (boundary 2026-09-26)
 
+> **Superseded for machine state by
+> [handoff-agent-pc-2026-09-27.md](handoff-agent-pc-2026-09-27.md)**: the
+> agent PC is provisioned and Phase 0 is done. The plan and rulings below
+> still stand.
+
 Written for a fresh Claude Code session on the dedicated Windows 11 agent PC,
 with nothing but this repo cloned. The main PC's memory notes are not here;
 this file is the handoff.
