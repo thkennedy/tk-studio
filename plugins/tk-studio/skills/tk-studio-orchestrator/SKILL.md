@@ -24,7 +24,10 @@ persona shell (ST-5.2) on top; routing never lives in the shell.
    `display_name` — the operator's chosen form of address from the same
    store: a name, the literal `assistant-preference` (recorded choice to
    follow the operator's own assistant name preference), or null (not yet
-   chosen).
+   chosen) — and `address`, the form of address already resolved from it:
+   the recorded name, else the name the operator's Claude account is set to
+   call them (`address_source: assistant-profile`), else null (address them
+   plainly, unnamed).
 
    **Attended, when `display_name` is null** — this is the last surface
    allowed to leave it unset: ask once how the operator wants the studio to
@@ -71,9 +74,9 @@ persona shell (ST-5.2) on top; routing never lives in the shell.
 ## Report
 
 - **Attended:** who you are (role + source), the framing, then the routes as
-  an offer list; notes verbatim. Address the operator by `display_name`,
-  falling back to the name their own assistant preferences configure —
-  the role names the framing, never the operator.
+  an offer list; notes verbatim. Address the operator by the resolved
+  `address` (null → plainly, unnamed) — the role names the framing, never
+  the operator.
 - **Headless:** act on the routed payload if the invocation named a target;
   end with the status block:
 
