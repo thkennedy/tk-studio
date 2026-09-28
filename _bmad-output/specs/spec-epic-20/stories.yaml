@@ -21,15 +21,15 @@
     explicitly on every subagent launch. Deviations: one `DRIFT: <what> - <why> -
     affects: <keys|none>` line each in the Auto Run Result.
 
-- id: "20-2-contract-0-1-17-names-the-supervisor-and-hermes"
-  title: "Contract 0.1.17 Names the Supervisor and Hermes"
+- id: "20-2-contract-0-1-18-names-the-supervisor-and-hermes"
+  title: "Contract 0.1.18 Names the Supervisor and Hermes"
   description: >-
     I want the contract to name its conformant drivers and say that any of them may
     execute a run, So that the studio supervisor is a first-class consumer while the
     studio itself still grows no UI. Canonical: ST-062.
   invoke_dev_with: >-
     Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 20.2:
-    Contract 0.1.17 Names the Supervisor and Hermes", the authoritative specification
+    Contract 0.1.18 Names the Supervisor and Hermes", the authoritative specification
     (user story and acceptance criteria). Read the epic's own narrative (the paragraphs
     under "## Epic 20:") for scope, rulings and the repo the story targets; transcribe
     the story into the spec's intent contract and never re-derive, generalise or extend

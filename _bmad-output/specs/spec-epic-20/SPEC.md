@@ -20,7 +20,7 @@ A mandate plus a measurement gap (Plan Phase 1 scope item 8, acceptance (d); `br
   - **success:** Given a finish with a cost figure, the `job-run` event payload carries `total_cost_usd` as a non-negative number, `run.json` records the same figure, and there is exactly one emitter and one event per terminal transition.
 - **CAP-2**
   - **intent:** A finish without cost is unchanged.
-  - **success:** Behavior and event are identical to 0.1.16: the field is absent, never zero-filled.
+  - **success:** Behavior and event are identical to 0.1.17: the field is absent, never zero-filled.
 - **CAP-3**
   - **intent:** An invalid cost is refused, not guessed.
   - **success:** A negative, non-numeric, or non-finite cost makes `finish` refuse with a named error; nothing is recorded or emitted.
@@ -28,8 +28,8 @@ A mandate plus a measurement gap (Plan Phase 1 scope item 8, acceptance (d); `br
   - **intent:** The taxonomy declares the cost field.
   - **success:** `contracts/events/taxonomy.v1.json` declares `job-run.payload.total_cost_usd` optional, with a note naming its source (the worker's `--output-format json` result); the lib suite pins the present, absent, and refused cases; full suite green.
 - **CAP-5**
-  - **intent:** The contract at 0.1.17 names its UI-carrying consumers in place of ClaudeOS.
-  - **success:** Header reads 0.1.17 with a changelog clause marking it additive; §7 row 6 names the studio supervisor (status page) and Hermes (front door) as the consumers that carry UI, and still states the studio grows no UI; the Audience line and every other row naming ClaudeOS as the driver are updated.
+  - **intent:** The contract at 0.1.18 names its UI-carrying consumers in place of ClaudeOS.
+  - **success:** Header reads 0.1.18 with a changelog clause marking it additive; §7 row 6 names the studio supervisor (status page) and Hermes (front door) as the consumers that carry UI, and still states the studio grows no UI; the Audience line and every other row naming ClaudeOS as the driver are updated.
 - **CAP-6**
   - **intent:** A driver author can find who drives the studio.
   - **success:** A driver roster lists the studio supervisor (executing wrapper, status page), Hermes (front door that submits jobs to the supervisor and never executes a run), and direct invocation (a conforming driver per §1).
@@ -46,7 +46,7 @@ A mandate plus a measurement gap (Plan Phase 1 scope item 8, acceptance (d); `br
 ## Constraints
 
 - AD-2: nothing in the plugin imports a driver; the contract is the entire interface.
-- Contract bump is additive **0.1.17** — the planned 0.1.16 slot was consumed by the install `no_normalize` change (PR #64).
+- Contract bump is additive **0.1.18** — the planned 0.1.16 slot was consumed by the install `no_normalize` change (PR #64), and 0.1.17 by the studio-managed base patches (#76, 2026-09-28).
 - AD-12: one `job-run` emitter (the job wrapper), one event per terminal transition.
 - AD-3: an invalid cost is refused, never coerced or guessed.
 - The studio grows no UI; UI lives in driver-side consumers.
@@ -60,7 +60,7 @@ A mandate plus a measurement gap (Plan Phase 1 scope item 8, acceptance (d); `br
 
 ## Success signal
 
-- A run finished with a cost lands one `job-run` event and a `run.json` both carrying the same `total_cost_usd`, a run finished without one is byte-identical in shape to 0.1.16, and the released 0.1.17 contract on the agent PC names the supervisor, Hermes, and direct invocation as its drivers with `tk activate` clean.
+- A run finished with a cost lands one `job-run` event and a `run.json` both carrying the same `total_cost_usd`, a run finished without one is byte-identical in shape to 0.1.17, and the released 0.1.18 contract on the agent PC names the supervisor, Hermes, and direct invocation as its drivers with `tk activate` clean.
 
 ## Assumptions
 
