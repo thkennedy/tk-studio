@@ -872,7 +872,9 @@ describe("review pass 2 fixes", () => {
     const env = { TK_SUPERVISOR_DB: join(base, ".TK-Studio", "q.db"), TK_STUDIO_HOME: join(base, ".tk-studio") };
     expect(() => queueDbPath(env, "darwin")).toThrow(QueueDbPlacementRefused);
     expect(() => queueDbPath(env, "win32")).toThrow(/studio store/);
-    expect(queueDbPath(env, "linux")).toBe(join(base, ".TK-Studio", "q.db")); // case-sensitive: a different directory
+    // case-sensitive: a different directory. Only a case-sensitive host can show it:
+    // on win32, node's path.relative itself compares case-insensitively.
+    if (process.platform !== "win32") expect(queueDbPath(env, "linux")).toBe(join(base, ".TK-Studio", "q.db"));
     const root = { TK_SUPERVISOR_DB: join(base, "Studio", "q.db"), TK_STUDIO_HOME: join(base, "s"), TK_STUDIO_ROOT: join(base, "studio") };
     expect(() => queueDbPath(root, "darwin")).toThrow(/TK_STUDIO_ROOT/);
     expect(existsSync(join(base, ".TK-Studio"))).toBe(false);

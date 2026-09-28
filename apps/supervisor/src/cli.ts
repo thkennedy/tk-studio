@@ -73,7 +73,7 @@ import {
   readProjectConfig, registryShow, requireCompatible, resolveStudioRoot, runJobVerb, SbxSandboxMissing, toVmPath, type Tier,
 } from "./server";
 import {
-  canonicalPath, isTerminal, Queue, selfOwner, type Holder, type Owner, type QueueRun, type RecoverReport, type RunState, type StudioEnder,
+  checkoutKey, isTerminal, Queue, selfOwner, type Holder, type Owner, type QueueRun, type RecoverReport, type RunState, type StudioEnder,
   type StudioFinder, type StudioOps,
 } from "./queue";
 import { jobOptions, loadSupervisorConfig, type JobOptions } from "./config";
@@ -227,7 +227,7 @@ function projectIdOf(root: string): string {
 
 /** The run `enqueue` would adopt: this job's `queued`/`running` run on this checkout. */
 function liveRun(queue: Queue, jobId: string, root: string): QueueRun | undefined {
-  const checkout = canonicalPath(root);
+  const checkout = checkoutKey(root);
   return queue.runs().find((r) => r.job_id === jobId && r.checkout === checkout && (r.state === "queued" || r.state === "running"));
 }
 

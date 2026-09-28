@@ -75,7 +75,9 @@ export class RunTerminal extends Error {
   }
 }
 
-/** Absolute, symlink-resolved (as far as the path exists), case-folded on win32. */
+/** Absolute and symlink-resolved (as far as the path exists), in its own case.
+ * Case-insensitive comparison is foldCase's job; folding here would hand callers
+ * a lowercased path on win32 and leak the host's folding into every comparison. */
 export function canonicalPath(p: string): string {
   let head = resolve(p);
   const tail: string[] = [];
@@ -86,14 +88,20 @@ export function canonicalPath(p: string): string {
     head = up;
   }
   try { head = realpathSync(head); } catch { /* keep the resolved head */ }
-  const full = tail.length ? join(head, ...tail) : head;
-  return process.platform === "win32" ? full.toLowerCase() : full;
+  return tail.length ? join(head, ...tail) : head;
 }
 
 /** Case-folded for comparison where the file system is case-insensitive by
  * default (win32, darwin), so `~/.TK-Studio` is still the store. */
 export function foldCase(p: string, platform: NodeJS.Platform = process.platform): string {
   return platform === "win32" || platform === "darwin" ? p.toLowerCase() : p;
+}
+
+/** The identity of a checkout for locks and live-run lookup: canonical and
+ * case-folded where the file system is case-insensitive, so two spellings of
+ * one checkout share one engine lock. */
+export function checkoutKey(p: string, platform: NodeJS.Platform = process.platform): string {
+  return foldCase(canonicalPath(p), platform);
 }
 
 function isInside(child: string, parent: string): boolean {
@@ -405,7 +413,7 @@ export class Queue {
   }
 
   lock(root: string): LockRow | null {
-    return (this.db.query("SELECT * FROM locks WHERE checkout = ?").get(canonicalPath(root)) as LockRow | null) ?? null;
+    return (this.db.query("SELECT * FROM locks WHERE checkout = ?").get(checkoutKey(root)) as LockRow | null) ?? null;
   }
 
   /** The definition a run was driven with (recorded at `verb_started`),
@@ -446,7 +454,7 @@ export class Queue {
     jobId: string; root: string; projectId?: string | null; target?: string | null;
     definition: Record<string, unknown>; owner?: Owner | null; permissionMode?: string | null;
   } & RunOptionsRecord): { run: QueueRun; minted: boolean } {
-    const checkout = canonicalPath(input.root);
+    const checkout = checkoutKey(input.root);
     return this.db.transaction(() => {
       const live = this.db.query(
         "SELECT * FROM runs WHERE job_id = ? AND checkout = ? AND state IN ('queued','running') ORDER BY created LIMIT 1",
