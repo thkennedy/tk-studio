@@ -83,7 +83,8 @@ import {
 } from "./queue";
 import { jobOptions, loadSupervisorConfig, type JobOptions } from "./config";
 import {
-  ensureTranscript, resultCounts, sbxTranscriptExists, transcriptCounts, TranscriptError, transcriptNewCounts, type Counts,
+  ensureTranscript, resultCounts, sbxSessionWorkers, sbxTranscriptExists, transcriptCounts, TranscriptError, transcriptNewCounts,
+  type Counts, type SbxWorkerProbe,
 } from "./transcript";
 
 export interface RunSummary {
@@ -113,6 +114,10 @@ export interface RunSummary {
    * run the backstop `cancel`led: the queue run ends `partial`, the studio holds
    * `cancelled`). `mirror` records and matches `stop.on_status` against it. */
   studio_state?: string;
+  /** Story 21.6: the run ends keeping its checkout lock (the cause: an sbx worker may still
+   * run in the VM); `mirror` ends the queue run with `holdLock`, and the lock is freed only
+   * once the recorded worker's in-VM deadline has passed (`Queue.recordedWorker`). */
+  hold_lock?: string;
 }
 
 /** A tripped guard: the job guard's name (or the tick's `--timeout-cap-s`) and its value. */
@@ -649,7 +654,8 @@ export async function mirror(queue: Queue, queueRunId: string, v: Pick<Validated
     const stop = studioOutcome && Array.isArray(onStatus) && onStatus.includes(studioOutcome.state)
       ? { stop: { condition: "on_status" as const, state: studioOutcome.state, job_id: v.jobId } } : {};
     await queue.endDriven(queueRunId, terminal ? (s.state as "complete") : "blocked", endReason,
-      { ...(engine ? { engineRunId: engine } : {}), ...(Object.keys(detail).length ? { detail } : {}), ...stop });
+      { ...(engine ? { engineRunId: engine } : {}), ...(Object.keys(detail).length ? { detail } : {}), ...stop,
+        ...(s.hold_lock ? { holdLock: s.hold_lock } : {}) });
   } catch (e) {
     reason = `${reason ? `${reason}; ` : ""}queue: ${message(e)}`;
   }
@@ -887,11 +893,28 @@ export const RESUME_CAP = 1;
 export interface TranscriptChecks {
   host(sessionId: string): { restored: boolean };
   sbx(sandbox: string, sessionId: string): Promise<void>;
+  /** sbx: the processes inside the microVM whose command line carries the session id
+   * (a read-only `sbx exec <sb> ps -eo pid=,args=`); a failed check answers `ok: false`. */
+  sbxWorkers(sandbox: string, sessionId: string): Promise<SbxWorkerProbe>;
 }
 const defaultTranscriptChecks: TranscriptChecks = {
   host: (sid) => ensureTranscript(sid),
   sbx: (sb, sid) => sbxTranscriptExists(sb, sid),
+  sbxWorkers: (sb, sid) => sbxSessionWorkers(sb, sid),
 };
+
+export const SBX_VM_WORKER = "sbx worker may still run in the VM";
+/** Story 21.6: before an sbx silent exit is resumed in process — the host `sbx exec`
+ * exiting never proves the in-VM worker ended. A process carrying the session id,
+ * or a failed check (thrown, non-zero, timed out), refuses the resume with
+ * `sbx worker may still run in the VM: <pid(s) | probe failed: detail>`. */
+export async function sbxVmWorkerCause(check: () => Promise<SbxWorkerProbe>): Promise<string | undefined> {
+  let found: SbxWorkerProbe;
+  try { found = await check(); }
+  catch (e) { found = { ok: false, detail: message(e) }; }
+  if (!found.ok) return `${SBX_VM_WORKER}: probe failed: ${found.detail}`;
+  return found.pids.length ? `${SBX_VM_WORKER}: ${found.pids.join(", ")}` : undefined;
+}
 
 /** What a resume check `account`ed: the counts, the message ids, the answer. */
 export interface Accounted { turns: number; tokens: number; message_ids: string[]; within_budget: boolean; exceeded: string[] }
@@ -1138,7 +1161,11 @@ async function settleTakenOver(
  * block, a preflight stop or a wall-clock trip) resumes the session in process
  * (`--resume <session-id>`, the remaining wall clock) when `resumeCheck` passes;
  * otherwise, and after the cap, it ends `partial` naming MISSING_STATUS_BLOCK and the cause
- * (a resume whose record fails never runs: `resume not recorded`). A worker whose
+ * (a resume whose record fails never runs: `resume not recorded`). On sbx a read-only
+ * in-VM process check runs first (`TranscriptChecks.sbxWorkers`): a process carrying the
+ * session id, or a failed check, refuses the resume (`sbx worker may still run in the VM:
+ * …`) and the summary carries `hold_lock` — the queue run ends keeping its checkout lock
+ * until the recorded worker's in-VM deadline. A worker whose
  * record fails is killed and the run ends `blocked` naming `worker record failed`.
  * A resumed iteration accounts only the message ids not already accounted. */
 export async function finishRun(
@@ -1179,6 +1206,8 @@ export async function finishRun(
   let spentS = s.resumeFirst?.spentS ?? 0;
   let timeoutS = s.resumeFirst && sid ? s.resumeFirst.remainingS : guardS;
   let accountedLast = false;
+  // Story 21.6: an sbx worker that may still run in the VM — the run ends keeping its lock.
+  let vmHold: string | undefined;
   const noteAccounted = (a: Accounted) => {
     for (const id of a.message_ids) accountedIds.add(id);
     try { rec?.accounted(a.message_ids, { turns: a.turns, tokens: a.tokens }); } catch { /* the studio already has the counts */ }
@@ -1229,7 +1258,14 @@ export async function finishRun(
         const engineCause = defn?.target?.skill === LAUNCH_SKILL
           ? await launchEngineCause(() => rec?.launchEngine ? rec.launchEngine(root) : probeLaunchEngine(defaultProbes, root))
           : undefined;
-        const verdict: ResumeVerdict = engineCause ? { ok: false, cause: engineCause } : await resumeCheck({
+        // sbx: the host `sbx exec` exiting never proves the in-VM worker ended — a process
+        // carrying the session id (or a failed check) refuses the resume, and the run ends
+        // keeping its checkout lock until the recorded worker's in-VM deadline (`hold_lock`).
+        if (!engineCause && tier === "sbx" && sid) {
+          vmHold = await sbxVmWorkerCause(() => transcripts.sbxWorkers(sandbox ?? "", sid));
+        }
+        const refused = engineCause ?? vmHold;
+        const verdict: ResumeVerdict = refused ? { ok: false, cause: refused } : await resumeCheck({
           root, jobId, studioRunId: runId, sessionId: sid, resumes, tier, sandbox, defn, guardS, jobGuardS: s.jobGuardS, spentS,
           counts: () => iterationNewCounts(out, tier, accountedIds, sid),
         }, verbRunner, transcripts);
@@ -1302,6 +1338,7 @@ export async function finishRun(
   const extras = {
     ...(block ? { status_block: block } : {}), ...(cost !== undefined ? { total_cost_usd: cost } : {}),
     ...(tripped?.length ? { guards_tripped: tripped } : {}), ...(account ? { account } : {}),
+    ...(vmHold ? { hold_lock: vmHold } : {}),
   };
   let finish: Record<string, any>;
   try {

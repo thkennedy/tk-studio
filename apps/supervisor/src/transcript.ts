@@ -27,7 +27,9 @@
  * §6's `claude-projects` folder: exactly one `<slug>/<session_id>.jsonl`, copied
  * with its `<session_id>/subagents/` into the same slug directory); on sbx its
  * existence is asked inside the microVM (`sbx exec <sb> find …`, argv only) —
- * the host backup never covers the VM.
+ * the host backup never covers the VM. Before an sbx silent exit is resumed, a
+ * read-only `sbx exec <sb> ps -eo pid=,args=` (argv only, filtered on the host)
+ * asks whether a process carrying the session id still runs in the VM.
  */
 import { cpSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -217,6 +219,35 @@ export async function sbxTranscriptExists(sandbox: string, sessionId: string, ru
   catch (e) { throw missing(`find failed: ${e instanceof Error ? e.message : e}`); }
   const hits = res.stdout.split(/\r?\n/).filter((l) => l.trim().endsWith(`/${sessionId}.jsonl`));
   if (res.exit !== 0 || hits.length === 0) throw missing("not found inside the microVM (the host backup never covers it)");
+}
+
+/** What the in-VM process check found: the pids of processes whose command
+ * line carries the session id (empty: none), or a failed check (counted live). */
+export type SbxWorkerProbe = { ok: true; pids: string[] } | { ok: false; detail: string };
+
+/** The argv of the in-VM process check: `sbx exec <sb> ps -eo pid=,args=` — read-only, no shell, no signal. */
+export function sbxWorkerArgv(sandbox: string): string[] {
+  return ["exec", sandbox, "ps", "-eo", "pid=,args="];
+}
+
+/** Host-side filter over `ps -eo pid=,args=` output: the pids of the lines carrying `sessionId`. */
+export function sessionWorkerPids(psOut: string, sessionId: string): string[] {
+  if (!sessionId) return [];
+  return psOut.split(/\r?\n/).filter((l) => l.includes(sessionId))
+    .map((l) => l.trim().split(/\s+/)[0] ?? "").filter((p) => p !== "");
+}
+
+/** Story 21.6: may a worker on `sessionId` still run inside the microVM? On sbx the host
+ * `sbx exec` exiting never proves the in-VM worker ended. One bounded read-only
+ * `ps` inside the VM, filtered on the host for the session id. A non-zero exit, a
+ * spawn failure or a timeout is a failed check (`ok: false`), which callers count live. */
+export async function sbxSessionWorkers(sandbox: string, sessionId: string, run: ExecRunner = execRunner): Promise<SbxWorkerProbe> {
+  if (!sessionId || /\s/.test(sessionId)) return { ok: false, detail: "not a plain session id" };
+  let res: RunResult;
+  try { res = await run(sbxBin(), sbxWorkerArgv(sandbox), 60); }
+  catch (e) { return { ok: false, detail: (e instanceof Error ? e.message : String(e)).slice(0, 300) }; }
+  if (res.exit !== 0) return { ok: false, detail: `ps exited ${res.exit}${res.stderr.trim() ? `: ${res.stderr.trim().slice(0, 300)}` : ""}` };
+  return { ok: true, pids: sessionWorkerPids(res.stdout, sessionId) };
 }
 
 /** The sbx counts: the worker result's `num_turns` and `usage` (same token sum). */

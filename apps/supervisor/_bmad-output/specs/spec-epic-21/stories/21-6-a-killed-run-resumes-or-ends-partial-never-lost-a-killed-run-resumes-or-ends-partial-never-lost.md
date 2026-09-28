@@ -2,7 +2,7 @@
 title: 'A Killed Run Resumes or Ends Partial, Never Lost'
 type: 'feature'
 created: '2026-09-28'
-status: 'done'
+status: 'blocked'
 review_loop_iteration: 0
 followup_review_recommended: true
 context: []
@@ -141,6 +141,19 @@ User story (epics.md, Story 21.6): As the operator, I want a run interrupted by 
   - `[low]` `[patch]` the migration test skipped `worker_guard_s` (blind-hunter) — present, INTEGER, null on a migrated row
   - `[low]` `[patch]` four `test/guards.test.ts` titles said `blocked` while asserting `partial` (blind-hunter) — retitled
 
+### 2026-09-28 — Review pass (follow-up 2)
+- both layers ran (band L): blind-hunter, edge-case-hunter; the diff (239 KB, spec excluded) was handed to both as a file path, not inline
+- intent_gap: 0
+- bad_spec: 0
+- patch: 4 (high 1, medium 2, low 1)
+- defer: 0
+- reject: 2 (medium 1, low 1) — `run <job>` drives its own resumed run, then mints and answers a fresh one (both layers): no criterion names `run`'s answer, pre-story `run` already recovered then minted, and the resumed run's outcome is recorded on its queue run; `recover` answers `ok: true` when a resumed run it drove ended `blocked` (blind-hunter): `recover`'s `ok` means the recovery ran, and its JSON carries each resumed run's summary
+- addressed_findings:
+  - `[high]` `[patch]` an sbx silent exit was resumed in-process as soon as the host `sbx exec` exited, so a host-side drop could start a second in-VM worker on the same session (blind-hunter) — a read-only in-VM `ps -eo pid=,args=` check filtered host-side for the session id runs before `resumeCheck`; found or failed → `partial` `MISSING_STATUS_BLOCK; sbx worker may still run in the VM: …`, the lock kept until the in-VM deadline and freed by `claim`/`recover` (consult 5)
+  - `[medium]` `[patch]` `recover` called `ops.end` on a stale candidate, so it could finish the studio run another recoverer had just taken over and resumed (both layers) — `stillOrphan` re-checks after each await, and a `recovering` mark (owner = self) in one transaction before `ops.end`
+  - `[medium]` `[patch]` `groupAlive` counted a zombie-only process group as live, so a run and its lock could be held forever under a non-reaping PID 1 (blind-hunter) — Linux `/proc` scan for a non-zombie member of the group; a failed scan keeps `alive`
+  - `[low]` `[patch]` a worker exiting between the probe and the kill (ESRCH) answered `kill failed` and held the run (edge-case-hunter) — re-probe after a failed kill; gone → `not running`
+
 ## Design Notes
 
 - Anticipated DRIFTs (record if taken): the missing-block outcome changes from `blocked` to `partial` after a resume attempt (21-1/21-5 pins; score 2, affects none); resume driving placed in the caller rather than inside `Queue.recover` (score 2, affects 22-x only if the API reuses `recover`).
@@ -218,70 +231,77 @@ DEVIATION SCORE: 2 (both carry out review-sent patches and change a type shape: 
 DRIFT: `RunRecorder` gains optional `launchEngine(root)`; `queue.ts` exports `probeLaunchEngine`/`LaunchEngine` beside public `Queue.launchEngineAt` — `finishRun` holds only the recorder and needs a fallback probe without one (consult 4 H1) — affects: none
 DRIFT: resume verdicts carry optional `accountAttempted`, and `accounted` is optional on `ResumeVerdict`; `Started` gains optional `accountedIds` — the post-loop block must tell an attempted `account` from none, an unguarded job accounts nothing (consult 4 H2), and the restart's accounted ids must reach `finishRun` — affects: none
 
+### pass 4 (2026-09-28, implementer, follow-up review 2 patches)
+
+DEVIATION SCORE: 2 (patch 1 pre-approved by consult 5; the others carry out review-sent patches and change an event/report shape, scored by the consult 3 rule candidate, no new consult)
+
+DRIFT: `TranscriptChecks` gains a required `sbxWorkers` dep, `RunSummary` gains `hold_lock`, `Queue.end`/`endDriven` gain `holdLock`, `RecoverReport` gains `released[]`; an sbx AC2 refusal ends the run while keeping its lock, freed by `claim`/`recover` at the in-VM deadline — consult 5 — affects: 22-x
+DRIFT: `recover` writes a `recovering` event (owner = self) before `ops.end`, and a `lock-released` event when an ended run's kept lock is freed; the e2e event-list assertion in `test/command-line.test.ts` updated — the patch-2 mark and the patch-1 release — affects: 22-x (event consumers)
+DRIFT: the in-VM worker check runs on every sbx silent exit with a session id, including the second, so a found worker is named instead of `resume cap reached (1)` — the ruling's "before `resumeCheck`" order — affects: none
+
 ## Consult Log
 
 - 2026-09-28T20:40:55Z — trigger: deviation-gt-0 — question: accept the 12 pass-1 deviations (resume driving in cli.ts, silent exits → partial with MISSING_STATUS_BLOCK, the "held" rule, wall-clock/sbx accounting fallbacks, RecoverReport/events shape)? — ruling: accept-deviation score 2 — do: (1) accept all 12 DRIFTs, diff and gate unchanged; (2) add to narrowed DW-3's "What remains" that a `held` run keeps its lock until its recorded pid dies, and where `processStartTime` returns null (not linux/win32) a reused pid can hold the run indefinitely, shown only in `held[]`; (3) record the ruling in Deviation Summary — rule candidate: When a story's Design Notes or plan Risks name a DRIFT in advance with a score, taking it with that score and stated affects needs no consult, provided the named-failure token survives in the reason.
 - 2026-09-28T20:45:30Z — trigger: high-severity-finding (review pass 1) — question: (H1) an sbx restart kills only the host `sbx exec`, so a resume starts a second worker beside the live VM worker — hold until the in-VM deadline (a), `pkill -f <uuid>` in the VM (b), `sbx stop` (c), or record the in-VM pid (d)? (H2) `Queue.claim` releases a dead-owner running holder's lock without checking its recorded worker — fix here or defer? — ruling: accept-deviation score 2 — do: (1) H1 reading (a): hold an sbx run until recorded spawn + guard seconds passed to that spawn + 10 s grace, keyed on that deadline and not on host pid liveness, with the guard seconds recorded on the worker record; after it, end `partial` naming `max_wall_clock_seconds`; reject (b)(c)(d); (2) apply the claim fix: a dead-owner running holder is live while its recorded worker may still run (pid alive with matching or unreadable start, or sbx deadline not passed); unit tests for both in test/resume.test.ts; (3) DRIFT "an sbx run interrupted mid-invoke is held until its in-VM deadline, then ends partial naming the wall-clock guard, never resumed on restart; claim treats a dead-owner holder with a possibly live worker as live" score 2 affects 22-x; narrow DW-3 to match — rule candidate: Any code path that frees a checkout lock must first pass the same "recorded worker may still run" predicate; for sbx that predicate is the in-VM deadline (spawn + guard + kill grace), never host pid liveness.
 - 2026-09-28T21:00:05Z — trigger: deviation-gt-0 (review-patch pass 2) — question: accept the six pass-2 deviations (account after takeover, WorkerKill/Probes shape, sbx no-worker end, worker-record failure blocked, deadline from the worker event, after-wake kill on the 2nd auth call)? — ruling: accept-deviation score 2 — do: (1) accept all six, diff and gate unchanged; (2) add the combined DRIFT line (affects 22-x) to the Deviation Summary; (3) mark the pass-1 "sbx accounts 0/0" DRIFT superseded without deleting it — rule candidate: A deviation that only carries out a review-sent patch, keeps every spec-named reason token and states its affects needs no consult: DRIFT score 2 if it changes a report/event/type shape, otherwise 1.
 - 2026-09-28T21:38:20Z — trigger: high-severity-finding (follow-up review pass) — question: (H1) a `tk-studio-launch` run can be resumed (restart or in-process AC2) beside its live detached engine — probe the engine before resuming (a) or never resume a launch run (b)? (H2) `resumeBudget` runs counts + `account` for jobs with no `max_turns`/`max_tokens`, so an sbx silent exit with no JSON result is refused as `guard: account failed` — skip account when unguarded? — ruling: apply — do: (1) H1 reading (a): before any resume of a LAUNCH_SKILL run, probe the launch engine outside any transaction in `restartResumer` and in `finishRun`'s AC2 branch (public wrapper over `Queue.launchEngine` or the `Probes.engineLive` dep); live or unverified refuses the resume naming it (`launch engine live: <id>` / `launch engine unverified: <detail>`) and the existing end paths hand the lock to the engine; an empty `live[]` continues the AC1/AC2 checks; reject (b); a test per layer and one README clause; (2) H2: in `resumeBudget`, when `!hasTurnTokenGuard(i.defn)` skip `i.counts()` and `account` entirely (no `accounted`, no event, no noteAccounted), remaining = `guardS − spentS`; a guarded job with unavailable counts keeps refusing with the existing cause; never account zero; (3) pin both with tests: an unguarded sbx silent exit resumes, a guarded one ends partial naming `account failed` — rule candidate: any path that resumes, re-drives or frees the lock of a `tk-studio-launch` run passes the launch-orphan engine probe first (live or unverified = no resume or release), and studio `account` is called only when `hasTurnTokenGuard(defn)` holds, on every path (observation recorded)
+- 2026-09-28T21:54:53Z — trigger: high-severity-finding (follow-up review pass 3) — question: an sbx silent exit is resumed in-process as soon as the host `sbx exec` exits (src/cli.ts:1223), so a host-side sbx drop can start a second in-VM worker on the same session beside a live one — fix by exit code (a), a read-only VM process check (b), reject as out of AC2 scope (c), or escalate (d)? — ruling: apply — do: (1) for `tier === "sbx"`, after the launch-engine probe and before `resumeCheck`, run `sbx exec <sb> ps -eo pid=,args=` (argv only, no shell, no signal, an injectable dep beside `TranscriptChecks.sbx`) and filter host-side for the session id; a line carrying it, or a failed check, refuses the resume with cause `sbx worker may still run in the VM: <pid | probe failed: detail>`; reject (a), (c) and a pattern kill; (2) on that refusal end the run `partial` `MISSING_STATUS_BLOCK; <cause>` without freeing the checkout lock — it is freed only through `Queue.recordedWorker`'s in-VM deadline (spawn + guard + 10 s), as consult 2 does on restart; (3) keep consult 4's pinned test by injecting a check that finds no worker, add a found-worker test and a failed-check test, and record a DRIFT score 2 (dep/type shape), affects 22-x — rule candidate: On sbx the host `sbx exec` exit never proves the in-VM worker ended; any path that starts another worker on a recorded sbx session or frees its lock needs the in-VM deadline passed or a read-only VM process check showing no process carrying the session id (a failed check counts as live)
+- 2026-09-28T22:10:36Z — trigger: verify-red (follow-up review pass 3, after the patch pass) — question: `bun test` 423 pass / 3 fail, all `test/guards.test.ts:463-497` (21-5 supervisor-signal tests); they fail identically on untouched worktrees of HEAD 7ee5dd8 and of baseline 92208cf, pass when the scenario is run by hand outside `bun test` — accept as pre-existing and finish `done` (a), HALT blocked (b), relaunch to fix 21-5's signal path (c), or escalate (d)? — ruling: escalate — do: (1) HALT `blocked` naming `verify gate red: test/guards.test.ts:463-497 signal tests (21-5 feature, src/server.ts:195-245) fail in this environment, also at baseline 92208cf; not a 21-6 regression`; (2) keep the patch pass as it is, record `bun test` 423 pass / 3 fail verbatim with the evidence under Verification, do not change src/server.ts's signal path or that test; (3) ask the operator to re-run `bun test` on a clean host — green there, the operator may mark 21-6 `done` without relaunching — rule candidate: When the verify gate is red only on tests that also fail on an untouched worktree of the story baseline and sit outside the story's plan Files scope, the session HALTs `blocked` with reason prefix `verify gate red (pre-existing at baseline <sha>)` and does not consult
 
 ## Auto Run Result
 
-Status: done
+Status: blocked
+Blocking condition: verify gate red: test/guards.test.ts:463-497 signal tests (21-5 feature, src/server.ts:195-245) fail in this environment, also at baseline 92208cf; not a 21-6 regression (consult 6 ruled `escalate`: a consult cannot waive the gate)
 
 Studio: activated as developer; working set bmm, tea, bmad-loop; drift clean; routing implementer=claude-opus-5-5 reviewers=claude-opus-5-5 consult=claude-opus-5-5; knowledge spine absent
 
-**Summary.** This was a follow-up review pass on a story already marked `done`. With the fixes below, a killed run resumes or ends `partial` with the cause named; it is never lost.
-- **Recording:** before the worker spawns, the supervisor records the pre-minted `--session-id`, the wake answer, and the worker's pid/group, start time and guard seconds.
-- **AC1:** `recover` kills a dead owner's recorded worker (pid + start time), takes the run over under the held lock, and resumes it with `claude -p --resume <sid>` on the stored tier. Otherwise the run ends `partial` naming the guard or `supervisor restart`.
-- **AC2:** a silent exit resumes once in-process. A second failure ends `partial`, and the reason keeps `MISSING_STATUS_BLOCK`.
-- **AC3:** a missing host transcript is restored from `TK_SUPERVISOR_TRANSCRIPT_BACKUP`. With no copy, the run ends `partial` naming `transcript missing: <sid>`.
-- **AC4:** e2e tests kill the supervisor after `wake`, mid-invoke and before `finish`.
-- **This pass:** a `tk-studio-launch` run is resumed only when its engine probe shows none live. Studio `account` runs only for jobs with `max_turns`/`max_tokens`. A failed resume-check `account` is not retried. The restart's accounted ids are carried into the resumed iteration.
+**Summary.** This was the second follow-up review of a story already marked `done`. Both review layers ran. Four patches were applied and are left uncommitted in the working tree, as consult 6 directed ("keep the patch pass as it is"):
+- An sbx silent exit now resumes only when a read-only in-VM check finds no process carrying the session id. Otherwise the run ends `partial` naming it, and the lock is kept until the in-VM deadline.
+- `recover` no longer ends a studio run that another recoverer took over. It re-checks after every await and marks the run as its own before `ops.end`.
+- A process group whose only members are zombies no longer counts as live.
+- A worker that exits between the probe and the kill no longer answers `kill failed`.
 
-**Files changed** (since baseline 92208cf7acc4e5ba6546aca234fef01992e9c546):
-- `src/queue.ts`: run columns and events; the resume takeover; the held rule and the recorded-worker kill/probe shared by `recover` and `claim`; restart ends carry the stop. This pass: `probeLaunchEngine`, `Queue.launchEngineAt`.
-- `src/cli.ts`: records the session, worker and wake answer; resume eligibility, budget and driver; the AC2 silent-exit resume. This pass: the launch-engine probe before either resume path; `account` only for turn/token-guarded jobs; `accountAttempted`; `Started.accountedIds`.
-- `src/server.ts`: `--session-id`/`--resume`, the continuation prompt, the `beforeSpawn`/`onSpawn` hooks.
-- `src/transcript.ts`: new-message counts, the backup restore, the sbx existence check.
-- `test/resume.test.ts`: the I/O matrix, the kill/hold/claim rules. This pass adds launch-engine (restart and in-process), unguarded/guarded sbx silent exit, single `account` attempt, and no restart re-count.
-- `test/command-line.test.ts`: the fake worker's new flags and the AC4 kill points.
-- `test/queue.test.ts`: the column migration (now including `worker_guard_s`), the takeover keeping the lock, the orphan stop.
-- `test/guards.test.ts`: assertions (missing block → resume or `partial`); four titles corrected this pass.
-- `README.md`: the restart/resume rule, the backup variable, the resume cap, the sbx hold. This pass: the launch-engine clause, `account` only when guarded, the account→event kill window.
-- `_bmad-output/implementation-artifacts/deferred-work.md`: changed in the earlier pass only; untouched in this pass.
+**Files changed in this pass** (uncommitted):
+- `src/queue.ts`: `stillOrphan` re-checks and the `recovering` mark; `holdLock` on end paths; `releaseKeptLocks`; `claimProbes` covers ended holders; zombie-aware `groupAlive`; re-probe after a failed kill.
+- `src/cli.ts`: the `sbxWorkers` dep and `sbxVmWorkerCause`; the in-VM worker check in `finishRun`'s AC2 branch; `hold_lock` passed through `mirror`.
+- `src/transcript.ts`: `sbxWorkerArgv`, `sessionWorkerPids`, `sbxSessionWorkers`.
+- `test/resume.test.ts`: tests for the VM worker found / check failed / host never asks, the two recover race orderings plus a dead recoverer after its mark, the zombie group parser and predicate, and the kill races.
+- `test/command-line.test.ts`: `recovering` added to the pinned event list (assertion only).
+- `README.md`: one clause on the sbx in-VM worker check.
+- The deferred-work ledger was not touched.
 
-**Review findings** (this pass: both layers ran, band L):
-- Patches applied: 6 (high 2, medium 2, low 2).
+**Review findings** (this pass):
+- Patches applied: 4 (high 1, medium 2, low 1).
 - Deferred: 0.
-- Rejected: 5.
-- Consults: 1 (high-severity-finding, ruling `apply`).
-- Follow-up review recommended: **true**. Two high findings were patched (score 3×2 + 1×2 = 8).
+- Rejected: 2.
+- Consults: 2. Consult 5 (high-severity-finding) ruled `apply`; consult 6 (verify-red) ruled `escalate`.
+- Follow-up review recommended: **true**. One high finding was patched; the score is 3×2 + 1×1 = 7.
 
 **Verification** (re-run by this session after the patches):
 - `bun install --frozen-lockfile`: no changes.
-- `bun test` (with `TK_STUDIO_ROOT` set): 413 pass, 0 fail, 1582 expect() calls, across 9 files.
+- `bun test` with `TK_STUDIO_ROOT` set: **423 pass, 3 fail**, 1657 expect() calls, 426 tests across 9 files. The three failures are `test/guards.test.ts` "a signal to the supervisor kills its detached children's groups, then it exits as before" > SIGTERM / SIGHUP / SIGINT, at `expect(survivors).toEqual([])` (:494). The child and grandchild are still alive and are not zombies.
+- Evidence that this predates 21-6:
+  - On an untouched worktree of HEAD 7ee5dd8 the same tests fail 3/3, twice.
+  - On an untouched worktree of baseline 92208cf (story 21-5's commit) they fail 2/3.
+  - The same scenario passes when run by hand outside `bun test`: the child and grandchild are killed and the supervisor exits 15.
+  - They still fail with a cleared signal mask.
+  - Environment: bun 1.4.2, PID 1 is `tini`.
+  - Earlier passes recorded 413 pass / 0 fail.
 - `bunx tsc --noEmit`: clean.
 - Machine-path `git grep` over `src`, `test`, `package.json` and `README.md`: nothing.
 - `git diff --stat 92208cf… -- package.json bun.lock`: empty.
 
-**unverifiable-here** (operator, agent PC):
-- A live `claude -p --session-id <uuid>` followed by `claude -p --resume <uuid>` should keep the same id.
-- win32: kill the console-hosted supervisor mid-run and restart it. The run should resume (`--resume` on the worker's command line) or end `partial`, and `Get-Process claude` should show nothing left from the old worker.
-- Delete a finished session's `.jsonl` under `%USERPROFILE%\.claude\projects`, then force a resume. The file should be restored from `<DEST>\claude-projects`.
+**Operator action:** re-run `TK_STUDIO_ROOT=<studio root> bun test` on a clean host. If it is green there, 21-6 can be marked `done` and this pass's changes committed, with nothing to relaunch (consult 6).
+
+**unverifiable-here** (operator, agent PC): unchanged from the earlier passes. These are a live `--session-id`/`--resume` id check, the win32 kill-and-restart check, and the backup restore from `<DEST>\claude-projects`.
 
 **Residual risks:**
-- The few milliseconds between the spawn and the worker record.
-- A `jobrun.py` verb in flight when the supervisor dies is never recorded or killed.
-- A supervisor killed between the `account` verb and the `accounted` event can re-count those ids on restart (named in the README).
-- A held run on a platform without readable start times can wait indefinitely (DW-3).
-- sbx microVM start lag beyond the 10 s grace.
-- An sbx run killed mid-invoke never resumes on restart.
-- A guarded sbx silent exit with no result counts never resumes (`account failed`).
-- The tick log does not report resumed or held runs.
-- The win32 paths are not exercised here (DW-5).
-- One more test title in `test/guards.test.ts` (~614) may still read `blocked`; it was left untouched.
+- An sbx silent exit with no session id skips the in-VM check.
+- A launch run refused by the in-VM check keeps its lock until the deadline, then hands over to the engine at the next claim.
+- `Queue.pacing()` does not treat an ended run that keeps its lock as live, so the pacer may start the next run, which then waits on the lock.
+- A recoverer that dies after its `recovering` mark but before `ops.end` finishes can leave the studio run resumable, and the next `recover` may resume it.
+- The residual risks from the earlier passes still stand. These are the spawn→record window, a `jobrun.py` verb in flight, the account→event window, held runs where start times cannot be read, sbx microVM start lag, the tick log not showing resumed runs, and the win32 paths (DW-5).
 
-DRIFT: `RunRecorder` gains optional `launchEngine(root)`; `queue.ts` exports `probeLaunchEngine`/`LaunchEngine` beside public `Queue.launchEngineAt` — `finishRun` holds only the recorder and needs a fallback probe — affects: none
-DRIFT: resume verdicts carry optional `accountAttempted`, `accounted` optional on `ResumeVerdict`, `Started.accountedIds` optional — needed to skip a second `account`, to account nothing for unguarded jobs, and to carry restart-accounted ids — affects: none
-(Earlier passes' DRIFT lines are kept under `## Deviation Summary`, passes 1–2.)
+DRIFT: `TranscriptChecks` gains a required `sbxWorkers` dep, `RunSummary` gains `hold_lock`, `Queue.end`/`endDriven` gain `holdLock`, `RecoverReport` gains `released[]`; an sbx AC2 refusal ends the run while keeping its lock, freed by `claim`/`recover` at the in-VM deadline — consult 5 — affects: 22-x
+DRIFT: `recover` writes a `recovering` event before `ops.end`, and a `lock-released` event when a kept lock is freed; the e2e event-list assertion was updated — the recover race mark and the kept-lock release — affects: 22-x (event consumers)
+DRIFT: the in-VM worker check runs on every sbx silent exit with a session id, including the second, so a found worker is named instead of `resume cap reached (1)` — the ruling's check order — affects: none

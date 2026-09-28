@@ -46,7 +46,7 @@
 import { Database } from "bun:sqlite";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pluginRoot } from "./env";
@@ -273,18 +273,74 @@ function pidRunning(pid: number): boolean {
   } catch { return false; }
 }
 
-/** POSIX: is any member of process group `pgid` alive (`kill(-pgid, 0)`)? A pgid
- * stays reserved while any member exists, so a live group is still the recorded one. */
-function groupAlive(pgid: number): boolean {
-  try { process.kill(-pgid, 0); return true; }
-  catch (e) { return (e as NodeJS.ErrnoException)?.code === "EPERM"; }
+/** One `/proc/<pid>/stat` line: its state (field 3) and process group (field 5), read
+ * from after the last ')' (field 2, comm, may hold spaces and parens); null when unparsable. */
+export function parseStatGroup(stat: string): { state: string; pgrp: number } | null {
+  const close = stat.lastIndexOf(")");
+  if (close < 0) return null;
+  const rest = stat.slice(close + 2).trim().split(/\s+/); // rest[0] is field 3
+  const pgrp = Number(rest[2]);
+  return rest[0] && Number.isInteger(pgrp) ? { state: rest[0], pgrp } : null;
+}
+
+/** Reads `/proc` for `linuxGroupHasLiveMember` (injectable in tests). */
+export interface ProcReader {
+  /** The entries of `/proc` (throws when unreadable). */
+  list(): string[];
+  /** `/proc/<pid>/stat`; null when the process is gone (ENOENT/ESRCH); throws on any other failure. */
+  stat(pid: string): string | null;
+}
+const procReader: ProcReader = {
+  list: () => readdirSync("/proc"),
+  stat: (pid) => {
+    try { return readFileSync(`/proc/${pid}/stat`, "utf-8"); }
+    catch (e) {
+      const code = (e as NodeJS.ErrnoException)?.code;
+      if (code === "ENOENT" || code === "ESRCH") return null;
+      throw e;
+    }
+  },
+};
+
+/** Linux: does process group `pgid` have a member that is not a zombie? A scan of
+ * `/proc/<pid>/stat` for pgrp (field 5) == pgid and state (field 3) != 'Z'. null when
+ * the scan failed (an unreadable `/proc`, an unreadable or unparsable stat of a live
+ * entry): the caller then keeps `kill(-pgid, 0)`'s answer (fail toward alive). */
+export function linuxGroupHasLiveMember(pgid: number, proc: ProcReader = procReader): boolean | null {
+  let entries: string[];
+  try { entries = proc.list(); } catch { return null; }
+  let failed = false;
+  for (const name of entries) {
+    if (!/^\d+$/.test(name)) continue;
+    let stat: string | null;
+    try { stat = proc.stat(name); } catch { failed = true; continue; }
+    if (stat === null) continue; // exited since the listing
+    const parsed = parseStatGroup(stat);
+    if (!parsed) { failed = true; continue; }
+    if (parsed.pgrp === pgid && parsed.state !== "Z") return true;
+  }
+  return failed ? null : false;
+}
+
+/** POSIX: is any member of process group `pgid` alive? `kill(-pgid, 0)` first (a pgid
+ * stays reserved while any member exists, so a live group is still the recorded one);
+ * on Linux a group whose only members are unreaped zombies (e.g. reparented to a PID 1
+ * that never reaps) is not alive — a `/proc` scan decides, and a failed scan keeps
+ * `kill`'s answer (alive). Other POSIX platforms: `kill(-pgid, 0)` alone. */
+export function groupAlive(pgid: number, platform: NodeJS.Platform = process.platform, proc: ProcReader = procReader,
+  signal: (pid: number, sig: 0) => void = (pid, sig) => { process.kill(pid, sig); }): boolean {
+  try { signal(-pgid, 0); }
+  catch (e) { if ((e as NodeJS.ErrnoException)?.code !== "EPERM") return false; }
+  if (platform !== "linux") return true;
+  return linuxGroupHasLiveMember(pgid, proc) ?? true;
 }
 
 export interface KillDeps {
   platform?: NodeJS.Platform;
   startTime?: (pid: number) => string | null;
   running?: (pid: number) => boolean;
-  /** POSIX: is the process group `pgid` alive (default `kill(-pgid, 0)`)? Never asked on win32. */
+  /** POSIX: is the process group `pgid` alive (default `groupAlive`: `kill(-pgid, 0)`, and on
+   * Linux a member that is not a zombie)? Never asked on win32. */
   groupAlive?: (pgid: number) => boolean;
   /** POSIX: signal the process group; win32: `taskkill /F /T /PID`. Throws on failure. */
   kill?: (pid: number, platform: NodeJS.Platform) => void;
@@ -311,7 +367,7 @@ export function probeRecordedWorker(pid: number, start: string | null, deps: Kil
   const startTime = deps.startTime ?? ((p: number) => processStartTime(p, platform));
   if (!Number.isInteger(pid) || pid <= 0) return { pid, start, outcome: "not running" };
   if (!running(pid)) {
-    if (platform !== "win32" && (deps.groupAlive ?? groupAlive)(pid)) {
+    if (platform !== "win32" && (deps.groupAlive ?? ((g: number) => groupAlive(g, platform)))(pid)) {
       return { pid, start, outcome: "group alive", detail: `leader ${pid} exited; members of its process group still run` };
     }
     return { pid, start, outcome: "not running" };
@@ -328,18 +384,24 @@ export function probeRecordedWorker(pid: number, start: string | null, deps: Kil
  * SIGKILL to its process group — also when the leader has exited but the group
  * still has members (a pgid stays reserved while any member exists); win32:
  * `taskkill /F /T /PID`. Never by name. Still running after the bounded wait
- * → `kill failed` (`still running after wait`), so the run is held. */
+ * → `kill failed` (`still running after wait`), so the run is held. A kill that
+ * throws because the worker (or its group) exited after the probe → `not running`. */
 export async function killRecordedWorker(pid: number, start: string | null, deps: KillDeps = {}): Promise<WorkerKill> {
   const platform = deps.platform ?? process.platform;
   const running = deps.running ?? pidRunning;
   const startTime = deps.startTime ?? ((p: number) => processStartTime(p, platform));
-  const alive = deps.groupAlive ?? groupAlive;
+  const alive = deps.groupAlive ?? ((g: number) => groupAlive(g, platform));
   const probe = probeRecordedWorker(pid, start, deps);
   if (probe.outcome !== "running" && probe.outcome !== "group alive") return probe;
   const group = probe.outcome === "group alive";
-  try { (deps.kill ?? killGroupOrTree)(pid, platform); }
-  catch (e) { return { pid, start, outcome: "kill failed", detail: `${group ? "group: " : ""}${e instanceof Error ? e.message : String(e)}` }; }
   const still = group ? () => alive(pid) : () => running(pid) && startTime(pid) === start;
+  try { (deps.kill ?? killGroupOrTree)(pid, platform); }
+  catch (e) {
+    const why = e instanceof Error ? e.message : String(e);
+    // Gone between the probe and the kill (POSIX ESRCH; win32 taskkill fails): not running, never `kill failed`.
+    if (!still()) return { pid, start, outcome: "not running", detail: `${group ? "process group" : "worker"} exited before the kill (${why})` };
+    return { pid, start, outcome: "kill failed", detail: `${group ? "group: " : ""}${why}` };
+  }
   const deadline = Date.now() + (deps.waitMs ?? 5000);
   while (still() && Date.now() < deadline) await Bun.sleep(50);
   if (still()) return { pid, start, outcome: "kill failed", detail: group ? "still running after wait (process group)" : "still running after wait" };
@@ -462,6 +524,9 @@ export interface RecoverReport {
   /** Runs left as they are: their recorded worker may still run (it could not be matched
    * or killed, or an sbx worker's in-VM deadline has not passed). */
   held?: { run_id: string; worker: WorkerKill }[];
+  /** Ended runs that had kept their checkout lock (an sbx worker that may have still run in
+   * the VM), whose lock was freed once their recorded worker may no longer run. */
+  released?: { run_id: string; worker?: WorkerKill }[];
 }
 
 /** What happened to (or where stands) a recorded worker before its run was resumed or its lock released. */
@@ -547,7 +612,8 @@ interface ClaimView { run: QueueRun; lock: LockRow | null; held: QueueRun | null
 /** The claim's probe results, computed outside the transaction. */
 interface ClaimProbes {
   ownerLive: boolean; holderLive: boolean; launch: boolean; engine?: EngineProbe;
-  /** A `running` holder whose owner is dead but whose recorded worker may still run (`recordedWorker`). */
+  /** What `recordedWorker` answered for a `running` holder with a dead owner, or an ended
+   * holder that kept its lock: live (`holderLive`) while it may still run. */
   holderWorker?: WorkerKill;
 }
 
@@ -829,8 +895,9 @@ export class Queue {
             }
           } else if (p.holderLive) {
             const w = p.holderWorker;
+            const who = held && isTerminal(held.state) ? `run ended ${held.state}` : "owner dead";
             holder = { kind: "run", run_id: lock.run_id, job_id: lock.job_id, pid: lock.owner_pid, host: lock.owner_host,
-              ...(w ? { detail: `owner dead, its recorded worker (pid ${w.pid}) may still run: ${w.outcome}${w.deadline ? ` until ${w.deadline}` : ""}` } : {}) };
+              ...(w ? { detail: `${who}, its recorded worker (pid ${w.pid}) may still run: ${w.outcome}${w.deadline ? ` until ${w.deadline}` : ""}` } : {}) };
           } else if (p.launch && p.engine!.live) {
             // The stale launch run's engine (or an unverified one, on a failed probe) takes the lock over.
             const probe = p.engine!;
@@ -840,7 +907,8 @@ export class Queue {
               ...(probe.detail ? { detail: probe.detail } : {}) };
             detail.handover = { from_run: lock.run_id, why: `holder ${held ? held.state : "missing"} (a tk-studio-launch run)`, to_engine: engineId ?? "unverified" };
           } else {
-            detail.released = { kind: "run", run_id: lock.run_id, why: `holder ${held ? held.state : "missing"}${held?.state === "running" ? " with a dead owner" : ""}` };
+            detail.released = { kind: "run", run_id: lock.run_id, why: `holder ${held ? held.state : "missing"}${held?.state === "running" ? " with a dead owner" : ""}`,
+              ...(p.holderWorker ? { worker: p.holderWorker } : {}) };
           }
           if (holder) {
             const reason = `waiting: ${holderReason(holder)}`;
@@ -894,10 +962,12 @@ export class Queue {
       return out;
     }
     out.holderLive = held?.state === "running" && this.ownerLive(ownerOf(lock), self);
-    if (!out.holderLive && held?.state === "running") {
-      // A dead owner's running holder is live while its recorded worker may still run (never a lock freed under it).
+    if (!out.holderLive && held && (held.state === "running" || isTerminal(held.state))) {
+      // A dead owner's running holder — or an ended run that kept its lock (`holdLock`) — is live
+      // while its recorded worker may still run (never a lock freed under it).
       const w = await this.recordedWorker(held, false);
-      if (w.mayRun) { out.holderLive = true; out.holderWorker = w.worker; }
+      if (w.mayRun) out.holderLive = true;
+      out.holderWorker = w.worker;
     }
     const defn = held ? this.definition(held) : this.definition({ job_id: lock.job_id, checkout: lock.checkout });
     out.launch = !out.holderLive && defn?.target?.skill === LAUNCH_SKILL;
@@ -1029,7 +1099,7 @@ export class Queue {
    * transaction, by the launch-orphan rule `recover` uses — the core may have
    * started an engine that still works the checkout. */
   async endDriven(runId: string, state: TerminalState, reason?: string | null,
-    opts: { engineRunId?: string; detail?: Record<string, unknown>; stop?: StopDetail } = {}): Promise<QueueRun> {
+    opts: { engineRunId?: string; detail?: Record<string, unknown>; stop?: StopDetail; holdLock?: string } = {}): Promise<QueueRun> {
     const run = opts.engineRunId ? null : this.get(runId);
     if (run && run.verb_started && !isTerminal(run.state) && this.definition(run)?.target?.skill === LAUNCH_SKILL) {
       const { holder, engine } = await this.launchEngine(run.root);
@@ -1041,9 +1111,13 @@ export class Queue {
   /** Terminal transition + lock release — or, when the run launched a
    * detached bmad-loop engine, the lock is handed to that engine (`null`: an
    * unverified engine, from a failed launch probe). `stop` (AC4) writes the
-   * `stopped` event (from/to = `state`) in the same transaction as `ended`. */
+   * `stopped` event (from/to = `state`) in the same transaction as `ended`.
+   * `holdLock` (Story 21.6, the cause): the run's recorded worker may still run
+   * (an sbx worker in the VM) — the run ends but keeps its checkout lock, which
+   * `claim` and `recover` free only once `recordedWorker` says it may no longer run
+   * (sbx: its in-VM deadline passed). */
   end(runId: string, state: TerminalState, reason?: string | null,
-    opts: { engineRunId?: string | null; detail?: Record<string, unknown>; from?: RunState; stop?: StopDetail } = {}): QueueRun {
+    opts: { engineRunId?: string | null; detail?: Record<string, unknown>; from?: RunState; stop?: StopDetail; holdLock?: string } = {}): QueueRun {
     if (!isTerminal(state)) throw new Error(`end: '${state}' is not a terminal state`);
     return this.db.transaction(() => {
       const run = this.must(runId);
@@ -1058,15 +1132,20 @@ export class Queue {
    * to an engine), the ending event (`ended`, or `orphaned` from `recover`), and
    * a `stop` recorded in the same transaction. The one end path. */
   private writeEnd(run: QueueRun, state: TerminalState, reason: string | null | undefined,
-    opts: { kind: "ended" | "orphaned"; engineRunId?: string | null; detail?: Record<string, unknown>; stop?: StopDetail }): void {
+    opts: { kind: "ended" | "orphaned"; engineRunId?: string | null; detail?: Record<string, unknown>; stop?: StopDetail; holdLock?: string }): void {
     const runId = run.run_id;
     this.db.query(
       `UPDATE runs SET state = ?, reason = ?, owner_pid = NULL, owner_host = NULL, owner_nonce = NULL, owner_start = NULL,
          engine_run_id = ?, updated = ? WHERE run_id = ?`,
     ).run(state, reason ?? null, opts.engineRunId ?? null, now(), runId);
     const detail: Record<string, unknown> = { ...(opts.detail ?? {}) };
-    if (opts.engineRunId !== undefined) {
-      const lock = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(run.checkout) as LockRow | null;
+    const held = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(run.checkout) as LockRow | null;
+    if (opts.holdLock && run.worker_pid !== null && run.worker_pid !== undefined && held?.kind === "run" && held.run_id === runId) {
+      // Its recorded worker may still run: the lock stays with the ended run (freed by `claim`/`recover`
+      // once `recordedWorker` says it may no longer run — sbx: at its in-VM deadline).
+      detail.lock = { held: opts.holdLock, ...(run.tier === "sbx" ? { until: new Date(this.sbxDeadline(run).ms).toISOString() } : {}) };
+    } else if (opts.engineRunId !== undefined) {
+      const lock = held;
       if (!lock || lock.run_id === runId) {
         this.handToEngine(run, opts.engineRunId);
         detail.lock = { handed_to_engine: opts.engineRunId ?? "unverified" };
@@ -1108,7 +1187,12 @@ export class Queue {
    * reached a terminal state, and the `stopped` event when the job's
    * `stop.on_status` lists it (DW-8). Ending a `tk-studio-launch` run first
    * probes the launch core: a live engine (or a failed probe: an unverified
-   * engine) takes the lock over. */
+   * engine) takes the lock over. Every await is followed by a re-check that the
+   * run is unchanged and its owner still dead (another recoverer may have taken
+   * it over), and before `ops.end` the run is marked this recoverer's (owner =
+   * self, a `recovering` event) so no other recoverer resumes or ends it under
+   * that call. Last, an ended run that kept its lock (`holdLock`) has it freed
+   * once its recorded worker may no longer run (`released`), else it is `held`. */
   async recover(ops: StudioOps, self: Owner = selfOwner()): Promise<RecoverReport> {
     const report: RecoverReport = { ended: [], requeued: [], resumed: [] };
     const candidates = (this.db.query(
@@ -1118,11 +1202,18 @@ export class Queue {
       !!now_ && now_.state === c.state && now_.owner_nonce === c.owner_nonce && now_.owner_pid === c.owner_pid
       && now_.owner_host === c.owner_host && now_.studio_run_id === c.studio_run_id && now_.verb_started === c.verb_started;
     const deadOwner = (c: QueueRun) => ({ pid: c.owner_pid, host: c.owner_host, nonce: c.owner_nonce, ...(c.owner_start ? { start: c.owner_start } : {}) });
+    // Re-checked after every await: another recoverer (a tick, `drain`) may have taken the run
+    // over (a `resumed` takeover, or its own end mark) since the candidates were listed.
+    const stillOrphan = (c: QueueRun) => {
+      const cur = this.get(c.run_id);
+      return unchanged(c, cur) && !this.ownerLive(ownerOf(cur!), self);
+    };
 
     for (const c of candidates) {
       // Before anything resumes the run or releases its lock: its recorded worker (DW-3, DW-7).
       // sbx: held until the in-VM deadline (the host pid is only `sbx exec`).
       const settled = await this.recordedWorker(c, true);
+      if (!stillOrphan(c)) continue;
       const worker = settled.worker;
       if (settled.mayRun) {
         // It may still be the worker: never release its lock under it.
@@ -1140,6 +1231,7 @@ export class Queue {
         let found: Awaited<ReturnType<StudioFinder>>;
         try { found = await ops.find(c, snapshot); }
         catch (e) { found = { ok: false, detail: e instanceof Error ? e.message : String(e) }; }
+        if (!stillOrphan(c)) continue;
         if (!found.ok) end = { studioRunId: null, lookupFailed: found.detail, lookup: { ok: false, detail: found.detail } };
         else if (found.run_id) end = { studioRunId: found.run_id, lookup: { ok: true, adopted: found.run_id } };
         else end = null; // the verb never minted: safe to re-queue
@@ -1171,6 +1263,7 @@ export class Queue {
         catch (e) { decision = { resume: false, cause: `resume check failed: ${e instanceof Error ? e.message : String(e)}` }; }
         // An sbx run is never resumed on restart (its in-VM worker ran to its deadline): the op names the guard.
         if (decision.resume && c.tier === "sbx") decision = { resume: false, cause: "an sbx run is never resumed on restart" };
+        if (!stillOrphan(c)) continue;
       }
       let lockCause: string | undefined;
       if (decision?.resume && studioRunId) {
@@ -1210,8 +1303,23 @@ export class Queue {
         : cause ? `${ORPHANED_REASON}; ${cause}` : ORPHANED_REASON;
       const already = lockCause ? undefined : noResume?.studioState;
       let studio: { ok: boolean; detail: string; state?: string } | null = null;
+      // The run as this recoverer leaves it before the end transaction (the end mark below re-owns it).
+      let mine = c;
       if (studioRunId && already) studio = { ok: true, detail: `studio run ${studioRunId} already ${already}`, state: already };
       else if (studioRunId) {
+        // Before the studio run is ended: mark the queue run this recoverer's (owner = self, state
+        // and lock untouched) in one transaction, so no other recoverer resumes or ends it under this
+        // `ops.end`. A recoverer that dies after the mark leaves a dead-owner running run: the next
+        // `recover` handles it again (the studio run then answers terminal, the queue run ends in it).
+        const marked = this.db.transaction(() => {
+          if (!unchanged(c, this.get(c.run_id))) return false;
+          this.db.query("UPDATE runs SET owner_pid = ?, owner_host = ?, owner_nonce = ?, owner_start = ?, updated = ? WHERE run_id = ?")
+            .run(self.pid, self.host, self.nonce, self.start ?? null, now(), c.run_id);
+          this.event(c.run_id, "recovering", c.state, c.state, { dead_owner: deadOwner(c), owner: ownerDetail(self), reason });
+          return true;
+        }).immediate();
+        if (!marked) continue;
+        mine = { ...c, owner_pid: self.pid, owner_host: self.host, owner_nonce: self.nonce, owner_start: self.start ?? null };
         try { studio = await ops.end({ ...c, studio_run_id: studioRunId }, reason); }
         catch (e) { studio = { ok: false, detail: `ending studio run ${studioRunId} failed: ${e instanceof Error ? e.message : String(e)}` }; }
       }
@@ -1229,7 +1337,8 @@ export class Queue {
       const trips = noResume?.trips?.length ? noResume.trips : undefined;
       const done = this.db.transaction(() => {
         const cur = this.get(c.run_id);
-        if (!unchanged(c, cur)) return false;
+        // Still as this recoverer left it (its end mark, when it ended the studio run).
+        if (!unchanged(mine, cur)) return false;
         if (studioRunId !== c.studio_run_id) this.db.query("UPDATE runs SET studio_run_id = ? WHERE run_id = ?").run(studioRunId, c.run_id);
         this.writeEnd(cur!, state, reason, {
           kind: "orphaned", ...(engineHolder ? { engineRunId: engineHolder.id } : {}), ...(stop ? { stop } : {}),
@@ -1247,6 +1356,29 @@ export class Queue {
         });
       }
     }
+    await this.releaseKeptLocks(report);
     return report;
+  }
+
+  /** Ended runs that kept their checkout lock (`holdLock`: a recorded sbx worker that may
+   * still run in the VM): each lock is freed once `recordedWorker` says its worker may no
+   * longer run (sbx: the in-VM deadline passed), else the run is reported `held`. */
+  private async releaseKeptLocks(report: RecoverReport): Promise<void> {
+    const kept = this.db.query(
+      `SELECT runs.* FROM locks JOIN runs ON runs.run_id = locks.run_id
+       WHERE locks.kind = 'run' AND runs.state IN ('complete','partial','blocked','cancelled') ORDER BY locks.acquired`,
+    ).all() as QueueRun[];
+    for (const k of kept) {
+      const settled = await this.recordedWorker(k, true);
+      if (settled.mayRun) { (report.held ??= []).push({ run_id: k.run_id, worker: settled.worker! }); continue; }
+      const freed = this.db.transaction(() => {
+        const lock = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(k.checkout) as LockRow | null;
+        if (lock?.kind !== "run" || lock.run_id !== k.run_id) return false;
+        this.db.query("DELETE FROM locks WHERE checkout = ? AND run_id = ? AND kind = 'run'").run(k.checkout, k.run_id);
+        this.event(k.run_id, "lock-released", k.state, k.state, { why: "the ended run's recorded worker may no longer run", ...(settled.worker ? { worker: settled.worker } : {}) });
+        return true;
+      }).immediate();
+      if (freed) (report.released ??= []).push({ run_id: k.run_id, ...(settled.worker ? { worker: settled.worker } : {}) });
+    }
   }
 }

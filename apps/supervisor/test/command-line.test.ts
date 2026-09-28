@@ -1247,7 +1247,8 @@ process.exit(r.status ?? 1);
     const reason = "orphaned: supervisor restart; no session recorded";
     expect(JSON.parse(rec.stdout)).toMatchObject({ ok: true, resumed: [], ended: [{ run_id: dead.run_id, studio_run_id: dead.studio_run_id, reason }] });
     expect(fx.queue((q) => q.get(dead.run_id))).toMatchObject({ state: "partial", reason, studio_run_id: dead.studio_run_id });
-    expect(events(fx, dead.run_id).map((e) => e.kind)).toEqual(["enqueued", "claimed", "verb-started", "studio-run", "woke", "orphaned"]);
+    // `recovering`: the recoverer marks the run its own before it ends the studio run (no other recoverer ends it under that call).
+    expect(events(fx, dead.run_id).map((e) => e.kind)).toEqual(["enqueued", "claimed", "verb-started", "studio-run", "woke", "recovering", "orphaned"]);
     expect(events(fx, dead.run_id).at(-1)).toMatchObject({ to_state: "partial", detail: { studio: { ok: true }, studio_outcome: { run_id: dead.studio_run_id, state: "partial" } } });
     const studio = fx.jobVerb(["status", "--directory", fx.project, "--job-id", "studio-health", "--run-id", dead.studio_run_id!]).runs[0];
     expect(studio).toMatchObject({ state: "partial", reason });

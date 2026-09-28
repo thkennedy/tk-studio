@@ -10,18 +10,20 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  driveResumes, finishRun, queueRecorder, recoverWithResume, RESUME_CAP, resumeCheck, restartResumer, studioOps,
+  driveResumes, finishRun, mirror, queueRecorder, recoverWithResume, RESUME_CAP, resumeCheck, restartResumer, SBX_VM_WORKER, studioOps,
   type RunRecorder, type Started, type TranscriptChecks,
 } from "../src/cli";
 import {
-  killRecordedWorker, ORPHANED_REASON, probeRecordedWorker, processStartTime, Queue, workerMayRun,
-  type Owner, type Probes, type QueueRun, type WorkerKill,
+  groupAlive, killRecordedWorker, linuxGroupHasLiveMember, ORPHANED_REASON, parseStatGroup, probeRecordedWorker, processStartTime, Queue,
+  workerMayRun, type Owner, type Probes, type ProcReader, type QueueRun, type StudioOps, type WorkerKill,
 } from "../src/queue";
 import {
   buildWorkerCommand, CONTINUATION_PROMPT, invokeSkill, MAX_LOGIN_MISSING, MISSING_STATUS_BLOCK, runProcess, SBX_GUARD_KILL_AFTER_S,
   WORKER_RECORD_FAILED, type Spawner,
 } from "../src/server";
-import { ensureTranscript, sbxTranscriptArgv, sbxTranscriptExists, TranscriptError, transcriptNewCounts } from "../src/transcript";
+import {
+  ensureTranscript, sbxSessionWorkers, sbxTranscriptArgv, sbxTranscriptExists, sbxWorkerArgv, sessionWorkerPids, TranscriptError, transcriptNewCounts,
+} from "../src/transcript";
 
 const HOST = hostname();
 const A: Owner = { pid: 910101, host: HOST, nonce: "nonce-dead" };
@@ -111,7 +113,9 @@ async function orphan(o: {
   return { queue, run: r, checkout, defn, kills, rebuild, alive };
 }
 
-const okTranscripts: TranscriptChecks = { host: () => ({ restored: false }), sbx: async () => {} };
+/** The in-VM process check finding no worker on the session. */
+const noVmWorker = async () => ({ ok: true as const, pids: [] as string[] });
+const okTranscripts: TranscriptChecks = { host: () => ({ restored: false }), sbx: async () => {}, sbxWorkers: noVmWorker };
 
 // ---------------------------------------------------------------- restart (AC1)
 
@@ -469,7 +473,7 @@ describe("resumeCheck order and the pieces it rests on", () => {
     expect(await resumeCheck(input({ sessionId: null }), v.runner, okTranscripts)).toMatchObject({ ok: false, cause: "no session recorded" });
     expect(await resumeCheck(input({ resumes: 1 }), v.runner, okTranscripts)).toMatchObject({ ok: false, cause: "resume cap reached (1)" });
     expect(v.calls).toEqual([]);
-    const missing: TranscriptChecks = { host: () => { throw new TranscriptError(`transcript missing: ${SID} (x)`); }, sbx: async () => {} };
+    const missing: TranscriptChecks = { host: () => { throw new TranscriptError(`transcript missing: ${SID} (x)`); }, sbx: async () => {}, sbxWorkers: noVmWorker };
     expect(await resumeCheck(input(), v.runner, missing)).toMatchObject({ ok: false, cause: `transcript missing: ${SID} (x)` });
     expect(v.calls.map((c) => c[0])).toEqual(["status"]); // no account for a run that cannot resume
     const ok = await resumeCheck(input({ spentS: 100 }), verbs({ account: { within_budget: true, exceeded: [], counters: { wall_clock_seconds: 250 } } }).runner, okTranscripts);
@@ -478,7 +482,7 @@ describe("resumeCheck order and the pieces it rests on", () => {
 
   test("sbx: the existence check runs inside the microVM", async () => {
     const seen: string[] = [];
-    const sbx: TranscriptChecks = { host: () => { throw new Error("host never read on sbx"); }, sbx: async (sb, sid) => { seen.push(`${sb}:${sid}`); } };
+    const sbx: TranscriptChecks = { host: () => { throw new Error("host never read on sbx"); }, sbx: async (sb, sid) => { seen.push(`${sb}:${sid}`); }, sbxWorkers: noVmWorker };
     expect(await resumeCheck(input({ tier: "sbx", sandbox: "sb" }), verbs().runner, sbx)).toMatchObject({ ok: true });
     expect(seen).toEqual([`sb:${SID}`]);
   });
@@ -575,6 +579,7 @@ describe("sbx restart: held until the in-VM deadline, then partial naming the wa
   const never: TranscriptChecks = {
     host: () => { throw new Error("the host transcript is never read for an sbx run"); },
     sbx: async () => { throw new Error("an sbx run on restart never reaches the transcript check"); },
+    sbxWorkers: async () => { throw new Error("an sbx run on restart never asks the VM"); },
   };
 
   test("the worker record carries the guard seconds passed to its spawn (column + `worker` event)", async () => {
@@ -902,7 +907,8 @@ describe("a launch run is never resumed beside a live or unverified engine", () 
 });
 
 describe("account only when the job has max_turns or max_tokens", () => {
-  const sbxOk: TranscriptChecks = { host: () => { throw new Error("host never read on sbx"); }, sbx: async () => {} };
+  // The in-VM process check finds no worker on the session (consult 5): the silent exit may resume.
+  const sbxOk: TranscriptChecks = { host: () => { throw new Error("host never read on sbx"); }, sbx: async () => {}, sbxWorkers: noVmWorker };
   const SBX = { tier: "sbx" as const, sandbox: "sb" };
   const SBX_SILENT = { ran: true, exit: 1, conformance_failure: MISSING_STATUS_BLOCK }; // no JSON result: no num_turns/usage
 
@@ -969,7 +975,7 @@ describe("a failed account in the resume check is attempted once", () => {
   test("counts that cannot be read in the resume check: not read again after the loop", async () => {
     // Guarded sbx with no JSON result: the resume check's counts throw once; the post-loop block never re-runs them.
     const { v, finish } = await silent([{ ran: true, exit: 1, conformance_failure: MISSING_STATUS_BLOCK }], { tier: "sbx", sandbox: "sb" }, verbs(), memRecorder(),
-      { host: () => ({ restored: false }), sbx: async () => {} });
+      { host: () => ({ restored: false }), sbx: async () => {}, sbxWorkers: noVmWorker });
     expect(v.of("account")).toEqual([]);
     expect(flag(finish, "--reason").split("account failed").length - 1).toBe(1);
   });
@@ -997,5 +1003,325 @@ describe("the restart's accounted ids are never counted again", () => {
     expect(v.of("account")).toHaveLength(2);
     expect(v.of("account")[1]).toEqual(["account", "--directory", fx.checkout, "--run-id", STUDIO, "--turns", "1", "--tokens", "15"]);
     expect(report.resumed[0].summary).toMatchObject({ ok: true, state: "complete" });
+  });
+});
+
+// ---------------------------------------------------------------- follow-up review pass 4
+
+describe("an sbx silent exit is never resumed beside a worker that may still run in the VM", () => {
+  const SBX = { tier: "sbx" as const, sandbox: "sb" };
+  const SBX_SILENT = { ran: true, exit: 1, conformance_failure: MISSING_STATUS_BLOCK };
+  const UNGUARDED = { id: "j", trigger: "one-shot", target: { skill: "tk-studio-activate" }, guards: { max_wall_clock_seconds: 600 } };
+  const C: Owner = { pid: 910104, host: HOST, nonce: "nonce-claimant" };
+  const checks = (sbxWorkers: TranscriptChecks["sbxWorkers"]): TranscriptChecks => ({
+    host: () => { throw new Error("host never read on sbx"); },
+    sbx: async () => { throw new Error("the transcript is never checked once the VM check refuses"); },
+    sbxWorkers,
+  });
+  const ops: StudioOps = { end: async () => ({ ok: true, detail: "ended" }), find: async () => ({ ok: true, run_id: null }) };
+
+  /** An sbx run B drives on a queue whose in-VM deadline clock the test sets. */
+  async function sbxRun() {
+    let clock = 0;
+    const hostKills: number[] = [];
+    const dir = mkdtempSync(join(tmpdir(), "tk-sup-vm-q-"));
+    const checkout = mkdtempSync(join(tmpdir(), "tk-sup-vm-co-"));
+    const queue = new Queue(join(dir, "q.db"), {
+      ownerAlive: () => true, engineLive: async () => ({ live: false }), now: () => clock,
+      // Never a real signal: the recorded pid is the fake invoker's.
+      killWorker: async (pid, start) => { hostKills.push(pid); return { pid, start, outcome: "not running" }; },
+      probeWorker: () => { throw new Error("an sbx worker is decided by its deadline, not the host pid"); },
+    });
+    const r = queue.enqueue({ jobId: "j", root: checkout, projectId: "p", target: "skill", definition: UNGUARDED, owner: B, ...SBX }).run;
+    await queue.claim(r.run_id, B);
+    queue.markVerbStarted(r.run_id, "submit", [], { target: "skill", definition: UNGUARDED });
+    queue.setStudioRun(r.run_id, STUDIO);
+    return { queue, run: r, checkout, hostKills, setClock: (ms: number) => { clock = ms; } };
+  }
+  const deadlineOf = (q: Queue, runId: string) => Date.parse(q.events(runId).filter((e) => e.kind === "worker").at(-1)!.at) + 610_000;
+  const contend = async (q: Queue, checkout: string) => {
+    const k = q.enqueue({ jobId: "k", root: checkout, projectId: "p", target: "skill", definition: { id: "k", target: { skill: "tk-studio-activate" } }, owner: C }).run;
+    return { k, claim: await q.claim(k.run_id, C) };
+  };
+
+  test("a process carrying the session id: partial naming its pid, never resumed; the lock is kept until the in-VM deadline", async () => {
+    const fx = await sbxRun();
+    const asked: string[] = [];
+    const found = checks(async (sb, sid) => { asked.push(`${sb}:${sid}`); return { ok: true, pids: ["4711"] }; });
+    const { summary, invokes, finish } = await silent([SBX_SILENT], { ...SBX, defn: UNGUARDED }, verbs(), { ...queueRecorder(fx.queue, fx.run.run_id), log: [] }, found);
+    const cause = `${SBX_VM_WORKER}: 4711`;
+    expect(asked).toEqual([`sb:${SID}`]);
+    expect(invokes).toHaveLength(1);
+    expect(flag(finish, "--state")).toBe("partial");
+    expect(flag(finish, "--reason")).toBe(`${MISSING_STATUS_BLOCK}; ${cause}`);
+    expect(summary).toMatchObject({ state: "partial", hold_lock: cause });
+
+    await mirror(fx.queue, fx.run.run_id, { jobId: "j", defn: UNGUARDED }, summary);
+    const deadline = deadlineOf(fx.queue, fx.run.run_id);
+    expect(fx.queue.get(fx.run.run_id)).toMatchObject({ state: "partial", reason: `${MISSING_STATUS_BLOCK}; ${cause}` });
+    expect(fx.queue.events(fx.run.run_id).find((e) => e.kind === "ended")!.detail).toMatchObject({ lock: { held: cause, until: new Date(deadline).toISOString() } });
+    expect(fx.queue.lock(fx.checkout)).toMatchObject({ run_id: fx.run.run_id });
+
+    // Before the deadline: a claimant waits naming the ended holder, and recover holds it.
+    fx.setClock(deadline - 1);
+    const first = await contend(fx.queue, fx.checkout);
+    expect(first.claim).toMatchObject({ claimed: false, why: "lock", holder: { kind: "run", run_id: fx.run.run_id } });
+    expect(first.claim.claimed ? "" : first.claim.reason).toContain("run ended partial, its recorded worker (pid 1000) may still run: in-VM deadline not passed");
+    const held = await fx.queue.recover(ops, B);
+    expect(held.held).toMatchObject([{ run_id: fx.run.run_id, worker: { outcome: "in-VM deadline not passed" } }]);
+    expect(held.released).toBeUndefined();
+    expect(fx.queue.lock(fx.checkout)).toMatchObject({ run_id: fx.run.run_id });
+    expect(fx.hostKills).toEqual([]);
+
+    // Once it has passed: recover frees the lock (the lingering host `sbx exec` killed best-effort), then the claimant claims.
+    fx.setClock(deadline + 1);
+    const freed = await fx.queue.recover(ops, B);
+    expect(freed.released).toMatchObject([{ run_id: fx.run.run_id, worker: { outcome: "in-VM deadline passed" } }]);
+    expect(freed.held).toBeUndefined();
+    expect(fx.queue.lock(fx.checkout)).toBeNull();
+    expect(fx.queue.events(fx.run.run_id).at(-1)).toMatchObject({ kind: "lock-released", from_state: "partial", to_state: "partial" });
+    expect((await fx.queue.claim(first.k.run_id, C)).claimed).toBe(true);
+  });
+
+  test("a failed check (non-zero, thrown): partial naming `probe failed`, never resumed; claim frees the lock only after the deadline", async () => {
+    const fx = await sbxRun();
+    const failed = checks(async () => ({ ok: false, detail: "ps exited 125: sandbox not running" }));
+    const { summary, invokes, finish } = await silent([SBX_SILENT], { ...SBX, defn: UNGUARDED }, verbs(), { ...queueRecorder(fx.queue, fx.run.run_id), log: [] }, failed);
+    const cause = `${SBX_VM_WORKER}: probe failed: ps exited 125: sandbox not running`;
+    expect(invokes).toHaveLength(1);
+    expect(flag(finish, "--reason")).toBe(`${MISSING_STATUS_BLOCK}; ${cause}`);
+    expect(summary.hold_lock).toBe(cause);
+    await mirror(fx.queue, fx.run.run_id, { jobId: "j", defn: UNGUARDED }, summary);
+    const deadline = deadlineOf(fx.queue, fx.run.run_id);
+    fx.setClock(deadline - 1);
+    const first = await contend(fx.queue, fx.checkout);
+    expect(first.claim).toMatchObject({ claimed: false, why: "lock" });
+    fx.setClock(deadline + 1);
+    const second = await fx.queue.claim(first.k.run_id, C);
+    expect(second.claimed).toBe(true);
+    expect(fx.queue.events(first.k.run_id).at(-1)!.detail).toMatchObject({ released: { run_id: fx.run.run_id, why: "holder partial", worker: { outcome: "in-VM deadline passed" } } });
+
+    // A check that throws (a spawn error, a timeout) counts as failed too.
+    const thrown = await silent([SBX_SILENT], { ...SBX, defn: UNGUARDED }, verbs(), memRecorder(), checks(async () => { throw new Error("sbx timed out after 60s"); }));
+    expect(thrown.invokes).toHaveLength(1);
+    expect(flag(thrown.finish, "--reason")).toBe(`${MISSING_STATUS_BLOCK}; ${SBX_VM_WORKER}: probe failed: sbx timed out after 60s`);
+  });
+
+  test("a host run is never asked about the VM; its end releases the lock as before", async () => {
+    const { invokes, summary } = await silent([SILENT, { ran: true, exit: 0, status_block: BLOCK }], {}, verbs(), memRecorder(),
+      { host: () => ({ restored: false }), sbx: async () => {}, sbxWorkers: async () => { throw new Error("a host run never asks the VM"); } });
+    expect(invokes).toHaveLength(2);
+    expect(summary.hold_lock).toBeUndefined();
+  });
+
+  test("sbxSessionWorkers: `sbx exec <sb> ps -eo pid=,args=` (argv only), filtered on the host; a non-zero exit or a throw is a failed check", async () => {
+    expect(sbxWorkerArgv("sb")).toEqual(["exec", "sb", "ps", "-eo", "pid=,args="]);
+    const ps = [
+      "    1 /sbin/init",
+      `  812 timeout -k 10 600 env -u ANTHROPIC_API_KEY -C /w claude -p --resume ${SID} continue`,
+      `  815 claude -p --resume ${SID} continue`,
+      "  900 ps -eo pid=,args=",
+    ].join("\n");
+    expect(sessionWorkerPids(ps, SID)).toEqual(["812", "815"]);
+    expect(sessionWorkerPids(ps, "")).toEqual([]);
+    const calls: string[][] = [];
+    const answer = (res: { stdout: string; stderr: string; exit: number }) => async (bin: string, args: string[]) => { calls.push([bin, ...args]); return res; };
+    expect(await sbxSessionWorkers("sb", SID, answer({ stdout: ps, stderr: "", exit: 0 }))).toEqual({ ok: true, pids: ["812", "815"] });
+    expect(calls[0].slice(1)).toEqual(["exec", "sb", "ps", "-eo", "pid=,args="]);
+    expect(await sbxSessionWorkers("sb", SID, answer({ stdout: "    1 /sbin/init\n", stderr: "", exit: 0 }))).toEqual({ ok: true, pids: [] });
+    expect(await sbxSessionWorkers("sb", SID, answer({ stdout: "", stderr: "no such sandbox", exit: 1 }))).toEqual({ ok: false, detail: "ps exited 1: no such sandbox" });
+    expect(await sbxSessionWorkers("sb", SID, async () => { throw new Error("sbx timed out after 60s"); })).toEqual({ ok: false, detail: "sbx timed out after 60s" });
+  });
+});
+
+describe("recover never resumes or ends a run another recoverer took over", () => {
+  const X: Owner = { pid: 910199, host: HOST, nonce: "nonce-x-dead" };
+  const STUDIO_R0 = "j0-20260928T101010Z", STUDIO_R = "j1-20260928T101010Z";
+
+  /** Two running runs of a dead supervisor X on two checkouts: R0 (listed first) and R. */
+  async function twoOrphans() {
+    const dir = mkdtempSync(join(tmpdir(), "tk-sup-race-q-"));
+    const db = join(dir, "q.db");
+    const setup = new Queue(db, { ownerAlive: () => true, engineLive: async () => ({ live: false }) });
+    const ids: string[] = [];
+    for (const [job, studio, pid] of [["j0", STUDIO_R0, 424240], ["j1", STUDIO_R, 424241]] as const) {
+      const checkout = mkdtempSync(join(tmpdir(), "tk-sup-race-co-"));
+      const defn = { id: job, trigger: "one-shot", target: { skill: "tk-studio-activate" }, guards: GUARDS };
+      const r = setup.enqueue({ jobId: job, root: checkout, projectId: "p", target: "skill", definition: defn, owner: X, tier: "host" }).run;
+      await setup.claim(r.run_id, X);
+      setup.markVerbStarted(r.run_id, "submit", [], { target: "skill", definition: defn });
+      setup.setStudioRun(r.run_id, studio);
+      setup.setSession(r.run_id, SID);
+      setup.setWorker(r.run_id, pid, "12345");
+      ids.push(r.run_id);
+    }
+    setup.close();
+    const open = (kill: (pid: number) => Promise<WorkerKill["outcome"]>) => new Queue(db, {
+      ownerAlive: (o) => o.pid !== X.pid, engineLive: async () => ({ live: false }),
+      killWorker: async (pid, start) => ({ pid, start, outcome: await kill(pid) }),
+    });
+    return { r0: ids[0], r: ids[1], open };
+  }
+  const log = () => {
+    const resumed: string[] = [], ended: string[] = [];
+    return { resumed, ended };
+  };
+
+  test("B takes R over after A listed its candidates, before A reached R: A neither asks the resume op nor ends the studio or queue run", async () => {
+    const fx = await twoOrphans();
+    const a = log(), b = log();
+    const qb = fx.open(async (pid) => (pid === 424240 ? "kill failed" : "not running")); // B holds R0, takes R over
+    const opsB: StudioOps = {
+      end: async (run) => { b.ended.push(run.run_id); return { ok: true, detail: "ended", state: "partial" }; },
+      find: async () => ({ ok: true, run_id: null }),
+      resume: async (run) => { b.resumed.push(run.run_id); return { resume: true }; },
+    };
+    let bReport: Awaited<ReturnType<Queue["recover"]>> | undefined;
+    // A is still on R0 (its kill wait) when B's recovery runs to completion.
+    const qa = fx.open(async (pid) => { if (pid === 424240 && !bReport) bReport = await qb.recover(opsB, B); return "not running"; });
+    const opsA: StudioOps = {
+      end: async (run) => { a.ended.push(run.run_id); return { ok: true, detail: "ended", state: "partial" }; },
+      find: async () => ({ ok: true, run_id: null }),
+      resume: async (run) => { a.resumed.push(run.run_id); return { resume: false, cause: `resume cap reached (${RESUME_CAP})` }; },
+    };
+    try {
+      const aReport = await qa.recover(opsA, A);
+      expect(bReport!.resumed).toEqual([{ run_id: fx.r, studio_run_id: STUDIO_R, resume: 1 }]);
+      expect(b.resumed).toEqual([fx.r]);
+      expect(a.resumed).toEqual([fx.r0]); // never asked about R
+      expect(a.ended).toEqual([fx.r0]); // the studio run of R never ended under B's resumed worker
+      expect(aReport.ended.map((e) => e.run_id)).toEqual([fx.r0]);
+      expect(qa.get(fx.r)).toMatchObject({ state: "running", owner_nonce: B.nonce });
+      expect(qa.lock(qa.get(fx.r)!.root)).toMatchObject({ run_id: fx.r, owner_nonce: B.nonce });
+      expect(qa.events(fx.r).map((e) => e.kind).filter((k) => ["resumed", "recovering", "orphaned"].includes(k))).toEqual(["resumed"]);
+    } finally { qa.close(); qb.close(); }
+  });
+
+  test("A marks R its own before `ops.end`: B, which listed R before the mark, neither resumes nor ends it", async () => {
+    const fx = await twoOrphans();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const b = log();
+    // B listed both runs, then waits on R0 until A is inside `ops.end` for R.
+    const qb = fx.open(async (pid) => { if (pid === 424240) await Promise.race([gate, Bun.sleep(3000)]); return pid === 424240 ? "kill failed" : "not running"; });
+    const opsB: StudioOps = {
+      end: async (run) => { b.ended.push(run.run_id); return { ok: true, detail: "ended", state: "partial" }; },
+      find: async () => ({ ok: true, run_id: null }),
+      resume: async (run) => { b.resumed.push(run.run_id); return { resume: true }; },
+    };
+    const bDone = qb.recover(opsB, B);
+    const qa = fx.open(async (pid) => (pid === 424240 ? "kill failed" : "not running"));
+    const during: { owner?: string | null } = {};
+    const opsA: StudioOps = {
+      end: async (run) => {
+        during.owner = qa.get(run.run_id)!.owner_nonce;
+        release();
+        await Promise.race([bDone, Bun.sleep(3000)]);
+        return { ok: true, detail: "ended", state: "partial" };
+      },
+      find: async () => ({ ok: true, run_id: null }),
+      resume: async () => ({ resume: false, cause: `resume cap reached (${RESUME_CAP})` }),
+    };
+    try {
+      const aReport = await qa.recover(opsA, A);
+      const bReport = await bDone;
+      expect(during.owner).toBe(A.nonce);
+      expect(b.resumed).toEqual([]);
+      expect(b.ended).toEqual([]);
+      expect(bReport.resumed).toEqual([]);
+      expect(aReport.ended).toMatchObject([{ run_id: fx.r, reason: `${ORPHANED_REASON}; resume cap reached (1)` }]);
+      expect(qa.get(fx.r)).toMatchObject({ state: "partial", owner_nonce: null });
+      const kinds = qa.events(fx.r).map((e) => e.kind);
+      expect(kinds.slice(-2)).toEqual(["recovering", "orphaned"]);
+      expect(kinds).not.toContain("resumed");
+      expect(qa.events(fx.r).at(-2)!.detail).toMatchObject({ dead_owner: { pid: X.pid, nonce: X.nonce }, owner: { nonce: A.nonce } });
+    } finally { qa.close(); qb.close(); }
+  });
+
+  test("a recoverer that died after its mark: the next recover ends the run in the studio run's terminal state", async () => {
+    const fx = await orphan();
+    const D: Owner = { pid: 910177, host: HOST, nonce: "nonce-died-after-mark" };
+    fx.queue.db.query("UPDATE runs SET owner_pid = ?, owner_host = ?, owner_nonce = ? WHERE run_id = ?").run(D.pid, D.host, D.nonce, fx.run.run_id);
+    const v = verbs({ status: "partial" }); // the dead recoverer's `ops.end` had finished the studio run
+    const { report } = await recoverWithResume(fx.queue, B, v.runner, { rebuild: fx.rebuild, transcripts: okTranscripts });
+    expect(report.resumed).toEqual([]);
+    expect(report.ended).toMatchObject([{ run_id: fx.run.run_id, reason: `${ORPHANED_REASON}; studio run ${STUDIO} already partial` }]);
+    expect(v.of("finish")).toEqual([]);
+    expect(fx.queue.get(fx.run.run_id)).toMatchObject({ state: "partial" });
+    expect(fx.queue.events(fx.run.run_id).at(-1)!.detail).toMatchObject({ studio_outcome: { run_id: STUDIO, state: "partial" }, dead_owner: { nonce: D.nonce } });
+    expect(fx.queue.lock(fx.checkout)).toBeNull();
+  });
+});
+
+describe("a process group whose only members are zombies is not alive (Linux /proc scan)", () => {
+  const stat = (pid: number, comm: string, state: string, pgrp: number) => `${pid} (${comm}) ${state} 1 ${pgrp} ${pgrp} 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 12345 0 0`;
+  const proc = (stats: Record<string, string | null | Error>, list?: () => string[]): ProcReader => ({
+    list: list ?? (() => [...Object.keys(stats), "self", "net"]),
+    stat: (pid) => { const v = stats[pid]; if (v instanceof Error) throw v; return v ?? null; },
+  });
+  const signalOk = () => {};
+  const esrch = () => { throw Object.assign(new Error("ESRCH"), { code: "ESRCH" }); };
+
+  test("parseStatGroup: state and pgrp read from after the last ')'", () => {
+    expect(parseStatGroup(stat(10, "odd) (name", "S", 42))).toEqual({ state: "S", pgrp: 42 });
+    expect(parseStatGroup(stat(11, "x", "Z", 7))).toEqual({ state: "Z", pgrp: 7 });
+    expect(parseStatGroup("garbage")).toBeNull();
+  });
+
+  test("linuxGroupHasLiveMember: zombies only → false; a live member → true; a failed scan → null", () => {
+    const zombies = { 10: stat(10, "claude", "Z", 42), 11: stat(11, "sh", "Z", 42), 12: stat(12, "other", "S", 7), 13: null };
+    expect(linuxGroupHasLiveMember(42, proc(zombies))).toBe(false);
+    expect(linuxGroupHasLiveMember(42, proc({ ...zombies, 14: stat(14, "sleep", "S", 42) }))).toBe(true);
+    expect(linuxGroupHasLiveMember(42, proc(zombies, () => { throw new Error("EACCES /proc"); }))).toBeNull();
+    expect(linuxGroupHasLiveMember(42, proc({ ...zombies, 15: Object.assign(new Error("EACCES"), { code: "EACCES" }) }))).toBeNull();
+    expect(linuxGroupHasLiveMember(42, proc({ ...zombies, 16: "unparsable" }))).toBeNull();
+    // A live member found wins over a failed entry.
+    expect(linuxGroupHasLiveMember(42, proc({ 15: new Error("EACCES"), 14: stat(14, "sleep", "S", 42) }))).toBe(true);
+  });
+
+  test("groupAlive: kill(-pgid, 0) first; on Linux zombies only → dead, a failed scan → alive (kill's answer); elsewhere kill alone", () => {
+    const zombies = proc({ 10: stat(10, "claude", "Z", 42) });
+    expect(groupAlive(42, "linux", zombies, signalOk)).toBe(false);
+    expect(groupAlive(42, "linux", proc({ 10: stat(10, "claude", "S", 42) }), signalOk)).toBe(true);
+    expect(groupAlive(42, "linux", proc({}, () => { throw new Error("no /proc"); }), signalOk)).toBe(true);
+    expect(groupAlive(42, "linux", proc({}, () => { throw new Error("never scanned"); }), esrch)).toBe(false);
+    expect(groupAlive(42, "darwin", proc({}, () => { throw new Error("never scanned off Linux"); }), signalOk)).toBe(true);
+    // The probe then answers `not running` for a leader whose group holds only zombies: nothing held forever.
+    const deps = { platform: "linux" as const, running: () => false, startTime: () => null, groupAlive: (g: number) => groupAlive(g, "linux", zombies, signalOk) };
+    expect(probeRecordedWorker(42, "s1", deps)).toMatchObject({ outcome: "not running" });
+  });
+});
+
+describe("a worker that exits between the probe and the kill is `not running`, never `kill failed`", () => {
+  const gone = () => Object.assign(new Error("kill ESRCH"), { code: "ESRCH" });
+
+  test("leader: the kill throws ESRCH and the worker is gone → not running", async () => {
+    let up = true;
+    const out = await killRecordedWorker(4242, "s1", {
+      platform: "linux", running: () => up, startTime: () => "s1", waitMs: 60,
+      kill: () => { up = false; throw gone(); },
+    });
+    expect(out).toMatchObject({ pid: 4242, outcome: "not running", detail: "worker exited before the kill (kill ESRCH)" });
+    expect(workerMayRun(out)).toBe(false);
+  });
+
+  test("process group: the kill throws and the group is gone → not running; still alive → kill failed", async () => {
+    let groupUp = true;
+    const deps = { platform: "linux" as const, running: () => false, startTime: () => null, waitMs: 60, groupAlive: () => groupUp };
+    const out = await killRecordedWorker(4242, "s1", { ...deps, kill: () => { groupUp = false; throw gone(); } });
+    expect(out).toMatchObject({ outcome: "not running", detail: "process group exited before the kill (kill ESRCH)" });
+    groupUp = true;
+    const stuck = await killRecordedWorker(4242, "s1", { ...deps, kill: () => { throw Object.assign(new Error("kill EPERM"), { code: "EPERM" }); } });
+    expect(stuck).toMatchObject({ outcome: "kill failed", detail: "group: kill EPERM" });
+    expect(workerMayRun(stuck)).toBe(true);
+  });
+
+  test("win32: taskkill fails because the process already exited → not running", async () => {
+    let up = true;
+    const out = await killRecordedWorker(4242, "s1", {
+      platform: "win32", running: () => up, startTime: () => "s1", waitMs: 60,
+      kill: () => { up = false; throw new Error("taskkill exited 128"); },
+    });
+    expect(out).toMatchObject({ outcome: "not running", detail: "worker exited before the kill (taskkill exited 128)" });
   });
 });
