@@ -1424,9 +1424,13 @@ So that one job can be woken, invoked headless, and finished from the command li
 **When** it is submitted
 **Then** the project is read through the contract's registry read path and the job through the `resolve` verb (0.1.12), never from raw `.tk-studio/jobs/*.json` files
 
-**Given** the shipped `maintenance-conformance` job on tk-studio
+**Given** a declared one-shot job whose target is the read-only `tk-studio-activate` surface (the story adds it to this repo as `.tk-studio/jobs/studio-health.json`)
 **When** it runs `wake` → invoke → `finish` from the CLI
 **Then** the status block is captured from the worker's JSON output, `finish` records it, and a `job-run` event lands in the agent PC's ledger
+
+**Given** the shipped core-target `maintenance-conformance` job
+**When** the supervisor wakes it
+**Then** `wake` runs the core itself and ends the run (no worker session, no `finish`), and the supervisor records the run's outcome from `status` — corrected 2026-09-28 after the Epic 21 launch found core-target jobs never reach `finish`
 
 **Given** the repo's test suite
 **When** `bun test` runs
