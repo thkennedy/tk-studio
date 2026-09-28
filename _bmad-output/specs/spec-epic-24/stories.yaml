@@ -1,0 +1,76 @@
+# stories.yaml: Epic 24 of this project, transcribed 1:1 from _bmad-output/planning-artifacts/epics.md
+# by .bmad-loop/plugins/studio-pipeline/transcribe.py on 2026-09-28. The epics document is
+# the plan; the studio gate may append remediation entries (`<key>-r<n>`) and revise
+# UNSTARTED entries' invoke_dev_with, nothing else.
+
+- id: "24-1-every-landed-story-carries-its-price-and-its-time"
+  title: "Every Landed Story Carries Its Price and Its Time"
+  description: >-
+    I want each landed loop story priced per model from its transcripts and timed from
+    its run, So that routes are judged on dollars and wall-clock time, not on token
+    counters. Canonical: ST-076.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 24.1: Every
+    Landed Story Carries Its Price and Its Time", the authoritative specification (user
+    story and acceptance criteria). Read the epic's own narrative (the paragraphs under
+    "## Epic 24:") for scope, rulings and the repo the story targets; transcribe the
+    story into the spec's intent contract and never re-derive, generalise or extend it.
+    Plan: plans/24-1.md when present (its Code Map is the investigation). Project rules
+    and the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass implementer.model and reviewers.model
+    explicitly on every subagent launch. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result.
+
+- id: "24-2-the-supervisor-is-built-on-the-trial-route"
+  title: "The Supervisor Is Built on the Trial Route"
+  description: >-
+    I want the Phase 1 build itself to run on the Opus 5.5 route and to be measured
+    story by story, So that the trial collects real data without spending anything
+    beyond the planned work. Canonical: ST-077.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 24.2: The
+    Supervisor Is Built on the Trial Route", the authoritative specification (user story
+    and acceptance criteria). Read the epic's own narrative (the paragraphs under "##
+    Epic 24:") for scope, rulings and the repo the story targets; transcribe the story
+    into the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/24-2.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass implementer.model and reviewers.model
+    explicitly on every subagent launch. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result.
+
+- id: "24-3-paired-runs-on-the-universe-awaits"
+  title: "Paired Runs on The Universe Awaits"
+  description: >-
+    I want the same stories run under both routes from the same base, So that cost and
+    speed are compared on identical work in the project the baseline came from.
+    Canonical: ST-078.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 24.3:
+    Paired Runs on The Universe Awaits", the authoritative specification (user story and
+    acceptance criteria). Read the epic's own narrative (the paragraphs under "## Epic
+    24:") for scope, rulings and the repo the story targets; transcribe the story into
+    the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/24-3.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass implementer.model and reviewers.model
+    explicitly on every subagent launch. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result.
+
+- id: "24-4-the-verdict-sets-the-defaults"
+  title: "The Verdict Sets the Defaults"
+  description: >-
+    I want the trial's evidence turned into a routing decision per leg, So that the
+    shipped defaults reflect what was measured, and nothing changes silently. Canonical:
+    ST-079.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 24.4: The
+    Verdict Sets the Defaults", the authoritative specification (user story and
+    acceptance criteria). Read the epic's own narrative (the paragraphs under "## Epic
+    24:") for scope, rulings and the repo the story targets; transcribe the story into
+    the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/24-4.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass implementer.model and reviewers.model
+    explicitly on every subagent launch. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result.
