@@ -540,6 +540,19 @@ arguments to `C:/...`:
 MSYS_NO_PATHCONV=1 sbx exec claude-<project> bash -lc 'GIT_NAME="Tim Kennedy" GIT_EMAIL="<noreply email>" bash /c/GitHub/tk-studio/tools/sbx-engine/provision-engine.sh /c/GitHub/<project> /c/GitHub/tk-studio'
 ```
 
+**C# / Godot projects need a network rule first.** The `balanced` policy
+blocks NuGet and the .NET download hosts (verified 2026-09-28), and the VM's
+Ubuntu packages only .NET 10, so a game project's sandbox cannot restore or
+build. Approving a network rule is the operator's call. Scope it to the one
+sandbox, from your terminal:
+
+```powershell
+sbx policy allow network --sandbox claude-<project> "api.nuget.org,globalcdn.nuget.org,dot.net,builds.dotnet.microsoft.com,dotnetcli.azureedge.net"
+```
+
+Then provision with `WITH_DOTNET=8.0`. Godot for Linux comes from the GitHub
+release, which the policy already allows, and runs through `$GODOT`.
+
 **Project setup.** Run this once per project, on the host:
 
 1. `tk install` at the pin, with the full module set, then `tk onboard`.

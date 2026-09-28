@@ -21,7 +21,7 @@ step git-identity
 git config --global user.email
 
 step tmux
-command -v tmux >/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tmux >/dev/null 2>&1
+command -v tmux >/dev/null || { sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1; sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tmux >/dev/null 2>&1; }
 tmux -V
 
 # [tui] is not optional: without it `bmad-loop list` fails (pyte/rich) and so
@@ -29,6 +29,17 @@ tmux -V
 step bmad-loop
 uv tool install --force "bmad-loop[tui] @ git+https://github.com/bmad-code-org/bmad-loop@${BMAD_LOOP_PIN}" >/dev/null 2>&1
 bmad-loop --version
+
+# C# / Godot projects: the `balanced` network policy blocks NuGet and the .NET
+# download hosts (verified 2026-09-28), and the VM's Ubuntu ships only .NET 10.
+# A .NET project's engine sandbox needs an operator-approved, sandbox-scoped
+# rule first (runbook §3.8): then WITH_DOTNET=8.0 installs the SDK channel.
+if [ -n "${WITH_DOTNET:-}" ]; then
+  step dotnet
+  curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh     && bash /tmp/dotnet-install.sh --channel "$WITH_DOTNET" --install-dir "$HOME/.dotnet" >/dev/null 2>&1
+  grep -q DOTNET_ROOT ~/.profile 2>/dev/null || { echo 'export DOTNET_ROOT="$HOME/.dotnet"' >> ~/.profile; echo 'export PATH="$HOME/.dotnet:$PATH"' >> ~/.profile; }
+  "$HOME/.dotnet/dotnet" --list-sdks 2>&1 | head -3
+fi
 
 if [ "${WITH_BUN:-0}" = 1 ]; then
   step bun
