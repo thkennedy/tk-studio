@@ -529,6 +529,9 @@ idempotent, and it sets up:
 - tmux
 - bmad-loop at the `bmad.lock` pin with the `[tui]` extra
 - Bun, when `WITH_BUN=1` is set
+- the .NET SDK, when `WITH_DOTNET=<channel>` is set
+- Godot (mono, Linux), when `WITH_GODOT=<version>` is set: the binary under
+  `~/godot`, a `godot` command on PATH, and `GODOT` in the profile
 - `TK_STUDIO_ROOT`
 - the tk-studio plugin at user scope
 - the sandbox's own studio store, with the project registered as developer
@@ -550,8 +553,20 @@ sandbox, from your terminal:
 sbx policy allow network --sandbox claude-<project> "api.nuget.org,globalcdn.nuget.org,dot.net,builds.dotnet.microsoft.com,dotnetcli.azureedge.net"
 ```
 
-Then provision with `WITH_DOTNET=8.0`. Godot for Linux comes from the GitHub
-release, which the policy already allows, and runs through `$GODOT`.
+Then provision with `WITH_DOTNET=8.0 WITH_GODOT=4.7.2`. Godot for Linux comes
+from the GitHub release, which the policy already allows. It runs through
+`$GODOT`, and through `godot` on PATH for project gates that call it by name.
+
+Proved on 2026-09-28 in `claude-the-universe-awaits`: .NET SDK 8.0.425,
+Godot 4.7.2 mono, and `TUA_ENGINE_GATE=1 bash scripts/verify.sh` green (1030
+xunit tests, 137 engine tests).
+
+**The engine reads the Windows checkout's line endings.** The sandbox mounts
+the host checkout, so a file under `* text=auto` arrives with CRLF. A test
+that compares text byte for byte fails in the sandbox and on the host, while
+a WSL-native clone passes. Pin such formats to LF in the project's
+`.gitattributes` (the-universe-awaits PR #2 did this for `*.tss`), then
+delete and check out the affected files again.
 
 **Project setup.** Run this once per project, on the host:
 

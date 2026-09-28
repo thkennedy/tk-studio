@@ -41,6 +41,28 @@ if [ -n "${WITH_DOTNET:-}" ]; then
   "$HOME/.dotnet/dotnet" --list-sdks 2>&1 | head -3
 fi
 
+# Godot (mono, Linux) for a game project's engine gate: WITH_GODOT=4.7.2. The
+# GitHub release host is allowed by `balanced`. Project gates call `godot` on
+# PATH (TUA's verify.sh and engine-gate.sh) and the studio runs it through
+# $GODOT, so both are set. libfontconfig1 is what the headless binary's loader
+# asks for on the VM's Ubuntu.
+if [ -n "${WITH_GODOT:-}" ]; then
+  step godot
+  GD_DIR="$HOME/godot/Godot_v${WITH_GODOT}-stable_mono_linux_x86_64"
+  GD_BIN="$GD_DIR/Godot_v${WITH_GODOT}-stable_mono_linux.x86_64"
+  [ -x "$GD_BIN" ] || {
+    mkdir -p "$HOME/godot"
+    curl -fsSL "https://github.com/godotengine/godot/releases/download/${WITH_GODOT}-stable/Godot_v${WITH_GODOT}-stable_mono_linux_x86_64.zip" -o /tmp/godot.zip \
+      && unzip -q -o /tmp/godot.zip -d "$HOME/godot" && chmod +x "$GD_BIN" && rm -f /tmp/godot.zip
+  }
+  dpkg -s libfontconfig1 >/dev/null 2>&1 || { sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1; sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libfontconfig1 >/dev/null 2>&1; }
+  mkdir -p "$HOME/.local/bin"
+  printf '#!/usr/bin/env bash\nexec "%s" "$@"\n' "$GD_BIN" > "$HOME/.local/bin/godot"
+  chmod +x "$HOME/.local/bin/godot"
+  grep -q 'export GODOT=' ~/.profile 2>/dev/null || echo "export GODOT=\"$GD_BIN\"" >> ~/.profile
+  "$HOME/.local/bin/godot" --version 2>&1 | tail -2
+fi
+
 if [ "${WITH_BUN:-0}" = 1 ]; then
   step bun
   command -v bun >/dev/null || (curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1) || npm install -g bun >/dev/null 2>&1
