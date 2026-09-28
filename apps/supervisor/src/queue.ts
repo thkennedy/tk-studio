@@ -30,6 +30,18 @@
  * whose `live[]` holds the engine while it runs; a failed probe counts as live).
  * No probe runs inside a transaction (a probe may spawn a process): the
  * transaction re-checks the rows it was probed from.
+ *
+ * Resume (Story 21.6): before the worker works, the run records its pre-minted
+ * session id, the worker's pid (POSIX: its process group) with its start time
+ * and the guard seconds passed to its spawn, and the wake answer — each with an
+ * event, in its own transaction. `recover` kills a recorded worker that still
+ * runs as recorded (pid + start time) before it resumes a run or releases its
+ * lock — an sbx run is held until its in-VM deadline instead, and `claim` waits
+ * on a dead owner's run whose recorded worker may still run (`recordedWorker`,
+ * one predicate) — then hands a resumable orphan to the
+ * injected `resume` op: a resume takes the run over in one transaction (owner,
+ * lock, a `resumed` event); anything else ends it through the same end path as
+ * `end` (the `stop` and `studio_outcome` markers included).
  */
 import { Database } from "bun:sqlite";
 import { spawnSync } from "node:child_process";
@@ -38,7 +50,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pluginRoot } from "./env";
-import { lastJsonObject, runUv, type RunResult } from "./server";
+import { lastJsonObject, runUv, SBX_GUARD_KILL_AFTER_S, type RunResult } from "./server";
 
 type Env = Record<string, string | undefined>;
 
@@ -185,6 +197,12 @@ export interface EngineProbe {
 export interface Probes {
   /** Is another owner's process alive? */
   ownerAlive(owner: Owner): boolean;
+  /** Kill a dead owner's recorded worker if it still runs as recorded (default: `killRecordedWorker`). */
+  killWorker?(pid: number, start: string | null): Promise<WorkerKill>;
+  /** Where a recorded worker stands, without signalling it (default: `probeRecordedWorker`). */
+  probeWorker?(pid: number, start: string | null): WorkerKill;
+  /** The clock an sbx worker's in-VM deadline is compared against (default `Date.now`). */
+  now?(): number;
   /** Is bmad-loop engine `engineRunId` live on the checkout at `root`? With
    * `null` (an unverified engine): is any engine live there? */
   engineLive(root: string, engineRunId: string | null): Promise<EngineProbe>;
@@ -227,6 +245,97 @@ export async function launchStatusProbe(root: string, engineRunId: string | null
 
 export const defaultProbes: Probes = { ownerAlive: (o) => defaultOwnerAlive(o), engineLive: (root, id) => launchStatusProbe(root, id) };
 
+/** Is `pid` a live (not zombie) process? */
+function pidRunning(pid: number): boolean {
+  try { process.kill(pid, 0); }
+  catch (e) { if ((e as NodeJS.ErrnoException)?.code !== "EPERM") return false; }
+  if (process.platform !== "linux") return true;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+    return stat.slice(stat.lastIndexOf(")") + 2)[0] !== "Z";
+  } catch { return false; }
+}
+
+/** POSIX: is any member of process group `pgid` alive (`kill(-pgid, 0)`)? A pgid
+ * stays reserved while any member exists, so a live group is still the recorded one. */
+function groupAlive(pgid: number): boolean {
+  try { process.kill(-pgid, 0); return true; }
+  catch (e) { return (e as NodeJS.ErrnoException)?.code === "EPERM"; }
+}
+
+export interface KillDeps {
+  platform?: NodeJS.Platform;
+  startTime?: (pid: number) => string | null;
+  running?: (pid: number) => boolean;
+  /** POSIX: is the process group `pgid` alive (default `kill(-pgid, 0)`)? Never asked on win32. */
+  groupAlive?: (pgid: number) => boolean;
+  /** POSIX: signal the process group; win32: `taskkill /F /T /PID`. Throws on failure. */
+  kill?: (pid: number, platform: NodeJS.Platform) => void;
+  /** Bounded wait for the killed worker to be gone (ms). */
+  waitMs?: number;
+}
+
+const killGroupOrTree = (pid: number, platform: NodeJS.Platform) => {
+  if (platform === "win32") {
+    const res = spawnSync("taskkill", ["/F", "/T", "/PID", String(pid)], { windowsHide: true, timeout: 30_000 });
+    if (res.status !== 0) throw new Error(`taskkill exited ${res.status}`);
+    return;
+  }
+  process.kill(-pid, "SIGKILL");
+};
+
+/** Where a recorded host worker stands, without signalling it: `running` (alive,
+ * start time equal to the recorded one), `start time unreadable`, `start time
+ * differs` (a reused pid), `group alive` (POSIX: the leader exited but members
+ * of its process group still run), or `not running`. */
+export function probeRecordedWorker(pid: number, start: string | null, deps: KillDeps = {}): WorkerKill {
+  const platform = deps.platform ?? process.platform;
+  const running = deps.running ?? pidRunning;
+  const startTime = deps.startTime ?? ((p: number) => processStartTime(p, platform));
+  if (!Number.isInteger(pid) || pid <= 0) return { pid, start, outcome: "not running" };
+  if (!running(pid)) {
+    if (platform !== "win32" && (deps.groupAlive ?? groupAlive)(pid)) {
+      return { pid, start, outcome: "group alive", detail: `leader ${pid} exited; members of its process group still run` };
+    }
+    return { pid, start, outcome: "not running" };
+  }
+  const live = startTime(pid);
+  if (!start || live === null) return { pid, start, outcome: "start time unreadable", detail: "not signalled: the recorded worker cannot be told from a reused pid" };
+  if (live !== start) return { pid, start, outcome: "start time differs", detail: `not signalled: pid ${pid} now started ${live} (a reused pid)` };
+  return { pid, start, outcome: "running" };
+}
+
+/** Kill a recorded worker only while it is still the recorded process: alive,
+ * and its start time readable and equal to the recorded one (a reused pid is
+ * never signalled; neither is one whose start time cannot be compared). POSIX:
+ * SIGKILL to its process group — also when the leader has exited but the group
+ * still has members (a pgid stays reserved while any member exists); win32:
+ * `taskkill /F /T /PID`. Never by name. Still running after the bounded wait
+ * → `kill failed` (`still running after wait`), so the run is held. */
+export async function killRecordedWorker(pid: number, start: string | null, deps: KillDeps = {}): Promise<WorkerKill> {
+  const platform = deps.platform ?? process.platform;
+  const running = deps.running ?? pidRunning;
+  const startTime = deps.startTime ?? ((p: number) => processStartTime(p, platform));
+  const alive = deps.groupAlive ?? groupAlive;
+  const probe = probeRecordedWorker(pid, start, deps);
+  if (probe.outcome !== "running" && probe.outcome !== "group alive") return probe;
+  const group = probe.outcome === "group alive";
+  try { (deps.kill ?? killGroupOrTree)(pid, platform); }
+  catch (e) { return { pid, start, outcome: "kill failed", detail: `${group ? "group: " : ""}${e instanceof Error ? e.message : String(e)}` }; }
+  const still = group ? () => alive(pid) : () => running(pid) && startTime(pid) === start;
+  const deadline = Date.now() + (deps.waitMs ?? 5000);
+  while (still() && Date.now() < deadline) await Bun.sleep(50);
+  if (still()) return { pid, start, outcome: "kill failed", detail: group ? "still running after wait (process group)" : "still running after wait" };
+  return group ? { pid, start, outcome: "group killed", detail: `leader ${pid} had exited; its process group was SIGKILLed` } : { pid, start, outcome: "killed" };
+}
+
+/** May a recorded worker still run, given what its probe or kill answered? The
+ * one predicate every path that frees a checkout lock asks (`recover`, `claim`). */
+export function workerMayRun(w: WorkerKill): boolean {
+  return w.outcome === "running" || w.outcome === "group alive" || w.outcome === "start time unreadable"
+    || w.outcome === "kill failed" || w.outcome === "in-VM deadline not passed";
+}
+
 // ------------------------------------------------------------ rows
 
 export interface QueueRun {
@@ -249,6 +358,14 @@ export interface QueueRun {
   sandbox: string | null;
   model: string | null;
   effort: string | null;
+  /** Story 21.6: the worker's pre-minted session id, its pid (POSIX: its process
+   * group) and that pid's start time, and the wake answer (JSON: directive, routing, state). */
+  session_id: string | null;
+  worker_pid: number | null;
+  worker_start: string | null;
+  /** The wall-clock guard (s) passed to the recorded worker's spawn: on sbx, its in-VM `timeout`. */
+  worker_guard_s: number | null;
+  wake: string | null;
   created: string; updated: string;
 }
 
@@ -301,17 +418,45 @@ export type ClaimResult =
   | { claimed: true; run: QueueRun }
   | { claimed: false; run: QueueRun; why: "terminal" | "running" | "owned" | "lock"; reason: string; holder?: Holder };
 
-/** Ends a minted studio run for an orphaned queue run (injected: the contract verbs live in cli.ts). */
-export type StudioEnder = (run: QueueRun, reason: string) => Promise<{ ok: boolean; detail: string }>;
+/** Ends a minted studio run for an orphaned queue run (injected: the contract verbs live in cli.ts);
+ * `state`: the studio run's terminal state once ended (or already). */
+export type StudioEnder = (run: QueueRun, reason: string) => Promise<{ ok: boolean; detail: string; state?: string }>;
 /** Looks up the job's studio run absent from the pre-verb snapshot (the 21-1
  * adoption rule): `run_id` null when none exists; `ok: false` when the lookup failed. */
 export type StudioFinder = (run: QueueRun, snapshot: string[]) =>
   Promise<{ ok: true; run_id: string | null } | { ok: false; detail: string }>;
-export interface StudioOps { end: StudioEnder; find: StudioFinder }
+/** A tripped guard as named on a run (cli.ts `GuardTrip`). */
+export interface TripRecord { guard: string; value: number }
+/** Whether a dead owner's skill run (with its studio run recorded) resumes: yes,
+ * with the detail the `resumed` event carries; or no, naming the cause (appended
+ * to `orphaned: supervisor restart`), the guards that tripped, and the studio
+ * run's own terminal state when it already ended (the queue run ends in it). */
+export type ResumeDecision =
+  | { resume: true; detail?: Record<string, unknown> }
+  | { resume: false; cause?: string; trips?: TripRecord[]; studioState?: TerminalState };
+export type StudioResumer = (run: QueueRun) => Promise<ResumeDecision>;
+export interface StudioOps { end: StudioEnder; find: StudioFinder; resume?: StudioResumer }
 
 export interface RecoverReport {
-  ended: { run_id: string; studio_run_id: string | null; studio: { ok: boolean; detail: string } | null; reason: string; engine?: Record<string, unknown> }[];
+  ended: { run_id: string; studio_run_id: string | null; studio: { ok: boolean; detail: string } | null; reason: string; engine?: Record<string, unknown>; state?: TerminalState }[];
   requeued: string[];
+  /** Runs taken over for a resume (driven by the caller): the resume count after the takeover. */
+  resumed: { run_id: string; studio_run_id: string; resume: number }[];
+  /** Runs left as they are: their recorded worker may still run (it could not be matched
+   * or killed, or an sbx worker's in-VM deadline has not passed). */
+  held?: { run_id: string; worker: WorkerKill }[];
+}
+
+/** What happened to (or where stands) a recorded worker before its run was resumed or its lock released. */
+export interface WorkerKill {
+  pid: number; start: string | null;
+  outcome: "killed" | "group killed" | "not running" | "start time differs" | "start time unreadable" | "kill failed"
+    | "running" | "group alive" | "in-VM deadline not passed" | "in-VM deadline passed";
+  detail?: string;
+  /** sbx: the in-VM deadline (recorded spawn + guard seconds + the `-k` grace), ISO. */
+  deadline?: string;
+  /** sbx, once the deadline passed: what the best-effort kill of the host `sbx exec` answered. */
+  host?: WorkerKill;
 }
 
 const SCHEMA = `
@@ -327,6 +472,7 @@ CREATE TABLE IF NOT EXISTS runs (
   reason TEXT, owner_pid INTEGER, owner_host TEXT, owner_nonce TEXT, owner_start TEXT,
   studio_run_id TEXT, engine_run_id TEXT, verb_started TEXT, verb_snapshot TEXT, definition TEXT,
   permission_mode TEXT, tier TEXT, sandbox TEXT, model TEXT, effort TEXT,
+  session_id TEXT, worker_pid INTEGER, worker_start TEXT, worker_guard_s INTEGER, wake TEXT,
   created TEXT NOT NULL, updated TEXT NOT NULL,
   FOREIGN KEY (job_id, checkout) REFERENCES jobs (job_id, checkout)
 );
@@ -348,7 +494,10 @@ CREATE TRIGGER IF NOT EXISTS runs_terminal_immutable BEFORE UPDATE ON runs
 
 /** Nullable run columns added after the first schema: an existing queue file
  * gains each one it lacks (guarded by PRAGMA table_info). */
-const ADDED_RUN_COLUMNS = ["permission_mode", "tier", "sandbox", "model", "effort"] as const;
+const ADDED_RUN_COLUMNS = [
+  ["permission_mode", "TEXT"], ["tier", "TEXT"], ["sandbox", "TEXT"], ["model", "TEXT"], ["effort", "TEXT"],
+  ["session_id", "TEXT"], ["worker_pid", "INTEGER"], ["worker_start", "TEXT"], ["wake", "TEXT"], ["worker_guard_s", "INTEGER"],
+] as const;
 
 const now = () => new Date().toISOString();
 
@@ -372,13 +521,18 @@ function holderReason(h: Holder): string {
     return `checkout lock held by ${engine} (launched by run ${h.run_id}, job ${h.job_id})`
       + (h.detail ? `; ${h.detail} — counted live` : "");
   }
-  return `checkout lock held by run ${h.run_id} (job ${h.job_id}, pid ${h.pid ?? "?"}${h.host ? `@${h.host}` : ""})`;
+  return `checkout lock held by run ${h.run_id} (job ${h.job_id}, pid ${h.pid ?? "?"}${h.host ? `@${h.host}` : ""})`
+    + (h.detail ? `; ${h.detail}` : "");
 }
 
 /** What a claim decides on: the run, its checkout's lock, the run holding that lock. */
 interface ClaimView { run: QueueRun; lock: LockRow | null; held: QueueRun | null }
 /** The claim's probe results, computed outside the transaction. */
-interface ClaimProbes { ownerLive: boolean; holderLive: boolean; launch: boolean; engine?: EngineProbe }
+interface ClaimProbes {
+  ownerLive: boolean; holderLive: boolean; launch: boolean; engine?: EngineProbe;
+  /** A `running` holder whose owner is dead but whose recorded worker may still run (`recordedWorker`). */
+  holderWorker?: WorkerKill;
+}
 
 const sameFields = <T extends object>(a: T | null, b: T | null, keys: (keyof T)[]) =>
   a === null || b === null ? a === b : keys.every((k) => a[k] === b[k]);
@@ -387,7 +541,7 @@ const sameFields = <T extends object>(a: T | null, b: T | null, keys: (keyof T)[
 function sameClaimView(a: ClaimView, b: ClaimView): boolean {
   return sameFields(a.run, b.run, ["state", "owner_pid", "owner_host", "owner_nonce", "owner_start"])
     && sameFields(a.lock, b.lock, ["kind", "run_id", "job_id", "owner_pid", "owner_host", "owner_nonce", "owner_start", "engine_run_id"])
-    && sameFields(a.held, b.held, ["state", "definition"]);
+    && sameFields(a.held, b.held, ["state", "definition", "tier", "worker_pid", "worker_start", "worker_guard_s"]);
 }
 
 // ------------------------------------------------------------ queue
@@ -406,8 +560,8 @@ export class Queue {
     this.db.transaction(() => {
       this.db.exec(SCHEMA);
       const have = new Set((this.db.query("PRAGMA table_info(runs)").all() as { name: string }[]).map((c) => c.name));
-      for (const col of ADDED_RUN_COLUMNS) {
-        if (!have.has(col)) this.db.exec(`ALTER TABLE runs ADD COLUMN ${col} TEXT`);
+      for (const [col, type] of ADDED_RUN_COLUMNS) {
+        if (!have.has(col)) this.db.exec(`ALTER TABLE runs ADD COLUMN ${col} ${type}`);
       }
     }).immediate();
   }
@@ -481,6 +635,40 @@ export class Queue {
     if (owner.nonce === self.nonce) return true;
     if (owner.host === self.host && owner.pid === self.pid) return false;
     return this.probes.ownerAlive(owner);
+  }
+
+  /** The in-VM deadline of an sbx run's recorded worker: its recorded spawn time (the
+   * latest `worker` event) + the guard seconds passed to that spawn (a record without
+   * them: the job's own guard, which bounds every spawn) + the `timeout -k` grace. */
+  sbxDeadline(run: QueueRun): { ms: number; guardS: number } {
+    const ev = this.db.query("SELECT at FROM events WHERE run_id = ? AND kind = 'worker' ORDER BY seq DESC LIMIT 1").get(run.run_id) as { at: string } | null;
+    const spawned = Date.parse(ev?.at ?? run.updated);
+    const guardS = run.worker_guard_s ?? (Number(this.definition(run)?.guards?.max_wall_clock_seconds) || 600);
+    return { ms: (Number.isFinite(spawned) ? spawned : Date.now()) + (guardS + SBX_GUARD_KILL_AFTER_S) * 1000, guardS };
+  }
+
+  /** The one "may the recorded worker still run" predicate every path that frees a
+   * checkout lock asks — `recover` (with `kill`) and `claim` (a probe, never a signal):
+   * no worker recorded → no; sbx → while its in-VM deadline has not passed (decided
+   * from the deadline, never from the host `sbx exec` pid; once passed, `kill` still
+   * kills a lingering host process best-effort); host → the pid + start time probe
+   * (or kill), then `workerMayRun`. */
+  async recordedWorker(run: QueueRun, kill: boolean): Promise<{ mayRun: boolean; worker?: WorkerKill }> {
+    if (run.worker_pid === null || run.worker_pid === undefined) return { mayRun: false };
+    const pid = run.worker_pid, start = run.worker_start;
+    if (run.tier === "sbx") {
+      const { ms } = this.sbxDeadline(run);
+      const deadline = new Date(ms).toISOString();
+      if ((this.probes.now?.() ?? Date.now()) < ms) {
+        return { mayRun: true, worker: { pid, start, outcome: "in-VM deadline not passed", deadline,
+          detail: `held until ${deadline}: the in-VM worker may run until its timeout (the recorded pid is the host sbx exec)` } };
+      }
+      const host = kill ? await (this.probes.killWorker ?? killRecordedWorker)(pid, start) : undefined;
+      return { mayRun: false, worker: { pid, start, outcome: "in-VM deadline passed", deadline, ...(host ? { host } : {}) } };
+    }
+    const worker = kill ? await (this.probes.killWorker ?? killRecordedWorker)(pid, start)
+      : (this.probes.probeWorker ?? probeRecordedWorker)(pid, start);
+    return { mayRun: workerMayRun(worker), worker };
   }
 
   private event(runId: string, kind: string, from: string | null, to: string, detail?: Record<string, unknown>): void {
@@ -581,7 +769,10 @@ export class Queue {
    * `queued` naming the live holder. Every owner and engine probe runs outside
    * the transaction (a probe may spawn a process — PowerShell on win32 — and
    * must never hold the write lock): the transaction re-reads the rows the
-   * probes were computed from and retries if any of them changed. */
+   * probes were computed from and retries if any of them changed. A `running`
+   * holder with a dead owner is live while its recorded worker may still run
+   * (`recordedWorker`: the pid alive with a matching or unreadable start time,
+   * its process group alive, or an sbx in-VM deadline not passed). */
   async claim(runId: string, owner: Owner = selfOwner()): Promise<ClaimResult> {
     for (let attempt = 0; attempt < 8; attempt++) {
       const seen = this.claimView(runId);
@@ -620,7 +811,9 @@ export class Queue {
               detail.released = { kind: "engine", engine_run_id: lock.engine_run_id, run_id: lock.run_id, why: "engine no longer live" };
             }
           } else if (p.holderLive) {
-            holder = { kind: "run", run_id: lock.run_id, job_id: lock.job_id, pid: lock.owner_pid, host: lock.owner_host };
+            const w = p.holderWorker;
+            holder = { kind: "run", run_id: lock.run_id, job_id: lock.job_id, pid: lock.owner_pid, host: lock.owner_host,
+              ...(w ? { detail: `owner dead, its recorded worker (pid ${w.pid}) may still run: ${w.outcome}${w.deadline ? ` until ${w.deadline}` : ""}` } : {}) };
           } else if (p.launch && p.engine!.live) {
             // The stale launch run's engine (or an unverified one, on a failed probe) takes the lock over.
             const probe = p.engine!;
@@ -684,6 +877,11 @@ export class Queue {
       return out;
     }
     out.holderLive = held?.state === "running" && this.ownerLive(ownerOf(lock), self);
+    if (!out.holderLive && held?.state === "running") {
+      // A dead owner's running holder is live while its recorded worker may still run (never a lock freed under it).
+      const w = await this.recordedWorker(held, false);
+      if (w.mayRun) { out.holderLive = true; out.holderWorker = w.worker; }
+    }
     const defn = held ? this.definition(held) : this.definition({ job_id: lock.job_id, checkout: lock.checkout });
     out.launch = !out.holderLive && defn?.target?.skill === LAUNCH_SKILL;
     // A stale launch-run holder may have started a detached engine: probe before taking over (AD: one engine per checkout).
@@ -721,6 +919,67 @@ export class Queue {
       this.event(runId, "studio-run", run.state, run.state, { studio_run_id: studioRunId });
       return this.must(runId);
     }).immediate();
+  }
+
+  /** Inside a transaction: a `running` run records `set` with one `kind` event. */
+  private recordOnRunning(runId: string, what: string, kind: string, set: Record<string, string | number | null>, detail: Record<string, unknown>): QueueRun {
+    return this.db.transaction(() => {
+      const run = this.must(runId);
+      if (isTerminal(run.state)) throw new RunTerminal(runId, run.state);
+      if (run.state !== "running") throw new Error(`${what}: queue run '${runId}' is ${run.state}, not running`);
+      const keys = Object.keys(set);
+      if (keys.length) {
+        this.db.query(`UPDATE runs SET ${keys.map((k) => `${k} = ?`).join(", ")}, updated = ? WHERE run_id = ?`)
+          .run(...keys.map((k) => set[k]), now(), runId);
+      }
+      this.event(runId, kind, run.state, run.state, detail);
+      return this.must(runId);
+    }).immediate();
+  }
+
+  /** Record the worker's pre-minted session id (before the worker is spawned). */
+  setSession(runId: string, sessionId: string): QueueRun {
+    return this.recordOnRunning(runId, "setSession", "session", { session_id: sessionId }, { session_id: sessionId });
+  }
+
+  /** Record the spawned worker: its pid (POSIX: its process group; win32: the pid), that pid's start
+   * time, and the wall-clock guard seconds passed to its spawn (sbx: the in-VM `timeout`). The
+   * `worker` event's time is the recorded spawn time. */
+  setWorker(runId: string, pid: number, start: string | null, guardS?: number | null): QueueRun {
+    const guard = typeof guardS === "number" && Number.isFinite(guardS) && guardS > 0 ? Math.ceil(guardS) : null;
+    return this.recordOnRunning(runId, "setWorker", "worker", { worker_pid: pid, worker_start: start, worker_guard_s: guard },
+      { pid, ...(start ? { start } : {}), ...(guard !== null ? { guard_s: guard } : {}) });
+  }
+
+  /** Record the wake/submit answer a resume rebuilds the run from (directive, routing, state). */
+  setWake(runId: string, wake: Record<string, unknown>): QueueRun {
+    return this.recordOnRunning(runId, "setWake", "woke", { wake: JSON.stringify(wake) }, { state: wake.state ?? null });
+  }
+
+  /** Record the transcript message ids (and their counts) `account` was given for this run. */
+  recordAccounted(runId: string, ids: readonly string[], counts: { turns: number; tokens: number }, extra: Record<string, unknown> = {}): QueueRun {
+    return this.recordOnRunning(runId, "recordAccounted", "accounted", {}, { ...counts, message_ids: [...ids], ...extra });
+  }
+
+  /** Every message id already accounted for this run (its `accounted` and `resumed` events). */
+  accountedIds(runId: string): string[] {
+    const ids = new Set<string>();
+    for (const e of this.events(runId)) {
+      const d = e.detail as Record<string, any> | null;
+      const list = e.kind === "accounted" ? d?.message_ids : e.kind === "resumed" ? d?.accounted?.message_ids : undefined;
+      if (Array.isArray(list)) for (const id of list) if (typeof id === "string") ids.add(id);
+    }
+    return [...ids];
+  }
+
+  /** How many times this run was resumed (its `resumed` events). */
+  resumeCount(runId: string): number {
+    return (this.db.query("SELECT COUNT(*) AS n FROM events WHERE run_id = ? AND kind = 'resumed'").get(runId) as { n: number }).n;
+  }
+
+  /** An in-process resume (a silent worker exit, AC2): the owner already holds the run and its lock. */
+  markResumed(runId: string, detail: Record<string, unknown>): QueueRun {
+    return this.recordOnRunning(runId, "markResumed", "resumed", {}, { resume: this.resumeCount(runId) + 1, ...detail });
   }
 
   /** Put an engine holder on the checkout lock for run `run` (inside a transaction). */
@@ -774,24 +1033,33 @@ export class Queue {
       const run = this.must(runId);
       if (isTerminal(run.state)) throw new RunTerminal(runId, run.state);
       if (opts.from && run.state !== opts.from) throw new Error(`end: queue run '${runId}' is ${run.state}, not ${opts.from}`);
-      this.db.query(
-        `UPDATE runs SET state = ?, reason = ?, owner_pid = NULL, owner_host = NULL, owner_nonce = NULL, owner_start = NULL,
-           engine_run_id = ?, updated = ? WHERE run_id = ?`,
-      ).run(state, reason ?? null, opts.engineRunId ?? null, now(), runId);
-      const detail: Record<string, unknown> = { ...(opts.detail ?? {}) };
-      if (opts.engineRunId !== undefined) {
-        const lock = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(run.checkout) as LockRow | null;
-        if (!lock || lock.run_id === runId) {
-          this.handToEngine(run, opts.engineRunId);
-          detail.lock = { handed_to_engine: opts.engineRunId ?? "unverified" };
-        }
-      } else if (this.db.query("DELETE FROM locks WHERE checkout = ? AND run_id = ? AND kind = 'run'").run(run.checkout, runId).changes) {
-        detail.lock = "released";
-      }
-      this.event(runId, "ended", run.state, state, { ...(reason ? { reason } : {}), ...detail });
-      if (opts.stop) this.event(runId, "stopped", state, state, { ...opts.stop, state });
+      this.writeEnd(run, state, reason, { ...opts, kind: "ended" });
       return this.must(runId);
     }).immediate();
+  }
+
+  /** Inside a transaction: the terminal transition, the lock released (or handed
+   * to an engine), the ending event (`ended`, or `orphaned` from `recover`), and
+   * a `stop` recorded in the same transaction. The one end path. */
+  private writeEnd(run: QueueRun, state: TerminalState, reason: string | null | undefined,
+    opts: { kind: "ended" | "orphaned"; engineRunId?: string | null; detail?: Record<string, unknown>; stop?: StopDetail }): void {
+    const runId = run.run_id;
+    this.db.query(
+      `UPDATE runs SET state = ?, reason = ?, owner_pid = NULL, owner_host = NULL, owner_nonce = NULL, owner_start = NULL,
+         engine_run_id = ?, updated = ? WHERE run_id = ?`,
+    ).run(state, reason ?? null, opts.engineRunId ?? null, now(), runId);
+    const detail: Record<string, unknown> = { ...(opts.detail ?? {}) };
+    if (opts.engineRunId !== undefined) {
+      const lock = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(run.checkout) as LockRow | null;
+      if (!lock || lock.run_id === runId) {
+        this.handToEngine(run, opts.engineRunId);
+        detail.lock = { handed_to_engine: opts.engineRunId ?? "unverified" };
+      }
+    } else if (this.db.query("DELETE FROM locks WHERE checkout = ? AND run_id = ? AND kind = 'run'").run(run.checkout, runId).changes) {
+      detail.lock = "released";
+    }
+    this.event(runId, opts.kind, run.state, state, { ...(reason ? { reason } : {}), ...detail });
+    if (opts.stop) this.event(runId, "stopped", state, state, { ...opts.stop, state });
   }
 
   /** `queued` runs no live process owns (ownerless, or a dead owner), oldest first. */
@@ -802,17 +1070,31 @@ export class Queue {
 
   /** The restart rule (AC4) over every `queued`/`running` run whose owner
    * process no longer exists:
-   *   - `running` with a studio run → ended `partial` (`orphaned: supervisor
-   *     restart`), the studio run ended too through `ops.end`;
+   *   - first, a recorded worker still running as recorded (pid + start time,
+   *     or its process group once the leader exited) is killed (Story 21.6,
+   *     DW-3/DW-7); one that may still run but cannot be matched or killed —
+   *     or an sbx worker whose in-VM deadline (recorded spawn + guard seconds
+   *     + the `-k` grace) has not passed — holds the run as it is (`held`:
+   *     nothing released; `recordedWorker`, the predicate `claim` asks too);
+   *   - `running` with a studio run → the `resume` op (when given) decides
+   *     (an sbx run is never resumed here):
+   *     resume → taken over in one transaction (owner = self, the lock
+   *     re-owned, a `resumed` event; the caller drives it); otherwise ended
+   *     `partial` (`orphaned: supervisor restart`, plus the cause the op
+   *     names), or in the studio run's own terminal state when it already
+   *     ended; the studio run ended too through `ops.end`;
    *   - `running` past `verb_started` with no studio run → `ops.find` looks up
    *     the job's studio run absent from the stored snapshot: found → recorded
-   *     and ended as above; none (lookup ok) → re-queued; lookup failed →
+   *     and handled as above; none (lookup ok) → re-queued; lookup failed →
    *     ended `partial` naming it (a run that may have executed never re-runs);
    *   - otherwise (never reached the verb, or `queued`) → re-queued.
-   * Ending a `tk-studio-launch` run first probes the launch core: a live
-   * engine (or a failed probe: an unverified engine) takes the lock over. */
+   * Every end goes through `end`'s path: `studio_outcome` when the studio run
+   * reached a terminal state, and the `stopped` event when the job's
+   * `stop.on_status` lists it (DW-8). Ending a `tk-studio-launch` run first
+   * probes the launch core: a live engine (or a failed probe: an unverified
+   * engine) takes the lock over. */
   async recover(ops: StudioOps, self: Owner = selfOwner()): Promise<RecoverReport> {
-    const report: RecoverReport = { ended: [], requeued: [] };
+    const report: RecoverReport = { ended: [], requeued: [], resumed: [] };
     const candidates = (this.db.query(
       "SELECT * FROM runs WHERE state IN ('queued','running') AND owner_pid IS NOT NULL ORDER BY created, rowid",
     ).all() as QueueRun[]).filter((r) => r.owner_nonce !== self.nonce && !this.ownerLive(ownerOf(r), self));
@@ -822,6 +1104,17 @@ export class Queue {
     const deadOwner = (c: QueueRun) => ({ pid: c.owner_pid, host: c.owner_host, nonce: c.owner_nonce, ...(c.owner_start ? { start: c.owner_start } : {}) });
 
     for (const c of candidates) {
+      // Before anything resumes the run or releases its lock: its recorded worker (DW-3, DW-7).
+      // sbx: held until the in-VM deadline (the host pid is only `sbx exec`).
+      const settled = await this.recordedWorker(c, true);
+      const worker = settled.worker;
+      if (settled.mayRun) {
+        // It may still be the worker: never release its lock under it.
+        (report.held ??= []).push({ run_id: c.run_id, worker: worker! });
+        continue;
+      }
+      const workerDetail = worker ? { worker } : {};
+
       let end: { studioRunId: string | null; lookup?: Record<string, unknown>; lookupFailed?: string } | null = null;
       if (c.state === "running" && c.studio_run_id) {
         end = { studioRunId: c.studio_run_id };
@@ -846,7 +1139,8 @@ export class Queue {
           ).run(REQUEUED_REASON, now(), c.run_id);
           this.db.query("DELETE FROM locks WHERE checkout = ? AND run_id = ? AND kind = 'run'").run(c.checkout, c.run_id);
           this.event(c.run_id, "requeued", c.state, "queued", {
-            reason: REQUEUED_REASON, dead_owner: deadOwner(c), ...(requeueWhy ? { lookup: { ok: true, adopted: null, why: requeueWhy } } : {}),
+            reason: REQUEUED_REASON, dead_owner: deadOwner(c), ...workerDetail,
+            ...(requeueWhy ? { lookup: { ok: true, adopted: null, why: requeueWhy } } : {}),
           });
           return true;
         }).immediate();
@@ -854,37 +1148,88 @@ export class Queue {
         continue;
       }
 
-      const reason = end.lookupFailed ? `${ORPHANED_REASON}; studio run lookup failed: ${end.lookupFailed.slice(0, 300)}` : ORPHANED_REASON;
-      let studio: { ok: boolean; detail: string } | null = null;
-      if (end.studioRunId) {
-        try { studio = await ops.end({ ...c, studio_run_id: end.studioRunId }, ORPHANED_REASON); }
-        catch (e) { studio = { ok: false, detail: `ending studio run ${end.studioRunId} failed: ${e instanceof Error ? e.message : String(e)}` }; }
+      const studioRunId = end.studioRunId;
+      let decision: ResumeDecision | undefined;
+      if (studioRunId && ops.resume) {
+        try { decision = await ops.resume({ ...c, studio_run_id: studioRunId }); }
+        catch (e) { decision = { resume: false, cause: `resume check failed: ${e instanceof Error ? e.message : String(e)}` }; }
+        // An sbx run is never resumed on restart (its in-VM worker ran to its deadline): the op names the guard.
+        if (decision.resume && c.tier === "sbx") decision = { resume: false, cause: "an sbx run is never resumed on restart" };
       }
+      let lockCause: string | undefined;
+      if (decision?.resume && studioRunId) {
+        // The takeover: owner = self, the lock re-owned (never released in between), a `resumed` event — one transaction.
+        const took = this.db.transaction((): number | "changed" | string => {
+          if (!unchanged(c, this.get(c.run_id))) return "changed";
+          const lock = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(c.checkout) as LockRow | null;
+          if (lock && lock.run_id !== c.run_id) return `checkout lock held by ${lock.kind} ${lock.run_id}`;
+          this.db.query(
+            `UPDATE runs SET reason = NULL, owner_pid = ?, owner_host = ?, owner_nonce = ?, owner_start = ?, studio_run_id = ?,
+               updated = ? WHERE run_id = ?`,
+          ).run(self.pid, self.host, self.nonce, self.start ?? null, studioRunId, now(), c.run_id);
+          this.db.query(
+            `INSERT INTO locks (checkout, root, kind, run_id, job_id, owner_pid, owner_host, owner_nonce, owner_start, engine_run_id, acquired)
+             VALUES (?, ?, 'run', ?, ?, ?, ?, ?, ?, NULL, ?)
+             ON CONFLICT (checkout) DO UPDATE SET root = excluded.root, kind = 'run', run_id = excluded.run_id,
+               job_id = excluded.job_id, owner_pid = excluded.owner_pid, owner_host = excluded.owner_host,
+               owner_nonce = excluded.owner_nonce, owner_start = excluded.owner_start,
+               engine_run_id = NULL, acquired = excluded.acquired`,
+          ).run(c.checkout, c.root, c.run_id, c.job_id, self.pid, self.host, self.nonce, self.start ?? null, now());
+          const n = this.resumeCount(c.run_id) + 1;
+          this.event(c.run_id, "resumed", c.state, c.state, {
+            resume: n, reason: "supervisor restart", dead_owner: deadOwner(c), owner: ownerDetail(self), studio_run_id: studioRunId,
+            ...(c.session_id ? { session_id: c.session_id } : {}), ...workerDetail,
+            ...(end!.lookup ? { lookup: end!.lookup } : {}), ...(decision.resume ? decision.detail ?? {} : {}),
+          });
+          return n;
+        }).immediate();
+        if (typeof took === "number") report.resumed.push({ run_id: c.run_id, studio_run_id: studioRunId, resume: took });
+        if (typeof took === "number" || took === "changed") continue;
+        lockCause = took;
+      }
+
+      const noResume = decision && !decision.resume ? decision : undefined;
+      const cause = lockCause ?? noResume?.cause;
+      const reason = end.lookupFailed ? `${ORPHANED_REASON}; studio run lookup failed: ${end.lookupFailed.slice(0, 300)}`
+        : cause ? `${ORPHANED_REASON}; ${cause}` : ORPHANED_REASON;
+      const already = lockCause ? undefined : noResume?.studioState;
+      let studio: { ok: boolean; detail: string; state?: string } | null = null;
+      if (studioRunId && already) studio = { ok: true, detail: `studio run ${studioRunId} already ${already}`, state: already };
+      else if (studioRunId) {
+        try { studio = await ops.end({ ...c, studio_run_id: studioRunId }, reason); }
+        catch (e) { studio = { ok: false, detail: `ending studio run ${studioRunId} failed: ${e instanceof Error ? e.message : String(e)}` }; }
+      }
+      const state: TerminalState = already ?? "partial";
+      // The studio run's own terminal state (DW-8): recorded, and matched against `stop.on_status`.
+      const studioOutcome = studioRunId && studio?.ok && isTerminal(studio.state) ? { run_id: studioRunId, state: studio.state } : undefined;
+      const defn = this.definition(c);
+      const onStatus = defn?.stop?.on_status;
+      const stop: StopDetail | undefined = studioOutcome && Array.isArray(onStatus) && onStatus.includes(studioOutcome.state)
+        ? { condition: "on_status", state: studioOutcome.state, job_id: c.job_id } : undefined;
       // A launch run may have started a detached engine before the handover: probe before releasing the lock.
       let engine: Record<string, unknown> | undefined;
       let engineHolder: { id: string | null } | undefined;
-      if (this.definition(c)?.target?.skill === LAUNCH_SKILL) ({ holder: engineHolder, engine } = await this.launchEngine(c.root));
+      if (defn?.target?.skill === LAUNCH_SKILL) ({ holder: engineHolder, engine } = await this.launchEngine(c.root));
+      const trips = noResume?.trips?.length ? noResume.trips : undefined;
       const done = this.db.transaction(() => {
-        if (!unchanged(c, this.get(c.run_id))) return false;
-        this.db.query(
-          `UPDATE runs SET state = 'partial', reason = ?, owner_pid = NULL, owner_host = NULL, owner_nonce = NULL, owner_start = NULL,
-             studio_run_id = ?, engine_run_id = ?, updated = ? WHERE run_id = ?`,
-        ).run(reason, end!.studioRunId, engineHolder?.id ?? null, now(), c.run_id);
-        const lock = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(c.checkout) as LockRow | null;
-        let lockDetail: unknown;
-        if (engineHolder && (!lock || lock.run_id === c.run_id)) {
-          this.handToEngine(c, engineHolder.id);
-          lockDetail = { handed_to_engine: engineHolder.id ?? "unverified" };
-        } else if (this.db.query("DELETE FROM locks WHERE checkout = ? AND run_id = ? AND kind = 'run'").run(c.checkout, c.run_id).changes) {
-          lockDetail = "released";
-        }
-        this.event(c.run_id, "orphaned", c.state, "partial", {
-          reason, dead_owner: deadOwner(c), studio_run_id: end!.studioRunId, studio,
-          ...(end!.lookup ? { lookup: end!.lookup } : {}), ...(engine ? { engine } : {}), ...(lockDetail ? { lock: lockDetail } : {}),
+        const cur = this.get(c.run_id);
+        if (!unchanged(c, cur)) return false;
+        if (studioRunId !== c.studio_run_id) this.db.query("UPDATE runs SET studio_run_id = ? WHERE run_id = ?").run(studioRunId, c.run_id);
+        this.writeEnd(cur!, state, reason, {
+          kind: "orphaned", ...(engineHolder ? { engineRunId: engineHolder.id } : {}), ...(stop ? { stop } : {}),
+          detail: {
+            dead_owner: deadOwner(c), studio_run_id: studioRunId, studio, ...workerDetail,
+            ...(end!.lookup ? { lookup: end!.lookup } : {}), ...(engine ? { engine } : {}),
+            ...(trips ? { guards_tripped: trips } : {}), ...(studioOutcome ? { studio_outcome: studioOutcome } : {}),
+          },
         });
         return true;
       }).immediate();
-      if (done) report.ended.push({ run_id: c.run_id, studio_run_id: end.studioRunId, studio, reason, ...(engine ? { engine } : {}) });
+      if (done) {
+        report.ended.push({
+          run_id: c.run_id, studio_run_id: studioRunId, studio, reason, ...(engine ? { engine } : {}), ...(state !== "partial" ? { state } : {}),
+        });
+      }
     }
     return report;
   }

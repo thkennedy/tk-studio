@@ -14,9 +14,13 @@
  * job.schema.json; a refusal or problems[] is returned verbatim, nothing
  * queued) → idempotent enqueue → JSON `{ok, run_id, state, minted}`.
  * `recover`: the restart rule — runs left `queued`/`running` by a dead owner
- * are ended `partial` (`orphaned: supervisor restart`, studio run ended too)
- * or re-queued when they never reached the minting verb (or reached it and
- * the lookup found no studio run absent from the stored pre-verb snapshot).
+ * have their recorded worker killed (pid + start time matched), then a skill
+ * run with its session recorded, a transcript and budget left is resumed
+ * (`claude -p --resume <session-id>`, once per run — Story 21.6); otherwise
+ * ended `partial` (`orphaned: supervisor restart` plus the cause, studio run
+ * ended too), or re-queued when they never reached the minting verb (or
+ * reached it and the lookup found no studio run absent from the stored
+ * pre-verb snapshot).
  * `drain`: recover, then drive every `queued` run no live process owns,
  * oldest first (re-validated through `resolve`: a refusal ends it `blocked`
  * naming the problems; a lock wait or no Max login leaves it queued), under
@@ -66,18 +70,21 @@
  * answering without a run_id, or failing with no new run found); a queue run
  * already claimed is ended `blocked` with that error and named in the answer.
  */
+import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import {
   buildWorkerCommand, checkTier, finishStateFor, invokeSkill, maxLoginPreflight, MISSING_STATUS_BLOCK,
-  readProjectConfig, registryShow, requireCompatible, resolveStudioRoot, runJobVerb, SbxSandboxMissing, toVmPath, type Tier,
+  readProjectConfig, registryShow, requireCompatible, resolveStudioRoot, runJobVerb, SbxSandboxMissing, toVmPath, WORKER_RECORD_FAILED, type Tier,
 } from "./server";
 import {
-  checkoutKey, isTerminal, Queue, selfOwner, type Holder, type Owner, type QueueRun, type RecoverReport, type RunState, type StudioEnder,
-  type StudioFinder, type StudioOps,
+  checkoutKey, isTerminal, ORPHANED_REASON, processStartTime, Queue, selfOwner, type Holder, type Owner, type QueueRun, type RecoverReport, type RunState,
+  type StudioEnder, type StudioFinder, type StudioOps, type StudioResumer, type TerminalState,
 } from "./queue";
 import { jobOptions, loadSupervisorConfig, type JobOptions } from "./config";
-import { resultCounts, transcriptCounts, type Counts } from "./transcript";
+import {
+  ensureTranscript, resultCounts, sbxTranscriptExists, transcriptCounts, TranscriptError, transcriptNewCounts, type Counts,
+} from "./transcript";
 
 export interface RunSummary {
   ok: boolean;
@@ -314,7 +321,7 @@ export function studioRunEnder(verbRunner: VerbRunner = runJobVerb): StudioEnder
     try {
       const st = answered(await verbRunner(root, ["status", "--directory", root, "--job-id", run.job_id, "--run-id", sid]), "status");
       const state = (st.runs ?? [])[0]?.state;
-      if (isTerminal(state)) return { ok: true, detail: `studio run ${sid} already ${state}` };
+      if (isTerminal(state)) return { ok: true, detail: `studio run ${sid} already ${state}`, state };
     } catch { /* end it anyway: the ending verb decides */ }
     const verb = run.target === "core" ? "cancel" : "finish";
     try {
@@ -322,7 +329,8 @@ export function studioRunEnder(verbRunner: VerbRunner = runJobVerb): StudioEnder
         ? ["finish", "--directory", root, "--run-id", sid, "--state", "partial", "--reason", reason]
         : ["cancel", "--directory", root, "--job-id", run.job_id, "--run-id", sid]), verb);
       if (verb === "cancel" && out.cancelled !== true) throw new Error(`cancel: ${out.reason ?? "not cancelled"}`);
-      return { ok: true, detail: `studio run ${sid} ended via ${verb}` };
+      // §4: `finish` answers the run's state; `cancel` ends a resumable run `partial` (reason `cancelled`).
+      return { ok: true, detail: `studio run ${sid} ended via ${verb}`, state: verb === "finish" && typeof out.state === "string" ? out.state : "partial" };
     } catch (e) {
       return { ok: false, detail: `ending studio run ${sid} via ${verb} failed: ${message(e)}` };
     }
@@ -374,17 +382,59 @@ export function studioOps(verbRunner: VerbRunner = runJobVerb): StudioOps {
   return { end: studioRunEnder(verbRunner), find: studioRunFinder(verbRunner) };
 }
 
-/** `recover`: the restart rule over the whole queue. */
-export async function recoverQueue(opts: RunOptions = {}, verbRunner: VerbRunner = runJobVerb): Promise<RecoverReport> {
+/** A run `recover` took over for a resume, and what driving it answered. */
+export type ResumedRun = RecoverReport["resumed"][number] & { summary?: RunSummary; error?: string };
+/** The restart rule's report, with every taken-over run driven. */
+export type RecoveryReport = Omit<RecoverReport, "resumed"> & { resumed: ResumedRun[] };
+
+/** The restart rule with resumes (Story 21.6): `Queue.recover` kills recorded
+ * workers, ends what cannot resume and takes over what can — kept short; the
+ * caller then drives each taken-over run (`driveResumes`). */
+export async function recoverWithResume(
+  queue: Queue, owner: Owner, verbRunner: VerbRunner = runJobVerb, deps: ResumeDeps = {},
+): Promise<{ report: RecoveryReport; prepared: Map<string, Started> }> {
+  const prepared = new Map<string, Started>();
+  const report = await queue.recover({ ...studioOps(verbRunner), resume: restartResumer(queue, verbRunner, prepared, deps) }, owner);
+  await settleTakenOver(queue, report, prepared, verbRunner, deps);
+  return { report, prepared };
+}
+
+/** Drive taken-over runs one after another: `--resume <session-id>` on the stored tier, then finish and mirror. */
+export async function driveResumes(
+  queue: Queue, runs: ResumedRun[], prepared: Map<string, Started>, verbRunner: VerbRunner = runJobVerb, invoke: SkillInvoker = invokeSkill,
+): Promise<void> {
+  for (const r of runs) {
+    const s = prepared.get(r.run_id);
+    if (!s) {
+      r.error = "resume: no rebuilt run to drive";
+      try { await queue.endDriven(r.run_id, "blocked", r.error); } catch { /* already ended */ }
+      continue;
+    }
+    let summary: RunSummary;
+    try { summary = await finishRun({ ...s, recorder: queueRecorder(queue, r.run_id) }, verbRunner, invoke); }
+    catch (e) {
+      r.error = message(e);
+      try { await queue.endDriven(r.run_id, "blocked", r.error); } catch { /* already ended */ }
+      continue;
+    }
+    r.summary = await mirror(queue, r.run_id, { jobId: s.jobId, defn: s.defn }, summary);
+  }
+}
+
+/** `recover`: the restart rule over the whole queue; every resumable run is resumed. */
+export async function recoverQueue(opts: RunOptions = {}, verbRunner: VerbRunner = runJobVerb): Promise<RecoveryReport> {
   requireStudio();
   const { queue, owned } = openQueue(opts);
-  try { return await queue.recover(studioOps(verbRunner), opts.owner ?? selfOwner()); }
-  finally { if (owned) queue.close(); }
+  try {
+    const { report, prepared } = await recoverWithResume(queue, opts.owner ?? selfOwner(), verbRunner);
+    await driveResumes(queue, report.resumed, prepared, verbRunner);
+    return report;
+  } finally { if (owned) queue.close(); }
 }
 
 export interface DrainReport {
   ok: boolean;
-  recovered: RecoverReport;
+  recovered: RecoveryReport;
   runs: ({ run_id: string; job_id: string } & (
     /** `state`: the queue run's actual state, when the summary carries no run id or a different state. */
     | { summary: RunSummary; state?: RunState }
@@ -401,7 +451,8 @@ export async function drainQueue(opts: RunOptions = {}, verbRunner: VerbRunner =
   const { queue, owned } = openQueue(opts);
   const owner = opts.owner ?? selfOwner();
   try {
-    const recovered = await queue.recover(studioOps(verbRunner), owner);
+    const { report: recovered, prepared } = await recoverWithResume(queue, owner, verbRunner);
+    await driveResumes(queue, recovered.resumed, prepared, verbRunner);
     const runs: DrainReport["runs"] = [];
     for (const r of queue.drainable(owner)) {
       try {
@@ -429,7 +480,10 @@ export async function drainQueue(opts: RunOptions = {}, verbRunner: VerbRunner =
         runs.push({ run_id: r.run_id, job_id: r.job_id, error, ...problems, ...(now && now !== "queued" ? { state: now } : {}) });
       }
     }
-    return { ok: runs.every((r) => "summary" in r && (r.summary.ok || r.summary.skipped === true)), recovered, runs };
+    // Every run drain drove completed: the queued runs, and the resumed runs its recovery took over.
+    const ok = runs.every((r) => "summary" in r && (r.summary.ok || r.summary.skipped === true))
+      && recovered.resumed.every((r) => r.summary?.ok === true);
+    return { ok, recovered, runs };
   } finally { if (owned) queue.close(); }
 }
 
@@ -460,8 +514,17 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
   requireStudio(); // StudioRootMissing (AD-15), the contract pin
   const { queue, owned } = openQueue(opts);
   const owner = opts.owner ?? selfOwner();
+  let resuming: Promise<void> = Promise.resolve();
   try {
-    if (!opts.skipRecover) await queue.recover(studioOps(), owner);
+    if (!opts.skipRecover) {
+      const { report, prepared } = await recoverWithResume(queue, owner);
+      // This job's own resumed run on this checkout first (it is never driven twice);
+      // other jobs' resumes are driven alongside this run.
+      const checkout = checkoutKey(resolve(directory));
+      const mine = (id: string) => { const r = queue.get(id); return r?.job_id === jobId && r.checkout === checkout; };
+      await driveResumes(queue, report.resumed.filter((r) => mine(r.run_id)), prepared);
+      resuming = driveResumes(queue, report.resumed.filter((r) => !mine(r.run_id)), prepared);
+    }
     // `drain` mode: the listed run must still be an ownerless `queued` run.
     const skipped = (why: string): RunSummary => {
       const now = opts.runId ? queue.get(opts.runId) : null;
@@ -520,7 +583,10 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
       throw err;
     }
     return await mirror(queue, run.run_id, v, summary);
-  } finally { if (owned) queue.close(); }
+  } finally {
+    await resuming;
+    if (owned) queue.close();
+  }
 }
 
 /** The 21-1 flow under a claimed lock: snapshot → wake/submit → invoke/finish. */
@@ -539,7 +605,10 @@ async function drive(queue: Queue, queueRunId: string, v: Validated): Promise<Ru
   }
   if ("summary" in started) return started.summary;
   queue.setStudioRun(queueRunId, started.runId);
-  return finishRun(started);
+  // Story 21.6: the wake answer a resume rebuilds from, then a pre-minted session id
+  // (recorded just before the spawn) and the worker's pid (recorded on spawn).
+  queue.setWake(queueRunId, { directive: started.woke.directive ?? null, routing: started.woke.routing ?? null, state: started.woke.state ?? null });
+  return finishRun({ ...started, sessionId: randomUUID(), recorder: queueRecorder(queue, queueRunId) });
 }
 
 /** `.bmad-loop/runs/<id>` named by a tk-studio-launch run's status block: the detached engine it started. */
@@ -599,6 +668,35 @@ export interface Started {
   registryRoot?: string;
   /** The submission's overrides: they win over `woke.routing` (§5). */
   model?: string; effort?: string;
+  /** Story 21.6: the pre-minted session id (`--session-id` on the first invoke, `--resume` on a resume). */
+  sessionId?: string;
+  /** Records the session, the worker, what was accounted and each resume on the queue run. */
+  recorder?: RunRecorder;
+  /** A restart resume: the first invocation resumes `sessionId` with this much of the guard left. */
+  resumeFirst?: { remainingS: number; spentS: number };
+}
+
+/** What a driven run records on its queue run (Story 21.6). */
+export interface RunRecorder {
+  session(sessionId: string): void;
+  /** The spawned worker's pid and the wall-clock guard seconds passed to that spawn. */
+  worker(pid: number, guardS?: number): void;
+  accounted(ids: string[], counts: Counts): void;
+  accountedIds(): string[];
+  resumes(): number;
+  resumed(detail: Record<string, unknown>): void;
+}
+
+/** The queue-backed recorder of one queue run. */
+export function queueRecorder(queue: Queue, runId: string): RunRecorder {
+  return {
+    session: (sid) => { queue.setSession(runId, sid); },
+    worker: (pid, guardS) => { queue.setWorker(runId, pid, processStartTime(pid), guardS); },
+    accounted: (ids, counts) => { queue.recordAccounted(runId, ids, counts); },
+    accountedIds: () => queue.accountedIds(runId),
+    resumes: () => queue.resumeCount(runId),
+    resumed: (detail) => { queue.markResumed(runId, detail); },
+  };
 }
 
 /** Registry `show` + `resolve`: the plugin's one validator (AD-2). A refusal
@@ -764,17 +862,254 @@ export function iterationCounts(out: Record<string, unknown>, tier?: Tier): Coun
   return tier === "sbx" ? resultCounts(out) : transcriptCounts(typeof out.session_id === "string" ? out.session_id : undefined);
 }
 
+/** One iteration's counts not yet accounted (host: the transcript's message ids
+ * outside `exclude`; sbx: the worker result's `num_turns`/`usage`, no ids). */
+export function iterationNewCounts(
+  out: Record<string, unknown>, tier: Tier | undefined, exclude: ReadonlySet<string>, sessionId?: string,
+): { counts: Counts; ids: string[] } {
+  if (tier === "sbx") return { counts: resultCounts(out), ids: [] };
+  return transcriptNewCounts(sessionId ?? (typeof out.session_id === "string" ? out.session_id : undefined), exclude);
+}
+
 type SkillInvoker = typeof invokeSkill;
+
+/** Resumes per run (AC2: one by default). */
+export const RESUME_CAP = 1;
+
+/** The transcript checks a resume needs: host (restored from the backup when
+ * missing), sbx (inside the microVM). Each throws naming `transcript missing: <sid>`. */
+export interface TranscriptChecks {
+  host(sessionId: string): { restored: boolean };
+  sbx(sandbox: string, sessionId: string): Promise<void>;
+}
+const defaultTranscriptChecks: TranscriptChecks = {
+  host: (sid) => ensureTranscript(sid),
+  sbx: (sb, sid) => sbxTranscriptExists(sb, sid),
+};
+
+/** What a resume check `account`ed: the counts, the message ids, the answer. */
+export interface Accounted { turns: number; tokens: number; message_ids: string[]; within_budget: boolean; exceeded: string[] }
+
+export interface ResumeInput {
+  root: string; jobId: string; studioRunId: string;
+  sessionId: string | null | undefined;
+  /** Resumes this run already had. */
+  resumes: number;
+  tier?: string | null; sandbox?: string | null;
+  defn: Record<string, any> | undefined; guardS: number; jobGuardS?: number;
+  /** Wall clock already spent (used when `account` reports none). */
+  spentS: number;
+  /** The interrupted iteration's counts not yet accounted. */
+  counts: () => { counts: Counts; ids: string[] };
+  /** A run that may not resume here (an sbx run on restart): once the session, cap and
+   * studio checks pass, it ends naming this cause (and trips) instead of resuming. */
+  neverResume?: { cause: string; trips?: GuardTrip[] };
+}
+
+type ResumeRefusal = { ok: false; cause: string; trips?: GuardTrip[]; studioState?: TerminalState; accounted?: Accounted };
+export type ResumeVerdict = { ok: true; remainingS: number; restored: boolean; accounted: Accounted } | ResumeRefusal;
+
+/** The resume-or-partial rule (AC1/AC2), checked in order; the first failure
+ * is the cause the run ends `partial` naming: the eligibility (`resumeEligible`),
+ * then the budget (`resumeBudget`). In process only — the owner already holds the
+ * run; a restart checks the budget only after it has won the takeover. */
+export async function resumeCheck(
+  i: ResumeInput, verbRunner: VerbRunner = runJobVerb, transcripts: TranscriptChecks = defaultTranscriptChecks,
+): Promise<ResumeVerdict> {
+  const e = await resumeEligible(i, verbRunner, transcripts);
+  if (!e.ok) return e;
+  const b = await resumeBudget(i, verbRunner);
+  return b.ok ? { ...b, restored: e.restored } : b;
+}
+
+/** Eligibility, in order, touching no studio counter: a session id recorded; the
+ * resume count below the cap; the studio run still resumable (`status` answers
+ * queued/running — a terminal one is answered as `studioState`); `neverResume`;
+ * the transcript exists (restored from the backup first on the host). */
+export async function resumeEligible(
+  i: ResumeInput, verbRunner: VerbRunner = runJobVerb, transcripts: TranscriptChecks = defaultTranscriptChecks,
+): Promise<{ ok: true; restored: boolean } | ResumeRefusal> {
+  const sid = i.sessionId;
+  if (!sid) return { ok: false, cause: "no session recorded" };
+  if (i.resumes >= RESUME_CAP) return { ok: false, cause: `resume cap reached (${RESUME_CAP})` };
+  let st: Record<string, any>;
+  try { st = answered(await verbRunner(i.root, ["status", "--directory", i.root, "--job-id", i.jobId, "--run-id", i.studioRunId]), "status"); }
+  catch (e) { return { ok: false, cause: `studio run status failed: ${message(e)}` }; }
+  const state = (st.runs ?? [])[0]?.state;
+  if (isTerminal(state)) return { ok: false, cause: `studio run ${i.studioRunId} already ${state}`, studioState: state };
+  if (state !== "queued" && state !== "running") return { ok: false, cause: `studio run ${i.studioRunId} is ${state ?? "unknown"}, not resumable` };
+  if (i.neverResume) return { ok: false, ...i.neverResume };
+  let restored = false;
+  try {
+    if (i.tier === "sbx") await transcripts.sbx(i.sandbox ?? "", sid);
+    else restored = transcripts.host(sid).restored;
+  } catch (e) {
+    return { ok: false, cause: e instanceof TranscriptError && e.message.startsWith("transcript missing") ? e.message : `transcript missing: ${sid} (${message(e)})` };
+  }
+  return { ok: true, restored };
+}
+
+/** The budget: `account` with the interrupted iteration's counts (a studio write —
+ * only by the process that owns the run); the remaining wall clock = the guard −
+ * `counters.wall_clock_seconds`, else − `spentS`. */
+export async function resumeBudget(
+  i: ResumeInput, verbRunner: VerbRunner = runJobVerb,
+): Promise<{ ok: true; remainingS: number; accounted: Accounted } | ResumeRefusal> {
+  let counted: { counts: Counts; ids: string[] };
+  try { counted = i.counts(); }
+  catch (e) { return { ok: false, cause: `guard: account failed — ${message(e)}` }; }
+  let acct: Record<string, any>;
+  try {
+    acct = answered(await verbRunner(i.root, [
+      "account", "--directory", i.root, "--run-id", i.studioRunId, "--turns", String(counted.counts.turns), "--tokens", String(counted.counts.tokens),
+    ]), "account");
+  } catch (e) { return { ok: false, cause: `guard: account failed — ${message(e)}` }; }
+  const exceeded: string[] = Array.isArray(acct.exceeded) ? acct.exceeded.map(String) : [];
+  const accounted: Accounted = { ...counted.counts, message_ids: counted.ids, within_budget: acct.within_budget !== false, exceeded };
+  if (acct.within_budget === false) {
+    const trips = exceeded.map((g) => ({ guard: g, value: Number(i.defn?.guards?.[g]) }));
+    return { ok: false, cause: trips.length ? guardReason(trips) : "guard: account answered within_budget false naming no guard", trips, accounted };
+  }
+  const reported = Number(acct.counters?.wall_clock_seconds);
+  const spent = acct.counters && Number.isFinite(reported) ? reported : i.spentS;
+  const remainingS = Math.floor(i.guardS - spent);
+  if (remainingS <= 0) {
+    const trips = [wallClockGuard(i.jobGuardS, i.guardS)];
+    return { ok: false, cause: guardReason(trips), trips, accounted };
+  }
+  return { ok: true, remainingS, accounted };
+}
+
+/** Seconds since the run's first worker spawned (else since `verb_started`). */
+function spentSince(queue: Queue, run: QueueRun, clock: () => number = Date.now): number {
+  const first = queue.events(run.run_id).find((e) => e.kind === "worker")?.at ?? run.verb_started;
+  const ms = Date.parse(first ?? "");
+  return Number.isFinite(ms) ? Math.max(0, (clock() - ms) / 1000) : 0;
+}
+
+/** Rebuild the run a restart resumes: the stored worker options (explicit none,
+ * then the config, then the default — `resolveWorkerOptions`), `validate()` for
+ * the registry root (the sbx VM root never falls back to the caller's root), the
+ * driven definition and the stored wake answer. No tick cap applies to a resume. */
+async function rebuildStarted(queue: Queue, run: QueueRun, wake: Record<string, any>): Promise<Started> {
+  const { options } = resolveBeforeStart(run.job_id, run.root, {}, run);
+  const v = await validate(run.job_id, run.root, options.permissionMode);
+  const defn = queue.definition(run) ?? v.defn;
+  return {
+    jobId: run.job_id, root: v.root, projectId: v.projectId, runId: run.studio_run_id!, ...guardsFor(defn), defn, woke: wake,
+    ...(v.registryRoot !== undefined ? { registryRoot: v.registryRoot } : {}), sessionId: run.session_id ?? undefined,
+    tier: options.tier, ...(options.permissionMode ? { permissionMode: options.permissionMode } : {}),
+    ...(options.sandbox ? { sandbox: options.sandbox } : {}), ...(options.model ? { model: options.model } : {}),
+    ...(options.effort ? { effort: options.effort } : {}),
+  };
+}
+
+export interface ResumeDeps {
+  rebuild?: (run: QueueRun, wake: Record<string, any>) => Promise<Started>;
+  transcripts?: TranscriptChecks;
+  clock?: () => number;
+}
+
+/** The resume input of a dead owner's run, as recorded on its queue run. */
+function restartInput(queue: Queue, run: QueueRun, deps: ResumeDeps): ResumeInput {
+  const defn = queue.definition(run) ?? undefined;
+  const { guardS, jobGuardS } = guardsFor(defn);
+  const sid = run.session_id;
+  return {
+    root: run.root, jobId: run.job_id, studioRunId: run.studio_run_id!, sessionId: sid, resumes: queue.resumeCount(run.run_id),
+    tier: run.tier, sandbox: run.sandbox, defn, guardS, jobGuardS, spentS: spentSince(queue, run, deps.clock),
+    counts: () => transcriptNewCounts(sid ?? undefined, new Set(queue.accountedIds(run.run_id))),
+  };
+}
+
+/** The `resume` op `recover` asks about a dead owner's run with a studio run:
+ * a core run never resumes (21-1 AC5b: cancel + `supervisor restart`); an sbx
+ * run never resumes on restart (its in-VM worker ran to its deadline: the
+ * wall-clock guard is named); a skill run resumes when `resumeEligible` passes
+ * and the run rebuilds — the rebuilt run is left in `prepared`. Nothing here
+ * writes a studio counter: the budget is checked (`account`) only after this
+ * process has won the takeover (`settleTakenOver`). */
+export function restartResumer(queue: Queue, verbRunner: VerbRunner, prepared: Map<string, Started>, deps: ResumeDeps = {}): StudioResumer {
+  return async (run) => {
+    const defn = queue.definition(run) ?? undefined;
+    if (run.target === "core" || isCore(defn)) return { resume: false };
+    const input = restartInput(queue, run, deps);
+    if (run.tier === "sbx") {
+      const trips = [{ guard: "max_wall_clock_seconds", value: input.jobGuardS ?? input.guardS }];
+      input.neverResume = run.worker_pid !== null && run.worker_pid !== undefined
+        ? { cause: guardReason(trips), trips }
+        : { cause: "no worker recorded (an sbx run is never resumed on restart)" };
+    }
+    const verdict = await resumeEligible(input, verbRunner, deps.transcripts);
+    if (!verdict.ok) {
+      return { resume: false, cause: verdict.cause, ...(verdict.trips ? { trips: verdict.trips } : {}), ...(verdict.studioState ? { studioState: verdict.studioState } : {}) };
+    }
+    let wake: unknown = null;
+    try { wake = JSON.parse(run.wake ?? "null"); } catch { /* unreadable: none */ }
+    if (!wake || typeof wake !== "object") return { resume: false, cause: "no wake answer recorded" };
+    let rebuilt: Started;
+    try { rebuilt = await (deps.rebuild ?? ((r, w) => rebuildStarted(queue, r, w)))(run, wake as Record<string, any>); }
+    catch (e) { return { resume: false, cause: `resume rebuild failed: ${message(e)}` }; }
+    prepared.set(run.run_id, { ...rebuilt, sessionId: run.session_id! });
+    return { resume: true, detail: { session_id: run.session_id, ...(verdict.restored ? { transcript: "restored from the backup" } : {}) } };
+  };
+}
+
+/** After the takeover (this process owns each run in `report.resumed`): the budget
+ * — `account` with the interrupted iteration's counts not yet accounted, recorded
+ * as an `accounted` event — so one recovery accounts them at most once. Budget
+ * left → the remaining wall clock is set on the prepared run; a guard trip (or a
+ * failed `account`) ends the owned run `partial` naming it (`orphaned: supervisor
+ * restart; guard: …`, the studio run finished too), moved to `report.ended`. */
+async function settleTakenOver(
+  queue: Queue, report: RecoverReport, prepared: Map<string, Started>, verbRunner: VerbRunner, deps: ResumeDeps,
+): Promise<void> {
+  for (const r of [...report.resumed]) {
+    const run = queue.get(r.run_id);
+    const s = prepared.get(r.run_id);
+    if (!run || !s || run.state !== "running") continue; // driveResumes names a missing rebuild
+    const input = restartInput(queue, run, deps);
+    const b = await resumeBudget(input, verbRunner);
+    if (b.accounted) {
+      try {
+        queue.recordAccounted(r.run_id, b.accounted.message_ids, { turns: b.accounted.turns, tokens: b.accounted.tokens },
+          { reason: "supervisor restart", ...(b.ok ? { remaining_s: b.remainingS } : {}) });
+      } catch { /* the studio already has the counts */ }
+    }
+    if (b.ok) {
+      prepared.set(r.run_id, { ...s, resumeFirst: { remainingS: b.remainingS, spentS: s.guardS - b.remainingS } });
+      continue;
+    }
+    prepared.delete(r.run_id);
+    report.resumed.splice(report.resumed.indexOf(r), 1);
+    const reason = `${ORPHANED_REASON}; ${b.cause}`;
+    const studio = await studioRunEnder(verbRunner)({ ...run, studio_run_id: r.studio_run_id }, reason);
+    await mirror(queue, r.run_id, { jobId: run.job_id, defn: s.defn }, {
+      ok: false, job_id: run.job_id, run_id: r.studio_run_id, target: "skill", state: "partial", reason,
+      ...(b.trips?.length ? { guards_tripped: b.trips } : {}), studio_state: studio.ok && studio.state ? studio.state : "unknown",
+    });
+    report.ended.push({ run_id: r.run_id, studio_run_id: r.studio_run_id, studio: { ok: studio.ok, detail: studio.detail }, reason });
+  }
+}
 
 /** Once a run id is known nothing throws: failures come back as ok:false with the run id.
  * The skill invocation runs under `s.guardS` (the capped guard); a trip ends the run
  * `partial` naming the bound that tripped. After the invocation returns and before
  * `finish`, a job with `max_turns`/`max_tokens` has the iteration's counters
- * `account`ed; `within_budget: false` or a failed `account` ends it `partial` naming it. */
+ * `account`ed; `within_budget: false` or a failed `account` ends it `partial` naming it.
+ * A silent exit (AC2: the worker ran and printed no status block — not an auth
+ * block, a preflight stop or a wall-clock trip) resumes the session in process
+ * (`--resume <session-id>`, the remaining wall clock) when `resumeCheck` passes;
+ * otherwise, and after the cap, it ends `partial` naming MISSING_STATUS_BLOCK and the cause
+ * (a resume whose record fails never runs: `resume not recorded`). A worker whose
+ * record fails is killed and the run ends `blocked` naming `worker record failed`.
+ * A resumed iteration accounts only the message ids not already accounted. */
 export async function finishRun(
   s: Started, verbRunner: VerbRunner = runJobVerb, invoke: SkillInvoker = invokeSkill, clockMs: () => number = () => performance.now(),
+  transcripts: TranscriptChecks = defaultTranscriptChecks,
 ): Promise<RunSummary> {
   const { jobId, root, projectId, runId, guardS, defn, woke, permissionMode, tier, sandbox, registryRoot } = s;
+  const rec = s.recorder, sid = s.sessionId;
   const base = { job_id: jobId, project_id: projectId, run_id: runId };
   const known = typeof woke.state === "string" ? woke.state : "unknown";
 
@@ -794,70 +1129,122 @@ export async function finishRun(
     return { ...base, ok: false, target: "skill", state: String(woke.state ?? "queued"), reason: "queued with no executable directive" };
   }
 
-  let state: ReturnType<typeof finishStateFor>, reason: string | undefined, block: Record<string, unknown> | undefined, cost: number | undefined;
+  let state: ReturnType<typeof finishStateFor> = "blocked", reason: string | undefined, block: Record<string, unknown> | undefined, cost: number | undefined;
   let invoked: Record<string, unknown> | undefined, tripped: GuardTrip[] | undefined, account: RunSummary["account"];
-  try {
-    const routing = (woke.routing ?? {}) as Record<string, unknown>;
-    const knowledge = directive.knowledge && typeof directive.knowledge === "object" ? directive.knowledge : undefined;
-    // §5: the submission's override, else the resolved job's routing — verbatim; neither → none (AD-14).
-    const model = s.model ?? routing.model, effort = s.effort ?? routing.effort;
-    const startedMs = clockMs();
-    const out = await invoke(root, directive.skill, {
-      payload: { ...(directive.payload ?? {}), run_id: runId }, timeout_s: guardS, permission_mode: permissionMode,
-      ...(model !== undefined ? { model } : {}), ...(effort !== undefined ? { effort } : {}),
-      ...(tier ? { tier } : {}), ...(sandbox ? { sandbox } : {}), ...(knowledge ? { knowledge } : {}),
-    }, undefined, registryRoot !== undefined ? { vmHostRoot: registryRoot } : {});
-    // The worker's own time, from its spawn (invokeSkill's worker_elapsed_s) —
-    // not the auth preflight or drift check before it; the injected clock only
-    // when the result does not carry it.
-    const elapsedS = typeof out.worker_elapsed_s === "number" && Number.isFinite(out.worker_elapsed_s)
-      ? out.worker_elapsed_s : (clockMs() - startedMs) / 1000;
-    invoked = out;
-    cost = typeof out.total_cost_usd === "number" ? out.total_cost_usd : undefined;
-    block = out.status_block as Record<string, unknown> | undefined;
-    if (block) {
-      state = finishStateFor(String(block.status));
-      reason = typeof block.reason === "string" && block.reason ? block.reason
-        : state === "complete" ? undefined : `status block ended '${block.status}'`;
-    } else if (tier === "sbx" && (out.exit === 124 || out.exit === 137) && elapsedS >= guardS) {
-      // The in-VM `timeout` (GNU: 124 on TERM, 137 after `-k`) fired before the
-      // host timer: the wall-clock guard tripped inside the microVM (AC1). Only
-      // once the guard's time has passed in the worker's own run (from its spawn,
-      // not counting the preflight) — an earlier 124/137 is an OOM or another
-      // SIGKILL, and stays the AD-11 failure below.
-      tripped = [wallClockGuard(s.jobGuardS, guardS)];
-      state = "partial";
-      reason = guardReason(tripped);
-    } else {
-      state = "blocked";
-      reason = String(out.conformance_failure ?? MISSING_STATUS_BLOCK);
+  const routing = (woke.routing ?? {}) as Record<string, unknown>;
+  const knowledge = directive.knowledge && typeof directive.knowledge === "object" ? directive.knowledge : undefined;
+  // §5: the submission's override, else the resolved job's routing — verbatim; neither → none (AD-14).
+  const model = s.model ?? routing.model, effort = s.effort ?? routing.effort;
+  // Resume state (Story 21.6).
+  let resumes = rec ? rec.resumes() : 0;
+  const accountedIds = new Set<string>(rec ? rec.accountedIds() : []);
+  let resuming = !!(s.resumeFirst && sid);
+  let spentS = s.resumeFirst?.spentS ?? 0;
+  let timeoutS = s.resumeFirst && sid ? s.resumeFirst.remainingS : guardS;
+  let accountedLast = false;
+  const noteAccounted = (a: Accounted) => {
+    for (const id of a.message_ids) accountedIds.add(id);
+    try { rec?.accounted(a.message_ids, { turns: a.turns, tokens: a.tokens }); } catch { /* the studio already has the counts */ }
+    account = { turns: a.turns, tokens: a.tokens, within_budget: a.within_budget, exceeded: a.exceeded };
+  };
+  for (;;) {
+    accountedLast = false; tripped = undefined; block = undefined; reason = undefined;
+    try {
+      const startedMs = clockMs();
+      const spawnGuardS = timeoutS; // the guard this spawn runs under (sbx: its in-VM `timeout`)
+      const recording = rec
+        ? { ...(sid && !resuming ? { beforeSpawn: () => rec.session(sid) } : {}), onSpawn: (pid: number) => rec.worker(pid, spawnGuardS) } : {};
+      const out = await invoke(root, directive.skill, {
+        payload: { ...(directive.payload ?? {}), run_id: runId }, timeout_s: timeoutS, permission_mode: permissionMode,
+        ...(model !== undefined ? { model } : {}), ...(effort !== undefined ? { effort } : {}),
+        ...(tier ? { tier } : {}), ...(sandbox ? { sandbox } : {}), ...(knowledge ? { knowledge } : {}),
+      }, undefined, {
+        ...(registryRoot !== undefined ? { vmHostRoot: registryRoot } : {}),
+        ...(sid ? { sessionId: sid, ...(resuming ? { resume: true } : {}) } : {}), ...recording,
+      });
+      // The worker's own time, from its spawn (invokeSkill's worker_elapsed_s) —
+      // not the auth preflight or drift check before it; the injected clock only
+      // when the result does not carry it.
+      const elapsedS = typeof out.worker_elapsed_s === "number" && Number.isFinite(out.worker_elapsed_s)
+        ? out.worker_elapsed_s : (clockMs() - startedMs) / 1000;
+      invoked = out;
+      if (typeof out.total_cost_usd === "number") cost = (cost ?? 0) + out.total_cost_usd;
+      block = out.status_block as Record<string, unknown> | undefined;
+      if (block) {
+        state = finishStateFor(String(block.status));
+        reason = typeof block.reason === "string" && block.reason ? block.reason
+          : state === "complete" ? undefined : `status block ended '${block.status}'`;
+      } else if (tier === "sbx" && (out.exit === 124 || out.exit === 137) && elapsedS >= timeoutS) {
+        // The in-VM `timeout` (GNU: 124 on TERM, 137 after `-k`) fired before the
+        // host timer: the wall-clock guard tripped inside the microVM (AC1). Only
+        // once the iteration's time has passed in the worker's own run (from its spawn,
+        // not counting the preflight) — an earlier 124/137 is an OOM or another
+        // SIGKILL, and stays the AD-11 failure below.
+        tripped = [wallClockGuard(s.jobGuardS, guardS)];
+        state = "partial";
+        reason = guardReason(tripped);
+      } else if (out.ran !== false) {
+        // AC2: a silent exit — the resume-or-partial rule, capped at RESUME_CAP.
+        const failure = String(out.conformance_failure ?? MISSING_STATUS_BLOCK);
+        spentS += elapsedS;
+        const verdict = await resumeCheck({
+          root, jobId, studioRunId: runId, sessionId: sid, resumes, tier, sandbox, defn, guardS, jobGuardS: s.jobGuardS, spentS,
+          counts: () => iterationNewCounts(out, tier, accountedIds, sid),
+        }, verbRunner, transcripts);
+        if (verdict.accounted) { noteAccounted(verdict.accounted); accountedLast = true; }
+        let unrecorded: string | undefined;
+        if (verdict.ok) {
+          // The resume is recorded before it runs: an unrecorded one could let a later restart exceed the cap.
+          try {
+            rec?.resumed({
+              reason: "silent worker exit", session_id: sid, remaining_s: verdict.remainingS,
+              accounted: { turns: verdict.accounted.turns, tokens: verdict.accounted.tokens },
+              ...(verdict.restored ? { transcript: "restored from the backup" } : {}),
+            });
+          } catch (e) { unrecorded = `resume not recorded: ${message(e)}`; }
+          if (unrecorded === undefined) {
+            resumes++;
+            resuming = true;
+            timeoutS = verdict.remainingS;
+            continue;
+          }
+        }
+        state = "partial";
+        reason = `${failure}; ${unrecorded ?? (verdict.ok ? "" : verdict.cause)}`;
+        if (!verdict.ok && verdict.trips?.length) tripped = verdict.trips;
+      } else {
+        state = "blocked";
+        reason = String(out.conformance_failure ?? MISSING_STATUS_BLOCK);
+      }
+    } catch (e) {
+      const msg = message(e);
+      // A failed worker record (the worker was killed) is its own named failure, never a guard trip.
+      if (/timed out/i.test(msg) && !msg.startsWith(WORKER_RECORD_FAILED)) {
+        tripped = [wallClockGuard(s.jobGuardS, guardS)];
+        state = "partial";
+        reason = guardReason(tripped);
+      } else {
+        state = "blocked";
+        reason = msg;
+      }
     }
-  } catch (e) {
-    const msg = message(e);
-    if (/timed out/i.test(msg)) {
-      tripped = [wallClockGuard(s.jobGuardS, guardS)];
-      state = "partial";
-      reason = guardReason(tripped);
-    } else {
-      state = "blocked";
-      reason = msg;
-    }
+    break;
   }
   // AC2: one worker iteration ran — account its turns/tokens before `finish`
   // (account refuses a run that is no longer resumable). A wall-clock trip is
-  // not accounted (the iteration was killed). The iteration's own reason is
-  // never dropped: guard text is appended to it. A tripped turn/token guard
-  // ends the run `partial`; an account FAILURE turns a clean run `partial` but
-  // never lifts an already-`blocked` one.
+  // not accounted (the iteration was killed), nor one a resume check already
+  // accounted. The iteration's own reason is never dropped: guard text is
+  // appended to it. A tripped turn/token guard ends the run `partial`; an
+  // account FAILURE turns a clean run `partial` but never lifts an already-`blocked` one.
   const withGuard = (text: string) => (reason ? `${reason}; ${text}` : text);
-  if (invoked && invoked.ran !== false && !tripped && hasTurnTokenGuard(defn)) {
+  if (invoked && invoked.ran !== false && !tripped && !accountedLast && hasTurnTokenGuard(defn)) {
     try {
-      const counts = iterationCounts(invoked, tier);
+      const { counts, ids } = iterationNewCounts(invoked, tier, accountedIds, sid);
       const acct = answered(await verbRunner(root, [
         "account", "--directory", root, "--run-id", runId, "--turns", String(counts.turns), "--tokens", String(counts.tokens),
       ]), "account");
       const exceeded: string[] = Array.isArray(acct.exceeded) ? acct.exceeded.map(String) : [];
-      account = { ...counts, within_budget: acct.within_budget !== false, exceeded };
+      noteAccounted({ ...counts, message_ids: ids, within_budget: acct.within_budget !== false, exceeded });
       if (acct.within_budget === false) {
         tripped = exceeded.map((g) => ({ guard: g, value: Number(defn?.guards?.[g]) }));
         state = "partial";

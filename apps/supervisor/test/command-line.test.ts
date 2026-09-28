@@ -9,7 +9,7 @@ import {
 import { claudeBin, studioRoot, StudioRootMissing } from "../src/env";
 import { Queue } from "../src/queue";
 import {
-  buildWorkerCommand, buildWorkerEnv, HostBypassRefused, invokeSkill, MISSING_STATUS_BLOCK, type Spawner,
+  buildWorkerCommand, buildWorkerEnv, CONTINUATION_PROMPT, HostBypassRefused, invokeSkill, MISSING_STATUS_BLOCK, type Spawner,
 } from "../src/server";
 
 const REPO = resolve(import.meta.dir, "..");
@@ -285,13 +285,13 @@ describe("finishRun: model/effort per §5, tier forwarded, cost to finish (AC3/A
     expect(args).toMatchObject({ tier: "sbx", sandbox: "claude-p", permission_mode: "bypassPermissions" });
   });
 
-  test("finish gets the studio run id and --total-cost-usd; a missing block → blocked naming MISSING_STATUS_BLOCK", async () => {
+  test("finish gets the studio run id and --total-cost-usd; a missing block with no session → partial naming MISSING_STATUS_BLOCK and the cause", async () => {
     const ok = await drive(started(woke()), { status_block: BLOCK, total_cost_usd: 0.42 });
     expect(ok.finish.slice(0, 7)).toEqual(["finish", "--directory", "proj", "--run-id", "s-20260928T101010Z", "--state", "complete"]);
     expect(ok.finish.slice(ok.finish.indexOf("--total-cost-usd"), ok.finish.indexOf("--total-cost-usd") + 2)).toEqual(["--total-cost-usd", "0.42"]);
     expect(ok.summary).toMatchObject({ ok: true, total_cost_usd: 0.42 });
     const missing = await drive(started(woke()), { conformance_failure: MISSING_STATUS_BLOCK, total_cost_usd: 0.1 });
-    expect(missing.finish.slice(3, 9)).toEqual(["--run-id", "s-20260928T101010Z", "--state", "blocked", "--reason", MISSING_STATUS_BLOCK]);
+    expect(missing.finish.slice(3, 9)).toEqual(["--run-id", "s-20260928T101010Z", "--state", "partial", "--reason", `${MISSING_STATUS_BLOCK}; no session recorded`]);
     expect(missing.finish).toContain("--total-cost-usd");
   });
 });
@@ -319,7 +319,18 @@ function e2eFixture(workerResult: string, loggedIn = true, opts: { selfFinish?: 
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(record)}, JSON.stringify({ args, apiKey: process.env.ANTHROPIC_API_KEY ?? null }) + "\\n");
-if (args[0] === "auth") { console.log(JSON.stringify({ loggedIn: ${loggedIn}, authMethod: "claude.ai" })); process.exit(0); }
+if (args[0] === "auth") {
+  // AC4 after-wake kill point: on the invoke's auth preflight (the second auth call — the first is
+  // runJob's login check), once (a marker file), kill the parent supervisor by its pid.
+  const authKill = process.env.FAKE_CLAUDE_KILL_PARENT_ON_INVOKE_AUTH;
+  if (authKill && !fs.existsSync(authKill)) {
+    const count = authKill + ".count";
+    const n = (fs.existsSync(count) ? Number(fs.readFileSync(count, "utf-8")) : 0) + 1;
+    fs.writeFileSync(count, String(n));
+    if (n === 2) { fs.writeFileSync(authKill, String(process.pid)); process.kill(process.ppid, "SIGKILL"); process.exit(1); }
+  }
+  console.log(JSON.stringify({ loggedIn: ${loggedIn}, authMethod: "claude.ai" })); process.exit(0);
+}
 fs.writeFileSync(${JSON.stringify(workerMarker)}, "ran\\n");
 if (${opts.selfFinish === true}) {
   // Race the supervisor: end this run first, so its own finish is refused.
@@ -328,11 +339,24 @@ if (${opts.selfFinish === true}) {
     "--run-id", payload.run_id, "--state", "cancelled", "--reason", "raced by the worker"], { encoding: "utf-8" });
 }
 // A session transcript under CLAUDE_CONFIG_DIR (the fixture's own dir): the supervisor accounts its turns/tokens.
-const sessionId = "sess-" + process.pid + "-" + Date.now();
+// The supervisor's --session-id is honoured; --resume <id> appends to that session's transcript (never a new id).
+const flagValue = (f) => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : undefined; };
+const resumed = flagValue("--resume");
+const sessionId = resumed ?? flagValue("--session-id") ?? ("sess-" + process.pid + "-" + Date.now());
 const tdir = require("node:path").join(process.env.CLAUDE_CONFIG_DIR, "projects", "fake-slug");
 fs.mkdirSync(tdir, { recursive: true });
 const usage = { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
-fs.writeFileSync(require("node:path").join(tdir, sessionId + ".jsonl"), JSON.stringify({ type: "assistant", message: { id: "msg-1", usage } }) + "\\n");
+fs.appendFileSync(require("node:path").join(tdir, sessionId + ".jsonl"),
+  JSON.stringify({ type: "assistant", message: { id: resumed ? "msg-resume-" + process.pid : "msg-1", usage } }) + "\\n");
+// AC4 mid-invoke kill point: once (a marker file), the worker kills its own parent — the supervisor
+// that spawned it, by pid — then keeps working (bounded: 30 s) until the restarted supervisor kills it.
+const killMarker = process.env.FAKE_CLAUDE_KILL_PARENT_ONCE;
+if (killMarker && !resumed && !fs.existsSync(killMarker)) {
+  fs.writeFileSync(killMarker, String(process.pid));
+  process.kill(process.ppid, "SIGKILL");
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30_000);
+  process.exit(0);
+}
 console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: ${JSON.stringify(workerResult)}, total_cost_usd: 0.0123, session_id: sessionId, num_turns: 1, usage }));
 `);
   chmodSync(fake, 0o755);
@@ -420,12 +444,32 @@ describe.skipIf(!canRunE2E)("CLI end to end: studio-health (faked worker)", () =
     expect(fx.queue((q) => q.get(summary.run_id))).toMatchObject({ tier: "host", sandbox: null });
   }, 120_000);
 
-  test("missing block → finished blocked with the named conformance failure", () => {
+  test("missing block (AC2 silent exit) → one in-process `--resume <session-id>`; the second silent exit ends partial naming MISSING_STATUS_BLOCK and the cap", () => {
     const fx = e2eFixture("Looked around; nothing to report.");
     const res = fx.run();
     expect(res.status).toBe(1);
-    expect(JSON.parse(res.stdout)).toMatchObject({ state: "blocked", reason: MISSING_STATUS_BLOCK });
-    expect(fx.ledger().some((e) => e.event === "job-run" && e.payload.state === "blocked")).toBe(true);
+    const summary = JSON.parse(res.stdout);
+    expect(summary).toMatchObject({ state: "partial", reason: `${MISSING_STATUS_BLOCK}; resume cap reached (1)` });
+    expect(fx.ledger().some((e) => e.event === "job-run" && e.payload.state === "partial")).toBe(true);
+    // The first invoke carries the pre-minted --session-id; the resume carries --resume with the same id
+    // and the continuation prompt as the one -p item; every other flag unchanged.
+    const workers = fx.calls().filter((c) => c.args[0] === "-p");
+    expect(workers).toHaveLength(2);
+    const sid = workers[0].args[workers[0].args.indexOf("--session-id") + 1];
+    expect(sid).toMatch(/^[0-9a-f-]{36}$/);
+    expect(workers[1].args.slice(workers[1].args.indexOf("--resume"), workers[1].args.indexOf("--resume") + 2)).toEqual(["--resume", sid]);
+    expect(workers[1].args).not.toContain("--session-id");
+    expect(workers[1].args).not.toContain("--fork-session");
+    expect(workers[1].args[1]).toBe(CONTINUATION_PROMPT);
+    const flagsOf = (a: string[]) => a.slice(2).filter((x, i, all) => x !== sid && !["--resume", "--session-id"].includes(x) && all[i - 1] !== "--resume");
+    expect(flagsOf(workers[1].args)).toEqual(flagsOf(workers[0].args));
+    const [run, events] = fx.queue((q) => [q.get(summary.run_id), q.events(summary.run_id)] as const);
+    expect(run).toMatchObject({ state: "partial", session_id: sid });
+    const resumed = events.filter((e) => e.kind === "resumed");
+    expect(resumed).toHaveLength(1);
+    expect(resumed[0].detail).toMatchObject({ resume: 1, reason: "silent worker exit", session_id: sid, accounted: { turns: 1 } });
+    // Each iteration accounted once, only its own messages (msg-1, then the resumed message).
+    expect(events.filter((e) => e.kind === "accounted").map((e) => (e.detail as any).message_ids.length)).toEqual([1, 1]);
   }, 120_000);
 
   test("login absent → blocked naming the Max login; nothing woken, worker never spawned", () => {
@@ -588,7 +632,9 @@ describe.skipIf(!canRunE2E)("CLI end to end: the durable queue", () => {
     const [run, events, lock] = fx.queue((q) => [q.get(summary.run_id), q.events(summary.run_id), q.lock(fx.project)] as const);
     expect(run).toMatchObject({ state: "complete", studio_run_id: summary.studio_run_id, owner_pid: null });
     expect(events.map((e) => [e.kind, e.to_state])).toEqual([
-      ["enqueued", "queued"], ["claimed", "running"], ["verb-started", "running"], ["studio-run", "running"], ["ended", "complete"],
+      ["enqueued", "queued"], ["claimed", "running"], ["verb-started", "running"], ["studio-run", "running"],
+      // Story 21.6: the wake answer, the pre-minted session, the spawned worker, the accounted messages — before `ended`.
+      ["woke", "running"], ["session", "running"], ["worker", "running"], ["accounted", "running"], ["ended", "complete"],
     ]);
     // The pre-verb snapshot is stored with verb_started: no studio-health run existed before.
     expect(events[2].detail).toEqual({ verb: "submit", snapshot: [], target: "skill" });
@@ -690,9 +736,10 @@ describe.skipIf(!canRunE2E)("tick: start-of-tick recovery", () => {
     expect(recovered).toBeGreaterThanOrEqual(0);
     // Recovery precedes every per-project/per-job line.
     expect(lines.slice(0, recovered).filter((l) => l.startsWith("[studio-tick]"))).toEqual([]);
-    expect(fx.queue((q) => q.get(queued.run_id))).toMatchObject({ state: "partial", reason: "orphaned: supervisor restart", owner_pid: null });
+    // Story 21.6: no session was recorded (the dead supervisor never spawned a worker) — the cause is named.
+    expect(fx.queue((q) => q.get(queued.run_id))).toMatchObject({ state: "partial", reason: "orphaned: supervisor restart; no session recorded", owner_pid: null });
     const studio = fx.jobVerb(["status", "--directory", fx.project, "--job-id", "studio-health", "--run-id", minted.run_id]).runs[0];
-    expect(studio).toMatchObject({ state: "partial", reason: "orphaned: supervisor restart" });
+    expect(studio).toMatchObject({ state: "partial", reason: "orphaned: supervisor restart; no session recorded" });
   }, 180_000);
 });
 
@@ -732,7 +779,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: restart recovery and drain", () => 
 
     const rec = fx.bare("recover");
     expect(rec.status).toBe(0);
-    expect(JSON.parse(rec.stdout)).toEqual({ ok: true, ended: [], requeued: [queued.run_id] });
+    expect(JSON.parse(rec.stdout)).toEqual({ ok: true, ended: [], requeued: [queued.run_id], resumed: [] });
     expect(fx.queue((q) => q.get(queued.run_id))).toMatchObject({ state: "queued", reason: "requeued: supervisor restart", owner_pid: null });
     fx.expectNothingWoken();
 
@@ -745,7 +792,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: restart recovery and drain", () => 
     const studioId = report.runs[0].summary.studio_run_id;
     expect(fx.jobVerb(["status", "--directory", fx.project, "--job-id", "studio-health", "--run-id", studioId]).runs[0].state).toBe("complete");
     expect(fx.queue((q) => q.events(queued.run_id).map((e) => e.kind))).toEqual([
-      "enqueued", "requeued", "claimed", "verb-started", "studio-run", "ended",
+      "enqueued", "requeued", "claimed", "verb-started", "studio-run", "woke", "session", "worker", "accounted", "ended",
     ]);
 
     // Nothing left to drain.
@@ -905,10 +952,10 @@ describe.skipIf(!canRunE2E)("CLI end to end: restart recovery and drain", () => 
     expect(summary.studio_run_id).not.toBe(minted.run_id);
 
     const orphan = fx.queue((q) => q.get(queued.run_id))!;
-    expect(orphan).toMatchObject({ state: "partial", reason: "orphaned: supervisor restart", studio_run_id: minted.run_id });
+    expect(orphan).toMatchObject({ state: "partial", reason: "orphaned: supervisor restart; no session recorded", studio_run_id: minted.run_id });
     expect(fx.queue((q) => q.events(queued.run_id).at(-1))).toMatchObject({ kind: "orphaned", detail: { lookup: { ok: true, adopted: minted.run_id }, studio: { ok: true } } });
     const studio = fx.jobVerb(["status", "--directory", fx.project, "--job-id", "studio-health", "--run-id", minted.run_id]).runs[0];
-    expect(studio).toMatchObject({ state: "partial", reason: "orphaned: supervisor restart" });
+    expect(studio).toMatchObject({ state: "partial", reason: "orphaned: supervisor restart; no session recorded" });
   }, 180_000);
 
   test("engine path: a tk-studio-launch block naming `.bmad-loop/runs/<id>` hands the lock to the engine; a claim then waits or frees by the probe", async () => {
@@ -1128,4 +1175,159 @@ describe.skipIf(!canRunE2E)("CLI end to end: worker tiers (Story 21.4)", () => {
     expect([fx.calls(), fx.sbxCalls()]).toEqual([[], []]);
     expect(fx.queue((q) => q.runs().length)).toBe(0);
   }, 120_000);
+});
+
+// ---------------------------------------------------------------- AC4: the supervisor killed at three points (Story 21.6)
+// Only the supervisor this test spawned is killed — by its pid, from its own child (`process.ppid`):
+// a fake `uv` in front of the real one (after `submit` answers; instead of `finish`) or the fake worker
+// (mid-invoke). Never by name pattern; every child is bounded by a timeout.
+
+describe.skipIf(!canRunE2E)("CLI end to end: a killed run resumes or ends partial, never lost (AC4)", () => {
+  const BLOCK_TEXT = `Resumed and done.\n{"status":"complete","intent":"tk-studio-activate","artifacts":[]}`;
+  /** A fake `uv` on PATH: runs the real uv, and once (a marker file) kills its parent supervisor at `at`. */
+  function killingUv(at: "submit" | "finish") {
+    const dir = mkdtempSync(join(tmpdir(), "tk-sup-e2e-uv-"));
+    const realUv = Bun.which("uv");
+    if (!realUv) throw new Error("uv not on PATH");
+    const marker = join(dir, "killed.marker");
+    writeFileSync(join(dir, "uv"), `#!/usr/bin/env bun
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+const once = args[0] === "run" && String(args[1]).endsWith("jobrun.py") && args[2] === ${JSON.stringify(at)} && !fs.existsSync(${JSON.stringify(marker)});
+const kill = () => { fs.writeFileSync(${JSON.stringify(marker)}, "1"); process.kill(process.ppid, "SIGKILL"); process.exit(1); };
+if (once && ${JSON.stringify(at)} === "finish") kill(); // before finish: the verb never runs
+const r = require("node:child_process").spawnSync(${JSON.stringify(realUv)}, args, { stdio: once ? ["inherit", "ignore", "inherit"] : "inherit", timeout: 120_000 });
+if (once) kill(); // after the verb answered, before the supervisor reads it
+process.exit(r.status ?? 1);
+`);
+    chmodSync(join(dir, "uv"), 0o755);
+    return { env: { PATH: `${dir}:${process.env.PATH}` }, marker };
+  }
+  const events = (fx: ReturnType<typeof e2eFixture>, runId: string) => fx.queue((q) => q.events(runId));
+  const onlyRun = (fx: ReturnType<typeof e2eFixture>) => fx.queue((q) => q.runs())[0];
+
+  test("after `wake` (the verb answered, the supervisor died before recording it) → `recover` ends it partial naming no session", () => {
+    const uv = killingUv("submit");
+    const fx = e2eFixture(BLOCK_TEXT, true, { env: uv.env });
+    const res = fx.run();
+    expect(res.signal ?? res.status).toBe("SIGKILL");
+    expect(existsSync(uv.marker)).toBe(true);
+    const dead = onlyRun(fx);
+    expect(dead).toMatchObject({ state: "running", studio_run_id: null, session_id: null });
+    expect(fx.calls().some((c) => c.args[0] === "-p")).toBe(false);
+
+    const rec = fx.bare("recover");
+    expect(rec.status).toBe(0);
+    const reason = "orphaned: supervisor restart; no session recorded";
+    const out = JSON.parse(rec.stdout);
+    expect(out).toMatchObject({ ok: true, resumed: [], ended: [{ run_id: dead.run_id, reason }] });
+    const run = fx.queue((q) => q.get(dead.run_id))!;
+    expect(run).toMatchObject({ state: "partial", reason });
+    expect(run.studio_run_id).toStartWith("studio-health-");
+    expect(events(fx, dead.run_id).at(-1)).toMatchObject({ kind: "orphaned", detail: { lookup: { ok: true, adopted: run.studio_run_id }, studio: { ok: true } } });
+    const studio = fx.jobVerb(["status", "--directory", fx.project, "--job-id", "studio-health", "--run-id", run.studio_run_id!]).runs[0];
+    expect(studio).toMatchObject({ state: "partial", reason });
+    expect(fx.queue((q) => q.lock(fx.project))).toBeNull();
+  }, 180_000);
+
+  test("after `wake` (the studio run and the wake answer recorded; killed on the invoke's auth preflight, before the worker) → partial naming no session, events recorded", () => {
+    const marker = join(tmpdir(), `tk-sup-authkill-${process.pid}-${Date.now()}`);
+    const fx = e2eFixture(BLOCK_TEXT, true, { env: { FAKE_CLAUDE_KILL_PARENT_ON_INVOKE_AUTH: marker } });
+    const res = fx.run();
+    expect(res.signal ?? res.status).toBe("SIGKILL");
+    expect(existsSync(marker)).toBe(true);
+    const dead = onlyRun(fx);
+    expect(dead).toMatchObject({ state: "running", session_id: null, worker_pid: null });
+    expect(dead.studio_run_id).toStartWith("studio-health-");
+    expect(JSON.parse(dead.wake!)).toMatchObject({ state: "queued", directive: { kind: "invoke-skill" } });
+    expect(fx.calls().some((c) => c.args[0] === "-p")).toBe(false);
+
+    const rec = fx.bare("recover");
+    expect(rec.status).toBe(0);
+    const reason = "orphaned: supervisor restart; no session recorded";
+    expect(JSON.parse(rec.stdout)).toMatchObject({ ok: true, resumed: [], ended: [{ run_id: dead.run_id, studio_run_id: dead.studio_run_id, reason }] });
+    expect(fx.queue((q) => q.get(dead.run_id))).toMatchObject({ state: "partial", reason, studio_run_id: dead.studio_run_id });
+    expect(events(fx, dead.run_id).map((e) => e.kind)).toEqual(["enqueued", "claimed", "verb-started", "studio-run", "woke", "orphaned"]);
+    expect(events(fx, dead.run_id).at(-1)).toMatchObject({ to_state: "partial", detail: { studio: { ok: true }, studio_outcome: { run_id: dead.studio_run_id, state: "partial" } } });
+    const studio = fx.jobVerb(["status", "--directory", fx.project, "--job-id", "studio-health", "--run-id", dead.studio_run_id!]).runs[0];
+    expect(studio).toMatchObject({ state: "partial", reason });
+    expect(fx.queue((q) => q.lock(fx.project))).toBeNull();
+  }, 180_000);
+
+  test("drain's exit status counts the resumed runs it drives: a resumed run ending blocked → exit 1", () => {
+    const blocked = `Could not finish.\n{"status":"blocked","intent":"tk-studio-activate","artifacts":[],"reason":"gap named"}`;
+    const fx = e2eFixture(blocked, true, { env: { FAKE_CLAUDE_KILL_PARENT_ONCE: join(tmpdir(), `tk-sup-kill-drain-${process.pid}-${Date.now()}`) } });
+    const res = fx.run();
+    expect(res.signal ?? res.status).toBe("SIGKILL");
+    const dead = onlyRun(fx);
+    const drained = fx.bare("drain");
+    const out = JSON.parse(drained.stdout);
+    expect(out.runs).toEqual([]);
+    expect(out.recovered.resumed).toMatchObject([{ run_id: dead.run_id, summary: { ok: false, state: "blocked" } }]);
+    expect(out.ok).toBe(false);
+    expect(drained.status).toBe(1);
+    expect(fx.queue((q) => q.get(dead.run_id))).toMatchObject({ state: "blocked" });
+  }, 180_000);
+
+  test("mid-invoke (the worker still running) → `recover` kills the recorded worker, then resumes it with --resume <session-id>; its block is finished", async () => {
+    const fx = e2eFixture(BLOCK_TEXT, true, { env: { FAKE_CLAUDE_KILL_PARENT_ONCE: join(tmpdir(), `tk-sup-kill-${process.pid}-${Date.now()}`) } });
+    const res = fx.run();
+    expect(res.signal ?? res.status).toBe("SIGKILL");
+    const dead = onlyRun(fx);
+    expect(dead.state).toBe("running");
+    expect(dead.session_id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(dead.worker_pid).toBeGreaterThan(0);
+    const worker = dead.worker_pid!;
+    process.kill(worker, 0); // the detached worker outlived its supervisor
+
+    const rec = fx.bare("recover");
+    expect(rec.status).toBe(0);
+    const out = JSON.parse(rec.stdout);
+    expect(out.ended).toEqual([]);
+    expect(out.resumed).toMatchObject([{ run_id: dead.run_id, resume: 1, summary: { ok: true, state: "complete", run_id: dead.run_id } }]);
+    // The old worker was killed (pid + start time matched) before the takeover.
+    let gone = false;
+    try { process.kill(worker, 0); gone = readFileSync(`/proc/${worker}/stat`, "utf-8").split(") ")[1]?.[0] === "Z"; } catch { gone = true; }
+    expect(gone).toBe(true);
+    const evs = events(fx, dead.run_id);
+    const resumed = evs.find((e) => e.kind === "resumed")!;
+    expect(resumed.detail).toMatchObject({ resume: 1, session_id: dead.session_id, worker: { pid: worker, outcome: "killed" } });
+    // The interrupted iteration is accounted after the takeover, then the resumed one.
+    expect(evs.filter((e) => e.kind === "accounted").map((e) => (e.detail as any).message_ids))
+      .toEqual([["msg-1"], [expect.stringMatching(/^msg-resume-/)]]);
+    expect(evs.at(-1)).toMatchObject({ kind: "ended", to_state: "complete" });
+    // The resume: --resume with the same session id, never a new one.
+    const workers = fx.calls().filter((c) => c.args[0] === "-p");
+    expect(workers).toHaveLength(2);
+    expect(workers[0].args).toContain(dead.session_id);
+    expect(workers[1].args.slice(workers[1].args.indexOf("--resume"), workers[1].args.indexOf("--resume") + 2)).toEqual(["--resume", dead.session_id]);
+    const run = fx.queue((q) => q.get(dead.run_id))!;
+    const studio = fx.jobVerb(["status", "--directory", fx.project, "--job-id", "studio-health", "--run-id", run.studio_run_id!]).runs[0];
+    expect(studio.state).toBe("complete");
+    expect(fx.queue((q) => q.lock(fx.project))).toBeNull();
+  }, 180_000);
+
+  test("before `finish` (the worker printed its block, the supervisor died) → resumed; only the new messages are accounted; the resumed block is finished", () => {
+    const uv = killingUv("finish");
+    const fx = e2eFixture(BLOCK_TEXT, true, { env: uv.env });
+    const res = fx.run();
+    expect(res.signal ?? res.status).toBe("SIGKILL");
+    const dead = onlyRun(fx);
+    expect(dead).toMatchObject({ state: "running" });
+    expect(events(fx, dead.run_id).filter((e) => e.kind === "accounted")).toHaveLength(1); // accounted before the kill
+
+    const drained = fx.bare("drain");
+    expect(drained.status).toBe(0);
+    const out = JSON.parse(drained.stdout);
+    expect(out.recovered.resumed).toMatchObject([{ run_id: dead.run_id, summary: { ok: true, state: "complete" } }]);
+    const evs = events(fx, dead.run_id);
+    // Nothing new to account on the restart (msg-1 was accounted), then only the resumed message.
+    expect(evs.find((e) => e.kind === "resumed")!.detail).toMatchObject({ worker: { outcome: "not running" } });
+    expect(evs.filter((e) => e.kind === "accounted").map((e) => (e.detail as any).message_ids)).toEqual([["msg-1"], [], [expect.stringMatching(/^msg-resume-/)]]);
+    expect(evs.at(-1)).toMatchObject({ kind: "ended", to_state: "complete" });
+    const run = fx.queue((q) => q.get(dead.run_id))!;
+    const studio = fx.jobVerb(["status", "--directory", fx.project, "--job-id", "studio-health", "--run-id", run.studio_run_id!]).runs[0];
+    expect(studio.state).toBe("complete");
+    expect(fx.ledger().filter((e) => e.event === "job-run" && e.payload.run_id === run.studio_run_id)).toHaveLength(1);
+  }, 180_000);
 });

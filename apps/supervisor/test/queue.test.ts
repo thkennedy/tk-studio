@@ -245,8 +245,15 @@ q.close();
       const q = new Queue(path, fakeProbes(new Set()).probes);
       try {
         const cols = (q.db.query("PRAGMA table_info(runs)").all() as { name: string }[]).map((c) => c.name);
-        for (const c of ["permission_mode", "tier", "sandbox", "model", "effort"]) expect(cols.filter((n) => n === c)).toHaveLength(1);
-        expect(q.get("q-old")).toMatchObject({ state: "queued", permission_mode: null, tier: null, sandbox: null, model: null, effort: null });
+        for (const c of ["permission_mode", "tier", "sandbox", "model", "effort", "session_id", "worker_pid", "worker_start", "wake"]) {
+          expect(cols.filter((n) => n === c)).toHaveLength(1);
+        }
+        const types = Object.fromEntries((q.db.query("PRAGMA table_info(runs)").all() as { name: string; type: string }[]).map((c) => [c.name, c.type]));
+        expect(types.worker_pid).toBe("INTEGER");
+        expect(q.get("q-old")).toMatchObject({
+          state: "queued", permission_mode: null, tier: null, sandbox: null, model: null, effort: null,
+          session_id: null, worker_pid: null, worker_start: null, wake: null,
+        });
       } finally { q.close(); }
     }
   });
@@ -502,7 +509,7 @@ describe("restart recovery", () => {
     await fx.queue.claim(live.run_id, A);
     const submitted = fx.enqueue("job-submitted", null).run;
     const report = await fx.queue.recover(studioOps(verbs("running").runner), B);
-    expect(report).toEqual({ ended: [], requeued: [] });
+    expect(report).toEqual({ ended: [], requeued: [], resumed: [] });
     expect(fx.queue.get(live.run_id)!.state).toBe("running");
     expect(fx.queue.get(submitted.run_id)!.state).toBe("queued");
   });
@@ -572,7 +579,7 @@ describe("restart recovery: the verb_started rule", () => {
     const { fx, r } = await verbStarted(["j-20260101T000000Z"]);
     const { calls, runner } = lookupVerbs([{ run_id: "j-20260101T000000Z", state: "complete" }]);
     const report = await fx.queue.recover(studioOps(runner), B);
-    expect(report).toEqual({ ended: [], requeued: [r.run_id] });
+    expect(report).toEqual({ ended: [], requeued: [r.run_id], resumed: [] });
     expect(fx.queue.get(r.run_id)).toMatchObject({ state: "queued", reason: REQUEUED_REASON, owner_nonce: null, verb_started: null, verb_snapshot: null });
     expect(calls.map((c) => c[0])).toEqual(["status"]);
     expect(fx.queue.lock(fx.checkout)).toBeNull();
@@ -627,7 +634,7 @@ describe("restart recovery: owner identity", () => {
     // Another live pid is left alone; my own nonce is never an orphan.
     const live = fx.enqueue("m", B).run;
     const mine = fx.queue.enqueue({ jobId: "n", root: mkdtempSync(join(tmpdir(), "tk-sup-checkout-")), definition: { id: "n" }, owner: restarted }).run;
-    expect(await fx.queue.recover(studioOps(async () => ({})), restarted)).toEqual({ ended: [], requeued: [] });
+    expect(await fx.queue.recover(studioOps(async () => ({})), restarted)).toEqual({ ended: [], requeued: [], resumed: [] });
     expect(fx.queue.get(live.run_id)!.owner_nonce).toBe(B.nonce);
     expect(fx.queue.get(mine.run_id)!.owner_nonce).toBe("new-process");
   });
@@ -1120,5 +1127,69 @@ describe("stop events and the pacer's read (Story 21.5)", () => {
       expect(p.latestTerminal!.run_id).toBe(orphan.run_id);
       expect(p.stopped).toMatchObject({ run_id: stopped.run_id });
     } finally { fx.queue.close(); }
+  });
+});
+
+describe("resume takeover and restart ends (Story 21.6)", () => {
+  async function orphaned(defn: Record<string, unknown> = {}) {
+    const fx = fixture();
+    const r = fx.queue.enqueue({ jobId: "j", root: fx.checkout, projectId: "p", target: "skill",
+      definition: { id: "j", target: { skill: "tk-studio-activate" }, ...defn }, owner: A }).run;
+    await fx.queue.claim(r.run_id, A);
+    fx.queue.setStudioRun(r.run_id, "j-20260928T101010Z");
+    fx.queue.setSession(r.run_id, "sid-1");
+    fx.queue.setWake(r.run_id, { directive: { kind: "invoke-skill", skill: "tk-studio-activate" }, state: "queued" });
+    fx.alive.delete(A.pid);
+    return { fx, r };
+  }
+  const ops = (resume: boolean) => ({
+    end: async () => ({ ok: true, detail: "finished", state: "partial" }),
+    find: async () => ({ ok: true as const, run_id: null }),
+    resume: async () => (resume ? { resume: true as const, detail: { session_id: "sid-1" } } : { resume: false as const, cause: "no session recorded" }),
+  });
+
+  test("setters: session, worker, wake and accounted ids are recorded with one event each, on a running run only", async () => {
+    const { fx, r } = await orphaned();
+    fx.queue.setWorker(r.run_id, 4242, "999");
+    fx.queue.recordAccounted(r.run_id, ["m1", "m2"], { turns: 2, tokens: 30 });
+    expect(fx.queue.get(r.run_id)).toMatchObject({ session_id: "sid-1", worker_pid: 4242, worker_start: "999" });
+    expect(JSON.parse(fx.queue.get(r.run_id)!.wake!)).toMatchObject({ state: "queued" });
+    expect(fx.queue.events(r.run_id).map((e) => e.kind)).toEqual(["enqueued", "claimed", "studio-run", "session", "woke", "worker", "accounted"]);
+    expect(fx.queue.accountedIds(r.run_id)).toEqual(["m1", "m2"]);
+    const q = fx.enqueue("other").run;
+    expect(() => fx.queue.setSession(q.run_id, "x")).toThrow(/not running/);
+  });
+
+  test("the takeover keeps the lock: owner and lock move to the restarted supervisor in one transaction; another run waits on it", async () => {
+    const { fx, r } = await orphaned();
+    const report = await fx.queue.recover(ops(true), B);
+    expect(report.resumed).toEqual([{ run_id: r.run_id, studio_run_id: "j-20260928T101010Z", resume: 1 }]);
+    expect(fx.queue.get(r.run_id)).toMatchObject({ state: "running", owner_nonce: B.nonce, owner_pid: B.pid });
+    expect(fx.queue.lock(fx.checkout)).toMatchObject({ kind: "run", run_id: r.run_id, owner_nonce: B.nonce });
+    expect(fx.queue.events(r.run_id).at(-1)).toMatchObject({ kind: "resumed", from_state: "running", to_state: "running", detail: { resume: 1, session_id: "sid-1" } });
+    expect(fx.queue.resumeCount(r.run_id)).toBe(1);
+    // The resumed run holds the checkout: a second job's run on it waits naming it.
+    const waiter = fx.enqueue("waiter").run;
+    expect(await fx.queue.claim(waiter.run_id, B)).toMatchObject({ claimed: false, why: "lock", holder: { kind: "run", run_id: r.run_id } });
+    // The pacer sees it live; a second recover leaves it alone (its owner is this process).
+    expect(fx.queue.pacing("j", fx.checkout, B).live.map((x) => x.run_id)).toEqual([r.run_id]);
+    expect(await fx.queue.recover(ops(true), B)).toEqual({ ended: [], requeued: [], resumed: [] });
+  });
+
+  test("an orphan end records studio_outcome, and `stopped` in the same transaction when stop.on_status lists it (DW-8)", async () => {
+    const { fx, r } = await orphaned({ stop: { on_status: ["partial"] } });
+    await fx.queue.recover(ops(false), B);
+    expect(fx.queue.get(r.run_id)).toMatchObject({ state: "partial", reason: `${ORPHANED_REASON}; no session recorded` });
+    const evs = fx.queue.events(r.run_id);
+    expect(evs.at(-2)).toMatchObject({ kind: "orphaned", detail: { studio_outcome: { run_id: "j-20260928T101010Z", state: "partial" }, lock: "released" } });
+    expect(evs.at(-1)).toMatchObject({ kind: "stopped", seq: evs.at(-2)!.seq + 1, detail: { condition: "on_status", state: "partial", job_id: "j" } });
+    expect(fx.queue.pacing("j", fx.checkout, B).stopped).toMatchObject({ run_id: r.run_id, kind: "stopped" });
+  });
+
+  test("no stop listed: studio_outcome recorded, no `stopped` event", async () => {
+    const { fx, r } = await orphaned();
+    await fx.queue.recover(ops(false), B);
+    expect(fx.queue.events(r.run_id).map((e) => e.kind).at(-1)).toBe("orphaned");
+    expect(fx.queue.pacing("j", fx.checkout, B).stopped).toBeNull();
   });
 });

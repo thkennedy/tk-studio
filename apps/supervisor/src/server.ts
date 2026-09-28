@@ -168,7 +168,7 @@ export interface RunResult {
  * the direct child. */
 function killTree(pid: number | undefined, child: ReturnType<typeof spawn>): void {
   if (process.platform === "win32" && pid) {
-    spawnSync("taskkill", ["/F", "/T", "/PID", String(pid)], { windowsHide: true });
+    spawnSync("taskkill", ["/F", "/T", "/PID", String(pid)], { windowsHide: true, timeout: 30_000 });
     return;
   }
   if (pid) {
@@ -245,13 +245,22 @@ function untrackGroup(pgid: number): void {
   if (!liveGroups.size) uninstallSignalHandlers();
 }
 
+/** The named failure of a spawn whose `onSpawn` record threw (its child's tree was killed). */
+export const WORKER_RECORD_FAILED = "worker record failed";
+
 /** The one spawn helper. On POSIX the child is `detached` (its own process
  * group, so a timeout kills the tree, and the supervisor's own SIGINT/SIGTERM/
  * SIGHUP — any not inherited as ignored — kill that group before the supervisor exits); on win32 never —
  * `detached` would give the worker its own console (21-4 AC1 console hosting). */
 export function runProcess(
   cmd: string, args: string[],
-  opts: { cwd?: string; input?: string; timeoutS: number; shell?: boolean; env?: Record<string, string | undefined> },
+  opts: {
+    cwd?: string; input?: string; timeoutS: number; shell?: boolean; env?: Record<string, string | undefined>;
+    /** Called once the child is spawned, with its pid (POSIX: the leader of its own process group).
+     * If it throws, the child's tree is killed and the call fails `worker record failed: <cause>`
+     * (a worker is never left running unrecorded). */
+    onSpawn?: (pid: number) => void;
+  },
 ): Promise<RunResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, {
@@ -264,6 +273,16 @@ export function runProcess(
     if (group) trackGroup(group);
     const untrack = () => { if (group) untrackGroup(group); };
     let stdout = "", stderr = "", settled = false;
+    if (child.pid && opts.onSpawn) {
+      try { opts.onSpawn(child.pid); }
+      catch (e) {
+        settled = true;
+        killTree(child.pid, child);
+        untrack();
+        reject(new Error(`${WORKER_RECORD_FAILED}: ${e instanceof Error ? e.message : String(e)}`));
+        return;
+      }
+    }
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
@@ -424,6 +443,10 @@ export function buildWorkerCommand(opts: {
   tier?: string;
   /** The host project root — required for an sbx deny profile (mapped to its microVM path). */
   root?: string;
+  /** The pre-minted session id: `--session-id <id>` on a first invoke, `--resume <id>` when `resume`
+   * (the same id — never `--fork-session`). */
+  sessionId?: string;
+  resume?: boolean;
 }): WorkerCommand {
   const tier = checkTier(opts.tier);
   const mode = opts.permissionMode ?? HOST_PERMISSION_MODE;
@@ -439,6 +462,7 @@ export function buildWorkerCommand(opts: {
   }
   if (opts.model) argv.push("--model", opts.model);
   if (opts.effort) argv.push("--effort", opts.effort);
+  if (opts.sessionId) argv.push(opts.resume ? "--resume" : "--session-id", opts.sessionId);
   return { bin: opts.bin ?? claudeBin(), argv };
 }
 
@@ -487,13 +511,17 @@ export function buildWorkerEnv(parent: Record<string, string | undefined> = proc
   return env;
 }
 
-export type Spawner = (cmd: string, args: string[], opts: { cwd?: string; timeoutS: number; env?: Record<string, string | undefined> }) => Promise<RunResult>;
+export type Spawner = (cmd: string, args: string[], opts: {
+  cwd?: string; timeoutS: number; env?: Record<string, string | undefined>; onSpawn?: (pid: number) => void;
+}) => Promise<RunResult>;
 
-async function runClaude(cmd: WorkerCommand, cwd: string, timeoutS: number, spawner: Spawner): Promise<RunResult> {
+async function runClaude(cmd: WorkerCommand, cwd: string, timeoutS: number, spawner: Spawner, onSpawn?: (pid: number) => void): Promise<RunResult> {
   try {
-    return await spawner(cmd.bin, cmd.argv, { cwd, timeoutS, env: buildWorkerEnv() });
+    return await spawner(cmd.bin, cmd.argv, { cwd, timeoutS, env: buildWorkerEnv(), ...(onSpawn ? { onSpawn } : {}) });
   } catch (e) {
-    throw e instanceof Error && !/timed out/.test(e.message) ? new Error(`claude spawn failed: ${e.message}`) : e;
+    // A timeout and a failed worker record keep their own names.
+    throw e instanceof Error && !/timed out/.test(e.message) && !e.message.startsWith(WORKER_RECORD_FAILED)
+      ? new Error(`claude spawn failed: ${e.message}`) : e;
   }
 }
 
@@ -925,7 +953,21 @@ export interface InvokeOptions {
    * profile) is derived from — the registry entry root; default `root`. The
    * host tier never reads it. */
   vmHostRoot?: string;
+  /** The supervisor's pre-minted session id (`--session-id`), or with `resume` the
+   * session to resume (`--resume`, the continuation prompt as the one `-p` item). */
+  sessionId?: string;
+  resume?: boolean;
+  /** Called after the preflight, just before the worker is spawned (the supervisor records the session id). */
+  beforeSpawn?: () => void;
+  /** Called with the worker's pid as soon as it is spawned (the supervisor records the worker). */
+  onSpawn?: (pid: number) => void;
 }
+
+/** The one `-p` item of a resumed worker (`--resume <session-id>`): the session's
+ * transcript already holds the skill line and the payload. */
+export const CONTINUATION_PROMPT = "HEADLESS driver invocation (driver contract §1), resumed after an interruption: " +
+  "continue the task where it stopped; never prompt or ask questions; end the run with the terminal JSON " +
+  "status block (§3) as the last JSON object on stdout; on ambiguity end blocked with the gap named in reason.";
 
 /** The §1 headless prompt. It always STARTS with the skill line —
  * `/tk-studio:<skill> <payload JSON>` — or `claude -p` does not invoke the
@@ -967,7 +1009,7 @@ export async function invokeSkill(
   if (args.effort) payload.effort = args.effort;
 
   const injection = buildKnowledgeInjection(args.knowledge);
-  const prompt = buildSkillPrompt(skill, payload, injection);
+  const prompt = opts.resume && opts.sessionId ? CONTINUATION_PROMPT : buildSkillPrompt(skill, payload, injection);
   const timeoutS = typeof args.timeout_s === "number" && args.timeout_s > 0 ? args.timeout_s : 600;
   const workerCmd = buildWorkerCommand({
     prompt, tier, root: vmHostRoot,
@@ -975,6 +1017,7 @@ export async function invokeSkill(
     model: typeof args.model === "string" ? args.model : undefined,
     effort: typeof args.effort === "string" ? args.effort : undefined,
     denyProfile: args.deny_profile === undefined ? undefined : String(args.deny_profile),
+    ...(opts.sessionId ? { sessionId: opts.sessionId, resume: opts.resume === true } : {}),
   });
   const cmd = vmRoot ? buildSbxCommand({ sandbox: sandbox!, vmRoot, worker: workerCmd, guardS: timeoutS }) : workerCmd;
 
@@ -992,8 +1035,9 @@ export async function invokeSkill(
 
   // The worker's own run time, from its spawn — the preflight and drift check
   // above are not part of the guard's budget (the host timer starts here).
+  opts.beforeSpawn?.();
   const spawnedMs = performance.now();
-  const res = await runClaude(cmd, root, timeoutS, spawner);
+  const res = await runClaude(cmd, root, timeoutS, spawner, opts.onSpawn);
   const workerElapsedS = (performance.now() - spawnedMs) / 1000;
   const worker = parseWorkerResult(res.stdout);
   const block = extractStatusBlock(worker.text);
