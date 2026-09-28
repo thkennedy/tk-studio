@@ -8,3 +8,19 @@
 ## Deferred from: AD-11/AD-13 hardening PRs (2026-08-06)
 
 - ~~**DW-3**~~ — **Resolved 2026-08-07 (ST-039, contract 0.1.7):** §8 names the suite's `unrunnable-core` assertion and §6 reads four-plane (base, plugin incl. harness loadability, store, vault), folded into the 1.7.0 bump with DW-1. *(Original: PATCH-level wording drift — behavior had already shipped and been asserted by the suite.)*
+
+### DW-4: Pre-existing platform-dependent failure: test_job.JobTestCase.test_target_rules expects "C:/abs/path.py" refused as absolute; accepted on Linux
+origin: spec-deferred ef269254c0b5
+source_spec: `20-1-finish-records-what-the-run-cost-finish-records-what-the-run-cost.md`
+location: plugins/tk-studio/lib/tests/test_job.py:177
+severity: low
+reason: Reproduces on clean git archive of baseline 0c984107dcaf136f8a6049acf0ac39f281b99744; outside story Files (consult ruling 2026-09-28T09:02:24Z)
+status: open
+
+### DW-5: A repeat finish in the same terminal state overwrites run.json fields (now including total_cost_usd) and emits a second job-run event.
+origin: spec-deferred 58cb8430e7bb
+source_spec: `20-1-finish-records-what-the-run-cost-finish-records-what-the-run-cost.md`
+location: plugins/tk-studio/lib/jobrun.py finish / plugins/tk-studio/lib/job.py:570
+severity: low
+reason: job.update_run allows new_state == record state on a terminal run (job.py:570), and finish always calls _finalize_run, which emits. This behaviour predates this story for reason/status_block. It touches the AD-12 one-event-per-terminal-transition invariant (deferral class (b)). Raised by the edge-case-hunter review layer.
+status: open
