@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildReport, checkAuthPreflight, checkStatusBlockDoc, checkUnrunnableCoreDoc, compareReports, DRIVER_NAME,
   evaluateHarness, HARNESS_TIMEOUT_S, harnessInvokeArgs, harnessSkip, harnessState, isDirectDrive, isHarnessDrive, parseArgs,
-  resolveDriveArgv, runDirectRunner, translateDrive, type Check, type Drive, type RunnerExec, type StatusSchema,
+  resolveDriveArgv, runDirectRunner, stagePluginFixture, translateDrive, type Check, type Drive, type RunnerExec, type StatusSchema,
 } from "../src/conformance";
 import { buildWorkerCommand, DenyProfileRefused, invokeSkill, validateDenyProfile, type Spawner } from "../src/server";
 
@@ -50,6 +50,52 @@ describe("plugin-relative --directory", () => {
   test("a {sandbox} directory is substituted, never re-rooted", () => {
     const drive: Drive = { argv: ["lib/consolidate.py", "run", "--directory", "{sandbox}/nowhere"] };
     expect(resolveDriveArgv(drive, SANDBOX, PLUGIN)[3]).toBe(`${SANDBOX}/nowhere`);
+  });
+});
+
+describe("supervisor-routed plugin fixtures are staged into the sandbox", () => {
+  const REL = "contracts/conformance/fixtures/unparseable-proposals-ledger";
+  const setup = () => {
+    const plugin = mkdtempSync(join(tmpdir(), "tk-conf-plugin-"));
+    const sandbox = mkdtempSync(join(tmpdir(), "tk-conf-sbx-"));
+    mkdirSync(join(plugin, REL), { recursive: true });
+    writeFileSync(join(plugin, REL, "proposals.md"), "not a ledger");
+    return { plugin, sandbox };
+  };
+  const drive: Drive = { argv: ["lib/evolve.py", "draft", "--directory", REL, "--dry-run"], expect: "refusal", marker: "cannot parse" };
+
+  test("the payload points at a sandbox copy; the plugin original is untouched", () => {
+    const { plugin, sandbox } = setup();
+    expect(isDirectDrive("tk-studio-evolve", drive)).toBe(false);
+    const payload = stagePluginFixture(translateDrive("tk-studio-evolve", drive, sandbox, plugin), plugin, sandbox);
+    const staged = payload.directory as string;
+    expect(staged).toBe(join(sandbox, "fixtures", REL));
+    expect(readFileSync(join(staged, "proposals.md"), "utf-8")).toBe("not a ledger");
+    expect(payload).toEqual({ verb: "draft", directory: staged, dry_run: true });
+    expect(readdirSync(join(plugin, REL))).toEqual(["proposals.md"]);
+    expect(readFileSync(join(plugin, REL, "proposals.md"), "utf-8")).toBe("not a ledger");
+    // Deterministic per sandbox: a repeat drive keys the same payload.
+    expect(stagePluginFixture(translateDrive("tk-studio-evolve", drive, sandbox, plugin), plugin, sandbox)).toEqual(payload);
+  });
+
+  test("a {sandbox} directory is not copied", () => {
+    const { plugin, sandbox } = setup();
+    const own: Drive = { argv: ["lib/evolve.py", "draft", "--directory", "{sandbox}", "--dry-run"] };
+    const payload = stagePluginFixture(translateDrive("tk-studio-evolve", own, sandbox, plugin), plugin, sandbox);
+    expect(payload.directory).toBe(sandbox);
+    expect(existsSync(join(sandbox, "fixtures"))).toBe(false);
+  });
+
+  test("a missing fixture throws (reported as an untranslatable drive), never copies", () => {
+    const { plugin, sandbox } = setup();
+    const missing: Drive = { argv: ["lib/evolve.py", "draft", "--directory", "contracts/conformance/fixtures/absent"] };
+    expect(() => stagePluginFixture(translateDrive("tk-studio-evolve", missing, sandbox, plugin), plugin, sandbox)).toThrow("does not exist in the plugin");
+    expect(existsSync(join(sandbox, "fixtures"))).toBe(false);
+  });
+
+  test("the direct route keeps the plugin path", () => {
+    const { plugin, sandbox } = setup();
+    expect(resolveDriveArgv(drive, sandbox, plugin)[3]).toBe(join(plugin, REL));
   });
 });
 
@@ -196,7 +242,7 @@ describe("deny-only settings profile", () => {
 
   test("a deny-only profile is accepted and forwarded as --settings", () => {
     const path = profile("deny", { permissions: { deny: ["Bash", "PowerShell"] } });
-    expect(validateDenyProfile(path)).toEqual(["Bash", "PowerShell"]);
+    expect(validateDenyProfile(path)).toEqual({ path, deny: ["Bash", "PowerShell"] });
     const { argv } = buildWorkerCommand({ prompt: "x", denyProfile: path });
     expect(argv).toEqual(["-p", "x", "--output-format", "json", "--permission-mode", "auto", "--settings", path]);
   });
@@ -245,6 +291,17 @@ describe("deny-only settings profile", () => {
     expect(worker).toBeDefined();
     expect(worker!.slice(2)).toEqual(["--output-format", "json", "--permission-mode", "auto", "--settings", path]);
     expect((out.status_block as Record<string, unknown>).status).toBe("blocked");
+  });
+
+  test("a non-normalised absolute path is validated and forwarded as its resolve() form", () => {
+    const path = profile("canonical", { permissions: { deny: ["Bash"] } });
+    const dotted = `${dir}/./canonical.json`;
+    const raw = `${dir}/a/../canonical.json`;
+    const read: string[] = [];
+    expect(validateDenyProfile(raw, (p) => { read.push(p); return readFileSync(p, "utf-8"); })).toEqual({ path, deny: ["Bash"] });
+    expect(read).toEqual([path]);
+    expect(buildWorkerCommand({ prompt: "x", denyProfile: raw }).argv.slice(-2)).toEqual(["--settings", path]);
+    expect(buildWorkerCommand({ prompt: "x", denyProfile: dotted }).argv.slice(-2)).toEqual(["--settings", path]);
   });
 
   test("no profile → no --settings flag", () => {

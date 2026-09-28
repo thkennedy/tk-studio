@@ -4,7 +4,7 @@ type: 'feature'
 created: '2026-09-28'
 status: 'done'
 review_loop_iteration: 0
-followup_review_recommended: true
+followup_review_recommended: false
 deviation_score: 2
 baseline_revision: 'f06c9e9d1cc95f99c05f86fa5f7a7fe567363be7'
 context:
@@ -100,6 +100,24 @@ deferred: []
   - `[low]` `[patch]` `--compare-direct --harness` spent on the direct runner before the supervisor was known to start. Fix: client init and the contract gate run first.
   - `[low]` `[patch]` The README said every drive goes through `tk_invoke`. Fix: it now names the direct §1 pure-data drives and the shared identical payloads.
 
+### 2026-09-28 — Review pass (follow-up)
+- layers: blind-hunter, edge-case-hunter (no story plan for 21-2, so no S band; both ran). Both reviewers were handed the diff since the baseline as a file (`/tmp/v212f/diff.txt`, 1166 lines).
+- intent_gap: 0
+- bad_spec: 0
+- patch: 2: (high 0, medium 0, low 2)
+- defer: 0
+- reject: 7: (low 7)
+  - Blind: the schema check compares key names and the status enum only. It mirrors `runner.py` one for one; the previous pass rejected this for the same reason.
+  - Blind: the harness drive drops the manifest's `prompt`. This is consult-accepted deviation 4.
+  - Blind: hang detection keys on error text. The supervisor's worker timeout surfaces as a `… timed out after Ns` tool error (`src/server.ts` runClaude), which `evaluateHarness` matches.
+  - Blind: `driveSurface`'s check order and `main`'s exit mapping are untested. The order is proven by the live `--compare-direct` run (equal assertion lists). `main`'s mapping is two lines over the tested `compareReports` and `runDirectRunner`.
+  - Edge: the profile could change between validation and `claude` reading it (TOCTOU). That needs write access to the operator's own profile file, which the supervisor already trusts.
+  - Edge: a relative `TK_STUDIO_ROOT` makes the harness profile path relative. It fails loudly with `DenyProfileRefused`, never silently.
+  - Edge: an earlier well-formed block could be judged when the final one is malformed. That is `extractStatusBlock`, 21-1 logic shared by every drive and unchanged by this story.
+- addressed_findings:
+  - `[low]` `[patch]` A tk_invoke-routed drive with a plugin-relative `--directory` (evolve's unparseable-ledger fixture) pointed an auto-mode LLM worker at a directory inside the installed plugin (edge-case-hunter). Fix: the exported `stagePluginFixture` copies the fixture to `<sandbox>/fixtures/<plugin-relative path>` and passes the copy. Direct §1 drives keep the plugin path, per the matrix row. Tests added. Live evolve pass green.
+  - `[low]` `[patch]` On Windows, a root-relative `deny_profile` (`\x\p.json`) passes `isAbsolute`. The supervisor validated it on its own drive while the worker loaded it from its cwd's drive (edge-case-hunter). Fix: `validateDenyProfile` reads and returns `resolve(path)`, and `buildWorkerCommand` forwards exactly that path as `--settings`. Test added.
+
 ## Design Notes
 
 - Why the static checks: AC3 demands equal check counts; the runner emits four per-surface checks before the drives. They read only contract-published files (SKILL.md surfaces, the manifest, `status-block.schema.json`), so mirroring them keeps AD-2.
@@ -144,10 +162,20 @@ DEVIATION SCORE: 2 (consult: narrowing the `deny_profile` seam 21-4 relies on sc
 DRIFT: `deny_profile` must be an absolute path. A relative path is DenyProfileRefused, because the supervisor validated against its own cwd while `claude -p --settings` resolved against the worker's cwd — affects: 21-4 (it must pass an absolute profile path)
 DRIFT: `runDirectRunner` exported with an injectable exec; `--compare-direct` runs the client + contract gate before the direct runner — review-directed ordering and test seam — affects: none
 
+### pass 3 (2026-09-28, implementer: follow-up review patches)
+
+- planned: `validateDenyProfile` exposes the canonical path it validated / actual: the return type changed from `string[]` to the exported `DenyProfile {path, deny}`; `buildWorkerCommand` forwards `--settings <resolve(path)>` / why: the validated path and the forwarded path are now one value / may affect: none (the `deny_profile` input set and the `--settings` argv shape are unchanged)
+- planned: stage plugin-relative fixtures at `<sandbox>/fixtures/<basename>` / actual: the exported `stagePluginFixture` copies to `<sandbox>/fixtures/<path relative to the plugin root>`, for tk_invoke-routed drives only / why: two fixtures with the same folder name cannot collide / may affect: none
+
+DEVIATION SCORE: 1 (consult: pass 3 is local; the story's deviation_score stays 2 from passes 1–2)
+
+DRIFT: tk_invoke-routed drives stage plugin-relative fixtures to <sandbox>/fixtures/<plugin-relative path>; direct §1 drives keep the plugin path — affects: none
+
 ## Consult Log
 
 - 2026-09-28T10:15:29Z — trigger: deviation-gt-0 — question: accept the pass-1 deviation set (resolveDriveArgv/pluginRoot, compare+surface refusal, deny_profile validation, harness via tk_invoke, harness-auth judge)? — ruling: accept-deviation score 2 — do: Accept all five and proceed to review; record pass-1 score 2 (deny_profile tool arg is a seam 21-4 relies on). / Keep the harness drive on tk_invoke; note in the Deviation Summary that the §1 headless preamble is part of the published invocation the harness drive exercises. — rule candidate: a deviation that adds or renames an argument on a supervisor MCP tool schema and names a later story in may-affect scores 2 automatically, no consult. — observe record: ok
 - 2026-09-28T10:19:31Z — trigger: deviation-gt-0 (review-patch pass 2) — question: accept the pass-2 deviations (absolute-path deny_profile refusal; runDirectRunner export + client-first ordering)? — ruling: accept-deviation score 2 — do: Accept (a) and (b) and continue; record pass-2 score 2 (narrows the deny_profile seam 21-4 relies on); story deviation_score stays 2. / Add the DRIFT line: deny_profile must be an absolute path (relative → DenyProfileRefused) — affects 21-4. / Keep the new main order and the exported runDirectRunner with injectable RunnerExec. — rule candidate: a deviation narrowing or widening a supervisor MCP tool arg already scored 2 for a later-story seam inherits score 2 without a consult, provided the DRIFT line names the new constraint. — observe record: ok
+- 2026-09-28T10:31:28Z — trigger: deviation-gt-0 (follow-up review, patch pass 3) — question: accept the pass-3 deviations ((a) validateDenyProfile returns DenyProfile {path, deny} and --settings forwards resolve(path); (b) stagePluginFixture copies plugin-relative fixtures to <sandbox>/fixtures/<rel> for tk_invoke-routed drives)? — ruling: accept-deviation score 1 — do: Accept both (a) and (b); record pass-3 score 1; story deviation_score stays 2 (set by passes 1–2). / No new DRIFT line for (a) — the existing "deny_profile must be an absolute path … affects: 21-4" line still describes the seam exactly; log (b) as DRIFT "tk_invoke-routed drives stage plugin-relative fixtures to <sandbox>/fixtures/<plugin-relative path>; direct §1 drives keep the plugin path — affects: none". / Proceed to the next review step. — rule candidate: a review patch that keeps a later-story seam's accepted input set and argv shape unchanged (it only canonicalizes the value or changes an internal helper's return type) scores 1 without a consult, provided the existing DRIFT line for that seam still describes it verbatim. — observe record: ok
 
 ## Auto Run Result
 
@@ -155,31 +183,29 @@ Status: done
 
 Studio: activated as developer; working set bmm, tea, bmad-loop; drift clean; routing implementer=claude-opus-5-5 reviewers=claude-opus-5-5 consult=claude-opus-5-5; knowledge spine absent
 
-**Summary.** The lifted `conformance.ts` now drives the installed plugin's whole manifest through the supervisor and matches `runner.py run` direct:
-- evolve and launch are known surfaces. Launch's `pipeline.py resolve|apply` run direct, and a plugin-relative `--directory` resolves against the plugin root.
-- Each surface gets the runner's four checks (`registered`, `status-block`, `unrunnable-core`, `auth-preflight`) before its drives, so check counts are equal.
-- A harness drive is one ok check naming its skip, with no TypeError. With `--harness` it runs through `tk_invoke` in `auto` mode under the drive's deny-only profile (`--settings`, absolute path, validated) and is judged per §8.
-- The report names the driver `tk-studio-supervisor` and carries `harness_pass`. `--compare-direct` runs `runner.py run --no-emit` and fails on any divergence.
+**Summary.** This was a follow-up review of the finished story; the spec was `done`, so step 1 routed it to a fresh review. The lifted `conformance.ts` still drives the installed plugin's whole manifest through the supervisor and matches `runner.py run` direct. The pass fixed two low defects:
+- A tk_invoke-routed drive with a plugin-relative fixture `--directory` now gets a copy staged into its sandbox, so no auto-mode worker is pointed inside `$TK_STUDIO_ROOT`.
+- The deny profile is validated and forwarded as one canonical `resolve()` path, which closes the Windows root-relative case.
 
-**Files changed:**
-- `src/conformance.ts`: surface/verb maps, argv resolution, static checks, harness skip/run/judge, report builder, `compareReports`, `runDirectRunner`, `--harness`/`--compare-direct`, header
-- `src/server.ts`: `validateDenyProfile`/`DenyProfileRefused` (deny-only, absolute path); `buildWorkerCommand` forwards it as `--settings`; `tk_invoke` `deny_profile` arg
-- `test/conformance.test.ts` (new): every matrix row plus the review patches
-- `README.md`: conformance operator commands; provenance note updated
+**Files changed (this pass):**
+- `src/conformance.ts`: `stagePluginFixture` (plus a private `isWithin`), called after `translateDrive` on the tk_invoke branch; header note
+- `src/server.ts`: `validateDenyProfile` returns `DenyProfile {path, deny}` from `resolve(path)`; `buildWorkerCommand` forwards that path as `--settings`
+- `test/conformance.test.ts`: staging tests (copy made, original untouched, `{sandbox}` not copied, missing fixture throws, direct route keeps the plugin path) and canonical-path deny-profile tests
 - this spec
 
-**Review findings:** 5 patches applied (high 1, low 4), 0 deferred, 2 rejected. Follow-up review recommended: true, because a high finding was patched (score 3×0 + 4 = 4; the high finding alone triggers it).
+Story-wide (all passes): `src/conformance.ts`, `src/server.ts`, `test/conformance.test.ts` (new), `README.md`, this spec.
+
+**Review findings:** 2 patches applied (low 2), 0 deferred, 7 rejected. Follow-up review recommended: false, because only 2 low findings were patched (score 3×0 + 2 = 2, below 5, no high).
 
 **Verification (re-run by this session after the patches):**
-- `bun install --frozen-lockfile`: ok, no changes. `bun test`: 108 pass / 0 fail. `bunx tsc --noEmit`: clean. Machine-path grep: nothing.
-- `bun src/conformance.ts --json --compare-direct`: exit 0. `driver: tk-studio-supervisor`, `ok: true`, 18 surfaces, 116 checks, 0 failures. `comparison: {ok: true, divergences: []}` against `runner.py run --no-emit` on plugin 0.2.16 (18/116). `harness_pass.state`: `skipped: --harness not given (spend-bearing)`. The pre-patch run gave the same result.
-- `bun src/conformance.ts --json --harness --surface tk-studio-detect`: exit 0. `harness_pass.state: ran`. `denied-core-refusal` passed per §8: blocked, and the reason names the unrunnable core.
-- Matrix test audit: every row is covered by a test that ran and passed.
+- `bun install --frozen-lockfile`: ok, no changes. `bun test`: 113 pass / 0 fail. `bunx tsc --noEmit`: clean. Machine-path grep: nothing.
+- `bun src/conformance.ts --json --compare-direct --concurrency 8`: exit 0 in 104 s. `driver: tk-studio-supervisor`, `ok: true`, 18 surfaces, 116 checks, 0 failures. `comparison: {ok: true, divergences: []}` against `runner.py run --no-emit`. `harness_pass.state`: `skipped: --harness not given (spend-bearing)`.
+- `bun src/conformance.ts --json --surface tk-studio-evolve`: exit 0, 7/7. `unparseable-ledger-refusal` passed on the staged copy (core refusal at step `ledger-parse`).
+- `bun src/conformance.ts --json --harness --surface tk-studio-detect`: exit 0. `harness_pass.state: ran`. `denied-core-refusal` passed per §8 under the profile forwarded in its `resolve()` form.
 
 **Residual risks:**
-- Launch's `start` drive translates `--spec` to a `spec` payload field, but §2 names it `spec_folder`. The skill's refusal still carries the marker, so the check passes, possibly for a coincidental reason. Fixing it needs a manifest or contract change in tk-studio (Epic 20), not here.
-- Migrate's and plan-sync's refusal drives are satisfied by the supervisor's own Jira preflight (`JIRA_API_TOKEN` unset), which is the existing §1 refusal rule.
-- LLM-mediated drives can vary from run to run. Two full live runs agreed.
+- These carry over from the first run: launch's `start` drive maps `--spec` to `spec` rather than §2's `spec_folder`, which would need an Epic 20 contract change. Migrate's and plan-sync's refusals are satisfied by the Jira preflight. LLM-mediated drives can vary from run to run.
+- The profile file can still change between validation and the worker reading it. This was rejected as needing write access to an operator-owned file.
 - `--compare-direct --harness` was not run live, because it is spend-bearing on both sides.
 
 DRIFT: `translateDrive` gains a `pluginRoot` argument and a shared `resolveDriveArgv` — relative `--directory` resolution needs the plugin root on both routes — affects: none
@@ -189,3 +215,4 @@ DRIFT: harness drive goes through `tk_invoke` (skill = surface, empty payload), 
 DRIFT: §8 harness judge also fails a reason starting "harness auth" — nothing was driven — affects: none
 DRIFT: `deny_profile` must be an absolute path. A relative path is DenyProfileRefused, because the supervisor validated against its own cwd while `claude -p --settings` resolved against the worker's cwd — affects: 21-4 (it must pass an absolute profile path)
 DRIFT: `runDirectRunner` exported with an injectable exec; `--compare-direct` runs the client + contract gate before the direct runner — review-directed ordering and test seam — affects: none
+DRIFT: tk_invoke-routed drives stage plugin-relative fixtures to <sandbox>/fixtures/<plugin-relative path>; direct §1 drives keep the plugin path — to keep auto-mode workers out of the installed plugin — affects: none

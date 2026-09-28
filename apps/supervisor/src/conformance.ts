@@ -13,7 +13,9 @@
  * value-less flags → true, a leading positional verb kept only where §2
  * declares a `verb` payload field). A relative `--directory` value (one
  * without `{sandbox}`) is resolved against the plugin root — the direct
- * runner's cwd — before translation.
+ * runner's cwd — before translation; a drive routed through `tk_invoke` then
+ * gets a copy of that fixture staged inside its sandbox, so the worker never
+ * points at the installed plugin (direct drives keep the plugin path).
  *
  * Checks per surface mirror `runner.py run` one for one, so the two reports
  * compare: `registered`, `status-block`, `unrunnable-core`, `auth-preflight`
@@ -57,9 +59,9 @@
  * (or, under --compare-direct, the direct runner) cannot run.
  */
 import { execFile } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { ConnectorClient, type InvokeOutcome } from "./client";
 import { lastJsonObject, resolveStudioRoot } from "./server";
@@ -208,6 +210,30 @@ export function translateDrive(surface: string, drive: Drive, sandbox: string, p
     payload[key] = value;
   }
   return payload;
+}
+
+/** True when `path` lies at or under `root`. */
+function isWithin(root: string, path: string): boolean {
+  const rel = relative(resolve(root), resolve(path));
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+/** Stage a supervisor-routed drive's plugin-relative fixture: when the
+ * payload's `directory` lies under the plugin root (and not the sandbox), copy
+ * it to `<sandbox>/fixtures/<plugin-relative path>` and point the payload at
+ * the copy — an auto-mode worker must never be aimed inside the installed
+ * plugin. The copy is refreshed per call (a prior drive's worker may have
+ * written to it) and its path is deterministic per sandbox, so identical
+ * drives still share one payload key. A missing fixture throws — the caller
+ * reports it as an untranslatable drive. */
+export function stagePluginFixture(payload: Record<string, unknown>, pluginRoot: string, sandbox: string): Record<string, unknown> {
+  const dir = payload.directory;
+  if (typeof dir !== "string" || !isWithin(pluginRoot, dir) || isWithin(sandbox, dir)) return payload;
+  if (!existsSync(dir) || !statSync(dir).isDirectory()) throw new Error(`fixture directory '${relative(pluginRoot, dir)}' does not exist in the plugin`);
+  const staged = join(sandbox, "fixtures", relative(resolve(pluginRoot), resolve(dir)) || "plugin-root");
+  rmSync(staged, { recursive: true, force: true });
+  cpSync(dir, staged, { recursive: true });
+  return { ...payload, directory: staged };
 }
 
 // ------------------------------------------------------------ drive-result evaluation
@@ -637,7 +663,7 @@ async function driveSurface(ctx: SuiteContext, surface: string, entry: SurfaceEn
         continue;
       }
       let payload: Record<string, unknown>;
-      try { payload = translateDrive(surface, drive, sandbox, ctx.pluginRoot); }
+      try { payload = stagePluginFixture(translateDrive(surface, drive, sandbox, ctx.pluginRoot), ctx.pluginRoot, sandbox); }
       catch (e) {
         checks.push({ assertion: drive.assertion ?? "headless-drive", ok: false, detail: `untranslatable drive: ${e instanceof Error ? e.message : e}` });
         continue;

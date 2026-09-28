@@ -17,7 +17,7 @@
  */
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { load as loadYaml } from "js-yaml";
 import { claudeBin, pluginRoot as envPluginRoot, studioRoot as envStudioRoot } from "./env";
@@ -250,15 +250,22 @@ export class DenyProfileRefused extends Error {
   }
 }
 
+/** A validated deny-only profile: the canonical path that was read (and must
+ * be the one forwarded) and its denials. */
+export interface DenyProfile { path: string; deny: string[] }
+
 /** Validate a deny-only settings profile (§8 harness pass): the file must
  * parse to exactly `{"permissions": {"deny": [string…]}}`. Anything else —
  * `allow`, `defaultMode`, any other key — is DenyProfileRefused. */
-export function validateDenyProfile(path: string, read: (p: string) => string = (p) => readFileSync(p, "utf-8")): string[] {
+export function validateDenyProfile(path: string, read: (p: string) => string = (p) => readFileSync(p, "utf-8")): DenyProfile {
   // `claude -p` resolves --settings from the worker's cwd (the project root),
   // not ours: a relative path could validate one file and load another.
   if (!isAbsolute(path)) throw new DenyProfileRefused(path, "is not an absolute path");
+  // Windows root-relative `\x\p.json` passes isAbsolute yet takes the cwd's
+  // drive — read and forward one fully resolved path so both sides agree.
+  const canonical = resolve(path);
   let parsed: unknown;
-  try { parsed = JSON.parse(read(path)); }
+  try { parsed = JSON.parse(read(canonical)); }
   catch (e) { throw new DenyProfileRefused(path, `is unreadable or not JSON (${e instanceof Error ? e.message : e})`); }
   const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
   if (!isObj(parsed)) throw new DenyProfileRefused(path, "is not a JSON object");
@@ -272,7 +279,7 @@ export function validateDenyProfile(path: string, read: (p: string) => string = 
   if (!Array.isArray(deny) || !deny.every((d) => typeof d === "string")) {
     throw new DenyProfileRefused(path, "has a `permissions.deny` that is not an array of strings");
   }
-  return deny as string[];
+  return { path: canonical, deny: deny as string[] };
 }
 
 /** The `claude -p` command line: `--output-format json` always (the status
@@ -290,8 +297,7 @@ export function buildWorkerCommand(opts: {
   }
   const argv = ["-p", opts.prompt, "--output-format", "json", "--permission-mode", mode];
   if (opts.denyProfile !== undefined) {
-    validateDenyProfile(opts.denyProfile);
-    argv.push("--settings", opts.denyProfile);
+    argv.push("--settings", validateDenyProfile(opts.denyProfile).path); // exactly the file validated
   }
   if (opts.model) argv.push("--model", opts.model);
   if (opts.effort) argv.push("--effort", opts.effort);
