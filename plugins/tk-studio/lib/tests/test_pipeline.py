@@ -183,6 +183,18 @@ class ResolveTests(unittest.TestCase):
             with self.assertRaises(pipeline.PipelineError, msg=pair):
                 pipeline.parse_sets([pair])
 
+    def test_opus_5_5_routes_on_every_leg(self):
+        # the 2026-09-28 trial routes every leg to Opus 5.5 from the project tier
+        legs = "\n".join(f'{leg} = {{ model = "claude-opus-5-5" }}' for leg in pipeline.LEGS)
+        (self.root / ".bmad-loop" / "routing.toml").write_text(
+            f"[defaults]\n{legs}\n", encoding="utf-8")
+        res = pipeline.resolve(self.root, "1-1")
+        for leg in pipeline.LEGS:
+            self.assertEqual(res["route"][leg]["model"], "claude-opus-5-5", msg=leg)
+            self.assertEqual(res["sources"][leg]["model"], "project-defaults", msg=leg)
+        runtime = pipeline.parse_sets(["session.model=claude-opus-5-5"])
+        self.assertEqual(runtime["session"]["model"], "claude-opus-5-5")
+
     def test_bad_project_routing_refuses_named(self):
         (self.root / ".bmad-loop" / "routing.toml").write_text(
             '[defaults]\nsessoin = { model = "claude-opus-5" }\n'

@@ -75,6 +75,35 @@ The binding constraint on a subscription plan is **weekly plan usage, not
 dollars**: ≈ 0.8 percentage points of the weekly cap per story on the top
 planning tier. Schedule around the reset, not the invoice.
 
+## Trial in flight: Opus 5.5 on every leg (from 2026-09-28)
+
+Claude Opus 5.5 (`claude-opus-5-5`) is priced at $4 / $20 per M input /
+output tokens, with cache reads at $0.20. For comparison, Opus 5 is
+$5 / $25, Fable 5.1 is $10 / $50, and Sonnet 5 is $2 / $10. That makes
+Opus 5.5 cheaper per token on the Opus and planner legs, but twice Sonnet's
+price on the session, implementer, reviewer and supervise legs. Those four
+legs only come out cheaper if Opus 5.5 finishes a story in fewer turns and
+retries.
+
+tk-studio's own `.bmad-loop/routing.toml` puts every leg on Opus 5.5 at the
+table's efforts. Set the effort explicitly: Opus 5.5 defaults to `medium`.
+The trial is measured per landed story on three things:
+
+- **Dollars.** Per-model usage from the session and subagent transcripts, at
+  list price. The weighted-token method above assumes one price and cannot
+  price mixed models.
+- **Wall-clock time.**
+- **Attempt-1 landings.**
+
+Two comparisons check it:
+
+- **By story kind:** against the v2 table above.
+- **Paired runs:** the same story from the same base, run under both routes
+  (plan Epic 24).
+
+The shipped defaults in the table above stay as they are until the verdict
+is recorded.
+
 ## Policy values that held (bmad-loop `policy.toml`)
 
 Not written by the studio — the engine's `bmad-loop init` template is the
