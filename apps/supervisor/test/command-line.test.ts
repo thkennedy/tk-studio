@@ -54,6 +54,11 @@ describe("worker command line", () => {
     expect(env).toEqual({ TK_STUDIO_HOME: "store", PATH: "p" });
   });
 
+  test("worker env never carries the API's bearer token (TK_SUPERVISOR_TOKEN)", () => {
+    const env = buildWorkerEnv({ TK_SUPERVISOR_TOKEN: "x", ANTHROPIC_API_KEY: "y", TK_STUDIO_HOME: "z" });
+    expect(env).toEqual({ TK_STUDIO_HOME: "z" });
+  });
+
   test("missing TK_STUDIO_ROOT is the named StudioRootMissing", () => {
     expect(() => studioRoot({})).toThrow(StudioRootMissing);
   });

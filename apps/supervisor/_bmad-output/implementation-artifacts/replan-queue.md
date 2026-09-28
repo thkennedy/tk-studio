@@ -100,3 +100,10 @@
 - What no longer holds: "starts the API and the pacer" (read: and runs the CLI's resume-driving recovery once at start, before the pacer's first tick)
 - Suggested adjustment: Replan (21-6 reconcile, 2026-09-28): `start.ps1` sets `TK_SUPERVISOR_TRANSCRIPT_BACKUP` to the nightly backup's `claude-projects` folder and starts the supervisor through the path that calls `recoverWithResume`. This story owns DW-5 and DW-10: enable the e2e suites on win32 and make them green on the Windows host, including the kill-and-restart and backup-restore cases.
 - Status: closed — applied to the unstarted 22-3 entry's invoke_dev_with by the attended session when Epic 22 was transcribed (2026-09-28)
+
+## 22-2-a-read-only-status-page — scope: stories — from 22-1-the-api-answers-on-the-tailnet-only — 2026-09-28
+
+- What changed: held checkout locks are listed by `Queue.locks()` (the exported `LockRow`). A run ended by an API cancel with no recorded worker keeps its lock for its live driver (`Queue.end`'s `driverLive`), with no deadline, until that driver frees it with a `lock-released` event. New event kinds: `worker-kill` and `lock-released`.
+- What no longer holds: "show `held` runs and ended runs that keep a lock, each with the lock holder and the deadline"
+- Suggested adjustment: Replan (22-1 reconcile, 2026-09-28): read kept locks through `Queue.locks()`/`LockRow` and the holder as `/status` names it; never query the locks table beside them. Show a deadline only where one exists (an sbx worker's in-VM deadline); a lock kept for a live driver shows its holder and "kept for its live driver". Render the `worker-kill` and `lock-released` kinds as stored, like any other kind.
+- Status: closed — applied to the unstarted 22-2 entry's invoke_dev_with by the 22-1 gate (2026-09-28)

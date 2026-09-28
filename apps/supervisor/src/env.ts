@@ -47,3 +47,59 @@ export function sbxBin(env: Env = process.env): string {
 export function supervisorConfigPath(env: Env = process.env): string | undefined {
   return env.TK_SUPERVISOR_CONFIG?.trim() || undefined;
 }
+
+// ------------------------------------------------------------ the HTTP API (Story 22.1)
+//
+//   TK_SUPERVISOR_BIND   the Tailscale address the API binds (required; inside 100.64.0.0/10 —
+//                        checked by api.ts `checkBind`)
+//   TK_SUPERVISOR_PORT   the API's port (optional, default 8787)
+//   TK_SUPERVISOR_TOKEN  the bearer token (required) — never logged, never rendered
+
+/** The default API port (operator-decisions §2). */
+export const DEFAULT_API_PORT = 8787;
+
+export class ApiBindMissing extends Error {
+  constructor() {
+    super("ApiBindMissing: TK_SUPERVISOR_BIND is not set — name the Tailscale address (inside 100.64.0.0/10) the API binds");
+    this.name = "ApiBindMissing";
+  }
+}
+
+export class ApiPortInvalid extends Error {
+  constructor(value: string) {
+    super(`ApiPortInvalid: TK_SUPERVISOR_PORT '${value}' is not a port number (1-65535)`);
+    this.name = "ApiPortInvalid";
+  }
+}
+
+/** Never carries the token's value: only that it is missing. */
+export class ApiTokenMissing extends Error {
+  constructor() {
+    super("ApiTokenMissing: TK_SUPERVISOR_TOKEN is not set or empty — the API refuses to start without a bearer token");
+    this.name = "ApiTokenMissing";
+  }
+}
+
+/** The address the API binds, as set (unchecked here: `checkBind` refuses a non-tailnet address). */
+export function apiBind(env: Env = process.env): string {
+  const bind = env.TK_SUPERVISOR_BIND?.trim();
+  if (!bind) throw new ApiBindMissing();
+  return bind;
+}
+
+/** The API port: TK_SUPERVISOR_PORT when set (a port number, else ApiPortInvalid), else 8787. */
+export function apiPort(env: Env = process.env): number {
+  const raw = env.TK_SUPERVISOR_PORT;
+  if (raw === undefined) return DEFAULT_API_PORT;
+  const v = raw.trim();
+  const n = Number(v);
+  if (!/^\d{1,5}$/.test(v) || !Number.isInteger(n) || n < 1 || n > 65535) throw new ApiPortInvalid(raw);
+  return n;
+}
+
+/** The bearer token (required, non-empty). */
+export function apiToken(env: Env = process.env): string {
+  const token = env.TK_SUPERVISOR_TOKEN?.trim();
+  if (!token) throw new ApiTokenMissing();
+  return token;
+}

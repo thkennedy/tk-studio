@@ -8,6 +8,7 @@
  *   bun src/cli.ts submit <job-id> --directory <root> [same options as run]
  *   bun src/cli.ts recover
  *   bun src/cli.ts drain
+ *   bun src/cli.ts serve   (the HTTP API, src/api.ts — Story 22.1)
  *
  * The queue (src/queue.ts, SQLite at TK_SUPERVISOR_DB) owns minting.
  * `submit`: registry `show` → `resolve` (the plugin's one validator of
@@ -72,13 +73,15 @@
  */
 import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
-import { basename, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import {
-  buildWorkerCommand, checkTier, finishStateFor, invokeSkill, maxLoginPreflight, MISSING_STATUS_BLOCK,
-  readProjectConfig, registryShow, requireCompatible, resolveStudioRoot, runJobVerb, SbxSandboxMissing, toVmPath, WORKER_RECORD_FAILED, type Tier,
+  buildWorkerCommand, checkTier, finishStateFor, invokeSkill, lastJsonObject, maxLoginPreflight, MISSING_STATUS_BLOCK,
+  readProjectConfig, registryShow, requireCompatible, resolveStudioRoot, runJobVerb, runUv, SbxSandboxMissing, toVmPath, WORKER_RECORD_FAILED, type Tier,
 } from "./server";
+import { serve as serveApi } from "./api";
+import { pluginRoot } from "./env";
 import {
-  checkoutKey, defaultProbes, isTerminal, LAUNCH_SKILL, ORPHANED_REASON, probeLaunchEngine, processStartTime, Queue, selfOwner,
+  checkoutKey, defaultProbes, isTerminal, LAUNCH_SKILL, ORPHANED_REASON, probeLaunchEngine, processStartTime, Queue, RunTerminal, selfOwner,
   type Holder, type LaunchEngine, type Owner, type QueueRun, type RecoverReport, type RunState, type StudioEnder, type StudioFinder, type StudioOps, type StudioResumer, type TerminalState,
 } from "./queue";
 import { jobOptions, loadSupervisorConfig, type JobOptions } from "./config";
@@ -218,6 +221,8 @@ export interface RunOptions {
   sandbox?: string;
   model?: string;
   effort?: string;
+  /** Story 22.1: the submission's `base_ref`, stored on the queue run it mints (no branch is cut). */
+  baseRef?: string;
 }
 
 /** The worker options a run is driven with (Story 21.4). */
@@ -422,7 +427,7 @@ export async function driveResumes(
       try { await queue.endDriven(r.run_id, "blocked", r.error); } catch { /* already ended */ }
       continue;
     }
-    r.summary = await mirror(queue, r.run_id, { jobId: s.jobId, defn: s.defn }, summary);
+    r.summary = await mirror(queue, r.run_id, { jobId: s.jobId, defn: s.defn }, summary, verbRunner);
   }
 }
 
@@ -510,9 +515,145 @@ export async function submitJob(jobId: string, directory: string, opts: RunOptio
     const { run, minted } = queue.enqueue({
       jobId, root: v.root, projectId: v.projectId, target: v.target, definition: v.defn,
       permissionMode: opts.permissionMode, tier: options.tier, sandbox: options.sandbox, model: options.model, effort: options.effort,
+      base_ref: opts.baseRef,
     });
     return { ok: true, job_id: jobId, project_id: v.projectId, run_id: run.run_id, state: run.state, minted };
   } finally { if (owned) queue.close(); }
+}
+
+/** `submit` by project id (the HTTP API, Story 22.1): the registry's `show` resolves the
+ * project's root, then the one submit path (`submitJob`) validates and enqueues. An unknown
+ * project is `show`'s own refusal (StartError, refused); nothing is queued. */
+export async function submitProject(projectId: string, jobId: string, opts: RunOptions & { permissionMode?: string } = {}): Promise<Record<string, unknown>> {
+  requireStudio();
+  let root: string;
+  try {
+    const shown = await registryShow(projectId);
+    root = shown.entry?.root;
+    if (typeof root !== "string" || !root.trim()) throw refusal(`registry: project '${projectId}' has no usable root`);
+  } catch (e) {
+    if (e instanceof StartError) throw e;
+    const msg = message(e);
+    throw msg.startsWith("registry: ") ? refusal(msg) : new StartError(msg);
+  }
+  return submitJob(jobId, root, opts);
+}
+
+/** Stops a launched bmad-loop engine gracefully (tk-studio-launch `stop --graceful`). A failure is returned, never thrown. */
+export type LaunchStopper = (root: string, engineRunId: string) => Promise<{ ok: boolean; detail: string }>;
+
+/** tk-studio `lib/launch.py stop --directory <root> --run-id <id> --graceful` (driver contract §tk-studio-launch). */
+export const launchStopGraceful: LaunchStopper = async (root, engineRunId) => {
+  try {
+    const res = await runUv(root, join(pluginRoot(), "lib", "launch.py"), ["stop", "--directory", root, "--run-id", engineRunId, "--graceful"]);
+    const out = lastJsonObject(res.stdout) as Record<string, any> | null;
+    if (!out) return { ok: false, detail: `launch stop emitted no JSON (exit ${res.exit}): ${res.stderr.trim().slice(0, 300)}` };
+    if (out.ok !== true) return { ok: false, detail: `launch stop refused: ${String(out.error ?? "refused").slice(0, 300)}` };
+    return { ok: true, detail: `engine ${engineRunId} stopping gracefully` };
+  } catch (e) {
+    return { ok: false, detail: `launch stop failed: ${message(e)}` };
+  }
+};
+
+/** The reason a cancelled queue run ends with. */
+export const CANCELLED_REASON = "cancelled: operator request";
+
+/** Cancel a queue run (Story 22.1): a launched engine is stopped gracefully (launch
+ * `stop --graceful`; the launch core probed again once the worker is dead), the studio run
+ * named after those awaits ended (`studioRunEnder`: core → `cancel`, skill →
+ * `finish`), then the recorded worker rule (`Queue.recordedWorker`, killing a host worker;
+ * on sbx the in-VM deadline) decides the lock: a worker that may still run keeps it
+ * (`holdLock`), an engine takes it over, else it is released — never a bare release. The
+ * queue run ends `cancelled` through `Queue.end` with its `ended` event. A `running` run whose
+ * dead driver started its minting verb but recorded no studio run has it looked up (the
+ * restart rule's finder, `studioRunFinder`) and ended too — `recover` skips terminal runs.
+ * A worker the driver recorded after the cancel read the run is killed once the run has
+ * ended (the recorded-worker rule), named in a `worker-kill` event. Throws
+ * `RunTerminal` on a run already ended (`CancelRaced`, carrying the side effects already
+ * done, when it ended during the cancel), and an Error on an unknown run. */
+export async function cancelRun(
+  queue: Queue, runId: string, deps: { verbRunner?: VerbRunner; launchStop?: LaunchStopper } = {},
+): Promise<QueueRun> {
+  const run = queue.get(runId);
+  if (!run) throw new Error(`queue run '${runId}' not found`);
+  if (isTerminal(run.state)) throw new RunTerminal(runId, run.state);
+  const detail: Record<string, unknown> = { cancelled_by: "api" };
+  // A launched engine: the one recorded, else (a launch run that reached its verb) the launch core's probe.
+  const probeEngine = async (r: QueueRun) => {
+    if (!r.verb_started || queue.definition(r)?.target?.skill !== LAUNCH_SKILL) return undefined;
+    const probed = await queue.launchEngineAt(r.root);
+    if (probed.holder) detail.engine = probed.engine;
+    return probed.holder;
+  };
+  const stopEngine = async (root: string, id: string | null) => {
+    detail.engine_stop = id
+      ? { engine_run_id: id, ...await (deps.launchStop ?? launchStopGraceful)(root, id) }
+      : { engine_run_id: null, ok: false, detail: "an unverified engine: no run id to stop" };
+  };
+  let engine: { id: string | null } | undefined = run.engine_run_id ? { id: run.engine_run_id } : await probeEngine(run);
+  if (engine) await stopEngine(run.root, engine.id);
+  // The studio run named after the awaits above: a driver inside its minting verb may have recorded it meanwhile.
+  const named = queue.get(runId) ?? run;
+  const verbs = deps.verbRunner ?? runJobVerb;
+  if (named.studio_run_id) detail.studio = await studioRunEnder(verbs)(named, CANCELLED_REASON);
+  else if (named.state === "running" && named.verb_started && !queue.ownerAlive(named)) {
+    // Its driver died inside the minting verb: once cancelled, `recover` never looks the
+    // studio run up — looked up here by the restart rule's finder, and ended when found.
+    let snapshot: string[] = [];
+    try { snapshot = JSON.parse(named.verb_snapshot ?? "[]"); } catch { /* an empty snapshot: the lookup still decides */ }
+    let found: Awaited<ReturnType<StudioFinder>>;
+    try { found = await studioRunFinder(verbs)(named, snapshot); }
+    catch (e) { found = { ok: false, detail: message(e) }; }
+    if (!found.ok) detail.lookup = { ok: false, detail: found.detail };
+    else if (found.run_id) {
+      detail.lookup = { ok: true, adopted: found.run_id };
+      try { queue.setStudioRun(runId, found.run_id); } catch { /* ended meanwhile: `Queue.end` below refuses */ }
+      detail.studio = await studioRunEnder(verbs)({ ...named, studio_run_id: found.run_id }, CANCELLED_REASON);
+    } else detail.lookup = { ok: true, adopted: null };
+  }
+  const current = queue.get(runId) ?? named;
+  const worker = await queue.recordedWorker(current, true);
+  if (worker.worker) detail.worker = worker.worker;
+  // An engine the launch core started after the first probe, found once the worker is dead: stopped too, and handed the lock.
+  if (!engine) {
+    engine = await probeEngine(current);
+    if (engine) await stopEngine(current.root, engine.id);
+  }
+  // A `running` run whose live owner (its driver) has recorded no worker yet — a queued run
+  // claimed during the awaits above included: the lock stays with it (never a bare release
+  // under a live driver); the driver's own end (`endDriven`), or `claim`/`recover` once the
+  // driver is dead, frees it.
+  const driverLive = !engine && current.state === "running" && current.worker_pid == null && queue.ownerAlive(current);
+  const holdLock = worker.mayRun ? `cancelled: its recorded worker may still run (${worker.worker?.outcome ?? "unknown"})`
+    : driverLive ? `cancelled: its driver (pid ${current.owner_pid ?? "?"}${current.owner_host ? `@${current.owner_host}` : ""}) is live, no worker recorded yet` : undefined;
+  let ended: QueueRun;
+  try {
+    ended = queue.end(runId, "cancelled", CANCELLED_REASON, {
+      detail, ...(holdLock ? { holdLock } : {}), ...(driverLive ? { driverLive } : {}), ...(engine ? { engineRunId: engine.id } : {}),
+    });
+  } catch (e) {
+    // Ended by its driver during the cancel: the side effects already done travel with the refusal.
+    if (e instanceof RunTerminal) throw new CancelRaced(runId, queue.get(runId)?.state ?? "terminal", detail);
+    throw e;
+  }
+  // A worker the driver recorded after `current` was read (`onSpawn` → `setWorker` before the
+  // end): the recorded-worker rule applies to it now, named in a `worker-kill` event (the
+  // API's `effects.worker`). `end` kept the lock (it re-reads the worker in its transaction);
+  // `claim`/`recover` free it once `recordedWorker` says it may no longer run.
+  if (ended.worker_pid != null && current.worker_pid == null) {
+    const late = await queue.recordedWorker(ended, true);
+    if (late.worker) queue.noteWorkerKill(runId, late.worker, "recorded by its driver during the cancel");
+    return queue.get(runId) ?? ended;
+  }
+  return ended;
+}
+
+/** `cancelRun`'s `RunTerminal` when the run ended during the cancel: `effects` names what the
+ * cancel had already done (engine stop, studio end, worker kill) before `Queue.end` refused. */
+export class CancelRaced extends RunTerminal {
+  constructor(runId: string, readonly state: string, readonly effects: Record<string, unknown>) {
+    super(runId, state);
+  }
 }
 
 export async function runJob(jobId: string, directory: string, permissionMode?: string, opts: RunOptions = {}): Promise<RunSummary> {
@@ -609,11 +750,28 @@ async function drive(queue: Queue, queueRunId: string, v: Validated): Promise<Ru
     throw e;
   }
   if ("summary" in started) return started.summary;
-  queue.setStudioRun(queueRunId, started.runId);
-  // Story 21.6: the wake answer a resume rebuilds from, then a pre-minted session id
-  // (recorded just before the spawn) and the worker's pid (recorded on spawn).
-  queue.setWake(queueRunId, { directive: started.woke.directive ?? null, routing: started.woke.routing ?? null, state: started.woke.state ?? null });
+  await recordMinted(queue, queueRunId, started);
   return finishRun({ ...started, sessionId: randomUUID(), recorder: queueRecorder(queue, queueRunId) });
+}
+
+/** Records the studio run the minting verb created on the queue run, then (Story 21.6) the
+ * wake answer a resume rebuilds from — a pre-minted session id (recorded just before the
+ * spawn) and the worker's pid (recorded on spawn) follow in `finishRun`. A queue run
+ * cancelled meanwhile refuses (`RunTerminal`): only the driver knows the minted id then, so
+ * it ends that studio run (`studioRunEnder`, `CANCELLED_REASON`) before the refusal is rethrown. */
+export async function recordMinted(
+  queue: Queue, queueRunId: string, started: Pick<Started, "runId" | "woke">, verbRunner: VerbRunner = runJobVerb,
+): Promise<void> {
+  try {
+    queue.setStudioRun(queueRunId, started.runId);
+    queue.setWake(queueRunId, { directive: started.woke.directive ?? null, routing: started.woke.routing ?? null, state: started.woke.state ?? null });
+  } catch (e) {
+    const run = queue.get(queueRunId);
+    if (e instanceof RunTerminal && run?.state === "cancelled") {
+      await studioRunEnder(verbRunner)({ ...run, studio_run_id: started.runId }, CANCELLED_REASON);
+    }
+    throw e;
+  }
 }
 
 /** `.bmad-loop/runs/<id>` named by a tk-studio-launch run's status block: the detached engine it started. */
@@ -633,11 +791,23 @@ export function launchedEngine(skill: unknown, block: unknown): string | undefin
  * named — never left `queued`. A launch run that names no engine has the
  * launch core probed before its lock is released (`Queue.endDriven`). The
  * summary's `run_id` becomes the queue id. */
-export async function mirror(queue: Queue, queueRunId: string, v: Pick<Validated, "jobId" | "defn">, s: RunSummary): Promise<RunSummary> {
+export async function mirror(
+  queue: Queue, queueRunId: string, v: Pick<Validated, "jobId" | "defn">, s: RunSummary, verbRunner: VerbRunner = runJobVerb,
+): Promise<RunSummary> {
   const studioRunId = s.run_id ?? null;
   let reason = s.reason;
   try {
-    if (studioRunId && queue.get(queueRunId)?.studio_run_id !== studioRunId) queue.setStudioRun(queueRunId, studioRunId);
+    if (studioRunId && queue.get(queueRunId)?.studio_run_id !== studioRunId) {
+      try { queue.setStudioRun(queueRunId, studioRunId); }
+      catch (e) {
+        // Cancelled before this studio run was recorded (e.g. adopted after a failed wake): only
+        // the driver knows it — ended as `recordMinted` does; the end below still runs, so the
+        // lock kept for this driver is freed (`endDriven`).
+        const run = queue.get(queueRunId);
+        if (!(e instanceof RunTerminal && run?.state === "cancelled")) throw e;
+        await studioRunEnder(verbRunner)({ ...run, studio_run_id: studioRunId }, CANCELLED_REASON);
+      }
+    }
     const terminal = isTerminal(s.state);
     const endReason = terminal ? s.reason ?? null
       : `${studioRunId ? `studio run ${studioRunId} left ${s.state}` : s.state}${s.reason ? `: ${s.reason}` : ""}`;
@@ -702,7 +872,16 @@ export interface RunRecorder {
 export function queueRecorder(queue: Queue, runId: string): RunRecorder {
   return {
     session: (sid) => { queue.setSession(runId, sid); },
-    worker: (pid, guardS) => { queue.setWorker(runId, pid, processStartTime(pid), guardS); },
+    worker: (pid, guardS) => {
+      const start = processStartTime(pid);
+      try { queue.setWorker(runId, pid, start, guardS); }
+      catch (e) {
+        // Cancelled between the spawn and this record: the driver's own child, never recorded, is
+        // killed before the refusal propagates (`killUnrecorded`); its `endDriven` awaits that kill.
+        if (e instanceof RunTerminal && queue.get(runId)?.state === "cancelled") void queue.killUnrecorded(runId, pid, start);
+        throw e;
+      }
+    },
     accounted: (ids, counts) => { queue.recordAccounted(runId, ids, counts); },
     accountedIds: () => queue.accountedIds(runId),
     resumes: () => queue.resumeCount(runId),
@@ -1368,10 +1547,23 @@ const USAGE = [
   "       bun src/cli.ts submit <job-id> --directory <root> [same options as run]",
   "       bun src/cli.ts recover",
   "       bun src/cli.ts drain",
+  "       bun src/cli.ts serve   (the HTTP API on TK_SUPERVISOR_BIND:TK_SUPERVISOR_PORT, bearer TK_SUPERVISOR_TOKEN)",
 ].join("\n");
 
 export async function main(argv: string[]): Promise<number> {
   const [cmd, ...args] = argv;
+  if (cmd === "serve") {
+    if (args.length) { console.error(`unknown argument '${args[0]}'\n${USAGE}`); return 2; }
+    let url: string;
+    try { url = serveApi().url; }
+    catch (e) {
+      // Refused before binding (bind, port, token, queue): named, never the token's value.
+      console.log(JSON.stringify({ ok: false, error: message(e) }, null, 2));
+      return 2;
+    }
+    console.log(JSON.stringify({ ok: true, listening: url }, null, 2));
+    return new Promise<number>(() => { /* serves until the process is stopped */ });
+  }
   if (cmd === "recover" || cmd === "drain") {
     if (args.length) { console.error(`unknown argument '${args[0]}'\n${USAGE}`); return 2; }
     try {

@@ -65,6 +65,12 @@
     lock, each with the lock holder and the deadline. Show a run's resume count and its
     cost summed across resumed iterations. Reasons can be long (`orphaned: supervisor
     restart; guard: ...`): wrap them, never cut them.
+    Replan (22-1 reconcile, 2026-09-28): read kept locks through `Queue.locks()`/`LockRow`
+    and the holder as `/status` names it; never query the locks table beside them. Show
+    a deadline only where one exists (an sbx worker's in-VM deadline); a lock kept for
+    a live driver after a cancel (`driverLive`) shows its holder and "kept for its live
+    driver". Render the `worker-kill` and `lock-released` kinds as stored, like any
+    other kind.
     Replan (operator, 2026-09-28): write the story spec as stories/<this entry's
     id>-<slug of the title>.md. The engine resolves a spec by the glob <id>-*.md, and a
     file named <id>.md is read as pending (story 21-6).

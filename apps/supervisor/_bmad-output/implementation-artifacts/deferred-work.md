@@ -89,3 +89,27 @@ severity: low
 reason: An sbx run refused a resume ends `partial` and keeps its checkout lock until the in-VM deadline (`hold_lock`). `Queue.pacing()` does not count it as live, so the pacer may mint the next run, which then waits on the lock. Nothing runs twice; the cost is a queued run that waits. Deferral class (b): behaviour outside this story's criteria.
 affects: 22-3
 status: open
+
+### DW-12: A driver can still claim a run between cancelRun's re-read and the Queue.end transaction, so a cancel can end a just-claimed run without keeping its lock for the live driver.
+origin: spec-deferred ce9b14f73290
+source_spec: `22-1-the-api-answers-on-the-tailnet-only-the-api-answers-on-the-tailnet-only.md`
+location: src/cli.ts cancelRun; src/queue.ts writeEnd
+severity: medium
+reason: Review pass 1 patch 2 narrowed the window but did not close it: the owner-liveness probe cannot run inside the end transaction (implementer report, consult ruling 2). The criterion it touches: cancel ends the run `cancelled` through Queue.end and the recorded-worker rule, never a bare lock release (deferral class a).
+status: open
+
+### DW-13: A driver that records its studio run after cancelRun's re-read but before Queue.end leaves that studio run unended.
+origin: spec-deferred 966aa17fc77c
+source_spec: `22-1-the-api-answers-on-the-tailnet-only-the-api-answers-on-the-tailnet-only.md`
+location: src/cli.ts cancelRun / recordMinted
+severity: medium
+reason: Follow-up review pass: patch 1 made cancel end the studio run from a fresh re-read, and the driver's recordMinted end a studio run minted after the cancel. A setStudioRun that lands between that re-read and the Queue.end transaction still succeeds, so neither side ends it (implementer report, consult ruling 3). It is a sibling of the claim/end race above. The criterion it touches: cancel ends the studio run through jobrun cancel (deferral class a).
+status: open
+
+### DW-14: Follow-up review still recommended for 22-1-the-api-answers-on-the-tailnet-only after the damping cap was spent
+origin: review-budget-followup
+source_spec: `22-1-the-api-answers-on-the-tailnet-only-the-api-answers-on-the-tailnet-only.md`
+location: n/a
+severity: low
+reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20260928-224136-6f1a; this entry preserves the lingering recommendation for a deliberate later review.
+status: open

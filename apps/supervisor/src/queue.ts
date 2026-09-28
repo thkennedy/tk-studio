@@ -437,6 +437,8 @@ export interface QueueRun {
   sandbox: string | null;
   model: string | null;
   effort: string | null;
+  /** Story 22.1: the submission's `base_ref` (null: none given) — stored, never acted on here. */
+  base_ref: string | null;
   /** Story 21.6: the worker's pre-minted session id, its pid (POSIX: its process
    * group) and that pid's start time, and the wake answer (JSON: directive, routing, state). */
   session_id: string | null;
@@ -449,8 +451,8 @@ export interface QueueRun {
 }
 
 /** The worker options a run records while `queued` (Story 21.4). */
-export interface RunOptionsRecord { tier?: string | null; sandbox?: string | null; model?: string | null; effort?: string | null }
-const RUN_OPTION_KEYS = ["tier", "sandbox", "model", "effort"] as const;
+export interface RunOptionsRecord { tier?: string | null; sandbox?: string | null; model?: string | null; effort?: string | null; base_ref?: string | null }
+const RUN_OPTION_KEYS = ["tier", "sandbox", "model", "effort", "base_ref"] as const;
 
 export interface QueueEvent {
   seq: number; run_id: string; at: string; kind: string;
@@ -479,7 +481,7 @@ export interface JobPacing {
   stopped: QueueEvent | null;
 }
 
-interface LockRow {
+export interface LockRow {
   checkout: string; root: string; kind: "run" | "engine"; run_id: string; job_id: string;
   owner_pid: number | null; owner_host: string | null; owner_nonce: string | null; owner_start: string | null;
   engine_run_id: string | null; acquired: string;
@@ -553,7 +555,7 @@ CREATE TABLE IF NOT EXISTS runs (
   state TEXT NOT NULL CHECK (state IN ('queued','running','complete','partial','blocked','cancelled')),
   reason TEXT, owner_pid INTEGER, owner_host TEXT, owner_nonce TEXT, owner_start TEXT,
   studio_run_id TEXT, engine_run_id TEXT, verb_started TEXT, verb_snapshot TEXT, definition TEXT,
-  permission_mode TEXT, tier TEXT, sandbox TEXT, model TEXT, effort TEXT,
+  permission_mode TEXT, tier TEXT, sandbox TEXT, model TEXT, effort TEXT, base_ref TEXT,
   session_id TEXT, worker_pid INTEGER, worker_start TEXT, worker_guard_s INTEGER, wake TEXT,
   created TEXT NOT NULL, updated TEXT NOT NULL,
   FOREIGN KEY (job_id, checkout) REFERENCES jobs (job_id, checkout)
@@ -579,6 +581,7 @@ CREATE TRIGGER IF NOT EXISTS runs_terminal_immutable BEFORE UPDATE ON runs
 const ADDED_RUN_COLUMNS = [
   ["permission_mode", "TEXT"], ["tier", "TEXT"], ["sandbox", "TEXT"], ["model", "TEXT"], ["effort", "TEXT"],
   ["session_id", "TEXT"], ["worker_pid", "INTEGER"], ["worker_start", "TEXT"], ["wake", "TEXT"], ["worker_guard_s", "INTEGER"],
+  ["base_ref", "TEXT"],
 ] as const;
 
 const now = () => new Date().toISOString();
@@ -632,6 +635,8 @@ function sameClaimView(a: ClaimView, b: ClaimView): boolean {
 export class Queue {
   readonly db: Database;
   readonly path: string;
+  /** Kills of workers spawned for a run a cancel had already ended (`killUnrecorded`), by queue run id. */
+  private readonly unrecorded = new Map<string, Promise<WorkerKill>>();
 
   constructor(path: string, readonly probes: Probes = defaultProbes) {
     this.path = path;
@@ -664,11 +669,29 @@ export class Queue {
     return this.db.query("SELECT * FROM runs ORDER BY created, rowid").all() as QueueRun[];
   }
 
-  events(runId?: string): QueueEvent[] {
+  /** Events in seq order: one run's, or all; with `since`, only those with `seq > since`. */
+  events(runId?: string, since?: number): QueueEvent[] {
+    const after = since ?? -1;
     const rows = (runId
-      ? this.db.query("SELECT * FROM events WHERE run_id = ? ORDER BY seq").all(runId)
-      : this.db.query("SELECT * FROM events ORDER BY seq").all()) as (Omit<QueueEvent, "detail"> & { detail: string | null })[];
+      ? this.db.query("SELECT * FROM events WHERE run_id = ? AND seq > ? ORDER BY seq").all(runId, after)
+      : this.db.query("SELECT * FROM events WHERE seq > ? ORDER BY seq").all(after)) as (Omit<QueueEvent, "detail"> & { detail: string | null })[];
     return rows.map((r) => ({ ...r, detail: r.detail ? JSON.parse(r.detail) : null }));
+  }
+
+  /** The submitted jobs (one per job + checkout), with the resolved definition parsed. */
+  jobs(): { job_id: string; checkout: string; root: string; project_id: string | null; definition: Record<string, unknown> | null; created: string; updated: string }[] {
+    const rows = this.db.query("SELECT * FROM jobs ORDER BY created, rowid").all() as
+      { job_id: string; checkout: string; root: string; project_id: string | null; definition: string; created: string; updated: string }[];
+    return rows.map((r) => {
+      let definition: Record<string, unknown> | null = null;
+      try { definition = JSON.parse(r.definition); } catch { /* unreadable: null */ }
+      return { ...r, definition };
+    });
+  }
+
+  /** Every held checkout lock, oldest first. */
+  locks(): LockRow[] {
+    return this.db.query("SELECT * FROM locks ORDER BY acquired, rowid").all() as LockRow[];
   }
 
   /** The pacer's read for one (job, checkout), as seen by `self` (owner liveness). */
@@ -718,6 +741,11 @@ export class Queue {
     if (owner.nonce === self.nonce) return true;
     if (owner.host === self.host && owner.pid === self.pid) return false;
     return this.probes.ownerAlive(owner);
+  }
+
+  /** Is the run's recorded owner alive, as seen by `self` (the owner probe, never a signal)? */
+  ownerAlive(run: QueueRun, self: Owner = selfOwner()): boolean {
+    return this.ownerLive(ownerOf(run), self);
   }
 
   /** The in-VM deadline of an sbx run's recorded worker: its recorded spawn time (the
@@ -796,11 +824,11 @@ export class Queue {
       const opts = Object.fromEntries(RUN_OPTION_KEYS.map((k) => [k, input[k] || null])) as Record<(typeof RUN_OPTION_KEYS)[number], string | null>;
       this.db.query(
         `INSERT INTO runs (run_id, job_id, checkout, root, project_id, target, state, reason, owner_pid, owner_host,
-           owner_nonce, owner_start, permission_mode, tier, sandbox, model, effort, created, updated)
-         VALUES (?, ?, ?, ?, ?, ?, 'queued', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           owner_nonce, owner_start, permission_mode, tier, sandbox, model, effort, base_ref, created, updated)
+         VALUES (?, ?, ?, ?, ?, ?, 'queued', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(runId, input.jobId, checkout, input.root, input.projectId ?? null, input.target ?? null,
         owner?.pid ?? null, owner?.host ?? null, owner?.nonce ?? null, owner?.start ?? null, mode,
-        opts.tier, opts.sandbox, opts.model, opts.effort, at, at);
+        opts.tier, opts.sandbox, opts.model, opts.effort, opts.base_ref, at, at);
       this.event(runId, "enqueued", null, "queued", {
         ...(owner ? { owner: ownerDetail(owner) } : {}), ...(mode ? { permission_mode: mode } : {}),
         ...Object.fromEntries(Object.entries(opts).filter(([, v]) => v !== null)),
@@ -961,7 +989,10 @@ export class Queue {
       out.engine = await this.probes.engineLive(lock.root, lock.engine_run_id);
       return out;
     }
-    out.holderLive = held?.state === "running" && this.ownerLive(ownerOf(lock), self);
+    // A running holder with a live owner — or a run ended with no worker recorded that kept its
+    // lock for its live driver (`end`'s `driverLive`) — is live while that owner lives.
+    out.holderLive = (held?.state === "running" || (!!held && isTerminal(held.state) && held.worker_pid == null))
+      && this.ownerLive(ownerOf(lock), self);
     if (!out.holderLive && held && (held.state === "running" || isTerminal(held.state))) {
       // A dead owner's running holder — or an ended run that kept its lock (`holdLock`) — is live
       // while its recorded worker may still run (never a lock freed under it).
@@ -1069,6 +1100,30 @@ export class Queue {
     return this.recordOnRunning(runId, "markResumed", "resumed", {}, { resume: this.resumeCount(runId) + 1, ...detail });
   }
 
+  /** Story 22.1: the driver spawned a worker it could not record — `setWorker` refused because a
+   * cancel ended the run between the spawn and the record. Its own child is killed by the kill
+   * the recorded-worker rule uses (`killWorker`, else `killRecordedWorker`: pid + start time,
+   * never by name; the signal is sent before this returns); the driver's `endDriven` awaits
+   * that kill before it frees the lock it kept (`releaseDriverLock`). */
+  killUnrecorded(runId: string, pid: number, start: string | null): Promise<WorkerKill> {
+    let kill: Promise<WorkerKill>;
+    try { kill = (this.probes.killWorker ?? killRecordedWorker)(pid, start); }
+    catch (e) { kill = Promise.reject(e); }
+    const settled = kill.catch((e): WorkerKill => ({ pid, start, outcome: "kill failed", detail: e instanceof Error ? e.message : String(e) }));
+    this.unrecorded.set(runId, settled);
+    return settled;
+  }
+
+  /** Story 22.1: a `worker-kill` event (from/to = the run's terminal state) naming a worker
+   * killed after its run ended — one the driver recorded during a cancel (after the cancel
+   * read the run), or one it spawned but could not record (`killUnrecorded`). */
+  noteWorkerKill(runId: string, worker: WorkerKill, why: string): void {
+    this.db.transaction(() => {
+      const run = this.must(runId);
+      this.event(runId, "worker-kill", run.state, run.state, { why, worker });
+    }).immediate();
+  }
+
   /** Put an engine holder on the checkout lock for run `run` (inside a transaction). */
   private handToEngine(run: Pick<QueueRun, "checkout" | "root" | "run_id" | "job_id">, engineRunId: string | null): void {
     this.db.query(
@@ -1100,12 +1155,36 @@ export class Queue {
    * started an engine that still works the checkout. */
   async endDriven(runId: string, state: TerminalState, reason?: string | null,
     opts: { engineRunId?: string; detail?: Record<string, unknown>; stop?: StopDetail; holdLock?: string } = {}): Promise<QueueRun> {
-    const run = opts.engineRunId ? null : this.get(runId);
-    if (run && run.verb_started && !isTerminal(run.state) && this.definition(run)?.target?.skill === LAUNCH_SKILL) {
-      const { holder, engine } = await this.launchEngine(run.root);
-      return this.end(runId, state, reason, { ...opts, ...(holder ? { engineRunId: holder.id } : {}), detail: { ...opts.detail, engine } });
+    try {
+      const run = opts.engineRunId ? null : this.get(runId);
+      if (run && run.verb_started && !isTerminal(run.state) && this.definition(run)?.target?.skill === LAUNCH_SKILL) {
+        const { holder, engine } = await this.launchEngine(run.root);
+        return this.end(runId, state, reason, { ...opts, ...(holder ? { engineRunId: holder.id } : {}), detail: { ...opts.detail, engine } });
+      }
+      return this.end(runId, state, reason, opts);
+    } catch (e) {
+      // Ended under its driver (a cancel): the lock it kept for this live driver is freed now the driver is done.
+      if (e instanceof RunTerminal) await this.releaseDriverLock(runId);
+      throw e;
     }
-    return this.end(runId, state, reason, opts);
+  }
+
+  /** A run ended with no worker recorded that kept its checkout lock for its live driver
+   * (`end`'s `driverLive`): its driver, done, frees it with a `lock-released` event. A worker
+   * it spawned but could not record (`killUnrecorded`) is awaited first, named in a
+   * `worker-kill` event; one that may still run keeps the lock (never freed under it). */
+  private async releaseDriverLock(runId: string): Promise<void> {
+    const pending = this.unrecorded.get(runId);
+    this.unrecorded.delete(runId);
+    const worker = pending ? await pending : undefined;
+    if (worker) this.noteWorkerKill(runId, worker, "spawned after the run was cancelled, never recorded");
+    if (worker && workerMayRun(worker)) return;
+    this.db.transaction(() => {
+      const run = this.get(runId);
+      if (!run || !isTerminal(run.state) || run.worker_pid != null) return;
+      if (!this.db.query("DELETE FROM locks WHERE checkout = ? AND run_id = ? AND kind = 'run'").run(run.checkout, runId).changes) return;
+      this.event(runId, "lock-released", run.state, run.state, { why: "its driver ended after the run was ended (no worker recorded)" });
+    }).immediate();
   }
 
   /** Terminal transition + lock release — or, when the run launched a
@@ -1115,9 +1194,11 @@ export class Queue {
    * `holdLock` (Story 21.6, the cause): the run's recorded worker may still run
    * (an sbx worker in the VM) — the run ends but keeps its checkout lock, which
    * `claim` and `recover` free only once `recordedWorker` says it may no longer run
-   * (sbx: its in-VM deadline passed). */
+   * (sbx: its in-VM deadline passed). `driverLive` (Story 22.1, a cancel): the run's live
+   * driver has recorded no worker yet — `holdLock` keeps the lock without one; the driver's
+   * `endDriven` frees it, else `claim`/`recover` once that owner is dead. */
   end(runId: string, state: TerminalState, reason?: string | null,
-    opts: { engineRunId?: string | null; detail?: Record<string, unknown>; from?: RunState; stop?: StopDetail; holdLock?: string } = {}): QueueRun {
+    opts: { engineRunId?: string | null; detail?: Record<string, unknown>; from?: RunState; stop?: StopDetail; holdLock?: string; driverLive?: boolean } = {}): QueueRun {
     if (!isTerminal(state)) throw new Error(`end: '${state}' is not a terminal state`);
     return this.db.transaction(() => {
       const run = this.must(runId);
@@ -1132,7 +1213,7 @@ export class Queue {
    * to an engine), the ending event (`ended`, or `orphaned` from `recover`), and
    * a `stop` recorded in the same transaction. The one end path. */
   private writeEnd(run: QueueRun, state: TerminalState, reason: string | null | undefined,
-    opts: { kind: "ended" | "orphaned"; engineRunId?: string | null; detail?: Record<string, unknown>; stop?: StopDetail; holdLock?: string }): void {
+    opts: { kind: "ended" | "orphaned"; engineRunId?: string | null; detail?: Record<string, unknown>; stop?: StopDetail; holdLock?: string; driverLive?: boolean }): void {
     const runId = run.run_id;
     this.db.query(
       `UPDATE runs SET state = ?, reason = ?, owner_pid = NULL, owner_host = NULL, owner_nonce = NULL, owner_start = NULL,
@@ -1140,10 +1221,11 @@ export class Queue {
     ).run(state, reason ?? null, opts.engineRunId ?? null, now(), runId);
     const detail: Record<string, unknown> = { ...(opts.detail ?? {}) };
     const held = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(run.checkout) as LockRow | null;
-    if (opts.holdLock && run.worker_pid !== null && run.worker_pid !== undefined && held?.kind === "run" && held.run_id === runId) {
+    const hasWorker = run.worker_pid !== null && run.worker_pid !== undefined;
+    if (opts.holdLock && (hasWorker || opts.driverLive) && held?.kind === "run" && held.run_id === runId) {
       // Its recorded worker may still run: the lock stays with the ended run (freed by `claim`/`recover`
       // once `recordedWorker` says it may no longer run — sbx: at its in-VM deadline).
-      detail.lock = { held: opts.holdLock, ...(run.tier === "sbx" ? { until: new Date(this.sbxDeadline(run).ms).toISOString() } : {}) };
+      detail.lock = { held: opts.holdLock, ...(hasWorker && run.tier === "sbx" ? { until: new Date(this.sbxDeadline(run).ms).toISOString() } : {}) };
     } else if (opts.engineRunId !== undefined) {
       const lock = held;
       if (!lock || lock.run_id === runId) {
@@ -1356,19 +1438,24 @@ export class Queue {
         });
       }
     }
-    await this.releaseKeptLocks(report);
+    await this.releaseKeptLocks(report, self);
     return report;
   }
 
   /** Ended runs that kept their checkout lock (`holdLock`: a recorded sbx worker that may
    * still run in the VM): each lock is freed once `recordedWorker` says its worker may no
    * longer run (sbx: the in-VM deadline passed), else the run is reported `held`. */
-  private async releaseKeptLocks(report: RecoverReport): Promise<void> {
+  private async releaseKeptLocks(report: RecoverReport, self: Owner): Promise<void> {
     const kept = this.db.query(
       `SELECT runs.* FROM locks JOIN runs ON runs.run_id = locks.run_id
        WHERE locks.kind = 'run' AND runs.state IN ('complete','partial','blocked','cancelled') ORDER BY locks.acquired`,
     ).all() as QueueRun[];
     for (const k of kept) {
+      if (k.worker_pid == null) {
+        // Kept for its live driver (`end`'s `driverLive`): freed by that driver, or once it is dead.
+        const lock = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(k.checkout) as LockRow | null;
+        if (lock && this.ownerLive(ownerOf(lock), self)) continue;
+      }
       const settled = await this.recordedWorker(k, true);
       if (settled.mayRun) { (report.held ??= []).push({ run_id: k.run_id, worker: settled.worker! }); continue; }
       const freed = this.db.transaction(() => {

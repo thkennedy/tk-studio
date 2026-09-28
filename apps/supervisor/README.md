@@ -13,6 +13,7 @@ bun src/cli.ts submit studio-health --directory <this repo>       # validate + q
 bun src/cli.ts run studio-health --directory <root> --tier sbx --sandbox claude-<project>   # the worker inside the sbx microVM
 bun src/cli.ts recover                                            # the restart rule over the queue
 bun src/cli.ts drain                                              # recover, then drive every unowned queued run
+bun src/cli.ts serve                                              # the HTTP API on the tailnet (see HTTP API)
 bun test
 bunx tsc --noEmit
 ```
@@ -34,6 +35,23 @@ bun src/conformance.ts --json --harness --surface tk-studio-detect      # spend-
 `run` prints one JSON summary. It exits 0 when the run completes. It exits 1 on any other run outcome, including the outcomes that end before a studio run exists: a missing Max login (`state: blocked`, nothing queued), a wake/submit answered without waking (`not-woken`), a lock wait (`queued`), and a run already `running` under another live owner. Once a run exists, a later failure (a refused `finish` or `status`) is reported with its run id; a refused `finish` reports the run's actual state from `status`. If a wake/submit times out, the CLI looks for a run of the job that was not in the `status` snapshot it took just before; it never adopts a run it did not start. A run it finds still `queued` or `running` is ended through a contract verb: a skill run with `finish --state blocked`, a core run with `cancel`. The CLI then reports that run with its id and exits 1. It exits 2 when the invocation or setup is refused before a studio run exists: a bad flag or a flag missing its value (a host bypass request, an unknown `--permission-mode`), a missing `TK_STUDIO_ROOT`, an incompatible contract, `QueueDbMissing` or `QueueDbPlacementRefused`, an unregistered project or a `--directory` that is not the registered root, an unreadable config, a job that `resolve` refuses, or a wake/submit the verb refuses outright, answers without a `run_id`, or times out with no new run found.
 
 `run` prints `run_id` (the queue run id, `q-<job>-<UTC compact>-<rand>`) and `studio_run_id` (the studio's run id, once minted).
+
+## HTTP API
+
+`bun src/cli.ts serve` starts the API (`Bun.serve`). It binds only `TK_SUPERVISOR_BIND` on `TK_SUPERVISOR_PORT` (default `8787`) and prints `{ok, listening}`. It refuses to start, exit 2 with a named error and nothing bound, when the bind is unset (`ApiBindMissing`), `0.0.0.0`, not an IPv4 literal, or outside `100.64.0.0/10` (`ApiBindRefused`); when `TK_SUPERVISOR_TOKEN` is unset or empty (`ApiTokenMissing`); or when `TK_SUPERVISOR_PORT` is set but is not a port number (`ApiPortInvalid`).
+
+Every route, an unknown path included, needs `Authorization: Bearer <TK_SUPERVISOR_TOKEN>` (the scheme in any case, the token compared in constant time); anything else is `401 {ok:false,error:"Unauthorized"}`. The token and the header never appear in a log line, an answer or an event. Run ids are queue run ids; answers also carry `studio_run_id`.
+
+| Route | Answer |
+|---|---|
+| `POST /jobs` | Body `{project, job, base_ref?, tier?, model?, effort?}` (non-empty strings, no other field). Goes through the CLI's own submit path: registry `show` resolves the project's root, then `submit`'s validation and the idempotent enqueue. `200 {ok, run_id, studio_run_id, state:"queued", …}`; `base_ref` is stored on the queue run (no branch is cut). When another run holds the checkout lock (e.g. an ended run that keeps it), the answer names it as `holder`. Malformed JSON is `400 MalformedJson`, a body that breaks the schema `400 SchemaError` naming the field; `HostBypassRefused`, `TierRefused`, `SbxSandboxMissing`, `SupervisorConfigInvalid` and `VmPathUnderivable` are `400` with that name; any other refusal (an unknown project or job) is `400 SubmitRefused` with the refusal as `detail`. Nothing is queued on a 400. Any other failure (the studio or the queue could not answer: a transport or setup error) is `500`, named by the error's own name prefix (`<Name>: …`) when it has one, else `500 SubmitFailed`, with the message as `detail`. |
+| `GET /jobs` | The submitted jobs (one per job and checkout, with the resolved definition). |
+| `GET /runs/{id}` | The queue run and its events, kinds and details as stored. `404` for an unknown run (a malformed id escape included). |
+| `POST /runs/{id}/cancel` | Ends the run `cancelled` through the queue's end path with its `ended` event: a launched engine is stopped with the launch core's `stop --graceful` (the lock is handed to it), the studio run is ended (core: `cancel`, skill: `finish`), and a recorded worker is killed, or on sbx the run keeps its lock until the worker's in-VM deadline. A `running` run whose live driver has recorded no worker yet keeps its lock too (never a bare release); the driver frees it when it ends, or `claim`/`recover` once the driver is dead. A `running` run whose dead driver started its minting verb but recorded no studio run has that studio run looked up (the restart rule's finder) and ended. A worker the driver records during the cancel is killed once the run has ended, named in a `worker-kill` event. The `200` answer carries `effects` (`engine_stop`, `engine`, `lookup`, `studio`, `worker`, `lock`), so a failed engine stop is visible there. `404` for an unknown run; `409 RunTerminal` for a run already ended before the cancel, which is left unchanged. A run its driver ended during the cancel is also `409 RunTerminal` (its state the driver's), but not unchanged: the answer's `effects` names what the cancel had already done (engine stop, studio end, worker kill). |
+| `GET /status` | `{ok, counts: {<state>: n}, live: [non-terminal runs], locks: [held checkout locks with their holder]}`. |
+| `GET /events?since=<seq>` | The events with `seq > since` (default 0) as JSON. With `Accept: text/event-stream`, an SSE stream: one `id:<seq>` and `data:<event json>` per event, then each new event as it lands. On the stream a valid `Last-Event-ID` header (an EventSource reconnect) wins over `since`. |
+
+The API never drives or claims a run: `drain` and the tick do. Smoke test from another tailnet device: `curl -H "Authorization: Bearer $TK_SUPERVISOR_TOKEN" http://$TK_SUPERVISOR_BIND:8787/status`.
 
 ## Queue, lock and restart rules
 
@@ -126,7 +144,10 @@ The studio's guards are data (`guards`, `stop`, `cadence.hint_seconds`); the sup
 | `TK_SUPERVISOR_CONFIG` | The supervisor's per-job config file (optional; unset means no config, and every job runs on the host tier). Never read from the plugin or a project's `.tk-studio/`. An unknown key or value is `SupervisorConfigInvalid` (exit 2). |
 | `CLAUDE_CONFIG_DIR` | Where the host worker's session transcripts are read for turn/token accounting and resume checks (default `~/.claude`). |
 | `TK_SUPERVISOR_TRANSCRIPT_BACKUP` | The nightly transcript backup's `claude-projects` folder (runbook §6; optional). A host resume restores a missing session transcript from it. Never covers sbx. |
-| `TK_SUPERVISOR_DB` | Queue database file (required by `run`, `submit`, `recover`, `drain` and the tick; unset fails with `QueueDbMissing`). Must lie outside every git checkout, the studio store and `TK_STUDIO_ROOT` (`QueueDbPlacementRefused`). |
+| `TK_SUPERVISOR_DB` | Queue database file (required by `run`, `submit`, `recover`, `drain`, `serve` and the tick; unset fails with `QueueDbMissing`). Must lie outside every git checkout, the studio store and `TK_STUDIO_ROOT` (`QueueDbPlacementRefused`). |
+| `TK_SUPERVISOR_BIND` | The Tailscale address `serve` binds (required by `serve`). Must be an IPv4 address inside `100.64.0.0/10`; unset is `ApiBindMissing`, anything else `ApiBindRefused`. |
+| `TK_SUPERVISOR_PORT` | The API's port (optional, default `8787`). Set but not a port number is `ApiPortInvalid`. |
+| `TK_SUPERVISOR_TOKEN` | The API's bearer token (required by `serve`; unset or empty is `ApiTokenMissing`). Never logged, never rendered. |
 
 ## Provenance
 
