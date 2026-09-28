@@ -1,0 +1,115 @@
+# stories.yaml: Epic 21 of this project, transcribed 1:1 from _bmad-output/planning-artifacts/epics.md
+# by .bmad-loop/plugins/studio-pipeline/transcribe.py on 2026-09-28. The epics document is
+# the plan; the studio gate may append remediation entries (`<key>-r<n>`) and revise
+# UNSTARTED entries' invoke_dev_with, nothing else.
+
+- id: "21-1-the-lift-drives-the-studio-at-the-current-contract"
+  title: "The Lift Drives the Studio at the Current Contract"
+  description: >-
+    I want the ClaudeOS driver code lifted into the supervisor repo and brought current,
+    So that one job can be woken, invoked headless, and finished from the command line
+    on the agent PC. Canonical: ST-001.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 21.1: The
+    Lift Drives the Studio at the Current Contract", the authoritative specification
+    (user story and acceptance criteria). Read the epic's own narrative (the paragraphs
+    under "## Epic 21:") for scope, rulings and the repo the story targets; transcribe
+    the story into the spec's intent contract and never re-derive, generalise or extend
+    it. Plan: plans/21-1.md when present (its Code Map is the investigation). Project
+    rules and the verify gate: the studio customization
+    (_bmad/custom/bmad-build-auto.toml). Routing: .bmad-loop/routing.current.json; pass
+    implementer.model and reviewers.model explicitly on every subagent launch.
+    Deviations: one `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto
+    Run Result.
+
+- id: "21-2-conformance-passes-through-the-supervisor"
+  title: "Conformance Passes Through the Supervisor"
+  description: >-
+    I want the shipped conformance suite driven through the supervisor, So that
+    acceptance (b) proves the new driver honours the contract (AD-19). Canonical:
+    ST-002.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 21.2:
+    Conformance Passes Through the Supervisor", the authoritative specification (user
+    story and acceptance criteria). Read the epic's own narrative (the paragraphs under
+    "## Epic 21:") for scope, rulings and the repo the story targets; transcribe the
+    story into the spec's intent contract and never re-derive, generalise or extend it.
+    Plan: plans/21-2.md when present (its Code Map is the investigation). Project rules
+    and the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass implementer.model and reviewers.model
+    explicitly on every subagent launch. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result.
+
+- id: "21-3-jobs-survive-restarts-in-a-durable-queue"
+  title: "Jobs Survive Restarts in a Durable Queue"
+  description: >-
+    I want submitted jobs and their runs held in SQLite with one lock per checkout, So
+    that nothing is lost or run twice when the supervisor stops, crashes, or two
+    requests race. Canonical: ST-003.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 21.3: Jobs
+    Survive Restarts in a Durable Queue", the authoritative specification (user story
+    and acceptance criteria). Read the epic's own narrative (the paragraphs under "##
+    Epic 21:") for scope, rulings and the repo the story targets; transcribe the story
+    into the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/21-3.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass implementer.model and reviewers.model
+    explicitly on every subagent launch. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result.
+
+- id: "21-4-the-worker-runs-on-the-right-tier-and-reports-its-cost"
+  title: "The Worker Runs on the Right Tier and Reports Its Cost"
+  description: >-
+    I want each run executed on the tier its job needs, with model and effort forwarded
+    verbatim and cost captured, So that no run bypasses permissions on the host and
+    every finish carries what it spent. Canonical: ST-004.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 21.4: The
+    Worker Runs on the Right Tier and Reports Its Cost", the authoritative specification
+    (user story and acceptance criteria). Read the epic's own narrative (the paragraphs
+    under "## Epic 21:") for scope, rulings and the repo the story targets; transcribe
+    the story into the spec's intent contract and never re-derive, generalise or extend
+    it. Plan: plans/21-4.md when present (its Code Map is the investigation). Project
+    rules and the verify gate: the studio customization
+    (_bmad/custom/bmad-build-auto.toml). Routing: .bmad-loop/routing.current.json; pass
+    implementer.model and reviewers.model explicitly on every subagent launch.
+    Deviations: one `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto
+    Run Result.
+
+- id: "21-5-guards-and-the-pacer-are-the-wrappers-job"
+  title: "Guards and the Pacer Are the Wrapper's Job"
+  description: >-
+    I want wall-clock, turn, and token guards enforced by the supervisor, and recurring
+    jobs paced without overlap, So that no unattended run outlives its budget and no job
+    piles up behind itself. Canonical: ST-005.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 21.5:
+    Guards and the Pacer Are the Wrapper's Job", the authoritative specification (user
+    story and acceptance criteria). Read the epic's own narrative (the paragraphs under
+    "## Epic 21:") for scope, rulings and the repo the story targets; transcribe the
+    story into the spec's intent contract and never re-derive, generalise or extend it.
+    Plan: plans/21-5.md when present (its Code Map is the investigation). Project rules
+    and the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass implementer.model and reviewers.model
+    explicitly on every subagent launch. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result.
+
+- id: "21-6-a-killed-run-resumes-or-ends-partial-never-lost"
+  title: "A Killed Run Resumes or Ends Partial, Never Lost"
+  description: >-
+    I want a run interrupted by a supervisor crash or a silent worker exit to resume
+    from its transcript or end `partial` with the reason named, So that acceptance (c)
+    holds: no run is ever silently lost. Canonical: ST-006.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 21.6: A
+    Killed Run Resumes or Ends Partial, Never Lost", the authoritative specification
+    (user story and acceptance criteria). Read the epic's own narrative (the paragraphs
+    under "## Epic 21:") for scope, rulings and the repo the story targets; transcribe
+    the story into the spec's intent contract and never re-derive, generalise or extend
+    it. Plan: plans/21-6.md when present (its Code Map is the investigation). Project
+    rules and the verify gate: the studio customization
+    (_bmad/custom/bmad-build-auto.toml). Routing: .bmad-loop/routing.current.json; pass
+    implementer.model and reviewers.model explicitly on every subagent launch.
+    Deviations: one `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto
+    Run Result.
