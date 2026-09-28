@@ -13,6 +13,20 @@ bun test
 bunx tsc --noEmit
 ```
 
+Conformance through the supervisor (driver contract §8). The manifest is read from the installed plugin. Drives the §2 payload can express go through `server.ts` over stdio as `tk_invoke` calls (identical payloads share one run). Fixture CLIs and non-payload verbs (research `seed|spine`, launch `pipeline.py resolve|apply`) run direct via uv under the §1 pure-data allowance:
+
+```bash
+bun src/conformance.ts --json                                           # every manifest surface through the supervisor
+bun src/conformance.ts --json --compare-direct                          # also runs runner.py run --no-emit direct and compares
+bun src/conformance.ts --json --harness --surface tk-studio-detect      # spend-bearing harness drive, judged per §8
+```
+
+- Each surface gets the runner's checks: `registered`, `status-block`, `unrunnable-core`, `auth-preflight`, then one check per manifest drive.
+- The report's `driver` is `tk-studio-supervisor`. `harness_pass` is `{declared, state}`, the same as the runner's.
+- Without `--harness`, an `expect: harness-blocked` drive is one ok check naming the skip. With `--harness`, it runs through the worker path in `auto` mode under the drive's deny-only settings profile (`--settings`), bounded by the drive's `timeout` or 180 s. A profile carrying anything but `permissions.deny` is refused with `DenyProfileRefused` before any process starts.
+- `--compare-direct` forwards `--harness` only when it is given, and cannot be combined with `--surface`. The report gains `comparison: {ok, divergences[]}`.
+- Exit 0 when every check passes and the comparison (if run) is equal. Exit 1 on a failure or a divergence. Exit 2 when the suite or the direct runner cannot run.
+
 `run` prints one JSON summary. It exits 0 when the run completes. It exits 1 on any other run outcome, including the two that end before a run id exists: a missing Max login (`state: blocked`) and a wake/submit answered without waking (`not-woken`). Once a run exists, a later failure (a refused `finish` or `status`) is reported with its run id; a refused `finish` reports the run's actual state from `status`. If a wake/submit times out, the CLI looks for a run of the job that was not in the `status` snapshot it took just before; it never adopts a run it did not start. A run it finds still `queued` or `running` is ended through a contract verb: a skill run with `finish --state blocked`, a core run with `cancel`. The CLI then reports that run with its id and exits 1. It exits 2 when the invocation or setup is refused before a run exists: a bad flag or a flag missing its value (a host bypass request, an unknown `--permission-mode`), a missing `TK_STUDIO_ROOT`, an incompatible contract, an unregistered project or a `--directory` that is not the registered root, an unreadable config, a job that `resolve` refuses, or a wake/submit the verb refuses outright, answers without a `run_id`, or times out with no new run found.
 
 How it runs a worker:
@@ -47,4 +61,6 @@ Story 21.1 changed `server.ts`:
 - projects read through `registry show` and jobs through `resolve`
 - `--output-format json`, with model and effort forwarded
 
-`conformance.ts` and `tick.ts` were lifted as-is apart from the coupling strip. Stories 21.2, 21.3 and 21.5 fix them.
+Story 21.2 fixed `conformance.ts`: evolve and launch surfaces, harness drives skipped or run under a deny-only profile, the runner's static checks, and the `--compare-direct` comparison.
+
+`tick.ts` was lifted as-is apart from the coupling strip. Stories 21.3 and 21.5 fix it.

@@ -17,7 +17,7 @@
  */
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { load as loadYaml } from "js-yaml";
 import { claudeBin, pluginRoot as envPluginRoot, studioRoot as envStudioRoot } from "./env";
@@ -242,11 +242,46 @@ export class HostBypassRefused extends Error {
 
 export interface WorkerCommand { bin: string; argv: string[] }
 
+/** A settings profile that is not deny-only — refused before any process starts. */
+export class DenyProfileRefused extends Error {
+  constructor(path: string, why: string) {
+    super(`DenyProfileRefused: settings profile '${path}' ${why} — only {"permissions": {"deny": [string…]}} is accepted (a profile may add denials, never grant or change modes)`);
+    this.name = "DenyProfileRefused";
+  }
+}
+
+/** Validate a deny-only settings profile (§8 harness pass): the file must
+ * parse to exactly `{"permissions": {"deny": [string…]}}`. Anything else —
+ * `allow`, `defaultMode`, any other key — is DenyProfileRefused. */
+export function validateDenyProfile(path: string, read: (p: string) => string = (p) => readFileSync(p, "utf-8")): string[] {
+  // `claude -p` resolves --settings from the worker's cwd (the project root),
+  // not ours: a relative path could validate one file and load another.
+  if (!isAbsolute(path)) throw new DenyProfileRefused(path, "is not an absolute path");
+  let parsed: unknown;
+  try { parsed = JSON.parse(read(path)); }
+  catch (e) { throw new DenyProfileRefused(path, `is unreadable or not JSON (${e instanceof Error ? e.message : e})`); }
+  const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+  if (!isObj(parsed)) throw new DenyProfileRefused(path, "is not a JSON object");
+  const top = Object.keys(parsed);
+  if (top.length !== 1 || top[0] !== "permissions") throw new DenyProfileRefused(path, `carries top-level keys [${top.join(", ")}]`);
+  const perms = parsed.permissions;
+  if (!isObj(perms)) throw new DenyProfileRefused(path, "has a non-object `permissions`");
+  const keys = Object.keys(perms);
+  if (keys.length !== 1 || keys[0] !== "deny") throw new DenyProfileRefused(path, `carries permissions keys [${keys.join(", ")}]`);
+  const deny = perms.deny;
+  if (!Array.isArray(deny) || !deny.every((d) => typeof d === "string")) {
+    throw new DenyProfileRefused(path, "has a `permissions.deny` that is not an array of strings");
+  }
+  return deny as string[];
+}
+
 /** The `claude -p` command line: `--output-format json` always (the status
  * block rides `result`, the cost rides `total_cost_usd`); model/effort
- * forwarded verbatim when present (§5 — never escalated). */
+ * forwarded verbatim when present (§5 — never escalated). A deny-only
+ * settings profile (validated, else DenyProfileRefused) rides `--settings`;
+ * it can only add denials — settings.json `permissions.deny` stays intact. */
 export function buildWorkerCommand(opts: {
-  prompt: string; permissionMode?: string; model?: string; effort?: string; bin?: string;
+  prompt: string; permissionMode?: string; model?: string; effort?: string; bin?: string; denyProfile?: string;
 }): WorkerCommand {
   const mode = opts.permissionMode ?? HOST_PERMISSION_MODE;
   if (mode === "bypassPermissions") throw new HostBypassRefused(mode);
@@ -254,6 +289,10 @@ export function buildWorkerCommand(opts: {
     throw new Error(`permission_mode must be one of ${PERMISSION_MODES.filter((m) => m !== "bypassPermissions").join("|")}`);
   }
   const argv = ["-p", opts.prompt, "--output-format", "json", "--permission-mode", mode];
+  if (opts.denyProfile !== undefined) {
+    validateDenyProfile(opts.denyProfile);
+    argv.push("--settings", opts.denyProfile);
+  }
   if (opts.model) argv.push("--model", opts.model);
   if (opts.effort) argv.push("--effort", opts.effort);
   return { bin: opts.bin ?? claudeBin(), argv };
@@ -647,6 +686,7 @@ const TOOLS: ToolDef[] = [
         effort: { type: "string", description: "§5 runtime effort override" },
         timeout_s: { type: "number", description: "run timeout in seconds (default 600)" },
         permission_mode: { type: "string", enum: [...PERMISSION_MODES], description: "claude -p permission mode (default auto; bypassPermissions is refused on the host — HostBypassRefused)" },
+        deny_profile: { type: "string", description: "path to a deny-only settings profile ({\"permissions\": {\"deny\": [...]}} and nothing else) forwarded as --settings — the §8 harness pass; anything else is refused (DenyProfileRefused) before any process starts" },
         knowledge: { type: "object", description: "§4 KB-injection directive from a submit/wake invoke-skill directive ({spine|seed: {path, present}}) — present artifacts' contents are injected into the run prompt as provisional knowledge (aid, not gate: absent/unreadable artifacts are skipped and reported)" },
       },
       required: ["skill"],
@@ -669,7 +709,7 @@ const TOOLS: ToolDef[] = [
 
 export interface InvokeArgs {
   payload?: unknown; model?: unknown; effort?: unknown; timeout_s?: unknown;
-  permission_mode?: unknown; knowledge?: unknown;
+  permission_mode?: unknown; knowledge?: unknown; deny_profile?: unknown;
 }
 
 /** The §1 headless prompt. It always STARTS with the skill line —
@@ -705,6 +745,7 @@ export async function invokeSkill(root: string, skill: string, args: InvokeArgs,
     permissionMode: args.permission_mode === undefined ? undefined : String(args.permission_mode),
     model: typeof args.model === "string" ? args.model : undefined,
     effort: typeof args.effort === "string" ? args.effort : undefined,
+    denyProfile: args.deny_profile === undefined ? undefined : String(args.deny_profile),
   });
 
   const gaps = await authPreflight(skill, payload, root, spawner);
