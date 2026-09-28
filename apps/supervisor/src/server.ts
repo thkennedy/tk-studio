@@ -232,17 +232,32 @@ function onSupervisorSignal(sig: NodeJS.Signals): void {
   process.kill(process.pid, sig);
 }
 
-function trackGroup(pgid: number): void {
-  liveGroups.add(pgid);
+/** Install the handlers (once). Called BEFORE a spawn: `spawn()` returns some
+ * milliseconds after the child is already running, and a signal that lands in
+ * that gap with no handler installed kills the supervisor by its default
+ * action and leaves the child's group alive. With the handlers installed
+ * first, the signal is delivered on the event loop, after the synchronous
+ * code that follows the spawn has tracked the group. */
+function armSignalHandlers(): void {
   if (signalHandlers) return;
   handledSignals ??= signalsToHandle(readProcStatus());
   signalHandlers = new Map(handledSignals.map((sig) => [sig, () => onSupervisorSignal(sig)]));
   for (const [sig, fn] of signalHandlers) process.on(sig, fn);
 }
 
+/** After a spawn that gave no group: drop the handlers unless another child is live. */
+function disarmIfIdle(): void {
+  if (!liveGroups.size) uninstallSignalHandlers();
+}
+
+function trackGroup(pgid: number): void {
+  liveGroups.add(pgid);
+  armSignalHandlers();
+}
+
 function untrackGroup(pgid: number): void {
   liveGroups.delete(pgid);
-  if (!liveGroups.size) uninstallSignalHandlers();
+  disarmIfIdle();
 }
 
 /** The named failure of a spawn whose `onSpawn` record threw (its child's tree was killed). */
@@ -263,14 +278,23 @@ export function runProcess(
   },
 ): Promise<RunResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, {
-      cwd: opts.cwd, windowsHide: true, shell: opts.shell ?? false,
-      detached: process.platform !== "win32",
-      env: (opts.env as NodeJS.ProcessEnv) ?? process.env,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    const group = process.platform !== "win32" ? child.pid : undefined;
+    const posix = process.platform !== "win32";
+    if (posix) armSignalHandlers(); // before the spawn: see armSignalHandlers
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(cmd, args, {
+        cwd: opts.cwd, windowsHide: true, shell: opts.shell ?? false,
+        detached: posix,
+        env: (opts.env as NodeJS.ProcessEnv) ?? process.env,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (e) {
+      if (posix) disarmIfIdle();
+      throw e;
+    }
+    const group = posix ? child.pid : undefined;
     if (group) trackGroup(group);
+    else if (posix) disarmIfIdle();
     const untrack = () => { if (group) untrackGroup(group); };
     let stdout = "", stderr = "", settled = false;
     if (child.pid && opts.onSpawn) {

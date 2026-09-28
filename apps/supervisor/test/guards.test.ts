@@ -495,6 +495,33 @@ describe.skipIf(process.platform === "win32")("a signal to the supervisor kills 
     expect(out).not.toContain("finished without the signal");
     expect(code).not.toBe(0);
   }, 30_000);
+
+  // `spawn()` returns some milliseconds after the child is already running. The child signals the
+  // supervisor as soon as it has written its pids, so the signal lands inside that gap: the handlers
+  // must already be installed (run 20260928-191230-73a0 paused on this race, 2026-09-28).
+  test.skipIf(!handled.includes("SIGTERM"))("SIGTERM from the child as it starts, while the spawn is still returning: its group is killed all the same", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tk-sup-sig-"));
+    const script = join(dir, "supervisor.ts");
+    writeFileSync(script, [
+      `import { runProcess } from ${JSON.stringify(SERVER)};`,
+      `const dir = ${JSON.stringify(dir)};`,
+      `await runProcess("sh", ["-c", 'echo $$ > "' + dir + '/child.pid"; sleep 30 & echo $! > "' + dir + '/gc.pid"; kill -TERM ' + process.pid + '; wait'], { timeoutS: 60 }).catch(() => {});`,
+      `console.log("supervisor finished without the signal");`,
+    ].join("\n"));
+    // Bounded: GNU timeout ends it (and its group) if the signal path hangs.
+    const proc = Bun.spawn(["timeout", "-k", "5", "20", process.execPath, script], { stdout: "pipe", stderr: "pipe" });
+    const code = await proc.exited;
+    const out = await new Response(proc.stdout).text();
+    const pid = (f: string) => Number(readFileSync(join(dir, f), "utf-8").trim());
+    const [child, grandchild] = [pid("child.pid"), pid("gc.pid")];
+    const gone = Date.now() + 3000;
+    while ((alive(child) || alive(grandchild)) && Date.now() < gone) await Bun.sleep(50);
+    const survivors = [child, grandchild].filter(alive);
+    for (const p of survivors) { try { process.kill(p, "SIGKILL"); } catch { /* gone */ } } // our own test's processes only
+    expect(survivors).toEqual([]);
+    expect(out).not.toContain("finished without the signal");
+    expect(code).not.toBe(0);
+  }, 30_000);
 });
 
 describe("signalsToHandle: a signal inherited as ignored is never handled", () => {
