@@ -89,6 +89,9 @@ if "--real-change" in args:
 tool = bmad / "scripts" / "tool.py"
 (bmad / "scripts" / "tool.py.bak").write_bytes(tool.read_bytes())
 tool.write_bytes(b"print('hi')\n")
+stock = Path("..") / "stock_render.py"
+if "--stock-renderer" in args and stock.is_file():
+    (bmad / "scripts" / "render_skill.py").write_bytes(stock.read_bytes())
 '''
 
 
@@ -156,6 +159,27 @@ class InstallBaseTestCase(unittest.TestCase):
         self.assertEqual(self._dirty(), [])
         self.assertEqual(self.emit.call_args.args[0], "install-outcome")
         self.assertEqual(self.emit.call_args.args[1]["outcome"], "success")
+
+    def test_reinstall_reverting_a_base_patch_is_repatched_to_a_clean_tree(self):
+        import basepatch
+        patch = basepatch.load()[0]
+        stock = ("def _resolve_short_config(central, key, project_root):\n"
+                 "    matches = _find_config_values(central, key)\n" + patch["find"]
+                 + "        raise RenderError(f\"ambiguous config value `{key}` found at: {paths}\")\n")
+        (self.repo.parent / "stock_render.py").write_text(stock, encoding="utf-8", newline="\n")
+        target = self.repo / patch["target"]
+        target.write_text(stock.replace(patch["find"], patch["replace"], 1),
+                          encoding="utf-8", newline="\n")
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "studio base patch in place")
+
+        code, result = self._install(fake_args=("--stock-renderer",))
+
+        self.assertEqual(code, 0, result)
+        self.assertEqual([(r["id"], r["status"]) for r in result["base_patches"]],
+                         [(patch["id"], "patched")])
+        self.assertEqual(result["normalized"]["remaining"], 0)
+        self.assertEqual(self._dirty(), [])
 
     def test_real_upstream_change_stays_and_is_counted(self):
         # the 6.11.0 output_folder template: a real value change — the whole

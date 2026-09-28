@@ -4,6 +4,7 @@ title: Finish Records What the Run Cost
 status: To Do
 assignee: []
 created_date: '2026-09-27 23:44'
+updated_date: '2026-09-28 08:56'
 labels:
   - ST-061
 milestone: The Contract Names Its Drivers and Carries Cost
@@ -25,7 +26,7 @@ So that every terminal run lands in the ledger with the dollars it spent.
 
 **Given** a `finish` without a cost figure, as every driver sends today
 **When** it runs
-**Then** the behavior and the event are identical to 0.1.16: the field is absent, never zero-filled
+**Then** the behavior and the event are identical to 0.1.17: the field is absent, never zero-filled
 
 **Given** a cost argument that is negative, non-numeric, or not finite
 **When** `finish` runs

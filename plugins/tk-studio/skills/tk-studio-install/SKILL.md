@@ -40,6 +40,13 @@ pinned invocation, verifies the result, and measures the outcome.
    result's `normalized` object carries per-class counts and `remaining`:
    entries that still differ from HEAD because upstream changed them for real.
 
+   Base patches (0.1.17) are re-applied before normalization: the studio's
+   declared fixes to installer-owned files (`base-patches/patches.json`,
+   `lib/basepatch.py`), each pinned to one upstream issue, the exact upstream
+   text it replaces, and the core versions it was verified at. A reinstall
+   therefore never silently reverts one. The result's `base_patches` lists
+   each patch's state.
+
 3. Report:
    - **Attended:** state the installed core/module versions, or on failure the
      failing step (`upstream-installer` vs `verify-at-pin`) and its detail.
@@ -49,6 +56,10 @@ pinned invocation, verifies the result, and measures the outcome.
      `tk-studio-base-update` (a same-version re-affirmation), never a hand
      commit; in any other project they are the project's to review and
      commit. `normalized.skipped` names why normalization did not run.
+     Name every base patch whose state is `stale` or `unverified-core` with
+     its upstream issue: the upstream file changed or the core moved, so the
+     patch was NOT applied and must be re-verified (retire it if the issue is
+     fixed at the pin).
    - **Headless:** no prompts (AD-11). End with the status block — `complete`
      on exit 0; `blocked` with the failing step as `reason` otherwise:
 
