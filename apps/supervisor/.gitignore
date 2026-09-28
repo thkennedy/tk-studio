@@ -13,3 +13,4 @@ _bmad/render/
 _bmad/config.user.yaml
 _bmad-output/implementation-artifacts/supervision/
 
+.bmad-loop/archive/
