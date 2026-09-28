@@ -72,8 +72,8 @@ LEGS = ("session", "implementer", "reviewers", "consult", "seam",
 # legs bmad-loop itself routes, and the stage table each one writes
 STAGE_OF = {"session": "dev", "review": "review", "triage": "triage"}
 FIELDS = ("model", "effort", "skill", "agent", "note")
-MODELS = frozenset({"claude-fable-5-1", "claude-opus-5", "claude-sonnet-5",
-                    "claude-haiku-4-5-20251001"})
+MODELS = frozenset({"claude-fable-5-1", "claude-opus-5-5", "claude-opus-5",
+                    "claude-sonnet-5", "claude-haiku-4-5-20251001"})
 EFFORTS = frozenset({"low", "medium", "high"})
 META_KEYS = ("match", "note")
 
