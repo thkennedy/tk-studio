@@ -117,6 +117,25 @@ describe("invokeSkill outcomes", () => {
     expect(String((out.status_block as any).reason)).toContain(MAX_LOGIN_MISSING);
   });
 
+  test.each([
+    ["stderr, no JSON on stdout", { exit: 1, stdout: "", stderr: "Not logged in · Please run /login" }],
+    ["non-JSON stdout", { exit: 1, stdout: "Error: OAuth token has expired. Please run /login", stderr: "" }],
+  ] as [string, RunResult][])("a non-zero exit with the login message in %s → blocked naming the Max login (AC3)", async (_n, res) => {
+    const { spawner } = fakeSpawner(LOGGED_IN, res);
+    const out = await invokeSkill(root, "tk-studio-activate", {}, spawner);
+    expect(out.status_block).toMatchObject({ status: "blocked" });
+    expect(String((out.status_block as any).reason)).toStartWith(MAX_LOGIN_MISSING);
+    expect(out.conformance_failure).toBeUndefined();
+  });
+
+  test("a non-zero exit mentioning only an author / OAuth scope is not relabelled as a Max-login failure", async () => {
+    const res: RunResult = { exit: 1, stdout: "", stderr: "Tool error: the commit author field is empty and the OAuth scope 'repo' was never granted; cannot authorize the push." };
+    const { spawner } = fakeSpawner(LOGGED_IN, res);
+    const out = await invokeSkill(root, "tk-studio-activate", {}, spawner);
+    expect(out.status_block).toBeUndefined();
+    expect(out.conformance_failure).toBe(MISSING_STATUS_BLOCK);
+  });
+
   test("an error-subtype result with no `result` text still reports its cost", async () => {
     const res: RunResult = { exit: 1, stderr: "", stdout: JSON.stringify({ type: "result", subtype: "error_max_turns", is_error: true, total_cost_usd: 0.5 }) };
     const { spawner } = fakeSpawner(LOGGED_IN, res);

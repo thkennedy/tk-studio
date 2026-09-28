@@ -10,8 +10,9 @@
  * Prints one JSON summary. Exit 0 the run completes. Exit 1 any other run
  * outcome, including the pre-run ones with no run id: no Max login (`blocked`)
  * and a wake/submit answered without waking (`not-woken`); once a run id
- * exists, later failures are reported with it. A wake/submit that times out
- * is recovered: a run of this job absent from the pre-wake `status` snapshot is
+ * exists, later failures are reported with it. A wake/submit that fails after
+ * the pre-wake snapshot (timeout, crash, non-JSON output) is recovered — jobrun
+ * creates the run before executing it: a run of this job absent from that snapshot is
  * the one this CLI started — a non-terminal one is ended through a contract
  * verb (skill: `finish --state blocked`; core: `cancel`) and reported with its
  * run id (exit 1). Exit 2 the invocation or setup is refused before a run
@@ -47,15 +48,15 @@ class StartError extends Error {}
 type Target = "skill" | "core";
 type VerbRunner = (root: string, cliArgs: string[], timeoutS?: number) => Promise<Record<string, any>>;
 
-/** What the recovery path needs after a wake/submit timed out. */
+/** What the recovery path needs after a wake/submit failed or timed out. */
 export interface TimeoutContext {
   root: string; projectId: string; target: Target; verb: "wake" | "submit"; timeoutS: number;
   /** Run ids of this job that existed before the wake/submit — never adopted. */
   before: ReadonlySet<string>;
 }
 
-/** A wake/submit that timed out: a run may or may not exist. */
-class WakeTimedOut extends Error {
+/** A wake/submit that failed or timed out: a run may or may not exist. */
+class WakeFailed extends Error {
   constructor(msg: string, readonly ctx: TimeoutContext) { super(msg); }
 }
 
@@ -85,8 +86,8 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
   let started: Awaited<ReturnType<typeof startRun>>;
   try { started = await startRun(jobId, directory, permissionMode); }
   catch (e) {
-    // A wake/submit that timed out may still have created the run: recover it.
-    if (e instanceof WakeTimedOut) return recoverAfterTimeout(jobId, e.message, e.ctx);
+    // A wake/submit that failed may still have created the run: recover it.
+    if (e instanceof WakeFailed) return recoverAfterTimeout(jobId, e.message, e.ctx);
     if (e instanceof StartError) throw e;
     throw new StartError(message(e));
   }
@@ -126,13 +127,16 @@ async function startRun(jobId: string, directory: string, permissionMode?: strin
   if (Array.isArray(resolved.problems) && resolved.problems.length) {
     throw new StartError(`resolve: ${resolved.problems.join("; ")}`);
   }
+  if (!resolved.resolved || typeof resolved.resolved !== "object") {
+    throw new StartError(`resolve: served no merged definition for '${jobId}'`);
+  }
   const defn = resolved.resolved as Record<string, any>;
   const guardS = Number(defn?.guards?.max_wall_clock_seconds) || 600;
   const oneShot = defn?.trigger === "one-shot";
   const verb = oneShot ? "submit" : "wake";
   const target: Target = isCore(defn) ? "core" : "skill";
 
-  // The runs this job already has: a timed-out wake/submit may only ever
+  // The runs this job already has: a failed wake/submit may only ever
   // adopt a run absent from this snapshot (one this CLI started).
   let before: Set<string>;
   try {
@@ -148,9 +152,9 @@ async function startRun(jobId: string, directory: string, permissionMode?: strin
       ? ["submit", "--directory", root, "--id", jobId]
       : ["wake", "--directory", root, "--job-id", jobId], timeoutS);
   } catch (e) {
-    const msg = message(e);
-    if (/timed out/i.test(msg)) throw new WakeTimedOut(msg, { root, projectId, target, verb, timeoutS, before });
-    throw new StartError(msg);
+    // jobrun creates the run before executing it: ANY failure here (timeout,
+    // crash, non-JSON output) may have left one behind — recover, never assume.
+    throw new WakeFailed(message(e), { root, projectId, target, verb, timeoutS, before });
   }
   const woke = answered(out, verb);
   if (woke.woken !== true && woke.accepted !== true) {
@@ -162,7 +166,7 @@ async function startRun(jobId: string, directory: string, permissionMode?: strin
   return { jobId, root, projectId, runId: woke.run_id, guardS, defn, woke, permissionMode };
 }
 
-/** After a wake/submit timeout: adopt the newest run of this job that is NOT
+/** After a wake/submit failure (timeout or otherwise): adopt the newest run of this job that is NOT
  * in the pre-wake snapshot — never a run this CLI did not start. A
  * non-terminal one is ended through a contract verb, because the tick's
  * no-overlap rule would otherwise skip the job forever and no `job-run` event
@@ -170,9 +174,10 @@ async function startRun(jobId: string, directory: string, permissionMode?: strin
  * is cancelled (AC5b: the supervisor never calls `finish` on a core run).
  * No new run → StartError (exit 2, nothing started). */
 export async function recoverAfterTimeout(
-  jobId: string, timeoutMsg: string, ctx: TimeoutContext, verbRunner: VerbRunner = runJobVerb,
+  jobId: string, failMsg: string, ctx: TimeoutContext, verbRunner: VerbRunner = runJobVerb,
 ): Promise<RunSummary> {
   const { root, projectId, target, verb, timeoutS, before } = ctx;
+  const timedOut = /timed out/i.test(failMsg);
   let run: Record<string, any> | undefined;
   try {
     const status = answered(await verbRunner(root, ["status", "--directory", root, "--job-id", jobId]), "status");
@@ -181,17 +186,19 @@ export async function recoverAfterTimeout(
       .sort((a, b) => (a.run_id < b.run_id ? -1 : a.run_id > b.run_id ? 1 : 0))
       .at(-1);
   } catch (e) {
-    throw new StartError(`${verb} failed: ${timeoutMsg}; no run could be looked up (status: ${message(e)})`);
+    throw new StartError(`${verb} failed: ${failMsg}; no run could be looked up (status: ${message(e)})`);
   }
-  if (!run) throw new StartError(`${verb} failed: ${timeoutMsg}; no new run of '${jobId}' exists`);
+  if (!run) throw new StartError(`${verb} failed: ${failMsg}; no new run of '${jobId}' exists`);
 
   const runId = run.run_id as string;
   const base = { ok: false, job_id: jobId, project_id: projectId, run_id: runId, target };
   let state = String(run.state ?? "unknown");
-  const failed = `${verb} failed: ${timeoutMsg}`;
+  const failed = `${verb} failed: ${failMsg}`;
   if (state !== "queued" && state !== "running") return { ...base, state, reason: failed };
 
-  const endReason = `supervisor: ${verb} timed out after ${timeoutS}s before answering — the run could not be driven`;
+  const endReason = timedOut
+    ? `supervisor: ${verb} timed out after ${timeoutS}s before answering — the run could not be driven`
+    : `supervisor: ${verb} failed before answering (${failMsg.slice(0, 300)}) — the run could not be driven`;
   const endVerb = target === "skill" ? "finish" : "cancel";
   let ended: string;
   try {

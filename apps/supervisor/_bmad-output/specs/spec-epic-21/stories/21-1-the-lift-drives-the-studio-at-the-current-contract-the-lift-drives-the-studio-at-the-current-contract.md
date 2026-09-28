@@ -145,6 +145,27 @@ deferred:
   - `[low]` `[patch]` The header comment wrongly said turn counts were unobservable under text output. It is reworded: `account`/`max_turns` belong to 21.5.
   - `[low]` `[patch]` A numeric `project_id` fell back to the basename. It is now `String(pid)`.
 
+### 2026-09-28 — Review pass (follow-up, pass 6)
+- layers: blind-hunter, edge-case-hunter (band L; both ran)
+- intent_gap: 0
+- bad_spec: 0
+- patch: 4: (high 0, medium 2, low 2)
+- defer: 0
+- reject: 8: (medium 3, low 5)
+  - POSIX timeout does not kill the process tree. Already deferred (frontmatter `deferred`, ledger DW-1); not re-filed.
+  - Recovery can adopt another driver's run created between the snapshot and the verb (both layers). Cross-driver concurrency is locks, which the intent's Never list assigns to Stories 21.2–21.6.
+  - A skill wake/submit answering a state other than `queued` is routed to the core branch. Unreachable: jobrun answers every skill-target wake/submit `queued` (`jobrun.py` wake and submit).
+  - `project_id` is read from `.tk-studio/config.yaml`. This is an accepted pass-1 DRIFT (consult 09:24:58Z).
+  - The connector `tk_job` finish carries no cost. Rejected again: README:21 describes the CLI worker path, which forwards cost; connector cost capture is Story 21.4.
+  - The `is_error` auth regex relabels unrelated failures. The behaviour was set deliberately in pass 5; only the misplaced comment is patched (below).
+  - No test pins the contract-version refusal. This is plumbing, not an AC-named behaviour (also rejected in pass 5).
+  - The end-to-end tests skip without `TK_STUDIO_ROOT`. The AC6 pins (command line, extraction, missing block) run unconditionally, and the verify gate runs with `TK_STUDIO_ROOT` set (63 tests ran).
+- addressed_findings:
+  - `[medium]` `[patch]` A wake/submit that failed without timing out, after jobrun had already created the run, became a StartError (exit 2, "nothing started"). The run stayed queued/running with no `job-run` event. Fix: every post-snapshot wake/submit failure goes through the snapshot-diff recovery, and the reasons no longer claim a timeout when there was none. Tests added for skill (`finish blocked`) and core (`cancel`).
+  - `[medium]` `[patch]` A worker that exited non-zero with "Not logged in · /login" or "token expired" on stderr or in non-JSON stdout was finished as MISSING_STATUS_BLOCK without naming the Max login (AC3). Fix: a failed run's text and stderr are both scanned with both auth regexes; healthy runs are still never scanned. Positive and negative tests added.
+  - `[low]` `[patch]` The orphaned "bare 401 needs http context" comment sat on `IS_ERROR_AUTH_RE`, which matches a bare 401. It now documents `AUTH_FAIL_RE` (comments only).
+  - `[low]` `[patch]` The CLI used `resolve`'s `resolved` definition unchecked and guessed the guard, verb and target. It is now a StartError ("served no merged definition") before the snapshot, matching `tick.ts`.
+
 ## Design Notes
 
 - Status-block extraction: scan the worker's `result` text for balanced `{…}` objects (string-aware brace matching), parse each, and keep the **last** one whose `status` and `intent` are strings. None → the named conformance failure.
@@ -219,11 +240,16 @@ DEVIATION SCORE: 1
 
 DRIFT: wake/submit-timeout recovery adopts only a run absent from a pre-wake `status` snapshot (a failed snapshot → exit 2) and ends a non-terminal adopted run (skill `finish blocked`, core `cancel`); supersedes the 2s-window rule — queued runs carry no `started`, so the window lost them — affects: 21-3, 21-6
 
+### pass 6 (2026-09-28, implementer: follow-up review patches)
+
+DEVIATIONS: none (score 0). The implementer touched only `src/cli.ts`, `src/server.ts`, `test/command-line.test.ts` and `test/preflight.test.ts`, all in the plan's Files. It renamed the internal `WakeTimedOut` class to `WakeFailed`; the exported `recoverAfterTimeout` and `TimeoutContext` are unchanged. The timeout recovery rule carried to the 21-3/21-6 planners now covers every post-snapshot wake/submit failure, not only a timeout. The adoption rule is unchanged.
+
 ## Consult Log
 
 - 2026-09-28T09:24:58Z — trigger: deviation-gt-0 (incl. plan Block-If line-budget tripwire) — question: accept the pass-1 deviation set, and does the ~380-line src overrun require a HALT? — ruling: accept-deviation score 2 — do: Do not HALT; continue to review with the full Deviation Summary accepted as one set, keeping the overrun DRIFT line as written. / Reviewer checks the refused-bypass path starts no process and creates no run (src/cli.ts:138-140), and one-shots go through submit, recurring through wake (src/cli.ts:63-64). / Carry the drift to the 21-3, 21-4 and 21-6 planners: one-shots start via submit, the stdio loop stays in server.ts, a refused bypass creates no run to finish. — rule candidate: plan template states the non-lifted line budget counts src only and an overrun with no new files is a record-and-continue DRIFT; routing states one-shot jobs start via jobrun submit (wake = recurring only). — observe record: ok
 - 2026-09-28T09:34:10Z — trigger: deviation-gt-0 (review-patch pass) — question: accept the pass-3 deviations, and is exit 1 for login-absent consistent with README's exit-2 rule? — ruling: accept-deviation score 1 — do: Accept all three and keep login-absent at blocked/run_id null/exit 1. / Reword README.md:16 and the src/cli.ts header: exit 2 = invocation or setup refused before a run exists; a missing Max login (blocked) and a declined wake/submit (not-woken) end without a run id but exit 1 as run outcomes. / Tell 21-3 and 21-6 planners that timeout recovery adopts only a run started within 2s before the CLI's own start. — rule candidate: customization states the CLI exit rule (0 complete; 1 any run outcome incl. pre-run blocked/not-woken; 2 invocation/setup refused before a run exists); timeout recovery never adopts a run older than the CLI. — observe record: ok
 - 2026-09-28T09:46:34Z — trigger: deviation-gt-0 (follow-up review patch pass 5) — question: accept the pass-5 deviations (a failed pre-wake snapshot refuses with exit 2; new test exports)? — ruling: accept-deviation score 1 — do: Accept both deviations as written; keep a failed pre-wake `status` snapshot as a StartError (exit 2), with no fallback. / Record in the Deviation Summary that the 09:34:10Z 2s-window rule for the 21-3/21-6 planners is superseded: recovery adopts only the newest run absent from the pre-wake snapshot and ends it if non-terminal (skill → finish blocked, core → cancel). / Reviewer confirms the snapshot sits after `resolve` and before `submit`/`wake` (confirmed: src/cli.ts:125 resolve, :136-142 snapshot, :148 submit/wake). — rule candidate: customization states a timed-out wake/submit may adopt only a run absent from a pre-verb `status --job-id` snapshot, a failed snapshot is a pre-run setup refusal (exit 2), and exporting a pure or injected function for tests is a score-0 non-deviation. — observe record: ok
+
 
 ## Auto Run Result
 
@@ -231,49 +257,49 @@ Status: done
 
 Studio: activated as developer; working set bmm, tea, bmad-loop; drift clean; routing implementer=claude-opus-5-5 reviewers=claude-opus-5-5 consult=claude-opus-5-5; knowledge spine absent
 
-**Summary.** This was a follow-up review of the 21-1 lift, which had been flagged for one. Both layers ran (band L). Nine findings were patched by a relaunched implementer (medium 4, low 5), one was deferred and five were rejected. The story's delivered scope is unchanged:
+**Summary.** This was a follow-up review (pass 6) of the 21-1 lift, which pass 5 had flagged for one. Both layers ran (band L). A relaunched implementer patched four findings (medium 2, low 2), with deviation score 0, so no consult was needed. Nothing was deferred and eight findings were rejected. The story's delivered scope is unchanged:
 - the four ClaudeOS driver files, blob-verified and lifted into `src/` with the coupling stripped
 - host default `auto`, and `HostBypassRefused` raised before any process starts
 - `ANTHROPIC_API_KEY` stripped from the worker env
-- Max-login preflight via `claude auth status --json`
+- the Max-login preflight via `claude auth status --json`
 - registry `show` and the `resolve` verb, never raw files
 - `--output-format json` with block extraction, and `MISSING_STATUS_BLOCK` (AD-11)
 - the `run <job-id> --directory <root>` CLI
 
-This pass hardened four areas:
-- **Timeout recovery.** A pre-wake `status` snapshot; an adopted run is ended with `finish blocked` (skill) or `cancel` (core).
-- **Skill prompt.** It always starts with `/tk-studio:<skill>`, with the knowledge preamble after the skill line.
-- **Auth-failure detection.** Only real auth signals count, so no false Max-login relabel.
-- **CLI inputs.** Missing `run_id`, flags missing a value, a numeric `project_id`, and a refused finish now reporting the real state.
+This pass hardened three areas:
+- **Failure recovery.** Any wake/submit failure after the snapshot, not only a timeout, now adopts and ends the run it created.
+- **Max-login naming (AC3).** A failed worker's stderr and non-JSON output are now scanned too.
+- **Unchecked `resolve` answer.** A missing definition is refused instead of guessed.
 
 **Files changed (this pass):**
-- `src/cli.ts`: snapshot-based timeout recovery that ends adopted runs; a StartError on a missing `run_id`; flag-value checks; `String(project_id)`; the real state after a refused finish; the `isCore` helper
-- `src/server.ts`: `buildSkillPrompt` (skill line first); a tightened `IS_ERROR_AUTH_RE`; the header comment corrected
-- `test/command-line.test.ts`: argument-parsing cases; 5 timeout-recovery tests with a fake verb runner; a tightened refused-finish assertion
-- `test/preflight.test.ts`: negative and positive auth-relabel tests; prompt-order tests with an injected spine
-- `README.md`: the exit-rule paragraph covers recovery, flags missing a value, and a missing `run_id`
-- this spec: triage log, deferral, pass-5 deviations, consult log
+- `src/cli.ts`: every post-snapshot wake/submit failure goes through the snapshot-diff recovery (`WakeFailed`), with timeout-neutral reasons; a StartError when `resolve` serves no definition
+- `src/server.ts`: auth detection scans a failed run's text and stderr with both regexes; the misplaced auth-regex comment moved to `AUTH_FAIL_RE`
+- `test/command-line.test.ts`: non-timeout recovery tests for skill (`finish blocked`) and core (`cancel`)
+- `test/preflight.test.ts`: non-zero exit with "Not logged in" on stderr, and "token expired" in non-JSON stdout, both name MAX_LOGIN_MISSING; a negative "author/OAuth scope" case on stderr
+- this spec: triage log, pass-6 deviation record, this result
 
 **Review findings:**
-- Patches applied: 9 (high 0, medium 4, low 5).
-- Deferred: 1 (medium; POSIX timeout does not kill the process tree; class c).
-- Rejected: 5.
-- Follow-up review recommended: true. Patched high 0, medium 4, low 5; score 3×4 + 5 = 17 ≥ 5.
+- Patches applied: 4 (high 0, medium 2, low 2).
+- Deferred: 0. The existing POSIX process-tree deferral was left untouched.
+- Rejected: 8.
+- Follow-up review recommended: true. Patched high 0, medium 2, low 2; score 3×2 + 2 = 8 ≥ 5.
 
 **Verification (re-run by this session after the patches):**
 - `bun install --frozen-lockfile`: ok, no changes
-- `bun test`: 58 pass / 0 fail (166 expects)
+- `bun test`: 63 pass / 0 fail (184 expects); `TK_STUDIO_ROOT` was set, so the end-to-end describes ran
 - `bunx tsc --noEmit`: clean
 - residue grep (`claudeos-mcp-connector|mcp.json|watchdog`) and machine-path grep: nothing
-- The implementer ran `bun src/cli.ts run maintenance-conformance --directory .` live: `target: core`, `state: complete`, exit 0.
+- `jobrun.py resolve --job-id studio-health`: `ok: true`, `problems: []`
+- `bun src/cli.ts run maintenance-conformance --directory .`: `target: core`, `state: complete` (18 surfaces, 116 checks, 0 failures), exit 0, no worker spawned
 
 **unverifiable-here (AC5 live leg):** the real `claude -p` worker needs the Max login on the agent PC's host tier. It is proven with a faked worker. Operator command: `bun src/cli.ts run studio-health --directory <this repo>`.
 
 **Residual risks:**
-- On POSIX, a timeout does not kill grandchildren (deferred). The agent PC is Windows, where `taskkill /T` works.
-- Recovery for a real wake/submit timeout (at least 121s) is tested only through the injected verb runner, not end to end.
-- `max_turns` is declared but unenforced until 21.5.
-- `CLAUDE_BIN` must name a real executable on Windows if `claude` is an npm shim.
+- A failed run (non-zero exit) whose stderr contains a bare "401" as a line number or id is now labelled a Max-login failure rather than a missing status block. It still ends `blocked`.
+- On POSIX, a timeout does not kill grandchildren (already deferred). The agent PC is Windows, where `taskkill /T` works.
+- Cross-driver races between the snapshot and the verb can still adopt a foreign run. Locks are Story 21.3.
+- `max_turns` is declared but not enforced until 21.5.
+- The untracked `_bmad-output/implementation-artifacts/deferred-work.md` is the orchestrator's ledger. It was neither modified nor committed by this run.
 
 DRIFT: one-shot jobs start via `submit`, not `wake` — `jobrun.py wake` refuses one-shots; AC5's "wake" is only reachable as `submit` — affects: 21-3, 21-6
 DRIFT: stdio JSON-RPC loop kept in `server.ts` (only ClaudeOS registration/names stripped) — lifted `client.ts`/`conformance.ts`/`tick.ts` drive it over stdio — affects: 21-2, 21-3
@@ -284,4 +310,4 @@ DRIFT: `studio-health` stop condition `max_runs: 1000` — schema requires a sto
 DRIFT: CLI reads `project_id` via lifted config reader; contract pin bumped to 0.1.18; server name renamed; CLI `--permission-mode` flag — needed for registry key, currency and the bypass row — affects: none
 DRIFT: non-lifted src lines ~380 vs ~300 plan budget (Block If; consult accepted, record-and-continue) — every AC plus tests needed it — affects: none
 DRIFT: README/cli.ts exit-rule wording splits a declined wake/submit (not-woken → 1) from an outright refusal (→ 2) — the docs match the code — affects: none
-DRIFT: wake/submit-timeout recovery adopts only a run absent from a pre-wake `status` snapshot (a failed snapshot → exit 2) and ends a non-terminal adopted run (skill `finish blocked`, core `cancel`); supersedes the pass-3 2s-window rule — queued runs carry no `started`, so the window lost them — affects: 21-3, 21-6
+DRIFT: wake/submit failure recovery adopts only a run absent from a pre-wake `status` snapshot (a failed snapshot → exit 2) and ends a non-terminal adopted run (skill `finish blocked`, core `cancel`); since pass 6 it covers every post-snapshot wake/submit failure, not only a timeout; supersedes the pass-3 2s-window rule — queued runs carry no `started`, so the window lost them — affects: 21-3, 21-6

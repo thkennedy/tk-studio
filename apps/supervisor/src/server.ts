@@ -39,13 +39,14 @@ const DRIVER_JOB_VERBS = ["submit", "status", "resolve", "cancel", "wake"] as co
 const WRAPPER_JOB_VERBS = ["finish"] as const;
 const RUN_TERMINAL_STATES = ["complete", "partial", "blocked", "cancelled"] as const;
 const JIRA_TOUCHING_SKILLS = new Set(["tk-studio-plan-sync", "tk-studio-migrate"]);
+/** The failed-run login signals: real auth-failure signals only — a bare 401,
+ * an authenticate/authentication failure, "not logged in", the CLI's "/login"
+ * hint, an expired login/session/token, an invalid API key. Words that merely
+ * contain "auth"/"login" ("author", "OAuth scope", "authorize") do not count.
+ * Applied (like AUTH_FAIL_RE) to a failed run's result text and stderr only. */
+const IS_ERROR_AUTH_RE = /\b401\b|authenticat(?:e|ion)|not logged in|\/login\b|(?:oauth|login|session|token)[^\n]{0,20}expired|invalid[_\s-]?(?:api[_\s-]?key|x-api-key)/i;
 /** Auth-failure shapes worth blocking on (§1: a 401 fails the run `blocked`, never silently).
  * Bare "401" needs http-ish context so line numbers/ids in ordinary output don't false-block. */
-/** The is_error fallback: real auth-failure signals only — a bare 401, an
- * authenticate/authentication failure, "not logged in", the CLI's "/login"
- * hint, an expired login/session/token, an invalid API key. Words that merely
- * contain "auth"/"login" ("author", "OAuth scope", "authorize") do not count. */
-const IS_ERROR_AUTH_RE = /\b401\b|authenticat(?:e|ion)|not logged in|\/login\b|(?:oauth|login|session|token)[^\n]{0,20}expired|invalid[_\s-]?(?:api[_\s-]?key|x-api-key)/i;
 const AUTH_FAIL_RE = /unauthorized|authentication[_\s-]?error|invalid[_\s-]?(?:api[_\s-]?key|x-api-key)|(?:http|status|error)[^\n]{0,20}\b401\b/i;
 
 // ------------------------------------------------------------ registry (contract read path)
@@ -731,13 +732,13 @@ export async function invokeSkill(root: string, skill: string, args: InvokeArgs,
     if (injection.skipped.length) result.knowledge_skipped = injection.skipped;
   }
   // §1 MUST: a 401 fails the run `blocked`, never silently — scan the result
-  // AND stderr (CLI auth failures characteristically land on stderr); an
-  // is_error result carrying a real auth-failure signal is the Max login gone.
-  // Only a failed run is scanned: healthy output that merely mentions
-  // "unauthorized" or "status 401" is not an auth failure.
+  // AND stderr (CLI auth failures characteristically land on stderr, or in
+  // non-JSON stdout); a failed run carrying a real auth-failure signal is the
+  // Max login gone. Only a failed run (is_error or a non-zero exit) is scanned:
+  // healthy output that merely mentions "unauthorized" or "status 401" is not
+  // an auth failure.
   const failed = worker.isError || res.exit !== 0;
-  const authFailed = failed && (AUTH_FAIL_RE.test(worker.text) || AUTH_FAIL_RE.test(res.stderr)
-    || (worker.isError && IS_ERROR_AUTH_RE.test(worker.text)));
+  const authFailed = failed && [worker.text, res.stderr].some((s) => AUTH_FAIL_RE.test(s) || IS_ERROR_AUTH_RE.test(s));
   const authReason = `${MAX_LOGIN_MISSING} — worker answered 401/auth failure (§1)`;
   const authBlock = { status: "blocked", intent: skill, artifacts: [], reason: authReason };
   if (block) {

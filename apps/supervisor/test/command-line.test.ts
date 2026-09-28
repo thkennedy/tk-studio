@@ -71,7 +71,7 @@ describe("argument parsing", () => {
   });
 });
 
-describe("wake/submit timeout recovery", () => {
+describe("wake/submit failure recovery (timeout or otherwise)", () => {
   type Call = string[];
   const ctx = (target: "skill" | "core", before: string[] = []): TimeoutContext =>
     ({ root: "proj", projectId: "p", target, verb: target === "core" ? "wake" : "submit", timeoutS: 720, before: new Set(before) });
@@ -128,6 +128,31 @@ describe("wake/submit timeout recovery", () => {
     const out = await recoverAfterTimeout("j", "uv timed out", ctx("skill"), runner);
     expect(out).toMatchObject({ ok: false, run_id: "j-1", state: "queued" });
     expect(out.reason).toContain("store locked");
+  });
+
+  test("a non-timeout wake failure after the run exists: that run is ended and reported with its run id, no timeout claimed", async () => {
+    const { calls, runner } = fakeVerbs(
+      [{ run_id: "j-old", state: "complete" }, { run_id: "j-20260928T101010Z", state: "running" }],
+      (args) => ({ run_id: args[args.indexOf("--run-id") + 1], state: "blocked" }));
+    const msg = "jobrun emitted no JSON (exit 1): Traceback (most recent call last): KeyError: 'target'";
+    const out = await recoverAfterTimeout("j", msg, ctx("skill", ["j-old"]), runner);
+    expect(out).toMatchObject({ ok: false, run_id: "j-20260928T101010Z", target: "skill", state: "blocked" });
+    expect(out.reason).toContain(`submit failed: ${msg}`);
+    expect(out.reason).not.toContain("timed out");
+    const finish = calls.find((c) => c[0] === "finish")!;
+    expect(finish.slice(finish.indexOf("--run-id"), finish.indexOf("--run-id") + 4)).toEqual(["--run-id", "j-20260928T101010Z", "--state", "blocked"]);
+    expect(finish[finish.indexOf("--reason") + 1]).toContain("submit failed before answering");
+    expect(finish[finish.indexOf("--reason") + 1]).not.toContain("timed out");
+    expect(calls.some((c) => c.includes("j-old"))).toBe(false);
+  });
+
+  test("a non-timeout core wake failure: the new run is cancelled, never finished", async () => {
+    const { calls, runner } = fakeVerbs([{ run_id: "j-1", state: "queued" }],
+      (args) => ({ cancelled: true, runs_ended: [args[args.indexOf("--run-id") + 1]] }));
+    const out = await recoverAfterTimeout("j", "jobrun emitted no JSON (exit 1): boom", ctx("core"), runner);
+    expect(out).toMatchObject({ ok: false, run_id: "j-1", target: "core", state: "partial" });
+    expect(out.reason).not.toContain("timed out");
+    expect(calls.some((c) => c[0] === "finish")).toBe(false);
   });
 
   test("no run beyond the snapshot → not started (never adopts a run it did not start)", async () => {
