@@ -558,7 +558,7 @@ describe.skipIf(process.platform === "win32")("a supervisor started with SIGHUP 
 describe("finishRun: an account failure or trip keeps the iteration's own named reason", () => {
   const G = { max_wall_clock_seconds: 600, max_turns: 40 };
 
-  test("no status block (AD-11) + no session_id: stays blocked, MISSING_STATUS_BLOCK kept, the account failure appended", async () => {
+  test("no status block (AD-11) + no session_id: partial, MISSING_STATUS_BLOCK kept, the account failure appended", async () => {
     const { summary, finish } = await withTranscript(null, [], () => drive(started(G), { ran: true, exit: 1, conformance_failure: MISSING_STATUS_BLOCK }));
     expect(flag(finish, "--state")).toBe("partial");
     expect(flag(finish, "--reason")).toBe(`${MISSING_STATUS_BLOCK}; no session recorded; guard: account failed — transcript: the worker result carried no session_id`);
@@ -650,7 +650,7 @@ describe("finishRun: on sbx, the in-VM `timeout` exit (124/137) with no status b
     expect(flag(finish, "--reason")).toBe("guard: --timeout-cap-s (300s)");
   });
 
-  test.each([124, 137])("exit %d well before the guard (an OOM or another SIGKILL) → blocked, the AD-11 failure kept, no guard named", async (exit) => {
+  test.each([124, 137])("exit %d well before the guard (an OOM or another SIGKILL) → partial, the AD-11 failure kept, no guard named", async (exit) => {
     const { summary, finish } = await drive(started({ max_wall_clock_seconds: 600 }, sbx),
       { ran: true, exit, conformance_failure: MISSING_STATUS_BLOCK }, undefined, 42);
     expect(flag(finish, "--state")).toBe("partial");
@@ -659,12 +659,12 @@ describe("finishRun: on sbx, the in-VM `timeout` exit (124/137) with no status b
     expect(summary.guards_tripped).toBeUndefined();
   });
 
-  test("exit 137 just short of the guard (599.9s of 600s) → blocked", async () => {
+  test("exit 137 just short of the guard (599.9s of 600s) → partial", async () => {
     const { finish } = await drive(started({ max_wall_clock_seconds: 600 }, sbx), { ran: true, exit: 137, conformance_failure: MISSING_STATUS_BLOCK }, undefined, 599.9);
     expect(flag(finish, "--state")).toBe("partial");
   });
 
-  test("host tier exit 124 is not an in-VM trip: blocked, missing status block", async () => {
+  test("host tier exit 124 is not an in-VM trip: partial, missing status block kept", async () => {
     const { finish } = await drive(started({ max_wall_clock_seconds: 600 }), { ran: true, exit: 124, conformance_failure: MISSING_STATUS_BLOCK }, undefined, 600);
     expect(flag(finish, "--state")).toBe("partial");
     expect(flag(finish, "--reason")).toBe(`${MISSING_STATUS_BLOCK}; no session recorded`);

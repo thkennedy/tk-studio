@@ -78,8 +78,8 @@ import {
   readProjectConfig, registryShow, requireCompatible, resolveStudioRoot, runJobVerb, SbxSandboxMissing, toVmPath, WORKER_RECORD_FAILED, type Tier,
 } from "./server";
 import {
-  checkoutKey, isTerminal, ORPHANED_REASON, processStartTime, Queue, selfOwner, type Holder, type Owner, type QueueRun, type RecoverReport, type RunState,
-  type StudioEnder, type StudioFinder, type StudioOps, type StudioResumer, type TerminalState,
+  checkoutKey, defaultProbes, isTerminal, LAUNCH_SKILL, ORPHANED_REASON, probeLaunchEngine, processStartTime, Queue, selfOwner,
+  type Holder, type LaunchEngine, type Owner, type QueueRun, type RecoverReport, type RunState, type StudioEnder, type StudioFinder, type StudioOps, type StudioResumer, type TerminalState,
 } from "./queue";
 import { jobOptions, loadSupervisorConfig, type JobOptions } from "./config";
 import {
@@ -674,6 +674,9 @@ export interface Started {
   recorder?: RunRecorder;
   /** A restart resume: the first invocation resumes `sessionId` with this much of the guard left. */
   resumeFirst?: { remainingS: number; spentS: number };
+  /** A restart resume: the message ids the restart's budget check `account`ed — never
+   * counted again, even when their `accounted` event could not be recorded. */
+  accountedIds?: string[];
 }
 
 /** What a driven run records on its queue run (Story 21.6). */
@@ -685,6 +688,8 @@ export interface RunRecorder {
   accountedIds(): string[];
   resumes(): number;
   resumed(detail: Record<string, unknown>): void;
+  /** The launch-orphan rule's probe of the run's checkout (`root` when the run is not found). */
+  launchEngine?(root: string): Promise<LaunchEngine>;
 }
 
 /** The queue-backed recorder of one queue run. */
@@ -696,6 +701,7 @@ export function queueRecorder(queue: Queue, runId: string): RunRecorder {
     accountedIds: () => queue.accountedIds(runId),
     resumes: () => queue.resumeCount(runId),
     resumed: (detail) => { queue.markResumed(runId, detail); },
+    launchEngine: (root) => queue.launchEngineAt(queue.get(runId)?.root ?? root),
   };
 }
 
@@ -906,8 +912,24 @@ export interface ResumeInput {
   neverResume?: { cause: string; trips?: GuardTrip[] };
 }
 
-type ResumeRefusal = { ok: false; cause: string; trips?: GuardTrip[]; studioState?: TerminalState; accounted?: Accounted };
-export type ResumeVerdict = { ok: true; remainingS: number; restored: boolean; accounted: Accounted } | ResumeRefusal;
+/** `accountAttempted`: the check ran `account` (or its counts) for this iteration — succeeded or failed —
+ * so the iteration is never accounted again; `accounted`: what it accounted (absent for a job
+ * with no `max_turns`/`max_tokens`, which is never accounted). */
+type ResumeRefusal = { ok: false; cause: string; trips?: GuardTrip[]; studioState?: TerminalState; accounted?: Accounted; accountAttempted?: boolean };
+export type ResumeVerdict = { ok: true; remainingS: number; restored: boolean; accounted?: Accounted; accountAttempted?: boolean } | ResumeRefusal;
+
+/** Story 21.6: a `tk-studio-launch` run is never resumed beside the engine it may
+ * have started. The launch-orphan rule's probe, outside any transaction: a live
+ * engine → `launch engine live: <id>`; a failed probe → `launch engine unverified:
+ * <detail>`; an empty `live[]` → undefined (the resume checks go on). */
+export async function launchEngineCause(probe: () => Promise<LaunchEngine>): Promise<string | undefined> {
+  let found: LaunchEngine;
+  try { found = await probe(); }
+  catch (e) { return `launch engine unverified: ${message(e)}`; }
+  if (!found.holder) return undefined;
+  if (found.engine.handed_to_engine === "unverified" && typeof found.engine.detail === "string") return `launch engine unverified: ${found.engine.detail}`;
+  return `launch engine live: ${found.holder.id ?? "(no run id)"}`;
+}
 
 /** The resume-or-partial rule (AC1/AC2), checked in order; the first failure
  * is the cause the run ends `partial` naming: the eligibility (`resumeEligible`),
@@ -949,35 +971,41 @@ export async function resumeEligible(
   return { ok: true, restored };
 }
 
-/** The budget: `account` with the interrupted iteration's counts (a studio write —
- * only by the process that owns the run); the remaining wall clock = the guard −
- * `counters.wall_clock_seconds`, else − `spentS`. */
+/** The budget. A job with `max_turns`/`max_tokens`: `account` with the interrupted
+ * iteration's counts (a studio write — only by the process that owns the run; counts
+ * that cannot be read are a failed `account`, never zero); the remaining wall clock =
+ * the guard − `counters.wall_clock_seconds`, else − `spentS`. A job with neither is
+ * never accounted: the remaining wall clock = the guard − `spentS`. */
 export async function resumeBudget(
   i: ResumeInput, verbRunner: VerbRunner = runJobVerb,
-): Promise<{ ok: true; remainingS: number; accounted: Accounted } | ResumeRefusal> {
-  let counted: { counts: Counts; ids: string[] };
-  try { counted = i.counts(); }
-  catch (e) { return { ok: false, cause: `guard: account failed — ${message(e)}` }; }
-  let acct: Record<string, any>;
-  try {
-    acct = answered(await verbRunner(i.root, [
-      "account", "--directory", i.root, "--run-id", i.studioRunId, "--turns", String(counted.counts.turns), "--tokens", String(counted.counts.tokens),
-    ]), "account");
-  } catch (e) { return { ok: false, cause: `guard: account failed — ${message(e)}` }; }
-  const exceeded: string[] = Array.isArray(acct.exceeded) ? acct.exceeded.map(String) : [];
-  const accounted: Accounted = { ...counted.counts, message_ids: counted.ids, within_budget: acct.within_budget !== false, exceeded };
-  if (acct.within_budget === false) {
-    const trips = exceeded.map((g) => ({ guard: g, value: Number(i.defn?.guards?.[g]) }));
-    return { ok: false, cause: trips.length ? guardReason(trips) : "guard: account answered within_budget false naming no guard", trips, accounted };
+): Promise<{ ok: true; remainingS: number; accounted?: Accounted; accountAttempted?: boolean } | ResumeRefusal> {
+  let acct: Record<string, any> | undefined, accounted: Accounted | undefined;
+  const attempted = hasTurnTokenGuard(i.defn) ? { accountAttempted: true } : {};
+  if (attempted.accountAttempted) {
+    let counted: { counts: Counts; ids: string[] };
+    try { counted = i.counts(); }
+    catch (e) { return { ok: false, cause: `guard: account failed — ${message(e)}`, ...attempted }; }
+    try {
+      acct = answered(await verbRunner(i.root, [
+        "account", "--directory", i.root, "--run-id", i.studioRunId, "--turns", String(counted.counts.turns), "--tokens", String(counted.counts.tokens),
+      ]), "account");
+    } catch (e) { return { ok: false, cause: `guard: account failed — ${message(e)}`, ...attempted }; }
+    const exceeded: string[] = Array.isArray(acct.exceeded) ? acct.exceeded.map(String) : [];
+    accounted = { ...counted.counts, message_ids: counted.ids, within_budget: acct.within_budget !== false, exceeded };
+    if (acct.within_budget === false) {
+      const trips = exceeded.map((g) => ({ guard: g, value: Number(i.defn?.guards?.[g]) }));
+      return { ok: false, cause: trips.length ? guardReason(trips) : "guard: account answered within_budget false naming no guard", trips, accounted, ...attempted };
+    }
   }
-  const reported = Number(acct.counters?.wall_clock_seconds);
-  const spent = acct.counters && Number.isFinite(reported) ? reported : i.spentS;
+  const reported = Number(acct?.counters?.wall_clock_seconds);
+  const spent = acct?.counters && Number.isFinite(reported) ? reported : i.spentS;
   const remainingS = Math.floor(i.guardS - spent);
+  const done = { ...(accounted ? { accounted } : {}), ...attempted };
   if (remainingS <= 0) {
     const trips = [wallClockGuard(i.jobGuardS, i.guardS)];
-    return { ok: false, cause: guardReason(trips), trips, accounted };
+    return { ok: false, cause: guardReason(trips), trips, ...done };
   }
-  return { ok: true, remainingS, accounted };
+  return { ok: true, remainingS, ...done };
 }
 
 /** Seconds since the run's first worker spawned (else since `verb_started`). */
@@ -1033,6 +1061,12 @@ export function restartResumer(queue: Queue, verbRunner: VerbRunner, prepared: M
   return async (run) => {
     const defn = queue.definition(run) ?? undefined;
     if (run.target === "core" || isCore(defn)) return { resume: false };
+    // A launch run may have started an engine that works the checkout: never resumed beside it
+    // (the orphan end then hands the lock to it, by the launch-orphan rule).
+    if (defn?.target?.skill === LAUNCH_SKILL) {
+      const cause = await launchEngineCause(() => queue.launchEngineAt(run.root));
+      if (cause) return { resume: false, cause };
+    }
     const input = restartInput(queue, run, deps);
     if (run.tier === "sbx") {
       const trips = [{ guard: "max_wall_clock_seconds", value: input.jobGuardS ?? input.guardS }];
@@ -1077,7 +1111,10 @@ async function settleTakenOver(
       } catch { /* the studio already has the counts */ }
     }
     if (b.ok) {
-      prepared.set(r.run_id, { ...s, resumeFirst: { remainingS: b.remainingS, spentS: s.guardS - b.remainingS } });
+      prepared.set(r.run_id, {
+        ...s, resumeFirst: { remainingS: b.remainingS, spentS: s.guardS - b.remainingS },
+        ...(b.accounted ? { accountedIds: b.accounted.message_ids } : {}),
+      });
       continue;
     }
     prepared.delete(r.run_id);
@@ -1137,7 +1174,7 @@ export async function finishRun(
   const model = s.model ?? routing.model, effort = s.effort ?? routing.effort;
   // Resume state (Story 21.6).
   let resumes = rec ? rec.resumes() : 0;
-  const accountedIds = new Set<string>(rec ? rec.accountedIds() : []);
+  const accountedIds = new Set<string>([...(rec ? rec.accountedIds() : []), ...(s.accountedIds ?? [])]);
   let resuming = !!(s.resumeFirst && sid);
   let spentS = s.resumeFirst?.spentS ?? 0;
   let timeoutS = s.resumeFirst && sid ? s.resumeFirst.remainingS : guardS;
@@ -1187,18 +1224,25 @@ export async function finishRun(
         // AC2: a silent exit — the resume-or-partial rule, capped at RESUME_CAP.
         const failure = String(out.conformance_failure ?? MISSING_STATUS_BLOCK);
         spentS += elapsedS;
-        const verdict = await resumeCheck({
+        // A launch run is never resumed beside a live (or unverified) engine: it ends
+        // `partial` naming it, and its end hands the lock to the engine (`endDriven`).
+        const engineCause = defn?.target?.skill === LAUNCH_SKILL
+          ? await launchEngineCause(() => rec?.launchEngine ? rec.launchEngine(root) : probeLaunchEngine(defaultProbes, root))
+          : undefined;
+        const verdict: ResumeVerdict = engineCause ? { ok: false, cause: engineCause } : await resumeCheck({
           root, jobId, studioRunId: runId, sessionId: sid, resumes, tier, sandbox, defn, guardS, jobGuardS: s.jobGuardS, spentS,
           counts: () => iterationNewCounts(out, tier, accountedIds, sid),
         }, verbRunner, transcripts);
-        if (verdict.accounted) { noteAccounted(verdict.accounted); accountedLast = true; }
+        if (verdict.accounted) noteAccounted(verdict.accounted);
+        // The check ran `account` for this iteration (answered or failed): never again after the loop.
+        if (verdict.accounted || verdict.accountAttempted) accountedLast = true;
         let unrecorded: string | undefined;
         if (verdict.ok) {
           // The resume is recorded before it runs: an unrecorded one could let a later restart exceed the cap.
           try {
             rec?.resumed({
               reason: "silent worker exit", session_id: sid, remaining_s: verdict.remainingS,
-              accounted: { turns: verdict.accounted.turns, tokens: verdict.accounted.tokens },
+              ...(verdict.accounted ? { accounted: { turns: verdict.accounted.turns, tokens: verdict.accounted.tokens } } : {}),
               ...(verdict.restored ? { transcript: "restored from the backup" } : {}),
             });
           } catch (e) { unrecorded = `resume not recorded: ${message(e)}`; }

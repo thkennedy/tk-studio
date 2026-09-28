@@ -243,6 +243,23 @@ export async function launchStatusProbe(root: string, engineRunId: string | null
   }
 }
 
+/** What the launch-orphan rule found on a checkout: `holder` when an engine
+ * holds it (id `null`: unverified), and the `engine` detail recorded. */
+export type LaunchEngine = { holder?: { id: string | null }; engine: Record<string, unknown> };
+
+/** The launch-orphan rule, probed outside any transaction: a failed probe
+ * → an unverified engine holder (fail closed, named); a non-empty `live[]`
+ * → that engine (the first live id); an empty `live[]` → no holder. */
+export async function probeLaunchEngine(probes: Pick<Probes, "engineLive">, root: string): Promise<LaunchEngine> {
+  const probe = await probes.engineLive(root, null);
+  if (probe.detail) return { holder: { id: null }, engine: { handed_to_engine: "unverified", detail: probe.detail } };
+  if (probe.live) {
+    const id = probe.run_ids?.[0] ?? null;
+    return { holder: { id }, engine: { handed_to_engine: id ?? "unverified", live: probe.run_ids ?? [] } };
+  }
+  return { engine: { handed_to_engine: null, live: [] } };
+}
+
 export const defaultProbes: Probes = { ownerAlive: (o) => defaultOwnerAlive(o), engineLive: (root, id) => launchStatusProbe(root, id) };
 
 /** Is `pid` a live (not zombie) process? */
@@ -993,17 +1010,16 @@ export class Queue {
     ).run(run.checkout, run.root, run.run_id, run.job_id, engineRunId, now());
   }
 
-  /** The launch-orphan rule, probed outside any transaction: a failed probe
-   * → an unverified engine holder (fail closed, named); a non-empty `live[]`
-   * → that engine (the first live id); an empty `live[]` → no holder. */
-  private async launchEngine(root: string): Promise<{ holder?: { id: string | null }; engine: Record<string, unknown> }> {
-    const probe = await this.probes.engineLive(root, null);
-    if (probe.detail) return { holder: { id: null }, engine: { handed_to_engine: "unverified", detail: probe.detail } };
-    if (probe.live) {
-      const id = probe.run_ids?.[0] ?? null;
-      return { holder: { id }, engine: { handed_to_engine: id ?? "unverified", live: probe.run_ids ?? [] } };
-    }
-    return { engine: { handed_to_engine: null, live: [] } };
+  /** The launch-orphan rule over this queue's probes (`probeLaunchEngine`). */
+  private async launchEngine(root: string): Promise<LaunchEngine> {
+    return probeLaunchEngine(this.probes, root);
+  }
+
+  /** The launch-orphan rule's probe, for a caller outside the queue (Story 21.6:
+   * a `tk-studio-launch` run is never resumed beside a live or unverified engine).
+   * Runs outside any transaction. */
+  async launchEngineAt(root: string): Promise<LaunchEngine> {
+    return this.launchEngine(root);
   }
 
   /** `end` for a run this process drove. When the run reached the minting

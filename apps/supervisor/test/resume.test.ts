@@ -75,6 +75,7 @@ async function orphan(o: {
   target?: "skill" | "core"; defn?: Record<string, unknown>; session?: string | null;
   worker?: { pid: number; start: string | null; guardS?: number } | null;
   killWorker?: Probes["killWorker"]; probeWorker?: Probes["probeWorker"]; now?: Probes["now"]; tier?: string; sandbox?: string;
+  engineLive?: Probes["engineLive"];
 } = {}) {
   const target = o.target ?? "skill";
   const dir = mkdtempSync(join(tmpdir(), "tk-sup-resume-q-"));
@@ -84,7 +85,7 @@ async function orphan(o: {
   let queue!: Queue;
   const probes: Probes = {
     ownerAlive: (w) => alive.has(w.pid),
-    engineLive: async () => ({ live: false }),
+    engineLive: o.engineLive ?? (async () => ({ live: false })),
     killWorker: o.killWorker ?? (async (pid, start): Promise<WorkerKill> => {
       // What the queue looked like when the worker was killed: the dead run still held its lock.
       const run = queue.runs()[0];
@@ -376,7 +377,9 @@ const started = (extra: Partial<Started> = {}): Started => ({
 });
 
 /** finishRun with a fake invoker answering `outs` in turn (each call appends one message to the transcript). */
-async function silent(outs: Record<string, unknown>[], extra: Partial<Started> = {}, v = verbs(), rec = memRecorder()) {
+async function silent(
+  outs: Record<string, unknown>[], extra: Partial<Started> = {}, v = verbs(), rec = memRecorder(), transcripts?: TranscriptChecks,
+) {
   const invokes: { args: Record<string, any>; opts: Record<string, any> }[] = [];
   let n = 0;
   const invoke = (async (_root: string, _skill: string, args: Record<string, any>, _sp?: unknown, opts: Record<string, any> = {}) => {
@@ -388,7 +391,7 @@ async function silent(outs: Record<string, unknown>[], extra: Partial<Started> =
     writeFileSync(path, (existsSync(path) ? readFileSync(path, "utf-8") : "") + line(`m${++n}`) + "\n");
     return { worker_elapsed_s: 10, session_id: SID, ...outs[Math.min(n - 1, outs.length - 1)] };
   }) as unknown as typeof invokeSkill;
-  const summary = await finishRun({ sessionId: SID, recorder: rec, ...started(extra) }, v.runner, invoke);
+  const summary = await finishRun({ sessionId: SID, recorder: rec, ...started(extra) }, v.runner, invoke, undefined, transcripts);
   return { summary, invokes, rec, v, finish: v.of("finish")[0] };
 }
 const SILENT = { ran: true, exit: 0, conformance_failure: MISSING_STATUS_BLOCK };
@@ -822,5 +825,177 @@ describe("recording failures are never swallowed", () => {
       expect(workerPid).toBeGreaterThan(0);
       expect(await goneWithin(workerPid)).toBe(true);
     });
+  });
+});
+
+// ---------------------------------------------------------------- follow-up review (Story 21.6)
+
+const LAUNCH_DEFN = { id: "j", trigger: "one-shot", target: { skill: "tk-studio-launch", payload: { verb: "status" } }, guards: GUARDS };
+
+describe("a launch run is never resumed beside a live or unverified engine", () => {
+  test("restart: a live engine refuses the resume (`launch engine live: <id>`), nothing accounted, the lock handed to the engine", async () => {
+    const probed: (string | null)[][] = [];
+    const fx = await orphan({ defn: LAUNCH_DEFN, engineLive: async (root, id) => { probed.push([root, id]); return { live: true, run_ids: ["E9"] }; } });
+    writeTranscript(join(cfg, "projects"), SID, ["m1"]);
+    const v = verbs();
+    const { report, prepared } = await recoverWithResume(fx.queue, B, v.runner, { rebuild: fx.rebuild, transcripts: okTranscripts });
+    const reason = `${ORPHANED_REASON}; launch engine live: E9`;
+    expect(report.resumed).toEqual([]);
+    expect(prepared.size).toBe(0);
+    expect(report.ended).toMatchObject([{ run_id: fx.run.run_id, reason, engine: { handed_to_engine: "E9" } }]);
+    expect(v.of("account")).toEqual([]);
+    expect(probed.length).toBeGreaterThanOrEqual(1);
+    expect(probed.every(([root, id]) => root === fx.checkout && id === null)).toBe(true);
+    expect(fx.queue.get(fx.run.run_id)).toMatchObject({ state: "partial", reason, engine_run_id: "E9" });
+    expect(fx.queue.lock(fx.checkout)).toMatchObject({ kind: "engine", engine_run_id: "E9" });
+    expect(fx.queue.events(fx.run.run_id).filter((e) => e.kind === "resumed")).toEqual([]);
+  });
+
+  test("restart: a failed probe refuses the resume (`launch engine unverified: <detail>`); an empty live[] resumes as before", async () => {
+    const detail = "launch status probe failed (exit 1): no bmad-loop";
+    const fx = await orphan({ defn: LAUNCH_DEFN, engineLive: async () => ({ live: true, detail }) });
+    writeTranscript(join(cfg, "projects"), SID, ["m1"]);
+    const { report } = await recoverWithResume(fx.queue, B, verbs().runner, { rebuild: fx.rebuild, transcripts: okTranscripts });
+    expect(report.resumed).toEqual([]);
+    expect(report.ended).toMatchObject([{ reason: `${ORPHANED_REASON}; launch engine unverified: ${detail}` }]);
+    expect(fx.queue.lock(fx.checkout)).toMatchObject({ kind: "engine", engine_run_id: null });
+
+    const idle = await orphan({ defn: LAUNCH_DEFN, engineLive: async () => ({ live: false, run_ids: [] }) });
+    const r2 = await recoverWithResume(idle.queue, B, verbs().runner, { rebuild: idle.rebuild, transcripts: okTranscripts });
+    expect(r2.report.resumed).toHaveLength(1);
+    expect(r2.report.ended).toEqual([]);
+  });
+
+  test("in process: a silent exit of a launch run with a live engine ends partial naming it, never resumed; an unverified one too; an idle one resumes", async () => {
+    const withEngine = (found: { live: boolean; run_ids?: string[]; detail?: string }) => {
+      const rec = memRecorder();
+      rec.launchEngine = async () => found.detail
+        ? { holder: { id: null }, engine: { handed_to_engine: "unverified", detail: found.detail } }
+        : found.live ? { holder: { id: found.run_ids![0] }, engine: { handed_to_engine: found.run_ids![0], live: found.run_ids } }
+        : { engine: { handed_to_engine: null, live: [] } };
+      return rec;
+    };
+    const live = await silent([SILENT, { ran: true, exit: 0, status_block: BLOCK }], { defn: LAUNCH_DEFN }, verbs(), withEngine({ live: true, run_ids: ["E9"] }));
+    expect(live.invokes).toHaveLength(1);
+    expect(flag(live.finish, "--state")).toBe("partial");
+    expect(flag(live.finish, "--reason")).toBe(`${MISSING_STATUS_BLOCK}; launch engine live: E9`);
+    expect(live.v.of("status")).toEqual([]); // no resume check ran
+    expect(live.rec.log.filter(([k]) => k === "resumed")).toEqual([]);
+    expect(live.v.of("account")).toHaveLength(1); // the iteration is still accounted, once, before finish
+
+    const unverified = await silent([SILENT], { defn: LAUNCH_DEFN }, verbs(), withEngine({ live: true, detail: "launch status probe failed: boom" }));
+    expect(unverified.invokes).toHaveLength(1);
+    expect(flag(unverified.finish, "--reason")).toBe(`${MISSING_STATUS_BLOCK}; launch engine unverified: launch status probe failed: boom`);
+
+    const idle = await silent([SILENT, { ran: true, exit: 0, status_block: BLOCK }], { defn: LAUNCH_DEFN }, verbs(), withEngine({ live: false }));
+    expect(idle.invokes).toHaveLength(2);
+    expect(flag(idle.finish, "--state")).toBe("complete");
+  });
+
+  test("queueRecorder: the launch probe asks the queue's engine probe on the queue run's checkout", async () => {
+    const probed: (string | null)[][] = [];
+    const fx = await orphan({ defn: LAUNCH_DEFN, engineLive: async (root, id) => { probed.push([root, id]); return { live: true, run_ids: ["E7"] }; } });
+    const found = await queueRecorder(fx.queue, fx.run.run_id).launchEngine!("elsewhere");
+    expect(found).toMatchObject({ holder: { id: "E7" }, engine: { handed_to_engine: "E7" } });
+    expect(probed).toEqual([[fx.checkout, null]]);
+  });
+});
+
+describe("account only when the job has max_turns or max_tokens", () => {
+  const sbxOk: TranscriptChecks = { host: () => { throw new Error("host never read on sbx"); }, sbx: async () => {} };
+  const SBX = { tier: "sbx" as const, sandbox: "sb" };
+  const SBX_SILENT = { ran: true, exit: 1, conformance_failure: MISSING_STATUS_BLOCK }; // no JSON result: no num_turns/usage
+
+  test("an unguarded sbx silent exit with no JSON result resumes: no account, no accounted event, the wall clock from the time spent", async () => {
+    const defn = { id: "j", trigger: "one-shot", target: { skill: "tk-studio-activate" }, guards: { max_wall_clock_seconds: 600 } };
+    const { invokes, v, rec, finish, summary } = await silent([SBX_SILENT, { ran: true, exit: 0, status_block: BLOCK }], { ...SBX, defn }, verbs(), memRecorder(), sbxOk);
+    expect(invokes).toHaveLength(2);
+    expect(invokes[1].opts).toMatchObject({ sessionId: SID, resume: true });
+    expect(invokes[1].args.timeout_s).toBe(590);
+    expect(v.of("account")).toEqual([]);
+    expect(rec.log.filter(([k]) => k === "accounted")).toEqual([]);
+    const resumed = rec.log.find(([k]) => k === "resumed")![1] as Record<string, unknown>;
+    expect(resumed.accounted).toBeUndefined();
+    expect(flag(finish, "--state")).toBe("complete");
+    expect(summary.account).toBeUndefined();
+  });
+
+  test("a guarded sbx silent exit with no JSON result ends partial naming `account failed` (never accounted as zero)", async () => {
+    const { invokes, v, finish } = await silent([SBX_SILENT], SBX, verbs(), memRecorder(), sbxOk);
+    expect(invokes).toHaveLength(1);
+    expect(v.of("account")).toEqual([]);
+    expect(flag(finish, "--state")).toBe("partial");
+    expect(flag(finish, "--reason")).toBe(`${MISSING_STATUS_BLOCK}; guard: account failed — sbx worker result carried no num_turns`);
+  });
+
+  test("resumeCheck: an unguarded job never reads its counts nor runs `account`; remaining = guard − spent", async () => {
+    const v = verbs();
+    const verdict = await resumeCheck({
+      root: "proj", jobId: "j", studioRunId: STUDIO, sessionId: SID, resumes: 0, defn: { guards: { max_wall_clock_seconds: 600 } },
+      guardS: 600, jobGuardS: 600, spentS: 100, counts: () => { throw new Error("counts read for an unguarded job"); },
+    }, v.runner, okTranscripts);
+    expect(verdict).toEqual({ ok: true, remainingS: 500, restored: false });
+    expect(v.of("account")).toEqual([]);
+    const spent = await resumeCheck({
+      root: "proj", jobId: "j", studioRunId: STUDIO, sessionId: SID, resumes: 0, defn: {}, guardS: 600, jobGuardS: 600, spentS: 600,
+      counts: () => { throw new Error("never"); },
+    }, v.runner, okTranscripts);
+    expect(spent).toMatchObject({ ok: false, cause: "guard: max_wall_clock_seconds (600s)" });
+    expect(v.of("account")).toEqual([]);
+  });
+});
+
+describe("a failed account in the resume check is attempted once", () => {
+  test("the account verb fails in the resume check: never run again after the loop; the reason names the failure once", async () => {
+    const base = verbs();
+    const calls: string[][] = [];
+    const runner = async (root: string, args: string[]) => {
+      calls.push(args);
+      if (args[0] === "account") throw new Error("jobrun account: database is locked");
+      return base.runner(root, args);
+    };
+    const v = { ...base, runner, of: (verb: string) => calls.filter((c) => c[0] === verb) };
+    const { invokes, finish, summary, rec } = await silent([SILENT], {}, v as ReturnType<typeof verbs>);
+    expect(invokes).toHaveLength(1);
+    expect(v.of("account")).toHaveLength(1);
+    expect(flag(finish, "--state")).toBe("partial");
+    const reason = flag(finish, "--reason");
+    expect(reason).toBe(`${MISSING_STATUS_BLOCK}; guard: account failed — jobrun account: database is locked`);
+    expect(reason.split("account failed").length - 1).toBe(1);
+    expect(summary.state).toBe("partial");
+    expect(rec.log.filter(([k]) => k === "accounted")).toEqual([]);
+  });
+
+  test("counts that cannot be read in the resume check: not read again after the loop", async () => {
+    // Guarded sbx with no JSON result: the resume check's counts throw once; the post-loop block never re-runs them.
+    const { v, finish } = await silent([{ ran: true, exit: 1, conformance_failure: MISSING_STATUS_BLOCK }], { tier: "sbx", sandbox: "sb" }, verbs(), memRecorder(),
+      { host: () => ({ restored: false }), sbx: async () => {} });
+    expect(v.of("account")).toEqual([]);
+    expect(flag(finish, "--reason").split("account failed").length - 1).toBe(1);
+  });
+});
+
+describe("the restart's accounted ids are never counted again", () => {
+  test("recordAccounted fails after the restart's account: the resumed iteration still counts only its new message ids", async () => {
+    const fx = await orphan();
+    writeTranscript(join(cfg, "projects"), SID, ["m1", "m2"]);
+    let failed = 0;
+    fx.queue.recordAccounted = () => { failed++; throw new Error("database is locked"); };
+    const v = verbs();
+    const { report, prepared } = await recoverWithResume(fx.queue, B, v.runner, { rebuild: fx.rebuild, transcripts: okTranscripts });
+    expect(report.resumed).toHaveLength(1);
+    expect(failed).toBe(1);
+    expect(fx.queue.accountedIds(fx.run.run_id)).toEqual([]); // the `accounted` event was never written
+    expect(v.of("account")[0]).toEqual(["account", "--directory", fx.checkout, "--run-id", STUDIO, "--turns", "2", "--tokens", "30"]);
+    expect(prepared.get(fx.run.run_id)!.accountedIds).toEqual(["m1", "m2"]);
+    const invoke = (async (_root: string, _skill: string, _args: Record<string, any>, _sp?: unknown, opts: Record<string, any> = {}) => {
+      opts.onSpawn?.(process.pid);
+      writeFileSync(join(cfg, "projects", "some-slug", `${SID}.jsonl`), ["m1", "m2", "m3"].map(line).join("\n") + "\n");
+      return { ran: true, status_block: BLOCK, session_id: SID };
+    }) as unknown as typeof invokeSkill;
+    await driveResumes(fx.queue, report.resumed, prepared, v.runner, invoke);
+    expect(v.of("account")).toHaveLength(2);
+    expect(v.of("account")[1]).toEqual(["account", "--directory", fx.checkout, "--run-id", STUDIO, "--turns", "1", "--tokens", "15"]);
+    expect(report.resumed[0].summary).toMatchObject({ ok: true, state: "complete" });
   });
 });

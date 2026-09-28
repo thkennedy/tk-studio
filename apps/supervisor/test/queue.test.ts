@@ -245,14 +245,15 @@ q.close();
       const q = new Queue(path, fakeProbes(new Set()).probes);
       try {
         const cols = (q.db.query("PRAGMA table_info(runs)").all() as { name: string }[]).map((c) => c.name);
-        for (const c of ["permission_mode", "tier", "sandbox", "model", "effort", "session_id", "worker_pid", "worker_start", "wake"]) {
+        for (const c of ["permission_mode", "tier", "sandbox", "model", "effort", "session_id", "worker_pid", "worker_start", "worker_guard_s", "wake"]) {
           expect(cols.filter((n) => n === c)).toHaveLength(1);
         }
         const types = Object.fromEntries((q.db.query("PRAGMA table_info(runs)").all() as { name: string; type: string }[]).map((c) => [c.name, c.type]));
         expect(types.worker_pid).toBe("INTEGER");
+        expect(types.worker_guard_s).toBe("INTEGER");
         expect(q.get("q-old")).toMatchObject({
           state: "queued", permission_mode: null, tier: null, sandbox: null, model: null, effort: null,
-          session_id: null, worker_pid: null, worker_start: null, wake: null,
+          session_id: null, worker_pid: null, worker_start: null, worker_guard_s: null, wake: null,
         });
       } finally { q.close(); }
     }

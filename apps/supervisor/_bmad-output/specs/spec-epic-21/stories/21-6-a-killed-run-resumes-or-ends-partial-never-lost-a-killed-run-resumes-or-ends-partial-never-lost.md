@@ -126,6 +126,21 @@ User story (epics.md, Story 21.6): As the operator, I want a run interrupted by 
   - `[medium]` `[patch]` AC4's "after `wake`" e2e killed before the studio run was recorded (blind-hunter) — added a kill after the studio run and wake answer are recorded, before the invoke
   - `[low]` `[patch]` a failed resume record was swallowed, so the cap could be exceeded (edge-case-hunter) — no resume; `partial` `MISSING_STATUS_BLOCK; resume not recorded`
 
+### 2026-09-28 — Review pass (follow-up)
+- both layers ran (band L): blind-hunter, edge-case-hunter; the diff (219 KB, spec excluded) was handed to both as a file path, not inline
+- intent_gap: 0
+- bad_spec: 0
+- patch: 6 (high 2, medium 2, low 2)
+- defer: 0
+- reject: 5 (medium 4, low 1) — a core `cancel` recorded as `partial` (jobrun `cancel` ends the run `partial` reason `cancelled`, so the state is the studio's own); the queue run ends `partial` while `studio_outcome` names an already-terminal studio state (AC1 names `partial` for a run that does not resume; `studio_outcome` carries the studio's own state by the DW-8 design); a restart resume ignores the tick's `--timeout-cap-s` (accepted pass-1 DRIFT, consult 1); an sbx restart end names the job guard, not `worker_guard_s` (consult 2 ruling names `max_wall_clock_seconds`); `mirror` throwing aborts `driveResumes` (`mirror` catches internally and never throws)
+- addressed_findings:
+  - `[high]` `[patch]` a `tk-studio-launch` run could be resumed (restart or in-process AC2) beside its live detached engine (edge-case-hunter) — the launch engine is probed before any resume; live or unverified refuses naming it, and the end paths hand the lock to the engine (consult 4, reading (a))
+  - `[high]` `[patch]` `resumeBudget` counted and called `account` for jobs with no `max_turns`/`max_tokens`, so an sbx silent exit with no JSON result was never resumed and named a guard (both layers) — unguarded jobs skip counts and `account`, remaining = guard − spent (consult 4)
+  - `[medium]` `[patch]` a failed `account` in the in-process resume check was attempted again after the loop and named twice (blind-hunter) — `accountAttempted` stops the second attempt
+  - `[medium]` `[patch]` a swallowed `recordAccounted` failure after a restart let the resumed iteration re-count the same ids (both layers) — the ids ride on the prepared `Started` and seed `finishRun`; README names the account→event kill window
+  - `[low]` `[patch]` the migration test skipped `worker_guard_s` (blind-hunter) — present, INTEGER, null on a migrated row
+  - `[low]` `[patch]` four `test/guards.test.ts` titles said `blocked` while asserting `partial` (blind-hunter) — retitled
+
 ## Design Notes
 
 - Anticipated DRIFTs (record if taken): the missing-block outcome changes from `blocked` to `partial` after a resume attempt (21-1/21-5 pins; score 2, affects none); resume driving placed in the caller rather than inside `Queue.recover` (score 2, affects 22-x only if the API reuses `recover`).
@@ -196,11 +211,19 @@ DRIFT: an sbx run interrupted mid-invoke is held until its in-VM deadline, then 
 DRIFT: restart `account` runs only after the takeover win (`accounted` event, reason `supervisor restart`, `remaining_s`); a trip there ends through `mirror` as `ended` with reason `orphaned: supervisor restart; guard: …`, listed in `report.ended`; `WorkerKill` gains outcomes `running`/`group alive`/`in-VM deadline not passed|passed` plus `deadline`/`host`; `Probes` gains `probeWorker`/`now`; sbx with no worker recorded ends `partial`; a failed worker record ends `blocked`; sbx deadline counts from the `worker` event — review patches 1-6 — affects: 22-x
 DRIFT: after-wake e2e kill fires on the second auth call via a counter file — the first is runJob's login check — affects: none
 
+### pass 3 (2026-09-28, implementer, follow-up review patches)
+
+DEVIATION SCORE: 2 (both carry out review-sent patches and change a type shape: scored by the consult 3 rule candidate, no new consult)
+
+DRIFT: `RunRecorder` gains optional `launchEngine(root)`; `queue.ts` exports `probeLaunchEngine`/`LaunchEngine` beside public `Queue.launchEngineAt` — `finishRun` holds only the recorder and needs a fallback probe without one (consult 4 H1) — affects: none
+DRIFT: resume verdicts carry optional `accountAttempted`, and `accounted` is optional on `ResumeVerdict`; `Started` gains optional `accountedIds` — the post-loop block must tell an attempted `account` from none, an unguarded job accounts nothing (consult 4 H2), and the restart's accounted ids must reach `finishRun` — affects: none
+
 ## Consult Log
 
 - 2026-09-28T20:40:55Z — trigger: deviation-gt-0 — question: accept the 12 pass-1 deviations (resume driving in cli.ts, silent exits → partial with MISSING_STATUS_BLOCK, the "held" rule, wall-clock/sbx accounting fallbacks, RecoverReport/events shape)? — ruling: accept-deviation score 2 — do: (1) accept all 12 DRIFTs, diff and gate unchanged; (2) add to narrowed DW-3's "What remains" that a `held` run keeps its lock until its recorded pid dies, and where `processStartTime` returns null (not linux/win32) a reused pid can hold the run indefinitely, shown only in `held[]`; (3) record the ruling in Deviation Summary — rule candidate: When a story's Design Notes or plan Risks name a DRIFT in advance with a score, taking it with that score and stated affects needs no consult, provided the named-failure token survives in the reason.
 - 2026-09-28T20:45:30Z — trigger: high-severity-finding (review pass 1) — question: (H1) an sbx restart kills only the host `sbx exec`, so a resume starts a second worker beside the live VM worker — hold until the in-VM deadline (a), `pkill -f <uuid>` in the VM (b), `sbx stop` (c), or record the in-VM pid (d)? (H2) `Queue.claim` releases a dead-owner running holder's lock without checking its recorded worker — fix here or defer? — ruling: accept-deviation score 2 — do: (1) H1 reading (a): hold an sbx run until recorded spawn + guard seconds passed to that spawn + 10 s grace, keyed on that deadline and not on host pid liveness, with the guard seconds recorded on the worker record; after it, end `partial` naming `max_wall_clock_seconds`; reject (b)(c)(d); (2) apply the claim fix: a dead-owner running holder is live while its recorded worker may still run (pid alive with matching or unreadable start, or sbx deadline not passed); unit tests for both in test/resume.test.ts; (3) DRIFT "an sbx run interrupted mid-invoke is held until its in-VM deadline, then ends partial naming the wall-clock guard, never resumed on restart; claim treats a dead-owner holder with a possibly live worker as live" score 2 affects 22-x; narrow DW-3 to match — rule candidate: Any code path that frees a checkout lock must first pass the same "recorded worker may still run" predicate; for sbx that predicate is the in-VM deadline (spawn + guard + kill grace), never host pid liveness.
 - 2026-09-28T21:00:05Z — trigger: deviation-gt-0 (review-patch pass 2) — question: accept the six pass-2 deviations (account after takeover, WorkerKill/Probes shape, sbx no-worker end, worker-record failure blocked, deadline from the worker event, after-wake kill on the 2nd auth call)? — ruling: accept-deviation score 2 — do: (1) accept all six, diff and gate unchanged; (2) add the combined DRIFT line (affects 22-x) to the Deviation Summary; (3) mark the pass-1 "sbx accounts 0/0" DRIFT superseded without deleting it — rule candidate: A deviation that only carries out a review-sent patch, keeps every spec-named reason token and states its affects needs no consult: DRIFT score 2 if it changes a report/event/type shape, otherwise 1.
+- 2026-09-28T21:38:20Z — trigger: high-severity-finding (follow-up review pass) — question: (H1) a `tk-studio-launch` run can be resumed (restart or in-process AC2) beside its live detached engine — probe the engine before resuming (a) or never resume a launch run (b)? (H2) `resumeBudget` runs counts + `account` for jobs with no `max_turns`/`max_tokens`, so an sbx silent exit with no JSON result is refused as `guard: account failed` — skip account when unguarded? — ruling: apply — do: (1) H1 reading (a): before any resume of a LAUNCH_SKILL run, probe the launch engine outside any transaction in `restartResumer` and in `finishRun`'s AC2 branch (public wrapper over `Queue.launchEngine` or the `Probes.engineLive` dep); live or unverified refuses the resume naming it (`launch engine live: <id>` / `launch engine unverified: <detail>`) and the existing end paths hand the lock to the engine; an empty `live[]` continues the AC1/AC2 checks; reject (b); a test per layer and one README clause; (2) H2: in `resumeBudget`, when `!hasTurnTokenGuard(i.defn)` skip `i.counts()` and `account` entirely (no `accounted`, no event, no noteAccounted), remaining = `guardS − spentS`; a guarded job with unavailable counts keeps refusing with the existing cause; never account zero; (3) pin both with tests: an unguarded sbx silent exit resumes, a guarded one ends partial naming `account failed` — rule candidate: any path that resumes, re-drives or frees the lock of a `tk-studio-launch` run passes the launch-orphan engine probe first (live or unverified = no resume or release), and studio `account` is called only when `hasTurnTokenGuard(defn)` holds, on every path (observation recorded)
 
 ## Auto Run Result
 
@@ -208,66 +231,57 @@ Status: done
 
 Studio: activated as developer; working set bmm, tea, bmad-loop; drift clean; routing implementer=claude-opus-5-5 reviewers=claude-opus-5-5 consult=claude-opus-5-5; knowledge spine absent
 
-**Summary.** A killed run now resumes or ends `partial` with the cause named; it is never lost.
-- **Recording:** before the worker spawns, the supervisor records a pre-minted session id (`--session-id <uuid>`), the wake answer, and then the worker's pid/process group, its start time and its guard seconds, all on the queue run.
-- **AC1:** on restart, `Queue.recover` kills a dead owner's recorded worker, but only when pid + start time match (or its POSIX group is still alive). It then takes the run over in one transaction (lock kept, `resumed` event), and the caller drives `claude -p --resume <sid>` on the stored tier through 21-5's guards. Otherwise the run ends `partial` with a reason starting `orphaned: supervisor restart; <cause>`. Every restart end goes through `end`'s `stop`/`studio_outcome` path (DW-8). A run whose worker may still be alive is held, and `claim` waits on it too (DW-3, DW-7). An sbx run is held until its in-VM deadline, then ends `partial` naming the wall-clock guard.
+**Summary.** This was a follow-up review pass on a story already marked `done`. With the fixes below, a killed run resumes or ends `partial` with the cause named; it is never lost.
+- **Recording:** before the worker spawns, the supervisor records the pre-minted `--session-id`, the wake answer, and the worker's pid/group, start time and guard seconds.
+- **AC1:** `recover` kills a dead owner's recorded worker (pid + start time), takes the run over under the held lock, and resumes it with `claude -p --resume <sid>` on the stored tier. Otherwise the run ends `partial` naming the guard or `supervisor restart`.
 - **AC2:** a silent exit resumes once in-process. A second failure ends `partial`, and the reason keeps `MISSING_STATUS_BLOCK`.
-- **AC3:** a missing host transcript is restored from `TK_SUPERVISOR_TRANSCRIPT_BACKUP` (runbook §6). If there is no copy, the run ends `partial` naming `transcript missing: <sid>`.
-- **AC4:** end-to-end tests kill the supervisor after `wake` (and after `submit` before recording), mid-invoke, and before `finish`. Each case ends resumed or `partial`, with its events asserted.
+- **AC3:** a missing host transcript is restored from `TK_SUPERVISOR_TRANSCRIPT_BACKUP`. With no copy, the run ends `partial` naming `transcript missing: <sid>`.
+- **AC4:** e2e tests kill the supervisor after `wake`, mid-invoke and before `finish`.
+- **This pass:** a `tk-studio-launch` run is resumed only when its engine probe shows none live. Studio `account` runs only for jobs with `max_turns`/`max_tokens`. A failed resume-check `account` is not retried. The restart's accounted ids are carried into the resumed iteration.
 
-**Files changed:**
-- `src/queue.ts`: new run columns and events; the resume takeover, the held rule and the recorded-worker kill/predicate shared by `recover` and `claim`; restart ends carry the stop.
-- `src/cli.ts`: records the session, worker and wake answer; the resume eligibility check and driver; the AC2 silent-exit resume; `account` only after the takeover and only for new message ids; `drain` counts resumed runs in its exit status.
-- `src/server.ts`: `--session-id`/`--resume`, the continuation prompt, the `beforeSpawn`/`onSpawn` hooks, and a failed worker record killing the child.
-- `src/transcript.ts`: new-message counts, the backup restore, and the sbx existence check (argv only).
-- `test/resume.test.ts` (new): every I/O matrix row, the kill/hold/claim rules, and concurrent recoverers.
-- `test/command-line.test.ts`: a fake worker that honours the new flags, and the AC4 kill points end to end.
-- `test/queue.test.ts`: the column migration, the takeover keeping the lock, and the orphan stop.
-- `test/guards.test.ts`: assertions only (missing block → resume or `partial`).
-- `README.md`: the restart/resume rule, the backup variable, the one-resume cap, the sbx hold, and `claim` waiting.
-- `_bmad-output/implementation-artifacts/deferred-work.md`: DW-7 and DW-8 closed, DW-3 narrowed to what remains.
+**Files changed** (since baseline 92208cf7acc4e5ba6546aca234fef01992e9c546):
+- `src/queue.ts`: run columns and events; the resume takeover; the held rule and the recorded-worker kill/probe shared by `recover` and `claim`; restart ends carry the stop. This pass: `probeLaunchEngine`, `Queue.launchEngineAt`.
+- `src/cli.ts`: records the session, worker and wake answer; resume eligibility, budget and driver; the AC2 silent-exit resume. This pass: the launch-engine probe before either resume path; `account` only for turn/token-guarded jobs; `accountAttempted`; `Started.accountedIds`.
+- `src/server.ts`: `--session-id`/`--resume`, the continuation prompt, the `beforeSpawn`/`onSpawn` hooks.
+- `src/transcript.ts`: new-message counts, the backup restore, the sbx existence check.
+- `test/resume.test.ts`: the I/O matrix, the kill/hold/claim rules. This pass adds launch-engine (restart and in-process), unguarded/guarded sbx silent exit, single `account` attempt, and no restart re-count.
+- `test/command-line.test.ts`: the fake worker's new flags and the AC4 kill points.
+- `test/queue.test.ts`: the column migration (now including `worker_guard_s`), the takeover keeping the lock, the orphan stop.
+- `test/guards.test.ts`: assertions (missing block → resume or `partial`); four titles corrected this pass.
+- `README.md`: the restart/resume rule, the backup variable, the resume cap, the sbx hold. This pass: the launch-engine clause, `account` only when guarded, the account→event kill window.
+- `_bmad-output/implementation-artifacts/deferred-work.md`: changed in the earlier pass only; untouched in this pass.
 
-**Review findings:** both layers ran (band L).
-- Patches applied: 9 (high 2, medium 6, low 1).
+**Review findings** (this pass: both layers ran, band L):
+- Patches applied: 6 (high 2, medium 2, low 2).
 - Deferred: 0.
-- Rejected: 7.
-- Consults: 3 (pass-1 deviations; the sbx/`claim` highs; pass-2 deviations), all `accept-deviation score 2`.
-- Follow-up review recommended: **true**. Two high findings were patched (score 3×6 + 1×1 = 19).
+- Rejected: 5.
+- Consults: 1 (high-severity-finding, ruling `apply`).
+- Follow-up review recommended: **true**. Two high findings were patched (score 3×2 + 1×2 = 8).
 
 **Verification** (re-run by this session after the patches):
 - `bun install --frozen-lockfile`: no changes.
-- `bun test` (with `TK_STUDIO_ROOT` set): 403 pass, 0 fail, across 9 files.
+- `bun test` (with `TK_STUDIO_ROOT` set): 413 pass, 0 fail, 1582 expect() calls, across 9 files.
 - `bunx tsc --noEmit`: clean.
 - Machine-path `git grep` over `src`, `test`, `package.json` and `README.md`: nothing.
 - `git diff --stat 92208cf… -- package.json bun.lock`: empty.
-- Matrix test audit: every row is covered in `test/resume.test.ts` and passed.
 
 **unverifiable-here** (operator, agent PC):
-- The installed CLI was checked only through `claude --help` (`--session-id`, `-r/--resume`). A live `claude -p --session-id <uuid>` followed by `claude -p --resume <uuid>` confirming the same id was not run here (it needs the Max login). Run once: `claude -p "hi" --session-id <uuid> --output-format json`, then `claude -p "continue" --resume <uuid> --output-format json`; both results should show `session_id` = `<uuid>`.
+- A live `claude -p --session-id <uuid>` followed by `claude -p --resume <uuid>` should keep the same id.
 - win32: kill the console-hosted supervisor mid-run and restart it. The run should resume (`--resume` on the worker's command line) or end `partial`, and `Get-Process claude` should show nothing left from the old worker.
 - Delete a finished session's `.jsonl` under `%USERPROFILE%\.claude\projects`, then force a resume. The file should be restored from `<DEST>\claude-projects`.
 
 **Residual risks:**
 - The few milliseconds between the spawn and the worker record.
-- A `uv run jobrun.py` verb in flight when the supervisor dies is never recorded, so it is never killed.
-- A held run waits until its pid dies. On platforms without readable start times, a reused pid can hold it indefinitely (DW-3).
+- A `jobrun.py` verb in flight when the supervisor dies is never recorded or killed.
+- A supervisor killed between the `account` verb and the `accounted` event can re-count those ids on restart (named in the README).
+- A held run on a platform without readable start times can wait indefinitely (DW-3).
 - sbx microVM start lag beyond the 10 s grace.
 - An sbx run killed mid-invoke never resumes on restart.
-- The tick's log does not report resumed or held runs (`src/tick.ts` untouched).
+- A guarded sbx silent exit with no result counts never resumes (`account failed`).
+- The tick log does not report resumed or held runs.
 - The win32 paths are not exercised here (DW-5).
+- One more test title in `test/guards.test.ts` (~614) may still read `blocked`; it was left untouched.
 
-DRIFT: resume driving lives in cli.ts (`recoverWithResume`/`driveResumes`); `Queue.recover` only takes over — keep recover short, no double drive — affects: 22-x
-DRIFT: every silent exit (incl. early sbx 124/137, host 124) ends `partial` with `MISSING_STATUS_BLOCK; <cause>` instead of `blocked` — AC2 resume-or-partial rule — affects: none
-DRIFT: `RecoverReport.resumed[]`/`held[]`/`ended[].state`, `StudioEnder` `state?`, `ResumeDecision` type — report takeovers and held runs — affects: 22-x
-DRIFT: "held" rule — an unmatchable live worker or failed kill keeps the run and lock — never release a lock under a live worker — affects: none
-DRIFT: remaining wall clock falls back to time since first worker spawn (else `verb_started`) — jobrun reports no `wall_clock_seconds` for skill runs — affects: none
-DRIFT: sbx transcript check resolves VM `$HOME` via `sbx exec <sb> printenv HOME` first — no shell, unknown VM config dir — affects: none
-DRIFT: sbx restart resume accounts 0/0 for the interrupted iteration — superseded (sbx never resumes on restart) — affects: none
-DRIFT: new events `accounted`/`woke`/`session`/`worker` and extra named causes — no double counting across the before-finish kill — affects: none
-DRIFT: restart resume uses the job's own guard, not the tick's `--timeout-cap-s` — the cap is not stored — affects: none
-DRIFT: `total_cost_usd` summed across original and resumed iterations — each result reports its own cost — affects: none
-DRIFT: existing assertions in `test/command-line.test.ts`/`test/queue.test.ts` updated — consequences of the above — affects: none
-DRIFT: AC4 after-wake/before-finish kills via a fake `uv` wrapper killing its parent — no other supervisor child at those points — affects: none
-DRIFT: an sbx run interrupted mid-invoke is held until its in-VM deadline, then ends partial naming the wall-clock guard, never resumed on restart; claim treats a dead-owner holder with a possibly live worker as live — consult 2 ruling — affects: 22-x
-DRIFT: restart `account` runs only after the takeover win; a trip there ends through `mirror` as `ended`; `WorkerKill`/`Probes` shapes grow; sbx with no worker recorded ends `partial`; a failed worker record ends `blocked`; sbx deadline counts from the `worker` event — review patches — affects: 22-x
-DRIFT: after-wake e2e kill fires on the second auth call via a counter file — the first is runJob's login check — affects: none
+DRIFT: `RunRecorder` gains optional `launchEngine(root)`; `queue.ts` exports `probeLaunchEngine`/`LaunchEngine` beside public `Queue.launchEngineAt` — `finishRun` holds only the recorder and needs a fallback probe — affects: none
+DRIFT: resume verdicts carry optional `accountAttempted`, `accounted` optional on `ResumeVerdict`, `Started.accountedIds` optional — needed to skip a second `account`, to account nothing for unguarded jobs, and to carry restart-accounted ids — affects: none
+(Earlier passes' DRIFT lines are kept under `## Deviation Summary`, passes 1–2.)
