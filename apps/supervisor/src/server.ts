@@ -33,14 +33,19 @@ const DRIVER_JOB_VERBS = ["submit", "status", "resolve", "cancel", "wake"] as co
 /** §2 also names the executing wrapper's verbs ("plus account/finish for the
  * executing wrapper"). A driver that executes a wake directive (invoke-skill)
  * becomes that run's executing wrapper — `finish` terminal-izes the run it
- * drove. `account` stays unexposed: turn/token counts are not observable
- * through the §1 text-output invocation, and wall-clock is enforced by the
- * driver's own run timeout. */
+ * drove. `account` stays unexposed and the `max_turns` guard unenforced here:
+ * both belong to Story 21.5 (guards) and are not wired in this story;
+ * wall-clock is enforced by the driver's own run timeout. */
 const WRAPPER_JOB_VERBS = ["finish"] as const;
 const RUN_TERMINAL_STATES = ["complete", "partial", "blocked", "cancelled"] as const;
 const JIRA_TOUCHING_SKILLS = new Set(["tk-studio-plan-sync", "tk-studio-migrate"]);
 /** Auth-failure shapes worth blocking on (§1: a 401 fails the run `blocked`, never silently).
  * Bare "401" needs http-ish context so line numbers/ids in ordinary output don't false-block. */
+/** The is_error fallback: real auth-failure signals only — a bare 401, an
+ * authenticate/authentication failure, "not logged in", the CLI's "/login"
+ * hint, an expired login/session/token, an invalid API key. Words that merely
+ * contain "auth"/"login" ("author", "OAuth scope", "authorize") do not count. */
+const IS_ERROR_AUTH_RE = /\b401\b|authenticat(?:e|ion)|not logged in|\/login\b|(?:oauth|login|session|token)[^\n]{0,20}expired|invalid[_\s-]?(?:api[_\s-]?key|x-api-key)/i;
 const AUTH_FAIL_RE = /unauthorized|authentication[_\s-]?error|invalid[_\s-]?(?:api[_\s-]?key|x-api-key)|(?:http|status|error)[^\n]{0,20}\b401\b/i;
 
 // ------------------------------------------------------------ registry (contract read path)
@@ -666,6 +671,21 @@ export interface InvokeArgs {
   permission_mode?: unknown; knowledge?: unknown;
 }
 
+/** The §1 headless prompt. It always STARTS with the skill line —
+ * `/tk-studio:<skill> <payload JSON>` — or `claude -p` does not invoke the
+ * skill as a slash command. The §4 KB-injection preamble (present provisional
+ * artifacts; the act is ours, AD-2, aid not gate) follows the skill line.
+ * The §1 mode is the driver's to declare: nothing in a bare `claude -p` run
+ * tells the skill it is headless, and an undeclared mode reproducibly yields
+ * attended-style behavior (asking instead of a §3 terminal block). */
+export function buildSkillPrompt(skill: string, payload: Record<string, unknown>, injection: KnowledgeInjection): string {
+  return `/tk-studio:${skill} ${JSON.stringify(payload)}\n` +
+    injection.preamble +
+    "HEADLESS driver invocation (driver contract §1): never prompt or ask questions; " +
+    "end the run with the terminal JSON status block (§3) as the last JSON object on stdout; " +
+    "on ambiguity end blocked with the gap named in reason.";
+}
+
 /** Headless skill run (§1): command line built first (a host bypass throws
  * HostBypassRefused before any process starts), then the Max-login preflight,
  * then the worker. Answers the tool result: status block, cost, or the named
@@ -676,17 +696,8 @@ export async function invokeSkill(root: string, skill: string, args: InvokeArgs,
   if (args.model) payload.model = args.model;
   if (args.effort) payload.effort = args.effort;
 
-  // §4 KB-injection directive (contract 0.1.7): inject present provisional
-  // artifacts ahead of the skill line — the act is ours (AD-2), aid not gate.
   const injection = buildKnowledgeInjection(args.knowledge);
-  // The §1 mode is the driver's to declare: nothing in a bare `claude -p` run
-  // tells the skill it is headless, and an undeclared mode reproducibly yields
-  // attended-style behavior (asking instead of a §3 terminal block).
-  const prompt = injection.preamble +
-    `/tk-studio:${skill} ${JSON.stringify(payload)}\n` +
-    "HEADLESS driver invocation (driver contract §1): never prompt or ask questions; " +
-    "end the run with the terminal JSON status block (§3) as the last JSON object on stdout; " +
-    "on ambiguity end blocked with the gap named in reason.";
+  const prompt = buildSkillPrompt(skill, payload, injection);
   const timeoutS = typeof args.timeout_s === "number" && args.timeout_s > 0 ? args.timeout_s : 600;
   const cmd = buildWorkerCommand({
     prompt,
@@ -721,12 +732,12 @@ export async function invokeSkill(root: string, skill: string, args: InvokeArgs,
   }
   // §1 MUST: a 401 fails the run `blocked`, never silently — scan the result
   // AND stderr (CLI auth failures characteristically land on stderr); an
-  // is_error result naming auth/401/login is the Max login gone.
+  // is_error result carrying a real auth-failure signal is the Max login gone.
   // Only a failed run is scanned: healthy output that merely mentions
   // "unauthorized" or "status 401" is not an auth failure.
   const failed = worker.isError || res.exit !== 0;
   const authFailed = failed && (AUTH_FAIL_RE.test(worker.text) || AUTH_FAIL_RE.test(res.stderr)
-    || (worker.isError && /\b401\b|auth|log ?in/i.test(worker.text)));
+    || (worker.isError && IS_ERROR_AUTH_RE.test(worker.text)));
   const authReason = `${MAX_LOGIN_MISSING} — worker answered 401/auth failure (§1)`;
   const authBlock = { status: "blocked", intent: skill, artifacts: [], reason: authReason };
   if (block) {

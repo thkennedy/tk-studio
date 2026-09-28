@@ -1,9 +1,9 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  invokeSkill, judgeAuthStatus, MAX_LOGIN_MISSING, maxLoginPreflight, MISSING_STATUS_BLOCK,
+  buildKnowledgeInjection, buildSkillPrompt, invokeSkill, judgeAuthStatus, MAX_LOGIN_MISSING, maxLoginPreflight, MISSING_STATUS_BLOCK,
   type RunResult, type Spawner,
 } from "../src/server";
 
@@ -93,6 +93,30 @@ describe("invokeSkill outcomes", () => {
     expect(reason).toEndWith("could not reach the API");
   });
 
+  test.each([
+    ["its own blocked block", "blocked"],
+    ["its own partial block", "partial"],
+  ])("an is_error result mentioning an author / OAuth scope keeps %s — not relabelled as a Max-login failure", async (_n, status) => {
+    const text = `Tool error: the commit author field is empty and the OAuth scope 'repo' was never granted; cannot authorize the push.\n` +
+      `{"status":"${status}","intent":"tk-studio-activate","artifacts":[],"reason":"push tool failed"}`;
+    const { spawner } = fakeSpawner(LOGGED_IN, worker(text, true));
+    const out = await invokeSkill(root, "tk-studio-activate", {}, spawner);
+    expect(out.status_block).toEqual({ status, intent: "tk-studio-activate", artifacts: [], reason: "push tool failed" });
+    expect(out.run_status_block).toBeUndefined();
+    expect(String((out.status_block as any).reason)).not.toContain(MAX_LOGIN_MISSING);
+  });
+
+  test.each([
+    ["a bare 401", "API Error: 401 {\"type\":\"error\"}"],
+    ["an expired OAuth token", "OAuth token has expired. Please run /login"],
+    ["not logged in", "Not logged in · Please run /login"],
+  ])("an is_error result with %s → blocked naming the Max login", async (_n, text) => {
+    const { spawner } = fakeSpawner(LOGGED_IN, worker(text, true));
+    const out = await invokeSkill(root, "tk-studio-activate", {}, spawner);
+    expect(out.status_block).toMatchObject({ status: "blocked" });
+    expect(String((out.status_block as any).reason)).toContain(MAX_LOGIN_MISSING);
+  });
+
   test("an error-subtype result with no `result` text still reports its cost", async () => {
     const res: RunResult = { exit: 1, stderr: "", stdout: JSON.stringify({ type: "result", subtype: "error_max_turns", is_error: true, total_cost_usd: 0.5 }) };
     const { spawner } = fakeSpawner(LOGGED_IN, res);
@@ -105,5 +129,32 @@ describe("invokeSkill outcomes", () => {
     const out = await invokeSkill(root, "tk-studio-activate", {}, spawner);
     expect(out.status_block).toBeUndefined();
     expect(out.conformance_failure).toBe(MISSING_STATUS_BLOCK);
+  });
+});
+
+describe("headless prompt (§1: the skill line comes first)", () => {
+  test("knowledge injected → the prompt still starts with /tk-studio:<skill>; the preamble follows it", async () => {
+    const spine = join(mkdtempSync(join(tmpdir(), "tk-sup-spine-")), "spine.md");
+    writeFileSync(spine, "# spine\nanchor S-1: the loop is headless.\n");
+    const { spawner, calls } = fakeSpawner(LOGGED_IN, worker(`{"status":"complete","intent":"tk-studio-activate","artifacts":[]}`));
+    const out = await invokeSkill(root, "tk-studio-activate",
+      { payload: { verb: "check" }, knowledge: { spine: { path: spine, present: true }, seed: { path: "x", present: false } } }, spawner);
+    expect(out.knowledge_injected).toEqual(["spine"]);
+    const prompt = calls.find((c) => c.args[0] === "-p")!.args[1];
+    expect(prompt).toStartWith("/tk-studio:tk-studio-activate ");
+    const [skillLine, ...rest] = prompt.split("\n");
+    expect(JSON.parse(skillLine.slice("/tk-studio:tk-studio-activate ".length))).toEqual({ verb: "check", directory: root });
+    const body = rest.join("\n");
+    expect(body).toContain("PROVISIONAL KNOWLEDGE");
+    expect(body).toContain("anchor S-1: the loop is headless.");
+    expect(body).toContain("HEADLESS driver invocation");
+  });
+
+  test("buildSkillPrompt starts with the skill line with or without a preamble", () => {
+    const injection = buildKnowledgeInjection({ spine: { path: "s.md", present: true } }, () => "spine text");
+    expect(injection.preamble).not.toBe("");
+    for (const inj of [injection, buildKnowledgeInjection(undefined)]) {
+      expect(buildSkillPrompt("tk-studio-detect", { directory: "d" }, inj)).toStartWith(`/tk-studio:tk-studio-detect {"directory":"d"}\n`);
+    }
   });
 });

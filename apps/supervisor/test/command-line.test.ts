@@ -3,6 +3,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSyn
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { main, recoverAfterTimeout, type TimeoutContext } from "../src/cli";
 import { claudeBin, studioRoot, StudioRootMissing } from "../src/env";
 import {
   buildWorkerCommand, buildWorkerEnv, HostBypassRefused, invokeSkill, MISSING_STATUS_BLOCK, type Spawner,
@@ -52,6 +53,87 @@ describe("worker command line", () => {
 
   test("missing TK_STUDIO_ROOT is the named StudioRootMissing", () => {
     expect(() => studioRoot({})).toThrow(StudioRootMissing);
+  });
+});
+
+describe("argument parsing", () => {
+  test.each([
+    [["run", "studio-health", "--directory"]],
+    [["run", "studio-health", "--directory", ".", "--permission-mode"]],
+    [["run", "studio-health", "--directory", "--permission-mode", "auto"]],
+    [["run", "studio-health", "--permission-mode", "--directory", "."]],
+  ])("a flag missing its value → usage error, exit 2: %j", async (argv) => {
+    const err = console.error;
+    const seen: string[] = [];
+    console.error = (...a: unknown[]) => { seen.push(a.join(" ")); };
+    try { expect(await main(argv)).toBe(2); } finally { console.error = err; }
+    expect(seen.join("\n")).toContain("needs a value");
+  });
+});
+
+describe("wake/submit timeout recovery", () => {
+  type Call = string[];
+  const ctx = (target: "skill" | "core", before: string[] = []): TimeoutContext =>
+    ({ root: "proj", projectId: "p", target, verb: target === "core" ? "wake" : "submit", timeoutS: 720, before: new Set(before) });
+  /** A fake §4 verb runner: `status` answers `runs`, later reflecting the ending verb. */
+  function fakeVerbs(runs: Record<string, any>[], ending: (args: string[]) => Record<string, any>) {
+    const calls: Call[] = [];
+    const states = new Map(runs.map((r) => [r.run_id, r.state]));
+    const runner = async (_root: string, args: string[]) => {
+      calls.push(args);
+      const runId = args[args.indexOf("--run-id") + 1];
+      if (args[0] === "status") {
+        const all = runs.map((r): Record<string, any> => ({ ...r, state: states.get(r.run_id) }));
+        return { job_id: "j", runs: args.includes("--run-id") ? all.filter((r) => r.run_id === runId) : all };
+      }
+      const out = ending(args);
+      if (out.ok !== false) states.set(runId, args[0] === "finish" ? "blocked" : "partial");
+      return out;
+    };
+    return { calls, runner };
+  }
+
+  test("skill run: adopts only the run absent from the snapshot and finishes it blocked naming the timeout", async () => {
+    const { calls, runner } = fakeVerbs(
+      [{ run_id: "j-20260101T000000Z", state: "queued" }, { run_id: "j-20260928T101010Z", state: "queued" }],
+      (args) => ({ run_id: args[args.indexOf("--run-id") + 1], state: "blocked" }));
+    const out = await recoverAfterTimeout("j", "uv timed out after 720s", ctx("skill", ["j-20260101T000000Z"]), runner);
+    expect(out).toMatchObject({ ok: false, run_id: "j-20260928T101010Z", target: "skill", state: "blocked" });
+    expect(out.reason).toContain("timed out");
+    const finish = calls.find((c) => c[0] === "finish")!;
+    expect(finish.slice(finish.indexOf("--run-id"), finish.indexOf("--run-id") + 4)).toEqual(["--run-id", "j-20260928T101010Z", "--state", "blocked"]);
+    expect(finish[finish.indexOf("--reason") + 1]).toContain("timed out");
+    expect(calls.some((c) => c.includes("j-20260101T000000Z"))).toBe(false);
+    expect(calls.some((c) => c[0] === "cancel")).toBe(false);
+  });
+
+  test("core run: cancelled, never finished (AC5b)", async () => {
+    const { calls, runner } = fakeVerbs([{ run_id: "j-1", state: "running" }],
+      (args) => ({ cancelled: true, runs_ended: [args[args.indexOf("--run-id") + 1]] }));
+    const out = await recoverAfterTimeout("j", "uv timed out", ctx("core"), runner);
+    expect(out).toMatchObject({ ok: false, run_id: "j-1", target: "core", state: "partial" });
+    expect(calls.some((c) => c[0] === "finish")).toBe(false);
+    expect(calls.find((c) => c[0] === "cancel")).toEqual(["cancel", "--directory", "proj", "--job-id", "j", "--run-id", "j-1"]);
+  });
+
+  test("an already-terminal adopted run is reported as is; nothing ends it", async () => {
+    const { calls, runner } = fakeVerbs([{ run_id: "j-1", state: "complete" }], () => { throw new Error("must not be called"); });
+    const out = await recoverAfterTimeout("j", "uv timed out", ctx("core"), runner);
+    expect(out).toMatchObject({ ok: false, run_id: "j-1", state: "complete" });
+    expect(calls.map((c) => c[0])).toEqual(["status"]);
+  });
+
+  test("ending the run fails → still reported with its run id, the failure in reason", async () => {
+    const { runner } = fakeVerbs([{ run_id: "j-1", state: "queued" }], () => ({ ok: false, error: "store locked" }));
+    const out = await recoverAfterTimeout("j", "uv timed out", ctx("skill"), runner);
+    expect(out).toMatchObject({ ok: false, run_id: "j-1", state: "queued" });
+    expect(out.reason).toContain("store locked");
+  });
+
+  test("no run beyond the snapshot → not started (never adopts a run it did not start)", async () => {
+    const { calls, runner } = fakeVerbs([{ run_id: "j-old", state: "queued" }], () => ({}));
+    await expect(recoverAfterTimeout("j", "uv timed out", ctx("skill", ["j-old"]), runner)).rejects.toThrow(/no new run/);
+    expect(calls.map((c) => c[0])).toEqual(["status"]);
   });
 });
 
@@ -210,10 +292,10 @@ describe.skipIf(!canRunE2E)("CLI end to end: studio-health (faked worker)", () =
     expect(res.status).toBe(1);
     const summary = JSON.parse(res.stdout);
     expect(summary.run_id).toStartWith("studio-health-");
-    expect(summary.state).not.toBe("not-started");
     expect(summary.reason).toStartWith("finish failed:");
     const run = fx.jobVerb(["status", "--directory", fx.project, "--job-id", "studio-health", "--run-id", summary.run_id]).runs[0];
     expect(run.state).toBe("cancelled");
+    expect(summary.state).toBe(run.state); // the run's real state, not the stale wake/submit answer
   }, 120_000);
 
   test("unregistered project → non-zero naming the registry refusal", () => {
