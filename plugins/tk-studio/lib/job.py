@@ -46,7 +46,7 @@ import re
 import sys
 import tempfile
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import classify
 import config as configlib
@@ -118,8 +118,12 @@ def _validate_target(target: object, problems: list[str]) -> None:
                 or not all(isinstance(a, str) and a for a in core)):
             problems.append("target.core must be a non-empty list of strings")
         else:
-            head = Path(core[0])
-            if head.is_absolute() or ".." in head.parts:
+            # judged under both path flavors, whatever the host OS: a
+            # definition must stay portable, so a drive-letter path is a
+            # machine path on Linux too (DW-4)
+            posix, win = PurePosixPath(core[0]), PureWindowsPath(core[0])
+            if (posix.is_absolute() or win.is_absolute() or win.drive
+                    or ".." in posix.parts or ".." in win.parts):
                 problems.append("target.core[0] must be plugin-root-relative "
                                 "(no absolute paths, no '..')")
     payload = target.get("payload")
