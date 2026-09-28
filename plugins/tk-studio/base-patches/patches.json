@@ -1,0 +1,19 @@
+{
+  "patches_version": 1,
+  "note": "Studio-managed patches to installer-owned BMad files. Each is the smallest fix for a named upstream defect, pinned to the exact upstream text and core versions it was verified against; tk install re-applies it after every install, tk activate reports it missing, and a changed upstream text or an undeclared core version makes it stale instead of patching blind. Retire a patch when its upstream issue is fixed at the pin.",
+  "patches": [
+    {
+      "id": "render-skill-identical-duplicates",
+      "target": "_bmad/scripts/render_skill.py",
+      "upstream_issue": "https://github.com/bmad-code-org/BMAD-METHOD/issues/2718",
+      "tracking_issue": "https://github.com/thkennedy/tk-studio/issues/75",
+      "reason": "render_skill.py HALTs on a short config token ({{.key}}) found under more than one module, even with identical values; bmm + gds both declare planning_artifacts and implementation_artifacts, so bmad-build and bmad-build-auto (and every bmad-loop session) cannot render in a game project.",
+      "applies_to_core": [
+        "6.11.0"
+      ],
+      "marker": "tk-studio base patch render-skill-identical-duplicates",
+      "find": "    if len(matches) > 1:\n        paths = \", \".join(path for path, _ in matches)\n",
+      "replace": "    # tk-studio base patch render-skill-identical-duplicates (BMAD-METHOD#2718):\n    # installed modules (bmm, gds, wds) declare the same key with the same value;\n    # that is only ambiguous when the values differ. Re-applied by tk install.\n    distinct = {_canonical_json(value): value for _, value in matches}\n    if len(distinct) > 1:\n        paths = \", \".join(path for path, _ in matches)\n"
+    }
+  ]
+}

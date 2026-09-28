@@ -1,7 +1,8 @@
 """tk-studio-activate — four-plane health/drift check (AD-13). Read-only, loud.
 
 Planes checked:
-  bmad-base  installed _bmad/_config/manifest.yaml versions vs the bmad.lock pins
+  bmad-base  installed _bmad/_config/manifest.yaml versions vs the bmad.lock pins,
+             plus the studio's declared base patches (lib/basepatch.py) in place
   plugin     installed plugin.json version vs the repo marketplace.json entry
              (catalog lockstep), when a marketplace catalog is present — plus
              the release-discipline guard: skills/ vs released-roster.json,
@@ -41,6 +42,7 @@ from pathlib import Path
 PLUGIN_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(PLUGIN_ROOT / "lib"))
 
+import basepatch  # noqa: E402
 import bmadlock  # noqa: E402
 import ledger  # noqa: E402
 import registry  # noqa: E402
@@ -48,6 +50,9 @@ import store  # noqa: E402
 import vault  # noqa: E402
 
 FIX_BMAD = "run tk-studio-install (tk install) to reinstall the base at the pin"
+FIX_PATCH_STALE = ("re-verify the base patch's upstream issue: retire the patch if it is "
+                   "fixed at the pin, else re-pin its find text and applies_to_core "
+                   "(plugins/tk-studio/base-patches/patches.json)")
 FIX_PLUGIN = "run /plugin marketplace update tk-studio, then reinstall/update the tk-studio plugin"
 FIX_HARNESS = ("install the plugin into the harness (AD-1 flow): claude plugin "
                "marketplace add <studio repo>, then claude plugin install tk-studio")
@@ -82,8 +87,24 @@ def check_bmad_base(directory: Path, lock_path: Path) -> dict:
         mismatches.append(f"installed but not pinned: {', '.join(extra)}")
     if mismatches:
         plane.update(status="drift", detail="; ".join(mismatches), fix=FIX_BMAD)
-    else:
-        plane["detail"] = f"{len(pins)} components at pin (core {pins['core']})"
+        return plane
+    plane["detail"] = f"{len(pins)} components at pin (core {pins['core']})"
+    try:
+        rows = basepatch.check(directory, pins["core"])
+    except basepatch.PatchError as exc:
+        plane.update(status="error", detail=f"{plane['detail']}; {exc}")
+        return plane
+    bad = [r for r in rows if r["status"] not in basepatch.GOOD]
+    if not bad:
+        applied = [r for r in rows if r["status"] in ("applied", "patched")]
+        if applied:
+            plane["detail"] += f"; {len(applied)} base patch(es) applied"
+        return plane
+    stale = [r for r in bad if r["status"] in ("stale", "unverified-core")]
+    plane.update(status="drift",
+                 detail=plane["detail"] + "; " + "; ".join(
+                     f"base patch {r['id']} {r['status']} ({r['upstream_issue']})" for r in bad),
+                 fix=FIX_PATCH_STALE if stale else FIX_BMAD)
     return plane
 
 

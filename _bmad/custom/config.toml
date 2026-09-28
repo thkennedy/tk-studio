@@ -5,3 +5,12 @@
 #
 # [agents.bmad-agent-pm]
 # description = "Prefers short, bulleted PRDs over narrative drafts."
+
+# gds shares bmm's artifact folders, the same layout as The Universe Awaits.
+# BMad's renderer accepts a key declared by several modules only when every
+# value is identical (tk-studio base patch render-skill-identical-duplicates,
+# BMAD-METHOD#2718). The gds install answer pointed at skills/, which made
+# bmad-build and bmad-build-auto unrenderable here.
+[modules.gds]
+planning_artifacts = "{project-root}/_bmad-output/planning-artifacts"
+implementation_artifacts = "{project-root}/_bmad-output/implementation-artifacts"

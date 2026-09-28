@@ -1,9 +1,10 @@
 ---
 id: TASK-63
-title: The Lift Drives the Studio at 0.1.16
+title: The Lift Drives the Studio at the Current Contract
 status: To Do
 assignee: []
 created_date: '2026-09-27 23:44'
+updated_date: '2026-09-28 08:56'
 labels:
   - ST-063
 milestone: A Queued Job Runs to a Guarded, Measured End

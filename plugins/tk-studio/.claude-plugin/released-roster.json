@@ -1,5 +1,5 @@
 {
-  "version": "0.2.14",
+  "version": "0.2.15",
   "skills": [
     "tk-studio-activate",
     "tk-studio-base-update",
@@ -21,7 +21,7 @@
     "tk-studio-session"
   ],
   "archive": {
-    "url": "https://github.com/thkennedy/tk-studio/releases/download/tk-studio--v0.2.14/tk-studio-0.2.14.zip",
-    "sha256": "b08978fa56e16458f1e1c2afab6ae2018e3cbab6a49afe2773a1e752dce28c41"
+    "url": "https://github.com/thkennedy/tk-studio/releases/download/tk-studio--v0.2.15/tk-studio-0.2.15.zip",
+    "sha256": "dbd1d03635e347f11d0e446143e497113319f79593c2325c51905149f71e05f0"
   }
 }

@@ -143,7 +143,11 @@ def _resolve_short_config(
     matches = _find_config_values(central, key)
     if not matches:
         raise RenderError(f"missing config value `{key}`")
-    if len(matches) > 1:
+    # tk-studio base patch render-skill-identical-duplicates (BMAD-METHOD#2718):
+    # installed modules (bmm, gds, wds) declare the same key with the same value;
+    # that is only ambiguous when the values differ. Re-applied by tk install.
+    distinct = {_canonical_json(value): value for _, value in matches}
+    if len(distinct) > 1:
         paths = ", ".join(path for path, _ in matches)
         raise RenderError(f"ambiguous config value `{key}` found at: {paths}")
     path, value = matches[0]

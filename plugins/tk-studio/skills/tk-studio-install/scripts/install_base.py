@@ -13,6 +13,11 @@ pin over a tree committed at that pin leaves `git status` clean. Paths that
 were already dirty before the run are never touched; real changes stay and
 are counted in `normalized.remaining`.
 
+Before normalizing, the studio's declared base patches (lib/basepatch.py,
+base-patches/patches.json) are re-applied, so a reinstall never silently
+reverts a studio fix to an installer-owned file; the result JSON
+`base_patches` names each patch and its state.
+
 Usage:
   uv run install_base.py [--directory DIR] [--modules a,b,c] [--dry-run]
                          [--timeout SECS] [--no-normalize]
@@ -39,6 +44,7 @@ from pathlib import Path
 PLUGIN_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(PLUGIN_ROOT / "lib"))
 
+import basepatch  # noqa: E402
 import bmadchurn  # noqa: E402
 import bmadlock  # noqa: E402
 import ledger  # noqa: E402
@@ -130,6 +136,14 @@ def emit_outcome(outcome: str, lock: dict, modules: list[str],
         print(f"warning: install-outcome event not recorded: {exc}", file=sys.stderr)
 
 
+def _base_patches(directory: Path, lock: dict, dry_run: bool = False) -> list[dict] | dict:
+    """Re-apply the studio's declared base patches (lib/basepatch.py); never raises."""
+    try:
+        return basepatch.apply(directory, lock["core"]["version"], dry_run=dry_run)
+    except (basepatch.PatchError, OSError, UnicodeDecodeError) as exc:
+        return {"error": str(exc)}
+
+
 def main(argv: list[str] | None = None) -> int:
     # Headless output must survive a cp1252 Windows console: payloads are
     # arbitrary unicode and must always print (AD-11).
@@ -166,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
             "verify": f"compare {directory / '_bmad/_config/manifest.yaml'} against lock pins",
             "normalize": (f"skipped: {skip}" if skip else
                           f"revert provable churn under {', '.join(bmadchurn.CHURN_ROOTS)}"),
+            "base_patches": _base_patches(directory, lock, dry_run=True),
         }))
         return 0
 
@@ -205,6 +220,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     emit_outcome("success", lock, modules)
+    # Studio-managed base patches (0.1.17) land before normalization, so a
+    # tree committed with the patch in place reads as churn-free.
+    patches = _base_patches(directory, lock)
     normalized = ({"skipped": skip} if preserve is None
                   else normalize_after_install(directory, preserve))
     print(json.dumps({
@@ -213,6 +231,7 @@ def main(argv: list[str] | None = None) -> int:
         "modules": {m: bmadlock.lock_pins(lock)[m] for m in modules},
         "directory": str(directory),
         "normalized": normalized,
+        "base_patches": patches,
     }))
     return 0
 

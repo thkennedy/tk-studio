@@ -127,11 +127,11 @@
 ## EP-020 — The Contract Names Its Drivers and Carries Cost (`draft`)
 
 - [`ST-061`](ST-061.md) Finish Records What the Run Cost — `draft`
-- [`ST-062`](ST-062.md) Contract 0.1.17 Names the Supervisor and Hermes — `draft`
+- [`ST-062`](ST-062.md) Contract 0.1.18 Names the Supervisor and Hermes — `draft`
 
 ## EP-021 — A Queued Job Runs to a Guarded, Measured End (`draft`)
 
-- [`ST-063`](ST-063.md) The Lift Drives the Studio at 0.1.16 — `draft`
+- [`ST-063`](ST-063.md) The Lift Drives the Studio at the Current Contract — `draft`
 - [`ST-064`](ST-064.md) Conformance Passes Through the Supervisor — `draft`
 - [`ST-065`](ST-065.md) Jobs Survive Restarts in a Durable Queue — `draft`
 - [`ST-066`](ST-066.md) The Worker Runs on the Right Tier and Reports Its Cost — `draft`
