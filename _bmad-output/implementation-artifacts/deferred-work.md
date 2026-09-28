@@ -15,7 +15,7 @@ source_spec: `20-1-finish-records-what-the-run-cost-finish-records-what-the-run-
 location: plugins/tk-studio/lib/tests/test_job.py:177
 severity: low
 reason: Reproduces on clean git archive of baseline 0c984107dcaf136f8a6049acf0ac39f281b99744; outside story Files (consult ruling 2026-09-28T09:02:24Z)
-status: open
+status: resolved 2026-09-28 by thkennedy/tk-studio#77 (core path judged under both path flavors; lib suite green on Linux)
 
 ### DW-5: A repeat finish in the same terminal state overwrites run.json fields (now including total_cost_usd) and emits a second job-run event.
 origin: spec-deferred 58cb8430e7bb
@@ -31,7 +31,7 @@ source_spec: `20-2-contract-0-1-18-names-the-supervisor-and-hermes-contract-0-1-
 location: plugins/tk-studio/contracts/driver-contract.md §2 executing-wrapper paragraph and the §1 roster Hermes row
 severity: medium
 reason: AC3 pins the wrapper as "whichever conformant driver executed its `wake` directive" (transcribed verbatim, so not extended here). But lib/jobrun.py submit() also creates the run and returns an invoke-skill directive for one-shot skill-target jobs (e.g. run-epic), and §4's KB-injection section says directives come from "submit/wake". Deferral class (b): a contract invariant left unpinned. Raised by both review layers.
-status: open
+status: resolved 2026-09-28 in the 0.1.18 release: the executing wrapper is whichever driver executed the invoke-skill directive from wake or, for one-shot skill targets, submit; Hermes hands jobs to the supervisor and never calls submit
 
 ### DW-7: `job.schema.json` `run.fields` does not list `total_cost_usd`, although Story 20.1 records it in `run.json` and the 0.1.18 §4 `finish` row now tells drivers it is recorded there.
 origin: spec-deferred 88fba205925c
@@ -39,4 +39,4 @@ source_spec: `20-2-contract-0-1-18-names-the-supervisor-and-hermes-contract-0-1-
 location: plugins/tk-studio/contracts/job.schema.json run.fields
 severity: medium
 reason: grep finds no `total_cost_usd` in plugins/tk-studio/contracts/job.schema.json. The run fields list `reason`, `status_block`, `ended` and others, but not the cost. 20-1 (2d68213) added the field to run.json and jobrun.py without the schema, so this predates 20-2. AD-19 says a contract-surface change updates its schemas in the same story. Deferral class (b): a contract or schema invariant left unpinned. Raised by the edge-case-hunter layer in the follow-up review.
-status: open
+status: resolved 2026-09-28 in the 0.1.18 release: job.schema.json run.fields lists total_cost_usd

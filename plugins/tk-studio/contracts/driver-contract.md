@@ -76,7 +76,7 @@ Any conformant driver may execute a run; the studio imports none of them
 | Driver | Role |
 | --- | --- |
 | the studio supervisor | the **executing wrapper** for the runs it executes — it executes `wake` directives and carries `account`/`finish` (§2; `finish` in §4) — and the **status page**, the UI a human reads run state through |
-| Hermes | the **front door**: a human-facing entry that submits jobs to the supervisor (§4 `submit`) and **never executes a run** |
+| Hermes | the **front door**: a human-facing entry that hands jobs to the studio supervisor (the supervisor calls §4 `submit`) and **never executes a run** |
 | direct invocation | headless invocation by name with a payload (above) — **a conforming driver per §1**, and how the shipped conformance suite drives every surface |
 
 ClaudeOS, the first consumer named through 0.1.17, is retired as a driver.
@@ -102,9 +102,13 @@ what a `complete` run reports in `artifacts[]`; every skill may instead end
 ends `partial` rather than blocked — the row states which).
 
 **The executing wrapper (0.1.18):** the executing wrapper for a run is
-whichever conformant driver (§1 driver roster) executed its `wake`
-directive; `account` (budget counters every iteration) and `finish` (the
-terminal transition, §4) are that wrapper's duty.
+whichever conformant driver (§1 driver roster) executed its `invoke-skill`
+directive — the one `wake` returns, or, for a one-shot skill-target job,
+the one `submit` returns; `account` (budget counters every iteration) and
+`finish` (the terminal transition, §4) are that wrapper's duty. A driver
+that submits but never executes (Hermes) does not call the studio's
+`submit` itself: it hands the job to the studio supervisor, which submits
+and executes it, so every run has exactly one executing wrapper.
 
 | Skill (intent) | Payload in | Deterministic core | Artifacts out | Blocked when (headless) |
 | --- | --- | --- | --- | --- |

@@ -150,7 +150,8 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertIn("status page", supervisor)
         hermes = rows["Hermes"]
         self.assertIn("front door", hermes)
-        self.assertIn("submits jobs to the supervisor", hermes)
+        # DW-6: Hermes hands jobs to the supervisor, which calls submit
+        self.assertIn("hands jobs to the studio supervisor", hermes)
         self.assertIn("never executes a run", hermes)
         direct = rows["direct invocation"]
         self.assertIn("conforming driver per §1", direct)
@@ -168,7 +169,12 @@ class DriverContractTestCase(unittest.TestCase):
         statement = " ".join(section.split())
         self.assertIn("the executing wrapper for a run is whichever "
                       "conformant driver", statement)
-        self.assertIn("executed its `wake` directive", statement)
+        # DW-6: the directive comes from wake, or from submit for a
+        # one-shot skill-target job; every run has exactly one wrapper
+        self.assertIn("executed its `invoke-skill` directive", statement)
+        self.assertIn("the one `wake` returns", statement)
+        self.assertIn("the one `submit` returns", statement)
+        self.assertIn("exactly one executing wrapper", statement)
         self.assertIn("`account`", statement)
         self.assertIn("`finish`", statement)
         self.assertIn("are that wrapper's duty", statement)
