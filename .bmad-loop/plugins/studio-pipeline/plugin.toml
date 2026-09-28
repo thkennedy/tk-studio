@@ -24,6 +24,10 @@
 #   [hooks.pre_commit]  reconcile_gate.py pauses the run on a recorded `escalate`,
 #                       or on score >= min_score with no verdict when fail_closed
 #                       is set, so a human reconciles attended (bmad-loop-resolve).
+#   [hooks.post_commit] meter_hook.py meters the landed story (ST-24.1): copies its
+#                       session + subagent transcripts into <run_dir>/transcripts/,
+#                       prices them from plugins/tk-studio/lib/prices.json and records
+#                       one `observation`. Never blocks: exits 0 on every path.
 #
 # Not ported yet: TUA's pre-dispatch seam check (seam_check.py). It reads TUA's
 # per-epic epics files and routes through TUA's scripts/loop/apply-route.py.
@@ -75,5 +79,11 @@ prompt = "Studio gate for unit `{story_key}` (run {run_id}). Read `{scripts}/gat
 [hooks.pre_commit]
 cmd = "uv run --no-project python \"{scripts}/reconcile_gate.py\""
 timeout_sec = 60
+blocking = false
+fail_closed = false
+
+[hooks.post_commit]
+cmd = "uv run --no-project python \"{scripts}/meter_hook.py\""
+timeout_sec = 300
 blocking = false
 fail_closed = false

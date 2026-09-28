@@ -1,0 +1,29 @@
+{
+  "date": "2026-09-28",
+  "source": "the Claude API reference bundled with Claude Code 2.1.281 (the claude-api skill); its models table is cached 2026-06-24, and the Opus 5.5 and Fable 5.1 notes come from their launch. Transcribed from kb/execution-pipeline-model-routing.md, 'Price table for the trial meter (sourced 2026-09-28)'.",
+  "aliases": {
+    "claude-haiku-4-5": "claude-haiku-4-5-20251001"
+  },
+  "models": {
+    "claude-opus-5-5": {
+      "input": 4.00, "output": 20.00, "cache_write_5m": 5.00, "cache_write_1h": 8.00, "cache_read": 0.20,
+      "derived": ["cache_write_5m", "cache_write_1h"]
+    },
+    "claude-opus-5": {
+      "input": 5.00, "output": 25.00, "cache_write_5m": 6.25, "cache_write_1h": 10.00, "cache_read": 0.50,
+      "derived": ["cache_write_5m", "cache_write_1h", "cache_read"]
+    },
+    "claude-fable-5-1": {
+      "input": 10.00, "output": 50.00, "cache_write_5m": 12.50, "cache_write_1h": 20.00, "cache_read": 0.25,
+      "derived": ["cache_write_5m", "cache_write_1h"]
+    },
+    "claude-sonnet-5": {
+      "input": 2.00, "output": 10.00, "cache_write_5m": 2.50, "cache_write_1h": 4.00, "cache_read": 0.20,
+      "derived": ["cache_write_5m", "cache_write_1h", "cache_read"]
+    },
+    "claude-haiku-4-5-20251001": {
+      "input": 1.00, "output": 5.00, "cache_write_5m": 1.25, "cache_write_1h": 2.00, "cache_read": 0.10,
+      "derived": ["cache_write_5m", "cache_write_1h", "cache_read"]
+    }
+  }
+}
