@@ -65,7 +65,8 @@
         "state": { "type": "string", "enum": ["complete", "partial", "blocked", "cancelled"], "required": true },
         "reason": { "type": "string", "required": false, "note": "the guard, stop condition, or gap that ended a partial|blocked|cancelled run" },
         "elapsed_ms": { "type": "number", "required": false },
-        "detail": { "type": "string", "required": false }
+        "detail": { "type": "string", "required": false },
+        "total_cost_usd": { "type": "number", "required": false, "note": "the run's cost in USD, supplied to jobrun.py finish (--total-cost-usd); source: the worker's --output-format json result (total_cost_usd). Finite and non-negative; absent when the driver sent none, never zero-filled" }
       }
     },
     "observation": {

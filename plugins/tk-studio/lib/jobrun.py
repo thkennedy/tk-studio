@@ -44,6 +44,7 @@ CLI (all verbs end with JSON on stdout; never prompts — AD-11):
   uv run jobrun.py account --directory DIR --run-id RID [--turns N] [--tokens N]
   uv run jobrun.py finish  --directory DIR --run-id RID --state STATE
                            [--reason R] [--status-block JSON]
+                           [--total-cost-usd USD]
 
 Exit codes: 0 verb answered (including accepted=false / woken=false — a
 refusal is an answer); 2 bad invocation or unknown id; 1 unexpected
@@ -54,6 +55,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -106,6 +108,8 @@ def _emit_job_event(record: dict, key: str, detail: str | None = None) -> None:
         elapsed = (_parse_iso(record["ended"])
                    - _parse_iso(record["started"])).total_seconds() * 1000
         payload["elapsed_ms"] = round(elapsed, 3)
+    if "total_cost_usd" in record:  # key presence: a cost of 0 is carried
+        payload["total_cost_usd"] = record["total_cost_usd"]
     try:
         ledger.emit("job-run", payload, project=key)
     except Exception:
@@ -490,12 +494,37 @@ def account(project_root: Path, run_id: str, turns: int = 0,
                                     "named in reason (§4)"}
 
 
+def _validate_cost(value) -> float:
+    """The run's cost as a finite non-negative float, or a named refusal —
+    never a guessed value (AD-3). bool is refused though it is an int; an
+    int too large for a float is refused, not an OverflowError; -0.0 is
+    recorded as 0.0 (no signed zero in a non-negative field)."""
+    refusal = JobRunError(
+        f"total_cost_usd must be a finite non-negative number, "
+        f"got {value!r}")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise refusal
+    try:
+        cost = float(value)
+    except OverflowError:
+        raise refusal from None
+    if not math.isfinite(cost) or cost < 0:
+        raise refusal
+    return cost + 0.0
+
+
 def finish(project_root: Path, run_id: str, state: str,
-           reason: str | None = None, status_block: dict | None = None) -> dict:
+           reason: str | None = None, status_block: dict | None = None,
+           total_cost_usd: float | None = None) -> dict:
     """Terminal-ize a skill-target run; emits the job-run event (the
-    wrapper's one job-level emission for this run — AD-12)."""
+    wrapper's one job-level emission for this run — AD-12). An optional
+    total_cost_usd (the worker's --output-format json result) lands in
+    run.json and the event; it is validated before anything is written."""
+    cost = None if total_cost_usd is None else _validate_cost(total_cost_usd)
     key = joblib.project_key(Path(project_root))
     changes: dict = {"state": state}
+    if cost is not None:
+        changes["total_cost_usd"] = cost
     if reason is not None:
         changes["reason"] = reason
     if status_block is not None:
@@ -542,6 +571,11 @@ def main(argv: list[str] | None = None) -> int:
                                  choices=list(joblib.TERMINAL_STATES))
                 cmd.add_argument("--reason")
                 cmd.add_argument("--status-block", help="JSON object")
+                # a string, validated by the module: a bad value answers
+                # with the JSON status block, never argparse usage (AD-11)
+                cmd.add_argument("--total-cost-usd",
+                                 help="run cost in USD (worker's "
+                                      "--output-format json result)")
 
     args = parser.parse_args(argv)
     try:
@@ -565,8 +599,17 @@ def main(argv: list[str] | None = None) -> int:
                     block = json.loads(args.status_block)
                 except json.JSONDecodeError as exc:
                     raise JobRunError(f"--status-block is not valid JSON: {exc}")
+            cost = None
+            if args.total_cost_usd is not None:
+                try:
+                    cost = float(args.total_cost_usd)
+                except ValueError:
+                    raise JobRunError(
+                        f"total_cost_usd must be a finite non-negative "
+                        f"number, got {args.total_cost_usd!r}")
             result = finish(Path(args.directory), args.run_id, args.state,
-                            reason=args.reason, status_block=block)
+                            reason=args.reason, status_block=block,
+                            total_cost_usd=cost)
     except (JobRunError, joblib.JobError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
         return 2

@@ -55,6 +55,8 @@ lives in resumable run workspaces under the per-user store.
    uv run "${CLAUDE_PLUGIN_ROOT}/lib/jobrun.py" finish --directory <root> --run-id <rid> --state partial --reason "guard: max_turns"
    ```
 
+   Pass `--total-cost-usd <usd>` to `finish` when the worker reports one
+   (its `--output-format json` result); omit it otherwise, never guess.
    `finish` records the terminal state and emits the run's `job-run` event —
    this wrapper alone emits job-level events; the target skill emits its own
    surface events, never both for one failure (AD-12). Every terminal

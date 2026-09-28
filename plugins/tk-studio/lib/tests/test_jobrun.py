@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import math
 import os
 import tempfile
 import unittest
@@ -218,6 +219,103 @@ class JobRunTestCase(unittest.TestCase):
         events = [e for e in self._ledger_events() if e["event"] == "job-run"]
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["payload"]["run_id"], run_id)
+
+    # ------------------------- ST-061 / Story 20.1: finish records the cost
+
+    def _queued_skill_run(self) -> str:
+        job_id = f"agentic-{len(getattr(self, '_cost_jobs', []))}"
+        self._cost_jobs = getattr(self, "_cost_jobs", []) + [job_id]
+        self._declare(job_id, self._skill_defn(job_id))
+        return jobrun.submit(self.root, job_id)["run_id"]
+
+    def _job_run_events(self) -> list[dict]:
+        return [e for e in self._ledger_events() if e["event"] == "job-run"]
+
+    def test_finish_with_cost_records_it_in_run_and_one_event(self):
+        run_id = self._queued_skill_run()
+        jobrun.finish(self.root, run_id, "complete", total_cost_usd=1.23)
+        self.assertEqual(joblib.read_run("proj", run_id)["total_cost_usd"],
+                         1.23)
+        events = self._job_run_events()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["payload"]["total_cost_usd"], 1.23)
+
+    def test_finish_zero_cost_is_carried_not_dropped(self):
+        run_id = self._queued_skill_run()
+        jobrun.finish(self.root, run_id, "complete", total_cost_usd=0)
+        self.assertEqual(joblib.read_run("proj", run_id)["total_cost_usd"], 0)
+        (event,) = self._job_run_events()
+        self.assertIn("total_cost_usd", event["payload"])
+        self.assertEqual(event["payload"]["total_cost_usd"], 0)
+
+    def test_finish_negative_zero_cost_is_recorded_as_positive_zero(self):
+        run_id = self._queued_skill_run()
+        jobrun.finish(self.root, run_id, "complete", total_cost_usd=-0.0)
+        recorded = joblib.read_run("proj", run_id)["total_cost_usd"]
+        self.assertEqual(recorded, 0)
+        self.assertEqual(math.copysign(1, recorded), 1.0)
+        (event,) = self._job_run_events()
+        emitted = event["payload"]["total_cost_usd"]
+        self.assertEqual(emitted, 0)
+        self.assertEqual(math.copysign(1, emitted), 1.0)
+
+    def test_cli_finish_with_cost(self):
+        run_id = self._queued_skill_run()
+        code, out = self._cli("finish", "--directory", str(self.root),
+                              "--run-id", run_id, "--state", "complete",
+                              "--total-cost-usd", "1.23")
+        self.assertEqual(code, 0, out)
+        self.assertTrue(out["ok"])
+        self.assertEqual(joblib.read_run("proj", run_id)["total_cost_usd"],
+                         1.23)
+        (event,) = self._job_run_events()
+        self.assertEqual(event["payload"]["total_cost_usd"], 1.23)
+
+    def test_finish_without_cost_leaves_field_absent(self):
+        run_id = self._queued_skill_run()
+        jobrun.finish(self.root, run_id, "partial", reason="guard: max_turns")
+        self.assertNotIn("total_cost_usd", joblib.read_run("proj", run_id))
+        (event,) = self._job_run_events()
+        # the 0.1.17 payload set, nothing zero-filled
+        self.assertEqual(set(event["payload"]) - {"elapsed_ms"},
+                         {"job_id", "run_id", "state", "reason"})
+
+    def _assert_refused_untouched(self, run_id: str) -> None:
+        record = joblib.read_run("proj", run_id)
+        self.assertEqual(record["state"], "queued")
+        self.assertNotIn("total_cost_usd", record)
+        self.assertEqual(self._job_run_events(), [])
+
+    def test_finish_refuses_invalid_cost_and_records_nothing(self):
+        for bad in (-0.01, float("nan"), float("inf"), float("-inf"), True,
+                    "1.23", "abc", 10**400):
+            with self.subTest(cost=bad):
+                run_id = self._queued_skill_run()
+                with self.assertRaises(jobrun.JobRunError) as ctx:
+                    jobrun.finish(self.root, run_id, "complete",
+                                  total_cost_usd=bad)
+                self.assertIn("total_cost_usd", str(ctx.exception))
+                self._assert_refused_untouched(run_id)
+
+    def test_cli_finish_refuses_invalid_cost_with_json(self):
+        for bad in ("abc", "-0.01", "nan", "inf", ""):
+            with self.subTest(cost=bad):
+                run_id = self._queued_skill_run()
+                code, out = self._cli("finish", "--directory", str(self.root),
+                                      "--run-id", run_id,
+                                      "--state", "complete",
+                                      f"--total-cost-usd={bad}")
+                self.assertEqual(code, 2)
+                self.assertFalse(out["ok"])
+                self.assertIn("total_cost_usd", out["error"])
+                self._assert_refused_untouched(run_id)
+
+    def test_job_run_taxonomy_declares_optional_cost(self):
+        base = {"job_id": "a", "run_id": "b", "state": "complete"}
+        ledger.validate("job-run", dict(base, total_cost_usd=1.5))
+        ledger.validate("job-run", dict(base, total_cost_usd=0))
+        with self.assertRaises(ledger.LedgerError):
+            ledger.validate("job-run", dict(base, total_cost_usd="1.5"))
 
     # --------------------------------- AC1: stop conditions gate schedule
 
