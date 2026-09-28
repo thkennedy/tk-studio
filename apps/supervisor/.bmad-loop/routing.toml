@@ -1,0 +1,31 @@
+# .bmad-loop/routing.toml: the project tier (AD-14). Any leg not listed here
+# uses the shipped default in tk-studio-launch customize.toml [pipeline.legs].
+#
+# Trial "opus-5-5", started 2026-09-28 at the operator's request: every loop
+# leg runs on Claude Opus 5.5. Prices per MTok (input/output):
+#   Opus 5.5   $4 / $20
+#   Opus 5     $5 / $25
+#   Fable 5.1  $10 / $50
+#   Sonnet 5   $2 / $10
+# So Opus 5.5 is cheaper on the Opus and Fable legs and costs twice Sonnet per
+# token on the Sonnet legs. Those legs are the open question: fewer turns and
+# retries have to pay for the higher price.
+#
+# Each story is measured in dollars (per-model usage x list price),
+# wall-clock time, and attempt-1 landings. The comparison is against the v2
+# baseline in kb/execution-pipeline-model-routing.md. The verdict goes back
+# into the shipped defaults, never silently (plan Epic 24).
+#
+# Opus 5.5 defaults to effort "medium", so every leg that takes an effort
+# sets it explicitly, at the level the shipped default gives that leg.
+
+[defaults]
+session     = { model = "claude-opus-5-5", effort = "medium" }
+implementer = { model = "claude-opus-5-5" }
+reviewers   = { model = "claude-opus-5-5" }
+consult     = { model = "claude-opus-5-5" }
+seam        = { model = "claude-opus-5-5", effort = "medium" }
+review      = { model = "claude-opus-5-5", effort = "high" }
+triage      = { model = "claude-opus-5-5", effort = "high" }
+supervise   = { model = "claude-opus-5-5", effort = "low" }
+planner     = { model = "claude-opus-5-5", effort = "high" }
