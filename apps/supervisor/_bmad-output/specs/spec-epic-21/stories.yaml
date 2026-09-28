@@ -85,6 +85,11 @@
     "the run ends blocked" as the submission refused `blocked` with no run minted. The
     worker prompt is the argument after `-p` (no stdin, no shell retry: an injection
     risk); keep it.
+    Replan (21-2 reconcile, 2026-09-28): the lifted worker command takes a
+    `deny_profile` input: an absolute path, validated by `validateDenyProfile` (a
+    relative or unreadable profile is `DenyProfileRefused`) and forwarded as `--settings
+    <path>`. The host tier passes the operator's deny-list settings through it unchanged
+    and never widens them.
 
 - id: "21-5-guards-and-the-pacer-are-the-wrappers-job"
   title: "Guards and the Pacer Are the Wrapper's Job"

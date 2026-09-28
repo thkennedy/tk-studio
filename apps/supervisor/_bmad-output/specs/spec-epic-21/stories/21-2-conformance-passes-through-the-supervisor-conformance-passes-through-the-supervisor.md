@@ -11,6 +11,7 @@ context:
   - '{project-root}/_bmad-output/specs/spec-epic-21/salvage-findings.md'
 warnings: ['oversized']
 deferred: []
+reconcile_verdict: 'adjust-stories'
 ---
 
 <intent-contract>
@@ -216,3 +217,14 @@ DRIFT: §8 harness judge also fails a reason starting "harness auth" — nothing
 DRIFT: `deny_profile` must be an absolute path. A relative path is DenyProfileRefused, because the supervisor validated against its own cwd while `claude -p --settings` resolved against the worker's cwd — affects: 21-4 (it must pass an absolute profile path)
 DRIFT: `runDirectRunner` exported with an injectable exec; `--compare-direct` runs the client + contract gate before the direct runner — review-directed ordering and test seam — affects: none
 DRIFT: tk_invoke-routed drives stage plugin-relative fixtures to <sandbox>/fixtures/<plugin-relative path>; direct §1 drives keep the plugin path — to keep auto-mode workers out of the installed plugin — affects: none
+
+## Reconcile
+
+### 2026-09-28 — adjust-stories
+
+- Score: 2 (passes 1-2); pass 3 local.
+- Reasoning: The only deviation later work relies on is the worker command's new `deny_profile` input. It must be an absolute path, validated by `validateDenyProfile`, and forwarded as `--settings <path>`. Story 21-4 builds the host-tier worker command line on this seam. Its text says the deny list applies "untouched" and absorbs the seam through an `invoke_dev_with` note. The other deviations (`translateDrive`'s plugin root, `--compare-direct` with `--surface` refused, harness drives through `tk_invoke`, and the stricter §8 judge) are local, and they strengthen the §8 path this story owns. No AD, contract surface or ruling is contradicted.
+- Affected: 21-4 — "`claude -p` runs under the Max login with `--permission-mode auto` ..., the deny list untouched" (the deny list reaches the worker as an absolute `deny_profile`, forwarded as `--settings`)
+- Invariant: none
+- Recorded attended by the planning session (the reconcile gate paused the commit, fail_closed).
+

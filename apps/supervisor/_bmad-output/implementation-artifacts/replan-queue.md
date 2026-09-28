@@ -17,3 +17,9 @@
 - What changed: see the 21-1 spec Reconcile section
 - Suggested adjustment: Replan (21-1 reconcile, 2026-09-28): resume and orphan handling must respect the lifted CLI's rule that only a run started within 2s before the caller began is adopted after a wake/submit timeout; one-shot runs are minted by `submit`.
 - Status: closed — applied to the unstarted 21-6 entry's invoke_dev_with by the planning session (2026-09-28)
+
+## 21-4 — scope: stories — from 21-2-conformance-passes-through-the-supervisor — 2026-09-28
+
+- What changed: the worker command's `deny_profile` seam (see the 21-2 spec's Reconcile section)
+- Suggested adjustment: Replan (21-2 reconcile, 2026-09-28): the lifted worker command takes a `deny_profile` input: an absolute path, validated by `validateDenyProfile` (a relative or unreadable profile is `DenyProfileRefused`) and forwarded as `--settings <path>`. The host tier passes the operator's deny-list settings through it unchanged and never widens them.
+- Status: closed — applied to the unstarted 21-4 entry's invoke_dev_with by the planning session (2026-09-28)
