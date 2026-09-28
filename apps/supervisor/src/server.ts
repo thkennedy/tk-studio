@@ -15,12 +15,12 @@
  * Protocol (when run directly): tools-only JSON-RPC 2.0 over stdio, one
  * message per line — the in-repo client (client.ts) drives it.
  */
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { load as loadYaml } from "js-yaml";
-import { claudeBin, pluginRoot as envPluginRoot, studioRoot as envStudioRoot } from "./env";
+import { claudeBin, pluginRoot as envPluginRoot, sbxBin, studioRoot as envStudioRoot } from "./env";
 
 const CONSUMED_CONTRACT = "0.1.18";
 /** Pre-1.0 contract semver: the compatibility line is major.minor (`0.1`) —
@@ -227,7 +227,7 @@ export async function runJobVerb(root: string, cliArgs: string[], timeoutS = 120
   return parsed as Record<string, any>;
 }
 
-const PERMISSION_MODES = ["auto", "acceptEdits", "default", "plan", "bypassPermissions"] as const;
+export const PERMISSION_MODES = ["auto", "acceptEdits", "default", "plan", "bypassPermissions"] as const;
 /** Host default (AD-2 ruling): `auto` — the operator's settings.json
  * `permissions.deny` applies untouched; no flag here ever overrides it. */
 export const HOST_PERMISSION_MODE = "auto";
@@ -235,9 +235,54 @@ export const HOST_PERMISSION_MODE = "auto";
 /** A bypass request on the host — refused before any process starts. */
 export class HostBypassRefused extends Error {
   constructor(mode: string) {
-    super(`HostBypassRefused: permission mode '${mode}' is forbidden on the host — the worker runs under '${HOST_PERMISSION_MODE}' with settings.json permissions.deny intact`);
+    super(`HostBypassRefused: permission mode '${mode}' is forbidden on the host — the worker runs under '${HOST_PERMISSION_MODE}' with settings.json permissions.deny intact (bypass is permitted only on the sbx tier)`);
     this.name = "HostBypassRefused";
   }
+}
+
+/** Where the worker runs (AD-2: from the submission or the supervisor's own
+ * per-job config, never from the plugin): `host` — `claude -p` directly under
+ * the Max login, never bypass; `sbx` — inside a Docker Sandboxes microVM
+ * through `sbx exec`, where bypass is permitted. */
+export const TIERS = ["host", "sbx"] as const;
+export type Tier = (typeof TIERS)[number];
+
+/** A tier that is neither `host` nor `sbx` — refused before any process starts. */
+export class TierRefused extends Error {
+  constructor(tier: unknown) {
+    super(`TierRefused: tier '${String(tier)}' is not one of ${TIERS.join("|")}`);
+    this.name = "TierRefused";
+  }
+}
+
+/** An sbx-tier run with no sandbox name — refused before any process starts. */
+export class SbxSandboxMissing extends Error {
+  constructor() {
+    super("SbxSandboxMissing: the sbx tier needs a sandbox name (--sandbox, the queued run's stored sandbox, or the supervisor config's `sandbox`)");
+    this.name = "SbxSandboxMissing";
+  }
+}
+
+/** A tier value checked: undefined → `host`; anything else must be a TIERS member. */
+export function checkTier(tier: unknown): Tier {
+  if (tier === undefined || tier === null) return "host";
+  if (typeof tier !== "string" || !(TIERS as readonly string[]).includes(tier)) throw new TierRefused(tier);
+  return tier as Tier;
+}
+
+/** The host root as the sbx microVM mounts it (runbook §3.8: a project at
+ * `<D>:\GitHub\<p>` is mounted at `/<d>/GitHub/<p>`), derived
+ * mechanically — never a hard-coded path (AD-15). A Windows drive path
+ * (backslashes or forward slashes) becomes `/<drive letter, lower case>/…`;
+ * an already-POSIX path is unchanged. */
+export function toVmPath(root: string): string {
+  const drive = /^([A-Za-z]):(?:[\\/](.*))?$/.exec(root);
+  if (drive) {
+    const rest = (drive[2] ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
+    return `/${drive[1].toLowerCase()}${rest ? `/${rest}` : ""}`;
+  }
+  if (root.startsWith("/")) return root;
+  throw new Error(`VmPathUnderivable: cannot derive the sbx microVM path of '${root}' (neither a drive path nor a POSIX path)`);
 }
 
 export interface WorkerCommand { bin: string; argv: string[] }
@@ -289,20 +334,57 @@ export function validateDenyProfile(path: string, read: (p: string) => string = 
  * it can only add denials — settings.json `permissions.deny` stays intact. */
 export function buildWorkerCommand(opts: {
   prompt: string; permissionMode?: string; model?: string; effort?: string; bin?: string; denyProfile?: string;
+  /** Default `host`: bypass is refused there (HostBypassRefused), permitted on `sbx`. */
+  tier?: string;
+  /** The host project root — required for an sbx deny profile (mapped to its microVM path). */
+  root?: string;
 }): WorkerCommand {
+  const tier = checkTier(opts.tier);
   const mode = opts.permissionMode ?? HOST_PERMISSION_MODE;
-  if (mode === "bypassPermissions") throw new HostBypassRefused(mode);
+  if (mode === "bypassPermissions" && tier === "host") throw new HostBypassRefused(mode);
   if (!(PERMISSION_MODES as readonly string[]).includes(mode)) {
-    throw new Error(`permission_mode must be one of ${PERMISSION_MODES.filter((m) => m !== "bypassPermissions").join("|")}`);
+    const allowed = tier === "host" ? PERMISSION_MODES.filter((m) => m !== "bypassPermissions") : PERMISSION_MODES;
+    throw new Error(`permission_mode must be one of ${allowed.join("|")}`);
   }
   const argv = ["-p", opts.prompt, "--output-format", "json", "--permission-mode", mode];
   if (opts.denyProfile !== undefined) {
-    argv.push("--settings", validateDenyProfile(opts.denyProfile).path); // exactly the file validated
+    const profile = validateDenyProfile(opts.denyProfile).path; // exactly the file validated
+    argv.push("--settings", tier === "host" ? profile : vmDenyProfile(opts.denyProfile, profile, opts.root));
   }
   if (opts.model) argv.push("--model", opts.model);
   if (opts.effort) argv.push("--effort", opts.effort);
   return { bin: opts.bin ?? claudeBin(), argv };
 }
+
+/** An sbx deny profile rides as its microVM path: it must lie inside the
+ * project root (the only host folder the sandbox mounts read-write), else it is
+ * not visible in the VM — DenyProfileRefused. Checked on real paths: a symlink
+ * inside the root pointing outside it would dangle in the VM. */
+function vmDenyProfile(requested: string, canonical: string, root: string | undefined): string {
+  if (!root) throw new DenyProfileRefused(requested, "cannot be mapped into the sbx microVM without the project root");
+  let realRoot: string;
+  try { realRoot = realpathSync(resolve(root)); } catch { realRoot = resolve(root); }
+  const rel = relative(realRoot, realpathSync(canonical)); // just read, so it exists
+  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    throw new DenyProfileRefused(requested, `lies outside the project root '${root}' — it would not be visible inside the sbx microVM`);
+  }
+  return `${toVmPath(root).replace(/\/+$/, "")}/${rel.split(sep).join("/")}`;
+}
+
+/** The sbx-tier wrapper: the same `claude -p` argv run inside the microVM
+ * through `sbx exec` — argv only, never a shell, so the prompt stays one argv
+ * item. `env -u ANTHROPIC_API_KEY` strips the key inside the VM and `env -C`
+ * sets the worker's cwd to the project's microVM path. The VM worker binary
+ * is literal `claude` (CLAUDE_BIN is host-only). */
+export function buildSbxCommand(opts: { sandbox: string; vmRoot: string; worker: WorkerCommand }): WorkerCommand {
+  return {
+    bin: sbxBin(),
+    argv: ["exec", opts.sandbox, "env", "-u", "ANTHROPIC_API_KEY", "-C", opts.vmRoot, "claude", ...opts.worker.argv],
+  };
+}
+
+/** Where a worker (and its login probe) runs: the host, or an sbx sandbox. */
+export interface WorkerPlacement { tier?: Tier; sandbox?: string }
 
 /** The worker's env: the parent's, minus ANTHROPIC_API_KEY (ruling 3 — the
  * Max login pays). TK_STUDIO_HOME and the rest pass through untouched. */
@@ -508,10 +590,16 @@ export function judgeAuthStatus(exit: number | null, stdout: string): string | n
 }
 
 /** The Max-login preflight: probe `$CLAUDE_BIN auth status --json` with the
- * worker's env (no API key) and judge it. */
-export async function maxLoginPreflight(spawner: Spawner = runProcess): Promise<string | null> {
+ * worker's env (no API key) and judge it. On the sbx tier the probe runs
+ * inside the sandbox through the same wrapper as the worker
+ * (`sbx exec <sb> env -u ANTHROPIC_API_KEY claude auth status --json`). */
+export async function maxLoginPreflight(spawner: Spawner = runProcess, placement: WorkerPlacement = {}): Promise<string | null> {
+  const probe = ["auth", "status", "--json"];
+  const [bin, args] = placement.tier === "sbx"
+    ? [sbxBin(), ["exec", placement.sandbox ?? "", "env", "-u", "ANTHROPIC_API_KEY", "claude", ...probe]]
+    : [claudeBin(), probe];
   try {
-    const res = await spawner(claudeBin(), ["auth", "status", "--json"], { timeoutS: 30, env: buildWorkerEnv() });
+    const res = await spawner(bin, args, { timeoutS: 30, env: buildWorkerEnv() });
     return judgeAuthStatus(res.exit, res.stdout);
   } catch (e) {
     return `${MAX_LOGIN_MISSING} (probe failed: ${e instanceof Error ? e.message : e})`;
@@ -520,9 +608,11 @@ export async function maxLoginPreflight(spawner: Spawner = runProcess): Promise<
 
 /** §1 preflight. The only config keys read are the ones the contract itself names
  * (planning.backend, planning.jira.site, planning.jira.email — §1/§2 plan-sync row). */
-async function authPreflight(skill: string, payload: Record<string, unknown>, projectRoot: string, spawner: Spawner = runProcess): Promise<string[]> {
+async function authPreflight(
+  skill: string, payload: Record<string, unknown>, projectRoot: string, spawner: Spawner = runProcess, placement: WorkerPlacement = {},
+): Promise<string[]> {
   const gaps: string[] = [];
-  const login = await maxLoginPreflight(spawner);
+  const login = await maxLoginPreflight(spawner, placement);
   if (login) gaps.push(login);
   if (!JIRA_TOUCHING_SKILLS.has(skill)) return gaps;
 
@@ -691,7 +781,9 @@ const TOOLS: ToolDef[] = [
         model: { type: "string", description: "§5 runtime model override — forwarded, never escalated" },
         effort: { type: "string", description: "§5 runtime effort override" },
         timeout_s: { type: "number", description: "run timeout in seconds (default 600)" },
-        permission_mode: { type: "string", enum: [...PERMISSION_MODES], description: "claude -p permission mode (default auto; bypassPermissions is refused on the host — HostBypassRefused)" },
+        permission_mode: { type: "string", enum: [...PERMISSION_MODES], description: "claude -p permission mode (default auto; bypassPermissions is refused on the host — HostBypassRefused — and permitted on the sbx tier)" },
+        tier: { type: "string", enum: [...TIERS], description: "where the worker runs: host (default) or sbx (a Docker Sandboxes microVM via `sbx exec`, where bypass is permitted)" },
+        sandbox: { type: "string", description: "sbx tier: the sandbox name (required on sbx)" },
         deny_profile: { type: "string", description: "path to a deny-only settings profile ({\"permissions\": {\"deny\": [...]}} and nothing else) forwarded as --settings — the §8 harness pass; anything else is refused (DenyProfileRefused) before any process starts" },
         knowledge: { type: "object", description: "§4 KB-injection directive from a submit/wake invoke-skill directive ({spine|seed: {path, present}}) — present artifacts' contents are injected into the run prompt as provisional knowledge (aid, not gate: absent/unreadable artifacts are skipped and reported)" },
       },
@@ -716,6 +808,15 @@ const TOOLS: ToolDef[] = [
 export interface InvokeArgs {
   payload?: unknown; model?: unknown; effort?: unknown; timeout_s?: unknown;
   permission_mode?: unknown; knowledge?: unknown; deny_profile?: unknown;
+  tier?: unknown; sandbox?: unknown;
+}
+
+/** Internal (not an MCP argument): options a supervisor-driven invocation carries. */
+export interface InvokeOptions {
+  /** The host root the sbx microVM path (worker cwd, payload `directory`, deny
+   * profile) is derived from — the registry entry root; default `root`. The
+   * host tier never reads it. */
+  vmHostRoot?: string;
 }
 
 /** The §1 headless prompt. It always STARTS with the skill line —
@@ -734,27 +835,42 @@ export function buildSkillPrompt(skill: string, payload: Record<string, unknown>
 }
 
 /** Headless skill run (§1): command line built first (a host bypass throws
- * HostBypassRefused before any process starts), then the Max-login preflight,
- * then the worker. Answers the tool result: status block, cost, or the named
+ * HostBypassRefused, an unknown tier TierRefused, sbx without a sandbox
+ * SbxSandboxMissing — all before any process starts), then the Max-login
+ * preflight, then the worker — on the host, or on the sbx tier wrapped in
+ * `sbx exec` (buildSbxCommand) with the payload directory as its VM path. Answers the tool result: status block, cost, or the named
  * conformance failure. */
-export async function invokeSkill(root: string, skill: string, args: InvokeArgs, spawner: Spawner = runProcess): Promise<Record<string, unknown>> {
+export async function invokeSkill(
+  root: string, skill: string, args: InvokeArgs, spawner: Spawner = runProcess, opts: InvokeOptions = {},
+): Promise<Record<string, unknown>> {
+  const tier = checkTier(args.tier);
+  const sandbox = typeof args.sandbox === "string" && args.sandbox.trim() ? args.sandbox.trim() : undefined;
+  if (tier === "sbx" && !sandbox) throw new SbxSandboxMissing();
+  // The sbx mount is derived from the registry entry root when the caller has one
+  // (a caller-spelled root may differ in case or through a junction/symlink).
+  const vmHostRoot = opts.vmHostRoot ?? root;
+  const vmRoot = tier === "sbx" ? toVmPath(vmHostRoot) : undefined;
   const payload: Record<string, unknown> = { ...(args.payload as Record<string, unknown> ?? {}) };
-  if (payload.directory === undefined) payload.directory = root; // §2: nearly every surface requires it; the registry already resolved it
+  // §2: nearly every surface requires it; the registry already resolved it. On
+  // sbx the skill runs inside the microVM, so the directory is the VM path.
+  if (payload.directory === undefined) payload.directory = vmRoot ?? root;
+  else if (vmRoot && typeof payload.directory === "string" && /^(?:[A-Za-z]:|\/)/.test(payload.directory)) payload.directory = toVmPath(payload.directory);
   if (args.model) payload.model = args.model;
   if (args.effort) payload.effort = args.effort;
 
   const injection = buildKnowledgeInjection(args.knowledge);
   const prompt = buildSkillPrompt(skill, payload, injection);
   const timeoutS = typeof args.timeout_s === "number" && args.timeout_s > 0 ? args.timeout_s : 600;
-  const cmd = buildWorkerCommand({
-    prompt,
+  const workerCmd = buildWorkerCommand({
+    prompt, tier, root: vmHostRoot,
     permissionMode: args.permission_mode === undefined ? undefined : String(args.permission_mode),
     model: typeof args.model === "string" ? args.model : undefined,
     effort: typeof args.effort === "string" ? args.effort : undefined,
     denyProfile: args.deny_profile === undefined ? undefined : String(args.deny_profile),
   });
+  const cmd = vmRoot ? buildSbxCommand({ sandbox: sandbox!, vmRoot, worker: workerCmd }) : workerCmd;
 
-  const gaps = await authPreflight(skill, payload, root, spawner);
+  const gaps = await authPreflight(skill, payload, root, spawner, { tier, sandbox });
   if (gaps.length) {
     return {
       status_block: { status: "blocked", intent: skill, artifacts: [], reason: `auth preflight: ${gaps.join("; ")}` },

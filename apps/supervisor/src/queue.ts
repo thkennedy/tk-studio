@@ -235,8 +235,18 @@ export interface QueueRun {
   /** The worker permission mode a caller asked for explicitly (null: the default);
    * `drain` and the tick drive the run under it. */
   permission_mode: string | null;
+  /** Where the worker runs (`host` | `sbx`), the sbx sandbox name, and the
+   * submission's model/effort overrides (Story 21.4) — null: not recorded. */
+  tier: string | null;
+  sandbox: string | null;
+  model: string | null;
+  effort: string | null;
   created: string; updated: string;
 }
+
+/** The worker options a run records while `queued` (Story 21.4). */
+export interface RunOptionsRecord { tier?: string | null; sandbox?: string | null; model?: string | null; effort?: string | null }
+const RUN_OPTION_KEYS = ["tier", "sandbox", "model", "effort"] as const;
 
 export interface QueueEvent {
   seq: number; run_id: string; at: string; kind: string;
@@ -286,7 +296,7 @@ CREATE TABLE IF NOT EXISTS runs (
   state TEXT NOT NULL CHECK (state IN ('queued','running','complete','partial','blocked','cancelled')),
   reason TEXT, owner_pid INTEGER, owner_host TEXT, owner_nonce TEXT, owner_start TEXT,
   studio_run_id TEXT, engine_run_id TEXT, verb_started TEXT, verb_snapshot TEXT, definition TEXT,
-  permission_mode TEXT,
+  permission_mode TEXT, tier TEXT, sandbox TEXT, model TEXT, effort TEXT,
   created TEXT NOT NULL, updated TEXT NOT NULL,
   FOREIGN KEY (job_id, checkout) REFERENCES jobs (job_id, checkout)
 );
@@ -305,6 +315,10 @@ CREATE TRIGGER IF NOT EXISTS runs_terminal_immutable BEFORE UPDATE ON runs
   WHEN OLD.state IN ('complete','partial','blocked','cancelled')
   BEGIN SELECT RAISE(ABORT, 'RunTerminal: a terminal queue run is immutable'); END;
 `;
+
+/** Nullable run columns added after the first schema: an existing queue file
+ * gains each one it lacks (guarded by PRAGMA table_info). */
+const ADDED_RUN_COLUMNS = ["permission_mode", "tier", "sandbox", "model", "effort"] as const;
 
 const now = () => new Date().toISOString();
 
@@ -359,7 +373,13 @@ export class Queue {
     this.db.exec("PRAGMA busy_timeout = 30000");
     this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec("PRAGMA foreign_keys = ON");
-    this.db.transaction(() => { this.db.exec(SCHEMA); }).immediate();
+    this.db.transaction(() => {
+      this.db.exec(SCHEMA);
+      const have = new Set((this.db.query("PRAGMA table_info(runs)").all() as { name: string }[]).map((c) => c.name));
+      for (const col of ADDED_RUN_COLUMNS) {
+        if (!have.has(col)) this.db.exec(`ALTER TABLE runs ADD COLUMN ${col} TEXT`);
+      }
+    }).immediate();
   }
 
   /** Open the queue at `TK_SUPERVISOR_DB` (placement checked before creation). */
@@ -420,11 +440,12 @@ export class Queue {
   /** Idempotent mint: validated input only (the caller ran `resolve`). While a
    * run of this job on this checkout is `queued` or `running`, nothing is
    * minted and that run is answered. An explicit `permissionMode` is stored on
-   * the minted run, or recorded on the adopted run while it is `queued`. */
+   * the minted run, or recorded on the adopted run while it is `queued`; so are
+   * the worker options (tier, sandbox, model, effort). */
   enqueue(input: {
     jobId: string; root: string; projectId?: string | null; target?: string | null;
     definition: Record<string, unknown>; owner?: Owner | null; permissionMode?: string | null;
-  }): { run: QueueRun; minted: boolean } {
+  } & RunOptionsRecord): { run: QueueRun; minted: boolean } {
     const checkout = canonicalPath(input.root);
     return this.db.transaction(() => {
       const live = this.db.query(
@@ -432,6 +453,7 @@ export class Queue {
       ).get(input.jobId, checkout) as QueueRun | null;
       if (live) {
         if (input.permissionMode) this.writePermissionMode(live, input.permissionMode);
+        this.writeRunOptions(this.must(live.run_id), input);
         return { run: this.must(live.run_id), minted: false };
       }
       const at = now();
@@ -443,13 +465,17 @@ export class Queue {
       const runId = mintRunId(input.jobId);
       const owner = input.owner ?? null;
       const mode = input.permissionMode || null;
+      const opts = Object.fromEntries(RUN_OPTION_KEYS.map((k) => [k, input[k] || null])) as Record<(typeof RUN_OPTION_KEYS)[number], string | null>;
       this.db.query(
         `INSERT INTO runs (run_id, job_id, checkout, root, project_id, target, state, reason, owner_pid, owner_host,
-           owner_nonce, owner_start, permission_mode, created, updated) VALUES (?, ?, ?, ?, ?, ?, 'queued', NULL, ?, ?, ?, ?, ?, ?, ?)`,
+           owner_nonce, owner_start, permission_mode, tier, sandbox, model, effort, created, updated)
+         VALUES (?, ?, ?, ?, ?, ?, 'queued', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(runId, input.jobId, checkout, input.root, input.projectId ?? null, input.target ?? null,
-        owner?.pid ?? null, owner?.host ?? null, owner?.nonce ?? null, owner?.start ?? null, mode, at, at);
+        owner?.pid ?? null, owner?.host ?? null, owner?.nonce ?? null, owner?.start ?? null, mode,
+        opts.tier, opts.sandbox, opts.model, opts.effort, at, at);
       this.event(runId, "enqueued", null, "queued", {
         ...(owner ? { owner: ownerDetail(owner) } : {}), ...(mode ? { permission_mode: mode } : {}),
+        ...Object.fromEntries(Object.entries(opts).filter(([, v]) => v !== null)),
       });
       return { run: this.must(runId), minted: true };
     }).immediate();
@@ -462,6 +488,29 @@ export class Queue {
       this.writePermissionMode(this.must(runId), mode);
       return this.must(runId);
     }).immediate();
+  }
+
+  /** Record worker options (tier, sandbox, model, effort) on a `queued` run —
+   * a run already running or ended keeps the options it was driven under.
+   * Absent/null fields are left as recorded; a change writes one `run-options` event. */
+  recordRunOptions(runId: string, opts: RunOptionsRecord): QueueRun {
+    return this.db.transaction(() => {
+      this.writeRunOptions(this.must(runId), opts);
+      return this.must(runId);
+    }).immediate();
+  }
+
+  /** Inside a transaction: the given options that differ are written, with one `run-options` event. */
+  private writeRunOptions(run: QueueRun, opts: RunOptionsRecord): void {
+    if (run.state !== "queued") return;
+    const changed = RUN_OPTION_KEYS.filter((k) => opts[k] && opts[k] !== run[k]);
+    if (!changed.length) return;
+    this.db.query(`UPDATE runs SET ${changed.map((k) => `${k} = ?`).join(", ")}, updated = ? WHERE run_id = ?`)
+      .run(...changed.map((k) => opts[k] as string), now(), run.run_id);
+    this.event(run.run_id, "run-options", run.state, run.state, {
+      ...Object.fromEntries(changed.map((k) => [k, opts[k]])),
+      previous: Object.fromEntries(changed.map((k) => [k, run[k]])),
+    });
   }
 
   /** Inside a transaction: a `queued` run whose recorded mode differs takes `mode`, with its event. */

@@ -3,8 +3,9 @@
  * Supervisor CLI — jobs queued durably, one engine per checkout, each run
  * woken, invoked headless, finished.
  *
- *   bun src/cli.ts run <job-id> --directory <root> [--permission-mode <mode>]
- *   bun src/cli.ts submit <job-id> --directory <root>
+ *   bun src/cli.ts run <job-id> --directory <root> [--permission-mode <mode>] [--tier host|sbx]
+ *                  [--sandbox <name>] [--model <model>] [--effort <effort>]
+ *   bun src/cli.ts submit <job-id> --directory <root> [same options as run]
  *   bun src/cli.ts recover
  *   bun src/cli.ts drain
  *
@@ -19,7 +20,22 @@
  * `drain`: recover, then drive every `queued` run no live process owns,
  * oldest first (re-validated through `resolve`: a refusal ends it `blocked`
  * naming the problems; a lock wait or no Max login leaves it queued), under
- * the permission mode recorded on the run (else the default).
+ * the permission mode and worker options recorded on the run (else the default).
+ *
+ * Tiers (Story 21.4): the worker runs on `host` (`claude -p` directly) or
+ * `sbx` (inside a Docker Sandboxes microVM through `sbx exec`). Every option
+ * resolves explicit (the flag) ?? stored (the queue run) ?? the supervisor's
+ * per-job config (TK_SUPERVISOR_CONFIG, keyed `<project-id>/<job-id>`) ??
+ * default (tier `host`, mode `auto`) — a config entry's permission_mode only on
+ * the entry's own tier (no `tier` → host); model/effort have no config layer and,
+ * when absent, the resolved job's `woke.routing` is forwarded verbatim (§5 —
+ * the supervisor never chooses a model). Resolved before any process and
+ * before anything is queued: a bypass on the host tier is HostBypassRefused
+ * (`state: blocked`, exit 2), an unknown tier TierRefused, an sbx tier with no
+ * sandbox SbxSandboxMissing, an sbx root with no microVM path
+ * VmPathUnderivable, a bad config SupervisorConfigInvalid (all exit 2,
+ * nothing queued). The resolved tier and sandbox, and explicit model/effort,
+ * are recorded on the queue run; stored values are re-checked after the claim.
  * JSON `{ok, recovered, runs[]}`; a run entry carries `state` (the queue run's
  * actual state) when its summary has no run id or a different state. Exit 0
  * every driven run completed, 1 otherwise, 2 the queue is unusable.
@@ -41,7 +57,9 @@
  * non-terminal one is ended through a contract verb (skill: `finish --state
  * blocked`; core: `cancel`) and reported with its run id (exit 1). Exit 2 the
  * invocation or setup is refused before the studio run exists (bad flag or a
- * flag missing its value, host bypass or unknown --permission-mode, missing
+ * flag missing its value or given an empty one, host bypass or unknown
+ * --permission-mode, unknown --tier, an sbx tier with no sandbox or no
+ * microVM path, SupervisorConfigInvalid, missing
  * TK_STUDIO_ROOT, contract pin, QueueDbMissing / QueueDbPlacementRefused,
  * unregistered project or a --directory that is not the registered root,
  * unreadable config, a job `resolve` refuses, a wake/submit refused outright,
@@ -51,13 +69,14 @@
 import { existsSync, realpathSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import {
-  buildWorkerCommand, finishStateFor, invokeSkill, maxLoginPreflight, MISSING_STATUS_BLOCK,
-  readProjectConfig, registryShow, requireCompatible, resolveStudioRoot, runJobVerb,
+  buildWorkerCommand, checkTier, finishStateFor, invokeSkill, maxLoginPreflight, MISSING_STATUS_BLOCK,
+  readProjectConfig, registryShow, requireCompatible, resolveStudioRoot, runJobVerb, SbxSandboxMissing, toVmPath, type Tier,
 } from "./server";
 import {
-  isTerminal, Queue, selfOwner, type Holder, type Owner, type QueueRun, type RecoverReport, type RunState, type StudioEnder,
+  canonicalPath, isTerminal, Queue, selfOwner, type Holder, type Owner, type QueueRun, type RecoverReport, type RunState, type StudioEnder,
   type StudioFinder, type StudioOps,
 } from "./queue";
+import { jobOptions, loadSupervisorConfig, type JobOptions } from "./config";
 
 export interface RunSummary {
   ok: boolean;
@@ -152,11 +171,84 @@ export interface RunOptions {
   skipRecover?: boolean;
   /** `drain`: drive exactly this queued run — adopt it, never mint. */
   runId?: string;
+  /** Explicit worker options (the submission's flags); each wins over the stored run and the config. */
+  tier?: string;
+  sandbox?: string;
+  model?: string;
+  effort?: string;
 }
+
+/** The worker options a run is driven with (Story 21.4). */
+export interface WorkerOptions { tier: Tier; permissionMode?: string; sandbox?: string; model?: string; effort?: string }
+
+/** One layer of worker options: the submission, the queue run, or the config. */
+interface OptionLayer { tier?: string | null; permissionMode?: string | null; sandbox?: string | null; model?: string | null; effort?: string | null }
+
+/** The stored layer of a queue run. */
+const storedLayer = (run: QueueRun | null | undefined): OptionLayer =>
+  run ? { tier: run.tier, permissionMode: run.permission_mode, sandbox: run.sandbox, model: run.model, effort: run.effort } : {};
+
+/** Resolve explicit ?? stored ?? config ?? default and check the result before
+ * any process starts: an unknown tier → TierRefused; bypass on the host tier
+ * → HostBypassRefused; an unknown mode → named; sbx without a sandbox →
+ * SbxSandboxMissing; sbx on a root with no microVM path (e.g. a UNC share,
+ * when `root` is given) → VmPathUnderivable. Only a config entry's
+ * `permission_mode` is tier-gated: it applies only when the run's effective
+ * tier is the entry's own tier (no `tier` → host), so a tier frozen at enqueue
+ * never mixes with a mode configured for another tier. The config `sandbox`
+ * follows the plain explicit ?? stored ?? config precedence and is read only
+ * on sbx. Model/effort come only from the
+ * submission (stored or explicit): the config never chooses a model (AD-14). */
+export function resolveWorkerOptions(explicit: OptionLayer, stored: OptionLayer = {}, config: JobOptions = {}, root?: string): WorkerOptions {
+  const pick = <T>(...vals: (T | null | undefined)[]): T | undefined => vals.find((v) => v !== undefined && v !== null && v !== "") ?? undefined;
+  const tier = checkTier(pick(explicit.tier, stored.tier, config.tier));
+  const configMode = tier === (config.tier ?? "host") ? config.permission_mode : undefined;
+  const permissionMode = pick(explicit.permissionMode, stored.permissionMode, configMode);
+  const sandbox = pick(explicit.sandbox, stored.sandbox, config.sandbox);
+  buildWorkerCommand({ prompt: "", permissionMode, tier }); // HostBypassRefused / unknown mode, no process
+  if (tier === "sbx" && !sandbox) throw new SbxSandboxMissing();
+  if (tier === "sbx" && root !== undefined) toVmPath(root); // VmPathUnderivable, no process
+  const model = pick(explicit.model, stored.model), effort = pick(explicit.effort, stored.effort);
+  return {
+    tier, ...(permissionMode ? { permissionMode } : {}), ...(sandbox ? { sandbox } : {}),
+    ...(model ? { model } : {}), ...(effort ? { effort } : {}),
+  };
+}
+
+/** The project id the studio keys this checkout by: `.tk-studio/config.yaml`
+ * `project_id` ?? basename(root) — a file read, no process. */
+function projectIdOf(root: string): string {
+  const cfg = readProjectConfig(root);
+  if (cfg.unreadable) throw refusal(`project config unreadable: ${cfg.unreadable}`);
+  const pid = cfg.config.project_id;
+  // The studio's identity is str(project_id): a numeric id is still the id.
+  return (typeof pid === "string" || typeof pid === "number") && String(pid) ? String(pid) : basename(root);
+}
+
+/** The run `enqueue` would adopt: this job's `queued`/`running` run on this checkout. */
+function liveRun(queue: Queue, jobId: string, root: string): QueueRun | undefined {
+  const checkout = canonicalPath(root);
+  return queue.runs().find((r) => r.job_id === jobId && r.checkout === checkout && (r.state === "queued" || r.state === "running"));
+}
+
+/** Resolve a job's worker options before any process: the config is loaded
+ * (SupervisorConfigInvalid), the project id read from its config file. */
+function resolveBeforeStart(jobId: string, root: string, explicit: OptionLayer, stored: QueueRun | null | undefined): { options: WorkerOptions; config: JobOptions } {
+  const config = jobOptions(loadSupervisorConfig(), projectIdOf(root), jobId);
+  // A refusal: the options can never run as given (`drain` ends a stored run `blocked` naming it).
+  try { return { options: resolveWorkerOptions(explicit, storedLayer(stored), config, root), config }; }
+  catch (e) { throw refusal(message(e)); }
+}
+
+const explicitLayer = (permissionMode: string | undefined, opts: RunOptions): OptionLayer =>
+  ({ permissionMode, tier: opts.tier, sandbox: opts.sandbox, model: opts.model, effort: opts.effort });
 
 /** A validated job: `resolve` served its merged definition with no problems. */
 export interface Validated {
   jobId: string; root: string; projectId: string; defn: Record<string, any>;
+  /** The registry entry's own root (`--directory` matched it via samePath): the
+   * sbx microVM path is derived from it, never from the caller's spelling. */
+  registryRoot?: string;
   target: Target;
   /** The skill invocation's timeout: the job's guard, capped at `guardCapS` (the tick's --timeout-cap-s). */
   guardS: number;
@@ -164,6 +256,11 @@ export interface Validated {
    * `wake` under it, so the wake/submit verb's timeout is this + 120 s. */
   jobGuardS: number;
   permissionMode?: string;
+  /** Worker options (Story 21.4): tier (default host), sbx sandbox, submission model/effort overrides. */
+  tier?: Tier;
+  sandbox?: string;
+  model?: string;
+  effort?: string;
 }
 
 /** The job's own wall-clock guard (default 600 s) and the invocation guard capped at `guardCapS`. */
@@ -307,15 +404,24 @@ export async function drainQueue(opts: RunOptions = {}, verbRunner: VerbRunner =
 }
 
 /** `submit`: validate, then enqueue (idempotent). Nothing is driven. */
-export async function submitJob(jobId: string, directory: string, opts: RunOptions = {}): Promise<Record<string, unknown>> {
+export async function submitJob(jobId: string, directory: string, opts: RunOptions & { permissionMode?: string } = {}): Promise<Record<string, unknown>> {
   try { resolveStudioRoot(); requireCompatible(); }
   catch (e) { throw new StartError(message(e)); }
   const { queue, owned } = openQueue(opts);
   try {
-    let v: Validated;
-    try { v = await validate(jobId, directory, undefined, opts.guardCapS); }
+    let v: Validated, options: WorkerOptions;
+    try {
+      const root = resolve(directory);
+      if (!existsSync(root)) throw refusal(`directory does not exist: ${directory}`);
+      // Worker options resolved before any process (a host bypass is refused, nothing queued).
+      ({ options } = resolveBeforeStart(jobId, root, explicitLayer(opts.permissionMode, opts), liveRun(queue, jobId, root)));
+      v = await validate(jobId, directory, undefined, opts.guardCapS);
+    }
     catch (e) { throw e instanceof StartError ? e : new StartError(message(e)); }
-    const { run, minted } = queue.enqueue({ jobId, root: v.root, projectId: v.projectId, target: v.target, definition: v.defn });
+    const { run, minted } = queue.enqueue({
+      jobId, root: v.root, projectId: v.projectId, target: v.target, definition: v.defn,
+      permissionMode: opts.permissionMode, tier: options.tier, sandbox: options.sandbox, model: options.model, effort: options.effort,
+    });
     return { ok: true, job_id: jobId, project_id: v.projectId, run_id: run.run_id, state: run.state, minted };
   } finally { if (owned) queue.close(); }
 }
@@ -335,25 +441,31 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
     if (opts.runId && !queue.drainable(owner).some((r) => r.run_id === opts.runId)) {
       return skipped(`run ${opts.runId} is no longer an ownerless queued run`);
     }
-    let v: Validated;
+    let v: Validated, options: WorkerOptions, config: JobOptions;
+    const explicit = explicitLayer(permissionMode, opts);
     try {
       const root = resolve(directory);
       if (!existsSync(root)) throw refusal(`directory does not exist: ${directory}`);
-      // A host bypass is refused before anything starts (AD-2 ruling).
-      buildWorkerCommand({ prompt: "", permissionMode });
-      const login = await maxLoginPreflight();
+      // Worker options resolved before anything starts: a host bypass is refused (AD-2
+      // ruling), an unknown tier or an sbx tier without a sandbox too — nothing queued.
+      const stored = opts.runId ? queue.get(opts.runId) : liveRun(queue, jobId, root);
+      ({ options, config } = resolveBeforeStart(jobId, root, explicit, stored));
+      const login = await maxLoginPreflight(undefined, { tier: options.tier, sandbox: options.sandbox });
       if (login) return { ok: false, job_id: jobId, run_id: null, state: "blocked", reason: login };
       v = await validate(jobId, directory, permissionMode, opts.guardCapS);
     } catch (e) { throw e instanceof StartError ? e : new StartError(message(e)); }
 
     // An explicit --permission-mode is recorded on the queue run it mints or adopts
-    // (a queued run only), so a later `drain` or tick drives it under that mode.
+    // (a queued run only), so a later `drain` or tick drives it under that mode; the
+    // resolved tier and sandbox, and the submission's model/effort, likewise.
+    const record = { tier: options.tier, sandbox: options.sandbox, model: options.model, effort: options.effort };
     let run: QueueRun;
     if (opts.runId) {
       run = queue.get(opts.runId)!;
       if (permissionMode !== undefined && run.state === "queued") run = queue.recordPermissionMode(run.run_id, permissionMode);
+      if (run.state === "queued") run = queue.recordRunOptions(run.run_id, record);
     } else {
-      run = queue.enqueue({ jobId, root: v.root, projectId: v.projectId, target: v.target, definition: v.defn, owner, permissionMode }).run;
+      run = queue.enqueue({ jobId, root: v.root, projectId: v.projectId, target: v.target, definition: v.defn, owner, permissionMode, ...record }).run;
     }
     const claim = await queue.claim(run.run_id, owner);
     if (!claim.claimed && opts.runId && claim.why !== "lock") return skipped(claim.reason);
@@ -366,10 +478,10 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
     }
     let summary: RunSummary;
     try {
-      // The effective mode: the caller's explicit one, else the one recorded on the run, else the default.
-      const mode = permissionMode ?? claim.run.permission_mode ?? undefined;
-      if (mode !== permissionMode) buildWorkerCommand({ prompt: "", permissionMode: mode }); // a stored mode is re-checked
-      summary = await drive(queue, run.run_id, { ...v, permissionMode: mode });
+      // The effective options: explicit, else recorded on the run, else the config, else the
+      // default — re-checked after the claim (an invalid stored value ends the run `blocked`).
+      const eff = resolveWorkerOptions(explicit, storedLayer(claim.run), config, v.root);
+      summary = await drive(queue, run.run_id, { ...v, ...eff });
     }
     catch (e) {
       const err = e instanceof StartError ? e : new StartError(message(e));
@@ -438,6 +550,11 @@ export interface Started {
   /** The skill invocation's timeout (the capped guard). */
   guardS: number;
   defn: Record<string, any>; woke: Record<string, any>; permissionMode?: string;
+  tier?: Tier; sandbox?: string;
+  /** The registry entry root: the sbx microVM path is derived from it. */
+  registryRoot?: string;
+  /** The submission's overrides: they win over `woke.routing` (§5). */
+  model?: string; effort?: string;
 }
 
 /** Registry `show` + `resolve`: the plugin's one validator (AD-2). A refusal
@@ -445,11 +562,7 @@ export interface Started {
 async function validate(jobId: string, directory: string, permissionMode?: string, guardCapS?: number): Promise<Validated> {
   const root = resolve(directory);
   if (!existsSync(root)) throw refusal(`directory does not exist: ${directory}`);
-  const cfg = readProjectConfig(root);
-  if (cfg.unreadable) throw refusal(`project config unreadable: ${cfg.unreadable}`);
-  const pid = cfg.config.project_id;
-  // The studio's identity is str(project_id): a numeric id is still the id.
-  const projectId = (typeof pid === "string" || typeof pid === "number") && String(pid) ? String(pid) : basename(root);
+  const projectId = projectIdOf(root);
   let shown: Record<string, any>;
   try { shown = await registryShow(projectId); }
   catch (e) {
@@ -474,7 +587,7 @@ async function validate(jobId: string, directory: string, permissionMode?: strin
     throw new StartError(`resolve: served no merged definition for '${jobId}'`);
   }
   const defn = resolved.resolved as Record<string, any>;
-  return { jobId, root, projectId, defn, target: isCore(defn) ? "core" : "skill", ...guardsFor(defn, guardCapS), permissionMode };
+  return { jobId, root, projectId, registryRoot: entryRoot, defn, target: isCore(defn) ? "core" : "skill", ...guardsFor(defn, guardCapS), permissionMode };
 }
 
 /** Under the claimed lock: snapshot, `onVerb` (the queue's `verb_started`
@@ -484,7 +597,8 @@ async function validate(jobId: string, directory: string, permissionMode?: strin
 export async function startRun(
   v: Validated, onVerb: (verb: "wake" | "submit", before: string[]) => void, verbRunner: VerbRunner = runJobVerb,
 ): Promise<Started | { summary: RunSummary }> {
-  const { jobId, root, projectId, defn, target, guardS, jobGuardS, permissionMode } = v;
+  const { jobId, root, projectId, defn, target, guardS, jobGuardS, permissionMode, tier, sandbox, model, effort, registryRoot } = v;
+  const worker = { permissionMode, tier, sandbox, model, effort, ...(registryRoot !== undefined ? { registryRoot } : {}) };
   const oneShot = defn?.trigger === "one-shot";
   const verb = oneShot ? "submit" : "wake";
 
@@ -518,7 +632,7 @@ export async function startRun(
   if (typeof woke.run_id !== "string" || !woke.run_id) {
     throw new StartError(`${verb}: answered ${woke.woken === true ? "woken" : "accepted"} without a run_id — driver contract §4 violation; nothing invoked`);
   }
-  return { jobId, root, projectId, runId: woke.run_id, guardS, defn, woke, permissionMode };
+  return { jobId, root, projectId, runId: woke.run_id, guardS, defn, woke, ...worker };
 }
 
 /** After a wake/submit failure (timeout or otherwise): adopt the newest run of this job that is NOT
@@ -580,7 +694,7 @@ type SkillInvoker = typeof invokeSkill;
 /** Once a run id is known nothing throws: failures come back as ok:false with the run id.
  * The skill invocation runs under `s.guardS` (the capped guard). */
 export async function finishRun(s: Started, verbRunner: VerbRunner = runJobVerb, invoke: SkillInvoker = invokeSkill): Promise<RunSummary> {
-  const { jobId, root, projectId, runId, guardS, defn, woke, permissionMode } = s;
+  const { jobId, root, projectId, runId, guardS, defn, woke, permissionMode, tier, sandbox, registryRoot } = s;
   const base = { job_id: jobId, project_id: projectId, run_id: runId };
   const known = typeof woke.state === "string" ? woke.state : "unknown";
 
@@ -604,10 +718,13 @@ export async function finishRun(s: Started, verbRunner: VerbRunner = runJobVerb,
   try {
     const routing = (woke.routing ?? {}) as Record<string, unknown>;
     const knowledge = directive.knowledge && typeof directive.knowledge === "object" ? directive.knowledge : undefined;
+    // §5: the submission's override, else the resolved job's routing — verbatim; neither → none (AD-14).
+    const model = s.model ?? routing.model, effort = s.effort ?? routing.effort;
     const out = await invoke(root, directive.skill, {
       payload: { ...(directive.payload ?? {}), run_id: runId }, timeout_s: guardS, permission_mode: permissionMode,
-      model: routing.model, effort: routing.effort, ...(knowledge ? { knowledge } : {}),
-    });
+      ...(model !== undefined ? { model } : {}), ...(effort !== undefined ? { effort } : {}),
+      ...(tier ? { tier } : {}), ...(sandbox ? { sandbox } : {}), ...(knowledge ? { knowledge } : {}),
+    }, undefined, registryRoot !== undefined ? { vmHostRoot: registryRoot } : {});
     cost = typeof out.total_cost_usd === "number" ? out.total_cost_usd : undefined;
     block = out.status_block as Record<string, unknown> | undefined;
     if (block) {
@@ -649,8 +766,9 @@ export async function finishRun(s: Started, verbRunner: VerbRunner = runJobVerb,
 }
 
 const USAGE = [
-  "usage: bun src/cli.ts run <job-id> --directory <root> [--permission-mode <mode>]",
-  "       bun src/cli.ts submit <job-id> --directory <root>",
+  "usage: bun src/cli.ts run <job-id> --directory <root> [--permission-mode <mode>] [--tier host|sbx] [--sandbox <name>]",
+  "                          [--model <model>] [--effort <effort>]",
+  "       bun src/cli.ts submit <job-id> --directory <root> [same options as run]",
   "       bun src/cli.ts recover",
   "       bun src/cli.ts drain",
 ].join("\n");
@@ -674,22 +792,24 @@ export async function main(argv: string[]): Promise<number> {
     }
   }
   const [jobId, ...rest] = args;
-  const allowed = cmd === "submit" ? ["--directory"] : ["--directory", "--permission-mode"];
-  let directory: string | undefined, permissionMode: string | undefined;
+  const allowed = ["--directory", "--permission-mode", "--tier", "--sandbox", "--model", "--effort"];
+  const values: Record<string, string> = {};
   for (let i = 0; i < rest.length; i++) {
     const flag = rest[i];
     if (!allowed.includes(flag)) { console.error(`unknown argument '${flag}'\n${USAGE}`); return 2; }
     const value = rest[++i];
-    if (value === undefined || value.startsWith("--")) { console.error(`${flag} needs a value\n${USAGE}`); return 2; }
-    if (flag === "--directory") directory = value; else permissionMode = value;
+    if (value === undefined || value.trim() === "" || value.startsWith("--")) { console.error(`${flag} needs a value\n${USAGE}`); return 2; }
+    values[flag] = value;
   }
+  const directory = values["--directory"], permissionMode = values["--permission-mode"];
+  const worker = { tier: values["--tier"], sandbox: values["--sandbox"], model: values["--model"], effort: values["--effort"] };
   if ((cmd !== "run" && cmd !== "submit") || !jobId || !directory) { console.error(USAGE); return 2; }
   try {
     if (cmd === "submit") {
-      console.log(JSON.stringify(await submitJob(jobId, directory), null, 2));
+      console.log(JSON.stringify(await submitJob(jobId, directory, { ...worker, permissionMode }), null, 2));
       return 0;
     }
-    const summary = await runJob(jobId, directory, permissionMode);
+    const summary = await runJob(jobId, directory, permissionMode, worker);
     console.log(JSON.stringify(summary, null, 2));
     return summary.ok ? 0 : 1;
   } catch (e) {

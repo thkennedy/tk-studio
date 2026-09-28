@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -194,6 +195,60 @@ q.close();
       } finally { restarted.close(); }
       expect(q.get(minted.run_id)).toMatchObject({ state: "queued", permission_mode: "acceptEdits" });
     } finally { q.close(); }
+  });
+
+  test("tier/sandbox/model/effort round-trip: stored on mint, recorded on a queued run with one run-options event, kept once running", async () => {
+    const fx = fixture(new Set([A.pid, B.pid]));
+    const def = { id: "j", trigger: "one-shot", target: { skill: "tk-studio-activate" } };
+    const plain = fx.queue.enqueue({ jobId: "j", root: fx.checkout, definition: def }).run;
+    expect(plain).toMatchObject({ tier: null, sandbox: null, model: null, effort: null });
+    // Adopting with options records the changed ones in one event; the same options again write nothing.
+    const opts = { tier: "sbx", sandbox: "claude-p", model: "m-1", effort: "high" };
+    expect(fx.queue.enqueue({ jobId: "j", root: fx.checkout, definition: def, ...opts }).run).toMatchObject({ run_id: plain.run_id, ...opts });
+    fx.queue.recordRunOptions(plain.run_id, opts);
+    fx.queue.recordRunOptions(plain.run_id, { model: "m-2" });
+    expect(fx.queue.events(plain.run_id).map((e) => [e.kind, e.detail])).toEqual([
+      ["enqueued", null],
+      ["run-options", { ...opts, previous: { tier: null, sandbox: null, model: null, effort: null } }],
+      ["run-options", { model: "m-2", previous: { model: "m-1" } }],
+    ]);
+    fx.queue.close();
+    const q = new Queue(fx.db, fakeProbes(new Set([A.pid])).probes);
+    try {
+      expect(q.get(plain.run_id)).toMatchObject({ tier: "sbx", sandbox: "claude-p", model: "m-2", effort: "high" });
+      q.end(plain.run_id, "cancelled");
+      const minted = q.enqueue({ jobId: "j", root: fx.checkout, definition: def, owner: A, tier: "host" }).run;
+      expect(minted).toMatchObject({ tier: "host", sandbox: null });
+      expect(q.events(minted.run_id)[0].detail).toMatchObject({ tier: "host" });
+      // A running run keeps the options it is driven under.
+      await q.claim(minted.run_id, A);
+      expect(q.recordRunOptions(minted.run_id, { tier: "sbx", sandbox: "s" })).toMatchObject({ tier: "host", sandbox: null });
+    } finally { q.close(); }
+  });
+
+  test("an old-schema queue file gains the new nullable run columns on open (guarded ALTER), rows intact", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tk-sup-queue-old-"));
+    const path = join(dir, "q.db");
+    const old = new Database(path, { create: true });
+    old.exec(`CREATE TABLE jobs (job_id TEXT NOT NULL, checkout TEXT NOT NULL, root TEXT NOT NULL, project_id TEXT,
+        definition TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL, PRIMARY KEY (job_id, checkout));
+      CREATE TABLE runs (run_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, checkout TEXT NOT NULL, root TEXT NOT NULL,
+        project_id TEXT, target TEXT,
+        state TEXT NOT NULL CHECK (state IN ('queued','running','complete','partial','blocked','cancelled')),
+        reason TEXT, owner_pid INTEGER, owner_host TEXT, owner_nonce TEXT, owner_start TEXT,
+        studio_run_id TEXT, engine_run_id TEXT, verb_started TEXT, verb_snapshot TEXT, definition TEXT,
+        created TEXT NOT NULL, updated TEXT NOT NULL, FOREIGN KEY (job_id, checkout) REFERENCES jobs (job_id, checkout));
+      INSERT INTO jobs VALUES ('j', '/x', '/x', NULL, '{}', 't', 't');
+      INSERT INTO runs (run_id, job_id, checkout, root, state, created, updated) VALUES ('q-old', 'j', '/x', '/x', 'queued', 't', 't');`);
+    old.close();
+    for (let i = 0; i < 2; i++) { // idempotent: a second open adds nothing
+      const q = new Queue(path, fakeProbes(new Set()).probes);
+      try {
+        const cols = (q.db.query("PRAGMA table_info(runs)").all() as { name: string }[]).map((c) => c.name);
+        for (const c of ["permission_mode", "tier", "sandbox", "model", "effort"]) expect(cols.filter((n) => n === c)).toHaveLength(1);
+        expect(q.get("q-old")).toMatchObject({ state: "queued", permission_mode: null, tier: null, sandbox: null, model: null, effort: null });
+      } finally { q.close(); }
+    }
   });
 });
 

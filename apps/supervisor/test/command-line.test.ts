@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
   finishRun, guardsFor, launchedEngine, main, recoverAfterTimeout, runJob, startRun, type TimeoutContext, type Validated,
@@ -65,12 +65,35 @@ describe("argument parsing", () => {
     [["run", "studio-health", "--directory", ".", "--permission-mode"]],
     [["run", "studio-health", "--directory", "--permission-mode", "auto"]],
     [["run", "studio-health", "--permission-mode", "--directory", "."]],
+    [["run", "studio-health", "--directory", ".", "--tier"]],
+    [["submit", "studio-health", "--directory", ".", "--sandbox", "--tier", "sbx"]],
+    // An empty value is refused like a missing one (never silently treated as absent).
+    [["run", "studio-health", "--directory", ".", "--permission-mode", ""]],
+    [["submit", "studio-health", "--directory", ".", "--tier", ""]],
   ])("a flag missing its value → usage error, exit 2: %j", async (argv) => {
     const err = console.error;
     const seen: string[] = [];
     console.error = (...a: unknown[]) => { seen.push(a.join(" ")); };
     try { expect(await main(argv)).toBe(2); } finally { console.error = err; }
     expect(seen.join("\n")).toContain("needs a value");
+  });
+
+  test("a whitespace-only value is refused like an empty one: `--tier sbx --sandbox ' '` → exit 2, nothing queued", async () => {
+    const db = join(mkdtempSync(join(tmpdir(), "tk-sup-blank-")), "queue.db");
+    const [err, prev] = [console.error, process.env.TK_SUPERVISOR_DB];
+    const seen: string[] = [];
+    console.error = (...a: unknown[]) => { seen.push(a.join(" ")); };
+    process.env.TK_SUPERVISOR_DB = db;
+    try {
+      for (const cmd of ["submit", "run"]) {
+        expect(await main([cmd, "studio-health", "--directory", ".", "--tier", "sbx", "--sandbox", " "])).toBe(2);
+      }
+    } finally {
+      console.error = err;
+      if (prev === undefined) delete process.env.TK_SUPERVISOR_DB; else process.env.TK_SUPERVISOR_DB = prev;
+    }
+    expect(seen.join("\n")).toContain("--sandbox needs a value");
+    expect(existsSync(db)).toBe(false); // the queue was never opened
   });
 });
 
@@ -214,6 +237,65 @@ describe("guard timeouts: --timeout-cap-s caps the skill invocation only", () =>
   });
 });
 
+describe("finishRun: model/effort per §5, tier forwarded, cost to finish (AC3/AC4)", () => {
+  const woke = (routing?: Record<string, unknown>) => ({
+    accepted: true, run_id: "s-20260928T101010Z", state: "queued", ...(routing ? { routing } : {}),
+    directive: { kind: "invoke-skill", skill: "tk-studio-activate", payload: {} },
+  });
+  const started = (w: Record<string, any>, extra: Record<string, unknown> = {}) => ({
+    jobId: "s", root: "proj", projectId: "p", runId: "s-20260928T101010Z", guardS: 600,
+    defn: { id: "s", trigger: "one-shot", target: { skill: "tk-studio-activate" } }, woke: w, ...extra,
+  });
+  /** Runs finishRun with a fake invoker answering `out`; returns the invoke args and the finish argv. */
+  async function drive(s: ReturnType<typeof started>, out: Record<string, unknown>) {
+    const invoked: Record<string, unknown>[] = [];
+    const verbs: string[][] = [];
+    const summary = await finishRun(s as any, async (_root, args) => { verbs.push(args); return { ok: true }; },
+      async (_root, _skill, args) => { invoked.push(args as Record<string, unknown>); return out; });
+    return { summary, args: invoked[0], finish: verbs.find((v) => v[0] === "finish")! };
+  }
+  const BLOCK = { status: "complete", intent: "tk-studio-activate", artifacts: [] };
+
+  test("woke.routing forwarded verbatim when there is no override", async () => {
+    const { args } = await drive(started(woke({ model: "claude-x-routing", effort: "high" })), { status_block: BLOCK });
+    expect(args).toMatchObject({ model: "claude-x-routing", effort: "high" });
+  });
+
+  test("a submission override wins over routing", async () => {
+    const { args } = await drive(started(woke({ model: "claude-x-routing", effort: "high" }), { model: "claude-y", effort: "low" }), { status_block: BLOCK });
+    expect(args).toMatchObject({ model: "claude-y", effort: "low" });
+  });
+
+  test("neither → no model, no effort (the supervisor never chooses one)", async () => {
+    const { args } = await drive(started(woke()), { status_block: BLOCK });
+    expect("model" in args).toBe(false);
+    expect("effort" in args).toBe(false);
+  });
+
+  test("the registry entry root rides to the invocation as the sbx VM root source (vmHostRoot), not the caller's root", async () => {
+    const opts: unknown[] = [];
+    await finishRun(started(woke(), { tier: "sbx", sandbox: "s", registryRoot: "reg-root" }) as any,
+      async () => ({ ok: true }),
+      async (root, _skill, _args, _spawner, o) => { opts.push({ root, o }); return { status_block: BLOCK }; });
+    expect(opts).toEqual([{ root: "proj", o: { vmHostRoot: "reg-root" } }]);
+  });
+
+  test("tier, sandbox and permission mode reach the invocation", async () => {
+    const { args } = await drive(started(woke(), { tier: "sbx", sandbox: "claude-p", permissionMode: "bypassPermissions" }), { status_block: BLOCK });
+    expect(args).toMatchObject({ tier: "sbx", sandbox: "claude-p", permission_mode: "bypassPermissions" });
+  });
+
+  test("finish gets the studio run id and --total-cost-usd; a missing block → blocked naming MISSING_STATUS_BLOCK", async () => {
+    const ok = await drive(started(woke()), { status_block: BLOCK, total_cost_usd: 0.42 });
+    expect(ok.finish.slice(0, 7)).toEqual(["finish", "--directory", "proj", "--run-id", "s-20260928T101010Z", "--state", "complete"]);
+    expect(ok.finish.slice(ok.finish.indexOf("--total-cost-usd"), ok.finish.indexOf("--total-cost-usd") + 2)).toEqual(["--total-cost-usd", "0.42"]);
+    expect(ok.summary).toMatchObject({ ok: true, total_cost_usd: 0.42 });
+    const missing = await drive(started(woke()), { conformance_failure: MISSING_STATUS_BLOCK, total_cost_usd: 0.1 });
+    expect(missing.finish.slice(3, 9)).toEqual(["--run-id", "s-20260928T101010Z", "--state", "blocked", "--reason", MISSING_STATUS_BLOCK]);
+    expect(missing.finish).toContain("--total-cost-usd");
+  });
+});
+
 // ---------------------------------------------------------------- end to end
 // Real studio verbs (uv + TK_STUDIO_ROOT) against a throwaway store and
 // project; only the worker is faked (CLAUDE_BIN printing a json result).
@@ -221,7 +303,7 @@ describe("guard timeouts: --timeout-cap-s caps the skill invocation only", () =>
 const canRunE2E = !!process.env.TK_STUDIO_ROOT && process.platform !== "win32"
   && spawnSync("uv", ["--version"]).status === 0;
 
-function e2eFixture(workerResult: string, loggedIn = true, opts: { selfFinish?: boolean } = {}) {
+function e2eFixture(workerResult: string, loggedIn = true, opts: { selfFinish?: boolean; env?: Record<string, string> } = {}) {
   const store = mkdtempSync(join(tmpdir(), "tk-sup-e2e-store-"));
   const project = mkdtempSync(join(tmpdir(), "tk-sup-e2e-proj-"));
   mkdirSync(join(project, ".tk-studio", "jobs"), { recursive: true });
@@ -248,16 +330,34 @@ if (${opts.selfFinish === true}) {
 console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: ${JSON.stringify(workerResult)}, total_cost_usd: 0.0123 }));
 `);
   chmodSync(fake, 0o755);
+  // A fake `sbx exec <sb> env [-u K]… [-C dir] claude …`: records its argv, then runs the fake claude
+  // with the env and cwd the wrapper names (argv only, no shell).
+  const sbxRecord = join(store, "sbx-calls.jsonl");
+  const fakeSbx = join(store, "fake-sbx.js");
+  writeFileSync(fakeSbx, `#!/usr/bin/env bun
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(sbxRecord)}, JSON.stringify({ args, apiKey: process.env.ANTHROPIC_API_KEY ?? null }) + "\\n");
+if (args[0] !== "exec" || args[2] !== "env") process.exit(97);
+const env = { ...process.env };
+let i = 3, cwd;
+while (args[i] === "-u" || args[i] === "-C") { if (args[i] === "-u") delete env[args[i + 1]]; else cwd = args[i + 1]; i += 2; }
+if (args[i] !== "claude") process.exit(98);
+const r = require("node:child_process").spawnSync(${JSON.stringify(fake)}, args.slice(i + 1), { env, cwd, stdio: "inherit" });
+process.exit(r.status ?? 1);
+`);
+  chmodSync(fakeSbx, 0o755);
+  const extraEnv = { SBX_BIN: fakeSbx, ...(opts.env ?? {}) };
   // The queue lives outside every repo and outside the store.
   const queueDb = join(mkdtempSync(join(tmpdir(), "tk-sup-e2e-queue-")), "queue.db");
   const cli = (verb: string, jobId: string, dir: string, extra: string[] = []) => spawnSync("bun", [join(REPO, "src", "cli.ts"), verb, jobId, "--directory", dir, ...extra], {
-    env: { ...process.env, TK_STUDIO_HOME: store, TK_SUPERVISOR_DB: queueDb, CLAUDE_BIN: fake, ANTHROPIC_API_KEY: "sk-test-parent" }, encoding: "utf-8", timeout: 120_000,
+    env: { ...process.env, TK_STUDIO_HOME: store, TK_SUPERVISOR_DB: queueDb, CLAUDE_BIN: fake, ANTHROPIC_API_KEY: "sk-test-parent", ...extraEnv }, encoding: "utf-8", timeout: 120_000,
   });
   const run = (jobId = "studio-health", dir = project, extra: string[] = []) => cli("run", jobId, dir, extra);
-  const submit = (jobId = "studio-health", dir = project) => cli("submit", jobId, dir);
+  const submit = (jobId = "studio-health", dir = project, extra: string[] = []) => cli("submit", jobId, dir, extra);
   /** `recover` / `drain`: no job, no directory. */
   const bare = (verb: string) => spawnSync("bun", [join(REPO, "src", "cli.ts"), verb], {
-    env: { ...process.env, TK_STUDIO_HOME: store, TK_SUPERVISOR_DB: queueDb, CLAUDE_BIN: fake, ANTHROPIC_API_KEY: "sk-test-parent" }, encoding: "utf-8", timeout: 120_000,
+    env: { ...process.env, TK_STUDIO_HOME: store, TK_SUPERVISOR_DB: queueDb, CLAUDE_BIN: fake, ANTHROPIC_API_KEY: "sk-test-parent", ...extraEnv }, encoding: "utf-8", timeout: 120_000,
   });
   /** Read the queue file (it may not exist yet: nothing opened it). */
   const queue = <T>(read: (q: Queue) => T): T => {
@@ -265,6 +365,7 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
     try { return read(q); } finally { q.close(); }
   };
   const calls = () => existsSync(record) ? readFileSync(record, "utf-8").trim().split("\n").map((l) => JSON.parse(l)) : [];
+  const sbxCalls = () => existsSync(sbxRecord) ? readFileSync(sbxRecord, "utf-8").trim().split("\n").map((l) => JSON.parse(l)) : [];
   const ledger = () => {
     const dir = join(store, "measurements");
     return existsSync(dir) ? readdirSync(dir).flatMap((f) => readFileSync(join(dir, f), "utf-8").trim().split("\n").map((l) => JSON.parse(l))) : [];
@@ -284,7 +385,7 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
     expect(jobVerb(["status", "--directory", project, "--job-id", "studio-health"]).runs).toEqual([]);
     expect(ledger().filter((e) => e.event === "job-run")).toEqual([]);
   };
-  return { store, project, run, submit, bare, queue, queueDb, calls, ledger, workerMarker, jobVerb, registeredId, expectNothingWoken };
+  return { store, project, run, submit, bare, queue, queueDb, calls, sbxCalls, ledger, workerMarker, jobVerb, registeredId, expectNothingWoken };
 }
 
 describe.skipIf(!canRunE2E)("CLI end to end: studio-health (faked worker)", () => {
@@ -306,6 +407,10 @@ describe.skipIf(!canRunE2E)("CLI end to end: studio-health (faked worker)", () =
     const events = fx.ledger().filter((e) => e.event === "job-run" && e.payload.run_id === summary.studio_run_id);
     expect(events).toHaveLength(1);
     expect(events[0].payload).toMatchObject({ state: "complete", total_cost_usd: 0.0123 });
+
+    // No tier anywhere: the host tier, spawned directly (no sbx), recorded on the queue run.
+    expect(fx.sbxCalls()).toEqual([]);
+    expect(fx.queue((q) => q.get(summary.run_id))).toMatchObject({ tier: "host", sandbox: null });
   }, 120_000);
 
   test("missing block → finished blocked with the named conformance failure", () => {
@@ -856,4 +961,163 @@ describe.skipIf(!canRunE2E)("CLI end to end: restart recovery and drain", () => 
       q.close();
     }
   }, 180_000);
+});
+
+describe.skipIf(!canRunE2E)("CLI end to end: worker tiers (Story 21.4)", () => {
+  const BLOCK_OK = `{"status":"complete","intent":"tk-studio-activate","artifacts":[]}`;
+  const flagValue = (args: string[], flag: string) => args[args.indexOf(flag) + 1];
+
+  test("`submit --permission-mode bypassPermissions` (no sbx tier) → exit 2 blocked HostBypassRefused; no process, no queue run", () => {
+    const fx = e2eFixture("unused");
+    const res = fx.submit("studio-health", fx.project, ["--permission-mode", "bypassPermissions"]);
+    expect(res.status).toBe(2);
+    const answer = JSON.parse(res.stdout);
+    expect(answer).toMatchObject({ ok: false, state: "blocked", run_id: null });
+    expect(answer.error).toContain("HostBypassRefused");
+    expect(fx.calls()).toEqual([]);
+    expect(fx.sbxCalls()).toEqual([]);
+    expect(fx.queue((q) => q.runs().length)).toBe(0);
+  }, 120_000);
+
+  test("`run --tier host --permission-mode bypassPermissions` → HostBypassRefused, zero spawns, zero queue runs", () => {
+    const fx = e2eFixture("unused");
+    const res = fx.run("studio-health", fx.project, ["--tier", "host", "--permission-mode", "bypassPermissions"]);
+    expect(res.status).toBe(2);
+    expect(JSON.parse(res.stdout)).toMatchObject({ state: "blocked" });
+    expect(JSON.parse(res.stdout).error).toContain("HostBypassRefused");
+    expect([fx.calls(), fx.sbxCalls()]).toEqual([[], []]);
+    expect(fx.queue((q) => q.runs().length)).toBe(0);
+  }, 120_000);
+
+  test.each([
+    ["run", ["--tier", "gpu"], "TierRefused"],
+    ["run", ["--tier", "sbx"], "SbxSandboxMissing"],
+    ["submit", ["--tier", "gpu"], "TierRefused"],
+    ["submit", ["--tier", "sbx"], "SbxSandboxMissing"],
+  ])("`%s %j` → exit 2 named refusal, nothing queued, no process", (verb, flags, name) => {
+    const fx = e2eFixture("unused");
+    const res = (verb === "submit" ? fx.submit : fx.run)("studio-health", fx.project, flags as string[]);
+    expect(res.status).toBe(2);
+    expect(JSON.parse(res.stdout).error).toContain(name as string);
+    expect([fx.calls(), fx.sbxCalls()]).toEqual([[], []]);
+    expect(fx.queue((q) => q.runs().length)).toBe(0);
+  }, 120_000);
+
+  test("`run --tier sbx --sandbox claude-p --permission-mode bypassPermissions`: login probe and worker through `sbx exec`", () => {
+    const fx = e2eFixture(BLOCK_OK);
+    const res = fx.run("studio-health", fx.project, ["--tier", "sbx", "--sandbox", "claude-p", "--permission-mode", "bypassPermissions", "--model", "m-over"]);
+    expect(res.status).toBe(0);
+    const summary = JSON.parse(res.stdout);
+    expect(summary).toMatchObject({ ok: true, state: "complete", total_cost_usd: 0.0123 });
+    const sbx = fx.sbxCalls();
+    expect(sbx.length).toBeGreaterThanOrEqual(2);
+    expect(sbx.every((c) => c.args[0] === "exec" && c.args[1] === "claude-p")).toBe(true);
+    const probe = sbx.find((c) => c.args.includes("auth"))!;
+    expect(probe.args).toEqual(["exec", "claude-p", "env", "-u", "ANTHROPIC_API_KEY", "claude", "auth", "status", "--json"]);
+    const worker = sbx.find((c) => c.args.includes("-p"))!;
+    expect(worker.args.slice(0, 9)).toEqual(["exec", "claude-p", "env", "-u", "ANTHROPIC_API_KEY", "-C", fx.project, "claude", "-p"]);
+    expect(worker.args[9]).toStartWith("/tk-studio:tk-studio-activate ");
+    expect(flagValue(worker.args, "--permission-mode")).toBe("bypassPermissions");
+    expect(flagValue(worker.args, "--model")).toBe("m-over");
+    expect(worker.apiKey).toBeNull(); // stripped on the host too
+    expect(fx.calls().filter((c) => c.args[0] === "-p").every((c) => c.apiKey === null)).toBe(true);
+    expect(fx.queue((q) => q.get(summary.run_id))).toMatchObject({ state: "complete", tier: "sbx", sandbox: "claude-p", model: "m-over" });
+    // finish got the studio run id and the cost: the job-run event carries both.
+    const events = fx.ledger().filter((e) => e.event === "job-run" && e.payload.run_id === summary.studio_run_id);
+    expect(events).toHaveLength(1);
+    expect(events[0].payload).toMatchObject({ state: "complete", total_cost_usd: 0.0123 });
+  }, 120_000);
+
+  test("sbx VM cwd comes from the registry entry root, not the `--directory` spelling (a symlink samePath accepts)", () => {
+    const fx = e2eFixture(BLOCK_OK);
+    const spelled = join(mkdtempSync(join(tmpdir(), "tk-sup-e2e-spelled-")), basename(fx.project)); // same basename: the same project id
+    symlinkSync(fx.project, spelled, "dir");
+    const res = fx.run("studio-health", spelled, ["--tier", "sbx", "--sandbox", "claude-p", "--permission-mode", "bypassPermissions"]);
+    expect(res.status).toBe(0);
+    expect(JSON.parse(res.stdout)).toMatchObject({ ok: true, state: "complete" });
+    const worker = fx.sbxCalls().find((c) => c.args.includes("-p"))!;
+    expect(flagValue(worker.args, "-C")).toBe(fx.project);
+    expect(flagValue(worker.args, "-C")).not.toBe(spelled);
+    expect(JSON.parse(worker.args[9].split("\n")[0].replace(/^\S+ /, ""))).toMatchObject({ directory: fx.project });
+  }, 120_000);
+
+  test("stored drive: `submit --tier sbx --sandbox s --model m` then `drain` → driven via sbx with --model m", () => {
+    const fx = e2eFixture(BLOCK_OK);
+    const sub = fx.submit("studio-health", fx.project, ["--tier", "sbx", "--sandbox", "s-stored", "--model", "m-stored", "--effort", "low"]);
+    expect(sub.status).toBe(0);
+    const queued = JSON.parse(sub.stdout);
+    expect(fx.queue((q) => q.get(queued.run_id))).toMatchObject({ state: "queued", tier: "sbx", sandbox: "s-stored", model: "m-stored", effort: "low" });
+    expect(fx.sbxCalls()).toEqual([]); // submit spawns no worker and no probe
+    const drained = fx.bare("drain");
+    expect(drained.status).toBe(0);
+    expect(JSON.parse(drained.stdout).runs[0]).toMatchObject({ run_id: queued.run_id, summary: { ok: true, state: "complete" } });
+    const worker = fx.sbxCalls().find((c) => c.args.includes("-p"))!;
+    expect(worker.args.slice(0, 2)).toEqual(["exec", "s-stored"]);
+    expect(flagValue(worker.args, "--model")).toBe("m-stored");
+    expect(flagValue(worker.args, "--effort")).toBe("low");
+    expect(flagValue(worker.args, "--permission-mode")).toBe("auto");
+  }, 180_000);
+
+  test("stored drive: an invalid stored tier ends the drained run `blocked` naming it", () => {
+    const fx = e2eFixture(BLOCK_OK);
+    const queued = JSON.parse(fx.submit().stdout);
+    fx.queue((q) => q.db.run("UPDATE runs SET tier = 'gpu' WHERE run_id = ?", [queued.run_id]));
+    const res = fx.bare("drain");
+    expect(res.status).toBe(1);
+    const run = fx.queue((q) => q.get(queued.run_id))!;
+    expect(run.state).toBe("blocked");
+    expect(run.reason).toContain("TierRefused");
+    expect(fx.calls().some((c) => c.args[0] === "-p")).toBe(false);
+  }, 180_000);
+
+  test("a tier frozen at enqueue never mixes with a mode configured for another tier: stored host + config sbx/bypass → drained on host under auto", () => {
+    const cfgDir = mkdtempSync(join(tmpdir(), "tk-sup-cfg-"));
+    const cfg = join(cfgDir, "supervisor.yaml");
+    writeFileSync(cfg, ""); // no config at submission
+    const fx = e2eFixture(BLOCK_OK, true, { env: { TK_SUPERVISOR_CONFIG: cfg } });
+    const sub = fx.submit();
+    expect(sub.status).toBe(0);
+    const queued = JSON.parse(sub.stdout);
+    expect(fx.queue((q) => q.get(queued.run_id))).toMatchObject({ state: "queued", tier: "host", permission_mode: null });
+    // The operator then configures the job for sbx with bypass: that entry is one unit, for the sbx tier only.
+    writeFileSync(cfg, `jobs:\n  ${fx.registeredId()}/studio-health:\n    tier: sbx\n    sandbox: s-cfg\n    permission_mode: bypassPermissions\n`);
+    const drained = fx.bare("drain");
+    expect(drained.status).toBe(0);
+    expect(JSON.parse(drained.stdout).runs[0]).toMatchObject({ run_id: queued.run_id, summary: { ok: true, state: "complete" } });
+    expect(fx.queue((q) => q.get(queued.run_id))).toMatchObject({ state: "complete", tier: "host" });
+    const worker = fx.calls().find((c) => c.args[0] === "-p");
+    expect(flagValue(worker.args, "--permission-mode")).toBe("auto");
+    expect(fx.sbxCalls()).toEqual([]);
+  }, 180_000);
+
+  test("supervisor config (TK_SUPERVISOR_CONFIG): acceptEdits for this job; a bad config → exit 2 SupervisorConfigInvalid, nothing queued", () => {
+    const cfgDir = mkdtempSync(join(tmpdir(), "tk-sup-cfg-"));
+    const cfg = join(cfgDir, "supervisor.yaml");
+    const fx = e2eFixture(BLOCK_OK, true, { env: { TK_SUPERVISOR_CONFIG: cfg } });
+    writeFileSync(cfg, `jobs:\n  ${fx.registeredId()}/studio-health:\n    permission_mode: acceptEdits\n`);
+    const res = fx.run();
+    expect(res.status).toBe(0);
+    const worker = fx.calls().find((c) => c.args[0] === "-p");
+    expect(flagValue(worker.args, "--permission-mode")).toBe("acceptEdits");
+    expect(fx.queue((q) => q.get(JSON.parse(res.stdout).run_id))).toMatchObject({ tier: "host", permission_mode: null });
+
+    writeFileSync(cfg, "jobs:\n  p/studio-health:\n    tier: gpu\n");
+    const before = fx.queue((q) => q.runs().length);
+    const bad = fx.run();
+    expect(bad.status).toBe(2);
+    expect(JSON.parse(bad.stdout).error).toContain("SupervisorConfigInvalid");
+    expect(fx.queue((q) => q.runs().length)).toBe(before);
+  }, 180_000);
+
+  test("`submit` with a bad TK_SUPERVISOR_CONFIG → exit 2 SupervisorConfigInvalid; zero spawns, zero queue runs", () => {
+    const cfgDir = mkdtempSync(join(tmpdir(), "tk-sup-cfg-"));
+    const cfg = join(cfgDir, "supervisor.yaml");
+    writeFileSync(cfg, "jobs:\n  p/studio-health:\n    tier: gpu\n");
+    const fx = e2eFixture(BLOCK_OK, true, { env: { TK_SUPERVISOR_CONFIG: cfg } });
+    const bad = fx.submit();
+    expect(bad.status).toBe(2);
+    expect(JSON.parse(bad.stdout).error).toContain("SupervisorConfigInvalid");
+    expect([fx.calls(), fx.sbxCalls()]).toEqual([[], []]);
+    expect(fx.queue((q) => q.runs().length)).toBe(0);
+  }, 120_000);
 });

@@ -10,6 +10,7 @@ bun install
 bun src/cli.ts run studio-health --directory <this repo>          # skill job: submit → claude -p → finish
 bun src/cli.ts run maintenance-conformance --directory <this repo> # core job: wake runs it, status reports it
 bun src/cli.ts submit studio-health --directory <this repo>       # validate + queue only (idempotent)
+bun src/cli.ts run studio-health --directory <root> --tier sbx --sandbox claude-<project>   # the worker inside the sbx microVM
 bun src/cli.ts recover                                            # the restart rule over the queue
 bun src/cli.ts drain                                              # recover, then drive every unowned queued run
 bun test
@@ -57,10 +58,43 @@ After killing the supervisor mid-run: `bun src/cli.ts drain` (it recovers, then 
 Before that `drain`, check that no worker of the killed run (`claude -p`, or a `uv run … jobrun.py` child) still runs in that checkout: recovery releases the checkout lock once the supervisor's own process is gone, so `drain` could otherwise drive a second run beside a surviving worker.
 
 How it runs a worker:
-- The permission mode defaults to `auto`. An explicit `run --permission-mode <mode>` is recorded on the queue run it mints or adopts while that run is `queued` (`runs.permission_mode`), so a run left `queued` (a lock wait) and later driven by `drain` or the tick keeps that mode. A `bypassPermissions` request is refused with `HostBypassRefused` before any process starts. No flag is passed that overrides `permissions.deny` in `~/.claude/settings.json`.
+- The permission mode defaults to `auto`. An explicit `--permission-mode <mode>` on `run` or `submit` is recorded on the queue run it mints or adopts while that run is `queued` (`runs.permission_mode`), so a run left `queued` (a lock wait) and later driven by `drain` or the tick keeps that mode. A `bypassPermissions` request on the host tier is refused with `HostBypassRefused` before any process starts. No flag is passed that overrides `permissions.deny` in `~/.claude/settings.json`.
 - Auth comes only from the Max login, checked with `claude auth status --json`. The worker's environment never carries `ANTHROPIC_API_KEY`.
-- The worker runs with `--output-format json`. The status block is read from the result text, and `total_cost_usd` is passed on to `finish`.
+- The worker runs with `--output-format json`. The status block is read from the result text, and `total_cost_usd` is passed on to `finish` with the studio's run id.
+- Model and effort: `--model`/`--effort` on `run` or `submit` override the resolved job's `routing` for that run; otherwise `routing.model`/`routing.effort` are forwarded verbatim (flags and payload, contract §5). With neither, no `--model`/`--effort` is passed. The supervisor never chooses a model.
 - `finish` emits the `job-run` ledger event. The supervisor never emits it.
+
+## Worker tiers
+
+Each run picks a tier: `host` (the default) or `sbx`. The tier comes from the submission or the supervisor's own per-job config, never from the plugin (AD-2).
+
+- **host**: `claude -p <prompt> --output-format json --permission-mode auto|acceptEdits|…`, spawned directly by the supervisor under the Max login. Bypass is refused (`HostBypassRefused`).
+- **sbx**: the same argv inside a Docker Sandboxes microVM: `sbx exec <sandbox> env -u ANTHROPIC_API_KEY -C <vm-root> claude -p <prompt> …`. It is argv only with no shell, so the prompt stays one argv item. The login probe runs through the same wrapper (`sbx exec <sandbox> env -u ANTHROPIC_API_KEY claude auth status --json`). `<vm-root>` is derived from the registry root the way sbx mounts it: a drive path `<D>:\GitHub\<p>` becomes `/<d>/GitHub/<p>`, and a POSIX path is unchanged. The skill's payload `directory` is that VM path. Bypass is permitted, but only when requested; the default is still `auto`. A deny profile must lie inside the project root, and it is forwarded as its VM path. A profile outside the root is refused with `DenyProfileRefused`. The VM worker is always `claude`, since `CLAUDE_BIN` is host-only.
+
+Every option resolves in this order: the flag, then the value stored on the queue run, then the per-job config, then the default (`host`, `auto`). A config entry's `permission_mode` applies only when the run's tier is that entry's own tier (no `tier` means host). Model and effort have no config layer. `submit` and `run` resolve them before any process starts and before anything is queued. Each of these refusals exits 2 with nothing queued:
+- `HostBypassRefused`, with `state: blocked`
+- `TierRefused`, for an unknown `--tier`
+- `SbxSandboxMissing`, when the sbx tier has no `--sandbox`
+- `VmPathUnderivable`, when the sbx tier runs on a root with no microVM path (e.g. a UNC share)
+- `SupervisorConfigInvalid`
+
+The queue run records the resolved `tier` and `sandbox`, and the submission's `model` and `effort` (nullable `runs` columns). A change on a `queued` run writes one `run-options` event. An existing queue file gains the new columns when it is opened. `drain` and the tick drive the run with the stored values, re-checked after the claim. An invalid stored value ends the run `blocked`, naming it.
+
+Per-job config (`TK_SUPERVISOR_CONFIG`, YAML; placeholders shown):
+
+```yaml
+jobs:
+  "<project-id>/<job-id>":
+    tier: sbx                        # host | sbx
+    sandbox: claude-<project>        # required for sbx
+    permission_mode: acceptEdits     # auto | acceptEdits | default | plan | bypassPermissions (sbx only)
+```
+
+A `sbx exec` timeout kills the host `sbx` process only. The worker inside the VM may survive it; Story 21.5 owns the tree kill.
+
+Live checks on the agent PC (not verifiable in CI):
+- **AC1, console hosting.** Run `bun src/cli.ts run studio-health --directory <root>` from the console-hosted supervisor window. While the worker runs, record the `claude -p` process's session id, for example with `Get-Process claude | Select-Object Id, SessionId, StartTime`. It must be non-zero, meaning not Session 0 and not a headless Task Scheduler spawn (runbook §8).
+- **AC5, the first sbx run (runbook §3.5).** Run `bun src/cli.ts run studio-health --directory <root> --tier sbx --sandbox claude-<project> --permission-mode bypassPermissions`. It must end `complete` with bypass. Then run `sbx exec claude-<project> bash -lc 'ls -a ~ ; ls ~/.ssh ~/.aws ~/.azure ~/.config/gcloud 2>&1'` and record that the credential folders are absent.
 
 ## Environment
 
@@ -68,7 +102,9 @@ How it runs a worker:
 |---|---|
 | `TK_STUDIO_ROOT` | tk-studio repo root (required; unset fails with `StudioRootMissing`). The plugin root is `$TK_STUDIO_ROOT/plugins/tk-studio`. |
 | `TK_STUDIO_HOME` | Per-user store override. Passed through to every child process and never hard-coded. |
-| `CLAUDE_BIN` | Worker binary (default `claude`). |
+| `CLAUDE_BIN` | Host worker binary (default `claude`). The sbx worker is always `claude` inside the microVM. |
+| `SBX_BIN` | Docker Sandboxes CLI on the host, for sbx-tier runs (default `sbx`). |
+| `TK_SUPERVISOR_CONFIG` | The supervisor's per-job config file (optional; unset means no config, and every job runs on the host tier). Never read from the plugin or a project's `.tk-studio/`. An unknown key or value is `SupervisorConfigInvalid` (exit 2). |
 | `TK_SUPERVISOR_DB` | Queue database file (required by `run`, `submit`, `recover`, `drain` and the tick; unset fails with `QueueDbMissing`). Must lie outside every git checkout, the studio store and `TK_STUDIO_ROOT` (`QueueDbPlacementRefused`). |
 
 ## Provenance

@@ -125,6 +125,12 @@
     uncapped guard + 120 s) and the capped skill invocation. With 21-6 that also covers
     DW-3. Record `stop.on_status` in the queue's `events` table. `finishArgsFor` and
     `knowledgeOf` in tick.ts are unused.
+    Replan (21-4 reconcile, 2026-09-28): on the sbx tier the worker runs as `sbx exec
+    <sb> env -u ANTHROPIC_API_KEY -C <vm-root> claude -p …`, so a host tree kill stops
+    only `sbx exec`. The guard must also end the in-VM worker (through `sbx exec <sb>`,
+    argv only, no shell) or name the survivor. Read an sbx run's turns and tokens
+    through the VM or the JSON result's usage. The tier is on the queue run
+    (`runs.tier`, `runs.sandbox`).
 
 - id: "21-6-a-killed-run-resumes-or-ends-partial-never-lost"
   title: "A Killed Run Resumes or Ends Partial, Never Lost"
@@ -153,3 +159,8 @@
     and its owner identity (hostname + pid + nonce + start time). The queue run id and
     `studio_run_id` stay separate. DW-3 is this story's: a worker that outlives a killed
     supervisor must hold the checkout lock, or be killed, before `recover` releases it.
+    Replan (21-4 reconcile, 2026-09-28): "the same tier" means the queue run's stored
+    `tier`/`sandbox`/`model`/`effort`. Rebuild `Started` through `validate()` so
+    `registryRoot` (the sbx VM root, passed as `invokeSkill(…, {vmHostRoot})`) never
+    falls back to the caller root. An sbx run's session transcript is inside the
+    microVM.

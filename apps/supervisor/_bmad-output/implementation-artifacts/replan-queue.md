@@ -51,3 +51,24 @@
 - What no longer holds: "it is queued through Story 21.3's validation and the response carries the run id" (read: the queue run id; `GET /runs/{id}` and cancel take it)
 - Suggested adjustment: Replan (21-3 reconcile, 2026-09-28): API run ids are queue run ids. Answers also carry `studio_run_id`. Cancel ends the queue run `cancelled` through a `Queue.end` transition with its event, and the studio run through `jobrun cancel` or launch `stop`. Epic 22 has no manifest yet; apply this when it is transcribed.
 - Status: open
+
+## 21-5 — scope: stories — from 21-4-the-worker-runs-on-the-right-tier-and-reports-its-cost — 2026-09-28
+
+- What changed: runs may execute on the sbx tier as `sbx exec <sb> env -u ANTHROPIC_API_KEY -C <vm-root> claude -p …`; the worker process and its session transcript live inside the microVM.
+- What no longer holds: "the worker's whole process tree is killed" and "`account` is called with the turns and tokens read from the worker's transcript" (neither is reachable from the host alone on sbx)
+- Suggested adjustment: Replan (21-4 reconcile, 2026-09-28): on sbx a host tree kill stops only `sbx exec`; the guard must also end the in-VM worker (e.g. through `sbx exec <sb>`, argv only, no shell), or name the survivor. Read turns/tokens for sbx runs through the VM (or the JSON result's usage); the tier is on the queue run (`runs.tier`, `runs.sandbox`).
+- Status: closed — applied to the unstarted 21-5 entry's invoke_dev_with by the 21-4 gate (2026-09-28)
+
+## 21-6 — scope: stories — from 21-4-the-worker-runs-on-the-right-tier-and-reports-its-cost — 2026-09-28
+
+- What changed: the queue run stores the resolved `tier`, `sandbox`, `model`, `effort`; the sbx VM root comes from `validate()`'s `registryRoot` via `Started.registryRoot` → `invokeSkill(…, {vmHostRoot})`, and falls back silently to the caller root when absent.
+- What no longer holds: "each resumes with `--resume <session-id>` on the same tier and branch" (same tier needs the stored options and the registry root, not only the queue row)
+- Suggested adjustment: Replan (21-4 reconcile, 2026-09-28): resume re-drives with the queue run's stored tier/sandbox/model/effort, rebuilds `Started` through `validate()` so `registryRoot` (the sbx VM root) is never the caller-root fallback, and looks for an sbx run's transcript inside the microVM.
+- Status: closed — applied to the unstarted 21-6 entry's invoke_dev_with by the 21-4 gate (2026-09-28)
+
+## 22-1 — scope: stories — from 21-4-the-worker-runs-on-the-right-tier-and-reports-its-cost — 2026-09-28
+
+- What changed: `submit` takes `--tier`, `--sandbox`, `--model`, `--effort`, `--permission-mode`, resolves them (submission ?? `TK_SUPERVISOR_CONFIG` ?? `host`) and refuses before enqueue (`HostBypassRefused`, `TierRefused`, `SbxSandboxMissing`, `SupervisorConfigInvalid`, `VmPathUnderivable`, exit 2).
+- What no longer holds: "`POST /jobs` … with optional `base_ref`, `tier`, `model`, and `effort` … queued through Story 21.3's validation" (read: through 21.4's resolution too)
+- Suggested adjustment: Replan (21-4 reconcile, 2026-09-28): `POST /jobs` calls the same submit path (`submitJob` resolution, then `enqueue`); each named refusal maps to 400 with its name, and no run is queued. Keep the registry root from `validate()` on any drive. Epic 22 has no manifest yet; apply this when it is transcribed.
+- Status: open

@@ -7,7 +7,12 @@
  *                   $TK_STUDIO_ROOT/plugins/tk-studio
  *   TK_STUDIO_HOME  the per-user store override — passed through to every
  *                   child untouched, never read or defaulted here
- *   CLAUDE_BIN      the worker binary (default `claude`)
+ *   CLAUDE_BIN      the host worker binary (default `claude`); host-only — the
+ *                   sbx worker is always `claude` inside the microVM
+ *   SBX_BIN         the host Docker Sandboxes CLI (default `sbx`) for sbx-tier runs
+ *   TK_SUPERVISOR_CONFIG  the supervisor's own per-job config file (optional:
+ *                   unset → no config, every job defaults to the host tier);
+ *                   never read from the plugin or a project's .tk-studio/
  */
 import { join } from "node:path";
 
@@ -32,4 +37,13 @@ export function pluginRoot(env: Env = process.env): string {
 
 export function claudeBin(env: Env = process.env): string {
   return env.CLAUDE_BIN?.trim() || "claude";
+}
+
+export function sbxBin(env: Env = process.env): string {
+  return env.SBX_BIN?.trim() || "sbx";
+}
+
+/** The supervisor's per-job config path, or undefined when unset (no config). */
+export function supervisorConfigPath(env: Env = process.env): string | undefined {
+  return env.TK_SUPERVISOR_CONFIG?.trim() || undefined;
 }
