@@ -2,13 +2,14 @@
 title: 'A Killed Run Resumes or Ends Partial, Never Lost'
 type: 'feature'
 created: '2026-09-28'
-status: 'blocked'
+status: 'done'
 review_loop_iteration: 0
 followup_review_recommended: true
 context: []
 warnings: [oversized]
 deferred: []
 deviation_score: 2
+reconcile_verdict: adjust-stories
 baseline_commit: 92208cf7acc4e5ba6546aca234fef01992e9c546
 baseline_revision: 92208cf7acc4e5ba6546aca234fef01992e9c546
 ---
@@ -250,8 +251,8 @@ DRIFT: the in-VM worker check runs on every sbx silent exit with a session id, i
 
 ## Auto Run Result
 
-Status: blocked
-Blocking condition: verify gate red: test/guards.test.ts:463-497 signal tests (21-5 feature, src/server.ts:195-245) fail in this environment, also at baseline 92208cf; not a 21-6 regression (consult 6 ruled `escalate`: a consult cannot waive the gate)
+Status: done
+Previously: blocked (2026-09-28T22:11Z) — verify gate red: test/guards.test.ts:463-497 signal tests (21-5 feature, src/server.ts:195-245) fail in this environment, also at baseline 92208cf; not a 21-6 regression (consult 6 ruled `escalate`: a consult cannot waive the gate). Closed by the operator resolution at the end of this file.
 
 Studio: activated as developer; working set bmm, tea, bmad-loop; drift clean; routing implementer=claude-opus-5-5 reviewers=claude-opus-5-5 consult=claude-opus-5-5; knowledge spine absent
 
@@ -305,3 +306,32 @@ Studio: activated as developer; working set bmm, tea, bmad-loop; drift clean; ro
 DRIFT: `TranscriptChecks` gains a required `sbxWorkers` dep, `RunSummary` gains `hold_lock`, `Queue.end`/`endDriven` gain `holdLock`, `RecoverReport` gains `released[]`; an sbx AC2 refusal ends the run while keeping its lock, freed by `claim`/`recover` at the in-VM deadline — consult 5 — affects: 22-x
 DRIFT: `recover` writes a `recovering` event before `ops.end`, and a `lock-released` event when a kept lock is freed; the e2e event-list assertion was updated — the recover race mark and the kept-lock release — affects: 22-x (event consumers)
 DRIFT: the in-VM worker check runs on every sbx silent exit with a session id, including the second, so a found worker is named instead of `resume cap reached (1)` — the ruling's check order — affects: none
+
+## Operator Resolution
+
+### 2026-09-28 — attended session (agent PC), after the run paused on this story
+
+- **Cause of the red gate.** A race in story 21-5's signal path, not the environment. `runProcess` installed its SIGINT/SIGTERM/SIGHUP handlers after `spawn()` returned, and `spawn()` returns some milliseconds after the child is already running. A signal in that gap met no handler: the supervisor died by the default action and the worker's group stayed alive. Timing marks in a scratch copy showed the test's signal arriving before the supervisor had logged the spawn's return.
+- **Fix.** Commit `76ded1b` (attended, outside the loop): `runProcess` arms the handlers before the spawn and tracks the group after it. `test/guards.test.ts` gains one test, where the child sends SIGTERM to the supervisor as soon as it has written its pids.
+- **Evidence.** In the engine sandbox, the four signal tests on the old code failed in 15 runs of 15. On `76ded1b` they passed in 15 of 15.
+- **This pass's changes** were committed as they stood in `b78a3fa`, as consult 6 directed.
+- **Verify gate on `76ded1b`:**
+  - Linux (engine sandbox, bun 1.4.2): `bun test` 427 pass, 0 fail, three runs; four suites in parallel, 0 fail; `bunx tsc --noEmit` clean.
+  - Windows host (bun 1.4.2, a separate clone): `bun test` 365 pass, 61 skip, 0 fail; `tsc --noEmit` clean.
+- **Spec file name.** The dev session wrote this file as `<id>.md`. The engine resolves `<id>-*.md`, so it read the story as pending. Renamed in `eaf9ea4`.
+- **unverifiable-here, checked on the agent PC:**
+  - Live `--session-id` then `--resume`: both runs report the same `session_id` (Claude Code 2.1.274, Max login). Pass.
+  - The win32 kill-and-restart check and the backup restore were **not** run. They need the supervisor started on the host, which is never done from a Claude desktop-app session. They go to Story 22.3 with DW-5.
+- **Not run by the engine for this story:** the studio gate (reconciled below by hand) and the `post_commit` meter (metered from the archived run).
+
+## Reconcile
+
+### 2026-09-28 — adjust-stories
+
+- Score: 2
+- Reasoning: Every DRIFT is `affects: none` or names 22-x. The 22-x ones change what Epic 22 reads from the queue and how a supervisor start recovers: resume driving lives in `cli.ts` (`recoverWithResume`/`driveResumes`), the recover report and the event list grew, a run can be `held`, and an ended run can keep its checkout lock until the in-VM deadline. No Epic 22 Given/When/Then has to change. Notes in the stories' `invoke_dev_with` can absorb all of it. Reconciled by the attended session, because the run paused before the studio gate.
+- Affected: 22-1-the-api-answers-on-the-tailnet-only — "each answers from the queue; cancel ends the run `cancelled`" (the event kinds and run states the API serves grew; a cancel must respect a held run and a kept lock)
+- Affected: 22-2-a-read-only-status-page — "it shows the queue (jobs, and runs with state, reason, and cost)" (held runs, kept locks and the longer reasons must be shown; cost is summed across resumed iterations)
+- Affected: 22-3-the-supervisor-starts-itself-at-logon — "starts the API and the pacer" (the start must run the CLI's resume-driving recovery, not `Queue.recover` alone; the two host checks this story could not run)
+- Invariant: none (AD-2, AD-11, AD-14 and AD-15 hold; no plugin, schema or contract change)
+- Gate: Part A adjust-stories, by hand; Part B not applicable, this is the epic's last story

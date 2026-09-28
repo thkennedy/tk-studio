@@ -79,3 +79,24 @@
 - What no longer holds: "each resumes … when its session transcript exists and its guards leave budget, and otherwise finishes `partial` naming the guard or `supervisor restart`" (not wrong, but "its guards" now means 21-5's named guards and `account` counters, and a restart-ended run must carry 21-5's `ended` detail)
 - Suggested adjustment: Replan (21-5 reconcile, 2026-09-28): a resume drives through 21-5's guards: the remaining wall-clock budget through `wallClockGuard` (and on sbx the in-VM `timeout` in `buildSbxCommand`), `account` after the resumed iteration, and a trip ends `partial` naming the guard. Every end `recover` writes goes through `Queue.end`'s `stop` option with `studio_outcome`, so a restart-ended run matching `stop.on_status` records `stopped` (closes DW-8). DW-3's kill of the recorded worker pid/process group before `recover` releases the lock must also cover what `runProcess`'s signal handling misses (DW-7: SIGHUP under `nohup` or on non-Linux POSIX, SIGKILL, a crash). Keep `Queue.pacing()`'s `live`/`adoptable` view true for a resumed run.
 - Status: closed — applied to the unstarted 21-6 entry's invoke_dev_with by the 21-5 gate (2026-09-28)
+
+## 22-1 — scope: stories — from 21-6-a-killed-run-resumes-or-ends-partial-never-lost — 2026-09-28
+
+- What changed: the queue's events and run states grew. New events: `accounted`, `woke`, `session`, `worker`, `recovering`, `lock-released`. `RecoverReport` has `resumed[]`, `held[]`, `released[]` and `ended[].state`. A run can be `held` (kept with its lock while its recorded worker may still run), and an ended run can keep its checkout lock until the in-VM deadline (`hold_lock`).
+- What no longer holds: "each answers from the queue; cancel ends the run `cancelled`" (read: serve every event kind as stored, never a fixed list; a cancel of a run whose worker may still run must kill or wait for that worker before the lock is freed)
+- Suggested adjustment: Replan (21-6 reconcile, 2026-09-28): `/events` and `/runs/{id}` pass event kinds and details through as stored. A `POST /jobs` on a checkout whose lock an ended run still keeps waits in `queued` naming that holder. Cancel goes through `Queue.end` and the recorded-worker rule (`Queue.recordedWorker`, the in-VM deadline on sbx), never a bare lock release. A silent exit ends `partial` with `MISSING_STATUS_BLOCK; <cause>`.
+- Status: open
+
+## 22-2 — scope: stories — from 21-6-a-killed-run-resumes-or-ends-partial-never-lost — 2026-09-28
+
+- What changed: runs can be resumed (one queue run, more than one worker iteration), held, or ended with a kept lock; `total_cost_usd` is summed across the original and the resumed iterations.
+- What no longer holds: "it shows the queue (jobs, and runs with state, reason, and cost)" (read: also the held runs and kept locks with their holder, and the resume count)
+- Suggested adjustment: Replan (21-6 reconcile, 2026-09-28): show `held` runs and ended runs that keep a lock, each with the lock holder and the deadline. Show a run's resume count and its summed cost. Reasons can be long (`orphaned: supervisor restart; guard: …`): wrap them, never cut them.
+- Status: open
+
+## 22-3 — scope: stories — from 21-6-a-killed-run-resumes-or-ends-partial-never-lost — 2026-09-28
+
+- What changed: resume driving lives in `cli.ts` (`recoverWithResume`/`driveResumes`); `Queue.recover` only takes runs over. Transcript restore reads the folder named by `TK_SUPERVISOR_TRANSCRIPT_BACKUP`. Two host checks of 21-6 were not run: kill the supervisor mid-run and restart it; delete a session's transcript and force a resume from the backup.
+- What no longer holds: "starts the API and the pacer" (read: and runs the CLI's resume-driving recovery once at start, before the pacer's first tick)
+- Suggested adjustment: Replan (21-6 reconcile, 2026-09-28): `start.ps1` sets `TK_SUPERVISOR_TRANSCRIPT_BACKUP` to the nightly backup's `claude-projects` folder and starts the supervisor through the path that calls `recoverWithResume`. This story owns DW-5 and DW-10: enable the e2e suites on win32 and make them green on the Windows host, including the kill-and-restart and backup-restore cases.
+- Status: open

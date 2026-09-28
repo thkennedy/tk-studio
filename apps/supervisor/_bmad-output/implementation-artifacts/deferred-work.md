@@ -64,3 +64,28 @@ location: src/queue.ts Queue.recover (orphan branch); src/cli.ts studioOps
 severity: low
 reason: Queue.recover (orphan branch, the `orphaned` event) writes no stop and has no job definition in hand; the studio run is ended `partial` via ops.end, so the studio's evaluate_stop refuses every later wake, but the pacer keeps minting queue runs that end `blocked` not-woken each hint interval. AC4 "the stop condition is recorded in events" does not hold for restart-ended runs. Deferral class (a). Fixing it reshapes `Queue.recover`, which this story may not do; 21-6 owns the killed-supervisor orphan rule (DW-3).
 status: closed — fixed in story 21-6, 2026-09-28: every end `recover` writes goes through `Queue.end`'s path (`writeEnd`): the `orphaned` event carries `studio_outcome` when the studio run reached a terminal state, and a `stopped` event is written in the same transaction when the job's `stop.on_status` lists it (test/resume.test.ts, test/queue.test.ts). Previously: open
+
+### DW-9: Follow-up review still recommended for 21-6-a-killed-run-resumes-or-ends-partial-never-lost after two follow-up passes
+origin: review-budget-followup (recorded by the attended session; the run paused before the engine's close-out)
+source_spec: `21-6-a-killed-run-resumes-or-ends-partial-never-lost-a-killed-run-resumes-or-ends-partial-never-lost.md`
+location: n/a
+severity: low
+reason: The second follow-up review patched one high finding (an sbx silent exit resumed beside a live in-VM worker) and still recommended another pass (score 7). The work was committed by bmad-loop run 20260928-191230-73a0 and closed by the attended session. This entry keeps the recommendation for a deliberate later review.
+status: open
+
+### DW-10: Two of story 21-6's host checks were not run on Windows
+origin: attended host verification 2026-09-28
+source_spec: `21-6-a-killed-run-resumes-or-ends-partial-never-lost-a-killed-run-resumes-or-ends-partial-never-lost.md`
+location: src/cli.ts recoverWithResume / driveResumes; src/transcript.ts (restore from `TK_SUPERVISOR_TRANSCRIPT_BACKUP`)
+severity: high
+reason: The engine sandbox cannot run them, and the supervisor is never started from a Claude desktop-app session. Not run: (1) kill the supervisor mid-run on the Windows host and restart it: the run must resume or end `partial`, and `Get-Process claude` must show nothing left of the old worker; (2) delete a finished session's `.jsonl` under `%USERPROFILE%\.claude\projects` and force a resume: the file must come back from the nightly backup. Run and passed: a live `--session-id` then `--resume` reports the same `session_id` (Claude Code 2.1.274). The matching e2e suites are skipped on win32 (DW-5). Owner: Story 22.3, with DW-5.
+status: open
+
+### DW-11: The pacer does not treat an ended run that keeps its lock as live
+origin: spec residual risk, 21-6 follow-up review 2 (recorded by the attended session)
+source_spec: `21-6-a-killed-run-resumes-or-ends-partial-never-lost-a-killed-run-resumes-or-ends-partial-never-lost.md`
+location: src/queue.ts Queue.pacing; src/tick.ts tickJob
+severity: low
+reason: An sbx run refused a resume ends `partial` and keeps its checkout lock until the in-VM deadline (`hold_lock`). `Queue.pacing()` does not count it as live, so the pacer may mint the next run, which then waits on the lock. Nothing runs twice; the cost is a queued run that waits. Deferral class (b): behaviour outside this story's criteria.
+affects: 22-3
+status: open
