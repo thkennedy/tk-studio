@@ -90,6 +90,12 @@
     relative or unreadable profile is `DenyProfileRefused`) and forwarded as `--settings
     <path>`. The host tier passes the operator's deny-list settings through it unchanged
     and never widens them.
+    Replan (21-3 reconcile, 2026-09-28): runs are queued and may be driven later by
+    `drain` or the tick, so store the submitted tier on the queue run like
+    `runs.permission_mode` (explicit ?? stored ?? config ?? host) and re-check it at
+    drive time with the same validator. A caller's host bypass is refused before
+    enqueue. `finish` (with `total_cost_usd`) takes `studio_run_id`, never the queue id.
+    Build on the exported `startRun`/`finishRun`/`guardsFor`.
 
 - id: "21-5-guards-and-the-pacer-are-the-wrappers-job"
   title: "Guards and the Pacer Are the Wrapper's Job"
@@ -111,6 +117,14 @@
     Replan (21-1 deferral DW-1, 2026-09-28): on POSIX the lifted timeout kills only the
     direct child; this story's "whole process tree is killed" criterion owns the fix
     (process group or equivalent), and closes DW-1 in deferred-work.md.
+    Replan (21-3 reconcile, 2026-09-28): the pacer reads `queued`/`running` from the
+    queue db (`TK_SUPERVISOR_DB`), keeps the tick's start-of-tick recovery, and keeps
+    its counts (`StartError` refused, lock wait/already-running skipped). The
+    wall-clock guard replaces today's stand-ins with a named guard that kills the
+    process tree. Those stand-ins are the `wake`/`submit` verb timeout (the core job's
+    uncapped guard + 120 s) and the capped skill invocation. With 21-6 that also covers
+    DW-3. Record `stop.on_status` in the queue's `events` table. `finishArgsFor` and
+    `knowledgeOf` in tick.ts are unused.
 
 - id: "21-6-a-killed-run-resumes-or-ends-partial-never-lost"
   title: "A Killed Run Resumes or Ends Partial, Never Lost"
@@ -130,6 +144,12 @@
     implementer.model and reviewers.model explicitly on every subagent launch.
     Deviations: one `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto
     Run Result.
-    Replan (21-1 reconcile, 2026-09-28): resume and orphan handling must respect the
-    lifted CLI's rule that only a run started within 2s before the caller began is
-    adopted after a wake/submit timeout; one-shot runs are minted by `submit`.
+    Replan (21-1 reconcile, 2026-09-28; the 2s wording superseded per 21-3 consult
+    10:52:44Z): one-shot runs are minted by `submit`, recurring ones by `wake`. Resume
+    and orphan handling adopt a studio run only if it is absent from the pre-verb
+    snapshot stored at `verb_started` and was minted at or after `verb_started`. The
+    earliest wins, and an ambiguous lookup fails.
+    Replan (21-3 reconcile, 2026-09-28): resume extends `Queue.recover({end, find})`
+    and its owner identity (hostname + pid + nonce + start time). The queue run id and
+    `studio_run_id` stay separate. DW-3 is this story's: a worker that outlives a killed
+    supervisor must hold the checkout lock, or be killed, before `recover` releases it.

@@ -15,19 +15,28 @@
  * state, and skill invocation go through a live connector
  * (`src/server.ts`) — never the studio internals.
  *
+ * On start (not under --dry-run), before any per-job gating, the tick runs
+ * the queue's restart rule once over the whole queue (`recoverQueue`, the
+ * same rule as `cli.ts recover`) and logs what it recovered: a run a killed
+ * tick stranded `running` has its studio run ended too, so the no-overlap
+ * skip below never holds that job forever. A failed recovery (no
+ * TK_STUDIO_ROOT, contract pin, unusable queue) is a tick that cannot run.
+ *
  * Per job, per tick:
  *   - skip while a run is queued/running (no overlap) or while the
  *     `hint_seconds` pacing window since the last run hasn't elapsed
  *     (both read via `tk_job status`);
- *   - otherwise `tk_job wake`. `woken: false` is an answer (stop condition),
- *     not an error. A core-target job executes inside wake; a skill-target
- *     job returns `queued` + an invoke-skill directive — this script is then
- *     the run's executing wrapper (contract §2): `tk_invoke` the skill with
- *     `run_id` in the payload and the job's `max_wall_clock_seconds` guard
- *     as the run timeout, then `tk_job finish` with the terminal state and
- *     §3 block. A timeout finishes `partial` with the guard named (§4);
- *     model/effort forward the studio-resolved routing verbatim (§5 — never
- *     escalated).
+ *   - otherwise wake → invoke → finish through the queue-backed `runJob`
+ *     (src/cli.ts, Story 21.3; `skipRecover`: the tick already recovered):
+ *     the queue mints idempotently (a racing wake gets the existing run),
+ *     the run takes the checkout lock before `wake` (a live holder leaves it
+ *     `queued`, logged as a skip). A queued run recorded with an explicit
+ *     permission mode is driven under it. `woken: false` is an answer (stop
+ *     condition), not an error. A core-target job executes inside wake under
+ *     the job's own `max_wall_clock_seconds` guard (uncapped: the wake
+ *     verb's timeout is that guard + 120 s); a skill-target job is invoked
+ *     headless under that guard capped at --timeout-cap-s and finished with
+ *     its §3 block.
  *
  * Cron and fixed-interval loop jobs are NOT ticked here — their directives
  * bind to real schedules at submit; this script is only the self-paced pacer.
@@ -36,14 +45,20 @@
  *   bun run src/tick.ts [--dry-run] [--project ID]...
  *                                       [--directory ROOT]... [--timeout-cap-s N]
  *
- * --directory ticks an explicit project root instead of enumerating the
- * registry (testing / one-off ticks).
+ * --directory ticks the given root instead of enumerating the registry
+ * (testing / one-off ticks). The root must still be a registered project
+ * root: every run is validated through registry `show` (its entry's root
+ * must be this directory), so an unregistered root's jobs are refused.
  *
  * Exit codes: 0 tick completed (including nothing-to-do and per-job refusals);
- * 1 a job errored unexpectedly; 2 the tick could not run at all.
+ * 1 a job errored unexpectedly; 2 the tick could not run at all (including an
+ * unusable queue: QueueDbMissing / QueueDbPlacementRefused, or a failed
+ * start-of-tick recovery, before any job).
  */
 import { existsSync } from "node:fs";
+import { recoverQueue, runJob, StartError, type RunSummary } from "./cli";
 import { ConnectorClient } from "./client";
+import { queueDbPath } from "./queue";
 
 const DEFAULT_TIMEOUT_CAP_S = 3600;
 
@@ -201,52 +216,25 @@ async function tickJob(
     return "skipped";
   }
 
-  const wakeOut = await client.callTool("tk_job", { verb: "wake", directory: root, job_id: job.id }, 300_000 + (Number(defn?.guards?.max_wall_clock_seconds) || 0) * 1000);
-  if (wakeOut.toolError) {
-    log(`${job.id}: wake errored — ${wakeOut.toolError.slice(0, 300)}`);
+  // Wake → invoke → finish through the queue-backed runJob (Story 21.3):
+  // idempotent minting, one engine per checkout. The restart rule already ran
+  // once at the start of this tick. The skill invocation's guard is capped at
+  // --timeout-cap-s; the wake verb keeps the job's own guard.
+  let summary: RunSummary;
+  try { summary = await runJob(job.id, root, undefined, { guardCapS: args.timeoutCapS, skipRecover: true }); }
+  catch (e) {
+    const msg = String(e instanceof Error ? e.message : e).slice(0, 300);
+    // A refusal (registry `show`/`resolve`/`wake` answering ok:false, problems[]): no studio run — refused, not an error.
+    if (e instanceof StartError && e.refused) { log(`${job.id}: refused — ${msg}`); return "refused"; }
+    log(`${job.id}: run could not start — ${msg}`);
     return "error";
   }
-  const wake = wakeOut.result ?? {};
-  if (wake.woken !== true) {
-    log(`${job.id}: not woken — ${wake.reason ?? wake.error ?? "unspecified"}`);
-    return "refused";
-  }
-  const runId = String(wake.run_id ?? "");
-  if (typeof wake.state === "string" && wake.state !== "queued") {
-    // Core target: executed inside wake, already terminal.
-    log(`${job.id}: run ${runId} ${wake.state}${wake.reason ? ` — ${wake.reason}` : ""}`);
-    return "woken";
-  }
-
-  const directive = wake.directive as Record<string, any> | undefined;
-  if (directive?.kind !== "invoke-skill" || typeof directive.skill !== "string") {
-    log(`${job.id}: run ${runId} queued with no executable directive (${JSON.stringify(directive ?? null).slice(0, 120)}) — leaving queued`);
-    return "woken";
-  }
-
-  // This driver is now the run's executing wrapper (§2): invoke, then finish.
-  const guardS = Math.min(Number(defn?.guards?.max_wall_clock_seconds) || args.timeoutCapS, args.timeoutCapS);
-  const routing = (wake.routing ?? {}) as Record<string, unknown>;
-  log(`${job.id}: run ${runId} → tk_invoke ${directive.skill} (guard ${guardS}s)`);
-  const knowledge = knowledgeOf(directive);
-  const invokeOut = await client.callTool("tk_invoke", {
-    directory: root,
-    skill: directive.skill,
-    payload: { ...(directive.payload ?? {}), run_id: runId },
-    timeout_s: guardS,
-    ...(typeof routing.model === "string" ? { model: routing.model } : {}),
-    ...(typeof routing.effort === "string" ? { effort: routing.effort } : {}),
-    ...(knowledge ? { knowledge } : {}),
-  }, (guardS + 120) * 1000);
-  const finish = finishArgsFor(invokeOut, guardS);
-  const finishOut = await client.callTool("tk_job", {
-    verb: "finish", directory: root, run_id: runId, ...finish,
-  }, 120_000);
-  if (finishOut.toolError || finishOut.result?.ok === false) {
-    log(`${job.id}: run ${runId} finish FAILED (${finishOut.toolError ?? finishOut.result?.error}) — run left ${finish.state}-unrecorded`);
-    return "error";
-  }
-  log(`${job.id}: run ${runId} ${finish.state}${finish.reason ? ` — ${finish.reason.slice(0, 200)}` : ""}`);
+  const where = `run ${summary.run_id ?? "-"}${summary.studio_run_id ? ` (studio ${summary.studio_run_id})` : ""}`;
+  log(`${job.id}: ${where} ${summary.state}${summary.reason ? ` — ${summary.reason.slice(0, 200)}` : ""}`);
+  // A lock wait or a run already running elsewhere: nothing was driven, whatever its studio run.
+  if (summary.waited || summary.skipped) return "skipped";
+  // No studio run minted (blocked before minting, not-woken): a refusal, not a wake.
+  if (!summary.studio_run_id) return "refused";
   return "woken";
 }
 
@@ -254,6 +242,24 @@ async function main(): Promise<number> {
   let args: Args;
   try { args = parseArgs(process.argv.slice(2)); }
   catch (e) { console.error(String(e instanceof Error ? e.message : e)); return 2; }
+  // An unusable queue (QueueDbMissing / QueueDbPlacementRefused) is a tick that cannot run.
+  try { queueDbPath(); }
+  catch (e) { console.error(`[studio-tick] tick cannot run: ${e instanceof Error ? e.message : e}`); return 2; }
+  // The restart rule, once over the whole queue, before any per-job gating: a
+  // run a killed tick stranded `running` (its studio run still open, which the
+  // no-overlap skip would honour forever) is ended or re-queued here.
+  if (!args.dryRun) {
+    try {
+      const rec = await recoverQueue();
+      const ended = rec.ended.map((e) => `${e.run_id}${e.studio_run_id ? ` (studio ${e.studio_run_id})` : ""}`);
+      if (ended.length || rec.requeued.length) {
+        log(`recovered: ended [${ended.join(", ")}]; requeued [${rec.requeued.join(", ")}]`);
+      } else log("recovered: nothing orphaned");
+    } catch (e) {
+      console.error(`[studio-tick] tick cannot run: recovery failed: ${e instanceof Error ? e.message : e}`);
+      return 2;
+    }
+  }
 
   const client = new ConnectorClient();
   let sawError = false;

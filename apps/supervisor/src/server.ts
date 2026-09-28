@@ -208,7 +208,7 @@ function runProcess(
   });
 }
 
-async function runUv(projectRoot: string, script: string, args: string[], timeoutS = 120): Promise<RunResult> {
+export async function runUv(projectRoot: string, script: string, args: string[], timeoutS = 120): Promise<RunResult> {
   try {
     return await runProcess("uv", ["run", script, ...args], {
       cwd: projectRoot, timeoutS,

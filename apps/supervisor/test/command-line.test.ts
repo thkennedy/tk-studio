@@ -1,10 +1,13 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { main, recoverAfterTimeout, type TimeoutContext } from "../src/cli";
+import {
+  finishRun, guardsFor, launchedEngine, main, recoverAfterTimeout, runJob, startRun, type TimeoutContext, type Validated,
+} from "../src/cli";
 import { claudeBin, studioRoot, StudioRootMissing } from "../src/env";
+import { Queue } from "../src/queue";
 import {
   buildWorkerCommand, buildWorkerEnv, HostBypassRefused, invokeSkill, MISSING_STATUS_BLOCK, type Spawner,
 } from "../src/server";
@@ -162,6 +165,55 @@ describe("wake/submit failure recovery (timeout or otherwise)", () => {
   });
 });
 
+describe("guard timeouts: --timeout-cap-s caps the skill invocation only", () => {
+  const CAP = 3600;
+  type Seen = { verb: string; timeoutS?: number };
+  /** A fake §4 verb runner recording each verb with the timeout it was given. */
+  function recordingRunner(answer: (args: string[]) => Record<string, any>) {
+    const seen: Seen[] = [];
+    const runner = async (_root: string, args: string[], timeoutS?: number) => { seen.push({ verb: args[0], timeoutS }); return answer(args); };
+    return { seen, runner };
+  }
+  const validated = (defn: Record<string, any>, target: "skill" | "core"): Validated =>
+    ({ jobId: defn.id, root: "proj", projectId: "p", defn, target, ...guardsFor(defn, CAP) });
+
+  test("guardsFor: the job's own guard stays uncapped; the invocation guard is capped (default 600 s)", () => {
+    expect(guardsFor({ guards: { max_wall_clock_seconds: 7200 } }, CAP)).toEqual({ jobGuardS: 7200, guardS: CAP });
+    expect(guardsFor({ guards: { max_wall_clock_seconds: 900 } }, CAP)).toEqual({ jobGuardS: 900, guardS: 900 });
+    expect(guardsFor({ guards: { max_wall_clock_seconds: 7200 } })).toEqual({ jobGuardS: 7200, guardS: 7200 });
+    expect(guardsFor({}, CAP)).toEqual({ jobGuardS: 600, guardS: 600 });
+  });
+
+  test("core job past the cap: `wake` (which executes it) gets the uncapped guard + 120 s, never the cap", async () => {
+    const defn = { id: "c", trigger: "loop", target: { core: "x" }, guards: { max_wall_clock_seconds: 7200 } };
+    const { seen, runner } = recordingRunner((args) => args[0] === "status" ? { runs: [] }
+      : { woken: true, run_id: "c-20260928T101010Z", state: "complete" });
+    const started = await startRun(validated(defn, "core"), () => {}, runner);
+    expect("summary" in started).toBe(false);
+    expect(seen.find((s) => s.verb === "wake")!.timeoutS).toBe(7200 + 120);
+  });
+
+  test("skill job past the cap: `submit` gets the uncapped guard + 120 s; the headless invocation runs under the cap", async () => {
+    const defn = { id: "s", trigger: "one-shot", target: { skill: "tk-studio-activate" }, guards: { max_wall_clock_seconds: 7200 } };
+    const { seen, runner } = recordingRunner((args) => {
+      if (args[0] === "status") return { runs: [] };
+      if (args[0] === "submit") return { accepted: true, run_id: "s-20260928T101010Z", state: "queued",
+        directive: { kind: "invoke-skill", skill: "tk-studio-activate", payload: {} } };
+      return { ok: true, state: "complete" }; // finish
+    });
+    const started = await startRun(validated(defn, "skill"), () => {}, runner);
+    if ("summary" in started) throw new Error(`not started: ${JSON.stringify(started.summary)}`);
+    expect(seen.find((s) => s.verb === "submit")!.timeoutS).toBe(7200 + 120);
+    const invoked: unknown[] = [];
+    const summary = await finishRun(started, runner, async (_root, _skill, args) => {
+      invoked.push(args.timeout_s);
+      return { status_block: { status: "complete", intent: "tk-studio-activate", artifacts: [] } };
+    });
+    expect(summary).toMatchObject({ ok: true, state: "complete", run_id: "s-20260928T101010Z" });
+    expect(invoked).toEqual([CAP]);
+  });
+});
+
 // ---------------------------------------------------------------- end to end
 // Real studio verbs (uv + TK_STUDIO_ROOT) against a throwaway store and
 // project; only the worker is faked (CLAUDE_BIN printing a json result).
@@ -196,9 +248,22 @@ if (${opts.selfFinish === true}) {
 console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: ${JSON.stringify(workerResult)}, total_cost_usd: 0.0123 }));
 `);
   chmodSync(fake, 0o755);
-  const run = (jobId = "studio-health", dir = project, extra: string[] = []) => spawnSync("bun", [join(REPO, "src", "cli.ts"), "run", jobId, "--directory", dir, ...extra], {
-    env: { ...process.env, TK_STUDIO_HOME: store, CLAUDE_BIN: fake, ANTHROPIC_API_KEY: "sk-test-parent" }, encoding: "utf-8", timeout: 120_000,
+  // The queue lives outside every repo and outside the store.
+  const queueDb = join(mkdtempSync(join(tmpdir(), "tk-sup-e2e-queue-")), "queue.db");
+  const cli = (verb: string, jobId: string, dir: string, extra: string[] = []) => spawnSync("bun", [join(REPO, "src", "cli.ts"), verb, jobId, "--directory", dir, ...extra], {
+    env: { ...process.env, TK_STUDIO_HOME: store, TK_SUPERVISOR_DB: queueDb, CLAUDE_BIN: fake, ANTHROPIC_API_KEY: "sk-test-parent" }, encoding: "utf-8", timeout: 120_000,
   });
+  const run = (jobId = "studio-health", dir = project, extra: string[] = []) => cli("run", jobId, dir, extra);
+  const submit = (jobId = "studio-health", dir = project) => cli("submit", jobId, dir);
+  /** `recover` / `drain`: no job, no directory. */
+  const bare = (verb: string) => spawnSync("bun", [join(REPO, "src", "cli.ts"), verb], {
+    env: { ...process.env, TK_STUDIO_HOME: store, TK_SUPERVISOR_DB: queueDb, CLAUDE_BIN: fake, ANTHROPIC_API_KEY: "sk-test-parent" }, encoding: "utf-8", timeout: 120_000,
+  });
+  /** Read the queue file (it may not exist yet: nothing opened it). */
+  const queue = <T>(read: (q: Queue) => T): T => {
+    const q = new Queue(queueDb);
+    try { return read(q); } finally { q.close(); }
+  };
   const calls = () => existsSync(record) ? readFileSync(record, "utf-8").trim().split("\n").map((l) => JSON.parse(l)) : [];
   const ledger = () => {
     const dir = join(store, "measurements");
@@ -219,7 +284,7 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
     expect(jobVerb(["status", "--directory", project, "--job-id", "studio-health"]).runs).toEqual([]);
     expect(ledger().filter((e) => e.event === "job-run")).toEqual([]);
   };
-  return { store, project, run, calls, ledger, workerMarker, jobVerb, registeredId, expectNothingWoken };
+  return { store, project, run, submit, bare, queue, queueDb, calls, ledger, workerMarker, jobVerb, registeredId, expectNothingWoken };
 }
 
 describe.skipIf(!canRunE2E)("CLI end to end: studio-health (faked worker)", () => {
@@ -238,7 +303,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: studio-health (faked worker)", () =
     expect(worker.apiKey).toBeNull();
     expect(fx.calls().every((c) => !c.args.includes("--version"))).toBe(true);
 
-    const events = fx.ledger().filter((e) => e.event === "job-run" && e.payload.run_id === summary.run_id);
+    const events = fx.ledger().filter((e) => e.event === "job-run" && e.payload.run_id === summary.studio_run_id);
     expect(events).toHaveLength(1);
     expect(events[0].payload).toMatchObject({ state: "complete", total_cost_usd: 0.0123 });
   }, 120_000);
@@ -316,9 +381,10 @@ describe.skipIf(!canRunE2E)("CLI end to end: studio-health (faked worker)", () =
     const res = fx.run();
     expect(res.status).toBe(1);
     const summary = JSON.parse(res.stdout);
-    expect(summary.run_id).toStartWith("studio-health-");
+    expect(summary.run_id).toStartWith("q-studio-health-");
+    expect(summary.studio_run_id).toStartWith("studio-health-");
     expect(summary.reason).toStartWith("finish failed:");
-    const run = fx.jobVerb(["status", "--directory", fx.project, "--job-id", "studio-health", "--run-id", summary.run_id]).runs[0];
+    const run = fx.jobVerb(["status", "--directory", fx.project, "--job-id", "studio-health", "--run-id", summary.studio_run_id]).runs[0];
     expect(run.state).toBe("cancelled");
     expect(summary.state).toBe(run.state); // the run's real state, not the stale wake/submit answer
   }, 120_000);
@@ -337,7 +403,8 @@ describe.skipIf(!canRunE2E)("CLI end to end: maintenance-conformance (core job)"
     const res = fx.run("maintenance-conformance");
     const summary = JSON.parse(res.stdout);
     expect(summary.target).toBe("core");
-    expect(summary.run_id).toStartWith("maintenance-conformance-");
+    expect(summary.run_id).toStartWith("q-maintenance-conformance-");
+    expect(summary.studio_run_id).toStartWith("maintenance-conformance-");
     expect(["complete", "partial", "blocked", "cancelled"]).toContain(summary.state);
     expect(res.status).toBe(summary.state === "complete" ? 0 : 1);
 
@@ -346,18 +413,447 @@ describe.skipIf(!canRunE2E)("CLI end to end: maintenance-conformance (core job)"
     expect(fx.calls().map((c) => c.args[0])).toEqual(["auth"]);
 
     // No finish beyond wake's own terminal transition: exactly one job-run event, from wake.
-    const events = fx.ledger().filter((e) => e.event === "job-run" && e.payload.run_id === summary.run_id);
+    const events = fx.ledger().filter((e) => e.event === "job-run" && e.payload.run_id === summary.studio_run_id);
     expect(events).toHaveLength(1);
     expect(events[0].payload.state).toBe(summary.state);
     expect(summary.finish).toBeUndefined();
 
     // The outcome is status's record of the run (wake answers no status_block; status does).
-    const status = fx.jobVerb(["status", "--directory", fx.project, "--job-id", "maintenance-conformance", "--run-id", summary.run_id]);
+    const status = fx.jobVerb(["status", "--directory", fx.project, "--job-id", "maintenance-conformance", "--run-id", summary.studio_run_id]);
     const run = status.runs[0];
-    expect(run.run_id).toBe(summary.run_id);
+    expect(run.run_id).toBe(summary.studio_run_id);
     expect(summary.state).toBe(run.state);
     expect(summary.status_block).toBeDefined();
     expect(summary.status_block).toEqual(run.status_block);
     expect(summary.reason).toBe(run.reason);
+
+    // The queue run mirrors the studio outcome.
+    expect(fx.queue((q) => q.get(summary.run_id))).toMatchObject({ state: summary.state, studio_run_id: summary.studio_run_id, target: "core" });
   }, 120_000);
+});
+
+describe.skipIf(!canRunE2E)("CLI end to end: the durable queue", () => {
+  test("submit an invalid job → exit 2 with resolve's problems verbatim; nothing queued", () => {
+    const fx = e2eFixture("unused");
+    const bad = JSON.parse(readFileSync(join(REPO, ".tk-studio", "jobs", "studio-health.json"), "utf-8"));
+    bad.id = "bad-job";
+    delete bad.guards;
+    writeFileSync(join(fx.project, ".tk-studio", "jobs", "bad-job.json"), JSON.stringify(bad));
+    const res = fx.submit("bad-job");
+    expect(res.status).toBe(2);
+    const answer = JSON.parse(res.stdout);
+    expect(answer).toMatchObject({ ok: false, run_id: null });
+    expect(answer.problems).toEqual(["missing required field 'guards'"]);
+    expect(answer.error).toContain("missing required field 'guards'");
+    expect(fx.queue((q) => [q.runs().length, q.events().length,
+      (q.db.query("SELECT COUNT(*) AS n FROM jobs").get() as { n: number }).n])).toEqual([0, 0, 0]);
+  }, 120_000);
+
+  test("submit twice → the same queued run; minted once; nothing driven", () => {
+    const fx = e2eFixture("unused");
+    const first = fx.submit();
+    const second = fx.submit();
+    expect(first.status).toBe(0);
+    expect(second.status).toBe(0);
+    const [a, b] = [JSON.parse(first.stdout), JSON.parse(second.stdout)];
+    expect(a).toMatchObject({ ok: true, state: "queued", minted: true });
+    expect(a.run_id).toStartWith("q-studio-health-");
+    expect(b).toMatchObject({ ok: true, run_id: a.run_id, state: "queued", minted: false });
+    expect(fx.queue((q) => q.runs().map((r) => [r.run_id, r.state]))).toEqual([[a.run_id, "queued"]]);
+    fx.expectNothingWoken();
+  }, 120_000);
+
+  test("run adopts the submitted run and records its transitions ending in the studio outcome", () => {
+    const fx = e2eFixture(`{"status":"complete","intent":"tk-studio-activate","artifacts":[]}`);
+    const queued = JSON.parse(fx.submit().stdout);
+    const res = fx.run();
+    expect(res.status).toBe(0);
+    const summary = JSON.parse(res.stdout);
+    expect(summary).toMatchObject({ ok: true, state: "complete", run_id: queued.run_id });
+    expect(summary.studio_run_id).toStartWith("studio-health-");
+    const studio = fx.jobVerb(["status", "--directory", fx.project, "--job-id", "studio-health", "--run-id", summary.studio_run_id]).runs[0];
+    expect(studio.state).toBe("complete");
+    const [run, events, lock] = fx.queue((q) => [q.get(summary.run_id), q.events(summary.run_id), q.lock(fx.project)] as const);
+    expect(run).toMatchObject({ state: "complete", studio_run_id: summary.studio_run_id, owner_pid: null });
+    expect(events.map((e) => [e.kind, e.to_state])).toEqual([
+      ["enqueued", "queued"], ["claimed", "running"], ["verb-started", "running"], ["studio-run", "running"], ["ended", "complete"],
+    ]);
+    // The pre-verb snapshot is stored with verb_started: no studio-health run existed before.
+    expect(events[2].detail).toEqual({ verb: "submit", snapshot: [], target: "skill" });
+    expect(run).toMatchObject({ verb_snapshot: "[]" });
+    expect(run!.verb_started).toBeString();
+    expect(lock).toBeNull();
+    // Terminal: the next submit mints a new run.
+    expect(JSON.parse(fx.submit().stdout)).toMatchObject({ minted: true });
+  }, 120_000);
+
+  test("run against a checkout held by a live run → stays queued naming the holder, exit 1; already running → its id, exit 1; nothing driven", async () => {
+    const fx = e2eFixture("unused");
+    const me = { pid: process.pid, host: hostname(), nonce: "test-holder" }; // this test process: alive
+    const q = new Queue(fx.queueDb);
+    const holder = q.enqueue({ jobId: "other-job", root: fx.project, definition: { id: "other-job" }, owner: me }).run;
+    expect((await q.claim(holder.run_id, me)).claimed).toBe(true);
+    const res = fx.run();
+    expect(res.status).toBe(1);
+    const waiting = JSON.parse(res.stdout);
+    expect(waiting).toMatchObject({ ok: false, state: "queued", studio_run_id: null, holder: { kind: "run", run_id: holder.run_id, job_id: "other-job", pid: me.pid } });
+    expect(waiting.reason).toContain(holder.run_id);
+    expect(fx.queue((q) => q.get(waiting.run_id))).toMatchObject({ state: "queued" });
+    expect(fx.calls().some((c) => c.args[0] === "-p")).toBe(false);
+    fx.expectNothingWoken();
+
+    // The waiting run is now running under this live process: a second `run` answers it, drives nothing.
+    q.end(holder.run_id, "complete");
+    expect((await q.claim(waiting.run_id, me)).claimed).toBe(true);
+    const again = fx.run();
+    expect(again.status).toBe(1);
+    expect(JSON.parse(again.stdout)).toMatchObject({ ok: false, run_id: waiting.run_id, state: "running" });
+    fx.expectNothingWoken();
+    q.close();
+  }, 120_000);
+
+  test("TK_SUPERVISOR_DB inside the project checkout → QueueDbPlacementRefused, exit 2, no file created", () => {
+    const fx = e2eFixture("unused");
+    mkdirSync(join(fx.project, ".git"));
+    const path = join(fx.project, "q.db");
+    const res = spawnSync("bun", [join(REPO, "src", "cli.ts"), "submit", "studio-health", "--directory", fx.project], {
+      env: { ...process.env, TK_STUDIO_HOME: fx.store, TK_SUPERVISOR_DB: path }, encoding: "utf-8", timeout: 120_000,
+    });
+    expect(res.status).toBe(2);
+    expect(JSON.parse(res.stdout).error).toContain("QueueDbPlacementRefused");
+    expect(existsSync(path)).toBe(false);
+  }, 120_000);
+});
+
+describe("launchedEngine (the tk-studio-launch status block names the detached engine)", () => {
+  test("a launch run's `.bmad-loop/runs/<id>` artifact names the engine", () => {
+    expect(launchedEngine("tk-studio-launch", { status: "complete", artifacts: ["docs/x.md", ".bmad-loop/runs/20260928-101500-ab12"] })).toBe("20260928-101500-ab12");
+    expect(launchedEngine("tk-studio-launch", { artifacts: ["./.bmad-loop/runs/E1/"] })).toBe("E1");
+    expect(launchedEngine(undefined, { intent: "tk-studio-launch", artifacts: [".bmad-loop\\runs\\E2"] })).toBe("E2");
+  });
+
+  test("any other skill, or no engine artifact, names none", () => {
+    expect(launchedEngine("tk-studio-activate", { artifacts: [".bmad-loop/runs/E1"] })).toBeUndefined();
+    expect(launchedEngine("tk-studio-launch", { artifacts: [".bmad-loop/runs/E1/log.txt", "other"] })).toBeUndefined();
+    expect(launchedEngine("tk-studio-launch", undefined)).toBeUndefined();
+  });
+});
+
+describe("tick: an unusable queue", () => {
+  test("TK_SUPERVISOR_DB unset → exit 2 before any job, naming QueueDbMissing", () => {
+    const env = { ...process.env };
+    delete env.TK_SUPERVISOR_DB;
+    const res = spawnSync("bun", [join(REPO, "src", "tick.ts"), "--dry-run"], { env, encoding: "utf-8", timeout: 60_000 });
+    expect(res.status).toBe(2);
+    expect(res.stderr).toContain("QueueDbMissing");
+    expect(res.stdout).not.toContain(": skip");
+  }, 60_000);
+});
+
+describe.skipIf(!canRunE2E)("tick: start-of-tick recovery", () => {
+  test("a tick recovers a dead-owner `running` orphan once, before any job gating; --dry-run recovers nothing", () => {
+    const fx = e2eFixture("unused");
+    // A killed tick left its queue run `running` with its studio run still open (which the no-overlap skip would honour forever).
+    const queued = JSON.parse(fx.submit().stdout);
+    const minted = fx.jobVerb(["submit", "--directory", fx.project, "--id", "studio-health"]);
+    expect(minted.run_id).toStartWith("studio-health-");
+    const dead = { pid: deadPid(), host: hostname(), nonce: "dead-tick" };
+    fx.queue((q) => q.db.run(
+      `UPDATE runs SET state = 'running', owner_pid = ?, owner_host = ?, owner_nonce = ?, verb_started = ?, verb_snapshot = '[]',
+         studio_run_id = ? WHERE run_id = ?`, [dead.pid, dead.host, dead.nonce, new Date().toISOString(), minted.run_id, queued.run_id]));
+    const tick = (extra: string[]) => spawnSync("bun", [join(REPO, "src", "tick.ts"), "--directory", fx.project, ...extra], {
+      env: { ...process.env, TK_STUDIO_HOME: fx.store, TK_SUPERVISOR_DB: fx.queueDb, CLAUDE_BIN: join(fx.store, "fake-claude.js") },
+      encoding: "utf-8", timeout: 120_000,
+    });
+
+    const dry = tick(["--dry-run"]);
+    expect(dry.status).toBe(0);
+    expect(dry.stdout).not.toContain("recovered:");
+    expect(fx.queue((q) => q.get(queued.run_id))).toMatchObject({ state: "running", owner_nonce: "dead-tick" });
+
+    const res = tick([]);
+    expect(res.status).toBe(0);
+    const lines = res.stdout.split("\n");
+    const recovered = lines.findIndex((l) => l.includes(`recovered: ended [${queued.run_id} (studio ${minted.run_id})]`));
+    expect(recovered).toBeGreaterThanOrEqual(0);
+    // Recovery precedes every per-project/per-job line.
+    expect(lines.slice(0, recovered).filter((l) => l.startsWith("[studio-tick]"))).toEqual([]);
+    expect(fx.queue((q) => q.get(queued.run_id))).toMatchObject({ state: "partial", reason: "orphaned: supervisor restart", owner_pid: null });
+    const studio = fx.jobVerb(["status", "--directory", fx.project, "--job-id", "studio-health", "--run-id", minted.run_id]).runs[0];
+    expect(studio).toMatchObject({ state: "partial", reason: "orphaned: supervisor restart" });
+  }, 180_000);
+});
+
+/** A pid that no longer exists (a child that already exited). */
+const deadPid = () => spawnSync("true").pid;
+
+describe("recover requires the studio first", () => {
+  test("`recover` with TK_STUDIO_ROOT unset → exit 2 naming StudioRootMissing; the queue is unchanged", () => {
+    const db = join(mkdtempSync(join(tmpdir(), "tk-sup-rec-queue-")), "q.db");
+    const q = new Queue(db);
+    const dead = { pid: deadPid(), host: hostname(), nonce: "dead" };
+    const r = q.enqueue({ jobId: "j", root: mkdtempSync(join(tmpdir(), "tk-sup-checkout-")), definition: { id: "j" }, owner: dead }).run;
+    q.close();
+    const env: Record<string, string | undefined> = { ...process.env, TK_SUPERVISOR_DB: db, TK_STUDIO_HOME: mkdtempSync(join(tmpdir(), "tk-sup-store-")) };
+    delete env.TK_STUDIO_ROOT;
+    for (const verb of ["recover", "drain"]) {
+      const res = spawnSync("bun", [join(REPO, "src", "cli.ts"), verb], { env, encoding: "utf-8", timeout: 60_000 });
+      expect(res.status).toBe(2);
+      expect(JSON.parse(res.stdout).error).toContain("StudioRootMissing");
+    }
+    const after = new Queue(db);
+    try {
+      expect(after.get(r.run_id)).toMatchObject({ state: "queued", owner_nonce: "dead", reason: null });
+      expect(after.events(r.run_id).map((e) => e.kind)).toEqual(["enqueued"]);
+    } finally { after.close(); }
+  }, 60_000);
+});
+
+describe.skipIf(!canRunE2E)("CLI end to end: restart recovery and drain", () => {
+  test("`recover` re-queues a run a dead supervisor left `running` before the minting verb; `drain` then drives it", () => {
+    const fx = e2eFixture(`{"status":"complete","intent":"tk-studio-activate","artifacts":[]}`);
+    const queued = JSON.parse(fx.submit().stdout);
+    const dead = { pid: deadPid(), host: hostname(), nonce: "dead-supervisor" };
+    fx.queue((q) => q.db.run(
+      "UPDATE runs SET state = 'running', owner_pid = ?, owner_host = ?, owner_nonce = ? WHERE run_id = ?",
+      [dead.pid, dead.host, dead.nonce, queued.run_id]));
+
+    const rec = fx.bare("recover");
+    expect(rec.status).toBe(0);
+    expect(JSON.parse(rec.stdout)).toEqual({ ok: true, ended: [], requeued: [queued.run_id] });
+    expect(fx.queue((q) => q.get(queued.run_id))).toMatchObject({ state: "queued", reason: "requeued: supervisor restart", owner_pid: null });
+    fx.expectNothingWoken();
+
+    const drained = fx.bare("drain");
+    expect(drained.status).toBe(0);
+    const report = JSON.parse(drained.stdout);
+    expect(report).toMatchObject({ ok: true, recovered: { ended: [], requeued: [] } });
+    expect(report.runs).toHaveLength(1);
+    expect(report.runs[0]).toMatchObject({ run_id: queued.run_id, job_id: "studio-health", summary: { ok: true, state: "complete", run_id: queued.run_id } });
+    const studioId = report.runs[0].summary.studio_run_id;
+    expect(fx.jobVerb(["status", "--directory", fx.project, "--job-id", "studio-health", "--run-id", studioId]).runs[0].state).toBe("complete");
+    expect(fx.queue((q) => q.events(queued.run_id).map((e) => e.kind))).toEqual([
+      "enqueued", "requeued", "claimed", "verb-started", "studio-run", "ended",
+    ]);
+
+    // Nothing left to drain.
+    const again = fx.bare("drain");
+    expect(again.status).toBe(0);
+    expect(JSON.parse(again.stdout)).toMatchObject({ ok: true, runs: [] });
+  }, 180_000);
+
+  test("`drain`: a queued run whose job now fails `resolve` ends `blocked` with the problems verbatim, with its event", () => {
+    const fx = e2eFixture("unused");
+    const def = JSON.parse(readFileSync(join(REPO, ".tk-studio", "jobs", "studio-health.json"), "utf-8"));
+    def.id = "soon-bad";
+    const file = join(fx.project, ".tk-studio", "jobs", "soon-bad.json");
+    writeFileSync(file, JSON.stringify(def));
+    const queued = JSON.parse(fx.submit("soon-bad").stdout);
+    expect(queued).toMatchObject({ ok: true, state: "queued", minted: true });
+    delete def.guards; // the definition no longer validates
+    writeFileSync(file, JSON.stringify(def));
+
+    const res = fx.bare("drain");
+    expect(res.status).toBe(1);
+    const report = JSON.parse(res.stdout);
+    expect(report.ok).toBe(false);
+    expect(report.runs).toEqual([{
+      run_id: queued.run_id, job_id: "soon-bad", state: "blocked",
+      problems: ["missing required field 'guards'"], error: "resolve: missing required field 'guards'",
+    }]);
+    const [run, last] = fx.queue((q) => [q.get(queued.run_id), q.events(queued.run_id).at(-1)] as const);
+    expect(run).toMatchObject({ state: "blocked", reason: "resolve: missing required field 'guards'" });
+    expect(last).toMatchObject({ kind: "ended", from_state: "queued", to_state: "blocked", detail: { reason: "resolve: missing required field 'guards'" } });
+    expect(fx.calls().some((c) => c.args[0] === "-p")).toBe(false);
+    // Ended, not queued: the next drain has nothing to do.
+    expect(JSON.parse(fx.bare("drain").stdout)).toMatchObject({ ok: true, runs: [] });
+  }, 180_000);
+
+  test("drain mode: a listed run ended before it is driven is skipped — nothing minted, no studio verb", async () => {
+    const fx = e2eFixture("unused");
+    const queued = JSON.parse(fx.submit().stdout);
+    const q = new Queue(fx.queueDb);
+    try {
+      q.end(queued.run_id, "cancelled", "ended elsewhere"); // another process drove and ended it after the listing
+      const out = await runJob("studio-health", fx.project, undefined, { queue: q, runId: queued.run_id, skipRecover: true });
+      expect(out).toMatchObject({ ok: false, skipped: true, run_id: queued.run_id, state: "cancelled" });
+      expect(out.reason).toStartWith("skipped:");
+      expect(q.runs().map((r) => r.run_id)).toEqual([queued.run_id]); // nothing minted
+    } finally { q.close(); }
+    expect(fx.calls()).toEqual([]); // not even the login preflight
+    fx.expectNothingWoken();
+  }, 180_000);
+
+  test("`drain`: a transport failure during re-validation (uv unavailable) leaves the run queued", () => {
+    const fx = e2eFixture("unused");
+    const queued = JSON.parse(fx.submit().stdout);
+    const res = spawnSync("bun", [join(REPO, "src", "cli.ts"), "drain"], {
+      env: { ...process.env, PATH: dirname(process.execPath), TK_STUDIO_HOME: fx.store, TK_SUPERVISOR_DB: fx.queueDb,
+        CLAUDE_BIN: join(fx.store, "fake-claude.js") }, encoding: "utf-8", timeout: 120_000,
+    });
+    expect(res.status).toBe(1);
+    const entry = JSON.parse(res.stdout).runs[0];
+    expect(entry).toMatchObject({ run_id: queued.run_id });
+    expect(entry.state).toBeUndefined();
+    expect(entry.error).toContain("uv spawn failed");
+    expect(fx.queue((q) => q.get(queued.run_id))).toMatchObject({ state: "queued" });
+    fx.expectNothingWoken();
+  }, 180_000);
+
+  test("`drain`: a start failure after the claim ends the run `blocked`, and the report carries that state", () => {
+    const fx = e2eFixture("unused");
+    const queued = JSON.parse(fx.submit().stdout);
+    // The queue refuses to record `verb_started`: a failure after the lock was claimed, before the minting verb.
+    fx.queue((q) => q.db.run("CREATE TRIGGER refuse_verb_started BEFORE UPDATE OF verb_started ON runs BEGIN SELECT RAISE(ABORT, 'test: verb start refused'); END"));
+    const res = fx.bare("drain");
+    expect(res.status).toBe(1);
+    const entry = JSON.parse(res.stdout).runs[0];
+    expect(entry).toMatchObject({ run_id: queued.run_id, job_id: "studio-health", state: "blocked" });
+    expect(entry.error).toContain("queue (recording submit start)");
+    const run = fx.queue((q) => q.get(queued.run_id))!;
+    expect(run.state).toBe("blocked");
+    expect(run.reason).toContain("verb start refused");
+    expect(fx.queue((q) => q.events(queued.run_id).map((e) => [e.kind, e.to_state]))).toEqual([
+      ["enqueued", "queued"], ["claimed", "running"], ["ended", "blocked"],
+    ]);
+    expect(fx.queue((q) => q.lock(fx.project))).toBeNull();
+    fx.expectNothingWoken();
+  }, 180_000);
+
+  test("`drain`: a queued run whose checkout no longer exists ends `blocked` naming the missing directory", () => {
+    const fx = e2eFixture("unused");
+    const queued = JSON.parse(fx.submit().stdout);
+    rmSync(fx.project, { recursive: true, force: true });
+    const res = fx.bare("drain");
+    expect(res.status).toBe(1);
+    expect(JSON.parse(res.stdout).runs[0]).toMatchObject({ run_id: queued.run_id, state: "blocked" });
+    const run = fx.queue((q) => q.get(queued.run_id))!;
+    expect(run.state).toBe("blocked");
+    expect(run.reason).toContain("directory does not exist");
+    expect(fx.queue((q) => q.events(queued.run_id).at(-1))).toMatchObject({ kind: "ended", to_state: "blocked" });
+  }, 180_000);
+
+  test("`drain`: a transient stop before validation (no Max login) leaves the run queued", () => {
+    const fx = e2eFixture("unused", false);
+    const queued = JSON.parse(fx.submit().stdout);
+    const res = fx.bare("drain");
+    expect(res.status).toBe(1);
+    // The entry reports the run's actual queue state (`queued`), and the summary names the drained run.
+    const entry = JSON.parse(res.stdout).runs[0];
+    expect(entry).toMatchObject({ run_id: queued.run_id, state: "queued", summary: { ok: false, state: "blocked", run_id: queued.run_id } });
+    expect(entry.summary.reason).toContain("Max login");
+    expect(fx.queue((q) => q.get(queued.run_id))).toMatchObject({ state: "queued" });
+    fx.expectNothingWoken();
+  }, 180_000);
+
+  test("`drain` drives a run queued by `run --permission-mode plan` (lock wait) under `plan`, not the default", async () => {
+    const fx = e2eFixture(`{"status":"complete","intent":"tk-studio-activate","artifacts":[]}`);
+    const me = { pid: process.pid, host: hostname(), nonce: "plan-holder" }; // this test process: alive
+    const q = new Queue(fx.queueDb);
+    try {
+      const holder = q.enqueue({ jobId: "other-job", root: fx.project, definition: { id: "other-job" }, owner: me }).run;
+      expect((await q.claim(holder.run_id, me)).claimed).toBe(true);
+      const res = fx.run("studio-health", fx.project, ["--permission-mode", "plan"]);
+      expect(res.status).toBe(1);
+      const waiting = JSON.parse(res.stdout);
+      expect(waiting).toMatchObject({ ok: false, state: "queued", waited: "lock" });
+      expect(q.get(waiting.run_id)).toMatchObject({ state: "queued", owner_pid: null, permission_mode: "plan" });
+      q.end(holder.run_id, "complete");
+
+      const drained = fx.bare("drain");
+      expect(drained.status).toBe(0);
+      const report = JSON.parse(drained.stdout);
+      expect(report.runs).toHaveLength(1);
+      expect(report.runs[0]).toMatchObject({ run_id: waiting.run_id, summary: { ok: true, state: "complete", run_id: waiting.run_id } });
+      const workers = fx.calls().filter((c) => c.args[0] === "-p");
+      expect(workers).toHaveLength(1);
+      const at = workers[0].args.indexOf("--permission-mode");
+      expect(workers[0].args.slice(at, at + 2)).toEqual(["--permission-mode", "plan"]);
+      expect(q.get(waiting.run_id)).toMatchObject({ state: "complete", permission_mode: "plan" });
+    } finally { q.close(); }
+  }, 180_000);
+
+  test("`run` recovers on start: a dead supervisor's minted run ends `partial` (studio run finished too), then a fresh run is driven", () => {
+    const fx = e2eFixture(`{"status":"complete","intent":"tk-studio-activate","artifacts":[]}`);
+    // A dead supervisor claimed a run, reached `submit` and minted a studio run, then died before recording it.
+    const queued = JSON.parse(fx.submit().stdout);
+    const verbStarted = new Date().toISOString();
+    const minted = fx.jobVerb(["submit", "--directory", fx.project, "--id", "studio-health"]);
+    expect(minted.run_id).toStartWith("studio-health-");
+    const dead = { pid: deadPid(), host: hostname(), nonce: "dead-supervisor" };
+    fx.queue((q) => q.db.run(
+      `UPDATE runs SET state = 'running', owner_pid = ?, owner_host = ?, owner_nonce = ?, verb_started = ?, verb_snapshot = '[]'
+       WHERE run_id = ?`, [dead.pid, dead.host, dead.nonce, verbStarted, queued.run_id]));
+
+    const res = fx.run();
+    expect(res.status).toBe(0);
+    const summary = JSON.parse(res.stdout);
+    expect(summary).toMatchObject({ ok: true, state: "complete" });
+    expect(summary.run_id).not.toBe(queued.run_id);
+    expect(summary.studio_run_id).not.toBe(minted.run_id);
+
+    const orphan = fx.queue((q) => q.get(queued.run_id))!;
+    expect(orphan).toMatchObject({ state: "partial", reason: "orphaned: supervisor restart", studio_run_id: minted.run_id });
+    expect(fx.queue((q) => q.events(queued.run_id).at(-1))).toMatchObject({ kind: "orphaned", detail: { lookup: { ok: true, adopted: minted.run_id }, studio: { ok: true } } });
+    const studio = fx.jobVerb(["status", "--directory", fx.project, "--job-id", "studio-health", "--run-id", minted.run_id]).runs[0];
+    expect(studio).toMatchObject({ state: "partial", reason: "orphaned: supervisor restart" });
+  }, 180_000);
+
+  test("engine path: a tk-studio-launch block naming `.bmad-loop/runs/<id>` hands the lock to the engine; a claim then waits or frees by the probe", async () => {
+    const fx = e2eFixture(`Launched.\n{"status":"complete","intent":"tk-studio-launch","artifacts":[".bmad-loop/runs/20260928-101500-ab12"]}`);
+    const def = JSON.parse(readFileSync(join(REPO, ".tk-studio", "jobs", "studio-health.json"), "utf-8"));
+    Object.assign(def, { id: "launch-probe", target: { skill: "tk-studio-launch", payload: { verb: "status" } } });
+    writeFileSync(join(fx.project, ".tk-studio", "jobs", "launch-probe.json"), JSON.stringify(def));
+
+    const res = fx.run("launch-probe");
+    const summary = JSON.parse(res.stdout);
+    expect(summary).toMatchObject({ ok: true, state: "complete", target: "skill" });
+    expect(res.status).toBe(0);
+    // The mirror handed the checkout lock to the engine.
+    const [run, lock, last] = fx.queue((q) => [q.get(summary.run_id), q.lock(fx.project), q.events(summary.run_id).at(-1)] as const);
+    expect(run).toMatchObject({ state: "complete", engine_run_id: "20260928-101500-ab12" });
+    expect(lock).toMatchObject({ kind: "engine", engine_run_id: "20260928-101500-ab12", run_id: summary.run_id });
+    expect(last!.detail).toMatchObject({ lock: { handed_to_engine: "20260928-101500-ab12" } });
+
+    // A second run on the checkout, probes injected: live → waits naming the engine; failed → waits naming the failure; gone → claims.
+    let probe = { live: true } as { live: boolean; detail?: string };
+    const me = { pid: process.pid, host: hostname(), nonce: "engine-test" };
+    const q = new Queue(fx.queueDb, { ownerAlive: () => true, engineLive: async () => probe });
+    try {
+      const b = q.enqueue({ jobId: "studio-health", root: fx.project, definition: { id: "studio-health" }, owner: me }).run;
+      const live = await q.claim(b.run_id, me);
+      expect(live).toMatchObject({ claimed: false, why: "lock", holder: { kind: "engine", engine_run_id: "20260928-101500-ab12" } });
+      probe = { live: true, detail: "launch status probe failed (exit 1): no bmad-loop" };
+      const failed = await q.claim(b.run_id, me);
+      if (failed.claimed) throw new Error("claimed under a failed probe");
+      expect(failed.reason).toContain("no bmad-loop");
+      probe = { live: false };
+      expect((await q.claim(b.run_id, me)).claimed).toBe(true);
+      expect(q.lock(fx.project)).toMatchObject({ kind: "run", run_id: b.run_id });
+    } finally { q.close(); }
+  }, 180_000);
+  test("mirror: a tk-studio-launch run whose block names no engine probes the launch core before releasing (injected probe: live → the engine holds the lock)", async () => {
+    const fx = e2eFixture(`{"status":"blocked","intent":"tk-studio-launch","reason":"engine start unconfirmed","artifacts":[]}`);
+    const def = JSON.parse(readFileSync(join(REPO, ".tk-studio", "jobs", "studio-health.json"), "utf-8"));
+    Object.assign(def, { id: "launch-probe", target: { skill: "tk-studio-launch", payload: { verb: "status" } } });
+    writeFileSync(join(fx.project, ".tk-studio", "jobs", "launch-probe.json"), JSON.stringify(def));
+    const probed: (string | null)[][] = [];
+    const q = new Queue(fx.queueDb, { ownerAlive: () => true, engineLive: async (root, id) => { probed.push([root, id]); return { live: true, run_ids: ["E9"] }; } });
+    const prev = { home: process.env.TK_STUDIO_HOME, bin: process.env.CLAUDE_BIN };
+    process.env.TK_STUDIO_HOME = fx.store;
+    process.env.CLAUDE_BIN = join(fx.store, "fake-claude.js");
+    try {
+      const summary = await runJob("launch-probe", fx.project, undefined, { queue: q });
+      expect(summary).toMatchObject({ ok: false, state: "blocked", target: "skill" });
+      expect(probed).toEqual([[fx.project, null]]);
+      expect(q.get(summary.run_id!)).toMatchObject({ state: "blocked", engine_run_id: "E9" });
+      expect(q.lock(fx.project)).toMatchObject({ kind: "engine", engine_run_id: "E9", run_id: summary.run_id });
+      expect(q.events(summary.run_id!).at(-1)!.detail).toMatchObject({ lock: { handed_to_engine: "E9" }, engine: { live: ["E9"] } });
+    } finally {
+      for (const [k, v] of [["TK_STUDIO_HOME", prev.home], ["CLAUDE_BIN", prev.bin]] as const) {
+        if (v === undefined) delete process.env[k]; else process.env[k] = v;
+      }
+      q.close();
+    }
+  }, 180_000);
 });
