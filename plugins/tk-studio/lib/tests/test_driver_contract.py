@@ -84,8 +84,11 @@ class DriverContractTestCase(unittest.TestCase):
         # pipeline-v2 defaults — additive); 0.1.16 adds tk-studio-install's
         # optional no_normalize payload and states its churn normalization
         # (the same-pin install no-op fix — additive); 0.1.17 adds the
-        # studio-managed base patches (BMAD-METHOD#2718, additive)
-        self.assertRegex(self.text, r"\*\*0\.1\.17\*\*")
+        # studio-managed base patches (BMAD-METHOD#2718, additive); 0.1.18
+        # names the conformant drivers — the studio supervisor and Hermes
+        # in place of the retired ClaudeOS, the §1 roster, §2's executing
+        # wrapper, the §4 finish row with total_cost_usd (ST-062, additive)
+        self.assertRegex(self.text, r"\*\*0\.1\.18\*\*")
         self.assertIn("### 5.1 Execution-pipeline legs", self.text)
         self.assertIn("lib/pipeline.py", self.text)
         self.assertIn("Change policy", self.text)
@@ -93,6 +96,110 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertRegex(self.text, r"[Bb]reaking")
         # the renumber mapping stays documented — old references resolve
         self.assertIn("1.N.0 → 0.1.N", self.text)
+
+    # --- ST-062: 0.1.18 names the supervisor and Hermes
+
+    def _section(self, start: str, end: str) -> str:
+        begin = self.text.index(start)
+        return self.text[begin:self.text.index(end, begin)]
+
+    def test_0_1_18_names_the_supervisor_and_hermes_in_place_of_claudeos(self):
+        # AC1: additive header clause; §7 row 6 names the UI-carrying
+        # consumers and still says the studio grows no UI; no row or
+        # Audience line names ClaudeOS as the driver
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.18**", header)
+        clause = header[header.index("0.1.18 names"):]
+        self.assertIn("— additive", clause)
+        audience = next(line for line in self.text.splitlines()
+                        if line.startswith("| Audience"))
+        self.assertNotIn("ClaudeOS", audience)
+        self.assertIn("studio supervisor", audience)
+        self.assertIn("Hermes", audience)
+        section = self.text[self.text.index("integration dossier coverage"):
+                            self.text.index("## 8. Conformance")]
+        row6 = next(line for line in section.splitlines()
+                    if line.startswith("| 6 |"))
+        for phrase in ("studio supervisor", "status page", "Hermes",
+                       "front door", "grows no UI"):
+            self.assertIn(phrase, row6)
+        self.assertNotIn("ClaudeOS", row6)
+        for row in (line for line in section.splitlines()
+                    if re.match(r"^\| \d \|", line)):
+            self.assertNotIn("ClaudeOS plugin", row)
+            self.assertNotRegex(row, r"ClaudeOS (as )?first driver(?!.{0,40}retired)")
+            self.assertNotIn("ClaudeOS remains", row)
+        # every remaining ClaudeOS mention reads as retired or historical
+        for line in self.text.splitlines():
+            if "ClaudeOS" in line:
+                self.assertTrue("retired" in line or "historical" in line,
+                                f"ClaudeOS not marked retired/historical: "
+                                f"{line[:120]}")
+
+    def test_driver_roster_names_the_three_drivers_and_their_roles(self):
+        # AC2: the supervisor executes and serves the status page; Hermes
+        # submits and never executes; direct invocation conforms per §1
+        roster = self._section("### Driver roster (0.1.18)",
+                               "### Auth preflight")
+        rows = {line.split("|")[1].strip(): line
+                for line in roster.splitlines()
+                if line.startswith("| ") and "---" not in line}
+        supervisor = rows["the studio supervisor"]
+        self.assertIn("executing wrapper", supervisor)
+        self.assertIn("status page", supervisor)
+        hermes = rows["Hermes"]
+        self.assertIn("front door", hermes)
+        self.assertIn("submits jobs to the supervisor", hermes)
+        self.assertIn("never executes a run", hermes)
+        direct = rows["direct invocation"]
+        self.assertIn("conforming driver per §1", direct)
+        # the roster sits in §1 (direct invocation is defined there)
+        self.assertLess(self.text.index("## 1. Invocation model"),
+                        self.text.index("### Driver roster (0.1.18)"))
+        self.assertLess(self.text.index("### Driver roster (0.1.18)"),
+                        self.text.index("## 2. Skill invocation surface"))
+
+    def test_section_2_names_the_executing_wrapper(self):
+        # AC3: whichever conformant driver executed the run's wake is its
+        # executing wrapper; account and finish are that wrapper's duty
+        section = self._section("## 2. Skill invocation surface",
+                                "## 3. JSON status schema")
+        statement = " ".join(section.split())
+        self.assertIn("the executing wrapper for a run is whichever "
+                      "conformant driver", statement)
+        self.assertIn("executed its `wake` directive", statement)
+        self.assertIn("`account`", statement)
+        self.assertIn("`finish`", statement)
+        self.assertIn("are that wrapper's duty", statement)
+
+    def test_section_1_cross_refs_and_the_finish_row(self):
+        # AC4: §1 points to §2 for the per-skill CLIs and §3 for the
+        # status block; §4 documents finish with the optional cost
+        section = " ".join(self._section("## 1. Invocation model",
+                                         "## 2. Skill invocation surface")
+                           .split())
+        self.assertIn("listed per skill in §2", section)
+        self.assertIn("status block** (§3)", section)
+        self.assertNotIn("status block** (§4)", section)
+        self.assertNotIn("listed per skill in §3", section)
+        section_4 = self._section("## 4. Job model and scheduler verbs",
+                                  "## 5. Model & effort override API")
+        row = next(line for line in section_4.splitlines()
+                   if line.startswith("| `finish`"))
+        self.assertIn("total_cost_usd?", row)
+        self.assertIn("--total-cost-usd", row)
+        self.assertIn("optional", row)
+        self.assertIn("never zero-filled", row)
+        self.assertIn("refused by name before anything is written", row)
+        self.assertIn("One `job-run` event per terminal transition", row)
+        self.assertIn("non-negative", row)
+        self.assertIn("finite", row)
+        self.assertIn("--directory DIR", row)
+        wake = next(line for line in section_4.splitlines()
+                    if line.startswith("| `wake`"))
+        self.assertEqual(len(re.split(r"(?<!\\)\|", row)),
+                         len(re.split(r"(?<!\\)\|", wake)))
 
     # --- 0.1.8: §2 clarifications stay pinned (chipped at PR #21 review)
 
