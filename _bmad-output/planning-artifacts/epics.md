@@ -1741,3 +1741,87 @@ So that Phase 1 is proven before Phase 2 starts.
 **Given** the acceptance record
 **When** the story closes
 **Then** a kb record names the run ids, the PR URL, the costs, and every failure met, and TUA `main` is verified unchanged at its recorded commit
+
+## Epic 24: Opus 5.5 Earns Its Legs, Measured
+
+The operator asked on 2026-09-28 to run Claude Opus 5.5 in as many loop legs as it suits, and to measure cost and speed. Opus 5.5 lists at $4 / $20 per million input / output tokens, with cache reads at $0.20. That is below Opus 5 ($5 / $25) and Fable 5.1 ($10 / $50), but twice Sonnet 5 ($2 / $10). So it is a price cut on the consult, seam, review, triage and planner legs. On the session, implementer, reviewer and supervise legs it only saves money if it finishes a story in fewer turns and retries.
+
+The routing is already in: PR #73 adds `claude-opus-5-5` to the pipeline allowlist and puts tk-studio's own `.bmad-loop/routing.toml` on Opus 5.5 for every leg. This epic makes the trial measurable and turns it into a verdict. Three measurement gaps drive it:
+
+- The v2 baseline priced weighted tokens at one model's price, which cannot price mixed-model routes.
+- The engine now runs inside Docker Sandboxes, so its session transcripts live in the microVM rather than in the host backup.
+- There is no wall-clock baseline on this box.
+
+The shipped `[pipeline.legs]` defaults change only when this epic records a verdict (AD-14, AD-12 evidence discipline). Requirements trace: operator request of 2026-09-28; `kb/execution-pipeline-model-routing.md`. Repos: tk-studio, the supervisor repo, the-universe-awaits (throwaway branches only).
+
+### Story 24.1: Every Landed Story Carries Its Price and Its Time
+
+As the operator comparing model routes,
+I want each landed loop story priced per model from its transcripts and timed from its run,
+So that routes are judged on dollars and wall-clock time, not on token counters.
+
+**Acceptance Criteria:**
+
+**Given** a bmad-loop run on the sbx engine
+**When** a story reaches its boundary
+**Then** the session transcripts and subagent transcripts for that story are copied out of the microVM into the run's directory in the mounted checkout (gitignored), so they reach the host and its nightly backup
+
+**Given** a story's transcripts and a committed price table (model id → input, output, cache-write and cache-read $ per MTok, with the table's date)
+**When** the meter prices the story
+**Then** it reports dollars per model and per leg (session, implementer, reviewers, consult, seam, review, triage, supervise), the story's wall-clock from first dispatch to landed commit, its attempt count, and the route in force (from `routing.current.json`); a model missing from the price table is a named refusal, never a guessed price
+
+**Given** a priced story
+**When** the meter records it
+**Then** one `observation` event per story lands in this machine's ledger, carrying the story key, route, dollars, wall-clock and attempts, and the lib suite pins the pricing arithmetic, the missing-price refusal, and a mixed-model story
+
+### Story 24.2: The Supervisor Is Built on the Trial Route
+
+As the operator,
+I want the Phase 1 build itself to run on the Opus 5.5 route and to be measured story by story,
+So that the trial collects real data without spending anything beyond the planned work.
+
+**Acceptance Criteria:**
+
+**Given** Epics 20–22 run through the launch pipeline
+**When** each story lands
+**Then** it ran on the trial route (tk-studio's `routing.toml`, and the same table in the supervisor repo), and its Story 24.1 record exists
+
+**Given** the landed stories
+**When** they are compared with the v2 table by story kind (core code ≈ $4.4, feature ≈ $8.6 all-in)
+**Then** a kb trial record lists each story's dollars, wall-clock, attempts and kind, with the caveat that these are different stories and a different language (TypeScript and Python against the C#/Godot baseline)
+
+### Story 24.3: Paired Runs on The Universe Awaits
+
+As the operator,
+I want the same stories run under both routes from the same base,
+So that cost and speed are compared on identical work in the project the baseline came from.
+
+**Acceptance Criteria:**
+
+**Given** the engine home on this box (Story 23.1) and two throwaway branches cut from one recorded TUA `main` commit, `throwaway/route-v2` and `throwaway/route-o55`
+**When** stories `2-1-keyed-month-thread-scheduler` and `2-2` (in `spec-epic-2` order) run on each branch, with the shipped defaults on `route-v2` and Opus 5.5 on every leg on `route-o55`, through runtime overrides or a branch-local `routing.toml` (never on `main`)
+**Then** each story on each arm has a Story 24.1 record
+
+**Given** the four records
+**When** the arms are compared per story
+**Then** the kb trial record states, per story and in total, the dollars (split by leg), wall-clock, attempt-1 landing, review findings raised, and weekly plan-usage points; it notes that n = 2 is directional, not significant; and neither branch merges anywhere
+
+### Story 24.4: The Verdict Sets the Defaults
+
+As the operator,
+I want the trial's evidence turned into a routing decision per leg,
+So that the shipped defaults reflect what was measured, and nothing changes silently.
+
+**Acceptance Criteria:**
+
+**Given** the Story 24.2 and 24.3 records
+**When** the verdict is drafted
+**Then** each leg gets keep-Opus-5.5, revert, or needs-more-data, with the evidence cited; an `observation` per leg lands in the ledger, and `tk-studio-evolve` mints the proposal, which only the operator adopts
+
+**Given** an adopted proposal
+**When** it is applied
+**Then** `[pipeline.legs]` in the `tk-studio-launch` `customize.toml` and the kb table change to the adopted route with the trial's numbers, and the release motion ships it with the lib suite and conformance green; the project-tier trial table is then removed from tk-studio's `routing.toml`
+
+**Given** budget left after the paired runs
+**When** the verdict keeps Opus 5.5 on the session leg
+**Then** one effort probe (session at `low` against `medium`, on one story) is run and recorded before the effort default is set
