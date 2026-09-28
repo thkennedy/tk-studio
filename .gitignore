@@ -9,3 +9,4 @@ __pycache__/
 _bmad/render/
 _bmad/config.user.yaml
 .bmad-loop/routing.current.json
+_bmad-output/implementation-artifacts/supervision/

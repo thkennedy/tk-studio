@@ -1,0 +1,79 @@
+# studio-pipeline: the bmad-loop plugin that carries the studio's per-unit
+# gate for tk-studio.
+#
+# Ported 2026-09-28. The base is The Universe Awaits' 0.3.0-tua.1: pipeline
+# v2, the measured one in kb/execution-pipeline-model-routing.md. The one
+# file TUA never had, task-planning.md, comes from the ClaudeOS 0.2.0 original
+# at tag retired-as-driver-2026-09-26, adapted here.
+#
+# A UNIT IS A WHOLE STORY. The stories in _bmad-output/planning-artifacts/epics.md
+# are already sized and carry their acceptance criteria. At bootstrap,
+# task-planning.md transcribes the epic 1:1 into stories.yaml (through
+# transcribe.py) and writes the first story's plan. tk-studio-launch step 4
+# reads it.
+#
+# Declarative only (no [python]), so the plugin loads without a trust entry.
+#
+#   [workflows.gate]    pre_commit_gate, role = review (the routed review model).
+#                       One injected session per unit, following {scripts}/gate.md.
+#                       Its reconcile (Part A) scores 0-1 in one turn; at 2-3 it
+#                       evaluates the deviation against later stories and records
+#                       one verdict (reconcile.md). OFF by default: TUA's D-90
+#                       measured six stories in a row at score 0-1, where the
+#                       session only re-ran verify.
+#   [hooks.pre_commit]  reconcile_gate.py pauses the run on a recorded `escalate`,
+#                       or on score >= min_score with no verdict when fail_closed
+#                       is set, so a human reconciles attended (bmad-loop-resolve).
+#
+# Not ported yet: TUA's pre-dispatch seam check (seam_check.py). It reads TUA's
+# per-epic epics files and routes through TUA's scripts/loop/apply-route.py.
+# Until it is generalised, the `seam-text-fix` consult trigger never fires here,
+# and reconcile_gate.py's seam guard finds no seam records and passes.
+#
+# Operator overlay, in .bmad-loop/policy.toml:
+#   [plugins.studio-pipeline]
+#   gate_enabled = false   # the injected session (default off)
+#   min_score = 2          # score at or above which the commit gate expects a verdict
+#   fail_closed = true     # pause when score >= min_score and no verdict landed
+
+[plugin]
+name = "studio-pipeline"
+version = "0.3.0-studio.1"
+api_version = 1
+description = "Per-unit studio gate: deviation-scored reconcile against later stories and the architecture spine; epic transcription and first-story planning at bootstrap."
+author = "tk-studio (ported from The Universe Awaits and ClaudeOS)"
+
+[[settings]]
+key = "gate_enabled"
+type = "bool"
+default = false
+label = "Enable the studio gate session"
+help = "pre_commit_gate: inject the studio gate session for every unit (workflow-overlay convention <name>_enabled)."
+
+[[settings]]
+key = "min_score"
+type = "int"
+default = 2
+min = 0
+max = 3
+label = "Minimum deviation score"
+help = "Deviation score (0-3) at or above which the commit gate expects a recorded reconcile verdict."
+
+[[settings]]
+key = "fail_closed"
+type = "bool"
+default = true
+label = "Pause on missing verdict"
+help = "true = pause before commit when deviation_score >= min_score but no reconcile verdict was recorded; false = commit with an advisory line."
+
+[workflows.gate]
+stage = "pre_commit_gate"
+role = "review"
+blocking = false
+prompt = "Studio gate for unit `{story_key}` (run {run_id}). Read `{scripts}/gate.md` completely and follow it for this unit; it points you at `{scripts}/reconcile.md` and `{scripts}/task-planning.md` as needed. Never modify code or tests."
+
+[hooks.pre_commit]
+cmd = "uv run --no-project python \"{scripts}/reconcile_gate.py\""
+timeout_sec = 60
+blocking = false
+fail_closed = false
