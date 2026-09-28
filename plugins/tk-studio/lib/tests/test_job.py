@@ -180,6 +180,10 @@ class JobTestCase(unittest.TestCase):
             self._defn(target={"payload": {"a": 1}}),
             self._defn(target={"core": []}),
             self._defn(target={"core": ["C:/abs/path.py", "run"]}),
+            self._defn(target={"core": [r"C:\abs\path.py"]}),
+            self._defn(target={"core": ["/abs/path.py"]}),
+            self._defn(target={"core": ["C:relative-to-drive.py"]}),
+            self._defn(target={"core": [r"lib\..\..\outside.py"]}),
             self._defn(target={"core": ["../outside.py"]}),
             self._defn(target={"skill": "x", "extra": 1}),
         ]
