@@ -10,3 +10,4 @@ _bmad/render/
 _bmad/config.user.yaml
 .bmad-loop/routing.current.json
 _bmad-output/implementation-artifacts/supervision/
+.bmad-loop/archive/

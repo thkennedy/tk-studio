@@ -1,0 +1,41 @@
+# stories.yaml: Epic 20 of this project, transcribed 1:1 from _bmad-output/planning-artifacts/epics.md
+# by .bmad-loop/plugins/studio-pipeline/transcribe.py on 2026-09-28. The epics document is
+# the plan; the studio gate may append remediation entries (`<key>-r<n>`) and revise
+# UNSTARTED entries' invoke_dev_with, nothing else.
+
+- id: "20-1-finish-records-what-the-run-cost"
+  title: "Finish Records What the Run Cost"
+  description: >-
+    I want `finish` to accept the run's cost and the `job-run` event to carry it, So
+    that every terminal run lands in the ledger with the dollars it spent. Canonical:
+    ST-061.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 20.1:
+    Finish Records What the Run Cost", the authoritative specification (user story and
+    acceptance criteria). Read the epic's own narrative (the paragraphs under "## Epic
+    20:") for scope, rulings and the repo the story targets; transcribe the story into
+    the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/20-1.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass implementer.model and reviewers.model
+    explicitly on every subagent launch. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result.
+
+- id: "20-2-contract-0-1-18-names-the-supervisor-and-hermes"
+  title: "Contract 0.1.18 Names the Supervisor and Hermes"
+  description: >-
+    I want the contract to name its conformant drivers and say that any of them may
+    execute a run, So that the studio supervisor is a first-class consumer while the
+    studio itself still grows no UI. Canonical: ST-062.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 20.2:
+    Contract 0.1.18 Names the Supervisor and Hermes", the authoritative specification
+    (user story and acceptance criteria). Read the epic's own narrative (the paragraphs
+    under "## Epic 20:") for scope, rulings and the repo the story targets; transcribe
+    the story into the spec's intent contract and never re-derive, generalise or extend
+    it. Plan: plans/20-2.md when present (its Code Map is the investigation). Project
+    rules and the verify gate: the studio customization
+    (_bmad/custom/bmad-build-auto.toml). Routing: .bmad-loop/routing.current.json; pass
+    implementer.model and reviewers.model explicitly on every subagent launch.
+    Deviations: one `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto
+    Run Result.
