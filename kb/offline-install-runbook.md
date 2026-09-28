@@ -43,9 +43,9 @@ uv run tools/release_archive.py run --dry-run
 
 ## Sneakernet, end to end
 
-On a **connected machine** (the repo is private — the download is
-authenticated; the archive marketplace source type cannot fetch it,
-which is exactly why this runbook exists):
+On a **connected machine** (the repo has been public since 2026-09-15,
+so the download itself needs no auth; this runbook exists for the target
+machine that has no network, git, or npm at all):
 
 ```bash
 gh release download tk-studio--v<version> --pattern "tk-studio-<version>.zip" --repo <owner>/tk-studio
@@ -99,10 +99,12 @@ Then consume it:
 `{"source": "archive", "url": …, "sha256": …}` in a marketplace entry
 is the harness-native pinned install — but it fetches over public HTTPS
 (headers only survive same-origin, and GitHub asset downloads redirect
-off-origin), so it cannot serve this private repo's assets. It activates
-if the repo goes public or assets land on a public (or same-origin
-header-auth) host; the recorded `{url, sha256}` pair is already in the
-exact shape that entry needs.
+off-origin), so it could not serve this repo's assets while the repo was
+private. The repo went public on 2026-09-15, which lifts that blocker;
+the recorded `{url, sha256}` pair is already in the exact shape that
+entry needs. The archive-source path has not yet been re-probed live
+against the public asset — until it is, this runbook's verified local
+zip remains the proven backstop.
 
 ## Release-motion order (why the record trails the tag)
 
