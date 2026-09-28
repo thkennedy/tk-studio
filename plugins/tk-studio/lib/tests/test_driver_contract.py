@@ -83,8 +83,9 @@ class DriverContractTestCase(unittest.TestCase):
         # execution-pipeline routing (§5.1, lib/pipeline.py, the measured
         # pipeline-v2 defaults — additive); 0.1.16 adds tk-studio-install's
         # optional no_normalize payload and states its churn normalization
-        # (the same-pin install no-op fix — additive)
-        self.assertRegex(self.text, r"\*\*0\.1\.16\*\*")
+        # (the same-pin install no-op fix — additive); 0.1.17 adds the
+        # studio-managed base patches (BMAD-METHOD#2718, additive)
+        self.assertRegex(self.text, r"\*\*0\.1\.17\*\*")
         self.assertIn("### 5.1 Execution-pipeline legs", self.text)
         self.assertIn("lib/pipeline.py", self.text)
         self.assertIn("Change policy", self.text)
@@ -137,6 +138,19 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertIn("`normalized`", row)
         self.assertIn("`remaining`", row)
         self.assertIn("dirty before the run are never touched", row)
+
+    # --- 0.1.17: studio-managed base patches stay published
+
+    def test_install_row_names_base_patches_never_blind(self):
+        # a reinstall must never silently revert a studio fix to an
+        # installer-owned file, and a patch must never land on changed text
+        row = next(line for line in self.text.splitlines()
+                   if line.startswith("| `tk-studio-install`"))
+        self.assertIn("`base_patches`", row)
+        self.assertIn("never blind", row)
+        activate = next(line for line in self.text.splitlines()
+                        if line.startswith("| `tk-studio-activate`"))
+        self.assertIn("base patch", activate)
 
     # --- ST-043: the 0.1.10 base-update clarification stays pinned (EP-011)
 

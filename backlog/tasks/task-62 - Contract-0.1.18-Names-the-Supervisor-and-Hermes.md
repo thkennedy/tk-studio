@@ -1,9 +1,10 @@
 ---
 id: TASK-62
-title: Contract 0.1.17 Names the Supervisor and Hermes
+title: Contract 0.1.18 Names the Supervisor and Hermes
 status: To Do
 assignee: []
 created_date: '2026-09-27 23:44'
+updated_date: '2026-09-28 08:56'
 labels:
   - ST-062
 milestone: The Contract Names Its Drivers and Carries Cost
@@ -19,9 +20,9 @@ So that the studio supervisor is a first-class consumer while the studio itself 
 
 **Acceptance Criteria:**
 
-**Given** `driver-contract.md` at 0.1.16
+**Given** `driver-contract.md` at 0.1.17
 **When** the patch lands
-**Then** the header reads 0.1.17 with a changelog clause marking it additive; §7 row 6 names the studio supervisor (status page) and Hermes (front door) as the consumers that carry UI, in place of ClaudeOS, and still states the studio grows no UI; the Audience line and every other row that names ClaudeOS as the driver are updated
+**Then** the header reads 0.1.18 with a changelog clause marking it additive; §7 row 6 names the studio supervisor (status page) and Hermes (front door) as the consumers that carry UI, in place of ClaudeOS, and still states the studio grows no UI; the Audience line and every other row that names ClaudeOS as the driver are updated
 
 **Given** the contract
 **When** a driver author looks for who drives the studio

@@ -1340,7 +1340,7 @@ So that offline installs are planned on what a seeded session actually does, not
 
 ## Epic 20: The Contract Names Its Drivers and Carries Cost
 
-Plan Phase 1 scope item 8 (planning pass 2026-09-26 §3; `briefs/brief-studio-supervisor-2026-09-27/brief.md`), reconciled to the box as built. The plan's "0.1.15 → 0.1.16" slot was consumed by the install `no_normalize` change (PR #64), so this is the additive **0.1.17** bump. It names the studio supervisor and Hermes as driver-contract consumers in place of ClaudeOS (§7 row 6, the Audience line, and every other row that names ClaudeOS as the driver), adds a driver roster, and states in §2 that the executing wrapper may be any conformant driver. It also gives `finish` and the `job-run` event an optional `total_cost_usd`: acceptance (d) asks for that field, but today the taxonomy payload has none and `jobrun.py` records none. The two stale §1 cross-references are fixed in passing (per-skill CLIs live in §2, the status block in §3). AD-2 holds: nothing in the plugin imports a driver. The epic ships through the release motion so headless runs on the agent PC pick it up. Requirements trace: scope item 8, acceptance (d). Repo: tk-studio.
+Plan Phase 1 scope item 8 (planning pass 2026-09-26 §3; `briefs/brief-studio-supervisor-2026-09-27/brief.md`), reconciled to the box as built. The plan's "0.1.15 → 0.1.16" slot was consumed by the install `no_normalize` change (PR #64), and 0.1.17 went to the studio-managed base patches (BMAD-METHOD#2718, 2026-09-28), so this is the additive **0.1.18** bump. It names the studio supervisor and Hermes as driver-contract consumers in place of ClaudeOS (§7 row 6, the Audience line, and every other row that names ClaudeOS as the driver), adds a driver roster, and states in §2 that the executing wrapper may be any conformant driver. It also gives `finish` and the `job-run` event an optional `total_cost_usd`: acceptance (d) asks for that field, but today the taxonomy payload has none and `jobrun.py` records none. The two stale §1 cross-references are fixed in passing (per-skill CLIs live in §2, the status block in §3). AD-2 holds: nothing in the plugin imports a driver. The epic ships through the release motion so headless runs on the agent PC pick it up. Requirements trace: scope item 8, acceptance (d). Repo: tk-studio.
 
 ### Story 20.1: Finish Records What the Run Cost
 
@@ -1356,7 +1356,7 @@ So that every terminal run lands in the ledger with the dollars it spent.
 
 **Given** a `finish` without a cost figure, as every driver sends today
 **When** it runs
-**Then** the behavior and the event are identical to 0.1.16: the field is absent, never zero-filled
+**Then** the behavior and the event are identical to 0.1.17: the field is absent, never zero-filled
 
 **Given** a cost argument that is negative, non-numeric, or not finite
 **When** `finish` runs
@@ -1366,7 +1366,7 @@ So that every terminal run lands in the ledger with the dollars it spent.
 **When** the story lands
 **Then** `job-run.payload.total_cost_usd` is declared optional with a note naming its source (the worker's `--output-format json` result), and the lib suite pins the present, absent, and refused cases with the full suite green
 
-### Story 20.2: Contract 0.1.17 Names the Supervisor and Hermes
+### Story 20.2: Contract 0.1.18 Names the Supervisor and Hermes
 
 As a driver author,
 I want the contract to name its conformant drivers and say that any of them may execute a run,
@@ -1374,9 +1374,9 @@ So that the studio supervisor is a first-class consumer while the studio itself 
 
 **Acceptance Criteria:**
 
-**Given** `driver-contract.md` at 0.1.16
+**Given** `driver-contract.md` at 0.1.17
 **When** the patch lands
-**Then** the header reads 0.1.17 with a changelog clause marking it additive; §7 row 6 names the studio supervisor (status page) and Hermes (front door) as the consumers that carry UI, in place of ClaudeOS, and still states the studio grows no UI; the Audience line and every other row that names ClaudeOS as the driver are updated
+**Then** the header reads 0.1.18 with a changelog clause marking it additive; §7 row 6 names the studio supervisor (status page) and Hermes (front door) as the consumers that carry UI, in place of ClaudeOS, and still states the studio grows no UI; the Audience line and every other row that names ClaudeOS as the driver are updated
 
 **Given** the contract
 **When** a driver author looks for who drives the studio
@@ -1398,9 +1398,9 @@ So that the studio supervisor is a first-class consumer while the studio itself 
 
 The core of Phase 1, in the new supervisor repo (proposed `thkennedy/tk-studio-supervisor`; the name stays plan open item 1 until the operator confirms it). The ClaudeOS driver code at tag `retired-as-driver-2026-09-26` (`connectors/tk-studio/server.ts` 705 lines, `client.ts` 96, `conformance.ts` 453, `scripts/studio-jobs-tick.ts` 307) is lifted as a Bun/TypeScript library and CLI. It is stripped of its ClaudeOS coupling (the `.mcp.json` stdio registration, the Mission Watchdog chaining, the `claudeos-mcp-connector` driver name) and grows the durable parts it never had: a SQLite queue, a lock per checkout, wrapper-enforced guards, a pacer, the two-tier worker under the Max login, cost capture, and crash recovery.
 
-The salvage read of 2026-09-27 found what the lift must change, not just copy. `server.ts` defaults the worker to `--permission-mode bypassPermissions`, which is forbidden on the host; it passes model and effort only inside the payload; it treats `ANTHROPIC_API_KEY` or a working `claude --version` as proof of auth; and it reads the registry file directly. `conformance.ts` has no `evolve` or `launch` entries in its surface and verb maps, and it throws a TypeError on `expect: harness-blocked` drives. The tick handles self-paced jobs only, never calls `account`, has no atomic wake, and strands a run in `queued` forever if it dies between `wake` and `finish`. Everything else it implements is current through 0.1.16: `job.schema.json`, `jobrun.py` and the status schema are unchanged since 0.1.12. The epic is operable from its own CLI; Epic 22 adds reach. Requirements trace: Source, scope items 1–4, acceptance (b) and (c). Repo: the supervisor repo.
+The salvage read of 2026-09-27 found what the lift must change, not just copy. `server.ts` defaults the worker to `--permission-mode bypassPermissions`, which is forbidden on the host; it passes model and effort only inside the payload; it treats `ANTHROPIC_API_KEY` or a working `claude --version` as proof of auth; and it reads the registry file directly. `conformance.ts` has no `evolve` or `launch` entries in its surface and verb maps, and it throws a TypeError on `expect: harness-blocked` drives. The tick handles self-paced jobs only, never calls `account`, has no atomic wake, and strands a run in `queued` forever if it dies between `wake` and `finish`. Everything else it implements is current through 0.1.17: `job.schema.json`, `jobrun.py` and the status schema are unchanged since 0.1.12. The epic is operable from its own CLI; Epic 22 adds reach. Requirements trace: Source, scope items 1–4, acceptance (b) and (c). Repo: the supervisor repo.
 
-### Story 21.1: The Lift Drives the Studio at 0.1.16
+### Story 21.1: The Lift Drives the Studio at the Current Contract
 
 As the operator,
 I want the ClaudeOS driver code lifted into the supervisor repo and brought current,
