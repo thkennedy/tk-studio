@@ -19,6 +19,7 @@ deferred:
     location: >-
       src/server.ts:159-164
     severity: medium
+reconcile_verdict: 'adjust-stories'
 ---
 
 <intent-contract>
@@ -311,3 +312,14 @@ DRIFT: CLI reads `project_id` via lifted config reader; contract pin bumped to 0
 DRIFT: non-lifted src lines ~380 vs ~300 plan budget (Block If; consult accepted, record-and-continue) — every AC plus tests needed it — affects: none
 DRIFT: README/cli.ts exit-rule wording splits a declined wake/submit (not-woken → 1) from an outright refusal (→ 2) — the docs match the code — affects: none
 DRIFT: wake/submit failure recovery adopts only a run absent from a pre-wake `status` snapshot (a failed snapshot → exit 2) and ends a non-terminal adopted run (skill `finish blocked`, core `cancel`); since pass 6 it covers every post-snapshot wake/submit failure, not only a timeout; supersedes the pass-3 2s-window rule — queued runs carry no `started`, so the window lost them — affects: 21-3, 21-6
+
+## Reconcile
+
+### 2026-09-28 — adjust-stories
+
+- Score: 2 (pass 1); passes 2-4 scored 0-1.
+- Reasoning: The pass-1 deviations were evaluated against stories 21-2..21-6 and Epic 22. Nothing contradicts an AD, the driver contract (0.1.18 already says the invoke-skill directive comes from `wake` or, for one-shot skill targets, `submit`), or a recorded ruling. Three later stories were written against the pre-lift shape and absorb the change through `invoke_dev_with` notes: one-shots start via `submit`; host bypass is refused before any run exists; the prompt is passed as the `-p` argument with no shell retry; timeout recovery adopts only runs the CLI started. The stdio JSON-RPC loop kept in `server.ts` matches 21-2's lifted conformance driver and needs no note.
+- Affected: 21-3 — "Given two wakes for the same job racing" (one-shot runs are minted by `submit`, so idempotence covers `submit` as well as `wake`); 21-4 — "a bypass request on the host tier is refused before any process starts and the run ends `blocked`" (no run is minted: the submission is refused `blocked` naming `HostBypassRefused`); 21-6 — "Given the supervisor is killed mid-run" (resume and orphan adoption follow the 2-second own-run rule).
+- Invariant: none
+- Recorded attended by the planning session (reconcile gate paused the commit, fail_closed).
+

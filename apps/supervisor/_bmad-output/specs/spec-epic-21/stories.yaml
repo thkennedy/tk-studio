@@ -57,6 +57,10 @@
     Routing: .bmad-loop/routing.current.json; pass implementer.model and reviewers.model
     explicitly on every subagent launch. Deviations: one `DRIFT: <what> - <why> -
     affects: <keys|none>` line each in the Auto Run Result.
+    Replan (21-1 reconcile, 2026-09-28): one-shot jobs start via jobrun `submit`,
+    recurring ones via `wake` (the lifted CLI does both); idempotent minting covers both
+    verbs. Timeout recovery adopts only a run started within 2s before the caller began:
+    keep that rule when the queue owns minting.
 
 - id: "21-4-the-worker-runs-on-the-right-tier-and-reports-its-cost"
   title: "The Worker Runs on the Right Tier and Reports Its Cost"
@@ -76,6 +80,11 @@
     implementer.model and reviewers.model explicitly on every subagent launch.
     Deviations: one `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto
     Run Result.
+    Replan (21-1 reconcile, 2026-09-28): a host-tier bypass request is refused before
+    any run exists (HostBypassRefused, exit 2, reported `blocked`); read this story's
+    "the run ends blocked" as the submission refused `blocked` with no run minted. The
+    worker prompt is the argument after `-p` (no stdin, no shell retry: an injection
+    risk); keep it.
 
 - id: "21-5-guards-and-the-pacer-are-the-wrappers-job"
   title: "Guards and the Pacer Are the Wrapper's Job"
@@ -94,6 +103,9 @@
     Routing: .bmad-loop/routing.current.json; pass implementer.model and reviewers.model
     explicitly on every subagent launch. Deviations: one `DRIFT: <what> - <why> -
     affects: <keys|none>` line each in the Auto Run Result.
+    Replan (21-1 deferral DW-1, 2026-09-28): on POSIX the lifted timeout kills only the
+    direct child; this story's "whole process tree is killed" criterion owns the fix
+    (process group or equivalent), and closes DW-1 in deferred-work.md.
 
 - id: "21-6-a-killed-run-resumes-or-ends-partial-never-lost"
   title: "A Killed Run Resumes or Ends Partial, Never Lost"
@@ -113,3 +125,6 @@
     implementer.model and reviewers.model explicitly on every subagent launch.
     Deviations: one `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto
     Run Result.
+    Replan (21-1 reconcile, 2026-09-28): resume and orphan handling must respect the
+    lifted CLI's rule that only a run started within 2s before the caller began is
+    adopted after a wake/submit timeout; one-shot runs are minted by `submit`.
