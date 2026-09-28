@@ -3,3 +3,9 @@ __pycache__/
 .tk-studio/config.local.yaml
 # BMad installer mirror of .claude/skills for other agent tools (generated, not source)
 .agents/
+.bmad-loop/runs/
+.bmad-loop/cache/
+.bmad-loop/policy.toml
+_bmad/render/
+_bmad/config.user.yaml
+.bmad-loop/routing.current.json
