@@ -104,6 +104,40 @@ Two comparisons check it:
 The shipped defaults in the table above stay as they are until the verdict
 is recorded.
 
+### Price table for the trial meter (sourced 2026-09-28)
+
+Source: the Claude API reference bundled with Claude Code 2.1.281 (the
+`claude-api` skill). Its models table is cached 2026-06-24, and the Opus 5.5
+and Fable 5.1 notes come from their launch.
+
+| model id (as in transcripts) | input | output | cache write 5m | cache write 1h | cache read |
+| --- | --- | --- | --- | --- | --- |
+| `claude-opus-5-5` | 4.00 | 20.00 | 5.00 | 8.00 | 0.20 |
+| `claude-opus-5` | 5.00 | 25.00 | 6.25 | 10.00 | 0.50 |
+| `claude-fable-5-1` | 10.00 | 50.00 | 12.50 | 20.00 | 0.25 |
+| `claude-sonnet-5` | 2.00 | 10.00 | 2.50 | 4.00 | 0.20 |
+| `claude-haiku-4-5-20251001` | 1.00 | 5.00 | 1.25 | 2.00 | 0.10 |
+
+All prices are USD per million tokens.
+
+How the columns were derived:
+
+- **Input and output:** stated for every model.
+- **Cache reads:** stated for Opus 5.5 ($0.20, 0.05×) and Fable 5.1 ($0.25,
+  0.025×). The others follow the reference's general rule, cache reads at
+  about 0.1× input. They are derived, and flagged as such in
+  `prices.json`.
+- **Cache writes:** the reference's rule for every model, 1.25× input for
+  the 5-minute TTL and 2× for the 1-hour TTL.
+- **Split by TTL:** transcripts report writes per TTL in
+  `usage.cache_creation.ephemeral_5m_input_tokens` and
+  `ephemeral_1h_input_tokens`, so the meter prices each TTL at its own rate.
+  A usage record with no TTL breakdown prices its writes at the 5-minute
+  rate (Claude Code's default) and is flagged `ttl_unknown`, never
+  silently.
+- **Haiku 4.5:** appears as `claude-haiku-4-5-20251001`, the id the
+  pipeline allowlist uses. The meter also accepts the bare `claude-haiku-4-5`.
+
 ## Policy values that held (bmad-loop `policy.toml`)
 
 Not written by the studio — the engine's `bmad-loop init` template is the
