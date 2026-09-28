@@ -22,21 +22,37 @@
  * skip below never holds that job forever. A failed recovery (no
  * TK_STUDIO_ROOT, contract pin, unusable queue) is a tick that cannot run.
  *
- * Per job, per tick:
- *   - skip while a run is queued/running (no overlap) or while the
- *     `hint_seconds` pacing window since the last run hasn't elapsed
- *     (both read via `tk_job status`);
+ * Per job, per tick, the pacer reads the queue db (TK_SUPERVISOR_DB), not the
+ * studio's `status` (Story 21.5):
+ *   - skip a stopped job: a terminal queue run carries a `stopped` event
+ *     (`stop.on_status` matched when that run ended) and no later run reached
+ *     a studio terminal state (a not-woken/refused run or an orphan never
+ *     clears it), while the current definition's `stop.on_status` still
+ *     lists the stopped state — skipped before any queue run is minted, the
+ *     condition logged (the studio's own `wake` would refuse it anyway; a hand
+ *     `run`/`submit` still meets that refusal);
+ *   - skip while a queue run of the job on this checkout is `running`, or
+ *     `queued` under a live owner (no overlap);
+ *   - an ownerless `queued` run (a lock wait, a recovery re-queue, a hand
+ *     `submit`) is driven: `runJob`'s idempotent mint adopts it, nothing new
+ *     is minted, and the hint is not re-applied;
+ *   - otherwise skip while `hint_seconds` since its latest terminal queue run
+ *     ended hasn't elapsed;
  *   - otherwise wake → invoke → finish through the queue-backed `runJob`
  *     (src/cli.ts, Story 21.3; `skipRecover`: the tick already recovered):
  *     the queue mints idempotently (a racing wake gets the existing run),
  *     the run takes the checkout lock before `wake` (a live holder leaves it
  *     `queued`, logged as a skip). A queued run recorded with an explicit
  *     permission mode is driven under it. `woken: false` is an answer (stop
- *     condition), not an error. A core-target job executes inside wake under
- *     the job's own `max_wall_clock_seconds` guard (uncapped: the wake
- *     verb's timeout is that guard + 120 s); a skill-target job is invoked
- *     headless under that guard capped at --timeout-cap-s and finished with
- *     its §3 block.
+ *     condition), not an error. Guards are the wrapper's job (src/cli.ts):
+ *     a core-target job executes inside wake, where jobrun enforces its
+ *     `max_wall_clock_seconds`; the wake verb's timeout (that guard + 120 s)
+ *     is the supervisor's named backstop (the studio run cancelled, the queue
+ *     run `partial` naming the guard). A skill-target job is invoked headless
+ *     under that guard capped at --timeout-cap-s (a trip kills the worker's
+ *     process tree and names the bound that tripped), its turns/tokens
+ *     `account`ed when it has `max_turns`/`max_tokens`, and finished with its
+ *     §3 block.
  *
  * Cron and fixed-interval loop jobs are NOT ticked here — their directives
  * bind to real schedules at submit; this script is only the self-paced pacer.
@@ -58,7 +74,7 @@
 import { existsSync } from "node:fs";
 import { recoverQueue, runJob, StartError, type RunSummary } from "./cli";
 import { ConnectorClient } from "./client";
-import { queueDbPath } from "./queue";
+import { Queue, queueDbPath, type JobPacing } from "./queue";
 
 const DEFAULT_TIMEOUT_CAP_S = 3600;
 
@@ -102,74 +118,51 @@ export interface WakeDecision {
   reason: string;
 }
 
-interface StatusRun {
-  run_id?: string;
-  state?: string;
-  started?: string;
-  ended?: string;
-  created?: string;
-}
-
-/** Pace one self-paced job from its §4 status rows: never overlap a live run;
- * honor hint_seconds since the last run's end (the hint is the studio's pacing
- * request — the substrate decides, and this substrate honors it). */
-export function shouldWake(defn: Record<string, any>, runs: StatusRun[], nowMs: number): WakeDecision {
-  const live = runs.find((r) => r.state === "queued" || r.state === "running");
-  if (live) return { wake: false, reason: `run ${live.run_id ?? "?"} still ${live.state} — no overlap` };
+/** Pace one self-paced job from its queue runs (`Queue.pacing`), in order:
+ *   1. a recorded `stop.on_status` stop still in force ends its recurrence —
+ *      only while the current definition's `stop.on_status` still lists the
+ *      stopped state (an operator who drops it, or the whole list, resumes the
+ *      job; the stale stop is ignored and the rules below apply);
+ *   2. never overlap a run that holds the job — `running`, or `queued` under a
+ *      live owner;
+ *   3. an ownerless `queued` run (a lock wait, a recovery re-queue, a hand
+ *      `submit`) is driven: wake, and `runJob`'s idempotent mint adopts that
+ *      run — nothing new is minted, and the hint is not re-applied (the run
+ *      was already asked for);
+ *   4. honor hint_seconds since its latest terminal run ended (the hint is the
+ *      studio's pacing request — the substrate decides, and this substrate
+ *      honors it).
+ * Pure: `nowMs` is injected. */
+export function shouldWake(
+  defn: Record<string, any>, pacing: Pick<JobPacing, "live" | "adoptable" | "lastEnded" | "stopped">, nowMs: number,
+): WakeDecision {
+  const stop = pacing.stopped?.detail;
+  if (stop) {
+    const state = stop.state ?? pacing.stopped!.to_state;
+    const onStatus = defn?.stop?.on_status;
+    if (Array.isArray(onStatus) && onStatus.includes(state)) {
+      return { wake: false, reason: `stopped — stop.${stop.condition ?? "on_status"}: run ${pacing.stopped!.run_id} ended ${state}` };
+    }
+  }
+  const live = pacing.live[0];
+  if (live) {
+    const why = live.state === "queued" ? "queued under a live owner" : live.state;
+    return { wake: false, reason: `run ${live.run_id} still ${why} — no overlap` };
+  }
+  const adopt = pacing.adoptable[0];
+  if (adopt) return { wake: true, reason: `driving ownerless queued run ${adopt.run_id} (nothing new minted)` };
+  const lastMs = pacing.lastEnded ? Date.parse(pacing.lastEnded) : Number.NaN;
   const hintS = defn?.cadence?.hint_seconds;
-  if (typeof hintS === "number" && hintS > 0) {
-    const lastMs = runs
-      .map((r) => Date.parse(r.ended ?? r.started ?? r.created ?? ""))
-      .filter((t) => Number.isFinite(t))
-      .reduce((a, b) => Math.max(a, b), Number.NEGATIVE_INFINITY);
-    if (Number.isFinite(lastMs) && nowMs - lastMs < hintS * 1000) {
-      const remainingH = ((hintS * 1000 - (nowMs - lastMs)) / 3_600_000).toFixed(1);
-      return { wake: false, reason: `hint_seconds pacing: ${remainingH}h remaining` };
-    }
+  if (typeof hintS === "number" && hintS > 0 && Number.isFinite(lastMs) && nowMs - lastMs < hintS * 1000) {
+    const remainingS = Math.ceil((hintS * 1000 - (nowMs - lastMs)) / 1000);
+    return { wake: false, reason: `hint_seconds pacing: ${remainingS}s remaining` };
   }
-  return { wake: true, reason: runs.length ? "pacing window elapsed" : "no prior runs" };
-}
-
-// ------------------------------------------------------------ directive execution (§3 → run state)
-
-/** The §4 KB-injection directive riding an invoke-skill directive (contract
- * 1.7.0): forwarded to tk_invoke verbatim when shaped like an object — the
- * connector reads the named spine/seed artifacts and injects them into the
- * segment prompt (aid, not gate; the injection act is driver-side, AD-2). */
-export function knowledgeOf(directive: Record<string, any> | undefined): Record<string, any> | undefined {
-  const k = directive?.knowledge;
-  return k && typeof k === "object" && !Array.isArray(k) ? (k as Record<string, any>) : undefined;
-}
-
-export interface FinishArgs {
-  state: "complete" | "partial" | "blocked";
-  reason?: string;
-  status_block?: Record<string, unknown>;
-}
-
-/** Map a tk_invoke outcome onto the run's terminal state per §3/§4: the
- * block's own status wins; a timeout is the wall-clock guard (partial, guard
- * named); anything without a block is a refusal to guess (blocked). */
-export function finishArgsFor(outcome: { toolError?: string; result?: Record<string, any> }, guardS: number): FinishArgs {
-  if (outcome.toolError) {
-    if (/timed out/i.test(outcome.toolError)) {
-      return { state: "partial", reason: `guard: max_wall_clock_seconds (${guardS}s)` };
-    }
-    return { state: "blocked", reason: `driver error: ${outcome.toolError.slice(0, 300)}` };
-  }
-  const r = outcome.result ?? {};
-  const block = r.status_block as Record<string, unknown> | undefined;
-  const status = block && typeof block.status === "string" ? block.status : undefined;
-  if (status === "complete" || status === "partial" || status === "blocked") {
-    const reason = typeof block!.reason === "string" ? (block!.reason as string) : undefined;
-    return { state: status, ...(reason ? { reason } : {}), status_block: block };
-  }
-  return { state: "blocked", reason: String(r.conformance_failure ?? "run terminated without a §3 status block") };
+  return { wake: true, reason: pacing.lastEnded ? "pacing window elapsed" : "no prior runs" };
 }
 
 // ------------------------------------------------------------ tick
 
-interface Args {
+export interface Args {
   dryRun: boolean;
   projects: string[];
   directories: string[];
@@ -193,26 +186,38 @@ function parseArgs(argv: string[]): Args {
 
 const log = (msg: string) => console.log(`[studio-tick] ${msg}`);
 
-async function tickJob(
-  client: ConnectorClient, root: string, job: DeclaredJob, args: Args,
-): Promise<"woken" | "skipped" | "refused" | "error"> {
+/** tickJob's seams (tests): the queue it paces from, the run driver, the log, the clock. */
+export interface TickDeps {
+  /** The queue (TK_SUPERVISOR_DB by default); a supplied queue is not closed here. */
+  queue?: Queue;
+  run?: typeof runJob;
+  log?: (msg: string) => void;
+  nowMs?: () => number;
+}
+
+/** One self-paced job, one tick: pace from the queue, then drive through `runJob`. */
+export async function tickJob(root: string, job: DeclaredJob, args: Args, deps: TickDeps = {}): Promise<"woken" | "skipped" | "refused" | "error"> {
+  const log_ = deps.log ?? log, run = deps.run ?? runJob;
   const defn = job.definition!;
-  const statusOut = await client.callTool("tk_job", { verb: "status", directory: root, job_id: job.id }, 120_000);
-  let runs: StatusRun[] = [];
-  if (statusOut.toolError || statusOut.result?.ok === false) {
-    // No runs yet reads as an unknown-id refusal on some paths — wake decides for real.
-    log(`${job.id}: status unavailable (${statusOut.toolError ?? statusOut.result?.error}) — deferring to wake`);
-  } else {
-    runs = (statusOut.result?.runs as StatusRun[] | undefined) ?? [];
+  let pacing: JobPacing;
+  try {
+    if (deps.queue) pacing = deps.queue.pacing(job.id, root);
+    else {
+      const queue = Queue.open();
+      try { pacing = queue.pacing(job.id, root); } finally { queue.close(); }
+    }
+  } catch (e) {
+    log_(`${job.id}: queue unreadable — ${String(e instanceof Error ? e.message : e).slice(0, 300)}`);
+    return "error";
   }
 
-  const decision = shouldWake(defn, runs, Date.now());
+  const decision = shouldWake(defn, pacing, (deps.nowMs ?? Date.now)());
   if (!decision.wake) {
-    log(`${job.id}: skip — ${decision.reason}`);
+    log_(`${job.id}: skip — ${decision.reason}`);
     return "skipped";
   }
   if (args.dryRun) {
-    log(`${job.id}: would wake (${decision.reason}) [dry-run]`);
+    log_(`${job.id}: would wake (${decision.reason}) [dry-run]`);
     return "skipped";
   }
 
@@ -221,16 +226,16 @@ async function tickJob(
   // once at the start of this tick. The skill invocation's guard is capped at
   // --timeout-cap-s; the wake verb keeps the job's own guard.
   let summary: RunSummary;
-  try { summary = await runJob(job.id, root, undefined, { guardCapS: args.timeoutCapS, skipRecover: true }); }
+  try { summary = await run(job.id, root, undefined, { guardCapS: args.timeoutCapS, skipRecover: true, ...(deps.queue ? { queue: deps.queue } : {}) }); }
   catch (e) {
     const msg = String(e instanceof Error ? e.message : e).slice(0, 300);
     // A refusal (registry `show`/`resolve`/`wake` answering ok:false, problems[]): no studio run — refused, not an error.
-    if (e instanceof StartError && e.refused) { log(`${job.id}: refused — ${msg}`); return "refused"; }
-    log(`${job.id}: run could not start — ${msg}`);
+    if (e instanceof StartError && e.refused) { log_(`${job.id}: refused — ${msg}`); return "refused"; }
+    log_(`${job.id}: run could not start — ${msg}`);
     return "error";
   }
   const where = `run ${summary.run_id ?? "-"}${summary.studio_run_id ? ` (studio ${summary.studio_run_id})` : ""}`;
-  log(`${job.id}: ${where} ${summary.state}${summary.reason ? ` — ${summary.reason.slice(0, 200)}` : ""}`);
+  log_(`${job.id}: ${where} ${summary.state}${summary.reason ? ` — ${summary.reason.slice(0, 200)}` : ""}`);
   // A lock wait or a run already running elsewhere: nothing was driven, whatever its studio run.
   if (summary.waited || summary.skipped) return "skipped";
   // No studio run minted (blocked before minting, not-woken): a refusal, not a wake.
@@ -292,7 +297,7 @@ async function main(): Promise<number> {
       for (const job of declared) {
         if (job.problem) { log(`${projectId}/${job.id}: ${job.problem} — skipped`); continue; }
         if (!isSelfPaced(job.definition)) continue;
-        const outcome = await tickJob(client, root, job, args);
+        const outcome = await tickJob(root, job, args);
         if (outcome === "error") sawError = true;
       }
       const selfPaced = declared.filter((j) => isSelfPaced(j.definition)).length;

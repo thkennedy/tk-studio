@@ -261,6 +261,28 @@ export interface QueueEvent {
   from_state: string | null; to_state: string; detail: Record<string, unknown> | null;
 }
 
+/** A `stop.on_status` stop recorded on a terminal run (Story 21.5, AC4). */
+export interface StopDetail { condition: "on_status"; state: string; job_id: string }
+
+/** Marker on an `ended` event whose outcome is a terminal state the studio
+ * itself reached (mirrored from its run) — the only kind of later run that
+ * clears a recorded stop (a not-woken/refused run or an orphan never does). */
+export interface StudioOutcome { run_id: string; state: string }
+
+/** What the pacer reads for one (job, checkout). */
+export interface JobPacing {
+  /** Runs that hold the job: `running`, or `queued` under a live owner — never overlapped. */
+  live: QueueRun[];
+  /** Ownerless (or dead-owner) `queued` runs: the tick's `runJob` adopts and drives the oldest. */
+  adoptable: QueueRun[];
+  /** The latest terminal run's end: its ending (`ended`/`orphaned`) event's `at`, else its `updated`. */
+  lastEnded: string | null;
+  latestTerminal: QueueRun | null;
+  /** The `stopped` event still in force: recorded on a terminal run and not
+   * cleared by a later run whose studio outcome was terminal (`StudioOutcome`). */
+  stopped: QueueEvent | null;
+}
+
 interface LockRow {
   checkout: string; root: string; kind: "run" | "engine"; run_id: string; job_id: string;
   owner_pid: number | null; owner_host: string | null; owner_nonce: string | null; owner_start: string | null;
@@ -410,6 +432,33 @@ export class Queue {
       ? this.db.query("SELECT * FROM events WHERE run_id = ? ORDER BY seq").all(runId)
       : this.db.query("SELECT * FROM events ORDER BY seq").all()) as (Omit<QueueEvent, "detail"> & { detail: string | null })[];
     return rows.map((r) => ({ ...r, detail: r.detail ? JSON.parse(r.detail) : null }));
+  }
+
+  /** The pacer's read for one (job, checkout), as seen by `self` (owner liveness). */
+  pacing(jobId: string, root: string, self: Owner = selfOwner()): JobPacing {
+    const checkout = checkoutKey(root);
+    const runs = this.db.query("SELECT * FROM runs WHERE job_id = ? AND checkout = ? ORDER BY created, rowid").all(jobId, checkout) as QueueRun[];
+    const live: QueueRun[] = [], adoptable: QueueRun[] = [];
+    for (const r of runs) {
+      if (r.state === "running" || (r.state === "queued" && this.ownerLive(ownerOf(r), self))) live.push(r);
+      else if (r.state === "queued") adoptable.push(r);
+    }
+    // Terminal runs in the order they ended (the ending event's seq; one with no event first, by `updated`).
+    const ends = runs.filter((r) => isTerminal(r.state)).map((r) => {
+      const ev = this.db.query("SELECT seq, at, detail FROM events WHERE run_id = ? AND kind IN ('ended', 'orphaned') ORDER BY seq DESC LIMIT 1")
+        .get(r.run_id) as { seq: number; at: string; detail: string | null } | null;
+      let detail: Record<string, unknown> | null = null;
+      try { detail = ev?.detail ? JSON.parse(ev.detail) : null; } catch { /* unreadable: no marker */ }
+      return { run: r, seq: ev?.seq ?? 0, at: ev?.at ?? r.updated, detail };
+    }).sort((x, y) => x.seq - y.seq || Date.parse(x.at) - Date.parse(y.at));
+    let stopped: QueueEvent | null = null;
+    for (const e of ends) {
+      const stop = this.events(e.run.run_id).filter((ev) => ev.kind === "stopped").at(-1);
+      if (stop) stopped = stop;
+      else if (e.detail?.studio_outcome) stopped = null; // the studio ran a later run to a terminal state
+    }
+    const last = ends.at(-1);
+    return { live, adoptable, lastEnded: last?.at ?? null, latestTerminal: last?.run ?? null, stopped };
   }
 
   lock(root: string): LockRow | null {
@@ -705,7 +754,7 @@ export class Queue {
    * transaction, by the launch-orphan rule `recover` uses — the core may have
    * started an engine that still works the checkout. */
   async endDriven(runId: string, state: TerminalState, reason?: string | null,
-    opts: { engineRunId?: string; detail?: Record<string, unknown> } = {}): Promise<QueueRun> {
+    opts: { engineRunId?: string; detail?: Record<string, unknown>; stop?: StopDetail } = {}): Promise<QueueRun> {
     const run = opts.engineRunId ? null : this.get(runId);
     if (run && run.verb_started && !isTerminal(run.state) && this.definition(run)?.target?.skill === LAUNCH_SKILL) {
       const { holder, engine } = await this.launchEngine(run.root);
@@ -716,9 +765,10 @@ export class Queue {
 
   /** Terminal transition + lock release — or, when the run launched a
    * detached bmad-loop engine, the lock is handed to that engine (`null`: an
-   * unverified engine, from a failed launch probe). */
+   * unverified engine, from a failed launch probe). `stop` (AC4) writes the
+   * `stopped` event (from/to = `state`) in the same transaction as `ended`. */
   end(runId: string, state: TerminalState, reason?: string | null,
-    opts: { engineRunId?: string | null; detail?: Record<string, unknown>; from?: RunState } = {}): QueueRun {
+    opts: { engineRunId?: string | null; detail?: Record<string, unknown>; from?: RunState; stop?: StopDetail } = {}): QueueRun {
     if (!isTerminal(state)) throw new Error(`end: '${state}' is not a terminal state`);
     return this.db.transaction(() => {
       const run = this.must(runId);
@@ -739,6 +789,7 @@ export class Queue {
         detail.lock = "released";
       }
       this.event(runId, "ended", run.state, state, { ...(reason ? { reason } : {}), ...detail });
+      if (opts.stop) this.event(runId, "stopped", state, state, { ...opts.stop, state });
       return this.must(runId);
     }).immediate();
   }

@@ -164,3 +164,13 @@
     `registryRoot` (the sbx VM root, passed as `invokeSkill(…, {vmHostRoot})`) never
     falls back to the caller root. An sbx run's session transcript is inside the
     microVM.
+    Replan (21-5 reconcile, 2026-09-28): a resume drives through 21-5's guards: the
+    remaining wall-clock budget through `wallClockGuard` (on sbx the in-VM `timeout`
+    in `buildSbxCommand`), `account` after the resumed iteration, and a trip ends
+    `partial` naming the guard. Every end `recover` writes goes through `Queue.end`'s
+    `stop` option with `studio_outcome`, so a restart-ended run matching
+    `stop.on_status` records `stopped` (closes DW-8). DW-3's kill of the recorded
+    worker pid/process group before `recover` releases the lock must also cover what
+    `runProcess`'s signal handling misses (DW-7: SIGHUP under `nohup` or on non-Linux
+    POSIX, SIGKILL, a crash). Keep `Queue.pacing()`'s `live`/`adoptable` view true
+    for a resumed run.

@@ -184,14 +184,14 @@ describe("the worker command line per tier", () => {
     expect(() => buildWorkerCommand({ prompt: "x", tier: "gpu" })).toThrow(TierRefused);
   });
 
-  test("buildSbxCommand: sbx exec <sandbox> env -u ANTHROPIC_API_KEY -C <vm-root> claude <worker argv>", () => {
+  test("buildSbxCommand: sbx exec <sandbox> timeout -k <s> <guard> env -u ANTHROPIC_API_KEY -C <vm-root> claude <worker argv>", () => {
     const prev = process.env.SBX_BIN;
     process.env.SBX_BIN = "fake-sbx";
     try {
       const worker = buildWorkerCommand({ prompt: "a prompt; $(rm -rf /)\nline 2", tier: "sbx", permissionMode: "bypassPermissions", bin: "host-only-claude" });
-      const cmd = buildSbxCommand({ sandbox: "claude-p", vmRoot: "/vm/p", worker });
+      const cmd = buildSbxCommand({ sandbox: "claude-p", vmRoot: "/vm/p", worker, guardS: 300 });
       expect(cmd.bin).toBe("fake-sbx");
-      expect(cmd.argv).toEqual(["exec", "claude-p", "env", "-u", "ANTHROPIC_API_KEY", "-C", "/vm/p", "claude",
+      expect(cmd.argv).toEqual(["exec", "claude-p", "timeout", "-k", "10", "300", "env", "-u", "ANTHROPIC_API_KEY", "-C", "/vm/p", "claude",
         "-p", "a prompt; $(rm -rf /)\nline 2", "--output-format", "json", "--permission-mode", "bypassPermissions"]);
     } finally {
       if (prev === undefined) delete process.env.SBX_BIN; else process.env.SBX_BIN = prev;
@@ -214,11 +214,11 @@ describe("invokeSkill on the sbx tier (injected spawner)", () => {
       const vm = toVmPath(root);
       const [probe, worker] = calls.filter((c) => c.cmd === sbxBin());
       expect(probe.args).toEqual(["exec", "claude-p", "env", "-u", "ANTHROPIC_API_KEY", "claude", "auth", "status", "--json"]);
-      expect(worker.args.slice(0, 9)).toEqual(["exec", "claude-p", "env", "-u", "ANTHROPIC_API_KEY", "-C", vm, "claude", "-p"]);
-      const prompt = worker.args[9];
+      expect(worker.args.slice(0, 13)).toEqual(["exec", "claude-p", "timeout", "-k", "10", "600", "env", "-u", "ANTHROPIC_API_KEY", "-C", vm, "claude", "-p"]);
+      const prompt = worker.args[13];
       expect(prompt).toStartWith("/tk-studio:tk-studio-activate ");
       expect(JSON.parse(prompt.split("\n")[0].replace(/^\S+ /, ""))).toMatchObject({ directory: vm, model: "m-x", effort: "high" });
-      expect(worker.args.slice(10)).toEqual([
+      expect(worker.args.slice(14)).toEqual([
         "--output-format", "json", "--permission-mode", "bypassPermissions",
         "--settings", `${vm}/.tk-studio/deny.settings.json`, "--model", "m-x", "--effort", "high",
       ]);
@@ -285,13 +285,13 @@ describe("invokeSkill on the sbx tier (injected spawner)", () => {
     const vm = toVmPath(reg);
     expect(vm).not.toBe(toVmPath(spelled));
     const worker = calls.find((c) => c.args.includes("-p"))!;
-    expect(worker.args.slice(5, 7)).toEqual(["-C", vm]);
-    expect(JSON.parse(worker.args[9].split("\n")[0].replace(/^\S+ /, ""))).toMatchObject({ directory: vm });
+    expect(worker.args.slice(9, 11)).toEqual(["-C", vm]);
+    expect(JSON.parse(worker.args[13].split("\n")[0].replace(/^\S+ /, ""))).toMatchObject({ directory: vm });
     expect(worker.args[worker.args.indexOf("--settings") + 1]).toBe(`${vm}/.tk-studio/deny.json`);
     // Without the option (the MCP path with no registry) the given root is mapped, as before.
     const bare = fakeSpawner();
     await invokeSkill(spelled, "tk-studio-activate", { tier: "sbx", sandbox: "s" }, bare.spawner);
-    expect(bare.calls.find((c) => c.args.includes("-p"))!.args.slice(5, 7)).toEqual(["-C", toVmPath(spelled)]);
+    expect(bare.calls.find((c) => c.args.includes("-p"))!.args.slice(9, 11)).toEqual(["-C", toVmPath(spelled)]);
   });
 
   test("an sbx deny profile is checked on real paths: a real file inside maps; a symlink inside pointing outside is refused", () => {

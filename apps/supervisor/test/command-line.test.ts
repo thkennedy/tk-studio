@@ -113,21 +113,21 @@ describe("wake/submit failure recovery (timeout or otherwise)", () => {
         return { job_id: "j", runs: args.includes("--run-id") ? all.filter((r) => r.run_id === runId) : all };
       }
       const out = ending(args);
-      if (out.ok !== false) states.set(runId, args[0] === "finish" ? "blocked" : "partial");
+      if (out.ok !== false) states.set(runId, args[0] === "finish" ? args[args.indexOf("--state") + 1] : "partial");
       return out;
     };
     return { calls, runner };
   }
 
-  test("skill run: adopts only the run absent from the snapshot and finishes it blocked naming the timeout", async () => {
+  test("skill run: adopts only the run absent from the snapshot and finishes it partial naming the timeout", async () => {
     const { calls, runner } = fakeVerbs(
       [{ run_id: "j-20260101T000000Z", state: "queued" }, { run_id: "j-20260928T101010Z", state: "queued" }],
-      (args) => ({ run_id: args[args.indexOf("--run-id") + 1], state: "blocked" }));
+      (args) => ({ run_id: args[args.indexOf("--run-id") + 1], state: "partial" }));
     const out = await recoverAfterTimeout("j", "uv timed out after 720s", ctx("skill", ["j-20260101T000000Z"]), runner);
-    expect(out).toMatchObject({ ok: false, run_id: "j-20260928T101010Z", target: "skill", state: "blocked" });
+    expect(out).toMatchObject({ ok: false, run_id: "j-20260928T101010Z", target: "skill", state: "partial" });
     expect(out.reason).toContain("timed out");
     const finish = calls.find((c) => c[0] === "finish")!;
-    expect(finish.slice(finish.indexOf("--run-id"), finish.indexOf("--run-id") + 4)).toEqual(["--run-id", "j-20260928T101010Z", "--state", "blocked"]);
+    expect(finish.slice(finish.indexOf("--run-id"), finish.indexOf("--run-id") + 4)).toEqual(["--run-id", "j-20260928T101010Z", "--state", "partial"]);
     expect(finish[finish.indexOf("--reason") + 1]).toContain("timed out");
     expect(calls.some((c) => c.includes("j-20260101T000000Z"))).toBe(false);
     expect(calls.some((c) => c[0] === "cancel")).toBe(false);
@@ -327,27 +327,34 @@ if (${opts.selfFinish === true}) {
   require("node:child_process").spawnSync("uv", ["run", ${JSON.stringify(join(plugin, "lib", "jobrun.py"))}, "finish", "--directory", payload.directory,
     "--run-id", payload.run_id, "--state", "cancelled", "--reason", "raced by the worker"], { encoding: "utf-8" });
 }
-console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: ${JSON.stringify(workerResult)}, total_cost_usd: 0.0123 }));
+// A session transcript under CLAUDE_CONFIG_DIR (the fixture's own dir): the supervisor accounts its turns/tokens.
+const sessionId = "sess-" + process.pid + "-" + Date.now();
+const tdir = require("node:path").join(process.env.CLAUDE_CONFIG_DIR, "projects", "fake-slug");
+fs.mkdirSync(tdir, { recursive: true });
+const usage = { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
+fs.writeFileSync(require("node:path").join(tdir, sessionId + ".jsonl"), JSON.stringify({ type: "assistant", message: { id: "msg-1", usage } }) + "\\n");
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: ${JSON.stringify(workerResult)}, total_cost_usd: 0.0123, session_id: sessionId, num_turns: 1, usage }));
 `);
   chmodSync(fake, 0o755);
-  // A fake `sbx exec <sb> env [-u K]… [-C dir] claude …`: records its argv, then runs the fake claude
-  // with the env and cwd the wrapper names (argv only, no shell).
+  // A fake `sbx exec <sb> [timeout -k <s> <guard>] env [-u K]… [-C dir] claude …`: records its argv, then runs
+  // the fake claude with the env and cwd the wrapper names (argv only, no shell).
   const sbxRecord = join(store, "sbx-calls.jsonl");
   const fakeSbx = join(store, "fake-sbx.js");
   writeFileSync(fakeSbx, `#!/usr/bin/env bun
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(sbxRecord)}, JSON.stringify({ args, apiKey: process.env.ANTHROPIC_API_KEY ?? null }) + "\\n");
-if (args[0] !== "exec" || args[2] !== "env") process.exit(97);
+const at = args[2] === "timeout" && args[3] === "-k" ? 6 : 2;
+if (args[0] !== "exec" || args[at] !== "env") process.exit(97);
 const env = { ...process.env };
-let i = 3, cwd;
+let i = at + 1, cwd;
 while (args[i] === "-u" || args[i] === "-C") { if (args[i] === "-u") delete env[args[i + 1]]; else cwd = args[i + 1]; i += 2; }
 if (args[i] !== "claude") process.exit(98);
 const r = require("node:child_process").spawnSync(${JSON.stringify(fake)}, args.slice(i + 1), { env, cwd, stdio: "inherit" });
 process.exit(r.status ?? 1);
 `);
   chmodSync(fakeSbx, 0o755);
-  const extraEnv = { SBX_BIN: fakeSbx, ...(opts.env ?? {}) };
+  const extraEnv = { SBX_BIN: fakeSbx, CLAUDE_CONFIG_DIR: join(store, "claude-config"), ...(opts.env ?? {}) };
   // The queue lives outside every repo and outside the store.
   const queueDb = join(mkdtempSync(join(tmpdir(), "tk-sup-e2e-queue-")), "queue.db");
   const cli = (verb: string, jobId: string, dir: string, extra: string[] = []) => spawnSync("bun", [join(REPO, "src", "cli.ts"), verb, jobId, "--directory", dir, ...extra], {
@@ -944,9 +951,10 @@ describe.skipIf(!canRunE2E)("CLI end to end: restart recovery and drain", () => 
     writeFileSync(join(fx.project, ".tk-studio", "jobs", "launch-probe.json"), JSON.stringify(def));
     const probed: (string | null)[][] = [];
     const q = new Queue(fx.queueDb, { ownerAlive: () => true, engineLive: async (root, id) => { probed.push([root, id]); return { live: true, run_ids: ["E9"] }; } });
-    const prev = { home: process.env.TK_STUDIO_HOME, bin: process.env.CLAUDE_BIN };
+    const prev = { home: process.env.TK_STUDIO_HOME, bin: process.env.CLAUDE_BIN, cfg: process.env.CLAUDE_CONFIG_DIR };
     process.env.TK_STUDIO_HOME = fx.store;
     process.env.CLAUDE_BIN = join(fx.store, "fake-claude.js");
+    process.env.CLAUDE_CONFIG_DIR = join(fx.store, "claude-config"); // the fake worker's transcript (max_turns → account)
     try {
       const summary = await runJob("launch-probe", fx.project, undefined, { queue: q });
       expect(summary).toMatchObject({ ok: false, state: "blocked", target: "skill" });
@@ -955,7 +963,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: restart recovery and drain", () => 
       expect(q.lock(fx.project)).toMatchObject({ kind: "engine", engine_run_id: "E9", run_id: summary.run_id });
       expect(q.events(summary.run_id!).at(-1)!.detail).toMatchObject({ lock: { handed_to_engine: "E9" }, engine: { live: ["E9"] } });
     } finally {
-      for (const [k, v] of [["TK_STUDIO_HOME", prev.home], ["CLAUDE_BIN", prev.bin]] as const) {
+      for (const [k, v] of [["TK_STUDIO_HOME", prev.home], ["CLAUDE_BIN", prev.bin], ["CLAUDE_CONFIG_DIR", prev.cfg]] as const) {
         if (v === undefined) delete process.env[k]; else process.env[k] = v;
       }
       q.close();
@@ -1015,8 +1023,8 @@ describe.skipIf(!canRunE2E)("CLI end to end: worker tiers (Story 21.4)", () => {
     const probe = sbx.find((c) => c.args.includes("auth"))!;
     expect(probe.args).toEqual(["exec", "claude-p", "env", "-u", "ANTHROPIC_API_KEY", "claude", "auth", "status", "--json"]);
     const worker = sbx.find((c) => c.args.includes("-p"))!;
-    expect(worker.args.slice(0, 9)).toEqual(["exec", "claude-p", "env", "-u", "ANTHROPIC_API_KEY", "-C", fx.project, "claude", "-p"]);
-    expect(worker.args[9]).toStartWith("/tk-studio:tk-studio-activate ");
+    expect(worker.args.slice(0, 13)).toEqual(["exec", "claude-p", "timeout", "-k", "10", "600", "env", "-u", "ANTHROPIC_API_KEY", "-C", fx.project, "claude", "-p"]);
+    expect(worker.args[13]).toStartWith("/tk-studio:tk-studio-activate ");
     expect(flagValue(worker.args, "--permission-mode")).toBe("bypassPermissions");
     expect(flagValue(worker.args, "--model")).toBe("m-over");
     expect(worker.apiKey).toBeNull(); // stripped on the host too
@@ -1038,7 +1046,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: worker tiers (Story 21.4)", () => {
     const worker = fx.sbxCalls().find((c) => c.args.includes("-p"))!;
     expect(flagValue(worker.args, "-C")).toBe(fx.project);
     expect(flagValue(worker.args, "-C")).not.toBe(spelled);
-    expect(JSON.parse(worker.args[9].split("\n")[0].replace(/^\S+ /, ""))).toMatchObject({ directory: fx.project });
+    expect(JSON.parse(worker.args[13].split("\n")[0].replace(/^\S+ /, ""))).toMatchObject({ directory: fx.project });
   }, 120_000);
 
   test("stored drive: `submit --tier sbx --sandbox s --model m` then `drain` → driven via sbx with --model m", () => {

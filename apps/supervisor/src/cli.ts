@@ -77,6 +77,7 @@ import {
   type StudioFinder, type StudioOps,
 } from "./queue";
 import { jobOptions, loadSupervisorConfig, type JobOptions } from "./config";
+import { resultCounts, transcriptCounts, type Counts } from "./transcript";
 
 export interface RunSummary {
   ok: boolean;
@@ -97,6 +98,33 @@ export interface RunSummary {
   waited?: "lock" | "running" | "owned" | "terminal";
   /** `drain`: the listed run was no longer an ownerless `queued` run — nothing minted, nothing driven. */
   skipped?: true;
+  /** The guards that tripped (Story 21.5): named in `reason` and in the queue run's `ended` event. */
+  guards_tripped?: GuardTrip[];
+  /** The studio's `account` answer for this iteration's counters. */
+  account?: { turns: number; tokens: number; within_budget: boolean; exceeded: string[] };
+  /** The studio run's own terminal state when it differs from `state` (a core
+   * run the backstop `cancel`led: the queue run ends `partial`, the studio holds
+   * `cancelled`). `mirror` records and matches `stop.on_status` against it. */
+  studio_state?: string;
+}
+
+/** A tripped guard: the job guard's name (or the tick's `--timeout-cap-s`) and its value. */
+export interface GuardTrip { guard: string; value: number }
+
+/** Guards counted in seconds: the job's wall clock (and its backstop), the tick's cap. */
+const inSeconds = (guard: string) => guard.startsWith("max_wall_clock_seconds") || guard === "--timeout-cap-s";
+
+/** `guard: <name> (<value>[s])` — the reason a guard trip ends a run with. */
+export function guardReason(trips: GuardTrip[]): string {
+  return trips.map((t) => `guard: ${t.guard} (${t.value}${inSeconds(t.guard) ? "s" : ""})`).join("; ");
+}
+
+/** The wall-clock bound that actually trips under `guardS`: the job's own
+ * `max_wall_clock_seconds`, or the tick's `--timeout-cap-s` when it capped it. */
+export function wallClockGuard(jobGuardS: number | undefined, guardS: number): GuardTrip {
+  return jobGuardS !== undefined && guardS < jobGuardS
+    ? { guard: "--timeout-cap-s", value: guardS }
+    : { guard: "max_wall_clock_seconds", value: guardS };
 }
 
 /** Raised only before a studio run exists — the run could not start (exit 2).
@@ -129,6 +157,8 @@ type VerbRunner = (root: string, cliArgs: string[], timeoutS?: number) => Promis
 /** What the recovery path needs after a wake/submit failed or timed out. */
 export interface TimeoutContext {
   root: string; projectId: string; target: Target; verb: "wake" | "submit"; timeoutS: number;
+  /** The job's own `max_wall_clock_seconds`: the verb's timeout is its backstop (+120 s). */
+  jobGuardS?: number;
   /** Run ids of this job that existed before the wake/submit — never adopted. */
   before: ReadonlySet<string>;
 }
@@ -529,7 +559,7 @@ export function launchedEngine(skill: unknown, block: unknown): string | undefin
  * named — never left `queued`. A launch run that names no engine has the
  * launch core probed before its lock is released (`Queue.endDriven`). The
  * summary's `run_id` becomes the queue id. */
-async function mirror(queue: Queue, queueRunId: string, v: Validated, s: RunSummary): Promise<RunSummary> {
+export async function mirror(queue: Queue, queueRunId: string, v: Pick<Validated, "jobId" | "defn">, s: RunSummary): Promise<RunSummary> {
   const studioRunId = s.run_id ?? null;
   let reason = s.reason;
   try {
@@ -538,7 +568,19 @@ async function mirror(queue: Queue, queueRunId: string, v: Validated, s: RunSumm
     const endReason = terminal ? s.reason ?? null
       : `${studioRunId ? `studio run ${studioRunId} left ${s.state}` : s.state}${s.reason ? `: ${s.reason}` : ""}`;
     const engine = launchedEngine(v.defn?.target?.skill, s.status_block);
-    await queue.endDriven(queueRunId, terminal ? (s.state as "complete") : "blocked", endReason, engine ? { engineRunId: engine } : {});
+    // A terminal state the studio's own run reached: marked on the `ended` event
+    // (it clears an earlier recorded stop — Queue.pacing); a not-woken or refused run never is.
+    // The studio's own state (`studio_state`) is what it holds, and what its `evaluate_stop` sees.
+    const studioState = s.studio_state ?? s.state;
+    const studioOutcome = terminal && studioRunId && isTerminal(studioState) ? { run_id: studioRunId, state: studioState } : undefined;
+    const detail = { ...(s.guards_tripped?.length ? { guards_tripped: s.guards_tripped } : {}), ...(studioOutcome ? { studio_outcome: studioOutcome } : {}) };
+    // AC4: a studio outcome in `stop.on_status` stops the job recurring — the
+    // `stopped` event is written in the same transaction as `ended`.
+    const onStatus = v.defn?.stop?.on_status;
+    const stop = studioOutcome && Array.isArray(onStatus) && onStatus.includes(studioOutcome.state)
+      ? { stop: { condition: "on_status" as const, state: studioOutcome.state, job_id: v.jobId } } : {};
+    await queue.endDriven(queueRunId, terminal ? (s.state as "complete") : "blocked", endReason,
+      { ...(engine ? { engineRunId: engine } : {}), ...(Object.keys(detail).length ? { detail } : {}), ...stop });
   } catch (e) {
     reason = `${reason ? `${reason}; ` : ""}queue: ${message(e)}`;
   }
@@ -549,6 +591,8 @@ export interface Started {
   jobId: string; root: string; projectId: string; runId: string;
   /** The skill invocation's timeout (the capped guard). */
   guardS: number;
+  /** The job's own `max_wall_clock_seconds` (uncapped): `guardS` below it means the cap bounds. */
+  jobGuardS?: number;
   defn: Record<string, any>; woke: Record<string, any>; permissionMode?: string;
   tier?: Tier; sandbox?: string;
   /** The registry entry root: the sbx microVM path is derived from it. */
@@ -592,8 +636,9 @@ async function validate(jobId: string, directory: string, permissionMode?: strin
 
 /** Under the claimed lock: snapshot, `onVerb` (the queue's `verb_started`
  * record), then the verb that mints. Any throw before the verb means no studio run started.
- * The verb's timeout is the job's UNCAPPED guard + 120 s (a core job runs inside `wake`
- * under its own guard); the tick's cap applies only to the skill invocation. */
+ * The verb's timeout is the backstop of the job's UNCAPPED `max_wall_clock_seconds`
+ * guard (+ 120 s: a core job runs inside `wake`, where jobrun enforces the guard
+ * itself); the tick's cap applies only to the skill invocation. */
 export async function startRun(
   v: Validated, onVerb: (verb: "wake" | "submit", before: string[]) => void, verbRunner: VerbRunner = runJobVerb,
 ): Promise<Started | { summary: RunSummary }> {
@@ -622,7 +667,7 @@ export async function startRun(
   } catch (e) {
     // jobrun creates the run before executing it: ANY failure here (timeout,
     // crash, non-JSON output) may have left one behind — recover, never assume.
-    throw new WakeFailed(message(e), { root, projectId, target, verb, timeoutS, before });
+    throw new WakeFailed(message(e), { root, projectId, target, verb, timeoutS, jobGuardS, before });
   }
   if (out.ok === false) throw refusal(`${verb}: ${out.error ?? "refused"}`);
   const woke = out;
@@ -632,21 +677,26 @@ export async function startRun(
   if (typeof woke.run_id !== "string" || !woke.run_id) {
     throw new StartError(`${verb}: answered ${woke.woken === true ? "woken" : "accepted"} without a run_id — driver contract §4 violation; nothing invoked`);
   }
-  return { jobId, root, projectId, runId: woke.run_id, guardS, defn, woke, ...worker };
+  return { jobId, root, projectId, runId: woke.run_id, guardS, jobGuardS, defn, woke, ...worker };
 }
 
 /** After a wake/submit failure (timeout or otherwise): adopt the newest run of this job that is NOT
  * in the pre-wake snapshot — never a run this CLI did not start. A
  * non-terminal one is ended through a contract verb, because the tick's
  * no-overlap rule would otherwise skip the job forever and no `job-run` event
- * would ever be emitted (AD-12): a skill run is finished `blocked`; a core run
- * is cancelled (AC5b: the supervisor never calls `finish` on a core run).
+ * would ever be emitted (AD-12): a skill run is finished — `partial` when the
+ * backstop of its wall-clock guard tripped (a timeout), `blocked` otherwise; a
+ * core run is cancelled (AC5b: the supervisor never calls `finish` on a core run).
  * No new run → StartError (exit 2, nothing started). */
 export async function recoverAfterTimeout(
   jobId: string, failMsg: string, ctx: TimeoutContext, verbRunner: VerbRunner = runJobVerb,
 ): Promise<RunSummary> {
-  const { root, projectId, target, verb, timeoutS, before } = ctx;
+  const { root, projectId, target, verb, timeoutS, jobGuardS, before } = ctx;
   const timedOut = /timed out/i.test(failMsg);
+  // A timeout is the backstop of the job's own wall-clock guard: named on the run.
+  const trip: GuardTrip | undefined = timedOut
+    ? (jobGuardS !== undefined ? { guard: "max_wall_clock_seconds", value: jobGuardS } : { guard: "max_wall_clock_seconds backstop", value: timeoutS })
+    : undefined;
   let run: Record<string, any> | undefined;
   try {
     const status = answered(await verbRunner(root, ["status", "--directory", root, "--job-id", jobId]), "status");
@@ -663,21 +713,23 @@ export async function recoverAfterTimeout(
   const base = { ok: false, job_id: jobId, project_id: projectId, run_id: runId, target };
   let state = String(run.state ?? "unknown");
   const failed = `${verb} failed: ${failMsg}`;
-  if (state !== "queued" && state !== "running") return { ...base, state, reason: failed };
+  // Already terminal: the studio run ended on its own (no `guards_tripped`), but a timeout still names the guard backstop.
+  if (state !== "queued" && state !== "running") return { ...base, state, reason: trip ? `${guardReason([trip])} — ${failed}` : failed };
 
-  const endReason = timedOut
-    ? `supervisor: ${verb} timed out after ${timeoutS}s before answering — the run could not be driven`
+  const endReason = trip
+    ? `${guardReason([trip])} — supervisor backstop: ${verb} timed out after ${timeoutS}s before answering; the run could not be driven`
     : `supervisor: ${verb} failed before answering (${failMsg.slice(0, 300)}) — the run could not be driven`;
   const endVerb = target === "skill" ? "finish" : "cancel";
-  let ended: string;
+  let ended: string, endedOk = false;
   try {
     const out = answered(await verbRunner(root, target === "skill"
-      ? ["finish", "--directory", root, "--run-id", runId, "--state", "blocked", "--reason", endReason]
+      ? ["finish", "--directory", root, "--run-id", runId, "--state", trip ? "partial" : "blocked", "--reason", endReason]
       : ["cancel", "--directory", root, "--job-id", jobId, "--run-id", runId]), endVerb);
     if (target === "core" && out.cancelled !== true) throw new Error(`cancel: ${out.reason ?? "not cancelled"}`);
     if (typeof out.state === "string") state = out.state;
     else if (Array.isArray(out.runs_ended) && out.runs_ended.includes(runId)) state = "partial";
     ended = `; the supervisor ended the run via ${endVerb}`;
+    endedOk = true;
   } catch (e) {
     ended = `; ending the run via ${endVerb} failed: ${message(e)}`;
   }
@@ -686,14 +738,42 @@ export async function recoverAfterTimeout(
     const now = (status.runs ?? [])[0];
     if (typeof now?.state === "string") state = now.state;
   } catch { /* keep the state the ending verb answered */ }
-  return { ...base, state, reason: `${failed}${ended}` };
+  if (trip && endedOk) {
+    // AC1 on the backstop trip — a skill run finished `partial`, a core run
+    // cancelled (21-1 AC5b: never finished): the queue run ends `partial` with
+    // the guard named in its reason and its `ended` event.
+    // A core run's studio state is `cancelled`: carried as `studio_state`, so `mirror` never records a studio outcome it does not hold.
+    return {
+      ...base, state: "partial", reason: `${guardReason([trip])} — ${failed}${ended} (studio run ${state})`, guards_tripped: [trip],
+      ...(state !== "partial" ? { studio_state: state } : {}),
+    };
+  }
+  return { ...base, state, reason: trip ? `${guardReason([trip])} — ${failed}${ended}` : `${failed}${ended}` };
+}
+
+/** Does the job carry a turn or token guard (the ones `account` enforces per iteration)? */
+export function hasTurnTokenGuard(defn: Record<string, any> | undefined): boolean {
+  const g = defn?.guards;
+  const numeric = (v: unknown) => typeof v === "number" && Number.isFinite(v);
+  return !!g && typeof g === "object" && (numeric(g.max_turns) || numeric(g.max_tokens));
+}
+
+/** One worker iteration's counters: the host transcript (by session id), or on
+ * sbx the worker result's `num_turns`/`usage` (the transcript is inside the microVM). */
+export function iterationCounts(out: Record<string, unknown>, tier?: Tier): Counts {
+  return tier === "sbx" ? resultCounts(out) : transcriptCounts(typeof out.session_id === "string" ? out.session_id : undefined);
 }
 
 type SkillInvoker = typeof invokeSkill;
 
 /** Once a run id is known nothing throws: failures come back as ok:false with the run id.
- * The skill invocation runs under `s.guardS` (the capped guard). */
-export async function finishRun(s: Started, verbRunner: VerbRunner = runJobVerb, invoke: SkillInvoker = invokeSkill): Promise<RunSummary> {
+ * The skill invocation runs under `s.guardS` (the capped guard); a trip ends the run
+ * `partial` naming the bound that tripped. After the invocation returns and before
+ * `finish`, a job with `max_turns`/`max_tokens` has the iteration's counters
+ * `account`ed; `within_budget: false` or a failed `account` ends it `partial` naming it. */
+export async function finishRun(
+  s: Started, verbRunner: VerbRunner = runJobVerb, invoke: SkillInvoker = invokeSkill, clockMs: () => number = () => performance.now(),
+): Promise<RunSummary> {
   const { jobId, root, projectId, runId, guardS, defn, woke, permissionMode, tier, sandbox, registryRoot } = s;
   const base = { job_id: jobId, project_id: projectId, run_id: runId };
   const known = typeof woke.state === "string" ? woke.state : "unknown";
@@ -715,33 +795,82 @@ export async function finishRun(s: Started, verbRunner: VerbRunner = runJobVerb,
   }
 
   let state: ReturnType<typeof finishStateFor>, reason: string | undefined, block: Record<string, unknown> | undefined, cost: number | undefined;
+  let invoked: Record<string, unknown> | undefined, tripped: GuardTrip[] | undefined, account: RunSummary["account"];
   try {
     const routing = (woke.routing ?? {}) as Record<string, unknown>;
     const knowledge = directive.knowledge && typeof directive.knowledge === "object" ? directive.knowledge : undefined;
     // §5: the submission's override, else the resolved job's routing — verbatim; neither → none (AD-14).
     const model = s.model ?? routing.model, effort = s.effort ?? routing.effort;
+    const startedMs = clockMs();
     const out = await invoke(root, directive.skill, {
       payload: { ...(directive.payload ?? {}), run_id: runId }, timeout_s: guardS, permission_mode: permissionMode,
       ...(model !== undefined ? { model } : {}), ...(effort !== undefined ? { effort } : {}),
       ...(tier ? { tier } : {}), ...(sandbox ? { sandbox } : {}), ...(knowledge ? { knowledge } : {}),
     }, undefined, registryRoot !== undefined ? { vmHostRoot: registryRoot } : {});
+    // The worker's own time, from its spawn (invokeSkill's worker_elapsed_s) —
+    // not the auth preflight or drift check before it; the injected clock only
+    // when the result does not carry it.
+    const elapsedS = typeof out.worker_elapsed_s === "number" && Number.isFinite(out.worker_elapsed_s)
+      ? out.worker_elapsed_s : (clockMs() - startedMs) / 1000;
+    invoked = out;
     cost = typeof out.total_cost_usd === "number" ? out.total_cost_usd : undefined;
     block = out.status_block as Record<string, unknown> | undefined;
     if (block) {
       state = finishStateFor(String(block.status));
       reason = typeof block.reason === "string" && block.reason ? block.reason
         : state === "complete" ? undefined : `status block ended '${block.status}'`;
+    } else if (tier === "sbx" && (out.exit === 124 || out.exit === 137) && elapsedS >= guardS) {
+      // The in-VM `timeout` (GNU: 124 on TERM, 137 after `-k`) fired before the
+      // host timer: the wall-clock guard tripped inside the microVM (AC1). Only
+      // once the guard's time has passed in the worker's own run (from its spawn,
+      // not counting the preflight) — an earlier 124/137 is an OOM or another
+      // SIGKILL, and stays the AD-11 failure below.
+      tripped = [wallClockGuard(s.jobGuardS, guardS)];
+      state = "partial";
+      reason = guardReason(tripped);
     } else {
       state = "blocked";
       reason = String(out.conformance_failure ?? MISSING_STATUS_BLOCK);
     }
   } catch (e) {
     const msg = message(e);
-    state = /timed out/i.test(msg) ? "partial" : "blocked";
-    reason = state === "partial" ? `guard: max_wall_clock_seconds (${guardS}s)` : msg;
+    if (/timed out/i.test(msg)) {
+      tripped = [wallClockGuard(s.jobGuardS, guardS)];
+      state = "partial";
+      reason = guardReason(tripped);
+    } else {
+      state = "blocked";
+      reason = msg;
+    }
+  }
+  // AC2: one worker iteration ran — account its turns/tokens before `finish`
+  // (account refuses a run that is no longer resumable). A wall-clock trip is
+  // not accounted (the iteration was killed). The iteration's own reason is
+  // never dropped: guard text is appended to it. A tripped turn/token guard
+  // ends the run `partial`; an account FAILURE turns a clean run `partial` but
+  // never lifts an already-`blocked` one.
+  const withGuard = (text: string) => (reason ? `${reason}; ${text}` : text);
+  if (invoked && invoked.ran !== false && !tripped && hasTurnTokenGuard(defn)) {
+    try {
+      const counts = iterationCounts(invoked, tier);
+      const acct = answered(await verbRunner(root, [
+        "account", "--directory", root, "--run-id", runId, "--turns", String(counts.turns), "--tokens", String(counts.tokens),
+      ]), "account");
+      const exceeded: string[] = Array.isArray(acct.exceeded) ? acct.exceeded.map(String) : [];
+      account = { ...counts, within_budget: acct.within_budget !== false, exceeded };
+      if (acct.within_budget === false) {
+        tripped = exceeded.map((g) => ({ guard: g, value: Number(defn?.guards?.[g]) }));
+        state = "partial";
+        reason = withGuard(tripped.length ? guardReason(tripped) : "guard: account answered within_budget false naming no guard");
+      }
+    } catch (e) {
+      if (state !== "blocked") state = "partial";
+      reason = withGuard(`guard: account failed — ${message(e)}`);
+    }
   }
   const extras = {
     ...(block ? { status_block: block } : {}), ...(cost !== undefined ? { total_cost_usd: cost } : {}),
+    ...(tripped?.length ? { guards_tripped: tripped } : {}), ...(account ? { account } : {}),
   };
   let finish: Record<string, any>;
   try {

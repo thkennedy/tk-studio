@@ -1040,3 +1040,85 @@ describe("no owner or engine probe runs inside a transaction", () => {
     expect(g.seen.inTransaction).toEqual([]);
   });
 });
+
+describe("stop events and the pacer's read (Story 21.5)", () => {
+  const STOP = { condition: "on_status" as const, state: "partial", job_id: "j" };
+  const studio = (state: string) => ({ detail: { studio_outcome: { run_id: "s-1", state } } });
+
+  test("end(..., { stop }): the `stopped` event is written in the same transaction as `ended`", () => {
+    const fx = fixture();
+    try {
+      const run = fx.enqueue("j").run;
+      fx.queue.end(run.run_id, "partial", "guard: max_turns (40)", { stop: STOP });
+      const evs = fx.queue.events(run.run_id);
+      const ended = evs.findIndex((e) => e.kind === "ended");
+      expect(evs[ended + 1]).toMatchObject({ kind: "stopped", from_state: "partial", to_state: "partial", detail: STOP });
+      expect(fx.queue.get(run.run_id)).toMatchObject({ state: "partial", reason: "guard: max_turns (40)" });
+      // A refused end (already terminal) writes neither.
+      expect(() => fx.queue.end(run.run_id, "partial", null, { stop: STOP })).toThrow(RunTerminal);
+      expect(fx.queue.events(run.run_id).filter((e) => e.kind === "stopped")).toHaveLength(1);
+    } finally { fx.queue.close(); }
+  });
+
+  test("pacing: live vs adoptable runs, the latest terminal run's end and the stop, per (job, checkout)", () => {
+    const fx = fixture();
+    try {
+      expect(fx.queue.pacing("j", fx.checkout)).toEqual({ live: [], adoptable: [], lastEnded: null, latestTerminal: null, stopped: null });
+      const first = fx.enqueue("j").run;
+      fx.queue.end(first.run_id, "partial", null, { ...studio("partial"), stop: STOP });
+      const endedAt = fx.queue.events(first.run_id).find((e) => e.kind === "ended")!.at;
+      let p = fx.queue.pacing("j", fx.checkout);
+      expect(p).toMatchObject({ live: [], adoptable: [], lastEnded: endedAt, latestTerminal: { run_id: first.run_id }, stopped: { kind: "stopped" } });
+
+      // A later run the studio ran to a terminal state clears the stop; an ownerless queued run is adoptable; other jobs are not listed.
+      const second = fx.enqueue("j").run;
+      fx.queue.end(second.run_id, "complete", null, studio("complete"));
+      const third = fx.enqueue("j").run;
+      fx.enqueue("other");
+      p = fx.queue.pacing("j", fx.checkout);
+      expect(p.live).toEqual([]);
+      expect(p.adoptable.map((r) => r.run_id)).toEqual([third.run_id]);
+      expect(p.latestTerminal!.run_id).toBe(second.run_id);
+      expect(p.lastEnded).toBe(fx.queue.events(second.run_id).find((e) => e.kind === "ended")!.at);
+      expect(p.stopped).toBeNull();
+      // Another checkout of the same job is its own pacing.
+      expect(fx.queue.pacing("j", mkdtempSync(join(tmpdir(), "tk-sup-other-co-"))).adoptable).toEqual([]);
+    } finally { fx.queue.close(); }
+  });
+
+  test("pacing: a queued run under a live owner and a running run are live; a dead owner's queued run is adoptable", async () => {
+    const fx = fixture(new Set([A.pid]));
+    try {
+      const owned = fx.enqueue("j", A).run;
+      expect(fx.queue.pacing("j", fx.checkout, B)).toMatchObject({ live: [{ run_id: owned.run_id }], adoptable: [] });
+      fx.alive.delete(A.pid);
+      expect(fx.queue.pacing("j", fx.checkout, B)).toMatchObject({ live: [], adoptable: [{ run_id: owned.run_id }] });
+      await fx.queue.claim(owned.run_id, B);
+      expect(fx.queue.pacing("j", fx.checkout, B)).toMatchObject({ live: [{ run_id: owned.run_id, state: "running" }], adoptable: [] });
+    } finally { fx.queue.close(); }
+  });
+
+  test("pacing: a stop persists past later runs the studio never ran to a terminal state (not-woken, refused, orphan)", () => {
+    const fx = fixture();
+    try {
+      const stopped = fx.enqueue("j").run;
+      fx.queue.end(stopped.run_id, "partial", null, { ...studio("partial"), stop: STOP });
+      // not-woken / refused: ended `blocked` with no studio outcome.
+      const notWoken = fx.enqueue("j").run;
+      fx.queue.end(notWoken.run_id, "blocked", "not-woken: stop: on_status");
+      const refused = fx.enqueue("j").run;
+      fx.queue.end(refused.run_id, "blocked", "registry show refused");
+      let p = fx.queue.pacing("j", fx.checkout);
+      expect(p.latestTerminal!.run_id).toBe(refused.run_id);
+      expect(p.stopped).toMatchObject({ run_id: stopped.run_id, kind: "stopped" });
+      // An orphan (ended by the restart rule, an `orphaned` event) never clears it either.
+      const orphan = fx.enqueue("j").run;
+      fx.queue.db.query("UPDATE runs SET state = 'partial', reason = ? WHERE run_id = ?").run(ORPHANED_REASON, orphan.run_id);
+      fx.queue.db.query("INSERT INTO events (run_id, at, kind, from_state, to_state, detail) VALUES (?, ?, 'orphaned', 'running', 'partial', NULL)")
+        .run(orphan.run_id, new Date(Date.now() + 1000).toISOString());
+      p = fx.queue.pacing("j", fx.checkout);
+      expect(p.latestTerminal!.run_id).toBe(orphan.run_id);
+      expect(p.stopped).toMatchObject({ run_id: stopped.run_id });
+    } finally { fx.queue.close(); }
+  });
+});

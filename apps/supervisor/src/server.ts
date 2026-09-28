@@ -162,29 +162,113 @@ export interface RunResult {
   stderr: string;
 }
 
+/** Kill the child's whole process tree. win32: `taskkill /F /T` (the tree).
+ * POSIX: the child leads its own process group (spawned `detached`), so the
+ * group is killed — grandchildren included (DW-1); if the group kill fails,
+ * the direct child. */
 function killTree(pid: number | undefined, child: ReturnType<typeof spawn>): void {
   if (process.platform === "win32" && pid) {
     spawnSync("taskkill", ["/F", "/T", "/PID", String(pid)], { windowsHide: true });
-  } else {
-    try { child.kill("SIGKILL"); } catch { /* already gone */ }
+    return;
   }
+  if (pid) {
+    try { process.kill(-pid, "SIGKILL"); return; } catch { /* no group — fall back to the child */ }
+  }
+  try { child.kill("SIGKILL"); } catch { /* already gone */ }
 }
 
-function runProcess(
+// ---- POSIX: the supervisor's own signals reach its detached children.
+// A `detached` child leads its own process group, so a Ctrl-C/SIGTERM/SIGHUP
+// to the supervisor (its terminal's foreground group) no longer reaches it.
+// While any child is live, those signals SIGKILL the live children's groups —
+// only the groups this process spawned, never a name pattern — then default
+// handling is restored and the signal re-raised, so the supervisor exits as it
+// did before. Never installed on win32 (no `detached` there).
+//
+// A signal the supervisor inherited as IGNORED (`nohup` → SIGHUP) is never
+// handled: removing a listener resets it to the default action, not the
+// inherited one, so handling it even once would let a later SIGHUP kill the
+// supervisor. The inherited set is read once, before the first install, from
+// `/proc/self/status` `SigIgn`; where that cannot be read (non-Linux POSIX)
+// SIGHUP is never handled (it may be ignored), SIGINT/SIGTERM still are.
+
+const FORWARDED_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
+type ForwardedSignal = typeof FORWARDED_SIGNALS[number];
+const SIGNAL_NUMBER: Record<ForwardedSignal, number> = { SIGHUP: 1, SIGINT: 2, SIGTERM: 15 };
+
+/** Pure: the forwarded signals to handle, given `/proc/self/status` text
+ * (null or no `SigIgn:` line → unknown: SIGHUP is left alone). `SigIgn` is a
+ * hex mask, bit n-1 set ⇔ signal n ignored. */
+export function signalsToHandle(procStatus: string | null | undefined): ForwardedSignal[] {
+  const m = procStatus ? /^SigIgn:\s*([0-9a-fA-F]+)\s*$/m.exec(procStatus) : null;
+  if (!m) return FORWARDED_SIGNALS.filter((sig) => sig !== "SIGHUP");
+  const ignored = BigInt(`0x${m[1]}`);
+  return FORWARDED_SIGNALS.filter((sig) => ((ignored >> BigInt(SIGNAL_NUMBER[sig] - 1)) & 1n) === 0n);
+}
+
+/** This process's `/proc/self/status` (Linux), else null. */
+export function readProcStatus(): string | null {
+  if (process.platform !== "linux") return null;
+  try { return readFileSync("/proc/self/status", "utf-8"); } catch { return null; }
+}
+
+const liveGroups = new Set<number>();
+let signalHandlers: Map<NodeJS.Signals, () => void> | null = null;
+/** Read once, before the first install: afterwards SigIgn no longer shows the inherited disposition. */
+let handledSignals: ForwardedSignal[] | null = null;
+
+function uninstallSignalHandlers(): void {
+  if (!signalHandlers) return;
+  for (const [sig, fn] of signalHandlers) process.removeListener(sig, fn);
+  signalHandlers = null;
+}
+
+function onSupervisorSignal(sig: NodeJS.Signals): void {
+  for (const pgid of liveGroups) { try { process.kill(-pgid, "SIGKILL"); } catch { /* group already gone */ } }
+  liveGroups.clear();
+  uninstallSignalHandlers();
+  // Re-raise: with our handlers gone, the signal gets its default handling
+  // (only signals that were not inherited as ignored are ever handled).
+  process.kill(process.pid, sig);
+}
+
+function trackGroup(pgid: number): void {
+  liveGroups.add(pgid);
+  if (signalHandlers) return;
+  handledSignals ??= signalsToHandle(readProcStatus());
+  signalHandlers = new Map(handledSignals.map((sig) => [sig, () => onSupervisorSignal(sig)]));
+  for (const [sig, fn] of signalHandlers) process.on(sig, fn);
+}
+
+function untrackGroup(pgid: number): void {
+  liveGroups.delete(pgid);
+  if (!liveGroups.size) uninstallSignalHandlers();
+}
+
+/** The one spawn helper. On POSIX the child is `detached` (its own process
+ * group, so a timeout kills the tree, and the supervisor's own SIGINT/SIGTERM/
+ * SIGHUP — any not inherited as ignored — kill that group before the supervisor exits); on win32 never —
+ * `detached` would give the worker its own console (21-4 AC1 console hosting). */
+export function runProcess(
   cmd: string, args: string[],
   opts: { cwd?: string; input?: string; timeoutS: number; shell?: boolean; env?: Record<string, string | undefined> },
 ): Promise<RunResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, {
       cwd: opts.cwd, windowsHide: true, shell: opts.shell ?? false,
+      detached: process.platform !== "win32",
       env: (opts.env as NodeJS.ProcessEnv) ?? process.env,
       stdio: ["pipe", "pipe", "pipe"],
     });
+    const group = process.platform !== "win32" ? child.pid : undefined;
+    if (group) trackGroup(group);
+    const untrack = () => { if (group) untrackGroup(group); };
     let stdout = "", stderr = "", settled = false;
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
       killTree(child.pid, child);
+      untrack();
       reject(new Error(`${cmd} timed out after ${opts.timeoutS}s (process tree killed); stdout tail: ${stdout.slice(-400)}`));
     }, opts.timeoutS * 1000);
     child.stdout!.setEncoding("utf-8");
@@ -192,12 +276,14 @@ function runProcess(
     child.stdout!.on("data", (c: string) => { stdout += c; });
     child.stderr!.on("data", (c: string) => { stderr += c; });
     child.on("error", (e) => {
+      untrack();
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       reject(e);
     });
     child.on("close", (code) => {
+      untrack();
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -371,15 +457,22 @@ function vmDenyProfile(requested: string, canonical: string, root: string | unde
   return `${toVmPath(root).replace(/\/+$/, "")}/${rel.split(sep).join("/")}`;
 }
 
+/** Grace (s) the in-VM `timeout` gives the worker between TERM and KILL. */
+export const SBX_GUARD_KILL_AFTER_S = 10;
+
 /** The sbx-tier wrapper: the same `claude -p` argv run inside the microVM
  * through `sbx exec` — argv only, never a shell, so the prompt stays one argv
- * item. `env -u ANTHROPIC_API_KEY` strips the key inside the VM and `env -C`
+ * item. The in-VM wall-clock guard is GNU `timeout -k <s> <guardS>` before
+ * `env`: a host tree kill stops only `sbx exec`, so the VM side ends its own
+ * worker (timeout runs it in its own process group and kills that group).
+ * `env -u ANTHROPIC_API_KEY` strips the key inside the VM and `env -C`
  * sets the worker's cwd to the project's microVM path. The VM worker binary
  * is literal `claude` (CLAUDE_BIN is host-only). */
-export function buildSbxCommand(opts: { sandbox: string; vmRoot: string; worker: WorkerCommand }): WorkerCommand {
+export function buildSbxCommand(opts: { sandbox: string; vmRoot: string; worker: WorkerCommand; guardS: number }): WorkerCommand {
   return {
     bin: sbxBin(),
-    argv: ["exec", opts.sandbox, "env", "-u", "ANTHROPIC_API_KEY", "-C", opts.vmRoot, "claude", ...opts.worker.argv],
+    argv: ["exec", opts.sandbox, "timeout", "-k", String(SBX_GUARD_KILL_AFTER_S), String(opts.guardS),
+      "env", "-u", "ANTHROPIC_API_KEY", "-C", opts.vmRoot, "claude", ...opts.worker.argv],
   };
 }
 
@@ -544,18 +637,33 @@ export function extractStatusBlock(text: string): { status: string; intent: stri
 export const MISSING_STATUS_BLOCK = "conformance failure (AD-11): run terminated without a JSON status block (§3)";
 export const MAX_LOGIN_MISSING = "harness auth: Max login missing or expired";
 
+export interface WorkerResult {
+  text: string; isError: boolean; totalCostUsd?: number;
+  /** The worker's session: its transcript is `projects/*\/<sessionId>.jsonl`. */
+  sessionId?: string;
+  /** Turns and token usage as the result reports them (the sbx tier's counts). */
+  numTurns?: number;
+  usage?: Record<string, unknown>;
+}
+
 /** The worker's `--output-format json` result: the text the status block
- * rides in, the error flag, and the cost when reported. */
-export function parseWorkerResult(stdout: string): { text: string; isError: boolean; totalCostUsd?: number } {
+ * rides in, the error flag, the cost, and the session id / turns / usage when reported. */
+export function parseWorkerResult(stdout: string): WorkerResult {
   let parsed: any = null;
   try { parsed = JSON.parse(stdout.trim()); } catch { parsed = lastJsonObject(stdout); }
-  const cost = parsed && typeof parsed === "object" && typeof parsed.total_cost_usd === "number"
-    && Number.isFinite(parsed.total_cost_usd) ? parsed.total_cost_usd as number : undefined;
-  const withCost = cost !== undefined ? { totalCostUsd: cost } : {};
-  if (!parsed || typeof parsed !== "object" || typeof parsed.result !== "string") {
-    return { text: stdout, isError: parsed?.is_error === true, ...withCost };
+  const obj = parsed && typeof parsed === "object" ? parsed : undefined;
+  const cost = obj && typeof obj.total_cost_usd === "number"
+    && Number.isFinite(obj.total_cost_usd) ? obj.total_cost_usd as number : undefined;
+  const extra = {
+    ...(cost !== undefined ? { totalCostUsd: cost } : {}),
+    ...(obj && typeof obj.session_id === "string" && obj.session_id ? { sessionId: obj.session_id as string } : {}),
+    ...(obj && typeof obj.num_turns === "number" && Number.isFinite(obj.num_turns) ? { numTurns: obj.num_turns as number } : {}),
+    ...(obj && obj.usage && typeof obj.usage === "object" && !Array.isArray(obj.usage) ? { usage: obj.usage as Record<string, unknown> } : {}),
+  };
+  if (!obj || typeof obj.result !== "string") {
+    return { text: stdout, isError: parsed?.is_error === true, ...extra };
   }
-  return { text: parsed.result, isError: parsed.is_error === true, ...withCost };
+  return { text: obj.result, isError: obj.is_error === true, ...extra };
 }
 
 /** The status-block.schema.json `status` enum. */
@@ -868,7 +976,7 @@ export async function invokeSkill(
     effort: typeof args.effort === "string" ? args.effort : undefined,
     denyProfile: args.deny_profile === undefined ? undefined : String(args.deny_profile),
   });
-  const cmd = vmRoot ? buildSbxCommand({ sandbox: sandbox!, vmRoot, worker: workerCmd }) : workerCmd;
+  const cmd = vmRoot ? buildSbxCommand({ sandbox: sandbox!, vmRoot, worker: workerCmd, guardS: timeoutS }) : workerCmd;
 
   const gaps = await authPreflight(skill, payload, root, spawner, { tier, sandbox });
   if (gaps.length) {
@@ -882,13 +990,20 @@ export async function invokeSkill(
     catch (e) { /* not cached — retried on the next invoke */ void e; }
   }
 
+  // The worker's own run time, from its spawn — the preflight and drift check
+  // above are not part of the guard's budget (the host timer starts here).
+  const spawnedMs = performance.now();
   const res = await runClaude(cmd, root, timeoutS, spawner);
+  const workerElapsedS = (performance.now() - spawnedMs) / 1000;
   const worker = parseWorkerResult(res.stdout);
   const block = extractStatusBlock(worker.text);
   const result: Record<string, unknown> = {
-    ran: true, exit: res.exit, startup_drift: driftByRoot.get(root) ?? null,
+    ran: true, exit: res.exit, worker_elapsed_s: workerElapsedS, startup_drift: driftByRoot.get(root) ?? null,
     output_tail: worker.text.slice(-2000),
     ...(worker.totalCostUsd !== undefined ? { total_cost_usd: worker.totalCostUsd } : {}),
+    ...(worker.sessionId !== undefined ? { session_id: worker.sessionId } : {}),
+    ...(worker.numTurns !== undefined ? { num_turns: worker.numTurns } : {}),
+    ...(worker.usage !== undefined ? { usage: worker.usage } : {}),
   };
   if (args.knowledge !== undefined) {
     result.knowledge_injected = injection.injected;
