@@ -501,6 +501,99 @@ Hermes never spawns `claude -p` for pipeline work on this box. Its one job
 toward the studio is turning your intent into a job JSON and POSTing it to the
 supervisor (plan Phase 2).
 
+### 3.8 The bmad-loop engine lives in Docker Sandboxes
+
+The execution engine is bmad-loop. It starts its dev sessions with
+`bypassPermissions`, and the studio's pipeline routing writes that flag into
+the engine's policy. So the engine only ever runs inside a Docker Sandboxes
+microVM (§3.5), never on the host, and never in WSL. This was verified end to
+end on 2026-09-28: tk-studio Epics 20 and 24 and the supervisor's Epic 21 were
+all built this way.
+
+**Create one sandbox per project.** It mounts the project read-write and the
+tk-studio checkout read-only; tk-studio's own sandbox needs only its own
+mount. Run this from your home folder, never from `System32` (§3.5):
+
+```powershell
+cd $HOME
+sbx create --name claude-<project> claude C:\GitHub\<project> C:\GitHub\tk-studio:ro
+```
+
+Claude inside the sandbox authenticates through the global `anthropic` sbx
+secret, which is the Max login. No sign-in is needed per sandbox.
+
+**Provision it once** with `tools/sbx-engine/provision-engine.sh`. It is
+idempotent, and it sets up:
+
+- a git identity for the engine's own commits
+- tmux
+- bmad-loop at the `bmad.lock` pin with the `[tui]` extra
+- Bun, when `WITH_BUN=1` is set
+- `TK_STUDIO_ROOT`
+- the tk-studio plugin at user scope
+- the sandbox's own studio store, with the project registered as developer
+
+From Git Bash, set `MSYS_NO_PATHCONV=1`, or Git Bash rewrites `/c/...`
+arguments to `C:/...`:
+
+```bash
+MSYS_NO_PATHCONV=1 sbx exec claude-<project> bash -lc 'GIT_NAME="Tim Kennedy" GIT_EMAIL="<noreply email>" bash /c/GitHub/tk-studio/tools/sbx-engine/provision-engine.sh /c/GitHub/<project> /c/GitHub/tk-studio'
+```
+
+**Project setup.** Run this once per project, on the host:
+
+1. `tk install` at the pin, with the full module set, then `tk onboard`.
+2. `bmad-loop init --cli claude` inside the sandbox. Then change the four hook
+   commands in `.claude/settings.json` to
+   `uv run --no-project python "$CLAUDE_PROJECT_DIR"/.bmad-loop/bmad_loop_hook.py <Event>`.
+   On the Windows host `python3` is the Microsoft Store stub, and every
+   desktop-app session runs these hooks.
+3. Add the studio pipeline:
+   - the gate plugin in `.bmad-loop/plugins/studio-pipeline/`
+   - the executor customization `_bmad/custom/bmad-build-auto.toml`
+   - `.tk-studio/budget-bands.yaml`
+   - `.bmad-loop/routing.toml`
+
+   Copy them from tk-studio. `tk-studio-supervisor` shows the adaptation for
+   a non-Python repo.
+4. Gitignore:
+   - `.bmad-loop/{runs,cache,archive}/`
+   - `.bmad-loop/policy.toml`
+   - `.bmad-loop/routing.current.json`
+   - `_bmad/render/`
+   - `_bmad/config.user.yaml`
+   - `_bmad-output/implementation-artifacts/supervision/`
+
+**Running an epic:**
+
+1. Cut a run branch from `main` in the project checkout: `loop/epic-<N>`. The
+   loop commits locally and never pushes.
+2. Launch with `tools/sbx-engine/launch-epic.sh`, held through a background
+   `sbx exec`. **A sandbox stops when nothing is attached**, and a detached
+   engine and its tmux server die with it. The script keeps the exec
+   attached while `bmad-loop run` lives. The supervisor's `start.ps1` takes
+   this over in §4.
+3. Epic 20 needed two launch passes: the first wrote SPEC.md, `stories.yaml`
+   and the first plan, then ended `blocked` on the dirty tree. Commit that
+   output and launch again. The Epic 24 launch committed its own bootstrap.
+4. Each landed story is metered by the studio pipeline's `post_commit` hook
+   (`lib/meter.py`). The hook copies transcripts out of the microVM into
+   `<run_dir>/transcripts/` and records one `observation`.
+5. When the run completes, open a PR from `loop/epic-<N>` into `main`.
+
+**When a run pauses:**
+
+- **On an escalation whose story did no work** (a missing fact, a render
+  halt): fix the cause, then re-arm it with `tools/sbx-engine/resume-run.sh`.
+- **On a story that already committed** (its spec says `status: done`, but
+  the engine's close-out failed): commit the engine's staged harvest by hand,
+  run `bmad-loop archive <run>`, and launch again. It skips stories that are
+  done.
+- **At the reconcile gate** (deviation score of 2 or more, no verdict): this
+  is an attended step. Run `.bmad-loop/plugins/studio-pipeline/reconcile.md`,
+  record the verdict on the spec, and carry any `adjust-stories` notes into
+  the unstarted entries' `invoke_dev_with`. Then close it the same way.
+
 ## 4. The studio supervisor (plan Phase 1; placeholder until extracted)
 
 The supervisor is the ruling-4 independent driver: the ~1.5k lines of
@@ -629,6 +722,11 @@ the first agent PC on 2026-09-27 (with `C:\agent-work`).
 | Bare Claude installer switches `settings.json` to the `latest` channel and leaves `~\.local\bin` off PATH | first agent PC, 2026-09-27 | install with the `stable` argument; add the PATH entry (§3.2) |
 | CRLF checkout makes every BMad-installer rewrite show as modified | first agent PC, 2026-09-26 | `core.autocrlf false` before cloning; one-time re-checkout otherwise (§3.1) |
 | Plugin skills work in the desktop app but headless `claude -p /tk-studio:…` is "Unknown command" (no CLI install record) | first agent PC, 2026-09-27; "tk activate" plugin plane | `claude plugin install tk-studio@tk-studio --scope project` (§3.4) |
+| A detached bmad-loop engine and its tmux server die within a minute | sbx v0.45.1: the sandbox stops when no `exec` or session is attached (first agent PC, 2026-09-28) | hold an `sbx exec` for the engine's lifetime (`tools/sbx-engine/launch-epic.sh`, §3.8) |
+| The loop's close-out commit fails with "Author identity unknown" after the story landed | the engine's shell has no git identity, even though the agent session has one (The Universe Awaits hit the same in WSL) | `provision-engine.sh` sets `user.name` and `user.email` (§3.8) |
+| `bmad-loop list` fails on `pyte` / `rich`, so launch's live-engine check fails | bmad-loop installed without its `[tui]` extra | install `bmad-loop[tui]` at the pin (§3.8) |
+| `bmad-build` / `bmad-build-auto` HALT: "ambiguous config value `planning_artifacts`" | BMAD-METHOD#2718: bmm + gds both declare the key | studio-managed base patch, re-applied by `tk install` (`kb/bmad-base-patches.md`) |
+| Every host session's hooks fail after `bmad-loop init` | init wrote `python3 …` hooks (the Store stub on Windows), or 0.12.0's absolute sandbox path | hooks through `uv run --no-project python` (§3.8); bmad-loop pinned |
 
 ## 9. Retiring ClaudeOS on the main PC (done 2026-09-26, one step left)
 
