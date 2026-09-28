@@ -1,0 +1,145 @@
+# Team override for bmad-build-auto in tk-studio: the dev/review primitive every
+# bmad-loop session runs under the studio pipeline (stories mode, folder+id
+# dispatch).
+#
+# Ported 2026-09-28 from The Universe Awaits, which took it from ClaudeOS.
+# What it adds:
+#   - studio activation
+#   - per-leg model routing
+#   - the deviation record
+#   - pipeline v2's monitor posture, consult triggers, foreground-only rule
+#     and context hygiene
+# The C#/Godot executor rules are replaced by this repo's own (stdlib Python,
+# AD-11 status blocks, lib suite + conformance as the verify gate).
+#
+# The stock skill runs untouched (AD-4, zero forks); this file is user-authored
+# studio content (AD-17). BMad merge rules: lists APPEND to the skill defaults,
+# strings replace.
+
+[workflow]
+
+activation_steps_prepend = [
+  """
+STUDIO ACTIVATION 1/4: resolve the studio root and run the drift check (read-only).
+`{studio-root}` is resolved in this order:
+1. The value of the `TK_STUDIO_ROOT` environment variable, when it is set.
+2. `{project-root}` itself, when `{project-root}/plugins/tk-studio/contracts/driver-contract.md` exists. It does in this repo.
+3. The `root` of the single entry in `~/.tk-studio/registry/projects.yaml` that holds that file.
+If none of these resolves, HALT with status `blocked` and blocking condition `studio root unresolvable`.
+Then run:
+  uv run "{studio-root}/plugins/tk-studio/skills/tk-studio-activate/scripts/drift_check.py" --directory "{project-root}"
+Keep `result` and every `fixes[]` line verbatim for the activation record. NEVER apply a fix: fixes are guidance for the operator. A `drift` result does not stop this session. An unrunnable check does: uv or python missing, or a non-zero exit with no JSON. Then HALT `blocked` with `studio drift check unrunnable: <what failed>`.
+""",
+  """
+STUDIO ACTIVATION 2/4: enter the studio as the developer role (headless, AD-11: never ask, never guess).
+Run:
+  uv run "{studio-root}/plugins/tk-studio/lib/orchestrate.py" resolve --directory "{project-root}" --role developer
+- On `outcome: ready`: adopt the execution framing it returns. Its `working_set` and `routes` are the studio resources this session may use. Invoke installed stock BMad skills by name, untouched. A route marked `missing` or `known-uninstalled` is unavailable: never substitute something else for it.
+- On `outcome: needs-onboarding`, `ok: false`, or no JSON: HALT `blocked` with `studio activation failed: <gaps[] or the error, verbatim>`.
+""",
+  """
+STUDIO ACTIVATION 3/4: routing, provisional knowledge, and the activation record.
+Routing: run
+  uv run "{studio-root}/plugins/tk-studio/lib/pipeline.py" resolve --directory "{project-root}" --story <story id>
+The story id is the folder+id dispatch id. Remember `route.implementer.model`, `route.reviewers.model` and `route.consult.model`, and use them for every subagent launch (see STUDIO MODEL ROUTING). If the command fails, read `{project-root}/.bmad-loop/routing.current.json` instead. If that is absent too, use the shipped defaults (implementer and reviewers `claude-sonnet-5`, consult `claude-opus-5`) and note `routing: fallback`.
+Provisional knowledge: if `~/.tk-studio/projects/tk-studio/knowledge/spine.md` exists, load it as foundational context. Otherwise continue without it.
+Carry forward one line for the terminal `## Auto Run Result`:
+  `Studio: activated as developer; working set <names>; drift <result>[; fixes: <fixes[]>]; routing implementer=<model> reviewers=<model> consult=<model>; knowledge spine <loaded|absent>`
+""",
+  """
+STUDIO ACTIVATION 4/4: the story plan, seam notes, and the consult policy.
+Story plan: if `plans/<N>-<M>.md` exists beside the spec folder's `stories.yaml`, read it once. Its Code Map, Files and Verify are the investigation already paid for. Start from them, and do not repeat the search.
+Seam notes: if `{project-root}/_bmad-output/implementation-artifacts/supervision/seam/<story id>.md` exists, read it.
+- First line `verdict: text-fix`: apply its replace/with pairs to the story text before transcribing the intent contract. List each in `## Deviation Summary` as `SEAM-FIX: <section> — <with>`. These are not deviations.
+- First line `verdict: escalate`: HALT `blocked` with `seam check escalated: <first sentence of its Reason>`.
+- No file: proceed. The seam check is not ported to this repo yet, so this is the normal case.
+Consult policy: from `{project-root}/.bmad-loop/routing.current.json`, remember `consult_triggers`.
+""",
+]
+
+persistent_facts = [
+  "You are the EXECUTOR. Decisions were spent at planning time. Under folder+id dispatch the entry's title and description identify the story. Its AUTHORITATIVE specification is its own `### Story <N>.<M>:` section in `_bmad-output/planning-artifacts/epics.md` (the user story and every Given/When/Then), read together with its `## Epic <N>:` narrative (scope, rulings, the target repo). Load both in full before planning. Transcribe the acceptance criteria into the spec's intent contract. Never re-derive, generalise or extend them. Every criterion is proven by a test or a command whose output shows it.",
+  "Touch only what the story needs. When the story plan (`plans/<N>-<M>.md`) lists Files, that list is the boundary, and any other file is a deviation you record. Do not refactor outside it. If the story is silent on something you must know to proceed, HALT `blocked` (Block If) rather than deciding.",
+  "If making the verify gate pass forces a deviation from the story, the architecture spine (AD-1..AD-20) or the driver contract, record it. Write one line per deviation in `## Auto Run Result`, exactly `DRIFT: <what changed> — <why it was unavoidable> — affects: <story keys, or none>`. Mirror it in `## Deviation Summary`, and set frontmatter `deviation_score` on this scale: 0 none; 1 local; 2 a verb, field, schema, event, file or sequencing that later stories were planned against; 3 the story or an AD is wrong. Never absorb drift silently.",
+  "VERIFY GATE (tk-studio): run both steps from `plugins/tk-studio/lib`. Both must pass before the story is done.\n1. `uv run python -m unittest discover tests`: the full lib suite, green.\n2. `uv run python ../contracts/conformance/runner.py run`: `ok: true` over every surface.\nA story that changes a contract surface also updates `driver-contract.md` and its schemas in the same story (AD-19: nothing is done until conformance passes).",
+  "HOUSE RULES (tk-studio):\n- Studio scripts are stdlib-only Python run via `uv run` (NFR9).\n- Writes are atomic.\n- Every headless surface ends with the JSON status block (AD-11), never a question.\n- Credentials never land in tracked files or events (NFR5).\n- Nothing in the plugin imports a driver, the supervisor or Hermes (AD-2).",
+  "OUT OF THE LOOP'S HANDS: the loop commits locally and nothing else.\n- Never `git push`, tag, open a PR, or touch remotes.\n- Never run the release motion (`tools/release_archive.py`, `claude plugin tag`), and never bump the gate x3 versions unless the story's criteria name the bump.\n- An acceptance criterion that needs a release, a push or an operator action is `unverifiable-here`: record the exact command the operator runs, and do not HALT for it.",
+  "Never write under `_bmad-output/implementation-artifacts/supervision/`. Never edit `_bmad-output/planning-artifacts/epics.md`, the canonical plan files (`_bmad-output/planning-artifacts/plan/`), `stories.yaml`, `.bmad-loop/routing.toml` or `.bmad-loop/policy.toml`. The executor spec under `_bmad-output/specs/<folder>/stories/` is the loop's own artifact: creating and appending to it is never a deviation.",
+  "PROCESS HYGIENE: never kill processes by name pattern (`pkill -f`, `ps | grep | kill`). This session's own command line carries the story text, so a pattern kill can end the session itself. Bound anything that could hang with `timeout -k 5 <seconds> <cmd>`, and kill only your own children. If a gate misbehaves, record it and HALT: never fight processes.",
+  "FOREGROUND ONLY. The Agent tool DEFAULTS TO BACKGROUND: every Agent call in this session carries `run_in_background: false`, explicitly, on every launch (the implementer, each review layer, the consult). To run two review layers concurrently, put both Agent calls in the SAME message, each foreground. Never end a turn while any subagent, background command or monitor is running. bmad-loop reads a turn end with no result as the session having finished, and rolls back or defers the story. The Universe Awaits lost two paid attempts this way.",
+  "RESULT HEADING TIMING: create `## Auto Run Result` exactly once, at the terminal report (`Status: done` or a HALT), never earlier. bmad-loop treats its presence as the session having finished and reaps live subagents. Until then, every record goes under `## Deviation Summary`.",
+  "STUDIO MODEL ROUTING: this rule overrides any step's rule that subagents must match this session's model. This session is the story's orchestrator. The IMPLEMENTER subagent runs on `route.implementer.model`, every REVIEWER subagent on `route.reviewers.model`, and the CONSULT on `route.consult.model`. Pass the model explicitly on each launch. Triage (severity, category, bad_spec vs patch) stays with this session. Never launch a subagent on `claude-fable-5-1`.",
+  "CONTEXT HYGIENE: a story costs API calls times context, not lines.\n(a) NEVER Read a subagent's output or transcript file: the Agent tool's returned summary IS the record.\n(b) Read `workflow.md` and each step file exactly once.\n(c) Do not re-read the spec after writing it; confirm an anchor with `Grep -n`.\n(d) Locate code with `Grep -n`, then Read only the line range you need.",
+  "MONITOR POSTURE (pipeline v2): this session follows the workflow. It launches the implementer and reviewers on the routed models, integrates their work, verifies it, and writes the spec. It does not decide. Wherever the workflow asks it to judge, and neither the story text nor the review layer's own words settle the question, that is a CONSULT trigger (next fact), never its own call. HANDS OFF THE CODE: this session edits and writes only `{spec_file}`. When the implementer's result is incomplete, verify is red, or a finding needs a patch, RELAUNCH THE IMPLEMENTER (foreground, routed model) with the exact findings and file:line evidence. Never call AskUserQuestion, ScheduleWakeup, TaskStop, Monitor or CronCreate: no human is present, and nothing of yours runs in the background.",
+  "STUDIO CONSULT: consult only on an OBJECTIVE trigger listed in `consult_triggers`:\n- `verify-red`: the gate is red after the implementer's own fix attempt\n- `halt`: you are about to HALT blocked\n- `deviation-gt-0`: the implementer's score is above 0\n- `high-severity-finding`\n- `tripwire`\n- `seam-text-fix`\n- `file-outside-files`: the implementer touched, or asks to touch, a file outside the plan's Files\nPackage ONE question: the trigger, the story key, the two pinned facts in conflict or the deviation, the options, and the files and lines. Launch a foreground subagent on `route.consult.model`. Its prompt is the full text of `{project-root}/.bmad-loop/plugins/studio-pipeline/consult.md` followed by the question.\nFollow its `DO:` lines verbatim. `RULING: escalate` means the operator decides: HALT `blocked` with the ruling's reason.\nLog EVERY consult before acting on it:\n1. Append to the spec a `## Consult Log` entry: `- <UTC time> — trigger: <t> — question: <one line> — ruling: <RULING> — do: <DO lines> — rule candidate: <line>`.\n2. Run `uv run \"{studio-root}/plugins/tk-studio/lib/observe.py\" record --source other --description \"consult: trigger=<t> story=<story id> ruling=<RULING> rule_candidate=<line or none>\" --evidence \"<spec path>#consult-log\" --project tk-studio`. A failed record is noted in the entry, never a HALT.\nNever consult twice on the same question.",
+  "REVIEW LAYERS FOR SMALL STORIES: when the story plan's band is S (files <= 3 and new lines <= 150), run ONLY the `blind-hunter` layer. Record the skip in `## Review Triage Log` as `skipped-layer: edge-case-hunter — S-band story`. Every other story runs both layers.",
+  "DEFERRAL DISCIPLINE: file a review finding as `deferred` only when it is one of these: (a) a defect in behaviour the story's criteria name; (b) a contract, schema or AD invariant left unpinned; (c) a credential or safety rule at risk. Reject 'X is asserted by nothing' notes about plumbing with a one-line reason in the Review Triage Log. Never file more than three deferrals per story without saying which of (a)–(c) each one meets.",
+]
+
+implementation_handoff = """
+Launch a subagent with no prior conversation context, on model `<route.implementer.model>` (the value resolved at STUDIO ACTIVATION 3/4; pass it explicitly), with `run_in_background: false` (FOREGROUND ONLY: wait for its result inside this turn). Give it this prompt:
+
+> Read {spec_file} fully and implement it. The spec is the sole source of truth. Load every file listed in its frontmatter `context:` before you start, and the story plan it cites when present. Implement exactly what the acceptance criteria require; touch nothing else, and do not refactor outside it. Studio scripts are stdlib-only Python.
+>
+> Keep a running DEVIATION LIST as you work. Record every place where what you did differs from the spec's Tasks & Acceptance, Code Map or Design Notes, as it happens:
+> - a file you had to touch that was not named
+> - a verb, field, schema, event or data shape you changed
+> - an ordering you had to invert
+> - a test you could not write as named
+>
+> Before you report, run the verify gate from `plugins/tk-studio/lib`: `uv run python -m unittest discover tests` must be green, and `uv run python ../contracts/conformance/runner.py run` must report `ok: true`. Then report what you changed, how you verified it, and anything left incomplete or risky. End with a `DEVIATIONS` block: one entry per deviation as `planned: … / actual: … / why: … / may affect: <later story key, or none>`, followed by `DEVIATION SCORE: <0|1|2|3>`. Write `DEVIATIONS: none` and score 0 when there were none.
+
+After the subagent returns and BEFORE Verify:
+1. Write its `DEVIATIONS` block into {spec_file} under `## Deviation Summary`. The section is APPEND-ONLY: an earlier pass's entries are never rewritten, and a later pass gets a dated `### pass <n>` sub-section.
+2. Set frontmatter `deviation_score`.
+3. Write one `DRIFT:` line per entry at the end of the section.
+Do NOT create `## Auto Run Result` here. It is written once, at the terminal report.
+"""
+
+[[workflow.review_layers]]
+id = "blind-hunter"
+name = "Blind Hunter"
+instruction = """
+Launch a context-free subagent on model `<route.reviewers.model>` (pass it explicitly; the studio's routing rule outranks this step's "same model capability" rule), with `run_in_background: false`. When the Edge Case Hunter also runs, issue both Agent calls in the same message and wait for both. Give it this prompt:
+
+Conduct a review of CONTENT.
+Look for what's missing, not only what's wrong.
+Find every real issue; if fewer than three exist, say so. Do not pad the list. Report an assertion gap only when the unasserted behaviour is named by the story's acceptance criteria, or is a contract, schema or AD invariant.
+Output a Markdown list of findings only, with no severity, priority or ranking.
+If the content is empty, stop and say so.
+
+CONTENT:
+{diff_output}
+
+Do not invoke any skill. Return only the review result.
+"""
+
+[[workflow.review_layers]]
+id = "edge-case-hunter"
+name = "Edge Case Hunter"
+instruction = """
+SKIP CONDITION, evaluated BEFORE launching anything: if the story plan's band is S (files <= 3 and new lines <= 150), this layer does NOT run. Write `skipped-layer: edge-case-hunter — S-band story` in the spec's `## Review Triage Log` and report this layer as skipped. Otherwise:
+
+Launch a context-free subagent on model `<route.reviewers.model>` (pass it explicitly), with `run_in_background: false`, in the same message as the Blind Hunter launch. Give it this prompt:
+
+Read `{skill-root}/review-prompts/edge-case-hunter.md` completely and follow it as your review instructions. Additional project rule: report an edge case only when it changes behaviour the story's criteria name, or a contract, schema or AD rule. Do not report untested plumbing.
+
+Review content:
+
+{diff_output}
+
+Do not invoke any skill. If the instruction file is unreadable, report that exact failure and stop. Return only the review result.
+"""
+
+# Pipeline v2 (The Universe Awaits D-90, measured): two layers, not four. The
+# Blind Hunter and the Edge Case Hunter produced every patch the layers ever
+# applied. An empty instruction disables a layer.
+[[workflow.review_layers]]
+id = "verification-gap"
+name = "Verification Gap Reviewer"
+instruction = ""
+
+[[workflow.review_layers]]
+id = "intent-alignment"
+name = "Intent Alignment Auditor"
+instruction = ""
