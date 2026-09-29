@@ -113,3 +113,19 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20260928-224136-6f1a; this entry preserves the lingering recommendation for a deliberate later review.
 status: open
+
+### DW-15: A run resumed after a supervisor restart loses the cost of its pre-restart iterations, so the page's cost (run.json `total_cost_usd`) under-reports it.
+origin: spec-deferred cfb7ee04d5a3
+source_spec: `22-2-a-read-only-status-page-a-read-only-status-page.md`
+location: src/cli.ts:1375-1528 finishRun
+severity: medium
+reason: `finishRun` keeps the iteration sum in a local `cost` (src/cli.ts:1375, :1416) and writes it only at `finish` (:1518, :1528). A restart resumes the run in a new process (`recoverWithResume`, src/cli.ts:403) whose sum starts empty, and no queue event records per-iteration cost. The 21-6 dispatch note names "cost summed across resumed iterations" (deferral class a). Fixing it needs src/cli.ts or src/queue.ts, outside this story's Files.
+status: open
+
+### DW-16: Follow-up review still recommended for 22-2-a-read-only-status-page after the damping cap was spent
+origin: review-budget-followup
+source_spec: `22-2-a-read-only-status-page-a-read-only-status-page.md`
+location: n/a
+severity: low
+reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20260928-224136-6f1a; this entry preserves the lingering recommendation for a deliberate later review.
+status: open

@@ -106,3 +106,5 @@
     Replan (operator, 2026-09-28): write the story spec as stories/<this entry's
     id>-<slug of the title>.md. The engine resolves a spec by the glob <id>-*.md, and a
     file named <id>.md is read as pending (story 21-6).
+    Oversize (22-2 gate, 2026-09-29): plans/22-3.md lists 11 files, past the L band. If
+    the Files list grows past those 11, halt and record it rather than widen the story.

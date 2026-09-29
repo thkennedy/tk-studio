@@ -18,6 +18,8 @@
  *   GET  /status             counts per state, the live runs, the held checkout locks
  *   GET  /events?since=<seq> events with seq > since: JSON, or SSE with
  *                            `Accept: text/event-stream`
+ *   GET  /                   the read-only status page (Story 22.2, `page.ts`): server-rendered
+ *                            HTML, no script, credential-shaped values redacted
  *
  * Run ids are queue run ids; answers carry `studio_run_id` too. The API never
  * drives or claims a run (drain and the pacer do).
@@ -25,7 +27,9 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { CancelRaced, cancelRun, StartError, submitProject } from "./cli";
 import { apiBind, apiPort, apiToken } from "./env";
-import { isTerminal, Queue, RunTerminal, type Holder, type LockRow, type QueueEvent, type QueueRun } from "./queue";
+import { gatherPage, holderOf, renderPage } from "./page";
+import { registryShow } from "./server";
+import { isTerminal, Queue, RunTerminal, type QueueEvent, type QueueRun } from "./queue";
 
 type Env = Record<string, string | undefined>;
 
@@ -65,6 +69,13 @@ export interface ApiDeps {
   keepaliveMs?: number;
   /** The clock (default `Date.now`). */
   now?: () => number;
+  /** The status page: the environment it reads the store root (`TK_STUDIO_HOME`), the ledger
+   * identity and the `TK_SUPERVISOR_*TOKEN*` values to redact from (default `process.env`). */
+  env?: Env;
+  /** The status page: the registry's projects (default `registryShow`, the published read path). */
+  registry?: () => Promise<Record<string, any>>;
+  /** The status page: this machine's ledger identity (default: getpass order, the hostname). */
+  ledger?: { user: string; machine: string };
 }
 
 const SUBMIT_FIELDS = ["project", "job", "base_ref", "tier", "model", "effort"] as const;
@@ -102,13 +113,6 @@ function submitError(e: unknown): { status: number; error: string; detail: strin
   // Not a refusal of the body: the studio or the queue could not answer (transport, setup).
   const prefix = /^([A-Z][A-Za-z]+):/.exec(detail)?.[1];
   return { status: 500, error: prefix ?? "SubmitFailed", detail, ...problems };
-}
-
-/** A lock's holder, as a waiting run names it. */
-function holderOf(lock: LockRow): Holder {
-  return lock.kind === "engine"
-    ? { kind: "engine", run_id: lock.run_id, job_id: lock.job_id, engine_run_id: lock.engine_run_id }
-    : { kind: "run", run_id: lock.run_id, job_id: lock.job_id, pid: lock.owner_pid, host: lock.owner_host };
 }
 
 /** A path segment decoded; a malformed escape (e.g. `%E0%A4`) names no run: null. */
@@ -256,6 +260,12 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
     return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" } });
   }
 
+  /** The status page: reads only (queue, store, registry), rendered to HTML. */
+  async function page(): Promise<Response> {
+    const data = await gatherPage({ queue, token: deps.token, env: deps.env, registry: deps.registry ?? (() => registryShow()), ledger: deps.ledger });
+    return new Response(renderPage(data), { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
+  }
+
   return async (req: Request): Promise<Response> => {
     if (!authorized(req)) return fail(401, "Unauthorized");
     try {
@@ -264,6 +274,7 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
       const method = req.method.toUpperCase();
       // 405: the allowed methods in the `Allow` header (RFC 9110) and the body alike.
       const allow = (m: string) => json(405, { ok: false, error: "MethodNotAllowed", allow: m }, { allow: m });
+      if (path === "/") return method === "GET" ? await page() : allow("GET");
       if (path === "/jobs") {
         if (method === "POST") return await postJobs(req);
         if (method === "GET") return json(200, { ok: true, jobs: queue.jobs() });
@@ -299,6 +310,6 @@ export function serve(env: Env = process.env): { url: string; stop: () => void }
   const port = apiPort(env);
   const token = apiToken(env);
   const queue = Queue.open(env);
-  const server = Bun.serve({ hostname: bind, port, idleTimeout: 0, fetch: createApi({ queue, token }) });
+  const server = Bun.serve({ hostname: bind, port, idleTimeout: 0, fetch: createApi({ queue, token, env }) });
   return { url: `http://${bind}:${server.port}`, stop: () => { server.stop(true); queue.close(); } };
 }

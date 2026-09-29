@@ -6,7 +6,8 @@
  *   TK_STUDIO_ROOT  the tk-studio repo root (required) — plugin root is
  *                   $TK_STUDIO_ROOT/plugins/tk-studio
  *   TK_STUDIO_HOME  the per-user store override — passed through to every
- *                   child untouched, never read or defaulted here
+ *                   child untouched; read only by `studioHome` (the status
+ *                   page's read-only view of the store, Story 22.2)
  *   CLAUDE_BIN      the host worker binary (default `claude`); host-only — the
  *                   sbx worker is always `claude` inside the microVM
  *   SBX_BIN         the host Docker Sandboxes CLI (default `sbx`) for sbx-tier runs
@@ -14,6 +15,7 @@
  *                   unset → no config, every job defaults to the host tier);
  *                   never read from the plugin or a project's .tk-studio/
  */
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 type Env = Record<string, string | undefined>;
@@ -33,6 +35,11 @@ export function studioRoot(env: Env = process.env): string {
 
 export function pluginRoot(env: Env = process.env): string {
   return join(studioRoot(env), "plugins", "tk-studio");
+}
+
+/** The per-user store root: TK_STUDIO_HOME when set, else `~/.tk-studio`. */
+export function studioHome(env: Env = process.env): string {
+  return env.TK_STUDIO_HOME?.trim() || join(homedir(), ".tk-studio");
 }
 
 export function claudeBin(env: Env = process.env): string {
