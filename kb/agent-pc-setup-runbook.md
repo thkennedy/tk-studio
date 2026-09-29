@@ -388,7 +388,7 @@ reset` starts over). `sbx diagnose` should end with no failures. The CLI has
 no `--version` flag.
 
 The daemon does **not** come back on its own after a reboot (verified
-2026-09-27). Until the supervisor's `start.ps1` (§4) starts it, register a
+2026-09-27). Until the supervisor's `start.ps1` (§4.3) starts it, register a
 sign-in task that starts it from the home folder. Task Scheduler launches it
 outside any Claude desktop app session, and the daemon outlives the task:
 
@@ -622,34 +622,138 @@ delete and check out the affected files again.
   record the verdict on the spec, and carry any `adjust-stories` notes into
   the unstarted entries' `invoke_dev_with`. Then close it the same way.
 
-## 4. The studio supervisor (plan Phase 1; placeholder until extracted)
+## 4. The studio supervisor
 
-The supervisor is the ruling-4 independent driver: the ~1.5k lines of
-contract-consuming TypeScript lifted from ClaudeOS plus a durable queue and an
-HTTP API. When its repo exists:
+The supervisor is the ruling-4 independent driver. It consumes the driver
+contract from outside the plugin (AD-2): the contract code lifted from
+ClaudeOS, plus a durable SQLite queue, a lock per checkout, guards it enforces
+itself, a pacer, crash recovery, an HTTP API and a status page. It was built on
+2026-09-28 through the studio's own launch pipeline (plan Epics 21 and 22).
+
+- **Repo:** `thkennedy/tk-studio-supervisor`, private, `main` protected. Bun
+  and TypeScript.
+- **Clone path:** `C:\GitHub\tk-studio-supervisor`, beside tk-studio.
+- **Full reference:** the repo's `README.md` (commands, API routes, queue and
+  restart rules, worker tiers).
+
+### 4.1 Install
 
 ```powershell
-cd D:\agent-work
-git clone https://github.com/thkennedy/<supervisor-repo>.git
-cd <supervisor-repo>
-bun install
+cd C:\GitHub
+git clone https://github.com/thkennedy/tk-studio-supervisor.git
+cd tk-studio-supervisor
+bun install --frozen-lockfile
+$env:TK_STUDIO_ROOT = 'C:\GitHub\tk-studio'
+bun test
 ```
 
-Run it **console-hosted in the studio account's interactive session**, never
-as a "run whether user is logged on or not" task. Simplest: a shortcut in
-`shell:startup` for the studio account that runs
+With `TK_STUDIO_ROOT` set and `uv` on PATH, `bun test` also runs the
+end-to-end suites. They use a throwaway store, project and queue, and a faked
+worker, so they touch nothing real. On the first agent PC: 545 pass, 16 skip,
+0 fail. The skips are POSIX-only cases and the symlink cases.
+
+### 4.2 Environment
+
+Set these in the studio account's **User** environment. `start.ps1` reads the
+User scope each time it starts, so a change needs no new logon.
+
+| Variable | Needed | What it holds |
+|---|---|---|
+| `TK_STUDIO_ROOT` | always | the tk-studio checkout, `C:\GitHub\tk-studio` |
+| `TK_SUPERVISOR_DB` | always | the queue database file. It must lie outside every git checkout, the studio store and `TK_STUDIO_ROOT`, for example `C:\agent-work\supervisor\queue.db` |
+| `TK_SUPERVISOR_BIND` | always | this machine's Tailscale IPv4 address (`tailscale ip -4`). Anything outside `100.64.0.0/10` is refused |
+| `TK_SUPERVISOR_TOKEN` | always | the API's bearer token. Never logged, never rendered |
+| `TK_SUPERVISOR_PORT` | no | the API's port, default `8787` |
+| `TK_SUPERVISOR_TRANSCRIPT_BACKUP` | no, warned when unset | the nightly backup's `claude-projects` folder (§6). A resume restores a missing transcript from it, and every host run's transcript is copied into it |
+| `TK_SUPERVISOR_NOTIFY` | no | the notification target: `ntfy` or `telegram`. Unset sends nothing |
+| `TK_SUPERVISOR_NTFY_URL` | with `ntfy` | the full topic URL. The topic is its secret |
+| `TK_SUPERVISOR_TELEGRAM_TOKEN` | with `telegram` | the bot token |
+| `TK_SUPERVISOR_TELEGRAM_CHAT` | with `telegram` | the chat id that receives the message |
+| `TK_SUPERVISOR_WORK` | for editor-in-the-loop runs | the work folder that holds the snapshots, `C:\agent-work` |
+| `TK_SUPERVISOR_CONFIG` | no | the per-job tier config. Unset runs every job on the host tier |
+
+Set them from your own PowerShell 7 terminal. The token line makes a random
+token and stores it without printing it:
+
+```powershell
+[Environment]::SetEnvironmentVariable('TK_STUDIO_ROOT', 'C:\GitHub\tk-studio', 'User')
+New-Item -ItemType Directory -Force C:\agent-work\supervisor | Out-Null
+[Environment]::SetEnvironmentVariable('TK_SUPERVISOR_DB', 'C:\agent-work\supervisor\queue.db', 'User')
+[Environment]::SetEnvironmentVariable('TK_SUPERVISOR_BIND', (tailscale ip -4), 'User')
+[Environment]::SetEnvironmentVariable('TK_SUPERVISOR_TOKEN', [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)), 'User')
+[Environment]::SetEnvironmentVariable('TK_SUPERVISOR_TRANSCRIPT_BACKUP', 'C:\agent-work\backups\claude-projects', 'User')
+[Environment]::SetEnvironmentVariable('TK_SUPERVISOR_WORK', 'C:\agent-work', 'User')
+```
+
+The worker never sees the API token or the notifier's credentials: the
+supervisor removes them, and `ANTHROPIC_API_KEY`, from every worker's
+environment. The Max login pays (ruling 3).
+
+### 4.3 Start at logon
+
+Run the supervisor **console-hosted in the studio account's interactive
+session**. Never register it as a "run whether user is logged on or not" task
+(§8), and never start it from a Claude desktop-app session (the app's AppData
+virtualisation, §8).
+
+Put a shortcut in `shell:startup` (Win+R, `shell:startup`) with this target:
 
 ```text
-wt.exe -w studio nt --title supervisor pwsh -NoExit -File D:\agent-work\<supervisor-repo>\start.ps1
+wt.exe -w studio nt --title supervisor pwsh -NoExit -File C:\GitHub\tk-studio-supervisor\start.ps1
 ```
 
-and a second tab for `hermes dashboard`. `start.ps1` binds the API to the
-tailnet IP with a bearer token from the agent's environment, backs up
-transcripts, and starts the pacer. Smoke test from another device:
+Add a second tab for `hermes dashboard` (§3.7). `start.ps1` prints the same
+command with the repo path filled in, then:
+
+1. Reads the variables of §4.2 from the User environment. A missing
+   `TK_SUPERVISOR_BIND` or `TK_SUPERVISOR_TOKEN` stops it and names the
+   variable, never a value.
+2. Starts the API keeper in the same console. The keeper restarts the API with
+   a back-off whenever it exits, so `/status` answers while long runs are
+   driven.
+3. Starts the Docker Sandboxes daemon from `$HOME` when `sbx ls` shows it is
+   not running.
+4. Runs one recovery pass: a run left behind by a killed supervisor resumes
+   from its transcript, or ends `partial` with the reason named.
+5. Loops the pacer: a tick, then a drain of the API's submissions, then a
+   sleep of `-IntervalSeconds` (default 60).
+
+Right after logon Tailscale may not have its address yet. The keeper warns and
+retries, and the pacer runs on. Ctrl+C in the tab stops the pacer and the API.
+
+### 4.4 Retire the sbx sign-in task
+
+`start.ps1` starts the sbx daemon, so the "Docker Sandboxes daemon" sign-in
+task of §3.5 is no longer needed. Retire it after one reboot has shown the
+supervisor tab bringing the daemon up:
 
 ```powershell
-curl -H "Authorization: Bearer <token>" http://<tailscale-ip>:<port>/status
+Unregister-ScheduledTask -TaskName "Docker Sandboxes daemon" -Confirm:$false
 ```
+
+### 4.5 Smoke test
+
+From another device on the tailnet, after a reboot and auto-logon:
+
+```powershell
+curl -H "Authorization: Bearer <token>" http://<tailscale-ip>:8787/status
+```
+
+It answers JSON: the run counts by state, the live runs, and the checkout
+locks that are held. `GET /` on the same address is the status page. It needs
+the same bearer header, which a phone's address bar cannot send: use a client
+that sends it.
+
+### 4.6 What runs where
+
+| Tier | Where the worker runs | Permission mode |
+|---|---|---|
+| host (default) | `claude -p` in the supervisor's console session, under the Max login | `auto`, or `acceptEdits` when the job asks. A bypass request is refused before anything starts |
+| sbx | `claude -p` inside the project's Docker Sandboxes microVM (§3.8) | bypass is allowed there |
+
+The tier comes from the submission or from `TK_SUPERVISOR_CONFIG`, never from
+the plugin. The supervisor never chooses a model: model and effort are
+forwarded as the job or the submission gives them (AD-14).
 
 ## 5. Hardening checklist
 
@@ -726,7 +830,8 @@ the first agent PC on 2026-09-27 (with `C:\agent-work`).
 | Tailnet reach | from iPad: RDP to the MagicDNS name | desktop visible |
 | Hermes | `hermes gateway status`; message the Telegram bot | connected; reply within seconds |
 | Dashboard | browse `http://<tailscale-ip>:9119` from iPad | basic-auth prompt, then Status tab |
-| Supervisor | `curl …/status` from another device | JSON status |
+| Supervisor | from another tailnet device: `curl -H "Authorization: Bearer <token>" http://<tailscale-ip>:8787/status` | JSON with `ok: true`, the run counts and the held locks |
+| Supervisor tests | `cd C:\GitHub\tk-studio-supervisor; $env:TK_STUDIO_ROOT='C:\GitHub\tk-studio'; bun test` | 0 fail, the end-to-end suites included |
 
 ## 8. Known Windows failure modes and what this runbook does about them
 
@@ -755,6 +860,13 @@ the first agent PC on 2026-09-27 (with `C:\agent-work`).
 | `bmad-loop list` fails on `pyte` / `rich`, so launch's live-engine check fails | bmad-loop installed without its `[tui]` extra | install `bmad-loop[tui]` at the pin (§3.8) |
 | `bmad-build` / `bmad-build-auto` HALT: "ambiguous config value `planning_artifacts`" | BMAD-METHOD#2718: bmm + gds both declare the key | studio-managed base patch, re-applied by `tk install` (`kb/bmad-base-patches.md`) |
 | Every host session's hooks fail after `bmad-loop init` | init wrote `python3 …` hooks (the Store stub on Windows), or 0.12.0's absolute sandbox path | hooks through `uv run --no-project python` (§3.8); bmad-loop pinned |
+| A test fake written as a `.cmd` shim fails to start: `spawn … EINVAL` | Node and Bun refuse to spawn a `.cmd` or `.bat` without a shell, and the supervisor spawns without one (first agent PC, 2026-09-29) | real tools must be `.exe` (`claude`, `uv`, `sbx`, `bun` and `robocopy` all are); the supervisor's test fakes are compiled executables (`test/fakes.ts`) |
+| The supervisor's tests pass in the Linux engine and fail on the Windows host | the loop's verify gate runs on Linux only: a lowercased path (21-4), 29 end-to-end failures and a `~\` separator (22-2, 22-3) | run `bun test` on the Windows host, in a clone, after every landed story and before every merge (§3.8) |
+| A supervisor signalled while it starts a worker dies and leaves the worker running (POSIX) | its signal handlers were installed after `spawn()` returned, and `spawn()` returns after the child is already running | fixed in the supervisor: the handlers are installed before the spawn. win32 is not affected: a worker there is not detached and ends with its supervisor |
+| A supervisor killed within half a second of starting a worker leaves no record of that worker | on win32 the worker record waits on a PowerShell read of the start time, about 0.5 s (supervisor DW-19, open) | the worker still ends with its supervisor on win32, and the run ends `partial` naming no session |
+| The status page will not open in a phone browser | it sits behind the same bearer header as the API, and an address bar cannot send one | use a client that sends the header, or the API's `/status` through `curl` (§4.5) |
+| A bmad-loop story is finished and committed, but the engine calls its session stalled | the dev session named its spec `<id>.md`; the engine resolves `<id>-*.md` and reads the story as pending (2026-09-28) | each `stories.yaml` entry names the file pattern; rename the file and commit if it happens (§3.8) |
+| An engine nudge is swallowed and the sandbox's default permission mode changes to `auto` | Claude Code showed "Make auto mode your default?" in a bypass session, and the nudge's keystrokes answered it (2026-09-28) | engine sessions pass the mode explicitly, so they are unaffected; put `permissions.defaultMode` back in the sandbox's `~/.claude/settings.json` |
 
 ## 9. Retiring ClaudeOS on the main PC (done 2026-09-26, one step left)
 
