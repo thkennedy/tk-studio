@@ -154,3 +154,12 @@ severity: medium
 reason: `queueRecorder.worker` reads the worker's start time before it writes the worker record. On Linux that is one `/proc` read. On win32 it is a synchronous `powershell` call of about 0.5 s (measured 0.42 s on the agent PC), and the supervisor is blocked for that long. A supervisor killed inside that window leaves a run with no `worker_pid`. The end-to-end mid-invoke kill test met this and now waits for the record. The exposure is smaller than on POSIX: a win32 worker is not detached, so it ends with its supervisor and cannot go on editing the checkout. What is lost is the record, so the restart cannot say what it did about the worker. Suggested fix: write the pid first and the start time after it, or read the creation time natively (`GetProcessTimes` through `bun:ffi`) instead of through PowerShell. The same read runs once per `selfOwner()` and per owner probe.
 affects: none
 status: open
+
+### DW-20: The status page cannot be opened from a phone's browser
+origin: attended review 2026-09-29 (writing runbook section 4 from the code as built)
+source_spec: `22-2-a-read-only-status-page-a-read-only-status-page.md`
+location: src/api.ts (the bearer check in front of every route); src/page.ts; README.md "HTTP API", `GET /`
+severity: medium
+reason: Story 22.2 asks for a page that "reads well at phone width", served "behind the same auth as the API". The page is behind the bearer header, and a browser's address bar cannot send one, so the operator cannot open it on the phone without a client that sets headers. The criteria are met as written, and the epic's success signal ("watch it on the status page" from the phone) is not. The fix is a product decision for the operator, not a patch: for example HTTP Basic with the token as the password, which a browser prompts for, or a login form that sets a session cookie. Either one changes how the token travels.
+affects: none
+status: open — needs the operator's decision
