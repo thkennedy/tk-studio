@@ -110,3 +110,66 @@ export function apiToken(env: Env = process.env): string {
   if (!token) throw new ApiTokenMissing();
   return token;
 }
+
+// ------------------------------------------------------------ run hygiene (Story 22.3)
+//
+//   TK_SUPERVISOR_NOTIFY          which notifier runs on every terminal run: `ntfy` | `telegram`;
+//                                 unset → none (the run's events record that none was configured)
+//   TK_SUPERVISOR_NTFY_URL        the full ntfy topic URL (with `ntfy`)
+//   TK_SUPERVISOR_TELEGRAM_TOKEN  the Telegram bot token (with `telegram`) — never logged, never rendered
+//   TK_SUPERVISOR_TELEGRAM_CHAT   the Telegram chat id (with `telegram`)
+//   TK_SUPERVISOR_WORK            the work folder holding editor-in-the-loop snapshots (for a flagged run)
+
+/** The notifier the environment selects: none, ntfy (its topic URL) or Telegram (bot token + chat). */
+export type Notifier =
+  | { kind: "none" }
+  | { kind: "ntfy"; url: string }
+  | { kind: "telegram"; token: string; chat: string };
+
+/** `TK_SUPERVISOR_NOTIFY` names no known notifier. */
+export class NotifierUnknown extends Error {
+  constructor(value: string) {
+    super(`NotifierUnknown: TK_SUPERVISOR_NOTIFY '${value}' is not a notifier (ntfy, telegram, or unset for none)`);
+    this.name = "NotifierUnknown";
+  }
+}
+
+/** A selected notifier missing one of its variables. Names the variable, never a value. */
+export class NotifierConfigMissing extends Error {
+  constructor(notifier: string, variable: string) {
+    super(`NotifierConfigMissing: TK_SUPERVISOR_NOTIFY=${notifier} needs ${variable}, which is not set or empty`);
+    this.name = "NotifierConfigMissing";
+  }
+}
+
+/** The notifier, validated: unset → none; a selected notifier needs its own variables (a named start error). */
+export function notifier(env: Env = process.env): Notifier {
+  const kind = env.TK_SUPERVISOR_NOTIFY?.trim();
+  if (!kind) return { kind: "none" };
+  if (kind === "ntfy") {
+    const url = env.TK_SUPERVISOR_NTFY_URL?.trim();
+    if (!url) throw new NotifierConfigMissing(kind, "TK_SUPERVISOR_NTFY_URL");
+    return { kind, url };
+  }
+  if (kind === "telegram") {
+    const token = env.TK_SUPERVISOR_TELEGRAM_TOKEN?.trim();
+    if (!token) throw new NotifierConfigMissing(kind, "TK_SUPERVISOR_TELEGRAM_TOKEN");
+    const chat = env.TK_SUPERVISOR_TELEGRAM_CHAT?.trim();
+    if (!chat) throw new NotifierConfigMissing(kind, "TK_SUPERVISOR_TELEGRAM_CHAT");
+    return { kind, token, chat };
+  }
+  throw new NotifierUnknown(kind);
+}
+
+/** A flagged (editor-in-the-loop) submission with no work folder: refused before anything is queued. */
+export class WorkDirMissing extends Error {
+  constructor() {
+    super("WorkDirMissing: TK_SUPERVISOR_WORK is not set — an editor-in-the-loop run needs the work folder its snapshot lands in");
+    this.name = "WorkDirMissing";
+  }
+}
+
+/** The work folder snapshots land under, or undefined when unset. */
+export function workDir(env: Env = process.env): string | undefined {
+  return env.TK_SUPERVISOR_WORK?.trim() || undefined;
+}

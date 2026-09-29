@@ -4,7 +4,8 @@
  *
  *   jobs    one row per (job, checkout): the resolved definition `resolve` served
  *   runs    queue runs — `queued` → `running` → complete|partial|blocked|cancelled
- *           (terminal is immutable; a trigger refuses any update of one)
+ *           (terminal is immutable; a trigger refuses any update of one — but its
+ *           end-hygiene marker `notified`: NULL → lease → done, a stale lease re-leased, Story 22.3)
  *   events  one row per transition, committed in the same transaction
  *   locks   one row per checkout: the run holding it, or the detached
  *           bmad-loop engine a `tk-studio-launch` run started
@@ -447,6 +448,13 @@ export interface QueueRun {
   /** The wall-clock guard (s) passed to the recorded worker's spawn: on sbx, its in-VM `timeout`. */
   worker_guard_s: number | null;
   wake: string | null;
+  /** Story 22.3: 1 when the submission flagged the run editor-in-the-loop (a Godot project is
+   * snapshot before its minting verb); null otherwise. */
+  editor_in_the_loop: number | null;
+  /** Story 22.3: the end hygiene (notification + transcript copy) marker — null until one process
+   * leases the run's end (`claimEnd`, `lease …`), `done …` once its outcomes are recorded
+   * (`finishEnd`); runs already terminal when the column was added are marked done. */
+  notified: string | null;
   created: string; updated: string;
 }
 
@@ -557,6 +565,7 @@ CREATE TABLE IF NOT EXISTS runs (
   studio_run_id TEXT, engine_run_id TEXT, verb_started TEXT, verb_snapshot TEXT, definition TEXT,
   permission_mode TEXT, tier TEXT, sandbox TEXT, model TEXT, effort TEXT, base_ref TEXT,
   session_id TEXT, worker_pid INTEGER, worker_start TEXT, worker_guard_s INTEGER, wake TEXT,
+  editor_in_the_loop INTEGER, notified TEXT,
   created TEXT NOT NULL, updated TEXT NOT NULL,
   FOREIGN KEY (job_id, checkout) REFERENCES jobs (job_id, checkout)
 );
@@ -571,20 +580,59 @@ CREATE TABLE IF NOT EXISTS locks (
   run_id TEXT NOT NULL, job_id TEXT NOT NULL, owner_pid INTEGER, owner_host TEXT, owner_nonce TEXT, owner_start TEXT,
   engine_run_id TEXT, acquired TEXT NOT NULL
 );
-CREATE TRIGGER IF NOT EXISTS runs_terminal_immutable BEFORE UPDATE ON runs
+`;
+
+/** The end-hygiene marker (Story 22.3): the one run column a terminal run may still have set, once. */
+const NOTIFIED_COLUMN = "notified";
+/** The marker the migration writes on runs already terminal when a queue file gains the column:
+ * they are never notified (no history flood). */
+export const NOTIFIED_BEFORE = "before-end-hygiene";
+
+/** The end-hygiene marker's shapes (Story 22.3): `claimEnd` writes a lease
+ * `lease <ISO time> pid <pid>@<host>`; once the notification and transcript-copy outcomes are
+ * recorded `finishEnd` turns it into `done <ISO time> pid <pid>@<host>`. A lease older than
+ * END_LEASE_STALE_MS is a claimant that died between the claim and the send: a later sweep
+ * re-claims it. Any other non-null value (NOTIFIED_BEFORE included) is done. */
+const LEASE_PREFIX = "lease ";
+const DONE_PREFIX = "done ";
+/** How old a lease must be before another sweep may take it over (10 minutes: a send is bounded
+ * to 15 s and a transcript copy to a local file copy, so a live claimant is long finished). */
+export const END_LEASE_STALE_MS = 10 * 60_000;
+/** The ISO time inside a lease marker (`lease ` + 24 characters of `toISOString()`), as SQL. */
+const leaseAtSql = (row: string) => `substr(${row}.${NOTIFIED_COLUMN}, ${LEASE_PREFIX.length + 1}, 24)`;
+
+/** A terminal run is immutable: every column but the end-hygiene marker (recreated on each open
+ * from the table's own columns, so a column added later is covered too); the marker is set once. */
+function immutabilityTriggers(columns: string[]): string {
+  const cols = columns.filter((c) => c !== NOTIFIED_COLUMN).join(", ");
+  return `
+DROP TRIGGER IF EXISTS runs_terminal_immutable;
+CREATE TRIGGER runs_terminal_immutable BEFORE UPDATE OF ${cols} ON runs
   WHEN OLD.state IN ('complete','partial','blocked','cancelled')
   BEGIN SELECT RAISE(ABORT, 'RunTerminal: a terminal queue run is immutable'); END;
+DROP TRIGGER IF EXISTS runs_notified_once;
+CREATE TRIGGER runs_notified_once BEFORE UPDATE OF ${NOTIFIED_COLUMN} ON runs
+  WHEN NOT COALESCE(OLD.state IN ('complete','partial','blocked','cancelled') AND (
+      (OLD.${NOTIFIED_COLUMN} IS NULL AND NEW.${NOTIFIED_COLUMN} LIKE '${LEASE_PREFIX}%')
+      OR (OLD.${NOTIFIED_COLUMN} LIKE '${LEASE_PREFIX}%' AND NEW.${NOTIFIED_COLUMN} LIKE '${LEASE_PREFIX}%'
+          AND julianday(${leaseAtSql("OLD")}) <= julianday('now') - ${END_LEASE_STALE_MS / 86_400_000})
+      OR (OLD.${NOTIFIED_COLUMN} LIKE '${LEASE_PREFIX}%' AND NEW.${NOTIFIED_COLUMN} LIKE '${DONE_PREFIX}%')
+    ), 0)
+  BEGIN SELECT RAISE(ABORT, 'EndClaimed: a run end is leased once terminal, re-leased only once stale, then done'); END;
 `;
+}
 
 /** Nullable run columns added after the first schema: an existing queue file
  * gains each one it lacks (guarded by PRAGMA table_info). */
 const ADDED_RUN_COLUMNS = [
   ["permission_mode", "TEXT"], ["tier", "TEXT"], ["sandbox", "TEXT"], ["model", "TEXT"], ["effort", "TEXT"],
   ["session_id", "TEXT"], ["worker_pid", "INTEGER"], ["worker_start", "TEXT"], ["wake", "TEXT"], ["worker_guard_s", "INTEGER"],
-  ["base_ref", "TEXT"],
+  ["base_ref", "TEXT"], ["editor_in_the_loop", "INTEGER"], [NOTIFIED_COLUMN, "TEXT"],
 ] as const;
 
 const now = () => new Date().toISOString();
+/** The newest lease time a sweep at `at` may take over (Story 22.3). */
+const staleCutoff = (at: number) => new Date(at - END_LEASE_STALE_MS).toISOString();
 
 /** Queue run ids never collide with studio run ids (`<job-id>-<UTC compact>`). */
 function mintRunId(jobId: string): string {
@@ -646,11 +694,19 @@ export class Queue {
     this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec("PRAGMA foreign_keys = ON");
     this.db.transaction(() => {
+      // The immutability trigger is recreated below (its column list follows the table's columns).
+      this.db.exec("DROP TRIGGER IF EXISTS runs_terminal_immutable; DROP TRIGGER IF EXISTS runs_notified_once;");
       this.db.exec(SCHEMA);
-      const have = new Set((this.db.query("PRAGMA table_info(runs)").all() as { name: string }[]).map((c) => c.name));
+      const columns = () => (this.db.query("PRAGMA table_info(runs)").all() as { name: string }[]).map((c) => c.name);
+      const have = new Set(columns());
       for (const [col, type] of ADDED_RUN_COLUMNS) {
         if (!have.has(col)) this.db.exec(`ALTER TABLE runs ADD COLUMN ${col} ${type}`);
       }
+      // Story 22.3: runs already terminal when the file gains the marker are never notified.
+      if (!have.has(NOTIFIED_COLUMN)) {
+        this.db.query(`UPDATE runs SET ${NOTIFIED_COLUMN} = ? WHERE state IN ('complete','partial','blocked','cancelled')`).run(NOTIFIED_BEFORE);
+      }
+      this.db.exec(immutabilityTriggers(columns()));
     }).immediate();
   }
 
@@ -801,6 +857,8 @@ export class Queue {
   enqueue(input: {
     jobId: string; root: string; projectId?: string | null; target?: string | null;
     definition: Record<string, unknown>; owner?: Owner | null; permissionMode?: string | null;
+    /** Story 22.3: the submission's editor-in-the-loop flag (stored like `tier`). */
+    editorInTheLoop?: boolean;
   } & RunOptionsRecord): { run: QueueRun; minted: boolean } {
     const checkout = checkoutKey(input.root);
     return this.db.transaction(() => {
@@ -810,6 +868,7 @@ export class Queue {
       if (live) {
         if (input.permissionMode) this.writePermissionMode(live, input.permissionMode);
         this.writeRunOptions(this.must(live.run_id), input);
+        if (input.editorInTheLoop) this.writeEditorInTheLoop(this.must(live.run_id));
         return { run: this.must(live.run_id), minted: false };
       }
       const at = now();
@@ -822,16 +881,18 @@ export class Queue {
       const owner = input.owner ?? null;
       const mode = input.permissionMode || null;
       const opts = Object.fromEntries(RUN_OPTION_KEYS.map((k) => [k, input[k] || null])) as Record<(typeof RUN_OPTION_KEYS)[number], string | null>;
+      const flagged = input.editorInTheLoop ? 1 : null;
       this.db.query(
         `INSERT INTO runs (run_id, job_id, checkout, root, project_id, target, state, reason, owner_pid, owner_host,
-           owner_nonce, owner_start, permission_mode, tier, sandbox, model, effort, base_ref, created, updated)
-         VALUES (?, ?, ?, ?, ?, ?, 'queued', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           owner_nonce, owner_start, permission_mode, tier, sandbox, model, effort, base_ref, editor_in_the_loop, created, updated)
+         VALUES (?, ?, ?, ?, ?, ?, 'queued', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(runId, input.jobId, checkout, input.root, input.projectId ?? null, input.target ?? null,
         owner?.pid ?? null, owner?.host ?? null, owner?.nonce ?? null, owner?.start ?? null, mode,
-        opts.tier, opts.sandbox, opts.model, opts.effort, opts.base_ref, at, at);
+        opts.tier, opts.sandbox, opts.model, opts.effort, opts.base_ref, flagged, at, at);
       this.event(runId, "enqueued", null, "queued", {
         ...(owner ? { owner: ownerDetail(owner) } : {}), ...(mode ? { permission_mode: mode } : {}),
         ...Object.fromEntries(Object.entries(opts).filter(([, v]) => v !== null)),
+        ...(flagged ? { editor_in_the_loop: true } : {}),
       });
       return { run: this.must(runId), minted: true };
     }).immediate();
@@ -867,6 +928,13 @@ export class Queue {
       ...Object.fromEntries(changed.map((k) => [k, opts[k]])),
       previous: Object.fromEntries(changed.map((k) => [k, run[k]])),
     });
+  }
+
+  /** Inside a transaction: a `queued` run not yet flagged editor-in-the-loop is flagged, with a `run-options` event. */
+  private writeEditorInTheLoop(run: QueueRun): void {
+    if (run.state !== "queued" || run.editor_in_the_loop) return;
+    this.db.query("UPDATE runs SET editor_in_the_loop = 1, updated = ? WHERE run_id = ?").run(now(), run.run_id);
+    this.event(run.run_id, "run-options", run.state, run.state, { editor_in_the_loop: true, previous: { editor_in_the_loop: null } });
   }
 
   /** Inside a transaction: a `queued` run whose recorded mode differs takes `mode`, with its event. */
@@ -1237,6 +1305,46 @@ export class Queue {
     }
     this.event(runId, opts.kind, run.state, state, { ...(reason ? { reason } : {}), ...detail });
     if (opts.stop) this.event(runId, "stopped", state, state, { ...opts.stop, state });
+  }
+
+  /** Story 22.3: terminal runs whose end hygiene is unclaimed (`notified` null) or whose lease is
+   * stale (its claimant died between the claim and the send), oldest first. */
+  unclaimedEnds(at: number = Date.now()): QueueRun[] {
+    return this.db.query(
+      `SELECT * FROM runs r WHERE state IN ('complete','partial','blocked','cancelled')
+         AND (${NOTIFIED_COLUMN} IS NULL OR (${NOTIFIED_COLUMN} LIKE '${LEASE_PREFIX}%' AND ${leaseAtSql("r")} <= ?))
+       ORDER BY updated, rowid`,
+    ).all(staleCutoff(at)) as QueueRun[];
+  }
+
+  /** Story 22.3: lease a terminal run's end hygiene — one atomic `UPDATE`, taken when the marker is
+   * null or a lease older than END_LEASE_STALE_MS, so exactly one live process (driver, `serve`,
+   * recoverer) notifies and copies for each end. Answers the lease written, or null when the end
+   * is not terminal, already done, or freshly leased by another process. */
+  claimEnd(runId: string, by: Owner = selfOwner(), at: number = Date.now()): string | null {
+    const lease = `${LEASE_PREFIX}${new Date(at).toISOString()} pid ${by.pid}@${by.host}`;
+    const changed = this.db.query(
+      `UPDATE runs SET ${NOTIFIED_COLUMN} = ? WHERE run_id = ? AND state IN ('complete','partial','blocked','cancelled')
+         AND (${NOTIFIED_COLUMN} IS NULL OR (${NOTIFIED_COLUMN} LIKE '${LEASE_PREFIX}%' AND ${leaseAtSql("runs")} <= ?))`,
+    ).run(lease, runId, staleCutoff(at)).changes;
+    return changed === 1 ? lease : null;
+  }
+
+  /** Story 22.3: finalise a lease once the notification and transcript-copy outcomes are recorded
+   * (`lease …` → `done …`). False when the lease is no longer this one (another sweep took it over). */
+  finishEnd(runId: string, lease: string): boolean {
+    const done = `${DONE_PREFIX}${new Date().toISOString()}${lease.slice(lease.indexOf(" pid "))}`;
+    return this.db.query(`UPDATE runs SET ${NOTIFIED_COLUMN} = ? WHERE run_id = ? AND ${NOTIFIED_COLUMN} = ?`)
+      .run(done, runId, lease).changes === 1;
+  }
+
+  /** Story 22.3: a hygiene event on a run (from/to = its current state): a snapshot, a
+   * notification, a transcript copy — or why one was skipped or failed. */
+  note(runId: string, kind: string, detail: Record<string, unknown>): void {
+    this.db.transaction(() => {
+      const run = this.must(runId);
+      this.event(runId, kind, run.state, run.state, detail);
+    }).immediate();
   }
 
   /** `queued` runs no live process owns (ownerless, or a dead owner), oldest first. */

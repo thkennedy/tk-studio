@@ -1,18 +1,41 @@
-import { beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
-  finishRun, guardsFor, launchedEngine, main, recoverAfterTimeout, runJob, startRun, type TimeoutContext, type Validated,
+  drainQueue, finishRun, guardsFor, launchedEngine, main, recoverAfterTimeout, recoverQueue, runJob, startRun, type TimeoutContext, type Validated,
 } from "../src/cli";
 import { claudeBin, studioRoot, StudioRootMissing } from "../src/env";
-import { Queue } from "../src/queue";
+import { END_HYGIENE_EVENTS } from "../src/hygiene";
+import { type QueueEvent, Queue } from "../src/queue";
 import {
   buildWorkerCommand, buildWorkerEnv, CONTINUATION_PROMPT, HostBypassRefused, invokeSkill, MISSING_STATUS_BLOCK, type Spawner,
 } from "../src/server";
 
 const REPO = resolve(import.meta.dir, "..");
+
+/** Story 22.3: the operator's run-hygiene variables (User scope on the Windows host) must never
+ * reach this suite — its in-process paths and every child it spawns through `...process.env` would
+ * send real notifications, copy transcripts into the real backup and snapshot into the real work
+ * folder. They are cleared for the suite (restored after it); a test that needs one sets it
+ * explicitly (a fixture's `env`, or `process.env` inside the test). */
+const OPERATOR_HYGIENE_VARS = [
+  "TK_SUPERVISOR_NOTIFY", "TK_SUPERVISOR_NTFY_URL", "TK_SUPERVISOR_TELEGRAM_TOKEN", "TK_SUPERVISOR_TELEGRAM_CHAT",
+  "TK_SUPERVISOR_TRANSCRIPT_BACKUP", "TK_SUPERVISOR_WORK",
+] as const;
+const operatorHygiene: Record<string, string | undefined> = {};
+beforeAll(() => {
+  for (const k of OPERATOR_HYGIENE_VARS) { operatorHygiene[k] = process.env[k]; delete process.env[k]; }
+});
+afterAll(() => {
+  for (const k of OPERATOR_HYGIENE_VARS) { if (operatorHygiene[k] === undefined) delete process.env[k]; else process.env[k] = operatorHygiene[k]; }
+});
+
+/** A run's lifecycle events: every event but the end hygiene's (Story 22.3), which follows each end. */
+const lifecycle = (q: Queue, runId?: string, since?: number): QueueEvent[] =>
+  q.events(runId, since).filter((e) => !(END_HYGIENE_EVENTS as readonly string[]).includes(e.kind));
+
 const FORBIDDEN_FLAGS = ["--dangerously-skip-permissions", "--settings", "--permission-prompt-tool", "--allowedTools", "--disallowedTools"];
 
 beforeAll(() => { process.env.TK_STUDIO_HOME = mkdtempSync(join(tmpdir(), "tk-sup-store-")); });
@@ -305,8 +328,19 @@ describe("finishRun: model/effort per §5, tier forwarded, cost to finish (AC3/A
 // Real studio verbs (uv + TK_STUDIO_ROOT) against a throwaway store and
 // project; only the worker is faked (CLAUDE_BIN printing a json result).
 
-const canRunE2E = !!process.env.TK_STUDIO_ROOT && process.platform !== "win32"
-  && spawnSync("uv", ["--version"]).status === 0;
+// win32 too (DW-5, DW-10): the fakes are exec'd through `fakeBin`'s shim there.
+const canRunE2E = !!process.env.TK_STUDIO_ROOT && spawnSync("uv", ["--version"]).status === 0;
+
+/** A fake executable from a bun script at `path`. POSIX: the shebang file itself, made
+ * executable. win32 (which cannot exec a shebang script): a `.cmd` shim beside it that runs
+ * `bun <script> %*` — test-side only, the production spawn path is unchanged. Answers the path to exec. */
+function fakeBin(path: string, script: string, platform: NodeJS.Platform = process.platform): string {
+  writeFileSync(path, `#!/usr/bin/env bun\n${script}`);
+  if (platform !== "win32") { chmodSync(path, 0o755); return path; }
+  const shim = `${path.replace(/\.js$/, "")}.cmd`;
+  writeFileSync(shim, `@echo off\r\n"${process.execPath}" "${path}" %*\r\n`);
+  return shim;
+}
 
 function e2eFixture(workerResult: string, loggedIn = true, opts: { selfFinish?: boolean; env?: Record<string, string> } = {}) {
   const store = mkdtempSync(join(tmpdir(), "tk-sup-e2e-store-"));
@@ -318,10 +352,9 @@ function e2eFixture(workerResult: string, loggedIn = true, opts: { selfFinish?: 
     { env: { ...process.env, TK_STUDIO_HOME: store }, encoding: "utf-8" });
   if (reg.status !== 0) throw new Error(`fixture register failed: ${reg.stdout}${reg.stderr}`);
   const record = join(store, "worker-calls.jsonl");
-  const fake = join(store, "fake-claude.js");
+  const fakeScript = join(store, "fake-claude.js");
   const workerMarker = join(store, "worker-ran.marker");
-  writeFileSync(fake, `#!/usr/bin/env bun
-const fs = require("node:fs");
+  const fake = fakeBin(fakeScript, `const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(record)}, JSON.stringify({ args, apiKey: process.env.ANTHROPIC_API_KEY ?? null }) + "\\n");
 if (args[0] === "auth") {
@@ -364,13 +397,10 @@ if (killMarker && !resumed && !fs.existsSync(killMarker)) {
 }
 console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: ${JSON.stringify(workerResult)}, total_cost_usd: 0.0123, session_id: sessionId, num_turns: 1, usage }));
 `);
-  chmodSync(fake, 0o755);
   // A fake `sbx exec <sb> [timeout -k <s> <guard>] env [-u K]… [-C dir] claude …`: records its argv, then runs
   // the fake claude with the env and cwd the wrapper names (argv only, no shell).
   const sbxRecord = join(store, "sbx-calls.jsonl");
-  const fakeSbx = join(store, "fake-sbx.js");
-  writeFileSync(fakeSbx, `#!/usr/bin/env bun
-const fs = require("node:fs");
+  const fakeSbx = fakeBin(join(store, "fake-sbx.js"), `const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(sbxRecord)}, JSON.stringify({ args, apiKey: process.env.ANTHROPIC_API_KEY ?? null }) + "\\n");
 const at = args[2] === "timeout" && args[3] === "-k" ? 6 : 2;
@@ -379,10 +409,9 @@ const env = { ...process.env };
 let i = at + 1, cwd;
 while (args[i] === "-u" || args[i] === "-C") { if (args[i] === "-u") delete env[args[i + 1]]; else cwd = args[i + 1]; i += 2; }
 if (args[i] !== "claude") process.exit(98);
-const r = require("node:child_process").spawnSync(${JSON.stringify(fake)}, args.slice(i + 1), { env, cwd, stdio: "inherit" });
+const r = require("node:child_process").spawnSync(process.execPath, [${JSON.stringify(fakeScript)}, ...args.slice(i + 1)], { env, cwd, stdio: "inherit" });
 process.exit(r.status ?? 1);
 `);
-  chmodSync(fakeSbx, 0o755);
   const extraEnv = { SBX_BIN: fakeSbx, CLAUDE_CONFIG_DIR: join(store, "claude-config"), ...(opts.env ?? {}) };
   // The queue lives outside every repo and outside the store.
   const queueDb = join(mkdtempSync(join(tmpdir(), "tk-sup-e2e-queue-")), "queue.db");
@@ -421,7 +450,7 @@ process.exit(r.status ?? 1);
     expect(jobVerb(["status", "--directory", project, "--job-id", "studio-health"]).runs).toEqual([]);
     expect(ledger().filter((e) => e.event === "job-run")).toEqual([]);
   };
-  return { store, project, run, submit, bare, queue, queueDb, calls, sbxCalls, ledger, workerMarker, jobVerb, registeredId, expectNothingWoken };
+  return { store, project, fake, run, submit, bare, queue, queueDb, calls, sbxCalls, ledger, workerMarker, jobVerb, registeredId, expectNothingWoken };
 }
 
 describe.skipIf(!canRunE2E)("CLI end to end: studio-health (faked worker)", () => {
@@ -468,7 +497,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: studio-health (faked worker)", () =
     expect(workers[1].args[1]).toBe(CONTINUATION_PROMPT);
     const flagsOf = (a: string[]) => a.slice(2).filter((x, i, all) => x !== sid && !["--resume", "--session-id"].includes(x) && all[i - 1] !== "--resume");
     expect(flagsOf(workers[1].args)).toEqual(flagsOf(workers[0].args));
-    const [run, events] = fx.queue((q) => [q.get(summary.run_id), q.events(summary.run_id)] as const);
+    const [run, events] = fx.queue((q) => [q.get(summary.run_id), lifecycle(q, summary.run_id)] as const);
     expect(run).toMatchObject({ state: "partial", session_id: sid });
     const resumed = events.filter((e) => e.kind === "resumed");
     expect(resumed).toHaveLength(1);
@@ -606,7 +635,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: the durable queue", () => {
     expect(answer).toMatchObject({ ok: false, run_id: null });
     expect(answer.problems).toEqual(["missing required field 'guards'"]);
     expect(answer.error).toContain("missing required field 'guards'");
-    expect(fx.queue((q) => [q.runs().length, q.events().length,
+    expect(fx.queue((q) => [q.runs().length, lifecycle(q).length,
       (q.db.query("SELECT COUNT(*) AS n FROM jobs").get() as { n: number }).n])).toEqual([0, 0, 0]);
   }, 120_000);
 
@@ -634,7 +663,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: the durable queue", () => {
     expect(summary.studio_run_id).toStartWith("studio-health-");
     const studio = fx.jobVerb(["status", "--directory", fx.project, "--job-id", "studio-health", "--run-id", summary.studio_run_id]).runs[0];
     expect(studio.state).toBe("complete");
-    const [run, events, lock] = fx.queue((q) => [q.get(summary.run_id), q.events(summary.run_id), q.lock(fx.project)] as const);
+    const [run, events, lock] = fx.queue((q) => [q.get(summary.run_id), lifecycle(q, summary.run_id), q.lock(fx.project)] as const);
     expect(run).toMatchObject({ state: "complete", studio_run_id: summary.studio_run_id, owner_pid: null });
     expect(events.map((e) => [e.kind, e.to_state])).toEqual([
       ["enqueued", "queued"], ["claimed", "running"], ["verb-started", "running"], ["studio-run", "running"],
@@ -796,7 +825,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: restart recovery and drain", () => 
     expect(report.runs[0]).toMatchObject({ run_id: queued.run_id, job_id: "studio-health", summary: { ok: true, state: "complete", run_id: queued.run_id } });
     const studioId = report.runs[0].summary.studio_run_id;
     expect(fx.jobVerb(["status", "--directory", fx.project, "--job-id", "studio-health", "--run-id", studioId]).runs[0].state).toBe("complete");
-    expect(fx.queue((q) => q.events(queued.run_id).map((e) => e.kind))).toEqual([
+    expect(fx.queue((q) => lifecycle(q, queued.run_id).map((e) => e.kind))).toEqual([
       "enqueued", "requeued", "claimed", "verb-started", "studio-run", "woke", "session", "worker", "accounted", "ended",
     ]);
 
@@ -825,7 +854,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: restart recovery and drain", () => 
       run_id: queued.run_id, job_id: "soon-bad", state: "blocked",
       problems: ["missing required field 'guards'"], error: "resolve: missing required field 'guards'",
     }]);
-    const [run, last] = fx.queue((q) => [q.get(queued.run_id), q.events(queued.run_id).at(-1)] as const);
+    const [run, last] = fx.queue((q) => [q.get(queued.run_id), lifecycle(q, queued.run_id).at(-1)] as const);
     expect(run).toMatchObject({ state: "blocked", reason: "resolve: missing required field 'guards'" });
     expect(last).toMatchObject({ kind: "ended", from_state: "queued", to_state: "blocked", detail: { reason: "resolve: missing required field 'guards'" } });
     expect(fx.calls().some((c) => c.args[0] === "-p")).toBe(false);
@@ -877,7 +906,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: restart recovery and drain", () => 
     const run = fx.queue((q) => q.get(queued.run_id))!;
     expect(run.state).toBe("blocked");
     expect(run.reason).toContain("verb start refused");
-    expect(fx.queue((q) => q.events(queued.run_id).map((e) => [e.kind, e.to_state]))).toEqual([
+    expect(fx.queue((q) => lifecycle(q, queued.run_id).map((e) => [e.kind, e.to_state]))).toEqual([
       ["enqueued", "queued"], ["claimed", "running"], ["ended", "blocked"],
     ]);
     expect(fx.queue((q) => q.lock(fx.project))).toBeNull();
@@ -894,7 +923,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: restart recovery and drain", () => 
     const run = fx.queue((q) => q.get(queued.run_id))!;
     expect(run.state).toBe("blocked");
     expect(run.reason).toContain("directory does not exist");
-    expect(fx.queue((q) => q.events(queued.run_id).at(-1))).toMatchObject({ kind: "ended", to_state: "blocked" });
+    expect(fx.queue((q) => lifecycle(q, queued.run_id).at(-1))).toMatchObject({ kind: "ended", to_state: "blocked" });
   }, 180_000);
 
   test("`drain`: a transient stop before validation (no Max login) leaves the run queued", () => {
@@ -958,7 +987,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: restart recovery and drain", () => 
 
     const orphan = fx.queue((q) => q.get(queued.run_id))!;
     expect(orphan).toMatchObject({ state: "partial", reason: "orphaned: supervisor restart; no session recorded", studio_run_id: minted.run_id });
-    expect(fx.queue((q) => q.events(queued.run_id).at(-1))).toMatchObject({ kind: "orphaned", detail: { lookup: { ok: true, adopted: minted.run_id }, studio: { ok: true } } });
+    expect(fx.queue((q) => lifecycle(q, queued.run_id).at(-1))).toMatchObject({ kind: "orphaned", detail: { lookup: { ok: true, adopted: minted.run_id }, studio: { ok: true } } });
     const studio = fx.jobVerb(["status", "--directory", fx.project, "--job-id", "studio-health", "--run-id", minted.run_id]).runs[0];
     expect(studio).toMatchObject({ state: "partial", reason: "orphaned: supervisor restart; no session recorded" });
   }, 180_000);
@@ -974,7 +1003,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: restart recovery and drain", () => 
     expect(summary).toMatchObject({ ok: true, state: "complete", target: "skill" });
     expect(res.status).toBe(0);
     // The mirror handed the checkout lock to the engine.
-    const [run, lock, last] = fx.queue((q) => [q.get(summary.run_id), q.lock(fx.project), q.events(summary.run_id).at(-1)] as const);
+    const [run, lock, last] = fx.queue((q) => [q.get(summary.run_id), q.lock(fx.project), lifecycle(q, summary.run_id).at(-1)] as const);
     expect(run).toMatchObject({ state: "complete", engine_run_id: "20260928-101500-ab12" });
     expect(lock).toMatchObject({ kind: "engine", engine_run_id: "20260928-101500-ab12", run_id: summary.run_id });
     expect(last!.detail).toMatchObject({ lock: { handed_to_engine: "20260928-101500-ab12" } });
@@ -1013,7 +1042,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: restart recovery and drain", () => 
       expect(probed).toEqual([[fx.project, null]]);
       expect(q.get(summary.run_id!)).toMatchObject({ state: "blocked", engine_run_id: "E9" });
       expect(q.lock(fx.project)).toMatchObject({ kind: "engine", engine_run_id: "E9", run_id: summary.run_id });
-      expect(q.events(summary.run_id!).at(-1)!.detail).toMatchObject({ lock: { handed_to_engine: "E9" }, engine: { live: ["E9"] } });
+      expect(lifecycle(q, summary.run_id!).at(-1)!.detail).toMatchObject({ lock: { handed_to_engine: "E9" }, engine: { live: ["E9"] } });
     } finally {
       for (const [k, v] of [["TK_STUDIO_HOME", prev.home], ["CLAUDE_BIN", prev.bin], ["CLAUDE_CONFIG_DIR", prev.cfg]] as const) {
         if (v === undefined) delete process.env[k]; else process.env[k] = v;
@@ -1195,8 +1224,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: a killed run resumes or ends partia
     const realUv = Bun.which("uv");
     if (!realUv) throw new Error("uv not on PATH");
     const marker = join(dir, "killed.marker");
-    writeFileSync(join(dir, "uv"), `#!/usr/bin/env bun
-const fs = require("node:fs");
+    fakeBin(join(dir, "uv"), `const fs = require("node:fs");
 const args = process.argv.slice(2);
 const once = args[0] === "run" && String(args[1]).endsWith("jobrun.py") && args[2] === ${JSON.stringify(at)} && !fs.existsSync(${JSON.stringify(marker)});
 const kill = () => { fs.writeFileSync(${JSON.stringify(marker)}, "1"); process.kill(process.ppid, "SIGKILL"); process.exit(1); };
@@ -1205,10 +1233,9 @@ const r = require("node:child_process").spawnSync(${JSON.stringify(realUv)}, arg
 if (once) kill(); // after the verb answered, before the supervisor reads it
 process.exit(r.status ?? 1);
 `);
-    chmodSync(join(dir, "uv"), 0o755);
-    return { env: { PATH: `${dir}:${process.env.PATH}` }, marker };
+    return { env: { PATH: `${dir}${delimiter}${process.env.PATH}` }, marker };
   }
-  const events = (fx: ReturnType<typeof e2eFixture>, runId: string) => fx.queue((q) => q.events(runId));
+  const events = (fx: ReturnType<typeof e2eFixture>, runId: string) => fx.queue((q) => lifecycle(q, runId));
   const onlyRun = (fx: ReturnType<typeof e2eFixture>) => fx.queue((q) => q.runs())[0];
 
   test("after `wake` (the verb answered, the supervisor died before recording it) → `recover` ends it partial naming no session", () => {
@@ -1336,4 +1363,202 @@ process.exit(r.status ?? 1);
     expect(studio.state).toBe("complete");
     expect(fx.ledger().filter((e) => e.event === "job-run" && e.payload.run_id === run.studio_run_id)).toHaveLength(1);
   }, 180_000);
+});
+
+// ---------------------------------------------------------------- Story 22.3: run hygiene and win32 fakes
+
+describe("the fake-bin helper (DW-5: win32-runnable fakes)", () => {
+  test("Story 22.3: the operator's hygiene variables are cleared for this suite and its children", () => {
+    for (const k of OPERATOR_HYGIENE_VARS) expect(process.env[k]).toBeUndefined();
+    const res = spawnSync(process.execPath, ["-e", `console.log(JSON.stringify(${JSON.stringify(OPERATOR_HYGIENE_VARS)}.filter((k) => k in process.env)))`],
+      { env: { ...process.env }, encoding: "utf-8" });
+    expect(JSON.parse(res.stdout)).toEqual([]);
+  });
+
+  test("POSIX: the shebang script itself, executable; win32: a .cmd shim running `bun <script> %*`", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tk-sup-fakebin-"));
+    const posix = fakeBin(join(dir, "fake-a.js"), "console.log(1);", "linux");
+    expect(posix).toBe(join(dir, "fake-a.js"));
+    expect(readFileSync(posix, "utf-8")).toStartWith("#!/usr/bin/env bun\n");
+    if (process.platform !== "win32") expect(spawnSync(posix, [], { encoding: "utf-8" }).stdout.trim()).toBe("1");
+    const shim = fakeBin(join(dir, "fake-b.js"), "console.log(2);", "win32");
+    expect(shim).toBe(join(dir, "fake-b.cmd"));
+    expect(readFileSync(shim, "utf-8")).toBe(`@echo off\r\n"${process.execPath}" "${join(dir, "fake-b.js")}" %*\r\n`);
+    expect(fakeBin(join(dir, "uv"), "", "win32")).toBe(join(dir, "uv.cmd"));
+  });
+
+  test("--editor-in-the-loop is a `submit` flag only: on `run` it is an unknown argument (exit 2)", async () => {
+    const err = console.error;
+    const lines: string[] = [];
+    console.error = (...a: unknown[]) => { lines.push(a.join(" ")); };
+    try { expect(await main(["run", "j", "--directory", ".", "--editor-in-the-loop"])).toBe(2); }
+    finally { console.error = err; }
+    expect(lines[0]).toStartWith("unknown argument '--editor-in-the-loop'");
+  });
+});
+
+describe.skipIf(!canRunE2E)("CLI end to end: editor-in-the-loop snapshot and end hygiene (Story 22.3)", () => {
+  /** A fake `robocopy` on PATH: records its argv, creates the target, exits `exit`. */
+  function fakeRobocopy(exit: number) {
+    const dir = mkdtempSync(join(tmpdir(), "tk-sup-e2e-robocopy-"));
+    const record = join(dir, "calls.jsonl");
+    fakeBin(join(dir, "robocopy"), `const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(record)}, JSON.stringify(args) + "\\n");
+fs.mkdirSync(args[1], { recursive: true });
+process.exit(${exit});
+`);
+    const calls = (): string[][] => existsSync(record) ? readFileSync(record, "utf-8").trim().split("\n").map((l) => JSON.parse(l)) : [];
+    return { env: { PATH: `${dir}${delimiter}${process.env.PATH}` }, calls };
+  }
+  const BLOCK = `{"status":"complete","intent":"tk-studio-activate","artifacts":[]}`;
+
+  test("submit --editor-in-the-loop with no TK_SUPERVISOR_WORK → exit 2, WorkDirMissing, nothing queued", () => {
+    const fx = e2eFixture("unused", true, { env: { TK_SUPERVISOR_WORK: "" } });
+    const res = fx.submit("studio-health", fx.project, ["--editor-in-the-loop"]);
+    expect(res.status).toBe(2);
+    const answer = JSON.parse(res.stdout);
+    expect(answer).toMatchObject({ ok: false, run_id: null, state: "not-started" });
+    expect(answer.error).toStartWith("WorkDirMissing:");
+    expect(fx.queue((q) => q.runs().length)).toBe(0);
+  }, 120_000);
+
+  test("a flagged Godot run (project.godot in game/): robocopy <root> <work>/snapshots/<pid>/<run> /E before wake, the path on the run; its end notified-or-recorded once", () => {
+    const work = mkdtempSync(join(tmpdir(), "tk-sup-e2e-work-"));
+    const robo = fakeRobocopy(1);
+    const fx = e2eFixture(BLOCK, true, { env: { ...robo.env, TK_SUPERVISOR_WORK: work, TK_SUPERVISOR_NOTIFY: "" } });
+    mkdirSync(join(fx.project, "game"));
+    writeFileSync(join(fx.project, "game", "project.godot"), "");
+    const submitted = JSON.parse(fx.submit("studio-health", fx.project, ["--editor-in-the-loop"]).stdout);
+    expect(fx.queue((q) => q.get(submitted.run_id))).toMatchObject({ state: "queued", editor_in_the_loop: 1 });
+    const res = fx.run();
+    expect(res.status).toBe(0);
+    const summary = JSON.parse(res.stdout);
+    expect(summary).toMatchObject({ ok: true, run_id: submitted.run_id, state: "complete" });
+    const target = join(work, "snapshots", summary.project_id, summary.run_id);
+    expect(robo.calls()).toEqual([[resolve(fx.project), target, "/E", "/R:3", "/W:5"]]);
+    expect(existsSync(target)).toBe(true);
+    const evs = fx.queue((q) => q.events(summary.run_id));
+    const kinds = evs.map((e) => e.kind);
+    expect(kinds.indexOf("snapshot")).toBeGreaterThan(kinds.indexOf("claimed"));
+    expect(kinds.indexOf("snapshot")).toBeLessThan(kinds.indexOf("verb-started"));
+    expect(evs.find((e) => e.kind === "snapshot")!.detail).toMatchObject({ path: target });
+    // The end hygiene, once: no notifier configured → recorded; the host transcript copy → recorded (no backup set).
+    expect(kinds.slice(kinds.indexOf("ended") + 1)).toEqual(["notify-skipped", "transcript-copy-failed"]);
+  }, 120_000);
+
+  test("a selected notifier missing its variables (or an unknown one): `run`, `recover` and `drain` refuse to start, naming it, never the token", () => {
+    const secret = "424242:tg-e2e-never-printed";
+    const cases = [
+      [{ TK_SUPERVISOR_NOTIFY: "telegram", TK_SUPERVISOR_TELEGRAM_TOKEN: secret, TK_SUPERVISOR_TELEGRAM_CHAT: "" }, "NotifierConfigMissing", "TK_SUPERVISOR_TELEGRAM_CHAT"],
+      [{ TK_SUPERVISOR_NOTIFY: "telegram", TK_SUPERVISOR_TELEGRAM_TOKEN: "", TK_SUPERVISOR_TELEGRAM_CHAT: "-100" }, "NotifierConfigMissing", "TK_SUPERVISOR_TELEGRAM_TOKEN"],
+      [{ TK_SUPERVISOR_NOTIFY: "ntfy", TK_SUPERVISOR_NTFY_URL: "", TK_SUPERVISOR_TELEGRAM_TOKEN: secret }, "NotifierConfigMissing", "TK_SUPERVISOR_NTFY_URL"],
+      [{ TK_SUPERVISOR_NOTIFY: "slack", TK_SUPERVISOR_TELEGRAM_TOKEN: secret }, "NotifierUnknown", "TK_SUPERVISOR_NOTIFY"],
+    ] as const;
+    for (const [env, name, variable] of cases) {
+      const fx = e2eFixture(BLOCK, true, { env });
+      // `submit` only queues (no notifier needed); every driving verb refuses before the queue is touched.
+      const submitted = JSON.parse(fx.submit().stdout);
+      expect(submitted).toMatchObject({ ok: true, state: "queued" });
+      for (const res of [fx.run(), fx.bare("recover"), fx.bare("drain")]) {
+        expect(res.status).toBe(2);
+        const answer = JSON.parse(res.stdout);
+        expect(answer.ok).toBe(false);
+        expect(answer.error).toStartWith(`${name}:`);
+        expect(answer.error).toContain(variable);
+        expect(`${res.stdout}${res.stderr}`).not.toContain(secret);
+      }
+      expect(fx.queue((q) => q.get(submitted.run_id))).toMatchObject({ state: "queued", owner_pid: null });
+      expect(fx.queue((q) => q.events(submitted.run_id).map((e) => e.kind))).toEqual(["enqueued"]);
+      expect(fx.calls()).toEqual([]);
+      fx.expectNothingWoken();
+    }
+  }, 240_000);
+
+  /** A recording fetch (Story 22.3's notifier, injected in process): answers 200. */
+  function recordingFetch() {
+    const bodies: string[] = [];
+    const fetchFn = async (_url: string, init?: RequestInit) => { bodies.push(String(init?.body)); return new Response("ok"); };
+    return { bodies, fetchFn };
+  }
+  const NTFY = { TK_SUPERVISOR_NOTIFY: "ntfy", TK_SUPERVISOR_NTFY_URL: "https://ntfy.example/tk-e2e-topic" };
+
+  test("`recover` sweeps the ends it makes: an orphaned run (dead owner, past its verb) → exactly one notification naming run id, state and reason", async () => {
+    const db = join(mkdtempSync(join(tmpdir(), "tk-sup-e2e-queue-")), "queue.db");
+    const dead = { pid: deadPid(), host: hostname(), nonce: "dead-supervisor" };
+    const me = { pid: process.pid, host: hostname(), nonce: "recover-sweep" };
+    const q = new Queue(db, { ownerAlive: (o) => o.nonce === me.nonce, engineLive: async () => ({ live: false }) });
+    try {
+      const run = q.enqueue({
+        jobId: "studio-health", root: mkdtempSync(join(tmpdir(), "tk-sup-checkout-")), owner: dead,
+        definition: { id: "studio-health", trigger: "one-shot", target: { skill: "tk-studio-activate" } },
+      }).run;
+      expect((await q.claim(run.run_id, dead)).claimed).toBe(true);
+      q.markVerbStarted(run.run_id, "wake", [], { target: "skill", definition: { id: "studio-health" } });
+      q.setStudioRun(run.run_id, "studio-health-20260929T101010Z");
+      const f = recordingFetch();
+      // The studio verbs injected: the studio run still `running`, then finished `partial`.
+      const verbs = async (_root: string, a: string[]) => a[0] === "status" ? { runs: [{ run_id: "studio-health-20260929T101010Z", state: "running" }] } : { state: "partial" };
+      const report = await recoverQueue({ queue: q, owner: me, hygiene: { env: NTFY, fetch: f.fetchFn } }, verbs);
+      expect(report.ended.map((e: { run_id: string }) => e.run_id)).toEqual([run.run_id]);
+      const ended = q.get(run.run_id)!;
+      expect(ended.state).toBe("partial");
+      expect(ended.reason).toStartWith("orphaned: supervisor restart");
+      expect(f.bodies).toHaveLength(1);
+      expect(f.bodies[0]).toContain(`run ${run.run_id} ended partial`);
+      expect(f.bodies[0]).toContain(`reason: ${ended.reason}`);
+      expect(q.events(run.run_id).filter((e) => e.kind === "notified")).toHaveLength(1);
+      expect(q.get(run.run_id)!.notified).toStartWith("done ");
+    } finally { q.close(); }
+  }, 120_000);
+
+  test("`drain` sweeps the ends it makes: a queued run whose job now fails `resolve` ends `blocked` → exactly one notification naming run id, state and reason", async () => {
+    const fx = e2eFixture("unused");
+    const def = JSON.parse(readFileSync(join(REPO, ".tk-studio", "jobs", "studio-health.json"), "utf-8"));
+    def.id = "soon-bad";
+    const file = join(fx.project, ".tk-studio", "jobs", "soon-bad.json");
+    writeFileSync(file, JSON.stringify(def));
+    const queued = JSON.parse(fx.submit("soon-bad").stdout);
+    expect(queued).toMatchObject({ ok: true, state: "queued" });
+    delete def.guards; // the definition no longer validates: drain itself ends the run (runJob refused before its claim)
+    writeFileSync(file, JSON.stringify(def));
+    const prev = { home: process.env.TK_STUDIO_HOME, bin: process.env.CLAUDE_BIN, cfg: process.env.CLAUDE_CONFIG_DIR };
+    process.env.TK_STUDIO_HOME = fx.store;
+    process.env.CLAUDE_BIN = fx.fake;
+    process.env.CLAUDE_CONFIG_DIR = join(fx.store, "claude-config");
+    const q = new Queue(fx.queueDb);
+    const f = recordingFetch();
+    try {
+      const report = await drainQueue({ queue: q, hygiene: { env: NTFY, fetch: f.fetchFn } });
+      expect(report.runs).toMatchObject([{ run_id: queued.run_id, state: "blocked" }]);
+      const reason = "resolve: missing required field 'guards'";
+      expect(q.get(queued.run_id)).toMatchObject({ state: "blocked", reason });
+      expect(f.bodies).toHaveLength(1);
+      expect(f.bodies[0]).toContain(`run ${queued.run_id} ended blocked`);
+      expect(f.bodies[0]).toContain(`reason: ${reason}`);
+      expect(q.events(queued.run_id).filter((e) => e.kind === "notified")).toHaveLength(1);
+      expect(q.get(queued.run_id)!.notified).toStartWith("done ");
+    } finally {
+      for (const [k, v] of [["TK_STUDIO_HOME", prev.home], ["CLAUDE_BIN", prev.bin], ["CLAUDE_CONFIG_DIR", prev.cfg]] as const) {
+        if (v === undefined) delete process.env[k]; else process.env[k] = v;
+      }
+      q.close();
+    }
+    expect(fx.calls().some((c) => c.args[0] === "-p")).toBe(false);
+  }, 180_000);
+
+  test("a snapshot that fails (robocopy exit 8) ends the run `blocked` before wake: no studio run, no worker", () => {
+    const work = mkdtempSync(join(tmpdir(), "tk-sup-e2e-work-"));
+    const robo = fakeRobocopy(8);
+    const fx = e2eFixture(BLOCK, true, { env: { ...robo.env, TK_SUPERVISOR_WORK: work } });
+    writeFileSync(join(fx.project, "project.godot"), "");
+    const submitted = JSON.parse(fx.submit("studio-health", fx.project, ["--editor-in-the-loop"]).stdout);
+    const res = fx.run();
+    expect(res.status).toBe(2);
+    expect(JSON.parse(res.stdout)).toMatchObject({ ok: false, run_id: submitted.run_id, error: "snapshot failed: robocopy exited 8" });
+    expect(fx.queue((q) => q.get(submitted.run_id))).toMatchObject({ state: "blocked", reason: "snapshot failed: robocopy exited 8", studio_run_id: null });
+    expect(fx.queue((q) => q.events(submitted.run_id).map((e) => e.kind))).not.toContain("verb-started");
+    expect(fx.calls().some((c) => c.args[0] === "-p")).toBe(false);
+    fx.expectNothingWoken();
+  }, 120_000);
 });

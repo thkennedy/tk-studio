@@ -10,8 +10,9 @@
  * (compared in constant time). The token and the header never appear in a
  * log line, an answer or an event.
  *
- *   POST /jobs               {project, job, base_ref?, tier?, model?, effort?} → the CLI's
- *                            own submit path (`submitProject` → `submitJob` → `enqueue`)
+ *   POST /jobs               {project, job, base_ref?, tier?, model?, effort?, editor_in_the_loop?}
+ *                            → the CLI's own submit path (`submitProject` → `submitJob` → `enqueue`);
+ *                            a flagged run with no TK_SUPERVISOR_WORK is 400 WorkDirMissing (Story 22.3)
  *   GET  /jobs               the submitted jobs
  *   GET  /runs/{id}          the queue run and its events (kinds and details as stored)
  *   POST /runs/{id}/cancel   ends the run `cancelled` (`cancelRun`); 409 once terminal
@@ -26,7 +27,7 @@
  */
 import { createHash, timingSafeEqual } from "node:crypto";
 import { CancelRaced, cancelRun, StartError, submitProject } from "./cli";
-import { apiBind, apiPort, apiToken } from "./env";
+import { apiBind, apiPort, apiToken, notifier } from "./env";
 import { gatherPage, holderOf, renderPage } from "./page";
 import { registryShow } from "./server";
 import { isTerminal, Queue, RunTerminal, type QueueEvent, type QueueRun } from "./queue";
@@ -54,7 +55,11 @@ export function checkBind(addr: string): string {
 }
 
 /** The submission body, validated. */
-export interface SubmitBody { project: string; job: string; base_ref?: string; tier?: string; model?: string; effort?: string }
+export interface SubmitBody {
+  project: string; job: string; base_ref?: string; tier?: string; model?: string; effort?: string;
+  /** Story 22.3: an editor-in-the-loop run (a Godot project is snapshot before it starts). */
+  editor_in_the_loop?: boolean;
+}
 
 export interface ApiDeps {
   queue: Queue;
@@ -78,18 +83,21 @@ export interface ApiDeps {
   ledger?: { user: string; machine: string };
 }
 
-const SUBMIT_FIELDS = ["project", "job", "base_ref", "tier", "model", "effort"] as const;
+const SUBMIT_FIELDS = ["project", "job", "base_ref", "tier", "model", "effort", "editor_in_the_loop"] as const;
+/** The boolean fields; every other field is a non-empty string. */
+const BOOLEAN_FIELDS = ["editor_in_the_loop"] as const;
 const REQUIRED_FIELDS = ["project", "job"] as const;
 
 /** The refusal names the submit path raises (each a 400 naming it; nothing queued). */
-export const NAMED_REFUSALS = ["HostBypassRefused", "TierRefused", "SbxSandboxMissing", "SupervisorConfigInvalid", "VmPathUnderivable"] as const;
+export const NAMED_REFUSALS = ["HostBypassRefused", "TierRefused", "SbxSandboxMissing", "SupervisorConfigInvalid", "VmPathUnderivable", "WorkDirMissing"] as const;
 
 const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json; charset=utf-8", ...headers } });
 
 const fail = (status: number, error: string, extra: Record<string, unknown> = {}) => json(status, { ok: false, error, ...extra });
 
-/** The body schema: a JSON object with `project` and `job`, and only the known fields, each a non-empty string. */
+/** The body schema: a JSON object with `project` and `job`, and only the known fields, each a
+ * non-empty string — `editor_in_the_loop` a boolean. */
 export function checkSubmitBody(body: unknown): { ok: true; body: SubmitBody } | { ok: false; detail: string } {
   if (!body || typeof body !== "object" || Array.isArray(body)) return { ok: false, detail: "the body must be a JSON object" };
   const b = body as Record<string, unknown>;
@@ -98,7 +106,10 @@ export function checkSubmitBody(body: unknown): { ok: true; body: SubmitBody } |
   }
   for (const k of REQUIRED_FIELDS) if (!(k in b)) return { ok: false, detail: `missing field '${k}'` };
   for (const k of SUBMIT_FIELDS) {
-    if (k in b && (typeof b[k] !== "string" || !(b[k] as string).trim())) return { ok: false, detail: `field '${k}' must be a non-empty string` };
+    if (!(k in b)) continue;
+    if ((BOOLEAN_FIELDS as readonly string[]).includes(k)) {
+      if (typeof b[k] !== "boolean") return { ok: false, detail: `field '${k}' must be a boolean` };
+    } else if (typeof b[k] !== "string" || !(b[k] as string).trim()) return { ok: false, detail: `field '${k}' must be a non-empty string` };
   }
   return { ok: true, body: b as unknown as SubmitBody };
 }
@@ -132,7 +143,7 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
   const { queue } = deps;
   const expected = createHash("sha256").update(`Bearer ${deps.token}`).digest();
   const submit = deps.submit ?? ((b: SubmitBody) => submitProject(b.project, b.job, {
-    queue, tier: b.tier, model: b.model, effort: b.effort, baseRef: b.base_ref,
+    queue, tier: b.tier, model: b.model, effort: b.effort, baseRef: b.base_ref, ...(b.editor_in_the_loop === true ? { editorInTheLoop: true } : {}),
   }));
   const cancel = deps.cancel ?? ((id: string) => cancelRun(queue, id));
   const pollMs = deps.pollMs ?? 1000, keepaliveMs = deps.keepaliveMs ?? 15000;
@@ -309,6 +320,7 @@ export function serve(env: Env = process.env): { url: string; stop: () => void }
   const bind = checkBind(apiBind(env));
   const port = apiPort(env);
   const token = apiToken(env);
+  notifier(env); // Story 22.3: a misconfigured notifier is a named start error (cancels notify from here)
   const queue = Queue.open(env);
   const server = Bun.serve({ hostname: bind, port, idleTimeout: 0, fetch: createApi({ queue, token, env }) });
   return { url: `http://${bind}:${server.port}`, stop: () => { server.stop(true); queue.close(); } };

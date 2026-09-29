@@ -6,9 +6,32 @@ import { spawn, spawnSync } from "node:child_process";
 import { ApiBindRefused, checkBind, checkSubmitBody, createApi, serve, type ApiDeps, type SubmitBody } from "../src/api";
 import { CancelRaced, cancelRun, CANCELLED_REASON, launchStopGraceful, mirror, queueRecorder, recordMinted, StartError, type RunSummary } from "../src/cli";
 import { ApiBindMissing, ApiPortInvalid, ApiTokenMissing, apiBind, apiPort, apiToken } from "../src/env";
-import { Queue, RunTerminal, type EngineProbe, type Owner, type Probes, type QueueRun, type WorkerKill } from "../src/queue";
+import { END_HYGIENE_EVENTS } from "../src/hygiene";
+import { type QueueEvent, Queue, RunTerminal, type EngineProbe, type Owner, type Probes, type QueueRun, type WorkerKill } from "../src/queue";
 
 const REPO = resolve(import.meta.dir, "..");
+
+/** Story 22.3: the operator's run-hygiene variables (User scope on the Windows host) must never
+ * reach this suite — its in-process paths and every child it spawns through `...process.env` would
+ * send real notifications, copy transcripts into the real backup and snapshot into the real work
+ * folder. They are cleared for the suite (restored after it); a test that needs one sets it
+ * explicitly (a fixture's `env`, or `process.env` inside the test). */
+const OPERATOR_HYGIENE_VARS = [
+  "TK_SUPERVISOR_NOTIFY", "TK_SUPERVISOR_NTFY_URL", "TK_SUPERVISOR_TELEGRAM_TOKEN", "TK_SUPERVISOR_TELEGRAM_CHAT",
+  "TK_SUPERVISOR_TRANSCRIPT_BACKUP", "TK_SUPERVISOR_WORK",
+] as const;
+const operatorHygiene: Record<string, string | undefined> = {};
+beforeAll(() => {
+  for (const k of OPERATOR_HYGIENE_VARS) { operatorHygiene[k] = process.env[k]; delete process.env[k]; }
+});
+afterAll(() => {
+  for (const k of OPERATOR_HYGIENE_VARS) { if (operatorHygiene[k] === undefined) delete process.env[k]; else process.env[k] = operatorHygiene[k]; }
+});
+
+/** A run's lifecycle events: every event but the end hygiene's (Story 22.3), which follows each end. */
+const lifecycle = (q: Queue, runId?: string, since?: number): QueueEvent[] =>
+  q.events(runId, since).filter((e) => !(END_HYGIENE_EVENTS as readonly string[]).includes(e.kind));
+
 const TOKEN = "tok-3f9a1c-very-secret-value";
 const HOST = hostname();
 const A: Owner = { pid: 920001, host: HOST, nonce: "api-nonce-a" };
@@ -93,6 +116,11 @@ describe("bind, port and token (AC1)", () => {
     expect(refusal({ ...ok, TK_SUPERVISOR_TOKEN: undefined })).toStartWith("ApiTokenMissing:");
     expect(refusal({ ...ok, TK_SUPERVISOR_TOKEN: "" })).toStartWith("ApiTokenMissing:");
     expect(refusal({ ...ok, TK_SUPERVISOR_PORT: "http" })).toStartWith("ApiPortInvalid:");
+    // Story 22.3: a selected notifier missing its variables is a named start error, never the token.
+    const tg = { TK_SUPERVISOR_NOTIFY: "telegram", TK_SUPERVISOR_TELEGRAM_TOKEN: "123:tg-secret-value", TK_SUPERVISOR_TELEGRAM_CHAT: "" };
+    expect(refusal({ ...ok, ...tg })).toStartWith("NotifierConfigMissing:");
+    expect(refusal({ ...ok, ...tg })).not.toContain("tg-secret-value");
+    expect(refusal({ ...ok, TK_SUPERVISOR_NOTIFY: "slack" })).toStartWith("NotifierUnknown:");
     // All three valid: the next check is the queue (unset here) — still before any bind.
     expect(refusal(ok)).toStartWith("QueueDbMissing:");
     for (const env of [{ ...ok, TK_SUPERVISOR_BIND: "0.0.0.0" }, { ...ok, TK_SUPERVISOR_PORT: "x" }]) expect(refusal(env)).not.toContain(TOKEN);
@@ -181,6 +209,18 @@ describe("POST /jobs (AC3)", () => {
     expect(checkSubmitBody({ project: "p", job: "j", base_ref: "main", tier: "sbx", model: "m", effort: "low" }).ok).toBe(true);
   });
 
+  test("Story 22.3: editor_in_the_loop is a boolean field, passed to the submit path; any other type is a SchemaError", async () => {
+    expect(checkSubmitBody({ project: "p", job: "j", editor_in_the_loop: true }).ok).toBe(true);
+    expect(checkSubmitBody({ project: "p", job: "j", editor_in_the_loop: false }).ok).toBe(true);
+    for (const bad of ["true", 1, null, ""]) {
+      expect(checkSubmitBody({ project: "p", job: "j", editor_in_the_loop: bad })).toEqual({ ok: false, detail: "field 'editor_in_the_loop' must be a boolean" });
+    }
+    const fx = fixture();
+    const res = await fx.call("POST", "/jobs", { body: JSON.stringify({ project: "p", job: "godot-job", editor_in_the_loop: true }) });
+    expect(res.status).toBe(200);
+    expect(fx.submitted).toEqual([{ project: "p", job: "godot-job", editor_in_the_loop: true }]);
+  });
+
   test("each named refusal → 400 with its name; unknown project / job → 400 naming the refusal; nothing queued", async () => {
     let next: Error = new Error("unset");
     const fx = fixture({ submit: async () => { throw next; } });
@@ -191,6 +231,7 @@ describe("POST /jobs (AC3)", () => {
       [refused("SbxSandboxMissing: the sbx tier needs a sandbox name"), "SbxSandboxMissing"],
       [new StartError("SupervisorConfigInvalid: TK_SUPERVISOR_CONFIG 'x' is unreadable"), "SupervisorConfigInvalid"],
       [refused("VmPathUnderivable: cannot derive the sbx microVM path of 'x'"), "VmPathUnderivable"],
+      [refused("WorkDirMissing: TK_SUPERVISOR_WORK is not set — an editor-in-the-loop run needs the work folder its snapshot lands in"), "WorkDirMissing"],
       [refused("registry: unknown project_id 'ghost'"), "SubmitRefused"],
       [refused("resolve: unknown job id 'nope'"), "SubmitRefused"],
     ] as const) {
@@ -242,7 +283,7 @@ describe("read routes (AC4)", () => {
     expect(jobs.jobs[0]).toMatchObject({ job_id: "studio-health", root: fx.checkout, definition: { id: "studio-health" } });
     const got = await (await fx.call("GET", `/runs/${run.run_id}`)).json() as Record<string, any>;
     expect(got).toMatchObject({ ok: true, run_id: run.run_id, studio_run_id: null, state: "queued" });
-    expect(got.events).toEqual(JSON.parse(JSON.stringify(fx.queue.events(run.run_id))));
+    expect(got.events).toEqual(JSON.parse(JSON.stringify(lifecycle(fx.queue, run.run_id))));
     expect(got.events.map((e: any) => e.kind)).toEqual(["enqueued", "run-options"]);
     expect((await fx.call("GET", "/runs/x")).status).toBe(404);
     expect((await fx.call("POST", "/runs/x/cancel")).status).toBe(404);
@@ -277,7 +318,7 @@ describe("read routes (AC4)", () => {
     const fx = fixture();
     fx.enqueue("a");
     fx.enqueue("b");
-    const all = fx.queue.events();
+    const all = lifecycle(fx.queue);
     const body = await (await fx.call("GET", "/events?since=0")).json() as Record<string, any>;
     expect(body.events).toEqual(JSON.parse(JSON.stringify(all)));
     const after = await (await fx.call("GET", `/events?since=${all[0].seq}`)).json() as Record<string, any>;
@@ -290,7 +331,7 @@ describe("read routes (AC4)", () => {
   test("GET /events?since= with an empty or blank value is the default 0: 200 with every event", async () => {
     const fx = fixture();
     fx.enqueue("a");
-    const all = JSON.parse(JSON.stringify(fx.queue.events()));
+    const all = JSON.parse(JSON.stringify(lifecycle(fx.queue)));
     for (const q of ["", "%20"]) {
       const res = await fx.call("GET", `/events?since=${q}`);
       expect(res.status).toBe(200);
@@ -301,7 +342,7 @@ describe("read routes (AC4)", () => {
   test("GET /events as SSE: id:<seq> + data:<event json> per event, then new events as they land", async () => {
     const fx = fixture();
     fx.enqueue("a");
-    const first = fx.queue.events()[0];
+    const first = lifecycle(fx.queue)[0];
     const ctl = new AbortController();
     const res = await fx.handler(new Request(`${BASE}/events?since=0`, {
       headers: { authorization: `Bearer ${TOKEN}`, accept: "text/event-stream" }, signal: ctl.signal,
@@ -322,7 +363,7 @@ describe("read routes (AC4)", () => {
     await readUntil(`id:${first.seq}\n`);
     expect(text).toContain(`id:${first.seq}\ndata:${JSON.stringify(first)}\n\n`);
     fx.enqueue("b");
-    const second = fx.queue.events().at(-1)!;
+    const second = lifecycle(fx.queue).at(-1)!;
     await readUntil(`id:${second.seq}\n`);
     expect(text).toContain(`id:${second.seq}\ndata:${JSON.stringify(second)}\n\n`);
     ctl.abort();
@@ -333,7 +374,7 @@ describe("read routes (AC4)", () => {
     const fx = fixture();
     fx.enqueue("a");
     fx.enqueue("b");
-    const [first, second] = fx.queue.events();
+    const [first, second] = lifecycle(fx.queue);
     const ctl = new AbortController();
     const res = await fx.handler(new Request(`${BASE}/events?since=0`, {
       headers: { authorization: `Bearer ${TOKEN}`, accept: "text/event-stream", "last-event-id": String(first.seq) }, signal: ctl.signal,
@@ -364,7 +405,7 @@ describe("read routes (AC4)", () => {
     const fx = fixture();
     fx.enqueue("a");
     fx.enqueue("b");
-    const all = JSON.parse(JSON.stringify(fx.queue.events()));
+    const all = JSON.parse(JSON.stringify(lifecycle(fx.queue)));
     const five = await fx.call("GET", "/events", { headers: { "last-event-id": "5" } });
     expect(five.status).toBe(200);
     expect(await five.json()).toMatchObject({ ok: true, since: 0, events: all });
@@ -394,15 +435,15 @@ describe("cancel (AC4, AC5)", () => {
     expect(res.status).toBe(200);
     const body = await res.json() as Record<string, any>;
     expect(body).toMatchObject({ ok: true, run_id: run.run_id, studio_run_id: null, state: "cancelled" });
-    const ended = fx.queue.events(run.run_id).at(-1)!;
+    const ended = lifecycle(fx.queue, run.run_id).at(-1)!;
     expect(ended).toMatchObject({ kind: "ended", from_state: "queued", to_state: "cancelled" });
     expect(ended.detail).toMatchObject({ reason: CANCELLED_REASON, cancelled_by: "api" });
 
-    const before = { run: fx.queue.get(run.run_id), events: fx.queue.events(run.run_id) };
+    const before = { run: fx.queue.get(run.run_id), events: lifecycle(fx.queue, run.run_id) };
     const again = await fx.call("POST", `/runs/${run.run_id}/cancel`);
     expect(again.status).toBe(409);
     expect(await again.json()).toMatchObject({ ok: false, error: "RunTerminal", state: "cancelled" });
-    expect({ run: fx.queue.get(run.run_id), events: fx.queue.events(run.run_id) }).toEqual(before);
+    expect({ run: fx.queue.get(run.run_id), events: lifecycle(fx.queue, run.run_id) }).toEqual(before);
   });
 
   test("a running skill run: the studio run ended (status → finish), the host worker killed, the lock released", async () => {
@@ -423,7 +464,7 @@ describe("cancel (AC4, AC5)", () => {
     expect(calls[1]).toContain(CANCELLED_REASON);
     expect(kills).toEqual([5151]);
     expect(fx.queue.lock(fx.checkout)).toBeNull();
-    const ev = fx.queue.events(run.run_id).at(-1)!;
+    const ev = lifecycle(fx.queue, run.run_id).at(-1)!;
     expect(ev.detail).toMatchObject({ lock: "released", studio: { ok: true }, worker: { outcome: "killed" } });
   });
 
@@ -443,7 +484,7 @@ describe("cancel (AC4, AC5)", () => {
     expect(ended.state).toBe("cancelled");
     expect(calls.map((c) => c[0])).toEqual(["status", "cancel"]);
     expect(fx.queue.lock(fx.checkout)?.run_id).toBe(run.run_id);
-    const ev = fx.queue.events(run.run_id).at(-1)!;
+    const ev = lifecycle(fx.queue, run.run_id).at(-1)!;
     expect(ev.detail).toMatchObject({ lock: { held: expect.stringContaining("in-VM deadline not passed") }, worker: { outcome: "in-VM deadline not passed" } });
   });
 
@@ -460,7 +501,7 @@ describe("cancel (AC4, AC5)", () => {
     expect(ended.state).toBe("cancelled");
     expect(stops).toEqual([[fx.checkout, "eng-1"]]);
     expect(fx.queue.lock(fx.checkout)).toMatchObject({ kind: "engine", engine_run_id: "eng-1" });
-    expect(fx.queue.events(run.run_id).at(-1)!.detail).toMatchObject({ engine_stop: { engine_run_id: "eng-1", ok: true } });
+    expect(lifecycle(fx.queue, run.run_id).at(-1)!.detail).toMatchObject({ engine_stop: { engine_run_id: "eng-1", ok: true } });
   });
 
   test("a run ended by its driver during the cancel is the same 409", async () => {
@@ -517,7 +558,7 @@ describe("cancel (AC4, AC5)", () => {
     const ended = await cancelRun(fx.queue, run.run_id, { verbRunner });
     expect(ended.state).toBe("cancelled");
     expect(fx.queue.lock(fx.checkout)).toMatchObject({ kind: "run", run_id: run.run_id, owner_pid: A.pid });
-    expect(fx.queue.events(run.run_id).at(-1)!.detail).toMatchObject({ lock: { held: expect.stringContaining("driver") } });
+    expect(lifecycle(fx.queue, run.run_id).at(-1)!.detail).toMatchObject({ lock: { held: expect.stringContaining("driver") } });
     // Another run waits on it while that driver lives.
     const next = fx.enqueue("next");
     const waited = await fx.queue.claim(next.run_id, B);
@@ -525,7 +566,7 @@ describe("cancel (AC4, AC5)", () => {
     // The driver's own end finds the run ended and frees the lock; the next claim takes it.
     await expect(fx.queue.endDriven(run.run_id, "complete", "done")).rejects.toThrow(/RunTerminal/);
     expect(fx.queue.lock(fx.checkout)).toBeNull();
-    expect(fx.queue.events(run.run_id).at(-1)).toMatchObject({ kind: "lock-released" });
+    expect(lifecycle(fx.queue, run.run_id).at(-1)).toMatchObject({ kind: "lock-released" });
     expect((await fx.queue.claim(next.run_id, B)).claimed).toBe(true);
   });
 
@@ -567,7 +608,7 @@ describe("cancel races with the driver (AC4, AC5)", () => {
     expect(ended.state).toBe("cancelled");
     expect(calls.map((c) => c[0])).toEqual(["status", "finish"]);
     expect(calls[1]).toEqual(expect.arrayContaining([sid, CANCELLED_REASON]));
-    expect(fx.queue.events(run.run_id).at(-1)!.detail).toMatchObject({ studio: { ok: true } });
+    expect(lifecycle(fx.queue, run.run_id).at(-1)!.detail).toMatchObject({ studio: { ok: true } });
   });
 
   test("a studio run minted after the cancel is ended by the driver (recordMinted), the refusal rethrown", async () => {
@@ -592,7 +633,7 @@ describe("cancel races with the driver (AC4, AC5)", () => {
     await recordMinted(other.queue, live.run_id, { runId: "live-20260928T000005Z", woke: { state: "running" } },
       async () => { throw new Error("never called"); });
     expect(other.queue.get(live.run_id)!.studio_run_id).toBe("live-20260928T000005Z");
-    expect(other.queue.events(live.run_id).at(-1)).toMatchObject({ kind: "woke" });
+    expect(lifecycle(other.queue, live.run_id).at(-1)).toMatchObject({ kind: "woke" });
   });
 
   test("a worker the driver records after the cancel read the run is killed once the run ended, in effects.worker", async () => {
@@ -612,7 +653,7 @@ describe("cancel races with the driver (AC4, AC5)", () => {
     const body = await res.json() as Record<string, any>;
     expect(body).toMatchObject({ ok: true, state: "cancelled", effects: { worker: { pid: 9191, outcome: "killed" }, lock: { held: expect.any(String) } } });
     expect(kills).toEqual([9191]);
-    const evs = fx.queue.events(run.run_id);
+    const evs = lifecycle(fx.queue, run.run_id);
     expect(evs.at(-2)).toMatchObject({ kind: "ended", to_state: "cancelled" });
     expect(evs.at(-1)).toMatchObject({ kind: "worker-kill", from_state: "cancelled", to_state: "cancelled", detail: { worker: { pid: 9191, outcome: "killed" } } });
     // The lock stays with the ended run: `claim` frees it once `recordedWorker` says the worker may no longer run.
@@ -634,7 +675,7 @@ describe("cancel races with the driver (AC4, AC5)", () => {
     expect(fx.queue.lock(fx.checkout)?.run_id).toBe(run.run_id);
     await expect(fx.queue.endDriven(run.run_id, "blocked", "worker record failed")).rejects.toThrow(RunTerminal);
     expect(fx.queue.lock(fx.checkout)).toBeNull();
-    const evs = fx.queue.events(run.run_id);
+    const evs = lifecycle(fx.queue, run.run_id);
     expect(evs.at(-2)).toMatchObject({ kind: "worker-kill", detail: { worker: { pid: 4343, outcome: "killed" } } });
     expect(evs.at(-1)).toMatchObject({ kind: "lock-released" });
 
@@ -646,7 +687,7 @@ describe("cancel races with the driver (AC4, AC5)", () => {
     expect(() => queueRecorder(held.queue, other.run_id).worker(4444)).toThrow(RunTerminal);
     await expect(held.queue.endDriven(other.run_id, "blocked", "worker record failed")).rejects.toThrow(RunTerminal);
     expect(held.queue.lock(held.checkout)?.run_id).toBe(other.run_id);
-    expect(held.queue.events(other.run_id).at(-1)).toMatchObject({ kind: "worker-kill", detail: { worker: { outcome: "kill failed" } } });
+    expect(lifecycle(held.queue, other.run_id).at(-1)).toMatchObject({ kind: "worker-kill", detail: { worker: { outcome: "kill failed" } } });
   });
 
   test.skipIf(process.platform !== "linux")("the refused record's real child is killed by the recorded-worker kill (its process group, never by name)", async () => {
@@ -662,7 +703,7 @@ describe("cancel races with the driver (AC4, AC5)", () => {
       expect(() => queueRecorder(queue, run.run_id).worker(child.pid!)).toThrow(RunTerminal);
       expect(await exited).toBe(true);
       await expect(queue.endDriven(run.run_id, "blocked", "worker record failed")).rejects.toThrow(RunTerminal);
-      expect(queue.events(run.run_id).find((e) => e.kind === "worker-kill")?.detail).toMatchObject({ worker: { pid: child.pid, outcome: "killed" } });
+      expect(lifecycle(queue, run.run_id).find((e) => e.kind === "worker-kill")?.detail).toMatchObject({ worker: { pid: child.pid, outcome: "killed" } });
       expect(queue.lock(checkout)).toBeNull();
     } finally {
       try { process.kill(-child.pid!, "SIGKILL"); } catch { /* already gone */ }
@@ -684,7 +725,7 @@ describe("cancel races with the driver (AC4, AC5)", () => {
     expect(calls.map((c) => c[0])).toEqual(["status", "finish"]);
     expect(calls[1]).toEqual(expect.arrayContaining([sid, CANCELLED_REASON]));
     expect(fx.queue.lock(fx.checkout)).toBeNull();
-    expect(fx.queue.events(run.run_id).at(-1)).toMatchObject({ kind: "lock-released" });
+    expect(lifecycle(fx.queue, run.run_id).at(-1)).toMatchObject({ kind: "lock-released" });
     expect(fx.queue.get(run.run_id)).toMatchObject({ state: "cancelled", studio_run_id: null });
     expect(out).toMatchObject({ run_id: run.run_id, studio_run_id: sid, state: "running" });
     expect(out.reason).toContain("queue: RunTerminal");
@@ -719,8 +760,8 @@ describe("cancel races with the driver (AC4, AC5)", () => {
     failed.queue.markVerbStarted(other.run_id, "wake", [], { target: "skill", definition: { id: "studio-health", target: { skill: "tk-studio-activate" } } });
     const ended = await cancelRun(failed.queue, other.run_id, { verbRunner: async () => { throw new Error("jobrun unreachable"); } });
     expect(ended.state).toBe("cancelled");
-    expect(failed.queue.events(other.run_id).at(-1)!.detail).toMatchObject({ lookup: { ok: false, detail: expect.stringContaining("jobrun unreachable") } });
-    expect(failed.queue.events(other.run_id).at(-1)!.detail!.studio).toBeUndefined();
+    expect(lifecycle(failed.queue, other.run_id).at(-1)!.detail).toMatchObject({ lookup: { ok: false, detail: expect.stringContaining("jobrun unreachable") } });
+    expect(lifecycle(failed.queue, other.run_id).at(-1)!.detail!.studio).toBeUndefined();
   });
 
   test("a launch engine started after the first probe is found once the worker is dead: stopped, and handed the lock", async () => {
@@ -743,7 +784,7 @@ describe("cancel races with the driver (AC4, AC5)", () => {
     expect(killed).toBe(true);
     expect(stops).toEqual([[fx.checkout, "eng-late"]]);
     expect(fx.queue.lock(fx.checkout)).toMatchObject({ kind: "engine", engine_run_id: "eng-late" });
-    expect(fx.queue.events(run.run_id).at(-1)!.detail).toMatchObject({
+    expect(lifecycle(fx.queue, run.run_id).at(-1)!.detail).toMatchObject({
       engine: { handed_to_engine: "eng-late" }, engine_stop: { engine_run_id: "eng-late", ok: true }, worker: { pid: 8181, outcome: "killed" },
     });
   });
@@ -777,7 +818,8 @@ describe.skipIf(process.platform === "win32")("launchStopGraceful through runUv 
 });
 
 // The real submit path (registry `show` → `resolve` → enqueue) against a throwaway store.
-const canRunE2E = !!process.env.TK_STUDIO_ROOT && process.platform !== "win32" && spawnSync("uv", ["--version"]).status === 0;
+// win32 too (DW-5): the Windows host runs this suite (no fake binary is exec'd here).
+const canRunE2E = !!process.env.TK_STUDIO_ROOT && spawnSync("uv", ["--version"]).status === 0;
 
 describe.skipIf(!canRunE2E)("POST /jobs through the real submit path", () => {
   const store = mkdtempSync(join(tmpdir(), "tk-sup-api-store-"));
@@ -830,6 +872,23 @@ describe.skipIf(!canRunE2E)("POST /jobs through the real submit path", () => {
     expect(res.status).toBe(400);
     expect((await res.json() as Record<string, string>).error).toBe("TierRefused");
     expect(queue.runs()).toEqual([]);
+  }, 60_000);
+
+  test("Story 22.3: a flagged run with no TK_SUPERVISOR_WORK → 400 WorkDirMissing, nothing queued; with it → queued, flagged", async () => {
+    const prev = process.env.TK_SUPERVISOR_WORK;
+    try {
+      delete process.env.TK_SUPERVISOR_WORK;
+      const { queue, post } = real();
+      const res = await post({ project: projectId, job: "studio-health", editor_in_the_loop: true });
+      expect(res.status).toBe(400);
+      expect((await res.json() as Record<string, string>).error).toBe("WorkDirMissing");
+      expect(queue.runs()).toEqual([]);
+      process.env.TK_SUPERVISOR_WORK = mkdtempSync(join(tmpdir(), "tk-sup-api-work-"));
+      const ok = await post({ project: projectId, job: "studio-health", editor_in_the_loop: true });
+      expect(ok.status).toBe(200);
+      const body = await ok.json() as Record<string, any>;
+      expect(queue.get(body.run_id)).toMatchObject({ state: "queued", editor_in_the_loop: 1 });
+    } finally { if (prev === undefined) delete process.env.TK_SUPERVISOR_WORK; else process.env.TK_SUPERVISOR_WORK = prev; }
   }, 60_000);
 
   test("valid → queued with the run id and base_ref stored", async () => {

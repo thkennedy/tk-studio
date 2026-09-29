@@ -129,3 +129,19 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20260928-224136-6f1a; this entry preserves the lingering recommendation for a deliberate later review.
 status: open
+
+### DW-17: Every worker inherits TK_SUPERVISOR_TELEGRAM_TOKEN and TK_SUPERVISOR_NTFY_URL, because buildWorkerEnv strips only ANTHROPIC_API_KEY and TK_SUPERVISOR_TOKEN.
+origin: spec-deferred 6598af1afd4d
+source_spec: `22-3-the-supervisor-starts-itself-at-logon-the-supervisor-starts-itself-at-logon.md`
+location: src/server.ts:533
+severity: high
+reason: start.ps1 exports the notifier variables to the supervisor, and the workers the tick and drain spawn get buildWorkerEnv(process.env), where an agent can read them with `env`. Deferral class (c): a credential rule is at risk. The consult ruled the story's NFR5 list (logs, events, errors, API answers, start.ps1 output) does not name the worker env, and the fix file is outside the 11-file cap. Fix: add both variables to the delete list in buildWorkerEnv, with one assertion in its existing test.
+status: open
+
+### DW-18: Follow-up review still recommended for 22-3-the-supervisor-starts-itself-at-logon after the damping cap was spent
+origin: review-budget-followup
+source_spec: `22-3-the-supervisor-starts-itself-at-logon-the-supervisor-starts-itself-at-logon.md`
+location: n/a
+severity: low
+reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20260928-224136-6f1a; this entry preserves the lingering recommendation for a deliberate later review.
+status: open

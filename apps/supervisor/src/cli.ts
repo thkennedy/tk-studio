@@ -5,7 +5,7 @@
  *
  *   bun src/cli.ts run <job-id> --directory <root> [--permission-mode <mode>] [--tier host|sbx]
  *                  [--sandbox <name>] [--model <model>] [--effort <effort>]
- *   bun src/cli.ts submit <job-id> --directory <root> [same options as run]
+ *   bun src/cli.ts submit <job-id> --directory <root> [same options as run] [--editor-in-the-loop]
  *   bun src/cli.ts recover
  *   bun src/cli.ts drain
  *   bun src/cli.ts serve   (the HTTP API, src/api.ts — Story 22.1)
@@ -70,6 +70,13 @@
  * unreadable config, a job `resolve` refuses, a wake/submit refused outright,
  * answering without a run_id, or failing with no new run found); a queue run
  * already claimed is ended `blocked` with that error and named in the answer.
+ *
+ * Run hygiene (Story 22.3, src/hygiene.ts): `submit --editor-in-the-loop` flags the run (refused
+ * with WorkDirMissing, nothing queued, when TK_SUPERVISOR_WORK is unset); a flagged Godot run is
+ * snapshot after the claim and before `wake`/`submit` (a failed snapshot ends it `blocked`
+ * naming `snapshot failed: …`). After every end — in the driving process, after a cancel (that
+ * run only), and in `recover`/`drain` — the end sweep notifies (TK_SUPERVISOR_NOTIFY, validated at the start of
+ * `run`, `recover`, `drain` and `serve`: a named start error) and copies the host transcript.
  */
 import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
@@ -79,7 +86,8 @@ import {
   readProjectConfig, registryShow, requireCompatible, resolveStudioRoot, runJobVerb, runUv, SbxSandboxMissing, toVmPath, WORKER_RECORD_FAILED, type Tier,
 } from "./server";
 import { serve as serveApi } from "./api";
-import { pluginRoot } from "./env";
+import { notifier, pluginRoot, WorkDirMissing, workDir } from "./env";
+import { prUrl, snapshotOnce, sweepEnds, type HygieneDeps } from "./hygiene";
 import {
   checkoutKey, defaultProbes, isTerminal, LAUNCH_SKILL, ORPHANED_REASON, probeLaunchEngine, processStartTime, Queue, RunTerminal, selfOwner,
   type Holder, type LaunchEngine, type Owner, type QueueRun, type RecoverReport, type RunState, type StudioEnder, type StudioFinder, type StudioOps, type StudioResumer, type TerminalState,
@@ -166,6 +174,12 @@ function requireStudio(): void {
   catch (e) { throw new StartError(message(e)); }
 }
 
+/** Story 22.3: a selected notifier missing its variables (or an unknown one) is a named start error. */
+function requireNotifier(env: Record<string, string | undefined> = process.env): void {
+  try { notifier(env); }
+  catch (e) { throw new StartError(message(e)); }
+}
+
 type Target = "skill" | "core";
 type VerbRunner = (root: string, cliArgs: string[], timeoutS?: number) => Promise<Record<string, any>>;
 
@@ -223,6 +237,10 @@ export interface RunOptions {
   effort?: string;
   /** Story 22.1: the submission's `base_ref`, stored on the queue run it mints (no branch is cut). */
   baseRef?: string;
+  /** Story 22.3: the submission's editor-in-the-loop flag (stored on the queue run like `tier`). */
+  editorInTheLoop?: boolean;
+  /** Story 22.3: the end sweep's environment and HTTP client (tests inject them). */
+  hygiene?: HygieneDeps;
 }
 
 /** The worker options a run is driven with (Story 21.4). */
@@ -434,12 +452,16 @@ export async function driveResumes(
 /** `recover`: the restart rule over the whole queue; every resumable run is resumed. */
 export async function recoverQueue(opts: RunOptions = {}, verbRunner: VerbRunner = runJobVerb): Promise<RecoveryReport> {
   requireStudio();
+  requireNotifier(opts.hygiene?.env);
   const { queue, owned } = openQueue(opts);
   try {
     const { report, prepared } = await recoverWithResume(queue, opts.owner ?? selfOwner(), verbRunner);
     await driveResumes(queue, report.resumed, prepared, verbRunner);
     return report;
-  } finally { if (owned) queue.close(); }
+  } finally {
+    await sweepEnds(queue, opts.hygiene);
+    if (owned) queue.close();
+  }
 }
 
 export interface DrainReport {
@@ -458,6 +480,7 @@ export interface DrainReport {
  * mints; a run no longer ownerless-queued is skipped). */
 export async function drainQueue(opts: RunOptions = {}, verbRunner: VerbRunner = runJobVerb): Promise<DrainReport> {
   requireStudio();
+  requireNotifier(opts.hygiene?.env);
   const { queue, owned } = openQueue(opts);
   const owner = opts.owner ?? selfOwner();
   try {
@@ -494,7 +517,10 @@ export async function drainQueue(opts: RunOptions = {}, verbRunner: VerbRunner =
     const ok = runs.every((r) => "summary" in r && (r.summary.ok || r.summary.skipped === true))
       && recovered.resumed.every((r) => r.summary?.ok === true);
     return { ok, recovered, runs };
-  } finally { if (owned) queue.close(); }
+  } finally {
+    await sweepEnds(queue, opts.hygiene);
+    if (owned) queue.close();
+  }
 }
 
 /** `submit`: validate, then enqueue (idempotent). Nothing is driven. */
@@ -505,6 +531,8 @@ export async function submitJob(jobId: string, directory: string, opts: RunOptio
   try {
     let v: Validated, options: WorkerOptions;
     try {
+      // Story 22.3: a flagged run needs the work folder its snapshot lands in — refused, nothing queued.
+      if (opts.editorInTheLoop && !workDir(opts.hygiene?.env)) throw refusal(new WorkDirMissing().message);
       const root = resolve(directory);
       if (!existsSync(root)) throw refusal(`directory does not exist: ${directory}`);
       // Worker options resolved before any process (a host bypass is refused, nothing queued).
@@ -515,7 +543,7 @@ export async function submitJob(jobId: string, directory: string, opts: RunOptio
     const { run, minted } = queue.enqueue({
       jobId, root: v.root, projectId: v.projectId, target: v.target, definition: v.defn,
       permissionMode: opts.permissionMode, tier: options.tier, sandbox: options.sandbox, model: options.model, effort: options.effort,
-      base_ref: opts.baseRef,
+      base_ref: opts.baseRef, ...(opts.editorInTheLoop ? { editorInTheLoop: true } : {}),
     });
     return { ok: true, job_id: jobId, project_id: v.projectId, run_id: run.run_id, state: run.state, minted };
   } finally { if (owned) queue.close(); }
@@ -572,7 +600,17 @@ export const CANCELLED_REASON = "cancelled: operator request";
  * `RunTerminal` on a run already ended (`CancelRaced`, carrying the side effects already
  * done, when it ended during the cancel), and an Error on an unknown run. */
 export async function cancelRun(
-  queue: Queue, runId: string, deps: { verbRunner?: VerbRunner; launchStop?: LaunchStopper } = {},
+  queue: Queue, runId: string, deps: { verbRunner?: VerbRunner; launchStop?: LaunchStopper; hygiene?: HygieneDeps } = {},
+): Promise<QueueRun> {
+  // Story 22.3: once the cancel is done, the end sweep covers this run only (its cancelled end, or a
+  // raced driver's end of it), so the answer never waits on other runs' ends: those stay with their
+  // driver, `recover` and `drain`. An unknown run id sweeps nothing.
+  try { return await cancelQueueRun(queue, runId, deps); }
+  finally { await sweepEnds(queue, deps.hygiene, [runId]); }
+}
+
+async function cancelQueueRun(
+  queue: Queue, runId: string, deps: { verbRunner?: VerbRunner; launchStop?: LaunchStopper },
 ): Promise<QueueRun> {
   const run = queue.get(runId);
   if (!run) throw new Error(`queue run '${runId}' not found`);
@@ -658,6 +696,7 @@ export class CancelRaced extends RunTerminal {
 
 export async function runJob(jobId: string, directory: string, permissionMode?: string, opts: RunOptions = {}): Promise<RunSummary> {
   requireStudio(); // StudioRootMissing (AD-15), the contract pin
+  requireNotifier(opts.hygiene?.env); // Story 22.3: a misconfigured notifier is a named start error
   const { queue, owned } = openQueue(opts);
   const owner = opts.owner ?? selfOwner();
   let resuming: Promise<void> = Promise.resolve();
@@ -720,6 +759,8 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
       // The effective options: explicit, else recorded on the run, else the config, else the
       // default — re-checked after the claim (an invalid stored value ends the run `blocked`).
       const eff = resolveWorkerOptions(explicit, storedLayer(claim.run), config, v.root);
+      // Story 22.3: a flagged Godot run is snapshot before the minting verb, once per queue run.
+      await snapshotOnce(queue, claim.run, v.projectId, v.root, { env: opts.hygiene?.env });
       summary = await drive(queue, run.run_id, { ...v, ...eff });
     }
     catch (e) {
@@ -731,6 +772,7 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
     return await mirror(queue, run.run_id, v, summary);
   } finally {
     await resuming;
+    await sweepEnds(queue, opts.hygiene); // Story 22.3: every end this process drove (resumes included)
     if (owned) queue.close();
   }
 }
@@ -817,7 +859,12 @@ export async function mirror(
     // The studio's own state (`studio_state`) is what it holds, and what its `evaluate_stop` sees.
     const studioState = s.studio_state ?? s.state;
     const studioOutcome = terminal && studioRunId && isTerminal(studioState) ? { run_id: studioRunId, state: studioState } : undefined;
-    const detail = { ...(s.guards_tripped?.length ? { guards_tripped: s.guards_tripped } : {}), ...(studioOutcome ? { studio_outcome: studioOutcome } : {}) };
+    // Story 22.3: the PR the run opened (a GitHub pull-request URL in the status block's `artifacts[]`), for its notification.
+    const pr = prUrl(s.status_block);
+    const detail = {
+      ...(s.guards_tripped?.length ? { guards_tripped: s.guards_tripped } : {}), ...(studioOutcome ? { studio_outcome: studioOutcome } : {}),
+      ...(pr ? { pr } : {}),
+    };
     // AC4: a studio outcome in `stop.on_status` stops the job recurring — the
     // `stopped` event is written in the same transaction as `ended`.
     const onStatus = v.defn?.stop?.on_status;
@@ -1544,7 +1591,7 @@ export async function finishRun(
 const USAGE = [
   "usage: bun src/cli.ts run <job-id> --directory <root> [--permission-mode <mode>] [--tier host|sbx] [--sandbox <name>]",
   "                          [--model <model>] [--effort <effort>]",
-  "       bun src/cli.ts submit <job-id> --directory <root> [same options as run]",
+  "       bun src/cli.ts submit <job-id> --directory <root> [same options as run] [--editor-in-the-loop]",
   "       bun src/cli.ts recover",
   "       bun src/cli.ts drain",
   "       bun src/cli.ts serve   (the HTTP API on TK_SUPERVISOR_BIND:TK_SUPERVISOR_PORT, bearer TK_SUPERVISOR_TOKEN)",
@@ -1583,8 +1630,11 @@ export async function main(argv: string[]): Promise<number> {
   const [jobId, ...rest] = args;
   const allowed = ["--directory", "--permission-mode", "--tier", "--sandbox", "--model", "--effort"];
   const values: Record<string, string> = {};
+  let editorInTheLoop = false;
   for (let i = 0; i < rest.length; i++) {
     const flag = rest[i];
+    // Story 22.3: a flag with no value, on `submit` only.
+    if (flag === "--editor-in-the-loop" && cmd === "submit") { editorInTheLoop = true; continue; }
     if (!allowed.includes(flag)) { console.error(`unknown argument '${flag}'\n${USAGE}`); return 2; }
     const value = rest[++i];
     if (value === undefined || value.trim() === "" || value.startsWith("--")) { console.error(`${flag} needs a value\n${USAGE}`); return 2; }
@@ -1595,7 +1645,7 @@ export async function main(argv: string[]): Promise<number> {
   if ((cmd !== "run" && cmd !== "submit") || !jobId || !directory) { console.error(USAGE); return 2; }
   try {
     if (cmd === "submit") {
-      console.log(JSON.stringify(await submitJob(jobId, directory, { ...worker, permissionMode }), null, 2));
+      console.log(JSON.stringify(await submitJob(jobId, directory, { ...worker, permissionMode, ...(editorInTheLoop ? { editorInTheLoop } : {}) }), null, 2));
       return 0;
     }
     const summary = await runJob(jobId, directory, permissionMode, worker);
