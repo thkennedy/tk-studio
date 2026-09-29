@@ -83,6 +83,14 @@ describe("worker command line", () => {
     expect(env).toEqual({ TK_STUDIO_HOME: "z" });
   });
 
+  test("worker env never carries the notifier's credentials (DW-17); the notifier's choice and the chat id pass through", () => {
+    const env = buildWorkerEnv({
+      TK_SUPERVISOR_TELEGRAM_TOKEN: "bot-token", TK_SUPERVISOR_NTFY_URL: "https://ntfy.example/secret-topic",
+      TK_SUPERVISOR_NOTIFY: "telegram", TK_SUPERVISOR_TELEGRAM_CHAT: "42", TK_STUDIO_HOME: "z",
+    });
+    expect(env).toEqual({ TK_SUPERVISOR_NOTIFY: "telegram", TK_SUPERVISOR_TELEGRAM_CHAT: "42", TK_STUDIO_HOME: "z" });
+  });
+
   test("missing TK_STUDIO_ROOT is the named StudioRootMissing", () => {
     expect(() => studioRoot({})).toThrow(StudioRootMissing);
   });
