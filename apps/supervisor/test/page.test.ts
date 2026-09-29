@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, sep } from "node:path";
 import { createApi } from "../src/api";
 import { studioHome } from "../src/env";
 import { credentialKey, holderOf, redactCredentials, tailLines } from "../src/page";
@@ -534,7 +534,8 @@ describe("follow-up review patches", () => {
     expect(section).toContain("registry show failed: registry show emitted no JSON (exit 1)");
     expect(section).toContain("~/.tk-studio/registry.yaml");
     expect(section).toContain("&lt;studio&gt;/plugins/tk-studio/lib/registry.py");
-    expect(section).toContain("cache ~/planted-home-file");
+    // The home prefix becomes `~`; the rest of the path keeps its own separator (`\` on win32).
+    expect(section).toContain(`cache ~${sep}planted-home-file`);
     for (const abs of [fx.store, fx.store.replace(/\//g, "\\"), studio, home, homedir() + "/"]) expect(body).not.toContain(abs);
   });
 

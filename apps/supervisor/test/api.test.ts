@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -8,6 +8,7 @@ import { CancelRaced, cancelRun, CANCELLED_REASON, launchStopGraceful, mirror, q
 import { ApiBindMissing, ApiPortInvalid, ApiTokenMissing, apiBind, apiPort, apiToken } from "../src/env";
 import { END_HYGIENE_EVENTS } from "../src/hygiene";
 import { type QueueEvent, Queue, RunTerminal, type EngineProbe, type Owner, type Probes, type QueueRun, type WorkerKill } from "../src/queue";
+import { fakeBin } from "./fakes";
 
 const REPO = resolve(import.meta.dir, "..");
 
@@ -791,13 +792,17 @@ describe("cancel races with the driver (AC4, AC5)", () => {
 });
 
 // The real `launchStopGraceful` against a fake `uv` on PATH: the argv it sends and how it reads the answer.
-describe.skipIf(process.platform === "win32")("launchStopGraceful through runUv (AC4)", () => {
+// win32 too (DW-5): the fake is a bun script behind `fakeBin` (`uv.exe` there).
+describe("launchStopGraceful through runUv (AC4)", () => {
   test("stop --directory <root> --run-id <id> --graceful on lib/launch.py; ok, refused, no JSON", async () => {
     const bin = mkdtempSync(join(tmpdir(), "tk-sup-api-uv-"));
     const studio = mkdtempSync(join(tmpdir(), "tk-sup-api-studio-"));
     const root = mkdtempSync(join(tmpdir(), "tk-sup-api-root-"));
-    writeFileSync(join(bin, "uv"), `#!/bin/sh\nprintf '%s\\n' "$@" > "${join(bin, "argv")}"\ncat "${join(bin, "out")}"\n`);
-    chmodSync(join(bin, "uv"), 0o755);
+    // One argument per line into `argv`, then the canned answer from `out`.
+    fakeBin(join(bin, "uv"), `const fs = require("node:fs");
+fs.writeFileSync(${JSON.stringify(join(bin, "argv"))}, process.argv.slice(2).map((a) => a + "\\n").join(""));
+process.stdout.write(fs.readFileSync(${JSON.stringify(join(bin, "out"))}, "utf-8"));
+`);
     const prev = { path: process.env.PATH, root: process.env.TK_STUDIO_ROOT };
     process.env.PATH = `${bin}${delimiter}${prev.path ?? ""}`;
     process.env.TK_STUDIO_ROOT = studio;

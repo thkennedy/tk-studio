@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -10,8 +10,9 @@ import { claudeBin, studioRoot, StudioRootMissing } from "../src/env";
 import { END_HYGIENE_EVENTS } from "../src/hygiene";
 import { type QueueEvent, Queue } from "../src/queue";
 import {
-  buildWorkerCommand, buildWorkerEnv, CONTINUATION_PROMPT, HostBypassRefused, invokeSkill, MISSING_STATUS_BLOCK, type Spawner,
+  buildWorkerCommand, buildWorkerEnv, CONTINUATION_PROMPT, HostBypassRefused, invokeSkill, MISSING_STATUS_BLOCK, type Spawner, toVmPath,
 } from "../src/server";
+import { fakeBin } from "./fakes";
 
 const REPO = resolve(import.meta.dir, "..");
 
@@ -328,19 +329,8 @@ describe("finishRun: model/effort per §5, tier forwarded, cost to finish (AC3/A
 // Real studio verbs (uv + TK_STUDIO_ROOT) against a throwaway store and
 // project; only the worker is faked (CLAUDE_BIN printing a json result).
 
-// win32 too (DW-5, DW-10): the fakes are exec'd through `fakeBin`'s shim there.
+// win32 too (DW-5, DW-10): the fakes are real executables there (`fakeBin`).
 const canRunE2E = !!process.env.TK_STUDIO_ROOT && spawnSync("uv", ["--version"]).status === 0;
-
-/** A fake executable from a bun script at `path`. POSIX: the shebang file itself, made
- * executable. win32 (which cannot exec a shebang script): a `.cmd` shim beside it that runs
- * `bun <script> %*` — test-side only, the production spawn path is unchanged. Answers the path to exec. */
-function fakeBin(path: string, script: string, platform: NodeJS.Platform = process.platform): string {
-  writeFileSync(path, `#!/usr/bin/env bun\n${script}`);
-  if (platform !== "win32") { chmodSync(path, 0o755); return path; }
-  const shim = `${path.replace(/\.js$/, "")}.cmd`;
-  writeFileSync(shim, `@echo off\r\n"${process.execPath}" "${path}" %*\r\n`);
-  return shim;
-}
 
 function e2eFixture(workerResult: string, loggedIn = true, opts: { selfFinish?: boolean; env?: Record<string, string> } = {}) {
   const store = mkdtempSync(join(tmpdir(), "tk-sup-e2e-store-"));
@@ -365,7 +355,7 @@ if (args[0] === "auth") {
     const count = authKill + ".count";
     const n = (fs.existsSync(count) ? Number(fs.readFileSync(count, "utf-8")) : 0) + 1;
     fs.writeFileSync(count, String(n));
-    if (n === 2) { fs.writeFileSync(authKill, String(process.pid)); process.kill(process.ppid, "SIGKILL"); process.exit(1); }
+    if (n === 2) { fs.writeFileSync(authKill, String(process.pid)); process.kill(Number(process.env.FAKE_PARENT_PID ?? process.ppid), "SIGKILL"); process.exit(1); }
   }
   console.log(JSON.stringify({ loggedIn: ${loggedIn}, authMethod: "claude.ai" })); process.exit(0);
 }
@@ -390,8 +380,21 @@ fs.appendFileSync(require("node:path").join(tdir, sessionId + ".jsonl"),
 // that spawned it, by pid — then keeps working (bounded: 30 s) until the restarted supervisor kills it.
 const killMarker = process.env.FAKE_CLAUDE_KILL_PARENT_ONCE;
 if (killMarker && !resumed && !fs.existsSync(killMarker)) {
+  // Mid-invoke means the worker is recorded. On win32 the record follows a PowerShell start-time read
+  // (about half a second), so wait for it (bounded) before killing the supervisor.
+  const { Database } = require("bun:sqlite");
+  for (const until = Date.now() + 15_000; Date.now() < until;) {
+    let recorded = false;
+    try {
+      const db = new Database(process.env.FAKE_QUEUE_DB, { readonly: true });
+      recorded = !!db.query("SELECT 1 FROM runs WHERE state = 'running' AND worker_pid IS NOT NULL").get();
+      db.close();
+    } catch { /* the queue file is busy or not there yet */ }
+    if (recorded) break;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  }
   fs.writeFileSync(killMarker, String(process.pid));
-  process.kill(process.ppid, "SIGKILL");
+  process.kill(Number(process.env.FAKE_PARENT_PID ?? process.ppid), "SIGKILL");
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30_000);
   process.exit(0);
 }
@@ -409,12 +412,14 @@ const env = { ...process.env };
 let i = at + 1, cwd;
 while (args[i] === "-u" || args[i] === "-C") { if (args[i] === "-u") delete env[args[i + 1]]; else cwd = args[i + 1]; i += 2; }
 if (args[i] !== "claude") process.exit(98);
+// The -C folder is a VM path (/c/...). This fake runs on the host: on win32 that folder is C:/...
+if (process.platform === "win32" && cwd && cwd[0] === "/" && cwd[2] === "/") cwd = cwd[1].toUpperCase() + ":" + cwd.slice(2);
 const r = require("node:child_process").spawnSync(process.execPath, [${JSON.stringify(fakeScript)}, ...args.slice(i + 1)], { env, cwd, stdio: "inherit" });
 process.exit(r.status ?? 1);
 `);
-  const extraEnv = { SBX_BIN: fakeSbx, CLAUDE_CONFIG_DIR: join(store, "claude-config"), ...(opts.env ?? {}) };
   // The queue lives outside every repo and outside the store.
   const queueDb = join(mkdtempSync(join(tmpdir(), "tk-sup-e2e-queue-")), "queue.db");
+  const extraEnv = { SBX_BIN: fakeSbx, CLAUDE_CONFIG_DIR: join(store, "claude-config"), FAKE_QUEUE_DB: queueDb, ...(opts.env ?? {}) };
   const cli = (verb: string, jobId: string, dir: string, extra: string[] = []) => spawnSync("bun", [join(REPO, "src", "cli.ts"), verb, jobId, "--directory", dir, ...extra], {
     env: { ...process.env, TK_STUDIO_HOME: store, TK_SUPERVISOR_DB: queueDb, CLAUDE_BIN: fake, ANTHROPIC_API_KEY: "sk-test-parent", ...extraEnv }, encoding: "utf-8", timeout: 120_000,
   });
@@ -754,7 +759,7 @@ describe.skipIf(!canRunE2E)("tick: start-of-tick recovery", () => {
       `UPDATE runs SET state = 'running', owner_pid = ?, owner_host = ?, owner_nonce = ?, verb_started = ?, verb_snapshot = '[]',
          studio_run_id = ? WHERE run_id = ?`, [dead.pid, dead.host, dead.nonce, new Date().toISOString(), minted.run_id, queued.run_id]));
     const tick = (extra: string[]) => spawnSync("bun", [join(REPO, "src", "tick.ts"), "--directory", fx.project, ...extra], {
-      env: { ...process.env, TK_STUDIO_HOME: fx.store, TK_SUPERVISOR_DB: fx.queueDb, CLAUDE_BIN: join(fx.store, "fake-claude.js") },
+      env: { ...process.env, TK_STUDIO_HOME: fx.store, TK_SUPERVISOR_DB: fx.queueDb, CLAUDE_BIN: fx.fake },
       encoding: "utf-8", timeout: 120_000,
     });
 
@@ -880,9 +885,12 @@ describe.skipIf(!canRunE2E)("CLI end to end: restart recovery and drain", () => 
   test("`drain`: a transport failure during re-validation (uv unavailable) leaves the run queued", () => {
     const fx = e2eFixture("unused");
     const queued = JSON.parse(fx.submit().stdout);
-    const res = spawnSync("bun", [join(REPO, "src", "cli.ts"), "drain"], {
-      env: { ...process.env, PATH: dirname(process.execPath), TK_STUDIO_HOME: fx.store, TK_SUPERVISOR_DB: fx.queueDb,
-        CLAUDE_BIN: join(fx.store, "fake-claude.js") }, encoding: "utf-8", timeout: 120_000,
+    // A PATH where `uv` resolves nowhere. POSIX: bun's own folder, which the fake worker's shebang needs.
+    // win32: an empty folder, because bun's folder may hold `uv` too (WinGet's Links does) and the fake is an .exe.
+    const noUv = process.platform === "win32" ? mkdtempSync(join(tmpdir(), "tk-sup-e2e-nopath-")) : dirname(process.execPath);
+    const res = spawnSync(process.execPath, [join(REPO, "src", "cli.ts"), "drain"], {
+      env: { ...process.env, PATH: noUv, TK_STUDIO_HOME: fx.store, TK_SUPERVISOR_DB: fx.queueDb,
+        CLAUDE_BIN: fx.fake }, encoding: "utf-8", timeout: 120_000,
     });
     expect(res.status).toBe(1);
     const entry = JSON.parse(res.stdout).runs[0];
@@ -1034,7 +1042,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: restart recovery and drain", () => 
     const q = new Queue(fx.queueDb, { ownerAlive: () => true, engineLive: async (root, id) => { probed.push([root, id]); return { live: true, run_ids: ["E9"] }; } });
     const prev = { home: process.env.TK_STUDIO_HOME, bin: process.env.CLAUDE_BIN, cfg: process.env.CLAUDE_CONFIG_DIR };
     process.env.TK_STUDIO_HOME = fx.store;
-    process.env.CLAUDE_BIN = join(fx.store, "fake-claude.js");
+    process.env.CLAUDE_BIN = fx.fake;
     process.env.CLAUDE_CONFIG_DIR = join(fx.store, "claude-config"); // the fake worker's transcript (max_turns → account)
     try {
       const summary = await runJob("launch-probe", fx.project, undefined, { queue: q });
@@ -1104,7 +1112,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: worker tiers (Story 21.4)", () => {
     const probe = sbx.find((c) => c.args.includes("auth"))!;
     expect(probe.args).toEqual(["exec", "claude-p", "env", "-u", "ANTHROPIC_API_KEY", "claude", "auth", "status", "--json"]);
     const worker = sbx.find((c) => c.args.includes("-p"))!;
-    expect(worker.args.slice(0, 13)).toEqual(["exec", "claude-p", "timeout", "-k", "10", "600", "env", "-u", "ANTHROPIC_API_KEY", "-C", fx.project, "claude", "-p"]);
+    expect(worker.args.slice(0, 13)).toEqual(["exec", "claude-p", "timeout", "-k", "10", "600", "env", "-u", "ANTHROPIC_API_KEY", "-C", toVmPath(fx.project), "claude", "-p"]); // the VM path: `/c/...` for a win32 host root
     expect(worker.args[13]).toStartWith("/tk-studio:tk-studio-activate ");
     expect(flagValue(worker.args, "--permission-mode")).toBe("bypassPermissions");
     expect(flagValue(worker.args, "--model")).toBe("m-over");
@@ -1120,7 +1128,8 @@ describe.skipIf(!canRunE2E)("CLI end to end: worker tiers (Story 21.4)", () => {
   test("sbx VM cwd comes from the registry entry root, not the `--directory` spelling (a symlink samePath accepts)", () => {
     const fx = e2eFixture(BLOCK_OK);
     const spelled = join(mkdtempSync(join(tmpdir(), "tk-sup-e2e-spelled-")), basename(fx.project)); // same basename: the same project id
-    symlinkSync(fx.project, spelled, "dir");
+    try { symlinkSync(fx.project, spelled, "dir"); }
+    catch { console.warn("symlink unavailable on this platform — skipping the caller-spelling case"); return; }
     const res = fx.run("studio-health", spelled, ["--tier", "sbx", "--sandbox", "claude-p", "--permission-mode", "bypassPermissions"]);
     expect(res.status).toBe(0);
     expect(JSON.parse(res.stdout)).toMatchObject({ ok: true, state: "complete" });
@@ -1216,6 +1225,9 @@ describe.skipIf(!canRunE2E)("CLI end to end: worker tiers (Story 21.4)", () => {
 // a fake `uv` in front of the real one (after `submit` answers; instead of `finish`) or the fake worker
 // (mid-invoke). Never by name pattern; every child is bounded by a timeout.
 
+/** How `spawnSync` reports a process killed with SIGKILL: the signal on POSIX; on win32 (TerminateProcess) exit code 1, no signal. */
+const KILLED = process.platform === "win32" ? 1 : "SIGKILL";
+
 describe.skipIf(!canRunE2E)("CLI end to end: a killed run resumes or ends partial, never lost (AC4)", () => {
   const BLOCK_TEXT = `Resumed and done.\n{"status":"complete","intent":"tk-studio-activate","artifacts":[]}`;
   /** A fake `uv` on PATH: runs the real uv, and once (a marker file) kills its parent supervisor at `at`. */
@@ -1227,7 +1239,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: a killed run resumes or ends partia
     fakeBin(join(dir, "uv"), `const fs = require("node:fs");
 const args = process.argv.slice(2);
 const once = args[0] === "run" && String(args[1]).endsWith("jobrun.py") && args[2] === ${JSON.stringify(at)} && !fs.existsSync(${JSON.stringify(marker)});
-const kill = () => { fs.writeFileSync(${JSON.stringify(marker)}, "1"); process.kill(process.ppid, "SIGKILL"); process.exit(1); };
+const kill = () => { fs.writeFileSync(${JSON.stringify(marker)}, "1"); process.kill(Number(process.env.FAKE_PARENT_PID ?? process.ppid), "SIGKILL"); process.exit(1); };
 if (once && ${JSON.stringify(at)} === "finish") kill(); // before finish: the verb never runs
 const r = require("node:child_process").spawnSync(${JSON.stringify(realUv)}, args, { stdio: once ? ["inherit", "ignore", "inherit"] : "inherit", timeout: 120_000 });
 if (once) kill(); // after the verb answered, before the supervisor reads it
@@ -1242,7 +1254,7 @@ process.exit(r.status ?? 1);
     const uv = killingUv("submit");
     const fx = e2eFixture(BLOCK_TEXT, true, { env: uv.env });
     const res = fx.run();
-    expect(res.signal ?? res.status).toBe("SIGKILL");
+    expect(res.signal ?? res.status).toBe(KILLED);
     expect(existsSync(uv.marker)).toBe(true);
     const dead = onlyRun(fx);
     expect(dead).toMatchObject({ state: "running", studio_run_id: null, session_id: null });
@@ -1266,7 +1278,7 @@ process.exit(r.status ?? 1);
     const marker = join(tmpdir(), `tk-sup-authkill-${process.pid}-${Date.now()}`);
     const fx = e2eFixture(BLOCK_TEXT, true, { env: { FAKE_CLAUDE_KILL_PARENT_ON_INVOKE_AUTH: marker } });
     const res = fx.run();
-    expect(res.signal ?? res.status).toBe("SIGKILL");
+    expect(res.signal ?? res.status).toBe(KILLED);
     expect(existsSync(marker)).toBe(true);
     const dead = onlyRun(fx);
     expect(dead).toMatchObject({ state: "running", session_id: null, worker_pid: null });
@@ -1291,7 +1303,7 @@ process.exit(r.status ?? 1);
     const blocked = `Could not finish.\n{"status":"blocked","intent":"tk-studio-activate","artifacts":[],"reason":"gap named"}`;
     const fx = e2eFixture(blocked, true, { env: { FAKE_CLAUDE_KILL_PARENT_ONCE: join(tmpdir(), `tk-sup-kill-drain-${process.pid}-${Date.now()}`) } });
     const res = fx.run();
-    expect(res.signal ?? res.status).toBe("SIGKILL");
+    expect(res.signal ?? res.status).toBe(KILLED);
     const dead = onlyRun(fx);
     const drained = fx.bare("drain");
     const out = JSON.parse(drained.stdout);
@@ -1305,26 +1317,28 @@ process.exit(r.status ?? 1);
   test("mid-invoke (the worker still running) → `recover` kills the recorded worker, then resumes it with --resume <session-id>; its block is finished", async () => {
     const fx = e2eFixture(BLOCK_TEXT, true, { env: { FAKE_CLAUDE_KILL_PARENT_ONCE: join(tmpdir(), `tk-sup-kill-${process.pid}-${Date.now()}`) } });
     const res = fx.run();
-    expect(res.signal ?? res.status).toBe("SIGKILL");
+    expect(res.signal ?? res.status).toBe(KILLED);
     const dead = onlyRun(fx);
     expect(dead.state).toBe("running");
     expect(dead.session_id).toMatch(/^[0-9a-f-]{36}$/);
     expect(dead.worker_pid).toBeGreaterThan(0);
     const worker = dead.worker_pid!;
-    process.kill(worker, 0); // the detached worker outlived its supervisor
+    // POSIX: the detached worker outlived its supervisor. win32: the worker is never detached (21-4 AC1), and
+    // the job object it is spawned in ends it with its supervisor, so the restart finds no worker to kill.
+    if (process.platform !== "win32") process.kill(worker, 0);
 
     const rec = fx.bare("recover");
     expect(rec.status).toBe(0);
     const out = JSON.parse(rec.stdout);
     expect(out.ended).toEqual([]);
     expect(out.resumed).toMatchObject([{ run_id: dead.run_id, resume: 1, summary: { ok: true, state: "complete", run_id: dead.run_id } }]);
-    // The old worker was killed (pid + start time matched) before the takeover.
+    // The old worker was killed (pid + start time matched) before the takeover; on win32 it was already gone.
     let gone = false;
     try { process.kill(worker, 0); gone = readFileSync(`/proc/${worker}/stat`, "utf-8").split(") ")[1]?.[0] === "Z"; } catch { gone = true; }
     expect(gone).toBe(true);
     const evs = events(fx, dead.run_id);
     const resumed = evs.find((e) => e.kind === "resumed")!;
-    expect(resumed.detail).toMatchObject({ resume: 1, session_id: dead.session_id, worker: { pid: worker, outcome: "killed" } });
+    expect(resumed.detail).toMatchObject({ resume: 1, session_id: dead.session_id, worker: { pid: worker, outcome: process.platform === "win32" ? "not running" : "killed" } });
     // The interrupted iteration is accounted after the takeover, then the resumed one.
     expect(evs.filter((e) => e.kind === "accounted").map((e) => (e.detail as any).message_ids))
       .toEqual([["msg-1"], [expect.stringMatching(/^msg-resume-/)]]);
@@ -1344,7 +1358,7 @@ process.exit(r.status ?? 1);
     const uv = killingUv("finish");
     const fx = e2eFixture(BLOCK_TEXT, true, { env: uv.env });
     const res = fx.run();
-    expect(res.signal ?? res.status).toBe("SIGKILL");
+    expect(res.signal ?? res.status).toBe(KILLED);
     const dead = onlyRun(fx);
     expect(dead).toMatchObject({ state: "running" });
     expect(events(fx, dead.run_id).filter((e) => e.kind === "accounted")).toHaveLength(1); // accounted before the kill
@@ -1375,17 +1389,18 @@ describe("the fake-bin helper (DW-5: win32-runnable fakes)", () => {
     expect(JSON.parse(res.stdout)).toEqual([]);
   });
 
-  test("POSIX: the shebang script itself, executable; win32: a .cmd shim running `bun <script> %*`", () => {
+  test("POSIX: the shebang script itself, executable; win32: an .exe beside the script that runs it, arguments and exit code kept", () => {
     const dir = mkdtempSync(join(tmpdir(), "tk-sup-fakebin-"));
-    const posix = fakeBin(join(dir, "fake-a.js"), "console.log(1);", "linux");
-    expect(posix).toBe(join(dir, "fake-a.js"));
-    expect(readFileSync(posix, "utf-8")).toStartWith("#!/usr/bin/env bun\n");
-    if (process.platform !== "win32") expect(spawnSync(posix, [], { encoding: "utf-8" }).stdout.trim()).toBe("1");
-    const shim = fakeBin(join(dir, "fake-b.js"), "console.log(2);", "win32");
-    expect(shim).toBe(join(dir, "fake-b.cmd"));
-    expect(readFileSync(shim, "utf-8")).toBe(`@echo off\r\n"${process.execPath}" "${join(dir, "fake-b.js")}" %*\r\n`);
-    expect(fakeBin(join(dir, "uv"), "", "win32")).toBe(join(dir, "uv.cmd"));
-  });
+    const fake = fakeBin(join(dir, "fake-a.js"), `console.log(JSON.stringify(process.argv.slice(2))); process.exit(7);`);
+    expect(fake).toBe(join(dir, process.platform === "win32" ? "fake-a.exe" : "fake-a.js"));
+    expect(readFileSync(join(dir, "fake-a.js"), "utf-8")).toStartWith("#!/usr/bin/env bun\n");
+    const res = spawnSync(fake, ["a b", "c"], { encoding: "utf-8" }); // no shell, like the production spawn
+    expect(res.error).toBeUndefined();
+    expect(JSON.parse(res.stdout)).toEqual(["a b", "c"]);
+    expect(res.status).toBe(7);
+    // A bare name (a fake `uv` on PATH): `uv.exe` on win32, `uv` elsewhere.
+    expect(fakeBin(join(dir, "uv"), "")).toBe(join(dir, process.platform === "win32" ? "uv.exe" : "uv"));
+  }, 120_000);
 
   test("--editor-in-the-loop is a `submit` flag only: on `run` it is an unknown argument (exit 2)", async () => {
     const err = console.error;
