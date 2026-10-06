@@ -49,7 +49,7 @@ The supervisor is never started from a Claude desktop-app session. Checks that n
 
 ## 6. The notifier (decided 2026-10-06)
 
-Both notifiers are configured in the User environment and `TK_SUPERVISOR_NOTIFY=telegram` is the default. Telegram uses the same bot as Hermes: the setup script (`C:gent-work	ools\set-supervisor-env.ps1`) reads the token and the home chat from Hermes' own `.env`, so nothing is copied by hand and a reply to a run's message reaches Hermes. ntfy stays one variable away (`TK_SUPERVISOR_NOTIFY=ntfy`; the topic in `TK_SUPERVISOR_NTFY_URL` is the secret).
+Both notifiers are configured in the User environment and `TK_SUPERVISOR_NOTIFY=telegram` is the default. Telegram uses the same bot as Hermes: the setup script (`C:\agent-work\tools\set-supervisor-env.ps1`) reads the token and the home chat from Hermes' own `.env`, so nothing is copied by hand and a reply to a run's message reaches Hermes. ntfy stays one variable away (`TK_SUPERVISOR_NOTIFY=ntfy`; the topic in `TK_SUPERVISOR_NTFY_URL` is the secret).
 
 ## 7. DW-20: the page signs you in (decided 2026-10-06)
 
