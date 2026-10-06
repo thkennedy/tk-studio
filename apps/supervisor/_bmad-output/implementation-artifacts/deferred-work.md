@@ -162,4 +162,4 @@ location: src/api.ts (the bearer check in front of every route); src/page.ts; RE
 severity: medium
 reason: Story 22.2 asks for a page that "reads well at phone width", served "behind the same auth as the API". The page is behind the bearer header, and a browser's address bar cannot send one, so the operator cannot open it on the phone without a client that sets headers. The criteria are met as written, and the epic's success signal ("watch it on the status page" from the phone) is not. The fix is a product decision for the operator, not a patch: for example HTTP Basic with the token as the password, which a browser prompts for, or a login form that sets a session cookie. Either one changes how the token travels.
 affects: none
-status: open — needs the operator's decision
+status: decided 2026-10-06 — Tim chose a login form that sets an HttpOnly session cookie, with Google and GitHub sign-in as well as the token. Tracked as tk-studio Story 22.5 ("Sign in from the phone"); constraints in `_bmad-output/specs/spec-epic-22/operator-decisions.md` §7. Still open until that story lands.

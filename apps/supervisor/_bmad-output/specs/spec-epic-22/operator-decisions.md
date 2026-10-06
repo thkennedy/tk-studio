@@ -46,3 +46,17 @@ The dev session lists them under `unverifiable-here` in the story's Auto Run Res
 - the win32 end-to-end suites
 
 The supervisor is never started from a Claude desktop-app session. Checks that need it running are the operator's, from the console.
+
+## 6. The notifier (decided 2026-10-06)
+
+Both notifiers are configured in the User environment and `TK_SUPERVISOR_NOTIFY=telegram` is the default. Telegram uses the same bot as Hermes: the setup script (`C:\agent-work\tools\set-supervisor-env.ps1`) reads the token and the home chat from Hermes' own `.env`, so nothing is copied by hand and a reply to a run's message reaches Hermes. ntfy stays one variable away (`TK_SUPERVISOR_NOTIFY=ntfy`; the topic in `TK_SUPERVISOR_NTFY_URL` is the secret).
+
+## 7. DW-20: the page signs you in (decided 2026-10-06)
+
+Tim confirmed sections 1 to 5 as built on 2026-10-06 and decided DW-20: **a login form that sets an HttpOnly session cookie, with Google and GitHub sign-in as well as the token.** It is tk-studio Story 22.5. Constraints the story inherits:
+
+- **HTTPS is required.** Google refuses `http://` redirect URIs on anything but localhost. The page therefore needs a certificate: Tailscale HTTPS (`tailscale cert`) on the MagicDNS name, which the operator enables once in the Tailscale admin console (`CertDomains` was empty on 2026-10-06). GitHub accepts `http://` but gets the same `https://` URL.
+- **The operator registers the two OAuth apps** (Google Cloud console, GitHub developer settings) and sets their client ids and secrets in the User environment under names the story fixes (`TK_SUPERVISOR_OAUTH_*`). Only allow-listed identities sign in: his Google account and his GitHub login, named in the environment, never a wildcard.
+- **The bearer header keeps working** for `curl` and every API route. The cookie authorises the browser only. Once a cookie can authorise `POST /runs/{id}/cancel`, that route needs CSRF protection (SameSite plus a token in the form).
+- **The bind does not change.** The API still listens on the tailnet address only (22.1's NFR). HTTPS may terminate in `Bun.serve` with the Tailscale certificate, or in `tailscale serve` in front of it; the story decides, and the runbook §4.5 follows.
+- Secrets stay out of logs, pages and worker environments, as in §1: the OAuth client secrets and the session secret join `buildWorkerEnv`'s drop list.
