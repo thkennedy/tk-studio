@@ -685,6 +685,13 @@ New-Item -ItemType Directory -Force C:\agent-work\supervisor | Out-Null
 [Environment]::SetEnvironmentVariable('TK_SUPERVISOR_WORK', 'C:\agent-work', 'User')
 ```
 
+The same, as one script that also wires the notifier (Telegram through the
+Hermes bot by default, an ntfy topic generated and ready; the supervisor's
+`operator-decisions.md` §6) and puts the Startup shortcut of §4.3 in place:
+`tools/agent-pc/set-supervisor-env.ps1` in this repo, run once from your own
+PowerShell 7 terminal. It generates the token and the topic and keeps them on
+a re-run; `-ShowToken` prints the token once, for the phone.
+
 The worker never sees the API token or the notifier's credentials: the
 supervisor removes them, and `ANTHROPIC_API_KEY`, from every worker's
 environment. The Max login pays (ruling 3).
