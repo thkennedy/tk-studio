@@ -52,6 +52,15 @@ This epic captures an opportunity and fixes a pain. Epic 21 left the supervisor 
     - §7 gains a smoke row, and §8 gains a row for each supervisor failure mode met while building the epic.
     - The kb index regenerates only if frontmatter moved. (Story 22.4)
 
+- **CAP-6**
+  - **intent:** The operator signs in to the status page from a phone browser, which cannot send the bearer header, with the token, with Google or with GitHub, and stays signed in with a cookie. (Added 2026-10-06 from DW-20, by the operator's decision.)
+  - **success:**
+    - A browser request with neither a bearer header nor a valid session cookie gets a sign-in page on the same bind: a form for the API token, "Continue with Google" and "Continue with GitHub". Nothing else of the page is served, and the API's JSON routes still answer 401 as in Story 22.1.
+    - The correct token on the form, or an OAuth callback whose verified identity is on the allow list named in the environment (one Google account, one GitHub login, never a wildcard), sets an `HttpOnly`, `Secure`, `SameSite=Lax` session cookie signed with a session secret from the environment and carrying an expiry. An identity off the allow list, a bad token or a failed OAuth state check is refused with no cookie and no detail.
+    - A signed-in browser reads `GET /` and the API's GET routes as the bearer header would. `POST /runs/{id}/cancel` from a cookie session also needs the CSRF token the page embeds, and a cookie never authorises `POST /jobs`.
+    - The sign-in is served over `https` on the tailnet address with the machine's Tailscale certificate for its MagicDNS name (`tailscale cert`). The bind rule of Story 22.1 is unchanged. The hand-over names the operator's two steps: enable HTTPS certificates once in the Tailscale admin console, and register the Google and GitHub OAuth apps with that callback URL, their client ids and secrets set under the `TK_SUPERVISOR_OAUTH_*` names the story fixes.
+    - The OAuth client secrets, the session secret and every cookie value never appear in logs, pages, notifications or worker environments (NFR5), and `buildWorkerEnv` drops them. The test suite pins the form path, both OAuth callbacks against a faked provider, the allow-list refusal, the state-check refusal, cookie expiry and the CSRF refusal. (Story 22.5)
+
 ## Constraints
 
 - The API is tailnet-only and token-gated. It never binds `0.0.0.0` or an address outside `100.64.0.0/10`, and it never starts without a bearer token. The token never appears in any log.
@@ -60,7 +69,8 @@ This epic captures an opportunity and fixes a pain. Epic 21 left the supervisor 
 - Cancel reuses the queue's existing `cancelled` terminal state.
 - The supervisor is console-hosted at logon. Nothing registers a "run whether user is logged on or not" task, and nothing starts the supervisor from a Claude desktop-app session (MSIX AppData virtualization).
 - Editor-in-the-loop snapshots use `robocopy /E`, never `/MIR`.
-- Stories 22.1–22.3 land in the supervisor repo. Story 22.4 lands in tk-studio kb and is docs-only: no code, schema or contract file changes. The engine sandbox mounts tk-studio read-only, so 22.4 is built there after 22.1–22.3 and is absent from `stories.yaml`.
+- The browser sign-in of Story 22.5 adds a cookie session beside the bearer header, never instead of it: the bearer header stays the API's auth, the bind rule stays, and only allow-listed identities sign in.
+- Stories 22.1–22.3 and 22.5 land in the supervisor repo. Story 22.4 lands in tk-studio kb and is docs-only: no code, schema or contract file changes. The engine sandbox mounts tk-studio read-only, so 22.4 is built there after 22.1–22.3 and is absent from `stories.yaml`.
 
 ## Non-goals
 
@@ -83,6 +93,8 @@ This epic captures an opportunity and fixes a pain. Epic 21 left the supervisor 
 ## Open Questions
 
 All five are answered in `operator-decisions.md` (attended session, 2026-09-28; provisional until the operator's review). They are kept here as asked.
+
+The operator accepted all five as built on 2026-10-06 and decided DW-20 the same day (`operator-decisions.md` §6 and §7).
 
 - Which environment variable names carry the bind address, port, token and notification target, and which selects ntfy or Telegram?
 - Which port does the API bind? The epic fixes the address rule, not the port.
