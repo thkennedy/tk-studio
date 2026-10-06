@@ -36,7 +36,7 @@ source_spec: `21-4-the-worker-runs-on-the-right-tier-and-reports-its-cost`
 location: test/command-line.test.ts:303 (`canRunE2E` excludes win32); test/queue.test.ts:642 (Linux /proc start time)
 severity: high
 reason: The loop verifies only inside the Linux engine sandbox (259 pass there). On the Windows host, `bun test` passes 216 and skips 43 of 259: all six CLI end-to-end suites (studio-health, the core job, durable queue, tick recovery, restart recovery and drain, worker tiers) and the Linux-only process-start probe. The supervisor runs console-hosted on Windows (plan §3 Phase 1 item 7; runbook §4), so its queue, recovery, process-tree kill and worker spawning are unverified where they will run. Two Windows-only defects were found and fixed in the same pass: canonicalPath lowercased returned paths on win32 (the lock identity now comes from `checkoutKey`), and a Linux-simulation assertion could not hold on a win32 host. Owner: Story 22.3 (start at logon on Windows), which needs the e2e suites enabled and green on the Windows host; Stories 21-5 and 21-6 (guards, kill tree, resume) should also prove their Windows paths.
-status: open
+status: closed — 2026-09-29, attended session on the agent PC: Story 22.3 removed the win32 exclusion, and the CLI end-to-end suites now run green on the Windows host (`TK_STUDIO_ROOT` set, bun 1.4.2): 545 pass, 16 skip, 0 fail, tsc clean. The first host run failed 29 tests; every cause was test-side and is fixed in `39596da` (fakes as real executables, win32 kill status, PATH, symlink guard, VM folder). A real process-tree kill test (`taskkill /F /T`) was added for win32. The 16 skips left are POSIX-only cases (process groups, signals, `/proc`) and the symlink cases. Previously: open
 
 
 ### DW-6: Studio runs started outside the queue are invisible to the pacer, so a tick can overlap them and the hint does not count from their end
@@ -79,7 +79,7 @@ source_spec: `21-6-a-killed-run-resumes-or-ends-partial-never-lost-a-killed-run-
 location: src/cli.ts recoverWithResume / driveResumes; src/transcript.ts (restore from `TK_SUPERVISOR_TRANSCRIPT_BACKUP`)
 severity: high
 reason: The engine sandbox cannot run them, and the supervisor is never started from a Claude desktop-app session. Not run: (1) kill the supervisor mid-run on the Windows host and restart it: the run must resume or end `partial`, and `Get-Process claude` must show nothing left of the old worker; (2) delete a finished session's `.jsonl` under `%USERPROFILE%\.claude\projects` and force a resume: the file must come back from the nightly backup. Run and passed: a live `--session-id` then `--resume` reports the same `session_id` (Claude Code 2.1.274). The matching e2e suites are skipped on win32 (DW-5). Owner: Story 22.3, with DW-5.
-status: open
+status: open (narrowed) — 2026-09-29: (1) kill-and-restart passes on the Windows host in the end-to-end suite with a faked worker (after `wake`, mid-invoke, before `finish`): the run resumes with `--resume` on its session or ends `partial`. On win32 the old worker is reported `not running`, because a worker that is not detached ends with its supervisor. (2) The restore from `TK_SUPERVISOR_TRANSCRIPT_BACKUP` passes on the Windows host at unit level (test/resume.test.ts). What remains is the operator's, from the console with the real supervisor and a real worker: kill the supervisor mid-run and restart it; delete a finished session's transcript and force a resume. Previously: open
 
 ### DW-11: The pacer does not treat an ended run that keeps its lock as live
 origin: spec residual risk, 21-6 follow-up review 2 (recorded by the attended session)
@@ -89,3 +89,77 @@ severity: low
 reason: An sbx run refused a resume ends `partial` and keeps its checkout lock until the in-VM deadline (`hold_lock`). `Queue.pacing()` does not count it as live, so the pacer may mint the next run, which then waits on the lock. Nothing runs twice; the cost is a queued run that waits. Deferral class (b): behaviour outside this story's criteria.
 affects: 22-3
 status: open
+
+### DW-12: A driver can still claim a run between cancelRun's re-read and the Queue.end transaction, so a cancel can end a just-claimed run without keeping its lock for the live driver.
+origin: spec-deferred ce9b14f73290
+source_spec: `22-1-the-api-answers-on-the-tailnet-only-the-api-answers-on-the-tailnet-only.md`
+location: src/cli.ts cancelRun; src/queue.ts writeEnd
+severity: medium
+reason: Review pass 1 patch 2 narrowed the window but did not close it: the owner-liveness probe cannot run inside the end transaction (implementer report, consult ruling 2). The criterion it touches: cancel ends the run `cancelled` through Queue.end and the recorded-worker rule, never a bare lock release (deferral class a).
+status: open
+
+### DW-13: A driver that records its studio run after cancelRun's re-read but before Queue.end leaves that studio run unended.
+origin: spec-deferred 966aa17fc77c
+source_spec: `22-1-the-api-answers-on-the-tailnet-only-the-api-answers-on-the-tailnet-only.md`
+location: src/cli.ts cancelRun / recordMinted
+severity: medium
+reason: Follow-up review pass: patch 1 made cancel end the studio run from a fresh re-read, and the driver's recordMinted end a studio run minted after the cancel. A setStudioRun that lands between that re-read and the Queue.end transaction still succeeds, so neither side ends it (implementer report, consult ruling 3). It is a sibling of the claim/end race above. The criterion it touches: cancel ends the studio run through jobrun cancel (deferral class a).
+status: open
+
+### DW-14: Follow-up review still recommended for 22-1-the-api-answers-on-the-tailnet-only after the damping cap was spent
+origin: review-budget-followup
+source_spec: `22-1-the-api-answers-on-the-tailnet-only-the-api-answers-on-the-tailnet-only.md`
+location: n/a
+severity: low
+reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20260928-224136-6f1a; this entry preserves the lingering recommendation for a deliberate later review.
+status: open
+
+### DW-15: A run resumed after a supervisor restart loses the cost of its pre-restart iterations, so the page's cost (run.json `total_cost_usd`) under-reports it.
+origin: spec-deferred cfb7ee04d5a3
+source_spec: `22-2-a-read-only-status-page-a-read-only-status-page.md`
+location: src/cli.ts:1375-1528 finishRun
+severity: medium
+reason: `finishRun` keeps the iteration sum in a local `cost` (src/cli.ts:1375, :1416) and writes it only at `finish` (:1518, :1528). A restart resumes the run in a new process (`recoverWithResume`, src/cli.ts:403) whose sum starts empty, and no queue event records per-iteration cost. The 21-6 dispatch note names "cost summed across resumed iterations" (deferral class a). Fixing it needs src/cli.ts or src/queue.ts, outside this story's Files.
+status: open
+
+### DW-16: Follow-up review still recommended for 22-2-a-read-only-status-page after the damping cap was spent
+origin: review-budget-followup
+source_spec: `22-2-a-read-only-status-page-a-read-only-status-page.md`
+location: n/a
+severity: low
+reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20260928-224136-6f1a; this entry preserves the lingering recommendation for a deliberate later review.
+status: open
+
+### DW-17: Every worker inherits TK_SUPERVISOR_TELEGRAM_TOKEN and TK_SUPERVISOR_NTFY_URL, because buildWorkerEnv strips only ANTHROPIC_API_KEY and TK_SUPERVISOR_TOKEN.
+origin: spec-deferred 6598af1afd4d
+source_spec: `22-3-the-supervisor-starts-itself-at-logon-the-supervisor-starts-itself-at-logon.md`
+location: src/server.ts:533
+severity: high
+reason: start.ps1 exports the notifier variables to the supervisor, and the workers the tick and drain spawn get buildWorkerEnv(process.env), where an agent can read them with `env`. Deferral class (c): a credential rule is at risk. The consult ruled the story's NFR5 list (logs, events, errors, API answers, start.ps1 output) does not name the worker env, and the fix file is outside the 11-file cap. Fix: add both variables to the delete list in buildWorkerEnv, with one assertion in its existing test.
+status: closed — 2026-09-29, attended fix: `buildWorkerEnv` also deletes `TK_SUPERVISOR_TELEGRAM_TOKEN` and `TK_SUPERVISOR_NTFY_URL`, with one test (test/command-line.test.ts). `TK_SUPERVISOR_NOTIFY` and `TK_SUPERVISOR_TELEGRAM_CHAT` pass through: they are not credentials. Previously: open
+
+### DW-18: Follow-up review still recommended for 22-3-the-supervisor-starts-itself-at-logon after the damping cap was spent
+origin: review-budget-followup
+source_spec: `22-3-the-supervisor-starts-itself-at-logon-the-supervisor-starts-itself-at-logon.md`
+location: n/a
+severity: low
+reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20260928-224136-6f1a; this entry preserves the lingering recommendation for a deliberate later review.
+status: open
+
+### DW-19: On win32 the worker record waits about half a second on a PowerShell start-time read
+origin: attended host verification 2026-09-29 (the Windows pass for DW-5)
+source_spec: `22-3-the-supervisor-starts-itself-at-logon-the-supervisor-starts-itself-at-logon.md`
+location: src/cli.ts queueRecorder.worker; src/queue.ts processStartTime / runPowerShell
+severity: medium
+reason: `queueRecorder.worker` reads the worker's start time before it writes the worker record. On Linux that is one `/proc` read. On win32 it is a synchronous `powershell` call of about 0.5 s (measured 0.42 s on the agent PC), and the supervisor is blocked for that long. A supervisor killed inside that window leaves a run with no `worker_pid`. The end-to-end mid-invoke kill test met this and now waits for the record. The exposure is smaller than on POSIX: a win32 worker is not detached, so it ends with its supervisor and cannot go on editing the checkout. What is lost is the record, so the restart cannot say what it did about the worker. Suggested fix: write the pid first and the start time after it, or read the creation time natively (`GetProcessTimes` through `bun:ffi`) instead of through PowerShell. The same read runs once per `selfOwner()` and per owner probe.
+affects: none
+status: open
+
+### DW-20: The status page cannot be opened from a phone's browser
+origin: attended review 2026-09-29 (writing runbook section 4 from the code as built)
+source_spec: `22-2-a-read-only-status-page-a-read-only-status-page.md`
+location: src/api.ts (the bearer check in front of every route); src/page.ts; README.md "HTTP API", `GET /`
+severity: medium
+reason: Story 22.2 asks for a page that "reads well at phone width", served "behind the same auth as the API". The page is behind the bearer header, and a browser's address bar cannot send one, so the operator cannot open it on the phone without a client that sets headers. The criteria are met as written, and the epic's success signal ("watch it on the status page" from the phone) is not. The fix is a product decision for the operator, not a patch: for example HTTP Basic with the token as the password, which a browser prompts for, or a login form that sets a session cookie. Either one changes how the token travels.
+affects: none
+status: open — needs the operator's decision

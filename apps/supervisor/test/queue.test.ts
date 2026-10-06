@@ -5,7 +5,7 @@ import { hostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { studioOps, studioRunFinder } from "../src/cli";
 import {
-  defaultOwnerAlive, launchStatusProbe, ORPHANED_REASON, processStartTime, Queue, QueueDbMissing, QueueDbPlacementRefused,
+  defaultOwnerAlive, END_LEASE_STALE_MS, launchStatusProbe, NOTIFIED_BEFORE, ORPHANED_REASON, processStartTime, Queue, QueueDbMissing, QueueDbPlacementRefused,
   queueDbPath, REQUEUED_REASON, RunTerminal, selfOwner, type EngineProbe, type Owner, type Probes,
 } from "../src/queue";
 
@@ -245,7 +245,7 @@ q.close();
       const q = new Queue(path, fakeProbes(new Set()).probes);
       try {
         const cols = (q.db.query("PRAGMA table_info(runs)").all() as { name: string }[]).map((c) => c.name);
-        for (const c of ["permission_mode", "tier", "sandbox", "model", "effort", "session_id", "worker_pid", "worker_start", "worker_guard_s", "wake"]) {
+        for (const c of ["permission_mode", "tier", "sandbox", "model", "effort", "session_id", "worker_pid", "worker_start", "worker_guard_s", "wake", "editor_in_the_loop", "notified"]) {
           expect(cols.filter((n) => n === c)).toHaveLength(1);
         }
         const types = Object.fromEntries((q.db.query("PRAGMA table_info(runs)").all() as { name: string; type: string }[]).map((c) => [c.name, c.type]));
@@ -254,9 +254,46 @@ q.close();
         expect(q.get("q-old")).toMatchObject({
           state: "queued", permission_mode: null, tier: null, sandbox: null, model: null, effort: null,
           session_id: null, worker_pid: null, worker_start: null, worker_guard_s: null, wake: null,
+          editor_in_the_loop: null, notified: null,
         });
       } finally { q.close(); }
     }
+  });
+
+  test("Story 22.3: a file gaining the end marker marks its terminal runs (no history flood); live runs stay unmarked", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tk-sup-queue-old-"));
+    const path = join(dir, "q.db");
+    const old = new Database(path, { create: true });
+    old.exec(`CREATE TABLE jobs (job_id TEXT NOT NULL, checkout TEXT NOT NULL, root TEXT NOT NULL, project_id TEXT,
+        definition TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL, PRIMARY KEY (job_id, checkout));
+      CREATE TABLE runs (run_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, checkout TEXT NOT NULL, root TEXT NOT NULL,
+        project_id TEXT, target TEXT,
+        state TEXT NOT NULL CHECK (state IN ('queued','running','complete','partial','blocked','cancelled')),
+        reason TEXT, owner_pid INTEGER, owner_host TEXT, owner_nonce TEXT, owner_start TEXT,
+        studio_run_id TEXT, engine_run_id TEXT, verb_started TEXT, verb_snapshot TEXT, definition TEXT,
+        created TEXT NOT NULL, updated TEXT NOT NULL, FOREIGN KEY (job_id, checkout) REFERENCES jobs (job_id, checkout));
+      CREATE TRIGGER runs_terminal_immutable BEFORE UPDATE ON runs
+        WHEN OLD.state IN ('complete','partial','blocked','cancelled')
+        BEGIN SELECT RAISE(ABORT, 'RunTerminal: a terminal queue run is immutable'); END;
+      INSERT INTO jobs VALUES ('j', '/x', '/x', NULL, '{}', 't', 't');
+      INSERT INTO jobs VALUES ('k', '/x', '/x', NULL, '{}', 't', 't');
+      INSERT INTO runs (run_id, job_id, checkout, root, state, created, updated) VALUES ('q-done', 'j', '/x', '/x', 'complete', 't', 't');
+      INSERT INTO runs (run_id, job_id, checkout, root, state, created, updated) VALUES ('q-live', 'k', '/x', '/x', 'queued', 't', 't');`);
+    old.close();
+    const q = new Queue(path, fakeProbes(new Set()).probes);
+    try {
+      expect(q.get("q-done")!.notified).toBe(NOTIFIED_BEFORE);
+      expect(q.get("q-live")!.notified).toBeNull();
+      expect(q.unclaimedEnds()).toEqual([]);
+      q.end("q-live", "blocked", "x");
+      expect(q.unclaimedEnds().map((r) => r.run_id)).toEqual(["q-live"]);
+      // The old trigger was replaced: the terminal run stays immutable, its marker is set once.
+      expect(() => q.db.run("UPDATE runs SET reason = 'y' WHERE run_id = 'q-done'")).toThrow(/immutable/);
+      expect(q.claimEnd("q-done")).toBeNull();
+      expect(() => q.db.run("UPDATE runs SET notified = 'lease 2020-01-01T00:00:00.000Z pid 1@h' WHERE run_id = 'q-done'")).toThrow(/EndClaimed/);
+    } finally { q.close(); }
+    const again = new Queue(path, fakeProbes(new Set()).probes); // a second open marks nothing new
+    try { expect(again.get("q-live")!.notified).toBeNull(); } finally { again.close(); }
   });
 });
 
@@ -287,6 +324,65 @@ describe("transitions", () => {
     expect((await fx.queue.claim(run.run_id, B))).toMatchObject({ claimed: false, why: "terminal" });
     expect(fx.queue.get(run.run_id)).toMatchObject({ state: "blocked", reason: "boom" });
     expect(fx.queue.events(run.run_id)).toHaveLength(events);
+  });
+
+  test("Story 22.3: a terminal run's end is leased once (`notified`), and only the marker may change", async () => {
+    const fx = fixture();
+    const { run } = fx.enqueue("j", A);
+    expect(fx.queue.claimEnd(run.run_id)).toBeNull(); // not terminal: nothing to claim
+    expect(() => fx.queue.db.run("UPDATE runs SET notified = ? WHERE run_id = ?", [`lease ${new Date().toISOString()} pid 1@h`, run.run_id])).toThrow(/EndClaimed/);
+    await fx.queue.claim(run.run_id, A);
+    fx.queue.end(run.run_id, "complete", null);
+    expect(fx.queue.unclaimedEnds().map((r) => r.run_id)).toEqual([run.run_id]);
+    // NULL → a lease; anything else is refused at the table.
+    expect(() => fx.queue.db.run("UPDATE runs SET notified = 'x' WHERE run_id = ?", [run.run_id])).toThrow(/EndClaimed/);
+    expect(() => fx.queue.db.run("UPDATE runs SET notified = 'done now' WHERE run_id = ?", [run.run_id])).toThrow(/EndClaimed/);
+    const lease = fx.queue.claimEnd(run.run_id, B)!;
+    expect(lease).toStartWith("lease ");
+    expect(fx.queue.get(run.run_id)!.notified).toBe(lease);
+    expect(lease).toContain(`pid ${B.pid}@${HOST}`);
+    // A fresh lease is never re-claimed, neither through claimEnd nor at the table.
+    expect(fx.queue.claimEnd(run.run_id, A)).toBeNull();
+    expect(fx.queue.unclaimedEnds()).toEqual([]);
+    expect(() => fx.queue.db.run("UPDATE runs SET notified = ? WHERE run_id = ?", [`lease ${new Date().toISOString()} pid 1@h`, run.run_id])).toThrow(/EndClaimed/);
+    expect(() => fx.queue.db.run("UPDATE runs SET notified = NULL WHERE run_id = ?", [run.run_id])).toThrow(/EndClaimed/);
+    expect(() => fx.queue.db.run("UPDATE runs SET notified = 'y', state = 'queued' WHERE run_id = ?", [run.run_id])).toThrow();
+    // lease → done, by its holder only; done is final.
+    expect(fx.queue.finishEnd(run.run_id, "lease 2020-01-01T00:00:00.000Z pid 1@h")).toBe(false);
+    expect(fx.queue.finishEnd(run.run_id, lease)).toBe(true);
+    expect(fx.queue.get(run.run_id)!.notified).toMatch(new RegExp(`^done \\S+ pid ${B.pid}@`));
+    expect(fx.queue.claimEnd(run.run_id, A, Date.now() + 3_600_000)).toBeNull();
+    expect(() => fx.queue.db.run("UPDATE runs SET notified = ? WHERE run_id = ?", [`lease ${new Date().toISOString()} pid 1@h`, run.run_id])).toThrow(/EndClaimed/);
+    expect(fx.queue.get(run.run_id)).toMatchObject({ state: "complete" });
+    expect(fx.queue.unclaimedEnds()).toEqual([]);
+  });
+
+  test("Story 22.3: a lease older than END_LEASE_STALE_MS (its claimant died before the send) is re-claimed, atomically", async () => {
+    const fx = fixture();
+    const { run } = fx.enqueue("j", A);
+    await fx.queue.claim(run.run_id, A);
+    fx.queue.end(run.run_id, "blocked", "x");
+    const past = Date.now() - END_LEASE_STALE_MS - 60_000;
+    const dead = fx.queue.claimEnd(run.run_id, B, past)!; // B leased it 11 minutes ago, then died
+    expect(dead).toStartWith("lease ");
+    expect(fx.queue.unclaimedEnds().map((r) => r.run_id)).toEqual([run.run_id]);
+    const retake = fx.queue.claimEnd(run.run_id, A)!;
+    expect(retake).toContain(`pid ${A.pid}@`);
+    expect(fx.queue.claimEnd(run.run_id, B)).toBeNull(); // the new lease is fresh
+    expect(fx.queue.finishEnd(run.run_id, dead)).toBe(false); // the dead claimant's lease is gone
+    expect(fx.queue.finishEnd(run.run_id, retake)).toBe(true);
+  });
+
+  test("Story 22.3: the editor-in-the-loop flag is stored on the run like tier (minted, or recorded on an adopted queued run)", () => {
+    const fx = fixture();
+    const minted = fx.queue.enqueue({ jobId: "f", root: fx.checkout, definition: { id: "f" }, editorInTheLoop: true });
+    expect(minted.run.editor_in_the_loop).toBe(1);
+    expect(fx.queue.events(minted.run.run_id)[0].detail).toMatchObject({ editor_in_the_loop: true });
+    const plain = fx.queue.enqueue({ jobId: "g", root: fx.checkout, definition: { id: "g" } });
+    expect(plain.run.editor_in_the_loop).toBeNull();
+    const adopted = fx.queue.enqueue({ jobId: "g", root: fx.checkout, definition: { id: "g" }, editorInTheLoop: true });
+    expect(adopted).toMatchObject({ minted: false, run: { run_id: plain.run.run_id, editor_in_the_loop: 1 } });
+    expect(fx.queue.events(plain.run.run_id).at(-1)).toMatchObject({ kind: "run-options", detail: { editor_in_the_loop: true } });
   });
 
   test("end({ from }) refuses a run no longer in that state; end without `from` is unchanged", async () => {
@@ -857,6 +953,16 @@ describe("review pass 2 fixes", () => {
     }), B);
     expect(calls.map((c) => c[0])).toEqual(["status", "cancel"]);
     expect(fx.queue.get(r.run_id)!.state).toBe("partial");
+  });
+
+  // DW-5: the real PowerShell read, on the Windows host only (unverifiable in the Linux sandbox).
+  test.skipIf(process.platform !== "win32")("win32 start time: a real PowerShell read of a live process; a reused pid is not the owner", () => {
+    const start = processStartTime(process.pid);
+    expect(start).toMatch(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z?$/);
+    expect(processStartTime(process.pid)).toBe(start); // stable
+    const me: Owner = { pid: process.pid, host: HOST, nonce: "n", start };
+    expect(defaultOwnerAlive(me)).toBe(true);
+    expect(defaultOwnerAlive({ ...me, start: "2000-01-01T00:00:00.0000000Z" })).toBe(false);
   });
 
   test("win32 start time: a bounded PowerShell read through injection; a failed read is absent", () => {

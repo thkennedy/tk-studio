@@ -41,6 +41,31 @@ describe.skipIf(process.platform === "win32")("wall-clock guard trip kills the w
   }, 15_000);
 });
 
+describe.skipIf(process.platform !== "win32")("wall-clock guard trip kills the whole win32 process tree (taskkill /F /T; DW-5)", () => {
+  test("a worker that spawned a grandchild: both are gone after the trip; the error still reads `timed out`", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tk-sup-tree-"));
+    const pidFile = join(dir, "pids.json");
+    // The worker (bun) starts a grandchild (bun) that idles, records both pids, then idles itself.
+    const worker = join(dir, "worker.js");
+    writeFileSync(worker, [
+      `const { spawn } = require("node:child_process");`,
+      `const gc = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" });`,
+      `require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, JSON.stringify({ worker: process.pid, grandchild: gc.pid }));`,
+      `setTimeout(() => {}, 30000);`,
+    ].join("\n"));
+    const run = runProcess(process.execPath, [worker], { timeoutS: 3 });
+    await expect(run).rejects.toThrow(/timed out/i);
+    const pids = JSON.parse(readFileSync(pidFile, "utf-8")) as { worker: number; grandchild: number };
+    expect(pids.worker).toBeGreaterThan(0);
+    expect(pids.grandchild).toBeGreaterThan(0);
+    const deadline = Date.now() + 3000;
+    while ((alive(pids.worker) || alive(pids.grandchild)) && Date.now() < deadline) await Bun.sleep(50);
+    const survivors = [pids.worker, pids.grandchild].filter(alive);
+    for (const pid of survivors) { try { process.kill(pid, "SIGKILL"); } catch { /* gone */ } } // our own test's processes only
+    expect(survivors).toEqual([]);
+  }, 30_000);
+});
+
 // ---------------------------------------------------------------- guard reasons
 
 describe("guard reasons name the bound that actually tripped", () => {

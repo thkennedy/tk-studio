@@ -528,10 +528,16 @@ export function buildSbxCommand(opts: { sandbox: string; vmRoot: string; worker:
 export interface WorkerPlacement { tier?: Tier; sandbox?: string }
 
 /** The worker's env: the parent's, minus ANTHROPIC_API_KEY (ruling 3 — the
- * Max login pays). TK_STUDIO_HOME and the rest pass through untouched. */
+ * Max login pays), TK_SUPERVISOR_TOKEN (the API's bearer token never reaches a
+ * worker) and the notifier's credentials, TK_SUPERVISOR_TELEGRAM_TOKEN and
+ * TK_SUPERVISOR_NTFY_URL (the supervisor notifies, a worker never does; DW-17).
+ * TK_STUDIO_HOME and the rest pass through untouched. */
 export function buildWorkerEnv(parent: Record<string, string | undefined> = process.env): Record<string, string | undefined> {
   const env = { ...parent };
   delete env.ANTHROPIC_API_KEY;
+  delete env.TK_SUPERVISOR_TOKEN;
+  delete env.TK_SUPERVISOR_TELEGRAM_TOKEN;
+  delete env.TK_SUPERVISOR_NTFY_URL;
   return env;
 }
 

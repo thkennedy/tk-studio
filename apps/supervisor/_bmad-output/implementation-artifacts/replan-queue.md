@@ -50,7 +50,7 @@
 - What changed: the queue owns the run id (`q-<job>-<ts>-<hex>`), and the studio's id is `studio_run_id`; `submit`/`drain`/`not-woken` answers carry the queue id; the queue's terminal states include `cancelled`.
 - What no longer holds: "it is queued through Story 21.3's validation and the response carries the run id" (read: the queue run id; `GET /runs/{id}` and cancel take it)
 - Suggested adjustment: Replan (21-3 reconcile, 2026-09-28): API run ids are queue run ids. Answers also carry `studio_run_id`. Cancel ends the queue run `cancelled` through a `Queue.end` transition with its event, and the studio run through `jobrun cancel` or launch `stop`. Epic 22 has no manifest yet; apply this when it is transcribed.
-- Status: open
+- Status: closed — applied to the unstarted 22-1 entry's invoke_dev_with by the attended session when Epic 22 was transcribed (2026-09-28)
 
 ## 21-5 — scope: stories — from 21-4-the-worker-runs-on-the-right-tier-and-reports-its-cost — 2026-09-28
 
@@ -71,7 +71,7 @@
 - What changed: `submit` takes `--tier`, `--sandbox`, `--model`, `--effort`, `--permission-mode`, resolves them (submission ?? `TK_SUPERVISOR_CONFIG` ?? `host`) and refuses before enqueue (`HostBypassRefused`, `TierRefused`, `SbxSandboxMissing`, `SupervisorConfigInvalid`, `VmPathUnderivable`, exit 2).
 - What no longer holds: "`POST /jobs` … with optional `base_ref`, `tier`, `model`, and `effort` … queued through Story 21.3's validation" (read: through 21.4's resolution too)
 - Suggested adjustment: Replan (21-4 reconcile, 2026-09-28): `POST /jobs` calls the same submit path (`submitJob` resolution, then `enqueue`); each named refusal maps to 400 with its name, and no run is queued. Keep the registry root from `validate()` on any drive. Epic 22 has no manifest yet; apply this when it is transcribed.
-- Status: open
+- Status: closed — applied to the unstarted 22-1 entry's invoke_dev_with by the attended session when Epic 22 was transcribed (2026-09-28)
 
 ## 21-6 — scope: stories — from 21-5-guards-and-the-pacer-are-the-wrappers-job — 2026-09-28
 
@@ -85,18 +85,32 @@
 - What changed: the queue's events and run states grew. New events: `accounted`, `woke`, `session`, `worker`, `recovering`, `lock-released`. `RecoverReport` has `resumed[]`, `held[]`, `released[]` and `ended[].state`. A run can be `held` (kept with its lock while its recorded worker may still run), and an ended run can keep its checkout lock until the in-VM deadline (`hold_lock`).
 - What no longer holds: "each answers from the queue; cancel ends the run `cancelled`" (read: serve every event kind as stored, never a fixed list; a cancel of a run whose worker may still run must kill or wait for that worker before the lock is freed)
 - Suggested adjustment: Replan (21-6 reconcile, 2026-09-28): `/events` and `/runs/{id}` pass event kinds and details through as stored. A `POST /jobs` on a checkout whose lock an ended run still keeps waits in `queued` naming that holder. Cancel goes through `Queue.end` and the recorded-worker rule (`Queue.recordedWorker`, the in-VM deadline on sbx), never a bare lock release. A silent exit ends `partial` with `MISSING_STATUS_BLOCK; <cause>`.
-- Status: open
+- Status: closed — applied to the unstarted 22-1 entry's invoke_dev_with by the attended session when Epic 22 was transcribed (2026-09-28)
 
 ## 22-2 — scope: stories — from 21-6-a-killed-run-resumes-or-ends-partial-never-lost — 2026-09-28
 
 - What changed: runs can be resumed (one queue run, more than one worker iteration), held, or ended with a kept lock; `total_cost_usd` is summed across the original and the resumed iterations.
 - What no longer holds: "it shows the queue (jobs, and runs with state, reason, and cost)" (read: also the held runs and kept locks with their holder, and the resume count)
 - Suggested adjustment: Replan (21-6 reconcile, 2026-09-28): show `held` runs and ended runs that keep a lock, each with the lock holder and the deadline. Show a run's resume count and its summed cost. Reasons can be long (`orphaned: supervisor restart; guard: …`): wrap them, never cut them.
-- Status: open
+- Status: closed — applied to the unstarted 22-2 entry's invoke_dev_with by the attended session when Epic 22 was transcribed (2026-09-28)
 
 ## 22-3 — scope: stories — from 21-6-a-killed-run-resumes-or-ends-partial-never-lost — 2026-09-28
 
 - What changed: resume driving lives in `cli.ts` (`recoverWithResume`/`driveResumes`); `Queue.recover` only takes runs over. Transcript restore reads the folder named by `TK_SUPERVISOR_TRANSCRIPT_BACKUP`. Two host checks of 21-6 were not run: kill the supervisor mid-run and restart it; delete a session's transcript and force a resume from the backup.
 - What no longer holds: "starts the API and the pacer" (read: and runs the CLI's resume-driving recovery once at start, before the pacer's first tick)
 - Suggested adjustment: Replan (21-6 reconcile, 2026-09-28): `start.ps1` sets `TK_SUPERVISOR_TRANSCRIPT_BACKUP` to the nightly backup's `claude-projects` folder and starts the supervisor through the path that calls `recoverWithResume`. This story owns DW-5 and DW-10: enable the e2e suites on win32 and make them green on the Windows host, including the kill-and-restart and backup-restore cases.
+- Status: closed — applied to the unstarted 22-3 entry's invoke_dev_with by the attended session when Epic 22 was transcribed (2026-09-28)
+
+## 22-2-a-read-only-status-page — scope: stories — from 22-1-the-api-answers-on-the-tailnet-only — 2026-09-28
+
+- What changed: held checkout locks are listed by `Queue.locks()` (the exported `LockRow`). A run ended by an API cancel with no recorded worker keeps its lock for its live driver (`Queue.end`'s `driverLive`), with no deadline, until that driver frees it with a `lock-released` event. New event kinds: `worker-kill` and `lock-released`.
+- What no longer holds: "show `held` runs and ended runs that keep a lock, each with the lock holder and the deadline"
+- Suggested adjustment: Replan (22-1 reconcile, 2026-09-28): read kept locks through `Queue.locks()`/`LockRow` and the holder as `/status` names it; never query the locks table beside them. Show a deadline only where one exists (an sbx worker's in-VM deadline); a lock kept for a live driver shows its holder and "kept for its live driver". Render the `worker-kill` and `lock-released` kinds as stored, like any other kind.
+- Status: closed — applied to the unstarted 22-2 entry's invoke_dev_with by the 22-1 gate (2026-09-28)
+
+## 22-4 — scope: stories — from 22-3-the-supervisor-starts-itself-at-logon — 2026-09-29
+
+- What changed: `start.ps1` runs env import (User scope, then process), a same-console `-ServeOnly` keeper that restarts `serve` with back-off (5 s doubling to 600 s, reset after 60 s up), a 30 s-bounded `sbx ls` probe (then `sbx daemon start -d` from `$HOME`), one `recover` pass, then the pacer (tick, drain, sleep `-IntervalSeconds`, default 60, 5–86400); only a missing `TK_SUPERVISOR_BIND`/`TK_SUPERVISOR_TOKEN` or no `bun` ends the script. Snapshots are `robocopy <root> <target> /E /R:3 /W:5` under `<TK_SUPERVISOR_WORK>/snapshots/<project id>/<queue run id>/`. End hygiene is a lease (at-least-once across crashes); a cancel sweeps only its own run.
+- What no longer holds: nothing in 22-4's criteria; "the environment variables (bind address, token, database path, notification target)" must be read as the full as-built set (operator-decisions §1 plus `TK_SUPERVISOR_WORK`, `TK_SUPERVISOR_TRANSCRIPT_BACKUP`, `SBX_BIN`).
+- Suggested adjustment: Replan (22-3 reconcile, 2026-09-29): describe `start.ps1` in its run order (env, keeper, sbx probe, recover, pacer) and `-IntervalSeconds`; `SBX_BIN` must name an executable, not a `.ps1` wrapper; tick/drain output reaches the console through `Out-Host`; snapshot argv `/E /R:3 /W:5`, and a work folder equal to or inside the project root is refused with `SnapshotFailed`; named errors `NotifierConfigMissing`, `NotifierUnknown`, `WorkDirMissing`, `SnapshotFailed` and the hygiene event kinds as §8 failure-mode rows; a notification may repeat once after a crash (lease). 22-4 has no entry in this manifest (built in tk-studio kb); apply when it is planned there.
 - Status: open

@@ -4,7 +4,8 @@
  *
  *   jobs    one row per (job, checkout): the resolved definition `resolve` served
  *   runs    queue runs — `queued` → `running` → complete|partial|blocked|cancelled
- *           (terminal is immutable; a trigger refuses any update of one)
+ *           (terminal is immutable; a trigger refuses any update of one — but its
+ *           end-hygiene marker `notified`: NULL → lease → done, a stale lease re-leased, Story 22.3)
  *   events  one row per transition, committed in the same transaction
  *   locks   one row per checkout: the run holding it, or the detached
  *           bmad-loop engine a `tk-studio-launch` run started
@@ -437,6 +438,8 @@ export interface QueueRun {
   sandbox: string | null;
   model: string | null;
   effort: string | null;
+  /** Story 22.1: the submission's `base_ref` (null: none given) — stored, never acted on here. */
+  base_ref: string | null;
   /** Story 21.6: the worker's pre-minted session id, its pid (POSIX: its process
    * group) and that pid's start time, and the wake answer (JSON: directive, routing, state). */
   session_id: string | null;
@@ -445,12 +448,19 @@ export interface QueueRun {
   /** The wall-clock guard (s) passed to the recorded worker's spawn: on sbx, its in-VM `timeout`. */
   worker_guard_s: number | null;
   wake: string | null;
+  /** Story 22.3: 1 when the submission flagged the run editor-in-the-loop (a Godot project is
+   * snapshot before its minting verb); null otherwise. */
+  editor_in_the_loop: number | null;
+  /** Story 22.3: the end hygiene (notification + transcript copy) marker — null until one process
+   * leases the run's end (`claimEnd`, `lease …`), `done …` once its outcomes are recorded
+   * (`finishEnd`); runs already terminal when the column was added are marked done. */
+  notified: string | null;
   created: string; updated: string;
 }
 
 /** The worker options a run records while `queued` (Story 21.4). */
-export interface RunOptionsRecord { tier?: string | null; sandbox?: string | null; model?: string | null; effort?: string | null }
-const RUN_OPTION_KEYS = ["tier", "sandbox", "model", "effort"] as const;
+export interface RunOptionsRecord { tier?: string | null; sandbox?: string | null; model?: string | null; effort?: string | null; base_ref?: string | null }
+const RUN_OPTION_KEYS = ["tier", "sandbox", "model", "effort", "base_ref"] as const;
 
 export interface QueueEvent {
   seq: number; run_id: string; at: string; kind: string;
@@ -479,7 +489,7 @@ export interface JobPacing {
   stopped: QueueEvent | null;
 }
 
-interface LockRow {
+export interface LockRow {
   checkout: string; root: string; kind: "run" | "engine"; run_id: string; job_id: string;
   owner_pid: number | null; owner_host: string | null; owner_nonce: string | null; owner_start: string | null;
   engine_run_id: string | null; acquired: string;
@@ -553,8 +563,9 @@ CREATE TABLE IF NOT EXISTS runs (
   state TEXT NOT NULL CHECK (state IN ('queued','running','complete','partial','blocked','cancelled')),
   reason TEXT, owner_pid INTEGER, owner_host TEXT, owner_nonce TEXT, owner_start TEXT,
   studio_run_id TEXT, engine_run_id TEXT, verb_started TEXT, verb_snapshot TEXT, definition TEXT,
-  permission_mode TEXT, tier TEXT, sandbox TEXT, model TEXT, effort TEXT,
+  permission_mode TEXT, tier TEXT, sandbox TEXT, model TEXT, effort TEXT, base_ref TEXT,
   session_id TEXT, worker_pid INTEGER, worker_start TEXT, worker_guard_s INTEGER, wake TEXT,
+  editor_in_the_loop INTEGER, notified TEXT,
   created TEXT NOT NULL, updated TEXT NOT NULL,
   FOREIGN KEY (job_id, checkout) REFERENCES jobs (job_id, checkout)
 );
@@ -569,19 +580,59 @@ CREATE TABLE IF NOT EXISTS locks (
   run_id TEXT NOT NULL, job_id TEXT NOT NULL, owner_pid INTEGER, owner_host TEXT, owner_nonce TEXT, owner_start TEXT,
   engine_run_id TEXT, acquired TEXT NOT NULL
 );
-CREATE TRIGGER IF NOT EXISTS runs_terminal_immutable BEFORE UPDATE ON runs
+`;
+
+/** The end-hygiene marker (Story 22.3): the one run column a terminal run may still have set, once. */
+const NOTIFIED_COLUMN = "notified";
+/** The marker the migration writes on runs already terminal when a queue file gains the column:
+ * they are never notified (no history flood). */
+export const NOTIFIED_BEFORE = "before-end-hygiene";
+
+/** The end-hygiene marker's shapes (Story 22.3): `claimEnd` writes a lease
+ * `lease <ISO time> pid <pid>@<host>`; once the notification and transcript-copy outcomes are
+ * recorded `finishEnd` turns it into `done <ISO time> pid <pid>@<host>`. A lease older than
+ * END_LEASE_STALE_MS is a claimant that died between the claim and the send: a later sweep
+ * re-claims it. Any other non-null value (NOTIFIED_BEFORE included) is done. */
+const LEASE_PREFIX = "lease ";
+const DONE_PREFIX = "done ";
+/** How old a lease must be before another sweep may take it over (10 minutes: a send is bounded
+ * to 15 s and a transcript copy to a local file copy, so a live claimant is long finished). */
+export const END_LEASE_STALE_MS = 10 * 60_000;
+/** The ISO time inside a lease marker (`lease ` + 24 characters of `toISOString()`), as SQL. */
+const leaseAtSql = (row: string) => `substr(${row}.${NOTIFIED_COLUMN}, ${LEASE_PREFIX.length + 1}, 24)`;
+
+/** A terminal run is immutable: every column but the end-hygiene marker (recreated on each open
+ * from the table's own columns, so a column added later is covered too); the marker is set once. */
+function immutabilityTriggers(columns: string[]): string {
+  const cols = columns.filter((c) => c !== NOTIFIED_COLUMN).join(", ");
+  return `
+DROP TRIGGER IF EXISTS runs_terminal_immutable;
+CREATE TRIGGER runs_terminal_immutable BEFORE UPDATE OF ${cols} ON runs
   WHEN OLD.state IN ('complete','partial','blocked','cancelled')
   BEGIN SELECT RAISE(ABORT, 'RunTerminal: a terminal queue run is immutable'); END;
+DROP TRIGGER IF EXISTS runs_notified_once;
+CREATE TRIGGER runs_notified_once BEFORE UPDATE OF ${NOTIFIED_COLUMN} ON runs
+  WHEN NOT COALESCE(OLD.state IN ('complete','partial','blocked','cancelled') AND (
+      (OLD.${NOTIFIED_COLUMN} IS NULL AND NEW.${NOTIFIED_COLUMN} LIKE '${LEASE_PREFIX}%')
+      OR (OLD.${NOTIFIED_COLUMN} LIKE '${LEASE_PREFIX}%' AND NEW.${NOTIFIED_COLUMN} LIKE '${LEASE_PREFIX}%'
+          AND julianday(${leaseAtSql("OLD")}) <= julianday('now') - ${END_LEASE_STALE_MS / 86_400_000})
+      OR (OLD.${NOTIFIED_COLUMN} LIKE '${LEASE_PREFIX}%' AND NEW.${NOTIFIED_COLUMN} LIKE '${DONE_PREFIX}%')
+    ), 0)
+  BEGIN SELECT RAISE(ABORT, 'EndClaimed: a run end is leased once terminal, re-leased only once stale, then done'); END;
 `;
+}
 
 /** Nullable run columns added after the first schema: an existing queue file
  * gains each one it lacks (guarded by PRAGMA table_info). */
 const ADDED_RUN_COLUMNS = [
   ["permission_mode", "TEXT"], ["tier", "TEXT"], ["sandbox", "TEXT"], ["model", "TEXT"], ["effort", "TEXT"],
   ["session_id", "TEXT"], ["worker_pid", "INTEGER"], ["worker_start", "TEXT"], ["wake", "TEXT"], ["worker_guard_s", "INTEGER"],
+  ["base_ref", "TEXT"], ["editor_in_the_loop", "INTEGER"], [NOTIFIED_COLUMN, "TEXT"],
 ] as const;
 
 const now = () => new Date().toISOString();
+/** The newest lease time a sweep at `at` may take over (Story 22.3). */
+const staleCutoff = (at: number) => new Date(at - END_LEASE_STALE_MS).toISOString();
 
 /** Queue run ids never collide with studio run ids (`<job-id>-<UTC compact>`). */
 function mintRunId(jobId: string): string {
@@ -632,6 +683,8 @@ function sameClaimView(a: ClaimView, b: ClaimView): boolean {
 export class Queue {
   readonly db: Database;
   readonly path: string;
+  /** Kills of workers spawned for a run a cancel had already ended (`killUnrecorded`), by queue run id. */
+  private readonly unrecorded = new Map<string, Promise<WorkerKill>>();
 
   constructor(path: string, readonly probes: Probes = defaultProbes) {
     this.path = path;
@@ -641,11 +694,19 @@ export class Queue {
     this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec("PRAGMA foreign_keys = ON");
     this.db.transaction(() => {
+      // The immutability trigger is recreated below (its column list follows the table's columns).
+      this.db.exec("DROP TRIGGER IF EXISTS runs_terminal_immutable; DROP TRIGGER IF EXISTS runs_notified_once;");
       this.db.exec(SCHEMA);
-      const have = new Set((this.db.query("PRAGMA table_info(runs)").all() as { name: string }[]).map((c) => c.name));
+      const columns = () => (this.db.query("PRAGMA table_info(runs)").all() as { name: string }[]).map((c) => c.name);
+      const have = new Set(columns());
       for (const [col, type] of ADDED_RUN_COLUMNS) {
         if (!have.has(col)) this.db.exec(`ALTER TABLE runs ADD COLUMN ${col} ${type}`);
       }
+      // Story 22.3: runs already terminal when the file gains the marker are never notified.
+      if (!have.has(NOTIFIED_COLUMN)) {
+        this.db.query(`UPDATE runs SET ${NOTIFIED_COLUMN} = ? WHERE state IN ('complete','partial','blocked','cancelled')`).run(NOTIFIED_BEFORE);
+      }
+      this.db.exec(immutabilityTriggers(columns()));
     }).immediate();
   }
 
@@ -664,11 +725,29 @@ export class Queue {
     return this.db.query("SELECT * FROM runs ORDER BY created, rowid").all() as QueueRun[];
   }
 
-  events(runId?: string): QueueEvent[] {
+  /** Events in seq order: one run's, or all; with `since`, only those with `seq > since`. */
+  events(runId?: string, since?: number): QueueEvent[] {
+    const after = since ?? -1;
     const rows = (runId
-      ? this.db.query("SELECT * FROM events WHERE run_id = ? ORDER BY seq").all(runId)
-      : this.db.query("SELECT * FROM events ORDER BY seq").all()) as (Omit<QueueEvent, "detail"> & { detail: string | null })[];
+      ? this.db.query("SELECT * FROM events WHERE run_id = ? AND seq > ? ORDER BY seq").all(runId, after)
+      : this.db.query("SELECT * FROM events WHERE seq > ? ORDER BY seq").all(after)) as (Omit<QueueEvent, "detail"> & { detail: string | null })[];
     return rows.map((r) => ({ ...r, detail: r.detail ? JSON.parse(r.detail) : null }));
+  }
+
+  /** The submitted jobs (one per job + checkout), with the resolved definition parsed. */
+  jobs(): { job_id: string; checkout: string; root: string; project_id: string | null; definition: Record<string, unknown> | null; created: string; updated: string }[] {
+    const rows = this.db.query("SELECT * FROM jobs ORDER BY created, rowid").all() as
+      { job_id: string; checkout: string; root: string; project_id: string | null; definition: string; created: string; updated: string }[];
+    return rows.map((r) => {
+      let definition: Record<string, unknown> | null = null;
+      try { definition = JSON.parse(r.definition); } catch { /* unreadable: null */ }
+      return { ...r, definition };
+    });
+  }
+
+  /** Every held checkout lock, oldest first. */
+  locks(): LockRow[] {
+    return this.db.query("SELECT * FROM locks ORDER BY acquired, rowid").all() as LockRow[];
   }
 
   /** The pacer's read for one (job, checkout), as seen by `self` (owner liveness). */
@@ -718,6 +797,11 @@ export class Queue {
     if (owner.nonce === self.nonce) return true;
     if (owner.host === self.host && owner.pid === self.pid) return false;
     return this.probes.ownerAlive(owner);
+  }
+
+  /** Is the run's recorded owner alive, as seen by `self` (the owner probe, never a signal)? */
+  ownerAlive(run: QueueRun, self: Owner = selfOwner()): boolean {
+    return this.ownerLive(ownerOf(run), self);
   }
 
   /** The in-VM deadline of an sbx run's recorded worker: its recorded spawn time (the
@@ -773,6 +857,8 @@ export class Queue {
   enqueue(input: {
     jobId: string; root: string; projectId?: string | null; target?: string | null;
     definition: Record<string, unknown>; owner?: Owner | null; permissionMode?: string | null;
+    /** Story 22.3: the submission's editor-in-the-loop flag (stored like `tier`). */
+    editorInTheLoop?: boolean;
   } & RunOptionsRecord): { run: QueueRun; minted: boolean } {
     const checkout = checkoutKey(input.root);
     return this.db.transaction(() => {
@@ -782,6 +868,7 @@ export class Queue {
       if (live) {
         if (input.permissionMode) this.writePermissionMode(live, input.permissionMode);
         this.writeRunOptions(this.must(live.run_id), input);
+        if (input.editorInTheLoop) this.writeEditorInTheLoop(this.must(live.run_id));
         return { run: this.must(live.run_id), minted: false };
       }
       const at = now();
@@ -794,16 +881,18 @@ export class Queue {
       const owner = input.owner ?? null;
       const mode = input.permissionMode || null;
       const opts = Object.fromEntries(RUN_OPTION_KEYS.map((k) => [k, input[k] || null])) as Record<(typeof RUN_OPTION_KEYS)[number], string | null>;
+      const flagged = input.editorInTheLoop ? 1 : null;
       this.db.query(
         `INSERT INTO runs (run_id, job_id, checkout, root, project_id, target, state, reason, owner_pid, owner_host,
-           owner_nonce, owner_start, permission_mode, tier, sandbox, model, effort, created, updated)
-         VALUES (?, ?, ?, ?, ?, ?, 'queued', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           owner_nonce, owner_start, permission_mode, tier, sandbox, model, effort, base_ref, editor_in_the_loop, created, updated)
+         VALUES (?, ?, ?, ?, ?, ?, 'queued', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(runId, input.jobId, checkout, input.root, input.projectId ?? null, input.target ?? null,
         owner?.pid ?? null, owner?.host ?? null, owner?.nonce ?? null, owner?.start ?? null, mode,
-        opts.tier, opts.sandbox, opts.model, opts.effort, at, at);
+        opts.tier, opts.sandbox, opts.model, opts.effort, opts.base_ref, flagged, at, at);
       this.event(runId, "enqueued", null, "queued", {
         ...(owner ? { owner: ownerDetail(owner) } : {}), ...(mode ? { permission_mode: mode } : {}),
         ...Object.fromEntries(Object.entries(opts).filter(([, v]) => v !== null)),
+        ...(flagged ? { editor_in_the_loop: true } : {}),
       });
       return { run: this.must(runId), minted: true };
     }).immediate();
@@ -839,6 +928,13 @@ export class Queue {
       ...Object.fromEntries(changed.map((k) => [k, opts[k]])),
       previous: Object.fromEntries(changed.map((k) => [k, run[k]])),
     });
+  }
+
+  /** Inside a transaction: a `queued` run not yet flagged editor-in-the-loop is flagged, with a `run-options` event. */
+  private writeEditorInTheLoop(run: QueueRun): void {
+    if (run.state !== "queued" || run.editor_in_the_loop) return;
+    this.db.query("UPDATE runs SET editor_in_the_loop = 1, updated = ? WHERE run_id = ?").run(now(), run.run_id);
+    this.event(run.run_id, "run-options", run.state, run.state, { editor_in_the_loop: true, previous: { editor_in_the_loop: null } });
   }
 
   /** Inside a transaction: a `queued` run whose recorded mode differs takes `mode`, with its event. */
@@ -961,7 +1057,10 @@ export class Queue {
       out.engine = await this.probes.engineLive(lock.root, lock.engine_run_id);
       return out;
     }
-    out.holderLive = held?.state === "running" && this.ownerLive(ownerOf(lock), self);
+    // A running holder with a live owner — or a run ended with no worker recorded that kept its
+    // lock for its live driver (`end`'s `driverLive`) — is live while that owner lives.
+    out.holderLive = (held?.state === "running" || (!!held && isTerminal(held.state) && held.worker_pid == null))
+      && this.ownerLive(ownerOf(lock), self);
     if (!out.holderLive && held && (held.state === "running" || isTerminal(held.state))) {
       // A dead owner's running holder — or an ended run that kept its lock (`holdLock`) — is live
       // while its recorded worker may still run (never a lock freed under it).
@@ -1069,6 +1168,30 @@ export class Queue {
     return this.recordOnRunning(runId, "markResumed", "resumed", {}, { resume: this.resumeCount(runId) + 1, ...detail });
   }
 
+  /** Story 22.1: the driver spawned a worker it could not record — `setWorker` refused because a
+   * cancel ended the run between the spawn and the record. Its own child is killed by the kill
+   * the recorded-worker rule uses (`killWorker`, else `killRecordedWorker`: pid + start time,
+   * never by name; the signal is sent before this returns); the driver's `endDriven` awaits
+   * that kill before it frees the lock it kept (`releaseDriverLock`). */
+  killUnrecorded(runId: string, pid: number, start: string | null): Promise<WorkerKill> {
+    let kill: Promise<WorkerKill>;
+    try { kill = (this.probes.killWorker ?? killRecordedWorker)(pid, start); }
+    catch (e) { kill = Promise.reject(e); }
+    const settled = kill.catch((e): WorkerKill => ({ pid, start, outcome: "kill failed", detail: e instanceof Error ? e.message : String(e) }));
+    this.unrecorded.set(runId, settled);
+    return settled;
+  }
+
+  /** Story 22.1: a `worker-kill` event (from/to = the run's terminal state) naming a worker
+   * killed after its run ended — one the driver recorded during a cancel (after the cancel
+   * read the run), or one it spawned but could not record (`killUnrecorded`). */
+  noteWorkerKill(runId: string, worker: WorkerKill, why: string): void {
+    this.db.transaction(() => {
+      const run = this.must(runId);
+      this.event(runId, "worker-kill", run.state, run.state, { why, worker });
+    }).immediate();
+  }
+
   /** Put an engine holder on the checkout lock for run `run` (inside a transaction). */
   private handToEngine(run: Pick<QueueRun, "checkout" | "root" | "run_id" | "job_id">, engineRunId: string | null): void {
     this.db.query(
@@ -1100,12 +1223,36 @@ export class Queue {
    * started an engine that still works the checkout. */
   async endDriven(runId: string, state: TerminalState, reason?: string | null,
     opts: { engineRunId?: string; detail?: Record<string, unknown>; stop?: StopDetail; holdLock?: string } = {}): Promise<QueueRun> {
-    const run = opts.engineRunId ? null : this.get(runId);
-    if (run && run.verb_started && !isTerminal(run.state) && this.definition(run)?.target?.skill === LAUNCH_SKILL) {
-      const { holder, engine } = await this.launchEngine(run.root);
-      return this.end(runId, state, reason, { ...opts, ...(holder ? { engineRunId: holder.id } : {}), detail: { ...opts.detail, engine } });
+    try {
+      const run = opts.engineRunId ? null : this.get(runId);
+      if (run && run.verb_started && !isTerminal(run.state) && this.definition(run)?.target?.skill === LAUNCH_SKILL) {
+        const { holder, engine } = await this.launchEngine(run.root);
+        return this.end(runId, state, reason, { ...opts, ...(holder ? { engineRunId: holder.id } : {}), detail: { ...opts.detail, engine } });
+      }
+      return this.end(runId, state, reason, opts);
+    } catch (e) {
+      // Ended under its driver (a cancel): the lock it kept for this live driver is freed now the driver is done.
+      if (e instanceof RunTerminal) await this.releaseDriverLock(runId);
+      throw e;
     }
-    return this.end(runId, state, reason, opts);
+  }
+
+  /** A run ended with no worker recorded that kept its checkout lock for its live driver
+   * (`end`'s `driverLive`): its driver, done, frees it with a `lock-released` event. A worker
+   * it spawned but could not record (`killUnrecorded`) is awaited first, named in a
+   * `worker-kill` event; one that may still run keeps the lock (never freed under it). */
+  private async releaseDriverLock(runId: string): Promise<void> {
+    const pending = this.unrecorded.get(runId);
+    this.unrecorded.delete(runId);
+    const worker = pending ? await pending : undefined;
+    if (worker) this.noteWorkerKill(runId, worker, "spawned after the run was cancelled, never recorded");
+    if (worker && workerMayRun(worker)) return;
+    this.db.transaction(() => {
+      const run = this.get(runId);
+      if (!run || !isTerminal(run.state) || run.worker_pid != null) return;
+      if (!this.db.query("DELETE FROM locks WHERE checkout = ? AND run_id = ? AND kind = 'run'").run(run.checkout, runId).changes) return;
+      this.event(runId, "lock-released", run.state, run.state, { why: "its driver ended after the run was ended (no worker recorded)" });
+    }).immediate();
   }
 
   /** Terminal transition + lock release — or, when the run launched a
@@ -1115,9 +1262,11 @@ export class Queue {
    * `holdLock` (Story 21.6, the cause): the run's recorded worker may still run
    * (an sbx worker in the VM) — the run ends but keeps its checkout lock, which
    * `claim` and `recover` free only once `recordedWorker` says it may no longer run
-   * (sbx: its in-VM deadline passed). */
+   * (sbx: its in-VM deadline passed). `driverLive` (Story 22.1, a cancel): the run's live
+   * driver has recorded no worker yet — `holdLock` keeps the lock without one; the driver's
+   * `endDriven` frees it, else `claim`/`recover` once that owner is dead. */
   end(runId: string, state: TerminalState, reason?: string | null,
-    opts: { engineRunId?: string | null; detail?: Record<string, unknown>; from?: RunState; stop?: StopDetail; holdLock?: string } = {}): QueueRun {
+    opts: { engineRunId?: string | null; detail?: Record<string, unknown>; from?: RunState; stop?: StopDetail; holdLock?: string; driverLive?: boolean } = {}): QueueRun {
     if (!isTerminal(state)) throw new Error(`end: '${state}' is not a terminal state`);
     return this.db.transaction(() => {
       const run = this.must(runId);
@@ -1132,7 +1281,7 @@ export class Queue {
    * to an engine), the ending event (`ended`, or `orphaned` from `recover`), and
    * a `stop` recorded in the same transaction. The one end path. */
   private writeEnd(run: QueueRun, state: TerminalState, reason: string | null | undefined,
-    opts: { kind: "ended" | "orphaned"; engineRunId?: string | null; detail?: Record<string, unknown>; stop?: StopDetail; holdLock?: string }): void {
+    opts: { kind: "ended" | "orphaned"; engineRunId?: string | null; detail?: Record<string, unknown>; stop?: StopDetail; holdLock?: string; driverLive?: boolean }): void {
     const runId = run.run_id;
     this.db.query(
       `UPDATE runs SET state = ?, reason = ?, owner_pid = NULL, owner_host = NULL, owner_nonce = NULL, owner_start = NULL,
@@ -1140,10 +1289,11 @@ export class Queue {
     ).run(state, reason ?? null, opts.engineRunId ?? null, now(), runId);
     const detail: Record<string, unknown> = { ...(opts.detail ?? {}) };
     const held = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(run.checkout) as LockRow | null;
-    if (opts.holdLock && run.worker_pid !== null && run.worker_pid !== undefined && held?.kind === "run" && held.run_id === runId) {
+    const hasWorker = run.worker_pid !== null && run.worker_pid !== undefined;
+    if (opts.holdLock && (hasWorker || opts.driverLive) && held?.kind === "run" && held.run_id === runId) {
       // Its recorded worker may still run: the lock stays with the ended run (freed by `claim`/`recover`
       // once `recordedWorker` says it may no longer run — sbx: at its in-VM deadline).
-      detail.lock = { held: opts.holdLock, ...(run.tier === "sbx" ? { until: new Date(this.sbxDeadline(run).ms).toISOString() } : {}) };
+      detail.lock = { held: opts.holdLock, ...(hasWorker && run.tier === "sbx" ? { until: new Date(this.sbxDeadline(run).ms).toISOString() } : {}) };
     } else if (opts.engineRunId !== undefined) {
       const lock = held;
       if (!lock || lock.run_id === runId) {
@@ -1155,6 +1305,46 @@ export class Queue {
     }
     this.event(runId, opts.kind, run.state, state, { ...(reason ? { reason } : {}), ...detail });
     if (opts.stop) this.event(runId, "stopped", state, state, { ...opts.stop, state });
+  }
+
+  /** Story 22.3: terminal runs whose end hygiene is unclaimed (`notified` null) or whose lease is
+   * stale (its claimant died between the claim and the send), oldest first. */
+  unclaimedEnds(at: number = Date.now()): QueueRun[] {
+    return this.db.query(
+      `SELECT * FROM runs r WHERE state IN ('complete','partial','blocked','cancelled')
+         AND (${NOTIFIED_COLUMN} IS NULL OR (${NOTIFIED_COLUMN} LIKE '${LEASE_PREFIX}%' AND ${leaseAtSql("r")} <= ?))
+       ORDER BY updated, rowid`,
+    ).all(staleCutoff(at)) as QueueRun[];
+  }
+
+  /** Story 22.3: lease a terminal run's end hygiene — one atomic `UPDATE`, taken when the marker is
+   * null or a lease older than END_LEASE_STALE_MS, so exactly one live process (driver, `serve`,
+   * recoverer) notifies and copies for each end. Answers the lease written, or null when the end
+   * is not terminal, already done, or freshly leased by another process. */
+  claimEnd(runId: string, by: Owner = selfOwner(), at: number = Date.now()): string | null {
+    const lease = `${LEASE_PREFIX}${new Date(at).toISOString()} pid ${by.pid}@${by.host}`;
+    const changed = this.db.query(
+      `UPDATE runs SET ${NOTIFIED_COLUMN} = ? WHERE run_id = ? AND state IN ('complete','partial','blocked','cancelled')
+         AND (${NOTIFIED_COLUMN} IS NULL OR (${NOTIFIED_COLUMN} LIKE '${LEASE_PREFIX}%' AND ${leaseAtSql("runs")} <= ?))`,
+    ).run(lease, runId, staleCutoff(at)).changes;
+    return changed === 1 ? lease : null;
+  }
+
+  /** Story 22.3: finalise a lease once the notification and transcript-copy outcomes are recorded
+   * (`lease …` → `done …`). False when the lease is no longer this one (another sweep took it over). */
+  finishEnd(runId: string, lease: string): boolean {
+    const done = `${DONE_PREFIX}${new Date().toISOString()}${lease.slice(lease.indexOf(" pid "))}`;
+    return this.db.query(`UPDATE runs SET ${NOTIFIED_COLUMN} = ? WHERE run_id = ? AND ${NOTIFIED_COLUMN} = ?`)
+      .run(done, runId, lease).changes === 1;
+  }
+
+  /** Story 22.3: a hygiene event on a run (from/to = its current state): a snapshot, a
+   * notification, a transcript copy — or why one was skipped or failed. */
+  note(runId: string, kind: string, detail: Record<string, unknown>): void {
+    this.db.transaction(() => {
+      const run = this.must(runId);
+      this.event(runId, kind, run.state, run.state, detail);
+    }).immediate();
   }
 
   /** `queued` runs no live process owns (ownerless, or a dead owner), oldest first. */
@@ -1356,19 +1546,24 @@ export class Queue {
         });
       }
     }
-    await this.releaseKeptLocks(report);
+    await this.releaseKeptLocks(report, self);
     return report;
   }
 
   /** Ended runs that kept their checkout lock (`holdLock`: a recorded sbx worker that may
    * still run in the VM): each lock is freed once `recordedWorker` says its worker may no
    * longer run (sbx: the in-VM deadline passed), else the run is reported `held`. */
-  private async releaseKeptLocks(report: RecoverReport): Promise<void> {
+  private async releaseKeptLocks(report: RecoverReport, self: Owner): Promise<void> {
     const kept = this.db.query(
       `SELECT runs.* FROM locks JOIN runs ON runs.run_id = locks.run_id
        WHERE locks.kind = 'run' AND runs.state IN ('complete','partial','blocked','cancelled') ORDER BY locks.acquired`,
     ).all() as QueueRun[];
     for (const k of kept) {
+      if (k.worker_pid == null) {
+        // Kept for its live driver (`end`'s `driverLive`): freed by that driver, or once it is dead.
+        const lock = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(k.checkout) as LockRow | null;
+        if (lock && this.ownerLive(ownerOf(lock), self)) continue;
+      }
       const settled = await this.recordedWorker(k, true);
       if (settled.mayRun) { (report.held ??= []).push({ run_id: k.run_id, worker: settled.worker! }); continue; }
       const freed = this.db.transaction(() => {
