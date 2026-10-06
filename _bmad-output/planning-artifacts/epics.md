@@ -1558,7 +1558,7 @@ So that acceptance (c) holds: no run is ever silently lost.
 
 ## Epic 22: Reachable from the Phone
 
-Plan Phase 1 scope items 5–7 and runbook §4. The supervisor answers on the tailnet and starts itself at logon the way this box needs: console-hosted, never a headless Task Scheduler task, and never started from a Claude desktop-app session (the MSIX AppData virtualization). The HTTP API is the seam Hermes will POST to in Phase 2, and the fallback front door if Hermes churns. Requirements trace: scope items 5, 6, 7. Repos: the supervisor repo (Stories 22.1–22.3), tk-studio kb (Story 22.4).
+Plan Phase 1 scope items 5–7 and runbook §4. The supervisor answers on the tailnet and starts itself at logon the way this box needs: console-hosted, never a headless Task Scheduler task, and never started from a Claude desktop-app session (the MSIX AppData virtualization). The HTTP API is the seam Hermes will POST to in Phase 2, and the fallback front door if Hermes churns. Requirements trace: scope items 5, 6, 7. Repos: the supervisor repo (Stories 22.1–22.3), tk-studio kb (Story 22.4). Story 22.5 was added on 2026-10-06 from DW-20, after the first four had landed: the page signs the operator in from a phone browser (supervisor repo, runbook §4.5 follows in tk-studio).
 
 ### Story 22.1: The API Answers on the Tailnet Only
 
@@ -1651,6 +1651,34 @@ So that the next box is set up from facts.
 **Given** the story's docs-only scope
 **When** it lands
 **Then** no code, schema, or contract file changes, and the kb index regenerates only if frontmatter moved
+
+### Story 22.5: Sign In from the Phone
+
+As the operator on the phone,
+I want the status page to sign me in with the token, with Google, or with GitHub, and keep me signed in with a cookie,
+So that I can watch and cancel runs from a phone browser, which cannot send the bearer header (DW-20).
+
+**Acceptance Criteria:**
+
+**Given** a browser request to the page with neither a bearer header nor a valid session cookie
+**When** it is answered
+**Then** it gets a sign-in page on the same bind: a form that takes the API token, and "Continue with Google" and "Continue with GitHub"; nothing else of the page is served, and the API's JSON routes still answer 401 as in Story 22.1
+
+**Given** the correct token on the form, or an OAuth callback whose verified identity is on the allow list named in the environment (one Google account, one GitHub login, never a wildcard)
+**When** sign-in completes
+**Then** an `HttpOnly`, `Secure`, `SameSite=Lax` session cookie is set, signed with a session secret from the environment and carrying an expiry; an identity off the allow list, a bad token, or a failed OAuth state check is refused with no cookie and no detail
+
+**Given** a signed-in browser
+**When** it opens `GET /` and the API's GET routes
+**Then** they answer as the bearer header would; `POST /runs/{id}/cancel` from a cookie session also needs the CSRF token the page embeds, and a cookie never authorises `POST /jobs`
+
+**Given** Google's rule that a redirect URI is `https` on anything but localhost
+**When** the supervisor serves the sign-in
+**Then** it serves `https` on the tailnet address with the machine's Tailscale certificate for its MagicDNS name (`tailscale cert`), the bind rule of Story 22.1 is unchanged, and the hand-over names the operator's two steps: enable HTTPS certificates once in the Tailscale admin console, and register the Google and GitHub OAuth apps with that callback URL, their client ids and secrets set under the `TK_SUPERVISOR_OAUTH_*` names the story fixes
+
+**Given** the OAuth client secrets, the session secret and every cookie value
+**When** anything logs, renders, notifies or spawns a worker
+**Then** none of them appears (NFR5) and `buildWorkerEnv` drops them; the test suite pins the form path, both OAuth callbacks against a faked provider, the allow-list refusal, the state-check refusal, cookie expiry and the CSRF refusal
 
 ## Epic 23: The Supervisor Lands a Story on The Universe Awaits
 
