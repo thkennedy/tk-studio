@@ -20,6 +20,10 @@ const REPO = resolve(import.meta.dir, "..");
 const OPERATOR_HYGIENE_VARS = [
   "TK_SUPERVISOR_NOTIFY", "TK_SUPERVISOR_NTFY_URL", "TK_SUPERVISOR_TELEGRAM_TOKEN", "TK_SUPERVISOR_TELEGRAM_CHAT",
   "TK_SUPERVISOR_TRANSCRIPT_BACKUP", "TK_SUPERVISOR_WORK",
+  // Story 22.5: the phone sign-in's variables (a `serve` spawned below must not read the operator's).
+  "TK_SUPERVISOR_SESSION_SECRET", "TK_SUPERVISOR_TLS_CERT", "TK_SUPERVISOR_TLS_KEY", "TK_SUPERVISOR_TLS_NAME",
+  "TK_SUPERVISOR_OAUTH_GOOGLE_CLIENT_ID", "TK_SUPERVISOR_OAUTH_GOOGLE_CLIENT_SECRET", "TK_SUPERVISOR_OAUTH_GOOGLE_ALLOW",
+  "TK_SUPERVISOR_OAUTH_GITHUB_CLIENT_ID", "TK_SUPERVISOR_OAUTH_GITHUB_CLIENT_SECRET", "TK_SUPERVISOR_OAUTH_GITHUB_ALLOW",
 ] as const;
 const operatorHygiene: Record<string, string | undefined> = {};
 beforeAll(() => {
@@ -110,7 +114,8 @@ describe("bind, port and token (AC1)", () => {
   });
 
   test("serve refuses before binding: bad bind, no token, bad port — each named, the token never in the message", () => {
-    const ok = { TK_SUPERVISOR_BIND: "100.64.0.1", TK_SUPERVISOR_TOKEN: TOKEN };
+    // Story 22.5: the session secret is required by `serve` too (its named error: test/auth.test.ts).
+    const ok = { TK_SUPERVISOR_BIND: "100.64.0.1", TK_SUPERVISOR_TOKEN: TOKEN, TK_SUPERVISOR_SESSION_SECRET: "session-secret-for-api-tests-0123456789" };
     const refusal = (env: Record<string, string | undefined>) => { try { serve(env); } catch (e) { return (e as Error).message; } return "bound"; };
     for (const bind of ["0.0.0.0", "192.168.1.5", "100.128.0.1"]) expect(refusal({ ...ok, TK_SUPERVISOR_BIND: bind })).toStartWith("ApiBindRefused:");
     expect(refusal({ ...ok, TK_SUPERVISOR_BIND: undefined })).toStartWith("ApiBindMissing:");
@@ -122,7 +127,8 @@ describe("bind, port and token (AC1)", () => {
     expect(refusal({ ...ok, ...tg })).toStartWith("NotifierConfigMissing:");
     expect(refusal({ ...ok, ...tg })).not.toContain("tg-secret-value");
     expect(refusal({ ...ok, TK_SUPERVISOR_NOTIFY: "slack" })).toStartWith("NotifierUnknown:");
-    // All three valid: the next check is the queue (unset here) — still before any bind.
+    expect(refusal({ ...ok, TK_SUPERVISOR_SESSION_SECRET: undefined })).toStartWith("SessionSecretMissing:");
+    // All valid: the next check is the queue (unset here) — still before any bind.
     expect(refusal(ok)).toStartWith("QueueDbMissing:");
     for (const env of [{ ...ok, TK_SUPERVISOR_BIND: "0.0.0.0" }, { ...ok, TK_SUPERVISOR_PORT: "x" }]) expect(refusal(env)).not.toContain(TOKEN);
   });

@@ -163,3 +163,11 @@ severity: medium
 reason: Story 22.2 asks for a page that "reads well at phone width", served "behind the same auth as the API". The page is behind the bearer header, and a browser's address bar cannot send one, so the operator cannot open it on the phone without a client that sets headers. The criteria are met as written, and the epic's success signal ("watch it on the status page" from the phone) is not. The fix is a product decision for the operator, not a patch: for example HTTP Basic with the token as the password, which a browser prompts for, or a login form that sets a session cookie. Either one changes how the token travels.
 affects: none
 status: decided 2026-10-06 — Tim chose a login form that sets an HttpOnly session cookie, with Google and GitHub sign-in as well as the token. Tracked as tk-studio Story 22.5 ("Sign in from the phone"); constraints in `_bmad-output/specs/spec-epic-22/operator-decisions.md` §7. Still open until that story lands.
+
+### DW-21: The Tailscale certificate is renewed only when start.ps1 starts, and serve never reloads it, so on a box up longer than the 90-day certificate life https fails with an expired certificate.
+origin: spec-deferred 518474edfc24
+source_spec: `22-5-sign-in-from-the-phone-sign-in-from-the-phone.md`
+location: start.ps1 (tailscale cert block); src/api.ts serve
+severity: medium
+reason: Review pass 1 (blind hunter): `tailscale cert` runs once in start.ps1's main script before the keeper; Bun.serve reads cert and key once at bind. No periodic renewal or serve restart exists. AC4 requires https with the machine's Tailscale certificate (deferral class a). The README now tells the operator to restart start.ps1 on long uptimes.
+status: open

@@ -133,12 +133,18 @@ describe("the status page (AC1)", () => {
     expect(body).toContain("overflow-wrap:anywhere");
   });
 
-  test("no token or a wrong one: 401 (the same gate as the API)", async () => {
-    const fx = fixture();
+  test("no token or a wrong one: 401 (the same gate as the API), answered with the sign-in page (Story 22.5)", async () => {
+    const fx = await populated();
     for (const auth of [null, "", `Bearer ${TOKEN}x`, `Basic ${TOKEN}`]) {
       const res = await fx.call("GET", "/", auth);
       expect(res.status).toBe(401);
-      expect(await res.json()).toEqual({ ok: false, error: "Unauthorized" });
+      expect(res.headers.get("content-type")).toStartWith("text/html");
+      const body = await res.text();
+      expect(body).toContain('action="/auth/token"');
+      // Nothing of the page: no section, no run, no planted value.
+      expect(body).not.toContain('id="runs"');
+      expect(body).not.toContain(fx.done.run_id);
+      for (const v of PLANTED) expect(body).not.toContain(v);
     }
     expect(fx.registryCalls).toEqual([]);
   });
@@ -326,6 +332,16 @@ describe("reads only, and no credential (AC3)", () => {
     // Not credential-named: kept.
     expect(out).toContain('"total_tokens": 1234');
     expect(redactCredentials("bind 100.64.0.1", env, TOKEN)).toBe("bind 100.64.0.1");
+  });
+
+  test("Story 22.5: every TK_SUPERVISOR_*SECRET* value is redacted exactly, on the page too", async () => {
+    const secrets = { TK_SUPERVISOR_SESSION_SECRET: "plain-session-secret-value", TK_SUPERVISOR_OAUTH_GOOGLE_CLIENT_SECRET: "plain-google-secret", TK_SUPERVISOR_OAUTH_GITHUB_CLIENT_SECRET: "plain-github-secret" };
+    expect(redactCredentials("x plain-session-secret-value y plain-google-secret z plain-github-secret", secrets, TOKEN)).toBe("x [redacted] y [redacted] z [redacted]");
+    const fx = await populated({ env: secrets });
+    const run = fx.enqueue("leaky", fx.checkout());
+    fx.queue.end(run.run_id, "partial", `failed near ${Object.values(secrets).join(" ")}`);
+    const body = await (await fx.call("GET")).text();
+    for (const v of Object.values(secrets)) expect(body).not.toContain(v);
   });
 });
 

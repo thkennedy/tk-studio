@@ -650,3 +650,57 @@ describe("start.ps1 (AC1, AC2)", () => {
     expect(res.stdout.trim()).toBe("0");
   });
 });
+
+describe("start.ps1 sign-in (Story 22.5 AC4)", () => {
+  const text = readFileSync(resolve(import.meta.dir, "..", "start.ps1"), "utf-8");
+  const certCall = "foreach ($arg in @('cert', '--cert-file', $env:TK_SUPERVISOR_TLS_CERT, '--key-file', $env:TK_SUPERVISOR_TLS_KEY, $env:TK_SUPERVISOR_TLS_NAME))";
+  const certGuard = "if (-not $ServeOnly -and -not ($TlsNames | Where-Object { -not $Present[$_] })) {";
+
+  test("TK_SUPERVISOR_SESSION_SECRET is required beside BIND and TOKEN: missing, the script ends before anything starts", () => {
+    expect(text).toContain("$Missing = @('TK_SUPERVISOR_BIND', 'TK_SUPERVISOR_TOKEN', 'TK_SUPERVISOR_SESSION_SECRET') | Where-Object { -not $Present[$_] }");
+    const refusal = text.indexOf('throw "[supervisor] cannot start: $($Missing -join');
+    expect(refusal).toBeGreaterThan(text.indexOf("$Missing = @('TK_SUPERVISOR_BIND'"));
+    expect(refusal).toBeLessThan(text.indexOf("$Keeper = Start-SupervisorKeeper"));
+  });
+
+  test("the new variables are among the exported names", () => {
+    const start = text.indexOf("$Names = @(");
+    expect(start).toBeGreaterThan(0);
+    const names = text.slice(start, text.indexOf("\n)\n", start));
+    for (const n of [
+      "TK_SUPERVISOR_SESSION_SECRET", "TK_SUPERVISOR_TLS_CERT", "TK_SUPERVISOR_TLS_KEY", "TK_SUPERVISOR_TLS_NAME",
+      "TK_SUPERVISOR_OAUTH_GOOGLE_CLIENT_ID", "TK_SUPERVISOR_OAUTH_GOOGLE_CLIENT_SECRET", "TK_SUPERVISOR_OAUTH_GOOGLE_ALLOW",
+      "TK_SUPERVISOR_OAUTH_GITHUB_CLIENT_ID", "TK_SUPERVISOR_OAUTH_GITHUB_CLIENT_SECRET", "TK_SUPERVISOR_OAUTH_GITHUB_ALLOW",
+    ]) expect(names).toContain(`'${n}'`);
+  });
+
+  test("tailscale cert runs once, in the main script only (never under -ServeOnly), with all three TLS variables, before the keeper", () => {
+    expect(text.split("'cert', '--cert-file'")).toHaveLength(2);
+    expect(text).toContain("$TlsNames = @('TK_SUPERVISOR_TLS_CERT', 'TK_SUPERVISOR_TLS_KEY', 'TK_SUPERVISOR_TLS_NAME')");
+    const guard = text.indexOf(certGuard);
+    const call = text.indexOf(certCall);
+    expect(guard).toBeGreaterThan(text.indexOf('throw "[supervisor] cannot start'));
+    expect(call).toBeGreaterThan(guard);
+    // Before the keeper branch (whose serve loop never ends) and before the keeper is started.
+    expect(call).toBeLessThan(text.indexOf("if ($ServeOnly) {\n"));
+    expect(call).toBeLessThan(text.indexOf("$Keeper = Start-SupervisorKeeper"));
+  });
+
+  test("tailscale cert is bounded at 120 s; a timeout kills only that process, and every failure is a warning", () => {
+    expect(text).toContain("$CertSeconds = 120");
+    const block = text.slice(text.indexOf(certGuard), text.indexOf("function New-Backoff"));
+    expect(block).toContain("if (-not $cert.WaitForExit($CertSeconds * 1000)) {");
+    expect(block).toContain("try { $cert.Kill() } catch { }");
+    expect(block).not.toMatch(/\$cert\.WaitForExit\(\)/);
+    for (const w of [
+      "Write-Warning '[supervisor] tailscale not found:",
+      'Write-Warning "[supervisor] tailscale cert gave no answer within $CertSeconds s:',
+      'Write-Warning "[supervisor] tailscale cert exited $($cert.ExitCode):',
+      'Write-Warning "[supervisor] tailscale cert did not run:',
+    ]) expect(block).toContain(w);
+    expect(block).not.toMatch(/\bthrow\b|\bexit\b/);
+    // Names only, never a value.
+    expect(block).not.toMatch(/Write-(Host|Warning)[^\n]*\$env:/);
+    expect(text).not.toMatch(/Write-(Host|Warning)[^\n]*\$env:TK_SUPERVISOR_(SESSION_SECRET|OAUTH_)/);
+  });
+});

@@ -20,7 +20,7 @@ export interface PageDeps {
   queue: Queue;
   /** The API token (never rendered). */
   token: string;
-  /** The environment: the store root (`TK_STUDIO_HOME`), the ledger identity, the `TK_SUPERVISOR_*TOKEN*` values to redact. */
+  /** The environment: the store root (`TK_STUDIO_HOME`), the ledger identity, the `TK_SUPERVISOR_*TOKEN*`/`*SECRET*` values to redact. */
   env?: Env;
   /** The registry's projects through its published read path (`registryShow`). */
   registry: () => Promise<Record<string, any>>;
@@ -289,11 +289,12 @@ const KEY_SHAPES: RegExp[] = [
   /(?<![0-9])\d{6,}:[A-Za-z0-9_\-]{30,}/g, // a Telegram bot token (also right after `/bot` in an API URL)
 ];
 
-/** The supervisor's own redaction: the API token and every `TK_SUPERVISOR_*TOKEN*` value, values under
+/** The supervisor's own redaction: the API token and every `TK_SUPERVISOR_*TOKEN*` / `TK_SUPERVISOR_*SECRET*`
+ * value (the session secret and the OAuth client secrets, Story 22.5), values under
  * credential-named keys (JSON `"key": value`, `KEY=value`, `key: value`), `Bearer`/`Basic` credentials,
  * and common key-shaped strings. */
 export function redactCredentials(text: string, env: Env, token: string): string {
-  const exact = [token, ...Object.entries(env).filter(([k]) => /^TK_SUPERVISOR_.*TOKEN/i.test(k)).map(([, v]) => v?.trim() ?? "")]
+  const exact = [token, ...Object.entries(env).filter(([k]) => /^TK_SUPERVISOR_.*(?:TOKEN|SECRET)/i.test(k)).map(([, v]) => v?.trim() ?? "")]
     .filter((v) => v.length > 0).sort((a, b) => b.length - a.length);
   let out = text;
   for (const v of exact) out = out.split(v).join("[redacted]");
@@ -362,17 +363,23 @@ h1{font-size:1.25rem;margin:.25rem 0}h2{font-size:1.05rem;margin:1.25rem 0 .5rem
 pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-size:.8rem;background:#f2f2f2;padding:.4rem;border-radius:4px;margin:.25rem 0}
 ul{padding-left:1.1rem;margin:.25rem 0}li{margin:.15rem 0}
 details summary{cursor:pointer;color:#333}
+form.cancel{margin:.35rem 0}form.cancel button{padding:.35rem .8rem;font-size:.95rem}
 @media (min-width:48rem){body{padding:1.25rem}}
 `;
 
-/** The escaped, credential-redacted HTML. */
-export function renderPage(data: PageData): string {
+/** The escaped, credential-redacted HTML. With a CSRF token (a cookie session's page, Story 22.5) each
+ * live run carries a cancel form (`POST /runs/<id>/cancel`, the token in a hidden `csrf` field). */
+export function renderPage(data: PageData, opts: { csrf?: string } = {}): string {
   const { token, env } = data.secrets;
   const redact = (s: string) => redactCredentials(s, env, token);
   const t = (s: unknown) => escapeHtml(redact(String(s ?? "")));
   const j = (v: unknown) => t(JSON.stringify(redactValue(v, redact), null, 2) ?? "null");
   const note = (s: string) => `<p class="note">${t(s)}</p>`;
   const read = (label: string, r: Read) => r.ok ? `<details><summary>${t(label)}</summary><pre>${j(r.value)}</pre></details>` : `<p class="meta">${t(label)}: <span class="note">${t(r.note)}</span></p>`;
+
+  const cancelForm = (r: QueueRun) => opts.csrf && !isTerminal(r.state)
+    ? `<form class="cancel" method="post" action="/runs/${escapeHtml(encodeURIComponent(r.run_id))}/cancel"><input type="hidden" name="csrf" value="${escapeHtml(opts.csrf)}"><button type="submit">Cancel run</button></form>`
+    : "";
 
   const counts = Object.entries(data.counts).map(([s, n]) => `<span class="st">${t(s)} ${n}</span>`).join(" ") || "no runs";
 
@@ -389,7 +396,7 @@ export function renderPage(data: PageData): string {
     return `<div class="card" id="run-${t(r.run_id)}"><strong>${t(r.run_id)}</strong> <span class="st">${t(r.state)}</span>
 <div class="meta">job ${t(r.job_id)} · project ${t(r.project_id ?? "-")} · tier ${t(r.tier ?? "host")} · studio run ${t(r.studio_run_id ?? "-")}</div>
 <div class="meta">resumes ${p.resumes} · cost ${p.cost === null ? "absent" : `$${t(p.cost.toFixed(4))}`} · created ${t(r.created)} · updated ${t(r.updated)}</div>
-${r.reason ? `<p class="reason">${t(r.reason)}</p>` : ""}
+${r.reason ? `<p class="reason">${t(r.reason)}</p>` : ""}${cancelForm(r)}
 <details><summary>events (${p.events.length + p.eventsOmitted})</summary>${p.eventsOmitted ? note(`${p.eventsOmitted} older events not shown`) : ""}<ul>${evs}</ul></details></div>`;
   }).join("\n") + (data.runsOmitted ? note(`${data.runsOmitted} older runs not shown`) : "") : note("no runs");
 

@@ -10,9 +10,11 @@
   In order, it:
     1. reads every TK_SUPERVISOR_* / TK_STUDIO_* / worker variable from the User environment
        (falling back to the process value; a shortcut-launched tab may predate a later setx) and
-       exports it to its children. TK_SUPERVISOR_BIND and TK_SUPERVISOR_TOKEN are required: a missing
-       one fails loudly, naming the variable, never printing a value. TK_SUPERVISOR_TRANSCRIPT_BACKUP
-       (the nightly backup's claude-projects folder) is warned about when unset.
+       exports it to its children. TK_SUPERVISOR_BIND, TK_SUPERVISOR_TOKEN and TK_SUPERVISOR_SESSION_SECRET
+       are required: a missing one fails loudly, naming the variable, never printing a value.
+       TK_SUPERVISOR_TRANSCRIPT_BACKUP (the nightly backup's claude-projects folder) is warned about when
+       unset. When TK_SUPERVISOR_TLS_CERT/KEY/NAME are all set, `tailscale cert` renews the 90-day
+       certificate into them (bounded; a failure is a warning) before the keeper starts (Story 22.5).
     2. starts the API keeper: this script again with -ServeOnly, in this console (never hidden),
        inheriting the variables step 1 exported. The keeper loops `bun src/cli.ts serve` in its own
        foreground and restarts it with a back-off whenever it exits, independent of recover, tick and
@@ -27,8 +29,8 @@
     5. loops the pacer in the foreground: `bun src/tick.ts`, then `bun src/cli.ts drain`, then sleeps
        -IntervalSeconds.
 
-  Only step 1's checks end the script: a missing TK_SUPERVISOR_BIND or TK_SUPERVISOR_TOKEN, or no
-  `bun` on PATH. Nothing after them does. Right after logon Tailscale may not have bound its 100.x
+  Only step 1's checks end the script: a missing TK_SUPERVISOR_BIND, TK_SUPERVISOR_TOKEN or
+  TK_SUPERVISOR_SESSION_SECRET, or no `bun` on PATH. Nothing after them does. Right after logon Tailscale may not have bound its 100.x
   address yet, so `serve` can fail to bind: the keeper warns and retries it with a back-off while
   the pacer runs on here (as it does when serve exits later). A failed `recover` is a warning too,
   retried with a back-off on later passes; every tick also recovers at its own start. Warnings name
@@ -72,7 +74,10 @@ $Names = @(
   'TK_SUPERVISOR_DB', 'TK_SUPERVISOR_CONFIG', 'TK_SUPERVISOR_TRANSCRIPT_BACKUP',
   'TK_SUPERVISOR_BIND', 'TK_SUPERVISOR_PORT', 'TK_SUPERVISOR_TOKEN',
   'TK_SUPERVISOR_NOTIFY', 'TK_SUPERVISOR_NTFY_URL', 'TK_SUPERVISOR_TELEGRAM_TOKEN', 'TK_SUPERVISOR_TELEGRAM_CHAT',
-  'TK_SUPERVISOR_WORK'
+  'TK_SUPERVISOR_WORK',
+  'TK_SUPERVISOR_SESSION_SECRET', 'TK_SUPERVISOR_TLS_CERT', 'TK_SUPERVISOR_TLS_KEY', 'TK_SUPERVISOR_TLS_NAME',
+  'TK_SUPERVISOR_OAUTH_GOOGLE_CLIENT_ID', 'TK_SUPERVISOR_OAUTH_GOOGLE_CLIENT_SECRET', 'TK_SUPERVISOR_OAUTH_GOOGLE_ALLOW',
+  'TK_SUPERVISOR_OAUTH_GITHUB_CLIENT_ID', 'TK_SUPERVISOR_OAUTH_GITHUB_CLIENT_SECRET', 'TK_SUPERVISOR_OAUTH_GITHUB_ALLOW'
 )
 
 function Import-SupervisorVariable {
@@ -87,7 +92,7 @@ function Import-SupervisorVariable {
 $Present = @{}
 foreach ($name in $Names) { $Present[$name] = Import-SupervisorVariable -Name $name }
 
-$Missing = @('TK_SUPERVISOR_BIND', 'TK_SUPERVISOR_TOKEN') | Where-Object { -not $Present[$_] }
+$Missing = @('TK_SUPERVISOR_BIND', 'TK_SUPERVISOR_TOKEN', 'TK_SUPERVISOR_SESSION_SECRET') | Where-Object { -not $Present[$_] }
 if ($Missing) {
   throw "[supervisor] cannot start: $($Missing -join ', ') not set in the User environment (setx <name> <value>, then open a new tab)"
 }
@@ -97,6 +102,40 @@ if (-not $ServeOnly -and -not $Present['TK_SUPERVISOR_TRANSCRIPT_BACKUP']) {
 
 $Bun = (Get-Command bun -ErrorAction Stop).Source
 Set-Location -LiteralPath $Repo
+
+# Story 22.5: with all three TLS variables set, renew the Tailscale certificate for the MagicDNS name
+# (90 days) into the files `serve` reads, before the keeper starts. Bounded; a failure (or no
+# `tailscale` on PATH) is a warning and `serve` uses the files as they are. Names only are printed.
+$CertSeconds = 120
+$TlsNames = @('TK_SUPERVISOR_TLS_CERT', 'TK_SUPERVISOR_TLS_KEY', 'TK_SUPERVISOR_TLS_NAME')
+if (-not $ServeOnly -and -not ($TlsNames | Where-Object { -not $Present[$_] })) {
+  $Tailscale = Get-Command tailscale -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $Tailscale) {
+    Write-Warning '[supervisor] tailscale not found: the certificate in TK_SUPERVISOR_TLS_CERT/TK_SUPERVISOR_TLS_KEY is not renewed'
+  } else {
+    Write-Host '[supervisor] tailscale cert (renews the certificate named by TK_SUPERVISOR_TLS_CERT/TK_SUPERVISOR_TLS_KEY/TK_SUPERVISOR_TLS_NAME)'
+    try {
+      $psi = [System.Diagnostics.ProcessStartInfo]::new($Tailscale.Source)
+      foreach ($arg in @('cert', '--cert-file', $env:TK_SUPERVISOR_TLS_CERT, '--key-file', $env:TK_SUPERVISOR_TLS_KEY, $env:TK_SUPERVISOR_TLS_NAME)) { $psi.ArgumentList.Add($arg) }
+      $psi.UseShellExecute = $false
+      $psi.RedirectStandardOutput = $true
+      $psi.RedirectStandardError = $true
+      $cert = [System.Diagnostics.Process]::Start($psi)
+      try {
+        $cert.BeginOutputReadLine()
+        $cert.BeginErrorReadLine()
+        if (-not $cert.WaitForExit($CertSeconds * 1000)) {
+          try { $cert.Kill() } catch { } # only this process (its known pid)
+          Write-Warning "[supervisor] tailscale cert gave no answer within $CertSeconds s: the certificate is not renewed"
+        } elseif ($cert.ExitCode -ne 0) {
+          Write-Warning "[supervisor] tailscale cert exited $($cert.ExitCode): the certificate is not renewed (is HTTPS enabled in the Tailscale admin console?)"
+        }
+      } finally { $cert.Dispose() }
+    } catch {
+      Write-Warning "[supervisor] tailscale cert did not run: the certificate is not renewed"
+    }
+  }
+}
 
 # Retries with a back-off: 5 s after the first failure, doubling to at most 600 s. The keeper sleeps
 # it out; this script checks it once per pacer pass (so a retry waits for the next pass at the earliest).

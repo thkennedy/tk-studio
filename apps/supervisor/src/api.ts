@@ -22,12 +22,23 @@
  *   GET  /                   the read-only status page (Story 22.2, `page.ts`): server-rendered
  *                            HTML, no script, credential-shaped values redacted
  *
+ * Story 22.5 (`auth.ts`): a browser signs in at `POST /auth/token`, `GET /auth/{google,github}` and
+ * their `/callback`s (answered before any auth) and gets a signed session cookie. The bearer header
+ * still authorises everything. Without it, a valid cookie authorises the GET routes, and
+ * `POST /runs/{id}/cancel` with the page's CSRF token (else 403 CsrfRefused); never `POST /jobs`.
+ * `GET /` with no auth is the 401 HTML sign-in page; everything else stays 401 JSON.
+ *
  * Run ids are queue run ids; answers carry `studio_run_id` too. The API never
  * drives or claims a run (drain and the pacer do).
  */
 import { createHash, timingSafeEqual } from "node:crypto";
+import {
+  allowed, authorizeUrl, csrfToken, type FetchLike, newState, oauthIdentity, PROVIDERS, type ProviderName, readCookie,
+  safeEqual, SESSION_COOKIE, SESSION_TTL_S, setCookie, signInPage, signSession, signState, STATE_COOKIE, STATE_TTL_S,
+  verifySession, verifyState,
+} from "./auth";
 import { CancelRaced, cancelRun, StartError, submitProject } from "./cli";
-import { apiBind, apiPort, apiToken, notifier } from "./env";
+import { apiBind, apiPort, apiToken, checkTlsFiles, notifier, type OAuthConfig, oauthConfig, sessionSecret, tlsConfig } from "./env";
 import { gatherPage, holderOf, renderPage } from "./page";
 import { registryShow } from "./server";
 import { isTerminal, Queue, RunTerminal, type QueueEvent, type QueueRun } from "./queue";
@@ -75,12 +86,18 @@ export interface ApiDeps {
   /** The clock (default `Date.now`). */
   now?: () => number;
   /** The status page: the environment it reads the store root (`TK_STUDIO_HOME`), the ledger
-   * identity and the `TK_SUPERVISOR_*TOKEN*` values to redact from (default `process.env`). */
+   * identity and the `TK_SUPERVISOR_*TOKEN*`/`*SECRET*` values to redact from (default `process.env`). */
   env?: Env;
   /** The status page: the registry's projects (default `registryShow`, the published read path). */
   registry?: () => Promise<Record<string, any>>;
   /** The status page: this machine's ledger identity (default: getpass order, the hostname). */
   ledger?: { user: string; machine: string };
+  /** Story 22.5: the session cookie's signing secret. Unset: no cookie session (every sign-in refused). */
+  session?: { secret: string };
+  /** Story 22.5: the configured OAuth providers, the public origin their callbacks live on
+   * (`https://<TLS_NAME>:<port>`), and the provider `fetch` (default the global one). Without an
+   * `https` origin the token form refuses (a `Secure` cookie never sticks over http). */
+  oauth?: { providers: OAuthConfig; origin: string; fetch?: FetchLike };
 }
 
 const SUBMIT_FIELDS = ["project", "job", "base_ref", "tier", "model", "effort", "editor_in_the_loop"] as const;
@@ -151,11 +168,10 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
 
   /** Constant time: both sides hashed to one length before `timingSafeEqual`. The scheme
    * matches case-insensitively (RFC 7235); the token is compared as sent. */
+  const bearerMatches = (header: string) => timingSafeEqual(createHash("sha256").update(header).digest(), expected);
   const authorized = (req: Request) => {
     const raw = req.headers.get("authorization") ?? "";
-    const header = /^bearer /i.test(raw) ? `Bearer ${raw.slice(7)}` : raw;
-    const got = createHash("sha256").update(header).digest();
-    return timingSafeEqual(got, expected);
+    return bearerMatches(/^bearer /i.test(raw) ? `Bearer ${raw.slice(7)}` : raw);
   };
   /** Never echo the token, even inside an error message. */
   const redact = (s: string) => s.split(deps.token).join("[redacted]");
@@ -271,21 +287,116 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
     return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" } });
   }
 
-  /** The status page: reads only (queue, store, registry), rendered to HTML. */
-  async function page(): Promise<Response> {
+  /** The status page: reads only (queue, store, registry), rendered to HTML. A cookie session's page
+   * carries its CSRF token in each live run's cancel form. */
+  async function page(csrf?: string): Promise<Response> {
     const data = await gatherPage({ queue, token: deps.token, env: deps.env, registry: deps.registry ?? (() => registryShow()), ledger: deps.ledger });
-    return new Response(renderPage(data), { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
+    return new Response(renderPage(data, csrf ? { csrf } : {}), { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
+  }
+
+  // ---------------------------------------------------------- the sign-in (Story 22.5)
+
+  const html = (status: number, body: string, headers: Record<string, string> = {}) =>
+    new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...headers } });
+  /** Served over https? Without it the browser drops the `Secure` cookie, so the token form refuses
+   * and the sign-in page says browser sign-in needs https. */
+  const https = /^https:\/\//i.test(deps.oauth?.origin ?? "");
+  /** The sign-in page; a refusal is the same page with a generic line, never a cookie or a detail. */
+  const signIn = (refused = false) => html(401, signInPage({ refused, needsHttps: !https }));
+  const redirect = (status: number, location: string, cookie: string) =>
+    new Response(null, { status, headers: { location, "set-cookie": cookie, "cache-control": "no-store" } });
+  const secret = deps.session?.secret;
+  const nowMs = () => clock();
+  const sessionCookie = (sub: string) => setCookie(SESSION_COOKIE, signSession(secret!, sub, nowMs()), SESSION_TTL_S);
+  const oauthFetch: FetchLike = deps.oauth?.fetch ?? ((input, init) => fetch(input, init));
+  const callbackUri = (p: ProviderName) => `${deps.oauth!.origin.replace(/\/+$/, "")}/auth/${p}/callback`;
+
+  /** `POST /auth/token`: the API token from the form, compared as the bearer header is. Refused
+   * like a bad token without https (the cookie would be dropped). */
+  async function tokenSignIn(req: Request): Promise<Response> {
+    let given = "";
+    try { given = new URLSearchParams(await req.text()).get("token") ?? ""; } catch { /* refused below */ }
+    if (!secret || !https || !given || !bearerMatches(`Bearer ${given}`)) return signIn(true);
+    return redirect(303, "/", sessionCookie("token"));
+  }
+
+  /** `GET /auth/<p>`: to the provider, with the signed state cookie. */
+  function oauthStart(p: ProviderName): Response {
+    const cfg = deps.oauth?.providers[p];
+    if (!secret || !cfg) return signIn(true);
+    const state = newState();
+    return redirect(302, authorizeUrl(p, cfg, callbackUri(p), state), setCookie(STATE_COOKIE, signState(secret, p, state, nowMs()), STATE_TTL_S));
+  }
+
+  /** `GET /auth/<p>/callback`: the state checked first (the provider never called on a failure), then
+   * the verified identity matched against the one allow entry. */
+  async function oauthCallback(p: ProviderName, req: Request, url: URL): Promise<Response> {
+    const cfg = deps.oauth?.providers[p];
+    if (!secret || !cfg) return signIn(true);
+    const expectedState = verifyState(secret, p, readCookie(req, STATE_COOKIE), nowMs());
+    const state = url.searchParams.get("state") ?? "";
+    if (!expectedState || !state || !safeEqual(state, expectedState)) return signIn(true);
+    const code = url.searchParams.get("code") ?? "";
+    if (!code) return signIn(true);
+    const identity = await oauthIdentity(p, cfg, code, callbackUri(p), oauthFetch);
+    if (!identity || !allowed(identity, cfg.allow)) return signIn(true);
+    return redirect(303, "/", sessionCookie(`${p}:${identity.toLowerCase()}`));
+  }
+
+  /** The auth routes, answered before any auth; null for any other path. */
+  async function authRoute(req: Request, url: URL, path: string, method: string): Promise<Response | null> {
+    const allow = (m: string) => json(405, { ok: false, error: "MethodNotAllowed", allow: m }, { allow: m });
+    if (path === "/auth/token") return method === "POST" ? await tokenSignIn(req) : allow("POST");
+    for (const p of PROVIDERS) {
+      if (path === `/auth/${p}`) return method === "GET" ? oauthStart(p) : allow("GET");
+      if (path === `/auth/${p}/callback`) return method === "GET" ? await oauthCallback(p, req, url) : allow("GET");
+    }
+    return null;
+  }
+
+  /** A cookie session's CSRF token from the `X-CSRF-Token` header or the form field `csrf`. */
+  async function csrfGiven(req: Request): Promise<string> {
+    const header = req.headers.get("x-csrf-token");
+    if (header) return header;
+    if (!(req.headers.get("content-type") ?? "").toLowerCase().startsWith("application/x-www-form-urlencoded")) return "";
+    try { return new URLSearchParams(await req.text()).get("csrf") ?? ""; } catch { return ""; }
+  }
+
+  /** What a valid cookie session may do: the GET routes, and cancel with CSRF. Anything else 401. */
+  async function cookieRoute(req: Request, url: URL, path: string, method: string, cookie: string): Promise<Response> {
+    const csrf = csrfToken(secret!, cookie);
+    const readRoute = path === "/" || path === "/jobs" || path === "/status" || path === "/events" || /^\/runs\/[^/]+$/.test(path);
+    if (method === "GET" && readRoute) return await route(req, url, path, method, csrf);
+    if (method === "POST" && /^\/runs\/[^/]+\/cancel$/.test(path)) {
+      const given = await csrfGiven(req);
+      if (!given || !safeEqual(given, csrf)) return fail(403, "CsrfRefused");
+      return await route(req, url, path, method);
+    }
+    return fail(401, "Unauthorized");
   }
 
   return async (req: Request): Promise<Response> => {
-    if (!authorized(req)) return fail(401, "Unauthorized");
     try {
       const url = new URL(req.url);
       const path = url.pathname.replace(/\/+$/, "") || "/";
       const method = req.method.toUpperCase();
+      const auth = await authRoute(req, url, path, method);
+      if (auth) return auth;
+      if (authorized(req)) return await route(req, url, path, method);
+      const cookie = readCookie(req, SESSION_COOKIE);
+      if (secret && cookie && verifySession(secret, cookie, nowMs())) return await cookieRoute(req, url, path, method, cookie);
+      return path === "/" && method === "GET" ? signIn() : fail(401, "Unauthorized");
+    } catch (e) {
+      return fail(500, "InternalError", { detail: redact(e instanceof Error ? e.message : String(e)) });
+    }
+  };
+
+  /** The API's routes (once authorised: the bearer, or a cookie session's allowed subset). */
+  async function route(req: Request, url: URL, path: string, method: string, csrf?: string): Promise<Response> {
+    {
       // 405: the allowed methods in the `Allow` header (RFC 9110) and the body alike.
       const allow = (m: string) => json(405, { ok: false, error: "MethodNotAllowed", allow: m }, { allow: m });
-      if (path === "/") return method === "GET" ? await page() : allow("GET");
+      if (path === "/") return method === "GET" ? await page(csrf) : allow("GET");
       if (path === "/jobs") {
         if (method === "POST") return await postJobs(req);
         if (method === "GET") return json(200, { ok: true, jobs: queue.jobs() });
@@ -309,19 +420,31 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
         return json(200, { ok: true, run_id: run.run_id, studio_run_id: run.studio_run_id, state: run.state, run, events: queue.events(runId) });
       }
       return fail(404, "NotFound", { path });
-    } catch (e) {
-      return fail(500, "InternalError", { detail: redact(e instanceof Error ? e.message : String(e)) });
     }
-  };
+  }
 }
 
-/** Start the API: bind, port and token validated first (a named refusal, never bound), then the queue opened. */
-export function serve(env: Env = process.env): { url: string; stop: () => void } {
+/** The part of `Bun.serve` `serve` uses (the injection seam: tests never bind a socket). */
+export type BunServe = (options: Parameters<typeof Bun.serve>[0]) => { port: number | undefined; stop: (closeActiveConnections?: boolean) => unknown };
+
+/** Start the API: bind, port, token, session secret, TLS (its files readable) and OAuth validated first
+ * (a named refusal, never bound), then the queue opened. With the TLS variables set it serves https on
+ * the same bind (Story 22.5: the Tailscale certificate for the MagicDNS name); without them http, as in 22.1. */
+export function serve(env: Env = process.env, bunServe: BunServe = (o) => Bun.serve(o)): { url: string; stop: () => void } {
   const bind = checkBind(apiBind(env));
   const port = apiPort(env);
   const token = apiToken(env);
+  const secret = sessionSecret(env);
+  const tls = tlsConfig(env);
+  const providers = oauthConfig(env);
+  if (tls) checkTlsFiles(tls);
   notifier(env); // Story 22.3: a misconfigured notifier is a named start error (cancels notify from here)
   const queue = Queue.open(env);
-  const server = Bun.serve({ hostname: bind, port, idleTimeout: 0, fetch: createApi({ queue, token, env }) });
-  return { url: `http://${bind}:${server.port}`, stop: () => { server.stop(true); queue.close(); } };
+  const origin = tls ? `https://${tls.name}:${port}` : `http://${bind}:${port}`;
+  const server = bunServe({
+    hostname: bind, port, idleTimeout: 0,
+    ...(tls ? { tls: { cert: Bun.file(tls.cert), key: Bun.file(tls.key) } } : {}),
+    fetch: createApi({ queue, token, env, session: { secret }, oauth: { providers, origin } }),
+  });
+  return { url: tls ? `https://${tls.name}:${server.port}` : `http://${bind}:${server.port}`, stop: () => { server.stop(true); queue.close(); } };
 }
