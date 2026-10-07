@@ -382,6 +382,8 @@ app session either: a daemon started that way never reached its internal
 engine (`Cannot connect to the Docker daemon at …docker.sock`). Sign in
 before starting it.
 
+**Never let an sbx command auto-start the daemon from a Claude session.** When the daemon is down, every sbx command but `sbx daemon status` starts one in the caller's context. From a Claude desktop-app session that daemon runs inside the app's container: it reads the sandbox records but cannot reach the inner engine, `sbx ls` lists nothing, and every `sbx exec` fails with `backend unavailable` (first agent PC, 2026-10-06, right after the v0.47.0 upgrade). Check `sbx daemon status` first. If it is not running, start it through the sign-in task from PowerShell, `Start-ScheduledTask -TaskName "Docker Sandboxes daemon"`; Git Bash rewrites the switches of `schtasks /Run /TN` as paths.
+
 `balanced` is deny-by-default plus an allow list of AI services and package
 registries (`allow-all` and `deny-all` are the alternatives; `sbx policy
 reset` starts over). `sbx diagnose` should end with no failures. The CLI has
@@ -621,6 +623,8 @@ delete and check out the affected files again.
   is an attended step. Run `.bmad-loop/plugins/studio-pipeline/reconcile.md`,
   record the verdict on the spec, and carry any `adjust-stories` notes into
   the unstarted entries' `invoke_dev_with`. Then close it the same way.
+
+**Pin an engine sandbox alive (sbx v0.47.0 and later).** `sbx run -d --name <sandbox>` keeps a local sandbox running after every session disconnects, until `sbx stop <sandbox>`. Verified 2026-10-06 on the first agent PC: the same boot, no restart, the sandbox still `running` 50 s after the last `sbx exec` ended. Run it once after `launch-epic.sh` has attached, and the engine no longer dies with the host-side `sbx exec` that started it (the hole the 2026-09-29 handoff lists as number 7). `sbx stop` releases the pin when the run is over.
 
 ## 4. The studio supervisor
 
@@ -874,6 +878,7 @@ the first agent PC on 2026-09-27 (with `C:\agent-work`).
 | The status page will not open in a phone browser | it sits behind the same bearer header as the API, and an address bar cannot send one | use a client that sends the header, or the API's `/status` through `curl` (§4.5) |
 | A bmad-loop story is finished and committed, but the engine calls its session stalled | the dev session named its spec `<id>.md`; the engine resolves `<id>-*.md` and reads the story as pending (2026-09-28) | each `stories.yaml` entry names the file pattern; rename the file and commit if it happens (§3.8) |
 | An engine nudge is swallowed and the sandbox's default permission mode changes to `auto` | Claude Code showed "Make auto mode your default?" in a bypass session, and the nudge's keystrokes answered it (2026-09-28) | `provision-engine.sh` marks the dialog seen (`hasSeenAutoDefaultNudge` and its two siblings in the sandbox's `~/.claude.json`, confirmed in the 2.1.284 binary); engine sessions pass the mode explicitly; if it ever shows again, put `permissions.defaultMode` back in the sandbox's `~/.claude/settings.json` |
+| An sbx command issued from a Claude session while the daemon is down auto-starts a daemon that cannot reach the inner engine (`backend unavailable`, `sbx ls` empty) | first agent PC, 2026-10-06, after `winget upgrade Docker.sbx` to v0.47.0 | `sbx daemon status` before any other sbx command from a session; start the daemon only through the sign-in task or `start.ps1` (§3.5, §4.3) |
 
 ## 9. Retiring ClaudeOS on the main PC (done 2026-09-26, one step left)
 
