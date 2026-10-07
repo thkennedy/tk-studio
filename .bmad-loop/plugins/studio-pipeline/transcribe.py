@@ -137,7 +137,10 @@ def entry(epic: int, story: dict, canon: dict[str, str]) -> tuple[str, str]:
         f"is the investigation). Project rules and the verify gate: the studio customization "
         f"(_bmad/custom/bmad-build-auto.toml). Routing: .bmad-loop/routing.current.json; pass "
         f"implementer.model and reviewers.model explicitly on every subagent launch. Deviations: "
-        f"one `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto Run Result."
+        f"one `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto Run Result. "
+        f"Spec file: write the executor spec as `stories/{key}-<slug of the title>.md` in the spec "
+        f"folder; the engine resolves it by the glob `{key}-*.md`, and a file named `{key}.md` is "
+        f"read as pending (loop deficiency 1, story 21-6)."
     )
     lines = [f"- id: {q(key)}", f"  title: {q(story['title'])}", folded("description", desc),
              folded("invoke_dev_with", dev)]
