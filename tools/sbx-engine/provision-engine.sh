@@ -81,6 +81,21 @@ claude plugin marketplace add "$STUDIO" >/dev/null 2>&1
 claude plugin install tk-studio@tk-studio --scope user 2>&1 | tail -1
 claude plugin update tk-studio@tk-studio --scope user 2>&1 | tail -1
 
+# Claude Code's "Make auto mode your default permission mode?" dialog is gated by
+# hasSeenAutoDefaultNudge in ~/.claude.json. On 2026-09-28 it swallowed an engine
+# nudge in a bypass session and the keystrokes flipped the sandbox's default mode
+# (loop deficiency 2, runbook section 8). Mark it and its two siblings seen, so no
+# headless session ever meets them.
+step claude-flags
+python3 - <<'PY'
+import json, os
+p = os.path.expanduser("~/.claude.json")
+d = json.load(open(p)) if os.path.exists(p) else {}
+d.update({"hasSeenAutoDefaultNudge": True, "hasSeenAutoDefaultNotice": True, "hasSeenAutoModeEntryWarning": True})
+json.dump(d, open(p, "w"), indent=2)
+print("seen:", ", ".join(k for k in ("hasSeenAutoDefaultNudge", "hasSeenAutoDefaultNotice", "hasSeenAutoModeEntryWarning") if d.get(k)))
+PY
+
 # The sandbox is its own machine for the studio: its own store and ledger
 # (AD-12/AD-20), with the project registered as developer.
 step store
