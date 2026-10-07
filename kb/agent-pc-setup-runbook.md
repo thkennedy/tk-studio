@@ -667,6 +667,7 @@ User scope each time it starts, so a change needs no new logon.
 | `TK_SUPERVISOR_DB` | always | the queue database file. It must lie outside every git checkout, the studio store and `TK_STUDIO_ROOT`, for example `C:\agent-work\supervisor\queue.db` |
 | `TK_SUPERVISOR_BIND` | always | this machine's Tailscale IPv4 address (`tailscale ip -4`). Anything outside `100.64.0.0/10` is refused |
 | `TK_SUPERVISOR_TOKEN` | always | the API's bearer token. Never logged, never rendered |
+| `TK_SUPERVISOR_SESSION_SECRET` | always | signs the browser's session cookie (Story 22.5). Random, at least 32 bytes, else `serve` refuses with `SessionSecretWeak`. Never logged, never rendered |
 | `TK_SUPERVISOR_PORT` | no | the API's port, default `8787` |
 | `TK_SUPERVISOR_TRANSCRIPT_BACKUP` | no, warned when unset | the nightly backup's `claude-projects` folder (§6). A resume restores a missing transcript from it, and every host run's transcript is copied into it |
 | `TK_SUPERVISOR_NOTIFY` | no | the notification target: `ntfy` or `telegram`. Unset sends nothing |
@@ -675,6 +676,9 @@ User scope each time it starts, so a change needs no new logon.
 | `TK_SUPERVISOR_TELEGRAM_CHAT` | with `telegram` | the chat id that receives the message |
 | `TK_SUPERVISOR_WORK` | for editor-in-the-loop runs | the work folder that holds the snapshots, `C:\agent-work` |
 | `TK_SUPERVISOR_CONFIG` | no | the per-job tier config. Unset runs every job on the host tier |
+| `TK_SUPERVISOR_TLS_CERT`, `TK_SUPERVISOR_TLS_KEY`, `TK_SUPERVISOR_TLS_NAME` | for https and the phone sign-in (§4.5) | the `tailscale cert` certificate and key files and the machine's MagicDNS name. All three or none (`TlsConfigIncomplete`); set them only after the files exist (`TlsCertUnreadable`) |
+| `TK_SUPERVISOR_OAUTH_GOOGLE_CLIENT_ID`, `_CLIENT_SECRET`, `_ALLOW` | for Google sign-in | all three or none (`OAuthConfigIncomplete`); needs the TLS variables (`OAuthNeedsHttps`). `_ALLOW` is the one Google account allowed |
+| `TK_SUPERVISOR_OAUTH_GITHUB_CLIENT_ID`, `_CLIENT_SECRET`, `_ALLOW` | for GitHub sign-in | the same rules; `_ALLOW` is the one GitHub login allowed |
 
 Set them from your own PowerShell 7 terminal. The token line makes a random
 token and stores it without printing it:
@@ -687,6 +691,7 @@ New-Item -ItemType Directory -Force C:\agent-work\supervisor | Out-Null
 [Environment]::SetEnvironmentVariable('TK_SUPERVISOR_TOKEN', [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)), 'User')
 [Environment]::SetEnvironmentVariable('TK_SUPERVISOR_TRANSCRIPT_BACKUP', 'C:\agent-work\backups\claude-projects', 'User')
 [Environment]::SetEnvironmentVariable('TK_SUPERVISOR_WORK', 'C:\agent-work', 'User')
+[Environment]::SetEnvironmentVariable('TK_SUPERVISOR_SESSION_SECRET', [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(48)), 'User')
 ```
 
 The same, as one script that also wires the notifier (Telegram through the
@@ -694,7 +699,8 @@ Hermes bot by default, an ntfy topic generated and ready; the supervisor's
 `operator-decisions.md` §6) and puts the Startup shortcut of §4.3 in place:
 `tools/agent-pc/set-supervisor-env.ps1` in this repo, run once from your own
 PowerShell 7 terminal. It generates the token and the topic and keeps them on
-a re-run; `-ShowToken` prints the token once, for the phone.
+a re-run; `-ShowToken` prints the token once, for the phone, and `-WithTls` fetches
+the Tailscale certificate and sets the TLS variables (§4.5).
 
 The worker never sees the API token or the notifier's credentials: the
 supervisor removes them, and `ANTHROPIC_API_KEY`, from every worker's
@@ -719,14 +725,17 @@ command with the repo path filled in, then:
 1. Reads the variables of §4.2 from the User environment. A missing
    `TK_SUPERVISOR_BIND` or `TK_SUPERVISOR_TOKEN` stops it and names the
    variable, never a value.
-2. Starts the API keeper in the same console. The keeper restarts the API with
+2. With the three TLS variables set, runs `tailscale cert` once for the MagicDNS
+   name into the certificate files (bounded at 120 s; a failure is a warning, and
+   `serve` uses the files as they are).
+3. Starts the API keeper in the same console. The keeper restarts the API with
    a back-off whenever it exits, so `/status` answers while long runs are
    driven.
-3. Starts the Docker Sandboxes daemon from `$HOME` when `sbx ls` shows it is
+4. Starts the Docker Sandboxes daemon from `$HOME` when `sbx ls` shows it is
    not running.
-4. Runs one recovery pass: a run left behind by a killed supervisor resumes
+5. Runs one recovery pass: a run left behind by a killed supervisor resumes
    from its transcript, or ends `partial` with the reason named.
-5. Loops the pacer: a tick, then a drain of the API's submissions, then a
+6. Loops the pacer: a tick, then a drain of the API's submissions, then a
    sleep of `-IntervalSeconds` (default 60).
 
 Right after logon Tailscale may not have its address yet. The keeper warns and
@@ -751,9 +760,31 @@ curl -H "Authorization: Bearer <token>" http://<tailscale-ip>:8787/status
 ```
 
 It answers JSON: the run counts by state, the live runs, and the checkout
-locks that are held. `GET /` on the same address is the status page. It needs
-the same bearer header, which a phone's address bar cannot send: use a client
-that sends it.
+locks that are held. With the TLS variables set, the same call is
+`https://<TLS_NAME>:8787/status`; the certificate is a public one, so `curl`
+needs no `-k`.
+
+**The status page from a phone (Story 22.5).** `GET /` without the bearer
+header answers a sign-in page: a form for the API token, "Continue with
+Google" and "Continue with GitHub". Sign-in sets a seven-day `HttpOnly`,
+`Secure` session cookie, so it works only over https. The operator's steps,
+once:
+
+1. Enable HTTPS certificates in the Tailscale admin console (DNS → HTTPS
+   Certificates). Then set the TLS variables (`set-supervisor-env.ps1 -WithTls`,
+   or by hand `tailscale cert --cert-file <TLS_CERT> --key-file <TLS_KEY>
+   <TLS_NAME>` followed by the three variables) and restart `start.ps1`. Open
+   `https://<TLS_NAME>:8787/` on the phone and sign in with the token.
+2. For Google and GitHub: register a Google OAuth web client and a GitHub
+   OAuth app with the callbacks `https://<TLS_NAME>:8787/auth/google/callback`
+   and `https://<TLS_NAME>:8787/auth/github/callback`, set the six
+   `TK_SUPERVISOR_OAUTH_*` variables (`_ALLOW` is the one Google account and
+   the one GitHub login allowed), and restart `start.ps1`.
+
+There is no sign-out: a session ends at its expiry, or rotate
+`TK_SUPERVISOR_SESSION_SECRET` and restart to end every session at once. The
+certificate is renewed only when `start.ps1` starts (supervisor DW-21), so a
+box that stays up past the certificate's 90 days needs the tab restarted.
 
 ### 4.6 What runs where
 
@@ -875,7 +906,11 @@ the first agent PC on 2026-09-27 (with `C:\agent-work`).
 | The supervisor's tests pass in the Linux engine and fail on the Windows host | the loop's verify gate runs on Linux only: a lowercased path (21-4), 29 end-to-end failures and a `~\` separator (22-2, 22-3) | run `bun test` on the Windows host, in a clone, after every landed story and before every merge (§3.8) |
 | A supervisor signalled while it starts a worker dies and leaves the worker running (POSIX) | its signal handlers were installed after `spawn()` returned, and `spawn()` returns after the child is already running | fixed in the supervisor: the handlers are installed before the spawn. win32 is not affected: a worker there is not detached and ends with its supervisor |
 | A supervisor killed within half a second of starting a worker leaves no record of that worker | on win32 the worker record waits on a PowerShell read of the start time, about 0.5 s (supervisor DW-19, open) | the worker still ends with its supervisor on win32, and the run ends `partial` naming no session |
-| The status page will not open in a phone browser | it sits behind the same bearer header as the API, and an address bar cannot send one | use a client that sends the header, or the API's `/status` through `curl` (§4.5) |
+| The status page will not open in a phone browser | it sat behind the same bearer header as the API, and an address bar cannot send one | Story 22.5: the page signs the operator in (token form, Google, GitHub) over https with a session cookie (§4.5); over plain http, the bearer header or a client that sends it |
+| `serve` refuses to start with `SessionSecretMissing` or `SessionSecretWeak` | Story 22.5 made the session cookie's signing secret required, at least 32 bytes | set `TK_SUPERVISOR_SESSION_SECRET` (the setup script does, §4.2) |
+| `serve` refuses to start with `TlsConfigIncomplete`, `TlsCertUnreadable`, `OAuthConfigIncomplete` or `OAuthNeedsHttps` | the TLS trio and each OAuth trio are all-or-none, the certificate files must exist, and OAuth redirects need https | set all three or none; run `tailscale cert` before the TLS variables (`-WithTls`); set the TLS variables before any OAuth trio (§4.5) |
+| The token form on the sign-in page refuses over http | the session cookie is `Secure`, so a browser never keeps it over http | set the TLS variables; the bearer header still works over http |
+| https fails with an expired certificate on a box up longer than 90 days | `tailscale cert` runs only when `start.ps1` starts (supervisor DW-21) | restart the supervisor tab before the certificate expires |
 | A bmad-loop story is finished and committed, but the engine calls its session stalled | the dev session named its spec `<id>.md`; the engine resolves `<id>-*.md` and reads the story as pending (2026-09-28) | each `stories.yaml` entry names the file pattern; rename the file and commit if it happens (§3.8) |
 | An engine nudge is swallowed and the sandbox's default permission mode changes to `auto` | Claude Code showed "Make auto mode your default?" in a bypass session, and the nudge's keystrokes answered it (2026-09-28) | `provision-engine.sh` marks the dialog seen (`hasSeenAutoDefaultNudge` and its two siblings in the sandbox's `~/.claude.json`, confirmed in the 2.1.284 binary); engine sessions pass the mode explicitly; if it ever shows again, put `permissions.defaultMode` back in the sandbox's `~/.claude/settings.json` |
 | An sbx command issued from a Claude session while the daemon is down auto-starts a daemon that cannot reach the inner engine (`backend unavailable`, `sbx ls` empty) | first agent PC, 2026-10-06, after `winget upgrade Docker.sbx` to v0.47.0 | `sbx daemon status` before any other sbx command from a session; start the daemon only through the sign-in task or `start.ps1` (§3.5, §4.3) |
