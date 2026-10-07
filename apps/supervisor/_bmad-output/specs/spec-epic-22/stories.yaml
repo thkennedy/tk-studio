@@ -108,3 +108,29 @@
     file named <id>.md is read as pending (story 21-6).
     Oversize (22-2 gate, 2026-09-29): plans/22-3.md lists 11 files, past the L band. If
     the Files list grows past those 11, halt and record it rather than widen the story.
+
+- id: "22-5-sign-in-from-the-phone"
+  title: "Sign In from the Phone"
+  description: >-
+    I want the status page to sign me in with the token, with Google, or with GitHub,
+    and keep me signed in with a cookie, So that I can watch and cancel runs from a
+    phone browser, which cannot send the bearer header (DW-20).
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 22.5: Sign
+    In from the Phone", the authoritative specification (user story and acceptance
+    criteria). Read the epic's own narrative (the paragraphs under "## Epic 22:") for
+    scope, rulings and the repo the story targets; transcribe the story into the spec's
+    intent contract and never re-derive, generalise or extend it. Plan: plans/22-5.md
+    when present (its Code Map is the investigation). Project rules and the verify gate:
+    the studio customization (_bmad/custom/bmad-build-auto.toml). Routing:
+    .bmad-loop/routing.current.json; pass implementer.model and reviewers.model
+    explicitly on every subagent launch. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result.
+    Rule (operator, 2026-10-06): write the story spec as stories/<this entry's
+    id>-<slug of the title>.md. The engine resolves a spec by the glob <id>-*.md, and a
+    file named <id>.md is read as pending (story 21-6).
+    Decided (operator, 2026-10-06): the constraints in
+    _bmad-output/specs/spec-epic-22/operator-decisions.md section 7 are part of this
+    story (HTTPS via the Tailscale certificate, operator-registered OAuth apps,
+    allow-listed identities, CSRF on cancel, bind unchanged, secrets dropped from logs,
+    pages and worker environments). Sections 1 to 6 there are decided too.
