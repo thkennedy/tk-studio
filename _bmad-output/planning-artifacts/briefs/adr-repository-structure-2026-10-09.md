@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Proposed id | AD-21 (the spine ends at AD-20; this number is taken on signature) |
-| Status | **Proposed, awaiting Tim's ruling.** Nothing in this document is in force until signed. |
+| Status | **Proposed, awaiting Tim's ruling on the repository (O2).** Nothing in this document is in force until signed. **Partial ruling 2026-10-09:** Tim ruled **O5** (keep the plugin form, drop the marketplace; the installer writes a skills-dir plugin) and held the rest until the design spec folds in every feature already planned: `_bmad-output/planning-artifacts/design/studio-design-spec-2026-10-09/README.md` (its Appendix C carries the remaining rulings, D1 to D8). |
 | Date | 2026-10-09 |
 | Decides | Where the Claude Code plugin, the Bun supervisor service and the planned Next.js front end live; how each is versioned and released; how a newcomer installs and updates all three |
 | Evidence | `_bmad-output/planning-artifacts/research/studio-front-end-and-repo-structure-2026-10-09/research.md`. Bracketed numbers below are that report's source rows. |
