@@ -135,9 +135,37 @@ Tim allowed a full rewrite if it offers clear benefits.
 - History preservation scores worst.
 - Deferred rather than rejected: a workspace tool can be added to O2 later if the task count grows.
 
-### O5. tk-studio stops being a Claude Code plugin (under research)
+### O5. Keep the plugin form, drop the marketplace: an installer-written skills-dir plugin (recommended as the distribution overlay on O2)
 
-Raised by Tim on 2026-10-09 after the first draft. The studio's deterministic cores are stdlib Python run through `uv run`; its attended surface is a set of skills; the BMad base itself is not a plugin but is installed into each project by the upstream installer. If the studio were distributed the same way (skills written into the user's or project's `.claude/skills/` by the installer, the cores as a CLI), drawbacks (a), (b) and the no-update-all problem disappear, and the installer becomes the only distribution. What it would cost (plugin-scoped agents and hooks, `CLAUDE_PLUGIN_ROOT`, the catalog lockstep the drift check gates on, the harness-loadable conformance plane, AD-1 and AD-13 as written) and whether the native harness now covers parts of the studio outright are the subject of the second research run (`research/studio-native-overlap-and-greenfield-2026-10-09/`). **This section is filled from that run's results before signature.**
+Raised by Tim on 2026-10-09; researched in `research/studio-native-overlap-and-greenfield-2026-10-09/research.md` §2 (dimension C1). O5 is orthogonal to the repository choice: it replaces O2's distribution rule (a) and §7's plugin leg.
+
+**What it is.** The installer writes `~/.claude/skills/tk-studio/` containing `.claude-plugin/plugin.json`, `skills/` (18 skills) and `agents/` (two role agents). Claude Code loads that folder as the plugin `tk-studio@skills-dir`: namespaced, agents bundled, loaded in place and "never copied", with no marketplace, no clone and no install record; `claude plugin init` has scaffolded this form since v2.1.157, and personal scope carries none of the project-scope restrictions. The repository's `.claude-plugin/marketplace.json` stays only for developers who clone, pinned to a tag.
+
+**Why.** Anthropic's docs say skills, subagents, hooks and MCP "all work on their own, without a plugin"; the plugin-only surface (`bin/`, monitors, channels, mods, `userConfig`, `plugin eval`) is nothing the studio uses, and monitors and `bin/` never reach unattended or claude.ai sessions. The studio's plugin uses only `${CLAUDE_PLUGIN_ROOT}` (ten skills), two agents and the install record. The marketplace is what costs: whole-repository clone on add and refresh (the MAX_PATH failure live on this box), one cache copy per version, auto-update off by default and on a ten-minute random delay when on, project-scope enable that does not install, and the 2026 Windows issue stream. BMad, Ruflo and SuperClaude all treat the marketplace as the secondary or absent path.
+
+**Benefits**
+
+- One installer, one updater, one version of truth (the roster); the plugin release plane's version gate, archive zip and catalog lockstep collapse into the installer, which the internal record lists among the things the studio would rather not own.
+- No clone, no cache copies, no MAX_PATH exposure, no update-all problem; skills editable in place on the dev box.
+- Namespacing, the two agents, one-unit enable and `claude plugin validate` are kept.
+- Sandbox provisioning becomes a folder copy instead of a marketplace install.
+
+**Drawbacks and the rule that contains each**
+
+| Drawback | Containing rule |
+|---|---|
+| Claude computes no version for a skills-dir plugin and `claude plugin update` does not apply | the roster is the only version gate; `tk-studio doctor` compares the folder's `plugin.json` version to the roster |
+| `${CLAUDE_PLUGIN_ROOT}` substitution for this form is not stated in the docs; a local probe was declined by the session's permission mode | Tim runs the probe (PowerShell version in the handoff); if it fails, the ten skills switch to `${CLAUDE_SKILL_DIR}`-relative paths |
+| The drift check's plugin plane reads `installed_plugins.json`, and the conformance suite's harness-loadable assertion with it | both move to the skills-dir folder plus the roster; AD-13's wording ("catalog lockstep") is amended |
+| No claude.ai sync, directory listing or `plugin eval` guarantee for this form | not needed today; `plugin eval` on a path is an open question |
+| Per-machine: every machine and sandbox image runs the installer | already true (a project-scope enable never installed) |
+| AD-1 as written names the git marketplace as the distribution | amend AD-1: composite distribution stays, the vehicle is the installer |
+
+**Scoring against the frame.** Gates: 1 pass (one clone, or none: the installer never clones); 2 pass (the pinned zip and the `tk-studio--v` prefix stay, consumed by the installer); 3 unchanged; 4 unchanged; 5 unchanged; 6 strengthened. Weighted preferences, applied as an overlay on O2: newcomer clarity 5, release tooling 4, blast radius 4 (no marketplace coupling to the repository), history 5 (nothing moves), CI 4, sandbox mounts 4: a weighted 4.40, above every repository option alone, because it removes the costs the red team found rather than containing them.
+
+**Red team (digest `digests/C1-redteam-1.md`, folded in).** Three rules added: (1) a same-named marketplace install silently shadows a skills-dir plugin, and this host has `tk-studio@tk-studio` at user and project scope, so the installer uninstalls every marketplace copy and the repository drops its committed `extraKnownMarketplaces` and `enabledPlugins` entries; developers use the installer in link mode, never a second marketplace copy. (2) Docker Sandboxes mount the host's `~/.claude/skills` into the microVM as an experimental shared store, so one install serves the host and every sandbox with the mount set `readonly`, and the drift check covers the sandbox store. (3) Skills-dir is documented as the no-marketplace development path, not a sharing path: a positioning risk accepted with a deprecation watch. The syscall cost of skill directories on Windows (#95306) is a "prove it on the box" item.
+
+**Decision put to Tim (adds to §8):** adopt O5 as the distribution rule of O2, or keep O2's rule (a) (marketplace plus hosted archive catalog).
 
 ---
 

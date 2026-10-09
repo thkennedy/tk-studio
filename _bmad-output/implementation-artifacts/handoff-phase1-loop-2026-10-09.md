@@ -2,6 +2,29 @@
 
 Written for a fresh Claude Code session on the agent PC (TIM-PC-2). It supersedes `handoff-phase1-loop-2026-10-07.md` for the state of Phase 1. Engine mechanics: the 09-28 handoff and runbook §3.8. The starter prompt is at the end.
 
+## Update at the end of session 2b (2026-10-09, later still): the plugin question, Jev, overlap and greenfield
+
+Tim asked, after reading the ADR: is being a Claude Code plugin still worth it; research "jev" auto-model routing; what else we built is already out there; how we would build from scratch. A second deep-recon run answered all four and is closed: `_bmad-output/planning-artifacts/research/studio-native-overlap-and-greenfield-2026-10-09/` (`research.md`, six digests C1 to C6, two red-team digests, `.memlog.md`; ledger 18 verified, 39 unverified; citations clean; staleness earliest 2026-11-01). Everything is on branch `research/synthesis-adr` (PR #102) with the run-1 close-out.
+
+- **Plugin or not (ADR O5, scored, awaiting Tim):** keep the plugin form, drop the marketplace. The installer writes a skills-dir plugin at `~/.claude/skills/tk-studio/` (loads as `tk-studio@skills-dir`, namespaced, agents bundled, in place, no clone). Anthropic's docs say skills, agents, hooks and MCP work without a plugin; the plugin-only surface is nothing the studio uses; the marketplace is what costs (whole-repo clone, cache per version, no auto-update, the Windows issue stream). Red team added three rules: uninstall every marketplace copy of `tk-studio` (this box has it at user and project scope and it would silently shadow the skills-dir copy); sandboxes read the host folder through Docker's experimental `agent-skills` mount set readonly; the form is documented as the "develop without a marketplace" path, accepted with a deprecation watch. **Open:** whether `${CLAUDE_PLUGIN_ROOT}` substitutes in a skills-dir plugin. Tim's probe, in PowerShell:
+
+  ```powershell
+  $P = "$HOME\.claude\skills\zzprobe"; New-Item -ItemType Directory -Force "$P\.claude-plugin","$P\skills\probe" | Out-Null
+  Set-Content -NoNewline -Encoding ascii "$P\.claude-plugin\plugin.json" '{"name":"zzprobe","version":"0.0.1"}'
+  Set-Content -Encoding ascii "$P\skills\probe\SKILL.md" @("---","name: probe","description: probe","---",'Reply with exactly: ROOT=${CLAUDE_PLUGIN_ROOT} SKILLDIR=${CLAUDE_SKILL_DIR}')
+  claude -p "/zzprobe:probe" --model haiku --max-turns 1
+  Remove-Item -Recurse -Force $P
+  ```
+
+  If `ROOT=` comes back as a path, O5 stands as written; if it comes back literal, the ten skills switch to `${CLAUDE_SKILL_DIR}` paths (mechanical).
+- **Jev:** TypeSafe AI's typed decision model; the Claude Code routers are OAuth-forwarding proxies, the legal page forbids intermediating session tokens, no per-model Max quota weighting exists, measured capture was 3 percent. Not for routing; a possible shadow-mode oracle for sizing and finding severity later. R2.
+- **Overlap map:** official Claude Code covers session hosting (agent view daemon, research preview), the consult leg (advisor), phone steering (Remote Control, channels), raw metering (OTel, `/usage`), review (`/code-review`, `ultrareview`) and research fan-out; nothing official or unofficial covers the queue contract, pacer and bands, the story-aware gate, the ledger and evolve loop, the drift check against a pinned base, the adapter, the conformance suite, the office or the engagement loop. Third-party: converge on bmad-loop (landing native Windows), ccusage for parsing, Backlog.md, claude-code-action as a cheap PR reviewer; Paperclip is borrow-ideas only (no Windows, server-side token storage).
+- **Greenfield (`briefs/greenfield-studio-2026-10-09.md`):** no rewrite; the from-scratch stack is the current shape with thinner commodity layers (sign-in to Remote Control, transcript parsing to OTel, the plugin release plane to the installer) and the spend moved to the engagement loop, story-keyed metering and the office. Four moves in order: packaging and repo (O2 plus O5), service owns engine lifetime and worktrees (hole 16), thin the commodity layers (advisor arm, OTel meter, review surfaces), build the differentiators.
+- **Standing risk (greenfield red team, material):** the Max-subscription premise. The legal page says developers "including those using the Agent SDK, should use API key authentication"; the policy moved four times in 2026; `--bare` (never reads OAuth) "will become the default for `-p`". Nothing forbids own-seat scripted `claude -p` today. Design an API-key fallback leg; record the reading in the ADR; watch the clause. Also: headless runs fail rather than wait at usage limits (the pacer's job), and Docker Sandboxes on Windows is 0.x with 56 open Windows issues (holes 7 and 13 are its lived form).
+- **Denied in-session:** a local skills-dir probe (writes under `~/.claude`, runs `claude -p`) was declined by the permission mode and not retried; a scratch `--plugin-dir` probe from the red team remains in the session scratchpad (harmless).
+
+**Next session, in order:** A sanity; Tim's probe result and his rulings on ADR §8 plus O5 (eight rulings now); merge PR #102; record the rulings in the ADR header and the spine (AD-21, and the AD-1 amendment); then the front-end brief; then packaging and repo (O2 plus O5, rehearsal first) or the first front-end epic as Tim decides; then Epic 24.3/24.4 with the advisor arm, Epic 23, holes 9, 10, 11, 16.
+
 ## Update at the end of session 2 (2026-10-09, later the same day)
 
 - **The research run is closed.** `research.md` is complete (decision-first summary, benefits and drawbacks per approach, red-team contrary evidence, twelve recommendations, 266-row appendix, computed staleness map with the earliest re-check on 2026-11-01; ledger per `recon_kit.py tally`: 36 verified, 50 unverified, 5 disputed, 1 overturned). Verify digests for A1 and B1 to B5, `A-redteam-1.md` and `citation-check.md` are on disk. All of it is in **PR #102** (`research/synthesis-adr`).
