@@ -790,7 +790,7 @@ box that stays up past the certificate's 90 days needs the tab restarted.
 
 | Tier | Where the worker runs | Permission mode |
 |---|---|---|
-| host (default) | `claude -p` in the supervisor's console session, under the Max login | `auto`, or `acceptEdits` when the job asks. A bypass request is refused before anything starts |
+| host (default) | `claude -p` in the supervisor's console session, under the Max login | `auto`, or `acceptEdits` when the job asks. A bypass request is refused before anything starts. The project's tracked `.claude/settings.json` allows `Bash(uv run:*)`, so the studio's own scripts run without the auto-mode classifier (supervisor DW-22); the deny list of §3.2 still applies |
 | sbx | `claude -p` inside the project's Docker Sandboxes microVM (§3.8) | bypass is allowed there |
 
 The tier comes from the submission or from `TK_SUPERVISOR_CONFIG`, never from
@@ -914,6 +914,7 @@ the first agent PC on 2026-09-27 (with `C:\agent-work`).
 | A bmad-loop story is finished and committed, but the engine calls its session stalled | the dev session named its spec `<id>.md`; the engine resolves `<id>-*.md` and reads the story as pending (2026-09-28) | each `stories.yaml` entry names the file pattern; rename the file and commit if it happens (§3.8) |
 | An engine nudge is swallowed and the sandbox's default permission mode changes to `auto` | Claude Code showed "Make auto mode your default?" in a bypass session, and the nudge's keystrokes answered it (2026-09-28) | `provision-engine.sh` marks the dialog seen (`hasSeenAutoDefaultNudge` and its two siblings in the sandbox's `~/.claude.json`, confirmed in the 2.1.284 binary); engine sessions pass the mode explicitly; if it ever shows again, put `permissions.defaultMode` back in the sandbox's `~/.claude/settings.json` |
 | An sbx command issued from a Claude session while the daemon is down auto-starts a daemon that cannot reach the inner engine (`backend unavailable`, `sbx ls` empty) | first agent PC, 2026-10-06, after `winget upgrade Docker.sbx` to v0.47.0 | `sbx daemon status` before any other sbx command from a session; start the daemon only through the sign-in task or `start.ps1` (§3.5, §4.3) |
+| A host-tier job ends `blocked` with "This command requires approval" on the studio's own `uv run` script | the host tier runs `claude -p --permission-mode auto`, and the auto-mode classifier does not approve the studio's scripts reliably (two of two `studio-health` runs denied on 2026-10-09, ten calls approved the day before) | `permissions.allow: ["Bash(uv run:*)"]` in the project's tracked `.claude/settings.json` (§4.6); the run itself is honest and ends `blocked` naming the gap |
 
 ## 9. Retiring ClaudeOS on the main PC (done 2026-09-26, one step left)
 
