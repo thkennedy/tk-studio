@@ -156,12 +156,13 @@ export function allowed(identity: string, allow: string): boolean {
 
 const CSS = `
 *{box-sizing:border-box}
-body{margin:0;padding:1rem;font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#1b1b1b;background:#f6f6f4;max-width:28rem}
+body{margin:0;padding:1rem;font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#e4e4e4;background:#141414;max-width:28rem}
+:root{color-scheme:dark}
 h1{font-size:1.25rem;margin:.25rem 0 1rem}
-form,.links{background:#fff;border:1px solid #ddd;border-radius:6px;padding:.75rem;margin:.75rem 0}
+form,.links{background:#1e1e1e;border:1px solid #333;border-radius:6px;padding:.75rem;margin:.75rem 0}
 label{display:block;margin-bottom:.35rem}input[type=password]{width:100%;padding:.5rem;font-size:1rem}
-button,.links a{display:block;width:100%;margin-top:.6rem;padding:.6rem;font-size:1rem;text-align:center;border:1px solid #888;border-radius:6px;background:#eee;color:#1b1b1b;text-decoration:none}
-.note{color:#8a4b00}
+button,.links a{display:block;width:100%;margin-top:.6rem;padding:.6rem;font-size:1rem;text-align:center;border:1px solid #555;border-radius:6px;background:#2a2a2a;color:#e4e4e4;text-decoration:none}
+.note{color:#e0a458}
 `;
 
 /** The static line a sign-in page served without https carries: the `Secure` cookie never sticks over http. */
