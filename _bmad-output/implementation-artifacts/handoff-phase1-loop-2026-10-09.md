@@ -2,6 +2,37 @@
 
 Written for a fresh Claude Code session on the agent PC (TIM-PC-2). It supersedes `handoff-phase1-loop-2026-10-07.md` for the state of Phase 1. Engine mechanics: the 09-28 handoff and runbook §3.8. The starter prompt is at the end.
 
+## Update at the end of session 2b (2026-10-09, later still): the plugin question, Jev, overlap and greenfield
+
+Tim asked, after reading the ADR: is being a Claude Code plugin still worth it; research "jev" auto-model routing; what else we built is already out there; how we would build from scratch. A second deep-recon run answered all four and is closed: `_bmad-output/planning-artifacts/research/studio-native-overlap-and-greenfield-2026-10-09/` (`research.md`, six digests C1 to C6, two red-team digests, `.memlog.md`; ledger 18 verified, 39 unverified; citations clean; staleness earliest 2026-11-01). Everything is on branch `research/synthesis-adr` (PR #102) with the run-1 close-out.
+
+- **Plugin or not (ADR O5, scored, awaiting Tim):** keep the plugin form, drop the marketplace. The installer writes a skills-dir plugin at `~/.claude/skills/tk-studio/` (loads as `tk-studio@skills-dir`, namespaced, agents bundled, in place, no clone). Anthropic's docs say skills, agents, hooks and MCP work without a plugin; the plugin-only surface is nothing the studio uses; the marketplace is what costs (whole-repo clone, cache per version, no auto-update, the Windows issue stream). Red team added three rules: uninstall every marketplace copy of `tk-studio` (this box has it at user and project scope and it would silently shadow the skills-dir copy); sandboxes read the host folder through Docker's experimental `agent-skills` mount set readonly; the form is documented as the "develop without a marketplace" path, accepted with a deprecation watch. **Open:** whether `${CLAUDE_PLUGIN_ROOT}` substitutes in a skills-dir plugin. Tim's probe, in PowerShell:
+
+  ```powershell
+  $P = "$HOME\.claude\skills\zzprobe"; New-Item -ItemType Directory -Force "$P\.claude-plugin","$P\skills\probe" | Out-Null
+  Set-Content -NoNewline -Encoding ascii "$P\.claude-plugin\plugin.json" '{"name":"zzprobe","version":"0.0.1"}'
+  Set-Content -Encoding ascii "$P\skills\probe\SKILL.md" @("---","name: probe","description: probe","---",'Reply with exactly: ROOT=${CLAUDE_PLUGIN_ROOT} SKILLDIR=${CLAUDE_SKILL_DIR}')
+  claude -p "/zzprobe:probe" --model haiku --max-turns 1
+  Remove-Item -Recurse -Force $P
+  ```
+
+  **Result (Tim, 2026-10-09, from `C:\GitHub\the-universe-awaits`):** `ROOT=C:/Users/tim/.claude/skills/zzprobe SKILLDIR=C:/Users/tim/.claude/skills/zzprobe/skills/probe`. Both variables substitute, forward slashes, so O5 stands as written and the ten skills need no change. The probe folder was removed.
+- **Jev:** TypeSafe AI's typed decision model; the Claude Code routers are OAuth-forwarding proxies, the legal page forbids intermediating session tokens, no per-model Max quota weighting exists, measured capture was 3 percent. Not for routing; a possible shadow-mode oracle for sizing and finding severity later. R2.
+- **Overlap map:** official Claude Code covers session hosting (agent view daemon, research preview), the consult leg (advisor), phone steering (Remote Control, channels), raw metering (OTel, `/usage`), review (`/code-review`, `ultrareview`) and research fan-out; nothing official or unofficial covers the queue contract, pacer and bands, the story-aware gate, the ledger and evolve loop, the drift check against a pinned base, the adapter, the conformance suite, the office or the engagement loop. Third-party: converge on bmad-loop (landing native Windows), ccusage for parsing, Backlog.md, claude-code-action as a cheap PR reviewer; Paperclip is borrow-ideas only (no Windows, server-side token storage).
+- **Greenfield (`briefs/greenfield-studio-2026-10-09.md`):** no rewrite; the from-scratch stack is the current shape with thinner commodity layers (sign-in to Remote Control, transcript parsing to OTel, the plugin release plane to the installer) and the spend moved to the engagement loop, story-keyed metering and the office. Four moves in order: packaging and repo (O2 plus O5), service owns engine lifetime and worktrees (hole 16), thin the commodity layers (advisor arm, OTel meter, review surfaces), build the differentiators.
+- **Standing risk (greenfield red team, material):** the Max-subscription premise. The legal page says developers "including those using the Agent SDK, should use API key authentication"; the policy moved four times in 2026; `--bare` (never reads OAuth) "will become the default for `-p`". Nothing forbids own-seat scripted `claude -p` today. Design an API-key fallback leg; record the reading in the ADR; watch the clause. Also: headless runs fail rather than wait at usage limits (the pacer's job), and Docker Sandboxes on Windows is 0.x with 56 open Windows issues (holes 7 and 13 are its lived form).
+- **Denied in-session:** a local skills-dir probe (writes under `~/.claude`, runs `claude -p`) was declined by the permission mode and not retried; a scratch `--plugin-dir` probe from the red team remains in the session scratchpad (harmless).
+
+**Next session, in order:** A sanity; Tim's probe result and his rulings on ADR §8 plus O5 (eight rulings now); merge PR #102; record the rulings in the ADR header and the spine (AD-21, and the AD-1 amendment); then the front-end brief; then packaging and repo (O2 plus O5, rehearsal first) or the first front-end epic as Tim decides; then Epic 24.3/24.4 with the advisor arm, Epic 23, holes 9, 10, 11, 16.
+
+## Update at the end of session 2 (2026-10-09, later the same day)
+
+- **The research run is closed.** `research.md` is complete (decision-first summary, benefits and drawbacks per approach, red-team contrary evidence, twelve recommendations, 266-row appendix, computed staleness map with the earliest re-check on 2026-11-01; ledger per `recon_kit.py tally`: 36 verified, 50 unverified, 5 disputed, 1 overturned). Verify digests for A1 and B1 to B5, `A-redteam-1.md` and `citation-check.md` are on disk. All of it is in **PR #102** (`research/synthesis-adr`).
+- **The ADR awaits Tim's ruling:** `briefs/adr-repository-structure-2026-10-09.md` (proposed AD-21). It recommends one repository with per-app releases and one installer, scores four options against the six gates and six weights, and lists seven rulings in its §8. Nothing is in force until signed. Design rules the red team forced: the plugin reaches users as the pinned zip, never by cloning the monorepo (Claude Code clones the whole marketplace repository on every install and refresh; a plugin shipped from a product repository fails at MAX_PATH on this Windows build today); `make_latest: false` on every release; `git filter-repo`, not `subtree add`; a fan-in gate that asserts `success`; bypass lists do not exist on a user-owned repository.
+- **Facts read live:** tk-studio is public; the supervisor and TUA are private; all three repositories have PR-required (0 approvals), admins exempt, no required checks, no rulesets and no CI workflows; the supervisor is itself an onboarded studio project (Epics 21 to 23, `.bmad-loop`, hooks), so the migration keeps it a nested project root, to be proven in rehearsal; `core.longpaths` is unset on the box.
+- **Holes recorded in the ledger:** 15 (onboarding and drift should check the trust dialog per registered root) and 16 (two loops on one checkout need worktrees; nested project roots).
+- **Next, in order:** Tim rules; merge #102 (record the ruling in the ADR header and add AD-21 to the spine); the front-end brief; then the restructure (rehearsal first, ADR §5) or the first front-end epic as he decides; then Epic 24.3/24.4 with the advisor arm, Epic 23, holes 9, 10, 11.
+
 ## Where things stand
 
 **The supervisor is live.** Tim started it from the console on 2026-10-07; it restarted itself after the Windows-update reboot of 2026-10-08 04:31 (Startup shortcut, auto-logon); `start.ps1` brings the sbx daemon up, so the "Docker Sandboxes daemon" task is retired. API and status page on `https://tim-pc-2.tail8e370a.ts.net:8787` (TLS from the Tailscale certificate, 7-day session cookie, token sign-in confirmed from the main PC, dark theme live). Telegram notifications go through the Hermes bot. Tim's main PC is on the tailnet (its Tailscale MSI needed `ROOTDRIVE="C:\"` because Windows Installer had picked a per-user G: drive).
@@ -81,7 +112,7 @@ Tim pointed at https://code.claude.com/docs/en/advisor. Fit note: `_bmad-output/
 ## Starter prompt for the next session
 
 ```text
-This is TIM-PC-2, the tk-studio agent PC. The supervisor runs on https://tim-pc-2.tail8e370a.ts.net:8787 (never start or stop it from a Claude session). A deep-recon research run on the front end and the repository structure is in flight.
+This is TIM-PC-2, the tk-studio agent PC. The supervisor runs on https://tim-pc-2.tail8e370a.ts.net:8787 (never start or stop it from a Claude session). The deep-recon research run on the front end and the repository structure is closed (PR #102); the ADR on repository structure awaits my ruling unless this prompt says I have ruled.
 
 Read in this order before acting:
 1. _bmad-output/implementation-artifacts/handoff-phase1-loop-2026-10-09.md
@@ -95,9 +126,9 @@ Hard rules: never --dangerously-skip-permissions on the host; keep the permissio
 
 Do this, in order, and report briefly after each step:
 A. Sanity: tk activate clean for the three projects; lib suite and conformance green; `sbx daemon status` running; curl /status on the supervisor with the token I give you. Report only what fails.
-B. Finish the research run: read pending digests, verify the B dimensions, red-team the repo verdict, write research.md, citation check, staleness map.
-C. Write the ADR on repository structure for my signature, with benefits and drawbacks per option, the migration plan, the per-app release scheme and the installer design. Stop and ask me to rule.
-D. After my ruling: the front-end brief, then the restructure or the first front-end epic as I decide.
+B. If PR #102 is open, walk me through it and merge it on my say-so; if I have ruled on the ADR, record the ruling in its header and add AD-21 to the architecture spine through a PR.
+C. If I have not ruled, stop after A and ask me to rule on the ADR's §8.
+D. After my ruling: the front-end brief, then the restructure (rehearsal first, ADR §5) or the first front-end epic as I decide.
 E. Then Epic 24.3/24.4 with the advisor arm, Epic 23, loop holes 9, 10, 11.
 
 Address me as Tim-Senpai. Lead every reply with pass/fail and blockers; keep it short.
