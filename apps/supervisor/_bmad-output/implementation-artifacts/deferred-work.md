@@ -79,7 +79,7 @@ source_spec: `21-6-a-killed-run-resumes-or-ends-partial-never-lost-a-killed-run-
 location: src/cli.ts recoverWithResume / driveResumes; src/transcript.ts (restore from `TK_SUPERVISOR_TRANSCRIPT_BACKUP`)
 severity: high
 reason: The engine sandbox cannot run them, and the supervisor is never started from a Claude desktop-app session. Not run: (1) kill the supervisor mid-run on the Windows host and restart it: the run must resume or end `partial`, and `Get-Process claude` must show nothing left of the old worker; (2) delete a finished session's `.jsonl` under `%USERPROFILE%\.claude\projects` and force a resume: the file must come back from the nightly backup. Run and passed: a live `--session-id` then `--resume` reports the same `session_id` (Claude Code 2.1.274). The matching e2e suites are skipped on win32 (DW-5). Owner: Story 22.3, with DW-5.
-status: open (narrowed) — 2026-09-29: (1) kill-and-restart passes on the Windows host in the end-to-end suite with a faked worker (after `wake`, mid-invoke, before `finish`): the run resumes with `--resume` on its session or ends `partial`. On win32 the old worker is reported `not running`, because a worker that is not detached ends with its supervisor. (2) The restore from `TK_SUPERVISOR_TRANSCRIPT_BACKUP` passes on the Windows host at unit level (test/resume.test.ts). What remains is the operator's, from the console with the real supervisor and a real worker: kill the supervisor mid-run and restart it; delete a finished session's transcript and force a resume. Previously: open
+status: open (narrowed) — 2026-10-09, live on the console: (1) **passed.** `studio-health` was submitted through the API, its real `claude -p` worker (pid 7804) was running, and the whole supervisor tree (start.ps1, drain, keeper, serve, worker) was killed with `taskkill /T /F`. After the operator ran `start.ps1` again, the restart rule recognised the dead owner, took the run over (`resumed`, resume 1, reason `supervisor restart`), resumed the same session with `--resume`, carried the accounted tokens across, started a new worker with the remaining guard (430 s), ended the run with the worker's own status block, sent the Telegram notification and copied the transcript; no worker process was left over. The run ended `blocked` because of DW-22, which is unrelated to the restart. (2) The transcript restore remains for Epic 23 (it needs a finished TUA run). Previously: 2026-09-29: (1) kill-and-restart passes on the Windows host in the end-to-end suite with a faked worker (after `wake`, mid-invoke, before `finish`): the run resumes with `--resume` on its session or ends `partial`. On win32 the old worker is reported `not running`, because a worker that is not detached ends with its supervisor. (2) The restore from `TK_SUPERVISOR_TRANSCRIPT_BACKUP` passes on the Windows host at unit level (test/resume.test.ts). What remains is the operator's, from the console with the real supervisor and a real worker: kill the supervisor mid-run and restart it; delete a finished session's transcript and force a resume. Previously: open
 
 ### DW-11: The pacer does not treat an ended run that keeps its lock as live
 origin: spec residual risk, 21-6 follow-up review 2 (recorded by the attended session)
@@ -162,7 +162,7 @@ location: src/api.ts (the bearer check in front of every route); src/page.ts; RE
 severity: medium
 reason: Story 22.2 asks for a page that "reads well at phone width", served "behind the same auth as the API". The page is behind the bearer header, and a browser's address bar cannot send one, so the operator cannot open it on the phone without a client that sets headers. The criteria are met as written, and the epic's success signal ("watch it on the status page" from the phone) is not. The fix is a product decision for the operator, not a patch: for example HTTP Basic with the token as the password, which a browser prompts for, or a login form that sets a session cookie. Either one changes how the token travels.
 affects: none
-status: decided 2026-10-06 — Tim chose a login form that sets an HttpOnly session cookie, with Google and GitHub sign-in as well as the token. Tracked as tk-studio Story 22.5 ("Sign in from the phone"); constraints in `_bmad-output/specs/spec-epic-22/operator-decisions.md` §7. Still open until that story lands.
+status: decided 2026-10-06 — Tim chose a login form that sets an HttpOnly session cookie, with Google and GitHub sign-in as well as the token. Tracked as tk-studio Story 22.5 ("Sign in from the phone"); constraints in `_bmad-output/specs/spec-epic-22/operator-decisions.md` §7. Story 22.5 landed (`f8a26c2`, PR #5). 2026-10-08: the operator enabled Tailscale HTTPS certificates, set the TLS variables, and the sign-in page is served over `https://<TLS_NAME>:8787/`. Closed once the operator confirms a phone sign-in with the token.
 
 ### DW-21: The Tailscale certificate is renewed only when start.ps1 starts, and serve never reloads it, so on a box up longer than the 90-day certificate life https fails with an expired certificate.
 origin: spec-deferred 518474edfc24
@@ -170,4 +170,22 @@ source_spec: `22-5-sign-in-from-the-phone-sign-in-from-the-phone.md`
 location: start.ps1 (tailscale cert block); src/api.ts serve
 severity: medium
 reason: Review pass 1 (blind hunter): `tailscale cert` runs once in start.ps1's main script before the keeper; Bun.serve reads cert and key once at bind. No periodic renewal or serve restart exists. AC4 requires https with the machine's Tailscale certificate (deferral class a). The README now tells the operator to restart start.ps1 on long uptimes.
+status: open
+
+### DW-22: The host tier's `auto` permission mode denies the studio's own `uv run` scripts
+origin: live DW-10 check, 2026-10-09
+source_spec: `21-4-the-worker-runs-on-the-right-tier-and-reports-its-cost-the-worker-runs-on-the-right-tier-and-reports-its-cost.md`
+location: the worker's `claude -p --permission-mode auto` on the host tier; the projects' `.claude/settings.json`
+severity: high
+reason: Two `studio-health` runs in a row (q-studio-health-20261009T045710Z-29ca5b, q-studio-health-20261009T050354Z-ea37da) ended `blocked`: every `uv run ".../tk-studio-activate/scripts/drift_check.py"` call was answered "This command requires approval" (two of two tool calls on the second run, no API error). The day before, the `research-ecosystem` run on the same tier had ten Bash calls approved, `uv run .../research.py` among them. The auto-mode classifier is a model and does not approve the studio's scripts reliably, so a host-tier skill job can never count on running them. The worker ends honestly (`blocked`, the gap named), which is the designed outcome, but the job is unusable.
+affects: every host-tier skill job that runs a studio script (studio-health, research-ecosystem, evolve-proposals)
+status: mitigated 2026-10-09 — on the operator's decision, `permissions.allow: ["Bash(uv run:*)"]` is added to the tracked `.claude/settings.json` of this repo and of tk-studio (the deny list unchanged), so the studio's checked-in Python runs without the classifier. Open until a studio-health run on the host tier ends `complete`.
+
+### DW-23: A skill run that finishes itself leaves `finish failed: ... terminal states are immutable` as the queue run's reason
+origin: first production run, 2026-10-07 (q-research-ecosystem-20261007T164123Z-0146a1)
+source_spec: `21-1-the-lift-drives-the-studio-at-the-current-contract-the-lift-drives-the-studio-at-the-current-contract.md`
+location: src/cli.ts (the end path after a skill worker exits: `finish` on an already-terminal studio run)
+severity: low
+reason: The `research-ecosystem` skill ended its own studio run `complete`; the supervisor's `finish` was then refused ("terminal states are immutable"), and that refusal text became the queue run's `reason` although `studio_outcome.state` is `complete` and the run is counted complete. The README says a refused `finish` reports the run's actual state, which it does; the `reason` field is noise on the page and in the notification.
+affects: none
 status: open
