@@ -2,6 +2,14 @@
 
 Written for a fresh Claude Code session on the agent PC (TIM-PC-2). It supersedes `handoff-phase1-loop-2026-10-07.md` for the state of Phase 1. Engine mechanics: the 09-28 handoff and runbook §3.8. The starter prompt is at the end.
 
+## Update at the end of session 2 (2026-10-09, later the same day)
+
+- **The research run is closed.** `research.md` is complete (decision-first summary, benefits and drawbacks per approach, red-team contrary evidence, twelve recommendations, 266-row appendix, computed staleness map with the earliest re-check on 2026-11-01; ledger per `recon_kit.py tally`: 36 verified, 50 unverified, 5 disputed, 1 overturned). Verify digests for A1 and B1 to B5, `A-redteam-1.md` and `citation-check.md` are on disk. All of it is in **PR #102** (`research/synthesis-adr`).
+- **The ADR awaits Tim's ruling:** `briefs/adr-repository-structure-2026-10-09.md` (proposed AD-21). It recommends one repository with per-app releases and one installer, scores four options against the six gates and six weights, and lists seven rulings in its §8. Nothing is in force until signed. Design rules the red team forced: the plugin reaches users as the pinned zip, never by cloning the monorepo (Claude Code clones the whole marketplace repository on every install and refresh; a plugin shipped from a product repository fails at MAX_PATH on this Windows build today); `make_latest: false` on every release; `git filter-repo`, not `subtree add`; a fan-in gate that asserts `success`; bypass lists do not exist on a user-owned repository.
+- **Facts read live:** tk-studio is public; the supervisor and TUA are private; all three repositories have PR-required (0 approvals), admins exempt, no required checks, no rulesets and no CI workflows; the supervisor is itself an onboarded studio project (Epics 21 to 23, `.bmad-loop`, hooks), so the migration keeps it a nested project root, to be proven in rehearsal; `core.longpaths` is unset on the box.
+- **Holes recorded in the ledger:** 15 (onboarding and drift should check the trust dialog per registered root) and 16 (two loops on one checkout need worktrees; nested project roots).
+- **Next, in order:** Tim rules; merge #102 (record the ruling in the ADR header and add AD-21 to the spine); the front-end brief; then the restructure (rehearsal first, ADR §5) or the first front-end epic as he decides; then Epic 24.3/24.4 with the advisor arm, Epic 23, holes 9, 10, 11.
+
 ## Where things stand
 
 **The supervisor is live.** Tim started it from the console on 2026-10-07; it restarted itself after the Windows-update reboot of 2026-10-08 04:31 (Startup shortcut, auto-logon); `start.ps1` brings the sbx daemon up, so the "Docker Sandboxes daemon" task is retired. API and status page on `https://tim-pc-2.tail8e370a.ts.net:8787` (TLS from the Tailscale certificate, 7-day session cookie, token sign-in confirmed from the main PC, dark theme live). Telegram notifications go through the Hermes bot. Tim's main PC is on the tailnet (its Tailscale MSI needed `ROOTDRIVE="C:\"` because Windows Installer had picked a per-user G: drive).
@@ -81,7 +89,7 @@ Tim pointed at https://code.claude.com/docs/en/advisor. Fit note: `_bmad-output/
 ## Starter prompt for the next session
 
 ```text
-This is TIM-PC-2, the tk-studio agent PC. The supervisor runs on https://tim-pc-2.tail8e370a.ts.net:8787 (never start or stop it from a Claude session). A deep-recon research run on the front end and the repository structure is in flight.
+This is TIM-PC-2, the tk-studio agent PC. The supervisor runs on https://tim-pc-2.tail8e370a.ts.net:8787 (never start or stop it from a Claude session). The deep-recon research run on the front end and the repository structure is closed (PR #102); the ADR on repository structure awaits my ruling unless this prompt says I have ruled.
 
 Read in this order before acting:
 1. _bmad-output/implementation-artifacts/handoff-phase1-loop-2026-10-09.md
@@ -95,9 +103,9 @@ Hard rules: never --dangerously-skip-permissions on the host; keep the permissio
 
 Do this, in order, and report briefly after each step:
 A. Sanity: tk activate clean for the three projects; lib suite and conformance green; `sbx daemon status` running; curl /status on the supervisor with the token I give you. Report only what fails.
-B. Finish the research run: read pending digests, verify the B dimensions, red-team the repo verdict, write research.md, citation check, staleness map.
-C. Write the ADR on repository structure for my signature, with benefits and drawbacks per option, the migration plan, the per-app release scheme and the installer design. Stop and ask me to rule.
-D. After my ruling: the front-end brief, then the restructure or the first front-end epic as I decide.
+B. If PR #102 is open, walk me through it and merge it on my say-so; if I have ruled on the ADR, record the ruling in its header and add AD-21 to the architecture spine through a PR.
+C. If I have not ruled, stop after A and ask me to rule on the ADR's §8.
+D. After my ruling: the front-end brief, then the restructure (rehearsal first, ADR §5) or the first front-end epic as I decide.
 E. Then Epic 24.3/24.4 with the advisor arm, Epic 23, loop holes 9, 10, 11.
 
 Address me as Tim-Senpai. Lead every reply with pass/fail and blockers; keep it short.
