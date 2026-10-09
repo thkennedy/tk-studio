@@ -155,7 +155,7 @@ Raised by Tim on 2026-10-09; researched in `research/studio-native-overlap-and-g
 | Drawback | Containing rule |
 |---|---|
 | Claude computes no version for a skills-dir plugin and `claude plugin update` does not apply | the roster is the only version gate; `tk-studio doctor` compares the folder's `plugin.json` version to the roster |
-| `${CLAUDE_PLUGIN_ROOT}` substitution for this form is not stated in the docs; a local probe was declined by the session's permission mode | Tim runs the probe (PowerShell version in the handoff); if it fails, the ten skills switch to `${CLAUDE_SKILL_DIR}`-relative paths |
+| `${CLAUDE_PLUGIN_ROOT}` substitution for this form is not stated in the docs | **Settled:** Tim's probe on 2026-10-09 returned `ROOT=C:/Users/tim/.claude/skills/zzprobe`, so the ten skills need no change |
 | The drift check's plugin plane reads `installed_plugins.json`, and the conformance suite's harness-loadable assertion with it | both move to the skills-dir folder plus the roster; AD-13's wording ("catalog lockstep") is amended |
 | No claude.ai sync, directory listing or `plugin eval` guarantee for this form | not needed today; `plugin eval` on a path is an open question |
 | Per-machine: every machine and sandbox image runs the installer | already true (a project-scope enable never installed) |

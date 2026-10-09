@@ -7,7 +7,7 @@ source: 'native run, web fan-out, 6 assistants, 2 red teams'
 status: complete
 preset: 'deep'
 validation: 'normal + red team on the plugin verdict and the greenfield stack'
-claims: { verified: 18, unverified: 39, disputed: 0, overturned: 0 }
+claims: { verified: 19, unverified: 39, disputed: 0, overturned: 0 }
 created: '2026-10-09'
 updated: '2026-10-09'
 ---
@@ -28,7 +28,7 @@ Every `[n]` resolves in the source appendix (§12). The digests under `digests/`
 2. **The marketplace is what costs.** The whole repository is cloned on add and refresh, one cache copy is kept per version, third-party marketplaces never auto-update by default (and run on a random delay of up to ten minutes when they do), a project-scope enable does not install, and 2026's Windows issue stream lands on this path (Defender `EBUSY`, drive-letter casing fixed only on 2026-10-08, case-sensitive `projectPath` still open) [3][5][6]. The run-1 red team added the live MAX_PATH failure on this Windows build.
 3. **Comparable tools treat the marketplace as the secondary path.** BMad leads with `npx skills add`; Ruflo labels its plugin path "lite, slash commands only" and its installer "production"; SuperClaude ships an installer with the plugin route "planned, no ETA" [7][10][9].
 
-Biggest caveat: whether a skills-dir plugin receives `${CLAUDE_PLUGIN_ROOT}` is not stated in the docs; a local probe was declined by the session's permission mode and is Tim's to run (§11). If it does not, the ten skills switch to `${CLAUDE_SKILL_DIR}`-relative paths, a mechanical change. The red team's findings are in §10.
+The one open mechanic was settled by Tim's local probe: a skills-dir plugin receives `${CLAUDE_PLUGIN_ROOT}` and `${CLAUDE_SKILL_DIR}` as forward-slash paths on this Windows box [80], so the ten skills need no change. The red team's findings and the three rules they added are in §10.
 
 ### Decision D: the overlap map
 
@@ -172,7 +172,7 @@ Ship dates come from the weekly "What's new" index and the releases API [28][5].
 
 Each binds to a decision and a downstream artifact, with its confidence basis.
 
-- **R1 (C, ADR O5).** Adopt the installer-written skills-dir plugin at user scope. Keep the plugin form (namespacing, two agents, `plugin validate`); drop the marketplace as the user delivery path; keep `.claude-plugin/marketplace.json` only for developers who clone, pinned to a tag. Confidence high on the docs, medium on the form's `${CLAUDE_PLUGIN_ROOT}` behaviour (unconfirmed; the probe is Tim's); mitigation is `${CLAUDE_SKILL_DIR}`-relative paths in ten skills [2][3][4][79]. Feeds ADR §2 O5 and the installer story; the drift check's plugin plane and the conformance suite's harness-loadable check change with it.
+- **R1 (C, ADR O5).** Adopt the installer-written skills-dir plugin at user scope. Keep the plugin form (namespacing, two agents, `plugin validate`); drop the marketplace as the user delivery path; keep `.claude-plugin/marketplace.json` only for developers who clone, pinned to a tag. Confidence high: the docs, plus Tim's local probe confirming `${CLAUDE_PLUGIN_ROOT}` and `${CLAUDE_SKILL_DIR}` substitute in a skills-dir plugin on this box [2][3][4][79][80]; the ten skills need no change. Feeds ADR §2 O5 and the installer story; the drift check's plugin plane and the conformance suite's harness-loadable check change with it.
 - **R2 (D, routing).** Do not adopt a Jev router. Keep the routing table, effort levels and the advisor arm (Epic 24.3). Optionally trial Jev as a shadow-mode oracle for intake sizing and finding severity after reading TypeSafe's terms and retention. Confidence high on the policy and quota evidence, medium on the oracle fit [22][23][24][14].
 - **R3 (D, supervisor).** Keep the queue, pacer, lock and worker tiers. Add `claude agents --json` as an observation source, use Remote Control and channels for phone steering and approvals, and retire the planned Google and GitHub OAuth walk-through unless a browser-only path is still wanted. Confidence high [29][32][27].
 - **R4 (D, meter and ledger).** Feed the meter from OTel per process (resource attributes for story and epic) and stream-json usage, with ccusage's parsing as the cross-check; feed the ledger from hook events; keep story keying, bands and the evolve loop. Confidence high on availability, medium on OTel cost population under a subscription (not stated) [63][64][45][5].
@@ -203,7 +203,7 @@ Also noted: Paperclip stores and renews Claude tokens server-side, which the leg
 
 | Question | What it would take |
 |---|---|
-| Does a `@skills-dir` plugin receive `${CLAUDE_PLUGIN_ROOT}` (and `bin/`)? | Tim runs the probe in the session notes; or switch the ten skills to `${CLAUDE_SKILL_DIR}` paths and stop caring |
+| ~~Does a `@skills-dir` plugin receive `${CLAUDE_PLUGIN_ROOT}`?~~ **Settled 2026-10-09:** Tim's probe on TIM-PC-2 (Claude Code 2.1.286) returned `ROOT=C:/Users/tim/.claude/skills/zzprobe SKILLDIR=C:/Users/tim/.claude/skills/zzprobe/skills/probe`, so both variables substitute, with forward slashes [80] | `bin/` for this form remains untested (not needed) |
 | Is OTel `cost_usd` populated for Max sessions, and do resource attributes reach subagents and workflow agents? | One instrumented story run with a local collector |
 | Does Anthropic's usage policy cover a private, unattended, multi-sandbox studio on one Max subscription? | Read the usage policy and Max terms; record the reading; ask Anthropic if ambiguous |
 | Does Docker Sandboxes document Claude Code support and credential passthrough? | Read the Docker "Agents" and "Configuration" sub-pages |
@@ -295,6 +295,7 @@ All accessed 2026-10-09. The digests carry every source each assistant used; the
 | 77 | Issues and proposals ledgers (ISS, PROP rows) | [tk-studio issues/ledger.md and proposals/ledger.md](https://github.com/thkennedy/tk-studio/blob/main/proposals/ledger.md) | rolling | 2026-10-09 | high (internal) |
 | 78 | Research 2026-09-26: the studio's unique pieces | [tk-studio research agent-studio-next-level-2026-09-26](https://github.com/thkennedy/tk-studio/tree/main/_bmad-output/planning-artifacts/research/agent-studio-next-level-2026-09-26) | 2026-09-26 | 2026-10-09 | high (internal) |
 | 79 | Plugin-feature inventory (grep of plugins/tk-studio, 2026-10-09) | [tk-studio plugins/tk-studio](https://github.com/thkennedy/tk-studio/tree/main/plugins/tk-studio) | 2026-10-09 | 2026-10-09 | high (internal) |
+| 80 | Local probe by Tim on TIM-PC-2 (Claude Code 2.1.286): a skills-dir plugin's skill body receives `ROOT=C:/Users/tim/.claude/skills/zzprobe SKILLDIR=…/skills/probe` | [Probe transcript recorded in the handoff (session 2b)](https://github.com/thkennedy/tk-studio/blob/research/synthesis-adr/_bmad-output/implementation-artifacts/handoff-phase1-loop-2026-10-09.md) | 2026-10-09 | 2026-10-09 | high (local test) |
 
 ## 13. Staleness map
 
