@@ -353,17 +353,19 @@ function credentialValue(text: string, at: number): { end: number; shown: string
 const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 
 const CSS = `
+:root{color-scheme:dark}
 *{box-sizing:border-box;overflow-wrap:anywhere}
-body{margin:0;padding:.75rem;font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#1b1b1b;background:#f6f6f4;max-width:60rem}
-h1{font-size:1.25rem;margin:.25rem 0}h2{font-size:1.05rem;margin:1.25rem 0 .5rem;border-bottom:1px solid #ccc}
-.card{background:#fff;border:1px solid #ddd;border-radius:6px;padding:.5rem .65rem;margin:.5rem 0}
-.meta{color:#555;font-size:.85rem}.note{color:#8a4b00;font-style:italic}
-.st{display:inline-block;padding:0 .4rem;border-radius:4px;background:#e8e8e8;font-weight:600}
+body{margin:0;padding:.75rem;font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#e4e4e4;background:#141414;max-width:60rem}
+a{color:#8ab4f8}
+h1{font-size:1.25rem;margin:.25rem 0}h2{font-size:1.05rem;margin:1.25rem 0 .5rem;border-bottom:1px solid #333}
+.card{background:#1e1e1e;border:1px solid #333;border-radius:6px;padding:.5rem .65rem;margin:.5rem 0}
+.meta{color:#a3a3a3;font-size:.85rem}.note{color:#e0a458;font-style:italic}
+.st{display:inline-block;padding:0 .4rem;border-radius:4px;background:#2c2c2c;font-weight:600}
 .reason{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;margin:.25rem 0}
-pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-size:.8rem;background:#f2f2f2;padding:.4rem;border-radius:4px;margin:.25rem 0}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-size:.8rem;background:#1a1a1a;padding:.4rem;border-radius:4px;margin:.25rem 0}
 ul{padding-left:1.1rem;margin:.25rem 0}li{margin:.15rem 0}
-details summary{cursor:pointer;color:#333}
-form.cancel{margin:.35rem 0}form.cancel button{padding:.35rem .8rem;font-size:.95rem}
+details summary{cursor:pointer;color:#cfcfcf}
+form.cancel{margin:.35rem 0}form.cancel button{padding:.35rem .8rem;font-size:.95rem;background:#2a2a2a;color:#e4e4e4;border:1px solid #555;border-radius:4px}
 @media (min-width:48rem){body{padding:1.25rem}}
 `;
 
