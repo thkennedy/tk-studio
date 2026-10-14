@@ -187,3 +187,61 @@ invented:
   - `x86_64-pc-windows-msvc`: `bun-windows-x64.zip`
   - `x86_64-unknown-linux-gnu`: `bun-linux-x64.zip`
   - `aarch64-apple-darwin`: `bun-darwin-aarch64.zip`
+
+## Skills-dir plugin: the on-box probe (Story 25.2)
+
+`tk-studio install` writes the plugin to `$CLAUDE_CONFIG_DIR/skills/tk-studio/`
+(else `~/.claude/skills/tk-studio/`) from the roster's SHA-256-verified zip;
+Claude Code loads it in place as `tk-studio@skills-dir`. The staging
+`.tk-studio.new`, the kept `.tk-studio.previous` and `.tk-studio.retired`
+(the old previous set aside, which exists only during a swap, or is left
+behind if its post-success delete failed) are dot-prefixed so Claude Code
+does not load them. The probe is an opt-in lib test that runs
+the real `claude` against an isolated temp `CLAUDE_CONFIG_DIR` (never the
+real `~/.claude`), from `plugins/tk-studio/lib`:
+
+```bash
+TK_STUDIO_LIVE_CLAUDE=1 uv run python -m unittest tests.test_installer_live -v
+```
+
+It zips the tracked `plugins/tk-studio` tree plus a test-only
+`skills/zz-probe/SKILL.md`, installs it twice through the plugin leg (so a
+`.tk-studio.previous` exists), and checks list, validate and a headless
+`claude -p "/tk-studio:zz-probe"` (the user's `.credentials.json` is
+symlinked, never copied, into the temp config; absent, that step is
+skipped by name).
+
+Outcome on this box (Linux sandbox, Claude Code 2.1.300, 2026-10-14) —
+OK, all three steps run:
+
+- `claude plugin list`: `Skills-directory plugins (.claude/skills/*):` /
+  `❯ tk-studio@skills-dir` / `Version: 0.2.16` / `Scope: user` /
+  `Path: <tmp>/config/skills/tk-studio` / `Status: ✔ loaded`; the
+  `.tk-studio.previous` sibling is not listed.
+- `claude plugin validate <folder>`: `✔ Validation passed` (one advisory
+  line, not a verdict change: the README has no marketplace install line).
+- probe: `ROOT=<tmp>/config/skills/tk-studio` and
+  `SKILL=<tmp>/config/skills/tk-studio/skills/zz-probe` — both forward-slash
+  paths under the folder.
+
+`claude plugin eval <folder>` was tried against a `git archive
+HEAD:plugins/tk-studio` copy placed in a temporary config's
+`skills/tk-studio` (same layout as the leg's output, no probe skill) — the
+open question closes: eval resolves a skills-dir folder as a target, and this
+plugin ships no eval suite. Verbatim, first without and then with
+`--trust-plugin`:
+
+```text
+Error: <folder> is not a trusted plugin directory, and this run cannot stop to ask you about it (no interactive terminal, or --json / CI). `claude plugin eval` loads the plugin and runs its eval suite on this machine as you - only evaluate plugins you trust. Run it once in a terminal to trust this directory, or pass --trust-plugin to assert that you trust this plugin's code and eval suite (e.g. in CI).
+```
+
+```text
+No eval cases found under <folder>.
+Cases are expected in a evals/ directory under <folder> (the default), each case a directory containing case.yaml or prompt.md.
+Run `claude plugin eval init` for a guided interview, or `claude plugin eval init --bare <name>` to scaffold a blank case.
+```
+
+Still to run by the operator on TIM-PC-2 (Windows): the same live test
+(junction and forward-slash substitution on Windows) and
+`uv run --project tools/installer/cli tk-studio install --link C:/GitHub/tk-studio`
+(junction plus the real marketplace removal).
