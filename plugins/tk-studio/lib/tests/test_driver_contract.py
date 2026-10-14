@@ -179,6 +179,13 @@ class DriverContractTestCase(unittest.TestCase):
                        "the default `stable`"):
             self.assertIn(phrase, flat)
         self.assertNotIn("still fold into the same plane", flat)
+        # a catalog without a tk-studio entry is another project's own
+        # marketplace: not a developer checkout, skipped, never error
+        for phrase in ("present with a `tk-studio` entry",
+                       "A catalog that lists no `tk-studio` entry is another "
+                       "project's own marketplace, not a developer checkout: "
+                       "the catalog comparison is skipped, never `error`"):
+            self.assertIn(phrase, flat)
 
     def test_section_8_documents_from_archive(self):
         section = self.text[self.text.index("## 8. Conformance"):]

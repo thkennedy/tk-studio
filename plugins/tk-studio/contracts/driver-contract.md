@@ -318,8 +318,11 @@ channel's roster `plugin` entry — `--channel` (default `stable`, the
 installer's default) selects the project's
 `tools/installer/rosters/<channel>.json`, never the network — and, only in a
 developer checkout (`<project-root>/.claude-plugin/marketplace.json`
-present), with the catalog's `tk-studio` entry. With no roster in the
-project the version comparison is "not checkable from this project" (ok); a
+present with a `tk-studio` entry), with that entry. A catalog that lists no
+`tk-studio` entry is another project's own marketplace, not a developer
+checkout: the catalog comparison is skipped, never `error`. With no roster
+in the project the version comparison is "not checkable from this project"
+(ok); a
 roster without a `plugin` entry means not shipped in that channel, never
 stale. The plugin plane carries an additive `case` field naming one of:
 
@@ -337,9 +340,9 @@ never the source of the version or of loadability: it is read, with
 (`enabledPlugins`, `extraKnownMarketplaces`), only to detect a shadowing
 copy — the user-scope `tk-studio@<m>` records the installer's cleanup
 removes, never `tk-studio@skills-dir`. An unreadable folder `plugin.json`,
-record file or developer marketplace catalog (one whose `tk-studio` entry
-carries no string `version` included) makes the plane `error`, naming the
-file (no `case`). `case` is the folder-and-roster verdict alone: the release
+record file or marketplace catalog (one that is not a JSON object with a
+`plugins` list, or whose `tk-studio` entry carries no string `version`,
+included) makes the plane `error`, naming the file (no `case`). `case` is the folder-and-roster verdict alone: the release
 guards (`released-roster.json`, the installer roster shape and gate ×4) fold
 into the same plane's `status` and `detail` and can raise `status` without
 changing `case`; a plane whose `status` is `error` carries no `case`.

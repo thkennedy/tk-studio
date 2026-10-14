@@ -98,6 +98,15 @@ class SkillsDirPlaneTestCase(unittest.TestCase):
                                        "version": version}]}),
             encoding="utf-8")
 
+    def _write_foreign_catalog(self) -> Path:
+        # a project shipping its own marketplace that lists no tk-studio
+        meta = self.project / ".claude-plugin"
+        meta.mkdir(exist_ok=True)
+        catalog = meta / "marketplace.json"
+        catalog.write_text(json.dumps({"plugins": [
+            {"name": "other", "version": "1.0.0"}]}), encoding="utf-8")
+        return catalog
+
     def _write_record(self, plugins: dict):
         (self.home / "plugins").mkdir(exist_ok=True)
         (self.home / "plugins" / "installed_plugins.json").write_text(
@@ -289,6 +298,40 @@ class SkillsDirPlaneTestCase(unittest.TestCase):
         self.assertEqual(check["status"], "error")
         self.assertIn(str(record), check["detail"])
 
+    def test_shadowed_with_known_marketplaces_names_the_marketplace_removal(self):
+        self._folder("1.0.0")
+        self._write_record({f"{NAME}@{NAME}": [
+            {"scope": "user", "version": "0.2.0", "installPath": "/x"}]})
+        (self.home / "plugins" / "known_marketplaces.json").write_text(
+            json.dumps({NAME: {"source": {"source": "github",
+                                          "repo": "o/r"}}}),
+            encoding="utf-8")
+        check = self._check()
+        self.assertEqual((check["status"], check["case"]),
+                         ("drift", "shadowed"))
+        self.assertIn(f"claude plugin uninstall {NAME}@{NAME} --scope user",
+                      check["fix"])
+        self.assertIn(f"claude plugin marketplace remove {NAME}", check["fix"])
+
+    def test_unreadable_known_marketplaces_is_error_naming_the_file(self):
+        self._folder("1.0.0")
+        (self.home / "plugins").mkdir()
+        known = self.home / "plugins" / "known_marketplaces.json"
+        known.write_text("{not json", encoding="utf-8")
+        check = self._check()
+        self.assertEqual(check["status"], "error")
+        self.assertNotIn("case", check)
+        self.assertIn(str(known), check["detail"])
+
+    def test_unreadable_settings_is_error_naming_the_file(self):
+        self._folder("1.0.0")
+        settings = self.home / "settings.json"
+        settings.write_text("{not json", encoding="utf-8")
+        check = self._check()
+        self.assertEqual(check["status"], "error")
+        self.assertNotIn("case", check)
+        self.assertIn(str(settings), check["detail"])
+
     def test_unreadable_catalog_is_error_naming_it_folder_present_or_not(self):
         meta = self.project / ".claude-plugin"
         meta.mkdir()
@@ -325,6 +368,26 @@ class SkillsDirPlaneTestCase(unittest.TestCase):
                 self.assertIn(str(catalog), check["detail"])
                 self.assertIn("no string version", check["detail"])
                 self.assertNotIn("vNone", check["detail"])
+
+    def test_foreign_catalog_is_not_a_developer_checkout(self):
+        catalog = self._write_foreign_catalog()
+        self._folder("1.0.0")
+        self._write_roster("stable", "1.0.0")
+        check = self._check()
+        self.assertEqual((check["status"], check["case"]), ("ok", "ok"),
+                         check["detail"])
+        self.assertIn(f"marketplace catalog {catalog} has no {NAME} entry",
+                      check["detail"])
+        self.assertIn("catalog comparison skipped", check["detail"])
+        self.assertNotIn("fix", check)
+
+    def test_foreign_catalog_without_the_folder_is_missing_not_error(self):
+        self._write_foreign_catalog()
+        check = self._check()
+        self.assertEqual((check["status"], check["case"]),
+                         ("missing", "missing"), check["detail"])
+        self.assertIn("catalog comparison skipped", check["detail"])
+        self.assertIn("tk-studio install", check["fix"])
 
     def test_precedence_missing_over_shadowed_over_stale(self):
         self._write_roster("stable", "1.0.0")
@@ -424,6 +487,30 @@ class SkillsDirPlaneTestCase(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertTrue(any("tk-studio update --channel latest" in f
                             for f in report["fixes"]))
+
+    def test_main_with_a_foreign_catalog_is_not_an_error(self):
+        catalog = self._write_foreign_catalog()
+        self._folder("1.0.0")
+        self._write_roster("stable", "1.0.0")
+        quiet = {"plane": "x", "status": "ok", "detail": ""}
+        out = io.StringIO()
+        with mock.patch.object(drift_check, "check_bmad_base",
+                               return_value=dict(quiet, plane="bmad-base")), \
+                mock.patch.object(drift_check, "check_store",
+                                  return_value=dict(quiet, plane="store")), \
+                mock.patch.object(drift_check, "check_vault",
+                                  return_value=dict(quiet, plane="vault")), \
+                mock.patch.object(drift_check, "_emit"), \
+                redirect_stdout(out):
+            code = drift_check.main(["--directory", str(self.project),
+                                     "--claude-home", str(self.home),
+                                     "--channel", "stable",
+                                     "--marketplace", str(catalog)])
+        report = json.loads(out.getvalue())
+        plugin = next(p for p in report["planes"] if p["plane"] == "plugin")
+        self.assertNotEqual(plugin["status"], "error", plugin["detail"])
+        self.assertIn("catalog comparison skipped", plugin["detail"])
+        self.assertNotEqual(code, 2)
 
 
 if __name__ == "__main__":

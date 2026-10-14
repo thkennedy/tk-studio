@@ -4,13 +4,20 @@ type: 'feature'
 created: '2026-10-14'
 status: 'done'
 review_loop_iteration: 0
-followup_review_recommended: true
+followup_review_recommended: false
 deviation_score: 2
 baseline_revision: 9812fabc7b0551d4009ba7d17124ce8a7d78a38f
 context:
   - '{project-root}/_bmad-output/specs/spec-epic-25/SPEC.md'
 warnings: ['oversized']
-deferred: []
+deferred:
+  - summary: >-
+      consolidate.py's drift-category fix text still names the retired marketplace flow ("tk install / /plugin marketplace update").
+    evidence: |-
+      plugins/tk-studio/lib/consolidate.py:246-247 builds the fix "run the guided fix on the affected machine (tk install / /plugin marketplace update)". Story 25-3 removed that flow from the drift check, SKILL.md, driver-contract §6 (pinned by test_driver_contract assertNotIn("/plugin marketplace update")) and amended AD-13 to the folder and the roster. Under AD-21 a marketplace copy is the `shadowed` condition, so evolve proposals built from drift-detection events give guidance that contradicts the plane's own fixes. The text pre-dates this story and the file is outside its Files boundary. Deferral criterion (b): an AD rule (AD-13 as amended) left contradicted by a shipped fix text.
+    location: >-
+      plugins/tk-studio/lib/consolidate.py:246
+    severity: low
 ---
 
 # The Drift Check and Conformance Read the Folder and the Roster
@@ -149,6 +156,17 @@ Story 25.3 (Canonical: ST-083). Authoritative text: `_bmad-output/planning-artif
   - `[low]` `[patch]` the developer catalog was read only when the folder version was known. It is now read whenever it is present, so an unreadable catalog is `error` with or without the folder, with a test.
   - `[low]` `[patch]` a catalog `tk-studio` entry with no string version reported `stale … vNone`. It is now an `error` naming the catalog, with a test.
 
+### 2026-10-14 — Review pass (follow-up review 2)
+- layers: blind-hunter, edge-case-hunter (band L); the diff `9812fab..5de6832` (excluding this spec) was handed to both as a scratch file path
+- intent_gap: 0
+- bad_spec: 0
+- patch: 2 (high 0, medium 1, low 1)
+- defer: 1 (low 1): consolidate.py:246 drift fix text still names `/plugin marketplace update`. It pre-dates the story and is outside the Files boundary; criterion (b) applies because it contradicts amended AD-13. Recorded in frontmatter `deferred`.
+- reject: 1 (low 1): "a `tk-studio@<m>` `enabledPlugins` key set to `false` is reported shadowed". Boundaries require mirroring exactly what `plugin_leg.py` `marketplace_cleanup` reads, and it counts every `enabledPlugins` key whatever its value.
+- addressed_findings:
+  - `[medium]` `[patch]` (both layers) a project that ships its own plugin marketplace (`.claude-plugin/marketplace.json` with no `tk-studio` entry) made the plugin plane `error` (exit 2, headless activation blocked), and since follow-up review 1 even with no folder. Such a catalog is no longer a tk-studio developer checkout: the comparison is skipped with a note. Malformed catalogs and a `tk-studio` entry with no string version stay `error`. Contract §6, the module docstring and the SKILL.md row now say so, with plane tests, a `main` exit-code test and a §6 pin (consult: score 2).
+  - `[low]` `[patch]` the §6 shadowed rules had no test: the `marketplace remove` fix via `known_marketplaces.json`, and an unreadable `known_marketplaces.json` or `settings.json` making the plane `error` with the file named. Three tests were added. The code already conformed.
+
 ## Design Notes
 
 - "Configured channel" and the roster source were an intent gap, settled by consult (Consult Log). The reasoning: the installer persists no channel, and a network roster read would contradict the manifest's `external_calls: false` for activate.
@@ -191,6 +209,15 @@ DEVIATION SCORE: 2 (consult ruling on pass 2; frontmatter `deviation_score` stay
 DRIFT: under `--from-archive`, a missing or malformed archive status-block schema exits 2 with `{ok:false,error}`, not a `failures[]` entry — it matches the missing-manifest precedent — affects: none
 DRIFT: a folder failing harness-loadable drives no surface; `harness_pass.state` gains `not run: the skills-dir folder is not harness-loadable` (driver-contract §8) — the loadability check must run before discovery — affects: none named (conformance report readers)
 
+### pass 3 (follow-up review 2 patches, 2026-10-14)
+
+- planned: a developer checkout is `<directory>/.claude-plugin/marketplace.json` present / actual: a catalog that is a JSON object with a `plugins` list but no `tk-studio` entry is another project's own marketplace, not a developer checkout. The catalog comparison is skipped with a note, never `error`. Malformed catalogs and a `tk-studio` entry with no string version stay `error` / why: any plugin-authoring project otherwise blocked activation with exit 2 and never saw the folder verdict / may affect: 25-5 (doctor's plugin check treats a foreign catalog as a note, never an error or fail) (consult: accepted, score 2)
+- planned: the unreadable-catalog error text "unreadable or missing the tk-studio entry" / actual: "unreadable (<err> | no plugins list)" / why: a missing entry is no longer an error / may affect: none
+
+DEVIATION SCORE: 2 (consult ruling on pass 3; frontmatter `deviation_score` stays 2)
+
+DRIFT: a marketplace catalog without a `tk-studio` entry is not a developer checkout (comparison skipped with a note, never `error`); driver-contract §6 says so at 0.1.19 — a foreign marketplace blocked activation with exit 2 — affects: 25-5
+
 ## Consult Log
 
 - 2026-10-14T21:34:09Z — trigger: halt (intent gap in planning) — question: which reading of "the roster's plugin entry for the configured channel" (A: `--channel` flag default stable, in-project roster, no network; B: network fetch; C: installer-persisted config), and is a named skip acceptable for harness-loadable without `--from-archive`? — ruling: apply — do: Q1 reading (A), with no roster reported as "not checkable from this project" (ok) while missing/shadowed are still judged; Q2 the proposed `--from-archive` design, with `harness_loadable: {state: "skipped: --from-archive not given"}` beside `harness_pass`; a default run never falls back to the repo tree and reports harness-loadable as passed — rule candidate: A read-only check that needs a release input (a roster or the built zip) reads it from the checked project or an explicit flag, never the network or the host install, and reports a named skip state when the input is absent, never a pass.
@@ -198,53 +225,49 @@ DRIFT: a folder failing harness-loadable drives no surface; `harness_pass.state`
 
 - 2026-10-14T21:59:31Z — trigger: deviation-gt-0 (follow-up review patches) — question: accept the two patch deviations (A: archive with a missing or malformed status-block schema is exit 2 `{ok:false,error}`, not a `failures[]` entry; B: a folder failing harness-loadable stops the run with no surfaces driven) and at what score? — ruling: accept-deviation score 1 (A); accept-deviation score 2 (B) — do: keep A as written; keep B as written and add `not run: the skills-dir folder is not harness-loadable` to the `harness_pass` state list in driver-contract §8; add one test_conformance test asserting `harness_pass.state` and `surfaces == {}` when the harness-loadable gate fails — rule candidate: Any new value a story gives a state field in the conformance report (`harness_pass.state`, `harness_loadable.state`) must be added to that field's list in driver-contract §8 in the same story, and a deviation that adds one scores at least 2.
 
+- 2026-10-14T22:10:23Z — trigger: deviation-gt-0 (follow-up review 2 patch) — question: accept narrowing "developer checkout" from "catalog present" to "catalog present with a `tk-studio` entry" (a foreign catalog skips the comparison with a note instead of `error`), and at what score? — ruling: accept-deviation score 2 — do: keep the patch as written (malformed catalogs and a `tk-studio` entry with no string version stay `error`, contract §6 stays 0.1.19); record it in the Deviation Summary as score 2 carried to 25-5 (doctor's plugin check treats a foreign catalog as a note, never an error or fail), frontmatter `deviation_score` stays 2; add one lib test that a foreign catalog leaves the plane not `error`, with the note, and an exit code other than 2 (unless already pinned) — rule candidate: A deviation that moves a condition between `error` and `ok`/note (or between `case` values) on a plane whose taxonomy a later story reuses is scored 2 by default; the same story updates its contract section and Deviation Summary, so no consult is needed.
+
 ## Auto Run Result
 
 Status: done
 
-**Summary:** This was follow-up review 1 of 25-3. Both layers ran over `9812fab..c421c2c`. Seven patches were applied:
-- The stale fix names `--channel <channel>` when the check runs off the default channel.
-- A plane whose status is `error` carries no `case`, and §6 states that `case` is the folder-and-roster verdict alone.
-- `--from-archive` reads the status-block schema from the extracted folder, never the repo tree.
-- A non-root-shaped zip gives a named `harness-loadable` failure, and no surface is driven.
-- The developer catalog is read whenever it is present, so an unreadable catalog is `error`.
-- A catalog entry with no version is `error`.
-- A missing-plugin.json `missing` test was added.
+**Summary:** This was follow-up review 2 of 25-3. Both layers ran over `9812fab..5de6832`, and two patches were applied:
+- A project that ships its own plugin marketplace (a `.claude-plugin/marketplace.json` with no `tk-studio` entry) no longer counts as a tk-studio developer checkout. The plugin plane skips the catalog comparison with a note instead of going `error`, which had meant exit 2 and blocked activation. Malformed catalogs and a `tk-studio` entry with no string version stay `error`.
+- The §6 shadowed-detection rules are now pinned by tests: the `marketplace remove` fix through `known_marketplaces.json`, and an unreadable `known_marketplaces.json` or `settings.json` making the plane `error` with the file named.
 
-Driver contract stays 0.1.19. §6 and §8 were clarified in the same story, and the new `harness_pass` state was documented per the consult.
+Driver contract stays 0.1.19. §6 now defines a developer checkout as a catalog present with a `tk-studio` entry.
 
 **Files changed (this pass):**
-- `plugins/tk-studio/skills/tk-studio-activate/scripts/drift_check.py`: the channel-aware stale fix; the catalog is read whenever present, and an entry with no version is an error; no `case` on an `error` plane.
-- `plugins/tk-studio/skills/tk-studio-activate/SKILL.md`: the plugin row's stale fix names `--channel` off the default.
-- `plugins/tk-studio/contracts/conformance/runner.py`: `load_status_schema` from the driven plugin root, threaded into the status-block and harness transcript checks; harness-loadable runs before discovery (folder-only, including no `skills/`); `_drive_surfaces` split out.
-- `plugins/tk-studio/contracts/driver-contract.md`: the §6 stale fix `--channel` clause; the §6 sentence on `case` versus the release guards and error; §8 reads the schema from the folder, the loadability-first clause, and the new `harness_pass` state.
-- `plugins/tk-studio/lib/tests/test_drift_check.py`: tests for the off-default stale fix, a guard error with no `case`, a folder without plugin.json, an unreadable catalog with or without the folder, and a catalog entry without a version.
-- `plugins/tk-studio/lib/tests/test_conformance.py`: tests for the archive's schema being used, no schema meaning no repo fallback, a wrapped zip, and an unloadable folder driving no surface.
-- `plugins/tk-studio/lib/tests/test_driver_contract.py`: §6 pins for the new sentences and the `--channel` clause.
+- `plugins/tk-studio/skills/tk-studio-activate/scripts/drift_check.py`: a foreign catalog skips the comparison with a note; the unreadable-catalog text is reworded; the docstring defines a developer checkout.
+- `plugins/tk-studio/skills/tk-studio-activate/SKILL.md`: the plugin row says a catalog without `tk-studio` is skipped.
+- `plugins/tk-studio/contracts/driver-contract.md`: §6 defines a developer checkout as present with a `tk-studio` entry, adds the foreign-catalog sentence, and lists the cases that stay `error`.
+- `plugins/tk-studio/lib/tests/test_drift_check.py`: adds a `_write_foreign_catalog` helper and six tests: a foreign catalog with the folder (ok) and without it (missing); `main` with a foreign catalog (not `error`, exit ≠ 2); shadowed through `known_marketplaces.json`; an unreadable `known_marketplaces.json`; and an unreadable `settings.json`.
+- `plugins/tk-studio/lib/tests/test_driver_contract.py`: §6 pins for the developer-checkout definition and the skip sentence.
 
 **Review:**
-- Findings: 7 patches applied (high 0, medium 3, low 4), 0 deferred, 2 rejected, 0 bad_spec, 0 intent_gap.
-- Consults: 1 — `deviation-gt-0` on the two patch deviations, ruled accept, scores 1 and 2. It is logged under `## Consult Log` and as an observation event.
-- Follow-up review recommended: **true**. The score is 3×3 (medium) + 1×4 (low) = 13, which is at least 5. No patch was high severity.
+- Findings: 2 patches applied (high 0, medium 1, low 1), 1 deferred (consolidate.py drift fix text), 1 rejected, 0 bad_spec, 0 intent_gap.
+- Consults: 1. A `deviation-gt-0` consult on the developer-checkout narrowing ruled accept at score 2, carried to 25-5. It is logged under `## Consult Log` and as an observation event.
+- Follow-up review recommended: **false**. The score is 3×1 (medium) + 1×1 (low) = 4, which is below 5, and no patch was high severity.
 
 **Verification (re-run by this session after all patches):**
-- `uv run python -m unittest tests.test_drift_check tests.test_release_roster tests.test_conformance tests.test_driver_contract`: 181 OK.
-- `uv run python -m unittest discover tests`: 938 OK, 1 skipped (the opt-in live `claude` probe).
+- `uv run python -m unittest tests.test_drift_check tests.test_release_roster tests.test_conformance tests.test_driver_contract`: 187 OK.
+- `uv run python -m unittest discover tests`: 944 OK, 1 skipped (the opt-in live `claude` probe).
 - `runner.py run`: exit 0, `"ok": true`, `harness_loadable.state` = `skipped: --from-archive not given`, 18 surfaces, no failures.
 - `runner.py run --from-archive <scratch zip of plugins/tk-studio, members at root>`: exit 0, `"ok": true`, `harness_loadable.state` ok at v0.2.16, 18 surfaces.
-- `drift_check.py --directory <repo> --claude-home <scratch home linking the checkout>`: plugin plane `ok`/`case ok` on both `latest` and `stable` (both rosters are at v0.2.16 now).
+- `drift_check.py --directory <repo> --claude-home <scratch home linking the checkout>`: plugin plane `ok`/`case ok` on both `latest` and `stable`.
 
-**Unverifiable here (operator):** unchanged from the first pass.
-- On TIM-PC-2, after `tk-studio install`: `uv run plugins/tk-studio/skills/tk-studio-activate/scripts/drift_check.py --directory C:/GitHub/tk-studio` and expect `case: ok`.
-- The spend-bearing live harness pass: from `plugins/tk-studio/lib`, `uv run python ../contracts/conformance/runner.py run --harness --from-archive <tk-studio-0.2.16.zip>`.
+**Unverifiable here (operator):** unchanged.
+- On TIM-PC-2, after `tk-studio install`: run `uv run plugins/tk-studio/skills/tk-studio-activate/scripts/drift_check.py --directory C:/GitHub/tk-studio` and expect `case: ok`.
+- The spend-bearing live harness pass: from `plugins/tk-studio/lib`, run `uv run python ../contracts/conformance/runner.py run --harness --from-archive <tk-studio-0.2.16.zip>`.
 
 **Residual risks:**
-- In a developer checkout on the default `stable` channel, the plane reports `stale` whenever stable trails the gate. In link mode, the `tk-studio update` fix would replace the link with the stable zip. This was rejected this pass as consult-ruled. Developers pass `--channel latest`.
+- In a developer checkout on the default `stable` channel, the plane reports `stale` whenever stable trails the gate. This is consult-ruled. Developers pass `--channel latest`.
 - On Windows, dangling-junction detection is untested.
-- An archive run that fails harness-loadable now reports `surfaces: {}`. A reader that expected per-surface results in that case sees none.
+- A disabled `enabledPlugins` `tk-studio@<m>` key is reported `shadowed`, which mirrors the installer's cleanup read set.
+- `consolidate.py`'s drift fix text still names the marketplace flow. It is deferred.
+- 25-5's doctor must treat a foreign catalog as a note, never a fail.
 
 Studio: activated as developer; working set bmm, tea, bmb, bmad-loop, gds; drift drift; fixes: run tk-studio install (the installer writes the skills-dir plugin folder <home>/skills/tk-studio/); remove the marketplace copy shadowing the skills-dir folder: claude plugin uninstall tk-studio@tk-studio --scope user; claude plugin marketplace remove tk-studio; routing implementer=claude-opus-5-5 reviewers=claude-opus-5-5 consult=claude-opus-5-5; knowledge spine absent
-Baseline: 9812fabc7b0551d4009ba7d17124ce8a7d78a38f (branch loop/epic-25); reviewed HEAD c421c2c9cbb42c4ee9a40b51f3156d914d873938
+Baseline: 9812fabc7b0551d4009ba7d17124ce8a7d78a38f (branch loop/epic-25); reviewed HEAD 5de6832fccf29266e067261b4514596e7b408dcf
 
-DRIFT: under `--from-archive`, a missing or malformed archive status-block schema exits 2 with `{ok:false,error}`, not a `failures[]` entry — it matches the missing-manifest precedent — affects: none
-DRIFT: a folder failing harness-loadable drives no surface; `harness_pass.state` gains `not run: the skills-dir folder is not harness-loadable` (driver-contract §8) — the loadability check must run before discovery — affects: none
+DRIFT: a marketplace catalog without a `tk-studio` entry is not a developer checkout (comparison skipped with a note, never `error`); driver-contract §6 says so at 0.1.19 — a foreign marketplace blocked activation with exit 2 — affects: 25-5

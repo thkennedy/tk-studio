@@ -8,7 +8,8 @@ Planes checked:
              its .claude-plugin/plugin.json version vs the configured channel's
              roster plugin entry (--channel, default stable; the project's
              tools/installer/rosters/<channel>.json) and, in a developer
-             checkout only, the repo marketplace.json entry. One case is named
+             checkout only (a repo marketplace.json listing tk-studio; one
+             that does not is skipped), that entry. One case is named
              (field `case`): ok | stale (tk-studio update, plus --channel
              off the default) | missing
              (tk-studio install) | shadowed (a marketplace copy is installed;
@@ -612,21 +613,25 @@ def _skills_dir_check(directory: Path, marketplace_path: Path | None,
             notes.append(note + (f" (channel {channel})" if expected else ""))
     # the developer catalog is validated whenever it is present, even with
     # no folder version to compare: an unreadable catalog is error, never
-    # hidden behind a missing folder
+    # hidden behind a missing folder. A catalog that lists no tk-studio
+    # entry is another project's own marketplace, not a developer checkout:
+    # the comparison is skipped, never error (as a roster with no plugin
+    # entry is never stale)
     catalog = marketplace_path or (directory / ".claude-plugin"
                                    / "marketplace.json")
-    if catalog.is_file():   # a developer checkout only
+    if catalog.is_file():
         market, err = _read_json_file(catalog)
-        entry = None
-        if not err and isinstance(market, dict) \
-                and isinstance(market.get("plugins"), list):
-            entry = next((p for p in market["plugins"]
-                          if isinstance(p, dict)
-                          and p.get("name") == SKILLS_DIR_PLUGIN), None)
-        if entry is None:
-            errors.append(f"marketplace catalog {catalog} unreadable or "
-                          f"missing the {SKILLS_DIR_PLUGIN} entry"
-                          + (f" ({err})" if err else ""))
+        listed = market.get("plugins") if isinstance(market, dict) else None
+        entry = next((p for p in listed if isinstance(p, dict)
+                      and p.get("name") == SKILLS_DIR_PLUGIN), None) \
+            if isinstance(listed, list) else None
+        if not isinstance(listed, list):
+            errors.append(f"marketplace catalog {catalog} unreadable "
+                          f"({err or 'no plugins list'})")
+        elif entry is None:
+            notes.append(f"marketplace catalog {catalog} has no "
+                         f"{SKILLS_DIR_PLUGIN} entry — not a {SKILLS_DIR_PLUGIN}"
+                         " developer checkout, catalog comparison skipped")
         elif not isinstance(entry.get("version"), str):
             errors.append(f"marketplace catalog {catalog} unreadable: its "
                           f"{SKILLS_DIR_PLUGIN} entry carries no string "
