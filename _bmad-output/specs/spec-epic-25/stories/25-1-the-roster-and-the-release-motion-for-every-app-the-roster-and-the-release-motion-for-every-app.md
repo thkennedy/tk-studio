@@ -6,6 +6,7 @@ status: 'done'
 review_loop_iteration: 0
 followup_review_recommended: true
 deviation_score: 2
+reconcile_verdict: adjust-stories
 baseline_revision: dd0e6778c495d88770f58e82e6bcca7c82e7a697
 context:
   - '{project-root}/_bmad-output/specs/spec-epic-25/plans/25-1.md'
@@ -280,3 +281,15 @@ Baseline: dd0e6778c495d88770f58e82e6bcca7c82e7a697 (branch loop/epic-25)
 
 DRIFT: in a roster with no `plugin` entry, every app entry requires `source`, and the motion records it — AC3's foreign entry must name its repository, and without a plugin entry there is no home to compare against — affects: 25-3, 25-4
 DRIFT: `--app plugin` with a foreign `--repo` is refused, dry run included — keeps the plugin motion unchanged in effect — affects: none
+
+## Reconcile
+
+### 2026-10-14 — adjust-stories
+
+- Score: 2
+- Reasoning: The one score-2 deviation is the roster guard being stricter than the plan's I/O matrix (six known component names only, `schema: 1`, `channel` in {stable, latest}, a `>=X.Y.Z` Claude Code floor, `X.Y.Z` tool versions), plus two score-1 follow-ons: a plugin-less roster requires `source` on every app entry, and the drift plane's ok detail now names both rosters per channel. Later stories 25.3 and 25.4 consume the roster and the guard, so their fakes and fixtures must use the accepted shape, but no acceptance criterion of either story changes: 25.3 still compares the folder's `plugin.json` against the channel's `plugin` entry and pins its four cases; 25.4 still reads the roster for every verb and tests against fakes. No AD, contract surface, schema or recorded ruling is contradicted: the guard refuses more, never less, which is AD-21's "never a placeholder, nothing fabricated" made concrete, and the per-channel detail follows the 2026-10-14 rulings recorded in SPEC.md. Stories 25.5 to 25.7 are unaffected (25.7's first `latest`-only cut is already covered by the Spec Change Log's gate ×4 amendment). Recorded by the attended session, since the gate session is off (`gate_enabled = false`).
+- Affected: 25-3-the-drift-check-and-conformance-read-the-folder-and-the — "a lib guard pins the shape" and "the plugin plane ... reports `ok`, `stale`, `missing` or `shadowed`": any roster the story writes or fakes must pass the stricter guard, and the plane's ok detail wording has moved on from the plan's draft
+- Affected: 25-4-the-bootstrap-and-the-meta-cli — "every verb is exercised against a fake roster": the fakes must use the six known names, `schema: 1`, a valid channel, the `>=X.Y.Z` floor and `X.Y.Z` tool versions, carry `source` on foreign app entries, and the meta-CLI must read `source` and the per-platform `sha256` map
+- Invariant: none
+
+Gate: Part A adjust-stories (attended session; gate session off); Part B not run here: the run is closed by archive and relaunch, which plans the next story.

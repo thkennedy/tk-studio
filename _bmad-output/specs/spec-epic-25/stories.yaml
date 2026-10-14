@@ -74,6 +74,12 @@
     `25-3-the-drift-check-and-conformance-read-the-folder-and-the-*.md`, and a file
     named `25-3-the-drift-check-and-conformance-read-the-folder-and-the.md` is read as
     pending (loop deficiency 1, story 21-6).
+    Replan (25-1 reconcile, 2026-10-14): build on the landed roster guard and drift plane as they
+    are (six known component names, schema 1, channel in {stable, latest}, a >=X.Y.Z floor,
+    X.Y.Z tool versions, `source` required on foreign app entries when no `plugin` entry
+    exists; gate x4 binds latest.json only); every roster fixture passes the guard; the
+    stale/missing/shadowed cases extend the plane's per-channel detail; the configured
+    channel comes from the roster file stem.
 
 - id: "25-4-the-bootstrap-and-the-meta-cli"
   title: "The Bootstrap and the Meta-CLI"
@@ -97,6 +103,11 @@
     `25-4-the-bootstrap-and-the-meta-cli-*.md`, and a file named
     `25-4-the-bootstrap-and-the-meta-cli.md` is read as pending (loop deficiency 1,
     story 21-6).
+    Replan (25-1 reconcile, 2026-10-14): read the roster through the landed guard, never a
+    second parser; select the running platform's digest from the per-platform `sha256` map
+    and refuse a missing key by name (PlatformNotPinned); honour `source` on foreign app
+    entries; treat an absent component as not shipped in this channel; every fake roster
+    in the tests passes the guard.
 
 - id: "25-5-doctor-says-what-is-wrong"
   title: "Doctor Says What Is Wrong"
