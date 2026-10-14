@@ -1,0 +1,170 @@
+# stories.yaml: Epic 25 of this project, transcribed 1:1 from _bmad-output/planning-artifacts/epics.md
+# by .bmad-loop/plugins/studio-pipeline/transcribe.py on 2026-10-14. The epics document is
+# the plan; the studio gate may append remediation entries (`<key>-r<n>`) and revise
+# UNSTARTED entries' invoke_dev_with, nothing else.
+
+- id: "25-1-the-roster-and-the-release-motion-for-every-app"
+  title: "The Roster and the Release Motion for Every App"
+  description: >-
+    I want one committed roster per channel naming the compatible set of app releases
+    with checksums, and one release script that cuts any app by its prefix, So that the
+    installer has a single source of truth and no app ever owns the repository's
+    "latest". Canonical: ST-081.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 25.1: The
+    Roster and the Release Motion for Every App", the authoritative specification (user
+    story and acceptance criteria). Read the epic's own narrative (the paragraphs under
+    "## Epic 25:") for scope, rulings and the repo the story targets; transcribe the
+    story into the spec's intent contract and never re-derive, generalise or extend it.
+    Plan: plans/25-1.md when present (its Code Map is the investigation). Project rules
+    and the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass implementer.model and reviewers.model
+    explicitly on every subagent launch. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/25-1-the-roster-and-the-release-motion-for-every-app-<slug
+    of the title>.md` in the spec folder; the engine resolves it by the glob
+    `25-1-the-roster-and-the-release-motion-for-every-app-*.md`, and a file named
+    `25-1-the-roster-and-the-release-motion-for-every-app.md` is read as pending (loop
+    deficiency 1, story 21-6).
+
+- id: "25-2-the-installer-writes-the-skills-dir-plugin"
+  title: "The Installer Writes the Skills-Dir Plugin"
+  description: >-
+    I want the plugin written to `~/.claude/skills/tk-studio/` from the verified release
+    zip, with every marketplace copy removed, So that Claude Code loads the studio in
+    place with no clone, no cache copy and nothing shadowing it. Canonical: ST-082.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 25.2: The
+    Installer Writes the Skills-Dir Plugin", the authoritative specification (user story
+    and acceptance criteria). Read the epic's own narrative (the paragraphs under "##
+    Epic 25:") for scope, rulings and the repo the story targets; transcribe the story
+    into the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/25-2.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass implementer.model and reviewers.model
+    explicitly on every subagent launch. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/25-2-the-installer-writes-the-skills-dir-plugin-<slug of
+    the title>.md` in the spec folder; the engine resolves it by the glob
+    `25-2-the-installer-writes-the-skills-dir-plugin-*.md`, and a file named
+    `25-2-the-installer-writes-the-skills-dir-plugin.md` is read as pending (loop
+    deficiency 1, story 21-6).
+
+- id: "25-3-the-drift-check-and-conformance-read-the-folder-and-the"
+  title: "The Drift Check and Conformance Read the Folder and the Roster"
+  description: >-
+    I want `tk activate`'s plugin plane and the conformance suite's harness-loadable
+    assertion to judge the skills-dir folder against the roster, So that the drift check
+    keeps telling the truth after the marketplace is gone (AD-13 as amended by AD-21).
+    Canonical: ST-083.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 25.3: The
+    Drift Check and Conformance Read the Folder and the Roster", the authoritative
+    specification (user story and acceptance criteria). Read the epic's own narrative
+    (the paragraphs under "## Epic 25:") for scope, rulings and the repo the story
+    targets; transcribe the story into the spec's intent contract and never re-derive,
+    generalise or extend it. Plan: plans/25-3.md when present (its Code Map is the
+    investigation). Project rules and the verify gate: the studio customization
+    (_bmad/custom/bmad-build-auto.toml). Routing: .bmad-loop/routing.current.json; pass
+    implementer.model and reviewers.model explicitly on every subagent launch.
+    Deviations: one `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto
+    Run Result. Spec file: write the executor spec as
+    `stories/25-3-the-drift-check-and-conformance-read-the-folder-and-the-<slug of the
+    title>.md` in the spec folder; the engine resolves it by the glob
+    `25-3-the-drift-check-and-conformance-read-the-folder-and-the-*.md`, and a file
+    named `25-3-the-drift-check-and-conformance-read-the-folder-and-the.md` is read as
+    pending (loop deficiency 1, story 21-6).
+
+- id: "25-4-the-bootstrap-and-the-meta-cli"
+  title: "The Bootstrap and the Meta-CLI"
+  description: >-
+    I want one command that installs a small self-updating CLI, and that CLI to install
+    and update the three apps from the roster, So that I never clone a repository or
+    hand-edit an environment to run the studio. Canonical: ST-084.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 25.4: The
+    Bootstrap and the Meta-CLI", the authoritative specification (user story and
+    acceptance criteria). Read the epic's own narrative (the paragraphs under "## Epic
+    25:") for scope, rulings and the repo the story targets; transcribe the story into
+    the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/25-4.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass implementer.model and reviewers.model
+    explicitly on every subagent launch. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/25-4-the-bootstrap-and-the-meta-cli-<slug of the
+    title>.md` in the spec folder; the engine resolves it by the glob
+    `25-4-the-bootstrap-and-the-meta-cli-*.md`, and a file named
+    `25-4-the-bootstrap-and-the-meta-cli.md` is read as pending (loop deficiency 1,
+    story 21-6).
+
+- id: "25-5-doctor-says-what-is-wrong"
+  title: "Doctor Says What Is Wrong"
+  description: >-
+    I want `tk-studio doctor` to run the runbook's smoke table and the trust checks and
+    name every failure with its fix, So that a fresh machine reaches a working studio
+    from facts, not from reading section 7. Canonical: ST-085.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 25.5:
+    Doctor Says What Is Wrong", the authoritative specification (user story and
+    acceptance criteria). Read the epic's own narrative (the paragraphs under "## Epic
+    25:") for scope, rulings and the repo the story targets; transcribe the story into
+    the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/25-5.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass implementer.model and reviewers.model
+    explicitly on every subagent launch. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/25-5-doctor-says-what-is-wrong-<slug of the title>.md` in
+    the spec folder; the engine resolves it by the glob
+    `25-5-doctor-says-what-is-wrong-*.md`, and a file named
+    `25-5-doctor-says-what-is-wrong.md` is read as pending (loop deficiency 1, story
+    21-6).
+
+- id: "25-6-sandboxes-read-the-host-skills-folder"
+  title: "Sandboxes Read the Host Skills Folder"
+  description: >-
+    I want every engine sandbox to consume the host's `~/.claude/skills` through
+    Docker's read-only skills mount instead of installing the plugin per sandbox, So
+    that one install serves the host and every microVM and the drift check covers both.
+    Canonical: ST-086.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 25.6:
+    Sandboxes Read the Host Skills Folder", the authoritative specification (user story
+    and acceptance criteria). Read the epic's own narrative (the paragraphs under "##
+    Epic 25:") for scope, rulings and the repo the story targets; transcribe the story
+    into the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/25-6.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass implementer.model and reviewers.model
+    explicitly on every subagent launch. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/25-6-sandboxes-read-the-host-skills-folder-<slug of the
+    title>.md` in the spec folder; the engine resolves it by the glob
+    `25-6-sandboxes-read-the-host-skills-folder-*.md`, and a file named
+    `25-6-sandboxes-read-the-host-skills-folder.md` is read as pending (loop deficiency
+    1, story 21-6).
+
+- id: "25-7-the-docs-and-the-release-say-the-installer-is-the-way-in"
+  title: "The Docs and the Release Say the Installer Is the Way In"
+  description: >-
+    I want the README, the install runbooks and the kb to describe the installer as the
+    only install path and the marketplace as the developer catalog, So that nobody
+    follows the retired path. Canonical: ST-087.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 25.7: The
+    Docs and the Release Say the Installer Is the Way In", the authoritative
+    specification (user story and acceptance criteria). Read the epic's own narrative
+    (the paragraphs under "## Epic 25:") for scope, rulings and the repo the story
+    targets; transcribe the story into the spec's intent contract and never re-derive,
+    generalise or extend it. Plan: plans/25-7.md when present (its Code Map is the
+    investigation). Project rules and the verify gate: the studio customization
+    (_bmad/custom/bmad-build-auto.toml). Routing: .bmad-loop/routing.current.json; pass
+    implementer.model and reviewers.model explicitly on every subagent launch.
+    Deviations: one `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto
+    Run Result. Spec file: write the executor spec as
+    `stories/25-7-the-docs-and-the-release-say-the-installer-is-the-way-in-<slug of the
+    title>.md` in the spec folder; the engine resolves it by the glob
+    `25-7-the-docs-and-the-release-say-the-installer-is-the-way-in-*.md`, and a file
+    named `25-7-the-docs-and-the-release-say-the-installer-is-the-way-in.md` is read as
+    pending (loop deficiency 1, story 21-6).
