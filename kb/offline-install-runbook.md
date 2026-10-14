@@ -38,7 +38,7 @@ deterministic, anyone at the tag can independently re-derive the
 recorded digest without publishing:
 
 ```bash
-uv run tools/release_archive.py run --dry-run
+uv run tools/release_archive.py run --app plugin --dry-run
 ```
 
 ## Sneakernet, end to end
@@ -110,6 +110,78 @@ zip remains the proven backstop.
 
 A zip cannot contain its own digest, so the motion is two commits:
 gate ×3 bump + `claude plugin tag` first, then
-`uv run tools/release_archive.py run` (build → hash → publish → verify →
-record) and the roster archive-record commit immediately after — main is
-never left between the two.
+`uv run tools/release_archive.py run --app plugin` (build → hash →
+publish → verify → record) and the roster archive-record commit
+immediately after — main is never left between the two. The record
+commit carries both `released-roster.json` `archive` and `latest.json`'s
+`plugin` entry (gate ×4). Gate ×4 binds `latest.json` only — the channel
+the motion writes; `stable.json` trails it by PR and is checked for shape
+only, so a `stable` plugin entry at an older tag is not drift.
+
+## Release motion for every app
+
+AD-21 (Story 25.1): one script cuts any app by its tag prefix, and no
+release owns the repository's "latest" — every `gh release create` passes
+`--latest=false` (a release that already exists is demoted with
+`gh release edit <tag> --latest=false`); consumers resolve by tag through the installer roster,
+never `/releases/latest`.
+
+| `--app` | tag | built from (at the tag) | artifact |
+|---|---|---|---|
+| `plugin` (default) | `tk-studio--vX.Y.Z` | `plugins/tk-studio` | `tk-studio-<v>.zip` |
+| `supervisor` | `supervisor--vX.Y.Z` | its own checkout's root (`--repo`, until EP-31) | `supervisor-<v>.zip` |
+| `studio-web` | `studio-web--vX.Y.Z` | `apps/studio-web/dist` | `studio-web-<v>.zip` |
+| `cli` | `cli--vX.Y.Z` | `tools/installer/cli` | wheel (`uv build`, `SOURCE_DATE_EPOCH` = commit) |
+
+The plugin's version comes from `plugin.json`; every other app takes
+`--version X.Y.Z` and needs the `<prefix>--v<version>` tag to exist. The
+script builds deterministically, publishes, re-downloads and verifies the
+digest, then records `{tag, url, sha256}` under the app's component in
+`tools/installer/rosters/<channel>.json` (`--channel latest`, the
+default, or `stable`) — adding `source: "<owner>/<repo>"` when the asset
+lives on another repository. It refuses, before any `gh` mutation, a
+roster the drift check's guard (`roster_problems`) rejects — shape plus
+gate ×4 for `--channel latest`, shape only for `--channel stable` — and a
+`cli` wheel whose version is not `--version`. `stable`
+trails `latest`: promoting an entry is a PR that copies it into
+`stable.json` (no promotion command).
+
+Roster components are optional per channel: an absent component means
+"not shipped in this channel". At the first cut both rosters carry
+`plugin`, `uv` and `bun`, and are identical except `channel` (first-cut
+evidence, not an invariant: `stable` trails `latest` from the next cut).
+
+### Operator step: the supervisor's first release (`supervisor--v0.1.0`)
+
+The engine never cuts or pushes a tag on another repository; the
+operator runs these. In a `thkennedy/tk-studio-supervisor` checkout on
+an up-to-date `main`:
+
+```bash
+git tag supervisor--v0.1.0 && git push origin supervisor--v0.1.0
+```
+
+then from this repository:
+
+```bash
+uv run tools/release_archive.py run --app supervisor --version 0.1.0 --repo <path-to-supervisor-checkout> --channel latest
+```
+
+then copy the written `supervisor` entry into `stable.json` by PR.
+Unverifiable here: the engine records them and never runs them.
+
+### Where the uv and Bun pins came from
+
+`uv` and `bun` entries are `{version, sha256: {<target triple>: <hex>}}`,
+one digest per upstream platform asset, read from the newest
+non-prerelease upstream release at 2026-10-14 — never computed or
+invented:
+
+- uv 0.13.1 (per-asset `.sha256` files):
+  - `x86_64-pc-windows-msvc`: https://github.com/astral-sh/uv/releases/download/0.13.1/uv-x86_64-pc-windows-msvc.zip.sha256
+  - `x86_64-unknown-linux-gnu`: https://github.com/astral-sh/uv/releases/download/0.13.1/uv-x86_64-unknown-linux-gnu.tar.gz.sha256
+  - `aarch64-apple-darwin`: https://github.com/astral-sh/uv/releases/download/0.13.1/uv-aarch64-apple-darwin.tar.gz.sha256
+- Bun 1.4.3 (`SHASUMS256.txt`, https://github.com/oven-sh/bun/releases/download/bun-v1.4.3/SHASUMS256.txt):
+  - `x86_64-pc-windows-msvc`: `bun-windows-x64.zip`
+  - `x86_64-unknown-linux-gnu`: `bun-linux-x64.zip`
+  - `aarch64-apple-darwin`: `bun-darwin-aarch64.zip`

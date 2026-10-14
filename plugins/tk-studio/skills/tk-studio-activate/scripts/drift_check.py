@@ -10,7 +10,10 @@ Planes checked:
              harness loadability: the harness's own install record
              (installed_plugins.json) must hold the plugin at the repo version,
              or headless /tk-studio:<skill> is 'Unknown command' while the
-             repo looks healthy (AD-13)
+             repo looks healthy (AD-13) — plus the installer roster guard
+             (AD-21): the project's tools/installer/rosters/{stable,latest}.json,
+             when present, must be in shape, and latest.json's plugin entry at
+             the gate (gate x4 — stable trails latest by PR, shape only)
   store      per-user store presence + skeleton (~/.tk-studio)
   vault      Obsidian vault window links for this project, when registered
              (ST-2.5) — observed state is recorded in the registry entry
@@ -35,6 +38,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -59,6 +63,10 @@ FIX_HARNESS = ("install the plugin into the harness (AD-1 flow): claude plugin "
 FIX_STORE = "run the store standup: uv run <plugin>/lib/store.py standup (idempotent, ST-2.1)"
 FIX_RELEASE = ("run the release motion: bump plugin.json, marketplace.json, and "
                "released-roster.json in lockstep (version gate + skill roster together)")
+FIX_INSTALLER_ROSTER = ("run the release motion: uv run tools/release_archive.py "
+                        "run --app plugin (records the roster's plugin entry in lockstep "
+                        "with released-roster.json); uv/bun pins are read from the "
+                        "upstream release, never invented")
 
 
 def check_bmad_base(directory: Path, lock_path: Path) -> dict:
@@ -224,6 +232,235 @@ def _released_roster_check(plugin_root: Path, version: str) -> dict:
             "detail": f"released roster {len(recorded)} skills at the gate"}
 
 
+# --- installer roster guard (AD-21, Story 25.1) ----------------------------
+# One pure validator for tools/installer/rosters/<channel>.json, shared by
+# the lib suite and the plugin plane. Every component is optional per
+# channel (absent = "not shipped in this channel"); a present entry must be
+# complete, real and well-formed — never a placeholder.
+
+ROSTER_SCHEMA = 1
+ROSTER_CHANNELS = ("stable", "latest")
+RELEASE_COMPONENTS = {"plugin": "tk-studio--v", "supervisor": "supervisor--v",
+                      "studio-web": "studio-web--v", "cli": "cli--v"}
+TOOL_COMPONENTS = ("uv", "bun")
+REQUIRED_TOOL_TARGET = "x86_64-pc-windows-msvc"
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+_SEMVER = re.compile(r"\d+\.\d+\.\d+")
+_FLOOR = re.compile(r">=\d+\.\d+\.\d+")
+_RELEASE_URL = re.compile(
+    r"https://github\.com/([^/]+)/([^/]+)/releases/download/([^/]+)/([^/]+)")
+_PLACEHOLDER_WORDS = ("tbd", "placeholder", "pending")
+
+
+def _is_placeholder_text(value: str) -> bool:
+    low = value.lower()
+    return any(w in low for w in _PLACEHOLDER_WORDS) or "<" in value or ">" in value
+
+
+def _digest_problem(where: str, value) -> str | None:
+    if not isinstance(value, str) or not _HEX64.fullmatch(value):
+        return f"{where}: not a 64-lowercase-hex sha256 ({value!r})"
+    if len(set(value)) == 1:
+        return f"{where}: placeholder digest ({value[:8]}...), never a real value"
+    return None
+
+
+def _url_repo(url) -> str | None:
+    m = _RELEASE_URL.fullmatch(url) if isinstance(url, str) else None
+    return f"{m.group(1)}/{m.group(2)}" if m else None
+
+
+def roster_problems(roster, *, released_archive: dict | None = None,
+                    plugin_version: str | None = None) -> list[str]:
+    """Shape problems in an installer roster, [] when well-formed. Each
+    problem names the component and field. ``released_archive`` (the
+    released-roster.json ``archive`` record) and ``plugin_version`` (the
+    plugin.json version) turn on gate x4 for a present ``plugin`` entry;
+    None skips that comparison. The ``plugin`` entry's URL repository is
+    the roster's home: any other repository must be named in ``source``."""
+    if not isinstance(roster, dict):
+        return ["roster: not a JSON object"]
+    problems: list[str] = []
+    if "schema" not in roster:
+        problems.append("schema: missing")
+    elif roster["schema"] != ROSTER_SCHEMA:
+        problems.append(f"schema: unsupported {roster['schema']!r} "
+                        f"(expected {ROSTER_SCHEMA})")
+    if "channel" not in roster:
+        problems.append("channel: missing")
+    elif roster["channel"] not in ROSTER_CHANNELS:
+        problems.append(f"channel: {roster['channel']!r} is not one of "
+                        f"{', '.join(ROSTER_CHANNELS)}")
+    requires = roster.get("requires")
+    if not isinstance(requires, dict):
+        problems.append("requires: missing (needs requires.claude-code)")
+    elif "claude-code" not in requires:
+        problems.append("requires.claude-code: missing")
+    elif not (isinstance(requires["claude-code"], str)
+              and _FLOOR.fullmatch(requires["claude-code"])):
+        problems.append(f"requires.claude-code: not a >=X.Y.Z version floor "
+                        f"({requires['claude-code']!r})")
+    components = roster.get("components")
+    if not isinstance(components, dict):
+        problems.append("components: missing")
+        return problems
+
+    plugin = components.get("plugin")
+    home = _url_repo(plugin.get("url")) if isinstance(plugin, dict) else None
+    for name, entry in components.items():
+        where = f"components.{name}"
+        if name in RELEASE_COMPONENTS:
+            problems.extend(_release_entry_problems(
+                where, RELEASE_COMPONENTS[name], entry, home))
+        elif name in TOOL_COMPONENTS:
+            problems.extend(_tool_entry_problems(where, entry))
+        else:
+            problems.append(f"{where}: unknown component")
+
+    if isinstance(plugin, dict):
+        if plugin_version is not None \
+                and plugin.get("tag") != f"tk-studio--v{plugin_version}":
+            problems.append(
+                f"components.plugin.tag: {plugin.get('tag')!r} is not the gate's "
+                f"tk-studio--v{plugin_version} (plugin.json) — gate x4 broken")
+        if released_archive is not None:
+            for field in ("url", "sha256"):
+                if plugin.get(field) != released_archive.get(field):
+                    problems.append(
+                        f"components.plugin.{field}: {plugin.get(field)!r} does "
+                        f"not match released-roster.json archive.{field} "
+                        f"{released_archive.get(field)!r} — gate x4 broken")
+    return problems
+
+
+def _release_entry_problems(where: str, prefix: str, entry,
+                            home: str | None) -> list[str]:
+    if not isinstance(entry, dict):
+        return [f"{where}: not an object {{tag, url, sha256}}"]
+    problems = [f"{where}.{field}: missing" for field in ("tag", "url", "sha256")
+                if field not in entry]
+    for field in ("tag", "url", "source"):
+        value = entry.get(field)
+        if isinstance(value, str) and _is_placeholder_text(value):
+            problems.append(f"{where}.{field}: placeholder value {value!r}")
+    if "sha256" in entry:
+        bad = _digest_problem(f"{where}.sha256", entry["sha256"])
+        if bad:
+            problems.append(bad)
+    tag = entry.get("tag")
+    if "tag" in entry and not (isinstance(tag, str) and tag.startswith(prefix)
+                               and _SEMVER.fullmatch(tag[len(prefix):])):
+        problems.append(f"{where}.tag: {tag!r} is not {prefix}X.Y.Z")
+    if "url" in entry:
+        url = entry["url"]
+        m = _RELEASE_URL.fullmatch(url) if isinstance(url, str) else None
+        if not m:
+            problems.append(f"{where}.url: {url!r} is not https://github.com/"
+                            "<owner>/<repo>/releases/download/<tag>/<asset>")
+        elif m.group(3) != tag:
+            problems.append(f"{where}.url: names tag {m.group(3)!r}, "
+                            f"entry tag is {tag!r}")
+        else:
+            repo = f"{m.group(1)}/{m.group(2)}"
+            source = entry.get("source")
+            if source is not None and source != repo:
+                problems.append(f"{where}.source: {source!r} does not match "
+                                f"its URL's repository {repo!r}")
+            elif source is None and home is not None and repo != home:
+                problems.append(f"{where}.source: URL is on {repo}, not the "
+                                f"roster's home {home} — name it in source")
+    return problems
+
+
+def _tool_entry_problems(where: str, entry) -> list[str]:
+    if not isinstance(entry, dict):
+        return [f"{where}: not an object {{version, sha256: {{target: hex}}}}"]
+    problems: list[str] = []
+    version = entry.get("version")
+    if "version" not in entry:
+        problems.append(f"{where}.version: missing")
+    elif isinstance(version, str) and _is_placeholder_text(version):
+        problems.append(f"{where}.version: placeholder value {version!r}")
+    elif not (isinstance(version, str) and _SEMVER.fullmatch(version)):
+        problems.append(f"{where}.version: {version!r} is not X.Y.Z")
+    digests = entry.get("sha256")
+    if not isinstance(digests, dict) or not digests:
+        problems.append(f"{where}.sha256: not a non-empty "
+                        "{<platform target>: <hex>} map")
+        return problems
+    if REQUIRED_TOOL_TARGET not in digests:
+        problems.append(f"{where}.sha256: no {REQUIRED_TOOL_TARGET} digest "
+                        "(Windows x64 is required)")
+    for target, value in digests.items():
+        bad = _digest_problem(f"{where}.sha256.{target}", value)
+        if bad:
+            problems.append(bad)
+    return problems
+
+
+def _installer_roster_check(directory: Path, plugin_root: Path,
+                            version: str) -> dict:
+    """AD-21 sealing: the rosters are read from the checked project
+    directory, never relative to the plugin root (a skills-dir install
+    carries no tools/). Absent roster = not checkable, ok. Gate x4 binds
+    latest.json only — the channel the release motion writes; stable.json
+    trails it by PR and is checked for shape only. Story 25.3 wires the
+    configured channel."""
+    rosters_dir = directory / "tools" / "installer" / "rosters"
+    paths = {"stable": rosters_dir / "stable.json",
+             "latest": rosters_dir / "latest.json"}
+    if not any(p.is_file() for p in paths.values()):
+        return {"status": "ok",
+                "detail": (f"no installer roster at {rosters_dir} — roster not "
+                           "checkable from this project")}
+    rosters: dict = {}
+    for channel, path in paths.items():
+        if not path.is_file():
+            continue
+        try:
+            rosters[channel] = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return {"status": "error",
+                    "detail": f"installer roster {path} unreadable: {exc}"}
+    try:
+        record = json.loads((plugin_root / ".claude-plugin" / "released-roster.json")
+                            .read_text(encoding="utf-8"))
+        archive = record.get("archive") if isinstance(record, dict) else None
+    except (OSError, json.JSONDecodeError):
+        archive = None
+    if not isinstance(archive, dict):
+        # no archive record to compare against: _released_roster_check and
+        # the archive-record pin report the record itself
+        archive = None
+
+    problems: list[str] = []
+    notes: list[str] = []
+    if "stable" in rosters:
+        problems += [f"installer roster stable.json: {p}"
+                     for p in roster_problems(rosters["stable"])]
+        notes.append("stable.json in shape")
+    else:
+        notes.append(f"no {paths['stable']} — stable roster not checkable "
+                     "from this project")
+    if "latest" in rosters:
+        problems += [f"installer roster latest.json: {p}"
+                     for p in roster_problems(rosters["latest"],
+                                              released_archive=archive,
+                                              plugin_version=version)]
+        notes.append("latest.json in shape, plugin entry at the gate (gate x4)")
+    else:
+        notes.append(f"no {paths['latest']} — gate x4 not checkable from "
+                     "this project")
+    if problems:
+        return {"status": "drift", "detail": "; ".join(problems),
+                "fix": FIX_INSTALLER_ROSTER}
+    shipped = "; ".join(
+        f"{ch}: {', '.join(sorted(r['components'])) or 'none'}"
+        for ch, r in rosters.items())
+    return {"status": "ok",
+            "detail": f"installer roster {', '.join(notes)} (components {shipped})"}
+
+
 def _directory_source_serves(name: str, version: str, home: Path,
                              marketplaces: list[str]) -> str | None:
     """A dangling installPath is not drift when the harness serves the plugin
@@ -310,6 +547,7 @@ def check_plugin(directory: Path, marketplace_path: Path | None,
 
     for sub in (
         _released_roster_check(PLUGIN_ROOT, installed.get("version")),
+        _installer_roster_check(directory, PLUGIN_ROOT, installed.get("version")),
         _harness_loadability(installed.get("name"), installed.get("version"),
                              claude_home, directory),
     ):

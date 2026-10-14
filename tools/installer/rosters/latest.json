@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "channel": "latest",
+  "requires": {
+    "claude-code": ">=2.1.224"
+  },
+  "components": {
+    "plugin": {
+      "tag": "tk-studio--v0.2.16",
+      "url": "https://github.com/thkennedy/tk-studio/releases/download/tk-studio--v0.2.16/tk-studio-0.2.16.zip",
+      "sha256": "2abc4e4754862be6d56250ab582af1234acf8f7fd9937f8840dd41b7cd8b207a"
+    },
+    "uv": {
+      "version": "0.13.1",
+      "sha256": {
+        "aarch64-apple-darwin": "cfe454573412ff7380d15fc7dae5997ab53ffce72fce0a78e91ddbc84001acd2",
+        "x86_64-pc-windows-msvc": "3b2661a463a5baea7f5076ea2b25ab71d77f36a6c0d809e5350651792f80a672",
+        "x86_64-unknown-linux-gnu": "eadd9d27c134ab5ac1ffd4473b97a741407f3ea238288f03121fc4deddf90220"
+      }
+    },
+    "bun": {
+      "version": "1.4.3",
+      "sha256": {
+        "aarch64-apple-darwin": "80afd4c069b46a6fa8f3ec520bebc750a7843e4a8d5b9583d29ad436c00a3403",
+        "x86_64-pc-windows-msvc": "0bf84e808552beea67bf1202a287a35c6c825d837b287b3f8e9dd513dba35d3d",
+        "x86_64-unknown-linux-gnu": "3e730528d89775f03f87f05c06787c4df4099d0a37f3f252e7b829cb23816e18"
+      }
+    }
+  }
+}
