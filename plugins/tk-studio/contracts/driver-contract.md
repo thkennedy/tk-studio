@@ -2,8 +2,8 @@
 
 | | |
 | --- | --- |
-| **Contract version** | **0.1.18** (pre-1.0 semver — a new product still stabilizing; see [Change policy](#change-policy). Renumbered 2026-08-07 from the 1.x line, mapped `1.N.0 → 0.1.N` for continuity: 0.1.1 added the `tk-studio-job` surface and the shipped `job.schema.json`, 0.1.2 added `tk-studio-research`, 0.1.3 added `tk-studio-measure-push`, 0.1.4 added `tk-studio-consolidate`, 0.1.5 installed the `jira` planning binding behind `tk-studio-plan-sync`, 0.1.6 added `tk-studio-migrate`, 0.1.7 publishes the Research→Knowledge Lifecycle port (Epic 9): the `tk-studio-session` and `tk-studio-knowledge` surfaces, the research anchor/seed surface, the run-finish capture note, the KB-injection directive, and the `knowledge-promotion` taxonomy event — each additive; 0.1.8 clarifies §2 (the detect row's blocked cell names the in-band `ask` outcome as a refusal; the plan-sync row states both-changed conflicts end `partial`, not blocked) — a clarification, no shape change; 0.1.9 adds `tk-studio-evolve` (EP-010 — the evolve loop's drafting half: merged `observation` events become `proposals/ledger.md` `PROP-NNN` rows; D1 documents only, D2 derive-only with the taxonomy untouched, D3 on-demand verb plus the shipped-undeclared `evolve-proposals` job type) — additive; 0.1.10 clarifies the §2 base-update row (EP-011 ST-043: the install diff commits only after provably churn-only files are reverted, per-class counts in the result JSON `normalized`; a same-version re-affirmation whose diff is empty after normalization ends `complete` reporting the verified no-op — no branch pushed, no PR opened) — a clarification, no shape change; 0.1.11 adds the conformance harness pass (EP-014: `expect: harness-blocked` drives run the surface through the real harness under a denying permission profile and are judged to end in a `blocked` terminal block naming the unrunnable core; opt-in `--harness` because spend-bearing, the report's `harness_pass` field names declared/skipped/ran, and the denied-permissions case for `tk-studio-detect` ships declared) — additive; 0.1.12 adds the `resolve` scheduler verb (EP-015 — PROP-008's resolved-definition read surface: declared jobs served with type extension applied by the studio-side resolver; substrate-side recurring classification reads trigger/cadence from the verb, never from raw `.tk-studio/jobs/<id>.json` instance files) — additive; 0.1.13 adds named-write reporting to the planning adapter result (EP-017 — PROP-020's staging gap: `normalize.counter` names the committed id counter, and `written[]` — normalize-level and the sync-level roll-up over projection and index — names every file a run wrote, counter included, so commit staging derives from the response alone) — additive; 0.1.14 adds `tk-studio-launch` (studio pipeline decision 5, 2026-09-02: the studio's one way to start the execution substrate for a project epic — planner-tier SPEC + first-story task bootstrap, then bmad-loop started detached with a pre-minted run id — plus the shipped `run-epic` one-shot job type) — additive; 0.1.15 adds per-leg execution-pipeline routing to `tk-studio-launch` (§5: `lib/pipeline.py defaults\|check\|resolve\|apply`, the measured pipeline-v2 defaults shipped in the launch resource's `customize.toml` `[pipeline]`, the project overlay `.bmad-loop/routing.toml`, runtime `--set leg.field=value`; the launch flow routes the epic's first story before its readiness check) — additive; 0.1.16 adds the optional `no_normalize` payload to `tk-studio-install` and states its churn normalization (a verified install reverts provably churn-only files and drops installer `*.bak` copies of committed files when the project root is a git top-level with `_bmad/` tracked; paths dirty before the run are never touched; result JSON `normalized` with per-class counts and `remaining`) — additive; 0.1.17 adds studio-managed base patches (BMAD-METHOD#2718: `render_skill.py` halts on a short config token that several modules declare, even with identical values, so bmm + gds cannot render `bmad-build`/`bmad-build-auto`): `tk-studio-install` re-applies every patch declared in `base-patches/patches.json` after verify-at-pin and reports each in the result JSON `base_patches` (`patched`, `applied`, `not-applicable`, or `stale` / `unverified-core` when the upstream text or core version no longer matches — then the file is left untouched), and `tk-studio-activate` reports a missing or stale patch as bmad-base drift — additive; 0.1.18 names the conformant drivers now that ClaudeOS is retired as a driver (ST-062): a driver roster in §1 (the studio supervisor — executing wrapper, status page; Hermes — front door that submits jobs to the supervisor and never executes a run; direct invocation), §2 states the executing wrapper for a run is whichever conformant driver executed its `wake` directive with `account` and `finish` its duty, a §4 `finish` row documenting the optional `total_cost_usd` (ST-061), §1's cross-references corrected (per-skill CLIs in §2, the status block in §3), and the Audience line and §7 rows name the studio supervisor and Hermes in place of ClaudeOS — additive) |
-| Story / rulings | ST-5.3, ST-6.2, ST-7.1, ST-7.2, ST-8.1, ST-8.2, ST-9.6 (Epic 9, D1–D5 ruled 2026-08-06), ST-040–ST-042 (EP-010, D1–D5 ruled 2026-08-07), ST-061, ST-062; AD-2, AD-3, AD-7, AD-8, AD-10, AD-11, AD-12, AD-13, AD-14, AD-16 |
+| **Contract version** | **0.1.19** (pre-1.0 semver — a new product still stabilizing; see [Change policy](#change-policy). Renumbered 2026-08-07 from the 1.x line, mapped `1.N.0 → 0.1.N` for continuity: 0.1.1 added the `tk-studio-job` surface and the shipped `job.schema.json`, 0.1.2 added `tk-studio-research`, 0.1.3 added `tk-studio-measure-push`, 0.1.4 added `tk-studio-consolidate`, 0.1.5 installed the `jira` planning binding behind `tk-studio-plan-sync`, 0.1.6 added `tk-studio-migrate`, 0.1.7 publishes the Research→Knowledge Lifecycle port (Epic 9): the `tk-studio-session` and `tk-studio-knowledge` surfaces, the research anchor/seed surface, the run-finish capture note, the KB-injection directive, and the `knowledge-promotion` taxonomy event — each additive; 0.1.8 clarifies §2 (the detect row's blocked cell names the in-band `ask` outcome as a refusal; the plan-sync row states both-changed conflicts end `partial`, not blocked) — a clarification, no shape change; 0.1.9 adds `tk-studio-evolve` (EP-010 — the evolve loop's drafting half: merged `observation` events become `proposals/ledger.md` `PROP-NNN` rows; D1 documents only, D2 derive-only with the taxonomy untouched, D3 on-demand verb plus the shipped-undeclared `evolve-proposals` job type) — additive; 0.1.10 clarifies the §2 base-update row (EP-011 ST-043: the install diff commits only after provably churn-only files are reverted, per-class counts in the result JSON `normalized`; a same-version re-affirmation whose diff is empty after normalization ends `complete` reporting the verified no-op — no branch pushed, no PR opened) — a clarification, no shape change; 0.1.11 adds the conformance harness pass (EP-014: `expect: harness-blocked` drives run the surface through the real harness under a denying permission profile and are judged to end in a `blocked` terminal block naming the unrunnable core; opt-in `--harness` because spend-bearing, the report's `harness_pass` field names declared/skipped/ran, and the denied-permissions case for `tk-studio-detect` ships declared) — additive; 0.1.12 adds the `resolve` scheduler verb (EP-015 — PROP-008's resolved-definition read surface: declared jobs served with type extension applied by the studio-side resolver; substrate-side recurring classification reads trigger/cadence from the verb, never from raw `.tk-studio/jobs/<id>.json` instance files) — additive; 0.1.13 adds named-write reporting to the planning adapter result (EP-017 — PROP-020's staging gap: `normalize.counter` names the committed id counter, and `written[]` — normalize-level and the sync-level roll-up over projection and index — names every file a run wrote, counter included, so commit staging derives from the response alone) — additive; 0.1.14 adds `tk-studio-launch` (studio pipeline decision 5, 2026-09-02: the studio's one way to start the execution substrate for a project epic — planner-tier SPEC + first-story task bootstrap, then bmad-loop started detached with a pre-minted run id — plus the shipped `run-epic` one-shot job type) — additive; 0.1.15 adds per-leg execution-pipeline routing to `tk-studio-launch` (§5: `lib/pipeline.py defaults\|check\|resolve\|apply`, the measured pipeline-v2 defaults shipped in the launch resource's `customize.toml` `[pipeline]`, the project overlay `.bmad-loop/routing.toml`, runtime `--set leg.field=value`; the launch flow routes the epic's first story before its readiness check) — additive; 0.1.16 adds the optional `no_normalize` payload to `tk-studio-install` and states its churn normalization (a verified install reverts provably churn-only files and drops installer `*.bak` copies of committed files when the project root is a git top-level with `_bmad/` tracked; paths dirty before the run are never touched; result JSON `normalized` with per-class counts and `remaining`) — additive; 0.1.17 adds studio-managed base patches (BMAD-METHOD#2718: `render_skill.py` halts on a short config token that several modules declare, even with identical values, so bmm + gds cannot render `bmad-build`/`bmad-build-auto`): `tk-studio-install` re-applies every patch declared in `base-patches/patches.json` after verify-at-pin and reports each in the result JSON `base_patches` (`patched`, `applied`, `not-applicable`, or `stale` / `unverified-core` when the upstream text or core version no longer matches — then the file is left untouched), and `tk-studio-activate` reports a missing or stale patch as bmad-base drift — additive; 0.1.18 names the conformant drivers now that ClaudeOS is retired as a driver (ST-062): a driver roster in §1 (the studio supervisor — executing wrapper, status page; Hermes — front door that submits jobs to the supervisor and never executes a run; direct invocation), §2 states the executing wrapper for a run is whichever conformant driver executed its `wake` directive with `account` and `finish` its duty, a §4 `finish` row documenting the optional `total_cost_usd` (ST-061), §1's cross-references corrected (per-skill CLIs in §2, the status block in §3), and the Audience line and §7 rows name the studio supervisor and Hermes in place of ClaudeOS — additive; 0.1.19 moves the drift check's plugin plane to the skills-dir folder and the roster (AD-21, ST-083): §6 states the folder-and-roster rule — the folder `<home>/skills/tk-studio/`'s `plugin.json` against the configured channel's roster `plugin` entry (`--channel`, default `stable`) and, only in a developer checkout, the catalog; the plane's additive `case` field (`ok`, `stale`, `missing`, `shadowed`) with each fix; `installed_plugins.json` read only to detect a shadowing marketplace copy — and §8 documents the conformance runner's `--from-archive <zip>` and the report's `harness_loadable` field — additive) |
+| Story / rulings | ST-5.3, ST-6.2, ST-7.1, ST-7.2, ST-8.1, ST-8.2, ST-9.6 (Epic 9, D1–D5 ruled 2026-08-06), ST-040–ST-042 (EP-010, D1–D5 ruled 2026-08-07), ST-061, ST-062, ST-083; AD-2, AD-3, AD-7, AD-8, AD-10, AD-11, AD-12, AD-13, AD-14, AD-16, AD-21 |
 | Audience | any harness that drives tk-studio unattended — the conformant drivers are the studio supervisor (executing wrapper, status page) and Hermes (front door), plus direct invocation (§1 [Driver roster](#driver-roster-0118)) |
 | Companion schemas | `status-block.schema.json`, `events/taxonomy.v1.json`, `registry.schema.json`, `interchange/shape.v1.json`, `job.schema.json` (v1, shipped ST-6.1), `knowledge.schema.json` (v1, shipped ST-9.1 — spine/seed frontmatter, anchors, deltas, queue and promotions-record lines) |
 
@@ -289,22 +289,57 @@ onto the planner tier by the shipped defaults.
 
 ## 6. Drift-check invocation
 
-The AD-13 activation check — four-plane (bmad-base; plugin, including
-harness loadability; store; vault), loud, read-only (DW-3 wording fold-in,
-0.1.7):
+The AD-13 activation check — four-plane (bmad-base; plugin, read from the
+skills-dir folder against the roster; store; vault), loud, read-only (DW-3
+wording fold-in, 0.1.7; folder-and-roster rule, 0.1.19):
 
 ```bash
-uv run "$PLUGIN_ROOT/skills/tk-studio-activate/scripts/drift_check.py" --directory <project-root> [--guided]
+uv run "$PLUGIN_ROOT/skills/tk-studio-activate/scripts/drift_check.py" --directory <project-root> [--guided] [--channel stable|latest] [--claude-home <dir>]
 ```
 
 Output (stdout JSON): `{ok, result: "clean"|"drift", planes: [{plane:
-"bmad-base"|"plugin"|"store"|"vault", status, detail, fix?}], fixes: [...]}`.
+"bmad-base"|"plugin"|"store"|"vault", status, detail, fix?, case?}],
+fixes: [...]}` — `case?` on the plugin plane only.
 The check never mutates; fixes are guidance (`tk install`,
-`/plugin marketplace update`), applied only by an operator or an explicitly
-invoked skill. Each run emits a `drift-detection` measurement event
-(taxonomy §`drift-detection`); `--guided` marks the onboarding-funnel
+`tk-studio update`, `tk-studio install`), applied only by an operator or an
+explicitly invoked skill. Each run emits a `drift-detection` measurement
+event (taxonomy §`drift-detection`); `--guided` marks the onboarding-funnel
 variant. A driver SHOULD run it at session/connector start and surface
 `fixes[]` verbatim.
+
+**The plugin plane's folder-and-roster rule (0.1.19, AD-21).** The plugin is
+the installer-written skills-dir folder `<home>/skills/tk-studio/`, where
+`<home>` is `--claude-home`, else `CLAUDE_CONFIG_DIR`, else `~/.claude`; a
+live link or junction counts as the folder, a dangling one does not, and the
+installer's siblings (`.tk-studio.new`, `.tk-studio.previous`,
+`.tk-studio.retired`) are never the plugin. The plane reads the folder's
+`.claude-plugin/plugin.json` version and compares it with the configured
+channel's roster `plugin` entry — `--channel` (default `stable`, the
+installer's default) selects the project's
+`tools/installer/rosters/<channel>.json`, never the network — and, only in a
+developer checkout (`<project-root>/.claude-plugin/marketplace.json`
+present), with the catalog's `tk-studio` entry. With no roster in the
+project the version comparison is "not checkable from this project" (ok); a
+roster without a `plugin` entry means not shipped in that channel, never
+stale. The plugin plane carries an additive `case` field naming one of:
+
+| `case` | Means | `status` | Fix |
+| --- | --- | --- | --- |
+| `ok` | the folder is present, at the roster (and catalog) version, unshadowed | `ok` | — |
+| `stale` | the folder version differs from the roster's `tk-studio--vX.Y.Z` tag or the developer catalog | `drift` | `tk-studio update` |
+| `missing` | no folder, a dangling link, or a folder with no `.claude-plugin/plugin.json`; the detail names an installer sibling found | `missing` | `tk-studio install` |
+| `shadowed` | a marketplace copy is installed beside the folder | `drift` | `claude plugin uninstall tk-studio@<m> --scope user` per copy, plus `claude plugin marketplace remove tk-studio` when the marketplace is known |
+
+When several apply, precedence is `missing` > `shadowed` > `stale` > `ok`,
+and the detail names every condition found. `installed_plugins.json` is
+never the source of the version or of loadability: it is read, with
+`known_marketplaces.json` and `<home>/settings.json`
+(`enabledPlugins`, `extraKnownMarketplaces`), only to detect a shadowing
+copy — the user-scope `tk-studio@<m>` records the installer's cleanup
+removes, never `tk-studio@skills-dir`. An unreadable folder `plugin.json`,
+record file or developer marketplace catalog makes the plane `error`, naming
+the file (no `case`). The release guards (`released-roster.json`, the
+installer roster shape and gate ×4) still fold into the same plane.
 
 ## 7. Driver integration dossier coverage (A7 — the retired ClaudeOS dossier)
 
@@ -355,3 +390,24 @@ core drives only). A missing claude CLI fails the drive loud — a named
 failure, never a crash. The shipped manifest declares one such case:
 `tk-studio-detect` under a profile denying `Bash` and `PowerShell`
 (`fixtures/harness-deny-core.settings.json`), proven live 2026-08-09.
+
+The suite cannot pass against the repository tree for the wrong reason
+(0.1.19, AD-21): `runner.py run --from-archive <zip>` safe-extracts the
+built plugin zip into `<tmp>/config/skills/tk-studio/` — refusing any
+absolute or `..` member by name, and turning any unreadable, encrypted
+or unsupported-compression archive into an error naming it (exit 2,
+`{ok: false, error}`) — sets
+`CLAUDE_CONFIG_DIR=<tmp>/config` in every drive's environment, discovers
+the surfaces, the manifest and the drive scripts from that folder, and
+runs harness drives from a cwd outside the repository. The archive
+config carries only a symlinked `.credentials.json` — linked, for harness
+drives, from the operator's config dir (`CLAUDE_CONFIG_DIR`, else
+`~/.claude`) when one exists there, never copied (NFR5); without it a
+harness drive runs and fails as `Not logged in`. A suite-level
+`harness-loadable` check reads the folder's `.claude-plugin/plugin.json`
+(name `tk-studio` and a version) and requires the folder's skills set to
+equal the surfaces discovered; a failure is a named entry in `failures[]`.
+The report's top-level `harness_loadable` field is `{state, folder?,
+version?}` — `ok`, `failed`, or, without the flag,
+`skipped: --from-archive not given`: a named skip, never a pass, and a
+default run never falls back to the repository tree for it.

@@ -58,6 +58,19 @@ def _plugin_fixture(tmp: Path, version: str, roster: list[str],
     return root
 
 
+def _skills_dir_home(tmp: Path, version: str) -> Path:
+    """A harness home carrying the skills-dir plugin folder at ``version``
+    (AD-21) — the plugin plane's folder half reads this, never an install
+    record."""
+    home = tmp / "home"
+    meta = home / "skills" / "tk-studio" / ".claude-plugin"
+    meta.mkdir(parents=True)
+    (meta / "plugin.json").write_text(
+        json.dumps({"name": "tk-studio", "version": version}),
+        encoding="utf-8")
+    return home
+
+
 class RealRepoGateTestCase(unittest.TestCase):
     """The guard itself: these go red the moment skills/ changes without a
     version-gate pull — green again when the release motion bumps the gate
@@ -334,14 +347,7 @@ class RosterGuardShapeTestCase(unittest.TestCase):
             (root / ".claude-plugin" / "plugin.json").write_text(
                 json.dumps({"name": "tk-studio", "version": "1.0.0"}),
                 encoding="utf-8")
-            home = Path(tmp) / "home"
-            (home / "plugins").mkdir(parents=True)
-            cache = home / "cache" / "1.0.0"
-            cache.mkdir(parents=True)
-            (home / "plugins" / "installed_plugins.json").write_text(
-                json.dumps({"version": 2, "plugins": {"tk-studio@m": [
-                    {"scope": "user", "version": "1.0.0",
-                     "installPath": str(cache)}]}}), encoding="utf-8")
+            home = _skills_dir_home(Path(tmp), "1.0.0")
             old = drift_check.PLUGIN_ROOT
             drift_check.PLUGIN_ROOT = root
             try:
@@ -351,7 +357,8 @@ class RosterGuardShapeTestCase(unittest.TestCase):
         self.assertEqual(plane["plane"], "plugin")
         self.assertEqual(plane["status"], "drift")
         self.assertIn("outran the version gate", plane["detail"])
-        self.assertIn("harness-loadable", plane["detail"])
+        self.assertEqual(plane["case"], "ok")
+        self.assertIn("skills-dir plugin v1.0.0", plane["detail"])
         self.assertIn("release motion", plane["fix"])
 
 
@@ -864,14 +871,7 @@ class InstallerRosterPlaneTestCase(unittest.TestCase):
             tmp = Path(tmp)
             root = self._plugin_root(tmp)
             project = self._project(tmp, roster)
-            home = tmp / "home"
-            (home / "plugins").mkdir(parents=True)
-            cache = home / "cache" / "1.2.3"
-            cache.mkdir(parents=True)
-            (home / "plugins" / "installed_plugins.json").write_text(
-                json.dumps({"version": 2, "plugins": {"tk-studio@m": [
-                    {"scope": "user", "version": "1.2.3",
-                     "installPath": str(cache)}]}}), encoding="utf-8")
+            home = _skills_dir_home(tmp, "1.2.3")
             old = drift_check.PLUGIN_ROOT
             drift_check.PLUGIN_ROOT = root
             try:
@@ -880,7 +880,8 @@ class InstallerRosterPlaneTestCase(unittest.TestCase):
                 drift_check.PLUGIN_ROOT = old
         self.assertEqual(plane["status"], "drift")
         self.assertIn("components.uv.sha256", plane["detail"])
-        self.assertIn("harness-loadable", plane["detail"])
+        self.assertEqual(plane["case"], "ok")
+        self.assertIn("skills-dir plugin v1.2.3", plane["detail"])
         self.assertIn("tools/release_archive.py run --app plugin", plane["fix"])
 
 

@@ -12,6 +12,9 @@ import os
 import subprocess
 import tempfile
 import unittest
+import zipfile
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest import mock
 import sys
@@ -389,6 +392,200 @@ class ConformanceHarnessTestCase(unittest.TestCase):
         self.assertIn("tk-harness-", child_store)
 
 
+    # --- Story 25.3: harness-loadable reads the skills-dir folder (AD-21)
+
+    def _plugin_zip(self, *, manifest: dict | None = None,
+                    plugin_json: dict | None = None,
+                    extra: dict | None = None) -> Path:
+        """A built-plugin-shaped zip, members at the zip root."""
+        members = {
+            ".claude-plugin/plugin.json": json.dumps(
+                plugin_json if plugin_json is not None
+                else {"name": "tk-studio", "version": "9.9.9"}),
+            "skills/tk-studio-fake/SKILL.md":
+                SKILL_TEMPLATE.format(name="tk-studio-fake"),
+            "contracts/conformance/manifest.json": json.dumps(
+                {"conformance_version": 1, "surfaces": manifest or {
+                    "tk-studio-fake": self._entry()}}),
+        }
+        members.update(extra or {})
+        path = Path(self._tmp.name) / "plugin.zip"
+        with zipfile.ZipFile(path, "w") as bundle:
+            for name, text in members.items():
+                bundle.writestr(name, text)
+        return path
+
+    def test_default_run_names_the_harness_loadable_skip(self):
+        self._make_skill("tk-studio-fake")
+        self._write_manifest({"tk-studio-fake": self._entry()})
+        report = self._run()
+        self.assertTrue(report["ok"], report["failures"])
+        self.assertEqual(report["harness_loadable"],
+                         {"state": "skipped: --from-archive not given"})
+        self.assertNotIn("harness-loadable",
+                         {f["assertion"] for f in report["failures"]})
+
+    def test_from_archive_drives_from_the_extracted_folder(self):
+        # the drive proves where it ran: its own file, its cwd and
+        # CLAUDE_CONFIG_DIR all name the clean config's skills folder
+        probe = (
+            "import json, os, sys\n"
+            "from pathlib import Path\n"
+            "config = os.environ.get('CLAUDE_CONFIG_DIR', '')\n"
+            "folder = Path(config) / 'skills' / 'tk-studio'\n"
+            "ok = bool(config) and Path.cwd().resolve() == folder.resolve() "
+            "and Path(__file__).resolve().parent == folder.resolve()\n"
+            "print(json.dumps({'ok': ok, 'error': str(Path.cwd())}))\n")
+        archive = self._plugin_zip(
+            manifest={"tk-studio-fake": self._entry(drives=[{
+                "assertion": "drives-from-folder", "argv": ["probe.py"],
+                "expect": "ok"}])},
+            extra={"probe.py": probe})
+        # the fixture skills tree is empty: only the archive can pass
+        report = runner.run_suite(skills_dir=self.skills,
+                                  manifest_path=self.manifest, emit=False,
+                                  from_archive=archive)
+        self.assertTrue(report["ok"], report["failures"])
+        self.assertEqual(sorted(report["surfaces"]), ["tk-studio-fake"])
+        self.assertEqual(report["harness_loadable"]["state"], "ok")
+        self.assertEqual(report["harness_loadable"]["version"], "9.9.9")
+        self.assertTrue(report["harness_loadable"]["folder"].replace(
+            "\\", "/").endswith("config/skills/tk-studio"))
+
+    def test_from_archive_unloadable_folder_is_a_named_failure(self):
+        for plugin_json, needle in (({"name": "other", "version": "1.0.0"},
+                                     "must carry name"),
+                                    ({"name": "tk-studio"}, "a version")):
+            archive = self._plugin_zip(plugin_json=plugin_json)
+            report = runner.run_suite(emit=False, from_archive=archive)
+            self.assertFalse(report["ok"])
+            failure = next(f for f in report["failures"]
+                           if f["assertion"] == "harness-loadable")
+            self.assertEqual(failure["surface"], "tk-studio")
+            self.assertIn(needle, failure["detail"])
+            self.assertEqual(report["harness_loadable"]["state"], "failed")
+
+    def test_from_archive_skill_dir_without_skill_md_fails_loadable(self):
+        archive = self._plugin_zip(extra={"skills/tk-studio-half/x.py": ""})
+        report = runner.run_suite(emit=False, from_archive=archive)
+        failure = next(f for f in report["failures"]
+                       if f["assertion"] == "harness-loadable")
+        self.assertIn("tk-studio-half", failure["detail"])
+
+    def test_unsafe_zip_member_is_refused_by_name(self):
+        for member in ("../x", "/abs/x", "skills/../../x"):
+            archive = self._plugin_zip(extra={member: "boom"})
+            with self.assertRaises(runner.ConformanceError) as ctx:
+                runner.run_suite(emit=False, from_archive=archive)
+            self.assertIn(repr(member), str(ctx.exception))
+        out = StringIO()
+        with redirect_stdout(out):
+            code = runner.main(["run", "--no-emit",
+                                "--from-archive", str(archive)])
+        self.assertEqual(code, 2)
+        result = json.loads(out.getvalue())
+        self.assertIs(result["ok"], False)
+        self.assertIn("skills/../../x", result["error"])
+
+    def test_from_archive_harness_drive_runs_outside_the_repo(self):
+        captured = {}
+
+        def fake_run(argv, **kwargs):
+            captured.update(cwd=kwargs.get("cwd"), env=kwargs.get("env"),
+                            argv=argv)
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=BLOCKED_TRANSCRIPT_BLOCK.replace(
+                    "tk-studio-detect", "tk-studio-fake"), stderr="")
+
+        archive = self._plugin_zip(manifest={"tk-studio-fake": self._entry(
+            drives=[{"assertion": "denied-core-refusal",
+                     "prompt": "/tk-studio:tk-studio-fake",
+                     "settings": "deny.settings.json",
+                     "expect": "harness-blocked"}])},
+            extra={"contracts/conformance/deny.settings.json": "{}"})
+        with mock.patch.object(runner.shutil, "which",
+                               return_value="claude-exe"), \
+                mock.patch.object(runner.subprocess, "run",
+                                  side_effect=fake_run):
+            report = runner.run_suite(emit=False, harness=True,
+                                      from_archive=archive)
+        self.assertTrue(report["ok"], report["failures"])
+        repo = runner.PLUGIN_ROOT.parent.parent.resolve()
+        cwd = Path(captured["cwd"]).resolve()
+        self.assertNotIn(repo, [cwd, *cwd.parents])
+        config = Path(captured["env"]["CLAUDE_CONFIG_DIR"])
+        self.assertEqual(config.name, "config")
+        settings = captured["argv"][captured["argv"].index("--settings") + 1]
+        self.assertTrue(Path(settings).resolve().is_relative_to(
+            config.resolve()), settings)
+
+    def test_from_archive_harness_drive_links_credentials_never_copies(self):
+        real = Path(self._tmp.name) / "real-config"
+        real.mkdir()
+        creds = real / ".credentials.json"
+        creds.write_text('{"dummy": true}', encoding="utf-8")
+        probe = Path(self._tmp.name) / "probe-link"
+        try:
+            probe.symlink_to(creds)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"cannot create a symlink here: {exc}")
+        probe.unlink()
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            link = Path(kwargs["env"]["CLAUDE_CONFIG_DIR"]) / ".credentials.json"
+            seen.update(exists=os.path.lexists(link),
+                        is_link=link.is_symlink(),
+                        target=os.readlink(link) if link.is_symlink() else None)
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=BLOCKED_TRANSCRIPT_BLOCK.replace(
+                    "tk-studio-detect", "tk-studio-fake"), stderr="")
+
+        archive = self._plugin_zip(manifest={"tk-studio-fake": self._entry(
+            drives=[{"assertion": "denied-core-refusal",
+                     "prompt": "/tk-studio:tk-studio-fake",
+                     "expect": "harness-blocked"}])})
+        with mock.patch.dict(runner.os.environ,
+                             {"CLAUDE_CONFIG_DIR": str(real)}), \
+                mock.patch.object(runner.shutil, "which",
+                                  return_value="claude-exe"), \
+                mock.patch.object(runner.subprocess, "run",
+                                  side_effect=fake_run):
+            report = runner.run_suite(emit=False, harness=True,
+                                      from_archive=archive)
+        self.assertTrue(report["ok"], report["failures"])
+        self.assertTrue(seen["exists"], seen)
+        self.assertTrue(seen["is_link"], "credentials were copied, not linked")
+        self.assertEqual(Path(seen["target"]), creds)
+
+    def test_unextractable_archive_is_a_conformance_error(self):
+        # a member whose compression method is unsupported raises
+        # NotImplementedError at extraction; it must surface as AD-11's
+        # {ok: false, error} naming the archive, exit 2
+        archive = self._plugin_zip()
+        raw = bytearray(archive.read_bytes())
+        for sig, off in ((b"PK\x03\x04", 8), (b"PK\x01\x02", 10)):
+            at = raw.find(sig)
+            while at != -1:
+                raw[at + off:at + off + 2] = (99).to_bytes(2, "little")
+                at = raw.find(sig, at + 4)
+        archive.write_bytes(bytes(raw))
+        not_zip = Path(self._tmp.name) / "not-a.zip"
+        not_zip.write_text("plain text", encoding="utf-8")
+        for bad in (archive, not_zip):
+            with self.assertRaises(runner.ConformanceError) as ctx:
+                runner.run_suite(emit=False, from_archive=bad)
+            self.assertIn(str(bad), str(ctx.exception))
+            out = StringIO()
+            with redirect_stdout(out):
+                code = runner.main(["run", "--no-emit",
+                                    "--from-archive", str(bad)])
+            self.assertEqual(code, 2)
+            result = json.loads(out.getvalue())
+            self.assertIs(result["ok"], False)
+            self.assertIn(str(bad), result["error"])
+
+
 BLOCKED_TRANSCRIPT_BLOCK = (
     '{"status": "blocked", "intent": "tk-studio-detect", "artifacts": [], '
     '"reason": "deterministic core unrunnable: uv run denied by harness '
@@ -512,6 +709,27 @@ class ConformanceRealPluginTestCase(unittest.TestCase):
             for required in ("registered", "status-block", "unrunnable-core",
                              "auth-preflight"):
                 self.assertIn(required, names, f"{surface} missing {required}")
+
+    def test_default_run_never_reports_harness_loadable_as_passed(self):
+        report = runner.run_suite(emit=False)
+        self.assertEqual(report["harness_loadable"]["state"],
+                         "skipped: --from-archive not given")
+
+    def test_real_plugin_passes_from_its_built_zip(self):
+        # the plugin zipped with members at the root (the release shape),
+        # installed into a clean CLAUDE_CONFIG_DIR skills folder and driven
+        # from there — never from the repository tree
+        archive = Path(self._tmp.name) / "tk-studio.zip"
+        with zipfile.ZipFile(archive, "w") as bundle:
+            for path in runner.PLUGIN_ROOT.rglob("*"):
+                rel = path.relative_to(runner.PLUGIN_ROOT)
+                if path.is_file() and "__pycache__" not in rel.parts:
+                    bundle.write(path, rel.as_posix())
+        report = runner.run_suite(emit=False, from_archive=archive)
+        self.assertTrue(report["ok"], json.dumps(report["failures"], indent=2))
+        self.assertEqual(report["harness_loadable"]["state"], "ok")
+        self.assertEqual(sorted(report["surfaces"]),
+                         runner.discover_surfaces())
 
     def test_every_shipped_surface_has_at_least_one_headless_drive(self):
         manifest = runner.load_manifest()

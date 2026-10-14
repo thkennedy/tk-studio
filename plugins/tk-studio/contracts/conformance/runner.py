@@ -31,6 +31,14 @@ alone) the runner asserts, per the driver contract:
                           failure escaped: a denied core left the skill
                           asking a question with no block (ST-049, AD-11).
                           Spend-bearing, so never part of the default pass.
+  harness-loadable        (suite-level; --from-archive <zip>) the built zip
+                          is safe-extracted into a clean CLAUDE_CONFIG_DIR
+                          skills folder (<tmp>/config/skills/tk-studio/) and
+                          every drive runs from there, never the repository
+                          tree: the folder's plugin.json must parse with name
+                          tk-studio and a version, and its skills set must
+                          equal the surfaces discovered (AD-21). Without the
+                          flag the report names the skip — never a pass.
 
 Every failed check emits a `headless-failure` measurement event naming the
 surface and assertion (taxonomy §headless-failure — this runner is that
@@ -39,7 +47,8 @@ event's sole emitter). The suite is the v1 maintenance job type's target
 driver contract once the connector exists.
 
 CLI:
-  uv run runner.py run [--no-emit] [--timeout SECONDS] [--json]
+  uv run runner.py run [--no-emit] [--timeout SECONDS] [--harness]
+                       [--from-archive ZIP]
 
 Exit codes: 0 all surfaces pass; 1 failures; 2 suite cannot run.
 Stdlib-only (NFR9); never prompts (AD-11).
@@ -53,7 +62,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
+import zipfile
+import zlib
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PLUGIN_ROOT / "lib"))
@@ -63,6 +74,8 @@ STATUS_SCHEMA_PATH = PLUGIN_ROOT / "contracts" / "status-block.schema.json"
 
 DEFAULT_TIMEOUT = 60
 HARNESS_TIMEOUT = 180  # harness drives carry an LLM turn — a wider bound
+PLUGIN_NAME = "tk-studio"
+HARNESS_LOADABLE_SKIPPED = "skipped: --from-archive not given"
 
 
 class ConformanceError(Exception):
@@ -158,16 +171,20 @@ def _check_auth_preflight(entry: dict) -> dict:
 
 
 def _run_drive(surface: str, drive: dict, sandbox: Path, store: Path,
-               timeout: int) -> dict:
-    """One headless drive: stdin closed, bounded, machine-readable out."""
+               timeout: int, plugin_root: Path | None = None,
+               env_overlay: dict | None = None) -> dict:
+    """One headless drive: stdin closed, bounded, machine-readable out.
+    ``plugin_root`` is the plugin tree the drive runs from (the extracted
+    archive under --from-archive); ``env_overlay`` joins the child env."""
+    root = Path(plugin_root) if plugin_root else PLUGIN_ROOT
     assertion = drive.get("assertion", "headless-drive")
     check = {"assertion": assertion, "ok": False, "detail": ""}
     argv = [a.replace("{sandbox}", str(sandbox)) for a in drive["argv"]]
-    script = PLUGIN_ROOT / argv[0]
+    script = root / argv[0]
     if not script.is_file():
         check["detail"] = f"drive target {argv[0]} does not exist"
         return check
-    env = dict(os.environ, TK_STUDIO_HOME=str(store))
+    env = {**os.environ, **(env_overlay or {}), "TK_STUDIO_HOME": str(store)}
     try:
         # Every shipped CLI reconfigures its stdout to utf-8 (AD-11, enforced
         # by test_utf8_guard) — decode the same way, or Windows' cp1252
@@ -176,7 +193,7 @@ def _run_drive(surface: str, drive: dict, sandbox: Path, store: Path,
             [sys.executable, str(script), *argv[1:]],
             stdin=subprocess.DEVNULL, capture_output=True, text=True,
             encoding="utf-8", errors="replace",
-            timeout=timeout, env=env, cwd=str(PLUGIN_ROOT))
+            timeout=timeout, env=env, cwd=str(root))
     except subprocess.TimeoutExpired:
         check["detail"] = (f"hung past {timeout}s — a prompt or wait, never "
                           "allowed headless (AD-11)")
@@ -300,11 +317,17 @@ def evaluate_harness_transcript(stdout: str, *, assertion: str = "harness-blocke
     return check
 
 
-def _run_harness_drive(surface: str, drive: dict, timeout: int) -> dict:
+def _run_harness_drive(surface: str, drive: dict, timeout: int,
+                       plugin_root: Path | None = None,
+                       env_overlay: dict | None = None,
+                       cwd: Path | None = None) -> dict:
     """One harness drive: the surface driven through the real harness
     (claude -p) under the drive's permission profile; the transcript is
     judged by evaluate_harness_transcript. Spend-bearing — reached only
-    through the opt-in harness pass, never the default suite."""
+    through the opt-in harness pass, never the default suite. Under
+    --from-archive the plugin root is the extracted folder, the env carries
+    its CLAUDE_CONFIG_DIR, and ``cwd`` lies outside the repository."""
+    root = Path(plugin_root) if plugin_root else PLUGIN_ROOT
     assertion = drive.get("assertion", "harness-blocked")
     bound = int(drive.get("timeout", timeout))
     exe = shutil.which("claude")
@@ -316,40 +339,164 @@ def _run_harness_drive(surface: str, drive: dict, timeout: int) -> dict:
     settings = drive.get("settings")
     if settings:
         argv += ["--settings",
-                 str(Path(__file__).resolve().parent / settings)]
-    # harness drives run where the plugin is loadable: the repo root above
-    # the plugin when this is the studio repo, else the plugin root itself
-    repo_root = PLUGIN_ROOT.parent.parent
-    cwd = repo_root if (repo_root / ".claude-plugin").is_dir() else PLUGIN_ROOT
+                 str(root / "contracts" / "conformance" / settings)]
+    if cwd is None:
+        # harness drives run where the plugin is loadable: the repo root
+        # above the plugin when this is the studio repo, else the plugin
+        # root itself
+        repo_root = root.parent.parent
+        cwd = repo_root if (repo_root / ".claude-plugin").is_dir() else root
+    archive_config = (env_overlay or {}).get("CLAUDE_CONFIG_DIR")
+    if archive_config:
+        _link_credentials(Path(archive_config))
     # the child gets an isolated store: even a mis-denying profile must not
     # let a live drive write measurement or run state into the real one
     with tempfile.TemporaryDirectory(prefix="tk-harness-") as tmp:
-        env = dict(os.environ, TK_STUDIO_HOME=str(Path(tmp) / "store"))
+        env = {**os.environ, **(env_overlay or {}),
+               "TK_STUDIO_HOME": str(Path(tmp) / "store")}
         try:
             proc = subprocess.run(
                 argv, stdin=subprocess.DEVNULL, capture_output=True,
                 text=True, encoding="utf-8", errors="replace",
                 timeout=bound, cwd=str(cwd), env=env)
         except subprocess.TimeoutExpired:
-            return evaluate_harness_transcript(
+            check = evaluate_harness_transcript(
                 "", assertion=assertion, surface=surface,
                 timed_out=True, timeout=bound)
-    return evaluate_harness_transcript(
-        proc.stdout, assertion=assertion, surface=surface,
-        marker=drive.get("marker") or None)
+        else:
+            check = evaluate_harness_transcript(
+                proc.stdout, assertion=assertion, surface=surface,
+                marker=drive.get("marker") or None)
+    if archive_config and not check["ok"]:
+        check["detail"] += (" (the --from-archive config carries only a "
+                            "symlinked .credentials.json from the operator's "
+                            "config dir, when one exists there)")
+    return check
+
+
+def _link_credentials(config_dir: Path) -> None:
+    """Symlink — never copy — the operator's .credentials.json into the
+    archive config dir so a harness drive can authenticate (NFR5: the
+    credentials are never copied or written anywhere). The operator's
+    config dir is CLAUDE_CONFIG_DIR from the runner's own environment, else
+    ~/.claude. Absent credentials or a failed symlink leave the drive to run
+    and fail as it would."""
+    real = os.environ.get("CLAUDE_CONFIG_DIR")
+    source = (Path(real) if real else Path.home() / ".claude") \
+        / ".credentials.json"
+    link = Path(config_dir) / ".credentials.json"
+    if os.path.lexists(link) or not source.is_file():
+        return
+    try:
+        link.symlink_to(source)
+    except (OSError, NotImplementedError):
+        pass
+
+
+# ------------------------------------------------- from-archive (AD-21)
+
+def install_archive(archive: Path, config_dir: Path) -> Path:
+    """Safe-extract the built plugin zip (members at the zip root) into a
+    clean ``<config_dir>/skills/tk-studio/`` — the skills-dir folder the
+    harness loads as tk-studio@skills-dir. Every member is vetted before
+    anything is written: an absolute or ``..`` member is refused by name."""
+    archive = Path(archive)
+    try:
+        bundle = zipfile.ZipFile(archive)
+    except (OSError, zipfile.BadZipFile, RuntimeError,
+            NotImplementedError, EOFError) as exc:
+        raise ConformanceError(
+            f"--from-archive {archive}: not a readable zip ({exc})") from exc
+    with bundle:
+        for name in bundle.namelist():
+            posix = PurePosixPath(name.replace("\\", "/"))
+            if posix.is_absolute() or PureWindowsPath(name).drive \
+                    or ".." in posix.parts:
+                raise ConformanceError(
+                    f"--from-archive {archive}: unsafe member {name!r} "
+                    "(absolute or '..' path) — refused, nothing extracted")
+        folder = Path(config_dir) / "skills" / PLUGIN_NAME
+        folder.mkdir(parents=True)
+        try:
+            bundle.extractall(folder)
+        except (OSError, zipfile.BadZipFile, RuntimeError,
+                NotImplementedError, EOFError, zlib.error) as exc:
+            # RuntimeError: an encrypted member; NotImplementedError: an
+            # unsupported compression method — both become the AD-11 error
+            raise ConformanceError(
+                f"--from-archive {archive}: extraction failed ({exc})") from exc
+    return folder
+
+
+def check_harness_loadable(folder: Path, shipped: list[str]) -> tuple[dict, dict]:
+    """(suite-level check, report field) for the skills-dir folder: its
+    plugin.json parses with name tk-studio and a version, and its skills
+    set equals the surfaces discovered."""
+    check = {"assertion": "harness-loadable", "ok": False, "detail": ""}
+    field: dict = {"state": "failed", "folder": str(folder)}
+    manifest = folder / ".claude-plugin" / "plugin.json"
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        check["detail"] = f"skills-dir {manifest} unreadable: {exc}"
+        return check, field
+    if not isinstance(data, dict) or data.get("name") != PLUGIN_NAME \
+            or not isinstance(data.get("version"), str) \
+            or not data["version"]:
+        check["detail"] = (f"skills-dir {manifest} must carry name "
+                           f"{PLUGIN_NAME!r} and a version")
+        return check, field
+    field["version"] = data["version"]
+    skills_dir = folder / "skills"
+    present = {p.name for p in skills_dir.iterdir()
+               if p.is_dir() and not p.name.startswith(".")} \
+        if skills_dir.is_dir() else set()
+    if present != set(shipped):
+        extra = ", ".join(sorted(present - set(shipped)))
+        absent = ", ".join(sorted(set(shipped) - present))
+        check["detail"] = (f"skills-dir folder skills differ from the "
+                           f"surfaces discovered (not loadable: {extra or '-'}; "
+                           f"absent: {absent or '-'})")
+        return check, field
+    check["ok"] = True
+    field["state"] = "ok"
+    return check, field
 
 
 # -------------------------------------------------------------------- run
 
 def run_suite(skills_dir: Path | None = None, manifest_path: Path | None = None,
               timeout: int = DEFAULT_TIMEOUT, emit: bool = True,
-              harness: bool = False) -> dict:
+              harness: bool = False, from_archive: Path | None = None) -> dict:
     """Drive every shipped surface; return the report. Emits headless-failure
     events for every failed check unless emit=False. Harness drives
     (expect: harness-blocked) are spend-bearing and run only when
     harness=True; otherwise each is reported as a named skip — loud,
-    never silent (ST-049)."""
-    skills = Path(skills_dir) if skills_dir else PLUGIN_ROOT / "skills"
+    never silent (ST-049). ``from_archive`` installs the built zip into a
+    clean CLAUDE_CONFIG_DIR skills folder and drives from there; surfaces,
+    the manifest and drive scripts then come from that folder, never the
+    repository tree (AD-21). Without it, harness-loadable is a named skip."""
+    if from_archive is None:
+        return _run_suite(Path(skills_dir) if skills_dir
+                          else PLUGIN_ROOT / "skills",
+                          manifest_path, timeout, emit, harness)
+    with tempfile.TemporaryDirectory(prefix="tk-conformance-archive-") as tmp:
+        config = Path(tmp) / "config"
+        folder = install_archive(Path(from_archive), config)
+        outside = Path(tmp) / "work"   # harness cwd outside the repo
+        outside.mkdir()
+        return _run_suite(
+            folder / "skills",
+            folder / "contracts" / "conformance" / "manifest.json",
+            timeout, emit, harness, plugin_root=folder,
+            env_overlay={"CLAUDE_CONFIG_DIR": str(config)},
+            harness_cwd=outside)
+
+
+def _run_suite(skills: Path, manifest_path: Path | None, timeout: int,
+               emit: bool, harness: bool, plugin_root: Path | None = None,
+               env_overlay: dict | None = None,
+               harness_cwd: Path | None = None) -> dict:
     shipped = discover_surfaces(skills)
     manifest = load_manifest(manifest_path)
     registered = manifest["surfaces"]
@@ -380,7 +527,9 @@ def run_suite(skills_dir: Path | None = None, manifest_path: Path | None = None,
                     harness_declared += 1
                     if harness:
                         checks.append(_run_harness_drive(
-                            surface, drive, HARNESS_TIMEOUT))
+                            surface, drive, HARNESS_TIMEOUT,
+                            plugin_root=plugin_root,
+                            env_overlay=env_overlay, cwd=harness_cwd))
                     else:
                         checks.append({
                             "assertion": drive.get("assertion",
@@ -390,7 +539,8 @@ def run_suite(skills_dir: Path | None = None, manifest_path: Path | None = None,
                                       "(--harness) — spend-bearing drive"})
                     continue
                 checks.append(_run_drive(surface, drive, sandbox, store,
-                                         timeout))
+                                         timeout, plugin_root=plugin_root,
+                                         env_overlay=env_overlay))
         surfaces[surface] = checks
 
     for name in sorted(set(registered) - set(shipped)):
@@ -401,6 +551,19 @@ def run_suite(skills_dir: Path | None = None, manifest_path: Path | None = None,
     failures = [{"surface": s, "assertion": c["assertion"], "detail": c["detail"]}
                 for s, checks in surfaces.items()
                 for c in checks if not c["ok"]]
+
+    # harness-loadable is suite-level: read the skills-dir folder only when
+    # the suite was driven from one — a repo-tree run is a named skip,
+    # never a pass for the wrong reason
+    if plugin_root is None:
+        harness_loadable = {"state": HARNESS_LOADABLE_SKIPPED}
+    else:
+        loadable, harness_loadable = check_harness_loadable(
+            Path(plugin_root), shipped)
+        if not loadable["ok"]:
+            failures.append({"surface": PLUGIN_NAME,
+                             "assertion": loadable["assertion"],
+                             "detail": loadable["detail"]})
 
     if emit and failures:
         import ledger
@@ -430,6 +593,8 @@ def run_suite(skills_dir: Path | None = None, manifest_path: Path | None = None,
         # whether spend-bearing drives ran, were skipped, or don't exist
         "harness_pass": {"declared": harness_declared,
                          "state": harness_state},
+        # the skills-dir folder check names whether it ran (AD-21)
+        "harness_loadable": harness_loadable,
         "failures": failures,
         "surfaces": surfaces,
     }
@@ -453,11 +618,17 @@ def main(argv: list[str] | None = None) -> int:
                      help="include spend-bearing harness drives (the surface "
                           "driven through the real claude CLI under a "
                           "denying permission profile)")
+    cmd.add_argument("--from-archive", metavar="ZIP",
+                     help="install the built plugin zip into a clean "
+                          "CLAUDE_CONFIG_DIR skills folder and drive every "
+                          "surface from there (the harness-loadable check)")
     args = parser.parse_args(argv)
 
     try:
         report = run_suite(timeout=args.timeout, emit=not args.no_emit,
-                           harness=args.harness)
+                           harness=args.harness,
+                           from_archive=(Path(args.from_archive)
+                                         if args.from_archive else None))
     except ConformanceError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
         return 2
