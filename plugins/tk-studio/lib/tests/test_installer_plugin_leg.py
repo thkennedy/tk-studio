@@ -897,6 +897,121 @@ class UnreadableRecordFiles(LegCase):
         self.assertIn("installed_plugins.json", result["reason"])
 
 
+class UserSettingsMarketplace(LegCase):
+    """Follow-up 2 P1: the user's settings.json is read, never edited."""
+
+    def write_settings(self, data) -> Path:
+        path = self.config / "settings.json"
+        path.write_text(data if isinstance(data, str) else json.dumps(data),
+                        encoding="utf-8")
+        return path
+
+    def test_settings_declared_copies_removed_via_claude(self):
+        settings = self.write_settings({
+            "extraKnownMarketplaces": {"tk-studio": {}},
+            "enabledPlugins": {"tk-studio@tk-studio": True,
+                               "tk-studio@other": True,
+                               "tk-studio@skills-dir": True, "x@y": True}})
+        pinned = (settings.stat().st_mtime_ns, settings.read_bytes())
+        result, code = self.install("0.2.16")
+        self.assertEqual((code, result["status"]), (0, "complete"))
+        self.assertEqual([" ".join(c) for c in self.claude.calls], [
+            "claude plugin uninstall tk-studio@other --scope user",
+            Marketplace.UNINSTALL, Marketplace.REMOVE])
+        self.assertEqual((settings.stat().st_mtime_ns, settings.read_bytes()),
+                         pinned)
+
+    def test_settings_and_records_queue_no_duplicates(self):
+        Marketplace.seed_marketplace(self)
+        self.write_settings({"extraKnownMarketplaces": {"tk-studio": {}},
+                             "enabledPlugins": {"tk-studio@tk-studio": True}})
+        self.install("0.2.16")
+        self.assertEqual([" ".join(c) for c in self.claude.calls],
+                         [Marketplace.UNINSTALL, Marketplace.REMOVE])
+
+    def test_unreadable_settings_is_partial_naming_file(self):
+        Marketplace.seed_marketplace(self)
+        settings = self.write_settings("{not json")
+        result, code = self.install("0.2.16")
+        self.assertEqual((code, result["status"]), (0, "partial"))
+        self.assertIn(str(settings), result["reason"])
+        self.assertEqual([" ".join(c) for c in self.claude.calls],
+                         [Marketplace.UNINSTALL, Marketplace.REMOVE])
+        self.assertEqual(settings.read_text(encoding="utf-8"), "{not json")
+
+
+class DefaultRunnerEnv(LegCase):
+    """Follow-up 2 P2: claude runs against the config the leg inspected."""
+
+    def test_run_leg_env_reaches_default_runner(self):
+        Marketplace.seed_marketplace(self)
+        env = dict(self.env, PATH="/fake/bin")
+        data = plugin_zip("0.2.16")
+        roster = self.write_roster(roster_for("0.2.16", data))
+        fetch = FakeFetch({URL.format(v="0.2.16"): data})
+        done = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(plugin_leg.shutil, "which",
+                               return_value="/fake/bin/claude") as which, \
+                mock.patch.object(plugin_leg.subprocess, "run",
+                                  return_value=done) as run:
+            result = plugin_leg.run_leg("install", roster=str(roster),
+                                        fetch=fetch, env=env)
+        self.assertEqual(result["status"], "complete", result)
+        self.assertEqual(run.call_count, 2)
+        for call in run.call_args_list:
+            self.assertEqual(call.kwargs["env"], env)
+            self.assertEqual(call.args[0][0], "/fake/bin/claude")
+        for call in which.call_args_list:
+            self.assertEqual(call.kwargs.get("path"), "/fake/bin")
+
+    def test_default_runner_without_env_inherits_process_env(self):
+        with mock.patch.object(plugin_leg.shutil, "which",
+                               return_value="/fake/claude") as which, \
+                mock.patch.object(plugin_leg.subprocess, "run") as run:
+            plugin_leg.default_runner(["claude", "plugin", "list"])
+        self.assertIsNone(run.call_args.kwargs["env"])
+        self.assertEqual(which.call_args, mock.call("claude"))
+
+
+class DanglingTargetKeepsMarketplace(LegCase):
+    """Follow-up 2 P3: a dangling link is no folder — keep the copy."""
+
+    def test_dangling_link_target_skips_removal(self):
+        self.target.parent.mkdir(parents=True)
+        try:
+            os.symlink(self.tmp / "moved-checkout", self.target,
+                       target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks cannot be created here")
+        Marketplace.seed_marketplace(self)
+        roster = NotShippedKeepsMarketplace.not_shipped_roster(self)
+        result, code = self.run_cli(["install", "--roster", str(roster)])
+        self.assertEqual((code, result["status"]), (0, "complete"))
+        self.assertEqual(result["marketplace"]["status"], "skipped")
+        self.assertEqual(self.claude.calls, [])
+
+
+class HelpEndsWithJson(LegCase):
+    """Follow-up 2 P4: -h/--help still ends stdout with the JSON line."""
+
+    def test_help_prints_help_then_json(self):
+        for argv, intent in ((["-h"], "tk-studio-cli"),
+                             (["install", "--help"], "tk-studio-cli-install")):
+            with self.subTest(argv=argv):
+                out = io.StringIO()
+                with redirect_stdout(out):
+                    code = cli_main.main(argv, runner=self.claude,
+                                         env=self.env)
+                lines = out.getvalue().strip().splitlines()
+                self.assertEqual(code, 0)
+                self.assertIn("usage:", out.getvalue())
+                last = json.loads(lines[-1])
+                self.assertEqual(last, {"status": "complete", "intent": intent,
+                                        "artifacts": [], "reason": None,
+                                        "help": True})
+        self.assertEqual(self.claude.calls, [])
+
+
 class CommittedRoster(unittest.TestCase):
     def test_committed_rosters_plugin_entry_accepted(self):
         for channel in ("stable", "latest"):

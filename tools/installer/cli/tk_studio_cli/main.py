@@ -3,7 +3,9 @@
 Every verb prints exactly one JSON object as the last stdout line (AD-11):
 ``{status: complete|partial|blocked, intent: "tk-studio-cli-<verb>",
 artifacts, reason, ...leg fields}``. A refusal is ``blocked`` with a named
-reason and exit code 1; a usage error is ``blocked`` with exit code 2.
+reason and exit code 1; a usage error is ``blocked`` with exit code 2;
+``-h``/``--help`` prints argparse's help, then a ``complete`` line with
+``help: true``, and exits 0.
 """
 from __future__ import annotations
 
@@ -22,9 +24,19 @@ class UsageError(Exception):
     """An argparse usage error, turned into a blocked JSON line."""
 
 
+class HelpRequested(Exception):
+    """``-h``/``--help`` printed the help text; the JSON line still follows."""
+
+
 class _Parser(argparse.ArgumentParser):
     def error(self, message):  # never exit before the JSON line is printed
         raise UsageError(f"{self.prog}: {message}")
+
+    def exit(self, status=0, message=None):
+        # Only the help action exits cleanly here (error() never exits).
+        if status == 0 and message is None:
+            raise HelpRequested()
+        super().exit(status, message)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -59,11 +71,14 @@ def run(argv: list[str] | None = None, *, fetch=None, runner=None,
     return result, 1 if result["status"] == "blocked" else 0
 
 
-def _blocked(argv: list[str] | None, reason: str) -> dict:
+def _intent(argv: list[str] | None) -> str:
     args = sys.argv[1:] if argv is None else argv
     verb = next((a for a in args if a in VERBS), None)
-    return {"status": "blocked",
-            "intent": f"tk-studio-cli-{verb}" if verb else "tk-studio-cli",
+    return f"tk-studio-cli-{verb}" if verb else "tk-studio-cli"
+
+
+def _blocked(argv: list[str] | None, reason: str) -> dict:
+    return {"status": "blocked", "intent": _intent(argv),
             "artifacts": [], "reason": reason}
 
 
@@ -73,6 +88,9 @@ def main(argv: list[str] | None = None, *, fetch=None, runner=None,
         sys.stdout.reconfigure(encoding="utf-8")
     try:
         result, code = run(argv, fetch=fetch, runner=runner, env=env)
+    except HelpRequested:
+        result, code = {"status": "complete", "intent": _intent(argv),
+                        "artifacts": [], "reason": None, "help": True}, 0
     except UsageError as exc:
         result, code = _blocked(argv, f"UsageError: {exc}"), 2
     except OSError as exc:  # last resort: AD-11 still gets its JSON line

@@ -12,6 +12,7 @@ against a temp ``CLAUDE_CONFIG_DIR``.
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import io
 import json
@@ -89,16 +90,23 @@ def default_fetch(url: str) -> bytes:
         return resp.read()
 
 
-def default_runner(args: list) -> subprocess.CompletedProcess:
+def default_runner(args: list, env: Mapping[str, str] | None = None
+                   ) -> subprocess.CompletedProcess:
     """Raises FileNotFoundError when ``claude`` is not on PATH, and
     subprocess.TimeoutExpired when it stalls (stdin is closed, so a prompt
-    cannot wait for input)."""
-    exe = shutil.which(args[0])
+    cannot wait for input). With ``env``, ``claude`` runs in that
+    environment (and is looked up on its PATH), so it acts on the same
+    config the leg inspected."""
+    if env is not None and env.get("PATH") is not None:
+        exe = shutil.which(args[0], path=env.get("PATH"))
+    else:
+        exe = shutil.which(args[0])
     if exe is None:
         raise FileNotFoundError(args[0])
     return subprocess.run([exe, *args[1:]], capture_output=True, text=True,
                           encoding="utf-8", errors="replace",
-                          stdin=subprocess.DEVNULL, timeout=RUNNER_TIMEOUT)
+                          stdin=subprocess.DEVNULL, timeout=RUNNER_TIMEOUT,
+                          env=dict(env) if env is not None else None)
 
 
 # --- roster -----------------------------------------------------------------
@@ -423,20 +431,22 @@ def _installed_records(config: Path) -> tuple[dict, str | None]:
 
 def marketplace_cleanup(config: Path, runner: Runner) -> dict:
     """Uninstall every user-scope ``tk-studio@<m>`` and remove the
-    ``tk-studio`` marketplace — only through ``claude plugin …``. A record
-    file that exists but cannot be read is a failed entry naming the file
-    (a copy may still shadow the folder); the other file is still used."""
-    commands, unreadable = [], []
+    ``tk-studio`` marketplace — only through ``claude plugin …``. Read are
+    the two record files and the user's ``settings.json`` (whose
+    ``extraKnownMarketplaces`` / ``enabledPlugins`` would bring a copy
+    back); none is ever edited. A file that exists but cannot be read is a
+    failed entry naming the file (a copy may still shadow the folder); the
+    other files are still used."""
+    uninstall, remove, unreadable = set(), False, []
     records, err = _installed_records(config)
     if err:
         unreadable.append({"command": None, "file": str(
             config / "plugins" / "installed_plugins.json"), "error": err})
-    for key, entries in sorted(records.items()):
+    for key, entries in records.items():
         if key.endswith(SKILLS_DIR_SUFFIX):     # the folder itself, not a copy
             continue
         if any(e.get("scope") == "user" for e in entries):
-            commands.append(["claude", "plugin", "uninstall", key,
-                             "--scope", "user"])
+            uninstall.add(key)
     known_file = config / "plugins" / "known_marketplaces.json"
     known, err = _read_json(known_file) if known_file.is_file() \
         else ({}, None)
@@ -444,6 +454,24 @@ def marketplace_cleanup(config: Path, runner: Runner) -> dict:
         unreadable.append({"command": None, "file": str(known_file),
                            "error": err or "not a JSON object"})
     elif PLUGIN_NAME in known:
+        remove = True
+    settings_file = config / "settings.json"
+    settings, err = _read_json(settings_file) if settings_file.is_file() \
+        else ({}, None)
+    if err or not isinstance(settings, dict):
+        unreadable.append({"command": None, "file": str(settings_file),
+                           "error": err or "not a JSON object"})
+    else:
+        extra = settings.get("extraKnownMarketplaces")
+        if isinstance(extra, dict) and PLUGIN_NAME in extra:
+            remove = True
+        enabled = settings.get("enabledPlugins")
+        if isinstance(enabled, dict):
+            uninstall.update(k for k in enabled if _is_ours(k)
+                             and not k.endswith(SKILLS_DIR_SUFFIX))
+    commands = [["claude", "plugin", "uninstall", key, "--scope", "user"]
+                for key in sorted(uninstall)]
+    if remove:
         commands.append(["claude", "plugin", "marketplace", "remove",
                          PLUGIN_NAME])
     if not commands and not unreadable:
@@ -542,7 +570,10 @@ def run_leg(verb: str, *, roster: str | None = None, channel: str = "stable",
             runner: Runner | None = None,
             env: Mapping[str, str] | None = None) -> dict:
     fetch = fetch or default_fetch
-    runner = runner or default_runner
+    if runner is None:
+        # claude acts on the config inspected here, not the process's own
+        runner = default_runner if env is None \
+            else functools.partial(default_runner, env=env)
     config = config_dir(env)
     try:
         if link is not None:
@@ -556,11 +587,11 @@ def run_leg(verb: str, *, roster: str | None = None, channel: str = "stable",
     except Refusal as refusal:
         return _result(verb, "blocked", refusal.reason)
     target, _, _ = folder_paths(config)
-    if target.exists() or is_link(target):
+    if target.is_dir():     # follows a live link; False for a dangling one
         market = marketplace_cleanup(config, runner)
     else:
-        # Removing the marketplace copy with no folder to replace it would
-        # leave no tk-studio at all.
+        # Removing the marketplace copy with no loadable folder to replace
+        # it would leave no tk-studio at all.
         market = {"status": "skipped", "removed": [],
                   "reason": f"no skills-dir folder at {target} — "
                             "marketplace copies kept"}
