@@ -108,6 +108,8 @@ Full investigation: [plans/25-1.md](../plans/25-1.md) §Code Map. Anchors re-con
 
 - 2026-10-14 (review pass 1, consult ruling 2026-10-14T20:17:56Z): the first-cut component set (`plugin`, `uv`, `bun`) is evidence, not an invariant: the test asserts `{plugin, uv, bun}` ⊆ latest components ⊆ the six known names, so the operator's later `supervisor` entry (AC3) keeps main green; the exact set is shown by a Verification command. KEEP: everything else from pass 2.
 
+- 2026-10-14 (follow-up review pass 4, consult ruling 2026-10-14T20:36:40Z): finding: a roster with no `plugin` entry accepted a foreign `supervisor` entry with no `source` (both layers), which breaks AC3's "named in the entry's `source` field". Amended: Design Notes now say that in a roster with no `plugin` entry, `source` is required on every present app entry. Before, they said `source` was checked only "when present". The release motion records `source` when it cuts into such a roster. Known-bad state avoided: a plugin-less channel accepting a foreign entry that names no repository. KEEP: everything from passes 1–3.
+
 ## Review Triage Log
 
 ### 2026-10-14 — Review pass
@@ -141,10 +143,29 @@ Full investigation: [plans/25-1.md](../plans/25-1.md) §Code Map. Anchors re-con
   - The plane compares the checkout's `latest.json` against the running plugin's record: this is the planned `_installer_roster_check(directory, plugin_root, version)` signature and mirrors the gate ×3 `_released_roster_check(PLUGIN_ROOT, …)`. A stale install is the harness plane's report.
   - The two-file record is not atomic as a pair, and two refusals plus the fake `_run` cwd are untested: each write is atomic per house rule. The refusals are pass-1 deviations rather than criteria, and the cwd is plumbing.
 
+### 2026-10-14 — Review pass (follow-up 2, review_loop_iteration 0)
+- intent_gap: 0
+- bad_spec: 0
+- patch: 6 (high 0, medium 0, low 6)
+- defer: 0
+- reject: 4 (reasons below)
+- addressed_findings:
+  - `[low]` `[patch]` The guard took repeating digests such as `"deadbeef"*8`, and a `uv`/`bun` map with one digest copied across targets, as real values (both layers; AC1 says it "never accepts a placeholder or a fabricated value"). `_digest_problem` now refuses any value made of a repeated 1–32-character unit, and the tool check refuses a digest that appears under two targets. The test fixtures now use `hashlib`-derived digests. Tests `test_periodic_digest_is_a_placeholder` and `test_duplicate_tool_target_digests_are_fabricated`.
+  - `[low]` `[patch]` A placeholder platform-target key in the `uv`/`bun` map (`"<platform target>"`, `"TBD"`, `""`) was accepted (edge-case-hunter). It is now refused by name. Test `test_placeholder_platform_target_is_refused`.
+  - `[low]` `[patch]` With no `plugin` entry, a foreign app entry passed without `source` (both layers; AC3). Now every app entry in a plugin-less roster must name `source`, and the motion records it (consult: score 2, seam). Tests `test_without_a_plugin_entry_every_app_entry_names_its_source` and `test_plugin_less_roster_cut_records_source`.
+  - `[low]` `[patch]` The runbook's AC3 operator command tagged whatever HEAD was checked out, not `main` (blind-hunter). It now runs `git switch main && git pull --ff-only origin main` before the tag and push.
+  - `[low]` `[patch]` No test checked that each app is archived from its own subtree at its tag (blind-hunter; AC2). Added `test_each_app_archives_its_subtree_at_its_tag`, covering all four apps. It is test-only, with no bug exposed; a mutation run shows it can fail.
+  - `[low]` `[patch]` `--app plugin --repo <another checkout>` built and published from that checkout while gating against this repository's records (edge-case-hunter; AC2 "plugin's motion is unchanged in effect"). It is now refused by name before any call, dry run included. Test `test_plugin_from_another_checkout_is_refused_before_any_call`.
+- rejected:
+  - `studio-web` needs `apps/studio-web/dist` committed at its tag: AC2's behaviour holds. The motion archives the subtree at the tag and refuses by name when it is absent. The precondition is already a recorded residual risk.
+  - The plane compares the checkout's `latest.json` against the running plugin's record: the same as the previous pass's rejection (the planned `_installer_roster_check` signature, mirroring gate ×3).
+  - `released-roster.json` and `latest.json` are not written atomically as a pair: the same as the previous pass's rejection, since each write is atomic per house rule.
+  - (deduplicated) The `source`-without-plugin and repeating-digest findings each came from both layers. Each is counted once above.
+
 ## Design Notes
 
 - "`stable.json` equals `latest.json`" is read as equal in `schema`, `requires` and `components`; `channel` names each file's own channel, as AC1 requires every roster to carry it. The real-repo test asserts exactly that.
-- The `plugin` entry's URL repository is the roster's home repository; this lets the pure guard decide "foreign" with no hard-coded owner. With no `plugin` entry, `source` (when present) must still match its URL.
+- The `plugin` entry's URL repository is the roster's home repository; this lets the pure guard decide "foreign" with no hard-coded owner. With no `plugin` entry the home cannot be established, so `source` is required on every present `supervisor`, `studio-web` or `cli` entry, and it must still match its URL.
 
 ## Verification
 
@@ -196,6 +217,15 @@ DRIFT: runbook gained notes on release demotion and the cli wheel version refusa
 DRIFT: the motion reads and checks the channel roster before the tag lookup (skipped on dry run) — the stem refusal must precede any `gh` call — affects: none
 DRIFT: the plugin motion's `released-roster.json` read now goes through `_read_json` — the same non-UTF-8 crash as P3 — affects: none
 
+### pass 4 (2026-10-14, implementer, follow-up review patches)
+
+- planned: P6 tightens only the guard / actual: `tools/release_archive.py` also writes `source` (this repository's `nameWithOwner`) when it cuts a non-plugin app into a channel roster with no `plugin` entry / why: otherwise the new guard rule would refuse every own-repository cut into a plugin-less channel / may affect: 25-3, 25-4
+- planned: P5 refuses `--app plugin` with a foreign `--repo` / actual: the refusal also covers `--dry-run`, and `--repo` set to this repository is still accepted / why: the patch said "before any `git`/`gh` call", with no dry-run exception / may affect: none
+- SEAM (consult ruling 2026-10-14T20:36:40Z): the 25-3/25-4 seam gains one rule. A roster with no `plugin` entry requires `source` on every present `supervisor`/`studio-web`/`cli` entry. Scored 2 together with the guard change; frontmatter `deviation_score` stays 2.
+
+DRIFT: in a roster with no `plugin` entry, every app entry requires `source`, and the motion records it — AC3's foreign entry must name its repository, and without a plugin entry there is no home to compare against — affects: 25-3, 25-4
+DRIFT: `--app plugin` with a foreign `--repo` is refused, dry run included — keeps the plugin motion unchanged in effect — affects: none
+
 ## Consult Log
 
 - 2026-10-14T19:57:30Z — trigger: halt — question: AC1 requires `supervisor`, `studio-web` and `cli` as `{tag, url, sha256}` and `uv`/`bun` as a single `{version, sha256}`, but only the plugin has a release and uv/bun ship one archive per platform; does the session pick a schema (pending marker / optional / deferred; per-platform map) or escalate? — ruling: escalate — do: HALT blocked before writing any spec or code. Hand the operator two questions. (1) Should the roster carry placeholders for the three unreleased components, carry them as optional entries, or leave them out until they ship? Whatever the answer, the guard must accept it. (2) Should the uv/bun `{version, sha256}` entry become a per-platform map, or should the roster pin one named platform? Re-drive 25.1 once the operator has ruled on both. — rule candidate: When a story's acceptance criteria require a schema entry for an artifact that won't exist until a later story or an operator action, the planner settles the schema (pending marker, optional entry or deferred entry, plus the per-platform digest shape) in the SPEC before launch instead of leaving it as a Block If.
@@ -203,53 +233,50 @@ DRIFT: the plugin motion's `released-roster.json` read now goes through `_read_j
 - 2026-10-14T20:13:37Z — trigger: high-severity-finding — question: gate ×4 binds both rosters (tests, pre-publish guard, drift plane on stable.json) but ruling 3 has the motion write `latest` only with stable trailing by PR, so the 25.7 cut goes red; which reading applies? — ruling: apply (option 1) — do: bind gate ×4 to `latest.json` only in test_release_roster.py, release_archive.py's pre-publish guard and drift_check.py's _installer_roster_check, reading `stable.json` for shape only; check stable's plugin entry for shape only (tag/url/64-hex), no comparison with the current gate and no permanent stable==latest guard (first-cut equality is evidence, not an invariant); record that 25.3 wires the configured channel and 25.7 is the first cut where stable trails — rule candidate: Release-lockstep guards (gate ×N) bind only the artifact the release motion writes, which here is the `latest` channel. Promoted or trailing channels get shape-only checks.
 - 2026-10-14T20:17:56Z — trigger: deviation-gt-0 — question: accept pass-2 deviations (tag-only gate without archive, renamed test + plane detail, runbook notes) and how to treat the exact first-cut component-set test that goes red at the AC3 operator step? — ruling: accept-deviation score 1 — do: accept a–c, keep deviation_score as is; replace the exact-set assertion at test_release_roster.py:105-107 with {plugin,uv,bun} ⊆ components ⊆ six known names, add a Verification line printing both rosters' component sets as first-cut evidence; record in the Spec Change Log; change nothing else — rule candidate: When an AC says "at the first cut X holds" and a later AC or operator step is allowed to change X, the test asserts only what stays true (subset, guard-clean) and X is shown as Verification evidence. Never pin an exact snapshot.
 - 2026-10-14T20:27:41Z — trigger: deviation-gt-0 — question: accept the pass-3 deviations (roster read moved before the tag lookup for P2b; `_read_json` at the plugin motion's released-roster read; P1 refusing on dry run; runbook clause) and at what score? — ruling: accept-deviation score 1 — do: accept (a) and (b) at score 1, (c) and (d) at score 0, leave frontmatter `deviation_score` at 2; record all four as `may affect: none` and log the ruling; change nothing else — rule candidate: When a review patch says both "do X at site S" and "before any `gh` call", and S comes after a `gh` call, move X earlier, keep the dry-run digest unchanged, and score it 1 with no consult. Applying the same fix to another site with the same defect, inside the plan's Files, is also scored 1 with no consult.
+- 2026-10-14T20:36:40Z — trigger: deviation-gt-0 — question: accept the pass-4 deviation (the motion writes `source` when it cuts into a roster with no `plugin` entry, forced by P6's stricter guard rule) at the self-scored 1, at 2, or reject P6? — ruling: accept-deviation score 2 — do: keep P6 and the motion change, and leave `deviation_score` at 2; add the plugin-less `source` rule to the SEAM note and log the motion change as "may affect: 25-3, 25-4"; replace the Design Note sentence with "source is required" and record it in the Spec Change Log, changing nothing else — rule candidate: When a review patch tightens the shared roster guard and the motion must change to keep writing rosters the guard accepts, score both together at 2 and append the new rule to the SEAM note. No consult is needed.
 
 ## Auto Run Result
 
 Status: done
 
-**Summary:** Follow-up review pass on 25.1 (`status: done`, `review_loop_iteration` 0), run because the previous pass recommended one. The story's implementation stands as summarised in the previous run. Committed per-channel installer rosters (`tools/installer/rosters/{stable,latest}.json`: `plugin` 0.2.16, `uv` 0.13.1 and `bun` 1.4.3 with per-target upstream digests). The pure `roster_problems` guard in `drift_check.py` runs as the plugin plane's installer-roster sub-check; gate ×4 binds `latest.json` and `stable.json` is checked for shape. `tools/release_archive.py` cuts any app by its `<prefix>--vX.Y.Z` tag with `--latest=false`, verifies the round trip, and records atomically. This pass hardened the edges both review layers found:
-- `--app plugin --channel stable` is refused.
-- A roster's `channel` must equal its file stem, in both the plane and the motion.
-- Non-UTF-8 rosters are an `error`, not a crash.
-- `schema` must be the integer 1.
-- The plane's ok-note reports accurately what gate ×4 checked.
-- The installer-roster fix text names the promotion PR for `stable.json`.
+**Summary:** This is the second follow-up review pass on 25.1 (`status: done`, `review_loop_iteration` 0), run because pass 3 recommended one. The story's implementation stands as summarised in earlier runs: per-channel installer rosters, the pure `roster_problems` guard in the plugin plane (gate ×4 on `latest.json`), and `tools/release_archive.py` cutting any app with `--latest=false` and a verified round trip. This pass hardened six more edges:
+- Repeating digests, and one digest copied across targets, are now refused as fabricated.
+- Placeholder platform-target keys are refused.
+- In a roster with no `plugin` entry, every app entry must name `source`, and the motion writes it.
+- The runbook's AC3 command now cuts the tag from an up-to-date `main`.
+- A test pins each app's archived subtree at its tag.
+- `--app plugin` from another checkout is refused.
 
 **Files changed (this pass):**
-- `tools/release_archive.py`: refuses plugin + stable; reads and checks the channel roster, including channel = stem, before the tag lookup; `_read_json` catches `UnicodeDecodeError` and is used for the plugin's `released-roster.json` read; `--channel` help text.
-- `plugins/tk-studio/skills/tk-studio-activate/scripts/drift_check.py`: integer-only `schema`; plane stem check (`stem_problems`); `UnicodeDecodeError` handling; accurate ok-note; `FIX_INSTALLER_ROSTER` names the promotion PR.
-- `plugins/tk-studio/lib/tests/test_release_roster.py`: 8 new tests, all red against the pre-fix sources and green now.
-- `kb/offline-install-runbook.md`: one clause saying plugin + `--channel stable` is refused.
+- `plugins/tk-studio/skills/tk-studio-activate/scripts/drift_check.py`: `_digest_problem` refuses digests made of a repeated unit; the `uv`/`bun` check refuses duplicate and placeholder targets; a roster with no plugin entry requires `source`.
+- `tools/release_archive.py`: refuses `--app plugin` with a foreign `--repo` before any call; records `source` when cutting into a roster with no plugin entry.
+- `plugins/tk-studio/lib/tests/test_release_roster.py`: 7 new tests and the `_digest()` fixture helper. Non-repeating fixtures replace the periodic ones.
+- `kb/offline-install-runbook.md`: the supervisor operator command now starts with `git switch main && git pull --ff-only origin main`.
 
-**Review:** Both layers ran (band L). 6 patches applied (high 0, medium 3, low 3), 0 deferred, 4 rejected (reasons in the Review Triage Log), 0 bad_spec, 0 intent_gap. There was 1 consult (`deviation-gt-0`, accepted at score 1), logged under `## Consult Log` and as an observation event. Follow-up review recommended: **true**. Patched counts: high 0, medium 3, low 3, so the score is 3×3 + 1×3 = 12, which is at least 5. Every patch is an edge hardening around an already-green core, with no criterion-level defect found.
+**Review:** Both layers ran (band L).
+- Findings: 6 patches applied (high 0, medium 0, low 6), 0 deferred, 4 rejected (reasons in the Review Triage Log), 0 bad_spec, 0 intent_gap.
+- Consult: 1 (`deviation-gt-0`, accepted at score 2 as a 25-3/25-4 seam), logged under `## Consult Log` and as an observation event.
+- Follow-up review recommended: **true**. The score is 3×0 + 1×6 = 6, which is at least 5. Every patch is low severity: an edge hardening on an already-green core.
 
 **Verification:**
-- `uv run python -m unittest tests.test_release_roster tests.test_drift_check`: 86 tests OK (implementer).
-- `uv run python -m unittest discover tests`: 841 tests OK (re-run by this session).
+- `uv run python -m unittest tests.test_release_roster tests.test_drift_check`: OK, 93 tests (implementer), re-run OK by this session.
+- `uv run python -m unittest discover tests`: 848 tests OK (re-run by this session).
 - Conformance `runner.py run`: `"ok": true` (re-run by this session).
-- `release_archive.py run --app plugin --dry-run`: sha256 `2abc4e4754862be6d56250ab582af1234acf8f7fd9937f8840dd41b7cd8b207a`, unchanged; `written: []`.
-- `drift_check.py --directory .`: `result: clean`. The plugin plane detail is unchanged ("installer roster stable.json in shape, latest.json in shape, plugin entry at the gate (gate x4) (components stable: bun, plugin, uv; latest: bun, plugin, uv)").
+- `release_archive.py run --app plugin --dry-run`: sha256 `2abc4e4754862be6d56250ab582af1234acf8f7fd9937f8840dd41b7cd8b207a` (unchanged); `written: []`.
+- `drift_check.py --directory .`: `result: clean`. Plugin plane detail unchanged; committed rosters still pass the tightened guard.
 - First-cut evidence: both rosters' components are `["bun","plugin","uv"]`, and `jq 'del(.channel)'` shows no difference between them.
 
 **Unverifiable here (operator):**
-- AC3, the supervisor's first release. In a `thkennedy/tk-studio-supervisor` checkout on an up-to-date `main`, run `git tag supervisor--v0.1.0 && git push origin supervisor--v0.1.0`. Then, from this repository, run `uv run tools/release_archive.py run --app supervisor --version 0.1.0 --repo <path-to-supervisor-checkout> --channel latest`, and copy the written `supervisor` entry into `stable.json` by PR. The engine cut and pushed no tag.
+- AC3, the supervisor's first release. In a `thkennedy/tk-studio-supervisor` checkout, run `git switch main && git pull --ff-only origin main && git tag supervisor--v0.1.0 && git push origin supervisor--v0.1.0`. Then, from this repository, run `uv run tools/release_archive.py run --app supervisor --version 0.1.0 --repo <path-to-supervisor-checkout> --channel latest`, and copy the written `supervisor` entry into `stable.json` by PR. The engine cut and pushed no tag.
 
 **Residual risks:**
-- The `cli` wheel build ran only against a fake `uv build`, because `tools/installer/cli` arrives in 25.4.
-- `studio-web`'s subtree (`apps/studio-web/dist`) is build output and may not be committed at a tag. That is for a later epic.
-- Releases published before this story, such as `tk-studio--v0.2.16`, keep whatever GitHub "latest" flag they have. The motion demotes a release only when it re-cuts that tag.
-- 25.3 inherits the guard seam (score 2, see pass 1) and the plane's ok-note wording, which now has three forms.
+- The `cli` wheel build is still exercised only against a fake `uv build`, because `tools/installer/cli` arrives in 25.4.
+- `studio-web` needs `apps/studio-web/dist` committed at its tag. That belongs to a later epic.
+- Releases published before this story keep their GitHub "latest" flag.
+- 25.3 and 25.4 inherit the guard seam: pass 1's rules plus this pass's rule that a roster with no plugin entry needs `source`. The periodic-digest refusal also binds any fixtures they write.
 
 Studio: activated as developer; working set bmm, tea, bmb, bmad-loop, gds; drift clean; routing implementer=claude-opus-5-5 reviewers=claude-opus-5-5 consult=claude-opus-5-5; knowledge spine absent
 Baseline: dd0e6778c495d88770f58e82e6bcca7c82e7a697 (branch loop/epic-25)
 
-DRIFT: plugin motion gains read-only pre-publish checks (subtree existence, guard) and `app`/`channel` result keys; zip bytes unchanged — required by the matrix's "named failure before any gh call" and the guard-refusal task — affects: none
-DRIFT: `--app supervisor` requires `--repo` — prevents archiving this repo as the supervisor before EP-31 — affects: none
-DRIFT: roster guard is stricter than the matrix (unknown component, schema≠1, channel, floor and tool-version formats) — keeps the guard from accepting invented shapes (consult: score 2, a seam 25.3/25.4 inherit) — affects: 25-3, 25-4
-DRIFT: gate test renamed to four-way and equality test split out — name accuracy — affects: none
-DRIFT: missing archive record skips only the url/sha256 half of gate ×4 — the tag half stays checkable from plugin.json — affects: none
-DRIFT: guard test renamed and plane ok-detail names both rosters with per-channel components — the old wording described the removed stable==latest invariant — affects: 25-3
-DRIFT: runbook gained notes on release demotion and the cli wheel version refusal — keep the runbook in step with the script — affects: none
-DRIFT: the motion reads and checks the channel roster before the tag lookup (skipped on dry run) — the stem refusal must precede any `gh` call — affects: none
-DRIFT: the plugin motion's `released-roster.json` read now goes through `_read_json` — the same non-UTF-8 crash as P3 — affects: none
+DRIFT: in a roster with no `plugin` entry, every app entry requires `source`, and the motion records it — AC3's foreign entry must name its repository, and without a plugin entry there is no home to compare against — affects: 25-3, 25-4
+DRIFT: `--app plugin` with a foreign `--repo` is refused, dry run included — keeps the plugin motion unchanged in effect — affects: none

@@ -160,7 +160,7 @@ operator runs these. In a `thkennedy/tk-studio-supervisor` checkout on
 an up-to-date `main`:
 
 ```bash
-git tag supervisor--v0.1.0 && git push origin supervisor--v0.1.0
+git switch main && git pull --ff-only origin main && git tag supervisor--v0.1.0 && git push origin supervisor--v0.1.0
 ```
 
 then from this repository:

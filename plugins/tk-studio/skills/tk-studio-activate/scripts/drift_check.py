@@ -261,8 +261,11 @@ def _is_placeholder_text(value: str) -> bool:
 def _digest_problem(where: str, value) -> str | None:
     if not isinstance(value, str) or not _HEX64.fullmatch(value):
         return f"{where}: not a 64-lowercase-hex sha256 ({value!r})"
-    if len(set(value)) == 1:
-        return f"{where}: placeholder digest ({value[:8]}...), never a real value"
+    # A repeated unit ("0"*64, "ab"*32, "deadbeef"*8) is typed, never hashed.
+    for unit in (1, 2, 4, 8, 16, 32):
+        if value == value[:unit] * (64 // unit):
+            return (f"{where}: placeholder digest ({value[:8]}...) repeats a "
+                    f"{unit}-char unit, never a real value")
     return None
 
 
@@ -278,7 +281,9 @@ def roster_problems(roster, *, released_archive: dict | None = None,
     released-roster.json ``archive`` record) and ``plugin_version`` (the
     plugin.json version) turn on gate x4 for a present ``plugin`` entry;
     None skips that comparison. The ``plugin`` entry's URL repository is
-    the roster's home: any other repository must be named in ``source``."""
+    the roster's home: any other repository must be named in ``source``.
+    With no ``plugin`` entry there is no home, so every app entry must name
+    its repository in ``source``."""
     if not isinstance(roster, dict):
         return ["roster: not a JSON object"]
     problems: list[str] = []
@@ -309,11 +314,12 @@ def roster_problems(roster, *, released_archive: dict | None = None,
 
     plugin = components.get("plugin")
     home = _url_repo(plugin.get("url")) if isinstance(plugin, dict) else None
+    homeless = "plugin" not in components
     for name, entry in components.items():
         where = f"components.{name}"
         if name in RELEASE_COMPONENTS:
             problems.extend(_release_entry_problems(
-                where, RELEASE_COMPONENTS[name], entry, home))
+                where, RELEASE_COMPONENTS[name], entry, home, homeless))
         elif name in TOOL_COMPONENTS:
             problems.extend(_tool_entry_problems(where, entry))
         else:
@@ -336,7 +342,7 @@ def roster_problems(roster, *, released_archive: dict | None = None,
 
 
 def _release_entry_problems(where: str, prefix: str, entry,
-                            home: str | None) -> list[str]:
+                            home: str | None, homeless: bool) -> list[str]:
     if not isinstance(entry, dict):
         return [f"{where}: not an object {{tag, url, sha256}}"]
     problems = [f"{where}.{field}: missing" for field in ("tag", "url", "sha256")
@@ -368,6 +374,10 @@ def _release_entry_problems(where: str, prefix: str, entry,
             if source is not None and source != repo:
                 problems.append(f"{where}.source: {source!r} does not match "
                                 f"its URL's repository {repo!r}")
+            elif source is None and homeless:
+                problems.append(f"{where}.source: missing — the roster's home "
+                                "cannot be established without the plugin "
+                                f"entry; name {repo} in source")
             elif source is None and home is not None and repo != home:
                 problems.append(f"{where}.source: URL is on {repo}, not the "
                                 f"roster's home {home} — name it in source")
@@ -393,10 +403,21 @@ def _tool_entry_problems(where: str, entry) -> list[str]:
     if REQUIRED_TOOL_TARGET not in digests:
         problems.append(f"{where}.sha256: no {REQUIRED_TOOL_TARGET} digest "
                         "(Windows x64 is required)")
+    seen: dict[str, str] = {}
     for target, value in digests.items():
+        if not isinstance(target, str) or not target.strip() \
+                or _is_placeholder_text(target):
+            problems.append(f"{where}.sha256: placeholder platform target "
+                            f"{target!r}")
         bad = _digest_problem(f"{where}.sha256.{target}", value)
         if bad:
             problems.append(bad)
+        elif value in seen:
+            # real upstream assets differ per platform: a shared digest is copied
+            problems.append(f"{where}.sha256: {seen[value]} and {target} carry "
+                            "the same digest — fabricated, never a real value")
+        else:
+            seen[value] = target
     return problems
 
 

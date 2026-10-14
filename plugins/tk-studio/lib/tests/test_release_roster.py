@@ -10,6 +10,7 @@ real-repo test here goes red in exactly that shape.
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import shutil
@@ -219,7 +220,7 @@ class ArchiveRecordPinTestCase(unittest.TestCase):
             {"version": "0.2.6", "skills": [],
              "archive": {"url": "https://github.com/x/y/releases/download/"
                                 "tk-studio--v0.2.6/tk-studio-0.2.6.zip",
-                         "sha256": "d1" * 32}}), [])
+                         "sha256": _digest("plugin-0.2.6")}}), [])
 
 
 class NormalizeZipTestCase(unittest.TestCase):
@@ -356,9 +357,16 @@ class RosterGuardShapeTestCase(unittest.TestCase):
 
 # --- installer roster (AD-21, Story 25.1) ----------------------------------
 
+
+def _digest(label: str) -> str:
+    """A real-shaped fixture digest: non-periodic and distinct per label —
+    the guard refuses periodic placeholders such as ``"a1" * 32``."""
+    return hashlib.sha256(label.encode("utf-8")).hexdigest()
+
+
 FIX_URL = ("https://github.com/o/r/releases/download/tk-studio--v1.2.3/"
            "tk-studio-1.2.3.zip")
-FIX_ARCHIVE = {"url": FIX_URL, "sha256": "a1" * 32}
+FIX_ARCHIVE = {"url": FIX_URL, "sha256": _digest("plugin")}
 SUP_URL = ("https://github.com/o/r/releases/download/supervisor--v0.1.0/"
            "supervisor-0.1.0.zip")
 
@@ -369,12 +377,12 @@ def _good_roster(channel: str = "latest") -> dict:
         "requires": {"claude-code": ">=2.1.224"},
         "components": {
             "plugin": {"tag": "tk-studio--v1.2.3", "url": FIX_URL,
-                       "sha256": "a1" * 32},
+                       "sha256": _digest("plugin")},
             "uv": {"version": "0.13.1",
-                   "sha256": {"x86_64-pc-windows-msvc": "b2" * 32,
-                              "x86_64-unknown-linux-gnu": "c3" * 32}},
+                   "sha256": {"x86_64-pc-windows-msvc": _digest("uv-win"),
+                              "x86_64-unknown-linux-gnu": _digest("uv-linux")}},
             "bun": {"version": "1.4.3",
-                    "sha256": {"x86_64-pc-windows-msvc": "d4" * 32}},
+                    "sha256": {"x86_64-pc-windows-msvc": _digest("bun-win")}},
         },
     }
 
@@ -385,13 +393,13 @@ def _release_entry(component: str) -> dict:
     return {"tag": tag,
             "url": f"https://github.com/o/r/releases/download/{tag}/"
                    f"{component}-0.1.0.zip",
-            "sha256": "e5" * 32}
+            "sha256": _digest(component)}
 
 
 _TRAILING_URL = ("https://github.com/o/r/releases/download/tk-studio--v0.2.15/"
                  "tk-studio-0.2.15.zip")
 _TRAILING_PLUGIN = {"tag": "tk-studio--v0.2.15", "url": _TRAILING_URL,
-                    "sha256": "9b" * 32}
+                    "sha256": _digest("plugin-0.2.15")}
 
 
 def _problems(roster, archive=FIX_ARCHIVE, version="1.2.3") -> list[str]:
@@ -478,16 +486,52 @@ class InstallerRosterGuardTestCase(unittest.TestCase):
         self.assertNamed(_problems(roster), "components.uv.version",
                          "placeholder")
 
+    def test_periodic_digest_is_a_placeholder(self):
+        # a repeated unit whose length divides 64 is typed, never hashed
+        for value in ("ab" * 32, "deadbeef" * 8, "0123456789abcdef" * 4,
+                      _digest("half")[:32] * 2):
+            roster = _good_roster()
+            roster["components"]["plugin"]["sha256"] = value
+            self.assertNamed(_problems(roster, archive=None),
+                             "components.plugin.sha256", "placeholder")
+            roster = _good_roster()
+            roster["components"]["uv"]["sha256"]["x86_64-pc-windows-msvc"] = value
+            self.assertNamed(_problems(roster),
+                             "components.uv.sha256.x86_64-pc-windows-msvc",
+                             "placeholder")
+            roster = _good_roster()
+            roster["components"]["cli"] = dict(_release_entry("cli"),
+                                               sha256=value)
+            self.assertNamed(_problems(roster), "components.cli.sha256",
+                             "placeholder")
+
+    def test_duplicate_tool_target_digests_are_fabricated(self):
+        # real upstream assets differ per platform: a shared digest is copied
+        for tool in ("uv", "bun"):
+            roster = _good_roster()
+            digests = roster["components"][tool]["sha256"]
+            digests["x86_64-unknown-linux-gnu"] = digests["x86_64-pc-windows-msvc"]
+            self.assertNamed(_problems(roster), f"components.{tool}.sha256",
+                             "x86_64-pc-windows-msvc",
+                             "x86_64-unknown-linux-gnu", "same digest")
+
+    def test_placeholder_platform_target_is_refused(self):
+        for target in ("<platform target>", "TBD", "", "  "):
+            roster = _good_roster()
+            roster["components"]["uv"]["sha256"][target] = _digest("uv-mac")
+            self.assertNamed(_problems(roster), "components.uv.sha256",
+                             "placeholder platform target", repr(target))
+
     def test_tool_entry_shape(self):
         for tool in ("uv", "bun"):
-            for digests in ("b2" * 32, {}, ["b2" * 32]):
+            for digests in (_digest("uv-win"), {}, [_digest("uv-win")]):
                 roster = _good_roster()
                 roster["components"][tool]["sha256"] = digests
                 self.assertNamed(_problems(roster), f"components.{tool}.sha256",
                                  "map")
             roster = _good_roster()
             roster["components"][tool]["sha256"] = {
-                "x86_64-unknown-linux-gnu": "c3" * 32}
+                "x86_64-unknown-linux-gnu": _digest("uv-linux")}
             self.assertNamed(_problems(roster), f"components.{tool}.sha256",
                              "x86_64-pc-windows-msvc")
             roster = _good_roster()
@@ -542,12 +586,30 @@ class InstallerRosterGuardTestCase(unittest.TestCase):
         roster["components"]["supervisor"]["source"] = "o/r"
         self.assertNamed(_problems(roster), "components.supervisor.source")
 
+    def test_without_a_plugin_entry_every_app_entry_names_its_source(self):
+        # no plugin entry, no home: a foreign (or any) URL cannot be told
+        # from the roster's own repository, so source is required
+        for component in ("supervisor", "studio-web", "cli"):
+            roster = _good_roster()
+            del roster["components"]["plugin"]
+            entry = _release_entry(component)
+            roster["components"][component] = dict(
+                entry, url=entry["url"].replace("o/r", "o/sup"))
+            self.assertNamed(_problems(roster), f"components.{component}.source",
+                             "missing", "without the plugin entry")
+            roster["components"][component]["source"] = "o/sup"
+            self.assertEqual(_problems(roster), [])
+        # with the plugin entry present, an own-repository entry needs none
+        roster = _good_roster()
+        roster["components"]["supervisor"] = _release_entry("supervisor")
+        self.assertEqual(_problems(roster), [])
+
     def test_gate_x4_plugin_entry_agrees_with_the_gate(self):
         self.assertNamed(_problems(_good_roster(), version="1.2.4"),
                          "components.plugin.tag", "gate x4")
         self.assertNamed(
             _problems(_good_roster(),
-                      archive=dict(FIX_ARCHIVE, sha256="c7" * 32)),
+                      archive=dict(FIX_ARCHIVE, sha256=_digest("other"))),
             "components.plugin.sha256", "released-roster.json")
         self.assertNamed(
             _problems(_good_roster(),
@@ -855,6 +917,7 @@ class ReleaseMotionTestCase(unittest.TestCase):
         self.release_exists = False
         self.wheel_version = "0.1.0"
         self.build_env: dict | None = None
+        self.build_src: str | None = None
         self.uploaded = b""
         for name, value in (("REPO_ROOT", self.repo), ("ROSTER", self.record),
                             ("PLUGIN_MANIFEST", self.manifest),
@@ -892,6 +955,7 @@ class ReleaseMotionTestCase(unittest.TestCase):
             return done(out="o/sup\n" if cwd == self.sup else "o/r\n")
         if args[:2] == ["uv", "build"]:
             self.build_env = kw.get("env")
+            self.build_src = (Path(args[-1]) / "a.txt").read_text("utf-8")
             out = Path(args[args.index("--out-dir") + 1])
             out.mkdir(parents=True, exist_ok=True)
             (out / f"tk_cli-{self.wheel_version}-py3-none-any.whl").write_bytes(
@@ -1116,6 +1180,61 @@ class ReleaseMotionTestCase(unittest.TestCase):
         self.record.write_bytes(b"\xff\xfe")
         failure = self._fails()
         self.assertIn("released-roster.json unreadable", failure["error"])
+
+    def test_each_app_archives_its_subtree_at_its_tag(self):
+        # AC2: built from the app's subtree at its <prefix>--vX.Y.Z tag —
+        # asserted against APPS and, for the planned layout, literally
+        expected = {"plugin": "tk-studio--v1.2.3:plugins/tk-studio",
+                    "supervisor": "supervisor--v0.1.0:",
+                    "studio-web": "studio-web--v0.1.0:apps/studio-web/dist",
+                    "cli": "cli--v0.1.0:" + release_archive.APPS["cli"][1]}
+        self.assertEqual(set(expected), set(release_archive.APPS))
+        for app, (prefix, subtree, _kind) in release_archive.APPS.items():
+            self.calls.clear()
+            version = "1.2.3" if app == "plugin" else "0.1.0"
+            repo = self.sup if app == "supervisor" else self.repo
+            treeish = f"{prefix}{version}:" + ("" if subtree == "." else subtree)
+            self.assertEqual(treeish, expected[app])
+            result = release_archive.run(
+                True, app=app, version=None if app == "plugin" else version,
+                repo=self.sup if app == "supervisor" else None)
+            self.assertEqual(result["tag"], f"{prefix}{version}")
+            archives = [(a, cwd) for a, cwd in self.calls if "archive" in a]
+            self.assertEqual(archives, [(
+                ["git", "-c", "core.autocrlf=false", "archive", "--format=zip",
+                 "-o", archives[0][0][6], treeish], repo)], app)
+        # the cli wheel is built from that archived subtree, not the worktree
+        self.assertEqual(self.build_src, f"tree {expected['cli']}")
+
+    def test_plugin_from_another_checkout_is_refused_before_any_call(self):
+        # the plugin is gated against this repository's plugin.json and
+        # released-roster.json: built and published elsewhere it is ungated
+        before = self._snapshot()
+        for dry_run in (False, True):
+            out = io.StringIO()
+            with redirect_stdout(out), self.assertRaises(SystemExit):
+                release_archive.run(dry_run, repo=self.sup)
+            error = json.loads(out.getvalue())["error"]
+            self.assertIn("--app plugin --repo", error)
+            self.assertIn("refused", error)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self._snapshot(), before)
+        # this repository named explicitly is the default, not another one
+        self.assertTrue(release_archive.run(True, repo=self.repo)["ok"])
+
+    def test_plugin_less_roster_cut_records_source(self):
+        # without a plugin entry the guard cannot establish home, so the
+        # motion names even this repository in source (else it is refused)
+        stable = _good_roster("stable")
+        del stable["components"]["plugin"]
+        (self.rosters / "stable.json").write_text(json.dumps(stable),
+                                                  encoding="utf-8")
+        result = release_archive.run(False, app="studio-web", version="0.1.0",
+                                     channel="stable")
+        self.assertEqual(result["source"], "o/r")
+        roster = json.loads((self.rosters / "stable.json").read_text("utf-8"))
+        self.assertEqual(roster["components"]["studio-web"]["source"], "o/r")
+        self.assertEqual(drift_check.roster_problems(roster), [])
 
     def test_non_plugin_app_needs_a_version(self):
         failure = self._fails(app="studio-web")

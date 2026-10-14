@@ -198,6 +198,12 @@ def run(dry_run: bool, app: str = "plugin", version: str | None = None,
               "stable by PR — --app plugin --channel stable refused")
     prefix, subtree, kind = APPS[app]
     repo = Path(repo).resolve() if repo else REPO_ROOT
+    if app == "plugin" and repo != REPO_ROOT:
+        # The plugin is gated against this repository's plugin.json and
+        # released-roster.json: built and published from another checkout,
+        # the cut would ride a gate that never described it.
+        _fail(f"the plugin motion builds and publishes from this repository "
+              f"(gate x4); --app plugin --repo {repo} refused")
     plugin_version = _read_json(PLUGIN_MANIFEST, "plugin.json")["version"]
 
     released = None
@@ -309,6 +315,10 @@ def run(dry_run: bool, app: str = "plugin", version: str | None = None,
                       f"{proc.stderr.strip()}")
             if proc.stdout.strip() != name_with_owner:
                 entry["source"] = name_with_owner
+        if app != "plugin" and "plugin" not in roster["components"]:
+            # No plugin entry, no home for the guard to compare against:
+            # every app entry names its repository (the guard requires it).
+            entry["source"] = name_with_owner
         roster["components"][app] = entry
         if app == "plugin":
             released["archive"] = {"url": url, "sha256": sha}
