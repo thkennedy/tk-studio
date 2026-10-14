@@ -6,6 +6,7 @@ status: 'done'
 review_loop_iteration: 0
 followup_review_recommended: true
 deviation_score: 2
+reconcile_verdict: adjust-stories
 baseline_revision: b16814f6aab8ab53a88d2083570178a7bd923bcc
 context:
   - '{project-root}/_bmad-output/specs/spec-epic-25/SPEC.md'
@@ -286,3 +287,16 @@ Studio: activated as developer; working set bmm, tea, bmb, bmad-loop, gds; drift
 Baseline: b16814f6aab8ab53a88d2083570178a7bd923bcc (branch loop/epic-25)
 
 DRIFT: `-h/--help` ends with `{status: complete, intent: tk-studio-cli[-<verb>], artifacts: [], reason: null, help: true}`, exit 0; `marketplace_cleanup` also reads (never edits) `<config>/settings.json`, so `extraKnownMarketplaces.tk-studio` queues `claude plugin marketplace remove tk-studio`, each `enabledPlugins` `tk-studio@<m>` key (not `@skills-dir`) queues `uninstall --scope user`, and an unreadable settings.json is a `{command: null, file, error}` row (partial); a dangling link target gives `marketplace.status: skipped`; `default_runner` takes `env` — follow-up review for AD-11 and AC3 — affects: 25-4, 25-5
+
+## Reconcile
+
+### 2026-10-14 — adjust-stories
+
+- Score: 2
+- Reasoning: The story landed the meta-CLI's first package (`tools/installer/cli/tk_studio_cli`, stdlib only, sealed from the plugin) with the plugin leg, and four passes grew its surface beyond the plan's examples: a wider refusal vocabulary with the `<Name>: <detail>` reason shape and exit codes, a three-sibling swap (`.tk-studio.new`, `.tk-studio.previous`, `.tk-studio.retired`) with a `retired_left` result field, a `--help` that ends with the AD-11 JSON line, `marketplace_cleanup` reading the user's `settings.json` for marketplace keys, and a sandbox verification rule (`UV_PROJECT_ENVIRONMENT` outside the mount, no `uv.lock` committed). Stories 25.3, 25.4 and 25.5 build on this package and the folder it writes, so their dispatch notes must name the landed shapes, but no acceptance criterion of any later story changes: 25.3 still judges the folder against the roster with its four cases, 25.4 still adds the bootstrap and the supervisor and web legs to the same CLI, 25.5 still reports the smoke table. No AD, contract surface, schema or ruling is contradicted: the CLI imports nothing from the plugin (AD-21 sealing holds in both directions), the repository dropped its committed marketplace entries as AD-21 requires, and every verb ends with the status block (AD-11). Recorded by the attended session (gate session off).
+- Affected: 25-3-the-drift-check-and-conformance-read-the-folder-and-the — "reports `ok`, `stale`, `missing` or `shadowed`": the plane must treat the leg's sibling folders (`.tk-studio.previous`, `.tk-studio.retired`, a leftover `.tk-studio.new`) as not the plugin, and read the same install records and `settings.json` keys as `marketplace_cleanup` to detect `shadowed`
+- Affected: 25-4-the-bootstrap-and-the-meta-cli — "the meta-CLI `tk-studio` ... verbs `install`, `update`, `doctor`, `status`": extend the landed `tk_studio_cli` package (its refusal names, `<Name>: <detail>` reasons, exit codes, the `--help` JSON line, `default_runner` taking `env`) rather than starting a second CLI; sandbox verification runs with `UV_PROJECT_ENVIRONMENT` outside the mount and commits no `uv.lock`
+- Affected: 25-5-doctor-says-what-is-wrong — "the skills-dir plugin against the roster (Story 25.3's cases)": doctor also reports a leftover `.tk-studio.retired` or `.tk-studio.new` and `retired_left`, reuses the leg's refusal names, and reads (never edits) `settings.json` for marketplace entries
+- Invariant: none
+
+Gate: Part A adjust-stories (attended session; gate session off); Part B not run here: the run is closed by archive and relaunch, which plans the next story.
