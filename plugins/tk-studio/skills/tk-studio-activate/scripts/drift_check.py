@@ -66,7 +66,8 @@ FIX_RELEASE = ("run the release motion: bump plugin.json, marketplace.json, and 
 FIX_INSTALLER_ROSTER = ("run the release motion: uv run tools/release_archive.py "
                         "run --app plugin (records the roster's plugin entry in lockstep "
                         "with released-roster.json); uv/bun pins are read from the "
-                        "upstream release, never invented")
+                        "upstream release, never invented; stable.json trails "
+                        "latest.json and is repaired by a promotion PR")
 
 
 def check_bmad_base(directory: Path, lock_path: Path) -> dict:
@@ -283,7 +284,8 @@ def roster_problems(roster, *, released_archive: dict | None = None,
     problems: list[str] = []
     if "schema" not in roster:
         problems.append("schema: missing")
-    elif roster["schema"] != ROSTER_SCHEMA:
+    elif type(roster["schema"]) is not int or roster["schema"] != ROSTER_SCHEMA:
+        # type() not isinstance: JSON true / 1.0 compare equal to 1
         problems.append(f"schema: unsupported {roster['schema']!r} "
                         f"(expected {ROSTER_SCHEMA})")
     if "channel" not in roster:
@@ -419,35 +421,57 @@ def _installer_roster_check(directory: Path, plugin_root: Path,
             continue
         try:
             rosters[channel] = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             return {"status": "error",
                     "detail": f"installer roster {path} unreadable: {exc}"}
     try:
         record = json.loads((plugin_root / ".claude-plugin" / "released-roster.json")
                             .read_text(encoding="utf-8"))
         archive = record.get("archive") if isinstance(record, dict) else None
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         archive = None
     if not isinstance(archive, dict):
         # no archive record to compare against: _released_roster_check and
         # the archive-record pin report the record itself
         archive = None
 
+    def stem_problems(channel: str) -> list[str]:
+        # roster_problems stays stem-agnostic; the file stem is the plane's
+        # knowledge. An out-of-set channel is already named by the guard.
+        declared = rosters[channel].get("channel") \
+            if isinstance(rosters[channel], dict) else None
+        if declared in ROSTER_CHANNELS and declared != channel:
+            return [f"channel: {declared!r} is not the file stem {channel!r}"]
+        return []
+
     problems: list[str] = []
     notes: list[str] = []
     if "stable" in rosters:
         problems += [f"installer roster stable.json: {p}"
-                     for p in roster_problems(rosters["stable"])]
+                     for p in roster_problems(rosters["stable"])
+                     + stem_problems("stable")]
         notes.append("stable.json in shape")
     else:
         notes.append(f"no {paths['stable']} — stable roster not checkable "
                      "from this project")
     if "latest" in rosters:
+        latest = rosters["latest"]
         problems += [f"installer roster latest.json: {p}"
-                     for p in roster_problems(rosters["latest"],
+                     for p in roster_problems(latest,
                                               released_archive=archive,
-                                              plugin_version=version)]
-        notes.append("latest.json in shape, plugin entry at the gate (gate x4)")
+                                              plugin_version=version)
+                     + stem_problems("latest")]
+        components = latest.get("components") if isinstance(latest, dict) else None
+        if not (isinstance(components, dict) and "plugin" in components):
+            notes.append("latest.json in shape, no plugin entry (gate x4 not "
+                         "applicable)")
+        elif archive is None:
+            notes.append("latest.json in shape, plugin entry at the gate tag "
+                         "(gate x4; url/sha256 comparison skipped — no "
+                         "released-roster.json archive record)")
+        else:
+            notes.append("latest.json in shape, plugin entry at the gate "
+                         "(gate x4)")
     else:
         notes.append(f"no {paths['latest']} — gate x4 not checkable from "
                      "this project")

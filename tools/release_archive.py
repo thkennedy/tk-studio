@@ -161,7 +161,7 @@ def _roster_problems(roster: dict, released_archive: dict | None,
 def _read_json(path: Path, label: str) -> dict:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         _fail(f"{label} unreadable: {exc}")
 
 
@@ -190,6 +190,12 @@ def run(dry_run: bool, app: str = "plugin", version: str | None = None,
         _fail(f"unknown app {app!r} — one of {', '.join(APPS)}")
     if channel not in CHANNELS:
         _fail(f"unknown channel {channel!r} — one of {', '.join(CHANNELS)}")
+    if app == "plugin" and channel != "latest":
+        # The plugin cut also rewrites released-roster.json's archive; into
+        # stable it would leave latest.json's plugin entry stale (gate x4 red,
+        # and stable is guarded for shape only, so nothing else stops it).
+        _fail("the plugin motion records into latest (gate x4); promote to "
+              "stable by PR — --app plugin --channel stable refused")
     prefix, subtree, kind = APPS[app]
     repo = Path(repo).resolve() if repo else REPO_ROOT
     plugin_version = _read_json(PLUGIN_MANIFEST, "plugin.json")["version"]
@@ -202,10 +208,7 @@ def run(dry_run: bool, app: str = "plugin", version: str | None = None,
         version = plugin_version
         # Lockstep before any work — and long before any gh mutation: a
         # partial gate bump must fail here, not after a release is created.
-        try:
-            released = json.loads(ROSTER.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            _fail(f"released-roster.json unreadable: {exc}")
+        released = _read_json(ROSTER, "released-roster.json")
         if released["version"] != version:
             _fail(f"roster version {released['version']} != plugin.json "
                   f"{version} — run the gate bump first (lockstep)")
@@ -215,6 +218,19 @@ def run(dry_run: bool, app: str = "plugin", version: str | None = None,
         if app == "supervisor" and repo == REPO_ROOT:
             _fail("--app supervisor runs against its own checkout until "
                   "EP-31: pass --repo <path-to-supervisor-checkout>")
+    # The roster this cut records into, read and sanity-checked before any
+    # git/gh call (a dry run records nothing, so does not read it).
+    roster_path = ROSTERS_DIR / f"{channel}.json"
+    roster = None
+    if not dry_run:
+        roster = _read_json(roster_path, f"installer roster {channel}.json")
+        if not isinstance(roster, dict) \
+                or not isinstance(roster.get("components"), dict):
+            _fail(f"installer roster {channel}.json has no components object")
+        if roster.get("channel") != channel:
+            _fail(f"installer roster {channel}.json: channel "
+                  f"{roster.get('channel')!r} is not the file stem "
+                  f"{channel!r} — not publishing")
     tag = f"{prefix}{version}"
     asset = f"tk-studio-{version}.zip" if app == "plugin" \
         else f"{app}-{version}.zip"
@@ -293,10 +309,6 @@ def run(dry_run: bool, app: str = "plugin", version: str | None = None,
                       f"{proc.stderr.strip()}")
             if proc.stdout.strip() != name_with_owner:
                 entry["source"] = name_with_owner
-        roster_path = ROSTERS_DIR / f"{channel}.json"
-        roster = _read_json(roster_path, f"installer roster {channel}.json")
-        if not isinstance(roster.get("components"), dict):
-            _fail(f"installer roster {channel}.json has no components object")
         roster["components"][app] = entry
         if app == "plugin":
             released["archive"] = {"url": url, "sha256": sha}
@@ -399,7 +411,8 @@ def main() -> None:
                           "this repository); the roster write always targets "
                           "this repository")
     cmd.add_argument("--channel", choices=list(CHANNELS), default="latest",
-                     help="installer roster to record into (default latest)")
+                     help="installer roster to record into (default latest; "
+                          "--app plugin records into latest only)")
     args = parser.parse_args()
     print(json.dumps(run(args.dry_run, app=args.app, version=args.version,
                          repo=args.repo, channel=args.channel), indent=2))

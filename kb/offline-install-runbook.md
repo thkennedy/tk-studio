@@ -138,7 +138,9 @@ The plugin's version comes from `plugin.json`; every other app takes
 script builds deterministically, publishes, re-downloads and verifies the
 digest, then records `{tag, url, sha256}` under the app's component in
 `tools/installer/rosters/<channel>.json` (`--channel latest`, the
-default, or `stable`) — adding `source: "<owner>/<repo>"` when the asset
+default, or `stable`; `--app plugin` records into `latest` only and
+refuses `--channel stable`, since it also rewrites `released-roster.json`
+`archive` — gate ×4) — adding `source: "<owner>/<repo>"` when the asset
 lives on another repository. It refuses, before any `gh` mutation, a
 roster the drift check's guard (`roster_problems`) rejects — shape plus
 gate ×4 for `--channel latest`, shape only for `--channel stable` — and a

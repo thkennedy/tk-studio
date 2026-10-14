@@ -568,6 +568,13 @@ class InstallerRosterGuardTestCase(unittest.TestCase):
         self.assertNamed(_problems(roster, archive=None, version="1.2.4"),
                          "components.plugin.tag", "gate x4")
 
+    def test_schema_must_be_the_integer_one(self):
+        # JSON true and 1.0 compare equal to 1 in Python — still refused
+        for bad in (True, 1.0, "1"):
+            roster = _good_roster()
+            roster["schema"] = bad
+            self.assertNamed(_problems(roster), "schema", "unsupported")
+
     def test_unknown_component_and_non_object_are_named(self):
         roster = _good_roster()
         roster["components"]["hermes"] = {}
@@ -703,6 +710,90 @@ class InstallerRosterPlaneTestCase(unittest.TestCase):
                 self._plugin_root(tmp), "1.2.3")
         self.assertEqual(check["status"], "error")
         self.assertIn("latest.json unreadable", check["detail"])
+
+    def test_non_utf8_roster_is_error_not_a_crash(self):
+        for stem in ("stable", "latest"):
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                project = self._project(tmp, _good_roster("stable"),
+                                        _good_roster("latest"))
+                (project / "tools" / "installer" / "rosters"
+                 / f"{stem}.json").write_bytes(b'{"schema": 1, "x": "\xff\xfe"}')
+                check = drift_check._installer_roster_check(
+                    project, self._plugin_root(tmp), "1.2.3")
+            self.assertEqual(check["status"], "error", stem)
+            self.assertIn(f"{stem}.json unreadable", check["detail"])
+        # a non-UTF-8 released-roster.json is no archive record (the record's
+        # own checks report it), never an escaping exception
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            root = self._plugin_root(tmp)
+            (root / ".claude-plugin" / "released-roster.json").write_bytes(
+                b"\xff\xfe")
+            check = drift_check._installer_roster_check(
+                self._project(tmp, _good_roster("stable"),
+                              _good_roster("latest")), root, "1.2.3")
+        self.assertEqual(check["status"], "ok", check["detail"])
+        self.assertIn("url/sha256 comparison skipped", check["detail"])
+
+    def test_channel_not_its_file_stem_is_drift(self):
+        for stem, declared in (("stable", "latest"), ("latest", "stable")):
+            rosters = {"stable": _good_roster("stable"),
+                       "latest": _good_roster("latest")}
+            rosters[stem]["channel"] = declared
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                check = drift_check._installer_roster_check(
+                    self._project(tmp, rosters["stable"], rosters["latest"]),
+                    self._plugin_root(tmp), "1.2.3")
+            self.assertEqual(check["status"], "drift", stem)
+            self.assertIn(f"installer roster {stem}.json: channel: "
+                          f"{declared!r} is not the file stem {stem!r}",
+                          check["detail"])
+
+    def test_bad_stable_fix_names_the_promotion_pr(self):
+        roster = _good_roster("stable")
+        roster["components"]["plugin"]["sha256"] = "abc"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            check = drift_check._installer_roster_check(
+                self._project(tmp, roster), self._plugin_root(tmp), "1.2.3")
+        self.assertEqual(check["status"], "drift")
+        self.assertIn("tools/release_archive.py run --app plugin", check["fix"])
+        self.assertIn("stable.json trails latest.json and is repaired by a "
+                      "promotion PR", check["fix"])
+
+    def test_ok_note_matches_what_gate_x4_checked(self):
+        latest = _good_roster("latest")
+        del latest["components"]["plugin"]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            check = drift_check._installer_roster_check(
+                self._project(tmp, _good_roster("stable"), latest),
+                self._plugin_root(tmp), "1.2.3")
+        self.assertEqual(check["status"], "ok", check["detail"])
+        self.assertIn("latest.json in shape, no plugin entry (gate x4 not "
+                      "applicable)", check["detail"])
+        self.assertNotIn("plugin entry at the gate", check["detail"])
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            root = self._plugin_root(tmp)
+            (root / ".claude-plugin" / "released-roster.json").write_text(
+                json.dumps({"version": "1.2.3", "skills": ["tk-a"]}),
+                encoding="utf-8")
+            check = drift_check._installer_roster_check(
+                self._project(tmp, _good_roster("stable"),
+                              _good_roster("latest")), root, "1.2.3")
+        self.assertEqual(check["status"], "ok", check["detail"])
+        self.assertIn("url/sha256 comparison skipped", check["detail"])
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            check = drift_check._installer_roster_check(
+                self._project(tmp, _good_roster("stable"),
+                              _good_roster("latest")),
+                self._plugin_root(tmp), "1.2.3")
+        self.assertIn("latest.json in shape, plugin entry at the gate "
+                      "(gate x4)", check["detail"])
 
     def test_plugin_plane_folds_the_roster_check_in(self):
         roster = _good_roster("stable")
@@ -987,6 +1078,44 @@ class ReleaseMotionTestCase(unittest.TestCase):
         self.assertEqual([a for a in self._gh_calls()
                           if a[1] == "release"], [])
         self.assertEqual(self._snapshot(), before)
+
+    def test_plugin_into_stable_is_refused_before_any_call(self):
+        # the plugin cut rewrites released-roster.json's archive: recorded
+        # into stable it would leave latest.json's plugin entry stale
+        before = self._snapshot()
+        for dry_run in (False, True):
+            out = io.StringIO()
+            with redirect_stdout(out), self.assertRaises(SystemExit):
+                release_archive.run(dry_run, channel="stable")
+            self.assertIn("the plugin motion records into latest (gate x4); "
+                          "promote to stable by PR",
+                          json.loads(out.getvalue())["error"])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self._snapshot(), before)
+
+    def test_roster_channel_not_its_stem_is_refused_before_gh(self):
+        stable = _good_roster("latest")
+        (self.rosters / "stable.json").write_text(json.dumps(stable),
+                                                  encoding="utf-8")
+        before = self._snapshot()
+        failure = self._fails(app="studio-web", version="0.1.0",
+                              channel="stable")
+        self.assertIn("installer roster stable.json: channel 'latest' is not "
+                      "the file stem 'stable'", failure["error"])
+        self.assertEqual(self._gh_calls(), [])
+        self.assertEqual(self._snapshot(), before)
+
+    def test_non_utf8_roster_fails_by_name_before_gh(self):
+        (self.rosters / "latest.json").write_bytes(b'{"x": "\xff\xfe"}')
+        before = self._snapshot()
+        failure = self._fails(app="studio-web", version="0.1.0")
+        self.assertIn("installer roster latest.json unreadable",
+                      failure["error"])
+        self.assertEqual(self._gh_calls(), [])
+        self.assertEqual(self._snapshot(), before)
+        self.record.write_bytes(b"\xff\xfe")
+        failure = self._fails()
+        self.assertIn("released-roster.json unreadable", failure["error"])
 
     def test_non_plugin_app_needs_a_version(self):
         failure = self._fails(app="studio-web")

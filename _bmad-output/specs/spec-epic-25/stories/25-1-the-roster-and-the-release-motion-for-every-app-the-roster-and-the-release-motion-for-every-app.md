@@ -122,6 +122,25 @@ Full investigation: [plans/25-1.md](../plans/25-1.md) §Code Map. Anchors re-con
   - `[medium]` `[patch]` The `cli` wheel path was untested, and a wheel of another version could be recorded under `cli--vX.Y.Z` (both layers). Added a named refusal on a version mismatch before any `gh` call, plus fake-`gh` tests for the cli cut and the mismatch.
   - `[medium]` `[patch]` An existing release skipped `create`, so `--latest=false` was never applied (AD-21; edge-case-hunter). That path now runs `gh release edit <tag> --latest=false`, with a test.
 
+### 2026-10-14 — Review pass (follow-up, review_loop_iteration 0)
+- intent_gap: 0
+- bad_spec: 0
+- patch: 6 (high 0, medium 3, low 3)
+- defer: 0
+- reject: 4 (one-line reasons below)
+- addressed_findings:
+  - `[medium]` `[patch]` `--app plugin --channel stable` rewrote `released-roster.json` `archive` but recorded the plugin entry only into `stable.json`, leaving gate ×4 red on `latest.json` (both layers). Now refused before any `git`/`gh` call; the runbook states it; test `test_plugin_into_stable_is_refused_before_any_call`.
+  - `[medium]` `[patch]` A roster whose `channel` differs from its file stem passed the plane and the motion (both layers; the matrix row "Real rosters" requires channel = stem). The plane now reports it as drift; the motion refuses before any `gh` call. `roster_problems` stays stem-agnostic. Tests `test_channel_not_its_file_stem_is_drift`, `test_roster_channel_not_its_stem_is_refused_before_gh`.
+  - `[medium]` `[patch]` A non-UTF-8 roster raised `UnicodeDecodeError` instead of `error` (edge-case-hunter; the matrix says "unreadable JSON is `error`, not a crash"). Now caught in the plane's roster and released-roster reads and in the motion's `_read_json`. Tests `test_non_utf8_roster_is_error_not_a_crash`, `test_non_utf8_roster_fails_by_name_before_gh`.
+  - `[low]` `[patch]` `schema` accepted JSON `true` and `1.0` (edge-case-hunter). Now it must be the integer 1; test `test_schema_must_be_the_integer_one`.
+  - `[low]` `[patch]` The plane's ok-note claimed "plugin entry at the gate (gate x4)" with no `plugin` entry, or when the url/sha256 half was skipped (blind-hunter). The note is now accurate in all three cases, and the normal-case wording is unchanged. Test `test_ok_note_matches_what_gate_x4_checked`.
+  - `[low]` `[patch]` `FIX_INSTALLER_ROSTER` sent a broken `stable.json` to a motion that writes only `latest.json` (blind-hunter). The fix still names the release motion, per the matrix, and adds that `stable.json` is repaired by a promotion PR. Test `test_bad_stable_fix_names_the_promotion_pr`.
+- rejected:
+  - `latest.json` with no `plugin` entry passes gate ×4: AC1 makes every component optional per channel. Only the misleading note was real, and it is patched above.
+  - "No release owns latest" is not achievable / pre-existing releases keep the flag: AC2 names `--latest=false` on publish, which is met, and the runbook's operative claim (consumers resolve by tag, never `/releases/latest`) holds.
+  - The plane compares the checkout's `latest.json` against the running plugin's record: this is the planned `_installer_roster_check(directory, plugin_root, version)` signature and mirrors the gate ×3 `_released_roster_check(PLUGIN_ROOT, …)`. A stale install is the harness plane's report.
+  - The two-file record is not atomic as a pair, and two refusals plus the fake `_run` cwd are untested: each write is atomic per house rule. The refusals are pass-1 deviations rather than criteria, and the cwd is plumbing.
+
 ## Design Notes
 
 - "`stable.json` equals `latest.json`" is read as equal in `schema`, `requires` and `components`; `channel` names each file's own channel, as AC1 requires every roster to carry it. The real-repo test asserts exactly that.
@@ -167,44 +186,60 @@ DRIFT: missing archive record skips only the url/sha256 half of gate ×4 — the
 DRIFT: guard test renamed and plane ok-detail names both rosters with per-channel components — the old wording described the removed stable==latest invariant — affects: 25-3
 DRIFT: runbook gained notes on release demotion and the cli wheel version refusal — keep the runbook in step with the script — affects: none
 
+### pass 3 (2026-10-14, implementer, follow-up review patches)
+
+- planned: check `roster["channel"] == channel` after the existing roster read / actual: the roster read, the components-object check and the stem check moved before the tag lookup in `run()`, skipped on `--dry-run`; dry-run output and sha256 unchanged / why: the old read ran after `gh repo view`, and the patch also required refusal before any `gh` call / may affect: none
+- planned: catch `UnicodeDecodeError` at the plane's reads and `_read_json` / actual: the plugin motion's inline `released-roster.json` read also now goes through `_read_json`, with the same message / why: the same crash at another site in the plan's Files / may affect: none
+- planned: refuse `--app plugin --channel stable` / actual: the refusal also covers `--dry-run`, and one runbook clause records it / why: P1 makes no dry-run exception, and the runbook implied the combination was allowed / may affect: none
+- Consult ruling (accept, score 1; (c) and (d) score 0): frontmatter `deviation_score` stays 2.
+
+DRIFT: the motion reads and checks the channel roster before the tag lookup (skipped on dry run) — the stem refusal must precede any `gh` call — affects: none
+DRIFT: the plugin motion's `released-roster.json` read now goes through `_read_json` — the same non-UTF-8 crash as P3 — affects: none
+
 ## Consult Log
 
 - 2026-10-14T19:57:30Z — trigger: halt — question: AC1 requires `supervisor`, `studio-web` and `cli` as `{tag, url, sha256}` and `uv`/`bun` as a single `{version, sha256}`, but only the plugin has a release and uv/bun ship one archive per platform; does the session pick a schema (pending marker / optional / deferred; per-platform map) or escalate? — ruling: escalate — do: HALT blocked before writing any spec or code. Hand the operator two questions. (1) Should the roster carry placeholders for the three unreleased components, carry them as optional entries, or leave them out until they ship? Whatever the answer, the guard must accept it. (2) Should the uv/bun `{version, sha256}` entry become a per-platform map, or should the roster pin one named platform? Re-drive 25.1 once the operator has ruled on both. — rule candidate: When a story's acceptance criteria require a schema entry for an artifact that won't exist until a later story or an operator action, the planner settles the schema (pending marker, optional entry or deferred entry, plus the per-platform digest shape) in the SPEC before launch instead of leaving it as a Block If.
 - 2026-10-14T20:11:12Z — trigger: deviation-gt-0 — question: accept the four pass-1 deviations (plugin pre-publish checks, supervisor needs --repo, stricter roster guard, renamed gate test) at the self-scored 1? — ruling: accept-deviation score 2 — do: accept all four; set deviation_score 2; mark deviation 3 as a seam 25.3/25.4 inherit (six components, schema 1, channel stable/latest, >=X.Y.Z floor, X.Y.Z tool versions); change nothing else — rule candidate: When an implementer makes a shared validator or schema guard stricter than the story's I/O matrix, and later stories read the same artifact, score it 2 automatically and copy the added rules into the SPEC's seam notes. No consult is needed.
 - 2026-10-14T20:13:37Z — trigger: high-severity-finding — question: gate ×4 binds both rosters (tests, pre-publish guard, drift plane on stable.json) but ruling 3 has the motion write `latest` only with stable trailing by PR, so the 25.7 cut goes red; which reading applies? — ruling: apply (option 1) — do: bind gate ×4 to `latest.json` only in test_release_roster.py, release_archive.py's pre-publish guard and drift_check.py's _installer_roster_check, reading `stable.json` for shape only; check stable's plugin entry for shape only (tag/url/64-hex), no comparison with the current gate and no permanent stable==latest guard (first-cut equality is evidence, not an invariant); record that 25.3 wires the configured channel and 25.7 is the first cut where stable trails — rule candidate: Release-lockstep guards (gate ×N) bind only the artifact the release motion writes, which here is the `latest` channel. Promoted or trailing channels get shape-only checks.
 - 2026-10-14T20:17:56Z — trigger: deviation-gt-0 — question: accept pass-2 deviations (tag-only gate without archive, renamed test + plane detail, runbook notes) and how to treat the exact first-cut component-set test that goes red at the AC3 operator step? — ruling: accept-deviation score 1 — do: accept a–c, keep deviation_score as is; replace the exact-set assertion at test_release_roster.py:105-107 with {plugin,uv,bun} ⊆ components ⊆ six known names, add a Verification line printing both rosters' component sets as first-cut evidence; record in the Spec Change Log; change nothing else — rule candidate: When an AC says "at the first cut X holds" and a later AC or operator step is allowed to change X, the test asserts only what stays true (subset, guard-clean) and X is shown as Verification evidence. Never pin an exact snapshot.
+- 2026-10-14T20:27:41Z — trigger: deviation-gt-0 — question: accept the pass-3 deviations (roster read moved before the tag lookup for P2b; `_read_json` at the plugin motion's released-roster read; P1 refusing on dry run; runbook clause) and at what score? — ruling: accept-deviation score 1 — do: accept (a) and (b) at score 1, (c) and (d) at score 0, leave frontmatter `deviation_score` at 2; record all four as `may affect: none` and log the ruling; change nothing else — rule candidate: When a review patch says both "do X at site S" and "before any `gh` call", and S comes after a `gh` call, move X earlier, keep the dry-run digest unchanged, and score it 1 with no consult. Applying the same fix to another site with the same defect, inside the plan's Files, is also scored 1 with no consult.
 
 ## Auto Run Result
 
 Status: done
 
-**Summary:** Committed one installer roster per channel (`tools/installer/rosters/{stable,latest}.json`). Each carries `schema: 1`, `channel`, `requires.claude-code >=2.1.224`, and the first-cut components: `plugin` at 0.2.16 (the digest from `released-roster.json`), `uv` 0.13.1 and `bun` 1.4.3. The uv and Bun entries hold per-target digests for Windows x64, Linux x64 and macOS arm64, read from upstream; the session re-checked them against upstream. A pure `roster_problems` guard in `drift_check.py` covers the shape, digests, placeholders, tag prefixes, release URLs, `source` for foreign repositories and gate ×4, which binds `latest.json` only. The guard runs as a third sub-check of the drift check's plugin plane: stable is checked for shape, latest for shape plus gate ×4. `tools/release_archive.py` now cuts any app (`--app/--version/--repo/--channel`) by its `<prefix>--vX.Y.Z` tag. It builds a zip, or a wheel for cli, publishes with `--latest=false` (or demotes an existing release), re-verifies the download, and atomically records `{tag, url, sha256}` (plus `source` when foreign) in the roster. The plugin cut still writes `released-roster.json` `archive`, and its zip bytes are unchanged.
+**Summary:** Follow-up review pass on 25.1 (`status: done`, `review_loop_iteration` 0), run because the previous pass recommended one. The story's implementation stands as summarised in the previous run. Committed per-channel installer rosters (`tools/installer/rosters/{stable,latest}.json`: `plugin` 0.2.16, `uv` 0.13.1 and `bun` 1.4.3 with per-target upstream digests). The pure `roster_problems` guard in `drift_check.py` runs as the plugin plane's installer-roster sub-check; gate ×4 binds `latest.json` and `stable.json` is checked for shape. `tools/release_archive.py` cuts any app by its `<prefix>--vX.Y.Z` tag with `--latest=false`, verifies the round trip, and records atomically. This pass hardened the edges both review layers found:
+- `--app plugin --channel stable` is refused.
+- A roster's `channel` must equal its file stem, in both the plane and the motion.
+- Non-UTF-8 rosters are an `error`, not a crash.
+- `schema` must be the integer 1.
+- The plane's ok-note reports accurately what gate ×4 checked.
+- The installer-roster fix text names the promotion PR for `stable.json`.
 
-**Files changed:**
-- `tools/installer/rosters/latest.json`, `tools/installer/rosters/stable.json`: new. The first-cut rosters, identical except `channel`.
-- `plugins/tk-studio/skills/tk-studio-activate/scripts/drift_check.py`: `roster_problems` guard plus the `_installer_roster_check` plugin-plane sub-check. It reads the project directory, so the plugin stays sealed.
-- `tools/release_archive.py`: an app table and the generalised motion. Adds `--latest=false` / demotion, the pre-publish guard, the wheel version check and atomic roster writes.
-- `plugins/tk-studio/lib/tests/test_release_roster.py`: gate ×4 and real-roster tests, one guard test per matrix row, plane tests, and fake-`gh` motion tests (plugin, foreign supervisor, cli wheel, mismatch, missing tag/subtree, rejected roster, existing release).
-- `kb/offline-install-runbook.md`: the `--app plugin` invocation and the "Release motion for every app" section. That section holds the AC3 operator commands and the uv/Bun digest source URLs.
+**Files changed (this pass):**
+- `tools/release_archive.py`: refuses plugin + stable; reads and checks the channel roster, including channel = stem, before the tag lookup; `_read_json` catches `UnicodeDecodeError` and is used for the plugin's `released-roster.json` read; `--channel` help text.
+- `plugins/tk-studio/skills/tk-studio-activate/scripts/drift_check.py`: integer-only `schema`; plane stem check (`stem_problems`); `UnicodeDecodeError` handling; accurate ok-note; `FIX_INSTALLER_ROSTER` names the promotion PR.
+- `plugins/tk-studio/lib/tests/test_release_roster.py`: 8 new tests, all red against the pre-fix sources and green now.
+- `kb/offline-install-runbook.md`: one clause saying plugin + `--channel stable` is refused.
 
-**Review:** Both layers ran (band L). 4 patches applied (high 1, medium 3), 0 deferred, 0 rejected, 0 bad_spec, 0 intent_gap. There were 3 consults, logged under `## Consult Log` and as observation events. Follow-up review recommended: **true**, because a high-severity finding was patched (patched counts: high 1, medium 3, low 0; score 3×3+0 = 9).
+**Review:** Both layers ran (band L). 6 patches applied (high 0, medium 3, low 3), 0 deferred, 4 rejected (reasons in the Review Triage Log), 0 bad_spec, 0 intent_gap. There was 1 consult (`deviation-gt-0`, accepted at score 1), logged under `## Consult Log` and as an observation event. Follow-up review recommended: **true**. Patched counts: high 0, medium 3, low 3, so the score is 3×3 + 1×3 = 12, which is at least 5. Every patch is an edge hardening around an already-green core, with no criterion-level defect found.
 
 **Verification:**
-- `uv run python -m unittest tests.test_release_roster tests.test_drift_check`: OK.
-- `uv run python -m unittest discover tests`: 833 tests OK.
-- Conformance `runner.py run`: `ok: true`.
-- `release_archive.py run --app plugin --dry-run`: sha256 `2abc4e4754862be6d56250ab582af1234acf8f7fd9937f8840dd41b7cd8b207a`, unchanged.
-- `drift_check.py --directory .`: `result: clean`. The plugin plane detail names the installer roster sub-check, gate ×4 and both channels.
-- First-cut evidence: both rosters' components are `["bun","plugin","uv"]`, and the rosters do not differ apart from `channel`.
-- Matrix audit: every row is covered by a named test in `test_release_roster.py`, and all of them ran in the green suite. The real-roster equality is shown by the Verification command, per the consult.
+- `uv run python -m unittest tests.test_release_roster tests.test_drift_check`: 86 tests OK (implementer).
+- `uv run python -m unittest discover tests`: 841 tests OK (re-run by this session).
+- Conformance `runner.py run`: `"ok": true` (re-run by this session).
+- `release_archive.py run --app plugin --dry-run`: sha256 `2abc4e4754862be6d56250ab582af1234acf8f7fd9937f8840dd41b7cd8b207a`, unchanged; `written: []`.
+- `drift_check.py --directory .`: `result: clean`. The plugin plane detail is unchanged ("installer roster stable.json in shape, latest.json in shape, plugin entry at the gate (gate x4) (components stable: bun, plugin, uv; latest: bun, plugin, uv)").
+- First-cut evidence: both rosters' components are `["bun","plugin","uv"]`, and `jq 'del(.channel)'` shows no difference between them.
 
 **Unverifiable here (operator):**
-- AC3, the supervisor's first release. In a `thkennedy/tk-studio-supervisor` checkout on an up-to-date `main`, run `git tag supervisor--v0.1.0 && git push origin supervisor--v0.1.0`. Then, from this repository, run `uv run tools/release_archive.py run --app supervisor --version 0.1.0 --repo <path-to-supervisor-checkout> --channel latest`, and promote the entry to `stable.json` by PR. The engine cut and pushed no tag.
+- AC3, the supervisor's first release. In a `thkennedy/tk-studio-supervisor` checkout on an up-to-date `main`, run `git tag supervisor--v0.1.0 && git push origin supervisor--v0.1.0`. Then, from this repository, run `uv run tools/release_archive.py run --app supervisor --version 0.1.0 --repo <path-to-supervisor-checkout> --channel latest`, and copy the written `supervisor` entry into `stable.json` by PR. The engine cut and pushed no tag.
 
 **Residual risks:**
 - The `cli` wheel build ran only against a fake `uv build`, because `tools/installer/cli` arrives in 25.4.
 - `studio-web`'s subtree (`apps/studio-web/dist`) is build output and may not be committed at a tag. That is for a later epic.
-- 25.3 inherits the stricter guard seam and the new plane detail wording.
+- Releases published before this story, such as `tk-studio--v0.2.16`, keep whatever GitHub "latest" flag they have. The motion demotes a release only when it re-cuts that tag.
+- 25.3 inherits the guard seam (score 2, see pass 1) and the plane's ok-note wording, which now has three forms.
 
 Studio: activated as developer; working set bmm, tea, bmb, bmad-loop, gds; drift clean; routing implementer=claude-opus-5-5 reviewers=claude-opus-5-5 consult=claude-opus-5-5; knowledge spine absent
 Baseline: dd0e6778c495d88770f58e82e6bcca7c82e7a697 (branch loop/epic-25)
@@ -216,3 +251,5 @@ DRIFT: gate test renamed to four-way and equality test split out — name accura
 DRIFT: missing archive record skips only the url/sha256 half of gate ×4 — the tag half stays checkable from plugin.json — affects: none
 DRIFT: guard test renamed and plane ok-detail names both rosters with per-channel components — the old wording described the removed stable==latest invariant — affects: 25-3
 DRIFT: runbook gained notes on release demotion and the cli wheel version refusal — keep the runbook in step with the script — affects: none
+DRIFT: the motion reads and checks the channel roster before the tag lookup (skipped on dry run) — the stem refusal must precede any `gh` call — affects: none
+DRIFT: the plugin motion's `released-roster.json` read now goes through `_read_json` — the same non-UTF-8 crash as P3 — affects: none
