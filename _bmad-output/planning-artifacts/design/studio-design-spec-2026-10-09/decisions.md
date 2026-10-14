@@ -1,114 +1,89 @@
-# Appendix C. Decisions that need Tim
+# Appendix C. Decisions: rulings recorded 2026-10-14
 
-Part of the [studio design spec](README.md). Each decision has the options, the benefits and drawbacks of each, a recommendation, and the evidence to deep-dive. Nothing here is in force until Tim rules. Settled items are listed first so they are not reopened.
+Part of the [studio design spec](README.md). Tim ruled D1 to D8 in [decisions-answers.md](decisions-answers.md) on 2026-10-14; the ruling is recorded at the top of each section and the options kept below it as the record. D9 and D10 are calls made while folding his feedback and are open to his objection.
 
 ## Settled (do not reopen)
 
 | Ruling | Date | Where recorded |
 |---|---|---|
 | Engines run only in Docker Sandboxes; never bypass on the host; the Max login pays; the supervisor is the independent durable driver | 2026-09-26 | [planning pass §1](../../briefs/planning-pass-agent-pc-and-supervisor-2026-09-26.md) |
-| Hermes never runs `claude -p` for pipeline work | 2026-09-26 | same, Phase 2 hard rule |
 | TUA is the game reference and stays its own repository | standing | handoffs |
-| The gamified office is the surface Tim will use most; no third repository; one installer, setup and updater as a hard gate; Next.js first; the contract-studio engagement vision | 2026-10-09 | [10-09 handoff](../../../implementation-artifacts/handoff-phase1-loop-2026-10-09.md) |
-| **O5: keep the plugin form, drop the marketplace; the installer writes a skills-dir plugin** | **2026-10-09, Tim: "I'm fine with O5"** | [ADR §2 O5](../../briefs/adr-repository-structure-2026-10-09.md#o5-keep-the-plugin-form-drop-the-marketplace-an-installer-written-skills-dir-plugin-recommended-as-the-distribution-overlay-on-o2); recorded in the ADR header by this PR |
+| The gamified office is the surface Tim will use most; no third repository; one installer, setup and updater as a hard gate; the contract-studio engagement vision | 2026-10-09 | [10-09 handoff](../../../implementation-artifacts/handoff-phase1-loop-2026-10-09.md) |
+| **O5: keep the plugin form, drop the marketplace; the installer writes a skills-dir plugin** | 2026-10-09 | [ADR §2 O5](../../briefs/adr-repository-structure-2026-10-09.md#o5-keep-the-plugin-form-drop-the-marketplace-an-installer-written-skills-dir-plugin-recommended-as-the-distribution-overlay-on-o2) |
+| **D1 to D8 below** | **2026-10-14** | [decisions-answers.md](decisions-answers.md); the ADR header; AD-21 and AD-22 in the spine |
 
 ## D1. Repository
 
-**One repository or two?** ADR §8.1, with §8.2 to §8.7 hanging off it.
+**Ruled: O2, one repository with per-app releases.** Recorded as AD-21. The ADR's §8.2 to §8.7 follow its recommendations (admins stay exempt; the front end gets its own `studio-web--v` tag; `apps/supervisor` stays a nested studio project, proven in rehearsal; the old repository is archived; the meta-CLI ships as a wheel on its own `cli--v` tag). The order is D3's: the restructure is EP-31, after the engagement loop.
 
-**Options.** O2 one repository with per-app releases (ADR recommendation, scored 3.95, the only option passing every gate without the installer papering over gate 1); O1 keep the supervisor separate with the front end beside it (3.70); O3 hybrid (3.85).
+<details><summary>Options as put (record)</summary>
 
-**What changed since the ADR.** O5 is settled, and O5 removes the strongest cost the red team found in O2 (the marketplace clones the whole repository). It also makes gate 1 moot for users: the installer never clones anything, so a newcomer clones zero repositories under any option. The repository question is now a **developer and maintainer** question: one PR flow, one `main`, the assistant seeing the whole graph, one place for the roster and release script, versus nothing moving and two loops that never share a checkout.
+O2 one repository (ADR recommendation, 3.95); O1 stay split (3.70); O3 hybrid (3.85). O5 made gate 1 moot for users (the installer never clones), so this became a developer and maintainer question: one PR flow and one `main` against nothing moving. Evidence: [ADR §3](../../briefs/adr-repository-structure-2026-10-09.md#3-scoring-against-the-frame), [run 1 §2 A1](../../research/studio-front-end-and-repo-structure-2026-10-09/research.md#2-a1-how-comparable-projects-structure-plugin-service-and-ui), [run 1 §11](../../research/studio-front-end-and-repo-structure-2026-10-09/research.md#11-contrary-evidence).
 
-| | O2 one repository | O1 stay split |
-|---|---|---|
-| Benefits | one convention set; cross-cutting changes (contract bump plus supervisor consumer plus web) are one PR; the roster, installer and release script live beside the apps they ship; Claude sees every call site | nothing moves, no history rewrite, no rehearsal; the two loops keep separate checkouts and sandboxes today; the plugin repository stays small |
-| Drawbacks | the rehearsal (ADR §5) is real work: filter-repo, nested project root, one sandbox for two loops, worktrees (hole 16) **before** any front-end story; shared `main` widens blast radius until CI exists | ordered PRs across repositories for every contract change; two places to keep the roster's tags; the supervisor's planning artifacts stay transcribed copies (hole 18 persists) |
-| Cost to Tim | one rehearsal day plus the cut-over; the Startup shortcut edit | none now; a slow tax forever |
-
-**Recommendation.** Sign O2, but **sequence it after the engagement loop's first slice, not before** (see [D3](#d3-order-of-work)). The reason: the move's main prize is developer ergonomics, and the hole-16 worktree work it needs is the same work EP-26 does anyway. Doing the migration first delays the surface Tim will use most by the rehearsal's duration. Rulings §8.2 to §8.7 of the ADR (admin exemption, front-end release tag, nested project, archive, meta-CLI wheel) follow the ADR's recommendations; none changes this design.
-
-**Evidence.** [ADR §3 scoring](../../briefs/adr-repository-structure-2026-10-09.md#3-scoring-against-the-frame), [run 1 §2 A1](../../research/studio-front-end-and-repo-structure-2026-10-09/research.md#2-a1-how-comparable-projects-structure-plugin-service-and-ui), [run 1 §11 red team](../../research/studio-front-end-and-repo-structure-2026-10-09/research.md#11-contrary-evidence).
+</details>
 
 ## D2. Hermes
 
-**The question.** Hermes was planned as the conversational front door and dispatcher (2026-09-26) and then as "the agent the front end wraps" (2026-10-09, with the 2026-09-01 note that Hermes profiles own live agent state). Phase 2 is about one third built (Appendix A.5). Tim asks whether it still adds benefits now that the design has its own chat surface, its own engagement state machine and its own event stream.
+**Ruled: B, drop Hermes; the studio owns its chat over Claude Code.** Tim's reasoning, in substance: Hermes is adjacent, not core; its draw was the agent registry and self-evolution, but a dependency on it blocks users who do not run Hermes, and an adapter would be two parallel systems more likely to conflict than cooperate; the studio builds its own bot, cron and memory as they become necessary; losing Telegram for now is acceptable.
 
-**Options.** Full evidence and scoring in [Appendix B](hermes-fit.md).
+Consequences folded in: the chat route is the supervisor's, answered by the studio's planner leg; the outbound notifier stays (it uses the Telegram Bot API directly and never needed Hermes); Telegram inbound is dropped until a tk-studio-native bot is wanted; [Appendix B](hermes-fit.md) stays as the record; the `adopt_external_logins` hazard stands while the Hermes gateway runs on the box.
 
-| | A. Hermes is the chat brain, wrapped by the office | B. Drop Hermes; the studio owns its chat over Claude Code | C. Hermes as an optional adapter behind a chat the supervisor owns |
-|---|---|---|---|
-| What it gives | 25 messaging platforms with pairing auth; cron with delivery to a channel; a memory notepad and session search; skills Tim can author; a dashboard; an OpenAI-compatible API with run events over SSE; profiles for per-project isolation; Bot Mode | one vendor, one login, one permission model; the chat is a `claude -p` session with the studio plugin, so the planner leg and the chat are the same brain; Remote Control and channels cover phone steering on the subscription | the supervisor owns the engagement state machine and a `/chat` route; Telegram and other channels arrive through whichever adapter is configured (Hermes today, Claude Code channels later); Hermes is replaceable without touching the loop |
-| What it costs | a second agent runtime with its own model bill (Nous Portal), its own learning loop that must stay gated, weekly 460 to 1,800-PR releases, a 700k-line service between the phone and the box; native Windows loses the dashboard chat PTY; agents must be registered as Hermes profiles for Hermes to see them, which duplicates the studio's registry | Telegram inbound needs Claude Code channels (research preview, needs a live session and Bun) or our own bot; no cron or memory beyond what the studio already has (jobs, kb, ledger); Hermes-only niceties (voice, Spotify, 25 platforms) are gone | the adapter boundary is design work; two chat brains are possible if the adapter also answers (the rule: the adapter relays, the supervisor decides) |
-| Fits the rulings | yes, if Hermes never executes (standing rule) and the office wraps it (10-09 ruling, literal reading) | changes the 10-09 wording "wraps the Hermes agent" to "wraps the studio chat"; keeps the intent (one conversation from the phone and the office) | yes; it is the seam the 09-26 plan already named ("the supervisor API is the seam; Hermes is replaceable") |
+<details><summary>Options as put (record)</summary>
 
-**Recommendation.** **C**, with Hermes kept as the first adapter because it is installed and the bot is already the notifier. The engagement state machine, the agent registry and the semantic event stream belong to the supervisor under every option; only the inbound channel and the "assistant voice" differ. Build the chat route on the supervisor, back it with a `claude -p` planner session (the brain the loop already uses), and give Hermes one skill, `tk-relay`, that forwards a Telegram message to `POST /engagements/{id}/input` and returns the reply, instead of the planned `tk-submit` that would have Hermes shape the job itself. Hermes profiles are then an optional mirror of the registry (one profile per project if Tim wants Hermes memory per project), not its source of truth. If the Hermes digest shows a capability the studio would otherwise have to build (see Appendix B's "would otherwise be built" list), A gains; if Claude Code channels leave research preview on Windows, B gains.
+A Hermes as the chat brain wrapped by the office; B drop; C Hermes as the first inbound adapter behind a supervisor-owned chat. The recommendation was C; the digest's facts (agents are profiles that cannot point at the supervisor; every dispatch surface runs a Hermes turn; the live credential hazard) are in [Appendix B](hermes-fit.md).
 
-**Two facts from the digest that shape C.** An inbound Telegram message is always a Hermes agent turn (there is no "forward raw message to a URL" mode short of a platform plugin), so the relay is a Hermes skill that calls the supervisor, with the Telegram toolset stripped of `terminal` and `execute_code`. And Hermes's "agents" are profiles that cannot point at the supervisor or a `claude -p` worker; registering the studio's agents means creating mirror profiles. Guardrails C requires on the box: `auth.adopt_external_logins: false` (today `true`, a live hazard to the Claude login), the bundled `claude-code` skill disabled, API server and dashboard loopback-only, `approvals.mode: manual` for messaging. Full evidence: [Appendix B](hermes-fit.md).
-
-**What "agents registered so Hermes can see them" means under C.** The registry ([README §7.2](README.md#72-the-agent-registry)) is the supervisor's; an exporter writes Hermes profiles or Bot Mode entries from it when Hermes is the adapter, so Hermes sees the same agents the office draws, and nothing is registered twice by hand.
-
-**Evidence.** [Appendix B](hermes-fit.md); [digest 08 (Hermes as hub, 2026-09-26)](../../research/agent-studio-next-level-2026-09-26/digests/08-hermes-agent-hub-research.md); [run 1 §7 B3 Hermes surfaces](../../research/studio-front-end-and-repo-structure-2026-10-09/research.md#7-b3-events-sse-projection-hermes-chat-hosting); [office digest §4](../../research/studio-office-ui-2026-09-01/digest-studio-office-ui.md).
+</details>
 
 ## D3. Order of work
 
-**Options.** (i) Restructure first (ADR §8.6 recommendation), then the front end. (ii) Engagement loop and office first, in the supervisor repository as it stands, restructure after. (iii) Packaging first (installer plus skills-dir plugin, O5), then the front end, restructure last.
-
-| | (i) restructure first | (ii) front end first | (iii) packaging first |
-|---|---|---|---|
-| Benefits | the front end lands once in its final home; one sandbox for two loops from day one | Tim gets the surface he will use most soonest; hole 16 is done as part of the front end's service work, which the restructure needs anyway | removes the marketplace clone and the plugin release plane now; the sandboxes switch to the read-only skills mount; cheap and self-contained |
-| Drawbacks | delays the office by the rehearsal and cut-over; the rehearsal exercises hole 16 before the service work that fixes it | the web app is born in the supervisor repository and moves later (a folder move, no history concern) | the installer's supervisor and web legs ship against today's two repositories and are re-pointed after the move |
-| Risk | a stalled rehearsal blocks everything | a second move later | low |
-
-**Recommendation.** **(iii) then (ii) then (i)**: packaging (EP-25) is small and settled by O5; the service work and the event projection (EP-26, EP-27) are needed by both the office and the restructure; the office v0 and the engagement loop (EP-28, EP-29) follow; the restructure (EP-30) comes when the rehearsal's hole-16 prerequisite is already built. Epic 23's acceptance and Epic 24.3/24.4 run alongside, since they need only the supervisor as it is.
+**Ruled: packaging, then the front end, then the restructure.** EP-25 first; EP-26 to EP-30 are the front end's service and surface work; EP-31 is the restructure. Epic 23.3 and 24.3/24.4 run alongside.
 
 ## D4. Quote basis
 
-**What is a quote denominated in?**
-
-**Options.** Dollars at list price (what the meter reports today; notional on Max); plan-window share (percent of the 5-hour and weekly windows); both, with dollars as the shadow figure.
-
-**Recommendation.** Both: the band is computed on the meter's per-story history in tokens, shown as window share (the thing that actually runs out on Max) with a list-price dollar shadow (the thing that makes stories comparable and would be real under an API-key fallback). Evidence: [run 2 §4 C3 meter row](../../research/studio-native-overlap-and-greenfield-2026-10-09/research.md#4-c3-the-official-overlap-map), [run 1 §9 B5 ProKanban band](../../research/studio-front-end-and-repo-structure-2026-10-09/research.md#9-b5-the-contract-studio-engagement-loop).
+**Ruled: both, dollars as the shadow figure.** The band is computed on the meter's per-story history in tokens, shown as plan-window share with a list-price dollar shadow.
 
 ## D5. Renderer
 
-**Confirm the hybrid with a phone spike before the first office story.**
+**Ruled, with a change of spec: no Next.js; PixiJS; a single web UI for desktop and iPad first; a separate phone UI later.** Tim's reasoning: the studio runs on a dedicated machine and talks directly to the services on it, so a Next.js layer is extra infrastructure; public access, if wanted, is the owner's firewall, DNS and login; a full UI comfortable on a phone is a hard target, so nail functionality on big screens first; PixiJS is a framework without hand-rolling and without exporting a game engine to the web.
 
-**Options.** CSS steps()/DOM only (4.60 in the matrix; zero bytes); hybrid DOM plus one plain PixiJS v8 canvas (recommended by run 1); Phaser; Godot web; Rive.
+Feedback given with the ruling (in the reply and here): agreed on every point. The research had already reduced Next.js to a static-export build tool served by the Bun service, so Vite is the simpler builder with nothing lost; the hybrid stays (PixiJS for the floor, React DOM for the text-heavy panels, since Pixi for text UI would be hand-rolling of another kind); iPad Safari backgrounds event streams the way iOS does, so the watchdog stays; the phone UI, when it comes, is small (inbox, approve, status). One caution became [D10](#d10-public-exposure).
 
-**Recommendation.** Hybrid, confirmed by a one-day spike on a real phone that settles the integer-zoom recipe (`resolution`, `autoDensity`, `roundPixels`) and the LimeZu frame coverage. If the spike fails on the phone, fall back to DOM for v0 (a legitimate one-day v0 per the 09-01 note) and revisit. Evidence: [run 1 §6 B2 matrix](../../research/studio-front-end-and-repo-structure-2026-10-09/research.md#6-b2-the-renderer-inside-a-nextjs-front-end).
+<details><summary>Options as put (record)</summary>
+
+CSS steps()/DOM only (4.60); hybrid DOM plus PixiJS (recommended); Phaser; Godot web; Rive. Evidence: [run 1 §6 B2](../../research/studio-front-end-and-repo-structure-2026-10-09/research.md#6-b2-the-renderer-inside-a-nextjs-front-end).
+
+</details>
 
 ## D6. Assets
 
-**Assets and licences for a repository that may go public.**
-
-**Options.** LimeZu Modern Office plus Modern Interiors (paid, cannot be in a public repository, must be fetched privately by the installer); LPC generator (free, share-alike, credits shipped in-app); PixelLab generation (owned output, subscription); a mix.
-
-**Recommendation.** LimeZu for the floor and furniture, fetched by the meta-CLI from a private location after a purchase check and kept out of git; LPC or PixelLab for anything committed, with CREDITS shipped; verify sit and typing frames before committing to the look. Evidence: [run 1 §8 B4](../../research/studio-front-end-and-repo-structure-2026-10-09/research.md#8-b4-pixel-art-assets-and-licences).
+**Ruled: look at existing packs for reference, then create our own 2D assets with the art tools on the PC (Adobe Creative Cloud or tools with agentic or MCP support), and commit them to the repository.** Consequence: no LimeZu, no private asset fetch in the installer, no share-alike credits; the renderer spike draws its first sprites from our own sheet; an asset-authoring story (tool, pipeline, sprite-sheet format) joins EP-28.
 
 ## D7. Sign-in
 
-**Keep the OAuth walk-through or drop it?**
+**Ruled: drop the external providers; one account per studio, username and password set on first visit, kept in the token cookie session, so password managers work.** Tim's reasoning: usage is restricted to the person who set the studio up and whose Claude Code is signed in; this is the ethically safe reading of the subscription terms; sharing the login is outside the studio's control; multi-user later.
 
-**Options.** Keep the built Google and GitHub sign-in and do the two OAuth registrations; drop them and rely on the token cookie plus Remote Control for phone steering.
-
-**Recommendation.** Drop the walk-through for now (run 2 R3: Remote Control covers phone steering on Max; the token cookie already works from the phone). The code stays; nothing is deleted. Evidence: [run 2 §9 R3](../../research/studio-native-overlap-and-greenfield-2026-10-09/research.md#9-recommendations).
+Folded in: the owner's account is created on the first visit (hashed with Bun's built-in password hashing, rate limit and lockout); the API bearer stays for automation; the Google and GitHub code is removed when the account lands; the intended-usage statement in [README §8](README.md#8-security-intended-usage-and-invariants).
 
 ## D8. API-key fallback
 
-**The API-key fallback leg: design now, build only if the clause moves.**
+**Ruled: none.** D7's single-owner rule is the answer: the studio is the subscription holder's own seat, stated plainly. The terms clause stays on the staleness watch; no fallback leg is designed.
 
-**Options.** Ignore the subscription-terms risk; design the fallback (a worker tier that authenticates with an API key from the per-user store, priced for real) and build only on a trigger; build it now.
+## D9. What the backend owns
 
-**Recommendation.** Design now, build on trigger. Record the current reading of the legal page in the ADR header at signature, and add `--bare` becoming the `-p` default and the Agent SDK credits programme to the staleness work order. Evidence: [run 2 §10 greenfield red team](../../research/studio-native-overlap-and-greenfield-2026-10-09/research.md#10-contrary-evidence).
+**My call while folding feedback 1, open to objection.** AD-5 says every backend is a projection and canonical files win. Tim's model has the owner writing comments, uploading attachments and authoring Confluence pages, which the canonical files never had. Rule adopted: entity fields stay canonical-authoritative (unchanged); **comments, attachments (as links) and owner-authored Confluence pages are a second class, backend-authoritative and append-only**, pulled back verbatim on the timer and never promoted from local. Written into AD-22. Alternative, if objected to: mirror comments into the canonical story files and promote them too, which creates the two-owner conflicts AD-5 was written to prevent.
 
-## Open questions this spec does not decide (for the stories to settle)
+## D10. Public exposure
+
+**My call while folding D5, open to objection.** The supervisor keeps its tailnet-only bind as the default. A "public" mode (the owner opens a port, sets DNS, terminates TLS, signs in with the one account) is documented as a later option with rate limiting and lockout required, not built now. Reason: the box holds the repositories and a signed-in Claude; the research found no benefit that needs it today. Tim's wording ("if people need to access the studio from public https, I'd rather require the user to open up a port…") reads as permitting this, not requiring it now.
+
+## Open questions for the stories to settle
 
 | Question | Settled by |
 |---|---|
-| Does a hosted `url` marketplace with an `archive` source still matter once O5 is in force? | No for users; keep the in-repo catalog for developers who clone, pinned to a tag |
-| Does `claude plugin eval` run against a skills-dir plugin path? | Try it on the box in EP-25 |
-| Is OTel `cost_usd` populated for Max sessions? | One instrumented story run (EP-26 or later) |
-| Does the PixiJS integer-zoom recipe hold on a phone? | The D5 spike |
-| How large is the clone after the supervisor and a Next app land, against the 120 s marketplace budget? | Moot for users under O5; measure in the EP-30 rehearsal for developers |
-| Does `hermes dashboard` spawn the chat PTY on native Windows at the pinned version? | Run it on the box, only if D2 keeps the dashboard in scope |
+| What do the Atlassian free plans allow: custom workflow statuses, project permissions, storage, API rate, Rovo MCP availability? | EP-29 story 1 verifies on a live free site before anything is built |
+| Is the Rovo MCP server needed, or does the REST API with an API token (what the adapter uses today) cover everything? | the same story |
+| Does `claude plugin eval` run against a skills-dir plugin path? | EP-25 |
+| Is OTel `cost_usd` populated for Max sessions? | one instrumented story run, EP-26 or later |
+| Does the PixiJS pixel-scaling recipe hold at desktop and iPad pixel ratios? | the EP-28 spike |
+| What sprite-sheet format and authoring tool for our own assets? | the EP-28 asset-authoring story |
+| How large is the clone after the supervisor and the web land? | the EP-31 rehearsal (developers only; users never clone) |

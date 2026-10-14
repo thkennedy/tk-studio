@@ -1857,3 +1857,155 @@ So that the shipped defaults reflect what was measured, and nothing changes sile
 **Given** budget left after the paired runs
 **When** the verdict keeps Opus 5.5 on the session leg
 **Then** one effort probe (session at `low` against `medium`, on one story) is run and recorded before the effort default is set
+
+## Epic 25: One Installer Writes the Studio
+
+The first epic of the design spec's build order (`_bmad-output/planning-artifacts/design/studio-design-spec-2026-10-09/README.md` §10; order ruled 2026-10-14, D3). It lands what O5 (ruled 2026-10-09) and AD-21 (signed 2026-10-14) decided about distribution: a bootstrap script installs a small self-updating meta-CLI; the meta-CLI reads a committed roster of compatible versions and installs or updates the three apps; the plugin reaches every machine as an installer-written skills-dir plugin at `~/.claude/skills/tk-studio/`, which Claude Code loads in place as `tk-studio@skills-dir` with `${CLAUDE_PLUGIN_ROOT}` substituting (Tim's probe, 2026-10-09); the marketplace is no longer the user delivery path. The three rules the red team added stand: the installer uninstalls every marketplace copy of `tk-studio` (a same-named marketplace install silently shadows the folder); sandboxes read the host skills folder through Docker's read-only skills mount instead of a per-sandbox install; the skills-dir form is documented as the no-marketplace path and carries a deprecation watch. Until EP-31 moves the supervisor into this repository, the roster points at two repositories' releases; nothing in this epic depends on the move. The installer design is ADR §7 with the plugin leg replaced by the skills-dir write; `doctor` absorbs the runbook's smoke table and the two trust holes (14, 15). Requirements trace: ADR §7, §6 and §8.7; spec §4, §6.5, F1 and F7; holes 14 and 15. Repos: tk-studio (every story); the supervisor repo for its first tagged release in Story 25.1 (an operator step until EP-31).
+
+### Story 25.1: The Roster and the Release Motion for Every App
+
+As the maintainer,
+I want one committed roster per channel naming the compatible set of app releases with checksums, and one release script that cuts any app by its prefix,
+So that the installer has a single source of truth and no app ever owns the repository's "latest".
+
+**Acceptance Criteria:**
+
+**Given** `tools/installer/rosters/stable.json` and `latest.json`
+**When** they are read
+**Then** each carries `schema`, `channel`, `requires` (at least `claude-code` as a version floor), and `components` with `plugin`, `supervisor`, `studio-web` and `cli` as `{tag, url, sha256}` and `uv` and `bun` as `{version, sha256}`; a lib guard pins the shape, refuses a missing or malformed digest by name, and asserts the plugin entry agrees with `released-roster.json` and the plugin's `plugin.json` version (the existing gate ×3 becomes gate ×4)
+
+**Given** `tools/release_archive.py`
+**When** it is run with `--app <plugin|supervisor|studio-web|cli>`
+**Then** it builds the deterministic zip (or wheel, for `cli`) from that app's subtree at the `<prefix>--vX.Y.Z` tag, publishes it with `gh release create --latest=false`, re-downloads and verifies the digest, and records `{tag, url, sha256}` under the right roster component; the plugin's motion is unchanged in effect; `make_latest: false` is asserted by the lib suite against a fake `gh`
+
+**Given** the supervisor repository, which has no tags today
+**When** the story closes
+**Then** `supervisor--v0.1.0` is cut from its `main` by the operator with the exact commands the story provides (the script runs against that checkout until EP-31), and the roster's `supervisor` entry points at that asset; an entry whose URL is on another repository is allowed by the schema and named in the roster's `source` field
+
+**Given** the lib suite and conformance
+**When** the story closes
+**Then** both are green, and the roster guard runs in the drift check's plugin plane (Story 25.3 wires the rest)
+
+### Story 25.2: The Installer Writes the Skills-Dir Plugin
+
+As a user of any machine with Claude Code signed in,
+I want the plugin written to `~/.claude/skills/tk-studio/` from the verified release zip, with every marketplace copy removed,
+So that Claude Code loads the studio in place with no clone, no cache copy and nothing shadowing it.
+
+**Acceptance Criteria:**
+
+**Given** `tk-studio install` or `update` and a roster
+**When** the plugin leg runs
+**Then** it downloads the plugin zip by the roster's tag, verifies the SHA-256 before extracting, writes the folder atomically (new folder beside, rename over; the previous folder kept until the next successful start), and the result names the version written; a digest mismatch refuses by name and leaves the existing folder untouched
+
+**Given** the developer's own checkout
+**When** `tk-studio install --link <checkout>` runs
+**Then** the folder is a junction (Windows) or symlink to `<checkout>/plugins/tk-studio`, so edits are live, and `doctor` reports "link mode" with the target
+
+**Given** a marketplace copy of `tk-studio` at user or project scope
+**When** the plugin leg runs
+**Then** it uninstalls the user-scope copy (`claude plugin uninstall`) and removes the `tk-studio` marketplace from the user's known marketplaces, reports every project-scope `enabledPlugins` or `extraKnownMarketplaces` entry it finds without editing another project's tracked files, and this repository drops its own committed `extraKnownMarketplaces` and `enabledPlugins` entries in the same story
+
+**Given** the written folder
+**When** `claude plugin list` and `claude plugin validate` run and a probe skill is invoked headless
+**Then** the plugin loads as `tk-studio@skills-dir`, validation passes, and `${CLAUDE_PLUGIN_ROOT}` and `${CLAUDE_SKILL_DIR}` substitute as forward-slash paths (the 2026-10-09 probe, now a test the story runs on the box); `claude plugin eval` is tried against the folder and the outcome recorded in the kb (the open question closes either way)
+
+### Story 25.3: The Drift Check and Conformance Read the Folder and the Roster
+
+As the operator,
+I want `tk activate`'s plugin plane and the conformance suite's harness-loadable assertion to judge the skills-dir folder against the roster,
+So that the drift check keeps telling the truth after the marketplace is gone (AD-13 as amended by AD-21).
+
+**Acceptance Criteria:**
+
+**Given** `drift_check.py`'s plugin plane
+**When** it runs on a machine with the skills-dir plugin
+**Then** it reads the folder's `plugin.json` version, compares it with the roster's `plugin` entry for the configured channel (and with the in-repo catalog only in a developer checkout), reports `ok`, `stale` (guidance: `tk-studio update`), `missing` (guidance: `tk-studio install`) or `shadowed` (a marketplace copy is installed; guidance names the uninstall), and never reads `installed_plugins.json` as the source of truth; the lib suite pins all four cases
+
+**Given** `contracts/conformance/`
+**When** the suite runs
+**Then** the harness-loadable assertion reads the skills-dir folder, and the runner can install the built zip into a clean `CLAUDE_CONFIG_DIR` skills folder before driving (`--from-archive <zip>`), so the suite cannot pass against the repository tree for the wrong reason
+
+**Given** the driver contract at 0.1.18
+**When** the story lands
+**Then** §6 (drift-check invocation) states the folder-and-roster rule, the header reads 0.1.19 with an additive changelog clause, the spine's AD-13 wording "installed plugin version vs `marketplace.json`" is amended to the folder and the roster, and conformance is ok over every surface
+
+### Story 25.4: The Bootstrap and the Meta-CLI
+
+As a newcomer,
+I want one command that installs a small self-updating CLI, and that CLI to install and update the three apps from the roster,
+So that I never clone a repository or hand-edit an environment to run the studio.
+
+**Acceptance Criteria:**
+
+**Given** `tools/installer/install.ps1` and `install.sh`
+**When** either runs
+**Then** it installs the pinned `uv` unmanaged into the studio's tools folder (version and SHA-256 embedded in the script), verifies the meta-CLI wheel's digest, runs `uv tool install` from that wheel, puts only the studio's `bin` directory on the user PATH, turns on long paths for git, never clones, and the README publishes each script's SHA-256 with a download-verify-run alternative
+
+**Given** the meta-CLI `tk-studio` (stdlib Python, shipped as a wheel on its own `cli--vX.Y.Z` tag)
+**When** `install`, `update` or `status` runs
+**Then** the supervisor leg downloads the release zip by tag, verifies it, unpacks it into `%LOCALAPPDATA%\tk-studio\supervisor\<version>\` (or the platform equivalent), runs `bun install --frozen-lockfile` with the roster's pinned Bun, writes the User environment and the Startup shortcut through the logic lifted from `tools/agent-pc/set-supervisor-env.ps1` (token and session secret generated once and kept), and points `current.json` at the slot; the studio-web leg unpacks the bundle into its own slot that the supervisor serves; `update` stops the service tab first, renames the old slot aside, verifies the new one starts, and deletes the old on the next successful start; `status` prints each component's installed and roster versions
+
+**Given** a machine where the supervisor runs from a git checkout (the dev box)
+**When** `update` or `doctor` runs
+**Then** it recognises "source checkout" mode, reports instead of replacing, and names the checkout
+
+**Given** the lib suite
+**When** it runs
+**Then** every verb is exercised against a fake roster, a fake release host and a fake `claude`, including the digest-mismatch, the stale-slot and the source-checkout cases, and no network call is made in tests
+
+### Story 25.5: Doctor Says What Is Wrong
+
+As the operator provisioning the next box,
+I want `tk-studio doctor` to run the runbook's smoke table and the trust checks and name every failure with its fix,
+So that a fresh machine reaches a working studio from facts, not from reading section 7.
+
+**Acceptance Criteria:**
+
+**Given** `tk-studio doctor`
+**When** it runs
+**Then** it checks and reports, each with pass, fail and the fix: Claude Code version against the roster floor; the skills-dir plugin against the roster (Story 25.3's cases); the per-user store; `sbx daemon status` **only** (it never runs an sbx command that would auto-start the daemon); folder trust (`hasTrustDialogAccepted`) for every root in the registry (holes 14 and 15); long paths; the PATH launcher; the Tailscale certificate age against its 90-day life; the supervisor's slot or checkout and whether `/status` answers; and, when a Hermes home exists on the box, whether `auth.adopt_external_logins` is on (a warning that names the setting and the Claude-login risk)
+
+**Given** `--json`
+**When** it runs headless
+**Then** the output is one JSON object and ends with the status block (AD-11); a conformance drive covers it
+
+**Given** runbook §7
+**When** the story lands
+**Then** its smoke table says "run `tk-studio doctor`" and keeps only the rows the CLI cannot check (RDP scope, the Startup shortcut's visible tab)
+
+### Story 25.6: Sandboxes Read the Host Skills Folder
+
+As the operator,
+I want every engine sandbox to consume the host's `~/.claude/skills` through Docker's read-only skills mount instead of installing the plugin per sandbox,
+So that one install serves the host and every microVM and the drift check covers both.
+
+**Acceptance Criteria:**
+
+**Given** `tools/sbx-engine/provision-engine.sh`
+**When** it provisions a sandbox
+**Then** it no longer installs the plugin at user scope inside the microVM; it verifies the mounted skills folder is present and read-only and that `tk-studio@skills-dir` loads inside the sandbox, and fails loudly naming the mount when it is absent
+
+**Given** runbook §3.8 and §3.5
+**When** the story lands
+**Then** `sbx create` is documented with the skills mount set read-only, the per-sandbox plugin install is removed from the provisioning list, and the "sandbox store" drift case (the mounted folder differing from the host's) is named with its fix
+
+**Given** one existing sandbox on the box
+**When** the operator recreates it with the mount (exact commands provided; from PowerShell, with the daemon running)
+**Then** `tk activate` inside it is clean on four planes, a headless drive of one skill from inside it substitutes `${CLAUDE_PLUGIN_ROOT}` to the mounted path, and the per-sandbox syscall cost of the skills folder is measured once and recorded in the kb (the red team's "prove it on the box" item)
+
+### Story 25.7: The Docs and the Release Say the Installer Is the Way In
+
+As a reader of the repository,
+I want the README, the install runbooks and the kb to describe the installer as the only install path and the marketplace as the developer catalog,
+So that nobody follows the retired path.
+
+**Acceptance Criteria:**
+
+**Given** `README.md`, `kb/offline-install-runbook.md`, `kb/agent-pc-setup-runbook.md` §3.4 and `kb/claude-plugin-archive-install-envelope.md`
+**When** the story lands
+**Then** the README's install section is the one-line bootstrap plus `tk-studio install`; the offline runbook describes the skills-dir write from a downloaded zip; §3.4 drops `claude plugin marketplace add` for users and keeps it, pinned to a tag, under a "developers who clone" note; the envelope document is marked historical with a pointer here; the kb index regenerates; the skills-dir form carries a "deprecation watch" line naming where to look
+
+**Given** the release gate
+**When** the story closes
+**Then** the plugin ships at 0.3.0 (a minor bump: the distribution changed) through the generalised motion with the roster, `released-roster.json` and `plugin.json` in lockstep (gate ×4), the lib suite and conformance are green, and `tk activate` is clean on all four planes on TIM-PC-2 with the plugin loaded from the skills-dir folder

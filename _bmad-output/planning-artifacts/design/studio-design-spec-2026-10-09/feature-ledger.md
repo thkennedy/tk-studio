@@ -1,6 +1,6 @@
 # Appendix A. Feature ledger: everything planned, what is built, what is owed, and where it lands
 
-Part of the [studio design spec](README.md). Audited 2026-10-09 against the plan files, the two deferred-work ledgers, the handoffs, the proposals ledger, the host observation ledger and the Hermes install on TIM-PC-2.
+Part of the [studio design spec](README.md). Audited 2026-10-09 against the plan files, the two deferred-work ledgers, the handoffs, the proposals ledger, the host observation ledger and the Hermes install on TIM-PC-2. **Updated 2026-10-14** for Tim's rulings: Hermes dropped (D2), Atlassian as the tracker (feedback 1), the inbox (feedback 2), one account (D7).
 
 **How to read the Status column.** `built` is proven on the box. `built, story open` means the work exists but the canonical story was never closed (the plan files still say `draft`). `open` is planned and not started. `superseded` means a later ruling replaced it. The "Lands in" column names the spec component (see [README §6](README.md#6-the-components)) or the proposed epic (see [README §10](README.md#10-build-order)) that carries it forward.
 
@@ -12,7 +12,7 @@ Source: [planning pass 2026-09-26](../../briefs/planning-pass-agent-pc-and-super
 |---|---|---|---|
 | 0. Agent PC provisioning | runbook §7 smoke green | **built** (TIM-PC-2 live since 2026-10-07; survived the 10-08 reboot) | kept; the installer's `doctor` verb takes over the smoke table |
 | 1. Supervisor extraction | queue, pacer, guards, tiers, API, status page, logon start, contract 0.1.18 | **built** (Epics 20 to 22; 599 tests) | C2 Supervisor, kept and extended |
-| 2. Hermes front door | 0.21.x install, Telegram, dashboard on the tailnet, learning gated, `tk-submit` and `tk-status` skills, one cron, `hermes mcp serve` | **about one third built**, see A.5 | C7 Front door, pending [decision D2](decisions.md#d2-hermes) |
+| 2. Hermes front door | 0.21.x install, Telegram, dashboard on the tailnet, learning gated, `tk-submit` and `tk-status` skills, one cron, `hermes mcp serve` | **superseded** (D2 ruled B, 2026-10-14): Hermes is dropped; the outbound notifier stays; see A.5 | the studio's own chat (EP-30); a native bot later if wanted |
 | 3. Vertical-slice pack | `playable-verify` leg, engine MCP wiring, asset-manifest ladder, `run-vertical-slice` job, contract bump, eval cases | **open**, nothing started | EP-31 Vertical-slice pack (game projects) |
 | 4. ClaudeOS retirement | disable the last task, push, tag, remove the worktree | one elevated-shell step left (runbook §9) | operator step; not in the design |
 
@@ -48,9 +48,9 @@ Source: [office UI digest](../../research/studio-office-ui-2026-09-01/digest-stu
 |---|---|---|
 | tk-studio owns resource selection and routing (which agents and skills form the team, model and effort per leg) | standing | C1 Plugin: `working_set.<role>`, `orchestrate.py resolve`, `[pipeline.legs]` |
 | The front end owns the presentation overlay (persona bindings keyed to tk-studio resource names; cached resolve; surface drift) | standing, not built | **C3 Studio web** and the **agent registry** in [README §7.2](README.md#72-the-agent-registry) |
-| Hermes profiles own live state (memory, sessions); policy overrides own execution config at spawn | **this is the "agents registered so Hermes can see them" requirement** | [decision D2](decisions.md#d2-hermes); the registry is designed so either Hermes profiles or the supervisor's own records can back it |
+| Hermes profiles own live state (memory, sessions); policy overrides own execution config at spawn | **superseded** (D2): the supervisor's registry owns live state | [README §7.2](README.md#72-the-agent-registry) |
 | Roadmap stage C: office view as a new route, SSE agent-state stream, GDT grammar, hiring modal over personas | not built | C3 Studio web, EP-27 and EP-28 |
-| Depends on A (event source) and B (a chattable orchestrator per project) | A exists (`/events`, journals); B does not | EP-27 (A as a semantic projection); D2 decides B |
+| Depends on A (event source) and B (a chattable orchestrator per project) | A exists (`/events`, journals); B does not | EP-27 (A as a semantic projection); EP-30 (B as the supervisor's chat route) |
 
 ## A.4 Deferred work still open
 
@@ -87,16 +87,16 @@ Source: [office UI digest](../../research/studio-office-ui-2026-09-01/digest-stu
 | `hermes mcp serve` for Claude Code call-back | not configured | **not done** |
 | Bot used as the supervisor's notifier | yes (operator decision §6) | built |
 
-So Hermes today is a running Telegram gateway with its learning gated, used as a notifier channel. Nothing in it knows the studio, and one default setting puts the Claude login at risk. Whether to finish Phase 2 or replace it is [decision D2](decisions.md#d2-hermes); [Appendix B](hermes-fit.md) carries the evidence.
+So Hermes today is a running Telegram gateway with its learning gated, used as a notifier channel. Nothing in it knows the studio, and one default setting puts the Claude login at risk. **Ruled 2026-10-14 (D2): dropped.** The supervisor's Telegram notifier keeps working without Hermes (it calls the Bot API directly). The hazard row stands until Tim sets `adopt_external_logins: false` or stops the gateway. [Appendix B](hermes-fit.md) is the record.
 
 ## A.6 Proposals and fit notes not yet acted on
 
 | Item | Source | Status | Lands in |
 |---|---|---|---|
 | Advisor as a third arm in Epic 24.3 (Sonnet 5.5 main, Opus 5.5 advisor), `advisor` field on routing legs, meter prices advisor tokens | [advisor fit note](../../briefs/advisor-tool-fit-2026-10-09.md) | proposed, observation recorded | Epic 24.3 and 24.4 as planned; routing story in EP-26 |
-| Google and GitHub OAuth walk-through | 10-09 handoff "still deferred" | deferred | dropped in favour of Remote Control unless Tim wants it ([decision D7](decisions.md#d7-sign-in)) |
+| Google and GitHub OAuth walk-through | 10-09 handoff "still deferred" | **dropped** (D7, 2026-10-14): one account, username and password | EP-27 removes the provider code |
 | `tk evolve` over the loop-deficiency observations | 16 entries in the host ledger, no PROP rows since PROP-023 | **never run on the agent PC's ledger** | run once before EP-26 so the holes become proposals |
-| API-key fallback leg designed, not built | greenfield red team (standing risk) | open | [README §11](README.md#11-risks) and the ADR header |
+| API-key fallback leg designed, not built | greenfield red team (standing risk) | **closed** (D8, 2026-10-14): no fallback; the owner's own seat, stated | [README §8](README.md#8-security-intended-usage-and-invariants) and the ADR header |
 | Anthropic usage-policy reading recorded in the ADR | run 2 R8 | open | the ADR header, at signature |
 
 ## A.7 Loop holes (the dev-loop deficiency list)
@@ -133,11 +133,19 @@ From [run 1 recommendations](../../research/studio-front-end-and-repo-structure-
 | R1 one repository (run 1) | pending ruling [D1](decisions.md#d1-repository); the design works under either answer, with the cost difference stated |
 | R2 `git filter-repo` migration, R3 per-app tags, R4 fan-in gate, R6 layout | adopted as written in the ADR, conditional on D1 |
 | R5 installer, R1 skills-dir plugin (run 2) | **adopted; O5 ruled by Tim 2026-10-09** |
-| R7 Next.js static export served by Bun, hybrid DOM plus one PixiJS canvas | adopted; renderer confirmed by a phone spike ([D5](decisions.md#d5-renderer)) |
+| R7 Next.js static export served by Bun, hybrid DOM plus one PixiJS canvas | adopted in shape, **Next.js replaced by Vite** (D5): a static bundle served by Bun, hybrid DOM plus one PixiJS canvas; desktop and iPad first |
 | R8 event contract (Pixel Agents vocabulary plus story, epic, engagement), R9 SSE transport | adopted (EP-27) |
-| R10 Hermes loopback API server, key held by the supervisor, server-to-server | the shape of option A in [D2](decisions.md#d2-hermes); not yet decided |
-| R11 assets (LimeZu out of git, LPC credits shipped) | adopted ([D6](decisions.md#d6-assets)) |
+| R10 Hermes loopback API server, key held by the supervisor, server-to-server | **not adopted**: D2 dropped Hermes |
+| R11 assets (LimeZu out of git, LPC credits shipped) | **not adopted**: D6 ruled our own committed assets |
 | R12 engagement loop as a state machine with the Jules enum and a dedicated approval verb | adopted (EP-29) |
 | R2 (run 2) no Jev router | adopted |
-| R3, R4, R5 (run 2) thin the commodity layers: Remote Control for steering, OTel for the meter, `/code-review` beside the reviewers | adopted as later moves, after the engagement loop exists |
-| R8 (run 2) read the usage policy and record it | open, at ADR signature |
+| R3, R4, R5 (run 2) thin the commodity layers: Remote Control for steering, OTel for the meter, `/code-review` beside the reviewers | adopted as later moves, after the engagement loop exists; the OAuth retirement in R3 landed as D7 |
+| R8 (run 2) read the usage policy and record it | recorded in the ADR header at signature (2026-10-14) as the intended-usage statement (D8) |
+
+## A.10 Tim's 2026-10-14 feedback, where it lands
+
+| Feedback | Lands in |
+|---|---|
+| Project identity, tracking and focus on Atlassian (Jira project plus Confluence space per project, template setup, publish and sync-back on a timer, agent user with API token) | [README §6.8](README.md#68-planning-and-knowledge-now-on-atlassian-feedback-1), AD-22, EP-29; builds on the Epic 8 Jira adapter and AD-7 |
+| User feedback and communications: comments, `Blocked - Awaiting User`, @mention, inbox, Done, `Block Resolved`, agent validation | [README §6.9](README.md#69-the-inbox-and-the-human-channel-feedback-2), §7.4, [F4](user-flows.md#f4-blocked-work-reaches-the-owner-through-the-inbox-target), EP-29 |
+| 3D asset tooling list (15 repositories from an X post) | [kb note](../../../../kb/agentic-3d-asset-tooling-2026-10.md), EP-32's asset ladder and engine MCP wiring |

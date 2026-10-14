@@ -1,5 +1,7 @@
 # Appendix B. Hermes: what it was for, what it offers now, and whether it still earns its place
 
+> **Ruled 2026-10-14 (D2): B, drop Hermes.** Tim: Hermes is adjacent rather than core; an adapter would be two parallel systems more likely to conflict than cooperate; the studio builds its own bot, cron and memory as they become necessary. This appendix stays as the record of the assessment. The one live item is B.4's credential hazard, which stands while the Hermes gateway keeps running on the box.
+
 Part of the [studio design spec](README.md). Evidence: a fresh digest of the installed Hermes checkout and its own docs, written 2026-10-09 ([H1 digest](../../research/hermes-fit-2026-10-09/digests/H1-hermes-capabilities-2026-10.md), 72 sourced bullets), plus the September hub research ([digest 08](../../research/agent-studio-next-level-2026-09-26/digests/08-hermes-agent-hub-research.md)) and the October integration round ([run 1 §7 B3](../../research/studio-front-end-and-repo-structure-2026-10-09/research.md#7-b3-events-sse-projection-hermes-chat-hosting)). The ruling is [decision D2](decisions.md#d2-hermes).
 
 ## B.1 How Hermes was meant to be used, in the plan's own words
