@@ -6,6 +6,7 @@ status: 'done'
 review_loop_iteration: 0
 followup_review_recommended: false
 deviation_score: 2
+reconcile_verdict: adjust-stories
 baseline_revision: 9812fabc7b0551d4009ba7d17124ce8a7d78a38f
 context:
   - '{project-root}/_bmad-output/specs/spec-epic-25/SPEC.md'
@@ -271,3 +272,14 @@ Studio: activated as developer; working set bmm, tea, bmb, bmad-loop, gds; drift
 Baseline: 9812fabc7b0551d4009ba7d17124ce8a7d78a38f (branch loop/epic-25); reviewed HEAD 5de6832fccf29266e067261b4514596e7b408dcf
 
 DRIFT: a marketplace catalog without a `tk-studio` entry is not a developer checkout (comparison skipped with a note, never `error`); driver-contract §6 says so at 0.1.19 — a foreign marketplace blocked activation with exit 2 — affects: 25-5
+
+## Reconcile
+
+### 2026-10-14 — adjust-stories
+
+- Score: 2
+- Reasoning: The plugin plane now judges the skills-dir folder against the roster with the four cases the story asked for, and three refinements go beyond the plan's draft: an `error` folder sub-check carries no `case` (a failed read is not judged), a folder without `.claude-plugin/plugin.json` is `missing` with the fix `tk-studio install`, and a marketplace catalog with no `tk-studio` entry is not a developer checkout (the comparison is skipped with a note, never an `error`), which the driver contract now states in §6 at 0.1.19. Only Story 25.5 (doctor) consumes these cases, and its acceptance criteria already defer to "Story 25.3's cases", so its dispatch note names the three refinements and nothing in its criteria changes. Stories 25.4, 25.6 and 25.7 are untouched. No AD, contract surface, schema or ruling is contradicted: the 0.1.19 bump is additive as the story required, AD-13's amended wording (folder plus roster) is what landed, and the conformance suite still gates the surface. Recorded by the attended session; this run started before the gate session was turned on, so the headless gate takes over from the next launch.
+- Affected: 25-5-doctor-says-what-is-wrong — "the skills-dir plugin against the roster (Story 25.3's cases)": doctor reuses the plane's `ok`, `stale`, `missing`, `shadowed` and `error` results as landed; an `error` carries no case and is reported as a failed read with the path; a folder with no `.claude-plugin/plugin.json` is `missing`; a foreign marketplace catalog is skipped with a note, never a failure
+- Invariant: none
+
+Gate: Part A adjust-stories (attended session; gate session enabled for the next run); Part B not run here: the run is closed by archive and relaunch, which plans the next story.

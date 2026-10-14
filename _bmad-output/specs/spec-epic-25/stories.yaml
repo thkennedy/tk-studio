@@ -143,6 +143,11 @@
     Replan (25-2 reconcile, 2026-10-14): report a leftover .tk-studio.retired or .tk-studio.new
     and the leg's retired_left; reuse the leg's refusal names in the fixes; read (never edit)
     settings.json for marketplace entries.
+    Replan (25-3 reconcile, 2026-10-14): call the landed plugin plane and report its results as
+    they are (ok, stale with the channel named, missing including a folder with no
+    .claude-plugin/plugin.json, shadowed, error with no case); an error is a failed read with
+    its path, not a judged case; a foreign marketplace catalog is a note, never a failure;
+    driver-contract section 6 at 0.1.19 is the reference.
 
 - id: "25-6-sandboxes-read-the-host-skills-folder"
   title: "Sandboxes Read the Host Skills Folder"
