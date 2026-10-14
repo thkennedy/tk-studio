@@ -9,7 +9,8 @@ alone) the runner asserts, per the driver contract:
                           entry with no shipped skill behind it
   status-block            the SKILL.md documents its terminal status block
                           and the example validates against
-                          status-block.schema.json with the right intent
+                          status-block.schema.json (the driven plugin's
+                          own copy) with the right intent
   unrunnable-core         the SKILL.md documents the unrunnable-core
                           discipline: a core the skill cannot run (tool call
                           denied, interpreter unavailable) ends blocked with
@@ -36,9 +37,11 @@ alone) the runner asserts, per the driver contract:
                           skills folder (<tmp>/config/skills/tk-studio/) and
                           every drive runs from there, never the repository
                           tree: the folder's plugin.json must parse with name
-                          tk-studio and a version, and its skills set must
-                          equal the surfaces discovered (AD-21). Without the
-                          flag the report names the skip — never a pass.
+                          tk-studio and a version, a skills/ tree must sit at
+                          its root — judged before any surface is driven —
+                          and its skills set must equal the surfaces
+                          discovered (AD-21). Without the flag the report
+                          names the skip — never a pass.
 
 Every failed check emits a `headless-failure` measurement event naming the
 surface and assertion (taxonomy §headless-failure — this runner is that
@@ -91,6 +94,24 @@ def discover_surfaces(skills_dir: Path | None = None) -> list[str]:
                   if p.is_dir() and (p / "SKILL.md").is_file())
 
 
+def load_status_schema(schema_path: Path | None = None) -> dict:
+    """The status-block schema the examples and transcripts are judged
+    against — the driven plugin's own copy (the extracted folder's under
+    --from-archive), never a silent fallback to the repository's."""
+    path = Path(schema_path) if schema_path else STATUS_SCHEMA_PATH
+    try:
+        schema = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ConformanceError(
+            f"status-block schema unreadable at {path}: {exc}") from exc
+    if not isinstance(schema, dict) \
+            or not isinstance(schema.get("properties"), dict) \
+            or not isinstance(schema.get("required"), list):
+        raise ConformanceError(
+            f"{path} carries no 'properties' map and 'required' list")
+    return schema
+
+
 def load_manifest(manifest_path: Path | None = None) -> dict:
     path = Path(manifest_path) if manifest_path else MANIFEST_PATH
     try:
@@ -104,8 +125,10 @@ def load_manifest(manifest_path: Path | None = None) -> dict:
 
 # ------------------------------------------------------------------ checks
 
-def _check_status_block_doc(surface: str, skills_dir: Path) -> dict:
-    """SKILL.md documents the terminal status block; example validates."""
+def _check_status_block_doc(surface: str, skills_dir: Path,
+                            schema: dict | None = None) -> dict:
+    """SKILL.md documents the terminal status block; example validates
+    against ``schema`` (default: the repository plugin's copy)."""
     check = {"assertion": "status-block", "ok": False, "detail": ""}
     text = (skills_dir / surface / "SKILL.md").read_text(encoding="utf-8")
     example = next((line.strip() for line in text.splitlines()
@@ -118,7 +141,7 @@ def _check_status_block_doc(surface: str, skills_dir: Path) -> dict:
     except json.JSONDecodeError as exc:
         check["detail"] = f"status-block example is not valid JSON: {exc}"
         return check
-    schema = json.loads(STATUS_SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema = schema if schema is not None else load_status_schema()
     props = set(schema["properties"])
     missing = [k for k in schema["required"] if k not in block]
     extra = [k for k in block if k not in props]
@@ -261,14 +284,17 @@ def _run_drive(surface: str, drive: dict, sandbox: Path, store: Path,
 def evaluate_harness_transcript(stdout: str, *, assertion: str = "harness-blocked",
                                 surface: str | None = None,
                                 timed_out: bool = False, timeout: int = 0,
-                                marker: str | None = None) -> dict:
+                                marker: str | None = None,
+                                schema: dict | None = None) -> dict:
     """Assert a harness transcript ends in a `blocked` terminal status block.
 
     The layer under test is the skill instruction layer above the
     deterministic core: under a permission profile denying the core, the
     run must end with the block naming the gap. A question, free text, or
     silence is exactly the failure PROP-005 observed live (AD-11) — and a
-    `complete` block under a denied core is a lie, not a pass."""
+    `complete` block under a denied core is a lie, not a pass. ``schema``
+    is the driven plugin's status-block schema (default: the repository
+    plugin's copy)."""
     check = {"assertion": assertion, "ok": False, "detail": ""}
     if timed_out:
         check["detail"] = (f"hung past {timeout}s — a prompt or wait, never "
@@ -288,7 +314,7 @@ def evaluate_harness_transcript(stdout: str, *, assertion: str = "harness-blocke
                            "— a question or free text is not a refusal "
                            "(AD-11: the block names the gap)")
         return check
-    schema = json.loads(STATUS_SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema = schema if schema is not None else load_status_schema()
     props = set(schema["properties"])
     missing = [k for k in schema["required"] if k not in block]
     extra = [k for k in block if k not in props]
@@ -320,7 +346,8 @@ def evaluate_harness_transcript(stdout: str, *, assertion: str = "harness-blocke
 def _run_harness_drive(surface: str, drive: dict, timeout: int,
                        plugin_root: Path | None = None,
                        env_overlay: dict | None = None,
-                       cwd: Path | None = None) -> dict:
+                       cwd: Path | None = None,
+                       schema: dict | None = None) -> dict:
     """One harness drive: the surface driven through the real harness
     (claude -p) under the drive's permission profile; the transcript is
     judged by evaluate_harness_transcript. Spend-bearing — reached only
@@ -366,7 +393,7 @@ def _run_harness_drive(surface: str, drive: dict, timeout: int,
         else:
             check = evaluate_harness_transcript(
                 proc.stdout, assertion=assertion, surface=surface,
-                marker=drive.get("marker") or None)
+                marker=drive.get("marker") or None, schema=schema)
     if archive_config and not check["ok"]:
         check["detail"] += (" (the --from-archive config carries only a "
                             "symlinked .credentials.json from the operator's "
@@ -428,10 +455,14 @@ def install_archive(archive: Path, config_dir: Path) -> Path:
     return folder
 
 
-def check_harness_loadable(folder: Path, shipped: list[str]) -> tuple[dict, dict]:
+def check_harness_loadable(folder: Path, shipped: list[str] | None
+                           ) -> tuple[dict, dict]:
     """(suite-level check, report field) for the skills-dir folder: its
-    plugin.json parses with name tk-studio and a version, and its skills
-    set equals the surfaces discovered."""
+    plugin.json parses with name tk-studio and a version, a skills/ tree
+    sits at its root, and its skills set equals the surfaces discovered.
+    ``shipped`` None checks the folder alone — the gate run before surface
+    discovery, so a folder the harness cannot load (a wrapped zip: no
+    skills/ at the root) is a named failure, never "skills tree missing"."""
     check = {"assertion": "harness-loadable", "ok": False, "detail": ""}
     field: dict = {"state": "failed", "folder": str(folder)}
     manifest = folder / ".claude-plugin" / "plugin.json"
@@ -448,10 +479,13 @@ def check_harness_loadable(folder: Path, shipped: list[str]) -> tuple[dict, dict
         return check, field
     field["version"] = data["version"]
     skills_dir = folder / "skills"
+    if not skills_dir.is_dir():
+        check["detail"] = (f"skills-dir folder {folder} has no skills/ tree "
+                           "at its root (members must sit at the zip root)")
+        return check, field
     present = {p.name for p in skills_dir.iterdir()
-               if p.is_dir() and not p.name.startswith(".")} \
-        if skills_dir.is_dir() else set()
-    if present != set(shipped):
+               if p.is_dir() and not p.name.startswith(".")}
+    if shipped is not None and present != set(shipped):
         extra = ", ".join(sorted(present - set(shipped)))
         absent = ", ".join(sorted(set(shipped) - present))
         check["detail"] = (f"skills-dir folder skills differ from the "
@@ -497,10 +531,94 @@ def _run_suite(skills: Path, manifest_path: Path | None, timeout: int,
                emit: bool, harness: bool, plugin_root: Path | None = None,
                env_overlay: dict | None = None,
                harness_cwd: Path | None = None) -> dict:
-    shipped = discover_surfaces(skills)
-    manifest = load_manifest(manifest_path)
-    registered = manifest["surfaces"]
+    surfaces: dict[str, list[dict]] = {}
+    harness_declared = 0
+    failures: list[dict] = []
+    conformance_version = 1
+    harness_state = None
+    # harness-loadable is suite-level: read the skills-dir folder only when
+    # the suite was driven from one — a repo-tree run is a named skip,
+    # never a pass for the wrong reason. Under --from-archive the folder is
+    # judged first: one the harness cannot load is a named failure and no
+    # surface is driven from it
+    if plugin_root is None:
+        harness_loadable = {"state": HARNESS_LOADABLE_SKIPPED}
+        gate = None
+    else:
+        gate, harness_loadable = check_harness_loadable(Path(plugin_root),
+                                                        None)
+    if gate is not None and not gate["ok"]:
+        harness_state = "not run: the skills-dir folder is not harness-loadable"
+        failures.append({"surface": PLUGIN_NAME, "assertion": gate["assertion"],
+                         "detail": gate["detail"]})
+    else:
+        shipped = discover_surfaces(skills)
+        manifest = load_manifest(manifest_path)
+        conformance_version = manifest.get("conformance_version", 1)
+        # the driven plugin's own schema: the extracted folder's under
+        # --from-archive (absent there is an error, never the repo copy)
+        schema = load_status_schema(
+            Path(plugin_root) / "contracts" / "status-block.schema.json"
+            if plugin_root is not None else None)
+        surfaces, harness_declared = _drive_surfaces(
+            shipped, manifest["surfaces"], skills, schema, timeout, harness,
+            plugin_root, env_overlay, harness_cwd)
+        failures = [{"surface": s, "assertion": c["assertion"],
+                     "detail": c["detail"]}
+                    for s, checks in surfaces.items()
+                    for c in checks if not c["ok"]]
+        if plugin_root is not None:
+            loadable, harness_loadable = check_harness_loadable(
+                Path(plugin_root), shipped)
+            if not loadable["ok"]:
+                failures.append({"surface": PLUGIN_NAME,
+                                 "assertion": loadable["assertion"],
+                                 "detail": loadable["detail"]})
 
+    if emit and failures:
+        import ledger
+        for failure in failures:
+            try:
+                ledger.emit("headless-failure", {
+                    "surface": failure["surface"],
+                    "assertion": failure["assertion"],
+                    "detail": failure["detail"] or "failed",
+                })
+            except Exception as exc:  # emission must never mask the report
+                failure["emit_error"] = str(exc)
+
+    if harness_state is None:
+        if harness_declared == 0:
+            harness_state = "none declared"
+        elif harness:
+            harness_state = "ran"
+        else:
+            harness_state = "skipped: --harness not given (spend-bearing)"
+
+    return {
+        "conformance_version": conformance_version,
+        "ok": not failures,
+        "surfaces_checked": len(surfaces),
+        "checks_run": sum(len(c) for c in surfaces.values()),
+        # the harness pass is never a silent cap: the report always names
+        # whether spend-bearing drives ran, were skipped, or don't exist
+        "harness_pass": {"declared": harness_declared,
+                         "state": harness_state},
+        # the skills-dir folder check names whether it ran (AD-21)
+        "harness_loadable": harness_loadable,
+        "failures": failures,
+        "surfaces": surfaces,
+    }
+
+
+def _drive_surfaces(shipped: list[str], registered: dict, skills: Path,
+                    schema: dict, timeout: int, harness: bool,
+                    plugin_root: Path | None, env_overlay: dict | None,
+                    harness_cwd: Path | None
+                    ) -> tuple[dict[str, list[dict]], int]:
+    """(per-surface checks, harness drives declared) for every shipped
+    surface, plus a stale-entry failure per manifest entry with no shipped
+    skill behind it."""
     surfaces: dict[str, list[dict]] = {}
     harness_declared = 0
     for surface in shipped:
@@ -514,7 +632,7 @@ def _run_suite(skills: Path, manifest_path: Path | None, timeout: int,
             surfaces[surface] = checks
             continue
         checks.append({"assertion": "registered", "ok": True, "detail": ""})
-        checks.append(_check_status_block_doc(surface, skills))
+        checks.append(_check_status_block_doc(surface, skills, schema))
         checks.append(_check_unrunnable_core_doc(surface, skills))
         checks.append(_check_auth_preflight(entry))
         with tempfile.TemporaryDirectory(prefix="tk-conformance-") as tmp:
@@ -529,7 +647,8 @@ def _run_suite(skills: Path, manifest_path: Path | None, timeout: int,
                         checks.append(_run_harness_drive(
                             surface, drive, HARNESS_TIMEOUT,
                             plugin_root=plugin_root,
-                            env_overlay=env_overlay, cwd=harness_cwd))
+                            env_overlay=env_overlay, cwd=harness_cwd,
+                            schema=schema))
                     else:
                         checks.append({
                             "assertion": drive.get("assertion",
@@ -547,57 +666,7 @@ def _run_suite(skills: Path, manifest_path: Path | None, timeout: int,
         surfaces[name] = [{"assertion": "registered", "ok": False,
                            "detail": "manifest entry has no shipped skill "
                                      "behind it (stale entry)"}]
-
-    failures = [{"surface": s, "assertion": c["assertion"], "detail": c["detail"]}
-                for s, checks in surfaces.items()
-                for c in checks if not c["ok"]]
-
-    # harness-loadable is suite-level: read the skills-dir folder only when
-    # the suite was driven from one — a repo-tree run is a named skip,
-    # never a pass for the wrong reason
-    if plugin_root is None:
-        harness_loadable = {"state": HARNESS_LOADABLE_SKIPPED}
-    else:
-        loadable, harness_loadable = check_harness_loadable(
-            Path(plugin_root), shipped)
-        if not loadable["ok"]:
-            failures.append({"surface": PLUGIN_NAME,
-                             "assertion": loadable["assertion"],
-                             "detail": loadable["detail"]})
-
-    if emit and failures:
-        import ledger
-        for failure in failures:
-            try:
-                ledger.emit("headless-failure", {
-                    "surface": failure["surface"],
-                    "assertion": failure["assertion"],
-                    "detail": failure["detail"] or "failed",
-                })
-            except Exception as exc:  # emission must never mask the report
-                failure["emit_error"] = str(exc)
-
-    if harness_declared == 0:
-        harness_state = "none declared"
-    elif harness:
-        harness_state = "ran"
-    else:
-        harness_state = "skipped: --harness not given (spend-bearing)"
-
-    return {
-        "conformance_version": manifest.get("conformance_version", 1),
-        "ok": not failures,
-        "surfaces_checked": len(surfaces),
-        "checks_run": sum(len(c) for c in surfaces.values()),
-        # the harness pass is never a silent cap: the report always names
-        # whether spend-bearing drives ran, were skipped, or don't exist
-        "harness_pass": {"declared": harness_declared,
-                         "state": harness_state},
-        # the skills-dir folder check names whether it ran (AD-21)
-        "harness_loadable": harness_loadable,
-        "failures": failures,
-        "surfaces": surfaces,
-    }
+    return surfaces, harness_declared
 
 
 # -------------------------------------------------------------------- CLI

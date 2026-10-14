@@ -126,6 +126,17 @@ class SkillsDirPlaneTestCase(unittest.TestCase):
         self.assertIn("v0.9.0", check["detail"])
         self.assertIn("tk-studio--v1.0.0", check["detail"])
         self.assertIn("tk-studio update", check["fix"])
+        # the default channel is the installer's default: no flag named
+        self.assertNotIn("--channel", check["fix"])
+
+    def test_stale_off_the_default_channel_names_it_in_the_fix(self):
+        # tk-studio update defaults to stable: a latest-channel fix that
+        # omitted the flag would reinstall stable and stay stale
+        self._folder("1.0.0")
+        self._write_roster("latest", "1.1.0")
+        check = self._check("latest")
+        self.assertEqual((check["status"], check["case"]), ("drift", "stale"))
+        self.assertIn("tk-studio update --channel latest", check["fix"])
 
     def test_stale_against_the_developer_catalog(self):
         self._folder("0.9.0")
@@ -148,6 +159,14 @@ class SkillsDirPlaneTestCase(unittest.TestCase):
         self.assertEqual((check["status"], check["case"]),
                          ("missing", "missing"))
         self.assertIn("no skills-dir plugin folder", check["detail"])
+        self.assertIn("tk-studio install", check["fix"])
+
+    def test_folder_without_plugin_json_is_missing(self):
+        self.folder.mkdir()
+        check = self._check()
+        self.assertEqual((check["status"], check["case"]),
+                         ("missing", "missing"))
+        self.assertIn("has no .claude-plugin/plugin.json", check["detail"])
         self.assertIn("tk-studio install", check["fix"])
 
     def test_missing_names_the_installer_sibling_found(self):
@@ -270,6 +289,43 @@ class SkillsDirPlaneTestCase(unittest.TestCase):
         self.assertEqual(check["status"], "error")
         self.assertIn(str(record), check["detail"])
 
+    def test_unreadable_catalog_is_error_naming_it_folder_present_or_not(self):
+        meta = self.project / ".claude-plugin"
+        meta.mkdir()
+        catalog = meta / "marketplace.json"
+        catalog.write_text("{not json", encoding="utf-8")
+        # the folder absent: the catalog is still read, and the missing
+        # folder is still named in the detail
+        check = self._check()
+        self.assertEqual(check["status"], "error")
+        self.assertNotIn("case", check)
+        self.assertIn(str(catalog), check["detail"])
+        self.assertIn("no skills-dir plugin folder", check["detail"])
+        # the folder present
+        self._folder("1.0.0")
+        check = self._check()
+        self.assertEqual(check["status"], "error")
+        self.assertNotIn("case", check)
+        self.assertIn(str(catalog), check["detail"])
+
+    def test_catalog_entry_without_a_string_version_is_error(self):
+        self._folder("1.0.0")
+        meta = self.project / ".claude-plugin"
+        meta.mkdir()
+        catalog = meta / "marketplace.json"
+        for entry in ({"name": NAME, "source": "./plugins/x"},
+                      {"name": NAME, "source": "./plugins/x", "version": 1}):
+            with self.subTest(entry=entry):
+                catalog.write_text(json.dumps({"name": NAME,
+                                               "plugins": [entry]}),
+                                   encoding="utf-8")
+                check = self._check()
+                self.assertEqual(check["status"], "error")
+                self.assertNotIn("case", check)
+                self.assertIn(str(catalog), check["detail"])
+                self.assertIn("no string version", check["detail"])
+                self.assertNotIn("vNone", check["detail"])
+
     def test_precedence_missing_over_shadowed_over_stale(self):
         self._write_roster("stable", "1.0.0")
         self._write_record({f"{NAME}@{NAME}": [{"scope": "user"}]})
@@ -304,6 +360,31 @@ class SkillsDirPlaneTestCase(unittest.TestCase):
             self.assertEqual((plane["case"], plane["status"]), (case, status),
                              plane["detail"])
         self.assertIn("released roster", plane["detail"])
+
+    def test_plane_with_a_guard_error_carries_no_case(self):
+        # case is the folder-and-roster verdict alone; a release guard can
+        # raise status past it, and an error plane carries no case (§6)
+        self._folder("1.0.0")
+        rosters = self.project / "tools" / "installer" / "rosters"
+        rosters.mkdir(parents=True)
+        (rosters / "latest.json").write_text("{not json", encoding="utf-8")
+        plane = drift_check.check_plugin(self.project, None, self.home)
+        self.assertEqual(plane["status"], "error", plane["detail"])
+        self.assertNotIn("case", plane)
+        self.assertIn("latest.json", plane["detail"])
+        (rosters / "latest.json").unlink()
+        # an unreadable released-roster.json in the plugin root
+        root = Path(self._tmp.name) / "plugin"
+        (root / ".claude-plugin").mkdir(parents=True)
+        (root / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps({"name": NAME, "version": "1.0.0"}), encoding="utf-8")
+        (root / ".claude-plugin" / "released-roster.json").write_text(
+            "{not json", encoding="utf-8")
+        with mock.patch.object(drift_check, "PLUGIN_ROOT", root):
+            plane = drift_check.check_plugin(self.project, None, self.home)
+        self.assertEqual(plane["status"], "error", plane["detail"])
+        self.assertNotIn("case", plane)
+        self.assertIn("released-roster.json unreadable", plane["detail"])
 
     def test_plane_stays_ok_on_the_real_repo_with_the_folder_linked(self):
         # PLUGIN_ROOT.parents[1] is the studio repo root: a developer
@@ -341,7 +422,8 @@ class SkillsDirPlaneTestCase(unittest.TestCase):
         plugin = next(p for p in report["planes"] if p["plane"] == "plugin")
         self.assertEqual(plugin["case"], "stale")
         self.assertEqual(code, 1)
-        self.assertTrue(any("tk-studio update" in f for f in report["fixes"]))
+        self.assertTrue(any("tk-studio update --channel latest" in f
+                            for f in report["fixes"]))
 
 
 if __name__ == "__main__":

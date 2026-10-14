@@ -169,6 +169,16 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertIn("never the source of the version or of loadability",
                       section)
         self.assertNotIn("/plugin marketplace update", section)
+        # case is the folder-and-roster verdict alone; the guards raise
+        # status only, and an error plane carries no case
+        flat = " ".join(section.split())
+        for phrase in ("`case` is the folder-and-roster verdict alone",
+                       "can raise `status` without changing `case`",
+                       "a plane whose `status` is `error` carries no `case`",
+                       "`--channel <channel>` added when `--channel` is not "
+                       "the default `stable`"):
+            self.assertIn(phrase, flat)
+        self.assertNotIn("still fold into the same plane", flat)
 
     def test_section_8_documents_from_archive(self):
         section = self.text[self.text.index("## 8. Conformance"):]
@@ -177,6 +187,10 @@ class DriverContractTestCase(unittest.TestCase):
                        "skipped: --from-archive not given",
                        "outside the repository", "`..`"):
             self.assertIn(phrase, section)
+        flat = " ".join(section.split())
+        self.assertIn("the drive scripts and the status-block schema from "
+                      "that folder", flat)
+        self.assertIn("judged before any surface is driven", flat)
 
     def test_driver_roster_names_the_three_drivers_and_their_roles(self):
         # AC2: the supervisor executes and serves the status page; Hermes

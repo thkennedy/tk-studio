@@ -396,9 +396,15 @@ class ConformanceHarnessTestCase(unittest.TestCase):
 
     def _plugin_zip(self, *, manifest: dict | None = None,
                     plugin_json: dict | None = None,
-                    extra: dict | None = None) -> Path:
-        """A built-plugin-shaped zip, members at the zip root."""
+                    extra: dict | None = None, schema: dict | None = None,
+                    omit: tuple[str, ...] = (), wrap: str = "") -> Path:
+        """A built-plugin-shaped zip, members at the zip root (under
+        ``wrap`` when given). It ships the repository's status-block schema
+        unless ``schema`` replaces it or ``omit`` names it."""
         members = {
+            "contracts/status-block.schema.json": json.dumps(
+                schema if schema is not None else json.loads(
+                    runner.STATUS_SCHEMA_PATH.read_text(encoding="utf-8"))),
             ".claude-plugin/plugin.json": json.dumps(
                 plugin_json if plugin_json is not None
                 else {"name": "tk-studio", "version": "9.9.9"}),
@@ -412,7 +418,8 @@ class ConformanceHarnessTestCase(unittest.TestCase):
         path = Path(self._tmp.name) / "plugin.zip"
         with zipfile.ZipFile(path, "w") as bundle:
             for name, text in members.items():
-                bundle.writestr(name, text)
+                if name not in omit:
+                    bundle.writestr(wrap + name, text)
         return path
 
     def test_default_run_names_the_harness_loadable_skip(self):
@@ -465,12 +472,85 @@ class ConformanceHarnessTestCase(unittest.TestCase):
             self.assertIn(needle, failure["detail"])
             self.assertEqual(report["harness_loadable"]["state"], "failed")
 
+    def test_from_archive_unloadable_folder_drives_no_surface(self):
+        # the gate stops the run: no surface is driven and harness_pass
+        # names why, in the exact §8 state string
+        archive = self._plugin_zip(plugin_json={"name": "tk-studio"})
+        report = runner.run_suite(emit=False, from_archive=archive)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["harness_loadable"]["state"], "failed")
+        self.assertEqual(report["surfaces"], {})
+        self.assertEqual(
+            report["harness_pass"]["state"],
+            "not run: the skills-dir folder is not harness-loadable")
+
     def test_from_archive_skill_dir_without_skill_md_fails_loadable(self):
         archive = self._plugin_zip(extra={"skills/tk-studio-half/x.py": ""})
         report = runner.run_suite(emit=False, from_archive=archive)
         failure = next(f for f in report["failures"]
                        if f["assertion"] == "harness-loadable")
         self.assertIn("tk-studio-half", failure["detail"])
+
+    def test_from_archive_judges_against_the_archives_schema(self):
+        # the archive's schema requires a field the repo copy does not: the
+        # fixture example lacks it, so only the archive's copy can fail it
+        schema = json.loads(runner.STATUS_SCHEMA_PATH.read_text(
+            encoding="utf-8"))
+        schema["required"] = [*schema["required"], "archive_only"]
+        schema["properties"]["archive_only"] = {"type": "string"}
+        report = runner.run_suite(emit=False, from_archive=self._plugin_zip(
+            schema=schema))
+        self.assertFalse(report["ok"])
+        failure = next(f for f in report["failures"]
+                       if f["assertion"] == "status-block")
+        self.assertIn("archive_only", failure["detail"])
+
+    def test_from_archive_without_a_schema_never_reads_the_repo_copy(self):
+        archive = self._plugin_zip(
+            omit=("contracts/status-block.schema.json",))
+        with self.assertRaises(runner.ConformanceError) as ctx:
+            runner.run_suite(emit=False, from_archive=archive)
+        self.assertIn("status-block schema unreadable", str(ctx.exception))
+        self.assertIn("config", str(ctx.exception))
+        out = StringIO()
+        with redirect_stdout(out):
+            code = runner.main(["run", "--no-emit",
+                                "--from-archive", str(archive)])
+        self.assertEqual(code, 2)
+        result = json.loads(out.getvalue())
+        self.assertIs(result["ok"], False)
+        self.assertIn("status-block.schema.json", result["error"])
+
+    def test_from_archive_wrapped_zip_is_a_named_loadable_failure(self):
+        # members under tk-studio/ leave no skills/ at the folder root: the
+        # loadability check runs first and names it, never exit 2
+        archive = self._plugin_zip(wrap="tk-studio/")
+        report = runner.run_suite(emit=False, from_archive=archive)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["surfaces"], {})
+        failure = next(f for f in report["failures"]
+                       if f["assertion"] == "harness-loadable")
+        self.assertEqual(failure["surface"], "tk-studio")
+        self.assertIn("plugin.json", failure["detail"])
+        self.assertEqual(report["harness_loadable"]["state"], "failed")
+        self.assertIn("not harness-loadable",
+                      report["harness_pass"]["state"])
+        out = StringIO()
+        with redirect_stdout(out):
+            code = runner.main(["run", "--no-emit",
+                                "--from-archive", str(archive)])
+        self.assertEqual(code, 1)
+        self.assertIs(json.loads(out.getvalue())["ok"], False)
+        # a loadable plugin.json but no skills/ at the root: named too
+        archive = self._plugin_zip(extra={
+            "tk-studio/skills/tk-studio-fake/SKILL.md":
+                SKILL_TEMPLATE.format(name="tk-studio-fake")},
+            omit=("skills/tk-studio-fake/SKILL.md",))
+        report = runner.run_suite(emit=False, from_archive=archive)
+        failure = next(f for f in report["failures"]
+                       if f["assertion"] == "harness-loadable")
+        self.assertIn("no skills/ tree", failure["detail"])
+        self.assertEqual(report["harness_loadable"]["version"], "9.9.9")
 
     def test_unsafe_zip_member_is_refused_by_name(self):
         for member in ("../x", "/abs/x", "skills/../../x"):

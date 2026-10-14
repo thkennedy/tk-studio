@@ -133,6 +133,22 @@ Story 25.3 (Canonical: ST-083). Authoritative text: `_bmad-output/planning-artif
   - `[low]` `[patch]` a non-directory at the folder path says "not a directory" instead of "dangling link" (still `missing`), with a test
   - `[low]` `[patch]` every archive open/extract failure (bad zip, encrypted, unsupported method, truncated) is a `ConformanceError`, so the run prints `{ok:false,error}` and exits 2 (AD-11), with a test
 
+### 2026-10-14 — Review pass (follow-up review 1)
+- layers: blind-hunter, edge-case-hunter (band L); the diff `9812fab..HEAD` (excluding this spec) was handed to both as a scratch file path
+- intent_gap: 0
+- bad_spec: 0
+- patch: 7 (high 0, medium 3, low 4)
+- defer: 0
+- reject: 2 (low 2): (1) "the default `stable` channel reports a false `stale` on the studio repo, and `tk-studio update` would replace a developer link": the default channel is the consult ruling (reading A), `stale` means "differs" per Boundaries, the risk is already a recorded residual, and how `update` treats a link is 25-2 installer behaviour; (2) "a folder `plugin.json` whose `name` is not `tk-studio` is reported ok": AC1 names only the version read, and the folder is written by the installer from the release zip
+- addressed_findings:
+  - `[medium]` `[patch]` the stale fix ignored the channel it checked (the installer's `update` defaults to `stable`). Off the default channel it now names `tk-studio update --channel <channel>`. Contract §6 and the SKILL.md row say so, with tests.
+  - `[medium]` `[patch]` the plane's `case` could contradict its `status`: a guard drift gave `{drift, case ok}`, and a guard error kept a `case`. Now a plane whose status is `error` carries no `case`. §6 states that `case` is the folder-and-roster verdict alone, and that the release guards can raise `status` without changing `case`. Covered by a test and a contract pin.
+  - `[medium]` `[patch]` under `--from-archive`, the status-block schema was still read from the repo tree. It is now read from the extracted folder, and a missing or malformed archive schema exits 2 with `{ok:false,error}` (no fallback). §8 says so, with tests.
+  - `[low]` `[patch]` a wrapped (non-root-shaped) zip exited 2 before the loadability check ran. Harness-loadable now runs first and gives a named `harness-loadable` failure in `failures[]`, with no surfaces driven. §8 states this, including the new `harness_pass` state (consult), with tests.
+  - `[low]` `[patch]` added the missing test for a folder with no `.claude-plugin/plugin.json` (`missing`).
+  - `[low]` `[patch]` the developer catalog was read only when the folder version was known. It is now read whenever it is present, so an unreadable catalog is `error` with or without the folder, with a test.
+  - `[low]` `[patch]` a catalog `tk-studio` entry with no string version reported `stale … vNone`. It is now an `error` naming the catalog, with a test.
+
 ## Design Notes
 
 - "Configured channel" and the roster source were an intent gap, settled by consult (Consult Log). The reasoning: the installer persists no channel, and a network roster read would contradict the manifest's `external_calls: false` for activate.
@@ -165,61 +181,70 @@ DRIFT: harness-loadable compares non-dot `skills/` directories with the discover
 DRIFT: harness drive `settings` resolve under the driven plugin root — drives must come from the extracted folder — affects: none
 DRIFT: `check_plugin` running-copy error text reworded — the file is no longer the installed plugin — affects: none
 
+### pass 2 (follow-up review patches, 2026-10-14)
+
+- planned: a harness-loadable failure is a named entry in `failures[]` / actual: an archive with a missing or malformed `contracts/status-block.schema.json` exits 2 with `{ok:false,error}`, the same as a missing archive manifest / why: the schema is something the runner discovers from the folder, not part of the harness-loadable check / may affect: none (consult: accepted, score 1)
+- planned: (spec silent) the order of harness-loadable and surface driving / actual: a folder that fails harness-loadable stops the run with no surfaces driven, and `harness_pass.state` reads `not run: the skills-dir folder is not harness-loadable` (added to the §8 state list) / why: a non-root-shaped zip must give a named loadability failure rather than exit 2 / may affect: readers of the conformance report's `harness_pass.state` (consult: accepted, score 2)
+
+DEVIATION SCORE: 2 (consult ruling on pass 2; frontmatter `deviation_score` stays 2)
+
+DRIFT: under `--from-archive`, a missing or malformed archive status-block schema exits 2 with `{ok:false,error}`, not a `failures[]` entry — it matches the missing-manifest precedent — affects: none
+DRIFT: a folder failing harness-loadable drives no surface; `harness_pass.state` gains `not run: the skills-dir folder is not harness-loadable` (driver-contract §8) — the loadability check must run before discovery — affects: none named (conformance report readers)
+
 ## Consult Log
 
 - 2026-10-14T21:34:09Z — trigger: halt (intent gap in planning) — question: which reading of "the roster's plugin entry for the configured channel" (A: `--channel` flag default stable, in-project roster, no network; B: network fetch; C: installer-persisted config), and is a named skip acceptable for harness-loadable without `--from-archive`? — ruling: apply — do: Q1 reading (A), with no roster reported as "not checkable from this project" (ok) while missing/shadowed are still judged; Q2 the proposed `--from-archive` design, with `harness_loadable: {state: "skipped: --from-archive not given"}` beside `harness_pass`; a default run never falls back to the repo tree and reports harness-loadable as passed — rule candidate: A read-only check that needs a release input (a roster or the built zip) reads it from the checked project or an explicit flag, never the network or the host install, and reports a named skip state when the input is absent, never a pass.
 - 2026-10-14T21:42:20Z — trigger: deviation-gt-0 — question: accept the five implementation deviations (no `case` on error; plugin.json-less folder is missing; skills-set vs surfaces; settings under the driven root; error text) and at what score? — ruling: accept-deviation score 2 — do: in driver-contract §6 make the `missing` row read "no folder, a dangling link, or a folder with no `.claude-plugin/plugin.json`; the detail names an installer sibling found" and the error sentence read "An unreadable folder `plugin.json`, record file or developer marketplace catalog makes the plane `error`, naming the file (no `case`)"; record deviations 1 and 2 as score 2 carried to 25-5; keep 3–5 at score 1 — rule candidate: When an implementer's deviation changes how the plugin plane decides `case` or `error`, the same story updates driver-contract §6's case table and error sentence to match the code before review, scored 2 when a later story reuses the taxonomy.
 
+- 2026-10-14T21:59:31Z — trigger: deviation-gt-0 (follow-up review patches) — question: accept the two patch deviations (A: archive with a missing or malformed status-block schema is exit 2 `{ok:false,error}`, not a `failures[]` entry; B: a folder failing harness-loadable stops the run with no surfaces driven) and at what score? — ruling: accept-deviation score 1 (A); accept-deviation score 2 (B) — do: keep A as written; keep B as written and add `not run: the skills-dir folder is not harness-loadable` to the `harness_pass` state list in driver-contract §8; add one test_conformance test asserting `harness_pass.state` and `surfaces == {}` when the harness-loadable gate fails — rule candidate: Any new value a story gives a state field in the conformance report (`harness_pass.state`, `harness_loadable.state`) must be added to that field's list in driver-contract §8 in the same story, and a deviation that adds one scores at least 2.
+
 ## Auto Run Result
 
 Status: done
 
-**Summary:** The plugin plane in `tk activate` now checks the skills-dir folder against the roster. It reads `<home>/skills/tk-studio/.claude-plugin/plugin.json` and compares that version with the `plugin` entry of `tools/installer/rosters/<channel>.json`, where `--channel` defaults to `stable`. In a developer checkout it also compares with the in-repo catalog. The result is one `case` (`ok`, `stale`, `missing` or `shadowed`), each with its fix (`tk-studio update`, `tk-studio install`, or the named `claude plugin uninstall …` and `marketplace remove` commands). Details:
-- The installer's sibling folders are never treated as the plugin, and the `missing` detail names the sibling it found.
-- `installed_plugins.json` and the `settings.json` keys are read only to detect a marketplace copy that shadows the folder, never for a version.
-- The old probes that read the install record as the truth are gone.
+**Summary:** This was follow-up review 1 of 25-3. Both layers ran over `9812fab..c421c2c`. Seven patches were applied:
+- The stale fix names `--channel <channel>` when the check runs off the default channel.
+- A plane whose status is `error` carries no `case`, and §6 states that `case` is the folder-and-roster verdict alone.
+- `--from-archive` reads the status-block schema from the extracted folder, never the repo tree.
+- A non-root-shaped zip gives a named `harness-loadable` failure, and no surface is driven.
+- The developer catalog is read whenever it is present, so an unreadable catalog is `error`.
+- A catalog entry with no version is `error`.
+- A missing-plugin.json `missing` test was added.
 
-The conformance runner gains `run --from-archive <zip>`. It safely extracts the zip into a clean `CLAUDE_CONFIG_DIR` skills folder and drives every surface from there. A suite-level `harness-loadable` check reads that folder, and the report gains a `harness_loadable` field. A run without the flag reports a loud named skip, never a pass. Driver contract 0.1.19 is additive: §6 states the folder-and-roster rule and its case table, and §8 covers `--from-archive`. The spine's AD-13 wording now names the folder and the roster.
+Driver contract stays 0.1.19. §6 and §8 were clarified in the same story, and the new `harness_pass` state was documented per the consult.
 
-**Files changed:**
-- `plugins/tk-studio/skills/tk-studio-activate/scripts/drift_check.py`: `_skills_dir_check` (folder, roster channel, catalog, shadowing); the `case` field; `--channel`; new fixes; the record-as-truth probes removed.
-- `plugins/tk-studio/skills/tk-studio-activate/SKILL.md`: the plugin plane row and its fixes.
-- `plugins/tk-studio/contracts/conformance/runner.py`: `--from-archive`, safe extraction, the `harness-loadable` check and report field, the drive plugin root and env overlay, and a credentials symlink for archive harness drives.
-- `plugins/tk-studio/contracts/driver-contract.md`: header 0.1.19 with an additive clause; the rulings row; §6 rule, case table and `case?`; §8 `--from-archive` and `harness_loadable`.
-- `_bmad-output/planning-artifacts/architecture/architecture-tk-studio-2026-07-26/ARCHITECTURE-SPINE.md`: the AD-13 rule wording.
-- `plugins/tk-studio/lib/tests/test_drift_check.py`: rewritten as one test per matrix row, plus precedence, env home, the real repo on `latest`, and `main --channel`.
-- `plugins/tk-studio/lib/tests/test_release_roster.py`: two plane tests moved to a folder fixture.
-- `plugins/tk-studio/lib/tests/test_conformance.py`: tests for from-archive, the skip, unsafe or unextractable zips, harness cwd and credentials, and the real plugin from its zip.
-- `plugins/tk-studio/lib/tests/test_driver_contract.py`: the 0.1.18 clause stays pinned, and 0.1.19 tests are added.
+**Files changed (this pass):**
+- `plugins/tk-studio/skills/tk-studio-activate/scripts/drift_check.py`: the channel-aware stale fix; the catalog is read whenever present, and an entry with no version is an error; no `case` on an `error` plane.
+- `plugins/tk-studio/skills/tk-studio-activate/SKILL.md`: the plugin row's stale fix names `--channel` off the default.
+- `plugins/tk-studio/contracts/conformance/runner.py`: `load_status_schema` from the driven plugin root, threaded into the status-block and harness transcript checks; harness-loadable runs before discovery (folder-only, including no `skills/`); `_drive_surfaces` split out.
+- `plugins/tk-studio/contracts/driver-contract.md`: the §6 stale fix `--channel` clause; the §6 sentence on `case` versus the release guards and error; §8 reads the schema from the folder, the loadability-first clause, and the new `harness_pass` state.
+- `plugins/tk-studio/lib/tests/test_drift_check.py`: tests for the off-default stale fix, a guard error with no `case`, a folder without plugin.json, an unreadable catalog with or without the folder, and a catalog entry without a version.
+- `plugins/tk-studio/lib/tests/test_conformance.py`: tests for the archive's schema being used, no schema meaning no repo fallback, a wrapped zip, and an unloadable folder driving no surface.
+- `plugins/tk-studio/lib/tests/test_driver_contract.py`: §6 pins for the new sentences and the `--channel` clause.
 
 **Review:**
-- Both layers ran. Findings: 6 patches applied (high 0, medium 2, low 4), 0 deferred, 1 rejected, 0 bad_spec, 0 intent_gap.
-- Consults: 2 — `halt` (planning intent gap, ruled apply) and `deviation-gt-0` (accept-deviation, score 2). Both are logged under `## Consult Log` and as observation events.
-- Follow-up review recommended: **true**. The score is 3×2 + 1×4 = 10, which is at least 5. No patch was high severity.
+- Findings: 7 patches applied (high 0, medium 3, low 4), 0 deferred, 2 rejected, 0 bad_spec, 0 intent_gap.
+- Consults: 1 — `deviation-gt-0` on the two patch deviations, ruled accept, scores 1 and 2. It is logged under `## Consult Log` and as an observation event.
+- Follow-up review recommended: **true**. The score is 3×3 (medium) + 1×4 (low) = 13, which is at least 5. No patch was high severity.
 
-**Verification (re-run by this session after the patches):**
-- `uv run python -m unittest discover tests`: 929 OK, 1 skipped (the opt-in live `claude` probe).
-- Targeted suites before the patches: 169 OK.
-- `runner.py run`: `"ok": true`, with `harness_loadable.state` = `skipped: --from-archive not given` and 18 surfaces.
-- `runner.py run --from-archive <scratch zip of plugins/tk-studio>`: `"ok": true`, with `harness_loadable.state` ok at v0.2.16.
-- `drift_check.py --directory . --claude-home <scratch home linking the checkout>`: plugin plane `ok`/`ok` on both `stable` and `latest`.
-- Against this sandbox's real home: `missing`, plus a shadowing user-scope `tk-studio@tk-studio` copy. That is the truth on this box (no folder installed yet). The activation drift of future sessions will read `drift` until the operator runs `tk-studio install`.
-- Matrix audit: every row has a test, and each one ran.
+**Verification (re-run by this session after all patches):**
+- `uv run python -m unittest tests.test_drift_check tests.test_release_roster tests.test_conformance tests.test_driver_contract`: 181 OK.
+- `uv run python -m unittest discover tests`: 938 OK, 1 skipped (the opt-in live `claude` probe).
+- `runner.py run`: exit 0, `"ok": true`, `harness_loadable.state` = `skipped: --from-archive not given`, 18 surfaces, no failures.
+- `runner.py run --from-archive <scratch zip of plugins/tk-studio, members at root>`: exit 0, `"ok": true`, `harness_loadable.state` ok at v0.2.16, 18 surfaces.
+- `drift_check.py --directory <repo> --claude-home <scratch home linking the checkout>`: plugin plane `ok`/`case ok` on both `latest` and `stable` (both rosters are at v0.2.16 now).
 
-**Unverifiable here (operator):**
-- On TIM-PC-2, after `tk-studio install`, run `uv run plugins/tk-studio/skills/tk-studio-activate/scripts/drift_check.py --directory C:/GitHub/tk-studio` and expect the plugin plane `case: ok`.
-- The live harness pass from an archive: from `plugins/tk-studio/lib`, run `uv run python ../contracts/conformance/runner.py run --harness --from-archive <tk-studio-0.2.16.zip>`. It is spend-bearing.
+**Unverifiable here (operator):** unchanged from the first pass.
+- On TIM-PC-2, after `tk-studio install`: `uv run plugins/tk-studio/skills/tk-studio-activate/scripts/drift_check.py --directory C:/GitHub/tk-studio` and expect `case: ok`.
+- The spend-bearing live harness pass: from `plugins/tk-studio/lib`, `uv run python ../contracts/conformance/runner.py run --harness --from-archive <tk-studio-0.2.16.zip>`.
 
 **Residual risks:**
-- On Windows, dangling-junction detection (`os.path.lexists`) is untested.
-- In a developer checkout on the default `stable` channel, the plane reports `stale` whenever stable trails the gate. That is true against the configured channel; developers in link mode pass `--channel latest`.
-- The root README still shows contract 0.1.13. That predates this story, and the README is 25.7's.
+- In a developer checkout on the default `stable` channel, the plane reports `stale` whenever stable trails the gate. In link mode, the `tk-studio update` fix would replace the link with the stable zip. This was rejected this pass as consult-ruled. Developers pass `--channel latest`.
+- On Windows, dangling-junction detection is untested.
+- An archive run that fails harness-loadable now reports `surfaces: {}`. A reader that expected per-surface results in that case sees none.
 
-Studio: activated as developer; working set bmm, tea, bmb, bmad-loop, gds; drift clean; routing implementer=claude-opus-5-5 reviewers=claude-opus-5-5 consult=claude-opus-5-5; knowledge spine absent
-Baseline: 9812fabc7b0551d4009ba7d17124ce8a7d78a38f (branch loop/epic-25)
+Studio: activated as developer; working set bmm, tea, bmb, bmad-loop, gds; drift drift; fixes: run tk-studio install (the installer writes the skills-dir plugin folder <home>/skills/tk-studio/); remove the marketplace copy shadowing the skills-dir folder: claude plugin uninstall tk-studio@tk-studio --scope user; claude plugin marketplace remove tk-studio; routing implementer=claude-opus-5-5 reviewers=claude-opus-5-5 consult=claude-opus-5-5; knowledge spine absent
+Baseline: 9812fabc7b0551d4009ba7d17124ce8a7d78a38f (branch loop/epic-25); reviewed HEAD c421c2c9cbb42c4ee9a40b51f3156d914d873938
 
-DRIFT: an `error` folder sub-check (unreadable folder `plugin.json`, record file or developer catalog) carries no `case` field; contract §6 says so — a failed read cannot be judged — affects: 25-5
-DRIFT: a folder with no `.claude-plugin/plugin.json` is `missing` (fix `tk-studio install`); contract §6 says so — the spec was silent and such a folder does not load — affects: 25-5
-DRIFT: the harness-loadable check compares non-dot `skills/` directories with the discovered surfaces — like-for-like would never fail — affects: none
-DRIFT: harness drive `settings` resolve under the driven plugin root — drives come from the extracted folder — affects: none
-DRIFT: `check_plugin`'s running-copy error text was reworded — the file is no longer the installed plugin — affects: none
+DRIFT: under `--from-archive`, a missing or malformed archive status-block schema exits 2 with `{ok:false,error}`, not a `failures[]` entry — it matches the missing-manifest precedent — affects: none
+DRIFT: a folder failing harness-loadable drives no surface; `harness_pass.state` gains `not run: the skills-dir folder is not harness-loadable` (driver-contract §8) — the loadability check must run before discovery — affects: none

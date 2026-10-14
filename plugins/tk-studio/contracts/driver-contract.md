@@ -326,7 +326,7 @@ stale. The plugin plane carries an additive `case` field naming one of:
 | `case` | Means | `status` | Fix |
 | --- | --- | --- | --- |
 | `ok` | the folder is present, at the roster (and catalog) version, unshadowed | `ok` | — |
-| `stale` | the folder version differs from the roster's `tk-studio--vX.Y.Z` tag or the developer catalog | `drift` | `tk-studio update` |
+| `stale` | the folder version differs from the roster's `tk-studio--vX.Y.Z` tag or the developer catalog | `drift` | `tk-studio update` (`--channel <channel>` added when `--channel` is not the default `stable`) |
 | `missing` | no folder, a dangling link, or a folder with no `.claude-plugin/plugin.json`; the detail names an installer sibling found | `missing` | `tk-studio install` |
 | `shadowed` | a marketplace copy is installed beside the folder | `drift` | `claude plugin uninstall tk-studio@<m> --scope user` per copy, plus `claude plugin marketplace remove tk-studio` when the marketplace is known |
 
@@ -337,9 +337,12 @@ never the source of the version or of loadability: it is read, with
 (`enabledPlugins`, `extraKnownMarketplaces`), only to detect a shadowing
 copy — the user-scope `tk-studio@<m>` records the installer's cleanup
 removes, never `tk-studio@skills-dir`. An unreadable folder `plugin.json`,
-record file or developer marketplace catalog makes the plane `error`, naming
-the file (no `case`). The release guards (`released-roster.json`, the
-installer roster shape and gate ×4) still fold into the same plane.
+record file or developer marketplace catalog (one whose `tk-studio` entry
+carries no string `version` included) makes the plane `error`, naming the
+file (no `case`). `case` is the folder-and-roster verdict alone: the release
+guards (`released-roster.json`, the installer roster shape and gate ×4) fold
+into the same plane's `status` and `detail` and can raise `status` without
+changing `case`; a plane whose `status` is `error` carries no `case`.
 
 ## 7. Driver integration dossier coverage (A7 — the retired ClaudeOS dossier)
 
@@ -383,7 +386,9 @@ catches. Harness drives are spend-bearing and never run in the default
 pass: `runner.py run --harness` opts in, each unrun drive is reported as
 a named skip, and the report's top-level `harness_pass` field names
 `{declared, state}` (`none declared` / `skipped: --harness not given` /
-`ran`) — never a silent cap. The child runs against an isolated
+`ran` / `not run: the skills-dir folder is not harness-loadable` — under
+`--from-archive`, when the extracted folder fails harness-loadable and no
+surface is driven) — never a silent cap. The child runs against an isolated
 throwaway store (`TK_STUDIO_HOME`), wall-clock bounded by the harness
 timeout (per-drive `timeout` overrides it; the CLI `--timeout` governs
 core drives only). A missing claude CLI fails the drive loud — a named
@@ -398,15 +403,20 @@ absolute or `..` member by name, and turning any unreadable, encrypted
 or unsupported-compression archive into an error naming it (exit 2,
 `{ok: false, error}`) — sets
 `CLAUDE_CONFIG_DIR=<tmp>/config` in every drive's environment, discovers
-the surfaces, the manifest and the drive scripts from that folder, and
+the surfaces, the manifest, the drive scripts and the status-block schema
+from that folder (an archive shipping no `contracts/status-block.schema.json`
+is an error naming it, never judged against the repository copy), and
 runs harness drives from a cwd outside the repository. The archive
 config carries only a symlinked `.credentials.json` — linked, for harness
 drives, from the operator's config dir (`CLAUDE_CONFIG_DIR`, else
 `~/.claude`) when one exists there, never copied (NFR5); without it a
 harness drive runs and fails as `Not logged in`. A suite-level
 `harness-loadable` check reads the folder's `.claude-plugin/plugin.json`
-(name `tk-studio` and a version) and requires the folder's skills set to
-equal the surfaces discovered; a failure is a named entry in `failures[]`.
+(name `tk-studio` and a version) and a `skills/` tree at the folder root —
+judged before any surface is driven, so a wrapped zip is this named failure
+with no surface driven, never a "skills tree missing" exit 2 — and requires
+the folder's skills set to equal the surfaces discovered; a failure is a
+named entry in `failures[]`.
 The report's top-level `harness_loadable` field is `{state, folder?,
 version?}` — `ok`, `failed`, or, without the flag,
 `skipped: --from-archive not given`: a named skip, never a pass, and a

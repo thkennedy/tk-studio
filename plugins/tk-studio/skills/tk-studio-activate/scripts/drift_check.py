@@ -9,7 +9,8 @@ Planes checked:
              roster plugin entry (--channel, default stable; the project's
              tools/installer/rosters/<channel>.json) and, in a developer
              checkout only, the repo marketplace.json entry. One case is named
-             (field `case`): ok | stale (tk-studio update) | missing
+             (field `case`): ok | stale (tk-studio update, plus --channel
+             off the default) | missing
              (tk-studio install) | shadowed (a marketplace copy is installed;
              the fix names each uninstall). installed_plugins.json is read only
              to detect marketplace copies, never for a version or loadability —
@@ -609,29 +610,43 @@ def _skills_dir_check(directory: Path, marketplace_path: Path | None,
                                   f"(channel {channel})")
         else:
             notes.append(note + (f" (channel {channel})" if expected else ""))
-        catalog = marketplace_path or (directory / ".claude-plugin"
-                                       / "marketplace.json")
-        if catalog.is_file():   # a developer checkout only
-            market, err = _read_json_file(catalog)
-            entry = None
-            if not err and isinstance(market, dict) \
-                    and isinstance(market.get("plugins"), list):
-                entry = next((p for p in market["plugins"]
-                              if isinstance(p, dict)
-                              and p.get("name") == SKILLS_DIR_PLUGIN), None)
-            if entry is None:
-                errors.append(f"marketplace catalog {catalog} unreadable or "
-                              f"missing the {SKILLS_DIR_PLUGIN} entry"
-                              + (f" ({err})" if err else ""))
-            elif entry.get("version") != version:
-                found["stale"].append(
-                    f"folder v{version} vs developer catalog "
-                    f"v{entry.get('version')} ({catalog})")
-            else:
-                notes.append(f"in lockstep with the developer catalog "
-                             f"v{version}")
-        if found["stale"]:
-            fixes["stale"] = FIX_UPDATE
+    # the developer catalog is validated whenever it is present, even with
+    # no folder version to compare: an unreadable catalog is error, never
+    # hidden behind a missing folder
+    catalog = marketplace_path or (directory / ".claude-plugin"
+                                   / "marketplace.json")
+    if catalog.is_file():   # a developer checkout only
+        market, err = _read_json_file(catalog)
+        entry = None
+        if not err and isinstance(market, dict) \
+                and isinstance(market.get("plugins"), list):
+            entry = next((p for p in market["plugins"]
+                          if isinstance(p, dict)
+                          and p.get("name") == SKILLS_DIR_PLUGIN), None)
+        if entry is None:
+            errors.append(f"marketplace catalog {catalog} unreadable or "
+                          f"missing the {SKILLS_DIR_PLUGIN} entry"
+                          + (f" ({err})" if err else ""))
+        elif not isinstance(entry.get("version"), str):
+            errors.append(f"marketplace catalog {catalog} unreadable: its "
+                          f"{SKILLS_DIR_PLUGIN} entry carries no string "
+                          f"version ({entry.get('version')!r})")
+        elif version is None:
+            pass   # nothing to compare: the folder's own condition is named
+        elif entry["version"] != version:
+            found["stale"].append(
+                f"folder v{version} vs developer catalog "
+                f"v{entry['version']} ({catalog})")
+        else:
+            notes.append(f"in lockstep with the developer catalog "
+                         f"v{version}")
+    if found["stale"]:
+        # the installer's update defaults to stable: off the default the
+        # fix must name the channel, or it reinstalls the wrong roster
+        fixes["stale"] = FIX_UPDATE if channel == DEFAULT_CHANNEL else (
+            f"run tk-studio update --channel {channel} (the installer "
+            f"rewrites the skills-dir plugin folder at the {channel} "
+            "roster's plugin version)")
 
     copies, named, unreadable = _marketplace_copies(home)
     errors += unreadable
@@ -691,6 +706,11 @@ def check_plugin(directory: Path, marketplace_path: Path | None,
         plane["detail"] = "; ".join(x for x in (plane["detail"], sub["detail"]) if x)
         if sub.get("fix"):
             plane["fix"] = "; ".join(x for x in (plane.get("fix"), sub["fix"]) if x)
+    # `case` is the folder-and-roster verdict alone: the release guards may
+    # raise `status` past it without changing it, but an `error` plane
+    # carries no case (driver contract §6)
+    if plane["status"] == "error":
+        plane.pop("case", None)
     return plane
 
 
