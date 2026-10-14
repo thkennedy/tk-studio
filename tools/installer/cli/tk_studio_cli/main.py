@@ -3,7 +3,7 @@
 Every verb prints exactly one JSON object as the last stdout line (AD-11):
 ``{status: complete|partial|blocked, intent: "tk-studio-cli-<verb>",
 artifacts, reason, ...leg fields}``. A refusal is ``blocked`` with a named
-reason and exit code 1.
+reason and exit code 1; a usage error is ``blocked`` with exit code 2.
 """
 from __future__ import annotations
 
@@ -77,6 +77,9 @@ def main(argv: list[str] | None = None, *, fetch=None, runner=None,
         result, code = _blocked(argv, f"UsageError: {exc}"), 2
     except OSError as exc:  # last resort: AD-11 still gets its JSON line
         result, code = _blocked(argv, f"UnexpectedOSError: "
+                                f"{type(exc).__name__}: {exc}"), 1
+    except Exception as exc:  # noqa: BLE001 — same last resort, any type
+        result, code = _blocked(argv, f"UnexpectedError: "
                                 f"{type(exc).__name__}: {exc}"), 1
     print(json.dumps(result, ensure_ascii=False))
     return code

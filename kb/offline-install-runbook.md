@@ -194,8 +194,11 @@ invented:
 (else `~/.claude/skills/tk-studio/`) from the roster's SHA-256-verified zip;
 Claude Code loads it in place as `tk-studio@skills-dir`. The staging
 `.tk-studio.new`, the kept `.tk-studio.previous` and `.tk-studio.retired`
-(the old previous set aside, which exists only during a swap, or is left
-behind if its post-success delete failed) are dot-prefixed so Claude Code
+(the old previous, set aside only when a target is superseded; it exists
+only during a swap, or is left behind when its post-success delete fails,
+and then the next run deletes it, or when a failed restore leaves it as
+the only copy, and then the next run renames it back to
+`.tk-studio.previous` before swapping) are dot-prefixed so Claude Code
 does not load them. The probe is an opt-in lib test that runs
 the real `claude` against an isolated temp `CLAUDE_CONFIG_DIR` (never the
 real `~/.claude`), from `plugins/tk-studio/lib`:

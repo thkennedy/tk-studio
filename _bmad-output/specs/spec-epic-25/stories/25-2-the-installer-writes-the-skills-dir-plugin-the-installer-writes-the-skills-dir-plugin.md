@@ -121,6 +121,27 @@ As a user of any machine with Claude Code signed in, I want the plugin written t
   - `[low]` `[patch]` Live probe parsed `ROOT=`/`SKILL=` with `\S+` and compared unresolved paths — now captures to end of line and accepts raw or resolved forward-slash paths.
   - `[low]` `[patch]` A `tk-studio@skills-dir` key would have been fed to `claude plugin uninstall` — excluded from the uninstall set.
 
+### 2026-10-14 — Review pass (follow-up review)
+- intent_gap: 0
+- bad_spec: 0
+- patch: 7 (high 0, medium 5, low 2)
+- defer: 0
+- reject: 4
+- addressed_findings:
+  - `[medium]` `[patch]` `_swap` retired and deleted `.tk-studio.previous` when no target was superseded (target missing), and a lone `.tk-studio.retired` left by a failed restore was deleted by the next run's stale-sibling cleanup (AC1, previous kept) — previous is set aside only when a target exists; a lone retired is renamed back to previous before the swap (`CleanupFailed` if that fails); tests `PreviousKeptWithoutTarget`.
+  - `[medium]` `[patch]` Non-OSError extract failures (`zlib.error`, `NotImplementedError`, `RuntimeError`) and any other non-OSError exception escaped as tracebacks with no AD-11 JSON line, leaving staging half-written — extract catches every exception into `PluginZipInvalid` and removes staging; `main()` last resort `UnexpectedError` (exit 1); tests `ExtractErrorsAreNamed`.
+  - `[medium]` `[patch]` `is_link`'s Windows fallback (Python < 3.12) was guarded by `path.exists()`, so a dangling junction read as "missing" and blocked every later install with `SwapFailed` (AC2) — guarded by `os.path.lexists`; test `DanglingJunction`.
+  - `[medium]` `[patch]` `default_runner` had no timeout and inherited stdin, so a stalled `claude plugin …` hung the verb with no JSON line (AC3) — `stdin=DEVNULL`, `RUNNER_TIMEOUT = 120`, `TimeoutExpired` recorded as a failed command → `partial`; tests `RunnerTimeout`.
+  - `[medium]` `[patch]` An unreadable or invalid `installed_plugins.json`/`known_marketplaces.json` was treated as clean, silently leaving a user-scope copy shadowing the folder (AC3) — each is a `failed` row `{command: null, file, error}`, the other file's commands still run, and the leg returns `partial`; tests `UnreadableRecordFiles`.
+  - `[low]` `[patch]` `project_entries` listed `tk-studio@skills-dir` keys as project-scope marketplace records, unlike `marketplace_cleanup` — excluded; test `SkillsDirKeyNotReported`.
+  - `[low]` `[patch]` `main.py` docstring said every refusal exits 1 while `UsageError` exits 2 (ruled) — docstring corrected; `test_usage_error` pins `code == 2`.
+- rejected (one line each):
+  - `--help` prints no JSON line — help is argparse's interactive output, not a verb; AD-11 binds the verbs.
+  - `requires.claude-code` not checked before marketplace removal — the Claude Code floor check is Story 25.5's doctor (epics §Story 25.5), not a 25.2 criterion.
+  - Concurrent install runs share `.tk-studio.new` (lock file) — no criterion names concurrent runs.
+  - User-scope `<config>/settings.json` marketplace keys not reported — AC3 names project-scope reporting; user scope is handled through the `claude plugin` commands the leg runs, and the re-registration claim is speculative.
+- procedural note: both review layers ran (band L); the 1686-line diff was handed to each layer as a scratchpad file path rather than inline text.
+
 ## Design Notes
 
 - "The previous folder kept until the next successful start" is read as: the previous folder survives this run and is removed only by the next successful plugin-leg run (which then keeps the folder it supersedes). The CLI cannot observe Claude Code's own start; 25.5's doctor may tighten this.
@@ -166,64 +187,70 @@ DEVIATION SCORE: 1 (implementer); 2 by consult
 
 DRIFT: old previous set aside as `.tk-studio.retired` and deleted only after the final rename; new result field `retired_left`; refusals FolderUnwritable/CleanupFailed/UnexpectedOSError added, UsageError exits 2 — AC1 keeps the previous across a failed swap, which two folders cannot — affects: 25-3, 25-5
 
+### pass 3 (2026-10-14, implementer, follow-up review patches)
+
+- planned: refusal and reason names as listed / actual: last-resort reason `UnexpectedError: <Type>: <msg>` (exit 1) for any non-OSError exception / why: AD-11 JSON line on every path / may affect: 25-4, 25-5
+- planned: `marketplace.failed[]` rows `{command, exit, error?}`, partial only on `status == "failed"` / actual: an unreadable record file is `{command: null, file, error}`; a `skipped` result can carry `failed`; partial on any non-empty `failed` / why: an unreadable file must never read as clean / may affect: 25-5
+- planned: `CleanupFailed` only for a stale sibling / actual: also when a lone `.tk-studio.retired` cannot be renamed back to previous / why: P1 restore path / may affect: none
+- planned: old previous set aside on every swap / actual: set aside only when a target is superseded; a lone retired is restored to previous first / why: AC1, previous kept until the next successful run / may affect: 25-3
+- kb: `kb/offline-install-runbook.md` 25.2 section's `.tk-studio.retired` parenthetical updated per consult (lines 197-201); deviation 0
+
+DEVIATION SCORE: 2 (implementer); 2 by consult
+
+DRIFT: UnexpectedError last-resort reason (exit 1); marketplace.failed[] gains {command: null, file, error} rows, a skipped result can carry failed, and partial triggers on any non-empty failed[]; CleanupFailed also covers an unrestorable lone .tk-studio.retired; old previous set aside only when a target is superseded and a lone retired is restored to previous — follow-up review patches for AC1/AC3 and the AD-11 JSON line — affects: 25-3, 25-4, 25-5
+
 ## Consult Log
 
 - 2026-10-14T20:57Z — trigger: deviation-gt-0 — question: accept pass 1 at score 1 or 2, and is eval on an archived copy (item 4) acceptable — ruling: accept-deviation score 2 — do: set score 2 and keep item 3's 25-4/25-5 note; correct kb/offline-install-runbook.md:225 to name the archived-copy target, outputs unchanged, no re-run; items 1, 2, 5 local, do not commit uv.lock — rule candidate: A pass that adds named values to a JSON result read by later stories scores at least 2, and a kb probe record must name the exact target it ran against.
 - 2026-10-14T21:04Z — trigger: deviation-gt-0 — question: accept the review-patch swap via a third sibling .tk-studio.retired (+ retired_left, new refusal names) at score 1 or 2, and update the kb — ruling: accept-deviation score 2 — do: keep the three-sibling swap, record DRIFT, score stays 2; add .tk-studio.retired to the kb 25.2 section's sibling sentence (~line 196) only; leave blocked refusals at exit 1, exit 2 only for UsageError — rule candidate: Any dot-prefixed sibling the installer creates in the skills dir is named in the spec's folder-layout bullet and the story's kb section in the same pass; later readers judge only skills/tk-studio and ignore every .tk-studio.* sibling.
+- 2026-10-14T21:14Z — trigger: deviation-gt-0 — question: accept follow-up review patches (UnexpectedError reason; marketplace.failed[] {command:null,file,error} rows, failed on skipped, partial on any failed; CleanupFailed for an unrestorable lone retired; previous retired only when a target is superseded, lone retired restored) at score 1 or 2, and does the kb 25.2 sibling sentence change — ruling: accept-deviation score 2 — do: accept all four, one DRIFT line affects 25-3, 25-4, 25-5, score stays 2; in kb/offline-install-runbook.md:196-198 change only the .tk-studio.retired parenthetical (set aside only when a target is superseded; exists only during a swap, or left behind when its post-success delete fails — next run deletes it — or when a failed restore leaves it the only copy — next run renames it back to .tk-studio.previous before swapping); do not edit the spec's Always write-order bullet — rule candidate: A pass that changes when a .tk-studio.* sibling is created, kept, restored or deleted updates the story's kb sibling sentence in the same pass, and a change to an existing result field's shape or to the status mapping is scored 2 without a consult.
 
 ## Auto Run Result
 
 Status: done
 
-**Summary:** The meta-CLI package now exists at `tools/installer/cli` (the subtree 25.1's release motion builds as the `cli` wheel), holding the plugin leg only.
-- `tk-studio install|update` read the roster's `plugin` entry, download by tag, and verify SHA-256 before extracting. They refuse zip-slip members and check `plugin.json` against the tag, then swap `~/.claude/skills/tk-studio/` atomically through dot-prefixed siblings (`.tk-studio.new`, `.tk-studio.previous`, `.tk-studio.retired`). The previous folder survives any failed run.
-- `install --link <checkout>` makes a symlink (POSIX) or a `mklink /J` junction (Windows) to `<checkout>/plugins/tk-studio`. `doctor` reports `link` with the target, `written` with the version, or `missing`.
-- Every leg run removes user-scope marketplace copies (`claude plugin uninstall … --scope user`, `claude plugin marketplace remove tk-studio`), but only when a skills-dir folder exists. It reports project-scope `enabledPlugins`/`extraKnownMarketplaces` entries without editing them.
-- This repository's `.claude/settings.json` no longer carries either key.
-- Every verb ends with one AD-11-shaped JSON line.
+**Summary:** This was a follow-up review pass of the story, which was already done. The meta-CLI's plugin leg at `tools/installer/cli` was reviewed again: it covers `install|update` from the verified roster zip, `install --link`, marketplace cleanup, the project-scope report and `doctor`. This pass hardened it and changed no behaviour the criteria name:
+- A previous folder is never lost when no target is superseded. A lone `.tk-studio.retired` is restored rather than deleted.
+- Every exception path ends with the AD-11 JSON line.
+- A dangling Windows junction is detected on Python < 3.12.
+- A stalled `claude` is bounded at 120 s.
+- Unreadable Claude Code record files return `partial`, never `clean`.
+- A `tk-studio@skills-dir` key is no longer reported as a marketplace record.
 
-**Files changed:**
-- `tools/installer/cli/pyproject.toml`: new. Defines `tk-studio-cli` 0.1.0 with script `tk-studio`, stdlib only (hatchling at build time).
-- `tools/installer/cli/tk_studio_cli/{__init__,__main__,main}.py`: new. The argparse verbs `install [--link]`, `update` and `doctor`, the `--roster`/`--channel` options, the JSON result, and the `UsageError`/`UnexpectedOSError` last-resort handlers.
-- `tools/installer/cli/tk_studio_cli/plugin_leg.py`: new. Roster entry check, fetch and verify, safe extract, the three-sibling atomic swap, link creation, marketplace cleanup, the project-scope report, and the doctor read.
-- `plugins/tk-studio/lib/tests/test_installer_plugin_leg.py`: new, 43 offline tests (fake fetcher, fake `claude`, temp config dir). They cover every I/O matrix row, both committed rosters and every review patch.
-- `plugins/tk-studio/lib/tests/test_installer_live.py`: new. An opt-in (`TK_STUDIO_LIVE_CLAUDE=1`) on-box probe in an isolated `CLAUDE_CONFIG_DIR`, covering `plugin list`, `plugin validate` and the headless `/tk-studio:zz-probe` substitution.
-- `.claude/settings.json`: dropped `extraKnownMarketplaces` and `enabledPlugins`; `hooks` and `permissions` are unchanged.
-- `kb/offline-install-runbook.md`: new section "Skills-dir plugin: the on-box probe (Story 25.2)" recording the live-test command, this box's outcome, and the `claude plugin eval` outcome verbatim (it resolves a skills-dir folder; the plugin ships no eval suite).
+**Files changed (this pass):**
+- `tools/installer/cli/tk_studio_cli/plugin_leg.py`: the `_swap` retired/previous lifecycle, catch-all extract refusal, the `lexists` junction fallback, `RUNNER_TIMEOUT` and `stdin=DEVNULL`, `failed` rows for unreadable record files, `partial` on any failure, and `@skills-dir` excluded from `project_entries`.
+- `tools/installer/cli/tk_studio_cli/main.py`: the `UnexpectedError` last-resort handler (exit 1), and the docstring now says usage errors exit 2.
+- `plugins/tk-studio/lib/tests/test_installer_plugin_leg.py`: 12 new offline tests (55 in all), and `test_usage_error` pins exit 2.
+- `kb/offline-install-runbook.md`: the `.tk-studio.retired` parenthetical in the 25.2 section, per consult.
 
 **Review:** Both layers ran (band L).
-- Findings: 5 patches applied (high 0, medium 3, low 2), 0 deferred, 0 rejected, 0 bad_spec, 0 intent_gap.
-- Consults: 2 (`deviation-gt-0`), both ruled accept-deviation score 2, logged under `## Consult Log` and as observation events.
-- Follow-up review recommended: **true**. Score is 3×3 + 1×2 = 11, which is at least 5.
+- Findings: 7 patches applied (high 0, medium 5, low 2), 0 deferred, 4 rejected, 0 bad_spec, 0 intent_gap.
+- Consult: 1 (`deviation-gt-0`), ruled accept-deviation score 2. It is logged under `## Consult Log` and recorded as an observation event.
+- Follow-up review recommended: **true**. Score is 3×5 + 1×2 = 17, which is at least 5.
 
 **Verification (re-run by this session after the patches):**
-- `uv run python -m unittest discover tests`: 892 OK, 1 skipped (the opt-in live test).
+- `uv run python -m unittest tests.test_installer_plugin_leg`: 55 OK.
+- `TK_STUDIO_LIVE_CLAUDE=1 uv run python -m unittest tests.test_installer_live -v`: OK on this box, in an isolated config. The headless probe ran.
+- `uv run python -m unittest discover tests`: 904 OK, 1 skipped (the opt-in live test).
 - `uv run python ../contracts/conformance/runner.py run`: `"ok": true`.
-- `uv run python -m unittest tests.test_installer_plugin_leg`: 43 OK.
-- `TK_STUDIO_LIVE_CLAUDE=1 uv run python -m unittest tests.test_installer_live -v`: OK on this box (Linux, Claude Code 2.1.300, isolated config).
-  - `tk-studio@skills-dir` shows `✔ loaded`, and `.tk-studio.previous` is not listed.
-  - Validation passed.
-  - The headless probe printed `ROOT=<tmp>/config/skills/tk-studio` and `SKILL=<tmp>/config/skills/tk-studio/skills/zz-probe`, both forward-slash paths.
-- `uv run --project tools/installer/cli tk-studio doctor`, with `UV_PROJECT_ENVIRONMENT` outside the mount: last line is JSON `status: complete`, `mode: missing`. The real `~/.claude` was never written.
+- `uv run --project tools/installer/cli tk-studio doctor` (with `UV_PROJECT_ENVIRONMENT` in the scratchpad): last line is JSON `status: complete`, `mode: missing`. The generated `uv.lock` was removed, and the real `~/.claude` was never written.
 - The settings assertion passes.
-- The I/O matrix audit found every row covered by a passing test.
 
 **Unverifiable here (operator, TIM-PC-2, Windows):**
-- Run `uv run --project tools/installer/cli tk-studio install --link C:/GitHub/tk-studio`. This creates the junction and does the real marketplace removal on the host.
-- Then, from `plugins/tk-studio/lib`, run `TK_STUDIO_LIVE_CLAUDE=1 uv run python -m unittest tests.test_installer_live -v`. This is the Windows forward-slash probe.
+- Run `uv run --project tools/installer/cli tk-studio install --link C:/GitHub/tk-studio` (the junction and the real marketplace removal).
+- Then, from `plugins/tk-studio/lib`, run `TK_STUDIO_LIVE_CLAUDE=1 uv run python -m unittest tests.test_installer_live -v` (the Windows forward-slash probe).
 
 **Residual risks:**
-- Until 25.3 lands, the drift check's plugin plane still reads `installed_plugins.json`. A box that runs the real leg (marketplace copy removed) will show plugin-plane drift.
-- 25.3 and 25.5 must judge only `skills/tk-studio` and ignore every `.tk-studio.*` sibling.
-- README line 61 and the agent-PC runbook still describe the `extraKnownMarketplaces` prompt this story removed. That rewrite is 25.7's.
-- The leg checks only the roster fields it consumes. 25.4 routes roster reads through the landed guard.
-- `tools/installer/cli/uv.lock` is not committed: `uv run --project` regenerates it, and this mount refuses the venv symlink. 25.4 decides.
+- 25.5's doctor must check the Claude Code floor (`requires.claude-code`). Until it does, the leg removes marketplace copies without checking that the installed Claude Code can load a skills-dir plugin.
+- Two install runs that overlap share `.tk-studio.new`; there is no lock.
+- 25.3 and 25.5 must judge only `skills/tk-studio`, ignore every `.tk-studio.*` sibling, and read the new `marketplace.failed[]` row shape.
+- The earlier risks still stand:
+  - Plugin-plane drift until 25.3.
+  - README and the runbook still describe the `extraKnownMarketplaces` prompt; that is 25.7's.
+  - The narrow roster check stays until 25.4.
+  - `uv.lock` is not committed.
 
 Studio: activated as developer; working set bmm, tea, bmb, bmad-loop, gds; drift clean; routing implementer=claude-opus-5-5 reviewers=claude-opus-5-5 consult=claude-opus-5-5; knowledge spine absent
 Baseline: b16814f6aab8ab53a88d2083570178a7bd923bcc (branch loop/epic-25)
 
-DRIFT: digest and zip-path checks run before any existing folder is touched — a refusal then changes nothing — affects: none
-DRIFT: refusal vocabulary extended (RosterEntryInvalid, RosterUnreadable, RosterInvalid, DownloadFailed, PluginZipInvalid, SwapFailed, LinkFailed, UnsupportedUrl, MarketplaceRemovalFailed, FolderUnwritable, CleanupFailed, UnexpectedOSError; UsageError exits 2), reason "<Name>: <detail>", project_entries carry scope — the spec named only examples — affects: 25-4, 25-5
-DRIFT: old previous set aside as `.tk-studio.retired` and deleted only after the final rename; new result field `retired_left` — AC1 keeps the previous across a failed swap, which the spec's write order could not — affects: 25-3, 25-5
-DRIFT: `claude plugin eval` tried on an archived copy of the plugin tree in a temp skills folder, not the leg-written folder — eval needs --trust-plugin and is a one-time kb record — affects: none
-DRIFT: doctor verification ran with UV_PROJECT_ENVIRONMENT outside the mount; no uv.lock committed — the mount refuses the venv symlink — affects: 25-4
+DRIFT: UnexpectedError last-resort reason (exit 1); marketplace.failed[] gains {command: null, file, error} rows, a skipped result can carry failed, and partial triggers on any non-empty failed[]; CleanupFailed also covers an unrestorable lone .tk-studio.retired; old previous set aside only when a target is superseded and a lone retired is restored to previous — follow-up review patches for AC1/AC3 and the AD-11 JSON line — affects: 25-3, 25-4, 25-5

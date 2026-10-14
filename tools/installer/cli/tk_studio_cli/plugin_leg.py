@@ -36,6 +36,7 @@ SKILLS_DIR_SUFFIX = "@skills-dir"
 DEFAULT_ROSTER_URL = ("https://raw.githubusercontent.com/thkennedy/tk-studio/"
                       "main/tools/installer/rosters/{channel}.json")
 CHANNELS = ("stable", "latest")
+RUNNER_TIMEOUT = 120              # seconds per `claude plugin …` call
 
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 _SEMVER = re.compile(r"\d+\.\d+\.\d+")
@@ -89,12 +90,15 @@ def default_fetch(url: str) -> bytes:
 
 
 def default_runner(args: list) -> subprocess.CompletedProcess:
-    """Raises FileNotFoundError when ``claude`` is not on PATH."""
+    """Raises FileNotFoundError when ``claude`` is not on PATH, and
+    subprocess.TimeoutExpired when it stalls (stdin is closed, so a prompt
+    cannot wait for input)."""
     exe = shutil.which(args[0])
     if exe is None:
         raise FileNotFoundError(args[0])
     return subprocess.run([exe, *args[1:]], capture_output=True, text=True,
-                          encoding="utf-8", errors="replace")
+                          encoding="utf-8", errors="replace",
+                          stdin=subprocess.DEVNULL, timeout=RUNNER_TIMEOUT)
 
 
 # --- roster -----------------------------------------------------------------
@@ -160,7 +164,7 @@ def is_link(path: Path) -> bool:
     isjunction = getattr(os.path, "isjunction", None)  # 3.12+
     if isjunction is not None:
         return isjunction(path)
-    if sys.platform == "win32" and path.exists():
+    if sys.platform == "win32" and os.path.lexists(path):  # dangling too
         try:
             os.readlink(path)
             return True
@@ -243,14 +247,24 @@ def _prepare(target: Path, staging: Path) -> None:
 
 
 def _swap(staging: Path, target: Path, previous: Path) -> dict:
-    """Swap the fully built ``staging`` in. The old previous is set aside
-    as ``.tk-studio.retired`` and deleted only once the swap has succeeded,
-    so any failed run leaves target and previous as they were.
+    """Swap the fully built ``staging`` in. When a target is superseded,
+    the old previous is set aside as ``.tk-studio.retired`` and deleted only
+    once the swap has succeeded, so any failed run leaves target and
+    previous as they were; with no target, previous is left alone.
     Returns ``{"had": bool, "retired_left": str|None}``."""
     retired = previous.parent / RETIRED
-    _must_remove(retired)                       # stale, from a crashed run
+    if retired.exists() or is_link(retired):
+        if previous.exists() or is_link(previous):
+            _must_remove(retired)               # stale, from a crashed run
+        else:
+            # A failed restore left the only previous here: put it back.
+            try:
+                _rename(retired, previous)
+            except OSError as exc:
+                raise Refusal("CleanupFailed", f"could not restore {retired} "
+                              f"-> {previous}: {exc}") from None
     had = target.exists() or is_link(target)
-    old_prev = previous.exists() or is_link(previous)
+    old_prev = had and (previous.exists() or is_link(previous))
 
     def fail(detail: str, steps: list) -> Refusal:
         problems = []
@@ -345,9 +359,10 @@ def write_from_zip(entry: dict, config: Path, fetch: Fetcher) -> dict:
     try:
         with zf:
             zf.extractall(staging)
-    except (OSError, zipfile.BadZipFile) as exc:
+    except Exception as exc:  # noqa: BLE001 — zlib.error, encrypted, …
         _try_remove(staging)
-        raise Refusal("PluginZipInvalid", f"extract failed: {exc}") from None
+        raise Refusal("PluginZipInvalid", f"extract failed: "
+                      f"{type(exc).__name__}: {exc}") from None
     found = _manifest_version(staging)
     if found != version:
         _try_remove(staging)
@@ -389,45 +404,65 @@ def _is_ours(plugin_key) -> bool:
         and plugin_key.split("@", 1)[0] == PLUGIN_NAME
 
 
-def _installed_records(config: Path) -> dict:
-    data, _ = _read_json(config / "plugins" / "installed_plugins.json") \
-        if (config / "plugins" / "installed_plugins.json").is_file() \
-        else (None, None)
+def _installed_records(config: Path) -> tuple[dict, str | None]:
+    """Our records, and the read error when the file exists but is
+    unreadable, invalid JSON or has no ``plugins`` object."""
+    path = config / "plugins" / "installed_plugins.json"
+    if not path.is_file():
+        return {}, None
+    data, err = _read_json(path)
+    if err:
+        return {}, err
     plugins = data.get("plugins") if isinstance(data, dict) else None
     if not isinstance(plugins, dict):
-        return {}
+        return {}, 'no "plugins" object'
     return {k: [e for e in v if isinstance(e, dict)]
-            for k, v in plugins.items() if _is_ours(k) and isinstance(v, list)}
+            for k, v in plugins.items()
+            if _is_ours(k) and isinstance(v, list)}, None
 
 
 def marketplace_cleanup(config: Path, runner: Runner) -> dict:
     """Uninstall every user-scope ``tk-studio@<m>`` and remove the
-    ``tk-studio`` marketplace — only through ``claude plugin …``."""
-    commands = []
-    for key, entries in sorted(_installed_records(config).items()):
+    ``tk-studio`` marketplace — only through ``claude plugin …``. A record
+    file that exists but cannot be read is a failed entry naming the file
+    (a copy may still shadow the folder); the other file is still used."""
+    commands, unreadable = [], []
+    records, err = _installed_records(config)
+    if err:
+        unreadable.append({"command": None, "file": str(
+            config / "plugins" / "installed_plugins.json"), "error": err})
+    for key, entries in sorted(records.items()):
         if key.endswith(SKILLS_DIR_SUFFIX):     # the folder itself, not a copy
             continue
         if any(e.get("scope") == "user" for e in entries):
             commands.append(["claude", "plugin", "uninstall", key,
                              "--scope", "user"])
     known_file = config / "plugins" / "known_marketplaces.json"
-    known, _ = _read_json(known_file) if known_file.is_file() else (None, None)
-    if isinstance(known, dict) and PLUGIN_NAME in known:
+    known, err = _read_json(known_file) if known_file.is_file() \
+        else ({}, None)
+    if err or not isinstance(known, dict):
+        unreadable.append({"command": None, "file": str(known_file),
+                           "error": err or "not a JSON object"})
+    elif PLUGIN_NAME in known:
         commands.append(["claude", "plugin", "marketplace", "remove",
                          PLUGIN_NAME])
-    if not commands:
+    if not commands and not unreadable:
         return {"status": "clean", "removed": []}
-    removed, failed = [], []
+    removed, failed = [], list(unreadable)
     for cmd in commands:
         text = " ".join(cmd)
         try:
             proc = runner(cmd)
         except FileNotFoundError:
-            return {"status": "skipped", "removed": removed,
-                    "reason": "claude not on PATH — marketplace copies left: "
-                              + ", ".join(" ".join(c) for c in commands
-                                          if " ".join(c) not in removed)}
-        except OSError as exc:
+            skipped = {"status": "skipped", "removed": removed,
+                       "reason": "claude not on PATH — marketplace copies "
+                                 "left: " + ", ".join(
+                                     " ".join(c) for c in commands
+                                     if " ".join(c) not in removed)}
+            if unreadable:
+                skipped["failed"] = unreadable
+            return skipped
+        except (OSError, subprocess.TimeoutExpired) as exc:
             failed.append({"command": text, "exit": None,
                            "error": f"{type(exc).__name__}: {exc}"})
             continue
@@ -446,7 +481,10 @@ def project_entries(config: Path, env: Mapping[str, str] | None = None
     out: list[dict] = []
     projects: set[str] = set()
     installed_file = config / "plugins" / "installed_plugins.json"
-    for key, entries in sorted(_installed_records(config).items()):
+    records, _ = _installed_records(config)   # an unreadable file lists none
+    for key, entries in sorted(records.items()):
+        if key.endswith(SKILLS_DIR_SUFFIX):     # the folder itself, not a copy
+            continue
         for e in entries:
             if e.get("scope") == "user":
                 continue
@@ -480,7 +518,8 @@ def project_entries(config: Path, env: Mapping[str, str] | None = None
                 continue
             enabled = data.get("enabledPlugins")
             if isinstance(enabled, dict):
-                for key in sorted(k for k in enabled if _is_ours(k)):
+                for key in sorted(k for k in enabled if _is_ours(k) and
+                                  not k.endswith(SKILLS_DIR_SUFFIX)):
                     out.append({"project": project, "file": str(settings),
                                 "key": f"enabledPlugins.{key}"})
             extra = data.get("extraKnownMarketplaces")
@@ -526,10 +565,11 @@ def run_leg(verb: str, *, roster: str | None = None, channel: str = "stable",
                   "reason": f"no skills-dir folder at {target} — "
                             "marketplace copies kept"}
     status, reason = "complete", None
-    if market["status"] == "failed":
+    if market.get("failed"):
         status = "partial"
         reason = "MarketplaceRemovalFailed: " + ", ".join(
-            f"{f['command']} ({f.get('error') or 'exit %s' % f['exit']})"
+            f"{f['command'] or 'unreadable ' + f['file']} "
+            f"({f.get('error') or 'exit %s' % f.get('exit')})"
             for f in market["failed"])
     artifacts = [leg["folder"]] if "folder" in leg else []
     return _result(verb, status, reason, artifacts, **leg,

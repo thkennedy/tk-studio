@@ -15,6 +15,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+import zlib
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
@@ -674,7 +675,226 @@ class LastLineJson(LegCase):
                 result, code = self.main_json(argv)
                 self.assertEqual(result["status"], "blocked")
                 self.assertTrue(result["reason"].startswith("UsageError:"))
-                self.assertNotEqual(code, 0)
+                self.assertEqual(code, 2)
+
+
+class PreviousKeptWithoutTarget(LegCase):
+    """Follow-up P1: previous is the only fallback when nothing supersedes."""
+
+    def setUp(self):
+        super().setUp()
+        self.install("0.2.14")
+        self.install("0.2.15")
+        self.retired = self.config / "skills" / ".tk-studio.retired"
+
+    def test_previous_untouched_when_target_absent(self):
+        plugin_leg.remove_path(self.target)
+        before = self.snapshot(self.previous)
+        result, code = self.install("0.2.16")
+        self.assertEqual((code, result["status"]), (0, "complete"))
+        self.assertEqual(self.folder_version(self.target), "0.2.16")
+        self.assertEqual(self.snapshot(self.previous), before)
+        self.assertIsNone(result["previous"])
+        self.assertFalse(self.retired.exists())
+
+    def test_lone_retired_restored_as_previous(self):
+        # A failed restore left the only previous (0.2.14) at retired.
+        os.rename(self.previous, self.retired)
+        real = plugin_leg._rename
+
+        def locked(src, dst):
+            if Path(src).name == "tk-studio":
+                raise OSError("simulated: target locked")
+            real(src, dst)
+
+        with mock.patch.object(plugin_leg, "_rename", locked):
+            result, code = self.install("0.2.16")
+        self.assertEqual((code, result["status"]), (1, "blocked"))
+        # retired went back to previous before the swap; the failed swap
+        # restored it there, so the folder is not lost
+        self.assertEqual(self.folder_version(self.previous), "0.2.14")
+        self.assertFalse(self.retired.exists())
+        os.rename(self.previous, self.retired)
+        result, code = self.install("0.2.16")
+        # success: previous = the superseded target, the old one cleaned
+        self.assertEqual((code, result["status"]), (0, "complete"))
+        self.assertNotIn("retired_left", result)
+        self.assertEqual(self.folder_version(self.target), "0.2.16")
+        self.assertEqual(self.folder_version(self.previous), "0.2.15")
+        self.assertFalse(self.retired.exists())
+
+    def test_lone_retired_restore_failure_is_named(self):
+        os.rename(self.previous, self.retired)
+        real = plugin_leg._rename
+
+        def broken(src, dst):
+            if Path(src).name == ".tk-studio.retired":
+                raise OSError("simulated")
+            real(src, dst)
+
+        with mock.patch.object(plugin_leg, "_rename", broken):
+            result, code = self.install("0.2.16")
+        self.assertEqual((code, result["status"]), (1, "blocked"))
+        self.assertTrue(result["reason"].startswith("CleanupFailed:"))
+        self.assertEqual(self.folder_version(self.retired), "0.2.14")
+        self.assertEqual(self.folder_version(self.target), "0.2.15")
+
+
+class ExtractErrorsAreNamed(LegCase):
+    """Follow-up P2: any extract error is PluginZipInvalid; any exception
+    from run() still ends in one blocked JSON line."""
+
+    def test_non_oserror_extract_failures_refused(self):
+        self.install("0.2.15")
+        before = self.snapshot(self.target)
+        for exc in (zlib.error("invalid block type"),
+                    NotImplementedError("compression type 99"),
+                    RuntimeError("File is encrypted")):
+            with self.subTest(exc=type(exc).__name__):
+                def half(path, *a, **k):
+                    Path(path).mkdir(parents=True)
+                    (Path(path) / "partial").write_text("x", encoding="utf-8")
+                    raise exc
+
+                with mock.patch.object(zipfile.ZipFile, "extractall",
+                                       side_effect=half):
+                    result, code = self.install("0.2.16")
+                self.assertEqual((code, result["status"]), (1, "blocked"))
+                self.assertTrue(result["reason"].startswith(
+                    "PluginZipInvalid:"), result["reason"])
+                self.assertIn(type(exc).__name__, result["reason"])
+                self.assertFalse(self.staging.exists())
+                self.assertEqual(self.snapshot(self.target), before)
+
+    def test_main_prints_blocked_line_for_any_exception(self):
+        Marketplace.seed_marketplace(self)
+        argv, fetch = LastLineJson.install_argv(self)
+
+        def broken(args):
+            raise ValueError("bad runner")
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = cli_main.main(argv, fetch=fetch, runner=broken, env=self.env)
+        result = json.loads(out.getvalue().strip().splitlines()[-1])
+        self.assertEqual((result["status"], code), ("blocked", 1))
+        self.assertTrue(result["reason"].startswith(
+            "UnexpectedError: ValueError:"), result["reason"])
+        self.assertEqual(result["intent"], "tk-studio-cli-install")
+
+
+class DanglingJunction(unittest.TestCase):
+    """Follow-up P4: Windows before 3.12 — a dangling junction is a link."""
+
+    def test_dangling_junction_detected_without_isjunction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            link = Path(tmp) / "tk-studio"
+            os.symlink(Path(tmp) / "moved-checkout", link,
+                       target_is_directory=True)
+            self.assertFalse(link.exists(), "dangling")
+            with mock.patch.object(plugin_leg, "sys",
+                                   mock.Mock(platform="win32")), \
+                    mock.patch.object(os.path, "isjunction", None,
+                                      create=True), \
+                    mock.patch.object(Path, "is_symlink", return_value=False):
+                self.assertTrue(plugin_leg.is_link(link))
+
+
+class SkillsDirKeyNotReported(LegCase):
+    """Follow-up P5: tk-studio@skills-dir is not a project marketplace copy."""
+
+    def test_project_skills_dir_key_not_listed(self):
+        proj = self.tmp / "proj"
+        (proj / ".claude").mkdir(parents=True)
+        settings = proj / ".claude" / "settings.json"
+        settings.write_text(json.dumps({"enabledPlugins": {
+            "tk-studio@tk-studio": True, "tk-studio@skills-dir": False}}),
+            encoding="utf-8")
+        plugins = self.config / "plugins"
+        plugins.mkdir()
+        (plugins / "installed_plugins.json").write_text(json.dumps(
+            {"version": 2, "plugins": {"tk-studio@skills-dir": [
+                {"scope": "project", "projectPath": str(proj)}]}}),
+            encoding="utf-8")
+        (self.config / ".claude.json").write_text(json.dumps(
+            {"projects": {str(proj): {}}}), encoding="utf-8")
+        pinned = (settings.stat().st_mtime_ns, settings.read_bytes())
+        result, code = self.install("0.2.16")
+        self.assertEqual(code, 0)
+        self.assertEqual([e.get("key") for e in result["project_entries"]],
+                         ["enabledPlugins.tk-studio@tk-studio"])
+        self.assertEqual((settings.stat().st_mtime_ns, settings.read_bytes()),
+                         pinned)
+
+
+class RunnerTimeout(LegCase):
+    """Follow-up P6: a stalled claude is a failed command, never a hang."""
+
+    def test_timeout_is_partial_naming_command(self):
+        Marketplace.seed_marketplace(self)
+
+        def stalled(args):
+            raise subprocess.TimeoutExpired(args, plugin_leg.RUNNER_TIMEOUT)
+
+        argv, fetch = LastLineJson.install_argv(self)
+        result, code = cli_main.run(argv, fetch=fetch, runner=stalled,
+                                    env=self.env)
+        self.assertEqual((code, result["status"]), (0, "partial"))
+        self.assertTrue(result["reason"].startswith("MarketplaceRemovalFailed:"))
+        self.assertIn(Marketplace.UNINSTALL, result["reason"])
+        self.assertIn("TimeoutExpired", result["reason"])
+        self.assertIsNone(result["marketplace"]["failed"][0]["exit"])
+
+    def test_default_runner_bounds_and_closes_stdin(self):
+        with mock.patch.object(plugin_leg.shutil, "which",
+                               return_value="/fake/claude"), \
+                mock.patch.object(plugin_leg.subprocess, "run") as run:
+            plugin_leg.default_runner(["claude", "plugin", "list"])
+        kwargs = run.call_args.kwargs
+        self.assertEqual(kwargs["timeout"], plugin_leg.RUNNER_TIMEOUT)
+        self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
+
+
+class UnreadableRecordFiles(LegCase):
+    """Follow-up P7: an unreadable record file is partial, never clean."""
+
+    def test_corrupt_installed_plugins_is_partial(self):
+        Marketplace.seed_marketplace(self)
+        installed = self.config / "plugins" / "installed_plugins.json"
+        installed.write_text("{not json", encoding="utf-8")
+        result, code = self.install("0.2.16")
+        self.assertEqual((code, result["status"]), (0, "partial"))
+        self.assertTrue(result["reason"].startswith("MarketplaceRemovalFailed:"))
+        self.assertIn(str(installed), result["reason"])
+        # the other file is still used
+        self.assertEqual([" ".join(c) for c in self.claude.calls],
+                         [Marketplace.REMOVE])
+        self.assertEqual(self.folder_version(self.target), "0.2.16")
+        self.assertIsInstance(result["project_entries"], list)
+
+    def test_corrupt_known_marketplaces_still_uninstalls(self):
+        Marketplace.seed_marketplace(self)
+        known = self.config / "plugins" / "known_marketplaces.json"
+        known.write_text("[]", encoding="utf-8")
+        result, code = self.install("0.2.16")
+        self.assertEqual((code, result["status"]), (0, "partial"))
+        self.assertEqual([" ".join(c) for c in self.claude.calls],
+                         [Marketplace.UNINSTALL])
+        self.assertIn(Marketplace.UNINSTALL, result["marketplace"]["removed"])
+        self.assertIn("known_marketplaces.json", result["reason"])
+
+    def test_no_plugins_object_and_no_claude_still_partial(self):
+        plugins = self.config / "plugins"
+        plugins.mkdir()
+        (plugins / "installed_plugins.json").write_text(
+            json.dumps({"plugins": []}), encoding="utf-8")
+        (plugins / "known_marketplaces.json").write_text(
+            json.dumps({"tk-studio": {}}), encoding="utf-8")
+        self.claude.missing = True
+        result, code = self.install("0.2.16")
+        self.assertEqual((code, result["status"]), (0, "partial"))
+        self.assertEqual(result["marketplace"]["status"], "skipped")
+        self.assertIn("installed_plugins.json", result["reason"])
 
 
 class CommittedRoster(unittest.TestCase):
