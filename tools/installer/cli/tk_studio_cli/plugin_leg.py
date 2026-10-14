@@ -26,6 +26,8 @@ import zipfile
 from pathlib import Path
 from typing import Callable, Mapping
 
+from tk_studio_cli import roster_guard
+
 PLUGIN_NAME = "tk-studio"
 TAG_PREFIX = "tk-studio--v"
 FOLDER = "tk-studio"
@@ -38,9 +40,6 @@ DEFAULT_ROSTER_URL = ("https://raw.githubusercontent.com/thkennedy/tk-studio/"
                       "main/tools/installer/rosters/{channel}.json")
 CHANNELS = ("stable", "latest")
 RUNNER_TIMEOUT = 120              # seconds per `claude plugin …` call
-
-_HEX64 = re.compile(r"[0-9a-f]{64}")
-_SEMVER = re.compile(r"\d+\.\d+\.\d+")
 
 Fetcher = Callable[[str], bytes]
 Runner = Callable[[list], "subprocess.CompletedProcess"]
@@ -111,7 +110,25 @@ def default_runner(args: list, env: Mapping[str, str] | None = None
 
 # --- roster -----------------------------------------------------------------
 
+# the guard knows only this CLI's components and schema: an older CLI is
+# blocked by a newer roster before its own self-update leg can run
+NEWER_ROSTER = ("A roster newer than this CLI needs a newer CLI — re-run the "
+                "bootstrap (tools/installer/install.ps1 or install.sh)")
+
+
+def _newer_roster_problem(problem: str) -> bool:
+    """The guard's texts for what a newer roster carries and this CLI does
+    not know: an unsupported ``schema`` or an unknown component. A typed
+    digest, tag or URL is the roster's fault; a new CLI changes nothing."""
+    return problem.startswith("schema: unsupported ") \
+        or problem.endswith(": unknown component")
+
+
 def load_roster(source: str | None, channel: str, fetch: Fetcher) -> dict:
+    """The roster, validated by the one guard (``roster_guard``, the
+    byte-identical copy of the plugin lib's). Problems confined to
+    component entries refuse ``RosterEntryInvalid``; any roster-level
+    problem refuses ``RosterInvalid``. Each names every problem."""
     src = source or DEFAULT_ROSTER_URL.format(channel=channel)
     try:
         if "://" in src:
@@ -123,37 +140,20 @@ def load_roster(source: str | None, channel: str, fetch: Fetcher) -> dict:
         raise
     except Exception as exc:  # noqa: BLE001 — any read failure is named
         raise Refusal("RosterUnreadable", f"{src}: {exc}") from None
-    if not isinstance(roster, dict):
-        raise Refusal("RosterInvalid", f"{src}: roster is not a JSON object")
-    if not isinstance(roster.get("components"), dict):
-        raise Refusal("RosterInvalid", f"{src}: components missing")
+    problems = roster_guard.roster_problems(roster)
+    if problems:
+        entry_only = all(p.startswith("components.") for p in problems)
+        hint = ". " + NEWER_ROSTER \
+            if any(_newer_roster_problem(p) for p in problems) else ""
+        raise Refusal("RosterEntryInvalid" if entry_only else "RosterInvalid",
+                      f"{src}: " + "; ".join(problems) + hint)
     return roster
 
 
 def plugin_entry_problems(entry) -> list[str]:
-    """The leg checks only the fields it consumes, each by name (25.4
-    routes every roster read through the 25.1 guard)."""
-    where = "components.plugin"
-    if not isinstance(entry, dict):
-        return [f"{where}: not an object {{tag, url, sha256}}"]
-    problems = [f"{where}.{f}: missing" for f in ("tag", "url", "sha256")
-                if f not in entry]
-    tag = entry.get("tag")
-    tag_ok = isinstance(tag, str) and tag.startswith(TAG_PREFIX) \
-        and bool(_SEMVER.fullmatch(tag[len(TAG_PREFIX):]))
-    if "tag" in entry and not tag_ok:
-        problems.append(f"{where}.tag: {tag!r} is not {TAG_PREFIX}X.Y.Z")
-    if "sha256" in entry and not (isinstance(entry["sha256"], str)
-                                  and _HEX64.fullmatch(entry["sha256"])):
-        problems.append(f"{where}.sha256: {entry['sha256']!r} is not 64 "
-                        "lowercase hex")
-    if "url" in entry:
-        url = entry["url"]
-        if not isinstance(url, str):
-            problems.append(f"{where}.url: not a string")
-        elif tag_ok and tag not in url:
-            problems.append(f"{where}.url: does not contain the tag {tag}")
-    return problems
+    """The plugin entry's problems, from the guard's own entry check."""
+    return roster_guard._release_entry_problems(
+        "components.plugin", TAG_PREFIX, entry, None, False)
 
 
 def check_plugin_entry(entry) -> str:

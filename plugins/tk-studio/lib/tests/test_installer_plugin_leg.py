@@ -178,7 +178,7 @@ class WriteFromZip(LegCase):
         cases = {
             "sha256: missing": {k: v for k, v in good.items() if k != "sha256"},
             "sha256": dict(good, sha256=good["sha256"][:40]),
-            "url: does not contain the tag": dict(
+            "url: names tag": dict(
                 good, url="https://github.com/thkennedy/tk-studio/releases/"
                           "download/other/tk-studio.zip"),
             "tag": dict(good, tag="v0.2.16"),

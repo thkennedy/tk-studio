@@ -50,6 +50,58 @@ No admin rights are required on Windows; the store uses directory junctions.
 
 ## Quick start
 
+### Bootstrap (one command)
+
+One script installs the pinned `uv` and the small self-updating `tk-studio` meta-CLI, puts only the studio's `bin` folder on your PATH and turns on long paths for git. It never clones anything; re-running it is the update. The meta-CLI then installs and updates the apps the roster ships (`tk-studio install`, `tk-studio update`, `tk-studio status`).
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/thkennedy/tk-studio/main/tools/installer/install.ps1 | iex
+```
+
+Linux / macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/thkennedy/tk-studio/main/tools/installer/install.sh | sh
+```
+
+Published SHA-256 of each script:
+
+| Script | SHA-256 |
+|---|---|
+| `tools/installer/install.ps1` | `a386d79989b55e87616714064f2ede8dc7c6044d6beefaf5ce2d5e3a55073140` |
+| `tools/installer/install.sh` | `f3bb442100401316e874d9b2c3fddf5f9670a258af575f57bad13ef4c81d672c` |
+
+To verify before running, download, check, then run:
+
+```powershell
+irm https://raw.githubusercontent.com/thkennedy/tk-studio/main/tools/installer/install.ps1 -OutFile install.ps1
+(Get-FileHash -Algorithm SHA256 install.ps1).Hash   # must equal the install.ps1 row above
+powershell -ExecutionPolicy Bypass -File .\install.ps1   # Windows PowerShell 5.1 (stock); pwsh works too
+```
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/thkennedy/tk-studio/main/tools/installer/install.sh
+echo "f3bb442100401316e874d9b2c3fddf5f9670a258af575f57bad13ef4c81d672c  install.sh" | sha256sum -c -        # Linux
+echo "f3bb442100401316e874d9b2c3fddf5f9670a258af575f57bad13ef4c81d672c  install.sh" | shasum -a 256 -c -    # macOS (no sha256sum)
+sh install.sh
+```
+
+Both take a channel (default `stable`) and a roster override. With the one-liners, pass them through the environment, since `iex` takes no arguments:
+
+```powershell
+$env:TK_STUDIO_CHANNEL = 'latest'; $env:TK_STUDIO_ROSTER = '<path or https URL>'
+irm https://raw.githubusercontent.com/thkennedy/tk-studio/main/tools/installer/install.ps1 | iex
+```
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/thkennedy/tk-studio/main/tools/installer/install.sh | TK_STUDIO_CHANNEL=latest sh
+# or: ... | sh -s -- --channel latest --roster <path or https URL>
+```
+
+A downloaded script also takes `-Channel` / `-Roster` (`powershell -ExecutionPolicy Bypass -File .\install.ps1 -Channel latest`) or `--channel` / `--roster`. Through `iex` a refusal throws `<Name>: <detail>` and leaves the window open; run as a file it exits 1. Until the first `cli--v` release is recorded in the roster, the bootstrap stops with `CliNotShipped`.
+
 ### 1. Install the plugin
 
 **Option A — clone this repo (recommended for the studio's own developers/testers):**

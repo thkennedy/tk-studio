@@ -148,6 +148,14 @@
     .claude-plugin/plugin.json, shadowed, error with no case); an error is a failed read with
     its path, not a judged case; a foreign marketplace catalog is a note, never a failure;
     driver-contract section 6 at 0.1.19 is the reference.
+    Replan (25-4 reconcile, 2026-10-14): extend the landed doctor (main.py, apps.doctor_fields,
+    source_checkout's process-free .lnk read, probe_url/default_probe), never a second one; reuse
+    the landed refusal names (RosterInvalid roster-level, RosterEntryInvalid entry-level) in the
+    fixes; report a leftover <root>/tools/cli-update.cmd or its log, stale .previous slots, and
+    DW-12's state (a served studio-web path that no longer exists); read the landed leg vocabulary
+    (restarted, scheduled, per-leg stale, a blocked leg with no status = planned, not applied).
+    Size (gate, 2026-10-14): band L, oversize risk; halt and record a deviation if the Files list
+    in plans/25-5.md grows past the L band (a bmad-correct-course split is the operator's call).
 
 - id: "25-6-sandboxes-read-the-host-skills-folder"
   title: "Sandboxes Read the Host Skills Folder"
@@ -196,3 +204,10 @@
     `25-7-the-docs-and-the-release-say-the-installer-is-the-way-in-*.md`, and a file
     named `25-7-the-docs-and-the-release-say-the-installer-is-the-way-in.md` is read as
     pending (loop deficiency 1, story 21-6).
+    Replan (25-4 reconcile, 2026-10-14): build the README install section on the landed
+    "Bootstrap (one command)" subsection: the one-liners pass TK_STUDIO_CHANNEL/TK_STUDIO_ROSTER
+    (install.ps1 has no param block, irm | iex safe); keep each script's published SHA-256 and the
+    stock-OS verify commands (powershell -ExecutionPolicy Bypass -File, shasum -a 256) so
+    test_installer_bootstrap.py stays green; document install --link (plugin leg only) under the
+    developers-who-clone note; the 0.3.0 release needs components.cli from the operator's
+    cli--v0.1.0 cut first, recorded as unverifiable if still absent, never fabricated.

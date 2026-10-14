@@ -1,3 +1,7 @@
 # Measurement ledgers are byte-stable JSONL — never CRLF-converted, so the
 # append-only diff discipline (AD-12) survives every platform.
 measurements/*.jsonl text eol=lf
+
+# The bootstrap scripts are served raw and their SHA-256 is published in the
+# README: checkout must never rewrite their bytes (Story 25.4).
+tools/installer/install.* text eol=lf
