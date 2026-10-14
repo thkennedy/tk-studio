@@ -4,10 +4,10 @@ type: architecture-spine
 purpose: build-substrate
 altitude: initiative
 paradigm: ports-and-adapters (hexagonal) over a plain-files data plane
-scope: tk-studio v1 target state — repo layout, config schema, planning-data adapter contract + canonical interchange shape, store paths, ClaudeOS driver contract, rulings O2/O3/O4/O5/O8 under the O1 composite-distribution ruling and the four pillars (Lockstep, Taxonomy, Recommendation, Operations)
+scope: tk-studio v1 target state — repo layout, config schema, planning-data adapter contract + canonical interchange shape, store paths, the driver contract, rulings O2/O3/O4/O5/O8 under the O1 composite-distribution ruling and the four pillars (Lockstep, Taxonomy, Recommendation, Operations); AD-21 (one repository, per-app releases, the installer and the skills-dir plugin, 2026-10-14) and AD-22 (engagements tracked on Atlassian; comments and the inbox as the human channel, 2026-10-14)
 status: final
 created: '2026-07-26'
-updated: '2026-07-26'
+updated: '2026-10-14'
 binds: [Lockstep, Taxonomy, Recommendation, Operations]
 sources:
   - ../../briefs/brief-tk-studio-2026-07-25/brief.md
@@ -37,7 +37,7 @@ companions: []
 
 - **Binds:** all — Lockstep
 - **Prevents:** per-developer unmanaged installs; a BMad fork
-- **Rule:** tk-studio ships as a Claude Code plugin from this repo's git marketplace (`extraKnownMarketplaces` auto-prompt on folder trust). The BMad base is never vendored or forked: a committed `bmad.lock` pins the core version, the module set **with per-module version pins** (external modules — bmb, cis, gds, tea, wds, bmad-loop — version and channel independently of core), and install flags; install/update always runs the upstream installer at the pin (`npx bmad-method@<pin> install`, non-interactive). No bootstrap script in the repo (ruled 2026-07-26): clone + folder trust auto-prompts the plugin install, and the base install is plain `npx` — `tk install` is a plugin skill only. Base updates go through the base-update skill: bump the pin → run the upstream installer → open an **integration PR** for review (the reviewable upstream diff, without owning a fork). Ruled 2026-07-26 as the working answer: not re-litigated pre-build; revised only on measurement-loop evidence through the AD-12 consolidation channel.
+- **Rule:** tk-studio ships as a Claude Code plugin from this repo's git marketplace (`extraKnownMarketplaces` auto-prompt on folder trust). The BMad base is never vendored or forked: a committed `bmad.lock` pins the core version, the module set **with per-module version pins** (external modules — bmb, cis, gds, tea, wds, bmad-loop — version and channel independently of core), and install flags; install/update always runs the upstream installer at the pin (`npx bmad-method@<pin> install`, non-interactive). No bootstrap script in the repo (ruled 2026-07-26): clone + folder trust auto-prompts the plugin install, and the base install is plain `npx` — `tk install` is a plugin skill only. Base updates go through the base-update skill: bump the pin → run the upstream installer → open an **integration PR** for review (the reviewable upstream diff, without owning a fork). Ruled 2026-07-26 as the working answer: not re-litigated pre-build; revised only on measurement-loop evidence through the AD-12 consolidation channel. **Amended 2026-10-14 by AD-21:** the "no bootstrap script" clause is withdrawn (one installer is a hard gate, ruled 2026-10-09); the git marketplace is no longer the user delivery path, the installer-written skills-dir plugin is (O5, ruled 2026-10-09); the `bmad.lock` discipline, the zero-fork line and the base-update motion are unchanged.
 
 ### AD-2 — Layer dependency direction
 
@@ -84,7 +84,7 @@ graph TD
 
 - **Binds:** planning adapter roadmap; Operations headless paths
 - **Prevents:** betting the first integration on an unofficial bridge
-- **Rule:** O3 ruling — the first external planning backend is **Jira (Atlassian Cloud)** through the official Atlassian Rovo MCP Server (formerly "Remote MCP"), shipped only after the local backends are stable, via the designed migration (AD-16). Headless flows MUST authenticate with API tokens, not OAuth (legacy-council ISS-008: MCP OAuth cannot complete non-interactively); API-token access is an org-admin-enabled toggle — verifying it is enabled is part of the headless auth preflight (AD-11). The epic→Epic / story→Story / task→Sub-task mapping is the default — confirm against the target org's issue-type scheme at adapter build. Confluence publishing of `kb/` and Linear are later adapters under the same contract.
+- **Rule:** O3 ruling — the first external planning backend is **Jira (Atlassian Cloud)** through the official Atlassian Rovo MCP Server (formerly "Remote MCP"), shipped only after the local backends are stable, via the designed migration (AD-16). Headless flows MUST authenticate with API tokens, not OAuth (legacy-council ISS-008: MCP OAuth cannot complete non-interactively); API-token access is an org-admin-enabled toggle — verifying it is enabled is part of the headless auth preflight (AD-11). The epic→Epic / story→Story / task→Sub-task mapping is the default — confirm against the target org's issue-type scheme at adapter build. Confluence publishing of `kb/` and Linear are later adapters under the same contract. **Amended 2026-10-14 by AD-22:** Confluence is no longer later; every studio project binds Jira and Confluence at onboarding, and the adapter uses the REST API with API tokens (as built in Epic 8) unless the Rovo MCP server is shown to be needed. Linear stays later.
 
 ### AD-8 — Cross-project knowledge stays out of v1 (O4)
 
@@ -120,7 +120,7 @@ graph TD
 
 - **Binds:** activation front door; onboarding
 - **Prevents:** silent version skew (the original disease); an activation that mutates the machine
-- **Rule:** activation cross-checks both planes — installed `_bmad` manifest vs `bmad.lock` pin, installed plugin version vs `marketplace.json` — plus store/junction health. Result is reported and fix-guided (`tk install`, `/plugin marketplace update`), never silently applied. The check itself is read-only and emits a measurement event. Onboarding is the same check in guided mode; the funnel (time-to-ready, failed steps, retries) is the first instrumented flow.
+- **Rule:** activation cross-checks both planes — installed `_bmad` manifest vs `bmad.lock` pin, installed plugin version vs `marketplace.json` — plus store/junction health. Result is reported and fix-guided (`tk install`, `/plugin marketplace update`), never silently applied. The check itself is read-only and emits a measurement event. Onboarding is the same check in guided mode; the funnel (time-to-ready, failed steps, retries) is the first instrumented flow. **Amended 2026-10-14 by AD-21:** the plugin plane compares the skills-dir folder's `plugin.json` against the installer's roster (and against `marketplace.json` only in a developer checkout); the installer's `doctor` runs the same check plus folder trust per registered root.
 
 ### AD-14 — Model & effort routing defaults
 
@@ -164,6 +164,18 @@ graph TD
 - **Prevents:** the canonical read path forking into incompatible shapes or split identities
 - **Rule:** `registry/projects.yaml` is a versioned schema in `contracts/`: a **map keyed by `project_id`** (never a list), entry = root path, bindings, VCS, working-set ref, vault-link state. **Single writer:** only onboarding/activation surfaces register or amend entries (atomic writes); every other surface reads. A `project_id` collision fails onboarding and demands an explicit id — one project, one registry identity, one run-workspace tree, one measurement key.
 
+### AD-21 — One repository, per-app releases, one installer, the skills-dir plugin `[SIGNED 2026-10-14]`
+
+- **Binds:** all — Lockstep, Operations
+- **Prevents:** a newcomer cloning anything; the marketplace clone (MAX_PATH on this Windows build); version skew between the three apps; a plugin update path outside the roster
+- **Rule:** tk-studio is one repository holding the plugin (`plugins/tk-studio`, sealed: nothing inside reaches outside it), the supervisor (`apps/supervisor`, a nested studio project), the studio web (`apps/studio-web`, a static bundle the supervisor serves) and the installer (`tools/installer`). Each app versions and releases independently under its tag prefix (`tk-studio--v`, `supervisor--v`, `studio-web--v`, `cli--v`) with `make_latest: false`; consumers resolve by tag, never `/releases/latest`; releases stay the scripted local motion (`tools/release_archive.py --app`). A committed roster per channel (`tools/installer/rosters/{stable,latest}.json`) names the compatible set with SHA-256s and is the only version gate. The only newcomer path is the bootstrap script → the meta-CLI (`tk-studio install|update|doctor|status`) → the roster; the installer never clones. The plugin reaches every machine as an installer-written **skills-dir plugin** at `~/.claude/skills/tk-studio/` (loads as `tk-studio@skills-dir`; `${CLAUDE_PLUGIN_ROOT}` substitutes); the installer uninstalls every marketplace copy (a same-named marketplace install shadows the folder); the in-repo `.claude-plugin/marketplace.json` stays a developer catalog pinned to a tag; sandboxes read the host skills folder through Docker's read-only skills mount. The supervisor's history moves in with `git filter-repo --to-subdirectory-filter` after a rehearsal on throwaway clones (ADR §5) and the old repository is archived, not deleted. `main` stays PR-only with admins exempt until CI exists; when it does, one fan-in `gate` job asserting `success` for every job not deliberately skipped is the only required check, and non-release workflows filter to `branches:`. **Intended usage:** the studio is operated by the subscription holder from their own seat on their own machine, with one account per studio; no token is intermediated, no third-party login is offered, no API-key tier exists. Evidence and options: `briefs/adr-repository-structure-2026-10-09.md`; order of work and the rest of the design: `design/studio-design-spec-2026-10-09/`.
+
+### AD-22 — Engagements are tracked on Atlassian; comments and the inbox are the human channel `[RULED 2026-10-14]`
+
+- **Binds:** Operations (the engagement loop, jobs), Taxonomy (planning data, knowledge), the supervisor as the only writer of engagement state
+- **Prevents:** the studio building its own tracker and wiki; the owner needing the studio site to answer a blocked story; two owners of one entity field
+- **Rule:** every studio project binds `planning.backend: jira` and a `knowledge.confluence` binding. At onboarding the studio creates a Confluence space and a linked Jira project from the studio template (folder structure for docs; Epic, Story, Sub-task; the two statuses below); two seats of the free tier, the owner and an agent user with its own API token (AD-3: tokens in the per-user store only); what the API cannot do is handed to the owner as exact steps. The canonical plan stays in `_bmad-output/` and promotes through the adapter (AD-4; AD-5 unchanged for entity fields); design pages (brief, GDD, scope of work, decisions) publish to Confluence. A recurring `atlassian-sync` job on a configurable interval pulls back status (AD-5) and, as a **second class that is backend-authoritative and append-only**, comments, attachments as links and owner-authored pages, mirrored into local memory (`kb/confluence/`, the story files' comment logs) so agents read locally and never query live for context. Every studio-managed Jira project has `Blocked - Awaiting User` and `Block Resolved`, mapped onto the canonical `blocked` with the original under `external.jira` (AD-6). Blocked work, including engagement questions, approvals and the loop's `escalate` rulings, moves to the first with an @mention comment naming the reason; the owner's inbox (the studio web, and a saved Jira filter) lists it by priority then time; the owner's reply, or a Done shortcut that writes the reply, moves it to the second; an agent validates the resolution before the work continues or the issue returns to blocked with a follow-up comment. Headless auth is API tokens (AD-7). Confluence publishing of `kb/` leaves Deferred and lands here. Open to verification before build: the free plans' limits on custom statuses, permissions and API rate (spec Appendix C).
+
 ## Consistency Conventions
 
 | Concern | Convention |
@@ -183,6 +195,12 @@ graph TD
 | Backlog.md (default local planning backend) | 1.48.0 |
 | Atlassian Rovo MCP Server (first external backend) | hosted, GA 2026-02-04 |
 | Python (studio scripts, stdlib-only, via `uv run`) | 3.12+ |
+| Claude Code (the only runtime on the subscription; headless `claude -p`) | 2.1.286 on the box; roster floor per release (AD-21) |
+| Docker Sandboxes (bypass tier, Windows microVM) | 0.47.x, a 0.x product |
+| Bun (the supervisor; serves the studio web) | 1.4.x |
+| bmad-loop (story engine, pinned by `bmad.lock`) | per the pin |
+| Vite + React + TypeScript + PixiJS v8 (the studio web, spec D5) | current at EP-28 |
+| Atlassian Cloud: Jira and Confluence, free tier, REST with API tokens (AD-22) | hosted |
 
 ## Structural Seed
 
@@ -200,7 +218,10 @@ tk-studio/
     bmad.lock                        # BMad base pin: version, module registry, install flags
   measurements/                      # teammate ledgers, arriving only via PR (the membrane)
   issues/ledger.md                   # ISS-NNN living ledger (consolidation output)
-  tools/                             # maintainer tooling (base-update helpers, bootstrap script)
+  apps/supervisor/                   # the Bun service (AD-21; moved in by EP-31), a nested studio project
+  apps/studio-web/                   # the browser app, built to a static bundle the supervisor serves
+  tools/installer/                   # bootstrap scripts, the meta-CLI, the committed rosters (AD-21)
+  tools/                             # maintainer tooling (base-update helpers, release_archive.py --app)
   docs/                              # this repo's own kb
   _bmad/ _bmad-output/               # working BMad install for developing tk-studio itself
 ```
@@ -242,16 +263,18 @@ tk-studio/
 | Operations (jobs, loops, dual-mode, conformance) | `tk-studio-job`, job definitions, `contracts/` | AD-10, AD-11, AD-14, AD-19 |
 | Measurement | ledgers, `tk-studio-report/measure-push/consolidate`, `issues/` | AD-12 |
 | Orchestration + roles + council shell | `tk-studio-orchestrator`, `agents/` | AD-9, AD-17, AD-2 |
+| Packaging and distribution (installer, roster, skills-dir plugin, per-app releases) | `tools/installer/`, `tools/release_archive.py`, `~/.claude/skills/tk-studio/` | AD-21, AD-1, AD-13 |
+| Engagement tracking and the human channel (Jira, Confluence, the inbox) | the supervisor, `lib/jirabackend.py`, the Confluence binding, the `atlassian-sync` job | AD-22, AD-4, AD-5, AD-7 |
 
 ## Deferred
 
 - **ClaudeOS MCP connector** — ClaudeOS-side deliverable; only the driver contract ships here (AD-11). Conformance runs by direct headless invocation until it exists.
 - **Cross-project canonical knowledge + promotion gate** — v2; seam reserved in AD-8.
-- **Linear adapter, Confluence kb publishing** — after Jira stabilizes, same contract (AD-6/AD-7).
+- **Linear adapter** — after Jira stabilizes, same contract (AD-6/AD-7). *(Confluence kb publishing left this list on 2026-10-14: AD-22.)*
 - **Evolve-loop automation** (proposal drafting from observed toil) — v1 observes and logs only. **Landed 2026-08-08 as Epic 10 (ST-040–ST-042), published at driver-contract 0.1.9** — `lib/evolve.py` observation clustering + `proposals/ledger.md` stable `PROP-NNN` rows (consolidate-twin discipline, ISS cross-links), the `tk-studio-evolve` surface (draft + read-only status, per-outcome headless postures), and the shipped-but-undeclared `evolve-proposals` job type (instance declaration stays an operator call, D3). Drafting triggers nothing (D1): proposals are documents; adoption and implementation stay human-initiated through the membrane. AD-8's cross-project tier remains deferred (`scope:` reserved and unread).
 - **Execution roles beyond developer** (artist/designer/PR/custom) — arrive with the team as configuration (AD-17).
 - **Persona lore / legacy-council overlay content** (11 personas, Perforce stream skills, UE content) — future overlay; the shell seam is AD-9.
-- **Distribution hardening** (permissions, security review, public distribution) — deliberately later per brief.
+- **Distribution hardening** (permissions, security review, public distribution) — deliberately later per brief. *(The installer and the single-account rule of AD-21 are the first steps; public exposure of the supervisor stays a documented later option, spec D10.)*
 - **Research→Knowledge Lifecycle port** (mission spine/seed, anchored deltas, JSONL reconciliation queue, promotion gate — verified built in the legacy council/ClaudeOS) — the named session-discipline upgrade. v1 ships only boundary handoffs + resumable run workspaces; the port moves the runner-side halves council-side behind the driver contract, ClaudeOS as first driver. **Landed 2026-08-07 as Epic 9 (ST-9.1–9.6), published at driver-contract 0.1.7** (renumbered same day from 1.7.0 — pre-1.0 semver for a new product, `1.N.0 → 0.1.N`) — spine/seed + anchored deltas (`knowledge.schema.json`, `lib/knowledge.py`), capture/queue/routing, the PR-membrane promotion gate, and the KB-injection directive; per-project `kb/` stays the only knowledge target (AD-8's cross-project tier remains deferred, `scope:` reserved and unread).
 - **`bmad.lock` file format and final skill names** — module-builder decisions. (The bootstrap-script question is closed — see AD-1: no bootstrap script.)
 - **Backlog.md projection fidelity** — verify at adapter build that Backlog.md preserves unknown frontmatter keys; if not, the projection writes only Backlog.md-native keys + the canonical id as a label (canonical files are unaffected either way — AD-5 makes the projection non-authoritative).

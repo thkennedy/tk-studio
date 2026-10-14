@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Proposed id | AD-21 (the spine ends at AD-20; this number is taken on signature) |
-| Status | **Proposed, awaiting Tim's ruling.** Nothing in this document is in force until signed. |
+| Status | **Signed 2026-10-14 by Tim (AD-21).** Rulings, from `design/studio-design-spec-2026-10-09/decisions-answers.md`: §8.1 **O2**, one repository with per-app releases; **O5** adopted as the distribution rule (ruled 2026-10-09); §8.2 admins stay exempt; §8.3 the front end gets its own `studio-web--v` tag paired by the roster; §8.4 `apps/supervisor` stays a nested studio project, decided by the rehearsal; §8.5 the old supervisor repository is archived after the merge; §8.6 order of work per the spec's D3: packaging first (EP-25), the front end next, the restructure last (EP-31); §8.7 the meta-CLI ships as a wheel on its own `cli--v` tag. Intended-usage reading recorded at signature (spec D7 and D8): the studio is operated by the subscription holder from their own seat on their own machine; no token is intermediated, no third-party login is offered, no API-key tier exists; the terms clause stays on the staleness watch. O2 rule (a) and §7's plugin leg are replaced by O5 as this document says. |
 | Date | 2026-10-09 |
 | Decides | Where the Claude Code plugin, the Bun supervisor service and the planned Next.js front end live; how each is versioned and released; how a newcomer installs and updates all three |
 | Evidence | `_bmad-output/planning-artifacts/research/studio-front-end-and-repo-structure-2026-10-09/research.md`. Bracketed numbers below are that report's source rows. |
@@ -301,4 +301,4 @@ Rules that apply to every row:
 6. **Order of work**: restructure first, then the front-end brief and epic land as `apps/studio-web` (recommended), or the front-end epic first in the supervisor repository and the restructure after.
 7. **Meta-CLI delivery**: a wheel on its own `cli--v` release (recommended; no clone, hash-pinned) or `uv tool install` from the git tag (clones the repository).
 
-**Signature.** ______________________ Tim Kennedy, date ______________
+**Signature.** Tim Kennedy, 2026-10-14, through `design/studio-design-spec-2026-10-09/decisions-answers.md` (recorded here by the session that folded the rulings into the spec).
