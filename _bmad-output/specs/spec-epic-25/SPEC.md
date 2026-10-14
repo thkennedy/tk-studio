@@ -116,7 +116,19 @@ A mandate plus a pain. AD-21 (signed 2026-10-14) and O5 (ruled 2026-10-09) retir
 - `contracts/conformance/` is `plugins/tk-studio/contracts/conformance/`.
 - The roster's `requires.claude-code` floor starts at the ADR §7 example (`>=2.1.224`) unless the story measures a different floor.
 
-## Open Questions
+## Rulings on the open questions (2026-10-14, recorded by the operator's delegate; Tim may override)
+
+The first 25.1 session halted on two schema questions and the consult ruled `escalate`. Both follow from the design spec and the ADR (never fabricate a digest; `mise.lock`-style pins), so they are settled here and in the story text:
+
+1. **Roster components are optional per channel.** A component absent from a channel's roster means "not shipped in this channel"; the installer installs only present components and `doctor` reports an absent one as "not shipped", never as an error. A **present** `plugin`, `supervisor`, `studio-web` or `cli` entry is `{tag, url, sha256}` with all three required (`sha256` is 64 hex); the guard refuses a present entry with a missing or malformed digest by name and never accepts a placeholder or a fabricated value. At 25.1's first cut the roster carries `plugin` (0.2.16, the digest already in `released-roster.json`), `uv` and `bun`. `supervisor` is added when the operator cuts `supervisor--v0.1.0` (the story provides the commands and the schema accepts an entry whose URL is on another repository, named in the entry's `source`); `cli` lands with Story 25.4; `studio-web` lands with its first release in a later epic.
+2. **`uv` and `bun` carry a per-platform digest map:** `{version, sha256: {"<target>": "<hex>", ...}}` keyed by the upstream release asset's target triple (for example `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`). The installer selects the running platform's key; a missing key is a named refusal (`PlatformNotPinned`). Only platforms whose digests were read from the upstream release are present; Windows x64 at minimum at first cut.
+3. `stable.json` and `latest.json` are identical at the first cut. The release motion writes `latest`; promoting an entry to `stable` is a PR that copies it (ADR: stable about a week behind).
+4. Operator-only steps (25.1's tag, 25.6's sandbox recreation) do not pause the engine: the story lands with the exact commands in the runbook or the kb, and the operator step is closed separately by the operator, with the result recorded afterwards.
+5. Docker's read-only skills mount flag is discovered in Story 25.6, which investigates and records it; it is not a block for 25.1.
+6. Slot paths outside Windows: `$XDG_DATA_HOME/tk-studio` (default `~/.local/share/tk-studio`) on Linux and `~/Library/Application Support/tk-studio` on macOS; the meta-CLI resolves the path per OS, never hard-codes it (AD-15).
+7. `doctor`'s per-user store check reuses the drift check's existing store plane and its pass criteria.
+
+## Open Questions (answered above on 2026-10-14; kept as the record)
 
 - `studio-web` and the `cli` wheel have no releases when 25.1 lands, yet the roster requires `{tag, url, sha256}` for both: placeholders, optional entries, or added only once they exist?
 - Are `stable.json` and `latest.json` identical at first cut, and what motion moves `latest` to `stable` (ADR: stable about a week behind)?
