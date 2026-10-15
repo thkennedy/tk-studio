@@ -248,3 +248,141 @@ Still to run by the operator on TIM-PC-2 (Windows): the same live test
 (junction and forward-slash substitution on Windows) and
 `uv run --project tools/installer/cli tk-studio install --link C:/GitHub/tk-studio`
 (junction plus the real marketplace removal).
+
+## Sandboxes read the host skills folder (Story 25.6)
+
+An engine sandbox no longer gets its own marketplace copy of the plugin
+(AD-21). `tools/sbx-engine/provision-engine.sh` used to run `claude plugin
+marketplace add`, `install` and `update tk-studio@tk-studio --scope user`
+inside the microVM; its `skills-mount` step now runs
+`tools/sbx-engine/check-skills-mount.sh`, which only verifies, in order:
+
+1. a `/proc/mounts` row targets `/home/agent/.claude/skills` (`SKILLS_MOUNT`
+   overrides the path, `PROC_MOUNTS` the file);
+2. its options include `ro`;
+3. `tk-studio/.claude-plugin/plugin.json` exists under it;
+4. `claude plugin list`, run from the project (`PROJECT_DIR`, which
+   provisioning sets to the project; default the current directory, so a
+   project-scope copy in its `.claude/settings.json` is listed), shows no
+   marketplace copy `❯ tk-studio@<m>` (any marketplace but `skills-dir`,
+   driver contract §6) shadowing it (checked first: a real shadow likely
+   keeps the skills-dir entry from loading, and its fix is the uninstall);
+5. the same listing shows `❯ tk-studio@skills-dir` with `Status: ✔ loaded`
+   and its `Path:` is the mount's `tk-studio` folder (a loaded entry from
+   another path, such as a project's `.claude/skills/tk-studio`, fails with
+   its own line naming that path).
+
+Each failure prints one line naming the mount and its fix and exits 1, and
+provisioning stops. The check never uninstalls, imports or calls `sbx`; for
+each shadowing copy it names `claude plugin uninstall tk-studio@<m> --scope
+user` (and `--scope project`, then `--scope local`, from the project); for the `tk-studio@tk-studio`
+copy it adds `claude plugin marketplace remove tk-studio`, since the old
+provisioning registered that marketplace and the copy can come back from it.
+A failing `claude plugin list` is its own one-line failure, naming its first
+line of output; it runs under `timeout` (`LIST_TIMEOUT`, default 120 seconds)
+when that is on PATH, and a listing that stalls fails with `timed out`. The lib test `tests.test_sbx_skills_mount`
+drives it with a fake mounts file and a fake `claude`.
+
+**The flag, as found.** `--skills readonly|readwrite|off` on `sbx create` or
+`sbx run`, applied only when the sandbox is created (remove and recreate to
+change it); `sbx settings set skills.defaultMode readonly` sets the default
+for future sandboxes. Source: Docker's "Share agent skills" page,
+https://docs.docker.com/ai/sandboxes/workflows/agent-skills/ (fetched
+2026-10-15, marked experimental). That page now says sandboxes mount the
+store read-only by default; the red-team digest (C1-redteam-1 F2) found an
+earlier rendering saying read-write since sbx 0.37.0, so the runbook passes
+`--skills readonly` explicitly. Not yet confirmed against `sbx create --help`
+on TIM-PC-2 (operator step below); no sbx version is recorded here.
+
+**Live mount or copy: a copy.** The docs say `sbx skills import` copies each
+skill directory under the host's `~/.claude/skills` (and the other agents'
+folders) into one persistent shared store, Windows
+`%LOCALAPPDATA%\DockerSandboxes\sandboxes\state\agent-skills`; "Importing
+replaces the complete skill directory rather than merging files"; a
+top-level symlink is followed but symlinks inside a skill directory are
+skipped; sandboxes "mount the contents of the store each time they start";
+`sbx reset` clears the store. So the sandbox does not read the host folder
+itself, and a host `tk-studio install` or `update` reaches the sandboxes only
+through another import.
+
+**Observed in this engine sandbox** (claude-tk-studio, created before this
+story, 2026-10-15): `/proc/mounts` has
+`host /home/agent/.claude/skills virtiofs ro,nosuid,nodev,relatime 0 0`, the
+folder is empty, and `claude plugin list` shows `tk-studio@tk-studio` 0.2.16
+at user and project scope (the old provisioning). The check fails loudly
+here, as AC1 requires:
+
+```text
+$ bash tools/sbx-engine/check-skills-mount.sh; echo $?
+skills-mount FAIL: /home/agent/.claude/skills has no tk-studio/.claude-plugin/plugin.json (the shared store is empty): run tk-studio install on the host, then sbx skills import --force there (the store is a copy of the host folder, not a live view)
+1
+```
+
+**The "sandbox store" drift case.** The store a sandbox mounts differs from
+the host's `~/.claude/skills`. Inside the sandbox the drift check's plugin
+plane shows it as `stale`; no new case or plane. When the store is empty the
+plugin does not load, so `check-skills-mount.sh` reports it first, and the
+drift check runs from the studio checkout mount instead
+(`uv run /c/GitHub/tk-studio/plugins/tk-studio/skills/tk-studio-activate/scripts/drift_check.py --directory <project>`),
+which shows it as `missing`. Fix on the host: `tk-studio install` (or `update`), then
+`sbx skills import --force`, then a fresh agent session in the sandbox (stop
+and start the sandbox, with no run in flight, if the plugin plane still
+shows `stale`). The installer does not run the import (it never calls
+`sbx`); that is the manual step until Story 25-7 decides otherwise.
+
+### Operator step: recreate one sandbox with the mount (AC3)
+
+Results: **pending: operator.** Run from PowerShell on TIM-PC-2. Pick a
+sandbox with no run in flight (never the one hosting a live `bmad-loop
+run`); `claude-<project>` below.
+
+```powershell
+sbx daemon status                       # must say running; if not:
+# Start-ScheduledTask -TaskName "Docker Sandboxes daemon"   (runbook §3.5)
+cd $HOME
+sbx create --help                       # confirm the --skills flag and its values; record the sbx version (sbx version)
+tk-studio install                       # writes %USERPROFILE%\.claude\skills\tk-studio
+sbx skills import --dry-run             # expect tk-studio from ~/.claude/skills
+sbx skills import --force               # copies it into the shared store
+sbx skills ls
+sbx rm claude-<project>
+sbx create --skills readonly --name claude-<project> claude C:\GitHub\<project> C:\GitHub\tk-studio:ro
+```
+
+Then provision it from Git Bash (runbook §3.8); the `skills-mount` step must
+print `skills-mount ok`:
+
+```bash
+MSYS_NO_PATHCONV=1 sbx exec claude-<project> bash -lc 'GIT_NAME="Tim Kennedy" GIT_EMAIL="<noreply email>" bash /c/GitHub/tk-studio/tools/sbx-engine/provision-engine.sh /c/GitHub/<project> /c/GitHub/tk-studio'
+```
+
+The in-sandbox proof (`sbx exec -it claude-<project> bash -l`):
+
+```bash
+grep ' /home/agent/.claude/skills ' /proc/mounts         # expect ro
+bash /c/GitHub/tk-studio/tools/sbx-engine/check-skills-mount.sh
+claude plugin list                                        # tk-studio@skills-dir, ✔ loaded, no tk-studio@tk-studio
+# tk activate (the activate skill runs this drift check): four planes (bmad-base, plugin, store, vault) all ok:
+uv run /home/agent/.claude/skills/tk-studio/skills/tk-studio-activate/scripts/drift_check.py --directory /c/GitHub/<project>
+# a headless drive of one skill; ${CLAUDE_PLUGIN_ROOT} must substitute to the mounted path:
+cd /c/GitHub/<project> && claude -p "/tk-studio:tk-studio-activate" --output-format stream-json --verbose \
+  | grep -o '/home/agent/.claude/skills/tk-studio/skills/tk-studio-activate/scripts/drift_check.py' | head -1
+# the per-sandbox syscall cost of the skills folder, measured once:
+command -v strace >/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq strace
+strace -f -c -o /tmp/strace-all.txt claude plugin list >/dev/null
+strace -f -e trace=%file -o /tmp/strace-file.txt claude plugin list >/dev/null
+grep -c '/home/agent/.claude/skills' /tmp/strace-file.txt   # file syscalls touching the mount
+head -25 /tmp/strace-all.txt                                 # total syscalls and time
+```
+
+Record here: the sbx version and the `--help` text for `--skills`; the
+`skills-mount ok` line; the four plane results; the substituted
+`${CLAUDE_PLUGIN_ROOT}` path (expected `/home/agent/.claude/skills/tk-studio`);
+the syscall counts (file syscalls on the mount, total syscalls and seconds
+from `strace -c`). Watch for the open points: whether `sbx skills import`
+copies a plugin folder (one with `.claude-plugin/plugin.json` and nested
+`skills/*/SKILL.md`, no top-level `SKILL.md`) as one skill directory;
+whether it also copies the installer's dot-prefixed `.tk-studio.previous`
+sibling; and whether it follows a Windows junction (the `tk-studio install
+--link` developer mode writes `~/.claude/skills/tk-studio` as a junction, and
+the docs only say a top-level symlink is followed).

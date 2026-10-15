@@ -408,6 +408,23 @@ run with bypass, and `~/.ssh` and cloud credential folders are blocked by
 default. There is no GPU, so this tier is for code and asset-script work,
 not engine runs.
 
+**The shared skills mount (experimental).** sbx mounts its shared skills store
+at `/home/agent/.claude/skills` in every sandbox created for Claude Code, and
+that is how the engine sandboxes load the tk-studio plugin (§3.8, AD-21). The
+store is a copy, not a live view of the host's `~/.claude/skills`:
+`sbx skills import` fills it (at
+`%LOCALAPPDATA%\DockerSandboxes\sandboxes\state\agent-skills`), and an
+import replaces each skill directory whole. The access mode
+(`--skills readonly|readwrite|off` on `sbx create` or `sbx run`) is applied
+only when the sandbox is created: changing it means `sbx rm` and create again.
+Always create engine sandboxes `--skills readonly`, since a `readwrite`
+sandbox can change what every other sandbox loads. **Never run `sbx reset`**
+on the agent PC: it clears the shared store, and every sandbox loses the
+plugin until the next `sbx skills import`. Source:
+https://docs.docker.com/ai/sandboxes/workflows/agent-skills/ (read
+2026-10-15; the page says read-only is the default, but an earlier rendering
+said read-write since sbx 0.37.0, so pass the flag explicitly).
+
 ### 3.6 The first Godot project ("slice zero")
 
 Create an empty Godot 4 C# project once in the editor at
@@ -518,8 +535,15 @@ mount. Run this from your home folder, never from `System32` (§3.5):
 
 ```powershell
 cd $HOME
-sbx create --name claude-<project> claude C:\GitHub\<project> C:\GitHub\tk-studio:ro
+sbx create --skills readonly --name claude-<project> claude C:\GitHub\<project> C:\GitHub\tk-studio:ro
 ```
+
+`--skills readonly` mounts the shared skills store (§3.5) read-only at
+`/home/agent/.claude/skills`, where Claude Code loads the plugin as
+`tk-studio@skills-dir`. Run `tk-studio install` (or `update`) on the host and
+then `sbx skills import --force` before creating the sandbox, so the store
+holds the plugin. Check the flag with `sbx create --help` on the box; the docs call the
+feature experimental.
 
 Claude inside the sandbox authenticates through the global `anthropic` sbx
 secret, which is the Max login. No sign-in is needed per sandbox.
@@ -535,7 +559,21 @@ idempotent, and it sets up:
 - Godot (mono, Linux), when `WITH_GODOT=<version>` is set: the binary under
   `~/godot`, a `godot` command on PATH, and `GODOT` in the profile
 - `TK_STUDIO_ROOT`
-- the tk-studio plugin at user scope
+- verifies the read-only skills mount (`tools/sbx-engine/check-skills-mount.sh`):
+  the mount is present and read-only, it holds
+  `tk-studio/.claude-plugin/plugin.json`, `tk-studio@skills-dir` loads, and no
+  marketplace copy `tk-studio@<m>` (any marketplace but `skills-dir`) shadows
+  it (the listing runs from the project, so a project-scope copy counts). Any failure stops
+  provisioning with one line naming `/home/agent/.claude/skills` and its fix.
+  The plugin is no longer installed per sandbox. A sandbox provisioned before
+  this change still has `tk-studio@tk-studio` at user and project scope, and
+  the `tk-studio` marketplace the old provisioning registered. Inside it, run
+  `claude plugin uninstall tk-studio@tk-studio --scope user`, then the same
+  with `--scope project` from the project, then `claude plugin marketplace
+  remove tk-studio` so the copy cannot come back. The check names these
+  commands and never runs them. Project scope lives in the project checkout's
+  `.claude/settings.json`, a tracked host file (the sandbox mount is
+  read-write), so that removal is a change to commit in that project
 - the sandbox's own studio store, with the project registered as developer
 
 From Git Bash, set `MSYS_NO_PATHCONV=1`, or Git Bash rewrites `/c/...`
@@ -544,6 +582,23 @@ arguments to `C:/...`:
 ```bash
 MSYS_NO_PATHCONV=1 sbx exec claude-<project> bash -lc 'GIT_NAME="Tim Kennedy" GIT_EMAIL="<noreply email>" bash /c/GitHub/tk-studio/tools/sbx-engine/provision-engine.sh /c/GitHub/<project> /c/GitHub/tk-studio'
 ```
+
+**The "sandbox store" drift case.** The sandbox store (the shared skills
+store a sandbox mounts) can differ from the host's `~/.claude/skills`: the
+store is a copy, so a `tk-studio install` or `update` on the host does not
+reach the sandboxes until it is imported again. Inside the sandbox, `tk
+activate` shows it on the plugin plane as `stale` (an older version). When
+the store is empty the plugin does not load, so `tk activate` is not
+available: `check-skills-mount.sh` reports it first, and the drift check run
+from the studio checkout mount
+(`uv run /c/GitHub/tk-studio/plugins/tk-studio/skills/tk-studio-activate/scripts/drift_check.py --directory <project>`)
+shows it as `missing`. The fix, from PowerShell on the host: run
+`tk-studio install` (or `update`), then `sbx skills import --force`. The docs
+say a sandbox mounts the store each time it starts, so a stopped sandbox picks
+the import up on its next start, with no recreate; in a running one, start a
+new agent session, and if the plugin plane still shows `stale`, `sbx stop` the
+sandbox (no run in flight) and start it again. A sandbox created without `--skills readonly`
+(or with `--skills off`) has to be recreated with it.
 
 **C# / Godot projects need a network rule first.** The `balanced` policy
 blocks NuGet and the .NET download hosts (verified 2026-09-28), and the VM's

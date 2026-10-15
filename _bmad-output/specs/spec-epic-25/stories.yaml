@@ -211,3 +211,8 @@
     test_installer_bootstrap.py stays green; document install --link (plugin leg only) under the
     developers-who-clone note; the 0.3.0 release needs components.cli from the operator's
     cli--v0.1.0 cut first, recorded as unverifiable if still absent, never fabricated.
+    Replan (25-6 reconcile, 2026-10-15): the sandbox skills store is a copy filled by
+    `sbx skills import --force`, not a live view; keep 25.6's kb section and runbook §3.5/§3.8
+    as landed (edit only stale marketplace references there), and wherever the docs say
+    `tk-studio install`/`update` on the host, add "then `sbx skills import --force` for engine
+    sandboxes".
