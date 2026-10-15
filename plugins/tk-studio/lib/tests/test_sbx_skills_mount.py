@@ -285,6 +285,49 @@ class SkillsMountCheckTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 20)
         self.assertNotIn("validate", out)
 
+    # --- the `--skills readonly` form proved on the box (2026-10-15): the store is
+    # mounted read-only elsewhere and each entry is a symlink in the skills dir.
+
+    def _store_link(self, options: str) -> Path:
+        """A store mounted at <root>/run/sbx/skills-shared with the plugin
+        folder in it, and $MOUNT/tk-studio a symlink into it."""
+        store = Path(self._tmp.name) / "run" / "sbx" / "skills-shared"
+        manifest = store / "tk-studio" / ".claude-plugin"
+        manifest.mkdir(parents=True)
+        (manifest / "plugin.json").write_text(
+            '{"name": "tk-studio", "version": "0.3.0"}', encoding="utf-8")
+        link = self.mount / "tk-studio"
+        try:
+            os.symlink(store / "tk-studio", link, target_is_directory=True)
+        except OSError as exc:  # Windows without the symlink privilege
+            self.skipTest(f"symlinks cannot be created here: {exc}")
+        rows = ["proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0",
+                "host /c/GitHub/tk-studio virtiofs ro,relatime 0 0",
+                f"host {store} virtiofs {options} 0 0"]
+        self.mounts_file.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        return store
+
+    def test_linked_readonly_store_passes(self):
+        self._store_link("ro,nosuid,nodev,relatime")
+        self._fake_claude(LOADED)
+        result = self._run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("read-only (linked)", result.stdout)
+
+    def test_linked_readwrite_store_fails(self):
+        self._store_link("rw,nosuid,nodev,relatime")
+        self._fake_claude(LOADED)
+        self._assert_fails(self._run(), "linked read-write",
+                           "sbx create --skills readonly")
+
+    def test_path_with_tilde_counts_as_the_mount(self):
+        self._mounts("ro,nosuid,nodev,relatime")
+        self._plugin_folder()
+        home = self.mount.parent.parent  # <root>/home/agent
+        self._fake_claude(LOADED.replace("{mount}", "~/.claude/skills"))
+        result = self._run(HOME=str(home))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_listing_runs_from_project_dir(self):
         self._mounts("ro,nosuid,nodev,relatime")
         self._plugin_folder()
