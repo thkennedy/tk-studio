@@ -733,6 +733,11 @@ delete and check out the affected files again.
    (`lib/meter.py`). The hook copies transcripts out of the microVM into
    `<run_dir>/transcripts/` and records one `observation`.
 5. When the run completes, open a PR from `loop/epic-<N>` into `main`.
+6. Spec files are `stories/<id>-spec.md`: the id already carries the title
+   slug, so the path stays short for Windows. The planner records settled
+   shapes (schema entries, files or tags for an artifact a later story or
+   an operator produces) in the SPEC's `## Design notes`, and never halts the
+   dev session on them (Story 26.2).
 
 **When a run pauses:**
 

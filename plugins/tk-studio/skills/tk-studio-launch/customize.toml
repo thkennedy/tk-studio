@@ -79,5 +79,5 @@ triggers = [
   "seam-text-fix",            # a seam-check text fix conflicts with what the tree shows
   "file-outside-files",       # a file outside the story's Files list was or would be touched
 ]
-scope = "resolve a contradiction between pinned facts; choose between two readings of the story; accept or reject a deviation. Never a design number, a product behaviour, or an architecture invariant — those return `escalate` and the session HALTs (CRITICAL stays human)."
+scope = "resolve a contradiction between pinned facts; choose between two readings of the story; accept or reject a deviation. Never a design number, a product behaviour, or an architecture invariant — those return `escalate` and the session HALTs (CRITICAL stays human). Schema shape for an artifact a later story or an operator produces is a planner matter, settled in the SPEC's design notes, when the design documents constrain it; an operator ruling (`escalate`) only when they do not."
 log = "spec `## Consult Log` entry + one observation event (tk-studio-observe, source `other`, description prefixed `consult:`)"
