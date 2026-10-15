@@ -2,6 +2,17 @@
 
 Written for a fresh Claude Code session on the agent PC (TIM-PC-2). It supersedes `handoff-phase1-loop-2026-10-07.md` for the state of Phase 1. Engine mechanics: the 09-28 handoff and runbook §3.8. The starter prompt is at the end.
 
+## Update at the end of session 5 (2026-10-15): Epic 25 built by the loop, PR #104 open
+
+PRs #102 and #103 merged on Tim's word (2026-10-14). Epic 25 "One Installer Writes the Studio" then ran through the studio's own loop in `claude-tk-studio` (branch `loop/epic-25`, four launches, runs `195634-b06c`, `204241-9620`, `212945-1486`, `221445-84de`): **seven of seven stories landed, every one on its first attempt, $145.91 at list price** (25.1 $18.87, 25.2 $17.20, 25.3 $22.50, 25.4 $34.74, 25.5 $24.58, 25.6 $14.46, 25.7 $13.57). Host gates on the run branch: lib suite 1140 OK, conformance ok plus the new CLI doctor drive. **PR #104** is open for Tim's merge.
+
+- **Pauses and how they were closed.** 25.1 halted on two roster-schema questions the planner had left as Block If (ruled by the delegate: optional components, per-platform digests; hole 19). 25.1, 25.2 and 25.3 each paused at the reconcile gate with score 2 because the gate session was off; reconciled attended (`adjust-stories` each, replan queue created, notes carried into the unstarted stories), metered by hand, archived and relaunched. **Tim turned the gate session on** (`.bmad-loop/policy.toml` `[plugins.studio-pipeline] gate_enabled = true`, machine-local) and 25.4 to 25.7 flowed through headless. 25.5 halted once more on a plan whose Files list was too narrow (two test files); Files grown per the consult, the implementation kept through `bmad-loop resolve --restore-patch` (the first attempt collided with files the rollback left behind: hole 21).
+- **Host fixes before the PR:** two Windows-only test defects (holes 11/12 again), fixed test-side in `aa21706`. `tk-studio doctor --json` ran on the box for the first time (DW-17: its Hermes check cannot parse Hermes's config).
+- **Holes recorded:** 19 (launch planner leaves schema shape unsettled), 20 (relaunch path ends without a status block), 21 (restore-patch collision), plus two instances of 11/12. **Operator steps the stories left**, all in `kb/offline-install-runbook.md`: the supervisor's first tag `supervisor--v0.1.0` and its roster entry; the 0.3.0 plugin release motion (five steps; the engine never bumps or tags); `LongPathsEnabled = 1` (system setting; `core.longpaths` is already set on the box); recreate the engine sandboxes `--skills readonly` after `sbx skills import --force`; then `tk-studio install` on the box.
+- **Gate flag note:** the sandbox was stopped (`sbx stop claude-tk-studio`) after the run; the pin is released.
+
+**Next session, in order:** A sanity; Tim merges #104; the operator steps above (hand him the exact commands from the kb, in order: long paths, supervisor tag plus roster entry, the 0.3.0 release, `tk-studio install`, sandbox recreation); then the evolve-loop test (`tk measure push` of the host ledger, `tk consolidate`, `tk evolve draft` on a branch, pre-triaged for Tim); then EP-26 (the service owns lifetime) through the loop, with Epic 23.3 and 24.3/24.4 alongside.
+
 ## Update at the end of session 4 (2026-10-14): the rulings are in, the spec is revised, Epic 25 is in the plan
 
 Tim answered every decision in `design/studio-design-spec-2026-10-09/decisions-answers.md` and added four pieces of feedback. Recorded and folded in on branch `design/studio-design-spec` (PR #103, stacked on #102):
