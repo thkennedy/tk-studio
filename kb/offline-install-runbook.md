@@ -1,15 +1,26 @@
 ---
-title: Offline install runbook — the archive backstop, end to end
-description: How to install the tk-studio plugin on an air-gapped or git-less machine from the SHA-256-pinned release asset, and how the release motion produces that asset.
+title: Offline install runbook — the skills-dir write from a downloaded zip
+description: How to put the tk-studio plugin into ~/.claude/skills/tk-studio/ on an air-gapped or git-less machine from the SHA-256-pinned release zip, how the release motion produces that zip, and the operator's 0.3.0 release commands.
 rank: 40
 ---
 
-# Offline install runbook — the archive backstop
+# Offline install runbook — the skills-dir write from a downloaded zip
 
 The sneakernet path for a machine without network, git, or npm (ST-057,
-EP-018 / PROP-012). Facts behind every step are pinned live in
-[claude-plugin-archive-install-envelope.md](claude-plugin-archive-install-envelope.md);
-the release motion's archive step is `tools/release_archive.py`.
+EP-018 / PROP-012). Since Epic 25 (AD-21) the plugin is delivered as the
+skills-dir folder `~/.claude/skills/tk-studio/`, which Claude Code loads in
+place as `tk-studio@skills-dir`; offline, that folder is written from the
+release zip carried to the box. The earlier marketplace-era probe record,
+[claude-plugin-archive-install-envelope.md](claude-plugin-archive-install-envelope.md),
+is historical. The release motion's archive step is
+`tools/release_archive.py`.
+
+**Deprecation watch (skills-dir plugins):** this delivery rests on Claude
+Code loading a plugin folder from the skills directory. Where to look for a
+change: https://code.claude.com/docs/en/plugins/create ("Develop without a
+marketplace"), https://code.claude.com/docs/en/plugins/loading (the
+name-conflict order), and the Claude Code CHANGELOG (grep `skills-dir`).
+Status: none found as of 2026-10-15.
 
 ## What each release publishes
 
@@ -66,9 +77,66 @@ On the **target machine**, verify out-of-band before use:
 (or `sha256sum` / `shasum -a 256` on POSIX). A mismatch means the
 artifact is not what the release recorded — stop.
 
-Then consume it:
+Then write the skills-dir folder from it. Routes (a) and (b) end with
+`~/.claude/skills/tk-studio/.claude-plugin/plugin.json` (under
+`$CLAUDE_CONFIG_DIR/skills/` when that is set); the zip carries the plugin
+tree at its root.
 
-- **Session-scoped (proven live, zero network):**
+- **(a) With the meta-CLI: not yet run on a box, and refused by today's
+  CLI.** The offline box needs the meta-CLI first, and its bootstrap
+  downloads `uv` and the CLI wheel, so the box must be connected once (or
+  get those carried too). Until the first `cli--v` release is recorded in
+  the roster, the bootstrap stops with `CliNotShipped`. The intended route
+  is a local roster whose `plugin` entry points at the carried zip and
+  carries the recorded digest, then an install from that roster:
+
+  ```json
+  "plugin": {
+    "tag": "tk-studio--v<version>",
+    "url": "file:///<path-to>/tk-studio-<version>.zip",
+    "sha256": "<the recorded 64 hex>"
+  }
+  ```
+
+  ```bash
+  tk-studio install --roster <path-to-roster.json>
+  ```
+
+  The plugin leg's fetcher accepts `file://` URLs and `--roster` takes a
+  path, but the roster guard (`roster_guard.py`, the copy the CLI loads)
+  requires every release URL to be
+  `https://github.com/<owner>/<repo>/releases/download/<tag>/<asset>`, so
+  today this roster is refused `RosterEntryInvalid` before anything is
+  written. Use route (b) until the guard admits a local URL.
+
+- **(b) Manual extract: not yet run on a box.** After the digest check
+  above, with Claude Code closed, extract the zip into the folder (the
+  blocks remove a `--link` junction or symlink without following it):
+
+  ```powershell
+  $dir = Join-Path $(if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { "$HOME\.claude" }) 'skills\tk-studio'
+  if ((Get-Item $dir -Force -EA SilentlyContinue).LinkType) { cmd /c rmdir "$dir" } else { Remove-Item -Recurse -Force $dir -EA SilentlyContinue }
+  Expand-Archive tk-studio-<version>.zip -DestinationPath $dir
+  ```
+
+  ```bash
+  dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/tk-studio"
+  rm -rf "$dir"
+  mkdir -p "$dir" && unzip -q tk-studio-<version>.zip -d "$dir"
+  ```
+
+  Then remove the marketplace copies that would shadow the folder, as the
+  installer does: `claude plugin uninstall tk-studio@<m> --scope user` for
+  each user-scope copy, `claude plugin marketplace remove tk-studio`, and,
+  from a project that has one, `claude plugin uninstall tk-studio@<m>
+  --scope project` (or `--scope local` for a local-scope copy; the installer
+  only reports project- and local-scope copies).
+  `claude plugin list` should then show `tk-studio@skills-dir` with
+  `Status: ✔ loaded` (what the 25.2 probe saw for the installer-written
+  folder, below).
+
+- **Or, without writing the folder: session-scoped (proven live, zero
+  network):**
 
   ```bash
   claude --plugin-dir path/to/tk-studio-<version>.zip
@@ -77,34 +145,37 @@ Then consume it:
   The CLI loads the zip directly — the full skill roster, no
   marketplace, no install record. Repeat the flag per session.
 
-- **Persistent (seed mechanism — explicit invocation only):**
-  pre-populate a seed on the connected machine
-  (`CLAUDE_CODE_PLUGIN_CACHE_DIR=<seed>` + marketplace add + plugin
-  install), carry the seed directory, and run with
-  `CLAUDE_CODE_PLUGIN_SEED_DIR=<seed>` plus a `settings.json` carrying
-  the `extraKnownMarketplaces`/`enabledPlugins` halves (they never enter
-  the seed). The serve split, proven live 2026-08-10 (ST-056 probes —
-  see the envelope record for the evidence): a seeded session serves
-  plugin skills on **explicit `/plugin:skill` invocation only**, zero
-  network, and never advertises them to the session — the model cannot
-  discover a seeded skill on its own. That is sufficient for
-  driver-contract headless drives, which name their skill exactly
-  (§2's invocation form), and insufficient for attended discovery,
-  which needs `--plugin-dir` or a real install. Unchanged gap at CLI
-  2.1.226: the `claude plugin …` management verbs do not read the seed
-  either.
+Where the engine sandboxes need the plugin too, run
+`sbx skills import --force` on the host after either route (the sandbox
+store is a copy, not a live view; see the Story 25.6 section below).
 
-## The archive marketplace source (the named seam)
+**Historical — the seed mechanism (marketplace era).** Before the
+skills-dir folder, the persistent offline route was a plugin seed:
+pre-populate a seed on the connected machine
+(`CLAUDE_CODE_PLUGIN_CACHE_DIR=<seed>` + marketplace add + plugin
+install), carry the seed directory, and run with
+`CLAUDE_CODE_PLUGIN_SEED_DIR=<seed>` plus a `settings.json` carrying
+the `extraKnownMarketplaces`/`enabledPlugins` halves (they never enter
+the seed). The serve split, proven live 2026-08-10 (ST-056 probes —
+see the envelope record for the evidence): a seeded session serves
+plugin skills on **explicit `/plugin:skill` invocation only**, zero
+network, and never advertises them to the session — the model cannot
+discover a seeded skill on its own. That was sufficient for
+driver-contract headless drives, which name their skill exactly
+(§2's invocation form), and insufficient for attended discovery. Unchanged gap at CLI 2.1.226: the
+`claude plugin …` management verbs do not read the seed either. It is
+kept here as the record, not as a route.
 
-`{"source": "archive", "url": …, "sha256": …}` in a marketplace entry
-is the harness-native pinned install — but it fetches over public HTTPS
-(headers only survive same-origin, and GitHub asset downloads redirect
-off-origin), so it could not serve this repo's assets while the repo was
-private. The repo went public on 2026-09-15, which lifts that blocker;
-the recorded `{url, sha256}` pair is already in the exact shape that
-entry needs. The archive-source path has not yet been re-probed live
-against the public asset — until it is, this runbook's verified local
-zip remains the proven backstop.
+## The archive marketplace source (historical: the marketplace-era seam)
+
+Historical: this was the marketplace delivery seam, retired by AD-21 (the
+skills-dir folder above). `{"source": "archive", "url": …, "sha256": …}`
+in a marketplace entry is the harness-native pinned install — but it
+fetches over public HTTPS (headers only survive same-origin, and GitHub
+asset downloads redirect off-origin), so it could not serve this repo's
+assets while the repo was private. The repo went public on 2026-09-15,
+which lifted that blocker; the archive-source path was never re-probed
+live against the public asset.
 
 ## Release-motion order (why the record trails the tag)
 
@@ -171,6 +242,82 @@ uv run tools/release_archive.py run --app supervisor --version 0.1.0 --repo <pat
 
 then copy the written `supervisor` entry into `stable.json` by PR.
 Unverifiable here: the engine records them and never runs them.
+
+### Operator step: the 0.3.0 release (25.7 AC2)
+
+Results: **pending: operator.** The plugin moves to 0.3.0, a minor bump
+because the distribution changed. The engine never bumps, tags or publishes:
+a gate ×3 bump committed without the archive-record commit turns
+`test_gate_files_are_in_four_way_lockstep` red. On an up-to-date `main` of
+this repository:
+
+1. The gate ×3 bump to `0.3.0`, committed: `version` in
+   `plugins/tk-studio/.claude-plugin/plugin.json`, `plugins[0].version` in
+   `.claude-plugin/marketplace.json`, and `version` in
+   `plugins/tk-studio/.claude-plugin/released-roster.json`. The same commit
+   updates the README's "Plugin release" status row to 0.3.0. Do not push
+   `main`: mint the tag at the bump commit and push only the tag, which
+   carries that commit to the remote (step 2's `gh release create
+   --verify-tag` refuses a tag that is not on the remote). `main` is pushed
+   only after step 4:
+
+   ```bash
+   claude plugin tag plugins/tk-studio --push
+   ```
+
+2. Build, publish, verify and record the zip:
+
+   ```bash
+   uv run tools/release_archive.py run --app plugin
+   ```
+
+3. Commit the archive record immediately after (`released-roster.json`
+   `archive` and `tools/installer/rosters/latest.json` `components.plugin`).
+   Do not push it yet.
+4. From `plugins/tk-studio/lib`, both green after step 3:
+
+   ```bash
+   uv run python -m unittest discover tests
+   uv run python ../contracts/conformance/runner.py run
+   ```
+
+   Only then push both commits, the bump and the archive record, to `main`
+   (`git push origin main`). If the push is rejected because `origin/main`
+   moved, merge `origin/main` (do not rebase) so the tagged bump commit stays
+   an ancestor of `main`, re-run step 4's checks, then push.
+
+5. On TIM-PC-2 (PowerShell), first `git pull` in the tk-studio checkout:
+   `tk activate` reads the rosters from the checked project, so a checkout
+   short of the archive-record commit still has `latest.json` at 0.2.16 and
+   reports `stale`. If the migration in
+   [agent-pc-setup-runbook.md](agent-pc-setup-runbook.md) §3.4 ("Moving from
+   the marketplace install") has not been done on this box, first run
+   `claude plugin uninstall tk-studio@tk-studio --scope project` from the
+   checkout: that copy shadows the folder and `tk activate` cannot see it.
+   Then, from the checkout root, pass the pulled roster (the default raw
+   `main` URL can serve the cached 0.2.16 `latest.json` for a few minutes
+   after step 4's push):
+
+   ```powershell
+   tk-studio update --channel latest --roster tools/installer/rosters/latest.json
+   ```
+
+   `claude plugin list` should then show `tk-studio@skills-dir` and no
+   `tk-studio@tk-studio`. Then `tk activate --channel latest` in a session:
+   clean on all four planes, with the plugin plane reading
+   `~/.claude/skills/tk-studio` at 0.3.0; then `sbx skills import --force` for the engine sandboxes.
+   `stable.json` picks 0.3.0 up only by the promotion PR, so until then
+   plain `tk-studio update` (channel `stable`) stays at 0.2.16, and a plain
+   `tk activate` (its plugin plane defaults to `--channel stable`) reads the
+   0.3.0 folder against 0.2.16 and reports `stale`. Do not run its printed
+   fix (plain `tk-studio update`, channel `stable`) before the promotion PR
+   lands: it rewrites the folder back to 0.2.16.
+
+The `cli` component is absent from both rosters today, so the bootstrap
+stops with `CliNotShipped` until the operator's `cli--v0.1.0` cut; until then
+step 5 runs the meta-CLI from a checkout
+(`uv run --project tools/installer/cli tk-studio update --channel latest --roster tools/installer/rosters/latest.json`).
+No `cli` tag, URL or digest is recorded here.
 
 ### Where the uv and Bun pins came from
 

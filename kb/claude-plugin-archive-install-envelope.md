@@ -1,10 +1,17 @@
 ---
-title: Claude Code plugin archive-install envelope — verified at CLI 2.1.226
-description: Live-probed facts for the EP-018 archive backstop — the accepted archive-source shape, mismatch refusal and version-gate behavior, the --plugin-dir zip load proof, seed-dir serve mechanics and gaps, and the private-repo constraint on the archive source type.
+title: Historical — Claude Code plugin archive-install envelope, verified at CLI 2.1.226
+description: Historical — superseded by the installer-written skills-dir plugin (AD-21). Live-probed facts for the EP-018 archive backstop — the accepted archive-source shape, mismatch refusal and version-gate behavior, the --plugin-dir zip load proof, seed-dir serve mechanics and gaps, and the private-repo constraint on the archive source type.
 rank: 30
 ---
 
 # Claude Code plugin archive-install envelope — verified at CLI 2.1.226
+
+> **Historical.** This record grounded the marketplace delivery path, which
+> Epic 25 retired: users now get the plugin from the bootstrap plus
+> `tk-studio install`, which writes `~/.claude/skills/tk-studio/` (loaded as
+> `tk-studio@skills-dir`, AD-21). The current offline path is
+> [offline-install-runbook.md](offline-install-runbook.md). The probe facts
+> below stay as the record; do not treat them as the install instructions.
 
 Probed 2026-08-10 (ST-056, EP-018 / PROP-012) against `claude` 2.1.226 on
 Windows, resolving what the archive-source + SHA-256 install path actually
