@@ -680,10 +680,20 @@ class TailscaleCertPem(DoctorCase):
 
 class Supervisor(DoctorCase):
     def test_not_shipped_is_skipped(self):
+        # Derived from the committed roster (25.1 ruling: the component set is
+        # evidence, not an invariant): an absent component is skipped as "not
+        # shipped"; a present one is judged (and fails here, nothing is
+        # installed in the isolated data dir).
+        committed = json.loads(
+            (ROSTERS / "latest.json").read_text(encoding="utf-8"))
         checks = self.checks(self.doctor(roster=ROSTERS / "latest.json")[0])
         for name in ("supervisor", "studio-web"):
-            self.assertEqual((checks[name]["status"], checks[name]["detail"]),
-                             ("skipped", "not shipped in latest"))
+            if committed["components"].get(name) is None:
+                self.assertEqual(
+                    (checks[name]["status"], checks[name]["detail"]),
+                    ("skipped", "not shipped in latest"), name)
+            else:
+                self.assertNotEqual(checks[name]["status"], "skipped", name)
 
     def test_not_installed_fails_with_install(self):
         checks = self.checks(self.doctor(roster=self.full_roster())[0])

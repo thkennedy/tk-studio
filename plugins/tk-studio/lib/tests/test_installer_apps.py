@@ -1549,13 +1549,22 @@ class Status(AppsCase):
         self.assertNotIn("_lines", last)
 
     def test_committed_roster_reads_not_shipped(self):
+        # The committed roster's component set is evidence, not an invariant
+        # (25.1 ruling): a component absent from it reads "not shipped", a
+        # present one reads its tag's version. The supervisor shipped on
+        # 2026-10-15; studio-web and cli follow later.
+        committed = json.loads(
+            (ROSTERS / "latest.json").read_text(encoding="utf-8"))
         lines, last, code = self.main_out(
             ["status", "--roster", str(ROSTERS / "latest.json")])
         self.assertEqual((code, last["status"]), (0, "complete"))
         self.assertEqual(len(lines), 6)
         for name in ("supervisor", "studio-web", "cli"):
-            self.assertEqual(last["components"][name]["roster"],
-                             "not shipped")
+            entry = committed["components"].get(name)
+            expected = ("not shipped" if entry is None
+                        else entry["tag"].rsplit("--v", 1)[1])
+            self.assertEqual(last["components"][name]["roster"], expected,
+                             name)
         self.assertEqual(last["components"]["supervisor"]["installed"],
                          "not installed")
         self.assertEqual(self.fetch.calls, [])
