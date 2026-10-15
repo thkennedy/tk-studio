@@ -6,7 +6,7 @@ tk-studio adds the discipline BMad leaves to the team: version-pinned installs t
 
 | | |
 | --- | --- |
-| Plugin release | **0.2.16** (the installer roster, [`tools/installer/rosters/`](tools/installer/rosters/), is the version gate) |
+| Plugin release | **0.3.0** (the installer roster, [`tools/installer/rosters/`](tools/installer/rosters/), is the version gate) |
 | Driver contract | **0.1.13** — [`plugins/tk-studio/contracts/driver-contract.md`](plugins/tk-studio/contracts/driver-contract.md) |
 | BMad base pin | core **6.11.0** + 6 external modules — [`plugins/tk-studio/bmad.lock`](plugins/tk-studio/bmad.lock) |
 | Platform | Windows-first (junctions, no admin); macOS/Linux via symlinks |
