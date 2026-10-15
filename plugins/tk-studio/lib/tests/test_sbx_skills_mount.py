@@ -127,7 +127,10 @@ class SkillsMountCheckTests(unittest.TestCase):
         fake.write_text(
             "#!/usr/bin/env bash\n"
             '[ "$1 $2" = "plugin list" ] || { echo "unexpected: $*" >&2; exit 9; }\n'
-            f'if [ "$(pwd -P)" = "{project.resolve()}" ]; then\n'
+            # Compare physical paths from bash's own view: on Windows (Git Bash)
+            # `pwd -P` prints an MSYS path while Path.resolve() prints a drive
+            # path, so a string comparison never matched there.
+            f"if [ \"$(pwd -P)\" = \"$(cd '{project.resolve()}' 2>/dev/null && pwd -P)\" ]; then\n"
             f"  cat <<'EOF'\n{MARKETPLACE_COPY}EOF\n"
             "fi\n"
             f'cat "{self.listing}"\n', encoding="utf-8")

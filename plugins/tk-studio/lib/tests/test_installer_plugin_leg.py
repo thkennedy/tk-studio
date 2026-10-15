@@ -789,8 +789,11 @@ class DanglingJunction(unittest.TestCase):
     def test_dangling_junction_detected_without_isjunction(self):
         with tempfile.TemporaryDirectory() as tmp:
             link = Path(tmp) / "tk-studio"
-            os.symlink(Path(tmp) / "moved-checkout", link,
-                       target_is_directory=True)
+            try:
+                os.symlink(Path(tmp) / "moved-checkout", link,
+                           target_is_directory=True)
+            except OSError as exc:  # Windows without the symlink privilege
+                self.skipTest(f"symlinks cannot be created here: {exc}")
             self.assertFalse(link.exists(), "dangling")
             with mock.patch.object(plugin_leg, "sys",
                                    mock.Mock(platform="win32")), \
