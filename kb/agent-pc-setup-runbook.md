@@ -318,6 +318,40 @@ the session moves back; that's expected.
 
 ### 3.4 tk-studio and the BMad base
 
+The plugin comes from the installer, not from a marketplace. Run the README's
+one-line bootstrap (it installs the pinned `uv` and the `tk-studio` meta-CLI
+and puts only the studio's `bin` folder on PATH):
+
+```powershell
+irm https://raw.githubusercontent.com/thkennedy/tk-studio/main/tools/installer/install.ps1 | iex
+```
+
+Open a new PowerShell window, so the new PATH applies, then install:
+
+```powershell
+tk-studio install
+sbx skills import --force
+```
+
+`tk-studio install` writes the plugin to `%USERPROFILE%\.claude\skills\tk-studio`
+from the roster's SHA-256-verified release zip, and Claude Code loads it in
+place as `tk-studio@skills-dir`; headless `claude -p /tk-studio:…` resolves
+it too (the Story 25.2 probe). It also removes any user-scope
+`tk-studio@<marketplace>` copy, which would shadow the folder. The
+`sbx skills import --force` step copies the folder into the shared store the
+engine sandboxes mount (§3.5): that store is a copy, not a live view. On a
+fresh box it cannot work yet, because §3.5 has not signed in to Docker or
+set up the `sbx` daemon and policy: skip it here and run it once §3.5 is
+done. On a box where §3.5 is already done, run it now.
+`tk-studio doctor` reports the folder's mode and runs the smoke checks, each
+with its fix. Until the first `cli--v` release is recorded in the roster, the
+bootstrap stops with `CliNotShipped` (after installing `uv`). Meanwhile, clone
+the checkout first (just below), then from its root run
+`uv run --project tools/installer/cli tk-studio install` (no `--link`).
+
+The box still works in a checkout of this repo (the engine sandboxes mount
+it, §3.8):
+
 ```powershell
 cd D:\agent-work
 git clone https://github.com/thkennedy/tk-studio.git
@@ -325,20 +359,7 @@ cd tk-studio
 claude
 ```
 
-Trust the folder. The repo's `extraKnownMarketplaces` entry prompts to add the
-`tk-studio` marketplace and install the plugin; accept both. The Claude
-desktop app loads the plugin's skills without recording a CLI install, so if
-you set up from the app (or skipped the prompt), "tk activate" reports plugin
-drift ("not installed in the harness") and headless `claude -p /tk-studio:…`
-answers "Unknown command". Fix it from the repo root:
-
-```powershell
-claude plugin install tk-studio@tk-studio --scope project
-git restore .claude/settings.json
-```
-
-The install rewrites `.claude/settings.json` with its keys reordered (same
-content), hence the restore. Then, inside the session, in this order:
+Trust the folder. Then, inside the session, in this order:
 
 1. **"tk activate"** — read-only health check. On a fresh machine it guides the
    per-user store standup (`~/.tk-studio`, registry, ledger). Follow the exact
@@ -351,9 +372,55 @@ content), hence the restore. Then, inside the session, in this order:
 The store on this box is its own per-machine store (AD-20) and its own
 measurement ledger file (AD-12); nothing is copied from the main PC.
 
-Plugin updates later: `claude plugin marketplace update tk-studio` then
-`claude plugin update tk-studio@tk-studio --scope project` (the bare name
-fails on current CLIs).
+Plugin updates later: `tk-studio update`, then `sbx skills import --force` for
+the engine sandboxes (once §3.5 is done).
+
+**Moving from the marketplace install.** `tk-studio install` uninstalls only
+user-scope marketplace copies; a project- or local-scope copy is only
+reported. A box
+set up under the old §3.4 (`claude plugin install tk-studio@tk-studio --scope
+project`, TIM-PC-2 included) keeps that copy, and it shadows the skills-dir
+folder. From the checkout:
+
+```powershell
+claude plugin uninstall tk-studio@tk-studio --scope project
+tk-studio install
+sbx skills import --force
+```
+
+For a local-scope copy, use `--scope local` in the uninstall instead. The
+import refreshes the engine sandboxes' store (skip it until §3.5 is
+done). `claude plugin list` should then show `tk-studio@skills-dir` and no
+`tk-studio@tk-studio`. Check it there: "tk activate" sees only user-scope
+marketplace copies, not project- or local-scope ones. If "tk activate" then reports
+the plugin plane `shadowed`, run the fix it prints.
+
+**Developers who clone** (working on tk-studio itself): link the folder to the
+checkout instead of writing it from the release zip. `--link` links the plugin
+only and installs no other app. From the checkout root:
+
+```powershell
+uv run --project tools/installer/cli tk-studio install --link D:\agent-work\tk-studio
+```
+
+The engine sandboxes need `sbx skills import --force` after it too (once
+§3.5 is done): their store is a copy, also of a linked folder. A later plain
+`tk-studio install` or `update` replaces the link with the release zip's
+folder; re-run `install --link <checkout>` (then `sbx skills import --force`)
+to get it back.
+
+The repo's `.claude-plugin/marketplace.json` is now only a developer catalog,
+for browsing it or pinning a tag in a dev checkout:
+
+```powershell
+claude plugin marketplace add thkennedy/tk-studio#tk-studio--v<X.Y.Z>
+```
+
+Every `tk-studio install` or `update` runs `claude plugin marketplace remove
+tk-studio`, so this catalog is gone after the next install or update; re-add
+it afterwards if you want it. Never install `tk-studio@tk-studio` from it
+beside the folder: a marketplace copy named `tk-studio` shadows the skills-dir
+folder, so use `install --link` instead.
 
 ### 3.5 Docker Sandboxes (the bypass tier)
 
@@ -407,6 +474,23 @@ Register-ScheduledTask -TaskName "Docker Sandboxes daemon" -Action $action -Trig
 run with bypass, and `~/.ssh` and cloud credential folders are blocked by
 default. There is no GPU, so this tier is for code and asset-script work,
 not engine runs.
+
+**The shared skills mount (experimental).** sbx mounts its shared skills store
+at `/home/agent/.claude/skills` in every sandbox created for Claude Code, and
+that is how the engine sandboxes load the tk-studio plugin (§3.8, AD-21). The
+store is a copy, not a live view of the host's `~/.claude/skills`:
+`sbx skills import` fills it (at
+`%LOCALAPPDATA%\DockerSandboxes\sandboxes\state\agent-skills`), and an
+import replaces each skill directory whole. The access mode
+(`--skills readonly|readwrite|off` on `sbx create` or `sbx run`) is applied
+only when the sandbox is created: changing it means `sbx rm` and create again.
+Always create engine sandboxes `--skills readonly`, since a `readwrite`
+sandbox can change what every other sandbox loads. **Never run `sbx reset`**
+on the agent PC: it clears the shared store, and every sandbox loses the
+plugin until the next `sbx skills import`. Source:
+https://docs.docker.com/ai/sandboxes/workflows/agent-skills/ (read
+2026-10-15; the page says read-only is the default, but an earlier rendering
+said read-write since sbx 0.37.0, so pass the flag explicitly).
 
 ### 3.6 The first Godot project ("slice zero")
 
@@ -518,8 +602,15 @@ mount. Run this from your home folder, never from `System32` (§3.5):
 
 ```powershell
 cd $HOME
-sbx create --name claude-<project> claude C:\GitHub\<project> C:\GitHub\tk-studio:ro
+sbx create --skills readonly --name claude-<project> claude C:\GitHub\<project> C:\GitHub\tk-studio:ro
 ```
+
+`--skills readonly` mounts the shared skills store (§3.5) read-only at
+`/home/agent/.claude/skills`, where Claude Code loads the plugin as
+`tk-studio@skills-dir`. Run `tk-studio install` (or `update`) on the host and
+then `sbx skills import --force` before creating the sandbox, so the store
+holds the plugin. Check the flag with `sbx create --help` on the box; the docs call the
+feature experimental.
 
 Claude inside the sandbox authenticates through the global `anthropic` sbx
 secret, which is the Max login. No sign-in is needed per sandbox.
@@ -535,7 +626,21 @@ idempotent, and it sets up:
 - Godot (mono, Linux), when `WITH_GODOT=<version>` is set: the binary under
   `~/godot`, a `godot` command on PATH, and `GODOT` in the profile
 - `TK_STUDIO_ROOT`
-- the tk-studio plugin at user scope
+- verifies the read-only skills mount (`tools/sbx-engine/check-skills-mount.sh`):
+  the mount is present and read-only, it holds
+  `tk-studio/.claude-plugin/plugin.json`, `tk-studio@skills-dir` loads, and no
+  marketplace copy `tk-studio@<m>` (any marketplace but `skills-dir`) shadows
+  it (the listing runs from the project, so a project-scope copy counts). Any failure stops
+  provisioning with one line naming `/home/agent/.claude/skills` and its fix.
+  The plugin is no longer installed per sandbox. A sandbox provisioned before
+  this change still has `tk-studio@tk-studio` at user and project scope, and
+  the `tk-studio` marketplace the old provisioning registered. Inside it, run
+  `claude plugin uninstall tk-studio@tk-studio --scope user`, then the same
+  with `--scope project` from the project, then `claude plugin marketplace
+  remove tk-studio` so the copy cannot come back. The check names these
+  commands and never runs them. Project scope lives in the project checkout's
+  `.claude/settings.json`, a tracked host file (the sandbox mount is
+  read-write), so that removal is a change to commit in that project
 - the sandbox's own studio store, with the project registered as developer
 
 From Git Bash, set `MSYS_NO_PATHCONV=1`, or Git Bash rewrites `/c/...`
@@ -544,6 +649,23 @@ arguments to `C:/...`:
 ```bash
 MSYS_NO_PATHCONV=1 sbx exec claude-<project> bash -lc 'GIT_NAME="Tim Kennedy" GIT_EMAIL="<noreply email>" bash /c/GitHub/tk-studio/tools/sbx-engine/provision-engine.sh /c/GitHub/<project> /c/GitHub/tk-studio'
 ```
+
+**The "sandbox store" drift case.** The sandbox store (the shared skills
+store a sandbox mounts) can differ from the host's `~/.claude/skills`: the
+store is a copy, so a `tk-studio install` or `update` on the host does not
+reach the sandboxes until it is imported again. Inside the sandbox, `tk
+activate` shows it on the plugin plane as `stale` (an older version). When
+the store is empty the plugin does not load, so `tk activate` is not
+available: `check-skills-mount.sh` reports it first, and the drift check run
+from the studio checkout mount
+(`uv run /c/GitHub/tk-studio/plugins/tk-studio/skills/tk-studio-activate/scripts/drift_check.py --directory <project>`)
+shows it as `missing`. The fix, from PowerShell on the host: run
+`tk-studio install` (or `update`), then `sbx skills import --force`. The docs
+say a sandbox mounts the store each time it starts, so a stopped sandbox picks
+the import up on its next start, with no recreate; in a running one, start a
+new agent session, and if the plugin plane still shows `stale`, `sbx stop` the
+sandbox (no run in flight) and start it again. A sandbox created without `--skills readonly`
+(or with `--skills off`) has to be recreated with it.
 
 **C# / Godot projects need a network rule first.** The `balanced` policy
 blocks NuGet and the .NET download hosts (verified 2026-09-28), and the VM's
@@ -868,19 +990,21 @@ the first agent PC on 2026-09-27 (with `C:\agent-work`).
 
 ## 7. Smoke checklist (all as the studio account)
 
+Run `tk-studio doctor` (headless: `tk-studio doctor --json`, one JSON object
+ending with the status block). It prints one line per check with pass,
+fail, warn or skipped and the fix: Claude Code against the roster floor, the
+skills-dir plugin against the roster, the per-user store, `sbx daemon status`
+(never another sbx command), folder trust for every registered root, long
+paths, the PATH launcher, the Tailscale certificate's age, the supervisor's
+slot or checkout and whether `/status` answers, studio-web, leftovers from an
+interrupted install or update, and Hermes' `auth.adopt_external_logins`.
+Doctor is read-only. The table keeps only what the CLI cannot check.
+
 | Check | Command | Pass looks like |
 |---|---|---|
-| Claude Code | `claude doctor` | version, auto-update stable, no settings errors |
-| Studio health | in Claude Code: "tk activate" | four planes green, no drift |
-| Lib + conformance | `cd tk-studio\plugins\tk-studio\lib; uv run python -m unittest discover tests` then `uv run ..\contracts\conformance\runner.py run` | all tests pass; conformance ok over every surface |
-| Godot headless | `& $env:GODOT --headless --path <proj> --quit` | exits 0, prints engine banner |
-| Blender headless | `blender -b --version` | ≥ 5.2.2 |
-| Sandbox tier | `sbx run claude` in a repo | Claude Code prompt inside the microVM |
-| Tailnet reach | from iPad: RDP to the MagicDNS name | desktop visible |
-| Hermes | `hermes gateway status`; message the Telegram bot | connected; reply within seconds |
-| Dashboard | browse `http://<tailscale-ip>:9119` from iPad | basic-auth prompt, then Status tab |
-| Supervisor | from another tailnet device: `curl -H "Authorization: Bearer <token>" http://<tailscale-ip>:8787/status` | JSON with `ok: true`, the run counts and the held locks |
-| Supervisor tests | `cd C:\GitHub\tk-studio-supervisor; $env:TK_STUDIO_ROOT='C:\GitHub\tk-studio'; bun test` | 0 fail, the end-to-end suites included |
+| Studio smoke checks | `tk-studio doctor` | every check `pass`, or `skipped`/`warn` with its fix read; the JSON `reason` is null |
+| RDP scope (§5 firewall) | from iPad over the tailnet: RDP to the MagicDNS name; from a device off the tailnet: RDP to the box's LAN or public address | desktop visible over the tailnet; off it, no connection (RDP scoped to `100.64.0.0/10`) |
+| Startup shortcut's visible tab (§4.3) | sign out and back in as the studio account | the `studio` Windows Terminal window opens visibly with the `supervisor` tab running `start.ps1` |
 
 ## 8. Known Windows failure modes and what this runbook does about them
 
@@ -903,7 +1027,7 @@ the first agent PC on 2026-09-27 (with `C:\agent-work`).
 | Desktop app's Bash tool gets an unparseable mixed `;`/`:` PATH; nothing resolves | first agent PC, 2026-09-26 (portable Git, no `CLAUDE_CODE_GIT_BASH_PATH`) | not seen again with winget `Git.Git` plus the §3.2 setting |
 | Bare Claude installer switches `settings.json` to the `latest` channel and leaves `~\.local\bin` off PATH | first agent PC, 2026-09-27 | install with the `stable` argument; add the PATH entry (§3.2) |
 | CRLF checkout makes every BMad-installer rewrite show as modified | first agent PC, 2026-09-26 | `core.autocrlf false` before cloning; one-time re-checkout otherwise (§3.1) |
-| Plugin skills work in the desktop app but headless `claude -p /tk-studio:…` is "Unknown command" (no CLI install record) | first agent PC, 2026-09-27; "tk activate" plugin plane | `claude plugin install tk-studio@tk-studio --scope project` (§3.4) |
+| Plugin skills work in the desktop app but headless `claude -p /tk-studio:…` is "Unknown command" (no CLI install record) | first agent PC, 2026-09-27; "tk activate" plugin plane | `tk-studio install`: the CLI loads the skills-dir folder with no install record (§3.4) |
 | A detached bmad-loop engine and its tmux server die within a minute | sbx v0.45.1: the sandbox stops when no `exec` or session is attached (first agent PC, 2026-09-28) | hold an `sbx exec` for the engine's lifetime (`tools/sbx-engine/launch-epic.sh`, §3.8) |
 | The loop's close-out commit fails with "Author identity unknown" after the story landed | the engine's shell has no git identity, even though the agent session has one (The Universe Awaits hit the same in WSL) | `provision-engine.sh` sets `user.name` and `user.email` (§3.8) |
 | `bmad-loop list` fails on `pyte` / `rich`, so launch's live-engine check fails | bmad-loop installed without its `[tui]` extra | install `bmad-loop[tui]` at the pin (§3.8) |

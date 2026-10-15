@@ -4,9 +4,15 @@
 #   <project-mount>  the project checkout as mounted in the sandbox (read-write)
 #   <studio-mount>   the tk-studio checkout as mounted in the sandbox (read-only
 #                    for other projects; the project itself when it IS tk-studio)
+# The sandbox must be created with the read-only skills mount (`sbx create
+# --skills readonly`): the tk-studio plugin comes from Docker Sandboxes' shared
+# skills store, a copy of the host's ~/.claude/skills that `sbx skills import`
+# fills on the host (not a live view), and the skills-mount step fails loudly
+# when it is absent.
 # Idempotent. Stdlib tools only; network per the sandbox's `balanced` policy.
 set -u
 PROJ="$1"; STUDIO="$2"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BMAD_LOOP_PIN="${BMAD_LOOP_PIN:-v0.9.1}"     # keep equal to bmad.lock's bmad-loop pin
 export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"
 step() { echo "== $*"; }
@@ -76,10 +82,12 @@ grep -q TK_STUDIO_ROOT ~/.profile 2>/dev/null || {
 }
 grep TK_STUDIO_ROOT ~/.profile
 
-step plugin
-claude plugin marketplace add "$STUDIO" >/dev/null 2>&1
-claude plugin install tk-studio@tk-studio --scope user 2>&1 | tail -1
-claude plugin update tk-studio@tk-studio --scope user 2>&1 | tail -1
+# The plugin is not installed per sandbox (AD-21): the sandbox reads Docker
+# Sandboxes' shared skills store, mounted read-only. The store is a copy of the
+# host's ~/.claude/skills that `sbx skills import` fills on the host, not a live
+# view, and this step only verifies it (Story 25.6).
+step skills-mount
+PROJECT_DIR="$PROJ" bash "$HERE/check-skills-mount.sh" || exit 1
 
 # Claude Code's "Make auto mode your default permission mode?" dialog is gated by
 # hasSeenAutoDefaultNudge in ~/.claude.json. On 2026-09-28 it swallowed an engine

@@ -87,8 +87,12 @@ class DriverContractTestCase(unittest.TestCase):
         # studio-managed base patches (BMAD-METHOD#2718, additive); 0.1.18
         # names the conformant drivers — the studio supervisor and Hermes
         # in place of the retired ClaudeOS, the §1 roster, §2's executing
-        # wrapper, the §4 finish row with total_cost_usd (ST-062, additive)
-        self.assertRegex(self.text, r"\*\*0\.1\.18\*\*")
+        # wrapper, the §4 finish row with total_cost_usd (ST-062, additive);
+        # 0.1.19 moves the drift check's plugin plane to the skills-dir
+        # folder and the roster, and adds §8 --from-archive (ST-083, additive);
+        # 0.1.20 adds the §8 meta-CLI drive, manifest and report
+        # `cli_drives` (ST-085, additive)
+        self.assertRegex(self.text, r"\*\*0\.1\.20\*\*")
         self.assertIn("### 5.1 Execution-pipeline legs", self.text)
         self.assertIn("lib/pipeline.py", self.text)
         self.assertIn("Change policy", self.text)
@@ -109,8 +113,9 @@ class DriverContractTestCase(unittest.TestCase):
         # Audience line names ClaudeOS as the driver
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.18**", header)
-        clause = header[header.index("0.1.18 names"):]
+        # the 0.1.18 clause survives in the history once 0.1.19 heads it
+        clause = header[header.index("0.1.18 names"):
+                        header.index("0.1.19 moves")]
         self.assertIn("— additive", clause)
         audience = next(line for line in self.text.splitlines()
                         if line.startswith("| Audience"))
@@ -136,6 +141,90 @@ class DriverContractTestCase(unittest.TestCase):
                 self.assertTrue("retired" in line or "historical" in line,
                                 f"ClaudeOS not marked retired/historical: "
                                 f"{line[:120]}")
+
+    # --- ST-083: 0.1.19 states the folder-and-roster rule
+
+    def test_0_1_19_header_names_the_folder_and_roster_rule(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        # the 0.1.19 clause survives in the history once 0.1.20 heads it
+        self.assertNotIn("**0.1.18**", header)
+        clause = header[header.index("0.1.19 moves"):
+                        header.index("0.1.20 adds")]
+        self.assertIn("— additive", clause)
+        self.assertIn("--from-archive", clause)
+        self.assertLess(header.index("0.1.18 names"),
+                        header.index("0.1.19 moves"))
+
+    # --- ST-085: 0.1.20 names the conformance suite's meta-CLI drive
+
+    def test_0_1_20_header_names_the_cli_drives(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.20**", header)
+        self.assertNotIn("**0.1.19**", header)
+        clause = header[header.index("0.1.20 adds"):]
+        self.assertIn("— additive", clause)
+        self.assertIn("`cli_drives`", clause)
+        self.assertLess(header.index("0.1.19 moves"),
+                        header.index("0.1.20 adds"))
+
+    def test_section_8_names_the_cli_drives(self):
+        section = self.text[self.text.index("## 8. Conformance"):]
+        flat = " ".join(section.split())
+        for phrase in ("`cli_drives`", "outside `surfaces`",
+                       "report's top-level `cli_drives` field",
+                       "tk_studio_cli doctor --json",
+                       "tools/installer/cli", "`not run` with a reason",
+                       "status, intent, artifacts, reason",
+                       "status-block.schema.json"):
+            self.assertIn(phrase, flat)
+
+    def test_section_6_states_the_folder_and_roster_rule(self):
+        section = self._section("## 6. Drift-check invocation",
+                                "## 7. Driver integration")
+        for phrase in ("skills/tk-studio/", "plugin.json", "--channel",
+                       "default `stable`",
+                       "tools/installer/rosters/<channel>.json",
+                       "developer checkout", "`case`", "`ok`", "`stale`",
+                       "`missing`", "`shadowed`", "tk-studio update",
+                       "tk-studio install",
+                       "claude plugin uninstall tk-studio@<m> --scope user",
+                       "`missing` > `shadowed` > `stale` > `ok`",
+                       "installed_plugins.json"):
+            self.assertIn(phrase, section)
+        self.assertIn("never the source of the version or of loadability",
+                      section)
+        self.assertNotIn("/plugin marketplace update", section)
+        # case is the folder-and-roster verdict alone; the guards raise
+        # status only, and an error plane carries no case
+        flat = " ".join(section.split())
+        for phrase in ("`case` is the folder-and-roster verdict alone",
+                       "can raise `status` without changing `case`",
+                       "a plane whose `status` is `error` carries no `case`",
+                       "`--channel <channel>` added when `--channel` is not "
+                       "the default `stable`"):
+            self.assertIn(phrase, flat)
+        self.assertNotIn("still fold into the same plane", flat)
+        # a catalog without a tk-studio entry is another project's own
+        # marketplace: not a developer checkout, skipped, never error
+        for phrase in ("present with a `tk-studio` entry",
+                       "A catalog that lists no `tk-studio` entry is another "
+                       "project's own marketplace, not a developer checkout: "
+                       "the catalog comparison is skipped, never `error`"):
+            self.assertIn(phrase, flat)
+
+    def test_section_8_documents_from_archive(self):
+        section = self.text[self.text.index("## 8. Conformance"):]
+        for phrase in ("--from-archive <zip>", "CLAUDE_CONFIG_DIR",
+                       "harness-loadable", "harness_loadable",
+                       "skipped: --from-archive not given",
+                       "outside the repository", "`..`"):
+            self.assertIn(phrase, section)
+        flat = " ".join(section.split())
+        self.assertIn("the drive scripts and the status-block schema from "
+                      "that folder", flat)
+        self.assertIn("judged before any surface is driven", flat)
 
     def test_driver_roster_names_the_three_drivers_and_their_roles(self):
         # AC2: the supervisor executes and serves the status page; Hermes

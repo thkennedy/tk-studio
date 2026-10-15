@@ -3,14 +3,24 @@
 Planes checked:
   bmad-base  installed _bmad/_config/manifest.yaml versions vs the bmad.lock pins,
              plus the studio's declared base patches (lib/basepatch.py) in place
-  plugin     installed plugin.json version vs the repo marketplace.json entry
-             (catalog lockstep), when a marketplace catalog is present — plus
-             the release-discipline guard: skills/ vs released-roster.json,
-             the version gate's third file (ST-048) — plus
-             harness loadability: the harness's own install record
-             (installed_plugins.json) must hold the plugin at the repo version,
-             or headless /tk-studio:<skill> is 'Unknown command' while the
-             repo looks healthy (AD-13)
+  plugin     the skills-dir plugin folder (AD-21): <home>/skills/tk-studio/
+             (<home> = --claude-home, else CLAUDE_CONFIG_DIR, else ~/.claude),
+             its .claude-plugin/plugin.json version vs the configured channel's
+             roster plugin entry (--channel, default stable; the project's
+             tools/installer/rosters/<channel>.json) and, in a developer
+             checkout only (a repo marketplace.json listing tk-studio; one
+             that does not is skipped), that entry. One case is named
+             (field `case`): ok | stale (tk-studio update, plus --channel
+             off the default) | missing
+             (tk-studio install) | shadowed (a marketplace copy is installed;
+             the fix names each uninstall). installed_plugins.json is read only
+             to detect marketplace copies, never for a version or loadability —
+             plus the release-discipline guard: skills/ vs released-roster.json,
+             the version gate's third file (ST-048) — plus the installer roster
+             guard (AD-21): the project's tools/installer/rosters/
+             {stable,latest}.json, when present, must be in shape, and
+             latest.json's plugin entry at the gate (gate x4 — stable trails
+             latest by PR, shape only)
   store      per-user store presence + skeleton (~/.tk-studio)
   vault      Obsidian vault window links for this project, when registered
              (ST-2.5) — observed state is recorded in the registry entry
@@ -26,7 +36,8 @@ Per-plane status: ok | drift | missing | error. Overall:
 (the instrumented onboarding funnel, AD-13). This script mutates nothing, ever.
 
 Usage:
-  uv run drift_check.py [--directory DIR] [--guided] [--lock PATH] [--marketplace PATH] [--claude-home DIR]
+  uv run drift_check.py [--directory DIR] [--guided] [--lock PATH] [--marketplace PATH]
+                        [--claude-home DIR] [--channel {stable,latest}]
 
 Stdlib-only (NFR9); no prompts (AD-11).
 """
@@ -48,17 +59,25 @@ import ledger  # noqa: E402
 import registry  # noqa: E402
 import store  # noqa: E402
 import vault  # noqa: E402
+# the skills-dir plane moved verbatim to lib/skills_plane.py (Story 25.5) so
+# the sealed meta-CLI's doctor ships a byte-identical copy; re-exported here
+from skills_plane import (  # noqa: E402,F401
+    DEFAULT_CHANNEL, FIX_INSTALL, FIX_SHADOWED, FIX_UPDATE, INSTALLER_SIBLINGS,
+    SKILLS_DIR_PLUGIN, SKILLS_DIR_SUFFIX, _CASE_ORDER, _CASE_STATUS,
+    _is_ours, _marketplace_copies, _read_json_file, skills_dir_check)
 
 FIX_BMAD = "run tk-studio-install (tk install) to reinstall the base at the pin"
 FIX_PATCH_STALE = ("re-verify the base patch's upstream issue: retire the patch if it is "
                    "fixed at the pin, else re-pin its find text and applies_to_core "
                    "(plugins/tk-studio/base-patches/patches.json)")
-FIX_PLUGIN = "run /plugin marketplace update tk-studio, then reinstall/update the tk-studio plugin"
-FIX_HARNESS = ("install the plugin into the harness (AD-1 flow): claude plugin "
-               "marketplace add <studio repo>, then claude plugin install tk-studio")
 FIX_STORE = "run the store standup: uv run <plugin>/lib/store.py standup (idempotent, ST-2.1)"
 FIX_RELEASE = ("run the release motion: bump plugin.json, marketplace.json, and "
                "released-roster.json in lockstep (version gate + skill roster together)")
+FIX_INSTALLER_ROSTER = ("run the release motion: uv run tools/release_archive.py "
+                        "run --app plugin (records the roster's plugin entry in lockstep "
+                        "with released-roster.json); uv/bun pins are read from the "
+                        "upstream release, never invented; stable.json trails "
+                        "latest.json and is repaired by a promotion PR")
 
 
 def check_bmad_base(directory: Path, lock_path: Path) -> dict:
@@ -108,79 +127,6 @@ def check_bmad_base(directory: Path, lock_path: Path) -> dict:
     return plane
 
 
-def _harness_loadability(name: str, version: str,
-                         claude_home: Path | None = None,
-                         directory: Path | None = None) -> dict:
-    """AD-13: catalog lockstep proves the repo and marketplace agree; it says
-    nothing about whether the harness can load the plugin at all. An absent
-    installed_plugins.json entry means every headless /tk-studio:<skill>
-    invocation is 'Unknown command' while the repo looks healthy.
-
-    The record is an externally-owned file — only its v2 shape
-    ({"plugins": {"<name>@<marketplace>": [entries]}}) is understood; any
-    other shape is an error, never a crash. The comparison baseline is the
-    plugin.json of the copy running this script, so a harness-cache
-    invocation compares against itself and only a studio-repo checkout can
-    surface staleness."""
-    home = claude_home or Path(os.environ.get("CLAUDE_CONFIG_DIR")
-                               or Path.home() / ".claude")
-    record = home / "plugins" / "installed_plugins.json"
-    if not record.is_file():
-        return {"status": "drift",
-                "detail": f"plugin not installed in the harness (no {record})",
-                "fix": FIX_HARNESS}
-    try:
-        data = json.loads(record.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return {"status": "error",
-                "detail": f"harness install record unreadable: {exc}"}
-    plugins = data.get("plugins") if isinstance(data, dict) else None
-    if not isinstance(plugins, dict) or not all(
-            isinstance(lst, list) and all(isinstance(e, dict) for e in lst)
-            for lst in plugins.values()):
-        return {"status": "error",
-                "detail": (f"harness install record {record} is not the v2 "
-                           "shape this probe understands — cannot judge "
-                           "loadability")}
-    matched = {key: lst for key, lst in plugins.items()
-               if key == name or key.startswith(f"{name}@")}
-    entries = [e for lst in matched.values() for e in lst]
-    # only entries loadable from the checked project count: user scope
-    # (or unscoped) always, project scope only for this directory
-    def _loadable_here(e: dict) -> bool:
-        if e.get("scope", "user") != "project":
-            return True
-        project = e.get("projectPath")
-        return bool(project and directory
-                    and Path(project).resolve() == Path(directory).resolve())
-    entries = [e for e in entries if _loadable_here(e)]
-    if not entries:
-        return {"status": "drift",
-                "detail": (f"plugin not installed in the harness ({record.name} "
-                           f"has no {name} entry loadable from this project — "
-                           f"headless /{name}:<skill> is 'Unknown command')"),
-                "fix": FIX_HARNESS}
-    at_version = [e for e in entries if e.get("version") == version]
-    if not at_version:
-        held = ", ".join(sorted({"v" + str(e.get("version"))
-                                 for e in entries}))
-        return {"status": "drift",
-                "detail": (f"harness holds {held}, repo plugin is v{version} "
-                           "(harness and repo out of step)"),
-                "fix": FIX_PLUGIN}
-    if not any(e.get("installPath") and Path(e["installPath"]).is_dir()
-               for e in at_version):
-        markets = [key.split("@", 1)[1] for key in matched if "@" in key]
-        served = _directory_source_serves(name, version, home, markets)
-        if served:
-            return {"status": "ok", "detail": served}
-        return {"status": "drift",
-                "detail": (f"harness entry v{version} installPath missing "
-                           "(cache evicted)"),
-                "fix": FIX_PLUGIN}
-    return {"status": "ok", "detail": f"harness-loadable (v{version} installed)"}
-
-
 def _released_roster_check(plugin_root: Path, version: str) -> dict:
     """ST-048 release-discipline guard: the skill roster must never outrun
     the version gate. released-roster.json is the gate's third file — the
@@ -224,100 +170,196 @@ def _released_roster_check(plugin_root: Path, version: str) -> dict:
             "detail": f"released roster {len(recorded)} skills at the gate"}
 
 
-def _directory_source_serves(name: str, version: str, home: Path,
-                             marketplaces: list[str]) -> str | None:
-    """A dangling installPath is not drift when the harness serves the plugin
-    straight from a directory-source marketplace carrying it at the checked
-    version — the 2.1.201 marketplace-update path records a cache path it
-    never materializes while every skill loads from the source directory
-    (PROP-017, studio-side half). A genuine eviction — no directory source,
-    or the source no longer at this version — still drifts. Every record
-    read here is externally owned: unreadable or unexpected shapes mean the
-    fallback simply does not apply, never an error."""
-    record = home / "plugins" / "known_marketplaces.json"
-    try:
-        known = json.loads(record.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(known, dict):
-        return None
-    for market in marketplaces:
-        entry = known.get(market)
-        if not isinstance(entry, dict):
+# --- installer roster guard (AD-21, Story 25.1) ----------------------------
+# Moved verbatim to lib/roster_guard.py (Story 25.4) so the sealed meta-CLI
+# wheel can ship a byte-identical copy; re-exported here so callers of
+# drift_check.roster_problems (release_archive.py, the lib suite) still work.
+from roster_guard import (  # noqa: E402,F401
+    REQUIRED_TOOL_TARGET, RELEASE_COMPONENTS, ROSTER_CHANNELS, ROSTER_SCHEMA,
+    TOOL_COMPONENTS, _FLOOR, _HEX64, _PLACEHOLDER_WORDS, _RELEASE_URL, _SEMVER,
+    _digest_problem, _is_placeholder_text, _release_entry_problems,
+    _tool_entry_problems, _url_repo, roster_problems)
+
+
+def _installer_roster_check(directory: Path, plugin_root: Path,
+                            version: str) -> dict:
+    """AD-21 sealing: the rosters are read from the checked project
+    directory, never relative to the plugin root (a skills-dir install
+    carries no tools/). Absent roster = not checkable, ok. Gate x4 binds
+    latest.json only — the channel the release motion writes; stable.json
+    trails it by PR and is checked for shape only. The configured channel's
+    version comparison is the folder check's (_skills_dir_check, Story 25.3),
+    never this guard's."""
+    rosters_dir = directory / "tools" / "installer" / "rosters"
+    paths = {"stable": rosters_dir / "stable.json",
+             "latest": rosters_dir / "latest.json"}
+    if not any(p.is_file() for p in paths.values()):
+        return {"status": "ok",
+                "detail": (f"no installer roster at {rosters_dir} — roster not "
+                           "checkable from this project")}
+    rosters: dict = {}
+    for channel, path in paths.items():
+        if not path.is_file():
             continue
-        source = entry.get("source")
-        if not isinstance(source, dict) or source.get("source") != "directory":
-            continue
-        root = source.get("path")
-        if not root:
-            continue
-        catalog = Path(root) / ".claude-plugin" / "marketplace.json"
         try:
-            market_doc = json.loads(catalog.read_text(encoding="utf-8"))
-            plug = next(p for p in market_doc["plugins"]
-                        if isinstance(p, dict) and p.get("name") == name)
-            plugin_dir = Path(root) / plug["source"]
-            manifest = json.loads(
-                (plugin_dir / ".claude-plugin" / "plugin.json")
-                .read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, TypeError, KeyError,
-                StopIteration):
-            continue
-        if manifest.get("version") == version:
-            return (f"harness-loadable (v{version} served from "
-                    f"directory-source marketplace {market}; recorded "
-                    "installPath unmaterialized)")
-    return None
+            rosters[channel] = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            return {"status": "error",
+                    "detail": f"installer roster {path} unreadable: {exc}"}
+    try:
+        record = json.loads((plugin_root / ".claude-plugin" / "released-roster.json")
+                            .read_text(encoding="utf-8"))
+        archive = record.get("archive") if isinstance(record, dict) else None
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        archive = None
+    if not isinstance(archive, dict):
+        # no archive record to compare against: _released_roster_check and
+        # the archive-record pin report the record itself
+        archive = None
+
+    def stem_problems(channel: str) -> list[str]:
+        # roster_problems stays stem-agnostic; the file stem is the plane's
+        # knowledge. An out-of-set channel is already named by the guard.
+        declared = rosters[channel].get("channel") \
+            if isinstance(rosters[channel], dict) else None
+        if declared in ROSTER_CHANNELS and declared != channel:
+            return [f"channel: {declared!r} is not the file stem {channel!r}"]
+        return []
+
+    problems: list[str] = []
+    notes: list[str] = []
+    if "stable" in rosters:
+        problems += [f"installer roster stable.json: {p}"
+                     for p in roster_problems(rosters["stable"])
+                     + stem_problems("stable")]
+        notes.append("stable.json in shape")
+    else:
+        notes.append(f"no {paths['stable']} — stable roster not checkable "
+                     "from this project")
+    if "latest" in rosters:
+        latest = rosters["latest"]
+        problems += [f"installer roster latest.json: {p}"
+                     for p in roster_problems(latest,
+                                              released_archive=archive,
+                                              plugin_version=version)
+                     + stem_problems("latest")]
+        components = latest.get("components") if isinstance(latest, dict) else None
+        if not (isinstance(components, dict) and "plugin" in components):
+            notes.append("latest.json in shape, no plugin entry (gate x4 not "
+                         "applicable)")
+        elif archive is None:
+            notes.append("latest.json in shape, plugin entry at the gate tag "
+                         "(gate x4; url/sha256 comparison skipped — no "
+                         "released-roster.json archive record)")
+        else:
+            notes.append("latest.json in shape, plugin entry at the gate "
+                         "(gate x4)")
+    else:
+        notes.append(f"no {paths['latest']} — gate x4 not checkable from "
+                     "this project")
+    if problems:
+        return {"status": "drift", "detail": "; ".join(problems),
+                "fix": FIX_INSTALLER_ROSTER}
+    shipped = "; ".join(
+        f"{ch}: {', '.join(sorted(r['components'])) or 'none'}"
+        for ch, r in rosters.items())
+    return {"status": "ok",
+            "detail": f"installer roster {', '.join(notes)} (components {shipped})"}
+
+
+# --- skills-dir folder vs roster (AD-21, Story 25.3) -------------------------
+# The plugin is the installer-written folder <home>/skills/tk-studio/, which
+# Claude Code loads in place as tk-studio@skills-dir. The folder's own
+# plugin.json is the installed version; the configured channel's roster
+# (read from the checked project, never the network) is the expected one.
+# Marketplace records are read only to find a same-named copy shadowing the
+# folder — the exact read set of the installer's marketplace_cleanup
+# (tools/installer/cli/tk_studio_cli/plugin_leg.py), mirrored, never imported
+# (the plugin is sealed). The plane lives in lib/skills_plane.py, shared
+# byte-identical with the meta-CLI's doctor (Story 25.5); this module feeds
+# it the checked project's roster file and developer catalog.
+
+def _claude_home(claude_home: Path | None) -> Path:
+    return claude_home or Path(os.environ.get("CLAUDE_CONFIG_DIR")
+                               or Path.home() / ".claude")
+
+
+def _roster_plugin_version(directory: Path, channel: str
+                           ) -> tuple[str | None, str]:
+    """(expected version or None, note). The roster is the checked
+    project's tools/installer/rosters/<channel>.json; the channel is the
+    file's stem. Shape problems are the installer roster guard's to report,
+    so an unusable roster only notes that it could not be compared."""
+    path = directory / "tools" / "installer" / "rosters" / f"{channel}.json"
+    if not path.is_file():
+        return None, (f"no {channel} roster at {path} — roster version not "
+                      "checkable from this project")
+    roster, err = _read_json_file(path)
+    components = roster.get("components") if isinstance(roster, dict) else None
+    if err or not isinstance(components, dict):
+        return None, (f"{channel} roster {path.name} not comparable "
+                      "(see the installer roster guard)")
+    entry = components.get("plugin")
+    if entry is None:
+        return None, (f"{channel} roster has no plugin entry — not shipped "
+                      "in this channel")
+    tag = entry.get("tag") if isinstance(entry, dict) else None
+    prefix = RELEASE_COMPONENTS["plugin"]
+    if not (isinstance(tag, str) and tag.startswith(prefix)
+            and _SEMVER.fullmatch(tag[len(prefix):])):
+        return None, (f"{channel} roster plugin tag {tag!r} not comparable "
+                      "(see the installer roster guard)")
+    return tag[len(prefix):], f"{channel} roster {tag}"
+
+
+def _skills_dir_check(directory: Path, marketplace_path: Path | None,
+                      claude_home: Path | None,
+                      channel: str = DEFAULT_CHANNEL) -> dict:
+    """The folder-and-roster sub-check (skills_plane.skills_dir_check) fed
+    from the checked project: its roster file for the expected version and
+    its developer catalog, when present."""
+    catalog = marketplace_path or (directory / ".claude-plugin"
+                                   / "marketplace.json")
+    return skills_dir_check(_claude_home(claude_home),
+                            _roster_plugin_version(directory, channel),
+                            catalog, channel)
 
 
 _STATUS_RANK = {"ok": 0, "drift": 1, "missing": 1, "error": 2}
 
 
 def check_plugin(directory: Path, marketplace_path: Path | None,
-                 claude_home: Path | None = None) -> dict:
+                 claude_home: Path | None = None,
+                 channel: str = DEFAULT_CHANNEL) -> dict:
     plane = {"plane": "plugin", "status": "ok", "detail": ""}
     plugin_json = PLUGIN_ROOT / ".claude-plugin" / "plugin.json"
     try:
-        installed = json.loads(plugin_json.read_text(encoding="utf-8"))
+        running = json.loads(plugin_json.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        plane.update(status="error", detail=f"installed plugin.json unreadable: {exc}")
+        plane.update(status="error", detail=f"plugin.json of this copy unreadable: {exc}")
         return plane
-    catalog = marketplace_path or (directory / ".claude-plugin" / "marketplace.json")
-    if not catalog.is_file():
-        plane["detail"] = (
-            f"installed plugin v{installed.get('version')}; no marketplace catalog at "
-            f"{catalog} — catalog lockstep not checkable from this project"
-        )
-    else:
-        try:
-            market = json.loads(catalog.read_text(encoding="utf-8"))
-            entry = next(p for p in market["plugins"] if p["name"] == installed.get("name"))
-        except (OSError, json.JSONDecodeError, KeyError, StopIteration) as exc:
-            # a broken catalog is an error but not a reason to skip the
-            # harness probe — the two concerns are independent
-            plane.update(status="error",
-                         detail=f"marketplace catalog unreadable or missing entry: {exc}")
-        else:
-            if entry.get("version") != installed.get("version"):
-                plane.update(
-                    status="drift",
-                    detail=(f"installed plugin v{installed.get('version')} vs marketplace "
-                            f"catalog v{entry.get('version')} (lockstep broken)"),
-                    fix=FIX_PLUGIN,
-                )
-            else:
-                plane["detail"] = f"plugin v{installed.get('version')} in lockstep with catalog"
 
+    folder = _skills_dir_check(directory, marketplace_path, claude_home,
+                               channel)
+    if "case" in folder:
+        plane["case"] = folder["case"]
+    # the folder sub-check runs first, so its missing outranks an equal-rank
+    # drift from the release guards that follow
     for sub in (
-        _released_roster_check(PLUGIN_ROOT, installed.get("version")),
-        _harness_loadability(installed.get("name"), installed.get("version"),
-                             claude_home, directory),
+        folder,
+        _released_roster_check(PLUGIN_ROOT, running.get("version")),
+        _installer_roster_check(directory, PLUGIN_ROOT, running.get("version")),
     ):
         if _STATUS_RANK[sub["status"]] > _STATUS_RANK[plane["status"]]:
             plane["status"] = sub["status"]
         plane["detail"] = "; ".join(x for x in (plane["detail"], sub["detail"]) if x)
         if sub.get("fix"):
             plane["fix"] = "; ".join(x for x in (plane.get("fix"), sub["fix"]) if x)
+    # `case` is the folder-and-roster verdict alone: the release guards may
+    # raise `status` past it without changing it, but an `error` plane
+    # carries no case (driver contract §6)
+    if plane["status"] == "error":
+        plane.pop("case", None)
     return plane
 
 
@@ -392,7 +434,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--marketplace", help="override marketplace.json path (tests)")
     parser.add_argument("--claude-home",
                         help="override the harness config dir (tests; default "
-                             "CLAUDE_CONFIG_DIR or ~/.claude)")
+                             "CLAUDE_CONFIG_DIR or ~/.claude); the plugin "
+                             "plane reads <home>/skills/tk-studio/")
+    parser.add_argument("--channel", choices=ROSTER_CHANNELS,
+                        default=DEFAULT_CHANNEL,
+                        help="installer channel whose roster plugin entry the "
+                             "skills-dir folder is compared with (default "
+                             "stable, the installer's default)")
     args = parser.parse_args(argv)
 
     directory = Path(args.directory).resolve()
@@ -403,7 +451,8 @@ def main(argv: list[str] | None = None) -> int:
     planes = []
     for check in (
         lambda: check_bmad_base(directory, lock_path),
-        lambda: check_plugin(directory, marketplace_path, claude_home),
+        lambda: check_plugin(directory, marketplace_path, claude_home,
+                             args.channel),
         check_store,
         lambda: check_vault(directory),
     ):

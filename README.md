@@ -1,12 +1,12 @@
 # tk-studio
 
-**An AI dev-studio layer over a pinned, unforked [BMad Method](https://github.com/bmad-code-org/BMAD-METHOD) base** — shipped as a Claude Code plugin from this repo's git marketplace.
+**An AI dev-studio layer over a pinned, unforked [BMad Method](https://github.com/bmad-code-org/BMAD-METHOD) base** — shipped as a Claude Code plugin that the `tk-studio` installer writes into your skills folder.
 
 tk-studio adds the discipline BMad leaves to the team: version-pinned installs that stay in lockstep across machines, a strict data taxonomy (every write lands in a classified home), a canonical planning layer with backend adapters (Backlog.md, Jira), role-aware orchestration, unattended job execution behind a published driver contract, and a self-measurement loop that turns the studio's own telemetry into reviewed fixes.
 
 | | |
 | --- | --- |
-| Plugin release | **0.2.8** (marketplace catalog is the version gate) |
+| Plugin release | **0.2.16** (the installer roster, [`tools/installer/rosters/`](tools/installer/rosters/), is the version gate) |
 | Driver contract | **0.1.13** — [`plugins/tk-studio/contracts/driver-contract.md`](plugins/tk-studio/contracts/driver-contract.md) |
 | BMad base pin | core **6.11.0** + 6 external modules — [`plugins/tk-studio/bmad.lock`](plugins/tk-studio/bmad.lock) |
 | Platform | Windows-first (junctions, no admin); macOS/Linux via symlinks |
@@ -50,29 +50,92 @@ No admin rights are required on Windows; the store uses directory junctions.
 
 ## Quick start
 
+### Bootstrap (one command)
+
+One script installs the pinned `uv` and the small self-updating `tk-studio` meta-CLI, puts only the studio's `bin` folder on your PATH and turns on long paths for git. It never clones anything; re-running it is the update. The meta-CLI then installs and updates the apps the roster ships (`tk-studio install`, `tk-studio update`, `tk-studio status`).
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/thkennedy/tk-studio/main/tools/installer/install.ps1 | iex
+```
+
+Linux / macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/thkennedy/tk-studio/main/tools/installer/install.sh | sh
+```
+
+Published SHA-256 of each script:
+
+| Script | SHA-256 |
+|---|---|
+| `tools/installer/install.ps1` | `a386d79989b55e87616714064f2ede8dc7c6044d6beefaf5ce2d5e3a55073140` |
+| `tools/installer/install.sh` | `f3bb442100401316e874d9b2c3fddf5f9670a258af575f57bad13ef4c81d672c` |
+
+To verify before running, download, check, then run:
+
+```powershell
+irm https://raw.githubusercontent.com/thkennedy/tk-studio/main/tools/installer/install.ps1 -OutFile install.ps1
+(Get-FileHash -Algorithm SHA256 install.ps1).Hash   # must equal the install.ps1 row above
+powershell -ExecutionPolicy Bypass -File .\install.ps1   # Windows PowerShell 5.1 (stock); pwsh works too
+```
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/thkennedy/tk-studio/main/tools/installer/install.sh
+echo "f3bb442100401316e874d9b2c3fddf5f9670a258af575f57bad13ef4c81d672c  install.sh" | sha256sum -c -        # Linux
+echo "f3bb442100401316e874d9b2c3fddf5f9670a258af575f57bad13ef4c81d672c  install.sh" | shasum -a 256 -c -    # macOS (no sha256sum)
+sh install.sh
+```
+
+Both take a channel (default `stable`) and a roster override. With the one-liners, pass them through the environment, since `iex` takes no arguments:
+
+```powershell
+$env:TK_STUDIO_CHANNEL = 'latest'; $env:TK_STUDIO_ROSTER = '<path or https URL>'
+irm https://raw.githubusercontent.com/thkennedy/tk-studio/main/tools/installer/install.ps1 | iex
+```
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/thkennedy/tk-studio/main/tools/installer/install.sh | TK_STUDIO_CHANNEL=latest sh
+# or: ... | sh -s -- --channel latest --roster <path or https URL>
+```
+
+A downloaded script also takes `-Channel` / `-Roster` (`powershell -ExecutionPolicy Bypass -File .\install.ps1 -Channel latest`) or `--channel` / `--roster`. Through `iex` a refusal throws `<Name>: <detail>` and leaves the window open; run as a file it exits 1. Until the first `cli--v` release is recorded in the roster, the bootstrap stops with `CliNotShipped`.
+
 ### 1. Install the plugin
 
-**Option A — clone this repo (recommended for the studio's own developers/testers):**
+With the meta-CLI on your PATH (bootstrap above), one command installs the plugin and the apps the roster ships:
+
+```bash
+tk-studio install
+```
+
+Until the first `cli--v` release is recorded in the roster, the bootstrap stops with `CliNotShipped`; meanwhile run the meta-CLI from a checkout, as shown under "Developers who clone" below (`uv run --project tools/installer/cli tk-studio install`).
+
+The plugin lands at `~/.claude/skills/tk-studio/` (`$CLAUDE_CONFIG_DIR/skills/tk-studio/` when that is set), written from the roster's SHA-256-verified release zip. Claude Code loads it in place as `tk-studio@skills-dir`, with no marketplace and no `claude plugin install`. The install also removes any user-scope marketplace copy of `tk-studio`, because a same-named marketplace copy shadows the skills-dir folder.
+
+> **Updating later:** `tk-studio update` brings every component to the channel roster's version; `tk-studio status` shows installed vs roster. Engine sandboxes do not see the host folder live: after `tk-studio install` or `update` on the host, run `sbx skills import --force` so the sandboxes' shared skills store gets the new copy ([kb/agent-pc-setup-runbook.md](kb/agent-pc-setup-runbook.md) §3.5).
+
+> **Deprecation watch (skills-dir plugins):** this delivery rests on Claude Code loading a plugin folder from the skills directory. Where to look for a change: [code.claude.com/docs/en/plugins/create](https://code.claude.com/docs/en/plugins/create) ("Develop without a marketplace"), [code.claude.com/docs/en/plugins/loading](https://code.claude.com/docs/en/plugins/loading) (the name-conflict order), and the Claude Code CHANGELOG (grep `skills-dir`). Status: none found as of 2026-10-15.
+
+**Moving from the marketplace install:** `tk-studio install` uninstalls only user-scope marketplace copies; a project- or local-scope copy (the old `claude plugin install tk-studio@tk-studio --scope project`) is only reported, and it shadows the skills-dir folder. From that project's checkout run `claude plugin uninstall tk-studio@tk-studio --scope project` (`--scope local` for a local-scope copy), then `tk-studio install`, then `sbx skills import --force` for engine sandboxes. `claude plugin list` should then show `tk-studio@skills-dir` and no `tk-studio@tk-studio`; check it there, because "tk activate" sees only user-scope marketplace copies, not project- or local-scope ones. If "tk activate" still reports the plugin plane `shadowed`, run the fix it prints.
+
+**Air-gapped / offline machines:** the skills-dir write from a downloaded release zip is in [kb/offline-install-runbook.md](kb/offline-install-runbook.md).
+
+**Developers who clone** this repo to work on the studio itself:
 
 ```bash
 git clone https://github.com/thkennedy/tk-studio.git
+tk-studio install --link <path-to-checkout>
 ```
 
-Open the folder in Claude Code and **trust it**. The repo carries an `extraKnownMarketplaces` entry ([`.claude/settings.json`](.claude/settings.json)), so Claude Code auto-prompts to add the `tk-studio` marketplace and install the plugin. Accept both prompts and you're done.
-
-**Option B — add the marketplace remotely (use the plugin anywhere, no clone):**
+Until the first `cli--v` release is recorded in the roster the bootstrap stops with `CliNotShipped`, so from a checkout run the meta-CLI as `uv run --project tools/installer/cli tk-studio install --link <path-to-checkout>`. `--link` points `~/.claude/skills/tk-studio` at `<checkout>/plugins/tk-studio` (a junction on Windows, a symlink elsewhere), so your edits load in the next session. Then run `sbx skills import --force` for engine sandboxes: their store is a copy, also of a linked folder. It links the plugin only; it installs no other app. A later plain `tk-studio install` or `update` replaces the link with the release zip's folder; re-run `install --link <checkout>` (then `sbx skills import --force`) to get it back. The repo's `.claude-plugin/marketplace.json` remains as a developer catalog, for browsing it or pinning a tag in a dev checkout:
 
 ```bash
-claude plugin marketplace add thkennedy/tk-studio
+claude plugin marketplace add thkennedy/tk-studio#tk-studio--v<X.Y.Z>
 ```
 
-```bash
-claude plugin install tk-studio@tk-studio
-```
-
-**Option C — air-gapped / git-less machines:** install from the SHA-256-pinned release asset. Full walkthrough: [kb/offline-install-runbook.md](kb/offline-install-runbook.md).
-
-> **Updating later:** `claude plugin marketplace update tk-studio` refreshes the catalog, then `claude plugin update tk-studio@tk-studio --scope <user|project>` updates the install — the bare plugin name without the `@marketplace` suffix and explicit scope fails "not found" on current CLIs.
+Every `tk-studio install` or `update` runs `claude plugin marketplace remove tk-studio`, so this catalog is gone after the next install or update; re-add it afterwards if you want it. Never install `tk-studio@tk-studio` from it alongside the folder: a marketplace copy named `tk-studio` shadows the skills-dir folder, so use `install --link` instead.
 
 ### 2. Verify with the drift check
 
@@ -80,7 +143,9 @@ In a Claude Code session:
 
 > **"activate the studio"** (or `tk activate`, "studio status", "check for drift")
 
-Activation cross-checks four planes — BMad base vs the `bmad.lock` pin, installed plugin vs the marketplace catalog, per-user store health, vault window — and reports loudly with exact fix commands. It is **read-only**: it names fixes, never applies them. On a fresh machine expect the store plane to guide you through standup.
+Activation cross-checks four planes — BMad base vs the `bmad.lock` pin, the skills-dir plugin folder vs the channel's roster, per-user store health, vault window — and reports loudly with exact fix commands. It is **read-only**: it names fixes, never applies them. On a fresh machine expect the store plane to guide you through standup.
+
+Outside a session, `tk-studio doctor` reports the plugin folder's mode (written or linked) and runs the installer's smoke checks, one line each with its fix. It is read-only too.
 
 ### 3. Install the BMad base (per project)
 
@@ -207,9 +272,9 @@ Consolidation and proposal drafting run repo-side and turn the merged corpus int
 
 ```text
 tk-studio/
-  .claude-plugin/marketplace.json    # catalog; plugins[].version = the update gate
+  .claude-plugin/marketplace.json    # developer catalog (pin to a tag); tools/installer/rosters/ is the gate
   plugins/tk-studio/
-    .claude-plugin/plugin.json       # plugin version (lockstep with the catalog)
+    .claude-plugin/plugin.json       # plugin version (gate ×4: roster, released-roster.json, plugin.json, catalog)
     skills/tk-studio-*/              # the 18 studio surfaces
     agents/                          # thin role wrappers: developer, direction-giver
     lib/                             # deterministic cores (stdlib-only Python, uv run)
@@ -237,7 +302,7 @@ Run conformance (all 18 surfaces, direct headless drive):
 cd plugins/tk-studio && uv run contracts/conformance/runner.py run
 ```
 
-Add `--harness` for the spend-bearing pass through the real harness (opt-in). The release motion (version gate ×3 → plugin tag → pinned archive asset → record) and the offline install path are documented in [kb/offline-install-runbook.md](kb/offline-install-runbook.md) and [kb/claude-plugin-archive-install-envelope.md](kb/claude-plugin-archive-install-envelope.md). Windows contributors: read [kb/windows-console-and-powershell-gotchas.md](kb/windows-console-and-powershell-gotchas.md) before touching canonical files.
+Add `--harness` for the spend-bearing pass through the real harness (opt-in). The release motion (version gate ×3 bump → plugin tag → pinned archive asset → record, which brings the roster into the gate ×4 lockstep) and the offline install path are documented in [kb/offline-install-runbook.md](kb/offline-install-runbook.md); [kb/claude-plugin-archive-install-envelope.md](kb/claude-plugin-archive-install-envelope.md) is the historical marketplace-era record. Windows contributors: read [kb/windows-console-and-powershell-gotchas.md](kb/windows-console-and-powershell-gotchas.md) before touching canonical files.
 
 ## Governing documents
 

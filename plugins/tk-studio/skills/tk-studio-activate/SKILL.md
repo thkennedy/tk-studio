@@ -5,8 +5,8 @@ description: Studio activation front door — health/drift check proving the BMa
 
 # tk-studio-activate
 
-Activation cross-checks four planes — base, plugin (catalog lockstep and
-harness loadability), store, vault (AD-13) — and reports; it never mutates
+Activation cross-checks four planes — base, plugin (the skills-dir folder
+against the roster), store, vault (AD-13) — and reports; it never mutates
 anything. Version skew is caught here, at the front door, instead of
 debugged later as ghosts.
 
@@ -28,7 +28,7 @@ debugged later as ghosts.
    | Plane | Compares | Guided fix on drift |
    | --- | --- | --- |
    | `bmad-base` | installed `_bmad/_config/manifest.yaml` vs `bmad.lock` pins | `tk install` |
-   | `plugin` | installed `plugin.json` vs marketplace catalog `plugins[].version`, plus harness loadability — the harness install record (`installed_plugins.json`) holds the plugin at the repo version (AD-13) | `/plugin marketplace update tk-studio`; if not harness-installed: `claude plugin marketplace add` + `claude plugin install tk-studio` |
+   | `plugin` | the skills-dir folder `<home>/skills/tk-studio/`'s `plugin.json` vs the configured channel's roster `plugin` entry (`--channel`, default `stable`; `tools/installer/rosters/<channel>.json` in the project) and, in a developer checkout only (a marketplace catalog listing `tk-studio`; a catalog without that entry is skipped), the marketplace catalog; `case` names `ok`, `stale`, `missing` or `shadowed` (a marketplace copy is installed). `installed_plugins.json` is read only to find marketplace copies, never for the version (AD-13, AD-21) | stale: `tk-studio update` (plus `--channel <channel>` off the default `stable`); missing: `tk-studio install`; shadowed: `claude plugin uninstall tk-studio@<m> --scope user` (plus `claude plugin marketplace remove tk-studio` when the marketplace is known) |
    | `store` | `~/.tk-studio` skeleton + config keys | `uv run <plugin>/lib/store.py standup` |
    | `vault` | vault window links for this project (when registered) | `uv run <plugin>/lib/vault.py link --project-id <id>` |
 
