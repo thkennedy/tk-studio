@@ -606,7 +606,8 @@ sbx create --skills readonly --name claude-<project> claude C:\GitHub\<project> 
 ```
 
 `--skills readonly` mounts the shared skills store (§3.5) read-only at
-`/home/agent/.claude/skills`, where Claude Code loads the plugin as
+`/run/sbx/skills-shared` and links each entry into `/home/agent/.claude/skills`
+(verified 2026-10-15 on sbx 0.47.0), where Claude Code loads the plugin as
 `tk-studio@skills-dir`. Run `tk-studio install` (or `update`) on the host and
 then `sbx skills import --force` before creating the sandbox, so the store
 holds the plugin. Check the flag with `sbx create --help` on the box; the docs call the

@@ -11,3 +11,5 @@ _bmad/config.user.yaml
 .bmad-loop/routing.current.json
 _bmad-output/implementation-artifacts/supervision/
 .bmad-loop/archive/
+# the meta-CLI runs from the checkout with uv; its lockfile is not committed (Story 25.2)
+tools/installer/cli/uv.lock
