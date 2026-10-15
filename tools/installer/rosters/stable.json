@@ -6,9 +6,9 @@
   },
   "components": {
     "plugin": {
-      "tag": "tk-studio--v0.2.16",
-      "url": "https://github.com/thkennedy/tk-studio/releases/download/tk-studio--v0.2.16/tk-studio-0.2.16.zip",
-      "sha256": "2abc4e4754862be6d56250ab582af1234acf8f7fd9937f8840dd41b7cd8b207a"
+      "tag": "tk-studio--v0.3.0",
+      "url": "https://github.com/thkennedy/tk-studio/releases/download/tk-studio--v0.3.0/tk-studio-0.3.0.zip",
+      "sha256": "1a377d39273c05721d084149906f5bbe8ce836064653050f2f4d751f042c37e9"
     },
     "uv": {
       "version": "0.13.1",
@@ -25,6 +25,17 @@
         "x86_64-pc-windows-msvc": "0bf84e808552beea67bf1202a287a35c6c825d837b287b3f8e9dd513dba35d3d",
         "x86_64-unknown-linux-gnu": "3e730528d89775f03f87f05c06787c4df4099d0a37f3f252e7b829cb23816e18"
       }
+    },
+    "supervisor": {
+      "tag": "supervisor--v0.1.0",
+      "url": "https://github.com/thkennedy/tk-studio-supervisor/releases/download/supervisor--v0.1.0/supervisor-0.1.0.zip",
+      "sha256": "76fbda662b9eaaf41a44030cb72860992178a162c7044cf1bfcba0593b0ac6ef",
+      "source": "thkennedy/tk-studio-supervisor"
+    },
+    "cli": {
+      "tag": "cli--v0.1.0",
+      "url": "https://github.com/thkennedy/tk-studio/releases/download/cli--v0.1.0/tk_studio_cli-0.1.0-py3-none-any.whl",
+      "sha256": "177a47dbc0a382f834496c8d1618b7bf3ac289cbd87d241fe9061d498b455cc9"
     }
   }
 }
