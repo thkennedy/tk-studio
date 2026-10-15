@@ -175,6 +175,14 @@ def _slug(envelope: dict) -> str:
     return f"{head}-{hashlib.sha1(basis.encode('utf-8')).hexdigest()[:6]}"
 
 
+def _is_measurement(envelope: dict) -> bool:
+    """A meter observation (description starts `meter:`), excluded from drafting."""
+    payload = envelope.get("payload")
+    return (envelope.get("event") == "observation" and isinstance(payload, dict)
+            and isinstance(payload.get("description"), str)
+            and payload["description"].startswith("meter:"))
+
+
 def cluster(events: list[dict]) -> list[dict]:
     """Greedy seed clustering of observation events, in evidence order.
 
@@ -366,7 +374,7 @@ def draft(directory: Path, dry_run: bool = False) -> dict:
                     "updated": [], "unchanged": 0}
     if not measurements.is_dir():
         result.update(events_scanned=0, observation_events=0, clusters=0,
-                      skipped_lines=0,
+                      skipped_lines=0, measurements_skipped=0,
                       note=f"no {MEASUREMENTS_DIR}/ under {directory.name} — "
                            "nothing to draft from")
         return result
@@ -377,13 +385,17 @@ def draft(directory: Path, dry_run: bool = False) -> dict:
             "is studio data and lands only there (AD-3)")
 
     events, skipped = consolidate.read_events(measurements)
-    clusters = cluster(events)
+    # meter rows are measurements, not toil: never cluster them (PROP-067)
+    measurements_rows = [e for e in events if _is_measurement(e)]
+    clusters = cluster([e for e in events if not _is_measurement(e)])
+    measurement_slugs = {_slug(e) for e in measurements_rows}
     reports = [e for e in events if e.get("event") == "report"
                and isinstance(e.get("payload"), dict)]
     issues_by_key = _issue_rows(directory)
     result.update(events_scanned=len(events) + skipped,
                   observation_events=sum(len(c["members"]) for c in clusters),
-                  clusters=len(clusters), skipped_lines=skipped)
+                  clusters=len(clusters), skipped_lines=skipped,
+                  measurements_skipped=len(measurements_rows))
 
     ledger_path = directory / LEDGER_REL
     lines = _load_ledger(ledger_path)
@@ -447,10 +459,12 @@ def draft(directory: Path, dry_run: bool = False) -> dict:
             result["unchanged"] += 1
 
     # a cluster merge can leave a machine-keyed row no cluster claims; rows
-    # are never deleted, so surface it for the operator to Decline by hand
+    # are never deleted, so surface it for the operator to Decline by hand;
+    # a row minted from skipped measurements was not left by a merge
     result["stranded"] = sorted(
         cells[0] for cells in rows.values()
-        if cells[7].startswith("obs:") and cells[7] not in claimed)
+        if cells[7].startswith("obs:") and cells[7] not in claimed
+        and cells[7] not in measurement_slugs)
     result["dry_run"] = dry_run
     if changed and not dry_run:
         _atomic_write(ledger_path, "\n".join(lines) + "\n")

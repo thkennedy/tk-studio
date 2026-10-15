@@ -668,6 +668,53 @@ new agent session, and if the plugin plane still shows `stale`, `sbx stop` the
 sandbox (no run in flight) and start it again. A sandbox created without `--skills readonly`
 (or with `--skills off`) has to be recreated with it.
 
+**Recreating a sandbox without losing the cost record.** The sandbox's own
+studio store, and the measurement ledger in it, dies with the sandbox
+(loop deficiency 23). Before any `sbx rm`, with no run in flight, do these
+steps in order, all from the host:
+
+1. Export the sandbox's ledger, from Git Bash on the host:
+
+   ```bash
+   MSYS_NO_PATHCONV=1 sbx exec claude-<project> bash -lc 'cat ~/.tk-studio/measurements/*.jsonl' > ~/.tk-studio/measurements/sandbox-claude-<project>-$(date +%Y%m%d).jsonl
+   ```
+
+   The redirect creates the file even when `sbx exec` fails or the glob
+   matches nothing, so check that the export is non-empty before going on.
+   A rerun on the same day overwrites the file, so a second recreate of the
+   same sandbox on the same day overwrites the first export: rename (or merge)
+   the earlier export before exporting again.
+
+   ```bash
+   test -s ~/.tk-studio/measurements/sandbox-claude-<project>-$(date +%Y%m%d).jsonl && wc -l ~/.tk-studio/measurements/sandbox-claude-<project>-$(date +%Y%m%d).jsonl
+   ```
+
+2. Harvest each run dir's meter observations into the host ledger, from the
+   tk-studio checkout, once per run dir:
+
+   ```bash
+   uv run --no-project python plugins/tk-studio/lib/meter.py harvest --run-dir /c/GitHub/<project>/.bmad-loop/runs/<run-id>
+   ```
+
+   A harvest refusal (exit 2) names the unreadable `observation.json` and
+   appends nothing. Fix that file or move it aside, then run the harvest
+   again. The run dirs live on the host checkout, under
+   `/c/GitHub/<project>/.bmad-loop/runs/` (`ls` lists them), so they and
+   their `observation.json` files survive the recreate.
+
+3. Only then remove the sandbox with `sbx rm claude-<project>`, and create it
+   again with the create command above.
+
+The harvest goes after the export so that a harvest refusal never blocks the
+export. The exported file lands in the host store as an extra file;
+`measurepush.py` pushes only this machine's own ledger, so the export is kept
+but never pushed, and merging it into the repo's `measurements/` is the
+operator's call. Meter rows can appear in both the exported file and the
+harvested ledger (with different `user`/`machine`); that double count is
+known and not deduped, and the export is what carries stories metered before
+Story 26.4 (only `metered.json`, no `observation.json`, such as Epic 26's
+26-1 to 26-3) and every non-meter observation.
+
 **C# / Godot projects need a network rule first.** The `balanced` policy
 blocks NuGet and the .NET download hosts (verified 2026-09-28), and the VM's
 Ubuntu packages only .NET 10, so a game project's sandbox cannot restore or
@@ -731,7 +778,10 @@ delete and check out the affected files again.
    output and launch again. The Epic 24 launch committed its own bootstrap.
 4. Each landed story is metered by the studio pipeline's `post_commit` hook
    (`lib/meter.py`). The hook copies transcripts out of the microVM into
-   `<run_dir>/transcripts/` and records one `observation`.
+   `<run_dir>/transcripts/` and records one `observation`. It also writes
+   that observation to `<run_dir>/transcripts/<story>/observation.json` on
+   the mounted checkout, and the host harvests it with `meter.py harvest`
+   (Story 26.4).
 5. When the run completes, open a PR from `loop/epic-<N>` into `main`.
 6. Spec files are `stories/<id>-spec.md`: the id already carries the title
    slug, so the path stays short for Windows. The planner records settled

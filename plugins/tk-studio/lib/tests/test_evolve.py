@@ -355,6 +355,67 @@ class EvolveTest(unittest.TestCase):
         self.assertEqual(self._rows()["PROP-001"][5],
                          "normalize the verify step.")
 
+    # --- Story 26.4: meter rows are measurements, not toil (PROP-067)
+
+    _METER = ("meter: story=25-1-the-roster route=session:opus usd=8.1 "
+              "usd_by_model=opus:8.1 wall_clock_s=900 attempts=1")
+    _METER_2 = ("meter: story=25-2-the-installer route=session:opus usd=3.4 "
+                "usd_by_model=opus:3.4 wall_clock_s=600 attempts=1")
+
+    def test_meter_observations_are_not_clustered_and_are_counted(self):
+        self._write("alice-m1.jsonl", [
+            _obs(self._METER, ts="2026-08-01T10:00:00+00:00"),
+            _obs(self._METER_2, ts="2026-08-02T10:00:00+00:00"),
+            _obs(_HEADLESS, ts="2026-08-03T09:00:00+00:00"),
+        ])
+        result = evolve.draft(self.repo)
+        self.assertEqual(result["measurements_skipped"], 2)
+        self.assertEqual(result["clusters"], 1)
+        self.assertEqual(result["observation_events"], 1)
+        self.assertEqual(len(result["created"]), 1)
+        self.assertEqual(result["stranded"], [])
+        self.assertFalse(any(row[7].startswith("obs:meter")
+                             for row in self._rows().values()))
+
+    def test_meter_keyed_row_is_not_recreated_updated_or_stranded(self):
+        meter_obs = _obs(self._METER, ts="2026-08-01T10:00:00+00:00")
+        key = evolve._slug(meter_obs)
+        self.ledger.parent.mkdir()
+        self.ledger.write_text(
+            evolve._LEDGER_TEMPLATE
+            + f"| PROP-067 | Low | Declined | Meter row | 1× observation | | | "
+              f"{key} | 2026-08-01 | 2026-08-01 |\n",
+            encoding="utf-8")
+        self._write("alice-m1.jsonl", [meter_obs])
+        before = self.ledger.read_bytes()
+        for _ in range(2):
+            result = evolve.draft(self.repo)
+            self.assertEqual(result["measurements_skipped"], 1)
+            self.assertEqual(result["created"], [])
+            self.assertEqual(result["updated"], [])
+            self.assertEqual(result["unchanged"], 0)
+            self.assertEqual(result["stranded"], [])
+            self.assertFalse(result["wrote"])
+            self.assertEqual(self.ledger.read_bytes(), before)
+        self.assertEqual(self._rows()["PROP-067"][2], "Declined")
+
+    def test_no_measurements_return_counts_zero_skipped(self):
+        elsewhere = Path(self._tmp.name) / "elsewhere"
+        elsewhere.mkdir()
+        result = evolve.draft(elsewhere)
+        self.assertEqual(result["measurements_skipped"], 0)
+        self._write("alice-m1.jsonl", [_obs(_HEADLESS)])
+        self.assertEqual(evolve.draft(self.repo, dry_run=True)["measurements_skipped"], 0)
+
+    def test_non_meter_observation_mentioning_meter_still_clusters(self):
+        self._write("alice-m1.jsonl", [
+            _obs("The meter: hook output is lost when the sandbox is recreated."),
+        ])
+        result = evolve.draft(self.repo)
+        self.assertEqual(result["measurements_skipped"], 0)
+        self.assertEqual(result["clusters"], 1)
+        self.assertEqual(len(result["created"]), 1)
+
     def test_dry_run_writes_nothing(self):
         self._seed()
         result = evolve.draft(self.repo, dry_run=True)
