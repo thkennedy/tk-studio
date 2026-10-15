@@ -1,0 +1,130 @@
+# stories.yaml: Epic 26 of this project, transcribed 1:1 from _bmad-output/planning-artifacts/epics.md
+# by .bmad-loop/plugins/studio-pipeline/transcribe.py on 2026-10-15. The epics document is
+# the plan; the studio gate may append remediation entries (`<key>-r<n>`) and revise
+# UNSTARTED entries' invoke_dev_with, nothing else.
+
+- id: "26-1-launch-ends-every-path-with-the-block-and-owns-its-bootstrap"
+  title: "Launch Ends Every Path with the Block and Owns Its Bootstrap"
+  description: >-
+    I want `tk-studio-launch` to end every headless path with the status block, to
+    commit its own bootstrap output, and to check the engine's budget limits against the
+    bands before it starts, So that a driver never records a missing block for a run
+    that succeeded, a second launch pass is never needed, and no story runs under a
+    policy limit the bands do not cover (holes 10, 20 and 4). Canonical: ST-088.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 26.1:
+    Launch Ends Every Path with the Block and Owns Its Bootstrap", the authoritative
+    specification (user story and acceptance criteria). Read the epic's own narrative
+    (the paragraphs under "## Epic 26:") for scope, rulings and the repo the story
+    targets; transcribe the story into the spec's intent contract and never re-derive,
+    generalise or extend it. Plan: plans/26-1.md when present (its Code Map is the
+    investigation). Project rules and the verify gate: the studio customization
+    (_bmad/custom/bmad-build-auto.toml). Routing: .bmad-loop/routing.current.json; pass
+    implementer.model and reviewers.model explicitly on every subagent launch.
+    Deviations: one `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto
+    Run Result. Spec file: write the executor spec as
+    `stories/26-1-launch-ends-every-path-with-the-block-and-owns-its-bootstrap-<slug of
+    the title>.md` in the spec folder; the engine resolves it by the glob
+    `26-1-launch-ends-every-path-with-the-block-and-owns-its-bootstrap-*.md`, and a file
+    named `26-1-launch-ends-every-path-with-the-block-and-owns-its-bootstrap.md` is read
+    as pending (loop deficiency 1, story 21-6).
+
+- id: "26-2-the-planner-settles-schema-shape-and-the-spec-file-name"
+  title: "The Planner Settles Schema Shape and the Spec File Name"
+  description: >-
+    I want the launch planner to settle the shape of artifacts that do not exist yet
+    before the first story is dispatched, and story spec files named short enough for
+    Windows, So that a dev session never halts on a question the design documents
+    already answer (hole 19) and spec paths stay under the path limit (hole 6).
+    Canonical: ST-089.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 26.2: The
+    Planner Settles Schema Shape and the Spec File Name", the authoritative
+    specification (user story and acceptance criteria). Read the epic's own narrative
+    (the paragraphs under "## Epic 26:") for scope, rulings and the repo the story
+    targets; transcribe the story into the spec's intent contract and never re-derive,
+    generalise or extend it. Plan: plans/26-2.md when present (its Code Map is the
+    investigation). Project rules and the verify gate: the studio customization
+    (_bmad/custom/bmad-build-auto.toml). Routing: .bmad-loop/routing.current.json; pass
+    implementer.model and reviewers.model explicitly on every subagent launch.
+    Deviations: one `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto
+    Run Result. Spec file: write the executor spec as
+    `stories/26-2-the-planner-settles-schema-shape-and-the-spec-file-name-<slug of the
+    title>.md` in the spec folder; the engine resolves it by the glob
+    `26-2-the-planner-settles-schema-shape-and-the-spec-file-name-*.md`, and a file
+    named `26-2-the-planner-settles-schema-shape-and-the-spec-file-name.md` is read as
+    pending (loop deficiency 1, story 21-6).
+
+- id: "26-3-routing-legs-carry-an-advisor-and-an-effort"
+  title: "Routing Legs Carry an Advisor and an Effort"
+  description: >-
+    I want every pipeline leg to declare an optional advisor model and to pass its
+    effort explicitly to every subagent it launches, So that Epic 24.3 can run its third
+    arm (a cheaper main model with a stronger advisor) and the meter can price it (the
+    advisor fit note; PROP-045, PROP-052, PROP-058). Canonical: ST-090.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 26.3:
+    Routing Legs Carry an Advisor and an Effort", the authoritative specification (user
+    story and acceptance criteria). Read the epic's own narrative (the paragraphs under
+    "## Epic 26:") for scope, rulings and the repo the story targets; transcribe the
+    story into the spec's intent contract and never re-derive, generalise or extend it.
+    Plan: plans/26-3.md when present (its Code Map is the investigation). Project rules
+    and the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass implementer.model and reviewers.model
+    explicitly on every subagent launch. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/26-3-routing-legs-carry-an-advisor-and-an-effort-<slug of
+    the title>.md` in the spec folder; the engine resolves it by the glob
+    `26-3-routing-legs-carry-an-advisor-and-an-effort-*.md`, and a file named
+    `26-3-routing-legs-carry-an-advisor-and-an-effort.md` is read as pending (loop
+    deficiency 1, story 21-6).
+
+- id: "26-4-the-meter-lands-on-the-host-and-does-not-draft-itself"
+  title: "The Meter Lands on the Host and Does Not Draft Itself"
+  description: >-
+    I want every landed story's meter observation to reach the host ledger even when the
+    engine runs in a microVM, and the evolve drafter to leave measurements alone, So
+    that recreating a sandbox never loses the cost record again (hole 23) and proposals
+    are minted from toil, not from meter rows (PROP-067). Canonical: ST-091.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 26.4: The
+    Meter Lands on the Host and Does Not Draft Itself", the authoritative specification
+    (user story and acceptance criteria). Read the epic's own narrative (the paragraphs
+    under "## Epic 26:") for scope, rulings and the repo the story targets; transcribe
+    the story into the spec's intent contract and never re-derive, generalise or extend
+    it. Plan: plans/26-4.md when present (its Code Map is the investigation). Project
+    rules and the verify gate: the studio customization
+    (_bmad/custom/bmad-build-auto.toml). Routing: .bmad-loop/routing.current.json; pass
+    implementer.model and reviewers.model explicitly on every subagent launch.
+    Deviations: one `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto
+    Run Result. Spec file: write the executor spec as
+    `stories/26-4-the-meter-lands-on-the-host-and-does-not-draft-itself-<slug of the
+    title>.md` in the spec folder; the engine resolves it by the glob
+    `26-4-the-meter-lands-on-the-host-and-does-not-draft-itself-*.md`, and a file named
+    `26-4-the-meter-lands-on-the-host-and-does-not-draft-itself.md` is read as pending
+    (loop deficiency 1, story 21-6).
+
+- id: "26-5-the-adapter-takes-a-status-pull-back-from-a-driver"
+  title: "The Adapter Takes a Status Pull-Back from a Driver"
+  description: >-
+    I want a planning-adapter verb that sets a canonical story's status-class fields
+    from outside, So that the supervisor can mark stories `review` when a run opens its
+    PR and `done` when the PR merges, without writing canonical frontmatter itself
+    (AD-4, AD-5; hole 18; Epic 27 consumes it). Canonical: ST-092.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 26.5: The
+    Adapter Takes a Status Pull-Back from a Driver", the authoritative specification
+    (user story and acceptance criteria). Read the epic's own narrative (the paragraphs
+    under "## Epic 26:") for scope, rulings and the repo the story targets; transcribe
+    the story into the spec's intent contract and never re-derive, generalise or extend
+    it. Plan: plans/26-5.md when present (its Code Map is the investigation). Project
+    rules and the verify gate: the studio customization
+    (_bmad/custom/bmad-build-auto.toml). Routing: .bmad-loop/routing.current.json; pass
+    implementer.model and reviewers.model explicitly on every subagent launch.
+    Deviations: one `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto
+    Run Result. Spec file: write the executor spec as
+    `stories/26-5-the-adapter-takes-a-status-pull-back-from-a-driver-<slug of the
+    title>.md` in the spec folder; the engine resolves it by the glob
+    `26-5-the-adapter-takes-a-status-pull-back-from-a-driver-*.md`, and a file named
+    `26-5-the-adapter-takes-a-status-pull-back-from-a-driver.md` is read as pending
+    (loop deficiency 1, story 21-6).
