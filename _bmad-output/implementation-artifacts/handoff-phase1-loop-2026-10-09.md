@@ -2,6 +2,14 @@
 
 Written for a fresh Claude Code session on the agent PC (TIM-PC-2). It supersedes `handoff-phase1-loop-2026-10-07.md` for the state of Phase 1. Engine mechanics: the 09-28 handoff and runbook §3.8. The starter prompt is at the end.
 
+## Update at the end of session 7 (2026-10-15): the meta-CLI wheel, stable promoted, the one-line bootstrap proven on the box
+
+On Tim's "go": `cli--v0.1.0` tagged at `0ee30c1` and published (`tk_studio_cli-0.1.0-py3-none-any.whl`, 50 KB, sha256 `177a47db…5cc9`, verified; recorded in `latest.json`, `05f8f8e`). Then **PR #106** promoted `stable.json` to equal `latest.json` (plugin 0.3.0, supervisor 0.1.0, cli 0.1.0, uv 0.13.1, bun 1.4.3), merged. Then the real newcomer path (spec flow F1) ran on TIM-PC-2 with the local stable roster: `install.ps1` installed uv 0.13.1 into `%LOCALAPPDATA%\tk-studio\tools`, the wheel through `uv tool install`, the launcher at `%LOCALAPPDATA%\tk-studio\bin\tk-studio.exe` on the User PATH; `tk-studio install` rewrote the plugin folder at 0.3.0 (same version, the swap kept the previous); `tk-studio status` lists every component against the roster; `tk-studio doctor` is **all green** except the Hermes parse warning (DW-17); a plain `tk activate` (stable) is clean on four planes. Epic 25's operator steps are all closed except recreating the TUA and supervisor sandboxes, which wait for their next loop runs.
+
+**Open:** DW-9 to DW-17; the supervisor repo's tracked `__pycache__` and `_bmad` copy (19.8 MB release zip); the TUA and supervisor sandboxes (`sbx skills import --force` is done; recreate `--skills readonly` and re-provision, TUA with the NuGet rule and `WITH_DOTNET=8.0 WITH_GODOT=4.7.2`).
+
+**Next session, in order:** A sanity (plain `tk activate` is fine again); the evolve-loop test (`tk measure push` of the host ledger, `tk consolidate`, `tk evolve draft` on a branch, pre-triaged for Tim; the 2026-10-14 dry run showed 39 new rows including holes 1 to 22); then EP-26 (the service owns lifetime) through the loop in `claude-tk-studio` (recreated, provisioned, stopped), with Epic 23.3 and 24.3/24.4 alongside after their sandboxes are recreated.
+
 ## Update at the end of session 6 (2026-10-15): Epic 25 merged, both releases cut, the box runs the installer-written plugin
 
 PR #104 merged on Tim's word. The operator steps then ran in order (Tim did step 1 himself; the rest on his "go ahead"):
