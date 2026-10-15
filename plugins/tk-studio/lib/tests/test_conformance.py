@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -257,6 +258,83 @@ class ConformanceHarnessTestCase(unittest.TestCase):
             "marker": "not the studio repo root"}])})
         report = self._run()
         self.assertTrue(report["ok"], report["failures"])
+
+    # --- Story 26.1: expect status-block on surface drives
+
+    def _block_drive(self, payload: dict, exit_code: int = 0, **drive) -> dict:
+        script = Path(self._tmp.name) / "blocky.py"
+        script.write_text(
+            f"import json, sys; print(json.dumps({payload!r})); "
+            f"sys.exit({exit_code})", encoding="utf-8")
+        self._make_skill("tk-studio-fake")
+        self._write_manifest({"tk-studio-fake": self._entry(drives=[{
+            "assertion": "status-block-drive", "argv": [str(script)],
+            "expect": "status-block", **drive}])})
+        return self._run()
+
+    def _block(self, status="blocked", intent="tk-studio-fake", **extra):
+        return {"ok": False, **extra, "status": status, "intent": intent,
+                "artifacts": [], "reason": "named gap"}
+
+    def test_surface_status_block_without_declared_status_passes_any_status(self):
+        for status, code in (("blocked", 0), ("partial", 0), ("complete", 0),
+                             ("blocked", 2)):
+            with self.subTest(status=status, code=code):
+                report = self._block_drive(self._block(status), code)
+                self.assertTrue(report["ok"], report["failures"])
+                shutil.rmtree(self.skills / "tk-studio-fake")
+
+    def test_surface_status_block_with_declared_status_must_match(self):
+        report = self._block_drive(self._block("blocked"), 0, status="blocked")
+        self.assertTrue(report["ok"], report["failures"])
+        shutil.rmtree(self.skills / "tk-studio-fake")
+        report = self._block_drive(self._block("partial"), 0, status="blocked")
+        failure = next(f for f in report["failures"]
+                       if f["assertion"] == "status-block-drive")
+        self.assertIn("declares 'blocked'", failure["detail"])
+
+    def test_surface_status_block_with_declared_marker_must_name_it(self):
+        report = self._block_drive(self._block(checks="task manifest: 2"), 0,
+                                   marker="task manifest")
+        self.assertTrue(report["ok"], report["failures"])
+        shutil.rmtree(self.skills / "tk-studio-fake")
+        report = self._block_drive(self._block(), 0, marker="task manifest")
+        failure = next(f for f in report["failures"]
+                       if f["assertion"] == "status-block-drive")
+        self.assertIn("declared marker 'task manifest'", failure["detail"])
+
+    def test_shipped_relaunch_drive_declares_a_reached_fixture_marker(self):
+        manifest = json.loads((PLUGIN_ROOT / "contracts" / "conformance"
+                               / "manifest.json").read_text(encoding="utf-8"))
+        drive = next(d for d in manifest["surfaces"]["tk-studio-launch"]["drives"]
+                     if d["assertion"] == "status-block-relaunch")
+        # the marker appears only once the fixture's two-entry manifest
+        # resolved and was counted — never on a checkout with no spec folder
+        self.assertEqual(drive.get("marker"), "2 entries")
+        self.assertNotIn("status", drive)
+        import launch  # noqa: E402 — lib is on sys.path above
+        with tempfile.TemporaryDirectory() as empty:
+            with mock.patch.object(launch, "_bmad_loop_binary", lambda: None):
+                answer = json.dumps(launch.check(Path(empty), launch.default_spec_folder(1)))
+        self.assertNotIn(drive["marker"], answer)
+
+    def test_surface_status_block_fails_when_the_block_is_not_last(self):
+        payload = {"status": "blocked", "intent": "tk-studio-fake",
+                   "artifacts": [], "reason": "x", "ok": False}
+        report = self._block_drive(payload, 0)
+        failure = next(f for f in report["failures"]
+                       if f["assertion"] == "status-block-drive")
+        self.assertIn("not the status block", failure["detail"])
+
+    def test_surface_status_block_fails_on_wrong_intent_or_exit_1(self):
+        report = self._block_drive(self._block(intent="tk-studio-other"), 0)
+        self.assertIn("status-block-drive",
+                      {f["assertion"] for f in report["failures"]})
+        shutil.rmtree(self.skills / "tk-studio-fake")
+        report = self._block_drive(self._block(), 1)
+        failure = next(f for f in report["failures"]
+                       if f["assertion"] == "status-block-drive")
+        self.assertIn("exit 1", failure["detail"])
 
     def test_hanging_drive_fails_no_prompt_assertion(self):
         script = Path(self._tmp.name) / "prompty.py"

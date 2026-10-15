@@ -63,3 +63,17 @@
 - What no longer holds: Nothing in the acceptance criteria. "the offline runbook describes the skills-dir write from a downloaded zip" must not drop 25.6's sections or the import step.
 - Suggested adjustment: Rewriting the README, the offline runbook and §3.4 keeps 25.6's kb section and §3.5/§3.8 as landed (edit them only to remove a stale marketplace reference). Wherever the docs say `tk-studio install`/`update` on the host, they add "then `sbx skills import --force` for engine sandboxes".
 - Status: closed — applied to the unstarted 25-7 entry's invoke_dev_with by the gate session (2026-10-15)
+
+## 26-3-routing-legs-carry-an-advisor-and-an-effort — scope: stories — from 26-1-launch-ends-every-path-with-the-block-and-owns-its-bootstrap — 2026-10-15
+
+- What changed: 26-1 already bumped the driver contract to 0.1.21. Its header clause starts at the anchor `0.1.21 (Epic 26)`, and `test_driver_contract.py` pins both the version and that anchor.
+- What no longer holds: "it documents the `advisor` field and the pairing rule (0.1.21, additive)". It cannot be a bump now, only an append to the existing clause.
+- Suggested adjustment: Append the §5 `advisor` text after the existing `0.1.21 (Epic 26)` clause in the header, without rewording it or bumping the version again. Put `plugins/tk-studio/lib/tests/test_driver_contract.py` in Files and pin the new clause by its own text.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-15)
+
+## 26-5-the-adapter-takes-a-status-pull-back-from-a-driver — scope: stories — from 26-1-launch-ends-every-path-with-the-block-and-owns-its-bootstrap — 2026-10-15
+
+- What changed: same as 26-3. Contract 0.1.21 is already the header under the anchor `0.1.21 (Epic 26)`, and `test_driver_contract.py` pins it.
+- What no longer holds: "the verb is documented as additive (0.1.21)". It cannot be a bump now, only an append to the existing clause.
+- Suggested adjustment: Append the §4 `plansync.py status` text after the existing `0.1.21 (Epic 26)` clause, without rewording it or bumping the version again. Put `test_driver_contract.py` in Files. If a launch refusal is read, `budget` is present only when a mismatch was found.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-15)

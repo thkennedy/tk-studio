@@ -5,11 +5,15 @@ The core is exercised against a fake substrate: `run_cli` and
 launched. What must hold: readiness names every gap and launches nothing;
 a live engine on the checkout refuses; a launch answers ok only once the
 engine acknowledged the pre-minted id; status answers without the CLI on a
-project that never ran; the CLI keeps the JSON/exit-code house shape.
+project that never ran; the CLI keeps the JSON/exit-code house shape, and
+every CLI result ends with the AD-11 block keys (Story 26.1); the policy
+limits are compared read-only with the budget bands, and a mismatch refuses
+`start` unless acknowledged.
 """
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -39,6 +43,52 @@ def _project(tmp: Path, *, spec: bool = True, entries: int = 2,
     if ran_before:
         (root / ".bmad-loop" / "runs").mkdir(parents=True)
     return root, "_bmad-output/specs/spec-epic-2"
+
+
+BLOCK_KEYS = ["status", "intent", "artifacts", "reason"]
+
+BANDS_YAML = """\
+bands_version: 1
+currency: usd
+bands:
+  S:
+    usd_estimate: 4.5
+    weighted_tokens: 2000000
+    review_cycles_max: 1
+  M:
+    usd_estimate: 8.5
+    weighted_tokens: 3500000
+    review_cycles_max: 2
+  L:
+    usd_estimate: 13
+    weighted_tokens: 5000000
+    review_cycles_max: 2
+"""
+
+
+def _budget_files(root: Path, *, max_tokens: int = 2000000, review_cycles: int = 3,
+                  bands: str | None = BANDS_YAML, policy: str | None = None) -> Path:
+    """Write the engine policy and the budget bands into a fixture project;
+    returns the policy path. The real-box numbers are the default: L's
+    5,000,000 weighted tokens exceed max_tokens_per_story 2,000,000."""
+    policy_path = root / ".bmad-loop" / "policy.toml"
+    policy_path.parent.mkdir(parents=True, exist_ok=True)
+    if policy is None:
+        policy = ("[gates]\nmode = \"per-epic\"\n\n[limits]\n"
+                  f"max_review_cycles = {review_cycles}\n"
+                  "session_timeout_min = 90\n"
+                  f"max_tokens_per_story = {max_tokens}\n"
+                  "max_tokens_per_session = 4000000\n")
+    policy_path.write_text(policy, encoding="utf-8")
+    if bands is not None:
+        bands_path = root / ".tk-studio" / "budget-bands.yaml"
+        bands_path.parent.mkdir(parents=True, exist_ok=True)
+        bands_path.write_text(bands, encoding="utf-8")
+    return policy_path
+
+
+def _sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 class _FakeSubstrate:
@@ -247,7 +297,13 @@ class LaunchTestCase(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             code = launch.main(["check", "--directory", str(root), "--spec", spec])
         self.assertEqual(code, 0)
-        self.assertTrue(json.loads(out.getvalue())["ok"])
+        parsed = json.loads(out.getvalue())
+        self.assertTrue(parsed["ok"])
+        # Story 26.1: the AD-11 block keys end every result, in order
+        self.assertEqual(list(parsed)[-4:], BLOCK_KEYS)
+        self.assertEqual((parsed["status"], parsed["intent"], parsed["artifacts"],
+                          parsed["reason"]), ("complete", "tk-studio-launch", [], None))
+        self.assertIn("budget", parsed)
 
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -256,6 +312,15 @@ class LaunchTestCase(unittest.TestCase):
         parsed = json.loads(out.getvalue())
         self.assertTrue(parsed["ok"])
         self.assertTrue(re.match(r"^\d{8}-\d{6}-[0-9a-f]{4}$", parsed["run_id"]))
+        self.assertEqual(list(parsed)[-4:], BLOCK_KEYS)
+        self.assertEqual(parsed["status"], "complete")
+        self.assertEqual(parsed["intent"], "tk-studio-launch")
+        # the project-relative run dir and spec folder — never run_dir_abs or the log
+        self.assertEqual(parsed["artifacts"], [parsed["run_dir"], parsed["spec_folder"]])
+        self.assertNotIn(parsed["run_dir_abs"], parsed["artifacts"])
+        self.assertNotIn(parsed["log"], parsed["artifacts"])
+        self.assertIsNone(parsed["reason"])
+        self.assertIn("budget", parsed)
 
     # ---- review-driven pins (PR #58 adversarial pass)
 
@@ -360,6 +425,279 @@ class LaunchTestCase(unittest.TestCase):
         parsed = json.loads(out.getvalue())
         self.assertFalse(parsed["ok"])
         self.assertIn("spec folder", parsed["error"])
+        # Story 26.1: the refusal carries the block too, blocked, reason = error
+        self.assertEqual(list(parsed), ["ok", "error"] + BLOCK_KEYS)
+        self.assertEqual(parsed["status"], "blocked")
+        self.assertEqual(parsed["intent"], "tk-studio-launch")
+        self.assertEqual(parsed["artifacts"], [])
+        self.assertEqual(parsed["reason"], parsed["error"])
+
+    # ---- Story 26.1: the block on every verb and outcome
+
+    def _cli(self, argv: list[str]) -> tuple[int, dict]:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = launch.main(argv)
+        return code, json.loads(out.getvalue())
+
+    def test_cli_check_with_gaps_ends_blocked_naming_them(self):
+        root, spec = _project(self.tmp, spec=False)
+        self._wire(_FakeSubstrate())
+        code, parsed = self._cli(["check", "--directory", str(root), "--spec", spec])
+        self.assertEqual(code, 0)  # a check with gaps is an answer
+        self.assertFalse(parsed["ok"])
+        self.assertEqual(list(parsed)[-4:], BLOCK_KEYS)
+        self.assertEqual(parsed["status"], "blocked")
+        self.assertIn("SPEC.md", parsed["reason"])
+
+    def test_cli_status_and_stop_end_with_the_block(self):
+        root, _ = _project(self.tmp, ran_before=True)
+        self._wire(_FakeSubstrate(runs=[
+            {"run_id": "20260902-022928-ef8c", "status": "in-progress", "paused_stage": ""}]))
+        code, parsed = self._cli(["status", "--directory", str(root)])
+        self.assertEqual(code, 0)
+        self.assertEqual(list(parsed)[-4:], BLOCK_KEYS)
+        self.assertEqual((parsed["status"], parsed["intent"], parsed["artifacts"], parsed["reason"]),
+                         ("complete", "tk-studio-launch", [], None))
+        code, parsed = self._cli(["stop", "--directory", str(root),
+                                  "--run-id", "20260902-022928-ef8c"])
+        self.assertEqual(code, 0)
+        self.assertEqual(list(parsed)[-4:], BLOCK_KEYS)
+        self.assertEqual(parsed["status"], "complete")
+
+    def test_cli_stop_refusal_ends_blocked(self):
+        root, _ = _project(self.tmp, ran_before=True)
+        self._wire(_FakeSubstrate(stop_ok=False))
+        code, parsed = self._cli(["stop", "--directory", str(root),
+                                  "--run-id", "20260901-000000-aaaa"])
+        self.assertEqual(code, 2)
+        self.assertEqual(list(parsed)[-4:], BLOCK_KEYS)
+        self.assertEqual(parsed["status"], "blocked")
+        self.assertIn("no such run", parsed["reason"])
+
+    def test_cli_unacknowledged_start_ends_blocked_exit_1(self):
+        root, spec = _project(self.tmp)
+        self._wire(_FakeSubstrate(acknowledge=False))
+        code, parsed = self._cli(["start", "--directory", str(root), "--spec", spec,
+                                  "--wait", "0.6"])
+        self.assertEqual(code, 1)
+        self.assertEqual(list(parsed)[-4:], BLOCK_KEYS)
+        self.assertEqual(parsed["status"], "blocked")
+        self.assertEqual(parsed["artifacts"], [])
+        self.assertIn("did not write", parsed["reason"])
+
+    # ---- Story 26.1: the budget comparison
+
+    def test_check_names_the_mismatch_with_both_numbers_and_ends_partial(self):
+        root, spec = _project(self.tmp)
+        _budget_files(root)
+        self._wire(_FakeSubstrate())
+        result = launch.check(root, spec)
+        self.assertTrue(result["ok"], result["gaps"])  # a mismatch is never a gap
+        self.assertEqual(result["gaps"], [])
+        self.assertEqual(result["budget"]["budget_mismatch"], [{
+            "limit": "max_tokens_per_story", "policy": 2000000, "band": "L",
+            "band_field": "weighted_tokens", "band_value": 5000000}])
+        compared = {c["limit"]: c for c in result["budget"]["compared"]}
+        self.assertEqual(set(compared), {"max_tokens_per_story", "max_review_cycles"})
+        self.assertEqual(compared["max_review_cycles"]["band_value"], 2)
+        code, parsed = self._cli(["check", "--directory", str(root), "--spec", spec])
+        self.assertEqual(code, 0)
+        self.assertEqual(list(parsed)[-4:], BLOCK_KEYS)
+        self.assertEqual(parsed["status"], "partial")
+        self.assertIn("max_tokens_per_story", parsed["reason"])
+        self.assertIn("2000000", parsed["reason"])
+        self.assertIn("5000000", parsed["reason"])
+
+    def test_check_within_the_bands_is_complete(self):
+        root, spec = _project(self.tmp)
+        _budget_files(root, max_tokens=6000000)
+        self._wire(_FakeSubstrate())
+        code, parsed = self._cli(["check", "--directory", str(root), "--spec", spec])
+        self.assertEqual(code, 0)
+        self.assertEqual(parsed["budget"]["budget_mismatch"], [])
+        self.assertEqual(len(parsed["budget"]["compared"]), 2)
+        self.assertEqual(parsed["status"], "complete")
+
+    def test_review_cap_below_the_bands_is_a_mismatch(self):
+        root, spec = _project(self.tmp)
+        _budget_files(root, max_tokens=6000000, review_cycles=1)
+        self._wire(_FakeSubstrate())
+        mismatch = launch.check(root, spec)["budget"]["budget_mismatch"]
+        self.assertEqual(mismatch, [{"limit": "max_review_cycles", "policy": 1,
+                                     "band": "M", "band_field": "review_cycles_max",
+                                     "band_value": 2}])
+
+    def test_limits_without_a_band_field_are_not_compared(self):
+        root, spec = _project(self.tmp)
+        _budget_files(root)
+        self._wire(_FakeSubstrate())
+        budget = launch.check(root, spec)["budget"]
+        not_compared = {n["limit"]: n["reason"] for n in budget["not_compared"]}
+        self.assertEqual(not_compared, {"session_timeout_min": "no band field",
+                                        "max_tokens_per_session": "no band field",
+                                        "max_followup_reviews": "no band field"})
+        limits = {m["limit"] for m in budget["budget_mismatch"]}
+        self.assertNotIn("session_timeout_min", limits)
+        self.assertNotIn("max_tokens_per_session", limits)
+        self.assertNotIn("max_followup_reviews", limits)
+
+    def test_missing_or_unparseable_budget_inputs_are_named_never_a_crash(self):
+        cases = {
+            "policy missing": dict(policy=None, write_policy=False),
+            "policy unparseable": dict(policy="[limits\nmax = = 1\n"),
+            "bands missing": dict(bands=None),
+            "bands unparseable": dict(bands="bands:\n  - [unclosed\n bad: : :\n"),
+        }
+        for label, kw in cases.items():
+            with self.subTest(label):
+                tmp = self.tmp / label.replace(" ", "-")
+                tmp.mkdir()
+                root, spec = _project(tmp)
+                write_policy = kw.pop("write_policy", True)
+                if write_policy:
+                    _budget_files(root, **kw)
+                elif kw.get("bands", BANDS_YAML) is not None:
+                    bands = root / ".tk-studio" / "budget-bands.yaml"
+                    bands.parent.mkdir(parents=True)
+                    bands.write_text(BANDS_YAML, encoding="utf-8")
+                self._wire(_FakeSubstrate())
+                result = launch.check(root, spec)
+                self.assertTrue(result["ok"], result["gaps"])
+                self.assertEqual(result["budget"]["budget_mismatch"], [])
+                entry = next(c for c in result["checks"] if c["check"] == "budget")
+                expected = ("policy.toml" if label.startswith("policy")
+                            else "budget-bands.yaml")
+                self.assertIn(expected, entry["detail"])
+                self.assertIn(label.split()[1], entry["detail"])
+                self.assertTrue(result["budget"]["not_compared"])
+
+    def test_start_refuses_on_a_mismatch_and_spawns_nothing(self):
+        root, spec = _project(self.tmp)
+        _budget_files(root)
+        fake = self._wire(_FakeSubstrate())
+        with self.assertRaises(launch.LaunchError) as ctx:
+            launch.start(root, spec, wait_s=2)
+        self.assertIn("budget_mismatch", str(ctx.exception))
+        self.assertIn("2000000", str(ctx.exception))
+        self.assertIn("5000000", str(ctx.exception))
+        self.assertEqual(fake.spawned, [])
+        code, parsed = self._cli(["start", "--directory", str(root), "--spec", spec,
+                                  "--wait", "2"])
+        self.assertEqual(code, 2)
+        self.assertEqual(list(parsed)[-4:], BLOCK_KEYS)
+        self.assertEqual(parsed["status"], "blocked")
+        self.assertIn("allow_budget_mismatch", parsed["reason"])
+        self.assertEqual(fake.spawned, [])
+
+    def test_cli_mismatch_refusal_carries_the_budget_before_the_block(self):
+        root, spec = _project(self.tmp)
+        _budget_files(root)
+        fake = self._wire(_FakeSubstrate())
+        code, parsed = self._cli(["start", "--directory", str(root), "--spec", spec,
+                                  "--wait", "2"])
+        self.assertEqual(code, 2)
+        self.assertEqual(list(parsed), ["ok", "error", "budget"] + BLOCK_KEYS)
+        self.assertFalse(parsed["ok"])
+        self.assertEqual(parsed["status"], "blocked")
+        self.assertEqual(parsed["artifacts"], [])
+        self.assertEqual(parsed["reason"], parsed["error"])
+        self.assertEqual(parsed["budget"]["budget_mismatch"], [{
+            "limit": "max_tokens_per_story", "policy": 2000000, "band": "L",
+            "band_field": "weighted_tokens", "band_value": 5000000}])
+        self.assertEqual(set(parsed["budget"]), {"compared", "budget_mismatch", "not_compared"})
+        self.assertEqual(fake.spawned, [])
+
+    def test_cli_gaps_refusal_with_a_mismatch_still_names_the_budget(self):
+        root, spec = _project(self.tmp, spec=False)
+        _budget_files(root)
+        self._wire(_FakeSubstrate())
+        code, parsed = self._cli(["start", "--directory", str(root), "--spec", spec])
+        self.assertEqual(code, 2)
+        self.assertEqual(list(parsed)[-4:], BLOCK_KEYS)
+        self.assertIn("SPEC.md", parsed["reason"])
+        self.assertEqual(len(parsed["budget"]["budget_mismatch"]), 1)
+
+    def test_a_non_numeric_band_field_is_not_compared_never_a_crash(self):
+        root, spec = _project(self.tmp)
+        bands = BANDS_YAML.replace("weighted_tokens: 5000000", 'weighted_tokens: "lots"')
+        _budget_files(root, bands=bands)
+        self._wire(_FakeSubstrate())
+        result = launch.check(root, spec)
+        self.assertTrue(result["ok"], result["gaps"])
+        budget = result["budget"]
+        not_compared = {n["limit"]: n["reason"] for n in budget["not_compared"]}
+        self.assertEqual(not_compared["max_tokens_per_story"],
+                         "band L weighted_tokens not a number")
+        self.assertNotIn("max_tokens_per_story", {c["limit"] for c in budget["compared"]})
+        self.assertEqual(budget["budget_mismatch"], [])
+        # the other limit is still compared on its numeric bands
+        self.assertEqual([c["limit"] for c in budget["compared"]], ["max_review_cycles"])
+
+    def test_a_non_numeric_or_absent_policy_limit_is_not_compared_never_a_crash(self):
+        root, spec = _project(self.tmp)
+        _budget_files(root, policy=("[limits]\nmax_tokens_per_story = \"2000000\"\n"
+                                    "session_timeout_min = 90\n"))
+        self._wire(_FakeSubstrate())
+        result = launch.check(root, spec)
+        self.assertTrue(result["ok"], result["gaps"])
+        budget = result["budget"]
+        not_compared = {n["limit"]: n["reason"] for n in budget["not_compared"]}
+        self.assertEqual(not_compared["max_tokens_per_story"], "not a number in policy")
+        self.assertEqual(not_compared["max_review_cycles"], "absent from policy")
+        self.assertEqual(budget["compared"], [])
+        self.assertEqual(budget["budget_mismatch"], [])
+
+    def test_every_exceeded_limit_is_named_at_once(self):
+        root, spec = _project(self.tmp)
+        _budget_files(root, review_cycles=1)
+        fake = self._wire(_FakeSubstrate())
+        mismatch = launch.check(root, spec)["budget"]["budget_mismatch"]
+        self.assertEqual({m["limit"]: (m["policy"], m["band_value"]) for m in mismatch},
+                         {"max_tokens_per_story": (2000000, 5000000),
+                          "max_review_cycles": (1, 2)})
+        code, parsed = self._cli(["check", "--directory", str(root), "--spec", spec])
+        self.assertEqual(code, 0)
+        self.assertEqual(parsed["status"], "partial")
+        both = ("max_tokens_per_story 2000000 <", "weighted_tokens 5000000",
+                "max_review_cycles 1 <", "review_cycles_max 2")
+        for text in both:
+            self.assertIn(text, parsed["reason"])
+        with self.assertRaises(launch.LaunchError) as ctx:
+            launch.start(root, spec, wait_s=2)
+        for text in both:
+            self.assertIn(text, str(ctx.exception))
+        code, parsed = self._cli(["start", "--directory", str(root), "--spec", spec,
+                                  "--wait", "2"])
+        self.assertEqual(code, 2)
+        self.assertEqual(parsed["status"], "blocked")
+        self.assertEqual(len(parsed["budget"]["budget_mismatch"]), 2)
+        self.assertIn("max_tokens_per_story", parsed["reason"])
+        self.assertIn("max_review_cycles", parsed["reason"])
+        self.assertEqual(fake.spawned, [])
+
+    def test_start_acknowledged_mismatch_launches(self):
+        root, spec = _project(self.tmp)
+        _budget_files(root)
+        fake = self._wire(_FakeSubstrate())
+        code, parsed = self._cli(["start", "--directory", str(root), "--spec", spec,
+                                  "--wait", "2", "--allow-budget-mismatch"])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(fake.spawned), 1)
+        self.assertEqual(parsed["status"], "complete")
+        self.assertEqual(parsed["artifacts"], [parsed["run_dir"], parsed["spec_folder"]])
+        self.assertEqual(len(parsed["budget"]["budget_mismatch"]), 1)
+
+    def test_policy_file_is_byte_identical_after_check_and_start(self):
+        root, spec = _project(self.tmp)
+        policy = _budget_files(root)
+        before = _sha(policy)
+        self._wire(_FakeSubstrate())
+        self._cli(["check", "--directory", str(root), "--spec", spec])
+        self._cli(["start", "--directory", str(root), "--spec", spec, "--wait", "2"])
+        self._cli(["start", "--directory", str(root), "--spec", spec, "--wait", "2",
+                   "--allow-budget-mismatch"])
+        self.assertEqual(_sha(policy), before)
 
 
 if __name__ == "__main__":

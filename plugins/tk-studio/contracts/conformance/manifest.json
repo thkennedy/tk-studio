@@ -104,6 +104,20 @@
           "argv": ["lib/pipeline.py", "apply", "--directory", "{sandbox}", "--story", "1-1-conformance", "--dry-run"],
           "expect": "refusal",
           "marker": "policy missing"
+        },
+        {
+          "assertion": "status-block-fresh",
+          "argv": ["lib/launch.py", "check", "--directory", "{sandbox}", "--spec", "_bmad-output/specs/spec-none"],
+          "expect": "status-block",
+          "intent": "tk-studio-launch",
+          "status": "blocked"
+        },
+        {
+          "assertion": "status-block-relaunch",
+          "argv": ["lib/launch.py", "check", "--directory", "contracts/conformance/fixtures/launch-relaunch", "--epic", "1"],
+          "expect": "status-block",
+          "intent": "tk-studio-launch",
+          "marker": "2 entries"
         }
       ]
     },

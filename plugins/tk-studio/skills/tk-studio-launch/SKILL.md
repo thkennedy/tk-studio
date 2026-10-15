@@ -5,9 +5,10 @@ description: Launch, inspect, or stop the execution substrate (bmad-loop) for on
 
 # tk-studio-launch
 
-The studio's only way to start a run (studio pipeline decision 5: ClaudeOS →
-orchestrator → substrate). ClaudeOS submits a `run-epic` job; the job wrapper
-invokes this surface; this surface does the planner-tier preparation and then
+The studio's only way to start a run (studio pipeline decision 5: driver →
+orchestrator → substrate). A conformant driver — the studio supervisor, Hermes
+submitting to it, or direct invocation (driver contract §1) — runs a `run-epic`
+job; the job wrapper invokes this surface; this surface does the planner-tier preparation and then
 hands the epic to bmad-loop through `lib/launch.py`, the one deterministic
 core that talks to the substrate (CLI only, never imported — AD-2). Ending
 this session never ends the run: the engine is detached and owns the
@@ -21,6 +22,7 @@ checkout until it finishes, pauses, or is stopped.
 - `spec_folder?` — project-relative epic spec folder; default `_bmad-output/specs/spec-epic-<N>`
 - `story?` — the first story to bootstrap as `<epic>-<story>` (default: the epic's first story)
 - `bootstrap?` — `true` (default) prepares SPEC.md and the first story's tasks when absent; `false` refuses instead
+- `allow_budget_mismatch?` — `start`: `true` acknowledges a `budget_mismatch` and launches anyway (passed to the core as `--allow-budget-mismatch`); default `false` refuses it
 - `run_id?` — `status`/`stop`: the run to address (default: the live run)
 - `graceful?` — `stop` after the current unit instead of immediately
 
@@ -48,19 +50,31 @@ checkout until it finishes, pauses, or is stopped.
 
    Read `gaps[]`. Gaps you may close in this session (only when `bootstrap` is true): a missing `SPEC.md` (step 3) and an empty or missing task manifest (step 4). Every other gap — a live engine already on the checkout, `bmad-loop` not installed, a failing `bmad-loop validate` (a dirty tree, a broken policy) — ends the run `blocked` with the gap verbatim in `reason`. Never stop another run to make room; never clean a tree.
 
+   Read `budget` too: the core compares the engine's `.bmad-loop/policy.toml` limits with `.tk-studio/budget-bands.yaml` and names each limit the bands exceed in `budget.budget_mismatch[]` (`{limit, policy, band, band_field, band_value}`). A mismatch is not a gap — `check` ends `partial` naming it — but step 6's `start` refuses it unless the payload carries `allow_budget_mismatch: true`. Report it with both numbers; never edit its `[limits]` to clear it (the limit is the operator's machine-local setting; step 1's managed routing block is the only launch write to that file).
+
+   **Relaunch.** When `SPEC.md` and the manifest already exist (the epic launched before: stories already `done`, the route already applied), steps 3 and 4 write nothing and step 5 makes no commit; go straight to step 6. A relaunch ends exactly as a fresh launch does — on the core's block (see Status block).
+
 3. **Epic SPEC (when missing).** Invoke the project's own `bmad-spec` skill by name, headless, on the epic: input = the epic's section of `_bmad-output/planning-artifacts/epics.md` plus `_bmad-output/implementation-artifacts/epic-<N>-context.md` when present; slug `epic-<N>`, so it lands at `<spec_folder>/SPEC.md`. Express mode: gaps become `open_questions[]`, never invented answers. The stock skill is invoked untouched (AD-4); if it is not installed in the project, end `blocked` naming it.
 
 4. **First story's tasks (when the manifest is empty).** The task-planning instructions are a **project resource**: `<root>/.bmad-loop/plugins/studio-pipeline/task-planning.md` (the studio pipeline's gate plugin). Read it and follow it as "bootstrap story `<epic>-<story>`" — it appends the story's tasks to `<spec_folder>/stories.yaml` and writes `<spec_folder>/plans/<epic>-<story>.md`, then validates with `bmad-loop validate`. This is planner-tier work and the reason this surface's model default is the top tier. If the file is absent, end `blocked` naming it: this surface never invents a task breakdown of its own.
 
-5. **Launch.** Re-run `check`; when it answers `ok`, start the engine:
+5. **Commit the bootstrap output** — the one rule for the launch's own writes, so the dirty-tree refusal never fires on them. When steps 3–4 wrote files, commit exactly those files (`<spec_folder>/SPEC.md`, `<spec_folder>/.memlog.md`, `<spec_folder>/stories.yaml`, `<spec_folder>/plans/<epic>-<story>.md`, and any canonical plan files the transcription wrote) on the checkout's current branch at launch — that branch is the run branch (`loop/epic-<N>` by convention; a supervisor worktree may name it otherwise, and this surface never checks the name or switches branches) — in one commit with exactly this message:
 
-   ```bash
-   uv run "${CLAUDE_PLUGIN_ROOT}/lib/launch.py" start --directory <root> --spec <spec_folder>
+   ```text
+   loop(epic-<N>): SPEC, manifest and first-story plan from the launch bootstrap
    ```
 
-   The core mints the run id, spawns `bmad-loop run --spec … --run-id …` detached and console-less with its output in `~/.tk-studio/projects/<key>/launches/<run-id>.log`, and answers `ok` only once the engine has written `.bmad-loop/runs/<run-id>/state.json`. A launch it could not confirm answers `ok: false` with the pid and log named — report that as `blocked` with the reason; do not launch again.
+   Name those paths, only the ones that exist, in both commands — `git add -- <paths>` then `git commit -m '<message>' -- <paths>` (a pathspec commit records only those paths, whatever else is staged) — never `git add -A`, never anything else. If `git add` or `git commit` fails, end `blocked` with the git error verbatim in `reason`. When nothing was written (a relaunch), make no commit. Never push. This happens after step 4 and before step 6's `check`.
 
-6. **Report.** Attended: the run id, the spec folder, the first story planned, the route (session / implementer / reviewers / consult models and where each came from), and how to watch it (`bmad-loop tui`, the ClaudeOS Queue). Headless: end with the status block — `artifacts[]` names the run dir (the core's project-relative `run_dir`, never `run_dir_abs` or the store `log` path — §3 forbids absolute local paths in artifacts), the spec folder, and any SPEC/plan files this session wrote.
+6. **Launch.** Re-run `check`; when it answers `ok`, start the engine (add `--allow-budget-mismatch` only when the payload carries `allow_budget_mismatch: true`):
+
+   ```bash
+   uv run "${CLAUDE_PLUGIN_ROOT}/lib/launch.py" start --directory <root> --spec <spec_folder> [--allow-budget-mismatch]
+   ```
+
+   A `budget_mismatch` without the acknowledgement is a refusal (exit 2, `blocked`, both numbers in `reason`, the `budget` object carried in the refusal): report it and do not launch. The core mints the run id, spawns `bmad-loop run --spec … --run-id …` detached and console-less with its output in `~/.tk-studio/projects/<key>/launches/<run-id>.log`, and answers `ok` only once the engine has written `.bmad-loop/runs/<run-id>/state.json`. A launch it could not confirm answers `ok: false` with the pid and log named — report that as `blocked` with the reason; do not launch again.
+
+7. **Report.** Attended and headless alike: the run id, the spec folder, the first story planned (none on a relaunch), the route (session / implementer / reviewers / consult models and where each came from), any `budget_mismatch` with both numbers, and how to watch it — the studio supervisor's status page, `launch.py status` (this surface's `status` verb), and `bmad-loop tui`. Then end with the status block (below).
 
 ### `status`
 
@@ -80,13 +94,13 @@ Attended: confirm before an immediate stop (work in the current unit is preserve
 
 ### Status block
 
-Every headless run ends with the block (§3 of the driver contract):
+Every path — `start` fresh or relaunch, `status`, `stop`, attended or headless — ends with the block (§3 of the driver contract) as its final line of output. The core ends every result, refusals included, with the block's keys in order (`status`, `intent`, `artifacts`, `reason`), so the rule is one: print the last core result's block as the final line, adding to `artifacts` only the SPEC/plan files this session wrote (never `run_dir_abs` or the store `log` path — §3 forbids absolute local paths). A `start` that launched ends:
 
 ```json
 {"status": "complete", "intent": "tk-studio-launch", "artifacts": [".bmad-loop/runs/20260903-101500-ab12", "_bmad-output/specs/spec-epic-2"], "reason": null}
 ```
 
-`blocked` names the gap verbatim: the readiness check's `gaps[]`, the missing project resource, an unconfirmed launch. Nothing here ends `partial`.
+`blocked` names the gap verbatim: the readiness check's `gaps[]`, an unacknowledged `budget_mismatch`, the missing project resource, an unconfirmed launch. A path that ends before any core call (an unresolvable input, an unignored routing write, a missing `bmad-spec`) prints the same block shape itself, `blocked` with the gap. `partial` is the core's `check` naming a `budget_mismatch`.
 
 If the deterministic core is unrunnable — a tool call denied by permissions, `uv`/python unavailable — end `blocked` with the status block naming the unrunnable core as `reason`: never a question, never a headless run that ends without the block (AD-11).
 

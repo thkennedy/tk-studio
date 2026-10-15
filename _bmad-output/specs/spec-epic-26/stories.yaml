@@ -78,6 +78,10 @@
     `26-3-routing-legs-carry-an-advisor-and-an-effort-*.md`, and a file named
     `26-3-routing-legs-carry-an-advisor-and-an-effort.md` is read as pending (loop
     deficiency 1, story 21-6).
+    Replan (from 26-1, 2026-10-15): the driver contract is already 0.1.21; append the
+    section 5 `advisor` text after the existing `0.1.21 (Epic 26)` header clause, never
+    rewording it or bumping again, and put plugins/tk-studio/lib/tests/test_driver_contract.py
+    in Files (it pins the version and that anchor).
 
 - id: "26-4-the-meter-lands-on-the-host-and-does-not-draft-itself"
   title: "The Meter Lands on the Host and Does Not Draft Itself"
@@ -128,3 +132,8 @@
     `26-5-the-adapter-takes-a-status-pull-back-from-a-driver-*.md`, and a file named
     `26-5-the-adapter-takes-a-status-pull-back-from-a-driver.md` is read as pending
     (loop deficiency 1, story 21-6).
+    Replan (from 26-1, 2026-10-15): the driver contract is already 0.1.21; append the
+    section 4 `plansync.py status` text after the existing `0.1.21 (Epic 26)` header
+    clause, never rewording it or bumping again, and put
+    plugins/tk-studio/lib/tests/test_driver_contract.py in Files (it pins the version and
+    that anchor).
