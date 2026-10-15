@@ -240,6 +240,99 @@ class MeterTest(unittest.TestCase):
         self.assertEqual(out["usd_by_leg"]["supervise"], 0)
         self.assertNotIn("unknown", out["usd_by_leg"])
 
+    # ------------------------------------------------------------ advisor (Story 26.3)
+
+    @staticmethod
+    def advisor_line(mid, model, iterations, inp=0, out=0):
+        line = usage_line(mid, model, inp=inp, out=out)
+        line["message"]["usage"]["iterations"] = iterations
+        return line
+
+    def test_advisor_usage_priced_as_its_own_leg(self):
+        self.add_session(f"{KEY}-dev-1", "s-dev", [self.advisor_line("m1", "model-a", [
+            {"type": "message", "input_tokens": M},
+            {"type": meter.ADVISOR_ITERATION, "model": "model-b",
+             "input_tokens": M, "output_tokens": M, "cache_read_input_tokens": M,
+             "cache_creation_input_tokens": M}], inp=M)])
+        rc, out = self.run_cli("--no-record")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(meter.ADVISOR_ITERATION, "advisor_message")
+        # the advisor's call at model-b's rates: 10 + 20 + 50 + 30 (5m write)
+        self.assertAlmostEqual(out["usd_by_leg"]["advisor"], 110.0)
+        # the executor's leg keeps only the top-level usage
+        self.assertAlmostEqual(out["usd_by_leg"]["session"], 1.0)
+        self.assertAlmostEqual(out["usd_by_model"]["model-b"], 110.0)
+        self.assertAlmostEqual(out["usd_total"], 111.0)
+        desc = meter.describe(KEY, dict(out, route=None))
+        self.assertIn("advisor:110.0", desc)
+
+    def test_advisor_on_a_subagent_record_stays_out_of_the_subagent_leg(self):
+        self.add_session(f"{KEY}-dev-1", "s-dev", [usage_line("m1", "model-a", inp=M)],
+                         subagents={"i1": ({"description": "Implement story"}, [
+                             self.advisor_line("x1", "model-a", [
+                                 {"type": meter.ADVISOR_ITERATION, "model": "model-a-alias",
+                                  "output_tokens": M}], inp=M)])})
+        rc, out = self.run_cli("--no-record")
+        self.assertEqual(rc, 0, out)
+        self.assertAlmostEqual(out["usd_by_leg"]["implementer"], 1.0)
+        self.assertAlmostEqual(out["usd_by_leg"]["advisor"], 2.0)
+        self.assertAlmostEqual(out["usd_by_leg"]["session"], 1.0)
+
+    def test_advisor_cache_write_split_prices_the_1h_rate(self):
+        self.add_session(f"{KEY}-dev-1", "s-dev", [self.advisor_line("m1", "model-a", [
+            {"type": meter.ADVISOR_ITERATION, "model": "model-b",
+             "cache_creation_input_tokens": M,
+             "cache_creation": {"ephemeral_5m_input_tokens": 0,
+                                "ephemeral_1h_input_tokens": M}}], inp=M)])
+        rc, out = self.run_cli("--no-record")
+        self.assertEqual(rc, 0, out)
+        self.assertAlmostEqual(out["usd_by_leg"]["advisor"], 40.0)  # model-b 1h write
+        self.assertEqual(out["tokens_by_model"]["model-b"]["cache_write_1h"], M)
+        self.assertFalse(out["ttl_unknown"])
+
+    def test_advisor_unsplit_cache_write_flags_ttl_unknown(self):
+        self.add_session(f"{KEY}-dev-1", "s-dev", [self.advisor_line("m1", "model-a", [
+            {"type": meter.ADVISOR_ITERATION, "model": "model-b",
+             "cache_creation_input_tokens": M}], inp=M)])
+        rc, out = self.run_cli("--no-record")
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(out["ttl_unknown"])
+
+    def test_premium_advisor_usage_refuses_like_the_executor(self):
+        for field, value in (("speed", "fast"), ("service_tier", "priority")):
+            with self.subTest(field=field):
+                self.add_session(f"{KEY}-dev-1", "s-dev", [self.advisor_line("m1", "model-a", [
+                    {"type": meter.ADVISOR_ITERATION, "model": "model-b",
+                     "input_tokens": M, field: value}], inp=M)])
+                rc, out = self.run_cli("--no-record")
+                self.assertEqual(rc, 2)
+                self.assertFalse(out["ok"])
+                self.assertIn(f"no price for model(s) 'model-b ({field}={value})'",
+                              out["error"])
+
+    def test_unpriced_advisor_model_refuses_by_name(self):
+        self.add_session(f"{KEY}-dev-1", "s-dev", [self.advisor_line("m1", "model-a", [
+            {"type": meter.ADVISOR_ITERATION, "model": "model-zz", "input_tokens": 5}], inp=M)])
+        rc, out = self.run_cli("--no-record")
+        self.assertEqual(rc, 2)
+        self.assertFalse(out["ok"])
+        self.assertIn("no price for model(s) 'model-zz'", out["error"])
+
+    def test_advisor_iteration_without_model_refuses(self):
+        self.add_session(f"{KEY}-dev-1", "s-dev", [self.advisor_line("m1", "model-a", [
+            {"type": meter.ADVISOR_ITERATION, "input_tokens": 5}], inp=M)])
+        rc, out = self.run_cli("--no-record")
+        self.assertEqual(rc, 2)
+        self.assertIn("advisor usage without a model", out["error"])
+
+    def test_no_advisor_usage_names_the_leg_at_zero(self):
+        self.basic_story()
+        rc, out = self.run_cli("--no-record")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("advisor", meter.LEGS)
+        self.assertEqual(out["usd_by_leg"]["advisor"], 0)
+        self.assertIn("advisor:0.0", meter.describe(KEY, out))
+
     # ------------------------------------------------------------ acceptance
 
     def test_report_fields_and_one_observation_shape(self):

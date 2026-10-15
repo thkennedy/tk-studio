@@ -63,6 +63,17 @@ class SpecFileNameTest(unittest.TestCase):
         self.assertIn(f"a file named `{self.key}.md` is read as pending", self.dev)
         self.assertNotIn("<slug of the title>", self.dev)
 
+    def test_entry_states_the_advisor_routing_and_triggers(self):
+        # Story 26.3: model, effort and advisor per launch; the consult
+        # triggers as advisor instructions, each call logged
+        self.assertIn("pass the model, effort and advisor of implementer and reviewers "
+                      "explicitly on every subagent launch", self.dev)
+        self.assertIn("Advisor: when routing.current.json gives the session an advisor other "
+                      "than `off`, consult the advisor on: verify-red, halt, deviation above 0, "
+                      "a high-severity finding, a tripwire, a file outside Files, and before "
+                      "declaring the story done; append a `## Consult Log` entry per advisor "
+                      "call.", self.dev)
+
     def test_engine_glob_resolves_spec_and_not_bare_id(self):
         with tempfile.TemporaryDirectory() as tmp:
             stories = Path(tmp) / "stories"

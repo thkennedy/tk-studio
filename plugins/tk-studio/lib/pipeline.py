@@ -1,5 +1,5 @@
-"""tk-studio execution-pipeline routing — the model and effort each leg of a
-bmad-loop run uses (AD-14 applied to the substrate; studio pipeline decision 5).
+"""tk-studio execution-pipeline routing — the model, effort and advisor each
+leg of a bmad-loop run uses (AD-14 applied to the substrate; studio pipeline decision 5).
 
 The engine routes per STAGE (`[adapter.dev|review|triage]` in its policy);
 the studio routes per LEG and per STORY, then writes the result where the
@@ -28,6 +28,17 @@ resource default):
 The consult policy (`triggers`, `scope`, `log`) resolves project `[consult]`
 > resource `[pipeline.consult]`, as a unit.
 
+Fields per leg: model, effort, advisor, skill, agent, note. `advisor` is one
+of `opus | fable | off` (missing = off). Pairing rule: the advisor must rank
+at or above the leg's model (fable 3; opus — claude-opus-5-5, claude-opus-5 —
+2; every other model 1; `off` is never ranked). It is checked per table, on
+the overlaid route in `resolve` (so `apply` inherits it), and in `check` on
+the defaults-only effective route; a violation is the named refusal
+`<where>.<leg>: advisor '<a>' ranks below model '<m>' (...)`.
+A subagent leg (implementer, reviewers, consult) that resolves no `effort`
+takes the session's resolved effort, source `inherited-session`, so every
+leg the session launches carries an explicit effort.
+
 Verbs (all end with JSON on stdout; never prompt — AD-11):
   uv run pipeline.py defaults
   uv run pipeline.py check   --directory DIR
@@ -36,20 +47,23 @@ Verbs (all end with JSON on stdout; never prompt — AD-11):
 
 `apply` writes exactly three things and nothing else:
   1. the managed block at the end of `.bmad-loop/policy.toml`
-     (`[adapter.dev|review|triage]`: model + `--effort`) — refused when the
+     (`[adapter.dev|review|triage]`: model + `--effort` + `--advisor <a>`
+     when the leg's advisor is not `off`) — refused when the
      policy is absent (`bmad-loop init` creates it; never invented here)
   2. `CLAUDE_CODE_SUBAGENT_MODEL` in `.bmad-loop/profiles/claude.toml`
      (= implementer), only when that tracked profile exists
   3. `.bmad-loop/routing.current.json` — every leg plus the consult policy,
-     read by the dev session to pass `model:` explicitly per subagent
+     read by the dev session to pass `model`, `effort` and the advisor
+     explicitly per subagent
 `apply` also reports which of those files the project has NOT gitignored:
 the engine's preflight refuses a dirty tree, so an unignored write there
 would block the very launch it prepares. That is a named warning, not a
 guess and not a fix.
 
 Exit codes: 0 verb answered (a `check` with problems answers ok=false and
-exits 2); 2 bad invocation or refusal (unknown leg, invalid model or
-effort, policy missing, routing.toml unparsable). Stdlib-only (NFR9).
+exits 2); 2 bad invocation or refusal (unknown leg, invalid model,
+effort or advisor, an advisor ranked below its model, policy missing,
+routing.toml unparsable). Stdlib-only (NFR9).
 """
 from __future__ import annotations
 
@@ -71,10 +85,19 @@ LEGS = ("session", "implementer", "reviewers", "consult", "seam",
         "review", "triage", "supervise", "planner")
 # legs bmad-loop itself routes, and the stage table each one writes
 STAGE_OF = {"session": "dev", "review": "review", "triage": "triage"}
-FIELDS = ("model", "effort", "skill", "agent", "note")
+FIELDS = ("model", "effort", "advisor", "skill", "agent", "note")
 MODELS = frozenset({"claude-fable-5-1", "claude-opus-5-5", "claude-opus-5",
                     "claude-sonnet-5", "claude-haiku-4-5-20251001"})
 EFFORTS = frozenset({"low", "medium", "high"})
+ADVISORS = ("opus", "fable", "off")  # missing = off
+ADVISOR_OFF = "off"
+# pairing rank: the advisor must rank at or above the leg's model; `off` is
+# never ranked, and any model not named here ranks 1
+ADVISOR_RANK = {"fable": 3, "opus": 2}
+MODEL_RANK = {"claude-fable-5-1": 3, "claude-opus-5-5": 2, "claude-opus-5": 2}
+# subagent legs the session launches; with no resolved effort they inherit
+# the session's
+SUBAGENT_LEGS = ("implementer", "reviewers", "consult")
 META_KEYS = ("match", "note")
 
 ROUTING_REL = Path(".bmad-loop") / "routing.toml"
@@ -149,7 +172,38 @@ def _validate_legs(where: str, legs: dict) -> list[str]:
         effort = fields.get("effort")
         if effort is not None and effort not in EFFORTS:
             problems.append(f"{where}.{leg}: effort {effort!r} not in {sorted(EFFORTS)}")
+        advisor = fields.get("advisor")
+        if advisor is not None and advisor not in ADVISORS:
+            problems.append(f"{where}.{leg}: advisor {advisor!r} not in {list(ADVISORS)}")
+    return problems + _pairing_problems(where, legs)
+
+
+def _pairing_problems(where: str, legs: dict) -> list[str]:
+    """The pairing rule on legs carrying both a model and a ranked advisor."""
+    problems: list[str] = []
+    for leg, fields in legs.items():
+        if not isinstance(fields, dict):
+            continue
+        model, advisor = fields.get("model"), fields.get("advisor")
+        # a non-string advisor already drew the vocabulary refusal; never hash it
+        if not isinstance(advisor, str) or advisor not in ADVISOR_RANK \
+                or not isinstance(model, str):
+            continue
+        if MODEL_RANK.get(model, 1) > ADVISOR_RANK[advisor]:
+            problems.append(f"{where}.{leg}: advisor '{advisor}' ranks below model "
+                            f"'{model}' (the advisor must rank at or above the leg's model)")
     return problems
+
+
+def effective_defaults(routing: dict) -> dict:
+    """The resource legs overlaid by the project `[defaults]` (no story)."""
+    route = {leg: dict(v) for leg, v in resource_defaults()["legs"].items()}
+    defaults = routing.get("defaults", {})
+    if isinstance(defaults, dict):
+        for leg, fields in defaults.items():
+            if leg in LEGS and isinstance(fields, dict):
+                route.setdefault(leg, {}).update(fields)
+    return route
 
 
 def validate_project(routing: dict) -> list[str]:
@@ -241,6 +295,16 @@ def resolve(project_root: Path | None, story: str | None = None,
     if runtime:
         overlay(runtime, "runtime")
 
+    problems = _pairing_problems("route", route)
+    if problems:
+        raise PipelineError("; ".join(problems))
+    session_effort = route.get("session", {}).get("effort")
+    if session_effort:
+        for leg in SUBAGENT_LEGS:
+            if leg in route and not route[leg].get("effort"):
+                route[leg]["effort"] = session_effort
+                sources.setdefault(leg, {})["effort"] = "inherited-session"
+
     for leg in STAGE_OF:
         if not route.get(leg, {}).get("model"):
             raise PipelineError(f"leg {leg!r} resolved without a model — the "
@@ -262,10 +326,16 @@ def render_block(route: dict, story: str) -> str:
         fields = route.get(leg, {})
         lines.append(f"[adapter.{stage}]")
         lines.append(f'model = "{fields["model"]}"')
+        args = []
         effort = fields.get("effort")
         if effort:
-            lines.append('extra_args = ["--permission-mode", "bypassPermissions", '
-                         f'"--effort", "{effort}"]')
+            args += ["--effort", effort]
+        advisor = fields.get("advisor")
+        if advisor and advisor != ADVISOR_OFF:
+            args += ["--advisor", advisor]
+        if args:
+            lines.append("extra_args = [" + ", ".join(
+                f'"{a}"' for a in ["--permission-mode", "bypassPermissions", *args]) + "]")
         lines.append("")
     lines.append(END)
     return "\n".join(lines) + "\n"
@@ -403,6 +473,9 @@ def main(argv: list[str] | None = None) -> int:
             root = Path(args.directory)
             routing = load_project_routing(root)
             problems = validate_project(routing)
+            if not problems:
+                problems = _pairing_problems("effective defaults",
+                                             effective_defaults(routing))
             out = {"ok": not problems, "routing": ROUTING_REL.as_posix(),
                    "present": bool(routing), "problems": problems,
                    "rules": [r["match"] for r in routing.get("rules", [])

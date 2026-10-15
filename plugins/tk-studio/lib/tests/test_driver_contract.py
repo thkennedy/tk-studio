@@ -200,6 +200,34 @@ class DriverContractTestCase(unittest.TestCase):
                        "may declare `status`", "fixtures/launch-relaunch/"):
             self.assertIn(phrase, section)
 
+    # --- Story 26.3: the §5.1 advisor field and pairing rule, appended to
+    # the 0.1.21 clause (no bump)
+
+    def test_0_1_21_advisor_clause_and_section_5_1(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.21**", header)
+        self.assertNotIn("**0.1.22**", header)
+        self.assertLess(header.index("0.1.21 (Epic 26)"),
+                        header.index("0.1.21 (Story 26.3)"))
+        clause = header[header.index("0.1.21 (Story 26.3)"):]
+        for phrase in ("optional `advisor`", "the pairing rule",
+                       "the advisor must rank at or above the leg's model",
+                       "`--advisor <value>`", "`inherited-session`", "— additive"):
+            self.assertIn(phrase, clause)
+        section = " ".join(self.text[self.text.index("### 5.1 Execution-pipeline legs"):
+                                     self.text.index("## 6. Drift-check invocation")].split())
+        for phrase in ("**Advisor (0.1.21, Story 26.3).**",
+                       "`opus`, `fable` or `off`", "a missing field means `off`",
+                       "The pairing rule: the advisor must rank at or above the leg's model",
+                       "`<where>.<leg>: advisor '<a>' ranks below model '<m>' (the advisor "
+                       "must rank at or above the leg's model)`",
+                       '`"--advisor", "<value>"`', "only when that leg's advisor is not `off`",
+                       "source `inherited-session`",
+                       "The advisor on a subagent leg is steering, not a switch",
+                       'keep `advisor = "off"` on every leg'):
+            self.assertIn(phrase, section)
+
     def test_section_8_names_the_cli_drives(self):
         section = self.text[self.text.index("## 8. Conformance"):]
         flat = " ".join(section.split())

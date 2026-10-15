@@ -48,7 +48,14 @@ import observe
 PRICES_PATH = Path(__file__).resolve().parent / "prices.json"
 
 LEGS = ("session", "implementer", "reviewers", "consult", "seam", "review",
-        "triage", "supervise")
+        "triage", "supervise", "advisor")
+ADVISOR_LEG = "advisor"
+# Named placeholder rule (Story 26.3): each `message.usage.iterations[]` entry
+# of this type is one advisor call, carrying its own `model` and the standard
+# token fields; it prices under leg `advisor`, and the top-level usage stays
+# the executor's. Epic 24.3's first advisor transcript confirms the type name
+# (a one-constant fix if it differs).
+ADVISOR_ITERATION = "advisor_message"
 UNKNOWN_LEG = "unknown"
 ROLE_LEGS = {"dev": "session", "review": "review", "triage": "triage"}
 RATE_FIELDS = ("input", "output", "cache_write_5m", "cache_write_1h", "cache_read")
@@ -330,6 +337,53 @@ def _premium(usage: dict) -> str | None:
     return _server_tools(usage)
 
 
+def _tokens(usage: dict) -> tuple[dict, bool]:
+    """(tokens by RATE_FIELDS, ttl_unknown) of one usage dict -- the executor's
+    top-level usage or one advisor iteration alike. Cache writes split by the
+    `cache_creation` ephemeral 5m/1h counts; creation tokens with no split (or
+    the unsplit remainder) price at the 5m rate and flag ttl_unknown."""
+    tokens = {
+        "input": _int(usage.get("input_tokens")),
+        "output": _int(usage.get("output_tokens")),
+        "cache_read": _int(usage.get("cache_read_input_tokens")),
+    }
+    ttl_unknown = False
+    creation = _int(usage.get("cache_creation_input_tokens"))
+    split = usage.get("cache_creation")
+    if isinstance(split, dict):
+        tokens["cache_write_5m"] = _int(split.get("ephemeral_5m_input_tokens"))
+        tokens["cache_write_1h"] = _int(split.get("ephemeral_1h_input_tokens"))
+        remainder = creation - tokens["cache_write_5m"] - tokens["cache_write_1h"]
+        if remainder > 0:  # unsplit part: 5m rate, flagged like no split
+            tokens["cache_write_5m"] += remainder
+            ttl_unknown = True
+    else:
+        tokens["cache_write_5m"] = creation
+        tokens["cache_write_1h"] = 0
+        if creation:
+            ttl_unknown = True
+    return tokens, ttl_unknown
+
+
+def _advisor_calls(usage: dict) -> list[tuple[str, dict]]:
+    """(model, iteration usage) of each advisor iteration in one usage record.
+    An advisor iteration without a string `model` is a named refusal."""
+    calls = []
+    iterations = usage.get("iterations")
+    if not isinstance(iterations, list):
+        return calls
+    for item in iterations:
+        if not isinstance(item, dict) or item.get("type") != ADVISOR_ITERATION:
+            continue
+        model = item.get("model")
+        if not isinstance(model, str) or not model:
+            raise MeterError(f"advisor usage without a model (a usage.iterations[] "
+                             f"entry of type '{ADVISOR_ITERATION}' carries no model); "
+                             "never priced as zero")
+        calls.append((model, item))
+    return calls
+
+
 def price(sources: list[tuple[str, Path]], prices: dict) -> dict:
     """Price usage from (leg, transcript) pairs.
 
@@ -341,7 +395,10 @@ def price(sources: list[tuple[str, Path]], prices: dict) -> dict:
     non-standard speed / service_tier / inference_geo or a non-zero
     server_tool_use web_search_requests / web_fetch_requests count the table
     does not price (`model (speed=fast)`, `model (web_search_requests=2)`) --
-    no partial dollars.
+    no partial dollars. Advisor iterations (`ADVISOR_ITERATION`) price under
+    leg `advisor` at their own model's rates, never in the executor's leg,
+    with the executor's cache-write split / ttl_unknown handling; an unpriced
+    advisor model or premium advisor usage joins the same refusal.
     """
     records: list[tuple[str, dict]] = []
     slot: dict = {}  # message.id -> index in records
@@ -359,42 +416,33 @@ def price(sources: list[tuple[str, Path]], prices: dict) -> dict:
     missing: list[str] = []
     unpriced: list[str] = []  # "model (field=value)" of premium usage
     ttl_unknown = False
-    for leg, record in records:
-        usage = record["usage"]
-        tokens = {
-            "input": _int(usage.get("input_tokens")),
-            "output": _int(usage.get("output_tokens")),
-            "cache_read": _int(usage.get("cache_read_input_tokens")),
-        }
-        creation = _int(usage.get("cache_creation_input_tokens"))
-        split = usage.get("cache_creation")
-        if isinstance(split, dict):
-            tokens["cache_write_5m"] = _int(split.get("ephemeral_5m_input_tokens"))
-            tokens["cache_write_1h"] = _int(split.get("ephemeral_1h_input_tokens"))
-            remainder = creation - tokens["cache_write_5m"] - tokens["cache_write_1h"]
-            if remainder > 0:  # unsplit part: 5m rate, flagged like no split
-                tokens["cache_write_5m"] += remainder
-                ttl_unknown = True
-        else:
-            tokens["cache_write_5m"] = creation
-            tokens["cache_write_1h"] = 0
-            if creation:
-                ttl_unknown = True
+
+    def admit(leg: str, model: str, usage: dict) -> None:
+        """Tally one usage (executor or advisor iteration) under `leg`, or
+        name its model as missing / its premium usage as unpriced."""
+        nonlocal ttl_unknown
+        tokens, ttl = _tokens(usage)
+        ttl_unknown = ttl_unknown or ttl
         if not any(tokens.values()) and not _server_tools(usage):
-            continue
-        model = record["model"] if isinstance(record["model"], str) else "<none>"
+            return
         if _rates(prices, model) is None:
             if model not in missing:
                 missing.append(model)
-            continue
+            return
         premium = _premium(usage)
         if premium:
             named = f"{model} ({premium})"
             if named not in unpriced:
                 unpriced.append(named)
-            continue
-        model = (prices.get("aliases") or {}).get(model, model)
-        tallies.append((leg, model, tokens))
+            return
+        tallies.append((leg, (prices.get("aliases") or {}).get(model, model), tokens))
+
+    for leg, record in records:
+        usage = record["usage"]
+        for advisor_model, advisor_usage in _advisor_calls(usage):
+            admit(ADVISOR_LEG, advisor_model, advisor_usage)
+        model = record["model"] if isinstance(record["model"], str) else "<none>"
+        admit(leg, model, usage)
     if missing or unpriced:
         raise MeterError(
             "no price for model(s) " + ", ".join(f"'{m}'" for m in missing + unpriced)

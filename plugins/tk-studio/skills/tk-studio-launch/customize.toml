@@ -52,19 +52,31 @@ effort = "high"
 #   planner                       the attended planning session (a fresh session
 #                                 per quiet point; never a subagent)
 #
-# Subagent legs (implementer, reviewers, consult) carry no `effort`: the
-# harness passes no effort flag to a subagent. Model ids and efforts are
-# validated by `pipeline.py check`; an unknown value refuses, never guesses.
+# Subagent legs (implementer, reviewers, consult) declare no `effort` here:
+# `pipeline.py resolve` gives them the session's resolved effort (source
+# `inherited-session`) unless a tier declares one, and the session passes it
+# to the Agent tool explicitly on every launch.
+#
+# `advisor` (every leg): `opus | fable | off` (missing = off). On an engine
+# stage leg (session, review, triage) a value other than `off` adds
+# `--advisor <value>` to that stage's `claude -p` command line; on a subagent
+# leg it reaches the subagent as its prompt's `Advisor:` first line. Pairing
+# rule: the advisor must rank at or above the leg's model (fable > opus >
+# every other model); a violation refuses by name. Shipped `off` on every leg
+# (AD-14) until Epic 24.4 records a verdict.
+#
+# Model ids, efforts and advisors are validated by `pipeline.py check`; an
+# unknown value refuses, never guesses.
 [pipeline.legs]
-session     = { model = "claude-sonnet-5", effort = "medium", skill = "bmad-build-auto" }
-implementer = { model = "claude-sonnet-5" }
-reviewers   = { model = "claude-sonnet-5" }
-consult     = { model = "claude-opus-5" }
-seam        = { model = "claude-opus-5",   effort = "medium" }
-review      = { model = "claude-opus-5",   effort = "high" }
-triage      = { model = "claude-opus-5",   effort = "high" }
-supervise   = { model = "claude-sonnet-5", effort = "low" }
-planner     = { model = "claude-fable-5-1", effort = "high" }
+session     = { model = "claude-sonnet-5", effort = "medium", advisor = "off", skill = "bmad-build-auto" }
+implementer = { model = "claude-sonnet-5", advisor = "off" }
+reviewers   = { model = "claude-sonnet-5", advisor = "off" }
+consult     = { model = "claude-opus-5",   advisor = "off" }
+seam        = { model = "claude-opus-5",   effort = "medium", advisor = "off" }
+review      = { model = "claude-opus-5",   effort = "high", advisor = "off" }
+triage      = { model = "claude-opus-5",   effort = "high", advisor = "off" }
+supervise   = { model = "claude-sonnet-5", effort = "low", advisor = "off" }
+planner     = { model = "claude-fable-5-1", effort = "high", advisor = "off" }
 
 # The objective triggers on which the session may consult, and the ruling's
 # scope. Never launched on judgment alone; a project may narrow or extend the
