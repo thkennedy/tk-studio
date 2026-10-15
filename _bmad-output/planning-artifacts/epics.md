@@ -2009,3 +2009,251 @@ So that nobody follows the retired path.
 **Given** the release gate
 **When** the story closes
 **Then** the plugin ships at 0.3.0 (a minor bump: the distribution changed) through the generalised motion with the roster, `released-roster.json` and `plugin.json` in lockstep (gate ×4), the lib suite and conformance are green, and `tk activate` is clean on all four planes on TIM-PC-2 with the plugin loaded from the skills-dir folder
+
+## Epic 26: The Service Owns Lifetime, Part 1: The Studio Side
+
+The second epic of the design spec's build order (`_bmad-output/planning-artifacts/design/studio-design-spec-2026-10-09/README.md` §6.2 and §10) and the first that spends the evolve loop's rulings of 2026-10-15 (`proposals/triage-2026-10-15.md`): thirteen adopted proposals name EP-26, and this epic carries the ones that live in the plugin and its pipeline. Epic 27 carries the supervisor's half, in its own repository and its own sandbox; the two are one design (the supervisor is the only thing that starts work and owns an engine's life), split by repository the way Epics 20 to 22 were. Everything here is driven by the loop in `claude-tk-studio` and gated by conformance (AD-19); every surface ends headless runs with the status block (AD-11). Rulings in force and not reopened: the 2026-09-26 and 2026-10-09 rulings, O5, AD-21 and AD-22, and the design spec's D1 to D10. Requirements trace: PROP-027, PROP-033, PROP-035, PROP-039, PROP-045, PROP-052, PROP-058, PROP-061, PROP-062, PROP-066, PROP-067 (adopted 2026-10-15), loop holes 4, 6, 10, 19, 20, 23; the advisor fit note (`briefs/advisor-tool-fit-2026-10-09.md`); spec §6.2 item 1 and §7.4 (the adapter's status pull-back, which Epic 27 consumes). Repo: tk-studio.
+
+### Story 26.1: Launch Ends Every Path with the Block and Owns Its Bootstrap
+
+As the operator,
+I want `tk-studio-launch` to end every headless path with the status block, to commit its own bootstrap output, and to check the engine's budget limits against the bands before it starts,
+So that a driver never records a missing block for a run that succeeded, a second launch pass is never needed, and no story runs under a policy limit the bands do not cover (holes 10, 20 and 4).
+
+**Acceptance Criteria:**
+
+**Given** a first launch on an epic
+**When** the bootstrap writes `SPEC.md`, `stories.yaml` and the first plan
+**Then** the launch commits them on the run branch with one named commit message before its readiness check, so the dirty-tree refusal never fires on its own output, and the rule is stated once in the skill text (the Epic 20 and 22 launches needed a second pass; the Epic 24 and 25 launches committed theirs)
+
+**Given** a relaunch on an epic with stories already `done` and routing already applied
+**When** the session ends
+**Then** its last output is the JSON status block exactly as on the fresh path, the watch hint names the supervisor's status page and the `status` verb and never ClaudeOS, and a conformance drive covers the relaunch case beside the fresh case
+
+**Given** the project's `.bmad-loop/policy.toml` limits (`max_tokens_per_story`, wall-clock, review caps) and the budget bands in `.tk-studio/budget-bands.yaml`
+**When** `start` or `check` runs
+**Then** the launch result names every limit the bands exceed (band ceiling above the policy limit) as a `budget_mismatch` entry with both numbers, `check` ends `partial` naming them, and `start` refuses to start the engine on a mismatch unless the payload carries `allow_budget_mismatch: true`; the machine-local policy file is never edited by the skill
+
+**Given** the lib suite and conformance
+**When** the story closes
+**Then** both are green, including the new drives, and the driver contract §2 launch row states the bootstrap commit, the relaunch block and the budget check (0.1.21, additive)
+
+### Story 26.2: The Planner Settles Schema Shape and the Spec File Name
+
+As the operator,
+I want the launch planner to settle the shape of artifacts that do not exist yet before the first story is dispatched, and story spec files named short enough for Windows,
+So that a dev session never halts on a question the design documents already answer (hole 19) and spec paths stay under the path limit (hole 6).
+
+**Acceptance Criteria:**
+
+**Given** `.bmad-loop/plugins/studio-pipeline/task-planning.md` and the SPEC the planner writes
+**When** a story's acceptance criteria require a schema entry, a file or a tag for an artifact that only a later story or an operator action produces
+**Then** the planner records the settled shape in the SPEC's design notes (an optional or deferred entry, a per-platform map, a named placeholder rule) citing the design document that constrains it, and never leaves it as a Block If or an open question; the consult scope text in the launch customization names schema shape as a planner matter when the design documents constrain it, and an operator ruling only when they do not
+
+**Given** the dispatch notes `transcribe.py` writes into `stories.yaml`
+**When** they name the executor spec file
+**Then** the name is `stories/<id>-spec.md` (the id already carries the title slug), the engine's glob `<id>-*.md` still resolves it, a bare `<id>.md` is still read as pending (hole 1 unchanged), and the longest resulting path on this box stays under 200 characters
+
+**Given** the lib suite
+**When** the story closes
+**Then** the transcription tests pin the new name, a planner-note fixture pins the settled-shape rule, and the runbook §3.8 names both
+
+### Story 26.3: Routing Legs Carry an Advisor and an Effort
+
+As the operator comparing routes,
+I want every pipeline leg to declare an optional advisor model and to pass its effort explicitly to every subagent it launches,
+So that Epic 24.3 can run its third arm (a cheaper main model with a stronger advisor) and the meter can price it (the advisor fit note; PROP-045, PROP-052, PROP-058).
+
+**Acceptance Criteria:**
+
+**Given** `[pipeline.legs]` in the launch customization and a project's `.bmad-loop/routing.toml`
+**When** a leg carries `advisor = "opus" | "fable" | "off"`
+**Then** `pipeline.py check|resolve|apply` validate it (default `off`; the pairing rule: the advisor must rank at or above the leg's model; a violation is a named refusal), `apply` writes it into `routing.current.json`, and the session leg's `claude -p` command carries `--advisor <model>` only when the leg's advisor is not `off`
+
+**Given** the implementer and reviewer launches the session makes
+**When** the routing is in force
+**Then** each launch passes `model`, `effort` and the advisor explicitly (the executor customization reads `routing.current.json`), and the dispatch note's consult triggers are stated as advisor instructions when an advisor is on ("consult the advisor on: verify-red, halt, deviation above 0, a high-severity finding, a tripwire, a file outside Files, and before declaring the story done"), with a Consult Log entry appended per advisor call so the audit trail survives
+
+**Given** `lib/meter.py`
+**When** a story's transcripts carry advisor usage
+**Then** the meter prices it as its own leg `advisor` from the price table (a missing price is a named refusal, never a guess) and the observation names it beside the other legs
+
+**Given** the driver contract §5
+**When** the story closes
+**Then** it documents the `advisor` field and the pairing rule (0.1.21, additive), the lib suite pins the validation, the command line and the pricing, and conformance is green; the shipped defaults stay `advisor = "off"` on every leg (AD-14: nothing changes until Epic 24.4 records a verdict)
+
+### Story 26.4: The Meter Lands on the Host and Does Not Draft Itself
+
+As the operator,
+I want every landed story's meter observation to reach the host ledger even when the engine runs in a microVM, and the evolve drafter to leave measurements alone,
+So that recreating a sandbox never loses the cost record again (hole 23) and proposals are minted from toil, not from meter rows (PROP-067).
+
+**Acceptance Criteria:**
+
+**Given** the `post_commit` meter hook inside a sandbox
+**When** it prices a landed story
+**Then** it also writes the full observation envelope to `<run_dir>/transcripts/<story>/observation.json` on the mounted checkout beside `metered.json`, so the record survives the sandbox
+
+**Given** `meter.py harvest --run-dir <dir>` run on the host
+**When** it finds observation files not yet harvested
+**Then** it appends each to the host ledger through `observe.record_observation` exactly once (a harvested marker beside the file), reports the story keys and dollars, and the seven re-recorded Epic 25 observations of 2026-10-15 are not duplicated (the marker is seeded for them)
+
+**Given** `evolve.py draft`
+**When** it clusters observations
+**Then** observations whose description starts with `meter:` are excluded from clustering and counted in the result as `measurements_skipped`; PROP-067's cluster is not re-created on a rerun, and the lib suite pins the exclusion
+
+**Given** runbook §3.8
+**When** the story closes
+**Then** the sandbox recreate step says to run the harvest and to export the sandbox's own ledger (`~/.tk-studio/measurements/*.jsonl` inside the microVM) to the host before `sbx rm`, with the exact commands
+
+### Story 26.5: The Adapter Takes a Status Pull-Back from a Driver
+
+As a driver author,
+I want a planning-adapter verb that sets a canonical story's status-class fields from outside,
+So that the supervisor can mark stories `review` when a run opens its PR and `done` when the PR merges, without writing canonical frontmatter itself (AD-4, AD-5; hole 18; Epic 27 consumes it).
+
+**Acceptance Criteria:**
+
+**Given** `plansync.py status --directory <root> --id ST-NNN --status <enum> [--note <text>]`
+**When** it runs on a project whose canonical entity exists
+**Then** it sets the entity's `status` to the given canonical enum value, stamps `updated`, records the note and the caller in the entity's `external.driver` snapshot (never touching `external.<backend>` snapshots), re-syncs the projection and the index, and names every written file in its result (AD-5: status-class only; a value outside the enum is a named refusal; an unknown id is a named refusal)
+
+**Given** a story that a loop landed in another repository (a transcribed epic)
+**When** the verb is called on the owning project with that story's canonical id
+**Then** it updates the canonical file there and nothing in the other repository, and the result says which plan it wrote
+
+**Given** the driver contract §4
+**When** the story closes
+**Then** the verb is documented as additive (0.1.21), the conformance manifest drives it (a headless success and a refused id), the lib suite pins the enum, the snapshot and the projection re-sync, and `plan/index.md` reflects the change after a run
+
+## Epic 27: The Service Owns Lifetime, Part 2: The Supervisor
+
+The supervisor's half of the design spec's §6.2 item 1, built in `thkennedy/tk-studio-supervisor` by the loop in `claude-tk-studio-supervisor` after this epic is transcribed there (the Epic 21 and 22 pattern: change a story here first, then re-transcribe). It makes the supervisor the only thing that starts work and the owner of every engine's life: a worktree per run that the sandbox can see, the engine held and pinned by the service itself, a close-out for a run that paused after its story landed, a host-tier verify leg before any PR opens, the plan pulled back when a run lands, and the deferred work the ledger assigned to it. Two preconditions are the operator's: the supervisor tab is stopped from the console before the loop builds the supervisor itself (the single-checkout decision of 2026-10-06), and the supervisor's sandbox is recreated with the read-only skills mount, `WITH_BUN=1`, and a second read-write mount of `TK_SUPERVISOR_WORK` so worktrees are visible inside the microVM. Requirements trace: Story 23.2 (superseded here), PROP-025, PROP-036, PROP-038, PROP-040, PROP-041, PROP-053, PROP-055, PROP-064, PROP-065 (adopted 2026-10-15), loop holes 7, 9, 11, 12, 16, 18, 22; DW-3, DW-6, DW-11, DW-12, DW-13, DW-15, DW-19, DW-21, DW-23 of the supervisor's ledger; spec §6.2 item 1. Repo: the supervisor repo (every story); tk-studio only for the runbook rows.
+
+### Story 27.1: Every Run Gets Its Own Worktree and Ends in a PR
+
+As the operator,
+I want each run to work in a git worktree of the project cut from its base, and to end as a pull request against that base,
+So that two loops never share a working tree, a run never switches the branch under a running service, and all agent work arrives PR-only (hole 16; supersedes Story 23.2).
+
+**Acceptance Criteria:**
+
+**Given** a submission with `base_ref`
+**When** the run is claimed
+**Then** the supervisor creates `git worktree add <TK_SUPERVISOR_WORK>/worktrees/<project>/<run_id> -b supervisor/run-<run_id> <base_ref>` from the project checkout, refuses a `base_ref` that is the repository's default branch when that branch is not protected on GitHub (`blocked`, naming it), and records the worktree path on the queue run; the checkout itself is never switched
+
+**Given** the untracked runtime the engine needs in a worktree (`_bmad/` at the pin, `.bmad-loop/policy.toml` and `routing.current.json`, the project's local config overlay)
+**When** the worktree is prepared
+**Then** the supervisor materialises them by the studio's own motions (`tk install` at the pin inside the worktree; the policy and routing files copied from the checkout; never a junction into the checkout), `tk activate` is clean inside the worktree, and the engine's `--project` is the worktree
+
+**Given** a run that launched an engine
+**When** the engine completes, pauses, or is stopped
+**Then** the supervisor pushes the run branch and opens a PR against `base_ref` whose body carries the launch status block, the engine run id, the landed commits and the metered cost, records the PR URL on the `ended` event, opens no PR when no commit landed ("no changes" recorded), never force-pushes and never merges; the worktree is removed after the PR opens unless the run is paused (a paused run keeps it for the resume)
+
+**Given** the supervisor's test suite on the Windows host and the Linux engine
+**When** it runs
+**Then** worktree creation, the unprotected-base refusal, the runtime materialisation and the PR body are pinned against a fake `gh` and a real throwaway repository, and the live acceptance on the-universe-awaits (Story 23.3) is re-planned against this story
+
+### Story 27.2: The Supervisor Holds the Engine and Nothing Else Starts One
+
+As the operator,
+I want the supervisor itself to start, hold, pin and release every engine sandbox, and the queue to be the only way a run starts,
+So that an engine never dies with a host-side shell (hole 7) and the pacer never overlaps a run it cannot see (DW-6, DW-3).
+
+**Acceptance Criteria:**
+
+**Given** an sbx-tier run
+**When** the worker starts
+**Then** the supervisor runs `sbx run -d --name <sandbox>` to pin the sandbox, holds its own `sbx exec` for the engine's lifetime from the console session (never a Claude desktop-app session), records the in-VM engine pid and the sandbox name on the run, and releases the pin (`sbx stop`) when the run ends and no other run holds the sandbox
+
+**Given** a cancel or a tripped guard on an sbx run
+**When** it fires
+**Then** the engine's process group inside the microVM is killed by name of the recorded pid through `sbx exec` (argv only, no shell), the kill is recorded, and a kill that leaves the pid alive after its wait holds the run as DW-3 specifies
+
+**Given** `jobrun.py submit|wake` run by hand or through the MCP `tk_job` surface on a project the supervisor serves
+**When** it would start a run
+**Then** the supervisor's lock file for the checkout names the queue as the only starter, the hand-started run is recorded as `external` on the next tick with its studio run id, and the pacer counts it as live until it ends (DW-6 closed)
+
+**Given** the supervisor's test suite
+**When** it runs
+**Then** the pin, hold, release, kill-by-pid and external-run detection are pinned with a fake `sbx`, on both hosts
+
+### Story 27.3: A Paused Run Whose Story Landed Is Closed Out by the Service
+
+As the operator,
+I want the supervisor to close out a run that paused after its story's work was committed, once a verdict exists,
+So that the attended recipe of 2026-10-14 (verdict, harvest commit, meter, archive, relaunch) is the service's job (hole 9).
+
+**Acceptance Criteria:**
+
+**Given** a run that paused at the commit gate or on an escalation with the story's spec at `status: done` and a `reconcile_verdict` other than `escalate` recorded
+**When** the supervisor's tick sees it
+**Then** it commits the engine's staged harvest on the run branch with a named message, harvests the story's meter observation to the host ledger (Story 26.4's `meter.py harvest`), archives the run (`bmad-loop archive`, through `sbx exec`), relaunches the epic through `tk-studio-launch` (which skips done stories) under the same queue run with a `close-out` event, and never re-implements the story
+
+**Given** the same run with no verdict, or `escalate`
+**When** the tick sees it
+**Then** it stays paused, one notification names the story and the reason, and the run's page row says "awaiting a ruling"
+
+**Given** a story that halted before any commit
+**When** the tick sees it
+**Then** nothing is closed out; the run stays paused for the resume path (`bmad-loop resolve`), which the supervisor exposes as `POST /runs/{id}/resume` with an optional restore patch
+
+**Given** the supervisor's test suite
+**When** it runs
+**Then** all three cases are pinned with a fake engine, on both hosts
+
+### Story 27.4: A Host-Tier Verify Leg Runs Before Any PR Opens
+
+As the operator,
+I want the project's own verify command run on the Windows host, in the run's worktree, after the engine completes and before the PR opens,
+So that Windows-only defects stop reaching branches (holes 11, 12 and 22).
+
+**Acceptance Criteria:**
+
+**Given** a project's tracked `.tk-studio/config.yaml` with `verify.host: <command>` (tk-studio: the lib suite and conformance; the supervisor: `bun test`; the-universe-awaits: its verify script)
+**When** an sbx-tier run's engine completes
+**Then** the supervisor runs that command on the host tier in the worktree, console-hosted, under the same guards as a host-tier worker, and records its exit, duration and the last lines of output on a `host-verify` event; the command comes from the project's config, never from the plugin (AD-2)
+
+**Given** a red host verify
+**When** the PR would open
+**Then** the run ends `partial` naming the failing command, the branch is still pushed, the PR opens as a draft whose body carries the host failures, and the notification names them
+
+**Given** a project with no `verify.host`
+**When** a run ends
+**Then** the PR opens as before and the event says the leg was skipped with the reason
+
+**Given** the supervisor's test suite and the runbook
+**When** the story closes
+**Then** green, red and absent commands are pinned on both hosts, and runbook §3.8 retires the "attended host run before each PR" rule in favour of this leg
+
+### Story 27.5: The Plan Follows the Run, and the Deferred Work Is Paid
+
+As the operator,
+I want the canonical plan to reflect a run's landing, and the supervisor's own deferred work closed,
+So that the plan index stops under-reporting what is built (hole 18) and the queue is honest about cost, cancels, time and certificates (DW-11, DW-12, DW-13, DW-15, DW-19, DW-21, DW-23).
+
+**Acceptance Criteria:**
+
+**Given** a run that opens a PR
+**When** the `ended` event is written
+**Then** the supervisor calls the planning adapter's status verb (Story 26.5) on the project that owns the plan (the registry names it; a transcribed epic names its owner) for every story the run's spec marked done, setting `review`; the next tick that sees the PR merged sets `done`; both are recorded on the run's events, and a refused call never changes the run's state
+
+**Given** a run resumed after a restart
+**When** it finishes
+**Then** `run.json`'s `total_cost_usd` is the sum across every iteration (per-iteration cost recorded as `accounted` events; DW-15)
+
+**Given** a cancel racing a claim or a late studio-run record
+**When** both happen
+**Then** the cancel ends the studio run it finds on a re-read inside the end transaction, or the next recovery ends it, and no run is left unended (DW-12, DW-13); an ended run that keeps its lock counts as live for the pacer (DW-11)
+
+**Given** the worker record on win32
+**When** it is written
+**Then** the pid lands before the start time, and the start time is read natively (`GetProcessTimes` through `bun:ffi` or an equivalent that takes under 50 ms), so a supervisor killed inside the window still leaves a usable record (DW-19)
+
+**Given** the TLS certificate and a refused `finish`
+**When** the certificate is within 14 days of expiry, or a skill run finished itself
+**Then** the keeper renews the certificate and restarts `serve` once, outside a live run, with an event (DW-21); and a refused `finish` on an already-terminal studio run leaves the run's reason as the worker's own status-block reason, never the refusal text (DW-23)
+
+**Given** the supervisor's test suite
+**When** the story closes
+**Then** every case above is pinned on both hosts, the deferred-work entries are closed with their evidence, and the runbook §4 names the new events and the certificate rule

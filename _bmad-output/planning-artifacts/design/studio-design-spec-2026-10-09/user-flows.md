@@ -84,12 +84,12 @@ What exists today: the read-only status page over the same data. New: the event 
 4. bmad-loop drives the story: session, implementer, two reviewers, consult on objective triggers (or the advisor), the studio gate with a deviation score, the meter hook pricing the story and copying transcripts out of the microVM.
 5. **Target (EP-26):** the supervisor owns the engine's lifetime, follows it through `launch status`, and on completion pushes the worktree branch and opens a PR whose body carries the status block, run id, commits and cost (Story 23.2). A landed-but-paused story gets a close-out (hole 9). A Windows host-tier verify leg runs before the PR exists (holes 11 and 12).
 6. The run ends with a status block; `finish` records `total_cost_usd`; one `job-run` event and one `observation` per story land in the ledger; the notifier fires; the transcript is copied to the backup.
-7. **Target (EP-26, hole 18):** the `ended` event with a PR URL triggers a status pull-back on the owning project and, **target (EP-29)**, a publish to Jira (status, PR link, cost in a comment by the agent user).
+7. **Target (EP-26, hole 18):** the `ended` event with a PR URL triggers a status pull-back on the owning project and, **target (EP-30)**, a publish to Jira (status, PR link, cost in a comment by the agent user).
 8. Tim merges the PR on GitHub (PR-only, protected `main`).
 
 ## F6. Recurring and maintenance jobs (today, plus the sync job)
 
-`studio-health`, `maintenance-conformance`, `research-ecosystem` and `evolve-proposals` run through the pacer on the host tier under `auto` mode in a trusted folder. **Target (EP-29):** `atlassian-sync` joins them per project on its configurable interval. Each ends with a status block and a ledger event; `doctor` and the office show them.
+`studio-health`, `maintenance-conformance`, `research-ecosystem` and `evolve-proposals` run through the pacer on the host tier under `auto` mode in a trusted folder. **Target (EP-30):** `atlassian-sync` joins them per project on its configurable interval. Each ends with a status block and a ledger event; `doctor` and the office show them.
 
 ## F7. Tim updates the studio (target)
 
@@ -98,14 +98,14 @@ What exists today: the read-only status page over the same data. New: the event 
 3. For the plugin it rewrites the skills-dir folder in place.
 4. On the dev box, `doctor` recognises "source checkout" mode and `update` only reports.
 
-## F8. The restructure rehearsal (target, EP-31, D1 ruled O2)
+## F8. The restructure rehearsal (target, EP-32, D1 ruled O2)
 
 The nine steps of [ADR §5](../../briefs/adr-repository-structure-2026-10-09.md#5-migration-plan-the-supervisor-into-appssupervisor), on throwaway clones first. Rollback before the archive step is "close the PR".
 
-## F9. A game project gets a vertical slice (target, EP-32)
+## F9. A game project gets a vertical slice (target, EP-33)
 
 The F2 engagement with a game project: the scope step runs the GDS quick-flow brief and GDD (published to Confluence); approval creates the epics; F5 runs with the `playable-verify` leg and the asset-manifest ladder; proof media land in the run workspace, the PR and the engagement's page. TUA is the reference project. Candidate tools are listed in the [3D tooling note](../../../../kb/agentic-3d-asset-tooling-2026-10.md).
 
-## F11. Tim checks in from the phone (target, EP-33, later)
+## F11. Tim checks in from the phone (target, EP-34, later)
 
 A separate phone-width UI: the inbox (reply, Done), approve or revise an engagement, the status view. No office floor. Until it exists, Jira's own mobile app and the notifier's links cover the phone.
