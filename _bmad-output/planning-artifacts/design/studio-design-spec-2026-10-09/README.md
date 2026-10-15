@@ -124,10 +124,10 @@ Keeps every surface. The drift check's plugin plane reads the skills-dir folder 
 
 Kept as built. It grows, in this order:
 
-1. **Engine lifetime and worktrees** (EP-26): worktree per run from `base_ref`; the service owns the engine's life; PR at the end (Story 23.2); close-out for a landed-but-paused story (hole 9); launch owns its bootstrap output (hole 10); a host-tier Windows verify leg (holes 11, 12); process-group ownership (DW-3); cost summed across resumes (DW-15); every run starts through the queue (DW-6); the `ended` event with a PR triggers a status pull-back (hole 18).
-2. **One account and the registry and projection** (EP-27): the owner's account (§8); the agent registry (§7.2); the office event stream (§7.3); contract 0.1.19.
-3. **Atlassian sync and the inbox** (EP-29): §6.8, §6.9, §7.4.
-4. **The engagement state machine and the chat route** (EP-30): §7.1; `POST /engagements`, typed inputs, `GET /engagements/{id}`; `POST /chat/{engagement}` backed by a `claude -p` planner session with the plugin, metered like any run.
+1. **Engine lifetime and worktrees** (EP-26 the studio side, EP-27 the supervisor): worktree per run from `base_ref`; the service owns the engine's life; PR at the end (Story 23.2); close-out for a landed-but-paused story (hole 9); launch owns its bootstrap output (hole 10); a host-tier Windows verify leg (holes 11, 12); process-group ownership (DW-3); cost summed across resumes (DW-15); every run starts through the queue (DW-6); the `ended` event with a PR triggers a status pull-back (hole 18).
+2. **One account and the registry and projection** (EP-28): the owner's account (§8); the agent registry (§7.2); the office event stream (§7.3); contract 0.1.19.
+3. **Atlassian sync and the inbox** (EP-30): §6.8, §6.9, §7.4.
+4. **The engagement state machine and the chat route** (EP-31): §7.1; `POST /engagements`, typed inputs, `GET /engagements/{id}`; `POST /chat/{engagement}` backed by a `claude -p` planner session with the plugin, metered like any run.
 5. **Thinner commodity layers** (later): OTel-fed meter with ccusage cross-check; `/code-review` beside the reviewers; the advisor as the consult leg once 24.3 measures it; Remote Control for live steering when wanted.
 
 ### 6.3 The studio web (new; shape ruled by D5)
@@ -135,7 +135,7 @@ Kept as built. It grows, in this order:
 - **Stack.** Vite plus React plus TypeScript, built to static files in `apps/studio-web/dist`; the supervisor serves the tree with a directory route and an `index.html` fallback on the same origin, behind the session cookie; one SSE stream per tab with snapshot-then-deltas, `Last-Event-ID`, a heartbeat under 15 s, and a watchdog on `visibilitychange` (iPad Safari backgrounds streams the way iOS does). No Next.js: nothing needed server rendering, and the Bun service was already the server.
 - **Renderer.** Hybrid: one plain PixiJS v8 canvas for the floor and characters (nearest scaling, integer zoom from the device pixel ratio); React DOM for everything with text in it: the HUD, bubbles, the board, the inbox, the issue view, the chat. A first spike settles the pixel-scaling recipe at desktop and iPad pixel ratios ([D5](decisions.md#d5-renderer)).
 - **Screens.** Office (floor plus HUD); Board (epics as projects with phased bars, stories as phases, findings draining, the quote band against spend, a Needs-you / Working / Done triage column); Inbox (§6.9); Issue (a Jira-like view of one story with its comments, status, run, PR and cost); Chat (the engagement conversation); Status (what the read-only page shows today). The read-only page stays as the no-JavaScript fallback.
-- **Devices.** Desktop and iPad first. A separate phone UI later (EP-33): inbox, approve, status; small by design.
+- **Devices.** Desktop and iPad first. A separate phone UI later (EP-34): inbox, approve, status; small by design.
 - **Reach.** Tailnet by default, as today. A "public" mode (owner's firewall and DNS, TLS, the same account) is documented as a later option, not built now ([D10](decisions.md#d10-public-exposure)).
 
 ### 6.4 The front door and chat (D2: the studio's own)
@@ -148,7 +148,7 @@ Bootstrap, meta-CLI, roster. Verbs `install`, `update`, `doctor`, `status`. `doc
 
 ### 6.6 Engines and sandboxes (exist)
 
-bmad-loop at the `bmad.lock` pin plus the studio pipeline, inside one Docker Sandbox per project. The plugin arrives through the read-only skills mount; the service owns lifetime (6.2); the Phase 3 pack adds the `playable-verify` leg and the asset ladder for game projects (EP-32), drawing on the [3D tooling resource list](../../../../kb/agentic-3d-asset-tooling-2026-10.md) Tim filed.
+bmad-loop at the `bmad.lock` pin plus the studio pipeline, inside one Docker Sandbox per project. The plugin arrives through the read-only skills mount; the service owns lifetime (6.2); the Phase 3 pack adds the `playable-verify` leg and the asset ladder for game projects (EP-33), drawing on the [3D tooling resource list](../../../../kb/agentic-3d-asset-tooling-2026-10.md) Tim filed.
 
 ### 6.7 Measurement and the evolve loop (exist)
 
@@ -252,17 +252,18 @@ Proposed epics, numbered after 24. Each is PR-sized work through the studio's ow
 | Epic | Name | Carries | Needs first |
 |---|---|---|---|
 | **EP-25** | **Packaging: installer, skills-dir plugin, roster** (in the plan now) | O5; ADR §7 minus the marketplace leg; drift check and conformance rebased; marketplace copies uninstalled; sandboxes on the read-only skills mount; `doctor` with the trust checks | nothing |
-| EP-26 | The service owns lifetime | Story 23.2 as worktree per run plus PR; holes 9, 10, 11/12, 16, 18; DW-3, 6, 11, 12, 13, 15, 19, 21, 23; the `advisor` routing field; `tk evolve` over the loop observations | EP-25 |
-| EP-27 | One account, the registry, the projection | D7; §7.2, §7.3; contract 0.1.19 | EP-26 |
-| EP-28 | Studio web v0: office, board, status | §6.3 with the renderer spike as story 1 (D5); replaces the status page as the home | EP-27 |
-| EP-29 | Tracking on Atlassian and the inbox | §6.8, §6.9, §7.4; project setup from a template; publish and sync-back; the two statuses; the inbox and issue screens | EP-27 (the web) in parallel with EP-28 |
-| EP-30 | The engagement loop v1 | §7.1; chat route; questions, scope (to Confluence), quote band (D4), approval verb, closeout report | EP-29 |
-| EP-31 | Repository restructure (O2) | ADR §5 rehearsal and cut-over; `apps/studio-web` and the supervisor move in | EP-26 (worktrees), EP-30 (so the move does not delay the surface) |
-| EP-32 | Vertical-slice pack (Phase 3) | `playable-verify` leg, engine MCP wiring (godot-ai is a new candidate), asset ladder, `run-vertical-slice` job | EP-30 |
-| EP-33 | Phone UI | inbox, approve, status at phone width | EP-29 |
+| EP-26 | The service owns lifetime, part 1: the studio side (in the plan since 2026-10-15) | launch ends every path with the block and owns its bootstrap plus the budget check (holes 10, 20, 4); the planner settles schema shape and the spec file name (holes 19, 6); routing legs carry `advisor` and `effort`; the meter lands on the host and the drafter skips it (hole 23, PROP-067); the adapter's status pull-back verb | EP-25 |
+| EP-27 | The service owns lifetime, part 2: the supervisor (in the plan since 2026-10-15; transcribed to the supervisor repo before its launch) | worktree per run plus PR (23.2, hole 16); the supervisor holds and pins the engine and the queue is the only starter (hole 7, DW-3, DW-6); close-out of a paused run whose story landed (hole 9); a host-tier verify leg before any PR (holes 11, 12, 22); the plan follows the run (hole 18) and DW-11, 12, 13, 15, 19, 21, 23 | EP-26; Tim stops the supervisor tab; its sandbox recreated with the skills and work mounts |
+| EP-28 | One account, the registry, the projection | D7; §7.2, §7.3; contract 0.1.19 | EP-27 |
+| EP-29 | Studio web v0: office, board, status | §6.3 with the renderer spike as story 1 (D5); replaces the status page as the home | EP-28 |
+| EP-30 | Tracking on Atlassian and the inbox | §6.8, §6.9, §7.4; project setup from a template; publish and sync-back; the two statuses; the inbox and issue screens | EP-28 (the web) in parallel with EP-29 |
+| EP-31 | The engagement loop v1 | §7.1; chat route; questions, scope (to Confluence), quote band (D4), approval verb, closeout report | EP-30 |
+| EP-32 | Repository restructure (O2) | ADR §5 rehearsal and cut-over; `apps/studio-web` and the supervisor move in | EP-26 (worktrees), EP-31 (so the move does not delay the surface) |
+| EP-33 | Vertical-slice pack (Phase 3) | `playable-verify` leg, engine MCP wiring (godot-ai is a new candidate), asset ladder, `run-vertical-slice` job | EP-31 |
+| EP-34 | Phone UI | inbox, approve, status at phone width | EP-30 |
 | 23.3, 24.3, 24.4 | acceptance on TUA; paired runs with the advisor arm; the verdict | as planned | EP-26 for 23.3 |
 
-Rough size, by analogy with Epics 21 and 22 ($152.75 and $69.36 all-in on Opus 5.5): EP-25, EP-27 and EP-29 are Epic-22-sized; EP-26, EP-28 and EP-30 are Epic-21-sized or larger; EP-28 is new territory for the loop and starts with the spike.
+Rough size, by analogy with Epics 21, 22 and 25 ($152.75, $69.36 and $145.91 all-in on Opus 5.5): EP-26, EP-28 and EP-30 are Epic-22-sized; EP-27, EP-29 and EP-31 are Epic-21-sized or larger; EP-29 is new territory for the loop and starts with the spike.
 
 ---
 
@@ -275,10 +276,10 @@ Rough size, by analogy with Epics 21 and 22 ($152.75 and $69.36 all-in on Opus 5
 | **Docker Sandboxes on Windows is 0.x** (56 open Windows issues) | holes 7 and 13 are its lived form | the service owns engine lifetime; the glue stays ours |
 | **Windows is the recurring tax** | MSIX virtualisation, Task Scheduler hangs, folder trust, CRLF, MAX_PATH, junctions | runbook §8 is a design input; a host-tier verify leg; "prove it on the box" stories |
 | **The Hermes gateway still runs with `adopt_external_logins: true`** | it can invalidate the Claude login the workers use, whether or not the studio uses Hermes | Tim sets it `false` or stops the gateway; `doctor` warns |
-| **Atlassian free-tier limits** | workflow customisation, permissions, storage and API rate limits on Free are unverified; the design needs two custom statuses | verify in EP-29's first story; the adapter maps onto status categories if custom statuses are unavailable |
+| **Atlassian free-tier limits** | workflow customisation, permissions, storage and API rate limits on Free are unverified; the design needs two custom statuses | verify in EP-30's first story; the adapter maps onto status categories if custom statuses are unavailable |
 | **A second source of truth** | comments and owner pages live in Atlassian; the plan lives in git | D9's rule: fields canonical, comments and owner pages backend-authoritative and append-only; the sync-back is the only reader |
 | **Public exposure** if ever enabled | the box holds repositories and a signed-in Claude | tailnet default; public mode only behind TLS, rate limits and lockout, documented later |
-| **A web app is new to the loop** | no metered history for EP-28 | the spike first; quote EP-28 after one story lands |
+| **A web app is new to the loop** | no metered history for EP-29 | the spike first; quote EP-29 after one story lands |
 
 ---
 

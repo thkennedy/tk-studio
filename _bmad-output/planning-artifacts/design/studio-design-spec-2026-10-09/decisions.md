@@ -14,7 +14,7 @@ Part of the [studio design spec](README.md). Tim ruled D1 to D8 in [decisions-an
 
 ## D1. Repository
 
-**Ruled: O2, one repository with per-app releases.** Recorded as AD-21. The ADR's §8.2 to §8.7 follow its recommendations (admins stay exempt; the front end gets its own `studio-web--v` tag; `apps/supervisor` stays a nested studio project, proven in rehearsal; the old repository is archived; the meta-CLI ships as a wheel on its own `cli--v` tag). The order is D3's: the restructure is EP-31, after the engagement loop.
+**Ruled: O2, one repository with per-app releases.** Recorded as AD-21. The ADR's §8.2 to §8.7 follow its recommendations (admins stay exempt; the front end gets its own `studio-web--v` tag; `apps/supervisor` stays a nested studio project, proven in rehearsal; the old repository is archived; the meta-CLI ships as a wheel on its own `cli--v` tag). The order is D3's: the restructure is EP-32, after the engagement loop.
 
 <details><summary>Options as put (record)</summary>
 
@@ -36,7 +36,7 @@ A Hermes as the chat brain wrapped by the office; B drop; C Hermes as the first 
 
 ## D3. Order of work
 
-**Ruled: packaging, then the front end, then the restructure.** EP-25 first; EP-26 to EP-30 are the front end's service and surface work; EP-31 is the restructure. Epic 23.3 and 24.3/24.4 run alongside.
+**Ruled: packaging, then the front end, then the restructure.** EP-25 first; EP-26 to EP-31 are the front end's service and surface work; EP-32 is the restructure. Epic 23.3 and 24.3/24.4 run alongside.
 
 ## D4. Quote basis
 
@@ -56,7 +56,7 @@ CSS steps()/DOM only (4.60); hybrid DOM plus PixiJS (recommended); Phaser; Godot
 
 ## D6. Assets
 
-**Ruled: look at existing packs for reference, then create our own 2D assets with the art tools on the PC (Adobe Creative Cloud or tools with agentic or MCP support), and commit them to the repository.** Consequence: no LimeZu, no private asset fetch in the installer, no share-alike credits; the renderer spike draws its first sprites from our own sheet; an asset-authoring story (tool, pipeline, sprite-sheet format) joins EP-28.
+**Ruled: look at existing packs for reference, then create our own 2D assets with the art tools on the PC (Adobe Creative Cloud or tools with agentic or MCP support), and commit them to the repository.** Consequence: no LimeZu, no private asset fetch in the installer, no share-alike credits; the renderer spike draws its first sprites from our own sheet; an asset-authoring story (tool, pipeline, sprite-sheet format) joins EP-29.
 
 ## D7. Sign-in
 
@@ -80,10 +80,10 @@ Folded in: the owner's account is created on the first visit (hashed with Bun's 
 
 | Question | Settled by |
 |---|---|
-| What do the Atlassian free plans allow: custom workflow statuses, project permissions, storage, API rate, Rovo MCP availability? | EP-29 story 1 verifies on a live free site before anything is built |
+| What do the Atlassian free plans allow: custom workflow statuses, project permissions, storage, API rate, Rovo MCP availability? | EP-30 story 1 verifies on a live free site before anything is built |
 | Is the Rovo MCP server needed, or does the REST API with an API token (what the adapter uses today) cover everything? | the same story |
 | Does `claude plugin eval` run against a skills-dir plugin path? | EP-25 |
 | Is OTel `cost_usd` populated for Max sessions? | one instrumented story run, EP-26 or later |
-| Does the PixiJS pixel-scaling recipe hold at desktop and iPad pixel ratios? | the EP-28 spike |
-| What sprite-sheet format and authoring tool for our own assets? | the EP-28 asset-authoring story |
-| How large is the clone after the supervisor and the web land? | the EP-31 rehearsal (developers only; users never clone) |
+| Does the PixiJS pixel-scaling recipe hold at desktop and iPad pixel ratios? | the EP-29 spike |
+| What sprite-sheet format and authoring tool for our own assets? | the EP-29 asset-authoring story |
+| How large is the clone after the supervisor and the web land? | the EP-32 rehearsal (developers only; users never clone) |
