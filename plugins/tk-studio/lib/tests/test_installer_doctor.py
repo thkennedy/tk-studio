@@ -1,0 +1,1001 @@
+"""``tk-studio doctor`` (Story 25.5): every row of the story's I/O matrix,
+the read-only invariant, the store verdict pinned to the drift check's, the
+``--json`` shape and the conformance CLI drive.
+
+Offline by construction: the fakes and the socket guard of
+``test_installer_apps``; ``claude``, ``sbx`` and ``git`` are fake
+executables on a temp PATH, answered by the fake runner.
+"""
+from __future__ import annotations
+
+import io
+import json
+import os
+import ssl
+import sys
+import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_installer_apps import (  # noqa: E402
+    LINUX, PLUGIN_ROOT, REPO_ROOT, ROSTERS, WINDOWS, AppsCase, FakeHost,
+    cli_main, done, drift_check, lnk_bytes)
+
+sys.path.insert(0, str(PLUGIN_ROOT / "lib"))
+sys.path.insert(0, str(PLUGIN_ROOT / "contracts" / "conformance"))
+import runner as conformance  # noqa: E402
+import skills_plane  # noqa: E402
+import store as lib_store  # noqa: E402
+
+from tk_studio_cli import doctor  # noqa: E402
+
+NOW = 2_000_000_000.0
+DAY = 86400
+ALLOWED = {"claude --version", "sbx daemon status",
+           "git config --global --get core.longpaths"}
+SCHEMA = json.loads((PLUGIN_ROOT / "contracts" / "status-block.schema.json")
+                    .read_text(encoding="utf-8"))
+AC1 = ("claude-code", "plugin", "store", "sbx-daemon", "long-paths",
+       "path-launcher", "tailscale-cert", "supervisor")
+
+
+class DoctorHost(FakeHost):
+    """FakeHost plus the three processes doctor may start."""
+
+    def __init__(self):
+        super().__init__()
+        self.claude_out = "2.1.230 (Claude Code)\n"
+        self.sbx_rc = 0
+        self.longpaths: str | None = "true"     # None: unset (exit 1)
+
+    def __call__(self, args, env=None):
+        args = [str(a) for a in args]
+        name = Path(args[0]).name.removesuffix(".exe")
+        if name == "claude" and args[1:] == ["--version"]:
+            self.calls.append((args, env))
+            return done(args, 0, self.claude_out)
+        if name == "sbx":
+            self.calls.append((args, env))
+            return done(args, self.sbx_rc, "running" if not self.sbx_rc
+                        else "", "daemon not running" if self.sbx_rc else "")
+        if name == "git":
+            self.calls.append((args, env))
+            if self.longpaths is None:
+                return done(args, 1)
+            return done(args, 0, self.longpaths + "\n")
+        return super().__call__(args, env)
+
+
+class DoctorCase(AppsCase):
+    plat = LINUX
+
+    def setUp(self):
+        super().setUp()
+        self.host = DoctorHost()
+        self.host.root = self.root
+        self.fakebin = self.tmp / "fakebin"
+        self.fakebin.mkdir()
+        self.tools("claude", "sbx", "git")
+        self.env["PATH"] = str(self.fakebin)
+        self.env["TK_STUDIO_HOME"] = str(self.tmp / "store")
+        self.hklm_value: object = 1
+
+    def tools(self, *names):
+        for name in names:
+            for exe in (name, f"{name}.exe"):
+                path = self.fakebin / exe
+                path.write_text("#!/bin/sh\n")
+                path.chmod(0o755)
+
+    def drop_tools(self, *names):
+        for name in names:
+            for exe in (name, f"{name}.exe"):
+                (self.fakebin / exe).unlink()
+
+    def doctor(self, *extra, roster: Path | None = None, **kw):
+        argv = ["doctor", *extra]
+        if roster is not None:
+            argv += ["--roster", str(roster)]
+        kw.setdefault("now", lambda: NOW)
+        kw.setdefault("hklm", lambda key, name: self.hklm_value)
+        return self.run_cli(argv, **kw)
+
+    def checks(self, result) -> dict[str, dict]:
+        return {c["check"]: c for c in result["checks"]}
+
+    def snapshot(self) -> dict:
+        return {str(p): (p.read_bytes() if p.is_file() else None)
+                for p in sorted(self.tmp.rglob("*"))}
+
+    def commands(self) -> list[str]:
+        return [" ".join([Path(a[0]).name.removesuffix(".exe"), *a[1:]])
+                for a, _ in self.host.calls]
+
+    # --- fixtures ----------------------------------------------------------
+
+    def plugin_folder(self, version: str):
+        folder = self.config / "skills" / "tk-studio" / ".claude-plugin"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "plugin.json").write_text(json.dumps(
+            {"name": "tk-studio", "version": version}), encoding="utf-8")
+
+    def store_tree(self, config: str | None = "user_name: tim\n"
+                   "role: developer\nmachine_id: box\n",
+                   dirs=lib_store.STORE_DIRS):
+        root = Path(self.env["TK_STUDIO_HOME"])
+        root.mkdir(parents=True, exist_ok=True)
+        for d in dirs:
+            (root / d).mkdir(exist_ok=True)
+        if config is not None:
+            (root / "config.yaml").write_text(config, encoding="utf-8")
+        return root
+
+    def registry(self, projects: dict[str, str] | None):
+        path = Path(self.env["TK_STUDIO_HOME"]) / "registry" / "projects.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = ["registry_version: 1"]
+        if projects:
+            lines.append("projects:")
+            for pid, root in projects.items():
+                lines += [f"  {pid}:", f"    root: '{root}'"]
+        else:
+            lines.append("projects:")
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
+
+    def trust(self, roots: dict[str, bool]):
+        (self.config / ".claude.json").write_text(json.dumps({"projects": {
+            root: {"hasTrustDialogAccepted": ok}
+            for root, ok in roots.items()}}), encoding="utf-8")
+
+    def cert(self, age_days: float) -> Path:
+        path = self.tmp / "tls" / "box.ts.net.crt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("not a pem\n")
+        os.utime(path, (NOW - age_days * DAY,) * 2)
+        return path
+
+
+class AllFailing(DoctorCase):
+    plat = WINDOWS
+
+    def test_every_check_fails_with_a_fix_and_nothing_changes(self):
+        roster = self.full_roster()
+        self.host.claude_out = "2.1.100 (Claude Code)\n"
+        self.host.sbx_rc = 1
+        self.host.longpaths = None
+        self.hklm_value = 0
+        self.registry({"demo": "C:\\GitHub\\demo"})
+        self.trust({"C:/GitHub/other": True})
+        self.store.values["TK_SUPERVISOR_TLS_CERT"] = str(self.cert(120))
+        sup = self.root / "supervisor" / "0.1.0"
+        sup.mkdir(parents=True)
+        gone = self.root / "studio-web" / ".0.1.0.previous"
+        gone.mkdir(parents=True)
+        (self.root / "supervisor" / ".0.0.9.previous").mkdir()
+        (self.root / "current.json").write_text(json.dumps({
+            "supervisor": {"version": "0.1.0", "path": str(sup)},
+            "studio-web": {"version": "0.1.0", "path": str(gone)}}))
+        (self.config / "skills" / ".tk-studio.new").mkdir(parents=True)
+        tools = self.root / "tools"
+        tools.mkdir()
+        (tools / "cli-update.cmd").write_text("rem helper\n")
+        (tools / "cli-update.log").write_text("install failed: exit 2\n")
+        hermes = self.tmp / "local" / "hermes"
+        hermes.mkdir(parents=True)
+        (hermes / "config.yaml").write_text(
+            "auth:\n  adopt_external_logins: true\n")
+        before = self.snapshot()
+
+        result, code = self.doctor(roster=roster)
+
+        self.assertEqual((code, result["status"]), (0, "complete"))
+        checks = self.checks(result)
+        for name in (*AC1, "folder-trust:demo", "studio-web"):
+            with self.subTest(check=name):
+                self.assertEqual(checks[name]["status"], "fail",
+                                 checks[name])
+                self.assertTrue(checks[name]["fix"])
+        for name in ("hermes-logins", "plugin-leftovers", "stale-slots",
+                     "cli-update-helper"):
+            with self.subTest(check=name):
+                self.assertEqual(checks[name]["status"], "warn")
+                self.assertTrue(checks[name]["fix"])
+        self.assertIn("adopt_external_logins", checks["hermes-logins"]
+                      ["detail"])
+        self.assertIn("Claude-login risk", checks["hermes-logins"]["detail"])
+        self.assertIn("DW-12", checks["studio-web"]["detail"])
+        self.assertIn("install failed", checks["cli-update-helper"]["detail"])
+        self.assertEqual(set(self.commands()), ALLOWED)
+        self.assertEqual(len(self.host.calls), 3)
+        self.assertEqual(self.snapshot(), before, "doctor is read-only")
+        self.assertEqual(self.store.values.keys(), {"TK_SUPERVISOR_TLS_CERT"})
+        failing = [c["check"] for c in result["checks"]
+                   if c["status"] == "fail"]
+        self.assertEqual(result["reason"],
+                         "failing checks: " + ", ".join(failing))
+
+
+class AllPassing(DoctorCase):
+    def test_a_healthy_box_passes_every_check(self):
+        roster = self.full_roster()
+        self.run_cli(["install", "--roster", str(roster)])
+        self.host.calls.clear()
+        self.store_tree()
+        project = self.tmp / "proj"
+        self.registry({"proj": str(project)})
+        self.trust({str(project): True})
+        (self.root / "bin").mkdir(exist_ok=True)
+        (self.root / "bin" / "tk-studio").write_text("cli")
+        self.env["PATH"] += os.pathsep + str(self.root / "bin")
+        self.env["TK_SUPERVISOR_TLS_CERT"] = str(self.cert(10))
+        before = self.snapshot()
+        result, code = self.doctor(roster=roster)
+        self.assertEqual((code, result["reason"]), (0, None), result)
+        statuses = {c["check"]: c["status"] for c in result["checks"]}
+        self.assertEqual(statuses.pop("long-paths"), "skipped")
+        self.assertEqual(set(statuses.values()), {"pass"}, statuses)
+        self.assertEqual(sorted(statuses), sorted(
+            ["claude-code", "plugin", "store", "sbx-daemon",
+             "folder-trust:proj", "path-launcher", "tailscale-cert",
+             "supervisor", "studio-web"]))
+        for check in result["checks"]:
+            if check["status"] == "pass":
+                self.assertIsNone(check["fix"])
+        self.assertEqual(self.commands(),
+                         ["claude --version", "sbx daemon status"])
+        self.assertEqual(self.snapshot(), before)
+        self.assertTrue(result["probe"]["answers"])
+        self.assertTrue(result["probe"]["url"].startswith("https://"))
+
+
+class ClaudeCode(DoctorCase):
+    def test_pass_names_both_versions(self):
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "claude-code"]
+        self.assertEqual((check["status"], check["detail"]),
+                         ("pass", "2.1.230 >= 2.1.224"))
+
+    def test_below_the_floor_fails_naming_it(self):
+        self.host.claude_out = "2.1.9 (Claude Code)"
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "claude-code"]
+        self.assertEqual(check["status"], "fail")
+        self.assertIn(">=2.1.224", check["fix"])
+
+    def test_not_found_or_unparseable_fails(self):
+        roster = self.full_roster()
+        self.host.claude_out = "Claude Code"
+        check = self.checks(self.doctor(roster=roster)[0])["claude-code"]
+        self.assertEqual(check["status"], "fail")
+        self.drop_tools("claude")
+        self.host.calls.clear()
+        check = self.checks(self.doctor(roster=roster)[0])["claude-code"]
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("not found", check["detail"])
+        self.assertNotIn("claude --version", self.commands())
+
+    def test_a_roster_refusal_fails_naming_it(self):
+        bad = json.loads(self.full_roster().read_text())
+        bad["requires"] = {"claude-code": "2.1"}
+        invalid = self.tmp / "invalid.json"
+        invalid.write_text(json.dumps(bad))
+        entry = json.loads(self.full_roster().read_text())
+        entry["components"]["supervisor"]["sha256"] = "nope"
+        entry_bad = self.tmp / "entry.json"
+        entry_bad.write_text(json.dumps(entry))
+        for path, name in ((invalid, "RosterInvalid"),
+                           (entry_bad, "RosterEntryInvalid"),
+                           (self.tmp / "absent.json", "RosterUnreadable")):
+            with self.subTest(refusal=name):
+                result, code = self.doctor(roster=path)
+                self.assertEqual((code, result["status"]), (0, "complete"))
+                for key in ("claude-code", "plugin"):
+                    check = self.checks(result)[key]
+                    self.assertEqual(check["status"], "fail")
+                    self.assertIn(name, check["fix"])
+
+    def test_no_roster_fetches_the_channel_url(self):
+        result, _ = self.doctor()
+        self.assertEqual(self.fetch.calls, [
+            "https://raw.githubusercontent.com/thkennedy/tk-studio/main/"
+            "tools/installer/rosters/stable.json"])
+        self.assertIn("RosterUnreadable",
+                      self.checks(result)["claude-code"]["fix"])
+
+
+class PluginPlane(DoctorCase):
+    def test_ok_is_pass_and_carries_the_case(self):
+        self.plugin_folder("0.2.16")
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "plugin"]
+        self.assertEqual((check["status"], check["case"]), ("pass", "ok"))
+
+    def test_stale_names_the_channel(self):
+        self.plugin_folder("0.2.15")
+        check = self.checks(self.doctor(
+            roster=ROSTERS / "latest.json")[0])["plugin"]
+        self.assertEqual((check["status"], check["case"]), ("fail", "stale"))
+        self.assertIn("--channel latest", check["fix"])
+
+    def test_missing_includes_a_folder_without_plugin_json(self):
+        (self.config / "skills" / "tk-studio").mkdir(parents=True)
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "plugin"]
+        self.assertEqual((check["status"], check["case"]), ("fail", "missing"))
+        self.assertIn("tk-studio install", check["fix"])
+
+    def test_shadowed_names_each_uninstall(self):
+        self.plugin_folder("0.2.16")
+        (self.config / "settings.json").write_text(json.dumps(
+            {"enabledPlugins": {"tk-studio@tk-studio": True}}))
+        before = (self.config / "settings.json").read_bytes()
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "plugin"]
+        self.assertEqual((check["status"], check["case"]),
+                         ("fail", "shadowed"))
+        self.assertIn("claude plugin uninstall tk-studio@tk-studio",
+                      check["fix"])
+        self.assertEqual((self.config / "settings.json").read_bytes(), before)
+
+    def test_error_carries_no_case_and_names_the_path(self):
+        self.plugin_folder("0.2.16")
+        (self.config / "settings.json").write_text("{not json")
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "plugin"]
+        self.assertEqual(check["status"], "fail")
+        self.assertNotIn("case", check)
+        self.assertIn(str(self.config / "settings.json"), check["detail"])
+        self.assertTrue(check["fix"])
+
+    def test_not_shipped_is_skipped(self):
+        roster = self.roster(uv=self.uv())
+        check = self.checks(self.doctor(roster=roster)[0])["plugin"]
+        self.assertEqual((check["status"], check["detail"]),
+                         ("skipped", "not shipped in stable"))
+
+    def test_the_plane_is_the_drift_checks(self):
+        self.assertIs(drift_check.skills_dir_check,
+                      skills_plane.skills_dir_check)
+        self.plugin_folder("0.2.15")
+        ours = doctor.skills_plane.skills_dir_check(
+            self.config, ("0.2.16", "stable roster tk-studio--v0.2.16"))
+        theirs = skills_plane.skills_dir_check(
+            self.config, ("0.2.16", "stable roster tk-studio--v0.2.16"))
+        self.assertEqual(ours, theirs)
+
+    def test_leftovers_warn_and_stay(self):
+        for name in (".tk-studio.retired", ".tk-studio.new"):
+            (self.config / "skills" / name).mkdir(parents=True)
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "plugin-leftovers"]
+        self.assertEqual(check["status"], "warn")
+        self.assertIn(".tk-studio.retired", check["detail"])
+        self.assertIn(".tk-studio.new", check["detail"])
+        self.assertTrue((self.config / "skills" / ".tk-studio.new").is_dir())
+
+    def test_no_leftovers_is_not_reported(self):
+        self.assertNotIn("plugin-leftovers", self.checks(
+            self.doctor(roster=self.full_roster())[0]))
+
+
+class StoreParity(DoctorCase):
+    """The CLI's store check is the drift check's store plane."""
+
+    def assert_same(self):
+        with mock.patch.dict(os.environ,
+                             {"TK_STUDIO_HOME": self.env["TK_STUDIO_HOME"]}):
+            theirs = drift_check.check_store()
+        ours = doctor.store_plane(self.env)
+        self.assertEqual(ours, theirs)
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "store"]
+        self.assertEqual(check["detail"], theirs["detail"])
+        self.assertEqual(check["status"],
+                         "pass" if theirs["status"] == "ok" else "fail")
+        if theirs["status"] != "ok":
+            self.assertEqual(check["fix"], drift_check.FIX_STORE)
+        return theirs["status"]
+
+    def test_constants_are_the_libs(self):
+        self.assertEqual(doctor.STORE_DIRS, lib_store.STORE_DIRS)
+        self.assertEqual(doctor.REQUIRED_CONFIG_KEYS,
+                         lib_store.REQUIRED_CONFIG_KEYS)
+        self.assertEqual(doctor.FIX_STORE, drift_check.FIX_STORE)
+
+    def test_absent(self):
+        self.assertEqual(self.assert_same(), "missing")
+
+    def test_partial(self):
+        self.store_tree(dirs=("registry",))
+        self.assertEqual(self.assert_same(), "drift")
+
+    def test_config_absent(self):
+        self.store_tree(config=None)
+        self.assertEqual(self.assert_same(), "drift")
+
+    def test_unreadable_config(self):
+        self.store_tree(config="user_name: [a, b]\n")
+        self.assertEqual(self.assert_same(), "drift")
+
+    def test_missing_keys(self):
+        self.store_tree(config="user_name: tim\nrole: ''\n")
+        self.assertEqual(self.assert_same(), "drift")
+
+    def test_complete(self):
+        self.store_tree()
+        self.assertEqual(self.assert_same(), "ok")
+
+
+class Sbx(DoctorCase):
+    def test_exit_zero_passes_and_only_daemon_status_runs(self):
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "sbx-daemon"]
+        self.assertEqual(check["status"], "pass")
+        sbx = [c for c in self.commands() if c.startswith("sbx")]
+        self.assertEqual(sbx, ["sbx daemon status"])
+
+    def test_non_zero_fails_naming_the_safe_start(self):
+        self.host.sbx_rc = 1
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "sbx-daemon"]
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("sign-in task", check["fix"])
+        self.assertIn("start.ps1", check["fix"])
+
+    def test_missing_sbx_is_skipped(self):
+        self.drop_tools("sbx")
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "sbx-daemon"]
+        self.assertEqual(check["status"], "skipped")
+        self.assertNotIn("sbx daemon status", self.commands())
+
+
+class FolderTrust(DoctorCase):
+    plat = WINDOWS
+
+    def test_one_entry_per_root_matched_by_normalized_path(self):
+        self.registry({"a": "C:\\GitHub\\Alpha", "b": "C:\\GitHub\\beta"})
+        self.trust({"c:/github/alpha/": True, "C:\\GitHub\\beta": False})
+        checks = self.checks(self.doctor(roster=self.full_roster())[0])
+        self.assertEqual(checks["folder-trust:a"]["status"], "pass")
+        self.assertEqual(checks["folder-trust:b"]["status"], "fail")
+        self.assertEqual(checks["folder-trust:b"]["fix"],
+                         "open Claude Code in C:\\GitHub\\beta and accept "
+                         "the trust dialog")
+
+    def test_colliding_keys_prefer_the_accepted_record(self):
+        self.registry({"demo": "C:\\GitHub\\demo"})
+        for order in ((("C:/GitHub/demo", True), ("c:\\github\\demo", False)),
+                      (("c:\\github\\demo", False), ("C:/GitHub/demo", True))):
+            with self.subTest(order=order):
+                self.trust(dict(order))
+                check = self.checks(self.doctor(
+                    roster=self.full_roster())[0])["folder-trust:demo"]
+                self.assertEqual(check["status"], "pass", check)
+
+    def test_absent_root_fails(self):
+        self.registry({"a": "C:\\GitHub\\Alpha"})
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "folder-trust:a"]
+        self.assertEqual(check["status"], "fail")
+
+    def test_empty_registry_is_skipped(self):
+        self.registry({})
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "folder-trust"]
+        self.assertEqual(check["status"], "skipped")
+        self.assertTrue(check["fix"])
+
+    def test_unreadable_registry_or_state_fails_naming_the_path(self):
+        path = self.registry({"a": "C:\\x"})
+        path.write_text("projects: [a, b]\n")
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "folder-trust"]
+        self.assertEqual(check["status"], "fail")
+        self.assertIn(str(path), check["detail"])
+        self.registry({"a": "C:\\x"})
+        (self.config / ".claude.json").write_text("{broken")
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "folder-trust"]
+        self.assertEqual(check["status"], "fail")
+        self.assertIn(str(self.config / ".claude.json"), check["detail"])
+
+
+class LongPaths(DoctorCase):
+    def test_off_windows_is_skipped(self):
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "long-paths"]
+        self.assertEqual((check["status"], check["detail"]),
+                         ("skipped", "windows only"))
+        self.assertNotIn("git", " ".join(self.commands()))
+
+
+class LongPathsWindows(DoctorCase):
+    plat = WINDOWS
+
+    def test_both_on_passes(self):
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "long-paths"]
+        self.assertEqual(check["status"], "pass")
+
+    def test_either_off_fails_naming_it(self):
+        self.hklm_value = None
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "long-paths"]
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("LongPathsEnabled", check["fix"])
+        self.hklm_value = 1
+        self.host.longpaths = "false"
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "long-paths"]
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("core.longpaths true", check["fix"])
+
+    def test_git_boolean_true_spellings_pass(self):
+        for word in ("yes", "1", "On", "TRUE"):
+            with self.subTest(word=word):
+                self.host.longpaths = word
+                check = self.checks(self.doctor(
+                    roster=self.full_roster())[0])["long-paths"]
+                self.assertEqual(check["status"], "pass", check)
+
+    def test_missing_git_is_skipped(self):
+        self.drop_tools("git")
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "long-paths"]
+        self.assertEqual(check["status"], "skipped")
+
+
+class PathLauncher(DoctorCase):
+    plat = WINDOWS
+
+    def test_launcher_on_the_hkcu_path_passes(self):
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "tk-studio.exe").write_text("cli")
+        self.store.values["Path"] = f"C:\\Windows;{bin_dir}\\"
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "path-launcher"]
+        self.assertEqual(check["status"], "pass")
+        self.assertIn("HKCU Path", check["detail"])
+
+    def test_an_unexpanded_hkcu_entry_passes(self):
+        # the HKCU Path is read raw (REG_EXPAND_SZ): the bootstrap keeps a
+        # %LOCALAPPDATA% entry unexpanded, and doctor expands it from env
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "tk-studio.exe").write_text("cli")
+        self.env["LOCALAPPDATA"] = str(self.tmp / "local")
+        self.assertNotIn(str(bin_dir), self.env["PATH"])
+        for ref in ("%LOCALAPPDATA%", "%LocalAppData%"):   # names fold case
+            with self.subTest(ref=ref):
+                self.store.values["Path"] = (f"C:\\Windows;{ref}"
+                                             "\\tk-studio\\bin")
+                check = self.checks(self.doctor(
+                    roster=self.full_roster())[0])["path-launcher"]
+                self.assertEqual(check["status"], "pass", check)
+                self.assertIn("HKCU Path", check["detail"])
+                self.assertNotIn("process PATH", check["detail"])
+
+    def test_an_unknown_reference_stays_unexpanded(self):
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "tk-studio.exe").write_text("cli")
+        self.store.values["Path"] = "%NOSUCHVAR%\\tk-studio\\bin"
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "path-launcher"]
+        self.assertEqual(check["status"], "fail", check)
+
+    def test_missing_launcher_or_path_fails(self):
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "path-launcher"]
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("bootstrap", check["fix"])
+
+
+class TailscaleCert(DoctorCase):
+    def test_unset_is_skipped(self):
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "tailscale-cert"]
+        self.assertEqual(check["status"], "skipped")
+
+    def test_missing_file_fails(self):
+        self.env["TK_SUPERVISOR_TLS_CERT"] = str(self.tmp / "absent.crt")
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "tailscale-cert"]
+        self.assertEqual(check["status"], "fail")
+
+    def test_age_against_ninety_days(self):
+        for age, status in ((89, "pass"), (90, "fail"), (200, "fail")):
+            with self.subTest(age=age):
+                self.env["TK_SUPERVISOR_TLS_CERT"] = str(self.cert(age))
+                check = self.checks(self.doctor(
+                    roster=self.full_roster())[0])["tailscale-cert"]
+                self.assertEqual(check["status"], status, check)
+                self.assertIn("file mtime", check["detail"])
+                if status == "fail":
+                    self.assertIn("tailscale cert", check["fix"])
+
+
+# a self-signed EC certificate (openssl req -x509, CN box.ts.net, 365 days):
+# notBefore Oct 15 00:11:40 2026 GMT, notAfter Oct 15 00:11:40 2027 GMT
+PEM = """-----BEGIN CERTIFICATE-----
+MIIBfzCCASWgAwIBAgIUSem6Py8W2VoO5xXpeLpFIIjNzvYwCgYIKoZIzj0EAwIw
+FTETMBEGA1UEAwwKYm94LnRzLm5ldDAeFw0yNjEwMTUwMDExNDBaFw0yNzEwMTUw
+MDExNDBaMBUxEzARBgNVBAMMCmJveC50cy5uZXQwWTATBgcqhkjOPQIBBggqhkjO
+PQMBBwNCAAQdNAFgkfROy6Ie7Cr6+GZ9NtUisM9X99PoY5MGkSV9cbgKCt7a/ndR
+IcjogZqW18HRrumXU37Suoky8iQo2Vv/o1MwUTAdBgNVHQ4EFgQURqVagXQ48axN
+g8vQheQe5SweCU4wHwYDVR0jBBgwFoAURqVagXQ48axNg8vQheQe5SweCU4wDwYD
+VR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNIADBFAiBAC6ZM6MfBSC8ic4uXaOQX
+aieP0WRpPut/XDD6a5g0MAIhAN+tXX6XImrqcNV2NVnpcF8FJArDwoL4YP6iY8hk
+RedN
+-----END CERTIFICATE-----
+"""
+PEM_NOT_BEFORE = 1_792_023_100.0
+PEM_NOT_AFTER = 1_823_559_100.0
+
+
+@unittest.skipUnless(getattr(getattr(ssl, "_ssl", None),
+                             "_test_decode_cert", None),
+                     "no ssl._ssl._test_decode_cert: the mtime fallback "
+                     "stands in (TailscaleCert covers it)")
+class TailscaleCertPem(DoctorCase):
+    def cert_check(self, now: float) -> dict:
+        path = self.tmp / "tls" / "box.ts.net.crt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(PEM)
+        # an mtime that contradicts every case: the certificate must win
+        os.utime(path, (now - 45 * DAY if now - PEM_NOT_BEFORE >= 90 * DAY
+                        else now - 200 * DAY,) * 2)
+        self.env["TK_SUPERVISOR_TLS_CERT"] = str(path)
+        return self.checks(self.doctor(roster=self.full_roster(),
+                                       now=lambda: now)[0])["tailscale-cert"]
+
+    def test_young_by_not_before_passes(self):
+        check = self.cert_check(PEM_NOT_BEFORE + 30 * DAY)
+        self.assertEqual(check["status"], "pass", check)
+        self.assertIn("30 days old (from its notBefore)", check["detail"])
+        self.assertNotIn("file mtime", check["detail"])
+
+    def test_ninety_days_by_not_before_fails(self):
+        for age in (90, 100):
+            with self.subTest(age=age):
+                check = self.cert_check(PEM_NOT_BEFORE + age * DAY)
+                self.assertEqual(check["status"], "fail", check)
+                self.assertIn(f"{age} days old (from its notBefore)",
+                              check["detail"])
+                self.assertNotIn("expired", check["detail"])
+                self.assertIn("tailscale cert", check["fix"])
+
+    def test_past_not_after_fails_expired(self):
+        check = self.cert_check(PEM_NOT_AFTER + DAY)
+        self.assertEqual(check["status"], "fail", check)
+        self.assertIn("from its notBefore", check["detail"])
+        self.assertTrue(check["detail"].endswith("; expired"), check)
+        self.assertIn("tailscale cert", check["fix"])
+
+
+class Supervisor(DoctorCase):
+    def test_not_shipped_is_skipped(self):
+        checks = self.checks(self.doctor(roster=ROSTERS / "latest.json")[0])
+        for name in ("supervisor", "studio-web"):
+            self.assertEqual((checks[name]["status"], checks[name]["detail"]),
+                             ("skipped", "not shipped in latest"))
+
+    def test_not_installed_fails_with_install(self):
+        checks = self.checks(self.doctor(roster=self.full_roster())[0])
+        self.assertEqual(checks["supervisor"]["fix"], "run tk-studio install")
+        self.assertEqual(checks["studio-web"]["fix"], "run tk-studio install")
+        self.assertEqual(self.host.probes, [], "nothing to probe")
+
+    def test_slot_answers_or_not(self):
+        roster = self.full_roster()
+        self.run_cli(["install", "--roster", str(roster)])
+        check = self.checks(self.doctor(roster=roster)[0])["supervisor"]
+        self.assertEqual(check["status"], "pass")
+        self.assertIn("slot 0.1.0", check["detail"])
+        self.host.up = False
+        check = self.checks(self.doctor(roster=roster)[0])["supervisor"]
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("Startup shortcut", check["fix"])
+
+    def test_dw12_studio_web_path_gone(self):
+        roster = self.full_roster()
+        self.run_cli(["install", "--roster", str(roster)])
+        web = self.root / "studio-web" / "0.1.0"
+        current = json.loads((self.root / "current.json").read_text())
+        current["studio-web"]["path"] = str(self.root / "studio-web" / "9.9")
+        (self.root / "current.json").write_text(json.dumps(current))
+        check = self.checks(self.doctor(roster=roster)[0])["studio-web"]
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("does not exist (DW-12)", check["detail"])
+        self.assertEqual(check["fix"].split(" (")[0], "run tk-studio update")
+        self.assertTrue(web.is_dir())
+
+    def test_cli_helper_is_reported_never_deleted(self):
+        tools = self.root / "tools"
+        tools.mkdir(parents=True)
+        (tools / "cli-update.cmd").write_text("rem\n")
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "cli-update-helper"]
+        self.assertEqual(check["status"], "warn")
+        self.assertTrue((tools / "cli-update.cmd").is_file())
+
+
+class SupervisorCheckout(DoctorCase):
+    """The matrix row's other half: a source checkout named by the Startup
+    shortcut (a process-free ``.lnk`` read), probed like a slot."""
+    plat = WINDOWS
+
+    def setUp(self):
+        super().setUp()
+        self.co = self.tmp / "GitHub" / "tk-studio-supervisor"
+        (self.co / ".git").mkdir(parents=True)
+        lnk = (self.tmp / "roaming" / "Microsoft" / "Windows" / "Start Menu"
+               / "Programs" / "Startup" / "tk-studio supervisor.lnk")
+        lnk.parent.mkdir(parents=True)
+        lnk.write_bytes(lnk_bytes(str(self.co)))
+
+    def test_checkout_answers_passes_naming_it(self):
+        self.host.up = True
+        result = self.doctor(roster=self.full_roster())[0]
+        self.assertEqual(result["supervisor"]["mode"], "source checkout")
+        check = self.checks(result)["supervisor"]
+        self.assertEqual(check["status"], "pass", check)
+        self.assertIn(f"source checkout {self.co}", check["detail"])
+        self.assertIsNone(check["fix"])
+
+    def test_checkout_no_answer_fails_with_the_startup_shortcut(self):
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "supervisor"]
+        self.assertEqual(check["status"], "fail", check)
+        self.assertIn(f"source checkout {self.co}", check["detail"])
+        self.assertIn("does not answer", check["detail"])
+        self.assertIn("Startup shortcut", check["fix"])
+        self.assertEqual(len(self.host.probes), 1)
+
+
+class Hermes(DoctorCase):
+    plat = WINDOWS
+
+    def hermes(self, text: str | None) -> Path:
+        home = self.tmp / "local" / "hermes"
+        home.mkdir(parents=True, exist_ok=True)
+        if text is not None:
+            (home / "config.yaml").write_text(text)
+        return home / "config.yaml"
+
+    def test_no_hermes_home_is_not_reported(self):
+        self.assertNotIn("hermes-logins", self.checks(
+            self.doctor(roster=self.full_roster())[0]))
+
+    def test_off_or_absent_passes(self):
+        for text in (None, "auth:\n  adopt_external_logins: false\n",
+                     "model: x\n"):
+            with self.subTest(text=text):
+                self.hermes(text)
+                check = self.checks(self.doctor(
+                    roster=self.full_roster())[0])["hermes-logins"]
+                self.assertEqual(check["status"], "pass")
+
+    def test_on_warns_naming_the_setting_and_the_fix(self):
+        self.hermes("auth:\n  adopt_external_logins: true\n")
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "hermes-logins"]
+        self.assertEqual(check["status"], "warn")
+        self.assertIn("auth.adopt_external_logins", check["detail"])
+        self.assertIn("hermes gateway restart", check["fix"])
+
+    def test_yaml_1_1_spellings_read_as_pyyaml_does(self):
+        for word, status in (("True", "warn"), ("yes", "warn"),
+                             ("on", "warn"), ("off", "pass")):
+            with self.subTest(word=word):
+                self.hermes(f"auth:\n  adopt_external_logins: {word}\n")
+                check = self.checks(self.doctor(
+                    roster=self.full_roster())[0])["hermes-logins"]
+                self.assertEqual(check["status"], status, check)
+                if status == "warn":
+                    self.assertIn("hermes gateway restart", check["fix"])
+
+    def test_only_pyyaml_exact_spellings_are_bools(self):
+        # PyYAML's resolver: Off/OFF are false, On is true; n, y and odd
+        # case (nO, oFF) stay truthy strings, so they are not clearly off
+        for word, status in (("n", "warn"), ("nO", "warn"), ("y", "warn"),
+                             ("oFF", "warn"), ("Off", "pass"),
+                             ("OFF", "pass"), ("On", "warn")):
+            with self.subTest(word=word):
+                self.hermes(f"auth:\n  adopt_external_logins: {word}\n")
+                check = self.checks(self.doctor(
+                    roster=self.full_roster())[0])["hermes-logins"]
+                self.assertEqual(check["status"], status, check)
+                if word in ("n", "nO", "y", "oFF"):
+                    self.assertIn("not clearly off", check["detail"])
+                if word == "On":
+                    self.assertIn("is on in", check["detail"])
+
+    def test_unclear_value_warns_naming_it(self):
+        self.hermes("auth:\n  adopt_external_logins: maybe\n")
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "hermes-logins"]
+        self.assertEqual(check["status"], "warn")
+        self.assertIn("maybe", check["detail"])
+
+    def test_quoted_value_is_a_string_never_a_bool(self):
+        # PyYAML hands Hermes a quoted "false" as a non-empty, truthy
+        # string; miniyaml strips the quotes, so doctor must not read it
+        # as a bool word
+        for raw, status in (('"false"', "warn"), ("'no'", "warn"),
+                            ("false", "pass"), ('"true"', "warn")):
+            with self.subTest(raw=raw):
+                self.hermes(f"auth:\n  adopt_external_logins: {raw}\n")
+                check = self.checks(self.doctor(
+                    roster=self.full_roster())[0])["hermes-logins"]
+                self.assertEqual(check["status"], status, check)
+                if status == "warn":
+                    self.assertTrue(check["fix"])
+                    self.assertIn("not clearly off", check["detail"])
+                    self.assertIn(raw.strip("'\""), check["detail"])
+
+    def test_bom_does_not_hide_the_auth_block(self):
+        path = self.hermes(None)
+        path.write_bytes(b"\xef\xbb\xbfauth:\n  adopt_external_logins: true\n")
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "hermes-logins"]
+        self.assertEqual(check["status"], "warn", check)
+        self.assertIn("is on in", check["detail"])
+
+    def test_unreadable_warns_naming_the_path(self):
+        path = self.hermes("providers: [a, b]\n")
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "hermes-logins"]
+        self.assertEqual(check["status"], "warn")
+        self.assertIn(str(path), check["detail"])
+
+
+class JsonShape(DoctorCase):
+    def main_lines(self, argv) -> tuple[list[str], int]:
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = cli_main.main(argv, fetch=self.fetch, runner=self.host,
+                                 env=self.env, platform=self.plat,
+                                 probe=self.host.probe, env_store=self.store,
+                                 sleep=self.clock.sleep, clock=self.clock.now,
+                                 spawn_detached=self.spawn,
+                                 cli_version=self.cli_version,
+                                 now=lambda: NOW)
+        return out.getvalue().strip().splitlines(), code
+
+    def test_json_is_one_object_ending_with_the_status_block(self):
+        roster = str(self.full_roster())
+        lines, code = self.main_lines(["doctor", "--json", "--roster", roster])
+        self.assertEqual((code, len(lines)), (0, 1))
+        obj = json.loads(lines[0])
+        self.assertEqual(list(obj)[-4:], ["status", "intent", "artifacts",
+                                          "reason"])
+        block = {k: obj[k] for k in list(obj)[-4:]}
+        self.assertIsNone(conformance._block_problem(
+            block, SCHEMA, "tk-studio-cli-doctor"))
+        self.assertEqual(set(block) - set(SCHEMA["properties"]), set())
+        self.assertEqual(obj["status"], "complete")
+        self.assertIn("plugin", obj["reason"])
+        for key in ("mode", "folder", "root", "supervisor", "studio_web",
+                    "checks"):
+            self.assertIn(key, obj)
+        self.assertNotIn("_lines", obj)
+        for check in obj["checks"]:
+            self.assertLessEqual({"check", "status", "detail", "fix"},
+                                 set(check))
+            self.assertIn(check["status"], ("pass", "fail", "warn",
+                                            "skipped"))
+            if check["status"] != "pass":
+                self.assertTrue(check["fix"])
+
+    def test_human_prints_one_line_per_check_then_the_json(self):
+        lines, code = self.main_lines(["doctor", "--roster",
+                                       str(self.full_roster())])
+        obj = json.loads(lines[-1])
+        self.assertEqual(len(lines) - 1, len(obj["checks"]))
+        for line, check in zip(lines, obj["checks"]):
+            self.assertTrue(line.startswith(check["status"]))
+            self.assertIn(check["check"], line)
+
+    def test_other_verbs_keep_their_line(self):
+        _, last, _ = self.main_out(["status", "--roster",
+                                    str(ROSTERS / "latest.json")])
+        self.assertEqual(list(last)[:4], ["status", "intent", "artifacts",
+                                          "reason"])
+        self.assertNotIn("checks", last)
+
+
+class ConformanceDrive(unittest.TestCase):
+    def drive(self) -> dict:
+        manifest = json.loads((PLUGIN_ROOT / "contracts" / "conformance"
+                               / "manifest.json").read_text(encoding="utf-8"))
+        drives = manifest["cli_drives"]["drives"]
+        self.assertEqual([d["assertion"] for d in drives], ["cli-doctor-json"])
+        return drives[0]
+
+    def test_the_doctor_drive_passes_from_the_checkout(self):
+        check = conformance._run_cli_drive(self.drive(), SCHEMA, 120)
+        self.assertTrue(check["ok"], check)
+        self.assertNotIn("state", check)
+
+    def test_no_checkout_is_not_run_never_a_failure(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            check = conformance._run_cli_drive(self.drive(), SCHEMA, 120,
+                                               repo=Path(tmp))
+        self.assertTrue(check["ok"])
+        self.assertEqual(check["state"], "not run")
+        self.assertIn("not run", check["detail"])
+
+    def test_a_crashed_doctor_fails_the_drive(self):
+        import subprocess
+        drive = self.drive()
+        for code, status in ((1, "blocked"), (0, "blocked"),
+                             (1, "complete")):
+            with self.subTest(code=code, status=status):
+                out = json.dumps({"checks": [], "status": status,
+                                  "intent": drive["intent"],
+                                  "artifacts": [],
+                                  "reason": "doctor crashed: boom"})
+                proc = subprocess.CompletedProcess([], code, out + "\n", "")
+                with mock.patch.object(conformance.subprocess, "run",
+                                       return_value=proc):
+                    check = conformance._run_cli_drive(drive, SCHEMA, 120)
+                self.assertFalse(check["ok"], check)
+                self.assertIn(f"exit {code}", check["detail"])
+                self.assertIn(status, check["detail"])
+
+    def test_the_cli_sits_in_this_checkout(self):
+        self.assertEqual(conformance.REPO_ROOT, REPO_ROOT)
+
+
+class SuiteCliDrives(AppsCase):
+    """driver-contract §8 (0.1.20): the suite reports its CLI drives in a
+    top-level ``cli_drives`` field, and a failed one is a ``failures[]``
+    entry (surface ``tk-studio-cli``) that turns ``ok`` false. Driven
+    through ``run_suite`` on a fixture with no skill surfaces, the drive
+    itself patched (its own tests are ConformanceDrive's)."""
+
+    def suite(self, check: dict) -> tuple[dict, list]:
+        manifest = json.loads((PLUGIN_ROOT / "contracts" / "conformance"
+                               / "manifest.json").read_text(encoding="utf-8"))
+        drive = manifest["cli_drives"]["drives"][0]
+        skills = self.tmp / "skills"
+        skills.mkdir()
+        path = self.tmp / "manifest.json"
+        path.write_text(json.dumps({
+            "conformance_version": manifest.get("conformance_version", 1),
+            "surfaces": {}, "cli_drives": {"drives": [drive]}}))
+        with mock.patch.object(conformance, "_run_cli_drive",
+                               return_value=check) as run:
+            report = conformance.run_suite(skills_dir=skills,
+                                           manifest_path=path, emit=False)
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0], drive)
+        return report, drive
+
+    def test_a_passing_drive_is_listed_and_ok(self):
+        check = {"assertion": "cli-doctor-json", "ok": True, "detail": ""}
+        report, _ = self.suite(check)
+        self.assertEqual(report["cli_drives"], [check])
+        self.assertEqual(report["failures"], [])
+        self.assertIs(report["ok"], True)
+
+    def test_a_failed_drive_is_a_named_failure_and_not_ok(self):
+        check = {"assertion": "cli-doctor-json", "ok": False,
+                 "detail": "exit 1, status blocked"}
+        report, _ = self.suite(check)
+        self.assertEqual(report["cli_drives"], [check])
+        self.assertEqual(report["failures"], [
+            {"surface": "tk-studio-cli", "assertion": "cli-doctor-json",
+             "detail": "exit 1, status blocked"}])
+        self.assertIs(report["ok"], False)
+
+
+if __name__ == "__main__":
+    unittest.main()

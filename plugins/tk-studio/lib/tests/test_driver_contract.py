@@ -89,8 +89,10 @@ class DriverContractTestCase(unittest.TestCase):
         # in place of the retired ClaudeOS, the §1 roster, §2's executing
         # wrapper, the §4 finish row with total_cost_usd (ST-062, additive);
         # 0.1.19 moves the drift check's plugin plane to the skills-dir
-        # folder and the roster, and adds §8 --from-archive (ST-083, additive)
-        self.assertRegex(self.text, r"\*\*0\.1\.19\*\*")
+        # folder and the roster, and adds §8 --from-archive (ST-083, additive);
+        # 0.1.20 adds the §8 meta-CLI drive, manifest and report
+        # `cli_drives` (ST-085, additive)
+        self.assertRegex(self.text, r"\*\*0\.1\.20\*\*")
         self.assertIn("### 5.1 Execution-pipeline legs", self.text)
         self.assertIn("lib/pipeline.py", self.text)
         self.assertIn("Change policy", self.text)
@@ -145,13 +147,38 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_19_header_names_the_folder_and_roster_rule(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.19**", header)
+        # the 0.1.19 clause survives in the history once 0.1.20 heads it
         self.assertNotIn("**0.1.18**", header)
-        clause = header[header.index("0.1.19 moves"):]
+        clause = header[header.index("0.1.19 moves"):
+                        header.index("0.1.20 adds")]
         self.assertIn("— additive", clause)
         self.assertIn("--from-archive", clause)
         self.assertLess(header.index("0.1.18 names"),
                         header.index("0.1.19 moves"))
+
+    # --- ST-085: 0.1.20 names the conformance suite's meta-CLI drive
+
+    def test_0_1_20_header_names_the_cli_drives(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.20**", header)
+        self.assertNotIn("**0.1.19**", header)
+        clause = header[header.index("0.1.20 adds"):]
+        self.assertIn("— additive", clause)
+        self.assertIn("`cli_drives`", clause)
+        self.assertLess(header.index("0.1.19 moves"),
+                        header.index("0.1.20 adds"))
+
+    def test_section_8_names_the_cli_drives(self):
+        section = self.text[self.text.index("## 8. Conformance"):]
+        flat = " ".join(section.split())
+        for phrase in ("`cli_drives`", "outside `surfaces`",
+                       "report's top-level `cli_drives` field",
+                       "tk_studio_cli doctor --json",
+                       "tools/installer/cli", "`not run` with a reason",
+                       "status, intent, artifacts, reason",
+                       "status-block.schema.json"):
+            self.assertIn(phrase, flat)
 
     def test_section_6_states_the_folder_and_roster_rule(self):
         section = self._section("## 6. Drift-check invocation",

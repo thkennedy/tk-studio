@@ -13,7 +13,10 @@
   ``supervisor``, ``studio_web`` and ``cli``. ``install --link`` links the
   plugin only.
 - ``doctor`` reports the plugin folder's mode and the supervisor's
-  (a slot, or a "source checkout" it never replaces); read-only.
+  (a slot, or a "source checkout" it never replaces), then runs every smoke
+  check (Story 25.5, ``doctor.py``): one line per check, then the JSON line
+  with ``checks: [{check, status, detail, fix}]`` before the status block.
+  ``--json`` prints the JSON object only. Read-only.
 - ``status`` prints one line per component (installed vs roster), then
   the JSON line with ``components: {name: {installed, roster}}``.
 
@@ -31,7 +34,7 @@ import json
 import sys
 from typing import Mapping
 
-from tk_studio_cli import apps, plugin_leg
+from tk_studio_cli import apps, doctor, plugin_leg
 
 
 VERBS = ("install", "update", "doctor", "status")
@@ -72,8 +75,11 @@ def build_parser() -> argparse.ArgumentParser:
                          help="link the folder to <CHECKOUT>/plugins/tk-studio")
     sub.add_parser("update", parents=[roster],
                    help="bring every component to the roster's version")
-    sub.add_parser("doctor", help="report the plugin folder's and the "
-                   "supervisor's mode (read-only)")
+    doc = sub.add_parser("doctor", parents=[roster],
+                         help="run the smoke checks and report each with "
+                              "its fix (read-only)")
+    doc.add_argument("--json", action="store_true",
+                     help="print only the JSON object (headless)")
     sub.add_parser("status", parents=[roster],
                    help="print each component's installed and roster "
                         "versions (read-only)")
@@ -97,16 +103,18 @@ class _OnceFetch:
 def run(argv: list[str] | None = None, *, fetch=None, runner=None,
         env: Mapping[str, str] | None = None, platform=None, probe=None,
         env_store=None, sleep=None, clock=None, spawn_detached=None,
-        cli_version: str | None = None) -> tuple[dict, int]:
+        cli_version: str | None = None, hklm=None,
+        now=None) -> tuple[dict, int]:
     args = build_parser().parse_args(argv)
     fetch = _OnceFetch(fetch or plugin_leg.default_fetch)
     ctx = apps.make_ctx(env, platform=platform, fetch=fetch, runner=runner,
                         probe=probe, env_store=env_store, sleep=sleep,
                         clock=clock, spawn_detached=spawn_detached,
-                        cli_version=cli_version)
+                        cli_version=cli_version, hklm=hklm, now=now)
     if args.verb == "doctor":
-        result = plugin_leg.doctor(env)
-        result.update(apps.doctor_fields(ctx))
+        result = doctor.run_doctor(ctx, roster=args.roster,
+                                   channel=args.channel, fetch=fetch,
+                                   json_only=args.json)
     elif args.verb == "status":
         try:
             components = plugin_leg.load_roster(

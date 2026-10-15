@@ -79,6 +79,60 @@ class SharedGuard(unittest.TestCase):
         self.assertNotIn("_SEMVER", text)
 
 
+SHARED_COPIES = ("skills_plane.py", "miniyaml.py")   # Story 25.5
+
+
+class SharedCopies(unittest.TestCase):
+    """The doctor's shared modules: one file each, stdlib only."""
+
+    def test_copies_are_byte_identical(self):
+        for name in SHARED_COPIES:
+            with self.subTest(name=name):
+                self.assertEqual(
+                    (PLUGIN_ROOT / "lib" / name).read_bytes(),
+                    (CLI_GUARD.parent / name).read_bytes(),
+                    f"edit plugins/tk-studio/lib/{name} and copy it to "
+                    "tools/installer/cli/tk_studio_cli/")
+
+    def test_copies_import_only_the_stdlib(self):
+        for name in SHARED_COPIES:
+            for path in (PLUGIN_ROOT / "lib" / name, CLI_GUARD.parent / name):
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+                names = set()
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import):
+                        names.update(a.name.split(".")[0] for a in node.names)
+                    elif isinstance(node, ast.ImportFrom):
+                        self.assertEqual(node.level, 0,
+                                         f"{path}: relative import")
+                        names.add(node.module.split(".")[0])
+                with self.subTest(path=str(path)):
+                    self.assertTrue(names)
+                    self.assertEqual(names - set(sys.stdlib_module_names),
+                                     set())
+
+    def test_drift_check_reexports_the_plane(self):
+        import skills_plane
+        self.assertIs(drift_check.skills_dir_check,
+                      skills_plane.skills_dir_check)
+        self.assertIs(drift_check.FIX_UPDATE, skills_plane.FIX_UPDATE)
+        self.assertNotIn("def _marketplace_copies", (
+            PLUGIN_ROOT / "skills" / "tk-studio-activate" / "scripts"
+            / "drift_check.py").read_text(encoding="utf-8"))
+
+    def test_the_cli_imports_only_itself_and_the_stdlib(self):
+        allowed = set(sys.stdlib_module_names) | {"tk_studio_cli"}
+        for path in sorted(CLI_GUARD.parent.glob("*.py")):
+            names = set()
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.Import):
+                    names.update(a.name.split(".")[0] for a in node.names)
+                elif isinstance(node, ast.ImportFrom):
+                    names.add((node.module or "").split(".")[0])
+            with self.subTest(path=path.name):
+                self.assertEqual(names - allowed, set())
+
+
 class Scripts(unittest.TestCase):
     def setUp(self):
         self.ps1 = PS1.read_text(encoding="utf-8")

@@ -42,6 +42,14 @@ alone) the runner asserts, per the driver contract:
                           and its skills set must equal the surfaces
                           discovered (AD-21). Without the flag the report
                           names the skip — never a pass.
+  cli drives              (suite-level; manifest `cli_drives`) the meta-CLI
+                          located from the runner's repository checkout
+                          (tools/installer/cli) is driven headless in a
+                          throwaway home: stdout is exactly one JSON object
+                          ending with the status block, whose projection
+                          validates against the schema (Story 25.5). No
+                          checkout beside the runner: each drive is recorded
+                          as not run, never a failure.
 
 Every failed check emits a `headless-failure` measurement event naming the
 surface and assertion (taxonomy §headless-failure — this runner is that
@@ -70,6 +78,7 @@ import zlib
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[4]   # the checkout, if any
 sys.path.insert(0, str(PLUGIN_ROOT / "lib"))
 
 MANIFEST_PATH = Path(__file__).resolve().parent / "manifest.json"
@@ -276,6 +285,109 @@ def _run_drive(surface: str, drive: dict, sandbox: Path, store: Path,
                               "ok!=false")
     else:
         check["detail"] = f"manifest declares unknown expect '{expect}'"
+    return check
+
+
+# -------------------------------------------------------------- cli drives
+
+BLOCK_KEYS = ("status", "intent", "artifacts", "reason")
+CLI_SURFACE = "tk-studio-cli"
+
+
+def _block_problem(block: dict, schema: dict, intent: str | None) -> str | None:
+    """Why ``block`` (a status-block projection) fails ``schema``, or None."""
+    props = schema["properties"]
+    missing = [k for k in schema["required"] if k not in block]
+    extra = [k for k in block if k not in props]
+    if missing or extra:
+        return f"block vs schema: missing {missing}, extra {extra}"
+    if block["status"] not in props["status"]["enum"]:
+        return f"status {block['status']!r} outside the enum"
+    if not isinstance(block["intent"], str):
+        return f"intent {block['intent']!r} is not a string"
+    if intent is not None and block["intent"] != intent:
+        return f"intent {block['intent']!r} is not {intent!r}"
+    if not (isinstance(block["artifacts"], list)
+            and all(isinstance(a, str) for a in block["artifacts"])):
+        return f"artifacts {block['artifacts']!r} is not a list of strings"
+    if "reason" in block and not (block["reason"] is None
+                                  or isinstance(block["reason"], str)):
+        return f"reason {block['reason']!r} is not a string or null"
+    return None
+
+
+def _run_cli_drive(drive: dict, schema: dict, timeout: int,
+                   repo: Path | None = None) -> dict:
+    """One meta-CLI drive (manifest ``cli_drives``), run from the runner's
+    repository checkout in a throwaway home with no claude, sbx or git on
+    PATH. A runner with no checkout beside it records the drive as not run
+    (``ok`` true, ``state`` not run), never a failure."""
+    repo = Path(repo) if repo else REPO_ROOT
+    assertion = drive.get("assertion", "cli-drive")
+    check = {"assertion": assertion, "ok": False, "detail": ""}
+    cli = repo / drive["cli"]
+    package = cli / drive["module"]
+    if not (package / "__main__.py").is_file():
+        check.update(ok=True, state="not run",
+                     detail=f"not run: no CLI checkout at {package} (the "
+                            "runner is not in a repository checkout)")
+        return check
+    argv = [a.replace("{repo}", str(repo)) for a in drive["argv"]]
+    with tempfile.TemporaryDirectory(prefix="tk-conformance-cli-") as tmp:
+        home = Path(tmp)
+        empty_bin = home / "bin"
+        empty_bin.mkdir()
+        env = {k: v for k, v in os.environ.items()
+               if not k.upper().startswith("TK_SUPERVISOR_")
+               and k.upper() not in ("PATH", "PYTHONPATH")}
+        env.update(TK_STUDIO_HOME=str(home / "store"),
+                   CLAUDE_CONFIG_DIR=str(home / "config"),
+                   XDG_DATA_HOME=str(home / "data"),
+                   LOCALAPPDATA=str(home / "local"),
+                   APPDATA=str(home / "roaming"), HOME=str(home / "home"),
+                   PATH=str(empty_bin), PYTHONPATH=str(cli))
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-m", drive["module"], *argv],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=timeout, env=env,
+                cwd=str(home))
+        except subprocess.TimeoutExpired:
+            check["detail"] = (f"hung past {timeout}s — a prompt or wait, "
+                               "never allowed headless (AD-11)")
+            return check
+    stdout = proc.stdout.strip()
+    try:
+        parsed = json.loads(stdout)
+    except json.JSONDecodeError:
+        check["detail"] = (f"stdout is not exactly one JSON object (exit "
+                           f"{proc.returncode}): {stdout[:200]!r}")
+        return check
+    if not isinstance(parsed, dict):
+        check["detail"] = "stdout is JSON but not an object"
+        return check
+    if drive.get("expect") != "status-block":
+        check["detail"] = (f"manifest declares unknown cli expect "
+                           f"'{drive.get('expect')}'")
+        return check
+    tail = tuple(list(parsed)[-len(BLOCK_KEYS):])
+    if tail != BLOCK_KEYS:
+        check["detail"] = (f"the object ends with {list(tail)}, not the "
+                           f"status block {list(BLOCK_KEYS)}")
+        return check
+    problem = _block_problem({k: parsed[k] for k in BLOCK_KEYS}, schema,
+                             drive.get("intent"))
+    if problem:
+        check["detail"] = problem
+        return check
+    if proc.returncode != 0 or parsed["status"] != "complete":
+        check["detail"] = (f"the CLI ended exit {proc.returncode}, status "
+                           f"'{parsed['status']}' — the drive requires exit "
+                           "0 and status complete")
+        return check
+    check["ok"] = True
+    check["detail"] = (f"one JSON object, status block last "
+                       f"({parsed['status']}, exit {proc.returncode})")
     return check
 
 
@@ -532,6 +644,7 @@ def _run_suite(skills: Path, manifest_path: Path | None, timeout: int,
                env_overlay: dict | None = None,
                harness_cwd: Path | None = None) -> dict:
     surfaces: dict[str, list[dict]] = {}
+    cli_checks: list[dict] = []
     harness_declared = 0
     failures: list[dict] = []
     conformance_version = 1
@@ -567,6 +680,12 @@ def _run_suite(skills: Path, manifest_path: Path | None, timeout: int,
                      "detail": c["detail"]}
                     for s, checks in surfaces.items()
                     for c in checks if not c["ok"]]
+        cli_checks = [_run_cli_drive(d, schema, timeout)
+                      for d in (manifest.get("cli_drives") or {})
+                      .get("drives", [])]
+        failures += [{"surface": CLI_SURFACE, "assertion": c["assertion"],
+                      "detail": c["detail"]}
+                     for c in cli_checks if not c["ok"]]
         if plugin_root is not None:
             loadable, harness_loadable = check_harness_loadable(
                 Path(plugin_root), shipped)
@@ -608,6 +727,8 @@ def _run_suite(skills: Path, manifest_path: Path | None, timeout: int,
         "harness_loadable": harness_loadable,
         "failures": failures,
         "surfaces": surfaces,
+        # the meta-CLI's drives (Story 25.5), outside the skill surfaces
+        "cli_drives": cli_checks,
     }
 
 

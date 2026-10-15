@@ -868,19 +868,21 @@ the first agent PC on 2026-09-27 (with `C:\agent-work`).
 
 ## 7. Smoke checklist (all as the studio account)
 
+Run `tk-studio doctor` (headless: `tk-studio doctor --json`, one JSON object
+ending with the status block). It prints one line per check with pass,
+fail, warn or skipped and the fix: Claude Code against the roster floor, the
+skills-dir plugin against the roster, the per-user store, `sbx daemon status`
+(never another sbx command), folder trust for every registered root, long
+paths, the PATH launcher, the Tailscale certificate's age, the supervisor's
+slot or checkout and whether `/status` answers, studio-web, leftovers from an
+interrupted install or update, and Hermes' `auth.adopt_external_logins`.
+Doctor is read-only. The table keeps only what the CLI cannot check.
+
 | Check | Command | Pass looks like |
 |---|---|---|
-| Claude Code | `claude doctor` | version, auto-update stable, no settings errors |
-| Studio health | in Claude Code: "tk activate" | four planes green, no drift |
-| Lib + conformance | `cd tk-studio\plugins\tk-studio\lib; uv run python -m unittest discover tests` then `uv run ..\contracts\conformance\runner.py run` | all tests pass; conformance ok over every surface |
-| Godot headless | `& $env:GODOT --headless --path <proj> --quit` | exits 0, prints engine banner |
-| Blender headless | `blender -b --version` | ≥ 5.2.2 |
-| Sandbox tier | `sbx run claude` in a repo | Claude Code prompt inside the microVM |
-| Tailnet reach | from iPad: RDP to the MagicDNS name | desktop visible |
-| Hermes | `hermes gateway status`; message the Telegram bot | connected; reply within seconds |
-| Dashboard | browse `http://<tailscale-ip>:9119` from iPad | basic-auth prompt, then Status tab |
-| Supervisor | from another tailnet device: `curl -H "Authorization: Bearer <token>" http://<tailscale-ip>:8787/status` | JSON with `ok: true`, the run counts and the held locks |
-| Supervisor tests | `cd C:\GitHub\tk-studio-supervisor; $env:TK_STUDIO_ROOT='C:\GitHub\tk-studio'; bun test` | 0 fail, the end-to-end suites included |
+| Studio smoke checks | `tk-studio doctor` | every check `pass`, or `skipped`/`warn` with its fix read; the JSON `reason` is null |
+| RDP scope (§5 firewall) | from iPad over the tailnet: RDP to the MagicDNS name; from a device off the tailnet: RDP to the box's LAN or public address | desktop visible over the tailnet; off it, no connection (RDP scoped to `100.64.0.0/10`) |
+| Startup shortcut's visible tab (§4.3) | sign out and back in as the studio account | the `studio` Windows Terminal window opens visibly with the `supervisor` tab running `start.ps1` |
 
 ## 8. Known Windows failure modes and what this runbook does about them
 

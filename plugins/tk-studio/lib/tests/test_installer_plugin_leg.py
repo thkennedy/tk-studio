@@ -1032,11 +1032,24 @@ class CommittedRoster(unittest.TestCase):
 
 class Entrypoint(unittest.TestCase):
     def test_python_m_doctor_prints_one_json_last_line(self):
+        # an isolated env and a path roster: no roster URL fetch, and no
+        # claude, sbx or git on PATH, so doctor starts no process (25.5)
+        roster = REPO_ROOT / "tools" / "installer" / "rosters" / "latest.json"
         with tempfile.TemporaryDirectory() as tmp:
-            env = dict(os.environ, CLAUDE_CONFIG_DIR=tmp,
-                       PYTHONPATH=str(CLI_ROOT))
+            empty_bin = Path(tmp) / "bin"
+            empty_bin.mkdir()
+            env = {k: v for k, v in os.environ.items()
+                   if not k.upper().startswith("TK_SUPERVISOR_")
+                   and k.upper() not in ("PATH", "PYTHONPATH")}
+            env.update(CLAUDE_CONFIG_DIR=tmp, PYTHONPATH=str(CLI_ROOT),
+                       PATH=str(empty_bin),
+                       TK_STUDIO_HOME=str(Path(tmp) / "store"),
+                       LOCALAPPDATA=str(Path(tmp) / "local"),
+                       APPDATA=str(Path(tmp) / "roaming"),
+                       HOME=str(Path(tmp) / "home"))
             proc = subprocess.run([sys.executable, "-m", "tk_studio_cli",
-                                   "doctor"], capture_output=True, text=True,
+                                   "doctor", "--roster", str(roster)],
+                                  capture_output=True, text=True,
                                   encoding="utf-8", env=env, cwd=tmp)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         last = json.loads(proc.stdout.strip().splitlines()[-1])

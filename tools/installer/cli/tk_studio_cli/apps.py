@@ -143,10 +143,12 @@ def find_exe(folder: Path, plat: Platform, name: str) -> Path | None:
 
 # --- injectables ----------------------------------------------------------
 
-def default_runner(args: list, env: Mapping[str, str] | None = None
+def default_runner(args: list, env: Mapping[str, str] | None = None, *,
+                   timeout: float = APP_RUNNER_TIMEOUT
                    ) -> subprocess.CompletedProcess:
     """plugin_leg.default_runner's contract with a longer bound: ``bun
-    install`` and ``uv tool install`` may download."""
+    install`` and ``uv tool install`` may download (the doctor passes a
+    short ``timeout``)."""
     if env is not None and env.get("PATH") is not None:
         exe = shutil.which(args[0], path=env.get("PATH"))
     else:
@@ -155,8 +157,24 @@ def default_runner(args: list, env: Mapping[str, str] | None = None
         raise FileNotFoundError(args[0])
     return subprocess.run([exe, *args[1:]], capture_output=True, text=True,
                           encoding="utf-8", errors="replace",
-                          stdin=subprocess.DEVNULL, timeout=APP_RUNNER_TIMEOUT,
+                          stdin=subprocess.DEVNULL, timeout=timeout,
                           env=dict(env) if env is not None else None)
+
+
+LONG_PATHS_KEY = r"SYSTEM\CurrentControlSet\Control\FileSystem"
+
+
+def default_hklm(key: str, name: str):
+    """A read of one ``HKLM`` value (the doctor's LongPathsEnabled); None
+    when it is absent or this is not Windows. Read-only."""
+    if sys.platform != "win32":
+        return None
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key) as k:
+            return winreg.QueryValueEx(k, name)[0]
+    except OSError:
+        return None
 
 
 _DETACHED_PROCESS = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
@@ -258,12 +276,14 @@ class Ctx:
     cli_version: str = __version__
     start_timeout: float = START_TIMEOUT
     stop_timeout: float = STOP_TIMEOUT
+    hklm: Callable = default_hklm       # read-only HKLM values (doctor)
+    now: Callable = time.time           # wall clock (doctor's cert age)
 
 
 def make_ctx(env: Mapping[str, str] | None = None, *, platform=None,
              fetch=None, runner=None, probe=None, env_store=None, sleep=None,
              clock=None, spawn_detached=None,
-             cli_version: str | None = None) -> Ctx:
+             cli_version: str | None = None, hklm=None, now=None) -> Ctx:
     plat = platform or current_platform()
     base = os.environ if env is None else env
     if env_store is None and plat.windows and sys.platform == "win32":
@@ -275,7 +295,8 @@ def make_ctx(env: Mapping[str, str] | None = None, *, platform=None,
                sleep=sleep or time.sleep, clock=clock or time.monotonic,
                explicit_env=env is not None,
                spawn_detached=spawn_detached or default_spawn_detached,
-               cli_version=cli_version or __version__)
+               cli_version=cli_version or __version__,
+               hklm=hklm or default_hklm, now=now or time.time)
 
 
 def _run(ctx: Ctx, args: list, extra: Mapping[str, str] | None = None):
@@ -1446,8 +1467,15 @@ def supervisor_report(ctx: Ctx) -> dict:
 
 
 def doctor_fields(ctx: Ctx) -> dict:
-    return {"root": str(ctx.root), "supervisor": supervisor_report(ctx),
-            "studio_web": _slot_report(ctx, STUDIO_WEB)}
+    """The slots, and whether ``/status`` answers (``probe``): probed only
+    when a slot or a source checkout is there to answer, else None."""
+    supervisor = supervisor_report(ctx)
+    probe = None
+    if supervisor["mode"] != NOT_INSTALLED:
+        url = probe_url(ctx)
+        probe = {"url": url, "answers": bool(ctx.probe(url))}
+    return {"root": str(ctx.root), "supervisor": supervisor,
+            "studio_web": _slot_report(ctx, STUDIO_WEB), "probe": probe}
 
 
 def _tool_versions(ctx: Ctx, name: str) -> list[str]:

@@ -359,5 +359,18 @@
         }
       ]
     }
+  },
+  "cli_drives": {
+    "description": "Drives of the meta-CLI (tools/installer/cli), which is not a skill: located from the runner's repository checkout, never the plugin tree; a runner with no checkout beside it records each drive as not run, never a failure. Each runs `python -m <module> <argv>` with TK_STUDIO_HOME, CLAUDE_CONFIG_DIR, XDG_DATA_HOME, LOCALAPPDATA, APPDATA and HOME in a throwaway directory and a PATH holding no claude, sbx or git. {repo} substitutes the checkout root. expect status-block: stdout is exactly one JSON object whose last keys are status, intent, artifacts, reason, and that projection validates against status-block.schema.json with the declared intent (Story 25.5).",
+    "drives": [
+      {
+        "assertion": "cli-doctor-json",
+        "cli": "tools/installer/cli",
+        "module": "tk_studio_cli",
+        "argv": ["doctor", "--json", "--roster", "{repo}/tools/installer/rosters/latest.json"],
+        "intent": "tk-studio-cli-doctor",
+        "expect": "status-block"
+      }
+    ]
   }
 }
