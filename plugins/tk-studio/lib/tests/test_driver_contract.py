@@ -228,6 +228,43 @@ class DriverContractTestCase(unittest.TestCase):
                        'keep `advisor = "off"` on every leg'):
             self.assertIn(phrase, section)
 
+    # --- Story 26.5: the planning adapter's status pull-back, appended to
+    # the 0.1.21 clause (no bump) with its own §4 subsection
+
+    def test_0_1_21_status_pull_back_clause_and_section_4(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.21**", header)
+        self.assertNotIn("**0.1.22**", header)
+        self.assertLess(header.index("0.1.21 (Story 26.3)"),
+                        header.index("0.1.21 (Story 26.5)"))
+        clause = header[header.index("0.1.21 (Story 26.5)"):]
+        for phrase in ("`plansync.py status --directory ROOT --id ST-NNN "
+                       "--status ENUM [--note TEXT] [--caller NAME] [--dry-run]`",
+                       "`external.driver` snapshot", "`plan/index.md`",
+                       "status-class only (AD-5)", "`plan_dir`", "— additive"):
+            self.assertIn(phrase, clause)
+        section = " ".join(self.text[
+            self.text.index("### Status pull-back (0.1.21, Story 26.5)"):
+            self.text.index("### KB-injection directive (0.1.7)")].split())
+        self.assertGreater(self.text.index("### Status pull-back (0.1.21, Story 26.5)"),
+                           self.text.index("## 4. Job model and scheduler verbs"))
+        for phrase in ("**Status-class only, AD-5.**",
+                       "`draft`, `ready`, `in-progress`, `blocked`, `review`, "
+                       "`done`, `dropped`",
+                       "`external.driver` = `{key, synced_at, content_hash, "
+                       "caller, status, note, previous_status}`",
+                       "default `tk-studio-plan-sync`",
+                       "`status '<v>' is not in the canonical enum (draft, "
+                       "ready, in-progress, blocked, review, done, dropped)`",
+                       "`unknown id <ID>: no canonical entity in <plan dir>`",
+                       "`<ID> is a <type>, not a story — status takes a story id`",
+                       "`note must be a single line`",
+                       "runs the existing `sync` as-is",
+                       "`plan_dir` names the plan the verb wrote",
+                       "Epic 27's studio supervisor calls it"):
+            self.assertIn(phrase, section)
+
     def test_section_8_names_the_cli_drives(self):
         section = self.text[self.text.index("## 8. Conformance"):]
         flat = " ".join(section.split())
