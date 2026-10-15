@@ -313,11 +313,11 @@ this repository:
    fix (plain `tk-studio update`, channel `stable`) before the promotion PR
    lands: it rewrites the folder back to 0.2.16.
 
-The `cli` component is absent from both rosters today, so the bootstrap
-stops with `CliNotShipped` until the operator's `cli--v0.1.0` cut; until then
-step 5 runs the meta-CLI from a checkout
-(`uv run --project tools/installer/cli tk-studio update --channel latest --roster tools/installer/rosters/latest.json`).
-No `cli` tag, URL or digest is recorded here.
+The `cli` component shipped on 2026-10-15 (`cli--v0.1.0`, a 50 KB wheel) and
+`stable` was promoted to match `latest` the same day (plugin 0.3.0,
+supervisor 0.1.0, cli 0.1.0), so the bootstrap runs end to end on the
+default channel. A checkout can still run the meta-CLI directly
+(`uv run --project tools/installer/cli tk-studio ...`).
 
 ### Where the uv and Bun pins came from
 
