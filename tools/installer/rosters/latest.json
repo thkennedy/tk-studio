@@ -25,6 +25,12 @@
         "x86_64-pc-windows-msvc": "0bf84e808552beea67bf1202a287a35c6c825d837b287b3f8e9dd513dba35d3d",
         "x86_64-unknown-linux-gnu": "3e730528d89775f03f87f05c06787c4df4099d0a37f3f252e7b829cb23816e18"
       }
+    },
+    "supervisor": {
+      "tag": "supervisor--v0.1.0",
+      "url": "https://github.com/thkennedy/tk-studio-supervisor/releases/download/supervisor--v0.1.0/supervisor-0.1.0.zip",
+      "sha256": "76fbda662b9eaaf41a44030cb72860992178a162c7044cf1bfcba0593b0ac6ef",
+      "source": "thkennedy/tk-studio-supervisor"
     }
   }
 }
