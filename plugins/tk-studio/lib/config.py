@@ -156,18 +156,52 @@ def _parse_runtime_sets(pairs: list[str]) -> dict:
 
 # -------------------------------------------------------------- project root
 
+def _store_roots() -> list[Path]:
+    """Every folder the per-user store can live in: the configured root
+    ($TK_STUDIO_HOME, set by tests and by workers) and the default
+    ~/.tk-studio, which stays on disk when the override points elsewhere. On
+    Windows %TEMP% and every project under the profile sit below ~, so an
+    exclusion of the configured root alone made C:\\Users\\<user> a project
+    root for all of them (found by the host gate on 2026-10-16; the Linux
+    engine never sees it because /tmp is outside $HOME)."""
+    return [store.store_root(), Path.home() / ".tk-studio"]
+
+
+# Folders only a per-user store holds (AD-3: working data never on VCS), so a
+# .tk-studio/ carrying any of them is a store wherever it lives — the rule that
+# needs no environment to be right (a redirected home still leaves the real
+# store on disk, above every project under the profile on Windows).
+STORE_ONLY_DIRS = ("registry", "measurements", "projects")
+
+
+def _is_store(marker: Path) -> bool:
+    """True when `marker` (a .tk-studio/ folder) is a per-user store: it is a
+    configured or default store root (`_store_roots`), or it holds a
+    store-only folder (`STORE_ONLY_DIRS`)."""
+    if any((marker / name).is_dir() for name in STORE_ONLY_DIRS):
+        return True
+    try:
+        resolved = marker.resolve()
+    except OSError:
+        return False
+    for root in _store_roots():
+        try:
+            if resolved == root.resolve():
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def _holds_config(directory: Path) -> bool:
     """True when `directory` is a studio project root: it holds
-    .tk-studio/config.yaml and that .tk-studio/ is not the per-user store
-    ($TK_STUDIO_HOME or ~/.tk-studio), whose config.yaml would otherwise make
-    $HOME a project root."""
+    .tk-studio/config.yaml and that .tk-studio/ is not a per-user store
+    (`_is_store`), whose config.yaml would otherwise make $HOME a project
+    root."""
     marker = directory / ".tk-studio"
     if not (marker / TRACKED_NAME).is_file():
         return False
-    try:
-        return marker.resolve() != store.store_root().resolve()
-    except OSError:
-        return True
+    return not _is_store(marker)
 
 
 def find_project_root(start: Path) -> Path:

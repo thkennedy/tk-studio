@@ -123,6 +123,53 @@ class RuleTests(NestedRootTestCase):
         self.assertIsNone(info["studio_root"])
         self.assertEqual(info["project_id"], "deep")
 
+    def test_the_default_home_store_never_marks_a_project_root_either(self):
+        # 2026-10-16, found by the Windows host gate: with TK_STUDIO_HOME set
+        # (tests, workers) the default ~/.tk-studio stays on disk, and on
+        # Windows %TEMP% and every project under the profile sit below ~, so
+        # excluding only the configured store made C:\Users\<user> a project
+        # root. Reproduced on every OS by pointing the home at a fixture.
+        # The fixture home is neither $TK_STUDIO_HOME nor Path.home(); what
+        # marks it a store is its skeleton (a store-only folder), the rule that
+        # also excludes the real ~/.tk-studio above this fixture on Windows.
+        home = self.base / "realhome"
+        user_store = home / ".tk-studio"
+        (user_store / "registry").mkdir(parents=True)
+        (user_store / "config.yaml").write_text("vcs: git\n", encoding="utf-8",
+                                                newline="\n")
+        self.assertNotEqual(Path(os.environ["TK_STUDIO_HOME"]).resolve(),
+                            user_store.resolve())
+        self.assertNotEqual(Path.home().resolve(), home.resolve())
+        self.assertTrue(configlib._is_store(user_store))
+        self.assertFalse(configlib._holds_config(home))
+        loose = home / "AppData" / "Local" / "Temp" / "work" / "loose"
+        loose.mkdir(parents=True)
+        self.assertEqual(configlib.find_project_root(loose), loose)
+        self.assertFalse(configlib.in_project(loose))
+        info = configlib.project_info(loose)
+        self.assertEqual(info["project_root"], str(loose))
+        self.assertFalse(info["nested"])
+        self.assertEqual(info["project_id"], "loose")
+        # a real project under that home still resolves, and is not nested
+        proj = home / "proj"
+        proj.mkdir()
+        configlib.standup_project_config(proj, project_id="homeproj")
+        self.assertFalse(configlib._is_store(proj / ".tk-studio"))
+        (proj / "sub").mkdir()
+        info = configlib.project_info(proj / "sub")
+        self.assertEqual(info["project_root"], str(proj))
+        self.assertFalse(info["nested"])
+        self.assertEqual(info["project_id"], "homeproj")
+        # the other store-only folders mark a store too
+        for name in ("measurements", "projects"):
+            other = self.base / f"home-{name}" / ".tk-studio"
+            other.mkdir(parents=True)
+            (other / name).mkdir()
+            (other / "config.yaml").write_text("vcs: git\n", encoding="utf-8",
+                                               newline="\n")
+            self.assertTrue(configlib._is_store(other), name)
+            self.assertFalse(configlib._holds_config(other.parent), name)
+
     def test_the_per_user_store_never_marks_a_project_root(self):
         # $HOME/.tk-studio is the per-user store; its config.yaml must not
         # make $HOME a studio project root (driver contract 0.1.22).

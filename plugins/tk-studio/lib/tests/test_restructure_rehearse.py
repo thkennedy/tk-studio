@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import io
 import os
+import shlex
 import shutil
 import socket
 import subprocess
@@ -107,13 +108,39 @@ def commit(repo: Path, files: dict[str, str], message: str) -> None:
 
 
 def make_shim(bin_dir: Path) -> str:
-    """A PATH holding only git, uv, python and ssh-keygen, so bun and bmad-loop are absent."""
+    """A PATH holding only git, uv, python and ssh-keygen, so bun and bmad-loop are absent.
+
+    Symlinks where the OS allows them; on Windows a symlink needs a privilege the host
+    gate does not hold (WinError 1314), and a linked or copied git.exe would not find its
+    DLLs anyway, so the fallback is the tools' own folders joined into a PATH (2026-10-16:
+    the whole module was skipped on the agent PC before this)."""
     bin_dir.mkdir(parents=True)
     links = {name: shutil.which(name) for name in SHIM_TOOLS}
     links["python"] = links["python3"] = sys.executable
-    for name, target in links.items():
-        if target:
-            os.symlink(target, bin_dir / name)
+    try:
+        for name, target in links.items():
+            if target:
+                os.symlink(target, bin_dir / name)
+    except OSError:
+        # Each tool's own folder joins the PATH, except a folder that also holds bun or
+        # bmad-loop (WinGet's Links folder holds uv and bun side by side): that tool, a
+        # single-file executable, is copied into the shim folder instead.
+        folders: list[str] = []
+        for name, target in links.items():
+            if not target:
+                continue
+            folder = os.path.dirname(target)
+            if any(shutil.which(x, path=folder) for x in ("bun", "bmad-loop")):
+                shutil.copy2(target, bin_dir / os.path.basename(target))
+                continue
+            if folder not in folders:
+                folders.append(folder)
+        path = os.pathsep.join([str(bin_dir), *folders])
+        for name in ("bun", "bmad-loop"):
+            found = shutil.which(name, path=path)
+            if found:
+                raise OSError(f"{name} would stay on the fallback PATH: {found}")
+        return path
     return str(bin_dir)
 
 
@@ -125,7 +152,11 @@ class RehearsalCase(unittest.TestCase):
         home = self.tmp / "home"
         home.mkdir()
         self.gitconfig = home / ".gitconfig"
-        self.gitconfig.write_text("", encoding="utf-8")
+        # the isolated global config: on Windows the script's Step 1 demands core.longpaths
+        # (the box has it set globally), so the fixture carries it; a test that rewrites
+        # the file keeps this prefix
+        self.gitconfig_base = "[core]\n\tlongpaths = true\n" if os.name == "nt" else ""
+        self.gitconfig.write_text(self.gitconfig_base, encoding="utf-8")
         if not shutil.which("git") or not shutil.which("uv"):
             self.skipTest("git and uv are required")
         try:
@@ -202,7 +233,9 @@ class RehearsalCase(unittest.TestCase):
             git(repo, "tag", "-d", "v-side")
             git(repo, "branch", "-q", "-D", "side")
         if tag:
-            git(repo, "tag", "v0.1.0")
+            # tag=True: a foreign tag (still refused); tag="release": the supervisor's own
+            # release tag, carried by the rewrite (2026-10-16: supervisor--v0.1.0 exists)
+            git(repo, "tag", "supervisor--v0.1.0" if tag == "release" else "v0.1.0")
         git(repo, "remote", "add", "origin", str(self.tmp / "nowhere" / "supervisor.git"))
 
     def ssh_key(self) -> Path:
@@ -326,22 +359,52 @@ class RehearsalCase(unittest.TestCase):
         self.addCleanup(os.chdir, old)
         rc, out = self.run_script(supervisor="supervisor")
         self.assertEqual(rc, 0, out + self.report_text())
-        self.assertIn(f"clone --no-local {self.sup} svc-rewrite", self.report_text())
+        # the report renders argv with shlex.join (a Windows path gets quoted)
+        self.assertIn(shlex.join(["clone", "--no-local", str(self.sup), "svc-rewrite"]),
+                      self.report_text())
 
     def test_tag_present(self):
+        # a tag that is not a release tag is still refused: nothing but supervisor--vX.Y.Z moves
         self.make_supervisor(tag=True)
         self.make_tk_studio()
         rc, out = self.run_script()
         text = self.report_text()
         self.assertEqual(rc, 1, out)
         self.assertEqual(self.assert_shape(text), "Verdict: failed at Step 2 — tags present")
+        self.assertIn("tags present (not release tags): v0.1.0", text)
         for section in SECTIONS[2:5]:
             self.assertIn(f"{section}\n\nnot run (Step 2 failed)", text)
         # origin is removed from the rewrite clone on an early Step 2 exit too
         self.assertEqual(git(self.scratch / "svc-rewrite", "remote").strip(), "")
         self.assertIn("### remove origin (rewrite clone) — pass", text)
 
+    def test_release_tag_is_carried(self):
+        # 2026-10-16: the supervisor has supervisor--v0.1.0 (its first release, 2026-10-15), so
+        # the ADR's "no tags to rename" is stale: release tags ride the rewrite into the clone
+        self.make_supervisor(tag="release")
+        self.make_tk_studio()
+        tagged = git(self.sup, "rev-list", "-n", "1", "supervisor--v0.1.0").strip()
+        rc, out = self.run_script()
+        text = self.report_text()
+        self.assertEqual(rc, 0, out + text)
+        self.assertEqual(self.assert_shape(text), "Verdict: rehearsal passed")
+        self.assertIn("### tags are release tags (carried) — pass", text)
+        self.assertIn("release tags carried by the rewrite: supervisor--v0.1.0", text)
+        self.assertIn("### release tags carried into the clone — pass", text)
+        self.assertIn("git push origin supervisor--v0.1.0", text)
+        svc = self.scratch / "svc-rewrite"
+        rewritten = git(svc, "rev-list", "-n", "1", "supervisor--v0.1.0").strip()
+        self.assertNotEqual(rewritten, tagged, "the tag was not rewritten onto the new history")
+        paths = git(svc, "ls-tree", "-r", "--name-only", "supervisor--v0.1.0").split()
+        self.assertTrue(paths and all(p.startswith("apps/supervisor/") for p in paths))
+        clone = self.scratch / "tk-studio"
+        self.assertEqual(git(clone, "rev-list", "-n", "1", "supervisor--v0.1.0").strip(), rewritten)
+        # the source repository's tag is untouched (snapshot asserted by run_script)
+        self.assertEqual(git(self.sup, "rev-list", "-n", "1", "supervisor--v0.1.0").strip(), tagged)
+
     def test_signed_commit(self):
+        # signatures never survive a rewrite and the archived repository keeps the originals:
+        # recorded as informational, never a failure (2026-10-16: GitHub signs web merges)
         if not shutil.which("ssh-keygen"):
             self.skipTest("ssh-keygen is not available to make an SSH-signed commit")
         self.make_supervisor(signed=True)
@@ -350,9 +413,11 @@ class RehearsalCase(unittest.TestCase):
         self.assertNotIn("allowedSignersFile", self.gitconfig.read_text(encoding="utf-8"))
         rc, out = self.run_script()
         text = self.report_text()
-        self.assertEqual(rc, 1, out)
-        self.assertEqual(self.assert_shape(text), "Verdict: failed at Step 2 — signed commits present")
+        self.assertEqual(rc, 0, out + text)
+        self.assertEqual(self.assert_shape(text), "Verdict: rehearsal passed")
+        self.assertIn("### signed commits (informational) — info", text)
         self.assertIn("signature headers: gpgsig in 1 commit", text)
+        self.assertIn("archived repository keeps the signed originals", text)
 
     def test_mergetag_commit(self):
         if not shutil.which("ssh-keygen"):
@@ -363,9 +428,22 @@ class RehearsalCase(unittest.TestCase):
         self.assertEqual(git(self.sup, "tag", "--list").strip(), "")
         rc, out = self.run_script()
         text = self.report_text()
-        self.assertEqual(rc, 1, out)
-        self.assertEqual(self.assert_shape(text), "Verdict: failed at Step 2 — signed commits present")
+        self.assertEqual(rc, 0, out + text)
+        self.assertEqual(self.assert_shape(text), "Verdict: rehearsal passed")
+        self.assertIn("### signed commits (informational) — info", text)
         self.assertIn("signature headers: mergetag in 1 commit", text)
+
+    def test_unsigned_history_is_a_plain_pass(self):
+        self.make_supervisor()
+        self.make_tk_studio()
+        rc, out = self.run_script()
+        text = self.report_text()
+        self.assertEqual(rc, 0, out + text)
+        self.assertIn("### signed commits (informational) — pass", text)
+        self.assertIn("no gpgsig/gpgsig-sha256/mergetag header in", text)
+        self.assertIn("### tags are release tags (carried) — pass", text)
+        self.assertIn("no tags", text)
+        self.assertIn("no release tags to carry", text)
 
     def test_signature_headers(self):
         raw = ("commit a\ntree t\ngpgsig -----BEGIN-----\n x\n -----END-----\n\n    gpgsig in message\n"
@@ -424,7 +502,7 @@ class RehearsalCase(unittest.TestCase):
     def test_merge_ignores_global_gpgsign(self):
         self.make_supervisor()
         self.make_tk_studio()
-        self.gitconfig.write_text("[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = "
+        self.gitconfig.write_text(self.gitconfig_base + "[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = "
                                   f"{(self.tmp / 'no-such-gpg').as_posix()}\n", encoding="utf-8")
         rc, out = self.run_script()
         text = self.report_text()
@@ -434,7 +512,7 @@ class RehearsalCase(unittest.TestCase):
     def test_merge_ignores_global_ff_only(self):
         self.make_supervisor()
         self.make_tk_studio()
-        self.gitconfig.write_text("[merge]\n\tff = only\n", encoding="utf-8")
+        self.gitconfig.write_text(self.gitconfig_base + "[merge]\n\tff = only\n", encoding="utf-8")
         rc, out = self.run_script()
         text = self.report_text()
         self.assertEqual(rc, 0, out + text)
@@ -675,12 +753,21 @@ class RehearsalCase(unittest.TestCase):
                        r"C:\GitHub\tk-studio-supervisor\rehearsal.md",
                        r"C:\GitHub\tk-studio-supervisor\_bmad-output\implementation-artifacts\r.md",
                        "/c/GitHub/tk-studio-supervisor/rehearse-test-never/r.md"):
+            # on the agent PC these live paths are real: an existing file must stay as it was,
+            # a missing one must stay missing
+            target = Path(report).resolve()
+            before = target.stat() if target.exists() else None
             buf = io.StringIO()
             with redirect_stdout(buf), redirect_stderr(buf):
                 rc = rehearse.main(["--supervisor", str(self.sup), "--tk-studio", str(self.tks),
                                     "--scratch", str(self.scratch), "--report", report])
-            self.assert_refused(rc, buf.getvalue(), self.scratch, Path(report).resolve(),
-                                needle="live checkout")
+            if before is None:
+                self.assert_refused(rc, buf.getvalue(), self.scratch, target, needle="live checkout")
+            else:
+                self.assert_refused(rc, buf.getvalue(), self.scratch, needle="live checkout")
+                after = target.stat()
+                self.assertEqual((before.st_size, before.st_mtime_ns),
+                                 (after.st_size, after.st_mtime_ns), f"{target} was rewritten")
         self.assertFalse(Path("/c/GitHub/tk-studio/rehearse-test-never").exists())
 
         def vet(report):

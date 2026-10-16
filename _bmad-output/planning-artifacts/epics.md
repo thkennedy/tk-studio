@@ -2272,7 +2272,7 @@ So that the real cut-over is a replay of a passed rehearsal and never an improvi
 
 **Given** a fresh `git clone --no-local` of the supervisor repository and a fresh clone of tk-studio, both in a scratch folder the script creates
 **When** `tools/restructure/rehearse.py` runs (stdlib Python; `git` and `uvx git-filter-repo` through subprocess argv, never a shell)
-**Then** it rewrites the supervisor clone's history under `apps/supervisor/` with `git filter-repo --to-subdirectory-filter apps/supervisor`, asserts there are no tags and no signed commits to lose and no `node_modules` path anywhere in the rewritten history, fetches the rewrite into the tk-studio clone on branch `restructure/supervisor-into-monorepo`, merges it with `--allow-unrelated-histories`, and asserts the merge produced no conflict (every path is new)
+**Then** it rewrites the supervisor clone's history under `apps/supervisor/` with `git filter-repo --to-subdirectory-filter apps/supervisor`, asserts every tag is a release tag `supervisor--vX.Y.Z` (carried through the rewrite and into the clone, pushed after the real merge; any other tag fails) and no `node_modules` path anywhere in the rewritten history, records signed commits as informational (a rewrite never keeps signatures; the archived repository keeps the originals), fetches the rewrite with its tags into the tk-studio clone on branch `restructure/supervisor-into-monorepo`, merges it with `--allow-unrelated-histories`, and asserts the merge produced no conflict (every path is new). *(Amended 2026-10-16 by the attended session: the ADR's "no tags, no signed commits" premise predated the supervisor's first release and GitHub's signed web merges.)*
 
 **Given** the merged clone
 **When** the checks run

@@ -37,6 +37,10 @@ from urllib.parse import unquote, urlparse
 ROOT = Path(__file__).resolve().parents[2]
 PREFIX = "apps/supervisor"
 BRANCH = "restructure/supervisor-into-monorepo"
+# The supervisor's release tags (ADR section 6: `supervisor--vX.Y.Z`, cut 2026-10-15 for 0.1.0).
+# filter-repo rewrites them onto the rewritten commits; the merge carries them into the clone,
+# and the real cut-over pushes them so the monorepo resolves the same tags. Any other tag fails.
+RELEASE_TAG_RE = re.compile(r"^supervisor--v\d+\.\d+\.\d+$")
 IDENTITY = ["-c", "user.name=rehearse", "-c", "user.email=rehearse@localhost"]
 # C:\GitHub\tk-studio and C:\GitHub\tk-studio-supervisor, in the form _norm produces
 LIVE_ROOTS = ("/c/github/tk-studio", "/c/github/tk-studio-supervisor")
@@ -423,31 +427,60 @@ def step_rewrite(s: Step, r: Runner, args, svc: Path) -> Step:
     return s
 
 
-def _rewrite(s: Step, r: Runner, args, svc: Path) -> None:
-    def empty(rc, out):
-        return rc == 0 and not out.strip(), ""
+def release_tags(out: str) -> tuple[list[str], list[str]]:
+    """Split a `git tag --list` listing into (release tags, every other tag)."""
+    tags = [t for t in out.split() if t]
+    return ([t for t in tags if RELEASE_TAG_RE.match(t)],
+            [t for t in tags if not RELEASE_TAG_RE.match(t)])
 
-    c, _ = r.gitcheck("no tags to lose", ["tag", "--list"], svc, label="tags present", ok=empty)
+
+def _rewrite(s: Step, r: Runner, args, svc: Path) -> None:
+    # 2026-10-16: the ADR's "no tags to rename and no signed commits" was written before the
+    # supervisor's first release (supervisor--v0.1.0, 2026-10-15) and before GitHub's web merges
+    # signed the merge commits. Release tags are carried (filter-repo rewrites them, Step 3 fetches
+    # them, the cut-over pushes them); any other tag still fails. Signatures do not survive a
+    # rewrite (the rewritten commits are new objects) and the archived repository keeps the
+    # signed originals, so they are recorded, never a failure.
+    carried: list[str] = []
+
+    def only_release_tags(rc, out):
+        if rc != 0:
+            return False, "git tag failed"
+        release, other = release_tags(out)
+        carried.extend(release)
+        if other:
+            return False, f"tags present (not release tags): {', '.join(other[:5])}"
+        if release:
+            return True, (f"release tags carried by the rewrite: {', '.join(release)} — pushed "
+                          "after the real merge (git push origin <tag>)")
+        return True, "no tags"
+
+    c, _ = r.gitcheck("tags are release tags (carried)", ["tag", "--list"], svc,
+                      label="tags present", ok=only_release_tags)
     s.checks.append(c)
     if c.status == "fail":
         return
 
-    def unsigned(rc, out):
+    def signatures(rc, out):
         counts = signature_headers(out)
         if rc != 0:
             return False, "git log failed"
         if counts:
-            return False, "signature headers: " + ", ".join(
+            return True, ("signature headers: " + ", ".join(
                 f"{kind} in {n} commit{'s' if n != 1 else ''}" for kind, n in sorted(counts.items()))
+                + " — dropped by the rewrite (rewritten commits are new objects); the archived "
+                  "repository keeps the signed originals")
         commits = sum(1 for line in out.splitlines() if line.startswith("commit "))
         return True, f"no {'/'.join(SIGNATURE_HEADERS)} header in {commits} commits (raw headers)"
 
     # raw headers, not %G?: an SSH signature with no allowedSignersFile, and a mergetag, read as N
-    c, out = r.gitcheck("no signed commits to lose",
+    c, out = r.gitcheck("signed commits (informational)",
                         ["log", "--all", "--no-show-signature", "--format=raw"], svc,
-                        label="signed commits present", ok=unsigned)
+                        label="git log failed", ok=signatures)
     c.tail = r.cut("\n".join(line for line in out.splitlines()
                              if line.startswith(("commit ", *(k + " " for k in SIGNATURE_HEADERS)))))
+    if c.status == "pass" and signature_headers(out):
+        c.status = "info"
     s.checks.append(c)
     if c.status == "fail":
         return
@@ -512,7 +545,29 @@ def step_merge(s: Step, r: Runner, args, svc: Path, tkc: Path) -> Step:
     if c.status == "fail":
         return s
     try:
-        c, _ = r.gitcheck("fetch svc", ["fetch", "svc"], tkc)
+        # --tags: the supervisor's release tags (rewritten by filter-repo in Step 2) ride along,
+        # so the merged clone resolves `supervisor--vX.Y.Z` as the old repository did
+        c, _ = r.gitcheck("fetch svc (with tags)", ["fetch", "--tags", "svc"], tkc)
+        s.checks.append(c)
+        if c.status == "fail":
+            return s
+        _rc, listed, _secs, _ = r.git(["tag", "--list"], svc)
+        carried, _other = release_tags(listed)
+
+        def tags_carried(rc, out):
+            if rc != 0:
+                return False, "git tag failed"
+            present = set(out.split())
+            missing = [t for t in carried if t not in present]
+            if missing:
+                return False, f"release tags missing in the merged clone: {', '.join(missing)}"
+            if carried:
+                return True, (f"{len(carried)} release tag(s) in the merged clone: {', '.join(carried)}"
+                              " — after the real merge: git push origin " + " ".join(carried))
+            return True, "no release tags to carry"
+
+        c, _ = r.gitcheck("release tags carried into the clone", ["tag", "--list"], tkc,
+                          label="release tags lost", ok=tags_carried)
         s.checks.append(c)
         if c.status == "fail":
             return s
