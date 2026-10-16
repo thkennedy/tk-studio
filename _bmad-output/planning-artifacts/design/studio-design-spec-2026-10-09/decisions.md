@@ -14,7 +14,7 @@ Part of the [studio design spec](README.md). Tim ruled D1 to D8 in [decisions-an
 
 ## D1. Repository
 
-**Ruled: O2, one repository with per-app releases.** Recorded as AD-21. The ADR's §8.2 to §8.7 follow its recommendations (admins stay exempt; the front end gets its own `studio-web--v` tag; `apps/supervisor` stays a nested studio project, proven in rehearsal; the old repository is archived; the meta-CLI ships as a wheel on its own `cli--v` tag). The order is D3's: the restructure is EP-32, after the engagement loop.
+**Ruled: O2, one repository with per-app releases.** Recorded as AD-21. The ADR's §8.2 to §8.7 follow its recommendations (admins stay exempt; the front end gets its own `studio-web--v` tag; `apps/supervisor` stays a nested studio project, proven in rehearsal; the old repository is archived; the meta-CLI ships as a wheel on its own `cli--v` tag). The order is D3's as amended on 2026-10-16: the restructure is EP-28, right after Epic 27 and before the front end.
 
 <details><summary>Options as put (record)</summary>
 
@@ -36,7 +36,9 @@ A Hermes as the chat brain wrapped by the office; B drop; C Hermes as the first 
 
 ## D3. Order of work
 
-**Ruled: packaging, then the front end, then the restructure.** EP-25 first; EP-26 to EP-31 are the front end's service and surface work; EP-32 is the restructure. Epic 23.3 and 24.3/24.4 run alongside.
+**Ruled: packaging, then the front end, then the restructure** (2026-10-14). **Amended by Tim on 2026-10-16: packaging, then Epics 26 and 27, then the restructure, then the front end.** EP-25 first; EP-26 and EP-27 (the service owns lifetime); EP-28 is the restructure, narrowed to the supervisor move (`apps/studio-web` is born in place with EP-30, which removes half of the old EP-32's scope); EP-29 to EP-32 are the front end's service and surface work. Epic 23.3 and 24.3/24.4 run alongside.
+
+Why the amendment: after Epic 27 every later epic touches the supervisor, and the two-repository state was paid in full by Epic 27: a read-only mount of tk-studio in the supervisor's sandbox (the run could not touch tk-studio and wrote a hand-over file the operator applied by hand), three PRs instead of one, a second copy of the studio pipeline plugin with `$TK_STUDIO_ROOT` paths, and an installer roster pointing at two repositories. Moving now carries 10 PRs of history instead of 20, and Epic 27's worktrees, hold and host-verify leg are what the ADR §5 rehearsal needs to exercise anyway. Cost: EP-29 (one account) waits one epic.
 
 ## D4. Quote basis
 
@@ -56,7 +58,7 @@ CSS steps()/DOM only (4.60); hybrid DOM plus PixiJS (recommended); Phaser; Godot
 
 ## D6. Assets
 
-**Ruled: look at existing packs for reference, then create our own 2D assets with the art tools on the PC (Adobe Creative Cloud or tools with agentic or MCP support), and commit them to the repository.** Consequence: no LimeZu, no private asset fetch in the installer, no share-alike credits; the renderer spike draws its first sprites from our own sheet; an asset-authoring story (tool, pipeline, sprite-sheet format) joins EP-29.
+**Ruled: look at existing packs for reference, then create our own 2D assets with the art tools on the PC (Adobe Creative Cloud or tools with agentic or MCP support), and commit them to the repository.** Consequence: no LimeZu, no private asset fetch in the installer, no share-alike credits; the renderer spike draws its first sprites from our own sheet; an asset-authoring story (tool, pipeline, sprite-sheet format) joins EP-30.
 
 ## D7. Sign-in
 
@@ -80,10 +82,10 @@ Folded in: the owner's account is created on the first visit (hashed with Bun's 
 
 | Question | Settled by |
 |---|---|
-| What do the Atlassian free plans allow: custom workflow statuses, project permissions, storage, API rate, Rovo MCP availability? | EP-30 story 1 verifies on a live free site before anything is built |
+| What do the Atlassian free plans allow: custom workflow statuses, project permissions, storage, API rate, Rovo MCP availability? | EP-31 story 1 verifies on a live free site before anything is built |
 | Is the Rovo MCP server needed, or does the REST API with an API token (what the adapter uses today) cover everything? | the same story |
 | Does `claude plugin eval` run against a skills-dir plugin path? | EP-25 |
 | Is OTel `cost_usd` populated for Max sessions? | one instrumented story run, EP-26 or later |
-| Does the PixiJS pixel-scaling recipe hold at desktop and iPad pixel ratios? | the EP-29 spike |
-| What sprite-sheet format and authoring tool for our own assets? | the EP-29 asset-authoring story |
-| How large is the clone after the supervisor and the web land? | the EP-32 rehearsal (developers only; users never clone) |
+| Does the PixiJS pixel-scaling recipe hold at desktop and iPad pixel ratios? | the EP-30 spike |
+| What sprite-sheet format and authoring tool for our own assets? | the EP-30 asset-authoring story |
+| How large is the clone after the supervisor and the web land? | the EP-28 rehearsal (developers only; users never clone) |
