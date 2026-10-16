@@ -2257,3 +2257,99 @@ So that the plan index stops under-reporting what is built (hole 18) and the que
 **Given** the supervisor's test suite
 **When** the story closes
 **Then** every case above is pinned on both hosts, the deferred-work entries are closed with their evidence, and the runbook §4 names the new events and the certificate rule
+
+## Epic 28: The Supervisor Moves In: One Repository
+
+Pulled forward by Tim on 2026-10-16 from the end of the build order (design spec D3 as amended): after Epic 27 every later epic touches the supervisor, and the two-repository tax (a read-only mount of tk-studio in the supervisor's sandbox, a hand-over file for the tk-studio side, a second copy of the studio pipeline plugin with `$TK_STUDIO_ROOT` paths, three PRs per epic, an installer roster with two sources) is paid once per epic until the move. AD-21 names the layout: `apps/supervisor` is a nested studio project that keeps its own `_bmad/`, `_bmad-output/` (Epics 21 to 23 and 27 keep their numbers), `.tk-studio/config.yaml`, `.bmad-loop/` and `.claude/settings.json`; the plugin stays sealed in `plugins/tk-studio`; `apps/studio-web` is born in place with EP-30 and is not part of this epic. The motion is ADR §5: rehearse on throwaway clones until every check passes, then once for real, through protected `main`; the old repository is archived, never deleted, and its PR discussions stay there. Built by the loop in `claude-tk-studio` in two launches: Stories 28.1 and 28.2 before the merge (they change only tk-studio), then the attended merge PR (ADR §5 steps 1 to 3 and 7, replayed from the passed rehearsal by the operator on the host), then Stories 28.3 and 28.4 on the merged tree. Operator steps: Tim stops the supervisor tab and freezes the old repository (no run in flight, every PR merged on both), edits the Startup shortcut target after the merge, and archives the old repository; the attended session recreates the sandboxes and runs the Windows-only checks. Requirements trace: D1 (O2, AD-21), D3 as amended 2026-10-16, ADR §5 and §6; hole 16 (worktrees, landed in Story 27.1) was the precondition the ADR named for one sandbox serving both loops. Repo: tk-studio (every story); one commit on the old repository's README before it is archived.
+
+### Story 28.1: The Rehearsal Is a Script With a Report
+
+As the operator,
+I want the migration rehearsed by a script on throwaway clones that ends in a report,
+So that the real cut-over is a replay of a passed rehearsal and never an improvisation.
+
+**Acceptance Criteria:**
+
+**Given** a fresh `git clone --no-local` of the supervisor repository and a fresh clone of tk-studio, both in a scratch folder the script creates
+**When** `tools/restructure/rehearse.py` runs (stdlib Python; `git` and `uvx git-filter-repo` through subprocess argv, never a shell)
+**Then** it rewrites the supervisor clone's history under `apps/supervisor/` with `git filter-repo --to-subdirectory-filter apps/supervisor`, asserts there are no tags and no signed commits to lose and no `node_modules` path anywhere in the rewritten history, fetches the rewrite into the tk-studio clone on branch `restructure/supervisor-into-monorepo`, merges it with `--allow-unrelated-histories`, and asserts the merge produced no conflict (every path is new)
+
+**Given** the merged clone
+**When** the checks run
+**Then** the report records each with its exit code, duration and last output lines: `tk activate` clean from the nested root `apps/supervisor` (the plugin's own entry point); `bmad-loop` finds its run workspace from the nested root; the supervisor's `bun test` passes from `apps/supervisor`; tk-studio's `tools/verify_host.py` passes from the repository root; the four loop hooks of `apps/supervisor/.claude/settings.json` fire with `$CLAUDE_PROJECT_DIR` equal to the nested root; the size of the clone after the merge (the design spec's open question)
+
+**Given** a check the script's host cannot run (a Windows-only check inside the Linux engine; a Claude session's hook firing where no session can start)
+**When** the report is written
+**Then** the check is listed under `unverifiable-here` with the exact command for the agent PC, never as a pass, and the script's exit status does not count it as failed
+
+**Given** the report `_bmad-output/implementation-artifacts/restructure-rehearsal-<date>.md`
+**When** the script ends
+**Then** it follows the order of ADR §5 steps 1 to 5, ends with a one-line verdict (`rehearsal passed` or the first failed step), the script exits non-zero when any step or check failed, it never touches `C:\GitHub\tk-studio`, the live supervisor checkout or any remote, and the lib suite pins it against a fake pair of small repositories (a fake `git-filter-repo` only where the real one is unavailable)
+
+### Story 28.2: A Nested Studio Project Is a First-Class Root
+
+As a developer,
+I want the plugin to resolve a project root nested inside another studio project,
+So that `apps/supervisor` keeps its own config, base, planning artifacts, engine workspace and hooks after the move, as AD-21 says.
+
+**Acceptance Criteria:**
+
+**Given** a working directory inside `apps/supervisor`
+**When** any surface resolves the project root (activation and the drift check, `config.py resolve`, `plansync`, `jobrun`, `meter`, `observe`, the registry, the launch skill)
+**Then** the nearest ancestor holding `.tk-studio/config.yaml` wins (the nested root), never the outer one; `TK_STUDIO_ROOT` keeps meaning the outer repository root, the plugin's home; activation reports both and names the project nested
+
+**Given** the supervisor's tracked `.tk-studio/config.yaml` carrying `project_id: supervisor`
+**When** the registry entry's `root` is amended to the nested root (`registry.py amend`)
+**Then** `registry.py show`, activation and the launch skill agree on the root; the store paths stay per project (`~/.tk-studio/projects/supervisor/`), the nested project's plan counter and `plansync` never mint into the outer project's counter, and nothing of the outer project's store is read or written from the nested root
+
+**Given** `apps/supervisor/.claude/settings.json` and `apps/supervisor/.bmad-loop/plugins/studio-pipeline/`
+**When** a Claude session or the engine starts in the nested root
+**Then** `$CLAUDE_PROJECT_DIR` is the nested root, the hooks resolve their scripts relative to it, and the pipeline plugin copy names the spine and the driver contract by a path relative to the nested root (`../../_bmad-output/...`, `../../plugins/tk-studio/contracts/...`) so `$TK_STUDIO_ROOT` is no longer required inside the microVM; the two copies of `task-planning.md`, `consult.md`, `gate.md` and `reconcile.md` differ only in those paths and the project's name, and a lib test pins that
+
+**Given** the lib suite and conformance
+**When** they run
+**Then** nested-root resolution is pinned for every surface above with a fixture holding an outer and a nested project, the drift check reports a nested root distinctly, and the driver contract states the nearest-root rule in a minor bump
+
+### Story 28.3: The Merged Tree Builds, Releases and Launches From One Root
+
+As the operator,
+I want the merged repository to release the supervisor, run both loops and pass both gates from one checkout,
+So that nothing points at the old repository.
+
+**Acceptance Criteria:**
+
+**Given** the merge landed on `main` through the attended PR
+**When** the fix-ups are applied
+**Then** the root `.gitignore` carries the supervisor's ignore entries under `apps/supervisor/`; `README.md`, the runbook §3.8 and §4 and the offline-install runbook point at `apps/supervisor`; `tools/release_archive.py --app supervisor` reads `apps/supervisor` in this repository (the second prefix, ADR §6) and both rosters' supervisor entries drop their foreign `source`; `tk-studio update` on each channel still resolves every component against the rosters' digests
+
+**Given** the engine sandboxes
+**When** `claude-tk-studio` is recreated with one read-write mount of `C:\GitHub\tk-studio` and the read-only skills store
+**Then** `launch-epic.sh` and `resume-run.sh` take `ROOT=/c/GitHub/tk-studio/apps/supervisor` for a supervisor epic and the repository root for a plugin epic; the `tk-studio:ro` second mount is gone from the runbook and the provisioning (`WITH_BUN=1` provisions bun for the nested project); `check-skills-mount.sh` holds; `claude-tk-studio-supervisor` is retired from the runbook; the two loops serialise on the checkout lock
+
+**Given** the supervisor's own `.tk-studio/config.yaml` (`verify.host: bun test`) and its transcribed plan
+**When** a supervisor run goes through the supervisor itself
+**Then** the project served is the nested root and its `verify.host` is the one read at the run's base; `apps/supervisor/_bmad-output/planning-artifacts/epics.md` stays the nested project's transcription (Epics 21 to 23 and 27 keep their numbers) and the repository root's plan stays canonical; the supervisor's `TK_STUDIO_ROOT` is still the outer root
+
+**Given** the host gates
+**When** this story's work is verified
+**Then** `tools/verify_host.py` from the root and `bun test` from `apps/supervisor` are green on both hosts (the Windows run attended), and the old repository's README (one commit there, before archiving) points at `tk-studio/apps/supervisor`
+
+### Story 28.4: The Cut-Over on the Box Is Checked and Recorded
+
+As the operator,
+I want the service cut-over checked by the tooling and the record complete,
+So that the old repository can be archived with nothing left pointing at it.
+
+**Acceptance Criteria:**
+
+**Given** the Startup shortcut retargeted to `C:\GitHub\tk-studio\apps\supervisor\start.ps1` by Tim and `bun install --frozen-lockfile` run in `apps/supervisor`
+**When** `tk-studio doctor` runs on the agent PC
+**Then** it reports the supervisor's root as the nested root, the registry root in agreement, folder trust for the nested root (trust has no inheritance; runbook §4.1), and the Startup shortcut's target (read from the `.lnk`), each `ok` or named; the checks are pinned with fakes in the lib suite and run for real on the box by the attended session
+
+**Given** the supervisor started from the console from its new root
+**When** the smoke test runs (`curl /status` from another device; one queued job to a guarded end)
+**Then** both pass and the results are recorded in the PR; `TK_STUDIO_ROOT`, `TK_SUPERVISOR_*` and `set-supervisor-env.ps1` are unchanged
+
+**Given** the record
+**When** the story closes
+**Then** runbook §3.8 and §4 describe the one-repository layout and sandbox; the handoff names the cut-over date and the archive; the spine's AD-21 carries a "done" note with the date; the observation ledger has every hole found during rehearsal; and `thkennedy/tk-studio-supervisor` is archived by Tim (`gh repo archive`), never deleted

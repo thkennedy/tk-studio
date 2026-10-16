@@ -12,8 +12,8 @@ Source: [planning pass 2026-09-26](../../briefs/planning-pass-agent-pc-and-super
 |---|---|---|---|
 | 0. Agent PC provisioning | runbook §7 smoke green | **built** (TIM-PC-2 live since 2026-10-07; survived the 10-08 reboot) | kept; the installer's `doctor` verb takes over the smoke table |
 | 1. Supervisor extraction | queue, pacer, guards, tiers, API, status page, logon start, contract 0.1.18 | **built** (Epics 20 to 22; 599 tests) | C2 Supervisor, kept and extended |
-| 2. Hermes front door | 0.21.x install, Telegram, dashboard on the tailnet, learning gated, `tk-submit` and `tk-status` skills, one cron, `hermes mcp serve` | **superseded** (D2 ruled B, 2026-10-14): Hermes is dropped; the outbound notifier stays; see A.5 | the studio's own chat (EP-31); a native bot later if wanted |
-| 3. Vertical-slice pack | `playable-verify` leg, engine MCP wiring, asset-manifest ladder, `run-vertical-slice` job, contract bump, eval cases | **open**, nothing started | EP-32 Vertical-slice pack (game projects) |
+| 2. Hermes front door | 0.21.x install, Telegram, dashboard on the tailnet, learning gated, `tk-submit` and `tk-status` skills, one cron, `hermes mcp serve` | **superseded** (D2 ruled B, 2026-10-14): Hermes is dropped; the outbound notifier stays; see A.5 | the studio's own chat (EP-32); a native bot later if wanted |
+| 3. Vertical-slice pack | `playable-verify` leg, engine MCP wiring, asset-manifest ladder, `run-vertical-slice` job, contract bump, eval cases | **open**, nothing started | EP-28 Vertical-slice pack (game projects) |
 | 4. ClaudeOS retirement | disable the last task, push, tag, remove the worktree | one elevated-shell step left (runbook §9) | operator step; not in the design |
 
 ## A.2 Epics 20 to 24 (the Phase 1 plan, story by story)
@@ -23,7 +23,7 @@ Source: [epics.md](../../epics.md) Epics 20 to 24; [plan index](../../plan/index
 | Story | Title | Status | Evidence | Lands in |
 |---|---|---|---|---|
 | 20.1 | Finish records what the run cost | built | contract 0.1.18, `total_cost_usd` in `job-run` | kept |
-| 20.2 | Contract 0.1.18 names the supervisor and Hermes | built | [driver-contract.md §1 roster](../../../../plugins/tk-studio/contracts/driver-contract.md) | the roster gains the front end as a consumer (contract 0.1.19, EP-28) |
+| 20.2 | Contract 0.1.18 names the supervisor and Hermes | built | [driver-contract.md §1 roster](../../../../plugins/tk-studio/contracts/driver-contract.md) | the roster gains the front end as a consumer (contract 0.1.19, EP-29) |
 | 21.1 to 21.6 | The queue, tiers, guards, pacer, resume | built | supervisor PRs #1 to #3; DW-10 kill-and-restart passed live 2026-10-09 | C2, kept; open DW items in A.4 |
 | 22.1 | API on the tailnet | built | `POST /jobs`, `GET /events` SSE, cancel | C2; the event stream is the office's feed |
 | 22.2 | Read-only status page | built | server-rendered, dark theme | **superseded by C3 Studio web**; the page stays as the no-JavaScript fallback |
@@ -49,8 +49,8 @@ Source: [office UI digest](../../research/studio-office-ui-2026-09-01/digest-stu
 | tk-studio owns resource selection and routing (which agents and skills form the team, model and effort per leg) | standing | C1 Plugin: `working_set.<role>`, `orchestrate.py resolve`, `[pipeline.legs]` |
 | The front end owns the presentation overlay (persona bindings keyed to tk-studio resource names; cached resolve; surface drift) | standing, not built | **C3 Studio web** and the **agent registry** in [README §7.2](README.md#72-the-agent-registry) |
 | Hermes profiles own live state (memory, sessions); policy overrides own execution config at spawn | **superseded** (D2): the supervisor's registry owns live state | [README §7.2](README.md#72-the-agent-registry) |
-| Roadmap stage C: office view as a new route, SSE agent-state stream, GDT grammar, hiring modal over personas | not built | C3 Studio web, EP-28 and EP-29 |
-| Depends on A (event source) and B (a chattable orchestrator per project) | A exists (`/events`, journals); B does not | EP-28 (A as a semantic projection); EP-31 (B as the supervisor's chat route) |
+| Roadmap stage C: office view as a new route, SSE agent-state stream, GDT grammar, hiring modal over personas | not built | C3 Studio web, EP-29 and EP-30 |
+| Depends on A (event source) and B (a chattable orchestrator per project) | A exists (`/events`, journals); B does not | EP-29 (A as a semantic projection); EP-32 (B as the supervisor's chat route) |
 
 ## A.4 Deferred work still open
 
@@ -94,7 +94,7 @@ So Hermes today is a running Telegram gateway with its learning gated, used as a
 | Item | Source | Status | Lands in |
 |---|---|---|---|
 | Advisor as a third arm in Epic 24.3 (Sonnet 5.5 main, Opus 5.5 advisor), `advisor` field on routing legs, meter prices advisor tokens | [advisor fit note](../../briefs/advisor-tool-fit-2026-10-09.md) | proposed, observation recorded | Epic 24.3 and 24.4 as planned; routing story in EP-26 |
-| Google and GitHub OAuth walk-through | 10-09 handoff "still deferred" | **dropped** (D7, 2026-10-14): one account, username and password | EP-28 removes the provider code |
+| Google and GitHub OAuth walk-through | 10-09 handoff "still deferred" | **dropped** (D7, 2026-10-14): one account, username and password | EP-29 removes the provider code |
 | `tk evolve` over the loop-deficiency observations | 16 entries in the host ledger, no PROP rows since PROP-023 | **never run on the agent PC's ledger** | run once before EP-26 so the holes become proposals |
 | API-key fallback leg designed, not built | greenfield red team (standing risk) | **closed** (D8, 2026-10-14): no fallback; the owner's own seat, stated | [README §8](README.md#8-security-intended-usage-and-invariants) and the ADR header |
 | Anthropic usage-policy reading recorded in the ADR | run 2 R8 | open | the ADR header, at signature |
@@ -134,10 +134,10 @@ From [run 1 recommendations](../../research/studio-front-end-and-repo-structure-
 | R2 `git filter-repo` migration, R3 per-app tags, R4 fan-in gate, R6 layout | adopted as written in the ADR, conditional on D1 |
 | R5 installer, R1 skills-dir plugin (run 2) | **adopted; O5 ruled by Tim 2026-10-09** |
 | R7 Next.js static export served by Bun, hybrid DOM plus one PixiJS canvas | adopted in shape, **Next.js replaced by Vite** (D5): a static bundle served by Bun, hybrid DOM plus one PixiJS canvas; desktop and iPad first |
-| R8 event contract (Pixel Agents vocabulary plus story, epic, engagement), R9 SSE transport | adopted (EP-28) |
+| R8 event contract (Pixel Agents vocabulary plus story, epic, engagement), R9 SSE transport | adopted (EP-29) |
 | R10 Hermes loopback API server, key held by the supervisor, server-to-server | **not adopted**: D2 dropped Hermes |
 | R11 assets (LimeZu out of git, LPC credits shipped) | **not adopted**: D6 ruled our own committed assets |
-| R12 engagement loop as a state machine with the Jules enum and a dedicated approval verb | adopted (EP-30) |
+| R12 engagement loop as a state machine with the Jules enum and a dedicated approval verb | adopted (EP-31) |
 | R2 (run 2) no Jev router | adopted |
 | R3, R4, R5 (run 2) thin the commodity layers: Remote Control for steering, OTel for the meter, `/code-review` beside the reviewers | adopted as later moves, after the engagement loop exists; the OAuth retirement in R3 landed as D7 |
 | R8 (run 2) read the usage policy and record it | recorded in the ADR header at signature (2026-10-14) as the intended-usage statement (D8) |
@@ -146,6 +146,6 @@ From [run 1 recommendations](../../research/studio-front-end-and-repo-structure-
 
 | Feedback | Lands in |
 |---|---|
-| Project identity, tracking and focus on Atlassian (Jira project plus Confluence space per project, template setup, publish and sync-back on a timer, agent user with API token) | [README §6.8](README.md#68-planning-and-knowledge-now-on-atlassian-feedback-1), AD-22, EP-30; builds on the Epic 8 Jira adapter and AD-7 |
-| User feedback and communications: comments, `Blocked - Awaiting User`, @mention, inbox, Done, `Block Resolved`, agent validation | [README §6.9](README.md#69-the-inbox-and-the-human-channel-feedback-2), §7.4, [F4](user-flows.md#f4-blocked-work-reaches-the-owner-through-the-inbox-target), EP-30 |
+| Project identity, tracking and focus on Atlassian (Jira project plus Confluence space per project, template setup, publish and sync-back on a timer, agent user with API token) | [README §6.8](README.md#68-planning-and-knowledge-now-on-atlassian-feedback-1), AD-22, EP-31; builds on the Epic 8 Jira adapter and AD-7 |
+| User feedback and communications: comments, `Blocked - Awaiting User`, @mention, inbox, Done, `Block Resolved`, agent validation | [README §6.9](README.md#69-the-inbox-and-the-human-channel-feedback-2), §7.4, [F4](user-flows.md#f4-blocked-work-reaches-the-owner-through-the-inbox-target), EP-31 |
 | 3D asset tooling list (15 repositories from an X post) | [kb note](../../../../kb/agentic-3d-asset-tooling-2026-10.md), EP-33's asset ladder and engine MCP wiring |

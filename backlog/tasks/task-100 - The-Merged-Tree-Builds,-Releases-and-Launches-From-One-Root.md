@@ -1,0 +1,37 @@
+---
+id: TASK-100
+title: The Merged Tree Builds, Releases and Launches From One Root
+status: To Do
+assignee: []
+created_date: '2026-10-16 20:11'
+labels:
+  - ST-100
+milestone: "The Supervisor Moves In: One Repository"
+dependencies: []
+---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+As the operator,
+I want the merged repository to release the supervisor, run both loops and pass both gates from one checkout,
+So that nothing points at the old repository.
+
+**Acceptance Criteria:**
+
+**Given** the merge landed on `main` through the attended PR
+**When** the fix-ups are applied
+**Then** the root `.gitignore` carries the supervisor's ignore entries under `apps/supervisor/`; `README.md`, the runbook §3.8 and §4 and the offline-install runbook point at `apps/supervisor`; `tools/release_archive.py --app supervisor` reads `apps/supervisor` in this repository (the second prefix, ADR §6) and both rosters' supervisor entries drop their foreign `source`; `tk-studio update` on each channel still resolves every component against the rosters' digests
+
+**Given** the engine sandboxes
+**When** `claude-tk-studio` is recreated with one read-write mount of `C:\GitHub\tk-studio` and the read-only skills store
+**Then** `launch-epic.sh` and `resume-run.sh` take `ROOT=/c/GitHub/tk-studio/apps/supervisor` for a supervisor epic and the repository root for a plugin epic; the `tk-studio:ro` second mount is gone from the runbook and the provisioning (`WITH_BUN=1` provisions bun for the nested project); `check-skills-mount.sh` holds; `claude-tk-studio-supervisor` is retired from the runbook; the two loops serialise on the checkout lock
+
+**Given** the supervisor's own `.tk-studio/config.yaml` (`verify.host: bun test`) and its transcribed plan
+**When** a supervisor run goes through the supervisor itself
+**Then** the project served is the nested root and its `verify.host` is the one read at the run's base; `apps/supervisor/_bmad-output/planning-artifacts/epics.md` stays the nested project's transcription (Epics 21 to 23 and 27 keep their numbers) and the repository root's plan stays canonical; the supervisor's `TK_STUDIO_ROOT` is still the outer root
+
+**Given** the host gates
+**When** this story's work is verified
+**Then** `tools/verify_host.py` from the root and `bun test` from `apps/supervisor` are green on both hosts (the Windows run attended), and the old repository's README (one commit there, before archiving) points at `tk-studio/apps/supervisor`
+<!-- SECTION:DESCRIPTION:END -->
