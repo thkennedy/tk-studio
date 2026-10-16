@@ -1,9 +1,10 @@
 ---
 id: TASK-92
 title: The Adapter Takes a Status Pull-Back from a Driver
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-15 19:21'
+updated_date: '2026-10-16 20:50'
 labels:
   - ST-092
 milestone: "The Service Owns Lifetime, Part 1: The Studio Side"
