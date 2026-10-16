@@ -3,8 +3,13 @@
 # resume it, and hold the sandbox attached while the engine lives.
 #   sbx exec <sandbox> bash -lc 'ROOT=<project-mount> bash <this> <run_id> [<tag>]'
 #
-# Use it only when the paused story had no landed work, for example a missing
-# fact or a render halt. A re-drive restarts that story from its baseline. A
+# A supervisor run never uses this script: the supervisor resumes a paused run
+# whose story did no work through `POST /runs/{id}/resume` (the same
+# `bmad-loop resolve --no-interactive --resume`, held by the supervisor), and
+# closes out one whose story landed by itself (harvest commit, meter harvest,
+# `bmad-loop archive`, relaunch). Use this only for an engine run started by
+# hand, when the paused story had no landed work (a missing fact, a render
+# halt): a re-drive restarts that story from its baseline. A hand-started
 # story whose dev session already committed (its spec says `status: done`) is
 # closed another way:
 #   1. commit the engine's staged harvest by hand;
