@@ -13,7 +13,18 @@ plugin's meter_hook.py) the meter:
               a model missing from the table is a named refusal, never a guess;
   3. record   emits exactly one `observation` per story through
               observe.record_observation -> ledger.emit (AD-12), only after
-              pricing succeeded, guarded by `transcripts/<key>/metered.json`.
+              pricing succeeded, guarded by `transcripts/<key>/metered.json`,
+              and writes the emitted envelope to `transcripts/<key>/
+              observation.json` before that marker, so the record survives
+              a recreated sandbox (Story 26.4).
+
+`harvest` (run on the host) appends every `transcripts/*/observation.json`
+not yet harvested to the host ledger through observe.record_observation,
+then writes `harvested.json` beside it (how: appended | in-ledger | seeded).
+The append comes before the marker: a crash between the two can re-append
+that story once on the next harvest (accepted; marker-first could lose the
+record). The harvested copy carries the host's ts/user/machine; the original
+stays in observation.json. Story dirs with only `metered.json` are ignored.
 
 Copy-out runs before the price table is loaded, so a bad table never costs
 the transcripts. A refusal of the `story` command is also written, with its
@@ -25,6 +36,7 @@ The journal's `tokens` / `tokens_weighted` counters are never used for dollars.
 CLI:
   uv run meter.py story --run-dir D --story-key K [--repo-root R]
                         [--prices P] [--no-record]
+  uv run meter.py harvest --run-dir D
 
 Prints one JSON object. Exit codes: 0 ok; 2 refusal (`{"ok": false, "error": ...}`,
 AD-11). Stdlib-only (NFR9); never prompts.
@@ -48,7 +60,14 @@ import observe
 PRICES_PATH = Path(__file__).resolve().parent / "prices.json"
 
 LEGS = ("session", "implementer", "reviewers", "consult", "seam", "review",
-        "triage", "supervise")
+        "triage", "supervise", "advisor")
+ADVISOR_LEG = "advisor"
+# Named placeholder rule (Story 26.3): each `message.usage.iterations[]` entry
+# of this type is one advisor call, carrying its own `model` and the standard
+# token fields; it prices under leg `advisor`, and the top-level usage stays
+# the executor's. Epic 24.3's first advisor transcript confirms the type name
+# (a one-constant fix if it differs).
+ADVISOR_ITERATION = "advisor_message"
 UNKNOWN_LEG = "unknown"
 ROLE_LEGS = {"dev": "session", "review": "review", "triage": "triage"}
 RATE_FIELDS = ("input", "output", "cache_write_5m", "cache_write_1h", "cache_read")
@@ -61,6 +80,20 @@ STANDARD_USAGE = {"speed": ("standard",), "service_tier": ("standard",),
 SERVER_TOOL_FIELDS = ("web_search_requests", "web_fetch_requests")
 MARKER = "metered.json"
 REFUSAL = "meter-refusal.json"
+OBSERVATION = "observation.json"
+HARVESTED = "harvested.json"
+# Re-recorded on the host ledger 2026-10-15, loop deficiency 23;
+# measurements/tim-Tim-PC-2.jsonl l.118-124. Their run dirs are archived
+# without observation.json, so a harvest only ever marks them seeded.
+HARVEST_SEEDED = frozenset({
+    "25-1-the-roster-and-the-release-motion-for-every-app",
+    "25-2-the-installer-writes-the-skills-dir-plugin",
+    "25-3-the-drift-check-and-conformance-read-the-folder-and-the",
+    "25-4-the-bootstrap-and-the-meta-cli",
+    "25-5-doctor-says-what-is-wrong",
+    "25-6-sandboxes-read-the-host-skills-folder",
+    "25-7-the-docs-and-the-release-say-the-installer-is-the-way-in",
+})
 MTOK = 1_000_000
 
 
@@ -330,6 +363,53 @@ def _premium(usage: dict) -> str | None:
     return _server_tools(usage)
 
 
+def _tokens(usage: dict) -> tuple[dict, bool]:
+    """(tokens by RATE_FIELDS, ttl_unknown) of one usage dict -- the executor's
+    top-level usage or one advisor iteration alike. Cache writes split by the
+    `cache_creation` ephemeral 5m/1h counts; creation tokens with no split (or
+    the unsplit remainder) price at the 5m rate and flag ttl_unknown."""
+    tokens = {
+        "input": _int(usage.get("input_tokens")),
+        "output": _int(usage.get("output_tokens")),
+        "cache_read": _int(usage.get("cache_read_input_tokens")),
+    }
+    ttl_unknown = False
+    creation = _int(usage.get("cache_creation_input_tokens"))
+    split = usage.get("cache_creation")
+    if isinstance(split, dict):
+        tokens["cache_write_5m"] = _int(split.get("ephemeral_5m_input_tokens"))
+        tokens["cache_write_1h"] = _int(split.get("ephemeral_1h_input_tokens"))
+        remainder = creation - tokens["cache_write_5m"] - tokens["cache_write_1h"]
+        if remainder > 0:  # unsplit part: 5m rate, flagged like no split
+            tokens["cache_write_5m"] += remainder
+            ttl_unknown = True
+    else:
+        tokens["cache_write_5m"] = creation
+        tokens["cache_write_1h"] = 0
+        if creation:
+            ttl_unknown = True
+    return tokens, ttl_unknown
+
+
+def _advisor_calls(usage: dict) -> list[tuple[str, dict]]:
+    """(model, iteration usage) of each advisor iteration in one usage record.
+    An advisor iteration without a string `model` is a named refusal."""
+    calls = []
+    iterations = usage.get("iterations")
+    if not isinstance(iterations, list):
+        return calls
+    for item in iterations:
+        if not isinstance(item, dict) or item.get("type") != ADVISOR_ITERATION:
+            continue
+        model = item.get("model")
+        if not isinstance(model, str) or not model:
+            raise MeterError(f"advisor usage without a model (a usage.iterations[] "
+                             f"entry of type '{ADVISOR_ITERATION}' carries no model); "
+                             "never priced as zero")
+        calls.append((model, item))
+    return calls
+
+
 def price(sources: list[tuple[str, Path]], prices: dict) -> dict:
     """Price usage from (leg, transcript) pairs.
 
@@ -341,7 +421,10 @@ def price(sources: list[tuple[str, Path]], prices: dict) -> dict:
     non-standard speed / service_tier / inference_geo or a non-zero
     server_tool_use web_search_requests / web_fetch_requests count the table
     does not price (`model (speed=fast)`, `model (web_search_requests=2)`) --
-    no partial dollars.
+    no partial dollars. Advisor iterations (`ADVISOR_ITERATION`) price under
+    leg `advisor` at their own model's rates, never in the executor's leg,
+    with the executor's cache-write split / ttl_unknown handling; an unpriced
+    advisor model or premium advisor usage joins the same refusal.
     """
     records: list[tuple[str, dict]] = []
     slot: dict = {}  # message.id -> index in records
@@ -359,42 +442,33 @@ def price(sources: list[tuple[str, Path]], prices: dict) -> dict:
     missing: list[str] = []
     unpriced: list[str] = []  # "model (field=value)" of premium usage
     ttl_unknown = False
-    for leg, record in records:
-        usage = record["usage"]
-        tokens = {
-            "input": _int(usage.get("input_tokens")),
-            "output": _int(usage.get("output_tokens")),
-            "cache_read": _int(usage.get("cache_read_input_tokens")),
-        }
-        creation = _int(usage.get("cache_creation_input_tokens"))
-        split = usage.get("cache_creation")
-        if isinstance(split, dict):
-            tokens["cache_write_5m"] = _int(split.get("ephemeral_5m_input_tokens"))
-            tokens["cache_write_1h"] = _int(split.get("ephemeral_1h_input_tokens"))
-            remainder = creation - tokens["cache_write_5m"] - tokens["cache_write_1h"]
-            if remainder > 0:  # unsplit part: 5m rate, flagged like no split
-                tokens["cache_write_5m"] += remainder
-                ttl_unknown = True
-        else:
-            tokens["cache_write_5m"] = creation
-            tokens["cache_write_1h"] = 0
-            if creation:
-                ttl_unknown = True
+
+    def admit(leg: str, model: str, usage: dict) -> None:
+        """Tally one usage (executor or advisor iteration) under `leg`, or
+        name its model as missing / its premium usage as unpriced."""
+        nonlocal ttl_unknown
+        tokens, ttl = _tokens(usage)
+        ttl_unknown = ttl_unknown or ttl
         if not any(tokens.values()) and not _server_tools(usage):
-            continue
-        model = record["model"] if isinstance(record["model"], str) else "<none>"
+            return
         if _rates(prices, model) is None:
             if model not in missing:
                 missing.append(model)
-            continue
+            return
         premium = _premium(usage)
         if premium:
             named = f"{model} ({premium})"
             if named not in unpriced:
                 unpriced.append(named)
-            continue
-        model = (prices.get("aliases") or {}).get(model, model)
-        tallies.append((leg, model, tokens))
+            return
+        tallies.append((leg, (prices.get("aliases") or {}).get(model, model), tokens))
+
+    for leg, record in records:
+        usage = record["usage"]
+        for advisor_model, advisor_usage in _advisor_calls(usage):
+            admit(ADVISOR_LEG, advisor_model, advisor_usage)
+        model = record["model"] if isinstance(record["model"], str) else "<none>"
+        admit(leg, model, usage)
     if missing or unpriced:
         raise MeterError(
             "no price for model(s) " + ", ".join(f"'{m}'" for m in missing + unpriced)
@@ -497,14 +571,120 @@ def record(run_dir: Path, story_key: str, report: dict, repo_root: Path) -> bool
                                         Path(repo_root).resolve())).as_posix()
     except ValueError:  # different drive on Windows
         evidence = f"transcripts/{story_key}"
-    observe.record_observation("other", describe(story_key, report),
-                               evidence=evidence,
-                               project=job.project_key(repo_root))
+    envelope = observe.record_observation("other", describe(story_key, report),
+                                          evidence=evidence,
+                                          project=job.project_key(repo_root))
+    # The envelope rides the mounted checkout (Story 26.4); metered.json
+    # stays the last write, the done marker.
+    _atomic_write_text(transcripts_dir / OBSERVATION,
+                       json.dumps(envelope, indent=2, ensure_ascii=False) + "\n")
     _atomic_write_text(marker, json.dumps(
         {"story_key": story_key, "usd_total": report["usd_total"],
          "prices_date": report["prices_date"],
          "ttl_unknown": report["ttl_unknown"]}, indent=2) + "\n")
     return True
+
+
+# ------------------------------------------------------------------ harvest
+
+def _read_observation(path: Path) -> dict:
+    try:
+        envelope = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise MeterError(f"observation {path} is unreadable: {exc}") from exc
+    if not isinstance(envelope, dict):
+        raise MeterError(f"observation {path} is unreadable: not a JSON object")
+    payload = envelope.get("payload")
+    if not isinstance(payload, dict):
+        raise MeterError(f"observation {path} is unreadable: no payload object")
+    for field in ("description", "source"):
+        if not isinstance(payload.get(field), str):
+            raise MeterError(f"observation {path} is unreadable: "
+                             f"payload has no string '{field}'")
+    # Pre-check everything observe.record_observation / ledger.emit would
+    # reject, so no file can fail after an earlier one was appended.
+    if payload["source"] not in observe.SOURCES:
+        raise MeterError(f"observation {path} is unreadable: "
+                         f"unknown source '{payload['source']}'")
+    if not payload["description"].strip():
+        raise MeterError(f"observation {path} is unreadable: empty description")
+    if not isinstance(payload.get("evidence"), (str, type(None))):
+        raise MeterError(f"observation {path} is unreadable: "
+                         "payload 'evidence' is not a string")
+    if not isinstance(envelope.get("project"), (str, type(None))):
+        raise MeterError(f"observation {path} is unreadable: "
+                         "'project' is not a string")
+    return envelope
+
+
+def _ledger_name_of(envelope: dict):
+    """The ledger file name the envelope's emitter wrote, built as ledger_path() does."""
+    user, machine = envelope.get("user"), envelope.get("machine")
+    if not isinstance(user, str) or not isinstance(machine, str):
+        return None
+    return f"{ledger._safe_name(user)}-{ledger._safe_name(machine)}.jsonl"
+
+
+def _metered_usd(story_dir: Path):
+    try:
+        data = json.loads((story_dir / MARKER).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    return data.get("usd_total") if isinstance(data, dict) else None
+
+
+def harvest(run_dir: Path) -> dict:
+    """Append each not-yet-harvested observation.json to the host ledger once.
+
+    Every candidate is validated before anything is appended. Per story dir:
+    an existing harvested.json is skipped; a HARVEST_SEEDED key, or an
+    envelope emitted into this very ledger, is only marked; anything else is
+    appended through observe.record_observation, then marked. Append comes
+    before the marker, so a crash in between can re-append once.
+    """
+    run_dir = Path(run_dir)
+    if not run_dir.is_dir():
+        raise MeterError(f"run dir {run_dir} does not exist")
+    already, candidates = [], []
+    for path in sorted((run_dir / "transcripts").glob(f"*/{OBSERVATION}")):
+        if not path.is_file():
+            continue
+        if (path.parent / HARVESTED).is_file():
+            already.append(path.parent.name)  # done; never re-read or validated
+            continue
+        candidates.append((path, _read_observation(path)))
+    ledger_file = ledger.ledger_path()
+    result = {"run_dir": str(run_dir), "ledger": str(ledger_file),
+              "harvested": [], "usd_total": 0.0, "already_harvested": already,
+              "in_ledger": [], "seeded": []}
+    for path, envelope in candidates:
+        story_dir = path.parent
+        story_key = story_dir.name
+        marker = story_dir / HARVESTED
+        if story_key in HARVEST_SEEDED:
+            how, bucket = "seeded", "seeded"
+        elif _ledger_name_of(envelope) == ledger_file.name:
+            how, bucket = "in-ledger", "in_ledger"
+        else:
+            payload = envelope["payload"]
+            observe.record_observation(payload["source"], payload["description"],
+                                       evidence=payload.get("evidence"),
+                                       project=envelope.get("project"))
+            how, bucket = "appended", "harvested"
+        _atomic_write_text(marker, json.dumps(
+            {"story_key": story_key,
+             "harvested_at": datetime.datetime.now(datetime.timezone.utc)
+             .isoformat(timespec="milliseconds"),
+             "how": how, "ledger": ledger_file.name}, indent=2) + "\n")
+        if bucket == "harvested":
+            usd = _metered_usd(story_dir)
+            result["harvested"].append({"story_key": story_key, "usd_total": usd})
+            if isinstance(usd, (int, float)) and not isinstance(usd, bool):
+                result["usd_total"] += usd
+        else:
+            result[bucket].append(story_key)
+    result["usd_total"] = round(result["usd_total"], 6)
+    return result
 
 
 # ------------------------------------------------------------------ story
@@ -601,7 +781,18 @@ def main(argv: list[str] | None = None) -> int:
     cmd.add_argument("--prices", help="price table (defaults to lib/prices.json)")
     cmd.add_argument("--no-record", action="store_true",
                      help="price and report only; no ledger write, no marker")
+    hcmd = sub.add_parser("harvest", help="append a run dir's observation.json "
+                          "files to this host's ledger, once each")
+    hcmd.add_argument("--run-dir", required=True)
     args = parser.parse_args(argv)
+    if args.command == "harvest":
+        try:
+            result = harvest(Path(args.run_dir))
+        except (MeterError, ledger.LedgerError, OSError) as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+            return 2
+        print(json.dumps({"ok": True, **result}, ensure_ascii=False))
+        return 0
     try:
         report = meter_story(Path(args.run_dir), args.story_key,
                              repo_root=Path(args.repo_root) if args.repo_root else None,

@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -452,6 +453,398 @@ class SyncTests(PlanSyncTestCase):
         out = json.loads(buffer.getvalue())
         self.assertTrue(out["ok"])
         self.assertEqual(out["projection"]["action"], "none")
+
+
+class StatusTests(PlanSyncTestCase):
+    """Story 26.5: the driver's status pull-back verb (AD-5 status-class)."""
+
+    def setUp(self):
+        super().setUp()
+        self._old_home = os.environ.get("TK_STUDIO_HOME")
+        os.environ["TK_STUDIO_HOME"] = str(Path(self._tmp.name) / "store")
+        self._bind("bmad-files")
+        self.assertTrue(plansync.sync(self.root)["ok"])
+
+    def tearDown(self):
+        if self._old_home is None:
+            os.environ.pop("TK_STUDIO_HOME", None)
+        else:
+            os.environ["TK_STUDIO_HOME"] = self._old_home
+        super().tearDown()
+
+    def _bind(self, backend: str) -> None:
+        conf_dir = self.root / ".tk-studio"
+        conf_dir.mkdir(parents=True, exist_ok=True)
+        (conf_dir / "config.yaml").write_text(
+            f"planning:\n  backend: {backend}\n",
+            encoding="utf-8", newline="\n")
+
+    def _snapshot_tree(self, root: Path) -> dict:
+        return {str(p.relative_to(root)): p.read_bytes()
+                for p in sorted(root.rglob("*")) if p.is_file()}
+
+    def _index_text(self) -> str:
+        return (plansync.plan_dir(self.root) / "index.md").read_text(encoding="utf-8")
+
+    def _assert_refused(self, message: str, **kwargs) -> None:
+        before = self._snapshot_tree(self.root)
+        args = {"story_id": "ST-001", "status": "review"}
+        args.update(kwargs)
+        with self.assertRaises(plansync.PlanSyncError) as ctx:
+            plansync.status_pull_back(self.root, **args)
+        self.assertIn(message, str(ctx.exception))
+        self.assertEqual(self._snapshot_tree(self.root), before)
+
+    def test_happy_path_sets_status_snapshot_and_resyncs(self):
+        result = plansync.status_pull_back(self.root, "ST-001", "review",
+                                           note="PR #4")
+        self.assertTrue(result["ok"])
+        self.assertNotIn("blocked", result)
+        front = self._front("ST-001")
+        self.assertEqual(front["status"], "review")
+        snap = front["external"]["driver"]
+        self.assertEqual(snap, {
+            "key": "tk-studio-plan-sync",
+            "synced_at": front["updated"],
+            "content_hash": backlogmd_hash("ST-001", "review", "PR #4"),
+            "caller": "tk-studio-plan-sync", "status": "review",
+            "note": "PR #4", "previous_status": "draft"})
+        self.assertEqual(result["previous_status"], "draft")
+        self.assertEqual(result["path"], str(self._plan_file("ST-001")))
+        self.assertEqual(result["plan_dir"],
+                         str(plansync.plan_dir(self.root.resolve())))
+        index = str(plansync.plan_dir(self.root.resolve()) / "index.md")
+        self.assertEqual(result["written"], [result["path"], index])
+        self.assertEqual(result["removed"], [])
+        self.assertTrue(result["sync"]["ok"])
+        self.assertIn("[`ST-001`](ST-001.md) Alpha Story — `review`",
+                      self._index_text())
+        self.assertEqual(interchange.validate_directory(
+            self.root / "_bmad-output")["ok"], True)
+
+    def test_every_canonical_status_is_accepted(self):
+        self.assertEqual(interchange.STATUS_VALUES,
+                         ("draft", "ready", "in-progress", "blocked",
+                          "review", "done", "dropped"))
+        for value in interchange.STATUS_VALUES:
+            result = plansync.status_pull_back(self.root, "ST-002", value)
+            self.assertTrue(result["ok"], value)
+            self.assertEqual(self._front("ST-002")["status"], value)
+
+    def test_unchanged_status_still_writes(self):
+        first = plansync.status_pull_back(self.root, "ST-001", "review")
+        snap_first = self._front("ST-001")["external"]["driver"]
+        second = plansync.status_pull_back(self.root, "ST-001", "review",
+                                           caller="supervisor")
+        self.assertIn(second["path"], second["written"])
+        self.assertEqual(first["status"], second["status"])
+        snap = self._front("ST-001")["external"]["driver"]
+        self.assertEqual(snap["previous_status"], "review")
+        self.assertEqual(snap["key"], "supervisor")
+        self.assertEqual(snap["caller"], "supervisor")
+        self.assertNotEqual(snap, snap_first)
+
+    def test_no_note_snapshot_note_is_empty(self):
+        plansync.status_pull_back(self.root, "ST-001", "ready")
+        snap = self._front("ST-001")["external"]["driver"]
+        self.assertEqual(snap["note"], "")
+        self.assertEqual(snap["content_hash"],
+                         backlogmd_hash("ST-001", "ready", ""))
+
+    def test_duplicate_id_refuses_before_any_write(self):
+        original = self._plan_file("ST-001")
+        dup_dir = self.root / "_bmad-output" / "stray"
+        dup_dir.mkdir(parents=True)
+        (dup_dir / "ST-001-copy.md").write_bytes(original.read_bytes())
+        self._assert_refused(
+            "duplicate ids block sync until renumbered (AD-4): ")
+        with self.assertRaises(plansync.PlanSyncError) as ctx:
+            plansync.status_pull_back(self.root, "ST-001", "review")
+        self.assertIn("ST-001", str(ctx.exception))
+
+    def test_outside_enum_refuses_nothing_written(self):
+        self._assert_refused(
+            "status 'merged' is not in the canonical enum (draft, ready, "
+            "in-progress, blocked, review, done, dropped)", status="merged")
+
+    def test_unknown_id_refuses(self):
+        plan = plansync.plan_dir(self.root.resolve())
+        self._assert_refused(f"unknown id ST-999: no canonical entity in {plan}",
+                             story_id="ST-999")
+
+    def test_unknown_id_refuses_when_plan_dir_absent(self):
+        empty = Path(self._tmp.name) / "empty"
+        empty.mkdir()
+        with self.assertRaises(plansync.PlanSyncError) as ctx:
+            plansync.status_pull_back(empty, "ST-001", "review")
+        self.assertIn("unknown id ST-001: no canonical entity in", str(ctx.exception))
+        self.assertEqual(list(empty.rglob("*")), [])
+
+    def test_epic_id_refuses(self):
+        self._assert_refused(
+            "EP-001 is a epic, not a story — status takes a story id",
+            story_id="EP-001")
+
+    def test_blank_caller_refuses(self):
+        self._assert_refused("caller must be a non-empty string", caller="  ")
+
+    def test_multi_line_note_refuses(self):
+        self._assert_refused("note must be a single line", note="a\nb")
+        self._assert_refused("note must be a single line", note="a\rb")
+
+    def test_note_with_any_splitlines_break_refuses(self):
+        for char in ("\x0b", "\x0c", "\x1c", "\x85", "\u2028", "\u2029"):
+            with self.subTest(char=repr(char)):
+                self._assert_refused("note must be a single line",
+                                     note=f"a{char}b")
+                self._assert_refused("note must be a single line",
+                                     note=f"trailing{char}")
+
+    def test_caller_with_line_break_refuses(self):
+        for char in ("\n", "\r", "\x0b", "\x0c", "\x1c", "\x85",
+                     "\u2028", "\u2029"):
+            with self.subTest(char=repr(char)):
+                self._assert_refused("caller must be a non-empty string",
+                                     caller=f"bot{char}x")
+
+    def test_sprint_status_pin_refuses(self):
+        self.impl.mkdir(parents=True)
+        sprint = self.impl / "sprint-status.yaml"
+        sprint.write_text("development-status:\n  1-1: in-progress\n",
+                          encoding="utf-8", newline="\n")
+        plansync.sync(self.root)
+        self._assert_refused(
+            f"status of ST-001 is pinned to 'in-progress' by "
+            f"{(self.root / plansync.IMPL_REL).resolve() / 'sprint-status.yaml'}"
+            f" — update that file or remove the entry")
+        # A request matching the pin is honoured, and other stories are free.
+        self.assertTrue(plansync.status_pull_back(
+            self.root, "ST-001", "in-progress")["ok"])
+        self.assertTrue(plansync.status_pull_back(
+            self.root, "ST-002", "review")["ok"])
+        self.assertEqual(self._front("ST-002")["status"], "review")
+
+    def test_other_external_snapshots_unchanged(self):
+        path = self._plan_file("ST-001")
+        front, body = interchange.parse_entity(path)
+        jira = {"key": "TK-7", "synced_at": "2026-10-01T00:00:00+00:00",
+                "content_hash": "abc123", "status": "In Progress"}
+        front["external"] = {"jira": dict(jira),
+                             "driver": {"key": "old", "synced_at":
+                                        "2026-10-01T00:00:00+00:00",
+                                        "content_hash": "x", "stale": "yes"}}
+        path.write_text(interchange.render_entity(front, body),
+                        encoding="utf-8", newline="\n")
+        before_updated = front["updated"]
+        result = plansync.status_pull_back(self.root, "ST-001", "done")
+        self.assertTrue(result["ok"])
+        after = self._front("ST-001")
+        self.assertEqual(after["external"]["jira"], jira)
+        self.assertNotIn("stale", after["external"]["driver"])
+        self.assertEqual(after["external"]["driver"]["key"], "tk-studio-plan-sync")
+        self.assertGreaterEqual(after["updated"], before_updated)
+        self.assertEqual(after["updated"], after["external"]["driver"]["synced_at"])
+        self.assertEqual(after["title"], front["title"])
+        self.assertEqual(after["source"], front["source"])
+
+    def test_dry_run_writes_nothing(self):
+        before = self._snapshot_tree(self.root)
+        result = plansync.status_pull_back(self.root, "ST-001", "review",
+                                           dry_run=True)
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["dry_run"])
+        index = str(plansync.plan_dir(self.root.resolve()) / "index.md")
+        self.assertEqual(result["written"][:2], [result["path"], index])
+        self.assertEqual(result["written"].count(index), 1)
+        self.assertEqual(self._snapshot_tree(self.root), before)
+
+    def test_backlog_md_resync_moves_task_status(self):
+        self._bind("backlog-md")
+        self.assertTrue(plansync.sync(self.root)["ok"])
+        result = plansync.status_pull_back(self.root, "ST-001", "done")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["sync"]["binding"], "backlog-md")
+        tasks = [p for p in (self.root / "backlog").rglob("*.md")
+                 if "Alpha-Story" in p.name]
+        self.assertEqual(len(tasks), 1)
+        self.assertIn("status: Done", tasks[0].read_text(encoding="utf-8"))
+        self.assertIn(str(tasks[0].resolve()),
+                      [str(Path(p).resolve()) for p in result["written"]])
+        front = self._front("ST-001")
+        self.assertEqual(front["status"], "done")
+        self.assertIn("backlog-md", front["external"])
+        self.assertEqual(front["external"]["driver"]["status"], "done")
+        self.assertEqual(result["written"].count(result["path"]), 1)
+
+    def test_backlog_md_pull_back_revert_is_blocked(self):
+        self._bind("backlog-md")
+        self.assertTrue(plansync.sync(self.root)["ok"])
+        current = self._front("ST-001")["status"]
+        tasks = [p for p in (self.root / "backlog").rglob("*.md")
+                 if "Alpha-Story" in p.name]
+        self.assertEqual(len(tasks), 1)
+        text = tasks[0].read_text(encoding="utf-8")
+        lines = [("status: Done" if line.startswith("status:") else line)
+                 for line in text.split("\n")]
+        self.assertNotEqual(lines, text.split("\n"))
+        tasks[0].write_text("\n".join(lines), encoding="utf-8", newline="\n")
+        result = plansync.status_pull_back(self.root, "ST-001", current)
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["blocked"])
+        self.assertIn("status of ST-001 was reverted to 'done' by the re-sync "
+                      "(backlog-md pull-back)", result["reason"])
+        self.assertEqual(result["status"], current)
+        self.assertIn(result["path"], result["written"])
+        self.assertIsNotNone(result["sync"])
+        self.assertEqual(self._front("ST-001")["status"], "done")
+
+    def test_blocked_sync_still_names_entity_write(self):
+        self._bind("jira")
+        result = plansync.status_pull_back(self.root, "ST-001", "review")
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["blocked"])
+        self.assertIn("planning.jira.site", result["reason"])
+        self.assertIn(result["path"], result["written"])
+        self.assertEqual(self._front("ST-001")["status"], "review")
+
+    def test_foreign_index_refuses_before_any_write(self):
+        index = plansync.plan_dir(self.root) / "index.md"
+        index.write_text("# hand-written index\n", encoding="utf-8",
+                         newline="\n")
+        message = (f"{plansync.plan_dir(self.root.resolve()) / 'index.md'} "
+                   f"exists but was not generated by plansync.py — refusing "
+                   f"to overwrite; move or delete it and rerun")
+        self._assert_refused(message)
+        self._assert_refused(message, dry_run=True)
+        self.assertEqual(self._front("ST-001")["status"], "draft")
+        self.assertEqual(index.read_text(encoding="utf-8"),
+                         "# hand-written index\n")
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = plansync.main(["status", "--directory", str(self.root),
+                                  "--id", "ST-001", "--status", "done"])
+        self.assertEqual(code, 2)
+        out = json.loads(buffer.getvalue())
+        self.assertFalse(out["ok"])
+        self.assertIn("not generated by plansync.py", out["error"])
+        self.assertEqual(self._front("ST-001")["status"], "draft")
+
+    def test_foreign_index_refuses_under_backlog_md(self):
+        self._bind("backlog-md")
+        self.assertTrue(plansync.sync(self.root)["ok"])
+        (plansync.plan_dir(self.root) / "index.md").write_text(
+            "# hand-written index\n", encoding="utf-8", newline="\n")
+        self._assert_refused("not generated by plansync.py")
+
+    def test_dry_run_unchanged_status_does_not_name_index(self):
+        plansync.status_pull_back(self.root, "ST-001", "review")
+        index = plansync.plan_dir(self.root.resolve()) / "index.md"
+        self.assertFalse(plansync.generate_plan_index(
+            self.root, dry_run=True)["changed"])
+        before = self._snapshot_tree(self.root)
+        result = plansync.status_pull_back(self.root, "ST-001", "review",
+                                           dry_run=True)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["previous_status"], "review")
+        self.assertIn(result["path"], result["written"])
+        self.assertNotIn(str(index), result["written"])
+        self.assertEqual(self._snapshot_tree(self.root), before)
+        # The real run agrees: an unchanged status leaves the index alone.
+        real = plansync.status_pull_back(self.root, "ST-001", "review")
+        self.assertNotIn(str(index), real["written"])
+
+    def test_dry_run_blocked_sync_does_not_name_index(self):
+        self._bind("jira")
+        before = self._snapshot_tree(self.root)
+        result = plansync.status_pull_back(self.root, "ST-001", "review",
+                                           dry_run=True)
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["blocked"])
+        self.assertIn("planning.jira.site", result["reason"])
+        index = str(plansync.plan_dir(self.root.resolve()) / "index.md")
+        self.assertNotIn(index, result["written"])
+        self.assertIn(result["path"], result["written"])
+        self.assertEqual(self._snapshot_tree(self.root), before)
+
+    def test_any_sync_exception_after_write_reports_entity_written(self):
+        def boom(*args, **kwargs):
+            raise OSError("disk went away")
+        with mock.patch.object(plansync, "sync", boom):
+            result = plansync.status_pull_back(self.root, "ST-001", "review")
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                code = plansync.main(["status", "--directory", str(self.root),
+                                      "--id", "ST-001", "--status", "done"])
+            with self.assertRaises(OSError):
+                plansync.status_pull_back(self.root, "ST-001", "review",
+                                          dry_run=True)
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["blocked"])
+        self.assertIn("disk went away", result["reason"])
+        self.assertEqual(result["written"], [result["path"]])
+        self.assertEqual(result["removed"], [])
+        self.assertIsNone(result["sync"])
+        self.assertEqual(code, 2)
+        out = json.loads(buffer.getvalue())
+        self.assertTrue(out["blocked"])
+        self.assertEqual(out["written"], [out["path"]])
+        self.assertEqual(self._front("ST-001")["status"], "done")
+
+    def test_cross_repo_touches_only_the_owning_plan(self):
+        other = Path(self._tmp.name) / "other"
+        spec_dir = other / "_bmad-output" / "specs" / "spec-epic-1"
+        (spec_dir / "stories").mkdir(parents=True)
+        (spec_dir / "stories.yaml").write_text(
+            "stories:\n  - key: 1-1-alpha-story\n    canonical_id: ST-001\n",
+            encoding="utf-8", newline="\n")
+        (spec_dir / "stories" / "1-1-alpha-story.md").write_text(
+            "---\ntitle: Alpha Story\nstatus: done\n---\n\nLanded here.\n",
+            encoding="utf-8", newline="\n")
+        before = self._snapshot_tree(other)
+        result = plansync.status_pull_back(self.root, "ST-001", "done",
+                                           note="landed in other")
+        self.assertTrue(result["ok"])
+        self.assertEqual(self._snapshot_tree(other), before)
+        owning = str(self.root.resolve())
+        self.assertTrue(result["plan_dir"].startswith(owning))
+        for written in result["written"]:
+            self.assertTrue(written.startswith(owning), written)
+        self.assertEqual(self._front("ST-001")["status"], "done")
+
+    def test_status_cli_exit_codes(self):
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = plansync.main(["status", "--directory", str(self.root),
+                                  "--id", "ST-001", "--status", "review",
+                                  "--note", "PR #4: opened"])
+        self.assertEqual(code, 0)
+        out = json.loads(buffer.getvalue())
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["note"], "PR #4: opened")
+        self.assertEqual(self._front("ST-001")["external"]["driver"]["note"],
+                         "PR #4: opened")
+        for argv, marker in (
+                (["--id", "ST-001", "--status", "merged"], "canonical enum"),
+                (["--id", "ST-999", "--status", "review"], "unknown id ST-999"),
+                (["--id", "EP-001", "--status", "review"], "not a story")):
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                code = plansync.main(["status", "--directory", str(self.root)]
+                                     + argv)
+            self.assertEqual(code, 2)
+            out = json.loads(buffer.getvalue())
+            self.assertFalse(out["ok"])
+            self.assertIn(marker, out["error"])
+
+
+def backlogmd_hash(*parts: str) -> str:
+    """sha256 hex over NUL-terminated parts (the backlogmd._content_hash
+    construction), computed independently of the module under test."""
+    import hashlib
+    digest = hashlib.sha256()
+    for part in parts:
+        digest.update(part.encode("utf-8") + b"\x00")
+    return digest.hexdigest()
 
 
 class CliTests(PlanSyncTestCase):

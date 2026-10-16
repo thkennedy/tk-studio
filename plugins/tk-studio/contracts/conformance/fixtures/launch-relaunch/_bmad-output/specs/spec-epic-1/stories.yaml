@@ -1,0 +1,10 @@
+# stories.yaml: the relaunch fixture's manifest (two entries; the first is done).
+
+- id: "1-1-relaunch-first"
+  title: "First story, already done"
+  description: >-
+    The story a previous launch of this epic completed.
+- id: "1-2-relaunch-second"
+  title: "Second story, not started"
+  description: >-
+    The story a relaunch dispatches next.

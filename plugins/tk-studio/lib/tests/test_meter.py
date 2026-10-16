@@ -240,6 +240,99 @@ class MeterTest(unittest.TestCase):
         self.assertEqual(out["usd_by_leg"]["supervise"], 0)
         self.assertNotIn("unknown", out["usd_by_leg"])
 
+    # ------------------------------------------------------------ advisor (Story 26.3)
+
+    @staticmethod
+    def advisor_line(mid, model, iterations, inp=0, out=0):
+        line = usage_line(mid, model, inp=inp, out=out)
+        line["message"]["usage"]["iterations"] = iterations
+        return line
+
+    def test_advisor_usage_priced_as_its_own_leg(self):
+        self.add_session(f"{KEY}-dev-1", "s-dev", [self.advisor_line("m1", "model-a", [
+            {"type": "message", "input_tokens": M},
+            {"type": meter.ADVISOR_ITERATION, "model": "model-b",
+             "input_tokens": M, "output_tokens": M, "cache_read_input_tokens": M,
+             "cache_creation_input_tokens": M}], inp=M)])
+        rc, out = self.run_cli("--no-record")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(meter.ADVISOR_ITERATION, "advisor_message")
+        # the advisor's call at model-b's rates: 10 + 20 + 50 + 30 (5m write)
+        self.assertAlmostEqual(out["usd_by_leg"]["advisor"], 110.0)
+        # the executor's leg keeps only the top-level usage
+        self.assertAlmostEqual(out["usd_by_leg"]["session"], 1.0)
+        self.assertAlmostEqual(out["usd_by_model"]["model-b"], 110.0)
+        self.assertAlmostEqual(out["usd_total"], 111.0)
+        desc = meter.describe(KEY, dict(out, route=None))
+        self.assertIn("advisor:110.0", desc)
+
+    def test_advisor_on_a_subagent_record_stays_out_of_the_subagent_leg(self):
+        self.add_session(f"{KEY}-dev-1", "s-dev", [usage_line("m1", "model-a", inp=M)],
+                         subagents={"i1": ({"description": "Implement story"}, [
+                             self.advisor_line("x1", "model-a", [
+                                 {"type": meter.ADVISOR_ITERATION, "model": "model-a-alias",
+                                  "output_tokens": M}], inp=M)])})
+        rc, out = self.run_cli("--no-record")
+        self.assertEqual(rc, 0, out)
+        self.assertAlmostEqual(out["usd_by_leg"]["implementer"], 1.0)
+        self.assertAlmostEqual(out["usd_by_leg"]["advisor"], 2.0)
+        self.assertAlmostEqual(out["usd_by_leg"]["session"], 1.0)
+
+    def test_advisor_cache_write_split_prices_the_1h_rate(self):
+        self.add_session(f"{KEY}-dev-1", "s-dev", [self.advisor_line("m1", "model-a", [
+            {"type": meter.ADVISOR_ITERATION, "model": "model-b",
+             "cache_creation_input_tokens": M,
+             "cache_creation": {"ephemeral_5m_input_tokens": 0,
+                                "ephemeral_1h_input_tokens": M}}], inp=M)])
+        rc, out = self.run_cli("--no-record")
+        self.assertEqual(rc, 0, out)
+        self.assertAlmostEqual(out["usd_by_leg"]["advisor"], 40.0)  # model-b 1h write
+        self.assertEqual(out["tokens_by_model"]["model-b"]["cache_write_1h"], M)
+        self.assertFalse(out["ttl_unknown"])
+
+    def test_advisor_unsplit_cache_write_flags_ttl_unknown(self):
+        self.add_session(f"{KEY}-dev-1", "s-dev", [self.advisor_line("m1", "model-a", [
+            {"type": meter.ADVISOR_ITERATION, "model": "model-b",
+             "cache_creation_input_tokens": M}], inp=M)])
+        rc, out = self.run_cli("--no-record")
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(out["ttl_unknown"])
+
+    def test_premium_advisor_usage_refuses_like_the_executor(self):
+        for field, value in (("speed", "fast"), ("service_tier", "priority")):
+            with self.subTest(field=field):
+                self.add_session(f"{KEY}-dev-1", "s-dev", [self.advisor_line("m1", "model-a", [
+                    {"type": meter.ADVISOR_ITERATION, "model": "model-b",
+                     "input_tokens": M, field: value}], inp=M)])
+                rc, out = self.run_cli("--no-record")
+                self.assertEqual(rc, 2)
+                self.assertFalse(out["ok"])
+                self.assertIn(f"no price for model(s) 'model-b ({field}={value})'",
+                              out["error"])
+
+    def test_unpriced_advisor_model_refuses_by_name(self):
+        self.add_session(f"{KEY}-dev-1", "s-dev", [self.advisor_line("m1", "model-a", [
+            {"type": meter.ADVISOR_ITERATION, "model": "model-zz", "input_tokens": 5}], inp=M)])
+        rc, out = self.run_cli("--no-record")
+        self.assertEqual(rc, 2)
+        self.assertFalse(out["ok"])
+        self.assertIn("no price for model(s) 'model-zz'", out["error"])
+
+    def test_advisor_iteration_without_model_refuses(self):
+        self.add_session(f"{KEY}-dev-1", "s-dev", [self.advisor_line("m1", "model-a", [
+            {"type": meter.ADVISOR_ITERATION, "input_tokens": 5}], inp=M)])
+        rc, out = self.run_cli("--no-record")
+        self.assertEqual(rc, 2)
+        self.assertIn("advisor usage without a model", out["error"])
+
+    def test_no_advisor_usage_names_the_leg_at_zero(self):
+        self.basic_story()
+        rc, out = self.run_cli("--no-record")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("advisor", meter.LEGS)
+        self.assertEqual(out["usd_by_leg"]["advisor"], 0)
+        self.assertIn("advisor:0.0", meter.describe(KEY, out))
+
     # ------------------------------------------------------------ acceptance
 
     def test_report_fields_and_one_observation_shape(self):
@@ -697,6 +790,205 @@ class MeterTest(unittest.TestCase):
             rc, out = self.run_cli("--no-record")
             self.assertEqual(rc, 0, (tasks, out))
             self.assertIsNone(out["attempts"], tasks)
+
+    # ------------------------------------------------------------ harvest (Story 26.4)
+
+    def story_dir(self, key=KEY) -> Path:
+        return self.run_dir / "transcripts" / key
+
+    def run_harvest(self, run_dir=None) -> tuple[int, dict]:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = meter.main(["harvest", "--run-dir", str(run_dir or self.run_dir)])
+        return rc, json.loads(buf.getvalue())
+
+    def sandbox_observation(self, key, usd=1.5, user="agent", machine="sandbox-vm",
+                            payload=None, metered=True):
+        envelope = {"ts": "2026-10-15T00:00:00.000+00:00", "event": "observation",
+                    "user": user, "machine": machine, "project": "tk-studio",
+                    "payload": payload if payload is not None else
+                    {"source": "other", "description": f"meter: story={key} usd={usd}",
+                     "evidence": f"transcripts/{key}"}}
+        d = self.story_dir(key)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / meter.OBSERVATION).write_text(json.dumps(envelope), encoding="utf-8")
+        if metered:
+            (d / meter.MARKER).write_text(json.dumps({"story_key": key, "usd_total": usd}),
+                                          encoding="utf-8")
+        return envelope
+
+    def test_metered_run_writes_observation_equal_to_ledger_line_before_marker(self):
+        self.basic_story()
+        order = []
+        real = meter._atomic_write_text
+
+        def spy(path, text):
+            order.append(Path(path).name)
+            real(path, text)
+
+        meter._atomic_write_text = spy
+        try:
+            rc, out = self.run_cli()
+        finally:
+            meter._atomic_write_text = real
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(order, [meter.OBSERVATION, meter.MARKER])
+        written = json.loads((self.story_dir() / meter.OBSERVATION).read_text(encoding="utf-8"))
+        self.assertEqual([written], self.ledger_lines())
+        self.assertTrue((self.story_dir() / meter.MARKER).is_file())
+
+    def test_no_record_writes_neither_observation_nor_marker(self):
+        self.basic_story()
+        rc, out = self.run_cli("--no-record")
+        self.assertEqual(rc, 0, out)
+        self.assertFalse((self.story_dir() / meter.OBSERVATION).exists())
+        self.assertFalse((self.story_dir() / meter.MARKER).exists())
+
+    def test_harvest_appends_sandbox_observation_exactly_once(self):
+        self.sandbox_observation(KEY, usd=1.25)
+        self.sandbox_observation(OTHER, usd=2.5)
+        rc, out = self.run_harvest()
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["harvested"], [{"story_key": KEY, "usd_total": 1.25},
+                                            {"story_key": OTHER, "usd_total": 2.5}])
+        self.assertAlmostEqual(out["usd_total"], 3.75)
+        self.assertEqual(out["ledger"], str(ledger.ledger_path()))
+        lines = self.ledger_lines()
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[0]["payload"]["description"], f"meter: story={KEY} usd=1.25")
+        self.assertEqual(lines[0]["payload"]["evidence"], f"transcripts/{KEY}")
+        self.assertEqual(lines[0]["project"], "tk-studio")
+        marker = json.loads((self.story_dir() / meter.HARVESTED).read_text(encoding="utf-8"))
+        self.assertEqual(marker["how"], "appended")
+        self.assertEqual(marker["story_key"], KEY)
+        self.assertEqual(marker["ledger"], ledger.ledger_path().name)
+        self.assertIn("harvested_at", marker)
+        rc2, out2 = self.run_harvest()
+        self.assertEqual(rc2, 0, out2)
+        self.assertEqual(out2["harvested"], [])
+        self.assertEqual(out2["usd_total"], 0)
+        self.assertEqual(out2["already_harvested"], [KEY, OTHER])
+        self.assertEqual(len(self.ledger_lines()), 2)
+        self.assertFalse((self.story_dir() / meter.REFUSAL).exists())
+
+    def test_harvest_missing_metered_reports_null_dollars(self):
+        self.sandbox_observation(KEY, metered=False)
+        rc, out = self.run_harvest()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["harvested"], [{"story_key": KEY, "usd_total": None}])
+        self.assertEqual(out["usd_total"], 0)
+
+    def test_harvest_seeded_key_is_marked_not_appended(self):
+        seeded = "25-1-the-roster-and-the-release-motion-for-every-app"
+        self.sandbox_observation(seeded)
+        rc, out = self.run_harvest()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["seeded"], [seeded])
+        self.assertEqual(out["harvested"], [])
+        self.assertEqual(self.ledger_lines(), [])
+        marker = json.loads((self.story_dir(seeded) / meter.HARVESTED).read_text(encoding="utf-8"))
+        self.assertEqual(marker["how"], "seeded")
+
+    def test_harvest_host_emitted_is_marked_in_ledger(self):
+        self.basic_story()
+        rc, out = self.run_cli()
+        self.assertEqual(rc, 0, out)
+        rc, out = self.run_harvest()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["in_ledger"], [KEY])
+        self.assertEqual(out["harvested"], [])
+        self.assertEqual(len(self.ledger_lines()), 1)
+        marker = json.loads((self.story_dir() / meter.HARVESTED).read_text(encoding="utf-8"))
+        self.assertEqual(marker["how"], "in-ledger")
+
+    def test_harvest_ignores_pre_26_4_dir(self):
+        d = self.story_dir()
+        d.mkdir(parents=True)
+        (d / meter.MARKER).write_text(json.dumps({"story_key": KEY, "usd_total": 9.0}),
+                                      encoding="utf-8")
+        rc, out = self.run_harvest()
+        self.assertEqual(rc, 0, out)
+        for bucket in ("harvested", "already_harvested", "in_ledger", "seeded"):
+            self.assertEqual(out[bucket], [], bucket)
+        self.assertFalse((d / meter.HARVESTED).exists())
+        self.assertEqual(self.ledger_lines(), [])
+
+    def test_harvest_bad_file_refuses_and_appends_nothing(self):
+        self.sandbox_observation(KEY)  # sorts first, valid
+        bad_cases = ["{not json", json.dumps([1]),
+                     json.dumps({"payload": {"source": "other"}}),
+                     json.dumps({"payload": {"source": 3, "description": "x"}}),
+                     json.dumps({"payload": {"source": "nope", "description": "x"}}),
+                     json.dumps({"payload": {"source": "other", "description": "x",
+                                             "evidence": 7}}),
+                     json.dumps({"payload": {"source": "other", "description": "  "}}),
+                     json.dumps({"project": 5,
+                                 "payload": {"source": "other", "description": "x"}})]
+        for text in bad_cases:
+            d = self.story_dir(OTHER)
+            d.mkdir(parents=True, exist_ok=True)
+            path = d / meter.OBSERVATION
+            path.write_text(text, encoding="utf-8")
+            rc, out = self.run_harvest()
+            self.assertEqual(rc, 2, (text, out))
+            self.assertFalse(out["ok"])
+            self.assertTrue(out["error"].startswith(f"observation {path} is unreadable: "),
+                            out["error"])
+            self.assertEqual(self.ledger_lines(), [], text)
+            self.assertFalse((self.story_dir() / meter.HARVESTED).exists())
+            self.assertFalse((d / meter.REFUSAL).exists())
+
+    def test_harvest_corrupt_already_harvested_dir_does_not_block(self):
+        self.sandbox_observation(KEY)  # sorts first; harvested, then corrupted
+        (self.story_dir() / meter.HARVESTED).write_text("{}", encoding="utf-8")
+        (self.story_dir() / meter.OBSERVATION).write_text("{not json", encoding="utf-8")
+        self.sandbox_observation(OTHER, usd=2.0)
+        rc, out = self.run_harvest()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["already_harvested"], [KEY])
+        self.assertEqual(out["harvested"], [{"story_key": OTHER, "usd_total": 2.0}])
+        self.assertEqual(len(self.ledger_lines()), 1)
+
+    def test_harvest_in_ledger_check_uses_safe_names(self):
+        import platform
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"LOGNAME": "a b", "USER": "a b",
+                                          "LNAME": "a b", "USERNAME": "a b"}):
+            self.assertEqual(ledger.ledger_path().name,
+                             f"a_b-{ledger._safe_name(platform.node())}.jsonl")
+            self.basic_story()
+            rc, out = self.run_cli()  # host-emitted: one line in the a_b ledger
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(len(self.ledger_lines()), 1)
+            # The envelope carries the raw, un-rewritten names.
+            path = self.story_dir() / meter.OBSERVATION
+            envelope = json.loads(path.read_text(encoding="utf-8"))
+            envelope["user"], envelope["machine"] = "a b", platform.node()
+            path.write_text(json.dumps(envelope), encoding="utf-8")
+            rc, out = self.run_harvest()
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(out["in_ledger"], [KEY])
+            self.assertEqual(out["harvested"], [])
+            self.assertEqual(len(self.ledger_lines()), 1)
+
+    def test_harvest_missing_run_dir_refuses(self):
+        gone = self.tmp / "no-such-run"
+        rc, out = self.run_harvest(gone)
+        self.assertEqual(rc, 2)
+        self.assertEqual(out, {"ok": False, "error": f"run dir {gone} does not exist"})
+
+    def test_harvest_seeded_holds_exactly_the_seven_epic_25_keys(self):
+        self.assertIsInstance(meter.HARVEST_SEEDED, frozenset)
+        self.assertEqual(meter.HARVEST_SEEDED, frozenset({
+            "25-1-the-roster-and-the-release-motion-for-every-app",
+            "25-2-the-installer-writes-the-skills-dir-plugin",
+            "25-3-the-drift-check-and-conformance-read-the-folder-and-the",
+            "25-4-the-bootstrap-and-the-meta-cli",
+            "25-5-doctor-says-what-is-wrong",
+            "25-6-sandboxes-read-the-host-skills-folder",
+            "25-7-the-docs-and-the-release-say-the-installer-is-the-way-in",
+        }))
 
 
 if __name__ == "__main__":

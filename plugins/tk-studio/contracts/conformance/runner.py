@@ -23,7 +23,12 @@ alone) the runner asserts, per the driver contract:
                           throwaway sandbox (isolated TK_STUDIO_HOME, stdin
                           closed, wall-clock bounded): output is JSON, and
                           ambiguity ends in a clean refusal — blocked, not
-                          a hang, never a prompt (AD-11)
+                          a hang, never a prompt (AD-11). `expect:
+                          status-block` (Story 26.1) judges the core's one
+                          JSON object as ending with the status block —
+                          the judge cli drives use — with the declared
+                          `status` when the drive names one, else any
+                          schema-valid status at exit 0 or 2
   harness drives          (opt-in: --harness) the surface is driven through
                           the real harness (claude -p) under a permission
                           profile denying its deterministic core; the
@@ -204,10 +209,13 @@ def _check_auth_preflight(entry: dict) -> dict:
 
 def _run_drive(surface: str, drive: dict, sandbox: Path, store: Path,
                timeout: int, plugin_root: Path | None = None,
-               env_overlay: dict | None = None) -> dict:
+               env_overlay: dict | None = None,
+               schema: dict | None = None) -> dict:
     """One headless drive: stdin closed, bounded, machine-readable out.
     ``plugin_root`` is the plugin tree the drive runs from (the extracted
-    archive under --from-archive); ``env_overlay`` joins the child env."""
+    archive under --from-archive); ``env_overlay`` joins the child env;
+    ``schema`` judges ``expect: status-block`` (default: the repository
+    plugin's copy)."""
     root = Path(plugin_root) if plugin_root else PLUGIN_ROOT
     assertion = drive.get("assertion", "headless-drive")
     check = {"assertion": assertion, "ok": False, "detail": ""}
@@ -283,6 +291,37 @@ def _run_drive(surface: str, drive: dict, sandbox: Path, store: Path,
         else:
             check["detail"] = ("expected a clean refusal, got exit 0 with "
                               "ok!=false")
+    elif expect == "status-block":
+        # a surface core whose every result ends with the block (Story
+        # 26.1): the judge shared with cli drives, plus an optional
+        # declared status; undeclared, any schema-valid status passes at
+        # exit 0 (an answer) or 2 (a refusal) — exit 1 is unexpected. A
+        # declared marker must appear in stdout: it proves the drive
+        # reached the state it targets (a fixture that failed to resolve
+        # blocks too, so the status alone cannot tell)
+        schema = schema if schema is not None else load_status_schema()
+        parsed, problem = _status_block_tail(stdout, proc.returncode, schema,
+                                             drive.get("intent", surface))
+        declared = drive.get("status")
+        marker = drive.get("marker") or None  # empty marker declares nothing
+        if problem:
+            check["detail"] = problem
+        elif marker is not None and marker not in stdout:
+            check["detail"] = (f"output does not name the declared marker "
+                              f"{marker!r} (exit {proc.returncode}) — the "
+                              "drive never reached the state it targets: "
+                              f"{parsed['reason']}")
+        elif proc.returncode not in (0, 2):
+            check["detail"] = (f"the core ended exit {proc.returncode} — a "
+                               "status-block drive requires exit 0 (answer) "
+                               "or 2 (refusal)")
+        elif declared is not None and parsed["status"] != declared:
+            check["detail"] = (f"status {parsed['status']!r}, the drive "
+                               f"declares {declared!r}: {parsed['reason']}")
+        else:
+            check["ok"] = True
+            check["detail"] = (f"one JSON object, status block last "
+                               f"({parsed['status']}, exit {proc.returncode})")
     else:
         check["detail"] = f"manifest declares unknown expect '{expect}'"
     return check
@@ -314,6 +353,27 @@ def _block_problem(block: dict, schema: dict, intent: str | None) -> str | None:
                                   or isinstance(block["reason"], str)):
         return f"reason {block['reason']!r} is not a string or null"
     return None
+
+
+def _status_block_tail(stdout: str, returncode: int, schema: dict,
+                       intent: str | None) -> tuple[dict | None, str | None]:
+    """(the parsed object, None) when ``stdout`` is exactly one JSON object
+    whose last keys are the status block and whose projection validates
+    against ``schema`` with ``intent``; (parsed-or-None, why) otherwise.
+    The judge shared by cli drives and surface `status-block` drives."""
+    try:
+        parsed = json.loads(stdout)
+    except json.JSONDecodeError:
+        return None, (f"stdout is not exactly one JSON object (exit "
+                      f"{returncode}): {stdout[:200]!r}")
+    if not isinstance(parsed, dict):
+        return None, "stdout is JSON but not an object"
+    tail = tuple(list(parsed)[-len(BLOCK_KEYS):])
+    if tail != BLOCK_KEYS:
+        return parsed, (f"the object ends with {list(tail)}, not the "
+                        f"status block {list(BLOCK_KEYS)}")
+    problem = _block_problem({k: parsed[k] for k in BLOCK_KEYS}, schema, intent)
+    return parsed, problem
 
 
 def _run_cli_drive(drive: dict, schema: dict, timeout: int,
@@ -357,26 +417,15 @@ def _run_cli_drive(drive: dict, schema: dict, timeout: int,
                                "never allowed headless (AD-11)")
             return check
     stdout = proc.stdout.strip()
-    try:
-        parsed = json.loads(stdout)
-    except json.JSONDecodeError:
-        check["detail"] = (f"stdout is not exactly one JSON object (exit "
-                           f"{proc.returncode}): {stdout[:200]!r}")
-        return check
-    if not isinstance(parsed, dict):
-        check["detail"] = "stdout is JSON but not an object"
+    parsed, problem = _status_block_tail(stdout, proc.returncode, schema,
+                                         drive.get("intent"))
+    if parsed is None:
+        check["detail"] = problem
         return check
     if drive.get("expect") != "status-block":
         check["detail"] = (f"manifest declares unknown cli expect "
                            f"'{drive.get('expect')}'")
         return check
-    tail = tuple(list(parsed)[-len(BLOCK_KEYS):])
-    if tail != BLOCK_KEYS:
-        check["detail"] = (f"the object ends with {list(tail)}, not the "
-                           f"status block {list(BLOCK_KEYS)}")
-        return check
-    problem = _block_problem({k: parsed[k] for k in BLOCK_KEYS}, schema,
-                             drive.get("intent"))
     if problem:
         check["detail"] = problem
         return check
@@ -780,7 +829,8 @@ def _drive_surfaces(shipped: list[str], registered: dict, skills: Path,
                     continue
                 checks.append(_run_drive(surface, drive, sandbox, store,
                                          timeout, plugin_root=plugin_root,
-                                         env_overlay=env_overlay))
+                                         env_overlay=env_overlay,
+                                         schema=schema))
         surfaces[surface] = checks
 
     for name in sorted(set(registered) - set(shipped)):

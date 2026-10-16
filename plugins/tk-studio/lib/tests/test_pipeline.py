@@ -8,6 +8,10 @@ apply writes only the managed policy block, the profile env line and
 routing.current.json, leaves the rest of the policy byte-identical, is
 idempotent, and refuses a missing policy rather than inventing one; bad
 legs, models and efforts refuse; the CLI keeps the JSON/exit-code shape.
+Story 26.3: every leg carries an `advisor` (opus | fable | off, shipped off)
+under the pairing rule, checked per table, on the overlaid route and on the
+defaults-only effective route; `--advisor` reaches the policy block only when
+the leg's advisor is not off; subagent legs inherit the session's effort.
 """
 from __future__ import annotations
 
@@ -115,7 +119,26 @@ class ResourceDefaultsTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertTrue(out["ok"])
         self.assertEqual(out["resource"], "tk-studio-launch")
-        self.assertEqual(out["legs"]["implementer"], {"model": "claude-sonnet-5"})
+        self.assertEqual(out["legs"]["implementer"], {"model": "claude-sonnet-5", "advisor": "off"})
+
+    def test_shipped_advisor_is_off_on_every_leg(self):
+        legs = pipeline.resource_defaults()["legs"]
+        for leg in pipeline.LEGS:
+            self.assertEqual(legs[leg]["advisor"], "off", leg)
+        # Story 26.3 changes no shipped model or effort value
+        shipped = {leg: {f: v for f, v in fields.items() if f in ("model", "effort")}
+                   for leg, fields in legs.items()}
+        self.assertEqual(shipped, {
+            "session": {"model": "claude-sonnet-5", "effort": "medium"},
+            "implementer": {"model": "claude-sonnet-5"},
+            "reviewers": {"model": "claude-sonnet-5"},
+            "consult": {"model": "claude-opus-5"},
+            "seam": {"model": "claude-opus-5", "effort": "medium"},
+            "review": {"model": "claude-opus-5", "effort": "high"},
+            "triage": {"model": "claude-opus-5", "effort": "high"},
+            "supervise": {"model": "claude-sonnet-5", "effort": "low"},
+            "planner": {"model": "claude-fable-5-1", "effort": "high"},
+        })
 
 
 class ResolveTests(unittest.TestCase):
@@ -133,7 +156,10 @@ class ResolveTests(unittest.TestCase):
         self.assertIsNone(res["project_routing"])
         for leg, fields in res["route"].items():
             for field in fields:
-                self.assertEqual(res["sources"][leg][field], "resource-default")
+                expected = ("inherited-session"
+                            if field == "effort" and leg in pipeline.SUBAGENT_LEGS
+                            else "resource-default")
+                self.assertEqual(res["sources"][leg][field], expected, (leg, field))
         self.assertEqual(res["consult_source"], "resource-default")
 
     def test_tiers_per_leg_and_field(self):
@@ -141,7 +167,7 @@ class ResolveTests(unittest.TestCase):
         route, src = res["route"], res["sources"]
         # story override beats the 9-* rule for the session
         self.assertEqual(route["session"], {"model": "claude-opus-5", "effort": "high",
-                                            "skill": "bmad-build-auto"})
+                                            "advisor": "off", "skill": "bmad-build-auto"})
         self.assertEqual(src["session"]["model"], "project-story")
         self.assertEqual(src["session"]["skill"], "resource-default")
         # the first matching rule supplies the implementer
@@ -151,10 +177,12 @@ class ResolveTests(unittest.TestCase):
         self.assertTrue(res["story_override"])
         self.assertEqual(res["note"], "R-tier")
         # project defaults overlay the shipped review leg
-        self.assertEqual(route["review"], {"model": "claude-sonnet-5", "effort": "medium"})
+        self.assertEqual(route["review"], {"model": "claude-sonnet-5", "effort": "medium",
+                                           "advisor": "off"})
         self.assertEqual(src["review"]["model"], "project-defaults")
         # untouched legs stay shipped
-        self.assertEqual(route["seam"], {"model": "claude-opus-5", "effort": "medium"})
+        self.assertEqual(route["seam"], {"model": "claude-opus-5", "effort": "medium",
+                                         "advisor": "off"})
         self.assertEqual(src["seam"]["model"], "resource-default")
         # the consult policy resolves as a unit
         self.assertEqual(res["consult_policy"]["triggers"], ["verify-red", "halt"])
@@ -235,8 +263,15 @@ class ApplyTests(unittest.TestCase):
         self.assertIn('CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN = "1"', profile)
         current = json.loads((self.loop / "routing.current.json").read_text(encoding="utf-8"))
         self.assertEqual(current["story"], "9-30-gated-scene")
-        self.assertEqual(current["implementer"], {"model": "claude-opus-5"})
-        self.assertEqual(current["consult"], {"model": "claude-opus-5"})
+        # every leg carries its advisor; subagent legs the session's effort
+        self.assertEqual(current["implementer"], {"model": "claude-opus-5", "advisor": "off",
+                                                  "effort": "high"})
+        self.assertEqual(current["consult"], {"model": "claude-opus-5", "advisor": "off",
+                                              "effort": "high"})
+        self.assertEqual(current["sources"]["consult"]["effort"], "inherited-session")
+        for leg in pipeline.LEGS:
+            self.assertEqual(current[leg]["advisor"], "off", leg)
+        self.assertNotIn("--advisor", policy)
         self.assertEqual(current["consult_triggers"], ["verify-red", "halt"])
         self.assertEqual(current["consult_scope"], "project scope")
         self.assertEqual(current["planner"]["model"], "claude-fable-5-1")
@@ -285,6 +320,139 @@ class ApplyTests(unittest.TestCase):
         pipeline.apply(self.root, "2-4-thing")
         profile = (self.loop / "profiles" / "claude.toml").read_text(encoding="utf-8")
         self.assertEqual(profile, 'name = "claude"\n\n[env]\nCLAUDE_CODE_SUBAGENT_MODEL = "claude-sonnet-5"\n')
+
+
+class AdvisorTests(unittest.TestCase):
+    """Story 26.3: the advisor field, the pairing rule, `--advisor` and the
+    subagent effort inheritance — proven on temp projects and --set only."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = _project(Path(self._tmp.name))
+        self.loop = self.root / ".bmad-loop"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _routing(self, text: str) -> None:
+        (self.loop / "routing.toml").write_text(text, encoding="utf-8")
+
+    def test_default_every_leg_off_and_no_advisor_flag(self):
+        res = pipeline.resolve(self.root, "2-4-thing")
+        for leg in pipeline.LEGS:
+            self.assertEqual(res["route"][leg]["advisor"], "off", leg)
+        self.assertNotIn("--advisor", pipeline.render_block(res["route"], "2-4-thing"))
+
+    def test_valid_pairing_puts_advisor_on_the_session_command_line(self):
+        runtime = pipeline.parse_sets(["session.model=claude-opus-5-5", "session.advisor=fable"])
+        res = pipeline.apply(self.root, "2-4-thing", runtime)
+        self.assertEqual(res["route"]["session"]["advisor"], "fable")
+        policy = (self.loop / "policy.toml").read_text(encoding="utf-8")
+        self.assertIn('[adapter.dev]\nmodel = "claude-opus-5-5"\nextra_args = ["--permission-mode", '
+                      '"bypassPermissions", "--effort", "medium", "--advisor", "fable"]', policy)
+        self.assertEqual(policy.count("--advisor"), 1)
+        current = json.loads((self.loop / "routing.current.json").read_text(encoding="utf-8"))
+        self.assertEqual(current["session"]["advisor"], "fable")
+        self.assertEqual(current["sources"]["session"]["advisor"], "runtime")
+
+    def test_advisor_without_effort_still_emits_extra_args(self):
+        route = {"session": {"model": "claude-opus-5", "advisor": "opus"},
+                 "review": {"model": "claude-opus-5", "advisor": "off"},
+                 "triage": {"model": "claude-opus-5"}}
+        block = pipeline.render_block(route, "1-1")
+        self.assertIn('[adapter.dev]\nmodel = "claude-opus-5"\nextra_args = ["--permission-mode", '
+                      '"bypassPermissions", "--advisor", "opus"]', block)
+        self.assertIn('[adapter.review]\nmodel = "claude-opus-5"\n\n', block)
+        self.assertEqual(block.count("extra_args"), 1)
+
+    def test_bad_vocabulary_refuses_named(self):
+        with self.assertRaises(pipeline.PipelineError) as ctx:
+            pipeline.parse_sets(["session.advisor=sonnet"])
+        self.assertIn("advisor 'sonnet' not in ['opus', 'fable', 'off']", str(ctx.exception))
+        self._routing('[defaults]\nreviewers = { model = "claude-sonnet-5", advisor = "sonnet" }\n')
+        code, out = _run(["check", "--directory", str(self.root)])
+        self.assertEqual(code, 2)
+        self.assertIn("defaults.reviewers: advisor 'sonnet' not in ['opus', 'fable', 'off']",
+                      out["problems"])
+        code, out = _run(["resolve", "--directory", str(self.root)])
+        self.assertEqual(code, 2)
+        self.assertIn("advisor 'sonnet'", out["error"])
+
+    def test_non_string_advisor_refuses_named_not_traceback(self):
+        self._routing('[defaults]\nreviewers = { model = "claude-opus-5", advisor = ["opus"] }\n')
+        code, out = _run(["check", "--directory", str(self.root)])
+        self.assertEqual(code, 2)
+        self.assertIn("defaults.reviewers: advisor ['opus'] not in ['opus', 'fable', 'off']",
+                      out["problems"])
+        code, out = _run(["resolve", "--directory", str(self.root)])
+        self.assertEqual((code, out["ok"]), (2, False))
+        self.assertIn("advisor ['opus'] not in", out["error"])
+
+    def test_pairing_violation_in_one_table(self):
+        msg = ("stories.1-1.session: advisor 'opus' ranks below model 'claude-fable-5-1' "
+               "(the advisor must rank at or above the leg's model)")
+        self._routing('[stories."1-1"]\nsession = { model = "claude-fable-5-1", advisor = "opus" }\n')
+        code, out = _run(["check", "--directory", str(self.root)])
+        self.assertEqual(code, 2)
+        self.assertEqual(out["problems"], [msg])
+        code, out = _run(["resolve", "--directory", str(self.root), "--story", "1-1"])
+        self.assertEqual((code, out["ok"]), (2, False))
+        self.assertIn("ranks below model", out["error"])
+        # the rank table: fable outranks opus, opus outranks every other model
+        for model, advisor, ok in (("claude-fable-5-1", "fable", True),
+                                   ("claude-opus-5-5", "opus", True),
+                                   ("claude-opus-5", "opus", True),
+                                   ("claude-opus-5-5", "fable", True),
+                                   ("claude-sonnet-5", "opus", True),
+                                   ("claude-haiku-4-5-20251001", "fable", True),
+                                   ("claude-fable-5-1", "off", True),
+                                   ("claude-opus-5-5", "off", True)):
+            problems = pipeline._validate_legs("t", {"session": {"model": model, "advisor": advisor}})
+            self.assertEqual(problems == [], ok, (model, advisor))
+
+    def test_pairing_violation_after_overlay(self):
+        # the per-table checks all pass; only the overlaid route violates
+        self._routing('[defaults]\nsession = { advisor = "opus" }\n')
+        self.assertEqual(pipeline.validate_project(pipeline.load_project_routing(self.root)), [])
+        runtime = pipeline.parse_sets(["session.model=claude-fable-5-1"])
+        for call in (lambda: pipeline.resolve(self.root, "1-1", runtime),
+                     lambda: pipeline.apply(self.root, "1-1", runtime, dry_run=True)):
+            with self.assertRaises(pipeline.PipelineError) as ctx:
+                call()
+            self.assertIn("route.session: advisor 'opus' ranks below model 'claude-fable-5-1'",
+                          str(ctx.exception))
+        code, out = _run(["apply", "--directory", str(self.root), "--story", "1-1",
+                          "--set", "session.model=claude-fable-5-1", "--dry-run"])
+        self.assertEqual((code, out["ok"]), (2, False))
+        self.assertIn("ranks below model", out["error"])
+        self.assertFalse((self.loop / "routing.current.json").exists())
+
+    def test_check_runs_pairing_on_the_effective_defaults(self):
+        # planner ships on claude-fable-5-1; a project advisor of opus on it
+        # passes its own table but not the effective route
+        self._routing('[defaults]\nplanner = { advisor = "opus" }\n')
+        code, out = _run(["check", "--directory", str(self.root)])
+        self.assertEqual(code, 2)
+        self.assertEqual(out["problems"], [
+            "effective defaults.planner: advisor 'opus' ranks below model 'claude-fable-5-1' "
+            "(the advisor must rank at or above the leg's model)"])
+
+    def test_subagent_legs_inherit_the_session_effort(self):
+        self._routing('[defaults]\nsession = { model = "claude-opus-5-5", effort = "medium" }\n'
+                      'implementer = { model = "claude-opus-5-5" }\n'
+                      'reviewers = { model = "claude-opus-5-5", effort = "low" }\n')
+        res = pipeline.resolve(self.root, "1-1")
+        for leg in ("implementer", "consult"):
+            self.assertEqual(res["route"][leg]["effort"], "medium", leg)
+            self.assertEqual(res["sources"][leg]["effort"], "inherited-session", leg)
+        # a declared effort is never overwritten
+        self.assertEqual(res["route"]["reviewers"]["effort"], "low")
+        self.assertEqual(res["sources"]["reviewers"]["effort"], "project-defaults")
+        # non-subagent legs never inherit
+        self.assertNotIn("inherited-session", res["sources"]["planner"].values())
+        # the runtime session effort is what is inherited
+        res = pipeline.resolve(self.root, "1-1", pipeline.parse_sets(["session.effort=high"]))
+        self.assertEqual(res["route"]["implementer"]["effort"], "high")
 
 
 class CliTests(unittest.TestCase):

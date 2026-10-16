@@ -104,6 +104,20 @@
           "argv": ["lib/pipeline.py", "apply", "--directory", "{sandbox}", "--story", "1-1-conformance", "--dry-run"],
           "expect": "refusal",
           "marker": "policy missing"
+        },
+        {
+          "assertion": "status-block-fresh",
+          "argv": ["lib/launch.py", "check", "--directory", "{sandbox}", "--spec", "_bmad-output/specs/spec-none"],
+          "expect": "status-block",
+          "intent": "tk-studio-launch",
+          "status": "blocked"
+        },
+        {
+          "assertion": "status-block-relaunch",
+          "argv": ["lib/launch.py", "check", "--directory", "contracts/conformance/fixtures/launch-relaunch", "--epic", "1"],
+          "expect": "status-block",
+          "intent": "tk-studio-launch",
+          "marker": "2 entries"
         }
       ]
     },
@@ -133,6 +147,17 @@
           "argv": ["lib/plansync.py", "sync", "--directory", "{sandbox}", "--backend", "jira"],
           "expect": "refusal",
           "marker": "planning.jira.site"
+        },
+        {
+          "assertion": "headless-clean",
+          "argv": ["lib/plansync.py", "status", "--directory", "contracts/conformance/fixtures/plan-status", "--id", "ST-001", "--status", "review", "--dry-run"],
+          "expect": "json"
+        },
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/plansync.py", "status", "--directory", "{sandbox}", "--id", "ST-999", "--status", "review"],
+          "expect": "refusal",
+          "marker": "unknown id ST-999"
         }
       ]
     },
