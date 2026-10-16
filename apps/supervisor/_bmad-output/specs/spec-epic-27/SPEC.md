@@ -102,3 +102,4 @@ This epic fixes a pain and meets a mandate. Today an engine dies with the host-s
 ## Design notes (settled shape, planner, 2026-10-16)
 
 - 27.1 — the project's local config overlay: optional entry — `.tk-studio/config.local.yaml`, copied from the checkout into the worktree when present, skipped when absent — per `.tk-studio/config.yaml` header (AD-3, AD-15)
+- 27.2 — the starter lock file: deferred entry — `<studioHome>/projects/<project key>/starter.lock` (`TK_STUDIO_HOME` or `~/.tk-studio`), JSON `{starter: "tk-studio-supervisor queue", checkout, since, supervisor_pid}`, rewritten atomically by the supervisor for each served project, never in the checkout's tree; `jobrun.py` honouring it is the tk-studio-side hand-over — per ARCHITECTURE-SPINE.md AD-3, AD-20

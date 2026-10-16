@@ -71,6 +71,16 @@
  * answering without a run_id, or failing with no new run found); a queue run
  * already claimed is ended `blocked` with that error and named in the answer.
  *
+ * Worktrees (Story 27.1, src/worktree.ts): after the claim, before the snapshot and the minting verb,
+ * every run gets its own git worktree of the project cut from its `base_ref` (none given → the
+ * default branch, recorded `base_ref_source: default`; an unprotected default branch is refused),
+ * materialised by the studio's own motions; a failed step ends the run `blocked` naming it.
+ * `wake` and the registry keep the registered root and the checkout lock; the worker's cwd,
+ * `payload.directory` and the sbx VM path are the worktree. A `tk-studio-launch` run that started an
+ * engine writes `launched` and stays `running` (its end deferred); the engine-end sweep
+ * (`sweepEngines`, in `run`, `recover` and `drain`) closes it out when the engine ends or pauses.
+ * Every other end closes out at once: push + PR, or "no changes", then the worktree removed.
+ *
  * Run hygiene (Story 22.3, src/hygiene.ts): `submit --editor-in-the-loop` flags the run (refused
  * with WorkDirMissing, nothing queued, when TK_SUPERVISOR_WORK is unset); a flagged Godot run is
  * snapshot after the claim and before `wake`/`submit` (a failed snapshot ends it `blocked`
@@ -87,9 +97,12 @@ import {
 } from "./server";
 import { serve as serveApi } from "./api";
 import { notifier, pluginRoot, WorkDirMissing, workDir } from "./env";
-import { prUrl, snapshotOnce, sweepEnds, type HygieneDeps } from "./hygiene";
+import { canonicalPr, prUrl, snapshotOnce, sweepEnds, type HygieneDeps } from "./hygiene";
 import {
-  checkoutKey, defaultProbes, isTerminal, LAUNCH_SKILL, ORPHANED_REASON, probeLaunchEngine, processStartTime, Queue, RunTerminal, selfOwner,
+  closeOut, closeOutDetail, launchedCloseOutInput, meteredCost, pendingCloseOut, prepareWorktree, priorPr, sweepEngines, type WorktreeDeps,
+} from "./worktree";
+import {
+  checkoutKey, defaultProbes, engineRoot, isTerminal, LAUNCH_SKILL, ORPHANED_REASON, probeLaunchEngine, processStartTime, Queue, RunTerminal, selfOwner,
   type Holder, type LaunchEngine, type Owner, type QueueRun, type RecoverReport, type RunState, type StudioEnder, type StudioFinder, type StudioOps, type StudioResumer, type TerminalState,
 } from "./queue";
 import { jobOptions, loadSupervisorConfig, type JobOptions } from "./config";
@@ -129,6 +142,9 @@ export interface RunSummary {
    * run in the VM); `mirror` ends the queue run with `holdLock`, and the lock is freed only
    * once the recorded worker's in-VM deadline has passed (`Queue.recordedWorker`). */
   hold_lock?: string;
+  /** Story 27.1 (operator-decisions §2): a `tk-studio-launch` run that started an engine in its
+   * worktree — `finish` was not called at launch return; the engine-end sweep calls it. */
+  finish_deferred?: true;
 }
 
 /** A tripped guard: the job guard's name (or the tick's `--timeout-cap-s`) and its value. */
@@ -235,12 +251,15 @@ export interface RunOptions {
   sandbox?: string;
   model?: string;
   effort?: string;
-  /** Story 22.1: the submission's `base_ref`, stored on the queue run it mints (no branch is cut). */
+  /** Story 22.1: the submission's `base_ref`, stored on the queue run it mints; Story 27.1: the run's
+   * worktree is cut from it and its PR targets it. */
   baseRef?: string;
   /** Story 22.3: the submission's editor-in-the-loop flag (stored on the queue run like `tier`). */
   editorInTheLoop?: boolean;
   /** Story 22.3: the end sweep's environment and HTTP client (tests inject them). */
   hygiene?: HygieneDeps;
+  /** Story 27.1: the worktree's environment and spawners (tests inject them; default process.env). */
+  worktree?: WorktreeDeps;
 }
 
 /** The worker options a run is driven with (Story 21.4). */
@@ -326,6 +345,9 @@ export interface Validated {
   sandbox?: string;
   model?: string;
   effort?: string;
+  /** Story 27.1: the run's worktree — the worker's cwd, `payload.directory` and the sbx VM path
+   * (the studio verbs and the registry keep `root`). */
+  workRoot?: string;
 }
 
 /** The job's own wall-clock guard (default 600 s) and the invocation guard capped at `guardCapS`. */
@@ -459,6 +481,7 @@ export async function recoverQueue(opts: RunOptions = {}, verbRunner: VerbRunner
     await driveResumes(queue, report.resumed, prepared, verbRunner);
     return report;
   } finally {
+    await sweepEngines(queue, opts.worktree); // Story 27.1: engines that ended or paused are closed out
     await sweepEnds(queue, opts.hygiene);
     if (owned) queue.close();
   }
@@ -518,6 +541,7 @@ export async function drainQueue(opts: RunOptions = {}, verbRunner: VerbRunner =
       && recovered.resumed.every((r) => r.summary?.ok === true);
     return { ok, recovered, runs };
   } finally {
+    await sweepEngines(queue, opts.worktree); // Story 27.1
     await sweepEnds(queue, opts.hygiene);
     if (owned) queue.close();
   }
@@ -600,7 +624,7 @@ export const CANCELLED_REASON = "cancelled: operator request";
  * `RunTerminal` on a run already ended (`CancelRaced`, carrying the side effects already
  * done, when it ended during the cancel), and an Error on an unknown run. */
 export async function cancelRun(
-  queue: Queue, runId: string, deps: { verbRunner?: VerbRunner; launchStop?: LaunchStopper; hygiene?: HygieneDeps } = {},
+  queue: Queue, runId: string, deps: { verbRunner?: VerbRunner; launchStop?: LaunchStopper; hygiene?: HygieneDeps; worktree?: WorktreeDeps } = {},
 ): Promise<QueueRun> {
   // Story 22.3: once the cancel is done, the end sweep covers this run only (its cancelled end, or a
   // raced driver's end of it), so the answer never waits on other runs' ends: those stay with their
@@ -610,7 +634,7 @@ export async function cancelRun(
 }
 
 async function cancelQueueRun(
-  queue: Queue, runId: string, deps: { verbRunner?: VerbRunner; launchStop?: LaunchStopper },
+  queue: Queue, runId: string, deps: { verbRunner?: VerbRunner; launchStop?: LaunchStopper; worktree?: WorktreeDeps },
 ): Promise<QueueRun> {
   const run = queue.get(runId);
   if (!run) throw new Error(`queue run '${runId}' not found`);
@@ -619,7 +643,7 @@ async function cancelQueueRun(
   // A launched engine: the one recorded, else (a launch run that reached its verb) the launch core's probe.
   const probeEngine = async (r: QueueRun) => {
     if (!r.verb_started || queue.definition(r)?.target?.skill !== LAUNCH_SKILL) return undefined;
-    const probed = await queue.launchEngineAt(r.root);
+    const probed = await queue.launchEngineAt(engineRoot(r));
     if (probed.holder) detail.engine = probed.engine;
     return probed.holder;
   };
@@ -629,7 +653,7 @@ async function cancelQueueRun(
       : { engine_run_id: null, ok: false, detail: "an unverified engine: no run id to stop" };
   };
   let engine: { id: string | null } | undefined = run.engine_run_id ? { id: run.engine_run_id } : await probeEngine(run);
-  if (engine) await stopEngine(run.root, engine.id);
+  if (engine) await stopEngine(engineRoot(run), engine.id);
   // The studio run named after the awaits above: a driver inside its minting verb may have recorded it meanwhile.
   const named = queue.get(runId) ?? run;
   const verbs = deps.verbRunner ?? runJobVerb;
@@ -655,7 +679,7 @@ async function cancelQueueRun(
   // An engine the launch core started after the first probe, found once the worker is dead: stopped too, and handed the lock.
   if (!engine) {
     engine = await probeEngine(current);
-    if (engine) await stopEngine(current.root, engine.id);
+    if (engine) await stopEngine(engineRoot(current), engine.id);
   }
   // A `running` run whose live owner (its driver) has recorded no worker yet — a queued run
   // claimed during the awaits above included: the lock stays with it (never a bare release
@@ -664,10 +688,38 @@ async function cancelQueueRun(
   const driverLive = !engine && current.state === "running" && current.worker_pid == null && queue.ownerAlive(current);
   const holdLock = worker.mayRun ? `cancelled: its recorded worker may still run (${worker.worker?.outcome ?? "unknown"})`
     : driverLive ? `cancelled: its driver (pid ${current.owner_pid ?? "?"}${current.owner_host ? `@${current.owner_host}` : ""}) is live, no worker recorded yet` : undefined;
+  // Story 27.1: a run with a worktree is closed out before its `cancelled` end, after the engine stop —
+  // only once nothing may still work the worktree (else skipped: the engine-end sweep closes it out
+  // later), and only by the process that takes the run (never beside the sweep).
+  let engineDead = false;
+  if (current.worktree) {
+    let skip: string | undefined;
+    if (worker.mayRun) skip = `its recorded worker may still run (${worker.worker?.outcome ?? "unknown"})`;
+    else if (driverLive) skip = "its driver is live";
+    else if (engine) {
+      const stop = detail.engine_stop as { ok?: boolean } | undefined;
+      if (stop?.ok !== true) skip = "the engine stop failed";
+      else if ((await queue.launchEngineAt(engineRoot(current))).holder) skip = "the engine stop is not confirmed: the engine is still live";
+    }
+    if (!skip && !queue.takeForCloseOut(runId)) {
+      // Refused on a running or paused run: another process holds its close-out. Any other state (a
+      // `queued` run `recover` requeued after its cut): nothing holds it, and the sweep closes it out.
+      const state = queue.get(runId)?.state ?? current.state;
+      skip = state === "running" || state === "paused" ? "the run is held by another close-out"
+        : `the run is ${state}: the engine-end sweep closes it out`;
+    }
+    // AC3: the PR body carries the launch status block and the metered cost (read before the removal).
+    const input = { ...launchedCloseOutInput(queue.events(runId), current), engineRunId: current.engine_run_id ?? engine?.id ?? null };
+    Object.assign(detail, await closeOutNow(queue, runId, input, deps.worktree, skip));
+    // Closed out with its engine confirmed dead (stopped, the probe empty): the lock is released, never
+    // handed to that engine at a worktree the close-out removed.
+    engineDead = !!engine && !skip;
+  }
   let ended: QueueRun;
   try {
     ended = queue.end(runId, "cancelled", CANCELLED_REASON, {
       detail, ...(holdLock ? { holdLock } : {}), ...(driverLive ? { driverLive } : {}), ...(engine ? { engineRunId: engine.id } : {}),
+      ...(engineDead ? { keepEngine: true } : {}),
     });
   } catch (e) {
     // Ended by its driver during the cancel: the side effects already done travel with the refusal.
@@ -759,22 +811,46 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
       // The effective options: explicit, else recorded on the run, else the config, else the
       // default — re-checked after the claim (an invalid stored value ends the run `blocked`).
       const eff = resolveWorkerOptions(explicit, storedLayer(claim.run), config, v.root);
+      // Story 27.1: the run's own worktree, cut from its base and materialised, once per queue run.
+      const workRoot = await prepareWorktree(queue, claim.run, v.projectId, v.root, { ...opts.worktree, tier: eff.tier });
       // Story 22.3: a flagged Godot run is snapshot before the minting verb, once per queue run.
       await snapshotOnce(queue, claim.run, v.projectId, v.root, { env: opts.hygiene?.env });
-      summary = await drive(queue, run.run_id, { ...v, ...eff });
+      summary = await drive(queue, run.run_id, { ...v, ...eff, workRoot });
     }
     catch (e) {
       const err = e instanceof StartError ? e : new StartError(message(e));
-      try { await queue.endDriven(run.run_id, "blocked", err.message); } catch { /* already ended */ }
+      await endAfterDriveFailure(queue, run.run_id, err.message, opts.worktree, owner);
       err.runId = run.run_id;
       throw err;
     }
-    return await mirror(queue, run.run_id, v, summary);
+    return await mirror(queue, run.run_id, v, summary, runJobVerb, opts.worktree);
   } finally {
     await resuming;
+    await sweepEngines(queue, opts.worktree); // Story 27.1: engines that ended or paused are closed out
     await sweepEnds(queue, opts.hygiene); // Story 22.3: every end this process drove (resumes included)
     if (owned) queue.close();
   }
+}
+
+/** Story 27.1: the `blocked` end of a run whose prepare or drive threw, by its driver. A worktree already
+ * cut is closed out ("no changes" when nothing landed) — never while what the drive may have started
+ * still works it: its recorded worker, or an engine in the worktree (`closeout: skipped`, the worktree
+ * kept; the engine-end sweep closes it out once they are dead). Never throws. */
+export async function endAfterDriveFailure(
+  queue: Queue, runId: string, reason: string, deps: WorktreeDeps = {}, self: Owner = selfOwner(),
+): Promise<void> {
+  const cur = queue.get(runId);
+  let skip: string | undefined;
+  if (cur?.worktree && !isTerminal(cur.state)) {
+    try { skip = await queue.closeOutBlocker(cur, self, { asDriver: true }); }
+    catch (e) { skip = `what may still work the worktree could not be probed: ${message(e)}`; }
+  }
+  const closed = await closeOutNow(queue, runId, {}, deps, skip);
+  // Closed out with nothing live around it: the lock is released, never handed to an engine at a removed worktree.
+  const closedOut = !skip && (closed.closeout as { result?: string } | undefined)?.result !== undefined;
+  try {
+    await queue.endDriven(runId, "blocked", reason, { ...(Object.keys(closed).length ? { detail: closed } : {}), ...(closedOut ? { keepEngine: true } : {}) });
+  } catch { /* already ended */ }
 }
 
 /** The 21-1 flow under a claimed lock: snapshot → wake/submit → invoke/finish. */
@@ -835,6 +911,7 @@ export function launchedEngine(skill: unknown, block: unknown): string | undefin
  * summary's `run_id` becomes the queue id. */
 export async function mirror(
   queue: Queue, queueRunId: string, v: Pick<Validated, "jobId" | "defn">, s: RunSummary, verbRunner: VerbRunner = runJobVerb,
+  worktree: WorktreeDeps = {},
 ): Promise<RunSummary> {
   const studioRunId = s.run_id ?? null;
   let reason = s.reason;
@@ -870,13 +947,83 @@ export async function mirror(
     const onStatus = v.defn?.stop?.on_status;
     const stop = studioOutcome && Array.isArray(onStatus) && onStatus.includes(studioOutcome.state)
       ? { stop: { condition: "on_status" as const, state: studioOutcome.state, job_id: v.jobId } } : {};
+    // Story 27.1 (operator-decisions §2): a launch that started an engine in the run's worktree
+    // writes `launched`; the run stays `running` and `ended` waits for the engine's end (the sweep).
+    const now = queue.get(queueRunId);
+    if (s.finish_deferred && engine && now?.worktree && now.state === "running" && terminal && !s.hold_lock) {
+      queue.markLaunched(queueRunId, engine, {
+        ...(s.status_block !== undefined ? { status_block: s.status_block } : {}),
+        ...(typeof s.total_cost_usd === "number" ? { worker_cost_usd: s.total_cost_usd } : {}),
+        end: { state: s.state, reason: endReason, ...(Object.keys(detail).length ? { detail } : {}), ...stop },
+      });
+      return { ...s, run_id: queueRunId, studio_run_id: studioRunId, ...(reason !== undefined ? { reason } : {}) };
+    }
+    // A deferred finish whose run can no longer wait for its engine: finished now, never left open
+    // (a state that is not terminal finishes `blocked`), its outcome on `ended`.
+    const deferredFinish = s.finish_deferred && studioRunId && now
+      ? await finishStudioRun(verbRunner, now.root, studioRunId, terminal ? s.state : "blocked", s.reason ?? null, s.status_block, s.total_cost_usd)
+      : undefined;
+    // An engine its status block names but that is not waited for (a `blocked` launch, no deferred
+    // finish), or — a launch run naming none — one the launch core may still have started (the
+    // launch-orphan rule): probed in the worktree first; an engine found keeps the worktree and takes the lock.
+    const probed = now?.worktree && !isTerminal(now.state) && (engine || (now.verb_started && v.defn?.target?.skill === LAUNCH_SKILL))
+      ? await queue.launchEngineAt(engineRoot(now)) : undefined;
+    // Every other end with a worktree closes out first: push + PR, or "no changes".
+    // Never while something may still work the worktree: an sbx worker that may still run in the VM, or an engine.
+    const skip = s.hold_lock ? `its worker may still run: ${s.hold_lock}` : probed?.holder ? "an engine may still work the worktree" : undefined;
+    // AC3: the engine's metered cost (its run.json, read before the close-out removes the worktree), else the worker's.
+    const metered = engine && now?.worktree && existsSync(now.worktree) ? meteredCost(now.worktree, engine) : undefined;
+    const cost = metered ?? s.total_cost_usd;
+    const closed = await closeOutNow(queue, queueRunId, { statusBlock: s.status_block, engineRunId: engine ?? null, ...(cost !== undefined ? { costUsd: cost } : {}) }, worktree, skip);
+    const ended = { ...detail, ...closed, ...(probed?.holder ? { engine: probed.engine } : {}), ...(deferredFinish ? { finish: deferredFinish } : {}) };
+    // Closed out with the probe confirming no engine: the lock is released (the engine id kept), never
+    // handed to an engine, nor re-probed, at the worktree the close-out removed.
+    const engineDead = !!probed && !probed.holder && !skip;
+    const engineEnd = engineDead ? { keepEngine: true, ...(engine ? { engineRunId: engine } : {}) }
+      : engine ? { engineRunId: engine } : probed?.holder ? { engineRunId: probed.holder.id } : {};
     await queue.endDriven(queueRunId, terminal ? (s.state as "complete") : "blocked", endReason,
-      { ...(engine ? { engineRunId: engine } : {}), ...(Object.keys(detail).length ? { detail } : {}), ...stop,
+      { ...engineEnd, ...(Object.keys(ended).length ? { detail: ended } : {}), ...stop,
         ...(s.hold_lock ? { holdLock: s.hold_lock } : {}) });
   } catch (e) {
     reason = `${reason ? `${reason}; ` : ""}queue: ${message(e)}`;
   }
   return { ...s, run_id: queueRunId, studio_run_id: studioRunId, ...(reason !== undefined ? { reason } : {}) };
+}
+
+/** Story 27.1: `finish` of a studio run whose end was deferred to its engine's (never throws). */
+async function finishStudioRun(
+  verbRunner: VerbRunner, root: string, studioRunId: string, state: string, reason: string | null, block: unknown, cost?: number,
+): Promise<{ ok: boolean; detail: string }> {
+  try {
+    answered(await verbRunner(root, [
+      "finish", "--directory", root, "--run-id", studioRunId, "--state", state, ...(reason ? ["--reason", reason] : []),
+      ...(block !== undefined ? ["--status-block", JSON.stringify(block)] : []), ...(cost !== undefined ? ["--total-cost-usd", String(cost)] : []),
+    ]), "finish");
+    return { ok: true, detail: `studio run ${studioRunId} finished ${state}` };
+  } catch (e) { return { ok: false, detail: `finish failed: ${message(e)}` }; }
+}
+
+/** Story 27.1: the close-out of a run ending now with its worktree cut (never throws): the
+ * `ended` detail (`pr` or `no_changes`, and the `closeout` record); `{}` for a run with no worktree. */
+async function closeOutNow(
+  queue: Queue, runId: string, input: { statusBlock?: unknown; engineRunId?: string | null; costUsd?: number }, deps: WorktreeDeps = {},
+  skip?: string,
+): Promise<Record<string, unknown>> {
+  const run = queue.get(runId);
+  if (!run?.worktree || isTerminal(run.state)) return {};
+  // Something may still work the worktree: no push, no PR, no removal — the sweep closes it out later.
+  if (skip) return { closeout: { result: "skipped", why: skip, worktree: "kept" } };
+  const events = queue.events(runId);
+  // A sweep's close-out already ran but its end was not written: its recorded result, never a second close-out.
+  const pending = pendingCloseOut(events);
+  if (pending?.phase === "ended") {
+    const d = pending.detail;
+    return { ...(d.pr ? { pr: d.pr } : {}), ...(d.no_changes ? { no_changes: true } : {}), ...(d.closeout ? { closeout: d.closeout } : {}) };
+  }
+  // A draft PR the run's pause opened is marked ready, never opened again.
+  const existingPr = priorPr(events);
+  try { return closeOutDetail(await closeOut(run, { paused: false, ...input, ...(existingPr ? { existingPr } : {}) }, deps)); }
+  catch (e) { return { closeout: { result: "failed", error: message(e), worktree: "kept" } }; }
 }
 
 export interface Started {
@@ -887,8 +1034,10 @@ export interface Started {
   jobGuardS?: number;
   defn: Record<string, any>; woke: Record<string, any>; permissionMode?: string;
   tier?: Tier; sandbox?: string;
-  /** The registry entry root: the sbx microVM path is derived from it. */
+  /** The registry entry root: the sbx microVM path is derived from it (when the run has no worktree). */
   registryRoot?: string;
+  /** Story 27.1: the run's worktree — the worker's cwd, `payload.directory` and the sbx VM path. */
+  workRoot?: string;
   /** The submission's overrides: they win over `woke.routing` (§5). */
   model?: string; effort?: string;
   /** Story 21.6: the pre-minted session id (`--session-id` on the first invoke, `--resume` on a resume). */
@@ -933,7 +1082,7 @@ export function queueRecorder(queue: Queue, runId: string): RunRecorder {
     accountedIds: () => queue.accountedIds(runId),
     resumes: () => queue.resumeCount(runId),
     resumed: (detail) => { queue.markResumed(runId, detail); },
-    launchEngine: (root) => queue.launchEngineAt(queue.get(runId)?.root ?? root),
+    launchEngine: (root) => { const r = queue.get(runId); return queue.launchEngineAt(r ? engineRoot(r) : root); },
   };
 }
 
@@ -978,8 +1127,8 @@ async function validate(jobId: string, directory: string, permissionMode?: strin
 export async function startRun(
   v: Validated, onVerb: (verb: "wake" | "submit", before: string[]) => void, verbRunner: VerbRunner = runJobVerb,
 ): Promise<Started | { summary: RunSummary }> {
-  const { jobId, root, projectId, defn, target, guardS, jobGuardS, permissionMode, tier, sandbox, model, effort, registryRoot } = v;
-  const worker = { permissionMode, tier, sandbox, model, effort, ...(registryRoot !== undefined ? { registryRoot } : {}) };
+  const { jobId, root, projectId, defn, target, guardS, jobGuardS, permissionMode, tier, sandbox, model, effort, registryRoot, workRoot } = v;
+  const worker = { permissionMode, tier, sandbox, model, effort, ...(registryRoot !== undefined ? { registryRoot } : {}), ...(workRoot !== undefined ? { workRoot } : {}) };
   const oneShot = defn?.trigger === "one-shot";
   const verb = oneShot ? "submit" : "wake";
 
@@ -1275,6 +1424,7 @@ async function rebuildStarted(queue: Queue, run: QueueRun, wake: Record<string, 
   return {
     jobId: run.job_id, root: v.root, projectId: v.projectId, runId: run.studio_run_id!, ...guardsFor(defn), defn, woke: wake,
     ...(v.registryRoot !== undefined ? { registryRoot: v.registryRoot } : {}), sessionId: run.session_id ?? undefined,
+    ...(run.worktree ? { workRoot: run.worktree } : {}),
     tier: options.tier, ...(options.permissionMode ? { permissionMode: options.permissionMode } : {}),
     ...(options.sandbox ? { sandbox: options.sandbox } : {}), ...(options.model ? { model: options.model } : {}),
     ...(options.effort ? { effort: options.effort } : {}),
@@ -1313,7 +1463,7 @@ export function restartResumer(queue: Queue, verbRunner: VerbRunner, prepared: M
     // A launch run may have started an engine that works the checkout: never resumed beside it
     // (the orphan end then hands the lock to it, by the launch-orphan rule).
     if (defn?.target?.skill === LAUNCH_SKILL) {
-      const cause = await launchEngineCause(() => queue.launchEngineAt(run.root));
+      const cause = await launchEngineCause(() => queue.launchEngineAt(engineRoot(run)));
       if (cause) return { resume: false, cause };
     }
     const input = restartInput(queue, run, deps);
@@ -1398,7 +1548,7 @@ export async function finishRun(
   s: Started, verbRunner: VerbRunner = runJobVerb, invoke: SkillInvoker = invokeSkill, clockMs: () => number = () => performance.now(),
   transcripts: TranscriptChecks = defaultTranscriptChecks,
 ): Promise<RunSummary> {
-  const { jobId, root, projectId, runId, guardS, defn, woke, permissionMode, tier, sandbox, registryRoot } = s;
+  const { jobId, root, projectId, runId, guardS, defn, woke, permissionMode, tier, sandbox, registryRoot, workRoot } = s;
   const rec = s.recorder, sid = s.sessionId;
   const base = { job_id: jobId, project_id: projectId, run_id: runId };
   const known = typeof woke.state === "string" ? woke.state : "unknown";
@@ -1446,12 +1596,12 @@ export async function finishRun(
       const spawnGuardS = timeoutS; // the guard this spawn runs under (sbx: its in-VM `timeout`)
       const recording = rec
         ? { ...(sid && !resuming ? { beforeSpawn: () => rec.session(sid) } : {}), onSpawn: (pid: number) => rec.worker(pid, spawnGuardS) } : {};
-      const out = await invoke(root, directive.skill, {
+      const out = await invoke(workRoot ?? root, directive.skill, {
         payload: { ...(directive.payload ?? {}), run_id: runId }, timeout_s: timeoutS, permission_mode: permissionMode,
         ...(model !== undefined ? { model } : {}), ...(effort !== undefined ? { effort } : {}),
         ...(tier ? { tier } : {}), ...(sandbox ? { sandbox } : {}), ...(knowledge ? { knowledge } : {}),
       }, undefined, {
-        ...(registryRoot !== undefined ? { vmHostRoot: registryRoot } : {}),
+        ...(workRoot !== undefined ? { vmHostRoot: workRoot } : registryRoot !== undefined ? { vmHostRoot: registryRoot } : {}),
         ...(sid ? { sessionId: sid, ...(resuming ? { resume: true } : {}) } : {}), ...recording,
       });
       // The worker's own time, from its spawn (invokeSkill's worker_elapsed_s) —
@@ -1482,7 +1632,7 @@ export async function finishRun(
         // A launch run is never resumed beside a live (or unverified) engine: it ends
         // `partial` naming it, and its end hands the lock to the engine (`endDriven`).
         const engineCause = defn?.target?.skill === LAUNCH_SKILL
-          ? await launchEngineCause(() => rec?.launchEngine ? rec.launchEngine(root) : probeLaunchEngine(defaultProbes, root))
+          ? await launchEngineCause(() => rec?.launchEngine ? rec.launchEngine(root) : probeLaunchEngine(defaultProbes, workRoot ?? root))
           : undefined;
         // sbx: the host `sbx exec` exiting never proves the in-VM worker ended — a process
         // carrying the session id (or a failed check) refuses the resume, and the run ends
@@ -1566,6 +1716,11 @@ export async function finishRun(
     ...(tripped?.length ? { guards_tripped: tripped } : {}), ...(account ? { account } : {}),
     ...(vmHold ? { hold_lock: vmHold } : {}),
   };
+  // Story 27.1 (operator-decisions §2): a launch that started an engine in the run's worktree is not
+  // finished at launch return — the studio run ends with the engine (`sweepEngines` calls `finish`).
+  if (workRoot !== undefined && !vmHold && state !== "blocked" && launchedEngine(directive.skill, block) !== undefined) {
+    return { ...base, ok: state === "complete", target: "skill", state, ...(reason ? { reason } : {}), ...extras, finish_deferred: true };
+  }
   let finish: Record<string, any>;
   try {
     finish = answered(await verbRunner(root, [

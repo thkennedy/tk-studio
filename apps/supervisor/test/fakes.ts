@@ -1,8 +1,8 @@
 // Test-side fake executables, shared by the end-to-end suites.
 import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, linkSync, mkdtempSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 /** win32 only: the launcher every fake there is a hard link of. Compiled once per bun build and cached in
  * the temp dir. It runs `bun <its own name>.js <args>` with the terminal inherited, answers that exit code,
@@ -38,4 +38,147 @@ export function fakeBin(path: string, script: string): string {
   const exe = `${base}.exe`;
   try { linkSync(fakeLauncher(), exe); } catch { copyFileSync(fakeLauncher(), exe); } // another volume
   return exe;
+}
+
+// ------------------------------------------------------------ Story 27.1: worktree fakes
+
+/** `real` mirrored at `fake`: every entry linked (a directory as a junction on win32, a file copied
+ * there), except the paths in `overrides` (relative, `/`-separated), written with their content. */
+function mirrorTree(real: string, fake: string, overrides: Record<string, string>, prefix = ""): void {
+  mkdirSync(fake, { recursive: true });
+  const own = new Set(Object.keys(overrides).filter((k) => k.startsWith(prefix)).map((k) => k.slice(prefix.length).split("/")[0]));
+  for (const name of readdirSync(real)) {
+    if (own.has(name)) continue;
+    const from = join(real, name), to = join(fake, name);
+    if (statSync(from).isDirectory()) symlinkSync(from, to, process.platform === "win32" ? "junction" : "dir");
+    else if (process.platform === "win32") copyFileSync(from, to);
+    else symlinkSync(from, to, "file");
+  }
+  for (const name of own) {
+    const rel = `${prefix}${name}`;
+    if (rel in overrides) { mkdirSync(fake, { recursive: true }); writeFileSync(join(fake, name), overrides[rel]); continue; }
+    const from = join(real, name);
+    if (existsSync(from)) mirrorTree(from, join(fake, name), overrides, `${rel}/`);
+    else {
+      for (const [k, v] of Object.entries(overrides).filter(([k]) => k.startsWith(`${rel}/`))) {
+        mkdirSync(dirname(join(fake, ...k.slice(prefix.length).split("/"))), { recursive: true });
+        writeFileSync(join(fake, ...k.slice(prefix.length).split("/")), v);
+      }
+    }
+  }
+}
+
+/** A throwaway TK_STUDIO_ROOT (operator-decisions §1: a fake studio script under a temp root, in
+ * tests only): the real studio mirrored, with `tk install` (`install_base.py`) and `tk activate`
+ * (`drift_check.py`) replaced by fakes that log their argv to `calls` and answer from `answers`
+ * (`{"install": "ok"|"fail", "drift": "clean"|"drift"}`, rewritable between runs). */
+export function fakeStudioRoot(realRoot: string = process.env.TK_STUDIO_ROOT!): { root: string; calls: () => { script: string; argv: string[] }[]; answer: (a: { install?: string; drift?: string }) => void } {
+  const root = mkdtempSync(join(tmpdir(), "tk-sup-studio-"));
+  const log = join(root, "studio-calls.jsonl"), answers = join(root, "studio-answers.json");
+  writeFileSync(answers, JSON.stringify({ install: "ok", drift: "clean" }));
+  const py = (script: string, body: string) => [
+    "import json, sys",
+    `log = ${JSON.stringify(log)}`,
+    `with open(log, "a", encoding="utf-8") as f: f.write(json.dumps({"script": ${JSON.stringify(script)}, "argv": sys.argv[1:]}) + "\\n")`,
+    `answers = json.load(open(${JSON.stringify(answers)}, encoding="utf-8"))`,
+    body,
+  ].join("\n");
+  mirrorTree(realRoot, root, {
+    "plugins/tk-studio/skills/tk-studio-install/scripts/install_base.py": py("install_base", [
+      `if answers.get("install") == "ok": print(json.dumps({"ok": True, "installed": True}))`,
+      `else:`,
+      `    print(json.dumps({"ok": False, "step": "upstream-installer", "error": "fake install failed"}))`,
+      `    sys.exit(1)`,
+    ].join("\n")),
+    "plugins/tk-studio/skills/tk-studio-activate/scripts/drift_check.py": py("drift_check", [
+      `result = answers.get("drift", "clean")`,
+      `print(json.dumps({"ok": True, "result": result}))`,
+      `sys.exit(0 if result == "clean" else 1)`,
+    ].join("\n")),
+  });
+  return {
+    root,
+    calls: () => existsSync(log) ? readFileSync(log, "utf-8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [],
+    answer: (a) => writeFileSync(answers, JSON.stringify({ install: "ok", drift: "clean", ...a })),
+  };
+}
+
+/** The fake `gh` (GH_BIN): records `{argv, cwd, gh_repo}` (its `GH_REPO`) per call to its log — and `body`, the
+ * content of a `--body-file` read at call time — and answers from a JSON file (rewritable between calls):
+ * `repo view` → the default branch; `api repos/{owner}/{repo}/branches/<b>` → `{protected}` (`protected`
+ * names the protected branches); `pr list` → `[{url}]` for each of `open` (the open PRs from the head
+ * branch; none by default); `pr create` → the PR URL, refused as gh does while `open` names one;
+ * `pr ready` → ok. `fail` names the subcommands (`"pr create"`, `"api"`, …) that exit 1. Never the network. */
+type GhAnswers = { default?: string; protected?: string[]; pr?: string; open?: string[]; fail?: string[] };
+export function fakeGh(dir: string = mkdtempSync(join(tmpdir(), "tk-sup-gh-"))): {
+  bin: string; calls: () => { argv: string[]; cwd: string; gh_repo: string | null; body?: string }[];
+  answer: (a: GhAnswers) => void;
+} {
+  const log = join(dir, "gh-calls.jsonl"), answers = join(dir, "gh-answers.json");
+  const set = (a: GhAnswers) =>
+    writeFileSync(answers, JSON.stringify({ default: "main", protected: ["main"], pr: "https://github.com/acme/widget/pull/42", open: [], fail: [], ...a }));
+  set({});
+  const bin = fakeBin(join(dir, "gh.js"), `const fs = require("node:fs");
+const argv = process.argv.slice(2);
+const bf = argv.indexOf("--body-file");
+const body = bf >= 0 ? fs.readFileSync(argv[bf + 1], "utf-8") : undefined;
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ argv, cwd: process.cwd(), gh_repo: process.env.GH_REPO ?? null, ...(body !== undefined ? { body } : {}) }) + "\\n");
+const a = JSON.parse(fs.readFileSync(${JSON.stringify(answers)}, "utf-8"));
+const sub = argv[0] === "api" ? "api" : argv.slice(0, 2).join(" ");
+if (a.fail.includes(sub)) { console.error("fake gh: " + sub + " failed"); process.exit(1); }
+if (sub === "repo view") { console.log(JSON.stringify({ defaultBranchRef: { name: a.default } })); process.exit(0); }
+if (sub === "api") {
+  const m = /^repos\\/\\{owner\\}\\/\\{repo\\}\\/branches\\/(.+)$/.exec(argv[1] ?? "");
+  if (!m) { console.error("fake gh: unknown api path"); process.exit(1); }
+  console.log(JSON.stringify({ name: m[1], protected: a.protected.includes(m[1]) })); process.exit(0);
+}
+if (sub === "pr list") { console.log(JSON.stringify(a.open.map((url) => ({ url })))); process.exit(0); }
+if (sub === "pr create") {
+  if (a.open.length) { console.error("a pull request for branch already exists: " + a.open[0]); process.exit(1); }
+  console.log(a.pr); process.exit(0);
+}
+if (sub === "pr ready") { console.log("ready"); process.exit(0); }
+console.error("fake gh: unsupported " + argv.join(" ")); process.exit(2);
+`);
+  return {
+    bin,
+    calls: () => existsSync(log) ? readFileSync(log, "utf-8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [],
+    answer: set,
+  };
+}
+
+type Git = (cwd: string, ...args: string[]) => string;
+
+/** git with a fixed test identity, failing loudly. */
+export const testGit: Git = (cwd, ...args) => {
+  const r = spawnSync("git", args, { cwd, encoding: "utf-8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" } });
+  if (r.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${r.stdout}${r.stderr}`);
+  return r.stdout.trim();
+};
+
+/** The engine's untracked runtime, ignored as in a studio project. */
+export const RUNTIME_GITIGNORE = ".bmad-loop/policy.toml\n.bmad-loop/routing.current.json\n.bmad-loop/runs/\n.tk-studio/config.local.yaml\n_bmad/render/\n";
+
+/** Make the existing folder `checkout` a git repository on `main` (its files, plus `files`, committed)
+ * with a bare `origin` beside it, pushed (so `refs/remotes/origin/main` exists: a PR base on origin), its
+ * `origin/HEAD` set to `main`. A test basing a run on another branch pushes it too. Answers the origin path. */
+export function gitInit(checkout: string, files: Record<string, string> = {}): string {
+  const origin = mkdtempSync(join(tmpdir(), "tk-sup-origin-"));
+  testGit(origin, "init", "-q", "--bare", "-b", "main");
+  testGit(checkout, "init", "-q", "-b", "main");
+  for (const [rel, content] of Object.entries(files)) { mkdirSync(dirname(join(checkout, rel)), { recursive: true }); writeFileSync(join(checkout, rel), content); }
+  testGit(checkout, "add", "-A");
+  testGit(checkout, "commit", "-q", "--allow-empty", "-m", "init");
+  testGit(checkout, "remote", "add", "origin", origin);
+  testGit(checkout, "push", "-q", "origin", "main");
+  testGit(checkout, "remote", "set-head", "origin", "main");
+  return origin;
+}
+
+/** A throwaway git repository (`gitInit`) with the runtime `.gitignore` and the files given. */
+export function gitRepo(files: Record<string, string> = {}): { checkout: string; origin: string; git: Git } {
+  const checkout = join(mkdtempSync(join(tmpdir(), "tk-sup-repo-")), "checkout");
+  mkdirSync(checkout, { recursive: true });
+  const origin = gitInit(checkout, { ".gitignore": RUNTIME_GITIGNORE, ...files });
+  return { checkout, origin, git: testGit };
 }

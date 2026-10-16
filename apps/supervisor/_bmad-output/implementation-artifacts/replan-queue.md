@@ -121,3 +121,31 @@
 - What no longer holds: nothing in 22-4's criteria. "the environment variables (bind address, token, database path, notification target)" and "the smoke test from another device" must be read as the as-built set and the https smoke.
 - Suggested adjustment: Replan (22-5 reconcile, 2026-10-07): write runbook §4.5 with the operator's two steps (enable Tailscale HTTPS certificates once; register the Google and GitHub OAuth apps with `https://<TLS_NAME>:<port>/auth/{google,github}/callback`), the variables above, and the https smoke. Add the named start errors as §8 rows. State that the certificate renews only when `start.ps1` starts (a deferral: restart it on long uptimes) and that there is no sign-out (rotate the session secret to revoke). 22-4 has no entry in this manifest; apply this when it is planned there.
 - Status: open
+
+## 27-2-the-supervisor-holds-the-engine-and-nothing-else-starts-one — scope: stories — from 27-1-every-run-gets-its-own-worktree-and-ends-in-a-pr — 2026-10-16
+
+- What changed: a launch run's `ended` is deferred to the engine-end sweep (`sweepEngines`, src/worktree.ts) after the close-out; a `paused` run keeps its worktree and the checkout lock; the engine lock's `root` is the worktree (`handToEngine`/`engineRoot`, key `checkoutKey(root)` unchanged); `releaseEngineLock` and `keepEngine` decide when the lock is let go.
+- What no longer holds: "releases the pin (`sbx stop`) when the run ends and no other run holds the sandbox"
+- Suggested adjustment: Replan (27-1 reconcile, 2026-10-16): release the pin at the deferred `ended` (after the close-out), never at launch return; a `paused` run keeps its pin with its worktree and lock (operator-decisions §2). The engine is probed and killed at the worktree's VM path (`toVmPath(worktree)`); a hand-started run is detected in the checkout, never in a worktree.
+- Status: closed — applied to the unstarted 27-2 entry's invoke_dev_with by the 27-1 gate (2026-10-16)
+
+## 27-3-a-paused-run-whose-story-landed-is-closed-out-by-the-service — scope: stories — from 27-1-every-run-gets-its-own-worktree-and-ends-in-a-pr — 2026-10-16
+
+- What changed: `paused` is a `RunState` (runs-table rebuild, counted live by `runs_one_live` and enqueue idempotency); a pause pushes the branch and opens a draft PR whose URL is on the `paused` event; cancelling a paused run reuses that draft and runs `gh pr ready`; `closeOut` adopts an open PR for the run branch (`gh pr list --head`); 27.1 added the kinds `closing-out` (a lease) and `closed_out` (a result).
+- What no longer holds: "relaunches the epic through `tk-studio-launch` … under the same queue run with a `close-out` event"
+- Suggested adjustment: Replan (27-1 reconcile, 2026-10-16): close out a `paused` run in its kept worktree on its `supervisor/run-<id>` branch and reuse its draft PR (never a second `gh pr create`). Name 27-3's event `close-out` distinct from 27.1's `closing-out`/`closed_out`, and leave the PR close-out lease alone. The queue state after the relaunch comes from the engine, not from `launched.detail.end`.
+- Status: closed — applied to the unstarted 27-3 entry's invoke_dev_with by the 27-1 gate (2026-10-16)
+
+## 27-4-a-host-tier-verify-leg-runs-before-any-pr-opens — scope: stories — from 27-1-every-run-gets-its-own-worktree-and-ends-in-a-pr — 2026-10-16
+
+- What changed: the PR opens inside `closeOut` (src/worktree.ts), reached from `sweepEngines`, `mirror`, the cancel path and the drive-failure end. The run's end state and the deferred `finish` state are the ones mirrored at launch return (`launched.detail.end`, D9), not derived from the engine's outcome.
+- What no longer holds: "after the engine completes and before the PR opens" (there is more than one path to the PR)
+- Suggested adjustment: Replan (27-1 reconcile, 2026-10-16): run the host verify inside `closeOut` before push/PR on every path that has an engine that completed, so no path opens a PR unverified. A red verify overrides `launched.detail.end` (`partial` naming the command) for both `ended` and the deferred `jobrun finish`, and the PR opens with `--draft`. This also carries operator-decisions §2's final `finish` status (`ok` only when every story landed and the verify is green).
+- Status: closed — applied to the unstarted 27-4 entry's invoke_dev_with by the 27-1 gate (2026-10-16)
+
+## 27-5-the-plan-follows-the-run-and-the-deferred-work-is-paid — scope: stories — from 27-1-every-run-gets-its-own-worktree-and-ends-in-a-pr — 2026-10-16
+
+- What changed: new event kinds `launched`, `paused`, `materialised`, `closing-out` (lease, plus an ownerless release detail), `closed_out` (`raced`/`pending`) and a late close-out `lock-released`; `ended` is written once, after the close-out, with `detail.pr`/`no_changes`; `recover` skips runs carrying `launched`; the deferred `finish` passes `--status-block` with the PR URL in its artifacts. Known gap (consult 1): a run `recover` ends as an orphan before `markLaunched` is not closed out and keeps its worktree.
+- What no longer holds: "the next recovery ends it, and no run is left unended" (an orphan with a worktree ends but is never closed out), and "runbook §4 names the new events"
+- Suggested adjustment: Replan (27-1 reconcile, 2026-10-16): key the plan pull-back on `ended.detail.pr` (a late PR is only on the appended `closed_out` event). In recovery, close out a worktree run `recover` ends as an orphan once its processes are confirmed dead, through `closeOut`. List 27.1's event kinds in runbook §4. A refused deferred `finish` (DW-23) keeps the worker's reason.
+- Status: closed — applied to the unstarted 27-5 entry's invoke_dev_with by the 27-1 gate (2026-10-16)

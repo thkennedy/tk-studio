@@ -4,6 +4,7 @@
  *
  *   jobs    one row per (job, checkout): the resolved definition `resolve` served
  *   runs    queue runs — `queued` → `running` → complete|partial|blocked|cancelled
+ *           (Story 27.1: a launch run whose engine paused rests `paused` until it ends)
  *           (terminal is immutable; a trigger refuses any update of one — but its
  *           end-hygiene marker `notified`: NULL → lease → done, a stale lease re-leased, Story 22.3)
  *   events  one row per transition, committed in the same transaction
@@ -12,7 +13,7 @@
  *
  * Every transition runs in one `BEGIN IMMEDIATE` transaction with its event.
  * Minting is idempotent: while a run of the same job on the same checkout is
- * `queued` or `running`, `enqueue` mints nothing and answers that run.
+ * `queued`, `running` or `paused` (Story 27.1), `enqueue` mints nothing and answers that run.
  *
  * The database path comes from the environment only (`TK_SUPERVISOR_DB`) and
  * must lie outside the studio store (TK_STUDIO_HOME when set, and ~/.tk-studio
@@ -57,7 +58,9 @@ type Env = Record<string, string | undefined>;
 
 export const TERMINAL_STATES = ["complete", "partial", "blocked", "cancelled"] as const;
 export type TerminalState = (typeof TERMINAL_STATES)[number];
-export type RunState = "queued" | "running" | TerminalState;
+/** Story 27.1: `paused` — a launch run whose engine paused: it keeps its worktree and its checkout
+ * lock, and its draft PR is recorded on the `paused` event; it is never terminal. */
+export type RunState = "queued" | "running" | "paused" | TerminalState;
 export const isTerminal = (s: unknown): s is TerminalState => (TERMINAL_STATES as readonly unknown[]).includes(s);
 
 export const ORPHANED_REASON = "orphaned: supervisor restart";
@@ -438,8 +441,13 @@ export interface QueueRun {
   sandbox: string | null;
   model: string | null;
   effort: string | null;
-  /** Story 22.1: the submission's `base_ref` (null: none given) — stored, never acted on here. */
+  /** Story 22.1: the submission's `base_ref`; Story 27.1: the base the run's worktree is cut from
+   * and its PR targets (resolved at claim to the default branch when none was given). */
   base_ref: string | null;
+  /** Story 27.1: `default` when `base_ref` was resolved at claim (none given); null otherwise. */
+  base_ref_source: string | null;
+  /** Story 27.1: the run's git worktree (`<work>/worktrees/<project>/<run id>`), null until cut. */
+  worktree: string | null;
   /** Story 21.6: the worker's pre-minted session id, its pid (POSIX: its process
    * group) and that pid's start time, and the wake answer (JSON: directive, routing, state). */
   session_id: string | null;
@@ -477,7 +485,7 @@ export interface StudioOutcome { run_id: string; state: string }
 
 /** What the pacer reads for one (job, checkout). */
 export interface JobPacing {
-  /** Runs that hold the job: `running`, or `queued` under a live owner — never overlapped. */
+  /** Runs that hold the job: `running`, `paused` (Story 27.1), or `queued` under a live owner — never overlapped. */
   live: QueueRun[];
   /** Ownerless (or dead-owner) `queued` runs: the tick's `runJob` adopts and drives the oldest. */
   adoptable: QueueRun[];
@@ -560,16 +568,16 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE TABLE IF NOT EXISTS runs (
   run_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, checkout TEXT NOT NULL, root TEXT NOT NULL,
   project_id TEXT, target TEXT,
-  state TEXT NOT NULL CHECK (state IN ('queued','running','complete','partial','blocked','cancelled')),
+  state TEXT NOT NULL CHECK (state IN ('queued','running','complete','partial','blocked','cancelled','paused')),
   reason TEXT, owner_pid INTEGER, owner_host TEXT, owner_nonce TEXT, owner_start TEXT,
   studio_run_id TEXT, engine_run_id TEXT, verb_started TEXT, verb_snapshot TEXT, definition TEXT,
   permission_mode TEXT, tier TEXT, sandbox TEXT, model TEXT, effort TEXT, base_ref TEXT,
   session_id TEXT, worker_pid INTEGER, worker_start TEXT, worker_guard_s INTEGER, wake TEXT,
-  editor_in_the_loop INTEGER, notified TEXT,
+  editor_in_the_loop INTEGER, notified TEXT, base_ref_source TEXT, worktree TEXT,
   created TEXT NOT NULL, updated TEXT NOT NULL,
   FOREIGN KEY (job_id, checkout) REFERENCES jobs (job_id, checkout)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS runs_one_live ON runs (job_id, checkout) WHERE state IN ('queued','running');
+CREATE UNIQUE INDEX IF NOT EXISTS runs_one_live ON runs (job_id, checkout) WHERE state IN ('queued','running','paused');
 CREATE TABLE IF NOT EXISTS events (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, at TEXT NOT NULL, kind TEXT NOT NULL,
   from_state TEXT, to_state TEXT NOT NULL, detail TEXT
@@ -628,7 +636,42 @@ const ADDED_RUN_COLUMNS = [
   ["permission_mode", "TEXT"], ["tier", "TEXT"], ["sandbox", "TEXT"], ["model", "TEXT"], ["effort", "TEXT"],
   ["session_id", "TEXT"], ["worker_pid", "INTEGER"], ["worker_start", "TEXT"], ["wake", "TEXT"], ["worker_guard_s", "INTEGER"],
   ["base_ref", "TEXT"], ["editor_in_the_loop", "INTEGER"], [NOTIFIED_COLUMN, "TEXT"],
+  ["base_ref_source", "TEXT"], ["worktree", "TEXT"],
 ] as const;
+
+/** Story 27.1: the one-live-run index — a `paused` run is the job's live run too (enqueue mints no second). */
+const LIVE_INDEX = "CREATE UNIQUE INDEX IF NOT EXISTS runs_one_live ON runs (job_id, checkout) WHERE state IN ('queued','running','paused')";
+
+/** Story 27.1: an index from before `paused` is dropped and recreated with it. */
+function widenLiveIndex(db: Database): void {
+  const row = db.query("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'runs_one_live'").get() as { sql: string } | null;
+  if (row?.sql.includes("'paused'")) return;
+  db.exec("DROP INDEX IF EXISTS runs_one_live");
+  db.exec(LIVE_INDEX);
+}
+
+/** Story 27.1: a runs table whose state CHECK predates `paused` is rebuilt once (SQLite cannot alter
+ * a CHECK): the same columns and rows, the CHECK widened, the live-run index recreated. */
+function widenStateCheck(db: Database): void {
+  const row = db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'runs'").get() as { sql: string } | null;
+  if (!row || row.sql.includes("'paused'")) return;
+  const check = /CHECK\s*\(\s*state\s+IN\s*\(([^)]*)\)\s*\)/;
+  if (!check.test(row.sql)) return;
+  const ddl = row.sql.replace(check, (_m, list: string) => `CHECK (state IN (${list.trim()},'paused'))`)
+    .replace(/^CREATE TABLE\s+(?:IF NOT EXISTS\s+)?["`]?runs["`]?/i, "CREATE TABLE runs_widened");
+  const cols = (db.query("PRAGMA table_info(runs)").all() as { name: string }[]).map((c) => c.name).join(", ");
+  db.exec(ddl);
+  db.exec(`INSERT INTO runs_widened (${cols}) SELECT ${cols} FROM runs`);
+  db.exec("DROP TABLE runs");
+  db.exec("ALTER TABLE runs_widened RENAME TO runs");
+  db.exec(LIVE_INDEX);
+}
+
+/** Story 27.1: where a run's launched engine is probed — its worktree (the engine's `--project`), else its
+ * root. A worktree the close-out already removed is never probed (the probe would fail there and fail
+ * closed into an unverified engine forever): its root then. */
+export const engineRoot = (run: Pick<QueueRun, "root"> & { worktree?: string | null }): string =>
+  run.worktree && existsSync(run.worktree) ? run.worktree : run.root;
 
 const now = () => new Date().toISOString();
 /** The newest lease time a sweep at `at` may take over (Story 22.3). */
@@ -706,6 +749,8 @@ export class Queue {
       if (!have.has(NOTIFIED_COLUMN)) {
         this.db.query(`UPDATE runs SET ${NOTIFIED_COLUMN} = ? WHERE state IN ('complete','partial','blocked','cancelled')`).run(NOTIFIED_BEFORE);
       }
+      widenStateCheck(this.db);
+      widenLiveIndex(this.db);
       this.db.exec(immutabilityTriggers(columns()));
     }).immediate();
   }
@@ -756,7 +801,7 @@ export class Queue {
     const runs = this.db.query("SELECT * FROM runs WHERE job_id = ? AND checkout = ? ORDER BY created, rowid").all(jobId, checkout) as QueueRun[];
     const live: QueueRun[] = [], adoptable: QueueRun[] = [];
     for (const r of runs) {
-      if (r.state === "running" || (r.state === "queued" && this.ownerLive(ownerOf(r), self))) live.push(r);
+      if (r.state === "running" || r.state === "paused" || (r.state === "queued" && this.ownerLive(ownerOf(r), self))) live.push(r);
       else if (r.state === "queued") adoptable.push(r);
     }
     // Terminal runs in the order they ended (the ending event's seq; one with no event first, by `updated`).
@@ -863,7 +908,7 @@ export class Queue {
     const checkout = checkoutKey(input.root);
     return this.db.transaction(() => {
       const live = this.db.query(
-        "SELECT * FROM runs WHERE job_id = ? AND checkout = ? AND state IN ('queued','running') ORDER BY created LIMIT 1",
+        "SELECT * FROM runs WHERE job_id = ? AND checkout = ? AND state IN ('queued','running','paused') ORDER BY created LIMIT 1",
       ).get(input.jobId, checkout) as QueueRun | null;
       if (live) {
         if (input.permissionMode) this.writePermissionMode(live, input.permissionMode);
@@ -964,6 +1009,10 @@ export class Queue {
           return { claimed: false, run, why: "terminal", reason: `run ${runId} already ended ${run.state}` };
         }
         const mine = run.owner_nonce !== null && run.owner_nonce === owner.nonce;
+        if (run.state === "paused") {
+          // Story 27.1: a paused launch run is continued by its resume, never claimed again.
+          return { claimed: false, run, why: "running", reason: `run ${runId} is paused (its engine paused; the resume continues it)` };
+        }
         if (run.state === "running") {
           if (mine) return { claimed: true, run };
           return {
@@ -980,7 +1029,13 @@ export class Queue {
         const detail: Record<string, unknown> = { owner: ownerDetail(owner) };
         if (lock && lock.run_id !== runId) {
           let holder: Holder | undefined;
-          if (lock.kind === "engine") {
+          const pausedHolder = this.get(lock.run_id)?.state === "paused";
+          if (pausedHolder) {
+            // Story 27.1: a paused run keeps its checkout lock (and its worktree) for the resume.
+            holder = { kind: lock.kind, run_id: lock.run_id, job_id: lock.job_id,
+              ...(lock.kind === "engine" ? { engine_run_id: lock.engine_run_id } : { pid: lock.owner_pid, host: lock.owner_host }),
+              detail: "its run is paused: the lock is kept for the resume" };
+          } else if (lock.kind === "engine") {
             const probe = p.engine!;
             if (probe.live) {
               const engineId = lock.engine_run_id ?? (probe.run_ids?.length ? probe.run_ids.join(",") : null);
@@ -1053,8 +1108,9 @@ export class Queue {
     const mine = run.owner_nonce !== null && run.owner_nonce === self.nonce;
     if (!mine && (out.ownerLive = this.ownerLive(ownerOf(run), self))) return out;
     if (!lock || lock.run_id === runId) return out;
+    if (this.get(lock.run_id)?.state === "paused") return out; // Story 27.1: held for the resume, nothing to probe
     if (lock.kind === "engine") {
-      out.engine = await this.probes.engineLive(lock.root, lock.engine_run_id);
+      out.engine = await this.probes.engineLive(this.lockRoot(lock), lock.engine_run_id);
       return out;
     }
     // A running holder with a live owner — or a run ended with no worker recorded that kept its
@@ -1071,8 +1127,16 @@ export class Queue {
     const defn = held ? this.definition(held) : this.definition({ job_id: lock.job_id, checkout: lock.checkout });
     out.launch = !out.holderLive && defn?.target?.skill === LAUNCH_SKILL;
     // A stale launch-run holder may have started a detached engine: probe before taking over (AD: one engine per checkout).
-    if (out.launch) out.engine = await this.probes.engineLive(lock.root, null);
+    if (out.launch) out.engine = await this.probes.engineLive(held ? engineRoot(held) : this.lockRoot(lock), null);
     return out;
+  }
+
+  /** Where a lock's engine is probed: its recorded root, else — a worktree since removed — its run's root
+   * (as `engineRoot`: a removed path is never probed). */
+  private lockRoot(lock: LockRow): string {
+    if (existsSync(lock.root)) return lock.root;
+    const run = this.get(lock.run_id);
+    return run ? engineRoot(run) : lock.root;
   }
 
   /** The run reached the studio's minting verb: recorded just before
@@ -1192,15 +1256,16 @@ export class Queue {
     }).immediate();
   }
 
-  /** Put an engine holder on the checkout lock for run `run` (inside a transaction). */
-  private handToEngine(run: Pick<QueueRun, "checkout" | "root" | "run_id" | "job_id">, engineRunId: string | null): void {
+  /** Put an engine holder on the checkout lock for run `run` (inside a transaction). The lock stays
+   * keyed by the checkout; its `root` is where the engine is probed (Story 27.1: the run's worktree). */
+  private handToEngine(run: Pick<QueueRun, "checkout" | "root" | "run_id" | "job_id"> & { worktree?: string | null }, engineRunId: string | null): void {
     this.db.query(
       `INSERT INTO locks (checkout, root, kind, run_id, job_id, owner_pid, owner_host, owner_nonce, owner_start, engine_run_id, acquired)
        VALUES (?, ?, 'engine', ?, ?, NULL, NULL, NULL, NULL, ?, ?)
-       ON CONFLICT (checkout) DO UPDATE SET kind = 'engine', run_id = excluded.run_id, job_id = excluded.job_id,
+       ON CONFLICT (checkout) DO UPDATE SET kind = 'engine', root = excluded.root, run_id = excluded.run_id, job_id = excluded.job_id,
          owner_pid = NULL, owner_host = NULL, owner_nonce = NULL, owner_start = NULL,
          engine_run_id = excluded.engine_run_id, acquired = excluded.acquired`,
-    ).run(run.checkout, run.root, run.run_id, run.job_id, engineRunId, now());
+    ).run(run.checkout, engineRoot(run), run.run_id, run.job_id, engineRunId, now());
   }
 
   /** The launch-orphan rule over this queue's probes (`probeLaunchEngine`). */
@@ -1215,6 +1280,161 @@ export class Queue {
     return this.launchEngine(root);
   }
 
+  // ---------------------------------------------------------- worktrees and engine lifetimes (Story 27.1)
+
+  /** A `base_ref` resolved at claim (the submission named none): recorded on the running run with
+   * its source (`default`), in a `base-ref` event. */
+  recordBaseRef(runId: string, baseRef: string, source: "default"): QueueRun {
+    return this.recordOnRunning(runId, "recordBaseRef", "base-ref", { base_ref: baseRef, base_ref_source: source }, { base_ref: baseRef, base_ref_source: source });
+  }
+
+  /** The run's git worktree, once cut: its path on the run, a `worktree` event naming it and its branch. */
+  recordWorktree(runId: string, path: string, detail: { branch: string; base_ref: string; base_ref_source?: string | null }): QueueRun {
+    return this.recordOnRunning(runId, "recordWorktree", "worktree", { worktree: path }, { path, ...detail });
+  }
+
+  /** `tk-studio-launch` returned with an engine started (operator-decisions §2): the run stays
+   * `running` and live for the pacer, its driver lets go (owner cleared, so `recover` never orphans
+   * it), the checkout lock is handed to the engine, and a `launched` event carries the status block,
+   * the engine run id and the end the close-out writes once the engine's life ends (`end`). */
+  markLaunched(runId: string, engineRunId: string, detail: { status_block?: unknown; end: Record<string, unknown> }): QueueRun {
+    return this.db.transaction(() => {
+      const run = this.must(runId);
+      if (isTerminal(run.state)) throw new RunTerminal(runId, run.state);
+      if (run.state !== "running") throw new Error(`markLaunched: queue run '${runId}' is ${run.state}, not running`);
+      this.db.query(
+        `UPDATE runs SET engine_run_id = ?, owner_pid = NULL, owner_host = NULL, owner_nonce = NULL, owner_start = NULL, updated = ? WHERE run_id = ?`,
+      ).run(engineRunId, now(), runId);
+      const held = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(run.checkout) as LockRow | null;
+      let lock: unknown = "not held";
+      if (!held || held.run_id === runId) { this.handToEngine(run, engineRunId); lock = { handed_to_engine: engineRunId }; }
+      this.event(runId, "launched", run.state, run.state, { engine_run_id: engineRunId, ...detail, lock });
+      return this.must(runId);
+    }).immediate();
+  }
+
+  /** The runs the engine-end sweep probes: `running` launch runs whose driver let go of them after
+   * the launch (`markLaunched`), and `paused` runs — each with its worktree and engine recorded. */
+  awaitingEngine(): QueueRun[] {
+    return this.db.query(
+      `SELECT * FROM runs WHERE worktree IS NOT NULL AND (
+         (engine_run_id IS NOT NULL
+           AND (state = 'paused' OR (state = 'running' AND EXISTS (SELECT 1 FROM events e WHERE e.run_id = runs.run_id AND e.kind = 'launched'))))
+         OR (state IN ('complete','partial','blocked','cancelled')
+           AND EXISTS (SELECT 1 FROM events e WHERE e.run_id = runs.run_id AND e.kind = 'ended' AND json_extract(e.detail, '$.closeout.result') = 'skipped')
+           AND NOT EXISTS (SELECT 1 FROM events e WHERE e.run_id = runs.run_id AND e.kind = 'closed_out')))
+       ORDER BY created, rowid`,
+    ).all() as QueueRun[];
+  }
+
+  /** A close-out taken (`takeForCloseOut`) that did not finish: the owner released (only while it is
+   * still `self`, on a run that is not terminal), so a later sweep can take the run again. A late
+   * close-out of a terminal run (`takeEndedCloseOut`) likewise: its `closing-out` lease, while still
+   * `self`'s and the run has no `closed_out`, let go of by an appended `closing-out` event with no
+   * owner (the terminal row is never updated). */
+  releaseCloseOut(runId: string, self: Owner = selfOwner()): void {
+    this.db.transaction(() => {
+      const run = this.get(runId);
+      if (run && isTerminal(run.state)) {
+        const evs = this.events(runId);
+        if (evs.some((e) => e.kind === "closed_out")) return;
+        const lease = evs.findLast((e) => e.kind === "closing-out")?.detail?.owner as Owner | null | undefined;
+        if (lease?.nonce === self.nonce) this.event(runId, "closing-out", run.state, run.state, { owner: null, released: ownerDetail(self) });
+        return;
+      }
+      this.db.query(`UPDATE runs SET owner_pid = NULL, owner_host = NULL, owner_nonce = NULL, owner_start = NULL, updated = ?
+         WHERE run_id = ? AND owner_nonce = ? AND state IN ('running','paused')`).run(now(), runId, self.nonce);
+    }).immediate();
+  }
+
+  /** A terminal run whose close-out was skipped (something may still have been live): the late
+   * close-out is taken atomically by appending a `closing-out` lease event (the terminal row is never
+   * updated) — refused when it already has its `closed_out` event, or a lease held by a live owner
+   * (a lease let go of, `releaseCloseOut`, has no owner). */
+  takeEndedCloseOut(runId: string, self: Owner = selfOwner()): boolean {
+    return this.db.transaction(() => {
+      const run = this.get(runId);
+      if (!run || !isTerminal(run.state)) return false;
+      const evs = this.events(runId);
+      if (evs.some((e) => e.kind === "closed_out")) return false;
+      const lease = evs.findLast((e) => e.kind === "closing-out")?.detail?.owner as Owner | undefined;
+      if (lease && this.ownerLive(lease, self)) return false;
+      this.event(runId, "closing-out", run.state, run.state, { owner: ownerDetail(self) });
+      return true;
+    }).immediate();
+  }
+
+  /** What may still be live around a run before its worktree is closed out: its driver (a kept run
+   * lock under a live owner), its recorded worker, or an engine in its worktree. Undefined: all dead. */
+  async closeOutBlocker(run: QueueRun, self: Owner = selfOwner(), opts: { asDriver?: boolean } = {}): Promise<string | undefined> {
+    // `asDriver`: asked by the run's own driver (a drive that threw), which is not what may still work the worktree.
+    if (!opts.asDriver) {
+      const lock = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(run.checkout) as LockRow | null;
+      if (lock?.kind === "run" && lock.run_id === run.run_id && this.ownerLive(ownerOf(lock), self)) return "its driver is live";
+      if (!isTerminal(run.state) && this.ownerLive(ownerOf(run), self)) return "its driver is live";
+    }
+    const w = await this.recordedWorker(run, false);
+    if (w.mayRun) return `its recorded worker may still run (${w.worker?.outcome ?? "unknown"})`;
+    if (run.engine_run_id || this.definition(run)?.target?.skill === LAUNCH_SKILL) {
+      const { holder, engine } = await this.launchEngine(engineRoot(run));
+      if (holder) return `an engine may still work the worktree (${holder.id ?? String(engine.detail ?? "unverified")})`;
+    }
+    return undefined;
+  }
+
+  /** A terminal run whose worktree was closed out and removed (its engine confirmed dead first): the
+   * engine lock it still holds — which would be probed in the removed worktree — is released, with a
+   * `lock-released` event. False when it holds none. */
+  releaseEngineLock(runId: string, why: string): boolean {
+    return this.db.transaction(() => {
+      const run = this.get(runId);
+      if (!run || !isTerminal(run.state)) return false;
+      if (!this.db.query("DELETE FROM locks WHERE checkout = ? AND run_id = ? AND kind = 'engine'").run(run.checkout, runId).changes) return false;
+      this.event(runId, "lock-released", run.state, run.state, { why });
+      return true;
+    }).immediate();
+  }
+
+  /** The close-out takes a run awaiting its engine: atomically, only while no live process holds it
+   * (no owner, or a dead one), so one close-out per engine end (a PR is never opened twice). */
+  takeForCloseOut(runId: string, self: Owner = selfOwner()): QueueRun | null {
+    const seen = this.get(runId);
+    if (!seen || (seen.state !== "running" && seen.state !== "paused")) return null;
+    if (seen.owner_pid !== null && this.ownerLive(ownerOf(seen), self)) return null;
+    return this.db.transaction(() => {
+      const cur = this.get(runId);
+      if (!cur || cur.state !== seen.state || cur.owner_nonce !== seen.owner_nonce || cur.owner_pid !== seen.owner_pid) return null;
+      this.db.query("UPDATE runs SET owner_pid = ?, owner_host = ?, owner_nonce = ?, owner_start = ?, updated = ? WHERE run_id = ?")
+        .run(self.pid, self.host, self.nonce, self.start ?? null, now(), runId);
+      return this.must(runId);
+    }).immediate();
+  }
+
+  /** The engine paused (operator-decisions §2): the run goes `paused`, keeps its worktree and its
+   * checkout lock, and the `paused` event carries the close-out (the draft PR's URL). */
+  markPaused(runId: string, detail: Record<string, unknown>): QueueRun {
+    return this.db.transaction(() => {
+      const run = this.must(runId);
+      if (isTerminal(run.state)) throw new RunTerminal(runId, run.state);
+      if (run.state !== "running") throw new Error(`markPaused: queue run '${runId}' is ${run.state}, not running`);
+      this.db.query("UPDATE runs SET state = 'paused', owner_pid = NULL, owner_host = NULL, owner_nonce = NULL, owner_start = NULL, updated = ? WHERE run_id = ?")
+        .run(now(), runId);
+      this.event(runId, "paused", run.state, "paused", detail);
+      return this.must(runId);
+    }).immediate();
+  }
+
+  /** The engine's life ended and the close-out ran: the one `ended` event (the PR URL or "no
+   * changes" in `detail`), the engine run id kept on the run, and the checkout lock it held released. */
+  endEngine(runId: string, state: TerminalState, reason: string | null | undefined, opts: { detail?: Record<string, unknown>; stop?: StopDetail } = {}): QueueRun {
+    return this.db.transaction(() => {
+      const run = this.must(runId);
+      if (isTerminal(run.state)) throw new RunTerminal(runId, run.state);
+      this.writeEnd(run, state, reason, { kind: "ended", ...opts, keepEngine: true });
+      return this.must(runId);
+    }).immediate();
+  }
+
   /** `end` for a run this process drove. When the run reached the minting
    * verb, its driven definition targets `tk-studio-launch` and no engine is
    * named (a timeout, a missing status block, a `blocked` launch with no
@@ -1222,11 +1442,13 @@ export class Queue {
    * transaction, by the launch-orphan rule `recover` uses — the core may have
    * started an engine that still works the checkout. */
   async endDriven(runId: string, state: TerminalState, reason?: string | null,
-    opts: { engineRunId?: string; detail?: Record<string, unknown>; stop?: StopDetail; holdLock?: string } = {}): Promise<QueueRun> {
+    opts: { engineRunId?: string | null; detail?: Record<string, unknown>; stop?: StopDetail; holdLock?: string; keepEngine?: boolean } = {}): Promise<QueueRun> {
     try {
-      const run = opts.engineRunId ? null : this.get(runId);
+      // An engine already named (Story 27.1: `null` — one the caller's own probe found unverified), or one
+      // the caller's probe confirmed dead (`keepEngine`), is not probed again.
+      const run = opts.engineRunId !== undefined || opts.keepEngine ? null : this.get(runId);
       if (run && run.verb_started && !isTerminal(run.state) && this.definition(run)?.target?.skill === LAUNCH_SKILL) {
-        const { holder, engine } = await this.launchEngine(run.root);
+        const { holder, engine } = await this.launchEngine(engineRoot(run));
         return this.end(runId, state, reason, { ...opts, ...(holder ? { engineRunId: holder.id } : {}), detail: { ...opts.detail, engine } });
       }
       return this.end(runId, state, reason, opts);
@@ -1264,9 +1486,11 @@ export class Queue {
    * `claim` and `recover` free only once `recordedWorker` says it may no longer run
    * (sbx: its in-VM deadline passed). `driverLive` (Story 22.1, a cancel): the run's live
    * driver has recorded no worker yet — `holdLock` keeps the lock without one; the driver's
-   * `endDriven` frees it, else `claim`/`recover` once that owner is dead. */
+   * `endDriven` frees it, else `claim`/`recover` once that owner is dead. `keepEngine` (Story 27.1):
+   * the caller confirmed the run's engine dead (its worktree closed out) — the engine id is kept on
+   * the run and its lock released, never handed to that engine. */
   end(runId: string, state: TerminalState, reason?: string | null,
-    opts: { engineRunId?: string | null; detail?: Record<string, unknown>; from?: RunState; stop?: StopDetail; holdLock?: string; driverLive?: boolean } = {}): QueueRun {
+    opts: { engineRunId?: string | null; detail?: Record<string, unknown>; from?: RunState; stop?: StopDetail; holdLock?: string; driverLive?: boolean; keepEngine?: boolean } = {}): QueueRun {
     if (!isTerminal(state)) throw new Error(`end: '${state}' is not a terminal state`);
     return this.db.transaction(() => {
       const run = this.must(runId);
@@ -1281,12 +1505,14 @@ export class Queue {
    * to an engine), the ending event (`ended`, or `orphaned` from `recover`), and
    * a `stop` recorded in the same transaction. The one end path. */
   private writeEnd(run: QueueRun, state: TerminalState, reason: string | null | undefined,
-    opts: { kind: "ended" | "orphaned"; engineRunId?: string | null; detail?: Record<string, unknown>; stop?: StopDetail; holdLock?: string; driverLive?: boolean }): void {
+    opts: { kind: "ended" | "orphaned"; engineRunId?: string | null; detail?: Record<string, unknown>; stop?: StopDetail; holdLock?: string; driverLive?: boolean;
+      /** Story 27.1 (`endEngine`): the engine's life is over — its id stays on the run, any lock this run holds is released. */
+      keepEngine?: boolean }): void {
     const runId = run.run_id;
     this.db.query(
       `UPDATE runs SET state = ?, reason = ?, owner_pid = NULL, owner_host = NULL, owner_nonce = NULL, owner_start = NULL,
          engine_run_id = ?, updated = ? WHERE run_id = ?`,
-    ).run(state, reason ?? null, opts.engineRunId ?? null, now(), runId);
+    ).run(state, reason ?? null, opts.keepEngine ? run.engine_run_id ?? opts.engineRunId ?? null : opts.engineRunId ?? null, now(), runId);
     const detail: Record<string, unknown> = { ...(opts.detail ?? {}) };
     const held = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(run.checkout) as LockRow | null;
     const hasWorker = run.worker_pid !== null && run.worker_pid !== undefined;
@@ -1294,6 +1520,8 @@ export class Queue {
       // Its recorded worker may still run: the lock stays with the ended run (freed by `claim`/`recover`
       // once `recordedWorker` says it may no longer run — sbx: at its in-VM deadline).
       detail.lock = { held: opts.holdLock, ...(hasWorker && run.tier === "sbx" ? { until: new Date(this.sbxDeadline(run).ms).toISOString() } : {}) };
+    } else if (opts.keepEngine) {
+      if (this.db.query("DELETE FROM locks WHERE checkout = ? AND run_id = ?").run(run.checkout, runId).changes) detail.lock = "released";
     } else if (opts.engineRunId !== undefined) {
       const lock = held;
       if (!lock || lock.run_id === runId) {
@@ -1385,8 +1613,12 @@ export class Queue {
    * once its recorded worker may no longer run (`released`), else it is `held`. */
   async recover(ops: StudioOps, self: Owner = selfOwner()): Promise<RecoverReport> {
     const report: RecoverReport = { ended: [], requeued: [], resumed: [] };
+    // A launched run (its driver let go at `launched`) carries an owner only as a close-out lease (the
+    // sweep's or a cancel's): a dead lease is re-taken by the engine-end sweep, never resumed or orphaned here.
     const candidates = (this.db.query(
-      "SELECT * FROM runs WHERE state IN ('queued','running') AND owner_pid IS NOT NULL ORDER BY created, rowid",
+      `SELECT * FROM runs WHERE state IN ('queued','running') AND owner_pid IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM events e WHERE e.run_id = runs.run_id AND e.kind = 'launched')
+       ORDER BY created, rowid`,
     ).all() as QueueRun[]).filter((r) => r.owner_nonce !== self.nonce && !this.ownerLive(ownerOf(r), self));
     const unchanged = (c: QueueRun, now_: QueueRun | null) =>
       !!now_ && now_.state === c.state && now_.owner_nonce === c.owner_nonce && now_.owner_pid === c.owner_pid
@@ -1523,7 +1755,7 @@ export class Queue {
       // A launch run may have started a detached engine before the handover: probe before releasing the lock.
       let engine: Record<string, unknown> | undefined;
       let engineHolder: { id: string | null } | undefined;
-      if (defn?.target?.skill === LAUNCH_SKILL) ({ holder: engineHolder, engine } = await this.launchEngine(c.root));
+      if (defn?.target?.skill === LAUNCH_SKILL) ({ holder: engineHolder, engine } = await this.launchEngine(engineRoot(c)));
       const trips = noResume?.trips?.length ? noResume.trips : undefined;
       const done = this.db.transaction(() => {
         const cur = this.get(c.run_id);

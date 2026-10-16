@@ -61,6 +61,13 @@
     `27-2-the-supervisor-holds-the-engine-and-nothing-else-starts-one-*.md`, and a file
     named `27-2-the-supervisor-holds-the-engine-and-nothing-else-starts-one.md` is read
     as pending (loop deficiency 1, story 21-6).
+    Replan (27-1 reconcile, 2026-10-16): release the pin at the deferred `ended` (after
+    the close-out), never at launch return; a `paused` run keeps its pin with its
+    worktree and lock (operator-decisions §2). The engine is probed and killed at the
+    worktree's VM path (`toVmPath(worktree)`); a hand-started run is detected in the
+    checkout, never in a worktree.
+    Oversize (plans/27-2.md Risks): HALT and record it if the Files list grows past the
+    plan's 11 files.
 
 - id: "27-3-a-paused-run-whose-story-landed-is-closed-out-by-the-service"
   title: "A Paused Run Whose Story Landed Is Closed Out by the Service"
@@ -89,6 +96,11 @@
     `27-3-a-paused-run-whose-story-landed-is-closed-out-by-the-service-*.md`, and a file
     named `27-3-a-paused-run-whose-story-landed-is-closed-out-by-the-service.md` is read
     as pending (loop deficiency 1, story 21-6).
+    Replan (27-1 reconcile, 2026-10-16): close out a `paused` run in its kept worktree
+    on its `supervisor/run-<id>` branch and reuse its draft PR (never a second `gh pr
+    create`). Name 27-3's event `close-out` distinct from 27.1's
+    `closing-out`/`closed_out`, and leave the PR close-out lease alone. The queue state
+    after the relaunch comes from the engine, not from `launched.detail.end`.
 
 - id: "27-4-a-host-tier-verify-leg-runs-before-any-pr-opens"
   title: "A Host-Tier Verify Leg Runs Before Any PR Opens"
@@ -117,6 +129,12 @@
     `27-4-a-host-tier-verify-leg-runs-before-any-pr-opens-*.md`, and a file named
     `27-4-a-host-tier-verify-leg-runs-before-any-pr-opens.md` is read as pending (loop
     deficiency 1, story 21-6).
+    Replan (27-1 reconcile, 2026-10-16): run the host verify inside `closeOut`
+    (src/worktree.ts) before push/PR on every path that has an engine that completed, so
+    no path opens a PR unverified. A red verify overrides `launched.detail.end`
+    (`partial` naming the command) for both `ended` and the deferred `jobrun finish`,
+    and the PR opens with `--draft`. This also carries operator-decisions §2's final
+    `finish` status (`ok` only when every story landed and the verify is green).
 
 - id: "27-5-the-plan-follows-the-run-and-the-deferred-work-is-paid"
   title: "The Plan Follows the Run, and the Deferred Work Is Paid"
@@ -146,3 +164,9 @@
     `27-5-the-plan-follows-the-run-and-the-deferred-work-is-paid-*.md`, and a file named
     `27-5-the-plan-follows-the-run-and-the-deferred-work-is-paid.md` is read as pending
     (loop deficiency 1, story 21-6).
+    Replan (27-1 reconcile, 2026-10-16): key the plan pull-back on `ended.detail.pr` (a
+    late PR is only on the appended `closed_out` event). In recovery, close out a
+    worktree run `recover` ends as an orphan once its processes are confirmed dead,
+    through `closeOut` (the 27.1 known gap, consult 1). List 27.1's event kinds
+    (`launched`, `paused`, `materialised`, `closing-out`, `closed_out`, `lock-released`)
+    in runbook §4. A refused deferred `finish` (DW-23) keeps the worker's reason.

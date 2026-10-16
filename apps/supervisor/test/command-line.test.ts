@@ -12,7 +12,7 @@ import { type QueueEvent, Queue } from "../src/queue";
 import {
   buildWorkerCommand, buildWorkerEnv, CONTINUATION_PROMPT, HostBypassRefused, invokeSkill, MISSING_STATUS_BLOCK, type Spawner, toVmPath,
 } from "../src/server";
-import { fakeBin } from "./fakes";
+import { fakeBin, fakeGh, fakeStudioRoot, gitInit } from "./fakes";
 
 const REPO = resolve(import.meta.dir, "..");
 
@@ -349,6 +349,14 @@ function e2eFixture(workerResult: string, loggedIn = true, opts: { selfFinish?: 
   const reg = spawnSync("uv", ["run", join(plugin, "lib", "registry.py"), "register", "--directory", project, "--writer", "onboard"],
     { env: { ...process.env, TK_STUDIO_HOME: store }, encoding: "utf-8" });
   if (reg.status !== 0) throw new Error(`fixture register failed: ${reg.stdout}${reg.stderr}`);
+  // Story 27.1: every run takes a worktree — the project is a git repo with a bare `origin`, the work
+  // folder is set, `gh` is the fake (a protected `main`), and `tk install`/`tk activate` are fakes
+  // under a throwaway TK_STUDIO_ROOT (the real studio mirrored around them).
+  const origin = gitInit(project);
+  const gh = fakeGh(mkdtempSync(join(tmpdir(), "tk-sup-e2e-gh-")));
+  const studio = fakeStudioRoot(process.env.TK_STUDIO_ROOT!);
+  const work = mkdtempSync(join(tmpdir(), "tk-sup-e2e-work-"));
+  const worktreeEnv = { TK_STUDIO_ROOT: studio.root, TK_SUPERVISOR_WORK: work, GH_BIN: gh.bin };
   const record = join(store, "worker-calls.jsonl");
   const fakeScript = join(store, "fake-claude.js");
   const workerMarker = join(store, "worker-ran.marker");
@@ -371,7 +379,8 @@ fs.writeFileSync(${JSON.stringify(workerMarker)}, "ran\\n");
 if (${opts.selfFinish === true}) {
   // Race the supervisor: end this run first, so its own finish is refused.
   const payload = JSON.parse(args[1].split("\\n")[0].replace(/^\\S+ /, ""));
-  require("node:child_process").spawnSync("uv", ["run", ${JSON.stringify(join(plugin, "lib", "jobrun.py"))}, "finish", "--directory", payload.directory,
+  // The registered checkout, not payload.directory: since Story 27.1 that is the run's worktree.
+  require("node:child_process").spawnSync("uv", ["run", ${JSON.stringify(join(plugin, "lib", "jobrun.py"))}, "finish", "--directory", ${JSON.stringify(project)},
     "--run-id", payload.run_id, "--state", "cancelled", "--reason", "raced by the worker"], { encoding: "utf-8" });
 }
 // A session transcript under CLAUDE_CONFIG_DIR (the fixture's own dir): the supervisor accounts its turns/tokens.
@@ -427,7 +436,7 @@ process.exit(r.status ?? 1);
 `);
   // The queue lives outside every repo and outside the store.
   const queueDb = join(mkdtempSync(join(tmpdir(), "tk-sup-e2e-queue-")), "queue.db");
-  const extraEnv = { SBX_BIN: fakeSbx, CLAUDE_CONFIG_DIR: join(store, "claude-config"), FAKE_QUEUE_DB: queueDb, ...(opts.env ?? {}) };
+  const extraEnv = { SBX_BIN: fakeSbx, CLAUDE_CONFIG_DIR: join(store, "claude-config"), FAKE_QUEUE_DB: queueDb, ...worktreeEnv, ...(opts.env ?? {}) };
   const cli = (verb: string, jobId: string, dir: string, extra: string[] = []) => spawnSync("bun", [join(REPO, "src", "cli.ts"), verb, jobId, "--directory", dir, ...extra], {
     env: { ...process.env, TK_STUDIO_HOME: store, TK_SUPERVISOR_DB: queueDb, CLAUDE_BIN: fake, ANTHROPIC_API_KEY: "sk-test-parent", ...extraEnv }, encoding: "utf-8", timeout: 120_000,
   });
@@ -463,7 +472,12 @@ process.exit(r.status ?? 1);
     expect(jobVerb(["status", "--directory", project, "--job-id", "studio-health"]).runs).toEqual([]);
     expect(ledger().filter((e) => e.event === "job-run")).toEqual([]);
   };
-  return { store, project, fake, run, submit, bare, queue, queueDb, calls, sbxCalls, ledger, workerMarker, jobVerb, registeredId, expectNothingWoken };
+  /** Story 27.1: the run's worktree path (`<work>/worktrees/<project id>/<run id>`). */
+  const worktreeOf = (runId: string) => join(work, "worktrees", basename(project), runId);
+  return {
+    store, project, fake, run, submit, bare, queue, queueDb, calls, sbxCalls, ledger, workerMarker, jobVerb, registeredId, expectNothingWoken,
+    origin, gh, studio, work, worktreeEnv, worktreeOf,
+  };
 }
 
 describe.skipIf(!canRunE2E)("CLI end to end: studio-health (faked worker)", () => {
@@ -679,12 +693,18 @@ describe.skipIf(!canRunE2E)("CLI end to end: the durable queue", () => {
     const [run, events, lock] = fx.queue((q) => [q.get(summary.run_id), lifecycle(q, summary.run_id), q.lock(fx.project)] as const);
     expect(run).toMatchObject({ state: "complete", studio_run_id: summary.studio_run_id, owner_pid: null });
     expect(events.map((e) => [e.kind, e.to_state])).toEqual([
-      ["enqueued", "queued"], ["claimed", "running"], ["verb-started", "running"], ["studio-run", "running"],
+      // Story 27.1: the default base_ref resolved at claim, then the run's worktree — before the minting verb.
+      ["enqueued", "queued"], ["claimed", "running"], ["base-ref", "running"], ["worktree", "running"], ["materialised", "running"], ["verb-started", "running"], ["studio-run", "running"],
       // Story 21.6: the wake answer, the pre-minted session, the spawned worker, the accounted messages — before `ended`.
       ["woke", "running"], ["session", "running"], ["worker", "running"], ["accounted", "running"], ["ended", "complete"],
     ]);
     // The pre-verb snapshot is stored with verb_started: no studio-health run existed before.
-    expect(events[2].detail).toEqual({ verb: "submit", snapshot: [], target: "skill" });
+    expect(events[5].detail).toEqual({ verb: "submit", snapshot: [], target: "skill" });
+    // Story 27.1: nothing landed — "no changes" on `ended`, no PR, the worktree removed.
+    expect(events.at(-1)!.detail).toMatchObject({ no_changes: true, closeout: { result: "no changes", worktree: "removed" } });
+    expect(run!.worktree).toBe(fx.worktreeOf(summary.run_id));
+    expect(existsSync(fx.worktreeOf(summary.run_id))).toBe(false);
+    expect(fx.gh.calls().map((c) => c.argv[0])).toEqual(["api"]); // the protection check only: no PR
     expect(run).toMatchObject({ verb_snapshot: "[]" });
     expect(run!.verb_started).toBeString();
     expect(lock).toBeNull();
@@ -719,7 +739,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: the durable queue", () => {
 
   test("TK_SUPERVISOR_DB inside the project checkout → QueueDbPlacementRefused, exit 2, no file created", () => {
     const fx = e2eFixture("unused");
-    mkdirSync(join(fx.project, ".git"));
+    if (!existsSync(join(fx.project, ".git"))) mkdirSync(join(fx.project, ".git")); // Story 27.1: the fixture is already a checkout
     const path = join(fx.project, "q.db");
     const res = spawnSync("bun", [join(REPO, "src", "cli.ts"), "submit", "studio-health", "--directory", fx.project], {
       env: { ...process.env, TK_STUDIO_HOME: fx.store, TK_SUPERVISOR_DB: path }, encoding: "utf-8", timeout: 120_000,
@@ -839,7 +859,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: restart recovery and drain", () => 
     const studioId = report.runs[0].summary.studio_run_id;
     expect(fx.jobVerb(["status", "--directory", fx.project, "--job-id", "studio-health", "--run-id", studioId]).runs[0].state).toBe("complete");
     expect(fx.queue((q) => lifecycle(q, queued.run_id).map((e) => e.kind))).toEqual([
-      "enqueued", "requeued", "claimed", "verb-started", "studio-run", "woke", "session", "worker", "accounted", "ended",
+      "enqueued", "requeued", "claimed", "base-ref", "worktree", "materialised", "verb-started", "studio-run", "woke", "session", "worker", "accounted", "ended",
     ]);
 
     // Nothing left to drain.
@@ -923,7 +943,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: restart recovery and drain", () => 
     expect(run.state).toBe("blocked");
     expect(run.reason).toContain("verb start refused");
     expect(fx.queue((q) => lifecycle(q, queued.run_id).map((e) => [e.kind, e.to_state]))).toEqual([
-      ["enqueued", "queued"], ["claimed", "running"], ["ended", "blocked"],
+      ["enqueued", "queued"], ["claimed", "running"], ["base-ref", "running"], ["worktree", "running"], ["materialised", "running"], ["ended", "blocked"],
     ]);
     expect(fx.queue((q) => q.lock(fx.project))).toBeNull();
     fx.expectNothingWoken();
@@ -1008,7 +1028,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: restart recovery and drain", () => 
     expect(studio).toMatchObject({ state: "partial", reason: "orphaned: supervisor restart; no session recorded" });
   }, 180_000);
 
-  test("engine path: a tk-studio-launch block naming `.bmad-loop/runs/<id>` hands the lock to the engine; a claim then waits or frees by the probe", async () => {
+  test("engine path: a tk-studio-launch block naming `.bmad-loop/runs/<id>` writes `launched` (the run stays running, its end deferred) and hands the lock to the engine; a claim then waits or frees by the probe", async () => {
     const fx = e2eFixture(`Launched.\n{"status":"complete","intent":"tk-studio-launch","artifacts":[".bmad-loop/runs/20260928-101500-ab12"]}`);
     const def = JSON.parse(readFileSync(join(REPO, ".tk-studio", "jobs", "studio-health.json"), "utf-8"));
     Object.assign(def, { id: "launch-probe", target: { skill: "tk-studio-launch", payload: { verb: "status" } } });
@@ -1018,11 +1038,27 @@ describe.skipIf(!canRunE2E)("CLI end to end: restart recovery and drain", () => 
     const summary = JSON.parse(res.stdout);
     expect(summary).toMatchObject({ ok: true, state: "complete", target: "skill" });
     expect(res.status).toBe(0);
-    // The mirror handed the checkout lock to the engine.
-    const [run, lock, last] = fx.queue((q) => [q.get(summary.run_id), q.lock(fx.project), lifecycle(q, summary.run_id).at(-1)] as const);
-    expect(run).toMatchObject({ state: "complete", engine_run_id: "20260928-101500-ab12" });
-    expect(lock).toMatchObject({ kind: "engine", engine_run_id: "20260928-101500-ab12", run_id: summary.run_id });
-    expect(last!.detail).toMatchObject({ lock: { handed_to_engine: "20260928-101500-ab12" } });
+    // Story 27.1 (operator-decisions §2): the launch's return writes `launched`, not `ended`: the run
+    // stays `running` (live for the pacer), its driver let go, the checkout lock handed to the engine
+    // (probed in the run's worktree, the engine's --project).
+    const [run, lock, events] = fx.queue((q) => [q.get(summary.run_id), q.lock(fx.project), lifecycle(q, summary.run_id)] as const);
+    expect(run).toMatchObject({ state: "running", engine_run_id: "20260928-101500-ab12", owner_pid: null, worktree: fx.worktreeOf(summary.run_id) });
+    expect(lock).toMatchObject({ kind: "engine", engine_run_id: "20260928-101500-ab12", run_id: summary.run_id, root: fx.worktreeOf(summary.run_id) });
+    const last = events.at(-1)!;
+    expect(last).toMatchObject({ kind: "launched", from_state: "running", to_state: "running" });
+    expect(last.detail).toMatchObject({
+      engine_run_id: "20260928-101500-ab12", lock: { handed_to_engine: "20260928-101500-ab12" },
+      status_block: { status: "complete", intent: "tk-studio-launch", artifacts: [".bmad-loop/runs/20260928-101500-ab12"] }, end: { state: "complete" },
+    });
+    expect(events.some((e) => e.kind === "ended")).toBe(false);
+    // operator-decisions §2: `finish` is not called at launch return — the studio run stays open
+    // (no job-run event) until the engine-end sweep finishes it.
+    expect(summary.finish).toBeUndefined();
+    expect(summary.finish_deferred).toBe(true);
+    expect(fx.jobVerb(["status", "--directory", fx.project, "--job-id", "launch-probe", "--run-id", summary.studio_run_id]).runs[0].state).not.toBe("complete");
+    expect(fx.ledger().filter((e) => e.event === "job-run" && e.payload.run_id === summary.studio_run_id)).toEqual([]);
+    // The engine's status cannot be read (no bmad-loop here): the sweep never closes it out on a guess.
+    expect(existsSync(fx.worktreeOf(summary.run_id))).toBe(true);
 
     // A second run on the checkout, probes injected: live → waits naming the engine; failed → waits naming the failure; gone → claims.
     let probe = { live: true } as { live: boolean; detail?: string };
@@ -1053,9 +1089,14 @@ describe.skipIf(!canRunE2E)("CLI end to end: restart recovery and drain", () => 
     process.env.CLAUDE_BIN = fx.fake;
     process.env.CLAUDE_CONFIG_DIR = join(fx.store, "claude-config"); // the fake worker's transcript (max_turns → account)
     try {
-      const summary = await runJob("launch-probe", fx.project, undefined, { queue: q });
+      const summary = await runJob("launch-probe", fx.project, undefined, { queue: q, worktree: { env: { ...process.env, ...fx.worktreeEnv } } });
       expect(summary).toMatchObject({ ok: false, state: "blocked", target: "skill" });
-      expect(probed).toEqual([[fx.project, null]]);
+      // Story 27.1: a blocked launch ends at once; the engine is probed in the run's worktree, which an engine found keeps.
+      // (the end-of-run sweep probes it again before any late close-out: the engine still live, it waits)
+      expect(probed.length).toBeGreaterThanOrEqual(1);
+      expect(probed.every(([root, id]) => root === fx.worktreeOf(summary.run_id!) && id === null)).toBe(true);
+      expect(lifecycle(q, summary.run_id!).some((e) => e.kind === "closed_out")).toBe(false);
+      expect(lifecycle(q, summary.run_id!).at(-1)!.detail).toMatchObject({ closeout: { result: "skipped", worktree: "kept" } });
       expect(q.get(summary.run_id!)).toMatchObject({ state: "blocked", engine_run_id: "E9" });
       expect(q.lock(fx.project)).toMatchObject({ kind: "engine", engine_run_id: "E9", run_id: summary.run_id });
       expect(lifecycle(q, summary.run_id!).at(-1)!.detail).toMatchObject({ lock: { handed_to_engine: "E9" }, engine: { live: ["E9"] } });
@@ -1120,7 +1161,8 @@ describe.skipIf(!canRunE2E)("CLI end to end: worker tiers (Story 21.4)", () => {
     const probe = sbx.find((c) => c.args.includes("auth"))!;
     expect(probe.args).toEqual(["exec", "claude-p", "env", "-u", "ANTHROPIC_API_KEY", "claude", "auth", "status", "--json"]);
     const worker = sbx.find((c) => c.args.includes("-p"))!;
-    expect(worker.args.slice(0, 13)).toEqual(["exec", "claude-p", "timeout", "-k", "10", "600", "env", "-u", "ANTHROPIC_API_KEY", "-C", toVmPath(fx.project), "claude", "-p"]); // the VM path: `/c/...` for a win32 host root
+    // Story 27.1: the VM cwd is the run's worktree (`/c/...` for a win32 host path), never the checkout.
+    expect(worker.args.slice(0, 13)).toEqual(["exec", "claude-p", "timeout", "-k", "10", "600", "env", "-u", "ANTHROPIC_API_KEY", "-C", toVmPath(fx.worktreeOf(summary.run_id)), "claude", "-p"]);
     expect(worker.args[13]).toStartWith("/tk-studio:tk-studio-activate ");
     expect(flagValue(worker.args, "--permission-mode")).toBe("bypassPermissions");
     expect(flagValue(worker.args, "--model")).toBe("m-over");
@@ -1133,18 +1175,20 @@ describe.skipIf(!canRunE2E)("CLI end to end: worker tiers (Story 21.4)", () => {
     expect(events[0].payload).toMatchObject({ state: "complete", total_cost_usd: 0.0123 });
   }, 120_000);
 
-  test("sbx VM cwd comes from the registry entry root, not the `--directory` spelling (a symlink samePath accepts)", () => {
+  test("sbx VM cwd is the run's worktree (Story 27.1), never the `--directory` spelling or the checkout (a symlink samePath accepts)", () => {
     const fx = e2eFixture(BLOCK_OK);
     const spelled = join(mkdtempSync(join(tmpdir(), "tk-sup-e2e-spelled-")), basename(fx.project)); // same basename: the same project id
     try { symlinkSync(fx.project, spelled, "dir"); }
     catch { console.warn("symlink unavailable on this platform — skipping the caller-spelling case"); return; }
     const res = fx.run("studio-health", spelled, ["--tier", "sbx", "--sandbox", "claude-p", "--permission-mode", "bypassPermissions"]);
     expect(res.status).toBe(0);
-    expect(JSON.parse(res.stdout)).toMatchObject({ ok: true, state: "complete" });
+    const summary = JSON.parse(res.stdout);
+    expect(summary).toMatchObject({ ok: true, state: "complete" });
     const worker = fx.sbxCalls().find((c) => c.args.includes("-p"))!;
-    expect(flagValue(worker.args, "-C")).toBe(fx.project);
+    expect(flagValue(worker.args, "-C")).toBe(fx.worktreeOf(summary.run_id));
     expect(flagValue(worker.args, "-C")).not.toBe(spelled);
-    expect(JSON.parse(worker.args[13].split("\n")[0].replace(/^\S+ /, ""))).toMatchObject({ directory: fx.project });
+    expect(flagValue(worker.args, "-C")).not.toBe(fx.project);
+    expect(JSON.parse(worker.args[13].split("\n")[0].replace(/^\S+ /, ""))).toMatchObject({ directory: fx.worktreeOf(summary.run_id) });
   }, 120_000);
 
   test("stored drive: `submit --tier sbx --sandbox s --model m` then `drain` → driven via sbx with --model m", () => {
@@ -1300,7 +1344,7 @@ process.exit(r.status ?? 1);
     expect(JSON.parse(rec.stdout)).toMatchObject({ ok: true, resumed: [], ended: [{ run_id: dead.run_id, studio_run_id: dead.studio_run_id, reason }] });
     expect(fx.queue((q) => q.get(dead.run_id))).toMatchObject({ state: "partial", reason, studio_run_id: dead.studio_run_id });
     // `recovering`: the recoverer marks the run its own before it ends the studio run (no other recoverer ends it under that call).
-    expect(events(fx, dead.run_id).map((e) => e.kind)).toEqual(["enqueued", "claimed", "verb-started", "studio-run", "woke", "recovering", "orphaned"]);
+    expect(events(fx, dead.run_id).map((e) => e.kind)).toEqual(["enqueued", "claimed", "base-ref", "worktree", "materialised", "verb-started", "studio-run", "woke", "recovering", "orphaned"]);
     expect(events(fx, dead.run_id).at(-1)).toMatchObject({ to_state: "partial", detail: { studio: { ok: true }, studio_outcome: { run_id: dead.studio_run_id, state: "partial" } } });
     const studio = fx.jobVerb(["status", "--directory", fx.project, "--job-id", "studio-health", "--run-id", dead.studio_run_id!]).runs[0];
     expect(studio).toMatchObject({ state: "partial", reason });
@@ -1583,5 +1627,58 @@ process.exit(${exit});
     expect(fx.queue((q) => q.events(submitted.run_id).map((e) => e.kind))).not.toContain("verb-started");
     expect(fx.calls().some((c) => c.args[0] === "-p")).toBe(false);
     fx.expectNothingWoken();
+  }, 120_000);
+});
+
+describe.skipIf(!canRunE2E)("CLI end to end: every run gets its own worktree (Story 27.1)", () => {
+  const BLOCK = `{"status":"complete","intent":"tk-studio-activate","artifacts":[]}`;
+
+  test("AC1/AC2: the run is cut a worktree from the default branch, materialised (`tk install` at the pin, `tk activate` clean) and worked there; the checkout never switched", () => {
+    const fx = e2eFixture(BLOCK);
+    const git = (...a: string[]) => spawnSync("git", a, { cwd: fx.project, encoding: "utf-8" }).stdout.trim();
+    const before = [git("rev-parse", "--abbrev-ref", "HEAD"), git("rev-parse", "HEAD")];
+    const res = fx.run();
+    expect(res.status).toBe(0);
+    const summary = JSON.parse(res.stdout);
+    const wt = fx.worktreeOf(summary.run_id);
+    expect(fx.queue((q) => q.get(summary.run_id))).toMatchObject({ state: "complete", base_ref: "main", base_ref_source: "default", worktree: wt });
+    // The studio's own motions, through uv, inside the worktree.
+    expect(fx.studio.calls()).toEqual([
+      { script: "install_base", argv: ["--directory", wt] },
+      { script: "drift_check", argv: ["--directory", wt] },
+      ...fx.studio.calls().slice(2), // the worker's own startup drift check (invokeSkill), on the worktree too
+    ]);
+    expect(fx.studio.calls().slice(2).every((c) => c.argv[1] === wt)).toBe(true);
+    // The worker ran with the worktree as its directory; wake/finish kept the registered root.
+    const worker = fx.calls().find((c) => c.args[0] === "-p");
+    expect(JSON.parse(worker.args[1].split("\n")[0].replace(/^\S+ /, ""))).toMatchObject({ directory: wt });
+    expect(fx.gh.calls().map((c) => c.argv)).toEqual([["api", "repos/{owner}/{repo}/branches/main"]]);
+    expect([git("rev-parse", "--abbrev-ref", "HEAD"), git("rev-parse", "HEAD")]).toEqual(before);
+  }, 120_000);
+
+  test("AC1: an unprotected default branch → the run ends `blocked` naming it before wake; no worktree, no worker", () => {
+    const fx = e2eFixture(BLOCK);
+    fx.gh.answer({ protected: [] });
+    const res = fx.run();
+    expect(res.status).toBe(2);
+    const answer = JSON.parse(res.stdout);
+    expect(answer.error).toBe("worktree protection: base_ref 'main' is the repository's default branch and is not protected on GitHub — refused");
+    expect(fx.queue((q) => q.get(answer.run_id))).toMatchObject({ state: "blocked", worktree: null, studio_run_id: null });
+    expect(existsSync(fx.worktreeOf(answer.run_id))).toBe(false);
+    expect(fx.calls().some((c) => c.args[0] === "-p")).toBe(false);
+    fx.expectNothingWoken();
+  }, 120_000);
+
+  test("AC2: activate drift inside the worktree → `blocked` naming the step; no TK_SUPERVISOR_WORK → `blocked` WorkDirMissing", () => {
+    const fx = e2eFixture(BLOCK);
+    fx.studio.answer({ drift: "drift" });
+    const res = fx.run();
+    expect(res.status).toBe(2);
+    expect(JSON.parse(res.stdout).error).toBe("worktree activate drift: result 'drift'");
+    fx.expectNothingWoken();
+    const nowork = e2eFixture(BLOCK, true, { env: { TK_SUPERVISOR_WORK: "" } });
+    const out = JSON.parse(nowork.run().stdout);
+    expect(out.error).toStartWith("worktree work folder: WorkDirMissing: TK_SUPERVISOR_WORK is not set");
+    expect(nowork.queue((q) => q.get(out.run_id))).toMatchObject({ state: "blocked" });
   }, 120_000);
 });

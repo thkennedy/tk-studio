@@ -11,6 +11,7 @@
  *   CLAUDE_BIN      the host worker binary (default `claude`); host-only — the
  *                   sbx worker is always `claude` inside the microVM
  *   SBX_BIN         the host Docker Sandboxes CLI (default `sbx`) for sbx-tier runs
+ *   GH_BIN          the GitHub CLI (default `gh`) a run's close-out pushes its PR through (Story 27.1)
  *   TK_SUPERVISOR_CONFIG  the supervisor's own per-job config file (optional:
  *                   unset → no config, every job defaults to the host tier);
  *                   never read from the plugin or a project's .tk-studio/
@@ -49,6 +50,11 @@ export function claudeBin(env: Env = process.env): string {
 
 export function sbxBin(env: Env = process.env): string {
   return env.SBX_BIN?.trim() || "sbx";
+}
+
+/** The GitHub CLI (Story 27.1: the default-branch protection check and the run's PR). */
+export function ghBin(env: Env = process.env): string {
+  return env.GH_BIN?.trim() || "gh";
 }
 
 /** The supervisor's per-job config path, or undefined when unset (no config). */
@@ -244,6 +250,7 @@ export function oauthConfig(env: Env = process.env): OAuthConfig {
 //   TK_SUPERVISOR_TELEGRAM_TOKEN  the Telegram bot token (with `telegram`) — never logged, never rendered
 //   TK_SUPERVISOR_TELEGRAM_CHAT   the Telegram chat id (with `telegram`)
 //   TK_SUPERVISOR_WORK            the work folder holding editor-in-the-loop snapshots (for a flagged run)
+//                                 and every run's git worktree (Story 27.1: required for every run)
 
 /** The notifier the environment selects: none, ntfy (its topic URL) or Telegram (bot token + chat). */
 export type Notifier =
@@ -286,15 +293,18 @@ export function notifier(env: Env = process.env): Notifier {
   throw new NotifierUnknown(kind);
 }
 
-/** A flagged (editor-in-the-loop) submission with no work folder: refused before anything is queued. */
+/** No work folder: a flagged (editor-in-the-loop) submission is refused before anything is queued
+ * (`snapshot`); a claimed run ends `blocked` before its worktree is cut (`worktree`, Story 27.1). */
 export class WorkDirMissing extends Error {
-  constructor() {
-    super("WorkDirMissing: TK_SUPERVISOR_WORK is not set — an editor-in-the-loop run needs the work folder its snapshot lands in");
+  constructor(need: "snapshot" | "worktree" = "snapshot") {
+    super(need === "worktree"
+      ? "WorkDirMissing: TK_SUPERVISOR_WORK is not set — every run needs the work folder its git worktree is cut under (<work>/worktrees/<project>/<run id>)"
+      : "WorkDirMissing: TK_SUPERVISOR_WORK is not set — an editor-in-the-loop run needs the work folder its snapshot lands in");
     this.name = "WorkDirMissing";
   }
 }
 
-/** The work folder snapshots land under, or undefined when unset. */
+/** The work folder snapshots and worktrees land under, or undefined when unset. */
 export function workDir(env: Env = process.env): string | undefined {
   return env.TK_SUPERVISOR_WORK?.trim() || undefined;
 }

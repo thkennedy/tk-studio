@@ -189,3 +189,11 @@ severity: low
 reason: The `research-ecosystem` skill ended its own studio run `complete`; the supervisor's `finish` was then refused ("terminal states are immutable"), and that refusal text became the queue run's `reason` although `studio_outcome.state` is `complete` and the run is counted complete. The README says a refused `finish` reports the run's actual state, which it does; the `reason` field is noise on the page and in the notification.
 affects: none
 status: open
+
+### DW-24: Follow-up review still recommended for 27-1-every-run-gets-its-own-worktree-and-ends-in-a-pr after the damping cap was spent
+origin: review-budget-followup
+source_spec: `27-1-every-run-gets-its-own-worktree-and-ends-in-a-pr-spec.md`
+location: n/a
+severity: low
+reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261016-014644-7fea; this entry preserves the lingering recommendation for a deliberate later review.
+status: open
