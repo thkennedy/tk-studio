@@ -1243,5 +1243,112 @@ class ReleaseMotionTestCase(unittest.TestCase):
         self.assertEqual(self._gh_calls(), [])
 
 
+class GateRootTestCase(unittest.TestCase):
+    """Loop hole 26 (2026-10-16): gate x4 is a lockstep between files of one
+    repository, so the drift check reads the gate's version and archive
+    record from the checked project's own plugins/tk-studio, never from an
+    installed copy — that copy is built at the bump commit and carries the
+    previous release's archive record by construction, which reported a
+    clean developer checkout as drift on every box not linked to it."""
+
+    _OLDER_ARCHIVE = {"url": FIX_URL.replace("1.2.3", "1.2.2"),
+                      "sha256": _digest("older")}
+
+    @staticmethod
+    def _developer_checkout(tmp: Path, version: str, archive: dict,
+                            latest: dict) -> Path:
+        project = InstallerRosterPlaneTestCase._project(
+            tmp, _good_roster("stable"), latest)
+        own = project / "plugins" / "tk-studio" / ".claude-plugin"
+        own.mkdir(parents=True)
+        (own / "plugin.json").write_text(
+            json.dumps({"name": "tk-studio", "version": version}),
+            encoding="utf-8")
+        (own / "released-roster.json").write_text(
+            json.dumps({"version": version, "skills": ["tk-a"],
+                        "archive": archive}), encoding="utf-8")
+        return project
+
+    @staticmethod
+    def _installed_copy(tmp: Path, version: str, archive: dict) -> Path:
+        root = _plugin_fixture(tmp, version, ["tk-a"], recorded=["tk-a"])
+        (root / ".claude-plugin" / "released-roster.json").write_text(
+            json.dumps({"version": version, "skills": ["tk-a"],
+                        "archive": archive}), encoding="utf-8")
+        (root / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps({"name": "tk-studio", "version": version}),
+            encoding="utf-8")
+        return root
+
+    def test_gate_is_read_from_the_project_not_the_lagging_installed_copy(self):
+        # the checkout at 1.2.3 with its 1.2.3 record and latest.json in
+        # lockstep; the running copy is the installed 1.2.3 zip, built at the
+        # bump commit, whose record still names the 1.2.2 archive
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            project = self._developer_checkout(
+                tmp, "1.2.3", FIX_ARCHIVE, _good_roster("latest"))
+            check = drift_check._installer_roster_check(
+                project, self._installed_copy(tmp, "1.2.3", self._OLDER_ARCHIVE),
+                "1.2.3")
+        self.assertEqual(check["status"], "ok", check["detail"])
+        self.assertIn("gate read from the project's plugins/tk-studio",
+                      check["detail"])
+        self.assertNotIn("gate x4 broken", check["detail"])
+
+    def test_gate_version_is_the_projects_not_the_installed_copys(self):
+        # a box still on the previous install (1.2.2) checking a checkout
+        # whose gate moved to 1.2.3: the folder check reports stale, this
+        # guard must not report the tag as broken
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            project = self._developer_checkout(
+                tmp, "1.2.3", FIX_ARCHIVE, _good_roster("latest"))
+            check = drift_check._installer_roster_check(
+                project, self._installed_copy(tmp, "1.2.2", self._OLDER_ARCHIVE),
+                "1.2.2")
+        self.assertEqual(check["status"], "ok", check["detail"])
+
+    def test_project_record_out_of_step_is_drift_even_when_the_copy_agrees(self):
+        # the checkout's own record disagrees with its latest.json: drift,
+        # whatever the running copy's record happens to say
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            project = self._developer_checkout(
+                tmp, "1.2.3", dict(FIX_ARCHIVE, sha256=_digest("other")),
+                _good_roster("latest"))
+            check = drift_check._installer_roster_check(
+                project, self._installed_copy(tmp, "1.2.3", FIX_ARCHIVE),
+                "1.2.3")
+        self.assertEqual(check["status"], "drift")
+        self.assertIn("components.plugin.sha256", check["detail"])
+        self.assertIn("gate read from the project's plugins/tk-studio",
+                      check["detail"])
+
+    def test_no_plugin_subtree_falls_back_to_the_running_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            project = InstallerRosterPlaneTestCase._project(
+                tmp, _good_roster("stable"), _good_roster("latest"))
+            check = drift_check._installer_roster_check(
+                project, self._installed_copy(tmp, "1.2.3", FIX_ARCHIVE),
+                "1.2.3")
+        self.assertEqual(check["status"], "ok", check["detail"])
+        self.assertIn("gate read from the running copy", check["detail"])
+
+    def test_unreadable_project_manifest_is_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            project = self._developer_checkout(
+                tmp, "1.2.3", FIX_ARCHIVE, _good_roster("latest"))
+            (project / "plugins" / "tk-studio" / ".claude-plugin"
+             / "plugin.json").write_text("{", encoding="utf-8")
+            check = drift_check._installer_roster_check(
+                project, self._installed_copy(tmp, "1.2.3", FIX_ARCHIVE),
+                "1.2.3")
+        self.assertEqual(check["status"], "error")
+        self.assertIn("plugin.json", check["detail"])
+
+
 if __name__ == "__main__":
     unittest.main()
