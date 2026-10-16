@@ -782,14 +782,56 @@ delete and check out the affected files again.
    that observation to `<run_dir>/transcripts/<story>/observation.json` on
    the mounted checkout, and the host harvests it with `meter.py harvest`
    (Story 26.4).
-5. When the run completes, open a PR from `loop/epic-<N>` into `main`.
+5. **When the run completes** (a supervisor run): the supervisor runs the project's
+   `verify.host` (its tracked `.tk-studio/config.yaml`, read at the run's base,
+   never from the plugin) on the host in the run's worktree, console-hosted,
+   under the job's wall-clock guard, and records a `host-verify` event (exit,
+   duration, the last lines of output). Green, or no `verify.host` (the event
+   says skipped and why): the PR opens ready. Red: the run ends `partial`
+   naming the command and its last lines, the branch is still pushed, and the
+   PR opens as a draft whose `## Host verify` section carries the failures; the
+   notification names them. No attended host run before the PR is needed: fix
+   the failures named on the draft PR (supervisor Story 27.4). A run started
+   by hand (`launch-epic.sh`) still needs the host suite run by hand
+   (`uv run python tools/verify_host.py`, the same command the key names)
+   before its PR from `loop/epic-<N>` into `main`.
 6. Spec files are `stories/<id>-spec.md`: the id already carries the title
    slug, so the path stays short for Windows. The planner records settled
    shapes (schema entries, files or tags for an artifact a later story or
    an operator produces) in the SPEC's `## Design notes`, and never halts the
    dev session on them (Story 26.2).
 
-**When a run pauses:**
+**When a supervisor run pauses** (the queue run is `paused`; its worktree,
+lock, pin and draft PR are kept). After every engine-end sweep (each tick) the
+supervisor reads the story the engine paused on (`launch.py status` →
+`run.paused_story_key`) and its spec in the run's worktree (supervisor Story
+27.3):
+
+- **The story landed** (its spec says `status: done`, paused at the commit
+  gate or on an escalation) **and a verdict is recorded** (`reconcile_verdict`
+  other than `escalate`): nothing to do by hand. The supervisor commits the
+  engine's staged harvest on the run branch, harvests the story's meter
+  observation to the host ledger (`meter.py harvest`), archives the engine run
+  (`bmad-loop archive`, through `sbx exec`), and launches the epic again under
+  the same queue run (a `close-out` event); the launch skips `done` stories. A
+  failed step is a `close-out-failed` event on the run, retried next tick.
+- **The story landed with no verdict, or `escalate`** (the reconcile gate): an
+  attended step. The supervisor sends one notification and the run's card says
+  "awaiting a ruling". Run `.bmad-loop/plugins/studio-pipeline/reconcile.md`
+  in the run's worktree (`<TK_SUPERVISOR_WORK>\worktrees\<project>\<queue
+  run id>`), record the verdict on the spec (and carry any `adjust-stories`
+  notes into the unstarted entries' `invoke_dev_with`); the next tick closes
+  it out as above.
+- **The story did no work** (a missing fact, a render halt): fix the cause in
+  the run's worktree, then `POST /runs/<queue run id>/resume` (bearer only;
+  body `{"restore_patch": "<path relative to the worktree>"}` optional). The
+  supervisor runs `bmad-loop resolve --no-interactive --resume
+  [--restore-patch …]` through `sbx exec` as its own child (the hold) and the
+  run goes `running` (`engine-resume`). A story whose spec is `done` is
+  refused `409 StoryLanded`: the close-out above handles it.
+
+**When a hand-started run pauses** (an engine started with `launch-epic.sh`,
+outside the supervisor), the attended recipe still applies:
 
 - **On an escalation whose story did no work** (a missing fact, a render
   halt): fix the cause, then re-arm it with `tools/sbx-engine/resume-run.sh`.
@@ -802,7 +844,23 @@ delete and check out the affected files again.
   record the verdict on the spec, and carry any `adjust-stories` notes into
   the unstarted entries' `invoke_dev_with`. Then close it the same way.
 
-**Pin an engine sandbox alive (sbx v0.47.0 and later).** `sbx run -d --name <sandbox>` keeps a local sandbox running after every session disconnects, until `sbx stop <sandbox>`. Verified 2026-10-06 on the first agent PC: the same boot, no restart, the sandbox still `running` 50 s after the last `sbx exec` ended. Run it once after `launch-epic.sh` has attached, and the engine no longer dies with the host-side `sbx exec` that started it (the hole the 2026-09-29 handoff lists as number 7). `sbx stop` releases the pin when the run is over.
+**Supervisor runs: the worktree, the pin, the hold (Epic 27).** A supervisor run never works in the checkout. The rows below are what the supervisor does on its own; the hand pattern that follows is for an engine started with `launch-epic.sh`.
+
+| Item | Value |
+|---|---|
+| `TK_SUPERVISOR_WORK` | Required for every run (no longer only for editor-in-the-loop snapshots): `C:\agent-work`. Worktrees land in `C:\agent-work\worktrees\<project>\<queue run id>` on `supervisor/run-<queue run id>`, snapshots in `C:\agent-work\snapshots\…`. |
+| Engine sandbox mount | `C:\agent-work\worktrees` read-write, as `/c/agent-work/worktrees` (only that subfolder; snapshots stay host-only). Recreate the sandbox with it (§3.5). |
+| git | 2.48 or later on the host and in the microVM: worktrees are cut with `git worktree add --relative-paths`, so the worktree's `.git` file resolves on both sides (a `C:/` path in it fails inside the VM). Host 2.55 and VM 2.53 on 2026-10-16. |
+| `gh` | Logged in on the host for the supervisor's user (the protection check and each run's PR). `GH_BIN` overrides the binary. |
+| Default branches | Protected on GitHub for every project the supervisor runs against with no `base_ref` (it defaults to the repository's default branch); an unprotected default branch is refused `blocked`. |
+| Sandbox pin | An sbx run starts with `sbx run -d --name <sandbox>` from the supervisor before its login probe; a failed pin ends the run `blocked` naming it. The supervisor runs in the console (`start.ps1`), and so does every `sbx` call it makes; it is never started from a Claude desktop-app session. |
+| Engine hold | Once a launch returns, the supervisor holds `sbx exec <sandbox> tail --pid=<engine pid> -f /dev/null` open for the engine's life (the pid from `<worktree>\.bmad-loop\runs\<id>\engine.pid`). Do not run `launch-epic.sh` beside a supervisor run on the same sandbox. A supervisor restart respawns the hold (`recover`, every tick). |
+| Release | `sbx stop <sandbox>` once the run's engine ended and its close-out ran, only when no other queued, running, paused or external run records the same sandbox. A paused run keeps its pin. |
+| Kill | A cancel or a tripped guard kills the engine's process group inside the VM by its recorded pid (`sbx exec <sandbox> kill -TERM -- -<pid>`, then `-KILL`); an engine still alive afterwards keeps the run's lock and pin (DW-3) until a later probe shows its pid gone. Check by hand with `sbx exec <sandbox> cat /proc/<pid>/stat`. |
+| Hand starts | `jobrun.py submit\|wake` and the MCP `tk_job` surface on a supervised project are recorded `external` on the next tick and paced around until the studio run ends; prefer `POST /jobs`. The supervisor writes an advisory `starter.lock` per served project in the store (`~/.tk-studio/projects/<key>/starter.lock`); `jobrun.py` honouring it is a planned tk-studio story. |
+| Clean-up | `git worktree remove` and `git worktree prune` run on the host. A worktree kept by a failed close-out or a paused run is listed by `git worktree list` in the checkout. |
+
+**Pin an engine sandbox alive by hand (sbx v0.47.0 and later).** `sbx run -d --name <sandbox>` keeps a local sandbox running after every session disconnects, until `sbx stop <sandbox>`. Verified 2026-10-06 on the first agent PC: the same boot, no restart, the sandbox still `running` 50 s after the last `sbx exec` ended. Run it once after `launch-epic.sh` has attached, and the engine no longer dies with the host-side `sbx exec` that started it (the hole the 2026-09-29 handoff lists as number 7). `sbx stop` releases the pin when the run is over.
 
 ## 4. The studio supervisor
 
@@ -859,7 +917,7 @@ User scope each time it starts, so a change needs no new logon.
 | `TK_SUPERVISOR_NTFY_URL` | with `ntfy` | the full topic URL. The topic is its secret |
 | `TK_SUPERVISOR_TELEGRAM_TOKEN` | with `telegram` | the bot token |
 | `TK_SUPERVISOR_TELEGRAM_CHAT` | with `telegram` | the chat id that receives the message |
-| `TK_SUPERVISOR_WORK` | for editor-in-the-loop runs | the work folder that holds the snapshots, `C:\agent-work` |
+| `TK_SUPERVISOR_WORK` | always (Epic 27) | the work folder: every run's worktree under `worktrees\<project>\<run id>`, editor-in-the-loop snapshots under `snapshots\…`; `C:\agent-work`. The engine sandbox mounts its `worktrees` subfolder read-write (§3.8) |
 | `TK_SUPERVISOR_CONFIG` | no | the per-job tier config. Unset runs every job on the host tier |
 | `TK_SUPERVISOR_TLS_CERT`, `TK_SUPERVISOR_TLS_KEY`, `TK_SUPERVISOR_TLS_NAME` | for https and the phone sign-in (§4.5) | the `tailscale cert` certificate and key files and the machine's MagicDNS name. All three or none (`TlsConfigIncomplete`); set them only after the files exist (`TlsCertUnreadable`) |
 | `TK_SUPERVISOR_OAUTH_GOOGLE_CLIENT_ID`, `_CLIENT_SECRET`, `_ALLOW` | for Google sign-in | all three or none (`OAuthConfigIncomplete`); needs the TLS variables (`OAuthNeedsHttps`). `_ALLOW` is the one Google account allowed |
@@ -968,8 +1026,7 @@ once:
 
 There is no sign-out: a session ends at its expiry, or rotate
 `TK_SUPERVISOR_SESSION_SECRET` and restart to end every session at once. The
-certificate is renewed only when `start.ps1` starts (supervisor DW-21), so a
-box that stays up past the certificate's 90 days needs the tab restarted.
+certificate renews itself (§4.7): nothing needs restarting by hand.
 
 ### 4.6 What runs where
 
@@ -981,6 +1038,42 @@ box that stays up past the certificate's 90 days needs the tab restarted.
 The tier comes from the submission or from `TK_SUPERVISOR_CONFIG`, never from
 the plugin. The supervisor never chooses a model: model and effort are
 forwarded as the job or the submission gives them (AD-14).
+
+### 4.7 The run's lifetime: events and the certificate (Epic 27)
+
+The supervisor owns every engine's life (supervisor Epic 27). A queue run's
+`events` (`GET /runs/{id}`, the status page) carry these kinds, beyond the
+Epic 21 and 22 set:
+
+| Event | When |
+|---|---|
+| `materialised` | (27.1) The run's worktree was cut and its untracked runtime materialised (`tk install` at the pin, the policy, routing and local overlay copied from the checkout, `tk activate` clean). |
+| `launched` | (27.1) `tk-studio-launch` returned with an engine started: the run stays `running`, its driver lets go, the checkout lock goes to the engine; carries the status block and the engine run id. |
+| `paused` | (27.1) The engine paused: the run is `paused` (not terminal), keeps its worktree, lock and pin; the draft PR's URL rides the event. |
+| `ended` | (27.1) Written once, at the engine's end after the close-out: the PR URL (or "no changes"). The pacer counts the run as live until then. |
+| `hold` | (27.2/27.3) The supervisor's own `sbx exec … tail --pid` (or the resume's child) holding the engine's sandbox open. |
+| `closing-out`, `closed_out`, `lock-released` | (27.1/27.5) A late close-out took its lease; a close-out recorded on a run already ended (`orphaned: true` for the orphan pass); a kept lock freed. |
+| `close-out`, `close-out-failed`, `awaiting-ruling`, `engine-resume` | (27.3) The paused-run pass relaunched a landed run; a step failed (retried next tick); a landed story with no verdict or `escalate` (one notification); `POST /runs/{id}/resume` moved the run back to `running`. |
+| `host-verify` | (27.4) The project's `verify.host` ran on the host in the worktree: exit, duration, the last lines; or skipped and why. |
+| `plan-status`, `plan-lease` | (27.5) The plan pull-back through `plansync.py status`: `review` when the PR opens, `done` when it merges, a skip naming why; never changes the run's state. The project that owns the plan comes from the host registry (tk-studio is registered on this box). |
+| `accounted`, `worker` | (21.6/27.5) The iteration's counts now carry `cost_usd` (`run.json`'s `total_cost_usd` is the sum across iterations); the worker record lands pid first, the start time after it (win32: `GetProcessTimes` natively). |
+| `studio-run-ended`, `studio-run-end-failed`, `finish-refused` | (27.5) A cancel's late studio-run end (or the next `recover`'s); a refused `finish` keeps the worker's own reason. |
+| `cert-renew-requested`, `cert-renewed`, `cert-renew-failed` | (27.5) Supervisor-scope, in the queue's `service_events` table: the certificate rule below. |
+
+**The TLS certificate renews itself.** `serve` checks the Tailscale
+certificate's `notAfter` at start and hourly. Within 14 days of expiry, while
+no run is `running` or `external` and no renewal was requested in the last 24
+hours, it records `cert-renew-requested` and exits 75; the keeper in
+`start.ps1` runs the same bounded `tailscale cert` (120 s) and restarts
+`serve` at once. The next `serve` records `cert-renewed` or
+`cert-renew-failed`. A live run postpones the renewal; within 3 days of
+expiry it renews even during a live run, naming the runs it overrode.
+
+**Checks only the console can run** (the supervisor is never started from a
+Claude session), after each supervisor release: the real `sbx run -d`, `exec`
+and `stop` and the kill through `sbx exec`; the console-hosted host-verify leg
+on a real run; the `tailscale cert` renew and `serve` restart on exit 75 as a
+dry run; `plansync.py status` into tk-studio's plan.
 
 ## 5. Hardening checklist
 

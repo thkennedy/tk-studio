@@ -34,3 +34,10 @@ working_set:
     - bmb
     - bmad-loop
     - gds
+
+# The host verify leg (supervisor Story 27.4): one command line the supervisor runs on the
+# Windows host in a run's worktree before its PR opens, split on whitespace, never a shell.
+# tk-studio's two gates (the lib suite and conformance, in two directories) live behind one
+# argv-only entry point. Red ends the run partial and opens the PR as a draft naming the failures.
+verify:
+  host: uv run python tools/verify_host.py
