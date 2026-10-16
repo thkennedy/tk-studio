@@ -201,7 +201,7 @@ describe("the paused story's spec and verdict", () => {
     // Block If: another paused stage with a done spec is never widened into AC1.
     const boundary = await pausedRun({ stage: "epic-boundary", verdict: "no-impact" });
     expect(landing(boundary.run, boundary.queue.events(boundary.run.run_id))).toMatchObject({ outcome: "not-landed" });
-  });
+  }, 60_000); // nine real worktrees through git: past bun's 5 s default on a Windows host (api.test.ts uses the same budget)
 });
 
 // ---------------------------------------------------------------- AC1

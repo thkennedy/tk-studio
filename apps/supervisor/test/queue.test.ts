@@ -970,11 +970,11 @@ describe("review pass 2 fixes", () => {
   test("win32 start time: a bounded PowerShell read through injection; a failed read is absent", () => {
     const seen: string[] = [];
     const ps = (out: string | null) => (cmd: string) => { seen.push(cmd); return out; };
-    expect(processStartTime(4242, "win32", ps("2026-09-28T10:00:00.1234567Z\r\n"))).toBe("2026-09-28T10:00:00.1234567Z");
+    expect(processStartTime(4242, "win32", ps("2026-09-28T10:00:00.1234567Z\r\n"), () => undefined)).toBe("2026-09-28T10:00:00.1234567Z");
     expect(seen[0]).toContain("Get-Process -Id 4242");
     expect(seen[0]).toContain("ToUniversalTime().ToString('o')");
-    expect(processStartTime(4242, "win32", ps(null))).toBeNull();
-    expect(processStartTime(4242, "win32", ps("Get-Process : Cannot find a process"))).toBeNull();
+    expect(processStartTime(4242, "win32", ps(null), () => undefined)).toBeNull();
+    expect(processStartTime(4242, "win32", ps("Get-Process : Cannot find a process"), () => undefined)).toBeNull();
     expect(processStartTime(4242, "darwin", ps("2026-09-28T10:00:00Z"))).toBeNull();
     // The owner probe compares the recorded start with the injected read: a reused pid is dead.
     const me: Owner = { pid: process.pid, host: HOST, nonce: "n", start: "2026-09-28T10:00:00.0000000Z" };
