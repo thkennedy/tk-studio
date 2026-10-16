@@ -85,3 +85,36 @@ Proposed header lines replacing "Use it only when … 3. launch the epic again. 
 ```
 
 Checks only the Windows host can run, for the attended session (operator-decisions §5): the real `sbx exec <sb> <VM HOME>/.local/bin/bmad-loop archive|resolve` against Docker Sandboxes, the real `meter.py harvest` into the host ledger on win32, `sbx run -d --name` on the already-pinned sandbox at the relaunch (the fake answers 0), and the win32 `bun test` run.
+
+## Story 27.4
+
+### Runbook `kb/agent-pc-setup-runbook.md` §3.8: the host verify row (retires the attended host run before each PR)
+
+The supervisor now runs each project's own verify on the Windows host, in the run's worktree, when an sbx-tier run's engine completes and before its PR opens (holes 11, 12 and 22). The attended "run the suite on the host before each PR" step retires for supervised runs. Proposed replacement for step 5 ("When the run completes, open a PR from `loop/epic-<N>` into `main`."):
+
+> 5. **When the run completes** (a supervisor run): the supervisor runs the project's `verify.host` (its tracked `.tk-studio/config.yaml`, read at the run's base, never from the plugin) on the host in the run's worktree, console-hosted, under the job's wall-clock guard, and records a `host-verify` event (exit, duration, the last lines of output). Green, or no `verify.host` (the event says skipped and why): the PR opens ready as before. Red: the run ends `partial` naming the command and its last lines, the branch is still pushed, and the PR opens as a draft whose `## Host verify` section carries the failures; the notification names them. No attended host run before the PR is needed: fix the failures named on the draft PR instead. A run started outside the supervisor (the hand `launch-epic.sh` path) still needs the host suite run by hand before its PR from `loop/epic-<N>` into `main`.
+
+### Proposed `verify.host` keys (tracked `.tk-studio/config.yaml`)
+
+The value is one command line, split on whitespace with `"…"`/`'…'` grouping and never run through a shell, so no `&&`, pipes, redirection or `cd`. A command whose first token is quoted (a path with spaces) must be wrapped whole in YAML quotes, e.g. `host: '"C:\Program Files\x\bun.exe" test'`: unwrapped, the YAML does not parse and the leg is skipped `config unreadable: …` (the PR then opens ready).
+
+- **the-universe-awaits:**
+
+  ```yaml
+  verify:
+    host: bash scripts/verify.sh
+  ```
+
+- **tk-studio:** the runbook's host gate is two commands in two directories (the lib suite, `cd plugins/tk-studio/lib && uv run python -m unittest discover tests`, and conformance, `cd plugins/tk-studio && uv run contracts/conformance/runner.py run`), which needs a shell as one line (Block-If of Story 27.4: no shell was added). Proposed: a single entry-point script, `tools/verify_host.py`, that runs both in turn with `subprocess.run([...], cwd=...)` (argv only) and exits non-zero when either fails, printing each failure's tail last; then:
+
+  ```yaml
+  verify:
+    host: uv run python tools/verify_host.py
+  ```
+
+The supervisor's own key (`verify.host: bun test`) is set in this repo by Story 27.4.
+
+Checks only the Windows host can run, for the attended session (operator-decisions §5): the console-hosted leg against a real sbx run on the agent PC (the command on win32, `windowsHide`, the tree kill on a tripped guard), and the win32 `bun test` run of `test/hostverify.test.ts` and the Story 27.4 sweep pins. Also on the host, for each project's key:
+
+- **Which `bash` resolves.** With no shell, a bare `bash` (the-universe-awaits' `bash scripts/verify.sh`) is resolved through PATH; on a Windows host with WSL, `C:\Windows\System32\bash.exe` (the WSL launcher) can come before Git Bash, and the script would then run inside Linux and miss the Windows-only defects the leg exists to catch. The operator confirms which `bash` the supervisor's PATH resolves first (`where bash`), or names Git Bash's `bash.exe` explicitly in the key.
+- **No `.cmd`/`.bat` shims.** `npm`, `npx`, `pnpm` and the like are `.cmd`/`.bat` shims on Windows and cannot be started without a shell: the key names a real executable (`bun`, `node`, `uv`).

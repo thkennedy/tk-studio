@@ -115,7 +115,7 @@ export function fakeStudioRoot(realRoot: string = process.env.TK_STUDIO_ROOT!): 
  * `repo view` → the default branch; `api repos/{owner}/{repo}/branches/<b>` → `{protected}` (`protected`
  * names the protected branches); `pr list` → `[{url}]` for each of `open` (the open PRs from the head
  * branch; none by default); `pr create` → the PR URL, refused as gh does while `open` names one;
- * `pr ready` → ok. `fail` names the subcommands (`"pr create"`, `"api"`, …) that exit 1. Never the network. */
+ * `pr ready` (and `pr ready <pr> --undo`) → ok; `pr edit` → the PR URL (Story 27.4). `fail` names the subcommands (`"pr create"`, `"api"`, …) that exit 1. Never the network. */
 type GhAnswers = { default?: string; protected?: string[]; pr?: string; open?: string[]; fail?: string[] };
 export function fakeGh(dir: string = mkdtempSync(join(tmpdir(), "tk-sup-gh-"))): {
   bin: string; calls: () => { argv: string[]; cwd: string; gh_repo: string | null; body?: string }[];
@@ -145,6 +145,7 @@ if (sub === "pr create") {
   console.log(a.pr); process.exit(0);
 }
 if (sub === "pr ready") { console.log("ready"); process.exit(0); }
+if (sub === "pr edit") { console.log(argv[2]); process.exit(0); }
 console.error("fake gh: unsupported " + argv.join(" ")); process.exit(2);
 `);
   return {

@@ -201,3 +201,5 @@
     iterations (27-3 consult 1). The pull-back reads every story spec marked done in
     the worktree, which spans relaunches. List 27-3's event kinds (`close-out`,
     `close-out-failed`, `awaiting-ruling`, `engine-resume`, `hold`) in runbook §4.
+    Oversize (plans/27-5.md Risks): HALT and record it if the Files list grows past the
+    plan's 20 files.

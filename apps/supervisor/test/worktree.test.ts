@@ -338,8 +338,12 @@ describe("AC3: the engine-end sweep (operator-decisions §2)", () => {
       "--status-block", JSON.stringify({ ...fx.BLOCK, artifacts: [...fx.BLOCK.artifacts, "https://github.com/acme/widget/pull/42"] }), "--total-cost-usd", "0.25",
     ]]);
     const prCalls = fx.gh.calls().filter((c) => c.argv[0] === "pr").map((c) => c.argv.slice(0, 2));
-    expect(prCalls).toEqual([["pr", "list"], ["pr", "create"], ["pr", "ready"]]); // the same PR, never opened twice
-    expect(fx.gh.calls().at(-1)!.argv).toEqual(["pr", "ready", "https://github.com/acme/widget/pull/42"]);
+    // The same PR, never opened twice; marked ready, then its body regenerated with the (skipped: host-tier)
+    // `## Host verify` section (Story 27.4).
+    expect(prCalls).toEqual([["pr", "list"], ["pr", "create"], ["pr", "ready"], ["pr", "edit"]]);
+    expect(fx.gh.calls().at(-2)!.argv).toEqual(["pr", "ready", "https://github.com/acme/widget/pull/42"]);
+    expect(fx.gh.calls().at(-1)!.argv.slice(0, 4)).toEqual(["pr", "edit", "https://github.com/acme/widget/pull/42", "--body-file"]);
+    expect(fx.gh.calls().at(-1)!.body).toContain("## Host verify\n\nSkipped: host-tier run: the worker ran on the host");
     expect(existsSync(fx.wt)).toBe(false);
     expect(fx.queue.lock(fx.repo.checkout)).toBeNull();
     expect(fx.head()).toEqual(fx.headBefore);
@@ -464,6 +468,420 @@ describe("AC3: the engine-end sweep (operator-decisions §2)", () => {
     expect(ended).toMatchObject({ kind: "ended", to_state: "complete" });
     expect(ended.detail).toMatchObject({ pr: "https://github.com/acme/widget/pull/42", closeout: { result: "PR", worktree: "removed" } });
     expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.body).toContain("$0.5000");
+  });
+});
+
+describe("Story 27.4: the host verify leg runs before any PR opens", () => {
+  /** `"<bun>" -e "<script>"`: the same verify command on both hosts (the script uses single quotes only). */
+  const bunCmd = (script: string) => `"${process.execPath}" -e "${script}"`;
+  const RED = bunCmd("console.log('ran 12 tests'); console.error('FAIL win32 path test'); console.error('1 failing'); process.exit(3)");
+  const config = (host?: string) => host === undefined ? "vcs: git\n" : `vcs: git\nverify:\n  host: ${JSON.stringify(host)}\n`;
+
+  /** A launched sbx run (as the AC3 sweep's `launched()`) whose base config carries `host`; one engine commit. */
+  async function launchedSbx(host: string | undefined, tier: "sbx" | "host" = "sbx") {
+    const fx = await fixture({ baseRef: "main", files: { ".tk-studio/config.yaml": config(host) } });
+    const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+    fx.queue.markVerbStarted(fx.run.run_id, "wake", [], { target: "skill", definition: fx.defn });
+    const BLOCK = { status: "complete", intent: "tk-studio-launch", artifacts: [".bmad-loop/runs/E1"] };
+    await mirror(fx.queue, fx.run.run_id, { jobId: "j", defn: fx.defn }, {
+      ok: true, job_id: "j", run_id: "j-20261016T101010Z", target: "skill", state: "complete", status_block: BLOCK, total_cost_usd: 0.25, finish_deferred: true,
+    }, async () => ({}), fx.deps);
+    // The run's tier as an sbx submission records it (set after the launch return: no fake `sbx` here).
+    (fx.queue as any).db.query("UPDATE runs SET tier = ? WHERE run_id = ?").run(tier, fx.run.run_id);
+    commitIn(wt, "a.txt", "engine: story one");
+    return { ...fx, wt, BLOCK };
+  }
+  const hv = (fx: { queue: Queue; run: { run_id: string } }) => fx.queue.events(fx.run.run_id).filter((e) => e.kind === "host-verify");
+  const prCalls = (fx: { gh: ReturnType<typeof fakeGh> }) => fx.gh.calls().filter((c) => c.argv[0] === "pr");
+
+  test("green: a `host-verify` event before the close-out (exit, duration, tails), the PR created ready, the end as computed", async () => {
+    const fx = await launchedSbx(bunCmd("console.log('all green')"));
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    const events = fx.queue.events(fx.run.run_id);
+    const ev = hv(fx);
+    expect(ev).toHaveLength(1);
+    expect(ev[0]!.detail).toMatchObject({ green: true, exit: 0, cwd: fx.wt, stdout_tail: ["all green"], stderr_tail: [] });
+    expect(typeof ev[0]!.detail!.duration_ms).toBe("number");
+    expect(events.findIndex((e) => e.kind === "host-verify")).toBeLessThan(events.findIndex((e) => e.kind === "ended"));
+    // The verify ran in the worktree, before the push.
+    const verifyAt = fx.argvs.findIndex((a) => a.bin === process.execPath), pushAt = fx.argvs.findIndex((a) => a.args[0] === "push");
+    expect(fx.argvs[verifyAt]!.cwd).toBe(fx.wt);
+    expect(verifyAt).toBeLessThan(pushAt);
+    const create = fx.gh.calls().find((c) => c.argv[1] === "create")!;
+    expect(create.argv).not.toContain("--draft");
+    expect(create.body).toContain("## Host verify");
+    expect(create.body).toContain("Green: `");
+    expect(fx.get()).toMatchObject({ state: "complete" });
+    const ended = events.find((e) => e.kind === "ended")!;
+    expect(ended.detail).toMatchObject({ closeout: { result: "PR", host_verify: "green", worktree: "removed" } });
+    expect(fx.verbs[0]![fx.verbs[0]!.indexOf("--state") + 1]).toBe("complete");
+  });
+
+  test("red exit: `partial` naming the command and its last lines, pushed, `gh pr create --draft` carrying the failures, `finish --state partial`", async () => {
+    const fx = await launchedSbx(RED);
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(hv(fx)[0]!.detail).toMatchObject({ green: false, exit: 3, command: RED, stderr_tail: ["FAIL win32 path test", "1 failing"] });
+    const reason = `host verify red: \`${RED}\` exited 3; last lines: FAIL win32 path test | 1 failing`;
+    expect(fx.get()).toMatchObject({ state: "partial", reason });
+    // Pushed as before.
+    expect(testGit(fx.repo.origin, "rev-parse", `refs/heads/supervisor/run-${fx.run.run_id}`)).toMatch(/^[0-9a-f]{40}$/);
+    const create = fx.gh.calls().find((c) => c.argv[1] === "create")!;
+    expect(create.argv).toContain("--draft");
+    expect(create.body).toContain("**Red:**");
+    expect(create.body).toContain("FAIL win32 path test");
+    expect(prCalls(fx).some((c) => c.argv[1] === "ready")).toBe(false);
+    const ended = fx.queue.events(fx.run.run_id).find((e) => e.kind === "ended")!;
+    expect(ended).toMatchObject({ to_state: "partial" });
+    expect(ended.detail!.reason).toBe(reason); // the notification's reason names the command and its failures
+    expect(ended.detail).toMatchObject({ pr: "https://github.com/acme/widget/pull/42", closeout: { result: "draft PR", host_verify: "red", worktree: "removed" } });
+    expect(existsSync(fx.wt)).toBe(false);
+    // The deferred studio `finish` carries the red end.
+    expect(fx.verbs).toHaveLength(1);
+    expect(fx.verbs[0]![fx.verbs[0]!.indexOf("--state") + 1]).toBe("partial");
+    expect(fx.verbs[0]![fx.verbs[0]!.indexOf("--reason") + 1]).toBe(reason);
+    expectNoForbiddenArgv(fx.argvs, fx.gh.calls());
+  });
+
+  test("red on a paused run's existing draft: no `host-verify` on the pause; at the end no `gh pr ready`, `gh pr edit <pr> --body-file` with the failures", async () => {
+    const fx = await launchedSbx(RED);
+    fx.answers.launch = { ok: true, run: { status: "running", paused_stage: "review", paused_reason: "escalation" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(fx.get().state).toBe("paused");
+    expect(hv(fx)).toHaveLength(0); // a paused stop runs no leg
+    expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).toContain("--draft");
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(hv(fx)).toHaveLength(1);
+    expect(fx.get().state).toBe("partial");
+    const pr = "https://github.com/acme/widget/pull/42";
+    expect(prCalls(fx).map((c) => c.argv[1])).toEqual(["list", "create", "ready", "edit"]);
+    expect(prCalls(fx)[2]!.argv).toEqual(["pr", "ready", pr, "--undo"]); // a no-op on the draft: never marked ready
+    const edit = prCalls(fx).at(-1)!;
+    expect(edit.argv.slice(0, 4)).toEqual(["pr", "edit", pr, "--body-file"]);
+    expect(edit.body).toContain("FAIL win32 path test");
+    const ended = fx.queue.events(fx.run.run_id).find((e) => e.kind === "ended")!;
+    expect(ended.detail).toMatchObject({ pr, closeout: { result: "draft PR", host_verify: "red", worktree: "removed" } });
+  });
+
+  test("absent: no `verify.host` → a skipped `host-verify` event with the reason; the PR opens as before", async () => {
+    const fx = await launchedSbx(undefined);
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(hv(fx).map((e) => e.detail)).toEqual([{ skipped: true, reason: "no verify.host" }]);
+    const create = fx.gh.calls().find((c) => c.argv[1] === "create")!;
+    expect(create.argv).not.toContain("--draft");
+    expect(create.body).toContain("Skipped: no verify.host");
+    expect(fx.get()).toMatchObject({ state: "complete" });
+  });
+
+  test("a host-tier run: skipped `host-tier run: …`, nothing spawned, the PR as before", async () => {
+    const fx = await launchedSbx(RED, "host");
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(hv(fx).map((e) => e.detail)).toEqual([{ skipped: true, reason: "host-tier run: the worker ran on the host" }]);
+    expect(fx.argvs.some((a) => a.bin === process.execPath)).toBe(false);
+    expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).not.toContain("--draft");
+    expect(fx.get().state).toBe("complete");
+  });
+
+  test("an engine the supervisor killed: no leg, no `host-verify` event, its recorded end", async () => {
+    const fx = await launchedSbx(RED);
+    fx.queue.recordEnginePid(fx.run.run_id, { pid: 6509, start: "125610.0", source: "engine.pid" });
+    fx.queue.note(fx.run.run_id, "engine-kill", { why: "test", sandbox: "claude-p", worker: { pid: 6509, start: "125610.0", outcome: "killed" } });
+    fx.answers.launch = { ok: true, run: { status: "running" } }; // a killed engine never writes its end
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(hv(fx)).toHaveLength(0);
+    expect(fx.argvs.some((a) => a.bin === process.execPath)).toBe(false);
+    expect(fx.get().state).toBe("complete");
+    expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).not.toContain("--draft");
+  });
+
+  test("a relaunched run: red overrides the engine's own end (`finished` would be `complete`)", async () => {
+    const fx = await launchedSbx(RED);
+    // A close-out then a relaunch's `launched` (Story 27.3): the end is the engine's terminal status.
+    fx.queue.note(fx.run.run_id, "close-out", { story: "k" });
+    fx.queue.markLaunched(fx.run.run_id, "E1", { end: { state: "complete", reason: null } });
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(fx.get().state).toBe("partial");
+    expect(fx.get().reason).toStartWith(`host verify red: \`${RED}\` exited 3`);
+    expect(fx.verbs[0]![fx.verbs[0]!.indexOf("--state") + 1]).toBe("partial");
+    expect(fx.verbs[0]!.join(" ")).not.toContain("relaunched engine ended");
+  });
+
+  test("a resumed run: red overrides the engine's own end (`finished` would be `complete`) → `partial` naming the command, `finish --state partial`", async () => {
+    const fx = await launchedSbx(RED);
+    // The resume's fresh `launched` (Story 27.3: `resumed: true`): the end is the engine's terminal status.
+    fx.queue.markLaunched(fx.run.run_id, "E1", { end: { state: "complete", reason: null }, resumed: true } as any);
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(hv(fx)).toHaveLength(1);
+    expect(fx.get().state).toBe("partial");
+    expect(fx.get().reason).toStartWith(`host verify red: \`${RED}\` exited 3`);
+    expect(fx.verbs).toHaveLength(1);
+    expect(fx.verbs[0]![fx.verbs[0]!.indexOf("--state") + 1]).toBe("partial");
+    expect(fx.verbs[0]![fx.verbs[0]!.indexOf("--reason") + 1]).toStartWith(`host verify red: \`${RED}\``);
+    expect(fx.verbs[0]!.join(" ")).not.toContain("resumed engine ended");
+  });
+
+  test("red on an adopted open PR (not paused, perhaps left ready by a crashed close-out): `gh pr ready <pr> --undo` and `gh pr edit`, never plain `gh pr ready`", async () => {
+    const fx = await launchedSbx(RED);
+    const pr = "https://github.com/acme/widget/pull/77";
+    fx.gh.answer({ open: [pr] });
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(prCalls(fx).map((c) => c.argv.slice(1, 4))).toEqual([
+      ["list", "--head", `supervisor/run-${fx.run.run_id}`], ["ready", pr, "--undo"], ["edit", pr, "--body-file"],
+    ]);
+    expect(prCalls(fx).filter((c) => c.argv[1] === "ready").every((c) => c.argv.includes("--undo"))).toBe(true);
+    expect(prCalls(fx).at(-1)!.body).toContain("FAIL win32 path test");
+    expect(fx.get().state).toBe("partial");
+    const ended = fx.queue.events(fx.run.run_id).find((e) => e.kind === "ended")!;
+    expect(ended.detail).toMatchObject({ pr, closeout: { result: "draft PR", host_verify: "red", worktree: "removed" } });
+  });
+
+  test("red on an adopted PR whose `gh pr ready --undo` fails: recorded in the close-out (never thrown), the body still edited", async () => {
+    const fx = await launchedSbx(RED);
+    const pr = "https://github.com/acme/widget/pull/77";
+    fx.gh.answer({ open: [pr], fail: ["pr ready"] });
+    const verify = { command: RED, argv: ["x"], cwd: fx.wt, exit: 3, duration_ms: 1, green: false, stdout_tail: [], stderr_tail: ["boom"] };
+    const c = await closeOut(fx.get(), { paused: false, verify }, fx.deps);
+    expect(c.error).toStartWith("gh pr ready --undo ");
+    expect(c.draft).toBeUndefined();
+    expect(c).toMatchObject({ pr, host_verify: "red", worktree: "kept" });
+    expect(prCalls(fx).map((c) => c.argv[1])).toEqual(["list", "ready", "edit"]);
+  });
+
+  test("green on a paused run's existing draft: at the end `gh pr ready <pr>` then `gh pr edit <pr> --body-file` carrying the green `## Host verify`", async () => {
+    const fx = await launchedSbx(bunCmd("console.log('all green')"));
+    fx.answers.launch = { ok: true, run: { status: "running", paused_stage: "review", paused_reason: "escalation" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(fx.get().state).toBe("paused");
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(hv(fx).map((e) => e.detail!.green)).toEqual([true]);
+    const pr = "https://github.com/acme/widget/pull/42";
+    expect(prCalls(fx).map((c) => c.argv[1])).toEqual(["list", "create", "ready", "edit"]);
+    expect(prCalls(fx)[2]!.argv).toEqual(["pr", "ready", pr]);
+    const edit = prCalls(fx)[3]!;
+    expect(edit.argv.slice(0, 4)).toEqual(["pr", "edit", pr, "--body-file"]);
+    expect(edit.body).toContain("## Host verify\n\nGreen: `");
+    expect(fx.get().state).toBe("complete");
+    const ended = fx.queue.events(fx.run.run_id).find((e) => e.kind === "ended")!;
+    expect(ended.detail).toMatchObject({ pr, closeout: { result: "PR", host_verify: "green", worktree: "removed" } });
+  });
+
+  test("green on an adopted open PR whose `gh pr ready` and `gh pr edit` both fail: both recorded in the close-out (never thrown)", async () => {
+    const fx = await launchedSbx(bunCmd("console.log('all green')"));
+    const pr = "https://github.com/acme/widget/pull/77";
+    fx.gh.answer({ open: [pr], fail: ["pr ready", "pr edit"] });
+    const verify = { command: "x", argv: ["x"], cwd: fx.wt, exit: 0, duration_ms: 1, green: true, stdout_tail: [], stderr_tail: [] };
+    const c = await closeOut(fx.get(), { paused: false, verify }, fx.deps);
+    expect(c.error).toStartWith("gh pr ready ");
+    expect(c.error).toContain("; gh pr edit ");
+    expect(c).toMatchObject({ pr, host_verify: "green", worktree: "kept" });
+    expect(prCalls(fx).map((c) => c.argv[1])).toEqual(["list", "ready", "edit"]);
+  });
+
+  test("no verify given (a late close-out, the CLI) on an open PR: `gh pr ready` only, the body never edited", async () => {
+    const fx = await launchedSbx(bunCmd("console.log('all green')"));
+    const pr = "https://github.com/acme/widget/pull/77";
+    fx.gh.answer({ open: [pr] });
+    const c = await closeOut(fx.get(), { paused: false }, fx.deps);
+    expect(c).toMatchObject({ pr, worktree: "removed" });
+    expect(c.error).toBeUndefined();
+    expect(prCalls(fx).map((c) => c.argv[1])).toEqual(["list", "ready"]);
+  });
+
+  test("a killed engine whose worktree is gone (no pending record): no leg, no `host-verify` event, its recorded end", async () => {
+    const fx = await launchedSbx(RED);
+    fx.queue.recordEnginePid(fx.run.run_id, { pid: 6509, start: "125610.0", source: "engine.pid" });
+    fx.queue.note(fx.run.run_id, "engine-kill", { why: "test", sandbox: "claude-p", worker: { pid: 6509, start: "125610.0", outcome: "killed" } });
+    testGit(fx.repo.checkout, "worktree", "remove", "--force", fx.wt);
+    expect(existsSync(fx.wt)).toBe(false);
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(hv(fx)).toHaveLength(0);
+    expect(fx.argvs.some((a) => a.bin === process.execPath)).toBe(false);
+    expect(fx.get().state).toBe("complete");
+    const ended = fx.queue.events(fx.run.run_id).find((e) => e.kind === "ended")!;
+    expect(ended.detail).toMatchObject({ engine: { gone: "its worktree is gone: no engine can run there" } });
+    expect((ended.detail!.closeout as Record<string, unknown>).host_verify).toBeUndefined();
+    expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).not.toContain("--draft");
+  });
+
+  /** A hanging verify command (prints, then sleeps 60s): the leg trips the run's guard. */
+  const HANG = bunCmd("console.error('hung here'); setTimeout(() => {}, 60000)");
+  const setGuards = (fx: { queue: Queue; run: { run_id: string }; defn: Record<string, unknown> }, workerGuardS: number | null, defnGuardS: number) =>
+    (fx.queue as any).db.query("UPDATE runs SET worker_guard_s = ?, definition = ? WHERE run_id = ?")
+      .run(workerGuardS, JSON.stringify({ ...fx.defn, guards: { max_wall_clock_seconds: defnGuardS } }), fx.run.run_id);
+
+  test("the guard: the run's `worker_guard_s` (before the definition's) bounds the leg, the trip named → `partial`", async () => {
+    const fx = await launchedSbx(HANG);
+    setGuards(fx, 1, 50);
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(hv(fx)[0]!.detail).toMatchObject({ green: false, exit: null, guard: "guard: max_wall_clock_seconds (1s)", stderr_tail: ["hung here"] });
+    expect(fx.get()).toMatchObject({ state: "partial", reason: `host verify red: \`${HANG}\` timed out (guard: max_wall_clock_seconds (1s)); last lines: hung here` });
+  }, 30_000);
+
+  test("the guard: no `worker_guard_s` → the job definition's `guards.max_wall_clock_seconds`", async () => {
+    const fx = await launchedSbx(HANG);
+    setGuards(fx, null, 1);
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(hv(fx)[0]!.detail).toMatchObject({ green: false, exit: null, guard: "guard: max_wall_clock_seconds (1s)" });
+    expect(fx.get().state).toBe("partial");
+  }, 30_000);
+
+  /** The first sweep's close-out runs, then its transition and its `closed_out` record both fail (a crash's
+   * effect): the run is left `running` with a `host-verify` recorded and no pending record. */
+  function loseTransitionOnce(fx: { queue: Queue }) {
+    const endEngine = fx.queue.endEngine.bind(fx.queue), note = fx.queue.note.bind(fx.queue);
+    let fail = true;
+    (fx.queue as any).endEngine = (...a: Parameters<typeof endEngine>) => { if (fail) throw new Error("database is locked"); return endEngine(...a); };
+    (fx.queue as any).note = (...a: Parameters<typeof note>) => { if (fail && a[1] === "closed_out") { fail = false; throw new Error("database is locked"); } return note(...a); };
+  }
+
+  test("a second sweep after a lost close-out (worktree kept) reuses the recorded `host-verify`: the command not re-run, no second event", async () => {
+    const fx = await launchedSbx(RED);
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    fx.gh.answer({ fail: ["pr create"] }); // the close-out errs: its worktree kept
+    loseTransitionOnce(fx);
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([]);
+    expect(hv(fx)).toHaveLength(1);
+    expect(existsSync(fx.wt)).toBe(true);
+    expect(fx.get().state).toBe("running");
+    const spawnsBefore = fx.argvs.filter((a) => a.bin === process.execPath).length;
+    expect(spawnsBefore).toBe(1);
+    fx.gh.answer({});
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(fx.argvs.filter((a) => a.bin === process.execPath)).toHaveLength(1); // never re-run
+    expect(hv(fx)).toHaveLength(1);
+    expect(fx.get()).toMatchObject({ state: "partial" });
+    expect(fx.get().reason).toStartWith(`host verify red: \`${RED}\` exited 3`);
+  });
+
+  test("a recorded red `host-verify` with the worktree since removed: still `partial`, never `worktree gone`, never plain `gh pr ready`", async () => {
+    const fx = await launchedSbx(RED);
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    loseTransitionOnce(fx);
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([]);
+    expect(existsSync(fx.wt)).toBe(false); // the close-out removed it before its transition was lost
+    expect(hv(fx)).toHaveLength(1);
+    const pr = "https://github.com/acme/widget/pull/42";
+    fx.gh.answer({ open: [pr] }); // the PR the lost close-out opened, adopted
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(hv(fx)).toHaveLength(1);
+    expect(hv(fx)[0]!.detail).toMatchObject({ green: false, exit: 3 });
+    expect(fx.get().state).toBe("partial");
+    expect(fx.get().reason).toStartWith(`host verify red: \`${RED}\` exited 3`);
+    const ready = prCalls(fx).filter((c) => c.argv[1] === "ready");
+    expect(ready.length).toBeGreaterThan(0);
+    expect(ready.every((c) => c.argv.includes("--undo"))).toBe(true);
+    const ended = fx.queue.events(fx.run.run_id).find((e) => e.kind === "ended")!;
+    expect(ended.detail).toMatchObject({ pr, closeout: { result: "draft PR", host_verify: "red" } });
+    expect(fx.verbs[0]![fx.verbs[0]!.indexOf("--state") + 1]).toBe("partial");
+  });
+
+  test("a pending record replayed by a later sweep never re-runs the leg", async () => {
+    const fx = await launchedSbx(RED);
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    // The transition fails once (the queue busy): the close-out recorded with its pending end.
+    const endEngine = fx.queue.endEngine.bind(fx.queue);
+    let fail = true;
+    (fx.queue as any).endEngine = (...a: Parameters<typeof endEngine>) => { if (fail) { fail = false; throw new Error("database is locked"); } return endEngine(...a); };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([]);
+    expect(hv(fx)).toHaveLength(1);
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(hv(fx)).toHaveLength(1);
+    expect(fx.get().state).toBe("partial");
+    expect(fx.get().reason).toStartWith("host verify red: ");
+  });
+
+  const KILL = { why: "test", sandbox: "claude-p", worker: { pid: 6509, start: "125610.0", outcome: "killed" } };
+  const TRIP = "guard tripped: max_turns exceeded";
+
+  test("review P1: a killed engine whose status reads ended (it handled TERM): no leg, no `host-verify` event, the launch's recorded end", async () => {
+    for (const status of ["stopped", "interrupted"]) {
+      const fx = await launchedSbx(RED);
+      // The trip's end on the launch's `launched` (as a relaunch after a guard trip records it).
+      fx.queue.markLaunched(fx.run.run_id, fx.get().engine_run_id!, { end: { state: "partial", reason: TRIP } });
+      fx.queue.recordEnginePid(fx.run.run_id, { pid: 6509, start: "125610.0", source: "engine.pid" });
+      fx.queue.note(fx.run.run_id, "engine-kill", { ...KILL, worker: { ...KILL.worker, outcome: status === "stopped" ? "killed" : "not running" } });
+      fx.answers.launch = { ok: true, run: { status } };
+      expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+      expect(hv(fx)).toHaveLength(0);
+      expect(fx.argvs.some((a) => a.bin === process.execPath)).toBe(false);
+      expect(fx.get()).toMatchObject({ state: "partial", reason: TRIP });
+      const ended = fx.queue.events(fx.run.run_id).find((e) => e.kind === "ended")!;
+      expect(ended.detail).toMatchObject({ engine: { status }, closeout: { result: "PR", worktree: "removed" } });
+      expect((ended.detail!.closeout as Record<string, unknown>).host_verify).toBeUndefined();
+      expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).not.toContain("--draft");
+      expect(fx.verbs[0]![fx.verbs[0]!.indexOf("--reason") + 1]).toBe(TRIP);
+    }
+  });
+
+  test("review P2: a recorded red `host-verify`, the worktree gone, then an `engine-kill` `not running`: the red reused — `partial`, never plain `gh pr ready`, no second event", async () => {
+    const fx = await launchedSbx(RED);
+    fx.queue.recordEnginePid(fx.run.run_id, { pid: 6509, start: "125610.0", source: "engine.pid" });
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    loseTransitionOnce(fx);
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([]);
+    expect(existsSync(fx.wt)).toBe(false);
+    expect(hv(fx)).toHaveLength(1);
+    fx.queue.note(fx.run.run_id, "engine-kill", { ...KILL, worker: { ...KILL.worker, outcome: "not running" } });
+    const pr = "https://github.com/acme/widget/pull/42";
+    fx.gh.answer({ open: [pr] }); // the draft the lost close-out opened, adopted
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(hv(fx)).toHaveLength(1);
+    expect(fx.argvs.filter((a) => a.bin === process.execPath)).toHaveLength(1);
+    expect(fx.get().state).toBe("partial");
+    expect(fx.get().reason).toStartWith(`host verify red: \`${RED}\` exited 3`);
+    const ready = prCalls(fx).filter((c) => c.argv[1] === "ready");
+    expect(ready.length).toBeGreaterThan(0);
+    expect(ready.every((c) => c.argv.includes("--undo"))).toBe(true);
+    const ended = fx.queue.events(fx.run.run_id).find((e) => e.kind === "ended")!;
+    expect(ended.detail).toMatchObject({ pr, closeout: { result: "draft PR", host_verify: "red" } });
+  });
+
+  const STOP_VERBS = async (_r: string, a: string[]) => a[0] === "status" ? { runs: [{ run_id: "j-20261016T101010Z", state: "running" }] } : { state: "cancelled" };
+  /** A launched run cancelled while its engine is still live (`closeout: skipped`), its draft PR open. */
+  async function cancelledSkipped(recorded?: Record<string, unknown>) {
+    const fx = await launchedSbx(RED);
+    if (recorded) fx.queue.note(fx.run.run_id, "host-verify", recorded);
+    await cancelRun(fx.queue, fx.run.run_id, { verbRunner: STOP_VERBS, launchStop: async () => ({ ok: true, detail: "stopping" }), worktree: fx.deps });
+    expect(fx.queue.events(fx.run.run_id).find((e) => e.kind === "ended")!.detail).toMatchObject({ closeout: { result: "skipped" } });
+    const pr = "https://github.com/acme/widget/pull/77";
+    fx.gh.answer({ open: [pr] });
+    fx.answers.engineLive = false;
+    return { ...fx, pr };
+  }
+
+  test("review P3: the late close-out of a terminal run with a recorded red `host-verify` never marks its draft ready: `--undo` and the body edited; the leg never run", async () => {
+    const red = { command: RED, argv: ["x"], cwd: "w", exit: 3, duration_ms: 5, green: false, stdout_tail: [], stderr_tail: ["FAIL win32 path test"] };
+    const fx = await cancelledSkipped(red);
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(prCalls(fx).map((c) => c.argv.slice(1, 4))).toEqual([
+      ["list", "--head", `supervisor/run-${fx.run.run_id}`], ["ready", fx.pr, "--undo"], ["edit", fx.pr, "--body-file"],
+    ]);
+    expect(prCalls(fx).at(-1)!.body).toContain("FAIL win32 path test");
+    expect(hv(fx)).toHaveLength(1);
+    expect(fx.argvs.some((a) => a.bin === process.execPath)).toBe(false);
+    expect(fx.get().state).toBe("cancelled");
+    const closed = fx.queue.events(fx.run.run_id).filter((e) => e.kind === "closed_out");
+    expect(closed).toHaveLength(1);
+    expect(closed[0]!.detail).toMatchObject({ pr: fx.pr, closeout: { result: "draft PR", host_verify: "red" } });
+  });
+
+  test("review P3: the late close-out of a terminal run with no recorded `host-verify`: as before — `gh pr ready` only, the body never edited", async () => {
+    const fx = await cancelledSkipped();
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(prCalls(fx).map((c) => c.argv.slice(1, 3))).toEqual([["list", "--head"], ["ready", fx.pr]]);
+    expect(prCalls(fx)[1]!.argv).toEqual(["pr", "ready", fx.pr]);
+    expect(hv(fx)).toHaveLength(0);
+    expect(fx.get().state).toBe("cancelled");
   });
 });
 

@@ -245,3 +245,27 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261016-014644-7fea; this entry preserves the lingering recommendation for a deliberate later review.
 status: open
+
+### DW-31: A cancel that stops an sbx engine can lose the close-out take to the engine-end sweep, which then runs the host verify leg on the cancelled run.
+origin: spec-deferred acf9e3efd09e
+source_spec: `27-4-a-host-tier-verify-leg-runs-before-any-pr-opens-spec.md`
+location: src/worktree.ts sweepEngines leg condition; src/cli.ts:772-827
+severity: medium
+reason: src/cli.ts:772 stops the engine (status 'stopped') and only reaches takeForCloseOut at src/cli.ts:827 after further awaits (the studio ender verb, the worker probe). A sweep tick in that window sees phase 'ended', not paused, not killed, takes the close-out (src/worktree.ts sweepEngines) and runs the leg, which the spec's Block-If says never runs on the cancel path. The sweep-vs-cancel race predates story 27.4 (the sweep already opened a PR there); a fix needs a cancel marker that src/worktree.ts can read, and src/cli.ts is outside the story's Files. Deferral criterion (a): behaviour the story's Block-If names.
+status: open
+
+### DW-32: A cancel of a run whose leg already recorded red (its transition and close-out record lost, the run still running) adopts the red draft and marks it ready.
+origin: spec-deferred 322ecfe3a241
+source_spec: `27-4-a-host-tier-verify-leg-runs-before-any-pr-opens-spec.md`
+location: src/cli.ts closeOutNow (cancelQueueRun path)
+severity: low
+reason: src/cli.ts closeOutNow (the cancel path) calls closeOut with no verify input, so an adopted PR gets plain `gh pr ready`, and the red result is dropped from the end (now cancelled). The sweep's main path and its late close-out now reuse the recorded host-verify (this pass, P2/P3); the cancel path needs src/cli.ts, outside the story's Files (Block-If: growing Files past 8 HALTs). Narrow window: between a lost transition and the next sweep tick. Deferral criterion (a): AC2's red PR stays a draft.
+status: open
+
+### DW-33: Follow-up review still recommended for 27-4-a-host-tier-verify-leg-runs-before-any-pr-opens after the damping cap was spent
+origin: review-budget-followup
+source_spec: `27-4-a-host-tier-verify-leg-runs-before-any-pr-opens-spec.md`
+location: n/a
+severity: low
+reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261016-014644-7fea; this entry preserves the lingering recommendation for a deliberate later review.
+status: open

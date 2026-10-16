@@ -32,6 +32,11 @@
  *              `paused` run, has `launch.py status --directory <worktree> --run-id <engine>` probed;
  *              an ended engine is closed out and the run ended (`ended`, the PR URL in its detail), a
  *              paused one closed out as a draft and the run paused (`paused`, the URL on that event).
+ *              Story 27.4: an engine that ended on its own (not paused, not killed) first gets the host
+ *              verify leg (`hostverify.ts`, a `host-verify` event); red ends the run `partial` naming the
+ *              command and opens the PR as a draft carrying the failures (an open PR: `gh pr ready --undo` and
+ *              `gh pr edit`, never ready); green or skipped on an open PR: `gh pr ready` and `gh pr edit` (the body
+ *              regenerated with its `## Host verify`). A `host-verify` already recorded for the completion is reused, never re-run.
  *              On the ended path the studio run is finished then (operator-decisions §2: not at
  *              launch return): `jobrun finish` with the deferred state and reason, the launch status
  *              block (the PR among its artifacts) and the metered cost. A close-out whose transition
@@ -56,6 +61,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { ghBin, pluginRoot, WorkDirMissing, workDir } from "./env";
 import { canonicalPr, isWithin } from "./hygiene";
+import { hostVerify, isRed, prSection, redReason, type HostVerifyResult } from "./hostverify";
 import { isTerminal, RunTerminal, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
 import { releasePin, sameStart, type SandboxDeps } from "./sandbox";
 import { lastJsonObject, runJobVerb, runProcess, runUv, toVmPath, type RunResult, type Tier } from "./server";
@@ -306,8 +312,9 @@ export function meteredCost(worktree: string, engineRunId: string | null | undef
 }
 
 /** The PR body, in order: the launch status block (fenced JSON), `Engine run: <id>`, the landed
- * commits (`git log --oneline <base_ref>..HEAD`), the metered cost (or "not metered"). */
-export function prBody(input: { statusBlock?: unknown; engineRunId?: string | null; commits: string[]; costUsd?: number; runId: string }): string {
+ * commits (`git log --oneline <base_ref>..HEAD`), the metered cost (or "not metered"), and the host
+ * verify leg's `## Host verify` section when it was run or skipped (Story 27.4). */
+export function prBody(input: { statusBlock?: unknown; engineRunId?: string | null; commits: string[]; costUsd?: number; runId: string; verify?: HostVerifyResult }): string {
   return [
     `Opened by the supervisor for queue run \`${input.runId}\`.`,
     "",
@@ -326,6 +333,7 @@ export function prBody(input: { statusBlock?: unknown; engineRunId?: string | nu
     "## Metered cost",
     "",
     input.costUsd === undefined ? "not metered" : `$${input.costUsd.toFixed(4)} (total_cost_usd)`,
+    ...(input.verify ? ["", ...prSection(input.verify)] : []),
   ].join("\n");
 }
 
@@ -333,12 +341,14 @@ export function prBody(input: { statusBlock?: unknown; engineRunId?: string | nu
 export interface CloseOut {
   pr?: string; no_changes?: true; commits: string[]; draft?: boolean; pushed?: string;
   error?: string; worktree: "removed" | "kept" | string;
+  /** Story 27.4: the host verify leg's outcome, when the close-out was given one. */
+  host_verify?: "green" | "red" | "skipped";
 }
 
 /** The close-out of a run's worktree (see the header). Never throws: a failure is `error`. */
 export async function closeOut(
   run: Pick<QueueRun, "run_id" | "job_id" | "root" | "worktree" | "base_ref">,
-  input: { paused: boolean; statusBlock?: unknown; engineRunId?: string | null; costUsd?: number; existingPr?: string },
+  input: { paused: boolean; statusBlock?: unknown; engineRunId?: string | null; costUsd?: number; existingPr?: string; verify?: HostVerifyResult },
   deps: WorktreeDeps = {},
 ): Promise<CloseOut> {
   const wt = run.worktree!, base = run.base_ref ?? "", branch = runBranch(run.run_id);
@@ -347,6 +357,9 @@ export async function closeOut(
   const gone = !existsSync(wt);
   const at = gone ? run.root : wt;
   const out: CloseOut = { commits: [], worktree: "kept" };
+  // Story 27.4: a red host verify opens the PR as a draft carrying the failures (never marked ready).
+  const red = isRed(input.verify);
+  if (input.verify) out.host_verify = input.verify.skipped ? "skipped" : input.verify.green ? "green" : "red";
   const finish = async (): Promise<CloseOut> => {
     if (input.paused) { out.worktree = "kept"; return out; } // a paused run keeps it for the resume
     if (out.error) { out.worktree = "kept"; return out; }
@@ -383,27 +396,63 @@ export async function closeOut(
       if (r.exit !== 0) { out.error = `gh pr list ${failed(r)}`; return finish(); }
       existingPr = openPrUrl(r.stdout);
     }
-    if (existingPr) {
-      out.pr = existingPr;
-      if (!input.paused) {
-        const r = await gh(deps, at, ["pr", "ready", existingPr]);
-        if (r.exit !== 0) out.error = `gh pr ready ${failed(r)}`;
-      } else out.draft = true;
-    } else {
-      const body = prBody({ statusBlock: input.statusBlock, engineRunId: input.engineRunId, commits: out.commits, costUsd: input.costUsd ?? (gone ? undefined : meteredCost(wt, input.engineRunId)), runId: run.run_id });
-      // The body through a file: a long run's body passes the win32 command-line limit as an argument.
+    // The body through a file: a long run's body passes the win32 command-line limit as an argument.
+    const withBody = async <T>(use: (bodyFile: string) => Promise<T>): Promise<T> => {
+      const body = prBody({ statusBlock: input.statusBlock, engineRunId: input.engineRunId, commits: out.commits, costUsd: input.costUsd ?? (gone ? undefined : meteredCost(wt, input.engineRunId)), runId: run.run_id, ...(input.verify ? { verify: input.verify } : {}) });
       const dir = mkdtempSync(join(tmpdir(), "tk-sup-pr-body-"));
       try {
         const bodyFile = join(dir, "body.md");
         writeFileSync(bodyFile, body, "utf-8");
-        const r = await gh(deps, at, [
-          "pr", "create", "--base", baseBranch(base), "--head", branch, "--title", `supervisor: ${run.job_id} (${run.run_id})`, "--body-file", bodyFile,
-          ...(input.paused ? ["--draft"] : []),
-        ]);
-        const url = r.stdout.split(/\s+/).map((t) => canonicalPr(t)).find(Boolean);
-        if (r.exit !== 0 || !url) out.error = `gh pr create ${failed(r)}`;
-        else { out.pr = url; if (input.paused) out.draft = true; }
+        return await use(bodyFile);
       } finally { try { rmSync(dir, { recursive: true, force: true }); } catch { /* a temp file left behind */ } }
+    };
+    // `gh pr edit <pr> --body-file` with the regenerated body; a failure (or a throw) pushed to `errors`.
+    const editBody = async (pr: string, errors: string[]) => {
+      try {
+        const r = await withBody((f) => gh(deps, at, ["pr", "edit", pr, "--body-file", f]));
+        if (r.exit !== 0) errors.push(`gh pr edit ${failed(r)}`);
+      } catch (e) { errors.push(`gh pr edit: ${clip(message(e))}`); }
+    };
+    if (existingPr) {
+      out.pr = existingPr;
+      if (red) {
+        // A red verify on a PR already open (a paused run's draft, or an adopted one an earlier close-out may
+        // have marked ready before it crashed): converted back to a draft (`gh pr ready --undo`, a no-op on a
+        // draft), never marked ready, its body regenerated. A failure of either is recorded, never thrown.
+        const errors: string[] = [];
+        try {
+          const u = await gh(deps, at, ["pr", "ready", existingPr, "--undo"]);
+          if (u.exit !== 0) errors.push(`gh pr ready --undo ${failed(u)}`);
+          else out.draft = true;
+        } catch (e) { errors.push(`gh pr ready --undo: ${clip(message(e))}`); }
+        await editBody(existingPr, errors);
+        if (errors.length) out.error = errors.join("; ");
+      } else if (!input.paused) {
+        if (!input.verify) {
+          const r = await gh(deps, at, ["pr", "ready", existingPr]);
+          if (r.exit !== 0) out.error = `gh pr ready ${failed(r)}`;
+        } else {
+          // A green or skipped verify on a PR already open (a resumed or relaunched run's draft, or an adopted
+          // one): marked ready as today, and its body regenerated so it carries the `## Host verify` section.
+          // A failure of either is recorded, never thrown.
+          const errors: string[] = [];
+          try {
+            const r = await gh(deps, at, ["pr", "ready", existingPr]);
+            if (r.exit !== 0) errors.push(`gh pr ready ${failed(r)}`);
+          } catch (e) { errors.push(`gh pr ready: ${clip(message(e))}`); }
+          await editBody(existingPr, errors);
+          if (errors.length) out.error = errors.join("; ");
+        }
+      } else out.draft = true;
+    } else {
+      const draft = input.paused || red;
+      const r = await withBody((bodyFile) => gh(deps, at, [
+        "pr", "create", "--base", baseBranch(base), "--head", branch, "--title", `supervisor: ${run.job_id} (${run.run_id})`, "--body-file", bodyFile,
+        ...(draft ? ["--draft"] : []),
+      ]));
+      const url = r.stdout.split(/\s+/).map((t) => canonicalPr(t)).find(Boolean);
+      if (r.exit !== 0 || !url) out.error = `gh pr create ${failed(r)}`;
+      else { out.pr = url; if (draft) out.draft = true; }
     }
   } catch (e) { out.error = `gh pr: ${clip(message(e))}`; }
   return finish();
@@ -444,6 +493,14 @@ export function priorPr(events: readonly QueueEvent[]): string | undefined {
   return undefined;
 }
 
+/** Story 27.4: the `host-verify` recorded for the latest engine completion (after the latest `launched`): a
+ * close-out that crashed, or whose transition and record both failed, perhaps after removing the worktree. */
+function recordedVerify(events: readonly QueueEvent[]): HostVerifyResult | undefined {
+  const at = events.findLastIndex((e) => e.kind === "host-verify");
+  const d = at > events.findLastIndex((e) => e.kind === "launched") ? events[at]!.detail : undefined;
+  return d && typeof d === "object" ? d as unknown as HostVerifyResult : undefined;
+}
+
 /** The state transition a sweep's close-out recorded but could not write (`closed_out` with `pending`):
  * `paused` (the `paused` event's detail) or `ended` (the end and its detail). */
 export type PendingTransition =
@@ -471,6 +528,7 @@ export function closeOutDetail(c: CloseOut): Record<string, unknown> {
     closeout: {
       result: c.no_changes ? "no changes" : c.pr ? (c.draft ? "draft PR" : "PR") : "failed",
       commits: c.commits, ...(c.pushed ? { pushed: c.pushed } : {}), ...(c.error ? { error: c.error } : {}), worktree: c.worktree,
+      ...(c.host_verify ? { host_verify: c.host_verify } : {}),
     },
   };
 }
@@ -562,7 +620,9 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         taken = true; // a throw below lets go of its `closing-out` lease (`releaseCloseOut`)
         const events = queue.events(r.run_id);
         const existingPr = priorPr(events);
-        const c = await closeOut(r, { paused: false, ...launchedCloseOutInput(events, r), ...(existingPr ? { existingPr } : {}) }, deps);
+        // A recorded `host-verify` goes with it (a red draft never marked ready); the leg is never run here.
+        const verify = recordedVerify(events);
+        const c = await closeOut(r, { paused: false, ...launchedCloseOutInput(events, r), ...(existingPr ? { existingPr } : {}), ...(verify ? { verify } : {}) }, deps);
         queue.note(r.run_id, "closed_out", closeOutDetail(c));
         // The worktree is gone: an engine lock this run still holds would be probed there forever.
         if (c.worktree === "removed") queue.releaseEngineLock(r.run_id, "its worktree was closed out and removed (its engine confirmed dead)");
@@ -603,7 +663,19 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
       const paused = st.phase === "paused";
       // The status block and the metered cost, read before the close-out removes the worktree.
       const input = launchedCloseOutInput(events, run);
-      const c = await closeOut(run, { paused, ...input, engineRunId: run.engine_run_id, ...(existingPr ? { existingPr } : {}) }, deps);
+      // Story 27.4: an engine that completed on its own (not paused, not killed) gets the host verify leg,
+      // run before the close-out pushes and opens the PR; one `host-verify` event, skipped or ran.
+      // A `host-verify` already recorded for this engine completion is reused whatever a later kill says: the
+      // leg never re-run (nor replaced by a `worktree gone` skip), no second event.
+      let verify = paused ? undefined : recordedVerify(events);
+      // An engine the supervisor killed runs no leg, its status ended (it handled TERM, or its worktree is
+      // gone) or not (its end and reason computed as before).
+      if (!verify && !paused && !st.detail.killed && !(await killedEngine(queue, run))) {
+        const guardS = run.worker_guard_s ?? (Number(queue.definition(run)?.guards?.max_wall_clock_seconds) || 600);
+        verify = await hostVerify(run, guardS, deps);
+        queue.note(run.run_id, "host-verify", verify as Record<string, unknown>);
+      }
+      const c = await closeOut(run, { paused, ...input, engineRunId: run.engine_run_id, ...(existingPr ? { existingPr } : {}), ...(verify ? { verify } : {}) }, deps);
       let next: PendingTransition;
       if (paused) next = { phase: "paused", detail: { engine: st.detail, ...closeOutDetail(c) } };
       else {
@@ -615,8 +687,10 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         const relaunched = !resumed && !st.detail.killed && events.findLastIndex((e) => e.kind === "close-out") >= 0
           && events.findLastIndex((e) => e.kind === "launched") > events.findLastIndex((e) => e.kind === "close-out");
         const engineEnd = resumed || relaunched ? String(st.detail.status ?? "unknown") : undefined;
-        const state = engineEnd !== undefined ? engineEndState(engineEnd) : end.state ?? "complete";
-        const reason = engineEnd !== undefined ? (state === "complete" ? null : `${resumed ? "resumed" : "relaunched"} engine ended '${engineEnd}'`) : end.reason ?? null;
+        let state: TerminalState = engineEnd !== undefined ? engineEndState(engineEnd) : end.state ?? "complete";
+        let reason: string | null = engineEnd !== undefined ? (state === "complete" ? null : `${resumed ? "resumed" : "relaunched"} engine ended '${engineEnd}'`) : end.reason ?? null;
+        // A red host verify ends the run `partial` naming the command, whatever end was computed (`ended` and `finish`).
+        if (isRed(verify)) { state = "partial"; reason = redReason(verify); }
         const finish = await finishStudio(run, state, reason, launched.status_block, c.pr, input.costUsd, deps);
         next = { phase: "ended", state, reason, detail: { ...(end.detail ?? {}), engine: st.detail, ...closeOutDetail(c), finish }, ...(end.stop ? { stop: end.stop } : {}) };
       }
