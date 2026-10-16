@@ -1,0 +1,148 @@
+# stories.yaml: Epic 27 of this project, transcribed 1:1 from _bmad-output/planning-artifacts/epics.md
+# by .bmad-loop/plugins/studio-pipeline/transcribe.py on 2026-10-16. The epics document is
+# the plan; the studio gate may append remediation entries (`<key>-r<n>`) and revise
+# UNSTARTED entries' invoke_dev_with, nothing else.
+
+- id: "27-1-every-run-gets-its-own-worktree-and-ends-in-a-pr"
+  title: "Every Run Gets Its Own Worktree and Ends in a PR"
+  description: >-
+    I want each run to work in a git worktree of the project cut from its base, and to
+    end as a pull request against that base, So that two loops never share a working
+    tree, a run never switches the branch under a running service, and all agent work
+    arrives PR-only (hole 16; supersedes Story 23.2).
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 27.1: Every
+    Run Gets Its Own Worktree and Ends in a PR", the authoritative specification (user
+    story and acceptance criteria). Read the epic's own narrative (the paragraphs under
+    "## Epic 27:") for scope, rulings and the repo the story targets; transcribe the
+    story into the spec's intent contract and never re-derive, generalise or extend it.
+    Plan: plans/27-1.md when present (its Code Map is the investigation). Project rules
+    and the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as
+    `stories/27-1-every-run-gets-its-own-worktree-and-ends-in-a-pr-spec.md` in the spec
+    folder; the engine resolves it by the glob
+    `27-1-every-run-gets-its-own-worktree-and-ends-in-a-pr-*.md`, and a file named
+    `27-1-every-run-gets-its-own-worktree-and-ends-in-a-pr.md` is read as pending (loop
+    deficiency 1, story 21-6) Oversize (plans/27-1.md Risks): HALT and record it if the Files
+    list grows past the plan's 8 files.
+
+- id: "27-2-the-supervisor-holds-the-engine-and-nothing-else-starts-one"
+  title: "The Supervisor Holds the Engine and Nothing Else Starts One"
+  description: >-
+    I want the supervisor itself to start, hold, pin and release every engine sandbox,
+    and the queue to be the only way a run starts, So that an engine never dies with a
+    host-side shell (hole 7) and the pacer never overlaps a run it cannot see (DW-6,
+    DW-3).
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 27.2: The
+    Supervisor Holds the Engine and Nothing Else Starts One", the authoritative
+    specification (user story and acceptance criteria). Read the epic's own narrative
+    (the paragraphs under "## Epic 27:") for scope, rulings and the repo the story
+    targets; transcribe the story into the spec's intent contract and never re-derive,
+    generalise or extend it. Plan: plans/27-2.md when present (its Code Map is the
+    investigation). Project rules and the verify gate: the studio customization
+    (_bmad/custom/bmad-build-auto.toml). Routing: .bmad-loop/routing.current.json; pass
+    the model, effort and advisor of implementer and reviewers explicitly on every
+    subagent launch. Advisor: when routing.current.json gives the session an advisor
+    other than `off`, consult the advisor on: verify-red, halt, deviation above 0, a
+    high-severity finding, a tripwire, a file outside Files, and before declaring the
+    story done; append a `## Consult Log` entry per advisor call. Deviations: one
+    `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto Run Result.
+    Spec file: write the executor spec as
+    `stories/27-2-the-supervisor-holds-the-engine-and-nothing-else-starts-one-spec.md`
+    in the spec folder; the engine resolves it by the glob
+    `27-2-the-supervisor-holds-the-engine-and-nothing-else-starts-one-*.md`, and a file
+    named `27-2-the-supervisor-holds-the-engine-and-nothing-else-starts-one.md` is read
+    as pending (loop deficiency 1, story 21-6).
+
+- id: "27-3-a-paused-run-whose-story-landed-is-closed-out-by-the-service"
+  title: "A Paused Run Whose Story Landed Is Closed Out by the Service"
+  description: >-
+    I want the supervisor to close out a run that paused after its story's work was
+    committed, once a verdict exists, So that the attended recipe of 2026-10-14
+    (verdict, harvest commit, meter, archive, relaunch) is the service's job (hole 9).
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 27.3: A
+    Paused Run Whose Story Landed Is Closed Out by the Service", the authoritative
+    specification (user story and acceptance criteria). Read the epic's own narrative
+    (the paragraphs under "## Epic 27:") for scope, rulings and the repo the story
+    targets; transcribe the story into the spec's intent contract and never re-derive,
+    generalise or extend it. Plan: plans/27-3.md when present (its Code Map is the
+    investigation). Project rules and the verify gate: the studio customization
+    (_bmad/custom/bmad-build-auto.toml). Routing: .bmad-loop/routing.current.json; pass
+    the model, effort and advisor of implementer and reviewers explicitly on every
+    subagent launch. Advisor: when routing.current.json gives the session an advisor
+    other than `off`, consult the advisor on: verify-red, halt, deviation above 0, a
+    high-severity finding, a tripwire, a file outside Files, and before declaring the
+    story done; append a `## Consult Log` entry per advisor call. Deviations: one
+    `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto Run Result.
+    Spec file: write the executor spec as
+    `stories/27-3-a-paused-run-whose-story-landed-is-closed-out-by-the-service-spec.md`
+    in the spec folder; the engine resolves it by the glob
+    `27-3-a-paused-run-whose-story-landed-is-closed-out-by-the-service-*.md`, and a file
+    named `27-3-a-paused-run-whose-story-landed-is-closed-out-by-the-service.md` is read
+    as pending (loop deficiency 1, story 21-6).
+
+- id: "27-4-a-host-tier-verify-leg-runs-before-any-pr-opens"
+  title: "A Host-Tier Verify Leg Runs Before Any PR Opens"
+  description: >-
+    I want the project's own verify command run on the Windows host, in the run's
+    worktree, after the engine completes and before the PR opens, So that Windows-only
+    defects stop reaching branches (holes 11, 12 and 22).
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 27.4: A
+    Host-Tier Verify Leg Runs Before Any PR Opens", the authoritative specification
+    (user story and acceptance criteria). Read the epic's own narrative (the paragraphs
+    under "## Epic 27:") for scope, rulings and the repo the story targets; transcribe
+    the story into the spec's intent contract and never re-derive, generalise or extend
+    it. Plan: plans/27-4.md when present (its Code Map is the investigation). Project
+    rules and the verify gate: the studio customization
+    (_bmad/custom/bmad-build-auto.toml). Routing: .bmad-loop/routing.current.json; pass
+    the model, effort and advisor of implementer and reviewers explicitly on every
+    subagent launch. Advisor: when routing.current.json gives the session an advisor
+    other than `off`, consult the advisor on: verify-red, halt, deviation above 0, a
+    high-severity finding, a tripwire, a file outside Files, and before declaring the
+    story done; append a `## Consult Log` entry per advisor call. Deviations: one
+    `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto Run Result.
+    Spec file: write the executor spec as
+    `stories/27-4-a-host-tier-verify-leg-runs-before-any-pr-opens-spec.md` in the spec
+    folder; the engine resolves it by the glob
+    `27-4-a-host-tier-verify-leg-runs-before-any-pr-opens-*.md`, and a file named
+    `27-4-a-host-tier-verify-leg-runs-before-any-pr-opens.md` is read as pending (loop
+    deficiency 1, story 21-6).
+
+- id: "27-5-the-plan-follows-the-run-and-the-deferred-work-is-paid"
+  title: "The Plan Follows the Run, and the Deferred Work Is Paid"
+  description: >-
+    I want the canonical plan to reflect a run's landing, and the supervisor's own
+    deferred work closed, So that the plan index stops under-reporting what is built
+    (hole 18) and the queue is honest about cost, cancels, time and certificates (DW-11,
+    DW-12, DW-13, DW-15, DW-19, DW-21, DW-23).
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 27.5: The
+    Plan Follows the Run, and the Deferred Work Is Paid", the authoritative
+    specification (user story and acceptance criteria). Read the epic's own narrative
+    (the paragraphs under "## Epic 27:") for scope, rulings and the repo the story
+    targets; transcribe the story into the spec's intent contract and never re-derive,
+    generalise or extend it. Plan: plans/27-5.md when present (its Code Map is the
+    investigation). Project rules and the verify gate: the studio customization
+    (_bmad/custom/bmad-build-auto.toml). Routing: .bmad-loop/routing.current.json; pass
+    the model, effort and advisor of implementer and reviewers explicitly on every
+    subagent launch. Advisor: when routing.current.json gives the session an advisor
+    other than `off`, consult the advisor on: verify-red, halt, deviation above 0, a
+    high-severity finding, a tripwire, a file outside Files, and before declaring the
+    story done; append a `## Consult Log` entry per advisor call. Deviations: one
+    `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto Run Result.
+    Spec file: write the executor spec as
+    `stories/27-5-the-plan-follows-the-run-and-the-deferred-work-is-paid-spec.md` in the
+    spec folder; the engine resolves it by the glob
+    `27-5-the-plan-follows-the-run-and-the-deferred-work-is-paid-*.md`, and a file named
+    `27-5-the-plan-follows-the-run-and-the-deferred-work-is-paid.md` is read as pending
+    (loop deficiency 1, story 21-6).
