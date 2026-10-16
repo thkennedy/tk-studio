@@ -38,6 +38,11 @@
  *              then fails is recorded (`closed_out`), never run twice: a run ended meanwhile keeps it
  *              as its close-out; otherwise the next sweep writes the transition from the record.
  *              A run whose worktree is gone with no record is closed out and ended, never probed.
+ *              Story 27.2: the deferred `ended` (and a terminal run's late close-out) releases the run's
+ *              sbx pin (`sbx stop`, only when no other live run records the sandbox); `paused` never does.
+ *              An engine the supervisor killed (`killedEngine`) never writes its own end — its status
+ *              stays in-progress — so a running/unknown status is read as ended once its recorded kill
+ *              shows it gone.
  *   retries    a close-out run again (its record lost) is idempotent: the commits and the push are
  *              read from the checkout once the worktree is gone (the removal counted done), and an open
  *              PR from the run branch (`gh pr list --head`) is adopted, never opened twice.
@@ -52,6 +57,7 @@ import { dirname, join, resolve } from "node:path";
 import { ghBin, pluginRoot, WorkDirMissing, workDir } from "./env";
 import { canonicalPr, isWithin } from "./hygiene";
 import { isTerminal, RunTerminal, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
+import { releasePin, sameStart, type SandboxDeps } from "./sandbox";
 import { lastJsonObject, runJobVerb, runProcess, runUv, toVmPath, type RunResult, type Tier } from "./server";
 
 type Env = Record<string, string | undefined>;
@@ -69,7 +75,12 @@ export interface WorktreeDeps {
   uv?: UvScriptRunner;
   /** The §4 jobrun verb runner the sweep finishes a launch run's studio run through (default `runJobVerb`). */
   verbs?: (root: string, args: string[], timeoutS?: number) => Promise<Record<string, any>>;
+  /** Story 27.2: the `sbx` seams the pin, hold, kill and release run through (default `runProcess`). */
+  sbx?: SandboxDeps;
 }
+
+/** Story 27.2: the deferred `ended` releases the run's pin (`sbx stop`, when no other run records its sandbox). */
+const release = (queue: Queue, runId: string, deps: WorktreeDeps) => releasePin(queue, runId, { ...(deps.env ? { env: deps.env } : {}), ...(deps.sbx ?? {}) });
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 /** Command output for an event: URL userinfo redacted, clipped. */
@@ -505,6 +516,23 @@ async function finishStudio(
   } catch (e) { return { ok: false, detail: `finish failed: ${clip(message(e))}` }; }
 }
 
+/** Story 27.2: the engine the supervisor killed, by the run's recorded pid (start time matched): its last
+ * `engine-kill` answered `killed` or `not running`, or an `engine-gone` recorded after a kill that left it
+ * alive (`Queue.engineAliveAfterKill`, re-probed here first). An engine killed on TERM-ignore never writes a
+ * terminal state, so its status would answer in-progress forever. Undefined: no such kill — or one still
+ * alive or unreadable — and the engine's own status decides. Never throws. */
+async function killedEngine(queue: Queue, r: QueueRun): Promise<Record<string, unknown> | undefined> {
+  try {
+    if (await queue.engineAliveAfterKill(r)) return undefined;
+    const ev = queue.events(r.run_id).findLast((e) => e.kind === "engine-kill" || e.kind === "engine-gone");
+    const d = (ev?.detail ?? {}) as Record<string, any>;
+    const w = (ev?.kind === "engine-kill" ? d.worker : d) as Record<string, any> | undefined;
+    if (!ev || !w || r.engine_pid == null || w.pid !== r.engine_pid || !sameStart(w.start, r.engine_start)) return undefined;
+    if (ev.kind === "engine-kill" && w.outcome !== "killed" && w.outcome !== "not running") return undefined;
+    return { pid: w.pid, start: w.start, by: ev.kind, ...(ev.kind === "engine-kill" ? { outcome: w.outcome } : { probe: d.probe }) };
+  } catch { return undefined; }
+}
+
 /** The engine-end sweep (see the header). Idempotent: a run is taken atomically before its
  * close-out (`Queue.takeForCloseOut`), a paused run is not closed out again while still paused, and a
  * PR recorded on its `paused` event is marked ready, never opened twice. Answers the run ids it
@@ -528,6 +556,7 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         queue.note(r.run_id, "closed_out", closeOutDetail(c));
         // The worktree is gone: an engine lock this run still holds would be probed there forever.
         if (c.worktree === "removed") queue.releaseEngineLock(r.run_id, "its worktree was closed out and removed (its engine confirmed dead)");
+        await release(queue, r.run_id, deps);
         done.push(r.run_id);
         continue;
       }
@@ -539,14 +568,21 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         if (!run) continue;
         taken = true;
         applyTransition(queue, run.run_id, pending);
+        if (pending.phase === "ended") await release(queue, run.run_id, deps);
         done.push(run.run_id);
         continue;
       }
       // Its worktree gone with no pending record (a close-out whose transition and record both failed):
       // no engine can run there, so it is closed out (from the checkout) and ended, never probed forever.
-      const st: EnginePhase = existsSync(r.worktree!) ? await engineStatus(r.worktree!, r.engine_run_id!, deps)
+      let st: EnginePhase = existsSync(r.worktree!) ? await engineStatus(r.worktree!, r.engine_run_id!, deps)
         : { phase: "ended", detail: { run_id: r.engine_run_id, status: "unknown", gone: "its worktree is gone: no engine can run there" } };
-      if (st.phase === "running" || st.phase === "unknown") continue;
+      if (st.phase === "running" || st.phase === "unknown") {
+        // An engine the supervisor killed (a tripped guard, its leader dead on KILL) never writes its end:
+        // ended here, its launch's recorded end (the trip's state and guard reason) finishing the run.
+        const killed = await killedEngine(queue, r);
+        if (!killed) continue;
+        st = { phase: "ended", detail: { ...st.detail, run_id: r.engine_run_id, killed } };
+      }
       if (st.phase === "paused" && r.state === "paused") continue;
       const run = queue.takeForCloseOut(r.run_id);
       if (!run) continue;
@@ -576,6 +612,7 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
             ...closeOutDetail(c), engine: st.detail, ...(next.phase === "ended" ? { finish: next.detail.finish } : {}), raced: clip(message(e)),
           });
           if (c.worktree === "removed") queue.releaseEngineLock(run.run_id, "its worktree was closed out and removed (its engine confirmed dead)");
+          if (next.phase === "ended") await release(queue, run.run_id, deps);
           done.push(run.run_id);
           continue;
         }
@@ -584,6 +621,8 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         try { queue.note(run.run_id, "closed_out", { ...closeOutDetail(c), pending: next }); } catch { /* still busy: the next sweep probes again */ }
         throw e;
       }
+      // The deferred `ended` releases the pin; a `paused` run keeps it (with its worktree and lock).
+      if (next.phase === "ended") await release(queue, run.run_id, deps);
       done.push(run.run_id);
     } catch {
       // The next sweep probes it again: a run this sweep took is let go of first.

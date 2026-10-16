@@ -147,6 +147,71 @@ console.error("fake gh: unsupported " + argv.join(" ")); process.exit(2);
   };
 }
 
+// ------------------------------------------------------------ Story 27.2: the sandbox fake
+
+/** One in-VM process the fake `sbx` knows: its start time (`/proc/<pid>/stat` field 22), its state, and which
+ * signal to its process group ends it (`never`: it survives TERM and KILL). */
+export type FakeProc = { start: string; state?: string; dies_on?: "TERM" | "KILL" | "never" };
+type SbxAnswers = { pin?: "ok" | "fail"; stop?: "ok" | "fail"; procs?: Record<string, FakeProc>; pgrep?: string[]; sessions?: string[] };
+
+/** The fake `sbx` (SBX_BIN): records `{argv}` per call to its log and answers from a JSON file (rewritable
+ * between calls; a kill rewrites it): `run -d --name <sb>` → the pin (`pin: fail` exits 1); `stop <sb>` → the
+ * release; `exec <sb> cat /proc/<pid>/stat` → a stat line for a known process (field 22 its start), else
+ * "No such file or directory"; `exec <sb> kill -<SIG> -- -<pid>` → ends the process when `dies_on` says so;
+ * `exec <sb> pgrep -a -f …` → the `pgrep` lines (none: exit 1); `exec <sb> tail --pid=<pid> -f /dev/null` →
+ * exits at once; `exec <sb> tmux kill-session -t =<name>` → ends a session `sessions` names, else "can't find
+ * session" (exit 1). Anything else exits 2. Never a real sandbox. */
+export function fakeSbx(dir: string = mkdtempSync(join(tmpdir(), "tk-sup-sbx-"))): {
+  bin: string; calls: () => { argv: string[] }[]; answer: (a: SbxAnswers) => void; answers: () => Required<SbxAnswers>;
+} {
+  const log = join(dir, "sbx-calls.jsonl"), answers = join(dir, "sbx-answers.json");
+  const set = (a: SbxAnswers) => writeFileSync(answers, JSON.stringify({ pin: "ok", stop: "ok", procs: {}, pgrep: [], sessions: [], ...a }));
+  set({});
+  const bin = fakeBin(join(dir, "sbx.js"), `const fs = require("node:fs");
+const argv = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ argv }) + "\\n");
+const file = ${JSON.stringify(answers)};
+const a = JSON.parse(fs.readFileSync(file, "utf-8"));
+if (argv[0] === "run" && argv[1] === "-d" && argv[2] === "--name" && argv[3]) {
+  if (a.pin === "fail") { console.error("fake sbx: sandbox " + argv[3] + " could not start"); process.exit(1); }
+  process.exit(0);
+}
+if (argv[0] === "stop" && argv[1]) process.exit(a.stop === "fail" ? 1 : 0);
+if (argv[0] !== "exec" || !argv[1]) { console.error("fake sbx: unsupported " + argv.join(" ")); process.exit(2); }
+const cmd = argv.slice(2);
+if (cmd[0] === "cat" && /^\\/proc\\/\\d+\\/stat$/.test(cmd[1] ?? "") && cmd.length === 2) {
+  const pid = cmd[1].split("/")[2], p = a.procs[pid];
+  if (!p) { console.error("cat: " + cmd[1] + ": No such file or directory"); process.exit(1); }
+  const fields = [p.state ?? "S", "1", pid, pid, "0", "-1", "4194304", "0", "0", "0", "0", "1", "1", "0", "0", "20", "0", "1", "0", p.start];
+  console.log(pid + " (bmad-loop) " + fields.join(" ") + " 1 1 1");
+  process.exit(0);
+}
+if (cmd[0] === "kill" && /^-(TERM|KILL)$/.test(cmd[1] ?? "") && cmd[2] === "--" && /^-\\d+$/.test(cmd[3] ?? "") && cmd.length === 4) {
+  const sig = cmd[1].slice(1), pid = cmd[3].slice(1), p = a.procs[pid];
+  if (!p) { console.error("kill: (" + pid + ") - No such process"); process.exit(1); }
+  if (p.dies_on === sig || (sig === "KILL" && p.dies_on !== "never")) { delete a.procs[pid]; fs.writeFileSync(file, JSON.stringify(a)); }
+  process.exit(0);
+}
+if (cmd[0] === "pgrep" && cmd[1] === "-a" && cmd[2] === "-f" && cmd.length === 4) {
+  if (!a.pgrep.length) process.exit(1);
+  console.log(a.pgrep.join("\\n")); process.exit(0);
+}
+if (cmd[0] === "tmux" && cmd[1] === "kill-session" && cmd[2] === "-t" && /^=/.test(cmd[3] ?? "") && cmd.length === 4) {
+  const name = cmd[3].slice(1), i = a.sessions.indexOf(name);
+  if (i < 0) { console.error("can't find session: " + name); process.exit(1); }
+  a.sessions.splice(i, 1); fs.writeFileSync(file, JSON.stringify(a)); process.exit(0);
+}
+if (cmd[0] === "tail" && /^--pid=\\d+$/.test(cmd[1] ?? "") && cmd[2] === "-f" && cmd[3] === "/dev/null" && cmd.length === 4) process.exit(0);
+console.error("fake sbx: unsupported exec " + cmd.join(" ")); process.exit(2);
+`);
+  return {
+    bin,
+    calls: () => existsSync(log) ? readFileSync(log, "utf-8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [],
+    answer: set,
+    answers: () => JSON.parse(readFileSync(answers, "utf-8")),
+  };
+}
+
 type Git = (cwd: string, ...args: string[]) => string;
 
 /** git with a fixed test identity, failing loudly. */

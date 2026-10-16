@@ -8,7 +8,8 @@ import {
 } from "../src/cli";
 import { claudeBin, studioRoot, StudioRootMissing } from "../src/env";
 import { END_HYGIENE_EVENTS } from "../src/hygiene";
-import { type QueueEvent, Queue } from "../src/queue";
+import { checkoutKey, type QueueEvent, Queue } from "../src/queue";
+import { STARTER } from "../src/sandbox";
 import {
   buildWorkerCommand, buildWorkerEnv, CONTINUATION_PROMPT, HostBypassRefused, invokeSkill, MISSING_STATUS_BLOCK, type Spawner, toVmPath,
 } from "../src/server";
@@ -418,11 +419,18 @@ if (killMarker && !resumed && !fs.existsSync(killMarker)) {
 console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: ${JSON.stringify(workerResult)}, total_cost_usd: 0.0123, session_id: sessionId, num_turns: 1, usage }));
 `);
   // A fake `sbx exec <sb> [timeout -k <s> <guard>] env [-u K]… [-C dir] claude …`: records its argv, then runs
-  // the fake claude with the env and cwd the wrapper names (argv only, no shell).
+  // the fake claude with the env and cwd the wrapper names (argv only, no shell). Story 27.2: it answers the
+  // pin (`run -d --name <sb>`), the release (`stop <sb>`) and the in-VM probes and kills (`exec <sb> cat
+  // /proc/<pid>/stat` → no such process, `kill`, `pgrep` → no match, the hold's `tail`).
   const sbxRecord = join(store, "sbx-calls.jsonl");
   const fakeSbx = fakeBin(join(store, "fake-sbx.js"), `const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(sbxRecord)}, JSON.stringify({ args, apiKey: process.env.ANTHROPIC_API_KEY ?? null }) + "\\n");
+if (args[0] === "run" && args[1] === "-d" && args[2] === "--name" && args[3]) process.exit(0);
+if (args[0] === "stop" && args[1]) process.exit(0);
+if (args[0] === "exec" && args[2] === "cat" && /^\\/proc\\/\\d+\\/stat$/.test(args[3] ?? "")) { console.error("cat: " + args[3] + ": No such file or directory"); process.exit(1); }
+if (args[0] === "exec" && (args[2] === "kill" || args[2] === "tail")) process.exit(0);
+if (args[0] === "exec" && args[2] === "pgrep") process.exit(1);
 const at = args[2] === "timeout" && args[3] === "-k" ? 6 : 2;
 if (args[0] !== "exec" || args[at] !== "env") process.exit(97);
 const env = { ...process.env };
@@ -503,6 +511,12 @@ describe.skipIf(!canRunE2E)("CLI end to end: studio-health (faked worker)", () =
     // No tier anywhere: the host tier, spawned directly (no sbx), recorded on the queue run.
     expect(fx.sbxCalls()).toEqual([]);
     expect(fx.queue((q) => q.get(summary.run_id))).toMatchObject({ tier: "host", sandbox: null });
+
+    // Story 27.2 (AC3): `run` never runs `recoverQueue` — its claim alone wrote the checkout's starter lock
+    // in the store (`<TK_STUDIO_HOME>/projects/<project key>/starter.lock`), never in the checkout.
+    const lockFile = join(fx.store, "projects", fx.registeredId().replace(/[^A-Za-z0-9._\-]/g, "_"), "starter.lock");
+    expect(JSON.parse(readFileSync(lockFile, "utf-8"))).toMatchObject({ starter: STARTER, checkout: checkoutKey(fx.project) });
+    expect(existsSync(join(fx.project, "starter.lock"))).toBe(false);
   }, 120_000);
 
   test("missing block (AC2 silent exit) → one in-process `--resume <session-id>`; the second silent exit ends partial naming MISSING_STATUS_BLOCK and the cap", () => {
@@ -1155,9 +1169,20 @@ describe.skipIf(!canRunE2E)("CLI end to end: worker tiers (Story 21.4)", () => {
     expect(res.status).toBe(0);
     const summary = JSON.parse(res.stdout);
     expect(summary).toMatchObject({ ok: true, state: "complete", total_cost_usd: 0.0123 });
-    const sbx = fx.sbxCalls();
+    const all = fx.sbxCalls();
+    // Story 27.2: the pin once, before the worker's own login preflight (`invokeSkill`'s `sbx exec`) and the
+    // worker; the release (`sbx stop`) last, once.
+    const pins = all.flatMap((c, i) => c.args[0] === "run" ? [i] : []);
+    expect(pins).toHaveLength(1);
+    expect(all[pins[0]].args).toEqual(["run", "-d", "--name", "claude-p"]);
+    expect(all.findLastIndex((c) => c.args.includes("auth"))).toBeGreaterThan(pins[0]);
+    expect(all.findIndex((c) => c.args.includes("-p"))).toBeGreaterThan(pins[0]);
+    expect(all.filter((c) => c.args[0] === "stop").map((c) => c.args)).toEqual([["stop", "claude-p"]]);
+    expect(all.at(-1)!.args).toEqual(["stop", "claude-p"]);
+    expect(fx.queue((q) => q.events(summary.run_id).map((e) => e.kind))).toEqual(expect.arrayContaining(["pinned", "pin-released"]));
+    const sbx = all.filter((c) => c.args[0] === "exec");
     expect(sbx.length).toBeGreaterThanOrEqual(2);
-    expect(sbx.every((c) => c.args[0] === "exec" && c.args[1] === "claude-p")).toBe(true);
+    expect(sbx.every((c) => c.args[1] === "claude-p")).toBe(true);
     const probe = sbx.find((c) => c.args.includes("auth"))!;
     expect(probe.args).toEqual(["exec", "claude-p", "env", "-u", "ANTHROPIC_API_KEY", "claude", "auth", "status", "--json"]);
     const worker = sbx.find((c) => c.args.includes("-p"))!;

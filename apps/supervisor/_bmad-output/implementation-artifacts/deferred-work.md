@@ -197,3 +197,27 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261016-014644-7fea; this entry preserves the lingering recommendation for a deliberate later review.
 status: open
+
+### DW-25: A sbx run that `recover` ends as orphaned never releases its sandbox pin.
+origin: spec-deferred 63b65528e800
+source_spec: `27-2-the-supervisor-holds-the-engine-and-nothing-else-starts-one-spec.md`
+location: src/queue.ts recover (orphan end); src/sandbox.ts releasePin
+severity: medium
+reason: No `releasePin` call is on the restart rule's orphan end (src/queue.ts ORPHANED_REASON end); orphaned runs are not closed out (27-1 consult 1 known gap, owned by 27-5). AC1 says the pin is released when the run ends. Class (a): a defect in behaviour AC1 names. Releasing safely needs the orphan close-out 27-5 owns, because the engine may still be live.
+status: open
+
+### DW-26: Map `ExternalRunRefused` to `409 ExternalRun` in `postCancel`; today an external-run cancel answers 500 InternalError.
+origin: spec-deferred d6bd7ddbf643
+source_spec: `27-2-the-supervisor-holds-the-engine-and-nothing-else-starts-one-spec.md`
+location: src/api.ts:223-228
+severity: low
+reason: Consult 2 ruling (2026-10-16): `postCancel` maps only `RunTerminal` to 409 and rethrows the rest (src/api.ts:223-228), so the outer catch answers 500 (src/api.ts:389-390). src/api.ts was outside 27-2's Files. README.md:51 marks the 500 as interim. Owner: the first later story whose Files include src/api.ts (27-3 or 27-5). Class (b): an API contract surface left unpinned.
+status: open
+
+### DW-27: Follow-up review still recommended for 27-2-the-supervisor-holds-the-engine-and-nothing-else-starts-one after the damping cap was spent
+origin: review-budget-followup
+source_spec: `27-2-the-supervisor-holds-the-engine-and-nothing-else-starts-one-spec.md`
+location: n/a
+severity: low
+reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261016-014644-7fea; this entry preserves the lingering recommendation for a deliberate later review.
+status: open

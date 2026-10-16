@@ -101,6 +101,15 @@
     create`). Name 27-3's event `close-out` distinct from 27.1's
     `closing-out`/`closed_out`, and leave the PR close-out lease alone. The queue state
     after the relaunch comes from the engine, not from `launched.detail.end`.
+    Replan (27-2 reconcile, 2026-10-16): drive the sbx relaunch through the queue
+    recorder with `InvokeOptions.pin` (the paused run's pin is still up, so the pin is
+    idempotent), and record the new engine's pid and hold through the `markLaunched`
+    path. Never call `releasePin` between the harvest, the archive and the relaunch; it
+    runs only at the final `ended`. The resume route puts `src/api.ts` in Files, so map
+    `ExternalRunRefused` to `409 ExternalRun` in `postCancel` (DW-26), and refuse a
+    resume of an `external` run the same way.
+    Oversize (plans/27-3.md Risks): HALT and record it if the Files list grows past the
+    plan's 11 files.
 
 - id: "27-4-a-host-tier-verify-leg-runs-before-any-pr-opens"
   title: "A Host-Tier Verify Leg Runs Before Any PR Opens"
@@ -170,3 +179,9 @@
     through `closeOut` (the 27.1 known gap, consult 1). List 27.1's event kinds
     (`launched`, `paused`, `materialised`, `closing-out`, `closed_out`, `lock-released`)
     in runbook §4. A refused deferred `finish` (DW-23) keeps the worker's reason.
+    Replan (27-2 reconcile, 2026-10-16): in the orphan close-out, call `releasePin`
+    (src/sandbox.ts; closes DW-25) once the engine is confirmed dead. Handle DW-13's late
+    studio-run record on the queue run itself (re-read in the end transaction); external
+    detection deliberately skips a checkout with a live queue run. Skip `external` runs
+    in the plan pull-back, since they open no PR. If 27-3 did not map
+    `ExternalRunRefused` to `409 ExternalRun` (DW-26), map it here.

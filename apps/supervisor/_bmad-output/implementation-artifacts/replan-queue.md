@@ -149,3 +149,17 @@
 - What no longer holds: "the next recovery ends it, and no run is left unended" (an orphan with a worktree ends but is never closed out), and "runbook §4 names the new events"
 - Suggested adjustment: Replan (27-1 reconcile, 2026-10-16): key the plan pull-back on `ended.detail.pr` (a late PR is only on the appended `closed_out` event). In recovery, close out a worktree run `recover` ends as an orphan once its processes are confirmed dead, through `closeOut`. List 27.1's event kinds in runbook §4. A refused deferred `finish` (DW-23) keeps the worker's reason.
 - Status: closed — applied to the unstarted 27-5 entry's invoke_dev_with by the 27-1 gate (2026-10-16)
+
+## 27-3-a-paused-run-whose-story-landed-is-closed-out-by-the-service — scope: stories — from 27-2-the-supervisor-holds-the-engine-and-nothing-else-starts-one — 2026-10-16
+
+- What changed: an sbx `invokeSkill` pins only when the caller passes `InvokeOptions.pin`, which the queue recorder (`finishRun`) does (consult 1). `releasePin` (src/sandbox.ts) runs only on a terminal run, and also at the end of a non-launch sbx run that pinned. The hold, the engine pid and its start time are recorded at `markLaunched`, and `respawnHolds` re-establishes the hold. A cancel of an `external` run throws `ExternalRunRefused`, which the API answers `500` (interim, DW-26).
+- What no longer holds: "relaunches the epic through `tk-studio-launch` … under the same queue run with a `close-out` event" (an sbx relaunch neither pins nor holds on its own)
+- Suggested adjustment: Replan (27-2 reconcile, 2026-10-16): drive the sbx relaunch through the queue recorder with `InvokeOptions.pin` (the paused run's pin is still up, so the pin is idempotent). Record the new engine's pid and hold through the `markLaunched` path. Never call `releasePin` between the harvest, the archive and the relaunch; it runs only at the final `ended`. The resume route puts `src/api.ts` in Files, so map `ExternalRunRefused` to `409 ExternalRun` in `postCancel` (DW-26), and refuse a resume of an `external` run the same way.
+- Status: closed — applied to the unstarted 27-3 entry's invoke_dev_with by the 27-2 gate (2026-10-16)
+
+## 27-5-the-plan-follows-the-run-and-the-deferred-work-is-paid — scope: stories — from 27-2-the-supervisor-holds-the-engine-and-nothing-else-starts-one — 2026-10-16
+
+- What changed: `external` is a `RunState`, recorded by `detectExternal` (src/cli.ts, in `recoverQueue`) only for a job with a `jobs` row and no live queue run on that checkout. An external run ends through `endExternal`, and ends `partial` (`external: studio run <id> vanished: …`) when its studio run leaves the list. A run `recover` ends as an orphan does not release its sandbox pin (DW-25, 27-2 deferred item 1, class (a), AC1).
+- What no longer holds: "the next recovery ends it, and no run is left unended" (an orphan end leaves its sandbox pinned; a hand start beside a live or ownerless queued run is not detected)
+- Suggested adjustment: Replan (27-2 reconcile, 2026-10-16): in the orphan close-out, call `releasePin` (src/sandbox.ts; closes DW-25) once the engine is confirmed dead. Handle DW-13's late studio-run record on the queue run itself (re-read in the end transaction); external detection deliberately skips a checkout with a live queue run. Skip `external` runs in the plan pull-back, since they open no PR. If 27-3 did not map `ExternalRunRefused` to `409 ExternalRun` (DW-26), map it here.
+- Status: closed — applied to the unstarted 27-5 entry's invoke_dev_with by the 27-2 gate (2026-10-16)

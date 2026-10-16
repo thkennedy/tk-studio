@@ -5,6 +5,8 @@
  *   jobs    one row per (job, checkout): the resolved definition `resolve` served
  *   runs    queue runs — `queued` → `running` → complete|partial|blocked|cancelled
  *           (Story 27.1: a launch run whose engine paused rests `paused` until it ends)
+ *           (Story 27.2: a studio run started outside the queue is recorded `external` — live for the
+ *           pacer, no owner, no lock — until its studio run is terminal)
  *           (terminal is immutable; a trigger refuses any update of one — but its
  *           end-hygiene marker `notified`: NULL → lease → done, a stale lease re-leased, Story 22.3)
  *   events  one row per transition, committed in the same transaction
@@ -52,6 +54,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from "
 import { homedir, hostname } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pluginRoot } from "./env";
+import { probeEngine, sameStart, type ProbeResult } from "./sandbox";
 import { lastJsonObject, runUv, SBX_GUARD_KILL_AFTER_S, type RunResult } from "./server";
 
 type Env = Record<string, string | undefined>;
@@ -59,8 +62,10 @@ type Env = Record<string, string | undefined>;
 export const TERMINAL_STATES = ["complete", "partial", "blocked", "cancelled"] as const;
 export type TerminalState = (typeof TERMINAL_STATES)[number];
 /** Story 27.1: `paused` — a launch run whose engine paused: it keeps its worktree and its checkout
- * lock, and its draft PR is recorded on the `paused` event; it is never terminal. */
-export type RunState = "queued" | "running" | "paused" | TerminalState;
+ * lock, and its draft PR is recorded on the `paused` event; it is never terminal.
+ * Story 27.2: `external` — a studio run started outside the queue (`jobrun.py` by hand, MCP `tk_job`),
+ * recorded so the pacer counts it live; it holds no lock and ends when its studio run is terminal. */
+export type RunState = "queued" | "running" | "paused" | "external" | TerminalState;
 export const isTerminal = (s: unknown): s is TerminalState => (TERMINAL_STATES as readonly unknown[]).includes(s);
 
 export const ORPHANED_REASON = "orphaned: supervisor restart";
@@ -210,6 +215,9 @@ export interface Probes {
   /** Is bmad-loop engine `engineRunId` live on the checkout at `root`? With
    * `null` (an unverified engine): is any engine live there? */
   engineLive(root: string, engineRunId: string | null): Promise<EngineProbe>;
+  /** Story 27.2 (DW-3): an in-VM engine pid's `/proc/<pid>/stat` through `sbx exec` (argv only; default
+   * `probeEngine` in src/sandbox.ts) — re-probed while a run's last engine kill left it alive. */
+  engineProbe?(sandbox: string, pid: number): Promise<ProbeResult>;
 }
 
 /** On the same host: `kill(pid, 0)` succeeds and the recorded start time (when
@@ -416,7 +424,7 @@ export async function killRecordedWorker(pid: number, start: string | null, deps
  * one predicate every path that frees a checkout lock asks (`recover`, `claim`). */
 export function workerMayRun(w: WorkerKill): boolean {
   return w.outcome === "running" || w.outcome === "group alive" || w.outcome === "start time unreadable"
-    || w.outcome === "kill failed" || w.outcome === "in-VM deadline not passed";
+    || w.outcome === "kill failed" || w.outcome === "in-VM deadline not passed" || w.outcome === "engine alive after kill";
 }
 
 // ------------------------------------------------------------ rows
@@ -448,6 +456,10 @@ export interface QueueRun {
   base_ref_source: string | null;
   /** Story 27.1: the run's git worktree (`<work>/worktrees/<project>/<run id>`), null until cut. */
   worktree: string | null;
+  /** Story 27.2: an sbx launch run's in-VM engine pid (its process group) and that pid's start time
+   * (`/proc/<pid>/stat` field 22, as bmad-loop's `engine.pid` records it); null: not recorded or unknown. */
+  engine_pid: number | null;
+  engine_start: string | null;
   /** Story 21.6: the worker's pre-minted session id, its pid (POSIX: its process
    * group) and that pid's start time, and the wake answer (JSON: directive, routing, state). */
   session_id: string | null;
@@ -485,7 +497,8 @@ export interface StudioOutcome { run_id: string; state: string }
 
 /** What the pacer reads for one (job, checkout). */
 export interface JobPacing {
-  /** Runs that hold the job: `running`, `paused` (Story 27.1), or `queued` under a live owner — never overlapped. */
+  /** Runs that hold the job: `running`, `paused` (Story 27.1), `external` (Story 27.2: started outside the
+   * queue), or `queued` under a live owner — never overlapped. */
   live: QueueRun[];
   /** Ownerless (or dead-owner) `queued` runs: the tick's `runJob` adopts and drives the oldest. */
   adoptable: QueueRun[];
@@ -551,7 +564,9 @@ export interface RecoverReport {
 export interface WorkerKill {
   pid: number; start: string | null;
   outcome: "killed" | "group killed" | "not running" | "start time differs" | "start time unreadable" | "kill failed"
-    | "running" | "group alive" | "in-VM deadline not passed" | "in-VM deadline passed";
+    | "running" | "group alive" | "in-VM deadline not passed" | "in-VM deadline passed"
+    /** Story 27.2: an in-VM engine still running as recorded after its kill-by-pid and the wait (DW-3: held). */
+    | "engine alive after kill";
   detail?: string;
   /** sbx: the in-VM deadline (recorded spawn + guard seconds + the `-k` grace), ISO. */
   deadline?: string;
@@ -568,16 +583,16 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE TABLE IF NOT EXISTS runs (
   run_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, checkout TEXT NOT NULL, root TEXT NOT NULL,
   project_id TEXT, target TEXT,
-  state TEXT NOT NULL CHECK (state IN ('queued','running','complete','partial','blocked','cancelled','paused')),
+  state TEXT NOT NULL CHECK (state IN ('queued','running','complete','partial','blocked','cancelled','paused','external')),
   reason TEXT, owner_pid INTEGER, owner_host TEXT, owner_nonce TEXT, owner_start TEXT,
   studio_run_id TEXT, engine_run_id TEXT, verb_started TEXT, verb_snapshot TEXT, definition TEXT,
   permission_mode TEXT, tier TEXT, sandbox TEXT, model TEXT, effort TEXT, base_ref TEXT,
   session_id TEXT, worker_pid INTEGER, worker_start TEXT, worker_guard_s INTEGER, wake TEXT,
-  editor_in_the_loop INTEGER, notified TEXT, base_ref_source TEXT, worktree TEXT,
+  editor_in_the_loop INTEGER, notified TEXT, base_ref_source TEXT, worktree TEXT, engine_pid INTEGER, engine_start TEXT,
   created TEXT NOT NULL, updated TEXT NOT NULL,
   FOREIGN KEY (job_id, checkout) REFERENCES jobs (job_id, checkout)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS runs_one_live ON runs (job_id, checkout) WHERE state IN ('queued','running','paused');
+CREATE UNIQUE INDEX IF NOT EXISTS runs_one_live ON runs (job_id, checkout) WHERE state IN ('queued','running','paused','external');
 CREATE TABLE IF NOT EXISTS events (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, at TEXT NOT NULL, kind TEXT NOT NULL,
   from_state TEXT, to_state TEXT NOT NULL, detail TEXT
@@ -636,28 +651,30 @@ const ADDED_RUN_COLUMNS = [
   ["permission_mode", "TEXT"], ["tier", "TEXT"], ["sandbox", "TEXT"], ["model", "TEXT"], ["effort", "TEXT"],
   ["session_id", "TEXT"], ["worker_pid", "INTEGER"], ["worker_start", "TEXT"], ["wake", "TEXT"], ["worker_guard_s", "INTEGER"],
   ["base_ref", "TEXT"], ["editor_in_the_loop", "INTEGER"], [NOTIFIED_COLUMN, "TEXT"],
-  ["base_ref_source", "TEXT"], ["worktree", "TEXT"],
+  ["base_ref_source", "TEXT"], ["worktree", "TEXT"], ["engine_pid", "INTEGER"], ["engine_start", "TEXT"],
 ] as const;
 
-/** Story 27.1: the one-live-run index — a `paused` run is the job's live run too (enqueue mints no second). */
-const LIVE_INDEX = "CREATE UNIQUE INDEX IF NOT EXISTS runs_one_live ON runs (job_id, checkout) WHERE state IN ('queued','running','paused')";
+/** Story 27.1: the one-live-run index — a `paused` run is the job's live run too (enqueue mints no second);
+ * Story 27.2: so is an `external` one. */
+const LIVE_INDEX = "CREATE UNIQUE INDEX IF NOT EXISTS runs_one_live ON runs (job_id, checkout) WHERE state IN ('queued','running','paused','external')";
 
-/** Story 27.1: an index from before `paused` is dropped and recreated with it. */
+/** Story 27.1/27.2: an index from before `paused` or `external` is dropped and recreated with them. */
 function widenLiveIndex(db: Database): void {
   const row = db.query("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'runs_one_live'").get() as { sql: string } | null;
-  if (row?.sql.includes("'paused'")) return;
+  if (row?.sql.includes("'paused'") && row.sql.includes("'external'")) return;
   db.exec("DROP INDEX IF EXISTS runs_one_live");
   db.exec(LIVE_INDEX);
 }
 
-/** Story 27.1: a runs table whose state CHECK predates `paused` is rebuilt once (SQLite cannot alter
- * a CHECK): the same columns and rows, the CHECK widened, the live-run index recreated. */
+/** Story 27.1: a runs table whose state CHECK predates `paused` (Story 27.2: or `external`) is rebuilt once
+ * (SQLite cannot alter a CHECK): the same columns and rows, the CHECK widened, the live-run index recreated. */
 function widenStateCheck(db: Database): void {
   const row = db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'runs'").get() as { sql: string } | null;
-  if (!row || row.sql.includes("'paused'")) return;
+  const missing = ["'paused'", "'external'"].filter((s) => !row?.sql.includes(s));
+  if (!row || !missing.length) return;
   const check = /CHECK\s*\(\s*state\s+IN\s*\(([^)]*)\)\s*\)/;
   if (!check.test(row.sql)) return;
-  const ddl = row.sql.replace(check, (_m, list: string) => `CHECK (state IN (${list.trim()},'paused'))`)
+  const ddl = row.sql.replace(check, (_m, list: string) => `CHECK (state IN (${list.trim()},${missing.join(",")}))`)
     .replace(/^CREATE TABLE\s+(?:IF NOT EXISTS\s+)?["`]?runs["`]?/i, "CREATE TABLE runs_widened");
   const cols = (db.query("PRAGMA table_info(runs)").all() as { name: string }[]).map((c) => c.name).join(", ");
   db.exec(ddl);
@@ -801,7 +818,7 @@ export class Queue {
     const runs = this.db.query("SELECT * FROM runs WHERE job_id = ? AND checkout = ? ORDER BY created, rowid").all(jobId, checkout) as QueueRun[];
     const live: QueueRun[] = [], adoptable: QueueRun[] = [];
     for (const r of runs) {
-      if (r.state === "running" || r.state === "paused" || (r.state === "queued" && this.ownerLive(ownerOf(r), self))) live.push(r);
+      if (r.state === "running" || r.state === "paused" || r.state === "external" || (r.state === "queued" && this.ownerLive(ownerOf(r), self))) live.push(r);
       else if (r.state === "queued") adoptable.push(r);
     }
     // Terminal runs in the order they ended (the ending event's seq; one with no event first, by `updated`).
@@ -865,7 +882,13 @@ export class Queue {
    * from the deadline, never from the host `sbx exec` pid; once passed, `kill` still
    * kills a lingering host process best-effort); host → the pid + start time probe
    * (or kill), then `workerMayRun`. */
-  async recordedWorker(run: QueueRun, kill: boolean): Promise<{ mayRun: boolean; worker?: WorkerKill }> {
+  async recordedWorker(run: QueueRun, kill: boolean, opts: { engine?: boolean } = {}): Promise<{ mayRun: boolean; worker?: WorkerKill }> {
+    // Story 27.2 (DW-3): a run whose last engine kill left its in-VM engine alive may still run while
+    // that engine pid does (re-probed; `engine: false` — the cancel that just killed it — skips this).
+    if (opts.engine !== false) {
+      const engine = await this.engineAliveAfterKill(run);
+      if (engine) return { mayRun: true, worker: engine };
+    }
     if (run.worker_pid === null || run.worker_pid === undefined) return { mayRun: false };
     const pid = run.worker_pid, start = run.worker_start;
     if (run.tier === "sbx") {
@@ -881,6 +904,48 @@ export class Queue {
     const worker = kill ? await (this.probes.killWorker ?? killRecordedWorker)(pid, start)
       : (this.probes.probeWorker ?? probeRecordedWorker)(pid, start);
     return { mayRun: workerMayRun(worker), worker };
+  }
+
+  /** Story 27.2 (DW-3): when the run's last recorded engine kill (`engine-kill`) is `engine alive after
+   * kill` — or `start time unreadable` (its first probe could not be read, so nothing was signalled; it
+   * carries the recorded start) — its engine pid is probed again (`sbx exec <sb> cat /proc/<pid>/stat`,
+   * argv only, the start time matched): answers that kill while the engine still runs as recorded (an
+   * unreadable probe counts as alive — fail closed), else undefined. Once the probe shows it gone (or a
+   * different start time), an `engine-gone` event is recorded, so later checks proceed without probing.
+   * Never throws. */
+  async engineAliveAfterKill(run: QueueRun): Promise<WorkerKill | undefined> {
+    const ev = this.db.query("SELECT kind, detail FROM events WHERE run_id = ? AND kind IN ('engine-kill', 'engine-gone') ORDER BY seq DESC LIMIT 1")
+      .get(run.run_id) as { kind: string; detail: string | null } | null;
+    if (ev?.kind !== "engine-kill") return undefined;
+    let d: Record<string, any> | null = null;
+    try { d = ev.detail ? JSON.parse(ev.detail) : null; } catch { return undefined; }
+    const w = d?.worker as WorkerKill | undefined;
+    const held = w?.outcome === "engine alive after kill"
+      || (w?.outcome === "start time unreadable" && typeof w.start === "string" && !!w.start);
+    if (!w || !held || !Number.isInteger(w.pid)) return undefined;
+    const sb = typeof d?.sandbox === "string" && d.sandbox ? d.sandbox : run.sandbox;
+    if (!sb) return { ...w, detail: `${w.detail ?? w.outcome}; no sandbox recorded to probe it again` };
+    let p: ProbeResult;
+    try { p = await (this.probes.engineProbe ?? ((s: string, pid: number) => probeEngine(s, pid)))(sb, w.pid); }
+    catch (e) { p = { unreadable: e instanceof Error ? e.message : String(e) }; }
+    if ("unreadable" in p) return { ...w, detail: `pid ${w.pid} in ${sb} may still run: its probe failed (${p.unreadable.slice(0, 200)})` };
+    if (p.alive && sameStart(p.start, w.start)) return { ...w, detail: `pid ${w.pid} still runs in ${sb} (probed again after ${w.outcome === "engine alive after kill" ? "its kill" : "its unreadable first probe"})` };
+    try {
+      const cur = this.get(run.run_id);
+      this.event(run.run_id, "engine-gone", cur?.state ?? run.state, cur?.state ?? run.state,
+        { sandbox: sb, pid: w.pid, start: w.start, probe: p.alive ? `start time differs (now ${p.start})` : "not running" });
+    } catch { /* the queue is busy: the next check probes again */ }
+    return undefined;
+  }
+
+  /** Story 27.2: is a pin on sandbox `sb` still outstanding — some run recording that sandbox pinned it
+   * (`pinned`), and no release (`pin-released`) was recorded on any run recording it since? */
+  pinOutstanding(sb: string): boolean {
+    const row = this.db.query(
+      `SELECT MAX(CASE WHEN e.kind = 'pinned' THEN e.seq END) AS pinned, MAX(CASE WHEN e.kind = 'pin-released' THEN e.seq END) AS released
+         FROM events e JOIN runs r ON r.run_id = e.run_id WHERE r.sandbox = ? AND e.kind IN ('pinned', 'pin-released')`,
+    ).get(sb) as { pinned: number | null; released: number | null } | null;
+    return row?.pinned != null && (row.released == null || row.pinned > row.released);
   }
 
   private event(runId: string, kind: string, from: string | null, to: string, detail?: Record<string, unknown>): void {
@@ -908,7 +973,7 @@ export class Queue {
     const checkout = checkoutKey(input.root);
     return this.db.transaction(() => {
       const live = this.db.query(
-        "SELECT * FROM runs WHERE job_id = ? AND checkout = ? AND state IN ('queued','running','paused') ORDER BY created LIMIT 1",
+        "SELECT * FROM runs WHERE job_id = ? AND checkout = ? AND state IN ('queued','running','paused','external') ORDER BY created LIMIT 1",
       ).get(input.jobId, checkout) as QueueRun | null;
       if (live) {
         if (input.permissionMode) this.writePermissionMode(live, input.permissionMode);
@@ -1013,6 +1078,10 @@ export class Queue {
           // Story 27.1: a paused launch run is continued by its resume, never claimed again.
           return { claimed: false, run, why: "running", reason: `run ${runId} is paused (its engine paused; the resume continues it)` };
         }
+        if (run.state === "external") {
+          // Story 27.2: a studio run started outside the queue: never driven here; it ends with its studio run.
+          return { claimed: false, run, why: "running", reason: `run ${runId} is external (studio run ${run.studio_run_id ?? "?"} started outside the queue)` };
+        }
         if (run.state === "running") {
           if (mine) return { claimed: true, run };
           return {
@@ -1104,13 +1173,17 @@ export class Queue {
   private async claimProbes(view: ClaimView, runId: string, self: Owner): Promise<ClaimProbes> {
     const { run, lock, held } = view;
     const out: ClaimProbes = { ownerLive: false, holderLive: false, launch: false };
-    if (isTerminal(run.state) || run.state === "running") return out;
+    if (isTerminal(run.state) || run.state === "running" || run.state === "external") return out;
     const mine = run.owner_nonce !== null && run.owner_nonce === self.nonce;
     if (!mine && (out.ownerLive = this.ownerLive(ownerOf(run), self))) return out;
     if (!lock || lock.run_id === runId) return out;
     if (this.get(lock.run_id)?.state === "paused") return out; // Story 27.1: held for the resume, nothing to probe
     if (lock.kind === "engine") {
       out.engine = await this.probes.engineLive(this.lockRoot(lock), lock.engine_run_id);
+      // Story 27.2 (DW-3): an engine its run's kill left alive in the VM holds the lock while its pid runs.
+      const lockRun = out.engine.live ? null : this.get(lock.run_id);
+      const alive = lockRun ? await this.engineAliveAfterKill(lockRun) : undefined;
+      if (alive) out.engine = { live: true, detail: `engine pid ${alive.pid} alive after its kill: ${alive.detail ?? alive.outcome}` };
       return out;
     }
     // A running holder with a live owner — or a run ended with no worker recorded that kept its
@@ -1311,6 +1384,68 @@ export class Queue {
       this.event(runId, "launched", run.state, run.state, { engine_run_id: engineRunId, ...detail, lock });
       return this.must(runId);
     }).immediate();
+  }
+
+  // ---------------------------------------------------------- the engine hold and external runs (Story 27.2)
+
+  /** An sbx launch run's in-VM engine pid and its start time, on the run (a `running` or `paused` run), with
+   * an `engine-pid` event naming the sandbox and the pid's source; `null`: no source named exactly one pid —
+   * the event records `engine pid: unknown` and the columns are left as they are. */
+  recordEnginePid(runId: string, found: { pid: number; start: string; source: string } | null, detail: Record<string, unknown> = {}): QueueRun {
+    return this.db.transaction(() => {
+      const run = this.must(runId);
+      if (isTerminal(run.state)) throw new RunTerminal(runId, run.state);
+      if (found) {
+        this.db.query("UPDATE runs SET engine_pid = ?, engine_start = ?, updated = ? WHERE run_id = ?").run(found.pid, found.start, now(), runId);
+        this.event(runId, "engine-pid", run.state, run.state, { ...detail, pid: found.pid, start: found.start, source: found.source });
+      } else {
+        this.event(runId, "engine-pid", run.state, run.state, { ...detail, engine_pid: "unknown" });
+      }
+      return this.must(runId);
+    }).immediate();
+  }
+
+  /** A non-terminal studio run of a served job (its job row is in the queue) that no queue run names, started
+   * outside the queue: recorded as an `external` queue run (no owner, no lock) with an `external` event
+   * carrying its studio run id. Null — nothing recorded — when the job is not served, a queue run already
+   * names that studio run, or the job already has a live queue run on the checkout. */
+  recordExternal(jobId: string, root: string, studioRunId: string, studioState: string,
+    placement: { tier?: string | null; sandbox?: string | null } = {}): QueueRun | null {
+    const checkout = checkoutKey(root);
+    return this.db.transaction(() => {
+      const job = this.db.query("SELECT * FROM jobs WHERE job_id = ? AND checkout = ?").get(jobId, checkout) as { root: string; project_id: string | null } | null;
+      if (!job) return null;
+      if (this.db.query("SELECT 1 FROM runs WHERE studio_run_id = ?").get(studioRunId)) return null;
+      if (this.db.query("SELECT 1 FROM runs WHERE job_id = ? AND checkout = ? AND state IN ('queued','running','paused','external')").get(jobId, checkout)) return null;
+      const runId = mintRunId(jobId), at = now();
+      const reason = `external: studio run ${studioRunId} was started outside the queue`;
+      // The job's placement (its tier, and the sandbox on sbx) as the queue places its own runs of the job:
+      // the release's other-holder check sees an external run on the same sandbox (no `sbx stop` under it).
+      const tier = placement.tier ?? null, sandbox = tier === "sbx" ? placement.sandbox ?? null : null;
+      this.db.query(
+        `INSERT INTO runs (run_id, job_id, checkout, root, project_id, target, state, reason, studio_run_id, tier, sandbox, created, updated)
+         VALUES (?, ?, ?, ?, ?, NULL, 'external', ?, ?, ?, ?, ?, ?)`,
+      ).run(runId, jobId, checkout, job.root, job.project_id, reason, studioRunId, tier, sandbox, at, at);
+      this.event(runId, "external", null, "external", {
+        studio_run_id: studioRunId, studio_state: studioState, ...(tier ? { tier } : {}), ...(sandbox ? { sandbox } : {}),
+      });
+      return this.must(runId);
+    }).immediate();
+  }
+
+  /** The `external` queue runs, oldest first. */
+  externalRuns(): QueueRun[] {
+    return this.db.query("SELECT * FROM runs WHERE state = 'external' ORDER BY created, rowid").all() as QueueRun[];
+  }
+
+  /** An external run's studio run reached a terminal state: the queue run ends in it (no longer live).
+   * `vanished` (the studio no longer lists that run, or refuses it): its outcome is unknown — the queue run
+   * ends `partial`, as the restart rule ends a run whose studio outcome it cannot read, the reason naming it. */
+  endExternal(runId: string, state: TerminalState, vanished?: string): QueueRun {
+    const run = this.must(runId);
+    const sid = run.studio_run_id ?? "?";
+    return this.end(runId, state, vanished ? `external: studio run ${sid} vanished: ${vanished}` : `external: studio run ${sid} ended ${state}`,
+      { from: "external", detail: { external: true, studio_run_id: run.studio_run_id, ...(vanished ? { vanished } : {}) } });
   }
 
   /** The runs the engine-end sweep probes: `running` launch runs whose driver let go of them after
