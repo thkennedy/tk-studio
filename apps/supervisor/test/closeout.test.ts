@@ -3,16 +3,16 @@
 // the fake `sbx` (its in-VM `bmad-loop archive|resolve`), a fake `meter.py` under a temp TK_STUDIO_ROOT and a
 // fake launch worker (the engine). Never a real sandbox, engine or ledger.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApi } from "../src/api";
-import { relauncher, type Started } from "../src/cli";
+import { closeOutOrphans, relauncher, type Started } from "../src/cli";
 import { closableVerdict, closeOutPaused, findSpec, frontmatter, harvestMessage, landing, launchedSinceMove, NOT_HANDED, resumePaused, ResumeRefused, type PausedDeps } from "../src/closeout";
 import { renderPage, type PageData } from "../src/page";
-import { Queue, type Owner } from "../src/queue";
+import { Queue, type Owner, type Probes } from "../src/queue";
 import { runProcess, toVmPath, type RunResult } from "../src/server";
-import { COPIED_RUNTIME, sweepEngines } from "../src/worktree";
+import { COPIED_RUNTIME, launchedCloseOutInput, sweepEngines } from "../src/worktree";
 import { fakeSbx, fakeStudioRoot, gitRepo, RUNTIME_GITIGNORE, testGit } from "./fakes";
 
 const SB = "claude-p";
@@ -846,6 +846,9 @@ describe("restart caution: a relaunched run is \"launched\" only after its new `
   test("after an `engine-resume`: no later `launched` and a dead owner → `recover` handles it; once a `launched` follows, the sweep probes it", async () => {
     const fx = await pausedRun({ status: "in-progress" });
     fx.queue.resumeFromPause(fx.run.run_id, "engine-resume", { engine_run_id: E1 }, dead);
+    // Story 27.5 (P1): the resume recorded its engine's pid, and that engine is gone (else the run is held, DW-29).
+    fx.queue.recordEnginePid(fx.run.run_id, { pid: 7001, start: "1", source: "engine.pid" }, { sandbox: SB, resumed: true });
+    (fx.queue.probes as Probes).engineProbe = async () => ({ alive: false });
     expect(fx.get()).toMatchObject({ state: "running", owner_nonce: dead.nonce });
     expect(fx.queue.awaitingEngine().map((r) => r.run_id)).not.toContain(fx.run.run_id); // the old `launched` does not count
     const ended: string[] = [];
@@ -871,3 +874,110 @@ describe("restart caution: a relaunched run is \"launched\" only after its new `
   });
 });
 
+
+// ---------------------------------------------------------------- Story 27.5
+
+describe("Story 27.5: cost across a close-out relaunch (DW-15), a resume in flight across a restart (DW-29)", () => {
+  test("the close-out records the archived engine's metered cost before the archive; the final close-out's cost is the sum across engines", async () => {
+    const fx = await pausedRun({ verdict: "no-impact" });
+    writeFileSync(join(fx.runDir, "run.json"), JSON.stringify({ total_cost_usd: 1.5 }));
+    const p = passDeps(fx);
+    expect(await closeOutPaused(fx.queue, p.deps)).toEqual({ closed: [fx.run.run_id], awaiting: [] });
+    const evs = fx.queue.events(fx.run.run_id);
+    const acct = evs.filter((e) => e.kind === "accounted" && e.detail?.source === "engine");
+    expect(acct.map((e) => e.detail)).toEqual([{ cost_usd: 1.5, engine_run_id: E1, source: "engine" }]);
+    // Recorded before the archive moved the run dir away, and before the relaunch's `close-out` move.
+    expect(evs.indexOf(acct[0]!)).toBeLessThan(evs.findIndex((e) => e.kind === "close-out"));
+    expect(existsSync(fx.runDir)).toBe(false);
+    // The relaunched engine E2 meters 2.0: the final close-out carries 1.5 + 2.0, never `launched` worker costs.
+    const e2 = join(fx.wt, ".bmad-loop", "runs", E2);
+    mkdirSync(e2, { recursive: true });
+    writeFileSync(join(e2, "run.json"), JSON.stringify({ total_cost_usd: 2 }));
+    expect(launchedCloseOutInput(fx.queue.events(fx.run.run_id), fx.get())).toMatchObject({ engineRunId: E2, costUsd: 3.5 });
+    // E2 unmetered: the archived sum plus that iteration's worker cost (as today), else the sum alone.
+    expect(launchedCloseOutInput(fx.queue.events(fx.run.run_id), { worktree: null, engine_run_id: E2 })).toMatchObject({ costUsd: 1.5 });
+  });
+
+  test("an engine cost already recorded (a close-out retried after a failed step) is never recorded twice", async () => {
+    const fx = await pausedRun({ verdict: "no-impact" });
+    writeFileSync(join(fx.runDir, "run.json"), JSON.stringify({ total_cost_usd: 0.75 }));
+    sbx.answer({ archive: "fail" });
+    try {
+      const p = passDeps(fx);
+      await closeOutPaused(fx.queue, p.deps);
+      await closeOutPaused(fx.queue, p.deps);
+      expect(fx.get().state).toBe("paused");
+      expect(ev(fx.queue, fx.run.run_id, "accounted").map((e) => e.detail)).toEqual([{ cost_usd: 0.75, engine_run_id: E1, source: "engine" }]);
+    } finally { sbx.answer({}); }
+  });
+
+  test("DW-29: a resume in flight across a restart is held while its resumed engine runs, never orphaned; once the engine is gone it is", async () => {
+    const fx = await pausedRun({ status: "in-progress" });
+    let engine: "alive" | "gone" = "alive";
+    (fx.queue.probes as Probes).engineProbe = async (_sb, pid) => engine === "alive" && pid === 7777 ? { alive: true, start: "424242" } : { alive: false };
+    // `POST /runs/{id}/resume` by a serve that then died: the run moved `engine-resume`, the resumed engine's pid recorded.
+    fx.queue.resumeFromPause(fx.run.run_id, "engine-resume", { engine_run_id: E1 }, dead);
+    fx.queue.recordEnginePid(fx.run.run_id, { pid: 7777, start: "424242", source: "engine.pid" }, { sandbox: SB, resumed: true });
+    expect(await fx.queue.resumedEngineAlive(fx.get())).toBe(true);
+    const ended: string[] = [];
+    const ops = { end: async (r: { run_id: string }) => { ended.push(r.run_id); return { ok: true, detail: "ended", state: "partial" }; }, find: async () => ({ ok: true as const, run_id: null }) };
+    const report = await fx.queue.recover(ops, me);
+    expect(report.ended).toEqual([]);
+    expect(report.held).toMatchObject([{ run_id: fx.run.run_id, worker: { pid: 7777, outcome: "running" } }]);
+    expect(fx.get()).toMatchObject({ state: "running", owner_nonce: dead.nonce });
+    expect(ended).toEqual([]);
+    // The resumed engine ended (its hand-back lost with the dead serve): the restart rule orphans the run now.
+    engine = "gone";
+    expect(await fx.queue.resumedEngineAlive(fx.get())).toBe(false);
+    const after = await fx.queue.recover(ops, me);
+    expect(after.ended.map((e) => e.run_id)).toEqual([fx.run.run_id]);
+    expect(fx.get().state).toBe("partial");
+    expect(fx.queue.orphanedCloseOuts().map((r) => r.run_id)).toEqual([fx.run.run_id]);
+  });
+});
+
+describe("Story 27.5 (P1): a resume whose engine pid is not recorded yet is held, never orphaned", () => {
+  for (const window of ["no engine-pid after the engine-resume", "engine-pid {resumed: true, engine_pid: unknown}"] as const) {
+    test(`${window}: \`recover\` holds the run; the orphan close-out never pushes, opens a PR or removes the worktree`, async () => {
+      const fx = await pausedRun({ status: "in-progress" });
+      // The resume's own `engine.pid` re-read from before the pause names the paused engine: not this resume's.
+      fx.queue.recordEnginePid(fx.run.run_id, { pid: 6509, start: "125610.0", source: "engine.pid" }, { sandbox: SB });
+      (fx.queue.probes as Probes).engineProbe = async () => ({ alive: false });
+      fx.queue.resumeFromPause(fx.run.run_id, "engine-resume", { engine_run_id: E1 }, dead);
+      if (window !== "no engine-pid after the engine-resume") {
+        fx.queue.recordEnginePid(fx.run.run_id, null, { sandbox: SB, why: "engine.pid was not rewritten by the resume", resumed: true });
+      }
+      expect(await fx.queue.resumedEngineHold(fx.get())).toContain("the resume recorded no engine pid after its engine-resume");
+      const ended: string[] = [];
+      const report = await fx.queue.recover({
+        end: async (r) => { ended.push(r.run_id); return { ok: true, detail: "ended", state: "partial" }; },
+        find: async () => ({ ok: true, run_id: null }),
+      }, me);
+      expect(report.ended).toEqual([]);
+      expect(ended).toEqual([]);
+      expect(report.held).toMatchObject([{ run_id: fx.run.run_id, worker: { detail: expect.stringContaining("recorded no engine pid") } }]);
+      expect(fx.get()).toMatchObject({ state: "running", owner_nonce: dead.nonce });
+      const p = passDeps(fx);
+      expect(await closeOutOrphans(fx.queue, p.deps)).toEqual([]);
+      expect(kinds(fx.queue, fx.run.run_id)).not.toContain("closed_out");
+      expect(existsSync(fx.wt)).toBe(true);
+      expect(p.order.some((o) => o.startsWith("git push"))).toBe(false);
+      expect(() => testGit(fx.repo.origin, "rev-parse", "--verify", "--quiet", `refs/heads/supervisor/run-${fx.run.run_id}`)).toThrow();
+    });
+  }
+});
+
+describe("Story 27.5 (P5): the archived engine's recorded cost when its relaunch failed", () => {
+  test("the run still names the archived engine (its run.json gone): its recorded cost counts; metered there, never twice", async () => {
+    const fx = await pausedRun({ verdict: "no-impact" });
+    writeFileSync(join(fx.runDir, "run.json"), JSON.stringify({ total_cost_usd: 1.5 }));
+    fx.queue.note(fx.run.run_id, "accounted", { cost_usd: 1.5, engine_run_id: E1, source: "engine" });
+    // Still metered (not archived yet): the run.json counts, the recorded copy of it does not.
+    expect(launchedCloseOutInput(fx.queue.events(fx.run.run_id), fx.get())).toMatchObject({ engineRunId: E1, costUsd: 1.5 });
+    // Archived, then the relaunch failed: the run still names E1, whose run.json is gone.
+    testGit(fx.wt, "status"); // the worktree is still there
+    rmSync(fx.runDir, { recursive: true, force: true });
+    expect(fx.get().engine_run_id).toBe(E1);
+    expect(launchedCloseOutInput(fx.queue.events(fx.run.run_id), fx.get())).toMatchObject({ engineRunId: E1, costUsd: 1.5 });
+  });
+});

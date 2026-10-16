@@ -4,16 +4,17 @@ import { hostname, tmpdir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
-  drainQueue, finishRun, guardsFor, launchedEngine, main, recoverAfterTimeout, recoverQueue, runJob, startRun, type TimeoutContext, type Validated,
+  drainQueue, finishRun, guardsFor, launchedEngine, main, mirror, recoverAfterTimeout, recoverQueue, runJob, startRun, type TimeoutContext, type Validated,
 } from "../src/cli";
 import { claudeBin, studioRoot, StudioRootMissing } from "../src/env";
 import { END_HYGIENE_EVENTS } from "../src/hygiene";
 import { checkoutKey, type QueueEvent, Queue } from "../src/queue";
 import { STARTER } from "../src/sandbox";
+import { runBranch } from "../src/worktree";
 import {
   buildWorkerCommand, buildWorkerEnv, CONTINUATION_PROMPT, HostBypassRefused, invokeSkill, MISSING_STATUS_BLOCK, type Spawner, toVmPath,
 } from "../src/server";
-import { fakeBin, fakeGh, fakeStudioRoot, gitInit } from "./fakes";
+import { fakeBin, fakeGh, fakePlansync, fakeStudioRoot, gitInit, gitRepo, testGit } from "./fakes";
 
 const REPO = resolve(import.meta.dir, "..");
 
@@ -607,18 +608,55 @@ describe.skipIf(!canRunE2E)("CLI end to end: studio-health (faked worker)", () =
     fx.expectNothingWoken();
   }, 120_000);
 
-  test("finish refused after the run exists → exit 1 keeping the run id, reason names the finish failure", () => {
-    const fx = e2eFixture(`{"status":"complete","intent":"tk-studio-activate","artifacts":[]}`, true, { selfFinish: true });
+  test("finish refused after the run exists → exit 1 keeping the run id; the reason stays the worker's own, the refusal a `finish-refused` event (DW-23)", () => {
+    const fx = e2eFixture(`{"status":"complete","reason":"the skill finished its own run","intent":"tk-studio-activate","artifacts":[]}`, true, { selfFinish: true });
     const res = fx.run();
     expect(res.status).toBe(1);
     const summary = JSON.parse(res.stdout);
     expect(summary.run_id).toStartWith("q-studio-health-");
     expect(summary.studio_run_id).toStartWith("studio-health-");
-    expect(summary.reason).toStartWith("finish failed:");
+    // Story 27.5 (DW-23): the worker's own status-block reason, never the refusal text.
+    // (the account the studio refused on the self-finished run is appended, as for any iteration)
+    expect(summary.reason).toStartWith("the skill finished its own run");
+    expect(summary.reason).not.toContain("finish failed");
+    expect(summary.finish_refused.error).toStartWith("finish failed:");
     const run = fx.jobVerb(["status", "--directory", fx.project, "--job-id", "studio-health", "--run-id", summary.studio_run_id]).runs[0];
     expect(run.state).toBe("cancelled");
     expect(summary.state).toBe(run.state); // the run's real state, not the stale wake/submit answer
+    expect(summary.finish_refused.actual_state).toBe(run.state);
+    const [queued, refused] = fx.queue((q) => [q.get(summary.run_id), q.events(summary.run_id).filter((e) => e.kind === "finish-refused")] as const);
+    expect(queued).toMatchObject({ state: "cancelled", reason: summary.reason });
+    expect(refused).toHaveLength(1);
+    expect(refused[0]!.detail).toEqual({ error: summary.finish_refused.error, actual_state: "cancelled" });
   }, 120_000);
+
+  // Story 27.5 (DW-23 is limited to a refusal on an already-terminal studio run): a `finish` that fails while the
+  // studio run is still running (or its status is unreadable → unknown) keeps the baseline `finish failed: …`.
+  test.each([["running"], ["unknown"]])("finish failing with the studio run %s → the reason stays `finish failed: …`, no `finish-refused` event (DW-23)", async (actual) => {
+    const runner = async (_root: string, args: string[]) => {
+      if (args[0] === "finish") throw new Error("uv timed out after 720s");
+      if (args[0] === "status") {
+        if (actual === "unknown") throw new Error("status unreadable");
+        return { runs: [{ run_id: "s-20260928T101010Z", state: "running" }] };
+      }
+      return { ok: true };
+    };
+    const defn = { id: "s", trigger: "one-shot", target: { skill: "tk-studio-activate" } };
+    const started = { jobId: "s", root: "proj", projectId: "p", runId: "s-20260928T101010Z", guardS: 600, defn,
+      woke: { accepted: true, run_id: "s-20260928T101010Z", state: "queued", directive: { kind: "invoke-skill", skill: "tk-studio-activate", payload: {} } } };
+    const summary = await finishRun(started as any, runner, async () => ({
+      status_block: { status: "complete", reason: "the worker's own reason", intent: "tk-studio-activate", artifacts: [] } }));
+    expect(summary).toMatchObject({ ok: false, state: actual });
+    expect(summary.reason).toBe("finish failed: uv timed out after 720s");
+    expect(summary.finish_refused).toBeUndefined();
+    const q = new Queue(join(mkdtempSync(join(tmpdir(), "tk-sup-dw23-q-")), "q.db"), { ownerAlive: () => true, engineLive: async () => ({ live: false }) });
+    try {
+      const { run } = q.enqueue({ jobId: "s", root: mkdtempSync(join(tmpdir(), "tk-sup-dw23-co-")), target: "skill", definition: defn });
+      await mirror(q, run.run_id, { jobId: "s", defn }, summary, runner);
+      expect(q.events(run.run_id).filter((e) => e.kind === "finish-refused")).toEqual([]);
+      expect(q.get(run.run_id)!.reason).toContain("finish failed: uv timed out after 720s");
+    } finally { q.close(); }
+  });
 
   test("unregistered project → non-zero naming the registry refusal", () => {
     const fx = e2eFixture("unused");
@@ -1345,7 +1383,9 @@ process.exit(r.status ?? 1);
     const run = fx.queue((q) => q.get(dead.run_id))!;
     expect(run).toMatchObject({ state: "partial", reason });
     expect(run.studio_run_id).toStartWith("studio-health-");
-    expect(events(fx, dead.run_id).at(-1)).toMatchObject({ kind: "orphaned", detail: { lookup: { ok: true, adopted: run.studio_run_id }, studio: { ok: true } } });
+    // Story 27.5 (DW-25): the orphan close-out follows the orphan end ("no changes": nothing landed).
+    expect(events(fx, dead.run_id).findLast((e) => e.kind === "orphaned")).toMatchObject({ kind: "orphaned", detail: { lookup: { ok: true, adopted: run.studio_run_id }, studio: { ok: true } } });
+    expect(events(fx, dead.run_id).at(-1)).toMatchObject({ kind: "closed_out", detail: { orphaned: true, no_changes: true } });
     const studio = fx.jobVerb(["status", "--directory", fx.project, "--job-id", "studio-health", "--run-id", run.studio_run_id!]).runs[0];
     expect(studio).toMatchObject({ state: "partial", reason });
     expect(fx.queue((q) => q.lock(fx.project))).toBeNull();
@@ -1369,8 +1409,9 @@ process.exit(r.status ?? 1);
     expect(JSON.parse(rec.stdout)).toMatchObject({ ok: true, resumed: [], ended: [{ run_id: dead.run_id, studio_run_id: dead.studio_run_id, reason }] });
     expect(fx.queue((q) => q.get(dead.run_id))).toMatchObject({ state: "partial", reason, studio_run_id: dead.studio_run_id });
     // `recovering`: the recoverer marks the run its own before it ends the studio run (no other recoverer ends it under that call).
-    expect(events(fx, dead.run_id).map((e) => e.kind)).toEqual(["enqueued", "claimed", "base-ref", "worktree", "materialised", "verb-started", "studio-run", "woke", "recovering", "orphaned"]);
-    expect(events(fx, dead.run_id).at(-1)).toMatchObject({ to_state: "partial", detail: { studio: { ok: true }, studio_outcome: { run_id: dead.studio_run_id, state: "partial" } } });
+    expect(events(fx, dead.run_id).map((e) => e.kind)).toEqual(["enqueued", "claimed", "base-ref", "worktree", "materialised", "verb-started", "studio-run", "woke", "recovering", "orphaned",
+      "closing-out", "closed_out"]); // Story 27.5 (DW-25): the orphan close-out
+    expect(events(fx, dead.run_id).findLast((e) => e.kind === "orphaned")).toMatchObject({ to_state: "partial", detail: { studio: { ok: true }, studio_outcome: { run_id: dead.studio_run_id, state: "partial" } } });
     const studio = fx.jobVerb(["status", "--directory", fx.project, "--job-id", "studio-health", "--run-id", dead.studio_run_id!]).runs[0];
     expect(studio).toMatchObject({ state: "partial", reason });
     expect(fx.queue((q) => q.lock(fx.project))).toBeNull();
@@ -1601,6 +1642,54 @@ process.exit(${exit});
       expect(f.bodies[0]).toContain(`reason: ${ended.reason}`);
       expect(q.events(run.run_id).filter((e) => e.kind === "notified")).toHaveLength(1);
       expect(q.get(run.run_id)!.notified).toStartWith("done ");
+    } finally { q.close(); }
+  }, 120_000);
+
+  test("Story 27.5: `recover` ends a cancelled run's studio run the cancel left open, and its plan passes set review and done on a merged PR", async () => {
+    const db = join(mkdtempSync(join(tmpdir(), "tk-sup-e2e-queue-")), "queue.db");
+    const me = { pid: process.pid, host: hostname(), nonce: "recover-wiring" };
+    const q = new Queue(db, { ownerAlive: (o) => o.nonce === me.nonce, engineLive: async () => ({ live: false, run_ids: [] }) });
+    try {
+      // A cancelled run whose studio run no record shows ended (its cancel's ender never ran).
+      const sid = "studio-health-20261016T121212Z";
+      const cancelled = q.enqueue({
+        jobId: "studio-health", root: mkdtempSync(join(tmpdir(), "tk-sup-checkout-")), owner: me,
+        definition: { id: "studio-health", trigger: "one-shot", target: { skill: "tk-studio-activate" } },
+      }).run;
+      expect((await q.claim(cancelled.run_id, me)).claimed).toBe(true);
+      q.setStudioRun(cancelled.run_id, sid);
+      q.end(cancelled.run_id, "cancelled", "cancelled: operator request");
+      // A terminal worktree run with an open PR, its run branch marking story 27.5 done, the plan's ST-097 for it.
+      const repo = gitRepo();
+      const reviewed = q.enqueue({ jobId: "j", root: repo.checkout, projectId: "proj", definition: { id: "j", target: { skill: "tk-studio-launch" } }, owner: me, base_ref: "main" }).run;
+      expect((await q.claim(reviewed.run_id, me)).claimed).toBe(true);
+      q.recordWorktree(reviewed.run_id, join(mkdtempSync(join(tmpdir(), "tk-sup-wt-")), "gone"), { branch: runBranch(reviewed.run_id), base_ref: "main" });
+      testGit(repo.checkout, "checkout", "-q", "-b", runBranch(reviewed.run_id));
+      const specRel = "_bmad-output/specs/spec-epic-27/stories/27-5-the-plan-follows-the-run-spec.md";
+      mkdirSync(dirname(join(repo.checkout, specRel)), { recursive: true });
+      writeFileSync(join(repo.checkout, specRel), "---\nstatus: 'done'\n---\n");
+      testGit(repo.checkout, "add", "-A");
+      testGit(repo.checkout, "commit", "-q", "-m", "the run's work");
+      testGit(repo.checkout, "checkout", "-q", "main");
+      mkdirSync(join(repo.checkout, "_bmad-output", "planning-artifacts", "plan"), { recursive: true });
+      writeFileSync(join(repo.checkout, "_bmad-output", "planning-artifacts", "plan", "ST-097.md"), "---\nid: ST-097\nstatus: draft\nsource: \"epics.md#story-27.5\"\n---\n");
+      const PR = "https://github.com/acme/widget/pull/42";
+      q.end(reviewed.run_id, "complete", null, { detail: { pr: PR } });
+      const gh = fakeGh();
+      gh.answer({ view: "MERGED" });
+      const plansync = fakePlansync();
+      const verbs = async (_root: string, a: string[]) => a[0] === "status" ? { ok: true, runs: [{ run_id: sid, state: "running" }] } : { ok: true, state: "partial" };
+      const f = recordingFetch();
+      await recoverQueue({
+        queue: q, owner: me, hygiene: { env: NTFY, fetch: f.fetchFn },
+        plan: { env: { ...process.env, TK_STUDIO_ROOT: plansync.root, GH_BIN: gh.bin }, registry: async () => undefined, self: me },
+      }, verbs);
+      expect(q.events(cancelled.run_id).filter((e) => e.kind === "studio-run-ended").map((e) => e.detail)).toEqual([
+        expect.objectContaining({ studio_run_id: sid, late: true, by: "recover" }),
+      ]);
+      expect(q.events(reviewed.run_id).filter((e) => e.kind === "plan-status").map((e) => [e.detail!.phase, e.detail!.id, e.detail!.ok]))
+        .toEqual([["review", "ST-097", true], ["done", "ST-097", true]]);
+      expect(plansync.calls().map((a) => a[a.indexOf("--status") + 1])).toEqual(["review", "done"]);
     } finally { q.close(); }
   }, 120_000);
 

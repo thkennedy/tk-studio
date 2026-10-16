@@ -110,20 +110,50 @@ export function fakeStudioRoot(realRoot: string = process.env.TK_STUDIO_ROOT!): 
   };
 }
 
+/** Story 27.5: a throwaway TK_STUDIO_ROOT holding only a fake planning adapter,
+ * `plugins/tk-studio/lib/plansync.py` (operator-decisions §1: in tests only). `status --directory D --id ST --status S
+ * [--note N] [--caller C]` logs its argv to `calls` and answers from `answer` (rewritable between runs): `ok` →
+ * `{ok: true, id, status, previous_status}` (exit 0); `refuse` → `{ok: false, error}` (exit 2); `blocked` →
+ * `{ok: false, blocked: true, reason, written: true}` (exit 2); `crash` → a traceback on stderr, no JSON (exit 1). */
+export function fakePlansync(): { root: string; calls: () => string[][]; answer: (a: "ok" | "refuse" | "blocked" | "crash") => void } {
+  const root = mkdtempSync(join(tmpdir(), "tk-sup-plansync-"));
+  const lib = join(root, "plugins", "tk-studio", "lib");
+  mkdirSync(lib, { recursive: true });
+  const log = join(root, "plansync-calls.jsonl"), answers = join(root, "plansync-answer.txt");
+  writeFileSync(answers, "ok");
+  writeFileSync(join(lib, "plansync.py"), [
+    "import json, sys",
+    `with open(${JSON.stringify(log)}, "a", encoding="utf-8") as f: f.write(json.dumps(sys.argv[1:]) + "\\n")`,
+    `answer = open(${JSON.stringify(answers)}, encoding="utf-8").read().strip()`,
+    "a = sys.argv[1:]",
+    "arg = lambda k: a[a.index(k) + 1] if k in a else None",
+    `if answer == "ok": print(json.dumps({"ok": True, "id": arg("--id"), "status": arg("--status"), "previous_status": "draft"})); sys.exit(0)`,
+    `if answer == "blocked": print(json.dumps({"ok": False, "blocked": True, "reason": "backend re-sync blocked", "written": True})); sys.exit(2)`,
+    `if answer == "crash": print("Traceback (most recent call last):\\n  OSError: plan directory busy", file=sys.stderr); sys.exit(1)`,
+    `print(json.dumps({"ok": False, "error": "unknown status entity " + str(arg("--id"))})); sys.exit(2)`,
+  ].join("\n"));
+  return {
+    root,
+    calls: () => existsSync(log) ? readFileSync(log, "utf-8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [],
+    answer: (a) => writeFileSync(answers, a),
+  };
+}
+
 /** The fake `gh` (GH_BIN): records `{argv, cwd, gh_repo}` (its `GH_REPO`) per call to its log — and `body`, the
  * content of a `--body-file` read at call time — and answers from a JSON file (rewritable between calls):
  * `repo view` → the default branch; `api repos/{owner}/{repo}/branches/<b>` → `{protected}` (`protected`
  * names the protected branches); `pr list` → `[{url}]` for each of `open` (the open PRs from the head
  * branch; none by default); `pr create` → the PR URL, refused as gh does while `open` names one;
- * `pr ready` (and `pr ready <pr> --undo`) → ok; `pr edit` → the PR URL (Story 27.4). `fail` names the subcommands (`"pr create"`, `"api"`, …) that exit 1. Never the network. */
-type GhAnswers = { default?: string; protected?: string[]; pr?: string; open?: string[]; fail?: string[] };
+ * `pr ready` (and `pr ready <pr> --undo`) → ok; `pr edit` → the PR URL (Story 27.4); `pr view <pr> --json state,mergedAt` →
+ * `{state: view, mergedAt}` (Story 27.5: `OPEN` by default). `fail` names the subcommands (`"pr create"`, `"api"`, …) that exit 1. Never the network. */
+type GhAnswers = { default?: string; protected?: string[]; pr?: string; open?: string[]; fail?: string[]; view?: "OPEN" | "MERGED" | "CLOSED" };
 export function fakeGh(dir: string = mkdtempSync(join(tmpdir(), "tk-sup-gh-"))): {
   bin: string; calls: () => { argv: string[]; cwd: string; gh_repo: string | null; body?: string }[];
   answer: (a: GhAnswers) => void;
 } {
   const log = join(dir, "gh-calls.jsonl"), answers = join(dir, "gh-answers.json");
   const set = (a: GhAnswers) =>
-    writeFileSync(answers, JSON.stringify({ default: "main", protected: ["main"], pr: "https://github.com/acme/widget/pull/42", open: [], fail: [], ...a }));
+    writeFileSync(answers, JSON.stringify({ default: "main", protected: ["main"], pr: "https://github.com/acme/widget/pull/42", open: [], fail: [], view: "OPEN", ...a }));
   set({});
   const bin = fakeBin(join(dir, "gh.js"), `const fs = require("node:fs");
 const argv = process.argv.slice(2);
@@ -146,6 +176,7 @@ if (sub === "pr create") {
 }
 if (sub === "pr ready") { console.log("ready"); process.exit(0); }
 if (sub === "pr edit") { console.log(argv[2]); process.exit(0); }
+if (sub === "pr view") { console.log(JSON.stringify({ state: a.view, mergedAt: a.view === "MERGED" ? "2026-10-16T00:00:00Z" : null })); process.exit(0); }
 console.error("fake gh: unsupported " + argv.join(" ")); process.exit(2);
 `);
   return {

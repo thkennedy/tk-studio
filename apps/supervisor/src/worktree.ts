@@ -62,7 +62,7 @@ import { dirname, join, resolve } from "node:path";
 import { ghBin, pluginRoot, WorkDirMissing, workDir } from "./env";
 import { canonicalPr, isWithin } from "./hygiene";
 import { hostVerify, isRed, prSection, redReason, type HostVerifyResult } from "./hostverify";
-import { isTerminal, RunTerminal, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
+import { accountedCostOf, isTerminal, RunTerminal, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
 import { releasePin, sameStart, type SandboxDeps } from "./sandbox";
 import { lastJsonObject, runJobVerb, runProcess, runUv, toVmPath, type RunResult, type Tier } from "./server";
 
@@ -147,7 +147,8 @@ async function originGhRepo(deps: WorktreeDeps, cwd: string): Promise<string | u
   } catch { return undefined; }
 }
 
-async function gh(deps: WorktreeDeps, cwd: string, args: string[], timeoutS = 120): Promise<RunResult> {
+/** `gh <args>` in `cwd`, pinned to origin's repository (`GH_REPO`); argv only. Story 27.5: exported for the merge pass. */
+export async function gh(deps: WorktreeDeps, cwd: string, args: string[], timeoutS = 120): Promise<RunResult> {
   const repo = await originGhRepo(deps, cwd);
   return runner(deps)(ghBin(deps.env ?? process.env), args, { cwd, timeoutS, ...(repo ? { env: { GH_REPO: repo } } : {}) });
 }
@@ -470,14 +471,20 @@ export function openPrUrl(stdout: string): string | undefined {
 
 /** What a launched run's close-out carries, from its `launched` event (AC3): the launch status block,
  * the engine run id and the metered cost — the engine's `run.json`, read before the worktree is
- * removed, else the launch worker's. A run with no `launched` event: its engine id only. */
+ * removed, else the launch worker's. A run with no `launched` event: its engine id only.
+ * Story 27.5 (DW-15): plus the metered cost of every engine run an earlier close-out archived (its `accounted`
+ * events, `source: "engine"`), so a relaunched run's cost is the sum across its engines. */
 export function launchedCloseOutInput(
   events: readonly QueueEvent[], run: Pick<QueueRun, "worktree" | "engine_run_id">,
 ): { statusBlock?: unknown; engineRunId: string | null; costUsd?: number } {
   const launched = (events.findLast((e) => e.kind === "launched")?.detail ?? {}) as Record<string, any>;
   const engineRunId: string | null = run.engine_run_id ?? (typeof launched.engine_run_id === "string" ? launched.engine_run_id : null);
-  const cost = (run.worktree && existsSync(run.worktree) ? meteredCost(run.worktree, engineRunId) : undefined)
-    ?? (typeof launched.worker_cost_usd === "number" ? launched.worker_cost_usd : undefined);
+  const metered = run.worktree && existsSync(run.worktree) ? meteredCost(run.worktree, engineRunId) : undefined;
+  const latest = metered ?? (typeof launched.worker_cost_usd === "number" ? launched.worker_cost_usd : undefined);
+  // The current engine's own recorded cost is left out only when its metered cost was read here: an engine archived
+  // (its cost recorded) whose relaunch failed still names the run's engine, with no run.json left to read.
+  const archived = accountedCostOf(events, "engine", metered !== undefined ? engineRunId : null);
+  const cost = archived === undefined ? latest : archived + (latest ?? 0);
   return { ...(launched.status_block !== undefined ? { statusBlock: launched.status_block } : {}), engineRunId, ...(cost !== undefined ? { costUsd: cost } : {}) };
 }
 

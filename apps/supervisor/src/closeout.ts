@@ -53,7 +53,7 @@ import { canonicalPr, isWithin, notify, type EndNotice } from "./hygiene";
 import { selfOwner, type Owner, type Queue, type QueueEvent, type QueueRun } from "./queue";
 import { HOLD_TIMEOUT_S, parseEnginePid, sameStart, type HoldChild } from "./sandbox";
 import { lastJsonObject, runProcess, toVmPath, type RunResult } from "./server";
-import { COPIED_RUNTIME, runner, studioScript, uvRunner, type WorktreeDeps } from "./worktree";
+import { COPIED_RUNTIME, meteredCost, runner, studioScript, uvRunner, type WorktreeDeps } from "./worktree";
 
 type Env = Record<string, string | undefined>;
 type Fetch = (input: string, init?: RequestInit) => Promise<Response>;
@@ -300,12 +300,25 @@ function backToPaused(queue: Queue, runId: string, why: Record<string, string>):
   } catch { return false; /* the queue is busy: `recover` handles a dead driver's run */ }
 }
 
+/** Story 27.5 (DW-15): the engine run about to be archived has its metered cost (`meteredCost`, its `run.json`)
+ * recorded as an `accounted` event `{cost_usd, engine_run_id, source: "engine"}` — once per engine run, and only
+ * while its run dir is still there — so the final close-out sums every engine iteration. Never throws. */
+function noteEngineCost(queue: Queue, run: QueueRun): void {
+  try {
+    const cost = meteredCost(run.worktree!, run.engine_run_id);
+    if (cost === undefined) return;
+    const seen = queue.events(run.run_id).some((e) => e.kind === "accounted" && e.detail?.source === "engine" && e.detail?.engine_run_id === run.engine_run_id);
+    if (!seen) queue.note(run.run_id, "accounted", { cost_usd: cost, engine_run_id: run.engine_run_id, source: "engine" });
+  } catch { /* not recorded: the final close-out reads the latest engine only */ }
+}
+
 async function closeOutLanded(queue: Queue, run: QueueRun, l: Extract<Landing, { outcome: "close-out" }>, deps: PausedDeps): Promise<boolean> {
   const key = l.story_key;
   const commit = await commitStep(run, key, deps);
   if (!commit.ok) { noteFailed(queue, run, key, "commit", commit.error); return false; }
   const meter = await meterStep(run, deps);
   if (!meter.ok) { noteFailed(queue, run, key, "meter", meter.error); return false; }
+  noteEngineCost(queue, run);
   const archive = await archiveStep(run, deps);
   if (!archive.ok) { noteFailed(queue, run, key, "archive", archive.error); return false; }
   if (!deps.relaunch) { noteFailed(queue, run, key, "relaunch", "no relaunch driver"); return false; }

@@ -118,3 +118,43 @@ Checks only the Windows host can run, for the attended session (operator-decisio
 
 - **Which `bash` resolves.** With no shell, a bare `bash` (the-universe-awaits' `bash scripts/verify.sh`) is resolved through PATH; on a Windows host with WSL, `C:\Windows\System32\bash.exe` (the WSL launcher) can come before Git Bash, and the script would then run inside Linux and miss the Windows-only defects the leg exists to catch. The operator confirms which `bash` the supervisor's PATH resolves first (`where bash`), or names Git Bash's `bash.exe` explicitly in the key.
 - **No `.cmd`/`.bat` shims.** `npm`, `npx`, `pnpm` and the like are `.cmd`/`.bat` shims on Windows and cannot be started without a shell: the key names a real executable (`bun`, `node`, `uv`).
+
+## Story 27.5
+
+### Runbook `kb/agent-pc-setup-runbook.md` §4: the supervisor's events and the certificate rule
+
+Proposed rows for §4 (the supervisor started at logon), naming the event kinds Stories 27.1, 27.3 and 27.5 added or changed on a queue run's `events` (`GET /runs/{id}`, the status page) — 27.2's and 27.4's are not listed here — and the supervisor-scope events:
+
+| Event | When |
+|---|---|
+| `launched` | (27.1) `tk-studio-launch` returned with an engine started: the run stays `running`, its driver lets go, the checkout lock goes to the engine; carries the status block, the engine run id, the end the close-out writes. |
+| `paused` | (27.1) The engine paused: the run is `paused` (not terminal), keeps its worktree, lock and pin; the draft PR's URL rides the event. |
+| `materialised` | (27.1) The run's worktree was cut and its untracked runtime materialised (`tk install`, the copied policy/routing/overlay, `tk activate` clean). |
+| `closing-out` | (27.1) A late close-out of a terminal run took its lease (a later one with no owner lets it go). |
+| `closed_out` | (27.1) A close-out recorded on a run already ended (a late close-out, a raced transition); 27.5: `{pr \| no_changes, closeout, orphaned: true}` for the orphan close-out. |
+| `lock-released` | (27.1) A kept lock was freed: an engine lock at a removed worktree, a lock kept for a live driver, a worker that may no longer run. |
+| `close-out` | (27.3) The paused-run pass moved a landed run `paused` → `running` to relaunch its epic (`{story_key, verdict, commit, meter, archive}`). |
+| `close-out-failed` | (27.3) A close-out step failed (`{story_key, engine_run_id, step, error}`), once per (step, error); the run stays `paused`. |
+| `awaiting-ruling` | (27.3) A landed story with no verdict or `escalate`: once per pause, with its notification. |
+| `engine-resume` | (27.3) `POST /runs/{id}/resume` moved the run `paused` → `running` (`bmad-loop resolve … --resume`). |
+| `hold` | (27.2/27.3) The supervisor's own `sbx exec … tail --pid` (or the resume's child) holding the engine's sandbox open. |
+| `plan-status` | (27.5) The plan pull-back: one per story per phase, `{phase: review\|done, pr, owner, directory, story_key, id, ok, previous_status?, error?, blocked?, skipped?, reason?}`. `review` when the PR opens, `done` when it merges, a skip naming why (owner not registered, no plan dir, no plan entity, `pr closed unmerged`, or `gave up after <n> attempts: <reason>` once a transient failure outlasts 24 released leases, e.g. a deleted run branch). Never changes the run's state. |
+| `studio-run-ended` | (27.5) A studio run a cancel's end found on its re-read (a driver's late record), or a cancelled run's studio run the next `recover` ended (or found already terminal): `{studio_run_id, late: true, by: cancel\|recover, detail, state}`. The cancel's `ended` detail names `late_studio_run_id`, and `claimed_during_cancel: {pid, host}` when a driver claimed the run inside the window (its lock kept for that driver). |
+| `studio-run-end-failed` | (27.5) The recovery's ender failed for a cancelled run's studio run: `{studio_run_id, by: recover, detail, attempt}`, one per failed attempt; the next `recover` tries again, and the attempt reaching 24 also carries `gave_up: true`, after which that run is never tried again. |
+| `plan-lease` | (27.5) The plan pull-back's per-phase lease: `{phase, owner}` before the verb is called; `{phase, owner: null, released}` when a transient failure (a failed registry lookup, a failed `git diff` or `git merge-base`, a run-branch or merge-base read that failed for any reason but "does not exist", a `plansync.py status` that timed out, failed to start or answered no JSON before anything was recorded) recorded nothing; `{phase, owner: null, released, settled: true}` once the pass recorded (the phase no longer in progress; `done` is not taken while the run's `review` lease is held by a live process). |
+| `finish-refused` | (27.5) `finish` was refused (the studio run already terminal, e.g. a skill that finished its own run): `{error, actual_state}`; the run's reason stays the worker's own. |
+| `accounted` | (21.6) The iteration's counts; 27.5: `cost_usd` (the iteration's worker cost; a job with no turn/token guard gets a cost-only `{turns: 0, tokens: 0, message_ids: [], cost_usd}`), and `{cost_usd, engine_run_id, source: "engine"}` for an engine run archived by the paused-run pass. `run.json`'s `total_cost_usd` is the sum across every iteration. |
+| `worker` | (21.6) The spawned worker; 27.5: `{pid, guard_s}` only, committed before its start time, which lands after it on the run's `worker_start` column. |
+| `cert-renew-requested`, `cert-renewed`, `cert-renew-failed` | (27.5) Supervisor-scope (no run), in the queue's `service_events` table: the certificate rule below. |
+
+Proposed text for the certificate, replacing "restart `start.ps1` on long uptimes":
+
+> **The TLS certificate renews itself.** `serve` checks the Tailscale certificate's `notAfter` at start and hourly. Within 14 days of expiry, while no run is `running` or `external` and no renewal was requested in the last 24 hours, it records `cert-renew-requested` and exits 75; the keeper in `start.ps1` runs the same bounded `tailscale cert` (120 s) and restarts `serve` at once. The next `serve` records `cert-renewed` (a later `notAfter`) or `cert-renew-failed`. A live run postpones the renewal to a later check; within 3 days of expiry it renews even during a live run, naming the runs it overrode. Nothing needs restarting by hand.
+
+Also for §4: the orphan close-out (a run the restart rule ended orphaned is closed out once its engine is confirmed dead, its pin released; a run whose `engine-resume` recorded no resumed engine pid yet, or `engine_pid: "unknown"`, is held, never orphaned), the pacer counting an ended run that keeps its lock, and the worker record landing pid first (the win32 start time read natively through `GetProcessTimes`).
+
+### Register tk-studio on the host
+
+The plan pull-back resolves the supervisor's own runs to tk-studio (this repo's `epics.md` is `status: transcribed`, `source: "thkennedy/tk-studio …"`). Until tk-studio is in the host registry, every supervisor run records `plan-status` `{skipped: true, reason: "owner tk-studio not in the registry"}`. Proposed runbook step: `tk register` (`registry.py`) tk-studio's checkout on the agent PC (`C:\GitHub\tk-studio`, project id `tk-studio`), so its `_bmad-output/planning-artifacts/plan/ST-*.md` entities (ST-093..ST-097 for Epic 27) take `review` and `done` from the supervisor.
+
+Checks only the Windows host can run, for the attended session (operator-decisions §5): the real `plansync.py status` into tk-studio's plan once registered; the win32 `bun test` run and the `GetProcessTimes` read under 50 ms (`test/queue.test.ts`, skipped off win32); the `tailscale cert` renewal and `serve` restart on exit 75, as a dry run on the agent PC.

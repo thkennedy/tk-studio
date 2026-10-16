@@ -54,6 +54,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from "
 import { homedir, hostname } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pluginRoot } from "./env";
+import { processCreationTime } from "./winproc";
 import { probeEngine, sameStart, type ProbeResult } from "./sandbox";
 import { lastJsonObject, runUv, SBX_GUARD_KILL_AFTER_S, type RunResult } from "./server";
 
@@ -174,11 +175,16 @@ export const runPowerShell: PowerShellRunner = (command) => {
 };
 
 /** The start time of `pid`: Linux `/proc/<pid>/stat` field 22; win32 the
- * creation time (UTC, ISO) through a bounded PowerShell call; else — or on
- * any failed read — null (absent). */
-export function processStartTime(pid: number, platform: NodeJS.Platform = process.platform, ps: PowerShellRunner = runPowerShell): string | null {
+ * creation time (UTC, ISO, 7 fractional digits) read natively (`GetProcessTimes` through `bun:ffi`,
+ * src/winproc.ts — Story 27.5, DW-19), with the bounded PowerShell call only when the FFI cannot load;
+ * else — or on any failed read — null (absent). */
+export function processStartTime(pid: number, platform: NodeJS.Platform = process.platform, ps: PowerShellRunner = runPowerShell,
+  native: (pid: number) => string | null | undefined = processCreationTime): string | null {
   if (!Number.isInteger(pid) || pid <= 0) return null;
   if (platform === "win32") {
+    // `undefined`: the FFI did not load (not win32, no kernel32) — the PowerShell read is the fallback.
+    const read = native(pid);
+    if (read !== undefined) return read;
     const out = ps(`(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`)?.trim();
     return out && /^\d{4}-\d{2}-\d{2}T[\d:.]+Z?$/.test(out) ? out : null;
   }
@@ -598,6 +604,9 @@ CREATE TABLE IF NOT EXISTS events (
   from_state TEXT, to_state TEXT NOT NULL, detail TEXT
 );
 CREATE INDEX IF NOT EXISTS events_run ON events (run_id, seq);
+CREATE TABLE IF NOT EXISTS service_events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, kind TEXT NOT NULL, detail TEXT
+);
 CREATE TABLE IF NOT EXISTS locks (
   checkout TEXT PRIMARY KEY, root TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('run','engine')),
   run_id TEXT NOT NULL, job_id TEXT NOT NULL, owner_pid INTEGER, owner_host TEXT, owner_nonce TEXT, owner_start TEXT,
@@ -621,6 +630,10 @@ const DONE_PREFIX = "done ";
 /** How old a lease must be before another sweep may take it over (10 minutes: a send is bounded
  * to 15 s and a transcript copy to a local file copy, so a live claimant is long finished). */
 export const END_LEASE_STALE_MS = 10 * 60_000;
+/** Story 27.5 (DW-13): the failed ender attempts (`studio-run-end-failed`) a cancelled run's studio run may carry
+ * before recovery gives up on it (the attempt reaching it records `gave_up: true`) — the plan passes' bound
+ * (`PLAN_RETRY_LIMIT`, src/planstatus.ts). */
+export const STUDIO_END_RETRY_LIMIT = 24;
 /** The ISO time inside a lease marker (`lease ` + 24 characters of `toISOString()`), as SQL. */
 const leaseAtSql = (row: string) => `substr(${row}.${NOTIFIED_COLUMN}, ${LEASE_PREFIX.length + 1}, 24)`;
 
@@ -682,6 +695,21 @@ function widenStateCheck(db: Database): void {
   db.exec("DROP TABLE runs");
   db.exec("ALTER TABLE runs_widened RENAME TO runs");
   db.exec(LIVE_INDEX);
+}
+
+/** Story 27.5 (DW-15): the sum of `cost_usd` over a run's `accounted` events of one source — the worker's
+ * iterations (no `source`) or the archived engine runs (`source: "engine"`, `except` an engine run id already
+ * metered elsewhere); undefined when none carries a cost. `launched` events are never counted. */
+export function accountedCostOf(events: readonly QueueEvent[], source: "worker" | "engine", except?: string | null): number | undefined {
+  let sum: number | undefined;
+  for (const e of events) {
+    if (e.kind !== "accounted") continue;
+    const d = (e.detail ?? {}) as Record<string, unknown>;
+    if ((d.source === "engine") !== (source === "engine")) continue;
+    if (source === "engine" && except && d.engine_run_id === except) continue;
+    if (typeof d.cost_usd === "number" && Number.isFinite(d.cost_usd)) sum = (sum ?? 0) + d.cost_usd;
+  }
+  return sum;
 }
 
 /** Story 27.3: the SQL test (over `runs`) that a run is launched — a `launched` event after its latest
@@ -828,6 +856,9 @@ export class Queue {
       if (r.state === "running" || r.state === "paused" || r.state === "external" || (r.state === "queued" && this.ownerLive(ownerOf(r), self))) live.push(r);
       else if (r.state === "queued") adoptable.push(r);
     }
+    // Story 27.5 (DW-11): an ended run that still holds its `run` lock (a worker that may still run, a live
+    // driver: `releaseKeptLocks`' query) is live for the pacer — the next run would only wait on that lock.
+    for (const k of this.keptLockRuns()) if (k.job_id === jobId && k.checkout === checkout) live.push(k);
     // Terminal runs in the order they ended (the ending event's seq; one with no event first, by `updated`).
     const ends = runs.filter((r) => isTerminal(r.state)).map((r) => {
       const ev = this.db.query("SELECT seq, at, detail FROM events WHERE run_id = ? AND kind IN ('ended', 'orphaned') ORDER BY seq DESC LIMIT 1")
@@ -844,6 +875,14 @@ export class Queue {
     }
     const last = ends.at(-1);
     return { live, adoptable, lastEnded: last?.at ?? null, latestTerminal: last?.run ?? null, stopped };
+  }
+
+  /** Ended runs that still hold their checkout's `run` lock (`holdLock`, `driverLive`), oldest lock first. */
+  keptLockRuns(): QueueRun[] {
+    return this.db.query(
+      `SELECT runs.* FROM locks JOIN runs ON runs.run_id = locks.run_id
+       WHERE locks.kind = 'run' AND runs.state IN ('complete','partial','blocked','cancelled') ORDER BY locks.acquired`,
+    ).all() as QueueRun[];
   }
 
   lock(root: string): LockRow | null {
@@ -1277,8 +1316,23 @@ export class Queue {
    * `worker` event's time is the recorded spawn time. */
   setWorker(runId: string, pid: number, start: string | null, guardS?: number | null): QueueRun {
     const guard = typeof guardS === "number" && Number.isFinite(guardS) && guardS > 0 ? Math.ceil(guardS) : null;
-    return this.recordOnRunning(runId, "setWorker", "worker", { worker_pid: pid, worker_start: start, worker_guard_s: guard },
-      { pid, ...(start ? { start } : {}), ...(guard !== null ? { guard_s: guard } : {}) });
+    // Story 27.5 (DW-19): the pid (and its `worker` event) commits first, the start time after it in a second
+    // update — a supervisor killed between the two still leaves a usable record (a pid whose start is unread).
+    const run = this.recordOnRunning(runId, "setWorker", "worker", { worker_pid: pid, worker_start: null, worker_guard_s: guard },
+      { pid, ...(guard !== null ? { guard_s: guard } : {}) });
+    return start ? this.setWorkerStart(runId, pid, start) : run;
+  }
+
+  /** Story 27.5 (DW-19): the recorded worker's start time, written after its pid (`setWorker`) — only while the
+   * run is not terminal and still records that pid. */
+  setWorkerStart(runId: string, pid: number, start: string): QueueRun {
+    return this.db.transaction(() => {
+      const run = this.must(runId);
+      if (isTerminal(run.state)) throw new RunTerminal(runId, run.state);
+      if (run.worker_pid !== pid) return run;
+      this.db.query("UPDATE runs SET worker_start = ?, updated = ? WHERE run_id = ?").run(start, now(), runId);
+      return this.must(runId);
+    }).immediate();
   }
 
   /** Record the wake/submit answer a resume rebuilds the run from (directive, routing, state). */
@@ -1300,6 +1354,12 @@ export class Queue {
       if (Array.isArray(list)) for (const id of list) if (typeof id === "string") ids.add(id);
     }
     return [...ids];
+  }
+
+  /** Story 27.5 (DW-15): the cost recorded on this run's `accounted` events (`cost_usd`) — the worker
+   * iterations' (`source` absent) or the archived engine runs' (`source: "engine"`). */
+  accountedCost(runId: string, source: "worker" | "engine" = "worker", events: readonly QueueEvent[] = this.events(runId)): number | undefined {
+    return accountedCostOf(events, source);
   }
 
   /** How many times this run was resumed (its `resumed` events). */
@@ -1717,6 +1777,154 @@ export class Queue {
     }).immediate();
   }
 
+  /** Story 27.5 (DW-12, DW-13): `end` for a cancel, re-reading inside the end transaction what the cancel acted
+   * on — the studio run it ended (`acted.studio_run_id`) and the owner it read (`acted.owner_nonce`). A studio run
+   * recorded since (a driver's `setStudioRun` after the cancel's read) is answered as `late_studio_run_id`, for the
+   * caller to end after the commit. A `running` run claimed since by another owner (not `self`, whose close-out take
+   * re-owns it) keeps its `run` lock for that driver (`driverLive`): the driver's own end frees it, else
+   * `claim`/`recover` once it is dead. The recorded owner is compared only — no liveness probe runs inside the
+   * transaction. */
+  endReread(runId: string, state: TerminalState, reason: string | null | undefined,
+    opts: { engineRunId?: string | null; detail?: Record<string, unknown>; holdLock?: string; driverLive?: boolean; keepEngine?: boolean },
+    acted: { studio_run_id: string | null; owner_nonce: string | null }, self: Owner = selfOwner(),
+  ): { run: QueueRun; late_studio_run_id?: string; claimed?: { pid: number | null; host: string | null } } {
+    if (!isTerminal(state)) throw new Error(`end: '${state}' is not a terminal state`);
+    return this.db.transaction(() => {
+      const run = this.must(runId);
+      if (isTerminal(run.state)) throw new RunTerminal(runId, run.state);
+      const late = run.studio_run_id && run.studio_run_id !== acted.studio_run_id ? run.studio_run_id : undefined;
+      const claimed = !opts.holdLock && opts.engineRunId === undefined && !opts.keepEngine && run.state === "running"
+        && run.owner_nonce !== null && run.owner_nonce !== acted.owner_nonce && run.owner_nonce !== self.nonce
+        ? { pid: run.owner_pid, host: run.owner_host } : undefined;
+      const detail = { ...(opts.detail ?? {}), ...(late ? { late_studio_run_id: late } : {}), ...(claimed ? { claimed_during_cancel: claimed } : {}) };
+      const hold = claimed
+        ? { holdLock: `cancelled: claimed by its driver (pid ${claimed.pid ?? "?"}${claimed.host ? `@${claimed.host}` : ""}) during the cancel`, driverLive: true } : {};
+      this.writeEnd(run, state, reason, { ...opts, ...hold, detail, kind: "ended" });
+      return { run: this.must(runId), ...(late ? { late_studio_run_id: late } : {}), ...(claimed ? { claimed } : {}) };
+    }).immediate();
+  }
+
+  /** Story 27.5 (DW-13): `cancelled` runs whose recorded studio run no record shows ended — neither the cancel's own
+   * ender (its `ended` detail's `studio`, ok and naming that run) nor a `studio-run-ended` event — and whose ender has
+   * not yet given up on it: fewer than `STUDIO_END_RETRY_LIMIT` `studio-run-end-failed` events for that studio run
+   * and none with `gave_up: true` (a failed ender is retried by the next recovery, bounded): `recoverQueue` ends each
+   * through the same ender. */
+  cancelledLeftovers(): QueueRun[] {
+    const runs = this.db.query(
+      `SELECT * FROM runs WHERE state = 'cancelled' AND studio_run_id IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM events e WHERE e.run_id = runs.run_id AND e.kind = 'studio-run-ended'
+           AND json_extract(e.detail, '$.studio_run_id') = runs.studio_run_id)
+         AND NOT EXISTS (SELECT 1 FROM events e WHERE e.run_id = runs.run_id AND e.kind = 'studio-run-end-failed'
+           AND json_extract(e.detail, '$.studio_run_id') = runs.studio_run_id AND json_extract(e.detail, '$.gave_up') = 1)
+         AND (SELECT COUNT(*) FROM events e WHERE e.run_id = runs.run_id AND e.kind = 'studio-run-end-failed'
+           AND json_extract(e.detail, '$.studio_run_id') = runs.studio_run_id) < ?
+       ORDER BY created, rowid`,
+    ).all(STUDIO_END_RETRY_LIMIT) as QueueRun[];
+    return runs.filter((r) => {
+      const ended = this.events(r.run_id).findLast((e) => e.kind === "ended")?.detail as Record<string, any> | null | undefined;
+      const studio = ended?.studio as { ok?: unknown; detail?: unknown } | undefined;
+      return !(studio?.ok === true && typeof studio.detail === "string" && studio.detail.includes(`studio run ${r.studio_run_id} `));
+    });
+  }
+
+  /** Story 27.5 (DW-25): runs `recover` ended orphaned with a worktree recorded and no `closed_out` yet — the
+   * orphan close-out pass (`recoverQueue`) closes each out once nothing around it is live. */
+  orphanedCloseOuts(): QueueRun[] {
+    return this.db.query(
+      `SELECT * FROM runs WHERE worktree IS NOT NULL AND state IN ('complete','partial','blocked','cancelled')
+         AND EXISTS (SELECT 1 FROM events e WHERE e.run_id = runs.run_id AND e.kind = 'orphaned')
+         AND NOT EXISTS (SELECT 1 FROM events e WHERE e.run_id = runs.run_id AND e.kind = 'closed_out')
+       ORDER BY created, rowid`,
+    ).all() as QueueRun[];
+  }
+
+  /** Story 27.5 (DW-29): a run whose latest move out of `paused` is `engine-resume` (`POST /runs/{id}/resume`) has
+   * its resumed engine probed by the pid the resume recorded (`engine_pid`, start time matched): sbx through
+   * `sbx exec … cat /proc/<pid>/stat` (an unreadable probe counts as alive — fail closed), host by the pid and its
+   * start time. False when the latest move is not an `engine-resume`, or no pid was recorded. Never throws. */
+  async resumedEngineAlive(run: QueueRun): Promise<boolean> {
+    return (await this.resumedEngineHold(run)) !== undefined;
+  }
+
+  /** `resumedEngineAlive` with its reason: why the run is held (undefined: not held). A resume whose engine pid was
+   * not recorded after the `engine-resume` move — no `engine-pid` event with `resumed: true` and a numeric `pid`
+   * after it (the resume still polling `engine.pid`, or `engine.pid` not rewritten) — is held: its engine cannot be
+   * probed, so it may still run. Only then is `engine_pid` probed. */
+  async resumedEngineHold(run: QueueRun): Promise<string | undefined> {
+    try {
+      const move = this.db.query("SELECT seq, kind FROM events WHERE run_id = ? AND kind IN ('close-out','engine-resume') ORDER BY seq DESC LIMIT 1")
+        .get(run.run_id) as { seq: number; kind: string } | null;
+      if (move?.kind !== "engine-resume") return undefined;
+      const recorded = this.events(run.run_id, move.seq).some((e) => e.kind === "engine-pid" && e.detail?.resumed === true && typeof e.detail?.pid === "number");
+      if (!recorded || run.engine_pid == null) {
+        return "the resume recorded no engine pid after its engine-resume (still polling engine.pid, or engine.pid was not rewritten): its engine may still run";
+      }
+      const why = "the resumed engine (engine-resume) still runs: the resume is in flight across a restart";
+      if (run.tier === "sbx" && run.sandbox) {
+        let p: ProbeResult;
+        try { p = await (this.probes.engineProbe ?? ((s: string, pid: number) => probeEngine(s, pid)))(run.sandbox, run.engine_pid); }
+        catch (e) { p = { unreadable: e instanceof Error ? e.message : String(e) }; }
+        if ("unreadable" in p) return `${why} (its probe failed: ${p.unreadable.slice(0, 200)})`;
+        return p.alive && sameStart(p.start, run.engine_start) ? why : undefined;
+      }
+      if (!pidRunning(run.engine_pid)) return undefined;
+      const live = processStartTime(run.engine_pid);
+      return !run.engine_start || live === null || live === run.engine_start || sameStart(live, run.engine_start) ? why : undefined;
+    } catch (e) { return `the resumed engine could not be checked: ${e instanceof Error ? e.message : String(e)}`; }
+  }
+
+  /** Story 27.5: the plan pull-back's lease for one phase of a run (`review`|`done`), taken in one IMMEDIATE
+   * transaction before `plansync.py status` is called (the end hygiene's `claimEnd` model): a `plan-lease {phase,
+   * owner}` event appended (a terminal row is never updated). Refused when the phase already has a `plan-status`
+   * event, or its latest lease is held by a live owner (this process included) — and, for `done`, while the run's
+   * latest `review` lease is held by a live owner (the review still in progress: a pass that recorded lets its lease
+   * go `settled`, `releasePlanPhase`), so `done` is never settled on a partial review. */
+  claimPlanPhase(runId: string, phase: string, self: Owner = selfOwner()): boolean {
+    return this.db.transaction(() => {
+      const run = this.get(runId);
+      if (!run) return false;
+      const evs = this.events(runId);
+      if (evs.some((e) => e.kind === "plan-status" && e.detail?.phase === phase)) return false;
+      const held = (p: string) => {
+        const lease = evs.findLast((e) => e.kind === "plan-lease" && e.detail?.phase === p)?.detail?.owner as Owner | null | undefined;
+        return !!lease && this.ownerLive(lease, self);
+      };
+      if (held(phase) || (phase === "done" && held("review"))) return false;
+      this.event(runId, "plan-lease", run.state, run.state, { phase, owner: ownerDetail(self) });
+      return true;
+    }).immediate();
+  }
+
+  /** Story 27.5: a plan lease let go of — an appended `plan-lease {phase, owner: null, released}`, only while the
+   * lease is still `self`'s. With nothing recorded (a transient failure: the next tick asks again, a bounded retry)
+   * or, `settled`, once the pass recorded (`settled: true`: the phase is no longer in progress, never a retry). */
+  releasePlanPhase(runId: string, phase: string, self: Owner = selfOwner(), settled = false): void {
+    this.db.transaction(() => {
+      const run = this.get(runId);
+      if (!run) return;
+      const lease = this.events(runId).findLast((e) => e.kind === "plan-lease" && e.detail?.phase === phase)?.detail?.owner as Owner | null | undefined;
+      if (lease?.nonce === self.nonce) {
+        this.event(runId, "plan-lease", run.state, run.state, { phase, owner: null, released: ownerDetail(self), ...(settled ? { settled: true } : {}) });
+      }
+    }).immediate();
+  }
+
+  // ---------------------------------------------------------- supervisor-scope events (Story 27.5)
+
+  /** A supervisor-scope event (no run): the certificate's renew request and its outcome. */
+  serviceEvent(kind: string, detail: Record<string, unknown> = {}, at: string = now()): void {
+    this.db.query("INSERT INTO service_events (at, kind, detail) VALUES (?, ?, ?)")
+      .run(at, kind, Object.keys(detail).length ? JSON.stringify(detail) : null);
+  }
+
+  /** The supervisor-scope events in seq order (with `kind`, only those). */
+  serviceEvents(kind?: string): { seq: number; at: string; kind: string; detail: Record<string, unknown> | null }[] {
+    const rows = (kind
+      ? this.db.query("SELECT * FROM service_events WHERE kind = ? ORDER BY seq").all(kind)
+      : this.db.query("SELECT * FROM service_events ORDER BY seq").all()) as { seq: number; at: string; kind: string; detail: string | null }[];
+    return rows.map((r) => ({ ...r, detail: r.detail ? JSON.parse(r.detail) : null }));
+  }
+
   /** Inside a transaction: the terminal transition, the lock released (or handed
    * to an engine), the ending event (`ended`, or `orphaned` from `recover`), and
    * a `stop` recorded in the same transaction. The one end path. */
@@ -1848,6 +2056,14 @@ export class Queue {
     };
 
     for (const c of candidates) {
+      // Story 27.5 (DW-29): a resume in flight across a restart (its latest move `engine-resume`, the `launched`
+      // written only when the resolve child exits) is never orphaned while its resumed engine runs: held as it is
+      // (`respawnHolds` re-holds an sbx engine); once that engine is gone the run is orphaned and closed out.
+      const resumeHold = c.state === "running" ? await this.resumedEngineHold(c) : undefined;
+      if (resumeHold) {
+        (report.held ??= []).push({ run_id: c.run_id, worker: { pid: c.engine_pid ?? 0, start: c.engine_start, outcome: "running", detail: resumeHold } });
+        continue;
+      }
       // Before anything resumes the run or releases its lock: its recorded worker (DW-3, DW-7).
       // sbx: held until the in-VM deadline (the host pid is only `sbx exec`).
       const settled = await this.recordedWorker(c, true);
@@ -2002,10 +2218,7 @@ export class Queue {
    * still run in the VM): each lock is freed once `recordedWorker` says its worker may no
    * longer run (sbx: the in-VM deadline passed), else the run is reported `held`. */
   private async releaseKeptLocks(report: RecoverReport, self: Owner): Promise<void> {
-    const kept = this.db.query(
-      `SELECT runs.* FROM locks JOIN runs ON runs.run_id = locks.run_id
-       WHERE locks.kind = 'run' AND runs.state IN ('complete','partial','blocked','cancelled') ORDER BY locks.acquired`,
-    ).all() as QueueRun[];
+    const kept = this.keptLockRuns();
     for (const k of kept) {
       if (k.worker_pid == null) {
         // Kept for its live driver (`end`'s `driverLive`): freed by that driver, or once it is dead.

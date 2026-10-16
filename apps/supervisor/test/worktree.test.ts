@@ -5,13 +5,13 @@ import { Database } from "bun:sqlite";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import { cancelRun, endAfterDriveFailure, mirror } from "../src/cli";
+import { cancelRun, closeOutOrphans, endAfterDriveFailure, mirror } from "../src/cli";
 import { Queue, selfOwner } from "../src/queue";
 import { runProcess, type RunResult } from "../src/server";
 import {
   baseBranch, closeOut, closeOutDetail, COPIED_RUNTIME, engineStatus, isDefaultBranch, openPrUrl, originRepo, prBody, prepareWorktree, runBranch, sweepEngines, worktreePath, WorktreeFailed, type WorktreeDeps,
 } from "../src/worktree";
-import { fakeGh, gitRepo, testGit } from "./fakes";
+import { fakeGh, fakeSbx, gitRepo, testGit } from "./fakes";
 
 const me = { pid: process.pid, host: hostname(), nonce: "worktree-test" };
 
@@ -1638,4 +1638,51 @@ describe("review pass 3: P1–P9", () => {
     expect(fx.queue.events(fx.run.run_id).findLast((e) => e.kind === "closed_out")).toMatchObject({ detail: { pr: URL, closeout: { result: "PR", worktree: "removed" } } });
     expect(existsSync(wt)).toBe(false);
   });
+});
+
+// ---------------------------------------------------------------- Story 27.5
+
+describe("Story 27.5: the orphan close-out (DW-25)", () => {
+  test("a worktree run `recover` orphaned is closed out once nothing around it is live: pushed, its PR on `closed_out`, no host verify leg, its pin released — once", async () => {
+    const fx = await fixture();
+    const sbx = fakeSbx();
+    fx.deps.env = { ...fx.deps.env, SBX_BIN: sbx.bin };
+    const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+    fx.queue.db.run("UPDATE runs SET tier = 'sbx', sandbox = 'sb' WHERE run_id = ?", [fx.run.run_id]);
+    fx.queue.note(fx.run.run_id, "pinned", { sandbox: "sb" });
+    fx.queue.markVerbStarted(fx.run.run_id, "wake", [], { target: "skill", definition: fx.defn });
+    fx.queue.setStudioRun(fx.run.run_id, "j-20261016T101010Z");
+    commitIn(wt, "a.txt", "the work a dead driver left");
+    // The driver dies: `recover` (another process) orphans the run — no engine live then.
+    fx.queue.db.run("UPDATE runs SET owner_nonce = 'dead-driver', owner_pid = 999999 WHERE run_id = ?", [fx.run.run_id]);
+    fx.queue.db.run("UPDATE locks SET owner_nonce = 'dead-driver', owner_pid = 999999");
+    fx.answers.engineLive = false;
+    const report = await fx.queue.recover({ end: async () => ({ ok: true, detail: "ended", state: "partial" }), find: async () => ({ ok: true, run_id: null }) }, me);
+    expect(report.ended.map((e) => e.run_id)).toEqual([fx.run.run_id]);
+    expect(fx.queue.orphanedCloseOuts().map((r) => r.run_id)).toEqual([fx.run.run_id]);
+
+    // An engine in its worktree may still work it: nothing yet.
+    fx.answers.engineLive = true;
+    expect(await closeOutOrphans(fx.queue, fx.deps)).toEqual([]);
+    expect(fx.queue.events(fx.run.run_id).some((e) => e.kind === "closing-out" || e.kind === "closed_out")).toBe(false);
+    expect(existsSync(wt)).toBe(true);
+
+    // Confirmed dead: closed out, the PR recorded, the worktree removed, the pin released; never the host verify leg.
+    fx.answers.engineLive = false;
+    expect(await closeOutOrphans(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    const evs = fx.queue.events(fx.run.run_id);
+    expect(evs.find((e) => e.kind === "closed_out")!.detail).toMatchObject({ orphaned: true, pr: "https://github.com/acme/widget/pull/42", closeout: { result: "PR", worktree: "removed" } });
+    expect(evs.some((e) => e.kind === "host-verify")).toBe(false);
+    expect(fx.studio.some((s) => /verify/.test(s.script))).toBe(false);
+    expect(evs.find((e) => e.kind === "pin-released")!.detail).toMatchObject({ sandbox: "sb", stop: { ok: true } });
+    expect(sbx.calls().map((c) => c.argv)).toContainEqual(["stop", "sb"]);
+    expect(existsSync(wt)).toBe(false);
+    expect(fx.get().state).toBe("partial");
+    expect(testGit(fx.repo.origin, "rev-parse", `refs/heads/supervisor/run-${fx.run.run_id}`)).toMatch(/^[0-9a-f]{40}$/);
+    // Once: never closed out again.
+    expect(await closeOutOrphans(fx.queue, fx.deps)).toEqual([]);
+    expect(fx.queue.orphanedCloseOuts()).toEqual([]);
+    expect(fx.gh.calls().filter((c) => c.argv[1] === "create")).toHaveLength(1);
+    expectNoForbiddenArgv(fx.argvs, fx.gh.calls());
+  }, 60_000);
 });

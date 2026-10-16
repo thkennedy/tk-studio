@@ -88,7 +88,7 @@ location: src/queue.ts Queue.pacing; src/tick.ts tickJob
 severity: low
 reason: An sbx run refused a resume ends `partial` and keeps its checkout lock until the in-VM deadline (`hold_lock`). `Queue.pacing()` does not count it as live, so the pacer may mint the next run, which then waits on the lock. Nothing runs twice; the cost is a queued run that waits. Deferral class (b): behaviour outside this story's criteria.
 affects: 22-3
-status: open
+status: closed — story 27.5, 2026-10-16: `Queue.pacing().live` also counts an ended run of the job that still holds its checkout's `run` lock (`Queue.keptLockRuns`, the query `releaseKeptLocks` used), so the tick never mints the next run while the kept lock stands. Evidence: test/queue.test.ts "pacing (DW-11): an ended run that keeps its `run` lock is live for its job …".
 
 ### DW-12: A driver can still claim a run between cancelRun's re-read and the Queue.end transaction, so a cancel can end a just-claimed run without keeping its lock for the live driver.
 origin: spec-deferred ce9b14f73290
@@ -96,7 +96,7 @@ source_spec: `22-1-the-api-answers-on-the-tailnet-only-the-api-answers-on-the-ta
 location: src/cli.ts cancelRun; src/queue.ts writeEnd
 severity: medium
 reason: Review pass 1 patch 2 narrowed the window but did not close it: the owner-liveness probe cannot run inside the end transaction (implementer report, consult ruling 2). The criterion it touches: cancel ends the run `cancelled` through Queue.end and the recorded-worker rule, never a bare lock release (deferral class a).
-status: open
+status: closed — story 27.5, 2026-10-16: the cancel ends through `Queue.endReread`, which re-reads the run inside the end transaction and compares the recorded owner with the one the cancel read (no liveness probe inside the transaction): a run claimed inside the window ends `cancelled` keeping its `run` lock for that driver (`claimed_during_cancel`, `driverLive`), freed by the driver's own end, else by `claim`/`recover` once it is dead. Evidence: test/api.test.ts "a claim inside the window: the run ends cancelled keeping its lock for the claiming driver, whose own end frees it".
 
 ### DW-13: A driver that records its studio run after cancelRun's re-read but before Queue.end leaves that studio run unended.
 origin: spec-deferred 966aa17fc77c
@@ -104,7 +104,7 @@ source_spec: `22-1-the-api-answers-on-the-tailnet-only-the-api-answers-on-the-ta
 location: src/cli.ts cancelRun / recordMinted
 severity: medium
 reason: Follow-up review pass: patch 1 made cancel end the studio run from a fresh re-read, and the driver's recordMinted end a studio run minted after the cancel. A setStudioRun that lands between that re-read and the Queue.end transaction still succeeds, so neither side ends it (implementer report, consult ruling 3). It is a sibling of the claim/end race above. The criterion it touches: cancel ends the studio run through jobrun cancel (deferral class a).
-status: open
+status: closed — story 27.5, 2026-10-16: `Queue.endReread` answers a studio run recorded after the cancel's last read (`late_studio_run_id`); the cancel ends it after the commit with `studioRunEnder` and records `studio-run-ended {studio_run_id, late: true, by: "cancel"}`. A cancelled run whose studio run no record shows ended is ended by the next `recover` (`endCancelledLeftovers`, `by: "recover"`), once. Evidence: test/api.test.ts "a studio run recorded after the cancel's last read is found by the end's re-read …" and "the next recovery ends a cancelled run's studio run the cancel left open …".
 
 ### DW-14: Follow-up review still recommended for 22-1-the-api-answers-on-the-tailnet-only after the damping cap was spent
 origin: review-budget-followup
@@ -120,7 +120,7 @@ source_spec: `22-2-a-read-only-status-page-a-read-only-status-page.md`
 location: src/cli.ts:1375-1528 finishRun
 severity: medium
 reason: `finishRun` keeps the iteration sum in a local `cost` (src/cli.ts:1375, :1416) and writes it only at `finish` (:1518, :1528). A restart resumes the run in a new process (`recoverWithResume`, src/cli.ts:403) whose sum starts empty, and no queue event records per-iteration cost. The 21-6 dispatch note names "cost summed across resumed iterations" (deferral class a). Fixing it needs src/cli.ts or src/queue.ts, outside this story's Files.
-status: open
+status: closed — story 27.5, 2026-10-16: each worker iteration's cost is recorded on its `accounted` event (`cost_usd`; a job with no turn/token guard gets a cost-only `accounted`), and `finishRun` seeds its sum from the run's recorded costs (`RunRecorder.costSoFar`, never counting `launched` events), so a resumed run's `finish --total-cost-usd` is the whole sum. The paused-run pass records the archived engine's metered cost (`accounted {cost_usd, engine_run_id, source: "engine"}`) before `bmad-loop archive`; `launchedCloseOutInput` sums those with the latest engine's. Evidence: test/resume.test.ts "cost (DW-15): …" (two tests), test/closeout.test.ts "the close-out records the archived engine's metered cost before the archive …".
 
 ### DW-16: Follow-up review still recommended for 22-2-a-read-only-status-page after the damping cap was spent
 origin: review-budget-followup
@@ -153,7 +153,7 @@ location: src/cli.ts queueRecorder.worker; src/queue.ts processStartTime / runPo
 severity: medium
 reason: `queueRecorder.worker` reads the worker's start time before it writes the worker record. On Linux that is one `/proc` read. On win32 it is a synchronous `powershell` call of about 0.5 s (measured 0.42 s on the agent PC), and the supervisor is blocked for that long. A supervisor killed inside that window leaves a run with no `worker_pid`. The end-to-end mid-invoke kill test met this and now waits for the record. The exposure is smaller than on POSIX: a win32 worker is not detached, so it ends with its supervisor and cannot go on editing the checkout. What is lost is the record, so the restart cannot say what it did about the worker. Suggested fix: write the pid first and the start time after it, or read the creation time natively (`GetProcessTimes` through `bun:ffi`) instead of through PowerShell. The same read runs once per `selfOwner()` and per owner probe.
 affects: none
-status: open
+status: closed (win32 half for the attended session) — story 27.5, 2026-10-16: `setWorker` commits the pid and its `worker` event first and writes the start time after it (`setWorkerStart`); `queueRecorder.worker` reads the start only after the pid record. On win32 `processStartTime` reads the creation time natively (`src/winproc.ts`: `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` + `GetProcessTimes` + `CloseHandle` through `bun:ffi`), formatted as PowerShell's `ToString('o')` UTC (7 fractional digits), the PowerShell read only when the FFI cannot load. Evidence: test/queue.test.ts "the worker record (DW-19) …", "win32 start time (DW-19): the FILETIME formatted exactly as …", test/resume.test.ts "queueRecorder (DW-19): the pid … lands before the start time …". `unverifiable-here` (operator-decisions §5): the real `GetProcessTimes` read under 50 ms and equal to the PowerShell read (test/queue.test.ts, skipped off win32), and the win32 `bun test` run.
 
 ### DW-20: The status page cannot be opened from a phone's browser
 origin: attended review 2026-09-29 (writing runbook section 4 from the code as built)
@@ -170,7 +170,7 @@ source_spec: `22-5-sign-in-from-the-phone-sign-in-from-the-phone.md`
 location: start.ps1 (tailscale cert block); src/api.ts serve
 severity: medium
 reason: Review pass 1 (blind hunter): `tailscale cert` runs once in start.ps1's main script before the keeper; Bun.serve reads cert and key once at bind. No periodic renewal or serve restart exists. AC4 requires https with the machine's Tailscale certificate (deferral class a). The README now tells the operator to restart start.ps1 on long uptimes.
-status: open
+status: closed (the dry run for the attended session) — story 27.5, 2026-10-16: `serve` checks the certificate's `notAfter` at start and hourly (`src/cert.ts`); within 14 days, with no `running`/`external` run and no request in 24 h, it records `cert-renew-requested` in the new `service_events` table and exits 75; the keeper runs the shared bounded `Invoke-TailscaleCert` and restarts `serve` at once, without the back-off; the next start records `cert-renewed` or `cert-renew-failed`. Evidence: test/queue.test.ts "Story 27.5: the certificate renews itself (DW-21)" (three tests), test/hygiene.test.ts "the keeper renews on serve's exit 75 …" and "tailscale cert is one shared function …". `unverifiable-here` (operator-decisions §5): the `tailscale cert` renewal and the `serve` restart, as a dry run on the agent PC.
 
 ### DW-22: The host tier's `auto` permission mode denies the studio's own `uv run` scripts
 origin: live DW-10 check, 2026-10-09
@@ -188,7 +188,7 @@ location: src/cli.ts (the end path after a skill worker exits: `finish` on an al
 severity: low
 reason: The `research-ecosystem` skill ended its own studio run `complete`; the supervisor's `finish` was then refused ("terminal states are immutable"), and that refusal text became the queue run's `reason` although `studio_outcome.state` is `complete` and the run is counted complete. The README says a refused `finish` reports the run's actual state, which it does; the `reason` field is noise on the page and in the notification.
 affects: none
-status: open
+status: closed — story 27.5, 2026-10-16: on a refused `finish` the queue run keeps the worker's own status-block reason; the refusal and the actual state ride `finish_refused` and a `finish-refused {error, actual_state}` event (`mirror`), and the run ends in the actual state as before. Evidence: test/command-line.test.ts "finish refused after the run exists → exit 1 keeping the run id; the reason stays the worker's own …".
 
 ### DW-24: Follow-up review still recommended for 27-1-every-run-gets-its-own-worktree-and-ends-in-a-pr after the damping cap was spent
 origin: review-budget-followup
@@ -204,7 +204,7 @@ source_spec: `27-2-the-supervisor-holds-the-engine-and-nothing-else-starts-one-s
 location: src/queue.ts recover (orphan end); src/sandbox.ts releasePin
 severity: medium
 reason: No `releasePin` call is on the restart rule's orphan end (src/queue.ts ORPHANED_REASON end); orphaned runs are not closed out (27-1 consult 1 known gap, owned by 27-5). AC1 says the pin is released when the run ends. Class (a): a defect in behaviour AC1 names. Releasing safely needs the orphan close-out 27-5 owns, because the engine may still be live.
-status: open
+status: closed — story 27.5, 2026-10-16: the orphan close-out pass (`closeOutOrphans`, after the paused-run pass in `run`, `recover`, `drain`) takes each worktree run ended `orphaned` with `takeEndedCloseOut` once `closeOutBlocker` is null and a resumed engine probes dead, closes it out with no host verify leg, records `closed_out {…, orphaned: true}`, releases its engine lock once the worktree is removed, then calls `releasePin`. Evidence: test/worktree.test.ts "a worktree run `recover` orphaned is closed out once nothing around it is live …"; test/command-line.test.ts end-to-end orphan cases now end with `closing-out`, `closed_out`.
 
 ### DW-26: Map `ExternalRunRefused` to `409 ExternalRun` in `postCancel`; today an external-run cancel answers 500 InternalError.
 origin: spec-deferred d6bd7ddbf643
@@ -236,7 +236,7 @@ source_spec: `27-3-a-paused-run-whose-story-landed-is-closed-out-by-the-service-
 location: src/closeout.ts (resumePaused, handBack); src/queue.ts (recover, LAUNCHED_SQL)
 severity: medium
 reason: `resumePaused` moves the run to `running` owned by the serve process, and the `launched` event that hands it to the engine-end sweep is written only when the `bmad-loop resolve` child exits. Until then `LAUNCHED_SQL` reads the run as not launched, so `recover` treats it as orphaned once the owner is dead, and `respawnHolds` re-holds only launched or paused runs. The fix moves where the resume hands the run over, which is the consult-1-accepted design (score 2, affects 27-4/27-5), so it is a planner decision, not a patch. Deferral class (a): AC3's resume path.
-status: open
+status: closed — story 27.5, 2026-10-16: `recover` never orphans a run whose latest move is `engine-resume` while its resumed engine (the recorded `engine_pid`, start time matched; sbx through `sbx exec … cat /proc/<pid>/stat`, an unreadable probe counted alive) still runs (`Queue.resumedEngineAlive`): the run is `held`, `respawnHolds` re-holds it; once the engine is gone the run is orphaned and the orphan close-out closes it out. Evidence: test/closeout.test.ts "DW-29: a resume in flight across a restart is held while its resumed engine runs …".
 
 ### DW-30: Follow-up review still recommended for 27-3-a-paused-run-whose-story-landed-is-closed-out-by-the-service after the damping cap was spent
 origin: review-budget-followup
@@ -265,6 +265,14 @@ status: open
 ### DW-33: Follow-up review still recommended for 27-4-a-host-tier-verify-leg-runs-before-any-pr-opens after the damping cap was spent
 origin: review-budget-followup
 source_spec: `27-4-a-host-tier-verify-leg-runs-before-any-pr-opens-spec.md`
+location: n/a
+severity: low
+reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261016-014644-7fea; this entry preserves the lingering recommendation for a deliberate later review.
+status: open
+
+### DW-34: Follow-up review still recommended for 27-5-the-plan-follows-the-run-and-the-deferred-work-is-paid after the damping cap was spent
+origin: review-budget-followup
+source_spec: `27-5-the-plan-follows-the-run-and-the-deferred-work-is-paid-spec.md`
 location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261016-014644-7fea; this entry preserves the lingering recommendation for a deliberate later review.

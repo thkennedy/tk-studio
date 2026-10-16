@@ -654,7 +654,7 @@ describe("start.ps1 (AC1, AC2)", () => {
 describe("start.ps1 sign-in (Story 22.5 AC4)", () => {
   const text = readFileSync(resolve(import.meta.dir, "..", "start.ps1"), "utf-8");
   const certCall = "foreach ($arg in @('cert', '--cert-file', $env:TK_SUPERVISOR_TLS_CERT, '--key-file', $env:TK_SUPERVISOR_TLS_KEY, $env:TK_SUPERVISOR_TLS_NAME))";
-  const certGuard = "if (-not $ServeOnly -and -not ($TlsNames | Where-Object { -not $Present[$_] })) {";
+  const certGuard = "if (-not $ServeOnly -and $TlsPresent) {";
 
   test("TK_SUPERVISOR_SESSION_SECRET is required beside BIND and TOKEN: missing, the script ends before anything starts", () => {
     expect(text).toContain("$Missing = @('TK_SUPERVISOR_BIND', 'TK_SUPERVISOR_TOKEN', 'TK_SUPERVISOR_SESSION_SECRET') | Where-Object { -not $Present[$_] }");
@@ -674,21 +674,36 @@ describe("start.ps1 sign-in (Story 22.5 AC4)", () => {
     ]) expect(names).toContain(`'${n}'`);
   });
 
-  test("tailscale cert runs once, in the main script only (never under -ServeOnly), with all three TLS variables, before the keeper", () => {
+  test("tailscale cert is one shared function: the main script runs it (never under -ServeOnly) with all three TLS variables, before the keeper", () => {
+    // Story 27.5 (DW-21): one `tailscale cert` call, in a function the main script and the keeper share.
     expect(text.split("'cert', '--cert-file'")).toHaveLength(2);
     expect(text).toContain("$TlsNames = @('TK_SUPERVISOR_TLS_CERT', 'TK_SUPERVISOR_TLS_KEY', 'TK_SUPERVISOR_TLS_NAME')");
-    const guard = text.indexOf(certGuard);
+    const fn = text.indexOf("function Invoke-TailscaleCert {");
     const call = text.indexOf(certCall);
-    expect(guard).toBeGreaterThan(text.indexOf('throw "[supervisor] cannot start'));
-    expect(call).toBeGreaterThan(guard);
-    // Before the keeper branch (whose serve loop never ends) and before the keeper is started.
-    expect(call).toBeLessThan(text.indexOf("if ($ServeOnly) {\n"));
-    expect(call).toBeLessThan(text.indexOf("$Keeper = Start-SupervisorKeeper"));
+    const guard = text.indexOf(certGuard);
+    expect(fn).toBeGreaterThan(text.indexOf('throw "[supervisor] cannot start'));
+    expect(call).toBeGreaterThan(fn);
+    expect(guard).toBeGreaterThan(call);
+    expect(text.slice(guard, guard + 80)).toContain("Invoke-TailscaleCert");
+    // Defined before the keeper branch (whose serve loop never ends), run before the keeper is started.
+    expect(fn).toBeLessThan(text.indexOf("if ($ServeOnly) {\n"));
+    expect(guard).toBeLessThan(text.indexOf("if ($ServeOnly) {\n"));
+    expect(guard).toBeLessThan(text.indexOf("$Keeper = Start-SupervisorKeeper"));
+  });
+
+  test("the keeper renews on serve's exit 75 and restarts serve at once, without the back-off (DW-21)", () => {
+    const keeper = text.slice(text.indexOf("if ($ServeOnly) {\n"), text.indexOf("$KeeperBackoff = New-Backoff"));
+    const renew = keeper.indexOf("if ($code -eq 75) {");
+    expect(renew).toBeGreaterThan(keeper.indexOf("& $Bun src/cli.ts serve"));
+    const branch = keeper.slice(renew, keeper.indexOf("}", keeper.indexOf("continue", renew)) + 1);
+    expect(branch).toContain("if ($TlsPresent) { Invoke-TailscaleCert }");
+    expect(branch).toContain("continue");
+    expect(renew).toBeLessThan(keeper.indexOf("$delay = Register-Failure -Backoff $ServeBackoff"));
   });
 
   test("tailscale cert is bounded at 120 s; a timeout kills only that process, and every failure is a warning", () => {
     expect(text).toContain("$CertSeconds = 120");
-    const block = text.slice(text.indexOf(certGuard), text.indexOf("function New-Backoff"));
+    const block = text.slice(text.indexOf("function Invoke-TailscaleCert {"), text.indexOf(certGuard));
     expect(block).toContain("if (-not $cert.WaitForExit($CertSeconds * 1000)) {");
     expect(block).toContain("try { $cert.Kill() } catch { }");
     expect(block).not.toMatch(/\$cert\.WaitForExit\(\)/);
