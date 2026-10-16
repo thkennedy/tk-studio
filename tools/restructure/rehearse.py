@@ -614,10 +614,47 @@ def step_merge(s: Step, r: Runner, args, svc: Path, tkc: Path) -> Step:
         s.checks.append(check)
         if check.status == "pass":
             r.size_check = measure_size(r, tkc)
+            _nest_fixup(s, r, tkc)
     finally:
         c, _ = r.gitcheck("remove remote svc", ["remote", "remove", "svc"], tkc)
         s.checks.append(c)
     return s
+
+
+NEST_FIXUP_MESSAGE = "restructure: render apps/supervisor's studio-pipeline copy (ADR section 5 step 3 fix-up)"
+
+
+def _nest_fixup(s: Step, r: Runner, tkc: Path) -> None:
+    """ADR section 5 step 3, "fix-ups in the same branch": apps/supervisor's studio-pipeline
+    copy rendered from the root copy by tools/restructure/nest_pipeline.py (Story 28.2) and
+    committed on the restructure branch, so Step 4 checks the tree the real merge produces
+    (test_nest_pipeline pins the real nested copy against the render once apps/supervisor
+    exists; found by the 2026-10-16 rehearsal, whose verify_host failed on the supervisor's
+    old copy). The real cut-over replays the same three commands. A tree without the
+    renderer records that, never a pass."""
+    name = "nest the studio pipeline (fix-up)"
+    renderer = tkc / "tools" / "restructure" / "nest_pipeline.py"
+    target = f"{PREFIX}/.bmad-loop/plugins/studio-pipeline"
+    if not renderer.is_file():
+        c = computed(name, time.monotonic(), True,
+                     "no tools/restructure/nest_pipeline.py in this tree: fix-up skipped")
+        c.status = "info"
+        s.checks.append(c)
+        return
+    c, _ = r.check(name, ["uv", "run", "python", "tools/restructure/nest_pipeline.py",
+                          "--out", target], tkc, label="nest fix-up failed")
+    s.checks.append(c)
+    if c.status == "fail":
+        return
+    c, _ = r.gitcheck("stage the fix-up", ["add", "-A", "--", target], tkc,
+                      label="nest fix-up not staged")
+    s.checks.append(c)
+    if c.status == "fail":
+        return
+    c, _ = r.gitcheck("commit the fix-up", ["-c", "commit.gpgsign=false", "commit", "-q", "-m",
+                                            NEST_FIXUP_MESSAGE], tkc,
+                      label="nest fix-up not committed")
+    s.checks.append(c)
 
 
 def measure_size(r: Runner, tkc: Path) -> Check:

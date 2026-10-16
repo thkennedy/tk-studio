@@ -90,6 +90,15 @@ print("stub verify_host %s")
 time.sleep(%d)
 sys.exit(%d)
 """
+# the ADR section 5 step 3 fix-up renderer (tools/restructure/nest_pipeline.py): the stub
+# writes the five rendered files under --out, as the real one does
+NEST_STUB = """import argparse, pathlib
+p = argparse.ArgumentParser(); p.add_argument("--out", required=True); p.add_argument("--project-name", default="supervisor")
+a = p.parse_args(); out = pathlib.Path(a.out); out.mkdir(parents=True, exist_ok=True)
+for name in ("task-planning.md", "consult.md", "gate.md", "reconcile.md", "transcribe.py"):
+    (out / name).write_text("rendered for " + a.project_name + "\\n", encoding="utf-8")
+print("rendered 5 files")
+"""
 SHIM_TOOLS = ("git", "uv", "ssh-keygen")
 
 
@@ -252,7 +261,8 @@ class RehearsalCase(unittest.TestCase):
         git(repo, "init", "-q", "-b", "main")
         commit(repo, {"README.md": "# tk-studio\n"}, "tk: first")
         files = {"tools/verify_host.py": VERIFY_STUB % ("failing" if verify_rc else "ok", sleep, verify_rc),
-                 "plugins/tk-studio/skills/tk-studio-activate/scripts/drift_check.py": DRIFT_STUB % drift_result}
+                 "plugins/tk-studio/skills/tk-studio-activate/scripts/drift_check.py": DRIFT_STUB % drift_result,
+                 "tools/restructure/nest_pipeline.py": NEST_STUB}
         if collide:
             files["apps/supervisor/package.json"] = '{"name": "not-the-supervisor"}\n'
         commit(repo, files, "tk: tools")
@@ -307,6 +317,15 @@ class RehearsalCase(unittest.TestCase):
         self.assertIn("apps/supervisor/package.json", paths)
         self.assertIn("apps/supervisor/.claude/settings.json", paths)
         self.assertNotIn("package.json", paths)
+        # the ADR section 5 step 3 fix-up: the nested studio-pipeline copy rendered and committed
+        # on the restructure branch, so Step 4's checks see the tree the real merge produces
+        self.assertIn("### nest the studio pipeline (fix-up) — pass", text)
+        self.assertIn("### commit the fix-up — pass", text)
+        for name in ("task-planning.md", "consult.md", "gate.md", "reconcile.md", "transcribe.py"):
+            self.assertIn(f"apps/supervisor/.bmad-loop/plugins/studio-pipeline/{name}", paths)
+        self.assertIn("restructure: render apps/supervisor's studio-pipeline copy",
+                      git(clone, "log", "-1", "--format=%s"))
+        self.assertEqual(git(clone, "status", "--porcelain").strip(), "")
         svc_paths = git(self.scratch / "svc-rewrite", "ls-tree", "-r", "--name-only", "HEAD").split()
         self.assertTrue(svc_paths and all(p.startswith("apps/supervisor/") for p in svc_paths))
         self.assertEqual(git(clone, "remote").strip(), "")
