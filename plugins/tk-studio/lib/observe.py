@@ -14,6 +14,9 @@ CLI:
   uv run observe.py record --source retrospective|repeated-manual-work|research-job|other
                            --description TEXT [--evidence TEXT] [--project KEY]
 
+--project defaults to the nearest studio project's id (driver contract
+0.1.22) when the working directory sits inside one; otherwise it is omitted.
+
 Exit codes: 0 ok; 2 validation error. Stdlib-only (NFR9); never prompts (AD-11).
 """
 from __future__ import annotations
@@ -21,7 +24,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
+import config as configlib
 import ledger
 
 SOURCES = ("retrospective", "repeated-manual-work", "research-job", "other")
@@ -55,8 +60,11 @@ def main(argv: list[str] | None = None) -> int:
                      help="the observed toil/signal, concretely")
     cmd.add_argument("--evidence",
                      help="pointer to the artifact/session where it was observed")
-    cmd.add_argument("--project", help="project key (envelope field)")
+    cmd.add_argument("--project", help="project key (envelope field; default: "
+                                       "the nearest studio project's id)")
     args = parser.parse_args(argv)
+    if args.project is None and configlib.in_project(Path.cwd()):
+        args.project = configlib.project_info(Path.cwd())["project_id"]
 
     try:
         envelope = record_observation(args.source, args.description,

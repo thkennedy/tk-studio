@@ -17,7 +17,7 @@ checkout until it finishes, pauses, or is stopped.
 ## Payload
 
 - `verb` — `start` (default) | `status` | `stop`
-- `directory` — the project root (the main checkout, never an engine worktree)
+- `directory` — the project root (the nested root for a supervisor epic, never an engine worktree); `lib/launch.py` walks `--directory` up to the nearest folder holding `.tk-studio/config.yaml` (driver contract 0.1.22), so a nested project launches against its own root and store
 - `epic` — epic number (`start`; required unless `spec_folder` is given)
 - `spec_folder?` — project-relative epic spec folder; default `_bmad-output/specs/spec-epic-<N>`
 - `story?` — the first story to bootstrap as `<epic>-<story>` (default: the epic's first story)
@@ -31,6 +31,7 @@ checkout until it finishes, pauses, or is stopped.
 ### `start`
 
 0. **Resolve the inputs before anything runs** (headless: a gap here ends `blocked`, never a guess):
+   - `<root>` = the `project_root` printed by `uv run "${CLAUDE_PLUGIN_ROOT}/lib/config.py" root --directory <directory>` (the payload's `directory` walked up to the nearest folder holding `.tk-studio/config.yaml`, driver contract 0.1.22). Every later `<root>` — in every step here and in `status` / `stop`, which resolve it the same way first — is that resolved root, never the raw `directory`.
    - `<spec_folder>` = the payload's `spec_folder`, else `_bmad-output/specs/spec-epic-<epic>` (the core's `--epic` flag applies the same default); with neither `epic` nor `spec_folder`, end `blocked`: `spec folder unresolvable: neither epic nor spec_folder given`.
    - `<story>` = the payload's `story`, else the first entry under `## Stories` in `<root>/_bmad-output/implementation-artifacts/epic-<epic>-context.md` (`Story N.M: …` → `N-M`), else the first `### Story N.M` heading of the epic's section in `<root>/_bmad-output/planning-artifacts/epics.md`; with none of these, end `blocked`: `first story unresolvable for epic <epic>`.
 

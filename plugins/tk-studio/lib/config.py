@@ -22,6 +22,15 @@ everywhere — they live in the OS credential store or environment, only).
 CLI:
   uv run config.py resolve --key planning.backend [--directory DIR] [--set k=v ...]
   uv run config.py standup --directory DIR [--vcs git|perforce] [--project-id ID]
+  uv run config.py root [--directory DIR]
+
+Project root (AD-21, driver contract 0.1.22): the nearest ancestor-or-self
+holding .tk-studio/config.yaml — a nested studio project (apps/supervisor)
+wins over the outer one. A folder with no config anywhere above resolves to
+itself. `resolve --directory` and `root` walk up; `standup` takes its
+--directory literally (a creation verb never walks up). The studio root is
+$TK_STUDIO_ROOT, else the nearest ancestor holding plugins/tk-studio/, else
+none — never the plugin's own folder.
 
 Exit codes: 0 ok; 2 key not found / classification refusal; 1 unexpected failure.
 Stdlib-only (NFR9); never prompts (AD-11).
@@ -30,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -144,6 +154,92 @@ def _parse_runtime_sets(pairs: list[str]) -> dict:
     return runtime
 
 
+# -------------------------------------------------------------- project root
+
+def _holds_config(directory: Path) -> bool:
+    """True when `directory` is a studio project root: it holds
+    .tk-studio/config.yaml and that .tk-studio/ is not the per-user store
+    ($TK_STUDIO_HOME or ~/.tk-studio), whose config.yaml would otherwise make
+    $HOME a project root."""
+    marker = directory / ".tk-studio"
+    if not (marker / TRACKED_NAME).is_file():
+        return False
+    try:
+        return marker.resolve() != store.store_root().resolve()
+    except OSError:
+        return True
+
+
+def find_project_root(start: Path) -> Path:
+    """The nearest ancestor-or-self of `start` holding .tk-studio/config.yaml;
+    `start` itself (resolved) when none does — today's behaviour for a folder
+    not yet onboarded. A `start` that is not an existing directory is taken
+    literally (resolved, no walk-up), so a missing or mistyped nested path
+    never lands in an enclosing project."""
+    start = Path(start).resolve()
+    if not start.is_dir():
+        return start
+    for candidate in (start, *start.parents):
+        if _holds_config(candidate):
+            return candidate
+    return start
+
+
+def studio_root(project_root: Path) -> Path | None:
+    """The outer repository root, the plugin's home: $TK_STUDIO_ROOT when set;
+    else the nearest ancestor-or-self of the project root holding
+    plugins/tk-studio/; else None. Never PLUGIN_ROOT (a skills-dir install is
+    not a checkout)."""
+    env = os.environ.get("TK_STUDIO_ROOT")
+    if env:
+        return Path(env).resolve()
+    root = Path(project_root).resolve()
+    for candidate in (root, *root.parents):
+        if (candidate / "plugins" / "tk-studio").is_dir():
+            return candidate
+    return None
+
+
+def tracked_project_id(project_root: Path) -> str | None:
+    """The explicit project_id in the root's tracked config, or None."""
+    tracked = Path(project_root) / ".tk-studio" / TRACKED_NAME
+    if not tracked.is_file():
+        return None
+    try:
+        pid = miniyaml.load(tracked).get("project_id")
+    except (miniyaml.MiniYamlError, OSError, UnicodeDecodeError):
+        # unreadable or not UTF-8: no explicit id, so callers (drift_check's
+        # project_info) still end with their JSON block (AD-11)
+        return None
+    return str(pid) if pid else None
+
+
+def project_key(project_root: Path) -> str:
+    """The project's one identity (AD-20): explicit project_id from tracked
+    config, else the root basename — same rule as the registry."""
+    root = Path(project_root).resolve()
+    pid = tracked_project_id(root)
+    return store.safe_name(pid if pid else root.name)
+
+
+def in_project(start: Path) -> bool:
+    """True when `start` sits inside (or is) an onboarded studio project."""
+    return _holds_config(find_project_root(start))
+
+
+def project_info(start: Path) -> dict:
+    """{project_root, studio_root, nested, project_id} for `start`. `nested`
+    is true when a strict ancestor of the project root also holds a
+    .tk-studio/config.yaml."""
+    root = find_project_root(start)
+    nested = _holds_config(root) and any(_holds_config(p) for p in root.parents)
+    studio = studio_root(root)
+    return {"project_root": str(root),
+            "studio_root": str(studio) if studio is not None else None,
+            "nested": nested,
+            "project_id": project_key(root)}
+
+
 # ------------------------------------------------------------------ standup
 
 _TRACKED_TEMPLATE = """\
@@ -248,7 +344,7 @@ def main(argv: list[str] | None = None) -> int:
 
     res = sub.add_parser("resolve")
     res.add_argument("--key", required=True, help="dotted path, e.g. planning.backend")
-    res.add_argument("--directory", help="project root (omit for no project scopes)")
+    res.add_argument("--directory", help="start folder; walks up to the nearest project root (omit for no project scopes)")
     res.add_argument("--set", dest="sets", action="append", default=[],
                      metavar="KEY=VALUE", help="runtime override (repeatable)")
 
@@ -257,11 +353,19 @@ def main(argv: list[str] | None = None) -> int:
     stand.add_argument("--vcs", choices=["git", "perforce"], default="git")
     stand.add_argument("--project-id", help="explicit stable project identity (AD-20)")
 
+    rootp = sub.add_parser("root")
+    rootp.add_argument("--directory", default=".",
+                       help="start folder; walks up to the nearest project root")
+
     args = parser.parse_args(argv)
     try:
-        if args.command == "resolve":
+        if args.command == "root":
+            print(json.dumps({"ok": True, **project_info(Path(args.directory))},
+                             ensure_ascii=False, indent=2))
+        elif args.command == "resolve":
             runtime = _parse_runtime_sets(args.sets)
-            root = Path(args.directory) if args.directory else None
+            root = (find_project_root(Path(args.directory))
+                    if args.directory else None)
             value, scope = resolve(args.key, project_root=root, runtime=runtime)
             print(json.dumps({"ok": True, "key": args.key, "value": value,
                               "scope": scope}, ensure_ascii=False))

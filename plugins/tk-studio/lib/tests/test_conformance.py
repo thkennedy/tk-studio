@@ -868,6 +868,29 @@ class ConformanceRealPluginTestCase(unittest.TestCase):
                              "auth-preflight"):
                 self.assertIn(required, names, f"{surface} missing {required}")
 
+    def test_shipped_nested_root_drive_reports_the_nested_root(self):
+        # Story 28.2 (driver contract 0.1.22): the activate surface is driven
+        # from inside a nested studio project; the runner judges `json`, and
+        # this pins the drive's declared marker — the nearest root wins
+        manifest = runner.load_manifest()
+        drive = next(d for d in manifest["surfaces"]["tk-studio-activate"]["drives"]
+                     if d["assertion"] == "nested-root")
+        self.assertEqual(drive["marker"], '"nested": true')
+        fixture = PLUGIN_ROOT / "contracts" / "conformance" / "fixtures" / "nested-root"
+        self.assertTrue((fixture / ".tk-studio" / "config.yaml").is_file())
+        self.assertTrue((fixture / "apps" / "inner" / ".tk-studio" / "config.yaml").is_file())
+        proc = subprocess.run(
+            [sys.executable, str(PLUGIN_ROOT / drive["argv"][0]), *drive["argv"][1:]],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=120, cwd=str(PLUGIN_ROOT),
+            env={**os.environ, "TK_STUDIO_HOME": os.environ["TK_STUDIO_HOME"]})
+        self.assertIn(drive["marker"], proc.stdout)
+        result = json.loads(proc.stdout)
+        self.assertTrue(result["nested"])
+        self.assertEqual(result["project_id"], "inner")
+        self.assertEqual(Path(result["project_root"]),
+                         (fixture / "apps" / "inner").resolve())
+
     def test_default_run_never_reports_harness_loadable_as_passed(self):
         report = runner.run_suite(emit=False)
         self.assertEqual(report["harness_loadable"]["state"],

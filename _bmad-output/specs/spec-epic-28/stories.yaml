@@ -86,7 +86,11 @@
     the spec folder; the engine resolves it by the glob
     `28-3-the-merged-tree-builds-releases-and-launches-from-one-root-*.md`, and a file
     named `28-3-the-merged-tree-builds-releases-and-launches-from-one-root.md` is read
-    as pending (loop deficiency 1, story 21-6).
+    as pending (loop deficiency 1, story 21-6). Precondition (planner, 2026-10-16): this
+    story runs on the merged tree only; if `apps/supervisor/` is absent at the run's
+    base, halt blocked "28-3 needs the merged tree" and write nothing. The rosters'
+    supervisor `source` drops only through the operator's release cut (plans/28-3.md
+    "Settled shape"); never hand-edit a roster or push a tag.
 
 - id: "28-4-the-cut-over-on-the-box-is-checked-and-recorded"
   title: "The Cut-Over on the Box Is Checked and Recorded"

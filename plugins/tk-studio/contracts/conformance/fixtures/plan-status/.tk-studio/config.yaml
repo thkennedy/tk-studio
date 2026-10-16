@@ -1,0 +1,3 @@
+# conformance fixture: its own project root, so the nearest-root rule
+# (driver contract 0.1.22) stops here instead of climbing to the checkout.
+vcs: git

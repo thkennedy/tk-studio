@@ -35,6 +35,10 @@ Per-plane status: ok | drift | missing | error. Overall:
 --guided additionally emits one onboarding-funnel event per plane with timings
 (the instrumented onboarding funnel, AD-13). This script mutates nothing, ever.
 
+Project root: --directory (default ".") walks up to the nearest ancestor
+holding .tk-studio/config.yaml (driver contract 0.1.22); the JSON carries
+project_root, studio_root (null when unresolved), nested and project_id.
+
 Usage:
   uv run drift_check.py [--directory DIR] [--guided] [--lock PATH] [--marketplace PATH]
                         [--claude-home DIR] [--channel {stable,latest}]
@@ -55,6 +59,7 @@ sys.path.insert(0, str(PLUGIN_ROOT / "lib"))
 
 import basepatch  # noqa: E402
 import bmadlock  # noqa: E402
+import config as configlib  # noqa: E402
 import ledger  # noqa: E402
 import registry  # noqa: E402
 import store  # noqa: E402
@@ -443,7 +448,10 @@ def main(argv: list[str] | None = None) -> int:
                              "stable, the installer's default)")
     args = parser.parse_args(argv)
 
-    directory = Path(args.directory).resolve()
+    # the nearest project root wins (driver contract 0.1.22): from inside a
+    # nested studio project (apps/supervisor) every plane reads the nested root
+    info = configlib.project_info(Path(args.directory))
+    directory = Path(info["project_root"])
     lock_path = Path(args.lock) if args.lock else PLUGIN_ROOT / "bmad.lock"
     marketplace_path = Path(args.marketplace) if args.marketplace else None
     claude_home = Path(args.claude_home) if args.claude_home else None
@@ -493,6 +501,11 @@ def main(argv: list[str] | None = None) -> int:
         "planes": planes,
         "fixes": [p["fix"] for p in planes if p.get("fix")],
         "mutated": False,
+        # optional roots entry (driver contract 0.1.22, additive)
+        "project_root": info["project_root"],
+        "studio_root": info["studio_root"],
+        "nested": info["nested"],
+        "project_id": info["project_id"],
     }, ensure_ascii=False, indent=2))
     return exit_code
 

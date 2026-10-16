@@ -851,17 +851,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="tk-studio planning adapter")
     sub = parser.add_subparsers(dest="command", required=True)
     norm = sub.add_parser("normalize")
-    norm.add_argument("--directory", required=True, help="project root")
+    norm.add_argument("--directory", required=True, help="project root (walks up to the nearest)")
     norm.add_argument("--dry-run", action="store_true")
     snc = sub.add_parser("sync")
-    snc.add_argument("--directory", required=True, help="project root")
+    snc.add_argument("--directory", required=True, help="project root (walks up to the nearest)")
     snc.add_argument("--dry-run", action="store_true")
     snc.add_argument("--backend", choices=list(BACKENDS),
                      help="runtime binding override (AD-15: runtime wins)")
     val = sub.add_parser("validate")
-    val.add_argument("--directory", required=True, help="project root")
+    val.add_argument("--directory", required=True, help="project root (walks up to the nearest)")
     sts = sub.add_parser("status")
-    sts.add_argument("--directory", required=True, help="project root")
+    sts.add_argument("--directory", required=True, help="project root (walks up to the nearest)")
     sts.add_argument("--id", required=True, dest="entity_id",
                      help="canonical story id (ST-NNN)")
     # Validated in code, not argparse choices: a refusal stays JSON (exit 2).
@@ -871,6 +871,9 @@ def main(argv: list[str] | None = None) -> int:
     sts.add_argument("--dry-run", action="store_true")
 
     args = parser.parse_args(argv)
+    # --directory walks up to the nearest project root (driver contract
+    # 0.1.22): from inside a nested project the nested counter is minted.
+    args.directory = configlib.find_project_root(Path(args.directory))
     try:
         if args.command == "normalize":
             result = normalize(Path(args.directory), dry_run=args.dry_run)
