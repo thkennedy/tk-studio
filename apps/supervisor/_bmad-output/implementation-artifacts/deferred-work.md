@@ -221,3 +221,27 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261016-014644-7fea; this entry preserves the lingering recommendation for a deliberate later review.
 status: open
+
+### DW-28: A paused run at a non-closable stage whose story spec is already `status: done` is a silent dead end: the pass leaves it (not landed) and `POST /runs/{id}/resume` refuses it `409 StoryLanded`, with no
+origin: spec-deferred af22d6289d91
+source_spec: `27-3-a-paused-run-whose-story-landed-is-closed-out-by-the-service-spec.md`
+location: src/closeout.ts (landing, storyLanded)
+severity: medium
+reason: `landing` answers `not-landed` for a stage outside {escalation, pre_commit, pre_commit_gate}; `storyLanded` checks only `status: done`. The plan's Block If says to record such a stage and not widen AC1, so routing it is a planner/operator decision, not a patch. Deferral class (a): AC3's resume path refuses it.
+status: open
+
+### DW-29: A supervisor (serve) restart while a `POST /runs/{id}/resume` is in flight ends the run `partial` with `orphaned: supervisor restart` while the resumed engine keeps working, and the engine's real end
+origin: spec-deferred 33fa0a648c67
+source_spec: `27-3-a-paused-run-whose-story-landed-is-closed-out-by-the-service-spec.md`
+location: src/closeout.ts (resumePaused, handBack); src/queue.ts (recover, LAUNCHED_SQL)
+severity: medium
+reason: `resumePaused` moves the run to `running` owned by the serve process, and the `launched` event that hands it to the engine-end sweep is written only when the `bmad-loop resolve` child exits. Until then `LAUNCHED_SQL` reads the run as not launched, so `recover` treats it as orphaned once the owner is dead, and `respawnHolds` re-holds only launched or paused runs. The fix moves where the resume hands the run over, which is the consult-1-accepted design (score 2, affects 27-4/27-5), so it is a planner decision, not a patch. Deferral class (a): AC3's resume path.
+status: open
+
+### DW-30: Follow-up review still recommended for 27-3-a-paused-run-whose-story-landed-is-closed-out-by-the-service after the damping cap was spent
+origin: review-budget-followup
+source_spec: `27-3-a-paused-run-whose-story-landed-is-closed-out-by-the-service-spec.md`
+location: n/a
+severity: low
+reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261016-014644-7fea; this entry preserves the lingering recommendation for a deliberate later review.
+status: open

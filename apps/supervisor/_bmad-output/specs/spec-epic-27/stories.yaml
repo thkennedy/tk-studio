@@ -144,6 +144,13 @@
     (`partial` naming the command) for both `ended` and the deferred `jobrun finish`,
     and the PR opens with `--draft`. This also carries operator-decisions §2's final
     `finish` status (`ok` only when every story landed and the verify is green).
+    Replan (27-3 reconcile, 2026-10-16): a red verify overrides whichever end the sweep
+    computed: `launched.detail.end`, or `engineEndState` (src/worktree.ts) for a
+    close-out relaunch or a resumed run (a killed engine keeps its `launched.end`). Run
+    the verify once, at the engine completion that reaches `closeOut`, never per
+    `launched` event and never on a `paused` stop (the paused run's draft PR stays a
+    draft); a `launched` event is never "tk-studio-launch returned" (the resume writes a
+    synthetic one with `resumed: true`; 27-3 consult 1).
 
 - id: "27-5-the-plan-follows-the-run-and-the-deferred-work-is-paid"
   title: "The Plan Follows the Run, and the Deferred Work Is Paid"
@@ -183,5 +190,14 @@
     (src/sandbox.ts; closes DW-25) once the engine is confirmed dead. Handle DW-13's late
     studio-run record on the queue run itself (re-read in the end transaction); external
     detection deliberately skips a checkout with a live queue run. Skip `external` runs
-    in the plan pull-back, since they open no PR. If 27-3 did not map
-    `ExternalRunRefused` to `409 ExternalRun` (DW-26), map it here.
+    in the plan pull-back, since they open no PR. 27-3 mapped `ExternalRunRefused` to
+    `409 ExternalRun` (DW-26 closed there).
+    Replan (27-3 reconcile, 2026-10-16): one queue run may span several engine
+    iterations (close-out relaunches with new engine ids, resumes with the same id).
+    The orphan close-out reads "launched" as a `launched` event after the latest
+    `close-out`/`engine-resume` (as `recover`/`awaitingEngine` do) and confirms a
+    resumed engine dead before closing it out (DW-29). Sum cost per `accounted` event
+    across relaunched and resumed iterations; never count `launched` events as
+    iterations (27-3 consult 1). The pull-back reads every story spec marked done in
+    the worktree, which spans relaunches. List 27-3's event kinds (`close-out`,
+    `close-out-failed`, `awaiting-ruling`, `engine-resume`, `hold`) in runbook §4.

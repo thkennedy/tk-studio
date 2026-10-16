@@ -72,10 +72,10 @@ function mirrorTree(real: string, fake: string, overrides: Record<string, string
  * tests only): the real studio mirrored, with `tk install` (`install_base.py`) and `tk activate`
  * (`drift_check.py`) replaced by fakes that log their argv to `calls` and answer from `answers`
  * (`{"install": "ok"|"fail", "drift": "clean"|"drift"}`, rewritable between runs). */
-export function fakeStudioRoot(realRoot: string = process.env.TK_STUDIO_ROOT!): { root: string; calls: () => { script: string; argv: string[] }[]; answer: (a: { install?: string; drift?: string }) => void } {
+export function fakeStudioRoot(realRoot: string = process.env.TK_STUDIO_ROOT!): { root: string; calls: () => { script: string; argv: string[] }[]; answer: (a: { install?: string; drift?: string; meter?: string }) => void } {
   const root = mkdtempSync(join(tmpdir(), "tk-sup-studio-"));
   const log = join(root, "studio-calls.jsonl"), answers = join(root, "studio-answers.json");
-  writeFileSync(answers, JSON.stringify({ install: "ok", drift: "clean" }));
+  writeFileSync(answers, JSON.stringify({ install: "ok", drift: "clean", meter: "ok" }));
   const py = (script: string, body: string) => [
     "import json, sys",
     `log = ${JSON.stringify(log)}`,
@@ -95,11 +95,18 @@ export function fakeStudioRoot(realRoot: string = process.env.TK_STUDIO_ROOT!): 
       `print(json.dumps({"ok": True, "result": result}))`,
       `sys.exit(0 if result == "clean" else 1)`,
     ].join("\n")),
+    // Story 27.3: `meter.py harvest --run-dir D` (`meter: "ok"` → {ok:true}, else {ok:false} exit 2).
+    "plugins/tk-studio/lib/meter.py": py("meter", [
+      `if answers.get("meter", "ok") == "ok": print(json.dumps({"ok": True, "harvested": [], "run_dir": sys.argv[-1]}))`,
+      `else:`,
+      `    print(json.dumps({"ok": False, "error": "fake meter failed"}))`,
+      `    sys.exit(2)`,
+    ].join("\n")),
   });
   return {
     root,
     calls: () => existsSync(log) ? readFileSync(log, "utf-8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [],
-    answer: (a) => writeFileSync(answers, JSON.stringify({ install: "ok", drift: "clean", ...a })),
+    answer: (a) => writeFileSync(answers, JSON.stringify({ install: "ok", drift: "clean", meter: "ok", ...a })),
   };
 }
 
@@ -152,7 +159,12 @@ console.error("fake gh: unsupported " + argv.join(" ")); process.exit(2);
 /** One in-VM process the fake `sbx` knows: its start time (`/proc/<pid>/stat` field 22), its state, and which
  * signal to its process group ends it (`never`: it survives TERM and KILL). */
 export type FakeProc = { start: string; state?: string; dies_on?: "TERM" | "KILL" | "never" };
-type SbxAnswers = { pin?: "ok" | "fail"; stop?: "ok" | "fail"; procs?: Record<string, FakeProc>; pgrep?: string[]; sessions?: string[] };
+type SbxAnswers = {
+  pin?: "ok" | "fail"; stop?: "ok" | "fail"; procs?: Record<string, FakeProc>; pgrep?: string[]; sessions?: string[];
+  /** Story 27.3: the VM home (`printenv HOME`), the in-VM `bmad-loop archive|resolve` answers, and the
+   * `engine.pid` line a resolve writes (none: not rewritten). */
+  home?: string; archive?: "ok" | "fail"; resolve?: "ok" | "fail"; resume_pid?: string | null;
+};
 
 /** The fake `sbx` (SBX_BIN): records `{argv}` per call to its log and answers from a JSON file (rewritable
  * between calls; a kill rewrites it): `run -d --name <sb>` → the pin (`pin: fail` exits 1); `stop <sb>` → the
@@ -160,12 +172,18 @@ type SbxAnswers = { pin?: "ok" | "fail"; stop?: "ok" | "fail"; procs?: Record<st
  * "No such file or directory"; `exec <sb> kill -<SIG> -- -<pid>` → ends the process when `dies_on` says so;
  * `exec <sb> pgrep -a -f …` → the `pgrep` lines (none: exit 1); `exec <sb> tail --pid=<pid> -f /dev/null` →
  * exits at once; `exec <sb> tmux kill-session -t =<name>` → ends a session `sessions` names, else "can't find
- * session" (exit 1). Anything else exits 2. Never a real sandbox. */
+ * session" (exit 1); `exec <sb> printenv HOME` → `home`; `exec <sb> <home>/.local/bin/bmad-loop archive --project <p>
+ * <id>` → moves `<p>/.bmad-loop/runs/<id>` to `<p>/.bmad-loop/archive/<id>` (`archive: fail` exits 1);
+ * `exec <sb> <home>/.local/bin/bmad-loop resolve --project <p> --no-interactive --resume [--restore-patch <x>] <id>`
+ * → writes `resume_pid` to the run's `engine.pid` when given (`resolve: fail` exits 1). A VM path `/<d>/…` is
+ * read as the host's `<D>:/…` on win32. Anything else exits 2. Never a real sandbox. */
 export function fakeSbx(dir: string = mkdtempSync(join(tmpdir(), "tk-sup-sbx-"))): {
   bin: string; calls: () => { argv: string[] }[]; answer: (a: SbxAnswers) => void; answers: () => Required<SbxAnswers>;
 } {
   const log = join(dir, "sbx-calls.jsonl"), answers = join(dir, "sbx-answers.json");
-  const set = (a: SbxAnswers) => writeFileSync(answers, JSON.stringify({ pin: "ok", stop: "ok", procs: {}, pgrep: [], sessions: [], ...a }));
+  const set = (a: SbxAnswers) => writeFileSync(answers, JSON.stringify({
+    pin: "ok", stop: "ok", procs: {}, pgrep: [], sessions: [], home: "/home/agent", archive: "ok", resolve: "ok", resume_pid: null, ...a,
+  }));
   set({});
   const bin = fakeBin(join(dir, "sbx.js"), `const fs = require("node:fs");
 const argv = process.argv.slice(2);
@@ -202,6 +220,21 @@ if (cmd[0] === "tmux" && cmd[1] === "kill-session" && cmd[2] === "-t" && /^=/.te
   a.sessions.splice(i, 1); fs.writeFileSync(file, JSON.stringify(a)); process.exit(0);
 }
 if (cmd[0] === "tail" && /^--pid=\\d+$/.test(cmd[1] ?? "") && cmd[2] === "-f" && cmd[3] === "/dev/null" && cmd.length === 4) process.exit(0);
+if (cmd[0] === "printenv" && cmd[1] === "HOME" && cmd.length === 2) { console.log(a.home); process.exit(0); }
+const host = (p) => process.platform === "win32" && /^\\/[a-z](\\/|$)/.test(p) ? p[1].toUpperCase() + ":" + (p.slice(2) || "/") : p;
+if (cmd[0] === a.home + "/.local/bin/bmad-loop" && cmd[1] === "archive" && cmd[2] === "--project" && cmd.length === 5) {
+  if (a.archive === "fail") { console.error("fake bmad-loop: archive refused"); process.exit(1); }
+  const runs = require("node:path").join(host(cmd[3]), ".bmad-loop"), from = runs + "/runs/" + cmd[4];
+  if (!fs.existsSync(from)) { console.error("no run " + cmd[4]); process.exit(1); }
+  fs.mkdirSync(runs + "/archive", { recursive: true }); fs.renameSync(from, runs + "/archive/" + cmd[4]);
+  console.log("run " + cmd[4] + " archived"); process.exit(0);
+}
+if (cmd[0] === a.home + "/.local/bin/bmad-loop" && cmd[1] === "resolve" && cmd[2] === "--project" && cmd[4] === "--no-interactive" && cmd[5] === "--resume"
+  && (cmd.length === 7 || (cmd.length === 9 && cmd[6] === "--restore-patch"))) {
+  if (a.resolve === "fail") { console.error("fake bmad-loop: resolve refused"); process.exit(1); }
+  if (a.resume_pid) fs.writeFileSync(host(cmd[3]) + "/.bmad-loop/runs/" + cmd[cmd.length - 1] + "/engine.pid", a.resume_pid);
+  process.exit(0);
+}
 console.error("fake sbx: unsupported exec " + cmd.join(" ")); process.exit(2);
 `);
   return {

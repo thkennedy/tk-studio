@@ -88,6 +88,12 @@
  * `recover` (each tick) writes the served projects' `starter.lock` (the queue is the only starter; a claim
  * rewrites its own) and records a studio run started outside the queue as an `external` queue run.
  *
+ * A paused run (Story 27.3, src/closeout.ts): after each sweep the paused-run pass closes out a run whose
+ * story landed with a closable verdict (harvest commit, `meter.py harvest`, `bmad-loop archive`, then the
+ * epic relaunched under the same queue run: `relauncher`), records one `awaiting-ruling` (and one notification)
+ * for a landed story with no verdict or `escalate`, and leaves anything else for `POST /runs/{id}/resume`
+ * (`resumeRun`).
+ *
  * Run hygiene (Story 22.3, src/hygiene.ts): `submit --editor-in-the-loop` flags the run (refused
  * with WorkDirMissing, nothing queued, when TK_SUPERVISOR_WORK is unset); a flagged Godot run is
  * snapshot after the claim and before `wake`/`submit` (a failed snapshot ends it `blocked`
@@ -113,6 +119,7 @@ import {
   type Holder, type LaunchEngine, type Owner, type QueueRun, type RecoverReport, type RunState, type StudioEnder, type StudioFinder, type StudioOps, type StudioResumer, type TerminalState,
   type WorkerKill,
 } from "./queue";
+import { closeOutPaused, resumePaused, type PausedDeps, type ResumeAnswer, type ResumeDeps as EngineResumeDeps } from "./closeout";
 import { holdEngine, killRunEngine, pinSandbox, releasePin, respawnHolds, studioRunDir, writeStarterLock, writeStarterLocks, type SandboxDeps } from "./sandbox";
 import { jobOptions, loadSupervisorConfig, type JobOptions } from "./config";
 import {
@@ -574,6 +581,7 @@ export async function recoverQueue(opts: RunOptions = {}, verbRunner: VerbRunner
     return report;
   } finally {
     await sweepEngines(queue, opts.worktree); // Story 27.1: engines that ended or paused are closed out
+    await closeOutPaused(queue, pausedDeps(opts)); // Story 27.3: a paused run whose story landed is closed out
     await detectExternal(queue, verbRunner, jobPlacement, sbxDeps(opts.worktree)); // Story 27.2: runs started outside the queue
     writeStarterLocks(queue, opts.worktree?.env ?? process.env);
     await sweepEnds(queue, opts.hygiene);
@@ -638,6 +646,7 @@ export async function drainQueue(opts: RunOptions = {}, verbRunner: VerbRunner =
     return { ok, recovered, runs };
   } finally {
     await sweepEngines(queue, opts.worktree); // Story 27.1
+    await closeOutPaused(queue, pausedDeps(opts)); // Story 27.3
     await sweepEnds(queue, opts.hygiene);
     if (owned) queue.close();
   }
@@ -956,6 +965,7 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
   } finally {
     await resuming;
     await sweepEngines(queue, opts.worktree); // Story 27.1: engines that ended or paused are closed out
+    await closeOutPaused(queue, pausedDeps(opts)); // Story 27.3: a paused run whose story landed is closed out
     await sweepEnds(queue, opts.hygiene); // Story 22.3: every end this process drove (resumes included)
     if (owned) queue.close();
   }
@@ -1583,6 +1593,41 @@ async function rebuildStarted(queue: Queue, run: QueueRun, wake: Record<string, 
     ...(options.sandbox ? { sandbox: options.sandbox } : {}), ...(options.model ? { model: options.model } : {}),
     ...(options.effort ? { effort: options.effort } : {}),
   };
+}
+
+/** Story 27.3: the paused-run pass's relaunch of a closed-out run under the same queue run, in two stages:
+ * the rebuild (`rebuildStarted` from the stored wake answer — a throw is a failed `relaunch` step, the run
+ * still paused), then the drive the pass runs after its `close-out` move: `finishRun` with a fresh session id
+ * (never `--resume`) and the pinning recorder (`queueRecorder`: `InvokeOptions.pin`), then `mirror` (the new
+ * `launched`, `markLaunched` recording the new engine id, its pid and the hold). Nothing story-specific is
+ * passed: `tk-studio-launch` skips done stories itself. */
+export function relauncher(opts: {
+  worktree?: WorktreeDeps; verbRunner?: VerbRunner; invoke?: SkillInvoker;
+  rebuild?: (queue: Queue, run: QueueRun, wake: Record<string, any>) => Promise<Started>;
+} = {}): NonNullable<PausedDeps["relaunch"]> {
+  return async (queue, run) => {
+    let wake: unknown = null;
+    try { wake = JSON.parse(run.wake ?? "null"); } catch { /* unreadable: none */ }
+    if (!wake || typeof wake !== "object") throw new Error("no wake answer recorded: the relaunch cannot be rebuilt");
+    const s = await (opts.rebuild ?? rebuildStarted)(queue, run, wake as Record<string, any>);
+    const verbs = opts.verbRunner ?? runJobVerb;
+    return async () => {
+      const summary = await finishRun({ ...s, sessionId: randomUUID(), recorder: queueRecorder(queue, run.run_id, sbxDeps(opts.worktree)) }, verbs, opts.invoke ?? invokeSkill);
+      return mirror(queue, run.run_id, { jobId: s.jobId, defn: s.defn }, summary, verbs, opts.worktree);
+    };
+  };
+}
+
+/** Story 27.3: the pass's seams from a run's options. */
+const pausedDeps = (opts: RunOptions): PausedDeps => ({
+  ...(opts.worktree ?? {}), ...(opts.hygiene ? { hygiene: opts.hygiene } : {}), ...(opts.owner ? { self: opts.owner } : {}),
+  relaunch: relauncher({ ...(opts.worktree ? { worktree: opts.worktree } : {}) }),
+});
+
+/** Story 27.3: the `resume` verb `POST /runs/{id}/resume` calls — `bmad-loop resolve … --resume` for a paused
+ * run whose story did not land (`resumePaused`; throws `ResumeRefused`). */
+export function resumeRun(queue: Queue, runId: string, restorePatch?: string, deps: EngineResumeDeps = {}): Promise<ResumeAnswer> {
+  return resumePaused(queue, runId, restorePatch !== undefined ? { restorePatch } : {}, deps);
 }
 
 export interface ResumeDeps {

@@ -3,7 +3,9 @@ import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } fro
 import { hostname, tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
-import { ApiBindRefused, checkBind, checkSubmitBody, createApi, serve, type ApiDeps, type SubmitBody } from "../src/api";
+import { ApiBindRefused, checkBind, checkResumeBody, checkSubmitBody, createApi, serve, type ApiDeps, type SubmitBody } from "../src/api";
+import { csrfToken, SESSION_COOKIE, signSession } from "../src/auth";
+import { ResumeRefused } from "../src/closeout";
 import { CancelRaced, cancelRun, CANCELLED_REASON, launchStopGraceful, mirror, queueRecorder, recordMinted, StartError, type RunSummary } from "../src/cli";
 import { ApiBindMissing, ApiPortInvalid, ApiTokenMissing, apiBind, apiPort, apiToken } from "../src/env";
 import { END_HYGIENE_EVENTS } from "../src/hygiene";
@@ -58,7 +60,7 @@ afterAll(() => {
 
 interface FxOpts {
   killWorker?: Probes["killWorker"]; engine?: (id: string | null) => EngineProbe; now?: () => number;
-  submit?: ApiDeps["submit"]; cancel?: ApiDeps["cancel"];
+  submit?: ApiDeps["submit"]; cancel?: ApiDeps["cancel"]; resume?: ApiDeps["resume"];
 }
 
 function fixture(o: FxOpts = {}) {
@@ -84,7 +86,7 @@ function fixture(o: FxOpts = {}) {
       definition: { id: b.job }, tier: b.tier, model: b.model, effort: b.effort, base_ref: b.base_ref });
     return { ok: true, job_id: b.job, project_id: b.project, run_id: run.run_id, state: run.state, minted };
   });
-  const handler = createApi({ queue, token: TOKEN, submit, ...(o.cancel ? { cancel: o.cancel } : {}), pollMs: 10 });
+  const handler = createApi({ queue, token: TOKEN, submit, ...(o.cancel ? { cancel: o.cancel } : {}), ...(o.resume ? { resume: o.resume } : {}), pollMs: 10 });
   const call = (method: string, path: string, init: { body?: string; auth?: string | null; headers?: Record<string, string> } = {}) =>
     handler(new Request(`${BASE}${path}`, {
       method, body: init.body,
@@ -910,4 +912,72 @@ describe.skipIf(!canRunE2E)("POST /jobs through the real submit path", () => {
     expect(body).toMatchObject({ ok: true, state: "queued", studio_run_id: null, base_ref: "main", project_id: projectId });
     expect(queue.get(body.run_id)).toMatchObject({ state: "queued", base_ref: "main", job_id: "studio-health" });
   }, 60_000);
+});
+
+describe("Story 27.3: POST /runs/{id}/resume, and an external run's cancel (DW-26)", () => {
+  test("cancel of an external run → 409 ExternalRun; the run stays external", async () => {
+    const { queue, enqueue, call, checkout } = fixture();
+    const first = enqueue("ext-job");
+    queue.end(first.run_id, "cancelled", "test");
+    const ext = queue.recordExternal("ext-job", checkout, "ext-job-20261016T101010Z", "running")!;
+    const res = await call("POST", `/runs/${ext.run_id}/cancel`);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ ok: false, error: "ExternalRun", run_id: ext.run_id });
+    expect(queue.get(ext.run_id)!.state).toBe("external");
+  });
+
+  test("resume answers: 404 RunNotFound, 409 RunNotPaused / ExternalRun (the default verb), 400 SchemaError, 200 through the verb", async () => {
+    const { queue, enqueue, call, checkout } = fixture();
+    expect(await (await call("POST", "/runs/q-nope/resume")).json()).toMatchObject({ error: "RunNotFound" });
+    expect((await call("POST", "/runs/q-nope/resume")).status).toBe(404);
+    const queued = enqueue("resume-job");
+    const notPaused = await call("POST", `/runs/${queued.run_id}/resume`, { body: "{}" });
+    expect(notPaused.status).toBe(409);
+    expect(await notPaused.json()).toMatchObject({ ok: false, error: "RunNotPaused", run_id: queued.run_id });
+    queue.end(queued.run_id, "cancelled", "test");
+    const ext = queue.recordExternal("resume-job", checkout, "resume-job-20261016T101010Z", "running")!;
+    expect(await (await call("POST", `/runs/${ext.run_id}/resume`)).json()).toMatchObject({ error: "ExternalRun" });
+    for (const body of ["[]", JSON.stringify({ restore_patch: "" }), JSON.stringify({ restore_patch: 1 }), JSON.stringify({ other: "x" })]) {
+      const r = await call("POST", `/runs/${queued.run_id}/resume`, { body });
+      expect(r.status).toBe(400);
+      expect(await r.json()).toMatchObject({ error: "SchemaError" });
+    }
+    expect((await call("POST", `/runs/${queued.run_id}/resume`, { body: "{nope" })).status).toBe(400);
+    expect((await call("GET", `/runs/${queued.run_id}/resume`)).status).toBe(405);
+    expect(checkResumeBody({ restore_patch: "p.patch" })).toEqual({ ok: true, body: { restore_patch: "p.patch" } });
+
+    const seen: unknown[] = [];
+    const ok = fixture({ resume: async (id, b) => { seen.push([id, b]); return { ok: true, run_id: id, state: "running", engine_run_id: "E1" }; } });
+    const r = await ok.call("POST", "/runs/q-1/resume", { body: JSON.stringify({ restore_patch: "fix.patch" }) });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ ok: true, run_id: "q-1", state: "running", engine_run_id: "E1" });
+    expect(seen).toEqual([["q-1", { restore_patch: "fix.patch" }]]);
+    const landed = fixture({ resume: async () => { throw new ResumeRefused("StoryLanded", "story 9-1 landed"); } });
+    const l = await landed.call("POST", "/runs/q-1/resume");
+    expect(l.status).toBe(409);
+    expect(await l.json()).toMatchObject({ ok: false, error: "StoryLanded" });
+    // Bearer only: no auth is 401.
+    expect((await ok.call("POST", "/runs/q-1/resume", { auth: null })).status).toBe(401);
+  });
+
+  test("resume refuses a valid cookie session, even with the page's CSRF token: bearer only", async () => {
+    const SECRET = "s".repeat(48);
+    const queue = new Queue(":memory:");
+    const seen: string[] = [];
+    const handler = createApi({ queue, token: TOKEN, session: { secret: SECRET },
+      resume: async (id) => { seen.push(id); return { ok: true, run_id: id, state: "running", engine_run_id: "E1" }; } });
+    const cookie = signSession(SECRET, "token", Date.now());
+    const csrf = csrfToken(SECRET, cookie);
+    // The session is valid: it reads the page.
+    expect((await handler(new Request(`${BASE}/status`, { headers: { cookie: `${SESSION_COOKIE}=${cookie}` } }))).status).toBe(200);
+    for (const init of <{ headers: Record<string, string>; body: string }[]>[
+      { headers: { cookie: `${SESSION_COOKIE}=${cookie}`, "x-csrf-token": csrf }, body: "{}" },
+      { headers: { cookie: `${SESSION_COOKIE}=${cookie}`, "content-type": "application/x-www-form-urlencoded" }, body: `csrf=${encodeURIComponent(csrf)}` },
+    ]) {
+      const r = await handler(new Request(`${BASE}/runs/q-1/resume`, { method: "POST", ...init }));
+      expect(r.status).toBe(401);
+      expect(await r.json()).toMatchObject({ ok: false, error: "Unauthorized" });
+    }
+    expect(seen).toEqual([]);
+  });
 });

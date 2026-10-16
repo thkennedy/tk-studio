@@ -684,6 +684,13 @@ function widenStateCheck(db: Database): void {
   db.exec(LIVE_INDEX);
 }
 
+/** Story 27.3: the SQL test (over `runs`) that a run is launched — a `launched` event after its latest
+ * `close-out` (the paused-run pass's relaunch) or `engine-resume` (`POST /runs/{id}/resume`). A relaunched or
+ * resumed run carries the old `launched` event: read without this, a dead relaunch driver would never be
+ * recovered and the archived engine id would be probed forever. */
+export const LAUNCHED_SQL = `EXISTS (SELECT 1 FROM events e WHERE e.run_id = runs.run_id AND e.kind = 'launched'
+  AND e.seq > COALESCE((SELECT MAX(x.seq) FROM events x WHERE x.run_id = runs.run_id AND x.kind IN ('close-out','engine-resume')), 0))`;
+
 /** Story 27.1: where a run's launched engine is probed — its worktree (the engine's `--project`), else its
  * root. A worktree the close-out already removed is never probed (the probe would fail there and fail
  * closed into an unverified engine forever): its root then. */
@@ -1449,12 +1456,14 @@ export class Queue {
   }
 
   /** The runs the engine-end sweep probes: `running` launch runs whose driver let go of them after
-   * the launch (`markLaunched`), and `paused` runs — each with its worktree and engine recorded. */
+   * the launch (`markLaunched`), and `paused` runs — each with its worktree and engine recorded. Story 27.3:
+   * "launched" is a `launched` event after the latest `close-out`/`engine-resume` (`LAUNCHED_SQL`), so a
+   * relaunch or a resume still under its driver is never probed at the engine id it replaced. */
   awaitingEngine(): QueueRun[] {
     return this.db.query(
       `SELECT * FROM runs WHERE worktree IS NOT NULL AND (
          (engine_run_id IS NOT NULL
-           AND (state = 'paused' OR (state = 'running' AND EXISTS (SELECT 1 FROM events e WHERE e.run_id = runs.run_id AND e.kind = 'launched'))))
+           AND (state = 'paused' OR (state = 'running' AND ${LAUNCHED_SQL})))
          OR (state IN ('complete','partial','blocked','cancelled')
            AND EXISTS (SELECT 1 FROM events e WHERE e.run_id = runs.run_id AND e.kind = 'ended' AND json_extract(e.detail, '$.closeout.result') = 'skipped')
            AND NOT EXISTS (SELECT 1 FROM events e WHERE e.run_id = runs.run_id AND e.kind = 'closed_out')))
@@ -1541,6 +1550,78 @@ export class Queue {
       if (!cur || cur.state !== seen.state || cur.owner_nonce !== seen.owner_nonce || cur.owner_pid !== seen.owner_pid) return null;
       this.db.query("UPDATE runs SET owner_pid = ?, owner_host = ?, owner_nonce = ?, owner_start = ?, updated = ? WHERE run_id = ?")
         .run(self.pid, self.host, self.nonce, self.start ?? null, now(), runId);
+      return this.must(runId);
+    }).immediate();
+  }
+
+  /** Story 27.3: a paused run moves `paused` → `running` under this process (owner = `self`, as `claim`)
+   * with one `kind` event: `close-out` (the paused-run pass relaunches the epic; the checkout lock becomes
+   * this process's run lock, as a claim takes it, until `markLaunched` hands it to the new engine) or
+   * `engine-resume` (`POST /runs/{id}/resume`; the engine keeps its lock). Refused unless the run is paused
+   * and no other live process holds it (a close-out lease this process took is its own). */
+  resumeFromPause(runId: string, kind: "close-out" | "engine-resume", detail: Record<string, unknown>, self: Owner = selfOwner()): QueueRun {
+    return this.db.transaction(() => {
+      const run = this.must(runId);
+      if (isTerminal(run.state)) throw new RunTerminal(runId, run.state);
+      if (run.state !== "paused") throw new Error(`${kind}: queue run '${runId}' is ${run.state}, not paused`);
+      if (run.owner_nonce !== null && run.owner_nonce !== self.nonce && this.ownerLive(ownerOf(run), self)) {
+        throw new Error(`${kind}: queue run '${runId}' is held by a live process (pid ${run.owner_pid ?? "?"})`);
+      }
+      this.db.query("UPDATE runs SET state = 'running', owner_pid = ?, owner_host = ?, owner_nonce = ?, owner_start = ?, updated = ? WHERE run_id = ?")
+        .run(self.pid, self.host, self.nonce, self.start ?? null, now(), runId);
+      // The lock as the paused run held it, recorded on the move so `returnToPause` can put it back.
+      let lock: { before: LockRow | null; taken: boolean } | undefined;
+      if (kind === "close-out") {
+        const held = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(run.checkout) as LockRow | null;
+        lock = { before: held && held.run_id === runId ? held : null, taken: !held || held.run_id === runId };
+        this.db.query(
+          `INSERT INTO locks (checkout, root, kind, run_id, job_id, owner_pid, owner_host, owner_nonce, owner_start, engine_run_id, acquired)
+           VALUES (?, ?, 'run', ?, ?, ?, ?, ?, ?, NULL, ?)
+           ON CONFLICT (checkout) DO UPDATE SET root = excluded.root, kind = 'run', run_id = excluded.run_id,
+             job_id = excluded.job_id, owner_pid = excluded.owner_pid, owner_host = excluded.owner_host,
+             owner_nonce = excluded.owner_nonce, owner_start = excluded.owner_start,
+             engine_run_id = NULL, acquired = excluded.acquired
+           WHERE locks.run_id = excluded.run_id`,
+        ).run(run.checkout, run.root, runId, run.job_id, self.pid, self.host, self.nonce, self.start ?? null, now());
+      }
+      this.event(runId, kind, "paused", "running", { ...detail, owner: ownerDetail(self), ...(lock ? { lock } : {}) });
+      return this.must(runId);
+    }).immediate();
+  }
+
+  /** Story 27.3: a run moved out of `paused` (`resumeFromPause`) whose relaunch or resume failed before its
+   * engine was handed the run goes back to `paused` (as `markPaused`), and the checkout lock the `close-out`
+   * move rewrote into this process's run lock is put back as the paused run held it (its engine lock; none:
+   * removed). A lock the move did not take, or one since handed on (not this run's `run` lock), is left. */
+  returnToPause(runId: string, detail: Record<string, unknown>): QueueRun {
+    return this.db.transaction(() => {
+      const run = this.must(runId);
+      if (isTerminal(run.state)) throw new RunTerminal(runId, run.state);
+      if (run.state !== "running") throw new Error(`returnToPause: queue run '${runId}' is ${run.state}, not running`);
+      const move = this.db.query(
+        "SELECT * FROM events WHERE run_id = ? AND kind IN ('close-out','engine-resume') ORDER BY seq DESC LIMIT 1",
+      ).get(runId) as { kind: string; detail: string | null } | null;
+      let restored: unknown;
+      const lock = move?.kind === "close-out" ? (JSON.parse(move.detail ?? "{}") as Record<string, any>).lock : undefined;
+      if (lock && lock.taken) {
+        const held = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(run.checkout) as LockRow | null;
+        if (held && held.run_id === runId && held.kind === "run") {
+          const b = lock.before as LockRow | null;
+          if (b) {
+            this.db.query(
+              `UPDATE locks SET root = ?, kind = ?, run_id = ?, job_id = ?, owner_pid = ?, owner_host = ?, owner_nonce = ?, owner_start = ?,
+                 engine_run_id = ?, acquired = ? WHERE checkout = ?`,
+            ).run(b.root, b.kind, b.run_id, b.job_id, b.owner_pid, b.owner_host, b.owner_nonce, b.owner_start, b.engine_run_id, b.acquired, run.checkout);
+            restored = { kind: b.kind, engine_run_id: b.engine_run_id };
+          } else {
+            this.db.query("DELETE FROM locks WHERE checkout = ?").run(run.checkout);
+            restored = "released (none held before the close-out)";
+          }
+        }
+      }
+      this.db.query("UPDATE runs SET state = 'paused', owner_pid = NULL, owner_host = NULL, owner_nonce = NULL, owner_start = NULL, updated = ? WHERE run_id = ?")
+        .run(now(), runId);
+      this.event(runId, "paused", run.state, "paused", { ...detail, ...(restored !== undefined ? { lock_restored: restored } : {}) });
       return this.must(runId);
     }).immediate();
   }
@@ -1752,7 +1833,7 @@ export class Queue {
     // sweep's or a cancel's): a dead lease is re-taken by the engine-end sweep, never resumed or orphaned here.
     const candidates = (this.db.query(
       `SELECT * FROM runs WHERE state IN ('queued','running') AND owner_pid IS NOT NULL
-         AND NOT EXISTS (SELECT 1 FROM events e WHERE e.run_id = runs.run_id AND e.kind = 'launched')
+         AND NOT ${LAUNCHED_SQL}
        ORDER BY created, rowid`,
     ).all() as QueueRun[]).filter((r) => r.owner_nonce !== self.nonce && !this.ownerLive(ownerOf(r), self));
     const unchanged = (c: QueueRun, now_: QueueRun | null) =>

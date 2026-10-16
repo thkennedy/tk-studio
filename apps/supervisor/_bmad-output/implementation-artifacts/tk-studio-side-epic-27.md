@@ -55,3 +55,33 @@ Proposed rows for the supervisor section:
 | Hand starts | `jobrun.py submit|wake` and the MCP `tk_job` surface on a supervised project are recorded `external` on the next tick and paced around until `jobrun status --job-id` lists the studio run terminal, or no longer lists it and its run directory is gone from the store (a `status` refusal, e.g. a job file with problems, keeps it live); prefer `POST /jobs`. |
 
 Checks only the Windows host can run, for the attended session (operator-decisions §5): the real `sbx run -d`/`exec`/`stop` against Docker Sandboxes (including whether `sbx run -d --name` on an already-running sandbox exits 0), the hold from the console session, the kill through `sbx exec`, and the win32 `bun test` run.
+
+## Story 27.3
+
+### Runbook `kb/agent-pc-setup-runbook.md`: replace "When a run pauses"
+
+The supervisor now moves a paused run on itself (the attended recipe of 2026-10-14 retires for supervised runs; hole 9). Proposed replacement for the "When a run pauses" block:
+
+> **When a run pauses** (a supervisor run: the queue run is `paused`, its worktree, lock, pin and draft PR kept). After every engine-end sweep (each tick) the supervisor reads the story the engine paused on (`launch.py status` → `run.paused_story_key`) and its spec in the run's worktree:
+>
+> - **The story landed** (its spec says `status: done`, paused at the commit gate or on an escalation) **and a verdict is recorded** (`reconcile_verdict` other than `escalate`): nothing to do by hand. The supervisor commits the engine's staged harvest on the run branch (`supervisor: close-out harvest for <story> (run <queue run>, engine <engine run>)`), harvests the story's meter observation to the host ledger (`meter.py harvest`), archives the engine run (`bmad-loop archive`, through `sbx exec`), and launches the epic again under the same queue run (a `close-out` event); the launch skips `done` stories. A failed step is a `close-out-failed` event on the run, retried next tick.
+> - **The story landed with no verdict, or `escalate`** (the reconcile gate): an attended step. The supervisor sends one notification and the status page's run card says "awaiting a ruling". Run `.bmad-loop/plugins/studio-pipeline/reconcile.md` in the run's worktree (`<TK_SUPERVISOR_WORK>\worktrees\<project>\<queue run id>`), record the verdict on the spec (and carry any `adjust-stories` notes into the unstarted entries' `invoke_dev_with`); the next tick closes it out as above.
+> - **The story did no work** (a missing fact, a render halt): fix the cause in the run's worktree, then `POST /runs/<queue run id>/resume` (bearer only; body `{"restore_patch": "<path relative to the worktree>"}` optional). The supervisor runs `bmad-loop resolve --no-interactive --resume [--restore-patch …]` through `sbx exec` as its own child (the hold) and the run goes `running` (`engine-resume`). A story whose spec is `done` is refused `409 StoryLanded`: the close-out above handles it.
+>
+> A run started outside the supervisor still follows the old recipe (commit the harvest by hand, `bmad-loop archive <run>`, launch again; or `resume-run.sh`).
+
+### `tools/sbx-engine/resume-run.sh`: header
+
+Proposed header lines replacing "Use it only when … 3. launch the epic again. It skips `done` stories.":
+
+```
+# A supervisor run never uses this script: the supervisor resumes a paused run
+# whose story did no work through `POST /runs/{id}/resume` (the same
+# `bmad-loop resolve --no-interactive --resume`, held by the supervisor), and
+# closes out one whose story landed by itself (harvest commit, meter harvest,
+# `bmad-loop archive`, relaunch). Use this only for an engine run started by
+# hand, when the paused story had no landed work (a missing fact, a render
+# halt): a re-drive restarts that story from its baseline.
+```
+
+Checks only the Windows host can run, for the attended session (operator-decisions §5): the real `sbx exec <sb> <VM HOME>/.local/bin/bmad-loop archive|resolve` against Docker Sandboxes, the real `meter.py harvest` into the host ledger on win32, `sbx run -d --name` on the already-pinned sandbox at the relaunch (the fake answers 0), and the win32 `bun test` run.

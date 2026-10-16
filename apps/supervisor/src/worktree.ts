@@ -86,10 +86,10 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 /** Command output for an event: URL userinfo redacted, clipped. */
 const clip = (s: string, n = 300) => s.replace(/\/\/[^/@\s]+@/g, "//[redacted]@").trim().slice(0, n);
 
-const runner = (deps: WorktreeDeps): CommandRunner =>
+export const runner = (deps: WorktreeDeps): CommandRunner =>
   deps.run ?? ((bin, args, opts) => runProcess(bin, args, { cwd: opts.cwd, timeoutS: opts.timeoutS, env: { ...(deps.env ?? process.env), ...(opts.env ?? {}) } }));
-const uvRunner = (deps: WorktreeDeps): UvScriptRunner => deps.uv ?? runUv;
-const studioScript = (deps: WorktreeDeps, ...rel: string[]) => join(pluginRoot(deps.env ?? process.env), ...rel);
+export const uvRunner = (deps: WorktreeDeps): UvScriptRunner => deps.uv ?? runUv;
+export const studioScript = (deps: WorktreeDeps, ...rel: string[]) => join(pluginRoot(deps.env ?? process.env), ...rel);
 
 /** A prepare step that failed: the run ends `blocked` naming it (`worktree <step>: <detail>`). */
 export class WorktreeFailed extends Error {
@@ -480,10 +480,18 @@ export function closeOutDetail(c: CloseOut): Record<string, unknown> {
 /** The engine statuses that end its life (launch.py TERMINAL_STATUSES). */
 export const ENGINE_ENDED = ["finished", "stopped", "interrupted", "crashed"] as const;
 
+/** A resumed run's end state from its engine's own terminal status (Story 27.3 consult ruling): `finished`
+ * is `complete`; any other end (`stopped`, `interrupted`, `crashed`, a killed or gone engine) is `partial`
+ * (as `finishStateFor` takes a status it does not know). */
+export function engineEndState(status: unknown): TerminalState {
+  return status === "finished" ? "complete" : "partial";
+}
+
 export type EnginePhase = { phase: "ended" | "paused" | "running" | "unknown"; detail: Record<string, unknown> };
 
 /** `launch.py status --directory <worktree> --run-id <id>`: ended (a terminal `run.status`), paused
- * (`paused_stage`/`paused_reason` on a live run), running, or unknown (the probe failed). */
+ * (`paused_stage`/`paused_reason` on a live run, with `paused_story_key` when the engine names it), running,
+ * or unknown (the probe failed). */
 export async function engineStatus(worktree: string, engineRunId: string, deps: WorktreeDeps = {}): Promise<EnginePhase> {
   let res: RunResult;
   try { res = await uvRunner(deps)(worktree, studioScript(deps, "lib", "launch.py"), ["status", "--directory", worktree, "--run-id", engineRunId], 120); }
@@ -492,7 +500,9 @@ export async function engineStatus(worktree: string, engineRunId: string, deps: 
   const run = out?.ok === true && out.run && typeof out.run === "object" ? out.run as Record<string, unknown> : null;
   if (!run) return { phase: "unknown", detail: { error: out?.error ? clip(String(out.error)) : failed(res) } };
   const status = String(run.status ?? "");
-  const detail = { run_id: engineRunId, status, ...(run.paused_stage ? { paused_stage: run.paused_stage } : {}), ...(run.paused_reason ? { paused_reason: run.paused_reason } : {}) };
+  const detail = { run_id: engineRunId, status, ...(run.paused_stage ? { paused_stage: run.paused_stage } : {}), ...(run.paused_reason ? { paused_reason: run.paused_reason } : {}),
+    // Story 27.3: the story the engine paused on (launch.py `run.paused_story_key`), for the paused-run pass.
+    ...(run.paused_story_key ? { paused_story_key: run.paused_story_key } : {}) };
   if ((ENGINE_ENDED as readonly string[]).includes(status)) return { phase: "ended", detail };
   if (run.paused_stage || run.paused_reason) return { phase: "paused", detail };
   return { phase: "running", detail };
@@ -598,9 +608,17 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
       if (paused) next = { phase: "paused", detail: { engine: st.detail, ...closeOutDetail(c) } };
       else {
         const end = (launched.end ?? {}) as { state?: TerminalState; reason?: string | null; detail?: Record<string, unknown>; stop?: any };
-        const state = end.state ?? "complete";
-        const finish = await finishStudio(run, state, end.reason ?? null, launched.status_block, c.pr, input.costUsd, deps);
-        next = { phase: "ended", state, reason: end.reason ?? null, detail: { ...(end.detail ?? {}), engine: st.detail, ...closeOutDetail(c), finish }, ...(end.stop ? { stop: end.stop } : {}) };
+        // A resumed run (its `launched` written when the resolve child exited) or a relaunched one (its latest
+        // `launched` after a `close-out`, from the relaunch's `mirror`): the end is the engine's own terminal
+        // status, never the launch's recorded end. A killed relaunch keeps its recorded end (the trip's).
+        const resumed = launched.resumed === true;
+        const relaunched = !resumed && !st.detail.killed && events.findLastIndex((e) => e.kind === "close-out") >= 0
+          && events.findLastIndex((e) => e.kind === "launched") > events.findLastIndex((e) => e.kind === "close-out");
+        const engineEnd = resumed || relaunched ? String(st.detail.status ?? "unknown") : undefined;
+        const state = engineEnd !== undefined ? engineEndState(engineEnd) : end.state ?? "complete";
+        const reason = engineEnd !== undefined ? (state === "complete" ? null : `${resumed ? "resumed" : "relaunched"} engine ended '${engineEnd}'`) : end.reason ?? null;
+        const finish = await finishStudio(run, state, reason, launched.status_block, c.pr, input.costUsd, deps);
+        next = { phase: "ended", state, reason, detail: { ...(end.detail ?? {}), engine: st.detail, ...closeOutDetail(c), finish }, ...(end.stop ? { stop: end.stop } : {}) };
       }
       try { applyTransition(queue, run.run_id, next); }
       catch (e) {
