@@ -31,8 +31,9 @@
  *     lists the stopped state — skipped before any queue run is minted, the
  *     condition logged (the studio's own `wake` would refuse it anyway; a hand
  *     `run`/`submit` still meets that refusal);
- *   - skip while a queue run of the job on this checkout is `running`, or
- *     `queued` under a live owner (no overlap);
+ *   - skip while a queue run of the job on this checkout is `running`, `paused`,
+ *     `external` (Story 27.2: a studio run started outside the queue, recorded by
+ *     the tick's recovery), or `queued` under a live owner (no overlap);
  *   - an ownerless `queued` run (a lock wait, a recovery re-queue, a hand
  *     `submit`) is driven: `runJob`'s idempotent mint adopts it, nothing new
  *     is minted, and the hint is not re-applied;
@@ -123,8 +124,9 @@ export interface WakeDecision {
  *      only while the current definition's `stop.on_status` still lists the
  *      stopped state (an operator who drops it, or the whole list, resumes the
  *      job; the stale stop is ignored and the rules below apply);
- *   2. never overlap a run that holds the job — `running`, or `queued` under a
- *      live owner;
+ *   2. never overlap a run that holds the job — `running`, `paused`, `external`
+ *      (Story 27.2: started outside the queue, live until its studio run ends),
+ *      or `queued` under a live owner;
  *   3. an ownerless `queued` run (a lock wait, a recovery re-queue, a hand
  *      `submit`) is driven: wake, and `runJob`'s idempotent mint adopts that
  *      run — nothing new is minted, and the hint is not re-applied (the run
@@ -146,7 +148,8 @@ export function shouldWake(
   }
   const live = pacing.live[0];
   if (live) {
-    const why = live.state === "queued" ? "queued under a live owner" : live.state;
+    const why = live.state === "queued" ? "queued under a live owner"
+      : live.state === "external" ? `external (studio run ${live.studio_run_id ?? "?"} started outside the queue)` : live.state;
     return { wake: false, reason: `run ${live.run_id} still ${why} — no overlap` };
   }
   const adopt = pacing.adoptable[0];

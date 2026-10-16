@@ -15,7 +15,12 @@
  *                            a flagged run with no TK_SUPERVISOR_WORK is 400 WorkDirMissing (Story 22.3)
  *   GET  /jobs               the submitted jobs
  *   GET  /runs/{id}          the queue run and its events (kinds and details as stored)
- *   POST /runs/{id}/cancel   ends the run `cancelled` (`cancelRun`); 409 once terminal
+ *   POST /runs/{id}/cancel   ends the run `cancelled` (`cancelRun`); 409 once terminal; 409 ExternalRun on an
+ *                            external run (Story 27.2: started outside the queue, never cancelled here)
+ *   POST /runs/{id}/resume   {restore_patch?} (Story 27.3, bearer only): a paused run whose story did not land is
+ *                            resumed (`resumeRun`: `bmad-loop resolve … --resume`); 200 {ok, run_id, state, engine_run_id},
+ *                            400 SchemaError | MalformedJson, 404 RunNotFound, 409 RunNotPaused | ExternalRun | StoryLanded,
+ *                            500 ResumeFailed
  *   GET  /status             counts per state, the live runs, the held checkout locks
  *   GET  /events?since=<seq> events with seq > since: JSON, or SSE with
  *                            `Accept: text/event-stream`
@@ -37,7 +42,8 @@ import {
   safeEqual, SESSION_COOKIE, SESSION_TTL_S, setCookie, signInPage, signSession, signState, STATE_COOKIE, STATE_TTL_S,
   verifySession, verifyState,
 } from "./auth";
-import { CancelRaced, cancelRun, StartError, submitProject } from "./cli";
+import { CancelRaced, cancelRun, ExternalRunRefused, resumeRun, StartError, submitProject } from "./cli";
+import { ResumeRefused, type ResumeAnswer } from "./closeout";
 import { apiBind, apiPort, apiToken, checkTlsFiles, notifier, type OAuthConfig, oauthConfig, sessionSecret, tlsConfig } from "./env";
 import { gatherPage, holderOf, renderPage } from "./page";
 import { registryShow } from "./server";
@@ -79,6 +85,8 @@ export interface ApiDeps {
   submit?: (body: SubmitBody) => Promise<Record<string, unknown>>;
   /** The cancel ruling (default: `cancelRun` on this queue). */
   cancel?: (runId: string) => Promise<QueueRun>;
+  /** Story 27.3: the resume (default: `resumeRun` on this queue). */
+  resume?: (runId: string, body: ResumeBody) => Promise<ResumeAnswer>;
   /** SSE: how often new events are polled for (ms, default 1000). */
   pollMs?: number;
   /** SSE: a keepalive comment after this long without an event (ms, default 15000). */
@@ -98,6 +106,20 @@ export interface ApiDeps {
    * (`https://<TLS_NAME>:<port>`), and the provider `fetch` (default the global one). Without an
    * `https` origin the token form refuses (a `Secure` cookie never sticks over http). */
   oauth?: { providers: OAuthConfig; origin: string; fetch?: FetchLike };
+}
+
+/** Story 27.3: the resume body — a restore patch relative to the run's worktree, optional. */
+export interface ResumeBody { restore_patch?: string }
+
+/** The resume body schema: a JSON object with only `restore_patch`, a non-empty string. */
+export function checkResumeBody(body: unknown): { ok: true; body: ResumeBody } | { ok: false; detail: string } {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return { ok: false, detail: "the body must be a JSON object" };
+  const b = body as Record<string, unknown>;
+  for (const k of Object.keys(b)) if (k !== "restore_patch") return { ok: false, detail: `unknown field '${k}' (allowed: restore_patch)` };
+  if ("restore_patch" in b && (typeof b.restore_patch !== "string" || !b.restore_patch.trim())) {
+    return { ok: false, detail: "field 'restore_patch' must be a non-empty string" };
+  }
+  return { ok: true, body: b as ResumeBody };
 }
 
 const SUBMIT_FIELDS = ["project", "job", "base_ref", "tier", "model", "effort", "editor_in_the_loop"] as const;
@@ -163,6 +185,7 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
     queue, tier: b.tier, model: b.model, effort: b.effort, baseRef: b.base_ref, ...(b.editor_in_the_loop === true ? { editorInTheLoop: true } : {}),
   }));
   const cancel = deps.cancel ?? ((id: string) => cancelRun(queue, id));
+  const resume = deps.resume ?? ((id: string, b: ResumeBody) => resumeRun(queue, id, b.restore_patch));
   const pollMs = deps.pollMs ?? 1000, keepaliveMs = deps.keepaliveMs ?? 15000;
   const clock = deps.now ?? Date.now;
 
@@ -226,7 +249,28 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
         return fail(409, "RunTerminal", { run_id: runId, state: queue.get(runId)?.state ?? null,
           ...(e instanceof CancelRaced ? { effects: cancelEffects(e.effects) } : {}) });
       }
+      // DW-26: a run started outside the queue is never cancelled here.
+      if (e instanceof ExternalRunRefused) return fail(409, "ExternalRun", { run_id: runId, detail: e.message });
       throw e;
+    }
+  }
+
+  /** Story 27.3: `POST /runs/{id}/resume` (bearer only). */
+  async function postResume(req: Request, runId: string): Promise<Response> {
+    const text = await req.text();
+    let raw: unknown = {};
+    if (text.trim()) {
+      try { raw = JSON.parse(text); }
+      catch (e) { return fail(400, "MalformedJson", { detail: `the body is not JSON: ${e instanceof Error ? e.message : String(e)}` }); }
+    }
+    const checked = checkResumeBody(raw);
+    if (!checked.ok) return fail(400, "SchemaError", { detail: checked.detail });
+    try {
+      return json(200, await resume(runId, checked.body));
+    } catch (e) {
+      if (!(e instanceof ResumeRefused)) throw e;
+      const status = e.code === "RunNotFound" ? 404 : e.code === "SchemaError" ? 400 : e.code === "ResumeFailed" ? 500 : 409;
+      return fail(status, e.code, { run_id: runId, detail: redact(e.message) });
     }
   }
 
@@ -409,6 +453,12 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
         if (method !== "POST") return allow("POST");
         const runId = decodeId(cancelMatch[1]);
         return runId === null ? fail(404, "RunNotFound", { run_id: cancelMatch[1] }) : await postCancel(runId);
+      }
+      const resumeMatch = /^\/runs\/([^/]+)\/resume$/.exec(path);
+      if (resumeMatch) {
+        if (method !== "POST") return allow("POST");
+        const runId = decodeId(resumeMatch[1]);
+        return runId === null ? fail(404, "RunNotFound", { run_id: resumeMatch[1] }) : await postResume(req, runId);
       }
       const runMatch = /^\/runs\/([^/]+)$/.exec(path);
       if (runMatch) {

@@ -392,13 +392,23 @@ export function renderPage(data: PageData, opts: { csrf?: string } = {}): string
 <div class="meta">trigger ${t(d.trigger ?? "-")} · target ${t(target || "-")} · updated ${t(jb.updated)}</div></div>`;
   }).join("\n") : note("no jobs submitted");
 
+  // Story 27.3: a paused run whose latest pass event is `awaiting-ruling` waits for a human's ruling (a newer
+  // `paused` — a fresh pause after a resume — needs its own record, written by the next pass).
+  const ruling = (p: PageRun) => {
+    if (p.run.state !== "paused") return "";
+    const last = p.events.findLast((e) => ["awaiting-ruling", "close-out", "close-out-failed", "engine-resume", "paused"].includes(e.kind));
+    if (last?.kind !== "awaiting-ruling") return "";
+    const d = (last.detail ?? {}) as Record<string, unknown>;
+    return `<p class="reason">awaiting a ruling: story ${t(d.story_key ?? "?")} — ${t(d.reason ?? "")}</p>`;
+  };
+
   const runs = data.runs.length ? data.runs.map((p) => {
     const r = p.run;
     const evs = p.events.map((e) => `<li><span class="meta">#${e.seq} ${t(e.at)}</span> <strong>${t(e.kind)}</strong> ${t(e.from_state ?? "")}→${t(e.to_state)}${e.detail ? `<pre>${j(e.detail)}</pre>` : ""}</li>`).join("");
     return `<div class="card" id="run-${t(r.run_id)}"><strong>${t(r.run_id)}</strong> <span class="st">${t(r.state)}</span>
 <div class="meta">job ${t(r.job_id)} · project ${t(r.project_id ?? "-")} · tier ${t(r.tier ?? "host")} · studio run ${t(r.studio_run_id ?? "-")}</div>
 <div class="meta">resumes ${p.resumes} · cost ${p.cost === null ? "absent" : `$${t(p.cost.toFixed(4))}`} · created ${t(r.created)} · updated ${t(r.updated)}</div>
-${r.reason ? `<p class="reason">${t(r.reason)}</p>` : ""}${cancelForm(r)}
+${r.reason ? `<p class="reason">${t(r.reason)}</p>` : ""}${ruling(p)}${cancelForm(r)}
 <details><summary>events (${p.events.length + p.eventsOmitted})</summary>${p.eventsOmitted ? note(`${p.eventsOmitted} older events not shown`) : ""}<ul>${evs}</ul></details></div>`;
   }).join("\n") + (data.runsOmitted ? note(`${data.runsOmitted} older runs not shown`) : "") : note("no runs");
 

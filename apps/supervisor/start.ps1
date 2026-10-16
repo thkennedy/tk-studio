@@ -15,6 +15,8 @@
        TK_SUPERVISOR_TRANSCRIPT_BACKUP (the nightly backup's claude-projects folder) is warned about when
        unset. When TK_SUPERVISOR_TLS_CERT/KEY/NAME are all set, `tailscale cert` renews the 90-day
        certificate into them (bounded; a failure is a warning) before the keeper starts (Story 22.5).
+       Story 27.5: the keeper runs the same renewal whenever `serve` exits 75 (the certificate is within
+       14 days of expiry and no run is live), then restarts `serve` at once, without the back-off.
     2. starts the API keeper: this script again with -ServeOnly, in this console (never hidden),
        inheriting the variables step 1 exported. The keeper loops `bun src/cli.ts serve` in its own
        foreground and restarts it with a back-off whenever it exits, independent of recover, tick and
@@ -106,35 +108,41 @@ Set-Location -LiteralPath $Repo
 # Story 22.5: with all three TLS variables set, renew the Tailscale certificate for the MagicDNS name
 # (90 days) into the files `serve` reads, before the keeper starts. Bounded; a failure (or no
 # `tailscale` on PATH) is a warning and `serve` uses the files as they are. Names only are printed.
+# Story 27.5 (DW-21): one function, shared by the main script and the keeper (which runs it when `serve`
+# exits 75: the certificate is within 14 days of expiry and no run is live).
 $CertSeconds = 120
 $TlsNames = @('TK_SUPERVISOR_TLS_CERT', 'TK_SUPERVISOR_TLS_KEY', 'TK_SUPERVISOR_TLS_NAME')
-if (-not $ServeOnly -and -not ($TlsNames | Where-Object { -not $Present[$_] })) {
+function Invoke-TailscaleCert {
   $Tailscale = Get-Command tailscale -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
   if (-not $Tailscale) {
     Write-Warning '[supervisor] tailscale not found: the certificate in TK_SUPERVISOR_TLS_CERT/TK_SUPERVISOR_TLS_KEY is not renewed'
-  } else {
-    Write-Host '[supervisor] tailscale cert (renews the certificate named by TK_SUPERVISOR_TLS_CERT/TK_SUPERVISOR_TLS_KEY/TK_SUPERVISOR_TLS_NAME)'
-    try {
-      $psi = [System.Diagnostics.ProcessStartInfo]::new($Tailscale.Source)
-      foreach ($arg in @('cert', '--cert-file', $env:TK_SUPERVISOR_TLS_CERT, '--key-file', $env:TK_SUPERVISOR_TLS_KEY, $env:TK_SUPERVISOR_TLS_NAME)) { $psi.ArgumentList.Add($arg) }
-      $psi.UseShellExecute = $false
-      $psi.RedirectStandardOutput = $true
-      $psi.RedirectStandardError = $true
-      $cert = [System.Diagnostics.Process]::Start($psi)
-      try {
-        $cert.BeginOutputReadLine()
-        $cert.BeginErrorReadLine()
-        if (-not $cert.WaitForExit($CertSeconds * 1000)) {
-          try { $cert.Kill() } catch { } # only this process (its known pid)
-          Write-Warning "[supervisor] tailscale cert gave no answer within $CertSeconds s: the certificate is not renewed"
-        } elseif ($cert.ExitCode -ne 0) {
-          Write-Warning "[supervisor] tailscale cert exited $($cert.ExitCode): the certificate is not renewed (is HTTPS enabled in the Tailscale admin console?)"
-        }
-      } finally { $cert.Dispose() }
-    } catch {
-      Write-Warning "[supervisor] tailscale cert did not run: the certificate is not renewed"
-    }
+    return
   }
+  Write-Host '[supervisor] tailscale cert (renews the certificate named by TK_SUPERVISOR_TLS_CERT/TK_SUPERVISOR_TLS_KEY/TK_SUPERVISOR_TLS_NAME)'
+  try {
+    $psi = [System.Diagnostics.ProcessStartInfo]::new($Tailscale.Source)
+    foreach ($arg in @('cert', '--cert-file', $env:TK_SUPERVISOR_TLS_CERT, '--key-file', $env:TK_SUPERVISOR_TLS_KEY, $env:TK_SUPERVISOR_TLS_NAME)) { $psi.ArgumentList.Add($arg) }
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $cert = [System.Diagnostics.Process]::Start($psi)
+    try {
+      $cert.BeginOutputReadLine()
+      $cert.BeginErrorReadLine()
+      if (-not $cert.WaitForExit($CertSeconds * 1000)) {
+        try { $cert.Kill() } catch { } # only this process (its known pid)
+        Write-Warning "[supervisor] tailscale cert gave no answer within $CertSeconds s: the certificate is not renewed"
+      } elseif ($cert.ExitCode -ne 0) {
+        Write-Warning "[supervisor] tailscale cert exited $($cert.ExitCode): the certificate is not renewed (is HTTPS enabled in the Tailscale admin console?)"
+      }
+    } finally { $cert.Dispose() }
+  } catch {
+    Write-Warning "[supervisor] tailscale cert did not run: the certificate is not renewed"
+  }
+}
+$TlsPresent = -not ($TlsNames | Where-Object { -not $Present[$_] })
+if (-not $ServeOnly -and $TlsPresent) {
+  Invoke-TailscaleCert
 }
 
 # Retries with a back-off: 5 s after the first failure, doubling to at most 600 s. The keeper sleeps
@@ -169,6 +177,13 @@ if ($ServeOnly) {
       $code = "no exit code ($($_.Exception.Message))"
     }
     if (((Get-Date) - $started).TotalSeconds -ge $ServeUpSeconds) { $ServeBackoff.Failures = 0 }
+    # Story 27.5 (DW-21): exit 75 is serve asking for a certificate renewal (within 14 days of expiry, no live
+    # run): the same bounded `tailscale cert`, then serve restarted at once, without the back-off.
+    if ($code -eq 75) {
+      Write-Host '[supervisor] serve asked for a certificate renewal (exit 75): tailscale cert, then serve restarts at once'
+      if ($TlsPresent) { Invoke-TailscaleCert }
+      continue
+    }
     $delay = Register-Failure -Backoff $ServeBackoff
     Write-Warning "[supervisor] serve exited ${code} (right after logon Tailscale may not have bound its 100.x address yet): the API is down, restarting it in ${delay} s (the pacer keeps running)"
     Start-Sleep -Seconds $delay

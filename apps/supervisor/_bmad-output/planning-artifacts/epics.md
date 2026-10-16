@@ -1,12 +1,12 @@
 ---
 status: transcribed
-source: "thkennedy/tk-studio _bmad-output/planning-artifacts/epics.md (EP-021, EP-022; ST-063..ST-072; Story 22.5 added 2026-10-06, no canonical id yet)"
+source: "thkennedy/tk-studio _bmad-output/planning-artifacts/epics.md (EP-021, EP-022; ST-063..ST-072; Story 22.5 = ST-080; EP-027 transcribed 2026-10-15, ST-093..ST-097)"
 inputDocuments:
   - https://github.com/thkennedy/tk-studio/blob/main/_bmad-output/planning-artifacts/briefs/brief-studio-supervisor-2026-09-27/brief.md
   - https://github.com/thkennedy/tk-studio/blob/main/_bmad-output/planning-artifacts/briefs/planning-pass-agent-pc-and-supervisor-2026-09-26.md
 note: >-
   The canonical plan for the studio supervisor lives in tk-studio (Phase 1,
-  Epics 20-24). This file carries the two epics whose code lands in this repo,
+  Epics 20-24, then Epics 26-27). This file carries the epics whose code lands in this repo,
   verbatim with their numbers, so tk-studio-launch can run them here. Change
   a story in tk-studio first, then re-transcribe it here; never edit it here
   alone.
@@ -304,3 +304,135 @@ So that I can watch and cancel runs from a phone browser, which cannot send the 
 **Given** the OAuth client secrets, the session secret and every cookie value
 **When** anything logs, renders, notifies or spawns a worker
 **Then** none of them appears (NFR5) and `buildWorkerEnv` drops them; the test suite pins the form path, both OAuth callbacks against a faked provider, the allow-list refusal, the state-check refusal, cookie expiry and the CSRF refusal
+
+## Epic 27: The Service Owns Lifetime, Part 2: The Supervisor
+
+The supervisor's half of the design spec's §6.2 item 1, built in `thkennedy/tk-studio-supervisor` by the loop in `claude-tk-studio-supervisor` after this epic is transcribed there (the Epic 21 and 22 pattern: change a story here first, then re-transcribe). It makes the supervisor the only thing that starts work and the owner of every engine's life: a worktree per run that the sandbox can see, the engine held and pinned by the service itself, a close-out for a run that paused after its story landed, a host-tier verify leg before any PR opens, the plan pulled back when a run lands, and the deferred work the ledger assigned to it. Two preconditions are the operator's: the supervisor tab is stopped from the console before the loop builds the supervisor itself (the single-checkout decision of 2026-10-06), and the supervisor's sandbox is recreated with the read-only skills mount, `WITH_BUN=1`, and a second read-write mount of `TK_SUPERVISOR_WORK` so worktrees are visible inside the microVM. Requirements trace: Story 23.2 (superseded here), PROP-025, PROP-036, PROP-038, PROP-040, PROP-041, PROP-053, PROP-055, PROP-064, PROP-065 (adopted 2026-10-15), loop holes 7, 9, 11, 12, 16, 18, 22; DW-3, DW-6, DW-11, DW-12, DW-13, DW-15, DW-19, DW-21, DW-23 of the supervisor's ledger; spec §6.2 item 1. Repo: the supervisor repo (every story); tk-studio only for the runbook rows.
+
+### Story 27.1: Every Run Gets Its Own Worktree and Ends in a PR
+
+As the operator,
+I want each run to work in a git worktree of the project cut from its base, and to end as a pull request against that base,
+So that two loops never share a working tree, a run never switches the branch under a running service, and all agent work arrives PR-only (hole 16; supersedes Story 23.2).
+
+**Acceptance Criteria:**
+
+**Given** a submission with `base_ref`
+**When** the run is claimed
+**Then** the supervisor creates `git worktree add <TK_SUPERVISOR_WORK>/worktrees/<project>/<run_id> -b supervisor/run-<run_id> <base_ref>` from the project checkout, refuses a `base_ref` that is the repository's default branch when that branch is not protected on GitHub (`blocked`, naming it), and records the worktree path on the queue run; the checkout itself is never switched
+
+**Given** the untracked runtime the engine needs in a worktree (`_bmad/` at the pin, `.bmad-loop/policy.toml` and `routing.current.json`, the project's local config overlay)
+**When** the worktree is prepared
+**Then** the supervisor materialises them by the studio's own motions (`tk install` at the pin inside the worktree; the policy and routing files copied from the checkout; never a junction into the checkout), `tk activate` is clean inside the worktree, and the engine's `--project` is the worktree
+
+**Given** a run that launched an engine
+**When** the engine completes, pauses, or is stopped
+**Then** the supervisor pushes the run branch and opens a PR against `base_ref` whose body carries the launch status block, the engine run id, the landed commits and the metered cost, records the PR URL on the `ended` event, opens no PR when no commit landed ("no changes" recorded), never force-pushes and never merges; the worktree is removed after the PR opens unless the run is paused (a paused run keeps it for the resume)
+
+**Given** the supervisor's test suite on the Windows host and the Linux engine
+**When** it runs
+**Then** worktree creation, the unprotected-base refusal, the runtime materialisation and the PR body are pinned against a fake `gh` and a real throwaway repository, and the live acceptance on the-universe-awaits (Story 23.3) is re-planned against this story
+
+### Story 27.2: The Supervisor Holds the Engine and Nothing Else Starts One
+
+As the operator,
+I want the supervisor itself to start, hold, pin and release every engine sandbox, and the queue to be the only way a run starts,
+So that an engine never dies with a host-side shell (hole 7) and the pacer never overlaps a run it cannot see (DW-6, DW-3).
+
+**Acceptance Criteria:**
+
+**Given** an sbx-tier run
+**When** the worker starts
+**Then** the supervisor runs `sbx run -d --name <sandbox>` to pin the sandbox, holds its own `sbx exec` for the engine's lifetime from the console session (never a Claude desktop-app session), records the in-VM engine pid and the sandbox name on the run, and releases the pin (`sbx stop`) when the run ends and no other run holds the sandbox
+
+**Given** a cancel or a tripped guard on an sbx run
+**When** it fires
+**Then** the engine's process group inside the microVM is killed by name of the recorded pid through `sbx exec` (argv only, no shell), the kill is recorded, and a kill that leaves the pid alive after its wait holds the run as DW-3 specifies
+
+**Given** `jobrun.py submit|wake` run by hand or through the MCP `tk_job` surface on a project the supervisor serves
+**When** it would start a run
+**Then** the supervisor's lock file for the checkout names the queue as the only starter, the hand-started run is recorded as `external` on the next tick with its studio run id, and the pacer counts it as live until it ends (DW-6 closed)
+
+**Given** the supervisor's test suite
+**When** it runs
+**Then** the pin, hold, release, kill-by-pid and external-run detection are pinned with a fake `sbx`, on both hosts
+
+### Story 27.3: A Paused Run Whose Story Landed Is Closed Out by the Service
+
+As the operator,
+I want the supervisor to close out a run that paused after its story's work was committed, once a verdict exists,
+So that the attended recipe of 2026-10-14 (verdict, harvest commit, meter, archive, relaunch) is the service's job (hole 9).
+
+**Acceptance Criteria:**
+
+**Given** a run that paused at the commit gate or on an escalation with the story's spec at `status: done` and a `reconcile_verdict` other than `escalate` recorded
+**When** the supervisor's tick sees it
+**Then** it commits the engine's staged harvest on the run branch with a named message, harvests the story's meter observation to the host ledger (Story 26.4's `meter.py harvest`), archives the run (`bmad-loop archive`, through `sbx exec`), relaunches the epic through `tk-studio-launch` (which skips done stories) under the same queue run with a `close-out` event, and never re-implements the story
+
+**Given** the same run with no verdict, or `escalate`
+**When** the tick sees it
+**Then** it stays paused, one notification names the story and the reason, and the run's page row says "awaiting a ruling"
+
+**Given** a story that halted before any commit
+**When** the tick sees it
+**Then** nothing is closed out; the run stays paused for the resume path (`bmad-loop resolve`), which the supervisor exposes as `POST /runs/{id}/resume` with an optional restore patch
+
+**Given** the supervisor's test suite
+**When** it runs
+**Then** all three cases are pinned with a fake engine, on both hosts
+
+### Story 27.4: A Host-Tier Verify Leg Runs Before Any PR Opens
+
+As the operator,
+I want the project's own verify command run on the Windows host, in the run's worktree, after the engine completes and before the PR opens,
+So that Windows-only defects stop reaching branches (holes 11, 12 and 22).
+
+**Acceptance Criteria:**
+
+**Given** a project's tracked `.tk-studio/config.yaml` with `verify.host: <command>` (tk-studio: the lib suite and conformance; the supervisor: `bun test`; the-universe-awaits: its verify script)
+**When** an sbx-tier run's engine completes
+**Then** the supervisor runs that command on the host tier in the worktree, console-hosted, under the same guards as a host-tier worker, and records its exit, duration and the last lines of output on a `host-verify` event; the command comes from the project's config, never from the plugin (AD-2)
+
+**Given** a red host verify
+**When** the PR would open
+**Then** the run ends `partial` naming the failing command, the branch is still pushed, the PR opens as a draft whose body carries the host failures, and the notification names them
+
+**Given** a project with no `verify.host`
+**When** a run ends
+**Then** the PR opens as before and the event says the leg was skipped with the reason
+
+**Given** the supervisor's test suite and the runbook
+**When** the story closes
+**Then** green, red and absent commands are pinned on both hosts, and runbook §3.8 retires the "attended host run before each PR" rule in favour of this leg
+
+### Story 27.5: The Plan Follows the Run, and the Deferred Work Is Paid
+
+As the operator,
+I want the canonical plan to reflect a run's landing, and the supervisor's own deferred work closed,
+So that the plan index stops under-reporting what is built (hole 18) and the queue is honest about cost, cancels, time and certificates (DW-11, DW-12, DW-13, DW-15, DW-19, DW-21, DW-23).
+
+**Acceptance Criteria:**
+
+**Given** a run that opens a PR
+**When** the `ended` event is written
+**Then** the supervisor calls the planning adapter's status verb (Story 26.5) on the project that owns the plan (the registry names it; a transcribed epic names its owner) for every story the run's spec marked done, setting `review`; the next tick that sees the PR merged sets `done`; both are recorded on the run's events, and a refused call never changes the run's state
+
+**Given** a run resumed after a restart
+**When** it finishes
+**Then** `run.json`'s `total_cost_usd` is the sum across every iteration (per-iteration cost recorded as `accounted` events; DW-15)
+
+**Given** a cancel racing a claim or a late studio-run record
+**When** both happen
+**Then** the cancel ends the studio run it finds on a re-read inside the end transaction, or the next recovery ends it, and no run is left unended (DW-12, DW-13); an ended run that keeps its lock counts as live for the pacer (DW-11)
+
+**Given** the worker record on win32
+**When** it is written
+**Then** the pid lands before the start time, and the start time is read natively (`GetProcessTimes` through `bun:ffi` or an equivalent that takes under 50 ms), so a supervisor killed inside the window still leaves a usable record (DW-19)
+
+**Given** the TLS certificate and a refused `finish`
+**When** the certificate is within 14 days of expiry, or a skill run finished itself
+**Then** the keeper renews the certificate and restarts `serve` once, outside a live run, with an event (DW-21); and a refused `finish` on an already-terminal studio run leaves the run's reason as the worker's own status-block reason, never the refusal text (DW-23)
+
+**Given** the supervisor's test suite
+**When** the story closes
+**Then** every case above is pinned on both hosts, the deferred-work entries are closed with their evidence, and the runbook §4 names the new events and the certificate rule

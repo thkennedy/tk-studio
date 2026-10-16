@@ -585,7 +585,8 @@ describe("sbx restart: held until the in-VM deadline, then partial naming the wa
   test("the worker record carries the guard seconds passed to its spawn (column + `worker` event)", async () => {
     const fx = await orphan({ tier: "sbx", sandbox: "sb", worker: { pid: 424242, start: "12345", guardS: 300 } });
     expect(fx.queue.get(fx.run.run_id)).toMatchObject({ worker_pid: 424242, worker_start: "12345", worker_guard_s: 300 });
-    expect(fx.queue.events(fx.run.run_id).find((e) => e.kind === "worker")!.detail).toEqual({ pid: 424242, start: "12345", guard_s: 300 });
+    // Story 27.5 (DW-19): the `worker` event commits with the pid; the start time lands after it, on the column only.
+    expect(fx.queue.events(fx.run.run_id).find((e) => e.kind === "worker")!.detail).toEqual({ pid: 424242, guard_s: 300 });
   });
 
   test("deadline not passed (spawn + guard + the -k grace): run and lock left as they are, reported in held[] — whatever the host pid", async () => {
@@ -1323,5 +1324,61 @@ describe("a worker that exits between the probe and the kill is `not running`, n
       kill: () => { up = false; throw new Error("taskkill exited 128"); },
     });
     expect(out).toMatchObject({ outcome: "not running", detail: "worker exited before the kill (taskkill exited 128)" });
+  });
+});
+
+// ---------------------------------------------------------------- Story 27.5
+
+describe("Story 27.5: the worker record and the cost survive a restart", () => {
+  test("queueRecorder (DW-19): the pid (and its `worker` event) lands before the start time is read and written", async () => {
+    const fx = await orphan({ session: null, worker: null });
+    fx.queue.db.run("UPDATE runs SET owner_nonce = ? WHERE run_id = ?", [B.nonce, fx.run.run_id]);
+    const seen: QueueRun[] = [];
+    const write = fx.queue.setWorkerStart.bind(fx.queue);
+    fx.queue.setWorkerStart = (runId, pid, start) => { seen.push(fx.queue.get(runId)!); return write(runId, pid, start); };
+    queueRecorder(fx.queue, fx.run.run_id).worker(process.pid, 120);
+    // When the start time was written, the pid and the `worker` event had already committed.
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ worker_pid: process.pid, worker_start: null, worker_guard_s: 120 });
+    expect(fx.queue.events(fx.run.run_id).filter((e) => e.kind === "worker").map((e) => e.detail)).toEqual([{ pid: process.pid, guard_s: 120 }]);
+    expect(fx.queue.get(fx.run.run_id)).toMatchObject({ worker_pid: process.pid, worker_start: processStartTime(process.pid) });
+  });
+
+  test("cost (DW-15): a run resumed after a restart finishes with the sum across every iteration; each iteration's cost on its `accounted` event", async () => {
+    const fx = await orphan();
+    // The pre-restart iteration, accounted (with its cost) by the dead supervisor.
+    queueRecorder(fx.queue, fx.run.run_id).accounted(["m0"], { turns: 1, tokens: 15 }, 0.25);
+    writeTranscript(join(cfg, "projects"), SID, ["m0", "m1"]);
+    const v = verbs();
+    const { report, prepared } = await recoverWithResume(fx.queue, B, v.runner, { rebuild: fx.rebuild, transcripts: okTranscripts });
+    expect(report.resumed).toHaveLength(1);
+    const invoke = (async (_root: string, _skill: string, _args: Record<string, any>, _sp?: unknown, opts: Record<string, any> = {}) => {
+      opts.onSpawn?.(process.pid);
+      writeFileSync(join(cfg, "projects", "some-slug", `${SID}.jsonl`), ["m0", "m1", "m2"].map(line).join("\n") + "\n");
+      return { ran: true, status_block: BLOCK, session_id: SID, total_cost_usd: 0.01 };
+    }) as unknown as typeof invokeSkill;
+    await driveResumes(fx.queue, report.resumed, prepared, v.runner, invoke);
+    expect(flag(v.of("finish")[0]!, "--total-cost-usd")).toBe("0.26");
+    expect(report.resumed[0]!.summary).toMatchObject({ state: "complete", total_cost_usd: 0.26 });
+    const costs = fx.queue.events(fx.run.run_id).filter((e) => e.kind === "accounted").map((e) => e.detail!.cost_usd);
+    expect(costs).toEqual([0.25, undefined, 0.01]); // the restart's own account of the interrupted iteration carries none
+    expect(fx.queue.accountedCost(fx.run.run_id)).toBe(0.26);
+  });
+
+  test("cost (DW-15): a job with no turn/token guard records each iteration's cost on its own `accounted` event; `launched` events are never counted", async () => {
+    const fx = await orphan({ session: null, worker: null, defn: { guards: { max_wall_clock_seconds: 600 } } });
+    fx.queue.db.run("UPDATE runs SET owner_nonce = ? WHERE run_id = ?", [B.nonce, fx.run.run_id]);
+    fx.queue.note(fx.run.run_id, "launched", { engine_run_id: "E1", worker_cost_usd: 9, end: {} });
+    queueRecorder(fx.queue, fx.run.run_id).accounted([], { turns: 0, tokens: 0 }, 0.5);
+    const v = verbs();
+    const invoke = (async () => ({ ran: true, status_block: BLOCK, session_id: SID, total_cost_usd: 0.25 })) as unknown as typeof invokeSkill;
+    const s = await fx.rebuild(fx.queue.get(fx.run.run_id)!, WAKE);
+    const summary = await finishRun({ ...s, defn: { ...fx.defn, guards: { max_wall_clock_seconds: 600 } }, recorder: queueRecorder(fx.queue, fx.run.run_id) }, v.runner, invoke);
+    expect(v.of("account")).toEqual([]);
+    expect(summary.total_cost_usd).toBe(0.75);
+    expect(flag(v.of("finish")[0]!, "--total-cost-usd")).toBe("0.75");
+    expect(fx.queue.events(fx.run.run_id).filter((e) => e.kind === "accounted").map((e) => e.detail)).toEqual([
+      { turns: 0, tokens: 0, message_ids: [], cost_usd: 0.5 }, { turns: 0, tokens: 0, message_ids: [], cost_usd: 0.25 },
+    ]);
   });
 });

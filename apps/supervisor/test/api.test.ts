@@ -3,11 +3,13 @@ import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } fro
 import { hostname, tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
-import { ApiBindRefused, checkBind, checkSubmitBody, createApi, serve, type ApiDeps, type SubmitBody } from "../src/api";
-import { CancelRaced, cancelRun, CANCELLED_REASON, launchStopGraceful, mirror, queueRecorder, recordMinted, StartError, type RunSummary } from "../src/cli";
+import { ApiBindRefused, checkBind, checkResumeBody, checkSubmitBody, createApi, serve, type ApiDeps, type SubmitBody } from "../src/api";
+import { csrfToken, SESSION_COOKIE, signSession } from "../src/auth";
+import { ResumeRefused } from "../src/closeout";
+import { CancelRaced, cancelRun, CANCELLED_REASON, endCancelledLeftovers, launchStopGraceful, mirror, queueRecorder, recordMinted, StartError, type RunSummary } from "../src/cli";
 import { ApiBindMissing, ApiPortInvalid, ApiTokenMissing, apiBind, apiPort, apiToken } from "../src/env";
 import { END_HYGIENE_EVENTS } from "../src/hygiene";
-import { type QueueEvent, Queue, RunTerminal, type EngineProbe, type Owner, type Probes, type QueueRun, type WorkerKill } from "../src/queue";
+import { type QueueEvent, Queue, RunTerminal, STUDIO_END_RETRY_LIMIT, type EngineProbe, type Owner, type Probes, type QueueRun, type WorkerKill } from "../src/queue";
 import { fakeBin } from "./fakes";
 
 const REPO = resolve(import.meta.dir, "..");
@@ -58,7 +60,7 @@ afterAll(() => {
 
 interface FxOpts {
   killWorker?: Probes["killWorker"]; engine?: (id: string | null) => EngineProbe; now?: () => number;
-  submit?: ApiDeps["submit"]; cancel?: ApiDeps["cancel"];
+  submit?: ApiDeps["submit"]; cancel?: ApiDeps["cancel"]; resume?: ApiDeps["resume"];
 }
 
 function fixture(o: FxOpts = {}) {
@@ -84,7 +86,7 @@ function fixture(o: FxOpts = {}) {
       definition: { id: b.job }, tier: b.tier, model: b.model, effort: b.effort, base_ref: b.base_ref });
     return { ok: true, job_id: b.job, project_id: b.project, run_id: run.run_id, state: run.state, minted };
   });
-  const handler = createApi({ queue, token: TOKEN, submit, ...(o.cancel ? { cancel: o.cancel } : {}), pollMs: 10 });
+  const handler = createApi({ queue, token: TOKEN, submit, ...(o.cancel ? { cancel: o.cancel } : {}), ...(o.resume ? { resume: o.resume } : {}), pollMs: 10 });
   const call = (method: string, path: string, init: { body?: string; auth?: string | null; headers?: Record<string, string> } = {}) =>
     handler(new Request(`${BASE}${path}`, {
       method, body: init.body,
@@ -910,4 +912,240 @@ describe.skipIf(!canRunE2E)("POST /jobs through the real submit path", () => {
     expect(body).toMatchObject({ ok: true, state: "queued", studio_run_id: null, base_ref: "main", project_id: projectId });
     expect(queue.get(body.run_id)).toMatchObject({ state: "queued", base_ref: "main", job_id: "studio-health" });
   }, 60_000);
+});
+
+describe("Story 27.3: POST /runs/{id}/resume, and an external run's cancel (DW-26)", () => {
+  test("cancel of an external run → 409 ExternalRun; the run stays external", async () => {
+    const { queue, enqueue, call, checkout } = fixture();
+    const first = enqueue("ext-job");
+    queue.end(first.run_id, "cancelled", "test");
+    const ext = queue.recordExternal("ext-job", checkout, "ext-job-20261016T101010Z", "running")!;
+    const res = await call("POST", `/runs/${ext.run_id}/cancel`);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ ok: false, error: "ExternalRun", run_id: ext.run_id });
+    expect(queue.get(ext.run_id)!.state).toBe("external");
+  });
+
+  test("resume answers: 404 RunNotFound, 409 RunNotPaused / ExternalRun (the default verb), 400 SchemaError, 200 through the verb", async () => {
+    const { queue, enqueue, call, checkout } = fixture();
+    expect(await (await call("POST", "/runs/q-nope/resume")).json()).toMatchObject({ error: "RunNotFound" });
+    expect((await call("POST", "/runs/q-nope/resume")).status).toBe(404);
+    const queued = enqueue("resume-job");
+    const notPaused = await call("POST", `/runs/${queued.run_id}/resume`, { body: "{}" });
+    expect(notPaused.status).toBe(409);
+    expect(await notPaused.json()).toMatchObject({ ok: false, error: "RunNotPaused", run_id: queued.run_id });
+    queue.end(queued.run_id, "cancelled", "test");
+    const ext = queue.recordExternal("resume-job", checkout, "resume-job-20261016T101010Z", "running")!;
+    expect(await (await call("POST", `/runs/${ext.run_id}/resume`)).json()).toMatchObject({ error: "ExternalRun" });
+    for (const body of ["[]", JSON.stringify({ restore_patch: "" }), JSON.stringify({ restore_patch: 1 }), JSON.stringify({ other: "x" })]) {
+      const r = await call("POST", `/runs/${queued.run_id}/resume`, { body });
+      expect(r.status).toBe(400);
+      expect(await r.json()).toMatchObject({ error: "SchemaError" });
+    }
+    expect((await call("POST", `/runs/${queued.run_id}/resume`, { body: "{nope" })).status).toBe(400);
+    expect((await call("GET", `/runs/${queued.run_id}/resume`)).status).toBe(405);
+    expect(checkResumeBody({ restore_patch: "p.patch" })).toEqual({ ok: true, body: { restore_patch: "p.patch" } });
+
+    const seen: unknown[] = [];
+    const ok = fixture({ resume: async (id, b) => { seen.push([id, b]); return { ok: true, run_id: id, state: "running", engine_run_id: "E1" }; } });
+    const r = await ok.call("POST", "/runs/q-1/resume", { body: JSON.stringify({ restore_patch: "fix.patch" }) });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ ok: true, run_id: "q-1", state: "running", engine_run_id: "E1" });
+    expect(seen).toEqual([["q-1", { restore_patch: "fix.patch" }]]);
+    const landed = fixture({ resume: async () => { throw new ResumeRefused("StoryLanded", "story 9-1 landed"); } });
+    const l = await landed.call("POST", "/runs/q-1/resume");
+    expect(l.status).toBe(409);
+    expect(await l.json()).toMatchObject({ ok: false, error: "StoryLanded" });
+    // Bearer only: no auth is 401.
+    expect((await ok.call("POST", "/runs/q-1/resume", { auth: null })).status).toBe(401);
+  });
+
+  test("resume refuses a valid cookie session, even with the page's CSRF token: bearer only", async () => {
+    const SECRET = "s".repeat(48);
+    const queue = new Queue(":memory:");
+    const seen: string[] = [];
+    const handler = createApi({ queue, token: TOKEN, session: { secret: SECRET },
+      resume: async (id) => { seen.push(id); return { ok: true, run_id: id, state: "running", engine_run_id: "E1" }; } });
+    const cookie = signSession(SECRET, "token", Date.now());
+    const csrf = csrfToken(SECRET, cookie);
+    // The session is valid: it reads the page.
+    expect((await handler(new Request(`${BASE}/status`, { headers: { cookie: `${SESSION_COOKIE}=${cookie}` } }))).status).toBe(200);
+    for (const init of <{ headers: Record<string, string>; body: string }[]>[
+      { headers: { cookie: `${SESSION_COOKIE}=${cookie}`, "x-csrf-token": csrf }, body: "{}" },
+      { headers: { cookie: `${SESSION_COOKIE}=${cookie}`, "content-type": "application/x-www-form-urlencoded" }, body: `csrf=${encodeURIComponent(csrf)}` },
+    ]) {
+      const r = await handler(new Request(`${BASE}/runs/q-1/resume`, { method: "POST", ...init }));
+      expect(r.status).toBe(401);
+      expect(await r.json()).toMatchObject({ ok: false, error: "Unauthorized" });
+    }
+    expect(seen).toEqual([]);
+  });
+});
+
+describe("Story 27.5: the cancel's end re-reads the run (DW-12, DW-13)", () => {
+  const LAUNCH = { target: "skill", definition: { id: "run-epic", target: { skill: "tk-studio-launch" } } };
+  const studioVerbs = (calls: string[][], state = "running") => async (_root: string, args: string[]) => {
+    calls.push(args);
+    return args[0] === "status" ? { ok: true, runs: [{ run_id: args[args.indexOf("--run-id") + 1], state }] } : { ok: true, state: "partial" };
+  };
+
+  test("a studio run recorded after the cancel's last read is found by the end's re-read and ended after the commit (`studio-run-ended`, late)", async () => {
+    const sid = "run-epic-20261016T000001Z";
+    let probes = 0;
+    // The driver's `setStudioRun` lands after the cancel's re-read, before `Queue.end` (on the second engine probe).
+    const fx = fixture({ engine: () => { if (++probes === 2) fx.queue.setStudioRun(run.run_id, sid); return { live: false }; } });
+    const run = fx.enqueue("run-epic", { skill: "tk-studio-launch" });
+    await fx.queue.claim(run.run_id, A);
+    fx.queue.markVerbStarted(run.run_id, "wake", [], LAUNCH);
+    const calls: string[][] = [];
+    const ended = await cancelRun(fx.queue, run.run_id, { verbRunner: studioVerbs(calls) });
+    expect(ended).toMatchObject({ state: "cancelled", studio_run_id: sid });
+    expect(calls.map((c) => c[0])).toEqual(["status", "finish"]);
+    expect(calls[1]).toEqual(expect.arrayContaining([sid, CANCELLED_REASON]));
+    const evs = lifecycle(fx.queue, run.run_id);
+    expect(evs.find((e) => e.kind === "ended")!.detail).toMatchObject({ late_studio_run_id: sid });
+    expect(evs.filter((e) => e.kind === "studio-run-ended").map((e) => e.detail)).toEqual([
+      { studio_run_id: sid, late: true, by: "cancel", detail: `studio run ${sid} ended via finish`, state: "partial" },
+    ]);
+    // Nothing is left for the next recovery.
+    expect(fx.queue.cancelledLeftovers()).toEqual([]);
+  });
+
+  test("a claim inside the window: the run ends cancelled keeping its lock for the claiming driver, whose own end frees it", async () => {
+    const fx = fixture();
+    const run = fx.enqueue();
+    // The driver claims the queued run after the cancel read it (inside the cancel's worker check).
+    const check = fx.queue.recordedWorker.bind(fx.queue);
+    fx.queue.recordedWorker = async (r, kill, opts) => {
+      if (r.run_id === run.run_id && fx.queue.get(run.run_id)!.state === "queued") await fx.queue.claim(run.run_id, A);
+      return check(r, kill, opts);
+    };
+    const ended = await cancelRun(fx.queue, run.run_id, { verbRunner: async () => { throw new Error("no studio run: never called"); } });
+    expect(ended.state).toBe("cancelled");
+    expect(fx.queue.lock(fx.checkout)).toMatchObject({ kind: "run", run_id: run.run_id, owner_pid: A.pid });
+    expect(lifecycle(fx.queue, run.run_id).find((e) => e.kind === "ended")!.detail).toMatchObject({
+      claimed_during_cancel: { pid: A.pid }, lock: { held: expect.stringContaining("claimed by its driver") },
+    });
+    // The driver's next record is refused; its end frees the lock it kept.
+    expect(() => fx.queue.markVerbStarted(run.run_id, "wake", [])).toThrow(RunTerminal);
+    await expect(fx.queue.endDriven(run.run_id, "blocked", "cancelled under the driver")).rejects.toThrow(RunTerminal);
+    expect(fx.queue.lock(fx.checkout)).toBeNull();
+  });
+
+  test("a claim inside the window on an sbx run: the cancel leaves the pin to the claiming driver (no `pin-released`, no `sbx stop`)", async () => {
+    const fx = fixture();
+    const run = fx.enqueue("studio-health", { tier: "sbx", sandbox: "sb-claimed" });
+    fx.queue.note(run.run_id, "pinned", { sandbox: "sb-claimed" }); // an outstanding pin on the run's sandbox
+    const check = fx.queue.recordedWorker.bind(fx.queue);
+    fx.queue.recordedWorker = async (r, kill, opts) => {
+      if (r.run_id === run.run_id && fx.queue.get(run.run_id)!.state === "queued") await fx.queue.claim(run.run_id, A);
+      return check(r, kill, opts);
+    };
+    const sbx: string[][] = [];
+    const ended = await cancelRun(fx.queue, run.run_id, {
+      verbRunner: async () => { throw new Error("no studio run: never called"); },
+      worktree: { sbx: { run: async (_bin, args) => { sbx.push(args); return { exit: 0, stdout: "", stderr: "" }; } } },
+    });
+    expect(ended.state).toBe("cancelled");
+    expect(lifecycle(fx.queue, run.run_id).find((e) => e.kind === "ended")!.detail).toMatchObject({ claimed_during_cancel: { pid: A.pid } });
+    expect(fx.queue.events(run.run_id).map((e) => e.kind)).not.toContain("pin-released");
+    expect(sbx).toEqual([]);
+    expect(fx.queue.lock(fx.checkout)).toMatchObject({ kind: "run", run_id: run.run_id, owner_pid: A.pid });
+  });
+
+  test("the next recovery ends a cancelled run's studio run the cancel left open (`studio-run-ended`, once)", async () => {
+    const sid = "studio-health-20261016T000002Z";
+    const fx = fixture();
+    const run = fx.enqueue();
+    await fx.queue.claim(run.run_id, A);
+    fx.queue.setStudioRun(run.run_id, sid);
+    // The cancel's own ender failed (the studio was unreachable): the studio run stays open.
+    await cancelRun(fx.queue, run.run_id, { verbRunner: async () => { throw new Error("studio unreachable"); } });
+    expect(lifecycle(fx.queue, run.run_id).find((e) => e.kind === "ended")!.detail).toMatchObject({ studio: { ok: false } });
+    expect(fx.queue.cancelledLeftovers().map((r) => r.run_id)).toEqual([run.run_id]);
+    const calls: string[][] = [];
+    expect(await endCancelledLeftovers(fx.queue, studioVerbs(calls))).toEqual([run.run_id]);
+    expect(calls.map((c) => c[0])).toEqual(["status", "finish"]);
+    expect(lifecycle(fx.queue, run.run_id).at(-1)).toMatchObject({
+      kind: "studio-run-ended", from_state: "cancelled", to_state: "cancelled", detail: { studio_run_id: sid, late: true, by: "recover" },
+    });
+    expect(await endCancelledLeftovers(fx.queue, studioVerbs(calls))).toEqual([]);
+    expect(calls).toHaveLength(2);
+    // A cancel whose ender ended its studio run leaves nothing for the recovery.
+    const other = fixture();
+    const done = other.enqueue();
+    await other.queue.claim(done.run_id, A);
+    other.queue.setStudioRun(done.run_id, sid);
+    await cancelRun(other.queue, done.run_id, { verbRunner: studioVerbs([]) });
+    expect(other.queue.cancelledLeftovers()).toEqual([]);
+  });
+});
+
+describe("Story 27.5 (P7): a leftover's outcome is recorded; a failed ender is retried, bounded", () => {
+  test("already terminal → `studio-run-ended` with its state; an ender that fails → `studio-run-end-failed`, retried by the next recovery until it ends", async () => {
+    const make = async (sid: string) => {
+      const fx = fixture();
+      const run = fx.enqueue();
+      await fx.queue.claim(run.run_id, A);
+      fx.queue.setStudioRun(run.run_id, sid);
+      await cancelRun(fx.queue, run.run_id, { verbRunner: async () => { throw new Error("studio unreachable"); } });
+      return { fx, run };
+    };
+    const terminal = await make("studio-health-20261016T000003Z");
+    const calls: string[][] = [];
+    const already = async (_root: string, args: string[]) => { calls.push(args); return { ok: true, runs: [{ run_id: args[args.indexOf("--run-id") + 1], state: "complete" }] }; };
+    expect(await endCancelledLeftovers(terminal.fx.queue, already)).toEqual([terminal.run.run_id]);
+    expect(calls.map((c) => c[0])).toEqual(["status"]); // already terminal: nothing ended
+    expect(lifecycle(terminal.fx.queue, terminal.run.run_id).at(-1)).toMatchObject({ kind: "studio-run-ended", detail: { late: true, by: "recover", state: "complete" } });
+    expect(terminal.fx.queue.cancelledLeftovers()).toEqual([]);
+
+    const failing = await make("studio-health-20261016T000004Z");
+    const tries: string[][] = [];
+    const broken = async (_root: string, args: string[]) => { tries.push(args); throw new Error("studio unreachable"); };
+    expect(await endCancelledLeftovers(failing.fx.queue, broken)).toEqual([]);
+    expect(lifecycle(failing.fx.queue, failing.run.run_id).at(-1)).toMatchObject({
+      kind: "studio-run-end-failed", detail: { studio_run_id: "studio-health-20261016T000004Z", by: "recover", detail: expect.stringContaining("studio unreachable"), attempt: 1 },
+    });
+    expect(lifecycle(failing.fx.queue, failing.run.run_id).at(-1)!.detail).not.toHaveProperty("gave_up");
+    // Still listed: the next recovery tries again (a short studio outage never leaves the studio run unended).
+    expect(failing.fx.queue.cancelledLeftovers().map((r) => r.run_id)).toEqual([failing.run.run_id]);
+    const n = tries.length;
+    expect(await endCancelledLeftovers(failing.fx.queue, broken)).toEqual([]);
+    expect(tries.length).toBeGreaterThan(n); // retried
+    expect(lifecycle(failing.fx.queue, failing.run.run_id).filter((e) => e.kind === "studio-run-end-failed").map((e) => e.detail!.attempt)).toEqual([1, 2]);
+    // The studio is back: the next recovery ends it, and the run is never listed again.
+    const calls2: string[][] = [];
+    const back = async (_root: string, args: string[]) => {
+      calls2.push(args);
+      return args[0] === "status" ? { ok: true, runs: [{ run_id: args[args.indexOf("--run-id") + 1], state: "running" }] } : { ok: true, state: "partial" };
+    };
+    expect(await endCancelledLeftovers(failing.fx.queue, back)).toEqual([failing.run.run_id]);
+    expect(calls2.map((c) => c[0])).toEqual(["status", "finish"]);
+    expect(lifecycle(failing.fx.queue, failing.run.run_id).at(-1)).toMatchObject({
+      kind: "studio-run-ended", detail: { studio_run_id: "studio-health-20261016T000004Z", late: true, by: "recover" },
+    });
+    expect(failing.fx.queue.cancelledLeftovers()).toEqual([]);
+  });
+
+  test("an ender failing STUDIO_END_RETRY_LIMIT times gives up: the last `studio-run-end-failed` carries `gave_up: true`, never listed again", async () => {
+    const fx = fixture();
+    const run = fx.enqueue();
+    await fx.queue.claim(run.run_id, A);
+    fx.queue.setStudioRun(run.run_id, "studio-health-20261016T000005Z");
+    await cancelRun(fx.queue, run.run_id, { verbRunner: async () => { throw new Error("studio unreachable"); } });
+    let tries = 0;
+    const broken = async () => { tries++; throw new Error("studio unreachable"); };
+    for (let i = 0; i < STUDIO_END_RETRY_LIMIT; i++) {
+      expect(fx.queue.cancelledLeftovers().map((r) => r.run_id)).toEqual([run.run_id]);
+      expect(await endCancelledLeftovers(fx.queue, broken)).toEqual([]);
+    }
+    const failed = lifecycle(fx.queue, run.run_id).filter((e) => e.kind === "studio-run-end-failed");
+    expect(failed.map((e) => e.detail!.attempt)).toEqual(Array.from({ length: STUDIO_END_RETRY_LIMIT }, (_, i) => i + 1));
+    expect(failed.filter((e) => e.detail!.gave_up === true).map((e) => e.detail!.attempt)).toEqual([STUDIO_END_RETRY_LIMIT]);
+    expect(fx.queue.cancelledLeftovers()).toEqual([]);
+    const n = tries;
+    expect(await endCancelledLeftovers(fx.queue, broken)).toEqual([]);
+    expect(tries).toBe(n); // given up: never tried again
+    expect(lifecycle(fx.queue, run.run_id).filter((e) => e.kind === "studio-run-end-failed")).toHaveLength(STUDIO_END_RETRY_LIMIT);
+  });
 });

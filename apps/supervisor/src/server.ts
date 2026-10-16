@@ -996,6 +996,9 @@ export interface InvokeOptions {
   beforeSpawn?: () => void;
   /** Called with the worker's pid as soon as it is spawned (the supervisor records the worker). */
   onSpawn?: (pid: number) => void;
+  /** Story 27.2: on the sbx tier, pins the sandbox (`sbx run -d --name <sb>`) before the login preflight;
+   * answers null when pinned, else the failure — the run then ends `blocked` naming the pin. */
+  pin?: (sandbox: string) => Promise<string | null>;
 }
 
 /** The one `-p` item of a resumed worker (`--resume <session-id>`): the session's
@@ -1021,8 +1024,8 @@ export function buildSkillPrompt(skill: string, payload: Record<string, unknown>
 
 /** Headless skill run (§1): command line built first (a host bypass throws
  * HostBypassRefused, an unknown tier TierRefused, sbx without a sandbox
- * SbxSandboxMissing — all before any process starts), then the Max-login
- * preflight, then the worker — on the host, or on the sbx tier wrapped in
+ * SbxSandboxMissing — all before any process starts), on sbx the sandbox pin
+ * (`opts.pin`, Story 27.2), then the Max-login preflight, then the worker — on the host, or on the sbx tier wrapped in
  * `sbx exec` (buildSbxCommand) with the payload directory as its VM path. Answers the tool result: status block, cost, or the named
  * conformance failure. */
 export async function invokeSkill(
@@ -1056,6 +1059,13 @@ export async function invokeSkill(
   });
   const cmd = vmRoot ? buildSbxCommand({ sandbox: sandbox!, vmRoot, worker: workerCmd, guardS: timeoutS }) : workerCmd;
 
+  // Story 27.2: the sandbox pinned first, so the preflight's own `sbx exec` finds it up.
+  if (vmRoot && opts.pin) {
+    const pinFailed = await opts.pin(sandbox!);
+    if (pinFailed) {
+      return { status_block: { status: "blocked", intent: skill, artifacts: [], reason: pinFailed }, pin: pinFailed, ran: false };
+    }
+  }
   const gaps = await authPreflight(skill, payload, root, spawner, { tier, sandbox });
   if (gaps.length) {
     return {

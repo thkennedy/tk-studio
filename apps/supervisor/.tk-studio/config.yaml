@@ -45,3 +45,12 @@ working_set:
 # live in tk-studio; this repo keeps plain canonical files only.
 planning:
   backend: bmad-files
+
+# Story 27.4: the host verify leg — one command line (split on whitespace, "…"/'…'
+# grouping, never a shell) the supervisor runs on the host in an sbx run's worktree
+# before its PR opens; read from this tracked file at the run's base_ref.
+# A command whose first token is quoted (a path with spaces) is wrapped whole in YAML
+# quotes, e.g. host: '"C:\Program Files\x\bun.exe" test' — else the YAML does not
+# parse and the leg is skipped `config unreadable: …`.
+verify:
+  host: bun test

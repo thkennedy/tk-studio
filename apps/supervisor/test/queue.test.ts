@@ -3,11 +3,13 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { studioOps, studioRunFinder } from "../src/cli";
+import { studioOps, studioRunFinder, watchCertificate } from "../src/cli";
 import {
   defaultOwnerAlive, END_LEASE_STALE_MS, launchStatusProbe, NOTIFIED_BEFORE, ORPHANED_REASON, processStartTime, Queue, QueueDbMissing, QueueDbPlacementRefused,
-  queueDbPath, REQUEUED_REASON, RunTerminal, selfOwner, type EngineProbe, type Owner, type Probes,
+  queueDbPath, REQUEUED_REASON, runPowerShell, RunTerminal, selfOwner, type EngineProbe, type Owner, type Probes,
 } from "../src/queue";
+import { filetimeToIso, processCreationTime } from "../src/winproc";
+import { CERT_CHECK_MS, CERT_RENEW_EXIT, certCheck, certNotAfter, FORCE_WITHIN_DAYS, recordCertStart } from "../src/cert";
 
 const REPO = resolve(import.meta.dir, "..");
 const HOST = hostname();
@@ -968,11 +970,11 @@ describe("review pass 2 fixes", () => {
   test("win32 start time: a bounded PowerShell read through injection; a failed read is absent", () => {
     const seen: string[] = [];
     const ps = (out: string | null) => (cmd: string) => { seen.push(cmd); return out; };
-    expect(processStartTime(4242, "win32", ps("2026-09-28T10:00:00.1234567Z\r\n"))).toBe("2026-09-28T10:00:00.1234567Z");
+    expect(processStartTime(4242, "win32", ps("2026-09-28T10:00:00.1234567Z\r\n"), () => undefined)).toBe("2026-09-28T10:00:00.1234567Z");
     expect(seen[0]).toContain("Get-Process -Id 4242");
     expect(seen[0]).toContain("ToUniversalTime().ToString('o')");
-    expect(processStartTime(4242, "win32", ps(null))).toBeNull();
-    expect(processStartTime(4242, "win32", ps("Get-Process : Cannot find a process"))).toBeNull();
+    expect(processStartTime(4242, "win32", ps(null), () => undefined)).toBeNull();
+    expect(processStartTime(4242, "win32", ps("Get-Process : Cannot find a process"), () => undefined)).toBeNull();
     expect(processStartTime(4242, "darwin", ps("2026-09-28T10:00:00Z"))).toBeNull();
     // The owner probe compares the recorded start with the injected read: a reused pid is dead.
     const me: Owner = { pid: process.pid, host: HOST, nonce: "n", start: "2026-09-28T10:00:00.0000000Z" };
@@ -1298,5 +1300,250 @@ describe("resume takeover and restart ends (Story 21.6)", () => {
     await fx.queue.recover(ops(false), B);
     expect(fx.queue.events(r.run_id).map((e) => e.kind).at(-1)).toBe("orphaned");
     expect(fx.queue.pacing("j", fx.checkout, B).stopped).toBeNull();
+  });
+});
+
+// ------------------------------------------------------------ Story 27.5
+
+const CERT_30D = `-----BEGIN CERTIFICATE-----
+MIIBbTCCAROgAwIBAgIUc6ZPqmTuygl1+92Cprb/ssY/v1owCgYIKoZIzj0EAwIw
+DDEKMAgGA1UEAwwBdDAeFw0yNjEwMTYwODE5MTZaFw0yNjExMTUwODE5MTZaMAwx
+CjAIBgNVBAMMAXQwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAT3XXxXeFfOcW4n
+8bGYkNI2elMfXBPjR0tTdKWvlxPIGlntbw22WylxH+Qx/IWQ/pd127fhB9CrnYYm
+O8jIVGWto1MwUTAdBgNVHQ4EFgQUpEWEoE9hHABV0CgPvAGOOtYrOYYwHwYDVR0j
+BBgwFoAUpEWEoE9hHABV0CgPvAGOOtYrOYYwDwYDVR0TAQH/BAUwAwEB/zAKBggq
+hkjOPQQDAgNIADBFAiAHThcmoxcPpJtqMKFRX8lx6WPsyKOotH7O2VoYjIhcgAIh
+AM75R/ANsRdCXmscP4YodxqbJGkWmwURVqxX+BKRPM+X
+-----END CERTIFICATE-----
+`; // notAfter 2026-11-15T08:19:16Z
+const CERT_10Y = `-----BEGIN CERTIFICATE-----
+MIIBazCCAROgAwIBAgIUb763IVWYFVNUeMMeHwMRGjQDeP4wCgYIKoZIzj0EAwIw
+DDEKMAgGA1UEAwwBdDAeFw0yNjEwMTYwODE5MTZaFw0zNjEwMTMwODE5MTZaMAwx
+CjAIBgNVBAMMAXQwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAATN5paqjo+wx1ip
+eNGSwW2dZqCftyQw96QNRmc2VrEPKtsCW73mLH2mIXz6IxrXd4ofcLIsIYYZaxUL
+vAvKhPrMo1MwUTAdBgNVHQ4EFgQUMApeJcc3q05krz+hgnt6dr3xEPAwHwYDVR0j
+BBgwFoAUMApeJcc3q05krz+hgnt6dr3xEPAwDwYDVR0TAQH/BAUwAwEB/zAKBggq
+hkjOPQQDAgNGADBDAh9mbO8JzC8xZvaPDDwnlIxCPnloywYCbn8wnSO4qrMzAiA4
+BZth+ThKr1Ze33DMeC5EonHsW1mgLKXRS1DF3hjIqQ==
+-----END CERTIFICATE-----
+`; // notAfter 2036-10-13T08:19:16Z
+
+describe("Story 27.5: the pacer, the worker record, the native start time, service events", () => {
+  test("pacing (DW-11): an ended run that keeps its `run` lock is live for its job; freed, it is not; another job's kept lock is not this job's", async () => {
+    const fx = fixture();
+    try {
+      const r = fx.enqueue("j", A).run;
+      await fx.queue.claim(r.run_id, A);
+      fx.queue.setWorker(r.run_id, 4242, "12345", 300);
+      fx.queue.end(r.run_id, "partial", "sbx worker may still run in the VM", { holdLock: "its worker may still run" });
+      expect(fx.queue.lock(fx.checkout)).toMatchObject({ kind: "run", run_id: r.run_id });
+      expect(fx.queue.keptLockRuns().map((k) => k.run_id)).toEqual([r.run_id]);
+      expect(fx.queue.pacing("j", fx.checkout, B)).toMatchObject({ live: [{ run_id: r.run_id, state: "partial" }], latestTerminal: { run_id: r.run_id } });
+      expect(fx.queue.pacing("other", fx.checkout, B).live).toEqual([]);
+      fx.queue.db.query("DELETE FROM locks WHERE run_id = ?").run(r.run_id);
+      expect(fx.queue.pacing("j", fx.checkout, B).live).toEqual([]);
+    } finally { fx.queue.close(); }
+  });
+
+  test("the worker record (DW-19): the pid and its `worker` event commit first, the start time after it on the column; a stale pid never takes a start", async () => {
+    const fx = fixture();
+    try {
+      const r = fx.enqueue("j", A).run;
+      await fx.queue.claim(r.run_id, A);
+      fx.queue.setWorker(r.run_id, 4242, null, 300);
+      // A supervisor killed here still leaves a usable record: the pid.
+      expect(fx.queue.get(r.run_id)).toMatchObject({ worker_pid: 4242, worker_start: null, worker_guard_s: 300 });
+      expect(fx.queue.events(r.run_id).filter((e) => e.kind === "worker").map((e) => e.detail)).toEqual([{ pid: 4242, guard_s: 300 }]);
+      fx.queue.setWorkerStart(r.run_id, 9999, "999"); // not the recorded pid: unchanged
+      expect(fx.queue.get(r.run_id)!.worker_start).toBeNull();
+      fx.queue.setWorkerStart(r.run_id, 4242, "12345");
+      expect(fx.queue.get(r.run_id)).toMatchObject({ worker_pid: 4242, worker_start: "12345" });
+      // `setWorker` with a start writes it the same two ways: pid first, then the start.
+      fx.queue.setWorker(r.run_id, 5151, "777", 60);
+      expect(fx.queue.get(r.run_id)).toMatchObject({ worker_pid: 5151, worker_start: "777", worker_guard_s: 60 });
+      expect(fx.queue.events(r.run_id).filter((e) => e.kind === "worker").map((e) => e.detail)).toEqual([{ pid: 4242, guard_s: 300 }, { pid: 5151, guard_s: 60 }]);
+      fx.queue.end(r.run_id, "cancelled", "cancelled: operator request", { holdLock: "worker may run" });
+      expect(() => fx.queue.setWorkerStart(r.run_id, 5151, "778")).toThrow(RunTerminal);
+    } finally { fx.queue.close(); }
+  });
+
+  test("win32 start time (DW-19): the FILETIME formatted exactly as PowerShell's `ToString('o')` UTC (7 fractional digits)", () => {
+    const secs = Date.UTC(2026, 8, 28, 10, 0, 0) / 1000;
+    const ft = BigInt(secs) * 10_000_000n + 1_234_567n + 116444736000000000n;
+    expect(filetimeToIso(ft)).toBe("2026-09-28T10:00:00.1234567Z");
+    expect(filetimeToIso(BigInt(secs) * 10_000_000n + 116444736000000000n)).toBe("2026-09-28T10:00:00.0000000Z");
+    expect(filetimeToIso(ft)).toMatch(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z?$/); // the shape the PowerShell read accepts
+  });
+
+  test("win32 start time: the native read wins; the PowerShell read only when the FFI cannot load", () => {
+    const seen: string[] = [];
+    const ps = (cmd: string) => { seen.push(cmd); return "2026-09-28T10:00:00.1234567Z"; };
+    expect(processStartTime(4242, "win32", ps, () => "2026-09-28T10:00:00.7654321Z")).toBe("2026-09-28T10:00:00.7654321Z");
+    expect(processStartTime(4242, "win32", ps, () => null)).toBeNull(); // the process could not be opened
+    expect(seen).toEqual([]);
+    expect(processStartTime(4242, "win32", ps, () => undefined)).toBe("2026-09-28T10:00:00.1234567Z");
+    expect(seen).toHaveLength(1);
+    if (process.platform !== "win32") expect(processCreationTime(process.pid)).toBeUndefined(); // no kernel32 here
+  });
+
+  // operator-decisions §5: the real `GetProcessTimes` read, on the Windows host only (unverifiable in the Linux sandbox).
+  test.skipIf(process.platform !== "win32")("win32 start time: a real native read, under 50 ms, equal to the PowerShell read", () => {
+    const t0 = performance.now();
+    const native = processCreationTime(process.pid);
+    const ms = performance.now() - t0;
+    expect(native).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$/);
+    expect(ms).toBeLessThan(50);
+    expect(processStartTime(process.pid, "win32", runPowerShell, () => undefined)).toBe(native!);
+  });
+
+  test("service_events: supervisor-scope events with no run, in their own table (events.run_id stays NOT NULL); kept across a reopen", () => {
+    const fx = fixture();
+    fx.queue.serviceEvent("cert-renew-requested", { cert: "c.pem", days_left: 3 });
+    fx.queue.serviceEvent("cert-renewed", { not_after: "x" });
+    expect(fx.queue.serviceEvents().map((e) => [e.kind, e.detail])).toEqual([["cert-renew-requested", { cert: "c.pem", days_left: 3 }], ["cert-renewed", { not_after: "x" }]]);
+    expect(fx.queue.serviceEvents("cert-renewed")).toHaveLength(1);
+    expect(count(fx.queue, "events")).toBe(0);
+    fx.queue.close();
+    const again = new Queue(fx.db);
+    try { expect(again.serviceEvents()).toHaveLength(2); } finally { again.close(); }
+  });
+});
+
+describe("Story 27.5: the certificate renews itself (DW-21)", () => {
+  const notAfter30 = Date.parse("2026-11-15T08:19:16Z");
+  function certFile(pem: string): string {
+    const p = join(mkdtempSync(join(tmpdir(), "tk-sup-cert-")), "cert.pem");
+    writeFileSync(p, pem);
+    return p;
+  }
+
+  test("more than 14 days left → nothing; within 14 days, no live run → `cert-renew-requested` and renew; at most once a day", () => {
+    const fx = fixture();
+    try {
+      const cert = certFile(CERT_30D);
+      expect(certNotAfter(cert)!.toISOString()).toBe("2026-11-15T08:19:16.000Z");
+      expect(certCheck(fx.queue, cert, notAfter30 - 20 * 86_400_000)).toMatchObject({ action: "none" });
+      const at = notAfter30 - 10 * 86_400_000;
+      expect(certCheck(fx.queue, cert, at)).toEqual({ action: "renew", detail: { cert, not_after: "2026-11-15T08:19:16.000Z", days_left: 10 } });
+      expect(CERT_RENEW_EXIT).toBe(75);
+      expect(fx.queue.serviceEvents("cert-renew-requested")).toMatchObject([{ at: new Date(at).toISOString(), detail: { cert, days_left: 10 } }]);
+      expect(certCheck(fx.queue, cert, at + 3600_000)).toMatchObject({ action: "wait" }); // requested within 24 h
+      expect(certCheck(fx.queue, cert, at + 25 * 3600_000)).toMatchObject({ action: "renew" });
+      expect(certCheck(fx.queue, join(fx.dir, "missing.pem"), at)).toMatchObject({ action: "none" });
+    } finally { fx.queue.close(); }
+  });
+
+  test("a live run (`running` or `external`) → wait; a paused run does not hold it", async () => {
+    const fx = fixture();
+    try {
+      const cert = certFile(CERT_30D);
+      const at = notAfter30 - 10 * 86_400_000; // outside FORCE_WITHIN_DAYS: a live run defers the renewal
+      const r = fx.enqueue("j", A).run;
+      await fx.queue.claim(r.run_id, A);
+      expect(certCheck(fx.queue, cert, at)).toEqual({ action: "wait", why: `a live run (${r.run_id})` });
+      fx.queue.end(r.run_id, "complete");
+      const ext = fx.queue.recordExternal("j", fx.checkout, "j-20261016T101010Z", "running")!;
+      expect(certCheck(fx.queue, cert, at)).toMatchObject({ action: "wait", why: `a live run (${ext.run_id})` });
+      fx.queue.endExternal(ext.run_id, "complete");
+      expect(certCheck(fx.queue, cert, at)).toMatchObject({ action: "renew" });
+    } finally { fx.queue.close(); }
+  });
+
+  test("within FORCE_WITHIN_DAYS of expiry a `running` run no longer defers it: days_left 2 → renew naming the run in `overrode`", async () => {
+    const fx = fixture();
+    try {
+      const cert = certFile(CERT_30D);
+      expect(FORCE_WITHIN_DAYS).toBe(3);
+      const r = fx.enqueue("j", A).run;
+      await fx.queue.claim(r.run_id, A);
+      const at = notAfter30 - 2 * 86_400_000;
+      expect(certCheck(fx.queue, cert, at)).toEqual({
+        action: "renew", detail: { cert, not_after: "2026-11-15T08:19:16.000Z", days_left: 2, overrode: [r.run_id] },
+      });
+      expect(fx.queue.serviceEvents("cert-renew-requested").map((e) => e.detail)).toEqual([{ cert, not_after: "2026-11-15T08:19:16.000Z", days_left: 2, overrode: [r.run_id] }]);
+      expect(certCheck(fx.queue, cert, at + 3600_000)).toMatchObject({ action: "wait" }); // still at most once per 24 h
+    } finally { fx.queue.close(); }
+  });
+
+  test("the same `running` run at days_left 10 → wait (outside FORCE_WITHIN_DAYS), nothing requested", async () => {
+    const fx = fixture();
+    try {
+      const cert = certFile(CERT_30D);
+      const r = fx.enqueue("j", A).run;
+      await fx.queue.claim(r.run_id, A);
+      expect(certCheck(fx.queue, cert, notAfter30 - 10 * 86_400_000)).toEqual({ action: "wait", why: `a live run (${r.run_id})` });
+      expect(fx.queue.serviceEvents("cert-renew-requested")).toEqual([]);
+    } finally { fx.queue.close(); }
+  });
+
+  test("on the next start: `cert-renewed {not_after_before, not_after}` when notAfter moved later, else `cert-renew-failed`; once per request", () => {
+    const fx = fixture();
+    try {
+      const cert = certFile(CERT_30D);
+      expect(recordCertStart(fx.queue, cert)).toBeNull(); // nothing requested
+      certCheck(fx.queue, cert, notAfter30 - 86_400_000);
+      expect(recordCertStart(fx.queue, cert)).toBe("cert-renew-failed"); // the same certificate
+      expect(recordCertStart(fx.queue, cert)).toBeNull();
+      certCheck(fx.queue, cert, notAfter30 - 86_400_000 + 25 * 3600_000);
+      writeFileSync(cert, CERT_10Y); // tailscale cert wrote a new one
+      expect(recordCertStart(fx.queue, cert)).toBe("cert-renewed");
+      expect(fx.queue.serviceEvents().map((e) => [e.kind, e.detail])).toEqual([
+        ["cert-renew-requested", expect.anything()],
+        ["cert-renew-failed", { not_after: "2026-11-15T08:19:16.000Z" }],
+        ["cert-renew-requested", expect.anything()],
+        ["cert-renewed", { not_after_before: "2026-11-15T08:19:16.000Z", not_after: "2036-10-13T08:19:16.000Z" }],
+      ]);
+    } finally { fx.queue.close(); }
+  });
+});
+
+describe("Story 27.5 (P8): serve's certificate watcher", () => {
+  const notAfter30 = Date.parse("2026-11-15T08:19:16Z");
+  const tlsEnv = () => {
+    const dir = mkdtempSync(join(tmpdir(), "tk-sup-certwatch-"));
+    writeFileSync(join(dir, "cert.pem"), CERT_30D);
+    return { TK_SUPERVISOR_TLS_CERT: join(dir, "cert.pem"), TK_SUPERVISOR_TLS_KEY: join(dir, "key.pem"), TK_SUPERVISOR_TLS_NAME: "box.tailnet.ts.net" };
+  };
+
+  test("a `renew` exits 75 exactly once, clears its timer and closes its queue; until then each tick checks", () => {
+    const fx = fixture();
+    let closed = 0;
+    const close = fx.queue.close.bind(fx.queue);
+    fx.queue.close = () => { closed++; close(); };
+    let clock = notAfter30 - 20 * 86_400_000; // 20 days left: nothing yet
+    const timers: { fn: () => void; ms: number }[] = [];
+    const cleared: unknown[] = [];
+    const exits: number[] = [];
+    const stop = watchCertificate((code) => exits.push(code), {
+      env: tlsEnv(), open: () => fx.queue, now: () => clock,
+      setInterval: (fn, ms) => { timers.push({ fn, ms }); return "the-timer"; }, clearInterval: (t) => cleared.push(t),
+    });
+    expect(stop).toBeFunction();
+    expect(timers).toHaveLength(1);
+    expect(timers[0]!.ms).toBe(CERT_CHECK_MS);
+    expect(exits).toEqual([]); // the check at start found 20 days left
+    clock = notAfter30 - 10 * 86_400_000;
+    timers[0]!.fn(); // the hourly tick: within 14 days, no live run
+    expect(exits).toEqual([CERT_RENEW_EXIT]);
+    expect(cleared).toEqual(["the-timer"]);
+    expect(closed).toBe(1);
+    timers[0]!.fn(); // a tick already queued never exits twice
+    stop!();
+    expect(exits).toEqual([75]);
+    expect(cleared).toHaveLength(1);
+    expect(closed).toBe(1);
+  });
+
+  test("no TLS → nothing watched; a queue that cannot be opened → one line on stderr, nothing watched", () => {
+    const lines: string[] = [];
+    expect(watchCertificate(() => { throw new Error("never"); }, { env: {}, log: (l) => lines.push(l) })).toBeUndefined();
+    expect(lines).toEqual([]);
+    const timers: unknown[] = [];
+    expect(watchCertificate(() => { throw new Error("never"); }, {
+      env: tlsEnv(), open: () => { throw new QueueDbMissing(); }, log: (l) => lines.push(l), setInterval: (fn) => { timers.push(fn); return 1; },
+    })).toBeUndefined();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toStartWith("[supervisor] certificate check disabled: the queue could not be opened (QueueDbMissing");
+    expect(timers).toEqual([]);
   });
 });

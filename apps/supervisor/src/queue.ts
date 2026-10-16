@@ -4,6 +4,9 @@
  *
  *   jobs    one row per (job, checkout): the resolved definition `resolve` served
  *   runs    queue runs — `queued` → `running` → complete|partial|blocked|cancelled
+ *           (Story 27.1: a launch run whose engine paused rests `paused` until it ends)
+ *           (Story 27.2: a studio run started outside the queue is recorded `external` — live for the
+ *           pacer, no owner, no lock — until its studio run is terminal)
  *           (terminal is immutable; a trigger refuses any update of one — but its
  *           end-hygiene marker `notified`: NULL → lease → done, a stale lease re-leased, Story 22.3)
  *   events  one row per transition, committed in the same transaction
@@ -12,7 +15,7 @@
  *
  * Every transition runs in one `BEGIN IMMEDIATE` transaction with its event.
  * Minting is idempotent: while a run of the same job on the same checkout is
- * `queued` or `running`, `enqueue` mints nothing and answers that run.
+ * `queued`, `running` or `paused` (Story 27.1), `enqueue` mints nothing and answers that run.
  *
  * The database path comes from the environment only (`TK_SUPERVISOR_DB`) and
  * must lie outside the studio store (TK_STUDIO_HOME when set, and ~/.tk-studio
@@ -51,13 +54,19 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from "
 import { homedir, hostname } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pluginRoot } from "./env";
+import { processCreationTime } from "./winproc";
+import { probeEngine, sameStart, type ProbeResult } from "./sandbox";
 import { lastJsonObject, runUv, SBX_GUARD_KILL_AFTER_S, type RunResult } from "./server";
 
 type Env = Record<string, string | undefined>;
 
 export const TERMINAL_STATES = ["complete", "partial", "blocked", "cancelled"] as const;
 export type TerminalState = (typeof TERMINAL_STATES)[number];
-export type RunState = "queued" | "running" | TerminalState;
+/** Story 27.1: `paused` — a launch run whose engine paused: it keeps its worktree and its checkout
+ * lock, and its draft PR is recorded on the `paused` event; it is never terminal.
+ * Story 27.2: `external` — a studio run started outside the queue (`jobrun.py` by hand, MCP `tk_job`),
+ * recorded so the pacer counts it live; it holds no lock and ends when its studio run is terminal. */
+export type RunState = "queued" | "running" | "paused" | "external" | TerminalState;
 export const isTerminal = (s: unknown): s is TerminalState => (TERMINAL_STATES as readonly unknown[]).includes(s);
 
 export const ORPHANED_REASON = "orphaned: supervisor restart";
@@ -166,11 +175,16 @@ export const runPowerShell: PowerShellRunner = (command) => {
 };
 
 /** The start time of `pid`: Linux `/proc/<pid>/stat` field 22; win32 the
- * creation time (UTC, ISO) through a bounded PowerShell call; else — or on
- * any failed read — null (absent). */
-export function processStartTime(pid: number, platform: NodeJS.Platform = process.platform, ps: PowerShellRunner = runPowerShell): string | null {
+ * creation time (UTC, ISO, 7 fractional digits) read natively (`GetProcessTimes` through `bun:ffi`,
+ * src/winproc.ts — Story 27.5, DW-19), with the bounded PowerShell call only when the FFI cannot load;
+ * else — or on any failed read — null (absent). */
+export function processStartTime(pid: number, platform: NodeJS.Platform = process.platform, ps: PowerShellRunner = runPowerShell,
+  native: (pid: number) => string | null | undefined = processCreationTime): string | null {
   if (!Number.isInteger(pid) || pid <= 0) return null;
   if (platform === "win32") {
+    // `undefined`: the FFI did not load (not win32, no kernel32) — the PowerShell read is the fallback.
+    const read = native(pid);
+    if (read !== undefined) return read;
     const out = ps(`(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`)?.trim();
     return out && /^\d{4}-\d{2}-\d{2}T[\d:.]+Z?$/.test(out) ? out : null;
   }
@@ -207,6 +221,9 @@ export interface Probes {
   /** Is bmad-loop engine `engineRunId` live on the checkout at `root`? With
    * `null` (an unverified engine): is any engine live there? */
   engineLive(root: string, engineRunId: string | null): Promise<EngineProbe>;
+  /** Story 27.2 (DW-3): an in-VM engine pid's `/proc/<pid>/stat` through `sbx exec` (argv only; default
+   * `probeEngine` in src/sandbox.ts) — re-probed while a run's last engine kill left it alive. */
+  engineProbe?(sandbox: string, pid: number): Promise<ProbeResult>;
 }
 
 /** On the same host: `kill(pid, 0)` succeeds and the recorded start time (when
@@ -413,7 +430,7 @@ export async function killRecordedWorker(pid: number, start: string | null, deps
  * one predicate every path that frees a checkout lock asks (`recover`, `claim`). */
 export function workerMayRun(w: WorkerKill): boolean {
   return w.outcome === "running" || w.outcome === "group alive" || w.outcome === "start time unreadable"
-    || w.outcome === "kill failed" || w.outcome === "in-VM deadline not passed";
+    || w.outcome === "kill failed" || w.outcome === "in-VM deadline not passed" || w.outcome === "engine alive after kill";
 }
 
 // ------------------------------------------------------------ rows
@@ -438,8 +455,17 @@ export interface QueueRun {
   sandbox: string | null;
   model: string | null;
   effort: string | null;
-  /** Story 22.1: the submission's `base_ref` (null: none given) — stored, never acted on here. */
+  /** Story 22.1: the submission's `base_ref`; Story 27.1: the base the run's worktree is cut from
+   * and its PR targets (resolved at claim to the default branch when none was given). */
   base_ref: string | null;
+  /** Story 27.1: `default` when `base_ref` was resolved at claim (none given); null otherwise. */
+  base_ref_source: string | null;
+  /** Story 27.1: the run's git worktree (`<work>/worktrees/<project>/<run id>`), null until cut. */
+  worktree: string | null;
+  /** Story 27.2: an sbx launch run's in-VM engine pid (its process group) and that pid's start time
+   * (`/proc/<pid>/stat` field 22, as bmad-loop's `engine.pid` records it); null: not recorded or unknown. */
+  engine_pid: number | null;
+  engine_start: string | null;
   /** Story 21.6: the worker's pre-minted session id, its pid (POSIX: its process
    * group) and that pid's start time, and the wake answer (JSON: directive, routing, state). */
   session_id: string | null;
@@ -477,7 +503,8 @@ export interface StudioOutcome { run_id: string; state: string }
 
 /** What the pacer reads for one (job, checkout). */
 export interface JobPacing {
-  /** Runs that hold the job: `running`, or `queued` under a live owner — never overlapped. */
+  /** Runs that hold the job: `running`, `paused` (Story 27.1), `external` (Story 27.2: started outside the
+   * queue), or `queued` under a live owner — never overlapped. */
   live: QueueRun[];
   /** Ownerless (or dead-owner) `queued` runs: the tick's `runJob` adopts and drives the oldest. */
   adoptable: QueueRun[];
@@ -543,7 +570,9 @@ export interface RecoverReport {
 export interface WorkerKill {
   pid: number; start: string | null;
   outcome: "killed" | "group killed" | "not running" | "start time differs" | "start time unreadable" | "kill failed"
-    | "running" | "group alive" | "in-VM deadline not passed" | "in-VM deadline passed";
+    | "running" | "group alive" | "in-VM deadline not passed" | "in-VM deadline passed"
+    /** Story 27.2: an in-VM engine still running as recorded after its kill-by-pid and the wait (DW-3: held). */
+    | "engine alive after kill";
   detail?: string;
   /** sbx: the in-VM deadline (recorded spawn + guard seconds + the `-k` grace), ISO. */
   deadline?: string;
@@ -560,21 +589,24 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE TABLE IF NOT EXISTS runs (
   run_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, checkout TEXT NOT NULL, root TEXT NOT NULL,
   project_id TEXT, target TEXT,
-  state TEXT NOT NULL CHECK (state IN ('queued','running','complete','partial','blocked','cancelled')),
+  state TEXT NOT NULL CHECK (state IN ('queued','running','complete','partial','blocked','cancelled','paused','external')),
   reason TEXT, owner_pid INTEGER, owner_host TEXT, owner_nonce TEXT, owner_start TEXT,
   studio_run_id TEXT, engine_run_id TEXT, verb_started TEXT, verb_snapshot TEXT, definition TEXT,
   permission_mode TEXT, tier TEXT, sandbox TEXT, model TEXT, effort TEXT, base_ref TEXT,
   session_id TEXT, worker_pid INTEGER, worker_start TEXT, worker_guard_s INTEGER, wake TEXT,
-  editor_in_the_loop INTEGER, notified TEXT,
+  editor_in_the_loop INTEGER, notified TEXT, base_ref_source TEXT, worktree TEXT, engine_pid INTEGER, engine_start TEXT,
   created TEXT NOT NULL, updated TEXT NOT NULL,
   FOREIGN KEY (job_id, checkout) REFERENCES jobs (job_id, checkout)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS runs_one_live ON runs (job_id, checkout) WHERE state IN ('queued','running');
+CREATE UNIQUE INDEX IF NOT EXISTS runs_one_live ON runs (job_id, checkout) WHERE state IN ('queued','running','paused','external');
 CREATE TABLE IF NOT EXISTS events (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, at TEXT NOT NULL, kind TEXT NOT NULL,
   from_state TEXT, to_state TEXT NOT NULL, detail TEXT
 );
 CREATE INDEX IF NOT EXISTS events_run ON events (run_id, seq);
+CREATE TABLE IF NOT EXISTS service_events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, kind TEXT NOT NULL, detail TEXT
+);
 CREATE TABLE IF NOT EXISTS locks (
   checkout TEXT PRIMARY KEY, root TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('run','engine')),
   run_id TEXT NOT NULL, job_id TEXT NOT NULL, owner_pid INTEGER, owner_host TEXT, owner_nonce TEXT, owner_start TEXT,
@@ -598,6 +630,10 @@ const DONE_PREFIX = "done ";
 /** How old a lease must be before another sweep may take it over (10 minutes: a send is bounded
  * to 15 s and a transcript copy to a local file copy, so a live claimant is long finished). */
 export const END_LEASE_STALE_MS = 10 * 60_000;
+/** Story 27.5 (DW-13): the failed ender attempts (`studio-run-end-failed`) a cancelled run's studio run may carry
+ * before recovery gives up on it (the attempt reaching it records `gave_up: true`) — the plan passes' bound
+ * (`PLAN_RETRY_LIMIT`, src/planstatus.ts). */
+export const STUDIO_END_RETRY_LIMIT = 24;
 /** The ISO time inside a lease marker (`lease ` + 24 characters of `toISOString()`), as SQL. */
 const leaseAtSql = (row: string) => `substr(${row}.${NOTIFIED_COLUMN}, ${LEASE_PREFIX.length + 1}, 24)`;
 
@@ -628,7 +664,66 @@ const ADDED_RUN_COLUMNS = [
   ["permission_mode", "TEXT"], ["tier", "TEXT"], ["sandbox", "TEXT"], ["model", "TEXT"], ["effort", "TEXT"],
   ["session_id", "TEXT"], ["worker_pid", "INTEGER"], ["worker_start", "TEXT"], ["wake", "TEXT"], ["worker_guard_s", "INTEGER"],
   ["base_ref", "TEXT"], ["editor_in_the_loop", "INTEGER"], [NOTIFIED_COLUMN, "TEXT"],
+  ["base_ref_source", "TEXT"], ["worktree", "TEXT"], ["engine_pid", "INTEGER"], ["engine_start", "TEXT"],
 ] as const;
+
+/** Story 27.1: the one-live-run index — a `paused` run is the job's live run too (enqueue mints no second);
+ * Story 27.2: so is an `external` one. */
+const LIVE_INDEX = "CREATE UNIQUE INDEX IF NOT EXISTS runs_one_live ON runs (job_id, checkout) WHERE state IN ('queued','running','paused','external')";
+
+/** Story 27.1/27.2: an index from before `paused` or `external` is dropped and recreated with them. */
+function widenLiveIndex(db: Database): void {
+  const row = db.query("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'runs_one_live'").get() as { sql: string } | null;
+  if (row?.sql.includes("'paused'") && row.sql.includes("'external'")) return;
+  db.exec("DROP INDEX IF EXISTS runs_one_live");
+  db.exec(LIVE_INDEX);
+}
+
+/** Story 27.1: a runs table whose state CHECK predates `paused` (Story 27.2: or `external`) is rebuilt once
+ * (SQLite cannot alter a CHECK): the same columns and rows, the CHECK widened, the live-run index recreated. */
+function widenStateCheck(db: Database): void {
+  const row = db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'runs'").get() as { sql: string } | null;
+  const missing = ["'paused'", "'external'"].filter((s) => !row?.sql.includes(s));
+  if (!row || !missing.length) return;
+  const check = /CHECK\s*\(\s*state\s+IN\s*\(([^)]*)\)\s*\)/;
+  if (!check.test(row.sql)) return;
+  const ddl = row.sql.replace(check, (_m, list: string) => `CHECK (state IN (${list.trim()},${missing.join(",")}))`)
+    .replace(/^CREATE TABLE\s+(?:IF NOT EXISTS\s+)?["`]?runs["`]?/i, "CREATE TABLE runs_widened");
+  const cols = (db.query("PRAGMA table_info(runs)").all() as { name: string }[]).map((c) => c.name).join(", ");
+  db.exec(ddl);
+  db.exec(`INSERT INTO runs_widened (${cols}) SELECT ${cols} FROM runs`);
+  db.exec("DROP TABLE runs");
+  db.exec("ALTER TABLE runs_widened RENAME TO runs");
+  db.exec(LIVE_INDEX);
+}
+
+/** Story 27.5 (DW-15): the sum of `cost_usd` over a run's `accounted` events of one source — the worker's
+ * iterations (no `source`) or the archived engine runs (`source: "engine"`, `except` an engine run id already
+ * metered elsewhere); undefined when none carries a cost. `launched` events are never counted. */
+export function accountedCostOf(events: readonly QueueEvent[], source: "worker" | "engine", except?: string | null): number | undefined {
+  let sum: number | undefined;
+  for (const e of events) {
+    if (e.kind !== "accounted") continue;
+    const d = (e.detail ?? {}) as Record<string, unknown>;
+    if ((d.source === "engine") !== (source === "engine")) continue;
+    if (source === "engine" && except && d.engine_run_id === except) continue;
+    if (typeof d.cost_usd === "number" && Number.isFinite(d.cost_usd)) sum = (sum ?? 0) + d.cost_usd;
+  }
+  return sum;
+}
+
+/** Story 27.3: the SQL test (over `runs`) that a run is launched — a `launched` event after its latest
+ * `close-out` (the paused-run pass's relaunch) or `engine-resume` (`POST /runs/{id}/resume`). A relaunched or
+ * resumed run carries the old `launched` event: read without this, a dead relaunch driver would never be
+ * recovered and the archived engine id would be probed forever. */
+export const LAUNCHED_SQL = `EXISTS (SELECT 1 FROM events e WHERE e.run_id = runs.run_id AND e.kind = 'launched'
+  AND e.seq > COALESCE((SELECT MAX(x.seq) FROM events x WHERE x.run_id = runs.run_id AND x.kind IN ('close-out','engine-resume')), 0))`;
+
+/** Story 27.1: where a run's launched engine is probed — its worktree (the engine's `--project`), else its
+ * root. A worktree the close-out already removed is never probed (the probe would fail there and fail
+ * closed into an unverified engine forever): its root then. */
+export const engineRoot = (run: Pick<QueueRun, "root"> & { worktree?: string | null }): string =>
+  run.worktree && existsSync(run.worktree) ? run.worktree : run.root;
 
 const now = () => new Date().toISOString();
 /** The newest lease time a sweep at `at` may take over (Story 22.3). */
@@ -706,6 +801,8 @@ export class Queue {
       if (!have.has(NOTIFIED_COLUMN)) {
         this.db.query(`UPDATE runs SET ${NOTIFIED_COLUMN} = ? WHERE state IN ('complete','partial','blocked','cancelled')`).run(NOTIFIED_BEFORE);
       }
+      widenStateCheck(this.db);
+      widenLiveIndex(this.db);
       this.db.exec(immutabilityTriggers(columns()));
     }).immediate();
   }
@@ -756,9 +853,12 @@ export class Queue {
     const runs = this.db.query("SELECT * FROM runs WHERE job_id = ? AND checkout = ? ORDER BY created, rowid").all(jobId, checkout) as QueueRun[];
     const live: QueueRun[] = [], adoptable: QueueRun[] = [];
     for (const r of runs) {
-      if (r.state === "running" || (r.state === "queued" && this.ownerLive(ownerOf(r), self))) live.push(r);
+      if (r.state === "running" || r.state === "paused" || r.state === "external" || (r.state === "queued" && this.ownerLive(ownerOf(r), self))) live.push(r);
       else if (r.state === "queued") adoptable.push(r);
     }
+    // Story 27.5 (DW-11): an ended run that still holds its `run` lock (a worker that may still run, a live
+    // driver: `releaseKeptLocks`' query) is live for the pacer — the next run would only wait on that lock.
+    for (const k of this.keptLockRuns()) if (k.job_id === jobId && k.checkout === checkout) live.push(k);
     // Terminal runs in the order they ended (the ending event's seq; one with no event first, by `updated`).
     const ends = runs.filter((r) => isTerminal(r.state)).map((r) => {
       const ev = this.db.query("SELECT seq, at, detail FROM events WHERE run_id = ? AND kind IN ('ended', 'orphaned') ORDER BY seq DESC LIMIT 1")
@@ -775,6 +875,14 @@ export class Queue {
     }
     const last = ends.at(-1);
     return { live, adoptable, lastEnded: last?.at ?? null, latestTerminal: last?.run ?? null, stopped };
+  }
+
+  /** Ended runs that still hold their checkout's `run` lock (`holdLock`, `driverLive`), oldest lock first. */
+  keptLockRuns(): QueueRun[] {
+    return this.db.query(
+      `SELECT runs.* FROM locks JOIN runs ON runs.run_id = locks.run_id
+       WHERE locks.kind = 'run' AND runs.state IN ('complete','partial','blocked','cancelled') ORDER BY locks.acquired`,
+    ).all() as QueueRun[];
   }
 
   lock(root: string): LockRow | null {
@@ -820,7 +928,13 @@ export class Queue {
    * from the deadline, never from the host `sbx exec` pid; once passed, `kill` still
    * kills a lingering host process best-effort); host → the pid + start time probe
    * (or kill), then `workerMayRun`. */
-  async recordedWorker(run: QueueRun, kill: boolean): Promise<{ mayRun: boolean; worker?: WorkerKill }> {
+  async recordedWorker(run: QueueRun, kill: boolean, opts: { engine?: boolean } = {}): Promise<{ mayRun: boolean; worker?: WorkerKill }> {
+    // Story 27.2 (DW-3): a run whose last engine kill left its in-VM engine alive may still run while
+    // that engine pid does (re-probed; `engine: false` — the cancel that just killed it — skips this).
+    if (opts.engine !== false) {
+      const engine = await this.engineAliveAfterKill(run);
+      if (engine) return { mayRun: true, worker: engine };
+    }
     if (run.worker_pid === null || run.worker_pid === undefined) return { mayRun: false };
     const pid = run.worker_pid, start = run.worker_start;
     if (run.tier === "sbx") {
@@ -836,6 +950,48 @@ export class Queue {
     const worker = kill ? await (this.probes.killWorker ?? killRecordedWorker)(pid, start)
       : (this.probes.probeWorker ?? probeRecordedWorker)(pid, start);
     return { mayRun: workerMayRun(worker), worker };
+  }
+
+  /** Story 27.2 (DW-3): when the run's last recorded engine kill (`engine-kill`) is `engine alive after
+   * kill` — or `start time unreadable` (its first probe could not be read, so nothing was signalled; it
+   * carries the recorded start) — its engine pid is probed again (`sbx exec <sb> cat /proc/<pid>/stat`,
+   * argv only, the start time matched): answers that kill while the engine still runs as recorded (an
+   * unreadable probe counts as alive — fail closed), else undefined. Once the probe shows it gone (or a
+   * different start time), an `engine-gone` event is recorded, so later checks proceed without probing.
+   * Never throws. */
+  async engineAliveAfterKill(run: QueueRun): Promise<WorkerKill | undefined> {
+    const ev = this.db.query("SELECT kind, detail FROM events WHERE run_id = ? AND kind IN ('engine-kill', 'engine-gone') ORDER BY seq DESC LIMIT 1")
+      .get(run.run_id) as { kind: string; detail: string | null } | null;
+    if (ev?.kind !== "engine-kill") return undefined;
+    let d: Record<string, any> | null = null;
+    try { d = ev.detail ? JSON.parse(ev.detail) : null; } catch { return undefined; }
+    const w = d?.worker as WorkerKill | undefined;
+    const held = w?.outcome === "engine alive after kill"
+      || (w?.outcome === "start time unreadable" && typeof w.start === "string" && !!w.start);
+    if (!w || !held || !Number.isInteger(w.pid)) return undefined;
+    const sb = typeof d?.sandbox === "string" && d.sandbox ? d.sandbox : run.sandbox;
+    if (!sb) return { ...w, detail: `${w.detail ?? w.outcome}; no sandbox recorded to probe it again` };
+    let p: ProbeResult;
+    try { p = await (this.probes.engineProbe ?? ((s: string, pid: number) => probeEngine(s, pid)))(sb, w.pid); }
+    catch (e) { p = { unreadable: e instanceof Error ? e.message : String(e) }; }
+    if ("unreadable" in p) return { ...w, detail: `pid ${w.pid} in ${sb} may still run: its probe failed (${p.unreadable.slice(0, 200)})` };
+    if (p.alive && sameStart(p.start, w.start)) return { ...w, detail: `pid ${w.pid} still runs in ${sb} (probed again after ${w.outcome === "engine alive after kill" ? "its kill" : "its unreadable first probe"})` };
+    try {
+      const cur = this.get(run.run_id);
+      this.event(run.run_id, "engine-gone", cur?.state ?? run.state, cur?.state ?? run.state,
+        { sandbox: sb, pid: w.pid, start: w.start, probe: p.alive ? `start time differs (now ${p.start})` : "not running" });
+    } catch { /* the queue is busy: the next check probes again */ }
+    return undefined;
+  }
+
+  /** Story 27.2: is a pin on sandbox `sb` still outstanding — some run recording that sandbox pinned it
+   * (`pinned`), and no release (`pin-released`) was recorded on any run recording it since? */
+  pinOutstanding(sb: string): boolean {
+    const row = this.db.query(
+      `SELECT MAX(CASE WHEN e.kind = 'pinned' THEN e.seq END) AS pinned, MAX(CASE WHEN e.kind = 'pin-released' THEN e.seq END) AS released
+         FROM events e JOIN runs r ON r.run_id = e.run_id WHERE r.sandbox = ? AND e.kind IN ('pinned', 'pin-released')`,
+    ).get(sb) as { pinned: number | null; released: number | null } | null;
+    return row?.pinned != null && (row.released == null || row.pinned > row.released);
   }
 
   private event(runId: string, kind: string, from: string | null, to: string, detail?: Record<string, unknown>): void {
@@ -863,7 +1019,7 @@ export class Queue {
     const checkout = checkoutKey(input.root);
     return this.db.transaction(() => {
       const live = this.db.query(
-        "SELECT * FROM runs WHERE job_id = ? AND checkout = ? AND state IN ('queued','running') ORDER BY created LIMIT 1",
+        "SELECT * FROM runs WHERE job_id = ? AND checkout = ? AND state IN ('queued','running','paused','external') ORDER BY created LIMIT 1",
       ).get(input.jobId, checkout) as QueueRun | null;
       if (live) {
         if (input.permissionMode) this.writePermissionMode(live, input.permissionMode);
@@ -964,6 +1120,14 @@ export class Queue {
           return { claimed: false, run, why: "terminal", reason: `run ${runId} already ended ${run.state}` };
         }
         const mine = run.owner_nonce !== null && run.owner_nonce === owner.nonce;
+        if (run.state === "paused") {
+          // Story 27.1: a paused launch run is continued by its resume, never claimed again.
+          return { claimed: false, run, why: "running", reason: `run ${runId} is paused (its engine paused; the resume continues it)` };
+        }
+        if (run.state === "external") {
+          // Story 27.2: a studio run started outside the queue: never driven here; it ends with its studio run.
+          return { claimed: false, run, why: "running", reason: `run ${runId} is external (studio run ${run.studio_run_id ?? "?"} started outside the queue)` };
+        }
         if (run.state === "running") {
           if (mine) return { claimed: true, run };
           return {
@@ -980,7 +1144,13 @@ export class Queue {
         const detail: Record<string, unknown> = { owner: ownerDetail(owner) };
         if (lock && lock.run_id !== runId) {
           let holder: Holder | undefined;
-          if (lock.kind === "engine") {
+          const pausedHolder = this.get(lock.run_id)?.state === "paused";
+          if (pausedHolder) {
+            // Story 27.1: a paused run keeps its checkout lock (and its worktree) for the resume.
+            holder = { kind: lock.kind, run_id: lock.run_id, job_id: lock.job_id,
+              ...(lock.kind === "engine" ? { engine_run_id: lock.engine_run_id } : { pid: lock.owner_pid, host: lock.owner_host }),
+              detail: "its run is paused: the lock is kept for the resume" };
+          } else if (lock.kind === "engine") {
             const probe = p.engine!;
             if (probe.live) {
               const engineId = lock.engine_run_id ?? (probe.run_ids?.length ? probe.run_ids.join(",") : null);
@@ -1049,12 +1219,17 @@ export class Queue {
   private async claimProbes(view: ClaimView, runId: string, self: Owner): Promise<ClaimProbes> {
     const { run, lock, held } = view;
     const out: ClaimProbes = { ownerLive: false, holderLive: false, launch: false };
-    if (isTerminal(run.state) || run.state === "running") return out;
+    if (isTerminal(run.state) || run.state === "running" || run.state === "external") return out;
     const mine = run.owner_nonce !== null && run.owner_nonce === self.nonce;
     if (!mine && (out.ownerLive = this.ownerLive(ownerOf(run), self))) return out;
     if (!lock || lock.run_id === runId) return out;
+    if (this.get(lock.run_id)?.state === "paused") return out; // Story 27.1: held for the resume, nothing to probe
     if (lock.kind === "engine") {
-      out.engine = await this.probes.engineLive(lock.root, lock.engine_run_id);
+      out.engine = await this.probes.engineLive(this.lockRoot(lock), lock.engine_run_id);
+      // Story 27.2 (DW-3): an engine its run's kill left alive in the VM holds the lock while its pid runs.
+      const lockRun = out.engine.live ? null : this.get(lock.run_id);
+      const alive = lockRun ? await this.engineAliveAfterKill(lockRun) : undefined;
+      if (alive) out.engine = { live: true, detail: `engine pid ${alive.pid} alive after its kill: ${alive.detail ?? alive.outcome}` };
       return out;
     }
     // A running holder with a live owner — or a run ended with no worker recorded that kept its
@@ -1071,8 +1246,16 @@ export class Queue {
     const defn = held ? this.definition(held) : this.definition({ job_id: lock.job_id, checkout: lock.checkout });
     out.launch = !out.holderLive && defn?.target?.skill === LAUNCH_SKILL;
     // A stale launch-run holder may have started a detached engine: probe before taking over (AD: one engine per checkout).
-    if (out.launch) out.engine = await this.probes.engineLive(lock.root, null);
+    if (out.launch) out.engine = await this.probes.engineLive(held ? engineRoot(held) : this.lockRoot(lock), null);
     return out;
+  }
+
+  /** Where a lock's engine is probed: its recorded root, else — a worktree since removed — its run's root
+   * (as `engineRoot`: a removed path is never probed). */
+  private lockRoot(lock: LockRow): string {
+    if (existsSync(lock.root)) return lock.root;
+    const run = this.get(lock.run_id);
+    return run ? engineRoot(run) : lock.root;
   }
 
   /** The run reached the studio's minting verb: recorded just before
@@ -1133,8 +1316,23 @@ export class Queue {
    * `worker` event's time is the recorded spawn time. */
   setWorker(runId: string, pid: number, start: string | null, guardS?: number | null): QueueRun {
     const guard = typeof guardS === "number" && Number.isFinite(guardS) && guardS > 0 ? Math.ceil(guardS) : null;
-    return this.recordOnRunning(runId, "setWorker", "worker", { worker_pid: pid, worker_start: start, worker_guard_s: guard },
-      { pid, ...(start ? { start } : {}), ...(guard !== null ? { guard_s: guard } : {}) });
+    // Story 27.5 (DW-19): the pid (and its `worker` event) commits first, the start time after it in a second
+    // update — a supervisor killed between the two still leaves a usable record (a pid whose start is unread).
+    const run = this.recordOnRunning(runId, "setWorker", "worker", { worker_pid: pid, worker_start: null, worker_guard_s: guard },
+      { pid, ...(guard !== null ? { guard_s: guard } : {}) });
+    return start ? this.setWorkerStart(runId, pid, start) : run;
+  }
+
+  /** Story 27.5 (DW-19): the recorded worker's start time, written after its pid (`setWorker`) — only while the
+   * run is not terminal and still records that pid. */
+  setWorkerStart(runId: string, pid: number, start: string): QueueRun {
+    return this.db.transaction(() => {
+      const run = this.must(runId);
+      if (isTerminal(run.state)) throw new RunTerminal(runId, run.state);
+      if (run.worker_pid !== pid) return run;
+      this.db.query("UPDATE runs SET worker_start = ?, updated = ? WHERE run_id = ?").run(start, now(), runId);
+      return this.must(runId);
+    }).immediate();
   }
 
   /** Record the wake/submit answer a resume rebuilds the run from (directive, routing, state). */
@@ -1156,6 +1354,12 @@ export class Queue {
       if (Array.isArray(list)) for (const id of list) if (typeof id === "string") ids.add(id);
     }
     return [...ids];
+  }
+
+  /** Story 27.5 (DW-15): the cost recorded on this run's `accounted` events (`cost_usd`) — the worker
+   * iterations' (`source` absent) or the archived engine runs' (`source: "engine"`). */
+  accountedCost(runId: string, source: "worker" | "engine" = "worker", events: readonly QueueEvent[] = this.events(runId)): number | undefined {
+    return accountedCostOf(events, source);
   }
 
   /** How many times this run was resumed (its `resumed` events). */
@@ -1192,15 +1396,16 @@ export class Queue {
     }).immediate();
   }
 
-  /** Put an engine holder on the checkout lock for run `run` (inside a transaction). */
-  private handToEngine(run: Pick<QueueRun, "checkout" | "root" | "run_id" | "job_id">, engineRunId: string | null): void {
+  /** Put an engine holder on the checkout lock for run `run` (inside a transaction). The lock stays
+   * keyed by the checkout; its `root` is where the engine is probed (Story 27.1: the run's worktree). */
+  private handToEngine(run: Pick<QueueRun, "checkout" | "root" | "run_id" | "job_id"> & { worktree?: string | null }, engineRunId: string | null): void {
     this.db.query(
       `INSERT INTO locks (checkout, root, kind, run_id, job_id, owner_pid, owner_host, owner_nonce, owner_start, engine_run_id, acquired)
        VALUES (?, ?, 'engine', ?, ?, NULL, NULL, NULL, NULL, ?, ?)
-       ON CONFLICT (checkout) DO UPDATE SET kind = 'engine', run_id = excluded.run_id, job_id = excluded.job_id,
+       ON CONFLICT (checkout) DO UPDATE SET kind = 'engine', root = excluded.root, run_id = excluded.run_id, job_id = excluded.job_id,
          owner_pid = NULL, owner_host = NULL, owner_nonce = NULL, owner_start = NULL,
          engine_run_id = excluded.engine_run_id, acquired = excluded.acquired`,
-    ).run(run.checkout, run.root, run.run_id, run.job_id, engineRunId, now());
+    ).run(run.checkout, engineRoot(run), run.run_id, run.job_id, engineRunId, now());
   }
 
   /** The launch-orphan rule over this queue's probes (`probeLaunchEngine`). */
@@ -1215,6 +1420,297 @@ export class Queue {
     return this.launchEngine(root);
   }
 
+  // ---------------------------------------------------------- worktrees and engine lifetimes (Story 27.1)
+
+  /** A `base_ref` resolved at claim (the submission named none): recorded on the running run with
+   * its source (`default`), in a `base-ref` event. */
+  recordBaseRef(runId: string, baseRef: string, source: "default"): QueueRun {
+    return this.recordOnRunning(runId, "recordBaseRef", "base-ref", { base_ref: baseRef, base_ref_source: source }, { base_ref: baseRef, base_ref_source: source });
+  }
+
+  /** The run's git worktree, once cut: its path on the run, a `worktree` event naming it and its branch. */
+  recordWorktree(runId: string, path: string, detail: { branch: string; base_ref: string; base_ref_source?: string | null }): QueueRun {
+    return this.recordOnRunning(runId, "recordWorktree", "worktree", { worktree: path }, { path, ...detail });
+  }
+
+  /** `tk-studio-launch` returned with an engine started (operator-decisions §2): the run stays
+   * `running` and live for the pacer, its driver lets go (owner cleared, so `recover` never orphans
+   * it), the checkout lock is handed to the engine, and a `launched` event carries the status block,
+   * the engine run id and the end the close-out writes once the engine's life ends (`end`). */
+  markLaunched(runId: string, engineRunId: string, detail: { status_block?: unknown; end: Record<string, unknown> }): QueueRun {
+    return this.db.transaction(() => {
+      const run = this.must(runId);
+      if (isTerminal(run.state)) throw new RunTerminal(runId, run.state);
+      if (run.state !== "running") throw new Error(`markLaunched: queue run '${runId}' is ${run.state}, not running`);
+      this.db.query(
+        `UPDATE runs SET engine_run_id = ?, owner_pid = NULL, owner_host = NULL, owner_nonce = NULL, owner_start = NULL, updated = ? WHERE run_id = ?`,
+      ).run(engineRunId, now(), runId);
+      const held = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(run.checkout) as LockRow | null;
+      let lock: unknown = "not held";
+      if (!held || held.run_id === runId) { this.handToEngine(run, engineRunId); lock = { handed_to_engine: engineRunId }; }
+      this.event(runId, "launched", run.state, run.state, { engine_run_id: engineRunId, ...detail, lock });
+      return this.must(runId);
+    }).immediate();
+  }
+
+  // ---------------------------------------------------------- the engine hold and external runs (Story 27.2)
+
+  /** An sbx launch run's in-VM engine pid and its start time, on the run (a `running` or `paused` run), with
+   * an `engine-pid` event naming the sandbox and the pid's source; `null`: no source named exactly one pid —
+   * the event records `engine pid: unknown` and the columns are left as they are. */
+  recordEnginePid(runId: string, found: { pid: number; start: string; source: string } | null, detail: Record<string, unknown> = {}): QueueRun {
+    return this.db.transaction(() => {
+      const run = this.must(runId);
+      if (isTerminal(run.state)) throw new RunTerminal(runId, run.state);
+      if (found) {
+        this.db.query("UPDATE runs SET engine_pid = ?, engine_start = ?, updated = ? WHERE run_id = ?").run(found.pid, found.start, now(), runId);
+        this.event(runId, "engine-pid", run.state, run.state, { ...detail, pid: found.pid, start: found.start, source: found.source });
+      } else {
+        this.event(runId, "engine-pid", run.state, run.state, { ...detail, engine_pid: "unknown" });
+      }
+      return this.must(runId);
+    }).immediate();
+  }
+
+  /** A non-terminal studio run of a served job (its job row is in the queue) that no queue run names, started
+   * outside the queue: recorded as an `external` queue run (no owner, no lock) with an `external` event
+   * carrying its studio run id. Null — nothing recorded — when the job is not served, a queue run already
+   * names that studio run, or the job already has a live queue run on the checkout. */
+  recordExternal(jobId: string, root: string, studioRunId: string, studioState: string,
+    placement: { tier?: string | null; sandbox?: string | null } = {}): QueueRun | null {
+    const checkout = checkoutKey(root);
+    return this.db.transaction(() => {
+      const job = this.db.query("SELECT * FROM jobs WHERE job_id = ? AND checkout = ?").get(jobId, checkout) as { root: string; project_id: string | null } | null;
+      if (!job) return null;
+      if (this.db.query("SELECT 1 FROM runs WHERE studio_run_id = ?").get(studioRunId)) return null;
+      if (this.db.query("SELECT 1 FROM runs WHERE job_id = ? AND checkout = ? AND state IN ('queued','running','paused','external')").get(jobId, checkout)) return null;
+      const runId = mintRunId(jobId), at = now();
+      const reason = `external: studio run ${studioRunId} was started outside the queue`;
+      // The job's placement (its tier, and the sandbox on sbx) as the queue places its own runs of the job:
+      // the release's other-holder check sees an external run on the same sandbox (no `sbx stop` under it).
+      const tier = placement.tier ?? null, sandbox = tier === "sbx" ? placement.sandbox ?? null : null;
+      this.db.query(
+        `INSERT INTO runs (run_id, job_id, checkout, root, project_id, target, state, reason, studio_run_id, tier, sandbox, created, updated)
+         VALUES (?, ?, ?, ?, ?, NULL, 'external', ?, ?, ?, ?, ?, ?)`,
+      ).run(runId, jobId, checkout, job.root, job.project_id, reason, studioRunId, tier, sandbox, at, at);
+      this.event(runId, "external", null, "external", {
+        studio_run_id: studioRunId, studio_state: studioState, ...(tier ? { tier } : {}), ...(sandbox ? { sandbox } : {}),
+      });
+      return this.must(runId);
+    }).immediate();
+  }
+
+  /** The `external` queue runs, oldest first. */
+  externalRuns(): QueueRun[] {
+    return this.db.query("SELECT * FROM runs WHERE state = 'external' ORDER BY created, rowid").all() as QueueRun[];
+  }
+
+  /** An external run's studio run reached a terminal state: the queue run ends in it (no longer live).
+   * `vanished` (the studio no longer lists that run, or refuses it): its outcome is unknown — the queue run
+   * ends `partial`, as the restart rule ends a run whose studio outcome it cannot read, the reason naming it. */
+  endExternal(runId: string, state: TerminalState, vanished?: string): QueueRun {
+    const run = this.must(runId);
+    const sid = run.studio_run_id ?? "?";
+    return this.end(runId, state, vanished ? `external: studio run ${sid} vanished: ${vanished}` : `external: studio run ${sid} ended ${state}`,
+      { from: "external", detail: { external: true, studio_run_id: run.studio_run_id, ...(vanished ? { vanished } : {}) } });
+  }
+
+  /** The runs the engine-end sweep probes: `running` launch runs whose driver let go of them after
+   * the launch (`markLaunched`), and `paused` runs — each with its worktree and engine recorded. Story 27.3:
+   * "launched" is a `launched` event after the latest `close-out`/`engine-resume` (`LAUNCHED_SQL`), so a
+   * relaunch or a resume still under its driver is never probed at the engine id it replaced. */
+  awaitingEngine(): QueueRun[] {
+    return this.db.query(
+      `SELECT * FROM runs WHERE worktree IS NOT NULL AND (
+         (engine_run_id IS NOT NULL
+           AND (state = 'paused' OR (state = 'running' AND ${LAUNCHED_SQL})))
+         OR (state IN ('complete','partial','blocked','cancelled')
+           AND EXISTS (SELECT 1 FROM events e WHERE e.run_id = runs.run_id AND e.kind = 'ended' AND json_extract(e.detail, '$.closeout.result') = 'skipped')
+           AND NOT EXISTS (SELECT 1 FROM events e WHERE e.run_id = runs.run_id AND e.kind = 'closed_out')))
+       ORDER BY created, rowid`,
+    ).all() as QueueRun[];
+  }
+
+  /** A close-out taken (`takeForCloseOut`) that did not finish: the owner released (only while it is
+   * still `self`, on a run that is not terminal), so a later sweep can take the run again. A late
+   * close-out of a terminal run (`takeEndedCloseOut`) likewise: its `closing-out` lease, while still
+   * `self`'s and the run has no `closed_out`, let go of by an appended `closing-out` event with no
+   * owner (the terminal row is never updated). */
+  releaseCloseOut(runId: string, self: Owner = selfOwner()): void {
+    this.db.transaction(() => {
+      const run = this.get(runId);
+      if (run && isTerminal(run.state)) {
+        const evs = this.events(runId);
+        if (evs.some((e) => e.kind === "closed_out")) return;
+        const lease = evs.findLast((e) => e.kind === "closing-out")?.detail?.owner as Owner | null | undefined;
+        if (lease?.nonce === self.nonce) this.event(runId, "closing-out", run.state, run.state, { owner: null, released: ownerDetail(self) });
+        return;
+      }
+      this.db.query(`UPDATE runs SET owner_pid = NULL, owner_host = NULL, owner_nonce = NULL, owner_start = NULL, updated = ?
+         WHERE run_id = ? AND owner_nonce = ? AND state IN ('running','paused')`).run(now(), runId, self.nonce);
+    }).immediate();
+  }
+
+  /** A terminal run whose close-out was skipped (something may still have been live): the late
+   * close-out is taken atomically by appending a `closing-out` lease event (the terminal row is never
+   * updated) — refused when it already has its `closed_out` event, or a lease held by a live owner
+   * (a lease let go of, `releaseCloseOut`, has no owner). */
+  takeEndedCloseOut(runId: string, self: Owner = selfOwner()): boolean {
+    return this.db.transaction(() => {
+      const run = this.get(runId);
+      if (!run || !isTerminal(run.state)) return false;
+      const evs = this.events(runId);
+      if (evs.some((e) => e.kind === "closed_out")) return false;
+      const lease = evs.findLast((e) => e.kind === "closing-out")?.detail?.owner as Owner | undefined;
+      if (lease && this.ownerLive(lease, self)) return false;
+      this.event(runId, "closing-out", run.state, run.state, { owner: ownerDetail(self) });
+      return true;
+    }).immediate();
+  }
+
+  /** What may still be live around a run before its worktree is closed out: its driver (a kept run
+   * lock under a live owner), its recorded worker, or an engine in its worktree. Undefined: all dead. */
+  async closeOutBlocker(run: QueueRun, self: Owner = selfOwner(), opts: { asDriver?: boolean } = {}): Promise<string | undefined> {
+    // `asDriver`: asked by the run's own driver (a drive that threw), which is not what may still work the worktree.
+    if (!opts.asDriver) {
+      const lock = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(run.checkout) as LockRow | null;
+      if (lock?.kind === "run" && lock.run_id === run.run_id && this.ownerLive(ownerOf(lock), self)) return "its driver is live";
+      if (!isTerminal(run.state) && this.ownerLive(ownerOf(run), self)) return "its driver is live";
+    }
+    const w = await this.recordedWorker(run, false);
+    if (w.mayRun) return `its recorded worker may still run (${w.worker?.outcome ?? "unknown"})`;
+    if (run.engine_run_id || this.definition(run)?.target?.skill === LAUNCH_SKILL) {
+      const { holder, engine } = await this.launchEngine(engineRoot(run));
+      if (holder) return `an engine may still work the worktree (${holder.id ?? String(engine.detail ?? "unverified")})`;
+    }
+    return undefined;
+  }
+
+  /** A terminal run whose worktree was closed out and removed (its engine confirmed dead first): the
+   * engine lock it still holds — which would be probed in the removed worktree — is released, with a
+   * `lock-released` event. False when it holds none. */
+  releaseEngineLock(runId: string, why: string): boolean {
+    return this.db.transaction(() => {
+      const run = this.get(runId);
+      if (!run || !isTerminal(run.state)) return false;
+      if (!this.db.query("DELETE FROM locks WHERE checkout = ? AND run_id = ? AND kind = 'engine'").run(run.checkout, runId).changes) return false;
+      this.event(runId, "lock-released", run.state, run.state, { why });
+      return true;
+    }).immediate();
+  }
+
+  /** The close-out takes a run awaiting its engine: atomically, only while no live process holds it
+   * (no owner, or a dead one), so one close-out per engine end (a PR is never opened twice). */
+  takeForCloseOut(runId: string, self: Owner = selfOwner()): QueueRun | null {
+    const seen = this.get(runId);
+    if (!seen || (seen.state !== "running" && seen.state !== "paused")) return null;
+    if (seen.owner_pid !== null && this.ownerLive(ownerOf(seen), self)) return null;
+    return this.db.transaction(() => {
+      const cur = this.get(runId);
+      if (!cur || cur.state !== seen.state || cur.owner_nonce !== seen.owner_nonce || cur.owner_pid !== seen.owner_pid) return null;
+      this.db.query("UPDATE runs SET owner_pid = ?, owner_host = ?, owner_nonce = ?, owner_start = ?, updated = ? WHERE run_id = ?")
+        .run(self.pid, self.host, self.nonce, self.start ?? null, now(), runId);
+      return this.must(runId);
+    }).immediate();
+  }
+
+  /** Story 27.3: a paused run moves `paused` → `running` under this process (owner = `self`, as `claim`)
+   * with one `kind` event: `close-out` (the paused-run pass relaunches the epic; the checkout lock becomes
+   * this process's run lock, as a claim takes it, until `markLaunched` hands it to the new engine) or
+   * `engine-resume` (`POST /runs/{id}/resume`; the engine keeps its lock). Refused unless the run is paused
+   * and no other live process holds it (a close-out lease this process took is its own). */
+  resumeFromPause(runId: string, kind: "close-out" | "engine-resume", detail: Record<string, unknown>, self: Owner = selfOwner()): QueueRun {
+    return this.db.transaction(() => {
+      const run = this.must(runId);
+      if (isTerminal(run.state)) throw new RunTerminal(runId, run.state);
+      if (run.state !== "paused") throw new Error(`${kind}: queue run '${runId}' is ${run.state}, not paused`);
+      if (run.owner_nonce !== null && run.owner_nonce !== self.nonce && this.ownerLive(ownerOf(run), self)) {
+        throw new Error(`${kind}: queue run '${runId}' is held by a live process (pid ${run.owner_pid ?? "?"})`);
+      }
+      this.db.query("UPDATE runs SET state = 'running', owner_pid = ?, owner_host = ?, owner_nonce = ?, owner_start = ?, updated = ? WHERE run_id = ?")
+        .run(self.pid, self.host, self.nonce, self.start ?? null, now(), runId);
+      // The lock as the paused run held it, recorded on the move so `returnToPause` can put it back.
+      let lock: { before: LockRow | null; taken: boolean } | undefined;
+      if (kind === "close-out") {
+        const held = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(run.checkout) as LockRow | null;
+        lock = { before: held && held.run_id === runId ? held : null, taken: !held || held.run_id === runId };
+        this.db.query(
+          `INSERT INTO locks (checkout, root, kind, run_id, job_id, owner_pid, owner_host, owner_nonce, owner_start, engine_run_id, acquired)
+           VALUES (?, ?, 'run', ?, ?, ?, ?, ?, ?, NULL, ?)
+           ON CONFLICT (checkout) DO UPDATE SET root = excluded.root, kind = 'run', run_id = excluded.run_id,
+             job_id = excluded.job_id, owner_pid = excluded.owner_pid, owner_host = excluded.owner_host,
+             owner_nonce = excluded.owner_nonce, owner_start = excluded.owner_start,
+             engine_run_id = NULL, acquired = excluded.acquired
+           WHERE locks.run_id = excluded.run_id`,
+        ).run(run.checkout, run.root, runId, run.job_id, self.pid, self.host, self.nonce, self.start ?? null, now());
+      }
+      this.event(runId, kind, "paused", "running", { ...detail, owner: ownerDetail(self), ...(lock ? { lock } : {}) });
+      return this.must(runId);
+    }).immediate();
+  }
+
+  /** Story 27.3: a run moved out of `paused` (`resumeFromPause`) whose relaunch or resume failed before its
+   * engine was handed the run goes back to `paused` (as `markPaused`), and the checkout lock the `close-out`
+   * move rewrote into this process's run lock is put back as the paused run held it (its engine lock; none:
+   * removed). A lock the move did not take, or one since handed on (not this run's `run` lock), is left. */
+  returnToPause(runId: string, detail: Record<string, unknown>): QueueRun {
+    return this.db.transaction(() => {
+      const run = this.must(runId);
+      if (isTerminal(run.state)) throw new RunTerminal(runId, run.state);
+      if (run.state !== "running") throw new Error(`returnToPause: queue run '${runId}' is ${run.state}, not running`);
+      const move = this.db.query(
+        "SELECT * FROM events WHERE run_id = ? AND kind IN ('close-out','engine-resume') ORDER BY seq DESC LIMIT 1",
+      ).get(runId) as { kind: string; detail: string | null } | null;
+      let restored: unknown;
+      const lock = move?.kind === "close-out" ? (JSON.parse(move.detail ?? "{}") as Record<string, any>).lock : undefined;
+      if (lock && lock.taken) {
+        const held = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(run.checkout) as LockRow | null;
+        if (held && held.run_id === runId && held.kind === "run") {
+          const b = lock.before as LockRow | null;
+          if (b) {
+            this.db.query(
+              `UPDATE locks SET root = ?, kind = ?, run_id = ?, job_id = ?, owner_pid = ?, owner_host = ?, owner_nonce = ?, owner_start = ?,
+                 engine_run_id = ?, acquired = ? WHERE checkout = ?`,
+            ).run(b.root, b.kind, b.run_id, b.job_id, b.owner_pid, b.owner_host, b.owner_nonce, b.owner_start, b.engine_run_id, b.acquired, run.checkout);
+            restored = { kind: b.kind, engine_run_id: b.engine_run_id };
+          } else {
+            this.db.query("DELETE FROM locks WHERE checkout = ?").run(run.checkout);
+            restored = "released (none held before the close-out)";
+          }
+        }
+      }
+      this.db.query("UPDATE runs SET state = 'paused', owner_pid = NULL, owner_host = NULL, owner_nonce = NULL, owner_start = NULL, updated = ? WHERE run_id = ?")
+        .run(now(), runId);
+      this.event(runId, "paused", run.state, "paused", { ...detail, ...(restored !== undefined ? { lock_restored: restored } : {}) });
+      return this.must(runId);
+    }).immediate();
+  }
+
+  /** The engine paused (operator-decisions §2): the run goes `paused`, keeps its worktree and its
+   * checkout lock, and the `paused` event carries the close-out (the draft PR's URL). */
+  markPaused(runId: string, detail: Record<string, unknown>): QueueRun {
+    return this.db.transaction(() => {
+      const run = this.must(runId);
+      if (isTerminal(run.state)) throw new RunTerminal(runId, run.state);
+      if (run.state !== "running") throw new Error(`markPaused: queue run '${runId}' is ${run.state}, not running`);
+      this.db.query("UPDATE runs SET state = 'paused', owner_pid = NULL, owner_host = NULL, owner_nonce = NULL, owner_start = NULL, updated = ? WHERE run_id = ?")
+        .run(now(), runId);
+      this.event(runId, "paused", run.state, "paused", detail);
+      return this.must(runId);
+    }).immediate();
+  }
+
+  /** The engine's life ended and the close-out ran: the one `ended` event (the PR URL or "no
+   * changes" in `detail`), the engine run id kept on the run, and the checkout lock it held released. */
+  endEngine(runId: string, state: TerminalState, reason: string | null | undefined, opts: { detail?: Record<string, unknown>; stop?: StopDetail } = {}): QueueRun {
+    return this.db.transaction(() => {
+      const run = this.must(runId);
+      if (isTerminal(run.state)) throw new RunTerminal(runId, run.state);
+      this.writeEnd(run, state, reason, { kind: "ended", ...opts, keepEngine: true });
+      return this.must(runId);
+    }).immediate();
+  }
+
   /** `end` for a run this process drove. When the run reached the minting
    * verb, its driven definition targets `tk-studio-launch` and no engine is
    * named (a timeout, a missing status block, a `blocked` launch with no
@@ -1222,11 +1718,13 @@ export class Queue {
    * transaction, by the launch-orphan rule `recover` uses — the core may have
    * started an engine that still works the checkout. */
   async endDriven(runId: string, state: TerminalState, reason?: string | null,
-    opts: { engineRunId?: string; detail?: Record<string, unknown>; stop?: StopDetail; holdLock?: string } = {}): Promise<QueueRun> {
+    opts: { engineRunId?: string | null; detail?: Record<string, unknown>; stop?: StopDetail; holdLock?: string; keepEngine?: boolean } = {}): Promise<QueueRun> {
     try {
-      const run = opts.engineRunId ? null : this.get(runId);
+      // An engine already named (Story 27.1: `null` — one the caller's own probe found unverified), or one
+      // the caller's probe confirmed dead (`keepEngine`), is not probed again.
+      const run = opts.engineRunId !== undefined || opts.keepEngine ? null : this.get(runId);
       if (run && run.verb_started && !isTerminal(run.state) && this.definition(run)?.target?.skill === LAUNCH_SKILL) {
-        const { holder, engine } = await this.launchEngine(run.root);
+        const { holder, engine } = await this.launchEngine(engineRoot(run));
         return this.end(runId, state, reason, { ...opts, ...(holder ? { engineRunId: holder.id } : {}), detail: { ...opts.detail, engine } });
       }
       return this.end(runId, state, reason, opts);
@@ -1264,9 +1762,11 @@ export class Queue {
    * `claim` and `recover` free only once `recordedWorker` says it may no longer run
    * (sbx: its in-VM deadline passed). `driverLive` (Story 22.1, a cancel): the run's live
    * driver has recorded no worker yet — `holdLock` keeps the lock without one; the driver's
-   * `endDriven` frees it, else `claim`/`recover` once that owner is dead. */
+   * `endDriven` frees it, else `claim`/`recover` once that owner is dead. `keepEngine` (Story 27.1):
+   * the caller confirmed the run's engine dead (its worktree closed out) — the engine id is kept on
+   * the run and its lock released, never handed to that engine. */
   end(runId: string, state: TerminalState, reason?: string | null,
-    opts: { engineRunId?: string | null; detail?: Record<string, unknown>; from?: RunState; stop?: StopDetail; holdLock?: string; driverLive?: boolean } = {}): QueueRun {
+    opts: { engineRunId?: string | null; detail?: Record<string, unknown>; from?: RunState; stop?: StopDetail; holdLock?: string; driverLive?: boolean; keepEngine?: boolean } = {}): QueueRun {
     if (!isTerminal(state)) throw new Error(`end: '${state}' is not a terminal state`);
     return this.db.transaction(() => {
       const run = this.must(runId);
@@ -1277,16 +1777,166 @@ export class Queue {
     }).immediate();
   }
 
+  /** Story 27.5 (DW-12, DW-13): `end` for a cancel, re-reading inside the end transaction what the cancel acted
+   * on — the studio run it ended (`acted.studio_run_id`) and the owner it read (`acted.owner_nonce`). A studio run
+   * recorded since (a driver's `setStudioRun` after the cancel's read) is answered as `late_studio_run_id`, for the
+   * caller to end after the commit. A `running` run claimed since by another owner (not `self`, whose close-out take
+   * re-owns it) keeps its `run` lock for that driver (`driverLive`): the driver's own end frees it, else
+   * `claim`/`recover` once it is dead. The recorded owner is compared only — no liveness probe runs inside the
+   * transaction. */
+  endReread(runId: string, state: TerminalState, reason: string | null | undefined,
+    opts: { engineRunId?: string | null; detail?: Record<string, unknown>; holdLock?: string; driverLive?: boolean; keepEngine?: boolean },
+    acted: { studio_run_id: string | null; owner_nonce: string | null }, self: Owner = selfOwner(),
+  ): { run: QueueRun; late_studio_run_id?: string; claimed?: { pid: number | null; host: string | null } } {
+    if (!isTerminal(state)) throw new Error(`end: '${state}' is not a terminal state`);
+    return this.db.transaction(() => {
+      const run = this.must(runId);
+      if (isTerminal(run.state)) throw new RunTerminal(runId, run.state);
+      const late = run.studio_run_id && run.studio_run_id !== acted.studio_run_id ? run.studio_run_id : undefined;
+      const claimed = !opts.holdLock && opts.engineRunId === undefined && !opts.keepEngine && run.state === "running"
+        && run.owner_nonce !== null && run.owner_nonce !== acted.owner_nonce && run.owner_nonce !== self.nonce
+        ? { pid: run.owner_pid, host: run.owner_host } : undefined;
+      const detail = { ...(opts.detail ?? {}), ...(late ? { late_studio_run_id: late } : {}), ...(claimed ? { claimed_during_cancel: claimed } : {}) };
+      const hold = claimed
+        ? { holdLock: `cancelled: claimed by its driver (pid ${claimed.pid ?? "?"}${claimed.host ? `@${claimed.host}` : ""}) during the cancel`, driverLive: true } : {};
+      this.writeEnd(run, state, reason, { ...opts, ...hold, detail, kind: "ended" });
+      return { run: this.must(runId), ...(late ? { late_studio_run_id: late } : {}), ...(claimed ? { claimed } : {}) };
+    }).immediate();
+  }
+
+  /** Story 27.5 (DW-13): `cancelled` runs whose recorded studio run no record shows ended — neither the cancel's own
+   * ender (its `ended` detail's `studio`, ok and naming that run) nor a `studio-run-ended` event — and whose ender has
+   * not yet given up on it: fewer than `STUDIO_END_RETRY_LIMIT` `studio-run-end-failed` events for that studio run
+   * and none with `gave_up: true` (a failed ender is retried by the next recovery, bounded): `recoverQueue` ends each
+   * through the same ender. */
+  cancelledLeftovers(): QueueRun[] {
+    const runs = this.db.query(
+      `SELECT * FROM runs WHERE state = 'cancelled' AND studio_run_id IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM events e WHERE e.run_id = runs.run_id AND e.kind = 'studio-run-ended'
+           AND json_extract(e.detail, '$.studio_run_id') = runs.studio_run_id)
+         AND NOT EXISTS (SELECT 1 FROM events e WHERE e.run_id = runs.run_id AND e.kind = 'studio-run-end-failed'
+           AND json_extract(e.detail, '$.studio_run_id') = runs.studio_run_id AND json_extract(e.detail, '$.gave_up') = 1)
+         AND (SELECT COUNT(*) FROM events e WHERE e.run_id = runs.run_id AND e.kind = 'studio-run-end-failed'
+           AND json_extract(e.detail, '$.studio_run_id') = runs.studio_run_id) < ?
+       ORDER BY created, rowid`,
+    ).all(STUDIO_END_RETRY_LIMIT) as QueueRun[];
+    return runs.filter((r) => {
+      const ended = this.events(r.run_id).findLast((e) => e.kind === "ended")?.detail as Record<string, any> | null | undefined;
+      const studio = ended?.studio as { ok?: unknown; detail?: unknown } | undefined;
+      return !(studio?.ok === true && typeof studio.detail === "string" && studio.detail.includes(`studio run ${r.studio_run_id} `));
+    });
+  }
+
+  /** Story 27.5 (DW-25): runs `recover` ended orphaned with a worktree recorded and no `closed_out` yet — the
+   * orphan close-out pass (`recoverQueue`) closes each out once nothing around it is live. */
+  orphanedCloseOuts(): QueueRun[] {
+    return this.db.query(
+      `SELECT * FROM runs WHERE worktree IS NOT NULL AND state IN ('complete','partial','blocked','cancelled')
+         AND EXISTS (SELECT 1 FROM events e WHERE e.run_id = runs.run_id AND e.kind = 'orphaned')
+         AND NOT EXISTS (SELECT 1 FROM events e WHERE e.run_id = runs.run_id AND e.kind = 'closed_out')
+       ORDER BY created, rowid`,
+    ).all() as QueueRun[];
+  }
+
+  /** Story 27.5 (DW-29): a run whose latest move out of `paused` is `engine-resume` (`POST /runs/{id}/resume`) has
+   * its resumed engine probed by the pid the resume recorded (`engine_pid`, start time matched): sbx through
+   * `sbx exec … cat /proc/<pid>/stat` (an unreadable probe counts as alive — fail closed), host by the pid and its
+   * start time. False when the latest move is not an `engine-resume`, or no pid was recorded. Never throws. */
+  async resumedEngineAlive(run: QueueRun): Promise<boolean> {
+    return (await this.resumedEngineHold(run)) !== undefined;
+  }
+
+  /** `resumedEngineAlive` with its reason: why the run is held (undefined: not held). A resume whose engine pid was
+   * not recorded after the `engine-resume` move — no `engine-pid` event with `resumed: true` and a numeric `pid`
+   * after it (the resume still polling `engine.pid`, or `engine.pid` not rewritten) — is held: its engine cannot be
+   * probed, so it may still run. Only then is `engine_pid` probed. */
+  async resumedEngineHold(run: QueueRun): Promise<string | undefined> {
+    try {
+      const move = this.db.query("SELECT seq, kind FROM events WHERE run_id = ? AND kind IN ('close-out','engine-resume') ORDER BY seq DESC LIMIT 1")
+        .get(run.run_id) as { seq: number; kind: string } | null;
+      if (move?.kind !== "engine-resume") return undefined;
+      const recorded = this.events(run.run_id, move.seq).some((e) => e.kind === "engine-pid" && e.detail?.resumed === true && typeof e.detail?.pid === "number");
+      if (!recorded || run.engine_pid == null) {
+        return "the resume recorded no engine pid after its engine-resume (still polling engine.pid, or engine.pid was not rewritten): its engine may still run";
+      }
+      const why = "the resumed engine (engine-resume) still runs: the resume is in flight across a restart";
+      if (run.tier === "sbx" && run.sandbox) {
+        let p: ProbeResult;
+        try { p = await (this.probes.engineProbe ?? ((s: string, pid: number) => probeEngine(s, pid)))(run.sandbox, run.engine_pid); }
+        catch (e) { p = { unreadable: e instanceof Error ? e.message : String(e) }; }
+        if ("unreadable" in p) return `${why} (its probe failed: ${p.unreadable.slice(0, 200)})`;
+        return p.alive && sameStart(p.start, run.engine_start) ? why : undefined;
+      }
+      if (!pidRunning(run.engine_pid)) return undefined;
+      const live = processStartTime(run.engine_pid);
+      return !run.engine_start || live === null || live === run.engine_start || sameStart(live, run.engine_start) ? why : undefined;
+    } catch (e) { return `the resumed engine could not be checked: ${e instanceof Error ? e.message : String(e)}`; }
+  }
+
+  /** Story 27.5: the plan pull-back's lease for one phase of a run (`review`|`done`), taken in one IMMEDIATE
+   * transaction before `plansync.py status` is called (the end hygiene's `claimEnd` model): a `plan-lease {phase,
+   * owner}` event appended (a terminal row is never updated). Refused when the phase already has a `plan-status`
+   * event, or its latest lease is held by a live owner (this process included) — and, for `done`, while the run's
+   * latest `review` lease is held by a live owner (the review still in progress: a pass that recorded lets its lease
+   * go `settled`, `releasePlanPhase`), so `done` is never settled on a partial review. */
+  claimPlanPhase(runId: string, phase: string, self: Owner = selfOwner()): boolean {
+    return this.db.transaction(() => {
+      const run = this.get(runId);
+      if (!run) return false;
+      const evs = this.events(runId);
+      if (evs.some((e) => e.kind === "plan-status" && e.detail?.phase === phase)) return false;
+      const held = (p: string) => {
+        const lease = evs.findLast((e) => e.kind === "plan-lease" && e.detail?.phase === p)?.detail?.owner as Owner | null | undefined;
+        return !!lease && this.ownerLive(lease, self);
+      };
+      if (held(phase) || (phase === "done" && held("review"))) return false;
+      this.event(runId, "plan-lease", run.state, run.state, { phase, owner: ownerDetail(self) });
+      return true;
+    }).immediate();
+  }
+
+  /** Story 27.5: a plan lease let go of — an appended `plan-lease {phase, owner: null, released}`, only while the
+   * lease is still `self`'s. With nothing recorded (a transient failure: the next tick asks again, a bounded retry)
+   * or, `settled`, once the pass recorded (`settled: true`: the phase is no longer in progress, never a retry). */
+  releasePlanPhase(runId: string, phase: string, self: Owner = selfOwner(), settled = false): void {
+    this.db.transaction(() => {
+      const run = this.get(runId);
+      if (!run) return;
+      const lease = this.events(runId).findLast((e) => e.kind === "plan-lease" && e.detail?.phase === phase)?.detail?.owner as Owner | null | undefined;
+      if (lease?.nonce === self.nonce) {
+        this.event(runId, "plan-lease", run.state, run.state, { phase, owner: null, released: ownerDetail(self), ...(settled ? { settled: true } : {}) });
+      }
+    }).immediate();
+  }
+
+  // ---------------------------------------------------------- supervisor-scope events (Story 27.5)
+
+  /** A supervisor-scope event (no run): the certificate's renew request and its outcome. */
+  serviceEvent(kind: string, detail: Record<string, unknown> = {}, at: string = now()): void {
+    this.db.query("INSERT INTO service_events (at, kind, detail) VALUES (?, ?, ?)")
+      .run(at, kind, Object.keys(detail).length ? JSON.stringify(detail) : null);
+  }
+
+  /** The supervisor-scope events in seq order (with `kind`, only those). */
+  serviceEvents(kind?: string): { seq: number; at: string; kind: string; detail: Record<string, unknown> | null }[] {
+    const rows = (kind
+      ? this.db.query("SELECT * FROM service_events WHERE kind = ? ORDER BY seq").all(kind)
+      : this.db.query("SELECT * FROM service_events ORDER BY seq").all()) as { seq: number; at: string; kind: string; detail: string | null }[];
+    return rows.map((r) => ({ ...r, detail: r.detail ? JSON.parse(r.detail) : null }));
+  }
+
   /** Inside a transaction: the terminal transition, the lock released (or handed
    * to an engine), the ending event (`ended`, or `orphaned` from `recover`), and
    * a `stop` recorded in the same transaction. The one end path. */
   private writeEnd(run: QueueRun, state: TerminalState, reason: string | null | undefined,
-    opts: { kind: "ended" | "orphaned"; engineRunId?: string | null; detail?: Record<string, unknown>; stop?: StopDetail; holdLock?: string; driverLive?: boolean }): void {
+    opts: { kind: "ended" | "orphaned"; engineRunId?: string | null; detail?: Record<string, unknown>; stop?: StopDetail; holdLock?: string; driverLive?: boolean;
+      /** Story 27.1 (`endEngine`): the engine's life is over — its id stays on the run, any lock this run holds is released. */
+      keepEngine?: boolean }): void {
     const runId = run.run_id;
     this.db.query(
       `UPDATE runs SET state = ?, reason = ?, owner_pid = NULL, owner_host = NULL, owner_nonce = NULL, owner_start = NULL,
          engine_run_id = ?, updated = ? WHERE run_id = ?`,
-    ).run(state, reason ?? null, opts.engineRunId ?? null, now(), runId);
+    ).run(state, reason ?? null, opts.keepEngine ? run.engine_run_id ?? opts.engineRunId ?? null : opts.engineRunId ?? null, now(), runId);
     const detail: Record<string, unknown> = { ...(opts.detail ?? {}) };
     const held = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(run.checkout) as LockRow | null;
     const hasWorker = run.worker_pid !== null && run.worker_pid !== undefined;
@@ -1294,6 +1944,8 @@ export class Queue {
       // Its recorded worker may still run: the lock stays with the ended run (freed by `claim`/`recover`
       // once `recordedWorker` says it may no longer run — sbx: at its in-VM deadline).
       detail.lock = { held: opts.holdLock, ...(hasWorker && run.tier === "sbx" ? { until: new Date(this.sbxDeadline(run).ms).toISOString() } : {}) };
+    } else if (opts.keepEngine) {
+      if (this.db.query("DELETE FROM locks WHERE checkout = ? AND run_id = ?").run(run.checkout, runId).changes) detail.lock = "released";
     } else if (opts.engineRunId !== undefined) {
       const lock = held;
       if (!lock || lock.run_id === runId) {
@@ -1385,8 +2037,12 @@ export class Queue {
    * once its recorded worker may no longer run (`released`), else it is `held`. */
   async recover(ops: StudioOps, self: Owner = selfOwner()): Promise<RecoverReport> {
     const report: RecoverReport = { ended: [], requeued: [], resumed: [] };
+    // A launched run (its driver let go at `launched`) carries an owner only as a close-out lease (the
+    // sweep's or a cancel's): a dead lease is re-taken by the engine-end sweep, never resumed or orphaned here.
     const candidates = (this.db.query(
-      "SELECT * FROM runs WHERE state IN ('queued','running') AND owner_pid IS NOT NULL ORDER BY created, rowid",
+      `SELECT * FROM runs WHERE state IN ('queued','running') AND owner_pid IS NOT NULL
+         AND NOT ${LAUNCHED_SQL}
+       ORDER BY created, rowid`,
     ).all() as QueueRun[]).filter((r) => r.owner_nonce !== self.nonce && !this.ownerLive(ownerOf(r), self));
     const unchanged = (c: QueueRun, now_: QueueRun | null) =>
       !!now_ && now_.state === c.state && now_.owner_nonce === c.owner_nonce && now_.owner_pid === c.owner_pid
@@ -1400,6 +2056,14 @@ export class Queue {
     };
 
     for (const c of candidates) {
+      // Story 27.5 (DW-29): a resume in flight across a restart (its latest move `engine-resume`, the `launched`
+      // written only when the resolve child exits) is never orphaned while its resumed engine runs: held as it is
+      // (`respawnHolds` re-holds an sbx engine); once that engine is gone the run is orphaned and closed out.
+      const resumeHold = c.state === "running" ? await this.resumedEngineHold(c) : undefined;
+      if (resumeHold) {
+        (report.held ??= []).push({ run_id: c.run_id, worker: { pid: c.engine_pid ?? 0, start: c.engine_start, outcome: "running", detail: resumeHold } });
+        continue;
+      }
       // Before anything resumes the run or releases its lock: its recorded worker (DW-3, DW-7).
       // sbx: held until the in-VM deadline (the host pid is only `sbx exec`).
       const settled = await this.recordedWorker(c, true);
@@ -1523,7 +2187,7 @@ export class Queue {
       // A launch run may have started a detached engine before the handover: probe before releasing the lock.
       let engine: Record<string, unknown> | undefined;
       let engineHolder: { id: string | null } | undefined;
-      if (defn?.target?.skill === LAUNCH_SKILL) ({ holder: engineHolder, engine } = await this.launchEngine(c.root));
+      if (defn?.target?.skill === LAUNCH_SKILL) ({ holder: engineHolder, engine } = await this.launchEngine(engineRoot(c)));
       const trips = noResume?.trips?.length ? noResume.trips : undefined;
       const done = this.db.transaction(() => {
         const cur = this.get(c.run_id);
@@ -1554,10 +2218,7 @@ export class Queue {
    * still run in the VM): each lock is freed once `recordedWorker` says its worker may no
    * longer run (sbx: the in-VM deadline passed), else the run is reported `held`. */
   private async releaseKeptLocks(report: RecoverReport, self: Owner): Promise<void> {
-    const kept = this.db.query(
-      `SELECT runs.* FROM locks JOIN runs ON runs.run_id = locks.run_id
-       WHERE locks.kind = 'run' AND runs.state IN ('complete','partial','blocked','cancelled') ORDER BY locks.acquired`,
-    ).all() as QueueRun[];
+    const kept = this.keptLockRuns();
     for (const k of kept) {
       if (k.worker_pid == null) {
         // Kept for its live driver (`end`'s `driverLive`): freed by that driver, or once it is dead.
