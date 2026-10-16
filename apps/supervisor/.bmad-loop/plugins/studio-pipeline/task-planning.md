@@ -91,6 +91,9 @@ repo: <the repo the epic narrative names for this story>
 ## Code Map
 <annotated paths, symbols, reuse points and read-only seams: the investigation, so the dev session does not repeat it>
 
+## Settled shape
+<the planner's rulings on shapes the design documents constrain (a schema entry, file or tag for an artifact a later story or an operator produces), each with the bullet it appended to SPEC.md; these are not Block Ifs>
+
 ## Files
 <the files the story will create or modify, each marked (new) or (modify); anything outside this list is a deviation the session must record>
 
@@ -98,10 +101,18 @@ repo: <the repo the epic narrative names for this story>
 <the exact commands: the project gate from the studio customization, plus any story-specific checks>
 
 ## Risks and open decisions
-<anything a dev session must not decide alone, phrased as a Block If>
+<anything a dev session must not decide alone, phrased as a Block If; settled shapes (the `## Settled shape` section) are not Block Ifs>
 ```
 
 Every entry's `invoke_dev_with` already names `plans/<N>-<M>.md`, so the dev session starts from this Code Map.
+
+**Settled shape.** When a story's acceptance criteria need a schema entry, a file or a tag for an artifact that only a later story or an operator action produces, settle its shape here. Append one bullet to `<spec_folder>/SPEC.md` under the existing `## Design notes (settled shape, planner, <date>)` section, whatever its date. Create the section, dated today, only when none exists; there is never a second dated section:
+
+```markdown
+- <CAP or story> — <artifact>: <shape> — per <design document path[§]>
+```
+
+`<shape>` is one of `optional entry`, `deferred entry`, `per-platform map` or `named placeholder rule`, each with its concrete text. The plan's own "Settled shape" section carries the detail. A settled shape is never a Block If and never an `open_questions[]` item. It stays a Block If naming an operator ruling only when no design document constrains it. Appending design notes to SPEC.md is a planner write, not a `bmad-spec` edit (AD-4).
 
 ## 4. Validate
 
