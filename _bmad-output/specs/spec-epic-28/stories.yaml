@@ -56,7 +56,9 @@
     folder; the engine resolves it by the glob
     `28-2-a-nested-studio-project-is-a-first-class-root-*.md`, and a file named
     `28-2-a-nested-studio-project-is-a-first-class-root.md` is read as pending (loop
-    deficiency 1, story 21-6).
+    deficiency 1, story 21-6). Oversize (planner, 2026-10-16): the plan's Files list is
+    already past band L; halt and record it if the Files list grows past plans/28-2.md
+    "Files" (that is the operator's bmad-correct-course, never a split decided here).
 
 - id: "28-3-the-merged-tree-builds-releases-and-launches-from-one-root"
   title: "The Merged Tree Builds, Releases and Launches From One Root"
