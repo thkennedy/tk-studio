@@ -2409,3 +2409,83 @@ Added 2026-10-17, after the cut-over. Story 27.2 made the supervisor write an ad
 **Given** the verbs the supervisor runs itself for a claimed run (`runJobVerb` callers in `apps/supervisor/src/cli.ts`: the run's `wake` or `submit`)
 **When** the supervisor executes one
 **Then** `--force-starter` is on that command line and the run is never refused by its own lock; the MCP `tk_job` route the supervisor serves passes nothing (a start through it is a hand start and is refused like one); `bun test` pins both; the driver contract takes a minor bump (0.1.23) documenting under §4 the `--force-starter` flag, the `TK_STUDIO_IGNORE_STARTER_LOCK` variable, the `StarterLocked` refusal and the `starter_lock` answer field, with conformance green; runbook §3.8's "Hand starts" row says `jobrun.py` refuses under a live lock and names the override; DW-6 is closed in `apps/supervisor/_bmad-output/implementation-artifacts/deferred-work.md`
+
+## Epic 29: One Account, the Registry, the Projection
+
+The design spec's §6.2 item 3 (`_bmad-output/planning-artifacts/design/studio-design-spec-2026-10-09/README.md`), the first epic after the restructure and the one every front-end epic stands on: the owner's single account replaces the Google and GitHub sign-in (D7, D8, spec §8), the supervisor owns an agent registry every consumer reads (§7.2), and the queue's events and the engine's journal are projected into the office vocabulary (§7.3) and streamed the way the studio web of EP-30 needs them (§6.3: snapshot then deltas, `Last-Event-ID`, a heartbeat under 15 s). Nothing here is a web page: the read-only status page stays the no-JavaScript fallback, and EP-30 builds the office on what this epic serves. Rulings in force and not reopened: the 2026-09-26 and 2026-10-09 rulings, O5, AD-2 (the supervisor stays outside the plugin; the plugin publishes the contract), AD-3 (credentials only in the per-user store, the OS store or the environment), AD-21 and AD-22, and the design spec's D1 to D10 (D7 one account, username and password, no external providers; D8 no API-key fallback; D10 tailnet by default). Driven by the supervisor's own queue on this repository (`POST /jobs` with the declared `run-epic-29` job, a worktree, the engine in `claude-tk-studio`, `tools/verify_host.py` as the host verify leg; `bun test` from `apps/supervisor` is the dev session's own gate, as Story 28.6 names it) and gated by conformance (AD-19); every surface ends headless runs with the status block (AD-11). The supervisor tab keeps running: the engine edits a worktree, never the checkout. Requirements trace: spec §6.2 item 3, §6.3 (the stream's shape), §7.2, §7.3, §8, §9 (D7, D8, D10); the 2026-09-01 office decisions recovered in `research/studio-office-ui-2026-09-01/`; DW-17 (the notifier's credentials never reach a worker, unchanged). Rough size: Epic-22-sized (four stories). Repo: tk-studio (`apps/supervisor/src`, `apps/supervisor/test`, `apps/supervisor/README.md`, `plugins/tk-studio/contracts/driver-contract.md`, `kb/agent-pc-setup-runbook.md`).
+
+### Story 29.1: The Owner's Account Replaces the Providers
+
+As the owner,
+I want to create the studio's one account on my first visit and sign in with a username and password,
+So that the studio is operated from my own seat with no external identity provider (D7, D8).
+
+**Acceptance Criteria:**
+
+**Given** a supervisor with no account yet
+**When** a browser opens `GET /` with no session
+**Then** the sign-in page offers account creation instead of sign-in: a username (3 to 64 characters, letters, digits, `-`, `_`, `.`) and a password (12 characters or more, checked for length only); `POST /auth/account` creates the account once (a second creation is 409 `AccountExists`), hashes the password with `Bun.password` (argon2id, the default cost), stores the record (`username`, the hash, `created_at`) in the per-user store under the supervisor's own folder (`<TK_STUDIO_HOME or ~/.tk-studio>/supervisor/account.json`, never in a checkout, never in the queue file; AD-3), answers with the session cookie, and records a `service_events` row `account-created {username}`; the page then states the intended usage in one paragraph: the studio is operated by the person whose Claude subscription is signed in on this box, from their own seat, with no token intermediated and no API-key tier (spec §8), and `apps/supervisor/README.md` carries the same paragraph
+
+**Given** the account exists
+**When** `POST /auth/signin` receives the username and password
+**Then** a match (constant-time, `Bun.password.verify`) answers the session cookie Story 22.5 defined (unchanged shape and lifetime); a mismatch answers 401 `SignInRefused` after a fixed delay, and five failures within fifteen minutes lock the account for fifteen minutes (423 `AccountLocked`, the lockout and every refusal recorded as `service_events` rows naming the username and never the password); the bearer header still authorises everything, and `POST /auth/token` (the token sign-in) stays for the operator's own browser; `bun test` pins creation, sign-in, the lockout window and that no answer, event or log line carries a password or a hash
+
+**Given** the Google and GitHub providers
+**When** the story closes
+**Then** the routes `GET /auth/{google,github}` and their callbacks, the `TK_SUPERVISOR_OAUTH_*` variables, `OAuthNeedsHttps` and the provider code in `apps/supervisor/src/auth.ts` are deleted (not disabled); a set `TK_SUPERVISOR_OAUTH_*` variable is ignored with one start-time warning naming it; the README's environment table and runbook §4.5 drop the OAuth walk-through and describe the account; `bun test` pins that the removed routes answer 404 and that the worker environment still strips every `TK_SUPERVISOR_*` secret (DW-17)
+
+**Given** the operator locked out or the password lost
+**When** they need back in
+**Then** the documented reset is deleting `account.json` from the console (the next visit creates the account again) and the bearer token keeps working throughout; the runbook §4.5 names it
+
+### Story 29.2: The Agent Registry
+
+As a consumer of the studio (the web, a driver, the operator),
+I want the supervisor to serve the registry of agents it can run per project,
+So that every surface names the same agents by the same ids (§7.2).
+
+**Acceptance Criteria:**
+
+**Given** the registry's served projects (the host registry's roots) and the routing legs of each (`pipeline.py resolve --directory <root>` with the shipped defaults when no story is live; the run's `routing.current.json` while one is)
+**When** `recover` runs (every tick) and whenever a run is claimed or ends
+**Then** the supervisor rebuilds an `agents` table in the queue file: one row per `(project, role)` for the roles `orchestrator`, `session`, `implementer`, `reviewer`, `consult`, `advisor`, `planner` (the legs of contract §5 mapped once, in one table in `apps/supervisor/src/registry.ts`), with `agent_id` `<project-id>/<role>`, `model`, `effort` and `advisor` from the resolved route, `persona` from a bindings file (`apps/supervisor/personas.json`, shipped: a display name per role; the sprites are EP-30's), `live_state` (Story 29.3; `offline` until then), `current_run` and `current_story` when the role has a live leg, and `jira_account` empty (EP-31's); the table is derived only: the plugin and onboarding are not changed, the registry is never edited by hand, and a project the host registry drops disappears on the next rebuild
+
+**Given** a consumer
+**When** it reads `GET /agents` (bearer or session cookie) or `GET /agents?project=<id>`
+**Then** the answer lists the rows above with the time of the rebuild; an unknown project answers an empty list; the read-only status page gains an "Agents" section listing them per project; `bun test` pins the mapping from a resolved route, the rebuild on tick, claim and end, and the two routes; `apps/supervisor/README.md` documents the table and the routes
+
+### Story 29.3: The Office Projection: Semantic States, Progress and Its Stream
+
+As the studio web (and the operator watching),
+I want each agent's state and each story's progress derived from the queue's events and the engine's journal, and streamed,
+So that the office of EP-30 renders a live picture without reading raw events (§7.3, §6.3).
+
+**Acceptance Criteria:**
+
+**Given** the queue's events of a run and the engine's journal in the run's served root (`.bmad-loop/runs/<engine run id>/` at the bmad-loop pin of `bmad.lock`: the journal and run files the engine writes; the planner's Code Map names the exact files and kinds, read from the host side of the worktrees mount, never through the engine)
+**When** the supervisor projects them
+**Then** each agent of the registry has one of `offline`, `idle`, `thinking`, `reading`, `typing`, `running`, `waiting-for-human`, `blocked`, with the overlays `done` and `failed` per story, by one mapping table in `apps/supervisor/src/office.ts` (queued or lock-wait is `idle`; the launch and planner legs `thinking`; a dev session's implementer `typing` and its reviewers `reading`; the verify and host-verify legs `running`; `paused`, `awaiting-ruling` and an `escalate` `waiting-for-human`; a `blocked` run `blocked`; no run `offline`); promotion is instant, demotion goes through a grace timer (20 s, injectable), and `waiting-for-human` never expires on its own
+
+**Given** a run's stories (the spec folder's manifest at the run's base, the denominator fixed when the launch validated it)
+**When** the journal's terminal kinds land (a story landed, failed, deferred)
+**Then** progress per story and per epic is `done / total` with the current story named, and the quote band of §7.1 is not computed here (EP-32's)
+
+**Given** a consumer
+**When** it reads `GET /office` (a snapshot: the agents with their states, the live runs with story and epic progress, the time) or opens `GET /office/events` with `Accept: text/event-stream`
+**Then** the stream sends the snapshot first, then one event per state or progress change (`office.agent`, `office.progress`, `office.run`), honours `Last-Event-ID` (a reconnect replays from that seq, the snapshot again when it is too old), sends a heartbeat comment every 10 s, and closes cleanly on the client's close; the raw `GET /events` stream is unchanged; `bun test` pins the mapping table against recorded event and journal fixtures, the grace timer with an injected clock, the snapshot-then-deltas order, the replay and the heartbeat; the read-only status page shows each live run's agent states as text
+
+### Story 29.4: The Contract Names the Web as a Consumer and the Runbook Follows
+
+As a driver author,
+I want the driver contract to name the studio web as a consumer and the supervisor's new surfaces as supervisor surfaces,
+So that AD-2 holds: the plugin publishes the contract, the supervisor owns the account, the registry and the projection (spec §6.1).
+
+**Acceptance Criteria:**
+
+**Given** `plugins/tk-studio/contracts/driver-contract.md`
+**When** the story closes
+**Then** a minor bump (the next after Story 28.6's) names the studio web among the consumers in §1 and documents, as supervisor surfaces consumed by the web and never plugin surfaces, the account (`POST /auth/account`, `POST /auth/signin`), the registry (`GET /agents`) and the projection (`GET /office`, `GET /office/events`, the three `office.*` event kinds and the eight states); nothing in the plugin's own surfaces changes; conformance is green and the lib suite is green
+
+**Given** the operator's runbook and the supervisor's README
+**When** the story closes
+**Then** runbook §4.5 (the smoke test) signs in with the account and keeps the token path for `curl`; §4.2's table drops the OAuth rows and names nothing new that is a secret (the account record is the store's); §7's smoke table gains the `/agents` and `/office` answers; the README's API table and environment table match the code; `tk-studio doctor` is unchanged

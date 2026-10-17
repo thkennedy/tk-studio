@@ -1,0 +1,11 @@
+{
+  "job_schema_version": 1,
+  "id": "run-epic-29",
+  "type": "run-epic",
+  "description": "tk-studio Epic 29 (One Account, the Registry, the Projection) through the supervisor's queue (declared 2026-10-17 with the epic). Extends the shipped run-epic type: one-shot; the first launch bootstraps the spec folder _bmad-output/specs/spec-epic-29 and the manifest from epics.md and commits them on the run branch (Story 26.1). Submit it with POST /jobs {project: tk-studio, job: run-epic-29} (its placement, tier sbx on claude-tk-studio, in TK_SUPERVISOR_CONFIG); the run's worktree is cut from main, tools/verify_host.py is the host verify leg, bun test from apps/supervisor is the dev session's own gate, and the close-out opens the PR. The supervisor tab keeps running: the engine edits the worktree, never the checkout.",
+  "target": {
+    "payload": {
+      "epic": 29
+    }
+  }
+}
