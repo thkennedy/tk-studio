@@ -26,9 +26,19 @@ step git-identity
 }
 git config --global user.email
 
+# Loud on failure (loop hole 24, twice): a silent apt left the sandbox without tmux and
+# the engine would have died at its first session. The apt output lands in a log whose
+# tail is printed when the install fails; `tmux -V` must answer afterwards.
+apt_install() {
+  local pkg="$1" log="/tmp/provision-apt-$1.log"
+  sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq > "$log" 2>&1 || true
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$pkg" >> "$log" 2>&1 || {
+    echo "$pkg: apt-get install failed; last lines of $log:"; tail -n 20 "$log"; return 1; }
+}
+
 step tmux
-command -v tmux >/dev/null || { sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1; sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tmux >/dev/null 2>&1; }
-tmux -V
+command -v tmux >/dev/null || apt_install tmux || exit 1
+tmux -V || { echo "tmux: not runnable after the install"; exit 1; }
 
 # [tui] is not optional: without it `bmad-loop list` fails (pyte/rich) and so
 # does tk-studio-launch's live-engine check.
@@ -61,7 +71,7 @@ if [ -n "${WITH_GODOT:-}" ]; then
     curl -fsSL "https://github.com/godotengine/godot/releases/download/${WITH_GODOT}-stable/Godot_v${WITH_GODOT}-stable_mono_linux_x86_64.zip" -o /tmp/godot.zip \
       && unzip -q -o /tmp/godot.zip -d "$HOME/godot" && chmod +x "$GD_BIN" && rm -f /tmp/godot.zip
   }
-  dpkg -s libfontconfig1 >/dev/null 2>&1 || { sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1; sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libfontconfig1 >/dev/null 2>&1; }
+  dpkg -s libfontconfig1 >/dev/null 2>&1 || apt_install libfontconfig1 || exit 1
   mkdir -p "$HOME/.local/bin"
   printf '#!/usr/bin/env bash\nexec "%s" "$@"\n' "$GD_BIN" > "$HOME/.local/bin/godot"
   chmod +x "$HOME/.local/bin/godot"
