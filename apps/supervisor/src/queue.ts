@@ -1451,15 +1451,15 @@ export class Queue {
   }
 
   /** The launch-orphan rule over this queue's probes (`probeLaunchEngine`). */
-  private async launchEngine(root: string): Promise<LaunchEngine> {
-    return probeLaunchEngine(this.probes, root);
+  private async launchEngine(root: string, where?: EngineWhere): Promise<LaunchEngine> {
+    return probeLaunchEngine(this.probes, root, where);
   }
 
   /** The launch-orphan rule's probe, for a caller outside the queue (Story 21.6:
    * a `tk-studio-launch` run is never resumed beside a live or unverified engine).
    * Runs outside any transaction. */
-  async launchEngineAt(root: string): Promise<LaunchEngine> {
-    return this.launchEngine(root);
+  async launchEngineAt(root: string, where?: EngineWhere): Promise<LaunchEngine> {
+    return this.launchEngine(root, where);
   }
 
   // ---------------------------------------------------------- worktrees and engine lifetimes (Story 27.1)
@@ -1622,7 +1622,7 @@ export class Queue {
     const w = await this.recordedWorker(run, false);
     if (w.mayRun) return `its recorded worker may still run (${w.worker?.outcome ?? "unknown"})`;
     if (run.engine_run_id || this.definition(run)?.target?.skill === LAUNCH_SKILL) {
-      const { holder, engine } = await this.launchEngine(engineRoot(run));
+      const { holder, engine } = await this.launchEngine(engineRoot(run), { tier: run.tier, sandbox: run.sandbox });
       if (holder) return `an engine may still work the worktree (${holder.id ?? String(engine.detail ?? "unverified")})`;
     }
     return undefined;
@@ -1766,7 +1766,7 @@ export class Queue {
       // the caller's probe confirmed dead (`keepEngine`), is not probed again.
       const run = opts.engineRunId !== undefined || opts.keepEngine ? null : this.get(runId);
       if (run && run.verb_started && !isTerminal(run.state) && this.definition(run)?.target?.skill === LAUNCH_SKILL) {
-        const { holder, engine } = await this.launchEngine(engineRoot(run));
+        const { holder, engine } = await this.launchEngine(engineRoot(run), { tier: run.tier, sandbox: run.sandbox });
         return this.end(runId, state, reason, { ...opts, ...(holder ? { engineRunId: holder.id } : {}), detail: { ...opts.detail, engine } });
       }
       return this.end(runId, state, reason, opts);
@@ -2229,7 +2229,7 @@ export class Queue {
       // A launch run may have started a detached engine before the handover: probe before releasing the lock.
       let engine: Record<string, unknown> | undefined;
       let engineHolder: { id: string | null } | undefined;
-      if (defn?.target?.skill === LAUNCH_SKILL) ({ holder: engineHolder, engine } = await this.launchEngine(engineRoot(c)));
+      if (defn?.target?.skill === LAUNCH_SKILL) ({ holder: engineHolder, engine } = await this.launchEngine(engineRoot(c), { tier: c.tier, sandbox: c.sandbox }));
       const trips = noResume?.trips?.length ? noResume.trips : undefined;
       const done = this.db.transaction(() => {
         const cur = this.get(c.run_id);

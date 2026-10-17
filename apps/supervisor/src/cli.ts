@@ -857,7 +857,7 @@ async function cancelQueueRun(
   // A launched engine: the one recorded, else (a launch run that reached its verb) the launch core's probe.
   const probeEngine = async (r: QueueRun) => {
     if (!r.verb_started || queue.definition(r)?.target?.skill !== LAUNCH_SKILL) return undefined;
-    const probed = await queue.launchEngineAt(engineRoot(r));
+    const probed = await queue.launchEngineAt(engineRoot(r), { tier: r.tier, sandbox: r.sandbox });
     if (probed.holder) detail.engine = probed.engine;
     return probed.holder;
   };
@@ -930,7 +930,7 @@ async function cancelQueueRun(
     else if (engine) {
       const stop = detail.engine_stop as { ok?: boolean } | undefined;
       if (stop?.ok !== true) skip = "the engine stop failed";
-      else if ((await queue.launchEngineAt(engineRoot(current))).holder) skip = "the engine stop is not confirmed: the engine is still live";
+      else if ((await queue.launchEngineAt(engineRoot(current), { tier: current.tier, sandbox: current.sandbox })).holder) skip = "the engine stop is not confirmed: the engine is still live";
     }
     if (!skip && !queue.takeForCloseOut(runId)) {
       // Refused on a running or paused run: another process holds its close-out. Any other state (a
@@ -1236,7 +1236,7 @@ export async function mirror(
     // finish), or — a launch run naming none — one the launch core may still have started (the
     // launch-orphan rule): probed in the worktree first; an engine found keeps the worktree and takes the lock.
     const probed = now?.worktree && !isTerminal(now.state) && (engine || (now.verb_started && v.defn?.target?.skill === LAUNCH_SKILL))
-      ? await queue.launchEngineAt(engineRoot(now)) : undefined;
+      ? await queue.launchEngineAt(engineRoot(now), { tier: now.tier, sandbox: now.sandbox }) : undefined;
     // Every other end with a worktree closes out first: push + PR, or "no changes".
     // Never while something may still work the worktree: an sbx worker that may still run in the VM, or an engine.
     const skip = s.hold_lock ? `its worker may still run: ${s.hold_lock}` : probed?.holder ? "an engine may still work the worktree" : undefined;
@@ -1379,7 +1379,7 @@ export function queueRecorder(queue: Queue, runId: string, sbx: SandboxDeps = {}
     accountedIds: () => queue.accountedIds(runId),
     resumes: () => queue.resumeCount(runId),
     resumed: (detail) => { queue.markResumed(runId, detail); },
-    launchEngine: (root) => { const r = queue.get(runId); return queue.launchEngineAt(r ? engineRoot(r) : root); },
+    launchEngine: (root) => { const r = queue.get(runId); return queue.launchEngineAt(r ? engineRoot(r) : root, r ? { tier: r.tier, sandbox: r.sandbox } : undefined); },
   };
 }
 
@@ -1795,7 +1795,7 @@ export function restartResumer(queue: Queue, verbRunner: VerbRunner, prepared: M
     // A launch run may have started an engine that works the checkout: never resumed beside it
     // (the orphan end then hands the lock to it, by the launch-orphan rule).
     if (defn?.target?.skill === LAUNCH_SKILL) {
-      const cause = await launchEngineCause(() => queue.launchEngineAt(engineRoot(run)));
+      const cause = await launchEngineCause(() => queue.launchEngineAt(engineRoot(run), { tier: run.tier, sandbox: run.sandbox }));
       if (cause) return { resume: false, cause };
     }
     const input = restartInput(queue, run, deps);
