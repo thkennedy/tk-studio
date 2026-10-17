@@ -27,6 +27,8 @@ async function fixture(opts: { baseRef?: string; files?: Record<string, string>;
   const verbs: string[][] = [];
   const answers = {
     install: { exit: 0, out: { ok: true } } as { exit: number; out: unknown }, drift: "clean", launch: { ok: true, run: { status: "running" } } as unknown,
+    /** Hole 42: the drift check's answers in order (consumed first), then `drift` for every later call. */
+    driftSeq: [] as string[],
     /** The queue's engine probe (`live[]` in the worktree) and the recorded worker's probe. */
     engineLive: true, workerRunning: false,
   };
@@ -37,7 +39,7 @@ async function fixture(opts: { baseRef?: string; files?: Record<string, string>;
     uv: async (root, script, args): Promise<RunResult> => {
       studio.push({ script, args, root });
       if (script.endsWith("install_base.py")) return { exit: answers.install.exit, stdout: JSON.stringify(answers.install.out), stderr: "" };
-      if (script.endsWith("drift_check.py")) return { exit: answers.drift === "clean" ? 0 : 1, stdout: JSON.stringify({ ok: true, result: answers.drift }), stderr: "" };
+      if (script.endsWith("drift_check.py")) { const r = answers.driftSeq.shift() ?? answers.drift; return { exit: r === "clean" ? 0 : 1, stdout: JSON.stringify({ ok: true, result: r }), stderr: "" }; }
       if (script.endsWith("launch.py")) return { exit: 0, stdout: JSON.stringify(answers.launch), stderr: "" };
       return { exit: 2, stdout: "", stderr: "unexpected script" };
     },
@@ -171,17 +173,18 @@ describe("AC1: the worktree is cut from base_ref, the checkout never switched", 
 });
 
 describe("AC2: the untracked runtime is materialised by the studio's own motions", () => {
-  test("materialise: `tk install` at the pin inside the worktree, policy/routing/overlay copied (files, never links), `tk activate` clean", async () => {
+  test("materialise: a drift-clean fresh worktree needs no install (hole 42) — the drift check first, policy/routing/overlay copied (files, never links), `tk activate` clean", async () => {
     const fx = await fixture({ baseRef: "main" });
     mkdirSync(join(fx.repo.checkout, ".bmad-loop"), { recursive: true });
     writeFileSync(join(fx.repo.checkout, ".bmad-loop", "policy.toml"), "policy = 1\n");
     writeFileSync(join(fx.repo.checkout, ".bmad-loop", "routing.current.json"), "{\"r\":1}\n");
     const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
     expect(fx.studio.map((c) => [c.script.split(/[\\/]/).slice(-4).join("/"), c.args, c.root])).toEqual([
-      ["skills/tk-studio-install/scripts/install_base.py", ["--directory", wt], wt],
+      ["skills/tk-studio-activate/scripts/drift_check.py", ["--directory", wt], wt],
       ["skills/tk-studio-activate/scripts/drift_check.py", ["--directory", wt], wt],
     ]);
     expect(fx.studio[0]!.script).toStartWith(join("/studio-root", "plugins", "tk-studio"));
+    expect(fx.queue.events(fx.run.run_id).find((e) => e.kind === "materialised")!.detail).toMatchObject({ path: wt, install: "skipped: drift-clean" });
     for (const rel of [".bmad-loop/policy.toml", ".bmad-loop/routing.current.json"]) {
       expect(lstatSync(join(wt, rel)).isFile()).toBe(true);
       expect(lstatSync(join(wt, rel)).isSymbolicLink()).toBe(false);
@@ -189,6 +192,15 @@ describe("AC2: the untracked runtime is materialised by the studio's own motions
     }
     expect(existsSync(join(wt, ".tk-studio", "config.local.yaml"))).toBe(false); // absent in the checkout: skipped silently
     expect(fx.head()).toEqual(fx.headBefore);
+  });
+
+  test("materialise: `tk install` at the pin runs only when the fresh worktree reports drift (hole 42), then `tk activate` clean", async () => {
+    const fx = await fixture({ baseRef: "main" });
+    fx.answers.driftSeq = ["drift"]; // the fresh worktree drifts; the install brings it to the pin; the final check is clean
+    const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+    expect(fx.studio.map((c) => c.script.split(/[\\/]/).at(-1))).toEqual(["drift_check.py", "install_base.py", "drift_check.py"]);
+    expect(fx.studio[1]).toMatchObject({ root: wt, args: ["--directory", wt] });
+    expect(fx.queue.events(fx.run.run_id).find((e) => e.kind === "materialised")!.detail).toMatchObject({ path: wt, install: "ran" });
   });
 
   test("the local overlay `.tk-studio/config.local.yaml` is copied when present", async () => {
@@ -202,6 +214,7 @@ describe("AC2: the untracked runtime is materialised by the studio's own motions
 
   test("an install that fails, or activate drift, ends the run `blocked` naming the step", async () => {
     const a = await fixture({ baseRef: "main" });
+    a.answers.driftSeq = ["drift"]; // the install runs only on drift (hole 42)
     a.answers.install = { exit: 1, out: { ok: false, step: "upstream-installer", error: "npx exploded" } };
     await expect(prepareWorktree(a.queue, a.run, "proj", a.repo.checkout, a.deps)).rejects.toThrow("worktree install: upstream-installer: npx exploded");
     const b = await fixture({ baseRef: "main" });
@@ -1146,15 +1159,17 @@ describe("review patches: enqueue while paused (P5), base_ref spellings (P6), re
 
   test("P7: a worktree cut but never materialised (a crash mid-materialise) is materialised again before the drive", async () => {
     const fx = await fixture({ baseRef: "main" });
+    fx.answers.driftSeq = ["drift"]; // the install runs only on drift (hole 42)
     fx.answers.install = { exit: 1, out: { ok: false, step: "upstream-installer", error: "killed" } };
     await expect(prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps)).rejects.toThrow("worktree install:");
     const cut = fx.get();
     expect(cut.worktree).toBeString();
     expect(fx.queue.events(cut.run_id).some((e) => e.kind === "materialised")).toBe(false);
     fx.answers.install = { exit: 0, out: { ok: true } };
+    fx.answers.driftSeq = ["drift"];
     const before = fx.studio.length;
     expect(await prepareWorktree(fx.queue, cut, "proj", fx.repo.checkout, fx.deps)).toBe(cut.worktree!);
-    expect(fx.studio.slice(before).map((c) => c.script.split(/[\\/]/).at(-1))).toEqual(["install_base.py", "drift_check.py"]);
+    expect(fx.studio.slice(before).map((c) => c.script.split(/[\\/]/).at(-1))).toEqual(["drift_check.py", "install_base.py", "drift_check.py"]);
     expect(fx.queue.events(cut.run_id).filter((e) => e.kind === "materialised")).toHaveLength(1);
     // Marked: a further re-drive keeps it as it is.
     const n = fx.studio.length;
@@ -1746,6 +1761,7 @@ describe("Story 28.5 (DW-25): a project below its git top-level is served at <wo
     expect(fx.run).toMatchObject({ prefix: `${NESTED}/`, checkout: checkoutKey(fx.root), lock_checkout: checkoutKey(fx.repo.checkout) });
     mkdirSync(join(fx.root, ".bmad-loop"), { recursive: true });
     writeFileSync(join(fx.root, ".bmad-loop", "policy.toml"), "nested = true\n");
+    fx.answers.driftSeq = ["drift"]; // the install runs only on drift (hole 42): pin it at the served root
     const served = await prepareWorktree(fx.queue, fx.run, "proj", fx.root, fx.deps);
     const wt = worktreePath(fx.work, "proj", fx.run.run_id);
     expect(served).toBe(join(wt, NESTED));
@@ -1771,6 +1787,7 @@ describe("Story 28.5 (DW-25): a project below its git top-level is served at <wo
     expect(where).toEqual({ lockCheckout: checkoutKey(fx.repo.checkout), prefix: "" });
     const top = fx.queue.enqueue({ jobId: "t", root: fx.repo.checkout, projectId: "proj", definition: { id: "t" }, owner: me, base_ref: "main", ...where }).run;
     expect(top).toMatchObject({ prefix: "", lock_checkout: checkoutKey(fx.repo.checkout) });
+    fx.answers.driftSeq = ["drift"]; // the install runs only on drift (hole 42)
     const served = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
     expect(served).toBe(worktreePath(fx.work, "proj", fx.run.run_id));
     expect(fx.studio.find((s) => s.script.endsWith("install_base.py"))).toMatchObject({ root: served, args: ["--directory", served] });
@@ -1781,6 +1798,7 @@ describe("Story 28.5 (DW-25): a project below its git top-level is served at <wo
     const fx = await fixture({ baseRef: "main", nested: NESTED, files: nestedFiles(files) });
     mkdirSync(join(fx.root, ".bmad-loop"), { recursive: true });
     writeFileSync(join(fx.root, ".bmad-loop", "policy.toml"), "nested = true\n");
+    fx.answers.driftSeq = ["drift"]; // the install runs only on drift (hole 42): pin it at the served root
     const served = await prepareWorktree(fx.queue, fx.run, "proj", fx.root, fx.deps);
     fx.queue.markVerbStarted(fx.run.run_id, "wake", [], { target: "skill", definition: fx.defn });
     await mirror(fx.queue, fx.run.run_id, { jobId: "j", defn: fx.defn }, {
