@@ -1,9 +1,10 @@
 ---
 id: TASK-94
 title: The Supervisor Holds the Engine and Nothing Else Starts One
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-15 19:21'
+updated_date: '2026-10-16 20:50'
 labels:
   - ST-094
 milestone: "The Service Owns Lifetime, Part 2: The Supervisor"
