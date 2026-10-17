@@ -33,9 +33,9 @@
       "source": "thkennedy/tk-studio-supervisor"
     },
     "cli": {
-      "tag": "cli--v0.1.0",
-      "url": "https://github.com/thkennedy/tk-studio/releases/download/cli--v0.1.0/tk_studio_cli-0.1.0-py3-none-any.whl",
-      "sha256": "177a47dbc0a382f834496c8d1618b7bf3ac289cbd87d241fe9061d498b455cc9"
+      "tag": "cli--v0.1.1",
+      "url": "https://github.com/thkennedy/tk-studio/releases/download/cli--v0.1.1/tk_studio_cli-0.1.1-py3-none-any.whl",
+      "sha256": "ffcf9a6fdc1d10dfdb34ff9ae2c2932339a8eebda4dd70b6a82ab70f76cda044"
     }
   }
 }
