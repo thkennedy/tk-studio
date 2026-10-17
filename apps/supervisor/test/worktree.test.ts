@@ -732,7 +732,7 @@ describe("Story 27.4: the host verify leg runs before any PR opens", () => {
     expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
     const status = sbx.calls().filter((c) => c.argv[0] === "exec" && c.argv[3] === "run");
     expect(status).toHaveLength(1);
-    expect(status[0]!.argv).toEqual(["exec", "claude-p", "/home/agent/.local/bin/uv", "run", "/studio-root/plugins/tk-studio/lib/launch.py", "status", "--directory", toVmPath(fx.wt), "--run-id", "E1"]);
+    expect(status[0]!.argv).toEqual(["exec", "claude-p", "uv", "run", "/studio-root/plugins/tk-studio/lib/launch.py", "status", "--directory", toVmPath(fx.wt), "--run-id", "E1"]);
     expect(fx.studio.some((s) => s.script.endsWith("launch.py"))).toBe(false); // never the host's launch core
     expect(fx.get().state).toBe("complete");
     expect(fx.queue.events(fx.run.run_id).find((e) => e.kind === "ended")!.detail).toMatchObject({ engine: { status: "finished" }, closeout: { result: "PR", worktree: "removed" } });

@@ -60,7 +60,7 @@ const cancelWith = (verbCalls: string[][] = []): Parameters<typeof cancelRun>[2]
 });
 /** Hole 38: the engine-end sweep reads an sbx run's engine status inside its sandbox (`exec <sb> printenv HOME`,
  * then `exec <sb> <home>/.local/bin/uv run …/launch.py status …`). Those two are the probe's, not a step's verb. */
-const isStatusProbe = (argv: string[]) => argv[0] === "exec" && (argv[2] === "printenv" || (argv[3] === "run" && /\/launch\.py$/.test(argv[4] ?? "")));
+const isStatusProbe = (argv: string[]) => argv[0] === "exec" && argv[2] === "uv" && argv[3] === "run" && /\/launch\.py$/.test(argv[4] ?? "");
 /** The fake's calls made while `fn` ran — the sbx verbs the step itself issued (the hole 38 status probe aside;
  * `sbx.calls()` still lists it). */
 async function during<T>(fn: () => Promise<T>): Promise<{ out: T; calls: string[][] }> {
@@ -224,8 +224,8 @@ describe("release: `sbx stop <sb>` at the deferred `ended`, never on paused, nev
     expect(calls).toEqual([["stop", SB]]);
     // Hole 38: the engine's status was read inside the sandbox (the host has no bmad-loop), before the stop.
     const probe = sbx.calls().slice(before).map((c) => c.argv).filter(isStatusProbe);
-    expect(probe.map((a) => a.slice(0, 4))).toEqual([["exec", SB, "printenv", "HOME"], ["exec", SB, "/home/agent/.local/bin/uv", "run"]]);
-    expect(probe[1]!.slice(5)).toEqual(["status", "--directory", toVmPath(run.worktree!), "--run-id", ENGINE]);
+    expect(probe.map((a) => a.slice(0, 4))).toEqual([["exec", SB, "uv", "run"]]);
+    expect(probe[0]!.slice(5)).toEqual(["status", "--directory", toVmPath(run.worktree!), "--run-id", ENGINE]);
     expect(kinds(q, run.run_id).slice(-1)).toEqual(["pin-released"]);
     // Released once: a second release finds it done.
     const again = await during(() => releasePin(q, run.run_id, deps));

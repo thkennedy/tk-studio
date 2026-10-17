@@ -256,7 +256,7 @@ if (cmd[0] === "tmux" && cmd[1] === "kill-session" && cmd[2] === "-t" && /^=/.te
 }
 if (cmd[0] === "tail" && /^--pid=\\d+$/.test(cmd[1] ?? "") && cmd[2] === "-f" && cmd[3] === "/dev/null" && cmd.length === 4) process.exit(0);
 if (cmd[0] === "printenv" && cmd[1] === "HOME" && cmd.length === 2) { console.log(a.home); process.exit(0); }
-if (cmd[0] === a.home + "/.local/bin/uv" && cmd[1] === "run" && /\\/launch\\.py$/.test(cmd[2] ?? "") && cmd[3] === "status" && cmd[4] === "--directory"
+if (cmd[0] === "uv" && cmd[1] === "run" && /\\/launch\\.py$/.test(cmd[2] ?? "") && cmd[3] === "status" && cmd[4] === "--directory"
   && (cmd.length === 6 || (cmd.length === 8 && cmd[6] === "--run-id"))) {
   if (a.launch_status === "fail") { console.error("fake launch.py: bmad-loop list failed (exit 2)"); process.exit(2); }
   console.log(JSON.stringify(a.launch_status)); process.exit(0);

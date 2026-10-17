@@ -892,27 +892,22 @@ describe("launchStatusProbe (the launch core's status, injected uv)", () => {
       const calls: string[][] = [];
       const sbx = {
         env: { TK_STUDIO_ROOT: "C:\\GitHub\\tk-studio", SBX_BIN: "sbx-fake" },
-        run: async (bin: string, args: string[]) => {
-          calls.push([bin, ...args]);
-          if (args[2] === "printenv") return { exit: 0, stdout: "/home/agent\n", stderr: "" };
-          return { exit: 0, stdout: answer, stderr: "" };
-        },
+        run: async (bin: string, args: string[]) => { calls.push([bin, ...args]); return { exit: 0, stdout: answer, stderr: "" }; },
       };
       const hostUv = async () => { throw new Error("the host uv must not be used for an sbx run"); };
       const where = { tier: "sbx", sandbox: "claude-p" };
       expect(await launchStatusProbe("C:\\agent-work\\worktrees\\p\\q-1", "E1", hostUv, where, sbx)).toEqual({ live: true, run_ids: ["E1", "E2"] });
       expect(calls).toEqual([
-        ["sbx-fake", "exec", "claude-p", "printenv", "HOME"],
-        ["sbx-fake", "exec", "claude-p", "/home/agent/.local/bin/uv", "run", "/c/GitHub/tk-studio/plugins/tk-studio/lib/launch.py", "status", "--directory", "/c/agent-work/worktrees/p/q-1"],
+        ["sbx-fake", "exec", "claude-p", "uv", "run", "/c/GitHub/tk-studio/plugins/tk-studio/lib/launch.py", "status", "--directory", "/c/agent-work/worktrees/p/q-1"],
       ]);
       // A host run, and an sbx run with no sandbox recorded, still probe through the host uv.
       expect(await launchStatusProbe("/proj", "E1", uv(answer), { tier: "host", sandbox: null }, sbx)).toEqual({ live: true, run_ids: ["E1", "E2"] });
       expect(await launchStatusProbe("/proj", "E1", uv(answer), { tier: "sbx", sandbox: null }, sbx)).toEqual({ live: true, run_ids: ["E1", "E2"] });
-      // The VM probe failing (no HOME, a refusal) counts live and is named — fail closed, as on the host.
-      const noHome = { ...sbx, run: async () => ({ exit: 1, stdout: "", stderr: "printenv: HOME: not set" }) };
-      const failed = await launchStatusProbe("C:\\x", "E1", hostUv, where, noHome);
+      // The VM probe failing (the exec refused, no JSON) counts live and is named — fail closed, as on the host.
+      const refused = { ...sbx, run: async () => ({ exit: 125, stdout: "", stderr: "OCI runtime exec failed: executable file `uv` not found" }) };
+      const failed = await launchStatusProbe("C:\\x", "E1", hostUv, where, refused);
       expect(failed).toMatchObject({ live: true });
-      expect(failed.detail).toContain("printenv HOME");
+      expect(failed.detail).toContain("executable file `uv` not found");
     });
   });
 

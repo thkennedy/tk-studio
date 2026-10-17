@@ -89,25 +89,20 @@ export const agentSessionArgv = (sb: string, engineRunId: string): string[] => [
 
 // ------------------------------------------------------------ the launch core's status, in the VM (hole 38)
 
-/** `sbx exec <sb> printenv HOME`: the VM home uv and bmad-loop live under. */
-export const vmHomeArgv = (sb: string): string[] => ["exec", sb, "printenv", "HOME"];
-
-/** `launch.py status` inside the sandbox: uv at the VM home, the plugin at `TK_STUDIO_ROOT`'s VM path (both
+/** `launch.py status` inside the sandbox: `uv` by name (a bare `sbx exec` already carries the VM's PATH with
+ * `~/.local/bin`; where uv lives differs per provisioning), the plugin at `TK_STUDIO_ROOT`'s VM path (both
  * engine sandboxes mount the checkout at `/c/GitHub/tk-studio`), the root in VM form. Argv only, no shell. */
-export const launchStatusArgv = (sb: string, home: string, vmPluginRoot: string, vmRoot: string, engineRunId: string | null): string[] =>
-  ["exec", sb, `${home.replace(/\/+$/, "")}/.local/bin/uv`, "run", `${vmPluginRoot}/lib/launch.py`, "status", "--directory", vmRoot, ...(engineRunId ? ["--run-id", engineRunId] : [])];
+export const launchStatusArgv = (sb: string, vmPluginRoot: string, vmRoot: string, engineRunId: string | null): string[] =>
+  ["exec", sb, "uv", "run", `${vmPluginRoot}/lib/launch.py`, "status", "--directory", vmRoot, ...(engineRunId ? ["--run-id", engineRunId] : [])];
 
 /** Hole 38: the launch core's `status` answers where the engine lives. The host has no bmad-loop by design
  * (engines live only in Docker Sandboxes), so for an sbx run `launch.py status --directory <root>` runs inside
  * the run's sandbox through `sbx exec`; `root` is the host path of the served root (mapped with `toVmPath`).
  * Throws naming the failure (the caller counts a failed probe live). */
 export async function vmLaunchStatus(sb: string, root: string, engineRunId: string | null, deps: SandboxDeps = {}): Promise<RunResult> {
-  const h = await call(deps, vmHomeArgv(sb), 60);
-  const home = h.stdout.trim();
-  if (h.exit !== 0 || !home.startsWith("/")) throw new Error(`sbx exec ${sb} printenv HOME exit ${h.exit}: ${clip(h.stderr || h.stdout || "no HOME")}`);
   const env = deps.env ?? process.env;
   // The plugin's VM path is joined with `/` after the mapping: `join` would give the host's separators.
-  return call(deps, launchStatusArgv(sb, home, `${toVmPath(studioRootOf(env)).replace(/\/+$/, "")}/plugins/tk-studio`, toVmPath(root), engineRunId), 120);
+  return call(deps, launchStatusArgv(sb, `${toVmPath(studioRootOf(env)).replace(/\/+$/, "")}/plugins/tk-studio`, toVmPath(root), engineRunId), 120);
 }
 
 /** `TK_STUDIO_ROOT` as the sandbox reads it (`pluginRoot` without the env.ts import: sandbox.ts is imported by
