@@ -64,9 +64,11 @@ def release_url(component: str, version: str, asset: str,
     return f"https://github.com/{repo}/releases/download/{tag}/{asset}"
 
 
-def lnk_bytes(workdir: str, *, extras: bool = False) -> bytes:
-    """A minimal MS-SHLLINK file whose StringData carries WorkingDirectory."""
-    flags = 0x10 | 0x80
+def lnk_bytes(workdir: str, *, extras: bool = False,
+              arguments: str | None = None) -> bytes:
+    """A minimal MS-SHLLINK file whose StringData carries WorkingDirectory
+    and, when given, the Arguments (COMMAND_LINE_ARGUMENTS) after it."""
+    flags = 0x10 | 0x80 | (0x20 if arguments is not None else 0)
     tail = b""
     if extras:     # an IDList, a LinkInfo and a NAME_STRING before it
         flags |= 0x01 | 0x02 | 0x04
@@ -77,8 +79,12 @@ def lnk_bytes(workdir: str, *, extras: bool = False) -> bytes:
     header = bytearray(76)
     struct.pack_into("<I", header, 0, 0x4C)
     struct.pack_into("<I", header, 20, flags)
-    return bytes(header) + tail + struct.pack("<H", len(workdir)) \
+    out = bytes(header) + tail + struct.pack("<H", len(workdir)) \
         + workdir.encode("utf-16-le")
+    if arguments is not None:
+        out += struct.pack("<H", len(arguments)) \
+            + arguments.encode("utf-16-le")
+    return out
 
 
 class FakeFetch:
@@ -1432,7 +1438,7 @@ class WindowsRollback(AppsCase):
 class SourceCheckout(AppsCase):
     plat = WINDOWS
 
-    def point_shortcut(self, workdir: Path, *, extras=False):
+    def point_shortcut(self, workdir: Path | str, *, extras=False):
         lnk = (self.tmp / "roaming" / "Microsoft" / "Windows" / "Start Menu"
                / "Programs" / "Startup" / "tk-studio supervisor.lnk")
         lnk.parent.mkdir(parents=True, exist_ok=True)
@@ -1501,6 +1507,106 @@ class SourceCheckout(AppsCase):
         self.point_shortcut(slot)
         result, _ = self.run_cli(["doctor"])
         self.assertEqual(result["supervisor"]["mode"], "not installed")
+
+    def cut_over(self) -> Path:
+        """The cut-over fixture: the merged checkout ``GitHub/tk-studio``
+        (``.git``, ``.tk-studio/config.yaml``) and the shortcut on its nested
+        ``apps/supervisor`` root, which holds no ``.git`` of its own."""
+        outer = self.tmp / "GitHub" / "tk-studio"
+        (outer / ".git").mkdir(parents=True)
+        (outer / ".tk-studio").mkdir()
+        (outer / ".tk-studio" / "config.yaml").write_text("schema: 1\n")
+        nested = outer / "apps" / "supervisor"
+        (nested / ".tk-studio").mkdir(parents=True)
+        (nested / ".tk-studio" / "config.yaml").write_text(
+            "project_id: supervisor\n")
+        (nested / "start.ps1").write_text("# start\n")
+        self.point_shortcut(nested)
+        return nested
+
+    def test_update_on_the_nested_root_reports_and_replaces_nothing(self):
+        nested = self.cut_over()
+        roster = self.full_roster()
+        sup_url = json.loads(roster.read_text())["components"]["supervisor"][
+            "url"]
+        result, code = self.run_cli(["update", "--roster", str(roster)])
+        self.assertEqual((code, result["status"]), (0, "complete"), result)
+        self.assertEqual(result["supervisor"]["status"], "reported")
+        self.assertEqual(result["supervisor"]["mode"], "source checkout")
+        self.assertEqual(result["supervisor"]["checkout"], str(nested))
+        self.assertNotIn(sup_url, self.fetch.calls)
+        self.assertFalse((self.root / "supervisor").exists())
+        self.assertNotIn("CreateShortcut", " ".join(
+            a[-1] for a, _ in self.host.calls))
+        self.assertNotIn("wt.exe", self.host.names())
+
+    def test_doctor_names_the_nested_root_as_the_checkout(self):
+        nested = self.cut_over()
+        result, _ = self.run_cli(["doctor"])
+        self.assertEqual(result["supervisor"]["mode"], "source checkout")
+        self.assertEqual(result["supervisor"]["checkout"], str(nested))
+
+    def test_a_folder_in_no_checkout_is_not_one(self):
+        folder = self.tmp / "loose"
+        folder.mkdir()
+        self.point_shortcut(folder)
+        result, _ = self.run_cli(["doctor"])
+        self.assertEqual(result["supervisor"]["mode"], "not installed")
+
+    def test_a_folder_under_a_git_tree_needs_its_own_studio_config(self):
+        nested = self.cut_over()
+        plain = nested.parent.parent / "plugins"      # in the checkout, no
+        plain.mkdir()                                  # .tk-studio of its own
+        self.point_shortcut(plain)
+        result, _ = self.run_cli(["doctor"])
+        self.assertEqual(result["supervisor"]["mode"], "not installed")
+        own = self.checkout()                  # its own .git: as before
+        self.point_shortcut(own)
+        result, _ = self.run_cli(["doctor"])
+        self.assertEqual(result["supervisor"]["checkout"], str(own))
+
+    def test_the_git_top_needs_a_studio_config_too(self):
+        nested = self.cut_over()
+        (nested.parent.parent / ".tk-studio" / "config.yaml").unlink()
+        result, _ = self.run_cli(["doctor"])
+        self.assertEqual(result["supervisor"]["mode"], "not installed")
+
+    def test_a_relative_working_directory_is_not_a_checkout(self):
+        nested = self.cut_over()
+        here = os.getcwd()
+        os.chdir(nested.parent.parent)        # the walk would succeed here
+        self.addCleanup(os.chdir, here)
+        for workdir in ("apps/supervisor", "./apps/supervisor"):
+            with self.subTest(workdir=workdir):
+                self.point_shortcut(workdir)
+                result, _ = self.run_cli(["doctor"])
+                self.assertEqual(result["supervisor"]["mode"],
+                                 "not installed")
+        self.assertIsNone(apps.git_top(Path("apps/supervisor")))
+
+    def test_percent_references_expand_from_the_environment(self):
+        nested = self.cut_over()
+        self.env["GH_ROOT"] = str(self.tmp / "GitHub")
+        self.point_shortcut("%gh_root%/tk-studio/apps/supervisor")
+        result, _ = self.run_cli(["doctor"])
+        self.assertEqual(result["supervisor"]["checkout"], str(nested))
+        self.point_shortcut("%NO_SUCH_VAR%/tk-studio/apps/supervisor")
+        result, _ = self.run_cli(["doctor"])
+        self.assertEqual(result["supervisor"]["mode"], "not installed")
+
+    def test_lnk_strings_carry_the_arguments(self):
+        path = self.tmp / "y.lnk"
+        args = "-w studio nt --title supervisor pwsh -NoExit -File C:\\s.ps1"
+        for extras in (False, True):
+            path.write_bytes(lnk_bytes("C:\\work", extras=extras,
+                                       arguments=args))
+            strings = apps.read_lnk_strings(path)
+            self.assertEqual(strings["working_dir"], "C:\\work")
+            self.assertEqual(strings["arguments"], args)
+            self.assertEqual(apps.read_lnk_working_dir(path), "C:\\work")
+        path.write_bytes(lnk_bytes("C:\\work"))
+        self.assertNotIn("arguments", apps.read_lnk_strings(path))
+        self.assertIsNone(apps.read_lnk_strings(self.tmp / "absent.lnk"))
 
     def test_lnk_parser(self):
         path = self.tmp / "x.lnk"

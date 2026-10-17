@@ -33,7 +33,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFile
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { sbxBin, studioHome } from "./env";
 import {
-  checkoutKey, isTerminal, parseStatGroup, probeRecordedWorker, processStartTime, type Queue, type QueueRun, type WorkerKill,
+  checkoutKey, isTerminal, parseStatGroup, probeRecordedWorker, processStartTime, servedRoot, type Queue, type QueueRun, type WorkerKill,
 } from "./queue";
 import { readProjectConfig, runProcess, toVmPath, type RunResult } from "./server";
 
@@ -241,7 +241,7 @@ export async function holdEngine(queue: Queue, runId: string, deps: SandboxDeps 
   try {
     const run = queue.get(runId);
     if (!run || run.tier !== "sbx" || !run.sandbox) return;
-    const found = await lookupEnginePid(run.worktree, run.engine_run_id, run.sandbox, deps);
+    const found = await lookupEnginePid(servedRoot(run), run.engine_run_id, run.sandbox, deps);
     if ("unknown" in found) { queue.recordEnginePid(runId, null, { why: found.unknown, sandbox: run.sandbox }); return; }
     queue.recordEnginePid(runId, found, { sandbox: run.sandbox });
     spawnRecordedHold(queue, runId, run.sandbox, found.pid, deps);
@@ -353,7 +353,7 @@ export async function killRunEngine(
     if (!run || run.tier !== "sbx" || !run.sandbox) return undefined;
     let pid = run.engine_pid, start = run.engine_start;
     if (pid == null || !start) {
-      const found = await lookupEnginePid(run.worktree, run.engine_run_id, run.sandbox, deps);
+      const found = await lookupEnginePid(servedRoot(run), run.engine_run_id, run.sandbox, deps);
       if ("unknown" in found) { queue.recordEnginePid(runId, null, { why: found.unknown, sandbox: run.sandbox }); return undefined; }
       queue.recordEnginePid(runId, found, { sandbox: run.sandbox });
       ({ pid, start } = found);

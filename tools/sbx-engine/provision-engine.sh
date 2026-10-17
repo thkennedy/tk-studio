@@ -4,6 +4,13 @@
 #   <project-mount>  the project checkout as mounted in the sandbox (read-write)
 #   <studio-mount>   the tk-studio checkout as mounted in the sandbox (read-only
 #                    for other projects; the project itself when it IS tk-studio)
+# The one-mount tk-studio sandbox `claude-tk-studio` (AD-21, Story 28.3) mounts
+# C:\GitHub\tk-studio read-write and serves both loops, the plugin's and the
+# nested supervisor's (apps/supervisor), so both arguments are the same path
+# and the supervisor needs bun:
+#   WITH_BUN=1 bash <this> /c/GitHub/tk-studio /c/GitHub/tk-studio
+# TK_STUDIO_ROOT stays the outer root there; launch-epic.sh's ROOT picks the
+# project per epic. Other projects (a Godot game) keep the two-mount form.
 # The sandbox must be created with the read-only skills mount (`sbx create
 # --skills readonly`): the tk-studio plugin comes from Docker Sandboxes' shared
 # skills store, a copy of the host's ~/.claude/skills that `sbx skills import`
@@ -26,9 +33,19 @@ step git-identity
 }
 git config --global user.email
 
+# Loud on failure (loop hole 24, twice): a silent apt left the sandbox without tmux and
+# the engine would have died at its first session. The apt output lands in a log whose
+# tail is printed when the install fails; `tmux -V` must answer afterwards.
+apt_install() {
+  local pkg="$1" log="/tmp/provision-apt-$1.log"
+  sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq > "$log" 2>&1 || true
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$pkg" >> "$log" 2>&1 || {
+    echo "$pkg: apt-get install failed; last lines of $log:"; tail -n 20 "$log"; return 1; }
+}
+
 step tmux
-command -v tmux >/dev/null || { sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1; sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tmux >/dev/null 2>&1; }
-tmux -V
+command -v tmux >/dev/null || apt_install tmux || exit 1
+tmux -V || { echo "tmux: not runnable after the install"; exit 1; }
 
 # [tui] is not optional: without it `bmad-loop list` fails (pyte/rich) and so
 # does tk-studio-launch's live-engine check.
@@ -61,7 +78,7 @@ if [ -n "${WITH_GODOT:-}" ]; then
     curl -fsSL "https://github.com/godotengine/godot/releases/download/${WITH_GODOT}-stable/Godot_v${WITH_GODOT}-stable_mono_linux_x86_64.zip" -o /tmp/godot.zip \
       && unzip -q -o /tmp/godot.zip -d "$HOME/godot" && chmod +x "$GD_BIN" && rm -f /tmp/godot.zip
   }
-  dpkg -s libfontconfig1 >/dev/null 2>&1 || { sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1; sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libfontconfig1 >/dev/null 2>&1; }
+  dpkg -s libfontconfig1 >/dev/null 2>&1 || apt_install libfontconfig1 || exit 1
   mkdir -p "$HOME/.local/bin"
   printf '#!/usr/bin/env bash\nexec "%s" "$@"\n' "$GD_BIN" > "$HOME/.local/bin/godot"
   chmod +x "$HOME/.local/bin/godot"
@@ -88,6 +105,12 @@ grep TK_STUDIO_ROOT ~/.profile
 # view, and this step only verifies it (Story 25.6).
 step skills-mount
 PROJECT_DIR="$PROJ" bash "$HERE/check-skills-mount.sh" || exit 1
+# The one-mount tk-studio sandbox also serves the nested supervisor project
+# (Story 28.3): a project-scope copy under apps/supervisor/.claude is listed
+# only from that directory, so check from it too.
+if [ -f "$PROJ/apps/supervisor/.tk-studio/config.yaml" ]; then
+  PROJECT_DIR="$PROJ/apps/supervisor" bash "$HERE/check-skills-mount.sh" || exit 1
+fi
 
 # Claude Code's "Make auto mode your default permission mode?" dialog is gated by
 # hasSeenAutoDefaultNudge in ~/.claude.json. On 2026-09-28 it swallowed an engine

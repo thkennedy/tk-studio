@@ -5,7 +5,9 @@
 
 # Stable project identity for the registry (AD-20); defaults to the repo
 # basename. Required explicitly when two projects would share a basename.
-# project_id: my-project
+# Set at the move into tk-studio/apps/supervisor (Story 28.2, AD-21): the
+# nested studio project is `supervisor`, its store ~/.tk-studio/projects/supervisor/.
+project_id: supervisor
 
 # Version control this project's team-shared data binds to (AD-18): git | perforce
 vcs: git

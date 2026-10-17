@@ -50,7 +50,7 @@ import { join, resolve } from "node:path";
 import { load as loadYaml } from "js-yaml";
 import { notifier, sbxBin } from "./env";
 import { canonicalPr, isWithin, notify, type EndNotice } from "./hygiene";
-import { selfOwner, type Owner, type Queue, type QueueEvent, type QueueRun } from "./queue";
+import { selfOwner, servedRoot, type Owner, type Queue, type QueueEvent, type QueueRun } from "./queue";
 import { HOLD_TIMEOUT_S, parseEnginePid, sameStart, type HoldChild } from "./sandbox";
 import { lastJsonObject, runProcess, toVmPath, type RunResult } from "./server";
 import { COPIED_RUNTIME, meteredCost, runner, studioScript, uvRunner, type WorktreeDeps } from "./worktree";
@@ -122,10 +122,10 @@ export type Landing =
 export const closableVerdict = (v: unknown): boolean => { const s = fmString(v); return !!s && !isEscalate(s); };
 
 /** The spec's frontmatter of the story a paused run stopped on; undefined when there is no key or no spec. */
-function storySpec(run: Pick<QueueRun, "worktree">, events: readonly QueueEvent[]): { key?: string; stage?: string; spec?: string; fm?: Record<string, unknown> } {
+function storySpec(run: Pick<QueueRun, "worktree" | "prefix">, events: readonly QueueEvent[]): { key?: string; stage?: string; spec?: string; fm?: Record<string, unknown> } {
   const { story_key: key, stage } = pausedStory(events);
   if (!key || !run.worktree) return { ...(key ? { key } : {}), ...(stage ? { stage } : {}) };
-  const spec = findSpec(run.worktree, key);
+  const spec = findSpec(servedRoot(run)!, key); // Story 28.5: the project's specs, at its served root
   if (!spec) return { key, ...(stage ? { stage } : {}) };
   let fm: Record<string, unknown> = {};
   try { fm = frontmatter(readFileSync(spec, "utf-8")); } catch { /* unreadable: no frontmatter */ }
@@ -133,7 +133,7 @@ function storySpec(run: Pick<QueueRun, "worktree">, events: readonly QueueEvent[
 }
 
 /** The pass's ruling on one paused run (reads only). */
-export function landing(run: Pick<QueueRun, "worktree">, events: readonly QueueEvent[]): Landing {
+export function landing(run: Pick<QueueRun, "worktree" | "prefix">, events: readonly QueueEvent[]): Landing {
   const { key, stage, spec, fm } = storySpec(run, events);
   if (!key) return { outcome: "not-landed", why: "no paused story key" };
   if (!spec || !fm) return { outcome: "not-landed", story_key: key, why: `no spec found for story ${key}` };
@@ -148,7 +148,7 @@ export function landing(run: Pick<QueueRun, "worktree">, events: readonly QueueE
 }
 
 /** Is the paused run's story landed (its spec `status: done`)? A resume never re-drives it. */
-export function storyLanded(run: Pick<QueueRun, "worktree">, events: readonly QueueEvent[]): string | undefined {
+export function storyLanded(run: Pick<QueueRun, "worktree" | "prefix">, events: readonly QueueEvent[]): string | undefined {
   const { key, fm } = storySpec(run, events);
   return key && fmString(fm?.status) === "done" ? key : undefined;
 }
@@ -214,6 +214,19 @@ const ENGINE_STATE = [
   ...COPIED_RUNTIME.map((rel) => `:(exclude,glob)${rel.slice(0, -1)}[${rel.slice(-1)}]`),
 ];
 
+/** A literal path as a `glob` pathspec fragment: its glob metacharacters (`*`, `?`, `[`, `]`, `\`) backslash-escaped. */
+// Bracket classes, never backslash escapes: git on Windows reads a backslash in a pathspec as a
+// path separator, so `apps/s\[u\]p/...` excluded nothing there and the engine state was committed
+// (found by the win32 host gate, 2026-10-17; probed on the box: `[[]`, `[]]`, `[*]`, `[?]` match
+// one literal character on both hosts). A literal backslash (never in a win32 path) is `[\\]`.
+const globLiteral = (path: string): string =>
+  path.replace(/[*?[\]\\]/g, (c) => (c === "\\" ? "[\\\\]" : `[${c}]`));
+
+/** The engine-state excludes for a project at `prefix` below the worktree top (`""`: the top). The prefix is
+ * the project's literal path, so a project folder named with a glob metacharacter still excludes only itself. */
+export const engineState = (prefix?: string | null): string[] =>
+  prefix ? ENGINE_STATE.map((p) => p.replace(":(exclude,glob)", () => `:(exclude,glob)${globLiteral(prefix)}`)) : ENGINE_STATE;
+
 async function commitStep(run: QueueRun, key: string, deps: WorktreeDeps): Promise<Step> {
   const wt = run.worktree!, exec = runner(deps);
   const branch = `supervisor/run-${run.run_id}`;
@@ -224,7 +237,8 @@ async function commitStep(run: QueueRun, key: string, deps: WorktreeDeps): Promi
     const head = at.stdout.trim();
     if (head !== branch) return { ok: false, error: `the worktree is on '${clip(head || "?")}', not the run branch '${branch}'` };
     // Everything but the engine's runtime state (its run and archive dirs), whatever the project ignores.
-    const add = await exec("git", ["add", "-A", "--", ".", ...ENGINE_STATE], { cwd: wt, timeoutS: 120 });
+    // Story 28.5: the engine state lies under the served root (`<prefix>`), so its excludes carry the prefix.
+    const add = await exec("git", ["add", "-A", "--", ".", ...engineState(run.prefix)], { cwd: wt, timeoutS: 120 });
     if (add.exit !== 0) return { ok: false, error: `git add -A (excluding .bmad-loop/runs, .bmad-loop/archive, the copied runtime) ${failed(add)}` };
     // A clean index is `nothing to commit` by exit code (never git's localized wording).
     const diff = await exec("git", ["diff", "--cached", "--quiet"], { cwd: wt, timeoutS: 60 });
@@ -237,13 +251,14 @@ async function commitStep(run: QueueRun, key: string, deps: WorktreeDeps): Promi
   } catch (e) { return { ok: false, error: `git: ${clip(message(e))}` }; }
 }
 
-const runDirOf = (run: QueueRun) => join(run.worktree!, ".bmad-loop", "runs", run.engine_run_id!);
+/** The engine run's dir under the root the run serves (Story 28.5: `<worktree>/<prefix>`). */
+const runDirOf = (run: QueueRun) => join(servedRoot(run)!, ".bmad-loop", "runs", run.engine_run_id!);
 
 async function meterStep(run: QueueRun, deps: WorktreeDeps): Promise<Step> {
   const dir = runDirOf(run);
   if (!existsSync(dir)) return { ok: true, value: "run dir already archived (harvested before the archive)" };
   let r: RunResult;
-  try { r = await uvRunner(deps)(run.worktree!, studioScript(deps, "lib", "meter.py"), ["harvest", "--run-dir", dir], 300); }
+  try { r = await uvRunner(deps)(servedRoot(run)!, studioScript(deps, "lib", "meter.py"), ["harvest", "--run-dir", dir], 300); }
   catch (e) { return { ok: false, error: `meter.py harvest: ${clip(message(e))}` }; }
   const out = lastJsonObject(r.stdout) as Record<string, unknown> | null;
   if (r.exit !== 0 || !out || out.ok === false) {
@@ -254,13 +269,13 @@ async function meterStep(run: QueueRun, deps: WorktreeDeps): Promise<Step> {
 
 async function archiveStep(run: QueueRun, deps: WorktreeDeps): Promise<Step> {
   if (!existsSync(runDirOf(run))) return { ok: true, value: "already archived" };
-  const sb = sbxRun(run), id = run.engine_run_id!;
+  const sb = sbxRun(run), id = run.engine_run_id!, served = servedRoot(run)!;
   try {
     let r: RunResult;
     if (sb) {
       const home = await vmHome(deps, sb);
-      r = await sbxCall(deps, ["exec", sb, vmBmadLoop(home), ...archiveArgs(toVmPath(run.worktree!), id)], 300);
-    } else r = await runner(deps)("bmad-loop", archiveArgs(run.worktree!, id), { cwd: run.worktree!, timeoutS: 300 });
+      r = await sbxCall(deps, ["exec", sb, vmBmadLoop(home), ...archiveArgs(toVmPath(served), id)], 300);
+    } else r = await runner(deps)("bmad-loop", archiveArgs(served, id), { cwd: served, timeoutS: 300 });
     return r.exit === 0 ? { ok: true, value: "archived" } : { ok: false, error: `bmad-loop archive ${failed(r)}` };
   } catch (e) { return { ok: false, error: `bmad-loop archive: ${clip(message(e))}` }; }
 }
@@ -305,7 +320,7 @@ function backToPaused(queue: Queue, runId: string, why: Record<string, string>):
  * while its run dir is still there — so the final close-out sums every engine iteration. Never throws. */
 function noteEngineCost(queue: Queue, run: QueueRun): void {
   try {
-    const cost = meteredCost(run.worktree!, run.engine_run_id);
+    const cost = meteredCost(servedRoot(run)!, run.engine_run_id);
     if (cost === undefined) return;
     const seen = queue.events(run.run_id).some((e) => e.kind === "accounted" && e.detail?.source === "engine" && e.detail?.engine_run_id === run.engine_run_id);
     if (!seen) queue.note(run.run_id, "accounted", { cost_usd: cost, engine_run_id: run.engine_run_id, source: "engine" });
@@ -385,7 +400,7 @@ export async function closeOutPaused(queue: Queue, deps: PausedDeps = {}): Promi
   for (const r of runs) {
     let taken = false;
     try {
-      if (!existsSync(r.worktree!)) continue;
+      if (!existsSync(servedRoot(r)!)) continue;
       const l = landing(r, queue.events(r.run_id));
       if (l.outcome === "not-landed") continue; // AC3: left paused for the resume
       if (l.outcome === "awaiting-ruling" && rulingRecorded(queue.events(r.run_id), l.story_key, r.engine_run_id)) continue;
@@ -476,7 +491,7 @@ export async function resumePaused(queue: Queue, runId: string, opts: { restoreP
   const events = queue.events(runId);
   const landed = storyLanded(run, events);
   if (landed) throw new ResumeRefused("StoryLanded", `story ${landed} landed (its spec is done): the paused-run pass closes it out, a resume never re-drives it`);
-  const wt = run.worktree, id = run.engine_run_id, sb = sbxRun(run);
+  const wt = servedRoot(run)!, id = run.engine_run_id, sb = sbxRun(run); // Story 28.5: the served root
   let patch: string | undefined;
   if (opts.restorePatch !== undefined) {
     if (typeof opts.restorePatch !== "string" || !opts.restorePatch.trim()) throw new ResumeRefused("SchemaError", "'restore_patch' must be a non-empty string");

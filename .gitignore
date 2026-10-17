@@ -13,3 +13,19 @@ _bmad-output/implementation-artifacts/supervision/
 .bmad-loop/archive/
 # the meta-CLI runs from the checkout with uv; its lockfile is not committed (Story 25.2)
 tools/installer/cli/uv.lock
+# apps/supervisor (AD-21, Story 28.3): the nested project's own ignore entries,
+# mirrored from apps/supervisor/.gitignore (which stays; git honours both).
+# Its slash-less patterns match at any depth there, hence **/ here.
+apps/supervisor/.tk-studio/config.local.yaml
+apps/supervisor/**/node_modules/
+apps/supervisor/**/*.tsbuildinfo
+apps/supervisor/**/.env
+apps/supervisor/**/.env.*
+apps/supervisor/.bmad-loop/runs/
+apps/supervisor/.bmad-loop/cache/
+apps/supervisor/.bmad-loop/policy.toml
+apps/supervisor/.bmad-loop/routing.current.json
+apps/supervisor/_bmad/render/
+apps/supervisor/_bmad/config.user.yaml
+apps/supervisor/_bmad-output/implementation-artifacts/supervision/
+apps/supervisor/.bmad-loop/archive/

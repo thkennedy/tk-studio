@@ -106,7 +106,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import {
   buildWorkerCommand, checkTier, finishStateFor, invokeSkill, lastJsonObject, maxLoginPreflight, MISSING_STATUS_BLOCK,
-  readProjectConfig, registryShow, requireCompatible, resolveStudioRoot, runJobVerb, runUv, SbxSandboxMissing, toVmPath, WORKER_RECORD_FAILED, type Tier,
+  readProjectConfig, registryShow, requireCompatible, resolveStudioRoot, runJobVerb, runProcess, runUv, SbxSandboxMissing, toVmPath, WORKER_RECORD_FAILED, type Tier,
 } from "./server";
 import { serve as serveApi } from "./api";
 import { notifier, pluginRoot, tlsConfig, WorkDirMissing, workDir } from "./env";
@@ -115,7 +115,7 @@ import {
   closeOut, closeOutDetail, launchedCloseOutInput, meteredCost, pendingCloseOut, prepareWorktree, priorPr, sweepEngines, type WorktreeDeps,
 } from "./worktree";
 import {
-  checkoutKey, defaultProbes, engineRoot, isTerminal, LAUNCH_SKILL, ORPHANED_REASON, probeLaunchEngine, processStartTime, Queue, RunTerminal, selfOwner, STUDIO_END_RETRY_LIMIT, workerMayRun,
+  checkoutKey, defaultProbes, engineRoot, servedRoot, isTerminal, LAUNCH_SKILL, ORPHANED_REASON, probeLaunchEngine, processStartTime, Queue, RunTerminal, selfOwner, STUDIO_END_RETRY_LIMIT, workerMayRun,
   type Holder, type LaunchEngine, type Owner, type QueueRun, type RecoverReport, type RunState, type StudioEnder, type StudioFinder, type StudioOps, type StudioResumer, type TerminalState,
   type WorkerKill,
 } from "./queue";
@@ -332,6 +332,27 @@ function projectIdOf(root: string): string {
   const pid = cfg.config.project_id;
   // The studio's identity is str(project_id): a numeric id is still the id.
   return (typeof pid === "string" || typeof pid === "number") && String(pid) ? String(pid) : basename(root);
+}
+
+/** How long the submission's git read may take (Story 28.5): a failure or a trip keys by the root. */
+const CHECKOUT_READ_TIMEOUT_S = 15;
+
+/** Story 28.5: the git checkout a project root lies in, read once per submission — the checkout lock's key
+ * (the canonical, case-folded `git rev-parse --show-toplevel`) and the root's prefix below it
+ * (`--show-prefix`, `""` at the top). Argv only, bounded; a root not in git — or any failure — keys by
+ * itself with prefix `""` (never a refusal). */
+export async function resolveCheckout(
+  root: string, opts: { platform?: NodeJS.Platform; timeoutS?: number } = {},
+): Promise<{ lockCheckout: string; prefix: string }> {
+  const own = { lockCheckout: checkoutKey(root, opts.platform), prefix: "" };
+  try {
+    const r = await runProcess("git", ["rev-parse", "--show-toplevel", "--show-prefix"], { cwd: root, timeoutS: opts.timeoutS ?? CHECKOUT_READ_TIMEOUT_S });
+    if (r.exit !== 0) return own;
+    const [top = "", prefix = ""] = r.stdout.split(/\r?\n/);
+    if (!top.trim()) return own;
+    // `--show-toplevel` prints forward slashes on win32: canonicalised (resolved) before it is folded.
+    return { lockCheckout: checkoutKey(top.trim(), opts.platform), prefix: prefix.trim() };
+  } catch { return own; }
 }
 
 /** The run `enqueue` would adopt: this job's `queued`/`running` run on this checkout. */
@@ -752,8 +773,9 @@ export async function submitJob(jobId: string, directory: string, opts: RunOptio
       v = await validate(jobId, directory, undefined, opts.guardCapS);
     }
     catch (e) { throw e instanceof StartError ? e : new StartError(message(e)); }
+    const where = await resolveCheckout(v.root);
     const { run, minted } = queue.enqueue({
-      jobId, root: v.root, projectId: v.projectId, target: v.target, definition: v.defn,
+      jobId, root: v.root, projectId: v.projectId, target: v.target, definition: v.defn, ...where,
       permissionMode: opts.permissionMode, tier: options.tier, sandbox: options.sandbox, model: options.model, effort: options.effort,
       base_ref: opts.baseRef, ...(opts.editorInTheLoop ? { editorInTheLoop: true } : {}),
     });
@@ -1029,7 +1051,8 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
       if (permissionMode !== undefined && run.state === "queued") run = queue.recordPermissionMode(run.run_id, permissionMode);
       if (run.state === "queued") run = queue.recordRunOptions(run.run_id, record);
     } else {
-      run = queue.enqueue({ jobId, root: v.root, projectId: v.projectId, target: v.target, definition: v.defn, owner, permissionMode, ...record }).run;
+      const where = await resolveCheckout(v.root);
+      run = queue.enqueue({ jobId, root: v.root, projectId: v.projectId, target: v.target, definition: v.defn, owner, permissionMode, ...record, ...where }).run;
     }
     const claim = await queue.claim(run.run_id, owner);
     // Story 27.2 (AC3): every claim rewrites the checkout's starter lock (the queue is the only starter).
@@ -1218,7 +1241,7 @@ export async function mirror(
     // Never while something may still work the worktree: an sbx worker that may still run in the VM, or an engine.
     const skip = s.hold_lock ? `its worker may still run: ${s.hold_lock}` : probed?.holder ? "an engine may still work the worktree" : undefined;
     // AC3: the engine's metered cost (its run.json, read before the close-out removes the worktree), else the worker's.
-    const metered = engine && now?.worktree && existsSync(now.worktree) ? meteredCost(now.worktree, engine) : undefined;
+    const metered = engine && now?.worktree && existsSync(now.worktree) ? meteredCost(servedRoot(now)!, engine) : undefined;
     const cost = metered ?? s.total_cost_usd;
     const closed = await closeOutNow(queue, queueRunId, { statusBlock: s.status_block, engineRunId: engine ?? null, ...(cost !== undefined ? { costUsd: cost } : {}) }, worktree, skip);
     const ended = { ...detail, ...closed, ...(probed?.holder ? { engine: probed.engine } : {}), ...(deferredFinish ? { finish: deferredFinish } : {}) };
@@ -1698,7 +1721,7 @@ async function rebuildStarted(queue: Queue, run: QueueRun, wake: Record<string, 
   return {
     jobId: run.job_id, root: v.root, projectId: v.projectId, runId: run.studio_run_id!, ...guardsFor(defn), defn, woke: wake,
     ...(v.registryRoot !== undefined ? { registryRoot: v.registryRoot } : {}), sessionId: run.session_id ?? undefined,
-    ...(run.worktree ? { workRoot: run.worktree } : {}),
+    ...(run.worktree ? { workRoot: servedRoot(run)! } : {}),
     tier: options.tier, ...(options.permissionMode ? { permissionMode: options.permissionMode } : {}),
     ...(options.sandbox ? { sandbox: options.sandbox } : {}), ...(options.model ? { model: options.model } : {}),
     ...(options.effort ? { effort: options.effort } : {}),

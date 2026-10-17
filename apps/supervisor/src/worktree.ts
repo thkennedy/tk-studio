@@ -62,7 +62,7 @@ import { dirname, join, resolve } from "node:path";
 import { ghBin, pluginRoot, WorkDirMissing, workDir } from "./env";
 import { canonicalPr, isWithin } from "./hygiene";
 import { hostVerify, isRed, prSection, redReason, type HostVerifyResult } from "./hostverify";
-import { accountedCostOf, isTerminal, RunTerminal, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
+import { accountedCostOf, isTerminal, RunTerminal, servedRoot, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
 import { releasePin, sameStart, type SandboxDeps } from "./sandbox";
 import { lastJsonObject, runJobVerb, runProcess, runUv, toVmPath, type RunResult, type Tier } from "./server";
 
@@ -234,24 +234,28 @@ export async function materialise(checkout: string, worktree: string, deps: Work
 
 /** Once per queue run, after the claim and before the minting verb: the run's worktree, cut and
  * materialised (see the header). A run that already has one (adopted, resumed) keeps it. Answers
- * the worktree path; throws `WorktreeFailed` naming the step (never a fallback to the checkout). */
+ * the root the run serves — Story 28.5 (DW-25): `<worktree>/<prefix>` for a project below its git
+ * top-level, the worktree itself at the top; throws `WorktreeFailed` naming the step (never a fallback
+ * to the checkout). The project is materialised at its served root. */
 export async function prepareWorktree(
   queue: Queue, run: QueueRun, projectId: string, checkout: string, opts: WorktreeDeps & { tier?: Tier } = {},
 ): Promise<string> {
   if (run.worktree) {
     if (!existsSync(run.worktree)) throw new WorktreeFailed("add", `the run's recorded worktree '${run.worktree}' is gone`);
     // Cut but never materialised (a crash between the cut and the end of materialise): materialised now.
+    const served = servedRoot(run)!;
     if (!queue.events(run.run_id).some((e) => e.kind === "materialised")) {
-      const done = await materialise(checkout, run.worktree, opts);
+      const done = await materialise(checkout, served, opts);
       queue.note(run.run_id, "materialised", { path: run.worktree, copied: done.copied, again: true });
     }
-    return run.worktree;
+    return served;
   }
   const env = opts.env ?? process.env;
   const work = workDir(env);
   if (!work) throw new WorktreeFailed("work folder", new WorkDirMissing("worktree").message);
   if (isWithin(checkout, work)) throw new WorktreeFailed("work folder", "TK_SUPERVISOR_WORK is the project root or lies inside it: the worktree would nest in the checkout");
   const path = worktreePath(work, projectId, run.run_id);
+  const served = servedRoot({ worktree: path, prefix: run.prefix })!;
   const branch = runBranch(run.run_id);
 
   let baseRef = run.base_ref ?? undefined, source: "default" | undefined, theDefault: string;
@@ -286,8 +290,10 @@ export async function prepareWorktree(
     throw new WorktreeFailed("base_ref", `base_ref '${baseRef}' does not resolve to a commit in the checkout: the worktree cannot be cut from it (origin/${branchOfBase} would)`);
   }
   if (opts.tier === "sbx") {
-    try { toVmPath(path); }
-    catch (e) { throw new WorktreeFailed("vm path", `the worktree '${path}' has no path visible in the microVM: ${message(e)}`); }
+    for (const p of new Set([path, served])) {
+      try { toVmPath(p); }
+      catch (e) { throw new WorktreeFailed("vm path", `the worktree '${p}' has no path visible in the microVM: ${message(e)}`); }
+    }
   }
   let res: RunResult;
   try {
@@ -296,9 +302,9 @@ export async function prepareWorktree(
   } catch (e) { throw new WorktreeFailed("add", clip(message(e))); }
   if (res.exit !== 0) throw new WorktreeFailed("add", `git worktree add ${failed(res)}`);
   queue.recordWorktree(run.run_id, path, { branch, base_ref: baseRef, ...(source ? { base_ref_source: source } : {}) });
-  const done = await materialise(checkout, path, opts);
+  const done = await materialise(checkout, served, opts);
   queue.note(run.run_id, "materialised", { path, copied: done.copied }); // the marker a re-drive checks
-  return path;
+  return served;
 }
 
 // ------------------------------------------------------------ the close-out
@@ -348,7 +354,7 @@ export interface CloseOut {
 
 /** The close-out of a run's worktree (see the header). Never throws: a failure is `error`. */
 export async function closeOut(
-  run: Pick<QueueRun, "run_id" | "job_id" | "root" | "worktree" | "base_ref">,
+  run: Pick<QueueRun, "run_id" | "job_id" | "root" | "worktree" | "base_ref" | "prefix">,
   input: { paused: boolean; statusBlock?: unknown; engineRunId?: string | null; costUsd?: number; existingPr?: string; verify?: HostVerifyResult },
   deps: WorktreeDeps = {},
 ): Promise<CloseOut> {
@@ -399,7 +405,8 @@ export async function closeOut(
     }
     // The body through a file: a long run's body passes the win32 command-line limit as an argument.
     const withBody = async <T>(use: (bodyFile: string) => Promise<T>): Promise<T> => {
-      const body = prBody({ statusBlock: input.statusBlock, engineRunId: input.engineRunId, commits: out.commits, costUsd: input.costUsd ?? (gone ? undefined : meteredCost(wt, input.engineRunId)), runId: run.run_id, ...(input.verify ? { verify: input.verify } : {}) });
+      // The metered cost read where the engine wrote it: the served root (`<worktree>/<prefix>`, Story 28.5).
+      const body = prBody({ statusBlock: input.statusBlock, engineRunId: input.engineRunId, commits: out.commits, costUsd: input.costUsd ?? (gone ? undefined : meteredCost(servedRoot(run)!, input.engineRunId)), runId: run.run_id, ...(input.verify ? { verify: input.verify } : {}) });
       const dir = mkdtempSync(join(tmpdir(), "tk-sup-pr-body-"));
       try {
         const bodyFile = join(dir, "body.md");
@@ -475,11 +482,11 @@ export function openPrUrl(stdout: string): string | undefined {
  * Story 27.5 (DW-15): plus the metered cost of every engine run an earlier close-out archived (its `accounted`
  * events, `source: "engine"`), so a relaunched run's cost is the sum across its engines. */
 export function launchedCloseOutInput(
-  events: readonly QueueEvent[], run: Pick<QueueRun, "worktree" | "engine_run_id">,
+  events: readonly QueueEvent[], run: Pick<QueueRun, "worktree" | "engine_run_id" | "prefix">,
 ): { statusBlock?: unknown; engineRunId: string | null; costUsd?: number } {
   const launched = (events.findLast((e) => e.kind === "launched")?.detail ?? {}) as Record<string, any>;
   const engineRunId: string | null = run.engine_run_id ?? (typeof launched.engine_run_id === "string" ? launched.engine_run_id : null);
-  const metered = run.worktree && existsSync(run.worktree) ? meteredCost(run.worktree, engineRunId) : undefined;
+  const metered = run.worktree && existsSync(run.worktree) ? meteredCost(servedRoot(run)!, engineRunId) : undefined;
   const latest = metered ?? (typeof launched.worker_cost_usd === "number" ? launched.worker_cost_usd : undefined);
   // The current engine's own recorded cost is left out only when its metered cost was read here: an engine archived
   // (its cost recorded) whose relaunch failed still names the run's engine, with no run.json left to read.
@@ -651,7 +658,7 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
       }
       // Its worktree gone with no pending record (a close-out whose transition and record both failed):
       // no engine can run there, so it is closed out (from the checkout) and ended, never probed forever.
-      let st: EnginePhase = existsSync(r.worktree!) ? await engineStatus(r.worktree!, r.engine_run_id!, deps)
+      let st: EnginePhase = existsSync(r.worktree!) ? await engineStatus(servedRoot(r)!, r.engine_run_id!, deps)
         : { phase: "ended", detail: { run_id: r.engine_run_id, status: "unknown", gone: "its worktree is gone: no engine can run there" } };
       if (st.phase === "running" || st.phase === "unknown") {
         // An engine the supervisor killed (a tripped guard, its leader dead on KILL) never writes its end:
