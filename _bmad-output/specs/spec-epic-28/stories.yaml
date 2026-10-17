@@ -158,3 +158,43 @@
     bmad-correct-course, never a split decided here). Keep `checkout` as the job's
     project-root identity and add the lock key beside it (plans/28-5.md Code Map,
     the planner's ruling).
+- id: "28-6-the-plugin-side-honours-the-queues-starter-lock"
+  title: "The Plugin Side Honours the Queue's Starter Lock"
+  description: >-
+    I want jobrun.py submit and wake to refuse a hand start on a checkout the
+    supervisor's queue serves (a live starter.lock in the store), unless forced with
+    --force-starter or TK_STUDIO_IGNORE_STARTER_LOCK=1, So that the queue is the only
+    starter on both sides of the one repository; the supervisor keeps the lock fresh
+    from `serve` on a timer and passes the override on the verbs it runs itself; the
+    driver contract bumps to 0.1.23. Added 2026-10-17 after the cut-over (the plugin's
+    half of Story 27.2, tk-studio-side-epic-27.md section 27.2). Canonical: ST-103.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 28.6: The
+    Plugin Side Honours the Queue's Starter Lock", the authoritative specification (user
+    story and acceptance criteria). Read the epic's own narrative (the paragraphs under
+    "## Epic 28:") for scope, rulings and the repo the story targets; transcribe the
+    story into the spec's intent contract and never re-derive, generalise or extend it.
+    Plan: plans/28-6.md when present (its Code Map is the investigation). The work is on
+    both sides of the repository: stdlib Python under plugins/tk-studio/lib with its
+    tests in plugins/tk-studio/lib/tests (gate: `uv run python -m unittest discover
+    tests` from plugins/tk-studio/lib, then `uv run python
+    ../contracts/conformance/runner.py run` from the same folder), and TypeScript under
+    apps/supervisor/src with its tests under apps/supervisor/test (gate: `bun test` from
+    apps/supervisor; bun is in the sandbox); both gates are the story's, beside the
+    studio customization's gate (_bmad/custom/bmad-build-auto.toml). Routing:
+    .bmad-loop/routing.current.json; pass the model, effort and advisor of implementer
+    and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a
+    `## Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/28-6-the-plugin-side-honours-the-queues-starter-lock-spec.md`
+    in the spec folder; the engine resolves it by the glob
+    `28-6-the-plugin-side-honours-the-queues-starter-lock-*.md`, and a file named
+    `28-6-the-plugin-side-honours-the-queues-starter-lock.md` is read as pending (loop
+    deficiency 1, story 21-6). Windows rule (holes 11, 12, 22, 33): every process probe
+    and every path comparison gets a win32 case; `os.kill(pid, 0)` terminates on
+    Windows and is never used there. The run that builds this story is itself
+    supervisor-driven (a worktree, not the checkout): never touch files outside the
+    worktree, never switch a branch.
