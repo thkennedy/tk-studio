@@ -1882,9 +1882,11 @@ describe("Story 28.5 (DW-25): a project below its git top-level is served at <wo
   });
 
   test("review patch: a project path with glob metacharacters is excluded literally (`apps/s[u]p` never reads as `apps/sup`)", async () => {
-    // The built pathspec: every metacharacter of the prefix backslash-escaped, the engine-state globs kept.
-    expect(engineState("a/b*[c]?\\d/")).toEqual(engineState("").map((p) => p.replace(":(exclude,glob)", ":(exclude,glob)a/b\\*\\[c\\]\\?\\\\d/")));
-    expect(engineState("apps/s[u]p/")[0]).toBe(":(exclude,glob)apps/s\\[u\\]p/.bmad-loop/run[s]/**");
+    // The built pathspec: every metacharacter of the prefix wrapped in a one-character bracket class
+    // (a backslash escape is a path separator to git on Windows and excluded nothing there), the
+    // engine-state globs kept.
+    expect(engineState("a/b*[c]?\\d/")).toEqual(engineState("").map((p) => p.replace(":(exclude,glob)", () => ":(exclude,glob)a/b[*][[]c[]][?][\\\\]d/")));
+    expect(engineState("apps/s[u]p/")[0]).toBe(":(exclude,glob)apps/s[[]u[]]p/.bmad-loop/run[s]/**");
     expect(engineState("$&/")[0]).toBe(":(exclude,glob)$&/.bmad-loop/run[s]/**");
     // A real repository: unescaped, `apps/s[u]p/.bmad-loop/...` would match `apps/sup/...` and the state would be committed.
     await pausedCloseOutNested("apps/s[u]p");

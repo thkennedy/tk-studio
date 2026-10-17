@@ -707,10 +707,12 @@ def check_startup_shortcut(ctx, report: dict) -> dict:
     if target is None:
         spaced = _UNQUOTED_SPACED.search(arguments)
         if spaced is not None:
+            # plain quotes, not !r: on Windows repr doubles every backslash
+            # and the operator would read a path that does not exist
             return _check(name, FAIL, f"{lnk} Arguments name the unquoted "
-                          f"-File path {spaced.group(1)!r}: a path with a "
+                          f"-File path '{spaced.group(1)}': a path with a "
                           "space must be quoted, or pwsh takes only "
-                          f"{spaced.group(1).split()[0]!r} as the file", fix)
+                          f"'{spaced.group(1).split()[0]}' as the file", fix)
     if target is None or _split_path(target)[1].casefold() != "start.ps1":
         return _check(name, FAIL, f"{lnk} Arguments name no `-File "
                       f"…start.ps1` ({arguments!r})", fix)

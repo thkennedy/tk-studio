@@ -215,7 +215,12 @@ const ENGINE_STATE = [
 ];
 
 /** A literal path as a `glob` pathspec fragment: its glob metacharacters (`*`, `?`, `[`, `]`, `\`) backslash-escaped. */
-const globLiteral = (path: string): string => path.replace(/[*?[\]\\]/g, "\\$&");
+// Bracket classes, never backslash escapes: git on Windows reads a backslash in a pathspec as a
+// path separator, so `apps/s\[u\]p/...` excluded nothing there and the engine state was committed
+// (found by the win32 host gate, 2026-10-17; probed on the box: `[[]`, `[]]`, `[*]`, `[?]` match
+// one literal character on both hosts). A literal backslash (never in a win32 path) is `[\\]`.
+const globLiteral = (path: string): string =>
+  path.replace(/[*?[\]\\]/g, (c) => (c === "\\" ? "[\\\\]" : `[${c}]`));
 
 /** The engine-state excludes for a project at `prefix` below the worktree top (`""`: the top). The prefix is
  * the project's literal path, so a project folder named with a glob metacharacter still excludes only itself. */
