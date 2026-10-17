@@ -596,9 +596,66 @@ microVM (§3.5), never on the host, and never in WSL. This was verified end to
 end on 2026-09-28: tk-studio Epics 20 and 24 and the supervisor's Epic 21 were
 all built this way.
 
-**Create one sandbox per project.** It mounts the project read-write and the
-tk-studio checkout read-only; tk-studio's own sandbox needs only its own
-mount. Run this from your home folder, never from `System32` (§3.5):
+**Create one sandbox per project.** Run every `sbx create` from your home
+folder, never from `System32` (§3.5).
+
+*tk-studio and the supervisor: one sandbox, one mount.* Since the supervisor
+moved into `apps/supervisor` (AD-21, Story 28.3), the one sandbox
+`claude-tk-studio` mounts `C:\GitHub\tk-studio` read-write and serves both
+loops: the plugin's (the repository root) and the supervisor's (the nested
+project `apps/supervisor`). It needs no second, read-only tk-studio mount:
+`TK_STUDIO_ROOT` lies inside the one mount.
+
+```powershell
+cd $HOME
+sbx create --skills readonly --name claude-tk-studio claude C:\GitHub\tk-studio
+```
+
+Provision it with bun for the nested project, giving the same path as the
+project and the studio mount (`TK_STUDIO_ROOT` stays the outer root,
+`/c/GitHub/tk-studio`). The skills-mount check runs from the repository root
+and, because `apps/supervisor/.tk-studio/config.yaml` exists, from
+`apps/supervisor` too: a project-scope plugin copy under
+`apps/supervisor/.claude` is seen only from there, and either check failing
+stops the provisioning.
+
+```bash
+MSYS_NO_PATHCONV=1 sbx exec claude-tk-studio bash -lc 'WITH_BUN=1 GIT_NAME="Tim Kennedy" GIT_EMAIL="<noreply email>" bash /c/GitHub/tk-studio/tools/sbx-engine/provision-engine.sh /c/GitHub/tk-studio /c/GitHub/tk-studio'
+```
+
+`launch-epic.sh` and `resume-run.sh` pick the project per epic through `ROOT`:
+
+- a supervisor epic: `ROOT=/c/GitHub/tk-studio/apps/supervisor`
+- a plugin epic: `ROOT=/c/GitHub/tk-studio`
+
+Both scripts refuse (exit 2, naming `ROOT`) a `ROOT` that holds neither
+`.tk-studio/config.yaml` nor `.bmad-loop/`.
+
+**Retire `claude-tk-studio-supervisor`.** That sandbox mounted the old
+`C:\GitHub\tk-studio-supervisor` checkout read-write and tk-studio read-only.
+The supervisor no longer lives there, so a loop in it builds a checkout that
+is no longer the source. Export its ledger and harvest its run dirs first
+(the recreate steps below, with `<project>` = `tk-studio-supervisor`), then:
+
+```powershell
+sbx rm claude-tk-studio-supervisor
+```
+
+**Two loops in one sandbox hold each other's launcher.** `launch-epic.sh` and
+`resume-run.sh` hold the sandbox while `pgrep -f "bmad-loop run"` (or
+`run|resume|resolve`) finds **any** engine in it. With a plugin run and a
+supervisor run both live in `claude-tk-studio`, each launcher holds for the
+other loop's engine too. That is harmless, just longer: the launcher returns
+when the last engine ends. So its `engine-gone` stamp records when the last
+engine in the sandbox ended, which may be the other loop's.
+
+Run one loop at a time for now. Serialising the two loops on the one checkout
+is Story 28.5 and is not in force yet. Engines started by `launch-epic.sh` or
+`resume-run.sh` directly never pass through the supervisor's lock.
+
+*Every other project: one sandbox, two mounts.* A project outside this
+repository (a Godot game, for example) keeps the two-mount form: the project
+read-write and the tk-studio checkout read-only.
 
 ```powershell
 cd $HOME
@@ -645,7 +702,8 @@ idempotent, and it sets up:
 - the sandbox's own studio store, with the project registered as developer
 
 From Git Bash, set `MSYS_NO_PATHCONV=1`, or Git Bash rewrites `/c/...`
-arguments to `C:/...`:
+arguments to `C:/...`. For a two-mount project (for `claude-tk-studio`, the
+one-mount command above):
 
 ```bash
 MSYS_NO_PATHCONV=1 sbx exec claude-<project> bash -lc 'GIT_NAME="Tim Kennedy" GIT_EMAIL="<noreply email>" bash /c/GitHub/tk-studio/tools/sbx-engine/provision-engine.sh /c/GitHub/<project> /c/GitHub/tk-studio'
@@ -754,8 +812,8 @@ delete and check out the affected files again.
    - `.tk-studio/budget-bands.yaml`
    - `.bmad-loop/routing.toml`
 
-   Copy them from tk-studio. `tk-studio-supervisor` shows the adaptation for
-   a non-Python repo.
+   Copy them from tk-studio. `apps/supervisor` shows the adaptation for
+   a non-Python project.
 4. Gitignore:
    - `.bmad-loop/{runs,cache,archive}/`
    - `.bmad-loop/policy.toml`
@@ -870,28 +928,34 @@ ClaudeOS, plus a durable SQLite queue, a lock per checkout, guards it enforces
 itself, a pacer, crash recovery, an HTTP API and a status page. It was built on
 2026-09-28 through the studio's own launch pipeline (plan Epics 21 and 22).
 
-- **Repo:** `thkennedy/tk-studio-supervisor`, private, `main` protected. Bun
-  and TypeScript.
-- **Clone path:** `C:\GitHub\tk-studio-supervisor`, beside tk-studio.
-- **Full reference:** the repo's `README.md` (commands, API routes, queue and
-  restart rules, worker tiers).
+- **Repo:** `apps/supervisor` in `thkennedy/tk-studio` (AD-21; `main`
+  protected). Bun and TypeScript. It is a nested studio project with its own
+  `_bmad/`, `_bmad-output/`, `.tk-studio/config.yaml` (`verify.host: bun
+  test`), `.bmad-loop/` and `.claude/`.
+- **Path:** `C:\GitHub\tk-studio\apps\supervisor`, inside the tk-studio
+  clone.
+- **Full reference:** `apps/supervisor/README.md` (commands, API routes, queue
+  and restart rules, worker tiers).
 
 ### 4.1 Install
 
 ```powershell
-cd C:\GitHub
-git clone https://github.com/thkennedy/tk-studio-supervisor.git
-cd tk-studio-supervisor
+cd C:\GitHub\tk-studio\apps\supervisor
 bun install --frozen-lockfile
 $env:TK_STUDIO_ROOT = 'C:\GitHub\tk-studio'
 bun test
 ```
 
-Then open `claude` once in the clone, accept "Yes, I trust this folder",
-and `/exit`. Claude Code applies a repository's `.claude/settings.json`
-permission rules only in a trusted folder, trust is recorded per repository
-root with no inheritance from a parent folder, and a headless worker cannot
-answer the dialog (supervisor DW-22, 2026-10-09). Do the same for every
+The tk-studio clone (§3) already holds it; there is no separate clone for
+the supervisor. Keep the old `C:\GitHub\tk-studio-supervisor` clone on the
+box for now: the §4.2 environment script still needs it.
+
+Then open `claude` once in `C:\GitHub\tk-studio\apps\supervisor`, accept "Yes,
+I trust this folder", and `/exit`. Claude Code applies a project's
+`.claude/settings.json` permission rules only in a trusted folder, trust is
+recorded per folder with no inheritance from a parent folder (trusting
+`C:\GitHub\tk-studio` does not trust `apps\supervisor`), and a headless worker
+cannot answer the dialog (supervisor DW-22, 2026-10-09). Do the same for every
 project the supervisor will drive on this box.
 
 With `TK_STUDIO_ROOT` set and `uv` on PATH, `bun test` also runs the
@@ -945,6 +1009,17 @@ PowerShell 7 terminal. It generates the token and the topic and keeps them on
 a re-run; `-ShowToken` prints the token once, for the phone, and `-WithTls` fetches
 the Tailscale certificate and sets the TLS variables (§4.5).
 
+**The script still knows only the old clone.** The move into
+`apps/supervisor` (Story 28.3) left `set-supervisor-env.ps1` unchanged. It
+still points at `C:\GitHub\tk-studio-supervisor`, stops with `missing:` when
+that folder is absent, and writes the Startup shortcut at the old clone's
+`start.ps1`. So, until Story 28.4 rules on the old clone:
+
+- keep `C:\GitHub\tk-studio-supervisor` on the box, or the script stops;
+- after every run, retarget the shortcut at
+  `C:\GitHub\tk-studio\apps\supervisor\start.ps1` as §4.3 shows (or run the
+  script with `-NoShortcut` and make the §4.3 shortcut by hand).
+
 The worker never sees the API token or the notifier's credentials: the
 supervisor removes them, and `ANTHROPIC_API_KEY`, from every worker's
 environment. The Max login pays (ruling 3).
@@ -959,8 +1034,11 @@ virtualisation, §8).
 Put a shortcut in `shell:startup` (Win+R, `shell:startup`) with this target:
 
 ```text
-wt.exe -w studio nt --title supervisor pwsh -NoExit -File C:\GitHub\tk-studio-supervisor\start.ps1
+wt.exe -w studio nt --title supervisor pwsh -NoExit -File C:\GitHub\tk-studio\apps\supervisor\start.ps1
 ```
+
+`set-supervisor-env.ps1` (§4.2) still writes this shortcut at the old clone's
+`start.ps1`. After running it, set the target back to the line above.
 
 Add a second tab for `hermes dashboard` (§3.7). `start.ps1` prints the same
 command with the repo path filled in, then:

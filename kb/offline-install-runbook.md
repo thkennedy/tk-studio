@@ -200,7 +200,7 @@ never `/releases/latest`.
 | `--app` | tag | built from (at the tag) | artifact |
 |---|---|---|---|
 | `plugin` (default) | `tk-studio--vX.Y.Z` | `plugins/tk-studio` | `tk-studio-<v>.zip` |
-| `supervisor` | `supervisor--vX.Y.Z` | its own checkout's root (`--repo`, until EP-31) | `supervisor-<v>.zip` |
+| `supervisor` | `supervisor--vX.Y.Z` | `apps/supervisor` (AD-21; `--repo <old checkout>` only for the old repository's historical tags, from its root) | `supervisor-<v>.zip` |
 | `studio-web` | `studio-web--vX.Y.Z` | `apps/studio-web/dist` | `studio-web-<v>.zip` |
 | `cli` | `cli--vX.Y.Z` | `tools/installer/cli` | wheel (`uv build`, `SOURCE_DATE_EPOCH` = commit) |
 
@@ -242,6 +242,34 @@ uv run tools/release_archive.py run --app supervisor --version 0.1.0 --repo <pat
 
 then copy the written `supervisor` entry into `stable.json` by PR.
 Unverifiable here: the engine records them and never runs them.
+
+That cut is history: `supervisor--v0.1.0` lives on the old repository, so
+both rosters' `supervisor` entries carry `source:
+thkennedy/tk-studio-supervisor` until the next cut.
+
+### Operator step: the next supervisor release (from `apps/supervisor`)
+
+Since the supervisor moved into `apps/supervisor` (AD-21, Story 28.3), every
+later cut is from this repository, with no `--repo`. Pick `X.Y.Z` above
+0.1.0. On an up-to-date `main` of `thkennedy/tk-studio`:
+
+```bash
+git switch main && git pull --ff-only origin main && git tag supervisor--vX.Y.Z && git push origin supervisor--vX.Y.Z
+```
+
+then, from the repository root:
+
+```bash
+uv run tools/release_archive.py run --app supervisor --version X.Y.Z --channel latest
+```
+
+The zip is `apps/supervisor` at the tag, and the entry written into
+`latest.json` is `{tag, url, sha256}` on `thkennedy/tk-studio` with no
+`source`. Then copy that entry into `stable.json` by PR, and run
+`tk-studio update --channel latest` (and `--channel stable` once the PR
+lands) on the box to check every component still resolves against the
+rosters' digests. Never hand-edit a roster to drop `source`.
+Unverifiable here: the engine records these and never runs them.
 
 ### Operator step: the 0.3.0 release (25.7 AC2)
 

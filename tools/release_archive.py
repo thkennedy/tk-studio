@@ -31,6 +31,14 @@ mutation, a roster the drift check's guard rejects. ``--app plugin`` (the
 default) is the historical motion unchanged in effect, plus those two
 additions.
 
+The supervisor (AD-21, Story 28.3) lives at ``apps/supervisor`` in this
+repository — the second prefix of ADR §6 — and is cut from that subtree
+with no ``--repo``, so its entry records no ``source``. ``--repo`` stays
+for the historical tags of the old ``thkennedy/tk-studio-supervisor``
+checkout (``supervisor--v0.1.0``), cut from that checkout's root with
+``source`` recorded; a ``--repo`` whose tag holds ``apps/supervisor``
+(another tk-studio clone or worktree) is cut from that subtree instead.
+
 Maintainer tooling, not a driver surface (AD-11 does not bind it); the
 JSON result on stdout follows the house shape. Stdlib-only; ``git`` and
 ``gh`` are the transports.
@@ -38,7 +46,10 @@ JSON result on stdout follows the house shape. Stdlib-only; ``git`` and
 Usage:
     uv run tools/release_archive.py run [--app plugin] [--dry-run]
     uv run tools/release_archive.py run --app supervisor --version X.Y.Z \\
-        --repo <path-to-supervisor-checkout> [--channel latest|stable]
+        [--channel latest|stable]
+    # historical: a tag of the old supervisor checkout, cut from its root
+    uv run tools/release_archive.py run --app supervisor --version X.Y.Z \\
+        --repo <path-to-old-supervisor-checkout> [--channel latest|stable]
 """
 from __future__ import annotations
 
@@ -65,14 +76,17 @@ DRIFT_CHECK_DIR = (REPO_ROOT / PLUGIN_SUBDIR / "skills" / "tk-studio-activate"
                    / "scripts")
 CHANNELS = ("latest", "stable")
 
-# app -> (tag prefix, subtree at the tag, artifact kind). The supervisor's
-# subtree is its own checkout's root (via --repo) until EP-31 moves it in.
+# app -> (tag prefix, subtree at the tag, artifact kind). A supervisor cut
+# from another checkout (--repo) uses that subtree when the tag holds it (a
+# tk-studio clone or worktree), else that checkout's root (the old
+# repository's historical tags): FOREIGN_SUBTREES.
 APPS = {
     "plugin": ("tk-studio--v", PLUGIN_SUBDIR, "zip"),
-    "supervisor": ("supervisor--v", ".", "zip"),
+    "supervisor": ("supervisor--v", "apps/supervisor", "zip"),
     "studio-web": ("studio-web--v", "apps/studio-web/dist", "zip"),
     "cli": ("cli--v", "tools/installer/cli", "wheel"),
 }
+FOREIGN_SUBTREES = {"supervisor": "."}
 VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
 
 
@@ -221,9 +235,6 @@ def run(dry_run: bool, app: str = "plugin", version: str | None = None,
     else:
         if not version or not VERSION_RE.fullmatch(version):
             _fail(f"--app {app} needs --version X.Y.Z (got {version!r})")
-        if app == "supervisor" and repo == REPO_ROOT:
-            _fail("--app supervisor runs against its own checkout until "
-                  "EP-31: pass --repo <path-to-supervisor-checkout>")
     # The roster this cut records into, read and sanity-checked before any
     # git/gh call (a dry run records nothing, so does not read it).
     roster_path = ROSTERS_DIR / f"{channel}.json"
@@ -249,6 +260,13 @@ def run(dry_run: bool, app: str = "plugin", version: str | None = None,
     if proc.returncode != 0:
         _fail(f"git rev-list failed: {proc.stderr.strip()}")
     commit = proc.stdout.strip()
+    if repo != REPO_ROOT and app in FOREIGN_SUBTREES:
+        # Another tk-studio clone or worktree holds the app at its in-repo
+        # subtree; only a checkout without it (the old supervisor
+        # repository's historical tags) is cut from its root.
+        proc = _run(["git", "cat-file", "-t", f"{tag}:{subtree}"], cwd=repo)
+        if proc.returncode != 0 or proc.stdout.strip() != "tree":
+            subtree = FOREIGN_SUBTREES[app]
     treeish = f"{tag}:" if subtree == "." else f"{tag}:{subtree}"
     proc = _run(["git", "cat-file", "-t", treeish], cwd=repo)
     if proc.returncode != 0 or proc.stdout.strip() != "tree":
