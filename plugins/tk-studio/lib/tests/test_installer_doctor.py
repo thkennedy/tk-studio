@@ -466,6 +466,24 @@ class FolderTrust(DoctorCase):
                          "open Claude Code in C:\\GitHub\\beta and accept "
                          "the trust dialog")
 
+    def test_a_trusted_ancestor_trusts_a_nested_root(self):
+        """Hole 35: a registered root inside a trusted folder passes (Claude
+        Code inherits trust into subfolders); a sibling whose name merely
+        starts with the trusted folder's does not."""
+        self.registry({"sup": "C:\\GitHub\\tk-studio\\apps\\supervisor",
+                       "sib": "C:\\GitHub\\tk-studio-supervisor",
+                       "far": "D:\\work\\game"})
+        self.trust({"C:/GitHub/tk-studio": True, "D:\\work": False})
+        checks = self.checks(self.doctor(roster=self.full_roster())[0])
+        self.assertEqual(checks["folder-trust:sup"]["status"], "pass",
+                         checks["folder-trust:sup"])
+        self.assertIn("ancestor c:/github/tk-studio",
+                      checks["folder-trust:sup"]["detail"])
+        self.assertIsNone(checks["folder-trust:sup"]["fix"])
+        self.assertEqual(checks["folder-trust:sib"]["status"], "fail")
+        self.assertEqual(checks["folder-trust:far"]["status"], "fail")
+        self.assertIn("no trusted ancestor", checks["folder-trust:far"]["detail"])
+
     def test_colliding_keys_prefer_the_accepted_record(self):
         self.registry({"demo": "C:\\GitHub\\demo"})
         for order in ((("C:/GitHub/demo", True), ("c:\\github\\demo", False)),
@@ -980,14 +998,28 @@ class CutOver(DoctorCase):
         self.assertEqual(self.cut_over()["supervisor-registry"]["status"],
                          "pass")
 
-    def test_parent_trusted_only_fails_no_inheritance(self):
+    def test_parent_trusted_passes_through_inheritance(self):
+        """Hole 35: Claude Code inherits trust into subfolders (2.1.292 on
+        the box, 2026-10-17): the nested root is trusted through the
+        checkout above it, with no record of its own."""
         self.registry({"supervisor": str(self.nested)})
         self.trust({str(self.outer): True})
         check = self.cut_over()["supervisor-trust"]
-        self.assertEqual(check["status"], "fail")
-        self.assertIn("no inheritance", check["detail"])
+        self.assertEqual(check["status"], "pass", check)
+        self.assertIn("ancestor", check["detail"])
         self.assertIn("§4.1", check["detail"])
+        self.assertIn(str(self.nested), check["detail"])
+        self.assertIsNone(check["fix"])
+
+    def test_nothing_trusted_fails_naming_both_ways_to_trust(self):
+        self.registry({"supervisor": str(self.nested)})
+        self.trust({str(self.tmp / "elsewhere"): True,
+                    str(self.outer): False})
+        check = self.cut_over()["supervisor-trust"]
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("neither it nor an ancestor", check["detail"])
         self.assertIn(f"open `claude` in {self.nested}", check["fix"])
+        self.assertIn("checkout above it", check["fix"])
 
     def test_bad_target_fails_naming_what_the_lnk_holds(self):
         self.healthy()

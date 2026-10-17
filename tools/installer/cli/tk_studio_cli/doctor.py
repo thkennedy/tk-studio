@@ -281,6 +281,20 @@ def _accepted(record: object) -> bool:
         and record.get("hasTrustDialogAccepted") is True
 
 
+def _trusted_via(trusted: dict[str, object], want: str) -> str | None:
+    """The normalized key whose accepted record trusts ``want``: ``want``
+    itself, else its nearest trusted ancestor, else None. Claude Code
+    inherits folder trust into every subfolder of a trusted folder — no
+    dialog opens there and no record of its own is written (2.1.292 on the
+    agent PC, 2026-10-17, loop hole 35), so a nested project such as
+    ``apps\\supervisor`` is trusted through its checkout."""
+    if _accepted(trusted.get(want)):
+        return want
+    parents = [key for key, record in trusted.items()
+               if _accepted(record) and want.startswith(key + "/")]
+    return max(parents, key=len) if parents else None
+
+
 def _registry_path(ctx) -> Path:
     return store_root(ctx.env) / "registry" / "projects.yaml"
 
@@ -354,13 +368,20 @@ def check_folder_trust(ctx) -> list[dict]:
             out.append(_check(name, FAIL, f"registry entry {pid} names no "
                               "root", fix_registry))
             continue
-        record = trusted.get(_norm(root, ctx.plat.windows))
-        if _accepted(record):
+        want = _norm(root, ctx.plat.windows)
+        record = trusted.get(want)
+        via = _trusted_via(trusted, want)
+        if via == want:
             out.append(_check(name, PASS, f"{root} trusted "
                               f"(hasTrustDialogAccepted in {state_file})"))
+        elif via:
+            out.append(_check(name, PASS, f"{root} trusted through its "
+                              f"ancestor {via} (hasTrustDialogAccepted in "
+                              f"{state_file}; Claude Code inherits trust "
+                              "into subfolders)"))
         else:
             why = "not accepted" if isinstance(record, dict) else \
-                f"absent from {state_file}"
+                f"absent from {state_file} (no trusted ancestor either)"
             out.append(_check(name, FAIL, f"{root}: trust dialog {why} — "
                               "its project rules are ignored",
                               f"open Claude Code in {root} and accept the "
@@ -676,18 +697,21 @@ def check_supervisor_trust(ctx, checkout: str) -> dict:
     if trusted is None:
         return _check(name, FAIL, why, f"repair {state_file} by starting "
                       "Claude Code once; doctor never edits it")
-    if _accepted(trusted.get(_norm(folder, True))):
+    want = _norm(folder, True)
+    via = _trusted_via(trusted, want)
+    if via == want:
         return _check(name, PASS, f"{folder} trusted (hasTrustDialogAccepted "
                       f"in {state_file})")
-    want = _norm(folder, True)
-    parents = sorted(key for key, record in trusted.items()
-                     if _accepted(record) and want.startswith(key + "/"))
-    detail = f"{folder} is not trusted in {state_file}"
-    if parents:
-        detail += (f"; its parent {parents[-1]} is, but trust has no "
-                   "inheritance (runbook §4.1)")
-    return _check(name, FAIL, detail, f"open `claude` in {folder} and accept "
-                  "the trust dialog")
+    if via:
+        # The nested root inherits the checkout's trust (runbook §4.1, hole 35).
+        return _check(name, PASS, f"{folder} trusted through its ancestor "
+                      f"{via} (hasTrustDialogAccepted in {state_file}; "
+                      "Claude Code inherits trust into subfolders, runbook "
+                      "§4.1)")
+    detail = (f"{folder} is not trusted in {state_file}: neither it nor an "
+              "ancestor has hasTrustDialogAccepted")
+    return _check(name, FAIL, detail, f"open `claude` in {folder} (or the "
+                  "checkout above it) and accept the trust dialog")
 
 
 def check_startup_shortcut(ctx, report: dict) -> dict:
@@ -745,7 +769,8 @@ def check_cut_over(ctx, fields: dict, supervisor: dict) -> list[dict]:
     """The four Story 28.4 checks, Windows only (absent elsewhere). The root
     checks run only when the shortcut names a source checkout; registry and
     trust are judged only once ``supervisor-root`` passes (else they would
-    name the wrong folder). With no supervisor shipped (``supervisor``
+    name the wrong folder). Trust counts when the nested root or an
+    ancestor of it (its checkout) is trusted (hole 35). With no supervisor shipped (``supervisor``
     skipped) the shortcut is skipped too."""
     if not ctx.plat.windows:
         return []

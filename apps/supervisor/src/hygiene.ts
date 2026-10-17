@@ -239,11 +239,21 @@ export function scrubNotifier(n: Exclude<Notifier, { kind: "none" }>, s: string)
   return notifierSecrets(n).reduce((acc, x) => acc.split(x).join("[redacted]"), s);
 }
 
+/** Hole 31: the suite runs under `bun test` with `test/preload.ts` (bunfig.toml), which strips the
+ * operator's notifier variables and sets this marker; a send through the real `fetch` is then refused,
+ * so a test reaches a notifier only through an injected fake. `NODE_ENV=test` counts too. */
+export function underBunTest(env: Env = process.env): boolean {
+  return env.TK_SUPERVISOR_UNDER_TEST === "1" || env.NODE_ENV === "test";
+}
+
+export const REFUSED_UNDER_TEST = "refused: a real notifier send under bun test (hole 31) — tests inject a fake fetch";
+
 /** One send through the selected notifier. A failure is answered, never thrown, and never carries
  * the Telegram token, its Bot API URL, or the ntfy topic URL (or its credentials). */
 export async function notify(
   n: Exclude<Notifier, { kind: "none" }>, notice: EndNotice, fetchFn: Fetch = fetch,
 ): Promise<{ ok: true; via: string } | { ok: false; via: string; error: string }> {
+  if ((fetchFn as unknown) === globalThis.fetch && underBunTest()) return { ok: false, via: n.kind, error: REFUSED_UNDER_TEST };
   const text = noticeText(notice);
   try {
     const res = n.kind === "ntfy"

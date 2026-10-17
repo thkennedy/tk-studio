@@ -348,6 +348,8 @@ export function prBody(input: { statusBlock?: unknown; engineRunId?: string | nu
 export interface CloseOut {
   pr?: string; no_changes?: true; commits: string[]; draft?: boolean; pushed?: string;
   error?: string; worktree: "removed" | "kept" | string;
+  /** Hole 34: after a "no changes" end the local run branch (at base_ref, never pushed) goes with the worktree. */
+  branch?: "deleted" | string;
   /** Story 27.4: the host verify leg's outcome, when the close-out was given one. */
   host_verify?: "green" | "red" | "skipped";
 }
@@ -367,20 +369,42 @@ export async function closeOut(
   // Story 27.4: a red host verify opens the PR as a draft carrying the failures (never marked ready).
   const red = isRed(input.verify);
   if (input.verify) out.host_verify = input.verify.skipped ? "skipped" : input.verify.green ? "green" : "red";
+  // Hole 34: a "no changes" end leaves the run branch at base_ref and never pushed; it is deleted with
+  // the worktree (a branch that carried commits is on origin by then and stays, as the resume paths and
+  // a lost-record close-out read it by name).
+  let branchGone = false;
+  const dropBranch = async (): Promise<CloseOut> => {
+    if (!out.no_changes || branchGone) return out;
+    try {
+      const r = await git(deps, run.root, ["branch", "-D", branch]);
+      out.branch = r.exit === 0 ? "deleted" : `kept: git branch -D ${failed(r)}`;
+    } catch (e) { out.branch = `kept: git branch -D: ${clip(message(e))}`; }
+    return out;
+  };
   const finish = async (): Promise<CloseOut> => {
     if (input.paused) { out.worktree = "kept"; return out; } // a paused run keeps it for the resume
     if (out.error) { out.worktree = "kept"; return out; }
     if (gone) {
       try { await git(deps, run.root, ["worktree", "prune"]); } catch { /* its record only: the directory is gone */ }
       out.worktree = "removed";
-      return out;
+      return dropBranch();
     }
     try {
-      const r = await git(deps, run.root, ["worktree", "remove", wt]);
+      // Hole 34: the engine leaves untracked runtime behind (its runs and caches, a nested project's
+      // state), and `git worktree remove` refuses a worktree holding modified or untracked files, so the
+      // folder stayed behind on the first real run. The run is over: what it landed is on origin.
+      const r = await git(deps, run.root, ["worktree", "remove", "--force", wt]);
       out.worktree = r.exit === 0 ? "removed" : `kept: git worktree remove ${failed(r)}`;
     } catch (e) { out.worktree = `kept: git worktree remove: ${clip(message(e))}`; }
-    return out;
+    return out.worktree === "removed" ? dropBranch() : out;
   };
+  if (gone) {
+    // The branch went with an earlier "no changes" close-out whose record was lost (hole 34): nothing landed.
+    try {
+      const r = await git(deps, run.root, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]);
+      if (r.exit !== 0) { branchGone = true; out.no_changes = true; return finish(); }
+    } catch { /* probed again by the git log below */ }
+  }
   try {
     const r = await git(deps, at, ["log", "--oneline", `${base}..${gone ? branch : "HEAD"}`]);
     if (r.exit !== 0) { out.error = `git log ${failed(r)}`; return finish(); }
@@ -542,6 +566,7 @@ export function closeOutDetail(c: CloseOut): Record<string, unknown> {
     closeout: {
       result: c.no_changes ? "no changes" : c.pr ? (c.draft ? "draft PR" : "PR") : "failed",
       commits: c.commits, ...(c.pushed ? { pushed: c.pushed } : {}), ...(c.error ? { error: c.error } : {}), worktree: c.worktree,
+      ...(c.branch ? { branch: c.branch } : {}),
       ...(c.host_verify ? { host_verify: c.host_verify } : {}),
     },
   };

@@ -62,12 +62,17 @@ async function fixture(opts: { baseRef?: string; files?: Record<string, string>;
   return { repo, root, gh, work, argvs, studio, verbs, answers, deps, queue, run: claim.run, defn, head, headBefore, get: () => queue.get(queued.run_id)! };
 }
 
-/** No git/gh argv ever forces, merges, or switches a branch. */
+/** No git/gh argv ever forces a push, merges, or switches a branch. The one forced verb is
+ * `git worktree remove --force` (hole 34: the engine's untracked runtime), never a push. */
 function expectNoForbiddenArgv(argvs: { bin: string; args: string[] }[], ghCalls: { argv: string[] }[]) {
   const all = [...argvs.map((a) => a.args), ...ghCalls.map((c) => c.argv)];
   expect(all.length).toBeGreaterThan(0);
   for (const args of all) {
-    for (const forbidden of ["--force", "-f", "--force-with-lease", "merge", "checkout", "switch"]) expect(args).not.toContain(forbidden);
+    const removal = args[0] === "worktree" && args[1] === "remove";
+    for (const forbidden of ["--force", "-f", "--force-with-lease", "merge", "checkout", "switch"]) {
+      if (removal && forbidden === "--force") continue;
+      expect(args).not.toContain(forbidden);
+    }
   }
 }
 
@@ -251,16 +256,34 @@ describe("AC3: the close-out pushes the run branch and opens a PR against base_r
     expect(body).toContain("$2.2500");
     expect(fx.head()).toEqual(fx.headBefore);
     expectNoForbiddenArgv(fx.argvs, fx.gh.calls());
+    // Hole 34: the removal is forced (the engine's untracked runtime); the pushed branch stays local too.
+    expect(fx.argvs.find((a) => a.args[0] === "worktree" && a.args[1] === "remove")!.args).toEqual(["worktree", "remove", "--force", wt]);
+    expect(out.branch).toBeUndefined();
+    expect(testGit(fx.repo.checkout, "rev-parse", "--verify", `refs/heads/supervisor/run-${fx.run.run_id}`)).toMatch(/^[0-9a-f]{40}$/);
   });
 
-  test("no commits: no push, no PR, \"no changes\", the worktree removed", async () => {
+  test("no commits: no push, no PR, \"no changes\", the worktree removed with its untracked runtime, the local branch deleted (hole 34)", async () => {
     const fx = await fixture({ baseRef: "main" });
     const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+    // What the first real run left behind: untracked files no .gitignore covers, which made a plain
+    // `git worktree remove` refuse (exit 128, "contains modified or untracked files") and keep the folder.
+    mkdirSync(join(wt, ".tk-studio", "runs", "q-1"), { recursive: true });
+    writeFileSync(join(wt, ".tk-studio", "runs", "q-1", "run.json"), "{}");
+    writeFileSync(join(wt, "scratch.txt"), "left by the engine");
+    const branch = `supervisor/run-${fx.run.run_id}`;
     const out = await closeOut(fx.get(), { paused: false, statusBlock: BLOCK, engineRunId: "E1" }, fx.deps);
-    expect(out).toEqual({ commits: [], no_changes: true, worktree: "removed" });
+    expect(out).toEqual({ commits: [], no_changes: true, worktree: "removed", branch: "deleted" });
     expect(fx.argvs.some((a) => a.args[0] === "push")).toBe(false);
     expect(fx.gh.calls().some((c) => c.argv[0] === "pr")).toBe(false);
     expect(existsSync(wt)).toBe(false);
+    expect(testGit(fx.repo.checkout, "branch", "--list", branch)).toBe("");
+    expect(testGit(fx.repo.checkout, "worktree", "list", "--porcelain")).not.toContain(branch);
+    expect(fx.head()).toEqual(fx.headBefore);
+    // A lost-record close-out of the same run (worktree and branch gone): still "no changes", never an error.
+    const again = await closeOut(fx.get(), { paused: false }, fx.deps);
+    expect(again).toEqual({ commits: [], no_changes: true, worktree: "removed" });
+    expect(fx.argvs.some((a) => a.args[0] === "branch" && a.args[1] === "-D" && a.args[2] === branch && a.cwd === fx.repo.checkout)).toBe(true);
+    expect(fx.argvs.filter((a) => a.args[0] === "branch")).toHaveLength(1); // not attempted twice
   });
 
   test("a push that fails is recorded and the worktree kept", async () => {
