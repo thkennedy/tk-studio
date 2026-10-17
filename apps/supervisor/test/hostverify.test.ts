@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { hostVerify, isRed, prSection, redReason, splitCommand, tail, verifyCommand, wallClockTrip, type HostVerifyRan } from "../src/hostverify";
+import { gitUsrBin, hostVerify, isRed, prSection, redReason, splitCommand, tail, verifyCommand, wallClockTrip, type HostVerifyRan } from "../src/hostverify";
 import { gitRepo, testGit } from "./fakes";
 
 /** `"<bun>" -e "<script>"` as one command line (the script uses single quotes only). */
@@ -214,5 +214,39 @@ describe("the leg runs the command in the worktree under the guard", () => {
     // A tail with no backticks keeps the plain three-backtick fence.
     expect(s.slice(close + 1)).toContain("```");
     expect(s.at(-1)).toBe("```");
+  });
+});
+
+describe("hole 46: Git Bash goes first on the leg's PATH on win32", () => {
+  test("a `Git\\cmd` entry on PATH with a sibling `usr\\bin\\bash.exe` is prepended and recorded (win32 only); none: PATH unchanged", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tk-sup-git-"));
+    mkdirSync(join(root, "Git", "cmd"), { recursive: true });
+    writeFileSync(join(root, "Git", "cmd", "git.exe"), "");
+    mkdirSync(join(root, "Git", "usr", "bin"), { recursive: true });
+    writeFileSync(join(root, "Git", "usr", "bin", "bash.exe"), "");
+    const win = process.platform === "win32";
+    const usrBin = join(root, "Git", "usr", "bin");
+    // The pure resolution: the fake Git alone on PATH (no real git there, so this never runs a command).
+    const env = { TK_STUDIO_HOME: "store", PATH: [join(root, "elsewhere"), join(root, "Git", "cmd")].join(";") };
+    expect(gitUsrBin(env)).toBe(win ? usrBin : null);
+    expect(gitUsrBin({ PATH: join(root, "nowhere") })).toBeNull();
+    expect(gitUsrBin({ PATH: join(root, "Git", "cmd") + "\\" })).toBe(win ? usrBin : null); // a trailing separator
+    // The leg: the config read and the command answered by an injected runner, the command's env captured.
+    const seen: Record<string, string | undefined>[] = [];
+    const run = async (bin: string, _args: string[], o: { cwd: string; timeoutS: number; env?: Record<string, string | undefined> }) => {
+      if (bin === "git") return { exit: 0, stdout: hostKey("bash scripts/verify.sh"), stderr: "" };
+      seen.push(o.env ?? {});
+      return { exit: 0, stdout: "", stderr: "" };
+    };
+    const fx = project(hostKey("bash scripts/verify.sh"));
+    const v = await hostVerify(fx.run, 60, { env, run: run as any }) as HostVerifyRan;
+    expect(seen).toHaveLength(1);
+    if (win) {
+      expect(v.git_bash).toBe(usrBin);
+      expect(seen[0]!.PATH).toBe(`${usrBin};${env.PATH}`);
+    } else {
+      expect(v.git_bash).toBeUndefined();
+      expect(seen[0]!.PATH).toBe(env.PATH);
+    }
   });
 });

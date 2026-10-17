@@ -61,7 +61,11 @@ if [ -n "${WITH_DOTNET:-}" ]; then
   step dotnet
   curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh     && bash /tmp/dotnet-install.sh --channel "$WITH_DOTNET" --install-dir "$HOME/.dotnet" >/dev/null 2>&1
   grep -q DOTNET_ROOT ~/.profile 2>/dev/null || { echo 'export DOTNET_ROOT="$HOME/.dotnet"' >> ~/.profile; echo 'export PATH="$HOME/.dotnet:$PATH"' >> ~/.profile; }
+  # Hole 47: the engine and its verify commands run under a bare `sbx exec` (no login shell, so ~/.profile
+  # is never read), whose PATH carries ~/.local/bin; dotnet goes there too, like godot below.
+  mkdir -p "$HOME/.local/bin" && ln -sf "$HOME/.dotnet/dotnet" "$HOME/.local/bin/dotnet"
   "$HOME/.dotnet/dotnet" --list-sdks 2>&1 | head -3
+  command -v dotnet >/dev/null || { echo "dotnet: not on the bare-exec PATH after the link"; exit 1; }
 fi
 
 # Godot (mono, Linux) for a game project's engine gate: WITH_GODOT=4.7.2. The
