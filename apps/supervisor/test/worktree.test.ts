@@ -722,6 +722,29 @@ describe("Story 27.4: the host verify leg runs before any PR opens", () => {
     expect(prCalls(fx).map((c) => c.argv[1])).toEqual(["list", "ready"]);
   });
 
+  test("hole 38: an sbx run's engine status is read inside its sandbox (`sbx exec … uv run …/launch.py status --directory <VM worktree> --run-id <id>`), never through the host uv; the end then runs as on the host", async () => {
+    const fx = await launchedSbx(bunCmd("console.log('all green')"));
+    const sbx = fakeSbx();
+    fx.deps.env = { ...fx.deps.env, SBX_BIN: sbx.bin };
+    fx.queue.db.run("UPDATE runs SET sandbox = 'claude-p' WHERE run_id = ?", [fx.run.run_id]);
+    fx.answers.launch = { ok: false, error: "the host uv must not probe an sbx run's engine" };
+    sbx.answer({ launch_status: { ok: true, runs: [{ run_id: "E1", status: "finished" }], live: [], run: { run_id: "E1", status: "finished" } } });
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    const status = sbx.calls().filter((c) => c.argv[0] === "exec" && c.argv[3] === "run");
+    expect(status).toHaveLength(1);
+    expect(status[0]!.argv).toEqual(["exec", "claude-p", "/home/agent/.local/bin/uv", "run", "/studio-root/plugins/tk-studio/lib/launch.py", "status", "--directory", toVmPath(fx.wt), "--run-id", "E1"]);
+    expect(fx.studio.some((s) => s.script.endsWith("launch.py"))).toBe(false); // never the host's launch core
+    expect(fx.get().state).toBe("complete");
+    expect(fx.queue.events(fx.run.run_id).find((e) => e.kind === "ended")!.detail).toMatchObject({ engine: { status: "finished" }, closeout: { result: "PR", worktree: "removed" } });
+    // A VM probe that fails leaves the run alone, named — fail closed, as on the host.
+    const fy = await launchedSbx(bunCmd("console.log('all green')"));
+    fy.deps.env = { ...fy.deps.env, SBX_BIN: sbx.bin };
+    fy.queue.db.run("UPDATE runs SET sandbox = 'claude-p' WHERE run_id = ?", [fy.run.run_id]);
+    sbx.answer({ launch_status: "fail" });
+    expect(await sweepEngines(fy.queue, fy.deps)).toEqual([]);
+    expect(fy.get().state).toBe("running");
+  }, 30_000);
+
   test("a killed engine whose worktree is gone (no pending record): no leg, no `host-verify` event, its recorded end", async () => {
     const fx = await launchedSbx(RED);
     fx.queue.recordEnginePid(fx.run.run_id, { pid: 6509, start: "125610.0", source: "engine.pid" });

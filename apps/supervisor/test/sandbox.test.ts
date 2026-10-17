@@ -11,7 +11,7 @@ import {
   holdArgv, holdEngine, killEngine, killRunEngine, lookupEnginePid, pinSandbox, probeEngine, releasePin, respawnHolds, STARTER, starterLockPath,
   writeStarterLock, writeStarterLocks, type HoldChild, type SandboxDeps,
 } from "../src/sandbox";
-import { invokeSkill, MISSING_STATUS_BLOCK, runProcess, type RunResult, type Spawner } from "../src/server";
+import { invokeSkill, MISSING_STATUS_BLOCK, runProcess, toVmPath, type RunResult, type Spawner } from "../src/server";
 import { shouldWake } from "../src/tick";
 import { engineStatus, sweepEngines, type WorktreeDeps } from "../src/worktree";
 import { fakeSbx, fakeStudioRoot } from "./fakes";
@@ -40,23 +40,33 @@ const newQueue = (probes: Partial<Probes> = {}) => new Queue(":memory:", {
 const noOps: StudioOps = { end: async () => ({ ok: true, detail: "unused" }), find: async () => ({ ok: true, run_id: null }) };
 /** The engine-end sweep's deps: git/gh answered ok ("no changes"), the launch status probe answering
  * `status`, the studio verbs ok, `sbx` the fake. */
-const sweepWith = (status: "finished" | "paused" | "running"): WorktreeDeps => ({
-  env: { ...process.env, TK_STUDIO_ROOT: mkdtempSync(join(tmpdir(), "tk-sup-studio-")), SBX_BIN: sbx.bin },
-  run: async () => ({ exit: 0, stdout: "", stderr: "" }),
-  uv: async () => ({ exit: 0, stderr: "", stdout: JSON.stringify({ ok: true, run: { status: status === "finished" ? "finished" : "running", ...(status === "paused" ? { paused_stage: "review" } : {}) } }) }),
-  verbs: async () => ({ ok: true, state: "complete" }),
-  sbx: deps,
-});
+const sweepWith = (status: "finished" | "paused" | "running"): WorktreeDeps => {
+  const run = { status: status === "finished" ? "finished" : "running", ...(status === "paused" ? { paused_stage: "review" } : {}) };
+  // Hole 38: an sbx run's engine status is read inside its sandbox, so the fake `sbx` answers it (the host
+  // `uv` below answers only what still runs on the host).
+  sbx.answer({ ...sbx.answers(), launch_status: { ok: true, runs: [], live: [], run } });
+  return {
+    env: { ...process.env, TK_STUDIO_ROOT: mkdtempSync(join(tmpdir(), "tk-sup-studio-")), SBX_BIN: sbx.bin },
+    run: async () => ({ exit: 0, stdout: "", stderr: "" }),
+    uv: async () => ({ exit: 0, stderr: "", stdout: JSON.stringify({ ok: true, run }) }),
+    verbs: async () => ({ ok: true, state: "complete" }),
+    sbx: deps,
+  };
+};
 /** The cancel's deps: the studio verbs ok (recorded in `verbCalls`), the graceful stop ok, `sbx` the fake. */
 const cancelWith = (verbCalls: string[][] = []): Parameters<typeof cancelRun>[2] => ({
   verbRunner: async (_r, a) => { verbCalls.push(a); return { ok: true }; }, launchStop: async () => ({ ok: true, detail: "stopping" }),
   worktree: { env: { ...process.env, SBX_BIN: sbx.bin }, run: async () => ({ exit: 0, stdout: "", stderr: "" }), sbx: deps },
 });
-/** The fake's calls made while `fn` ran. */
+/** Hole 38: the engine-end sweep reads an sbx run's engine status inside its sandbox (`exec <sb> printenv HOME`,
+ * then `exec <sb> <home>/.local/bin/uv run …/launch.py status …`). Those two are the probe's, not a step's verb. */
+const isStatusProbe = (argv: string[]) => argv[0] === "exec" && (argv[2] === "printenv" || (argv[3] === "run" && /\/launch\.py$/.test(argv[4] ?? "")));
+/** The fake's calls made while `fn` ran — the sbx verbs the step itself issued (the hole 38 status probe aside;
+ * `sbx.calls()` still lists it). */
 async function during<T>(fn: () => Promise<T>): Promise<{ out: T; calls: string[][] }> {
   const before = sbx.calls().length;
   const out = await fn();
-  return { out, calls: sbx.calls().slice(before).map((c) => c.argv) };
+  return { out, calls: sbx.calls().slice(before).map((c) => c.argv).filter((a) => !isStatusProbe(a)) };
 }
 /** A worktree with bmad-loop's `engine.pid` for `engine` (absent with `pidLine` null). */
 function worktreeWith(pidLine: string | null, engine = ENGINE): string {
@@ -208,9 +218,14 @@ describe("release: `sbx stop <sb>` at the deferred `ended`, never on paused, nev
     const q = newQueue();
     const { run } = await sbxRun(q);
     launched(q, run.run_id);
+    const before = sbx.calls().length;
     const { calls } = await during(() => sweepEngines(q, sweepDeps("finished")));
     expect(q.get(run.run_id)!.state).toBe("complete");
     expect(calls).toEqual([["stop", SB]]);
+    // Hole 38: the engine's status was read inside the sandbox (the host has no bmad-loop), before the stop.
+    const probe = sbx.calls().slice(before).map((c) => c.argv).filter(isStatusProbe);
+    expect(probe.map((a) => a.slice(0, 4))).toEqual([["exec", SB, "printenv", "HOME"], ["exec", SB, "/home/agent/.local/bin/uv", "run"]]);
+    expect(probe[1]!.slice(5)).toEqual(["status", "--directory", toVmPath(run.worktree!), "--run-id", ENGINE]);
     expect(kinds(q, run.run_id).slice(-1)).toEqual(["pin-released"]);
     // Released once: a second release finds it done.
     const again = await during(() => releasePin(q, run.run_id, deps));

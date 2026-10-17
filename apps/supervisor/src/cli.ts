@@ -1979,7 +1979,7 @@ export async function finishRun(
         // A launch run is never resumed beside a live (or unverified) engine: it ends
         // `partial` naming it, and its end hands the lock to the engine (`endDriven`).
         const engineCause = defn?.target?.skill === LAUNCH_SKILL
-          ? await launchEngineCause(() => rec?.launchEngine ? rec.launchEngine(root) : probeLaunchEngine(defaultProbes, workRoot ?? root))
+          ? await launchEngineCause(() => rec?.launchEngine ? rec.launchEngine(root) : probeLaunchEngine(defaultProbes, workRoot ?? root, { tier, sandbox }))
           : undefined;
         // sbx: the host `sbx exec` exiting never proves the in-VM worker ended — a process
         // carrying the session id (or a failed check) refuses the resume, and the run ends

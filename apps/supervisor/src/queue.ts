@@ -55,7 +55,7 @@ import { homedir, hostname } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pluginRoot } from "./env";
 import { processCreationTime } from "./winproc";
-import { probeEngine, sameStart, type ProbeResult } from "./sandbox";
+import { probeEngine, sameStart, vmLaunchStatus, type ProbeResult, type SandboxDeps } from "./sandbox";
 import { lastJsonObject, runUv, SBX_GUARD_KILL_AFTER_S, type RunResult } from "./server";
 
 type Env = Record<string, string | undefined>;
@@ -209,6 +209,8 @@ export interface EngineProbe {
   /** The live bmad-loop run ids the probe saw. */
   run_ids?: string[];
 }
+/** Hole 38: where a run's engine lives — on the host, or in an sbx sandbox (the probe then runs there). */
+export interface EngineWhere { tier?: string | null; sandbox?: string | null }
 export interface Probes {
   /** Is another owner's process alive? */
   ownerAlive(owner: Owner): boolean;
@@ -219,8 +221,9 @@ export interface Probes {
   /** The clock an sbx worker's in-VM deadline is compared against (default `Date.now`). */
   now?(): number;
   /** Is bmad-loop engine `engineRunId` live on the checkout at `root`? With
-   * `null` (an unverified engine): is any engine live there? */
-  engineLive(root: string, engineRunId: string | null): Promise<EngineProbe>;
+   * `null` (an unverified engine): is any engine live there? `where` names the run's tier and sandbox:
+   * an sbx run's engine is probed inside its sandbox (hole 38), never on the host. */
+  engineLive(root: string, engineRunId: string | null, where?: EngineWhere): Promise<EngineProbe>;
   /** Story 27.2 (DW-3): an in-VM engine pid's `/proc/<pid>/stat` through `sbx exec` (argv only; default
    * `probeEngine` in src/sandbox.ts) — re-probed while a run's last engine kill left it alive. */
   engineProbe?(sandbox: string, pid: number): Promise<ProbeResult>;
@@ -245,10 +248,16 @@ type UvRunner = (root: string, script: string, args: string[], timeoutS?: number
 /** The launch core's `status --directory <root>` (§1 pure-data allowance):
  * the engine holds the checkout while its id is in `live[]` (with a null id:
  * while `live[]` is non-empty). Any failed probe counts as live (fail closed)
- * and is named. */
-export async function launchStatusProbe(root: string, engineRunId: string | null, uv: UvRunner = runUv): Promise<EngineProbe> {
+ * and is named. Hole 38: for an sbx run (`where`) the status runs inside the
+ * run's sandbox (`vmLaunchStatus`), since the host has no bmad-loop by design. */
+export async function launchStatusProbe(
+  root: string, engineRunId: string | null, uv: UvRunner = runUv, where?: EngineWhere, sbx?: SandboxDeps,
+): Promise<EngineProbe> {
+  const sandbox = where?.tier === "sbx" && where.sandbox ? where.sandbox : null;
   try {
-    const res = await uv(root, join(pluginRoot(), "lib", "launch.py"), ["status", "--directory", root], 120);
+    const res = sandbox
+      ? await vmLaunchStatus(sandbox, root, null, sbx ?? {})
+      : await uv(root, join(pluginRoot(), "lib", "launch.py"), ["status", "--directory", root], 120);
     const out = lastJsonObject(res.stdout) as Record<string, any> | null;
     if (!out || out.ok !== true || !Array.isArray(out.live)) {
       const why = out?.error ?? (res.stderr.trim() || "no JSON answer");
@@ -268,8 +277,8 @@ export type LaunchEngine = { holder?: { id: string | null }; engine: Record<stri
 /** The launch-orphan rule, probed outside any transaction: a failed probe
  * → an unverified engine holder (fail closed, named); a non-empty `live[]`
  * → that engine (the first live id); an empty `live[]` → no holder. */
-export async function probeLaunchEngine(probes: Pick<Probes, "engineLive">, root: string): Promise<LaunchEngine> {
-  const probe = await probes.engineLive(root, null);
+export async function probeLaunchEngine(probes: Pick<Probes, "engineLive">, root: string, where?: EngineWhere): Promise<LaunchEngine> {
+  const probe = await probes.engineLive(root, null, where);
   if (probe.detail) return { holder: { id: null }, engine: { handed_to_engine: "unverified", detail: probe.detail } };
   if (probe.live) {
     const id = probe.run_ids?.[0] ?? null;
@@ -278,7 +287,7 @@ export async function probeLaunchEngine(probes: Pick<Probes, "engineLive">, root
   return { engine: { handed_to_engine: null, live: [] } };
 }
 
-export const defaultProbes: Probes = { ownerAlive: (o) => defaultOwnerAlive(o), engineLive: (root, id) => launchStatusProbe(root, id) };
+export const defaultProbes: Probes = { ownerAlive: (o) => defaultOwnerAlive(o), engineLive: (root, id, where) => launchStatusProbe(root, id, runUv, where) };
 
 /** Is `pid` a live (not zombie) process? */
 function pidRunning(pid: number): boolean {
@@ -1252,7 +1261,7 @@ export class Queue {
     if (!lock || lock.run_id === runId) return out;
     if (this.get(lock.run_id)?.state === "paused") return out; // Story 27.1: held for the resume, nothing to probe
     if (lock.kind === "engine") {
-      out.engine = await this.probes.engineLive(this.lockRoot(lock), lock.engine_run_id);
+      out.engine = await this.probes.engineLive(this.lockRoot(lock), lock.engine_run_id, this.whereOf(lock.run_id));
       // Story 27.2 (DW-3): an engine its run's kill left alive in the VM holds the lock while its pid runs.
       const lockRun = out.engine.live ? null : this.get(lock.run_id);
       const alive = lockRun ? await this.engineAliveAfterKill(lockRun) : undefined;
@@ -1273,8 +1282,14 @@ export class Queue {
     const defn = held ? this.definition(held) : this.definition({ job_id: lock.job_id, checkout: checkoutKey(lock.root) });
     out.launch = !out.holderLive && defn?.target?.skill === LAUNCH_SKILL;
     // A stale launch-run holder may have started a detached engine: probe before taking over (AD: one engine per checkout).
-    if (out.launch) out.engine = await this.probes.engineLive(held ? engineRoot(held) : this.lockRoot(lock), null);
+    if (out.launch) out.engine = await this.probes.engineLive(held ? engineRoot(held) : this.lockRoot(lock), null, this.whereOf(held?.run_id ?? lock.run_id));
     return out;
+  }
+
+  /** Hole 38: where a run's engine is probed — its recorded tier and sandbox (an sbx engine lives in its VM). */
+  private whereOf(runId: string): EngineWhere {
+    const r = this.get(runId);
+    return r ? { tier: r.tier, sandbox: r.sandbox } : {};
   }
 
   /** Where a lock's engine is probed: its recorded root, else — a worktree since removed — its run's root
