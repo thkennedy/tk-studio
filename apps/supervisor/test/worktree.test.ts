@@ -821,7 +821,7 @@ describe("Story 27.4: the host verify leg runs before any PR opens", () => {
       expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).not.toContain("--draft");
       expect(fx.verbs[0]![fx.verbs[0]!.indexOf("--reason") + 1]).toBe(TRIP);
     }
-  });
+  }, 30_000); // two launched-sbx fixtures through real git: past bun's 5 s default on the win32 host (2026-10-16)
 
   test("review P2: a recorded red `host-verify`, the worktree gone, then an `engine-kill` `not running`: the red reused — `partial`, never plain `gh pr ready`, no second event", async () => {
     const fx = await launchedSbx(RED);
