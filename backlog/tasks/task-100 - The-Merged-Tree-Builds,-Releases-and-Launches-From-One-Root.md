@@ -4,6 +4,7 @@ title: The Merged Tree Builds, Releases and Launches From One Root
 status: To Do
 assignee: []
 created_date: '2026-10-16 20:11'
+updated_date: '2026-10-17 02:56'
 labels:
   - ST-100
 milestone: "The Supervisor Moves In: One Repository"
@@ -25,7 +26,7 @@ So that nothing points at the old repository.
 
 **Given** the engine sandboxes
 **When** `claude-tk-studio` is recreated with one read-write mount of `C:\GitHub\tk-studio` and the read-only skills store
-**Then** `launch-epic.sh` and `resume-run.sh` take `ROOT=/c/GitHub/tk-studio/apps/supervisor` for a supervisor epic and the repository root for a plugin epic; the `tk-studio:ro` second mount is gone from the runbook and the provisioning (`WITH_BUN=1` provisions bun for the nested project); `check-skills-mount.sh` holds; `claude-tk-studio-supervisor` is retired from the runbook; the two loops serialise on the checkout lock
+**Then** `launch-epic.sh` and `resume-run.sh` take `ROOT=/c/GitHub/tk-studio/apps/supervisor` for a supervisor epic and the repository root for a plugin epic; the `tk-studio:ro` second mount is gone from the runbook and the provisioning (`WITH_BUN=1` provisions bun for the nested project); `check-skills-mount.sh` holds; `claude-tk-studio-supervisor` is retired from the runbook; the two loops serialise on the checkout lock *(the serialisation itself is Story 28.5, carved out by correct-course on 2026-10-17: the supervisor keyed its lock by project root, and this story's plan kept `apps/supervisor/src` outside its Files)*
 
 **Given** the supervisor's own `.tk-studio/config.yaml` (`verify.host: bun test`) and its transcribed plan
 **When** a supervisor run goes through the supervisor itself
