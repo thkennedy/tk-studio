@@ -96,8 +96,10 @@ class DriverContractTestCase(unittest.TestCase):
         # status-block drives (Story 26.1, additive); 0.1.22 states the
         # §1 nearest-root rule and §6's optional drift-check roots keys
         # (Story 28.2, additive — SPEC's "minor bump" is the change
-        # policy's patch position: an additive rule never takes 0.2.0)
-        self.assertRegex(self.text, r"\*\*0\.1\.22\*\*")
+        # policy's patch position: an additive rule never takes 0.2.0);
+        # 0.1.23 honours the supervisor's starter lock in §4 (Story 28.6,
+        # additive)
+        self.assertRegex(self.text, r"\*\*0\.1\.23\*\*")
         self.assertIn("### 5.1 Execution-pipeline legs", self.text)
         self.assertIn("lib/pipeline.py", self.text)
         self.assertIn("Change policy", self.text)
@@ -277,12 +279,14 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_22_header_project_root_and_drift_check_keys(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.22**", header)
+        # the 0.1.22 clause survives in the history once 0.1.23 heads it
+        self.assertNotIn("**0.1.22**", header)
         self.assertNotIn("**0.1.21**", header)
         self.assertNotIn("0.2.0 (", header)
         self.assertLess(header.index("0.1.21 (Story 26.5)"),
                         header.index("0.1.22 (Story 28.2)"))
-        clause = header[header.index("0.1.22 (Story 28.2)"):]
+        clause = header[header.index("0.1.22 (Story 28.2)"):
+                        header.index("0.1.23 (Story 28.6)")]
         for phrase in ("nearest-root rule", "`.tk-studio/config.yaml`",
                        "`TK_STUDIO_ROOT` keeps meaning the outer repository root",
                        "`config.py standup`", "`registry.py register`",
@@ -311,6 +315,53 @@ class DriverContractTestCase(unittest.TestCase):
                        "four optional roots keys (0.1.22)", "(`null` when unresolved)",
                        "[Project root](#project-root-0122)"):
             self.assertIn(phrase, drift)
+
+    # --- Story 28.6: 0.1.23 honours the supervisor's starter lock (§4)
+
+    def test_0_1_23_header_and_starter_lock_section(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.23**", header)
+        self.assertNotIn("**0.1.22**", header)
+        self.assertNotIn("0.2.0 (", header)
+        self.assertLess(header.index("0.1.22 (Story 28.2)"),
+                        header.index("0.1.23 (Story 28.6)"))
+        clause = header[header.index("0.1.23 (Story 28.6)"):]
+        for phrase in ("`StarterLocked`", "`--force-starter`",
+                       "`TK_STUDIO_IGNORE_STARTER_LOCK=1`", "`starter_lock`",
+                       "[Starter lock](#starter-lock-0123-story-286)",
+                       "— additive"):
+            self.assertIn(phrase, clause)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 28.6", stories)
+        start = self.text.index("### Starter lock (0.1.23, Story 28.6)")
+        self.assertGreater(start, self.text.index(
+            "## 4. Job model and scheduler verbs"))
+        self.assertLess(start, self.text.index("## 5. Model & effort override API"))
+        section = " ".join(self.text[start:self.text.index(
+            "### Status pull-back (0.1.21, Story 26.5)")].split())
+        for phrase in ("`~/.tk-studio/projects/<key>/starter.lock`",
+                       "`{starter, checkout, since, supervisor_pid}`",
+                       "`tk-studio-supervisor queue`",
+                       "**Judged after every other refusal, before anything is minted.**",
+                       "is **no lock** — it never refuses",
+                       "`STARTER_LOCK_STALE_S` (900 s)",
+                       "`{job_id, run_id: null, accepted: false, reason}`",
+                       "`{woken: false, run_id: null, reason}`",
+                       "`StarterLocked: tk-studio-supervisor's queue is the only "
+                       "starter on this checkout (since <since>, supervisor pid "
+                       "<pid>) — submit the job to the supervisor (POST /jobs or "
+                       "bun src/cli.ts submit)`",
+                       "The `--force-starter` flag (on `submit` and `wake` only)",
+                       "the `TK_STUDIO_IGNORE_STARTER_LOCK` variable set exactly to `1`",
+                       "**`starter_lock` answer field** (optional): `\"forced\"`",
+                       "`\"stale\"`", "The MCP `tk_job` surface"):
+            self.assertIn(phrase, section)
+        table = " ".join(self.text[self.text.index("## 4. Job model and scheduler verbs"):
+                                   self.text.index("Guarantees a driver can rely on:")].split())
+        self.assertIn("`{job_id, run_id, accepted: bool, reason?, starter_lock?}` (0.1.23)", table)
+        self.assertIn("`{woken: bool, run_id?, reason?, starter_lock?}` (0.1.23)", table)
 
     def test_section_8_names_the_cli_drives(self):
         section = self.text[self.text.index("## 8. Conformance"):]

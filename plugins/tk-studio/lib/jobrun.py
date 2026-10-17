@@ -36,11 +36,11 @@ Guarantees implemented here, verbatim from the contract:
     recorded there — never a masked verb, never a raised finish.
 
 CLI (all verbs end with JSON on stdout; never prompts — AD-11):
-  uv run jobrun.py submit  --directory DIR --id JOB_ID
+  uv run jobrun.py submit  --directory DIR --id JOB_ID [--force-starter]
   uv run jobrun.py status  --directory DIR --job-id ID [--run-id RID]
   uv run jobrun.py resolve --directory DIR [--job-id ID]
   uv run jobrun.py cancel  --directory DIR --job-id ID [--run-id RID]
-  uv run jobrun.py wake    --directory DIR --job-id ID
+  uv run jobrun.py wake    --directory DIR --job-id ID [--force-starter]
   uv run jobrun.py account --directory DIR --run-id RID [--turns N] [--tokens N]
   uv run jobrun.py finish  --directory DIR --run-id RID --state STATE
                            [--reason R] [--status-block JSON]
@@ -49,6 +49,13 @@ CLI (all verbs end with JSON on stdout; never prompts — AD-11):
 Exit codes: 0 verb answered (including accepted=false / woken=false — a
 refusal is an answer); 2 bad invocation or unknown id; 1 unexpected
 failure. Env: TK_STUDIO_HOME overrides the store root (tests).
+
+Starter lock (Story 28.6, driver contract 0.1.23): `submit` and `wake`
+refuse (`StarterLocked`, nothing minted) while the studio supervisor's live
+`~/.tk-studio/projects/<key>/starter.lock` names this checkout — the queue
+is its only starter. `--force-starter`, or env
+TK_STUDIO_IGNORE_STARTER_LOCK=1, overrides it (`"starter_lock": "forced"`);
+a stale lock never refuses (`"starter_lock": "stale"`).
 Stdlib-only (NFR9).
 """
 from __future__ import annotations
@@ -56,6 +63,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import ntpath
 import os
 import subprocess
 import sys
@@ -66,6 +74,7 @@ import job as joblib
 import ledger
 import reconcile as reconcilelib
 import routing as routinglib
+import store as storelib
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 
@@ -114,6 +123,122 @@ def _emit_job_event(record: dict, key: str, detail: str | None = None) -> None:
         ledger.emit("job-run", payload, project=key)
     except Exception:
         pass
+
+
+# ---------------------------------------------------------- starter lock
+
+# Story 28.6: the studio supervisor writes an advisory starter lock per
+# served project (Story 27.2) naming its queue the only starter of runs on
+# the checkout; submit/wake honour it here (nothing imports the supervisor —
+# AD-2: the file is the whole interface).
+STARTER_LOCK_STALE_S = 900
+QUEUE_STARTER = "tk-studio-supervisor queue"
+IGNORE_STARTER_LOCK_ENV = "TK_STUDIO_IGNORE_STARTER_LOCK"
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_STILL_ACTIVE = 259
+
+
+def starter_lock_path(project_root: Path) -> Path:
+    """`<store>/projects/<key>/starter.lock` — beside the run records."""
+    return (storelib.store_root() / "projects"
+            / joblib.project_key(Path(project_root)) / "starter.lock")
+
+
+def _win32_pid_alive(pid: int) -> bool:
+    """OpenProcess + GetExitCodeProcess == STILL_ACTIVE; any failure is not
+    alive. Never os.kill on win32 — there it terminates the process."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.windll.kernel32
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL,
+                                         wintypes.DWORD]
+        handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION,
+                                      False, pid)
+        if not handle:
+            return False
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return False
+            return code.value == _STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return False
+
+
+def _pid_alive(pid: int, platform: str | None = None) -> bool:
+    """Whether `pid` is a running process on this host."""
+    if (platform or sys.platform) == "win32":
+        return _win32_pid_alive(pid)
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except (ProcessLookupError, OSError, OverflowError, ValueError):
+        return False
+    return True
+
+
+def _same_checkout(lock_checkout: str, root: Path,
+                   platform: str | None = None) -> bool:
+    """Canonical absolute paths compared, case-folded on win32."""
+    a = os.path.realpath(lock_checkout)
+    b = os.path.realpath(str(root))
+    if (platform or sys.platform) == "win32":
+        a, b = ntpath.normcase(a), ntpath.normcase(b)
+    return a == b
+
+
+def starter_lock_state(project_root: Path, *, now: datetime | None = None,
+                       platform: str | None = None
+                       ) -> tuple[str | None, dict | None]:
+    """(None | "live" | "stale", lock). An unreadable or malformed lock, a
+    foreign starter or another checkout's lock is no lock: (None, None).
+    Live when the supervisor pid runs on this host, or `since` is less than
+    STARTER_LOCK_STALE_S old; else stale. Never raises."""
+    try:
+        lock = json.loads(starter_lock_path(project_root)
+                          .read_text(encoding="utf-8"))
+        if not isinstance(lock, dict):
+            return None, None
+        starter, checkout = lock.get("starter"), lock.get("checkout")
+        pid, since = lock.get("supervisor_pid"), lock.get("since")
+        if (not isinstance(starter, str) or not isinstance(checkout, str)
+                or not checkout or not isinstance(since, str)
+                or isinstance(pid, bool) or not isinstance(pid, int)
+                or pid <= 0):
+            return None, None
+        since_at = _parse_iso(since)
+        if starter != QUEUE_STARTER:
+            return None, None
+        if not _same_checkout(checkout, Path(project_root), platform):
+            return None, None
+        age = ((now or _now()) - since_at).total_seconds()
+        if _pid_alive(pid, platform) or age < STARTER_LOCK_STALE_S:
+            return "live", lock
+        return "stale", lock
+    except Exception:
+        return None, None
+
+
+def _starter_gate(project_root: Path, force: bool
+                  ) -> tuple[str | None, str | None]:
+    """(refusal reason, starter_lock answer field) for submit/wake."""
+    state, lock = starter_lock_state(project_root)
+    if state == "stale":
+        return None, "stale"
+    if state == "live":
+        if force or os.environ.get(IGNORE_STARTER_LOCK_ENV) == "1":
+            return None, "forced"
+        return (f"StarterLocked: tk-studio-supervisor's queue is the only "
+                f"starter on this checkout (since {lock['since']}, "
+                f"supervisor pid {lock['supervisor_pid']}) — submit the job "
+                f"to the supervisor (POST /jobs or bun src/cli.ts submit)",
+                None)
+    return None, None
 
 
 # ------------------------------------------------------------- scheduling
@@ -304,12 +429,14 @@ def execute_core(key: str, record: dict) -> dict:
 
 # ------------------------------------------------------------------ verbs
 
-def submit(project_root: Path, job_id: str) -> dict:
+def submit(project_root: Path, job_id: str, force: bool = False) -> dict:
     """§4 submit: validate, gate on stop conditions, mint/execute/schedule.
 
     Response always carries {job_id, run_id, accepted, reason?}; recurring
     triggers add the substrate directive, durable jobs the surfaced
-    constraint. accepted=false is an answer, never an exception."""
+    constraint. accepted=false is an answer, never an exception. A live
+    supervisor starter lock refuses (StarterLocked) after every other
+    refusal and before anything is minted, unless `force`."""
     root = Path(project_root)
     entry = joblib.load_instance(root, job_id)
     if entry["problems"]:
@@ -321,6 +448,10 @@ def submit(project_root: Path, job_id: str) -> dict:
     if stop_reason:
         return {"job_id": job_id, "run_id": None, "accepted": False,
                 "reason": stop_reason}
+    locked, starter_lock = _starter_gate(root, force)
+    if locked:
+        return {"job_id": job_id, "run_id": None, "accepted": False,
+                "reason": locked}
 
     routing = _job_routing(defn, root)
     result: dict = {"job_id": job_id, "run_id": None, "accepted": True,
@@ -329,6 +460,8 @@ def submit(project_root: Path, job_id: str) -> dict:
                     "routing": routing}
     if defn.get("durable") and defn["trigger"] != "one-shot":
         result["durability_constraint"] = DURABILITY_CONSTRAINT
+    if starter_lock:
+        result["starter_lock"] = starter_lock
 
     if defn["trigger"] == "one-shot":
         record = joblib.create_run(defn, key)
@@ -429,9 +562,11 @@ def cancel(project_root: Path, job_id: str, run_id: str | None = None) -> dict:
                                     f"for job '{job_id}'"}}
 
 
-def wake(project_root: Path, job_id: str) -> dict:
+def wake(project_root: Path, job_id: str, force: bool = False) -> dict:
     """§4 wake: fire a recurring job's next iteration now (the mission-
-    runner tick). Stop conditions gate it; woken=false names the reason."""
+    runner tick). Stop conditions gate it; woken=false names the reason.
+    A live supervisor starter lock refuses (StarterLocked) after every
+    other refusal and before anything is minted, unless `force`."""
     root = Path(project_root)
     entry = joblib.load_instance(root, job_id)
     if entry["problems"]:
@@ -446,10 +581,15 @@ def wake(project_root: Path, job_id: str) -> dict:
     stop_reason = evaluate_stop(defn, joblib.list_runs(key, job_id=job_id))
     if stop_reason:
         return {"woken": False, "run_id": None, "reason": stop_reason}
+    locked, starter_lock = _starter_gate(root, force)
+    if locked:
+        return {"woken": False, "run_id": None, "reason": locked}
     routing = _job_routing(defn, root)
     record = joblib.create_run(defn, key)
     record = joblib.update_run(key, record["run_id"], {"routing": routing})
     result = {"woken": True, "run_id": record["run_id"], "routing": routing}
+    if starter_lock:
+        result["starter_lock"] = starter_lock
     if "core" in defn["target"]:
         record = execute_core(key, record)
         result["state"] = record["state"]
@@ -577,13 +717,18 @@ def main(argv: list[str] | None = None) -> int:
                 cmd.add_argument("--total-cost-usd",
                                  help="run cost in USD (worker's "
                                       "--output-format json result)")
+        if name in ("submit", "wake"):
+            cmd.add_argument("--force-starter", action="store_true",
+                             help="start despite a live supervisor "
+                                  "starter lock (driver contract 0.1.23)")
 
     args = parser.parse_args(argv)
     # --directory walks up to the nearest project root (driver contract 0.1.22)
     args.directory = joblib.configlib.find_project_root(Path(args.directory))
     try:
         if args.command == "submit":
-            result = submit(Path(args.directory), args.id)
+            result = submit(Path(args.directory), args.id,
+                            force=args.force_starter)
         elif args.command == "status":
             result = status(Path(args.directory), args.job_id, args.run_id)
         elif args.command == "resolve":
@@ -591,7 +736,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "cancel":
             result = cancel(Path(args.directory), args.job_id, args.run_id)
         elif args.command == "wake":
-            result = wake(Path(args.directory), args.job_id)
+            result = wake(Path(args.directory), args.job_id,
+                          force=args.force_starter)
         elif args.command == "account":
             result = account(Path(args.directory), args.run_id,
                              turns=args.turns, tokens=args.tokens)

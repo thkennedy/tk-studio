@@ -46,7 +46,7 @@ location: src/tick.ts tickJob / src/queue.ts pacing; src/server.ts tk_job
 severity: medium
 reason: The pacer reads only the queue database (Story 21.5, AC3). Studio runs started outside the queue (the MCP `tk_job` `wake`/`submit`, or `jobrun.py` by hand) never appear there, so a tick can wake a second run of the job while one of those is live, and `hint_seconds` does not count from its end. Suggested fix: route MCP `tk_job wake`/`submit` through the queue, or have the pacer see external studio runs. Documented in README.md under "Guards and the pacer".
 affects: none
-status: open
+status: closed — story 28-6, 2026-10-17: the supervisor's `starter.lock` (Story 27.2) is now honoured by the plugin. `jobrun.py submit`/`wake` refuse with `StarterLocked` and mint nothing while a live queue lock names the checkout (live = the supervisor's pid running, or `since` under `STARTER_LOCK_STALE_S` = 900 s), unless `--force-starter` or `TK_STUDIO_IGNORE_STARTER_LOCK=1`. The MCP `tk_job` route inherits the refusal. `serve` rewrites every served project's lock every 60 s with a fresh `since` (`watchStarterLocks`), and the queue's own `wake`/`submit` carry `--force-starter`. A forced hand start is still recorded `external` (Story 27.2). Driver contract 0.1.23 §4. Evidence: plugins/tk-studio/lib/tests/test_jobrun.py `StarterLockTests`; test/sandbox.test.ts "Story 28.6 (DW-6): serve refreshes …"; test/command-line.test.ts "Story 28.6: the queue's own verbs carry --force-starter …". Previously: open
 
 ### DW-7: DW-3's signal clause is narrower than stated
 origin: spec-review 21-5 follow-up (consult)

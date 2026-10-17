@@ -10,6 +10,7 @@ import { claudeBin, studioRoot, StudioRootMissing } from "../src/env";
 import { END_HYGIENE_EVENTS } from "../src/hygiene";
 import { checkoutKey, type QueueEvent, Queue } from "../src/queue";
 import { STARTER } from "../src/sandbox";
+import { ConnectorClient } from "../src/client";
 import { runBranch } from "../src/worktree";
 import {
   buildWorkerCommand, buildWorkerEnv, CONTINUATION_PROMPT, HostBypassRefused, invokeSkill, MISSING_STATUS_BLOCK, type Spawner, toVmPath,
@@ -274,6 +275,54 @@ describe("guard timeouts: --timeout-cap-s caps the skill invocation only", () =>
     expect(summary).toMatchObject({ ok: true, state: "complete", run_id: "s-20260928T101010Z" });
     expect(invoked).toEqual([CAP]);
   });
+});
+
+describe("Story 28.6: the queue's own verbs carry --force-starter; the MCP tk_job route carries none", () => {
+  const validated = (defn: Record<string, any>, target: "skill" | "core"): Validated =>
+    ({ jobId: defn.id, root: "proj", projectId: "p", defn, target, ...guardsFor(defn) });
+  const recording = (answer: (args: string[]) => Record<string, any>) => {
+    const seen: string[][] = [];
+    return { seen, runner: async (_root: string, args: string[]) => { seen.push(args); return answer(args); } };
+  };
+
+  test("startRun: the run's `wake` and `submit` argv end in --force-starter; `status` carries none", async () => {
+    const loop = recording((a) => a[0] === "status" ? { runs: [] } : { woken: true, run_id: "c-20261017T101010Z", state: "complete" });
+    await startRun(validated({ id: "c", trigger: "loop", target: { core: "x" }, guards: { max_wall_clock_seconds: 60 } }, "core"), () => {}, loop.runner);
+    expect(loop.seen.find((a) => a[0] === "wake")).toEqual(["wake", "--directory", "proj", "--job-id", "c", "--force-starter"]);
+    const once = recording((a) => a[0] === "status" ? { runs: [] } : { accepted: true, run_id: "s-20261017T101010Z", state: "queued",
+      directive: { kind: "invoke-skill", skill: "tk-studio-activate", payload: {} } });
+    await startRun(validated({ id: "s", trigger: "one-shot", target: { skill: "tk-studio-activate" }, guards: { max_wall_clock_seconds: 60 } }, "skill"), () => {}, once.runner);
+    expect(once.seen.find((a) => a[0] === "submit")).toEqual(["submit", "--directory", "proj", "--id", "s", "--force-starter"]);
+    for (const a of [...loop.seen, ...once.seen].filter((x) => x[0] === "status")) expect(a).not.toContain("--force-starter");
+  });
+
+  test("MCP tk_job submit and wake: the jobrun argv carries no --force-starter (a hand start, refused like one)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tk-sup-mcp-argv-"));
+    const bin = join(dir, "bin");
+    mkdirSync(bin);
+    const log = join(dir, "uv-calls.jsonl");
+    fakeBin(join(bin, "uv"), [
+      `const { appendFileSync } = require("node:fs");`,
+      `appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + "\\n");`,
+      `console.log(JSON.stringify({ ok: true, accepted: false, woken: false, run_id: null, reason: "fake" }));`,
+    ].join("\n"));
+    const project = mkdtempSync(join(tmpdir(), "tk-sup-mcp-proj-"));
+    const client = new ConnectorClient({ TK_STUDIO_ROOT: resolve(REPO, "..", ".."), PATH: `${bin}${delimiter}${process.env.PATH ?? ""}` });
+    try {
+      await client.init("story-28-6-test");
+      const sub = await client.callTool("tk_job", { verb: "submit", directory: project, id: "studio-health" }, 60_000);
+      expect(sub.toolError).toBeUndefined();
+      const woke = await client.callTool("tk_job", { verb: "wake", directory: project, job_id: "studio-health" }, 60_000);
+      expect(woke.toolError).toBeUndefined();
+    } finally { client.close(); }
+    const calls: string[][] = readFileSync(log, "utf-8").trim().split("\n").map((l) => JSON.parse(l));
+    const verbs = calls.map((argv) => argv.slice(argv.findIndex((a) => a.endsWith("jobrun.py")) + 1));
+    expect(verbs).toEqual([
+      ["submit", "--directory", project, "--id", "studio-health"],
+      ["wake", "--directory", project, "--job-id", "studio-health"],
+    ]);
+    for (const argv of calls) expect(argv).not.toContain("--force-starter");
+  }, 60_000);
 });
 
 describe("finishRun: model/effort per §5, tier forwarded, cost to finish (AC3/AC4)", () => {
