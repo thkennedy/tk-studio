@@ -15,7 +15,7 @@ You are headless (AD-11): never ask, never wait. Every uncertainty is resolved h
 - `_bmad-output/planning-artifacts/epics.md`: the `## Epic <N>:` narrative, which carries scope, rulings and the repo each story targets, plus every `### Story <N>.<M>:` section.
 - `_bmad-output/implementation-artifacts/replan-queue.md`, when it exists.
 - `.tk-studio/budget-bands.yaml`, for the S/M/L bands. It is operator-tunable, so never hard-code its numbers.
-- The studio's architecture spine (`$TK_STUDIO_ROOT/_bmad-output/planning-artifacts/architecture/architecture-tk-studio-2026-07-26/ARCHITECTURE-SPINE.md`) and `$TK_STUDIO_ROOT/plugins/tk-studio/contracts/driver-contract.md`, the contract this repo consumes. Read them for constraints; do not re-derive the plan from them.
+- The architecture spine (`../../_bmad-output/planning-artifacts/architecture/architecture-tk-studio-2026-07-26/ARCHITECTURE-SPINE.md`) and `../../plugins/tk-studio/contracts/driver-contract.md`. Read them for constraints; do not re-derive the plan from them.
 
 ## 1. Bootstrap: transcribe the epic, then plan its first story
 

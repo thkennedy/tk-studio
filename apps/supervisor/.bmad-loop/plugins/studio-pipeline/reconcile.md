@@ -1,6 +1,6 @@
 # Reconcile: evaluate a unit's deviations and record exactly one verdict
 
-Ported from The Universe Awaits (which took it from ClaudeOS `agentic-pipeline-2026-09-02.md` §4, step 6.4) and adapted to tk-studio-supervisor, a driver-contract consumer outside the studio plugin (AD-2). `$TK_STUDIO_ROOT` is the tk-studio checkout (read-only in the engine sandbox).
+Ported from The Universe Awaits (which took it from ClaudeOS `agentic-pipeline-2026-09-02.md` §4, step 6.4) and adapted to supervisor.
 
 Your first job is to **evaluate, not rewrite**. Most deviations change nothing downstream. Only a verdict that names affected later work leads to any change. Even then, you never edit a story that is in flight, and you never edit `epics.md`: changing the plan is the operator's `bmad-correct-course`.
 
@@ -43,9 +43,9 @@ Read only what exists, in this order:
    - a Given/When/Then that no longer holds
    - an epic narrative that names this story's outcome
 4. The binding constraints:
-   - the studio's architecture spine (`$TK_STUDIO_ROOT/_bmad-output/planning-artifacts/architecture/architecture-tk-studio-2026-07-26/ARCHITECTURE-SPINE.md`, AD-1 … AD-20)
-   - `$TK_STUDIO_ROOT/plugins/tk-studio/contracts/driver-contract.md` and the schemas beside it
-   - the rulings recorded in the planning passes under `$TK_STUDIO_ROOT/_bmad-output/planning-artifacts/briefs/`
+   - the architecture spine (`../../_bmad-output/planning-artifacts/architecture/architecture-tk-studio-2026-07-26/ARCHITECTURE-SPINE.md`, AD-1 … AD-20)
+   - `../../plugins/tk-studio/contracts/driver-contract.md` and the schemas beside it
+   - the rulings recorded in the planning passes under `_bmad-output/planning-artifacts/briefs/`
 5. `_bmad-output/implementation-artifacts/replan-queue.md`, if it exists.
 
 For each deviation, decide whether a later story was planned against the thing that changed. Cite the story key and the sentence that no longer holds. A deviation that touches nothing later work relies on is **not** affecting, however large it looks.
