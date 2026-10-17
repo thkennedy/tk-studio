@@ -1064,6 +1064,11 @@ class Entrypoint(unittest.TestCase):
         # The released version moves with every cli cut (cli--vX.Y.Z); the motion bumps it here first.
         self.assertRegex(text, r'(?m)^version = "\d+\.\d+\.\d+"$')
         self.assertIn('tk-studio = "tk_studio_cli.main:main"', text)
+        # Hole 41: the package reports the same version (from the installed distribution's metadata,
+        # else this pyproject), so a launcher never schedules its own install against the roster forever.
+        import re as _re
+        import tk_studio_cli
+        self.assertEqual(tk_studio_cli.__version__, _re.search(r'(?m)^version = "([^"]+)"$', text).group(1))
 
 
 class RepoSettings(unittest.TestCase):
