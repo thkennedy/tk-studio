@@ -1,0 +1,33 @@
+---
+id: TASK-106
+title: "The Office Projection: Semantic States, Progress and Its Stream"
+status: To Do
+assignee: []
+created_date: '2026-10-17 21:14'
+labels:
+  - ST-106
+milestone: One Account, the Registry, the Projection
+dependencies: []
+---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+As the studio web (and the operator watching),
+I want each agent's state and each story's progress derived from the queue's events and the engine's journal, and streamed,
+So that the office of EP-30 renders a live picture without reading raw events (§7.3, §6.3).
+
+**Acceptance Criteria:**
+
+**Given** the queue's events of a run and the engine's journal in the run's served root (`.bmad-loop/runs/<engine run id>/` at the bmad-loop pin of `bmad.lock`: the journal and run files the engine writes; the planner's Code Map names the exact files and kinds, read from the host side of the worktrees mount, never through the engine)
+**When** the supervisor projects them
+**Then** each agent of the registry has one of `offline`, `idle`, `thinking`, `reading`, `typing`, `running`, `waiting-for-human`, `blocked`, with the overlays `done` and `failed` per story, by one mapping table in `apps/supervisor/src/office.ts` (queued or lock-wait is `idle`; the launch and planner legs `thinking`; a dev session's implementer `typing` and its reviewers `reading`; the verify and host-verify legs `running`; `paused`, `awaiting-ruling` and an `escalate` `waiting-for-human`; a `blocked` run `blocked`; no run `offline`); promotion is instant, demotion goes through a grace timer (20 s, injectable), and `waiting-for-human` never expires on its own
+
+**Given** a run's stories (the spec folder's manifest at the run's base, the denominator fixed when the launch validated it)
+**When** the journal's terminal kinds land (a story landed, failed, deferred)
+**Then** progress per story and per epic is `done / total` with the current story named, and the quote band of §7.1 is not computed here (EP-32's)
+
+**Given** a consumer
+**When** it reads `GET /office` (a snapshot: the agents with their states, the live runs with story and epic progress, the time) or opens `GET /office/events` with `Accept: text/event-stream`
+**Then** the stream sends the snapshot first, then one event per state or progress change (`office.agent`, `office.progress`, `office.run`), honours `Last-Event-ID` (a reconnect replays from that seq, the snapshot again when it is too old), sends a heartbeat comment every 10 s, and closes cleanly on the client's close; the raw `GET /events` stream is unchanged; `bun test` pins the mapping table against recorded event and journal fixtures, the grace timer with an injected clock, the snapshot-then-deltas order, the replay and the heartbeat; the read-only status page shows each live run's agent states as text
+<!-- SECTION:DESCRIPTION:END -->

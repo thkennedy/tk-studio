@@ -26,6 +26,7 @@ vcs: git
 jobs:
   - research-ecosystem
   - run-epic-28
+  - run-epic-29
 
 # Role-keyed working sets (AD-17) — recorded only on explicit
 # confirmation via tk-studio-onboard; one entry per role.
