@@ -1,6 +1,6 @@
 [project]
 name = "tk-studio-cli"
-version = "0.1.0"
+version = "0.1.1"
 description = "The tk-studio meta-CLI: installs and updates the studio from the committed roster (AD-21)."
 requires-python = ">=3.10"
 dependencies = []
