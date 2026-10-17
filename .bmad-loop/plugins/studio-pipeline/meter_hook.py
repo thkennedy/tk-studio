@@ -7,8 +7,11 @@ BMAD_LOOP_STORY_KEY in the environment. This hook runs where the engine runs
 transcripts; the studio meter copies them into the run dir, prices them and
 records one observation.
 
-The studio root is TK_STUDIO_ROOT, else BMAD_LOOP_REPO_ROOT when it holds
-plugins/tk-studio/lib/meter.py. The meter's JSON is printed as-is. The hook is
+The studio root is TK_STUDIO_ROOT, else the nearest ancestor-or-self of
+BMAD_LOOP_REPO_ROOT holding plugins/tk-studio/lib/meter.py — so a nested
+studio project (apps/supervisor) finds the outer checkout without
+TK_STUDIO_ROOT (driver contract 0.1.22). The walk-up is inlined: this hook
+must not import the plugin's config. The meter's JSON is printed as-is. The hook is
 declared blocking=false and exits 0 on every path, so a meter failure never
 blocks the run. Stdlib only: it runs under `uv run --no-project python`.
 """
@@ -29,8 +32,11 @@ def _studio_root(env) -> Path | None:
     if explicit:
         return Path(explicit)
     repo = env.get("BMAD_LOOP_REPO_ROOT")
-    if repo and (Path(repo) / METER).is_file():
-        return Path(repo)
+    if repo:
+        start = Path(repo).resolve()
+        for candidate in (start, *start.parents):
+            if (candidate / METER).is_file():
+                return candidate
     return None
 
 

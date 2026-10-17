@@ -1,0 +1,3 @@
+# conformance fixture: a nested studio project inside the outer one.
+project_id: inner
+vcs: git

@@ -421,17 +421,9 @@ def load_instances(project_root: Path) -> dict:
 # --------------------------------------------------------------- run state
 
 def project_key(project_root: Path) -> str:
-    """The project's one identity (AD-20): explicit project_id from tracked
-    config, else the root basename — same rule as the registry."""
-    root = Path(project_root).resolve()
-    tracked = root / ".tk-studio" / configlib.TRACKED_NAME
-    pid = None
-    if tracked.is_file():
-        try:
-            pid = miniyaml.load(tracked).get("project_id")
-        except miniyaml.MiniYamlError:
-            pid = None
-    return storelib.safe_name(str(pid) if pid else root.name)
+    """The project's one identity (AD-20) — a thin alias of the config rule
+    (config.project_key), kept so existing callers do not move."""
+    return configlib.project_key(project_root)
 
 
 def runs_root(key: str) -> Path:

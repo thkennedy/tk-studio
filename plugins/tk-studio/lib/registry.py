@@ -11,11 +11,15 @@ Writes are whole-file atomic (temp + os.replace) under an exclusive OS lock
 on a sidecar lock file, so a concurrent register and amend cannot lose each
 other's entries. A project whose key (explicit project_id or root basename)
 matches an existing entry with a *different root* fails loudly demanding an
-explicit project_id — never a silent second identity.
+explicit project_id — never a silent second identity. Without --project-id,
+`register` on a root already registered re-affirms that entry under its
+existing key (unchanged, or amended when resolved fields changed); with an
+explicit --project-id naming a different key it exits 2 — use or amend that
+entry instead.
 
 CLI:
   uv run registry.py register --directory DIR --writer onboard|activate [--project-id ID]
-  uv run registry.py amend --project-id ID --writer onboard|activate [--vault-link STATE [--detail TEXT]]
+  uv run registry.py amend --project-id ID --writer onboard|activate [--vault-link STATE [--detail TEXT]] [--root DIR]
   uv run registry.py show [--project-id ID]
   uv run registry.py validate
 
@@ -167,13 +171,25 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _root_holder(data: dict, root: Path, key: str) -> str | None:
+    """The key of another entry already registered at `root`, or None."""
+    for other, entry in data["projects"].items():
+        if other != key and Path(entry["root"]) == root:
+            return other
+    return None
+
+
 def register(project_root: Path, writer: str, project_id: str | None = None) -> dict:
     """Register (or re-affirm) a project. Returns {project_id, entry, action}."""
     _check_writer(writer)
     root = Path(project_root).resolve()
     if not root.is_dir():
         raise RegistryError(f"project root {root} is not a directory")
-    key = project_id or root.name
+    # --project-id, else the tracked config's project_id (the config rule,
+    # driver contract 0.1.22), else the basename. The root itself is taken
+    # literally: register is a creation verb and never walks up.
+    key = project_id or (configlib.project_key(root)
+                         if configlib.tracked_project_id(root) else root.name)
 
     def _resolved(dotted: str, fallback: str) -> str:
         try:
@@ -183,13 +199,34 @@ def register(project_root: Path, writer: str, project_id: str | None = None) -> 
 
     with _write_lock():
         data = load_registry()
+        # Without --project-id, a root already registered is re-affirmed under
+        # its existing key (onboard's register step is idempotent).
+        if project_id is None:
+            holders = [k for k, e in data["projects"].items()
+                       if Path(e["root"]) == root]
+            if len(holders) == 1:
+                key = holders[0]
         existing = data["projects"].get(key)
         same = existing is not None and Path(existing["root"]) == root
         if existing is not None and not same:
+            if project_id is None and configlib.tracked_project_id(root):
+                # the key is this root's own tracked identity: a second key
+                # would split it (AD-20), so the fix is a re-point.
+                raise RegistryError(
+                    f"project_id '{key}' is already registered for "
+                    f"{existing['root']} — one project, one identity (AD-20): "
+                    f"re-point it with 'registry.py amend --project-id {key} "
+                    f"--writer {writer} --root {root}'")
             raise RegistryError(
                 f"project_id '{key}' is already registered for {existing['root']} — "
                 f"one project, one identity (AD-20): re-run with an explicit "
                 f"--project-id for {root}")
+        holder = _root_holder(data, root, key)
+        if holder is not None:
+            raise RegistryError(
+                f"{root} is already registered as '{holder}' — one project, one "
+                f"identity (AD-20): never a second key for the same root; use "
+                f"'{holder}' (or amend that entry) instead of '{key}'")
         entry = {
             "root": str(root),
             "vcs": _resolved("vcs", "git"),
@@ -211,13 +248,38 @@ def register(project_root: Path, writer: str, project_id: str | None = None) -> 
 
 
 def amend(project_id: str, writer: str, vault_link: str | None = None,
-          vault_link_detail: str | None = None) -> dict:
-    """Amend an existing entry's mutable state (vault-link, currently)."""
+          vault_link_detail: str | None = None, root: Path | None = None) -> dict:
+    """Amend an existing entry's mutable state: vault-link, and `root` to
+    re-point an existing identity (e.g. at a nested studio project, Story
+    28.2). A new root must hold `.tk-studio/config.yaml` whose project_id (the
+    config.py project_key rule) is this identity; it is taken literally."""
     _check_writer(writer)
+    new_root = None
+    if root is not None:
+        new_root = Path(root).resolve()
+        # the config.py rule: the per-user store never marks a project root
+        if not configlib._holds_config(new_root):
+            raise RegistryError(
+                f"cannot re-point '{project_id}' at {new_root}: no studio "
+                f"project config (.tk-studio/{configlib.TRACKED_NAME} outside the "
+                f"per-user store) there — onboard it first")
+        raw = configlib.tracked_project_id(new_root) or new_root.name
+        found = configlib.project_key(new_root)
+        if project_id not in (raw, found):
+            raise RegistryError(
+                f"cannot re-point '{project_id}' at {new_root}: its project_id "
+                f"is '{found}' — one project, one identity (AD-20)")
     with _write_lock():
         data = load_registry()
         if project_id not in data["projects"]:
             raise RegistryError(f"project '{project_id}' is not registered")
+        if new_root is not None:
+            holder = _root_holder(data, new_root, project_id)
+            if holder is not None:
+                raise RegistryError(
+                    f"cannot re-point '{project_id}' at {new_root}: that root is "
+                    f"already registered as '{holder}' — one project, one "
+                    f"identity (AD-20)")
         entry = dict(data["projects"][project_id])
         if vault_link is not None:
             if vault_link not in VAULT_LINK_STATES:
@@ -229,6 +291,8 @@ def amend(project_id: str, writer: str, vault_link: str | None = None,
                 entry["vault_link_detail"] = vault_link_detail
             else:
                 entry.pop("vault_link_detail", None)
+        if new_root is not None:
+            entry["root"] = str(new_root)
         entry["updated_at"] = _now()
         data["projects"][project_id] = entry
         _atomic_replace(data)
@@ -249,13 +313,16 @@ def main(argv: list[str] | None = None) -> int:
     reg.add_argument("--directory", required=True, help="project root")
     reg.add_argument("--writer", required=True,
                      help="writing surface — onboard or activate only (AD-20)")
-    reg.add_argument("--project-id", help="explicit stable identity (basename default)")
+    reg.add_argument("--project-id", help="explicit stable identity (default: the "
+                     "tracked config's project_id, else the basename)")
 
     amd = sub.add_parser("amend")
     amd.add_argument("--project-id", required=True)
     amd.add_argument("--writer", required=True)
     amd.add_argument("--vault-link", choices=list(VAULT_LINK_STATES))
     amd.add_argument("--detail", help="vault-link detail ('' clears it)")
+    amd.add_argument("--root", help="re-point the identity at DIR (must hold "
+                     ".tk-studio/config.yaml with this project_id)")
 
     show = sub.add_parser("show")
     show.add_argument("--project-id")
@@ -272,7 +339,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "amend":
             result = amend(args.project_id, writer=args.writer,
                            vault_link=args.vault_link,
-                           vault_link_detail=args.detail)
+                           vault_link_detail=args.detail,
+                           root=Path(args.root) if args.root else None)
             print(json.dumps({"ok": True, **result}, ensure_ascii=False, indent=2))
         elif args.command == "show":
             if args.project_id:

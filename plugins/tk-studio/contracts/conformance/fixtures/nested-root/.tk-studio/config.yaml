@@ -1,0 +1,3 @@
+# conformance fixture: the outer studio project (driver contract 0.1.22).
+project_id: outer
+vcs: git

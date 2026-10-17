@@ -550,7 +550,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--graceful", action="store_true")
 
     args = parser.parse_args(argv)
-    root = Path(args.directory)
+    # --directory walks up to the nearest project root (driver contract
+    # 0.1.22): a supervisor epic launches against the nested root.
+    root = joblib.configlib.find_project_root(Path(args.directory))
     try:
         if args.command in ("check", "start"):
             spec = args.spec

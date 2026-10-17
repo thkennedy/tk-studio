@@ -552,7 +552,8 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("submit", "status", "resolve", "cancel", "wake", "account",
                  "finish"):
         cmd = sub.add_parser(name)
-        cmd.add_argument("--directory", required=True, help="project root")
+        cmd.add_argument("--directory", required=True,
+                         help="project root (walks up to the nearest)")
         if name == "submit":
             cmd.add_argument("--id", required=True, help="job id")
         elif name == "resolve":
@@ -578,6 +579,8 @@ def main(argv: list[str] | None = None) -> int:
                                       "--output-format json result)")
 
     args = parser.parse_args(argv)
+    # --directory walks up to the nearest project root (driver contract 0.1.22)
+    args.directory = joblib.configlib.find_project_root(Path(args.directory))
     try:
         if args.command == "submit":
             result = submit(Path(args.directory), args.id)
