@@ -1,9 +1,10 @@
 ---
 id: TASK-96
 title: A Host-Tier Verify Leg Runs Before Any PR Opens
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-15 19:21'
+updated_date: '2026-10-16 20:50'
 labels:
   - ST-096
 milestone: "The Service Owns Lifetime, Part 2: The Supervisor"

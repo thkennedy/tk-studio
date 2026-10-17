@@ -1,9 +1,10 @@
 ---
 id: TASK-88
 title: Launch Ends Every Path with the Block and Owns Its Bootstrap
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-15 19:21'
+updated_date: '2026-10-16 20:50'
 labels:
   - ST-088
 milestone: "The Service Owns Lifetime, Part 1: The Studio Side"
