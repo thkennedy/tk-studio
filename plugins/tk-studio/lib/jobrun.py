@@ -185,8 +185,13 @@ def _pid_alive(pid: int, platform: str | None = None) -> bool:
 def _same_checkout(lock_checkout: str, root: Path,
                    platform: str | None = None) -> bool:
     """Canonical absolute paths compared, case-folded on win32."""
-    a = os.path.realpath(lock_checkout)
-    b = os.path.realpath(str(root))
+    if platform is not None and platform != sys.platform:
+        # A simulated platform (the suite's cross-platform cases): compare the
+        # spellings alone — realpath would ask this host's filesystem, which on
+        # Windows answers the on-disk casing for any spelling (holes 11/12/22).
+        a, b = os.path.normpath(lock_checkout), os.path.normpath(str(root))
+    else:
+        a, b = os.path.realpath(lock_checkout), os.path.realpath(str(root))
     if (platform or sys.platform) == "win32":
         a, b = ntpath.normcase(a), ntpath.normcase(b)
     return a == b
