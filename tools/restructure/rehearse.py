@@ -47,8 +47,13 @@ LIVE_ROOTS = ("/c/github/tk-studio", "/c/github/tk-studio-supervisor")
 EXPECTED_HOOKS = 4
 DEFAULT_TIMEOUT = 1800
 AGENT_PC_NESTED = r"C:\GitHub\tk-studio\apps\supervisor"
+# Never inherited by a child: git's repository overrides, Claude's project dir, and the
+# supervisor's notifier settings — under the operator's real environment the supervisor's
+# `bun test` sent every notifier test's message to Tim's Telegram (loop hole 31, 2026-10-17).
 STRIPPED_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
-                "GIT_OBJECT_DIRECTORY", "CLAUDE_PROJECT_DIR")
+                "GIT_OBJECT_DIRECTORY", "CLAUDE_PROJECT_DIR",
+                "TK_SUPERVISOR_NOTIFY", "TK_SUPERVISOR_TELEGRAM_TOKEN", "TK_SUPERVISOR_TELEGRAM_CHAT",
+                "TK_SUPERVISOR_NTFY_URL")
 DRIFT_NOTE = ("drift_check emits its own drift/activation measurement event to the per-user store "
               "(~/.tk-studio); this is the check's own measurement, not a rehearsal write.")
 _PROJECT_DIR = re.compile(r"\$\{CLAUDE_PROJECT_DIR\}|\$CLAUDE_PROJECT_DIR")

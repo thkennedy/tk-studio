@@ -817,6 +817,20 @@ class RehearsalCase(unittest.TestCase):
                     "GIT_OBJECT_DIRECTORY", "CLAUDE_PROJECT_DIR"):
             self.assertNotIn(var, env)
 
+    def test_child_env_strips_the_supervisor_notifier(self):
+        # loop hole 31: the supervisor's bun test under the operator's real environment sent
+        # every notifier test's message to Telegram; a child of the rehearsal never sees it
+        with mock.patch.dict(os.environ, {"TK_SUPERVISOR_NOTIFY": "telegram",
+                                          "TK_SUPERVISOR_TELEGRAM_TOKEN": "t",
+                                          "TK_SUPERVISOR_TELEGRAM_CHAT": "c",
+                                          "TK_SUPERVISOR_NTFY_URL": "https://ntfy.example/x",
+                                          "TK_SUPERVISOR_WORK": "/keep"}):
+            env = rehearse.child_env()
+        for var in ("TK_SUPERVISOR_NOTIFY", "TK_SUPERVISOR_TELEGRAM_TOKEN",
+                    "TK_SUPERVISOR_TELEGRAM_CHAT", "TK_SUPERVISOR_NTFY_URL"):
+            self.assertNotIn(var, env)
+        self.assertEqual(env.get("TK_SUPERVISOR_WORK"), "/keep")
+
     def test_argv_only(self):
         src = SCRIPT.read_text(encoding="utf-8")
         self.assertNotIn("shell=True", src)
