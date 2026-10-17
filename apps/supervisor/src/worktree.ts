@@ -62,8 +62,8 @@ import { dirname, join, resolve } from "node:path";
 import { ghBin, pluginRoot, WorkDirMissing, workDir } from "./env";
 import { canonicalPr, isWithin } from "./hygiene";
 import { hostVerify, isRed, prSection, redReason, type HostVerifyResult } from "./hostverify";
-import { accountedCostOf, isTerminal, RunTerminal, servedRoot, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
-import { releasePin, sameStart, type SandboxDeps } from "./sandbox";
+import { accountedCostOf, isTerminal, RunTerminal, servedRoot, type EngineWhere, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
+import { releasePin, sameStart, vmLaunchStatus, type SandboxDeps } from "./sandbox";
 import { lastJsonObject, runJobVerb, runProcess, runUv, toVmPath, type RunResult, type Tier } from "./server";
 
 type Env = Record<string, string | undefined>;
@@ -85,8 +85,12 @@ export interface WorktreeDeps {
   sbx?: SandboxDeps;
 }
 
+/** The `sbx` seams of a worktree run (the pin's env and the injected runner), for the pin, the release and
+ * the in-VM engine probe (hole 38). */
+const sbxOf = (deps: WorktreeDeps): SandboxDeps => ({ ...(deps.env ? { env: deps.env } : {}), ...(deps.sbx ?? {}) });
+
 /** Story 27.2: the deferred `ended` releases the run's pin (`sbx stop`, when no other run records its sandbox). */
-const release = (queue: Queue, runId: string, deps: WorktreeDeps) => releasePin(queue, runId, { ...(deps.env ? { env: deps.env } : {}), ...(deps.sbx ?? {}) });
+const release = (queue: Queue, runId: string, deps: WorktreeDeps) => releasePin(queue, runId, sbxOf(deps));
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 /** Command output for an event: URL userinfo redacted, clipped. */
@@ -589,10 +593,15 @@ export type EnginePhase = { phase: "ended" | "paused" | "running" | "unknown"; d
 /** `launch.py status --directory <worktree> --run-id <id>`: ended (a terminal `run.status`), paused
  * (`paused_stage`/`paused_reason` on a live run, with `paused_story_key` when the engine names it), running,
  * or unknown (the probe failed). */
-export async function engineStatus(worktree: string, engineRunId: string, deps: WorktreeDeps = {}): Promise<EnginePhase> {
+export async function engineStatus(worktree: string, engineRunId: string, deps: WorktreeDeps = {}, where?: EngineWhere): Promise<EnginePhase> {
   let res: RunResult;
-  try { res = await uvRunner(deps)(worktree, studioScript(deps, "lib", "launch.py"), ["status", "--directory", worktree, "--run-id", engineRunId], 120); }
-  catch (e) { return { phase: "unknown", detail: { error: clip(message(e)) } }; }
+  // Hole 38: an sbx run's engine lives in its sandbox, where bmad-loop is; the host has none by design.
+  const sandbox = where?.tier === "sbx" && where.sandbox ? where.sandbox : null;
+  try {
+    res = sandbox
+      ? await vmLaunchStatus(sandbox, worktree, engineRunId, sbxOf(deps))
+      : await uvRunner(deps)(worktree, studioScript(deps, "lib", "launch.py"), ["status", "--directory", worktree, "--run-id", engineRunId], 120);
+  } catch (e) { return { phase: "unknown", detail: { error: clip(message(e)) } }; }
   const out = lastJsonObject(res.stdout) as Record<string, any> | null;
   const run = out?.ok === true && out.run && typeof out.run === "object" ? out.run as Record<string, unknown> : null;
   if (!run) return { phase: "unknown", detail: { error: out?.error ? clip(String(out.error)) : failed(res) } };
@@ -683,7 +692,7 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
       }
       // Its worktree gone with no pending record (a close-out whose transition and record both failed):
       // no engine can run there, so it is closed out (from the checkout) and ended, never probed forever.
-      let st: EnginePhase = existsSync(r.worktree!) ? await engineStatus(servedRoot(r)!, r.engine_run_id!, deps)
+      let st: EnginePhase = existsSync(r.worktree!) ? await engineStatus(servedRoot(r)!, r.engine_run_id!, deps, { tier: r.tier, sandbox: r.sandbox })
         : { phase: "ended", detail: { run_id: r.engine_run_id, status: "unknown", gone: "its worktree is gone: no engine can run there" } };
       if (st.phase === "running" || st.phase === "unknown") {
         // An engine the supervisor killed (a tripped guard, its leader dead on KILL) never writes its end:

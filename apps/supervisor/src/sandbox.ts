@@ -87,6 +87,32 @@ export const pgrepArgv = (sb: string): string[] => ["exec", sb, "pgrep", "-a", "
  * name (`=`, as bmad-loop's own tmux backend targets it — never a prefix match). */
 export const agentSessionArgv = (sb: string, engineRunId: string): string[] => ["exec", sb, "tmux", "kill-session", "-t", `=bmad-loop-${engineRunId}`];
 
+// ------------------------------------------------------------ the launch core's status, in the VM (hole 38)
+
+/** `launch.py status` inside the sandbox: `uv` by name (a bare `sbx exec` already carries the VM's PATH with
+ * `~/.local/bin`; where uv lives differs per provisioning), the plugin at `TK_STUDIO_ROOT`'s VM path (both
+ * engine sandboxes mount the checkout at `/c/GitHub/tk-studio`), the root in VM form. Argv only, no shell. */
+export const launchStatusArgv = (sb: string, vmPluginRoot: string, vmRoot: string, engineRunId: string | null): string[] =>
+  ["exec", sb, "uv", "run", `${vmPluginRoot}/lib/launch.py`, "status", "--directory", vmRoot, ...(engineRunId ? ["--run-id", engineRunId] : [])];
+
+/** Hole 38: the launch core's `status` answers where the engine lives. The host has no bmad-loop by design
+ * (engines live only in Docker Sandboxes), so for an sbx run `launch.py status --directory <root>` runs inside
+ * the run's sandbox through `sbx exec`; `root` is the host path of the served root (mapped with `toVmPath`).
+ * Throws naming the failure (the caller counts a failed probe live). */
+export async function vmLaunchStatus(sb: string, root: string, engineRunId: string | null, deps: SandboxDeps = {}): Promise<RunResult> {
+  const env = deps.env ?? process.env;
+  // The plugin's VM path is joined with `/` after the mapping: `join` would give the host's separators.
+  return call(deps, launchStatusArgv(sb, `${toVmPath(studioRootOf(env)).replace(/\/+$/, "")}/plugins/tk-studio`, toVmPath(root), engineRunId), 120);
+}
+
+/** `TK_STUDIO_ROOT` as the sandbox reads it (`pluginRoot` without the env.ts import: sandbox.ts is imported by
+ * queue.ts, which env.ts never is). */
+function studioRootOf(env: Env): string {
+  const root = env.TK_STUDIO_ROOT?.trim();
+  if (!root) throw new Error("TK_STUDIO_ROOT is not set: the launch core cannot be located for the in-VM probe");
+  return root;
+}
+
 /** The hold is bounded only by the engine pid it tails: `runProcess` takes a timeout, so the hold is given
  * the longest one a timer can carry (~24.8 days) — never a guard on the engine's life. */
 export const HOLD_TIMEOUT_S = Math.floor((2 ** 31 - 1) / 1000);

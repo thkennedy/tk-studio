@@ -29,6 +29,11 @@ const IDENTITY = { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", 
 let sbx: ReturnType<typeof fakeSbx>;
 let studio: ReturnType<typeof fakeStudioRoot>;
 beforeAll(() => { sbx = fakeSbx(); studio = fakeStudioRoot(); });
+
+/** Hole 38: an sbx run's engine status (`launch.py status`) is read inside its sandbox, so the fake `sbx`
+ * answers it; a test's host `uv` override keeps answering a host-tier run. `"fail"`: the probe fails. */
+const statusAnswer = (run: Record<string, unknown> | "fail") =>
+  sbx.answer({ ...sbx.answers(), launch_status: run === "fail" ? "fail" : { ok: true, runs: [], live: [], run } });
 afterAll(() => {
   // Every `sbx` call was argv only: no shell, no `-c` string; the pin was never released by the pass.
   for (const c of sbx.calls()) for (const a of c.argv) expect(["bash", "sh", "-c", "-lc", "--force"]).not.toContain(a);
@@ -672,6 +677,7 @@ describe("AC3: a story with no landed work is left for the resume", () => {
       expect(launched.end).toMatchObject({ state: "complete" }); // the launch's recorded end, carried over: never the answer
       // The engine probe answers the resumed engine's own end; the studio `finish` is recorded.
       const finishes: string[][] = [];
+      statusAnswer({ run_id: E1, status });
       const uv = async (root: string, script: string, args: string[], timeoutS?: number): Promise<RunResult> =>
         script.endsWith("launch.py") && args[0] === "status"
           ? { exit: 0, stdout: JSON.stringify({ ok: true, run: { run_id: E1, status } }), stderr: "" }
@@ -700,6 +706,7 @@ describe("AC3: a story with no landed work is left for the resume", () => {
       expect(launched.resumed).toBeUndefined();
       expect(launched.end).toMatchObject({ state: "complete" }); // the relaunch's recorded end: never the answer
       const finishes: string[][] = [];
+      statusAnswer({ run_id: E2, status });
       const uv = async (root: string, script: string, args: string[], timeoutS?: number): Promise<RunResult> =>
         script.endsWith("launch.py") && args[0] === "status"
           ? { exit: 0, stdout: JSON.stringify({ ok: true, run: { run_id: E2, status } }), stderr: "" }
@@ -732,6 +739,7 @@ describe("AC3: a story with no landed work is left for the resume", () => {
       fx.queue.recordEnginePid(fx.run.run_id, { pid: 6509, start: "125610.0", source: "engine.pid" });
       fx.queue.note(fx.run.run_id, "engine-kill", { why: "test", sandbox: SB, worker: { pid: 6509, start: "125610.0", outcome: "killed" } });
       const finishes: string[][] = [];
+      statusAnswer(probe === "running" ? { run_id: E2, status: "running" } : "fail");
       const uv = async (root: string, script: string, args: string[], timeoutS?: number): Promise<RunResult> =>
         script.endsWith("launch.py") && args[0] === "status"
           ? probe === "running"
@@ -802,9 +810,11 @@ describe("the engine's paused story key reaches the pass through the engine-end 
       const fx = await pausedRun({ verdict: "escalate", paused: false });
       const p = passDeps(fx);
       expect(fx.get().state).toBe("running");
+      const pausedRunStatus = { run_id: E1, status: "running", paused_stage: "escalation", paused_reason: "reconcile asks for a ruling", ...(named ? { paused_story_key: KEY } : {}) };
+      statusAnswer(pausedRunStatus);
       const uv = async (root: string, script: string, args: string[], timeoutS?: number): Promise<RunResult> =>
         script.endsWith("launch.py") && args[0] === "status"
-          ? { exit: 0, stdout: JSON.stringify({ ok: true, run: { run_id: E1, status: "running", paused_stage: "escalation", paused_reason: "reconcile asks for a ruling", ...(named ? { paused_story_key: KEY } : {}) } }), stderr: "" }
+          ? { exit: 0, stdout: JSON.stringify({ ok: true, run: pausedRunStatus }), stderr: "" }
           : p.deps.uv!(root, script, args, timeoutS);
       expect(await sweepEngines(fx.queue, { ...p.deps, uv })).toEqual([fx.run.run_id]);
       expect(fx.get().state).toBe("paused");
