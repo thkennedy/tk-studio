@@ -1,0 +1,18 @@
+{
+  "job_schema_version": 1,
+  "id": "studio-health",
+  "description": "One-shot studio health check for the supervisor (Story 21.1): runs the read-only tk-studio-activate surface headless (drift check, no writes) so wake/submit -> invoke -> finish can be proven from the supervisor CLI. max_runs is a ceiling, not a plan.",
+  "target": {
+    "skill": "tk-studio-activate",
+    "payload": {}
+  },
+  "trigger": "one-shot",
+  "guards": {
+    "max_turns": 20,
+    "max_wall_clock_seconds": 600
+  },
+  "stop": {
+    "max_runs": 1000
+  },
+  "effort": "low"
+}

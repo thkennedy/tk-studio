@@ -35,6 +35,10 @@ Per-plane status: ok | drift | missing | error. Overall:
 --guided additionally emits one onboarding-funnel event per plane with timings
 (the instrumented onboarding funnel, AD-13). This script mutates nothing, ever.
 
+Project root: --directory (default ".") walks up to the nearest ancestor
+holding .tk-studio/config.yaml (driver contract 0.1.22); the JSON carries
+project_root, studio_root (null when unresolved), nested and project_id.
+
 Usage:
   uv run drift_check.py [--directory DIR] [--guided] [--lock PATH] [--marketplace PATH]
                         [--claude-home DIR] [--channel {stable,latest}]
@@ -55,6 +59,7 @@ sys.path.insert(0, str(PLUGIN_ROOT / "lib"))
 
 import basepatch  # noqa: E402
 import bmadlock  # noqa: E402
+import config as configlib  # noqa: E402
 import ledger  # noqa: E402
 import registry  # noqa: E402
 import store  # noqa: E402
@@ -181,6 +186,17 @@ from roster_guard import (  # noqa: E402,F401
     _tool_entry_problems, _url_repo, roster_problems)
 
 
+def _gate_root(directory: Path, plugin_root: Path) -> tuple[Path, str]:
+    """The copy gate x4 is read from: the checked project's own plugin
+    subtree when it carries a manifest (a developer checkout), else the
+    running copy (hole 26: an installed copy's archive record lags one
+    release by construction, so it never describes the checkout's gate)."""
+    own = directory / "plugins" / "tk-studio"
+    if (own / ".claude-plugin" / "plugin.json").is_file():
+        return own, "gate read from the project's plugins/tk-studio"
+    return plugin_root, "gate read from the running copy"
+
+
 def _installer_roster_check(directory: Path, plugin_root: Path,
                             version: str) -> dict:
     """AD-21 sealing: the rosters are read from the checked project
@@ -189,7 +205,17 @@ def _installer_roster_check(directory: Path, plugin_root: Path,
     latest.json only — the channel the release motion writes; stable.json
     trails it by PR and is checked for shape only. The configured channel's
     version comparison is the folder check's (_skills_dir_check, Story 25.3),
-    never this guard's."""
+    never this guard's.
+
+    Gate x4 is a lockstep between files of one repository (plugin.json,
+    released-roster.json's archive and latest.json's plugin entry land
+    together), so the gate's version and archive record are read from the
+    checked project's own plugin subtree when it has one
+    (plugins/tk-studio/.claude-plugin). The running copy is the fallback
+    only: an installed copy is built at the bump commit and so carries the
+    previous release's archive record by construction — read from there, a
+    developer checkout at any release reported gate x4 broken on every box
+    that is not linked to the checkout (loop hole 26, 2026-10-16)."""
     rosters_dir = directory / "tools" / "installer" / "rosters"
     paths = {"stable": rosters_dir / "stable.json",
              "latest": rosters_dir / "latest.json"}
@@ -197,6 +223,18 @@ def _installer_roster_check(directory: Path, plugin_root: Path,
         return {"status": "ok",
                 "detail": (f"no installer roster at {rosters_dir} — roster not "
                            "checkable from this project")}
+    gate_root, gate_note = _gate_root(directory, plugin_root)
+    if gate_root is not plugin_root:
+        try:
+            manifest = json.loads(
+                (gate_root / ".claude-plugin" / "plugin.json")
+                .read_text(encoding="utf-8"))
+            if isinstance(manifest, dict) and manifest.get("version"):
+                version = str(manifest["version"])
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            return {"status": "error",
+                    "detail": (f"{gate_root / '.claude-plugin' / 'plugin.json'} "
+                               f"unreadable: {exc}")}
     rosters: dict = {}
     for channel, path in paths.items():
         if not path.is_file():
@@ -207,7 +245,7 @@ def _installer_roster_check(directory: Path, plugin_root: Path,
             return {"status": "error",
                     "detail": f"installer roster {path} unreadable: {exc}"}
     try:
-        record = json.loads((plugin_root / ".claude-plugin" / "released-roster.json")
+        record = json.loads((gate_root / ".claude-plugin" / "released-roster.json")
                             .read_text(encoding="utf-8"))
         archive = record.get("archive") if isinstance(record, dict) else None
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
@@ -257,8 +295,10 @@ def _installer_roster_check(directory: Path, plugin_root: Path,
     else:
         notes.append(f"no {paths['latest']} — gate x4 not checkable from "
                      "this project")
+    notes.append(gate_note)
     if problems:
-        return {"status": "drift", "detail": "; ".join(problems),
+        return {"status": "drift",
+                "detail": "; ".join(problems) + f" ({gate_note})",
                 "fix": FIX_INSTALLER_ROSTER}
     shipped = "; ".join(
         f"{ch}: {', '.join(sorted(r['components'])) or 'none'}"
@@ -443,7 +483,10 @@ def main(argv: list[str] | None = None) -> int:
                              "stable, the installer's default)")
     args = parser.parse_args(argv)
 
-    directory = Path(args.directory).resolve()
+    # the nearest project root wins (driver contract 0.1.22): from inside a
+    # nested studio project (apps/supervisor) every plane reads the nested root
+    info = configlib.project_info(Path(args.directory))
+    directory = Path(info["project_root"])
     lock_path = Path(args.lock) if args.lock else PLUGIN_ROOT / "bmad.lock"
     marketplace_path = Path(args.marketplace) if args.marketplace else None
     claude_home = Path(args.claude_home) if args.claude_home else None
@@ -493,6 +536,11 @@ def main(argv: list[str] | None = None) -> int:
         "planes": planes,
         "fixes": [p["fix"] for p in planes if p.get("fix")],
         "mutated": False,
+        # optional roots entry (driver contract 0.1.22, additive)
+        "project_root": info["project_root"],
+        "studio_root": info["studio_root"],
+        "nested": info["nested"],
+        "project_id": info["project_id"],
     }, ensure_ascii=False, indent=2))
     return exit_code
 

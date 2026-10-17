@@ -18,6 +18,13 @@ debugged later as ghosts.
    uv run "${CLAUDE_PLUGIN_ROOT}/skills/tk-studio-activate/scripts/drift_check.py" --directory <project-root>
    ```
 
+   `--directory` walks up to the nearest folder holding
+   `.tk-studio/config.yaml` (driver contract 0.1.22), so from inside a nested
+   studio project (`apps/supervisor` in tk-studio) the nested root wins. The
+   JSON carries `project_root`, `studio_root` (the outer repository root, the
+   plugin's home: `$TK_STUDIO_ROOT`, else the nearest folder holding
+   `plugins/tk-studio/`; `null` when neither), `nested` and `project_id`.
+
    Add `--guided` only when running as part of guided onboarding — it
    additionally emits `onboarding-funnel` timing events per plane.
 
@@ -38,6 +45,9 @@ debugged later as ghosts.
    view, never a dependency), and links are never repaired here.
 
 3. Report:
+   - **Both roots first:** name the project root and the studio root from
+     the JSON; when `nested` is true, say so — "nested project `<project_id>`
+     at `<project_root>` inside the studio root `<studio_root>`".
    - **Attended:** state each plane's status in one line each; on drift, give
      the exact fix commands from the `fixes` array and stop — the fix is the
      operator's move, never applied silently (NFR6).

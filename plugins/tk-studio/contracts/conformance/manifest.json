@@ -15,6 +15,12 @@
           "assertion": "headless-clean",
           "argv": ["skills/tk-studio-activate/scripts/drift_check.py", "--directory", "{sandbox}"],
           "expect": "json"
+        },
+        {
+          "assertion": "nested-root",
+          "argv": ["skills/tk-studio-activate/scripts/drift_check.py", "--directory", "contracts/conformance/fixtures/nested-root/apps/inner/deep"],
+          "expect": "json",
+          "marker": "\"nested\": true"
         }
       ]
     },

@@ -1,0 +1,176 @@
+# stories.yaml: Epic 21 of this project, transcribed 1:1 from _bmad-output/planning-artifacts/epics.md
+# by .bmad-loop/plugins/studio-pipeline/transcribe.py on 2026-09-28. The epics document is
+# the plan; the studio gate may append remediation entries (`<key>-r<n>`) and revise
+# UNSTARTED entries' invoke_dev_with, nothing else.
+
+- id: "21-1-the-lift-drives-the-studio-at-the-current-contract"
+  title: "The Lift Drives the Studio at the Current Contract"
+  description: >-
+    I want the ClaudeOS driver code lifted into the supervisor repo and brought current,
+    So that one job can be woken, invoked headless, and finished from the command line
+    on the agent PC. Canonical: ST-001.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 21.1: The
+    Lift Drives the Studio at the Current Contract", the authoritative specification
+    (user story and acceptance criteria). Read the epic's own narrative (the paragraphs
+    under "## Epic 21:") for scope, rulings and the repo the story targets; transcribe
+    the story into the spec's intent contract and never re-derive, generalise or extend
+    it. Plan: plans/21-1.md when present (its Code Map is the investigation). Project
+    rules and the verify gate: the studio customization
+    (_bmad/custom/bmad-build-auto.toml). Routing: .bmad-loop/routing.current.json; pass
+    implementer.model and reviewers.model explicitly on every subagent launch.
+    Deviations: one `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto
+    Run Result.
+
+- id: "21-2-conformance-passes-through-the-supervisor"
+  title: "Conformance Passes Through the Supervisor"
+  description: >-
+    I want the shipped conformance suite driven through the supervisor, So that
+    acceptance (b) proves the new driver honours the contract (AD-19). Canonical:
+    ST-002.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 21.2:
+    Conformance Passes Through the Supervisor", the authoritative specification (user
+    story and acceptance criteria). Read the epic's own narrative (the paragraphs under
+    "## Epic 21:") for scope, rulings and the repo the story targets; transcribe the
+    story into the spec's intent contract and never re-derive, generalise or extend it.
+    Plan: plans/21-2.md when present (its Code Map is the investigation). Project rules
+    and the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass implementer.model and reviewers.model
+    explicitly on every subagent launch. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result.
+
+- id: "21-3-jobs-survive-restarts-in-a-durable-queue"
+  title: "Jobs Survive Restarts in a Durable Queue"
+  description: >-
+    I want submitted jobs and their runs held in SQLite with one lock per checkout, So
+    that nothing is lost or run twice when the supervisor stops, crashes, or two
+    requests race. Canonical: ST-003.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 21.3: Jobs
+    Survive Restarts in a Durable Queue", the authoritative specification (user story
+    and acceptance criteria). Read the epic's own narrative (the paragraphs under "##
+    Epic 21:") for scope, rulings and the repo the story targets; transcribe the story
+    into the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/21-3.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass implementer.model and reviewers.model
+    explicitly on every subagent launch. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result.
+    Replan (21-1 reconcile, 2026-09-28): one-shot jobs start via jobrun `submit`,
+    recurring ones via `wake` (the lifted CLI does both); idempotent minting covers both
+    verbs. Timeout recovery adopts only a run started within 2s before the caller began:
+    keep that rule when the queue owns minting.
+
+- id: "21-4-the-worker-runs-on-the-right-tier-and-reports-its-cost"
+  title: "The Worker Runs on the Right Tier and Reports Its Cost"
+  description: >-
+    I want each run executed on the tier its job needs, with model and effort forwarded
+    verbatim and cost captured, So that no run bypasses permissions on the host and
+    every finish carries what it spent. Canonical: ST-004.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 21.4: The
+    Worker Runs on the Right Tier and Reports Its Cost", the authoritative specification
+    (user story and acceptance criteria). Read the epic's own narrative (the paragraphs
+    under "## Epic 21:") for scope, rulings and the repo the story targets; transcribe
+    the story into the spec's intent contract and never re-derive, generalise or extend
+    it. Plan: plans/21-4.md when present (its Code Map is the investigation). Project
+    rules and the verify gate: the studio customization
+    (_bmad/custom/bmad-build-auto.toml). Routing: .bmad-loop/routing.current.json; pass
+    implementer.model and reviewers.model explicitly on every subagent launch.
+    Deviations: one `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto
+    Run Result.
+    Replan (21-1 reconcile, 2026-09-28): a host-tier bypass request is refused before
+    any run exists (HostBypassRefused, exit 2, reported `blocked`); read this story's
+    "the run ends blocked" as the submission refused `blocked` with no run minted. The
+    worker prompt is the argument after `-p` (no stdin, no shell retry: an injection
+    risk); keep it.
+    Replan (21-2 reconcile, 2026-09-28): the lifted worker command takes a
+    `deny_profile` input: an absolute path, validated by `validateDenyProfile` (a
+    relative or unreadable profile is `DenyProfileRefused`) and forwarded as `--settings
+    <path>`. The host tier passes the operator's deny-list settings through it unchanged
+    and never widens them.
+    Replan (21-3 reconcile, 2026-09-28): runs are queued and may be driven later by
+    `drain` or the tick, so store the submitted tier on the queue run like
+    `runs.permission_mode` (explicit ?? stored ?? config ?? host) and re-check it at
+    drive time with the same validator. A caller's host bypass is refused before
+    enqueue. `finish` (with `total_cost_usd`) takes `studio_run_id`, never the queue id.
+    Build on the exported `startRun`/`finishRun`/`guardsFor`.
+
+- id: "21-5-guards-and-the-pacer-are-the-wrappers-job"
+  title: "Guards and the Pacer Are the Wrapper's Job"
+  description: >-
+    I want wall-clock, turn, and token guards enforced by the supervisor, and recurring
+    jobs paced without overlap, So that no unattended run outlives its budget and no job
+    piles up behind itself. Canonical: ST-005.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 21.5:
+    Guards and the Pacer Are the Wrapper's Job", the authoritative specification (user
+    story and acceptance criteria). Read the epic's own narrative (the paragraphs under
+    "## Epic 21:") for scope, rulings and the repo the story targets; transcribe the
+    story into the spec's intent contract and never re-derive, generalise or extend it.
+    Plan: plans/21-5.md when present (its Code Map is the investigation). Project rules
+    and the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass implementer.model and reviewers.model
+    explicitly on every subagent launch. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result.
+    Replan (21-1 deferral DW-1, 2026-09-28): on POSIX the lifted timeout kills only the
+    direct child; this story's "whole process tree is killed" criterion owns the fix
+    (process group or equivalent), and closes DW-1 in deferred-work.md.
+    Replan (21-3 reconcile, 2026-09-28): the pacer reads `queued`/`running` from the
+    queue db (`TK_SUPERVISOR_DB`), keeps the tick's start-of-tick recovery, and keeps
+    its counts (`StartError` refused, lock wait/already-running skipped). The
+    wall-clock guard replaces today's stand-ins with a named guard that kills the
+    process tree. Those stand-ins are the `wake`/`submit` verb timeout (the core job's
+    uncapped guard + 120 s) and the capped skill invocation. With 21-6 that also covers
+    DW-3. Record `stop.on_status` in the queue's `events` table. `finishArgsFor` and
+    `knowledgeOf` in tick.ts are unused.
+    Replan (21-4 reconcile, 2026-09-28): on the sbx tier the worker runs as `sbx exec
+    <sb> env -u ANTHROPIC_API_KEY -C <vm-root> claude -p …`, so a host tree kill stops
+    only `sbx exec`. The guard must also end the in-VM worker (through `sbx exec <sb>`,
+    argv only, no shell) or name the survivor. Read an sbx run's turns and tokens
+    through the VM or the JSON result's usage. The tier is on the queue run
+    (`runs.tier`, `runs.sandbox`).
+
+- id: "21-6-a-killed-run-resumes-or-ends-partial-never-lost"
+  title: "A Killed Run Resumes or Ends Partial, Never Lost"
+  description: >-
+    I want a run interrupted by a supervisor crash or a silent worker exit to resume
+    from its transcript or end `partial` with the reason named, So that acceptance (c)
+    holds: no run is ever silently lost. Canonical: ST-006.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 21.6: A
+    Killed Run Resumes or Ends Partial, Never Lost", the authoritative specification
+    (user story and acceptance criteria). Read the epic's own narrative (the paragraphs
+    under "## Epic 21:") for scope, rulings and the repo the story targets; transcribe
+    the story into the spec's intent contract and never re-derive, generalise or extend
+    it. Plan: plans/21-6.md when present (its Code Map is the investigation). Project
+    rules and the verify gate: the studio customization
+    (_bmad/custom/bmad-build-auto.toml). Routing: .bmad-loop/routing.current.json; pass
+    implementer.model and reviewers.model explicitly on every subagent launch.
+    Deviations: one `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto
+    Run Result.
+    Replan (21-1 reconcile, 2026-09-28; the 2s wording superseded per 21-3 consult
+    10:52:44Z): one-shot runs are minted by `submit`, recurring ones by `wake`. Resume
+    and orphan handling adopt a studio run only if it is absent from the pre-verb
+    snapshot stored at `verb_started` and was minted at or after `verb_started`. The
+    earliest wins, and an ambiguous lookup fails.
+    Replan (21-3 reconcile, 2026-09-28): resume extends `Queue.recover({end, find})`
+    and its owner identity (hostname + pid + nonce + start time). The queue run id and
+    `studio_run_id` stay separate. DW-3 is this story's: a worker that outlives a killed
+    supervisor must hold the checkout lock, or be killed, before `recover` releases it.
+    Replan (21-4 reconcile, 2026-09-28): "the same tier" means the queue run's stored
+    `tier`/`sandbox`/`model`/`effort`. Rebuild `Started` through `validate()` so
+    `registryRoot` (the sbx VM root, passed as `invokeSkill(…, {vmHostRoot})`) never
+    falls back to the caller root. An sbx run's session transcript is inside the
+    microVM.
+    Replan (21-5 reconcile, 2026-09-28): a resume drives through 21-5's guards: the
+    remaining wall-clock budget through `wallClockGuard` (on sbx the in-VM `timeout`
+    in `buildSbxCommand`), `account` after the resumed iteration, and a trip ends
+    `partial` naming the guard. Every end `recover` writes goes through `Queue.end`'s
+    `stop` option with `studio_outcome`, so a restart-ended run matching
+    `stop.on_status` records `stopped` (closes DW-8). DW-3's kill of the recorded
+    worker pid/process group before `recover` releases the lock must also cover what
+    `runProcess`'s signal handling misses (DW-7: SIGHUP under `nohup` or on non-Linux
+    POSIX, SIGKILL, a crash). Keep `Queue.pacing()`'s `live`/`adoptable` view true
+    for a resumed run.

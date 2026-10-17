@@ -1,0 +1,32 @@
+# Studio pipeline budget bands for tk-studio: the estimation currency that
+# task-planning.md sizes each story in. This is tracked, operator-tunable
+# data, never constants.
+#
+# Ported 2026-09-28 from The Universe Awaits (bands_version 2, calibrated on
+# its stories 1.1-1.3). tk-studio's stories are Python and markdown against a
+# stdlib lib, not C#/Godot. Treat the numbers as PROVISIONAL until the
+# Opus 5.5 trial (plan Epic 24) prices landed stories here.
+#
+# Size by the files and lines the story's plan expects:
+#   S  <= 3 files and <= 150 new lines
+#   M  otherwise, within 5 files and 300 new lines
+#   L  larger, with a stated reason; anything bigger goes to bmad-correct-course
+#
+# `usd_estimate` uses the measured v2 means (kb/execution-pipeline-model-routing.md:
+# core-code story ~$4.4, feature story ~$8.6 all-in). weighted_tokens is kept
+# for continuity with the TUA baseline.
+bands_version: 1
+currency: usd
+bands:
+  S:
+    usd_estimate: 4.5
+    weighted_tokens: 2000000
+    review_cycles_max: 1
+  M:
+    usd_estimate: 8.5
+    weighted_tokens: 3500000
+    review_cycles_max: 2
+  L:
+    usd_estimate: 13
+    weighted_tokens: 5000000
+    review_cycles_max: 2

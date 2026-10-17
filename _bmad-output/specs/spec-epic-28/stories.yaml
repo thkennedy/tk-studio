@@ -1,0 +1,121 @@
+# stories.yaml: Epic 28 of this project, transcribed 1:1 from _bmad-output/planning-artifacts/epics.md
+# by .bmad-loop/plugins/studio-pipeline/transcribe.py on 2026-10-16. The epics document is
+# the plan; the studio gate may append remediation entries (`<key>-r<n>`) and revise
+# UNSTARTED entries' invoke_dev_with, nothing else.
+
+- id: "28-1-the-rehearsal-is-a-script-with-a-report"
+  title: "The Rehearsal Is a Script With a Report"
+  description: >-
+    I want the migration rehearsed by a script on throwaway clones that ends in a
+    report, So that the real cut-over is a replay of a passed rehearsal and never an
+    improvisation. Canonical: ST-098.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 28.1: The
+    Rehearsal Is a Script With a Report", the authoritative specification (user story
+    and acceptance criteria). Read the epic's own narrative (the paragraphs under "##
+    Epic 28:") for scope, rulings and the repo the story targets; transcribe the story
+    into the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/28-1.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/28-1-the-rehearsal-is-a-script-with-a-report-spec.md` in
+    the spec folder; the engine resolves it by the glob
+    `28-1-the-rehearsal-is-a-script-with-a-report-*.md`, and a file named
+    `28-1-the-rehearsal-is-a-script-with-a-report.md` is read as pending (loop
+    deficiency 1, story 21-6).
+
+- id: "28-2-a-nested-studio-project-is-a-first-class-root"
+  title: "A Nested Studio Project Is a First-Class Root"
+  description: >-
+    I want the plugin to resolve a project root nested inside another studio project, So
+    that `apps/supervisor` keeps its own config, base, planning artifacts, engine
+    workspace and hooks after the move, as AD-21 says. Canonical: ST-099.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 28.2: A
+    Nested Studio Project Is a First-Class Root", the authoritative specification (user
+    story and acceptance criteria). Read the epic's own narrative (the paragraphs under
+    "## Epic 28:") for scope, rulings and the repo the story targets; transcribe the
+    story into the spec's intent contract and never re-derive, generalise or extend it.
+    Plan: plans/28-2.md when present (its Code Map is the investigation). Project rules
+    and the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as
+    `stories/28-2-a-nested-studio-project-is-a-first-class-root-spec.md` in the spec
+    folder; the engine resolves it by the glob
+    `28-2-a-nested-studio-project-is-a-first-class-root-*.md`, and a file named
+    `28-2-a-nested-studio-project-is-a-first-class-root.md` is read as pending (loop
+    deficiency 1, story 21-6). Oversize (planner, 2026-10-16): the plan's Files list is
+    already past band L; halt and record it if the Files list grows past plans/28-2.md
+    "Files" (that is the operator's bmad-correct-course, never a split decided here).
+
+- id: "28-3-the-merged-tree-builds-releases-and-launches-from-one-root"
+  title: "The Merged Tree Builds, Releases and Launches From One Root"
+  description: >-
+    I want the merged repository to release the supervisor, run both loops and pass both
+    gates from one checkout, So that nothing points at the old repository. Canonical:
+    ST-100.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 28.3: The
+    Merged Tree Builds, Releases and Launches From One Root", the authoritative
+    specification (user story and acceptance criteria). Read the epic's own narrative
+    (the paragraphs under "## Epic 28:") for scope, rulings and the repo the story
+    targets; transcribe the story into the spec's intent contract and never re-derive,
+    generalise or extend it. Plan: plans/28-3.md when present (its Code Map is the
+    investigation). Project rules and the verify gate: the studio customization
+    (_bmad/custom/bmad-build-auto.toml). Routing: .bmad-loop/routing.current.json; pass
+    the model, effort and advisor of implementer and reviewers explicitly on every
+    subagent launch. Advisor: when routing.current.json gives the session an advisor
+    other than `off`, consult the advisor on: verify-red, halt, deviation above 0, a
+    high-severity finding, a tripwire, a file outside Files, and before declaring the
+    story done; append a `## Consult Log` entry per advisor call. Deviations: one
+    `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto Run Result.
+    Spec file: write the executor spec as
+    `stories/28-3-the-merged-tree-builds-releases-and-launches-from-one-root-spec.md` in
+    the spec folder; the engine resolves it by the glob
+    `28-3-the-merged-tree-builds-releases-and-launches-from-one-root-*.md`, and a file
+    named `28-3-the-merged-tree-builds-releases-and-launches-from-one-root.md` is read
+    as pending (loop deficiency 1, story 21-6). Precondition (planner, 2026-10-16): this
+    story runs on the merged tree only; if `apps/supervisor/` is absent at the run's
+    base, halt blocked "28-3 needs the merged tree" and write nothing. The rosters'
+    supervisor `source` drops only through the operator's release cut (plans/28-3.md
+    "Settled shape"); never hand-edit a roster or push a tag.
+
+- id: "28-4-the-cut-over-on-the-box-is-checked-and-recorded"
+  title: "The Cut-Over on the Box Is Checked and Recorded"
+  description: >-
+    I want the service cut-over checked by the tooling and the record complete, So that
+    the old repository can be archived with nothing left pointing at it. Canonical:
+    ST-101.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 28.4: The
+    Cut-Over on the Box Is Checked and Recorded", the authoritative specification (user
+    story and acceptance criteria). Read the epic's own narrative (the paragraphs under
+    "## Epic 28:") for scope, rulings and the repo the story targets; transcribe the
+    story into the spec's intent contract and never re-derive, generalise or extend it.
+    Plan: plans/28-4.md when present (its Code Map is the investigation). Project rules
+    and the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as
+    `stories/28-4-the-cut-over-on-the-box-is-checked-and-recorded-spec.md` in the spec
+    folder; the engine resolves it by the glob
+    `28-4-the-cut-over-on-the-box-is-checked-and-recorded-*.md`, and a file named
+    `28-4-the-cut-over-on-the-box-is-checked-and-recorded.md` is read as pending (loop
+    deficiency 1, story 21-6).

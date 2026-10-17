@@ -93,8 +93,11 @@ class DriverContractTestCase(unittest.TestCase):
         # 0.1.20 adds the §8 meta-CLI drive, manifest and report
         # `cli_drives` (ST-085, additive); 0.1.21 states the launch row's
         # block, bootstrap commit and budget check, and §8's surface
-        # status-block drives (Story 26.1, additive)
-        self.assertRegex(self.text, r"\*\*0\.1\.21\*\*")
+        # status-block drives (Story 26.1, additive); 0.1.22 states the
+        # §1 nearest-root rule and §6's optional drift-check roots keys
+        # (Story 28.2, additive — SPEC's "minor bump" is the change
+        # policy's patch position: an additive rule never takes 0.2.0)
+        self.assertRegex(self.text, r"\*\*0\.1\.22\*\*")
         self.assertIn("### 5.1 Execution-pipeline legs", self.text)
         self.assertIn("lib/pipeline.py", self.text)
         self.assertIn("Change policy", self.text)
@@ -178,9 +181,10 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_21_header_and_launch_row(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.21**", header)
+        # the 0.1.21 clause survives in the history once 0.1.22 heads it
         self.assertNotIn("**0.1.20**", header)
-        clause = header[header.index("0.1.21 (Epic 26)"):]
+        clause = header[header.index("0.1.21 (Epic 26)"):
+                        header.index("0.1.22 (Story 28.2)")]
         self.assertIn("— additive", clause)
         self.assertIn("allow_budget_mismatch", clause)
         self.assertLess(header.index("0.1.20 adds"),
@@ -206,11 +210,12 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_21_advisor_clause_and_section_5_1(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.21**", header)
-        self.assertNotIn("**0.1.22**", header)
+        # the 0.1.21 clause survives in the history once 0.1.22 heads it
+        self.assertNotIn("**0.1.21**", header)
         self.assertLess(header.index("0.1.21 (Epic 26)"),
                         header.index("0.1.21 (Story 26.3)"))
-        clause = header[header.index("0.1.21 (Story 26.3)"):]
+        clause = header[header.index("0.1.21 (Story 26.3)"):
+                        header.index("0.1.21 (Story 26.5)")]
         for phrase in ("optional `advisor`", "the pairing rule",
                        "the advisor must rank at or above the leg's model",
                        "`--advisor <value>`", "`inherited-session`", "— additive"):
@@ -234,11 +239,12 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_21_status_pull_back_clause_and_section_4(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.21**", header)
-        self.assertNotIn("**0.1.22**", header)
+        # the 0.1.21 clause survives in the history once 0.1.22 heads it
+        self.assertNotIn("**0.1.21**", header)
         self.assertLess(header.index("0.1.21 (Story 26.3)"),
                         header.index("0.1.21 (Story 26.5)"))
-        clause = header[header.index("0.1.21 (Story 26.5)"):]
+        clause = header[header.index("0.1.21 (Story 26.5)"):
+                        header.index("0.1.22 (Story 28.2)")]
         for phrase in ("`plansync.py status --directory ROOT --id ST-NNN "
                        "--status ENUM [--note TEXT] [--caller NAME] [--dry-run]`",
                        "`external.driver` snapshot", "`plan/index.md`",
@@ -264,6 +270,47 @@ class DriverContractTestCase(unittest.TestCase):
                        "`plan_dir` names the plan the verb wrote",
                        "Epic 27's studio supervisor calls it"):
             self.assertIn(phrase, section)
+
+    # --- Story 28.2: 0.1.22 states the nearest-root rule (§1 Project root)
+    # and §6's optional drift-check roots keys
+
+    def test_0_1_22_header_project_root_and_drift_check_keys(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.22**", header)
+        self.assertNotIn("**0.1.21**", header)
+        self.assertNotIn("0.2.0 (", header)
+        self.assertLess(header.index("0.1.21 (Story 26.5)"),
+                        header.index("0.1.22 (Story 28.2)"))
+        clause = header[header.index("0.1.22 (Story 28.2)"):]
+        for phrase in ("nearest-root rule", "`.tk-studio/config.yaml`",
+                       "`TK_STUDIO_ROOT` keeps meaning the outer repository root",
+                       "`config.py standup`", "`registry.py register`",
+                       "`project_root`", "`studio_root`", "`nested`",
+                       "`project_id`", "— additive"):
+            self.assertIn(phrase, clause)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 28.2", stories)
+        start = self.text.index("### Project root (0.1.22)")
+        self.assertGreater(start, self.text.index("### Driver roster (0.1.18)"))
+        self.assertLess(start, self.text.index("### Auth preflight"))
+        section = " ".join(self.text[start:self.text.index("### Auth preflight")].split())
+        for phrase in ("**nearest** ancestor-or-self of the given folder holding "
+                       "`.tk-studio/config.yaml`",
+                       "resolves to itself (not yet onboarded)",
+                       "**Creation verbs never walk up:**",
+                       "`$TK_STUDIO_ROOT` when set, else the nearest "
+                       "ancestor-or-self of the project root holding `plugins/tk-studio/`",
+                       "never the plugin's own folder",
+                       'lib/config.py" root [--directory DIR]`',
+                       "`~/.tk-studio/projects/<project_id>/`"):
+            self.assertIn(phrase, section)
+        drift = " ".join(self.text[self.text.index("## 6. Drift-check invocation"):].split())
+        for phrase in ("project_root?, studio_root?, nested?, project_id?",
+                       "four optional roots keys (0.1.22)", "(`null` when unresolved)",
+                       "[Project root](#project-root-0122)"):
+            self.assertIn(phrase, drift)
 
     def test_section_8_names_the_cli_drives(self):
         section = self.text[self.text.index("## 8. Conformance"):]
