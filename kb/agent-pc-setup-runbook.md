@@ -929,7 +929,7 @@ outside the supervisor), the attended recipe still applies:
 
 The supervisor is the ruling-4 independent driver. It consumes the driver
 contract from outside the plugin (AD-2): the contract code lifted from
-ClaudeOS, plus a durable SQLite queue, a lock per checkout, guards it enforces
+ClaudeOS, plus a durable SQLite queue, a lock per git checkout (§4 table), guards it enforces
 itself, a pacer, crash recovery, an HTTP API and a status page. It was built on
 2026-09-28 through the studio's own launch pipeline (plan Epics 21 and 22).
 
@@ -941,6 +941,11 @@ itself, a pacer, crash recovery, an HTTP API and a status page. It was built on
   clone.
 - **Full reference:** `apps/supervisor/README.md` (commands, API routes, queue
   and restart rules, worker tiers).
+
+| Item | Value |
+|---|---|
+| Checkout lock | (28.5) One lock per git checkout: its key is the project root's canonical, case-folded `git rev-parse --show-toplevel`, read once at submission and recorded on the run (a root outside git keys by itself). `apps\supervisor` and `C:\GitHub\tk-studio` therefore share one lock: the second queued run shows `lock-wait` naming the first on `/status`, and the two never run at once. The lock row and the status page still name the project root that holds it. The `starter.lock` stays per project. |
+| Served subpath | (28.5) A project below its git top-level is served at `<worktree>\<prefix>` (`git rev-parse --show-prefix`, for example `C:\agent-work\worktrees\<project>\<run id>\apps\supervisor`): the worker's cwd, `payload.directory`, the sbx VM path, `tk install`/`tk activate`, the copied runtime, the engine's `.bmad-loop`, and `verify.host` (read from `<base>:<prefix>.tk-studio/config.yaml`, run there). The worktree itself is still cut at the repository's top, and the push, PR and `git worktree remove` run there. A project at its top-level is unchanged. |
 
 ### 4.1 Install
 

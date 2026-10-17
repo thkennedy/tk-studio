@@ -5,11 +5,12 @@ import { Database } from "bun:sqlite";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import { cancelRun, closeOutOrphans, endAfterDriveFailure, mirror } from "../src/cli";
-import { Queue, selfOwner } from "../src/queue";
-import { runProcess, type RunResult } from "../src/server";
+import { cancelRun, closeOutOrphans, endAfterDriveFailure, finishRun, mirror, resolveCheckout, type Started } from "../src/cli";
+import { closeOutPaused, engineState, harvestMessage, type PausedDeps } from "../src/closeout";
+import { checkoutKey, Queue, selfOwner, servedRoot } from "../src/queue";
+import { invokeSkill, runProcess, toVmPath, type RunResult, type Spawner } from "../src/server";
 import {
-  baseBranch, closeOut, closeOutDetail, COPIED_RUNTIME, engineStatus, isDefaultBranch, openPrUrl, originRepo, prBody, prepareWorktree, runBranch, sweepEngines, worktreePath, WorktreeFailed, type WorktreeDeps,
+  baseBranch, closeOut, closeOutDetail, COPIED_RUNTIME, engineStatus, isDefaultBranch, launchedCloseOutInput, openPrUrl, originRepo, prBody, prepareWorktree, runBranch, sweepEngines, worktreePath, WorktreeFailed, type WorktreeDeps,
 } from "../src/worktree";
 import { fakeGh, fakeSbx, gitRepo, testGit } from "./fakes";
 
@@ -17,7 +18,7 @@ const me = { pid: process.pid, host: hostname(), nonce: "worktree-test" };
 
 /** One fixture: a real repo + bare origin, the fake gh, a work folder, a queue with a claimed run,
  * a recording git/gh runner, and an injected studio-script runner (install, drift, launch status). */
-async function fixture(opts: { baseRef?: string; files?: Record<string, string>; skill?: string } = {}) {
+async function fixture(opts: { baseRef?: string; files?: Record<string, string>; skill?: string; nested?: string } = {}) {
   const repo = gitRepo(opts.files);
   const gh = fakeGh();
   const work = mkdtempSync(join(tmpdir(), "tk-sup-wt-work-"));
@@ -50,12 +51,15 @@ async function fixture(opts: { baseRef?: string; files?: Record<string, string>;
     probeWorker: (pid, start) => ({ pid, start, outcome: answers.workerRunning ? "running" : "not running" }),
   });
   const defn = { id: "j", target: { skill: opts.skill ?? "tk-studio-launch" } };
-  const queued = queue.enqueue({ jobId: "j", root: repo.checkout, projectId: "proj", definition: defn, owner: me, ...(opts.baseRef ? { base_ref: opts.baseRef } : {}) }).run;
+  // Story 28.5: a project nested below the repository's top-level (its lock key and prefix as a submission resolves them).
+  const root = opts.nested ? join(repo.checkout, opts.nested) : repo.checkout;
+  const where = opts.nested ? await resolveCheckout(root) : {};
+  const queued = queue.enqueue({ jobId: "j", root, projectId: "proj", definition: defn, owner: me, ...(opts.baseRef ? { base_ref: opts.baseRef } : {}), ...where }).run;
   const claim = await queue.claim(queued.run_id, me);
   if (!claim.claimed) throw new Error("not claimed");
   const head = () => [testGit(repo.checkout, "rev-parse", "--abbrev-ref", "HEAD"), testGit(repo.checkout, "rev-parse", "HEAD")];
   const headBefore = head();
-  return { repo, gh, work, argvs, studio, verbs, answers, deps, queue, run: claim.run, defn, head, headBefore, get: () => queue.get(queued.run_id)! };
+  return { repo, root, gh, work, argvs, studio, verbs, answers, deps, queue, run: claim.run, defn, head, headBefore, get: () => queue.get(queued.run_id)! };
 }
 
 /** No git/gh argv ever forces, merges, or switches a branch. */
@@ -1685,4 +1689,204 @@ describe("Story 27.5: the orphan close-out (DW-25)", () => {
     expect(fx.gh.calls().filter((c) => c.argv[1] === "create")).toHaveLength(1);
     expectNoForbiddenArgv(fx.argvs, fx.gh.calls());
   }, 60_000);
+});
+
+describe("Story 28.5 (DW-25): a project below its git top-level is served at <worktree>/<prefix>", () => {
+  const NESTED = "apps/sup";
+  const nestedFiles = (extra: Record<string, string> = {}) => ({ [`${NESTED}/.tk-studio/config.yaml`]: "project_id: sup\n", ...extra });
+
+  test("nested: the worktree is cut at the repository's top, the run serves <wt>/<prefix> (install, drift and the copied runtime there)", async () => {
+    const fx = await fixture({ baseRef: "main", nested: NESTED, files: nestedFiles() });
+    expect(fx.run).toMatchObject({ prefix: `${NESTED}/`, checkout: checkoutKey(fx.root), lock_checkout: checkoutKey(fx.repo.checkout) });
+    mkdirSync(join(fx.root, ".bmad-loop"), { recursive: true });
+    writeFileSync(join(fx.root, ".bmad-loop", "policy.toml"), "nested = true\n");
+    const served = await prepareWorktree(fx.queue, fx.run, "proj", fx.root, fx.deps);
+    const wt = worktreePath(fx.work, "proj", fx.run.run_id);
+    expect(served).toBe(join(wt, NESTED));
+    // The worktree is the whole repository (its top recorded on the run for the git motions).
+    expect(fx.get().worktree).toBe(wt);
+    expect(existsSync(join(wt, ".git"))).toBe(true);
+    expect(existsSync(join(served, ".tk-studio", "config.yaml"))).toBe(true);
+    expect(fx.argvs.find((a) => a.args[0] === "worktree")!.args).toEqual(["worktree", "add", "--relative-paths", wt, "-b", runBranch(fx.run.run_id), "main"]);
+    // `install_base.py --directory` and the drift check at the served root, never the top.
+    const install = fx.studio.find((s) => s.script.endsWith("install_base.py"))!;
+    expect(install).toMatchObject({ root: served, args: ["--directory", served] });
+    expect(fx.studio.find((s) => s.script.endsWith("drift_check.py"))).toMatchObject({ root: served, args: ["--directory", served] });
+    // The copied runtime from the project root lands under the served root.
+    expect(readFileSync(join(served, ".bmad-loop", "policy.toml"), "utf-8")).toBe("nested = true\n");
+    expect(existsSync(join(wt, ".bmad-loop", "policy.toml"))).toBe(false);
+    // Once per queue run: a resumed or adopted run answers the served root again.
+    expect(await prepareWorktree(fx.queue, fx.get(), "proj", fx.root, fx.deps)).toBe(served);
+  });
+
+  test("top-level: prefix \"\" — the run serves the worktree itself (unchanged)", async () => {
+    const fx = await fixture({ baseRef: "main" });
+    const where = await resolveCheckout(fx.repo.checkout);
+    expect(where).toEqual({ lockCheckout: checkoutKey(fx.repo.checkout), prefix: "" });
+    const top = fx.queue.enqueue({ jobId: "t", root: fx.repo.checkout, projectId: "proj", definition: { id: "t" }, owner: me, base_ref: "main", ...where }).run;
+    expect(top).toMatchObject({ prefix: "", lock_checkout: checkoutKey(fx.repo.checkout) });
+    const served = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+    expect(served).toBe(worktreePath(fx.work, "proj", fx.run.run_id));
+    expect(fx.studio.find((s) => s.script.endsWith("install_base.py"))).toMatchObject({ root: served, args: ["--directory", served] });
+  });
+
+  /** A launched nested run (as the AC3 sweep's `launched()`): served root prepared, engine E1, `launched` written. */
+  async function launchedNested(files: Record<string, string> = {}) {
+    const fx = await fixture({ baseRef: "main", nested: NESTED, files: nestedFiles(files) });
+    mkdirSync(join(fx.root, ".bmad-loop"), { recursive: true });
+    writeFileSync(join(fx.root, ".bmad-loop", "policy.toml"), "nested = true\n");
+    const served = await prepareWorktree(fx.queue, fx.run, "proj", fx.root, fx.deps);
+    fx.queue.markVerbStarted(fx.run.run_id, "wake", [], { target: "skill", definition: fx.defn });
+    await mirror(fx.queue, fx.run.run_id, { jobId: "j", defn: fx.defn }, {
+      ok: true, job_id: "j", run_id: "j-20261017T101010Z", target: "skill", state: "complete",
+      status_block: { status: "complete", intent: "tk-studio-launch", artifacts: [".bmad-loop/runs/E1"] }, total_cost_usd: 0.25, finish_deferred: true,
+    }, async () => ({}), fx.deps);
+    return { ...fx, served, wt: worktreePath(fx.work, "proj", fx.run.run_id) };
+  }
+
+  test("the engine-end sweep reads <wt>/<prefix>/.bmad-loop (status, metered cost), commits without the nested engine state", async () => {
+    const fx = await launchedNested();
+    // The engine lock is probed at the served root; the lock row keyed by the git checkout.
+    expect(fx.queue.lock(fx.get())).toMatchObject({ kind: "engine", engine_run_id: "E1", root: fx.served, checkout: checkoutKey(fx.repo.checkout) });
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([]);
+    expect(fx.studio.at(-1)).toMatchObject({ args: ["status", "--directory", fx.served, "--run-id", "E1"], root: fx.served });
+    // The engine's run.json under the served root is the metered cost (never an outer `.bmad-loop`).
+    mkdirSync(join(fx.served, ".bmad-loop", "runs", "E1"), { recursive: true });
+    writeFileSync(join(fx.served, ".bmad-loop", "runs", "E1", "run.json"), JSON.stringify({ total_cost_usd: 1.5 }));
+    expect(launchedCloseOutInput(fx.queue.events(fx.run.run_id), fx.get())).toMatchObject({ engineRunId: "E1", costUsd: 1.5 });
+    commitIn(fx.served, "a.txt", "engine: story one");
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(fx.get()).toMatchObject({ state: "complete" });
+    expect(fx.verbs[0]).toContain("1.5");
+    // Pushed from the worktree top: the engine's work, never its nested runtime state.
+    const files = testGit(fx.repo.origin, "ls-tree", "-r", "--name-only", `refs/heads/${runBranch(fx.run.run_id)}`).split("\n");
+    expect(files).toContain(`${NESTED}/a.txt`);
+    expect(files).not.toContain(`${NESTED}/.bmad-loop/policy.toml`);
+    expect(files.some((f) => f.startsWith(`${NESTED}/.bmad-loop/runs/`))).toBe(false);
+  });
+
+  test("closeOut with no costUsd: the PR body carries the metered cost from <wt>/<prefix>/.bmad-loop/runs/<id>/run.json", async () => {
+    const fx = await launchedNested();
+    commitIn(fx.served, "a.txt", "engine: story one");
+    mkdirSync(join(fx.served, ".bmad-loop", "runs", "E1"), { recursive: true });
+    writeFileSync(join(fx.served, ".bmad-loop", "runs", "E1", "run.json"), JSON.stringify({ total_cost_usd: 2.5 }));
+    // Never the outer worktree top's `.bmad-loop`.
+    mkdirSync(join(fx.wt, ".bmad-loop", "runs", "E1"), { recursive: true });
+    writeFileSync(join(fx.wt, ".bmad-loop", "runs", "E1", "run.json"), JSON.stringify({ total_cost_usd: 9 }));
+    const out = await closeOut(fx.get(), { paused: false, engineRunId: "E1" }, fx.deps);
+    expect(out.error).toBeUndefined();
+    const body = fx.gh.calls().find((c) => c.argv[1] === "create")!.body!;
+    expect(body).toContain("$2.5000");
+    expect(body).not.toContain("$9.0000");
+  });
+
+  test("the host verify leg reads `<base>:<prefix>.tk-studio/config.yaml` from the project root and runs at the served root", async () => {
+    const host = `"${process.execPath}" -e "console.log('nested green')"`;
+    const fx = await launchedNested({ [`${NESTED}/.tk-studio/config.yaml`]: `project_id: sup\nverify:\n  host: ${JSON.stringify(host)}\n` });
+    (fx.queue as any).db.query("UPDATE runs SET tier = 'sbx' WHERE run_id = ?").run(fx.run.run_id);
+    commitIn(fx.served, "a.txt", "engine: story one");
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(fx.argvs.find((a) => a.args[0] === "show")).toEqual({ bin: "git", args: ["show", `main:${NESTED}/.tk-studio/config.yaml`], cwd: fx.root });
+    const ev = fx.queue.events(fx.run.run_id).find((e) => e.kind === "host-verify")!;
+    expect(ev.detail).toMatchObject({ green: true, cwd: fx.served, command: host, stdout_tail: ["nested green"] });
+    expect(fx.argvs.find((a) => a.bin === process.execPath)!.cwd).toBe(fx.served);
+  });
+
+  /** AC3: drive a nested run's invocation through `finishRun` and the real `invokeSkill` (an injected spawner), the
+   * run's `workRoot` the served root `prepareWorktree` answers (as `runJob` passes it). Answers the worker spawn. */
+  async function invokeNested(tier: "host" | "sbx") {
+    const fx = await fixture({ baseRef: "main", nested: NESTED, files: nestedFiles() });
+    const served = await prepareWorktree(fx.queue, fx.run, "proj", fx.root, fx.deps);
+    const BLOCK = { status: "complete", intent: "tk-studio-activate", artifacts: [] };
+    const calls: { cmd: string; args: string[]; cwd?: string }[] = [];
+    const spawner: Spawner = async (cmd, args, o) => {
+      calls.push({ cmd, args, cwd: o.cwd });
+      return args.includes("auth") && args.includes("status")
+        ? { exit: 0, stderr: "", stdout: JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }) }
+        : { exit: 0, stderr: "", stdout: JSON.stringify({ type: "result", is_error: false, result: JSON.stringify(BLOCK) }) };
+    };
+    const started: Started = {
+      jobId: "j", root: fx.root, projectId: "proj", runId: "j-20261017T101010Z", guardS: 600, defn: fx.defn,
+      woke: { accepted: true, run_id: "j-20261017T101010Z", state: "queued", directive: { kind: "invoke-skill", skill: "tk-studio-activate", payload: {} } },
+      workRoot: served, tier, ...(tier === "sbx" ? { sandbox: "claude-p" } : {}),
+    };
+    const summary = await finishRun(started, async () => ({ ok: true }), (root, skill, args, _sp, o) => invokeSkill(root, skill, args, spawner, o));
+    expect(summary).toMatchObject({ ok: true, state: "complete" });
+    const worker = calls.find((c) => c.args.includes("-p"))!;
+    const prompt = worker.args[worker.args.indexOf("-p") + 1];
+    const payload = JSON.parse(prompt.split("\n")[0].replace(/^\S+ /, ""));
+    return { fx, served, worker, payload };
+  }
+
+  test("AC3 (review patch): host tier — the worker's cwd and `payload.directory` are <wt>/<prefix>, never the worktree top or the checkout", async () => {
+    const { fx, served, worker, payload } = await invokeNested("host");
+    const wt = worktreePath(fx.work, "proj", fx.run.run_id);
+    expect(served).toBe(join(wt, NESTED));
+    expect(worker.cwd).toBe(served);
+    expect(payload.directory).toBe(served);
+    expect(payload.directory).not.toBe(wt);
+    expect(payload.directory).not.toBe(fx.root);
+  });
+
+  test("AC3 (review patch): sbx tier — the VM path (`sbx exec … -C`, `payload.directory`) is derived from the served path; the resume path's workRoot is the served root", async () => {
+    const { fx, served, worker, payload } = await invokeNested("sbx");
+    const vm = toVmPath(served);
+    expect(vm.endsWith(`/${NESTED}`)).toBe(true);
+    expect(worker.args.slice(0, 2)).toEqual(["exec", "claude-p"]);
+    expect(worker.args[worker.args.indexOf("-C") + 1]).toBe(vm);
+    expect(payload.directory).toBe(vm);
+    expect(worker.cwd).toBe(served);
+    // The resume path (`rebuildStarted`'s `workRoot: servedRoot(run)`) reads the same served root off the run row.
+    expect(servedRoot(fx.get())).toBe(served);
+  });
+
+  /** A paused nested run at `nested` closed out: the harvest committed, the nested engine state never staged. */
+  async function pausedCloseOutNested(nested: string) {
+    const NESTED = nested;
+    const fx = await fixture({ baseRef: "main", nested: NESTED, files: { [`${NESTED}/.tk-studio/config.yaml`]: "project_id: sup\n" } });
+    const served = await prepareWorktree(fx.queue, fx.run, "proj", fx.root, fx.deps);
+    const wt = worktreePath(fx.work, "proj", fx.run.run_id);
+    const KEY = "9-1-the-landed-story", E1 = "20261017-101010-ab12";
+    // The engine's state under the served root: its run dir, an archived run, the copied runtime — none ignored
+    // there (the top-level `.gitignore` anchors its patterns at the top), all untracked.
+    const state = [`.bmad-loop/runs/${E1}/engine.pid`, ".bmad-loop/archive/20261016-090909-ee00/engine.pid", ...COPIED_RUNTIME];
+    for (const rel of state) { mkdirSync(join(served, rel, ".."), { recursive: true }); writeFileSync(join(served, rel), "machine-local\n"); }
+    const untracked = testGit(wt, "status", "--porcelain", "--untracked-files=all").split("\n");
+    for (const rel of state) expect(untracked).toContain(`?? ${NESTED}/${rel}`);
+    // The engine's harvest: the story's spec at done with a closable verdict (uncommitted), under the served root.
+    const specRel = `_bmad-output/specs/spec-epic-9/stories/${KEY}-spec.md`;
+    mkdirSync(join(served, specRel, ".."), { recursive: true });
+    writeFileSync(join(served, specRel), "---\ntitle: 'x'\nstatus: done\nreconcile_verdict: no-impact\n---\n\n# body\n");
+    const head = testGit(wt, "rev-parse", "HEAD");
+    fx.queue.markLaunched(fx.run.run_id, E1, { end: { state: "complete", reason: null } });
+    fx.queue.markPaused(fx.run.run_id, { engine: { run_id: E1, status: "running", paused_stage: "escalation", paused_story_key: KEY } });
+    const IDENTITY = { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" };
+    // The injected studio runner answers `meter.py` with a failure: the pass stops right after the commit step.
+    const deps: PausedDeps = { ...fx.deps, self: me, run: (bin, args, o) => fx.deps.run!(bin, args, { ...o, env: { ...IDENTITY, ...(o.env ?? {}) } }) };
+    expect(await closeOutPaused(fx.queue, deps)).toEqual({ closed: [], awaiting: [] });
+    expect(fx.queue.events(fx.run.run_id).filter((e) => e.kind === "close-out-failed").map((e) => e.detail!.step)).toEqual(["meter"]);
+    expect(fx.argvs.find((a) => a.args[0] === "add")).toMatchObject({ cwd: wt });
+    expect(testGit(wt, "log", "-1", "--format=%s")).toBe(harvestMessage(KEY, fx.run.run_id, E1));
+    expect(testGit(wt, "rev-parse", "HEAD~1")).toBe(head);
+    expect(testGit(wt, "show", "--name-only", "--format=", "HEAD").split("\n").filter(Boolean)).toEqual([`${NESTED}/${specRel}`]);
+    // The engine state: never staged, never committed, still in the served root.
+    expect(testGit(wt, "diff", "--cached", "--name-only")).toBe("");
+    const after = testGit(wt, "status", "--porcelain", "--untracked-files=all").split("\n");
+    for (const rel of state) { expect(after).toContain(`?? ${NESTED}/${rel}`); expect(existsSync(join(served, rel))).toBe(true); }
+  }
+
+  test("the paused-run close-out commits the harvest without the nested engine state (`<prefix>.bmad-loop/runs|archive`, the copied runtime)", async () => {
+    await pausedCloseOutNested(NESTED);
+  });
+
+  test("review patch: a project path with glob metacharacters is excluded literally (`apps/s[u]p` never reads as `apps/sup`)", async () => {
+    // The built pathspec: every metacharacter of the prefix backslash-escaped, the engine-state globs kept.
+    expect(engineState("a/b*[c]?\\d/")).toEqual(engineState("").map((p) => p.replace(":(exclude,glob)", ":(exclude,glob)a/b\\*\\[c\\]\\?\\\\d/")));
+    expect(engineState("apps/s[u]p/")[0]).toBe(":(exclude,glob)apps/s\\[u\\]p/.bmad-loop/run[s]/**");
+    expect(engineState("$&/")[0]).toBe(":(exclude,glob)$&/.bmad-loop/run[s]/**");
+    // A real repository: unescaped, `apps/s[u]p/.bmad-loop/...` would match `apps/sup/...` and the state would be committed.
+    await pausedCloseOutNested("apps/s[u]p");
+  });
 });

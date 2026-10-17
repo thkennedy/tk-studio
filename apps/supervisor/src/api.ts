@@ -213,7 +213,7 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
     }
     const runId = String(answer.run_id);
     const run = queue.get(runId);
-    const lock = run ? queue.lock(run.root) : null;
+    const lock = run ? queue.lock(run) : null; // Story 28.5: the lock the run waits on (its git checkout)
     const holder = lock && lock.run_id !== runId ? { holder: holderOf(lock) } : {};
     return json(200, {
       ...answer, run_id: runId, studio_run_id: run?.studio_run_id ?? null, state: run?.state ?? answer.state,

@@ -477,6 +477,12 @@ export interface QueueRun {
   /** Story 22.3: 1 when the submission flagged the run editor-in-the-loop (a Godot project is
    * snapshot before its minting verb); null otherwise. */
   editor_in_the_loop: number | null;
+  /** Story 28.5: the checkout lock's key — the canonical, case-folded git top-level of the root (the root's own
+   * key outside git), resolved once at submission; null on rows minted before the column (`lockKeyOf`). */
+  lock_checkout?: string | null;
+  /** Story 28.5: the root's path below its git top-level (`git rev-parse --show-prefix`, `""` at the top):
+   * the run serves `<worktree>/<prefix>` (`servedRoot`); null on rows minted before the column. */
+  prefix?: string | null;
   /** Story 22.3: the end hygiene (notification + transcript copy) marker — null until one process
    * leases the run's end (`claimEnd`, `lease …`), `done …` once its outcomes are recorded
    * (`finishEnd`); runs already terminal when the column was added are marked done. */
@@ -665,6 +671,7 @@ const ADDED_RUN_COLUMNS = [
   ["session_id", "TEXT"], ["worker_pid", "INTEGER"], ["worker_start", "TEXT"], ["wake", "TEXT"], ["worker_guard_s", "INTEGER"],
   ["base_ref", "TEXT"], ["editor_in_the_loop", "INTEGER"], [NOTIFIED_COLUMN, "TEXT"],
   ["base_ref_source", "TEXT"], ["worktree", "TEXT"], ["engine_pid", "INTEGER"], ["engine_start", "TEXT"],
+  ["lock_checkout", "TEXT"], ["prefix", "TEXT"],
 ] as const;
 
 /** Story 27.1: the one-live-run index — a `paused` run is the job's live run too (enqueue mints no second);
@@ -719,11 +726,23 @@ export function accountedCostOf(events: readonly QueueEvent[], source: "worker" 
 export const LAUNCHED_SQL = `EXISTS (SELECT 1 FROM events e WHERE e.run_id = runs.run_id AND e.kind = 'launched'
   AND e.seq > COALESCE((SELECT MAX(x.seq) FROM events x WHERE x.run_id = runs.run_id AND x.kind IN ('close-out','engine-resume')), 0))`;
 
-/** Story 27.1: where a run's launched engine is probed — its worktree (the engine's `--project`), else its
- * root. A worktree the close-out already removed is never probed (the probe would fail there and fail
- * closed into an unverified engine forever): its root then. */
-export const engineRoot = (run: Pick<QueueRun, "root"> & { worktree?: string | null }): string =>
-  run.worktree && existsSync(run.worktree) ? run.worktree : run.root;
+/** Story 28.5: the key a run's checkout lock is held under — its recorded lock key (the git top-level of its
+ * root), else — a row minted before the column, or a lock row — its `checkout`. The one rule for every locks site. */
+export const lockKeyOf = (run: { checkout: string; lock_checkout?: string | null }): string => run.lock_checkout || run.checkout;
+
+/** Story 28.5 (DW-25): the root a run serves as the project — `<worktree>/<prefix>` (the project's place in its
+ * worktree; the worktree top for a project at its git top-level). Null until the worktree is cut. The worktree
+ * top (`run.worktree`) stays the root of the git motions. */
+export const servedRoot = (run: { worktree?: string | null; prefix?: string | null }): string | null =>
+  run.worktree ? (run.prefix ? resolve(run.worktree, run.prefix) : run.worktree) : null;
+
+/** Story 27.1: where a run's launched engine is probed — its served root in its worktree (the engine's
+ * `--project`; Story 28.5: `<worktree>/<prefix>`), else its root. A worktree the close-out already removed is
+ * never probed (the probe would fail there and fail closed into an unverified engine forever): its root then. */
+export const engineRoot = (run: Pick<QueueRun, "root"> & { worktree?: string | null; prefix?: string | null }): string => {
+  const served = servedRoot(run);
+  return served && existsSync(served) ? served : run.root;
+};
 
 const now = () => new Date().toISOString();
 /** The newest lease time a sweep at `at` may take over (Story 22.3). */
@@ -885,8 +904,11 @@ export class Queue {
     ).all() as QueueRun[];
   }
 
-  lock(root: string): LockRow | null {
-    return (this.db.query("SELECT * FROM locks WHERE checkout = ?").get(checkoutKey(root)) as LockRow | null) ?? null;
+  /** The checkout lock a run waits on or holds (Story 28.5: keyed by `lockKeyOf`); a path: the lock keyed by
+   * that path's own key. */
+  lock(of: string | { checkout: string; lock_checkout?: string | null }): LockRow | null {
+    const key = typeof of === "string" ? checkoutKey(of) : lockKeyOf(of);
+    return (this.db.query("SELECT * FROM locks WHERE checkout = ?").get(key) as LockRow | null) ?? null;
   }
 
   /** The definition a run was driven with (recorded at `verb_started`),
@@ -1015,6 +1037,9 @@ export class Queue {
     definition: Record<string, unknown>; owner?: Owner | null; permissionMode?: string | null;
     /** Story 22.3: the submission's editor-in-the-loop flag (stored like `tier`). */
     editorInTheLoop?: boolean;
+    /** Story 28.5: the root's git top-level as a lock key and its prefix, resolved once per submission
+     * (`resolveCheckout`); absent: the root keys by itself, prefix `""`. Recorded on a minted run only. */
+    lockCheckout?: string | null; prefix?: string | null;
   } & RunOptionsRecord): { run: QueueRun; minted: boolean } {
     const checkout = checkoutKey(input.root);
     return this.db.transaction(() => {
@@ -1040,11 +1065,13 @@ export class Queue {
       const flagged = input.editorInTheLoop ? 1 : null;
       this.db.query(
         `INSERT INTO runs (run_id, job_id, checkout, root, project_id, target, state, reason, owner_pid, owner_host,
-           owner_nonce, owner_start, permission_mode, tier, sandbox, model, effort, base_ref, editor_in_the_loop, created, updated)
-         VALUES (?, ?, ?, ?, ?, ?, 'queued', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           owner_nonce, owner_start, permission_mode, tier, sandbox, model, effort, base_ref, editor_in_the_loop,
+           lock_checkout, prefix, created, updated)
+         VALUES (?, ?, ?, ?, ?, ?, 'queued', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(runId, input.jobId, checkout, input.root, input.projectId ?? null, input.target ?? null,
         owner?.pid ?? null, owner?.host ?? null, owner?.nonce ?? null, owner?.start ?? null, mode,
-        opts.tier, opts.sandbox, opts.model, opts.effort, opts.base_ref, flagged, at, at);
+        opts.tier, opts.sandbox, opts.model, opts.effort, opts.base_ref, flagged,
+        input.lockCheckout || checkout, input.prefix ?? "", at, at);
       this.event(runId, "enqueued", null, "queued", {
         ...(owner ? { owner: ownerDetail(owner) } : {}), ...(mode ? { permission_mode: mode } : {}),
         ...Object.fromEntries(Object.entries(opts).filter(([, v]) => v !== null)),
@@ -1191,7 +1218,7 @@ export class Queue {
              job_id = excluded.job_id, owner_pid = excluded.owner_pid, owner_host = excluded.owner_host,
              owner_nonce = excluded.owner_nonce, owner_start = excluded.owner_start,
              engine_run_id = NULL, acquired = excluded.acquired`,
-        ).run(run.checkout, run.root, runId, run.job_id, owner.pid, owner.host, owner.nonce, owner.start ?? null, now());
+        ).run(lockKeyOf(run), run.root, runId, run.job_id, owner.pid, owner.host, owner.nonce, owner.start ?? null, now());
         this.db.query(
           `UPDATE runs SET state = 'running', reason = NULL, owner_pid = ?, owner_host = ?, owner_nonce = ?, owner_start = ?,
              updated = ? WHERE run_id = ?`,
@@ -1207,7 +1234,7 @@ export class Queue {
   /** The rows a claim decides on: the run, its checkout's lock, and the run holding that lock. */
   private claimView(runId: string): ClaimView {
     const run = this.must(runId);
-    const lock = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(run.checkout) as LockRow | null;
+    const lock = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(lockKeyOf(run)) as LockRow | null;
     const held = lock?.kind === "run" && lock.run_id !== runId ? this.get(lock.run_id) : null;
     return { run, lock, held };
   }
@@ -1243,7 +1270,7 @@ export class Queue {
       if (w.mayRun) out.holderLive = true;
       out.holderWorker = w.worker;
     }
-    const defn = held ? this.definition(held) : this.definition({ job_id: lock.job_id, checkout: lock.checkout });
+    const defn = held ? this.definition(held) : this.definition({ job_id: lock.job_id, checkout: checkoutKey(lock.root) });
     out.launch = !out.holderLive && defn?.target?.skill === LAUNCH_SKILL;
     // A stale launch-run holder may have started a detached engine: probe before taking over (AD: one engine per checkout).
     if (out.launch) out.engine = await this.probes.engineLive(held ? engineRoot(held) : this.lockRoot(lock), null);
@@ -1398,14 +1425,14 @@ export class Queue {
 
   /** Put an engine holder on the checkout lock for run `run` (inside a transaction). The lock stays
    * keyed by the checkout; its `root` is where the engine is probed (Story 27.1: the run's worktree). */
-  private handToEngine(run: Pick<QueueRun, "checkout" | "root" | "run_id" | "job_id"> & { worktree?: string | null }, engineRunId: string | null): void {
+  private handToEngine(run: Pick<QueueRun, "checkout" | "root" | "run_id" | "job_id"> & { worktree?: string | null; prefix?: string | null; lock_checkout?: string | null }, engineRunId: string | null): void {
     this.db.query(
       `INSERT INTO locks (checkout, root, kind, run_id, job_id, owner_pid, owner_host, owner_nonce, owner_start, engine_run_id, acquired)
        VALUES (?, ?, 'engine', ?, ?, NULL, NULL, NULL, NULL, ?, ?)
        ON CONFLICT (checkout) DO UPDATE SET kind = 'engine', root = excluded.root, run_id = excluded.run_id, job_id = excluded.job_id,
          owner_pid = NULL, owner_host = NULL, owner_nonce = NULL, owner_start = NULL,
          engine_run_id = excluded.engine_run_id, acquired = excluded.acquired`,
-    ).run(run.checkout, engineRoot(run), run.run_id, run.job_id, engineRunId, now());
+    ).run(lockKeyOf(run), engineRoot(run), run.run_id, run.job_id, engineRunId, now());
   }
 
   /** The launch-orphan rule over this queue's probes (`probeLaunchEngine`). */
@@ -1445,7 +1472,7 @@ export class Queue {
       this.db.query(
         `UPDATE runs SET engine_run_id = ?, owner_pid = NULL, owner_host = NULL, owner_nonce = NULL, owner_start = NULL, updated = ? WHERE run_id = ?`,
       ).run(engineRunId, now(), runId);
-      const held = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(run.checkout) as LockRow | null;
+      const held = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(lockKeyOf(run)) as LockRow | null;
       let lock: unknown = "not held";
       if (!held || held.run_id === runId) { this.handToEngine(run, engineRunId); lock = { handed_to_engine: engineRunId }; }
       this.event(runId, "launched", run.state, run.state, { engine_run_id: engineRunId, ...detail, lock });
@@ -1573,7 +1600,7 @@ export class Queue {
   async closeOutBlocker(run: QueueRun, self: Owner = selfOwner(), opts: { asDriver?: boolean } = {}): Promise<string | undefined> {
     // `asDriver`: asked by the run's own driver (a drive that threw), which is not what may still work the worktree.
     if (!opts.asDriver) {
-      const lock = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(run.checkout) as LockRow | null;
+      const lock = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(lockKeyOf(run)) as LockRow | null;
       if (lock?.kind === "run" && lock.run_id === run.run_id && this.ownerLive(ownerOf(lock), self)) return "its driver is live";
       if (!isTerminal(run.state) && this.ownerLive(ownerOf(run), self)) return "its driver is live";
     }
@@ -1593,7 +1620,7 @@ export class Queue {
     return this.db.transaction(() => {
       const run = this.get(runId);
       if (!run || !isTerminal(run.state)) return false;
-      if (!this.db.query("DELETE FROM locks WHERE checkout = ? AND run_id = ? AND kind = 'engine'").run(run.checkout, runId).changes) return false;
+      if (!this.db.query("DELETE FROM locks WHERE checkout = ? AND run_id = ? AND kind = 'engine'").run(lockKeyOf(run), runId).changes) return false;
       this.event(runId, "lock-released", run.state, run.state, { why });
       return true;
     }).immediate();
@@ -1632,7 +1659,7 @@ export class Queue {
       // The lock as the paused run held it, recorded on the move so `returnToPause` can put it back.
       let lock: { before: LockRow | null; taken: boolean } | undefined;
       if (kind === "close-out") {
-        const held = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(run.checkout) as LockRow | null;
+        const held = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(lockKeyOf(run)) as LockRow | null;
         lock = { before: held && held.run_id === runId ? held : null, taken: !held || held.run_id === runId };
         this.db.query(
           `INSERT INTO locks (checkout, root, kind, run_id, job_id, owner_pid, owner_host, owner_nonce, owner_start, engine_run_id, acquired)
@@ -1642,7 +1669,7 @@ export class Queue {
              owner_nonce = excluded.owner_nonce, owner_start = excluded.owner_start,
              engine_run_id = NULL, acquired = excluded.acquired
            WHERE locks.run_id = excluded.run_id`,
-        ).run(run.checkout, run.root, runId, run.job_id, self.pid, self.host, self.nonce, self.start ?? null, now());
+        ).run(lockKeyOf(run), run.root, runId, run.job_id, self.pid, self.host, self.nonce, self.start ?? null, now());
       }
       this.event(runId, kind, "paused", "running", { ...detail, owner: ownerDetail(self), ...(lock ? { lock } : {}) });
       return this.must(runId);
@@ -1664,17 +1691,17 @@ export class Queue {
       let restored: unknown;
       const lock = move?.kind === "close-out" ? (JSON.parse(move.detail ?? "{}") as Record<string, any>).lock : undefined;
       if (lock && lock.taken) {
-        const held = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(run.checkout) as LockRow | null;
+        const held = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(lockKeyOf(run)) as LockRow | null;
         if (held && held.run_id === runId && held.kind === "run") {
           const b = lock.before as LockRow | null;
           if (b) {
             this.db.query(
               `UPDATE locks SET root = ?, kind = ?, run_id = ?, job_id = ?, owner_pid = ?, owner_host = ?, owner_nonce = ?, owner_start = ?,
                  engine_run_id = ?, acquired = ? WHERE checkout = ?`,
-            ).run(b.root, b.kind, b.run_id, b.job_id, b.owner_pid, b.owner_host, b.owner_nonce, b.owner_start, b.engine_run_id, b.acquired, run.checkout);
+            ).run(b.root, b.kind, b.run_id, b.job_id, b.owner_pid, b.owner_host, b.owner_nonce, b.owner_start, b.engine_run_id, b.acquired, lockKeyOf(run));
             restored = { kind: b.kind, engine_run_id: b.engine_run_id };
           } else {
-            this.db.query("DELETE FROM locks WHERE checkout = ?").run(run.checkout);
+            this.db.query("DELETE FROM locks WHERE checkout = ?").run(lockKeyOf(run));
             restored = "released (none held before the close-out)";
           }
         }
@@ -1748,7 +1775,7 @@ export class Queue {
     this.db.transaction(() => {
       const run = this.get(runId);
       if (!run || !isTerminal(run.state) || run.worker_pid != null) return;
-      if (!this.db.query("DELETE FROM locks WHERE checkout = ? AND run_id = ? AND kind = 'run'").run(run.checkout, runId).changes) return;
+      if (!this.db.query("DELETE FROM locks WHERE checkout = ? AND run_id = ? AND kind = 'run'").run(lockKeyOf(run), runId).changes) return;
       this.event(runId, "lock-released", run.state, run.state, { why: "its driver ended after the run was ended (no worker recorded)" });
     }).immediate();
   }
@@ -1938,21 +1965,21 @@ export class Queue {
          engine_run_id = ?, updated = ? WHERE run_id = ?`,
     ).run(state, reason ?? null, opts.keepEngine ? run.engine_run_id ?? opts.engineRunId ?? null : opts.engineRunId ?? null, now(), runId);
     const detail: Record<string, unknown> = { ...(opts.detail ?? {}) };
-    const held = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(run.checkout) as LockRow | null;
+    const held = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(lockKeyOf(run)) as LockRow | null;
     const hasWorker = run.worker_pid !== null && run.worker_pid !== undefined;
     if (opts.holdLock && (hasWorker || opts.driverLive) && held?.kind === "run" && held.run_id === runId) {
       // Its recorded worker may still run: the lock stays with the ended run (freed by `claim`/`recover`
       // once `recordedWorker` says it may no longer run — sbx: at its in-VM deadline).
       detail.lock = { held: opts.holdLock, ...(hasWorker && run.tier === "sbx" ? { until: new Date(this.sbxDeadline(run).ms).toISOString() } : {}) };
     } else if (opts.keepEngine) {
-      if (this.db.query("DELETE FROM locks WHERE checkout = ? AND run_id = ?").run(run.checkout, runId).changes) detail.lock = "released";
+      if (this.db.query("DELETE FROM locks WHERE checkout = ? AND run_id = ?").run(lockKeyOf(run), runId).changes) detail.lock = "released";
     } else if (opts.engineRunId !== undefined) {
       const lock = held;
       if (!lock || lock.run_id === runId) {
         this.handToEngine(run, opts.engineRunId);
         detail.lock = { handed_to_engine: opts.engineRunId ?? "unverified" };
       }
-    } else if (this.db.query("DELETE FROM locks WHERE checkout = ? AND run_id = ? AND kind = 'run'").run(run.checkout, runId).changes) {
+    } else if (this.db.query("DELETE FROM locks WHERE checkout = ? AND run_id = ? AND kind = 'run'").run(lockKeyOf(run), runId).changes) {
       detail.lock = "released";
     }
     this.event(runId, opts.kind, run.state, state, { ...(reason ? { reason } : {}), ...detail });
@@ -2099,7 +2126,7 @@ export class Queue {
             `UPDATE runs SET state = 'queued', reason = ?, owner_pid = NULL, owner_host = NULL, owner_nonce = NULL, owner_start = NULL,
                verb_started = NULL, verb_snapshot = NULL, updated = ? WHERE run_id = ?`,
           ).run(REQUEUED_REASON, now(), c.run_id);
-          this.db.query("DELETE FROM locks WHERE checkout = ? AND run_id = ? AND kind = 'run'").run(c.checkout, c.run_id);
+          this.db.query("DELETE FROM locks WHERE checkout = ? AND run_id = ? AND kind = 'run'").run(lockKeyOf(c), c.run_id);
           this.event(c.run_id, "requeued", c.state, "queued", {
             reason: REQUEUED_REASON, dead_owner: deadOwner(c), ...workerDetail,
             ...(requeueWhy ? { lookup: { ok: true, adopted: null, why: requeueWhy } } : {}),
@@ -2124,7 +2151,7 @@ export class Queue {
         // The takeover: owner = self, the lock re-owned (never released in between), a `resumed` event — one transaction.
         const took = this.db.transaction((): number | "changed" | string => {
           if (!unchanged(c, this.get(c.run_id))) return "changed";
-          const lock = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(c.checkout) as LockRow | null;
+          const lock = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(lockKeyOf(c)) as LockRow | null;
           if (lock && lock.run_id !== c.run_id) return `checkout lock held by ${lock.kind} ${lock.run_id}`;
           this.db.query(
             `UPDATE runs SET reason = NULL, owner_pid = ?, owner_host = ?, owner_nonce = ?, owner_start = ?, studio_run_id = ?,
@@ -2137,7 +2164,7 @@ export class Queue {
                job_id = excluded.job_id, owner_pid = excluded.owner_pid, owner_host = excluded.owner_host,
                owner_nonce = excluded.owner_nonce, owner_start = excluded.owner_start,
                engine_run_id = NULL, acquired = excluded.acquired`,
-          ).run(c.checkout, c.root, c.run_id, c.job_id, self.pid, self.host, self.nonce, self.start ?? null, now());
+          ).run(lockKeyOf(c), c.root, c.run_id, c.job_id, self.pid, self.host, self.nonce, self.start ?? null, now());
           const n = this.resumeCount(c.run_id) + 1;
           this.event(c.run_id, "resumed", c.state, c.state, {
             resume: n, reason: "supervisor restart", dead_owner: deadOwner(c), owner: ownerDetail(self), studio_run_id: studioRunId,
@@ -2222,15 +2249,15 @@ export class Queue {
     for (const k of kept) {
       if (k.worker_pid == null) {
         // Kept for its live driver (`end`'s `driverLive`): freed by that driver, or once it is dead.
-        const lock = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(k.checkout) as LockRow | null;
+        const lock = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(lockKeyOf(k)) as LockRow | null;
         if (lock && this.ownerLive(ownerOf(lock), self)) continue;
       }
       const settled = await this.recordedWorker(k, true);
       if (settled.mayRun) { (report.held ??= []).push({ run_id: k.run_id, worker: settled.worker! }); continue; }
       const freed = this.db.transaction(() => {
-        const lock = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(k.checkout) as LockRow | null;
+        const lock = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(lockKeyOf(k)) as LockRow | null;
         if (lock?.kind !== "run" || lock.run_id !== k.run_id) return false;
-        this.db.query("DELETE FROM locks WHERE checkout = ? AND run_id = ? AND kind = 'run'").run(k.checkout, k.run_id);
+        this.db.query("DELETE FROM locks WHERE checkout = ? AND run_id = ? AND kind = 'run'").run(lockKeyOf(k), k.run_id);
         this.event(k.run_id, "lock-released", k.state, k.state, { why: "the ended run's recorded worker may no longer run", ...(settled.worker ? { worker: settled.worker } : {}) });
         return true;
       }).immediate();

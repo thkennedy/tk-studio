@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { load as loadYaml } from "js-yaml";
 import { buildWorkerEnv, runProcess, type RunResult } from "./server";
-import type { QueueRun } from "./queue";
+import { servedRoot, type QueueRun } from "./queue";
 import type { WorktreeDeps } from "./worktree";
 
 /** The leg's result: what ran (`green` decides), or why it was skipped. */
@@ -34,7 +34,7 @@ export type HostVerifyRan = {
 export type HostVerifySkipped = { skipped: true; reason: string };
 export type HostVerifyResult = HostVerifyRan | HostVerifySkipped;
 
-type Run = Pick<QueueRun, "root" | "worktree" | "base_ref" | "tier">;
+type Run = Pick<QueueRun, "root" | "worktree" | "base_ref" | "tier" | "prefix">;
 type Deps = Pick<WorktreeDeps, "env" | "run">;
 
 /** The tracked config's path, as `git show <rev>:<path>` takes it. */
@@ -68,9 +68,11 @@ export async function verifyCommand(run: Run, deps: Deps = {}): Promise<{ comman
   if (run.tier !== "sbx") return { skipped: true, reason: "host-tier run: the worker ran on the host" };
   if (!run.worktree || !existsSync(run.worktree)) return { skipped: true, reason: "worktree gone" };
   const base = run.base_ref ?? "";
+  // Story 28.5: a project below its git top-level reads its own config at the base (`<prefix>.tk-studio/…`).
+  const configPath = `${run.prefix ?? ""}${CONFIG_PATH}`;
   let res: RunResult;
   try {
-    const args = ["show", `${base}:${CONFIG_PATH}`];
+    const args = ["show", `${base}:${configPath}`];
     // `LC_ALL=C`: git's "does not exist" message (the no-config skip below) is matched in English.
     const env = { ...(deps.env ?? process.env), LC_ALL: "C" };
     res = deps.run ? await deps.run("git", args, { cwd: run.root, timeoutS: 60, env })
@@ -78,7 +80,7 @@ export async function verifyCommand(run: Run, deps: Deps = {}): Promise<{ comman
   } catch (e) { return { skipped: true, reason: `config unreadable: git show: ${clip(message(e))}` }; }
   if (res.exit !== 0) {
     const err = `${res.stderr}${res.stdout}`;
-    if (/does not exist|exists on disk, but not in/i.test(err)) return { skipped: true, reason: `no ${CONFIG_PATH} at ${base}` };
+    if (/does not exist|exists on disk, but not in/i.test(err)) return { skipped: true, reason: `no ${configPath} at ${base}` };
     return { skipped: true, reason: `config unreadable: git show exited ${res.exit}: ${clip(err)}` };
   }
   let config: unknown;
@@ -125,7 +127,7 @@ const TIMED_OUT = / timed out after [\d.]+s \(process tree killed\)/;
 export async function hostVerify(run: Run, guardS: number, deps: Deps = {}): Promise<HostVerifyResult> {
   const cmd = await verifyCommand(run, deps);
   if ("skipped" in cmd) return cmd;
-  const cwd = run.worktree!;
+  const cwd = servedRoot(run)!; // Story 28.5: the root the run serves (`<worktree>/<prefix>`)
   const env = buildWorkerEnv(deps.env ?? process.env);
   const started = Date.now();
   const ran = (r: Partial<HostVerifyRan> & { exit: number | null; stdout?: string; stderr?: string }): HostVerifyRan => ({
