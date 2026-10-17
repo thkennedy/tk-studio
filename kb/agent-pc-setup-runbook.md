@@ -604,7 +604,8 @@ moved into `apps/supervisor` (AD-21, Story 28.3), the one sandbox
 `claude-tk-studio` mounts `C:\GitHub\tk-studio` read-write and serves both
 loops: the plugin's (the repository root) and the supervisor's (the nested
 project `apps/supervisor`). It needs no second, read-only tk-studio mount:
-`TK_STUDIO_ROOT` lies inside the one mount.
+`TK_STUDIO_ROOT` lies inside the one mount. The cut-over to this layout was
+the merge of PR #118 through protected `main` on 2026-10-16 (Epic 28).
 
 ```powershell
 cd $HOME
@@ -951,8 +952,9 @@ bun test
 ```
 
 The tk-studio clone (§3) already holds it; there is no separate clone for
-the supervisor. Keep the old `C:\GitHub\tk-studio-supervisor` clone on the
-box for now: the §4.2 environment script still needs it.
+the supervisor. The old `C:\GitHub\tk-studio-supervisor` folder stays on the
+box: the §4.2 environment script still reads it, and archiving
+`thkennedy/tk-studio-supervisor` on GitHub removes nothing locally.
 
 Then open `claude` once in `C:\GitHub\tk-studio\apps\supervisor`, accept "Yes,
 I trust this folder", and `/exit`. Claude Code applies a project's
@@ -1013,13 +1015,15 @@ PowerShell 7 terminal. It generates the token and the topic and keeps them on
 a re-run; `-ShowToken` prints the token once, for the phone, and `-WithTls` fetches
 the Tailscale certificate and sets the TLS variables (§4.5).
 
-**The script still knows only the old clone.** The move into
-`apps/supervisor` (Story 28.3) left `set-supervisor-env.ps1` unchanged. It
-still points at `C:\GitHub\tk-studio-supervisor`, stops with `missing:` when
-that folder is absent, and writes the Startup shortcut at the old clone's
-`start.ps1`. So, until Story 28.4 rules on the old clone:
+**The script knows only the old clone.** The cut-over (Epic 28) left
+`set-supervisor-env.ps1` unchanged, and the User environment with it
+(`TK_STUDIO_ROOT` is still the outer root `C:\GitHub\tk-studio`). The script
+points at `C:\GitHub\tk-studio-supervisor`, stops with `missing:` when that
+folder is absent, and writes the Startup shortcut at the old clone's
+`start.ps1`. So:
 
-- keep `C:\GitHub\tk-studio-supervisor` on the box, or the script stops;
+- keep the local `C:\GitHub\tk-studio-supervisor` folder on the box, or the
+  script stops (archiving the GitHub repository removes nothing locally);
 - after every run, retarget the shortcut at
   `C:\GitHub\tk-studio\apps\supervisor\start.ps1` as §4.3 shows (or run the
   script with `-NoShortcut` and make the §4.3 shortcut by hand).
@@ -1041,8 +1045,15 @@ Put a shortcut in `shell:startup` (Win+R, `shell:startup`) with this target:
 wt.exe -w studio nt --title supervisor pwsh -NoExit -File C:\GitHub\tk-studio\apps\supervisor\start.ps1
 ```
 
-`set-supervisor-env.ps1` (§4.2) still writes this shortcut at the old clone's
-`start.ps1`. After running it, set the target back to the line above.
+Its "Start in" folder is `C:\GitHub\tk-studio\apps\supervisor`.
+`set-supervisor-env.ps1` (§4.2) writes this shortcut at the old clone's
+`start.ps1`. After running it, set the target back to the line above, or run
+it with `-NoShortcut`. `tk-studio doctor` reads the shortcut while it points
+elsewhere (§7): at the old clone it fails `supervisor-root`; at a folder that
+is no source checkout (a loose folder, or one with no `.tk-studio` of its
+own) the `supervisor` check finds no checkout and fails (`no supervisor slot
+… and no source checkout`) unless a slot is installed; and at a `start.ps1`
+outside its "Start in" folder, or a missing one, it fails `startup-shortcut`.
 
 Add a second tab for `hermes dashboard` (§3.7). `start.ps1` prints the same
 command with the repo path filled in, then:
@@ -1109,6 +1120,30 @@ once:
 There is no sign-out: a session ends at its expiry, or rotate
 `TK_SUPERVISOR_SESSION_SECRET` and restart to end every session at once. The
 certificate renews itself (§4.7): nothing needs restarting by hand.
+
+**After the cut-over (Epic 28).** Once the Startup shortcut points at
+`C:\GitHub\tk-studio\apps\supervisor\start.ps1` (§4.3) and
+`bun install --frozen-lockfile` has run in `apps\supervisor` (§4.1):
+
+1. Run `tk-studio doctor` on the box. `supervisor-root`,
+   `supervisor-registry`, `supervisor-trust` and `startup-shortcut` all
+   `pass` (§7).
+2. Start the supervisor tab from the console (the shortcut, or sign out and
+   in) from its new root.
+3. From another device on the tailnet,
+   `curl -H "Authorization: Bearer <token>" http://<tailscale-ip>:8787/status`
+   (or, with the TLS variables set, `https://<TLS_NAME>:8787/status`)
+   answers JSON.
+4. Queue one job and drive it to a guarded end (a refused or completed run,
+   never one left running): from `apps\supervisor`,
+   `bun src/cli.ts run studio-health --directory C:\GitHub\tk-studio`, or
+   `POST /jobs` with the bearer header and body
+   `{"project": "<id>", "job": "<job>"}`.
+5. Record both results, the `/status` answer and the job's end, in the
+   Epic 28 loop PR (branch `loop/epic-28`) that carries Story 28.4.
+
+`TK_STUDIO_ROOT`, the `TK_SUPERVISOR_*` variables and
+`set-supervisor-env.ps1` stay as they are: the cut-over changes none of them.
 
 ### 4.6 What runs where
 
@@ -1228,7 +1263,16 @@ skills-dir plugin against the roster, the per-user store, `sbx daemon status`
 (never another sbx command), folder trust for every registered root, long
 paths, the PATH launcher, the Tailscale certificate's age, the supervisor's
 slot or checkout and whether `/status` answers, studio-web, leftovers from an
-interrupted install or update, and Hermes' `auth.adopt_external_logins`.
+interrupted install or update, and Hermes' `auth.adopt_external_logins`. On
+Windows it also checks the cut-over (Epic 28): `supervisor-root` (the
+shortcut's working directory is the nested root `apps\supervisor`, not a
+repository of its own), `supervisor-registry` (the registry's `supervisor`
+root agrees with it), `supervisor-trust` (the nested root is trusted itself;
+trust has no inheritance, §4.1) and `startup-shortcut` (the `.lnk`'s
+Arguments run `start.ps1` in its working directory, §4.3). The first three
+appear only when the shortcut runs a source checkout, and the registry and
+trust checks are `skipped` until `supervisor-root` passes; a slot box shows
+`startup-shortcut` alone, `skipped` when the roster ships no supervisor.
 Doctor is read-only. The table keeps only what the CLI cannot check.
 
 | Check | Command | Pass looks like |

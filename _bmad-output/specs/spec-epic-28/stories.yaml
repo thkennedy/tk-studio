@@ -152,4 +152,9 @@
     the spec folder; the engine resolves it by the glob
     `28-5-one-checkout-lock-for-a-nested-project-and-its-repository-*.md`, and a file
     named `28-5-one-checkout-lock-for-a-nested-project-and-its-repository.md` is read as
-    pending (loop deficiency 1, story 21-6).
+    pending (loop deficiency 1, story 21-6). Oversize (planner, 2026-10-17): the
+    plan's Files list (13 files) is already past band L; halt and record it if the
+    Files list grows past plans/28-5.md "Files" (that is the operator's
+    bmad-correct-course, never a split decided here). Keep `checkout` as the job's
+    project-root identity and add the lock key beside it (plans/28-5.md Code Map,
+    the planner's ruling).
