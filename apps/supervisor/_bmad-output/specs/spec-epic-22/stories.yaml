@@ -1,0 +1,136 @@
+# stories.yaml: Epic 22 of this project, transcribed 1:1 from _bmad-output/planning-artifacts/epics.md
+# by .bmad-loop/plugins/studio-pipeline/transcribe.py on 2026-09-28. The epics document is
+# the plan; the studio gate may append remediation entries (`<key>-r<n>`) and revise
+# UNSTARTED entries' invoke_dev_with, nothing else.
+#
+# Operator, 2026-09-28: Story 22.4 (the runbook describes the supervisor as built) is not
+# listed. It is a tk-studio kb story (the epic narrative: "tk-studio kb (Story 22.4)"), and
+# the engine sandbox mounts tk-studio read-only. It is built in tk-studio after 22.1-22.3.
+
+- id: "22-1-the-api-answers-on-the-tailnet-only"
+  title: "The API Answers on the Tailnet Only"
+  description: >-
+    I want the supervisor's HTTP API on the tailnet address behind a bearer token, So
+    that I can submit, watch, and cancel runs from the phone, iPad, or main PC.
+    Canonical: ST-007.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 22.1: The
+    API Answers on the Tailnet Only", the authoritative specification (user story and
+    acceptance criteria). Read the epic's own narrative (the paragraphs under "## Epic
+    22:") for scope, rulings and the repo the story targets; transcribe the story into
+    the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/22-1.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass implementer.model and reviewers.model
+    explicitly on every subagent launch. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result.
+    Replan (21-3 reconcile, 2026-09-28): API run ids are queue run ids. Answers also
+    carry `studio_run_id`. Cancel ends the queue run `cancelled` through a `Queue.end`
+    transition with its event, and the studio run through `jobrun cancel` or launch
+    `stop`.
+    Replan (21-4 reconcile, 2026-09-28): `POST /jobs` calls the same submit path
+    (`submitJob` resolution, then `enqueue`); each named refusal (`HostBypassRefused`,
+    `TierRefused`, `SbxSandboxMissing`, `SupervisorConfigInvalid`, `VmPathUnderivable`)
+    maps to 400 with its name, and no run is queued. Keep the registry root from
+    `validate()` on any drive.
+    Replan (21-6 reconcile, 2026-09-28): `/events` and `/runs/{id}` pass event kinds and
+    details through as stored, never a fixed list (new kinds: `accounted`, `woke`,
+    `session`, `worker`, `recovering`, `lock-released`). A `POST /jobs` on a checkout
+    whose lock an ended run still keeps waits in `queued` naming that holder. Cancel
+    goes through `Queue.end` and the recorded-worker rule (`Queue.recordedWorker`, the
+    in-VM deadline on sbx), never a bare lock release. A silent exit ends `partial` with
+    `MISSING_STATUS_BLOCK; <cause>`.
+    Replan (operator, 2026-09-28): write the story spec as stories/<this entry's
+    id>-<slug of the title>.md. The engine resolves a spec by the glob <id>-*.md, and a
+    file named <id>.md is read as pending (story 21-6).
+
+- id: "22-2-a-read-only-status-page"
+  title: "A Read-Only Status Page"
+  description: >-
+    I want a small server-rendered page over the queue and `~/.tk-studio`, So that I can
+    see what the box is doing at a glance while the studio plugin still grows no UI.
+    Canonical: ST-008.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 22.2: A
+    Read-Only Status Page", the authoritative specification (user story and acceptance
+    criteria). Read the epic's own narrative (the paragraphs under "## Epic 22:") for
+    scope, rulings and the repo the story targets; transcribe the story into the spec's
+    intent contract and never re-derive, generalise or extend it. Plan: plans/22-2.md
+    when present (its Code Map is the investigation). Project rules and the verify gate:
+    the studio customization (_bmad/custom/bmad-build-auto.toml). Routing:
+    .bmad-loop/routing.current.json; pass implementer.model and reviewers.model
+    explicitly on every subagent launch. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result.
+    Replan (21-6 reconcile, 2026-09-28): show `held` runs and ended runs that keep a
+    lock, each with the lock holder and the deadline. Show a run's resume count and its
+    cost summed across resumed iterations. Reasons can be long (`orphaned: supervisor
+    restart; guard: ...`): wrap them, never cut them.
+    Replan (22-1 reconcile, 2026-09-28): read kept locks through `Queue.locks()`/`LockRow`
+    and the holder as `/status` names it; never query the locks table beside them. Show
+    a deadline only where one exists (an sbx worker's in-VM deadline); a lock kept for
+    a live driver after a cancel (`driverLive`) shows its holder and "kept for its live
+    driver". Render the `worker-kill` and `lock-released` kinds as stored, like any
+    other kind.
+    Replan (operator, 2026-09-28): write the story spec as stories/<this entry's
+    id>-<slug of the title>.md. The engine resolves a spec by the glob <id>-*.md, and a
+    file named <id>.md is read as pending (story 21-6).
+
+- id: "22-3-the-supervisor-starts-itself-at-logon"
+  title: "The Supervisor Starts Itself at Logon"
+  description: >-
+    I want the supervisor console-hosted at logon with the box's run hygiene built in,
+    So that it is always up after a reboot and never runs under the conditions that hang
+    `claude -p`. Canonical: ST-009.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 22.3: The
+    Supervisor Starts Itself at Logon", the authoritative specification (user story and
+    acceptance criteria). Read the epic's own narrative (the paragraphs under "## Epic
+    22:") for scope, rulings and the repo the story targets; transcribe the story into
+    the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/22-3.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass implementer.model and reviewers.model
+    explicitly on every subagent launch. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result.
+    Replan (21-6 reconcile, 2026-09-28): `start.ps1` sets
+    `TK_SUPERVISOR_TRANSCRIPT_BACKUP` to the nightly backup's `claude-projects` folder
+    and starts the supervisor through the path that calls `recoverWithResume`, once,
+    before the pacer's first tick.
+    Replan (operator, 2026-09-28): this story owns DW-5 and DW-10 in deferred-work.md.
+    Enable the CLI end-to-end suites on win32 (`canRunE2E`, the process-start probe) and
+    make them green on the Windows host, the production host, including the
+    kill-and-restart and the backup-restore cases. The engine sandbox is Linux: write
+    the win32 paths so they run there, record under `unverifiable-here` what only the
+    Windows host can confirm, and never start the supervisor from a Claude desktop-app
+    session. Close neither DW entry until the suites have run green on the Windows host.
+    Replan (operator, 2026-09-28): write the story spec as stories/<this entry's
+    id>-<slug of the title>.md. The engine resolves a spec by the glob <id>-*.md, and a
+    file named <id>.md is read as pending (story 21-6).
+    Oversize (22-2 gate, 2026-09-29): plans/22-3.md lists 11 files, past the L band. If
+    the Files list grows past those 11, halt and record it rather than widen the story.
+
+- id: "22-5-sign-in-from-the-phone"
+  title: "Sign In from the Phone"
+  description: >-
+    I want the status page to sign me in with the token, with Google, or with GitHub,
+    and keep me signed in with a cookie, So that I can watch and cancel runs from a
+    phone browser, which cannot send the bearer header (DW-20).
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 22.5: Sign
+    In from the Phone", the authoritative specification (user story and acceptance
+    criteria). Read the epic's own narrative (the paragraphs under "## Epic 22:") for
+    scope, rulings and the repo the story targets; transcribe the story into the spec's
+    intent contract and never re-derive, generalise or extend it. Plan: plans/22-5.md
+    when present (its Code Map is the investigation). Project rules and the verify gate:
+    the studio customization (_bmad/custom/bmad-build-auto.toml). Routing:
+    .bmad-loop/routing.current.json; pass implementer.model and reviewers.model
+    explicitly on every subagent launch. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result.
+    Rule (operator, 2026-10-06): write the story spec as stories/<this entry's
+    id>-<slug of the title>.md. The engine resolves a spec by the glob <id>-*.md, and a
+    file named <id>.md is read as pending (story 21-6).
+    Decided (operator, 2026-10-06): the constraints in
+    _bmad-output/specs/spec-epic-22/operator-decisions.md section 7 are part of this
+    story (HTTPS via the Tailscale certificate, operator-registered OAuth apps,
+    allow-listed identities, CSRF on cancel, bind unchanged, secrets dropped from logs,
+    pages and worker environments). Sections 1 to 6 there are decided too.
