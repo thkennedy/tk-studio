@@ -265,10 +265,12 @@ uv run tools/release_archive.py run --app supervisor --version X.Y.Z --channel l
 
 The zip is `apps/supervisor` at the tag, and the entry written into
 `latest.json` is `{tag, url, sha256}` on `thkennedy/tk-studio` with no
-`source`. Then copy that entry into `stable.json` by PR, and run
-`tk-studio update --channel latest` (and `--channel stable` once the PR
-lands) on the box to check every component still resolves against the
-rosters' digests. Never hand-edit a roster to drop `source`.
+`source`. Then promote it by PR: copy that whole written `supervisor`
+entry from `latest.json` into `stable.json` verbatim (the promotion route
+above), and run `tk-studio update --channel latest` (and `--channel stable`
+once the PR lands) on the box to check every component still resolves
+against the rosters' digests. Never hand-edit a roster's entry merely to
+delete `source` without a cut.
 Unverifiable here: the engine records these and never runs them.
 
 ### Operator step: the 0.3.0 release (25.7 AC2)

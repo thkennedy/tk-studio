@@ -4,7 +4,7 @@ type: 'chore'
 created: '2026-10-17'
 status: 'done'
 review_loop_iteration: 0
-followup_review_recommended: true
+followup_review_recommended: false
 baseline_commit: '4236e6a65c39a5b9834be779f2bc4789efed9c31'
 baseline_revision: '4236e6a65c39a5b9834be779f2bc4789efed9c31'
 deviation_score: 1
@@ -12,7 +12,14 @@ context:
   - '{project-root}/_bmad-output/specs/spec-epic-28/plans/28-3.md'
   - '{project-root}/_bmad-output/planning-artifacts/briefs/adr-repository-structure-2026-10-09.md'
 warnings: ['oversized']
-deferred: []
+deferred:
+  - summary: >-
+      A supervisor-queued run of the nested project apps/supervisor serves the outer tk-studio root, not apps/supervisor, so AC3's live clause ("the project served is the nested root and its verify.host is the one read at the run's base") cannot pass until a fix under apps/supervisor/src lands; that fix needs an operator correct-course to give it a story (28.5 or a new one).
+    evidence: |-
+      The supervisor cuts `git worktree add` of the whole repository from the project checkout and makes the worktree root the run's payload.directory and sbx VM path; nothing in apps/supervisor/src maps a project that sits below its git top-level (no --show-prefix / subpath handling). Pre-existing Epic 27 code, untouched by this story; the intent contract's Never forbids editing apps/supervisor/src. Consult ruling 2026-10-17 (high-severity-finding): defer under DEFERRAL DISCIPLINE (a).
+    location: >-
+      apps/supervisor/src/worktree.ts:110-111, :254; apps/supervisor/src/cli.ts:79, :373
+    severity: high
 ---
 
 <intent-contract>
@@ -103,6 +110,20 @@ All anchors re-checked on the merged tree at `4236e6a`. Full investigation: `pla
   - `[low]` `[patch]` the two-loop note in §3.8 now says the `engine-gone` stamp may record the other loop's engine, and to run one loop at a time until Story 28.5.
   - `[low]` `[patch]` added positive ROOT tests: `launch-epic.sh` and `resume-run.sh` get past the check with only `.tk-studio/config.yaml`, or with only `.bmad-loop/`.
 
+### 2026-10-17 — Review pass (follow-up)
+- note: follow-up pass on the committed story (4e63827), review_loop_iteration reset to 0; both layers ran (band L); diff 4236e6a..working tree minus the spec, handed over as a scratchpad file path (753 lines).
+- intent_gap: 0
+- bad_spec: 0
+- patch: 3 (high 0, medium 0, low 3)
+- defer: 1 (high 1)
+- reject: 0
+- note: the blind hunter's `--repo` finding and the edge-case hunter's single finding were deduplicated (same action: guard the root fallback). Its premise that the merged `supervisor--v0.1.0` tag lacks `apps/supervisor` is false (`git cat-file -t supervisor--v0.1.0:apps/supervisor` = `tree`), so only the mis-minted-tag case was patched.
+- note: the deferral meets DEFERRAL DISCIPLINE (a), per the consult ruling (high-severity-finding).
+- addressed_findings:
+  - `[low]` `[patch]` `release_archive.py` `--repo` root fallback could zip a whole tk-studio tree as the supervisor when its tag lacked `apps/supervisor`. It now refuses before any `gh` call when `<tag>:plugins/tk-studio` is a tree. New test `test_foreign_tk_studio_tag_without_the_subtree_is_refused`.
+  - `[low]` `[patch]` the offline-install runbook's next-cut step read as "copy into stable.json by PR" against "never hand-edit a roster to drop source". It now says the PR copies the cut's whole written entry verbatim (the promotion route), and never to hand-edit an entry merely to delete `source` without a cut.
+  - `[low]` `[patch]` runbook §3.8 called two loops in one sandbox "harmless", against §4's "Engine hold" row. It now says the hold only lengthens the wait, names the shared checkout and `.git` as the hazard, and points to the §4 row until Story 28.5.
+
 ## Design Notes
 
 unverifiable-here (operator/attended; record verbatim in the Auto Run Result):
@@ -141,8 +162,13 @@ Consult ruling (pass 1): all four entries accepted at score 1. The plan's Verify
 ## Consult Log
 
 - 2026-10-17T03:11Z — trigger: deviation-gt-0 — question: accept the four pass-1 deviations (check-ignore precedence, `**/` mirroring, FOREIGN_SUBTREES, rewritten subtree test)? — ruling: accept-deviation score 1 — do: accept all four, keep the tree; restate plan Verify :97 as check-ignore with the nested file set aside, never edit apps/supervisor/.gitignore — rule candidate: When a plan keeps a nested .gitignore next to mirrored root entries, its Verify uses git status --ignored parity (or check-ignore with the nested file set aside), and slash-less nested patterns are mirrored as <prefix>/**/<pattern>.
+- 2026-10-17T03:26Z — trigger: high-severity-finding — question: follow-up review found the supervisor serves a worktree's top level (apps/supervisor/src/worktree.ts:110-111, :254; cli.ts:373), so AC3's nested-root clause fails at the live run; defer or intent_gap? — ruling: apply — do: route as defer (high) under DEFERRAL DISCIPLINE (a), naming the defect and that AC3's live clause needs an operator correct-course giving the src fix a story; keep 4e63827, record AC3 live run unverifiable-here with the defect in residual risks, do not edit apps/supervisor/src; finish done and state AC3 is known to fail at the attended run — rule candidate: When a story's AC names live behaviour that depends on code the intent contract's Never puts off-limits, and review finds that code defective but not changed by the story, route it defer (a), naming the blocked AC and "needs operator correct-course"; never intent_gap.
 
 ### pass 2 (2026-10-17, implementer, review fixes)
+
+DEVIATIONS: none (score 0)
+
+### pass 3 (2026-10-17, implementer, follow-up review fixes)
 
 DEVIATIONS: none (score 0)
 
@@ -152,51 +178,50 @@ Status: done
 
 Studio: activated as developer; working set bmm, tea, bmb, bmad-loop, gds; drift clean; routing implementer=claude-opus-5-5 reviewers=claude-opus-5-5 consult=claude-opus-5-5; knowledge spine absent
 
-**Summary:** The merged tree now points only at itself, per ADR §5 step 3 and the second prefix in ADR §6.
-- `.gitignore`: the root file mirrors the supervisor's ignore entries.
+**Summary:** This was a follow-up review of the committed story (4e63827). The merged tree already pointed only at itself, and this pass hardened it:
+- The `--repo` root fallback in `release_archive.py` now refuses a tk-studio tree whose tag lacks `apps/supervisor`.
+- Two runbook passages that read as contradictions are clarified.
+- One pre-existing supervisor defect that blocks AC3's live clause is deferred for an operator correct-course.
+
+The earlier pass's work is unchanged:
+- `.gitignore`: the root file carries the mirrored supervisor ignore entries.
 - Docs: README, runbook §3.8 and §4, and the offline-install runbook point at `apps/supervisor`.
-- Release: `release_archive.py --app supervisor` cuts from `apps/supervisor` in this repository. The refusal is gone, and a foreign `--repo` still cuts `.` for historical tags.
-- Sandbox: one-mount usage, with the ROOT values and a named exit-2 refusal in `launch-epic.sh` and `resume-run.sh`. Provisioning also runs the skills-mount check from the nested project.
+- Release: `release_archive.py --app supervisor` cuts from `apps/supervisor`.
+- Sandbox: one-mount usage, with the ROOT values and the named exit-2 refusal.
 
-**Files:**
-- `.gitignore`: the supervisor's ignore entries under `apps/supervisor/`, with slash-free entries written as `apps/supervisor/**/`.
-- `README.md`: the repository map names `apps/supervisor`.
-- `kb/agent-pc-setup-runbook.md`:
-  - §3.8: one sandbox `claude-tk-studio`, `claude-tk-studio-supervisor` retired, the two ROOT values, the nested skills-mount check, the two-loop hazard. Other projects keep the two-mount form.
-  - §4: `apps/supervisor` paths, install, trust and Startup target, plus the `set-supervisor-env.ps1` caveat.
-- `kb/offline-install-runbook.md`: the release-table row, and the next supervisor cut (no `--repo`). The 0.1.0 section is kept as history.
-- `tools/release_archive.py`: subtree `apps/supervisor`, refusal and EP-31 comment removed, and the foreign-repo subtree probe (`FOREIGN_SUBTREES` fallback).
-- `tools/sbx-engine/launch-epic.sh`, `resume-run.sh`: the ROOT values in the headers, and a named refusal (exit 2).
-- `tools/sbx-engine/provision-engine.sh`: one-mount usage, and the nested `check-skills-mount.sh` run.
-- `plugins/tk-studio/lib/tests/test_release_roster.py`: an in-repo cut with no `source` and subtree paths, a check that a missing tag fails only on the tag, a foreign tk-studio clone cut, and the rewritten subtree test.
-- `plugins/tk-studio/lib/tests/test_sbx_skills_mount.py`: the nested-directory listing, provisioning pins, and `EngineRootTests` (refusal and acceptance).
+**Files (this pass):**
+- `tools/release_archive.py`: the `--repo` fallback refuses when `<tag>:plugins/tk-studio` is a tree. The comment is updated, and the `source` logic is unchanged.
+- `plugins/tk-studio/lib/tests/test_release_roster.py`: `test_foreign_tk_studio_tag_without_the_subtree_is_refused` (no `gh` call, no archive, rosters untouched).
+- `kb/offline-install-runbook.md`: the next-cut step promotes the whole written entry verbatim. Never hand-edit an entry merely to delete `source`.
+- `kb/agent-pc-setup-runbook.md` §3.8: the two-loop paragraph agrees with §4's "Engine hold" row and names the shared checkout as the hazard.
 
-**Review:** blind-hunter plus edge-case-hunter, band L. 5 patches applied (medium 3, low 2), 0 deferred, 0 rejected.
-**Follow-up review recommended:** true. Patched findings: high 0, medium 3, low 2. Score 3×3 + 2 = 11, which is 5 or more.
+(Earlier pass, 4e63827: `.gitignore`, `README.md`, both runbooks, `tools/release_archive.py`, `tools/sbx-engine/{launch-epic,resume-run,provision-engine}.sh`, `test_release_roster.py`, `test_sbx_skills_mount.py`.)
+
+**Review:** blind-hunter plus edge-case-hunter, band L. 3 patches applied (low 3), 1 deferred (high: AC3's nested root in the supervisor's worktree path), 0 rejected. The false premise in one finding (that the merged tag lacks the subtree) is noted in the triage log.
+**Follow-up review recommended:** false. Patched findings: high 0, medium 0, low 3. Score 3×0 + 3 = 3, which is below 5.
 
 **Verification** (re-run by this session after the patches):
-- `uv run python -m unittest discover tests`: 1332 tests, OK, skipped=1. `test_the_real_nested_copy_equals_the_render` now runs and passes.
+- `uv run python -m unittest discover tests`: 1333 tests, OK, skipped=1.
 - `uv run python ../contracts/conformance/runner.py run`: `ok: true`.
 - `uv run python tools/verify_host.py`: exit 0.
 - `release_archive.py run --app supervisor --version 0.1.1 --dry-run`: fails only on `tag supervisor--v0.1.1 not found`.
 - `config.py root --directory apps/supervisor`: `nested: true`, `project_id: supervisor`.
-- `bun test` from `apps/supervisor`: 860 tests, 0 fail.
-- `git check-ignore -v`: names the nested line while that file is present. The root lines were proven with the nested file set aside (consult ruling).
-- Pass-1 note from the implementer: a dry run at `supervisor--v0.1.0` from `apps/supervisor` reproduced the rosters' sha256 `76fbda66…ac6ef`.
+- `bun install --frozen-lockfile && bun test` from `apps/supervisor`: 860 tests, 0 fail, 5 skip.
+- `git check-ignore -v apps/supervisor/node_modules/x`: names the nested `.gitignore:3` while that file is present. The root lines were proven with it set aside (pass-1 consult ruling).
 
 **unverifiable-here (operator or attended):**
-- AC1, the rosters' `source` drop: tag `supervisor--vX.Y.Z` (X.Y.Z > 0.1.0) on `thkennedy/tk-studio` `main`, then `uv run tools/release_archive.py run --app supervisor --version X.Y.Z --channel latest`, then a PR into `stable.json`, then `tk-studio update --channel latest|stable` on the box.
+- AC1, the rosters' `source` drop: tag `supervisor--vX.Y.Z` (X.Y.Z > 0.1.0) on `thkennedy/tk-studio` `main`, then `uv run tools/release_archive.py run --app supervisor --version X.Y.Z --channel latest`, then a PR copying the entry verbatim into `stable.json`, then `tk-studio update --channel latest|stable` on the box.
 - AC2, the sandbox recreate: `sbx rm claude-tk-studio-supervisor`; `sbx create --skills readonly --name claude-tk-studio claude C:\GitHub\tk-studio`; `WITH_BUN=1 bash tools/sbx-engine/provision-engine.sh /c/GitHub/tk-studio /c/GitHub/tk-studio`.
 - AC2, the checkout-lock clause: Story 28.5.
-- AC3: a live supervisor run through the supervisor.
+- AC3, a live supervisor run through the supervisor. **It is known to fail at the attended run** until the deferred `apps/supervisor/src` fix lands: the run serves the worktree's top level, the outer root. That fix needs an operator correct-course to give it a story.
 - AC4: the Windows `uv run python tools/verify_host.py` and `cd apps\supervisor; bun install --frozen-lockfile; bun test`, plus one commit on `thkennedy/tk-studio-supervisor`'s README pointing at `tk-studio/apps/supervisor`.
 
 **Residual risks:**
-- `tools/agent-pc/set-supervisor-env.ps1` still hard-codes the old clone (CAP-14 keeps it unchanged), so the old clone must stay on the box until 28.4.
+- AC3: `apps/supervisor/src/worktree.ts:110-111`, `:254` and `cli.ts:79`, `:373` serve the worktree root. A supervisor-queued run of the nested project serves the outer tk-studio root (deferred, high, needs an operator correct-course).
+- `tools/agent-pc/set-supervisor-env.ps1` still hard-codes the old clone (CAP-14), so the old clone stays on the box until 28.4.
 - Two loops in one sandbox are not serialised until 28.5. The runbook says to run one at a time.
-- `bun install --frozen-lockfile` printed an EPERM linking typescript in this sandbox, but the tests still ran.
 
 DRIFT: check-ignore names the nested .gitignore line, root lines proven with the nested file moved aside — git's deeper-file precedence; the spec keeps the nested file — affects: none
 DRIFT: slash-free supervisor ignore entries written as apps/supervisor/**/<entry> — a plain prefix would anchor them and change their meaning — affects: none
-DRIFT: release_archive.py gains FOREIGN_SUBTREES for --repo cuts (probing <tag>:apps/supervisor first) — keeps the historical cut at subtree "." per the I/O matrix — affects: none
+DRIFT: release_archive.py gains FOREIGN_SUBTREES for --repo cuts (probing <tag>:apps/supervisor first, refusing a tk-studio tree without it) — keeps the historical cut at subtree "." per the I/O matrix — affects: none
 DRIFT: test_each_app_archives_its_subtree_at_its_tag rewritten, fake _run gains archive_from_disk — it pinned the pre-merge supervisor subtree — affects: none

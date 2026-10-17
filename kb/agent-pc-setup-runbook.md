@@ -645,13 +645,17 @@ sbx rm claude-tk-studio-supervisor
 `resume-run.sh` hold the sandbox while `pgrep -f "bmad-loop run"` (or
 `run|resume|resolve`) finds **any** engine in it. With a plugin run and a
 supervisor run both live in `claude-tk-studio`, each launcher holds for the
-other loop's engine too. That is harmless, just longer: the launcher returns
-when the last engine ends. So its `engine-gone` stamp records when the last
-engine in the sandbox ended, which may be the other loop's.
+other loop's engine too. The mutual hold itself only lengthens the wait: the
+launcher returns when the last engine ends, so its `engine-gone` stamp records
+when the last engine in the sandbox ended, which may be the other loop's.
 
-Run one loop at a time for now. Serialising the two loops on the one checkout
-is Story 28.5 and is not in force yet. Engines started by `launch-epic.sh` or
-`resume-run.sh` directly never pass through the supervisor's lock.
+The real hazard is the checkout: both engines work in the same checkout and
+the same `.git` (the repository root, and `apps/supervisor` inside it). So run
+one loop at a time, and do not run `launch-epic.sh` beside a supervisor run on
+the same sandbox (§4, the "Engine hold" row), until Story 28.5 serialises the
+two loops on the one checkout; it is not in force yet. Engines started by
+`launch-epic.sh` or `resume-run.sh` directly never pass through the
+supervisor's lock.
 
 *Every other project: one sandbox, two mounts.* A project outside this
 repository (a Godot game, for example) keeps the two-mount form: the project

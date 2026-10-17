@@ -1106,6 +1106,20 @@ class ReleaseMotionTestCase(unittest.TestCase):
         self.assertEqual(roster["components"]["supervisor"]["sha256"],
                          result["sha256"])
 
+    def test_foreign_tk_studio_tag_without_the_subtree_is_refused(self):
+        # a tk-studio clone whose supervisor tag predates apps/supervisor
+        # (a mis-minted tag): its root is not the supervisor — no cut
+        clone = self.tmp / "clone"
+        (clone / "plugins" / "tk-studio").mkdir(parents=True)
+        before = self._snapshot()
+        error = self._fails(app="supervisor", version="0.1.0",
+                            repo=clone)["error"]
+        self.assertIn("tag supervisor--v0.1.0 in", error)
+        self.assertIn("is a tk-studio tree without apps/supervisor", error)
+        self.assertEqual(self._gh_calls(), [])
+        self.assertEqual([a for a, _ in self.calls if "archive" in a], [])
+        self.assertEqual(self._snapshot(), before)
+
     def test_in_repo_supervisor_without_its_tag_fails_on_the_tag(self):
         # the EP-31 "own checkout" refusal is gone: only the absent tag stops it
         self.tags.discard("supervisor--v0.1.0")

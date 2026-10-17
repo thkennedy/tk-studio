@@ -263,9 +263,15 @@ def run(dry_run: bool, app: str = "plugin", version: str | None = None,
     if repo != REPO_ROOT and app in FOREIGN_SUBTREES:
         # Another tk-studio clone or worktree holds the app at its in-repo
         # subtree; only a checkout without it (the old supervisor
-        # repository's historical tags) is cut from its root.
+        # repository's historical tags) is cut from its root — never a
+        # tk-studio tree whose tag lacks the subtree (a mis-minted tag).
         proc = _run(["git", "cat-file", "-t", f"{tag}:{subtree}"], cwd=repo)
         if proc.returncode != 0 or proc.stdout.strip() != "tree":
+            proc = _run(["git", "cat-file", "-t", f"{tag}:{PLUGIN_SUBDIR}"],
+                        cwd=repo)
+            if proc.returncode == 0 and proc.stdout.strip() == "tree":
+                _fail(f"tag {tag} in {repo} is a tk-studio tree without "
+                      f"{subtree} — not cutting its root as the {app}")
             subtree = FOREIGN_SUBTREES[app]
     treeish = f"{tag}:" if subtree == "." else f"{tag}:{subtree}"
     proc = _run(["git", "cat-file", "-t", treeish], cwd=repo)
