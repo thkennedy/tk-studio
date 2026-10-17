@@ -125,8 +125,11 @@
   description: >-
     I want the supervisor to key its checkout lock by the git top-level of a project's
     root, So that a run on apps/supervisor and a run on the repository root serialise on
-    one lock, as one checkout. Carved out of Story 28.3 by correct-course on 2026-10-17.
-    Canonical: ST-102.
+    one lock, as one checkout; and a run prepared for a project below its git top-level
+    serves <worktree>/<prefix> (git rev-parse --show-prefix), never the worktree top
+    level (DW-25: prepareWorktree and the invocation root in worktree.ts and cli.ts).
+    Carved out of Story 28.3 by the two correct-courses of 2026-10-17 (the lock, then the
+    subpath). Canonical: ST-102.
   invoke_dev_with: >-
     Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 28.5: One
     Checkout Lock for a Nested Project and Its Repository", the authoritative

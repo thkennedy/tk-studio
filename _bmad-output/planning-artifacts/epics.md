@@ -2328,7 +2328,7 @@ So that nothing points at the old repository.
 
 **Given** the supervisor's own `.tk-studio/config.yaml` (`verify.host: bun test`) and its transcribed plan
 **When** a supervisor run goes through the supervisor itself
-**Then** the project served is the nested root and its `verify.host` is the one read at the run's base; `apps/supervisor/_bmad-output/planning-artifacts/epics.md` stays the nested project's transcription (Epics 21 to 23 and 27 keep their numbers) and the repository root's plan stays canonical; the supervisor's `TK_STUDIO_ROOT` is still the outer root
+**Then** the project served is the nested root and its `verify.host` is the one read at the run's base *(this live clause is Story 28.5's subpath AC, correct-course 2026-10-17: the supervisor served the run's worktree top level, DW-25)*; `apps/supervisor/_bmad-output/planning-artifacts/epics.md` stays the nested project's transcription (Epics 21 to 23 and 27 keep their numbers) and the repository root's plan stays canonical; the supervisor's `TK_STUDIO_ROOT` is still the outer root
 
 **Given** the host gates
 **When** this story's work is verified
@@ -2372,6 +2372,10 @@ Carved out of Story 28.3 by correct-course on 2026-10-17: 28.3's AC2 asked that 
 **When** `drain` or a tick claims one
 **Then** the other waits on the same lock (`holder` names the first run) and the two never run at once; `bun test` from `apps/supervisor` pins it with a nested fixture, the case-folded spelling included on win32
 
+**Given** a project whose registered root sits below its git top-level (`apps/supervisor`) and a run the supervisor prepares for it
+**When** the worktree is cut and the run is invoked (`prepareWorktree` and the invocation root in `apps/supervisor/src/worktree.ts` and `cli.ts`; DW-25)
+**Then** the root the run serves is `<worktree>/<prefix>` with the prefix from `git rev-parse --show-prefix` of the project root (the worker's cwd, `payload.directory`, the sbx VM path, the `verify.host` read at the run's base), never the worktree's top level; a project at its git top-level is unchanged; `bun test` from `apps/supervisor` pins both cases
+
 **Given** runbook §4 and the deferred-work ledger
 **When** the story closes
-**Then** §4's lock row says the lock is per git checkout, and 28.3's AC2 is satisfied by reference to this story
+**Then** §4's lock row says the lock is per git checkout and names the served subpath; DW-25 is closed; and 28.3's AC2 (the serialisation) and AC3's live clause (the project served) are satisfied by reference to this story *(widened by the second correct-course of 2026-10-17)*

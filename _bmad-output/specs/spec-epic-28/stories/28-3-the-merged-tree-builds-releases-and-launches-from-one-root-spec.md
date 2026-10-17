@@ -2,12 +2,13 @@
 title: 'The Merged Tree Builds, Releases and Launches From One Root'
 type: 'chore'
 created: '2026-10-17'
-status: 'done'
+status: done
 review_loop_iteration: 0
 followup_review_recommended: false
 baseline_commit: '4236e6a65c39a5b9834be779f2bc4789efed9c31'
 baseline_revision: '4236e6a65c39a5b9834be779f2bc4789efed9c31'
 deviation_score: 1
+reconcile_verdict: no-impact
 context:
   - '{project-root}/_bmad-output/specs/spec-epic-28/plans/28-3.md'
   - '{project-root}/_bmad-output/planning-artifacts/briefs/adr-repository-structure-2026-10-09.md'
@@ -163,6 +164,7 @@ Consult ruling (pass 1): all four entries accepted at score 1. The plan's Verify
 
 - 2026-10-17T03:11Z — trigger: deviation-gt-0 — question: accept the four pass-1 deviations (check-ignore precedence, `**/` mirroring, FOREIGN_SUBTREES, rewritten subtree test)? — ruling: accept-deviation score 1 — do: accept all four, keep the tree; restate plan Verify :97 as check-ignore with the nested file set aside, never edit apps/supervisor/.gitignore — rule candidate: When a plan keeps a nested .gitignore next to mirrored root entries, its Verify uses git status --ignored parity (or check-ignore with the nested file set aside), and slash-less nested patterns are mirrored as <prefix>/**/<pattern>.
 - 2026-10-17T03:26Z — trigger: high-severity-finding — question: follow-up review found the supervisor serves a worktree's top level (apps/supervisor/src/worktree.ts:110-111, :254; cli.ts:373), so AC3's nested-root clause fails at the live run; defer or intent_gap? — ruling: apply — do: route as defer (high) under DEFERRAL DISCIPLINE (a), naming the defect and that AC3's live clause needs an operator correct-course giving the src fix a story; keep 4e63827, record AC3 live run unverifiable-here with the defect in residual risks, do not edit apps/supervisor/src; finish done and state AC3 is known to fail at the attended run — rule candidate: When a story's AC names live behaviour that depends on code the intent contract's Never puts off-limits, and review finds that code defective but not changed by the story, route it defer (a), naming the blocked AC and "needs operator correct-course"; never intent_gap.
+- 2026-10-17T03:36Z — trigger: halt — question: the re-dispatch found the spec at ready-for-dev with reconcile_verdict: escalate; the operator correct-course for DW-25 is still open (replan-queue "operator — from 28-3"), and epics.md/stories.yaml are unchanged since 4236e6a. HALT, re-run step-03, or edit apps/supervisor/src? — ruling: apply — do: HALT blocked now without entering step-03, citing the open operator entry and DW-25; write only the Auto Run Result, with no edits to apps/supervisor/src, epics.md, stories.yaml, the queue entry or the Reconcile section; keep status: ready-for-dev and reconcile_verdict: escalate as they are, so the story is runnable again only once an operator correct-course commit lands on epics.md or stories.yaml after 4236e6a — rule candidate: In step-01 routing, if the spec has reconcile_verdict: escalate and replan-queue.md has an open "operator — from <story>" entry, HALT blocked (write only the Auto Run Result) regardless of status, until a commit to epics.md or stories.yaml postdates the escalation.
 
 ### pass 2 (2026-10-17, implementer, review fixes)
 
@@ -172,56 +174,22 @@ DEVIATIONS: none (score 0)
 
 DEVIATIONS: none (score 0)
 
+## Reconcile
+
+- 2026-10-17 — score 1; reconcile not required.
+- 2026-10-17 — story-boundary escalate (gate Part B, task-planning §2): AC3's live clause ("the project served is the nested root") is unmet. The cause is the pre-existing supervisor defect DW-25 (`apps/supervisor/src/worktree.ts:110-111`, `:254`; `cli.ts:1051`, `:1922`): the run's worktree top level is served, not `apps/supervisor`. The fix lies outside this story's plan Files, and no story in `stories.yaml` covers it (28.5 is the lock only). A remediation entry would widen the story into `apps/supervisor/src`, which is the operator's `bmad-correct-course` (same precedent as the 28.5 carve-out). Queue entry: `replan-queue.md` "operator — from 28-3".
+- Gate: Part A not-required; Part B escalate: AC3 live clause unmet (DW-25, supervisor serves the worktree top level, not the nested root); fix needs a story via operator bmad-correct-course; 28-4 left unplanned
+- 2026-10-17 — operator ruling (attended session, the second correct-course of the day): Story 28.5 widened with the subpath AC (DW-25: serve `<worktree>/<git rev-parse --show-prefix>` in `apps/supervisor/src/worktree.ts` and `cli.ts`), `epics.md`, `SPEC.md` CAP-11/CAP-16 and `stories.yaml` amended; 28.3's AC3 live clause is satisfied by reference to 28.5, as AC2 is. The landed work (4e63827, c6679b3; score 1) stands: verdict `no-impact`, status `done`; the replan-queue entry closed; DW-25 stays open, scheduled on 28.5. 28-4 is planned by the pipeline at its dispatch.
+
 ## Auto Run Result
 
-Status: done
+Status: blocked
+Blocking condition: operator correct-course pending: AC3's live clause ("the project served is the nested root") needs the DW-25 `apps/supervisor/src` subpath fix, and no story covers it yet. The replan-queue entry "operator — from 28-3" (2026-10-17) is still `open — needs bmad-correct-course`. `epics.md` and `stories.yaml` are unchanged since `4236e6a65c39a5b9834be779f2bc4789efed9c31`.
 
 Studio: activated as developer; working set bmm, tea, bmb, bmad-loop, gds; drift clean; routing implementer=claude-opus-5-5 reviewers=claude-opus-5-5 consult=claude-opus-5-5; knowledge spine absent
 
-**Summary:** This was a follow-up review of the committed story (4e63827). The merged tree already pointed only at itself, and this pass hardened it:
-- The `--repo` root fallback in `release_archive.py` now refuses a tk-studio tree whose tag lacks `apps/supervisor`.
-- Two runbook passages that read as contradictions are clarified.
-- One pre-existing supervisor defect that blocks AC3's live clause is deferred for an operator correct-course.
+**What happened.** This was a re-dispatch at HEAD `c6679b305b6a858c6b5395a822913f41cb417102`. The precondition holds: `apps/supervisor/` is present. Step-01 found this spec at `status: ready-for-dev` with `reconcile_verdict: escalate`, the gate's story-boundary escalation (see `## Reconcile`). Re-entering step-03 would only reproduce the escalated result. Meeting AC3 would mean editing `apps/supervisor/src`, which the intent contract's Never forbids and which belongs to the operator's correct-course. The consult (trigger: halt) ruled to HALT without implementing; see `## Consult Log` 03:36Z. Per that ruling, `status: ready-for-dev` and `reconcile_verdict: escalate` are left as they are. The story becomes runnable again once a correct-course commit lands on `epics.md` or `stories.yaml`.
 
-The earlier pass's work is unchanged:
-- `.gitignore`: the root file carries the mirrored supervisor ignore entries.
-- Docs: README, runbook §3.8 and §4, and the offline-install runbook point at `apps/supervisor`.
-- Release: `release_archive.py --app supervisor` cuts from `apps/supervisor`.
-- Sandbox: one-mount usage, with the ROOT values and the named exit-2 refusal.
+**Changed this run:** this spec only (Consult Log entry, this section). No code, no tests, no commit.
 
-**Files (this pass):**
-- `tools/release_archive.py`: the `--repo` fallback refuses when `<tag>:plugins/tk-studio` is a tree. The comment is updated, and the `source` logic is unchanged.
-- `plugins/tk-studio/lib/tests/test_release_roster.py`: `test_foreign_tk_studio_tag_without_the_subtree_is_refused` (no `gh` call, no archive, rosters untouched).
-- `kb/offline-install-runbook.md`: the next-cut step promotes the whole written entry verbatim. Never hand-edit an entry merely to delete `source`.
-- `kb/agent-pc-setup-runbook.md` §3.8: the two-loop paragraph agrees with §4's "Engine hold" row and names the shared checkout as the hazard.
-
-(Earlier pass, 4e63827: `.gitignore`, `README.md`, both runbooks, `tools/release_archive.py`, `tools/sbx-engine/{launch-epic,resume-run,provision-engine}.sh`, `test_release_roster.py`, `test_sbx_skills_mount.py`.)
-
-**Review:** blind-hunter plus edge-case-hunter, band L. 3 patches applied (low 3), 1 deferred (high: AC3's nested root in the supervisor's worktree path), 0 rejected. The false premise in one finding (that the merged tag lacks the subtree) is noted in the triage log.
-**Follow-up review recommended:** false. Patched findings: high 0, medium 0, low 3. Score 3×0 + 3 = 3, which is below 5.
-
-**Verification** (re-run by this session after the patches):
-- `uv run python -m unittest discover tests`: 1333 tests, OK, skipped=1.
-- `uv run python ../contracts/conformance/runner.py run`: `ok: true`.
-- `uv run python tools/verify_host.py`: exit 0.
-- `release_archive.py run --app supervisor --version 0.1.1 --dry-run`: fails only on `tag supervisor--v0.1.1 not found`.
-- `config.py root --directory apps/supervisor`: `nested: true`, `project_id: supervisor`.
-- `bun install --frozen-lockfile && bun test` from `apps/supervisor`: 860 tests, 0 fail, 5 skip.
-- `git check-ignore -v apps/supervisor/node_modules/x`: names the nested `.gitignore:3` while that file is present. The root lines were proven with it set aside (pass-1 consult ruling).
-
-**unverifiable-here (operator or attended):**
-- AC1, the rosters' `source` drop: tag `supervisor--vX.Y.Z` (X.Y.Z > 0.1.0) on `thkennedy/tk-studio` `main`, then `uv run tools/release_archive.py run --app supervisor --version X.Y.Z --channel latest`, then a PR copying the entry verbatim into `stable.json`, then `tk-studio update --channel latest|stable` on the box.
-- AC2, the sandbox recreate: `sbx rm claude-tk-studio-supervisor`; `sbx create --skills readonly --name claude-tk-studio claude C:\GitHub\tk-studio`; `WITH_BUN=1 bash tools/sbx-engine/provision-engine.sh /c/GitHub/tk-studio /c/GitHub/tk-studio`.
-- AC2, the checkout-lock clause: Story 28.5.
-- AC3, a live supervisor run through the supervisor. **It is known to fail at the attended run** until the deferred `apps/supervisor/src` fix lands: the run serves the worktree's top level, the outer root. That fix needs an operator correct-course to give it a story.
-- AC4: the Windows `uv run python tools/verify_host.py` and `cd apps\supervisor; bun install --frozen-lockfile; bun test`, plus one commit on `thkennedy/tk-studio-supervisor`'s README pointing at `tk-studio/apps/supervisor`.
-
-**Residual risks:**
-- AC3: `apps/supervisor/src/worktree.ts:110-111`, `:254` and `cli.ts:79`, `:373` serve the worktree root. A supervisor-queued run of the nested project serves the outer tk-studio root (deferred, high, needs an operator correct-course).
-- `tools/agent-pc/set-supervisor-env.ps1` still hard-codes the old clone (CAP-14), so the old clone stays on the box until 28.4.
-- Two loops in one sandbox are not serialised until 28.5. The runbook says to run one at a time.
-
-DRIFT: check-ignore names the nested .gitignore line, root lines proven with the nested file moved aside — git's deeper-file precedence; the spec keeps the nested file — affects: none
-DRIFT: slash-free supervisor ignore entries written as apps/supervisor/**/<entry> — a plain prefix would anchor them and change their meaning — affects: none
-DRIFT: release_archive.py gains FOREIGN_SUBTREES for --repo cuts (probing <tag>:apps/supervisor first, refusing a tk-studio tree without it) — keeps the historical cut at subtree "." per the I/O matrix — affects: none
-DRIFT: test_each_app_archives_its_subtree_at_its_tag rewritten, fake _run gains archive_from_disk — it pinned the pre-merge supervisor subtree — affects: none
+**Operator action:** run `bmad-correct-course` on the replan-queue entry "operator — from 28-3". Give the DW-25 fix a story: serve `<worktree>/<git rev-parse --show-prefix>` in `apps/supervisor/src/worktree.ts` and `cli.ts`, either as a new 28.x or by widening 28.5. Then mark 28.3 AC3 as satisfied by reference, or re-drive 28-3, and decide where it goes relative to 28-4.
