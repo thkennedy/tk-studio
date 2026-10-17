@@ -1,6 +1,6 @@
 {
   "name": "tk-studio-supervisor",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "Durable driver for tk-studio on the agent PC — a driver-contract consumer outside the plugin (AD-2).",

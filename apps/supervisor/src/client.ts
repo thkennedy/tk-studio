@@ -73,7 +73,7 @@ export class ConnectorClient {
   async init(clientName: string): Promise<void> {
     await this.request("initialize", {
       protocolVersion: "2024-11-05", capabilities: {},
-      clientInfo: { name: clientName, version: "0.1.0" },
+      clientInfo: { name: clientName, version: "0.1.1" },
     }, 30_000);
   }
 
