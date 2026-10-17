@@ -1061,7 +1061,8 @@ class Entrypoint(unittest.TestCase):
     def test_pyproject_names_project_version_and_script(self):
         text = (CLI_ROOT / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn('name = "tk-studio-cli"', text)
-        self.assertIn('version = "0.1.0"', text)
+        # The released version moves with every cli cut (cli--vX.Y.Z); the motion bumps it here first.
+        self.assertRegex(text, r'(?m)^version = "\d+\.\d+\.\d+"$')
         self.assertIn('tk-studio = "tk_studio_cli.main:main"', text)
 
 
