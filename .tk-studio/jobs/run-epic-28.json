@@ -1,0 +1,11 @@
+{
+  "job_schema_version": 1,
+  "id": "run-epic-28",
+  "type": "run-epic",
+  "description": "tk-studio Epic 28 (The Supervisor Moves In: One Repository) through the supervisor's queue: the first run-epic the service drives on this repository (declared 2026-10-17 for Story 28.6, after Stories 28.1 to 28.5 landed by hand launches). Extends the shipped run-epic type: one-shot; the spec folder _bmad-output/specs/spec-epic-28 and its manifest already exist on main, so the launch takes the relaunch path and the pipeline plans only the stories not yet done. Submit it with POST /jobs {project: tk-studio, job: run-epic-28, tier: sbx} (runbook section 3.8); the run's worktree is cut from main, the engine runs in claude-tk-studio, the host verify leg is tools/verify_host.py, and the close-out opens the PR.",
+  "target": {
+    "payload": {
+      "epic": 28
+    }
+  }
+}

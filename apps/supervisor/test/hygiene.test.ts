@@ -7,8 +7,10 @@ import { cancelRun, mirror, studioOps } from "../src/cli";
 import { NotifierConfigMissing, NotifierUnknown, notifier, workDir } from "../src/env";
 import {
   canonicalPr, copyTranscript, END_HYGIENE_EVENTS, endNotice, isGodot, isWithin, NOTICE_MAX_BYTES, notifierSecrets, notify, noticeText, prUrl,
-  robocopyOk, scrubNotifier, snapshot, snapshotArgv, SnapshotFailed, snapshotOnce, snapshotTarget, sweepEnds, TRUNCATED_MARKER,
+  REFUSED_UNDER_TEST, robocopyOk, scrubNotifier, snapshot, snapshotArgv, SnapshotFailed, snapshotOnce, snapshotTarget, sweepEnds, TRUNCATED_MARKER,
+  underBunTest,
 } from "../src/hygiene";
+import { NOTIFIER_VARS } from "./preload";
 import { END_LEASE_STALE_MS, NOTIFIED_BEFORE, Queue, type Owner, type Probes } from "../src/queue";
 import type { RunResult } from "../src/server";
 import { ensureTranscript } from "../src/transcript";
@@ -51,6 +53,39 @@ function fakeFetch(status = 200, fail?: string) {
 
 const NTFY_ENV = { TK_SUPERVISOR_NOTIFY: "ntfy", TK_SUPERVISOR_NTFY_URL: "https://ntfy.example/tk-supervisor" };
 const TG_ENV = { TK_SUPERVISOR_NOTIFY: "telegram", TK_SUPERVISOR_TELEGRAM_TOKEN: TG_TOKEN, TK_SUPERVISOR_TELEGRAM_CHAT: "-100777" };
+
+describe("hole 31: the suite never sends a real notification", () => {
+  test("the preload stripped the operator's notifier variables before any test loaded, and set the marker", () => {
+    for (const name of NOTIFIER_VARS) expect(process.env[name]).toBeUndefined();
+    expect(process.env.TK_SUPERVISOR_UNDER_TEST).toBe("1");
+    expect(underBunTest()).toBe(true);
+    expect(underBunTest({})).toBe(false);
+    expect(underBunTest({ NODE_ENV: "test" })).toBe(true);
+    expect(notifier(process.env)).toEqual({ kind: "none" });
+  });
+
+  test("notify() through the real fetch is refused under bun test, naming no secret; an injected fake still sends", async () => {
+    const notice = { run_id: "q-j-1", job_id: "j", project_id: "p", studio_run_id: "j-20260929T101010Z", state: "complete", reason: null };
+    const tg = { kind: "telegram" as const, token: TG_TOKEN, chat: "-100777" };
+    expect(await notify(tg, notice)).toEqual({ ok: false, via: "telegram", error: REFUSED_UNDER_TEST });
+    expect(await notify(tg, notice, fetch)).toEqual({ ok: false, via: "telegram", error: REFUSED_UNDER_TEST });
+    expect(await notify({ kind: "ntfy", url: NTFY_ENV.TK_SUPERVISOR_NTFY_URL }, notice)).toMatchObject({ ok: false, via: "ntfy", error: REFUSED_UNDER_TEST });
+    expect(REFUSED_UNDER_TEST).not.toContain(TG_TOKEN);
+    const fake = fakeFetch();
+    expect(await notify(tg, notice, fake.fetchFn)).toEqual({ ok: true, via: "telegram" });
+    expect(fake.calls).toHaveLength(1);
+  });
+
+  test("the end sweep with the real fetch records the refusal as notify-failed, never a send", async () => {
+    const fx = fixture();
+    const r = fx.enqueue();
+    fx.queue.end(r.run_id, "complete", null);
+    await sweepEnds(fx.queue, { env: TG_ENV });
+    const ev = fx.queue.events(r.run_id).find((e) => e.kind === "notify-failed")!;
+    expect(ev.detail).toEqual({ via: "telegram", error: REFUSED_UNDER_TEST });
+    expect(JSON.stringify(fx.queue.events(r.run_id))).not.toContain(TG_TOKEN);
+  });
+});
 
 describe("environment (operator-decisions §1)", () => {
   test("notifier: unset → none; ntfy needs its URL; telegram its token and chat; named errors never carry a value", () => {

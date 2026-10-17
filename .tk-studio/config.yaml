@@ -21,9 +21,11 @@ vcs: git
 #   developer:
 #     - resource-name
 
-# Per-project job instances (AD-10; Epic 6).
+# Per-project job instances (AD-10; Epic 6). run-epic-28 (2026-10-17): Epic 28 through
+# the supervisor's queue (POST /jobs), the first run-epic the service drives on this repository.
 jobs:
   - research-ecosystem
+  - run-epic-28
 
 # Role-keyed working sets (AD-17) — recorded only on explicit
 # confirmation via tk-studio-onboard; one entry per role.

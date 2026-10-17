@@ -961,13 +961,18 @@ the supervisor. The old `C:\GitHub\tk-studio-supervisor` folder stays on the
 box: the §4.2 environment script still reads it, and archiving
 `thkennedy/tk-studio-supervisor` on GitHub removes nothing locally.
 
-Then open `claude` once in `C:\GitHub\tk-studio\apps\supervisor`, accept "Yes,
-I trust this folder", and `/exit`. Claude Code applies a project's
-`.claude/settings.json` permission rules only in a trusted folder, trust is
-recorded per folder with no inheritance from a parent folder (trusting
-`C:\GitHub\tk-studio` does not trust `apps\supervisor`), and a headless worker
-cannot answer the dialog (supervisor DW-22, 2026-10-09). Do the same for every
-project the supervisor will drive on this box.
+Claude Code applies a project's `.claude/settings.json` permission rules
+only in a trusted folder, and a headless worker cannot answer the trust
+dialog (supervisor DW-22, 2026-10-09). Trust is inherited: a folder inside a
+trusted folder is trusted too, with no dialog and no record of its own in
+`~/.claude.json` (Claude Code 2.1.292, checked on the box 2026-10-17, loop
+hole 35), so `apps\supervisor` is covered by the tk-studio checkout's trust
+from §3 and needs no step of its own. Every other project the supervisor
+will drive on this box is trusted once: open `claude` in it, accept "Yes, I
+trust this folder", and `/exit`. `tk-studio doctor` reports each registered
+root as trusted itself or through an ancestor. Still unverified: which
+`.claude/settings.json` (the nested root's or the git root's) a session
+started in the nested root loads.
 
 With `TK_STUDIO_ROOT` set and `uv` on PATH, `bun test` also runs the
 end-to-end suites. They use a throwaway store, project and queue, and a faked
@@ -1272,8 +1277,9 @@ interrupted install or update, and Hermes' `auth.adopt_external_logins`. On
 Windows it also checks the cut-over (Epic 28): `supervisor-root` (the
 shortcut's working directory is the nested root `apps\supervisor`, not a
 repository of its own), `supervisor-registry` (the registry's `supervisor`
-root agrees with it), `supervisor-trust` (the nested root is trusted itself;
-trust has no inheritance, §4.1) and `startup-shortcut` (the `.lnk`'s
+root agrees with it), `supervisor-trust` (the nested root is trusted, itself
+or through a trusted ancestor such as the checkout, §4.1) and
+`startup-shortcut` (the `.lnk`'s
 Arguments run `start.ps1` in its working directory, §4.3). The first three
 appear only when the shortcut runs a source checkout, and the registry and
 trust checks are `skipped` until `supervisor-root` passes; a slot box shows

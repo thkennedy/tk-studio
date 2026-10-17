@@ -1,0 +1,6 @@
+# Hole 31 (2026-10-17): `bun test` under the operator's real User environment sent every test run's
+# notifications to the real Telegram chat. The preload runs before any test file and strips the notifier's
+# variables from the process (and so from every child spawned with `...process.env`); src/hygiene.ts then
+# refuses a send through the real `fetch` while its marker is set.
+[test]
+preload = ["./test/preload.ts"]
