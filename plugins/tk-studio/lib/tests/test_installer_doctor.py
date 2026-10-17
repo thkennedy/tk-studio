@@ -768,6 +768,378 @@ class SupervisorCheckout(DoctorCase):
         self.assertEqual(len(self.host.probes), 1)
 
 
+CUT_OVER = ("supervisor-root", "supervisor-registry", "supervisor-trust",
+            "startup-shortcut")
+
+
+class CutOver(DoctorCase):
+    """Story 28.4: the cut-over on the box — the nested root, its registry
+    agreement, its own folder trust and the Startup shortcut's target, each
+    read without a process (the ``.lnk`` is parsed, ``.git`` is walked)."""
+    plat = WINDOWS
+
+    def setUp(self):
+        super().setUp()
+        self.outer = self.tmp / "GitHub" / "tk-studio"
+        (self.outer / ".git").mkdir(parents=True)
+        (self.outer / ".tk-studio").mkdir()
+        (self.outer / ".tk-studio" / "config.yaml").write_text("schema: 1\n")
+        self.nested = self.outer / "apps" / "supervisor"
+        (self.nested / ".tk-studio").mkdir(parents=True)
+        (self.nested / ".tk-studio" / "config.yaml").write_text(
+            "project_id: supervisor\n")
+        (self.nested / "start.ps1").write_text("# start\n")
+        self.lnk = (self.tmp / "roaming" / "Microsoft" / "Windows"
+                    / "Start Menu" / "Programs" / "Startup"
+                    / "tk-studio supervisor.lnk")
+        self.lnk.parent.mkdir(parents=True)
+        self.shortcut(self.nested)
+
+    def shortcut(self, workdir: Path, target: str | None = None,
+                 arguments: str | None = None):
+        if arguments is None:
+            target = target or str(workdir / "start.ps1")
+            arguments = ("-w studio nt --title supervisor pwsh -NoExit "
+                         f"-File {target}")
+        self.lnk.write_bytes(lnk_bytes(str(workdir), arguments=arguments))
+
+    def healthy(self):
+        self.registry({"supervisor": str(self.nested)})
+        self.trust({str(self.nested): True})
+
+    def cut_over(self, roster: Path | None = None) -> dict[str, dict]:
+        result = self.doctor(roster=roster or self.full_roster())[0]
+        self.result = result
+        return {k: v for k, v in self.checks(result).items()
+                if k in CUT_OVER}
+
+    def test_healthy_cut_over_passes_each_naming_its_path(self):
+        self.healthy()
+        roster = self.full_roster()
+        before = self.snapshot()
+        self.host.calls.clear()
+        checks = self.cut_over(roster)
+        cut_over_calls = list(self.host.calls)
+        self.assertEqual(list(checks), list(CUT_OVER))
+        for name in CUT_OVER:
+            with self.subTest(check=name):
+                self.assertEqual(checks[name]["status"], "pass",
+                                 checks[name])
+                self.assertIsNone(checks[name]["fix"])
+        self.assertEqual(self.result["supervisor"]["mode"], "source checkout")
+        self.assertEqual(self.result["supervisor"]["checkout"],
+                         str(self.nested))
+        self.assertIn(str(self.nested), checks["supervisor-root"]["detail"])
+        self.assertIn(str(self.outer), checks["supervisor-root"]["detail"])
+        self.assertIn(str(self.nested),
+                      checks["supervisor-registry"]["detail"])
+        self.assertIn(str(self.nested), checks["supervisor-trust"]["detail"])
+        self.assertIn(str(self.nested / "start.ps1"),
+                      checks["startup-shortcut"]["detail"])
+        self.assertTrue(set(self.commands()) <= ALLOWED, self.commands())
+        self.assertEqual(self.snapshot(), before, "doctor is read-only")
+        names = [c["check"] for c in self.result["checks"]]
+        at = names.index("supervisor")
+        self.assertEqual(names[at + 1:at + 5], list(CUT_OVER))
+        self.lnk.unlink()                 # the same box, no cut-over to read
+        self.host.calls.clear()
+        self.cut_over(roster)
+        self.assertEqual(cut_over_calls, self.host.calls,
+                         "the cut-over checks add no process call")
+
+    def test_quoted_target_passes(self):
+        self.healthy()
+        self.shortcut(self.nested, arguments=(
+            f'-w studio nt -d "{self.nested}" --title supervisor pwsh '
+            f'-NoExit -File "{self.nested / "start.ps1"}"'))
+        self.assertEqual(self.cut_over()["startup-shortcut"]["status"],
+                         "pass")
+
+    def test_old_layout_fails_naming_its_own_repository(self):
+        old = self.tmp / "GitHub" / "tk-studio-supervisor"
+        (old / ".git").mkdir(parents=True)
+        (old / "start.ps1").write_text("# old\n")
+        self.shortcut(old)
+        self.healthy()
+        checks = self.cut_over()
+        root = checks["supervisor-root"]
+        self.assertEqual(root["status"], "fail", root)
+        self.assertIn("repository of its own", root["detail"])
+        self.assertIn("pre-cut-over", root["detail"])
+        self.assertIn("§4.3", root["fix"])
+        self.assertEqual(checks["startup-shortcut"]["status"], "pass")
+        # registry and trust would judge the old clone: not checked
+        for name in ("supervisor-registry", "supervisor-trust"):
+            with self.subTest(check=name):
+                self.assertEqual(
+                    (checks[name]["status"], checks[name]["detail"]),
+                    ("skipped", "not checked: supervisor-root failed"))
+                self.assertEqual(checks[name]["fix"], "retarget the shortcut "
+                                 "first (supervisor-root's fix)")
+                self.assertNotIn(str(old), checks[name]["fix"])
+
+    def test_old_onboarded_clone_fails_naming_its_own_repository(self):
+        # the real old clone was onboarded: it holds its own studio config
+        old = self.tmp / "GitHub" / "tk-studio-supervisor"
+        (old / ".git").mkdir(parents=True)
+        (old / ".tk-studio").mkdir()
+        (old / ".tk-studio" / "config.yaml").write_text(
+            "project_id: supervisor\n")
+        (old / "start.ps1").write_text("# old\n")
+        self.shortcut(old)
+        self.healthy()
+        checks = self.cut_over()
+        root = checks["supervisor-root"]
+        self.assertEqual(root["status"], "fail", root)
+        self.assertIn("repository of its own", root["detail"])
+        self.assertIn("pre-cut-over", root["detail"])
+        self.assertNotIn("repository top level", root["detail"])
+        self.assertIn("§4.3", root["fix"])
+        for name in ("supervisor-registry", "supervisor-trust"):
+            with self.subTest(check=name):
+                self.assertEqual(
+                    (checks[name]["status"], checks[name]["detail"]),
+                    ("skipped", "not checked: supervisor-root failed"))
+                self.assertNotIn(str(old), checks[name]["fix"])
+
+    def test_the_repository_top_level_is_not_the_nested_root(self):
+        self.shortcut(self.outer, target=str(self.nested / "start.ps1"))
+        self.healthy()
+        checks = self.cut_over()
+        root = checks["supervisor-root"]
+        self.assertEqual(root["status"], "fail", root)
+        self.assertIn("repository top level", root["detail"])
+        self.assertNotIn("pre-cut-over", root["detail"])
+        self.assertIn("§4.3", root["fix"])
+        self.assertEqual(checks["supervisor-registry"]["status"], "skipped")
+
+    def test_a_checkout_subfolder_without_studio_config_is_no_root(self):
+        plain = self.outer / "plugins"
+        plain.mkdir()
+        (plain / "start.ps1").write_text("#\n")
+        check = doctor.check_supervisor_root(None, str(plain))
+        self.assertEqual(check["status"], "fail", check)
+        self.assertIn(str(plain), check["detail"])
+        self.assertIn("no .tk-studio/config.yaml", check["detail"])
+        self.assertIn("§4.3", check["fix"])
+        # through doctor it is no source checkout at all: the supervisor
+        # check names it, and the root checks are absent
+        self.healthy()
+        self.shortcut(plain)
+        checks = self.cut_over()
+        self.assertEqual(list(checks), ["startup-shortcut"])
+        self.assertEqual(self.result["supervisor"]["mode"], "not installed")
+        self.assertEqual(self.checks(self.result)["supervisor"]["status"],
+                         "fail")
+
+    def test_a_nested_root_without_start_ps1_names_it(self):
+        self.healthy()
+        (self.nested / "start.ps1").unlink()
+        root = self.cut_over()["supervisor-root"]
+        self.assertEqual(root["status"], "fail", root)
+        self.assertIn("holds no start.ps1", root["detail"])
+        self.assertIn("restore apps/supervisor/start.ps1", root["fix"])
+
+    def test_registry_agreement_folds_case_and_slash(self):
+        self.registry({"supervisor": str(self.nested).upper()
+                       .replace("/", "\\") + "\\"})
+        self.trust({str(self.nested): True})
+        check = self.cut_over()["supervisor-registry"]
+        self.assertEqual(check["status"], "pass", check)
+
+    def test_registry_root_differs_fails_naming_both(self):
+        other = "C:\\GitHub\\tk-studio-supervisor"
+        self.registry({"supervisor": other})
+        self.trust({str(self.nested): True})
+        check = self.cut_over()["supervisor-registry"]
+        self.assertEqual(check["status"], "fail")
+        self.assertIn(other, check["detail"])
+        self.assertIn(str(self.nested), check["detail"])
+        self.assertIn("registry.py amend --project-id supervisor --writer "
+                      f"activate --root {self.nested}", check["fix"])
+        self.assertIn("doctor never edits", check["fix"])
+
+    def test_registry_entry_missing_fails(self):
+        for projects in ({"demo": str(self.tmp / "demo")}, None):
+            with self.subTest(projects=projects):
+                if projects is None:
+                    (Path(self.env["TK_STUDIO_HOME"]) / "registry"
+                     / "projects.yaml").unlink()
+                else:
+                    self.registry(projects)
+                check = self.cut_over()["supervisor-registry"]
+                self.assertEqual(check["status"], "fail")
+                self.assertIn("supervisor", check["detail"])
+                self.assertIn(str(self.nested), check["detail"])
+                self.assertIn("--project-id supervisor", check["fix"])
+
+    def test_project_id_defaults_to_the_basename(self):
+        (self.nested / ".tk-studio" / "config.yaml").write_text("schema: 1\n")
+        self.registry({"supervisor": str(self.nested)})
+        self.trust({str(self.nested): True})
+        self.assertEqual(self.cut_over()["supervisor-registry"]["status"],
+                         "pass")
+
+    def test_parent_trusted_only_fails_no_inheritance(self):
+        self.registry({"supervisor": str(self.nested)})
+        self.trust({str(self.outer): True})
+        check = self.cut_over()["supervisor-trust"]
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("no inheritance", check["detail"])
+        self.assertIn("§4.1", check["detail"])
+        self.assertIn(f"open `claude` in {self.nested}", check["fix"])
+
+    def test_bad_target_fails_naming_what_the_lnk_holds(self):
+        self.healthy()
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "start.ps1").write_text("#\n")
+        for label, kw, needle in (
+                ("no -File", {"arguments": "-w studio nt pwsh -NoExit"},
+                 "no `-File"),
+                ("not start.ps1", {"target": str(self.nested / "run.ps1")},
+                 "no `-File"),
+                ("other folder", {"target": str(elsewhere / "start.ps1")},
+                 "outside its working directory"),
+                ("missing", {"target": None}, "does not exist")):
+            with self.subTest(case=label):
+                if label == "missing":
+                    (self.nested / "start.ps1").unlink()
+                self.shortcut(self.nested, **kw)
+                check = self.cut_over()["startup-shortcut"]
+                self.assertEqual(check["status"], "fail", check)
+                self.assertIn(needle, check["detail"])
+                self.assertIn(str(self.lnk), check["detail"])
+                self.assertIn("§4.3", check["fix"])
+
+    def test_unquoted_target_with_a_space_fails_asking_for_quotes(self):
+        self.healthy()
+        spaced = self.tmp / "My Dir"
+        spaced.mkdir()
+        (spaced / "start.ps1").write_text("#\n")
+        self.shortcut(spaced)                 # -File <tmp>/My Dir/start.ps1
+        check = self.cut_over()["startup-shortcut"]
+        self.assertEqual(check["status"], "fail", check)
+        self.assertIn("must be quoted", check["detail"])
+        self.assertIn(str(spaced / "start.ps1"), check["detail"])
+        self.assertTrue(check["fix"])
+
+    def test_no_shortcut_fails_and_root_checks_are_absent(self):
+        self.healthy()
+        for label in ("absent", "unreadable", "APPDATA unset"):
+            with self.subTest(case=label):
+                if label == "absent":
+                    self.lnk.unlink()
+                elif label == "unreadable":
+                    self.lnk.write_bytes(b"not a link")
+                else:
+                    del self.env["APPDATA"]
+                checks = self.cut_over()
+                self.assertEqual(list(checks), ["startup-shortcut"])
+                check = checks["startup-shortcut"]
+                self.assertEqual(check["status"], "fail")
+                self.assertIn("§4.3", check["fix"])
+                self.assertIn("APPDATA" if label == "APPDATA unset"
+                              else str(self.lnk), check["detail"])
+
+    def test_relative_target_resolves_against_the_working_directory(self):
+        self.healthy()
+        for arg in ("start.ps1", ".\\start.ps1", "./start.ps1"):
+            with self.subTest(arg=arg):
+                self.shortcut(self.nested, target=arg)
+                check = self.cut_over()["startup-shortcut"]
+                self.assertEqual(check["status"], "pass", check)
+                self.assertIn(str(self.nested / "start.ps1"),
+                              check["detail"])
+        self.lnk.write_bytes(lnk_bytes("", arguments=(
+            "-w studio nt --title supervisor pwsh -NoExit -File start.ps1")))
+        check = self.cut_over()["startup-shortcut"]
+        self.assertEqual(check["status"], "fail", check)
+        self.assertIn("no absolute working directory", check["detail"])
+        self.assertIn("§4.3", check["fix"])
+
+    def test_no_supervisor_shipped_skips_the_shortcut(self):
+        self.lnk.unlink()
+        roster = self.roster(uv=self.uv())
+        checks = self.checks(self.doctor(roster=roster)[0])
+        self.assertEqual(checks["supervisor"]["status"], "skipped")
+        check = checks["startup-shortcut"]
+        self.assertEqual((check["status"], check["detail"]),
+                         ("skipped", "not shipped in stable"))
+        self.assertTrue(check["fix"])
+        self.assertNotIn("startup-shortcut", self.doctor(
+            roster=roster)[0]["reason"] or "")
+
+    def test_the_shortcut_fix_follows_the_supervisor_mode(self):
+        self.healthy()
+        target = "C:\\GitHub\\tk-studio\\apps\\supervisor\\start.ps1"
+        self.shortcut(self.nested, arguments="pwsh -NoExit")
+        fix = self.cut_over()["startup-shortcut"]["fix"]
+        self.assertIn(target, fix)
+        self.assertNotIn("tk-studio update", fix)
+        slot = self.root / "supervisor" / "0.1.0"
+        slot.mkdir(parents=True)
+        (self.root / "current.json").write_text(json.dumps({
+            "supervisor": {"version": "0.1.0", "path": str(slot)}}))
+        self.shortcut(slot, arguments="pwsh -NoExit")
+        fix = self.cut_over()["startup-shortcut"]["fix"]
+        self.assertIn("`tk-studio update` rewrites the shortcut", fix)
+        self.assertIn(str(slot / "start.ps1"), fix)
+        self.assertNotIn(target, fix)
+        (self.root / "current.json").unlink()
+        self.lnk.unlink()
+        fix = self.cut_over()["startup-shortcut"]["fix"]
+        self.assertIn(target, fix)
+        self.assertIn("tk-studio update", fix)
+
+    def test_slot_box_passes_and_stays_a_slot(self):
+        slot = self.root / "supervisor" / "0.1.0"
+        slot.mkdir(parents=True)
+        (slot / "start.ps1").write_text("# slot\n")
+        (self.root / "current.json").write_text(json.dumps({
+            "supervisor": {"version": "0.1.0", "path": str(slot)}}))
+        self.shortcut(slot)
+        checks = self.cut_over()
+        self.assertEqual(list(checks), ["startup-shortcut"])
+        self.assertEqual(checks["startup-shortcut"]["status"], "pass")
+        self.assertEqual(self.result["supervisor"]["mode"], "slot")
+
+    def test_a_stale_slot_fails_naming_the_current_slot(self):
+        current = self.root / "supervisor" / "0.1.0"
+        stale = self.root / "supervisor" / "0.0.9"
+        for slot in (current, stale):
+            slot.mkdir(parents=True)
+            (slot / "start.ps1").write_text("# slot\n")
+        (self.root / "current.json").write_text(json.dumps({
+            "supervisor": {"version": "0.1.0", "path": str(current)}}))
+        self.shortcut(stale)
+        check = self.cut_over()["startup-shortcut"]
+        self.assertEqual(check["status"], "fail", check)
+        self.assertIn(str(stale / "start.ps1"), check["detail"])
+        self.assertIn(f"the current slot is {current}", check["detail"])
+        self.assertIn(str(current / "start.ps1"), check["fix"])
+        self.assertEqual(self.result["supervisor"]["mode"], "slot")
+
+    def test_a_loose_folder_with_start_ps1_fails(self):
+        loose = self.tmp / "loose"
+        loose.mkdir()
+        (loose / "start.ps1").write_text("#\n")
+        self.shortcut(loose)
+        checks = self.cut_over()
+        self.assertEqual(list(checks), ["startup-shortcut"])
+        check = checks["startup-shortcut"]
+        self.assertEqual(check["status"], "fail", check)
+        self.assertIn(str(loose / "start.ps1"), check["detail"])
+        self.assertIn("no current slot is installed", check["detail"])
+        self.assertTrue(check["fix"])
+
+
+class CutOverOffWindows(DoctorCase):
+    def test_the_cut_over_checks_are_absent(self):
+        names = set(self.checks(self.doctor(roster=self.full_roster())[0]))
+        self.assertFalse(names & set(CUT_OVER), names)
+
+
 class Hermes(DoctorCase):
     plat = WINDOWS
 

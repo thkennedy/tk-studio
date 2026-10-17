@@ -8,6 +8,14 @@
 # MSYS_NO_PATHCONV=1 so /c/... arguments pass through):
 #   sbx exec <sandbox> bash -lc 'ROOT=<project-mount> bash <this> <epic> [<tag>]'
 #
+# ROOT is the project the epic belongs to. In the one-mount tk-studio sandbox
+# `claude-tk-studio` (runbook §3.8, Story 28.3) that is:
+#   ROOT=/c/GitHub/tk-studio/apps/supervisor   a supervisor epic (nested project)
+#   ROOT=/c/GitHub/tk-studio                   a plugin epic (the repository root)
+# Any other project's sandbox: ROOT=/c/GitHub/<project>. A ROOT with neither
+# .tk-studio/config.yaml nor .bmad-loop/ is refused (exit 2) before anything
+# is written.
+#
 # Output lands in <project>/.bmad-loop/cache/epic-<epic>-<tag>/ (gitignored):
 # launch.json (the session's --output-format json result, cost included),
 # launch.rc, and started / launch-ended / engine-gone stamps.
@@ -18,6 +26,10 @@
 set -u
 EPIC="$1"; TAG="${2:-launch}"
 ROOT="${ROOT:?set ROOT to the project mount}"
+if [ ! -f "$ROOT/.tk-studio/config.yaml" ] && [ ! -d "$ROOT/.bmad-loop" ]; then
+  echo "launch-epic: ROOT=$ROOT is not a studio project root (no .tk-studio/config.yaml, no .bmad-loop/): use /c/GitHub/tk-studio/apps/supervisor for a supervisor epic, /c/GitHub/tk-studio for a plugin epic (runbook §3.8)" >&2
+  exit 2
+fi
 MODEL="${LAUNCH_MODEL:-claude-opus-5-5}"      # the planner leg; keep it equal to routing
 EFFORT="${LAUNCH_EFFORT:-high}"
 export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"

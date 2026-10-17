@@ -3,12 +3,14 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { studioOps, studioRunFinder, watchCertificate } from "../src/cli";
+import { resolveCheckout, studioOps, studioRunFinder, watchCertificate } from "../src/cli";
 import {
-  defaultOwnerAlive, END_LEASE_STALE_MS, launchStatusProbe, NOTIFIED_BEFORE, ORPHANED_REASON, processStartTime, Queue, QueueDbMissing, QueueDbPlacementRefused,
+  canonicalPath, checkoutKey, defaultOwnerAlive, END_LEASE_STALE_MS, lockKeyOf, launchStatusProbe, NOTIFIED_BEFORE, ORPHANED_REASON, processStartTime, Queue, QueueDbMissing, QueueDbPlacementRefused,
   queueDbPath, REQUEUED_REASON, runPowerShell, RunTerminal, selfOwner, type EngineProbe, type Owner, type Probes,
 } from "../src/queue";
 import { filetimeToIso, processCreationTime } from "../src/winproc";
+import { gitRepo } from "./fakes";
+import { gatherPage, renderPage } from "../src/page";
 import { CERT_CHECK_MS, CERT_RENEW_EXIT, certCheck, certNotAfter, FORCE_WITHIN_DAYS, recordCertStart } from "../src/cert";
 
 const REPO = resolve(import.meta.dir, "..");
@@ -1545,5 +1547,142 @@ describe("Story 27.5 (P8): serve's certificate watcher", () => {
     expect(lines).toHaveLength(1);
     expect(lines[0]).toStartWith("[supervisor] certificate check disabled: the queue could not be opened (QueueDbMissing");
     expect(timers).toEqual([]);
+  });
+});
+
+describe("Story 28.5: one checkout lock for a nested project and its repository", () => {
+  /** A repository with a project nested at `apps/sup`, a queue over it, and the two roots' submissions resolved. */
+  async function nestedFixture() {
+    const repo = gitRepo({ "apps/sup/.tk-studio/config.yaml": "project_id: sup\n" });
+    const nested = join(repo.checkout, "apps", "sup");
+    const queue = new Queue(join(mkdtempSync(join(tmpdir(), "tk-sup-queue-")), "q.db"), fakeProbes(new Set([A.pid, B.pid])).probes);
+    const enqueue = async (jobId: string, root: string, owner: Owner | null = null) =>
+      queue.enqueue({ jobId, root, projectId: "p", target: "skill", definition: { id: jobId, trigger: "one-shot", target: { skill: "tk-studio-activate" } }, owner,
+        ...(await resolveCheckout(root)) }).run;
+    return { repo, nested, queue, enqueue };
+  }
+
+  test("AC1: the submission resolves the git top-level (canonical, case-folded) and the prefix, recorded on the run; `checkout` stays the project root", async () => {
+    const fx = await nestedFixture();
+    expect(await resolveCheckout(fx.nested)).toEqual({ lockCheckout: checkoutKey(fx.repo.checkout), prefix: "apps/sup/" });
+    expect(await resolveCheckout(fx.repo.checkout)).toEqual({ lockCheckout: checkoutKey(fx.repo.checkout), prefix: "" });
+    const run = await fx.enqueue("studio-health", fx.nested);
+    expect(run).toMatchObject({ checkout: checkoutKey(fx.nested), root: fx.nested, lock_checkout: checkoutKey(fx.repo.checkout), prefix: "apps/sup/" });
+    expect(lockKeyOf(run)).toBe(checkoutKey(fx.repo.checkout));
+    // The job identity stays per project: the same job on the repository root is its own job and run, never adopted.
+    const top = await fx.enqueue("studio-health", fx.repo.checkout);
+    expect(top.run_id).not.toBe(run.run_id);
+    expect(fx.queue.jobs().map((j) => j.checkout).sort()).toEqual([checkoutKey(fx.repo.checkout), checkoutKey(fx.nested)].sort());
+  });
+
+  test("AC1: a root not inside a git checkout keys by itself, prefix \"\"; a failed git read never refuses (keys by the root)", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "tk-sup-nogit-"));
+    expect(await resolveCheckout(outside)).toEqual({ lockCheckout: checkoutKey(outside), prefix: "" });
+    const gone = join(outside, "missing");
+    expect(await resolveCheckout(gone)).toEqual({ lockCheckout: checkoutKey(gone), prefix: "" });
+    const queue = new Queue(":memory:", fakeProbes(new Set([A.pid])).probes);
+    const run = queue.enqueue({ jobId: "j", root: outside, definition: { id: "j" }, ...(await resolveCheckout(outside)) }).run;
+    expect(run).toMatchObject({ checkout: checkoutKey(outside), lock_checkout: checkoutKey(outside), prefix: "" });
+  });
+
+  test("AC2: a nested run and a repository-root run share one lock — the second waits, `holder` names the first, never both running; the lock row names the holder's project root", async () => {
+    const fx = await nestedFixture();
+    const a = await fx.enqueue("job-a", fx.nested, A);
+    const b = await fx.enqueue("job-b", fx.repo.checkout, B);
+    expect((await fx.queue.claim(a.run_id, A)).claimed).toBe(true);
+    const wait = await fx.queue.claim(b.run_id, B);
+    expect(wait).toMatchObject({ claimed: false, why: "lock", holder: { kind: "run", run_id: a.run_id, job_id: "job-a", pid: A.pid } });
+    expect(fx.queue.get(b.run_id)).toMatchObject({ state: "queued" });
+    expect(fx.queue.runs().filter((r) => r.state === "running").map((r) => r.run_id)).toEqual([a.run_id]);
+    // One lock row, keyed by the git checkout, naming the project root that holds it.
+    expect(fx.queue.locks()).toEqual([expect.objectContaining({ checkout: checkoutKey(fx.repo.checkout), root: fx.nested, run_id: a.run_id })]);
+    expect(fx.queue.lock(b)).toMatchObject({ run_id: a.run_id, root: fx.nested });
+    fx.queue.end(a.run_id, "complete");
+    expect(fx.queue.locks()).toEqual([]);
+    expect((await fx.queue.claim(b.run_id, B)).claimed).toBe(true);
+    expect(fx.queue.locks()).toEqual([expect.objectContaining({ checkout: checkoutKey(fx.repo.checkout), root: fx.repo.checkout, run_id: b.run_id })]);
+    // And the other way round: the repository root's run holds it, the nested run waits on it.
+    const c = await fx.enqueue("job-c", fx.nested, A);
+    expect(await fx.queue.claim(c.run_id, A)).toMatchObject({ claimed: false, why: "lock", holder: { run_id: b.run_id } });
+  });
+
+  test("AC1 (review patch): the status page's lock card names the holder's nested project root, the git top-level only as its checkout line", async () => {
+    const fx = await nestedFixture();
+    const a = await fx.enqueue("job-a", fx.nested, A);
+    expect((await fx.queue.claim(a.run_id, A)).claimed).toBe(true);
+    const env = { ...process.env, TK_STUDIO_HOME: mkdtempSync(join(tmpdir(), "tk-sup-page-home-")) };
+    const data = await gatherPage({ queue: fx.queue, token: "t0k", env, registry: async () => ({}), ledger: { user: "u", machine: "m" } });
+    expect(data.locks).toEqual([expect.objectContaining({ root: fx.nested, checkout: checkoutKey(fx.repo.checkout), run_id: a.run_id })]);
+    const html = renderPage(data);
+    const card = html.slice(html.indexOf("held by its running run") - 600, html.indexOf("held by its running run"));
+    const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    // Titled with the nested project's root (never only the repository's), the lock key as a secondary line.
+    expect(card).toContain(`<strong>${esc(fx.nested)}</strong>`);
+    expect(card).toContain(`<div class="meta">checkout ${esc(checkoutKey(fx.repo.checkout))}</div>`);
+    expect(card).not.toContain(`<strong>${esc(checkoutKey(fx.repo.checkout))}</strong>`);
+  });
+
+  test("AC1 (follow-up patch): an engine lock held for a nested run is titled with the run's project root, never the served worktree root", async () => {
+    const fx = await nestedFixture();
+    const a = await fx.enqueue("job-a", fx.nested, A);
+    expect((await fx.queue.claim(a.run_id, A)).claimed).toBe(true);
+    // As `handToEngine` writes it after Story 28.5: the lock's `root` is the served root inside the worktree.
+    const served = join(mkdtempSync(join(tmpdir(), "tk-sup-work-")), "worktrees", "p", a.run_id, "apps", "sup");
+    (fx.queue as any).db.query(`UPDATE locks SET kind = 'engine', root = ?, engine_run_id = 'E1', owner_pid = NULL, owner_host = NULL, owner_nonce = NULL, owner_start = NULL WHERE run_id = ?`).run(served, a.run_id);
+    expect(fx.queue.locks()).toEqual([expect.objectContaining({ kind: "engine", root: served, run_id: a.run_id })]);
+    const env = { ...process.env, TK_STUDIO_HOME: mkdtempSync(join(tmpdir(), "tk-sup-page-home-")) };
+    const data = await gatherPage({ queue: fx.queue, token: "t0k", env, registry: async () => ({}), ledger: { user: "u", machine: "m" } });
+    expect(data.locks).toEqual([expect.objectContaining({ kind: "engine", root: fx.nested, checkout: checkoutKey(fx.repo.checkout), run_id: a.run_id, kept: "handed to bmad-loop engine E1" })]);
+    const html = renderPage(data);
+    const card = html.slice(html.indexOf("handed to bmad-loop engine E1") - 600, html.indexOf("handed to bmad-loop engine E1"));
+    const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    expect(card).toContain(`<strong>${esc(fx.nested)}</strong>`);
+    expect(card).not.toContain(`<strong>${esc(served)}</strong>`);
+    // The handing run not in the queue: the lock's own root.
+    (fx.queue as any).db.query("UPDATE locks SET run_id = 'gone' WHERE run_id = ?").run(a.run_id);
+    const orphan = await gatherPage({ queue: fx.queue, token: "t0k", env, registry: async () => ({}), ledger: { user: "u", machine: "m" } });
+    expect(orphan.locks).toEqual([expect.objectContaining({ kind: "engine", root: served, run_id: "gone" })]);
+  });
+
+  test("AC2: the case-folded spelling on win32 — two spellings of one checkout are one lock (platform injected)", async () => {
+    const fx = await nestedFixture();
+    const win = await resolveCheckout(fx.nested, { platform: "win32" });
+    expect(win).toEqual({ lockCheckout: checkoutKey(fx.repo.checkout, "win32"), prefix: "apps/sup/" });
+    expect(win.lockCheckout).toBe(canonicalPath(fx.repo.checkout).toLowerCase());
+    const upper = checkoutKey(canonicalPath(fx.repo.checkout).toUpperCase(), "win32");
+    expect(upper).toBe(win.lockCheckout);
+    const defn = (id: string) => ({ id, trigger: "one-shot", target: { skill: "tk-studio-activate" } });
+    const a = fx.queue.enqueue({ jobId: "job-a", root: fx.nested, definition: defn("job-a"), owner: A, ...win }).run;
+    const b = fx.queue.enqueue({ jobId: "job-b", root: fx.repo.checkout, definition: defn("job-b"), owner: B, lockCheckout: upper, prefix: "" }).run;
+    expect((await fx.queue.claim(a.run_id, A)).claimed).toBe(true);
+    expect(await fx.queue.claim(b.run_id, B)).toMatchObject({ claimed: false, why: "lock", holder: { run_id: a.run_id } });
+  });
+
+  test("pre-migration row: a run with no lock key holds and frees its lock under its `checkout`", async () => {
+    const fx = fixture();
+    const a = fx.enqueue("job-a", A).run;
+    fx.queue.db.query("UPDATE runs SET lock_checkout = NULL, prefix = NULL WHERE run_id = ?").run(a.run_id);
+    const old = fx.queue.get(a.run_id)!;
+    expect(lockKeyOf(old)).toBe(old.checkout);
+    expect((await fx.queue.claim(a.run_id, A)).claimed).toBe(true);
+    expect(fx.queue.locks()).toEqual([expect.objectContaining({ checkout: old.checkout, run_id: a.run_id })]);
+    expect(fx.queue.lock(old)).toMatchObject({ run_id: a.run_id });
+    const b = fx.enqueue("job-b", B).run;
+    expect(await fx.queue.claim(b.run_id, B)).toMatchObject({ claimed: false, why: "lock", holder: { run_id: a.run_id } });
+    fx.queue.end(a.run_id, "complete");
+    expect(fx.queue.locks()).toEqual([]);
+  });
+
+  test("migration: a queue file from before the lock key gains the two run columns", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "tk-sup-qmig-")), "q.db");
+    new Queue(path).close();
+    const raw = new Database(path);
+    raw.exec("DROP TRIGGER IF EXISTS runs_terminal_immutable; ALTER TABLE runs DROP COLUMN lock_checkout; ALTER TABLE runs DROP COLUMN prefix;");
+    raw.close();
+    const q = new Queue(path);
+    const cols = (q.db.query("PRAGMA table_info(runs)").all() as { name: string }[]).map((c) => c.name);
+    expect(cols).toContain("lock_checkout");
+    expect(cols).toContain("prefix");
+    q.close();
   });
 });

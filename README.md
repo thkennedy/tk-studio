@@ -280,6 +280,9 @@ tk-studio/
     lib/                             # deterministic cores (stdlib-only Python, uv run)
     contracts/                       # driver contract + schemas + conformance suite
     bmad.lock                        # the BMad base pin
+  apps/supervisor/                   # the studio supervisor (Bun/TS; `bun test` from here), a nested
+                                     #   studio project (AD-21): own _bmad/ _bmad-output/ .tk-studio/
+                                     #   .bmad-loop/ .claude/; released as supervisor--vX.Y.Z
   measurements/                      # teammate ledgers, arriving only via PR
   issues/ledger.md                   # ISS-NNN living defect ledger
   proposals/ledger.md                # PROP-NNN living proposals ledger

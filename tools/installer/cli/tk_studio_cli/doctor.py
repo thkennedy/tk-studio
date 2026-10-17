@@ -7,7 +7,9 @@ are ``claude --version``, ``sbx daemon status`` and ``git config --global
 --get core.longpaths``, each through the injected runner, only when the
 executable is on PATH, and each bounded by ``PROCESS_TIMEOUT``. Its only
 network calls are the ``/status`` probe (through the injected probe) and the
-roster fetch when ``--roster`` is a URL or absent.
+roster fetch when ``--roster`` is a URL or absent. The cut-over checks
+(Story 28.4, Windows only) start nothing: the Startup ``.lnk`` is parsed in
+Python and the git top-level is found by walking up for ``.git``.
 
 Doctor's own status is ``complete`` whatever the checks find; ``reason``
 names every failing check. Every non-``pass`` check carries a ``fix``.
@@ -279,41 +281,35 @@ def _accepted(record: object) -> bool:
         and record.get("hasTrustDialogAccepted") is True
 
 
-def check_folder_trust(ctx) -> list[dict]:
-    registry = store_root(ctx.env) / "registry" / "projects.yaml"
-    fix_registry = (f"repair {registry} (tk-studio-onboard writes it); "
-                    "doctor never edits it")
-    if not registry.is_file():
-        return [_check("folder-trust", SKIPPED,
-                       f"no registered projects ({registry} absent)",
-                       "onboard a project (tk onboard); trust is checked "
-                       "for every registered root")]
+def _registry_path(ctx) -> Path:
+    return store_root(ctx.env) / "registry" / "projects.yaml"
+
+
+def _read_projects(registry: Path) -> tuple[dict | None, str | None]:
+    """The registry's ``projects`` map, or None and why it is unreadable.
+    The caller checks ``is_file`` first."""
     try:
         data = miniyaml.loads(registry.read_text(encoding="utf-8"))
     except (miniyaml.MiniYamlError, OSError, UnicodeDecodeError) as exc:
-        return [_check("folder-trust", FAIL,
-                       f"registry {registry} unreadable: {exc}", fix_registry)]
+        return None, f"registry {registry} unreadable: {exc}"
     projects = data.get("projects")
     if projects is None:     # miniyaml dumps an empty map as a bare key
         projects = {}
     if not isinstance(projects, dict):
-        return [_check("folder-trust", FAIL, f"registry {registry} "
-                       "unreadable: 'projects' is not a map", fix_registry)]
-    if not projects:
-        return [_check("folder-trust", SKIPPED,
-                       f"registry {registry} has no projects",
-                       "onboard a project (tk onboard); trust is checked "
-                       "for every registered root")]
+        return None, f"registry {registry} unreadable: 'projects' is not a map"
+    return projects, None
+
+
+def _trusted_roots(ctx) -> tuple[Path, dict[str, object] | None, str | None]:
+    """``.claude.json``'s project records keyed by normalized path, or None
+    and why the file is unreadable (an absent file is an empty map)."""
     state_file = plugin_leg.claude_json_path(ctx.env)
     trusted: dict[str, object] = {}
     if state_file.is_file():
         state, err = plugin_leg._read_json(state_file)
         if err or not isinstance(state, dict):
-            return [_check("folder-trust", FAIL,
-                           f"{state_file} unreadable: "
-                           f"{err or 'not a JSON object'}",
-                           f"repair {state_file} by starting Claude Code "
-                           "once; doctor never edits it")]
+            return state_file, None, (f"{state_file} unreadable: "
+                                      f"{err or 'not a JSON object'}")
         entries = state.get("projects")
         if isinstance(entries, dict):
             # keys that normalize alike (case, slash direction on Windows)
@@ -324,6 +320,31 @@ def check_folder_trust(ctx) -> list[dict]:
                 norm = _norm(key, ctx.plat.windows)
                 if norm not in trusted or _accepted(record):
                     trusted[norm] = record
+    return state_file, trusted, None
+
+
+def check_folder_trust(ctx) -> list[dict]:
+    registry = _registry_path(ctx)
+    fix_registry = (f"repair {registry} (tk-studio-onboard writes it); "
+                    "doctor never edits it")
+    if not registry.is_file():
+        return [_check("folder-trust", SKIPPED,
+                       f"no registered projects ({registry} absent)",
+                       "onboard a project (tk onboard); trust is checked "
+                       "for every registered root")]
+    projects, why = _read_projects(registry)
+    if projects is None:
+        return [_check("folder-trust", FAIL, why, fix_registry)]
+    if not projects:
+        return [_check("folder-trust", SKIPPED,
+                       f"registry {registry} has no projects",
+                       "onboard a project (tk onboard); trust is checked "
+                       "for every registered root")]
+    state_file, trusted, why = _trusted_roots(ctx)
+    if trusted is None:
+        return [_check("folder-trust", FAIL, why,
+                       f"repair {state_file} by starting Claude Code "
+                       "once; doctor never edits it")]
     out = []
     for pid in sorted(projects):
         entry = projects[pid]
@@ -385,14 +406,7 @@ def check_long_paths(ctx) -> dict:
     return _check(name, PASS, "LongPathsEnabled = 1; git core.longpaths true")
 
 
-def _expand(entry: str, env: Mapping[str, str]) -> str:
-    """``%NAME%`` references expanded from ``env``, names matched
-    case-insensitively as Windows does; an unknown reference stays as it
-    is (ExpandEnvironmentVariables)."""
-    folded = {k.casefold(): v for k, v in env.items()}
-    return re.sub(r"%([^%]+)%",
-                  lambda m: folded.get(m.group(1).casefold(), m.group(0)),
-                  entry)
+_expand = apps.expand_vars     # %NAME% from env (ExpandEnvironmentVariables)
 
 
 def _on_path(value: str | None, folder: Path, windows: bool,
@@ -508,6 +522,253 @@ def check_supervisor(ctx, fields: dict, roster: dict | None,
         return _check(name, PASS, f"{where}; {probe['url']} answers")
     url = probe["url"] if probe else apps.probe_url(ctx)
     return _check(name, FAIL, f"{where}; {url} does not answer", FIX_START)
+
+
+# --- the cut-over (Story 28.4): root, registry, trust, Startup shortcut -----
+
+TARGET = "C:\\GitHub\\tk-studio\\apps\\supervisor"     # runbook §4.3
+FIX_SHORTCUT = ("make the Startup shortcut as runbook §4.3 says: Target "
+                "wt.exe, Arguments `-w studio nt --title supervisor pwsh "
+                f"-NoExit -File {TARGET}\\start.ps1`, Start in {TARGET}")
+FIX_RETARGET = ("retarget the Startup shortcut to runbook §4.3's target "
+                f"{TARGET}\\start.ps1 (Start in {TARGET})")
+FIX_ROOT_FIRST = "retarget the shortcut first (supervisor-root's fix)"
+_FILE_ARG = re.compile(r'-File\s+(?:"([^"]+)"|([^\s"]+\.ps1))(?=\s|$)',
+                       re.IGNORECASE)
+# An unquoted -File path with whitespace in it: pwsh takes only the text up
+# to the first space as the file, so it must be quoted.
+_UNQUOTED_SPACED = re.compile(r'-File\s+([^"\s][^"]*?\s[^"]*?\.ps1)(?=\s|$)',
+                              re.IGNORECASE)
+
+
+def fix_shortcut(report: dict) -> str:
+    """The shortcut fix for this box, by the supervisor's mode: a slot box's
+    shortcut is the installer's to write; a source checkout's is §4.3's."""
+    mode = report.get("mode")
+    if mode == "source checkout":
+        return FIX_SHORTCUT
+    slot_fix = ("`tk-studio update` rewrites the shortcut at the current "
+                "slot's start.ps1 when it installs a slot")
+    if mode == "slot" and report.get("path"):
+        slot = Path(report["path"])
+        return (f"on this slot box {slot_fix}; until then make it as runbook "
+                "§4.3 shows, pointed at the slot: Arguments `-w studio nt "
+                f"--title supervisor pwsh -NoExit -File "
+                f"\"{slot / 'start.ps1'}\"`, Start in {slot}")
+    return (f"on a source checkout, {FIX_SHORTCUT}; on a slot box, "
+            f"{slot_fix} (tk-studio install or update)")
+
+
+def _split_path(text: str) -> tuple[str, str]:
+    """``(parent, name)`` of a path written with either slash."""
+    trimmed = text.rstrip("\\/")
+    cut = max(trimmed.rfind("\\"), trimmed.rfind("/"))
+    return (trimmed[:cut], trimmed[cut + 1:]) if cut >= 0 else ("", trimmed)
+
+
+def _join(folder: str, relative: str) -> str:
+    """``relative`` (leading ``.\\`` or ``./`` dropped) under ``folder``,
+    written with ``folder``'s own slash."""
+    rest = re.sub(r"^(?:\.[\\/])+", "", relative)
+    sep = "\\" if "\\" in folder else "/"
+    rest = rest.replace("/" if sep == "\\" else "\\", sep)
+    return folder.rstrip("\\/") + sep + rest
+
+
+def _project_id(folder: Path) -> str:
+    """The nested root's ``project_id`` from its ``.tk-studio/config.yaml``;
+    the folder basename when absent (AD-20 default)."""
+    config = folder / ".tk-studio" / "config.yaml"
+    try:
+        data = miniyaml.loads(config.read_text(encoding="utf-8-sig"))
+    except (miniyaml.MiniYamlError, OSError, UnicodeDecodeError):
+        data = {}
+    value = data.get("project_id") if isinstance(data, dict) else None
+    return value if isinstance(value, str) and value else folder.name
+
+
+def _is_file(path: Path) -> bool:
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
+def check_supervisor_root(ctx, checkout: str) -> dict:
+    name = "supervisor-root"
+    folder = Path(checkout)
+    config = folder / ".tk-studio" / "config.yaml"
+    try:
+        own = (folder / ".git").exists()
+    except OSError:
+        own = False
+    # the old clone holds .git and start.ps1 (and, onboarded, its own
+    # .tk-studio/config.yaml): named before the top-level case
+    if own and _is_file(folder / "start.ps1"):
+        holds = (".git, start.ps1 and .tk-studio/config.yaml"
+                 if _is_file(config) else ".git and start.ps1")
+        return _check(name, FAIL, f"{folder} is a repository of its own "
+                      f"(holds {holds}), not a nested studio root; likely "
+                      "the pre-cut-over layout (the old clone)", FIX_RETARGET)
+    if own and _is_file(config):
+        return _check(name, FAIL, f"{folder} is a repository top level "
+                      "(holds .git and .tk-studio/config.yaml), not a nested "
+                      "root inside one", FIX_RETARGET)
+    if own:
+        return _check(name, FAIL, f"{folder} is a repository of its own "
+                      "(holds .git), not a nested studio root; likely the "
+                      "pre-cut-over layout (the old clone)", FIX_RETARGET)
+    top = apps.git_top(folder)
+    if top is None:
+        return _check(name, FAIL, f"{folder} is in no git checkout",
+                      FIX_RETARGET)
+    if not _is_file(config):
+        return _check(name, FAIL, f"{folder} is inside the checkout {top} "
+                      "but holds no .tk-studio/config.yaml (not a nested "
+                      "studio project)", FIX_RETARGET)
+    if not _is_file(top / ".tk-studio" / "config.yaml"):
+        return _check(name, FAIL, f"{folder} is inside the checkout {top}, "
+                      "which holds no .tk-studio/config.yaml (not a studio "
+                      "project)", FIX_RETARGET)
+    if not _is_file(folder / "start.ps1"):
+        relative = Path(os.path.relpath(folder, top)).as_posix()
+        return _check(name, FAIL, f"{folder} is the nested root inside the "
+                      f"checkout {top} but holds no start.ps1",
+                      f"restore it (`git -C {top} restore "
+                      f"{relative}/start.ps1`), or {FIX_RETARGET}")
+    return _check(name, PASS, f"{folder} is the nested root inside the "
+                  f"checkout {top} (project {_project_id(folder)})")
+
+
+def check_supervisor_registry(ctx, checkout: str) -> dict:
+    name = "supervisor-registry"
+    folder = Path(checkout)
+    pid = _project_id(folder)
+    registry = _registry_path(ctx)
+    register = (f"uv run <plugin>/lib/registry.py register --directory "
+                f"{folder} --writer activate --project-id {pid}; doctor never "
+                "edits the registry")
+    if not registry.is_file():
+        return _check(name, FAIL, f"no registry at {registry}: {pid} is not "
+                      f"registered at {folder}", register)
+    projects, why = _read_projects(registry)
+    if projects is None:
+        return _check(name, FAIL, why, f"repair {registry} "
+                      "(tk-studio-onboard writes it); doctor never edits it")
+    entry = projects.get(pid)
+    root = entry.get("root") if isinstance(entry, dict) else None
+    if not isinstance(root, str) or not root:
+        return _check(name, FAIL, f"registry {registry} has no root for "
+                      f"{pid} (the supervisor root is {folder})", register)
+    if _norm(root, True) != _norm(str(folder), True):
+        return _check(name, FAIL, f"registry {registry} names {pid} at "
+                      f"{root}; the supervisor root is {folder}",
+                      f"uv run <plugin>/lib/registry.py amend --project-id "
+                      f"{pid} --writer activate --root {folder}; doctor never "
+                      "edits the registry")
+    return _check(name, PASS, f"registry {registry} names {pid} at {root}")
+
+
+def check_supervisor_trust(ctx, checkout: str) -> dict:
+    name = "supervisor-trust"
+    folder = str(Path(checkout))
+    state_file, trusted, why = _trusted_roots(ctx)
+    if trusted is None:
+        return _check(name, FAIL, why, f"repair {state_file} by starting "
+                      "Claude Code once; doctor never edits it")
+    if _accepted(trusted.get(_norm(folder, True))):
+        return _check(name, PASS, f"{folder} trusted (hasTrustDialogAccepted "
+                      f"in {state_file})")
+    want = _norm(folder, True)
+    parents = sorted(key for key, record in trusted.items()
+                     if _accepted(record) and want.startswith(key + "/"))
+    detail = f"{folder} is not trusted in {state_file}"
+    if parents:
+        detail += (f"; its parent {parents[-1]} is, but trust has no "
+                   "inheritance (runbook §4.1)")
+    return _check(name, FAIL, detail, f"open `claude` in {folder} and accept "
+                  "the trust dialog")
+
+
+def check_startup_shortcut(ctx, report: dict) -> dict:
+    name = "startup-shortcut"
+    fix = fix_shortcut(report)
+    lnk = apps.shortcut_path(ctx)
+    if lnk is None:
+        return _check(name, FAIL, "APPDATA is unset: no Startup folder to "
+                      f"find {apps.SHORTCUT} in", fix)
+    strings = apps.read_lnk_strings(lnk)
+    if strings is None:
+        return _check(name, FAIL, f"{lnk} is absent or not a shell link", fix)
+    arguments = strings.get("arguments") or ""
+    workdir = _expand(strings.get("working_dir") or "", ctx.env)
+    match = _FILE_ARG.search(arguments)
+    target = (match.group(1) or match.group(2)) if match else None
+    if target is None:
+        spaced = _UNQUOTED_SPACED.search(arguments)
+        if spaced is not None:
+            # plain quotes, not !r: on Windows repr doubles every backslash
+            # and the operator would read a path that does not exist
+            return _check(name, FAIL, f"{lnk} Arguments name the unquoted "
+                          f"-File path '{spaced.group(1)}': a path with a "
+                          "space must be quoted, or pwsh takes only "
+                          f"'{spaced.group(1).split()[0]}' as the file", fix)
+    if target is None or _split_path(target)[1].casefold() != "start.ps1":
+        return _check(name, FAIL, f"{lnk} Arguments name no `-File "
+                      f"…start.ps1` ({arguments!r})", fix)
+    target = _expand(target, ctx.env)
+    if not apps.is_absolute(target):
+        if not apps.is_absolute(workdir):
+            return _check(name, FAIL, f"{lnk} runs the relative {target} "
+                          "with no absolute working directory to resolve it "
+                          f"against (Start in {workdir!r})", fix)
+        target = _join(workdir, target)
+    parent = _split_path(target)[0]
+    if _norm(parent, True) != _norm(workdir, True):
+        return _check(name, FAIL, f"{lnk} runs {target}, outside its "
+                      f"working directory {workdir!r}", fix)
+    if not Path(target).is_file():
+        return _check(name, FAIL, f"{lnk} runs {target}, which does not "
+                      "exist", fix)
+    if report.get("mode") != "source checkout":
+        slot = report.get("path") if report.get("mode") == "slot" else None
+        if slot is None or _norm(parent, True) != _norm(str(slot), True):
+            current = (f"the current slot is {slot}" if slot is not None
+                       else "no current slot is installed")
+            return _check(name, FAIL, f"{lnk} runs {target}, which is "
+                          f"neither a source checkout nor the current "
+                          f"slot; {current}", fix)
+    return _check(name, PASS, f"{lnk} runs {target}")
+
+
+def check_cut_over(ctx, fields: dict, supervisor: dict) -> list[dict]:
+    """The four Story 28.4 checks, Windows only (absent elsewhere). The root
+    checks run only when the shortcut names a source checkout; registry and
+    trust are judged only once ``supervisor-root`` passes (else they would
+    name the wrong folder). With no supervisor shipped (``supervisor``
+    skipped) the shortcut is skipped too."""
+    if not ctx.plat.windows:
+        return []
+    report = fields["supervisor"]
+    out = []
+    checkout = report.get("checkout") \
+        if report.get("mode") == "source checkout" else None
+    if checkout is not None:
+        root = check_supervisor_root(ctx, checkout)
+        out.append(root)
+        if root["status"] == PASS:
+            out += [check_supervisor_registry(ctx, checkout),
+                    check_supervisor_trust(ctx, checkout)]
+        else:
+            out += [_check(n, SKIPPED, "not checked: supervisor-root failed",
+                           FIX_ROOT_FIRST)
+                    for n in ("supervisor-registry", "supervisor-trust")]
+    if supervisor["status"] == SKIPPED:
+        out.append(_check("startup-shortcut", SKIPPED, supervisor["detail"],
+                          supervisor["fix"]))
+    else:
+        out.append(check_startup_shortcut(ctx, report))
+    return out
 
 
 def check_stale_slots(ctx) -> dict | None:
@@ -662,6 +923,7 @@ def run_doctor(ctx, *, roster: str | None, channel: str, fetch,
         loaded, refusal = None, exc
     if loaded is not None:   # a --roster path names its own channel
         channel = loaded["channel"]
+    supervisor = check_supervisor(ctx, fields, loaded, channel)
     checks: list[dict | None] = [
         check_claude(ctx, loaded, refusal),
         check_plugin(ctx, loaded, refusal, channel),
@@ -672,7 +934,8 @@ def run_doctor(ctx, *, roster: str | None, channel: str, fetch,
         check_long_paths(ctx),
         check_path_launcher(ctx),
         check_tailscale_cert(ctx),
-        check_supervisor(ctx, fields, loaded, channel),
+        supervisor,
+        *check_cut_over(ctx, fields, supervisor),
         check_stale_slots(ctx),
         check_studio_web(ctx, loaded, channel),
         check_cli_helper(ctx),

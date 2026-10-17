@@ -9,7 +9,10 @@ copy, and the listing runs from ``PROJECT_DIR`` so a project-scope copy is
 seen), plus a failing and a stalled ``claude plugin list``. Every failure
 exits non-zero and names the mount path. Then the static half: ``provision-engine.sh`` no longer installs the
 plugin per sandbox and does run the check, and the check never runs an
-uninstall or ``sbx``. No network, no real ``claude``.
+uninstall or ``sbx``. No network, no real ``claude``. Story 28.3 adds the
+one-mount ``claude-tk-studio`` sandbox: the listing from a nested project
+dir, the launch/resume scripts' two ROOT values and their named refusal of a
+ROOT that is no project, and the provisioning's one-mount usage.
 """
 from __future__ import annotations
 
@@ -27,6 +30,8 @@ REPO_ROOT = PLUGIN_ROOT.parents[1]
 SBX = REPO_ROOT / "tools" / "sbx-engine"
 CHECK = SBX / "check-skills-mount.sh"
 PROVISION = SBX / "provision-engine.sh"
+LAUNCH = SBX / "launch-epic.sh"
+RESUME = SBX / "resume-run.sh"
 
 LOADED = """Installed plugins:
 
@@ -340,6 +345,21 @@ class SkillsMountCheckTests(unittest.TestCase):
             self._run(self.project),
             "claude plugin uninstall tk-studio@tk-studio --scope user")
 
+    def test_listing_runs_from_nested_project_dir(self):
+        # Story 28.3: in the one-mount sandbox the supervisor's project is
+        # nested (apps/supervisor); its project-scope copy counts when
+        # PROJECT_DIR is the nested root, and is not seen from the outer one.
+        self._mounts("ro,nosuid,nodev,relatime")
+        self._plugin_folder()
+        nested = self.project / "apps" / "supervisor"
+        nested.mkdir(parents=True)
+        self._fake_claude_project_copy(nested)
+        result = self._run(self.project)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self._assert_fails(
+            self._run(nested),
+            "claude plugin uninstall tk-studio@tk-studio --scope user")
+
 
 _SBX_TOKEN = re.compile(r"(^|[\s;|&(])sbx\s")
 _DQ_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
@@ -387,6 +407,36 @@ class ProvisionScriptTests(unittest.TestCase):
             'PROJECT_DIR="$PROJ" bash "$HERE/check-skills-mount.sh" || exit 1',
             text)
 
+    def test_runs_the_check_from_the_nested_supervisor_too(self):
+        # Story 28.3 (AC2): a shadowing copy under apps/supervisor/.claude is
+        # seen only from the nested dir (test_listing_runs_from_nested_
+        # project_dir), so provisioning checks from there as well, when the
+        # nested project exists, and fails the same way.
+        text = PROVISION.read_text(encoding="utf-8")
+        outer = text.index(
+            'PROJECT_DIR="$PROJ" bash "$HERE/check-skills-mount.sh" || exit 1')
+        guard = text.index(
+            'if [ -f "$PROJ/apps/supervisor/.tk-studio/config.yaml" ]; then')
+        nested = text.index(
+            'PROJECT_DIR="$PROJ/apps/supervisor" bash '
+            '"$HERE/check-skills-mount.sh" || exit 1')
+        self.assertLess(outer, guard)
+        self.assertLess(guard, nested)
+        self.assertLess(nested, text.index("step claude-flags"))
+
+    def test_usage_names_the_one_mount_layout(self):
+        # Story 28.3: claude-tk-studio mounts the repository once; both
+        # arguments are that path, bun is provisioned for apps/supervisor, and
+        # TK_STUDIO_ROOT stays the outer root (the studio mount).
+        text = PROVISION.read_text(encoding="utf-8")
+        header = text.split("\nset -u", 1)[0]
+        self.assertIn("WITH_BUN=1 bash <this> /c/GitHub/tk-studio "
+                      "/c/GitHub/tk-studio", header)
+        self.assertIn("two-mount form", header)
+        self.assertIn('PROJ="$1"; STUDIO="$2"', text)
+        self.assertIn('echo "export TK_STUDIO_ROOT=$STUDIO" >> ~/.profile',
+                      text)
+
     def test_check_never_uninstalls_or_calls_sbx(self):
         # The guard itself: a call chained after a message, or hidden in a
         # quoted substitution, is flagged; a fix named in a message is not.
@@ -400,6 +450,96 @@ class ProvisionScriptTests(unittest.TestCase):
                 if not line.lstrip().startswith("#")]
         for line in code:
             self.assertFalse(_runs_forbidden(line), line)
+
+
+@unittest.skipUnless(shutil.which("bash"), "bash is required")
+class EngineRootTests(unittest.TestCase):
+    """Story 28.3 (AC2): launch-epic.sh and resume-run.sh take ROOT, the
+    nested supervisor or the repository root; a ROOT that is neither a studio
+    project root nor holds .bmad-loop/ is refused by name, exit 2, before
+    anything is written or run."""
+
+    SCRIPTS = ((LAUNCH, "launch-epic", "42"), (RESUME, "resume-run", "r-1"))
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.marker = self.root / "ran"
+        # Anything the scripts would run past the refusal leaves a marker.
+        for tool in ("claude", "bmad-loop"):
+            fake = self.bin / tool
+            fake.write_text(f'#!/usr/bin/env bash\ntouch "{self.marker}"\n',
+                            encoding="utf-8")
+            fake.chmod(0o755)
+        # Past the refusal the payload settles (sleep 20) and holds while
+        # pgrep finds an engine: stub both so an accepted ROOT ends at once
+        # and never sees a real engine on this host.
+        for tool, body in (("sleep", "exit 0"), ("pgrep", "exit 1")):
+            fake = self.bin / tool
+            fake.write_text(f"#!/usr/bin/env bash\n{body}\n", encoding="utf-8")
+            fake.chmod(0o755)
+
+    def _run(self, script: Path, arg: str, root: Path):
+        env = dict(os.environ, ROOT=str(root), HOME=str(self.root),
+                   PATH=f"{self.bin}{os.pathsep}{os.environ.get('PATH', '')}")
+        return subprocess.run(["bash", str(script), arg], env=env,
+                              cwd=str(self.root), capture_output=True,
+                              text=True, encoding="utf-8", timeout=30)
+
+    def test_root_that_is_no_project_is_refused_by_name(self):
+        bad = self.root / "not-a-project"
+        bad.mkdir()
+        for script, name, arg in self.SCRIPTS:
+            result = self._run(script, arg, bad)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn(f"{name}: ROOT={bad} is not a studio project root",
+                          result.stderr)
+            self.assertIn("/c/GitHub/tk-studio/apps/supervisor",
+                          result.stderr)
+            self.assertEqual(list(bad.iterdir()), [], name)
+            self.assertFalse(self.marker.exists(), name)
+
+    def test_root_with_either_marker_gets_past_the_check(self):
+        # A studio project root (.tk-studio/config.yaml only) and a bare
+        # engine project (.bmad-loop/ only) are both accepted: the payload
+        # runs (the stubbed claude / bmad-loop leaves the marker) and the
+        # script ends without the refusal.
+        for kind in ("config", "bmad-loop"):
+            for script, name, arg in self.SCRIPTS:
+                root = self.root / f"{kind}-{name}"
+                if kind == "config":
+                    (root / ".tk-studio").mkdir(parents=True)
+                    (root / ".tk-studio" / "config.yaml").write_text(
+                        "project_id: x\n", encoding="utf-8")
+                else:
+                    (root / ".bmad-loop").mkdir(parents=True)
+                if self.marker.exists():
+                    self.marker.unlink()
+                result = self._run(script, arg, root)
+                label = f"{name} with {kind}"
+                self.assertNotEqual(result.returncode, 2, label)
+                self.assertNotIn("is not a studio project root",
+                                 result.stderr, label)
+                self.assertEqual(result.returncode, 0,
+                                 f"{label}: {result.stderr}")
+                self.assertTrue(self.marker.exists(), label)
+
+    def test_refusal_precedes_any_write_and_spares_the_hold_loop(self):
+        for script, _name, _arg in self.SCRIPTS:
+            text = script.read_text(encoding="utf-8")
+            refusal = text.index('[ ! -f "$ROOT/.tk-studio/config.yaml" ]')
+            self.assertLess(refusal, text.index('mkdir -p "$OUT"'))
+            self.assertIn("exit 2", text[refusal:text.index('mkdir -p "$OUT"')])
+            self.assertIn("while pgrep -f", text)
+
+    def test_headers_name_both_roots(self):
+        for script, _name, _arg in self.SCRIPTS:
+            header = script.read_text(encoding="utf-8").split("\nset -u", 1)[0]
+            self.assertIn("ROOT=/c/GitHub/tk-studio/apps/supervisor", header)
+            self.assertIn("ROOT=/c/GitHub/tk-studio ", header)
 
 
 if __name__ == "__main__":

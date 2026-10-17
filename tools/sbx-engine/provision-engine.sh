@@ -4,6 +4,13 @@
 #   <project-mount>  the project checkout as mounted in the sandbox (read-write)
 #   <studio-mount>   the tk-studio checkout as mounted in the sandbox (read-only
 #                    for other projects; the project itself when it IS tk-studio)
+# The one-mount tk-studio sandbox `claude-tk-studio` (AD-21, Story 28.3) mounts
+# C:\GitHub\tk-studio read-write and serves both loops, the plugin's and the
+# nested supervisor's (apps/supervisor), so both arguments are the same path
+# and the supervisor needs bun:
+#   WITH_BUN=1 bash <this> /c/GitHub/tk-studio /c/GitHub/tk-studio
+# TK_STUDIO_ROOT stays the outer root there; launch-epic.sh's ROOT picks the
+# project per epic. Other projects (a Godot game) keep the two-mount form.
 # The sandbox must be created with the read-only skills mount (`sbx create
 # --skills readonly`): the tk-studio plugin comes from Docker Sandboxes' shared
 # skills store, a copy of the host's ~/.claude/skills that `sbx skills import`
@@ -88,6 +95,12 @@ grep TK_STUDIO_ROOT ~/.profile
 # view, and this step only verifies it (Story 25.6).
 step skills-mount
 PROJECT_DIR="$PROJ" bash "$HERE/check-skills-mount.sh" || exit 1
+# The one-mount tk-studio sandbox also serves the nested supervisor project
+# (Story 28.3): a project-scope copy under apps/supervisor/.claude is listed
+# only from that directory, so check from it too.
+if [ -f "$PROJ/apps/supervisor/.tk-studio/config.yaml" ]; then
+  PROJECT_DIR="$PROJ/apps/supervisor" bash "$HERE/check-skills-mount.sh" || exit 1
+fi
 
 # Claude Code's "Make auto mode your default permission mode?" dialog is gated by
 # hasSeenAutoDefaultNudge in ~/.claude.json. On 2026-09-28 it swallowed an engine

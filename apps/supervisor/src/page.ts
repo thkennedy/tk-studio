@@ -42,6 +42,9 @@ const RUNS_SHOWN = 50, EVENTS_PER_RUN = 30, STATUS_BLOCKS = 5, LEDGER_LINES = 20
 type Read = { ok: true; value: unknown } | { ok: false; note: string };
 
 export interface KeptLock {
+  /** The holder's project root (`locks.root`): what the card is titled with — a nested project names itself, not its repository. */
+  root: string;
+  /** The lock key (the git top-level's checkout key, Story 28.5), shown as a secondary line. */
   checkout: string; kind: "run" | "engine"; run_id: string; holder: Holder; acquired: string;
   run_state: string | null;
   /** The run's own reason (null for an engine lock or a run not in the queue). */
@@ -224,7 +227,10 @@ export async function gatherPage(deps: PageDeps): Promise<PageData> {
           : mayRun ? `kept while its recorded worker (pid ${pid}) may run` : `recorded worker (pid ${pid}) is gone: the next claim or recover frees it`;
       }
     }
-    locks.push({ checkout: l.checkout, kind: l.kind, run_id: l.run_id, holder: holderOf(l), acquired: l.acquired, run_state: run?.state ?? null, reason: run?.reason ?? null, kept, deadline });
+    // An engine lock's `root` is where the engine is probed (the served root in the worktree): the card
+    // is titled with the handing run's project root, `l.root` only when that run is not in the queue.
+    const root = l.kind === "engine" ? queue.get(l.run_id)?.root ?? l.root : l.root;
+    locks.push({ root, checkout: l.checkout, kind: l.kind, run_id: l.run_id, holder: holderOf(l), acquired: l.acquired, run_state: run?.state ?? null, reason: run?.reason ?? null, kept, deadline });
   }
 
   const statusBlocks: PageData["statusBlocks"] = [];
@@ -416,7 +422,8 @@ ${r.reason ? `<p class="reason">${t(r.reason)}</p>` : ""}${ruling(p)}${cancelFor
     const h = l.holder;
     const who = h.kind === "engine" ? `engine ${h.engine_run_id ?? "(unverified)"} (run ${h.run_id}, job ${h.job_id})`
       : `run ${h.run_id} (job ${h.job_id}, pid ${h.pid ?? "?"}${h.host ? `@${h.host}` : ""})`;
-    return `<div class="card"><strong>${t(l.checkout)}</strong>
+    return `<div class="card"><strong>${t(l.root)}</strong>
+<div class="meta">checkout ${t(l.checkout)}</div>
 <div>holder: ${t(who)}${l.run_state ? ` · run <span class="st">${t(l.run_state)}</span>` : ""}</div>
 <div>${t(l.kept)}${l.deadline ? ` · deadline ${t(l.deadline)}` : ""}</div>
 ${l.reason ? `<p class="reason">${t(l.reason)}</p>` : ""}

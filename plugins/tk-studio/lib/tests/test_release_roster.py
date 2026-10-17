@@ -914,6 +914,7 @@ class ReleaseMotionTestCase(unittest.TestCase):
         self.tags = {"tk-studio--v1.2.3", "supervisor--v0.1.0", "cli--v0.1.0",
                      "studio-web--v0.1.0"}
         self.subtree_present = True
+        self.archive_from_disk = False
         self.tamper = False
         self.release_exists = False
         self.wheel_version = "0.1.0"
@@ -944,13 +945,28 @@ class ReleaseMotionTestCase(unittest.TestCase):
         if args[:2] == ["git", "rev-list"]:
             return done(out="c0ffee\n")
         if args[:2] == ["git", "cat-file"]:
-            return done(out="tree\n") if self.subtree_present else done(128)
+            if not self.subtree_present:
+                return done(128)
+            # another checkout (--repo) answers from its files on disk
+            sub = args[-1].partition(":")[2]
+            if cwd not in (None, self.repo) and sub \
+                    and not (Path(cwd) / sub).is_dir():
+                return done(128)
+            return done(out="tree\n")
         if args[:2] == ["git", "show"]:
             return done(out="1754000000\n")
         if "archive" in args:
             out = Path(args[args.index("-o") + 1])
+            subdir = Path(cwd) / args[-1].partition(":")[2]
             with zipfile.ZipFile(out, "w") as z:
-                z.writestr("a.txt", f"tree {args[-1]}")
+                if self.archive_from_disk:
+                    # git archive <tag>:<subtree> — paths relative to it
+                    for f in sorted(subdir.rglob("*")):
+                        if f.is_file():
+                            z.writestr(f.relative_to(subdir).as_posix(),
+                                       f.read_bytes())
+                else:
+                    z.writestr("a.txt", f"tree {args[-1]}")
             return done()
         if args[:3] == ["gh", "repo", "view"]:
             return done(out="o/sup\n" if cwd == self.sup else "o/r\n")
@@ -1034,6 +1050,87 @@ class ReleaseMotionTestCase(unittest.TestCase):
         self.assertEqual(self.record.read_bytes(), before_record)
         self.assertEqual(result["written"],
                          ["tools/installer/rosters/latest.json"])
+
+    def test_in_repo_supervisor_cut_records_no_source(self):
+        # Story 28.3 (ADR §6 second prefix): the supervisor lives at
+        # apps/supervisor in this repository — no --repo, no source
+        sup = self.repo / "apps" / "supervisor"
+        (sup / "src").mkdir(parents=True)
+        (sup / "package.json").write_text("{}", encoding="utf-8")
+        (sup / "src" / "index.ts").write_text("export {}", encoding="utf-8")
+        self.archive_from_disk = True
+        self.tags.add("supervisor--v0.1.1")
+        before_record = self.record.read_bytes()
+        result = release_archive.run(False, app="supervisor", version="0.1.1")
+        self.assertTrue(result["verified"])
+        self.assertIn("--latest=false", self._gh_calls("create")[0])
+        archives = [(a, cwd) for a, cwd in self.calls if "archive" in a]
+        self.assertEqual([(a[-1], cwd) for a, cwd in archives],
+                         [("supervisor--v0.1.1:apps/supervisor", self.repo)])
+        with zipfile.ZipFile(io.BytesIO(self.uploaded)) as z:
+            self.assertEqual(sorted(z.namelist()),
+                             ["package.json", "src/index.ts"])
+        roster = json.loads((self.rosters / "latest.json").read_text("utf-8"))
+        self.assertEqual(roster["components"]["supervisor"], {
+            "tag": "supervisor--v0.1.1",
+            "url": "https://github.com/o/r/releases/download/"
+                   "supervisor--v0.1.1/supervisor-0.1.1.zip",
+            "sha256": result["sha256"]})
+        self.assertEqual(drift_check.roster_problems(roster), [])
+        self.assertEqual(self.record.read_bytes(), before_record)
+        self.assertEqual(result["written"],
+                         ["tools/installer/rosters/latest.json"])
+
+    def test_foreign_tk_studio_clone_cuts_the_supervisor_subtree(self):
+        # --repo at another tk-studio clone/worktree (same owner): its tag
+        # holds apps/supervisor, so the cut is that subtree, never the whole
+        # repository, and records no source
+        clone = self.tmp / "clone"
+        sup = clone / "apps" / "supervisor"
+        (sup / "src").mkdir(parents=True)
+        (sup / "package.json").write_text("{}", encoding="utf-8")
+        (sup / "src" / "index.ts").write_text("export {}", encoding="utf-8")
+        (clone / "README.md").write_text("root", encoding="utf-8")
+        self.archive_from_disk = True
+        result = release_archive.run(False, app="supervisor", version="0.1.0",
+                                     repo=clone)
+        self.assertTrue(result["verified"])
+        archives = [(a[-1], cwd) for a, cwd in self.calls if "archive" in a]
+        self.assertEqual(archives,
+                         [("supervisor--v0.1.0:apps/supervisor", clone)])
+        with zipfile.ZipFile(io.BytesIO(self.uploaded)) as z:
+            self.assertEqual(sorted(z.namelist()),
+                             ["package.json", "src/index.ts"])
+        roster = json.loads((self.rosters / "latest.json").read_text("utf-8"))
+        self.assertNotIn("source", roster["components"]["supervisor"])
+        self.assertEqual(roster["components"]["supervisor"]["sha256"],
+                         result["sha256"])
+
+    def test_foreign_tk_studio_tag_without_the_subtree_is_refused(self):
+        # a tk-studio clone whose supervisor tag predates apps/supervisor
+        # (a mis-minted tag): its root is not the supervisor — no cut
+        clone = self.tmp / "clone"
+        (clone / "plugins" / "tk-studio").mkdir(parents=True)
+        before = self._snapshot()
+        error = self._fails(app="supervisor", version="0.1.0",
+                            repo=clone)["error"]
+        self.assertIn("tag supervisor--v0.1.0 in", error)
+        self.assertIn("is a tk-studio tree without apps/supervisor", error)
+        self.assertEqual(self._gh_calls(), [])
+        self.assertEqual([a for a, _ in self.calls if "archive" in a], [])
+        self.assertEqual(self._snapshot(), before)
+
+    def test_in_repo_supervisor_without_its_tag_fails_on_the_tag(self):
+        # the EP-31 "own checkout" refusal is gone: only the absent tag stops it
+        self.tags.discard("supervisor--v0.1.0")
+        for dry_run in (True, False):
+            out = io.StringIO()
+            with redirect_stdout(out), self.assertRaises(SystemExit):
+                release_archive.run(dry_run, app="supervisor", version="0.1.0")
+            error = json.loads(out.getvalue())["error"]
+            self.assertIn("tag supervisor--v0.1.0 not found", error)
+            self.assertNotIn("own checkout", error)
+        self.assertEqual(self._gh_calls(), [])
 
     def test_existing_release_is_demoted_from_latest(self):
         self.release_exists = True
@@ -1186,24 +1283,22 @@ class ReleaseMotionTestCase(unittest.TestCase):
         # AC2: built from the app's subtree at its <prefix>--vX.Y.Z tag —
         # asserted against APPS and, for the planned layout, literally
         expected = {"plugin": "tk-studio--v1.2.3:plugins/tk-studio",
-                    "supervisor": "supervisor--v0.1.0:",
+                    "supervisor": "supervisor--v0.1.0:apps/supervisor",
                     "studio-web": "studio-web--v0.1.0:apps/studio-web/dist",
                     "cli": "cli--v0.1.0:" + release_archive.APPS["cli"][1]}
         self.assertEqual(set(expected), set(release_archive.APPS))
         for app, (prefix, subtree, _kind) in release_archive.APPS.items():
             self.calls.clear()
             version = "1.2.3" if app == "plugin" else "0.1.0"
-            repo = self.sup if app == "supervisor" else self.repo
             treeish = f"{prefix}{version}:" + ("" if subtree == "." else subtree)
             self.assertEqual(treeish, expected[app])
             result = release_archive.run(
-                True, app=app, version=None if app == "plugin" else version,
-                repo=self.sup if app == "supervisor" else None)
+                True, app=app, version=None if app == "plugin" else version)
             self.assertEqual(result["tag"], f"{prefix}{version}")
             archives = [(a, cwd) for a, cwd in self.calls if "archive" in a]
             self.assertEqual(archives, [(
                 ["git", "-c", "core.autocrlf=false", "archive", "--format=zip",
-                 "-o", archives[0][0][6], treeish], repo)], app)
+                 "-o", archives[0][0][6], treeish], self.repo)], app)
         # the cli wheel is built from that archived subtree, not the worktree
         self.assertEqual(self.build_src, f"tree {expected['cli']}")
 

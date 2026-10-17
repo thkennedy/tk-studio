@@ -3,6 +3,14 @@
 # resume it, and hold the sandbox attached while the engine lives.
 #   sbx exec <sandbox> bash -lc 'ROOT=<project-mount> bash <this> <run_id> [<tag>]'
 #
+# ROOT is the project the run belongs to. In the one-mount tk-studio sandbox
+# `claude-tk-studio` (runbook §3.8, Story 28.3) that is:
+#   ROOT=/c/GitHub/tk-studio/apps/supervisor   a supervisor run (nested project)
+#   ROOT=/c/GitHub/tk-studio                   a plugin run (the repository root)
+# Any other project's sandbox: ROOT=/c/GitHub/<project>. A ROOT with neither
+# .tk-studio/config.yaml nor .bmad-loop/ is refused (exit 2) before anything
+# is written.
+#
 # A supervisor run never uses this script: the supervisor resumes a paused run
 # whose story did no work through `POST /runs/{id}/resume` (the same
 # `bmad-loop resolve --no-interactive --resume`, held by the supervisor), and
@@ -18,6 +26,10 @@
 set -u
 RUN="$1"; TAG="${2:-resume}"
 ROOT="${ROOT:?set ROOT to the project mount}"
+if [ ! -f "$ROOT/.tk-studio/config.yaml" ] && [ ! -d "$ROOT/.bmad-loop" ]; then
+  echo "resume-run: ROOT=$ROOT is not a studio project root (no .tk-studio/config.yaml, no .bmad-loop/): use /c/GitHub/tk-studio/apps/supervisor for a supervisor run, /c/GitHub/tk-studio for a plugin run (runbook §3.8)" >&2
+  exit 2
+fi
 export PATH="$HOME/.local/bin:$PATH"
 OUT="$ROOT/.bmad-loop/cache/$RUN-$TAG"
 mkdir -p "$OUT"

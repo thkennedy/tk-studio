@@ -77,3 +77,10 @@
 - What no longer holds: "the verb is documented as additive (0.1.21)". It cannot be a bump now, only an append to the existing clause.
 - Suggested adjustment: Append the §4 `plansync.py status` text after the existing `0.1.21 (Epic 26)` clause, without rewording it or bumping the version again. Put `test_driver_contract.py` in Files. If a launch refusal is read, `budget` is present only when a mismatch was found.
 - Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-15)
+
+## operator — scope: operator — from 28-3-the-merged-tree-builds-releases-and-launches-from-one-root — 2026-10-17
+
+- What changed: nothing in 28-3 itself. The gate found AC3's live clause unmet because of the pre-existing supervisor defect DW-25: `prepareWorktree` and `invoke(workRoot ?? root, …)` serve the worktree top level, and nothing maps a project below its git top level (`apps/supervisor/src/worktree.ts:110-111`, `:254`; `cli.ts:1051`, `:1922`).
+- What no longer holds: 28.3 AC3, "the project served is the nested root and its `verify.host` is the one read at the run's base".
+- Suggested adjustment: correct-course to give the fix a story (a new 28.x, or widen 28.5, which already resolves the git top level per submission). The run should serve `<worktree>/<prefix>` (the prefix comes from `git rev-parse --show-prefix` of the root). Then mark 28.3 AC3 satisfied by reference, as 28.5 does for AC2. Decide the order relative to 28-4 (28.4's smoke test queues a supervisor job).
+- Status: closed — correct-course applied by the attended session (2026-10-17): Story 28.5 widened with the subpath AC (DW-25), 28.3 AC3's live clause satisfied by reference; order kept 28-4 then 28-5

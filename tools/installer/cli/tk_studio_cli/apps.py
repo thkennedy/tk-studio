@@ -493,13 +493,21 @@ def bun_leg(ctx: Ctx, entry: dict | None) -> dict:
 
 # --- source checkout (the dev box) -----------------------------------------
 
-def read_lnk_working_dir(path: Path) -> str | None:
-    """The WorkingDirectory of a Windows shell link (MS-SHLLINK), or None.
-    Parsed here (stdlib) so a read-only verb starts no process."""
+LNK_STRINGS = ((0x04, "name"), (0x08, "relative_path"),
+               (0x10, "working_dir"), (0x20, "arguments"))
+
+
+def read_lnk_strings(path: Path) -> dict[str, str] | None:
+    """The StringData of a Windows shell link (MS-SHLLINK): NAME_STRING,
+    RELATIVE_PATH, WORKING_DIR and COMMAND_LINE_ARGUMENTS, in that order,
+    keyed ``name``, ``relative_path``, ``working_dir``, ``arguments`` (only
+    those present), or None when the file is absent or not a link. Parsed
+    here (stdlib) so a read-only verb starts no process."""
     try:
         data = path.read_bytes()
     except OSError:
         return None
+    out: dict[str, str] = {}
     try:
         if len(data) < 76 or struct.unpack_from("<I", data, 0)[0] != 0x4C:
             return None
@@ -510,7 +518,7 @@ def read_lnk_working_dir(path: Path) -> str | None:
         if flags & 0x02:                                  # HasLinkInfo
             pos += struct.unpack_from("<I", data, pos)[0]
         wide = bool(flags & 0x80)                         # IsUnicode
-        for bit in (0x04, 0x08, 0x10):        # name, relative path, work dir
+        for bit, key in LNK_STRINGS:
             if not flags & bit:
                 continue
             count = struct.unpack_from("<H", data, pos)[0]
@@ -518,12 +526,17 @@ def read_lnk_working_dir(path: Path) -> str | None:
             size = count * 2 if wide else count
             raw = data[pos:pos + size]
             pos += size
-            if bit == 0x10:
-                return raw.decode("utf-16-le" if wide else "latin-1",
+            out[key] = raw.decode("utf-16-le" if wide else "latin-1",
                                   errors="replace")
     except struct.error:
-        return None
-    return None
+        return out or None
+    return out
+
+
+def read_lnk_working_dir(path: Path) -> str | None:
+    """The WorkingDirectory of a Windows shell link, or None."""
+    strings = read_lnk_strings(path)
+    return strings.get("working_dir") if strings else None
 
 
 def shortcut_path(ctx: Ctx) -> Path | None:
@@ -534,22 +547,71 @@ def shortcut_path(ctx: Ctx) -> Path | None:
             / "Programs" / "Startup" / SHORTCUT)
 
 
+def expand_vars(text: str, env: Mapping[str, str]) -> str:
+    """``%NAME%`` references expanded from ``env``, names matched
+    case-insensitively as Windows does; an unknown reference stays as it
+    is (ExpandEnvironmentVariables)."""
+    folded = {k.casefold(): v for k, v in env.items()}
+    return re.sub(r"%([^%]+)%",
+                  lambda m: folded.get(m.group(1).casefold(), m.group(0)),
+                  text)
+
+
+def is_absolute(text: str) -> bool:
+    """Whether ``text`` is an absolute path on this host; on Windows it also
+    needs a drive or a UNC share (``\\foo`` is relative to the current
+    drive), so nothing is resolved against the caller's working directory."""
+    if not text or not os.path.isabs(text):
+        return False
+    return sys.platform != "win32" or bool(os.path.splitdrive(text)[0])
+
+
+def git_top(folder: Path) -> Path | None:
+    """The nearest of ``folder`` and its ancestors that holds ``.git``, found
+    by walking up the filesystem (no ``git rev-parse``: no process). None
+    for a relative ``folder``: it is never resolved against the cwd."""
+    if not is_absolute(str(folder)):
+        return None
+    here = Path(os.path.abspath(folder))
+    for candidate in (here, *here.parents):
+        try:
+            if (candidate / ".git").exists():
+                return candidate
+        except OSError:
+            return None
+    return None
+
+
 def source_checkout(ctx: Ctx) -> str | None:
-    """The git checkout the Startup shortcut runs the supervisor from, when
-    it is one (a directory holding ``.git`` outside ``<root>/supervisor``)."""
+    """The folder the Startup shortcut runs the supervisor from, when it is
+    a source checkout outside ``<root>/supervisor``: a folder holding its own
+    ``.git``, or a nested studio project (Story 28.4: ``.git`` in an
+    ancestor that holds ``.tk-studio/config.yaml``, and its own
+    ``.tk-studio/config.yaml``, as ``apps/supervisor`` is). ``%NAME%``
+    references are expanded from the environment; a
+    working directory that is still not absolute is never one."""
     if not ctx.plat.windows:
         return None
     lnk = shortcut_path(ctx)
     workdir = read_lnk_working_dir(lnk) if lnk is not None else None
     if not workdir:
         return None
-    folder = Path(workdir)
-    try:
-        if not (folder / ".git").exists():
-            return None
-    except OSError:
+    workdir = expand_vars(workdir, ctx.env)
+    if not is_absolute(workdir):
         return None
+    folder = Path(workdir)
     if _is_under(folder, ctx.root / SUPERVISOR):
+        return None
+    try:
+        own = (folder / ".git").exists()
+        if not own:
+            if not (folder / ".tk-studio" / "config.yaml").is_file():
+                return None
+            top = git_top(folder)
+            if top is None or not (
+                    top / ".tk-studio" / "config.yaml").is_file():
+                return None
+    except OSError:
         return None
     return str(folder)
 

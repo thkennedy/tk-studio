@@ -1,0 +1,40 @@
+---
+id: TASK-102
+title: One Checkout Lock for a Nested Project and Its Repository
+status: To Do
+assignee: []
+created_date: '2026-10-17 02:56'
+updated_date: '2026-10-17 03:39'
+labels:
+  - ST-102
+milestone: "The Supervisor Moves In: One Repository"
+dependencies: []
+---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+As the operator,
+I want the supervisor to key its checkout lock by the git top-level of a project's root,
+So that a run on `apps/supervisor` and a run on the repository root serialise on one lock, as one checkout.
+
+Carved out of Story 28.3 by correct-course on 2026-10-17: 28.3's AC2 asked that "the two loops serialise on the checkout lock", but the supervisor keys the lock by project root (`checkoutKey` in `apps/supervisor/src/queue.ts`), so the nested root and the repository root never collide, and 28.3's plan, written before the merge, kept `apps/supervisor/src` outside its Files. The supervisor's source is in this repository now, so this is a tk-studio story. Repo: tk-studio (`apps/supervisor/src`, `apps/supervisor/test`, `kb/agent-pc-setup-runbook.md`).
+
+**Acceptance Criteria:**
+
+**Given** a project whose registered root is nested inside a git checkout (`apps/supervisor` under `C:\GitHub\tk-studio`)
+**When** a run is enqueued, claimed, or looked up as live (`checkoutKey`, `enqueue`, the locks table, the live-run and lock lookups in `queue.ts` and `cli.ts`, the sandbox probe in `sandbox.ts`)
+**Then** the lock's key is the canonical, case-folded git top-level of the root (`git rev-parse --show-toplevel`, resolved once per submission and recorded on the run), never the project root itself; a root that is not inside a git checkout keys by itself, as today; the lock row and the status page still name the project root that holds it
+
+**Given** a queued run for the nested project and a queued run for the repository root
+**When** `drain` or a tick claims one
+**Then** the other waits on the same lock (`holder` names the first run) and the two never run at once; `bun test` from `apps/supervisor` pins it with a nested fixture, the case-folded spelling included on win32
+
+**Given** a project whose registered root sits below its git top-level (`apps/supervisor`) and a run the supervisor prepares for it
+**When** the worktree is cut and the run is invoked (`prepareWorktree` and the invocation root in `apps/supervisor/src/worktree.ts` and `cli.ts`; DW-25)
+**Then** the root the run serves is `<worktree>/<prefix>` with the prefix from `git rev-parse --show-prefix` of the project root (the worker's cwd, `payload.directory`, the sbx VM path, the `verify.host` read at the run's base), never the worktree's top level; a project at its git top-level is unchanged; `bun test` from `apps/supervisor` pins both cases
+
+**Given** runbook §4 and the deferred-work ledger
+**When** the story closes
+**Then** §4's lock row says the lock is per git checkout and names the served subpath; DW-25 is closed; and 28.3's AC2 (the serialisation) and AC3's live clause (the project served) are satisfied by reference to this story *(widened by the second correct-course of 2026-10-17)*
+<!-- SECTION:DESCRIPTION:END -->

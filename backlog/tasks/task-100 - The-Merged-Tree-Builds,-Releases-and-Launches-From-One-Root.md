@@ -4,6 +4,7 @@ title: The Merged Tree Builds, Releases and Launches From One Root
 status: To Do
 assignee: []
 created_date: '2026-10-16 20:11'
+updated_date: '2026-10-17 03:39'
 labels:
   - ST-100
 milestone: "The Supervisor Moves In: One Repository"
@@ -25,11 +26,11 @@ So that nothing points at the old repository.
 
 **Given** the engine sandboxes
 **When** `claude-tk-studio` is recreated with one read-write mount of `C:\GitHub\tk-studio` and the read-only skills store
-**Then** `launch-epic.sh` and `resume-run.sh` take `ROOT=/c/GitHub/tk-studio/apps/supervisor` for a supervisor epic and the repository root for a plugin epic; the `tk-studio:ro` second mount is gone from the runbook and the provisioning (`WITH_BUN=1` provisions bun for the nested project); `check-skills-mount.sh` holds; `claude-tk-studio-supervisor` is retired from the runbook; the two loops serialise on the checkout lock
+**Then** `launch-epic.sh` and `resume-run.sh` take `ROOT=/c/GitHub/tk-studio/apps/supervisor` for a supervisor epic and the repository root for a plugin epic; the `tk-studio:ro` second mount is gone from the runbook and the provisioning (`WITH_BUN=1` provisions bun for the nested project); `check-skills-mount.sh` holds; `claude-tk-studio-supervisor` is retired from the runbook; the two loops serialise on the checkout lock *(the serialisation itself is Story 28.5, carved out by correct-course on 2026-10-17: the supervisor keyed its lock by project root, and this story's plan kept `apps/supervisor/src` outside its Files)*
 
 **Given** the supervisor's own `.tk-studio/config.yaml` (`verify.host: bun test`) and its transcribed plan
 **When** a supervisor run goes through the supervisor itself
-**Then** the project served is the nested root and its `verify.host` is the one read at the run's base; `apps/supervisor/_bmad-output/planning-artifacts/epics.md` stays the nested project's transcription (Epics 21 to 23 and 27 keep their numbers) and the repository root's plan stays canonical; the supervisor's `TK_STUDIO_ROOT` is still the outer root
+**Then** the project served is the nested root and its `verify.host` is the one read at the run's base *(this live clause is Story 28.5's subpath AC, correct-course 2026-10-17: the supervisor served the run's worktree top level, DW-25)*; `apps/supervisor/_bmad-output/planning-artifacts/epics.md` stays the nested project's transcription (Epics 21 to 23 and 27 keep their numbers) and the repository root's plan stays canonical; the supervisor's `TK_STUDIO_ROOT` is still the outer root
 
 **Given** the host gates
 **When** this story's work is verified
