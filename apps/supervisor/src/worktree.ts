@@ -206,17 +206,33 @@ export const isDefaultBranch = (branch: string, theDefault: string): boolean => 
 /** The untracked runtime copied from the checkout into a worktree, each only when present. */
 export const COPIED_RUNTIME = [".bmad-loop/policy.toml", ".bmad-loop/routing.current.json", ".tk-studio/config.local.yaml"] as const;
 
-/** The engine's untracked runtime in a fresh worktree, by the studio's own motions: `tk install` at
- * the pin inside it, the policy/routing/overlay files copied from the checkout (when present), and
- * `tk activate` clean inside it. Throws `WorktreeFailed` naming the step. */
-export async function materialise(checkout: string, worktree: string, deps: WorktreeDeps = {}): Promise<{ copied: string[] }> {
+/** What `materialise` did about the base: `tk install` ran because the fresh worktree reported drift, or
+ * was skipped because the worktree was already at the pin (hole 42). */
+export type MaterialiseInstall = "ran" | "skipped: drift-clean";
+
+/** The engine's untracked runtime in a fresh worktree, by the studio's own motions: the drift check
+ * first, `tk install` at the pin inside it only when that check reports drift (hole 42: a fresh worktree
+ * of a project whose committed base is at the pin is already clean, and the install would only re-render
+ * committed config into a dirty tree the launch refuses), the policy/routing/overlay files copied from the
+ * checkout (when present), and `tk activate` clean inside it. Throws `WorktreeFailed` naming the step. */
+export async function materialise(checkout: string, worktree: string, deps: WorktreeDeps = {}): Promise<{ copied: string[]; install: MaterialiseInstall }> {
   const uv = uvRunner(deps);
-  let res: RunResult;
-  try { res = await uv(worktree, studioScript(deps, "skills", "tk-studio-install", "scripts", "install_base.py"), ["--directory", worktree], 1800); }
-  catch (e) { throw new WorktreeFailed("install", clip(message(e))); }
-  const installed = lastJsonObject(res.stdout) as Record<string, any> | null;
-  if (res.exit !== 0 || !installed || installed.ok === false) {
-    throw new WorktreeFailed("install", installed ? `${installed.step ?? "install_base"}: ${clip(String(installed.error ?? JSON.stringify(installed.problems ?? "failed")))}` : failed(res));
+  const driftCheck = async (): Promise<{ out: Record<string, any> | null; res: RunResult }> => {
+    let res: RunResult;
+    try { res = await uv(worktree, studioScript(deps, "skills", "tk-studio-activate", "scripts", "drift_check.py"), ["--directory", worktree], 300); }
+    catch (e) { throw new WorktreeFailed("activate drift", clip(message(e))); }
+    return { out: lastJsonObject(res.stdout) as Record<string, any> | null, res };
+  };
+  let install: MaterialiseInstall = "skipped: drift-clean";
+  if ((await driftCheck()).out?.result !== "clean") {
+    let res: RunResult;
+    try { res = await uv(worktree, studioScript(deps, "skills", "tk-studio-install", "scripts", "install_base.py"), ["--directory", worktree], 1800); }
+    catch (e) { throw new WorktreeFailed("install", clip(message(e))); }
+    const installed = lastJsonObject(res.stdout) as Record<string, any> | null;
+    if (res.exit !== 0 || !installed || installed.ok === false) {
+      throw new WorktreeFailed("install", installed ? `${installed.step ?? "install_base"}: ${clip(String(installed.error ?? JSON.stringify(installed.problems ?? "failed")))}` : failed(res));
+    }
+    install = "ran";
   }
   const copied: string[] = [];
   try {
@@ -229,11 +245,9 @@ export async function materialise(checkout: string, worktree: string, deps: Work
       copied.push(rel);
     }
   } catch (e) { throw new WorktreeFailed("copy", clip(message(e))); }
-  try { res = await uv(worktree, studioScript(deps, "skills", "tk-studio-activate", "scripts", "drift_check.py"), ["--directory", worktree], 300); }
-  catch (e) { throw new WorktreeFailed("activate drift", clip(message(e))); }
-  const drift = lastJsonObject(res.stdout) as Record<string, any> | null;
-  if (drift?.result !== "clean") throw new WorktreeFailed("activate drift", drift ? `result '${String(drift.result)}'` : failed(res));
-  return { copied };
+  const { out: drift, res: last } = await driftCheck();
+  if (drift?.result !== "clean") throw new WorktreeFailed("activate drift", drift ? `result '${String(drift.result)}'` : failed(last));
+  return { copied, install };
 }
 
 /** Once per queue run, after the claim and before the minting verb: the run's worktree, cut and
@@ -250,7 +264,7 @@ export async function prepareWorktree(
     const served = servedRoot(run)!;
     if (!queue.events(run.run_id).some((e) => e.kind === "materialised")) {
       const done = await materialise(checkout, served, opts);
-      queue.note(run.run_id, "materialised", { path: run.worktree, copied: done.copied, again: true });
+      queue.note(run.run_id, "materialised", { path: run.worktree, copied: done.copied, install: done.install, again: true });
     }
     return served;
   }
@@ -307,7 +321,7 @@ export async function prepareWorktree(
   if (res.exit !== 0) throw new WorktreeFailed("add", `git worktree add ${failed(res)}`);
   queue.recordWorktree(run.run_id, path, { branch, base_ref: baseRef, ...(source ? { base_ref_source: source } : {}) });
   const done = await materialise(checkout, served, opts);
-  queue.note(run.run_id, "materialised", { path, copied: done.copied }); // the marker a re-drive checks
+  queue.note(run.run_id, "materialised", { path, copied: done.copied, install: done.install }); // the marker a re-drive checks
   return served;
 }
 

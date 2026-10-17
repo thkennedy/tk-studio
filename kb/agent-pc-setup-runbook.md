@@ -1174,7 +1174,7 @@ Epic 21 and 22 set:
 
 | Event | When |
 |---|---|
-| `materialised` | (27.1) The run's worktree was cut and its untracked runtime materialised (`tk install` at the pin, the policy, routing and local overlay copied from the checkout, `tk activate` clean). |
+| `materialised` | (27.1) The run's worktree was cut and its untracked runtime materialised: the drift check first, `tk install` at the pin only when it reports drift (hole 42: a fresh worktree of a project whose committed base is at the pin is already clean, and an install would re-render committed config into a dirty tree the launch refuses; the event's `install` says `ran` or `skipped: drift-clean`), the policy, routing and local overlay copied from the checkout, `tk activate` clean. |
 | `launched` | (27.1) `tk-studio-launch` returned with an engine started: the run stays `running`, its driver lets go, the checkout lock goes to the engine; carries the status block and the engine run id. |
 | `paused` | (27.1) The engine paused: the run is `paused` (not terminal), keeps its worktree, lock and pin; the draft PR's URL rides the event. |
 | `ended` | (27.1) Written once, at the engine's end after the close-out: the PR URL (or "no changes"). The pacer counts the run as live until then. |

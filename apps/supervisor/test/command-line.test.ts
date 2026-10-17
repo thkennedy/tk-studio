@@ -1747,7 +1747,7 @@ process.exit(${exit});
 describe.skipIf(!canRunE2E)("CLI end to end: every run gets its own worktree (Story 27.1)", () => {
   const BLOCK = `{"status":"complete","intent":"tk-studio-activate","artifacts":[]}`;
 
-  test("AC1/AC2: the run is cut a worktree from the default branch, materialised (`tk install` at the pin, `tk activate` clean) and worked there; the checkout never switched", () => {
+  test("AC1/AC2: the run is cut a worktree from the default branch, materialised (the drift check first, `tk install` at the pin only on drift, `tk activate` clean) and worked there; the checkout never switched", () => {
     const fx = e2eFixture(BLOCK);
     const git = (...a: string[]) => spawnSync("git", a, { cwd: fx.project, encoding: "utf-8" }).stdout.trim();
     const before = [git("rev-parse", "--abbrev-ref", "HEAD"), git("rev-parse", "HEAD")];
@@ -1757,8 +1757,9 @@ describe.skipIf(!canRunE2E)("CLI end to end: every run gets its own worktree (St
     const wt = fx.worktreeOf(summary.run_id);
     expect(fx.queue((q) => q.get(summary.run_id))).toMatchObject({ state: "complete", base_ref: "main", base_ref_source: "default", worktree: wt });
     // The studio's own motions, through uv, inside the worktree.
+    // Hole 42: the fresh worktree is drift-clean (the fake studio root answers clean), so no install runs.
     expect(fx.studio.calls()).toEqual([
-      { script: "install_base", argv: ["--directory", wt] },
+      { script: "drift_check", argv: ["--directory", wt] },
       { script: "drift_check", argv: ["--directory", wt] },
       ...fx.studio.calls().slice(2), // the worker's own startup drift check (invokeSkill), on the worktree too
     ]);
