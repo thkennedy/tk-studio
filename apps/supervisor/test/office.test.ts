@@ -492,6 +492,7 @@ describe("progress (AC2)", () => {
     expect(e.epic).toMatchObject({ done: 1, failed: 1, total: 4 });
     expect(e.stories[1]).toMatchObject({ key: S2, status: "failed", overlay: "failed" });
     expect(projectOffice(w.queue).problems).toEqual([]);
+    w.queue.close(); // the queue's SQLite file lives in w.dir: open, it keeps the directory busy on win32
     for (const d of [w.dir, w.checkout, run.worktree!]) rmSync(d, { recursive: true, force: true });
   });
 
@@ -743,6 +744,7 @@ describe("the status page's Office section (AC3)", () => {
     expect(card(older.run.run_id)).toContain(`<p class="note">the project&#39;s agents are on run ${newer.run_id}</p>`);
     expect(card(older.run.run_id)).not.toContain("no registry agents for this run");
     expect(cards.find((c) => c.includes("project unregistered"))).toContain("no registry agents for this run");
+    w.queue.close(); // the queue's SQLite file lives in w.dir: open, it keeps the directory busy on win32
     for (const d of [w.dir, w.checkout, root, older.run.worktree!, newer.worktree!]) rmSync(d, { recursive: true, force: true });
   });
 

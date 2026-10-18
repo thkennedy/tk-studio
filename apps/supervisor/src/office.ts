@@ -148,6 +148,12 @@ export function readJournal(dir: string, shown = "journal.jsonl"): { entries: Jo
     journals.delete(path);
     return enoent(e) ? { entries: [] } : { entries: [], problem: problemOf("JournalUnreadable", path, shown, e) };
   }
+  if (st.isDirectory()) {
+    // A directory in the journal's place: on Linux its `size` makes the read below fail EISDIR; on Windows a
+    // directory's `size` is 0, nothing is read and nothing fails, so the problem is named here on both.
+    journals.delete(path);
+    return { entries: [], problem: problemOf("JournalUnreadable", path, shown, new Error("EISDIR: illegal operation on a directory")) };
+  }
   const hit = journals.get(path);
   if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) return { entries: hit.entries };
   const base: JournalCache = hit && st.size >= hit.offset ? hit : { size: 0, mtimeMs: 0, offset: 0, entries: [] };
