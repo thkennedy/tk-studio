@@ -1,0 +1,14 @@
+{"ts": 1792300000.0, "kind": "run-start", "run_id": "20261018-100000-def1", "source": "stories"}
+{"ts": 1792300000.1, "kind": "stories-validated", "count": 4, "spec_folder": "_bmad-output/specs/spec-epic-29"}
+{"ts": 1792300000.2, "kind": "story-start", "story_key": "29-1-the-owners-account-replaces-the-providers"}
+{"ts": 1792300001.0, "kind": "session-start", "task_id": "29-1-the-owners-account-replaces-the-providers-dev-1", "role": "dev", "model": "claude-opus-5-5", "story_key": "29-1-the-owners-account-replaces-the-providers"}
+{"ts": 1792300002.0, "kind": "session-end", "task_id": "29-1-the-owners-account-replaces-the-providers-dev-1", "status": "completed"}
+{"ts": 1792300003.0, "kind": "story-done", "story_key": "29-1-the-owners-account-replaces-the-providers", "commit": "0000000000000000000000000000000000000001"}
+{"ts": 1792300003.1, "kind": "story-start", "story_key": "29-2-the-agent-registry"}
+{"ts": 1792300004.0, "kind": "session-start", "task_id": "29-2-the-agent-registry-dev-1", "role": "dev", "model": "claude-opus-5-5", "story_key": "29-2-the-agent-registry"}
+{"ts": 1792300005.0, "kind": "session-end", "task_id": "29-2-the-agent-registry-dev-1", "status": "completed"}
+{"ts": 1792300006.0, "kind": "story-deferred", "story_key": "29-2-the-agent-registry", "reason": "deferred by the gate"}
+{"ts": 1792300006.1, "kind": "story-start", "story_key": "29-3-the-office-projection-semantic-states-progress-and-its"}
+{"ts": 1792300006.2, "kind": "story-skipped", "story_key": "29-3-the-office-projection-semantic-states-progress-and-its", "reason": "skipped"}
+{"ts": 1792300006.3, "kind": "story-start", "story_key": "29-4-the-contract-names-the-web-as-a-consumer-and-the-runbook"}
+{"ts": 1792300007.0, "kind": "session-start", "task_id": "29-4-the-contract-names-the-web-as-a-consumer-and-the-runbook-dev-1", "role": "dev", "model": "claude-opus-5-5", "story_key": "29-4-the-contract-names-the-web-as-a-consumer-and-the-runbook"}

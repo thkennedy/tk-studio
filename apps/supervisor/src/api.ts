@@ -26,6 +26,11 @@
  *                            `Accept: text/event-stream`
  *   GET  /agents[?project=<id>]  the agent registry (Story 29.2, `registry.ts`): {ok, rebuilt_at, agents}, one row per
  *                            (project, role); an unknown project answers `agents: []`. A read only: never rebuilds
+ *   GET  /office             the office projection (Story 29.3, `office.ts`): {ok, at, agents, runs, problems, id} —
+ *                            each registry agent's graced state, the live runs with story and epic progress
+ *   GET  /office/events      with `Accept: text/event-stream`: `event:snapshot` first (or, for a valid `Last-Event-ID`,
+ *                            the buffered deltas after it), then `office.agent` / `office.progress` / `office.run`
+ *                            deltas (`id:<boot>-<seq>`), a `: heartbeat` comment every 10 s; without it the JSON snapshot
  *   GET  /                   the read-only status page (Story 22.2, `page.ts`): server-rendered
  *                            HTML, no script, credential-shaped values redacted
  *
@@ -51,6 +56,7 @@ import {
 import { CancelRaced, cancelRun, ExternalRunRefused, resumeRun, StartError, submitProject, type AgentsOption } from "./cli";
 import { ResumeRefused, type ResumeAnswer } from "./closeout";
 import { apiBind, apiPort, apiToken, checkTlsFiles, notifier, oauthLeftovers, sessionSecret, tlsConfig } from "./env";
+import { OfficeHub, type OfficeEvent } from "./office";
 import { gatherPage, holderOf, renderPage } from "./page";
 import { readAgents, type RebuildResult } from "./registry";
 import { registryShow } from "./server";
@@ -119,6 +125,12 @@ export interface ApiDeps {
    * (production; skipped under `bun test`). The rebuild is detached from the answer; `onAgentsRebuild` receives it. */
   agents?: AgentsOption;
   onAgentsRebuild?: (rebuild: Promise<RebuildResult | null>) => void;
+  /** Story 29.3: the office hub (default one per api, on this queue, `now`, `pollMs` and `graceMs`). */
+  office?: OfficeHub;
+  /** Story 29.3: the office stream's heartbeat comment interval (ms, default 10000). */
+  heartbeatMs?: number;
+  /** Story 29.3: the office hub's demotion grace (ms, default 20000). */
+  graceMs?: number;
 }
 
 /** Story 27.3: the resume body — a restore patch relative to the run's worktree, optional. */
@@ -202,6 +214,8 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
   const resume = deps.resume ?? ((id: string, b: ResumeBody) => resumeRun(queue, id, b.restore_patch));
   const pollMs = deps.pollMs ?? 1000, keepaliveMs = deps.keepaliveMs ?? 15000;
   const clock = deps.now ?? Date.now;
+  const office = deps.office ?? new OfficeHub({ queue, now: clock, pollMs, ...(deps.graceMs !== undefined ? { graceMs: deps.graceMs } : {}) });
+  const heartbeatMs = deps.heartbeatMs ?? 10_000;
 
   /** Constant time: both sides hashed to one length before `timingSafeEqual`. The scheme
    * matches case-insensitively (RFC 7235); the token is compared as sent. */
@@ -345,10 +359,56 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
     return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" } });
   }
 
+  /** Story 29.3: `GET /office/events` — the JSON snapshot, or with `text/event-stream` the office stream. */
+  function officeEvents(req: Request): Response {
+    if (!(req.headers.get("accept") ?? "").includes("text/event-stream")) return json(200, { ok: true, ...office.snapshot() });
+    return officeSse(req);
+  }
+
+  /** The office stream (beside `sse()`, never factored with it): `event:snapshot` first — or, for a `Last-Event-ID`
+   * of this hub's boot still inside its buffer, the deltas after it — then each delta as the hub's poll finds it,
+   * and a `: heartbeat` comment every `heartbeatMs` on its own timer. The client's close unsubscribes and clears
+   * both timers (the hub stops polling with its last subscriber). Reads only. */
+  function officeSse(req: Request): Response {
+    const enc = new TextEncoder();
+    let closed = false, heartbeat: ReturnType<typeof setInterval> | undefined, unsubscribe: (() => void) | undefined;
+    const frame = (e: OfficeEvent) => `id:${e.id}\nevent:${e.kind}\ndata:${JSON.stringify(e.data)}\n\n`;
+    const cleanup = () => {
+      closed = true;
+      if (heartbeat) { clearInterval(heartbeat); heartbeat = undefined; }
+      if (unsubscribe) { unsubscribe(); unsubscribe = undefined; }
+    };
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const send = (text: string) => {
+          if (closed) return;
+          try { controller.enqueue(enc.encode(text)); } catch { stop(); }
+        };
+        const stop = () => {
+          if (closed) return;
+          cleanup();
+          try { controller.close(); } catch { /* already closed */ }
+        };
+        req.signal?.addEventListener("abort", stop);
+        if (req.signal?.aborted) { stop(); return; }
+        const replay = office.since(req.headers.get("last-event-id"));
+        if (replay) send(replay.map(frame).join(""));
+        else {
+          const snap = office.snapshot();
+          send(`id:${snap.id}\nevent:snapshot\ndata:${JSON.stringify(snap)}\n\n`);
+        }
+        unsubscribe = office.subscribe((evs) => send(evs.map(frame).join("")));
+        heartbeat = setInterval(() => send(": heartbeat\n\n"), heartbeatMs);
+      },
+      cancel() { cleanup(); },
+    });
+    return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" } });
+  }
+
   /** The status page: reads only (queue, store, registry), rendered to HTML. A cookie session's page
    * carries its CSRF token in each live run's cancel form. */
   async function page(csrf?: string): Promise<Response> {
-    const data = await gatherPage({ queue, token: deps.token, env: deps.env, registry: deps.registry ?? (() => registryShow()), ledger: deps.ledger });
+    const data = await gatherPage({ queue, token: deps.token, env: deps.env, registry: deps.registry ?? (() => registryShow()), ledger: deps.ledger, office });
     return new Response(renderPage(data, csrf ? { csrf } : {}), { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
   }
 
@@ -503,7 +563,8 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
   /** What a valid cookie session may do: the GET routes, and cancel with CSRF. Anything else 401. */
   async function cookieRoute(req: Request, url: URL, path: string, method: string, cookie: string): Promise<Response> {
     const csrf = csrfToken(secret!, cookie);
-    const readRoute = path === "/" || path === "/jobs" || path === "/status" || path === "/events" || path === "/agents" || /^\/runs\/[^/]+$/.test(path);
+    const readRoute = path === "/" || path === "/jobs" || path === "/status" || path === "/events" || path === "/agents"
+      || path === "/office" || path === "/office/events" || /^\/runs\/[^/]+$/.test(path);
     if (method === "GET" && readRoute) return await route(req, url, path, method, csrf);
     if (method === "POST" && /^\/runs\/[^/]+\/cancel$/.test(path)) {
       const given = await csrfGiven(req);
@@ -549,6 +610,9 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
         const { rebuilt_at, agents } = readAgents(queue, url.searchParams.get("project") ?? undefined);
         return json(200, { ok: true, rebuilt_at, agents });
       }
+      // Story 29.3: the graced office view (a read: nothing is written to the queue).
+      if (path === "/office") return method === "GET" ? json(200, { ok: true, ...office.snapshot() }) : allow("GET");
+      if (path === "/office/events") return method === "GET" ? officeEvents(req) : allow("GET");
       const cancelMatch = /^\/runs\/([^/]+)\/cancel$/.exec(path);
       if (cancelMatch) {
         if (method !== "POST") return allow("POST");

@@ -11,6 +11,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pluginRoot } from "./env";
+import { officeStates } from "./office";
 import { servedRoot, type AgentRecord, type Queue, type QueueRun } from "./queue";
 import { lastJsonObject, registryShow, runUv } from "./server";
 
@@ -31,7 +32,7 @@ export const ROLE_LEGS: Readonly<Record<Role, { leg: string; take: "leg" | "advi
   planner: { leg: "planner", take: "leg" },
 };
 
-/** Every row's `live_state` until Story 29.3 derives it. */
+/** A row's `live_state` when the office projection names none for its role (Story 29.3: no run, or no projection). */
 export const OFFLINE = "offline";
 
 /** A route: `{<leg>: {model, effort?, advisor?, …}}` — `pipeline.py resolve`'s `route`, or the top-level legs of
@@ -67,8 +68,10 @@ const legOf = (route: Route | null, leg: string): Record<string, unknown> => {
 };
 
 /** Seven rows for one project — pure. A missing field is `null`, never invented; `route` null (a refusing
- * resolve) gives `null` model, effort and advisor on every row with the ids kept. */
-export function rowsFor(projectId: string, route: Route | null, personas: Partial<Record<string, string | null>>, live: LiveLeg | null): AgentRow[] {
+ * resolve) gives `null` model, effort and advisor on every row with the ids kept. `liveStates` (Story 29.3): each
+ * role's office state, `offline` for a role it does not name. */
+export function rowsFor(projectId: string, route: Route | null, personas: Partial<Record<string, string | null>>, live: LiveLeg | null,
+  liveStates: Partial<Record<string, string>> = {}): AgentRow[] {
   return ROLES.map((role) => {
     const { leg, take } = ROLE_LEGS[role];
     const fields = legOf(route, leg);
@@ -77,7 +80,7 @@ export function rowsFor(projectId: string, route: Route | null, personas: Partia
       : { model: str(fields.model), effort: str(fields.effort), advisor: str(fields.advisor) };
     return {
       agent_id: `${projectId}/${role}`, project: projectId, role, ...values,
-      persona: personas[role] ?? null, live_state: OFFLINE,
+      persona: personas[role] ?? null, live_state: liveStates[role] ?? OFFLINE,
       current_run: live?.run_id ?? null, current_story: live?.story ?? null, jira_account: "",
     };
   });
@@ -158,6 +161,9 @@ export interface RebuildDeps {
   personas: string;
   /** The snapshot time, read once before the registry and the runs (default now, ISO). */
   now: () => string;
+  /** Story 29.3: each agent's live state by `agent_id` (default the raw, ungraced office projection,
+   * `officeStates`). A throw stamps every row `offline` and names the problem; it never fails the rebuild. */
+  live: (queue: Queue) => Record<string, string>;
 }
 
 export type RebuildResult =
@@ -192,6 +198,9 @@ export async function rebuildAgents(queue: Queue, deps: Partial<RebuildDeps> = {
   const rows: AgentRow[] = [];
   const ids = Object.keys(projects).sort();
   const runs = queue.runs(); // once per rebuild, shared by every project's live-leg lookup
+  let liveStates: Record<string, string> = {};
+  try { liveStates = deps.live ? deps.live(queue) : officeStates(queue, runs); }
+  catch (e) { problems.push(`OfficeProjectionFailed: ${message(e)} — live_state offline`); }
   for (const id of ids) {
     const entry = projects[id] as Record<string, unknown> | null;
     let route: Route | null = null, live: LiveLeg | null = null;
@@ -212,7 +221,9 @@ export async function rebuildAgents(queue: Queue, deps: Partial<RebuildDeps> = {
         route = null;
       }
     }
-    rows.push(...rowsFor(id, route, loaded.personas, live));
+    const states: Record<string, string> = {};
+    for (const role of ROLES) { const st = liveStates[`${id}/${role}`]; if (typeof st === "string") states[role] = st; }
+    rows.push(...rowsFor(id, route, loaded.personas, live, states));
   }
   if (!queue.replaceAgents(rows, at)) {
     return { rebuilt: false, problem: `RebuildSuperseded: a newer rebuild is stored; this snapshot (${at}) is not written` };

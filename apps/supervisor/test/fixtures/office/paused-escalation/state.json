@@ -1,0 +1,25 @@
+{
+  "run_id": "20261018-100000-esc1",
+  "project": "<hand-made>",
+  "paused_reason": "escalation",
+  "paused_stage": "escalation",
+  "paused_story_key": "29-2-the-agent-registry",
+  "finished": false,
+  "stopped": false,
+  "crashed": false,
+  "run_type": "story",
+  "source": "stories",
+  "spec_folder": "_bmad-output/specs/spec-epic-29",
+  "tasks": {
+    "29-1-the-owners-account-replaces-the-providers": {
+      "story_key": "29-1-the-owners-account-replaces-the-providers",
+      "epic": 0,
+      "phase": "done"
+    },
+    "29-2-the-agent-registry": {
+      "story_key": "29-2-the-agent-registry",
+      "epic": 0,
+      "phase": "escalated"
+    }
+  }
+}

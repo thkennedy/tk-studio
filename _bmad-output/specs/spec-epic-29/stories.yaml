@@ -109,4 +109,8 @@
     the spec folder; the engine resolves it by the glob
     `29-4-the-contract-names-the-web-as-a-consumer-and-the-runbook-*.md`, and a file
     named `29-4-the-contract-names-the-web-as-a-consumer-and-the-runbook.md` is read as
-    pending (loop deficiency 1, story 21-6).
+    pending (loop deficiency 1, story 21-6). Replan (29-3 reconcile, 2026-10-18): document the
+    projection as landed: the emission rules, the run-selection order, the row-5/row-10
+    predicates and the progress-source rule (replan-queue.md, 29-4 entry; plan 29-4 §
+    Settled shape). Keep OFFICE_MAP's when/signal columns and the helper exports out of
+    the contract. The version is 0.1.24 (main's Story 28.6 holds 0.1.23).

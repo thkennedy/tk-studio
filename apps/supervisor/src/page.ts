@@ -12,6 +12,7 @@ import { homedir, hostname, userInfo } from "node:os";
 import { basename, join } from "node:path";
 import { studioHome } from "./env";
 import { isTerminal, type Holder, type LockRow, type Queue, type QueueEvent, type QueueRun } from "./queue";
+import { projectOffice, type OfficeHub, type OfficeView } from "./office";
 import { readAgents, type AgentRow } from "./registry";
 import { readProjectConfig } from "./server";
 
@@ -27,6 +28,8 @@ export interface PageDeps {
   registry: () => Promise<Record<string, any>>;
   /** This machine's ledger identity (default: getpass order for the user, the hostname for the machine). */
   ledger?: { user: string; machine: string };
+  /** Story 29.3: the office hub (its graced snapshot); absent, the raw projection (`projectOffice`). */
+  office?: OfficeHub;
 }
 
 /** A lock's holder, as a waiting run names it (`/status` and the page alike). */
@@ -74,6 +77,8 @@ export interface PageData {
   /** Story 29.2: the agent registry as the last rebuild left it (read from the queue's `agents` table, never
    * rebuilt here), grouped by project. Absent: the section notes no registry. */
   agents?: { rebuilt_at: string | null; byProject: Record<string, AgentRow[]> };
+  /** Story 29.3: the office projection (the live runs, each agent's state). Absent: the section notes none. */
+  office?: OfficeView;
   /** For the renderer's redaction. */
   secrets: { token: string; env: Env };
 }
@@ -265,9 +270,16 @@ export async function gatherPage(deps: PageDeps): Promise<PageData> {
   const byProject: Record<string, AgentRow[]> = {};
   for (const a of read.agents) (byProject[a.project] ??= []).push(a);
 
+  // Story 29.3: the office projection — files and the queue read only.
+  let office: OfficeView;
+  try { office = deps.office ? deps.office.snapshot() : projectOffice(queue); }
+  catch (e) { office = { at: new Date().toISOString(), agents: [], runs: [], problems: [`OfficeProjectionFailed: ${e instanceof Error ? e.message : String(e)}`] }; }
+  // Every office problem without a machine path (AD-15; the projection already names run-relative paths).
+  office = { ...office, problems: office.problems.map((p) => machinePathsOut(p, store, env)) };
+
   return {
     generated: new Date().toISOString(), counts, jobs: queue.jobs(), runs, runsOmitted: Math.max(0, all.length - shown.length),
-    locks, statusBlocks, ledger, registry, agents: { rebuilt_at: read.rebuilt_at, byProject }, secrets: { token: deps.token, env },
+    locks, statusBlocks, ledger, registry, agents: { rebuilt_at: read.rebuilt_at, byProject }, office, secrets: { token: deps.token, env },
   };
 }
 
@@ -464,6 +476,21 @@ ${l.reason ? `<p class="reason">${t(l.reason)}</p>` : ""}
       `<li><strong>${t(a.role)}</strong> <span class="meta">${t(a.agent_id)}</span> · model ${t(a.model ?? "-")} · effort ${t(a.effort ?? "-")} · advisor ${t(a.advisor ?? "-")} · persona ${t(a.persona ?? "-")} · <span class="st">${t(a.live_state)}</span>${a.current_story ? ` · story ${t(a.current_story)}` : ""}${a.current_run ? ` · run ${t(a.current_run)}` : ""}</li>`).join("")}</ul></div>`).join("\n")
     : note(data.agents?.rebuilt_at ? "no agents: the registry serves no projects" : "no agent registry rebuilt yet");
 
+  // Story 29.3: each live run's agent states as text (`role: state`).
+  const officeRuns = data.office?.runs ?? [];
+  const officeProblems = (data.office?.problems ?? []).map(note).join("");
+  // A project's agents follow ONE run (`selectRun`): a run without them names the run holding them, if any.
+  const elsewhere = (project: string | null) => {
+    const held = [...new Set(data.office!.agents.filter((a) => project !== null && a.project === project && a.current_run).map((a) => a.current_run!))];
+    return held.length ? `the project's agents are on run ${held.join(", ")}` : "no registry agents for this run";
+  };
+  const office = (officeRuns.length ? officeRuns.map((r) => {
+    const lines = data.office!.agents.filter((a) => a.current_run === r.run_id).map((a) => `<li>${t(a.role)}: ${t(a.state)}</li>`).join("");
+    return `<div class="card"><strong>${t(r.run_id)}</strong> <span class="st">${t(r.state)}</span>
+<div class="meta">project ${t(r.project ?? "-")} · epic ${t(r.epic.done)}/${t(r.epic.total)} · current story ${t(r.epic.current_story ?? "-")}</div>
+${lines ? `<ul>${lines}</ul>` : note(elsewhere(r.project))}</div>`;
+  }).join("\n") : note(data.office ? "no live runs" : "no office projection")) + officeProblems;
+
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>tk-studio supervisor</title><style>${CSS}</style></head>
@@ -476,5 +503,6 @@ ${l.reason ? `<p class="reason">${t(l.reason)}</p>` : ""}
 <section id="ledger"><h2>Ledger tail</h2>${ledger}</section>
 <section id="registry"><h2>Registry projects</h2>${registry}</section>
 <section id="agents"><h2>Agents</h2>${agents}</section>
+<section id="office"><h2>Office</h2>${office}</section>
 </body></html>`;
 }
