@@ -1,0 +1,9 @@
+{
+  "orchestrator": { "display_name": "Orchestrator" },
+  "session": { "display_name": "Session" },
+  "implementer": { "display_name": "Implementer" },
+  "reviewer": { "display_name": "Reviewer" },
+  "consult": { "display_name": "Consult" },
+  "advisor": { "display_name": "Advisor" },
+  "planner": { "display_name": "Planner" }
+}

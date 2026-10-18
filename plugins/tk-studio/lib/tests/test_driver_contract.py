@@ -97,9 +97,11 @@ class DriverContractTestCase(unittest.TestCase):
         # §1 nearest-root rule and §6's optional drift-check roots keys
         # (Story 28.2, additive — SPEC's "minor bump" is the change
         # policy's patch position: an additive rule never takes 0.2.0);
-        # 0.1.23 honours the supervisor's starter lock in §4 (Story 28.6,
-        # additive)
-        self.assertRegex(self.text, r"\*\*0\.1\.23\*\*")
+        # 0.1.23 is Story 28.6's (main; a merge inserts its clause);
+        # 0.1.24 names the studio web as a consumer and documents the
+        # supervisor surfaces it reads in §1 (Story 29.4, additive — AD-2:
+        # the supervisor's, never the plugin's)
+        self.assertRegex(self.text, r"\*\*0\.1\.24\*\*")
         self.assertIn("### 5.1 Execution-pipeline legs", self.text)
         self.assertIn("lib/pipeline.py", self.text)
         self.assertIn("Change policy", self.text)
@@ -279,14 +281,13 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_22_header_project_root_and_drift_check_keys(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        # the 0.1.22 clause survives in the history once 0.1.23 heads it
+        # the 0.1.22 clause survives in the history once a later bump heads it
         self.assertNotIn("**0.1.22**", header)
         self.assertNotIn("**0.1.21**", header)
         self.assertNotIn("0.2.0 (", header)
         self.assertLess(header.index("0.1.21 (Story 26.5)"),
                         header.index("0.1.22 (Story 28.2)"))
-        clause = header[header.index("0.1.22 (Story 28.2)"):
-                        header.index("0.1.23 (Story 28.6)")]
+        clause = header[header.index("0.1.22 (Story 28.2)"):]
         for phrase in ("nearest-root rule", "`.tk-studio/config.yaml`",
                        "`TK_STUDIO_ROOT` keeps meaning the outer repository root",
                        "`config.py standup`", "`registry.py register`",
@@ -321,8 +322,10 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_23_header_and_starter_lock_section(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.23**", header)
+        # 0.1.24 (Story 29.4) heads the header since the EP-29 merge; the 0.1.23 clause stays
+        self.assertIn("0.1.23 (Story 28.6)", header)
         self.assertNotIn("**0.1.22**", header)
+        self.assertNotIn("**0.1.23**", header)
         self.assertNotIn("0.2.0 (", header)
         self.assertLess(header.index("0.1.22 (Story 28.2)"),
                         header.index("0.1.23 (Story 28.6)"))
@@ -362,6 +365,90 @@ class DriverContractTestCase(unittest.TestCase):
                                    self.text.index("Guarantees a driver can rely on:")].split())
         self.assertIn("`{job_id, run_id, accepted: bool, reason?, starter_lock?}` (0.1.23)", table)
         self.assertIn("`{woken: bool, run_id?, reason?, starter_lock?}` (0.1.23)", table)
+
+    # --- Story 29.4: 0.1.24 names the studio web as a consumer and the
+    # supervisor surfaces it reads (§1), never plugin surfaces (AD-2). The
+    # slices hold whether Story 28.6's 0.1.23 clause is present or absent.
+
+    def test_0_1_24_names_the_web_and_the_supervisor_surfaces(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.24**", header)
+        for older in ("**0.1.22**", "**0.1.23**"):
+            self.assertNotIn(older, header)
+        self.assertNotIn("0.2.0 (", header)
+        self.assertLess(header.index("0.1.22 (Story 28.2)"),
+                        header.index("0.1.24 (Story 29.4)"))
+        clause = header[header.index("0.1.24 (Story 29.4)"):]
+        for phrase in ("the studio web", "a consumer, not a driver",
+                       "[Supervisor surfaces the web consumes]"
+                       "(#supervisor-surfaces-the-web-consumes-0124)",
+                       "`POST /auth/account`", "`POST /auth/signin`",
+                       "`GET /agents`", "`GET /office`", "`GET /office/events`",
+                       "never plugin surfaces",
+                       "nothing in the plugin's own surfaces changes",
+                       "— additive"):
+            self.assertIn(phrase, clause)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 29.4", stories)
+        audience = next(line for line in self.text.splitlines()
+                        if line.startswith("| Audience"))
+        self.assertIn("studio web", audience)
+        # the web is a consumer, never a driver: the roster keeps its three
+        roster = self._section("### Driver roster (0.1.18)",
+                               "### Supervisor surfaces the web consumes (0.1.24)")
+        drivers = [line.split("|")[1].strip() for line in roster.splitlines()
+                   if line.startswith("| ") and "---" not in line]
+        self.assertEqual(drivers, ["Driver", "the studio supervisor", "Hermes",
+                                   "direct invocation"])
+        flat_roster = " ".join(roster.split())
+        for phrase in ("the studio web", "a consumer, not a driver"):
+            self.assertIn(phrase, flat_roster)
+        title = "### Supervisor surfaces the web consumes (0.1.24)"
+        start = self.text.index(title)
+        self.assertGreater(start, self.text.index("### Driver roster (0.1.18)"))
+        self.assertLess(start, self.text.index("## 2. Skill invocation surface"))
+        end = self.text.index("\n### ", start + len(title))
+        section = " ".join(self.text[start:end].split())
+        for phrase in ("These are supervisor surfaces (AD-2)",
+                       "the plugin publishes their description but neither "
+                       "implements nor serves them",
+                       "never plugin surfaces",
+                       "`POST /auth/account`", "`POST /auth/signin`",
+                       "`GET /agents`", "`GET /office`", "`GET /office/events`",
+                       "`office.agent`", "`office.progress`", "`office.run`",
+                       "`offline`, `idle`, `thinking`, `reading`, `typing`, "
+                       "`running`, `waiting-for-human`, `blocked`",
+                       "`event:snapshot`", "`<boot>-<seq>`", "`Last-Event-ID`",
+                       "every 10 s", '`overlay` `"done"`, `"failed"` or `null`',
+                       "`stories-validated`", "`status: done`",
+                       "the journal wins", "apps/supervisor/README.md",
+                       # office.run fires on appearing, changing and leaving
+                       "`office.run` fires when a run appears in the live "
+                       "set (`from` `null`), changes state, or leaves the "
+                       "live set (`state` its queue state, `null` when the "
+                       "run is gone; `from` its last live state)",
+                       "`null` for the agent's first appearance",
+                       "`401 SignInRefused`", "`400 AccountInvalid`",
+                       "`400 MalformedJson`",
+                       "`500 AccountRecordInvalid`",
+                       "the next visit creates the account again"):
+            self.assertIn(phrase, section)
+        # the projection's internals stay the supervisor's (never contract)
+        for name in ("OFFICE_MAP", "OFFICE_RANK", "mapRoles", "selectRun",
+                     "engineRunDir", "LIVE_RUN_STATES", "officeStates",
+                     "officeCachedPaths", "specsDone", "launchedSinceMove"):
+            self.assertNotIn(name, self.text)
+        # §7 row 6 names the web among the UI-carrying consumers and still
+        # says the studio (the plugin) grows no UI
+        dossier = self.text[self.text.index("integration dossier coverage"):
+                            self.text.index("## 8. Conformance")]
+        row6 = next(line for line in dossier.splitlines()
+                    if line.startswith("| 6 |"))
+        for phrase in ("studio supervisor", "status page", "studio web",
+                       "Hermes", "front door", "grows no UI"):
+            self.assertIn(phrase, row6)
 
     def test_section_8_names_the_cli_drives(self):
         section = self.text[self.text.index("## 8. Conformance"):]

@@ -1,0 +1,116 @@
+# stories.yaml: Epic 29 of this project, transcribed 1:1 from _bmad-output/planning-artifacts/epics.md
+# by .bmad-loop/plugins/studio-pipeline/transcribe.py on 2026-10-18. The epics document is
+# the plan; the studio gate may append remediation entries (`<key>-r<n>`) and revise
+# UNSTARTED entries' invoke_dev_with, nothing else.
+
+- id: "29-1-the-owners-account-replaces-the-providers"
+  title: "The Owner's Account Replaces the Providers"
+  description: >-
+    I want to create the studio's one account on my first visit and sign in with a
+    username and password, So that the studio is operated from my own seat with no
+    external identity provider (D7, D8). Canonical: ST-104.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 29.1: The
+    Owner's Account Replaces the Providers", the authoritative specification (user story
+    and acceptance criteria). Read the epic's own narrative (the paragraphs under "##
+    Epic 29:") for scope, rulings and the repo the story targets; transcribe the story
+    into the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/29-1.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/29-1-the-owners-account-replaces-the-providers-spec.md` in
+    the spec folder; the engine resolves it by the glob
+    `29-1-the-owners-account-replaces-the-providers-*.md`, and a file named
+    `29-1-the-owners-account-replaces-the-providers.md` is read as pending (loop
+    deficiency 1, story 21-6).
+
+- id: "29-2-the-agent-registry"
+  title: "The Agent Registry"
+  description: >-
+    I want the supervisor to serve the registry of agents it can run per project, So
+    that every surface names the same agents by the same ids (§7.2). Canonical: ST-105.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 29.2: The
+    Agent Registry", the authoritative specification (user story and acceptance
+    criteria). Read the epic's own narrative (the paragraphs under "## Epic 29:") for
+    scope, rulings and the repo the story targets; transcribe the story into the spec's
+    intent contract and never re-derive, generalise or extend it. Plan: plans/29-2.md
+    when present (its Code Map is the investigation). Project rules and the verify gate:
+    the studio customization (_bmad/custom/bmad-build-auto.toml). Routing:
+    .bmad-loop/routing.current.json; pass the model, effort and advisor of implementer
+    and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/29-2-the-agent-registry-spec.md` in the spec folder; the
+    engine resolves it by the glob `29-2-the-agent-registry-*.md`, and a file named
+    `29-2-the-agent-registry.md` is read as pending (loop deficiency 1, story 21-6).
+
+- id: "29-3-the-office-projection-semantic-states-progress-and-its"
+  title: "The Office Projection: Semantic States, Progress and Its Stream"
+  description: >-
+    I want each agent's state and each story's progress derived from the queue's events
+    and the engine's journal, and streamed, So that the office of EP-30 renders a live
+    picture without reading raw events (§7.3, §6.3). Canonical: ST-106.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 29.3: The
+    Office Projection: Semantic States, Progress and Its Stream", the authoritative
+    specification (user story and acceptance criteria). Read the epic's own narrative
+    (the paragraphs under "## Epic 29:") for scope, rulings and the repo the story
+    targets; transcribe the story into the spec's intent contract and never re-derive,
+    generalise or extend it. Plan: plans/29-3.md when present (its Code Map is the
+    investigation). Project rules and the verify gate: the studio customization
+    (_bmad/custom/bmad-build-auto.toml). Routing: .bmad-loop/routing.current.json; pass
+    the model, effort and advisor of implementer and reviewers explicitly on every
+    subagent launch. Advisor: when routing.current.json gives the session an advisor
+    other than `off`, consult the advisor on: verify-red, halt, deviation above 0, a
+    high-severity finding, a tripwire, a file outside Files, and before declaring the
+    story done; append a `## Consult Log` entry per advisor call. Deviations: one
+    `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto Run Result.
+    Spec file: write the executor spec as
+    `stories/29-3-the-office-projection-semantic-states-progress-and-its-spec.md` in the
+    spec folder; the engine resolves it by the glob
+    `29-3-the-office-projection-semantic-states-progress-and-its-*.md`, and a file named
+    `29-3-the-office-projection-semantic-states-progress-and-its.md` is read as pending
+    (loop deficiency 1, story 21-6).
+
+- id: "29-4-the-contract-names-the-web-as-a-consumer-and-the-runbook"
+  title: "The Contract Names the Web as a Consumer and the Runbook Follows"
+  description: >-
+    I want the driver contract to name the studio web as a consumer and the supervisor's
+    new surfaces as supervisor surfaces, So that AD-2 holds: the plugin publishes the
+    contract, the supervisor owns the account, the registry and the projection (spec
+    §6.1). Canonical: ST-107.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 29.4: The
+    Contract Names the Web as a Consumer and the Runbook Follows", the authoritative
+    specification (user story and acceptance criteria). Read the epic's own narrative
+    (the paragraphs under "## Epic 29:") for scope, rulings and the repo the story
+    targets; transcribe the story into the spec's intent contract and never re-derive,
+    generalise or extend it. Plan: plans/29-4.md when present (its Code Map is the
+    investigation). Project rules and the verify gate: the studio customization
+    (_bmad/custom/bmad-build-auto.toml). Routing: .bmad-loop/routing.current.json; pass
+    the model, effort and advisor of implementer and reviewers explicitly on every
+    subagent launch. Advisor: when routing.current.json gives the session an advisor
+    other than `off`, consult the advisor on: verify-red, halt, deviation above 0, a
+    high-severity finding, a tripwire, a file outside Files, and before declaring the
+    story done; append a `## Consult Log` entry per advisor call. Deviations: one
+    `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto Run Result.
+    Spec file: write the executor spec as
+    `stories/29-4-the-contract-names-the-web-as-a-consumer-and-the-runbook-spec.md` in
+    the spec folder; the engine resolves it by the glob
+    `29-4-the-contract-names-the-web-as-a-consumer-and-the-runbook-*.md`, and a file
+    named `29-4-the-contract-names-the-web-as-a-consumer-and-the-runbook.md` is read as
+    pending (loop deficiency 1, story 21-6). Replan (29-3 reconcile, 2026-10-18): document the
+    projection as landed: the emission rules, the run-selection order, the row-5/row-10
+    predicates and the progress-source rule (replan-queue.md, 29-4 entry; plan 29-4 §
+    Settled shape). Keep OFFICE_MAP's when/signal columns and the helper exports out of
+    the contract. The version is 0.1.24 (main's Story 28.6 holds 0.1.23).

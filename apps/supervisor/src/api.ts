@@ -24,28 +24,41 @@
  *   GET  /status             counts per state, the live runs, the held checkout locks
  *   GET  /events?since=<seq> events with seq > since: JSON, or SSE with
  *                            `Accept: text/event-stream`
+ *   GET  /agents[?project=<id>]  the agent registry (Story 29.2, `registry.ts`): {ok, rebuilt_at, agents}, one row per
+ *                            (project, role); an unknown project answers `agents: []`. A read only: never rebuilds
+ *   GET  /office             the office projection (Story 29.3, `office.ts`): {ok, at, agents, runs, problems, id} —
+ *                            each registry agent's graced state, the live runs with story and epic progress
+ *   GET  /office/events      with `Accept: text/event-stream`: `event:snapshot` first (or, for a valid `Last-Event-ID`,
+ *                            the buffered deltas after it), then `office.agent` / `office.progress` / `office.run`
+ *                            deltas (`id:<boot>-<seq>`), a `: heartbeat` comment every 10 s; without it the JSON snapshot
  *   GET  /                   the read-only status page (Story 22.2, `page.ts`): server-rendered
  *                            HTML, no script, credential-shaped values redacted
  *
- * Story 22.5 (`auth.ts`): a browser signs in at `POST /auth/token`, `GET /auth/{google,github}` and
- * their `/callback`s (answered before any auth) and gets a signed session cookie. The bearer header
- * still authorises everything. Without it, a valid cookie authorises the GET routes, and
+ * Story 22.5 (`auth.ts`), Story 29.1 (`account.ts`): a browser signs in at `POST /auth/token`,
+ * `POST /auth/account` (the owner's one account, created once) or `POST /auth/signin` (its username and
+ * password, rate-limited with a lockout), all answered before any auth, and gets a signed session cookie.
+ * The bearer header still authorises everything. Without it, a valid cookie authorises the GET routes, and
  * `POST /runs/{id}/cancel` with the page's CSRF token (else 403 CsrfRefused); never `POST /jobs`.
- * `GET /` with no auth is the 401 HTML sign-in page; everything else stays 401 JSON.
+ * `GET /` with no auth is the 401 HTML sign-in page (account creation while no account exists);
+ * everything else stays 401 JSON.
  *
  * Run ids are queue run ids; answers carry `studio_run_id` too. The API never
  * drives or claims a run (drain and the pacer do).
  */
 import { createHash, timingSafeEqual } from "node:crypto";
 import {
-  allowed, authorizeUrl, csrfToken, type FetchLike, newState, oauthIdentity, PROVIDERS, type ProviderName, readCookie,
-  safeEqual, SESSION_COOKIE, SESSION_TTL_S, setCookie, signInPage, signSession, signState, STATE_COOKIE, STATE_TTL_S,
-  verifySession, verifyState,
+  ACCOUNT_RELATIVE_PATH, AccountExists, AccountInvalid, accountPath, AccountRecordInvalid, createAccount, lockState, readAccount,
+  SIGNIN_DELAY_MS, verifyPassword,
+} from "./account";
+import {
+  csrfToken, readCookie, safeEqual, sessionSubAccepted, SESSION_COOKIE, SESSION_TTL_S, setCookie, signInPage, type SignInMode, signSession, USERNAME_RE, verifySession,
 } from "./auth";
-import { CancelRaced, cancelRun, ExternalRunRefused, resumeRun, StartError, submitProject } from "./cli";
+import { CancelRaced, cancelRun, ExternalRunRefused, resumeRun, StartError, submitProject, type AgentsOption } from "./cli";
 import { ResumeRefused, type ResumeAnswer } from "./closeout";
-import { apiBind, apiPort, apiToken, checkTlsFiles, notifier, type OAuthConfig, oauthConfig, sessionSecret, tlsConfig } from "./env";
+import { apiBind, apiPort, apiToken, checkTlsFiles, notifier, oauthLeftovers, sessionSecret, tlsConfig } from "./env";
+import { OfficeHub, type OfficeEvent } from "./office";
 import { gatherPage, holderOf, renderPage } from "./page";
+import { readAgents, type RebuildResult } from "./registry";
 import { registryShow } from "./server";
 import { isTerminal, Queue, RunTerminal, type QueueEvent, type QueueRun } from "./queue";
 
@@ -102,10 +115,22 @@ export interface ApiDeps {
   ledger?: { user: string; machine: string };
   /** Story 22.5: the session cookie's signing secret. Unset: no cookie session (every sign-in refused). */
   session?: { secret: string };
-  /** Story 22.5: the configured OAuth providers, the public origin their callbacks live on
-   * (`https://<TLS_NAME>:<port>`), and the provider `fetch` (default the global one). Without an
-   * `https` origin the token form refuses (a `Secure` cookie never sticks over http). */
-  oauth?: { providers: OAuthConfig; origin: string; fetch?: FetchLike };
+  /** Story 22.5: the public origin (`https://<TLS_NAME>:<port>`). Without an `https` origin every browser
+   * sign-in refuses (a `Secure` cookie never sticks over http). */
+  origin?: string;
+  /** Story 29.1: the account record's path (default `accountPath(env)`), the mismatch delay (default
+   * SIGNIN_DELAY_MS) and the sleep it waits through (tests inject one that records and returns at once). */
+  account?: { path?: string; delayMs?: number; sleep?: (ms: number) => Promise<void> };
+  /** Story 29.2: the default cancel's agent-registry rebuild — injected deps (tests), `false` (none), or unset
+   * (production; skipped under `bun test`). The rebuild is detached from the answer; `onAgentsRebuild` receives it. */
+  agents?: AgentsOption;
+  onAgentsRebuild?: (rebuild: Promise<RebuildResult | null>) => void;
+  /** Story 29.3: the office hub (default one per api, on this queue, `now`, `pollMs` and `graceMs`). */
+  office?: OfficeHub;
+  /** Story 29.3: the office stream's heartbeat comment interval (ms, default 10000). */
+  heartbeatMs?: number;
+  /** Story 29.3: the office hub's demotion grace (ms, default 20000). */
+  graceMs?: number;
 }
 
 /** Story 27.3: the resume body — a restore patch relative to the run's worktree, optional. */
@@ -184,10 +209,13 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
   const submit = deps.submit ?? ((b: SubmitBody) => submitProject(b.project, b.job, {
     queue, tier: b.tier, model: b.model, effort: b.effort, baseRef: b.base_ref, ...(b.editor_in_the_loop === true ? { editorInTheLoop: true } : {}),
   }));
-  const cancel = deps.cancel ?? ((id: string) => cancelRun(queue, id));
+  // Story 29.2: the cancel's agent-registry rebuild is started, not awaited: the answer never waits on it (Story 22.3).
+  const cancel = deps.cancel ?? ((id: string) => cancelRun(queue, id, { agents: deps.agents, detachRebuild: (p) => { deps.onAgentsRebuild?.(p); } }));
   const resume = deps.resume ?? ((id: string, b: ResumeBody) => resumeRun(queue, id, b.restore_patch));
   const pollMs = deps.pollMs ?? 1000, keepaliveMs = deps.keepaliveMs ?? 15000;
   const clock = deps.now ?? Date.now;
+  const office = deps.office ?? new OfficeHub({ queue, now: clock, pollMs, ...(deps.graceMs !== undefined ? { graceMs: deps.graceMs } : {}) });
+  const heartbeatMs = deps.heartbeatMs ?? 10_000;
 
   /** Constant time: both sides hashed to one length before `timingSafeEqual`. The scheme
    * matches case-insensitively (RFC 7235); the token is compared as sent. */
@@ -331,10 +359,56 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
     return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" } });
   }
 
+  /** Story 29.3: `GET /office/events` — the JSON snapshot, or with `text/event-stream` the office stream. */
+  function officeEvents(req: Request): Response {
+    if (!(req.headers.get("accept") ?? "").includes("text/event-stream")) return json(200, { ok: true, ...office.snapshot() });
+    return officeSse(req);
+  }
+
+  /** The office stream (beside `sse()`, never factored with it): `event:snapshot` first — or, for a `Last-Event-ID`
+   * of this hub's boot still inside its buffer, the deltas after it — then each delta as the hub's poll finds it,
+   * and a `: heartbeat` comment every `heartbeatMs` on its own timer. The client's close unsubscribes and clears
+   * both timers (the hub stops polling with its last subscriber). Reads only. */
+  function officeSse(req: Request): Response {
+    const enc = new TextEncoder();
+    let closed = false, heartbeat: ReturnType<typeof setInterval> | undefined, unsubscribe: (() => void) | undefined;
+    const frame = (e: OfficeEvent) => `id:${e.id}\nevent:${e.kind}\ndata:${JSON.stringify(e.data)}\n\n`;
+    const cleanup = () => {
+      closed = true;
+      if (heartbeat) { clearInterval(heartbeat); heartbeat = undefined; }
+      if (unsubscribe) { unsubscribe(); unsubscribe = undefined; }
+    };
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const send = (text: string) => {
+          if (closed) return;
+          try { controller.enqueue(enc.encode(text)); } catch { stop(); }
+        };
+        const stop = () => {
+          if (closed) return;
+          cleanup();
+          try { controller.close(); } catch { /* already closed */ }
+        };
+        req.signal?.addEventListener("abort", stop);
+        if (req.signal?.aborted) { stop(); return; }
+        const replay = office.since(req.headers.get("last-event-id"));
+        if (replay) send(replay.map(frame).join(""));
+        else {
+          const snap = office.snapshot();
+          send(`id:${snap.id}\nevent:snapshot\ndata:${JSON.stringify(snap)}\n\n`);
+        }
+        unsubscribe = office.subscribe((evs) => send(evs.map(frame).join("")));
+        heartbeat = setInterval(() => send(": heartbeat\n\n"), heartbeatMs);
+      },
+      cancel() { cleanup(); },
+    });
+    return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" } });
+  }
+
   /** The status page: reads only (queue, store, registry), rendered to HTML. A cookie session's page
    * carries its CSRF token in each live run's cancel form. */
   async function page(csrf?: string): Promise<Response> {
-    const data = await gatherPage({ queue, token: deps.token, env: deps.env, registry: deps.registry ?? (() => registryShow()), ledger: deps.ledger });
+    const data = await gatherPage({ queue, token: deps.token, env: deps.env, registry: deps.registry ?? (() => registryShow()), ledger: deps.ledger, office });
     return new Response(renderPage(data, csrf ? { csrf } : {}), { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
   }
 
@@ -344,16 +418,44 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
     new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...headers } });
   /** Served over https? Without it the browser drops the `Secure` cookie, so the token form refuses
    * and the sign-in page says browser sign-in needs https. */
-  const https = /^https:\/\//i.test(deps.oauth?.origin ?? "");
-  /** The sign-in page; a refusal is the same page with a generic line, never a cookie or a detail. */
-  const signIn = (refused = false) => html(401, signInPage({ refused, needsHttps: !https }));
+  const https = /^https:\/\//i.test(deps.origin ?? "");
+  const pageEnv = deps.env ?? process.env;
+  const acctPath = deps.account?.path ?? accountPath(pageEnv);
+  const delayMs = deps.account?.delayMs ?? SIGNIN_DELAY_MS;
+  const sleep = deps.account?.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  /** Story 29.1: `create` while no account exists, else `signin` — read per request (the reset is a file deletion). */
+  const mode = (): SignInMode => readAccount(pageEnv, acctPath) === null ? "create" : "signin";
+  /** The sign-in page; a refusal is the same page with a generic line, never a cookie or a detail. A malformed
+   * `account.json` answers the sign-in page at 500 with one generic line naming AccountRecordInvalid (never the
+   * file's content); the token form stays. */
+  const signIn = (refused = false, status = 401, invalid?: "username" | "password") => {
+    let m: SignInMode;
+    try { m = mode(); } catch (e) {
+      if (e instanceof AccountRecordInvalid) return recordInvalidPage();
+      throw e;
+    }
+    return html(status, signInPage({ mode: m, refused, needsHttps: !https, ...(invalid ? { invalid } : {}) }));
+  };
+  const recordInvalidPage = () => html(500, signInPage({ mode: "signin", needsHttps: !https }).replace(
+    "<h1>tk-studio supervisor</h1>",
+    `<h1>tk-studio supervisor</h1><p class="note">AccountRecordInvalid: the account record (${ACCOUNT_RELATIVE_PATH} in the studio store) is not readable; delete it from the console to create the account again.</p>`,
+  ));
+  /** The named refusal of a malformed `account.json` on an account route: JSON 500, or the page at 500. */
+  const recordInvalid = (isJson: boolean) =>
+    isJson ? fail(500, "AccountRecordInvalid", { path: ACCOUNT_RELATIVE_PATH }) : recordInvalidPage();
+  /** Sign-in attempts run one at a time (per `createApi`): the lock check, the verify, the delay, the row and the
+   * lockout check of one attempt finish before the next starts, so parallel guesses cannot pass the lockout. */
+  let signInChain: Promise<unknown> = Promise.resolve();
+  const serialised = <T>(fn: () => Promise<T>): Promise<T> => {
+    const run = signInChain.then(fn, fn);
+    signInChain = run.catch(() => undefined);
+    return run;
+  };
   const redirect = (status: number, location: string, cookie: string) =>
     new Response(null, { status, headers: { location, "set-cookie": cookie, "cache-control": "no-store" } });
   const secret = deps.session?.secret;
   const nowMs = () => clock();
   const sessionCookie = (sub: string) => setCookie(SESSION_COOKIE, signSession(secret!, sub, nowMs()), SESSION_TTL_S);
-  const oauthFetch: FetchLike = deps.oauth?.fetch ?? ((input, init) => fetch(input, init));
-  const callbackUri = (p: ProviderName) => `${deps.oauth!.origin.replace(/\/+$/, "")}/auth/${p}/callback`;
 
   /** `POST /auth/token`: the API token from the form, compared as the bearer header is. Refused
    * like a bad token without https (the cookie would be dropped). */
@@ -364,37 +466,89 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
     return redirect(303, "/", sessionCookie("token"));
   }
 
-  /** `GET /auth/<p>`: to the provider, with the signed state cookie. */
-  function oauthStart(p: ProviderName): Response {
-    const cfg = deps.oauth?.providers[p];
-    if (!secret || !cfg) return signIn(true);
-    const state = newState();
-    return redirect(302, authorizeUrl(p, cfg, callbackUri(p), state), setCookie(STATE_COOKIE, signState(secret, p, state, nowMs()), STATE_TTL_S));
+  /** Story 29.1: an account route's body — a JSON body (`application/json`) answers JSON, any other body is a
+   * browser form and answers HTML. Never logged. */
+  async function accountBody(req: Request): Promise<{ json: boolean; username: unknown; password: unknown } | Response> {
+    const isJson = (req.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json");
+    const text = await req.text();
+    if (!isJson) {
+      const f = new URLSearchParams(text);
+      return { json: false, username: f.get("username") ?? "", password: f.get("password") ?? "" };
+    }
+    let raw: unknown;
+    try { raw = JSON.parse(text); } catch { return fail(400, "MalformedJson", { detail: "the body is not JSON" }); }
+    const b = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+    return { json: true, username: b.username, password: b.password };
   }
 
-  /** `GET /auth/<p>/callback`: the state checked first (the provider never called on a failure), then
-   * the verified identity matched against the one allow entry. */
-  async function oauthCallback(p: ProviderName, req: Request, url: URL): Promise<Response> {
-    const cfg = deps.oauth?.providers[p];
-    if (!secret || !cfg) return signIn(true);
-    const expectedState = verifyState(secret, p, readCookie(req, STATE_COOKIE), nowMs());
-    const state = url.searchParams.get("state") ?? "";
-    if (!expectedState || !state || !safeEqual(state, expectedState)) return signIn(true);
-    const code = url.searchParams.get("code") ?? "";
-    if (!code) return signIn(true);
-    const identity = await oauthIdentity(p, cfg, code, callbackUri(p), oauthFetch);
-    if (!identity || !allowed(identity, cfg.allow)) return signIn(true);
-    return redirect(303, "/", sessionCookie(`${p}:${identity.toLowerCase()}`));
+  /** A refusal of an account route: JSON `{ok:false, error}` (plus extras), or the sign-in page at the status. */
+  const accountRefusal = (isJson: boolean, status: number, error: string, extra: { field?: "username" | "password" } = {}) =>
+    isJson ? fail(status, error, extra) : signIn(!extra.field, status, extra.field);
+  /** A success: JSON `{ok:true, username}` with the cookie, or `303 → /` with it, as the token form does. */
+  const accountSession = (isJson: boolean, username: string) => {
+    const cookie = sessionCookie(`account:${username}`);
+    return isJson ? json(200, { ok: true, username }, { "set-cookie": cookie, "cache-control": "no-store" }) : redirect(303, "/", cookie);
+  };
+
+  /** `POST /auth/account`: the owner's account, created once. Refused like the token form without the session
+   * secret or https; 400 AccountInvalid naming the field; 409 AccountExists; then `account-created {username}`. */
+  async function createAccountRoute(req: Request): Promise<Response> {
+    const body = await accountBody(req);
+    if (body instanceof Response) return body;
+    if (!secret || !https) return accountRefusal(body.json, 401, "SignInRefused");
+    try {
+      readAccount(pageEnv, acctPath); // a malformed record is named (500), never answered as AccountExists
+      const at = new Date(nowMs()).toISOString();
+      const record = await createAccount(pageEnv, body.username, body.password, at, acctPath);
+      queue.serviceEvent("account-created", { username: record.username }, at);
+      return accountSession(body.json, record.username);
+    } catch (e) {
+      if (e instanceof AccountInvalid) return accountRefusal(body.json, 400, "AccountInvalid", { field: e.field });
+      if (e instanceof AccountExists) return accountRefusal(body.json, 409, "AccountExists");
+      if (e instanceof AccountRecordInvalid) return recordInvalid(body.json);
+      throw e;
+    }
+  }
+
+  /** `POST /auth/signin`: locked → 423 AccountLocked; a mismatch (or an unknown username) waits the fixed delay,
+   * records `signin-refused {username, reason}`, and the fifth inside the window locks (423); else 401
+   * SignInRefused. A match answers the session cookie. No row, answer or log carries the password or the hash.
+   * Attempts are serialised; a username that fails the pattern is recorded truncated to 64 characters; a
+   * malformed `account.json` is 500 AccountRecordInvalid. */
+  async function signInRoute(req: Request): Promise<Response> {
+    const body = await accountBody(req);
+    if (body instanceof Response) return body;
+    if (!secret || !https) return accountRefusal(body.json, 401, "SignInRefused");
+    const given = typeof body.username === "string" ? body.username : "";
+    const password = typeof body.password === "string" ? body.password : "";
+    const valid = USERNAME_RE.test(given);
+    const username = valid ? given : given.slice(0, 64);
+    const at = () => new Date(nowMs()).toISOString();
+    return await serialised(async () => {
+      let record;
+      try { record = readAccount(pageEnv, acctPath); } catch (e) {
+        if (e instanceof AccountRecordInvalid) return recordInvalid(body.json);
+        throw e;
+      }
+      if (lockState(queue, username, nowMs()).locked) {
+        queue.serviceEvent("signin-refused", { username, reason: "locked" }, at());
+        return accountRefusal(body.json, 423, "AccountLocked");
+      }
+      const known = valid && record !== null && safeEqual(given, record.username);
+      if (await verifyPassword(valid ? record : null, given, password)) return accountSession(body.json, record!.username);
+      await sleep(delayMs);
+      queue.serviceEvent("signin-refused", { username, reason: known ? "mismatch" : "unknown-username" }, at());
+      if (lockState(queue, username, nowMs()).locked) return accountRefusal(body.json, 423, "AccountLocked");
+      return accountRefusal(body.json, 401, "SignInRefused");
+    });
   }
 
   /** The auth routes, answered before any auth; null for any other path. */
   async function authRoute(req: Request, url: URL, path: string, method: string): Promise<Response | null> {
     const allow = (m: string) => json(405, { ok: false, error: "MethodNotAllowed", allow: m }, { allow: m });
     if (path === "/auth/token") return method === "POST" ? await tokenSignIn(req) : allow("POST");
-    for (const p of PROVIDERS) {
-      if (path === `/auth/${p}`) return method === "GET" ? oauthStart(p) : allow("GET");
-      if (path === `/auth/${p}/callback`) return method === "GET" ? await oauthCallback(p, req, url) : allow("GET");
-    }
+    if (path === "/auth/account") return method === "POST" ? await createAccountRoute(req) : allow("POST");
+    if (path === "/auth/signin") return method === "POST" ? await signInRoute(req) : allow("POST");
     return null;
   }
 
@@ -409,7 +563,8 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
   /** What a valid cookie session may do: the GET routes, and cancel with CSRF. Anything else 401. */
   async function cookieRoute(req: Request, url: URL, path: string, method: string, cookie: string): Promise<Response> {
     const csrf = csrfToken(secret!, cookie);
-    const readRoute = path === "/" || path === "/jobs" || path === "/status" || path === "/events" || /^\/runs\/[^/]+$/.test(path);
+    const readRoute = path === "/" || path === "/jobs" || path === "/status" || path === "/events" || path === "/agents"
+      || path === "/office" || path === "/office/events" || /^\/runs\/[^/]+$/.test(path);
     if (method === "GET" && readRoute) return await route(req, url, path, method, csrf);
     if (method === "POST" && /^\/runs\/[^/]+\/cancel$/.test(path)) {
       const given = await csrfGiven(req);
@@ -428,7 +583,8 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
       if (auth) return auth;
       if (authorized(req)) return await route(req, url, path, method);
       const cookie = readCookie(req, SESSION_COOKIE);
-      if (secret && cookie && verifySession(secret, cookie, nowMs())) return await cookieRoute(req, url, path, method, cookie);
+      const session = secret && cookie ? verifySession(secret, cookie, nowMs()) : null;
+      if (session && sessionSubAccepted(session.sub)) return await cookieRoute(req, url, path, method, cookie!);
       return path === "/" && method === "GET" ? signIn() : fail(401, "Unauthorized");
     } catch (e) {
       return fail(500, "InternalError", { detail: redact(e instanceof Error ? e.message : String(e)) });
@@ -448,6 +604,15 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
       }
       if (path === "/status") return method === "GET" ? status() : allow("GET");
       if (path === "/events") return method === "GET" ? events(req, url) : allow("GET");
+      if (path === "/agents") {
+        if (method !== "GET") return allow("GET");
+        // Story 29.2: the table as the last rebuild left it — a read, never a rebuild.
+        const { rebuilt_at, agents } = readAgents(queue, url.searchParams.get("project") ?? undefined);
+        return json(200, { ok: true, rebuilt_at, agents });
+      }
+      // Story 29.3: the graced office view (a read: nothing is written to the queue).
+      if (path === "/office") return method === "GET" ? json(200, { ok: true, ...office.snapshot() }) : allow("GET");
+      if (path === "/office/events") return method === "GET" ? officeEvents(req) : allow("GET");
       const cancelMatch = /^\/runs\/([^/]+)\/cancel$/.exec(path);
       if (cancelMatch) {
         if (method !== "POST") return allow("POST");
@@ -477,24 +642,27 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
 /** The part of `Bun.serve` `serve` uses (the injection seam: tests never bind a socket). */
 export type BunServe = (options: Parameters<typeof Bun.serve>[0]) => { port: number | undefined; stop: (closeActiveConnections?: boolean) => unknown };
 
-/** Start the API: bind, port, token, session secret, TLS (its files readable) and OAuth validated first
- * (a named refusal, never bound), then the queue opened. With the TLS variables set it serves https on
- * the same bind (Story 22.5: the Tailscale certificate for the MagicDNS name); without them http, as in 22.1. */
+/** Start the API: bind, port, token, session secret and TLS (its files readable) validated first (a named
+ * refusal, never bound), then the queue opened. With the TLS variables set it serves https on the same bind
+ * (Story 22.5: the Tailscale certificate for the MagicDNS name); without them http, as in 22.1. Story 29.1:
+ * each leftover provider variable still set is ignored with one warning naming it (never its value). */
 export function serve(env: Env = process.env, bunServe: BunServe = (o) => Bun.serve(o)): { url: string; stop: () => void } {
   const bind = checkBind(apiBind(env));
   const port = apiPort(env);
   const token = apiToken(env);
   const secret = sessionSecret(env);
   const tls = tlsConfig(env);
-  const providers = oauthConfig(env);
   if (tls) checkTlsFiles(tls);
   notifier(env); // Story 22.3: a misconfigured notifier is a named start error (cancels notify from here)
   const queue = Queue.open(env);
   const origin = tls ? `https://${tls.name}:${port}` : `http://${bind}:${port}`;
+  for (const name of oauthLeftovers(env)) {
+    console.warn(`serve: ${name} is set but ignored — the Google and GitHub sign-in is gone (Story 29.1); the first visit creates the account`);
+  }
   const server = bunServe({
     hostname: bind, port, idleTimeout: 0,
     ...(tls ? { tls: { cert: Bun.file(tls.cert), key: Bun.file(tls.key) } } : {}),
-    fetch: createApi({ queue, token, env, session: { secret }, oauth: { providers, origin } }),
+    fetch: createApi({ queue, token, env, session: { secret }, origin }),
   });
   return { url: tls ? `https://${tls.name}:${server.port}` : `http://${bind}:${server.port}`, stop: () => { server.stop(true); queue.close(); } };
 }

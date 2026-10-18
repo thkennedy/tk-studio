@@ -1,45 +1,28 @@
 /**
- * The phone sign-in (Story 22.5, DW-20): a cookie session beside the bearer header, never instead of it.
+ * The phone sign-in (Story 22.5, DW-20; Story 29.1): a cookie session beside the bearer header, never instead of it.
  *
- *   POST /auth/token                 form `token=<TK_SUPERVISOR_TOKEN>` → the session cookie
- *   GET  /auth/{google,github}       → the provider's authorize URL, with a signed state cookie (600 s)
- *   GET  /auth/{google,github}/callback  state checked first, then the code exchanged and the verified
- *                                    identity matched against the one allow-listed entry
+ *   POST /auth/token     form `token=<TK_SUPERVISOR_TOKEN>` → the session cookie (the operator's own browser)
+ *   POST /auth/account   the owner's one account, created on the first visit (`account.ts`) → the session cookie
+ *   POST /auth/signin    the account's username and password, rate-limited with a lockout → the session cookie
  *
  * The session cookie `tk_session` is `<base64url {sub, exp}>.<HMAC-SHA256>` under
  * TK_SUPERVISOR_SESSION_SECRET, 7 days, `HttpOnly; Secure; SameSite=Lax; Path=/`. The CSRF token the
  * page embeds is an HMAC of the cookie's signature under a distinct label (never the cookie value).
- * Every comparison is constant time (both sides hashed, then `timingSafeEqual`). The provider endpoints
- * are reached through an injected `fetch`, so tests fake the provider and never touch the network.
+ * Every comparison is constant time (both sides hashed, then `timingSafeEqual`). No external identity
+ * provider exists (D7, D8).
  */
-import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import type { OAuthProviderConfig } from "./env";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 
 export const SESSION_COOKIE = "tk_session";
-export const STATE_COOKIE = "tk_oauth_state";
 /** The session's lifetime: 7 days. */
 export const SESSION_TTL_S = 7 * 24 * 3600;
-/** The OAuth state cookie's lifetime. */
-export const STATE_TTL_S = 600;
+/** Story 29.1: a username is 3 to 64 letters, digits, `-`, `_` or `.`. */
+export const USERNAME_RE = /^[A-Za-z0-9._-]{3,64}$/;
+/** Story 29.1: a password is at least this many characters (its length is the only check). */
+export const PASSWORD_MIN = 12;
 
-export type ProviderName = "google" | "github";
-export const PROVIDERS: readonly ProviderName[] = ["google", "github"];
-
-export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
-
-/** The provider endpoints (reached through the injected `fetch`). */
-export const ENDPOINTS: Record<ProviderName, { authorize: string; token: string; user: string }> = {
-  google: {
-    authorize: "https://accounts.google.com/o/oauth2/v2/auth",
-    token: "https://oauth2.googleapis.com/token",
-    user: "https://openidconnect.googleapis.com/v1/userinfo",
-  },
-  github: {
-    authorize: "https://github.com/login/oauth/authorize",
-    token: "https://github.com/login/oauth/access_token",
-    user: "https://api.github.com/user",
-  },
-};
+/** Story 29.1 (spec §8): the intended usage, stated on the sign-in page and verbatim in the README. */
+export const INTENDED_USAGE = "The studio is operated by the person whose Claude subscription is signed in on this box, from their own seat: no token is intermediated and there is no API-key tier.";
 
 const hash = (s: string) => createHash("sha256").update(s).digest();
 const hmac = (secret: string, data: string) => createHmac("sha256", secret).update(data).digest("base64url");
@@ -78,24 +61,16 @@ export function verifySession(secret: string, value: string | null, nowMs: numbe
   return p && typeof p.sub === "string" ? { sub: p.sub, exp: p.exp as number } : null;
 }
 
+/** Whether a verified session's `sub` is one this code mints: `"token"` (the API token sign-in)
+ * or `"account:<name>"` (the owner's account). Anything else, such as a `google:`/`github:` sub
+ * minted by the deleted OAuth providers, is no session. */
+export function sessionSubAccepted(sub: string): boolean {
+  return sub === "token" || sub.startsWith("account:");
+}
+
 /** The CSRF token for a session cookie: an HMAC of its signature under a distinct label. */
 export function csrfToken(secret: string, cookieValue: string): string {
   return hmac(secret, `csrf.${cookieValue.slice(cookieValue.lastIndexOf(".") + 1)}`);
-}
-
-/** A fresh OAuth `state`. */
-export function newState(): string {
-  return randomBytes(32).toString("base64url");
-}
-
-export function signState(secret: string, provider: ProviderName, state: string, nowMs: number): string {
-  return sign(secret, `oauth-state.${provider}`, { state, exp: Math.floor(nowMs / 1000) + STATE_TTL_S });
-}
-
-/** The state the cookie carries for `provider`, or null (missing, bad signature, expired). */
-export function verifyState(secret: string, provider: ProviderName, value: string | null, nowMs: number): string | null {
-  const p = verify(secret, `oauth-state.${provider}`, value, nowMs);
-  return p && typeof p.state === "string" && p.state ? p.state : null;
 }
 
 /** A `Set-Cookie` value with the fixed flags. */
@@ -112,70 +87,48 @@ export function readCookie(req: Request, name: string): string | null {
   return null;
 }
 
-/** The provider's authorize URL for this sign-in. */
-export function authorizeUrl(provider: ProviderName, cfg: OAuthProviderConfig, redirectUri: string, state: string): string {
-  const q = new URLSearchParams({ client_id: cfg.clientId, redirect_uri: redirectUri, state });
-  if (provider === "google") { q.set("response_type", "code"); q.set("scope", "openid email"); }
-  return `${ENDPOINTS[provider].authorize}?${q.toString()}`;
-}
-
-/** The provider's verified identity for `code` — Google: the email, only when `email_verified`;
- * GitHub: the `/user` login — or null. Any provider failure is null (never a detail). */
-export async function oauthIdentity(provider: ProviderName, cfg: OAuthProviderConfig, code: string, redirectUri: string, fetcher: FetchLike): Promise<string | null> {
-  try {
-    const ep = ENDPOINTS[provider];
-    const form = new URLSearchParams({ client_id: cfg.clientId, client_secret: cfg.clientSecret, code, redirect_uri: redirectUri });
-    if (provider === "google") form.set("grant_type", "authorization_code");
-    const tokenRes = await fetcher(ep.token, {
-      method: "POST", body: form.toString(),
-      headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
-    });
-    if (!tokenRes.ok) return null;
-    const tok = await tokenRes.json() as Record<string, unknown>;
-    const access = typeof tok.access_token === "string" && tok.access_token ? tok.access_token : null;
-    if (!access) return null;
-    const userRes = await fetcher(ep.user, {
-      headers: { authorization: `Bearer ${access}`, accept: "application/json", "user-agent": "tk-studio-supervisor" },
-    });
-    if (!userRes.ok) return null;
-    const user = await userRes.json() as Record<string, unknown>;
-    if (provider === "google") {
-      const verified = user.email_verified === true || user.email_verified === "true";
-      return verified && typeof user.email === "string" && user.email ? user.email : null;
-    }
-    return typeof user.login === "string" && user.login ? user.login : null;
-  } catch {
-    return null;
-  }
-}
-
-/** The identity equals the one allow entry (case-insensitive, constant time). */
-export function allowed(identity: string, allow: string): boolean {
-  return safeEqual(identity.trim().toLowerCase(), allow.trim().toLowerCase());
-}
-
 const CSS = `
 *{box-sizing:border-box}
 body{margin:0;padding:1rem;font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#e4e4e4;background:#141414;max-width:28rem}
 :root{color-scheme:dark}
 h1{font-size:1.25rem;margin:.25rem 0 1rem}
-form,.links{background:#1e1e1e;border:1px solid #333;border-radius:6px;padding:.75rem;margin:.75rem 0}
-label{display:block;margin-bottom:.35rem}input[type=password]{width:100%;padding:.5rem;font-size:1rem}
-button,.links a{display:block;width:100%;margin-top:.6rem;padding:.6rem;font-size:1rem;text-align:center;border:1px solid #555;border-radius:6px;background:#2a2a2a;color:#e4e4e4;text-decoration:none}
+form{background:#1e1e1e;border:1px solid #333;border-radius:6px;padding:.75rem;margin:.75rem 0}
+label{display:block;margin-bottom:.35rem}input[type=password],input[type=text]{width:100%;padding:.5rem;font-size:1rem}
+button{display:block;width:100%;margin-top:.6rem;padding:.6rem;font-size:1rem;text-align:center;border:1px solid #555;border-radius:6px;background:#2a2a2a;color:#e4e4e4}
 .note{color:#e0a458}
 `;
 
 /** The static line a sign-in page served without https carries: the `Secure` cookie never sticks over http. */
 export const NEEDS_HTTPS_NOTE = "Browser sign-in needs https: set TK_SUPERVISOR_TLS_CERT, TK_SUPERVISOR_TLS_KEY and TK_SUPERVISOR_TLS_NAME.";
 
-/** The sign-in page: the token form and the two provider links. No script; nothing of the status page.
- * A refusal adds only the generic "Sign-in refused."; a server without https adds the static NEEDS_HTTPS_NOTE. */
-export function signInPage(opts: { refused?: boolean; needsHttps?: boolean } = {}): string {
+const esc = (v: string) => v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+/** The line a refused account form adds, naming the field, never its value. */
+const INVALID_NOTE: Record<"username" | "password", string> = {
+  username: "The username must be 3 to 64 characters: letters, digits, -, _ or .",
+  password: `The password must be at least ${PASSWORD_MIN} characters.`,
+};
+
+export type SignInMode = "create" | "signin";
+
+/** The sign-in page. No script; nothing of the status page. `create` (no account yet) offers the account creation
+ * form (`POST /auth/account`) and no account sign-in form; `signin` offers the account form (`POST /auth/signin`).
+ * Both keep the token form (`POST /auth/token`, the operator's own browser) and carry INTENDED_USAGE. A refusal adds only the generic "Sign-in refused."; a refused
+ * account field adds the line naming that field; a server without https adds the static NEEDS_HTTPS_NOTE. */
+export function signInPage(opts: { mode: SignInMode; refused?: boolean; needsHttps?: boolean; invalid?: "username" | "password" }): string {
+  const fields = (action: string, pwAutocomplete: string, button: string) =>
+    `<form method="post" action="${action}"><label for="username">Username</label><input type="text" id="username" name="username" autocomplete="username" pattern="[A-Za-z0-9._-]{3,64}" required>`
+    + `<label for="password">Password</label><input type="password" id="password" name="password" autocomplete="${pwAutocomplete}" minlength="${PASSWORD_MIN}" required>`
+    + `<button type="submit">${esc(button)}</button></form>`;
+  const token = `<form method="post" action="/auth/token"><label for="token">API token</label><input type="password" id="token" name="token" autocomplete="current-password" required><button type="submit">Sign in with the token</button></form>`;
+  const forms = opts.mode === "create"
+    ? `<p>No account yet: create the owner's account.</p>\n${fields("/auth/account", "new-password", "Create account")}\n${token}`
+    : `${fields("/auth/signin", "current-password", "Sign in")}\n${token}`;
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>tk-studio supervisor: sign in</title><style>${CSS}</style></head>
-<body><h1>tk-studio supervisor</h1>${opts.refused ? `<p class="note">Sign-in refused.</p>` : ""}${opts.needsHttps ? `<p class="note">${NEEDS_HTTPS_NOTE}</p>` : ""}
-<form method="post" action="/auth/token"><label for="token">API token</label><input type="password" id="token" name="token" autocomplete="current-password" required><button type="submit">Sign in</button></form>
-<div class="links"><a href="/auth/google">Continue with Google</a><a href="/auth/github">Continue with GitHub</a></div>
+<body><h1>tk-studio supervisor</h1>${opts.refused ? `<p class="note">Sign-in refused.</p>` : ""}${opts.invalid ? `<p class="note">${esc(INVALID_NOTE[opts.invalid])}</p>` : ""}${opts.needsHttps ? `<p class="note">${NEEDS_HTTPS_NOTE}</p>` : ""}
+${forms}
+<p class="usage">${esc(INTENDED_USAGE)}</p>
 </body></html>`;
 }

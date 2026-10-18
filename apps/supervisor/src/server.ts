@@ -531,8 +531,9 @@ export interface WorkerPlacement { tier?: Tier; sandbox?: string }
  * Max login pays), TK_SUPERVISOR_TOKEN (the API's bearer token never reaches a
  * worker) and the notifier's credentials, TK_SUPERVISOR_TELEGRAM_TOKEN and
  * TK_SUPERVISOR_NTFY_URL (the supervisor notifies, a worker never does; DW-17),
- * and the phone sign-in's secrets (Story 22.5): TK_SUPERVISOR_SESSION_SECRET,
- * TK_SUPERVISOR_OAUTH_GOOGLE_CLIENT_SECRET and TK_SUPERVISOR_OAUTH_GITHUB_CLIENT_SECRET.
+ * and the phone sign-in's session secret (Story 22.5), TK_SUPERVISOR_SESSION_SECRET. Story 29.1: every
+ * other `TK_SUPERVISOR_*` variable whose name holds TOKEN, SECRET or PASSWORD is stripped by pattern too
+ * (a leftover OAuth client secret, any future secret), so no supervisor secret reaches a worker.
  * TK_STUDIO_HOME and the rest pass through untouched. */
 export function buildWorkerEnv(parent: Record<string, string | undefined> = process.env): Record<string, string | undefined> {
   const env = { ...parent };
@@ -541,8 +542,9 @@ export function buildWorkerEnv(parent: Record<string, string | undefined> = proc
   delete env.TK_SUPERVISOR_TELEGRAM_TOKEN;
   delete env.TK_SUPERVISOR_NTFY_URL;
   delete env.TK_SUPERVISOR_SESSION_SECRET;
-  delete env.TK_SUPERVISOR_OAUTH_GOOGLE_CLIENT_SECRET;
-  delete env.TK_SUPERVISOR_OAUTH_GITHUB_CLIENT_SECRET;
+  for (const k of Object.keys(env)) {
+    if (/^TK_SUPERVISOR_.*(?:TOKEN|SECRET|PASSWORD)/i.test(k) || k === "TK_SUPERVISOR_NTFY_URL") delete env[k];
+  }
   return env;
 }
 

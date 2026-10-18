@@ -1,0 +1,43 @@
+{
+  "run_id": "20261018-010738-a250",
+  "project": "<recorded worktree>",
+  "started_at": "2026-10-18T01:07:38",
+  "current_epic": 0,
+  "epic_filter": null,
+  "story_filter": null,
+  "max_stories": null,
+  "paused_reason": null,
+  "paused_stage": null,
+  "paused_story_key": null,
+  "finished": false,
+  "stopped": false,
+  "crashed": false,
+  "crash_error": null,
+  "run_type": "story",
+  "source": "stories",
+  "spec_folder": "_bmad-output/specs/spec-epic-29",
+  "sweep_cycle": 1,
+  "sweeps_triggered": [],
+  "target_branch": "",
+  "plugin_shared": {},
+  "tasks": {
+    "29-1-the-owners-account-replaces-the-providers": {
+      "story_key": "29-1-the-owners-account-replaces-the-providers",
+      "epic": 0,
+      "phase": "done",
+      "attempt": 1,
+      "review_cycle": 1,
+      "commit_sha": "e17b43b1365954e25afd800249b8049748e73c24",
+      "defer_reason": null
+    },
+    "29-2-the-agent-registry": {
+      "story_key": "29-2-the-agent-registry",
+      "epic": 0,
+      "phase": "review-verify",
+      "attempt": 1,
+      "review_cycle": 1,
+      "commit_sha": null,
+      "defer_reason": null
+    }
+  }
+}

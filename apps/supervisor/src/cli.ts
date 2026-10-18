@@ -113,7 +113,8 @@ import {
 } from "./server";
 import { serve as serveApi } from "./api";
 import { notifier, pluginRoot, tlsConfig, WorkDirMissing, workDir } from "./env";
-import { canonicalPr, prUrl, snapshotOnce, sweepEnds, type HygieneDeps } from "./hygiene";
+import { canonicalPr, prUrl, snapshotOnce, sweepEnds, underBunTest, type HygieneDeps } from "./hygiene";
+import { rebuildAgents, type RebuildDeps, type RebuildResult } from "./registry";
 import {
   closeOut, closeOutDetail, launchedCloseOutInput, meteredCost, pendingCloseOut, prepareWorktree, priorPr, sweepEngines, type WorktreeDeps,
 } from "./worktree";
@@ -290,6 +291,29 @@ export interface RunOptions {
   worktree?: WorktreeDeps;
   /** Story 27.5: the plan pull-back's registry lookup (tests inject it; default `registry.py show`). */
   plan?: PlanStatusDeps;
+  /** Story 29.2: the agent registry's rebuild (`rebuildQuietly`) — injected deps, or `false` to skip it. */
+  agents?: AgentsOption;
+}
+
+/** Story 29.2: how a rebuild point rebuilds the `agents` table — the injected deps (tests), `false` (no rebuild),
+ * or undefined (production: `registry.py show` and `pipeline.py resolve`; under `bun test` no rebuild, so a test
+ * never reads the operator's real registry or spawns `uv` unless it injects the deps). */
+export type AgentsOption = Partial<RebuildDeps> | false | undefined;
+
+/** Story 29.2: the one rebuild helper every rebuild point calls (recover, claim, end, drain, cancel). It awaits
+ * `rebuildAgents`, logs a failed rebuild or its problems with `console.warn`, and never throws: a registry failure
+ * never fails a tick, a claim or an end. */
+export async function rebuildQuietly(queue: Queue, agents: AgentsOption = undefined): Promise<RebuildResult | null> {
+  if (agents === false || (agents === undefined && underBunTest())) return null;
+  try {
+    const res = await rebuildAgents(queue, agents ?? {});
+    if (!res.rebuilt) console.warn(`[agents] registry not rebuilt (table unchanged): ${res.problem}`);
+    else for (const p of res.problems) console.warn(`[agents] ${p}`);
+    return res;
+  } catch (e) {
+    console.warn(`[agents] registry not rebuilt: ${message(e)}`);
+    return null;
+  }
 }
 
 /** The worker options a run is driven with (Story 21.4). */
@@ -619,6 +643,7 @@ export async function recoverQueue(opts: RunOptions = {}, verbRunner: VerbRunner
     await afterCloseOuts(queue, opts); // Story 27.5: the orphan close-out, then the plan's review and merge passes
     await detectExternal(queue, verbRunner, jobPlacement, sbxDeps(opts.worktree)); // Story 27.2: runs started outside the queue
     writeStarterLocks(queue, opts.worktree?.env ?? process.env);
+    await rebuildQuietly(queue, opts.agents); // Story 29.2: the agent registry, every recover (every tick)
     await sweepEnds(queue, opts.hygiene);
     if (owned) queue.close();
   }
@@ -756,6 +781,7 @@ export async function drainQueue(opts: RunOptions = {}, verbRunner: VerbRunner =
     await sweepEngines(queue, opts.worktree); // Story 27.1
     await closeOutPaused(queue, pausedDeps(opts)); // Story 27.3
     await afterCloseOuts(queue, opts); // Story 27.5
+    await rebuildQuietly(queue, opts.agents); // Story 29.2: the agent registry after the drain's claims and ends
     await sweepEnds(queue, opts.hygiene);
     if (owned) queue.close();
   }
@@ -840,13 +866,26 @@ export const CANCELLED_REASON = "cancelled: operator request";
  * done, when it ended during the cancel), `ExternalRunRefused` on an `external` run (Story 27.2:
  * started outside the queue, left live), and an Error on an unknown run. */
 export async function cancelRun(
-  queue: Queue, runId: string, deps: { verbRunner?: VerbRunner; launchStop?: LaunchStopper; hygiene?: HygieneDeps; worktree?: WorktreeDeps } = {},
+  queue: Queue, runId: string,
+  deps: {
+    verbRunner?: VerbRunner; launchStop?: LaunchStopper; hygiene?: HygieneDeps; worktree?: WorktreeDeps; agents?: AgentsOption;
+    /** Story 29.2: when given, the cancel's agent-registry rebuild is started and handed here, not awaited (the HTTP
+     * route: the answer never waits on it). Unset: the rebuild is awaited before the end sweep. */
+    detachRebuild?: (rebuild: Promise<RebuildResult | null>) => void;
+  } = {},
 ): Promise<QueueRun> {
   // Story 22.3: once the cancel is done, the end sweep covers this run only (its cancelled end, or a
   // raced driver's end of it), so the answer never waits on other runs' ends: those stay with their
   // driver, `recover` and `drain`. An unknown run id sweeps nothing.
   try { return await cancelQueueRun(queue, runId, deps); }
-  finally { await sweepEnds(queue, deps.hygiene, [runId]); }
+  finally {
+    // Story 29.2: the cancel's end rebuilds the agent registry (`rebuildQuietly` never rejects, so a detached
+    // rebuild is never an unhandled rejection).
+    const rebuild = rebuildQuietly(queue, deps.agents);
+    if (deps.detachRebuild) deps.detachRebuild(rebuild);
+    else await rebuild;
+    await sweepEnds(queue, deps.hygiene, [runId]);
+  }
 }
 
 async function cancelQueueRun(
@@ -1062,6 +1101,7 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
     const claim = await queue.claim(run.run_id, owner);
     // Story 27.2 (AC3): every claim rewrites the checkout's starter lock (the queue is the only starter).
     writeStarterLock({ project_id: v.projectId, root: v.root }, opts.worktree?.env ?? process.env);
+    if (claim.claimed) await rebuildQuietly(queue, opts.agents); // Story 29.2: every claim rebuilds the agent registry
     if (!claim.claimed && opts.runId && claim.why !== "lock") return skipped(claim.reason);
     if (!claim.claimed) {
       return {
@@ -1093,6 +1133,7 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
     await sweepEngines(queue, opts.worktree); // Story 27.1: engines that ended or paused are closed out
     await closeOutPaused(queue, pausedDeps(opts)); // Story 27.3: a paused run whose story landed is closed out
     await afterCloseOuts(queue, opts); // Story 27.5: the orphan close-out, then the plan's review and merge passes
+    await rebuildQuietly(queue, opts.agents); // Story 29.2: every end this process drove rebuilds the agent registry
     await sweepEnds(queue, opts.hygiene); // Story 22.3: every end this process drove (resumes included)
     if (owned) queue.close();
   }

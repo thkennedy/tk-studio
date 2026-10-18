@@ -581,6 +581,13 @@ export interface RecoverReport {
   released?: { run_id: string; worker?: WorkerKill }[];
 }
 
+/** Story 29.2: one row of the derived `agents` table (the registry of the agents the supervisor can run). */
+export interface AgentRecord {
+  agent_id: string; project: string; role: string;
+  model: string | null; effort: string | null; advisor: string | null; persona: string | null;
+  live_state: string; current_run: string | null; current_story: string | null; jira_account: string;
+}
+
 /** What happened to (or where stands) a recorded worker before its run was resumed or its lock released. */
 export interface WorkerKill {
   pid: number; start: string | null;
@@ -621,6 +628,14 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS events_run ON events (run_id, seq);
 CREATE TABLE IF NOT EXISTS service_events (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, kind TEXT NOT NULL, detail TEXT
+);
+CREATE TABLE IF NOT EXISTS agents (
+  agent_id TEXT PRIMARY KEY, project TEXT NOT NULL, role TEXT NOT NULL, model TEXT, effort TEXT, advisor TEXT,
+  persona TEXT, live_state TEXT NOT NULL, current_run TEXT, current_story TEXT,
+  jira_account TEXT NOT NULL DEFAULT '', rebuilt_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS agents_meta (
+  id INTEGER PRIMARY KEY CHECK (id = 1), rebuilt_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS locks (
   checkout TEXT PRIMARY KEY, root TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('run','engine')),
@@ -1965,6 +1980,46 @@ export class Queue {
       ? this.db.query("SELECT * FROM service_events WHERE kind = ? ORDER BY seq").all(kind)
       : this.db.query("SELECT * FROM service_events ORDER BY seq").all()) as { seq: number; at: string; kind: string; detail: string | null }[];
     return rows.map((r) => ({ ...r, detail: r.detail ? JSON.parse(r.detail) : null }));
+  }
+
+  // ---------------------------------------------------------- the agent registry (Story 29.2)
+
+  /** Story 29.2: the derived `agents` table replaced whole, in one transaction, with one `rebuilt_at`, stamped in
+   * the one-row `agents_meta` in the same transaction (so a rebuild over zero projects still records its time).
+   * `registry.ts` `rebuildAgents` is its only writer; a project absent from `rows` disappears. A snapshot older than
+   * the stored rebuild (an overlapping rebuild that finished first with a later snapshot) is not written: `false`.
+   * A stored stamp later than `current` (read inside the transaction; default now) means the clock moved back: it
+   * never blocks, the rebuild writes. */
+  replaceAgents(rows: AgentRecord[], rebuiltAt: string, current?: string): boolean {
+    return this.db.transaction(() => {
+      const stored = this.agentsRebuiltAt();
+      if (stored !== null && stored > rebuiltAt && stored <= (current ?? now())) return false;
+      this.db.exec("DELETE FROM agents");
+      const insert = this.db.query(
+        `INSERT INTO agents (agent_id, project, role, model, effort, advisor, persona, live_state, current_run, current_story, jira_account, rebuilt_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const r of rows) {
+        insert.run(r.agent_id, r.project, r.role, r.model, r.effort, r.advisor, r.persona, r.live_state,
+          r.current_run, r.current_story, r.jira_account, rebuiltAt);
+      }
+      this.db.query("INSERT INTO agents_meta (id, rebuilt_at) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET rebuilt_at = excluded.rebuilt_at").run(rebuiltAt);
+      return true;
+    }).immediate();
+  }
+
+  /** Story 29.2: the time of the last written rebuild (`agents_meta`), null before the first. */
+  private agentsRebuiltAt(): string | null {
+    return (this.db.query("SELECT rebuilt_at FROM agents_meta WHERE id = 1").get() as { rebuilt_at: string } | null)?.rebuilt_at ?? null;
+  }
+
+  /** Story 29.2: the `agents` rows (one project's, or all) ordered by project then agent id, and the time of the
+   * last rebuild (`agents_meta`; null before the first, set after a rebuild over zero projects). Reads only. */
+  agents(project?: string): { rebuilt_at: string | null; rows: AgentRecord[] } {
+    const rows = (project === undefined
+      ? this.db.query("SELECT * FROM agents ORDER BY project, agent_id").all()
+      : this.db.query("SELECT * FROM agents WHERE project = ? ORDER BY agent_id").all(project)) as (AgentRecord & { rebuilt_at: string })[];
+    return { rebuilt_at: this.agentsRebuiltAt(), rows: rows.map(({ rebuilt_at: _at, ...r }) => r) };
   }
 
   /** Inside a transaction: the terminal transition, the lock released (or handed

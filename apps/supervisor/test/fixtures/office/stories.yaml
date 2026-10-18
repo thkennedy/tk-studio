@@ -1,0 +1,17 @@
+# Hand-made from _bmad-output/specs/spec-epic-29/stories.yaml (ids and titles only), plus a remediation entry
+# (`<key>-r1`) appended after the four the launch validated: it is `extra`, outside the denominator.
+
+- id: "29-1-the-owners-account-replaces-the-providers"
+  title: "The Owner's Account Replaces the Providers"
+
+- id: "29-2-the-agent-registry"
+  title: "The Agent Registry"
+
+- id: "29-3-the-office-projection-semantic-states-progress-and-its"
+  title: "The Office Projection: Semantic States, Progress and Its Stream"
+
+- id: "29-4-the-contract-names-the-web-as-a-consumer-and-the-runbook"
+  title: "The Contract Names the Web as a Consumer and the Runbook Follows"
+
+- id: "29-2-the-agent-registry-r1"
+  title: "Remediation: The Agent Registry"
