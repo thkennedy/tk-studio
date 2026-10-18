@@ -1,9 +1,10 @@
 ---
 id: TASK-104
 title: "The Owner's Account Replaces the Providers"
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-17 21:14'
+updated_date: '2026-10-18 06:25'
 labels:
   - ST-104
 milestone: One Account, the Registry, the Projection

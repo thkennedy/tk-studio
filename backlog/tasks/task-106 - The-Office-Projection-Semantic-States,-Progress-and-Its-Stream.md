@@ -1,9 +1,10 @@
 ---
 id: TASK-106
 title: "The Office Projection: Semantic States, Progress and Its Stream"
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-17 21:14'
+updated_date: '2026-10-18 06:25'
 labels:
   - ST-106
 milestone: One Account, the Registry, the Projection
