@@ -1,9 +1,10 @@
 ---
 id: TASK-107
 title: The Contract Names the Web as a Consumer and the Runbook Follows
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-17 21:14'
+updated_date: '2026-10-18 06:25'
 labels:
   - ST-107
 milestone: One Account, the Registry, the Projection
