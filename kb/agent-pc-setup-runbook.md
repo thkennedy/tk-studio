@@ -1001,6 +1001,11 @@ User scope each time it starts, so a change needs no new logon.
 | `TK_SUPERVISOR_CONFIG` | no | the per-job tier config. Unset runs every job on the host tier |
 | `TK_SUPERVISOR_TLS_CERT`, `TK_SUPERVISOR_TLS_KEY`, `TK_SUPERVISOR_TLS_NAME` | for https and the phone sign-in (§4.5) | the `tailscale cert` certificate and key files and the machine's MagicDNS name. All three or none (`TlsConfigIncomplete`); set them only after the files exist (`TlsCertUnreadable`) |
 
+The owner's account (Story 29.1) is not a variable: its record (the username
+and the password's hash) is the store's,
+`<TK_STUDIO_HOME or ~/.tk-studio>\supervisor\account.json`, written on the
+first visit (§4.5). Nothing here holds a password.
+
 Set them from your own PowerShell 7 terminal. The token line makes a random
 token and stores it without printing it:
 
@@ -1108,6 +1113,21 @@ locks that are held. With the TLS variables set, the same call is
 `https://<TLS_NAME>:8787/status`; the certificate is a public one, so `curl`
 needs no `-k`.
 
+The agent registry and the office projection (Epic 29) answer the same way,
+on the bearer token:
+
+```powershell
+curl -H "Authorization: Bearer <token>" http://<tailscale-ip>:8787/agents
+curl -H "Authorization: Bearer <token>" http://<tailscale-ip>:8787/office
+```
+
+`/agents` answers `{ok:true, rebuilt_at, agents:[…]}`: each served project's
+seven roles (`orchestrator`, `session`, `implementer`, `reviewer`,
+`consult`, `advisor`, `planner`) with their routed models. `/office` answers
+the snapshot `{ok:true, at, agents, runs, …}`: every agent with one of the
+eight office states, and the live runs with their progress. `curl` always
+uses the bearer token; the account is for the browser.
+
 **The status page from a phone (Story 22.5, Story 29.1).** `GET /` without
 the bearer header answers a page for the owner's one account. The first visit
 creates it: a username (3 to 64 characters: letters, digits, `-`, `_`, `.`)
@@ -1128,7 +1148,10 @@ https. The operator's steps, once:
    or by hand `tailscale cert --cert-file <TLS_CERT> --key-file <TLS_KEY>
    <TLS_NAME>` followed by the three variables) and restart `start.ps1`. Open
    `https://<TLS_NAME>:8787/` on the phone and create the account.
-2. The reset, when locked out or the password is lost: delete
+2. The smoke sign-in: open `https://<TLS_NAME>:8787/` in a fresh browser (or
+   after the session expires) and sign in with the account's username and
+   password. The status page answers, with its Agents and Office sections.
+3. The reset, when locked out or the password is lost: delete
    `<TK_STUDIO_HOME or ~/.tk-studio>\supervisor\account.json` from the
    console. The next visit creates the account again (no restart needed),
    and the bearer token keeps working throughout.
@@ -1149,7 +1172,8 @@ certificate renews itself (§4.7): nothing needs restarting by hand.
 3. From another device on the tailnet,
    `curl -H "Authorization: Bearer <token>" http://<tailscale-ip>:8787/status`
    (or, with the TLS variables set, `https://<TLS_NAME>:8787/status`)
-   answers JSON.
+   answers JSON, and so do `/agents` and `/office` on the same token.
+   On the phone, sign in at `https://<TLS_NAME>:8787/` with the account.
 4. Queue one job and drive it to a guarded end (a refused or completed run,
    never one left running): from `apps\supervisor`,
    `bun src/cli.ts run studio-health --directory C:\GitHub\tk-studio`, or
@@ -1297,6 +1321,9 @@ Doctor is read-only. The table keeps only what the CLI cannot check.
 | Studio smoke checks | `tk-studio doctor` | every check `pass`, or `skipped`/`warn` with its fix read; the JSON `reason` is null |
 | RDP scope (§5 firewall) | from iPad over the tailnet: RDP to the MagicDNS name; from a device off the tailnet: RDP to the box's LAN or public address | desktop visible over the tailnet; off it, no connection (RDP scoped to `100.64.0.0/10`) |
 | Startup shortcut's visible tab (§4.3) | sign out and back in as the studio account | the `studio` Windows Terminal window opens visibly with the `supervisor` tab running `start.ps1` |
+| `GET /agents` (§4.5, Story 29.2) | `curl -H "Authorization: Bearer <token>" https://<TLS_NAME>:8787/agents` | `{ok:true, rebuilt_at, agents:[…]}`: each served project's seven roles (`orchestrator`, `session`, `implementer`, `reviewer`, `consult`, `advisor`, `planner`) with their routed models |
+| `GET /office` (§4.5, Story 29.3) | `curl -H "Authorization: Bearer <token>" https://<TLS_NAME>:8787/office` | `{ok:true, at, agents, runs, …}`: every agent once with one of the eight states, the live runs with story and epic progress |
+| `GET /office/events` (Story 29.3) | `curl -N -H "Accept: text/event-stream" -H "Authorization: Bearer <token>" https://<TLS_NAME>:8787/office/events` | an `event:snapshot` frame first, then a `: heartbeat` line within 10 s (and `office.*` frames while a run moves); Ctrl+C ends it |
 
 ## 8. Known Windows failure modes and what this runbook does about them
 
