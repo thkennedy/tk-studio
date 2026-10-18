@@ -24,6 +24,8 @@
  *   GET  /status             counts per state, the live runs, the held checkout locks
  *   GET  /events?since=<seq> events with seq > since: JSON, or SSE with
  *                            `Accept: text/event-stream`
+ *   GET  /agents[?project=<id>]  the agent registry (Story 29.2, `registry.ts`): {ok, rebuilt_at, agents}, one row per
+ *                            (project, role); an unknown project answers `agents: []`. A read only: never rebuilds
  *   GET  /                   the read-only status page (Story 22.2, `page.ts`): server-rendered
  *                            HTML, no script, credential-shaped values redacted
  *
@@ -46,10 +48,11 @@ import {
 import {
   csrfToken, readCookie, safeEqual, sessionSubAccepted, SESSION_COOKIE, SESSION_TTL_S, setCookie, signInPage, type SignInMode, signSession, USERNAME_RE, verifySession,
 } from "./auth";
-import { CancelRaced, cancelRun, ExternalRunRefused, resumeRun, StartError, submitProject } from "./cli";
+import { CancelRaced, cancelRun, ExternalRunRefused, resumeRun, StartError, submitProject, type AgentsOption } from "./cli";
 import { ResumeRefused, type ResumeAnswer } from "./closeout";
 import { apiBind, apiPort, apiToken, checkTlsFiles, notifier, oauthLeftovers, sessionSecret, tlsConfig } from "./env";
 import { gatherPage, holderOf, renderPage } from "./page";
+import { readAgents, type RebuildResult } from "./registry";
 import { registryShow } from "./server";
 import { isTerminal, Queue, RunTerminal, type QueueEvent, type QueueRun } from "./queue";
 
@@ -112,6 +115,10 @@ export interface ApiDeps {
   /** Story 29.1: the account record's path (default `accountPath(env)`), the mismatch delay (default
    * SIGNIN_DELAY_MS) and the sleep it waits through (tests inject one that records and returns at once). */
   account?: { path?: string; delayMs?: number; sleep?: (ms: number) => Promise<void> };
+  /** Story 29.2: the default cancel's agent-registry rebuild — injected deps (tests), `false` (none), or unset
+   * (production; skipped under `bun test`). The rebuild is detached from the answer; `onAgentsRebuild` receives it. */
+  agents?: AgentsOption;
+  onAgentsRebuild?: (rebuild: Promise<RebuildResult | null>) => void;
 }
 
 /** Story 27.3: the resume body — a restore patch relative to the run's worktree, optional. */
@@ -190,7 +197,8 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
   const submit = deps.submit ?? ((b: SubmitBody) => submitProject(b.project, b.job, {
     queue, tier: b.tier, model: b.model, effort: b.effort, baseRef: b.base_ref, ...(b.editor_in_the_loop === true ? { editorInTheLoop: true } : {}),
   }));
-  const cancel = deps.cancel ?? ((id: string) => cancelRun(queue, id));
+  // Story 29.2: the cancel's agent-registry rebuild is started, not awaited: the answer never waits on it (Story 22.3).
+  const cancel = deps.cancel ?? ((id: string) => cancelRun(queue, id, { agents: deps.agents, detachRebuild: (p) => { deps.onAgentsRebuild?.(p); } }));
   const resume = deps.resume ?? ((id: string, b: ResumeBody) => resumeRun(queue, id, b.restore_patch));
   const pollMs = deps.pollMs ?? 1000, keepaliveMs = deps.keepaliveMs ?? 15000;
   const clock = deps.now ?? Date.now;
@@ -495,7 +503,7 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
   /** What a valid cookie session may do: the GET routes, and cancel with CSRF. Anything else 401. */
   async function cookieRoute(req: Request, url: URL, path: string, method: string, cookie: string): Promise<Response> {
     const csrf = csrfToken(secret!, cookie);
-    const readRoute = path === "/" || path === "/jobs" || path === "/status" || path === "/events" || /^\/runs\/[^/]+$/.test(path);
+    const readRoute = path === "/" || path === "/jobs" || path === "/status" || path === "/events" || path === "/agents" || /^\/runs\/[^/]+$/.test(path);
     if (method === "GET" && readRoute) return await route(req, url, path, method, csrf);
     if (method === "POST" && /^\/runs\/[^/]+\/cancel$/.test(path)) {
       const given = await csrfGiven(req);
@@ -535,6 +543,12 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
       }
       if (path === "/status") return method === "GET" ? status() : allow("GET");
       if (path === "/events") return method === "GET" ? events(req, url) : allow("GET");
+      if (path === "/agents") {
+        if (method !== "GET") return allow("GET");
+        // Story 29.2: the table as the last rebuild left it — a read, never a rebuild.
+        const { rebuilt_at, agents } = readAgents(queue, url.searchParams.get("project") ?? undefined);
+        return json(200, { ok: true, rebuilt_at, agents });
+      }
       const cancelMatch = /^\/runs\/([^/]+)\/cancel$/.exec(path);
       if (cancelMatch) {
         if (method !== "POST") return allow("POST");

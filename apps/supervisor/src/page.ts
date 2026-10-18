@@ -12,6 +12,7 @@ import { homedir, hostname, userInfo } from "node:os";
 import { basename, join } from "node:path";
 import { studioHome } from "./env";
 import { isTerminal, type Holder, type LockRow, type Queue, type QueueEvent, type QueueRun } from "./queue";
+import { readAgents, type AgentRow } from "./registry";
 import { readProjectConfig } from "./server";
 
 type Env = Record<string, string | undefined>;
@@ -70,6 +71,9 @@ export interface PageData {
   statusBlocks: { run_id: string; studio_run_id: string; block: unknown }[];
   ledger: { path: string; lines: string[] } | { path: string; note: string };
   registry: { ok: true; projects: Record<string, Record<string, unknown>> } | { ok: false; note: string };
+  /** Story 29.2: the agent registry as the last rebuild left it (read from the queue's `agents` table, never
+   * rebuilt here), grouped by project. Absent: the section notes no registry. */
+  agents?: { rebuilt_at: string | null; byProject: Record<string, AgentRow[]> };
   /** For the renderer's redaction. */
   secrets: { token: string; env: Env };
 }
@@ -256,9 +260,14 @@ export async function gatherPage(deps: PageDeps): Promise<PageData> {
     registry = { ok: false, note: `registry show failed: ${machinePathsOut(e instanceof Error ? e.message : String(e), store, env)}` };
   }
 
+  // Story 29.2: the `agents` table read as it stands (the page never rebuilds it, never resolves a route).
+  const read = readAgents(queue);
+  const byProject: Record<string, AgentRow[]> = {};
+  for (const a of read.agents) (byProject[a.project] ??= []).push(a);
+
   return {
     generated: new Date().toISOString(), counts, jobs: queue.jobs(), runs, runsOmitted: Math.max(0, all.length - shown.length),
-    locks, statusBlocks, ledger, registry, secrets: { token: deps.token, env },
+    locks, statusBlocks, ledger, registry, agents: { rebuilt_at: read.rebuilt_at, byProject }, secrets: { token: deps.token, env },
   };
 }
 
@@ -449,6 +458,12 @@ ${l.reason ? `<p class="reason">${t(l.reason)}</p>` : ""}
       : note("no registered projects"))
     : note(data.registry.note);
 
+  const agentProjects = data.agents ? Object.entries(data.agents.byProject) : [];
+  const agents = agentProjects.length ? `<p class="meta">rebuilt ${t(data.agents!.rebuilt_at ?? "-")}</p>` + agentProjects.map(([project, rows]) =>
+    `<div class="card"><strong>${t(project)}</strong><ul>${rows.map((a) =>
+      `<li><strong>${t(a.role)}</strong> <span class="meta">${t(a.agent_id)}</span> · model ${t(a.model ?? "-")} · effort ${t(a.effort ?? "-")} · advisor ${t(a.advisor ?? "-")} · persona ${t(a.persona ?? "-")} · <span class="st">${t(a.live_state)}</span>${a.current_story ? ` · story ${t(a.current_story)}` : ""}${a.current_run ? ` · run ${t(a.current_run)}` : ""}</li>`).join("")}</ul></div>`).join("\n")
+    : note(data.agents?.rebuilt_at ? "no agents: the registry serves no projects" : "no agent registry rebuilt yet");
+
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>tk-studio supervisor</title><style>${CSS}</style></head>
@@ -460,5 +475,6 @@ ${l.reason ? `<p class="reason">${t(l.reason)}</p>` : ""}
 <section id="workspaces"><h2>Run workspaces</h2>${workspaces}</section>
 <section id="ledger"><h2>Ledger tail</h2>${ledger}</section>
 <section id="registry"><h2>Registry projects</h2>${registry}</section>
+<section id="agents"><h2>Agents</h2>${agents}</section>
 </body></html>`;
 }
