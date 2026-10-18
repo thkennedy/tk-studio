@@ -1000,8 +1000,6 @@ User scope each time it starts, so a change needs no new logon.
 | `TK_SUPERVISOR_WORK` | always (Epic 27) | the work folder: every run's worktree under `worktrees\<project>\<run id>`, editor-in-the-loop snapshots under `snapshots\…`; `C:\agent-work`. The engine sandbox mounts its `worktrees` subfolder read-write (§3.8) |
 | `TK_SUPERVISOR_CONFIG` | no | the per-job tier config. Unset runs every job on the host tier |
 | `TK_SUPERVISOR_TLS_CERT`, `TK_SUPERVISOR_TLS_KEY`, `TK_SUPERVISOR_TLS_NAME` | for https and the phone sign-in (§4.5) | the `tailscale cert` certificate and key files and the machine's MagicDNS name. All three or none (`TlsConfigIncomplete`); set them only after the files exist (`TlsCertUnreadable`) |
-| `TK_SUPERVISOR_OAUTH_GOOGLE_CLIENT_ID`, `_CLIENT_SECRET`, `_ALLOW` | for Google sign-in | all three or none (`OAuthConfigIncomplete`); needs the TLS variables (`OAuthNeedsHttps`). `_ALLOW` is the one Google account allowed |
-| `TK_SUPERVISOR_OAUTH_GITHUB_CLIENT_ID`, `_CLIENT_SECRET`, `_ALLOW` | for GitHub sign-in | the same rules; `_ALLOW` is the one GitHub login allowed |
 
 Set them from your own PowerShell 7 terminal. The token line makes a random
 token and stores it without printing it:
@@ -1110,22 +1108,30 @@ locks that are held. With the TLS variables set, the same call is
 `https://<TLS_NAME>:8787/status`; the certificate is a public one, so `curl`
 needs no `-k`.
 
-**The status page from a phone (Story 22.5).** `GET /` without the bearer
-header answers a sign-in page: a form for the API token, "Continue with
-Google" and "Continue with GitHub". Sign-in sets a seven-day `HttpOnly`,
-`Secure` session cookie, so it works only over https. The operator's steps,
-once:
+**The status page from a phone (Story 22.5, Story 29.1).** `GET /` without
+the bearer header answers a page for the owner's one account. The first visit
+creates it: a username (3 to 64 characters: letters, digits, `-`, `_`, `.`)
+and a password (12 characters or more), stored hashed in
+`<TK_STUDIO_HOME or ~/.tk-studio>\supervisor\account.json`. Later visits
+sign in with that username and password; the token form stays for the
+operator's own browser. Five refused sign-ins within fifteen minutes lock the
+account for fifteen minutes. There is no Google or GitHub sign-in: a
+leftover `TK_SUPERVISOR_OAUTH_*` variable is ignored, with one warning at
+start naming it. Delete any leftover `TK_SUPERVISOR_OAUTH_*` User variables
+(they include the old Google and GitHub client secrets), and delete the Google
+and GitHub OAuth apps registered for the supervisor's callback URLs. Sign-in
+sets a seven-day `HttpOnly`, `Secure` session cookie, so it works only over
+https. The operator's steps, once:
 
 1. Enable HTTPS certificates in the Tailscale admin console (DNS → HTTPS
    Certificates). Then set the TLS variables (`set-supervisor-env.ps1 -WithTls`,
    or by hand `tailscale cert --cert-file <TLS_CERT> --key-file <TLS_KEY>
    <TLS_NAME>` followed by the three variables) and restart `start.ps1`. Open
-   `https://<TLS_NAME>:8787/` on the phone and sign in with the token.
-2. For Google and GitHub: register a Google OAuth web client and a GitHub
-   OAuth app with the callbacks `https://<TLS_NAME>:8787/auth/google/callback`
-   and `https://<TLS_NAME>:8787/auth/github/callback`, set the six
-   `TK_SUPERVISOR_OAUTH_*` variables (`_ALLOW` is the one Google account and
-   the one GitHub login allowed), and restart `start.ps1`.
+   `https://<TLS_NAME>:8787/` on the phone and create the account.
+2. The reset, when locked out or the password is lost: delete
+   `<TK_STUDIO_HOME or ~/.tk-studio>\supervisor\account.json` from the
+   console. The next visit creates the account again (no restart needed),
+   and the bearer token keeps working throughout.
 
 There is no sign-out: a session ends at its expiry, or rotate
 `TK_SUPERVISOR_SESSION_SECRET` and restart to end every session at once. The
@@ -1325,7 +1331,7 @@ Doctor is read-only. The table keeps only what the CLI cannot check.
 | A supervisor killed within half a second of starting a worker leaves no record of that worker | on win32 the worker record waits on a PowerShell read of the start time, about 0.5 s (supervisor DW-19, open) | the worker still ends with its supervisor on win32, and the run ends `partial` naming no session |
 | The status page will not open in a phone browser | it sat behind the same bearer header as the API, and an address bar cannot send one | Story 22.5: the page signs the operator in (token form, Google, GitHub) over https with a session cookie (§4.5); over plain http, the bearer header or a client that sends it |
 | `serve` refuses to start with `SessionSecretMissing` or `SessionSecretWeak` | Story 22.5 made the session cookie's signing secret required, at least 32 bytes | set `TK_SUPERVISOR_SESSION_SECRET` (the setup script does, §4.2) |
-| `serve` refuses to start with `TlsConfigIncomplete`, `TlsCertUnreadable`, `OAuthConfigIncomplete` or `OAuthNeedsHttps` | the TLS trio and each OAuth trio are all-or-none, the certificate files must exist, and OAuth redirects need https | set all three or none; run `tailscale cert` before the TLS variables (`-WithTls`); set the TLS variables before any OAuth trio (§4.5) |
+| `serve` refuses to start with `TlsConfigIncomplete` or `TlsCertUnreadable` | the TLS trio is all-or-none, and the certificate files must exist | set all three or none; run `tailscale cert` before the TLS variables (`-WithTls`) (§4.5) |
 | The token form on the sign-in page refuses over http | the session cookie is `Secure`, so a browser never keeps it over http | set the TLS variables; the bearer header still works over http |
 | https fails with an expired certificate on a box up longer than 90 days | `tailscale cert` runs only when `start.ps1` starts (supervisor DW-21) | restart the supervisor tab before the certificate expires |
 | A bmad-loop story is finished and committed, but the engine calls its session stalled | the dev session named its spec `<id>.md`; the engine resolves `<id>-*.md` and reads the story as pending (2026-09-28) | each `stories.yaml` entry names the file pattern; rename the file and commit if it happens (§3.8) |

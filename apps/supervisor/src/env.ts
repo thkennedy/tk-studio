@@ -125,11 +125,12 @@ export function apiToken(env: Env = process.env): string {
 //   TK_SUPERVISOR_TLS_CERT        the `tailscale cert` certificate file  } all three or none: with them
 //   TK_SUPERVISOR_TLS_KEY         its key file                           } `serve` answers https on the
 //   TK_SUPERVISOR_TLS_NAME        the machine's MagicDNS name            } same bind
-//   TK_SUPERVISOR_OAUTH_GOOGLE_{CLIENT_ID,CLIENT_SECRET,ALLOW}  Google sign-in: all three or none;
-//   TK_SUPERVISOR_OAUTH_GITHUB_{CLIENT_ID,CLIENT_SECRET,ALLOW}  GitHub sign-in: all three or none.
-//                                 ALLOW is one identity (a Google email, a GitHub login), never a
-//                                 wildcard or a list. A configured provider needs the TLS variables.
 //                                 `serve` checks the cert and key files are readable before it binds.
+//
+// Story 29.1: the owner's one account (username, argon2id hash, created_at) lives in the per-user store at
+// `<TK_STUDIO_HOME or ~/.tk-studio>/supervisor/account.json` (`account.ts`), never in the environment, a
+// checkout or the queue file. The Google and GitHub providers are gone: a provider variable still set is
+// ignored, and `serve` warns once per name (`oauthLeftovers`), never its value.
 //
 // Every error names variables only, never a value.
 
@@ -156,27 +157,6 @@ export class TlsConfigIncomplete extends Error {
   constructor(missing: string[]) {
     super(`TlsConfigIncomplete: set all of TK_SUPERVISOR_TLS_CERT, TK_SUPERVISOR_TLS_KEY and TK_SUPERVISOR_TLS_NAME, or none — ${missing.join(", ")} not set or empty`);
     this.name = "TlsConfigIncomplete";
-  }
-}
-
-export class OAuthConfigIncomplete extends Error {
-  constructor(provider: string, missing: string[]) {
-    super(`OAuthConfigIncomplete: ${provider} sign-in needs all three TK_SUPERVISOR_OAUTH_${provider.toUpperCase()}_{CLIENT_ID,CLIENT_SECRET,ALLOW}, or none — ${missing.join(", ")} not set or empty`);
-    this.name = "OAuthConfigIncomplete";
-  }
-}
-
-export class OAuthAllowInvalid extends Error {
-  constructor(variable: string) {
-    super(`OAuthAllowInvalid: ${variable} must name exactly one identity — no wildcard (*), no list (,), no whitespace`);
-    this.name = "OAuthAllowInvalid";
-  }
-}
-
-export class OAuthNeedsHttps extends Error {
-  constructor(provider: string) {
-    super(`OAuthNeedsHttps: ${provider} sign-in is configured but TK_SUPERVISOR_TLS_CERT/KEY/NAME are not: OAuth redirects need https`);
-    this.name = "OAuthNeedsHttps";
   }
 }
 
@@ -220,26 +200,9 @@ export function checkTlsFiles(tls: TlsConfig): void {
   }
 }
 
-export interface OAuthProviderConfig { clientId: string; clientSecret: string; allow: string }
-export interface OAuthConfig { google?: OAuthProviderConfig; github?: OAuthProviderConfig }
-
-/** The configured OAuth providers: each all three variables or none; ALLOW a single identity;
- * any configured provider needs TLS (Google refuses an http redirect URI off localhost). */
-export function oauthConfig(env: Env = process.env): OAuthConfig {
-  const out: OAuthConfig = {};
-  for (const provider of ["google", "github"] as const) {
-    const prefix = `TK_SUPERVISOR_OAUTH_${provider.toUpperCase()}_`;
-    const names = [`${prefix}CLIENT_ID`, `${prefix}CLIENT_SECRET`, `${prefix}ALLOW`];
-    const values = names.map((n) => env[n]?.trim() ?? "");
-    const missing = names.filter((_, i) => !values[i]);
-    if (missing.length === names.length) continue;
-    if (missing.length) throw new OAuthConfigIncomplete(provider, missing);
-    if (/[*,\s]/.test(values[2])) throw new OAuthAllowInvalid(names[2]);
-    out[provider] = { clientId: values[0], clientSecret: values[1], allow: values[2] };
-  }
-  const configured = (Object.keys(out) as (keyof OAuthConfig)[])[0];
-  if (configured && !tlsConfig(env)) throw new OAuthNeedsHttps(configured);
-  return out;
+/** Story 29.1: the `TK_SUPERVISOR_OAUTH_*` names still set (non-empty) — ignored, each warned once at start. */
+export function oauthLeftovers(env: Env = process.env): string[] {
+  return Object.keys(env).filter((k) => /^TK_SUPERVISOR_OAUTH_/.test(k) && (env[k]?.trim() ?? "") !== "").sort();
 }
 
 // ------------------------------------------------------------ run hygiene (Story 22.3)

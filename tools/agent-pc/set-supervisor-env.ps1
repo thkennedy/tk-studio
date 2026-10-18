@@ -150,14 +150,5 @@ if ($ShowToken) {
   Write-Host "  (show the token once with:  [Environment]::GetEnvironmentVariable('TK_SUPERVISOR_TOKEN','User')  or re-run with -ShowToken)"
 }
 Write-Host ''
-Write-Host 'Phone sign-in (Story 22.5) needs TLS. Once -WithTls has run, open on the phone:'
-Write-Host "  https://${tlsName}:$Port/      (token form; Google / GitHub once the apps are registered)"
-Write-Host 'Google and GitHub sign-in (optional, only you can fill these in; all three per provider or none):'
-Write-Host "  callback URLs to register:  https://${tlsName}:$Port/auth/google/callback   and   https://${tlsName}:$Port/auth/github/callback"
-Write-Host "  [Environment]::SetEnvironmentVariable('TK_SUPERVISOR_OAUTH_GOOGLE_CLIENT_ID',     '<client id>', 'User')"
-Write-Host "  [Environment]::SetEnvironmentVariable('TK_SUPERVISOR_OAUTH_GOOGLE_CLIENT_SECRET', '<client secret>', 'User')"
-Write-Host "  [Environment]::SetEnvironmentVariable('TK_SUPERVISOR_OAUTH_GOOGLE_ALLOW',         '<your Google email>', 'User')"
-Write-Host "  [Environment]::SetEnvironmentVariable('TK_SUPERVISOR_OAUTH_GITHUB_CLIENT_ID',     '<client id>', 'User')"
-Write-Host "  [Environment]::SetEnvironmentVariable('TK_SUPERVISOR_OAUTH_GITHUB_CLIENT_SECRET', '<client secret>', 'User')"
-Write-Host "  [Environment]::SetEnvironmentVariable('TK_SUPERVISOR_OAUTH_GITHUB_ALLOW',         '<your GitHub login>', 'User')"
-Write-Host '  then Ctrl+C the supervisor tab and run start.ps1 again.'
+Write-Host 'Phone sign-in needs TLS. Once -WithTls has run, open on the phone:'
+Write-Host "  https://${tlsName}:$Port/      (the first visit creates the account)"

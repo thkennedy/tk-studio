@@ -704,8 +704,6 @@ describe("start.ps1 sign-in (Story 22.5 AC4)", () => {
     const names = text.slice(start, text.indexOf("\n)\n", start));
     for (const n of [
       "TK_SUPERVISOR_SESSION_SECRET", "TK_SUPERVISOR_TLS_CERT", "TK_SUPERVISOR_TLS_KEY", "TK_SUPERVISOR_TLS_NAME",
-      "TK_SUPERVISOR_OAUTH_GOOGLE_CLIENT_ID", "TK_SUPERVISOR_OAUTH_GOOGLE_CLIENT_SECRET", "TK_SUPERVISOR_OAUTH_GOOGLE_ALLOW",
-      "TK_SUPERVISOR_OAUTH_GITHUB_CLIENT_ID", "TK_SUPERVISOR_OAUTH_GITHUB_CLIENT_SECRET", "TK_SUPERVISOR_OAUTH_GITHUB_ALLOW",
     ]) expect(names).toContain(`'${n}'`);
   });
 
