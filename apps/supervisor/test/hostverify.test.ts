@@ -3,10 +3,10 @@
 // tails clipped and redacted. Verify commands are `process.execPath` (bun) `-e` scripts: the same test
 // runs on both hosts.
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { hostVerify, isRed, prSection, redReason, splitCommand, tail, verifyCommand, wallClockTrip, type HostVerifyRan } from "../src/hostverify";
+import { gitUsrBin, hostVerify, isRed, prSection, redReason, splitCommand, tail, verifyCommand, wallClockTrip, type HostVerifyRan } from "../src/hostverify";
 import { gitRepo, testGit } from "./fakes";
 
 /** `"<bun>" -e "<script>"` as one command line (the script uses single quotes only). */
@@ -214,5 +214,68 @@ describe("the leg runs the command in the worktree under the guard", () => {
     // A tail with no backticks keeps the plain three-backtick fence.
     expect(s.slice(close + 1)).toContain("```");
     expect(s.at(-1)).toBe("```");
+  });
+});
+
+describe("hole 46: Git Bash goes first on the leg's PATH on win32", () => {
+  test("a `Git\\cmd` entry on PATH with a sibling `usr\\bin\\bash.exe` is prepended and recorded (win32 only); none: PATH unchanged", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tk-sup-git-"));
+    mkdirSync(join(root, "Git", "cmd"), { recursive: true });
+    writeFileSync(join(root, "Git", "cmd", "git.exe"), "");
+    mkdirSync(join(root, "Git", "usr", "bin"), { recursive: true });
+    writeFileSync(join(root, "Git", "usr", "bin", "bash.exe"), "");
+    const win = process.platform === "win32";
+    const usrBin = join(root, "Git", "usr", "bin");
+    // The pure resolution: the fake Git alone on PATH (no real git there, so this never runs a command).
+    const env = { TK_STUDIO_HOME: "store", PATH: [join(root, "elsewhere"), join(root, "Git", "cmd")].join(";") };
+    expect(gitUsrBin(env)).toBe(win ? usrBin : null);
+    expect(gitUsrBin({ PATH: join(root, "nowhere") })).toBeNull();
+    expect(gitUsrBin({ PATH: join(root, "Git", "cmd") + "\\" })).toBe(win ? usrBin : null); // a trailing separator
+    // The leg: the config read and the command answered by an injected runner, the command's env captured.
+    const seen: Record<string, string | undefined>[] = [];
+    const specs: { argv: string[] }[] = [];
+    const run = async (bin: string, args: string[], o: { cwd: string; timeoutS: number; env?: Record<string, string | undefined> }) => {
+      if (bin === "git") return { exit: 0, stdout: hostKey("bash scripts/verify.sh"), stderr: "" };
+      seen.push(o.env ?? {});
+      specs.push(JSON.parse(readFileSync(args[2]!, "utf-8"))); // the capture wrapper's spec: what is spawned
+      return { exit: 0, stdout: "", stderr: "" };
+    };
+    const fx = project(hostKey("bash scripts/verify.sh"));
+    const v = await hostVerify(fx.run, 60, { env, run: run as any }) as HostVerifyRan;
+    expect(seen).toHaveLength(1);
+    expect(v.argv).toEqual(["bash", "scripts/verify.sh"]); // the event keeps the config's argv
+    if (win) {
+      expect(v.git_bash).toBe(usrBin);
+      expect(seen[0]!.PATH).toBe(`${usrBin};${env.PATH}`);
+      // Hole 52: the bare `bash` is spawned by its full path in that `usr\bin` (the PATH prefix alone changes
+      // nothing: Windows resolves a bare name through the parent's PATH), and the event names it.
+      expect(specs[0]!.argv).toEqual([join(usrBin, "bash.exe"), "scripts/verify.sh"]);
+      expect(v.resolved).toBe(join(usrBin, "bash.exe"));
+    } else {
+      expect(v.git_bash).toBeUndefined();
+      expect(v.resolved).toBeUndefined();
+      expect(seen[0]!.PATH).toBe(env.PATH);
+      expect(specs[0]!.argv).toEqual(["bash", "scripts/verify.sh"]);
+    }
+  });
+
+  test("hole 52: a first token that is already a path, or one Git's `usr\\bin` does not hold, is spawned as written", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tk-sup-git-"));
+    mkdirSync(join(root, "Git", "cmd"), { recursive: true });
+    mkdirSync(join(root, "Git", "usr", "bin"), { recursive: true });
+    writeFileSync(join(root, "Git", "usr", "bin", "bash.exe"), "");
+    const env = { TK_STUDIO_HOME: "store", PATH: join(root, "Git", "cmd") };
+    const specs: { argv: string[] }[] = [];
+    const runWith = (command: string) => async (bin: string, args: string[]) => {
+      if (bin === "git") return { exit: 0, stdout: hostKey(command), stderr: "" };
+      specs.push(JSON.parse(readFileSync(args[2]!, "utf-8")));
+      return { exit: 0, stdout: "", stderr: "" };
+    };
+    for (const command of ["uv run tools/verify_host.py", `"${join(root, "elsewhere", "bash.exe")}" scripts/verify.sh`]) {
+      const fx = project(hostKey(command));
+      const v = await hostVerify(fx.run, 60, { env, run: runWith(command) as any }) as HostVerifyRan;
+      expect(v.resolved).toBeUndefined();
+      expect(specs.at(-1)!.argv).toEqual(v.argv);
+    }
   });
 });

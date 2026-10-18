@@ -19,7 +19,21 @@
  */
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+
+/** Hole 46 (win32 only): Git for Windows' `usr\bin` (Git Bash, `bash.exe`) beside the `Git\cmd` or
+ * `Git\bin` entry on PATH, or null. The console's bare `bash` is the WindowsApps WSL launcher, which runs a
+ * `verify.host` of `bash …` inside WSL against Windows paths; the leg puts Git Bash first instead. */
+export function gitUsrBin(env: Record<string, string | undefined>): string | null {
+  if (process.platform !== "win32") return null;
+  for (const entry of (env.PATH ?? env.Path ?? "").split(";")) {
+    const e = entry.trim().replace(/[\\/]+$/, "");
+    if (!/[\\/]Git[\\/](cmd|bin)$/i.test(e)) continue;
+    const usrBin = join(dirname(e), "usr", "bin");
+    if (existsSync(join(usrBin, "bash.exe"))) return usrBin;
+  }
+  return null;
+}
 import { load as loadYaml } from "js-yaml";
 import { buildWorkerEnv, runProcess, type RunResult } from "./server";
 import { servedRoot, type QueueRun } from "./queue";
@@ -30,6 +44,10 @@ export type HostVerifyRan = {
   skipped?: false; command: string; argv: string[]; cwd: string; exit: number | null; duration_ms: number;
   /** The signal that killed the command (not the guard), when one did. */
   signal?: string; guard?: string; error?: string; green: boolean; stdout_tail: string[]; stderr_tail: string[];
+  /** Hole 46 (win32): Git's `usr\bin` put first on the leg's PATH, when it was there. */
+  git_bash?: string;
+  /** Hole 52 (win32): the command's first token as spawned, when it was a bare name found in that `usr\bin`. */
+  resolved?: string;
 };
 export type HostVerifySkipped = { skipped: true; reason: string };
 export type HostVerifyResult = HostVerifyRan | HostVerifySkipped;
@@ -129,9 +147,23 @@ export async function hostVerify(run: Run, guardS: number, deps: Deps = {}): Pro
   if ("skipped" in cmd) return cmd;
   const cwd = servedRoot(run)!; // Story 28.5: the root the run serves (`<worktree>/<prefix>`)
   const env = buildWorkerEnv(deps.env ?? process.env);
+  // Hole 46: on the Windows host the console's `bash` is the WindowsApps WSL launcher, so a `verify.host`
+  // that says `bash …` (and the lib suite's own bash-driven tests) ran inside WSL against Windows paths. Git's
+  // own `usr\bin` (Git Bash, not on PATH by default) goes first when it is there.
+  const gitBash = gitUsrBin(env);
+  if (gitBash) env.PATH = `${gitBash};${env.PATH ?? ""}`;
+  // Hole 52: Windows resolves a bare command name through the parent's PATH, never the child's, so the
+  // prefix alone still ran the WindowsApps stub (exit 127, nothing printed). A bare first token that Git's
+  // `usr\bin` holds (`bash`, `sh`, …) is spawned by its full path there; the event records it as `resolved`.
+  const argv = [...cmd.argv];
+  let resolved: string | undefined;
+  if (gitBash && argv[0] && !/[\\/]/.test(argv[0])) {
+    const exe = join(gitBash, /\.exe$/i.test(argv[0]) ? argv[0] : `${argv[0]}.exe`);
+    if (existsSync(exe)) { argv[0] = exe; resolved = exe; }
+  }
   const started = Date.now();
   const ran = (r: Partial<HostVerifyRan> & { exit: number | null; stdout?: string; stderr?: string }): HostVerifyRan => ({
-    command: cmd.command, argv: cmd.argv, cwd, exit: r.exit, duration_ms: Date.now() - started,
+    command: cmd.command, argv: cmd.argv, cwd, exit: r.exit, duration_ms: Date.now() - started, ...(gitBash ? { git_bash: gitBash } : {}), ...(resolved ? { resolved } : {}),
     ...(r.signal ? { signal: r.signal } : {}), ...(r.guard ? { guard: r.guard } : {}), ...(r.error ? { error: r.error } : {}),
     green: r.exit === 0 && !r.guard && !r.error, stdout_tail: tail(r.stdout ?? ""), stderr_tail: tail(r.stderr ?? ""),
   });
@@ -143,7 +175,7 @@ export async function hostVerify(run: Run, guardS: number, deps: Deps = {}): Pro
   const streams = () => ({ stdout: read(files.out), stderr: read(files.err) });
   try {
     const spec = join(dir, "spec.json");
-    writeFileSync(spec, JSON.stringify({ argv: cmd.argv, cwd, ...files }), "utf-8");
+    writeFileSync(spec, JSON.stringify({ argv, cwd, ...files }), "utf-8");
     const args = ["-e", CAPTURE, spec];
     let res: RunResult;
     try {
