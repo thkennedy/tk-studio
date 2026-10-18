@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gitUsrBin, hostVerify, isRed, prSection, redReason, splitCommand, tail, verifyCommand, wallClockTrip, type HostVerifyRan } from "../src/hostverify";
+import { gitUsrBin, hostVerify, isRed, pathKey, prSection, redReason, splitCommand, tail, verifyCommand, wallClockTrip, type HostVerifyRan } from "../src/hostverify";
 import { gitRepo, testGit } from "./fakes";
 
 /** `"<bun>" -e "<script>"` as one command line (the script uses single quotes only). */
@@ -257,6 +257,34 @@ describe("hole 46: Git Bash goes first on the leg's PATH on win32", () => {
       expect(seen[0]!.PATH).toBe(env.PATH);
       expect(specs[0]!.argv).toEqual(["bash", "scripts/verify.sh"]);
     }
+  });
+
+  test("hole 54: an env that spells the key `Path` (a console-started process on Windows) is edited in place, never given a second `PATH`", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tk-sup-git-"));
+    mkdirSync(join(root, "Git", "cmd"), { recursive: true });
+    mkdirSync(join(root, "Git", "usr", "bin"), { recursive: true });
+    writeFileSync(join(root, "Git", "usr", "bin", "bash.exe"), "");
+    const win = process.platform === "win32";
+    const usrBin = join(root, "Git", "usr", "bin");
+    const original = [join(root, "tools"), join(root, "Git", "cmd")].join(";");
+    const env = { TK_STUDIO_HOME: "store", Path: original };
+    expect(pathKey(env)).toBe("Path");
+    expect(pathKey({ PATH: "x" })).toBe("PATH");
+    expect(pathKey({})).toBe("PATH");
+    expect(gitUsrBin(env)).toBe(win ? usrBin : null);
+    const seen: Record<string, string | undefined>[] = [];
+    const run = async (bin: string, _args: string[], o: { cwd: string; timeoutS: number; env?: Record<string, string | undefined> }) => {
+      if (bin === "git") return { exit: 0, stdout: hostKey("uv run tools/verify_host.py"), stderr: "" };
+      seen.push(o.env ?? {});
+      return { exit: 0, stdout: "", stderr: "" };
+    };
+    const fx = project(hostKey("uv run tools/verify_host.py"));
+    const v = await hostVerify(fx.run, 60, { env, run: run as any }) as HostVerifyRan;
+    expect(seen).toHaveLength(1);
+    const keys = Object.keys(seen[0]!).filter((k) => k.toUpperCase() === "PATH");
+    expect(keys).toEqual(["Path"]); // the one key, its spelling kept: the child's PATH is the whole PATH
+    expect(seen[0]!.Path).toBe(win ? `${usrBin};${original}` : original);
+    expect(v.resolved).toBeUndefined(); // `uv` is not in Git's usr\bin: spawned as written, found through the whole PATH
   });
 
   test("hole 52: a first token that is already a path, or one Git's `usr\\bin` does not hold, is spawned as written", async () => {
