@@ -24,9 +24,16 @@ import { dirname, join } from "node:path";
 /** Hole 46 (win32 only): Git for Windows' `usr\bin` (Git Bash, `bash.exe`) beside the `Git\cmd` or
  * `Git\bin` entry on PATH, or null. The console's bare `bash` is the WindowsApps WSL launcher, which runs a
  * `verify.host` of `bash …` inside WSL against Windows paths; the leg puts Git Bash first instead. */
+/** Hole 54: the key `env` spells PATH with (`Path` under a console-started process on Windows, `PATH` under
+ * Git Bash), so the leg edits that key and never adds a second one: a plain object copy of `process.env` is
+ * case-sensitive, and a duplicate `PATH` beside `Path` reached the child as a PATH of Git's `usr\bin` alone. */
+export function pathKey(env: Record<string, string | undefined>): string {
+  return Object.keys(env).find((k) => k.toUpperCase() === "PATH") ?? "PATH";
+}
+
 export function gitUsrBin(env: Record<string, string | undefined>): string | null {
   if (process.platform !== "win32") return null;
-  for (const entry of (env.PATH ?? env.Path ?? "").split(";")) {
+  for (const entry of (env[pathKey(env)] ?? "").split(";")) {
     const e = entry.trim().replace(/[\\/]+$/, "");
     if (!/[\\/]Git[\\/](cmd|bin)$/i.test(e)) continue;
     const usrBin = join(dirname(e), "usr", "bin");
@@ -151,7 +158,7 @@ export async function hostVerify(run: Run, guardS: number, deps: Deps = {}): Pro
   // that says `bash …` (and the lib suite's own bash-driven tests) ran inside WSL against Windows paths. Git's
   // own `usr\bin` (Git Bash, not on PATH by default) goes first when it is there.
   const gitBash = gitUsrBin(env);
-  if (gitBash) env.PATH = `${gitBash};${env.PATH ?? ""}`;
+  if (gitBash) { const key = pathKey(env); env[key] = `${gitBash};${env[key] ?? ""}`; }
   // Hole 52: Windows resolves a bare command name through the parent's PATH, never the child's, so the
   // prefix alone still ran the WindowsApps stub (exit 127, nothing printed). A bare first token that Git's
   // `usr\bin` holds (`bash`, `sh`, …) is spawned by its full path there; the event records it as `resolved`.
