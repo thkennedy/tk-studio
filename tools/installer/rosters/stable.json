@@ -32,9 +32,9 @@
       "sha256": "46dcb5b0011891ed8f6ce0deb2ced3418bfaabd2ba68682307b43cedec7507df"
     },
     "cli": {
-      "tag": "cli--v0.1.1",
-      "url": "https://github.com/thkennedy/tk-studio/releases/download/cli--v0.1.1/tk_studio_cli-0.1.1-py3-none-any.whl",
-      "sha256": "ffcf9a6fdc1d10dfdb34ff9ae2c2932339a8eebda4dd70b6a82ab70f76cda044"
+      "tag": "cli--v0.1.2",
+      "url": "https://github.com/thkennedy/tk-studio/releases/download/cli--v0.1.2/tk_studio_cli-0.1.2-py3-none-any.whl",
+      "sha256": "a4e1aa264b5e0e33f8ee8e244ffef4ae2c3e664e42d52b40c20fd7b7f9e4adeb"
     }
   }
 }
