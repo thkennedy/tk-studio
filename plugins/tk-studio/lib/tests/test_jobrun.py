@@ -18,7 +18,9 @@ import math
 import os
 import tempfile
 import unittest
+from datetime import timedelta, timezone
 from pathlib import Path
+from unittest import mock
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -474,6 +476,304 @@ class JobRunTestCase(unittest.TestCase):
                               "--job-id", "ghost-job")
         self.assertEqual(code, 2)
         self.assertFalse(out["ok"])
+
+
+class StarterLockTests(JobRunTestCase):
+    """Story 28.6: submit/wake honour the supervisor queue's starter lock
+    (AC1-AC3) — live by pid or by `since`, stale, forced, malformed,
+    foreign, another checkout, the win32 case-fold and pid probe."""
+
+    DEAD_PID = 2 ** 30  # above any pid_max: never a running process
+
+    def setUp(self):
+        super().setUp()
+        self._old_ignore = os.environ.pop(jobrun.IGNORE_STARTER_LOCK_ENV, None)
+
+    def tearDown(self):
+        os.environ.pop(jobrun.IGNORE_STARTER_LOCK_ENV, None)
+        if self._old_ignore is not None:
+            os.environ[jobrun.IGNORE_STARTER_LOCK_ENV] = self._old_ignore
+        super().tearDown()
+
+    # ------------------------------------------------------------- helpers
+
+    def _since(self, seconds_ago: float) -> str:
+        return (jobrun._now() - timedelta(seconds=seconds_ago)).isoformat()
+
+    def _lock(self, *, pid=None, since=None, starter=jobrun.QUEUE_STARTER,
+              checkout=None, raw: str | None = None, drop: str | None = None):
+        if not (self.root / ".tk-studio" / "config.yaml").is_file():
+            configlib.standup_project_config(self.root)
+        path = jobrun.starter_lock_path(self.root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if raw is not None:
+            path.write_text(raw, encoding="utf-8")
+            return path
+        lock = {"starter": starter,
+                "checkout": str(self.root) if checkout is None else checkout,
+                "since": self._since(3600) if since is None else since,
+                "supervisor_pid": os.getpid() if pid is None else pid}
+        if drop:
+            lock.pop(drop)
+        path.write_text(json.dumps(lock), encoding="utf-8")
+        return path
+
+    def _declare_both(self):
+        self._declare("checkup", self._core_defn(
+            "checkup", stop={"max_runs": 100}))
+        self._declare("pulse", self._skill_defn(
+            "pulse", trigger="loop", cadence={"mode": "self-paced"},
+            stop={"max_runs": 100}))
+
+    def _assert_nothing_minted(self):
+        key = joblib.project_key(self.root)
+        self.assertEqual(joblib.list_runs(key), [])
+        self.assertFalse([e for e in self._ledger_events()
+                          if e.get("event") == "job-run"])
+
+    def _assert_refused(self):
+        sub = jobrun.submit(self.root, "checkup")
+        self.assertEqual(
+            {k: sub[k] for k in ("job_id", "run_id", "accepted")},
+            {"job_id": "checkup", "run_id": None, "accepted": False})
+        self.assertTrue(sub["reason"].startswith("StarterLocked: "))
+        self.assertNotIn("directive", sub)
+        woke = jobrun.wake(self.root, "pulse")
+        self.assertEqual({k: woke[k] for k in ("woken", "run_id")},
+                         {"woken": False, "run_id": None})
+        self.assertTrue(woke["reason"].startswith("StarterLocked: "))
+        self.assertNotIn("directive", woke)
+        self._assert_nothing_minted()
+        return sub, woke
+
+    # ---------------------------------------------------------- AC1 / AC3
+
+    def test_live_by_pid_refuses_both_verbs_with_the_verbatim_reason(self):
+        self._declare_both()
+        since = self._since(3600)
+        self._lock(pid=os.getpid(), since=since)
+        sub, woke = self._assert_refused()
+        expected = (
+            "StarterLocked: tk-studio-supervisor's queue is the only starter "
+            f"on this checkout (since {since}, supervisor pid {os.getpid()}) "
+            "— submit the job to the supervisor (POST /jobs or bun "
+            "src/cli.ts submit)")
+        self.assertEqual(sub["reason"], expected)
+        self.assertEqual(woke["reason"], expected)
+
+    def test_live_by_since_refuses(self):
+        self._declare_both()
+        self._lock(pid=self.DEAD_PID, since=self._since(60))
+        self._assert_refused()
+
+    def test_stale_lock_mints_and_says_stale(self):
+        self._declare_both()
+        self._lock(pid=self.DEAD_PID, since=self._since(901))
+        sub = jobrun.submit(self.root, "checkup")
+        self.assertTrue(sub["accepted"])
+        self.assertIsNotNone(sub["run_id"])
+        self.assertEqual(sub["starter_lock"], "stale")
+        woke = jobrun.wake(self.root, "pulse")
+        self.assertTrue(woke["woken"])
+        self.assertEqual(woke["starter_lock"], "stale")
+        # forced or not, a stale lock answers stale
+        self.assertEqual(jobrun.wake(self.root, "pulse", force=True)
+                         ["starter_lock"], "stale")
+
+    # ------------------------------------- the supervisor's exact format
+
+    def _supervisor_since(self, seconds_ago: float) -> str:
+        """JavaScript `Date.toISOString()`: millisecond precision, `Z`."""
+        at = jobrun._now().astimezone(timezone.utc) - timedelta(
+            seconds=seconds_ago)
+        return at.strftime("%Y-%m-%dT%H:%M:%S.") + "123Z"
+
+    def _supervisor_checkout(self) -> str:
+        """The supervisor's `checkoutKey`: realpath, folded on win32/darwin."""
+        key = os.path.realpath(str(self.root))
+        return key.lower() if sys.platform in ("win32", "darwin") else key
+
+    def test_supervisor_format_live_lock_refuses(self):
+        self._declare_both()
+        since = self._supervisor_since(60)
+        self.assertRegex(since, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$")
+        self._lock(pid=self.DEAD_PID, since=since,
+                   starter="tk-studio-supervisor queue",
+                   checkout=self._supervisor_checkout())
+        sub, woke = self._assert_refused()
+        self.assertIn(f"(since {since}, supervisor pid {self.DEAD_PID})",
+                      sub["reason"])
+        self.assertIn(f"(since {since}, supervisor pid {self.DEAD_PID})",
+                      woke["reason"])
+
+    def test_supervisor_format_stale_lock_mints_and_says_stale(self):
+        self._declare_both()
+        self._lock(pid=self.DEAD_PID, since=self._supervisor_since(901),
+                   starter="tk-studio-supervisor queue",
+                   checkout=self._supervisor_checkout())
+        sub = jobrun.submit(self.root, "checkup")
+        self.assertTrue(sub["accepted"])
+        self.assertIsNotNone(sub["run_id"])
+        self.assertEqual(sub["starter_lock"], "stale")
+        woke = jobrun.wake(self.root, "pulse")
+        self.assertTrue(woke["woken"])
+        self.assertEqual(woke["starter_lock"], "stale")
+
+    def test_no_lock_file_is_unchanged(self):
+        self._declare_both()
+        sub = jobrun.submit(self.root, "checkup")
+        self.assertTrue(sub["accepted"])
+        self.assertNotIn("starter_lock", sub)
+        self.assertNotIn("starter_lock", jobrun.wake(self.root, "pulse"))
+
+    def test_malformed_locks_are_no_lock(self):
+        self._declare_both()
+        cases = [{"raw": "{not json"}, {"raw": "[]"}, {"drop": "starter"},
+                 {"drop": "checkout"}, {"drop": "supervisor_pid"},
+                 {"since": "yesterday-ish"}, {"pid": "123"}, {"pid": 0},
+                 {"pid": -4}, {"pid": True}]
+        for case in cases:
+            with self.subTest(case=case):
+                self._lock(**case)
+                self.assertEqual(jobrun.starter_lock_state(self.root),
+                                 (None, None))
+                sub = jobrun.submit(self.root, "checkup")
+                self.assertTrue(sub["accepted"], sub)
+                self.assertNotIn("starter_lock", sub)
+                woke = jobrun.wake(self.root, "pulse")
+                self.assertTrue(woke["woken"], woke)
+                self.assertNotIn("starter_lock", woke)
+
+    def test_foreign_starter_or_other_checkout_is_no_lock(self):
+        self._declare_both()
+        other = Path(self._tmp.name) / "other"
+        other.mkdir()
+        for case in ({"starter": "someone else"}, {"checkout": str(other)}):
+            with self.subTest(case=case):
+                self._lock(**case)
+                sub = jobrun.submit(self.root, "checkup")
+                self.assertTrue(sub["accepted"], sub)
+                self.assertNotIn("starter_lock", sub)
+                self.assertTrue(jobrun.wake(self.root, "pulse")["woken"])
+
+    def test_win32_case_folded_checkout_matches_linux_does_not(self):
+        self._lock(pid=self.DEAD_PID, since=self._since(60),
+                   checkout=str(self.root).upper())
+        self.assertEqual(
+            jobrun.starter_lock_state(self.root, platform="win32")[0], "live")
+        self.assertEqual(
+            jobrun.starter_lock_state(self.root, platform="linux"),
+            (None, None))
+        self._declare_both()
+        with mock.patch.object(jobrun.sys, "platform", "win32"):
+            self._assert_refused()
+
+    def test_win32_probe_never_reaches_os_kill(self):
+        with mock.patch.object(jobrun.os, "kill",
+                               side_effect=AssertionError("os.kill on win32")):
+            if sys.platform != "win32":
+                self.assertFalse(jobrun._pid_alive(os.getpid(), "win32"))
+            self._lock(pid=os.getpid(), since=self._since(3600))
+            # never raises, never reaches os.kill
+            jobrun.starter_lock_state(self.root, platform="win32")
+
+    @unittest.skipUnless(sys.platform == "win32", "win32 pid probe")
+    def test_win32_probing_a_live_pid_terminates_nothing(self):
+        import subprocess
+        child = subprocess.Popen([sys.executable, "-c",
+                                  "import time; time.sleep(60)"])
+        try:
+            self.assertTrue(jobrun._pid_alive(child.pid))
+            self.assertTrue(jobrun._pid_alive(child.pid))
+            self.assertIsNone(child.poll())
+        finally:
+            child.terminate()
+            child.wait(timeout=30)
+
+    def test_posix_probe_treats_permission_error_as_alive(self):
+        with mock.patch.object(jobrun.os, "kill",
+                               side_effect=PermissionError()):
+            self.assertTrue(jobrun._pid_alive(1, "linux"))
+        with mock.patch.object(jobrun.os, "kill",
+                               side_effect=ProcessLookupError()):
+            self.assertFalse(jobrun._pid_alive(1, "linux"))
+
+    # ---------------------------------------------------------------- AC2
+
+    def test_forced_by_argument_mints_and_says_forced(self):
+        self._declare_both()
+        self._lock()
+        sub = jobrun.submit(self.root, "checkup", force=True)
+        self.assertTrue(sub["accepted"])
+        self.assertEqual(sub["starter_lock"], "forced")
+        woke = jobrun.wake(self.root, "pulse", force=True)
+        self.assertTrue(woke["woken"])
+        self.assertEqual(woke["starter_lock"], "forced")
+
+    def test_cli_flag_forces_both_verbs(self):
+        self._declare_both()
+        self._lock()
+        code, out = self._cli("submit", "--directory", str(self.root),
+                              "--id", "checkup")
+        self.assertEqual(code, 0)
+        self.assertFalse(out["accepted"])
+        self.assertTrue(out["reason"].startswith("StarterLocked: "))
+        code, out = self._cli("submit", "--directory", str(self.root),
+                              "--id", "checkup", "--force-starter")
+        self.assertEqual(code, 0)
+        self.assertTrue(out["accepted"])
+        self.assertEqual(out["starter_lock"], "forced")
+        code, out = self._cli("wake", "--directory", str(self.root),
+                              "--job-id", "pulse")
+        self.assertEqual(code, 0)
+        self.assertFalse(out["woken"])
+        code, out = self._cli("wake", "--directory", str(self.root),
+                              "--job-id", "pulse", "--force-starter")
+        self.assertEqual(code, 0)
+        self.assertTrue(out["woken"])
+        self.assertEqual(out["starter_lock"], "forced")
+
+    def test_env_forces_only_when_exactly_1(self):
+        self._declare_both()
+        self._lock()
+        for value in ("0", "true", "yes", " 1"):
+            with self.subTest(value=value):
+                os.environ[jobrun.IGNORE_STARTER_LOCK_ENV] = value
+                self._assert_refused()
+        os.environ[jobrun.IGNORE_STARTER_LOCK_ENV] = "1"
+        code, out = self._cli("submit", "--directory", str(self.root),
+                              "--id", "checkup")
+        self.assertTrue(out["accepted"])
+        self.assertEqual(out["starter_lock"], "forced")
+        code, out = self._cli("wake", "--directory", str(self.root),
+                              "--job-id", "pulse")
+        self.assertTrue(out["woken"])
+        self.assertEqual(out["starter_lock"], "forced")
+
+    # ------------------------------------------- other refusals come first
+
+    def test_other_refusals_answer_as_today_under_a_live_lock(self):
+        self._declare("checkup", self._core_defn("checkup"))
+        self._declare("done", self._core_defn("done", stop={"max_runs": 1}))
+        self._declare("loopdone", self._skill_defn(
+            "loopdone", trigger="loop", cadence={"mode": "self-paced"},
+            stop={"max_runs": 1}))
+        # spend each stop condition before the lock exists
+        self.assertTrue(jobrun.submit(self.root, "done")["accepted"])
+        self.assertTrue(jobrun.wake(self.root, "loopdone")["woken"])
+        self._lock()
+        # definition problems
+        sub = jobrun.submit(self.root, "ghost-job")
+        self.assertFalse(sub["accepted"])
+        self.assertIn("no definition", sub["reason"])
+        # one-shot wake
+        woke = jobrun.wake(self.root, "checkup")
+        self.assertIn("wake applies to recurring jobs", woke["reason"])
+        # stop condition
+        self.assertIn("stop: max_runs",
+                      jobrun.submit(self.root, "done")["reason"])
+        self.assertIn("stop: max_runs",
+                      jobrun.wake(self.root, "loopdone")["reason"])
 
 
 if __name__ == "__main__":
