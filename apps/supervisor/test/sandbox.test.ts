@@ -5,10 +5,10 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { cancelRun, detectExternal, driveResumes, ExternalRunRefused, finishRun, mirror, queueRecorder, recoverQueue, type ResumedRun, type Started } from "../src/cli";
+import { cancelRun, detectExternal, driveResumes, ExternalRunRefused, finishRun, mirror, queueRecorder, recoverQueue, watchStarterLocks, type ResumedRun, type Started } from "../src/cli";
 import { checkoutKey, Queue, workerMayRun, type Owner, type Probes, type QueueRun, type StudioOps } from "../src/queue";
 import {
-  holdArgv, holdEngine, killEngine, killRunEngine, lookupEnginePid, pinSandbox, probeEngine, releasePin, respawnHolds, STARTER, starterLockPath,
+  holdArgv, holdEngine, killEngine, killRunEngine, lookupEnginePid, pinSandbox, probeEngine, releasePin, respawnHolds, STARTER, STARTER_LOCK_REFRESH_MS, starterLockPath,
   writeStarterLock, writeStarterLocks, type HoldChild, type SandboxDeps,
 } from "../src/sandbox";
 import { invokeSkill, MISSING_STATUS_BLOCK, runProcess, toVmPath, type RunResult, type Spawner } from "../src/server";
@@ -856,6 +856,72 @@ describe("Lock file: `<studioHome>/projects/<key>/starter.lock` names the queue 
     const out = writeStarterLock({ project_id: "p", root }, { TK_STUDIO_HOME: join(root, ".store") });
     expect(out).toMatchObject({ error: expect.stringContaining("checkout's tree") });
     expect(existsSync(join(root, ".store"))).toBe(false);
+  });
+});
+
+describe("Story 28.6 (DW-6): serve refreshes every served project's starter lock every minute, `since` fresh", () => {
+  test("written at once and on each injected tick with `since` = now and `supervisor_pid` = this process; stop clears it", () => {
+    const home = mkdtempSync(join(tmpdir(), "tk-sup-sbx-refresh-"));
+    const q = newQueue();
+    const rootA = mkdtempSync(join(tmpdir(), "tk-sup-sbx-refresh-a-"));
+    const rootB = mkdtempSync(join(tmpdir(), "tk-sup-sbx-refresh-b-"));
+    q.enqueue({ jobId: "studio-health", root: rootA, projectId: "proj-a", definition: { id: "studio-health" } });
+    q.enqueue({ jobId: "studio-health", root: rootB, projectId: "proj-b", definition: { id: "studio-health" } });
+    let closed = 0;
+    const close = q.close.bind(q);
+    q.close = () => { closed++; close(); };
+    const env = { TK_STUDIO_HOME: home };
+    const t0 = Date.parse("2026-10-17T10:00:00.000Z");
+    let clock = t0;
+    const timers: { fn: () => void; ms: number }[] = [];
+    const cleared: unknown[] = [];
+    const lockOf = (projectId: string, root: string) => JSON.parse(readFileSync(starterLockPath({ project_id: projectId, root }, env), "utf-8"));
+    const stop = watchStarterLocks({
+      env, open: () => q, now: () => clock,
+      setInterval: (fn, ms) => { timers.push({ fn, ms }); return "the-lock-timer"; }, clearInterval: (t) => cleared.push(t),
+    });
+    expect(stop).toBeFunction();
+    expect(timers).toHaveLength(1);
+    expect(timers[0]!.ms).toBe(STARTER_LOCK_REFRESH_MS);
+    expect(STARTER_LOCK_REFRESH_MS).toBe(60_000);
+    // written at once
+    expect(lockOf("proj-a", rootA)).toEqual({ starter: STARTER, checkout: checkoutKey(rootA), since: new Date(t0).toISOString(), supervisor_pid: process.pid });
+    expect(lockOf("proj-b", rootB)).toEqual({ starter: STARTER, checkout: checkoutKey(rootB), since: new Date(t0).toISOString(), supervisor_pid: process.pid });
+    // each tick stamps `since` fresh (the 27.2 writes keep theirs: same pid, same checkout)
+    clock = t0 + 60_000;
+    timers[0]!.fn();
+    expect(lockOf("proj-a", rootA).since).toBe(new Date(t0 + 60_000).toISOString());
+    clock = t0 + 3 * 3_600_000;
+    timers[0]!.fn();
+    expect(lockOf("proj-b", rootB)).toMatchObject({ since: new Date(t0 + 3 * 3_600_000).toISOString(), supervisor_pid: process.pid });
+    // the since-preserving default is unchanged
+    writeStarterLock({ project_id: "proj-a", root: rootA }, env, () => new Date(clock + 60_000));
+    expect(lockOf("proj-a", rootA).since).toBe(new Date(t0 + 3 * 3_600_000).toISOString());
+    stop!();
+    expect(cleared).toEqual(["the-lock-timer"]);
+    expect(closed).toBe(1);
+    clock = t0 + 4 * 3_600_000;
+    timers[0]!.fn(); // a tick already queued after the stop writes nothing
+    expect(lockOf("proj-a", rootA).since).toBe(new Date(t0 + 3 * 3_600_000).toISOString());
+    stop!();
+    expect(cleared).toHaveLength(1);
+  });
+
+  test("a queue that cannot be opened → one line on stderr, nothing watched; a failing write never throws", () => {
+    const lines: string[] = [];
+    const timers: unknown[] = [];
+    expect(watchStarterLocks({
+      env: {}, open: () => { throw new Error("QueueDbMissing: TK_SUPERVISOR_DB is not set"); }, log: (l) => lines.push(l),
+      setInterval: (fn) => { timers.push(fn); return 1; },
+    })).toBeUndefined();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toStartWith("[supervisor] starter-lock refresh disabled: the queue could not be opened (QueueDbMissing");
+    expect(timers).toEqual([]);
+    const q = newQueue();
+    q.jobs = () => { throw new Error("busy"); };
+    const stop = watchStarterLocks({ env: {}, open: () => q, setInterval: () => 1, clearInterval: () => {} });
+    expect(stop).toBeFunction();
+    stop!();
   });
 });
 

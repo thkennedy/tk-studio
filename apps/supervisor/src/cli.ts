@@ -87,6 +87,9 @@
  * it by that pid; its deferred end releases the pin (`sbx stop`) when no other run records the sandbox.
  * `recover` (each tick) writes the served projects' `starter.lock` (the queue is the only starter; a claim
  * rewrites its own) and records a studio run started outside the queue as an `external` queue run.
+ * Story 28.6: `serve` rewrites them every STARTER_LOCK_REFRESH_MS with a fresh `since` (`watchStarterLocks`),
+ * so `jobrun.py` judges the lock live while the supervisor is up and refuses a hand start (`StarterLocked`);
+ * the verbs `startRun` runs for a claimed run carry `--force-starter`.
  *
  * A paused run (Story 27.3, src/closeout.ts): after each sweep the paused-run pass closes out a run whose
  * story landed with a closable verdict (harvest commit, `meter.py harvest`, `bmad-loop archive`, then the
@@ -123,7 +126,9 @@ import {
 import { closeOutPaused, launchedSinceMove, resumePaused, type PausedDeps, type ResumeAnswer, type ResumeDeps as EngineResumeDeps } from "./closeout";
 import { mergePass, reviewPass, type PlanStatusDeps } from "./planstatus";
 import { CERT_CHECK_MS, CERT_RENEW_EXIT, certCheck, recordCertStart } from "./cert";
-import { holdEngine, killRunEngine, pinSandbox, releasePin, respawnHolds, studioRunDir, writeStarterLock, writeStarterLocks, type SandboxDeps } from "./sandbox";
+import {
+  holdEngine, killRunEngine, pinSandbox, releasePin, respawnHolds, STARTER_LOCK_REFRESH_MS, studioRunDir, writeStarterLock, writeStarterLocks, type SandboxDeps,
+} from "./sandbox";
 import { jobOptions, loadSupervisorConfig, type JobOptions } from "./config";
 import {
   ensureTranscript, resultCounts, sbxSessionWorkers, sbxTranscriptExists, transcriptCounts, TranscriptError, transcriptNewCounts,
@@ -1484,9 +1489,10 @@ export async function startRun(
   const timeoutS = jobGuardS + 120;
   let out: Record<string, any>;
   try {
+    // Story 28.6: the queue is the checkout's only starter — its own verb is never refused by its own lock.
     out = await verbRunner(root, oneShot
-      ? ["submit", "--directory", root, "--id", jobId]
-      : ["wake", "--directory", root, "--job-id", jobId], timeoutS);
+      ? ["submit", "--directory", root, "--id", jobId, "--force-starter"]
+      : ["wake", "--directory", root, "--job-id", jobId, "--force-starter"], timeoutS);
   } catch (e) {
     // jobrun creates the run before executing it: ANY failure here (timeout,
     // crash, non-JSON output) may have left one behind — recover, never assume.
@@ -2186,6 +2192,42 @@ export function watchCertificate(exit: (code: number) => void, deps: CertWatchDe
   return stop;
 }
 
+/** The seams of `serve`'s starter-lock refresh (tests inject them). */
+export interface StarterLockWatchDeps {
+  env?: Record<string, string | undefined>;
+  open?: () => Queue;
+  now?: () => number;
+  setInterval?: (fn: () => void, ms: number) => unknown;
+  clearInterval?: (timer: unknown) => void;
+  /** One line to stderr (default `console.error`). */
+  log?: (line: string) => void;
+}
+
+/** Story 28.6 (DW-6): `serve` rewrites every served project's `starter.lock` at once and every
+ * STARTER_LOCK_REFRESH_MS, stamping `since` fresh, so `jobrun.py` judges it live (pid alive, `since` at most a
+ * minute old) while the supervisor is up and stale within STARTER_LOCK_STALE_S of it going down. The tick's and
+ * the claim's writes (Story 27.2) are unchanged. A queue that cannot be opened disables the refresh with one line
+ * on stderr. Never throws. Answers a stop for the watcher (undefined when nothing is watched). */
+export function watchStarterLocks(deps: StarterLockWatchDeps = {}): (() => void) | undefined {
+  const log = deps.log ?? ((line: string) => console.error(line));
+  const env = deps.env ?? process.env;
+  let queue: Queue;
+  try { queue = (deps.open ?? (() => Queue.open(deps.env)))(); }
+  catch (e) { log(`[supervisor] starter-lock refresh disabled: the queue could not be opened (${message(e)})`); return undefined; }
+  const set = deps.setInterval ?? ((fn: () => void, ms: number) => setInterval(fn, ms));
+  const clear = deps.clearInterval ?? ((t: unknown) => clearInterval(t as ReturnType<typeof setInterval>));
+  const now = () => new Date((deps.now ?? Date.now)());
+  let timer: unknown, done = false;
+  const stop = () => { if (done) return; done = true; if (timer !== undefined) clear(timer); try { queue.close(); } catch { /* closed */ } };
+  const tick = () => {
+    if (done) return;
+    try { writeStarterLocks(queue, env, now, { fresh: true }); } catch { /* never throws: the next tick */ }
+  };
+  try { timer = set(tick, STARTER_LOCK_REFRESH_MS); } catch (e) { log(`[supervisor] starter-lock refresh timer failed (${message(e)})`); }
+  tick();
+  return stop;
+}
+
 const USAGE = [
   "usage: bun src/cli.ts run <job-id> --directory <root> [--permission-mode <mode>] [--tier host|sbx] [--sandbox <name>]",
   "                          [--model <model>] [--effort <effort>]",
@@ -2209,7 +2251,8 @@ export async function main(argv: string[]): Promise<number> {
     console.log(JSON.stringify({ ok: true, listening: url }, null, 2));
     // Story 27.5 (DW-21): the certificate is checked at start and on each tick; within 14 days of expiry and
     // outside a live run, `serve` records the request and exits CERT_RENEW_EXIT for the keeper to renew and restart it.
-    return new Promise<number>((done) => { watchCertificate(done); });
+    // Story 28.6: every served project's starter lock is refreshed at once and every minute (fresh `since`).
+    return new Promise<number>((done) => { watchStarterLocks(); watchCertificate(done); });
   }
   if (cmd === "recover" || cmd === "drain") {
     if (args.length) { console.error(`unknown argument '${args[0]}'\n${USAGE}`); return 2; }

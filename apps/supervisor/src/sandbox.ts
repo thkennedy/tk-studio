@@ -25,7 +25,11 @@
  *             records the same sandbox (else `pin-kept`).
  *   starter   `<studioHome>/projects/<project key>/starter.lock`: JSON naming the queue as the only
  *             starter of runs on the checkout, written atomically per tick and per claim; never in the
- *             checkout's tree.
+ *             checkout's tree. Story 28.6: `serve` also rewrites every served project's lock each
+ *             STARTER_LOCK_REFRESH_MS with a fresh `since` (`watchStarterLocks`) — a heartbeat, so the
+ *             lock goes stale within STARTER_LOCK_STALE_S of the supervisor going down; the per-tick and
+ *             per-claim writes keep the previous `since`. That liveness is what `jobrun.py submit`/`wake`
+ *             judge before they refuse a hand start (`StarterLocked`).
  *
  * Every `sbx` call is argv only — never `bash`, `sh` or a `-c` string, never a pattern kill.
  */
@@ -407,6 +411,9 @@ export function projectKeyOf(p: { project_id: string | null; root: string }): st
 
 export const STARTER = "tk-studio-supervisor queue";
 
+/** Story 28.6: how often `serve` rewrites the served projects' starter locks (fresh `since`). */
+export const STARTER_LOCK_REFRESH_MS = 60_000;
+
 /** `<studioHome>/projects/<project key>/starter.lock`. */
 export const starterLockPath = (p: { project_id: string | null; root: string }, env: Env = process.env): string =>
   join(studioHome(env), "projects", projectKeyOf(p), "starter.lock");
@@ -416,11 +423,14 @@ export const starterLockPath = (p: { project_id: string | null; root: string }, 
 export const studioRunDir = (p: { project_id: string | null; root: string }, studioRunId: string, env: Env = process.env): string =>
   join(studioHome(env), "projects", projectKeyOf(p), "runs", safeName(studioRunId));
 
-/** Write the checkout's starter lock (atomically: a temp file renamed over it). `since` is kept while the
- * same supervisor process rewrites it. Refused (never written) when the path would lie in the checkout's
- * tree. Never throws: answers the path written, or the error. */
+/** Write the checkout's starter lock (atomically: a temp file renamed over it). `since` is a heartbeat, not
+ * a start time: `serve`'s refresh timer (Story 28.6, `fresh`) stamps it `now()` every STARTER_LOCK_REFRESH_MS,
+ * so the lock goes stale within STARTER_LOCK_STALE_S (`jobrun.py`'s 900 s) of the supervisor going down; the
+ * per-tick and per-claim writes keep the previous `since` while the same supervisor process rewrites it. Refused (never written) when the path would lie in the checkout's tree. Never throws:
+ * answers the path written, or the error. */
 export function writeStarterLock(
   p: { project_id: string | null; root: string }, env: Env = process.env, now: () => Date = () => new Date(),
+  opts: { fresh?: boolean } = {},
 ): { path: string } | { error: string } {
   try {
     const path = starterLockPath(p, env);
@@ -428,7 +438,7 @@ export function writeStarterLock(
     if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) return { error: `the starter lock '${path}' would lie in the checkout's tree — not written` };
     const checkout = checkoutKey(p.root);
     let since = now().toISOString();
-    try {
+    if (!opts.fresh) try {
       const prev = existsSync(path) ? JSON.parse(readFileSync(path, "utf-8")) : null;
       if (prev?.starter === STARTER && prev.checkout === checkout && prev.supervisor_pid === process.pid && typeof prev.since === "string") since = prev.since;
     } catch { /* unreadable: rewritten */ }
@@ -441,7 +451,9 @@ export function writeStarterLock(
 }
 
 /** The starter lock of every project the queue serves (a checkout with a submitted job). Never throws. */
-export function writeStarterLocks(queue: Queue, env: Env = process.env): ({ path: string } | { error: string })[] {
+export function writeStarterLocks(
+  queue: Queue, env: Env = process.env, now: () => Date = () => new Date(), opts: { fresh?: boolean } = {},
+): ({ path: string } | { error: string })[] {
   const seen = new Set<string>();
   const out: ({ path: string } | { error: string })[] = [];
   let jobs: ReturnType<Queue["jobs"]>;
@@ -449,7 +461,7 @@ export function writeStarterLocks(queue: Queue, env: Env = process.env): ({ path
   for (const j of jobs) {
     if (seen.has(j.checkout)) continue;
     seen.add(j.checkout);
-    out.push(writeStarterLock({ project_id: j.project_id, root: j.root }, env));
+    out.push(writeStarterLock({ project_id: j.project_id, root: j.root }, env, now, opts));
   }
   return out;
 }
