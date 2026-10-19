@@ -1,0 +1,33 @@
+---
+id: TASK-108
+title: The Renderer Spike
+status: To Do
+assignee: []
+created_date: '2026-10-19 17:32'
+labels:
+  - ST-108
+milestone: "Studio Web v0: Office, Board, Status"
+dependencies: []
+---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+As the studio's developer,
+I want a first `apps/studio-web` that draws a pixel floor and one character on a PixiJS v8 canvas at the right scale on desktop and iPad,
+So that the pixel-scaling recipe is settled by a landed story before the rest of the web is quoted (D5, §10).
+
+**Acceptance Criteria:**
+
+**Given** the one repository
+**When** the story lands
+**Then** `apps/studio-web` exists as a Vite plus React plus TypeScript project (its own `package.json`, `bun install --frozen-lockfile`, `bun run build` to `apps/studio-web/dist`, `bun run test` with vitest), it is a nested studio project like `apps/supervisor` (its own `.tk-studio/config.yaml`, `verify.host` naming its build and tests), the repository's `tools/verify_host.py` runs its build and tests when `apps/studio-web` changed, and nothing in `apps/supervisor` changes yet
+
+**Given** a browser at device pixel ratio 1, 2 or 3 (desktop and iPad Safari)
+**When** the spike's page opens
+**Then** one PixiJS v8 `Application` fills its container with `resolution` from the device pixel ratio, nearest-neighbour scaling (`TextureSource.scaleMode = "nearest"`), an integer zoom chosen from the ratio and the container's size so a 16-pixel tile renders as a whole number of device pixels, a floor of tiles and one character sprite from a committed placeholder sheet (`apps/studio-web/public/sprites/placeholder.png`, our own pixels, D6) stand on the canvas with crisp edges, and a React DOM HUD over the canvas shows the zoom, the ratio and the frame rate; the recipe is one exported function (`pickZoom(ratio, width, height, tile)`) with unit tests for the three ratios and three container sizes
+
+**Given** the spike landed
+**When** the story closes
+**Then** `kb/studio-web-renderer-spike.md` records the recipe, what each ratio showed on the desktop monitor and the iPad (the operator's attended check, named as such when not yet done), the frame cost of the canvas idle, and the quote for the rest of the epic by analogy with EP-29's per-story price; the design spec's README §6.3 gains one line pointing at the record
+<!-- SECTION:DESCRIPTION:END -->

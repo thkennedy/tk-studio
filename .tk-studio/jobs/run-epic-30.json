@@ -1,0 +1,11 @@
+{
+  "job_schema_version": 1,
+  "id": "run-epic-30",
+  "type": "run-epic",
+  "description": "tk-studio Epic 30 (Studio Web v0: Office, Board, Status) through the supervisor queue (declared 2026-10-19 with the epic). Extends the shipped run-epic type: one-shot; the first launch bootstraps the spec folder _bmad-output/specs/spec-epic-30 and the manifest from epics.md and commits them on the run branch (Story 26.1). Submit it with POST /jobs {project: tk-studio, job: run-epic-30} (placement tier sbx on claude-tk-studio in TK_SUPERVISOR_CONFIG); the worktree is cut from main, tools/verify_host.py is the host verify leg, the close-out opens the PR. Story 30.1 (the renderer spike) first and alone: a graceful stop after it, then the epic is quoted from its price (design spec section 10).",
+  "target": {
+    "payload": {
+      "epic": 30
+    }
+  }
+}
