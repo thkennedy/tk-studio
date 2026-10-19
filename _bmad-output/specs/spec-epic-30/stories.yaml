@@ -1,0 +1,188 @@
+# stories.yaml: Epic 30 of this project, transcribed 1:1 from _bmad-output/planning-artifacts/epics.md
+# by .bmad-loop/plugins/studio-pipeline/transcribe.py on 2026-10-19. The epics document is
+# the plan; the studio gate may append remediation entries (`<key>-r<n>`) and revise
+# UNSTARTED entries' invoke_dev_with, nothing else.
+
+- id: "30-1-the-renderer-spike"
+  title: "The Renderer Spike"
+  description: >-
+    I want a first `apps/studio-web` that draws a pixel floor and one character on a
+    PixiJS v8 canvas at the right scale on desktop and iPad, So that the pixel-scaling
+    recipe is settled by a landed story before the rest of the web is quoted (D5, §10).
+    Canonical: ST-108.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 30.1: The
+    Renderer Spike", the authoritative specification (user story and acceptance
+    criteria). Read the epic's own narrative (the paragraphs under "## Epic 30:") for
+    scope, rulings and the repo the story targets; transcribe the story into the spec's
+    intent contract and never re-derive, generalise or extend it. Plan: plans/30-1.md
+    when present (its Code Map is the investigation). Project rules and the verify gate:
+    the studio customization (_bmad/custom/bmad-build-auto.toml). Routing:
+    .bmad-loop/routing.current.json; pass the model, effort and advisor of implementer
+    and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/30-1-the-renderer-spike-spec.md` in the spec folder; the
+    engine resolves it by the glob `30-1-the-renderer-spike-*.md`, and a file named
+    `30-1-the-renderer-spike.md` is read as pending (loop deficiency 1, story 21-6).
+
+- id: "30-2-the-supervisor-serves-the-web"
+  title: "The Supervisor Serves the Web"
+  description: >-
+    I want the supervisor to serve the built web on its own origin behind the session
+    cookie, So that the web needs no second server and no second sign-in (§6.3, D7).
+    Canonical: ST-109.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 30.2: The
+    Supervisor Serves the Web", the authoritative specification (user story and
+    acceptance criteria). Read the epic's own narrative (the paragraphs under "## Epic
+    30:") for scope, rulings and the repo the story targets; transcribe the story into
+    the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/30-2.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/30-2-the-supervisor-serves-the-web-spec.md` in the spec
+    folder; the engine resolves it by the glob
+    `30-2-the-supervisor-serves-the-web-*.md`, and a file named
+    `30-2-the-supervisor-serves-the-web.md` is read as pending (loop deficiency 1, story
+    21-6).
+
+- id: "30-3-the-live-stream-in-the-browser"
+  title: "The Live Stream in the Browser"
+  description: >-
+    I want the web to hold one event stream per tab that survives sleeps and
+    backgrounding, So that what the office shows is what the supervisor knows, on
+    desktop and on the iPad (§6.3). Canonical: ST-110.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 30.3: The
+    Live Stream in the Browser", the authoritative specification (user story and
+    acceptance criteria). Read the epic's own narrative (the paragraphs under "## Epic
+    30:") for scope, rulings and the repo the story targets; transcribe the story into
+    the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/30-3.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/30-3-the-live-stream-in-the-browser-spec.md` in the spec
+    folder; the engine resolves it by the glob
+    `30-3-the-live-stream-in-the-browser-*.md`, and a file named
+    `30-3-the-live-stream-in-the-browser.md` is read as pending (loop deficiency 1,
+    story 21-6).
+
+- id: "30-4-the-office-screen"
+  title: "The Office Screen"
+  description: >-
+    I want the office floor to show each project's agents as characters whose pose
+    follows their semantic state, with a HUD for the run and the story in flight, So
+    that a glance at the screen says what the studio is doing (§6.3, §7.3). Canonical:
+    ST-111.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 30.4: The
+    Office Screen", the authoritative specification (user story and acceptance
+    criteria). Read the epic's own narrative (the paragraphs under "## Epic 30:") for
+    scope, rulings and the repo the story targets; transcribe the story into the spec's
+    intent contract and never re-derive, generalise or extend it. Plan: plans/30-4.md
+    when present (its Code Map is the investigation). Project rules and the verify gate:
+    the studio customization (_bmad/custom/bmad-build-auto.toml). Routing:
+    .bmad-loop/routing.current.json; pass the model, effort and advisor of implementer
+    and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/30-4-the-office-screen-spec.md` in the spec folder; the
+    engine resolves it by the glob `30-4-the-office-screen-*.md`, and a file named
+    `30-4-the-office-screen.md` is read as pending (loop deficiency 1, story 21-6).
+
+- id: "30-5-the-board-screen"
+  title: "The Board Screen"
+  description: >-
+    I want a board of epics as projects with their stories as phases, the findings
+    draining and the spend against the band, with a Needs-you / Working / Done column,
+    So that the plan, the runs and the money are read on one screen (§6.3) Canonical:
+    ST-112.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 30.5: The
+    Board Screen", the authoritative specification (user story and acceptance criteria).
+    Read the epic's own narrative (the paragraphs under "## Epic 30:") for scope,
+    rulings and the repo the story targets; transcribe the story into the spec's intent
+    contract and never re-derive, generalise or extend it. Plan: plans/30-5.md when
+    present (its Code Map is the investigation). Project rules and the verify gate: the
+    studio customization (_bmad/custom/bmad-build-auto.toml). Routing:
+    .bmad-loop/routing.current.json; pass the model, effort and advisor of implementer
+    and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/30-5-the-board-screen-spec.md` in the spec folder; the
+    engine resolves it by the glob `30-5-the-board-screen-*.md`, and a file named
+    `30-5-the-board-screen.md` is read as pending (loop deficiency 1, story 21-6).
+
+- id: "30-6-the-status-screen-and-the-home"
+  title: "The Status Screen and the Home"
+  description: >-
+    I want the web to be what I land on, with a Status screen that shows what the
+    read-only page shows, So that one home serves every device and the old page stays as
+    the fallback without JavaScript (§6.3) Canonical: ST-113.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 30.6: The
+    Status Screen and the Home", the authoritative specification (user story and
+    acceptance criteria). Read the epic's own narrative (the paragraphs under "## Epic
+    30:") for scope, rulings and the repo the story targets; transcribe the story into
+    the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/30-6.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/30-6-the-status-screen-and-the-home-spec.md` in the spec
+    folder; the engine resolves it by the glob
+    `30-6-the-status-screen-and-the-home-*.md`, and a file named
+    `30-6-the-status-screen-and-the-home.md` is read as pending (loop deficiency 1,
+    story 21-6).
+
+- id: "30-7-our-own-assets"
+  title: "Our Own Assets"
+  description: >-
+    I want the floor, the desks and the characters drawn as our own sprite sheet with a
+    documented pipeline, So that the office looks like ours and the repository owns
+    every pixel it ships (D6). Canonical: ST-114.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 30.7: Our
+    Own Assets", the authoritative specification (user story and acceptance criteria).
+    Read the epic's own narrative (the paragraphs under "## Epic 30:") for scope,
+    rulings and the repo the story targets; transcribe the story into the spec's intent
+    contract and never re-derive, generalise or extend it. Plan: plans/30-7.md when
+    present (its Code Map is the investigation). Project rules and the verify gate: the
+    studio customization (_bmad/custom/bmad-build-auto.toml). Routing:
+    .bmad-loop/routing.current.json; pass the model, effort and advisor of implementer
+    and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/30-7-our-own-assets-spec.md` in the spec folder; the
+    engine resolves it by the glob `30-7-our-own-assets-*.md`, and a file named
+    `30-7-our-own-assets.md` is read as pending (loop deficiency 1, story 21-6).
