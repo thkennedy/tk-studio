@@ -1,8 +1,15 @@
 // The spike's page (Story 30.1): a container filling the viewport, the PixiJS canvas inside it,
 // and a React DOM HUD over the canvas showing the zoom, the device pixel ratio and the frame rate.
-import { useEffect, useRef, useState } from "react";
+// Story 30.3: the tab's one office stream folds into one store; the HUD shows the stream's status.
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { Application } from "pixi.js";
 import { createApp, layoutScene, loadSheet, type Scene, type Sheet } from "./renderer/scene";
+import { createOfficeStore, LIVE_RUN_STATES } from "./live/store";
+import { openOfficeStream } from "./live/stream";
+
+/** The tab's one store (module-level: it outlives StrictMode's remount, so the view is never cleared). */
+const officeStore = createOfficeStore();
+const STREAM_LABEL = { live: "stream live", connecting: "connecting", reconnecting: "reconnecting" } as const;
 
 interface Hud {
   zoom: number;
@@ -16,6 +23,13 @@ export function App() {
   const containerRef = useRef<HTMLDivElement>(null);
   const [hud, setHud] = useState<Hud>({ zoom: 0, ratio: currentRatio(), fps: 0 });
   const [error, setError] = useState<string | null>(null);
+  const live = useSyncExternalStore(officeStore.subscribe, officeStore.getState);
+
+  // One EventSource per mount, closed in the cleanup: StrictMode's double mount leaves one open.
+  useEffect(() => {
+    const stream = openOfficeStream(officeStore);
+    return () => stream.close();
+  }, []);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -104,6 +118,9 @@ export function App() {
         <div>zoom {hud.zoom}x</div>
         <div>ratio {hud.ratio}</div>
         <div>fps {hud.fps.toFixed(0)}</div>
+        <div>
+          {STREAM_LABEL[live.status]} · agents {live.view?.agents.length ?? 0} · live runs {live.view?.runs.filter((r) => r.state !== null && LIVE_RUN_STATES.has(r.state)).length ?? 0}
+        </div>
         {error && <div style={{ color: "#ff8080" }}>error {error}</div>}
       </div>
     </div>
