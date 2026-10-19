@@ -22,7 +22,8 @@ because a zip cannot contain its own digest):
 
 Every app (AD-21, Story 25.1): ``--app <plugin|supervisor|studio-web|cli>``
 cuts that app from its subtree at its ``<prefix>--vX.Y.Z`` tag (``cli`` is
-a wheel built by ``uv build``), publishes with ``--latest=false`` (no app
+a wheel built by ``uv build``; ``studio-web`` is its ``dist`` built by
+``bun`` from the tag's ``apps/studio-web``, Story 30.2), publishes with ``--latest=false`` (no app
 owns the repository's "latest"; consumers resolve by tag), verifies the
 round trip, and records ``{tag, url, sha256}`` (plus ``source`` when the
 asset lives on another repository) under the app's component in
@@ -83,7 +84,8 @@ CHANNELS = ("latest", "stable")
 APPS = {
     "plugin": ("tk-studio--v", PLUGIN_SUBDIR, "zip"),
     "supervisor": ("supervisor--v", "apps/supervisor", "zip"),
-    "studio-web": ("studio-web--v", "apps/studio-web/dist", "zip"),
+    # Story 30.2: dist is ignored (never at the tag) — built from the subtree.
+    "studio-web": ("studio-web--v", "apps/studio-web", "web"),
     "cli": ("cli--v", "tools/installer/cli", "wheel"),
 }
 FOREIGN_SUBTREES = {"supervisor": "."}
@@ -196,6 +198,39 @@ def _build_wheel(raw_zip: Path, work: Path, commit_epoch: int,
     if len(wheels) != 1:
         _fail(f"uv build produced {len(wheels)} wheels, expected exactly 1")
     return wheels[0]
+
+
+def _build_web(raw_zip: Path, work: Path, commit_epoch: int,
+               cwd: Path) -> Path:
+    """studio-web (Story 30.2): the subtree at the tag, extracted, then
+    ``bun install --frozen-lockfile`` and ``bun run build`` in it with
+    SOURCE_DATE_EPOCH pinned to the commit — never the working tree (``cwd``,
+    the repository, is not read). The zip's root holds ``dist``'s contents
+    (``index.html`` at the root, what the installer's ``studio-web/<ver>/``
+    slot expects), normalized for stable bytes. ``cwd`` is unused: bun runs
+    in the extracted tag tree."""
+    src = work / "web-src"
+    with zipfile.ZipFile(raw_zip) as z:
+        z.extractall(src)
+    env = dict(os.environ, SOURCE_DATE_EPOCH=str(commit_epoch))
+    for argv in (["bun", "install", "--frozen-lockfile"],
+                 ["bun", "run", "build"]):
+        proc = _run(argv, cwd=src, env=env)
+        if proc.returncode != 0:
+            _fail(f"{' '.join(argv)} failed: {proc.stderr.strip()}")
+    dist = src / "dist"
+    if not (dist / "index.html").is_file():
+        _fail("bun run build produced no dist/index.html")
+    raw = work / "web-raw.zip"
+    with zipfile.ZipFile(raw, "w", zipfile.ZIP_STORED) as z:
+        for f in sorted(dist.rglob("*")):
+            if f.is_file():
+                info = zipfile.ZipInfo(f.relative_to(dist).as_posix())
+                info.external_attr = 0o100644 << 16
+                z.writestr(info, f.read_bytes())
+    out = work / "web.zip"
+    normalize_zip(raw, out, commit_epoch)
+    return out
 
 
 def run(dry_run: bool, app: str = "plugin", version: str | None = None,
@@ -311,6 +346,10 @@ def run(dry_run: bool, app: str = "plugin", version: str | None = None,
                 _fail(f"built wheel {art_path.name} is not version {version} "
                       f"— bump the cli's pyproject.toml at {tag} first")
             asset = art_path.name
+        elif kind == "web":
+            # Published under the asset's name (studio-web-X.Y.Z.zip).
+            art_path = _build_web(raw_path, Path(tmp), commit_epoch, repo) \
+                .replace(Path(tmp) / asset)
         else:
             art_path = Path(tmp) / asset
             normalize_zip(raw_path, art_path, commit_epoch)

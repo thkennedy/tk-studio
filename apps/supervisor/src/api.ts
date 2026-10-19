@@ -32,15 +32,21 @@
  *                            the buffered deltas after it), then `office.agent` / `office.progress` / `office.run`
  *                            deltas (`id:<boot>-<seq>`), a `: heartbeat` comment every 10 s; without it the JSON snapshot
  *   GET  /                   the read-only status page (Story 22.2, `page.ts`): server-rendered
- *                            HTML, no script, credential-shaped values redacted
+ *                            HTML, no script, credential-shaped values redacted; a note when the web is not built
+ *   GET  /app[/…]            the studio web (Story 30.2, `web.ts`): the built web's file (its content type), or
+ *                            `index.html` for a path with no file (the single-page fallback); a traversal (`..`,
+ *                            an absolute path, `\`, `:`, NUL, a bad escape) 404 NotFound; no built web 503
+ *                            WebNotBuilt {command}. Every answer `cache-control: no-store`
  *
  * Story 22.5 (`auth.ts`), Story 29.1 (`account.ts`): a browser signs in at `POST /auth/token`,
  * `POST /auth/account` (the owner's one account, created once) or `POST /auth/signin` (its username and
  * password, rate-limited with a lockout), all answered before any auth, and gets a signed session cookie.
  * The bearer header still authorises everything. Without it, a valid cookie authorises the GET routes, and
  * `POST /runs/{id}/cancel` with the page's CSRF token (else 403 CsrfRefused); never `POST /jobs`.
- * `GET /` with no auth is the 401 HTML sign-in page (account creation while no account exists);
- * everything else stays 401 JSON.
+ * `GET /` with no auth is the 401 HTML sign-in page (account creation while no account exists); so is a
+ * `GET /app[/…]` (Story 30.2), its forms carrying the requested path and query as `next`, where a successful
+ * form sign-in returns (`303`; a `next` that is not a same-origin path returns to `/`). Everything else
+ * stays 401 JSON.
  *
  * Run ids are queue run ids; answers carry `studio_run_id` too. The API never
  * drives or claims a run (drain and the pacer do).
@@ -59,6 +65,7 @@ import { apiBind, apiPort, apiToken, checkTlsFiles, notifier, oauthLeftovers, se
 import { OfficeHub, type OfficeEvent } from "./office";
 import { gatherPage, holderOf, renderPage } from "./page";
 import { readAgents, type RebuildResult } from "./registry";
+import { contentType, resolveWebPath, WEB_BUILD_COMMAND, webRoot, type WebOptions } from "./web";
 import { registryShow } from "./server";
 import { isTerminal, Queue, RunTerminal, type QueueEvent, type QueueRun } from "./queue";
 
@@ -131,6 +138,9 @@ export interface ApiDeps {
   heartbeatMs?: number;
   /** Story 29.3: the office hub's demotion grace (ms, default 20000). */
   graceMs?: number;
+  /** Story 30.2: the studio web's root (default: the installed slot from `current.json`, else the checkout's
+   * `apps/studio-web/dist`). */
+  web?: WebOptions;
 }
 
 /** Story 27.3: the resume body — a restore patch relative to the run's worktree, optional. */
@@ -408,8 +418,21 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
   /** The status page: reads only (queue, store, registry), rendered to HTML. A cookie session's page
    * carries its CSRF token in each live run's cancel form. */
   async function page(csrf?: string): Promise<Response> {
-    const data = await gatherPage({ queue, token: deps.token, env: deps.env, registry: deps.registry ?? (() => registryShow()), ledger: deps.ledger, office });
+    const data = await gatherPage({ queue, token: deps.token, env: deps.env, registry: deps.registry ?? (() => registryShow()), ledger: deps.ledger, office, web: deps.web ?? {} });
     return new Response(renderPage(data, csrf ? { csrf } : {}), { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
+  }
+
+  /** Story 30.2: `GET /app[/…]` — the built web's file, or `index.html` (the single-page fallback); a refused path
+   * 404 NotFound (never the fallback); no built web 503 WebNotBuilt naming the build command. Every answer
+   * `cache-control: no-store`. */
+  async function web(path: string): Promise<Response> {
+    const noStore = { "cache-control": "no-store" };
+    const root = webRoot(deps.web ?? {});
+    if (root === null) return json(503, { ok: false, error: "WebNotBuilt", command: WEB_BUILD_COMMAND }, noStore);
+    const resolved = resolveWebPath(root, path);
+    if ("refused" in resolved) return json(404, { ok: false, error: "NotFound", path }, noStore);
+    const file = "file" in resolved ? resolved.file : resolved.fallback;
+    return new Response(Bun.file(file), { status: 200, headers: { "content-type": contentType(file), ...noStore } });
   }
 
   // ---------------------------------------------------------- the sign-in (Story 22.5)
@@ -428,21 +451,21 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
   /** The sign-in page; a refusal is the same page with a generic line, never a cookie or a detail. A malformed
    * `account.json` answers the sign-in page at 500 with one generic line naming AccountRecordInvalid (never the
    * file's content); the token form stays. */
-  const signIn = (refused = false, status = 401, invalid?: "username" | "password") => {
+  const signIn = (refused = false, status = 401, invalid?: "username" | "password", next?: string) => {
     let m: SignInMode;
     try { m = mode(); } catch (e) {
-      if (e instanceof AccountRecordInvalid) return recordInvalidPage();
+      if (e instanceof AccountRecordInvalid) return recordInvalidPage(next);
       throw e;
     }
-    return html(status, signInPage({ mode: m, refused, needsHttps: !https, ...(invalid ? { invalid } : {}) }));
+    return html(status, signInPage({ mode: m, refused, needsHttps: !https, ...(invalid ? { invalid } : {}), ...(next ? { next } : {}) }));
   };
-  const recordInvalidPage = () => html(500, signInPage({ mode: "signin", needsHttps: !https }).replace(
+  const recordInvalidPage = (next?: string) => html(500, signInPage({ mode: "signin", needsHttps: !https, ...(next ? { next } : {}) }).replace(
     "<h1>tk-studio supervisor</h1>",
     `<h1>tk-studio supervisor</h1><p class="note">AccountRecordInvalid: the account record (${ACCOUNT_RELATIVE_PATH} in the studio store) is not readable; delete it from the console to create the account again.</p>`,
   ));
   /** The named refusal of a malformed `account.json` on an account route: JSON 500, or the page at 500. */
-  const recordInvalid = (isJson: boolean) =>
-    isJson ? fail(500, "AccountRecordInvalid", { path: ACCOUNT_RELATIVE_PATH }) : recordInvalidPage();
+  const recordInvalid = (isJson: boolean, next?: string) =>
+    isJson ? fail(500, "AccountRecordInvalid", { path: ACCOUNT_RELATIVE_PATH }) : recordInvalidPage(next);
   /** Sign-in attempts run one at a time (per `createApi`): the lock check, the verify, the delay, the row and the
    * lockout check of one attempt finish before the next starts, so parallel guesses cannot pass the lockout. */
   let signInChain: Promise<unknown> = Promise.resolve();
@@ -457,23 +480,38 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
   const nowMs = () => clock();
   const sessionCookie = (sub: string) => setCookie(SESSION_COOKIE, signSession(secret!, sub, nowMs()), SESSION_TTL_S);
 
+  /** Story 30.2: where a successful form sign-in returns — `next` when it is a same-origin path (starts with `/`,
+   * not `//` or `/\`, no `\`, printable ASCII only — no control character, C0 or C1, and nothing a `Location`
+   * header cannot carry — no scheme), else `/`: never an open redirect. */
+  const safeNext = (next: unknown): string => {
+    if (typeof next !== "string" || !next.startsWith("/") || next.startsWith("//")) return "/";
+    if (next.includes("\\") || /[^\x20-\x7e]/.test(next) || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(next)) return "/";
+    return next;
+  };
+
   /** `POST /auth/token`: the API token from the form, compared as the bearer header is. Refused
    * like a bad token without https (the cookie would be dropped). */
   async function tokenSignIn(req: Request): Promise<Response> {
-    let given = "";
-    try { given = new URLSearchParams(await req.text()).get("token") ?? ""; } catch { /* refused below */ }
-    if (!secret || !https || !given || !bearerMatches(`Bearer ${given}`)) return signIn(true);
-    return redirect(303, "/", sessionCookie("token"));
+    let given = "", next = "";
+    try {
+      const f = new URLSearchParams(await req.text());
+      given = f.get("token") ?? "";
+      next = f.get("next") ?? "";
+    } catch { /* refused below */ }
+    const keep = safeNext(next) === "/" ? undefined : next;
+    if (!secret || !https || !given || !bearerMatches(`Bearer ${given}`)) return signIn(true, 401, undefined, keep);
+    return redirect(303, safeNext(next), sessionCookie("token"));
   }
 
   /** Story 29.1: an account route's body — a JSON body (`application/json`) answers JSON, any other body is a
    * browser form and answers HTML. Never logged. */
-  async function accountBody(req: Request): Promise<{ json: boolean; username: unknown; password: unknown } | Response> {
+  async function accountBody(req: Request): Promise<{ json: boolean; username: unknown; password: unknown; next?: string } | Response> {
     const isJson = (req.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json");
     const text = await req.text();
     if (!isJson) {
       const f = new URLSearchParams(text);
-      return { json: false, username: f.get("username") ?? "", password: f.get("password") ?? "" };
+      const next = safeNext(f.get("next"));
+      return { json: false, username: f.get("username") ?? "", password: f.get("password") ?? "", ...(next !== "/" ? { next } : {}) };
     }
     let raw: unknown;
     try { raw = JSON.parse(text); } catch { return fail(400, "MalformedJson", { detail: "the body is not JSON" }); }
@@ -482,12 +520,13 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
   }
 
   /** A refusal of an account route: JSON `{ok:false, error}` (plus extras), or the sign-in page at the status. */
-  const accountRefusal = (isJson: boolean, status: number, error: string, extra: { field?: "username" | "password" } = {}) =>
-    isJson ? fail(status, error, extra) : signIn(!extra.field, status, extra.field);
-  /** A success: JSON `{ok:true, username}` with the cookie, or `303 → /` with it, as the token form does. */
-  const accountSession = (isJson: boolean, username: string) => {
+  const accountRefusal = (isJson: boolean, status: number, error: string, extra: { field?: "username" | "password" } = {}, next?: string) =>
+    isJson ? fail(status, error, extra) : signIn(!extra.field, status, extra.field, next);
+  /** A success: JSON `{ok:true, username}` with the cookie, or `303 → next` (a safe `next`, else `/`) with it, as
+   * the token form does. */
+  const accountSession = (isJson: boolean, username: string, next?: string) => {
     const cookie = sessionCookie(`account:${username}`);
-    return isJson ? json(200, { ok: true, username }, { "set-cookie": cookie, "cache-control": "no-store" }) : redirect(303, "/", cookie);
+    return isJson ? json(200, { ok: true, username }, { "set-cookie": cookie, "cache-control": "no-store" }) : redirect(303, safeNext(next), cookie);
   };
 
   /** `POST /auth/account`: the owner's account, created once. Refused like the token form without the session
@@ -495,17 +534,18 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
   async function createAccountRoute(req: Request): Promise<Response> {
     const body = await accountBody(req);
     if (body instanceof Response) return body;
-    if (!secret || !https) return accountRefusal(body.json, 401, "SignInRefused");
+    const next = body.next;
+    if (!secret || !https) return accountRefusal(body.json, 401, "SignInRefused", {}, next);
     try {
       readAccount(pageEnv, acctPath); // a malformed record is named (500), never answered as AccountExists
       const at = new Date(nowMs()).toISOString();
       const record = await createAccount(pageEnv, body.username, body.password, at, acctPath);
       queue.serviceEvent("account-created", { username: record.username }, at);
-      return accountSession(body.json, record.username);
+      return accountSession(body.json, record.username, next);
     } catch (e) {
-      if (e instanceof AccountInvalid) return accountRefusal(body.json, 400, "AccountInvalid", { field: e.field });
-      if (e instanceof AccountExists) return accountRefusal(body.json, 409, "AccountExists");
-      if (e instanceof AccountRecordInvalid) return recordInvalid(body.json);
+      if (e instanceof AccountInvalid) return accountRefusal(body.json, 400, "AccountInvalid", { field: e.field }, next);
+      if (e instanceof AccountExists) return accountRefusal(body.json, 409, "AccountExists", {}, next);
+      if (e instanceof AccountRecordInvalid) return recordInvalid(body.json, next);
       throw e;
     }
   }
@@ -518,7 +558,8 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
   async function signInRoute(req: Request): Promise<Response> {
     const body = await accountBody(req);
     if (body instanceof Response) return body;
-    if (!secret || !https) return accountRefusal(body.json, 401, "SignInRefused");
+    const next = body.next;
+    if (!secret || !https) return accountRefusal(body.json, 401, "SignInRefused", {}, next);
     const given = typeof body.username === "string" ? body.username : "";
     const password = typeof body.password === "string" ? body.password : "";
     const valid = USERNAME_RE.test(given);
@@ -527,19 +568,19 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
     return await serialised(async () => {
       let record;
       try { record = readAccount(pageEnv, acctPath); } catch (e) {
-        if (e instanceof AccountRecordInvalid) return recordInvalid(body.json);
+        if (e instanceof AccountRecordInvalid) return recordInvalid(body.json, next);
         throw e;
       }
       if (lockState(queue, username, nowMs()).locked) {
         queue.serviceEvent("signin-refused", { username, reason: "locked" }, at());
-        return accountRefusal(body.json, 423, "AccountLocked");
+        return accountRefusal(body.json, 423, "AccountLocked", {}, next);
       }
       const known = valid && record !== null && safeEqual(given, record.username);
-      if (await verifyPassword(valid ? record : null, given, password)) return accountSession(body.json, record!.username);
+      if (await verifyPassword(valid ? record : null, given, password)) return accountSession(body.json, record!.username, next);
       await sleep(delayMs);
       queue.serviceEvent("signin-refused", { username, reason: known ? "mismatch" : "unknown-username" }, at());
-      if (lockState(queue, username, nowMs()).locked) return accountRefusal(body.json, 423, "AccountLocked");
-      return accountRefusal(body.json, 401, "SignInRefused");
+      if (lockState(queue, username, nowMs()).locked) return accountRefusal(body.json, 423, "AccountLocked", {}, next);
+      return accountRefusal(body.json, 401, "SignInRefused", {}, next);
     });
   }
 
@@ -564,7 +605,8 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
   async function cookieRoute(req: Request, url: URL, path: string, method: string, cookie: string): Promise<Response> {
     const csrf = csrfToken(secret!, cookie);
     const readRoute = path === "/" || path === "/jobs" || path === "/status" || path === "/events" || path === "/agents"
-      || path === "/office" || path === "/office/events" || /^\/runs\/[^/]+$/.test(path);
+      || path === "/office" || path === "/office/events" || /^\/runs\/[^/]+$/.test(path)
+      || path === "/app" || path.startsWith("/app/");
     if (method === "GET" && readRoute) return await route(req, url, path, method, csrf);
     if (method === "POST" && /^\/runs\/[^/]+\/cancel$/.test(path)) {
       const given = await csrfGiven(req);
@@ -585,6 +627,7 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
       const cookie = readCookie(req, SESSION_COOKIE);
       const session = secret && cookie ? verifySession(secret, cookie, nowMs()) : null;
       if (session && sessionSubAccepted(session.sub)) return await cookieRoute(req, url, path, method, cookie!);
+      if (method === "GET" && (path === "/app" || path.startsWith("/app/"))) return signIn(false, 401, undefined, `${url.pathname}${url.search}`);
       return path === "/" && method === "GET" ? signIn() : fail(401, "Unauthorized");
     } catch (e) {
       return fail(500, "InternalError", { detail: redact(e instanceof Error ? e.message : String(e)) });
@@ -597,6 +640,7 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
       // 405: the allowed methods in the `Allow` header (RFC 9110) and the body alike.
       const allow = (m: string) => json(405, { ok: false, error: "MethodNotAllowed", allow: m }, { allow: m });
       if (path === "/") return method === "GET" ? await page(csrf) : allow("GET");
+      if (path === "/app" || path.startsWith("/app/")) return method === "GET" ? await web(path) : allow("GET");
       if (path === "/jobs") {
         if (method === "POST") return await postJobs(req);
         if (method === "GET") return json(200, { ok: true, jobs: queue.jobs() });

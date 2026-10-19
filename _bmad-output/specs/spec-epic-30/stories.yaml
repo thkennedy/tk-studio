@@ -102,6 +102,10 @@
     refuses symlinks (`bun install` EPERM): verify bun in a /tmp copy of exactly the
     files git would commit, record the in-worktree gate unverifiable-here with the
     command, and treat the host leg `uv run python tools/verify_host.py` as binding.
+    Web-only (plan 30-3): never touch apps/supervisor or the contract. Under 30-2's
+    injected `<base href="/app/">`, the stream URL must be the absolute
+    `/office/events`. Oversize (plan 30-3, band L): halt blocked if the Files list
+    grows past the plan's six.
 
 - id: "30-4-the-office-screen"
   title: "The Office Screen"

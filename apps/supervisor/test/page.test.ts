@@ -30,6 +30,16 @@ interface FxOpts {
   probeWorker?: Probes["probeWorker"]; env?: Record<string, string>;
   /** null: no `ledger` dep (the default identity). */
   ledger?: { user: string; machine: string } | null;
+  /** Story 30.2: the studio web's root (a temp dir; never the real apps/studio-web/dist). */
+  web?: { dir: string };
+}
+
+/** The default web root: an isolated temp dir holding index.html (built), so the page never reads the checkout's
+ * apps/studio-web/dist. */
+function builtWeb(): { dir: string } {
+  const dir = mkdtempSync(join(tmpdir(), "tk-sup-page-web-built-"));
+  writeFileSync(join(dir, "index.html"), "<!doctype html><title>web</title>");
+  return { dir };
 }
 
 function fixture(o: FxOpts = {}) {
@@ -47,7 +57,7 @@ function fixture(o: FxOpts = {}) {
   const env = { TK_STUDIO_HOME: store, TK_SUPERVISOR_TELEGRAM_TOKEN: TELEGRAM, TK_SUPERVISOR_OTHER_TOKEN: OTHER_TOKEN, ...o.env };
   const registryCalls: number[] = [];
   const registry = o.registry ?? (async () => { registryCalls.push(1); return { ok: true, projects: { p: { root: "/work/p", vcs: "git", planning_backend: "files" } } }; });
-  const handler = createApi({ queue, token: TOKEN, env, registry, ...(o.ledger === null ? {} : { ledger: o.ledger ?? LEDGER }) });
+  const handler = createApi({ queue, token: TOKEN, env, registry, ...(o.ledger === null ? {} : { ledger: o.ledger ?? LEDGER }), web: o.web ?? builtWeb() });
   const call = (method: string, path = "/", auth: string | null = `Bearer ${TOKEN}`) =>
     handler(new Request(`${BASE}${path}`, { method, headers: auth === null ? {} : { authorization: auth } }));
   const checkout = () => mkdtempSync(join(tmpdir(), "tk-sup-page-checkout-"));
@@ -163,6 +173,28 @@ describe("the status page (AC1)", () => {
     const status = await (await fx.call("GET", "/status")).json() as Record<string, any>;
     expect(Object.keys(status).sort()).toEqual(["counts", "live", "locks", "ok"]);
     expect((await fx.call("GET", "/nope")).status).toBe(404);
+  });
+});
+
+describe("the web's not-built note (Story 30.2, AC2)", () => {
+  const NOTE = '<p class="note">The web is not built: cd apps/studio-web &amp;&amp; bun install --frozen-lockfile &amp;&amp; bun run build</p>';
+
+  test("no built web: one note line under the header naming the build command", async () => {
+    const fx = fixture({ web: { dir: mkdtempSync(join(tmpdir(), "tk-sup-page-web-")) } });
+    const body = await (await fx.call("GET")).text();
+    const header = body.indexOf('<h1>tk-studio supervisor</h1><p class="meta">generated ');
+    expect(header).toBeGreaterThan(-1);
+    expect(body.indexOf(`</p>${NOTE}\n<section id="jobs">`)).toBeGreaterThan(header);
+    expect(body.split("The web is not built")).toHaveLength(2);
+  });
+
+  test("a built web (index.html present): no note", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tk-sup-page-web-"));
+    writeFileSync(join(dir, "index.html"), "<!doctype html>");
+    const fx = fixture({ web: { dir } });
+    const res = await fx.call("GET");
+    expect(res.status).toBe(200);
+    expect(await res.text()).not.toContain("The web is not built");
   });
 });
 
