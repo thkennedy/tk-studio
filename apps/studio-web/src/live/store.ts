@@ -9,6 +9,9 @@
 // client's receive time of the last applied delta or of the last snapshot that changed the view (the
 // first one, or one whose agents, runs, problems or last_run differ): the stream watchdog's reconnect
 // re-sends an identical snapshot every 15 s on a quiet office, which is not an event (the clock injectable).
+// Story 30.6 (0.1.25, additive): a snapshot also carries `supervisor {version, counts}` and the ledger tail; the
+// view keeps them from each snapshot (null when absent), deltas leave them as they are, and they are not an event
+// (`lastEventAt` compares the four fields above only).
 
 // ------------------------------------------------------------ mirrored types (apps/supervisor/src/office.ts)
 // Mirrored, never imported across apps.
@@ -61,6 +64,13 @@ export interface OfficeLastRun {
   pr: string | null;
   ended_at: string;
 }
+/** The supervisor's version and its queue's per-state run counts (snapshot only, 0.1.25, Story 30.6). */
+export interface SupervisorInfo {
+  version: string;
+  counts: Record<string, number>;
+}
+/** The host ledger's last lines (redacted by the supervisor), or a note naming why there are none (Story 30.6). */
+export type LedgerTail = { path: string; lines: string[] } | { path: string; note: string };
 export interface OfficeView {
   at: string;
   agents: OfficeAgent[];
@@ -68,6 +78,10 @@ export interface OfficeView {
   problems: string[];
   /** Keyed by project; a project that never ended a run has no entry. */
   last_run: Record<string, OfficeLastRun>;
+  /** Story 30.6: from the last snapshot; null when it carried none. */
+  supervisor?: SupervisorInfo | null;
+  /** Story 30.6: from the last snapshot; null when it carried none. */
+  ledger?: LedgerTail | null;
 }
 
 export type OfficeDeltaKind = "office.agent" | "office.progress" | "office.run";
@@ -178,6 +192,22 @@ function lastRunsOf(v: unknown): Record<string, OfficeLastRun> {
   return out;
 }
 
+/** A well-formed `supervisor` object, or null. */
+function supervisorOf(v: unknown): SupervisorInfo | null {
+  if (!isObj(v) || typeof v.version !== "string") return null;
+  const counts: Record<string, number> = {};
+  if (isObj(v.counts)) for (const [k, n] of Object.entries(v.counts)) if (typeof n === "number") counts[k] = n;
+  return { version: v.version, counts };
+}
+
+/** A well-formed ledger tail, or null. */
+function ledgerOf(v: unknown): LedgerTail | null {
+  if (!isObj(v) || typeof v.path !== "string") return null;
+  if (Array.isArray(v.lines)) return { path: v.path, lines: v.lines.filter((l): l is string => typeof l === "string") };
+  if (typeof v.note === "string") return { path: v.path, note: v.note };
+  return null;
+}
+
 function applyRun(view: OfficeView, d: Record<string, unknown>): OfficeView | null {
   const runId = d.run_id;
   if (typeof runId !== "string") return null;
@@ -245,7 +275,7 @@ export function createOfficeStore(deps: StoreDeps = {}): OfficeStore {
     },
     applySnapshot(id, data) {
       if (!parseId(id) || !isObj(data)) return;
-      const { at, agents, runs, problems, last_run } = data;
+      const { at, agents, runs, problems, last_run, supervisor, ledger } = data;
       if (!Array.isArray(agents) || !Array.isArray(runs)) return;
       const view: OfficeView = {
         at: typeof at === "string" ? at : "",
@@ -253,6 +283,8 @@ export function createOfficeStore(deps: StoreDeps = {}): OfficeStore {
         runs: runs as OfficeRun[],
         problems: Array.isArray(problems) ? (problems as string[]) : [],
         last_run: lastRunsOf(last_run),
+        supervisor: supervisorOf(supervisor),
+        ledger: ledgerOf(ledger),
       };
       // A reconnect's identical snapshot keeps the time of the last real change.
       const changed = !state.view || state.lastEventAt === null || !sameContent(state.view, view);

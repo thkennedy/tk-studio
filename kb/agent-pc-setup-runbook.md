@@ -947,7 +947,8 @@ itself, a pacer, crash recovery, an HTTP API and a status page. It was built on
 |---|---|
 | Checkout lock | (28.5) One lock per git checkout: its key is the project root's canonical, case-folded `git rev-parse --show-toplevel`, read once at submission and recorded on the run (a root outside git keys by itself). `apps\supervisor` and `C:\GitHub\tk-studio` therefore share one lock: the second queued run shows `lock-wait` naming the first on `/status`, and the two never run at once. The lock row and the status page still name the project root that holds it. The `starter.lock` stays per project. |
 | Served subpath | (28.5) A project below its git top-level is served at `<worktree>\<prefix>` (`git rev-parse --show-prefix`, for example `C:\agent-work\worktrees\<project>\<run id>\apps\supervisor`): the worker's cwd, `payload.directory`, the sbx VM path, `tk install`/`tk activate`, the copied runtime, the engine's `.bmad-loop`, and `verify.host` (read from `<base>:<prefix>.tk-studio/config.yaml`, run there). The worktree itself is still cut at the repository's top, and the push, PR and `git worktree remove` run there. A project at its top-level is unchanged. |
-| Studio web | (30.2) The supervisor serves the built web at `/app` on its own origin, behind the bearer or the session cookie (a browser without a session gets the sign-in page and returns to the page it asked for). It lives in the installer's slot `<root>\studio-web\<version>\`, found through `current.json`'s `"studio-web".path`, else in the checkout's `apps\studio-web\dist`. Built by the release motion (`uv run python tools/release_archive.py run --app studio-web --version X.Y.Z`: `bun install --frozen-lockfile` and `bun run build` from the tag, `dist`'s contents zipped) or by hand: `cd apps\studio-web; bun install --frozen-lockfile; bun run build`. Not built: `GET /app` answers `503 WebNotBuilt` naming that command, and the status page at `/` shows a note saying so. |
+| Studio web | (30.2) The supervisor serves the built web at `/app` on its own origin, behind the bearer or the session cookie (a browser without a session gets the sign-in page and returns to the page it asked for). It lives in the installer's slot `<root>\studio-web\<version>\`, found through `current.json`'s `"studio-web".path`, else in the checkout's `apps\studio-web\dist`. Built by the release motion (`uv run python tools/release_archive.py run --app studio-web --version X.Y.Z`: `bun install --frozen-lockfile` and `bun run build` from the tag, `dist`'s contents zipped) or by hand: `cd apps\studio-web; bun install --frozen-lockfile; bun run build`. Not built: `GET /app` answers `503 WebNotBuilt` naming that command, and the status page shows a note saying so. |
+| The home | (30.6) The web is the home: a signed-in `GET /` answers the built web's `index.html` (the Office screen first, then whichever screen this browser last showed: Office, Board or Status). Build it as the row above says (`cd apps\studio-web; bun install --frozen-lockfile; bun run build`, the command a `503 WebNotBuilt` names) or install a release; until it is built, `GET /` answers the read-only status page with its "not built" note, never a 503. The read-only page moved to `GET /status`: a browser (an `Accept` naming `text/html`) gets the page, without JavaScript; anything else (`curl`, `set-supervisor-env.ps1`, §4.5) gets the same JSON as before. The web's Status screen links it. |
 
 ### 4.1 Install
 
@@ -1130,8 +1131,9 @@ the snapshot `{ok:true, at, agents, runs, …}`: every agent with one of the
 eight office states, and the live runs with their progress. `curl` always
 uses the bearer token; the account is for the browser.
 
-**The status page from a phone (Story 22.5, Story 29.1).** `GET /` without
-the bearer header answers a page for the owner's one account. The first visit
+**The web and the status page from a phone (Story 22.5, Story 29.1, Story 30.6).** `GET /` without
+the bearer header answers a page for the owner's one account (so does
+`/status` opened in a browser, returning there after the sign-in). The first visit
 creates it: a username (3 to 64 characters: letters, digits, `-`, `_`, `.`)
 and a password (12 characters or more), stored hashed in
 `<TK_STUDIO_HOME or ~/.tk-studio>\supervisor\account.json`. Later visits
@@ -1152,7 +1154,12 @@ https. The operator's steps, once:
    `https://<TLS_NAME>:8787/` on the phone and create the account.
 2. The smoke sign-in: open `https://<TLS_NAME>:8787/` in a fresh browser (or
    after the session expires) and sign in with the account's username and
-   password. The status page answers, with its Agents and Office sections.
+   password. The web answers at `/` (Story 30.6: the Office screen, or the
+   screen this browser last showed). Its Status screen shows the queue's
+   counts, the live runs, the agents, the office section, the ledger's last
+   lines and the supervisor's version, and links the read-only status page
+   at `https://<TLS_NAME>:8787/status`, which answers without JavaScript,
+   with its Agents and Office sections. With no built web, `/` is that page.
 3. The reset, when locked out or the password is lost: delete
    `<TK_STUDIO_HOME or ~/.tk-studio>\supervisor\account.json` from the
    console. The next visit creates the account again (no restart needed),

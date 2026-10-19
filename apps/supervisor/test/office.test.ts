@@ -861,6 +861,95 @@ describe("the routes (AC3)", () => {
   });
 });
 
+describe("the snapshot extras (Story 30.6, contract 0.1.25 additive)", () => {
+  const PKG_VERSION = JSON.parse(readFileSync(join(import.meta.dir, "..", "package.json"), "utf-8")).version as string;
+  async function extras(o: { ledger?: string[] | null } = {}) {
+    const w = world();
+    const launched = await w.launch({ lines: CUT.gate });
+    // A second, ended run: the counts hold more than the live set.
+    const ended = w.enqueue("nightly");
+    w.queue.end(ended.run_id, "cancelled", "not wanted");
+    const store = mkdtempSync(join(tmpdir(), "tk-sup-office-store-"));
+    if (o.ledger !== null) {
+      mkdirSync(join(store, "measurements"), { recursive: true });
+      writeFileSync(join(store, "measurements", "u-m.jsonl"), (o.ledger ?? []).join("\n") + "\n");
+    }
+    const env = { TK_STUDIO_HOME: store };
+    const hub = new OfficeHub({ queue: w.queue, graceMs: 0, pollMs: 10 });
+    const handler = createApi({ queue: w.queue, token: TOKEN, session: { secret: SECRET }, env, office: hub, heartbeatMs: 60_000, registry: async () => ({ projects: {} }), ledger: { user: "u", machine: "m" }, submit: async () => { throw new Error("never"); } });
+    const call = (path: string, headers: Record<string, string> = {}) =>
+      handler(new Request(`${BASE}${path}`, { headers: { authorization: `Bearer ${TOKEN}`, ...headers } }));
+    return { ...w, ...launched, call, handler };
+  }
+
+  test("GET /office and the JSON /office/events carry supervisor {version, counts} and the ledger tail, and nothing else new", async () => {
+    const lines = Array.from({ length: 25 }, (_, i) => JSON.stringify({ n: i }));
+    const fx = await extras({ ledger: lines });
+    const status = await (await fx.call("/status")).json() as any;
+    for (const path of ["/office", "/office/events"]) {
+      const body = await (await fx.call(path)).json() as any;
+      expect(Object.keys(body).sort()).toEqual(["agents", "at", "id", "last_run", "ledger", "ok", "problems", "runs", "supervisor"]);
+      expect(body.supervisor).toEqual({ version: PKG_VERSION, counts: status.counts });
+      expect(body.supervisor.counts).toEqual({ running: 1, cancelled: 1 });
+      expect(body.ledger).toEqual({ path: "measurements/u-m.jsonl", lines: lines.slice(-20) });
+    }
+  });
+
+  test("a ledger line holding the API token is redacted; a missing ledger is a note", async () => {
+    const fx = await extras({ ledger: [JSON.stringify({ n: 1, text: `api ${TOKEN}` })] });
+    const body = await (await fx.call("/office")).json() as any;
+    expect(JSON.stringify(body)).not.toContain(TOKEN);
+    expect(body.ledger.lines).toHaveLength(1);
+    expect(body.ledger.lines[0]).toContain("[redacted]");
+    const none = await extras({ ledger: null });
+    expect(((await (await none.call("/office")).json()) as any).ledger).toEqual({ path: "measurements/u-m.jsonl", note: "measurements/u-m.jsonl not found" });
+  });
+
+  test("a ledger line with a credential-named key holding an array is redacted by key, as the page renders it (NFR5)", async () => {
+    const fx = await extras({ ledger: [JSON.stringify({ secret: ["hunter2"], note: TOKEN })] });
+    const body = await (await fx.call("/office")).json() as any;
+    expect(body.ledger.lines).toHaveLength(1);
+    expect(body.ledger.lines[0]).not.toContain("hunter2");
+    expect(body.ledger.lines[0]).not.toContain(TOKEN);
+    expect(body.ledger.lines[0]).toContain("[redacted]");
+  });
+
+  test("the stream's event:snapshot carries the extras; a delta never does", async () => {
+    const fx = await extras({ ledger: [JSON.stringify({ n: 1 })] });
+    const ctl = new AbortController();
+    const res = await fx.handler(new Request(`${BASE}/office/events`, { headers: { authorization: `Bearer ${TOKEN}`, accept: "text/event-stream" }, signal: ctl.signal }));
+    const rd = res.body!.getReader();
+    const dec = new TextDecoder();
+    let text = "";
+    const until = async (pred: (t: string) => boolean) => {
+      const deadline = Date.now() + 5000;
+      while (!pred(text) && Date.now() < deadline) {
+        const { value, done } = await rd.read();
+        if (done) break;
+        text += dec.decode(value);
+      }
+    };
+    await until((t) => t.includes("event:snapshot") && t.includes("\n\n"));
+    fx.queue.markPaused(fx.run.run_id, { engine: {} });
+    await until((t) => t.includes("event:office.run"));
+    ctl.abort();
+    await rd.cancel().catch(() => {});
+    const frames = text.split("\n\n").filter((f) => f.startsWith("id:")).map((f) => {
+      const [, ev, data] = f.split("\n");
+      return { event: ev.slice(6), data: JSON.parse(data.slice(5)) };
+    });
+    const snap = frames.find((f) => f.event === "snapshot")!;
+    expect(snap.data.supervisor.version).toBe(PKG_VERSION);
+    expect(snap.data.ledger.lines).toEqual([JSON.stringify({ n: 1 })]);
+    const deltas = frames.filter((f) => f.event !== "snapshot");
+    expect(deltas.length).toBeGreaterThan(0);
+    for (const d of deltas) {
+      expect("supervisor" in d.data).toBe(false);
+      expect("ledger" in d.data).toBe(false);
+    }
+  });
+});
+
 describe("the status page's Office section (AC3)", () => {
   test("<section id=\"office\"> lists each live run's role: state lines as text", async () => {
     const w = world();

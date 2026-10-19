@@ -278,3 +278,48 @@ describe("the reason, last_run and lastEventAt (Story 30.4, contract 0.1.25)", (
     expect(store.getState().view?.runs.map((r) => r.run_id)).toEqual(["r1"]);
   });
 });
+
+describe("the snapshot extras (Story 30.6, contract 0.1.25)", () => {
+  const supervisor = { version: "0.1.2", counts: { done: 4, running: 1 } };
+  const ledger = { path: "measurements/op-box.jsonl", lines: ['{"n":1}', '{"n":2}'] };
+
+  it("keeps supervisor and ledger from the snapshot; a delta leaves them; a later snapshot replaces them", () => {
+    const store = createOfficeStore();
+    store.applySnapshot("b-5", { ...snapshot(), supervisor, ledger });
+    expect(store.getState().view?.supervisor).toEqual(supervisor);
+    expect(store.getState().view?.ledger).toEqual(ledger);
+    store.applyDelta("b-6", "office.run", { run_id: "r1", project: "proj", state: "paused", from: "running" });
+    store.applyDelta("b-7", "office.agent", { agent_id: "proj/sm", state: "typing", from: "idle", at: "x", current_run: "r1", current_story: null, reason: null });
+    store.applyDelta("b-8", "office.progress", { run_id: "r1", epic: epic({ done: 2 }) });
+    expect(store.getState().view?.supervisor).toEqual(supervisor);
+    expect(store.getState().view?.ledger).toEqual(ledger);
+    const note = { path: "measurements/op-box.jsonl", note: "measurements/op-box.jsonl not found" };
+    store.applySnapshot("b-9", { ...snapshot("b-9"), supervisor: { version: "0.1.3", counts: { done: 5 } }, ledger: note });
+    expect(store.getState().view?.supervisor).toEqual({ version: "0.1.3", counts: { done: 5 } });
+    expect(store.getState().view?.ledger).toEqual(note);
+  });
+
+  it("a snapshot without them (or with malformed ones) leaves them null", () => {
+    const store = createOfficeStore();
+    store.applySnapshot("b-5", { ...snapshot(), supervisor, ledger });
+    store.applySnapshot("b-6", snapshot("b-6"));
+    expect(store.getState().view?.supervisor).toBeNull();
+    expect(store.getState().view?.ledger).toBeNull();
+    store.applySnapshot("b-7", { ...snapshot("b-7"), supervisor: { counts: {} }, ledger: { lines: [] } });
+    expect(store.getState().view?.supervisor).toBeNull();
+    expect(store.getState().view?.ledger).toBeNull();
+  });
+
+  it("an extras-only snapshot change is not an event: lastEventAt stays; the view still updates", () => {
+    let t = 1000;
+    const store = createOfficeStore({ now: () => t });
+    store.applySnapshot("b-5", { ...snapshot(), supervisor, ledger });
+    expect(store.getState().lastEventAt).toBe(1000);
+    t = 2000;
+    const changed = { version: "0.1.2", counts: { done: 5 } };
+    store.applySnapshot("b-6", { ...snapshot("b-6"), supervisor: changed, ledger: { ...ledger, lines: ['{"n":3}'] } });
+    expect(store.getState().lastEventAt).toBe(1000);
+    expect(store.getState().view?.supervisor).toEqual(changed);
+    expect(store.getState().view?.ledger).toEqual({ ...ledger, lines: ['{"n":3}'] });
+  });
+});

@@ -5,7 +5,7 @@ import { homedir, hostname, tmpdir } from "node:os";
 import { basename, join, sep } from "node:path";
 import { createApi } from "../src/api";
 import { studioHome } from "../src/env";
-import { credentialKey, holderOf, redactCredentials, tailLines } from "../src/page";
+import { credentialKey, holderOf, redactCredentials, redactLedgerLine, tailLines } from "../src/page";
 import { Queue, type Owner, type Probes, type WorkerKill } from "../src/queue";
 
 const TOKEN = "tok-page-7c1e-very-secret-value";
@@ -58,8 +58,14 @@ function fixture(o: FxOpts = {}) {
   const registryCalls: number[] = [];
   const registry = o.registry ?? (async () => { registryCalls.push(1); return { ok: true, projects: { p: { root: "/work/p", vcs: "git", planning_backend: "files" } } }; });
   const handler = createApi({ queue, token: TOKEN, env, registry, ...(o.ledger === null ? {} : { ledger: o.ledger ?? LEDGER }), web: o.web ?? builtWeb() });
-  const call = (method: string, path = "/", auth: string | null = `Bearer ${TOKEN}`) =>
-    handler(new Request(`${BASE}${path}`, { method, headers: auth === null ? {} : { authorization: auth } }));
+  /** Story 30.6: the page's address is `GET /status` with `Accept: text/html` — the default (no path given); a path
+   * given is requested with no `Accept` unless one is named. */
+  const call = (method: string, path?: string, auth: string | null = `Bearer ${TOKEN}`, accept?: string) => {
+    const headers: Record<string, string> = auth === null ? {} : { authorization: auth };
+    const a = accept ?? (path === undefined ? "text/html" : undefined);
+    if (a) headers.accept = a;
+    return handler(new Request(`${BASE}${path ?? "/status"}`, { method, headers }));
+  };
   const checkout = () => mkdtempSync(join(tmpdir(), "tk-sup-page-checkout-"));
   const enqueue = (jobId: string, root: string, extra: { tier?: string; sandbox?: string } = {}) =>
     queue.enqueue({ jobId, root, projectId: "p", target: "skill", tier: extra.tier, sandbox: extra.sandbox,
@@ -132,7 +138,7 @@ function dbBytes(dir: string): string {
 const maxSeq = (q: Queue) => (q.db.query("SELECT MAX(seq) AS m FROM events").get() as { m: number | null }).m;
 
 describe("the status page (AC1)", () => {
-  test("GET / with a valid token: text/html, a viewport meta, no script", async () => {
+  test("GET /status (Accept: text/html) with a valid token: text/html, a viewport meta, no script", async () => {
     const fx = await populated();
     const res = await fx.call("GET");
     expect(res.status).toBe(200);
@@ -146,7 +152,7 @@ describe("the status page (AC1)", () => {
   test("no token or a wrong one: 401 (the same gate as the API), answered with the sign-in page (Story 22.5)", async () => {
     const fx = await populated();
     for (const auth of [null, "", `Bearer ${TOKEN}x`, `Basic ${TOKEN}`]) {
-      const res = await fx.call("GET", "/", auth);
+      const res = await fx.call("GET", undefined, auth);
       expect(res.status).toBe(401);
       expect(res.headers.get("content-type")).toStartWith("text/html");
       const body = await res.text();
@@ -173,6 +179,33 @@ describe("the status page (AC1)", () => {
     const status = await (await fx.call("GET", "/status")).json() as Record<string, any>;
     expect(Object.keys(status).sort()).toEqual(["counts", "live", "locks", "ok"]);
     expect((await fx.call("GET", "/nope")).status).toBe(404);
+  });
+
+  test("Story 30.6: /status without text/html is the same JSON byte for byte (none, */*, application/json), vary Accept", async () => {
+    const fx = await populated();
+    const answers: string[] = [];
+    for (const accept of [undefined, "*/*", "application/json"]) {
+      const res = await fx.call("GET", "/status", `Bearer ${TOKEN}`, accept);
+      expect(res.headers.get("content-type")).toBe("application/json; charset=utf-8");
+      expect(res.headers.get("vary")).toBe("Accept");
+      answers.push(await res.text());
+    }
+    expect(new Set(answers).size).toBe(1);
+    expect(Object.keys(JSON.parse(answers[0])).sort()).toEqual(["counts", "live", "locks", "ok"]);
+    const page = await fx.call("GET");
+    expect(page.headers.get("vary")).toBe("Accept");
+    expect(page.headers.get("content-type")).toBe("text/html; charset=utf-8");
+  });
+
+  test("Story 30.6: GET / with no built web is the page (never a 503); with a built web, the web's index.html", async () => {
+    const none = fixture({ web: { dir: mkdtempSync(join(tmpdir(), "tk-sup-page-web-")) } });
+    const home = await none.call("GET", "/");
+    expect(home.status).toBe(200);
+    expect(await home.text()).toContain("The web is not built");
+    const built = fixture();
+    const index = await built.call("GET", "/");
+    expect(index.status).toBe(200);
+    expect(await index.text()).toBe("<!doctype html><title>web</title>");
   });
 });
 
@@ -355,6 +388,17 @@ describe("reads only, and no credential (AC3)", () => {
     const body = await (await fx.call("GET")).text();
     for (const v of [...PLANTED, "nested-planted-token-1", "handoff-planted-secret", "ledger-planted-token"]) expect(body).not.toContain(v);
     expect(body).toContain("[redacted]");
+  });
+
+  test("the page's ledger line is exactly redactLedgerLine's output (one redaction path, NFR5)", async () => {
+    const fx = await populated();
+    const body = await (await fx.call("GET")).text();
+    const line = JSON.stringify({ n: 40, kind: "measure", token: "ledger-planted-token", text: LEAKY });
+    const env = { TK_STUDIO_HOME: fx.store, TK_SUPERVISOR_TELEGRAM_TOKEN: TELEGRAM, TK_SUPERVISOR_OTHER_TOKEN: OTHER_TOKEN };
+    const redacted = redactLedgerLine(line, env, TOKEN);
+    expect(redacted).not.toContain("ledger-planted-token");
+    const esc = redacted.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+    expect(body).toContain(esc);
   });
 
   test("redactCredentials: each shape", () => {

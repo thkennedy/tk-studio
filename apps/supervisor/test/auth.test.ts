@@ -277,7 +277,7 @@ describe("the token form (AC2)", () => {
 });
 
 describe("a signed-in browser (AC3)", () => {
-  test("the cookie reads GET /, /jobs, /runs/{id}, /status and /events (JSON and SSE) as the bearer does", async () => {
+  test("the cookie reads the page (GET /status, Accept text/html), /jobs, /runs/{id}, /status and /events (JSON and SSE) as the bearer does", async () => {
     const fx = fixture();
     const run = fx.enqueue();
     const c = `${SESSION_COOKIE}=${await tokenSession(fx)}`;
@@ -287,7 +287,7 @@ describe("a signed-in browser (AC3)", () => {
       expect(byCookie.status).toBe(200);
       expect(await byCookie.json()).toEqual(await byBearer.json());
     }
-    const page = await fx.call("GET", "/", { cookie: c });
+    const page = await fx.call("GET", "/status", { cookie: c, headers: { accept: "text/html" } });
     expect(page.status).toBe(200);
     expect(page.headers.get("content-type")).toStartWith("text/html");
     expect(await page.text()).toContain(`id="run-${run.run_id}"`);
@@ -304,7 +304,7 @@ describe("a signed-in browser (AC3)", () => {
     await fx.queue.claim(ended.run_id, A);
     fx.queue.end(ended.run_id, "complete", "done");
     const cookie = await tokenSession(fx);
-    const body = await (await fx.call("GET", "/", { cookie: `${SESSION_COOKIE}=${cookie}` })).text();
+    const body = await (await fx.call("GET", "/status", { cookie: `${SESSION_COOKIE}=${cookie}`, headers: { accept: "text/html" } })).text();
     const csrf = csrfToken(SECRET, cookie);
     expect(body).toContain(`<form class="cancel" method="post" action="/runs/${encodeURIComponent(live.run_id)}/cancel"><input type="hidden" name="csrf" value="${csrf}">`);
     expect(body).not.toContain(`/runs/${encodeURIComponent(ended.run_id)}/cancel`);

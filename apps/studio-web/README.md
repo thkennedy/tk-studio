@@ -81,8 +81,8 @@ functions in `src/office/model.ts` (vitest, `environment: "node"`); the canvas g
 ## The Board screen (Story 30.5)
 
 `src/board/BoardScreen.tsx` is the second screen: a minimal Office / Board switch in `App.tsx` (bottom left)
-mounts one screen at a time, both fed by the one store and the one stream (30.6 adds the remembered screen and
-the home). The board reads only the supervisor's `GET /board?project=<id>` (absolute, because of `<base
+mounts one screen at a time, both fed by the one store and the one stream (30.6 adds the remembered screen, the
+Status screen and the home, below). The board reads only the supervisor's `GET /board?project=<id>` (absolute, because of `<base
 href="/app/">`; contract 0.1.25), plus the `/agents` project list the Office already reads; the project choice is
 the Office's (`tk-studio.office.project`). The rules are pure functions in `src/board/model.ts` (vitest).
 
@@ -103,6 +103,30 @@ the Office's (`tk-studio.office.project`). The rules are pure functions in `src/
   The `/agents` project list is read on mount and again on each such wake while no project is chosen (a failed
   read, or no project served yet).
 - **No plan.** A project with no plan directory shows the answer's `plan.reason` and the columns.
+
+## The Status screen and the home (Story 30.6)
+
+The web is the home: a signed-in `GET /` on the supervisor answers this web's `index.html` (as `GET /app` does; the
+absolute `/app/` asset base and the `<base href="/app/">` make it load from `/`). Until the web is built, `GET /`
+answers the supervisor's read-only status page with its "not built" note. Build it with
+`cd apps/studio-web && bun install --frozen-lockfile && bun run build` (the supervisor's `WEB_BUILD_COMMAND`).
+
+- **The remembered screen.** `src/screen.ts`: the switch in `App.tsx` is Office / Board / Status, and the screen
+  shown is stored per browser under `tk-studio.web.screen` (`rememberedScreen` / `rememberScreen`, the storage
+  injectable as `rememberedProject`'s is). Absent, unknown or a storage that throws: Office. One screen is mounted at
+  a time, so the Office canvas (the one Pixi Application) exists only on the Office screen, and the one stream stays
+  open across the switch.
+- **The Status screen.** `src/status/StatusScreen.tsx` renders `statusView` (`src/status/model.ts`, pure, vitest)
+  from the one store: the queue's per-state counts and the supervisor's version (the snapshot's `supervisor
+  {version, counts}`), the live runs (`state !== null && LIVE_RUN_STATES.has(state)`), the agents with their state
+  and reason, the office section (each live run's epic progress and stories, each project's `last_run`, the
+  `problems`), and the ledger's last lines or its note (the snapshot's `ledger`, redacted by the supervisor). It
+  re-renders on a store change and never polls: the extras ride the snapshot only (contract 0.1.25), so they refresh
+  with the next snapshot (the stream's 15 s watchdog reopen on a quiet office), while the live runs follow every
+  delta.
+- **The read-only page.** The Status screen links `/status` (absolute, because of `<base href="/app/">`): opened in
+  the browser it is the supervisor's server-rendered page, which works without JavaScript. `/status` without
+  `Accept: text/html` still answers the JSON the bearer API always has.
 
 ## Commands (from `apps/studio-web`)
 

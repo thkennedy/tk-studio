@@ -1,5 +1,6 @@
 /**
- * The read-only status page (Story 22.2): `GET /` on the API's bind, behind its bearer check.
+ * The read-only status page (Story 22.2): `GET /status` with `Accept: text/html` (Story 30.6; it was `GET /`) on the
+ * API's bind, behind its bearer check or a cookie session; `GET /` answers it only while the web is not built.
  *
  * `gatherPage` only reads — the queue (`runs`, `jobs`, `events`, `locks`, `resumeCount`,
  * `recordedWorker(run, false)`, the owner probe `ownerAlive`), the per-user store (`run.json`, `handoff.json`, the tail of
@@ -67,6 +68,9 @@ export interface PageRun {
   workspace: string | null; runJson: Read; handoff: Read;
 }
 
+/** The ledger tail: its lines, or a note (not found, unreadable). */
+export type LedgerTail = { path: string; lines: string[] } | { path: string; note: string };
+
 export interface PageData {
   generated: string;
   counts: Record<string, number>;
@@ -75,7 +79,7 @@ export interface PageData {
   runsOmitted: number;
   locks: KeptLock[];
   statusBlocks: { run_id: string; studio_run_id: string; block: unknown }[];
-  ledger: { path: string; lines: string[] } | { path: string; note: string };
+  ledger: LedgerTail;
   registry: { ok: true; projects: Record<string, Record<string, unknown>> } | { ok: false; note: string };
   /** Story 29.2: the agent registry as the last rebuild left it (read from the queue's `agents` table, never
    * rebuilt here), grouped by project. Absent: the section notes no registry. */
@@ -170,6 +174,16 @@ export function tailLines(path: string, n: number): string[] {
   } finally { closeSync(fd); }
 }
 
+/** The ledger tail (Story 30.6: one read for the page and the office snapshot's `ledger`): the last
+ * `LEDGER_LINES` lines of this machine's ledger file in the store, or a note naming the store-relative path.
+ * The lines are raw; each reader redacts them. */
+export function readLedgerTail(env: Env, who?: { user: string; machine: string }): LedgerTail {
+  const id = who ?? { user: ledgerUser(env), machine: hostname() };
+  const ledgerRel = `measurements/${safeName(id.user)}-${safeName(id.machine)}.jsonl`;
+  try { return { path: ledgerRel, lines: tailLines(join(studioHome(env), ...ledgerRel.split("/")), LEDGER_LINES) }; }
+  catch (e) { return { path: ledgerRel, note: (e as NodeJS.ErrnoException).code === "ENOENT" ? `${ledgerRel} not found` : `${ledgerRel} unreadable` }; }
+}
+
 /** Everything the page shows — reads only: nothing is written to the queue or the store. */
 export async function gatherPage(deps: PageDeps): Promise<PageData> {
   const { queue } = deps;
@@ -255,11 +269,7 @@ export async function gatherPage(deps: PageDeps): Promise<PageData> {
     if (block !== undefined && block !== null) statusBlocks.push({ run_id: r.run.run_id, studio_run_id: r.run.studio_run_id!, block });
   }
 
-  const who = deps.ledger ?? { user: ledgerUser(env), machine: hostname() };
-  const ledgerRel = `measurements/${safeName(who.user)}-${safeName(who.machine)}.jsonl`;
-  let ledger: PageData["ledger"];
-  try { ledger = { path: ledgerRel, lines: tailLines(join(store, ...ledgerRel.split("/")), LEDGER_LINES) }; }
-  catch (e) { ledger = { path: ledgerRel, note: (e as NodeJS.ErrnoException).code === "ENOENT" ? `${ledgerRel} not found` : `${ledgerRel} unreadable` }; }
+  const ledger = readLedgerTail(env, deps.ledger);
 
   let registry: PageData["registry"];
   try {
@@ -336,6 +346,17 @@ export function redactCredentials(text: string, env: Env, token: string): string
   out = redactKeyValues(out);
   for (const re of KEY_SHAPES) out = out.replace(re, "[redacted]");
   return out;
+}
+
+/** One ledger line redacted as the page renders it (NFR5) — the single path both `renderPage` and
+ * `officeSnapshot()` use, so the two cannot drift: a JSON line has its credential-named keys' values
+ * replaced (`redactValue`, whatever their shape) and is re-serialised compactly, then the whole passes
+ * `redactCredentials` once more; a line that is not JSON passes `redactCredentials` alone. */
+export function redactLedgerLine(line: string, env: Env, token: string): string {
+  const text = (s: string) => redactCredentials(s, env, token);
+  let parsed: unknown;
+  try { parsed = JSON.parse(line); } catch { return text(line); }
+  return text(JSON.stringify(redactValue(parsed, text)));
 }
 
 /** Values under credential-named keys (`"key": value`, `KEY=value`, `key: value`), with the quotes
@@ -465,9 +486,7 @@ ${l.reason ? `<p class="reason">${t(l.reason)}</p>` : ""}
 <div class="meta">${t(p.workspace ?? "no workspace")}</div>${read("run.json", p.runJson)}${read("handoff.json", p.handoff)}</div>`).join("\n") : note("no runs");
 
   const ledger = "lines" in data.ledger
-    ? (data.ledger.lines.length ? `<p class="meta">${t(data.ledger.path)} (last ${data.ledger.lines.length} lines)</p><pre>${data.ledger.lines.map((l) => {
-      try { return j(JSON.parse(l)).replace(/\n\s*/g, " "); } catch { return t(l); }
-    }).join("\n")}</pre>` : note(`${data.ledger.path} is empty`))
+    ? (data.ledger.lines.length ? `<p class="meta">${t(data.ledger.path)} (last ${data.ledger.lines.length} lines)</p><pre>${data.ledger.lines.map((l) => t(redactLedgerLine(l, env, token))).join("\n")}</pre>` : note(`${data.ledger.path} is empty`))
     : note(data.ledger.note);
 
   const registry = data.registry.ok
