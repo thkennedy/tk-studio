@@ -91,3 +91,17 @@
 - What no longer holds: nothing in the acceptance criteria. "documents … the projection (`GET /office`, `GET /office/events`, the three `office.*` event kinds and the eight states)" must describe the landed rules.
 - Suggested adjustment: Document (a)–(d) as landed in the contract's supervisor-surface text, or link to the README's "office projection (Story 29.3)" bullet. Keep these out of the documented surface: `OFFICE_MAP`'s `when`/`signal` columns, the helper exports (`OFFICE_RANK`, `mapRoles`, `selectRun`, `engineRunDir`, `LIVE_RUN_STATES`, `officeStates`, `officeCachedPaths`, `specsDone`, `launchedSinceMove`).
 - Status: closed — applied to the unstarted 29-4 entry's invoke_dev_with by the gate session (2026-10-18)
+
+## 24-4-the-verdict-sets-the-defaults — scope: stories — from 24-2-the-supervisor-is-built-on-the-trial-route — 2026-10-19
+
+- What changed: the 24.2 record (`kb/trial-record-opus-5-5.md`) sorts stories by kind with its own line-count proxy (under 150 insertions + deletions outside `_bmad-output/` is core code), so all 12 stories are `feature` and the $4.4 core band has no trial data. Its dollars are handoff totals, with no per-leg split. 20-1, 20-2 and 21-1 have no ledger observation (they landed before the meter). For 21-2 to 22-5 the observation sits in the supervisor sandbox's store (unverifiable here). Wall-clock is `not recorded` for 4 of the 12 stories.
+- What no longer holds: nothing in the acceptance criteria. The evidence behind "Given the Story 24.2 and 24.3 records … each leg gets keep-Opus-5.5, revert, or needs-more-data, with the evidence cited" is thinner than CAP-6 assumed.
+- Suggested adjustment: Cite per-leg evidence from the 24.3 paired records (CAP-9 splits dollars by leg). Use the 24.2 record for the feature-kind totals and attempt-1 landings only, with its caveat and the 2.39× all-in ambiguity. Mark any leg needs-more-data where only 24.2 speaks to it. Extend `kb/trial-record-opus-5-5.md` and do not rewrite its 24.2 sections.
+- Status: open
+
+## operator — scope: operator — from 24-2-the-supervisor-is-built-on-the-trial-route — 2026-10-19
+
+- What changed: the gate found 24.2 AC1's record half ("its Story 24.1 record exists") unmet for 20-1, 20-2 and 21-1. All three landed before the 24.1 meter (`8b83a7e`, 2026-09-28T10:14:36Z), so no `meter:` observation exists. For 21-2 to 22-5 the observations sit in the supervisor sandbox's `~/.tk-studio` (the check is `sbx exec claude-tk-studio-supervisor -- sh -c "grep '\"meter: story=2[12]-' ~/.tk-studio/measurements/*.jsonl"`).
+- What no longer holds: 24.2 AC1, "When each story lands Then … its Story 24.1 record exists", for the three pre-meter stories. SPEC Open Question 1 (retro-price Epic 20, or limit CAP-6 to stories landed after the meter) was never ruled on. 24-2's contract declined to record anything.
+- Suggested adjustment: one of these. (a) Accept the three as unmet by construction and mark AC1 satisfied by reference to the handoff figures. (b) Retro-record 20-2 from the surviving host run dir `/c/GitHub/tk-studio/.bmad-loop/runs/20260928-090746-8360` (`meter.py story … --repo-root .`, which records) and accept 20-1/21-1 as not recoverable. There is no run dir for either on this box. (c) Correct-course CAP-6 / AC1 to the stories landed after the meter. Either way, run the sandbox check above for 21-2 to 22-5. Then resume the run. The next gate plans 24-3 and applies the 24-4 entry above.
+- Status: open — needs bmad-correct-course
