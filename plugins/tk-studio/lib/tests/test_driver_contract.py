@@ -549,6 +549,60 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertLess(section.index("Story 30.5 adds `GET /board?project=<id>`"),
                         section.index("**The rules a consumer may rely on**"))
 
+    # --- Story 30.6: the web is the home (`GET /`), the read-only page moves
+    # to `GET /status` (content-negotiated), and the office snapshot carries
+    # `supervisor` and `ledger`; joins the same 0.1.25 entry (no bump).
+
+    def test_0_1_25_names_the_status_page(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.25**", header)
+        self.assertNotIn("**0.1.26**", header)
+        self.assertNotIn("0.1.26 (", header)
+        self.assertLess(header.index("0.1.25 (Story 30.5)"),
+                        header.index("0.1.25 (Story 30.6)"))
+        clause = " ".join(header[header.index("0.1.25 (Story 30.6)"):].split())
+        for phrase in ("a signed-in `GET /` answers the built web's `index.html`, "
+                       "falling back to the read-only page when the web is not built",
+                       "`GET /status`",
+                       "`Accept: text/html` the page",
+                       "the unchanged `/status` JSON",
+                       "`supervisor` `{version, counts}`", "`ledger`",
+                       "never on a delta", "no second version bump",
+                       "never plugin surfaces", "— additive"):
+            self.assertIn(phrase, clause)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 30.6", stories)
+        title = "### Supervisor surfaces the web consumes (0.1.24)"
+        start = self.text.index(title)
+        end = self.text.index("\n### ", start + len(title))
+        section = " ".join(self.text[start:end].split())
+        # the board row (30.5) stays; the read-only page's row names its address
+        self.assertIn("| the board (Story 30.5, 0.1.25) | `GET /board?project=<id>` |",
+                      self.text[start:end])
+        row = next(line for line in self.text[start:end].splitlines()
+                   if line.startswith("| the home and the read-only page "
+                                      "(Story 30.6, 0.1.25) |"))
+        for phrase in ("`GET /`, `GET /status`", "`index.html`",
+                       "never a `503`", "the sign-in page",
+                       "`{ok, counts, live, locks}` unchanged",
+                       "`vary: Accept`", "returning to `/status`"):
+            self.assertIn(phrase, row)
+        note = section[section.index("Story 30.6 adds to this same 0.1.25 "
+                                     "entry (no second bump)"):]
+        for phrase in ("`supervisor` `{version, counts}`",
+                       "as `GET /status` counts them", "`ledger`",
+                       "`{path, lines}`", "each line redacted",
+                       "`{path, note}`", "never a delta",
+                       "The web is the home at `GET /`",
+                       "moves to `GET /status`"):
+            self.assertIn(phrase, note)
+        self.assertLess(section.index("Story 30.5 adds `GET /board?project=<id>`"),
+                        section.index("Story 30.6 adds to this same 0.1.25 entry"))
+        self.assertLess(section.index("Story 30.6 adds to this same 0.1.25 entry"),
+                        section.index("**The rules a consumer may rely on**"))
+
     def test_section_8_names_the_cli_drives(self):
         section = self.text[self.text.index("## 8. Conformance"):]
         flat = " ".join(section.split())

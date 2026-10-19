@@ -293,3 +293,7 @@
     so move its fallback to the role's `idle` with a console warning naming the gap
     (injectable warn). scene.test.ts decodes the committed placeholder.png per state:
     repoint it at office.png and its atlas, never delete the check.
+    From 30-6 (gate 2026-10-19): plans/30-7.md is band L and oversize (seventeen Files
+    entries, the assets folder included); halt `blocked` if the Files list grows past
+    them. Its Block If (the art tool, SPEC Open Question 1) needs the operator ruling in
+    the replan queue ("operator — from 30-6") before the story runs.

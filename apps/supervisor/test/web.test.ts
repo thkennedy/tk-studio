@@ -160,20 +160,49 @@ describe("GET /app (AC1)", () => {
     expect(await cookie.json()).toEqual({ ok: false, error: "Unauthorized" });
   });
 
-  test("GET / with a session stays the read-only page", async () => {
+  test("Story 30.6: GET / with a session is the web's index.html (no-store), as GET /app — the cookie and the bearer alike", async () => {
     const fx = fixture();
     for (const { init } of await auths(fx)) {
       const res = await fx.call("GET", "/", init);
       expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe("text/html; charset=utf-8");
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      expect(await res.text()).toBe(INDEX);
+    }
+  });
+
+  test("Story 30.6: GET /status with Accept text/html is the read-only page (no script), vary Accept", async () => {
+    const fx = fixture();
+    for (const { label, init } of await auths(fx)) {
+      const res = await fx.call("GET", "/status", { ...init, headers: { accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8" } });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe("text/html; charset=utf-8");
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      expect(res.headers.get("vary")).toBe("Accept");
       const body = await res.text();
       expect(body).toContain("<h1>tk-studio supervisor</h1><p class=\"meta\">generated");
+      expect(body).not.toContain("<script");
       expect(body).not.toContain("The web is not built");
+      expect(label === "cookie" || !body.includes('name="csrf"')).toBe(true);
+    }
+  });
+
+  test("Story 30.6: GET /status with no, */* or application/json Accept is today's JSON, vary Accept — the cookie and the bearer alike", async () => {
+    const fx = fixture();
+    for (const { init } of await auths(fx)) {
+      for (const accept of [undefined, "*/*", "application/json"]) {
+        const res = await fx.call("GET", "/status", { ...init, ...(accept ? { headers: { accept } } : {}) });
+        expect(res.status).toBe(200);
+        expect(res.headers.get("content-type")).toBe("application/json; charset=utf-8");
+        expect(res.headers.get("vary")).toBe("Accept");
+        expect(await res.text()).toBe(JSON.stringify({ ok: true, counts: {}, live: [], locks: [] }));
+      }
     }
   });
 });
 
 describe("no built web (AC2)", () => {
-  test("GET /app and a path under it: 503 WebNotBuilt naming the build command, no-store; GET / carries the note", async () => {
+  test("GET /app and a path under it: 503 WebNotBuilt naming the build command, no-store; GET / is the page with the note (never a 503)", async () => {
     const fx = fixture({ built: false });
     for (const { init } of await auths(fx)) {
       for (const path of ["/app", "/app/", "/app/assets/app.js"]) {
@@ -182,8 +211,13 @@ describe("no built web (AC2)", () => {
         expect(res.headers.get("cache-control")).toBe("no-store");
         expect(await res.json()).toEqual({ ok: false, error: "WebNotBuilt", command: "cd apps/studio-web && bun install --frozen-lockfile && bun run build" });
       }
-      const page = await (await fx.call("GET", "/", init)).text();
+      const home = await fx.call("GET", "/", init);
+      expect(home.status).toBe(200);
+      expect(home.headers.get("content-type")).toBe("text/html; charset=utf-8");
+      const page = await home.text();
       expect(page).toContain('<p class="note">The web is not built: cd apps/studio-web &amp;&amp; bun install --frozen-lockfile &amp;&amp; bun run build</p>');
+      const status = await (await fx.call("GET", "/status", { ...init, headers: { accept: "text/html" } })).text();
+      expect(status).toContain('<p class="note">The web is not built: cd apps/studio-web &amp;&amp; bun install --frozen-lockfile &amp;&amp; bun run build</p>');
     }
   });
 
@@ -285,6 +319,18 @@ describe("the sign-in's return path (AC1)", () => {
     for (const [method, path] of [["POST", "/app"], ["GET", "/status"], ["GET", "/apps"]] as const) {
       const r = await fx.call(method, path);
       expect(r.status).toBe(401);
+      expect(await r.json()).toEqual({ ok: false, error: "Unauthorized" });
+    }
+    // Story 30.6: an HTML GET /status is the sign-in page with next=/status; a non-HTML one stays 401 JSON
+    const status = await fx.call("GET", "/status", { headers: { accept: "text/html" } });
+    expect(status.status).toBe(401);
+    expect(status.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(status.headers.get("vary")).toBe("Accept");
+    expect(await status.text()).toContain('<form method="post" action="/auth/account"><input type="hidden" name="next" value="/status">');
+    for (const accept of ["*/*", "application/json"]) {
+      const r = await fx.call("GET", "/status", { headers: { accept } });
+      expect(r.status).toBe(401);
+      expect(r.headers.get("vary")).toBe("Accept");
       expect(await r.json()).toEqual({ ok: false, error: "Unauthorized" });
     }
   });

@@ -21,14 +21,19 @@
  *                            resumed (`resumeRun`: `bmad-loop resolve … --resume`); 200 {ok, run_id, state, engine_run_id},
  *                            400 SchemaError | MalformedJson, 404 RunNotFound, 409 RunNotPaused | ExternalRun | StoryLanded,
  *                            500 ResumeFailed
- *   GET  /status             counts per state, the live runs, the held checkout locks
+ *   GET  /status             counts per state, the live runs, the held checkout locks (JSON); Story 30.6: content-negotiated —
+ *                            an `Accept` naming `text/html` answers the read-only status page (`page.ts`), any other
+ *                            `Accept` (none, the wildcard, `application/json`) this JSON unchanged; both `vary: Accept`
  *   GET  /events?since=<seq> events with seq > since: JSON, or SSE with
  *                            `Accept: text/event-stream`
  *   GET  /agents[?project=<id>]  the agent registry (Story 29.2, `registry.ts`): {ok, rebuilt_at, agents}, one row per
  *                            (project, role); an unknown project answers `agents: []`. A read only: never rebuilds
  *   GET  /office             the office projection (Story 29.3, `office.ts`): {ok, at, agents, runs, last_run, problems,
  *                            id} — each registry agent's graced state and its `reason` (0.1.25), the live runs with
- *                            story and epic progress, `last_run` the last ended run keyed by project (0.1.25)
+ *                            story and epic progress, `last_run` the last ended run keyed by project (0.1.25); Story
+ *                            30.6 (0.1.25, additive): `supervisor {version, counts}` (package.json's version, the
+ *                            `/status` counts) and `ledger {path, lines}` | `{path, note}` (the page's ledger tail,
+ *                            redacted), here, in the JSON `/office/events` and in the stream's `event:snapshot` only
  *   GET  /board?project=<id> the board (Story 30.5, `board.ts`, contract 0.1.25): {ok, project, built_at, plan, epics,
  *                            triage} — the served project's plan epics and stories with their statuses, each story's
  *                            latest run and open findings, per epic the metered spend against its band, and the
@@ -36,8 +41,9 @@
  *   GET  /office/events      with `Accept: text/event-stream`: `event:snapshot` first (or, for a valid `Last-Event-ID`,
  *                            the buffered deltas after it), then `office.agent` / `office.progress` / `office.run`
  *                            deltas (`id:<boot>-<seq>`), a `: heartbeat` comment every 10 s; without it the JSON snapshot
- *   GET  /                   the read-only status page (Story 22.2, `page.ts`): server-rendered
- *                            HTML, no script, credential-shaped values redacted; a note when the web is not built
+ *   GET  /                   Story 30.6: the home — the built web's `index.html` (as `GET /app`, `no-store`); with no
+ *                            built web the read-only status page (Story 22.2, `page.ts`: server-rendered HTML, no
+ *                            script, credential-shaped values redacted) with its "not built" note, never a 503
  *   GET  /app[/…]            the studio web (Story 30.2, `web.ts`): the built web's file (its content type), or
  *                            `index.html` for a path with no file (the single-page fallback); a traversal (`..`,
  *                            an absolute path, `\`, `:`, NUL, a bad escape) 404 NotFound; no built web 503
@@ -49,7 +55,8 @@
  * The bearer header still authorises everything. Without it, a valid cookie authorises the GET routes, and
  * `POST /runs/{id}/cancel` with the page's CSRF token (else 403 CsrfRefused); never `POST /jobs`.
  * `GET /` with no auth is the 401 HTML sign-in page (account creation while no account exists); so is a
- * `GET /app[/…]` (Story 30.2), its forms carrying the requested path and query as `next`, where a successful
+ * `GET /app[/…]` (Story 30.2) and an HTML `GET /status` (Story 30.6; a non-HTML one stays 401 JSON), their forms
+ * carrying the requested path and query as `next`, where a successful
  * form sign-in returns (`303`; a `next` that is not a same-origin path returns to `/`). Everything else
  * stays 401 JSON.
  *
@@ -57,6 +64,8 @@
  * drives or claims a run (drain and the pacer do).
  */
 import { createHash, timingSafeEqual } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   ACCOUNT_RELATIVE_PATH, AccountExists, AccountInvalid, accountPath, AccountRecordInvalid, createAccount, lockState, readAccount,
   SIGNIN_DELAY_MS, verifyPassword,
@@ -69,7 +78,7 @@ import { CancelRaced, cancelRun, ExternalRunRefused, resumeRun, StartError, subm
 import { ResumeRefused, type ResumeAnswer } from "./closeout";
 import { apiBind, apiPort, apiToken, checkTlsFiles, notifier, oauthLeftovers, sessionSecret, tlsConfig } from "./env";
 import { OfficeHub, type OfficeEvent } from "./office";
-import { gatherPage, holderOf, renderPage } from "./page";
+import { gatherPage, holderOf, readLedgerTail, redactLedgerLine, renderPage } from "./page";
 import { readAgents, type RebuildResult } from "./registry";
 import { contentType, resolveWebPath, WEB_BUILD_COMMAND, webRoot, type WebOptions } from "./web";
 import { registryShow } from "./server";
@@ -179,6 +188,28 @@ const json = (status: number, body: unknown, headers: Record<string, string> = {
 
 const fail = (status: number, error: string, extra: Record<string, unknown> = {}) => json(status, { ok: false, error, ...extra });
 
+/** Story 30.6: the supervisor's version — `apps/supervisor/package.json`'s `version`, read once. */
+let versionRead: string | undefined;
+export function supervisorVersion(): string {
+  if (versionRead === undefined) {
+    try {
+      const v = JSON.parse(readFileSync(join(import.meta.dir, "..", "package.json"), "utf-8"))?.version;
+      versionRead = typeof v === "string" && v ? v : "unknown";
+    } catch { versionRead = "unknown"; }
+  }
+  return versionRead;
+}
+
+/** Counts per state over every queue run (`GET /status` and the office snapshot's `supervisor.counts` alike). */
+function stateCounts(runs: QueueRun[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const r of runs) counts[r.state] = (counts[r.state] ?? 0) + 1;
+  return counts;
+}
+
+/** Story 30.6: whether a request's `Accept` names `text/html` (a browser navigation). */
+const wantsHtml = (req: Request) => (req.headers.get("accept") ?? "").toLowerCase().includes("text/html");
+
 /** The body schema: a JSON object with `project` and `job`, and only the known fields, each a
  * non-empty string — `editor_in_the_loop` a boolean. */
 export function checkSubmitBody(body: unknown): { ok: true; body: SubmitBody } | { ok: false; detail: string } {
@@ -274,11 +305,20 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
 
   function status(): Response {
     const runs = queue.runs();
-    const counts: Record<string, number> = {};
-    for (const r of runs) counts[r.state] = (counts[r.state] ?? 0) + 1;
+    const counts = stateCounts(runs);
     const live = runs.filter((r) => !isTerminal(r.state));
     const locks = queue.locks().map((l) => ({ checkout: l.checkout, root: l.root, acquired: l.acquired, holder: holderOf(l) }));
-    return json(200, { ok: true, counts, live, locks });
+    return json(200, { ok: true, counts, live, locks }, { vary: "Accept" });
+  }
+
+  /** Story 30.6 (0.1.25, additive): the office snapshot with `supervisor {version, counts}` and the ledger tail —
+   * wrapped here, around the hub's snapshot, so the hub's diffing never sees them (they ride no delta). Every
+   * ledger line passes `redactLedgerLine` (NFR5: the page's key-based redaction, then `redactCredentials`). */
+  function officeSnapshot() {
+    const env = deps.env ?? process.env;
+    const tail = readLedgerTail(env, deps.ledger);
+    const ledger = "lines" in tail ? { path: tail.path, lines: tail.lines.map((l) => redactLedgerLine(l, env, deps.token)) } : tail;
+    return { ...office.snapshot(), supervisor: { version: supervisorVersion(), counts: stateCounts(queue.runs()) }, ledger };
   }
 
   async function postCancel(runId: string): Promise<Response> {
@@ -384,7 +424,7 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
 
   /** Story 29.3: `GET /office/events` — the JSON snapshot, or with `text/event-stream` the office stream. */
   function officeEvents(req: Request): Response {
-    if (!(req.headers.get("accept") ?? "").includes("text/event-stream")) return json(200, { ok: true, ...office.snapshot() });
+    if (!(req.headers.get("accept") ?? "").includes("text/event-stream")) return json(200, { ok: true, ...officeSnapshot() });
     return officeSse(req);
   }
 
@@ -417,7 +457,7 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
         const replay = office.since(req.headers.get("last-event-id"));
         if (replay) send(replay.map(frame).join(""));
         else {
-          const snap = office.snapshot();
+          const snap = officeSnapshot();
           send(`id:${snap.id}\nevent:snapshot\ndata:${JSON.stringify(snap)}\n\n`);
         }
         unsubscribe = office.subscribe((evs) => send(evs.map(frame).join("")));
@@ -640,7 +680,15 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
       const cookie = readCookie(req, SESSION_COOKIE);
       const session = secret && cookie ? verifySession(secret, cookie, nowMs()) : null;
       if (session && sessionSubAccepted(session.sub)) return await cookieRoute(req, url, path, method, cookie!);
-      if (method === "GET" && (path === "/app" || path.startsWith("/app/"))) return signIn(false, 401, undefined, `${url.pathname}${url.search}`);
+      // Story 30.6: with no session, `/status` still varies on Accept — the sign-in page (HTML) or the 401 JSON.
+      if (method === "GET" && path === "/status") {
+        const answer = wantsHtml(req) ? signIn(false, 401, undefined, `${url.pathname}${url.search}`) : fail(401, "Unauthorized");
+        answer.headers.set("vary", "Accept");
+        return answer;
+      }
+      if (method === "GET" && (path === "/app" || path.startsWith("/app/"))) {
+        return signIn(false, 401, undefined, `${url.pathname}${url.search}`);
+      }
       return path === "/" && method === "GET" ? signIn() : fail(401, "Unauthorized");
     } catch (e) {
       return fail(500, "InternalError", { detail: redact(e instanceof Error ? e.message : String(e)) });
@@ -652,14 +700,22 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
     {
       // 405: the allowed methods in the `Allow` header (RFC 9110) and the body alike.
       const allow = (m: string) => json(405, { ok: false, error: "MethodNotAllowed", allow: m }, { allow: m });
-      if (path === "/") return method === "GET" ? await page(csrf) : allow("GET");
+      // Story 30.6: the home is the built web's index.html (as `GET /app`); no built web, the read-only page (never a 503).
+      if (path === "/") return method !== "GET" ? allow("GET") : webRoot(deps.web ?? {}) !== null ? await web("/app") : await page(csrf);
       if (path === "/app" || path.startsWith("/app/")) return method === "GET" ? await web(path) : allow("GET");
       if (path === "/jobs") {
         if (method === "POST") return await postJobs(req);
         if (method === "GET") return json(200, { ok: true, jobs: queue.jobs() });
         return allow("GET, POST");
       }
-      if (path === "/status") return method === "GET" ? status() : allow("GET");
+      // Story 30.6: content-negotiated — HTML the read-only page, anything else today's JSON; both vary on Accept.
+      if (path === "/status") {
+        if (method !== "GET") return allow("GET");
+        if (!wantsHtml(req)) return status();
+        const answer = await page(csrf);
+        answer.headers.set("vary", "Accept");
+        return answer;
+      }
       if (path === "/events") return method === "GET" ? events(req, url) : allow("GET");
       if (path === "/agents") {
         if (method !== "GET") return allow("GET");
@@ -676,7 +732,7 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
         return answer ? json(200, answer) : fail(404, "UnknownProject", { project });
       }
       // Story 29.3: the graced office view (a read: nothing is written to the queue).
-      if (path === "/office") return method === "GET" ? json(200, { ok: true, ...office.snapshot() }) : allow("GET");
+      if (path === "/office") return method === "GET" ? json(200, { ok: true, ...officeSnapshot() }) : allow("GET");
       if (path === "/office/events") return method === "GET" ? officeEvents(req) : allow("GET");
       const cancelMatch = /^\/runs\/([^/]+)\/cancel$/.exec(path);
       if (cancelMatch) {
