@@ -7,6 +7,10 @@ baseline_revision: 'dcdabd23593a50c9426fbd9d7ec0ff02cb36eef2'
 review_loop_iteration: 0
 followup_review_recommended: false
 deviation_score: 2
+# Operator ruling 2026-10-19 (session 11): no retro-pricing. Stories 20-1, 20-2 and 21-1 landed before the meter
+# (8b83a7e) and their transcripts are not on this box, so no 24.1 record can exist for them; the 24.2 record names the
+# gap and 24.4 treats them as needs-more-data. SPEC Open Question 1 closes the same way. The story is done as landed.
+reconcile_verdict: no-impact
 context:
   - '{project-root}/kb/execution-pipeline-model-routing.md'
 warnings: []
@@ -214,3 +218,18 @@ DRIFT: "changed lines" = insertions + deletions, so every trial story is `featur
 DRIFT: the 20-1/20-2 rows say AC1's ledger-observation half is unmet, and the `story=20-` operator command is dropped — both stories landed before the meter, and the spec's "priced afterwards from its transcripts" citation (H0928:78) does not carry that claim — affects: 24-4
 DRIFT: the record's kind rule is labelled its own line-count proxy, not a v2 definition — the v2 kinds are by what a story is (kb:59-62) — affects: 24-4
 DRIFT: 21-1's row now says AC1's ledger-observation half is unmet, like 20-1/20-2 — it landed before the meter commit, under the timing rule the second consult accepted — affects: 24-4
+
+## Reconcile
+
+### 2026-10-19 — adjust-stories
+
+- Score: 2
+- Reasoning: The deviations are kb-record framing: the kind proxy (insertions + deletions, labelled as the record's own rule), an empty core-code band, and no ledger observation for 20-1/20-2/21-1, which landed before the meter `8b83a7e`. 24-3 relies on none of them. 24-4's acceptance criteria still hold ("Given the Story 24.2 and 24.3 records"), but its verdict must read the 24.2 record with those limits, and a note in its `invoke_dev_with` can carry that. No AD, contract or schema is touched (kb only).
+- Affected: 24-4-the-verdict-sets-the-defaults — "Given the Story 24.2 and 24.3 records When the verdict is drafted Then each leg gets keep-Opus-5.5, revert, or needs-more-data, with the evidence cited" (still holds; the 24.2 record has no core-code trial data, no per-leg split, and handoff figures in place of ledger observations)
+- Invariant: none
+
+### 2026-10-19 — escalate (gate Part B acceptance)
+
+- AC1's record half is unmet for 20-1, 20-2 and 21-1: they landed before the meter, so no 24.1 observation exists (plans/24-2.md, Acceptance). A remediation entry cannot converge. Retro-pricing is SPEC Open Question 1, which 24-1 deferred to 24.2 ("Retro-price Epic 20 (that is Story 24.2's call)"), and this story's contract ruled it out ("no meter `record`, no ledger write"). Transcripts survive on this box only for 20-2 (`/c/GitHub/tk-studio/.bmad-loop/runs/20260928-090746-8360`). There is no run dir for 20-1, and none for 21-1 (a supervisor-sandbox run). The operator decides. Queue entry: `operator — from 24-2…` in replan-queue.md.
+
+Gate: Part A adjust-stories; Part B escalate: 24.2 AC1 record half unmet for 20-1, 20-2 and 21-1 (landed before the meter); retro-pricing is the open SPEC Open Question 1 and no remediation can converge (20-1/21-1 transcripts not on this box)

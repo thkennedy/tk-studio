@@ -84,7 +84,7 @@ An opportunity plus a measurement gap. The operator asked on 2026-09-28 to run C
 
 ## Open Questions
 
-- Epic 20 landed (PR #79, plugin 0.2.16) before the 24.1 meter exists: are its stories priced retroactively from surviving transcripts, or does CAP-6 cover Epics 21–22 only?
+- Epic 20 landed (PR #79, plugin 0.2.16) before the 24.1 meter exists: are its stories priced retroactively from surviving transcripts, or does CAP-6 cover Epics 21–22 only? **Ruled 2026-10-19 (session 11, the 24.2 reconcile): no retro-pricing; stories landed before the meter carry no price, the 24.2 record names the gap, 24.4 treats them as needs-more-data.**
 - The source gives Opus 5.5's cache-read price only and no cache-write price for any model: which figures, from which source, populate the committed table?
 - Is the transcript copy-out at the story boundary a studio-side step or a bmad-loop hook, given the studio reaches the substrate by CLI only (AD-2)?
 - How are weekly plan-usage points captured per story (CAP-9)?
