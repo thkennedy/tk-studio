@@ -231,3 +231,19 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261019-195216-0564; this entry preserves the lingering recommendation for a deliberate later review.
 status: open
+
+### DW-32: An open, focused Board tab with no run deltas keeps yesterday's Done items past local midnight.
+origin: spec-deferred 21ebd940c6e4
+source_spec: `30-5-the-board-screen-spec.md`
+location: apps/studio-web/src/board/BoardScreen.tsx
+severity: low
+reason: Category (a), AC2 "Done (ended today)". The Board refetches on project-scoped office.run/office.progress deltas, window focus and visibility, never on a timer (spec Never). A tab that stays focused and visible across midnight with no run activity is not refetched until the next delta or focus change. Raised by both review layers.
+status: open
+
+### DW-33: Follow-up review still recommended for 30-5-the-board-screen after the damping cap was spent
+origin: review-budget-followup
+source_spec: `30-5-the-board-screen-spec.md`
+location: n/a
+severity: low
+reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261019-212444-d031; this entry preserves the lingering recommendation for a deliberate later review.
+status: open

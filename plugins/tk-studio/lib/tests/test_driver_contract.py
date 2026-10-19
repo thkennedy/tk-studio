@@ -498,6 +498,57 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertLess(section.index("**0.1.25 (Story 30.4, additive).**"),
                         section.index("**The rules a consumer may rely on**"))
 
+    # --- Story 30.5: `GET /board` joins 30.4's 0.1.25 entry (no second
+    # bump); a supervisor surface, never a plugin surface (AD-2).
+
+    def test_0_1_25_names_the_board(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.25**", header)
+        self.assertNotIn("**0.1.26**", header)
+        self.assertNotIn("0.1.26 (", header)
+        self.assertLess(header.index("0.1.25 (Story 30.4)"),
+                        header.index("0.1.25 (Story 30.5)"))
+        clause = " ".join(header[header.index("0.1.25 (Story 30.5)"):].split())
+        for phrase in ("`GET /board?project=<id>`",
+                       "canonical statuses", "latest run",
+                       "deferred-work findings", "`job-run` spend",
+                       "Needs-you / Working / Done",
+                       "no second version bump",
+                       "never a plugin surface", "— additive"):
+            self.assertIn(phrase, clause)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 30.5", stories)
+        title = "### Supervisor surfaces the web consumes (0.1.24)"
+        start = self.text.index(title)
+        end = self.text.index("\n### ", start + len(title))
+        section = " ".join(self.text[start:end].split())
+        row = next(line for line in self.text[start:end].splitlines()
+                   if line.startswith("| the board (Story 30.5, 0.1.25) |"))
+        for phrase in ("`GET /board?project=<id>`",
+                       "`{ok:true, project, built_at, plan, epics, triage}`",
+                       "`{run_id, state, pr, host_verify, ended_at}`",
+                       "`spend_usd` against `band_usd`",
+                       "`400 ProjectRequired`", "`404 UnknownProject`",
+                       "a read that writes nothing"):
+            self.assertIn(phrase, row)
+        note = section[section.index("Story 30.5 adds `GET /board?project=<id>` "
+                                     "to this same 0.1.25 entry (no second "
+                                     "bump)"):]
+        for phrase in ("`needs_you`, `working` and `done`",
+                       "`{run_id, state, story_key, pr, ruling}`",
+                       "exactly one of Needs-you and Working",
+                       "the supervisor host's local day",
+                       "a terminal run ended that day with a red host leg is in Needs-you instead",
+                       "`plan.reason`",
+                       "`.tk-studio/budget-bands.yaml`"):
+            self.assertIn(phrase, note)
+        self.assertLess(section.index("**0.1.25 (Story 30.4, additive).**"),
+                        section.index("Story 30.5 adds `GET /board?project=<id>`"))
+        self.assertLess(section.index("Story 30.5 adds `GET /board?project=<id>`"),
+                        section.index("**The rules a consumer may rely on**"))
+
     def test_section_8_names_the_cli_drives(self):
         section = self.text[self.text.index("## 8. Conformance"):]
         flat = " ".join(section.split())

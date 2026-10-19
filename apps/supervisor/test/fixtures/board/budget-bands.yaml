@@ -1,0 +1,9 @@
+# The board fixture's budget bands: the story bands, plus one epic band (Story 30.5).
+bands_version: 1
+currency: usd
+bands:
+  S:
+    usd_estimate: 4.5
+epics:
+  EP-030:
+    usd_estimate: 40

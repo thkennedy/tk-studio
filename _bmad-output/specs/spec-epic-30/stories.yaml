@@ -245,6 +245,11 @@
     screen with an injectable-storage helper modelled on `rememberedProject`. A
     from-null `office.run` may carry a never-live terminal run: the store replaces
     `last_run` by project.
+    From 30-5 (gate 2026-10-19): plans/30-6.md is band L and oversize (seventeen Files
+    entries); halt `blocked` if the Files list grows past those plus whatever the
+    operator's AC2 ruling names. Its Block If (AC2's counts, ledger tail and version
+    are on no web-read surface) needs the operator ruling in the replan queue
+    ("operator — from 30-5") before the story runs.
 
 - id: "30-7-our-own-assets"
   title: "Our Own Assets"

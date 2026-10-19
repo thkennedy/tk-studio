@@ -29,6 +29,10 @@
  *   GET  /office             the office projection (Story 29.3, `office.ts`): {ok, at, agents, runs, last_run, problems,
  *                            id} — each registry agent's graced state and its `reason` (0.1.25), the live runs with
  *                            story and epic progress, `last_run` the last ended run keyed by project (0.1.25)
+ *   GET  /board?project=<id> the board (Story 30.5, `board.ts`, contract 0.1.25): {ok, project, built_at, plan, epics,
+ *                            triage} — the served project's plan epics and stories with their statuses, each story's
+ *                            latest run and open findings, per epic the metered spend against its band, and the
+ *                            Needs-you / Working / Done triage of its runs; 400 ProjectRequired, 404 UnknownProject
  *   GET  /office/events      with `Accept: text/event-stream`: `event:snapshot` first (or, for a valid `Last-Event-ID`,
  *                            the buffered deltas after it), then `office.agent` / `office.progress` / `office.run`
  *                            deltas (`id:<boot>-<seq>`), a `: heartbeat` comment every 10 s; without it the JSON snapshot
@@ -60,6 +64,7 @@ import {
 import {
   csrfToken, readCookie, safeEqual, sessionSubAccepted, SESSION_COOKIE, SESSION_TTL_S, setCookie, signInPage, type SignInMode, signSession, USERNAME_RE, verifySession,
 } from "./auth";
+import { boardFor, type BoardAnswer } from "./board";
 import { CancelRaced, cancelRun, ExternalRunRefused, resumeRun, StartError, submitProject, type AgentsOption } from "./cli";
 import { ResumeRefused, type ResumeAnswer } from "./closeout";
 import { apiBind, apiPort, apiToken, checkTlsFiles, notifier, oauthLeftovers, sessionSecret, tlsConfig } from "./env";
@@ -139,6 +144,9 @@ export interface ApiDeps {
   heartbeatMs?: number;
   /** Story 29.3: the office hub's demotion grace (ms, default 20000). */
   graceMs?: number;
+  /** Story 30.5: the board builder (default `boardFor` on this queue, `now`, `env`, `ledger`, `registry` and the office
+   * hub's live runs); null for a project the registry does not serve. */
+  board?: (project: string) => Promise<BoardAnswer | null>;
   /** Story 30.2: the studio web's root (default: the installed slot from `current.json`, else the checkout's
    * `apps/studio-web/dist`). */
   web?: WebOptions;
@@ -227,6 +235,10 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
   const clock = deps.now ?? Date.now;
   const office = deps.office ?? new OfficeHub({ queue, now: clock, pollMs, ...(deps.graceMs !== undefined ? { graceMs: deps.graceMs } : {}) });
   const heartbeatMs = deps.heartbeatMs ?? 10_000;
+  const board = deps.board ?? ((project: string) => boardFor(project, {
+    queue, now: clock, env: deps.env, ledger: deps.ledger, registry: deps.registry ?? (() => registryShow()),
+    liveRuns: () => office.snapshot().runs,
+  }));
 
   /** Constant time: both sides hashed to one length before `timingSafeEqual`. The scheme
    * matches case-insensitively (RFC 7235); the token is compared as sent. */
@@ -606,7 +618,7 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
   async function cookieRoute(req: Request, url: URL, path: string, method: string, cookie: string): Promise<Response> {
     const csrf = csrfToken(secret!, cookie);
     const readRoute = path === "/" || path === "/jobs" || path === "/status" || path === "/events" || path === "/agents"
-      || path === "/office" || path === "/office/events" || /^\/runs\/[^/]+$/.test(path)
+      || path === "/board" || path === "/office" || path === "/office/events" || /^\/runs\/[^/]+$/.test(path)
       || path === "/app" || path.startsWith("/app/");
     if (method === "GET" && readRoute) return await route(req, url, path, method, csrf);
     if (method === "POST" && /^\/runs\/[^/]+\/cancel$/.test(path)) {
@@ -654,6 +666,14 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
         // Story 29.2: the table as the last rebuild left it — a read, never a rebuild.
         const { rebuilt_at, agents } = readAgents(queue, url.searchParams.get("project") ?? undefined);
         return json(200, { ok: true, rebuilt_at, agents });
+      }
+      if (path === "/board") {
+        if (method !== "GET") return allow("GET");
+        // Story 30.5: a read composed per request (the plan, findings and spend parts cached on their files).
+        const project = url.searchParams.get("project")?.trim();
+        if (!project) return fail(400, "ProjectRequired", { detail: "the board needs ?project=<id>" });
+        const answer = await board(project);
+        return answer ? json(200, answer) : fail(404, "UnknownProject", { project });
       }
       // Story 29.3: the graced office view (a read: nothing is written to the queue).
       if (path === "/office") return method === "GET" ? json(200, { ok: true, ...office.snapshot() }) : allow("GET");
