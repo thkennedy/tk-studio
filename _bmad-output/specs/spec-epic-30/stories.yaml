@@ -143,6 +143,21 @@
     `Texture`, `layoutScene`, `floorSize` and `TILE`. Extend these rather than adding a
     second loader. The eight placeholder frame sets extend scripts/make-placeholder.ts
     and its sheet.
+    From 30-3 (gate 2026-10-19, replan queue): read the landed store
+    (src/live/store.ts `createOfficeStore`, mounted module-level in App.tsx) and extend
+    it rather than add a second one. A run row may hold `state: null` (seen in
+    office.progress before its office.run) and `engine_run_id: null`, with an empty
+    epic and no stories. Render those as pending and "—", and count live runs as
+    App.tsx does. Block If (plan 30-4): the projection carries no agent reason, no
+    ended run and no PR. Halt blocked unless the operator's ruling on the replan
+    queue's 30-3 operator entry is recorded.
+    Operator ruling (2026-10-19, session 11, recorded here as the replan queue's 30-3
+    operator entry): not blocked. Extend the office projection additively, as supervisor
+    surfaces (AD-2): office.agent carries a reason (the projection's reason text) for
+    waiting-for-human and blocked; the snapshot and office.run carry the project's last
+    ended run as last_run {run_id, state, pr, ended_at}; the contract's section 1 web
+    surfaces note bumps to 0.1.25 (additive) alongside 30-5's /board; the store mirrors
+    both and renders the null seams as pending.
 
 - id: "30-5-the-board-screen"
   title: "The Board Screen"
@@ -209,6 +224,9 @@
     files git would commit, record the in-worktree gate unverifiable-here with the
     command, and treat the host leg `uv run python tools/verify_host.py` as binding.
     When `/` serves index.html, keep the absolute asset base that 30-2 settles.
+    From 30-3 (gate 2026-10-19, replan queue): store run rows may hold `state: null`
+    and `engine_run_id: null`; when the Status screen counts or lists live runs from
+    the store, filter `state !== null && LIVE_RUN_STATES.has(state)` as App.tsx does.
 
 - id: "30-7-our-own-assets"
   title: "Our Own Assets"

@@ -147,3 +147,24 @@
 - What no longer holds: nothing in the acceptance criteria. "the placeholder sheet of Story 30.1 is deleted" also retires its generator and the `sprites` script.
 - Suggested adjustment: Delete `make-placeholder.ts`, `placeholder.png` and the `sprites` script, then repoint `loadSheet`/`SHEET_URL` at `office.png` and its atlas. Use the /tmp-copy verify rule.
 - Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-19)
+
+## 30-4-the-office-screen — scope: stories — from 30-3-the-live-stream-in-the-browser — 2026-10-19
+
+- What changed: the store (`apps/studio-web/src/live/store.ts`, `createOfficeStore`, `LiveState {view, lastId, status}`) mirrors `OfficeRun.state` as `string | null`. A run first seen in `office.progress`, or in an `office.run` for an unseen run, is a row with `state: null` (progress-born rows only), `engine_run_id: null`, and possibly an empty epic and no stories. Any applied delta sets `status: "live"`.
+- What no longer holds: nothing in the acceptance criteria on its own. The HUD's "the run id and state … the engine run id" can meet a row whose state and engine run id are null.
+- Suggested adjustment: render `state: null` as pending and `engine_run_id: null` as "—"; count live runs as `App.tsx` does (`state !== null && LIVE_RUN_STATES.has(state)`); extend the 30-3 store rather than add a second one.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-19)
+
+## 30-6-the-status-screen-and-the-home — scope: stories — from 30-3-the-live-stream-in-the-browser — 2026-10-19
+
+- What changed: as above. The store's run rows may hold `state: null` (until its `office.run`) and `engine_run_id: null`.
+- What no longer holds: nothing in the acceptance criteria. "refreshes from the store" reads those rows.
+- Suggested adjustment: when the Status screen counts or lists live runs from the store, filter `state !== null && LIVE_RUN_STATES.has(state)` as `App.tsx` does.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-19)
+
+## operator — scope: operator — from 30-3-the-live-stream-in-the-browser — 2026-10-19
+
+- What changed: nothing in 30-3 caused this. Planning 30-4 against the landed 30-3 store found that the 0.1.24 office projection (`GET /office`, `GET /office/events`, mirrored in `store.ts`) carries no per-agent reason, no ended run and no PR. `OfficeAgent` is `{agent_id, project, role, state, current_run, current_story}`. `runs` holds live runs only (`office.ts:283` `selectRun`). The reasons and PRs live in queue events (`awaiting-ruling {story_key, reason}`, `paused` `detail.pr`), served only by `GET /runs/{id}` and `GET /jobs`.
+- What no longer holds: 30.4 AC1 "naming what it waits for (the projection's reason)" and AC2 "with no live run it shows the last ended run's end state and PR link". Both read data the web's 0.1.24 surfaces lack, and SPEC Constraints limit the web to those surfaces plus `/board` and `/status`.
+- Suggested adjustment: choose one before 30-4 runs. (a) Extend the projection additively in 30-4: an optional `reason` on agent rows and `office.agent`, plus a per-project `last_run {run_id, state, pr}` in the snapshot. This touches `apps/supervisor` and the contract §1 table; fold it into 30.5's 0.1.25 bump, and the epic narrative needs a correct-course line. (b) Let the web read `GET /runs/{id}` (cookie GET, exists) for the reason and PR, and name it in 0.1.25's web surfaces. (c) Narrow AC1/AC2: the bubble names what the store carries (the run's `paused` state and the current story), and the ended-run line waits for 30.5's `GET /board` (each story's latest run, state and PR). Plan 30-4 records this as its Block If.
+- Status: open — needs bmad-correct-course

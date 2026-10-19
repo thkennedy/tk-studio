@@ -7,6 +7,9 @@ baseline_revision: '9f9458d88c6974b72132dd5b0454a6f8ba5876d3'
 deviation_score: 2
 review_loop_iteration: 0
 followup_review_recommended: false
+# Operator ruling 2026-10-19 (session 11): the story stands; 30-4 extends the office projection additively
+# (agent reason, last ended run with its PR; contract 0.1.25) and the ruling is recorded in its replan note.
+reconcile_verdict: adjust-stories
 context:
   - '{project-root}/_bmad-output/specs/spec-epic-30/plans/30-3.md'
   - '{project-root}/_bmad-output/specs/spec-epic-30/SPEC.md'
@@ -198,3 +201,17 @@ DRIFT: office.run for an unseen live run creates a row (engine_run_id null, empt
 DRIFT: an applied delta, or the browser's own reconnect `open` on a source that has delivered an event, sets status `live` — a Last-Event-ID resume sends no snapshot — affects: none
 DRIFT: exported OFFICE_EVENTS_URL and backoff constants — readability and tests — affects: none
 DRIFT: watchdog reopen gets a snapshot, not a Last-Event-ID replay — a fresh EventSource cannot set the header (plan 30-3 ruling) — affects: none
+
+## Reconcile
+
+### 2026-10-19 — escalate
+
+- Score: 2
+- Reasoning: DRIFT #1 and #3 (`OfficeRun.state: string | null`; an `office.run` for an unseen run creates a row with `engine_run_id: null`, an empty epic and no stories) are seams that 30-4 and 30-6 read. Notes in their `invoke_dev_with` can absorb them (queued below). The other three DRIFT lines touch nothing later. Escalated because 30-4's criteria need data that this story's store, and the 0.1.24 projection it mirrors, do not carry. `OfficeAgent` has no reason field, and the stream holds no ended run and no PR. Meeting those criteria means either a new supervisor or contract field, or the web reading `GET /runs/{id}` / `GET /jobs`. The first contradicts the epic narrative ("extended here only by the board's read"); the second contradicts SPEC Constraints ("The web consumes only the supervisor's own surfaces named in contract §1 (0.1.24…)"). Otherwise 30-4's acceptance criteria must change, and that is the operator's `bmad-correct-course`.
+- Affected: 30-4-the-office-screen — "`waiting-for-human` and `blocked` add a React DOM bubble over the character naming what it waits for (the projection's reason)"
+- Affected: 30-4-the-office-screen — "with no live run it shows the last ended run's end state and PR link"
+- Affected: 30-4-the-office-screen / 30-6-the-status-screen-and-the-home — the store's run rows may hold `state: null`, `engine_run_id: null`, an empty epic and no stories (seam only; queued)
+- Invariant: SPEC.md Constraints bullet 2 (web consumes only contract §1 0.1.24 surfaces plus `/board`, `/status`); epic 30 narrative (§1 extended only by the board's read); no AD contradicted by 30-3 itself
+
+
+Gate: Part A escalate; Part B story accepted, planned 30-4-the-office-screen (Block If: projection carries no agent reason, ended run or PR — operator ruling in the replan queue)
