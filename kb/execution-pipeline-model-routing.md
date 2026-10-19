@@ -104,6 +104,8 @@ Two comparisons check it:
 The shipped defaults in the table above stay as they are until the verdict
 is recorded.
 
+The by-kind record for Epics 20–22 is [trial-record-opus-5-5.md](trial-record-opus-5-5.md).
+
 ### Price table for the trial meter (sourced 2026-09-28)
 
 Source: the Claude API reference bundled with Claude Code 2.1.281 (the
