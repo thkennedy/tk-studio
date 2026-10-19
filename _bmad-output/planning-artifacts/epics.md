@@ -2489,3 +2489,143 @@ So that AD-2 holds: the plugin publishes the contract, the supervisor owns the a
 **Given** the operator's runbook and the supervisor's README
 **When** the story closes
 **Then** runbook §4.5 (the smoke test) signs in with the account and keeps the token path for `curl`; §4.2's table drops the OAuth rows and names nothing new that is a secret (the account record is the store's); §7's smoke table gains the `/agents` and `/office` answers; the README's API table and environment table match the code; `tk-studio doctor` is unchanged
+
+## Epic 30: Studio Web v0: Office, Board, Status
+
+The design spec's §6.3 (`_bmad-output/planning-artifacts/design/studio-design-spec-2026-10-09/README.md`), the first front-end epic, standing on EP-29's account, registry and office projection: a Vite plus React plus TypeScript app born in `apps/studio-web` of the one repository, built to static files the supervisor serves on its own origin behind the session cookie, with one PixiJS v8 canvas for the floor and the characters and React DOM for everything with text in it (D5: no Next.js; desktop and iPad first; a separate phone UI later in EP-34). The renderer spike is story 1 and the epic is quoted after it lands (§10's risk table: a web app is new to the loop). The assets are our own (D6): the spike draws from a placeholder sheet, the asset-authoring story replaces it. Inbox, Issue and Chat screens belong to EP-31 and EP-32; this epic ships Office, Board and Status, and makes the web the home while the read-only page stays as the no-JavaScript fallback. Planned 2026-10-19 (session 11's tail) from the spec; the supervisor surfaces it reads are the contract's §1 "Supervisor surfaces the web consumes" (0.1.24), extended here only by the board's read (AD-2: supervisor surfaces, never plugin surfaces).
+
+### Story 30.1: The Renderer Spike
+
+As the studio's developer,
+I want a first `apps/studio-web` that draws a pixel floor and one character on a PixiJS v8 canvas at the right scale on desktop and iPad,
+So that the pixel-scaling recipe is settled by a landed story before the rest of the web is quoted (D5, §10).
+
+**Acceptance Criteria:**
+
+**Given** the one repository
+**When** the story lands
+**Then** `apps/studio-web` exists as a Vite plus React plus TypeScript project (its own `package.json`, `bun install --frozen-lockfile`, `bun run build` to `apps/studio-web/dist`, `bun run test` with vitest), it is a nested studio project like `apps/supervisor` (its own `.tk-studio/config.yaml`, `verify.host` naming its build and tests), the repository's `tools/verify_host.py` runs its build and tests when `apps/studio-web` changed, and nothing in `apps/supervisor` changes yet
+
+**Given** a browser at device pixel ratio 1, 2 or 3 (desktop and iPad Safari)
+**When** the spike's page opens
+**Then** one PixiJS v8 `Application` fills its container with `resolution` from the device pixel ratio, nearest-neighbour scaling (`TextureSource.scaleMode = "nearest"`), an integer zoom chosen from the ratio and the container's size so a 16-pixel tile renders as a whole number of device pixels, a floor of tiles and one character sprite from a committed placeholder sheet (`apps/studio-web/public/sprites/placeholder.png`, our own pixels, D6) stand on the canvas with crisp edges, and a React DOM HUD over the canvas shows the zoom, the ratio and the frame rate; the recipe is one exported function (`pickZoom(ratio, width, height, tile)`) with unit tests for the three ratios and three container sizes
+
+**Given** the spike landed
+**When** the story closes
+**Then** `kb/studio-web-renderer-spike.md` records the recipe, what each ratio showed on the desktop monitor and the iPad (the operator's attended check, named as such when not yet done), the frame cost of the canvas idle, and the quote for the rest of the epic by analogy with EP-29's per-story price; the design spec's README §6.3 gains one line pointing at the record
+
+### Story 30.2: The Supervisor Serves the Web
+
+As the owner,
+I want the supervisor to serve the built web on its own origin behind the session cookie,
+So that the web needs no second server and no second sign-in (§6.3, D7).
+
+**Acceptance Criteria:**
+
+**Given** `apps/studio-web/dist` present beside the supervisor (built by the release motion's `--app studio-web`, or by hand from the checkout)
+**When** a signed-in browser requests `GET /app` or any path under it
+**Then** the supervisor serves the file from `dist` with the right content type, or `index.html` for a path with no file (the single-page fallback), never a path outside `dist` (`..` and absolute paths answer 404), and every answer carries the session's cache headers; a request with no session answers the sign-in page of Story 29.1 with a return to the requested path; `GET /` keeps serving the read-only page until Story 30.6 moves the home
+
+**Given** no `dist` beside the supervisor
+**When** `GET /app` is requested
+**Then** the answer is 503 `WebNotBuilt` naming the build command, and the read-only page's header says the web is not built; `bun test` covers the directory route, the fallback, the traversal refusal and the missing build
+
+**Given** the release motion
+**When** `tools/release_archive.py run --app studio-web --version X.Y.Z` runs
+**Then** it builds `dist` from the tag, zips it, publishes and records it under the roster's `studio-web` component as the other apps are, and the installer's supervisor slot unpacks it beside the supervisor; the runbook §4 gains the web's row
+
+### Story 30.3: The Live Stream in the Browser
+
+As the operator watching the office,
+I want the web to hold one event stream per tab that survives sleeps and backgrounding,
+So that what the office shows is what the supervisor knows, on desktop and on the iPad (§6.3).
+
+**Acceptance Criteria:**
+
+**Given** a signed-in tab
+**When** the web mounts
+**Then** it opens one `EventSource` on `GET /office/events` (Story 29.3's stream), applies the `event:snapshot` first and every `office.agent`, `office.progress` and `office.run` delta after it into one client store, and reconnects with `Last-Event-ID` after a drop so no delta is lost or applied twice (the store ignores an id at or below the last applied)
+
+**Given** no event for 15 seconds, or the tab returning from the background (`visibilitychange` to visible)
+**When** the watchdog fires
+**Then** the stream is closed and reopened with the last id, the HUD shows "reconnecting" until the snapshot arrives, and the store's state is never cleared in between (iPad Safari backgrounds streams the way iOS does)
+
+**Given** the store
+**When** it is tested
+**Then** vitest covers the snapshot, each delta kind, a duplicate delivery, a gap filled by a resume, and the watchdog's reopen, with a fake `EventSource`
+
+### Story 30.4: The Office Screen
+
+As the operator,
+I want the office floor to show each project's agents as characters whose pose follows their semantic state, with a HUD for the run and the story in flight,
+So that a glance at the screen says what the studio is doing (§6.3, §7.3).
+
+**Acceptance Criteria:**
+
+**Given** the registry's agents for the selected project (`GET /agents?project=<id>`) and the store of Story 30.3
+**When** the Office screen renders
+**Then** each agent is one character at a desk on the PixiJS floor, named by its role, whose pose is one of the eight office states of §7.3 (`offline`, `idle`, `thinking`, `reading`, `typing`, `running`, `waiting-for-human`, `blocked`), each state a distinct, looping frame set from the sheet; a state change swaps the frame set within one frame without a flicker; `waiting-for-human` and `blocked` add a React DOM bubble over the character naming what it waits for (the projection's reason)
+
+**Given** a project with a live run
+**When** the HUD renders
+**Then** it shows the project, the run id and state, the story in flight with its progress (`office.progress`: done, failed and total stories, the current story's phase), the engine run id and the time since the last event; with no live run it shows the last ended run's end state and PR link; a project switcher lists the registry's projects and remembers the choice per browser
+
+**Given** the screen
+**When** it is tested
+**Then** vitest covers the state-to-frames mapping for all eight states, the bubble rule, the HUD's fields from a fixture store, and the project switcher; the canvas is driven through the renderer's exported scene functions so the tests need no WebGL
+
+### Story 30.5: The Board Screen
+
+As the operator,
+I want a board of epics as projects with their stories as phases, the findings draining and the spend against the band, with a Needs-you / Working / Done column,
+So that the plan, the runs and the money are read on one screen (§6.3)
+
+**Acceptance Criteria:**
+
+**Given** the plan directory of a served project (`_bmad-output/planning-artifacts/plan/`, the index and the entities) and the queue's runs and PRs
+**When** a consumer reads `GET /board?project=<id>` (a new supervisor surface, AD-2, named in the contract's §1 web surfaces at 0.1.25)
+**Then** the answer lists the epics with their stories and canonical statuses, each story's latest run (state, PR, host-verify outcome) when one exists, the open deferred-work entries that name the story (the findings), and per epic the metered spend from the ledger's `job-run` events against the epic's band when `.tk-studio/budget-bands.yaml` names one; the answer is cached per plan-directory mtime and rebuilt on change; a project with no plan directory answers an empty board with the reason
+
+**Given** the board
+**When** the Board screen renders
+**Then** epics are rows of phased bars whose segments are their stories coloured by status, the findings count drains as entries close, the spend bar sits against the band, and three columns triage every live run: Needs-you (paused, awaiting a ruling, a red host leg), Working (running), Done (ended today); each item links to the run's PR and names the ruling it waits for when there is one
+
+**Given** the screen
+**When** it is tested
+**Then** `bun test` covers the board surface from a fixture plan directory and queue (statuses, findings, spend, the cache), and vitest covers the rows, the columns and the links from a fixture answer
+
+### Story 30.6: The Status Screen and the Home
+
+As the owner,
+I want the web to be what I land on, with a Status screen that shows what the read-only page shows,
+So that one home serves every device and the old page stays as the fallback without JavaScript (§6.3)
+
+**Acceptance Criteria:**
+
+**Given** the web built and the account signed in
+**When** `GET /` is requested with a session
+**Then** the supervisor answers the web's `index.html` (the Office screen opens by default; the last screen is remembered per browser) and the read-only page moves to `GET /status`, linked from the web's Status screen and answered without JavaScript as today; with no session, `GET /` is the sign-in page; the bearer API and every `/jobs`, `/runs`, `/agents`, `/office` and `/board` route are unchanged
+
+**Given** the Status screen
+**When** it renders
+**Then** it shows the queue's counts and live runs, the agents, the office section, the ledger's last events and the supervisor's version, each from the surfaces the web already reads (no new surface), and refreshes from the store rather than polling
+
+**Given** the move of the home
+**When** the story closes
+**Then** the contract's §1 names `GET /status` as the read-only page's address and `GET /board` among the web surfaces (0.1.25, additive), the runbook §4 and the supervisor README say the web is the home and how to build it, and the status page's tests and the conformance suite's status drive follow the new address
+
+### Story 30.7: Our Own Assets
+
+As the studio's developer,
+I want the floor, the desks and the characters drawn as our own sprite sheet with a documented pipeline,
+So that the office looks like ours and the repository owns every pixel it ships (D6).
+
+**Acceptance Criteria:**
+
+**Given** the art tools on the PC (Adobe Creative Cloud or a tool with agentic or MCP support, the operator's choice named in the record)
+**When** the pipeline is built
+**Then** `apps/studio-web/assets/` holds the source files and `tools/sprites/` a script that exports the committed sheet `apps/studio-web/public/sprites/office.png` plus its JSON atlas (frame names `<role>.<state>.<n>`, 16 by 16 or 32 by 32 tiles, nearest-friendly, no anti-aliased edges), the export is reproducible (the same source gives the same bytes, checked by a test), and the sheet carries the floor, one desk, and every role of the registry in every office state of §7.3 with at least two frames per looping state
+
+**Given** the sheet
+**When** the Office screen uses it
+**Then** the placeholder sheet of Story 30.1 is deleted, the renderer's frame sets come from the atlas by name, and a missing frame for a (role, state) falls back to the role's `idle` frames with a console warning naming the gap; `kb/studio-web-assets.md` records the tool, the pipeline, the format and the credits (none owed: our own work)
