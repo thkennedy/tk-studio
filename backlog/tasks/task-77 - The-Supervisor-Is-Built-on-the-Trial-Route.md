@@ -1,9 +1,10 @@
 ---
 id: TASK-77
 title: The Supervisor Is Built on the Trial Route
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-09-28 02:40'
+updated_date: '2026-10-19 17:54'
 labels:
   - ST-077
 milestone: Opus 5.5 Earns Its Legs, Measured
