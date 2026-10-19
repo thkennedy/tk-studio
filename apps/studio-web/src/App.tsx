@@ -2,18 +2,24 @@
 // React DOM debug HUD over the canvas showing the zoom, the device pixel ratio and the frame rate.
 // Story 30.3: the tab's one office stream folds into one store; the debug HUD shows the stream's status.
 // Story 30.4: the canvas is the Office screen (`office/OfficeScreen.tsx`), fed by that one store.
+// Story 30.5: a minimal Office / Board switch mounting one screen at a time (30.6 adds the remembered screen and the
+// home); both screens read the one store, and the one stream stays open across the switch.
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { createOfficeStore, LIVE_RUN_STATES } from "./live/store";
 import { openOfficeStream } from "./live/stream";
+import { BoardScreen } from "./board/BoardScreen";
 import { OfficeScreen, type CanvasStats } from "./office/OfficeScreen";
 
 /** The tab's one store (module-level: it outlives StrictMode's remount, so the view is never cleared). */
 const officeStore = createOfficeStore();
 const STREAM_LABEL = { live: "stream live", connecting: "connecting", reconnecting: "reconnecting" } as const;
+type Screen = "office" | "board";
+const SCREENS: readonly Screen[] = ["office", "board"];
 
 export function App() {
   const [hud, setHud] = useState<CanvasStats>({ zoom: 0, ratio: window.devicePixelRatio || 1, fps: 0 });
   const live = useSyncExternalStore(officeStore.subscribe, officeStore.getState);
+  const [screen, setScreen] = useState<Screen>("office");
 
   // One EventSource per mount, closed in the cleanup: StrictMode's double mount leaves one open.
   useEffect(() => {
@@ -23,7 +29,14 @@ export function App() {
 
   return (
     <>
-      <OfficeScreen store={officeStore} onStats={setHud} />
+      {screen === "office" ? <OfficeScreen store={officeStore} onStats={setHud} /> : <BoardScreen store={officeStore} />}
+      <nav style={{ position: "fixed", bottom: 8, left: 8, display: "flex", gap: 4, zIndex: 2 }}>
+        {SCREENS.map((s) => (
+          <button key={s} type="button" onClick={() => setScreen(s)} disabled={s === screen} style={{ font: "12px ui-monospace, Menlo, Consolas, monospace" }}>
+            {s === "office" ? "Office" : "Board"}
+          </button>
+        ))}
+      </nav>
       <div
         style={{
           position: "fixed",

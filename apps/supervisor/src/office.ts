@@ -313,6 +313,42 @@ const kindIn = (...kinds: string[]) => (e: { kind: string }) => kinds.includes(e
 const VERIFY_PHASES = new Set(["dev-verify", "review-verify", "committing"]);
 const RULING_KINDS = ["awaiting-ruling", "close-out", "close-out-failed", "engine-resume", "resumed", "paused"];
 
+/** Awaiting a ruling (Story 30.5 exports the rule `analyseRun` uses, for the board): the latest of the
+ * pause/ruling/move-out kinds, when it is `awaiting-ruling` (the page's ruling check, `page.ts`, with `resumed`): a
+ * close-out, a failed close-out, an engine resume or a newer pause ends it. Null otherwise. */
+export function awaitingRuling(events: readonly QueueEvent[]): QueueEvent | null {
+  const last = events.findLast(kindIn(...RULING_KINDS));
+  return last?.kind === "awaiting-ruling" ? last : null;
+}
+
+/** The latest queue `paused` event's engine `paused_reason`, only while that pause stands: no close-out, failed
+ * close-out, engine resume or resume after it (an `awaiting-ruling` does not end a pause), so an earlier, resumed
+ * pause never names a new wait. Null otherwise. */
+export function standingPauseReason(events: readonly QueueEvent[]): string | null {
+  const lastMove = events.findLast(kindIn(...RULING_KINDS.filter((k) => k !== "awaiting-ruling")));
+  const pausedEngine = lastMove?.kind === "paused" ? lastMove.detail?.engine as Record<string, unknown> | undefined : undefined;
+  return str(pausedEngine?.paused_reason);
+}
+
+/** What a waiting run waits for (Story 30.4): the first non-empty of the awaiting ruling's reason, state.json's
+ * `paused_reason`, the latest queue `paused` event's engine `paused_reason` (while that pause stands), the latest
+ * journal escalation's reason (while it stands unresolved). */
+function waitReasonOf(events: readonly QueueEvent[], entries: readonly JournalEntry[], state: Record<string, any> | null): string | null {
+  const escalated = lastIndex(entries, kindIn("story-escalated", "run-paused")) > lastIndex(entries, kindIn("run-resume", "story-escalation-resolved"));
+  return str(awaitingRuling(events)?.detail?.reason)
+    ?? str(state?.paused_reason)
+    ?? standingPauseReason(events)
+    ?? (escalated ? str(entries.findLast(kindIn("story-escalated", "run-paused"))?.reason) : null);
+}
+
+/** A run's wait reason by the office's one rule (`waitReasonOf`; Story 30.5 exports it for the board's triage),
+ * reading the run's journal and state.json; their read problems are the office projection's to report. */
+export function runWaitReason(run: QueueRun, events: readonly QueueEvent[]): string | null {
+  const dir = engineRunDir(run);
+  if (!dir || !existsSync(dir)) return waitReasonOf(events, [], null);
+  return waitReasonOf(events, readJournal(dir).entries, readEngineState(dir).state);
+}
+
 interface RunAnalysis { signals: Omit<OfficeSignals, "run">; epic: OfficeEpic; stories: OfficeStory[]; waitReason: string | null }
 
 /** Progress (AC2, planner ruling on the denominator): the first `stories-validated.count` manifest entries are the
@@ -399,9 +435,8 @@ function analyseRun(run: QueueRun, events: readonly QueueEvent[], problems: stri
   }
   const { epic, stories } = progress(runRoot(run), shownPrefix, entries, state, problems);
 
-  // Awaiting a ruling: the latest of the pause/ruling/move-out kinds is `awaiting-ruling` (the page's ruling
-  // check, `page.ts`, with `resumed`): a close-out, a failed close-out, an engine resume or a newer pause ends it.
-  const awaiting = events.findLast(kindIn(...RULING_KINDS))?.kind === "awaiting-ruling";
+  const ruling = awaitingRuling(events);
+  const awaiting = ruling !== null;
   const escalated = lastIndex(entries, kindIn("story-escalated", "run-paused")) > lastIndex(entries, kindIn("run-resume", "story-escalation-resolved"));
   const pausedReason = state?.paused_reason !== null && state?.paused_reason !== undefined && state?.paused_reason !== "";
   const launchedAt = lastIndex(events, kindIn("launched"));
@@ -420,17 +455,7 @@ function analyseRun(run: QueueRun, events: readonly QueueEvent[], problems: stri
     session = [...open.values()].at(-1) ?? null;
   }
   const phase = epic.current_story ? str((state?.tasks as Record<string, any> | undefined)?.[epic.current_story]?.phase) : null;
-  // What a waiting run waits for (Story 30.4): the first non-empty of the awaiting ruling's reason, state.json's
-  // `paused_reason`, the latest queue `paused` event's engine `paused_reason` (while that pause stands), the latest
-  // journal escalation's reason.
-  // The `paused` event's reason only while that pause stands: no close-out, failed close-out, engine resume or
-  // resume after it (an `awaiting-ruling` does not end a pause), so an earlier, resumed pause never names a new wait.
-  const lastMove = events.findLast(kindIn(...RULING_KINDS.filter((k) => k !== "awaiting-ruling")));
-  const pausedEngine = lastMove?.kind === "paused" ? lastMove.detail?.engine as Record<string, unknown> | undefined : undefined;
-  const waitReason = (awaiting ? str(events.findLast(kindIn(...RULING_KINDS))?.detail?.reason) : null)
-    ?? str(state?.paused_reason)
-    ?? str(pausedEngine?.paused_reason)
-    ?? (escalated ? str(entries.findLast(kindIn("story-escalated", "run-paused"))?.reason) : null);
+  const waitReason = waitReasonOf(events, entries, state);
   return {
     signals: {
       live: LIVE_RUN_STATES.has(run.state), blocked: run.state === "blocked", queued: run.state === "queued",

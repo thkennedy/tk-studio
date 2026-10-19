@@ -78,6 +78,32 @@ functions in `src/office/model.ts` (vitest, `environment: "node"`); the canvas g
   in `localStorage` (`tk-studio.office.project`) and restored when still listed, else the first
   project. A storage that throws keeps the choice in memory only.
 
+## The Board screen (Story 30.5)
+
+`src/board/BoardScreen.tsx` is the second screen: a minimal Office / Board switch in `App.tsx` (bottom left)
+mounts one screen at a time, both fed by the one store and the one stream (30.6 adds the remembered screen and
+the home). The board reads only the supervisor's `GET /board?project=<id>` (absolute, because of `<base
+href="/app/">`; contract 0.1.25), plus the `/agents` project list the Office already reads; the project choice is
+the Office's (`tk-studio.office.project`). The rules are pure functions in `src/board/model.ts` (vitest).
+
+- **The rows.** One row per epic: a phased bar whose segments are its stories in key order, each coloured by its
+  canonical status (`draft`, `ready`, `in-progress`, `blocked`, `review`, `done`, `dropped`; an unknown status
+  reads as `draft`), linking the story's latest run's PR; the open findings count (it drains as entries close);
+  and the spend bar filled against the epic's band (`$spend / $band`, red when over). A `null` band shows the
+  spend alone, with no fill.
+- **The columns.** Needs you, Working, Done, straight from the answer's `triage`: each item names its run, state
+  and story, links its PR and names the ruling it waits for (`waits for: <reason>`) when there is one.
+- **Links.** A PR is a link only when it is `http(s)://` (`safeHref`); anything else is no link.
+- **The read.** `fetchBoard` never throws: a non-200 (naming the supervisor's `error`), a network error or a
+  malformed body (no `plan` object, an epic with no `stories` array, a story with no `findings` array, a triage
+  column that is not an array) is `{ok:false, error}`, shown on the screen. The board is fetched on a project change, again
+  whenever the selected project's runs or `last_run` change in the store (an `office.run` or `office.progress`
+  delta, `refetchKey`; another project's delta does not refetch), and when the window regains focus or the page
+  becomes visible again (a closed finding, a plan edit, new spend or a new local day send no delta), never on a timer.
+  The `/agents` project list is read on mount and again on each such wake while no project is chosen (a failed
+  read, or no project served yet).
+- **No plan.** A project with no plan directory shows the answer's `plan.reason` and the columns.
+
 ## Commands (from `apps/studio-web`)
 
 ```bash
