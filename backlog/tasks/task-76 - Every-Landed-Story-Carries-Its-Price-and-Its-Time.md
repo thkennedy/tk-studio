@@ -1,10 +1,10 @@
 ---
 id: TASK-76
 title: Every Landed Story Carries Its Price and Its Time
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-09-28 02:40'
-updated_date: '2026-09-28 09:39'
+updated_date: '2026-10-19 17:10'
 labels:
   - ST-076
 milestone: Opus 5.5 Earns Its Legs, Measured
