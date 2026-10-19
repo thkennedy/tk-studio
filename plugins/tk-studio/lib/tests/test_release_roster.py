@@ -920,6 +920,10 @@ class ReleaseMotionTestCase(unittest.TestCase):
         self.wheel_version = "0.1.0"
         self.build_env: dict | None = None
         self.build_src: str | None = None
+        # Story 30.2: the studio-web build's bun calls (argv, the tree it
+        # ran in as read then, env)
+        self.bun_calls: list[tuple[list[str], str, dict | None]] = []
+        self.bun_fails: str | None = None
         self.uploaded = b""
         for name, value in (("REPO_ROOT", self.repo), ("ROSTER", self.record),
                             ("PLUGIN_MANIFEST", self.manifest),
@@ -977,6 +981,20 @@ class ReleaseMotionTestCase(unittest.TestCase):
             out.mkdir(parents=True, exist_ok=True)
             (out / f"tk_cli-{self.wheel_version}-py3-none-any.whl").write_bytes(
                 b"wheel " + self.wheel_version.encode())
+            return done()
+        if args[0] == "bun":
+            self.bun_calls.append((list(args),
+                                   (Path(cwd) / "a.txt").read_text("utf-8"),
+                                   kw.get("env")))
+            if self.bun_fails == " ".join(args[1:]):
+                return done(1)
+            if args[1:] == ["run", "build"]:
+                # what vite build leaves: dist/ in the extracted subtree
+                dist = Path(cwd) / "dist"
+                (dist / "assets").mkdir(parents=True, exist_ok=True)
+                (dist / "index.html").write_text(
+                    '<script src="/app/assets/app.js"></script>', "utf-8")
+                (dist / "assets" / "app.js").write_text("app", "utf-8")
             return done()
         if args[:3] == ["gh", "release", "view"]:
             return done(0 if self.release_exists else 1)
@@ -1156,6 +1174,45 @@ class ReleaseMotionTestCase(unittest.TestCase):
         self.assertEqual(result["written"],
                          ["tools/installer/rosters/latest.json"])
 
+    def test_studio_web_cut_builds_dist_from_the_tag(self):
+        # Story 30.2 (AC3): dist is ignored, so the web is built from the
+        # tag's apps/studio-web subtree by bun, and the zip's root is dist's
+        result = release_archive.run(False, app="studio-web", version="0.1.0")
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["asset"], "studio-web-0.1.0.zip")
+        self.assertIn("studio-web--v0.1.0:apps/studio-web",
+                      [a[-1] for a, _ in self.calls if "archive" in a])
+        self.assertEqual([a for a, _, _ in self.bun_calls], [
+            ["bun", "install", "--frozen-lockfile"], ["bun", "run", "build"]])
+        for _, tree, env in self.bun_calls:
+            # in the archived subtree, never the working tree
+            self.assertEqual(tree, "tree studio-web--v0.1.0:apps/studio-web")
+            self.assertEqual(env["SOURCE_DATE_EPOCH"], "1754000000")
+        with zipfile.ZipFile(io.BytesIO(self.uploaded)) as z:
+            self.assertEqual(sorted(z.namelist()),
+                             ["assets/app.js", "index.html"])
+            self.assertIn(b"/app/assets/", z.read("index.html"))
+        roster = json.loads((self.rosters / "latest.json").read_text("utf-8"))
+        self.assertEqual(roster["components"]["studio-web"], {
+            "tag": "studio-web--v0.1.0",
+            "url": "https://github.com/o/r/releases/download/"
+                   "studio-web--v0.1.0/studio-web-0.1.0.zip",
+            "sha256": result["sha256"]})
+        # stable bytes: the same tag rebuilds the same digest
+        self.bun_calls.clear()
+        again = release_archive.run(True, app="studio-web", version="0.1.0")
+        self.assertEqual(again["sha256"], result["sha256"])
+
+    def test_studio_web_bun_failure_publishes_nothing(self):
+        for failing in ("install --frozen-lockfile", "run build"):
+            self.bun_fails = failing
+            before = self._snapshot()
+            failure = self._fails(app="studio-web", version="0.1.0")
+            self.assertIn(f"bun {failing} failed", failure["error"])
+            self.assertEqual([a for a in self._gh_calls() if a[1] == "release"],
+                             [])
+            self.assertEqual(self._snapshot(), before)
+
     def test_cli_wheel_of_another_version_is_refused(self):
         self.wheel_version = "0.0.9"
         before = self._snapshot()
@@ -1284,7 +1341,7 @@ class ReleaseMotionTestCase(unittest.TestCase):
         # asserted against APPS and, for the planned layout, literally
         expected = {"plugin": "tk-studio--v1.2.3:plugins/tk-studio",
                     "supervisor": "supervisor--v0.1.0:apps/supervisor",
-                    "studio-web": "studio-web--v0.1.0:apps/studio-web/dist",
+                    "studio-web": "studio-web--v0.1.0:apps/studio-web",
                     "cli": "cli--v0.1.0:" + release_archive.APPS["cli"][1]}
         self.assertEqual(set(expected), set(release_archive.APPS))
         for app, (prefix, subtree, _kind) in release_archive.APPS.items():

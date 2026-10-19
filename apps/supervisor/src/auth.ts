@@ -114,13 +114,15 @@ export type SignInMode = "create" | "signin";
 /** The sign-in page. No script; nothing of the status page. `create` (no account yet) offers the account creation
  * form (`POST /auth/account`) and no account sign-in form; `signin` offers the account form (`POST /auth/signin`).
  * Both keep the token form (`POST /auth/token`, the operator's own browser) and carry INTENDED_USAGE. A refusal adds only the generic "Sign-in refused."; a refused
- * account field adds the line naming that field; a server without https adds the static NEEDS_HTTPS_NOTE. */
-export function signInPage(opts: { mode: SignInMode; refused?: boolean; needsHttps?: boolean; invalid?: "username" | "password" }): string {
+ * account field adds the line naming that field; a server without https adds the static NEEDS_HTTPS_NOTE. Story 30.2: with
+ * `next` (the requested path and query) each form carries it, escaped, in a hidden `next` field. */
+export function signInPage(opts: { mode: SignInMode; refused?: boolean; needsHttps?: boolean; invalid?: "username" | "password"; next?: string }): string {
+  const next = opts.next ? `<input type="hidden" name="next" value="${esc(opts.next)}">` : "";
   const fields = (action: string, pwAutocomplete: string, button: string) =>
-    `<form method="post" action="${action}"><label for="username">Username</label><input type="text" id="username" name="username" autocomplete="username" pattern="[A-Za-z0-9._-]{3,64}" required>`
+    `<form method="post" action="${action}">${next}<label for="username">Username</label><input type="text" id="username" name="username" autocomplete="username" pattern="[A-Za-z0-9._-]{3,64}" required>`
     + `<label for="password">Password</label><input type="password" id="password" name="password" autocomplete="${pwAutocomplete}" minlength="${PASSWORD_MIN}" required>`
     + `<button type="submit">${esc(button)}</button></form>`;
-  const token = `<form method="post" action="/auth/token"><label for="token">API token</label><input type="password" id="token" name="token" autocomplete="current-password" required><button type="submit">Sign in with the token</button></form>`;
+  const token = `<form method="post" action="/auth/token">${next}<label for="token">API token</label><input type="password" id="token" name="token" autocomplete="current-password" required><button type="submit">Sign in with the token</button></form>`;
   const forms = opts.mode === "create"
     ? `<p>No account yet: create the owner's account.</p>\n${fields("/auth/account", "new-password", "Create account")}\n${token}`
     : `${fields("/auth/signin", "current-password", "Sign in")}\n${token}`;

@@ -15,6 +15,7 @@ import { isTerminal, type Holder, type LockRow, type Queue, type QueueEvent, typ
 import { projectOffice, type OfficeHub, type OfficeView } from "./office";
 import { readAgents, type AgentRow } from "./registry";
 import { readProjectConfig } from "./server";
+import { WEB_BUILD_COMMAND, webRoot, type WebOptions } from "./web";
 
 type Env = Record<string, string | undefined>;
 
@@ -30,6 +31,8 @@ export interface PageDeps {
   ledger?: { user: string; machine: string };
   /** Story 29.3: the office hub (its graced snapshot); absent, the raw projection (`projectOffice`). */
   office?: OfficeHub;
+  /** Story 30.2: where the studio web is looked for (`webRoot`; default the installed slot, else the checkout). */
+  web?: WebOptions;
 }
 
 /** A lock's holder, as a waiting run names it (`/status` and the page alike). */
@@ -79,6 +82,8 @@ export interface PageData {
   agents?: { rebuilt_at: string | null; byProject: Record<string, AgentRow[]> };
   /** Story 29.3: the office projection (the live runs, each agent's state). Absent: the section notes none. */
   office?: OfficeView;
+  /** Story 30.2: whether the studio web is built (`webRoot` found an `index.html`). Not built: one note under the header. */
+  web?: { built: boolean };
   /** For the renderer's redaction. */
   secrets: { token: string; env: Env };
 }
@@ -279,7 +284,8 @@ export async function gatherPage(deps: PageDeps): Promise<PageData> {
 
   return {
     generated: new Date().toISOString(), counts, jobs: queue.jobs(), runs, runsOmitted: Math.max(0, all.length - shown.length),
-    locks, statusBlocks, ledger, registry, agents: { rebuilt_at: read.rebuilt_at, byProject }, office, secrets: { token: deps.token, env },
+    locks, statusBlocks, ledger, registry, agents: { rebuilt_at: read.rebuilt_at, byProject }, office,
+    web: { built: webRoot(deps.web ?? {}) !== null }, secrets: { token: deps.token, env },
   };
 }
 
@@ -494,7 +500,7 @@ ${lines ? `<ul>${lines}</ul>` : note(elsewhere(r.project))}</div>`;
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>tk-studio supervisor</title><style>${CSS}</style></head>
-<body><h1>tk-studio supervisor</h1><p class="meta">generated ${t(data.generated)} · ${counts}</p>
+<body><h1>tk-studio supervisor</h1><p class="meta">generated ${t(data.generated)} · ${counts}</p>${data.web && !data.web.built ? note(`The web is not built: ${WEB_BUILD_COMMAND}`) : ""}
 <section id="jobs"><h2>Jobs</h2>${jobs}</section>
 <section id="runs"><h2>Runs</h2>${runs}</section>
 <section id="locks"><h2>Kept locks</h2>${locks}</section>
