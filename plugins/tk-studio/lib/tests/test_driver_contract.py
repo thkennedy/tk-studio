@@ -100,8 +100,9 @@ class DriverContractTestCase(unittest.TestCase):
         # 0.1.23 is Story 28.6's (main; a merge inserts its clause);
         # 0.1.24 names the studio web as a consumer and documents the
         # supervisor surfaces it reads in §1 (Story 29.4, additive — AD-2:
-        # the supervisor's, never the plugin's)
-        self.assertRegex(self.text, r"\*\*0\.1\.24\*\*")
+        # the supervisor's, never the plugin's); 0.1.25 extends the office
+        # projection with `reason` and `last_run` (Story 30.4, additive)
+        self.assertRegex(self.text, r"\*\*0\.1\.25\*\*")
         self.assertIn("### 5.1 Execution-pipeline legs", self.text)
         self.assertIn("lib/pipeline.py", self.text)
         self.assertIn("Change policy", self.text)
@@ -322,7 +323,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_23_header_and_starter_lock_section(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        # 0.1.24 (Story 29.4) heads the header since the EP-29 merge; the 0.1.23 clause stays
+        # 0.1.25 (Story 30.4) heads the header; the 0.1.23 clause stays
         self.assertIn("0.1.23 (Story 28.6)", header)
         self.assertNotIn("**0.1.22**", header)
         self.assertNotIn("**0.1.23**", header)
@@ -373,8 +374,9 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_24_names_the_web_and_the_supervisor_surfaces(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.24**", header)
-        for older in ("**0.1.22**", "**0.1.23**"):
+        # 0.1.25 (Story 30.4) heads the header now; the 0.1.24 clause stays
+        self.assertIn("**0.1.25**", header)
+        for older in ("**0.1.22**", "**0.1.23**", "**0.1.24**"):
             self.assertNotIn(older, header)
         self.assertNotIn("0.2.0 (", header)
         self.assertLess(header.index("0.1.22 (Story 28.2)"),
@@ -449,6 +451,52 @@ class DriverContractTestCase(unittest.TestCase):
         for phrase in ("studio supervisor", "status page", "studio web",
                        "Hermes", "front door", "grows no UI"):
             self.assertIn(phrase, row6)
+
+    # --- Story 30.4: 0.1.25 extends the office projection additively
+    # (`reason` on agent rows and `office.agent`, `last_run` on the snapshot
+    # and on a terminal run's leaving `office.run`); supervisor surfaces,
+    # never plugin surfaces (AD-2). 30.5 adds `GET /board` to this entry.
+
+    def test_0_1_25_extends_the_office_projection_additively(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.25**", header)
+        self.assertNotIn("**0.1.24**", header)
+        self.assertNotIn("0.2.0 (", header)
+        self.assertLess(header.index("0.1.24 (Story 29.4)"),
+                        header.index("0.1.25 (Story 30.4)"))
+        clause = " ".join(header[header.index("0.1.25 (Story 30.4)"):].split())
+        for phrase in ("`reason`", "`office.agent`", "`last_run`",
+                       "`{run_id, state, pr, ended_at}`", "`office.run`",
+                       "`GET /office`", "Story 30.5 adds `GET /board`",
+                       "never plugin surfaces",
+                       "nothing in the plugin's own surfaces changes",
+                       "— additive"):
+            self.assertIn(phrase, clause)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 30.4", stories)
+        # the section keeps its 0.1.24 heading and the pinned office.run
+        # sentence, and gains the 0.1.25 note
+        title = "### Supervisor surfaces the web consumes (0.1.24)"
+        start = self.text.index(title)
+        end = self.text.index("\n### ", start + len(title))
+        section = " ".join(self.text[start:end].split())
+        self.assertIn("`office.run` fires when a run appears in the live "
+                      "set (`from` `null`), changes state, or leaves the "
+                      "live set (`state` its queue state, `null` when the "
+                      "run is gone; `from` its last live state)", section)
+        note = section[section.index("**0.1.25 (Story 30.4, additive).**"):]
+        for phrase in ("`reason`", "`waiting-for-human`", "`blocked`",
+                       "a change of `reason` alone fires `office.agent`",
+                       "`last_run`, keyed by project",
+                       "`{run_id, state, pr, ended_at}`", "`pr` `null`",
+                       "has no entry", "leaving the live set terminal",
+                       "Existing fields, kinds, ids and the rules below "
+                       "are unchanged"):
+            self.assertIn(phrase, note)
+        self.assertLess(section.index("**0.1.25 (Story 30.4, additive).**"),
+                        section.index("**The rules a consumer may rely on**"))
 
     def test_section_8_names_the_cli_drives(self):
         section = self.text[self.text.index("## 8. Conformance"):]
