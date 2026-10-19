@@ -27,9 +27,9 @@
       }
     },
     "supervisor": {
-      "tag": "supervisor--v0.1.1",
-      "url": "https://github.com/thkennedy/tk-studio/releases/download/supervisor--v0.1.1/supervisor-0.1.1.zip",
-      "sha256": "46dcb5b0011891ed8f6ce0deb2ced3418bfaabd2ba68682307b43cedec7507df"
+      "tag": "supervisor--v0.1.2",
+      "url": "https://github.com/thkennedy/tk-studio/releases/download/supervisor--v0.1.2/supervisor-0.1.2.zip",
+      "sha256": "aff0cedc23c03eae8f28309840cca228625ad7b5f6524be1f215adbf7399aa2b"
     },
     "cli": {
       "tag": "cli--v0.1.2",
