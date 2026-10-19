@@ -29,3 +29,19 @@ apps/supervisor/_bmad/render/
 apps/supervisor/_bmad/config.user.yaml
 apps/supervisor/_bmad-output/implementation-artifacts/supervision/
 apps/supervisor/.bmad-loop/archive/
+# apps/studio-web (Story 30.1): the nested project's own ignore entries, mirrored from
+# apps/studio-web/.gitignore (which stays; git honours both), plus its build output.
+apps/studio-web/.tk-studio/config.local.yaml
+apps/studio-web/**/node_modules/
+apps/studio-web/**/*.tsbuildinfo
+apps/studio-web/**/.env
+apps/studio-web/**/.env.*
+apps/studio-web/dist/
+apps/studio-web/.bmad-loop/runs/
+apps/studio-web/.bmad-loop/cache/
+apps/studio-web/.bmad-loop/policy.toml
+apps/studio-web/.bmad-loop/routing.current.json
+apps/studio-web/_bmad/render/
+apps/studio-web/_bmad/config.user.yaml
+apps/studio-web/_bmad-output/implementation-artifacts/supervision/
+apps/studio-web/.bmad-loop/archive/

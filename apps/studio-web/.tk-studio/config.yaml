@@ -1,0 +1,30 @@
+# tk-studio project configuration — tracked, shared with the team (AD-15).
+# Machine paths and credentials never land here (AD-3); per-dev values go in
+# config.local.yaml (ignored). Resolution: runtime > config.local.yaml > this
+# file > ~/.tk-studio/config.yaml > studio defaults shipped with the plugin.
+
+# Stable project identity for the registry (AD-20). Born nested in
+# tk-studio/apps/studio-web (Story 30.1, D5): the nested studio project is
+# `studio-web`, its store ~/.tk-studio/projects/studio-web/.
+project_id: studio-web
+
+# Version control this project's team-shared data binds to (AD-18): git | perforce
+vcs: git
+
+# Role-keyed working sets (AD-17) — one entry per role.
+working_set:
+  developer:
+    - bmm
+    - tea
+    - bmad-loop
+
+# Planning backend (AD-4): the canonical plan lives in tk-studio; this
+# nested project keeps plain canonical files only.
+planning:
+  backend: bmad-files
+
+# The host verify leg (Story 27.4) — one command line (split on whitespace,
+# "…"/'…' grouping, never a shell). The `&&` lives in package.json's
+# `verify` script (vite build, then vitest run), never here.
+verify:
+  host: bun run verify

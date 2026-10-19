@@ -105,3 +105,45 @@
 - What no longer holds: 24.2 AC1, "When each story lands Then … its Story 24.1 record exists", for the three pre-meter stories. SPEC Open Question 1 (retro-price Epic 20, or limit CAP-6 to stories landed after the meter) was never ruled on. 24-2's contract declined to record anything.
 - Suggested adjustment: one of these. (a) Accept the three as unmet by construction and mark AC1 satisfied by reference to the handoff figures. (b) Retro-record 20-2 from the surviving host run dir `/c/GitHub/tk-studio/.bmad-loop/runs/20260928-090746-8360` (`meter.py story … --repo-root .`, which records) and accept 20-1/21-1 as not recoverable. There is no run dir for either on this box. (c) Correct-course CAP-6 / AC1 to the stories landed after the meter. Either way, run the sandbox check above for 21-2 to 22-5. Then resume the run. The next gate plans 24-3 and applies the 24-4 entry above.
 - Status: open — needs bmad-correct-course
+
+## 30-2-the-supervisor-serves-the-web — scope: stories — from 30-1-the-renderer-spike — 2026-10-19
+
+- What changed: `apps/studio-web`'s `bun run verify` is `bun install --frozen-lockfile && bun run build && bun run test` (30-1's consult-ruled loopback). The engine sandbox refuses symlinks, so 30-1 verified bun in a /tmp copy of the committed files. `vite.config.ts` has `base: "./"`. `dist/` is ignored, so no tag holds it.
+- What no longer holds: "or `index.html` for a path with no file (the single-page fallback)": relative asset URLs break below `/app/`. "builds `dist` from the tag": `tools/release_archive.py` archives `apps/studio-web/dist` at the tag, which is absent there.
+- Suggested adjustment: Serve the web under an absolute `/app/` base (vite `base`, and mind `api.ts:580`'s trailing-slash strip). Build `dist` in the release from the tag's `apps/studio-web` (frozen install, then build), as `_build_wheel` does. Use the sandbox /tmp-copy verify rule.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-19)
+
+## 30-3-the-live-stream-in-the-browser — scope: stories — from 30-1-the-renderer-spike — 2026-10-19
+
+- What changed: `apps/studio-web`'s `bun run verify` is `bun install --frozen-lockfile && bun run build && bun run test` (30-1's consult-ruled loopback). The engine sandbox refuses symlinks, so 30-1 verified bun in a /tmp copy of the committed files.
+- What no longer holds: nothing in the acceptance criteria; the verify seam only.
+- Suggested adjustment: A new web dependency regenerates `bun.lock`. Use the /tmp-copy verify rule; `tools/verify_host.py` on the host is binding.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-19)
+
+## 30-4-the-office-screen — scope: stories — from 30-1-the-renderer-spike — 2026-10-19
+
+- What changed: `apps/studio-web`'s `bun run verify` is `bun install --frozen-lockfile && bun run build && bun run test` (30-1's consult-ruled loopback). The engine sandbox refuses symlinks, so 30-1 verified bun in a /tmp copy of the committed files. `scene.ts` exports `loadSheet`/`SHEET_URL` (the one loader), `drawFloor`/`placeCharacter` taking a `Texture`, `layoutScene`, `floorSize` and `TILE`.
+- What no longer holds: nothing in the acceptance criteria. "the canvas is driven through the renderer's exported scene functions" now names these landed signatures.
+- Suggested adjustment: Extend the landed `scene.ts` functions rather than add a second loader. The eight placeholder frame sets extend `scripts/make-placeholder.ts`. Use the /tmp-copy verify rule.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-19)
+
+## 30-5-the-board-screen — scope: stories — from 30-1-the-renderer-spike — 2026-10-19
+
+- What changed: `apps/studio-web`'s `bun run verify` is `bun install --frozen-lockfile && bun run build && bun run test` (30-1's consult-ruled loopback). The engine sandbox refuses symlinks, so 30-1 verified bun in a /tmp copy of the committed files.
+- What no longer holds: nothing in the acceptance criteria; the verify seam only.
+- Suggested adjustment: A new web dependency regenerates `bun.lock`. Use the /tmp-copy verify rule.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-19)
+
+## 30-6-the-status-screen-and-the-home — scope: stories — from 30-1-the-renderer-spike — 2026-10-19
+
+- What changed: `apps/studio-web`'s `bun run verify` is `bun install --frozen-lockfile && bun run build && bun run test` (30-1's consult-ruled loopback). The engine sandbox refuses symlinks, so 30-1 verified bun in a /tmp copy of the committed files. The asset base is settled by 30-2.
+- What no longer holds: nothing in the acceptance criteria. "the supervisor answers the web's `index.html`" at `/` relies on an absolute asset base.
+- Suggested adjustment: Keep 30-2's absolute asset base when `/` serves `index.html`. Use the /tmp-copy verify rule.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-19)
+
+## 30-7-our-own-assets — scope: stories — from 30-1-the-renderer-spike — 2026-10-19
+
+- What changed: `apps/studio-web`'s `bun run verify` is `bun install --frozen-lockfile && bun run build && bun run test` (30-1's consult-ruled loopback). The engine sandbox refuses symlinks, so 30-1 verified bun in a /tmp copy of the committed files. The placeholder comes from `scripts/make-placeholder.ts` (the `sprites` package script), and `scene.ts`'s `loadSheet`/`SHEET_URL` loads it.
+- What no longer holds: nothing in the acceptance criteria. "the placeholder sheet of Story 30.1 is deleted" also retires its generator and the `sprites` script.
+- Suggested adjustment: Delete `make-placeholder.ts`, `placeholder.png` and the `sprites` script, then repoint `loadSheet`/`SHEET_URL` at `office.png` and its atlas. Use the /tmp-copy verify rule.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-19)
