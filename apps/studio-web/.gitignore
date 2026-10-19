@@ -1,0 +1,18 @@
+.tk-studio/config.local.yaml
+# Bun / TypeScript / Vite
+node_modules/
+*.tsbuildinfo
+.env
+.env.*
+# the build output: never committed (the release motion builds it from the tag)
+dist/
+# bmad-loop (engine state, machine-local policy, rendered skills, routing snapshot)
+.bmad-loop/runs/
+.bmad-loop/cache/
+.bmad-loop/policy.toml
+.bmad-loop/routing.current.json
+_bmad/render/
+_bmad/config.user.yaml
+_bmad-output/implementation-artifacts/supervision/
+
+.bmad-loop/archive/

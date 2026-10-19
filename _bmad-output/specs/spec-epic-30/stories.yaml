@@ -55,6 +55,20 @@
     `30-2-the-supervisor-serves-the-web-*.md`, and a file named
     `30-2-the-supervisor-serves-the-web.md` is read as pending (loop deficiency 1, story
     21-6).
+    From 30-1 (gate 2026-10-19, replan queue): apps/studio-web's `bun run verify` is
+    `bun install --frozen-lockfile && bun run build && bun run test`, so a new web
+    dependency regenerates and commits apps/studio-web/bun.lock. The engine sandbox
+    refuses symlinks (`bun install` EPERM): verify bun in a /tmp copy of exactly the
+    files git would commit, record the in-worktree gate unverifiable-here with the
+    command, and treat the host leg `uv run python tools/verify_host.py` as binding.
+    Also: apps/studio-web/vite.config.ts `base: "./"` breaks deep paths served through
+    the index.html fallback (assets resolve below /app/a/), and
+    apps/supervisor/src/api.ts:580 strips trailing slashes; serve the web under an
+    absolute `/app/` base. tools/release_archive.py archives `apps/studio-web/dist` at
+    the tag, but dist is ignored and absent there: build it from the tag's
+    apps/studio-web (install from the frozen lockfile, then build), as `_build_wheel` does for the
+    cli. Oversize (plan 30-2, band L): halt blocked if the Files list grows past the
+    plan's eleven.
 
 - id: "30-3-the-live-stream-in-the-browser"
   title: "The Live Stream in the Browser"
@@ -82,6 +96,12 @@
     `30-3-the-live-stream-in-the-browser-*.md`, and a file named
     `30-3-the-live-stream-in-the-browser.md` is read as pending (loop deficiency 1,
     story 21-6).
+    From 30-1 (gate 2026-10-19, replan queue): apps/studio-web's `bun run verify` is
+    `bun install --frozen-lockfile && bun run build && bun run test`, so a new web
+    dependency regenerates and commits apps/studio-web/bun.lock. The engine sandbox
+    refuses symlinks (`bun install` EPERM): verify bun in a /tmp copy of exactly the
+    files git would commit, record the in-worktree gate unverifiable-here with the
+    command, and treat the host leg `uv run python tools/verify_host.py` as binding.
 
 - id: "30-4-the-office-screen"
   title: "The Office Screen"
@@ -108,6 +128,17 @@
     executor spec as `stories/30-4-the-office-screen-spec.md` in the spec folder; the
     engine resolves it by the glob `30-4-the-office-screen-*.md`, and a file named
     `30-4-the-office-screen.md` is read as pending (loop deficiency 1, story 21-6).
+    From 30-1 (gate 2026-10-19, replan queue): apps/studio-web's `bun run verify` is
+    `bun install --frozen-lockfile && bun run build && bun run test`, so a new web
+    dependency regenerates and commits apps/studio-web/bun.lock. The engine sandbox
+    refuses symlinks (`bun install` EPERM): verify bun in a /tmp copy of exactly the
+    files git would commit, record the in-worktree gate unverifiable-here with the
+    command, and treat the host leg `uv run python tools/verify_host.py` as binding.
+    Drive the canvas through the landed apps/studio-web/src/renderer/scene.ts:
+    `loadSheet` (the one loader, `SHEET_URL`), `drawFloor` and `placeCharacter` taking a
+    `Texture`, `layoutScene`, `floorSize` and `TILE`. Extend these rather than adding a
+    second loader. The eight placeholder frame sets extend scripts/make-placeholder.ts
+    and its sheet.
 
 - id: "30-5-the-board-screen"
   title: "The Board Screen"
@@ -134,6 +165,12 @@
     executor spec as `stories/30-5-the-board-screen-spec.md` in the spec folder; the
     engine resolves it by the glob `30-5-the-board-screen-*.md`, and a file named
     `30-5-the-board-screen.md` is read as pending (loop deficiency 1, story 21-6).
+    From 30-1 (gate 2026-10-19, replan queue): apps/studio-web's `bun run verify` is
+    `bun install --frozen-lockfile && bun run build && bun run test`, so a new web
+    dependency regenerates and commits apps/studio-web/bun.lock. The engine sandbox
+    refuses symlinks (`bun install` EPERM): verify bun in a /tmp copy of exactly the
+    files git would commit, record the in-worktree gate unverifiable-here with the
+    command, and treat the host leg `uv run python tools/verify_host.py` as binding.
 
 - id: "30-6-the-status-screen-and-the-home"
   title: "The Status Screen and the Home"
@@ -161,6 +198,13 @@
     `30-6-the-status-screen-and-the-home-*.md`, and a file named
     `30-6-the-status-screen-and-the-home.md` is read as pending (loop deficiency 1,
     story 21-6).
+    From 30-1 (gate 2026-10-19, replan queue): apps/studio-web's `bun run verify` is
+    `bun install --frozen-lockfile && bun run build && bun run test`, so a new web
+    dependency regenerates and commits apps/studio-web/bun.lock. The engine sandbox
+    refuses symlinks (`bun install` EPERM): verify bun in a /tmp copy of exactly the
+    files git would commit, record the in-worktree gate unverifiable-here with the
+    command, and treat the host leg `uv run python tools/verify_host.py` as binding.
+    When `/` serves index.html, keep the absolute asset base that 30-2 settles.
 
 - id: "30-7-our-own-assets"
   title: "Our Own Assets"
@@ -186,3 +230,12 @@
     executor spec as `stories/30-7-our-own-assets-spec.md` in the spec folder; the
     engine resolves it by the glob `30-7-our-own-assets-*.md`, and a file named
     `30-7-our-own-assets.md` is read as pending (loop deficiency 1, story 21-6).
+    From 30-1 (gate 2026-10-19, replan queue): apps/studio-web's `bun run verify` is
+    `bun install --frozen-lockfile && bun run build && bun run test`, so a new web
+    dependency regenerates and commits apps/studio-web/bun.lock. The engine sandbox
+    refuses symlinks (`bun install` EPERM): verify bun in a /tmp copy of exactly the
+    files git would commit, record the in-worktree gate unverifiable-here with the
+    command, and treat the host leg `uv run python tools/verify_host.py` as binding. The
+    placeholder pipeline to retire is apps/studio-web/scripts/make-placeholder.ts,
+    public/sprites/placeholder.png and the `sprites` package script. Repoint
+    `loadSheet`/`SHEET_URL` in src/renderer/scene.ts at office.png and its atlas.

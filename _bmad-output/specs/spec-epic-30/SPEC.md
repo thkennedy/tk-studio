@@ -119,3 +119,7 @@ A vision plus a mandate. The design spec's §6.3 is the first front-end epic, st
 - 30.7 names the operator's art tool (Adobe Creative Cloud or an agentic/MCP tool) as the operator's choice, and a headless dev session cannot drive Adobe CC: may the loop author the source files in a tool-neutral format its own script can export (layered PNGs or a generator under `tools/sprites/`), recording that as the tool of record, or does 30.7 wait for an attended ruling naming the tool?
 - Does the engine sandbox reach the npm registry for `bun install` of pixi.js, react, vite and vitest (30.1 is the first story to need it), or must a package cache be provisioned on the box first (runbook)?
 - 30.6 names "the conformance suite's status drive": the contract (0.1.20) documents a CLI doctor drive, and the supervisor's own tests cover the status page; which suite's drive follows the new `/status` address: `apps/supervisor`'s `conformance.ts` self-check, the plugin's runner, or both?
+
+## Design notes (settled shape, planner, 2026-10-19)
+
+- 30.2 — the studio-web release asset: deferred entry — `components["studio-web"] = {tag: "studio-web--vX.Y.Z", url, sha256, source}`, written by the operator's `tools/release_archive.py run --app studio-web` as for the other zip apps; the zip's root holds `dist`'s contents (`index.html` at the root), unpacked by the installer into `<root>/studio-web/<ver>/` and pointed at by `current.json` — per `_bmad-output/planning-artifacts/architecture/architecture-tk-studio-2026-07-26/ARCHITECTURE-SPINE.md` §AD-21
