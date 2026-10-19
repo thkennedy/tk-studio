@@ -278,7 +278,7 @@ export async function gatherPage(deps: PageDeps): Promise<PageData> {
   // Story 29.3: the office projection — files and the queue read only.
   let office: OfficeView;
   try { office = deps.office ? deps.office.snapshot() : projectOffice(queue); }
-  catch (e) { office = { at: new Date().toISOString(), agents: [], runs: [], problems: [`OfficeProjectionFailed: ${e instanceof Error ? e.message : String(e)}`] }; }
+  catch (e) { office = { at: new Date().toISOString(), agents: [], runs: [], problems: [`OfficeProjectionFailed: ${e instanceof Error ? e.message : String(e)}`], last_run: {} }; }
   // Every office problem without a machine path (AD-15; the projection already names run-relative paths).
   office = { ...office, problems: office.problems.map((p) => machinePathsOut(p, store, env)) };
 

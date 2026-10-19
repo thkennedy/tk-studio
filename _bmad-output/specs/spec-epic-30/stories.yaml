@@ -190,6 +190,16 @@
     refuses symlinks (`bun install` EPERM): verify bun in a /tmp copy of exactly the
     files git would commit, record the in-worktree gate unverifiable-here with the
     command, and treat the host leg `uv run python tools/verify_host.py` as binding.
+    From 30-4 (gate 2026-10-19, replan queue): 30.4 took the 0.1.25 bump; the header
+    clause `0.1.25 (Story 30.4)` already says "Story 30.5 adds `GET /board` to this same
+    0.1.25 entry" and test_driver_contract.py pins it. Append `GET /board` to that
+    clause and to the §1 web-surfaces table and note with no second bump and no
+    rewording of the 30.4 text (SPEC Assumptions' "30.5 takes the one bump" no longer
+    holds); pin the new text by its own phrases. Count live runs as `state !== null &&
+    LIVE_RUN_STATES.has(state)`; Done (ended today) comes from the `/board` answer, not
+    the store's `last_run` (newest terminal run per project only). Reuse
+    src/office/model.ts (`FetchLike`, `fetchAgents`' never-throw shape,
+    `rememberedProject`/`PROJECT_KEY`, `safeHref`, `NONE`).
 
 - id: "30-6-the-status-screen-and-the-home"
   title: "The Status Screen and the Home"
@@ -227,6 +237,14 @@
     From 30-3 (gate 2026-10-19, replan queue): store run rows may hold `state: null`
     and `engine_run_id: null`; when the Status screen counts or lists live runs from
     the store, filter `state !== null && LIVE_RUN_STATES.has(state)` as App.tsx does.
+    From 30-4 (gate 2026-10-19, replan queue): append `GET /status` to the existing
+    `0.1.25 (Story 30.4)` header clause (30.5 appends `/board`) with no bump, pinned by
+    its own phrases. The Pixi canvas lives in src/office/OfficeScreen.tsx (stats via
+    `onStats`); App.tsx keeps the store, the one stream and the debug lines. Switch
+    screens by mounting OfficeScreen, never a second Pixi Application; remember the last
+    screen with an injectable-storage helper modelled on `rememberedProject`. A
+    from-null `office.run` may carry a never-live terminal run: the store replaces
+    `last_run` by project.
 
 - id: "30-7-our-own-assets"
   title: "Our Own Assets"
@@ -261,3 +279,12 @@
     placeholder pipeline to retire is apps/studio-web/scripts/make-placeholder.ts,
     public/sprites/placeholder.png and the `sprites` package script. Repoint
     `loadSheet`/`SHEET_URL` in src/renderer/scene.ts at office.png and its atlas.
+    From 30-4 (gate 2026-10-19, replan queue): scene.ts cuts the placeholder in a pure
+    `cutSheet(source)` used by `loadSheet`; `Sheet` is {floor, character, desk, frames:
+    Record<OfficeState, Texture[]>}; keep `placeDesks(world, sheet, agents, opts?)`,
+    `setPose`, `deskSetKey`/`syncDesks` (the in-place swap). Replace `cutSheet`'s grid
+    cut with an atlas parse (`<role>.<state>.<n>`) filling per-role sets;
+    src/office/model.ts `framesFor(sheet, role, state)` already prefers the role's set,
+    so move its fallback to the role's `idle` with a console warning naming the gap
+    (injectable warn). scene.test.ts decodes the committed placeholder.png per state:
+    repoint it at office.png and its atlas, never delete the check.

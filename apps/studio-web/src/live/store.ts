@@ -4,6 +4,11 @@
 // Rules: a snapshot replaces the view atomically (never cleared first), rebases `lastId` and sets
 // `status: "live"`. A delta applies only when its boot equals `lastId`'s boot and its seq is
 // greater; anything else (a duplicate, a stale boot, a malformed id, an unknown kind) is ignored.
+// Story 30.4 (contract 0.1.25): agents carry `reason`, the view carries each project's `last_run`
+// (replaced by a snapshot, set by an `office.run` delta carrying one), and `lastEventAt` is the
+// client's receive time of the last applied delta or of the last snapshot that changed the view (the
+// first one, or one whose agents, runs, problems or last_run differ): the stream watchdog's reconnect
+// re-sends an identical snapshot every 15 s on a quiet office, which is not an event (the clock injectable).
 
 // ------------------------------------------------------------ mirrored types (apps/supervisor/src/office.ts)
 // Mirrored, never imported across apps.
@@ -46,12 +51,23 @@ export interface OfficeAgent {
   state: OfficeState;
   current_run: string | null;
   current_story: string | null;
+  /** What a `waiting-for-human` or `blocked` agent waits for; null otherwise (0.1.25). */
+  reason: string | null;
+}
+/** A project's newest terminal run (0.1.25). `ended_at` is an ISO string. */
+export interface OfficeLastRun {
+  run_id: string;
+  state: string;
+  pr: string | null;
+  ended_at: string;
 }
 export interface OfficeView {
   at: string;
   agents: OfficeAgent[];
   runs: OfficeRun[];
   problems: string[];
+  /** Keyed by project; a project that never ended a run has no entry. */
+  last_run: Record<string, OfficeLastRun>;
 }
 
 export type OfficeDeltaKind = "office.agent" | "office.progress" | "office.run";
@@ -84,6 +100,8 @@ export interface LiveState {
   view: OfficeView | null;
   lastId: string | null;
   status: StreamStatus;
+  /** Client receive time (ms) of the last applied delta or view-changing snapshot; null before the first. */
+  lastEventAt: number | null;
 }
 
 export interface OfficeStore {
@@ -106,6 +124,7 @@ function applyAgent(view: OfficeView, d: Record<string, unknown>): OfficeView | 
     state: d.state as OfficeState,
     current_run: strOrNull(d.current_run),
     current_story: strOrNull(d.current_story),
+    reason: strOrNull(d.reason),
   };
   const i = view.agents.findIndex((a) => a.agent_id === agentId);
   let agents: OfficeAgent[];
@@ -143,13 +162,33 @@ function applyProgress(view: OfficeView, d: Record<string, unknown>): OfficeView
   return { ...view, runs };
 }
 
+/** A well-formed `last_run` object, or null. */
+function lastRunOf(v: unknown): OfficeLastRun | null {
+  if (!isObj(v) || typeof v.run_id !== "string" || typeof v.state !== "string") return null;
+  return { run_id: v.run_id, state: v.state, pr: strOrNull(v.pr), ended_at: typeof v.ended_at === "string" ? v.ended_at : "" };
+}
+
+function lastRunsOf(v: unknown): Record<string, OfficeLastRun> {
+  const out: Record<string, OfficeLastRun> = {};
+  if (!isObj(v)) return out;
+  for (const [project, entry] of Object.entries(v)) {
+    const last = lastRunOf(entry);
+    if (last) out[project] = last;
+  }
+  return out;
+}
+
 function applyRun(view: OfficeView, d: Record<string, unknown>): OfficeView | null {
   const runId = d.run_id;
   if (typeof runId !== "string") return null;
   const state = strOrNull(d.state);
   const i = view.runs.findIndex((r) => r.run_id === runId);
   if (state === null || !LIVE_RUN_STATES.has(state)) {
-    return i >= 0 ? { ...view, runs: view.runs.filter((r) => r.run_id !== runId) } : view;
+    // A run leaving the live set terminal carries its project's `last_run` (0.1.25).
+    const last = lastRunOf(d.last_run);
+    const project = strOrNull(d.project) ?? (i >= 0 ? view.runs[i].project : null);
+    const next = last && project !== null ? { ...view, last_run: { ...view.last_run, [project]: last } } : view;
+    return i >= 0 ? { ...next, runs: next.runs.filter((r) => r.run_id !== runId) } : next;
   }
   const project = d.project === undefined ? undefined : strOrNull(d.project);
   if (i >= 0) {
@@ -168,8 +207,28 @@ function applyRun(view: OfficeView, d: Record<string, unknown>): OfficeView | nu
   return { ...view, runs: [...view.runs, run] };
 }
 
-export function createOfficeStore(): OfficeStore {
-  let state: LiveState = { view: null, lastId: null, status: "connecting" };
+/** Deep equality of JSON values, key order ignored. */
+function sameJson(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (Array.isArray(a)) return Array.isArray(b) && a.length === b.length && a.every((v, i) => sameJson(v, b[i]));
+  if (!isObj(a) || !isObj(b)) return false;
+  const ka = Object.keys(a).filter((k) => a[k] !== undefined);
+  const kb = Object.keys(b).filter((k) => b[k] !== undefined);
+  return ka.length === kb.length && ka.every((k) => sameJson(a[k], b[k]));
+}
+
+/** A snapshot changes the view when its content (not its `at`) differs. */
+const sameContent = (a: OfficeView, b: OfficeView): boolean =>
+  sameJson(a.agents, b.agents) && sameJson(a.runs, b.runs) && sameJson(a.problems, b.problems) && sameJson(a.last_run, b.last_run);
+
+export interface StoreDeps {
+  /** The clock for `lastEventAt` (default `Date.now`). */
+  now?: () => number;
+}
+
+export function createOfficeStore(deps: StoreDeps = {}): OfficeStore {
+  const now = deps.now ?? (() => Date.now());
+  let state: LiveState = { view: null, lastId: null, status: "connecting", lastEventAt: null };
   const listeners = new Set<() => void>();
   const set = (next: LiveState) => {
     state = next;
@@ -186,15 +245,18 @@ export function createOfficeStore(): OfficeStore {
     },
     applySnapshot(id, data) {
       if (!parseId(id) || !isObj(data)) return;
-      const { at, agents, runs, problems } = data;
+      const { at, agents, runs, problems, last_run } = data;
       if (!Array.isArray(agents) || !Array.isArray(runs)) return;
       const view: OfficeView = {
         at: typeof at === "string" ? at : "",
         agents: agents as OfficeAgent[],
         runs: runs as OfficeRun[],
         problems: Array.isArray(problems) ? (problems as string[]) : [],
+        last_run: lastRunsOf(last_run),
       };
-      set({ view, lastId: id, status: "live" });
+      // A reconnect's identical snapshot keeps the time of the last real change.
+      const changed = !state.view || state.lastEventAt === null || !sameContent(state.view, view);
+      set({ view, lastId: id, status: "live", lastEventAt: changed ? now() : state.lastEventAt });
     },
     applyDelta(id, kind, data) {
       const next = parseId(id);
@@ -212,7 +274,7 @@ export function createOfficeStore(): OfficeStore {
       }
       if (!view) return;
       // A resume's replay applies deltas after a drop: the stream is live again.
-      set({ view, lastId: id, status: "live" });
+      set({ view, lastId: id, status: "live", lastEventAt: now() });
     },
     setStatus(s) {
       if (state.status === s) return;

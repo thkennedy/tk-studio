@@ -13,7 +13,8 @@ import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, s
 import { join } from "node:path";
 import { load as loadYaml } from "js-yaml";
 import { launchedSinceMove } from "./closeout";
-import { engineRoot, servedRoot, type Queue, type QueueEvent, type QueueRun } from "./queue";
+import { runPr } from "./planstatus";
+import { engineRoot, isTerminal, servedRoot, type Queue, type QueueEvent, type QueueRun } from "./queue";
 import { readAgents, ROLES, type Role } from "./registry";
 
 /** The eight office states (closed by the story), in the story's order; `OFFICE_RANK` holds the grace rank. */
@@ -294,8 +295,17 @@ export interface OfficeStory {
 }
 export interface OfficeEpic { spec_folder: string | null; done: number; deferred: number; failed: number; total: number; current_story: string | null }
 export interface OfficeRun { run_id: string; project: string | null; state: string; engine_run_id: string | null; epic: OfficeEpic; stories: OfficeStory[] }
-export interface OfficeAgent { agent_id: string; project: string; role: string; state: OfficeState; current_run: string | null; current_story: string | null }
-export interface OfficeView { at: string; agents: OfficeAgent[]; runs: OfficeRun[]; problems: string[] }
+/** `reason` (Story 30.4, contract 0.1.25, additive): what a `waiting-for-human` or `blocked` agent waits for; null in
+ * every other state. */
+export interface OfficeAgent {
+  agent_id: string; project: string; role: string; state: OfficeState; current_run: string | null; current_story: string | null;
+  reason: string | null;
+}
+/** A project's newest terminal run (Story 30.4, contract 0.1.25): its end state, its PR (`runPr`) and when it ended
+ * (the latest `ended`/`orphaned` event's `at`, else the run's `updated`), an ISO string. */
+export interface OfficeLastRun { run_id: string; state: string; pr: string | null; ended_at: string }
+/** `last_run` (Story 30.4, additive): keyed by project; a project that never ended a run has no entry. */
+export interface OfficeView { at: string; agents: OfficeAgent[]; runs: OfficeRun[]; problems: string[]; last_run: Record<string, OfficeLastRun> }
 
 const str = (v: unknown): string | null => (typeof v === "string" && v !== "" ? v : null);
 const lastIndex = <T>(xs: readonly T[], pred: (x: T) => boolean) => { for (let i = xs.length - 1; i >= 0; i--) if (pred(xs[i])) return i; return -1; };
@@ -303,7 +313,7 @@ const kindIn = (...kinds: string[]) => (e: { kind: string }) => kinds.includes(e
 const VERIFY_PHASES = new Set(["dev-verify", "review-verify", "committing"]);
 const RULING_KINDS = ["awaiting-ruling", "close-out", "close-out-failed", "engine-resume", "resumed", "paused"];
 
-interface RunAnalysis { signals: Omit<OfficeSignals, "run">; epic: OfficeEpic; stories: OfficeStory[] }
+interface RunAnalysis { signals: Omit<OfficeSignals, "run">; epic: OfficeEpic; stories: OfficeStory[]; waitReason: string | null }
 
 /** Progress (AC2, planner ruling on the denominator): the first `stories-validated.count` manifest entries are the
  * run's stories, later ones `extra`; with no manifest the journal's `story-start` keys, the first `count` of them
@@ -410,6 +420,17 @@ function analyseRun(run: QueueRun, events: readonly QueueEvent[], problems: stri
     session = [...open.values()].at(-1) ?? null;
   }
   const phase = epic.current_story ? str((state?.tasks as Record<string, any> | undefined)?.[epic.current_story]?.phase) : null;
+  // What a waiting run waits for (Story 30.4): the first non-empty of the awaiting ruling's reason, state.json's
+  // `paused_reason`, the latest queue `paused` event's engine `paused_reason` (while that pause stands), the latest
+  // journal escalation's reason.
+  // The `paused` event's reason only while that pause stands: no close-out, failed close-out, engine resume or
+  // resume after it (an `awaiting-ruling` does not end a pause), so an earlier, resumed pause never names a new wait.
+  const lastMove = events.findLast(kindIn(...RULING_KINDS.filter((k) => k !== "awaiting-ruling")));
+  const pausedEngine = lastMove?.kind === "paused" ? lastMove.detail?.engine as Record<string, unknown> | undefined : undefined;
+  const waitReason = (awaiting ? str(events.findLast(kindIn(...RULING_KINDS))?.detail?.reason) : null)
+    ?? str(state?.paused_reason)
+    ?? str(pausedEngine?.paused_reason)
+    ?? (escalated ? str(entries.findLast(kindIn("story-escalated", "run-paused"))?.reason) : null);
   return {
     signals: {
       live: LIVE_RUN_STATES.has(run.state), blocked: run.state === "blocked", queued: run.state === "queued",
@@ -422,7 +443,7 @@ function analyseRun(run: QueueRun, events: readonly QueueEvent[], problems: stri
       // launch, e.g. an adopted `external` run): with none, the run never enters row 10.
       engineEnded, hostVerified: launchedAt < 0 || lastIndex(events, kindIn("host-verify")) > launchedAt,
     },
-    epic, stories,
+    epic, stories, waitReason,
   };
 }
 
@@ -431,11 +452,30 @@ const NO_SIGNALS: Omit<OfficeSignals, "run"> = {
   verifyPhase: false, engineEnded: false, hostVerified: false,
 };
 
+/** Two `last_run` entries equal in every field. */
+const sameLastRun = (a: OfficeLastRun | undefined, b: OfficeLastRun): boolean =>
+  !!a && a.run_id === b.run_id && a.state === b.state && a.pr === b.pr && a.ended_at === b.ended_at;
+
+/** A terminal run as a project's `last_run` (Story 30.4). */
+export function lastRunOf(run: QueueRun, events: readonly QueueEvent[]): OfficeLastRun {
+  const end = events.findLast(kindIn("ended", "orphaned"));
+  return { run_id: run.run_id, state: run.state, pr: runPr(events) ?? null, ended_at: end?.at ?? run.updated };
+}
+
+/** What an agent in `state` waits for (Story 30.4): the run's wait reason when `waiting-for-human`, the run's queue
+ * `reason` when `blocked`, else null. */
+function reasonFor(state: OfficeState, run: QueueRun | null, waitReason: string | null): string | null {
+  if (state === "waiting-for-human") return waitReason;
+  if (state === "blocked") return str(run?.reason);
+  return null;
+}
+
 /** The projection's core over one read of the runs: each project's role states, and the live runs' progress. */
 function projectCore(queue: Queue, given?: readonly QueueRun[]): {
   runs: QueueRun[]; problems: string[];
-  forProject: (project: string) => { run: QueueRun | null; states: Record<Role, OfficeState>; current_story: string | null };
+  forProject: (project: string) => { run: QueueRun | null; states: Record<Role, OfficeState>; current_story: string | null; waitReason: string | null };
   liveRuns: () => OfficeRun[];
+  lastRuns: () => Record<string, OfficeLastRun>;
 } {
   const runs = [...(given ?? queue.runs())];
   const problems: string[] = [];
@@ -451,12 +491,19 @@ function projectCore(queue: Queue, given?: readonly QueueRun[]): {
       const run = selectRun(runs, project);
       const a = run ? analysis(run) : null;
       const { states } = mapRoles({ run, ...(a?.signals ?? NO_SIGNALS) });
-      return { run, states, current_story: a?.epic.current_story ?? null };
+      return { run, states, current_story: a?.epic.current_story ?? null, waitReason: a?.waitReason ?? null };
     },
     liveRuns: () => runs.filter((r) => LIVE_RUN_STATES.has(r.state)).map((r) => {
       const a = analysis(r);
       return { run_id: r.run_id, project: r.project_id, state: r.state, engine_run_id: r.engine_run_id, epic: a.epic, stories: a.stories };
     }),
+    lastRuns: () => {
+      const newest = new Map<string, QueueRun>();
+      for (const r of runs) if (r.project_id && isTerminal(r.state)) newest.set(r.project_id, r);
+      const out: Record<string, OfficeLastRun> = {};
+      for (const [project, r] of newest) out[project] = lastRunOf(r, queue.events(r.run_id));
+      return out;
+    },
   };
 }
 
@@ -472,11 +519,15 @@ export function projectOffice(queue: Queue, deps: { now?: () => number } = {}): 
       let p = byProject.get(row.project);
       if (!p) { p = core.forProject(row.project); byProject.set(row.project, p); }
       const state = (p.states as Record<string, OfficeState>)[row.role] ?? (p.run && LIVE_RUN_STATES.has(p.run.state) ? "idle" : "offline");
-      return { agent_id: row.agent_id, project: row.project, role: row.role, state, current_run: p.run?.run_id ?? null, current_story: p.current_story };
+      return {
+        agent_id: row.agent_id, project: row.project, role: row.role, state, current_run: p.run?.run_id ?? null, current_story: p.current_story,
+        reason: reasonFor(state, p.run, p.waitReason),
+      };
     });
     const runs = core.liveRuns();
+    const last_run = core.lastRuns();
     pruneCaches(seen); // only after a whole projection: a throw keeps the caches as they were
-    return { at: new Date((deps.now ?? Date.now)()).toISOString(), agents, runs, problems: core.problems };
+    return { at: new Date((deps.now ?? Date.now)()).toISOString(), agents, runs, problems: core.problems, last_run };
   } finally { touched = null; }
 }
 
@@ -582,18 +633,20 @@ export class OfficeHub {
       if (!p) return a;
       // A new run for the agent: its raw state at once, never the old run's held under the new one.
       if (p.current_run !== a.current_run) { this.demoting.delete(a.agent_id); return a; }
-      return { ...a, state: this.graced(a.agent_id, p.state, a.state, t) };
+      const state = this.graced(a.agent_id, p.state, a.state, t);
+      // The reason follows the shown state: a held state keeps the previous reason (Story 30.4).
+      return { ...a, state, reason: state === a.state ? (a.reason ?? null) : (p.reason ?? null) };
     });
     for (const id of [...this.demoting.keys()]) if (!agents.some((a) => a.agent_id === id)) this.demoting.delete(id);
-    const next: OfficeView = { at, agents, runs: raw.runs, problems: raw.problems };
+    const next: OfficeView = { at, agents, runs: raw.runs, problems: raw.problems, last_run: raw.last_run ?? {} };
     this.view = next;
     this.viewAt = t;
     if (!prev) return [];
     const out: OfficeEvent[] = [];
     for (const a of agents) {
       const p = prevAgents.get(a.agent_id);
-      if (p && p.state === a.state && p.current_run === a.current_run && p.current_story === a.current_story) continue;
-      this.emit(out, "office.agent", { agent_id: a.agent_id, state: a.state, from: p?.state ?? null, at, current_run: a.current_run, current_story: a.current_story });
+      if (p && p.state === a.state && p.current_run === a.current_run && p.current_story === a.current_story && (p.reason ?? null) === (a.reason ?? null)) continue;
+      this.emit(out, "office.agent", { agent_id: a.agent_id, state: a.state, from: p?.state ?? null, at, current_run: a.current_run, current_story: a.current_story, reason: a.reason ?? null });
     }
     const prevRuns = new Map(prev.runs.map((r) => [r.run_id, r]));
     for (const r of next.runs) {
@@ -609,9 +662,24 @@ export class OfficeHub {
       const p = prevRuns.get(r.run_id);
       if (!p || p.state !== r.state) this.emit(out, "office.run", { run_id: r.run_id, project: r.project, state: r.state, from: p?.state ?? null });
     }
+    // A run leaving the live set terminal carries its project's `last_run` (Story 30.4, contract 0.1.25), only when
+    // that run is the snapshot's `last_run` for the project: a delta never says other than the snapshot does.
+    const covered = new Set<string>();
     for (const p of prev.runs) {
       if (nextRuns.has(p.run_id)) continue;
-      this.emit(out, "office.run", { run_id: p.run_id, project: p.project, state: this.queue.get(p.run_id)?.state ?? null, from: p.state });
+      const ended = this.queue.get(p.run_id);
+      const state = ended?.state ?? null;
+      const shown = p.project ? next.last_run[p.project] : undefined;
+      const last = ended && isTerminal(state) && shown?.run_id === p.run_id ? shown : null;
+      if (last && p.project) covered.add(p.project);
+      this.emit(out, "office.run", { run_id: p.run_id, project: p.project, state, from: p.state, ...(last ? { last_run: last } : {}) });
+    }
+    // A project's `last_run` that changed in any field with no leaving run carrying it (a run created and ended
+    // between two refreshes, never seen live, or a PR arriving on a later `closed_out` after the run ended): one
+    // `office.run` for that run, `from` null, carrying the new `last_run`.
+    for (const [project, last] of Object.entries(next.last_run)) {
+      if (covered.has(project) || sameLastRun(prev.last_run[project], last)) continue;
+      this.emit(out, "office.run", { run_id: last.run_id, project, state: last.state, from: null, last_run: last });
     }
     if (out.length) {
       this.buffer.push(...out);

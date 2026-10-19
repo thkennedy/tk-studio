@@ -316,7 +316,7 @@ describe("the mapping table (AC1)", () => {
 describe("the grace timer (AC1, injected clock)", () => {
   function hubOver(raw: { state: OfficeState }) {
     let t = 1_000_000;
-    const view = (): OfficeView => ({ at: "", runs: [], problems: [], agents: [{ agent_id: "p/session", project: "p", role: "session", state: raw.state, current_run: null, current_story: null }] });
+    const view = (): OfficeView => ({ at: "", runs: [], problems: [], last_run: {}, agents: [{ agent_id: "p/session", project: "p", role: "session", state: raw.state, current_run: null, current_story: null, reason: null }] });
     const hub = new OfficeHub({ queue: null as unknown as Queue, now: () => t, project: view });
     const shown = () => hub.snapshot().agents[0].state;
     return { hub, shown, advance: (ms: number) => { t += ms; } };
@@ -373,7 +373,7 @@ describe("the grace timer (AC1, injected clock)", () => {
   test("a change of current_run applies the new run's raw state at once and drops the pending demotion", () => {
     let t = 0;
     const raw = { state: "waiting-for-human" as OfficeState, run: "r1" as string | null };
-    const hub = new OfficeHub({ queue: null as unknown as Queue, now: () => t, project: () => ({ at: "", runs: [], problems: [], agents: [{ agent_id: "p/session", project: "p", role: "session", state: raw.state, current_run: raw.run, current_story: null }] }) });
+    const hub = new OfficeHub({ queue: null as unknown as Queue, now: () => t, project: () => ({ at: "", runs: [], problems: [], last_run: {}, agents: [{ agent_id: "p/session", project: "p", role: "session", state: raw.state, current_run: raw.run, current_story: null, reason: null }] }) });
     const shown = () => hub.snapshot().agents[0];
     expect(shown().state).toBe("waiting-for-human");
     raw.state = "offline"; raw.run = null; t += 1000; // the paused run cancelled
@@ -387,7 +387,7 @@ describe("the grace timer (AC1, injected clock)", () => {
   test("an injected graceMs is honoured", () => {
     let t = 0;
     const raw = { state: "typing" as OfficeState };
-    const hub = new OfficeHub({ queue: null as unknown as Queue, now: () => t, graceMs: 5, project: () => ({ at: "", runs: [], problems: [], agents: [{ agent_id: "a", project: "p", role: "session", state: raw.state, current_run: null, current_story: null }] }) });
+    const hub = new OfficeHub({ queue: null as unknown as Queue, now: () => t, graceMs: 5, project: () => ({ at: "", runs: [], problems: [], last_run: {}, agents: [{ agent_id: "a", project: "p", role: "session", state: raw.state, current_run: null, current_story: null, reason: null }] }) });
     hub.snapshot(); raw.state = "idle"; hub.snapshot();
     t = 5;
     expect(hub.snapshot().agents[0].state).toBe("idle");
@@ -595,7 +595,7 @@ describe("the stream (AC3)", () => {
   test("an id older than the buffer is too old: since() answers null (the stream then sends the snapshot, above)", async () => {
     let t = 0;
     const raw = { state: "idle" as OfficeState };
-    const hub = new OfficeHub({ queue: null as unknown as Queue, now: () => t, bufferSize: 2, project: () => ({ at: "", runs: [], problems: [], agents: [{ agent_id: "a", project: "p", role: "session", state: raw.state, current_run: null, current_story: null }] }) });
+    const hub = new OfficeHub({ queue: null as unknown as Queue, now: () => t, bufferSize: 2, project: () => ({ at: "", runs: [], problems: [], last_run: {}, agents: [{ agent_id: "a", project: "p", role: "session", state: raw.state, current_run: null, current_story: null, reason: null }] }) });
     const start = hub.snapshot().id;
     for (const s of ["typing", "blocked", "waiting-for-human"] as OfficeState[]) { raw.state = s; t += 30_000; hub.refresh(); }
     expect(hub.since(start)).toBeNull();
@@ -631,6 +631,154 @@ describe("the stream (AC3)", () => {
   });
 });
 
+describe("the reason and last_run (Story 30.4, contract 0.1.25)", () => {
+  const agentOf = (v: OfficeView, id: string) => v.agents.find((a) => a.agent_id === id)!;
+
+  test("awaiting-ruling: the ruling's reason on the waiting agents; every other agent null", async () => {
+    const w = world();
+    const { run } = await w.launch({ lines: CUT.dev });
+    w.queue.markPaused(run.run_id, { engine: { paused_story_key: S2, paused_stage: "escalation", paused_reason: "engine says" } });
+    w.queue.note(run.run_id, "awaiting-ruling", { story_key: S2, reason: "reconcile_verdict: escalate" });
+    const v = projectOffice(w.queue);
+    for (const role of ["orchestrator", "session"]) expect(agentOf(v, `p/${role}`)).toMatchObject({ state: "waiting-for-human", reason: "reconcile_verdict: escalate" });
+    for (const a of v.agents.filter((x) => x.state !== "waiting-for-human")) expect(a.reason).toBeNull();
+  });
+
+  test("paused: the paused event's engine paused_reason; the escalation fixture: state.json's paused_reason", async () => {
+    const w = world();
+    const { run } = await w.launch({ lines: CUT.dev });
+    w.queue.markPaused(run.run_id, { engine: { paused_story_key: S2, paused_stage: "escalation", paused_reason: "the review escalated" } });
+    expect(agentOf(projectOffice(w.queue), "p/orchestrator").reason).toBe("the review escalated");
+    const esc = world();
+    await esc.launch({ fixture: "paused-escalation" });
+    expect(agentOf(projectOffice(esc.queue), "p/session")).toMatchObject({ state: "waiting-for-human", reason: "escalation" });
+    const bare = world();
+    const b = await bare.launch({ lines: CUT.dev });
+    bare.queue.markPaused(b.run.run_id, {});
+    expect(agentOf(projectOffice(bare.queue), "p/orchestrator")).toMatchObject({ state: "waiting-for-human", reason: null });
+  });
+
+  test("blocked: the run's queue reason; a non-waiting state is null", async () => {
+    const w = world();
+    const run = await w.claim(w.enqueue());
+    w.queue.endEngine(run.run_id, "blocked", "the launch refused");
+    const v = projectOffice(w.queue);
+    expect(agentOf(v, "p/orchestrator")).toMatchObject({ state: "blocked", reason: "the launch refused" });
+    expect(agentOf(v, "p/implementer")).toMatchObject({ state: "offline", reason: null });
+    const typing = world();
+    await typing.launch({ lines: CUT.dev, phases: { [S2]: "dev-running" } });
+    expect(projectOffice(typing.queue).agents.every((a) => a.reason === null)).toBe(true);
+  });
+
+  test("a reason-only change is one office.agent delta carrying the reason; a held state keeps its reason", () => {
+    let t = 0;
+    const raw = { state: "waiting-for-human" as OfficeState, reason: "first" as string | null };
+    const hub = new OfficeHub({ queue: null as unknown as Queue, now: () => t, graceMs: 20_000, project: () => ({
+      at: "", runs: [], problems: [], last_run: {},
+      agents: [{ agent_id: "p/session", project: "p", role: "session", state: raw.state, current_run: "r", current_story: null, reason: raw.reason }],
+    }) });
+    hub.snapshot();
+    raw.reason = "second";
+    const evs = hub.refresh();
+    expect(evs).toHaveLength(1);
+    expect(evs[0]).toMatchObject({ kind: "office.agent", data: { agent_id: "p/session", state: "waiting-for-human", from: "waiting-for-human", reason: "second" } });
+    // A demotion under grace: the held waiting state keeps "second"; once it lands, the reason is the raw null.
+    raw.state = "idle"; raw.reason = null; t += 1000;
+    expect(hub.refresh()).toEqual([]);
+    expect(hub.snapshot().agents[0]).toMatchObject({ state: "waiting-for-human", reason: "second" });
+    t += 20_000;
+    expect(hub.refresh()[0]).toMatchObject({ kind: "office.agent", data: { state: "idle", reason: null } });
+  });
+
+  test("last_run: the snapshot keys each project's newest terminal run; a project that never ended a run has none", async () => {
+    const w = world();
+    expect(projectOffice(w.queue).last_run).toEqual({});
+    const first = await w.claim(w.enqueue());
+    w.queue.end(first.run_id, "cancelled", "test");
+    const second = await w.claim(w.enqueue());
+    w.queue.end(second.run_id, "complete", null, { detail: { pr: "https://github.com/o/r/pull/7" } });
+    const v = projectOffice(w.queue);
+    const ended = w.queue.events(second.run_id).findLast((e) => e.kind === "ended")!;
+    expect(v.last_run).toEqual({ p: { run_id: second.run_id, state: "complete", pr: "https://github.com/o/r/pull/7", ended_at: ended.at } });
+    expect(v.last_run.q).toBeUndefined();
+  });
+
+  test("a run leaving the live set terminal: the office.run delta carries last_run (with a PR, and without)", async () => {
+    for (const pr of ["https://github.com/o/r/pull/9", null]) {
+      const w = world();
+      const run = await w.claim(w.enqueue());
+      const hub = new OfficeHub({ queue: w.queue, graceMs: 0 });
+      hub.snapshot();
+      w.queue.end(run.run_id, "complete", null, pr ? { detail: { pr } } : {});
+      const evs = hub.refresh().filter((e) => e.kind === "office.run");
+      expect(evs).toHaveLength(1);
+      const last = evs[0].data.last_run as Record<string, unknown>;
+      expect(evs[0].data).toMatchObject({ run_id: run.run_id, project: "p", state: "complete", from: "running" });
+      expect(last).toMatchObject({ run_id: run.run_id, state: "complete", pr });
+      expect(typeof last.ended_at).toBe("string");
+      expect(hub.snapshot().last_run.p).toEqual(last as any);
+    }
+  });
+
+  test("an older run ending after a newer one: its leaving office.run carries no last_run (the snapshot's stays the newer run)", () => {
+    const w = world();
+    const older = w.enqueue("run-epic-a");
+    const newer = w.enqueue("run-epic-b");
+    const hub = new OfficeHub({ queue: w.queue, graceMs: 0 });
+    hub.snapshot();
+    w.queue.end(newer.run_id, "cancelled", "test");
+    const first = hub.refresh().filter((e) => e.kind === "office.run");
+    expect(first).toHaveLength(1);
+    expect(first[0].data).toMatchObject({ run_id: newer.run_id, state: "cancelled", last_run: { run_id: newer.run_id } });
+    w.queue.end(older.run_id, "complete", null);
+    const second = hub.refresh().filter((e) => e.kind === "office.run");
+    expect(second).toHaveLength(1);
+    expect(second[0].data).toMatchObject({ run_id: older.run_id, state: "complete", from: "queued" });
+    expect(second[0].data.last_run).toBeUndefined();
+    expect(hub.snapshot().last_run.p.run_id).toBe(newer.run_id);
+  });
+
+  test("a run never seen live that ends: one office.run {from: null} carrying the new last_run; nothing again after", () => {
+    const w = world();
+    const hub = new OfficeHub({ queue: w.queue, graceMs: 0 });
+    hub.snapshot();
+    const run = w.enqueue();
+    w.queue.end(run.run_id, "cancelled", "test");
+    const evs = hub.refresh().filter((e) => e.kind === "office.run");
+    expect(evs).toHaveLength(1);
+    expect(evs[0].data).toEqual({ run_id: run.run_id, project: "p", state: "cancelled", from: null, last_run: hub.snapshot().last_run.p as any });
+    expect((evs[0].data.last_run as Record<string, unknown>).run_id).toBe(run.run_id);
+    expect(hub.refresh().filter((e) => e.kind === "office.run")).toEqual([]);
+  });
+
+  test("a terminal last_run whose PR arrives later (a closed_out with a pr): one office.run {from: null} with the pr; unchanged, nothing", async () => {
+    const w = world();
+    const run = await w.claim(w.enqueue());
+    w.queue.end(run.run_id, "complete", null);
+    const hub = new OfficeHub({ queue: w.queue, graceMs: 0 });
+    expect(hub.snapshot().last_run.p).toMatchObject({ run_id: run.run_id, pr: null });
+    expect(hub.refresh().filter((e) => e.kind === "office.run")).toEqual([]);
+    const pr = "https://github.com/o/r/pull/11";
+    w.queue.note(run.run_id, "closed_out", { pr, closeout: { result: "PR", commits: [], worktree: "removed" } });
+    const evs = hub.refresh().filter((e) => e.kind === "office.run");
+    expect(evs).toHaveLength(1);
+    expect(evs[0].data).toEqual({ run_id: run.run_id, project: "p", state: "complete", from: null, last_run: hub.snapshot().last_run.p as any });
+    expect((evs[0].data.last_run as Record<string, unknown>).pr).toBe(pr);
+    expect(hub.refresh().filter((e) => e.kind === "office.run")).toEqual([]);
+  });
+
+  test("a resumed old pause then a new escalation: the old pause's engine reason is not shown", async () => {
+    const w = world();
+    const { run, runDir } = await w.launch({ lines: CUT.dev });
+    w.queue.markPaused(run.run_id, { engine: { paused_story_key: S2, paused_stage: "escalation", paused_reason: "the old pause" } });
+    w.queue.resumeFromPause(run.run_id, "engine-resume", {}, ME);
+    appendFileSync(join(runDir, "journal.jsonl"), JSON.stringify({ kind: "story-escalated", story_key: S2, reason: "the new escalation" }) + "\n");
+    expect(agentOf(projectOffice(w.queue), "p/session")).toMatchObject({ state: "waiting-for-human", reason: "the new escalation" });
+    appendFileSync(join(runDir, "journal.jsonl"), JSON.stringify({ kind: "run-paused" }) + "\n");
+    expect(agentOf(projectOffice(w.queue), "p/session")).toMatchObject({ state: "waiting-for-human", reason: null });
+  });
+});
+
 describe("the routes (AC3)", () => {
   async function routed() {
     const w = world();
@@ -650,7 +798,7 @@ describe("the routes (AC3)", () => {
     expect(typeof body.at).toBe("string");
     expect(body.id).toMatch(/^\d+-\d+$/);
     expect(body.agents).toHaveLength(14);
-    expect(body.agents.find((a: any) => a.agent_id === "p/planner")).toEqual({ agent_id: "p/planner", project: "p", role: "planner", state: "thinking", current_run: fx.run.run_id, current_story: S2 });
+    expect(body.agents.find((a: any) => a.agent_id === "p/planner")).toEqual({ agent_id: "p/planner", project: "p", role: "planner", state: "thinking", current_run: fx.run.run_id, current_story: S2, reason: null });
     expect(body.runs).toHaveLength(1);
     expect(body.runs[0]).toMatchObject({ run_id: fx.run.run_id, project: "p", state: "running", epic: { done: 1, total: 4, current_story: S2 } });
     // Without the SSE accept the events route answers the JSON snapshot.

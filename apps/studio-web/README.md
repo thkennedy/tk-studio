@@ -47,6 +47,37 @@ Each tab opens exactly one `EventSource` on the supervisor's `GET /office/events
   never fires a listener, so on a quiet office the watchdog reopens every 15 s (one snapshot, a
   brief `reconnecting`). Accepted for v0.
 
+## The Office screen (Story 30.4)
+
+`src/office/OfficeScreen.tsx` is the page's canvas now: for the selected project, each registry
+agent (`GET /agents?project=<id>`, absolute because of `<base href="/app/">`) is one character at a
+desk on the PixiJS floor, labelled with its role, in registry row order. The rules are pure
+functions in `src/office/model.ts` (vitest, `environment: "node"`); the canvas goes through
+`src/renderer/scene.ts` only. The spike's zoom / ratio / fps / stream lines stay as debug lines in
+`App.tsx`, which keeps the one store and the one stream.
+
+- **The pose.** A desk's state is the store's agent with the same `agent_id`, else the row's
+  `live_state`, else `offline`. `framesFor(sheet, role, state)` returns the role's frame set for
+  that state when the sheet has one, else the shared set for the state; the placeholder sheet has
+  only the shared sets (eight states, two looping frames each, cut by `cutSheet`), and Story 30.7
+  adds per-role sets and the `idle` fallback without changing callers.
+- **No flicker.** `placeDesks(world, sheet, agents)` adds one `AnimatedSprite` and one desk per
+  agent. A state change calls `setPose(sprite, frames)`: `sprite.textures = frames; play()` on the
+  same sprite, so the new set's first frame shows in the next frame. A pose change never destroys
+  or re-adds a sprite and never calls `layoutScene`; a resize rebuilds the world and the desks.
+- **The bubble.** `waiting-for-human` and `blocked` get a React DOM bubble over the character
+  naming the projection's `reason` (contract 0.1.25); a null reason says `waiting` / `blocked`.
+  Every other state has none.
+- **The HUD.** `hudModel(state, project, now)`: with a live run (the one the project's agents point
+  at, else its newest live row), the project, the run id and state (`pending` while the row's state
+  is null), the current story and its phase, done / failed / total, the engine run id (`—` while
+  null) and the time since the last applied event (`lastEventAt`, ticking every second). With no
+  live run, the project's `last_run` end state and PR link (`no PR` when null), else `no run yet`.
+  A failed `/agents` read is named in the HUD and the floor stays empty.
+- **The switcher.** The projects are the distinct projects of `GET /agents`; the choice is stored
+  in `localStorage` (`tk-studio.office.project`) and restored when still listed, else the first
+  project. A storage that throws keeps the choice in memory only.
+
 ## Commands (from `apps/studio-web`)
 
 ```bash
@@ -55,7 +86,7 @@ bun run dev                     # the page on Vite's dev server (open it on the 
 bun run build                   # static files to dist/ (ignored, never committed)
 bun run test                    # vitest
 bun run verify                  # frozen install, build, then test: the project's verify.host
-bun run sprites                 # regenerate public/sprites/placeholder.png (same bytes each run)
+bun run sprites                 # regenerate public/sprites/placeholder.png (same bytes each run; desk + eight state sets)
 ```
 
 From the repository root, `uv run python tools/verify_host.py` runs `bun run verify` here when

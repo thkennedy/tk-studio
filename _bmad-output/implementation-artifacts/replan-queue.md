@@ -168,3 +168,24 @@
 - What no longer holds: 30.4 AC1 "naming what it waits for (the projection's reason)" and AC2 "with no live run it shows the last ended run's end state and PR link". Both read data the web's 0.1.24 surfaces lack, and SPEC Constraints limit the web to those surfaces plus `/board` and `/status`.
 - Suggested adjustment: choose one before 30-4 runs. (a) Extend the projection additively in 30-4: an optional `reason` on agent rows and `office.agent`, plus a per-project `last_run {run_id, state, pr}` in the snapshot. This touches `apps/supervisor` and the contract §1 table; fold it into 30.5's 0.1.25 bump, and the epic narrative needs a correct-course line. (b) Let the web read `GET /runs/{id}` (cookie GET, exists) for the reason and PR, and name it in 0.1.25's web surfaces. (c) Narrow AC1/AC2: the bubble names what the store carries (the run's `paused` state and the current story), and the ended-run line waits for 30.5's `GET /board` (each story's latest run, state and PR). Plan 30-4 records this as its Block If.
 - Status: open — needs bmad-correct-course
+
+## 30-5-the-board-screen — scope: stories — from 30-4-the-office-screen — 2026-10-19
+
+- What changed: 30.4 took the 0.1.25 bump (operator ruling, session 11). The header clause starts at the anchor `0.1.25 (Story 30.4)` and already says "Story 30.5 adds `GET /board` to this same 0.1.25 entry". `test_0_1_25_extends_the_office_projection_additively` pins it. The 0.1.25 note also defines a from-null `office.run` that carries a terminal `last_run` and is not a live-set entry. The web store's `last_run` holds only each project's newest terminal run.
+- What no longer holds: SPEC Assumptions "30.5 takes the one bump to 0.1.25 naming `GET /board`". AC1's "named in the contract's §1 web surfaces at 0.1.25" still holds, as an append.
+- Suggested adjustment: Append `GET /board` to the existing 0.1.25 header clause and to the §1 web-surfaces table and note, without a second bump or rewording the 30.4 text. Pin the new text by its own phrases in `test_driver_contract.py`. Count live runs with `state !== null && LIVE_RUN_STATES.has(state)`. Done (ended today) comes from the `/board` answer, not the store's `last_run`.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-19)
+
+## 30-6-the-status-screen-and-the-home — scope: stories — from 30-4-the-office-screen — 2026-10-19
+
+- What changed: as above for 0.1.25. In addition, the Pixi canvas effect moved from App.tsx into `src/office/OfficeScreen.tsx`, which reports zoom, ratio and fps through `onStats`. App.tsx keeps the module-level store, the one stream and the debug lines. The per-browser project choice is `rememberedProject`/`rememberProject` in `src/office/model.ts` (key `tk-studio.office.project`, injectable storage).
+- What no longer holds: SPEC Assumptions "30.6 extends that same 0.1.25 entry with `GET /status`". The entry is 30.4's, and 30.5 appends `/board` to it. AC3's "(0.1.25, additive)" still holds, as an append.
+- Suggested adjustment: Append `GET /status` to the existing 0.1.25 clause, with no bump, and pin it by its own phrases. Switch screens in App.tsx by mounting or unmounting `OfficeScreen`, which owns the canvas; never a second Pixi Application. Remember the last screen with an injectable-storage helper modelled on `rememberedProject`. A from-null `office.run` may carry a never-live terminal run: replace `last_run` by project, never append.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-19)
+
+## 30-7-our-own-assets — scope: stories — from 30-4-the-office-screen — 2026-10-19
+
+- What changed: `scene.ts` cuts the placeholder in a pure `cutSheet(source)` used by `loadSheet`. `Sheet` is `{floor, character, desk, frames: Record<OfficeState, Texture[]>}`. `placeDesks(world, sheet, agents, opts?)` (`cols`, `autoUpdate`, `tile`), `setPose`, `deskSetKey`/`syncDesks` swap poses in place. `model.ts` `framesFor(sheet, role, state)` already prefers a role's set and falls back to the shared state set. `scene.test.ts` decodes the committed `placeholder.png` to assert each state's two frames differ at a pixel the desk leaves visible.
+- What no longer holds: nothing in the acceptance criteria. "the renderer's frame sets come from the atlas by name" now replaces `cutSheet`'s grid cut. Deleting the placeholder breaks the png-decoding test.
+- Suggested adjustment: Replace `cutSheet` with an atlas parse (`<role>.<state>.<n>`) that fills per-role sets. Move `framesFor`'s fallback to the role's `idle` with a console warning naming the gap (injectable warn). Keep `setPose`/`syncDesks` and the in-place swap. Repoint the png-decoding test at `office.png` and its atlas rather than delete it.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-19)

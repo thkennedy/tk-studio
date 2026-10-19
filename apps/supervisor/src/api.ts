@@ -26,8 +26,9 @@
  *                            `Accept: text/event-stream`
  *   GET  /agents[?project=<id>]  the agent registry (Story 29.2, `registry.ts`): {ok, rebuilt_at, agents}, one row per
  *                            (project, role); an unknown project answers `agents: []`. A read only: never rebuilds
- *   GET  /office             the office projection (Story 29.3, `office.ts`): {ok, at, agents, runs, problems, id} —
- *                            each registry agent's graced state, the live runs with story and epic progress
+ *   GET  /office             the office projection (Story 29.3, `office.ts`): {ok, at, agents, runs, last_run, problems,
+ *                            id} — each registry agent's graced state and its `reason` (0.1.25), the live runs with
+ *                            story and epic progress, `last_run` the last ended run keyed by project (0.1.25)
  *   GET  /office/events      with `Accept: text/event-stream`: `event:snapshot` first (or, for a valid `Last-Event-ID`,
  *                            the buffered deltas after it), then `office.agent` / `office.progress` / `office.run`
  *                            deltas (`id:<boot>-<seq>`), a `: heartbeat` comment every 10 s; without it the JSON snapshot

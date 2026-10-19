@@ -1,17 +1,28 @@
 // The spike's scene (Story 30.1): one PixiJS v8 Application, a floor of tiles and one character
 // from the placeholder sheet, drawn at the integer zoom of `pickZoom`. The builders below take a
 // Container and Textures only, so later stories' tests can drive them without WebGL (30.4).
-import { Application, Assets, Container, Rectangle, Sprite, Texture, TextureSource } from "pixi.js";
+// Story 30.4: the sheet also holds a desk and one two-frame looping set per office state (§7.3);
+// `placeDesks` stands a character at a desk per agent and `setPose` swaps a character's frame set
+// in place on the same sprite (no destroy, no re-add, no `layoutScene`).
+import { AnimatedSprite, Application, Assets, Container, Rectangle, Sprite, Texture, TextureSource } from "pixi.js";
+import { OFFICE_STATES, type OfficeState } from "../live/store";
+import { framesFor } from "../office/model";
 import { pickZoom } from "./pickZoom";
 
 /** Source tile size in pixels. */
 export const TILE = 16;
-/** The committed placeholder sheet (our own pixels, D6): floor tile at x 0, character at x 16. */
+/** The committed placeholder sheet (our own pixels, D6): row 0 holds the floor tile at x 0, the
+ * character at x 16 and the desk at x 32; row 1 + i holds `OFFICE_STATES[i]`'s frames at x 0, x 16. */
 export const SHEET_URL = "sprites/placeholder.png";
+/** Frames per state on the placeholder sheet. */
+export const STATE_FRAMES = 2;
 
 export interface Sheet {
   floor: Texture;
   character: Texture;
+  desk: Texture;
+  /** The shared looping frame set per office state. */
+  frames: Record<OfficeState, Texture[]>;
 }
 
 export interface Scene {
@@ -39,15 +50,21 @@ export async function createApp(container: HTMLElement, ratio: number): Promise<
   return app;
 }
 
-/** Loads the placeholder sheet and cuts its two 16x16 frames by Rectangle. */
+/** Cuts the placeholder sheet's 16x16 tiles by Rectangle from one source (pure: no loading). */
+export function cutSheet(source: TextureSource, tile: number = TILE): Sheet {
+  const at = (col: number, row: number) => new Texture({ source, frame: new Rectangle(col * tile, row * tile, tile, tile) });
+  const frames = Object.fromEntries(
+    OFFICE_STATES.map((state, i) => [state, Array.from({ length: STATE_FRAMES }, (_, n) => at(n, 1 + i))]),
+  ) as Record<OfficeState, Texture[]>;
+  return { floor: at(0, 0), character: at(1, 0), desk: at(2, 0), frames };
+}
+
+/** Loads the placeholder sheet (the one loader) and cuts it (`cutSheet`). */
 export async function loadSheet(url: string = SHEET_URL): Promise<Sheet> {
   const sheet: Texture = await Assets.load(url);
   const source = sheet.source;
   source.scaleMode = "nearest";
-  return {
-    floor: new Texture({ source, frame: new Rectangle(0, 0, TILE, TILE) }),
-    character: new Texture({ source, frame: new Rectangle(TILE, 0, TILE, TILE) }),
-  };
+  return cutSheet(source);
 }
 
 /** A cols x rows floor of `tile`-pixel sprites at whole source-pixel positions, added to `world`. */
@@ -93,4 +110,101 @@ export function layoutScene(stage: Container, sheet: Sheet, ratio: number, width
   const character = placeCharacter(world, sheet.character, Math.floor(cols / 2), Math.floor(rows / 2));
   stage.addChild(world);
   return { world, floor, character, zoom };
+}
+
+/** One agent at its desk. */
+export interface DeskSprites {
+  agent_id: string;
+  desk: Sprite;
+  character: AnimatedSprite;
+  col: number;
+  row: number;
+}
+
+export interface DeskOptions {
+  /** Floor width in tiles: desks fill rows of `floor((cols - 1) / 2)`, two tiles apart (default 16). */
+  cols?: number;
+  /** Drive the animation from the shared ticker (default true; tests pass false: no WebGL, no rAF). */
+  autoUpdate?: boolean;
+  tile?: number;
+}
+
+/** Frames advance at this fraction of a tick (about four frames a second at 60 fps). */
+export const POSE_SPEED = 1 / 15;
+
+/** Stands one looping character at one desk per agent, in `agents` order, in a `desks` container
+ * added to `world` above the floor. Each character starts on its pose (`framesFor`). */
+export function placeDesks(
+  world: Container,
+  sheet: Sheet,
+  agents: readonly { agent_id: string; role: string; state: string }[],
+  opts: DeskOptions = {},
+): { container: Container; desks: DeskSprites[] } {
+  const tile = opts.tile ?? TILE;
+  const perRow = Math.max(1, Math.floor(((opts.cols ?? 16) - 1) / 2));
+  const container = new Container({ label: "desks" });
+  const desks = agents.map((a, i) => {
+    const col = 1 + (i % perRow) * 2;
+    const row = 1 + Math.floor(i / perRow) * 2;
+    const character = new AnimatedSprite({
+      textures: [...framesFor(sheet, a.role, a.state)],
+      animationSpeed: POSE_SPEED,
+      loop: true,
+      autoUpdate: opts.autoUpdate ?? true,
+    });
+    character.label = `character:${a.agent_id}`;
+    character.position.set(col * tile, row * tile);
+    // The desk stands in front of the character's legs.
+    const desk = new Sprite(sheet.desk);
+    desk.label = `desk:${a.agent_id}`;
+    desk.position.set(col * tile, row * tile + Math.floor(tile / 2));
+    container.addChild(character, desk);
+    character.play();
+    return { agent_id: a.agent_id, desk, character, col, row };
+  });
+  world.addChild(container);
+  return { container, desks };
+}
+
+/** Swaps a character's frame set in place: the same sprite, its first new frame shown at once and
+ * looping (no destroy, no re-add, so no flicker). Setting the same set again is a no-op. */
+export function setPose(sprite: AnimatedSprite, frames: readonly Texture[]): void {
+  if (!frames.length) return;
+  const current = sprite.textures as Texture[];
+  if (current.length === frames.length && current.every((t, i) => t === frames[i])) return;
+  sprite.textures = [...frames];
+  sprite.play();
+}
+
+/** The desks placed for one desk set: `key` names the set (`deskSetKey`). */
+export interface PlacedDesks {
+  key: string;
+  container: Container;
+  desks: DeskSprites[];
+}
+
+/** The desk set's identity: its agents and roles, in order (a state is not part of it). */
+export const deskSetKey = (agents: readonly { agent_id: string; role: string }[]): string =>
+  agents.map((a) => `${a.agent_id}:${a.role}`).join("|");
+
+/** Brings the floor's desks to `agents`: when `placed` holds the same desk set, each character's pose
+ * is swapped in place (`setPose`) and `placed` itself is returned, the same sprite objects; otherwise
+ * (none placed, or the agent set changed) the old desks are destroyed and new ones placed. */
+export function syncDesks(
+  world: Container,
+  sheet: Sheet,
+  placed: PlacedDesks | null,
+  agents: readonly { agent_id: string; role: string; state: string }[],
+  opts: DeskOptions = {},
+): PlacedDesks {
+  const key = deskSetKey(agents);
+  if (placed && placed.key === key) {
+    for (const [i, a] of agents.entries()) setPose(placed.desks[i]!.character, framesFor(sheet, a.role, a.state));
+    return placed;
+  }
+  if (placed) {
+    world.removeChild(placed.container);
+    placed.container.destroy({ children: true });
+  }
+  return { key, ...placeDesks(world, sheet, agents, opts) };
 }
