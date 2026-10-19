@@ -5,7 +5,7 @@ created: '2026-10-19'
 status: 'done'
 baseline_revision: 'dcdabd23593a50c9426fbd9d7ec0ff02cb36eef2'
 review_loop_iteration: 0
-followup_review_recommended: true
+followup_review_recommended: false
 deviation_score: 2
 context:
   - '{project-root}/kb/execution-pipeline-model-routing.md'
@@ -79,6 +79,12 @@ Acceptance criteria (verbatim, epics.md Story 24.2):
 
 ## Spec Change Log
 
+### 2026-10-19 — follow-up review pass (patch, outside `<intent-contract>`)
+- trigger: blind-hunter finding that Design Notes and Verification still carried text the earlier passes withdrew
+- amended: Design Notes drops the `story=20-` operator check and names the three before-the-meter stories; Verification expects 12 rows and two added index lines
+- known-bad state avoided: a re-run following Verification would flag the correct 12-row record and the generated index as failures
+- KEEP: `<intent-contract>` untouched (its matrix row "20-1 timing" and the Boundaries kind-rule citation stay as written; the DRIFT lines record why the record departs from them)
+
 ## Review Triage Log
 
 ### 2026-10-19 — Review pass
@@ -97,17 +103,29 @@ Acceptance criteria (verbatim, epics.md Story 24.2):
   - `[low]` `[patch]` (session-found) ledger range "26-1 to 28-5" wrong; now 25-1…28-5
 - rejected: edge-case-hunter's two findings (reclassify 20-1/20-2 as core code and recompute the by-kind rows) — they change the kind rule the intent contract pins and the first consult ruled on; the disclosure patch above covers the substance
 
+### 2026-10-19 — Review pass (follow-up)
+- skipped-layer: none (no story plan, so no band; both layers ran)
+- intent_gap: 0
+- bad_spec: 0
+- patch: 2 (high 0, medium 1, low 1)
+- defer: 0
+- reject: 2 (high 0, medium 2, low 0)
+- addressed_findings:
+  - `[medium]` `[patch]` 21-1 (last commit `1572100` 09:55:15Z) landed before the meter `8b83a7e` (10:14:36Z), yet its row and the Evidence gaps said its observation stayed in the sandbox ledger; the implementer moved 21-1 to the before-the-meter rule (wall-clock reason, 24.1 cell, three Evidence-gaps bullets); both layers raised it, deduplicated
+  - `[low]` `[patch]` the spec's Design Notes and Verification still carried withdrawn text (`story=20-` check, 11 rows, one index line); amended by this session (Spec Change Log)
+- rejected: the blind hunter's "21-2 may share it" (its first commit `29af406` is 10:23Z, after the meter; that the run started earlier is speculation and H0928:86 covers it); the blind hunter's "AC1 unmet is not escalated" (already recorded as DRIFT, consulted twice with accept-deviation score 2, and stated as unmet in the Auto Run Result)
+
 ## Design Notes
 
-AC1 is historical: it is proven by citation, not by re-running. The ledger observations the 24.1 meter wrote for Epics 20–22 landed in each sandbox's `~/.tk-studio` (the residual risk 24-1 recorded, fixed later by 26-4); none is in a committed ledger. The operator check is `sbx exec claude-tk-studio-supervisor -- sh -c "grep '\"meter: story=2[12]-' ~/.tk-studio/measurements/*.jsonl"` (and `claude-tk-studio` for `story=20-`).
+AC1 is historical: it is proven by citation, not by re-running. The ledger observations the 24.1 meter wrote for Epics 20–22 landed in each sandbox's `~/.tk-studio` (the residual risk 24-1 recorded, fixed later by 26-4); none is in a committed ledger. The operator check is `sbx exec claude-tk-studio-supervisor -- sh -c "grep '\"meter: story=2[12]-' ~/.tk-studio/measurements/*.jsonl"`. 20-1, 20-2 and 21-1 landed before the meter's commit `8b83a7e` (10:14Z), so no hook-written observation exists for them and no operator check applies (amended in the follow-up review pass, see Spec Change Log).
 
 ## Verification
 
 **Commands:**
 - `diff .bmad-loop/routing.toml apps/supervisor/.bmad-loop/routing.toml` -- expected: no output.
-- `grep -c '^| 2[0-2]-' kb/trial-record-opus-5-5.md` -- expected: 11 story rows (plus none for 22-4 or 24-1).
+- `grep -c '^| 2[0-2]-' kb/trial-record-opus-5-5.md` -- expected: 12 story rows (plus none for 22-4 or 24-1).
 - Matrix checks, each against `kb/trial-record-opus-5-5.md`: `grep -n '21-3' ` shows $38.13, 89.6 min and attempt 1 (full figures); the rows of 20-1, 21-1, 21-2 and 21-4 carry `not recorded` in the wall-clock column (missing wall-clock); every story row cites a `Studio:` spec line or `not recorded` (route evidence); every story row names a handoff/spec source in its 24.1 record column and the page states the ledger observations are not on this box (24.1 record); the 20-1 row or its note says it was priced after landing (20-1 timing).
-- `uv run plugins/tk-studio/lib/kb.py index --directory .` then `git diff --stat kb/index.md` -- expected: one added line.
+- `uv run plugins/tk-studio/lib/kb.py index --directory .` then `git diff --stat kb/index.md` -- expected: two added lines (the new record and the already-missing `acceptance-record-23-3…` page).
 - From `plugins/tk-studio/lib`: `uv run python -m unittest discover tests` -- expected: OK; `uv run python ../contracts/conformance/runner.py run` -- expected: `ok: true`.
 
 ## Deviation Summary
@@ -138,10 +156,19 @@ DEVIATION SCORE: 2 (implementer and consult)
 DRIFT: the 20-1/20-2 rows say AC1's ledger-observation half is unmet and drop the `story=20-` operator command — both landed before the meter, and the spec's "priced afterwards from its transcripts" citation (H0928:78) does not carry that claim — affects: 24-4
 DRIFT: the record's kind rule is labelled its own line-count proxy, not a v2 definition — the v2 kinds are by what a story is (kb:59-62) — affects: 24-4
 
+### pass 4 (2026-10-19, follow-up review patch)
+
+- planned: the I/O matrix's 24.1-record row treats every 21–22 story's ledger half as unverifiable-here / actual: 21-1 joins 20-1 and 20-2 as landed before the meter, so its ledger half is unmet and its wall-clock reason is "no observation was written" / why: `1572100` (09:55:15Z) predates `8b83a7e` (10:14:36Z), the same timing rule the pass-3 consult accepted / may affect: 24-4
+
+DEVIATION SCORE: 0 (implementer); story stays 2
+
+DRIFT: 21-1's row now says AC1's ledger-observation half is unmet, like 20-1/20-2 — it landed before the meter commit, under the timing rule the second consult accepted — affects: 24-4
+
 ## Consult Log
 
 - 2026-10-19T17:26:45Z — trigger: deviation-gt-0 — question: accept the implementer's three deviations (12 rows not 11; index regenerated with the stale 23-3 line via a tk-studio-named temp root; changed = insertions + deletions so every story is feature) at score 1, score 2, or reject #2/#3? — ruling: accept-deviation score 2 — do: accept #1 and #2 unchanged (never hand-trim the generated index); accept #3 and add beside the kind rule on kb/trial-record-opus-5-5.md: "changed = insertions + deletions; under insertions only, 20-1 (+148) would be core code; the core band is empty, so the $4.4 comparison has no trial data", set DEVIATION SCORE 2; keep "may affect: 24-4" on the #3 DRIFT line — rule candidate: In the customization kind rule, define "changed lines" as git diff --shortstat insertions + deletions outside _bmad-output/ over the landed range, and derive Verification row counts from the Boundaries scope list. (observation recorded, "ok": true)
 - 2026-10-19T17:35:13Z — trigger: deviation-gt-0 — question: accept the review-pass deviation (20-1/20-2 AC1 ledger half unmet, no pricing time recorded, story=20- command dropped) at score 2, 1, or reject and restore "priced afterwards from its transcripts"? — ruling: accept-deviation score 2 — do: keep the reviewer's wording and keep the story=20- command out; add the DRIFT line; DEVIATION SCORE 2; do not restore the transcripts wording — rule candidate: A spec I/O matrix cell that cites a source line must quote that line; a citation that does not carry the claim is a spec error, so the record states only what the source says and logs DRIFT. (observation recorded, "ok": true)
+
 
 ## Auto Run Result
 
@@ -149,43 +176,41 @@ Status: done
 
 Studio: activated as developer; working set bmm, tea, bmb, bmad-loop, gds; drift clean; routing implementer=claude-opus-5-5 reviewers=claude-opus-5-5 consult=claude-opus-5-5; knowledge spine absent
 
-**Summary:** This is a kb-only story. A new page, `kb/trial-record-opus-5-5.md`, records the 12 Epic 20–22 stories that went through the launch pipeline: 20-1, 20-2, 21-1…21-6, 22-1…22-3 and 22-5. 22-4 is out of scope because it was built by hand (PR #85).
-- Every figure is cited from committed evidence: the 09-28, 09-29 and 10-07 handoffs, the story specs, git commits and the 24-1 spec. Nothing was run, metered or written to a ledger.
-- Each row gives the dollars, wall-clock, attempts, kind, the route evidence (the spec's `Studio:` line) and the source of the 24.1 figure.
-- Route: both `routing.toml` tables are byte-identical. Each has had a single commit (`f006a3e`, `383a799`), and both commits predate the first landing.
-- Kind: the record's own proxy is fewer than 150 changed lines = core code. Under it all 12 stories are `feature`, so the core band is empty.
-- Against v2: the feature mean is $20.55 (range $3.97–$38.13), 2.39× v2's $8.6. The caveat on different stories and language is on the page, along with the gap in measurement method.
+**Summary:** A follow-up review of the done kb-only story. It ran because the spec was supplied with `status: done` and the last run recommended a follow-up. `kb/trial-record-opus-5-5.md` covers the 12 Epic 20–22 stories that ran through the launch pipeline: route evidence, metered dollars, wall-clock, attempts and kind, compared by kind with the v2 table, with the caveat. This pass made one correction: 21-1 landed before the 24.1 meter (`1572100` 09:55:15Z, before `8b83a7e` 10:14:36Z). It is now treated like 20-1 and 20-2: no meter observation was written, and AC1's ledger half is unmet.
 
-**Files changed:**
-- `kb/trial-record-opus-5-5.md`: new; the trial record (scope, per-story table, by-kind comparison, caveat, evidence gaps).
+**Files changed (story total since `dcdabd2`):**
+- `kb/trial-record-opus-5-5.md`: the trial record. In this pass, the 21-1 row and three Evidence-gaps bullets move 21-1 to the before-the-meter rule.
 - `kb/execution-pipeline-model-routing.md`: one pointer line under "Trial in flight".
-- `kb/index.md`: regenerated by `kb.py index`. It gains the new page and the `acceptance-record-23-3` page, which was already missing.
+- `kb/index.md`: regenerated by `kb.py index`. It adds the new page and the stale `acceptance-record-23-3` line.
+- This spec: in this pass, Design Notes and Verification were brought into line with earlier rulings, and the triage, deviation and result records were updated.
 
-**Review:** both layers ran. 6 patches were applied (medium 5, low 1), 0 deferred and 2 rejected (see the Review Triage Log).
+**Review (this pass):** both layers ran. 2 patches were applied (medium 1, low 1), 0 deferred and 2 rejected (see the Review Triage Log).
 
-**Follow-up review:** recommended (true). Patched findings were high 0, medium 5, low 1, so the score is 3×5 + 1 = 16 ≥ 5.
+**Follow-up review:** not recommended (false). Patched findings this pass were high 0, medium 1, low 1, so the score is 3×1 + 1 = 4 < 5.
 
-**Consults:** two, both on `deviation-gt-0`, and both ruled `accept-deviation score 2` (see the Consult Log). Both observations were recorded with ok: true.
+**Consults:** none this pass. The implementer's deviation score was 0, and no other trigger fired. The two earlier consults stand (Consult Log).
 
 **Verification:**
-- `diff` of the two `routing.toml` files prints nothing.
-- The record has 12 story rows.
-- The matrix checks were done by inspection: 21-3 shows $38.13 / 89.6 min / attempt 1; 20-1, 21-1, 21-2 and 21-4 show `not recorded`; every row cites a route line and a record source; 20-1/20-2 are noted as landed before the meter.
-- `uv run python -m unittest discover tests` → 1412 OK (2 skipped). I re-ran this in this session.
-- `uv run python ../contracts/conformance/runner.py run` → `ok: true`. Also re-ran here.
+- `diff .bmad-loop/routing.toml apps/supervisor/.bmad-loop/routing.toml` printed nothing. I ran it in this session.
+- `grep -c '^| 2[0-2]-' kb/trial-record-opus-5-5.md` printed 12. I ran it in this session.
+- I checked the commit times with `git log -1 --format='%h %aI'`: 21-1's `1572100` is at 09:55:15Z, before the meter's `8b83a7e` at 10:14:36Z; 21-2's `29af406` is at 10:23:42Z, after it.
+- `uv run python -m unittest discover tests` → 1412 tests OK (2 skipped). The implementer ran this after the patch.
+- `uv run python ../contracts/conformance/runner.py run` → `ok: true` (18 surfaces, 121 checks). The implementer ran this after the patch.
 
-**Unverifiable here:** the ledger-observation half of AC1 for Epics 21–22. The `meter:` observations were written to the supervisor sandbox's own ledger, and no committed ledger has them. The operator checks with: `sbx exec claude-tk-studio-supervisor -- sh -c "grep '\"meter: story=2[12]-' ~/.tk-studio/measurements/*.jsonl"`.
+**Unverifiable here:** the ledger-observation half of AC1 for 21-2 to 22-5. The operator check is `sbx exec claude-tk-studio-supervisor -- sh -c "grep '\"meter: story=2[12]-' ~/.tk-studio/measurements/*.jsonl"`.
 
-**Unmet, on record:** for 20-1 and 20-2, the ledger-observation half of AC1 is unmet. Both landed before the meter (`8b83a7e`), so they have no hook-written observation. Their 24.1 record is the metered figure in the handoffs; 20-2 was also re-priced live with `--no-record`.
+**Unmet, on record:** the ledger-observation half of AC1 for 20-1, 20-2 and 21-1. All three landed before the meter. Their 24.1 record is the metered figure in the handoffs.
 
 **Residual risks:**
-- The kind proxy leaves the $4.4 core-code comparison without data. 24-4 reads that band as needs-more-data.
+- The kind proxy leaves the $4.4 core-code band with no trial data.
 - Wall-clock is not recorded for 4 of the 12 stories.
-- The handoffs don't say whether v2's separately counted overheads are included in the trial dollars.
-- The figures come from handoff tables, not from ledger events that can be re-read.
+- The handoffs don't say whether v2's separately counted overheads are inside the trial dollars.
+- The figures come from handoff tables, not ledger events.
+- 21-2's run may have started before the meter commit. Its first commit is after it, so the record keeps it as unverifiable-here.
 
 DRIFT: the verification row count is 12, not 11 — the spec's own scope list has 12 stories — affects: none
 DRIFT: kb/index.md also gains the stale acceptance-record-23-3 line, generated from a `tk-studio`-named temp root — kb.py names the header after the root dir — affects: none
 DRIFT: "changed lines" = insertions + deletions, so every trial story is `feature` and the core-code band is empty — the spec left "changed" undefined — affects: 24-4
 DRIFT: the 20-1/20-2 rows say AC1's ledger-observation half is unmet, and the `story=20-` operator command is dropped — both stories landed before the meter, and the spec's "priced afterwards from its transcripts" citation (H0928:78) does not carry that claim — affects: 24-4
 DRIFT: the record's kind rule is labelled its own line-count proxy, not a v2 definition — the v2 kinds are by what a story is (kb:59-62) — affects: 24-4
+DRIFT: 21-1's row now says AC1's ledger-observation half is unmet, like 20-1/20-2 — it landed before the meter commit, under the timing rule the second consult accepted — affects: 24-4
