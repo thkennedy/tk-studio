@@ -5,17 +5,37 @@ import { LIVE_RUN_STATES, OFFICE_STATES, type LiveState, type OfficeAgent, type 
 
 // ------------------------------------------------------------ frames
 
-/** Frame sets by office state (the placeholder's shared sets), plus optional per-role sets (30.7). */
+/** Frame sets by office state: the shared sets (for a role the sheet does not carry), plus the
+ * per-role sets built from the atlas by name (Story 30.7). */
 export interface FrameSheet<F> {
   frames: Readonly<Record<OfficeState, readonly F[]>>;
   roles?: Readonly<Record<string, Partial<Record<OfficeState, readonly F[]>>>>;
 }
 
-/** The pose's frames: the role's set for `state` when the sheet has one, else the shared set for
- * `state`. An unknown state reads as `offline`. 30.7 adds per-role sets without changing callers. */
-export function framesFor<F>(sheet: FrameSheet<F>, role: string, state: string): readonly F[] {
+export type Warn = (message: string) => void;
+
+/** The gaps already warned about, per sheet: `syncDesks` asks on every store change. */
+const warned = new WeakMap<object, Set<string>>();
+
+/** The pose's frames. A role the sheet carries gets its own set for `state`; when that set is
+ * missing, the role's `idle` set, with one warning per sheet naming the gap `<role>.<state>`
+ * through `warn`. A role the sheet does not carry gets the shared set for `state`, without a
+ * warning. An unknown state reads as `offline`. */
+export function framesFor<F>(sheet: FrameSheet<F>, role: string, state: string, warn: Warn = console.warn): readonly F[] {
   const s: OfficeState = isOfficeState(state) ? state : "offline";
-  return sheet.roles?.[role]?.[s] ?? sheet.frames[s];
+  const own = sheet.roles?.[role];
+  if (!own) return sheet.frames[s];
+  const set = own[s];
+  if (set?.length) return set;
+  const gap = `${role}.${s}`;
+  let gaps = warned.get(sheet);
+  if (!gaps) warned.set(sheet, (gaps = new Set()));
+  if (!gaps.has(gap)) {
+    gaps.add(gap);
+    const shown = own.idle?.length ? `${role}.idle` : `the shared ${s} set (${role} has no idle frames)`;
+    warn(`office sheet: no frames for ${gap}; showing ${shown}`);
+  }
+  return own.idle?.length ? own.idle : sheet.frames[s];
 }
 
 export const isOfficeState = (s: unknown): s is OfficeState => (OFFICE_STATES as readonly unknown[]).includes(s);

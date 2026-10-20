@@ -1,5 +1,5 @@
 // Story 30.4: the Office screen's rules without a browser or WebGL: the state-to-frames mapping for
-// all eight states, the bubble rule, the desks, the HUD's fields from a fixture store (the null
+// all eight states (30.7: the per-role sets and the idle fallback), the bubble rule, the desks, the HUD's fields from a fixture store (the null
 // seams and no live run), the registry fetch and the project switcher with a fake storage.
 import { describe, expect, it } from "vitest";
 import { createOfficeStore, OFFICE_STATES, type OfficeState } from "../live/store";
@@ -19,12 +19,54 @@ describe("framesFor (the state-to-frames mapping)", () => {
     expect(new Set(sets.flat()).size).toBe(16);
   });
 
-  it("prefers the role's set for that state, else the shared set; an unknown state reads offline", () => {
-    const sheet: FrameSheet<string> = { frames: shared, roles: { planner: { typing: ["planner.typing.0", "planner.typing.1"] } } };
-    expect(framesFor(sheet, "planner", "typing")).toEqual(["planner.typing.0", "planner.typing.1"]);
-    expect(framesFor(sheet, "planner", "idle")).toEqual(["idle.0", "idle.1"]);
-    expect(framesFor(sheet, "session", "typing")).toEqual(["typing.0", "typing.1"]);
-    expect(framesFor(sheet, "session", "dancing")).toEqual(["offline.0", "offline.1"]);
+  // Story 30.7: a role the sheet carries falls back to its own idle set, warning once per gap.
+  const planner = {
+    typing: ["planner.typing.0", "planner.typing.1"],
+    idle: ["planner.idle.0", "planner.idle.1"],
+    offline: ["planner.offline.0", "planner.offline.1"],
+  };
+
+  it("prefers the role's set for that state; a missing pose falls back to the role's idle, warning once naming the gap", () => {
+    const sheet: FrameSheet<string> = { frames: shared, roles: { planner } };
+    const warnings: string[] = [];
+    const warn = (m: string) => warnings.push(m);
+    expect(framesFor(sheet, "planner", "typing", warn)).toEqual(planner.typing);
+    expect(warnings).toEqual([]);
+    expect(framesFor(sheet, "planner", "blocked", warn)).toEqual(planner.idle);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("planner.blocked");
+    // a second call (syncDesks asks on every store change) does not warn again
+    expect(framesFor(sheet, "planner", "blocked", warn)).toEqual(planner.idle);
+    expect(warnings).toHaveLength(1);
+    // another gap warns once more, naming it
+    expect(framesFor(sheet, "planner", "reading", warn)).toEqual(planner.idle);
+    expect(warnings).toHaveLength(2);
+    expect(warnings[1]).toContain("planner.reading");
+    // a fresh sheet warns afresh
+    framesFor({ frames: shared, roles: { planner } }, "planner", "blocked", warn);
+    expect(warnings).toHaveLength(3);
+  });
+
+  it("a role on the sheet without the pose or an idle set gets the shared set, warning once accurately", () => {
+    const sheet: FrameSheet<string> = { frames: shared, roles: { planner: { typing: planner.typing } } };
+    const warnings: string[] = [];
+    const warn = (m: string) => warnings.push(m);
+    expect(framesFor(sheet, "planner", "blocked", warn)).toEqual(["blocked.0", "blocked.1"]);
+    expect(framesFor(sheet, "planner", "blocked", warn)).toEqual(["blocked.0", "blocked.1"]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("planner.blocked");
+    expect(warnings[0]).toContain("shared blocked set");
+    expect(warnings[0]).not.toContain("showing planner.idle");
+  });
+
+  it("an unknown role takes the shared set without a warning; an unknown state reads offline", () => {
+    const sheet: FrameSheet<string> = { frames: shared, roles: { planner } };
+    const warnings: string[] = [];
+    const warn = (m: string) => warnings.push(m);
+    expect(framesFor(sheet, "session", "typing", warn)).toEqual(["typing.0", "typing.1"]);
+    expect(framesFor(sheet, "session", "dancing", warn)).toEqual(["offline.0", "offline.1"]);
+    expect(framesFor(sheet, "planner", "dancing", warn)).toEqual(planner.offline);
+    expect(warnings).toEqual([]);
   });
 });
 

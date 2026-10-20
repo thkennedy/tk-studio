@@ -1,28 +1,36 @@
 // The spike's scene (Story 30.1): one PixiJS v8 Application, a floor of tiles and one character
-// from the placeholder sheet, drawn at the integer zoom of `pickZoom`. The builders below take a
+// from the office sheet, drawn at the integer zoom of `pickZoom`. The builders below take a
 // Container and Textures only, so later stories' tests can drive them without WebGL (30.4).
 // Story 30.4: the sheet also holds a desk and one two-frame looping set per office state (§7.3);
 // `placeDesks` stands a character at a desk per agent and `setPose` swaps a character's frame set
 // in place on the same sprite (no destroy, no re-add, no `layoutScene`).
-import { AnimatedSprite, Application, Assets, Container, Rectangle, Sprite, Texture, TextureSource } from "pixi.js";
+// Story 30.7: the sheet is our own (tools/sprites/export.py, kb/studio-web-assets.md), loaded through
+// its atlas; every frame set comes from the atlas by name, per role (`sheetFromAtlas`).
+import { AnimatedSprite, Application, Assets, Container, Sprite, Texture, TextureSource, type Spritesheet } from "pixi.js";
 import { OFFICE_STATES, type OfficeState } from "../live/store";
 import { framesFor } from "../office/model";
 import { pickZoom } from "./pickZoom";
 
 /** Source tile size in pixels. */
 export const TILE = 16;
-/** The committed placeholder sheet (our own pixels, D6): row 0 holds the floor tile at x 0, the
- * character at x 16 and the desk at x 32; row 1 + i holds `OFFICE_STATES[i]`'s frames at x 0, x 16. */
-export const SHEET_URL = "sprites/placeholder.png";
-/** Frames per state on the placeholder sheet. */
+/** The committed sheet's atlas (our own pixels, D6): Pixi v8 spritesheet JSON naming `floor.0`,
+ * `desk.0` and `<role>.<state>.<n>`; it loads `office.png` beside it through `meta.image`. */
+export const SHEET_URL = "sprites/office.json";
+/** The least frames every looping state carries per role on the sheet (all eight states loop). */
 export const STATE_FRAMES = 2;
+/** The registry's roles in order (apps/supervisor/src/registry.ts `ROLES`): mirrored, never imported
+ * across apps. The shared set for a state is the first of these roles that has it. */
+export const ROLES = ["orchestrator", "session", "implementer", "reviewer", "consult", "advisor", "planner"] as const;
 
 export interface Sheet {
   floor: Texture;
+  /** The spike's lone character: the first role's `idle.0`. */
   character: Texture;
   desk: Texture;
-  /** The shared looping frame set per office state. */
+  /** The shared looping frame set per office state, for a role the sheet does not carry. */
   frames: Record<OfficeState, Texture[]>;
+  /** Each role's looping frame sets by office state, ordered by `n`. */
+  roles: Record<string, Partial<Record<OfficeState, Texture[]>>>;
 }
 
 export interface Scene {
@@ -50,21 +58,48 @@ export async function createApp(container: HTMLElement, ratio: number): Promise<
   return app;
 }
 
-/** Cuts the placeholder sheet's 16x16 tiles by Rectangle from one source (pure: no loading). */
-export function cutSheet(source: TextureSource, tile: number = TILE): Sheet {
-  const at = (col: number, row: number) => new Texture({ source, frame: new Rectangle(col * tile, row * tile, tile, tile) });
-  const frames = Object.fromEntries(
-    OFFICE_STATES.map((state, i) => [state, Array.from({ length: STATE_FRAMES }, (_, n) => at(n, 1 + i))]),
-  ) as Record<OfficeState, Texture[]>;
-  return { floor: at(0, 0), character: at(1, 0), desk: at(2, 0), frames };
+const FRAME_NAME = /^([a-z][a-z0-9-]*)\.([a-z-]+)\.(\d+)$/;
+
+/** Builds the sheet from the atlas's textures by name (pure: no loading). `floor.0` and `desk.0` are
+ * the tiles; `<role>.<state>.<n>` go to `roles[role][state]` ordered by `n`; `frames[state]` is the
+ * first role (`ROLES` order, then the others by name) that has the state, else the shared `idle`.
+ * A name that does not parse is ignored with a warning through `warn`. */
+export function sheetFromAtlas(textures: Readonly<Record<string, Texture>>, warn: (message: string) => void = console.warn): Sheet {
+  const found: Record<string, Partial<Record<OfficeState, [number, Texture][]>>> = {};
+  for (const [name, texture] of Object.entries(textures)) {
+    if (name === "floor.0" || name === "desk.0") continue;
+    const m = FRAME_NAME.exec(name);
+    const state = m?.[2] as OfficeState | undefined;
+    if (!m || !(OFFICE_STATES as readonly string[]).includes(state!)) {
+      warn(`office sheet: ignoring atlas frame "${name}" (want <role>.<state>.<n>)`);
+      continue;
+    }
+    ((found[m[1]!] ??= {})[state!] ??= []).push([Number(m[3]), texture]);
+  }
+  const roles: Sheet["roles"] = {};
+  for (const [role, sets] of Object.entries(found)) {
+    roles[role] = Object.fromEntries(
+      Object.entries(sets).map(([state, list]) => [state, list!.sort((a, b) => a[0] - b[0]).map(([, t]) => t)]),
+    );
+  }
+  const order = [...ROLES.filter((r) => roles[r]), ...Object.keys(roles).filter((r) => !(ROLES as readonly string[]).includes(r)).sort()];
+  const shared = (state: OfficeState) => roles[order.find((r) => roles[r]![state]?.length) ?? ""]?.[state];
+  const idle = shared("idle");
+  const tile = (name: string) => {
+    const t = textures[name];
+    if (!t) throw new Error(`office sheet: the atlas has no ${name}`);
+    return t;
+  };
+  if (!idle?.length) throw new Error("office sheet: the atlas has no idle frames for any role");
+  const frames = Object.fromEntries(OFFICE_STATES.map((state) => [state, shared(state) ?? idle])) as Record<OfficeState, Texture[]>;
+  return { floor: tile("floor.0"), character: idle[0]!, desk: tile("desk.0"), frames, roles };
 }
 
-/** Loads the placeholder sheet (the one loader) and cuts it (`cutSheet`). */
+/** Loads the sheet through its atlas (the one loader) and builds the frame sets by name (`sheetFromAtlas`). */
 export async function loadSheet(url: string = SHEET_URL): Promise<Sheet> {
-  const sheet: Texture = await Assets.load(url);
-  const source = sheet.source;
-  source.scaleMode = "nearest";
-  return cutSheet(source);
+  const atlas: Spritesheet = await Assets.load(url);
+  atlas.textureSource.scaleMode = "nearest";
+  return sheetFromAtlas(atlas.textures);
 }
 
 /** A cols x rows floor of `tile`-pixel sprites at whole source-pixel positions, added to `world`. */

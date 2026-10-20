@@ -1,32 +1,84 @@
 // Story 30.4: the scene's desk and pose builders on a bare Container with Textures (no renderer,
 // no WebGL): eight distinct looping frame sets, one character per agent at a desk, and a pose swap
-// in place on the same sprite object.
+// in place on the same sprite object. Story 30.7: the sheet is built from the committed atlas
+// (office.json) by name, per role, and the visible-loop check reads office.png through it.
 import { readFileSync } from "node:fs";
 import { inflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
-import { Container, Texture } from "pixi.js";
+import { Container, Rectangle, Texture } from "pixi.js";
 import { OFFICE_STATES } from "../live/store";
-import { cutSheet, deskSetKey, placeDesks, setPose, STATE_FRAMES, syncDesks, TILE } from "./scene";
+import { deskSetKey, placeDesks, ROLES, setPose, sheetFromAtlas, STATE_FRAMES, syncDesks, TILE } from "./scene";
 
-const sheet = () => cutSheet(new Texture().source);
+interface AtlasFrame { frame: { x: number; y: number; w: number; h: number } }
+const atlas = JSON.parse(readFileSync(new URL("../../public/sprites/office.json", import.meta.url), "utf8")) as {
+  frames: Record<string, AtlasFrame>;
+  meta: { image: string; size: { w: number; h: number } };
+};
+const source = new Texture().source;
+const texturesOf = (frames: Record<string, AtlasFrame>) =>
+  Object.fromEntries(Object.entries(frames).map(([name, { frame: f }]) => [name, new Texture({ source, frame: new Rectangle(f.x, f.y, f.w, f.h) })]));
+const sheet = () => sheetFromAtlas(texturesOf(atlas.frames));
 const frameKey = (t: Texture) => `${t.frame.x},${t.frame.y},${t.frame.width},${t.frame.height}`;
+const atlasKey = (name: string) => {
+  const f = atlas.frames[name]!.frame;
+  return `${f.x},${f.y},${f.w},${f.h}`;
+};
 
-describe("the sheet's frame sets", () => {
-  it("cuts eight distinct looping sets, two frames each, apart from the floor, character and desk", () => {
+describe("the sheet's frame sets, from the atlas by name", () => {
+  it("builds every role's eight looping sets, ordered by n, apart from the floor and the desk", () => {
     const s = sheet();
-    expect(Object.keys(s.frames)).toEqual([...OFFICE_STATES]);
-    const seen = new Set([frameKey(s.floor), frameKey(s.character), frameKey(s.desk)]);
-    expect(seen.size).toBe(3);
-    for (const state of OFFICE_STATES) {
-      const set = s.frames[state];
-      expect(set).toHaveLength(STATE_FRAMES);
-      for (const t of set) {
-        expect(t.frame.width).toBe(TILE);
-        expect(seen.has(frameKey(t))).toBe(false);
-        seen.add(frameKey(t));
+    expect(atlas.meta.image).toBe("office.png");
+    expect(frameKey(s.floor)).toBe(atlasKey("floor.0"));
+    expect(frameKey(s.desk)).toBe(atlasKey("desk.0"));
+    const seen = new Set([frameKey(s.floor), frameKey(s.desk)]);
+    expect(seen.size).toBe(2);
+    expect(Object.keys(s.roles).sort()).toEqual([...ROLES].sort());
+    // the exporter lays frames out in its order (floor, desk, ROLES x states x n) row-major, and the
+    // JSON keys are written sorted, so the roles' order is read from the sheet position (y, then x)
+    const bySheet = Object.entries(atlas.frames)
+      .sort(([, a], [, b]) => a.frame.y - b.frame.y || a.frame.x - b.frame.x)
+      .map(([name]) => name);
+    expect(bySheet.slice(0, 2)).toEqual(["floor.0", "desk.0"]);
+    expect([...new Set(bySheet.slice(2).map((name) => name.split(".")[0]))]).toEqual([...ROLES]);
+    for (const role of ROLES) {
+      for (const state of OFFICE_STATES) {
+        const set = s.roles[role]![state]!;
+        expect(set.length, `${role}.${state}`).toBeGreaterThanOrEqual(STATE_FRAMES);
+        for (const [n, t] of set.entries()) {
+          expect(frameKey(t)).toBe(atlasKey(`${role}.${state}.${n}`));
+          expect(t.frame.width).toBe(TILE);
+          expect(seen.has(frameKey(t))).toBe(false);
+          seen.add(frameKey(t));
+        }
       }
     }
-    expect(seen.size).toBe(3 + OFFICE_STATES.length * STATE_FRAMES);
+    expect(seen.size).toBe(Object.keys(atlas.frames).length);
+    // the shared sets and the spike's character are the first role's
+    for (const state of OFFICE_STATES) expect(s.frames[state]).toBe(s.roles[ROLES[0]]![state]);
+    expect(s.character).toBe(s.roles[ROLES[0]]!.idle![0]);
+  });
+
+  it("orders by n, takes the shared set from the first ROLES role that has it, and ignores an unparseable name with a warning", () => {
+    const at = (x: number): AtlasFrame => ({ frame: { x: x * TILE, y: 0, w: TILE, h: TILE } });
+    const warnings: string[] = [];
+    const s = sheetFromAtlas(
+      texturesOf({
+        "floor.0": at(0), "desk.0": at(1),
+        "planner.idle.1": at(2), "planner.idle.0": at(3), "planner.typing.0": at(4),
+        "session.typing.1": at(5), "session.typing.0": at(6),
+        bogus: at(7), "planner.dancing.0": at(8),
+      }),
+      (m) => warnings.push(m),
+    );
+    expect(s.roles.planner!.idle!.map((t) => t.frame.x)).toEqual([3 * TILE, 2 * TILE]);
+    expect(s.frames.typing.map((t) => t.frame.x)).toEqual([6 * TILE, 5 * TILE]);
+    expect(s.frames.idle).toBe(s.roles.planner!.idle);
+    // a state no role has reads the shared idle
+    expect(s.frames.blocked).toBe(s.roles.planner!.idle);
+    expect(s.character).toBe(s.roles.planner!.idle![0]);
+    expect(warnings).toHaveLength(2);
+    expect(warnings[0]).toContain('"bogus"');
+    expect(warnings[1]).toContain('"planner.dancing.0"');
   });
 });
 
@@ -47,7 +99,7 @@ describe("placeDesks", () => {
     // cols 5: two desks per row, two tiles apart
     expect(desks.map((d) => [d.col, d.row])).toEqual([[1, 1], [3, 1], [1, 3]]);
     for (const [i, d] of desks.entries()) {
-      expect(d.character.textures).toEqual(s.frames[agents[i].state as keyof typeof s.frames]);
+      expect(d.character.textures).toEqual(s.roles[agents[i].role]![agents[i].state as keyof typeof s.frames]);
       expect(d.character.playing).toBe(true);
       expect(d.character.loop).toBe(true);
       expect(d.desk.texture).toBe(s.desk);
@@ -110,8 +162,8 @@ describe("syncDesks", () => {
       expect(d.character).toBe(sprites[i]);
       expect(d.character.destroyed).toBe(false);
     }
-    expect(sprites[0].textures).toEqual(s.frames["waiting-for-human"]);
-    expect(sprites[1].textures).toEqual(s.frames.blocked);
+    expect(sprites[0].textures).toEqual(s.roles.orchestrator!["waiting-for-human"]);
+    expect(sprites[1].textures).toEqual(s.roles.session!.blocked);
     expect(world.children).toEqual([first.container]);
   });
 
@@ -131,7 +183,7 @@ describe("syncDesks", () => {
 
 /** The committed sheet's RGBA pixels, decoded (it is written with filter 0 on every scanline). */
 function decodeSheet(): { width: number; at: (x: number, y: number) => number[] } {
-  const bytes = readFileSync(new URL("../../public/sprites/placeholder.png", import.meta.url));
+  const bytes = readFileSync(new URL(`../../public/sprites/${atlas.meta.image}`, import.meta.url));
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const idat: Uint8Array[] = [];
   let width = 0;
@@ -154,28 +206,36 @@ function decodeSheet(): { width: number; at: (x: number, y: number) => number[] 
 }
 
 describe("the committed sheet's poses at a desk", () => {
-  it("loops every state visibly: its two frames differ at a pixel the desk does not cover", () => {
+  it("loops every role in every state visibly: its first two frames differ at a pixel the desk does not cover", () => {
     const png = decodeSheet();
+    expect(png.width).toBe(atlas.meta.size.w);
     const s = sheet();
     // The desk's offset in front of its character, as placeDesks stands them.
     const [{ desk, character }] = placeDesks(new Container(), s, [{ agent_id: "a", role: "session", state: "idle" }], { autoUpdate: false }).desks;
     const dy = desk.y - character.y;
-    const deskCovers = (x: number, y: number) => y - dy >= 0 && png.at(2 * TILE + x, y - dy)[3] !== 0;
-    const tile = (col: number, row: number) =>
-      Array.from({ length: TILE * TILE }, (_, i) => png.at(col * TILE + (i % TILE), row * TILE + Math.floor(i / TILE)).join(",")).join(";");
-    const sets = new Set<string>();
-    for (const [i, state] of OFFICE_STATES.entries()) {
-      const row = 1 + i;
-      const visible: [number, number][] = [];
-      for (let y = 0; y < TILE; y++) {
-        for (let x = 0; x < TILE; x++) {
-          const differs = png.at(x, row * TILE + y).join() !== png.at(TILE + x, row * TILE + y).join();
-          if (differs && !deskCovers(x, y)) visible.push([x, y]);
+    const origin = (name: string): [number, number] => [atlas.frames[name]!.frame.x, atlas.frames[name]!.frame.y];
+    const [deskX, deskY] = origin("desk.0");
+    const deskCovers = (x: number, y: number) => y - dy >= 0 && png.at(deskX + x, deskY + y - dy)[3] !== 0;
+    const tile = (name: string) => {
+      const [ox, oy] = origin(name);
+      return Array.from({ length: TILE * TILE }, (_, i) => png.at(ox + (i % TILE), oy + Math.floor(i / TILE)).join(",")).join(";");
+    };
+    for (const role of ROLES) {
+      const sets = new Set<string>();
+      for (const state of OFFICE_STATES) {
+        const [ax, ay] = origin(`${role}.${state}.0`);
+        const [bx, by] = origin(`${role}.${state}.1`);
+        const visible: [number, number][] = [];
+        for (let y = 0; y < TILE; y++) {
+          for (let x = 0; x < TILE; x++) {
+            const differs = png.at(ax + x, ay + y).join() !== png.at(bx + x, by + y).join();
+            if (differs && !deskCovers(x, y)) visible.push([x, y]);
+          }
         }
+        expect(visible.length, `${role}.${state}`).toBeGreaterThan(0);
+        sets.add(tile(`${role}.${state}.0`) + "|" + tile(`${role}.${state}.1`));
       }
-      expect(visible.length, state).toBeGreaterThan(0);
-      sets.add(tile(0, row) + "|" + tile(1, row));
+      expect(sets.size, role).toBe(OFFICE_STATES.length);
     }
-    expect(sets.size).toBe(OFFICE_STATES.length);
   });
 });

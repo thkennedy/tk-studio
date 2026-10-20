@@ -1,0 +1,31 @@
+# The office palette: `<char> <RRGGBBAA>`, every alpha 00 or ff (Story 30.7, D6: our own pixels, loop-authored text grids; the format is in kb/studio-web-assets.md).
+. 00000000  # transparent
+a 5c4033ff  # floor plank
+b 4a3228ff  # floor plank, dark
+c 38261fff  # floor seam
+e 96643cff  # desk top
+d 6e482cff  # desk front
+m 282c38ff  # monitor
+v 5ac8ffff  # monitor screen
+k 18141cff  # outline
+s ecbc96ff  # skin
+w fafafaff  # eye
+p 2c3048ff  # trousers
+l c8c8dcff  # book page, thought dot, sleep mark, motion line
+y f0d23cff  # waiting marker, bow tie
+r d23232ff  # blocked marker
+g 808088ff  # headset, glasses
+W e6e6ecff  # white hair, beard
+1 201820ff  # hair, black
+2 462c1eff  # hair, brown
+3 dcb45aff  # hair, blonde
+4 969aa0ff  # hair, grey
+5 b45028ff  # hair, ginger
+N 283c78ff  # cap, navy
+P 8c5ac8ff  # shirt, orchestrator
+t 4078c8ff  # shirt, session
+o e68228ff  # shirt, implementer
+n 46a05aff  # shirt, reviewer
+q 28bec8ff  # shirt, consult
+M 8c2846ff  # shirt, advisor
+i dc6ea0ff  # shirt, planner
