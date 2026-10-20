@@ -29,6 +29,7 @@ jobs:
   - run-epic-29
   - run-epic-24
   - run-epic-30
+  - run-epic-31
 
 # Role-keyed working sets (AD-17) — recorded only on explicit
 # confirmation via tk-studio-onboard; one entry per role.

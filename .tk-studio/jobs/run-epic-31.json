@@ -1,0 +1,11 @@
+{
+  "job_schema_version": 1,
+  "id": "run-epic-31",
+  "type": "run-epic",
+  "description": "tk-studio Epic 31 (Tracking on Atlassian and the Inbox) through the supervisor queue (declared 2026-10-20 with the epic). Extends the shipped run-epic type: one-shot; the first launch bootstraps _bmad-output/specs/spec-epic-31 from epics.md (Story 26.1). Submit it with POST /jobs {project: tk-studio, job: run-epic-31} only once the Atlassian site, the two seats and their API tokens exist and the tokens reach the engine sandbox (attended): story 31.1 verifies the free tier first and halts the epic on a does-not-fit. Placement tier sbx on claude-tk-studio; tools/verify_host.py is the host verify leg; the close-out opens the PR.",
+  "target": {
+    "payload": {
+      "epic": 31
+    }
+  }
+}
