@@ -2629,3 +2629,119 @@ So that the office looks like ours and the repository owns every pixel it ships 
 **Given** the sheet
 **When** the Office screen uses it
 **Then** the placeholder sheet of Story 30.1 is deleted, the renderer's frame sets come from the atlas by name, and a missing frame for a (role, state) falls back to the role's `idle` frames with a console warning naming the gap; `kb/studio-web-assets.md` records the tool, the pipeline, the format and the credits (none owed: our own work)
+
+## Epic 31: Tracking on Atlassian and the Inbox
+
+The design spec's §6.8 and §6.9 (`_bmad-output/planning-artifacts/design/studio-design-spec-2026-10-09/README.md`), the build order's next epic after EP-30: planning and knowledge move onto Atlassian's free tier (Jira for the tracker, Confluence for the wiki, two seats: the owner and an agent user with its own API token), and the human channel becomes one inbox. The plan stays canonical in `_bmad-output/` for entity fields (AD-5); comments, attachments and owner-authored Confluence pages are a new class, backend-authoritative and append-only, pulled back verbatim and never promoted from local (D9, AD-22). The existing planning adapter (AD-4 to AD-6), the Jira adapter with promote and status pull-back (Epic 8) and the knowledge promotion gate (Epic 9) are the base; AD-7 keeps API tokens, never OAuth. Tim's inbox model (§6.9) is adopted as written. Planned 2026-10-20 (session 11's tail) from the spec. The web screens here (Inbox, Issue) extend EP-30's app; the office's "!" bubble is the only office change. Attended: the Atlassian accounts, the two seats and their tokens are Tim's to create; the studio hands him exact steps for what the API cannot do.
+
+### Story 31.1: The Free Tier, Verified
+
+As the operator,
+I want the free plans' limits checked before anything is built on them,
+So that the project template, the statuses and the sync-back are designed against what Jira and Confluence Free actually allow (§6.8 "verify before building", decisions Appendix C).
+
+**Acceptance Criteria:**
+
+**Given** an Atlassian site on the free plans with the owner seat and the agent user seat (created by Tim, attended; the story names the exact steps and the two API tokens' environment variables, never the values)
+**When** the research runs (the `tk-studio-research` surface, a digest to disk)
+**Then** `kb/atlassian-free-tier.md` records, with the source and the date: whether a Free Jira project allows the two custom statuses and a workflow transition between them; the project-permission model available (who can transition, comment, attach); the REST API's rate limits and the token's scope; Confluence Free's space, page and attachment limits; and whether the Rovo MCP server adds anything the REST API with an API token does not (the adapter uses REST today); each finding ends in "fits", "fits with a workaround (named)" or "does not fit", and a "does not fit" on the statuses or the API halts the epic with the alternative named
+
+**Given** the record
+**When** the story closes
+**Then** `decisions.md` Appendix C's open questions are answered by reference to it, and the stories below carry the workarounds it names (a story-level note, never a silent change)
+
+### Story 31.2: Project Setup From a Template
+
+As the operator,
+I want onboarding a project to create its Confluence space and its linked Jira project from a studio template,
+So that every studio-managed project has the same folders, the same statuses and the same two users (§6.8 a).
+
+**Acceptance Criteria:**
+
+**Given** a registered project, the site's URL and the two tokens in the environment
+**When** `tk-studio-onboard` is asked to set up tracking (a new optional step, refused with a named reason when the tokens are absent)
+**Then** the planning adapter's Jira binding creates the Jira project from the template (key from the project id, issue types epic and story, the workflow with `To Do`, `In Progress`, `Blocked - Awaiting User`, `Block Resolved`, `Done`), the linked Confluence space with the folder structure for the design pages (brief, GDD, scope of work, decisions, records), the saved filter "Needs you" (`status = "Blocked - Awaiting User" ORDER BY priority DESC, updated ASC`), and records the keys and ids under `.tk-studio/config.yaml`'s planning binding; every step the API cannot do on the free plan (31.1's findings) is printed as an exact, numbered instruction for the owner and the run ends `partial` naming them, never `complete`
+
+**Given** a project set up
+**When** setup runs again
+**Then** it is idempotent: existing space, project, statuses and filter are recognised by key and left as they are, and the result names what it found; `bun test`-free: the lib suite covers the template, the idempotence and the refusals with a fake Atlassian REST
+
+### Story 31.3: Publish: Design Pages to Confluence
+
+As the owner,
+I want the brief, the GDD, the scope of work and the decisions published to the project's Confluence space, and epics and stories promoted to Jira as today,
+So that the plan is readable from any device without the studio site (§6.8 b).
+
+**Acceptance Criteria:**
+
+**Given** the planning artifacts under `_bmad-output/planning-artifacts/` and the design folder
+**When** `plansync.py sync` runs with the Jira binding (today's promote) and the new `publish` verb runs
+**Then** each design page is created or updated in the space's folder by a stable title, with a provenance footer naming the source file and the commit, Markdown converted to Confluence storage format (headings, lists, tables, code, links; images attached), and unchanged pages are skipped by content hash; epics and stories promote as before, now with a link to their design pages; the plan stays canonical (AD-5): nothing from Confluence changes an entity field
+
+**Given** the publish
+**When** it is tested
+**Then** the lib suite covers the conversion, the hashing, the idempotence and the provenance with a fake Confluence REST; the contract's §2 names `publish` (additive)
+
+### Story 31.4: Sync-Back on a Timer
+
+As an agent working on a story,
+I want the issue's status, its comments, its attachments as links and the owner's Confluence pages in local memory,
+So that no agent queries Atlassian live for context (§6.8 c and e, D9).
+
+**Acceptance Criteria:**
+
+**Given** a project set up and the shipped job `atlassian-sync-back` (cron, every 10 minutes by default; `durable`)
+**When** it runs
+**Then** it pulls each tracked issue's status (mapped onto the canonical enum per AD-6, the Jira original kept under `external.jira`), its comments (append-only into `_bmad-output/tracking/<key>/comments.jsonl`: `{issue, author: owner | agent, body, mentions[], created, source: jira}`), its attachments as links, and every owner-authored Confluence page into `kb/confluence/<slug>.md` with a provenance header (read-only sources: a local edit is overwritten and reported); nothing local is promoted back; the run's record names counts and the newest comment seen
+
+**Given** the sync-back
+**When** it is tested
+**Then** the lib suite covers the status mapping, the append-only comment log (a comment seen twice is written once), the attachment links, the page mirror and the overwrite report, with a fake REST; `tk-studio-activate`'s drift check gains a `tracking` plane that says when the last sync-back ran and whether the binding is reachable
+
+### Story 31.5: The Two Statuses and the Inbox Items
+
+As the owner,
+I want every issue that cannot progress to sit in `Blocked - Awaiting User` with its reason, and an inbox derived from that,
+So that one list says what needs me (§6.9 items 1 and 2, §7.4).
+
+**Acceptance Criteria:**
+
+**Given** a story the loop cannot progress (a dev session's `blocked` end, a `paused` run awaiting a ruling, an engagement question)
+**When** the loop reports it
+**Then** the issue (and each dependent story, by the plan's links) moves to `Blocked - Awaiting User` with a comment that @mentions the owner and names the reason and what resolves it (a `tk-studio-track block` verb the supervisor's paused-run pass and the engine's escalation hook call)
+
+**Given** the sync-back
+**When** it reads the mentions
+**Then** it derives `inbox_item {issue, priority, blocked_since, reason_comment, state: open | resolved | validating}` for every issue in that status, sorted by priority then time, into `_bmad-output/tracking/inbox.json`; the supervisor serves it at `GET /inbox` (a supervisor surface the web consumes, contract 0.1.26 additive) and the office shows a persistent "!" bubble on the desk whose work is blocked, cleared when the status changes, never when a message arrives
+
+### Story 31.6: The Inbox and Issue Screens
+
+As the owner,
+I want the web's Inbox to list what needs me and its Issue view to let me reply or press Done,
+So that I answer from the desktop or the iPad without opening Jira (§6.9 items 2 to 4).
+
+**Acceptance Criteria:**
+
+**Given** `GET /inbox` and the tracked issues
+**When** the Inbox screen renders
+**Then** it lists open items sorted as served, each with the project, the issue key and title, the priority, how long it has waited and the reason's first line; the web's nav gains Inbox and Issue; the count sits on the nav item
+
+**Given** one item
+**When** the Issue screen opens
+**Then** it shows the issue Jira-like (status, the run and PR when the plan links one, the cost from the ledger when known, the comments in order with author and time), a reply box, and a **Done** button for a simple request; sending a reply, or Done (which writes "Done." as the owner), posts the comment through the supervisor (`POST /inbox/{key}/reply`, the owner's token, never the agent's) and moves the issue to `Block Resolved`; the item leaves the list on the next sync-back; vitest covers the list, the view and the two actions with a fixture
+
+### Story 31.7: Validation of a Resolution
+
+As the loop,
+I want an agent to validate a resolved block before the story continues,
+So that a reply that did not resolve the block comes back to the inbox with a follow-up, not a silent failure (§6.9 item 4 and 5).
+
+**Acceptance Criteria:**
+
+**Given** an issue in `Block Resolved`
+**When** the sync-back sees it
+**Then** the supervisor queues a `validate-resolution` job for the project (host tier, the planner leg's model): the session reads the reason and the reply, and either tests the thing it had to be able to do (a command, a path, a sign-in) or judges whether the answer is enough; a pass moves the issue back to `To Do` or `In Progress` (the loop re-arms the story: the supervisor's paused run resumes with the ruling written into the spec, or the job's next tick re-runs it), a fail moves it to `Blocked - Awaiting User` with a follow-up comment that lands in the inbox again
+
+**Given** the engagement's questions and approvals and the loop's `escalate` rulings
+**When** they arise
+**Then** each is an issue with comments in the same project, so the owner has one inbox for everything; the supervisor's `awaiting-ruling` writes the block instead of a Telegram note alone, and a reply that carries a ruling is written into the spec by the validation session; the lib suite and `bun test` cover the queueing, the two outcomes and the ruling write with fakes
