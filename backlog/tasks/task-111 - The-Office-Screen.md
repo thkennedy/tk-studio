@@ -1,9 +1,10 @@
 ---
 id: TASK-111
 title: The Office Screen
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-19 17:32'
+updated_date: '2026-10-19 21:24'
 labels:
   - ST-111
 milestone: "Studio Web v0: Office, Board, Status"
