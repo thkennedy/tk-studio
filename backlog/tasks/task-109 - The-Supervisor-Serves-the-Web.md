@@ -1,9 +1,10 @@
 ---
 id: TASK-109
 title: The Supervisor Serves the Web
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-19 17:32'
+updated_date: '2026-10-19 19:32'
 labels:
   - ST-109
 milestone: "Studio Web v0: Office, Board, Status"

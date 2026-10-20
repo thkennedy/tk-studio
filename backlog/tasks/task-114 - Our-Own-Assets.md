@@ -1,9 +1,10 @@
 ---
 id: TASK-114
 title: Our Own Assets
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-19 17:32'
+updated_date: '2026-10-20 00:32'
 labels:
   - ST-114
 milestone: "Studio Web v0: Office, Board, Status"

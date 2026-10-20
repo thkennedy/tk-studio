@@ -1,9 +1,10 @@
 ---
 id: TASK-108
 title: The Renderer Spike
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-19 17:32'
+updated_date: '2026-10-19 18:39'
 labels:
   - ST-108
 milestone: "Studio Web v0: Office, Board, Status"

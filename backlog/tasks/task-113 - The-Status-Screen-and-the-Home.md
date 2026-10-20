@@ -1,9 +1,10 @@
 ---
 id: TASK-113
 title: The Status Screen and the Home
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-19 17:32'
+updated_date: '2026-10-19 23:52'
 labels:
   - ST-113
 milestone: "Studio Web v0: Office, Board, Status"
