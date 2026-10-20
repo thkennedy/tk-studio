@@ -1,0 +1,19 @@
+# The floor tile: wooden planks (Story 30.7, D6: our own pixels, loop-authored text grids; the format is in kb/studio-web-assets.md).
+
+[0]
+aaaaaaacaaaaaaac
+aaaaaaacaaaaaaac
+aaaaaaacaaaaaaac
+cccccccccccccccc
+bbbcbbbbbbbcbbbb
+bbbcbbbbbbbcbbbb
+bbbcbbbbbbbcbbbb
+cccccccccccccccc
+aaaaaaacaaaaaaac
+aaaaaaacaaaaaaac
+aaaaaaacaaaaaaac
+cccccccccccccccc
+bbbcbbbbbbbcbbbb
+bbbcbbbbbbbcbbbb
+bbbcbbbbbbbcbbbb
+cccccccccccccccc

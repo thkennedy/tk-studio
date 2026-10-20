@@ -9,7 +9,7 @@
     "build": "vite build",
     "test": "vitest run",
     "verify": "bun install --frozen-lockfile && bun run build && bun run test",
-    "sprites": "bun scripts/make-placeholder.ts"
+    "sprites": "uv run --no-project python ../../tools/sprites/export.py"
   },
   "dependencies": {
     "pixi.js": "^8.22.0",

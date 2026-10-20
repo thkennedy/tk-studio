@@ -6,7 +6,7 @@ import react from "@vitejs/plugin-react";
 // from its own origin under /app/ (Story 30.2), so asset URLs are absolute under that
 // base: a deep path (/app/a/b) or /app without its slash still loads /app/assets/….
 // A <base href="/app/"> prepended to <head> makes runtime-relative URLs (the sprite
-// sheet "sprites/placeholder.png") resolve under /app/ too, from /app and deep paths.
+// sheet atlas "sprites/office.json") resolve under /app/ too, from /app and deep paths.
 const baseHref = (): Plugin => ({
   name: "studio-web-base-href",
   transformIndexHtml: () => [{ tag: "base", attrs: { href: "/app/" }, injectTo: "head-prepend" }],
