@@ -337,13 +337,15 @@ def _payload_flags(payload: dict) -> list[str]:
 def _summarize_result(parsed: dict | None, exit_code: int | None) -> tuple[dict, str]:
     """Compact summary + one-line headline from a core's parsed output.
 
-    Well-known report keys (the conformance runner's among them) surface in
-    the summary; everything else stays in the workspace's output.json."""
+    Well-known report keys (the conformance runner's among them; the
+    sync-back's `status`, `counts` and `newest_comment`, Story 31.4) surface
+    in the summary; everything else stays in the workspace's output.json."""
     summary: dict = {}
     if exit_code is not None:
         summary["exit_code"] = exit_code
     if isinstance(parsed, dict):
-        for known in ("ok", "surfaces_checked", "checks_run"):
+        for known in ("ok", "surfaces_checked", "checks_run", "status",
+                      "counts", "newest_comment"):
             if known in parsed:
                 summary[known] = parsed[known]
         if isinstance(parsed.get("failures"), list):
@@ -382,8 +384,17 @@ def _finalize_run(key: str, record: dict, summary: dict,
     return captured
 
 
-def execute_core(key: str, record: dict) -> dict:
+PROJECT_ROOT_TOKEN = "{project_root}"
+
+
+def execute_core(key: str, record: dict,
+                 project_root: Path | None = None) -> dict:
     """Run a core-target run to a terminal state, wall-clock guarded.
+
+    An argument of `target.core[1:]` that is exactly `{project_root}` is
+    replaced by the submitting project's root (Story 31.4: `submit` and
+    `wake` pass it); no other templating, and a definition without the
+    token runs exactly as before.
 
     Outcome mapping: machine-readable stdout → complete; timeout → partial
     with the guard named; anything unparseable → blocked, never a guess.
@@ -395,7 +406,10 @@ def execute_core(key: str, record: dict) -> dict:
     core = defn["target"]["core"]
     payload = defn["target"].get("payload") or {}
     record = joblib.update_run(key, record["run_id"], {"state": "running"})
-    argv = [sys.executable, str(PLUGIN_ROOT / core[0]), *core[1:],
+    args = [str(Path(project_root).resolve())
+            if project_root is not None and arg == PROJECT_ROOT_TOKEN else arg
+            for arg in core[1:]]
+    argv = [sys.executable, str(PLUGIN_ROOT / core[0]), *args,
             *_payload_flags(payload)]
     timeout = defn["guards"].get("max_wall_clock_seconds")
     try:
@@ -475,7 +489,7 @@ def submit(project_root: Path, job_id: str, force: bool = False) -> dict:
         result["run_id"] = record["run_id"]
         due_now = not defn.get("at") or _parse_iso(defn["at"]) <= _now()
         if due_now and "core" in defn["target"]:
-            record = execute_core(key, record)
+            record = execute_core(key, record, root)
             result["state"] = record["state"]
             if record.get("reason"):
                 result["reason"] = record["reason"]
@@ -596,7 +610,7 @@ def wake(project_root: Path, job_id: str, force: bool = False) -> dict:
     if starter_lock:
         result["starter_lock"] = starter_lock
     if "core" in defn["target"]:
-        record = execute_core(key, record)
+        record = execute_core(key, record, root)
         result["state"] = record["state"]
         if record.get("reason"):
             result["reason"] = record["reason"]

@@ -13,7 +13,7 @@
         "note": "what the job executes; at least one of skill|core",
         "fields": {
           "skill": { "type": "string", "required": false, "note": "a contract surface by name (driver-contract §2); payload maps 1:1 onto its flags" },
-          "core": { "type": "array", "items": "string", "required": false, "note": "plugin-root-relative deterministic-core argv (same shape as conformance drives) for pure-data jobs; never an absolute path" },
+          "core": { "type": "array", "items": "string", "required": false, "note": "plugin-root-relative deterministic-core argv (same shape as conformance drives) for pure-data jobs; never an absolute path. An argument of core[1:] that is exactly `{project_root}` is replaced by the submitting project's root when submit or wake executes the run (Story 31.4, additive: no other templating; a definition without the token runs unchanged)" },
           "payload": { "type": "object", "required": false, "note": "arguments for the target; defaults to {}" }
         }
       },

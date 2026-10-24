@@ -1,4 +1,4 @@
-"""tk-studio-activate — four-plane health/drift check (AD-13). Read-only, loud.
+"""tk-studio-activate — five-plane health/drift check (AD-13). Read-only, loud.
 
 Planes checked:
   bmad-base  installed _bmad/_config/manifest.yaml versions vs the bmad.lock pins,
@@ -26,6 +26,11 @@ Planes checked:
              (ST-2.5) — observed state is recorded in the registry entry
              (writer: activate), the one sanctioned bookkeeping write; links
              are never repaired here (fix is the explicit vault link verb)
+  tracking   the Atlassian sync-back (Story 31.4): when the last tick ran and
+             whether the binding was reachable, read from .tk-studio/config.yaml
+             and _bmad-output/tracking/sync-state.json only — never a network
+             call. One case is named (field `case`): not-bound | never-run |
+             ok | stale | token-missing | unreachable | deactivated | auth
 
 Per-plane status: ok | drift | missing | error. Overall:
   clean  → exit 0, drift-detection{result: clean}
@@ -51,7 +56,9 @@ import argparse
 import json
 import os
 import sys
+import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[3]
@@ -461,6 +468,126 @@ def check_vault(directory: Path) -> dict:
     return plane
 
 
+TRACKING_STATE_REL = Path("_bmad-output") / "tracking" / "sync-state.json"
+TRACKING_STALE_SECONDS = 30 * 60  # three ten-minute ticks
+FIX_TRACKING_RUN = ("run `uv run <plugin>/lib/plansync.py sync-back --directory "
+                    "{root}` and declare the atlassian-sync-back job in "
+                    ".tk-studio/config.yaml jobs")
+FIX_TRACKING_STALE = ("the atlassian-sync-back job has not ticked: check it is "
+                      "declared in .tk-studio/config.yaml jobs and its cron "
+                      "schedule is bound (jobrun.py resolve), or run `uv run "
+                      "<plugin>/lib/plansync.py sync-back --directory {root}`")
+FIX_TRACKING_UNREACHABLE = ("check the network path to api.atlassian.com (the "
+                            "sandbox's `sbx policy approval ls`) and the site's "
+                            "status, then rerun sync-back")
+FIX_TRACKING_DEACTIVATED = ("the owner signs in to the Atlassian site and opens "
+                            "a Jira issue and a Confluence page to reactivate "
+                            "the Free site (kb/atlassian-free-tier.md §1 step "
+                            "10), then rerun sync-back")
+
+
+def _tracking_age(at: object, now: datetime) -> float | None:
+    if not isinstance(at, str):
+        return None
+    try:
+        when = datetime.fromisoformat(at)
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return (now - when).total_seconds()
+
+
+def check_tracking(directory: Path, now: datetime | None = None) -> dict:
+    """The Atlassian sync-back plane (Story 31.4, Settled shape 4): local
+    reads only (contract §6 read-only; manifest external_calls false).
+    "Whether the binding is reachable" is the last tick's observed case."""
+    plane = {"plane": "tracking", "status": "ok", "case": "not-bound",
+             "detail": ""}
+    now = now or datetime.now(timezone.utc)
+    try:
+        key, _ = configlib.resolve("planning.jira.project_key",
+                                   project_root=directory)
+    except configlib.ConfigError:
+        key = None
+    except (OSError, ValueError) as exc:  # an unreadable config: no binding read
+        plane["detail"] = (f"the project config is unreadable ({exc}) — no "
+                           f"planning.jira binding read")
+        return plane
+    if key in (None, "") or isinstance(key, (dict, list)):
+        plane["detail"] = ("no planning.jira binding — Atlassian tracking is "
+                           "not set up (plansync.py setup)")
+        return plane
+    path = directory / TRACKING_STATE_REL
+    fix_run = FIX_TRACKING_RUN.format(root=directory)
+    if not path.is_file():
+        plane.update(status="missing", case="never-run", fix=fix_run,
+                     detail=f"bound to Jira project {key}, but sync-back has "
+                            f"never run ({TRACKING_STATE_REL.as_posix()} absent)")
+        return plane
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        plane.update(status="drift", case="stale", fix=fix_run,
+                     detail=f"{TRACKING_STATE_REL.as_posix()} unreadable: {exc}")
+        return plane
+    last = state.get("last_run") if isinstance(state, dict) else None
+    if not isinstance(last, dict):
+        plane.update(status="missing", case="never-run", fix=fix_run,
+                     detail=f"bound to Jira project {key}; no sync-back run "
+                            f"recorded")
+        return plane
+    plane["last_run"] = last
+    at, case, status = last.get("at"), last.get("case"), last.get("status")
+    reason = str(last.get("reason") or "")
+    age = _tracking_age(at, now)
+    when = (f"last sync-back {at} ({round(age / 60)} min ago)"
+            if age is not None else f"last sync-back at {at!r}")
+    if case == "token-missing":
+        names = sorted(set(re.findall(r"\b(?:TK_ATLASSIAN_[A-Z_]+|JIRA_[A-Z_]+)\b",
+                                      reason)))
+        plane.update(status="drift", case=case,
+                     detail=f"{when} ended {status}: a variable was absent — "
+                            f"{reason}",
+                     fix=(f"set {', '.join(names) or 'the named variable'} in "
+                          f"the user environment (setx NAME …, never a file "
+                          f"in a checkout), then rerun sync-back"))
+    elif case == "unreachable" and status == "blocked":
+        # a failed preflight (contract §6); a later page's, the comment
+        # overflow's or the mirror's 5xx ends `partial` and is read by age
+        # and status below, as `rate-limited`/`error` are
+        plane.update(status="drift", case=case,
+                     detail=f"{when}: the site was unreachable — {reason}",
+                     fix=FIX_TRACKING_UNREACHABLE)
+    elif case == "deactivated":
+        plane.update(status="drift", case=case,
+                     detail=f"{when}: the site answered as deactivated — "
+                            f"{reason}",
+                     fix=FIX_TRACKING_DEACTIVATED)
+    elif case == "auth":
+        plane.update(status="drift", case=case,
+                     detail=f"{when}: the token was refused — {reason}",
+                     fix=reason or "check the agent seat's tokens")
+    elif age is None or age > TRACKING_STALE_SECONDS:
+        plane.update(status="drift", case="stale",
+                     detail=f"{when} ended {status} — older than 30 minutes "
+                            f"or not a completed tick",
+                     fix=FIX_TRACKING_STALE.format(root=directory))
+    elif status not in ("complete", "partial"):
+        # a recent tick that ran and recorded its failure: name it, never
+        # "has not ticked"
+        outcome = f"{status} (case {case})" + (f": {reason}" if reason else "")
+        plane.update(status="drift", case="stale",
+                     detail=f"{when} ended {outcome} — not a completed tick",
+                     fix=(f"the last sync-back tick ended {outcome}; fix that, "
+                          f"then rerun `uv run <plugin>/lib/plansync.py "
+                          f"sync-back --directory {directory}`"))
+    else:
+        plane.update(case="ok", detail=f"{when} ended {status}; the binding "
+                                       f"was reachable")
+    return plane
+
+
 def main(argv: list[str] | None = None) -> int:
     # Headless output must survive a cp1252 Windows console: payloads are
     # arbitrary unicode and must always print (AD-11).
@@ -498,6 +625,7 @@ def main(argv: list[str] | None = None) -> int:
                              args.channel),
         check_store,
         lambda: check_vault(directory),
+        lambda: check_tracking(directory),
     ):
         started = time.monotonic()
         plane = check()

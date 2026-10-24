@@ -22,6 +22,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -476,6 +477,8 @@ class SkillsDirPlaneTestCase(unittest.TestCase):
                                   return_value=dict(quiet, plane="store")), \
                 mock.patch.object(drift_check, "check_vault",
                                   return_value=dict(quiet, plane="vault")), \
+                mock.patch.object(drift_check, "check_tracking",
+                                  return_value=dict(quiet, plane="tracking")), \
                 mock.patch.object(drift_check, "_emit"), \
                 redirect_stdout(out):
             code = drift_check.main(["--directory", str(self.project),
@@ -500,6 +503,8 @@ class SkillsDirPlaneTestCase(unittest.TestCase):
                                   return_value=dict(quiet, plane="store")), \
                 mock.patch.object(drift_check, "check_vault",
                                   return_value=dict(quiet, plane="vault")), \
+                mock.patch.object(drift_check, "check_tracking",
+                                  return_value=dict(quiet, plane="tracking")), \
                 mock.patch.object(drift_check, "_emit"), \
                 redirect_stdout(out):
             code = drift_check.main(["--directory", str(self.project),
@@ -511,6 +516,172 @@ class SkillsDirPlaneTestCase(unittest.TestCase):
         self.assertNotEqual(plugin["status"], "error", plugin["detail"])
         self.assertIn("catalog comparison skipped", plugin["detail"])
         self.assertNotEqual(code, 2)
+
+
+class TrackingPlaneTests(unittest.TestCase):
+    """Story 31.4, Settled shape 4: the tracking plane reads
+    .tk-studio/config.yaml and _bmad-output/tracking/sync-state.json only —
+    never the network — and names one case."""
+
+    NOW = datetime(2026, 10, 24, 12, 0, tzinfo=timezone.utc)
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name) / "proj"
+        (self.root / ".tk-studio").mkdir(parents=True)
+        self._old_home = os.environ.get("TK_STUDIO_HOME")
+        os.environ["TK_STUDIO_HOME"] = str(Path(self._tmp.name) / "store")
+
+    def tearDown(self):
+        if self._old_home is None:
+            os.environ.pop("TK_STUDIO_HOME", None)
+        else:
+            os.environ["TK_STUDIO_HOME"] = self._old_home
+        self._tmp.cleanup()
+
+    def _bind(self):
+        (self.root / ".tk-studio" / "config.yaml").write_text(
+            "planning:\n  jira:\n    project_key: TKS\n", encoding="utf-8",
+            newline="\n")
+
+    def _last_run(self, minutes_ago=5, status="complete", case="ok",
+                  reason=None):
+        at = self.NOW - timedelta(minutes=minutes_ago)
+        path = self.root / drift_check.TRACKING_STATE_REL
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"cursor": None, "pages": {}, "last_run": {
+            "at": at.isoformat(timespec="seconds"), "status": status,
+            "case": case, "counts": {}, "newest_comment": None,
+            "reason": reason}}), encoding="utf-8")
+
+    def _plane(self):
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=AssertionError("network")), \
+                mock.patch("socket.create_connection",
+                           side_effect=AssertionError("network")):
+            return drift_check.check_tracking(self.root, now=self.NOW)
+
+    def test_not_bound_is_ok(self):
+        plane = self._plane()
+        self.assertEqual((plane["plane"], plane["status"], plane["case"]),
+                         ("tracking", "ok", "not-bound"))
+
+    def test_never_run_is_missing_with_the_fix(self):
+        self._bind()
+        plane = self._plane()
+        self.assertEqual((plane["status"], plane["case"]),
+                         ("missing", "never-run"))
+        self.assertIn("plansync.py sync-back --directory", plane["fix"])
+        self.assertIn("atlassian-sync-back", plane["fix"])
+
+    def test_recent_complete_or_partial_is_ok(self):
+        self._bind()
+        for status in ("complete", "partial"):
+            self._last_run(status=status)
+            plane = self._plane()
+            self.assertEqual((plane["status"], plane["case"]), ("ok", "ok"))
+            self.assertEqual(plane["last_run"]["status"], status)
+            self.assertIn("min ago", plane["detail"])
+
+    def test_older_than_thirty_minutes_is_stale(self):
+        self._bind()
+        self._last_run(minutes_ago=31)
+        plane = self._plane()
+        self.assertEqual((plane["status"], plane["case"]), ("drift", "stale"))
+
+    def test_named_states_are_their_own_cases(self):
+        self._bind()
+        expectations = {
+            "token-missing": ("sync-back partial: owner-page mirror skipped: "
+                              "TK_ATLASSIAN_AGENT_CONFLUENCE_TOKEN is not set",
+                              "TK_ATLASSIAN_AGENT_CONFLUENCE_TOKEN"),
+            "unreachable": ("GET /myself returned 503", "network path"),
+            "deactivated": ("GET /myself returned 410", "owner signs in"),
+            "auth": ("Jira returned 401 for GET /myself: check the token",
+                     "returned 401"),
+        }
+        for case, (reason, fix) in expectations.items():
+            self._last_run(status="blocked", case=case, reason=reason)
+            plane = self._plane()
+            self.assertEqual((plane["status"], plane["case"]), ("drift", case))
+            self.assertIn(fix, plane["fix"])
+            self.assertNotIn("no changes", plane["detail"])
+
+    def test_error_and_rate_limited_are_read_by_age_and_status(self):
+        # run cases, never a ninth plane case: ok when a recent tick ended
+        # partial, stale when it is old or ended blocked
+        self._bind()
+        for case in ("error", "rate-limited"):
+            self._last_run(status="partial", case=case, reason="r")
+            plane = self._plane()
+            self.assertEqual((plane["status"], plane["case"]), ("ok", "ok"))
+            self._last_run(minutes_ago=31, status="partial", case=case)
+            plane = self._plane()
+            self.assertEqual((plane["status"], plane["case"]),
+                             ("drift", "stale"))
+            self._last_run(status="blocked", case=case)
+            plane = self._plane()
+            self.assertEqual((plane["status"], plane["case"]),
+                             ("drift", "stale"))
+
+    def test_unreachable_is_a_plane_case_only_on_a_failed_preflight(self):
+        # contract §6: `unreachable` is a connection error or 5xx on
+        # preflight; a later 5xx ends the tick partial, read by age and status
+        self._bind()
+        self._last_run(status="partial", case="unreachable",
+                       reason="Jira returned 503 for GET /search page 2")
+        plane = self._plane()
+        self.assertEqual((plane["status"], plane["case"]), ("ok", "ok"))
+        self._last_run(minutes_ago=31, status="partial", case="unreachable")
+        plane = self._plane()
+        self.assertEqual((plane["status"], plane["case"]), ("drift", "stale"))
+        self._last_run(status="blocked", case="unreachable",
+                       reason="GET /myself returned 503")
+        plane = self._plane()
+        self.assertEqual((plane["status"], plane["case"]),
+                         ("drift", "unreachable"))
+        self.assertIn("network path", plane["fix"])
+
+    def test_a_recent_blocked_tick_names_its_outcome_not_a_missing_tick(self):
+        self._bind()
+        for case in ("error", "rate-limited"):
+            reason = f"Jira returned 400 for GET /myself ({case})"
+            self._last_run(status="blocked", case=case, reason=reason)
+            plane = self._plane()
+            self.assertEqual((plane["status"], plane["case"]),
+                             ("drift", "stale"))
+            self.assertNotIn("has not ticked", plane["fix"])
+            self.assertIn(reason, plane["fix"])
+            self.assertIn(reason, plane["detail"])
+            self.assertIn("blocked", plane["fix"])
+            self.assertIn("rerun", plane["fix"])
+        # genuinely old: the job has not ticked
+        self._last_run(minutes_ago=31, status="blocked", case="error",
+                       reason="r")
+        self.assertIn("has not ticked", self._plane()["fix"])
+
+    def test_this_repo_is_not_bound_or_never_run(self):
+        plane = drift_check.check_tracking(PLUGIN_ROOT.parents[1])
+        self.assertIn(plane["case"], ("not-bound", "never-run"))
+
+    def test_main_reports_five_planes(self):
+        quiet = {"plane": "x", "status": "ok", "detail": ""}
+        out = io.StringIO()
+        with mock.patch.object(drift_check, "check_bmad_base",
+                               return_value=dict(quiet, plane="bmad-base")), \
+                mock.patch.object(drift_check, "check_plugin",
+                                  return_value=dict(quiet, plane="plugin")), \
+                mock.patch.object(drift_check, "check_store",
+                                  return_value=dict(quiet, plane="store")), \
+                mock.patch.object(drift_check, "check_vault",
+                                  return_value=dict(quiet, plane="vault")), \
+                mock.patch.object(drift_check, "_emit"), \
+                redirect_stdout(out):
+            code = drift_check.main(["--directory", str(self.root)])
+        report = json.loads(out.getvalue())
+        self.assertEqual([p["plane"] for p in report["planes"]],
+                         ["bmad-base", "plugin", "store", "vault", "tracking"])
+        self.assertEqual(code, 0)
 
 
 if __name__ == "__main__":

@@ -53,6 +53,7 @@ import json
 import os
 import re
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -99,6 +100,26 @@ DEFAULT_TYPE_MAPPING = {"epic": "Epic", "story": "Story", "task": "Sub-task"}
 
 class JiraError(Exception):
     """Backend refusal or failure; message is safe to surface as `reason`."""
+
+
+class RateLimited(JiraError):
+    """A 429 still answered after every retry (Story 31.4); `reason` is the
+    response's `RateLimit-Reason`, or None when the header was absent."""
+
+    def __init__(self, message: str, reason: str | None = None):
+        super().__init__(message)
+        self.reason = reason
+
+
+def canonical_status(name: str | None, category: str | None) -> str | None:
+    """The canonical status for a Jira status: by name first — the two
+    template statuses (`SETUP_STATUSES`) are canonical `blocked` (AD-22,
+    AD-6) — then by status category. None when neither maps. `pull_back`
+    and the sync-back share it, so `sync` and `sync-back` never flip an
+    entity between `in-progress` and `blocked`."""
+    if name in SETUP_STATUSES:
+        return "blocked"
+    return FROM_BACKEND_CATEGORY.get(category)
 
 
 def _now_iso() -> str:
@@ -221,13 +242,111 @@ def non_json_2xx(app: str, method: str, url: str, status: int) -> str:
             f"once the network path to the site is clean")
 
 
+# 429 handling (Story 31.4, kb/atlassian-free-tier.md §2 Q3): wait
+# `Retry-After` when present, else back off exponentially; missing
+# rate-limit headers are normal. Every observed `RateLimit*` /
+# `X-RateLimit*` value and every 429 (with its `RateLimit-Reason`) lands in
+# the client's `rate_limit` record. The waits are bounded so a tick lands
+# its `last_run` and the 429 well inside the job's 300 s wall-clock guard:
+# a `Retry-After` past RETRY_AFTER_CAP, or a wait that would take the
+# client's total past RETRY_WAIT_BUDGET, raises `RateLimited` at once.
+RETRY_DELAYS = (1, 2, 4, 8, 16)
+RETRY_AFTER_CAP = 30
+RETRY_WAIT_BUDGET = 90
+THROTTLE_LOG_MAX = 50
+
+
+def new_retry_budget() -> dict:
+    """A client's 429 wait account (one client serves one tick)."""
+    return {"waited": 0.0, "limit": float(RETRY_WAIT_BUDGET)}
+
+
+def new_rate_limit_record() -> dict:
+    return {"headers": {}, "throttled": []}
+
+
+def _lower_headers(headers) -> dict[str, str]:
+    try:
+        items = headers.items()
+    except AttributeError:
+        return {}
+    return {str(k).lower(): str(v) for k, v in items}
+
+
+def _retry_after(value: str | None) -> float | None:
+    """Seconds from a `Retry-After` value; None when absent or an HTTP
+    date (then the exponential backoff applies)."""
+    if value is None:
+        return None
+    try:
+        seconds = float(value.strip())
+    except ValueError:
+        return None
+    return seconds if seconds >= 0 else None
+
+
+def send_with_retry(app: str, transport, method: str, url: str, body,
+                    record: dict, sleep, limited,
+                    budget: dict | None = None) -> tuple[int, object]:
+    """One request through the transport seam with the 429 retry. A
+    transport answers `(status, body)` or `(status, body, headers)`.
+    After the last retry a 429 raises `limited(message, reason)`; so does
+    a `Retry-After` past RETRY_AFTER_CAP, or a wait that would take
+    `budget["waited"]` past `budget["limit"]` (the client's account; a
+    fresh one per call when None), without sleeping."""
+    budget = budget if budget is not None else new_retry_budget()
+    # the gateway's cloud id stays out of the record (it lands in tracked
+    # sync-state): /ex/<app>/<cloud id>/… is named by the app alone
+    path = re.sub(r"^/ex/(jira|confluence)/[^/]+", r"/ex/\1",
+                  urllib.parse.urlsplit(url).path)
+    reason = None
+    for attempt in range(len(RETRY_DELAYS) + 1):
+        answer = transport(method, url, body)
+        status, data = answer[0], answer[1]
+        headers = _lower_headers(answer[2]) if len(answer) > 2 else {}
+        for name, value in headers.items():
+            if name.startswith(("ratelimit", "x-ratelimit")):
+                record["headers"][name] = value
+        if status != 429:
+            return status, data
+        reason = headers.get("ratelimit-reason")
+        wait = _retry_after(headers.get("retry-after"))
+        if len(record["throttled"]) < THROTTLE_LOG_MAX:
+            record["throttled"].append({
+                "method": method, "path": path, "reason": reason,
+                "retry_after": headers.get("retry-after")})
+        if attempt == len(RETRY_DELAYS):
+            break
+        if wait is not None and wait > RETRY_AFTER_CAP:
+            raise limited(f"{app} answered {method} {path} with 429 and "
+                          f"Retry-After {wait:g} s, past the "
+                          f"{RETRY_AFTER_CAP} s cap — not waited "
+                          f"(RateLimit-Reason: {reason or 'not given'})",
+                          reason)
+        wait = wait if wait is not None else RETRY_DELAYS[attempt]
+        if budget["waited"] + wait > budget["limit"]:
+            raise limited(f"{app} answered {method} {path} with 429; the "
+                          f"next wait ({wait:g} s) would pass the "
+                          f"{budget['limit']:g} s retry budget — not waited "
+                          f"(RateLimit-Reason: {reason or 'not given'})",
+                          reason)
+        budget["waited"] += wait
+        sleep(wait)
+    raise limited(f"{app} answered {method} {path} with 429 after "
+                  f"{len(RETRY_DELAYS)} retries (RateLimit-Reason: "
+                  f"{reason or 'not given'})", reason)
+
+
 class JiraClient:
     """Minimal Jira Cloud REST client, API-token basic auth (AD-7).
 
     `transport(method, url, body) -> (status, parsed_body)` is injectable so
-    the adapter is testable offline; the default is urllib over HTTPS. The
-    constructor is the legacy site-URL path; `for_gateway` builds the
-    api.atlassian.com base a scoped agent token needs (Story 31.2).
+    the adapter is testable offline; the default is urllib over HTTPS. A
+    transport may answer `(status, parsed_body, headers)` too (Story 31.4:
+    the rate-limit record and `Retry-After`). The constructor is the legacy
+    site-URL path; `for_gateway` builds the api.atlassian.com base a scoped
+    agent token needs (Story 31.2). `sleep` is the 429 backoff's wait and
+    `retry_budget` the client's bounded total of those waits.
     """
 
     def __init__(self, site: str, email: str, token: str, transport=None,
@@ -246,6 +365,9 @@ class JiraClient:
                          "Accept": "application/json",
                          "Content-Type": "application/json"}
         self._transport = transport or self._http
+        self.sleep = time.sleep
+        self.rate_limit = new_rate_limit_record()
+        self.retry_budget = new_retry_budget()
 
     @classmethod
     def for_gateway(cls, cloud_id: str, email: str, token: str,
@@ -268,7 +390,8 @@ class JiraClient:
                 raw = resp.read().decode("utf-8", errors="replace")
                 try:
                     return resp.status, (json.loads(raw) if raw.strip()
-                                         else None)
+                                         else None), \
+                        _lower_headers(resp.headers)
                 except ValueError as exc:
                     raise JiraError(non_json_2xx("Jira", method, url,
                                                  resp.status)) from exc
@@ -278,7 +401,7 @@ class JiraClient:
                 parsed = json.loads(raw)
             except ValueError:
                 parsed = raw
-            return exc.code, parsed
+            return exc.code, parsed, _lower_headers(exc.headers)
         except (urllib.error.URLError, OSError) as exc:
             proxied = proxy_refusal("Jira", method, url, exc, self.site)
             if proxied:
@@ -290,7 +413,9 @@ class JiraClient:
         url = self.base + path
         if query:
             url += "?" + urllib.parse.urlencode(query)
-        status, data = self._transport(method, url, body)
+        status, data = send_with_retry("Jira", self._transport, method, url,
+                                       body, self.rate_limit, self.sleep,
+                                       RateLimited, self.retry_budget)
         reason = auth_failure("Jira", status, method, path, data, self.site,
                               self.token_env, self.email_env, scope,
                               site=self.toggle_site)
@@ -358,8 +483,11 @@ def pull_back(plan_dir: Path, client: JiraClient,
 
     Echo suppression: a backend value equal to the last-promote snapshot is
     ignored. Both-changed entities are conflicts — reported, never resolved.
+    One `GET /issue/{key}` per bound entity, then `apply_statuses`.
     """
-    applied, conflicts, notes = [], [], []
+    notes: list[str] = []
+    statuses: dict[str, tuple[str, str | None]] = {}
+    assignees: dict[str, str | None] = {}
     for path, front, body in _load_entities(plan_dir):
         snapshot = (front.get("external") or {}).get(BINDING)
         if not isinstance(snapshot, dict) or not snapshot.get("key"):
@@ -384,11 +512,45 @@ def pull_back(plan_dir: Path, client: JiraClient,
         if b_status is None:
             notes.append(f"{front['id']}: {key} has no readable status")
             continue
+        statuses[key] = (b_status, b_category)
+        assignees[key] = b_assignee
+    applied = apply_statuses(plan_dir, statuses, dry_run, assignees=assignees)
+    applied["notes"] = notes + applied["notes"]
+    return applied
+
+
+def apply_statuses(plan_dir: Path, statuses: dict, dry_run: bool = False,
+                   assignees: dict | None = None) -> dict:
+    """Apply backend statuses `{jira key: (name, category)}` onto the
+    canonical entities whose `external.jira.key` is in the map (AD-5;
+    Story 31.4 splits it out of `pull_back` so the sync-back's JQL search
+    shares it). The status maps by `canonical_status` (name, then
+    category). Echo suppression against the `external.jira` snapshot; a
+    both-changed entity is a conflict, reported, never resolved. When the
+    backend name changed but already maps onto the canonical status, only
+    the snapshot is refreshed: its `status` (the Jira original) and, when
+    it was stale, its `canonical_status`. `assignees`
+    (`{key: name | None}`, pull_back's) adds the assignee class; without
+    it the assignee is never read or changed. `{applied, conflicts, notes}`.
+    """
+    applied, conflicts, notes = [], [], []
+    for path, front, body in _load_entities(plan_dir):
+        snapshot = (front.get("external") or {}).get(BINDING)
+        if not isinstance(snapshot, dict) or not snapshot.get("key"):
+            continue
+        key = snapshot["key"]
+        if key not in statuses:
+            continue
+        b_status, b_category = statuses[key]
+        if b_status is None:
+            notes.append(f"{front['id']}: {key} has no readable status")
+            continue
 
         changes: dict[str, object] = {}
         conflict_fields: list[str] = []
+        refresh = False
         if b_status != snapshot.get("status"):
-            mapped = FROM_BACKEND_CATEGORY.get(b_category)
+            mapped = canonical_status(b_status, b_category)
             if mapped is None:
                 notes.append(f"{front['id']}: backend status {b_status!r} "
                              f"(category {b_category!r}) has no canonical "
@@ -401,29 +563,56 @@ def pull_back(plan_dir: Path, client: JiraClient,
                     f"(promoted: {snapshot.get('canonical_status')!r})")
             elif front["status"] != mapped:
                 changes["status"] = (mapped, b_status)
+            else:
+                # the Jira name moved within the mapping, or Jira caught up
+                # with an unpromoted local change: the snapshot follows, so
+                # the next promote has nothing to push (AD-5 round trip)
+                refresh = True
+        else:
+            # the Jira name is unchanged, but a snapshot taken before the
+            # name-first mapping (a pre-31.4 pull-back mapped by category
+            # only) can hold a stale canonical status — e.g. `Blocked -
+            # Awaiting User` as `in-progress`. Re-map it unless a local
+            # change is still unpromoted (AD-6: one shared mapping). Only
+            # the name-mapped `SETUP_STATUSES` qualify: a category maps
+            # several canonical statuses (`review` and `in-progress` both
+            # promote into `indeterminate`), so a category-mapped snapshot
+            # differing from its canonical status is the AD-5 round trip
+            # of an unrepresentable status, not a stale mapping
+            mapped = canonical_status(b_status, b_category)
+            promoted = snapshot.get("canonical_status")
+            if b_status in SETUP_STATUSES and mapped != promoted and \
+                    front["status"] == promoted:
+                changes["status"] = (mapped, b_status)
 
-        snap_assignee = snapshot.get("assignee") or None
-        if b_assignee != snap_assignee:
-            canonical_now = front.get("assignee") or None
-            snap_canonical = snapshot.get("canonical_assignee") or None
-            if canonical_now != snap_canonical and canonical_now != b_assignee:
-                conflict_fields.append(
-                    f"assignee: canonical={front.get('assignee')!r} "
-                    f"backend={b_assignee!r}")
-            elif canonical_now != b_assignee:
-                changes["assignee"] = b_assignee
+        if assignees is not None and key in assignees:
+            b_assignee = assignees[key]
+            snap_assignee = snapshot.get("assignee") or None
+            if b_assignee != snap_assignee:
+                canonical_now = front.get("assignee") or None
+                snap_canonical = snapshot.get("canonical_assignee") or None
+                if canonical_now != snap_canonical and \
+                        canonical_now != b_assignee:
+                    conflict_fields.append(
+                        f"assignee: canonical={front.get('assignee')!r} "
+                        f"backend={b_assignee!r}")
+                elif canonical_now != b_assignee:
+                    changes["assignee"] = b_assignee
 
         if conflict_fields:
             conflicts.append({"id": front["id"], "canonical": str(path),
                               "backend": key, "fields": conflict_fields})
             continue
-        if not changes:
+        if not changes and not refresh:
             continue
         if "status" in changes:
             mapped, backend_name = changes["status"]
             front["status"] = mapped
             snapshot["status"] = backend_name
             snapshot["canonical_status"] = mapped
+        elif refresh:
+            snapshot["status"] = b_status
+            snapshot["canonical_status"] = front["status"]
         if "assignee" in changes:
             if changes["assignee"] is None:
                 front.pop("assignee", None)
@@ -431,11 +620,13 @@ def pull_back(plan_dir: Path, client: JiraClient,
                 front["assignee"] = changes["assignee"]
             snapshot["assignee"] = changes["assignee"] or ""
             snapshot["canonical_assignee"] = changes["assignee"] or ""
-        front["updated"] = _now_iso()
+        if changes:
+            front["updated"] = _now_iso()
         snapshot["synced_at"] = _now_iso()
         if not dry_run:
             _atomic_write(path, interchange.render_entity(front, body))
-        applied.append({"id": front["id"], "fields": sorted(changes),
+        applied.append({"id": front["id"],
+                        "fields": sorted(changes) or ["external.jira.status"],
                         "path": str(path)})
     return {"applied": applied, "conflicts": conflicts, "notes": notes}
 
@@ -826,6 +1017,55 @@ def _paged_values(client: JiraClient, path: str, query: dict,
         if data.get("isLast", True) or not page:
             return values
     raise JiraError(f"setup: GET {path} did not end within {MAX_PAGES} pages")
+
+
+SEARCH_PAGE_SIZE = 100
+
+
+def search_jql(client: JiraClient, jql: str, fields: str) -> list[dict]:
+    """Every issue of one JQL search, `GET /search/jql` paged by
+    `nextPageToken` (Story 31.4: the sync-back's one search per tick).
+    The request and page shapes are ungraded on the live site (pinned in
+    the sync-back tests' fake). Any page's failure raises — the caller
+    keeps its cursor."""
+    issues: list[dict] = []
+    query = {"jql": jql, "fields": fields, "maxResults": SEARCH_PAGE_SIZE}
+    for _ in range(MAX_PAGES):
+        status, data = client.request("GET", "/search/jql", query=query,
+                                      scope=SCOPE_READ)
+        if status != 200 or not isinstance(data, dict):
+            raise JiraError(f"sync-back: GET /search/jql returned {status}")
+        issues += [i for i in data.get("issues") or [] if isinstance(i, dict)]
+        token = data.get("nextPageToken")
+        if not token or data.get("isLast") is True:
+            return issues
+        query = {**query, "nextPageToken": token}
+    raise JiraError(f"sync-back: GET /search/jql did not end within "
+                    f"{MAX_PAGES} pages")
+
+
+def issue_comments(client: JiraClient, key: str) -> list[dict]:
+    """Every comment of one issue, `GET /issue/{key}/comment` paged by
+    `startAt` — the sync-back's overflow read only, when the search's
+    embedded `comment.total` exceeds the comments it returned."""
+    comments: list[dict] = []
+    start = 0
+    for _ in range(MAX_PAGES):
+        status, data = client.request(
+            "GET", f"/issue/{key}/comment",
+            query={"startAt": start, "maxResults": SEARCH_PAGE_SIZE},
+            scope=SCOPE_READ)
+        if status != 200 or not isinstance(data, dict):
+            raise JiraError(f"sync-back: GET /issue/{key}/comment returned "
+                            f"{status}")
+        page = [c for c in data.get("comments") or [] if isinstance(c, dict)]
+        comments += page
+        start += len(page)
+        total = data.get("total")
+        if not page or not isinstance(total, int) or start >= total:
+            return comments
+    raise JiraError(f"sync-back: GET /issue/{key}/comment did not end "
+                    f"within {MAX_PAGES} pages")
 
 
 def get_project(client: JiraClient, key: str) -> dict | None:

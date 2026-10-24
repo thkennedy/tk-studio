@@ -5,9 +5,9 @@ description: Studio activation front door — health/drift check proving the BMa
 
 # tk-studio-activate
 
-Activation cross-checks four planes — base, plugin (the skills-dir folder
-against the roster), store, vault (AD-13) — and reports; it never mutates
-anything. Version skew is caught here, at the front door, instead of
+Activation cross-checks five planes — base, plugin (the skills-dir folder
+against the roster), store, vault, tracking (AD-13) — and reports; it never
+mutates anything. Version skew is caught here, at the front door, instead of
 debugged later as ghosts.
 
 ## Behavior (both modes)
@@ -28,7 +28,7 @@ debugged later as ghosts.
    Add `--guided` only when running as part of guided onboarding — it
    additionally emits `onboarding-funnel` timing events per plane.
 
-2. The script checks four planes and emits its own measurement events
+2. The script checks five planes and emits its own measurement events
    (`drift-detection` on clean or drift; `activation-failure` if a check step
    itself fails):
 
@@ -38,6 +38,7 @@ debugged later as ghosts.
    | `plugin` | the skills-dir folder `<home>/skills/tk-studio/`'s `plugin.json` vs the configured channel's roster `plugin` entry (`--channel`, default `stable`; `tools/installer/rosters/<channel>.json` in the project) and, in a developer checkout only (a marketplace catalog listing `tk-studio`; a catalog without that entry is skipped), the marketplace catalog; `case` names `ok`, `stale`, `missing` or `shadowed` (a marketplace copy is installed). `installed_plugins.json` is read only to find marketplace copies, never for the version (AD-13, AD-21) | stale: `tk-studio update` (plus `--channel <channel>` off the default `stable`); missing: `tk-studio install`; shadowed: `claude plugin uninstall tk-studio@<m> --scope user` (plus `claude plugin marketplace remove tk-studio` when the marketplace is known) |
    | `store` | `~/.tk-studio` skeleton + config keys | `uv run <plugin>/lib/store.py standup` |
    | `vault` | vault window links for this project (when registered) | `uv run <plugin>/lib/vault.py link --project-id <id>` |
+   | `tracking` | the Atlassian sync-back (Story 31.4): when the last tick ran and whether the binding was reachable, read from `.tk-studio/config.yaml` and `_bmad-output/tracking/sync-state.json` only — never a network call; `case` names `not-bound` (no `planning.jira` binding, ok), `never-run`, `ok` (last tick `complete` or `partial` within 30 minutes), `stale`, `token-missing`, `unreachable`, `deactivated` or `auth` — each its own state, never "no changes"; `last_run` carries the tick's record | never-run: `plansync.py sync-back --directory <root>` and declare the `atlassian-sync-back` job; stale: check the job is declared and bound; token-missing: set the named variable; unreachable: the network path; deactivated: the owner's sign-in (kb/atlassian-free-tier.md §1 step 10); auth: the 401/403 split's own text |
 
    Exit codes: 0 clean, 1 drift found, 2 check-step error. The vault plane
    records its observed state in the registry entry (writer: activate) — the

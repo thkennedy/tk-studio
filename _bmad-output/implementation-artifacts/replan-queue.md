@@ -273,3 +273,17 @@
 - What no longer holds: "a pass moves the issue back to `To Do` or `In Progress` … a fail moves it to `Blocked - Awaiting User`" cannot be done by category, and `Block Resolved` must not read as canonical `in-progress`.
 - Suggested adjustment: detect `Block Resolved` by status name. Transition by target name (`To Do`/`In Progress` on a pass, `Blocked - Awaiting User` on a fail) and refuse by name when no transition reaches it.
 - Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-24)
+
+## 31-5-the-two-statuses-and-the-inbox-items — scope: stories — from 31-4-sync-back-on-a-timer — 2026-10-24
+
+- What changed: sync-back maps both setup statuses to canonical `blocked` and keeps the Jira name in `external.jira.status`. A Jira-name change within the same canonical status is reported as `applied[].fields` = `["external.jira.status"]`. `sync-state.json` `last_run` is `{at, status, case, counts, newest_comment, reason}`, and the run cases include `rate-limited` and `error`. Comments carry `author: owner | agent` from `author.accountId` only.
+- What no longer holds: "cleared when the status changes" and "every issue in that status" both assume the canonical `status`. It stays `blocked` through `Block Resolved`.
+- Suggested adjustment: derive the inbox and clear the "!" bubble from `external.jira.status` by name. `Blocked - Awaiting User` is open and `Block Resolved` is resolved; canonical `blocked` alone is never enough. Rewrite `inbox.json` only after a tick that read every page. A `rate-limited`, `error` or `blocked` tick leaves the previous file as it is. An owner reply also needs `updateAuthor.accountId` (the 31-1 note), which the 31.4 comment log does not record.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-24)
+
+## 31-7-validation-of-a-resolution — scope: stories — from 31-4-sync-back-on-a-timer — 2026-10-24
+
+- What changed: as for 31-5. `Block Resolved` is canonical `blocked`, and the transition into it is reported only as `applied[].fields` = `["external.jira.status"]`.
+- What no longer holds: "Given an issue in `Block Resolved` When the sync-back sees it", if "sees" is read as a canonical status change.
+- Suggested adjustment: queue `validate-resolution` from `applied[]` entries whose `fields` include `external.jira.status` and whose entity's `external.jira.status` is now `Block Resolved` (by name). A `rate-limited` or `error` tick queues nothing for issues on pages it did not read. A pass or a fail is a status the next tick reads back the same way, so keep it idempotent per (issue, transition).
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-24)

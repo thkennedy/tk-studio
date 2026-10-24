@@ -13,15 +13,18 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import config as configlib  # noqa: E402
 import job as joblib  # noqa: E402
+import jobrun  # noqa: E402
 
 
 class JobTestCase(unittest.TestCase):
@@ -209,6 +212,93 @@ class JobTestCase(unittest.TestCase):
         self.assertEqual(entry["problems"], [])
         self.assertEqual(entry["definition"]["trigger"], "cron")
         self.assertTrue(entry["definition"]["durable"])
+
+    # ---------------- Story 31.4: the shipped atlassian-sync-back job type
+
+    def test_atlassian_sync_back_ships_as_a_durable_cron_core_job(self):
+        entry = joblib.load_types()["atlassian-sync-back"]
+        self.assertEqual(entry["problems"], [])
+        defn = entry["definition"]
+        self.assertEqual(defn["trigger"], "cron")
+        self.assertEqual(defn["cadence"], {"mode": "fixed",
+                                           "schedule": "*/10 * * * *"})
+        self.assertTrue(defn["durable"])
+        self.assertEqual(defn["target"]["core"],
+                         ["lib/plansync.py", "sync-back", "--directory",
+                          "{project_root}"])
+        self.assertNotIn("skill", defn["target"])
+        self.assertEqual(defn["guards"], {"max_wall_clock_seconds": 300})
+        self.assertEqual(defn["stop"], {"on_status": ["blocked"]})
+        self.assertEqual(defn["effort"], "low")
+        # shipped undeclared: no project runs it until it declares it
+        self.assertEqual(joblib.load_instances(self.root)["jobs"], [])
+
+    def _fake_core(self, stdout: dict, code: int = 0):
+        seen = []
+
+        def run(argv, **kwargs):
+            seen.append((list(argv), kwargs))
+            return subprocess.CompletedProcess(argv, code,
+                                               stdout=json.dumps(stdout),
+                                               stderr="")
+        return seen, run
+
+    def test_project_root_is_substituted_and_the_summary_names_the_tick(self):
+        self._declare_jobs("atlassian-sync-back")
+        out = {"ok": True, "status": "partial", "case": "token-missing",
+               "counts": {"issues": 2, "comments_appended": 1},
+               "newest_comment": {"issue": "K-1", "id": "c1"},
+               "written": []}
+        seen, run = self._fake_core(out)
+        with mock.patch.object(jobrun.subprocess, "run", side_effect=run):
+            result = jobrun.wake(self.root, "atlassian-sync-back")
+        self.assertTrue(result["woken"], result)
+        argv, kwargs = seen[0]
+        self.assertEqual(argv[1:], [str(jobrun.PLUGIN_ROOT / "lib/plansync.py"),
+                                    "sync-back", "--directory",
+                                    str(self.root.resolve())])
+        self.assertNotIn("{project_root}", argv)
+        self.assertEqual(kwargs["cwd"], str(jobrun.PLUGIN_ROOT))
+        key = joblib.project_key(self.root)
+        summary = json.loads((joblib.workspace_path(key, result["run_id"])
+                              / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["status"], "partial")
+        self.assertEqual(summary["counts"], out["counts"])
+        self.assertEqual(summary["newest_comment"], out["newest_comment"])
+
+    def test_submit_substitutes_the_submitting_project_root(self):
+        # contract §4 / job.schema.json: submit, like wake, hands the core
+        # the submitting project's root in place of `{project_root}`
+        self._declare_jobs("probe-core")
+        self._write_instance("probe-core", self._defn(
+            id="probe-core",
+            target={"core": ["contracts/conformance/runner.py", "run",
+                             "--directory", "{project_root}"]},
+            guards={"max_wall_clock_seconds": 60}))
+        seen, run = self._fake_core({"ok": True})
+        with mock.patch.object(jobrun.subprocess, "run", side_effect=run):
+            result = jobrun.submit(self.root, "probe-core")
+        self.assertTrue(result["accepted"], result)
+        argv, kwargs = seen[0]
+        self.assertEqual(argv[1:], [
+            str(jobrun.PLUGIN_ROOT / "contracts/conformance/runner.py"),
+            "run", "--directory", str(self.root.resolve())])
+        self.assertNotIn("{project_root}", argv)
+        self.assertEqual(kwargs["cwd"], str(jobrun.PLUGIN_ROOT))
+
+    def test_a_definition_without_the_token_runs_unchanged(self):
+        self._declare_jobs("probe-core")
+        self._write_instance("probe-core", self._defn(
+            id="probe-core", trigger="cron",
+            cadence={"mode": "fixed", "schedule": "0 6 * * *"},
+            target={"core": ["contracts/conformance/runner.py", "run",
+                             "{project_root}x"]},
+            guards={"max_wall_clock_seconds": 60}))
+        seen, run = self._fake_core({"ok": True})
+        with mock.patch.object(jobrun.subprocess, "run", side_effect=run):
+            result = jobrun.wake(self.root, "probe-core")
+        self.assertTrue(result["woken"], result)
+        self.assertEqual(seen[0][0][2:], ["run", "{project_root}x"])
 
     # ------------------------- AC1: instances from project config jobs[]
 

@@ -1,0 +1,22 @@
+{
+  "job_schema_version": 1,
+  "id": "atlassian-sync-back",
+  "description": "the Atlassian sync-back on a timer (Story 31.4, §6.8 c and e, D9): run `plansync.py sync-back` against the submitting project's root ({project_root}, substituted by jobrun's execute_core) every 10 minutes, pulling each tracked issue's status, its comments and attachments (as links) into _bmad-output/tracking/ and the owner's Confluence pages into kb/confluence/; nothing local is promoted back. A core target, not a skill target: a skill target would be a model session every tick. Shipped undeclared, as evolve-proposals is: the project declares it in .tk-studio/config.yaml jobs and may override the schedule. The run's summary.json names status, counts and newest_comment; the verb commits nothing.",
+  "target": {
+    "core": ["lib/plansync.py", "sync-back", "--directory", "{project_root}"],
+    "payload": {}
+  },
+  "trigger": "cron",
+  "cadence": {
+    "mode": "fixed",
+    "schedule": "*/10 * * * *"
+  },
+  "durable": true,
+  "guards": {
+    "max_wall_clock_seconds": 300
+  },
+  "stop": {
+    "on_status": ["blocked"]
+  },
+  "effort": "low"
+}
