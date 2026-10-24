@@ -70,13 +70,49 @@ Run each step through the plugin root; all are idempotent.
    comment preserved byte-for-byte. Re-recording an identical set is a
    no-op (idempotent re-onboarding).
 
+4. **Set up tracking** (optional — only when asked: attended, the operator
+   asks for it; headless, the payload carries `tracking: true`). The
+   planning adapter creates the project's Jira project, its statuses and
+   the "Needs you" filter, and the linked Confluence space with its
+   design-page folders, from the studio template, and records the keys and
+   ids under `planning.jira` and `planning.confluence` (AD-4: this skill
+   never calls Atlassian itself):
+
+   ```bash
+   uv run "${CLAUDE_PLUGIN_ROOT}/lib/plansync.py" setup --directory <project-root> [--dry-run] [--owner-account-id <id> | --owner-email <owner email>]
+   ```
+
+   Pass `--owner-account-id` or `--owner-email` from the payload's
+   `owner_account_id` / `owner_email` when given. It uses the agent seat's
+   variables only — `TK_ATLASSIAN_SITE` (first setup), `TK_ATLASSIAN_AGENT_EMAIL`,
+   `TK_ATLASSIAN_AGENT_TOKEN`, `TK_ATLASSIAN_AGENT_CONFLUENCE_TOKEN`,
+   `TK_ATLASSIAN_CLOUD_ID` — and refuses with each absent one named (and
+   on an unregistered project) before any call: relay that refusal as
+   `blocked`, never ask for a token. Relay the setup's status block as
+   this skill's — its `status` and `reason` unchanged, its `artifacts`
+   added to (deduplicated with) the artifacts onboard itself wrote this
+   run (`kb/`, vault links, the registry entry), with `intent` set to
+   `tk-studio-onboard` (the core's block says `tk-studio-plan-sync`):
+   `complete` when every step was created or found;
+   `partial` with its `owner_steps[]` shown **verbatim and in order** —
+   the numbered steps the API could not do on the free plan — never
+   reworded and never reported `complete`; `blocked` with its `reason`.
+   A rerun is idempotent: what exists is recognised by key and named in
+   `found[]`.
+
 ## Report
 
 - **Attended:** one line per standup step (created vs already-present), the
   proposal table with evidence, then the recorded outcome.
+- **Attended, tracking:** the setup's `found[]` and `created[]`, then, on
+  `partial`, its numbered owner steps verbatim.
 - **Headless:** end with the status block — `complete` after a successful
   record (or a clean standup-only run with no confirmation requested),
-  `blocked` on collision, classification refusal, or missing confirmation:
+  `partial` when tracking setup ended `partial` (its `reason` carries the
+  owner's numbered steps verbatim, `artifacts` the config it wrote plus
+  what onboard itself wrote),
+  `blocked` on collision, classification refusal, missing confirmation, or
+  a tracking-setup refusal:
 
   ```json
   {"status": "complete", "intent": "tk-studio-onboard", "artifacts": [".tk-studio/config.yaml"], "reason": null}
@@ -92,4 +128,6 @@ If the deterministic core is unrunnable — a tool call denied by permissions, `
   single-writer); this skill never edits `projects.yaml` directly.
 - Tracked-config writes are classification-checked (AD-3) — a refusal is a
   `blocked` status, not a workaround.
+- Tracking setup goes through `plansync.py setup` only (AD-4); the
+  owner's token is never read and no token lands in any file (AD-3).
 - All paths resolve through `${CLAUDE_PLUGIN_ROOT}`.

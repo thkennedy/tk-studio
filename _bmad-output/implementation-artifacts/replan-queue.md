@@ -252,3 +252,24 @@
 - What no longer holds: SPEC.md Assumptions bullet 1, "The agent seat's variables are … (`TK_ATLASSIAN_SITE`, `TK_ATLASSIAN_AGENT_EMAIL`, `TK_ATLASSIAN_AGENT_TOKEN`, `TK_ATLASSIAN_CLOUD_ID`)".
 - Suggested adjustment: read 31.2's "the two tokens in the environment" as one token per seat (consult ruling, 31-1 pass 2). Setup runs with the agent seat's tokens only (Jira and Confluence) and never needs the owner's token. The refusal names each absent variable. kb/atlassian-free-tier.md §1 step 7 is the authoritative variable list, not SPEC.md's Assumptions.
 - Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-24)
+
+## 31-4-sync-back-on-a-timer — scope: stories — from 31-2-project-setup-from-a-template — 2026-10-24
+
+- What changed: setup (31.2) creates `Blocked - Awaiting User` and `Block Resolved` in Jira's In Progress category (`jirabackend.create_statuses`), and `pull_back` is unchanged, so `FROM_BACKEND_CATEGORY` maps both to canonical `in-progress`.
+- What no longer holds: 31-2 Design Notes "The new statuses map onto canonical blocked by category (AD-6)"; 31.4's "status (mapped onto the canonical enum per AD-6, the Jira original kept under `external.jira`)" yields `in-progress` for them.
+- Suggested adjustment: the sync-back's status mapping recognises the two setup statuses by name (`jirabackend.SETUP_STATUSES`) and maps both onto canonical `blocked`, keeping the Jira name under `external.jira` (AD-22, SPEC Constraints AD-6). Every other status keeps the category mapping. Keep round trips stable (AD-5): an unchanged `blocked` must not be re-promoted into a different In Progress status.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-24)
+
+## 31-5-the-two-statuses-and-the-inbox-items — scope: stories — from 31-2-project-setup-from-a-template — 2026-10-24
+
+- What changed: as for 31-4. In addition, promote moves issues by status category (`jirabackend._transition_to_category`), which cannot pick one of three In Progress statuses. "Needs you" is shared with the project, and `planning.jira.filter_id` is absent until a rerun after an owner-made project.
+- What no longer holds: "the issue … moves to `Blocked - Awaiting User`" cannot be done by category.
+- Suggested adjustment: `tk-studio-track block` transitions by the target status name (`Blocked - Awaiting User`), never by category, and refuses by name when no transition reaches it. The inbox reads the issue status by name. It never relies on `filter_id`, and an absent `filter_id` is not an error.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-24)
+
+## 31-7-validation-of-a-resolution — scope: stories — from 31-2-project-setup-from-a-template — 2026-10-24
+
+- What changed: as for 31-4 and 31-5. Both setup statuses are In Progress by category.
+- What no longer holds: "a pass moves the issue back to `To Do` or `In Progress` … a fail moves it to `Blocked - Awaiting User`" cannot be done by category, and `Block Resolved` must not read as canonical `in-progress`.
+- Suggested adjustment: detect `Block Resolved` by status name. Transition by target name (`To Do`/`In Progress` on a pass, `Blocked - Awaiting User` on a fail) and refuse by name when no transition reaches it.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-24)

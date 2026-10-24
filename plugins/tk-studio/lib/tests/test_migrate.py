@@ -11,6 +11,7 @@ import re
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -46,11 +47,17 @@ class LabelDroppingJira(FakeJira):
 
 
 class MigrateTestCase(unittest.TestCase):
-    ENV_KEYS = ("TK_STUDIO_HOME", jirabackend.TOKEN_ENV, jirabackend.EMAIL_ENV)
+    # the five agent-seat names too: the sandbox exports real values, and
+    # a set TK_ATLASSIAN_AGENT_TOKEN would move these tests off the
+    # legacy JIRA_* path (Story 31.2)
+    ENV_KEYS = ("TK_STUDIO_HOME", jirabackend.TOKEN_ENV, jirabackend.EMAIL_ENV,
+                *jirabackend.AGENT_ENV_NAMES)
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self._saved_env = {k: os.environ.get(k) for k in self.ENV_KEYS}
+        for key in jirabackend.AGENT_ENV_NAMES:
+            os.environ.pop(key, None)
         os.environ["TK_STUDIO_HOME"] = str(Path(self._tmp.name) / "store")
         os.environ[jirabackend.TOKEN_ENV] = "fake-token"
         os.environ[jirabackend.EMAIL_ENV] = "tim@example.com"
@@ -152,6 +159,30 @@ class RunTests(MigrateTestCase):
         record = json.loads(migrate.record_path(self.root).read_text(
             encoding="utf-8"))
         self.assertEqual(record["status"], "blocked")
+
+    def test_agent_seat_names_route_the_migrate_client_through_the_gateway(self):
+        # Story 31.2: with the five agent names set, migrate's own client is
+        # the gateway one, never the site URL with a scoped token
+        os.environ.pop(jirabackend.TOKEN_ENV, None)
+        os.environ.pop(jirabackend.EMAIL_ENV, None)
+        os.environ.update({
+            jirabackend.SITE_ENV: "example.atlassian.net",
+            jirabackend.AGENT_EMAIL_ENV: "agent@example.com",
+            jirabackend.AGENT_TOKEN_ENV: "fake-agent-token",
+            jirabackend.AGENT_CONFLUENCE_TOKEN_ENV: "fake-confluence-token",
+            jirabackend.CLOUD_ID_ENV: "cloud-test"})
+        urls = []
+
+        def transport(_client, method, url, body):
+            urls.append(url)
+            return self.fake(method, url, body)
+        with mock.patch.object(jirabackend.JiraClient, "_http", transport):
+            result = migrate.run(self.root)
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(urls)
+        for url in urls:
+            self.assertTrue(url.startswith(
+                "https://api.atlassian.com/ex/jira/cloud-test/rest/api/2/"), url)
 
     def test_empty_project_has_nothing_to_migrate(self):
         empty = Path(self._tmp.name) / "empty"

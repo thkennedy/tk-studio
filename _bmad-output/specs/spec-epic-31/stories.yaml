@@ -118,6 +118,8 @@
     readable; otherwise assume 100 MB and say so in the output (REST uploads over 100 MB
     fail with 502). Report the bytes uploaded against Free's 2 GB storage. Site-wide use
     is an attended browser check (Confluence Settings > Storage).
+    Band L, oversize risk (plans/31-3.md): halt blocked if the Files list must grow past
+    the plan's Files.
 
 - id: "31-4-sync-back-on-a-timer"
   title: "Sync-Back on a Timer"
@@ -159,6 +161,13 @@
     and a deactivated site (Free deactivates after 120 days without activity). For a
     deactivated site it names the owner's sign-in as the fix (kb §1 step 10). The loop
     never relies on its own API traffic to keep the site active.
+    From 31-2 (gate 2026-10-24, replan queue): setup created `Blocked - Awaiting User`
+    and `Block Resolved` in Jira's In Progress category, and the unchanged category
+    pull-back maps both to canonical `in-progress`. The sync-back's status mapping
+    recognises the two by name (`jirabackend.SETUP_STATUSES`) and maps both onto
+    canonical `blocked`, keeping the Jira name under `external.jira` (AD-22, AD-6). Every
+    other status keeps the category mapping. Keep round trips stable (AD-5): an
+    unchanged `blocked` is never re-promoted into a different In Progress status.
 
 - id: "31-5-the-two-statuses-and-the-inbox-items"
   title: "The Two Statuses and the Inbox Items"
@@ -193,6 +202,13 @@
     absent or empty accountId never matches. A block counts as answered only by a
     comment whose `author.accountId` and `updateAuthor.accountId` are both the owner's.
     Agent-authored comments are never the owner's reply.
+    From 31-2 (gate 2026-10-24, replan queue): both setup statuses are in Jira's In
+    Progress category, so promote's category transition
+    (`jirabackend._transition_to_category`) cannot target them. `tk-studio-track block`
+    transitions by the target name `Blocked - Awaiting User` and refuses by name when no
+    transition reaches it. The inbox reads issue status by name. "Needs you" is shared
+    with the project, and `planning.jira.filter_id` can be absent until a rerun after an
+    owner-made project. Never rely on it, and an absent `filter_id` is not an error.
 
 - id: "31-6-the-inbox-and-issue-screens"
   title: "The Inbox and Issue Screens"
@@ -259,3 +275,8 @@
     transition into it; an older owner transition never validates a later one. With none
     recorded, validation refuses by name, and an absent or empty changelog accountId
     never matches. Otherwise return the issue to the inbox with a follow-up.
+    From 31-2 (gate 2026-10-24, replan queue): both setup statuses are in Jira's In
+    Progress category, so the category pull-back reads `Block Resolved` as
+    `in-progress`. Detect it by status name. Transition by target name (`To Do` or `In
+    Progress` on a pass, `Blocked - Awaiting User` on a fail), never by category, and
+    refuse by name when no transition reaches the target.

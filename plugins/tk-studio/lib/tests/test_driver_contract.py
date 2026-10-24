@@ -101,8 +101,10 @@ class DriverContractTestCase(unittest.TestCase):
         # 0.1.24 names the studio web as a consumer and documents the
         # supervisor surfaces it reads in §1 (Story 29.4, additive — AD-2:
         # the supervisor's, never the plugin's); 0.1.25 extends the office
-        # projection with `reason` and `last_run` (Story 30.4, additive)
-        self.assertRegex(self.text, r"\*\*0\.1\.25\*\*")
+        # projection with `reason` and `last_run` (Story 30.4, additive);
+        # 0.1.26 opens Epic 31's entry with the planning adapter's `setup`
+        # verb (Story 31.2, additive)
+        self.assertRegex(self.text, r"\*\*0\.1\.26\*\*")
         self.assertIn("### 5.1 Execution-pipeline legs", self.text)
         self.assertIn("lib/pipeline.py", self.text)
         self.assertIn("Change policy", self.text)
@@ -374,8 +376,8 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_24_names_the_web_and_the_supervisor_surfaces(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        # 0.1.25 (Story 30.4) heads the header now; the 0.1.24 clause stays
-        self.assertIn("**0.1.25**", header)
+        # 0.1.26 (Story 31.2) heads the header now; the 0.1.24 clause stays
+        self.assertIn("**0.1.26**", header)
         for older in ("**0.1.22**", "**0.1.23**", "**0.1.24**"):
             self.assertNotIn(older, header)
         self.assertNotIn("0.2.0 (", header)
@@ -460,7 +462,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_25_extends_the_office_projection_additively(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.25**", header)
+        self.assertIn("**0.1.26**", header)
         self.assertNotIn("**0.1.24**", header)
         self.assertNotIn("0.2.0 (", header)
         self.assertLess(header.index("0.1.24 (Story 29.4)"),
@@ -504,9 +506,9 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_25_names_the_board(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.25**", header)
-        self.assertNotIn("**0.1.26**", header)
-        self.assertNotIn("0.1.26 (", header)
+        # 0.1.26 (Story 31.2) heads the header now; the 0.1.25 clauses stay
+        self.assertIn("**0.1.26**", header)
+        self.assertNotIn("**0.1.25**", header)
         self.assertLess(header.index("0.1.25 (Story 30.4)"),
                         header.index("0.1.25 (Story 30.5)"))
         clause = " ".join(header[header.index("0.1.25 (Story 30.5)"):].split())
@@ -556,9 +558,9 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_25_names_the_status_page(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.25**", header)
-        self.assertNotIn("**0.1.26**", header)
-        self.assertNotIn("0.1.26 (", header)
+        # 0.1.26 (Story 31.2) heads the header now; the 0.1.25 clauses stay
+        self.assertIn("**0.1.26**", header)
+        self.assertNotIn("**0.1.25**", header)
         self.assertLess(header.index("0.1.25 (Story 30.5)"),
                         header.index("0.1.25 (Story 30.6)"))
         clause = " ".join(header[header.index("0.1.25 (Story 30.6)"):].split())
@@ -602,6 +604,55 @@ class DriverContractTestCase(unittest.TestCase):
                         section.index("Story 30.6 adds to this same 0.1.25 entry"))
         self.assertLess(section.index("Story 30.6 adds to this same 0.1.25 entry"),
                         section.index("**The rules a consumer may rely on**"))
+
+    # --- Story 31.2: 0.1.26 opens Epic 31's entry — the planning adapter's
+    # `setup` verb, onboard's optional `tracking` step, and the Jira binding
+    # on the `TK_ATLASSIAN_*` gateway names with the legacy fallback.
+
+    def test_0_1_26_opens_epic_31_with_the_setup_verb(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.26**", header)
+        self.assertNotIn("**0.1.25**", header)
+        self.assertNotIn("0.2.0 (", header)
+        self.assertLess(header.index("0.1.25 (Story 30.6)"),
+                        header.index("0.1.26 (Story 31.2)"))
+        clause = " ".join(header[header.index("0.1.26 (Story 31.2)"):].split())
+        for phrase in ("opens Epic 31's entry", "`setup` verb",
+                       "`plansync.py setup --directory ROOT [--dry-run] "
+                       "[--owner-account-id ID | --owner-email EMAIL]`",
+                       "`Blocked - Awaiting User`", "`Block Resolved`",
+                       "\"Needs you\"", "`planning.jira`",
+                       "`planning.confluence`", "`owner_steps[]`",
+                       "`found[]`, `created[]` and `written[]`",
+                       "`would_create[]`, dry run only",
+                       "`tracking`", "`TK_ATLASSIAN_*`", "`api.atlassian.com`",
+                       "`/rest/api/2` kept", "legacy fallback", "— additive"):
+            self.assertIn(phrase, clause)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 31.2", stories)
+        onboard = next(line for line in self.text.splitlines()
+                       if line.startswith("| `tk-studio-onboard` |"))
+        for phrase in ("`tracking?` (0.1.26", "`lib/plansync.py setup`",
+                       "`planning.jira` and `planning.confluence`",
+                       "`partial` with the owner's numbered steps verbatim",
+                       "an unregistered project",
+                       "`TK_ATLASSIAN_AGENT_CONFLUENCE_TOKEN`",
+                       "`TK_ATLASSIAN_CLOUD_ID`", "before any Atlassian call"):
+            self.assertIn(phrase, onboard)
+        plan_sync = next(line for line in self.text.splitlines()
+                         if line.startswith("| `tk-studio-plan-sync` |"))
+        for phrase in ("`lib/plansync.py sync|normalize|setup`",
+                       "`api.atlassian.com` gateway",
+                       "never the site URL",
+                       "the legacy `JIRA_EMAIL`/`JIRA_API_TOKEN`",
+                       "network approval step", "the missing scope",
+                       "never `complete`",
+                       "a dry run that would create anything ends "
+                       "`partial` and names those items in "
+                       "`would_create[]`"):
+            self.assertIn(phrase, plan_sync)
 
     def test_section_8_names_the_cli_drives(self):
         section = self.text[self.text.index("## 8. Conformance"):]

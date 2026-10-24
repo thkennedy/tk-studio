@@ -353,8 +353,7 @@ def run(project_root: Path, dry_run: bool = False, client=None) -> dict:
     if gaps:
         return _blocked("jira preflight: " + "; ".join(gaps))
     if client is None:
-        client = jirabackend.JiraClient(settings["site"], settings["email"],
-                                        settings["token"])
+        client = jirabackend.client_for(settings)
 
     record = {"migration_version": MIGRATION_VERSION, "target": TARGET,
               "source_binding": inventory["source_binding"],

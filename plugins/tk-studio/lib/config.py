@@ -293,12 +293,30 @@ vcs: {vcs}
 #   # Planning backend binding (AD-4): bmad-files | backlog-md | jira.
 #   # Unset, the studio default applies (backlog-md).
 #   backend: backlog-md
-#   # jira binding config (AD-7) — site + project key are team-shared; the
-#   # account email may ride JIRA_EMAIL or planning.jira.email; the API token
-#   # rides JIRA_API_TOKEN only, never any config file (AD-3).
+#   # jira binding config (AD-7) — keys and ids only, team-shared. The agent
+#   # seat's scoped tokens ride the environment only, never any config file
+#   # (AD-3): TK_ATLASSIAN_AGENT_EMAIL, TK_ATLASSIAN_AGENT_TOKEN (Jira),
+#   # TK_ATLASSIAN_AGENT_CONFLUENCE_TOKEN and TK_ATLASSIAN_CLOUD_ID, through
+#   # the api.atlassian.com gateway; TK_ATLASSIAN_SITE seeds `site` on the
+#   # first `plansync.py setup`. Legacy: JIRA_EMAIL (or planning.jira.email)
+#   # and JIRA_API_TOKEN against the site URL when TK_ATLASSIAN_AGENT_TOKEN
+#   # is unset. `plansync.py setup` records the keys and ids below.
 #   jira:
 #     site: myorg.atlassian.net
 #     project_key: PROJ
+#     project_id: "10000"
+#     filter_id: "10001"
+#     owner_account_id: "<owner seat accountId>"
+#     agent_account_id: "<agent seat accountId>"
+#   confluence:
+#     space_key: PROJ
+#     space_id: "98305"
+#     folders:
+#       brief: "98306"
+#       gdd: "98307"
+#       scope-of-work: "98308"
+#       decisions: "98309"
+#       records: "98310"
 
 # Role-keyed working sets (AD-17) — recorded only on explicit confirmation
 # by tk-studio-onboard (ST-4.3); no role's entry overwrites another's.

@@ -41,11 +41,38 @@ committed per-project counter at `.tk-studio/plan-counter.yaml`).
    promote creates/updates issues (canonical id rides as the first label;
    status set by transition into the matching Jira status *category*, which
    keeps mapping round-trip stable). Binding config: `planning.jira.site` +
-   `planning.jira.project_key` (tracked), account email from `JIRA_EMAIL`
-   or `planning.jira.email`, token from `JIRA_API_TOKEN` **only** — never
-   any config file (AD-3). Auth is API-token, never OAuth (legacy-council ISS-008);
-   any gap or 401/403 blocks with every cause named — never a silent 401
-   (AD-11). `normalize --directory <root>` runs the canonicalization pass
+   `planning.jira.project_key` (tracked). Credentials ride the environment
+   **only** — never any config file (AD-3): the agent seat's scoped token
+   `TK_ATLASSIAN_AGENT_TOKEN` with `TK_ATLASSIAN_AGENT_EMAIL`, through the
+   `https://api.atlassian.com/ex/jira/<TK_ATLASSIAN_CLOUD_ID>` gateway
+   (`/rest/api/2` kept); either agent token set without
+   `TK_ATLASSIAN_CLOUD_ID` refuses by name, never the site URL. With
+   `TK_ATLASSIAN_AGENT_TOKEN` unset, the legacy `JIRA_API_TOKEN` plus
+   `JIRA_EMAIL` (or `planning.jira.email`) against the site URL. Auth is
+   API-token, never OAuth (legacy-council ISS-008); any gap blocks with
+   every cause named — a 401 names the token, its email, its expiry and
+   the org toggle; the sandbox proxy's 403 (`Approval required for
+   <host>:443`) is the network approval step; any other 403 names the
+   missing scope and asks for a new token — never a silent 401 (AD-11).
+   `setup --directory <root> [--dry-run] [--owner-account-id <id> |
+   --owner-email <email>]` creates the project's tracking from the studio
+   template — the Jira project (key from the project id), issue types Epic
+   and Story, the statuses `Blocked - Awaiting User` and `Block Resolved`
+   with their transition, the "Needs you" filter, the Confluence space
+   (`TK_ATLASSIAN_AGENT_CONFLUENCE_TOKEN`, gateway only) and its folders
+   Brief, GDD, Scope of Work, Decisions and Records — recognising each by
+   key first, and records the keys and ids under `planning.jira` and
+   `planning.confluence`. What the API refuses becomes the owner's
+   numbered steps (`owner_steps[]`) and the run ends `partial`; an
+   unregistered project or an absent agent-seat variable ends `blocked`
+   before any call; a dry run that would create anything ends `partial`
+   too (`would_create[]`). `tk-studio-onboard`'s optional tracking step
+   calls it. Payload mapping: `setup: true` runs `plansync.py setup
+   --directory <directory>`; `dry_run` adds `--dry-run`; `owner_account_id`
+   adds `--owner-account-id <id>`, else `owner_email` adds `--owner-email
+   <email>`.
+
+   `normalize --directory <root>` runs the canonicalization pass
    alone. Add `--dry-run` to preview without writing (under `jira` a
    dry-run never contacts the backend). The normalize pass:
    - derives/repairs one canonical entity file per epic/story under
@@ -86,9 +113,14 @@ committed per-project counter at `.tk-studio/plan-counter.yaml`).
    - On **conflicts** (both sides changed since the last sync): list each
      conflicted entity with both values and both file paths; the human picks
      a side by editing one of them, then reruns sync.
-   - **Headless:** no prompts (AD-11). End with the status block —
-     `complete` on exit 0 (report conflicts as `partial` with the conflict
-     list in `reason`), `blocked` on exit 2 with the blocking reason:
+   - **Headless:** no prompts (AD-11). End with the status block. When
+     the core's result carries its own `status` (`setup` does:
+     `complete`, `partial` or `blocked`), relay that `status`, its
+     `reason` and its `artifacts` as they are — never infer the status
+     from the exit code (`setup` exits 0 on `partial`). For `sync`,
+     `normalize` and `status`, whose results carry no `status`: `complete`
+     on exit 0 (report conflicts as `partial` with the conflict list in
+     `reason`), `blocked` on exit 2 with the blocking reason:
 
      ```json
      {"status": "complete", "intent": "tk-studio-plan-sync", "artifacts": ["_bmad-output/planning-artifacts/plan/"], "reason": null}
