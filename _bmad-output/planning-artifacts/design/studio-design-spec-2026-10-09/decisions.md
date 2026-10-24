@@ -82,8 +82,8 @@ Folded in: the owner's account is created on the first visit (hashed with Bun's 
 
 | Question | Settled by |
 |---|---|
-| What do the Atlassian free plans allow: custom workflow statuses, project permissions, storage, API rate, Rovo MCP availability? | EP-31 story 1 verifies on a live free site before anything is built |
-| Is the Rovo MCP server needed, or does the REST API with an API token (what the adapter uses today) cover everything? | the same story |
+| What do the Atlassian free plans allow: custom workflow statuses, project permissions, storage, API rate, Rovo MCP availability? | answered (EP-31 story 1, 2026-10-24): see [kb/atlassian-free-tier.md](../../../../kb/atlassian-free-tier.md) — from documentation (documentation-graded B to D; live read-only probes pending as attended checks), everything fits on Free with named workarounds: custom statuses and a transition (REST on company-managed, browser steps otherwise), non-customisable permissions (owner told apart by accountId), scoped tokens one app each through the api.atlassian.com gateway with burst limits whose numbers Atlassian does not publish, Confluence 2 GB storage and a 100 MB default per-file limit, Free sites deactivated after 120 days without sign-in |
+| Is the Rovo MCP server needed, or does the REST API with an API token (what the adapter uses today) cover everything? | answered (EP-31 story 1, 2026-10-24): see [kb/atlassian-free-tier.md](../../../../kb/atlassian-free-tier.md) — not needed, from documentation (grade C; no live probe needed for the verdict): REST with scoped API tokens covers 31.2 to 31.7, so AD-22 (REST unless MCP is shown necessary) stands |
 | Does `claude plugin eval` run against a skills-dir plugin path? | EP-25 |
 | Is OTel `cost_usd` populated for Max sessions? | one instrumented story run, EP-26 or later |
 | Does the PixiJS pixel-scaling recipe hold at desktop and iPad pixel ratios? | the EP-30 spike |

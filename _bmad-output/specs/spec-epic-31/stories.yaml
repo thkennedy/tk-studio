@@ -56,6 +56,30 @@
     `31-2-project-setup-from-a-template-*.md`, and a file named
     `31-2-project-setup-from-a-template.md` is read as pending (loop deficiency 1, story
     21-6).
+    From 31-1 (gate 2026-10-24, replan queue; kb/atlassian-free-tier.md §1, §2 Q1 and
+    Q3, §4): a scoped token works only through the gateway. The adapter reads
+    `TK_ATLASSIAN_SITE`, `TK_ATLASSIAN_AGENT_EMAIL`, `TK_ATLASSIAN_AGENT_TOKEN` (Jira),
+    `TK_ATLASSIAN_AGENT_CONFLUENCE_TOKEN` and `TK_ATLASSIAN_CLOUD_ID`. Jira goes through
+    `https://api.atlassian.com/ex/jira/<cloud id>` and Confluence through
+    `https://api.atlassian.com/ex/confluence/<cloud id>/wiki/api/v2`. Either agent token
+    set without `TK_ATLASSIAN_CLOUD_ID` refuses by name and never falls back to the site
+    URL; Confluence never uses the site URL. `JIRA_*` plus the site URL stay a legacy
+    fallback only when `TK_ATLASSIAN_AGENT_TOKEN` is unset. A 401 is reported by name as
+    the token, its email, its expiry or the org API-token toggle, never as a missing
+    scope. A 403 whose body is the sandbox proxy's `Approval required for <host>:443` is
+    the network approval step. Any other 403 on a create names the missing scope and
+    asks for a new token, since scopes are taken as fixed. The agent Jira token carries
+    read:jira-work, write:jira-work, read:jira-user, manage:jira-project and
+    manage:jira-configuration. Setup records the owner seat's accountId, which 31.5 and
+    31.7 depend on. Create the two statuses and their transition over REST on a
+    company-managed project. On a team-managed project, or on any refusal, print the
+    exact numbered browser steps for the project's own type and verify with `GET
+    statuses/search`. Read "the two tokens in the environment" as one token per seat:
+    setup uses the agent seat's tokens only, never the owner's, and the refusal names
+    each absent variable. The variable list is kb/atlassian-free-tier.md §1 step 7
+    (SPEC.md Assumptions bullet 1 undercounts it).
+    Band L, oversize risk (plans/31-2.md): halt blocked if the Files list must grow past
+    the plan's Files.
 
 - id: "31-3-publish-design-pages-to-confluence"
   title: "Publish: Design Pages to Confluence"
@@ -84,6 +108,16 @@
     `31-3-publish-design-pages-to-confluence-*.md`, and a file named
     `31-3-publish-design-pages-to-confluence.md` is read as pending (loop deficiency 1,
     story 21-6).
+    From 31-1 (gate 2026-10-24, replan queue; kb/atlassian-free-tier.md §2 Q3 and Q4):
+    authenticate Confluence with `TK_ATLASSIAN_AGENT_EMAIL` and
+    `TK_ATLASSIAN_AGENT_CONFLUENCE_TOKEN` through
+    `https://api.atlassian.com/ex/confluence/<cloud id>/wiki/api/v2`, refusing by name
+    when the token is absent. Downscale or compress design images before upload. Refuse
+    by name any attachment over the per-file ceiling: the smaller of the site's
+    Attachment maximum size and 100 MB. Use the site setting only when it is supplied or
+    readable; otherwise assume 100 MB and say so in the output (REST uploads over 100 MB
+    fail with 502). Report the bytes uploaded against Free's 2 GB storage. Site-wide use
+    is an attended browser check (Confluence Settings > Storage).
 
 - id: "31-4-sync-back-on-a-timer"
   title: "Sync-Back on a Timer"
@@ -109,6 +143,22 @@
     executor spec as `stories/31-4-sync-back-on-a-timer-spec.md` in the spec folder; the
     engine resolves it by the glob `31-4-sync-back-on-a-timer-*.md`, and a file named
     `31-4-sync-back-on-a-timer.md` is read as pending (loop deficiency 1, story 21-6).
+    From 31-1 (gate 2026-10-24, replan queue; kb/atlassian-free-tier.md §2 Q2 to Q4,
+    §4): run one paged JQL search per tick over the tracked projects, never a GET per
+    issue. Overlap the cursor by a few minutes (`updated >= <cursor minus a few
+    minutes>`, written in the agent seat's Jira time zone or in a form JQL reads
+    unambiguously) and order by `updated ASC`. De-duplicate by key and `updated`.
+    Advance the cursor from the largest `updated` seen, not the host clock, and only
+    after every page of the tick is read; an interrupted tick leaves the cursor where it
+    was. On a 429, wait `Retry-After`, or back off exponentially when it is absent.
+    Missing rate-limit headers are normal. Log the observed RateLimit-* and
+    X-RateLimit-* values, and every 429 with its RateLimit-Reason. The page mirror uses
+    `TK_ATLASSIAN_AGENT_CONFLUENCE_TOKEN`, refuses by name without it, and never
+    re-uploads an unchanged attachment. The tracking plane reports three cases as their
+    own states, never as "no changes": a missing Confluence token, an unreachable site,
+    and a deactivated site (Free deactivates after 120 days without activity). For a
+    deactivated site it names the owner's sign-in as the fix (kb §1 step 10). The loop
+    never relies on its own API traffic to keep the site active.
 
 - id: "31-5-the-two-statuses-and-the-inbox-items"
   title: "The Two Statuses and the Inbox Items"
@@ -136,6 +186,13 @@
     `31-5-the-two-statuses-and-the-inbox-items-*.md`, and a file named
     `31-5-the-two-statuses-and-the-inbox-items.md` is read as pending (loop deficiency
     1, story 21-6).
+    From 31-1 (gate 2026-10-24, replan queue; kb/atlassian-free-tier.md §2 Q2): on Jira
+    Free every user administers every project, so no role or permission separates the
+    owner seat from the agent seat. Identify the owner by the accountId recorded at
+    setup (31.2; kb §1 step 6). With none recorded, the inbox refuses by name, and an
+    absent or empty accountId never matches. A block counts as answered only by a
+    comment whose `author.accountId` and `updateAuthor.accountId` are both the owner's.
+    Agent-authored comments are never the owner's reply.
 
 - id: "31-6-the-inbox-and-issue-screens"
   title: "The Inbox and Issue Screens"
@@ -162,6 +219,14 @@
     folder; the engine resolves it by the glob `31-6-the-inbox-and-issue-screens-*.md`,
     and a file named `31-6-the-inbox-and-issue-screens.md` is read as pending (loop
     deficiency 1, story 21-6).
+    From 31-1 (gate 2026-10-24, replan queue; kb/atlassian-free-tier.md §2 Q2, §1 step
+    7): the owner's token is `TK_STUDIO_ATLASSIAN_OWNER_TOKEN`, with
+    `TK_STUDIO_ATLASSIAN_OWNER_EMAIL`. Both are host-only: they sit outside the
+    `TK_ATLASSIAN_` prefix and are never passed into the sandbox. The supervisor posts
+    the reply and the Done transition with them through
+    `https://api.atlassian.com/ex/jira/<cloud id>/rest/api/3`, so the author accountId
+    is the owner's. When either is absent, it refuses by name and never posts with
+    another identity.
 
 - id: "31-7-validation-of-a-resolution"
   title: "Validation of a Resolution"
@@ -188,3 +253,9 @@
     folder; the engine resolves it by the glob `31-7-validation-of-a-resolution-*.md`,
     and a file named `31-7-validation-of-a-resolution.md` is read as pending (loop
     deficiency 1, story 21-6).
+    From 31-1 (gate 2026-10-24, replan queue; kb/atlassian-free-tier.md §2 Q2): any seat
+    can transition on Jira Free. Accept `Block Resolved` only when the issue changelog
+    shows the owner's recorded accountId (31.2; kb §1 step 6) made the most recent
+    transition into it; an older owner transition never validates a later one. With none
+    recorded, validation refuses by name, and an absent or empty changelog accountId
+    never matches. Otherwise return the issue to the inbox with a follow-up.

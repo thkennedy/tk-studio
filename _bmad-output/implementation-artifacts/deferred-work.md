@@ -255,3 +255,11 @@ location: .gitattributes
 severity: medium
 reason: .gitattributes:3,7 pin eol=lf only for measurements/*.jsonl and tools/installer/install.*. Story criterion (a): AC1 says the export is reproducible, checked by a test. A fix outside the plan's 17-entry Files list was ruled out by consult (Consult Log). Operator fix: add `apps/studio-web/public/sprites/office.json text eol=lf` to .gitattributes.
 status: open
+
+### DW-35: Follow-up review still recommended for 31-1-the-free-tier-verified after the damping cap was spent
+origin: review-budget-followup
+source_spec: `31-1-the-free-tier-verified-spec.md`
+location: n/a
+severity: low
+reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261024-165853-5939; this entry preserves the lingering recommendation for a deliberate later review.
+status: open
