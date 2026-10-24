@@ -21,6 +21,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { load as loadYaml } from "js-yaml";
 import { claudeBin, pluginRoot as envPluginRoot, sbxBin, studioRoot as envStudioRoot } from "./env";
+import { underBunTest } from "./hygiene";
 
 const CONSUMED_CONTRACT = "0.1.18";
 /** Pre-1.0 contract semver: the compatibility line is major.minor (`0.1`) —
@@ -516,7 +517,7 @@ export const SBX_GUARD_KILL_AFTER_S = 10;
  * `env -u ANTHROPIC_API_KEY` strips the key inside the VM and `env -C`
  * sets the worker's cwd to the project's microVM path. The VM worker binary
  * is literal `claude` (CLAUDE_BIN is host-only). */
-export function buildSbxCommand(opts: { sandbox: string; vmRoot: string; worker: WorkerCommand; guardS: number }, env: Record<string, string | undefined> = process.env): WorkerCommand {
+export function buildSbxCommand(opts: { sandbox: string; vmRoot: string; worker: WorkerCommand; guardS: number }, env: Record<string, string | undefined> = buildWorkerEnv()): WorkerCommand {
   return {
     bin: sbxBin(),
     argv: ["exec", ...sbxEnvPassthrough(env).flatMap((name) => ["-e", name]), opts.sandbox,
@@ -539,6 +540,31 @@ export function sbxEnvPassthrough(env: Record<string, string | undefined>): stri
     .sort();
 }
 
+/** `reg query HKCU\Environment` parsed: `{NAME: value}` for every REG_SZ / REG_EXPAND_SZ line. */
+export function parseRegQuery(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of text.split(/\r?\n/)) {
+    const m = /^\s+(\S+)\s+(REG_(?:EXPAND_)?SZ)\s+(.*)$/.exec(line);
+    if (m) out[m[1]!] = m[3]!.trim();
+  }
+  return out;
+}
+
+const regQueryUserEnv = (): string => {
+  const r = spawnSync("reg", ["query", "HKCU\\Environment"], { encoding: "utf-8", timeout: 5000, windowsHide: true });
+  return r.status === 0 ? String(r.stdout ?? "") : "";
+};
+
+/** Hole 60: the User environment as the registry holds it (win32; `{}` elsewhere, under `bun test`, or when
+ * `reg` fails). A console started inside an already-running Windows Terminal inherits the terminal's
+ * environment, which predates any later `setx`, so a secret set that way never reached a restarted tab;
+ * `buildWorkerEnv` fills the pass-through variables from here when its own environment lacks them, so a
+ * `setx` is enough and no restart is needed for a new or rotated secret. */
+export function userEnvFromRegistry(read: () => string = regQueryUserEnv): Record<string, string> {
+  if (process.platform !== "win32" || underBunTest()) return {};
+  try { return parseRegQuery(read()); } catch { return {}; }
+}
+
 /** Where a worker (and its login probe) runs: the host, or an sbx sandbox. */
 export interface WorkerPlacement { tier?: Tier; sandbox?: string }
 
@@ -550,7 +576,9 @@ export interface WorkerPlacement { tier?: Tier; sandbox?: string }
  * other `TK_SUPERVISOR_*` variable whose name holds TOKEN, SECRET or PASSWORD is stripped by pattern too
  * (a leftover OAuth client secret, any future secret), so no supervisor secret reaches a worker.
  * TK_STUDIO_HOME and the rest pass through untouched. */
-export function buildWorkerEnv(parent: Record<string, string | undefined> = process.env): Record<string, string | undefined> {
+export function buildWorkerEnv(
+  parent: Record<string, string | undefined> = process.env, registry: () => Record<string, string> = userEnvFromRegistry,
+): Record<string, string | undefined> {
   const env = { ...parent };
   delete env.ANTHROPIC_API_KEY;
   delete env.TK_SUPERVISOR_TOKEN;
@@ -559,6 +587,10 @@ export function buildWorkerEnv(parent: Record<string, string | undefined> = proc
   delete env.TK_SUPERVISOR_SESSION_SECRET;
   for (const k of Object.keys(env)) {
     if (/^TK_SUPERVISOR_.*(?:TOKEN|SECRET|PASSWORD)/i.test(k) || k === "TK_SUPERVISOR_NTFY_URL") delete env[k];
+  }
+  // Hole 60: the pass-through variables the console's environment lacks come from the User environment itself.
+  for (const [k, v] of Object.entries(registry())) {
+    if (SBX_ENV_PASSTHROUGH_PREFIXES.some((p) => k.startsWith(p)) && !env[k]?.trim() && v.trim()) env[k] = v;
   }
   return env;
 }
