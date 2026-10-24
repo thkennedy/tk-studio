@@ -1,0 +1,190 @@
+# stories.yaml: Epic 31 of this project, transcribed 1:1 from _bmad-output/planning-artifacts/epics.md
+# by .bmad-loop/plugins/studio-pipeline/transcribe.py on 2026-10-24. The epics document is
+# the plan; the studio gate may append remediation entries (`<key>-r<n>`) and revise
+# UNSTARTED entries' invoke_dev_with, nothing else.
+
+- id: "31-1-the-free-tier-verified"
+  title: "The Free Tier, Verified"
+  description: >-
+    I want the free plans' limits checked before anything is built on them, So that the
+    project template, the statuses and the sync-back are designed against what Jira and
+    Confluence Free actually allow (§6.8 "verify before building", decisions Appendix
+    C). Canonical: ST-115.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 31.1: The
+    Free Tier, Verified", the authoritative specification (user story and acceptance
+    criteria). Read the epic's own narrative (the paragraphs under "## Epic 31:") for
+    scope, rulings and the repo the story targets; transcribe the story into the spec's
+    intent contract and never re-derive, generalise or extend it. Plan: plans/31-1.md
+    when present (its Code Map is the investigation). Project rules and the verify gate:
+    the studio customization (_bmad/custom/bmad-build-auto.toml). Routing:
+    .bmad-loop/routing.current.json; pass the model, effort and advisor of implementer
+    and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/31-1-the-free-tier-verified-spec.md` in the spec folder;
+    the engine resolves it by the glob `31-1-the-free-tier-verified-*.md`, and a file
+    named `31-1-the-free-tier-verified.md` is read as pending (loop deficiency 1, story
+    21-6).
+
+- id: "31-2-project-setup-from-a-template"
+  title: "Project Setup From a Template"
+  description: >-
+    I want onboarding a project to create its Confluence space and its linked Jira
+    project from a studio template, So that every studio-managed project has the same
+    folders, the same statuses and the same two users (§6.8 a). Canonical: ST-116.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 31.2:
+    Project Setup From a Template", the authoritative specification (user story and
+    acceptance criteria). Read the epic's own narrative (the paragraphs under "## Epic
+    31:") for scope, rulings and the repo the story targets; transcribe the story into
+    the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/31-2.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/31-2-project-setup-from-a-template-spec.md` in the spec
+    folder; the engine resolves it by the glob
+    `31-2-project-setup-from-a-template-*.md`, and a file named
+    `31-2-project-setup-from-a-template.md` is read as pending (loop deficiency 1, story
+    21-6).
+
+- id: "31-3-publish-design-pages-to-confluence"
+  title: "Publish: Design Pages to Confluence"
+  description: >-
+    I want the brief, the GDD, the scope of work and the decisions published to the
+    project's Confluence space, and epics and stories promoted to Jira as today, So that
+    the plan is readable from any device without the studio site (§6.8 b). Canonical:
+    ST-117.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 31.3:
+    Publish: Design Pages to Confluence", the authoritative specification (user story
+    and acceptance criteria). Read the epic's own narrative (the paragraphs under "##
+    Epic 31:") for scope, rulings and the repo the story targets; transcribe the story
+    into the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/31-3.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/31-3-publish-design-pages-to-confluence-spec.md` in the
+    spec folder; the engine resolves it by the glob
+    `31-3-publish-design-pages-to-confluence-*.md`, and a file named
+    `31-3-publish-design-pages-to-confluence.md` is read as pending (loop deficiency 1,
+    story 21-6).
+
+- id: "31-4-sync-back-on-a-timer"
+  title: "Sync-Back on a Timer"
+  description: >-
+    I want the issue's status, its comments, its attachments as links and the owner's
+    Confluence pages in local memory, So that no agent queries Atlassian live for
+    context (§6.8 c and e, D9). Canonical: ST-118.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 31.4:
+    Sync-Back on a Timer", the authoritative specification (user story and acceptance
+    criteria). Read the epic's own narrative (the paragraphs under "## Epic 31:") for
+    scope, rulings and the repo the story targets; transcribe the story into the spec's
+    intent contract and never re-derive, generalise or extend it. Plan: plans/31-4.md
+    when present (its Code Map is the investigation). Project rules and the verify gate:
+    the studio customization (_bmad/custom/bmad-build-auto.toml). Routing:
+    .bmad-loop/routing.current.json; pass the model, effort and advisor of implementer
+    and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/31-4-sync-back-on-a-timer-spec.md` in the spec folder; the
+    engine resolves it by the glob `31-4-sync-back-on-a-timer-*.md`, and a file named
+    `31-4-sync-back-on-a-timer.md` is read as pending (loop deficiency 1, story 21-6).
+
+- id: "31-5-the-two-statuses-and-the-inbox-items"
+  title: "The Two Statuses and the Inbox Items"
+  description: >-
+    I want every issue that cannot progress to sit in `Blocked - Awaiting User` with its
+    reason, and an inbox derived from that, So that one list says what needs me (§6.9
+    items 1 and 2, §7.4). Canonical: ST-119.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 31.5: The
+    Two Statuses and the Inbox Items", the authoritative specification (user story and
+    acceptance criteria). Read the epic's own narrative (the paragraphs under "## Epic
+    31:") for scope, rulings and the repo the story targets; transcribe the story into
+    the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/31-5.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/31-5-the-two-statuses-and-the-inbox-items-spec.md` in the
+    spec folder; the engine resolves it by the glob
+    `31-5-the-two-statuses-and-the-inbox-items-*.md`, and a file named
+    `31-5-the-two-statuses-and-the-inbox-items.md` is read as pending (loop deficiency
+    1, story 21-6).
+
+- id: "31-6-the-inbox-and-issue-screens"
+  title: "The Inbox and Issue Screens"
+  description: >-
+    I want the web's Inbox to list what needs me and its Issue view to let me reply or
+    press Done, So that I answer from the desktop or the iPad without opening Jira (§6.9
+    items 2 to 4). Canonical: ST-120.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 31.6: The
+    Inbox and Issue Screens", the authoritative specification (user story and acceptance
+    criteria). Read the epic's own narrative (the paragraphs under "## Epic 31:") for
+    scope, rulings and the repo the story targets; transcribe the story into the spec's
+    intent contract and never re-derive, generalise or extend it. Plan: plans/31-6.md
+    when present (its Code Map is the investigation). Project rules and the verify gate:
+    the studio customization (_bmad/custom/bmad-build-auto.toml). Routing:
+    .bmad-loop/routing.current.json; pass the model, effort and advisor of implementer
+    and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/31-6-the-inbox-and-issue-screens-spec.md` in the spec
+    folder; the engine resolves it by the glob `31-6-the-inbox-and-issue-screens-*.md`,
+    and a file named `31-6-the-inbox-and-issue-screens.md` is read as pending (loop
+    deficiency 1, story 21-6).
+
+- id: "31-7-validation-of-a-resolution"
+  title: "Validation of a Resolution"
+  description: >-
+    I want an agent to validate a resolved block before the story continues, So that a
+    reply that did not resolve the block comes back to the inbox with a follow-up, not a
+    silent failure (§6.9 item 4 and 5). Canonical: ST-121.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 31.7:
+    Validation of a Resolution", the authoritative specification (user story and
+    acceptance criteria). Read the epic's own narrative (the paragraphs under "## Epic
+    31:") for scope, rulings and the repo the story targets; transcribe the story into
+    the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/31-7.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/31-7-validation-of-a-resolution-spec.md` in the spec
+    folder; the engine resolves it by the glob `31-7-validation-of-a-resolution-*.md`,
+    and a file named `31-7-validation-of-a-resolution.md` is read as pending (loop
+    deficiency 1, story 21-6).
