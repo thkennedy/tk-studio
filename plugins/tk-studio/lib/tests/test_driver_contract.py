@@ -777,6 +777,74 @@ class DriverContractTestCase(unittest.TestCase):
                        "never \"has not ticked\""):
             self.assertIn(phrase, flat)
 
+    # --- Story 31.5: the same 0.1.26 entry names the `tk-studio-track`
+    # surface (its §2 row), `GET /inbox` (its §1 row), the inbox file and
+    # the office's `blocked_issue` (no bump).
+
+    def test_0_1_26_names_track_and_the_inbox(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.26**", header)
+        self.assertNotIn("**0.1.27**", header)
+        self.assertLess(header.index("0.1.26 (Story 31.4)"),
+                        header.index("0.1.26 (Story 31.5)"))
+        clause = " ".join(header[header.index("0.1.26 (Story 31.5)"):].split())
+        for phrase in ("`tk-studio-track` surface",
+                       "`track.py block --directory ROOT --story <ST-NNN | "
+                       "N-M-slug> --reason TEXT --resolves TEXT [--source "
+                       "run|engagement] [--dry-run]`",
+                       "`Blocked - Awaiting User` by the transition's target "
+                       "name, never its category", "(AD-4)",
+                       "`[~accountid:<owner>] Blocked: <reason>`",
+                       "`Blocked by: <key>`",
+                       "`planning.jira.owner_account_id`",
+                       "`track-block` event", "DRIFT",
+                       "`update_author: owner | agent`",
+                       "`_bmad-output/tracking/inbox.json`",
+                       "state: open | resolved | validating",
+                       "`rate-limited`, `error` or `blocked` tick leaves it "
+                       "untouched", "`GET /inbox?project=<id>`",
+                       "`blocked_issue`", "(D9)", "— additive"):
+            self.assertIn(phrase, clause)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 31.5", stories)
+        row = next(line for line in self.text.splitlines()
+                   if line.startswith("| `tk-studio-track` "))
+        for phrase in ("verb `block`", "`lib/track.py block`",
+                       "`source?` (`run` \\| `engagement`",
+                       "by transition name", "`lib/jirabackend.py` (AD-4)",
+                       "`skipped[]`", "no Atlassian call",
+                       "`planning.jira.owner_account_id`",
+                       "`external.jira.key`", "ends `partial`",
+                       # the review's additive clarifications
+                       "already `done` or `dropped` is skipped",
+                       "`ok: false` and the additive `retry: true`",
+                       "already in the status before the run"):
+            self.assertIn(phrase, row)
+        title = "### Supervisor surfaces the web consumes (0.1.24)"
+        section = self.text[self.text.index(title):]
+        # the stream: `office.agent` deltas carry `blocked_issue`, and a
+        # change of it alone fires one (beside 0.1.25's `reason`)
+        flat = " ".join(section[:section.index(
+            "**The rules a consumer may rely on**")].split())
+        note = flat[flat.index("**0.1.26 (Story 31.5, additive).**"):]
+        for phrase in ("every `office.agent` delta carry `blocked_issue`",
+                       "`{issue, state}`", "`null` otherwise",
+                       "a change of `blocked_issue` alone fires "
+                       "`office.agent`", "never moved by a comment or a "
+                       "message"):
+            self.assertIn(phrase, note)
+        inbox = next(line for line in section.splitlines()
+                     if line.startswith("| the inbox (Story 31.5, 0.1.26) |"))
+        for phrase in ("`GET /inbox?project=<id>`",
+                       "`{ok:true, project, generated_at, items:[…]}`",
+                       "`items: []` with `generated_at: null`, never a `404`",
+                       "`400 ProjectRequired`", "`404 UnknownProject`",
+                       "the bearer or the cookie", "`blocked_issue`",
+                       "never a comment or message event", "additive"):
+            self.assertIn(phrase, inbox)
+
     def test_section_8_names_the_cli_drives(self):
         section = self.text[self.text.index("## 8. Conformance"):]
         flat = " ".join(section.split())

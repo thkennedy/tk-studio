@@ -1068,6 +1068,49 @@ def issue_comments(client: JiraClient, key: str) -> list[dict]:
                     f"within {MAX_PAGES} pages")
 
 
+# -------------------------------------------------------------------- block
+#
+# Story 31.5: the two writes `tk-studio-track block` makes (AD-4: through
+# this adapter only). Both request shapes are ungraded on the live site and
+# pinned in the fakes.
+
+def transition_to_name(client: JiraClient, key: str, name: str,
+                       notes: list[str], entity_id: str) -> str | None:
+    """Move the issue into the status named `name` (never by category: the
+    two setup statuses share one); returns `name`, or None — with a note
+    naming it — when no transition reaches that status."""
+    status, data = client.request("GET", f"/issue/{key}/transitions",
+                                  scope=SCOPE_READ)
+    if status != 200 or not isinstance(data, dict):
+        raise JiraError(f"track: GET /issue/{key}/transitions returned "
+                        f"{status}")
+    for tr in data.get("transitions") or []:
+        to = tr.get("to") or {}
+        if to.get("name") == name:
+            posted, _ = client.request("POST", f"/issue/{key}/transitions",
+                                       {"transition": {"id": tr.get("id")}},
+                                       scope=SCOPE_WORK)
+            if posted not in (200, 204):
+                raise JiraError(f"track: transition on {key} returned "
+                                f"{posted}")
+            return name
+    notes.append(f"{entity_id}: {key} has no transition into {name!r} — "
+                 f"the workflow lacks it (rerun `plansync.py setup`, or add "
+                 f"the transition in the project's workflow)")
+    return None
+
+
+def add_comment(client: JiraClient, key: str, body: str) -> dict:
+    """`POST /issue/{key}/comment {"body": …}` — REST v2, so the body is
+    plain text and a mention is wiki markup `[~accountid:<id>]` (the form
+    the sync-back's `MENTION_RE` reads). Returns the created comment."""
+    status, data = client.request("POST", f"/issue/{key}/comment",
+                                  {"body": body}, scope=SCOPE_WORK)
+    if status not in (200, 201):
+        raise JiraError(f"track: POST /issue/{key}/comment returned {status}")
+    return data if isinstance(data, dict) else {}
+
+
 def get_project(client: JiraClient, key: str) -> dict | None:
     status, proj = client.request("GET", f"/project/{key}")
     if status == 404:

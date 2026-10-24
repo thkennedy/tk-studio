@@ -287,3 +287,17 @@
 - What no longer holds: "Given an issue in `Block Resolved` When the sync-back sees it", if "sees" is read as a canonical status change.
 - Suggested adjustment: queue `validate-resolution` from `applied[]` entries whose `fields` include `external.jira.status` and whose entity's `external.jira.status` is now `Block Resolved` (by name). A `rate-limited` or `error` tick queues nothing for issues on pages it did not read. A pass or a fail is a status the next tick reads back the same way, so keep it idempotent per (issue, transition).
 - Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-24)
+
+## 31-6-the-inbox-and-issue-screens — scope: stories — from 31-5-the-two-statuses-and-the-inbox-items — 2026-10-24
+
+- What changed: `GET /inbox?project=<id>` serves `inbox.json` v1 as written: `{ok, project, generated_at, items[]}`, where items carry `state: open | resolved | validating`. A missing file gives `generated_at: null, items: []`, and no `project` gives 400 `ProjectRequired`. `OfficeAgent.blocked_issue` is always `{issue, state}` or `null`. On a paused run it falls back to the paused story. The new `tk-studio-track` skill leaves the released-roster guard red until the release motion (3 tests).
+- What no longer holds: "it lists open items sorted as served" (served items are not all open).
+- Suggested adjustment: filter the served items to `state === "open"`, keeping the served order. Count the nav badge over open items. Treat an empty `items` / `generated_at: null` as an empty inbox, not an error. Read `blocked_issue` as always present (null = none). The 3 released-roster guard failures are red by design (unverifiable-here, release motion). Do not edit `released-roster.json`.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-24)
+
+## 31-7-validation-of-a-resolution — scope: stories — from 31-5-the-two-statuses-and-the-inbox-items — 2026-10-24
+
+- What changed: the supervisor's paused-run pass (`apps/supervisor/src/closeout.ts`) calls `track.py block --directory <run.root>` on three triggers. These are awaiting-ruling (`awaiting-ruling` + `track-block`), a not-landed spec `status: blocked` (`devBlocked`, `track-block` only) and a not-landed stage `escalation` (`escalationBlocked`, `track-block` only). Each happens once per (story key, engine run id) since the latest `paused`. bmad-loop has no escalation hook. A transient Jira failure ends `partial` + `ok: false` + `retry: true`, and no `track-block` is recorded, so the pass retries. The re-block comment skip reads comments live and skips only when the issue was already in the status with an identical newest agent comment. Comment-log lines carry `update_author`.
+- What no longer holds: "the supervisor's paused run resumes with the ruling written into the spec" read as tied to an `awaiting-ruling` event. Two of the three block triggers write none.
+- Suggested adjustment: key re-arming off the run's `track-block` event (story key, engine run id), not `awaiting-ruling`. Accept all three triggers. On a fail, re-block through `track.py block` (reason = the follow-up), treating `retry: true` as "call again" and recording nothing. Identify the owner's reply with both `author` and `update_author` = owner from `comments.jsonl`. Add no engine hook.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-24)

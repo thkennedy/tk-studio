@@ -1149,3 +1149,64 @@ describe("Story 27.5 (P7): a leftover's outcome is recorded; a failed ender is r
     expect(lifecycle(fx.queue, run.run_id).filter((e) => e.kind === "studio-run-end-failed")).toHaveLength(STUDIO_END_RETRY_LIMIT);
   });
 });
+
+describe("Story 31.5: GET /inbox (contract 0.1.26 additive)", () => {
+  const SECRET = "i".repeat(48);
+  const ITEMS = [
+    { issue: "TKS-3", entity: "ST-003", title: "Gamma", priority: "Highest", blocked_since: "2026-10-24T09:00:00+00:00",
+      reason_comment: { id: "10001", body: "[~accountid:acc-owner] Blocked: x\nResolves when: y", created: "2026-10-24T09:00:00.000+0000" }, state: "open" },
+    { issue: "TKS-1", priority: null, blocked_since: "2026-10-24T08:00:00+00:00", reason_comment: null, state: "resolved" },
+  ];
+  function routed(o: { file?: string | null } = {}) {
+    const root = mkdtempSync(join(tmpdir(), "tk-sup-inbox-root-"));
+    if (o.file !== null) {
+      mkdirSync(join(root, "_bmad-output", "tracking"), { recursive: true });
+      writeFileSync(join(root, "_bmad-output", "tracking", "inbox.json"), o.file ?? JSON.stringify({
+        inbox_version: 1, generated_at: "2026-10-24T12:00:00+00:00", project_key: "TKS", items: ITEMS }));
+    }
+    const queue = new Queue(join(mkdtempSync(join(tmpdir(), "tk-sup-inbox-q-")), "q.db"), { ownerAlive: () => false, engineLive: async () => ({ live: false }) });
+    const handler = createApi({
+      queue, token: TOKEN, session: { secret: SECRET }, submit: async () => { throw new Error("never"); },
+      registry: async () => ({ projects: { p: { root } } }),
+    });
+    const call = (method: string, path: string, headers: Record<string, string> = { authorization: `Bearer ${TOKEN}` }) =>
+      handler(new Request(`${BASE}${path}`, { method, headers }));
+    return { root, call };
+  }
+
+  test("with the bearer: the file's items exactly as served; no project 400; unknown 404; POST 405", async () => {
+    const fx = routed();
+    const ok = await fx.call("GET", "/inbox?project=p");
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ ok: true, project: "p", generated_at: "2026-10-24T12:00:00+00:00", items: ITEMS });
+    const none = await fx.call("GET", "/inbox");
+    expect(none.status).toBe(400);
+    expect(await none.json()).toMatchObject({ ok: false, error: "ProjectRequired" });
+    const unknown = await fx.call("GET", "/inbox?project=nope");
+    expect(unknown.status).toBe(404);
+    expect(await unknown.json()).toMatchObject({ ok: false, error: "UnknownProject", project: "nope" });
+    const post = await fx.call("POST", "/inbox?project=p");
+    expect(post.status).toBe(405);
+    expect(post.headers.get("allow")).toBe("GET");
+  });
+
+  test("with a session cookie: the same answer; no auth is 401", async () => {
+    const fx = routed();
+    const cookie = `${SESSION_COOKIE}=${signSession(SECRET, "token", Date.now())}`;
+    const viaCookie = await fx.call("GET", "/inbox?project=p", { cookie });
+    expect(viaCookie.status).toBe(200);
+    expect(((await viaCookie.json()) as { items: unknown[] }).items).toEqual(ITEMS);
+    const anon = await fx.call("GET", "/inbox?project=p", {});
+    expect(anon.status).toBe(401);
+    expect(await anon.json()).toMatchObject({ ok: false, error: "Unauthorized" });
+  });
+
+  test("a missing file is an empty list with generated_at null, never a 404; a malformed one too", async () => {
+    for (const file of [null, "{not json"]) {
+      const fx = routed({ file });
+      const res = await fx.call("GET", "/inbox?project=p");
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, project: "p", generated_at: null, items: [] });
+    }
+  });
+});

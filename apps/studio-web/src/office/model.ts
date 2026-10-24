@@ -1,7 +1,7 @@
 // The Office screen's rules (Story 30.4, design spec §6.3, §7.3): pure functions vitest drives in
 // `environment: "node"`. No pixi.js, no DOM: `fetch`, `localStorage` and the clock are injected.
 // The canvas lives in `src/renderer/scene.ts`, the composition in `OfficeScreen.tsx`.
-import { LIVE_RUN_STATES, OFFICE_STATES, type LiveState, type OfficeAgent, type OfficeRun, type OfficeState } from "../live/store";
+import { blockedIssueOf, LIVE_RUN_STATES, OFFICE_STATES, type BlockedIssue, type LiveState, type OfficeAgent, type OfficeRun, type OfficeState } from "../live/store";
 
 // ------------------------------------------------------------ frames
 
@@ -42,9 +42,13 @@ export const isOfficeState = (s: unknown): s is OfficeState => (OFFICE_STATES as
 
 // ------------------------------------------------------------ the bubble
 
-/** The DOM bubble over a character: only `waiting-for-human` and `blocked` have one, naming the
+/** The DOM bubble over a character: a desk whose work is blocked on the owner (a non-null
+ * `blocked_issue`, Story 31.5) shows the persistent "!" naming the issue, whatever its state —
+ * it clears only when the projection clears the field (the status changed), never on a comment
+ * or a message. Otherwise only `waiting-for-human` and `blocked` have one, naming the
  * projection's reason ("waiting" / "blocked" when the reason is null). */
-export function bubbleFor(agent: { state: string; reason?: string | null }): string | null {
+export function bubbleFor(agent: { state: string; reason?: string | null; blocked_issue?: BlockedIssue | null }): string | null {
+  if (agent.blocked_issue) return `! ${agent.blocked_issue.issue}`;
   if (agent.state === "waiting-for-human") return agent.reason || "waiting";
   if (agent.state === "blocked") return agent.reason || "blocked";
   return null;
@@ -67,6 +71,8 @@ export interface Desk {
   role: string;
   state: OfficeState;
   reason: string | null;
+  /** The store agent's `blocked_issue` (0.1.26), else null: the "!" follows it alone. */
+  blocked_issue: BlockedIssue | null;
 }
 
 const roleOf = (row: RegistryRow): string => row.role ?? row.agent_id.slice(row.agent_id.lastIndexOf("/") + 1);
@@ -78,7 +84,10 @@ export function desksFrom(rows: readonly RegistryRow[], agents: readonly OfficeA
   return rows.map((row) => {
     const a = live.get(row.agent_id);
     const raw = a?.state ?? row.live_state;
-    return { agent_id: row.agent_id, role: roleOf(row), state: isOfficeState(raw) ? raw : "offline", reason: a?.reason ?? null };
+    return {
+      agent_id: row.agent_id, role: roleOf(row), state: isOfficeState(raw) ? raw : "offline", reason: a?.reason ?? null,
+      blocked_issue: blockedIssueOf(a?.blocked_issue),
+    };
   });
 }
 

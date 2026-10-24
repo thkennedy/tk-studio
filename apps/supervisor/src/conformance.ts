@@ -115,6 +115,7 @@ export interface StatusSchema {
  * (session and knowledge joined at contract 0.1.7 — Epic 9.) */
 const VERB_SURFACES = new Set([
   "tk-studio-job", "tk-studio-migrate", "tk-studio-session", "tk-studio-knowledge", "tk-studio-evolve", "tk-studio-launch",
+  "tk-studio-track", // contract 0.1.26 (Story 31.5): verb `block`
 ]);
 
 /** Each surface's §2 deterministic-core CLI basenames — the same hand-mirrored
@@ -141,6 +142,7 @@ const SURFACE_CORES: Record<string, string[]> = {
   "tk-studio-report": ["report.py"],
   "tk-studio-evolve": ["evolve.py"],
   "tk-studio-launch": ["launch.py", "pipeline.py"],
+  "tk-studio-track": ["track.py"], // contract 0.1.26 (Story 31.5)
 };
 
 /** Core verbs the §2 payload row does NOT declare — run-workspace-mediated

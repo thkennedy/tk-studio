@@ -224,6 +224,7 @@ export function OfficeScreen({ store, onStats }: { store: OfficeStore; onStats?:
             {bubble !== null && (
               <div
                 data-agent={d.agent_id}
+                data-blocked-issue={d.blocked_issue?.issue}
                 style={{
                   ...panel,
                   left: spot.x,
@@ -231,7 +232,7 @@ export function OfficeScreen({ store, onStats }: { store: OfficeStore; onStats?:
                   transform: "translate(-50%, -100%)",
                   maxWidth: 220,
                   whiteSpace: "normal",
-                  background: d.state === "blocked" ? "rgba(140, 20, 20, 0.85)" : "rgba(120, 90, 0, 0.85)",
+                  background: d.blocked_issue || d.state === "blocked" ? "rgba(140, 20, 20, 0.85)" : "rgba(120, 90, 0, 0.85)",
                   pointerEvents: "none",
                   // Above every panel (the HUD here, the debug panel in App), never hidden under one.
                   zIndex: BUBBLE_Z,
