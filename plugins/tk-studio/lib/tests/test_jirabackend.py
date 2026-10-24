@@ -372,6 +372,249 @@ class PullBackTests(JiraTestCase):
         self.assertEqual(front["status"], "in-progress")
 
 
+class SetupStatusMappingTests(JiraTestCase):
+    """Story 31.4: the two template statuses map onto canonical `blocked` by
+    name (AD-22, AD-6); every other status keeps the category mapping, and
+    `sync` and `sync-back` share it so neither flips an entity."""
+
+    def setUp(self):
+        super().setUp()
+        self.fake.STATUSES = {**FakeJira.STATUSES,
+                              jirabackend.BLOCKED_STATUS: "indeterminate",
+                              jirabackend.RESOLVED_STATUS: "indeterminate"}
+
+    def test_canonical_status_by_name_then_category(self):
+        self.assertEqual(jirabackend.canonical_status(
+            "Blocked - Awaiting User", "indeterminate"), "blocked")
+        self.assertEqual(jirabackend.canonical_status(
+            "Block Resolved", "indeterminate"), "blocked")
+        self.assertEqual(jirabackend.canonical_status(
+            "In Progress", "indeterminate"), "in-progress")
+        self.assertEqual(jirabackend.canonical_status("To Do", "new"), "ready")
+        self.assertEqual(jirabackend.canonical_status("Done", "done"), "done")
+        self.assertIsNone(jirabackend.canonical_status("Odd", "weird"))
+
+    def test_pull_back_maps_both_setup_statuses_to_blocked(self):
+        self._project()
+        key = self._jira_key("ST-001")
+        self.fake.issues[key]["status"] = jirabackend.BLOCKED_STATUS
+        self._project()
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["status"], "blocked")
+        self.assertEqual(front["external"]["jira"]["status"],
+                         "Blocked - Awaiting User")
+        self.fake.issues[key]["status"] = jirabackend.RESOLVED_STATUS
+        result = self._project()
+        self.assertEqual(result["conflicts"], [])
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["status"], "blocked")
+        self.assertEqual(front["external"]["jira"]["status"], "Block Resolved")
+
+    def test_promote_leaves_a_blocked_entity_untouched(self):
+        self._project()
+        key = self._jira_key("ST-001")
+        self.fake.issues[key]["status"] = jirabackend.BLOCKED_STATUS
+        self._project()  # pull-back makes it blocked
+        self.fake.calls.clear()
+        result = self._project()
+        self.assertEqual(self.fake.writes(), [])
+        self.assertEqual(result["pull_back"]["applied"], [])
+        self.assertEqual(self.fake.issues[key]["status"],
+                         "Blocked - Awaiting User")
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["status"], "blocked")
+
+    def test_jira_catching_up_refreshes_a_stale_snapshot(self):
+        # local `blocked` was never promoted (snapshot still `in-progress`);
+        # Jira then moves to the blocked status: the snapshot follows, so
+        # promote has nothing to push (AD-5 round trip)
+        self._project()
+        key = self._jira_key("ST-001")
+        self._set_canonical("ST-001", status="in-progress")
+        self._project()
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["external"]["jira"]["canonical_status"],
+                         "in-progress")
+        self._set_canonical("ST-001", status="blocked")
+        self.fake.issues[key]["status"] = jirabackend.BLOCKED_STATUS
+        self.fake.calls.clear()
+        result = self._project()
+        self.assertEqual(result["conflicts"], [])
+        self.assertEqual(result["promote"]["updated"], [])
+        self.assertEqual(self.fake.writes(), [])
+        self.assertFalse(any(path.endswith("/transitions")
+                             for _, path in self.fake.calls))
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["status"], "blocked")
+        self.assertEqual(front["external"]["jira"]["status"],
+                         jirabackend.BLOCKED_STATUS)
+        self.assertEqual(front["external"]["jira"]["canonical_status"],
+                         "blocked")
+
+    def _legacy_snapshot(self, local_status):
+        # a pre-31.4 pull-back mapped `Blocked - Awaiting User` by category
+        # only: the snapshot holds the Jira name and `in-progress`
+        self._project()
+        key = self._jira_key("ST-001")
+        path, front, body = self._canonical("ST-001")
+        front["status"] = local_status
+        front["external"]["jira"]["status"] = jirabackend.BLOCKED_STATUS
+        front["external"]["jira"]["canonical_status"] = "in-progress"
+        path.write_text(interchange.render_entity(front, body),
+                        encoding="utf-8", newline="\n")
+        return key
+
+    def test_a_legacy_snapshot_re_maps_to_blocked(self):
+        key = self._legacy_snapshot("in-progress")
+        result = jirabackend.apply_statuses(
+            plansync.plan_dir(self.root),
+            {key: (jirabackend.BLOCKED_STATUS, "indeterminate")})
+        self.assertEqual(result["conflicts"], [])
+        self.assertEqual([(a["id"], a["fields"]) for a in result["applied"]],
+                         [("ST-001", ["status"])])
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["status"], "blocked")
+        self.assertEqual(front["external"]["jira"]["status"],
+                         jirabackend.BLOCKED_STATUS)
+        self.assertEqual(front["external"]["jira"]["canonical_status"],
+                         "blocked")
+        # once re-mapped it is echo-suppressed again
+        again = jirabackend.apply_statuses(
+            plansync.plan_dir(self.root),
+            {key: (jirabackend.BLOCKED_STATUS, "indeterminate")})
+        self.assertEqual(again["applied"], [])
+
+    def test_a_legacy_snapshot_with_a_pending_local_change_is_untouched(self):
+        key = self._legacy_snapshot("done")
+        before_text = (plansync.plan_dir(self.root) / "ST-001.md").read_text(
+            "utf-8")
+        result = jirabackend.apply_statuses(
+            plansync.plan_dir(self.root),
+            {key: (jirabackend.BLOCKED_STATUS, "indeterminate")})
+        self.assertEqual(result["conflicts"], [])
+        self.assertEqual(result["applied"], [])
+        self.assertEqual((plansync.plan_dir(self.root) / "ST-001.md")
+                         .read_text("utf-8"), before_text)
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["status"], "done")
+
+
+class RateLimitTests(unittest.TestCase):
+    """Story 31.4: a transport may answer a 3-tuple with headers; a 429 waits
+    `Retry-After`, else 1, 2, 4, 8, 16 s, then raises `RateLimited`."""
+
+    def client(self, answers):
+        calls = []
+
+        def transport(method, url, body):
+            calls.append(url)
+            return answers.pop(0) if answers else (200, {"ok": True})
+        client = jirabackend.JiraClient.for_gateway(
+            "cloud-test", "agent@example.com", "fake", transport)
+        sleeps = []
+        client.sleep = sleeps.append
+        return client, calls, sleeps
+
+    def test_two_tuple_transports_keep_working(self):
+        client, _, sleeps = self.client([(200, {"a": 1})])
+        self.assertEqual(client.request("GET", "/myself"), (200, {"a": 1}))
+        self.assertEqual(sleeps, [])
+        self.assertEqual(client.rate_limit["headers"], {})
+
+    def test_headers_are_recorded(self):
+        client, _, _ = self.client([(200, {}, {"X-RateLimit-Remaining": "9",
+                                                "RateLimit-Policy": "p",
+                                                "Content-Type": "json"})])
+        client.request("GET", "/myself")
+        self.assertEqual(client.rate_limit["headers"],
+                         {"x-ratelimit-remaining": "9",
+                          "ratelimit-policy": "p"})
+
+    def test_retry_after_is_honoured(self):
+        client, calls, sleeps = self.client(
+            [(429, {}, {"Retry-After": "7"}), (200, {"done": True})])
+        self.assertEqual(client.request("GET", "/myself"),
+                         (200, {"done": True}))
+        self.assertEqual(sleeps, [7.0])
+        self.assertEqual(len(calls), 2)
+
+    def test_exhausted_backoff_raises_with_the_reason(self):
+        answers = [(429, {}, {"RateLimit-Reason": "jira-per-issue-on-write"})
+                   for _ in range(6)]
+        client, calls, sleeps = self.client(answers)
+        with self.assertRaises(jirabackend.RateLimited) as caught:
+            client.request("GET", "/myself")
+        self.assertEqual(sleeps, [1, 2, 4, 8, 16])
+        self.assertEqual(len(calls), 6)
+        self.assertEqual(caught.exception.reason, "jira-per-issue-on-write")
+        self.assertIn("jira-per-issue-on-write", str(caught.exception))
+        self.assertEqual(len(client.rate_limit["throttled"]), 6)
+
+    def test_retry_after_past_the_cap_raises_without_waiting(self):
+        client, calls, sleeps = self.client(
+            [(429, {}, {"Retry-After": str(jirabackend.RETRY_AFTER_CAP + 1),
+                        "RateLimit-Reason": "jira-quota-global-based"})])
+        with self.assertRaises(jirabackend.RateLimited) as caught:
+            client.request("GET", "/myself")
+        self.assertEqual(sleeps, [])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(caught.exception.reason, "jira-quota-global-based")
+        self.assertEqual(len(client.rate_limit["throttled"]), 1)
+
+    def test_the_wait_budget_spans_the_client_and_raises_at_once(self):
+        # each wait under the cap, but their total would pass the budget —
+        # across two requests of one client (one tick)
+        wait = jirabackend.RETRY_AFTER_CAP
+        n = int(jirabackend.RETRY_WAIT_BUDGET // wait)
+        answers = ([(429, {}, {"Retry-After": str(wait)})] * (n - 1)
+                   + [(200, {})]
+                   + [(429, {}, {"Retry-After": str(wait),
+                                 "RateLimit-Reason": "burst"})] * 3)
+        client, _, sleeps = self.client(answers)
+        self.assertEqual(client.request("GET", "/myself")[0], 200)
+        with self.assertRaises(jirabackend.RateLimited) as caught:
+            client.request("GET", "/myself")
+        self.assertEqual(sleeps, [float(wait)] * n)
+        self.assertLessEqual(sum(sleeps), jirabackend.RETRY_WAIT_BUDGET)
+        self.assertEqual(caught.exception.reason, "burst")
+        self.assertIn("retry budget", str(caught.exception))
+
+    def test_the_budget_sits_well_under_the_job_guard(self):
+        job = json.loads((Path(__file__).resolve().parents[2] / "jobs" /
+                          "atlassian-sync-back.json").read_text("utf-8"))
+        guard = job["guards"]["max_wall_clock_seconds"]
+        # two clients (Jira, Confluence) per tick
+        self.assertLess(2 * jirabackend.RETRY_WAIT_BUDGET, guard * 0.75)
+
+    def test_confluence_bounds_its_waits_too(self):
+        import confluence
+        answers = [(429, {}, {"Retry-After": "600",
+                              "RateLimit-Reason": "confluence-burst"})]
+        client = confluence.ConfluenceClient(
+            "cloud-test", "agent@example.com", "fake",
+            lambda m, u, b: answers.pop(0))
+        sleeps = []
+        client.sleep = sleeps.append
+        with self.assertRaises(confluence.RateLimited) as caught:
+            client.request("GET", "/spaces")
+        self.assertEqual(sleeps, [])
+        self.assertEqual(caught.exception.reason, "confluence-burst")
+
+    def test_confluence_retries_the_same_way(self):
+        import confluence
+        answers = [(429, {}, {"Retry-After": "2"}),
+                   (200, {"results": []}, {"X-RateLimit-Limit": "350"})]
+        client = confluence.ConfluenceClient(
+            "cloud-test", "agent@example.com", "fake",
+            lambda m, u, b: answers.pop(0))
+        sleeps = []
+        client.sleep = sleeps.append
+        self.assertEqual(client.request("GET", "/spaces")[0], 200)
+        self.assertEqual(sleeps, [2.0])
+        self.assertEqual(client.rate_limit["headers"],
+                         {"x-ratelimit-limit": "350"})
+
+
 class DryRunTests(JiraTestCase):
     def test_dry_run_never_contacts_the_backend(self):
         result = self._project(dry_run=True)

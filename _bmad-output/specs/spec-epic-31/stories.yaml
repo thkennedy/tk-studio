@@ -211,6 +211,16 @@
     transition reaches it. The inbox reads issue status by name. "Needs you" is shared
     with the project, and `planning.jira.filter_id` can be absent until a rerun after an
     owner-made project. Never rely on it, and an absent `filter_id` is not an error.
+    From 31-4 (gate 2026-10-24, replan queue): sync-back maps both setup statuses to
+    canonical `blocked` and keeps the Jira name in `external.jira.status`. A Jira-name
+    change within one canonical status is reported as `applied[].fields` =
+    `["external.jira.status"]`. Derive the inbox, and clear the "!" bubble, from
+    `external.jira.status` by name: `Blocked - Awaiting User` is open and `Block
+    Resolved` is resolved. Canonical `blocked` alone is never enough. Rewrite
+    `inbox.json` only after a tick that read every page. A tick whose `last_run.case` is
+    `rate-limited` or `error`, or whose status is `blocked`, leaves the previous file as
+    it is. The 31.4 comment log records `author` from `author.accountId` only, so the
+    owner-reply test (the 31-1 note) needs `updateAuthor.accountId` added to it.
 
 - id: "31-6-the-inbox-and-issue-screens"
   title: "The Inbox and Issue Screens"
@@ -282,3 +292,10 @@
     `in-progress`. Detect it by status name. Transition by target name (`To Do` or `In
     Progress` on a pass, `Blocked - Awaiting User` on a fail), never by category, and
     refuse by name when no transition reaches the target.
+    From 31-4 (gate 2026-10-24, replan queue): `Block Resolved` is canonical `blocked`,
+    and the transition into it is reported only as `applied[].fields` =
+    `["external.jira.status"]`. Queue `validate-resolution` from `applied[]` entries
+    whose fields include `external.jira.status` and whose entity's
+    `external.jira.status` is now `Block Resolved` (by name). A `rate-limited` or
+    `error` tick queues nothing for issues on pages it did not read. A pass or a fail is
+    a status that the next tick reads back, so queue once per (issue, transition).

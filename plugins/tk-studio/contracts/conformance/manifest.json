@@ -9,7 +9,7 @@
   "surfaces": {
     "tk-studio-activate": {
       "external_calls": false,
-      "auth_preflight": "none needed — read-only local four-plane check; harness auth is the driver's preflight (driver-contract §1)",
+      "auth_preflight": "none needed — read-only local five-plane check (the tracking plane reads the last sync-back's recorded outcome, never the network); harness auth is the driver's preflight (driver-contract §1)",
       "drives": [
         {
           "assertion": "headless-clean",
@@ -176,6 +176,12 @@
           "argv": ["lib/plansync.py", "publish", "--directory", "{sandbox}"],
           "expect": "refusal",
           "marker": "run `plansync.py setup` first"
+        },
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/plansync.py", "sync-back", "--directory", "{sandbox}"],
+          "expect": "refusal",
+          "marker": "sync-back refused"
         }
       ]
     },

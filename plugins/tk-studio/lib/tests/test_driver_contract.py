@@ -691,6 +691,92 @@ class DriverContractTestCase(unittest.TestCase):
                        "its page still publishes"):
             self.assertIn(phrase, plan_sync)
 
+    # --- Story 31.4: the same 0.1.26 entry names the `sync-back` verb (no
+    # bump), the plan-sync row, §4's `{project_root}` note and §6's
+    # five-plane check with the tracking plane.
+
+    def test_0_1_26_names_sync_back(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.26**", header)
+        self.assertNotIn("**0.1.27**", header)
+        self.assertLess(header.index("0.1.26 (Story 31.3)"),
+                        header.index("0.1.26 (Story 31.4)"))
+        clause = " ".join(header[header.index("0.1.26 (Story 31.4)"):].split())
+        for phrase in ("`sync-back` verb",
+                       "`plansync.py sync-back --directory ROOT [--dry-run]`",
+                       "`Blocked - Awaiting User` and `Block Resolved` are "
+                       "canonical `blocked`", "`external.jira`", "(AD-5)",
+                       "`_bmad-output/tracking/<KEY>/comments.jsonl`",
+                       "`{issue, id, author: owner | agent, body, mentions[], "
+                       "created, updated, source: jira}`",
+                       "a comment seen twice is written once",
+                       "`_bmad-output/tracking/<KEY>/attachments.jsonl`",
+                       "`kb/confluence/<slug>.md`", "`overwritten[]`",
+                       "`content_hash: sha256:<hex>`",
+                       "one paged JQL search per tick", "never a GET per issue",
+                       "`Retry-After`", "`RateLimit-Reason`",
+                       "`counts`, `newest_comment`",
+                       "`sync_back?`", "`atlassian-sync-back`",
+                       "stamping `updated`", "raises at once",
+                       "regenerates `plan/index.md`, local-only",
+                       "`{project_root}`", "five-plane", "`tracking` plane",
+                       "nothing local is promoted back", "— additive",
+                       "a preflight answered with another, non-auth "
+                       "status, run case `error`",
+                       "an unrecorded `planning.confluence.space_id`, the "
+                       "mirror skipped",
+                       "only an issue whose `comment.total` exceeds the "
+                       "comments the search returned pages "
+                       "`GET /rest/api/2/issue/{key}/comment` (overflow "
+                       "only)"):
+            self.assertIn(phrase, clause)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 31.4", stories)
+        plan_sync = next(line for line in self.text.splitlines()
+                         if line.startswith("| `tk-studio-plan-sync` |"))
+        for phrase in ("`sync_back?` (0.1.26, Story 31.4",
+                       "`lib/plansync.py sync-back` (0.1.26, Story 31.4)",
+                       "`sync-back` (0.1.26, Story 31.4) ends `blocked`",
+                       "no Atlassian call", "the cursor unchanged",
+                       "`RateLimit-Reason` named", "never runs promote",
+                       "entity `status` (stamping `updated`)",
+                       "`plan/index.md` (regenerated local-only",
+                       "no recorded owner accountId also leaves the "
+                       "cursor unchanged",
+                       "a preflight answered with another, non-auth "
+                       "status: run case `error`",
+                       "an unrecorded `planning.confluence.space_id` (the "
+                       "mirror skipped)",
+                       "only an issue whose `comment.total` exceeds the "
+                       "comments the search returned pages "
+                       "`GET /rest/api/2/issue/{key}/comment` (overflow "
+                       "only)"):
+            self.assertIn(phrase, plan_sync)
+        section_4 = self.text[self.text.index("## 4. Job model"):
+                              self.text.index("## 5. Model")]
+        flat = " ".join(section_4.split())
+        for phrase in ("`{project_root}` core argument",
+                       "replaced by the submitting project's root",
+                       "no other templating", "`newest_comment`"):
+            self.assertIn(phrase, flat)
+        section_6 = self.text[self.text.index("## 6. Drift-check"):]
+        flat = " ".join(section_6.split())
+        for phrase in ("five-plane", '"tracking"', "`not-bound`",
+                       "`never-run`", "`stale`", "`token-missing`",
+                       "`unreachable`", "`deactivated`", "`auth`",
+                       "never a network call", "owner's sign-in",
+                       "never \"no changes\"",
+                       "`{at, status, case, counts, newest_comment, "
+                       "reason}`", "`rate-limited` (an exhausted `429`)",
+                       "`error` (a non-network request error",
+                       "as `ok` or `stale` by age and status",
+                       "never as a ninth plane case",
+                       "so does an `unreachable` run case not on preflight",
+                       "never \"has not ticked\""):
+            self.assertIn(phrase, flat)
+
     def test_section_8_names_the_cli_drives(self):
         section = self.text[self.text.index("## 8. Conformance"):]
         flat = " ".join(section.split())
@@ -976,10 +1062,11 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertIn("not a driver surface", self.text)
 
     def test_folds_in_the_deferred_wording(self):
-        # DW-1: §4 submit is id-only; DW-3: four-plane + unrunnable-core
+        # DW-1: §4 submit is id-only; DW-3: four-plane (five-plane since
+        # Story 31.4's tracking plane) + unrunnable-core
         self.assertNotIn("a job definition (or the id", self.text)
         self.assertIn("id-only", self.text)
-        self.assertIn("four-plane", self.text)
+        self.assertIn("five-plane", self.text)
         self.assertNotIn("three-way", self.text)
         self.assertIn("unrunnable-core", self.text)
 

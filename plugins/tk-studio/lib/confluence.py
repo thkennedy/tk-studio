@@ -24,6 +24,7 @@ import base64
 import hashlib
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -49,6 +50,15 @@ FOLDERS = (("brief", "Brief"), ("gdd", "GDD"),
 
 class ConfluenceError(Exception):
     """Backend refusal or failure; message is safe to surface as `reason`."""
+
+
+class RateLimited(ConfluenceError):
+    """A 429 still answered after every retry (Story 31.4); `reason` is the
+    response's `RateLimit-Reason`, or None when the header was absent."""
+
+    def __init__(self, message: str, reason: str | None = None):
+        super().__init__(message)
+        self.reason = reason
 
 
 class Multipart:
@@ -86,7 +96,11 @@ class ConfluenceClient:
     """Minimal Confluence Cloud v2 client through the gateway.
 
     `transport(method, url, body) -> (status, parsed_body)` is injectable so
-    the client is testable offline; the default is urllib over HTTPS.
+    the client is testable offline; the default is urllib over HTTPS. A
+    transport may answer `(status, parsed_body, headers)` too, and a 429 is
+    retried as the Jira client retries it (Story 31.4,
+    `jirabackend.send_with_retry`, the same capped `Retry-After` and wait
+    budget); `sleep` is the backoff's wait.
     """
 
     def __init__(self, cloud_id: str, email: str, token: str, transport=None,
@@ -108,6 +122,9 @@ class ConfluenceClient:
                          "Accept": "application/json",
                          "Content-Type": "application/json"}
         self._transport = transport or self._http
+        self.sleep = time.sleep
+        self.rate_limit = jirabackend.new_rate_limit_record()
+        self.retry_budget = jirabackend.new_retry_budget()
 
     @classmethod
     def from_env(cls, transport=None) -> "ConfluenceClient":
@@ -133,7 +150,8 @@ class ConfluenceClient:
                 raw = resp.read().decode("utf-8", errors="replace")
                 try:
                     return resp.status, (json.loads(raw) if raw.strip()
-                                         else None)
+                                         else None), \
+                        jirabackend._lower_headers(resp.headers)
                 except ValueError as exc:
                     raise ConfluenceError(jirabackend.non_json_2xx(
                         "Confluence", method, url, resp.status)) from exc
@@ -143,7 +161,7 @@ class ConfluenceClient:
                 parsed = json.loads(raw)
             except ValueError:
                 parsed = raw
-            return exc.code, parsed
+            return exc.code, parsed, jirabackend._lower_headers(exc.headers)
         except (urllib.error.URLError, OSError) as exc:
             proxied = jirabackend.proxy_refusal("Confluence", method, url,
                                                 exc, self.host)
@@ -157,7 +175,9 @@ class ConfluenceClient:
         url = (self.v1_base if v1 else self.base) + path
         if query:
             url += "?" + urllib.parse.urlencode(query)
-        status, data = self._transport(method, url, body)
+        status, data = jirabackend.send_with_retry(
+            "Confluence", self._transport, method, url, body,
+            self.rate_limit, self.sleep, RateLimited, self.retry_budget)
         reason = jirabackend.auth_failure("Confluence", status, method, path,
                                           data, self.host, TOKEN_ENV,
                                           EMAIL_ENV, scope, site=self.site)
@@ -293,6 +313,27 @@ def update_page(client: ConfluenceClient, page_id: str, title: str,
     if status not in (200, 201) or not isinstance(data, dict):
         return None, _refusal(status, data)
     return data, ""
+
+
+def list_space_pages(client: ConfluenceClient, space_id: str) -> list[dict]:
+    """Every page of the space with its storage body (Story 31.4, the
+    owner-page mirror): `GET /spaces/{id}/pages?body-format=storage&limit=250`,
+    each entry reduced to `{id, title, author_id, version, body, webui}`.
+    The `authorId` reading is ungraded on the live site (pinned in the
+    sync-back tests' fake)."""
+    pages = []
+    for entry in _paged_results(client, f"/spaces/{space_id}/pages",
+                                {"body-format": "storage", "limit": 250},
+                                prefix="sync-back"):
+        if entry.get("id") is None:
+            continue
+        pages.append({"id": str(entry["id"]),
+                      "title": str(entry.get("title") or ""),
+                      "author_id": entry.get("authorId"),
+                      "version": page_version(entry),
+                      "body": page_body(entry),
+                      "webui": (entry.get("_links") or {}).get("webui")})
+    return pages
 
 
 def list_attachments(client: ConfluenceClient, page_id: str) -> list[dict]:

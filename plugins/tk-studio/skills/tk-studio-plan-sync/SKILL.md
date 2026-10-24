@@ -96,6 +96,36 @@ committed per-project counter at `.tk-studio/plan-counter.yaml`).
    says which was used. An image outside the project root (an absolute
    path, a non-http(s) scheme, a `../` escape or a symlink out) is refused
    by name before any read and its page still publishes.
+   `sync-back --directory <root> [--dry-run]` (Story 31.4) pulls the
+   project's Atlassian state into local memory so that no agent queries
+   Atlassian live for context: each tracked issue's status (canonical by
+   name first — `Blocked - Awaiting User` and `Block Resolved` are
+   `blocked` — then by status category; the Jira original kept under
+   `external.jira`, `updated` stamped; no other entity field changes, and
+   `plan/index.md` is regenerated local-only when a status changed), its comments
+   append-only into `_bmad-output/tracking/<KEY>/comments.jsonl` (a
+   comment seen twice is written once; an edit appends a line), its
+   attachments as links into `attachments.jsonl` (never downloaded or
+   uploaded), and every owner-authored page of the recorded Confluence
+   space into `kb/confluence/<slug>.md` with a provenance header (read-only:
+   a local edit is overwritten and named in `overwritten[]`). One paged JQL
+   search per tick, never a GET per issue — only an issue whose
+   `comment.total` exceeds the comments the search returned pages
+   `GET /rest/api/2/issue/{key}/comment` (overflow only); the cursor in `_bmad-output/tracking/sync-state.json`
+   moves only after every page was read. Nothing local is promoted back.
+   The result names `counts`, `newest_comment`, `applied[]`,
+   `conflicts[]`, `overwritten[]`, `rate_limit`, `notes[]` and `written[]`.
+   No `planning.jira` binding or an absent Jira variable ends `blocked`
+   before any call; a failed preflight (unreachable, deactivated, the
+   401/403 split, or a preflight answered with another, non-auth status:
+   run case `error`) ends `blocked`; an absent
+   `TK_ATLASSIAN_AGENT_CONFLUENCE_TOKEN` (the Jira half still runs), an
+   unrecorded `planning.confluence.space_id` (the mirror skipped), no
+   recorded owner accountId, a conflict, or a 429 or error that
+   interrupted a read ends `partial`. The shipped cron job
+   `atlassian-sync-back` runs it every 10 minutes. Payload mapping:
+   `sync_back: true` runs `plansync.py sync-back --directory <directory>`;
+   `dry_run` adds `--dry-run` (reads only, writes nothing).
 
    `normalize --directory <root>` runs the canonicalization pass
    alone. Add `--dry-run` to preview without writing (under `jira` a
@@ -134,6 +164,8 @@ committed per-project counter at `.tk-studio/plan-counter.yaml`).
      `TK_ATLASSIAN_AGENT_CONFLUENCE_TOKEN` or `TK_ATLASSIAN_CLOUD_ID`, no
      `planning.confluence` binding, a bad `--source`, or two sources with
      one title — each named, no Atlassian call.
+   - **sync-back refusal** — no `planning.jira` binding or an absent Jira
+     variable — each named, no Atlassian call.
 
 3. Report:
    - **Attended:** summarize actions (created/repaired/unchanged, minted
@@ -143,10 +175,11 @@ committed per-project counter at `.tk-studio/plan-counter.yaml`).
      conflicted entity with both values and both file paths; the human picks
      a side by editing one of them, then reruns sync.
    - **Headless:** no prompts (AD-11). End with the status block. When
-     the core's result carries its own `status` (`setup` and `publish`
-     do: `complete`, `partial` or `blocked`), relay that `status`, its
-     `reason` and its `artifacts` as they are — never infer the status
-     from the exit code (`setup` and `publish` exit 0 on `partial`). For `sync`,
+     the core's result carries its own `status` (`setup`, `publish` and
+     `sync-back` do: `complete`, `partial` or `blocked`), relay that
+     `status`, its `reason` and its `artifacts` as they are — never infer
+     the status from the exit code (`setup`, `publish` and `sync-back`
+     exit 0 on `partial`). For `sync`,
      `normalize` and `status`, whose results carry no `status`: `complete`
      on exit 0 (report conflicts as `partial` with the conflict list in
      `reason`), `blocked` on exit 2 with the blocking reason:

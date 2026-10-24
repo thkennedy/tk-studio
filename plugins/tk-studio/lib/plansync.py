@@ -57,6 +57,7 @@ CLI:
   uv run plansync.py publish --directory ROOT [--dry-run]
                              [--source CATEGORY=PATH ...]
                              [--attachment-max-bytes N]
+  uv run plansync.py sync-back --directory ROOT [--dry-run]
 
 `setup` (Story 31.2) creates the project's tracking from the studio
 template through the agent seat's gateway tokens (TK_ATLASSIAN_*): the Jira
@@ -81,6 +82,22 @@ ceiling refused by name. It writes `.tk-studio/confluence-pages.json`, the
 index the Jira promote turns into each issue's "Design pages:" line, and
 never changes an entity field (AD-5). The AD-11 status block ends the
 result.
+
+`sync-back` (Story 31.4) pulls the project's Atlassian state into local
+memory (lib/syncback.py holds the tick): each tracked issue's status
+(canonical by name, then category; the Jira original under
+`external.jira`), its comments append-only into
+`_bmad-output/tracking/<KEY>/comments.jsonl`, its attachments as links, and
+every owner-authored Confluence page into `kb/confluence/<slug>.md` under a
+provenance header (a local edit is overwritten and named in
+`overwritten[]`). One paged JQL search per tick; the cursor in
+`_bmad-output/tracking/sync-state.json` moves only after every page was
+read. Nothing local is promoted back and no entity field other than
+`status` changes (AD-5). An absent binding or Jira variable ends `blocked`
+before any call; an absent Confluence token, owner accountId or space id,
+a conflict or an interrupted read ends `partial`. The shipped cron job
+`atlassian-sync-back` runs it every 10 minutes. The AD-11 status block ends
+the result.
 
 `status` is the driver's status pull-back (Story 26.5, AD-5 status-class
 only): it sets one canonical story's `status`, stamps `updated`, replaces
@@ -118,6 +135,7 @@ import jirabackend
 import mdstorage
 import miniyaml
 import registry
+import syncback
 
 COUNTER_VERSION = 1
 COUNTER_REL = Path(".tk-studio") / "plan-counter.yaml"
@@ -1943,6 +1961,95 @@ def publish(project_root: Path, dry_run: bool = False,
     return finish("complete", None)
 
 
+# --------------------------------------------------------------- sync-back
+
+SYNC_BACK_INTENT = SETUP_INTENT
+
+
+def _finish_sync_back(result: dict, status: str, reason: str | None) -> dict:
+    result["ok"] = status != "blocked"
+    result.update({"status": status, "intent": SYNC_BACK_INTENT,
+                   "artifacts": list(result["written"]), "reason": reason})
+    return result
+
+
+def sync_back(project_root: Path, dry_run: bool = False, transport=None,
+              sleep=None, now=None) -> dict:
+    """Pull status, comments, attachments and the owner's Confluence pages
+    into local memory (Story 31.4; the tick is `syncback.tick`). Ends
+    `blocked` (exit 2) on no `planning.jira` binding or an absent Jira
+    variable — each named, before any call — or on a failed preflight
+    (unreachable, deactivated, the 401/403 split); `partial` on an absent
+    Confluence token, owner accountId or space id, a conflict, or a 429 or
+    error that interrupted a read (the cursor unchanged); else
+    `complete`. A tick that changed a canonical status regenerates
+    `plan/index.md` (local-only, FR14). Never promotes anything (D9,
+    AD-5)."""
+    root = Path(project_root).resolve()
+    result = syncback.new_result(dry_run)
+
+    def finish(status: str, reason: str | None) -> dict:
+        return _finish_sync_back(result, status, reason)
+
+    if _recorded(root, "planning.jira.project_key") is None:
+        return finish("blocked", "sync-back refused: "
+                      "planning.jira.project_key is not recorded (no "
+                      "planning.jira binding) — run `plansync.py setup` "
+                      "first; no Atlassian call made")
+    settings, gaps = jirabackend._resolve_settings(root, None)
+    if not os.environ.get(jirabackend.AGENT_TOKEN_ENV) \
+            and not os.environ.get(jirabackend.TOKEN_ENV):
+        gaps.insert(0, f"{jirabackend.AGENT_TOKEN_ENV} is not set (the "
+                       f"agent seat's Jira token)")
+    if gaps:
+        reason = ("sync-back refused: " + "; ".join(gaps)
+                  + " — no Atlassian call made")
+        if not dry_run and not any(g.startswith("planning.jira.")
+                                   for g in gaps):
+            syncback.record_refusal(root, result, "token-missing", reason,
+                                    now)
+        return finish("blocked", reason)
+
+    jira = jirabackend.client_for(settings, transport)
+    conf, conf_gaps = None, confluence.env_gaps()
+    if not conf_gaps:
+        conf = confluence.ConfluenceClient(
+            os.environ[jirabackend.CLOUD_ID_ENV],
+            os.environ[jirabackend.AGENT_EMAIL_ENV],
+            os.environ[jirabackend.AGENT_CONFLUENCE_TOKEN_ENV], transport,
+            site=settings.get("site"))
+    if sleep is not None:
+        jira.sleep = sleep
+        if conf is not None:
+            conf.sleep = sleep
+    binding = {
+        "project_key": settings["project_key"],
+        "site": re.sub(r"^https?://", "", settings.get("site") or "").strip("/")
+        or None,
+        "owner_account_id": _recorded(root, "planning.jira.owner_account_id"),
+        "agent_account_id": _recorded(root, "planning.jira.agent_account_id"),
+        "space_id": _recorded(root, "planning.confluence.space_id"),
+        "space_key": _recorded(root, "planning.confluence.space_key"),
+        "published": {str(p.get("page_id")) for p in _load_page_index(root)
+                      if p.get("page_id") is not None},
+    }
+    status, reason = syncback.tick(root, result, binding, plan_dir(root),
+                                   jira, conf, conf_gaps, now=now)
+    if not dry_run and any("status" in a["fields"] for a in result["applied"]):
+        # FR14: the index follows the canonical files the tick changed —
+        # local-only, never a promote (D9)
+        try:
+            index = generate_plan_index(root)
+        except PlanSyncError as exc:
+            result["notes"].append(f"plan index not regenerated: {exc}")
+        else:
+            if index["changed"]:
+                result["written"].append(
+                    Path(index["index"]).resolve().relative_to(root)
+                    .as_posix())
+    return finish(status, reason)
+
+
 # --------------------------------------------------------------------- CLI
 
 def main(argv: list[str] | None = None) -> int:
@@ -1984,6 +2091,9 @@ def main(argv: list[str] | None = None) -> int:
                      help="replace a category's default sources (repeatable)")
     pub.add_argument("--attachment-max-bytes", type=int, default=None,
                      help="the site's Attachment maximum size, in bytes")
+    sbk = sub.add_parser("sync-back")
+    sbk.add_argument("--directory", required=True, help="project root (walks up to the nearest)")
+    sbk.add_argument("--dry-run", action="store_true")
 
     args = parser.parse_args(argv)
     # --directory walks up to the nearest project root (driver contract
@@ -2009,6 +2119,8 @@ def main(argv: list[str] | None = None) -> int:
             result = publish(Path(args.directory), dry_run=args.dry_run,
                              sources=args.source,
                              attachment_max_bytes=args.attachment_max_bytes)
+        elif args.command == "sync-back":
+            result = sync_back(Path(args.directory), dry_run=args.dry_run)
         elif args.command == "status":
             result = status_pull_back(Path(args.directory), args.entity_id,
                                       args.status, note=args.note,
