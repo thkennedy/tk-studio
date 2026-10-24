@@ -10,7 +10,8 @@ import { join } from "node:path";
 import { createApi } from "../src/api";
 import { SESSION_COOKIE, signSession } from "../src/auth";
 import {
-  OFFICE_MAP, OFFICE_STATES, OfficeHub, officeCachedPaths, officeStates, projectOffice, type OfficeState, type OfficeView,
+  blockedIssueFor, INBOX_REL, OFFICE_MAP, OFFICE_STATES, OfficeHub, officeCachedPaths, officeStates, projectOffice, readInbox, type OfficeState,
+  type OfficeView,
 } from "../src/office";
 import { gatherPage, renderPage } from "../src/page";
 import { Queue, type Owner, type Probes, type QueueRun, type WorkerKill } from "../src/queue";
@@ -779,6 +780,111 @@ describe("the reason and last_run (Story 30.4, contract 0.1.25)", () => {
   });
 });
 
+describe("the \"!\" follows blocked_issue (Story 31.5, contract 0.1.26 additive)", () => {
+  /** The project root's plan entity for story 29.2 and an inbox with one item for it in `state`. */
+  const inboxFor = (root: string, state: string | null) => {
+    mkdirSync(join(root, "_bmad-output", "planning-artifacts", "plan"), { recursive: true });
+    writeFileSync(join(root, "_bmad-output", "planning-artifacts", "plan", "ST-002.md"),
+      "---\nshape_version: 1\nid: ST-002\ntype: story\ntitle: The agent registry\nsource: \"epics.md#story-29.2\"\n---\n");
+    mkdirSync(join(root, "_bmad-output", "tracking"), { recursive: true });
+    const items = state === null ? [] : [{ issue: "TKS-2", entity: "ST-002", title: "The agent registry", priority: "High",
+      blocked_since: "2026-10-24T10:00:00+00:00", reason_comment: null, state }];
+    writeFileSync(join(root, INBOX_REL), JSON.stringify({ inbox_version: 1, generated_at: "2026-10-24T12:00:00+00:00", project_key: "TKS", items }));
+  };
+  const blockedOf = (v: OfficeView, project = "p") => v.agents.filter((a) => a.project === project).map((a) => a.blocked_issue ?? null);
+
+  test("an open item for the agents' current story sets blocked_issue on the project's desks; other projects null", async () => {
+    const w = world();
+    const { run } = await w.launch({ lines: CUT.dev });
+    inboxFor(run.root, "open");
+    const v = projectOffice(w.queue);
+    expect(v.agents.find((a) => a.agent_id === "p/planner")!.current_story).toBe(S2);
+    expect(new Set(blockedOf(v).map((b) => JSON.stringify(b)))).toEqual(new Set([JSON.stringify({ issue: "TKS-2", state: "open" })]));
+    expect(blockedOf(v, "q").every((b) => b === null)).toBe(true);
+  });
+
+  test("cleared when the status changes (resolved, or the item gone); never set for another story's item", async () => {
+    const w = world();
+    const { run } = await w.launch({ lines: CUT.dev });
+    inboxFor(run.root, "resolved");
+    expect(blockedOf(projectOffice(w.queue)).every((b) => b === null)).toBe(true);
+    inboxFor(run.root, null);
+    expect(blockedOf(projectOffice(w.queue)).every((b) => b === null)).toBe(true);
+    expect(blockedIssueFor(run.root, S1)).toBeNull();
+    expect(blockedIssueFor(run.root, null)).toBeNull();
+  });
+
+  test("a comment or message event alone never changes it; the inbox file changing does, as one office.agent delta", async () => {
+    const w = world();
+    const { run } = await w.launch({ lines: CUT.dev });
+    inboxFor(run.root, "open");
+    let t = 0;
+    const hub = new OfficeHub({ queue: w.queue, now: () => t, graceMs: 20_000 });
+    expect(hub.snapshot().agents.find((a) => a.agent_id === "p/session")!.blocked_issue).toEqual({ issue: "TKS-2", state: "open" });
+    // the owner replies: a comment lands in the log, a message event in the queue — the "!" stays
+    mkdirSync(join(run.root, "_bmad-output", "tracking", "TKS-2"), { recursive: true });
+    appendFileSync(join(run.root, "_bmad-output", "tracking", "TKS-2", "comments.jsonl"),
+      JSON.stringify({ issue: "TKS-2", id: "c9", author: "owner", update_author: "owner", body: "done", mentions: [], created: "x", updated: "x", source: "jira" }) + "\n");
+    w.queue.note(run.run_id, "message", { from: "owner", body: "done" });
+    t += 1000;
+    expect(hub.refresh()).toEqual([]);
+    expect(hub.snapshot().agents.find((a) => a.agent_id === "p/session")!.blocked_issue).toEqual({ issue: "TKS-2", state: "open" });
+    // the status moves (Block Resolved): the sync-back rewrites the inbox, the "!" clears
+    inboxFor(run.root, "resolved");
+    t += 1000;
+    const evs = hub.refresh().filter((e) => e.data.agent_id === "p/session");
+    expect(evs).toHaveLength(1);
+    expect(evs[0]).toMatchObject({ kind: "office.agent", data: { agent_id: "p/session", blocked_issue: null } });
+  });
+
+  test("a run paused on an escalation: the paused story's open item sets blocked_issue; current_story on the wire is unchanged", async () => {
+    // the journal's story-escalated (no queue paused_story_key): the standing escalation names the story
+    const w = world();
+    const { run, runDir } = await w.launch({ lines: CUT.dev });
+    inboxFor(run.root, "open");
+    appendFileSync(join(runDir, "journal.jsonl"), JSON.stringify({ kind: "story-escalated", story_key: S2, reason: "needs a ruling" }) + "\n");
+    w.queue.markPaused(run.run_id, { engine: { paused_stage: "escalation" } });
+    const v = projectOffice(w.queue);
+    expect(v.agents.find((a) => a.agent_id === "p/planner")!.current_story).not.toBe(S2);
+    expect(new Set(blockedOf(v).map((b) => JSON.stringify(b)))).toEqual(new Set([JSON.stringify({ issue: "TKS-2", state: "open" })]));
+    // the item resolved: cleared
+    inboxFor(run.root, "resolved");
+    expect(blockedOf(projectOffice(w.queue)).every((b) => b === null)).toBe(true);
+  });
+
+  test("a paused run whose queue paused event names the story (paused_story_key), the journal silent: blocked_issue set", async () => {
+    const w = world();
+    const { run, runDir } = await w.launch({ lines: CUT.dev });
+    inboxFor(run.root, "open");
+    appendFileSync(join(runDir, "journal.jsonl"), JSON.stringify({ kind: "story-escalated", story_key: S2, reason: "x" }) + "\n");
+    appendFileSync(join(runDir, "journal.jsonl"), JSON.stringify({ kind: "run-resume" }) + "\n"); // no standing journal escalation
+    w.queue.markPaused(run.run_id, { engine: { paused_story_key: S2, paused_stage: "escalation", paused_reason: "x" } });
+    const v = projectOffice(w.queue);
+    expect(v.agents.find((a) => a.agent_id === "p/planner")!.current_story).not.toBe(S2);
+    expect(new Set(blockedOf(v).map((b) => JSON.stringify(b)))).toEqual(new Set([JSON.stringify({ issue: "TKS-2", state: "open" })]));
+  });
+
+  test("a running (not paused) run with an escalated story: no fallback, blocked_issue null", async () => {
+    const w = world();
+    const { run, runDir } = await w.launch({ lines: CUT.dev });
+    inboxFor(run.root, "open");
+    appendFileSync(join(runDir, "journal.jsonl"), JSON.stringify({ kind: "story-escalated", story_key: S2, reason: "x" }) + "\n");
+    const v = projectOffice(w.queue);
+    expect(v.agents.find((a) => a.agent_id === "p/planner")!.current_story).not.toBe(S2);
+    expect(blockedOf(v).every((b) => b === null)).toBe(true);
+  });
+
+  test("readInbox: the file's generated_at and items as written; missing or malformed is empty, never an error", () => {
+    const root = mkdtempSync(join(tmpdir(), "tk-sup-inbox-"));
+    expect(readInbox(root)).toEqual({ generated_at: null, items: [] });
+    mkdirSync(join(root, "_bmad-output", "tracking"), { recursive: true });
+    writeFileSync(join(root, INBOX_REL), "{not json");
+    expect(readInbox(root)).toEqual({ generated_at: null, items: [] });
+    inboxFor(root, "open");
+    expect(readInbox(root)).toMatchObject({ generated_at: "2026-10-24T12:00:00+00:00", items: [{ issue: "TKS-2", state: "open", priority: "High" }] });
+  });
+});
+
 describe("the routes (AC3)", () => {
   async function routed() {
     const w = world();
@@ -798,7 +904,7 @@ describe("the routes (AC3)", () => {
     expect(typeof body.at).toBe("string");
     expect(body.id).toMatch(/^\d+-\d+$/);
     expect(body.agents).toHaveLength(14);
-    expect(body.agents.find((a: any) => a.agent_id === "p/planner")).toEqual({ agent_id: "p/planner", project: "p", role: "planner", state: "thinking", current_run: fx.run.run_id, current_story: S2, reason: null });
+    expect(body.agents.find((a: any) => a.agent_id === "p/planner")).toEqual({ agent_id: "p/planner", project: "p", role: "planner", state: "thinking", current_run: fx.run.run_id, current_story: S2, reason: null, blocked_issue: null });
     expect(body.runs).toHaveLength(1);
     expect(body.runs[0]).toMatchObject({ run_id: fx.run.run_id, project: "p", state: "running", epic: { done: 1, total: 4, current_story: S2 } });
     // Without the SSE accept the events route answers the JSON snapshot.

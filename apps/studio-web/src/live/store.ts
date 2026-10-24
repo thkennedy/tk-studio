@@ -56,6 +56,14 @@ export interface OfficeAgent {
   current_story: string | null;
   /** What a `waiting-for-human` or `blocked` agent waits for; null otherwise (0.1.25). */
   reason: string | null;
+  /** The open inbox item of the agent's current story, else null (0.1.26, Story 31.5): the office's "!" follows it
+   * alone. Absent from an older supervisor's answer. */
+  blocked_issue?: BlockedIssue | null;
+}
+/** The inbox item behind an agent's "!" (0.1.26). */
+export interface BlockedIssue {
+  issue: string;
+  state: string;
 }
 /** A project's newest terminal run (0.1.25). `ended_at` is an ISO string. */
 export interface OfficeLastRun {
@@ -131,14 +139,21 @@ export interface OfficeStore {
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const strOrNull = (v: unknown): string | null => (typeof v === "string" ? v : null);
 
+/** A well-formed `blocked_issue`, or null. */
+export function blockedIssueOf(v: unknown): BlockedIssue | null {
+  return isObj(v) && typeof v.issue === "string" && typeof v.state === "string" ? { issue: v.issue, state: v.state } : null;
+}
+
 function applyAgent(view: OfficeView, d: Record<string, unknown>): OfficeView | null {
   const agentId = d.agent_id;
   if (typeof agentId !== "string" || typeof d.state !== "string") return null;
-  const patch = {
+  const patch: Partial<OfficeAgent> & Pick<OfficeAgent, "state" | "current_run" | "current_story" | "reason"> = {
     state: d.state as OfficeState,
     current_run: strOrNull(d.current_run),
     current_story: strOrNull(d.current_story),
     reason: strOrNull(d.reason),
+    // Only an `office.agent` delta that carries the field moves it (0.1.26): nothing else ever touches it.
+    ...("blocked_issue" in d ? { blocked_issue: blockedIssueOf(d.blocked_issue) } : {}),
   };
   const i = view.agents.findIndex((a) => a.agent_id === agentId);
   let agents: OfficeAgent[];

@@ -407,6 +407,19 @@
           "expect": "refusal"
         }
       ]
+    },
+    "tk-studio-track": {
+      "external_calls": true,
+      "auth_preflight": "the jira binding's agent seat (AD-7), through the planning adapter (AD-4): no planning.jira binding or an absent TK_ATLASSIAN_* variable refuses by name before any call; the adapter's 401/403 split names the token, its email, its expiry, the org toggle, the proxy approval or the scope — never a silent 401 (the sandbox drive below proves the refusal without any network)",
+      "drives": [
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/track.py", "block", "--directory", "{sandbox}", "--story", "ST-001", "--reason", "conformance probe", "--resolves", "nothing (sandbox)"],
+          "expect": "status-block",
+          "status": "blocked",
+          "marker": "no Atlassian call made"
+        }
+      ]
     }
   },
   "cli_drives": {

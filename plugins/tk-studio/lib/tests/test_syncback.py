@@ -51,8 +51,9 @@ def stamp(minutes_ago: float) -> str:
     return at.strftime("%Y-%m-%dT%H:%M:%S.000+0000")
 
 
-def comment(cid, author, body, minutes_ago, edited_ago=None):
-    return {"id": cid, "author": {"accountId": author}, "body": body,
+def comment(cid, author, body, minutes_ago, edited_ago=None, updater=None):
+    return {"id": cid, "author": {"accountId": author},
+            "updateAuthor": {"accountId": updater or author}, "body": body,
             "created": stamp(minutes_ago),
             "updated": stamp(minutes_ago if edited_ago is None else edited_ago)}
 
@@ -74,7 +75,7 @@ class FakeSyncBack(FakeAtlassian):
         q = {k: v[0] for k, v in urllib.parse.parse_qs(query).items()}
         if method == "GET" and path == "/search/jql":
             self.jql.append(q["jql"])
-            assert q["fields"] == "status,updated,comment,attachment", q
+            assert q["fields"] == "status,updated,comment,attachment,priority", q
             token = q.get("nextPageToken")
             if token is not None and token == self.fail_token:
                 return 500, {"errorMessages": ["boom"]}
@@ -113,13 +114,15 @@ class FakeSyncBack(FakeAtlassian):
         return entry
 
     def issue(self, key, status, category, minutes_ago, comments=(),
-              attachments=(), total=None):
+              attachments=(), total=None, priority=None):
         entry = {"key": key, "fields": {
             "status": {"name": status, "statusCategory": {"key": category}},
             "updated": stamp(minutes_ago),
             "comment": {"comments": list(comments),
                         "total": len(comments) if total is None else total},
             "attachment": list(attachments)}}
+        if priority is not None:
+            entry["fields"]["priority"] = {"name": priority}
         self.search_issues.append(entry)
         return entry
 
@@ -216,8 +219,9 @@ class HappyTickTests(SyncBackTestCase):
         # comments
         log = self.lines(f"_bmad-output/tracking/{KEY}-1/comments.jsonl")
         self.assertEqual([sorted(l) for l in log][0],
-                         sorted(["issue", "id", "author", "body", "mentions",
-                                 "created", "updated", "source"]))
+                         sorted(["issue", "id", "author", "update_author",
+                                 "body", "mentions", "created", "updated",
+                                 "source"]))
         self.assertEqual([(l["id"], l["author"], l["mentions"]) for l in log],
                          [("c1", "owner", ["agent"]),
                           ("c2", "agent", ["owner", "acc-other"])])
@@ -264,6 +268,7 @@ class HappyTickTests(SyncBackTestCase):
             f"_bmad-output/tracking/{KEY}-1/attachments.jsonl",
             "kb/confluence/owner-notes.md",
             "_bmad-output/tracking/sync-state.json",
+            "_bmad-output/tracking/inbox.json",
             "_bmad-output/planning-artifacts/plan/index.md"]))
         # the observed rate-limit headers are recorded
         self.assertEqual(result["rate_limit"]["jira"]["headers"],
@@ -418,6 +423,156 @@ class CommentLogTests(SyncBackTestCase):
         self.run_tick()
         self.assertEqual([l["author"] for l in self.lines(self.REL)],
                          ["agent", "agent"])
+
+    def test_update_author_is_logged_on_new_lines(self):
+        # Story 31.5 (additive): an owner's comment last edited by the agent
+        # is not the owner's reply — `update_author` says who edited last
+        self.fake.issue(f"{KEY}-1", "In Progress", "indeterminate", 30,
+                        comments=[comment("c1", OWNER, "mine", 40),
+                                  comment("c2", OWNER, "edited", 39,
+                                          updater=AGENT),
+                                  comment("c3", AGENT, "agent's", 38)])
+        self.run_tick()
+        self.assertEqual([(l["author"], l["update_author"])
+                          for l in self.lines(self.REL)],
+                         [("owner", "owner"), ("owner", "agent"),
+                          ("agent", "agent")])
+
+    def test_old_lines_without_update_author_are_left_as_they_are(self):
+        path = self.root / self.REL
+        path.parent.mkdir(parents=True)
+        old = {"issue": f"{KEY}-1", "id": "c0", "author": "owner",
+               "body": "old", "mentions": [], "created": stamp(90),
+               "updated": stamp(90), "source": "jira"}
+        path.write_text(json.dumps(old) + "\n", encoding="utf-8")
+        self.fake.issue(f"{KEY}-1", "In Progress", "indeterminate", 30,
+                        comments=[comment("c1", OWNER, "new", 40)])
+        self.run_tick()
+        log = self.lines(self.REL)
+        self.assertEqual(log[0], old)
+        self.assertEqual(log[1]["update_author"], "owner")
+
+
+class InboxSeamTests(SyncBackTestCase):
+    """The tick's call into `inbox.derive` (Story 31.5): only a non-dry-run
+    tick whose search read every page writes `inbox.json`."""
+    INBOX = "_bmad-output/tracking/inbox.json"
+
+    def test_a_complete_tick_derives_the_inbox_and_names_it(self):
+        self.fake.issue(f"{KEY}-1", jirabackend.BLOCKED_STATUS, "indeterminate",
+                        30, priority="High")
+        result = self.run_tick()
+        self.assert_block_last(result, "complete")
+        self.assertIn(self.INBOX, result["written"])
+        data = json.loads((self.root / self.INBOX).read_text("utf-8"))
+        self.assertEqual([(i["issue"], i["state"], i["priority"])
+                          for i in data["items"]],
+                         [(f"{KEY}-1", "open", "High")])
+        # the search asked for the priority, in its one paged search
+        self.assertEqual(len(self.fake.jql), 1)
+
+    def test_a_dry_run_or_an_interrupted_search_writes_no_inbox(self):
+        self.fake.issue(f"{KEY}-1", jirabackend.BLOCKED_STATUS, "indeterminate",
+                        30)
+        result = self.run_tick(dry_run=True)
+        self.assertNotIn(self.INBOX, result["written"])
+        self.assertFalse((self.root / self.INBOX).exists())
+        self.fake.force[("GET", "/search/jql")] = (400, {"errorMessages": ["x"]})
+        result = self.run_tick()
+        self.assertEqual(result["status"], "partial")
+        self.assertFalse((self.root / self.INBOX).exists())
+
+    def test_a_complete_search_with_a_mirror_429_or_error_leaves_the_inbox(self):
+        self.fake.issue(f"{KEY}-1", jirabackend.BLOCKED_STATUS, "indeterminate",
+                        30)
+        self.fake.page("P-1", "Owner Notes", "<p>one</p>")
+        self.assert_block_last(self.run_tick(), "complete")
+        before = (self.root / self.INBOX).read_bytes()
+        real = self.fake._confluence
+        for answer, case in (((429, {}, {"Retry-After": "600"}), "rate-limited"),
+                             ((400, {"message": "bad"}), "error")):
+            # the search reads every page and would move the item to resolved
+            self.fake.search_issues[0]["fields"]["status"] = {
+                "name": jirabackend.RESOLVED_STATUS,
+                "statusCategory": {"key": "indeterminate"}}
+
+            def failing(method, path, query, body, answer=answer):
+                if path.endswith("/pages"):
+                    return answer
+                return real(method, path, query, body)
+            self.fake._confluence = failing
+            result = self.run_tick(minutes_later=10)
+            self.assertEqual((result["status"], result["case"]),
+                             ("partial", case))
+            self.assertNotIn(self.INBOX, result["written"])
+            self.assertEqual((self.root / self.INBOX).read_bytes(), before)
+
+    def test_a_held_inbox_keeps_the_cursor_so_the_next_tick_re_reads(self):
+        # a complete read whose mirror then fails holds the inbox; the cursor
+        # must stay where it was, or the issue that left the status on the
+        # held tick is never re-read and keeps its open item (AC2)
+        self.fake.issue(f"{KEY}-1", jirabackend.BLOCKED_STATUS, "indeterminate",
+                        30, comments=[comment("c1", OWNER, "a ruling", 31)],
+                        attachments=[{"id": "a1", "filename": "x.png",
+                                      "author": {"accountId": OWNER},
+                                      "created": stamp(31)}])
+        self.fake.page("P-1", "Owner Notes", "<p>one</p>")
+        self.assert_block_last(self.run_tick(), "complete")
+        prior = self.state()["cursor"]
+        self.assertEqual(prior, stamp(30))
+        real = self.fake._confluence
+        for answer, case in (((429, {}, {"Retry-After": "600"}), "rate-limited"),
+                             ((400, {"message": "bad"}), "error")):
+            with self.subTest(case=case):
+                before = (self.root / self.INBOX).read_bytes()
+                self.fake.search_issues[0]["fields"].update({
+                    "status": {"name": "In Progress",
+                               "statusCategory": {"key": "indeterminate"}},
+                    "updated": stamp(5)})
+
+                def failing(method, path, query, body, answer=answer):
+                    if path.endswith("/pages"):
+                        return answer
+                    return real(method, path, query, body)
+                self.fake._confluence = failing
+                result = self.run_tick(minutes_later=10)
+                self.assertEqual((result["status"], result["case"]),
+                                 ("partial", case))
+                self.assertIn("cursor unchanged", result["reason"])
+                self.assertEqual((self.root / self.INBOX).read_bytes(), before)
+                self.assertEqual(self.state()["cursor"], prior)
+        # the next clean tick searches from the prior cursor and derives the
+        # inbox with the status change: the item is gone
+        self.fake._confluence = real
+        self.fake.jql.clear()
+        result = self.run_tick(minutes_later=20)
+        self.assert_block_last(result, "complete")
+        self.assertIn(self.INBOX, result["written"])
+        self.assertEqual(self.fake.jql, [syncback.jql_for(
+            KEY, prior, NOW + timedelta(minutes=20))])
+        data = json.loads((self.root / self.INBOX).read_text("utf-8"))
+        self.assertNotIn(f"{KEY}-1", [i["issue"] for i in data["items"]])
+        self.assertEqual(self.state()["cursor"], stamp(5))
+        # re-reading appended nothing twice
+        for log in ("comments", "attachments"):
+            self.assertEqual(len(self.lines(
+                f"_bmad-output/tracking/{KEY}-1/{log}.jsonl")), 1)
+
+    def test_a_held_inbox_on_the_first_tick_leaves_no_cursor(self):
+        self.fake.issue(f"{KEY}-1", jirabackend.BLOCKED_STATUS, "indeterminate",
+                        30)
+        real = self.fake._confluence
+
+        def failing(method, path, query, body):
+            if path.endswith("/pages"):
+                return 400, {"message": "bad"}
+            return real(method, path, query, body)
+        self.fake._confluence = failing
+        result = self.run_tick()
+        self.assertEqual((result["status"], result["case"]),
+                         ("partial", "error"))
+        self.assertFalse((self.root / self.INBOX).exists())
+        self.assertIsNone(self.state()["cursor"])
 
 
 class AttachmentTests(SyncBackTestCase):

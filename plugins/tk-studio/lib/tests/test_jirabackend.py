@@ -874,3 +874,69 @@ class ProxyConnectRefusalTests(unittest.TestCase):
             with self.assertRaises(jirabackend.JiraError) as caught:
                 client.request("GET", "/myself")
         self.assertIn("cannot reach", str(caught.exception))
+
+
+class BlockWriteTests(unittest.TestCase):
+    """Story 31.5: `transition_to_name` and `add_comment`, the two writes
+    `tk-studio-track block` makes. Both request shapes are ungraded on the
+    live site, so they are pinned here."""
+
+    def setUp(self):
+        self.calls: list[tuple[str, str, object]] = []
+        self.transitions = [
+            {"id": "11", "to": {"name": "In Progress",
+                                "statusCategory": {"key": "indeterminate"}}},
+            {"id": "21", "to": {"name": jirabackend.RESOLVED_STATUS,
+                                "statusCategory": {"key": "indeterminate"}}},
+            {"id": "31", "to": {"name": jirabackend.BLOCKED_STATUS,
+                                "statusCategory": {"key": "indeterminate"}}}]
+
+        def transport(method, url, body):
+            path = url.split(jirabackend.API_PREFIX, 1)[1]
+            self.calls.append((method, path, body))
+            if method == "GET" and path == "/issue/TKS-1/transitions":
+                return 200, {"transitions": self.transitions}
+            if method == "POST" and path == "/issue/TKS-1/transitions":
+                return 204, None
+            if method == "POST" and path == "/issue/TKS-1/comment":
+                return 201, {"id": "10001", "body": body["body"],
+                             "created": "2026-10-24T12:00:00.000+0000"}
+            return 400, {"errorMessages": ["unhandled"]}
+
+        self.client = jirabackend.JiraClient("example.atlassian.net",
+                                             "a@example.com", "fake-token",
+                                             transport=transport)
+
+    def test_transition_by_name_never_by_category(self):
+        notes: list[str] = []
+        got = jirabackend.transition_to_name(
+            self.client, "TKS-1", jirabackend.BLOCKED_STATUS, notes, "ST-001")
+        self.assertEqual(got, jirabackend.BLOCKED_STATUS)
+        self.assertEqual(notes, [])
+        # the two setup statuses share a category: the name picks id 31
+        self.assertEqual(self.calls[-1], ("POST", "/issue/TKS-1/transitions",
+                                          {"transition": {"id": "31"}}))
+
+    def test_no_transition_reaching_the_name_refuses_by_name(self):
+        self.transitions.pop()
+        notes: list[str] = []
+        got = jirabackend.transition_to_name(
+            self.client, "TKS-1", jirabackend.BLOCKED_STATUS, notes, "ST-001")
+        self.assertIsNone(got)
+        self.assertEqual(len(notes), 1)
+        self.assertIn("'Blocked - Awaiting User'", notes[0])
+        self.assertIn("TKS-1", notes[0])
+        self.assertFalse([c for c in self.calls if c[0] == "POST"])
+
+    def test_add_comment_posts_a_v2_plain_body_with_the_wiki_mention(self):
+        body = "[~accountid:acc-owner] Blocked: x\nResolves when: y"
+        created = jirabackend.add_comment(self.client, "TKS-1", body)
+        self.assertEqual(self.calls, [("POST", "/issue/TKS-1/comment",
+                                       {"body": body})])
+        self.assertEqual(created["id"], "10001")
+
+    def test_add_comment_refused_raises(self):
+        with self.assertRaises(jirabackend.JiraError) as caught:
+            jirabackend.add_comment(self.client, "TKS-9", "x")
+        self.assertIn("POST /issue/TKS-9/comment returned 400",
+                      str(caught.exception))

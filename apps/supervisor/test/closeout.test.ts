@@ -8,7 +8,7 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApi } from "../src/api";
 import { closeOutOrphans, relauncher, type Started } from "../src/cli";
-import { closableVerdict, closeOutPaused, findSpec, frontmatter, harvestMessage, landing, launchedSinceMove, NOT_HANDED, resumePaused, ResumeRefused, type PausedDeps } from "../src/closeout";
+import { closableVerdict, closeOutPaused, ESCALATION_BLOCKED_REASON, findSpec, frontmatter, harvestMessage, jiraBound, landing, launchedSinceMove, NOT_HANDED, resumePaused, ResumeRefused, trackArgs, type PausedDeps } from "../src/closeout";
 import { renderPage, type PageData } from "../src/page";
 import { Queue, type Owner, type Probes } from "../src/queue";
 import { runProcess, toVmPath, type RunResult } from "../src/server";
@@ -557,6 +557,264 @@ describe("AC2: no verdict, or `escalate`: awaiting a ruling", () => {
     const rec = ev(fx.queue, fx.run.run_id, "awaiting-ruling");
     expect(rec).toHaveLength(1);
     expect(rec[0]!.detail!.notify).toEqual({ ok: false, via: "ntfy", error: "HTTP 503" });
+  });
+});
+
+// ---------------------------------------------------------------- Story 31.5
+
+describe("Story 31.5: a bound project's paused run is blocked on Jira once per (story key, engine run id)", () => {
+  const bind = (root: string, body = "planning:\n  jira:\n    site: example.atlassian.net\n    project_key: TKS\n") => {
+    mkdirSync(join(root, ".tk-studio"), { recursive: true });
+    writeFileSync(join(root, ".tk-studio", "config.yaml"), body);
+  };
+  /** The pass's deps with `track.py` answered by `answer` (every other studio script as `passDeps` runs it). */
+  const tracked = (fx: Awaited<ReturnType<typeof pausedRun>>, answer: () => Promise<RunResult>) => {
+    const p = passDeps(fx);
+    const calls: { root: string; script: string; args: string[] }[] = [];
+    const uv = p.deps.uv!;
+    const deps: PausedDeps = {
+      ...p.deps,
+      uv: async (root, script, args, timeoutS) => {
+        if (!script.endsWith("track.py")) return uv(root, script, args, timeoutS);
+        calls.push({ root, script, args });
+        return answer();
+      },
+    };
+    return { ...p, deps, calls };
+  };
+  const BLOCKED = { ok: true, status: "complete", intent: "tk-studio-track", artifacts: [], reason: null,
+    issues: [{ issue: "TKS-1", entity: "ST-001", role: "story", transitioned: true, commented: true }] };
+  const answer = (out: unknown, exit = 0) => async (): Promise<RunResult> => ({ exit, stdout: JSON.stringify(out), stderr: "" });
+
+  test("jiraBound reads planning.jira.project_key from the tracked config only", () => {
+    const root = mkdtempSync(join(tmpdir(), "tk-sup-bound-"));
+    expect(jiraBound(root)).toBe(false);
+    bind(root, "planning:\n  backend: bmad-files\n");
+    expect(jiraBound(root)).toBe(false);
+    bind(root, "planning:\n  jira:\n    project_key: ''\n");
+    expect(jiraBound(root)).toBe(false);
+    bind(root);
+    expect(jiraBound(root)).toBe(true);
+  });
+
+  test("the block is invoked once per (story key, engine run id) and a `track-block` event records it", async () => {
+    const fx = await pausedRun({ verdict: "escalate" });
+    bind(fx.run.root);
+    const t = tracked(fx, answer(BLOCKED));
+    expect(await closeOutPaused(fx.queue, t.deps)).toEqual({ closed: [], awaiting: [fx.run.run_id] });
+    expect(await closeOutPaused(fx.queue, t.deps)).toEqual({ closed: [], awaiting: [] });
+    expect(t.calls).toHaveLength(1);
+    const spec = `_bmad-output/specs/spec-epic-9/stories/${KEY}-spec.md`;
+    expect(t.calls[0]!.root).toBe(fx.run.root);
+    expect(t.calls[0]!.script.split(/[\\/]/).slice(-2)).toEqual(["lib", "track.py"]);
+    expect(t.calls[0]!.args).toEqual(trackArgs(fx.run.root, KEY, "reconcile_verdict: escalate", spec));
+    expect(t.calls[0]!.args).toEqual(["block", "--directory", fx.run.root, "--story", KEY, "--reason", "reconcile_verdict: escalate",
+      "--resolves", `a ruling in the spec (${spec})`, "--source", "run"]);
+    const rec = ev(fx.queue, fx.run.run_id, "track-block");
+    expect(rec).toHaveLength(1);
+    expect(rec[0]!.detail).toEqual({ story_key: KEY, engine_run_id: E1, ok: true, status: "complete", reason: null,
+      issues: [{ issue: "TKS-1", role: "story", transitioned: true, commented: true }] });
+    // the existing record and its notification are unchanged
+    expect(ev(fx.queue, fx.run.run_id, "awaiting-ruling")).toHaveLength(1);
+    expect(t.sent).toHaveLength(1);
+    expect(fx.get()).toMatchObject({ state: "paused", owner_pid: null });
+  });
+
+  test("a by-name `blocked` answer is recorded and never retried", async () => {
+    const fx = await pausedRun({});
+    bind(fx.run.root);
+    const out = { ok: false, status: "blocked", intent: "tk-studio-track", artifacts: [], reason: "track refused: TK_ATLASSIAN_AGENT_TOKEN is not set — no Atlassian call made", issues: [] };
+    const t = tracked(fx, answer(out, 2));
+    await closeOutPaused(fx.queue, t.deps);
+    await closeOutPaused(fx.queue, t.deps);
+    expect(t.calls).toHaveLength(1);
+    expect(ev(fx.queue, fx.run.run_id, "track-block")[0]!.detail).toMatchObject({ ok: false, status: "blocked", reason: out.reason });
+  });
+
+  test("a transient failure (no JSON, a crash) records nothing and the next pass retries", async () => {
+    const fx = await pausedRun({ verdict: "escalate" });
+    bind(fx.run.root);
+    let n = 0;
+    const t = tracked(fx, async () => {
+      n += 1;
+      if (n === 1) return { exit: 1, stdout: "Traceback (most recent call last):", stderr: "boom" };
+      if (n === 2) throw new Error("uv: spawn failed");
+      return { exit: 0, stdout: JSON.stringify(BLOCKED), stderr: "" };
+    });
+    expect(await closeOutPaused(fx.queue, t.deps)).toEqual({ closed: [], awaiting: [fx.run.run_id] });
+    expect(ev(fx.queue, fx.run.run_id, "track-block")).toHaveLength(0);
+    expect(await closeOutPaused(fx.queue, t.deps)).toEqual({ closed: [], awaiting: [] });
+    expect(ev(fx.queue, fx.run.run_id, "track-block")).toHaveLength(0);
+    await closeOutPaused(fx.queue, t.deps);
+    await closeOutPaused(fx.queue, t.deps);
+    expect(t.calls).toHaveLength(3);
+    expect(ev(fx.queue, fx.run.run_id, "track-block")).toHaveLength(1);
+    expect(ev(fx.queue, fx.run.run_id, "awaiting-ruling")).toHaveLength(1);
+    expect(t.sent).toHaveLength(1);
+    expect(fx.get()).toMatchObject({ state: "paused", owner_pid: null });
+  });
+
+  test("a `retry: true` answer (a temporary Jira failure, `partial` with ok false) records nothing and is retried", async () => {
+    const fx = await pausedRun({ verdict: "escalate" });
+    bind(fx.run.root);
+    const RETRY = { ok: false, status: "partial", intent: "tk-studio-track", artifacts: [], retry: true,
+      reason: "track retry: TKS-1: track: GET /issue/TKS-1 returned 503 — a temporary failure; call again on the next pass",
+      issues: [{ issue: "TKS-1", role: "story", transitioned: false, commented: false, error: "returned 503" }] };
+    let n = 0;
+    const t = tracked(fx, async () => (++n === 1 ? answer(RETRY)() : answer(BLOCKED)()));
+    await closeOutPaused(fx.queue, t.deps);
+    expect(t.calls).toHaveLength(1);
+    expect(ev(fx.queue, fx.run.run_id, "track-block")).toHaveLength(0);
+    await closeOutPaused(fx.queue, t.deps);
+    await closeOutPaused(fx.queue, t.deps);
+    expect(t.calls).toHaveLength(2);
+    expect(ev(fx.queue, fx.run.run_id, "track-block").map((e) => e.detail!.status)).toEqual(["complete"]);
+    expect(ev(fx.queue, fx.run.run_id, "awaiting-ruling")).toHaveLength(1);
+  });
+
+  // ------------------------------------------------ a dev session's `blocked` end (AC1's first trigger)
+
+  const specFile = (fx: Awaited<ReturnType<typeof pausedRun>>) => join(fx.wt, "_bmad-output", "specs", "spec-epic-9", "stories", `${KEY}-spec.md`);
+  const SPEC_REL = `_bmad-output/specs/spec-epic-9/stories/${KEY}-spec.md`;
+  const devBlockedRun = async (condition?: string) => {
+    const fx = await pausedRun({ status: "blocked", stage: "dev" });
+    if (condition !== undefined) writeFileSync(specFile(fx), `${spec("blocked")}\n## Deviation Summary\n\nBlocking condition: none\n\nBlocking condition: ${condition}\n`);
+    return fx;
+  };
+
+  test("a blocked spec makes one block call per pause, with no ruling record and no notification", async () => {
+    const fx = await devBlockedRun("the spec contradicts AC2 on the inbox sort");
+    bind(fx.run.root);
+    const t = tracked(fx, answer(BLOCKED));
+    expect(await closeOutPaused(fx.queue, t.deps)).toEqual({ closed: [], awaiting: [] });
+    expect(t.calls).toHaveLength(1);
+    expect(t.calls[0]!.args).toEqual(["block", "--directory", fx.run.root, "--story", KEY, "--reason", "the spec contradicts AC2 on the inbox sort",
+      "--resolves", `a ruling in the spec (${SPEC_REL})`, "--source", "run"]);
+    expect(ev(fx.queue, fx.run.run_id, "track-block")[0]!.detail).toMatchObject({ story_key: KEY, engine_run_id: E1, ok: true, status: "complete" });
+    expect(ev(fx.queue, fx.run.run_id, "awaiting-ruling")).toHaveLength(0);
+    expect(t.sent).toHaveLength(0);
+    expect(fx.get()).toMatchObject({ state: "paused", owner_pid: null });
+    // a fresh pause of the same story and engine owes a fresh block
+    fx.queue.resumeFromPause(fx.run.run_id, "engine-resume", { engine_run_id: E1 }, me);
+    fx.queue.markLaunched(fx.run.run_id, E1, { end: {} });
+    fx.queue.markPaused(fx.run.run_id, { engine: ev(fx.queue, fx.run.run_id, "paused").at(-1)!.detail!.engine, pr: PR });
+    await closeOutPaused(fx.queue, t.deps);
+    expect(t.calls).toHaveLength(2);
+    expect(ev(fx.queue, fx.run.run_id, "track-block")).toHaveLength(2);
+    expect(ev(fx.queue, fx.run.run_id, "awaiting-ruling")).toHaveLength(0);
+  });
+
+  test("a repeat pass over a blocked spec makes no second call (the reason falls back when none is named)", async () => {
+    const fx = await devBlockedRun();
+    bind(fx.run.root);
+    const t = tracked(fx, answer(BLOCKED));
+    for (let i = 0; i < 3; i++) expect(await closeOutPaused(fx.queue, t.deps)).toEqual({ closed: [], awaiting: [] });
+    expect(t.calls).toHaveLength(1);
+    expect(t.calls[0]!.args).toEqual(trackArgs(fx.run.root, KEY, "dev session ended blocked", SPEC_REL));
+    expect(ev(fx.queue, fx.run.run_id, "track-block")).toHaveLength(1);
+    expect(t.sent).toHaveLength(0);
+    expect(fx.get()).toMatchObject({ state: "paused", owner_pid: null });
+  });
+
+  test("a blocked spec in an unbound project makes no call", async () => {
+    const fx = await devBlockedRun("needs a token");
+    const t = tracked(fx, answer(BLOCKED));
+    await closeOutPaused(fx.queue, t.deps);
+    await closeOutPaused(fx.queue, t.deps);
+    expect(t.calls).toHaveLength(0);
+    expect(fx.queue.events(fx.run.run_id).filter((e) => e.kind === "track-block" || e.kind === "awaiting-ruling")).toHaveLength(0);
+    expect(fx.get()).toMatchObject({ state: "paused", owner_pid: null });
+  });
+
+  test("an `in-progress` spec that did not land stays a silent skip", async () => {
+    const fx = await pausedRun({ status: "in-progress", stage: "dev" });
+    bind(fx.run.root);
+    const t = tracked(fx, answer(BLOCKED));
+    const before = kinds(fx.queue, fx.run.run_id);
+    expect(await closeOutPaused(fx.queue, t.deps)).toEqual({ closed: [], awaiting: [] });
+    expect(t.calls).toHaveLength(0);
+    expect(kinds(fx.queue, fx.run.run_id)).toEqual(before);
+    expect(t.sent).toHaveLength(0);
+    expect(fx.get()).toMatchObject({ state: "paused", owner_pid: null });
+  });
+
+  // ------------------------------------------------ an engine-raised escalation (AC1: a paused run awaiting a ruling)
+
+  test("paused at `escalation` with an `in-review` spec: one block call, one `track-block`, no ruling record, still paused", async () => {
+    const fx = await pausedRun({ status: "in-review", stage: "escalation" });
+    bind(fx.run.root);
+    const t = tracked(fx, answer(BLOCKED));
+    expect(await closeOutPaused(fx.queue, t.deps)).toEqual({ closed: [], awaiting: [] });
+    expect(t.calls).toHaveLength(1);
+    expect(t.calls[0]!.args).toEqual(["block", "--directory", fx.run.root, "--story", KEY, "--reason", "reconcile asks for a ruling",
+      "--resolves", `a ruling in the spec (${SPEC_REL})`, "--source", "run"]);
+    const rec = ev(fx.queue, fx.run.run_id, "track-block");
+    expect(rec).toHaveLength(1);
+    expect(rec[0]!.detail).toMatchObject({ story_key: KEY, engine_run_id: E1, ok: true, status: "complete" });
+    expect(ev(fx.queue, fx.run.run_id, "awaiting-ruling")).toHaveLength(0);
+    expect(t.sent).toHaveLength(0);
+    expect(fx.get()).toMatchObject({ state: "paused", owner_pid: null });
+    // a second pass: no second call
+    expect(await closeOutPaused(fx.queue, t.deps)).toEqual({ closed: [], awaiting: [] });
+    expect(t.calls).toHaveLength(1);
+    expect(ev(fx.queue, fx.run.run_id, "track-block")).toHaveLength(1);
+    expect(fx.get()).toMatchObject({ state: "paused", owner_pid: null });
+  });
+
+  test("an escalation whose paused event names no reason: the fixed fallback", async () => {
+    const fx = await pausedRun({ status: "in-progress", paused: false });
+    fx.queue.markPaused(fx.run.run_id, { engine: { run_id: E1, status: "running", paused_stage: "escalation", paused_reason: "  ", paused_story_key: KEY }, pr: PR });
+    bind(fx.run.root);
+    const t = tracked(fx, answer(BLOCKED));
+    await closeOutPaused(fx.queue, t.deps);
+    expect(t.calls).toHaveLength(1);
+    expect(t.calls[0]!.args).toEqual(trackArgs(fx.run.root, KEY, ESCALATION_BLOCKED_REASON, SPEC_REL));
+    expect(ESCALATION_BLOCKED_REASON).toBe("story escalated: awaiting a ruling");
+  });
+
+  test("an escalation with a not-landed spec in an unbound project makes no call", async () => {
+    const fx = await pausedRun({ status: "in-review", stage: "escalation" });
+    const t = tracked(fx, answer(BLOCKED));
+    const before = kinds(fx.queue, fx.run.run_id);
+    await closeOutPaused(fx.queue, t.deps);
+    await closeOutPaused(fx.queue, t.deps);
+    expect(t.calls).toHaveLength(0);
+    expect(kinds(fx.queue, fx.run.run_id)).toEqual(before);
+    expect(fx.get()).toMatchObject({ state: "paused", owner_pid: null });
+  });
+
+  test("a not-landed `in-review` spec paused at another stage (`dev`) makes no call", async () => {
+    const fx = await pausedRun({ status: "in-review", stage: "dev" });
+    bind(fx.run.root);
+    const t = tracked(fx, answer(BLOCKED));
+    const before = kinds(fx.queue, fx.run.run_id);
+    expect(await closeOutPaused(fx.queue, t.deps)).toEqual({ closed: [], awaiting: [] });
+    expect(t.calls).toHaveLength(0);
+    expect(kinds(fx.queue, fx.run.run_id)).toEqual(before);
+    expect(fx.get()).toMatchObject({ state: "paused", owner_pid: null });
+  });
+
+  test("no binding: no call and nothing recorded", async () => {
+    const fx = await pausedRun({ verdict: "escalate" });
+    const t = tracked(fx, answer(BLOCKED));
+    await closeOutPaused(fx.queue, t.deps);
+    await closeOutPaused(fx.queue, t.deps);
+    expect(t.calls).toHaveLength(0);
+    expect(ev(fx.queue, fx.run.run_id, "track-block")).toHaveLength(0);
+  });
+
+  test("a fresh pause of the same story and engine blocks again", async () => {
+    const fx = await pausedRun({ verdict: "escalate" });
+    bind(fx.run.root);
+    const t = tracked(fx, answer(BLOCKED));
+    await closeOutPaused(fx.queue, t.deps);
+    fx.queue.resumeFromPause(fx.run.run_id, "engine-resume", { engine_run_id: E1 }, me);
+    fx.queue.markLaunched(fx.run.run_id, E1, { end: {} });
+    fx.queue.markPaused(fx.run.run_id, { engine: ev(fx.queue, fx.run.run_id, "paused").at(-1)!.detail!.engine, pr: PR });
+    await closeOutPaused(fx.queue, t.deps);
+    await closeOutPaused(fx.queue, t.deps);
+    expect(t.calls).toHaveLength(2);
+    expect(ev(fx.queue, fx.run.run_id, "track-block")).toHaveLength(2);
   });
 });
 

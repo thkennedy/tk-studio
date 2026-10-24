@@ -38,6 +38,10 @@
  *                            triage} — the served project's plan epics and stories with their statuses, each story's
  *                            latest run and open findings, per epic the metered spend against its band, and the
  *                            Needs-you / Working / Done triage of its runs; 400 ProjectRequired, 404 UnknownProject
+ *   GET  /inbox?project=<id> the inbox (Story 31.5, contract 0.1.26 additive): {ok, project, generated_at, items} — the
+ *                            served project's `_bmad-output/tracking/inbox.json` (the sync-back's) items exactly as
+ *                            written; a missing file is `items: []` with `generated_at: null`, never a 404; 400
+ *                            ProjectRequired, 404 UnknownProject (an unregistered project). Readable by the cookie too
  *   GET  /office/events      with `Accept: text/event-stream`: `event:snapshot` first (or, for a valid `Last-Event-ID`,
  *                            the buffered deltas after it), then `office.agent` / `office.progress` / `office.run`
  *                            deltas (`id:<boot>-<seq>`), a `: heartbeat` comment every 10 s; without it the JSON snapshot
@@ -77,7 +81,7 @@ import { boardFor, type BoardAnswer } from "./board";
 import { CancelRaced, cancelRun, ExternalRunRefused, resumeRun, StartError, submitProject, type AgentsOption } from "./cli";
 import { ResumeRefused, type ResumeAnswer } from "./closeout";
 import { apiBind, apiPort, apiToken, checkTlsFiles, notifier, oauthLeftovers, sessionSecret, tlsConfig } from "./env";
-import { OfficeHub, type OfficeEvent } from "./office";
+import { OfficeHub, readInbox, type InboxFile, type OfficeEvent } from "./office";
 import { gatherPage, holderOf, readLedgerTail, redactLedgerLine, renderPage } from "./page";
 import { readAgents, type RebuildResult } from "./registry";
 import { contentType, resolveWebPath, WEB_BUILD_COMMAND, webRoot, type WebOptions } from "./web";
@@ -156,6 +160,9 @@ export interface ApiDeps {
   /** Story 30.5: the board builder (default `boardFor` on this queue, `now`, `env`, `ledger`, `registry` and the office
    * hub's live runs); null for a project the registry does not serve. */
   board?: (project: string) => Promise<BoardAnswer | null>;
+  /** Story 31.5: the inbox reader (default: the registry's root for `project`, then `readInbox`); null for a project
+   * the registry does not serve. */
+  inbox?: (project: string) => Promise<InboxFile | null>;
   /** Story 30.2: the studio web's root (default: the installed slot from `current.json`, else the checkout's
    * `apps/studio-web/dist`). */
   web?: WebOptions;
@@ -270,6 +277,13 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
     queue, now: clock, env: deps.env, ledger: deps.ledger, registry: deps.registry ?? (() => registryShow()),
     liveRuns: () => office.snapshot().runs,
   }));
+  const inbox = deps.inbox ?? (async (project: string): Promise<InboxFile | null> => {
+    const shown = await (deps.registry ?? (() => registryShow()))();
+    const projects = shown?.projects && typeof shown.projects === "object" ? shown.projects as Record<string, any> : undefined;
+    const entry = projects && Object.hasOwn(projects, project) ? projects[project] : undefined;
+    if (!entry || typeof entry !== "object") return null;
+    return readInbox(typeof entry.root === "string" && entry.root ? entry.root : null);
+  });
 
   /** Constant time: both sides hashed to one length before `timingSafeEqual`. The scheme
    * matches case-insensitively (RFC 7235); the token is compared as sent. */
@@ -658,7 +672,7 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
   async function cookieRoute(req: Request, url: URL, path: string, method: string, cookie: string): Promise<Response> {
     const csrf = csrfToken(secret!, cookie);
     const readRoute = path === "/" || path === "/jobs" || path === "/status" || path === "/events" || path === "/agents"
-      || path === "/board" || path === "/office" || path === "/office/events" || /^\/runs\/[^/]+$/.test(path)
+      || path === "/board" || path === "/inbox" || path === "/office" || path === "/office/events" || /^\/runs\/[^/]+$/.test(path)
       || path === "/app" || path.startsWith("/app/");
     if (method === "GET" && readRoute) return await route(req, url, path, method, csrf);
     if (method === "POST" && /^\/runs\/[^/]+\/cancel$/.test(path)) {
@@ -730,6 +744,14 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
         if (!project) return fail(400, "ProjectRequired", { detail: "the board needs ?project=<id>" });
         const answer = await board(project);
         return answer ? json(200, answer) : fail(404, "UnknownProject", { project });
+      }
+      if (path === "/inbox") {
+        if (method !== "GET") return allow("GET");
+        // Story 31.5: the sync-back's inbox file as written (a read; a missing file is an empty list, never a 404).
+        const project = url.searchParams.get("project")?.trim();
+        if (!project) return fail(400, "ProjectRequired", { detail: "the inbox needs ?project=<id>" });
+        const file = await inbox(project);
+        return file ? json(200, { ok: true, project, generated_at: file.generated_at, items: file.items }) : fail(404, "UnknownProject", { project });
       }
       // Story 29.3: the graced office view (a read: nothing is written to the queue).
       if (path === "/office") return method === "GET" ? json(200, { ok: true, ...officeSnapshot() }) : allow("GET");

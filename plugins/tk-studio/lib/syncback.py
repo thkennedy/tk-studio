@@ -17,6 +17,9 @@ queries Atlassian live for context:
   - every owner-authored page of `planning.confluence.space_id` into
     `kb/confluence/<slug>.md`, storage XHTML verbatim under a provenance
     header; a local edit is overwritten and reported in `overwritten[]`.
+  - the inbox (Story 31.5): `_bmad-output/tracking/inbox.json`, derived
+    by `inbox.derive` from the tick's search and the comment logs, only
+    after a non-dry-run tick that read every page.
 
 One paged JQL search per tick (`GET /rest/api/2/search/jql`), never a GET
 per issue; the bound is relative (`updated >= -<n>m`, n = the minutes since
@@ -41,13 +44,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import confluence
+import inbox
 import jirabackend
 
 TRACKING_REL = Path("_bmad-output") / "tracking"
 STATE_REL = TRACKING_REL / "sync-state.json"
 MIRROR_REL = Path("kb") / "confluence"
 OVERLAP_MINUTES = 5
-SEARCH_FIELDS = "status,updated,comment,attachment"
+SEARCH_FIELDS = "status,updated,comment,attachment,priority"
 KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*-\d+$")
 MENTION_RE = re.compile(r"\[~accountid:([^\]\s]+)\]")
 HEADER_HASH_RE = re.compile(r"^content_hash: sha256:([0-9a-f]{64})$",
@@ -57,6 +61,8 @@ HEADER_HASH_RE = re.compile(r"^content_hash: sha256:([0-9a-f]{64})$",
 # 429) are run cases the plane reads by age and status, not plane cases
 CASE_RANK = ("token-missing", "auth", "deactivated", "unreachable",
              "error", "rate-limited", "ok")
+# a tick in either case leaves `inbox.json` untouched (Story 31.5)
+INBOX_HOLD_CASES = ("rate-limited", "error")
 UNREACHABLE_RE = re.compile(r"\bcannot reach\b|\breturned 5\d\d\b")
 SIGN_IN_FIX = ("the owner signs in to the site and opens a Jira issue and a "
                "Confluence page (kb/atlassian-free-tier.md §1 step 10) — the "
@@ -249,6 +255,11 @@ def log_comments(root: Path, result: dict, key: str, comments: list[dict],
         entry = {"issue": key, "id": str(comment["id"]),
                  "author": _who((comment.get("author") or {}).get("accountId"),
                                 owner, agent),
+                 # Story 31.5 (additive): the owner's reply is the owner's
+                 # only when both author and updateAuthor are the owner
+                 "update_author": _who(
+                     (comment.get("updateAuthor") or {}).get("accountId"),
+                     owner, agent),
                  "body": body,
                  "mentions": [_mention(m, owner, agent)
                               for m in MENTION_RE.findall(body)],
@@ -522,7 +533,9 @@ def tick(root: Path, result: dict, binding: dict, plan_dir: Path, jira,
         _set_case(result, classify(exc))
         partial.append(f"search interrupted ({exc}) — cursor unchanged")
     complete_read = issues is not None
+    had_cursor, prior_cursor = "cursor" in state, state.get("cursor")
     observed: list[dict] = []
+    latest: dict[str, dict] = {}
     if issues is not None:
         latest = _latest(issues)
         result["counts"]["issues"] = len(latest)
@@ -612,6 +625,28 @@ def tick(root: Path, result: dict, binding: dict, plan_dir: Path, jira,
         except confluence.ConfluenceError as exc:
             _set_case(result, classify(exc))
             partial.append(f"owner-page mirror interrupted ({exc})")
+
+    # 4. the inbox (Story 31.5): only from a non-dry-run tick whose search
+    # read every page (no second search: `inbox` merges with the last file).
+    # Every case is settled by here (the mirror ran above) and a `blocked`
+    # tick returned early, so a `rate-limited` or `error` case — a later
+    # page-mirror 429 or error included — leaves the previous file as it is
+    if complete_read and not dry_run and \
+            result.get("case") not in INBOX_HOLD_CASES:
+        inbox.derive(root, result, binding["project_key"], plan_dir, latest,
+                     now)
+    elif complete_read and not dry_run:
+        # the inbox is held, so the cursor must not pass the issues this
+        # tick read: an issue that left `Blocked - Awaiting User` here would
+        # otherwise never be re-read and keep its open item. Re-reading is
+        # safe — the logs append once per (id, updated) / id and a status
+        # already applied changes nothing
+        if had_cursor:
+            state["cursor"] = prior_cursor
+        else:
+            state.pop("cursor", None)
+        partial.append(f"inbox held (case {result.get('case')!r}) — cursor "
+                       f"unchanged, so the next tick re-reads these issues")
 
     result["rate_limit"] = rate_limits()
     for name, record in result["rate_limit"].items():

@@ -2,7 +2,7 @@
 // all eight states (30.7: the per-role sets and the idle fallback), the bubble rule, the desks, the HUD's fields from a fixture store (the null
 // seams and no live run), the registry fetch and the project switcher with a fake storage.
 import { describe, expect, it } from "vitest";
-import { createOfficeStore, OFFICE_STATES, type OfficeState } from "../live/store";
+import { createOfficeStore, OFFICE_STATES, type OfficeAgent, type OfficeState } from "../live/store";
 import {
   agentsUrl, bubbleFor, safeHref, desksFrom, fetchAgents, framesFor, hudModel, NONE, PENDING, PROJECT_KEY, projectsFrom,
   rememberedProject, rememberProject, type FrameSheet, type StorageLike,
@@ -85,6 +85,44 @@ describe("the bubble rule", () => {
   });
 });
 
+describe("the \"!\" follows blocked_issue alone (Story 31.5, 0.1.26)", () => {
+  const agent = (over: Partial<OfficeAgent> = {}): OfficeAgent => ({
+    agent_id: "p/session", project: "p", role: "session", state: "typing", current_run: "r1", current_story: "31-5-x", reason: null, ...over,
+  });
+  const SNAP = (agents: OfficeAgent[]) => ({ at: "t", agents, runs: [], problems: [], last_run: {} });
+
+  it("a non-null blocked_issue shows the \"!\" in any state; null or absent never does", () => {
+    for (const state of OFFICE_STATES) expect(bubbleFor({ state, blocked_issue: { issue: "TKS-2", state: "open" } })).toBe("! TKS-2");
+    expect(bubbleFor({ state: "typing", blocked_issue: null })).toBeNull();
+    expect(bubbleFor({ state: "typing" })).toBeNull();
+  });
+
+  it("the desk carries the store agent's blocked_issue", () => {
+    const desks = desksFrom([{ agent_id: "p/session", project: "p", role: "session" }], [agent({ blocked_issue: { issue: "TKS-2", state: "open" } })]);
+    expect(desks[0]).toMatchObject({ blocked_issue: { issue: "TKS-2", state: "open" } });
+    expect(bubbleFor(desks[0])).toBe("! TKS-2");
+  });
+
+  it("set and cleared only by an office.agent delta carrying the field; a comment or message event never touches it", () => {
+    const store = createOfficeStore({ now: () => 1 });
+    store.applySnapshot("b-1", SNAP([agent()]));
+    const issueOf = () => store.getState().view!.agents[0].blocked_issue ?? null;
+    expect(issueOf()).toBeNull();
+    store.applyDelta("b-2", "office.agent", { agent_id: "p/session", state: "typing", current_run: "r1", current_story: "31-5-x", reason: null, blocked_issue: { issue: "TKS-2", state: "open" } });
+    expect(issueOf()).toEqual({ issue: "TKS-2", state: "open" });
+    // a comment or a message is no office kind: ignored; an agent delta without the field leaves it as it is
+    store.applyDelta("b-3", "comment", { agent_id: "p/session", body: "done" });
+    store.applyDelta("b-4", "message", { agent_id: "p/session", body: "done" });
+    store.applyDelta("b-5", "office.agent", { agent_id: "p/session", state: "thinking", current_run: "r1", current_story: "31-5-x", reason: null });
+    expect(issueOf()).toEqual({ issue: "TKS-2", state: "open" });
+    expect(bubbleFor(desksFrom([{ agent_id: "p/session" }], store.getState().view!.agents)[0])).toBe("! TKS-2");
+    // the status changed: the projection clears it
+    store.applyDelta("b-6", "office.agent", { agent_id: "p/session", state: "thinking", current_run: "r1", current_story: "31-5-x", reason: null, blocked_issue: null });
+    expect(issueOf()).toBeNull();
+    expect(bubbleFor(desksFrom([{ agent_id: "p/session" }], store.getState().view!.agents)[0])).toBeNull();
+  });
+});
+
 describe("the desks and the projects", () => {
   const rows = [
     { agent_id: "p/orchestrator", project: "p", role: "orchestrator", live_state: "idle" },
@@ -99,11 +137,11 @@ describe("the desks and the projects", () => {
       { agent_id: "p/orchestrator", project: "p", role: "orchestrator", state: "waiting-for-human", current_run: "r1", current_story: null, reason: "a ruling" },
     ]);
     expect(desks).toEqual([
-      { agent_id: "p/orchestrator", role: "orchestrator", state: "waiting-for-human", reason: "a ruling" },
-      { agent_id: "p/session", role: "session", state: "typing", reason: null },
-      { agent_id: "p/planner", role: "planner", state: "offline", reason: null },
+      { agent_id: "p/orchestrator", role: "orchestrator", state: "waiting-for-human", reason: "a ruling", blocked_issue: null },
+      { agent_id: "p/session", role: "session", state: "typing", reason: null, blocked_issue: null },
+      { agent_id: "p/planner", role: "planner", state: "offline", reason: null, blocked_issue: null },
     ]);
-    expect(desksFrom([rows[4]], null)).toEqual([{ agent_id: "r.s/advisor", role: "advisor", state: "offline", reason: null }]);
+    expect(desksFrom([rows[4]], null)).toEqual([{ agent_id: "r.s/advisor", role: "advisor", state: "offline", reason: null, blocked_issue: null }]);
   });
 
   it("projectsFrom lists the distinct projects in first-seen order (the agent_id prefix as a fallback)", () => {

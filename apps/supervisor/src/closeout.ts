@@ -12,8 +12,28 @@
  *                  commit, the meter harvest, the archive, the relaunch (below);
  *                - landed with no verdict, or `escalate`: left `paused` for a human — one `awaiting-ruling`
  *                  event and one notification per (story key, engine run id); the page says "awaiting a
- *                  ruling";
- *                - anything else (no story key, no spec, a spec not done, another paused stage): nothing is
+ *                  ruling"; Story 31.5: for a project with a `planning.jira` binding (`planning.jira.project_key`
+ *                  in the run root's `.tk-studio/config.yaml`) the pass also runs `uv run <plugin>/lib/track.py
+ *                  block --directory <root> --story <key> --reason <the landing's reason> --resolves "a ruling in
+ *                  the spec (<spec path>)" --source run` on the host, once per (story key, engine run id): its
+ *                  answer (`ok`, or a by-name `blocked`) is one `track-block` event `{story_key, engine_run_id, ok,
+ *                  status, reason, issues}`; a transient failure (the runner throws, no JSON answer, or the
+ *                  core's `retry: true` — a 429, a 5xx or the site unreachable, `partial` with `ok: false`)
+ *                  records nothing and the next pass calls it again. No binding: no call, nothing recorded.
+ *                  bmad-loop fires no escalation hook, so this pass is the block's one caller (DRIFT, contract
+ *                  0.1.26);
+ *                - a story that did not land whose spec's frontmatter `status` is exactly `blocked` (a dev
+ *                  session's `blocked` end, Story 31.5): for a bound project the same `track.py block` call and
+ *                  `track-block` record, once per (story key, engine run id) since the latest `paused`, the
+ *                  `--reason` the spec's last `Blocking condition:` line (clipped; "dev session ended blocked"
+ *                  when absent or `none`); no `awaiting-ruling` event, no notification, the run left `paused`;
+ *                - a story that did not land, paused at stage `escalation`, whose spec is found and is neither
+ *                  `done` nor `blocked` (an engine-raised escalation awaiting a ruling, Story 31.5): the same
+ *                  block, call and record, once per (story key, engine run id) since the latest `paused`, the
+ *                  `--reason` the `paused` event's engine `paused_reason` (clipped; "story escalated: awaiting a
+ *                  ruling" when empty); no `awaiting-ruling` event, no notification, the run left `paused` for
+ *                  `POST /runs/{id}/resume`;
+ *                - anything else (no story key, no spec, a spec not done at another paused stage): nothing is
  *                  done — the run stays `paused` for `POST /runs/{id}/resume` (`resumePaused`).
  *              The pass takes the run as the sweep does (`Queue.takeForCloseOut`, released after), so `serve`
  *              and a tick never close the same run out twice.
@@ -46,7 +66,7 @@
  * Every command is argv only — never a shell.
  */
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { load as loadYaml } from "js-yaml";
 import { notifier, sbxBin } from "./env";
 import { canonicalPr, isWithin, notify, type EndNotice } from "./hygiene";
@@ -369,9 +389,96 @@ export function rulingRecorded(events: readonly QueueEvent[], storyKey: string, 
   return events.slice(pause + 1).some((e) => e.kind === "awaiting-ruling" && e.detail?.story_key === storyKey && e.detail?.engine_run_id === engineRunId);
 }
 
-/** AC2: one `awaiting-ruling` event, and one notification, per pause of (story key, engine run id). */
+/** Story 31.5: a project root's `planning.jira` binding — a non-empty `planning.jira.project_key` in its tracked
+ * `.tk-studio/config.yaml` (read only; any read or parse failure is "not bound"). */
+export function jiraBound(root: string): boolean {
+  try {
+    const doc = loadYaml(readFileSync(join(root, ".tk-studio", "config.yaml"), "utf-8")) as Record<string, any> | null;
+    const key = doc?.planning?.jira?.project_key;
+    return (typeof key === "string" && key.trim() !== "") || typeof key === "number";
+  } catch { return false; }
+}
+
+/** Story 31.5: one `track-block` (story key, engine run id) recorded since the run's latest `paused` event. */
+export function trackRecorded(events: readonly QueueEvent[], storyKey: string, engineRunId: string | null): boolean {
+  const pause = events.findLastIndex((e) => e.kind === "paused");
+  return events.slice(pause + 1).some((e) => e.kind === "track-block" && e.detail?.story_key === storyKey && e.detail?.engine_run_id === engineRunId);
+}
+
+/** Story 31.5: what a block names — the story key, its spec (a path) and the reason. The awaiting-ruling path
+ * and a dev session's `blocked` end share it. */
+export interface BlockInput { story_key: string; spec: string; reason: string }
+
+/** The `--reason` of a dev session's `blocked` end when its spec names none. */
+export const DEV_BLOCKED_REASON = "dev session ended blocked";
+
+/** The spec's last `Blocking condition:` line, clipped; undefined when absent, empty or `none`. */
+export function blockingCondition(text: string): string | undefined {
+  const hits = [...text.matchAll(/^[ \t>*-]*Blocking condition:[ \t]*(.*)$/gim)];
+  const value = clip(hits.at(-1)?.[1] ?? "");
+  return value && value.toLowerCase().replace(/[.\s]+$/, "") !== "none" ? value : undefined;
+}
+
+/** Story 31.5: the block owed by a paused run whose story did not land and whose spec's frontmatter `status` is
+ * exactly `blocked` (a dev session's `blocked` end); undefined otherwise (reads only). */
+export function devBlocked(run: Pick<QueueRun, "worktree" | "prefix">, events: readonly QueueEvent[]): BlockInput | undefined {
+  const { key, spec, fm } = storySpec(run, events);
+  if (!key || !spec || fm?.status !== "blocked") return undefined;
+  let text = "";
+  try { text = readFileSync(spec, "utf-8"); } catch { /* unreadable: the fallback reason */ }
+  return { story_key: key, spec, reason: blockingCondition(text) ?? DEV_BLOCKED_REASON };
+}
+
+/** The `--reason` of an engine-raised escalation whose paused event names none. */
+export const ESCALATION_BLOCKED_REASON = "story escalated: awaiting a ruling";
+
+/** Story 31.5: the block owed by a run paused at stage `escalation` whose story did not land and whose spec is
+ * neither `done` nor `blocked` (an engine-raised escalation awaiting a ruling): the latest `paused` event's engine
+ * `paused_reason`, else `ESCALATION_BLOCKED_REASON`; undefined otherwise (reads only). A spec `blocked` is
+ * `devBlocked`'s. */
+export function escalationBlocked(run: Pick<QueueRun, "worktree" | "prefix">, events: readonly QueueEvent[]): BlockInput | undefined {
+  const { key, stage, spec, fm } = storySpec(run, events);
+  if (!key || !spec || stage !== "escalation") return undefined;
+  const status = fmString(fm?.status);
+  if (status === "done" || status === "blocked") return undefined;
+  return { story_key: key, spec, reason: clip(pausedStory(events).reason ?? "") || ESCALATION_BLOCKED_REASON };
+}
+
+/** `track.py block` argv (argv only, no shell). */
+export const trackArgs = (root: string, storyKey: string, reason: string, specPath: string): string[] =>
+  ["block", "--directory", root, "--story", storyKey, "--reason", reason, "--resolves", `a ruling in the spec (${specPath})`, "--source", "run"];
+
+/** Is a block still owed for this pause (a bound project, none recorded)? */
+const trackOwed = (run: QueueRun, events: readonly QueueEvent[], storyKey: string): boolean =>
+  jiraBound(run.root) && !trackRecorded(events, storyKey, run.engine_run_id);
+
+/** Story 31.5: the block (see the header). Answers whether it recorded a `track-block`: only on `ok`, or a by-name
+ * `blocked`; a `retry: true` answer (a temporary failure) is retried on the next pass. Never throws. */
+async function trackBlock(queue: Queue, run: QueueRun, l: BlockInput, deps: PausedDeps): Promise<boolean> {
+  try {
+    if (!trackOwed(run, queue.events(run.run_id), l.story_key)) return false;
+    const served = servedRoot(run);
+    const spec = served ? relative(served, l.spec).split("\\").join("/") : l.spec;
+    let r: RunResult;
+    try { r = await uvRunner(deps)(run.root, studioScript(deps, "lib", "track.py"), trackArgs(run.root, l.story_key, l.reason, spec), 120); }
+    catch { return false; /* transient: the next pass calls it again */ }
+    const out = lastJsonObject(r.stdout) as Record<string, any> | null;
+    if (!out || typeof out.status !== "string" || out.retry === true || (out.ok !== true && out.status !== "blocked")) return false; // transient
+    const issues = Array.isArray(out.issues)
+      ? out.issues.map((i: Record<string, unknown>) => ({ issue: i?.issue ?? null, role: i?.role ?? null, transitioned: i?.transitioned === true, commented: i?.commented === true }))
+      : [];
+    queue.note(run.run_id, "track-block", {
+      story_key: l.story_key, engine_run_id: run.engine_run_id, ok: out.ok === true, status: out.status,
+      reason: typeof out.reason === "string" ? clip(out.reason, 500) : null, issues,
+    });
+    return true;
+  } catch { return false; }
+}
+
+/** AC2: one `awaiting-ruling` event, and one notification, per pause of (story key, engine run id); Story 31.5: then
+ * the owed block, if any (its own record). Answers whether the ruling was newly recorded. */
 async function awaitRuling(queue: Queue, run: QueueRun, l: Extract<Landing, { outcome: "awaiting-ruling" }>, deps: PausedDeps): Promise<boolean> {
-  if (rulingRecorded(queue.events(run.run_id), l.story_key, run.engine_run_id)) return false;
+  if (rulingRecorded(queue.events(run.run_id), l.story_key, run.engine_run_id)) { await trackBlock(queue, run, l, deps); return false; }
   const env = deps.hygiene?.env ?? envOf(deps);
   let outcome: Record<string, unknown>;
   try {
@@ -387,6 +494,7 @@ async function awaitRuling(queue: Queue, run: QueueRun, l: Extract<Landing, { ou
     }
   } catch (e) { outcome = { ok: false, error: clip(message(e)) }; }
   queue.note(run.run_id, "awaiting-ruling", { story_key: l.story_key, engine_run_id: run.engine_run_id, reason: l.reason, notify: outcome });
+  await trackBlock(queue, run, l, deps);
   return true;
 }
 
@@ -402,8 +510,20 @@ export async function closeOutPaused(queue: Queue, deps: PausedDeps = {}): Promi
     try {
       if (!existsSync(servedRoot(r)!)) continue;
       const l = landing(r, queue.events(r.run_id));
-      if (l.outcome === "not-landed") continue; // AC3: left paused for the resume
-      if (l.outcome === "awaiting-ruling" && rulingRecorded(queue.events(r.run_id), l.story_key, r.engine_run_id)) continue;
+      if (l.outcome === "not-landed") {
+        // Story 31.5: a dev session's `blocked` end, or an engine-raised escalation (paused at stage `escalation`,
+        // the spec neither done nor blocked), owes the block (no ruling record, no notification); any other story
+        // that did not land is left paused for the resume (AC3).
+        const b = devBlocked(r, queue.events(r.run_id)) ?? escalationBlocked(r, queue.events(r.run_id));
+        if (!b || !trackOwed(r, queue.events(r.run_id), b.story_key)) continue;
+        const run = queue.takeForCloseOut(r.run_id, self);
+        if (!run || run.state !== "paused") continue;
+        taken = true;
+        await trackBlock(queue, run, b, deps);
+        continue;
+      }
+      if (l.outcome === "awaiting-ruling" && rulingRecorded(queue.events(r.run_id), l.story_key, r.engine_run_id)
+        && !trackOwed(r, queue.events(r.run_id), l.story_key)) continue;
       const run = queue.takeForCloseOut(r.run_id, self);
       if (!run || run.state !== "paused") continue;
       taken = true;

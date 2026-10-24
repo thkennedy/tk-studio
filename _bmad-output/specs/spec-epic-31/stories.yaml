@@ -255,6 +255,15 @@
     `https://api.atlassian.com/ex/jira/<cloud id>/rest/api/3`, so the author accountId
     is the owner's. When either is absent, it refuses by name and never posts with
     another identity.
+    From 31-5 (gate 2026-10-24, replan queue): `GET /inbox?project=<id>` serves
+    `inbox.json` v1 as written (`{ok, project, generated_at, items[]}`, items `{issue,
+    entity?, title?, priority, blocked_since, reason_comment: {id, body, created} |
+    null, state: open | resolved | validating}`). A missing file is `generated_at: null,
+    items: []`, and no `project` is 400 `ProjectRequired`. List only `state` `open`
+    items, in the served order, and count the nav badge over those. An empty inbox is
+    not an error. `OfficeAgent.blocked_issue` is always `{issue, state}` or `null`. The
+    new `tk-studio-track` skill leaves the released-roster guard red until the release
+    motion (3 tests, unverifiable-here). Never edit `released-roster.json`.
 
 - id: "31-7-validation-of-a-resolution"
   title: "Validation of a Resolution"
@@ -299,3 +308,14 @@
     `external.jira.status` is now `Block Resolved` (by name). A `rate-limited` or
     `error` tick queues nothing for issues on pages it did not read. A pass or a fail is
     a status that the next tick reads back, so queue once per (issue, transition).
+    From 31-5 (gate 2026-10-24, replan queue): the supervisor's paused-run pass
+    (`apps/supervisor/src/closeout.ts`) calls `track.py block --directory <run.root>` on
+    three triggers. Awaiting-ruling records `awaiting-ruling` and `track-block`. A
+    not-landed spec `status: blocked` (`devBlocked`) and a not-landed stage `escalation`
+    (`escalationBlocked`) record `track-block` only. Each fires once per (story key,
+    engine run id) since the latest `paused`. bmad-loop has no escalation hook, so add
+    none. Re-arm a passed story from its `track-block` event, not from
+    `awaiting-ruling`. On a fail, re-block through `track.py block` with the follow-up
+    as the reason. A transient Jira failure ends `partial` + `ok: false` + `retry:
+    true`, so call again and record nothing. The owner's reply is a `comments.jsonl`
+    line whose `author` and `update_author` are both `owner`.

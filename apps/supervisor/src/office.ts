@@ -8,12 +8,18 @@
  * `engineRoot(run)`), and only `journal.jsonl` and `state.json` are read there (plus the spec folder's
  * `stories.yaml` in the served root, for the denominator). Never through the engine, never git, never a write to
  * the queue, `service_events` or the store. A missing run dir or file is "no engine signal", never an error.
+ *
+ * Story 31.5 (contract 0.1.26, additive): each agent's `blocked_issue` `{issue, state} | null` — set while its
+ * project's `current_story` (`N-M…`) — or, when that gives nothing and the run is `paused`, the story it paused on
+ * (the queue `paused` event's `paused_story_key`, else the standing journal `story-escalated` key) — maps, by the plan entity's `source: epics.md#story-N.M` in the run's project
+ * root, to an entity with an `open` item in that root's `_bmad-output/tracking/inbox.json` (the sync-back's file,
+ * re-read when it changes). Only the inbox moves it: a comment or a message never does.
  */
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { load as loadYaml } from "js-yaml";
-import { launchedSinceMove } from "./closeout";
-import { runPr } from "./planstatus";
+import { launchedSinceMove, pausedStory } from "./closeout";
+import { planEntity, runPr, storyNumber } from "./planstatus";
 import { engineRoot, isTerminal, servedRoot, type Queue, type QueueEvent, type QueueRun } from "./queue";
 import { readAgents, ROLES, type Role } from "./registry";
 
@@ -300,7 +306,58 @@ export interface OfficeRun { run_id: string; project: string | null; state: stri
 export interface OfficeAgent {
   agent_id: string; project: string; role: string; state: OfficeState; current_run: string | null; current_story: string | null;
   reason: string | null;
+  /** Story 31.5 (contract 0.1.26, additive): the open inbox item of the agent's current story, else null. */
+  blocked_issue?: BlockedIssue | null;
 }
+/** Story 31.5: the inbox item the office's "!" follows. */
+export interface BlockedIssue { issue: string; state: string }
+
+// ------------------------------------------------------------ the inbox (Story 31.5)
+
+/** The sync-back's inbox file, relative to a project root. */
+export const INBOX_REL = join("_bmad-output", "tracking", "inbox.json");
+/** The inbox as `GET /inbox` serves it: the file's `generated_at` and `items` as written; a missing, unreadable or
+ * malformed file is `{generated_at: null, items: []}`, never an error. */
+export interface InboxFile { generated_at: string | null; items: Record<string, unknown>[] }
+const inboxCache = new Map<string, { signature: string; value: InboxFile }>();
+
+/** A project root's inbox (cached on the file's `(mtimeMs, size)`: a changed file is read again). */
+export function readInbox(root: string | null | undefined): InboxFile {
+  const empty: InboxFile = { generated_at: null, items: [] };
+  if (!root) return empty;
+  const path = join(root, INBOX_REL);
+  let signature: string;
+  try { const st = statSync(path); signature = `${st.mtimeMs}:${st.size}`; } catch { inboxCache.delete(path); return empty; }
+  const hit = inboxCache.get(path);
+  if (hit && hit.signature === signature) return hit.value;
+  let value = empty;
+  try {
+    const doc = JSON.parse(readFileSync(path, "utf-8"));
+    if (doc && typeof doc === "object" && !Array.isArray(doc) && Array.isArray(doc.items)) {
+      value = {
+        generated_at: typeof doc.generated_at === "string" ? doc.generated_at : null,
+        items: doc.items.filter((i: unknown) => !!i && typeof i === "object" && !Array.isArray(i)),
+      };
+    }
+  } catch { /* unreadable or not JSON: empty */ }
+  inboxCache.set(path, { signature, value });
+  return value;
+}
+
+/** The `blocked_issue` of a project's current story (see the header); null when none. */
+export function blockedIssueFor(root: string | null | undefined, currentStory: string | null): BlockedIssue | null {
+  const story = currentStory ? storyNumber(currentStory) : undefined;
+  if (!root || !story) return null;
+  const open = readInbox(root).items.filter((i) => i.state === "open" && typeof i.issue === "string");
+  if (!open.length) return null;
+  const entity = planEntity(root, story);
+  if (!("id" in entity)) return null;
+  const hit = open.find((i) => i.entity === entity.id);
+  return hit ? { issue: hit.issue as string, state: "open" } : null;
+}
+
+const sameBlocked = (a: BlockedIssue | null | undefined, b: BlockedIssue | null | undefined): boolean =>
+  (a?.issue ?? null) === (b?.issue ?? null) && (a?.state ?? null) === (b?.state ?? null);
 /** A project's newest terminal run (Story 30.4, contract 0.1.25): its end state, its PR (`runPr`) and when it ended
  * (the latest `ended`/`orphaned` event's `at`, else the run's `updated`), an ISO string. */
 export interface OfficeLastRun { run_id: string; state: string; pr: string | null; ended_at: string }
@@ -349,7 +406,19 @@ export function runWaitReason(run: QueueRun, events: readonly QueueEvent[]): str
   return waitReasonOf(events, readJournal(dir).entries, readEngineState(dir).state);
 }
 
-interface RunAnalysis { signals: Omit<OfficeSignals, "run">; epic: OfficeEpic; stories: OfficeStory[]; waitReason: string | null }
+/** The story a `paused` run paused on (Story 31.5): the latest queue `paused` event's engine `paused_story_key`
+ * (`pausedStory`), else the latest journal `story-escalated` `story_key` while that escalation stands unresolved
+ * (no `run-resume` or `story-escalation-resolved` after it). Null for any other run state. */
+function pausedStoryOf(run: QueueRun, events: readonly QueueEvent[], entries: readonly JournalEntry[]): string | null {
+  if (run.state !== "paused") return null;
+  const queued = pausedStory(events).story_key;
+  if (queued) return queued;
+  const at = lastIndex(entries, kindIn("story-escalated"));
+  if (at < 0 || at < lastIndex(entries, kindIn("run-resume", "story-escalation-resolved"))) return null;
+  return str(entries[at].story_key);
+}
+
+interface RunAnalysis { signals: Omit<OfficeSignals, "run">; epic: OfficeEpic; stories: OfficeStory[]; waitReason: string | null; pausedStory: string | null }
 
 /** Progress (AC2, planner ruling on the denominator): the first `stories-validated.count` manifest entries are the
  * run's stories, later ones `extra`; with no manifest the journal's `story-start` keys, the first `count` of them
@@ -468,7 +537,7 @@ function analyseRun(run: QueueRun, events: readonly QueueEvent[], problems: stri
       // launch, e.g. an adopted `external` run): with none, the run never enters row 10.
       engineEnded, hostVerified: launchedAt < 0 || lastIndex(events, kindIn("host-verify")) > launchedAt,
     },
-    epic, stories, waitReason,
+    epic, stories, waitReason, pausedStory: pausedStoryOf(run, events, entries),
   };
 }
 
@@ -498,7 +567,7 @@ function reasonFor(state: OfficeState, run: QueueRun | null, waitReason: string 
 /** The projection's core over one read of the runs: each project's role states, and the live runs' progress. */
 function projectCore(queue: Queue, given?: readonly QueueRun[]): {
   runs: QueueRun[]; problems: string[];
-  forProject: (project: string) => { run: QueueRun | null; states: Record<Role, OfficeState>; current_story: string | null; waitReason: string | null };
+  forProject: (project: string) => { run: QueueRun | null; states: Record<Role, OfficeState>; current_story: string | null; waitReason: string | null; paused_story: string | null };
   liveRuns: () => OfficeRun[];
   lastRuns: () => Record<string, OfficeLastRun>;
 } {
@@ -516,7 +585,7 @@ function projectCore(queue: Queue, given?: readonly QueueRun[]): {
       const run = selectRun(runs, project);
       const a = run ? analysis(run) : null;
       const { states } = mapRoles({ run, ...(a?.signals ?? NO_SIGNALS) });
-      return { run, states, current_story: a?.epic.current_story ?? null, waitReason: a?.waitReason ?? null };
+      return { run, states, current_story: a?.epic.current_story ?? null, waitReason: a?.waitReason ?? null, paused_story: a?.pausedStory ?? null };
     },
     liveRuns: () => runs.filter((r) => LIVE_RUN_STATES.has(r.state)).map((r) => {
       const a = analysis(r);
@@ -539,14 +608,25 @@ export function projectOffice(queue: Queue, deps: { now?: () => number } = {}): 
   touched = seen;
   try {
     const core = projectCore(queue);
-    const byProject = new Map<string, ReturnType<typeof core.forProject>>();
+    const byProject = new Map<string, ReturnType<typeof core.forProject> & { blocked: BlockedIssue | null }>();
     const agents: OfficeAgent[] = readAgents(queue).agents.map((row) => {
       let p = byProject.get(row.project);
-      if (!p) { p = core.forProject(row.project); byProject.set(row.project, p); }
+      if (!p) {
+        const f = core.forProject(row.project);
+        let blocked: BlockedIssue | null = null;
+        // A paused run's escalated story is `failed` in the progress (no `current_story`): the paused story is the
+        // fallback, for `blocked_issue` only (`current_story` on the wire is unchanged).
+        try {
+          blocked = f.run ? blockedIssueFor(f.run.root, f.current_story) : null;
+          if (!blocked && f.run && f.paused_story && f.paused_story !== f.current_story) blocked = blockedIssueFor(f.run.root, f.paused_story);
+        } catch { /* no signal */ }
+        p = { ...f, blocked };
+        byProject.set(row.project, p);
+      }
       const state = (p.states as Record<string, OfficeState>)[row.role] ?? (p.run && LIVE_RUN_STATES.has(p.run.state) ? "idle" : "offline");
       return {
         agent_id: row.agent_id, project: row.project, role: row.role, state, current_run: p.run?.run_id ?? null, current_story: p.current_story,
-        reason: reasonFor(state, p.run, p.waitReason),
+        reason: reasonFor(state, p.run, p.waitReason), blocked_issue: p.blocked,
       };
     });
     const runs = core.liveRuns();
@@ -670,8 +750,12 @@ export class OfficeHub {
     const out: OfficeEvent[] = [];
     for (const a of agents) {
       const p = prevAgents.get(a.agent_id);
-      if (p && p.state === a.state && p.current_run === a.current_run && p.current_story === a.current_story && (p.reason ?? null) === (a.reason ?? null)) continue;
-      this.emit(out, "office.agent", { agent_id: a.agent_id, state: a.state, from: p?.state ?? null, at, current_run: a.current_run, current_story: a.current_story, reason: a.reason ?? null });
+      if (p && p.state === a.state && p.current_run === a.current_run && p.current_story === a.current_story && (p.reason ?? null) === (a.reason ?? null)
+        && sameBlocked(p.blocked_issue, a.blocked_issue)) continue;
+      this.emit(out, "office.agent", {
+        agent_id: a.agent_id, state: a.state, from: p?.state ?? null, at, current_run: a.current_run, current_story: a.current_story, reason: a.reason ?? null,
+        blocked_issue: a.blocked_issue ?? null,
+      });
     }
     const prevRuns = new Map(prev.runs.map((r) => [r.run_id, r]));
     for (const r of next.runs) {
