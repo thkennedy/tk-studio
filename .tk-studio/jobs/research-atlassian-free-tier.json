@@ -1,0 +1,36 @@
+{
+  "job_schema_version": 1,
+  "id": "research-atlassian-free-tier",
+  "description": "EP-31 story 1 (2026-10-24): one-shot research run verifying what Jira Free and Confluence Free allow before Stories 31.2 to 31.7 build on them (design README §6.8 \"verify before building\", decisions Appendix C). Evidence-graded findings land in the run workspace; kb/atlassian-free-tier.md records them with source, date and verdict. Observe and log only (AD-8): GET-only probes, nothing written to the live site.",
+  "target": {
+    "skill": "tk-studio-research",
+    "payload": {
+      "charter": {
+        "topics": [
+          "Jira Free: can a project's workflow carry the two custom statuses 'Blocked - Awaiting User' and 'Block Resolved' with a transition between them, through the REST API or only the browser, for team-managed and company-managed projects",
+          "Jira Free project-permission model: who can transition issues, comment and attach, given that Free does not customise project roles or permission schemes",
+          "Jira and Confluence REST API rate limits and the API token's scope: classic unscoped vs scoped tokens, scoped tokens only through the api.atlassian.com gateway",
+          "Confluence Free limits on spaces, pages, storage and attachments",
+          "Whether the Atlassian Rovo MCP server adds anything the REST API with an API token does not (the adapter uses REST today; AD-7 as amended by AD-22)"
+        ],
+        "sources": [
+          "atlassian-support-docs",
+          "atlassian-developer-docs",
+          "live-site-read-only-rest-probes",
+          "repository-code"
+        ],
+        "max_findings": 12,
+        "notes": "Halt rule: a finding graded A or B saying Free Jira cannot carry the two custom statuses with a transition between them in any project type, or that the REST API with an API token cannot do what Stories 31.4 and 31.5 need (rate limit or token scope), ends the run blocked with 'does not fit: <finding> — alternative: <named>'. Live probes are GET only through the api.atlassian.com gateway form (ex/jira or ex/confluence plus the cloud id); never POST, PUT or DELETE; never print or write a token value."
+      }
+    }
+  },
+  "trigger": "one-shot",
+  "guards": {
+    "max_turns": 40,
+    "max_wall_clock_seconds": 3600
+  },
+  "stop": {
+    "on_status": ["blocked"]
+  },
+  "effort": "medium"
+}
