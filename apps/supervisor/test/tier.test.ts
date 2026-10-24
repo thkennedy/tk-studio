@@ -7,7 +7,7 @@ import { jobOptions, loadSupervisorConfig, SupervisorConfigInvalid } from "../sr
 import { claudeBin, sbxBin, supervisorConfigPath } from "../src/env";
 import {
   buildSbxCommand, buildWorkerCommand, DenyProfileRefused, HostBypassRefused, invokeSkill, MAX_LOGIN_MISSING, maxLoginPreflight,
-  SbxSandboxMissing, TierRefused, toVmPath, type RunResult, type Spawner,
+  SbxSandboxMissing, sbxEnvPassthrough, TierRefused, toVmPath, type RunResult, type Spawner,
 } from "../src/server";
 
 type Call = { cmd: string; args: string[]; cwd?: string; env?: Record<string, string | undefined> };
@@ -189,13 +189,28 @@ describe("the worker command line per tier", () => {
     process.env.SBX_BIN = "fake-sbx";
     try {
       const worker = buildWorkerCommand({ prompt: "a prompt; $(rm -rf /)\nline 2", tier: "sbx", permissionMode: "bypassPermissions", bin: "host-only-claude" });
-      const cmd = buildSbxCommand({ sandbox: "claude-p", vmRoot: "/vm/p", worker, guardS: 300 });
+      const cmd = buildSbxCommand({ sandbox: "claude-p", vmRoot: "/vm/p", worker, guardS: 300 }, {});
       expect(cmd.bin).toBe("fake-sbx");
       expect(cmd.argv).toEqual(["exec", "claude-p", "timeout", "-k", "10", "300", "env", "-u", "ANTHROPIC_API_KEY", "-C", "/vm/p", "claude",
         "-p", "a prompt; $(rm -rf /)\nline 2", "--output-format", "json", "--permission-mode", "bypassPermissions"]);
     } finally {
       if (prev === undefined) delete process.env.SBX_BIN; else process.env.SBX_BIN = prev;
     }
+  });
+
+  test("buildSbxCommand passes the supervisor's TK_ATLASSIAN_* variables into the sandbox by name (sbx exec -e NAME), never by value", () => {
+    const worker = buildWorkerCommand({ prompt: "p", tier: "sbx", permissionMode: "bypassPermissions", bin: "host-only-claude" });
+    const env = {
+      TK_ATLASSIAN_AGENT_TOKEN: "s3cret-token", TK_ATLASSIAN_SITE: "https://acme.atlassian.net", TK_ATLASSIAN_EMPTY: "  ",
+      TK_SUPERVISOR_TOKEN: "bearer", ANTHROPIC_API_KEY: "sk", PATH: "/usr/bin",
+    };
+    expect(sbxEnvPassthrough(env)).toEqual(["TK_ATLASSIAN_AGENT_TOKEN", "TK_ATLASSIAN_SITE"]);
+    const cmd = buildSbxCommand({ sandbox: "claude-p", vmRoot: "/vm/p", worker, guardS: 300 }, env);
+    expect(cmd.argv.slice(0, 6)).toEqual(["exec", "-e", "TK_ATLASSIAN_AGENT_TOKEN", "-e", "TK_ATLASSIAN_SITE", "claude-p"]);
+    expect(cmd.argv.join(" ")).not.toContain("s3cret-token");
+    expect(cmd.argv.join(" ")).not.toContain("acme.atlassian.net");
+    expect(cmd.argv).not.toContain("TK_SUPERVISOR_TOKEN");
+    expect(buildSbxCommand({ sandbox: "claude-p", vmRoot: "/vm/p", worker, guardS: 300 }, { PATH: "/usr/bin" }).argv.slice(0, 2)).toEqual(["exec", "claude-p"]);
   });
 });
 

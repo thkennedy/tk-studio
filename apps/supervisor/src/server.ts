@@ -516,12 +516,27 @@ export const SBX_GUARD_KILL_AFTER_S = 10;
  * `env -u ANTHROPIC_API_KEY` strips the key inside the VM and `env -C`
  * sets the worker's cwd to the project's microVM path. The VM worker binary
  * is literal `claude` (CLAUDE_BIN is host-only). */
-export function buildSbxCommand(opts: { sandbox: string; vmRoot: string; worker: WorkerCommand; guardS: number }): WorkerCommand {
+export function buildSbxCommand(opts: { sandbox: string; vmRoot: string; worker: WorkerCommand; guardS: number }, env: Record<string, string | undefined> = process.env): WorkerCommand {
   return {
     bin: sbxBin(),
-    argv: ["exec", opts.sandbox, "timeout", "-k", String(SBX_GUARD_KILL_AFTER_S), String(opts.guardS),
+    argv: ["exec", ...sbxEnvPassthrough(env).flatMap((name) => ["-e", name]), opts.sandbox,
+      "timeout", "-k", String(SBX_GUARD_KILL_AFTER_S), String(opts.guardS),
       "env", "-u", "ANTHROPIC_API_KEY", "-C", opts.vmRoot, "claude", ...opts.worker.argv],
   };
+}
+
+/** The secrets channel into the engine sandbox (EP-31, Story 31.1): a variable of the supervisor's own
+ * environment whose name starts with one of these prefixes reaches the worker, and so the engine it starts,
+ * through `sbx exec -e <NAME>` — by name only, the CLI reads the value from the spawning environment, so no
+ * value ever sits on a command line or in a file the worktree could carry. Set them in the console that
+ * starts the supervisor (`setx`, then restart the tab). */
+export const SBX_ENV_PASSTHROUGH_PREFIXES: readonly string[] = ["TK_ATLASSIAN_"];
+
+/** The names `buildSbxCommand` passes through, sorted, each with a non-empty value in `env`. */
+export function sbxEnvPassthrough(env: Record<string, string | undefined>): string[] {
+  return Object.keys(env)
+    .filter((k) => SBX_ENV_PASSTHROUGH_PREFIXES.some((p) => k.startsWith(p)) && !!env[k]?.trim())
+    .sort();
 }
 
 /** Where a worker (and its login probe) runs: the host, or an sbx sandbox. */
