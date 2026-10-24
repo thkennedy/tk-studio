@@ -71,6 +71,31 @@ committed per-project counter at `.tk-studio/plan-counter.yaml`).
    --directory <directory>`; `dry_run` adds `--dry-run`; `owner_account_id`
    adds `--owner-account-id <id>`, else `owner_email` adds `--owner-email
    <email>`.
+   `publish --directory <root> [--dry-run] [--source <category>=<path>]
+   [--attachment-max-bytes <n>]` (Story 31.3) publishes the design pages
+   (brief, GDD, scope of work, decisions — never the records folder) to
+   the folders setup recorded, by the stable title `<Folder>: <slug>`,
+   Markdown converted to Confluence storage format with images attached,
+   each page ending with a provenance footer (source file, the last commit
+   that touched it, the content hash); an unchanged page is skipped. An
+   image over the per-file ceiling (100 MB assumed unless
+   `--attachment-max-bytes` supplies the site's smaller setting) is refused
+   by name and its page still publishes; `bytes_uploaded` reports the
+   upload against Confluence Free's 2 GB. It writes
+   `.tk-studio/confluence-pages.json`, from which the `jira` promote adds a
+   `Design pages:` line to every epic and story; nothing from Confluence
+   changes an entity field (AD-5). An absent agent-seat Confluence variable,
+   no `planning.confluence` binding ("run `plansync.py setup` first"), a
+   bad `--source` or a duplicate title ends `blocked` before any call; a
+   category with no folder, a refused page or image, or a dry run that
+   would publish ends `partial`. Payload mapping: `publish: true` runs
+   `plansync.py publish --directory <directory>`; `dry_run` adds
+   `--dry-run`; `attachment_max_bytes` (the site's Attachment maximum
+   size, in bytes) adds `--attachment-max-bytes <n>` — the effective
+   ceiling is the smaller of it and 100 MB, and the result's `notes[]`
+   says which was used. An image outside the project root (an absolute
+   path, a non-http(s) scheme, a `../` escape or a symlink out) is refused
+   by name before any read and its page still publishes.
 
    `normalize --directory <root>` runs the canonicalization pass
    alone. Add `--dry-run` to preview without writing (under `jira` a
@@ -105,6 +130,10 @@ committed per-project counter at `.tk-studio/plan-counter.yaml`).
    - **jira preflight failure** — missing binding config or credentials,
      401/403 (token or org toggle), or an issue-type scheme missing a
      default-mapping target — each gap named (AD-7/AD-11).
+   - **publish refusal** — an absent `TK_ATLASSIAN_AGENT_EMAIL`,
+     `TK_ATLASSIAN_AGENT_CONFLUENCE_TOKEN` or `TK_ATLASSIAN_CLOUD_ID`, no
+     `planning.confluence` binding, a bad `--source`, or two sources with
+     one title — each named, no Atlassian call.
 
 3. Report:
    - **Attended:** summarize actions (created/repaired/unchanged, minted
@@ -114,10 +143,10 @@ committed per-project counter at `.tk-studio/plan-counter.yaml`).
      conflicted entity with both values and both file paths; the human picks
      a side by editing one of them, then reruns sync.
    - **Headless:** no prompts (AD-11). End with the status block. When
-     the core's result carries its own `status` (`setup` does:
-     `complete`, `partial` or `blocked`), relay that `status`, its
+     the core's result carries its own `status` (`setup` and `publish`
+     do: `complete`, `partial` or `blocked`), relay that `status`, its
      `reason` and its `artifacts` as they are — never infer the status
-     from the exit code (`setup` exits 0 on `partial`). For `sync`,
+     from the exit code (`setup` and `publish` exit 0 on `partial`). For `sync`,
      `normalize` and `status`, whose results carry no `status`: `complete`
      on exit 0 (report conflicts as `partial` with the conflict list in
      `reason`), `blocked` on exit 2 with the blocking reason:

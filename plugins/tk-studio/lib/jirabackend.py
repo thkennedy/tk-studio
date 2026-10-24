@@ -487,16 +487,48 @@ def _find_account(client: JiraClient, assignee: str, notes: list[str],
     return matches[0]
 
 
+PAGE_INDEX_REL = Path(".tk-studio") / "confluence-pages.json"
+
+
+def design_pages_line(project_root: Path, site: str | None) -> str | None:
+    """`Design pages: [Title|https://<site>/wiki<webui>], …` over the
+    project's published pages in index order (Story 31.3: the page index
+    `plansync.publish` writes), or None when the index is absent, unreadable
+    or empty, or no site is configured — then descriptions stay as they
+    were. Wiki markup (REST v2 descriptions): `|` and brackets in a title
+    are neutralised."""
+    path = Path(project_root) / PAGE_INDEX_REL
+    host = re.sub(r"^https?://", "", site or "").strip("/")
+    if not host or not path.is_file():
+        return None
+    try:
+        pages = json.loads(path.read_text(encoding="utf-8")).get("pages")
+    except (OSError, ValueError, AttributeError):
+        return None
+    links = []
+    for page in pages if isinstance(pages, list) else []:
+        if not isinstance(page, dict) or not page.get("title") \
+                or not page.get("webui"):
+            continue
+        title = re.sub(r"[|\[\]]", " ", str(page["title"])).strip()
+        links.append(f"[{title}|https://{host}/wiki{page['webui']}]")
+    return ("Design pages: " + ", ".join(links)) if links else None
+
+
 def promote(plan_dir: Path, client: JiraClient | None, project_key: str,
             mapping: dict, dry_run: bool = False,
-            skip_ids: set[str] | None = None) -> dict:
+            skip_ids: set[str] | None = None,
+            design_line: str | None = None) -> dict:
     """Create/update Jira issues from canonical entities, snapshot on the
     canonical side. With dry_run the backend is never contacted — the plan
     (would-create / would-update) is computed locally from the snapshots.
 
     `skip_ids` holds this round's pull-back conflicts: a both-changed entity
     is left untouched on BOTH sides until a human picks a side — promoting
-    it would silently resolve the conflict in canonical's favor (AD-5)."""
+    it would silently resolve the conflict in canonical's favor (AD-5).
+
+    `design_line` (Story 31.3) ends every epic's and story's description and
+    enters the content hash; None leaves both exactly as before."""
     entities = _load_entities(plan_dir)
     notes, created, updated = [], [], []
     skip_ids = skip_ids or set()
@@ -516,9 +548,11 @@ def promote(plan_dir: Path, client: JiraClient | None, project_key: str,
                              f"projection is never authoritative)")
             continue
         snapshot = (front.get("external") or {}).get(BINDING) or {}
+        link = design_line if design_line and \
+            front["type"] in ("epic", "story") else None
         content_hash = _content_hash(
             front["title"], ",".join(_labels(front)),
-            front.get("parent") or "", body)
+            front.get("parent") or "", body, *([link] if link else []))
         fields_changed = snapshot.get("content_hash") != content_hash
         status_changed = snapshot.get("canonical_status") != front["status"]
         assignee_changed = (front.get("assignee") or None) != \
@@ -533,8 +567,12 @@ def promote(plan_dir: Path, client: JiraClient | None, project_key: str,
                  "path": str(path)})
             continue
 
+        description = body.strip("\n")
+        if link:
+            description = (description + "\n\n" + link) if description \
+                else link
         fields = {"summary": front["title"],
-                  "description": body.strip("\n"),
+                  "description": description,
                   "labels": _labels(front)}
         parent_key = jira_keys.get(front.get("parent") or "")
         if not key:
@@ -700,9 +738,11 @@ def project(project_root: Path, plan_dir: Path, dry_run: bool = False,
                 "reason": "jira binding preflight: " + "; ".join(
                     config_gaps if dry_run else gaps)}
 
+    design_line = design_pages_line(project_root, settings.get("site"))
     if dry_run:
         plan = promote(plan_dir, None, settings["project_key"],
-                       DEFAULT_TYPE_MAPPING, dry_run=True)
+                       DEFAULT_TYPE_MAPPING, dry_run=True,
+                       design_line=design_line)
         return {"binding": BINDING, "action": "dry-run", "promote": plan,
                 "pull_back": {"applied": [], "conflicts": [], "notes": [
                     "dry-run: backend not contacted — pull-back skipped, "
@@ -716,7 +756,8 @@ def project(project_root: Path, plan_dir: Path, dry_run: bool = False,
         pulled = pull_back(plan_dir, client)
         promoted = promote(plan_dir, client, settings["project_key"],
                            checked["mapping"],
-                           skip_ids={c["id"] for c in pulled["conflicts"]})
+                           skip_ids={c["id"] for c in pulled["conflicts"]},
+                           design_line=design_line)
     except JiraError as exc:
         return {"binding": BINDING, "blocked": True, "reason": str(exc)}
     return {"binding": BINDING, "action": "projected",

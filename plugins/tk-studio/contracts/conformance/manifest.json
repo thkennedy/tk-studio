@@ -170,6 +170,12 @@
           "argv": ["lib/plansync.py", "status", "--directory", "{sandbox}", "--id", "ST-999", "--status", "review"],
           "expect": "refusal",
           "marker": "unknown id ST-999"
+        },
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/plansync.py", "publish", "--directory", "{sandbox}"],
+          "expect": "refusal",
+          "marker": "run `plansync.py setup` first"
         }
       ]
     },

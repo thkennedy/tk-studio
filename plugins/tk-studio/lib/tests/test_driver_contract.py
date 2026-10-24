@@ -643,7 +643,7 @@ class DriverContractTestCase(unittest.TestCase):
             self.assertIn(phrase, onboard)
         plan_sync = next(line for line in self.text.splitlines()
                          if line.startswith("| `tk-studio-plan-sync` |"))
-        for phrase in ("`lib/plansync.py sync|normalize|setup`",
+        for phrase in ("`lib/plansync.py sync|normalize|setup|publish`",
                        "`api.atlassian.com` gateway",
                        "never the site URL",
                        "the legacy `JIRA_EMAIL`/`JIRA_API_TOKEN`",
@@ -652,6 +652,43 @@ class DriverContractTestCase(unittest.TestCase):
                        "a dry run that would create anything ends "
                        "`partial` and names those items in "
                        "`would_create[]`"):
+            self.assertIn(phrase, plan_sync)
+
+    # --- Story 31.3: the same 0.1.26 entry names the `publish` verb (no
+    # bump), the plan-sync row's core and its refusals.
+
+    def test_0_1_26_names_publish(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.26**", header)
+        self.assertNotIn("**0.1.27**", header)
+        self.assertLess(header.index("0.1.26 (Story 31.2)"),
+                        header.index("0.1.26 (Story 31.3)"))
+        clause = " ".join(header[header.index("0.1.26 (Story 31.3)"):].split())
+        for phrase in ("`publish` verb",
+                       "`plansync.py publish --directory ROOT [--dry-run] "
+                       "[--source CATEGORY=PATH ...] [--attachment-max-bytes N]`",
+                       "never the records folder", "stable title",
+                       "provenance footer", "content hash",
+                       "unchanged page is skipped", "refused by name",
+                       "`would_publish[]`", "`bytes_uploaded`",
+                       "`.tk-studio/confluence-pages.json`",
+                       "`Design pages:` line", "(AD-5)", "— additive"):
+            self.assertIn(phrase, clause)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 31.3", stories)
+        plan_sync = next(line for line in self.text.splitlines()
+                         if line.startswith("| `tk-studio-plan-sync` |"))
+        for phrase in ("`publish?` (0.1.26, Story 31.3",
+                       "`attachment_max_bytes?`",
+                       "`--attachment-max-bytes`",
+                       "`lib/plansync.py sync|normalize|setup|publish`",
+                       "`TK_ATLASSIAN_AGENT_CONFLUENCE_TOKEN`",
+                       "run `plansync.py setup` first",
+                       "two sources with one title",
+                       "no Atlassian call", "`skipped[]`", "`refused[]`",
+                       "its page still publishes"):
             self.assertIn(phrase, plan_sync)
 
     def test_section_8_names_the_cli_drives(self):

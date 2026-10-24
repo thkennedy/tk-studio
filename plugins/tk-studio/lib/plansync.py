@@ -54,6 +54,9 @@ CLI:
                             [--note TEXT] [--caller NAME] [--dry-run]
   uv run plansync.py setup --directory ROOT [--dry-run]
                            [--owner-account-id ID | --owner-email EMAIL]
+  uv run plansync.py publish --directory ROOT [--dry-run]
+                             [--source CATEGORY=PATH ...]
+                             [--attachment-max-bytes N]
 
 `setup` (Story 31.2) creates the project's tracking from the studio
 template through the agent seat's gateway tokens (TK_ATLASSIAN_*): the Jira
@@ -67,6 +70,17 @@ owner's numbered steps (`owner_steps[]`) and the run ends `partial`; an
 unregistered project or an absent variable ends `blocked` before any call.
 The result names `found[]`, `created[]` and `written[]` and ends with the
 AD-11 status block.
+
+`publish` (Story 31.3) converts each design page (brief, GDD, scope of
+work, decisions) from Markdown to Confluence storage format (mdstorage)
+and creates or updates it by the stable title `<Folder>: <slug>` in the
+folder setup recorded, with a provenance footer (the source and the last
+commit that touched it) and a content hash: an unchanged page is skipped.
+Images are attached (PNG re-deflated losslessly), any over the per-file
+ceiling refused by name. It writes `.tk-studio/confluence-pages.json`, the
+index the Jira promote turns into each issue's "Design pages:" line, and
+never changes an entity field (AD-5). The AD-11 status block ends the
+result.
 
 `status` is the driver's status pull-back (Story 26.5, AD-5 status-class
 only): it sets one canonical story's `status`, stamps `updated`, replaces
@@ -84,9 +98,13 @@ Stdlib-only (NFR9); never prompts (AD-11).
 from __future__ import annotations
 
 import argparse
+import fnmatch
+import hashlib
+import html
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -97,6 +115,7 @@ import config as configlib
 import confluence
 import interchange
 import jirabackend
+import mdstorage
 import miniyaml
 import registry
 
@@ -1472,6 +1491,458 @@ def setup(project_root: Path, dry_run: bool = False,
     return finish("complete", None)
 
 
+# ------------------------------------------------------ design-page publish
+#
+# Story 31.3 (§6.8 b, AD-22): the project's design pages go to the folders
+# setup recorded in the Confluence space. Publish writes only to Confluence
+# and to the local page index — never an entity field (AD-5).
+
+PUBLISH_INTENT = SETUP_INTENT
+# category -> (project-relative directory glob, file-name glob), matched
+# case-insensitively on the file name (Settled shape 1). `records` is not
+# published here.
+PUBLISH_SOURCES = {
+    "brief": ("_bmad-output/planning-artifacts/briefs/*", "brief.md"),
+    "gdd": ("_bmad-output/planning-artifacts/**", "gdd*.md"),
+    "scope-of-work": ("_bmad-output/planning-artifacts/**",
+                      "scope-of-work*.md"),
+    "decisions": ("_bmad-output/planning-artifacts/design/*",
+                  "decisions*.md"),
+}
+SLUG_FROM_PARENT = ("brief.md", "readme.md", "index.md")
+ATTACHMENT_CEILING = 104_857_600  # the REST upload ceiling (kb §2 Q4)
+PAGE_INDEX_REL = jirabackend.PAGE_INDEX_REL
+FOOTER_HASH_RE = re.compile(r"content-hash: sha256:([0-9a-f]{64})")
+FREE_STORAGE_NOTE = ("Confluence Free stores 2 GB per site (Settings > "
+                     "Storage shows use)")
+
+
+def _publish_result(dry_run: bool) -> dict:
+    return {"ok": False, "dry_run": dry_run, "found": [], "created": [],
+            "updated": [], "skipped": [], "refused": [], "would_publish": [],
+            "bytes_uploaded": 0, "notes": [], "written": []}
+
+
+def _finish_publish(result: dict, status: str, reason: str | None) -> dict:
+    result["ok"] = status != "blocked"
+    result.update({"status": status, "intent": PUBLISH_INTENT,
+                   "artifacts": list(result["written"]), "reason": reason})
+    return result
+
+
+def _discover_sources(root: Path, category: str,
+                      gaps: list[str]) -> list[str]:
+    """The category's default sources, project-relative POSIX, sorted. A
+    source that resolves (symlinks followed) outside the project root is
+    never read: it is a named gap, as an out-of-root `--source` is."""
+    dir_glob, name_glob = PUBLISH_SOURCES[category]
+    found = set()
+    for folder in root.glob(dir_glob):
+        if not folder.is_dir():
+            continue
+        for path in folder.iterdir():
+            if path.is_file() and fnmatch.fnmatchcase(path.name.lower(),
+                                                      name_glob):
+                rel = path.relative_to(root).as_posix()
+                resolved = path.resolve()
+                try:
+                    resolved.relative_to(root)
+                except ValueError:
+                    gaps.append(f"{category} source {rel!r}: {resolved} is "
+                                f"outside the project root {root}")
+                    continue
+                found.add(rel)
+    return sorted(found)
+
+
+def _page_title(category: str, rel: str) -> str:
+    folder_title = dict(confluence.FOLDERS)[category]
+    path = Path(rel)
+    slug = path.parent.name if path.name.lower() in SLUG_FROM_PARENT \
+        and path.parent.name else path.stem
+    return f"{folder_title}: {slug}"
+
+
+def _source_overrides(root: Path, sources: list[str] | None
+                      ) -> tuple[dict[str, list[str]], list[str]]:
+    """`--source <category>=<path>` (repeatable): the category's sources for
+    this run, replacing its default. Every bad flag is a named gap."""
+    overrides: dict[str, list[str]] = {}
+    gaps = []
+    for flag in sources or []:
+        category, sep, raw = flag.partition("=")
+        category = category.strip()
+        if not sep or not raw.strip():
+            gaps.append(f"--source {flag!r} is not <category>=<path>")
+            continue
+        if category not in PUBLISH_SOURCES:
+            gaps.append(f"--source {flag!r}: unknown category {category!r} "
+                        f"(known: {', '.join(PUBLISH_SOURCES)})")
+            continue
+        path = Path(raw.strip())
+        path = (path if path.is_absolute() else root / path).resolve()
+        try:
+            rel = path.relative_to(root).as_posix()
+        except ValueError:
+            gaps.append(f"--source {flag!r}: {path} is outside the project "
+                        f"root {root}")
+            continue
+        if not path.is_file():
+            gaps.append(f"--source {flag!r}: {rel} does not exist")
+            continue
+        bucket = overrides.setdefault(category, [])
+        if rel not in bucket:
+            bucket.append(rel)
+    return overrides, gaps
+
+
+def _git_out(root: Path, *args: str) -> subprocess.CompletedProcess | None:
+    try:
+        return subprocess.run(["git", *args], cwd=str(root),
+                              stdin=subprocess.DEVNULL, capture_output=True,
+                              encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def _provenance(root: Path, rel: str) -> str:
+    """The last commit that touched the source (never HEAD), with
+    `(uncommitted changes)` when it is dirty or untracked; `no commit`
+    outside a git work tree."""
+    inside = _git_out(root, "rev-parse", "--is-inside-work-tree")
+    if inside is None or inside.returncode != 0 \
+            or inside.stdout.strip() != "true":
+        return "no commit"
+    log = _git_out(root, "log", "-1", "--format=%H", "--", rel)
+    sha = (log.stdout.strip() if log and log.returncode == 0 else "") \
+        or "no commit"
+    dirty = _git_out(root, "status", "--porcelain", "--", rel)
+    if dirty is not None and dirty.returncode == 0 and dirty.stdout.strip():
+        sha += " (uncommitted changes)"
+    return sha
+
+
+def page_hash(title: str, storage: str, attachment_hashes: list[str]) -> str:
+    """sha256 over the title, the storage body (footer excluded) and each
+    attachment's sha256, in order (Settled shape 2)."""
+    return jirabackend._content_hash(title, storage, *attachment_hashes)
+
+
+def page_footer(source: str, commit: str, digest: str) -> str:
+    return (f"<p><em>Published by tk-studio from <code>"
+            f"{html.escape(source)}</code> at commit <code>"
+            f"{html.escape(commit)}</code>. content-hash: sha256:{digest}"
+            f"</em></p>")
+
+
+def _load_page_index(root: Path) -> list[dict]:
+    """The index's entries in their order; [] when absent or unreadable."""
+    path = root / PAGE_INDEX_REL
+    try:
+        pages = json.loads(path.read_text(encoding="utf-8")).get("pages")
+    except (OSError, ValueError, AttributeError):
+        return []
+    return [p for p in pages if isinstance(p, dict)
+            and isinstance(p.get("title"), str)] \
+        if isinstance(pages, list) else []
+
+
+def _merge_page_index(previous: list[dict], landed: list[dict]) -> list[dict]:
+    """Earlier entries in their order, each replaced by this run's entry of
+    the same title; this run's new titles appended in work order. A page not
+    processed this run (no folder, a `--source` override, a refusal) keeps
+    its entry, so its Jira link does not vanish."""
+    fresh = {p["title"]: p for p in landed}
+    merged = [fresh.pop(p["title"], p) for p in previous]
+    return merged + [p for p in landed if p["title"] in fresh]
+
+
+def _refuse_image(result: dict, partial: list[str], name: str, source: str,
+                  reason: str) -> None:
+    result["refused"].append({"name": name, "source": source,
+                              "reason": reason})
+    partial.append(f"image {name} refused ({reason.split(' — ')[0]})")
+
+
+def _webui(page: dict | None) -> str | None:
+    return ((page or {}).get("_links") or {}).get("webui") or None
+
+
+def publish(project_root: Path, dry_run: bool = False,
+            sources: list[str] | None = None,
+            attachment_max_bytes: int | None = None,
+            transport=None) -> dict:
+    """Publish the design pages (brief, GDD, scope of work, decisions) to
+    the folders setup recorded, by stable title, each with a provenance
+    footer and a content hash that skips unchanged pages; write the local
+    page index the Jira promote links from (Story 31.3, AD-4/AD-5). Ends
+    `blocked` (exit 2) on an env gap, an absent binding, a bad `--source`
+    or a duplicate title — before any call — or on an auth refusal;
+    `partial` when a category has no folder, an attachment or page is
+    refused, or a dry run would publish anything; else `complete`."""
+    root = Path(project_root).resolve()
+    result = _publish_result(dry_run)
+    notes = result["notes"]
+
+    def finish(status: str, reason: str | None) -> dict:
+        return _finish_publish(result, status, reason)
+
+    gaps = list(confluence.env_gaps())
+    space_id = _recorded(root, "planning.confluence.space_id")
+    if space_id is None:
+        gaps.append("planning.confluence.space_id is not recorded (no "
+                    "planning.confluence binding) — run `plansync.py setup` "
+                    "first")
+    overrides, flag_gaps = _source_overrides(root, sources)
+    gaps += flag_gaps
+    if attachment_max_bytes is not None and attachment_max_bytes <= 0:
+        gaps.append(f"--attachment-max-bytes {attachment_max_bytes} is not "
+                    f"a positive byte count")
+    by_category = {cat: overrides.get(cat)
+                   or _discover_sources(root, cat, gaps)
+                   for cat in PUBLISH_SOURCES}
+    titles: dict[str, str] = {}
+    owners: dict[str, tuple[str, str]] = {}
+    category_of: dict[str, str] = {}
+    for cat, rels in by_category.items():
+        for rel in rels:
+            if rel in category_of:
+                gaps.append(f"{rel} supplied to two categories "
+                            f"({category_of[rel]} and {cat}) — pass it to one")
+                continue
+            category_of[rel] = cat
+            title = _page_title(cat, rel)
+            # Confluence titles are unique per space case-insensitively
+            key = title.casefold()
+            if key in owners and owners[key][0] != rel:
+                first, first_title = owners[key]
+                named = repr(title) if title == first_title \
+                    else f"{first_title!r} / {title!r}"
+                gaps.append(f"duplicate page title {named}: {first} "
+                            f"and {rel} — rename one source")
+            owners.setdefault(key, (rel, title))
+            titles[rel] = title
+    if gaps:
+        return finish("blocked", "publish refused: " + "; ".join(gaps))
+
+    if attachment_max_bytes is None:
+        ceiling = ATTACHMENT_CEILING
+        notes.append(f"attachment ceiling assumed {ATTACHMENT_CEILING:,} "
+                     f"bytes (100 MB): the site's Attachment maximum size was "
+                     f"not supplied (--attachment-max-bytes) and REST uploads "
+                     f"over 100 MB fail")
+    else:
+        ceiling = min(attachment_max_bytes, ATTACHMENT_CEILING)
+        if attachment_max_bytes > ATTACHMENT_CEILING:
+            notes.append(f"attachment ceiling {ATTACHMENT_CEILING:,} bytes: "
+                         f"the supplied {attachment_max_bytes:,} is above "
+                         f"the 100 MB REST upload ceiling")
+        else:
+            notes.append(f"attachment ceiling {ceiling:,} bytes: the "
+                         f"supplied site setting (--attachment-max-bytes)")
+
+    partial: list[str] = []
+    work: list[tuple[str, str, str]] = []  # (category, folder id, source)
+    for cat, rels in by_category.items():
+        if not rels:
+            result["skipped"].append({"category": cat,
+                                      "reason": "no source"})
+            continue
+        folder = _recorded(root, f"planning.confluence.folders.{cat}")
+        if folder is None:
+            result["skipped"].append({
+                "category": cat, "sources": list(rels),
+                "reason": f"planning.confluence.folders.{cat} is not "
+                          f"recorded — rerun `plansync.py setup`"})
+            partial.append(f"category {cat} has no folder")
+            continue
+        work.extend((cat, folder, rel) for rel in rels)
+
+    site = _recorded(root, "planning.jira.site") \
+        or os.environ.get(jirabackend.SITE_ENV)
+    conf = confluence.ConfluenceClient(
+        os.environ[jirabackend.CLOUD_ID_ENV],
+        os.environ[jirabackend.AGENT_EMAIL_ENV],
+        os.environ[jirabackend.AGENT_CONFLUENCE_TOKEN_ENV], transport,
+        site=site)
+
+    landed: dict[str, dict] = {}
+    error = None
+    try:
+        for cat, folder, rel in work:
+            title = titles[rel]
+            entry = {"category": cat, "source": rel, "title": title}
+            storage, images = mdstorage.convert(
+                (root / rel).read_text(encoding="utf-8"), rel, titles)
+            uploads, image_hashes = [], []
+            for image in images:
+                name = image["path"]
+                # confined to the project root, symlinks followed, before
+                # any read: an absolute path or a non-http(s) scheme too
+                path = (root / name).resolve()
+                if image.get("outside"):
+                    path = None
+                else:
+                    try:
+                        path.relative_to(root)
+                    except ValueError:
+                        path = None
+                if path is None:
+                    _refuse_image(result, partial, name, rel,
+                                  "outside the project root — left out, "
+                                  "the page still publishes")
+                    continue
+                if not path.is_file():
+                    _refuse_image(result, partial, name, rel,
+                                  "image not found — left out, the page "
+                                  "still publishes")
+                    continue
+                png = path.suffix.lower() == ".png"
+                size = path.stat().st_size
+                # a PNG may re-deflate under the ceiling, so only one far
+                # over it is refused before the read
+                if size > (4 * ceiling if png else ceiling):
+                    _refuse_image(result, partial, name, rel,
+                                  f"{size:,} bytes is over the per-file "
+                                  f"attachment ceiling of {ceiling:,} bytes "
+                                  f"— left out, the page still publishes")
+                    continue
+                source_bytes = path.read_bytes()
+                data = mdstorage.recompress_png(source_bytes) if png \
+                    else source_bytes
+                if len(data) > ceiling:
+                    _refuse_image(result, partial, name, rel,
+                                  f"{len(data):,} bytes is over the per-file "
+                                  f"attachment ceiling of {ceiling:,} bytes "
+                                  f"— left out, the page still publishes")
+                    continue
+                # the hash is over the source bytes: another zlib build
+                # never republishes an unchanged image
+                digest = hashlib.sha256(source_bytes).hexdigest()
+                image_hashes.append(digest)
+                uploads.append((image["filename"], data, digest))
+            digest = page_hash(title, storage, image_hashes)
+            body = storage + page_footer(rel, _provenance(root, rel), digest)
+
+            page_id = confluence.find_page(conf, folder, title)
+            if page_id is not None:
+                page = confluence.get_page(conf, page_id)
+                webui = _webui(page)
+                result["found"].append({**entry, "page_id": page_id})
+                # the footer is the page's last element: its hash is the
+                # last match (a source may quote the marker)
+                hashes = FOOTER_HASH_RE.findall(confluence.page_body(page))
+                remote = hashes[-1] if hashes else None
+                if remote == digest:
+                    result["skipped"].append({**entry, "page_id": page_id,
+                                              "reason": "unchanged"})
+                else:
+                    notes.append(
+                        f"{title}: " + ("the remote page carries no tk-studio "
+                                        "content hash" if not remote else
+                                        "the remote content hash differs "
+                                        "(the source changed, or the page was "
+                                        "edited in Confluence)")
+                        + (" — would be overwritten" if dry_run
+                           else " — overwritten")
+                        + ", the local source wins (AD-5)")
+                    if dry_run:
+                        result["would_publish"].append({
+                            **entry, "page_id": page_id, "action": "update"})
+                        continue
+                    put, detail = confluence.update_page(
+                        conf, page_id, title, body,
+                        confluence.page_version(page) + 1)
+                    if put is None:
+                        result["refused"].append({"name": title,
+                                                  "source": rel,
+                                                  "reason": f"update refused: "
+                                                            f"{detail}"})
+                        partial.append(f"page {title} update refused")
+                        continue
+                    webui = _webui(put) or webui
+                    result["updated"].append({**entry, "page_id": page_id})
+            else:
+                if dry_run:
+                    result["would_publish"].append({**entry,
+                                                    "action": "create"})
+                    continue
+                made, detail = confluence.create_page(conf, space_id, folder,
+                                                      title, body)
+                if made is None:
+                    result["refused"].append({"name": title, "source": rel,
+                                              "reason": f"create refused: "
+                                                        f"{detail}"})
+                    partial.append(f"page {title} create refused")
+                    continue
+                page_id = str(made["id"])
+                webui = _webui(made)
+                result["created"].append({**entry, "page_id": page_id})
+            landed[rel] = {**entry, "page_id": page_id, "webui": webui}
+
+            if uploads:
+                remote_files = {a.get("title"): a for a in
+                                confluence.list_attachments(conf, page_id)}
+                pending = []
+                for filename, data, sha in uploads:
+                    comment = f"sha256:{sha}"
+                    held = remote_files.get(filename)
+                    if held and comment in str(held.get("comment") or ""):
+                        continue
+                    pending.append((filename, data, comment))
+                if dry_run:
+                    # only an unchanged page reaches here on a dry run (a
+                    # read, never a write): its missing or stale
+                    # attachments are what a real run would still publish
+                    if pending:
+                        result["would_publish"].append({
+                            **entry, "page_id": page_id, "action": "attach",
+                            "attachments": [f for f, _, _ in pending]})
+                    continue
+                for filename, data, comment in pending:
+                    ok, detail = confluence.upload_attachment(
+                        conf, page_id, filename, data, comment)
+                    if not ok:
+                        result["refused"].append({
+                            "name": filename, "source": rel,
+                            "reason": f"upload refused: {detail}"})
+                        partial.append(f"attachment {filename} refused")
+                        continue
+                    result["bytes_uploaded"] += len(data)
+    except (confluence.ConfluenceError, OSError, UnicodeDecodeError) as exc:
+        error = str(exc)
+
+    if dry_run:
+        notes.append("dry run: nothing published, the page index not written")
+    else:
+        notes.append(f"{result['bytes_uploaded']} bytes uploaded this run; "
+                     f"{FREE_STORAGE_NOTE}")
+        pages = _merge_page_index(_load_page_index(root),
+                                  [landed[rel] for _, _, rel in work
+                                   if rel in landed])
+        target = root / PAGE_INDEX_REL
+        text = json.dumps({"pages": pages}, ensure_ascii=False,
+                          indent=2) + "\n"
+        try:
+            old = target.read_text(encoding="utf-8") \
+                if target.is_file() else None
+        except (OSError, UnicodeDecodeError):
+            old = None  # unreadable: rewritten, the run still ends (AD-11)
+        if pages and text != old:
+            _atomic_write(target, text)
+            result["written"].append(PAGE_INDEX_REL.as_posix())
+
+    if error is not None:
+        return finish("blocked", f"publish: {error}")
+    if partial:
+        return finish("partial", "publish partial: " + "; ".join(partial))
+    if result["would_publish"]:
+        return finish("partial", "dry run: nothing published; a real run "
+                                 "would publish " + ", ".join(
+                                     w["title"] for w in result["would_publish"]))
+    return finish("complete", None)
+
+
 # --------------------------------------------------------------------- CLI
 
 def main(argv: list[str] | None = None) -> int:
@@ -1505,6 +1976,14 @@ def main(argv: list[str] | None = None) -> int:
     stp.add_argument("--dry-run", action="store_true")
     stp.add_argument("--owner-account-id", default=None)
     stp.add_argument("--owner-email", default=None)
+    pub = sub.add_parser("publish")
+    pub.add_argument("--directory", required=True, help="project root (walks up to the nearest)")
+    pub.add_argument("--dry-run", action="store_true")
+    pub.add_argument("--source", action="append", default=None,
+                     metavar="CATEGORY=PATH",
+                     help="replace a category's default sources (repeatable)")
+    pub.add_argument("--attachment-max-bytes", type=int, default=None,
+                     help="the site's Attachment maximum size, in bytes")
 
     args = parser.parse_args(argv)
     # --directory walks up to the nearest project root (driver contract
@@ -1526,6 +2005,10 @@ def main(argv: list[str] | None = None) -> int:
             result = setup(Path(args.directory), dry_run=args.dry_run,
                            owner_account_id=args.owner_account_id,
                            owner_email=args.owner_email)
+        elif args.command == "publish":
+            result = publish(Path(args.directory), dry_run=args.dry_run,
+                             sources=args.source,
+                             attachment_max_bytes=args.attachment_max_bytes)
         elif args.command == "status":
             result = status_pull_back(Path(args.directory), args.entity_id,
                                       args.status, note=args.note,
