@@ -9,6 +9,7 @@ silent 401).
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -506,6 +507,91 @@ class GatewayTests(JiraTestCase):
                                  scope=jirabackend.SCOPE_PROJECT)
         self.assertIn("manage:jira-project", reason)
         self.assertIn("new scoped token", reason)
+
+
+class DesignPagesLinkTests(JiraTestCase):
+    """Story 31.3: the page index publish writes becomes the last line of
+    every epic's and story's description, inside the content hash."""
+
+    INDEX = {"pages": [
+        {"category": "brief", "source": "a/brief.md", "title": "Brief: b1",
+         "page_id": "601", "webui": "/spaces/TKS/pages/601"},
+        {"category": "decisions", "source": "d/decisions.md",
+         "title": "Decisions: decisions", "page_id": "602",
+         "webui": "/spaces/TKS/pages/602"}]}
+    LINE = ("Design pages: [Brief: b1|https://example.atlassian.net/wiki"
+            "/spaces/TKS/pages/601], [Decisions: decisions|https://"
+            "example.atlassian.net/wiki/spaces/TKS/pages/602]")
+
+    def _write_index(self):
+        (self.root / ".tk-studio" / "confluence-pages.json").write_text(
+            json.dumps(self.INDEX), encoding="utf-8")
+
+    def _hashes(self):
+        out = {}
+        for path in sorted(plansync.plan_dir(self.root).glob("*-*.md")):
+            front, _ = interchange.parse_entity(path)
+            out[front["id"]] = front["external"]["jira"]["content_hash"]
+        return out
+
+    def test_without_the_index_descriptions_and_hashes_are_unchanged(self):
+        self._project()
+        for issue in self.fake.issues.values():
+            self.assertNotIn("Design pages", issue["fields"]["description"])
+        for entity_id in ("EP-001", "ST-001"):
+            _, front, body = self._canonical(entity_id)
+            self.assertEqual(
+                front["external"]["jira"]["content_hash"],
+                jirabackend._content_hash(
+                    front["title"], ",".join(jirabackend._labels(front)),
+                    front.get("parent") or "", body))
+
+    def test_index_adds_the_line_and_moves_each_hash_once(self):
+        self._project()
+        before = self._hashes()
+        self._write_index()
+        result = self._project()
+        self.assertEqual(sorted(u["id"] for u in result["promote"]["updated"]),
+                         sorted(before))
+        after = self._hashes()
+        for entity_id in before:
+            self.assertNotEqual(before[entity_id], after[entity_id])
+        for issue in self.fake.issues.values():
+            self.assertTrue(issue["fields"]["description"].endswith(
+                "\n\n" + self.LINE), issue["fields"]["description"])
+        # AD-5: the appended line never reads back as a remote edit — a
+        # conflict would also land in skip_ids and produce no update
+        self.assertEqual(result["pull_back"]["conflicts"], [])
+        self.assertEqual(result["pull_back"]["applied"], [])
+        bodies = {entity_id: self._canonical(entity_id)[1:]
+                  for entity_id in before}
+        self.fake.calls.clear()
+        again = self._project()
+        self.assertEqual(again["pull_back"]["conflicts"], [])
+        self.assertEqual(again["pull_back"]["applied"], [])
+        self.assertEqual(again["conflicts"], [])
+        self.assertEqual(again["promote"]["updated"], [])
+        self.assertEqual(self.fake.writes(), [])
+        self.assertEqual(self._hashes(), after)
+        for entity_id, (front, body) in bodies.items():
+            self.assertEqual(self._canonical(entity_id)[1:], (front, body))
+            self.assertNotIn("Design pages", body)
+
+    def test_first_promote_with_the_index_carries_the_line(self):
+        self._write_index()
+        self._project()
+        epic = self.fake.issues[self._jira_key("EP-001")]
+        self.assertTrue(epic["fields"]["description"].endswith(self.LINE))
+
+    def test_line_reads_the_index_in_order(self):
+        self._write_index()
+        self.assertEqual(jirabackend.design_pages_line(
+            self.root, "https://example.atlassian.net/"), self.LINE)
+        self.assertIsNone(jirabackend.design_pages_line(self.root, None))
+        (self.root / ".tk-studio" / "confluence-pages.json").write_text(
+            "not json", encoding="utf-8")
+        self.assertIsNone(jirabackend.design_pages_line(
+            self.root, "example.atlassian.net"))
 
 
 class ProxyConnectRefusalTests(unittest.TestCase):

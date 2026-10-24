@@ -168,6 +168,8 @@
     canonical `blocked`, keeping the Jira name under `external.jira` (AD-22, AD-6). Every
     other status keeps the category mapping. Keep round trips stable (AD-5): an
     unchanged `blocked` is never re-promoted into a different In Progress status.
+    Band L, oversize risk (plans/31-4.md): halt blocked if the Files list must grow past
+    the plan's Files.
 
 - id: "31-5-the-two-statuses-and-the-inbox-items"
   title: "The Two Statuses and the Inbox Items"
