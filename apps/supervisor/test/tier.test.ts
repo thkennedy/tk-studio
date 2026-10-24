@@ -6,8 +6,8 @@ import { resolveWorkerOptions } from "../src/cli";
 import { jobOptions, loadSupervisorConfig, SupervisorConfigInvalid } from "../src/config";
 import { claudeBin, sbxBin, supervisorConfigPath } from "../src/env";
 import {
-  buildSbxCommand, buildWorkerCommand, DenyProfileRefused, HostBypassRefused, invokeSkill, MAX_LOGIN_MISSING, maxLoginPreflight,
-  SbxSandboxMissing, sbxEnvPassthrough, TierRefused, toVmPath, type RunResult, type Spawner,
+  buildSbxCommand, buildWorkerCommand, buildWorkerEnv, DenyProfileRefused, HostBypassRefused, invokeSkill, MAX_LOGIN_MISSING, maxLoginPreflight,
+  parseRegQuery, SbxSandboxMissing, sbxEnvPassthrough, TierRefused, toVmPath, userEnvFromRegistry, type RunResult, type Spawner,
 } from "../src/server";
 
 type Call = { cmd: string; args: string[]; cwd?: string; env?: Record<string, string | undefined> };
@@ -211,6 +211,26 @@ describe("the worker command line per tier", () => {
     expect(cmd.argv.join(" ")).not.toContain("acme.atlassian.net");
     expect(cmd.argv).not.toContain("TK_SUPERVISOR_TOKEN");
     expect(buildSbxCommand({ sandbox: "claude-p", vmRoot: "/vm/p", worker, guardS: 300 }, { PATH: "/usr/bin" }).argv.slice(0, 2)).toEqual(["exec", "claude-p"]);
+  });
+
+  test("hole 60: buildWorkerEnv fills the pass-through variables from the User environment registry when the console lacks them", () => {
+    const text = [
+      "", "HKEY_CURRENT_USER\\Environment", "    Path    REG_EXPAND_SZ    C:\\Users\\tim\\bin;%PATH%",
+      "    TK_ATLASSIAN_SITE    REG_SZ    https://acme.atlassian.net", "    TK_ATLASSIAN_AGENT_TOKEN    REG_SZ    reg-token",
+      "    TK_ATLASSIAN_BLANK    REG_SZ    ", "    OTHER_SECRET    REG_SZ    nope", "",
+    ].join("\r\n");
+    const reg = parseRegQuery(text);
+    expect(reg).toEqual({ Path: "C:\\Users\\tim\\bin;%PATH%", TK_ATLASSIAN_SITE: "https://acme.atlassian.net", TK_ATLASSIAN_AGENT_TOKEN: "reg-token", TK_ATLASSIAN_BLANK: "", OTHER_SECRET: "nope" });
+    const env = buildWorkerEnv({ PATH: "/usr/bin", TK_ATLASSIAN_SITE: "https://console.atlassian.net", TK_SUPERVISOR_TOKEN: "x" }, () => reg);
+    expect(env.TK_ATLASSIAN_SITE).toBe("https://console.atlassian.net"); // the console's value wins
+    expect(env.TK_ATLASSIAN_AGENT_TOKEN).toBe("reg-token"); // filled from the registry
+    expect(env.TK_ATLASSIAN_BLANK).toBeUndefined(); // an empty registry value is not a value
+    expect(env.OTHER_SECRET).toBeUndefined(); // only the pass-through prefixes
+    expect(env.Path).toBeUndefined();
+    expect(env.TK_SUPERVISOR_TOKEN).toBeUndefined(); // the strip still applies
+    expect(buildWorkerEnv({ PATH: "/usr/bin" }, () => ({})).TK_ATLASSIAN_SITE).toBeUndefined();
+    expect(userEnvFromRegistry(() => text)).toEqual({}); // under bun test the registry is never consulted
+    expect(sbxEnvPassthrough(env)).toEqual(["TK_ATLASSIAN_AGENT_TOKEN", "TK_ATLASSIAN_SITE"]);
   });
 });
 
