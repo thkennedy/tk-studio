@@ -18,7 +18,8 @@
     "tk-studio-plan-sync",
     "tk-studio-report",
     "tk-studio-research",
-    "tk-studio-session"
+    "tk-studio-session",
+    "tk-studio-track"
   ],
   "archive": {
     "url": "https://github.com/thkennedy/tk-studio/releases/download/tk-studio--v0.3.3/tk-studio-0.3.3.zip",
