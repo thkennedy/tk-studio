@@ -52,6 +52,21 @@ CLI:
   uv run plansync.py validate --directory ROOT
   uv run plansync.py status --directory ROOT --id ST-NNN --status ENUM
                             [--note TEXT] [--caller NAME] [--dry-run]
+  uv run plansync.py setup --directory ROOT [--dry-run]
+                           [--owner-account-id ID | --owner-email EMAIL]
+
+`setup` (Story 31.2) creates the project's tracking from the studio
+template through the agent seat's gateway tokens (TK_ATLASSIAN_*): the Jira
+project (key from the project id), its issue types, the statuses `Blocked -
+Awaiting User` and `Block Resolved` with their transition, the "Needs you"
+filter, the Confluence space and its five design-page folders, and the
+owner seat's accountId. Each is recognised by key first and created only
+when absent; the keys and ids land under `planning.jira` and
+`planning.confluence` in tracked config. What the API refuses becomes the
+owner's numbered steps (`owner_steps[]`) and the run ends `partial`; an
+unregistered project or an absent variable ends `blocked` before any call.
+The result names `found[]`, `created[]` and `written[]` and ends with the
+AD-11 status block.
 
 `status` is the driver's status pull-back (Story 26.5, AD-5 status-class
 only): it sets one canonical story's `status`, stamps `updated`, replaces
@@ -79,9 +94,11 @@ from pathlib import Path
 
 import backlogmd
 import config as configlib
+import confluence
 import interchange
 import jirabackend
 import miniyaml
+import registry
 
 COUNTER_VERSION = 1
 COUNTER_REL = Path(".tk-studio") / "plan-counter.yaml"
@@ -841,6 +858,620 @@ def status_pull_back(project_root: Path, story_id: str, status: str,
     return result
 
 
+# --------------------------------------------------------- tracking setup
+
+SETUP_INTENT = "tk-studio-plan-sync"
+SETUP_BLOCK_KEYS = ("status", "intent", "artifacts", "reason")
+
+
+class SetupRefusal(Exception):
+    """A named refusal met mid-setup (a key collision)."""
+
+
+def _recorded(project_root: Path, dotted: str) -> str | None:
+    """A binding value from config, or None when absent or empty."""
+    try:
+        value, _ = configlib.resolve(dotted, project_root=project_root)
+    except configlib.ConfigError:
+        return None
+    if value is None or isinstance(value, (dict, list)) or str(value) == "":
+        return None
+    return str(value)
+
+
+def _setup_gaps(project_root: Path, project_id: str) -> list[str]:
+    """Every refusal that ends setup before any Atlassian call, by name."""
+    gaps = []
+    try:
+        registry.read_project(project_id)
+    except registry.RegistryError as exc:
+        gaps.append(f"{exc} — onboard the project first "
+                    f"(registry.py register)")
+    cloud_gap = jirabackend.gateway_gaps()
+    for name in (jirabackend.AGENT_EMAIL_ENV, jirabackend.AGENT_TOKEN_ENV,
+                 jirabackend.AGENT_CONFLUENCE_TOKEN_ENV,
+                 jirabackend.CLOUD_ID_ENV):
+        if os.environ.get(name):
+            continue
+        if name == jirabackend.CLOUD_ID_ENV and cloud_gap:
+            gaps.extend(cloud_gap)
+        else:
+            gaps.append(f"{name} is not set")
+    if _recorded(project_root, "planning.jira.site") is None \
+            and not os.environ.get(jirabackend.SITE_ENV):
+        gaps.append(f"{jirabackend.SITE_ENV} is not set (first setup: "
+                    f"planning.jira.site is not configured)")
+    layout = binding_layout_gap(project_root)
+    if layout:
+        gaps.append(layout)
+    key = jirabackend.project_key_for(project_id)
+    if key is None:
+        gaps.append(f"no Jira project key can be derived from project id "
+                    f"{project_id!r} (uppercase alphanumerics starting with "
+                    f"a letter)")
+    else:
+        for dotted in ("planning.jira.project_key",
+                       "planning.confluence.space_key"):
+            recorded = _recorded(project_root, dotted)
+            if recorded is not None and recorded != key:
+                gaps.append(f"{dotted} records {recorded!r} but setup derives "
+                            f"{key!r} from project id {project_id!r}")
+    return gaps
+
+
+# --- the binding text edit (Settled shape 1): every other byte survives
+
+def _key_index(lines: list[str], lo: int, hi: int, depth: int,
+               key: str) -> int | None:
+    pattern = re.compile(rf"^{'  ' * depth}{re.escape(key)}:(\s.*)?$")
+    for i in range(lo, hi):
+        if pattern.match(lines[i]):
+            return i
+    return None
+
+
+def _block_extent(lines: list[str], idx: int, depth: int) -> tuple[int, int]:
+    """(end, insert_at) of the mapping opened at lines[idx]: the block runs
+    while lines are blank, comment-only or indented deeper; new keys go
+    after its last content line. A comment-only line (even at column 0, as
+    in config.py's _TRACKED_TEMPLATE) neither ends the block nor counts as
+    its last content line."""
+    end, last = idx + 1, idx
+    while end < len(lines):
+        line = lines[end]
+        if line.strip() and not line.lstrip().startswith("#"):
+            if len(line) - len(line.lstrip(" ")) <= 2 * depth:
+                break
+            last = end
+        end += 1
+    return end, last + 1
+
+
+def _inline_value(line: str) -> str:
+    value = line.split(":", 1)[1].strip()
+    value = re.sub(r"\s+#.*$", "", value) if not value.startswith(("'", '"')) \
+        else value
+    return value.strip().strip('"').strip("'")
+
+
+def _set_path(lines: list[str], path: tuple[str, ...], value: str) -> None:
+    lo, hi, insert_at = 0, len(lines), len(lines)
+    for depth, key in enumerate(path):
+        last = depth == len(path) - 1
+        idx = _key_index(lines, lo, hi, depth, key)
+        rendered = f"{'  ' * depth}{key}:" + (f" {json.dumps(value)}" if last else "")
+        if idx is None:
+            if depth == 0:
+                if lines and lines[-1].strip():
+                    lines.append("")
+                insert_at = len(lines)
+            lines.insert(insert_at, rendered)
+            idx = insert_at
+        elif last:
+            if _inline_value(lines[idx]) != value:
+                lines[idx] = rendered
+        elif _inline_value(lines[idx]) and not lines[idx].split(":", 1)[1].strip().startswith("#"):
+            raise PlanSyncError(f"config key {'.'.join(path[:depth + 1])} "
+                                f"holds a scalar where setup needs a mapping")
+        if not last:
+            hi, insert_at = _block_extent(lines, idx, depth)
+            lo = idx + 1
+
+
+def _flatten(prefix: tuple[str, ...], mapping: dict) -> list[tuple[tuple[str, ...], str]]:
+    pairs = []
+    for key, value in mapping.items():
+        if isinstance(value, dict):
+            pairs += _flatten(prefix + (key,), value)
+        elif value not in (None, ""):
+            pairs.append((prefix + (key,), str(value)))
+    return pairs
+
+
+def binding_layout_gap(project_root: Path) -> str | None:
+    """A named refusal when the tracked `planning:` block is not laid out
+    in two-space steps (the text edit would add a second `jira:` mapping
+    beside one indented otherwise), else None."""
+    tracked = Path(project_root) / ".tk-studio" / configlib.TRACKED_NAME
+    if not tracked.is_file():
+        return None
+    lines = tracked.read_text(encoding="utf-8").splitlines()
+    idx = _key_index(lines, 0, len(lines), 0, "planning")
+    if idx is None:
+        return None
+    end, _ = _block_extent(lines, idx, 0)
+    content = [l for l in lines[idx + 1:end]
+               if l.strip() and not l.lstrip().startswith("#")]
+    widths = [len(l) - len(l.lstrip(" ")) for l in content]
+    if any("\t" in l[:len(l) - len(l.lstrip())] for l in content) or \
+            (widths and widths[0] != 2) or any(w % 2 for w in widths):
+        return (f"{tracked}'s planning: block is not indented in two-space "
+                f"steps — setup edits it as text and refuses to guess; "
+                f"re-indent it with two spaces per level, then rerun")
+    return None
+
+
+def write_binding(project_root: Path, binding: dict,
+                  dry_run: bool = False) -> tuple[Path, bool]:
+    """Land the tracking binding under `planning:` in tracked config as a
+    text edit; classification-checked before the write (AD-3), atomic.
+    Returns (path, changed)."""
+    tracked = Path(project_root) / ".tk-studio" / configlib.TRACKED_NAME
+    text = tracked.read_text(encoding="utf-8") if tracked.is_file() else ""
+    lines = text.splitlines()
+    for path, value in _flatten(("planning",), binding):
+        _set_path(lines, path, value)
+    new_text = "\n".join(lines) + "\n"
+    if new_text == text:
+        return tracked, False
+    try:
+        parsed = miniyaml.loads(new_text)
+    except miniyaml.MiniYamlError as exc:
+        raise PlanSyncError(f"the binding edit would leave {tracked} "
+                            f"unreadable: {exc}") from exc
+    for path, value in _flatten(("planning",), binding):
+        node = parsed
+        for part in path:
+            node = node.get(part) if isinstance(node, dict) else None
+        if node is None or str(node) != value:
+            raise PlanSyncError(f"the binding edit would not land "
+                                f"{'.'.join(path)} in {tracked} (its "
+                                f"planning: block is laid out in a way the "
+                                f"text edit does not handle)")
+    if not dry_run:
+        configlib.assert_tracked_safe(new_text, str(tracked))
+        _atomic_write(tracked, new_text)
+    return tracked, True
+
+
+# --- the owner's numbered browser steps (kb/atlassian-free-tier.md §2 Q1)
+
+def _project_steps(site: str, key: str, name: str) -> list[str]:
+    # create only: on Free, project roles cannot be customised and everyone
+    # with Jira access administers every project (kb §2 Q2)
+    return [f"Sign in to https://{site} as the owner seat, open Projects > "
+            f"Create project > Software development > Kanban, choose "
+            f"Company-managed, name it `{name}` and set the key to `{key}`."]
+
+
+def _company_status_steps(site: str, key: str,
+                          existing=()) -> list[str]:
+    """The company-managed workflow steps; a status that already exists on
+    the site (`existing`) is added to the workflow, never created again."""
+    def add(name: str) -> str:
+        if name in existing:
+            return (f"Choose Add status and add the existing status "
+                    f"`{name}` to the workflow (do not create a new one).")
+        return (f"Choose Add status, create `{name}` in the In Progress "
+                f"category.")
+    return [f"Sign in to https://{site} as the owner seat and open Settings "
+            f"> Work items > Workflows; choose Edit on the workflow project "
+            f"`{key}` uses.",
+            add(jirabackend.BLOCKED_STATUS),
+            add(jirabackend.RESOLVED_STATUS),
+            f"Add a transition from `{jirabackend.BLOCKED_STATUS}` to "
+            f"`{jirabackend.RESOLVED_STATUS}`, then choose Update workflow."]
+
+
+_STATUS_CATEGORY = {"To Do": "To Do", "In Progress": "In Progress",
+                    "Done": "Done"}
+
+
+def _template_status_steps(site: str, key: str, missing: list[str],
+                           team: bool) -> list[str]:
+    where = (f"open project `{key}` > Project settings > Issue types > "
+             f"Story, and choose Edit workflow" if team else
+             f"open Settings > Work items > Workflows and choose Edit on the "
+             f"workflow project `{key}` uses")
+    return ([f"Sign in to https://{site} as the owner seat and {where}."]
+            + [f"Add status `{name}` in the {_STATUS_CATEGORY[name]} "
+               f"category, then save the workflow." for name in missing])
+
+
+def _team_status_steps(site: str, key: str) -> list[str]:
+    return [f"Sign in to https://{site} as the owner seat, open project "
+            f"`{key}` > Project settings > Issue types > Story, and choose "
+            f"Edit workflow.",
+            f"Add status `{jirabackend.BLOCKED_STATUS}` in the In progress "
+            f"category.",
+            f"Add status `{jirabackend.RESOLVED_STATUS}` in the In progress "
+            f"category.",
+            f"Add a transition from `{jirabackend.BLOCKED_STATUS}` to "
+            f"`{jirabackend.RESOLVED_STATUS}`, then choose Save changes; "
+            f"repeat for the Epic issue type."]
+
+
+def _issue_type_steps(site: str, key: str, missing: list[str]) -> list[str]:
+    return [f"Sign in to https://{site} as the owner seat, open project "
+            f"`{key}` > Project settings > Issue types and add "
+            f"{', '.join(f'`{m}`' for m in missing)}."]
+
+
+def _filter_steps(site: str, key: str) -> list[str]:
+    return [f"Sign in to https://{site} as the owner seat, open Filters > "
+            f"Search work items, switch to JQL, enter "
+            f"`{jirabackend.NEEDS_YOU_JQL}`, then Save filter as "
+            f"`{jirabackend.NEEDS_YOU_FILTER}`.",
+            f"Open the saved filter's Details > Edit permissions and share "
+            f"`{jirabackend.NEEDS_YOU_FILTER}` with project `{key}` (Viewers: "
+            f"Project `{key}`), so the agent seat finds it on the rerun."]
+
+
+def _space_steps(site: str, key: str, name: str) -> list[str]:
+    # create only: Confluence Free permissions cannot be customised (kb §2 Q4)
+    return [f"Sign in to https://{site}/wiki as the owner seat, choose "
+            f"Create > Space > Blank space, name it `{name}` and set the "
+            f"space key to `{key}`."]
+
+
+def _folder_steps(site: str, key: str, titles: list[str]) -> list[str]:
+    return [f"Sign in to https://{site}/wiki as the owner seat, open space "
+            f"`{key}` and, from the sidebar's + > Folder, create the "
+            f"top-level folder{'s' if len(titles) > 1 else ''} "
+            f"{', '.join(f'`{t}`' for t in titles)}."]
+
+
+def _owner_id_steps(site: str) -> list[str]:
+    return [f"Sign in to https://{site} as the owner seat, open your "
+            f"Atlassian profile (avatar > Profile) and copy the accountId "
+            f"from the address bar (kb/atlassian-free-tier.md §1 step 6); "
+            f"rerun setup with `--owner-account-id <that id>`."]
+
+
+def _setup_result(project_id: str, dry_run: bool) -> dict:
+    return {"ok": False, "dry_run": dry_run, "project_id": project_id,
+            "project_key": None, "found": [], "created": [],
+            "would_create": [], "owner_steps": [], "notes": [],
+            "binding": {}, "written": []}
+
+
+def _finish_setup(result: dict, status: str, reason: str | None) -> dict:
+    result["ok"] = status != "blocked"
+    result.update({"status": status, "intent": SETUP_INTENT,
+                   "artifacts": list(result["written"]), "reason": reason})
+    return result
+
+
+def _number_steps(groups: list[list[str]]) -> list[str]:
+    """The owner's steps numbered in order, the rerun step last."""
+    steps = [line for group in groups for line in group]
+    steps.append("Rerun `uv run plugins/tk-studio/lib/plansync.py setup "
+                 "--directory <project root>`: it recognises what was made "
+                 "by key and records it.")
+    return [f"{i}. {line}" for i, line in enumerate(steps, 1)]
+
+
+def setup_flag_refusal(project_root: Path, dry_run: bool = False) -> dict:
+    """`--owner-account-id` and `--owner-email` together: one source of the
+    owner's accountId, so both is a named refusal before any call."""
+    root = Path(project_root).resolve()
+    return _finish_setup(
+        _setup_result(configlib.project_key(root), dry_run), "blocked",
+        "tracking setup refused: --owner-account-id and --owner-email are "
+        "exclusive — pass one of them, not both")
+
+
+def setup(project_root: Path, dry_run: bool = False,
+          owner_account_id: str | None = None,
+          owner_email: str | None = None, transport=None) -> dict:
+    """Create the project's Jira project, statuses, filter and Confluence
+    space from the studio template, recognising each by key first (Story
+    31.2, AD-4). Ends `complete` only when every step was created or found;
+    whatever the API refuses becomes the owner's numbered steps and the run
+    ends `partial`, as does a dry run that would create anything; a refusal
+    ends `blocked` before any Atlassian call."""
+    root = Path(project_root).resolve()
+    project_id = configlib.project_key(root)
+    result = _setup_result(project_id, dry_run)
+
+    def finish(status: str, reason: str | None) -> dict:
+        return _finish_setup(result, status, reason)
+
+    gaps = _setup_gaps(root, project_id)
+    if gaps:
+        return finish("blocked", "tracking setup refused: " + "; ".join(gaps))
+
+    key = jirabackend.project_key_for(project_id)
+    result["project_key"] = key
+    recorded_site = _recorded(root, "planning.jira.site")
+    site = recorded_site or os.environ[jirabackend.SITE_ENV]
+    site = re.sub(r"^https?://", "", site).strip("/")
+    email = os.environ[jirabackend.AGENT_EMAIL_ENV]
+    cloud_id = os.environ[jirabackend.CLOUD_ID_ENV]
+    jira = jirabackend.JiraClient.for_gateway(
+        cloud_id, email, os.environ[jirabackend.AGENT_TOKEN_ENV], transport,
+        site=site)
+    conf = confluence.ConfluenceClient(
+        cloud_id, email, os.environ[jirabackend.AGENT_CONFLUENCE_TOKEN_ENV],
+        transport, site=site)
+
+    found, created, notes = result["found"], result["created"], result["notes"]
+    would = result["would_create"]
+    groups: list[list[str]] = []
+    # Settled shape 1, in its order; None/empty values are not written. A
+    # key is recorded only once its item is found (past the collision
+    # check), created, or handed to the owner to create — so a rerun never
+    # adopts a same-keyed item this setup neither made nor asked for.
+    jira_binding: dict = {"site": None if recorded_site else site,
+                          "project_key": None, "project_id": None,
+                          "filter_id": None, "owner_account_id": None,
+                          "agent_account_id": None}
+    conf_binding: dict = {"space_key": None, "space_id": None, "folders": {}}
+    result["binding"] = {"jira": jira_binding, "confluence": conf_binding}
+    error = None
+    handed_over = False  # an owner step asks the owner to create a keyed item
+    try:
+        # 1. the agent seat
+        status, me = jira.request("GET", "/myself")
+        if status != 200 or not isinstance(me, dict):
+            raise jirabackend.JiraError(
+                f"auth preflight failed: GET /myself returned {status}")
+        agent_id = me.get("accountId")
+        jira_binding["agent_account_id"] = agent_id
+        found.append(f"agent seat accountId {agent_id}")
+
+        # 7 (first: the project lead is the owner when known). The owner id
+        # source order is Settled shape 2.
+        owner_id = _recorded(root, "planning.jira.owner_account_id")
+        if owner_id:
+            found.append("owner seat accountId (recorded)")
+        elif owner_account_id:
+            owner_id = owner_account_id
+            found.append("owner seat accountId (--owner-account-id)")
+        elif owner_email:
+            owner_id, note = jirabackend.lookup_owner(jira, owner_email)
+            if owner_id:
+                found.append("owner seat accountId (looked up by "
+                             "--owner-email)")
+            else:
+                notes.append(note)
+                groups.append(_owner_id_steps(site))
+        else:
+            groups.append(_owner_id_steps(site))
+        jira_binding["owner_account_id"] = owner_id
+
+        # 2. the project
+        recorded_pid = _recorded(root, "planning.jira.project_id")
+        recorded_key = _recorded(root, "planning.jira.project_key")
+        proj = jirabackend.get_project(jira, key)
+        if proj is not None:
+            if recorded_key != key or (recorded_pid and
+                                       recorded_pid != str(proj.get("id"))):
+                raise SetupRefusal(
+                    f"Jira project {key} already exists on {site} and this "
+                    f"setup did not create it (planning.jira.project_key "
+                    f"does not record it) — set `project_id` in "
+                    f".tk-studio/config.yaml to a unique id, or record "
+                    f"planning.jira.project_key: {key} to adopt it")
+            found.append(f"Jira project {key}")
+            jira_binding["project_key"] = key
+        elif dry_run:
+            would.append(f"Jira project {key}")
+        else:
+            made, detail = jirabackend.create_project(
+                jira, key, project_id, owner_id or agent_id)
+            if made is None:
+                notes.append(f"project create refused: {detail}")
+                groups.append(_project_steps(site, key, project_id))
+                jira_binding["project_key"] = key
+                handed_over = True
+            else:
+                created.append(f"Jira project {key}")
+                jira_binding["project_key"] = key
+                proj = jirabackend.get_project(jira, key)
+                if proj is None:
+                    raise jirabackend.JiraError(
+                        f"setup: project {key} was created but GET "
+                        f"/project/{key} finds none")
+        if proj is not None:
+            jira_binding["project_id"] = str(proj.get("id"))
+
+        # 3. issue types, 4. the five-status workflow and the transition
+        if proj is not None:
+            pid = str(proj.get("id"))
+            have_types, missing_types = jirabackend.confirm_issue_types(proj)
+            found += [f"issue type {t}" for t in have_types]
+            if missing_types:
+                groups.append(_issue_type_steps(site, key, missing_types))
+            team = jirabackend.is_team_managed(proj)
+            have = jirabackend.find_statuses(jira, pid, key, team)
+            found += [f"status {n}" for n in jirabackend.TEMPLATE_STATUSES
+                      if n in have]
+            missing_template = [n for n in jirabackend.TEMPLATE_STATUSES
+                                if n not in have
+                                and n not in jirabackend.SETUP_STATUSES]
+            if missing_template:
+                groups.append(_template_status_steps(site, key,
+                                                     missing_template, team))
+            missing = [n for n in jirabackend.SETUP_STATUSES if n not in have]
+            company_steps = False
+            if missing and team:
+                groups.append(_team_status_steps(site, key))
+            elif missing and dry_run:
+                would.extend(f"status {n}" for n in missing)
+            elif missing:
+                made, detail = jirabackend.create_statuses(jira, pid, missing)
+                landed = {e["name"]: e for e in made or []}
+                for name in missing:
+                    if name in landed:
+                        have[name] = landed[name]
+                        created.append(f"status {name}")
+                if made is None:
+                    notes.append(f"status create refused: {detail}")
+                elif len(landed) < len(missing):
+                    notes.append(
+                        "status create answered without "
+                        + ", ".join(n for n in missing if n not in landed))
+                if len(landed) < len(missing):
+                    groups.append(_company_status_steps(site, key, have))
+                    company_steps = True
+            if not team and not company_steps:
+                both = all(n in have for n in jirabackend.SETUP_STATUSES)
+                label = (f"transition {jirabackend.BLOCKED_STATUS} -> "
+                         f"{jirabackend.RESOLVED_STATUS}")
+                if not both:
+                    if dry_run:
+                        would.append(label)
+                else:
+                    blocked_id = have[jirabackend.BLOCKED_STATUS].get("id")
+                    resolved_id = have[jirabackend.RESOLVED_STATUS].get("id")
+                    flow, why = jirabackend.find_workflow(jira, key)
+                    if flow is not None and jirabackend.has_resolution_transition(
+                            flow, blocked_id, resolved_id):
+                        found.append(label)
+                    elif flow is None:
+                        notes.append(f"workflow not selected: {why}")
+                        groups.append(_company_status_steps(site, key, have))
+                    elif dry_run:
+                        would.append(label)
+                    else:
+                        done, detail = jirabackend.add_resolution_transition(
+                            jira, flow, blocked_id, resolved_id)
+                        if done:
+                            created.append(label)
+                        else:
+                            notes.append(f"workflow update refused: {detail}")
+                            groups.append(_company_status_steps(site, key, have))
+        elif dry_run:
+            would.extend(f"status {n}" for n in jirabackend.SETUP_STATUSES)
+            would.append(f"transition {jirabackend.BLOCKED_STATUS} -> "
+                         f"{jirabackend.RESOLVED_STATUS}")
+
+        # 5. the "Needs you" filter
+        saved = jirabackend.find_filter(jira, agent_id)
+        if saved is not None:
+            found.append(f"filter {jirabackend.NEEDS_YOU_FILTER}")
+        elif dry_run:
+            would.append(f"filter {jirabackend.NEEDS_YOU_FILTER}")
+        elif proj is None:
+            # shared with the project, so it waits for the project to exist
+            notes.append(f"filter {jirabackend.NEEDS_YOU_FILTER} not created: "
+                         f"it is shared with project {key}, which does not "
+                         f"exist yet — the rerun creates it")
+        else:
+            saved, detail = jirabackend.create_filter(jira, str(proj.get("id")))
+            if saved is None:
+                notes.append(f"filter create refused: {detail}")
+                groups.append(_filter_steps(site, key))
+            else:
+                created.append(f"filter {jirabackend.NEEDS_YOU_FILTER}")
+        if saved is not None:
+            jira_binding["filter_id"] = str(saved.get("id"))
+
+        # 6. the Confluence space and its folders
+        space = confluence.find_space(conf, key)
+        if space is not None:
+            if _recorded(root, "planning.confluence.space_key") != key:
+                raise SetupRefusal(
+                    f"Confluence space {key} already exists and this setup "
+                    f"did not create it (planning.confluence.space_key does "
+                    f"not record it) — set `project_id` in "
+                    f".tk-studio/config.yaml to a unique id, or record "
+                    f"planning.confluence.space_key: {key} to adopt it")
+            found.append(f"Confluence space {key}")
+            conf_binding["space_key"] = key
+        elif dry_run:
+            would.append(f"Confluence space {key}")
+        else:
+            space, detail = confluence.create_space(conf, key, project_id)
+            if space is None:
+                notes.append(f"space create refused: {detail}")
+                groups.append(_space_steps(site, key, project_id))
+                conf_binding["space_key"] = key
+                handed_over = True
+            else:
+                created.append(f"Confluence space {key}")
+                conf_binding["space_key"] = key
+        if space is not None:
+            conf_binding["space_id"] = str(space.get("id"))
+            titles = confluence.find_folders(conf, str(space.get("id")))
+            refused = []
+            for name, title in confluence.FOLDERS:
+                if title in titles:
+                    conf_binding["folders"][name] = titles[title]
+                    found.append(f"folder {title}")
+                elif dry_run:
+                    would.append(f"folder {title}")
+                else:
+                    folder, detail = confluence.create_folder(
+                        conf, str(space.get("id")), title)
+                    if folder is None:
+                        notes.append(f"folder {title} create refused: {detail}")
+                        refused.append(title)
+                    else:
+                        conf_binding["folders"][name] = str(folder.get("id"))
+                        created.append(f"folder {title}")
+            if refused:
+                groups.append(_folder_steps(site, key, refused))
+        elif dry_run:
+            would.extend(f"folder {title}" for _, title in confluence.FOLDERS)
+    except (jirabackend.JiraError, confluence.ConfluenceError,
+            SetupRefusal) as exc:
+        error = str(exc)
+
+    # 8. the binding — on an error only when this run already created
+    # something, or emitted an owner step to create a keyed item (the
+    # project or the space), so a rerun recognises it by key rather than
+    # refusing it as a collision
+    if dry_run:
+        notes.append("dry run: nothing created, config not written")
+    elif error is None or created or handed_over:
+        try:
+            tracked, changed = write_binding(root, result["binding"])
+            if changed:
+                # project-root-relative, POSIX (§3: artifacts are relative)
+                result["written"].append(tracked.relative_to(root).as_posix())
+        except (PlanSyncError, configlib.ClassificationError) as exc:
+            record = "; ".join(f"{'.'.join(path)}: {value}" for path, value
+                               in _flatten(("planning",), result["binding"]))
+            error = ((f"{error}; " if error else "")
+                     + f"the binding was not written: {exc} — this run "
+                       f"created {', '.join(created) or 'nothing'}; record "
+                       f"these keys and ids by hand: {record}")
+
+    # 9. the result
+    if error is not None:
+        if groups:
+            # the steps the API refused before the error still reach the owner
+            result["owner_steps"] = _number_steps(groups)
+            error += (f" — and {len(groups)} item(s) the API could not do "
+                      f"here are left to the owner; the numbered steps: "
+                      + " ".join(result["owner_steps"]))
+        return finish("blocked", error)
+    if groups:
+        result["owner_steps"] = _number_steps(groups)
+        reason = (f"tracking setup partial: {len(groups)} item(s) the "
+                  f"API could not do here are left to the owner; the "
+                  f"numbered steps: " + " ".join(result["owner_steps"]))
+        if would:
+            reason += " Dry run: would create " + ", ".join(would) + "."
+        return finish("partial", reason)
+    if would:
+        return finish("partial", "dry run: nothing created; a real run would "
+                                 "create " + ", ".join(would))
+    return finish("complete", None)
+
+
 # --------------------------------------------------------------------- CLI
 
 def main(argv: list[str] | None = None) -> int:
@@ -869,6 +1500,11 @@ def main(argv: list[str] | None = None) -> int:
     sts.add_argument("--note", default="")
     sts.add_argument("--caller", default=DEFAULT_CALLER)
     sts.add_argument("--dry-run", action="store_true")
+    stp = sub.add_parser("setup")
+    stp.add_argument("--directory", required=True, help="project root (walks up to the nearest)")
+    stp.add_argument("--dry-run", action="store_true")
+    stp.add_argument("--owner-account-id", default=None)
+    stp.add_argument("--owner-email", default=None)
 
     args = parser.parse_args(argv)
     # --directory walks up to the nearest project root (driver contract
@@ -882,6 +1518,14 @@ def main(argv: list[str] | None = None) -> int:
                        if args.backend else None)
             result = sync(Path(args.directory), dry_run=args.dry_run,
                           runtime=runtime)
+        elif args.command == "setup" and args.owner_account_id \
+                and args.owner_email:
+            result = setup_flag_refusal(Path(args.directory),
+                                        dry_run=args.dry_run)
+        elif args.command == "setup":
+            result = setup(Path(args.directory), dry_run=args.dry_run,
+                           owner_account_id=args.owner_account_id,
+                           owner_email=args.owner_email)
         elif args.command == "status":
             result = status_pull_back(Path(args.directory), args.entity_id,
                                       args.status, note=args.note,

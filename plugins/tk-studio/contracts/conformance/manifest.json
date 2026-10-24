@@ -70,8 +70,8 @@
       ]
     },
     "tk-studio-onboard": {
-      "external_calls": false,
-      "auth_preflight": "none needed — local standup + propose/record; vault linking skips cleanly when unconfigured",
+      "external_calls": true,
+      "auth_preflight": "standup + propose/record are local (vault linking skips cleanly when unconfigured); the optional tracking step (plansync.py setup, 0.1.26) refuses before any Atlassian call on an unregistered project or any absent agent-seat variable (TK_ATLASSIAN_SITE on first setup, TK_ATLASSIAN_AGENT_EMAIL, TK_ATLASSIAN_AGENT_TOKEN, TK_ATLASSIAN_AGENT_CONFLUENCE_TOKEN, TK_ATLASSIAN_CLOUD_ID), each named, then proves the agent token through the api.atlassian.com gateway with GET /myself — a 401, the proxy's approval 403 or a scope 403 blocks by name (the sandbox drive below proves the unregistered-project refusal without any network)",
       "drives": [
         {
           "assertion": "headless-clean",
@@ -82,6 +82,12 @@
           "assertion": "blocked-on-ambiguity",
           "argv": ["lib/recommend.py", "record", "--directory", "{sandbox}", "--role", "developer", "--resources", ","],
           "expect": "refusal"
+        },
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/plansync.py", "setup", "--directory", "{sandbox}"],
+          "expect": "refusal",
+          "marker": "is not registered"
         }
       ]
     },

@@ -14,7 +14,9 @@ import re
 import sys
 import tempfile
 import unittest
+import urllib.error
 import urllib.parse
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -121,11 +123,17 @@ class FakeJira:
 
 
 class JiraTestCase(unittest.TestCase):
-    ENV_KEYS = ("TK_STUDIO_HOME", jirabackend.TOKEN_ENV, jirabackend.EMAIL_ENV)
+    # the five agent-seat names too: the sandbox exports real values, and
+    # a set TK_ATLASSIAN_AGENT_TOKEN would move these tests off the
+    # legacy JIRA_* path (Story 31.2)
+    ENV_KEYS = ("TK_STUDIO_HOME", jirabackend.TOKEN_ENV, jirabackend.EMAIL_ENV,
+                *jirabackend.AGENT_ENV_NAMES)
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self._saved_env = {k: os.environ.get(k) for k in self.ENV_KEYS}
+        for key in jirabackend.AGENT_ENV_NAMES:
+            os.environ.pop(key, None)
         os.environ["TK_STUDIO_HOME"] = str(Path(self._tmp.name) / "store")
         os.environ[jirabackend.TOKEN_ENV] = "fake-token"
         os.environ[jirabackend.EMAIL_ENV] = "tim@example.com"
@@ -384,3 +392,156 @@ class DryRunTests(JiraTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GatewayTests(JiraTestCase):
+    """Story 31.2: the agent seat's gateway path, its refusals by name, the
+    legacy fallback and the 401 / proxy 403 / scope 403 split."""
+
+    def _gateway_env(self):
+        os.environ.pop(jirabackend.TOKEN_ENV, None)
+        os.environ.pop(jirabackend.EMAIL_ENV, None)
+        os.environ[jirabackend.AGENT_TOKEN_ENV] = "fake-agent-token"
+        os.environ[jirabackend.AGENT_EMAIL_ENV] = "agent@example.com"
+        os.environ[jirabackend.CLOUD_ID_ENV] = "cloud-test"
+
+    def test_gateway_url_keeps_rest_api_2(self):
+        urls = []
+
+        def transport(method, url, body):
+            urls.append(url)
+            return 200, {"accountId": "acc-agent"}
+        client = jirabackend.JiraClient.for_gateway(
+            "cloud-test", "agent@example.com", "fake-agent-token", transport)
+        client.request("GET", "/myself")
+        self.assertEqual(urls, ["https://api.atlassian.com/ex/jira/cloud-test"
+                                "/rest/api/2/myself"])
+
+    def test_agent_token_selects_the_gateway(self):
+        self._gateway_env()
+        settings, gaps = jirabackend._resolve_settings(self.root, RUNTIME)
+        self.assertEqual(gaps, [])
+        self.assertEqual(settings["email"], "agent@example.com")
+        client = jirabackend.client_for(settings, transport=self.fake)
+        self.assertEqual(client.base, "https://api.atlassian.com/ex/jira/"
+                                      "cloud-test/rest/api/2")
+        self.assertEqual(client.token_env, jirabackend.AGENT_TOKEN_ENV)
+        # the site stays binding config, never read from TK_ATLASSIAN_SITE
+        self.assertEqual(settings["site"], "example.atlassian.net")
+
+    def test_preflight_captures_the_agent_account_id(self):
+        def transport(method, url, body):
+            if url.endswith("/myself"):
+                return 200, {"accountId": "acc-agent", "displayName": "Agent"}
+            return self.fake(method, url, body)
+        client = jirabackend.JiraClient.for_gateway(
+            "cloud-test", "agent@example.com", "fake-agent-token", transport)
+        checked = jirabackend.preflight(client, "TKS")
+        self.assertEqual(checked["account_id"], "acc-agent")
+
+    def test_agent_token_without_cloud_id_refuses_by_name(self):
+        self._gateway_env()
+        os.environ.pop(jirabackend.CLOUD_ID_ENV)
+        result = plansync.sync(self.root, runtime=RUNTIME)
+        self.assertTrue(result.get("blocked"))
+        self.assertIn(jirabackend.CLOUD_ID_ENV, result["reason"])
+        self.assertIn("never the site URL", result["reason"])
+        self.assertEqual(self.fake.calls, [])
+
+    def test_confluence_token_without_cloud_id_refuses_by_name(self):
+        os.environ[jirabackend.AGENT_CONFLUENCE_TOKEN_ENV] = "fake-conf-token"
+        settings, gaps = jirabackend._resolve_settings(self.root, RUNTIME)
+        self.assertTrue(any(jirabackend.CLOUD_ID_ENV in g and
+                            jirabackend.AGENT_CONFLUENCE_TOKEN_ENV in g
+                            for g in gaps), gaps)
+
+    def test_agent_email_missing_is_named(self):
+        self._gateway_env()
+        os.environ.pop(jirabackend.AGENT_EMAIL_ENV)
+        _, gaps = jirabackend._resolve_settings(self.root, RUNTIME)
+        self.assertTrue(any(jirabackend.AGENT_EMAIL_ENV in g for g in gaps))
+
+    def test_legacy_path_without_the_agent_token(self):
+        settings, gaps = jirabackend._resolve_settings(self.root, RUNTIME)
+        self.assertEqual(gaps, [])
+        self.assertNotIn("cloud_id", settings)
+        client = jirabackend.client_for(settings)
+        self.assertEqual(client.base, "https://example.atlassian.net/rest/api/2")
+        self.assertEqual(client.token_env, jirabackend.TOKEN_ENV)
+
+    def test_sync_does_not_fall_back_to_the_site_variable(self):
+        self._gateway_env()
+        os.environ[jirabackend.SITE_ENV] = "example.atlassian.net"
+        (self.root / ".tk-studio" / "config.yaml").write_text(
+            "planning:\n  backend: jira\n", encoding="utf-8", newline="\n")
+        result = plansync.sync(self.root, runtime=RUNTIME)
+        self.assertTrue(result.get("blocked"))
+        self.assertIn("planning.jira.site", result["reason"])
+
+    def _raise_for(self, status, body, method="GET", scope=None):
+        client = jirabackend.JiraClient.for_gateway(
+            "cloud-test", "agent@example.com", "fake-agent-token",
+            lambda m, u, b: (status, body))
+        with self.assertRaises(jirabackend.JiraError) as caught:
+            client.request(method, "/project", {} if method == "POST" else None,
+                           scope=scope)
+        return str(caught.exception)
+
+    def test_401_names_token_email_expiry_and_toggle_never_scope(self):
+        reason = self._raise_for(401, {"errorMessages": ["Unauthorized"]})
+        for phrase in ("401", jirabackend.AGENT_TOKEN_ENV,
+                       jirabackend.AGENT_EMAIL_ENV, "expiry", "org-admin"):
+            self.assertIn(phrase, reason)
+        self.assertNotIn("scope", reason.lower())
+
+    def test_proxy_403_is_the_network_approval_step(self):
+        reason = self._raise_for(403, "Approval required for api.atlassian.com:443")
+        self.assertIn("network approval", reason)
+        self.assertIn("api.atlassian.com:443", reason)
+        self.assertNotIn("scope", reason.lower())
+
+    def test_other_403_names_the_scope_and_asks_for_a_new_token(self):
+        reason = self._raise_for(403, {"errorMessages": ["forbidden"]},
+                                 method="POST",
+                                 scope=jirabackend.SCOPE_PROJECT)
+        self.assertIn("manage:jira-project", reason)
+        self.assertIn("new scoped token", reason)
+
+
+class ProxyConnectRefusalTests(unittest.TestCase):
+    """Story 31.2 review 5: a refused HTTPS CONNECT reaches urllib as a
+    URLError, not an HTTP 403 — it is still the network approval step."""
+
+    ERROR = urllib.error.URLError(
+        "Tunnel connection failed: 403 Approval required for "
+        "api.atlassian.com:443")
+
+    def test_jira_connect_refusal_is_the_network_approval_step(self):
+        client = jirabackend.JiraClient.for_gateway(
+            "cloud-test", "agent@example.com", "fake-agent-token")
+        with mock.patch("urllib.request.urlopen", side_effect=self.ERROR):
+            with self.assertRaises(jirabackend.JiraError) as caught:
+                client.request("GET", "/myself")
+        reason = str(caught.exception)
+        self.assertIn("network approval", reason)
+        self.assertIn("api.atlassian.com:443", reason)
+        self.assertNotIn("cannot reach", reason)
+
+    def test_confluence_connect_refusal_is_the_network_approval_step(self):
+        import confluence
+        client = confluence.ConfluenceClient(
+            "cloud-test", "agent@example.com", "fake-confluence-token")
+        with mock.patch("urllib.request.urlopen", side_effect=self.ERROR):
+            with self.assertRaises(confluence.ConfluenceError) as caught:
+                client.request("GET", "/spaces")
+        self.assertIn("network approval", str(caught.exception))
+        self.assertNotIn("cannot reach", str(caught.exception))
+
+    def test_other_connect_failure_still_cannot_reach(self):
+        client = jirabackend.JiraClient.for_gateway(
+            "cloud-test", "agent@example.com", "fake-agent-token")
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=urllib.error.URLError("Name or service not known")):
+            with self.assertRaises(jirabackend.JiraError) as caught:
+                client.request("GET", "/myself")
+        self.assertIn("cannot reach", str(caught.exception))
