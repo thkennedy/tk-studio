@@ -1,9 +1,10 @@
 ---
 id: TASK-117
 title: "Publish: Design Pages to Confluence"
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-20 00:35'
+updated_date: '2026-10-24 20:24'
 labels:
   - ST-117
 milestone: Tracking on Atlassian and the Inbox

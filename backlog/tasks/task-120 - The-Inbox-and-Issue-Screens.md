@@ -1,9 +1,10 @@
 ---
 id: TASK-120
 title: The Inbox and Issue Screens
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-20 00:35'
+updated_date: '2026-10-25 01:24'
 labels:
   - ST-120
 milestone: Tracking on Atlassian and the Inbox
