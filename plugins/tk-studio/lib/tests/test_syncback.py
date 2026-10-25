@@ -9,6 +9,10 @@ pinned here. No test makes a network call. Covered: the status mapping
 (both setup statuses), the append-once comment log and edits, the attachment
 links, the page mirror and the overwrite report, the cursor (an interrupted
 tick included), the 429 path, the three named states and the refusals.
+Story 32.4: an engagement's scope page read by id (`FakeScopeSyncBack`): an
+owner edit in `scoping` replaces `scope.md` wholesale and merges the
+version, in `quoted` only the mirror and a note, an unchanged version
+nothing, a 404 a note.
 """
 from __future__ import annotations
 
@@ -32,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "skills"
 
 import confluence  # noqa: E402
 import drift_check  # noqa: E402
+import engage  # noqa: E402
 import interchange  # noqa: E402
 import jirabackend  # noqa: E402
 import plansync  # noqa: E402
@@ -1053,6 +1058,272 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(syncback.slug_for("Owner: Notes — v2!"),
                          "owner-notes-v2")
         self.assertEqual(syncback.slug_for("!!!"), "page")
+
+
+
+# ------------------------------------------- engagement scope pages (32.4)
+
+ENG = "ENG-001"
+SCOPE_PAGE = "P-90"
+EDITED = ("<h1>ENG-001: Scope of Work</h1><h2 local-id=\"g\">Goal</h2>"
+          "<p><span>The owner rewrote the goal.</span></p>"
+          "<h2>Deliverables</h2><h3>CSV export</h3>"
+          "<p>Acceptance signal: a file downloads.</p>"
+          "<p><em>Published by tk-studio from <code>_bmad-output/engagements/"
+          "ENG-001/scope.md</code> at commit <code>no commit</code>. "
+          "content-hash: sha256:" + "0" * 64 + "</em></p>")
+
+
+class FakeScopeSyncBack(FakeSyncBack):
+    """FakeSyncBack plus `GET /pages/{id}` (body-format storage) for the
+    engagement scope pages, which are never in the owner's page list."""
+
+    def __init__(self):
+        super().__init__()
+        self.by_id: dict[str, dict] = {}
+
+    def scope_page(self, pid, body, version):
+        self.by_id[pid] = {
+            "id": pid, "title": f"{ENG}: Scope of Work",
+            "version": {"number": version},
+            "body": {"storage": {"value": body, "representation": "storage"}},
+            "_links": {"webui": f"/spaces/{KEY}/pages/{pid}"}}
+
+    def _confluence(self, method, path, query, body):
+        m = re.match(r"^/pages/([^/]+)$", path)
+        if method == "GET" and m:
+            q = {k: v[0] for k, v in urllib.parse.parse_qs(query).items()}
+            assert q.get("body-format") == "storage", q
+            page = self.by_id.get(m.group(1))
+            return (200, page) if page else (404, {"message": "not found"})
+        return super()._confluence(method, path, query, body)
+
+
+class EngagementScopeMirrorTests(SyncBackTestCase):
+    MIRROR = "kb/confluence/eng-001-scope-of-work.md"
+    SCOPE = "# ENG-001: Scope of Work\n\n## Goal\n\nThe planner's goal.\n"
+
+    def setUp(self):
+        super().setUp()
+        self.fake = FakeScopeSyncBack()
+        self.dir = self.root / "_bmad-output" / "engagements" / ENG
+        self.dir.mkdir(parents=True)
+        self.write_record("scoping")
+        (self.dir / "scope.md").write_text(self.SCOPE, encoding="utf-8",
+                                           newline="\n")
+
+    def write_record(self, state, version=1):
+        record = {"shape_version": 1, "id": ENG, "project": "tk-studio",
+                  "state": state, "request": "CSV export", "questions": [],
+                  "assumptions": [],
+                  "scope_page": {"id": SCOPE_PAGE,
+                                 "url": f"https://{SITE}/wiki/x",
+                                 "version": version},
+                  "quote": None, "autonomy": None, "approved_at": None,
+                  "closeout": None, "created": "2026-10-25T03:00:00.000Z",
+                  "updated": "2026-10-25T03:00:00.000Z",
+                  "spend": {"planning_usd": 0, "runs_usd": 0}, "inputs": []}
+        (self.dir / "engagement.yaml").write_text(
+            json.dumps(record, indent=2) + "\n", encoding="utf-8")
+
+    def record(self):
+        return json.loads((self.dir / "engagement.yaml")
+                          .read_text(encoding="utf-8"))
+
+    def scope_text(self):
+        return (self.dir / "scope.md").read_text(encoding="utf-8")
+
+    def test_an_owner_edit_while_scoping_replaces_scope_md_wholesale(self):
+        self.fake.scope_page(SCOPE_PAGE, EDITED, 2)
+        result = self.run_tick()
+        self.assert_block_last(result, "complete")
+        markdown = ("# ENG-001: Scope of Work\n\n## Goal\n\nThe owner "
+                    "rewrote the goal.\n\n## Deliverables\n\n### CSV export"
+                    "\n\nAcceptance signal: a file downloads.\n")
+        # replaced wholesale, unchecked (D9: the page is authoritative)
+        self.assertEqual(self.scope_text(), markdown)
+        record = self.record()
+        self.assertEqual(record["scope_page"],
+                         {"id": SCOPE_PAGE, "url": f"https://{SITE}/wiki/x",
+                          "version": 2})
+        self.assertEqual(record["state"], "scoping")
+        # the mirror: the header plus `engagement`, the Markdown body
+        text = (self.root / self.MIRROR).read_text(encoding="utf-8")
+        self.assertTrue(text.endswith("---\n" + markdown))
+        digest = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
+        for line in ("source: confluence", f'page_id: "{SCOPE_PAGE}"',
+                     'title: "ENG-001: Scope of Work"', "version: 2",
+                     f'url: "https://{SITE}/wiki/spaces/{KEY}/pages/'
+                     f'{SCOPE_PAGE}"', f"content_hash: sha256:{digest}",
+                     f"engagement: {ENG}"):
+            self.assertIn(line + "\n", text)
+        counts = result["counts"]
+        self.assertEqual((counts["engagement_pages_mirrored"],
+                          counts["scopes_replaced"]), (1, 1))
+        self.assertIn(self.MIRROR, result["written"])
+        self.assertIn(f"_bmad-output/engagements/{ENG}/scope.md",
+                      result["written"])
+        state = self.state()
+        self.assertEqual(state["engagement_pages"][SCOPE_PAGE]["version"], 2)
+        self.assertNotIn(SCOPE_PAGE, state.get("pages", {}))
+        self.assertFalse(any("gone or no longer" in n for n in result["notes"]))
+        # the next tick: nothing new
+        second = self.run_tick(minutes_later=10)
+        self.assertEqual((second["counts"]["engagement_pages_mirrored"],
+                          second["counts"]["scopes_replaced"]), (0, 0))
+        self.assertEqual(self.scope_text(), markdown)
+
+    def test_an_owner_edit_in_quoted_mirrors_only_with_a_note_once(self):
+        self.write_record("quoted")
+        before = (self.dir / "engagement.yaml").read_bytes()
+        self.fake.scope_page(SCOPE_PAGE, EDITED, 2)
+        result = self.run_tick()
+        self.assert_block_last(result, "complete")
+        self.assertTrue((self.root / self.MIRROR).is_file())
+        self.assertEqual(self.scope_text(), self.SCOPE)
+        self.assertEqual((self.dir / "engagement.yaml").read_bytes(), before)
+        note = f"scope edit of {ENG} not applied: state quoted (send revise)"
+        self.assertIn(note, result["notes"])
+        self.assertEqual(result["counts"]["scopes_replaced"], 0)
+        second = self.run_tick(minutes_later=10)
+        self.assertNotIn(note, second["notes"])
+        self.assertEqual(second["counts"]["engagement_pages_mirrored"], 0)
+        # a newer edit is noted once more
+        self.fake.scope_page(SCOPE_PAGE, EDITED.replace("rewrote", "redid"),
+                             3)
+        third = self.run_tick(minutes_later=20)
+        self.assertIn(note, third["notes"])
+        self.assertEqual(self.record()["state"], "quoted")
+
+    def test_an_edit_noted_in_quoted_is_applied_once_back_in_scoping(self):
+        self.write_record("quoted")
+        self.fake.scope_page(SCOPE_PAGE, EDITED, 2)
+        note = f"scope edit of {ENG} not applied: state quoted (send revise)"
+        first = self.run_tick()
+        self.assertIn(note, first["notes"])
+        self.assertEqual(first["counts"]["engagement_pages_mirrored"], 1)
+        mirror = (self.root / self.MIRROR).read_bytes()
+        self.assertEqual(self.scope_text(), self.SCOPE)
+        # a bodiless revise: back in scoping, the page itself unchanged
+        self.write_record("scoping")
+        second = self.run_tick(minutes_later=10)
+        self.assert_block_last(second, "complete")
+        markdown = ("# ENG-001: Scope of Work\n\n## Goal\n\nThe owner "
+                    "rewrote the goal.\n\n## Deliverables\n\n### CSV export"
+                    "\n\nAcceptance signal: a file downloads.\n")
+        self.assertEqual(self.scope_text(), markdown)
+        self.assertEqual(self.record()["scope_page"]["version"], 2)
+        self.assertEqual(self.record()["scope_page"]["id"], SCOPE_PAGE)
+        self.assertNotIn(note, second["notes"])
+        self.assertEqual((second["counts"]["engagement_pages_mirrored"],
+                          second["counts"]["scopes_replaced"]), (0, 1))
+        self.assertIn(f"_bmad-output/engagements/{ENG}/scope.md",
+                      second["written"])
+        self.assertNotIn(self.MIRROR, second["written"])
+        self.assertEqual((self.root / self.MIRROR).read_bytes(), mirror)
+        # applied: the next tick does nothing
+        third = self.run_tick(minutes_later=20)
+        self.assertEqual((third["counts"]["engagement_pages_mirrored"],
+                          third["counts"]["scopes_replaced"]), (0, 0))
+
+    def test_a_state_or_page_changed_before_the_lock_applies_nothing(self):
+        real = engage._with_scope_lock
+        page = {"id": SCOPE_PAGE, "version": 2, "body": EDITED}
+        for why, change in (("state", lambda: self.write_record("quoted")),
+                            ("page id", lambda: self.set_page_id("999"))):
+            with self.subTest(why=why):
+                self.write_record("scoping")
+
+                def racing(root, engagement, fn, **kwargs):
+                    return real(root, engagement,
+                                lambda: (change(), fn())[1], **kwargs)
+
+                with unittest.mock.patch("engage._with_scope_lock", racing):
+                    out = engage.apply_page_revision(self.root, ENG, page)
+                self.assertIs(out["applied"], False)
+                self.assertEqual(out["written"], [])
+                self.assertEqual(self.scope_text(), self.SCOPE)
+                self.assertEqual(self.record()["scope_page"]["version"], 1)
+
+    def set_page_id(self, pid):
+        record = self.record()
+        record["scope_page"]["id"] = pid
+        (self.dir / "engagement.yaml").write_text(
+            json.dumps(record, indent=2) + "\n", encoding="utf-8")
+
+    def test_an_unchanged_version_does_nothing_and_a_404_is_a_note(self):
+        self.fake.scope_page(SCOPE_PAGE, EDITED, 1)
+        result = self.run_tick()
+        self.assertEqual(result["counts"]["engagement_pages_mirrored"], 0)
+        self.assertFalse((self.root / self.MIRROR).exists())
+        self.assertEqual(self.scope_text(), self.SCOPE)
+        self.fake.by_id.clear()
+        gone = self.run_tick(minutes_later=10)
+        self.assert_block_last(gone, "complete")
+        self.assertTrue(any(f"scope page {SCOPE_PAGE} was not found (404)"
+                            in n for n in gone["notes"]))
+        self.assertEqual(self.scope_text(), self.SCOPE)
+
+    def test_a_confluence_error_is_partial(self):
+        self.fake.force[("GET", f"confluence:/pages/{SCOPE_PAGE}")] = (
+            500, {"message": "boom"})
+        result = self.run_tick()
+        self.assert_block_last(result, "partial")
+        self.assertIn("engagement scope mirror interrupted", result["reason"])
+        self.assertEqual(self.scope_text(), self.SCOPE)
+
+    def test_a_held_scope_lock_retries_on_the_next_tick(self):
+        self.fake.scope_page(SCOPE_PAGE, EDITED, 2)
+        (self.dir / "scope.lock").write_text("", encoding="utf-8")
+        with unittest.mock.patch("engage.SCOPE_LOCK_WAIT_S", 0):
+            result = self.run_tick()
+        (self.dir / "scope.lock").unlink()
+        self.assertEqual(self.scope_text(), self.SCOPE)
+        self.assertTrue(any("ScopeBusy" in n for n in result["notes"]))
+        self.assertNotIn(SCOPE_PAGE, self.state().get("engagement_pages", {}))
+        again = self.run_tick(minutes_later=10)
+        self.assertEqual(again["counts"]["scopes_replaced"], 1)
+        self.assertEqual(self.record()["scope_page"]["version"], 2)
+
+    def test_a_version_published_while_the_tick_waited_is_not_overwritten(self):
+        # the tick GETs version 2; before it takes scope.lock a concurrent
+        # `engage.py scope` publishes version 3 and records it
+        self.fake.scope_page(SCOPE_PAGE, EDITED, 2)
+        real = engage._with_scope_lock
+        published = "# ENG-001: Scope of Work\n\n## Goal\n\nPublished v3.\n"
+
+        def racing(root, engagement, fn, **kwargs):
+            def concurrent_publish():
+                (self.dir / "scope.md").write_text(published,
+                                                   encoding="utf-8",
+                                                   newline="\n")
+                self.write_record("scoping", version=3)
+            return real(root, engagement,
+                        lambda: (concurrent_publish(), fn())[1], **kwargs)
+
+        with unittest.mock.patch("engage._with_scope_lock", racing):
+            result = self.run_tick()
+        self.assert_block_last(result, "complete")
+        self.assertEqual(self.scope_text(), published)  # not the stale v2
+        self.assertEqual(self.record()["scope_page"]["version"], 3)
+        self.assertEqual(result["counts"]["scopes_replaced"], 0)
+        self.assertFalse(any("not applied" in n for n in result["notes"]))
+        # and directly: a record at or past the page's version applies nothing
+        before = (self.dir / "engagement.yaml").read_bytes()
+        out = engage.apply_page_revision(
+            self.root, ENG, {"id": SCOPE_PAGE, "version": 3, "body": EDITED})
+        self.assertEqual((out["applied"], out["retry"], out["note"],
+                          out["written"]), (False, False, None, []))
+        self.assertEqual(self.scope_text(), published)
+        self.assertEqual((self.dir / "engagement.yaml").read_bytes(), before)
+
+    def test_a_dry_run_writes_nothing(self):
+        self.fake.scope_page(SCOPE_PAGE, EDITED, 2)
+        result = self.run_tick(dry_run=True)
+        self.assertEqual(result["counts"]["engagement_pages_mirrored"], 1)
+        self.assertFalse((self.root / self.MIRROR).exists())
+        self.assertEqual(self.scope_text(), self.SCOPE)
+        self.assertEqual(self.record()["scope_page"]["version"], 1)
 
 
 if __name__ == "__main__":

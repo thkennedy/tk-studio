@@ -52,6 +52,43 @@ the written file once per `run_id` (the 32.1 event row `questions`, source
 fourth), `QuestionInvalid` (naming the index), `EngagementClosed`,
 `NotIntake` (any state but `intake`), `RunIdRequired`, plus the record's.
 
+The `scope` verb (Story 32.4, user flow F2 step 3) is the engagement's
+scope of work, published to Confluence:
+
+  uv run engage.py scope --directory ROOT --engagement ENG-NNN
+      [--scope-file PATH | --revise-at AT] [--dry-run]
+
+In `scoping` only (else `NotScoping`, or `EngagementClosed`). The planner's
+`scope.md` (`--scope-file`, default the engagement's own `scope.md`) is
+checked first (Settled shape 1): the `##` sections `Goal`, `Deliverables`
+(each `### <title>` with an `Acceptance signal:` line, else
+`DeliverableWithoutSignal: <title>`), `Exclusions`, `What the studio needs
+from you` (each list item dated `YYYY-MM-DD`), `Milestones` and `Proposed
+epics and stories` (`### Epic <k>: …` / `#### Story <k>.<m>: …` in
+`epics.md`'s story shape, at least one story), in that order, each
+non-empty, plus an optional last `## Assumptions` naming each of the
+record's `assumptions[]` question ids (else `AssumptionUnstated: <id>`);
+any other shape is `ScopeInvalid: <what>`. `--revise-at AT` instead takes
+the body of the record's `revise` input logged at `AT` verbatim (unchecked,
+D9; none: `ReviseNotFound`). Under `scope.lock` (the `chat.lock` pattern;
+held: `ScopeBusy`, `partial` with `retry: true`) the text lands as
+`_bmad-output/engagements/<id>/scope.md` (atomically, when it differs) and
+is published as the page `ENG-NNN: Scope of Work` in the folder
+`Engagements/ENG-NNN` (each found by title, else created) with 31.3's
+provenance footer, skipped when the remote footer's content hash matches;
+then the record is re-read fresh and only `scope_page {id, url, version}`
+and `updated` are merged into it. No binding is `ConfluenceUnbound`; an
+absent agent-seat variable is named; a refused write is `PublishRefused`;
+a 429 or 5xx is `partial` with `retry: true` (`scope.md` kept,
+`scope_page` unchanged); `scope.md`, the record or `scope.lock` refused by
+the OS is `ScopeUnwritable: <path>: <error>` (`written` names what had
+already landed). Nothing is written under `plan/`,
+`_bmad-output/planning-artifacts/` or `.tk-studio/`: the proposed epics and
+stories become plan entities only at approval (32.6). The sync-back mirrors
+an owner's edit of the page back through `apply_page_revision` (Settled
+shape 3). The `reply` memory carries `scope {path, text}` (null while
+there is none), so the planner's next turn reads the current scope.
+
 Refusals end `blocked` (exit 2), each named in `reason`: `BadEngagement`,
 `UnknownEngagement` (no record), `EngagementRecordUnreadable` (not JSON, or
 not a record), `EngagementClosed` (`delivered`, `failed`, `cancelled`),
@@ -66,6 +103,7 @@ and no supervisor code.
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import math
 import os
@@ -76,6 +114,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import config as configlib
+import mdstorage
 from job import atomic_write_text
 
 INTENT = "tk-studio-engage"
@@ -468,7 +507,8 @@ def questions(project_root: Path, engagement: str, asked=None,
 
 # ------------------------------------------------------------ the chat lock
 
-def _take_over_stale(lock: Path, clock) -> None:
+def _take_over_stale(lock: Path, clock,
+                     stale_s: float = CHAT_LOCK_STALE_S) -> None:
     """Take a stale lock over atomically: rename it to a unique name (of
     two writers that saw it stale, one rename wins; the other finds it
     gone). What was moved is checked once more: not stale (another writer
@@ -482,7 +522,7 @@ def _take_over_stale(lock: Path, clock) -> None:
     except FileNotFoundError:
         return
     try:
-        if clock() - aside.stat().st_mtime <= CHAT_LOCK_STALE_S:
+        if clock() - aside.stat().st_mtime <= stale_s:
             try:
                 os.link(aside, lock)
             except OSError:
@@ -575,7 +615,8 @@ def reply(project_root: Path, engagement: str, body: str | None = None,
         if mode == "memory":
             result.update({"record": record,
                            "chat": read_chat(root, engagement),
-                           "memory": memory(root)})
+                           "memory": memory(root),
+                           "scope": read_scope(root, engagement)})
             return _finish(result, "complete", None)
         if not body.strip():
             raise Refused("BodyEmpty", "the reply body is empty")
@@ -600,6 +641,561 @@ def reply(project_root: Path, engagement: str, body: str | None = None,
         return _finish(result, "blocked", f"engage refused: {exc}")
 
 
+# ------------------------------------------------------------ the scope
+
+SCOPE_SECTIONS = ("Goal", "Deliverables", "Exclusions",
+                  "What the studio needs from you", "Milestones",
+                  "Proposed epics and stories")
+ASSUMPTIONS_SECTION = "Assumptions"
+SCOPE_TITLE = "{engagement}: Scope of Work"
+ENGAGEMENTS_FOLDER = "Engagements"
+SCOPE_LOCK_WAIT_S = 5.0
+# scope.lock wraps Confluence I/O, so it is stale only well past the worst
+# publish: ~8 requests (folders, page lookup, GET, PUT, a few result pages)
+# each up to the 30 s urlopen timeout, plus the client's 90 s 429 wait
+# budget (jirabackend.RETRY_WAIT_BUDGET) — about 330 s; 900 s leaves a
+# wide margin and stays far from chat.lock's 30 s.
+SCOPE_LOCK_STALE_S = 900.0
+SCOPE_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+SCOPE_H_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+# `**Acceptance signal:** …` and `**Acceptance signal**: …` (the colon inside
+# or outside the bold) and the plain `Acceptance signal: …`
+SIGNAL_RE = re.compile(r"^\s*(?:[-*+]\s+)?(?:\*\*|__)?Acceptance signal"
+                       r"(?:\*\*|__)?:(?:\*\*|__)?\s*(.*)$", re.IGNORECASE)
+SCOPE_ITEM_RE = re.compile(r"^([-*+]|\d{1,9}[.)])\s+")
+ISO_DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
+EPIC_RE = re.compile(r"^Epic\s+(\d+)\s*:\s*\S")
+STORY_RE = re.compile(r"^Story\s+(\d+)\.(\d+)\s*:\s*\S")
+STORY_SHAPE = (("As a", re.compile(r"\bAs an?\b")),
+               ("I want", re.compile(r"\bI want\b")),
+               ("So that", re.compile(r"\bSo that\b")),
+               ("**Acceptance Criteria:**",
+                re.compile(r"Acceptance Criteria", re.IGNORECASE)))
+SCOPE_TRANSIENT_RE = re.compile(r"\bcannot reach\b|\breturned 5\d\d\b|"
+                                r"^HTTP 5\d\d\b")
+
+
+def scope_rel(engagement: str) -> str:
+    return f"_bmad-output/engagements/{engagement}/scope.md"
+
+
+def read_scope(root: Path, engagement: str) -> dict | None:
+    """`{path, text}` of the engagement's `scope.md`, or None."""
+    path = engagement_dir(root, engagement) / "scope.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    return {"path": scope_rel(engagement), "text": text}
+
+
+def _headings(text: str) -> list[tuple[int, int, str]]:
+    """(line index, level, title) of every ATX heading outside a fence."""
+    out, fence = [], None
+    for i, line in enumerate(text.replace("\r\n", "\n").split("\n")):
+        opened = SCOPE_FENCE_RE.match(line)
+        if fence is not None:
+            if opened and opened.group(1)[0] == fence[0] \
+                    and len(opened.group(1)) >= len(fence):
+                fence = None
+            continue
+        if opened:
+            fence = opened.group(1)
+            continue
+        m = SCOPE_H_RE.match(line)
+        if m:
+            out.append((i, len(m.group(1)), m.group(2).strip()))
+    return out
+
+
+def parse_scope(text: str) -> dict:
+    """The scope's `##` sections in order: `{sections: [(title, body
+    lines)], headings}`; text before the first `##` is the preamble."""
+    lines = text.replace("\r\n", "\n").split("\n")
+    heads = _headings(text)
+    tops = [(i, title) for i, level, title in heads if level == 2]
+    sections = []
+    for n, (i, title) in enumerate(tops):
+        end = tops[n + 1][0] if n + 1 < len(tops) else len(lines)
+        sections.append((title, lines[i + 1:end]))
+    return {"sections": sections}
+
+
+def _subsections(body: list[str], level: int) -> list[tuple[str, list[str]]]:
+    """The `level` headings of a section body with their lines (deeper
+    headings stay inside)."""
+    text = "\n".join(body)
+    heads = [(i, t) for i, lv, t in _headings(text) if lv == level]
+    out = []
+    for n, (i, title) in enumerate(heads):
+        stop = len(body)
+        for j, lv, _t in _headings(text):
+            if j > i and lv <= level:
+                stop = j
+                break
+        out.append((title, body[i + 1:stop]))
+    return out
+
+
+def check_scope(text: str, assumptions=None) -> None:
+    """The planner's `scope.md` checked (Settled shapes 1 and 5); raises the
+    named refusal, else returns None."""
+    sections = parse_scope(text)["sections"]
+    known = [s.casefold() for s in SCOPE_SECTIONS + (ASSUMPTIONS_SECTION,)]
+    titles = [title for title, _ in sections]
+    for title in titles:
+        if title.casefold() not in known:
+            raise Refused("ScopeInvalid", f"unknown section '## {title}' "
+                          f"(allowed, in order: "
+                          f"{', '.join(SCOPE_SECTIONS)}, then an optional "
+                          f"{ASSUMPTIONS_SECTION})")
+    folded = [t.casefold() for t in titles]
+    for name in SCOPE_SECTIONS + (ASSUMPTIONS_SECTION,):
+        if folded.count(name.casefold()) > 1:
+            raise Refused("ScopeInvalid", f"section '## {name}' appears "
+                          f"twice")
+    for name in SCOPE_SECTIONS:
+        if name.casefold() not in folded:
+            raise Refused("ScopeInvalid", f"section '## {name}' is missing")
+    expected = list(SCOPE_SECTIONS)
+    if ASSUMPTIONS_SECTION.casefold() in folded:
+        expected.append(ASSUMPTIONS_SECTION)
+    for title, want in zip(titles, expected):
+        if title.casefold() != want.casefold():
+            raise Refused("ScopeInvalid", f"section '## {title}' is out of "
+                          f"order (expected '## {want}' there)")
+    body = {title.casefold(): lines for title, lines in sections}
+    for name in SCOPE_SECTIONS + ((ASSUMPTIONS_SECTION,)
+                                  if ASSUMPTIONS_SECTION.casefold() in body
+                                  else ()):
+        if not "\n".join(body[name.casefold()]).strip():
+            raise Refused("ScopeInvalid", f"section '## {name}' is empty")
+    # deliverables: each `### <title>` carries its acceptance signal
+    deliverables = _subsections(body["deliverables"], 3)
+    if not deliverables:
+        raise Refused("ScopeInvalid", "section '## Deliverables' names no "
+                      "deliverable (### <title>)")
+    for title, lines in deliverables:
+        if not any((m := SIGNAL_RE.match(line)) and m.group(1).strip()
+                   for line in lines):
+            raise Refused("DeliverableWithoutSignal", title)
+    # dependencies: each list item dated
+    n = 0
+    for line in body["what the studio needs from you"]:
+        if not SCOPE_ITEM_RE.match(line):
+            continue
+        n += 1
+        dated = False
+        for found in ISO_DATE_RE.findall(line):
+            try:
+                datetime.strptime(found, "%Y-%m-%d")
+                dated = True
+            except ValueError:
+                pass
+        if not dated:
+            raise Refused("ScopeInvalid", f"dependency {n} has no date "
+                          f"(YYYY-MM-DD)")
+    # proposed epics and stories, in epics.md's story shape
+    stories = 0
+    for etitle, elines in _subsections(body["proposed epics and stories"], 3):
+        if not EPIC_RE.match(etitle):
+            raise Refused("ScopeInvalid", f"'### {etitle}' is not an epic "
+                          f"heading (### Epic <k>: <title>)")
+        for stitle, slines in _subsections(elines, 4):
+            if not STORY_RE.match(stitle):
+                raise Refused("ScopeInvalid", f"'#### {stitle}' is not a "
+                              f"story heading (#### Story <k>.<m>: <title>)")
+            story = "\n".join(slines)
+            for label, pattern in STORY_SHAPE:
+                if not pattern.search(story):
+                    raise Refused("ScopeInvalid", f"'#### {stitle}' has no "
+                                  f"'{label}' (epics.md's story shape)")
+            stories += 1
+    if not stories:
+        raise Refused("ScopeInvalid", "no proposed story (#### Story <k>.<m>: "
+                      "<title> under ### Epic <k>: <title>)")
+    # an image is never part of a scope
+    storage, images = mdstorage.convert(text, "scope.md")
+    if images:
+        raise Refused("ScopeInvalid", f"an image ({images[0]['path']}) — a "
+                      f"scope carries no image")
+    if "<ac:image" in storage:
+        # a web image (`https://…`, `//…`) is an `ri:url`, no attachment
+        found = re.search(r'<ac:image[^>]*>\s*<ri:url ri:value="([^"]*)"',
+                          storage)
+        src = html.unescape(found.group(1)) if found else "a web image"
+        raise Refused("ScopeInvalid", f"an image ({src}) — a scope carries "
+                      f"no image")
+    # the assumptions named on the page (Settled shape 5)
+    stated = "\n".join(body.get(ASSUMPTIONS_SECTION.casefold(), []))
+    for entry in assumptions or []:
+        qid = entry.get("question") if isinstance(entry, dict) else None
+        if not isinstance(qid, str) or not qid:
+            continue
+        if not re.search(r"(?<![a-z0-9-])" + re.escape(qid) + r"(?![a-z0-9-])",
+                         stated):
+            raise Refused("AssumptionUnstated", qid)
+
+
+def _with_scope_lock(root: Path, engagement: str, fn,
+                     wait_s=SCOPE_LOCK_WAIT_S, clock=time.time,
+                     sleep=time.sleep):
+    """Run `fn` holding `scope.lock` (the `chat.lock` rule: exclusive
+    create, retaken when stale, held past `wait_s`: ScopeBusy), stale only
+    after SCOPE_LOCK_STALE_S (it wraps Confluence I/O). The lock holds a
+    token unique to this holder, and release removes it only while it still
+    holds that token: a lock taken over by another writer is never
+    removed by the first holder."""
+    lock = engagement_dir(root, engagement) / "scope.lock"
+    token = f"{os.getpid()}-{os.urandom(8).hex()}"
+    deadline = clock() + wait_s
+    while True:
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                if clock() - lock.stat().st_mtime > SCOPE_LOCK_STALE_S:
+                    _take_over_stale(lock, clock, SCOPE_LOCK_STALE_S)
+                    continue
+            except FileNotFoundError:
+                continue
+            if clock() >= deadline:
+                raise Refused("ScopeBusy", f"_bmad-output/engagements/"
+                              f"{engagement}/scope.lock is held") from None
+            sleep(0.02)
+            continue
+        try:
+            os.write(fd, token.encode("ascii"))
+        finally:
+            os.close(fd)
+        try:
+            return fn()
+        finally:
+            _release_scope_lock(lock, token)
+
+
+def _release_scope_lock(lock: Path, token: str) -> None:
+    """Remove `lock` only while it still holds this holder's `token`."""
+    try:
+        held = lock.read_text(encoding="ascii", errors="replace")
+    except (FileNotFoundError, OSError):
+        return
+    if held != token:
+        return
+    try:
+        lock.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _merge_record(root: Path, engagement: str, changes: dict) -> None:
+    """Re-read the record fresh and merge only `changes` (the
+    `chatSpendPass` rule), written atomically as JSON text."""
+    record = read_record(root, engagement)
+    record.update(changes)
+    atomic_write_text(engagement_dir(root, engagement) / "engagement.yaml",
+                      json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+
+
+class _Transient(Exception):
+    """A 429 or 5xx, or the network: `partial`, `retry: true`."""
+
+
+def _page_url(site: str | None, webui: str | None) -> str | None:
+    site = re.sub(r"^https?://", "", site or "").strip("/")
+    if site and webui:
+        return f"https://{site}/wiki{webui}"
+    return webui
+
+
+def _publish_scope(root: Path, engagement: str, text: str, space_id: str,
+                   site: str | None, transport, sleep,
+                   recorded_version=None) -> dict:
+    """The page `ENG-NNN: Scope of Work` in `Engagements/ENG-NNN` (Settled
+    shape 2): `{id, url, version, action}`. `skipped` only when the footer
+    hash matches and the page is still at `recorded_version` (or none is
+    recorded): an owner's newer version is overwritten at version + 1
+    (local wins), never adopted unmirrored."""
+    import confluence
+    import plansync
+    try:
+        client = confluence.ConfluenceClient.from_env(transport)
+        if sleep is not None:
+            client.sleep = sleep
+
+        def refused(what: str, detail: str):
+            if SCOPE_TRANSIENT_RE.search(detail):
+                return _Transient(f"{what}: {detail}")
+            return Refused("PublishRefused", f"{what}: {detail}")
+
+        parent = confluence.find_folders(client, space_id).get(
+            ENGAGEMENTS_FOLDER)
+        if parent is None:
+            made, detail = confluence.create_folder(client, space_id,
+                                                    ENGAGEMENTS_FOLDER)
+            if made is None:
+                raise refused(f"folder {ENGAGEMENTS_FOLDER} create refused",
+                              detail)
+            parent = str(made["id"])
+        folder = confluence.find_child_folder(client, parent, engagement)
+        if folder is None:
+            made, detail = confluence.create_folder(client, space_id,
+                                                    engagement,
+                                                    parent_id=parent)
+            if made is None:
+                raise refused(f"folder {ENGAGEMENTS_FOLDER}/{engagement} "
+                              f"create refused", detail)
+            folder = str(made["id"])
+        title = SCOPE_TITLE.format(engagement=engagement)
+        rel = scope_rel(engagement)
+        storage, _images = mdstorage.convert(text, rel)
+        digest = plansync.page_hash(title, storage, [])
+        body = storage + plansync.page_footer(
+            rel, plansync._provenance(root, rel), digest)
+        page_id = confluence.find_page(client, folder, title)
+        if page_id is not None:
+            page = confluence.get_page(client, page_id)
+            hashes = plansync.FOOTER_HASH_RE.findall(confluence.page_body(page))
+            remote = confluence.page_version(page)
+            if hashes and hashes[-1] == digest and (
+                    recorded_version is None or remote == recorded_version):
+                return {"id": page_id,
+                        "url": _page_url(site, plansync._webui(page)),
+                        "version": confluence.page_version(page),
+                        "action": "skipped"}
+            put, detail = confluence.update_page(
+                client, page_id, title, body,
+                confluence.page_version(page) + 1)
+            if put is None:
+                raise refused(f"page {title} update refused", detail)
+            webui = plansync._webui(put) or plansync._webui(page)
+            version = confluence.page_version(put) \
+                or confluence.page_version(page) + 1
+            return {"id": page_id, "url": _page_url(site, webui),
+                    "version": version, "action": "updated"}
+        made, detail = confluence.create_page(client, space_id, folder, title,
+                                              body)
+        if made is None:
+            raise refused(f"page {title} create refused", detail)
+        return {"id": str(made["id"]),
+                "url": _page_url(site, plansync._webui(made)),
+                "version": confluence.page_version(made) or 1,
+                "action": "created"}
+    except confluence.RateLimited as exc:
+        raise _Transient(str(exc)) from None
+    except confluence.ConfluenceError as exc:
+        if SCOPE_TRANSIENT_RE.search(str(exc)):
+            raise _Transient(str(exc)) from None
+        raise Refused("PublishRefused", str(exc)) from None
+
+
+def scope(project_root: Path, engagement: str, text: str | None = None,
+          revise_at: str | None = None, dry_run: bool = False, now=None,
+          transport=None, sleep=None, lock_wait_s=SCOPE_LOCK_WAIT_S) -> dict:
+    """The `scope` verb (see the module docstring): `text` is the planner's
+    scope (checked); `revise_at` names the `revise` input whose body is
+    taken verbatim."""
+    import confluence
+    import plansync
+    root = Path(project_root).resolve()
+    result = _result(engagement, "scope", dry_run)
+    result.update({"source": "revise" if revise_at is not None
+                   else "planner", "scope": scope_rel(engagement),
+                   "page": None})
+    try:
+        if not ENGAGEMENT_ID_RE.match(engagement or ""):
+            raise Refused("BadEngagement", f"--engagement {engagement!r} is "
+                          f"not an engagement id (ENG-001)")
+        record = read_record(root, engagement)
+        state = record.get("state")
+        if state in TERMINAL_STATES:
+            raise Refused("EngagementClosed", f"{engagement} is {state}; "
+                          f"nothing is written")
+        if state != "scoping":
+            raise Refused("NotScoping", f"{engagement} is {state}; the scope "
+                          f"is written only in scoping")
+        if revise_at is not None:
+            line = next((l for l in reversed(record.get("inputs") or [])
+                         if isinstance(l, dict) and l.get("verb") == "revise"
+                         and l.get("at") == revise_at), None)
+            body = ((line or {}).get("payload") or {}).get("body") \
+                if isinstance((line or {}).get("payload"), dict) else None
+            if not _non_empty(body):
+                raise Refused("ReviseNotFound", f"no revise input with a "
+                              f"body at {revise_at!r} in {engagement}'s "
+                              f"inputs[]")
+            text = body
+        else:
+            if text is None:
+                raise Refused("ScopeInvalid", "no scope text")
+            check_scope(text, record.get("assumptions"))
+        space_id = plansync._recorded(root, "planning.confluence.space_id")
+        if space_id is None:
+            raise Refused("ConfluenceUnbound", "planning.confluence.space_id "
+                          "is not recorded — run `plansync.py setup` first")
+        gaps = confluence.env_gaps()
+        if gaps:
+            raise Refused("ConfluenceEnvMissing", "; ".join(gaps))
+        if dry_run:
+            result["notes"].append("dry run: scope.md was not written and "
+                                   "the page not published")
+            return _finish(result, "partial", "dry run: nothing written; a "
+                           "real run would write `scope` and publish it")
+        site = plansync._recorded(root, "planning.jira.site")
+        path = engagement_dir(root, engagement) / "scope.md"
+
+        def write_and_publish() -> dict:
+            # re-checked under the lock: the state may have left scoping
+            # since the unlocked check above
+            fresh = read_record(root, engagement)
+            fresh_state = fresh.get("state")
+            if fresh_state in TERMINAL_STATES:
+                raise Refused("EngagementClosed", f"{engagement} is "
+                              f"{fresh_state}; nothing is written")
+            if fresh_state != "scoping":
+                raise Refused("NotScoping", f"{engagement} is {fresh_state}; "
+                              f"the scope is written only in scoping")
+            try:
+                current = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                current = None
+            if current != text:
+                try:
+                    atomic_write_text(path, text)
+                except OSError as exc:
+                    raise Refused("ScopeUnwritable", f"{scope_rel(engagement)}"
+                                  f": {exc.__class__.__name__}") from None
+                result["written"].append(scope_rel(engagement))
+            recorded = fresh.get("scope_page") \
+                if isinstance(fresh.get("scope_page"), dict) else {}
+            try:
+                recorded_version = int(recorded["version"]) \
+                    if recorded.get("version") is not None else None
+            except (TypeError, ValueError):
+                recorded_version = None
+            page = _publish_scope(root, engagement, text, space_id, site,
+                                  transport, sleep, recorded_version)
+            record_rel = f"_bmad-output/engagements/{engagement}/" \
+                         f"engagement.yaml"
+            try:
+                _merge_record(root, engagement, {
+                    "scope_page": {"id": page["id"], "url": page["url"],
+                                   "version": page["version"]},
+                    "updated": now or _now()})
+            except OSError as exc:
+                # scope.md (in `written`) and the page are already out; only
+                # the record's scope_page is behind
+                result["notes"].append(f"page {page['id']} published at "
+                                       f"version {page['version']}; "
+                                       f"scope_page unchanged")
+                raise Refused("ScopeUnwritable", f"{record_rel}: "
+                              f"{exc.__class__.__name__}") from None
+            result["written"].append(record_rel)
+            return page
+
+        try:
+            result["page"] = _with_scope_lock(root, engagement,
+                                              write_and_publish,
+                                              wait_s=lock_wait_s)
+        except _Transient as exc:
+            result["retry"] = True
+            result["notes"].append("scope.md kept; scope_page unchanged; "
+                                   "rerun to publish")
+            return _finish(result, "partial", f"engage scope transient: "
+                           f"{exc}")
+        except Refused as exc:
+            if exc.name != "ScopeBusy":
+                raise
+            result["retry"] = True
+            return _finish(result, "partial", f"engage scope busy: {exc}")
+        except OSError as exc:  # the lock itself refused by the OS
+            raise Refused("ScopeUnwritable", f"scope.lock: "
+                          f"{exc.__class__.__name__}") from None
+        if revise_at is not None:
+            result["revise_at"] = revise_at
+        return _finish(result, "complete", None)
+    except Refused as exc:
+        return _finish(result, "blocked", f"engage refused: {exc}")
+
+
+def apply_page_revision(root: Path, engagement: str, page: dict,
+                        now=None) -> dict:
+    """An owner's edit of the scope page, mirrored by the sync-back
+    (Settled shape 3). `page` is `{id, version, body}` (`body` the storage
+    format). In `scoping` its Markdown replaces `scope.md` wholesale,
+    unchecked (the page is authoritative, D9), and `scope_page.version` is
+    merged; in any other state nothing changes and the answer names why.
+    Re-checked under `scope.lock`: a record already at or past the page's
+    version (a concurrent `scope` publish) applies nothing, without a note.
+    Answers `{applied, retry, note, markdown, written[]}`; never raises."""
+    root = Path(root)
+    out = {"applied": False, "retry": False, "note": None,
+           "markdown": mdstorage.to_markdown(page.get("body") or ""),
+           "written": []}
+    try:
+        record = read_record(root, engagement)
+    except Refused as exc:
+        out["note"] = f"scope edit of {engagement} not applied: {exc}"
+        return out
+    sp = record.get("scope_page") if isinstance(record.get("scope_page"),
+                                                dict) else {}
+    if str(sp.get("id")) != str(page.get("id")):
+        out["note"] = (f"scope edit of {engagement} not applied: page "
+                       f"{page.get('id')} is not its scope page")
+        return out
+    state = record.get("state")
+    if state != "scoping":
+        out["note"] = (f"scope edit of {engagement} not applied: state "
+                       f"{state} (send revise)")
+        return out
+    version = page.get("version")
+    path = engagement_dir(root, engagement) / "scope.md"
+
+    def replace() -> bool:
+        # re-checked under the lock: a concurrent `engage.py scope` may have
+        # published a version at or past this one since the sync-back's GET
+        fresh = read_record(root, engagement)
+        merged = dict(fresh.get("scope_page") or {}) \
+            if isinstance(fresh.get("scope_page"), dict) else {}
+        # ... and the state or the scope page may have changed since
+        if fresh.get("state") != "scoping" \
+                or str(merged.get("id")) != str(page.get("id")):
+            return False
+        try:
+            current = int(merged.get("version") or 0)
+        except (TypeError, ValueError):
+            current = 0
+        try:
+            if current >= int(version):
+                return False
+        except (TypeError, ValueError):
+            pass
+        atomic_write_text(path, out["markdown"])
+        merged["version"] = version
+        _merge_record(root, engagement, {"scope_page": merged,
+                                         "updated": now or _now()})
+        return True
+
+    try:
+        applied = _with_scope_lock(root, engagement, replace,
+                                   wait_s=SCOPE_LOCK_WAIT_S)
+    except Refused as exc:
+        out["retry"] = exc.name == "ScopeBusy"
+        out["note"] = f"scope edit of {engagement} not applied: {exc}"
+        return out
+    except OSError as exc:
+        out["retry"] = True
+        out["note"] = (f"scope edit of {engagement} not applied: "
+                       f"{exc.__class__.__name__}")
+        return out
+    if not applied:
+        return out  # already at or past this version: nothing to apply
+    out["applied"] = True
+    out["written"] = [scope_rel(engagement),
+                      f"_bmad-output/engagements/{engagement}/engagement.yaml"]
+    return out
+
+
 # --------------------------------------------------------------------- CLI
 
 def _questions_main(directory: Path, args) -> int:
@@ -619,6 +1215,28 @@ def _questions_main(directory: Path, args) -> int:
                        f"({exc.msg})")
     result = questions(directory, args.engagement, asked, run_id=args.run_id,
                        dry_run=args.dry_run)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 2 if result.get("status") == "blocked" else 0
+
+
+def _scope_main(directory: Path, args, transport=None) -> int:
+    text = None
+    if args.revise_at is None:
+        source = Path(args.scope_file) if args.scope_file else \
+            engagement_dir(Path(directory).resolve(), args.engagement) \
+            / "scope.md"
+        try:
+            text = source.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            result = _finish(_result(args.engagement, "scope", args.dry_run),
+                             "blocked", f"engage refused: ScopeInvalid: "
+                             f"cannot read --scope-file: "
+                             f"{exc.__class__.__name__}; nothing written")
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 2
+    result = scope(directory, args.engagement, text=text,
+                   revise_at=args.revise_at, dry_run=args.dry_run,
+                   transport=transport)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 2 if result.get("status") == "blocked" else 0
 
@@ -650,10 +1268,23 @@ def main(argv: list[str] | None = None) -> int:
     qst.add_argument("--questions-file", required=True,
                      help="a JSON array of {id, text, options, impact}")
     qst.add_argument("--dry-run", action="store_true")
+    scp = sub.add_parser("scope")
+    scp.add_argument("--directory", required=True,
+                     help="project root (the served root, project_root)")
+    scp.add_argument("--engagement", required=True, help="ENG-NNN")
+    source = scp.add_mutually_exclusive_group()
+    source.add_argument("--scope-file", help="the planner's scope.md "
+                                             "(default: the engagement's "
+                                             "own scope.md)")
+    source.add_argument("--revise-at", help="the `at` of the revise input "
+                                            "whose body becomes the scope")
+    scp.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     directory = configlib.find_project_root(Path(args.directory))
     if args.command == "questions":
         return _questions_main(directory, args)
+    if args.command == "scope":
+        return _scope_main(directory, args)
     mode = "write" if args.body_file is not None else "memory"
     texts = {}
     for name in ("body_file", "proposals_file"):

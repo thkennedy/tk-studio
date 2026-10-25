@@ -17,6 +17,12 @@ queries Atlassian live for context:
   - every owner-authored page of `planning.confluence.space_id` into
     `kb/confluence/<slug>.md`, storage XHTML verbatim under a provenance
     header; a local edit is overwritten and reported in `overwritten[]`.
+  - (Story 32.4) each engagement's scope page (`scope_page.id` in
+    `_bmad-output/engagements/*/engagement.yaml`) read by id: a version
+    above the recorded one is mirrored into `kb/confluence/<slug>.md` as
+    Markdown (`mdstorage.to_markdown`, the header plus `engagement`; state
+    under `sync-state.json` `engagement_pages`) and, while `scoping`,
+    replaces `scope.md` wholesale through `engage.apply_page_revision`;
   - the inbox (Story 31.5): `_bmad-output/tracking/inbox.json`, derived
     by `inbox.derive` from the tick's search and the comment logs, only
     after a non-dry-run tick that read every page.
@@ -46,6 +52,7 @@ from pathlib import Path
 import confluence
 import inbox
 import jirabackend
+import mdstorage
 
 TRACKING_REL = Path("_bmad-output") / "tracking"
 STATE_REL = TRACKING_REL / "sync-state.json"
@@ -76,7 +83,8 @@ def new_result(dry_run: bool) -> dict:
             "counts": {"issues": 0, "statuses_applied": 0, "conflicts": 0,
                        "comments_seen": 0, "comments_appended": 0,
                        "attachments_appended": 0, "pages_mirrored": 0,
-                       "pages_unchanged": 0, "pages_overwritten": 0},
+                       "pages_unchanged": 0, "pages_overwritten": 0,
+                       "engagement_pages_mirrored": 0, "scopes_replaced": 0},
             "newest_comment": None, "applied": [], "conflicts": [],
             "overwritten": [], "rate_limit": {}, "notes": [], "written": []}
 
@@ -451,6 +459,98 @@ def mirror_pages(root: Path, result: dict, state: dict, conf, space_id: str,
                                f"mirrored")
 
 
+ENGAGEMENTS_REL = Path("_bmad-output") / "engagements"
+
+
+def mirror_engagement_pages(root: Path, result: dict, state: dict, conf,
+                            space_key: str | None, site: str | None,
+                            now: datetime) -> None:
+    """Story 32.4 (Settled shape 3): read each engagement's scope page by
+    id; a version above the record's `scope_page.version` not mirrored yet
+    is written to `kb/confluence/<slug>.md` (Markdown under the mirror
+    header plus `engagement`) and handed to `engage.apply_page_revision`
+    (in `scoping` it replaces `scope.md`; in any other state a note, once
+    per version). Its state lives under `engagement_pages`, never `pages`.
+    A 404 is a note; any other refusal raises `ConfluenceError`."""
+    import engage  # lazy: engage imports plansync, which imports this
+    base = root / ENGAGEMENTS_REL
+    if not base.is_dir():
+        return
+    pages_state = state.setdefault("engagement_pages", {})
+    synced_at = now.isoformat(timespec="seconds")
+    for record_path in sorted(base.glob("*/engagement.yaml")):
+        engagement = record_path.parent.name
+        try:
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            continue
+        scope_page = record.get("scope_page") if isinstance(record, dict) \
+            else None
+        if not isinstance(scope_page, dict) or not scope_page.get("id"):
+            continue
+        page_id = str(scope_page["id"])
+        status, data = conf.request("GET", f"/pages/{page_id}",
+                                    query={"body-format": "storage"})
+        if status == 404:
+            result["notes"].append(f"{engagement}'s scope page {page_id} "
+                                   f"was not found (404) — nothing mirrored")
+            continue
+        if status != 200 or not isinstance(data, dict):
+            raise confluence.ConfluenceError(
+                f"sync-back: GET /pages/{page_id} returned {status}")
+        version = confluence.page_version(data)
+        try:
+            recorded = int(scope_page.get("version") or 0)
+        except (TypeError, ValueError):
+            recorded = 0
+        known = pages_state.get(page_id)
+        if version <= recorded:
+            continue
+        page = {"id": page_id, "title": str(data.get("title") or ""),
+                "version": version, "body": confluence.page_body(data),
+                "webui": (data.get("_links") or {}).get("webui")}
+        if isinstance(known, dict) and known.get("version") == version:
+            # mirrored (and noted) already; a version still above the
+            # record's is applied once the state is back in scoping (D9) —
+            # no mirror rewrite, no count, no repeated note
+            if result["dry_run"] or record.get("state") != "scoping":
+                continue
+            outcome = engage.apply_page_revision(root, engagement, page,
+                                                 now=synced_at)
+            if outcome["applied"]:
+                result["counts"]["scopes_replaced"] += 1
+                result["written"] += outcome["written"]
+            continue
+        rel = known.get("path") if isinstance(known, dict) \
+            and known.get("path") else \
+            (MIRROR_REL / f"{slug_for(page['title'])}.md").as_posix()
+        if result["dry_run"]:
+            markdown = mdstorage.to_markdown(page["body"])
+            outcome = {"applied": False, "retry": False, "written": [],
+                       "note": None}
+        else:
+            outcome = engage.apply_page_revision(root, engagement, page,
+                                                 now=synced_at)
+            markdown = outcome["markdown"]
+        digest = _sha(markdown)
+        header = _header(page, space_key, site, synced_at, digest)
+        header = header[:-len("---\n")] + f"engagement: {engagement}\n---\n"
+        result["counts"]["engagement_pages_mirrored"] += 1
+        if not result["dry_run"]:
+            jirabackend._atomic_write(root / rel, header + markdown)
+            result["written"].append(rel)
+        if outcome["applied"]:
+            result["counts"]["scopes_replaced"] += 1
+            result["written"] += outcome["written"]
+        elif outcome["note"]:
+            result["notes"].append(outcome["note"])
+        if outcome["retry"]:
+            continue  # the next tick tries this version again
+        pages_state[page_id] = {"path": rel, "version": version,
+                                "engagement": engagement,
+                                "content_hash": f"sha256:{digest}"}
+
+
 # ----------------------------------------------------------------- the tick
 
 def _latest(issues: list[dict]) -> dict[str, dict]:
@@ -626,6 +726,17 @@ def tick(root: Path, result: dict, binding: dict, plan_dir: Path, jira,
         except confluence.ConfluenceError as exc:
             _set_case(result, classify(exc))
             partial.append(f"owner-page mirror interrupted ({exc})")
+
+    # 3b. the engagement scope pages (Story 32.4): the Confluence token and
+    # the recorded space only, not the owner id
+    if conf is not None and binding.get("space_id"):
+        try:
+            mirror_engagement_pages(root, result, state, conf,
+                                    binding.get("space_key"),
+                                    binding.get("site"), now)
+        except confluence.ConfluenceError as exc:
+            _set_case(result, classify(exc))
+            partial.append(f"engagement scope mirror interrupted ({exc})")
 
     # 4. the inbox (Story 31.5): only from a non-dry-run tick whose search
     # read every page (no second search: `inbox` merges with the last file).

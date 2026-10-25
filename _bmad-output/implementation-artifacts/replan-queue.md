@@ -372,3 +372,17 @@
 - What no longer holds: "the planning spend" and "`engage.py closeout`", read as new computations in the served root's cwd.
 - Suggested adjustment: read the planning spend from `spend.planning_usd`. `engage.py closeout` takes `--directory`. The engagement pass merges only `closeout` and the state into a fresh read, or adds the shared record lock to every writer (chat spend pass, input route, engagement pass) and names it in the 0.1.27 entry.
 - Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-25)
+
+## 32-6-approval-autonomy-and-the-first-run — scope: stories — from 32-4-the-scope-of-work-on-confluence — 2026-10-25
+
+- What changed: `scope.md` is shape-checked only on the planner's `engage.py scope`. An owner page edit (mirrored back by `mdstorage.to_markdown`) or a `revise` body replaces it verbatim. After the round trip, a story's `As a`/`I want`/`So that`/`**Acceptance Criteria:**` can be joined into one paragraph. `engage.py` `STORY_SHAPE` matches them as substrings. The `### Epic <k>:`/`#### Story <k>.<m>:` headings survive.
+- What no longer holds: "the scope's proposed epics and stories appended to `epics.md` as `## Epic N` sections", read as a line-by-line copy of `scope.md`'s story lines.
+- Suggested adjustment: split the proposed stories on the `####` headings. Find the user-story parts and the acceptance criteria as substrings (reuse `engage.py` `STORY_SHAPE`), then re-emit them in `epics.md`'s line shape when renumbering. At approve, refuse by name a scope whose stories fail that check.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-25)
+
+## 32-8-delivery-the-closeout-report-and-change-requests — scope: stories — from 32-4-the-scope-of-work-on-confluence — 2026-10-25
+
+- What changed: the same unchecked `scope.md` as for 32-6. The planner's check (`engage.py` `SIGNAL_RE`, per line) takes `Acceptance signal:` with an optional leading bullet or bold and the colon inside or outside the bold. In owner text (a mirrored edit or a `revise`) the signal can also be soft-wrapped into a joined paragraph, or be missing. 32.4 also built `confluence.find_child_folder` and `create_folder(parent_id)` for `Engagements/ENG-NNN`, the publish skip (footer hash AND remote version = recorded version), `scope.lock`, and `ScopeUnwritable`/`ConfluenceEnvMissing` refusals.
+- What no longer holds: "each deliverable's acceptance signal checked against the landed stories' specs and PRs", read as a line-start `Acceptance signal:` parse.
+- Suggested adjustment: parse deliverables on `###` headings with `engage.py` `parse_scope`. Find the signal with `SIGNAL_RE`, and fall back to a substring search inside the deliverable's text. A deliverable with no signal is reported as `not done — no acceptance signal`, never as a crash. Publish `ENG-NNN: Closeout` through 32.4's folder and skip helpers in `engage.py`, and record the page the same way `scope_page` is recorded.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-25)
