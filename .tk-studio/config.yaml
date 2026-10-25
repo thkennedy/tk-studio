@@ -30,6 +30,7 @@ jobs:
   - run-epic-24
   - run-epic-30
   - run-epic-31
+  - run-epic-32
   - research-atlassian-free-tier
 
 # Role-keyed working sets (AD-17) — recorded only on explicit
