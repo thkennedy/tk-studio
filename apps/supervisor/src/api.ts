@@ -110,7 +110,7 @@ import {
 } from "./auth";
 import { boardFor, type BoardAnswer } from "./board";
 import { appendChatLineHeld, ChatBusy, chatSince, checkChatBody, dropChatLineHeld, mintChatTurn, prepareChatTurn, recordIsJsonText, withChatLockAsync, type ChatDeps, type ChatLine } from "./chat";
-import { CancelRaced, cancelRun, chatDeps, ExternalRunRefused, resumeRun, StartError, submitProject, type AgentsOption } from "./cli";
+import { afterEngagementInput, CancelRaced, cancelRun, chatDeps, ExternalRunRefused, resumeRun, StartError, submitProject, type AgentsOption } from "./cli";
 import { ResumeRefused, type ResumeAnswer } from "./closeout";
 import { apiBind, apiPort, apiToken, checkTlsFiles, notifier, oauthLeftovers, sessionSecret, tlsConfig } from "./env";
 import {
@@ -211,6 +211,9 @@ export interface ApiDeps {
   /** Story 32.2: the chat route's turn — the `engagement-chat` definition for a served root and its checkout (default
    * `chatDeps()`: `validate`'s resolve and `resolveCheckout`). */
   chat?: ChatDeps;
+  /** Story 32.3: run after an applied `answer` or `go` on `POST /engagements/{id}/input`, fire-and-forget (its
+   * errors swallowed; default `afterEngagementInput`: the questions pass for that served root and engagement). */
+  afterEngagementInput?: (root: string, id: string) => Promise<unknown> | unknown;
 }
 
 /** Story 27.3: the resume body — a restore patch relative to the run's worktree, optional. */
@@ -381,6 +384,7 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
   }));
   const reply = deps.reply ?? ((key: string, body: ReplyBody) => postReply(key, body, { registry, env: deps.env }));
   const chat = deps.chat ?? chatDeps();
+  const afterInput = deps.afterEngagementInput ?? ((root: string, id: string) => afterEngagementInput(queue, root, id));
 
   /** Constant time: both sides hashed to one length before `timingSafeEqual`. The scheme
    * matches case-insensitively (RFC 7235); the token is compared as sent. */
@@ -555,6 +559,11 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
     }
     writeEngagement(found.root, applied.record);
     queue.serviceEvent("engagement", { id, project: found.project, state: applied.to, from: applied.from, verb: checked.body.verb, source: via }, at);
+    // Story 32.3: an applied answer or go runs the questions pass (the issue closed once the state moves on); never
+    // awaited, never failing the answer
+    if (checked.body.verb === "answer" || checked.body.verb === "go") {
+      try { Promise.resolve(afterInput(found.root, id)).catch(() => { /* the next run end */ }); } catch { /* the next run end */ }
+    }
     return json(200, { ok: true, engagement: applied.record, from: applied.from, to: applied.to });
   }
 

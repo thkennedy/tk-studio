@@ -11,7 +11,7 @@ import { createApi } from "../src/api";
 import { newEngagement, writeEngagement, type EngagementState } from "../src/engagement";
 import { SESSION_COOKIE, signSession } from "../src/auth";
 import {
-  blockedIssueFor, INBOX_REL, OFFICE_MAP, OFFICE_STATES, OfficeHub, officeCachedPaths, officeStates, projectOffice, readInbox, type OfficeState,
+  blockedIssueFor, engagementBlockedIssue, INBOX_REL, OFFICE_MAP, OFFICE_STATES, OfficeHub, officeCachedPaths, officeStates, projectOffice, readInbox, type OfficeState,
   type OfficeView,
 } from "../src/office";
 import { gatherPage, renderPage } from "../src/page";
@@ -873,6 +873,58 @@ describe("the \"!\" follows blocked_issue (Story 31.5, contract 0.1.26 additive)
     const v = projectOffice(w.queue);
     expect(v.agents.find((a) => a.agent_id === "p/planner")!.current_story).not.toBe(S2);
     expect(blockedOf(v).every((b) => b === null)).toBe(true);
+  });
+
+  /** Story 32.3: an inbox whose items are `extra` plus an engagement's questions item in `state`. */
+  const engagementInbox = (root: string, state: string, extra: Record<string, unknown>[] = []) => {
+    mkdirSync(join(root, "_bmad-output", "tracking"), { recursive: true });
+    const items = [...extra, { issue: "TKS-40", engagement: "ENG-001", title: "ENG-001: questions", priority: null,
+      blocked_since: "2026-10-24T11:00:00+00:00", reason_comment: null, state }];
+    writeFileSync(join(root, INBOX_REL), JSON.stringify({ inbox_version: 1, generated_at: "2026-10-24T12:00:00+00:00", project_key: "TKS", items }));
+  };
+  const byRole = (v: OfficeView, project = "p") => Object.fromEntries(v.agents.filter((a) => a.project === project).map((a) => [a.role, a.blocked_issue ?? null]));
+
+  test("Story 32.3: an open engagement item puts the \"!\" on the planner's desk only, with no run (the served root)", () => {
+    const w = world();
+    const root = mkdtempSync(join(tmpdir(), "tk-sup-office-eng-inbox-"));
+    engagementInbox(root, "open");
+    const v = projectOffice(w.queue, { roots: () => ({ p: root }) });
+    const roles = byRole(v);
+    expect(roles.planner).toEqual({ issue: "TKS-40", state: "open" });
+    for (const [role, b] of Object.entries(roles)) if (role !== "planner") expect(b).toBeNull();
+    expect(Object.values(byRole(v, "q")).every((b) => b === null)).toBe(true);
+    // resolved (the owner moved it), or gone: cleared
+    engagementInbox(root, "resolved");
+    expect(byRole(projectOffice(w.queue, { roots: () => ({ p: root }) })).planner).toBeNull();
+    expect(engagementBlockedIssue(root)).toBeNull();
+    expect(engagementBlockedIssue(null)).toBeNull();
+  });
+
+  test("Story 32.3: with a run, the planner takes the engagement's issue; a story block still wins for the other agents", async () => {
+    const w = world();
+    const { run } = await w.launch({ lines: CUT.dev });
+    inboxFor(run.root, "open");
+    const story = JSON.parse(readFileSync(join(run.root, INBOX_REL), "utf-8")).items;
+    engagementInbox(run.root, "open", story);
+    const roles = byRole(projectOffice(w.queue));
+    expect(roles.planner).toEqual({ issue: "TKS-40", state: "open" });
+    for (const [role, b] of Object.entries(roles)) if (role !== "planner") expect(b).toEqual({ issue: "TKS-2", state: "open" });
+    // the engagement item resolved: the planner falls back to the story's block
+    engagementInbox(run.root, "resolved", story);
+    expect(byRole(projectOffice(w.queue)).planner).toEqual({ issue: "TKS-2", state: "open" });
+  });
+
+  test("Story 32.3: the planner's \"!\" appearing is one office.agent delta for the planner", () => {
+    const w = world();
+    const root = mkdtempSync(join(tmpdir(), "tk-sup-office-eng-inbox-"));
+    let t = 0;
+    const hub = new OfficeHub({ queue: w.queue, now: () => t, graceMs: 20_000, roots: () => ({ p: root }) });
+    expect(hub.snapshot().agents.find((a) => a.agent_id === "p/planner")!.blocked_issue).toBeNull();
+    engagementInbox(root, "open");
+    t += 1000;
+    const evs = hub.refresh().filter((e) => e.kind === "office.agent");
+    expect(evs.map((e) => e.data.agent_id)).toEqual(["p/planner"]);
+    expect(evs[0]).toMatchObject({ data: { agent_id: "p/planner", blocked_issue: { issue: "TKS-40", state: "open" } } });
   });
 
   test("readInbox: the file's generated_at and items as written; missing or malformed is empty, never an error", () => {

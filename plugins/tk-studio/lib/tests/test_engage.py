@@ -1,4 +1,5 @@
-"""Tests for `tk-studio-engage reply` (Story 32.2, AC1 and AC2).
+"""Tests for `tk-studio-engage reply` (Story 32.2, AC1 and AC2) and
+`questions` (Story 32.3, AC1: the cap, the shape, the state refusals).
 
 The fixture project `fixtures/engage-project/` (copied to a temp root per
 test, so nothing writes into the tree) holds one engagement in `intake`
@@ -396,6 +397,153 @@ class CliTestCase(EngageTestCase):
                 self.assert_status_block_last(result, "blocked")
                 self.assertIn(name, result["reason"])
         self.assertEqual(len(self.lines()), 1)
+
+
+def question(qid="scope", **changes):
+    q = {"id": qid, "text": "How big is the first cut?",
+         "options": [{"label": "Small", "default": True}, {"label": "Large"}],
+         "impact": "sets the quote"}
+    q.update(changes)
+    return q
+
+
+class QuestionsTestCase(EngageTestCase):
+    def ask(self, asked, **kwargs):
+        kwargs.setdefault("run_id", "engagement-chat-q1")
+        return engage.questions(self.root, ENG, asked, now=NOW, **kwargs)
+
+    def written(self) -> Path:
+        return self.dir / "questions.json"
+
+    def test_one_to_three_valid_questions_write_questions_json(self):
+        asked = [question(), question("db", text="Which database?",
+                                      options=[{"label": "sqlite"},
+                                               {"label": "postgres",
+                                                "default": True}],
+                                      impact="the hosting cost")]
+        result = self.ask(asked)
+        self.assert_status_block_last(result, "complete")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["mode"], "questions")
+        self.assertEqual(result["written"],
+                         [f"_bmad-output/engagements/{ENG}/questions.json"])
+        doc = json.loads(self.written().read_text(encoding="utf-8"))
+        self.assertEqual(doc, {"run_id": "engagement-chat-q1", "at": NOW,
+                               "questions": asked})
+        self.assertEqual(result["questions"], doc)
+        # the planner moves no state: the record is untouched
+        record = json.loads((self.dir / "engagement.yaml")
+                            .read_text(encoding="utf-8"))
+        self.assertEqual(record["state"], "intake")
+        self.assertEqual(record["questions"], [])
+        # three is the cap, not a refusal
+        three = [question("a"), question("b"), question("c")]
+        self.assert_status_block_last(self.ask(three), "complete")
+
+    def test_a_fourth_question_is_too_many_questions_and_writes_nothing(self):
+        result = self.ask([question(q) for q in ("a", "b", "c", "d")])
+        self.assert_status_block_last(result, "blocked")
+        self.assertFalse(result["ok"])
+        self.assertIn("TooManyQuestions", result["reason"])
+        self.assertFalse(self.written().exists())
+
+    def test_each_invalid_shape_is_question_invalid_naming_the_index(self):
+        cases = {
+            "no default": [question(options=[{"label": "a"},
+                                             {"label": "b"}])],
+            "two defaults": [question(options=[
+                {"label": "a", "default": True},
+                {"label": "b", "default": True}])],
+            "one option": [question(options=[{"label": "a",
+                                              "default": True}])],
+            "seven options": [question(options=[
+                {"label": f"o{i}", **({"default": True} if i == 0 else {})}
+                for i in range(7)])],
+            "duplicate id": [question("a"), question("a")],
+            "duplicate label": [question(options=[
+                {"label": "Same", "default": True}, {"label": "same"}])],
+            "bad id": [question("Not An Id")],
+            # `$` alone would accept a trailing newline the supervisor refuses
+            "id with a trailing newline": [question("q1\n")],
+            "empty text": [question(text="  ")],
+            "empty impact": [question(impact="")],
+            "default false": [question(options=[
+                {"label": "a", "default": True},
+                {"label": "b", "default": False}])],
+            "unknown field": [question(extra=1)],
+            "not an array": {"questions": [question()]},
+            "none": [],
+        }
+        for why, asked in cases.items():
+            with self.subTest(why=why):
+                result = self.ask(asked)
+                self.assert_status_block_last(result, "blocked")
+                self.assertIn("QuestionInvalid", result["reason"])
+                if why == "duplicate id":
+                    self.assertIn("questions[1]", result["reason"])
+                elif isinstance(asked, list) and asked:
+                    self.assertIn("questions[0]", result["reason"])
+                self.assertFalse(self.written().exists())
+
+    def test_the_state_refusals_and_the_run_id(self):
+        result = self.ask([question()], run_id=None)
+        self.assert_status_block_last(result, "blocked")
+        self.assertIn("RunIdRequired", result["reason"])
+        for state, name in (("awaiting-answers", "NotIntake"),
+                            ("scoping", "NotIntake"),
+                            ("cancelled", "EngagementClosed"),
+                            ("delivered", "EngagementClosed")):
+            with self.subTest(state=state):
+                self.set_record(state=state)
+                result = self.ask([question()])
+                self.assert_status_block_last(result, "blocked")
+                self.assertIn(name, result["reason"])
+        result = engage.questions(self.root, "ENG-404", [question()],
+                                  run_id="r")
+        self.assertIn("UnknownEngagement", result["reason"])
+        result = engage.questions(self.root, "nope", [question()],
+                                  run_id="r")
+        self.assertIn("BadEngagement", result["reason"])
+        self.assertFalse(self.written().exists())
+
+    def test_a_dry_run_writes_nothing_and_ends_partial(self):
+        result = self.ask([question()], dry_run=True)
+        self.assert_status_block_last(result, "partial")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["written"], [])
+        self.assertEqual(result["questions"]["run_id"], "engagement-chat-q1")
+        self.assertFalse(self.written().exists())
+
+    def test_the_cli_writes_from_the_questions_file_and_refuses_by_name(self):
+        path = Path(self._tmp.name) / "questions.json"
+
+        def run(*argv):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = engage.main(["questions", "--directory",
+                                    str(self.root), "--engagement", ENG,
+                                    "--questions-file", str(path), *argv])
+            return code, json.loads(out.getvalue())
+
+        path.write_text(json.dumps([question(q) for q in "abcd"]),
+                        encoding="utf-8")
+        code, result = run("--run-id", "r1")
+        self.assertEqual(code, 2)
+        self.assert_status_block_last(result, "blocked")
+        self.assertIn("TooManyQuestions", result["reason"])
+        path.write_text("{nope", encoding="utf-8")
+        code, result = run("--run-id", "r1")
+        self.assertEqual(code, 2)
+        self.assertIn("QuestionInvalid", result["reason"])
+        path.write_text(json.dumps([question()]), encoding="utf-8")
+        code, result = run()
+        self.assertEqual(code, 2)
+        self.assertIn("RunIdRequired", result["reason"])
+        code, result = run("--run-id", "r1")
+        self.assertEqual(code, 0)
+        self.assert_status_block_last(result, "complete")
+        self.assertEqual(json.loads(self.written().read_text("utf-8"))
+                         ["run_id"], "r1")
 
 
 if __name__ == "__main__":

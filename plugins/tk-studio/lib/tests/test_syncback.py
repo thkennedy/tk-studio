@@ -75,7 +75,9 @@ class FakeSyncBack(FakeAtlassian):
         q = {k: v[0] for k, v in urllib.parse.parse_qs(query).items()}
         if method == "GET" and path == "/search/jql":
             self.jql.append(q["jql"])
-            assert q["fields"] == "status,updated,comment,attachment,priority", q
+            # Story 32.3: `summary` rides the one search (the engagement item)
+            assert q["fields"] == ("status,updated,comment,attachment,"
+                                   "priority,summary"), q
             token = q.get("nextPageToken")
             if token is not None and token == self.fail_token:
                 return 500, {"errorMessages": ["boom"]}
@@ -114,7 +116,7 @@ class FakeSyncBack(FakeAtlassian):
         return entry
 
     def issue(self, key, status, category, minutes_ago, comments=(),
-              attachments=(), total=None, priority=None):
+              attachments=(), total=None, priority=None, summary=None):
         entry = {"key": key, "fields": {
             "status": {"name": status, "statusCategory": {"key": category}},
             "updated": stamp(minutes_ago),
@@ -123,6 +125,8 @@ class FakeSyncBack(FakeAtlassian):
             "attachment": list(attachments)}}
         if priority is not None:
             entry["fields"]["priority"] = {"name": priority}
+        if summary is not None:
+            entry["fields"]["summary"] = summary
         self.search_issues.append(entry)
         return entry
 
@@ -470,6 +474,20 @@ class InboxSeamTests(SyncBackTestCase):
                          [(f"{KEY}-1", "open", "High")])
         # the search asked for the priority, in its one paged search
         self.assertEqual(len(self.fake.jql), 1)
+
+    def test_the_summary_reaches_the_inbox_as_the_engagement(self):
+        # Story 32.3: the one search asks for `summary`; an engagement's
+        # questions issue lands as an item carrying `engagement`
+        self.fake.issue(f"{KEY}-40", jirabackend.BLOCKED_STATUS,
+                        "indeterminate", 30, summary="ENG-001: questions")
+        result = self.run_tick()
+        self.assert_block_last(result, "complete")
+        data = json.loads((self.root / self.INBOX).read_text("utf-8"))
+        self.assertEqual([(i["issue"], i.get("engagement"), i.get("title"))
+                          for i in data["items"]],
+                         [(f"{KEY}-40", "ENG-001", "ENG-001: questions")])
+        self.assertEqual(syncback.SEARCH_FIELDS,
+                         "status,updated,comment,attachment,priority,summary")
 
     def test_a_dry_run_or_an_interrupted_search_writes_no_inbox(self):
         self.fake.issue(f"{KEY}-1", jirabackend.BLOCKED_STATUS, "indeterminate",

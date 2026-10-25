@@ -1,6 +1,6 @@
 ---
 name: tk-studio-engage
-description: The planner leg of an engagement — `reply` reads the engagement's memory (the record, the chat so far, the plan under `_bmad-output/planning-artifacts/`, `kb/` and `kb/confluence/`) and writes the planner's reply line, with optional proposals the owner can press, to the engagement's `chat.jsonl`. Use when a supervisor `engagement-chat` payload names this skill, or the user says "reply in the engagement chat" or "tk engage reply".
+description: The planner leg of an engagement — `reply` reads the engagement's memory (the record, the chat so far, the plan under `_bmad-output/planning-artifacts/`, `kb/` and `kb/confluence/`) and writes the planner's reply line, with optional proposals the owner can press, to the engagement's `chat.jsonl`; `questions` writes at most three multiple-choice clarifying questions, each with a default, for the owner's inbox. Use when a supervisor `engagement-chat` payload names this skill, or the user says "reply in the engagement chat" or "tk engage reply".
 ---
 
 # tk-studio-engage
@@ -78,7 +78,38 @@ presses through the supervisor's `POST /engagements/{id}/input`.
    and run mode 2 with the payload's `run_id`. End on the status block;
    commit nothing.
 
-3. Blocking conditions (exit 2), each named in `reason`: `BadEngagement`
+3. Ask clarifying questions (Story 32.3, user flow F2 step 2) — only in
+   `intake`, and only when the turn finds gaps that **no default can
+   cover**: a choice the scope or the quote turns on and the memory does not
+   settle. Ask **at most three**; each has options and exactly one default.
+   When a sensible default covers a gap, do not ask: proceed on it and state
+   it as an assumption in the reply. Write the questions to a temp file (a
+   JSON array) and run:
+
+   ```bash
+   uv run "${CLAUDE_PLUGIN_ROOT}/lib/engage.py" questions --directory <project_root> \
+     --engagement <ENG-NNN> --run-id <run_id> --questions-file <path> [--dry-run]
+   ```
+
+   Each question is `{id, text, options: [{label, default?: true}],
+   impact}`: `id` matching `^[a-z0-9][a-z0-9-]{0,15}$` and unique, `text`
+   the question, `impact` what the answer changes (the scope, the quote),
+   2 to 6 options with unique labels and exactly one `"default": true`.
+   `--directory` is the payload's `project_root` (never the worktree),
+   `--run-id` the payload's `run_id`. It writes
+   `_bmad-output/engagements/<id>/questions.json`; the planner still moves
+   no state: when the run ends, the supervisor applies the file
+   (`intake → awaiting-answers`, recorded with source `planner` and the run
+   id), puts the questions in the owner's inbox (one Jira issue per
+   engagement) and reads the answers back. Then write the reply (mode 2)
+   telling the owner what you asked and why. Its refusals (exit 2), each
+   named: `TooManyQuestions` (a fourth), `QuestionInvalid` (naming the
+   index), `NotIntake`, `EngagementClosed`, `RunIdRequired`, plus the
+   record's (`BadEngagement`, `UnknownEngagement`,
+   `EngagementRecordUnreadable`) and an unreadable `--questions-file`. A dry
+   run writes nothing and ends `partial`.
+
+4. Blocking conditions (exit 2), each named in `reason`: `BadEngagement`
    (not like `ENG-001`), `UnknownEngagement` (no record),
    `EngagementRecordUnreadable` (not JSON, or not this engagement's record),
    `EngagementClosed` (`delivered`, `failed` or `cancelled`), `BodyEmpty`,
@@ -88,7 +119,7 @@ presses through the supervisor's `POST /engagements/{id}/input`.
    `--body-file` or `--proposals-file`. Nothing is appended on a refusal; a
    dry run appends nothing and ends `partial`.
 
-4. Report:
+5. Report:
    - **Attended:** show the reply line and its proposals.
    - **Headless:** no prompts (AD-11). Relay the core's `status`, `reason`
      and `artifacts` as they are — never infer the status from the exit
@@ -105,6 +136,7 @@ If the deterministic core is unrunnable — a tool call denied by permissions, `
 - The planner never moves state, never sends an input, and never holds a
   bearer or a CSRF token; its session runs with a worker's environment
   (every `TK_SUPERVISOR_*` secret and the owner seat stripped).
-- The only file written is the engagement's `chat.jsonl`, one line per
-  reply; nothing is committed, nothing is promoted.
+- The only files written are the engagement's `chat.jsonl`, one line per
+  reply, and its `questions.json` (Story 32.3); nothing is committed,
+  nothing is promoted.
 - All paths resolve through `${CLAUDE_PLUGIN_ROOT}`.

@@ -3,7 +3,7 @@
 `_bmad-output/tracking/inbox.json`, version 1:
 
     {inbox_version: 1, generated_at, project_key,
-     items: [{issue, entity?, title?, priority, blocked_since,
+     items: [{issue, entity?, engagement?, title?, priority, blocked_since,
               reason_comment: {id, body, created} | null,
               state: open | resolved | validating}]}
 
@@ -21,6 +21,11 @@ alone never makes an item (both setup statuses map onto it, AD-6).
                   plain mention of the owner is never the reason
   blocked_since   that comment's `created`; else the item's previous value;
                   else when the tick first saw the status
+  engagement      Story 32.3: `ENG-NNN` when the issue's summary is
+                  `ENG-NNN: questions` (the engagement's questions issue,
+                  `tk-studio-track block --engagement`); its `title` is the
+                  summary; kept from the previous item when the summary
+                  was not pulled
   priority        the Jira `priority.name` as pulled; else the canonical
                   `priority` mapped (P0 Highest, P1 High, P2 Medium,
                   P3 Low); else null
@@ -62,6 +67,8 @@ PRIORITY_RANK = {"Highest": 0, "High": 1, "Medium": 2, "Low": 3, "Lowest": 4}
 BLOCK_COMMENT_RE = re.compile(r"^\[~accountid:[^\]]+\]\s*Blocked:")
 CANONICAL_PRIORITY = {"P0": "Highest", "P1": "High", "P2": "Medium",
                       "P3": "Low"}
+# Story 32.3: the engagement's questions issue, by its exact summary
+ENGAGEMENT_SUMMARY_RE = re.compile(r"^(ENG-\d{3,}): questions$")
 
 
 def load(root: Path) -> dict:
@@ -113,7 +120,8 @@ def sort_key(item: dict) -> tuple:
 
 
 def _item(root: Path, key: str, status: str, pulled_priority,
-          front: dict | None, previous: dict | None, now: datetime) -> dict:
+          front: dict | None, previous: dict | None, now: datetime,
+          summary=None) -> dict:
     state = STATES[status]
     if state == "resolved" and (previous or {}).get("state") == "validating":
         state = "validating"
@@ -121,12 +129,17 @@ def _item(root: Path, key: str, status: str, pulled_priority,
     since = (reason or {}).get("created") or (previous or {}).get(
         "blocked_since") or now.isoformat(timespec="seconds")
     item = {"issue": key}
+    engagement = ENGAGEMENT_SUMMARY_RE.match(summary) \
+        if isinstance(summary, str) else None
     if front:
         item["entity"] = front.get("id")
         if front.get("title"):
             item["title"] = front["title"]
+    elif engagement:
+        item["engagement"] = engagement.group(1)
+        item["title"] = summary
     elif previous:
-        for k in ("entity", "title"):
+        for k in ("entity", "engagement", "title"):
             if previous.get(k):
                 item[k] = previous[k]
     item.update({"priority": _priority(pulled_priority, front),
@@ -154,7 +167,8 @@ def derive(root: Path, result: dict, project_key: str, plan_dir: Path,
         name = (fields.get("status") or {}).get("name")
         if name in STATES:
             items[key] = _item(root, key, name, fields.get("priority"),
-                               fronts.get(key), previous.get(key), now)
+                               fronts.get(key), previous.get(key), now,
+                               fields.get("summary"))
     for key, item in previous.items():
         if key not in latest:
             items[key] = item

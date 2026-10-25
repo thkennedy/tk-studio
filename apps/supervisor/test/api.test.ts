@@ -1499,6 +1499,30 @@ describe("Story 32.1: the engagement routes (contract 0.1.27 additive)", () => {
     expect(fx.events()).toHaveLength(1); // the create's only
   });
 
+  test("Story 32.3: afterEngagementInput runs after an applied answer or go (the served root, the id), never after a refused or other input", async () => {
+    const calls: [string, string][] = [];
+    const fx = routed({ afterEngagementInput: async (root, id) => { calls.push([root, id]); throw new Error("the pass's errors are swallowed"); } });
+    await fx.create();
+    const r = readEngagement(fx.root, "ENG-001")!;
+    const q = (id: string) => ({ id, text: "?", options: [{ label: "a", default: true }, { label: "b" }], impact: "x" });
+    writeEngagement(fx.root, { ...r, state: "awaiting-answers", questions: [q("q1"), q("q2")] });
+    // a refused input (an unknown id: 400 SchemaError; an illegal verb: 409) runs nothing
+    expect((await fx.call("POST", "/engagements/ENG-001/input", undefined, { verb: "answer", answers: { q9: "a" } })).status).toBe(400);
+    expect((await fx.call("POST", "/engagements/ENG-001/input", undefined, { verb: "approve", autonomy: "ask" })).status).toBe(409);
+    // a question moves nothing and runs nothing
+    expect((await fx.call("POST", "/engagements/ENG-001/input", undefined, { verb: "question", text: "how long?" })).status).toBe(200);
+    expect(calls).toEqual([]);
+    const answer = await fx.call("POST", "/engagements/ENG-001/input", undefined, { verb: "answer", answers: { q1: "b" } });
+    expect(answer.status).toBe(200);
+    expect((await answer.json() as Record<string, any>).to).toBe("awaiting-answers");
+    const go = await fx.call("POST", "/engagements/ENG-001/input", undefined, { verb: "go" });
+    expect(go.status).toBe(200);
+    const body = await go.json() as Record<string, any>;
+    expect(body.to).toBe("scoping");
+    expect(body.engagement.assumptions).toEqual([{ question: "q2", text: "?", assumed: "a" }]);
+    expect(calls).toEqual([[fx.root, "ENG-001"], [fx.root, "ENG-001"]]);
+  });
+
   test("POST /engagements/{id}/input: a legal input 200 {ok, engagement, from, to}, the inputs[] line, the event carrying from", async () => {
     const fx = routed();
     await fx.create();

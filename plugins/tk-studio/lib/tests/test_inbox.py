@@ -84,6 +84,30 @@ class StateTests(InboxTestCase):
                          (f"{KEY}-2", "resolved", "Low", None,
                           NOW.isoformat(timespec="seconds")))
 
+    def test_an_engagement_questions_issue_carries_engagement(self):
+        # Story 32.3: `ENG-NNN: questions` (no plan entity) is an item with
+        # `engagement` and the summary as `title`; the engagement's block
+        # comment (`track.py block --engagement`) fills `reason_comment`
+        body = (f"[~accountid:{OWNER}] Blocked: ENG-001 needs 1 answer(s)\n"
+                f'Resolves when: reply with one "<id>: <option>" line per '
+                f"question\n\nscope: How big?\nImpact: the quote\n"
+                f"- Small (default)\n- Large")
+        self.fake.issue(f"{KEY}-40", BLOCKED, "indeterminate", 30,
+                        comments=[comment("c9", AGENT, body, 31)],
+                        summary="ENG-001: questions")
+        self.fake.issue(f"{KEY}-41", BLOCKED, "indeterminate", 29,
+                        summary="ENG-001: questions, again")  # not exact
+        self.run_tick()
+        first, second = self.items()
+        self.assertEqual(first, {
+            "issue": f"{KEY}-40", "engagement": "ENG-001",
+            "title": "ENG-001: questions", "priority": None,
+            "blocked_since": stamp(31),
+            "reason_comment": {"id": "c9", "body": body,
+                               "created": stamp(31)},
+            "state": "open"})
+        self.assertNotIn("engagement", second)
+
     def test_canonical_blocked_alone_is_never_an_item(self):
         # a local entity canonically `blocked` whose Jira status is not one
         # of the two setup statuses is no inbox item
@@ -195,6 +219,19 @@ class MergeTests(InboxTestCase):
         self.assertIn(inbox.INBOX_REL.as_posix(), result["written"])
         self.assertEqual(self.items(), before)
         self.assertEqual(len(self.fake.jql), 2)  # one search per tick
+
+    def test_an_engagement_item_keeps_engagement_from_the_previous_item(self):
+        # Story 32.3: a later tick that returns the issue without its
+        # summary keeps `engagement` (and `title`) from the previous item
+        self.fake.issue(f"{KEY}-40", BLOCKED, "indeterminate", 30,
+                        summary="ENG-002: questions")
+        self.run_tick()
+        self.fake.search_issues = []
+        self.fake.issue(f"{KEY}-40", RESOLVED, "indeterminate", 5)
+        self.run_tick(minutes_later=10)
+        (item,) = self.items()
+        self.assertEqual((item["engagement"], item["title"], item["state"]),
+                         ("ENG-002", "ENG-002: questions", "resolved"))
 
     def test_an_issue_leaving_the_setup_statuses_leaves_the_inbox(self):
         self.fake.issue(f"{KEY}-1", BLOCKED, "indeterminate", 30)

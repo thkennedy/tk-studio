@@ -21,6 +21,7 @@ import sys
 import tempfile
 import unittest
 import unittest.mock
+import urllib.parse
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -53,8 +54,35 @@ class FakeTrack(FakeSyncBack):
         self.comment_as = AGENT             # the seat the token belongs to
         self.posted: dict[str, list[str]] = {}
         self.lacking: dict[str, set[str]] = {}  # 31.7: more missing targets
+        # 32.3: the engagement issue's create and its exact-summary search
+        self.created: list[dict] = []        # each POST /issue's fields
+        self.summaries: dict[str, str] = {}  # key -> summary (the search)
+        self.next_issue = 100
+        self.refuse_create = False           # a 400 (e.g. no Task type)
 
     def _jira(self, method, path, query, body):
+        q = {k: v[0] for k, v in urllib.parse.parse_qs(query).items()}
+        if method == "GET" and path == "/search/jql" \
+                and q.get("fields") == "summary,status":
+            self.jql.append(q["jql"])
+            # a contains-match (as Jira's `~`): the caller matches exactly
+            m = re.search(r'summary ~ "\\"(.+)\\""$', q["jql"])
+            wanted = m.group(1) if m else ""
+            return 200, {"issues": [
+                {"key": k, "fields": {"summary": v, "status": {
+                    "name": self.status.get(k, "To Do")}}}
+                for k, v in self.summaries.items() if wanted in v]}
+        if method == "POST" and path == "/issue":
+            assert set(body) == {"fields"}, body
+            if self.refuse_create:
+                return 400, {"errors": {"issuetype": "The issue type "
+                                        "selected is invalid."}}
+            self.created.append(body["fields"])
+            key = f"{KEY}-{self.next_issue}"
+            self.next_issue += 1
+            self.summaries[key] = body["fields"]["summary"]
+            self.status[key] = "To Do"
+            return 201, {"id": "1", "key": key}
         m = re.match(r"^/issue/([^/]+)$", path)
         if method == "GET" and m and m.group(1) in self.status:
             return 200, {"key": m.group(1), "fields": {"status": {
@@ -1382,6 +1410,314 @@ class ValidateCliTests(ValidateTestCase):
         result = json.loads(out.getvalue())
         self.assert_validate_block(result, "blocked")
         self.assertIn("--follow-up-file", result["reason"])
+
+
+# -------------------------------------------------------------- engagement
+# Story 32.3: `block --engagement` and `close --engagement` against the fake
+# Atlassian REST (the create, the exact-summary search, the moves by name).
+
+ENG = "ENG-001"
+QUESTIONS = [
+    {"id": "scope", "text": "How big is the first cut?",
+     "options": [{"label": "Small", "default": True}, {"label": "Large"}],
+     "impact": "sets the quote"},
+    {"id": "db", "text": "Which database?",
+     "options": [{"label": "sqlite"}, {"label": "postgres", "default": True}],
+     "impact": "the hosting cost"},
+]
+
+
+def engagement_body(questions):
+    lines = [f"[~accountid:{OWNER}] Blocked: {ENG} needs {len(questions)} "
+             f"answer(s)",
+             'Resolves when: reply with one "<id>: <option>" line per '
+             'question']
+    for q in questions:
+        lines += ["", f"{q['id']}: {q['text']}", f"Impact: {q['impact']}"]
+        lines += [f"- {o['label']}" + (" (default)" if o.get("default")
+                                       else "") for o in q["options"]]
+    return "\n".join(lines)
+
+
+class EngagementTestCase(TrackTestCase):
+    def setUp(self):
+        super().setUp()
+        self.record(QUESTIONS)
+
+    def record(self, questions, **fields):
+        path = self.root / "_bmad-output" / "engagements" / ENG \
+            / "engagement.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {"shape_version": 1, "id": ENG, "project": "p",
+                  "state": "awaiting-answers",
+                  "request": "Build the export\nwith CSV",
+                  "questions": questions, "assumptions": [], "inputs": []}
+        record.update(fields)
+        path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+
+    def block_eng(self, **kwargs):
+        return track.block_engagement(self.root, ENG, transport=self.fake,
+                                      sleep=self.sleeps.append, **kwargs)
+
+    def close_eng(self, **kwargs):
+        return track.close_engagement(self.root, ENG, transport=self.fake,
+                                      sleep=self.sleeps.append, **kwargs)
+
+
+class EngagementBlockTests(EngagementTestCase):
+    def test_creates_the_task_moves_it_blocked_and_comments_the_questions(self):
+        result = self.block_eng()
+        self.assert_track_block(result, "complete")
+        self.assertEqual((result["story"], result["engagement"],
+                          result["source"]), (None, ENG, "engagement"))
+        (entry,) = result["issues"]
+        key = f"{KEY}-100"
+        self.assertEqual(entry, {"issue": key, "created": True,
+                                 "transitioned": True, "commented": True})
+        self.assertEqual(self.fake.created, [{
+            "project": {"key": KEY}, "summary": f"{ENG}: questions",
+            "issuetype": {"name": "Task"}, "description": "Build the export",
+            "labels": ["tk-studio-engagement"]}])
+        self.assertEqual(self.fake.status[key], BLOCKED)
+        self.assertEqual(self.fake.posted[key], [engagement_body(QUESTIONS)])
+        # the comment is a block comment the inbox reads as the reason
+        self.assertTrue(inbox.BLOCK_COMMENT_RE.match(
+            self.fake.posted[key][0]))
+        self.assertEqual(self.fake.jql, [
+            f'project = "{KEY}" AND summary ~ "\\"{ENG}: questions\\""'])
+        self.assertEqual(result["written"], [])
+
+    def test_finds_the_existing_issue_by_its_exact_summary(self):
+        # a contains-match that is not exact never counts
+        self.fake.summaries[f"{KEY}-7"] = f"re: {ENG}: questions (old)"
+        self.fake.status[f"{KEY}-7"] = "To Do"
+        self.fake.summaries[f"{KEY}-8"] = f"{ENG}: questions"
+        self.fake.status[f"{KEY}-8"] = "In Progress"
+        result = self.block_eng()
+        self.assert_track_block(result, "complete")
+        (entry,) = result["issues"]
+        self.assertEqual((entry["issue"], entry["created"]),
+                         (f"{KEY}-8", False))
+        self.assertEqual(self.fake.created, [])
+        self.assertEqual(self.fake.status[f"{KEY}-7"], "To Do")
+
+    def test_a_re_block_skips_then_names_only_the_open_questions(self):
+        self.block_eng()
+        writes = len(self.writes())
+        again = self.block_eng()
+        self.assert_track_block(again, "complete")
+        (entry,) = again["issues"]
+        self.assertEqual((entry["transitioned"], entry["commented"]),
+                         (False, False))
+        self.assertEqual(len(entry["skipped"]), 2)
+        self.assertEqual(len(self.writes()), writes)
+        # one answer landed: the re-block comments the remaining question
+        answered = [dict(QUESTIONS[0], answer="Small"), QUESTIONS[1]]
+        self.record(answered)
+        third = self.block_eng()
+        self.assert_track_block(third, "complete")
+        self.assertTrue(third["issues"][0]["commented"])
+        self.assertEqual(self.fake.posted[f"{KEY}-100"][-1],
+                         engagement_body([QUESTIONS[1]]))
+
+    def test_a_re_block_after_an_owner_reply_that_answered_nothing_comments_again(self):
+        self.block_eng()
+        key = f"{KEY}-100"
+        # the owner replied after the agent's comment; nothing parsed, so the
+        # same questions are still open: the comment names them again
+        self.fake.comment_store[key].append(
+            comment("20001", OWNER, "what do you mean?", 0))
+        again = self.block_eng()
+        self.assert_track_block(again, "complete")
+        (entry,) = again["issues"]
+        self.assertEqual((entry["transitioned"], entry["commented"]),
+                         (False, True))
+        self.assertEqual(self.fake.posted[key],
+                         [engagement_body(QUESTIONS)] * 2)
+        # with no owner reply since, the skip rule holds again
+        third = self.block_eng()
+        self.assertFalse(third["issues"][0]["commented"])
+        self.assertEqual(len(self.fake.posted[key]), 2)
+
+    def test_a_held_lock_is_a_retry_and_a_stale_one_is_retaken(self):
+        lock = (self.root / "_bmad-output" / "engagements" / ENG
+                / track.ENGAGEMENT_LOCK)
+        lock.write_text("", encoding="utf-8")
+        held = self.block_eng()
+        self.assertEqual((held["status"], held["ok"], held["retry"]),
+                         ("partial", False, True))
+        self.assertIn("track.lock is held", held["reason"])
+        self.assertEqual(list(held)[-4:], ["status", "intent", "artifacts",
+                                           "reason"])
+        self.assertEqual(self.fake.created, [])
+        self.assertEqual(self.fake.calls, [])
+        closed = self.close_eng()
+        self.assertEqual((closed["status"], closed["retry"]),
+                         ("partial", True))
+        self.assertTrue(lock.exists())  # another holder's lock is kept
+        # stale (older than the bound): retaken, and released after
+        old = lock.stat().st_mtime - track.ENGAGEMENT_LOCK_STALE_S - 5
+        os.utime(lock, (old, old))
+        result = self.block_eng()
+        self.assert_track_block(result, "complete")
+        self.assertEqual(len(self.fake.created), 1)
+        self.assertFalse(lock.exists())
+        self.assertEqual([p.name for p in lock.parent.iterdir()
+                          if p.name.startswith(track.ENGAGEMENT_LOCK)], [])
+
+    def test_the_lock_serialises_the_find_or_create(self):
+        # a second caller arriving while the first holds the lock (inside its
+        # create) gets a retry, never a second issue
+        seen = []
+        real = track.create_engagement_issue
+
+        def racing(*args, **kwargs):
+            seen.append(self.block_eng())
+            return real(*args, **kwargs)
+        with unittest.mock.patch.object(track, "create_engagement_issue",
+                                        racing):
+            first = self.block_eng()
+        self.assert_track_block(first, "complete")
+        self.assertEqual(seen[0]["retry"], True)
+        self.assertEqual(len(self.fake.created), 1)
+        self.assertEqual(len(self.fake.posted[f"{KEY}-100"]), 1)
+
+    def test_the_refusals_by_name(self):
+        self.record([dict(q, answer="x") for q in QUESTIONS])
+        result = self.block_eng()
+        self.assert_track_block(result, "blocked")
+        self.assertIn("NoOpenQuestions", result["reason"])
+        self.assertEqual(self.fake.calls, [])
+        missing = track.block_engagement(self.root, "ENG-404",
+                                         transport=self.fake)
+        self.assert_track_block(missing, "blocked")
+        self.assertIn("EngagementNotFound", missing["reason"])
+        bad = track.block_engagement(self.root, "nope", transport=self.fake)
+        self.assertIn("EngagementNotFound", bad["reason"])
+        self.assertEqual(self.fake.calls, [])
+        self.record(QUESTIONS)
+        self.fake.refuse_create = True
+        refused = self.block_eng()
+        self.assert_track_block(refused, "blocked")
+        self.assertIn("IssueCreateRefused", refused["reason"])
+        self.assertIn("'Task'", refused["reason"])
+        with tempfile.TemporaryDirectory() as tmp:
+            unbound = track.block_engagement(Path(tmp), ENG,
+                                             transport=self.fake)
+        self.assertIn("no Atlassian call made", unbound["reason"])
+
+    def test_a_temporary_failure_is_retried(self):
+        self.fake.force[("POST", "/issue")] = (503, "unavailable")
+        result = self.block_eng()
+        self.assertEqual((result["status"], result["ok"], result["retry"]),
+                         ("partial", False, True))
+
+    def test_a_dry_run_creates_nothing(self):
+        result = self.block_eng(dry_run=True)
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(self.fake.created, [])
+        self.assertEqual(self.writes(), [])
+
+    def test_the_cli_takes_engagement_exclusive_with_story(self):
+        def run(*argv):
+            out = io.StringIO()
+            with unittest.mock.patch.object(jirabackend, "client_for",
+                                            _client_with(self.fake)), \
+                    contextlib.redirect_stdout(out):
+                code = track.main(["block", "--directory", str(self.root),
+                                   *argv])
+            return code, json.loads(out.getvalue())
+        code, result = run("--engagement", ENG, "--story", "ST-001")
+        self.assertEqual(code, 2)
+        self.assertIn("exclusive", result["reason"])
+        code, result = run("--engagement", ENG, "--reason", "x")
+        self.assertEqual(code, 2)
+        code, result = run("--engagement", ENG, "--source", "run")
+        self.assertEqual(code, 2)
+        self.assertEqual(self.fake.calls, [])
+        code, result = run("--engagement", ENG)
+        self.assertEqual(code, 0)
+        self.assert_track_block(result, "complete")
+        self.assertEqual(result["source"], "engagement")
+
+
+class EngagementCloseTests(EngagementTestCase):
+    def test_close_moves_block_resolved_then_done(self):
+        self.block_eng()
+        result = self.close_eng()
+        self.assertEqual(result["status"], "complete")
+        self.assertTrue(result["ok"])
+        self.assertEqual((result["issue"], result["moved"], result["skipped"]),
+                         (f"{KEY}-100", [jirabackend.RESOLVED_STATUS, "Done"],
+                          []))
+        self.assertEqual(self.fake.status[f"{KEY}-100"], "Done")
+        self.assertEqual(list(result)[-4:], ["status", "intent", "artifacts",
+                                             "reason"])
+
+    def test_a_move_already_in_place_is_skipped(self):
+        self.block_eng()
+        self.fake.status[f"{KEY}-100"] = jirabackend.RESOLVED_STATUS
+        result = self.close_eng()
+        self.assertEqual(result["moved"], ["Done"])
+        self.assertEqual(len(result["skipped"]), 1)
+        again = self.close_eng()
+        self.assertEqual(again["status"], "complete")
+        self.assertEqual(again["moved"], [])
+        self.assertEqual(len(again["skipped"]), 2)
+
+    def test_no_issue_is_refused_by_name(self):
+        result = self.close_eng()
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("NoIssue", result["reason"])
+
+    def test_an_issue_never_blocked_skips_block_resolved_and_closes(self):
+        # setup adds only Blocked -> Block Resolved: a To-Do issue (created,
+        # never moved to Blocked) whose only transition goes to Done
+        key = f"{KEY}-100"
+        self.fake.summaries[key] = f"{ENG}: questions"
+        self.fake.status[key] = "To Do"
+        self.fake.lacking[key] = {"In Progress", BLOCKED,
+                                  jirabackend.RESOLVED_STATUS}
+        result = self.close_eng()
+        self.assertEqual(result["status"], "complete")
+        self.assertTrue(result["ok"])
+        self.assertEqual((result["issue"], result["moved"]), (key, ["Done"]))
+        self.assertEqual(result["skipped"], [
+            f"transition: {key} is not blocked (To Do); "
+            f"{jirabackend.RESOLVED_STATUS!r} skipped"])
+        self.assertEqual(self.fake.status[key], "Done")
+
+    def test_a_blocked_issue_still_needs_block_resolved(self):
+        self.block_eng()
+        self.fake.no_resolved.add(f"{KEY}-100")
+        result = self.close_eng()
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(self.fake.status[f"{KEY}-100"], BLOCKED)
+        self.assertEqual(
+            result["reason"],
+            f"track refused: NoTransition: {KEY}-100: no transition reaches "
+            f"{jirabackend.RESOLVED_STATUS!r} from {BLOCKED!r}")
+
+    def test_no_transition_to_done_is_refused_by_name(self):
+        self.block_eng()
+        self.fake.lacking[f"{KEY}-100"] = {"Done"}
+        result = self.close_eng()
+        self.assertEqual(result["status"], "blocked")
+        self.assertTrue(result["reason"].startswith(
+            "track refused: NoTransition: "), result["reason"])
+        self.assertIn("'Done'", result["reason"])
+
+    def test_the_cli_close(self):
+        self.block_eng()
+        out = io.StringIO()
+        with unittest.mock.patch.object(jirabackend, "client_for",
+                                        _client_with(self.fake)), \
+                contextlib.redirect_stdout(out):
+            code = track.main(["close", "--directory", str(self.root),
+                               "--engagement", ENG])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out.getvalue())["moved"],
+                         [jirabackend.RESOLVED_STATUS, "Done"])
 
 
 if __name__ == "__main__":

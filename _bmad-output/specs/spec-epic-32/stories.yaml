@@ -133,6 +133,8 @@
     (the served root, not the session's worktree) and writes scope.md and scope_page
     there; the record is JSON text; the update re-reads fresh and merges only the
     fields it owns (chatSpendPass rule).
+    Oversize (gate, 2026-10-25): plans/32-4.md lists 18 files, past band L; halt
+    blocked if the Files list must grow beyond the plan's list.
 
 - id: "32-5-the-quote-band"
   title: "The Quote Band"

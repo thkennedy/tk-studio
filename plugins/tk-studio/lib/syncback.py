@@ -51,7 +51,8 @@ TRACKING_REL = Path("_bmad-output") / "tracking"
 STATE_REL = TRACKING_REL / "sync-state.json"
 MIRROR_REL = Path("kb") / "confluence"
 OVERLAP_MINUTES = 5
-SEARCH_FIELDS = "status,updated,comment,attachment,priority"
+# Story 32.3: `summary` names an engagement issue (`ENG-NNN: questions`)
+SEARCH_FIELDS = "status,updated,comment,attachment,priority,summary"
 KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*-\d+$")
 MENTION_RE = re.compile(r"\[~accountid:([^\]\s]+)\]")
 HEADER_HASH_RE = re.compile(r"^content_hash: sha256:([0-9a-f]{64})$",
