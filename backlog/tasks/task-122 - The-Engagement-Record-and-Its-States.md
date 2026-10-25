@@ -1,9 +1,10 @@
 ---
 id: TASK-122
 title: The Engagement Record and Its States
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-25 03:13'
+updated_date: '2026-10-25 05:05'
 labels:
   - ST-122
 milestone: The Engagement Loop v1
