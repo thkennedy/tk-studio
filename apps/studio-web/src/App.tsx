@@ -7,10 +7,17 @@
 // Story 30.6: the web is the home (`GET /` answers this index.html). The Status screen joins the switch, and the
 // screen shown is remembered per browser (`screen.ts`, Office by default). Still one screen mounted at a time: the
 // Office canvas (the one Pixi Application) exists only while the Office screen is shown.
+// Story 31.6: the Inbox and the Issue screens join the switch. The inbox rows are read here (`useInbox`), so the
+// open-item count sits on the Inbox nav item whichever screen is shown (no count for an empty inbox); choosing a row
+// opens the Issue screen for it, remembered per browser (`issue/model.ts`).
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { createOfficeStore, LIVE_RUN_STATES } from "./live/store";
 import { openOfficeStream } from "./live/stream";
 import { BoardScreen } from "./board/BoardScreen";
+import { InboxScreen, useInbox } from "./inbox/InboxScreen";
+import { navCount } from "./inbox/model";
+import { IssueScreen } from "./issue/IssueScreen";
+import { rememberedIssue, rememberIssue, type IssueRef } from "./issue/model";
 import { OfficeScreen, type CanvasStats } from "./office/OfficeScreen";
 import { rememberedScreen, rememberScreen, SCREENS, type Screen } from "./screen";
 import { StatusScreen } from "./status/StatusScreen";
@@ -18,7 +25,7 @@ import { StatusScreen } from "./status/StatusScreen";
 /** The tab's one store (module-level: it outlives StrictMode's remount, so the view is never cleared). */
 const officeStore = createOfficeStore();
 const STREAM_LABEL = { live: "stream live", connecting: "connecting", reconnecting: "reconnecting" } as const;
-const SCREEN_LABEL: Record<Screen, string> = { office: "Office", board: "Board", status: "Status" };
+const SCREEN_LABEL: Record<Screen, string> = { office: "Office", board: "Board", status: "Status", inbox: "Inbox", issue: "Issue" };
 
 export function App() {
   const [hud, setHud] = useState<CanvasStats>({ zoom: 0, ratio: window.devicePixelRatio || 1, fps: 0 });
@@ -27,6 +34,15 @@ export function App() {
   const setScreen = (s: Screen) => {
     setScreenState(s);
     rememberScreen(s);
+  };
+  const inbox = useInbox(officeStore);
+  const count = navCount(inbox.rows);
+  const [issue, setIssue] = useState<IssueRef | null>(() => rememberedIssue());
+  const openIssue = (project: string, key: string) => {
+    const ref = { project, key };
+    setIssue(ref);
+    rememberIssue(ref);
+    setScreen("issue");
   };
 
   // One EventSource per mount, closed in the cleanup: StrictMode's double mount leaves one open.
@@ -41,6 +57,10 @@ export function App() {
         <OfficeScreen store={officeStore} onStats={setHud} />
       ) : screen === "board" ? (
         <BoardScreen store={officeStore} />
+      ) : screen === "inbox" ? (
+        <InboxScreen rows={inbox.rows} errors={inbox.errors} loaded={inbox.loaded} onOpen={openIssue} />
+      ) : screen === "issue" ? (
+        <IssueScreen issue={issue} />
       ) : (
         <StatusScreen store={officeStore} />
       )}
@@ -48,6 +68,7 @@ export function App() {
         {SCREENS.map((s) => (
           <button key={s} type="button" onClick={() => setScreen(s)} disabled={s === screen} style={{ font: "12px ui-monospace, Menlo, Consolas, monospace" }}>
             {SCREEN_LABEL[s]}
+            {s === "inbox" && count !== null ? ` (${count})` : ""}
           </button>
         ))}
       </nav>

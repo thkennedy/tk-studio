@@ -319,3 +319,10 @@
     as the reason. A transient Jira failure ends `partial` + `ok: false` + `retry:
     true`, so call again and record nothing. The owner's reply is a `comments.jsonl`
     line whose `author` and `update_author` are both `owner`.
+    From 31-6 (gate 2026-10-25, replan queue): `buildWorkerEnv` strips
+    `TK_STUDIO_ATLASSIAN_OWNER_*` from every worker, so the `validate-resolution` session
+    acts on the agent seat only (never `track.py reply`, never the owner variables). The
+    reply to judge is the owner comments after the issue's newest agent comment; `Done.`
+    is a valid simple answer. `track.py reply` skips an identical owner comment in the
+    same block cycle (`skipped[]`), so a fail re-blocks through `track.py block` with a
+    new follow-up comment, which opens a new cycle and lets the owner's next reply post.

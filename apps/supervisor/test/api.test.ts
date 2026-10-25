@@ -1210,3 +1210,127 @@ describe("Story 31.5: GET /inbox (contract 0.1.26 additive)", () => {
     }
   });
 });
+
+describe("Story 31.6: the issue read and POST /inbox/{key}/reply (contract 0.1.26 additive)", () => {
+  const SECRET = "j".repeat(48);
+  const ITEM = { issue: "TKS-3", entity: "ST-003", title: "Gamma", priority: "High", blocked_since: "2026-10-24T09:00:00+00:00", reason_comment: null, state: "open" };
+  function routed(o: Partial<ApiDeps> = {}) {
+    const root = mkdtempSync(join(tmpdir(), "tk-sup-reply-root-"));
+    mkdirSync(join(root, "_bmad-output", "tracking"), { recursive: true });
+    writeFileSync(join(root, "_bmad-output", "tracking", "inbox.json"), JSON.stringify({ inbox_version: 1, generated_at: "2026-10-24T12:00:00+00:00", project_key: "TKS", items: [ITEM] }));
+    const queue = new Queue(join(mkdtempSync(join(tmpdir(), "tk-sup-reply-q-")), "q.db"), { ownerAlive: () => false, engineLive: async () => ({ live: false }) });
+    const replies: { key: string; body: unknown }[] = [];
+    const handler = createApi({
+      queue, token: TOKEN, session: { secret: SECRET }, submit: async () => { throw new Error("never"); },
+      registry: async () => ({ projects: { p: { root } } }), env: { TK_STUDIO_HOME: mkdtempSync(join(tmpdir(), "tk-sup-reply-home-")) },
+      reply: async (key, body) => { replies.push({ key, body }); return { status: 200, body: { ok: true, project: body.project, issue: key, commented: true, transitioned: true, status: "complete" } }; },
+      ...o,
+    });
+    const cookie = `${SESSION_COOKIE}=${signSession(SECRET, "token", Date.now())}`;
+    const csrf = csrfToken(SECRET, cookie.slice(SESSION_COOKIE.length + 1));
+    const call = (method: string, path: string, headers: Record<string, string> = { authorization: `Bearer ${TOKEN}` }, body?: unknown) =>
+      handler(new Request(`${BASE}${path}`, { method, headers: { ...(body !== undefined ? { "content-type": "application/json" } : {}), ...headers }, ...(body !== undefined ? { body: typeof body === "string" ? body : JSON.stringify(body) } : {}) }));
+    return { root, call, cookie, csrf, replies, queue };
+  }
+
+  test("GET /inbox&issue: the matching item and the issue; a bad key 400 BadIssue; an unknown one 404 UnknownIssue", async () => {
+    const fx = routed();
+    const ok = await fx.call("GET", "/inbox?project=p&issue=TKS-3");
+    expect(ok.status).toBe(200);
+    const body = await ok.json() as Record<string, any>;
+    expect(body).toMatchObject({ ok: true, project: "p", generated_at: "2026-10-24T12:00:00+00:00", items: [ITEM] });
+    expect(body.issue).toEqual({ key: "TKS-3", entity: null, title: "Gamma", status: "open", run: null, cost_usd: null, comments: [] });
+    expect(ok.headers.get("x-csrf-token")).toBeNull(); // a bearer answer has none
+    const bad = await fx.call("GET", "/inbox?project=p&issue=tks-3");
+    expect(bad.status).toBe(400);
+    expect(await bad.json()).toMatchObject({ ok: false, error: "BadIssue" });
+    const unknown = await fx.call("GET", "/inbox?project=p&issue=TKS-99");
+    expect(unknown.status).toBe(404);
+    expect(await unknown.json()).toMatchObject({ ok: false, error: "UnknownIssue", issue: "TKS-99" });
+    const noProject = await fx.call("GET", "/inbox?project=nope&issue=TKS-3");
+    expect(noProject.status).toBe(404);
+    expect(await noProject.json()).toMatchObject({ ok: false, error: "UnknownProject" });
+  });
+
+  test("GET /inbox&issue: a failing read is 500 IssueReadFailed", async () => {
+    const fx = routed({ issueRead: async () => ({ ok: false, error: "IssueReadFailed", detail: "boom" }) });
+    const res = await fx.call("GET", "/inbox?project=p&issue=TKS-3");
+    expect(res.status).toBe(500);
+    expect(await res.json()).toMatchObject({ ok: false, error: "IssueReadFailed", issue: "TKS-3", detail: "boom" });
+  });
+
+  test("a cookie session's GET /inbox carries its CSRF token in X-CSRF-Token", async () => {
+    const fx = routed();
+    for (const path of ["/inbox?project=p", "/inbox?project=p&issue=TKS-3", "/inbox?project=nope"]) {
+      const res = await fx.call("GET", path, { cookie: fx.cookie });
+      expect(res.headers.get("x-csrf-token")).toBe(fx.csrf);
+    }
+  });
+
+  test("a cookie session's GET /inbox with no project is 400 ProjectRequired and still carries X-CSRF-Token; a bearer's none", async () => {
+    const fx = routed();
+    const viaCookie = await fx.call("GET", "/inbox", { cookie: fx.cookie });
+    expect(viaCookie.status).toBe(400);
+    expect(await viaCookie.json()).toMatchObject({ ok: false, error: "ProjectRequired" });
+    expect(viaCookie.headers.get("x-csrf-token")).toBe(fx.csrf);
+    const viaBearer = await fx.call("GET", "/inbox");
+    expect(viaBearer.status).toBe(400);
+    expect(viaBearer.headers.get("x-csrf-token")).toBeNull();
+  });
+
+  test("POST /inbox/{key}/reply: the bearer, or the cookie with X-CSRF-Token, else 403 CsrfRefused; no auth 401", async () => {
+    const fx = routed();
+    const viaBearer = await fx.call("POST", "/inbox/TKS-3/reply", undefined, { project: "p", body: "Use the second option." });
+    expect(viaBearer.status).toBe(200);
+    expect(await viaBearer.json()).toEqual({ ok: true, project: "p", issue: "TKS-3", commented: true, transitioned: true, status: "complete" });
+    const viaCookie = await fx.call("POST", "/inbox/TKS-3/reply", { cookie: fx.cookie, "x-csrf-token": fx.csrf }, { project: "p", done: true });
+    expect(viaCookie.status).toBe(200);
+    expect(fx.replies).toEqual([{ key: "TKS-3", body: { project: "p", body: "Use the second option." } }, { key: "TKS-3", body: { project: "p", done: true } }]);
+    for (const headers of [{ cookie: fx.cookie }, { cookie: fx.cookie, "x-csrf-token": "forged" }] as Record<string, string>[]) {
+      const refused = await fx.call("POST", "/inbox/TKS-3/reply", headers, { project: "p", done: true });
+      expect(refused.status).toBe(403);
+      expect(await refused.json()).toMatchObject({ ok: false, error: "CsrfRefused" });
+    }
+    expect((await fx.call("POST", "/inbox/TKS-3/reply", {}, { project: "p", done: true })).status).toBe(401);
+    expect(fx.replies).toHaveLength(2);
+    const get = await fx.call("GET", "/inbox/TKS-3/reply");
+    expect(get.status).toBe(405);
+    expect(get.headers.get("allow")).toBe("POST");
+  });
+
+  test("POST /inbox/{key}/reply: both, neither, an empty or a >32 KiB body is 400 SchemaError; not JSON 400 MalformedJson", async () => {
+    const fx = routed();
+    for (const body of [{ project: "p" }, { project: "p", body: "x", done: true }, { project: "p", body: "" }, { project: "p", body: "x".repeat(32 * 1024 + 1) }, { body: "x" }]) {
+      const res = await fx.call("POST", "/inbox/TKS-3/reply", undefined, body);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ ok: false, error: "SchemaError" });
+    }
+    const malformed = await fx.call("POST", "/inbox/TKS-3/reply", undefined, "{nope");
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toMatchObject({ ok: false, error: "MalformedJson" });
+    expect(fx.replies).toEqual([]);
+  });
+
+  test("the default reply: an absent owner seat is 409 OwnerSeatMissing naming each, no spawn; an unknown project 404", async () => {
+    const fx = routed({ reply: undefined });
+    const res = await fx.call("POST", "/inbox/TKS-3/reply", undefined, { project: "p", done: true });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({
+      ok: false, error: "OwnerSeatMissing", missing: ["TK_STUDIO_ATLASSIAN_OWNER_EMAIL", "TK_STUDIO_ATLASSIAN_OWNER_TOKEN", "TK_ATLASSIAN_CLOUD_ID"],
+    });
+    const unknown = await fx.call("POST", "/inbox/TKS-3/reply", undefined, { project: "nope", done: true });
+    expect(unknown.status).toBe(404);
+    expect(await unknown.json()).toMatchObject({ ok: false, error: "UnknownProject" });
+  });
+
+  test("the reply's own answers pass through: 409 ReplyRefused, 503 ReplyRetry, 500 ReplyFailed; no queue event", async () => {
+    for (const [status, error] of [[409, "ReplyRefused"], [503, "ReplyRetry"], [500, "ReplyFailed"]] as const) {
+      const fx = routed({ reply: async () => ({ status, body: { ok: false, error, reason: "r" } }) });
+      const res = await fx.call("POST", "/inbox/TKS-3/reply", undefined, { project: "p", done: true });
+      expect(res.status).toBe(status);
+      expect(await res.json()).toEqual({ ok: false, error, reason: "r" });
+      expect(fx.queue.events()).toEqual([]);
+    }
+  });
+});
+

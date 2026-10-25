@@ -845,6 +845,70 @@ class DriverContractTestCase(unittest.TestCase):
                        "never a comment or message event", "additive"):
             self.assertIn(phrase, inbox)
 
+    # --- Story 31.6: the same 0.1.26 entry names the `reply` verb, the
+    # issue read, `POST /inbox/{key}/reply` and the CSRF header (no bump).
+
+    def test_0_1_26_names_reply_and_the_issue_read(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.26**", header)
+        self.assertNotIn("**0.1.27**", header)
+        self.assertLess(header.index("0.1.26 (Story 31.5)"),
+                        header.index("0.1.26 (Story 31.6)"))
+        clause = " ".join(header[header.index("0.1.26 (Story 31.6)"):].split())
+        for phrase in ("`reply` verb",
+                       "`track.py reply --directory ROOT --issue <KEY> "
+                       "(--body-file PATH | --done) [--dry-run]`",
+                       "`Done.`", "never the command line",
+                       "`TK_STUDIO_ATLASSIAN_OWNER_EMAIL`",
+                       "`TK_STUDIO_ATLASSIAN_OWNER_TOKEN`", "host-only",
+                       "`TK_ATLASSIAN_CLOUD_ID` gateway", "`/rest/api/2`",
+                       "DRIFT", "`Block Resolved`", "(AD-4)", "`skipped[]`",
+                       "the agent's token never stands in",
+                       "nothing moved", "`retry: true`", "(D9)",
+                       "`GET /inbox?project=<id>&issue=<KEY>`",
+                       "`POST /inbox/{key}/reply`", "`X-CSRF-Token`",
+                       "— additive"):
+            self.assertIn(phrase, clause)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 31.6", stories)
+        row = next(line for line in self.text.splitlines()
+                   if line.startswith("| `tk-studio-track` "))
+        for phrase in ("`reply`", "`lib/track.py reply`", "`--body-file`",
+                       "`done?`", "`TK_STUDIO_ATLASSIAN_OWNER_TOKEN`",
+                       "`Block Resolved`", "comment_id, transitioned",
+                       "not authored by the owner"):
+            self.assertIn(phrase, row)
+        title = "### Supervisor surfaces the web consumes (0.1.24)"
+        section = self.text[self.text.index(title):]
+        inbox = next(line for line in section.splitlines()
+                     if line.startswith("| the inbox (Story 31.5, 0.1.26) |"))
+        for phrase in ("`GET /inbox?project=<id>&issue=<KEY>`",
+                       "`{key, entity, title, status, run, cost_usd, "
+                       "comments[]}`", "`400 BadIssue`",
+                       "`404 UnknownIssue`", "`500 IssueReadFailed`",
+                       "last `_bmad-output/tracking/"
+                       "<KEY>/comments.jsonl` line per `id`",
+                       "`X-CSRF-Token` response header"):
+            self.assertIn(phrase, inbox)
+        reply = next(line for line in section.splitlines()
+                     if line.startswith("| the owner's reply (Story 31.6, "
+                                        "0.1.26) |"))
+        for phrase in ("`POST /inbox/{key}/reply`",
+                       "`{project, body?, done?: true}`", "32 KiB",
+                       "`400 SchemaError`", "`400 MalformedJson`",
+                       "a malformed key `400 BadIssue`",
+                       "`status` is the verb's §3 status",
+                       "never the issue's Jira status", "`403 CsrfRefused`",
+                       "`409 OwnerSeatMissing {missing}`", "no spawn",
+                       "--body-file <tmp>`", "never reach the sandbox",
+                       "`409 ReplyRefused {reason, commented}`",
+                       "`503 ReplyRetry {reason, commented}`", "`500 ReplyFailed`",
+                       "`404 UnknownProject`", "no queue event",
+                       "next sync-back", "additive"):
+            self.assertIn(phrase, reply)
+
     def test_section_8_names_the_cli_drives(self):
         section = self.text[self.text.index("## 8. Conformance"):]
         flat = " ".join(section.split())

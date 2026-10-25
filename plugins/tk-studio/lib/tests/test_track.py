@@ -1,4 +1,4 @@
-"""Tests for `tk-studio-track block` (Story 31.5, AC1).
+"""Tests for `tk-studio-track block` (Story 31.5, AC1) and `reply` (31.6).
 
 `track.block` moves a story's issue and each dependent's (the entities whose
 `depends_on` names it) to `Blocked - Awaiting User` by transition name, with
@@ -48,6 +48,8 @@ class FakeTrack(FakeSyncBack):
         super().__init__()
         self.status: dict[str, str] = {}
         self.no_blocked: set[str] = set()   # workflows lacking the transition
+        self.no_resolved: set[str] = set()  # ... into Block Resolved (31.6)
+        self.comment_as = AGENT             # the seat the token belongs to
         self.posted: dict[str, list[str]] = {}
 
     def _jira(self, method, path, query, body):
@@ -59,7 +61,9 @@ class FakeTrack(FakeSyncBack):
         m = re.match(r"^/issue/([^/]+)/transitions$", path)
         if m and m.group(1) in self.status:
             names = [n for n in WORKFLOW if not (
-                n == BLOCKED and m.group(1) in self.no_blocked)]
+                n == BLOCKED and m.group(1) in self.no_blocked) and not (
+                n == jirabackend.RESOLVED_STATUS
+                and m.group(1) in self.no_resolved)]
             if method == "GET":
                 return 200, {"transitions": [
                     {"id": str(10 * (WORKFLOW.index(n) + 1)),
@@ -74,8 +78,8 @@ class FakeTrack(FakeSyncBack):
         if method == "POST" and m:
             assert set(body) == {"body"}, body
             self.posted.setdefault(m.group(1), []).append(body["body"])
-            created = comment(str(10000 + len(self.posted[m.group(1)])), AGENT,
-                              body["body"], 0)
+            created = comment(str(10000 + len(self.posted[m.group(1)])),
+                              self.comment_as, body["body"], 0)
             self.comment_store.setdefault(m.group(1), []).append(created)
             return 201, created
         return super()._jira(method, path, query, body)
@@ -492,6 +496,292 @@ class RefusalTests(TrackTestCase):
         result = json.loads(out.getvalue())
         self.assert_track_block(result, "blocked")
         self.assertIn("track refused", result["reason"])
+
+
+# ------------------------------------------------------------------- reply
+
+RESOLVED = jirabackend.RESOLVED_STATUS
+OWNER_ENV = {jirabackend.OWNER_EMAIL_ENV: "owner@example.com",
+             jirabackend.OWNER_TOKEN_ENV: "fake-owner-token"}
+
+
+class ReplyTestCase(TrackTestCase):
+    """Story 31.6: `track.reply` posts the owner's comment with the owner
+    seat's gateway client, then moves the issue to `Block Resolved` by
+    name. The fake answers the comment as the seat whose token posted it
+    (`comment_as`)."""
+
+    ENV_KEYS = (*TrackTestCase.ENV_KEYS, *OWNER_ENV)
+
+    def setUp(self):
+        super().setUp()
+        os.environ.update(OWNER_ENV)
+        self.fake.comment_as = OWNER
+        self.fake.status[f"{KEY}-1"] = BLOCKED
+
+    def reply(self, issue=f"{KEY}-1", **kwargs):
+        if "body" not in kwargs and not kwargs.get("done"):
+            kwargs["body"] = "Use the second option."
+        return track.reply(self.root, issue, transport=self.fake,
+                           sleep=self.sleeps.append, **kwargs)
+
+    def assert_reply_block(self, result, status, ok=None):
+        self.assertEqual(list(result)[-4:], ["status", "intent", "artifacts",
+                                             "reason"])
+        self.assertEqual(result["status"], status)
+        self.assertEqual(result["intent"], "tk-studio-track")
+        self.assertEqual(result["ok"], status != "blocked" if ok is None
+                         else ok)
+        for name in ("dry_run", "issue", "commented", "comment_id",
+                     "transitioned", "notes", "skipped", "written"):
+            self.assertIn(name, result)
+
+
+class ReplyTests(ReplyTestCase):
+    def test_a_reply_comments_as_the_owner_then_moves_to_block_resolved(self):
+        result = self.reply()
+        self.assert_reply_block(result, "complete")
+        self.assertEqual((result["commented"], result["transitioned"]),
+                         (True, True))
+        self.assertEqual(result["comment_id"], "10001")
+        self.assertEqual(self.fake.posted, {f"{KEY}-1":
+                                            ["Use the second option."]})
+        self.assertEqual(self.fake.status[f"{KEY}-1"], RESOLVED)
+        # the comment, then the transition by name; nothing else written
+        self.assertEqual([c[1] for c in self.writes()],
+                         [f"/issue/{KEY}-1/comment",
+                          f"/issue/{KEY}-1/transitions"])
+        # the owner seat's gateway, REST v2
+        self.assertTrue(all(u.startswith(
+            "https://api.atlassian.com/ex/jira/cloud-test/rest/api/2/")
+            for u in self.fake.urls))
+        self.assertEqual(result["written"], [])
+        self.assertFalse((self.root / "_bmad-output" / "tracking").exists())
+        self.assertNotIn("fake-owner-token", json.dumps(result))
+
+    def test_done_writes_done_as_the_owner(self):
+        result = self.reply(done=True)
+        self.assert_reply_block(result, "complete")
+        self.assertEqual(self.fake.posted[f"{KEY}-1"], ["Done."])
+        self.assertEqual(self.fake.status[f"{KEY}-1"], RESOLVED)
+
+    def test_done_twice_posts_once(self):
+        self.assert_reply_block(self.reply(done=True), "complete")
+        result = self.reply(done=True)
+        self.assert_reply_block(result, "complete")
+        self.assertEqual(self.fake.posted[f"{KEY}-1"], ["Done."])
+        self.assertTrue(result["commented"])
+        self.assertEqual([x.split(":")[0] for x in result["skipped"]],
+                         ["comment", "transition"])
+
+    def test_a_reply_to_a_later_block_posts_again(self):
+        # Done answered an earlier block; a newer agent block comment
+        # follows it: the same Done is a new reply
+        self.seed_comment(f"{KEY}-1", OWNER, "Done.", 90)
+        self.seed_comment(f"{KEY}-1", AGENT, body(), 30)
+        result = self.reply(done=True)
+        self.assert_reply_block(result, "complete")
+        self.assertEqual(self.fake.posted[f"{KEY}-1"], ["Done."])
+        self.assertEqual(result["skipped"], [])
+
+    def test_the_owner_seat_signs_the_requests_never_the_agent(self):
+        seen = []
+        real = jirabackend.JiraClient.for_owner
+
+        def spy(*args, **kwargs):
+            client = real(*args, **kwargs)
+            seen.append(client)
+            return client
+        with unittest.mock.patch.object(jirabackend.JiraClient, "for_owner",
+                                        spy):
+            self.reply(done=True)
+        (client,) = seen
+        self.assertEqual(client.token_env, jirabackend.OWNER_TOKEN_ENV)
+        import base64
+        auth = base64.b64decode(client._headers["Authorization"].split()[1])
+        self.assertEqual(auth.decode(), "owner@example.com:fake-owner-token")
+
+    def test_already_resolved_comments_and_skips_the_transition(self):
+        self.fake.status[f"{KEY}-1"] = RESOLVED
+        result = self.reply()
+        self.assert_reply_block(result, "complete")
+        self.assertEqual((result["commented"], result["transitioned"]),
+                         (True, False))
+        self.assertEqual(len(result["skipped"]), 1)
+        self.assertTrue(result["skipped"][0].startswith("transition:"))
+        self.assertFalse([c for c in self.writes()
+                          if c[1].endswith("/transitions")])
+
+    def test_dry_run_reads_and_writes_nothing(self):
+        result = self.reply(dry_run=True)
+        self.assert_reply_block(result, "partial")
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(self.writes(), [])
+        self.assertTrue(any(n.startswith("dry run:") for n in result["notes"]))
+        self.assertEqual(self.fake.status[f"{KEY}-1"], BLOCKED)
+
+    def test_dry_run_predicts_the_skip_of_a_standing_owner_reply(self):
+        # the owner's identical Done already follows the newest agent
+        # comment: the dry run names the skip the real run would make
+        self.seed_comment(f"{KEY}-1", AGENT, body(), 90)
+        self.seed_comment(f"{KEY}-1", OWNER, "Done.", 30)
+        result = self.reply(done=True, dry_run=True)
+        self.assert_reply_block(result, "partial")
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(result["commented"], False)
+        self.assertEqual(result["comment_id"], None)
+        self.assertEqual([x.split(":")[0] for x in result["skipped"]],
+                         ["comment"])
+        self.assertFalse([n for n in result["notes"]
+                          if "owner's comment" in n])
+        self.assertTrue(any("would move" in n for n in result["notes"]))
+        self.assertEqual(self.fake.status[f"{KEY}-1"], BLOCKED)
+
+    def test_cli_reads_the_body_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "body.txt"
+            path.write_text("from the iPad\nsecond line", encoding="utf-8")
+            out = io.StringIO()
+            with unittest.mock.patch.object(
+                    jirabackend, "owner_client",
+                    _owner_client_with(self.fake)), \
+                    contextlib.redirect_stdout(out):
+                code = track.main(["reply", "--directory", str(self.root),
+                                   "--issue", f"{KEY}-1", "--body-file",
+                                   str(path)])
+        self.assertEqual(code, 0)
+        result = json.loads(out.getvalue())
+        self.assert_reply_block(result, "complete")
+        self.assertEqual(self.fake.posted[f"{KEY}-1"],
+                         ["from the iPad\nsecond line"])
+
+
+def _owner_client_with(transport):
+    real = jirabackend.owner_client
+
+    def owner_client(_transport=None, site=None):
+        return real(transport, site=site)
+    return owner_client
+
+
+class ReplyRefusalTests(ReplyTestCase):
+    def assert_refused(self, result, *names, calls=False):
+        self.assert_reply_block(result, "blocked")
+        for name in names:
+            self.assertIn(name, result["reason"])
+        if not calls:
+            self.assertEqual(self.fake.calls, [])
+
+    def test_absent_owner_env_is_named_with_no_call(self):
+        for name in (jirabackend.OWNER_EMAIL_ENV, jirabackend.OWNER_TOKEN_ENV,
+                     jirabackend.CLOUD_ID_ENV):
+            with self.subTest(name=name):
+                saved = os.environ.pop(name)
+                try:
+                    result = self.reply(done=True)
+                finally:
+                    os.environ[name] = saved
+                self.assert_refused(result, name, "no Atlassian call made")
+
+    def test_the_agent_token_never_stands_in_for_the_owner(self):
+        # the agent seat is fully set (TrackTestCase); the owner's is not
+        for name in OWNER_ENV:
+            os.environ.pop(name)
+        result = self.reply(done=True)
+        self.assert_refused(result, jirabackend.OWNER_TOKEN_ENV,
+                            jirabackend.OWNER_EMAIL_ENV)
+
+    def test_no_binding_makes_no_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = track.reply(Path(tmp), f"{KEY}-1", done=True,
+                                 transport=self.fake)
+        self.assert_refused(result, "planning.jira.project_key",
+                            "no Atlassian call made")
+
+    def test_no_owner_account_id_is_refused(self):
+        text = self.config.read_text(encoding="utf-8")
+        self.config.write_text(re.sub(r"\n\s*owner_account_id:[^\n]*", "",
+                                      text), encoding="utf-8")
+        self.assert_refused(self.reply(), "planning.jira.owner_account_id")
+
+    def test_a_bad_key_or_body_is_refused(self):
+        self.assert_refused(self.reply("st-1"), "not a Jira issue key")
+        self.assert_refused(self.reply(body="   "), "empty")
+        self.assert_refused(self.reply(body="x", done=True), "exactly one")
+        self.assert_refused(track.reply(self.root, f"{KEY}-1",
+                                        transport=self.fake), "exactly one")
+
+    def test_a_comment_from_another_seat_moves_nothing(self):
+        # the owner variables hold the agent's token: the created comment's
+        # author is the agent, named; the issue stays where it was
+        self.fake.comment_as = AGENT
+        result = self.reply()
+        self.assert_refused(result, AGENT, OWNER, "nothing moved",
+                            jirabackend.OWNER_TOKEN_ENV, calls=True)
+        self.assertEqual((result["commented"], result["transitioned"]),
+                         (True, False))
+        self.assertEqual(self.fake.status[f"{KEY}-1"], BLOCKED)
+        self.assertFalse([c for c in self.writes()
+                          if c[1].endswith("/transitions")])
+
+    def test_no_transition_to_block_resolved_keeps_the_comment(self):
+        self.fake.no_resolved.add(f"{KEY}-1")
+        result = self.reply()
+        self.assert_refused(result, f"{KEY}-1", "'Block Resolved'",
+                            calls=True)
+        self.assertEqual((result["commented"], result["transitioned"]),
+                         (True, False))
+        self.assertEqual(self.fake.status[f"{KEY}-1"], BLOCKED)
+
+    def test_cli_no_env_exits_2_with_the_block_last(self):
+        for name in OWNER_ENV:
+            os.environ.pop(name)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = track.main(["reply", "--directory", str(self.root),
+                               "--issue", f"{KEY}-1", "--done"])
+        self.assertEqual(code, 2)
+        result = json.loads(out.getvalue())
+        self.assert_reply_block(result, "blocked")
+        self.assertIn("no Atlassian call made", result["reason"])
+
+
+class ReplyTransientTests(ReplyTestCase):
+    def assert_retry(self, result):
+        self.assert_reply_block(result, "partial", ok=False)
+        self.assertTrue(result["retry"])
+        self.assertTrue(result["reason"].startswith("track retry: "))
+
+    def test_a_5xx_is_retried(self):
+        self.fake.force[("GET", f"/issue/{KEY}-1")] = (503, "unavailable")
+        self.assert_retry(self.reply())
+        self.assertEqual(self.writes(), [])
+
+    def test_a_retry_after_a_failed_transition_posts_once(self):
+        # the comment landed, the transition read answered 503: the owner
+        # presses Send again — the comment is not posted twice
+        self.fake.force[("GET", f"/issue/{KEY}-1/transitions")] = (503, "x")
+        first = self.reply()
+        self.assert_retry(first)
+        self.assertTrue(first["commented"])
+        del self.fake.force[("GET", f"/issue/{KEY}-1/transitions")]
+        result = self.reply()
+        self.assert_reply_block(result, "complete")
+        self.assertEqual((result["commented"], result["transitioned"]),
+                         (True, True))
+        self.assertEqual(result["comment_id"], first["comment_id"])
+        self.assertTrue(result["skipped"][0].startswith("comment:"))
+        self.assertEqual(self.fake.posted[f"{KEY}-1"],
+                         ["Use the second option."])
+        self.assertEqual(self.fake.status[f"{KEY}-1"], RESOLVED)
+
+    def test_an_exhausted_429_on_the_comment_is_retried(self):
+        self.fake.force[("POST", f"/issue/{KEY}-1/comment")] = (
+            429, {}, {"Retry-After": "600"})
+        result = self.reply()
+        self.assert_retry(result)
+        self.assertIn("429", result["reason"])
+        self.assertFalse(result["commented"])
 
 
 if __name__ == "__main__":

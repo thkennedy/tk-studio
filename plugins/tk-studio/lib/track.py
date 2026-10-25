@@ -1,4 +1,5 @@
-"""tk-studio-track — the `block` verb (Story 31.5, §6.9 items 1 and 2, §7.4).
+"""tk-studio-track — the `block` verb (Story 31.5, §6.9 items 1 and 2, §7.4)
+and the `reply` verb (Story 31.6).
 
 When the loop cannot progress a story, its Jira issue — and each dependent
 story's issue (the canonical story entities whose `depends_on` names it,
@@ -34,6 +35,30 @@ on its next pass. Every result ends with the
 §3 status block (AD-11). `--source engagement` fixes the shape for the
 engagement loop's questions (EP-32); the supervisor's paused-run pass is
 the caller today (`--source run`). Stdlib-only (NFR9); never prompts.
+
+The `reply` verb (Story 31.6, §6.9 items 3 and 4) is the owner's answer:
+
+  uv run track.py reply --directory ROOT --issue <KEY>
+      (--body-file PATH | --done) [--dry-run]
+
+It posts the comment (`--done` writes `Done.`) with the owner seat's
+client (`jirabackend.owner_client`: TK_STUDIO_ATLASSIAN_OWNER_EMAIL and
+TK_STUDIO_ATLASSIAN_OWNER_TOKEN through the TK_ATLASSIAN_CLOUD_ID gateway,
+REST v2, plain text), then moves the issue by name to `Block Resolved`; an
+issue already there skips the transition, named in `skipped[]`. The body
+comes from a file, never the command line. Only the supervisor's `POST
+/inbox/{key}/reply` calls it, on the host: the owner's variables never
+reach the sandbox. Refusals end `blocked` (exit 2), each by name: an absent
+owner variable or cloud id, or no `planning.jira` binding (both before any
+call, `no Atlassian call made`); no recorded
+`planning.jira.owner_account_id`; a created comment whose author is not
+the owner (another seat's token: nothing is moved); no transition reaching
+`Block Resolved` (the comment stays, `commented: true`). A temporary
+failure ends `partial` with `ok: false` and `retry: true`. An owner comment
+with the same body after the issue's newest agent comment (read live) is
+not posted again — a retry or a second Done — and is named in `skipped[]`
+(`commented: true`, its id), and the transition still runs. No local file is
+written and nothing else is promoted (D9).
 """
 from __future__ import annotations
 
@@ -53,6 +78,8 @@ INTENT = "tk-studio-track"
 SOURCES = ("run", "engagement")
 FINISHED = ("done", "dropped")
 ENTITY_ID_RE = re.compile(r"^(EP|ST|TA)-\d{3,}$")
+ISSUE_KEY_RE = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
+DONE_BODY = "Done."
 STORY_KEY_RE = re.compile(r"^(\d+)[.-](\d+)(?:-|$)")
 
 
@@ -295,6 +322,135 @@ def block(project_root: Path, story: str, reason: str, resolves: str,
     return _finish(result, "complete", None)
 
 
+# ------------------------------------------------------------------- reply
+
+def _reply_result(issue: str, dry_run: bool) -> dict:
+    return {"ok": False, "dry_run": dry_run, "issue": issue,
+            "commented": False, "comment_id": None, "transitioned": False,
+            "notes": [], "skipped": [], "written": []}
+
+
+def owner_reply_in_place(client, key: str, owner: str,
+                         text: str) -> str | None:
+    """The id of an owner comment with the same body posted after the
+    issue's newest agent comment (read live, `GET /issue/{key}/comment`
+    through `jirabackend`), else None — so a retried reply or a second Done
+    never posts twice, while a reply to a later block (a newer agent
+    comment) still posts."""
+    found = None
+    for c in jirabackend.issue_comments(client, key):
+        author = (c.get("author") or {}).get("accountId")
+        if author != owner:
+            found = None   # an agent comment after it: a new block cycle
+            continue
+        body = c.get("body")
+        if isinstance(body, str) and body.strip() == text.strip() \
+                and c.get("id") is not None:
+            found = str(c["id"])
+    return found
+
+
+def reply(project_root: Path, issue: str, body: str | None = None,
+          done: bool = False, dry_run: bool = False, transport=None,
+          sleep=None) -> dict:
+    """The `reply` verb (see the module docstring). `body` is the comment
+    text (the CLI reads it from `--body-file`); `done` writes `Done.`."""
+    root = Path(project_root).resolve()
+    result = _reply_result(issue, dry_run)
+
+    def refuse(why: str) -> dict:
+        return _finish(result, "blocked", f"track refused: {why}")
+
+    if not ISSUE_KEY_RE.match(issue or ""):
+        return refuse(f"--issue {issue!r} is not a Jira issue key "
+                      f"(KEY-123); no Atlassian call made")
+    if done == (body is not None):
+        return refuse("give exactly one of --body-file and --done; no "
+                      "Atlassian call made")
+    text = DONE_BODY if done else body.strip()
+    if not text:
+        return refuse("the reply body is empty; no Atlassian call made")
+    gaps = jirabackend.owner_gaps()
+    if gaps:
+        return refuse("; ".join(gaps) + " — the reply is posted only as the "
+                      "owner, never with another identity; no Atlassian "
+                      "call made")
+    if plansync._recorded(root, "planning.jira.project_key") is None:
+        return refuse("planning.jira.project_key is not recorded (no "
+                      "planning.jira binding) — run `plansync.py setup` "
+                      "first; no Atlassian call made")
+    owner = plansync._recorded(root, "planning.jira.owner_account_id")
+    if owner is None:
+        return refuse("planning.jira.owner_account_id is not recorded — the "
+                      "reply's author is checked against it; rerun "
+                      "`plansync.py setup --owner-account-id <id>`; no "
+                      "Atlassian call made")
+    client, gaps = jirabackend.owner_client(
+        transport, site=plansync._recorded(root, "planning.jira.site"))
+    if client is None:  # pragma: no cover — owner_gaps above
+        return refuse("; ".join(gaps) + " — no Atlassian call made")
+    if sleep is not None:
+        client.sleep = sleep
+    notes, skipped = result["notes"], result["skipped"]
+    target = jirabackend.RESOLVED_STATUS
+    try:
+        name, _ = jirabackend._current_status(client, issue)
+        if dry_run:
+            # the same read-only check the real run makes: a standing
+            # identical owner reply is predicted as a skip, never a post
+            landed = owner_reply_in_place(client, issue, owner, text)
+            if landed is not None:
+                skipped.append(f"comment: {issue} already has this owner "
+                               f"reply ({landed}) since the newest agent "
+                               f"comment")
+            else:
+                notes.append(f"dry run: {issue} would get the owner's "
+                             f"comment ({len(text)} characters)")
+            if name == target:
+                skipped.append(f"transition: {issue} is already in "
+                               f"{target!r}")
+            else:
+                notes.append(f"dry run: {issue} would move from {name!r} "
+                             f"to {target!r}")
+            return _finish(result, "partial", "dry run: nothing written; a "
+                           "real run would comment and move as `notes[]` "
+                           "names")
+        landed = owner_reply_in_place(client, issue, owner, text)
+        if landed is not None:
+            # a retry after a temporary failure, or Done pressed twice:
+            # the owner's identical reply already stands — never twice
+            result["commented"] = True
+            result["comment_id"] = landed
+            skipped.append(f"comment: {issue} already has this owner reply "
+                           f"({landed}) since the newest agent comment")
+        else:
+            created = jirabackend.add_comment(client, issue, text)
+            result["commented"] = True
+            result["comment_id"] = (str(created["id"]) if created.get("id")
+                                    is not None else None)
+            author = (created.get("author") or {}).get("accountId")
+            if author != owner:
+                return refuse(f"{issue}: the comment {result['comment_id']} "
+                              f"was posted as {author!r}, not the owner "
+                              f"{owner!r} — {jirabackend.OWNER_TOKEN_ENV} is "
+                              f"another seat's token; nothing moved")
+        if name == target:
+            skipped.append(f"transition: {issue} is already in {target!r}")
+        elif jirabackend.transition_to_name(client, issue, target, notes,
+                                            issue) is None:
+            return refuse(f"{issue}: no transition reaches {target!r} from "
+                          f"{name!r} — the comment stays (commented: true)")
+        else:
+            result["transitioned"] = True
+    except jirabackend.JiraError as exc:
+        if transient(exc):
+            result["retry"] = True
+            return _finish(result, "partial", f"track retry: {issue}: {exc} "
+                           f"— a temporary failure; call again", ok=False)
+        return refuse(f"{issue}: {exc}")
+    return _finish(result, "complete", None)
+
+
 # --------------------------------------------------------------------- CLI
 
 def main(argv: list[str] | None = None) -> int:
@@ -313,8 +469,34 @@ def main(argv: list[str] | None = None) -> int:
     # Validated in code, not argparse choices: a refusal stays JSON (exit 2).
     blk.add_argument("--source", default="run")
     blk.add_argument("--dry-run", action="store_true")
+    rep = sub.add_parser("reply")
+    rep.add_argument("--directory", required=True,
+                     help="project root (walks up to the nearest)")
+    rep.add_argument("--issue", required=True, help="the Jira issue key")
+    # Exactly one of the two, validated in code: a refusal stays JSON.
+    rep.add_argument("--body-file", help="the reply's text, UTF-8 (never "
+                                         "the command line)")
+    rep.add_argument("--done", action="store_true",
+                     help="the reply is `Done.`")
+    rep.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     directory = configlib.find_project_root(Path(args.directory))
+    if args.command == "reply":
+        body = None
+        if args.body_file is not None:
+            try:
+                body = Path(args.body_file).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                result = _finish(_reply_result(args.issue, args.dry_run),
+                                 "blocked", f"track refused: cannot read "
+                                 f"--body-file: {exc}; no Atlassian call "
+                                 f"made")
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+                return 2
+        result = reply(directory, args.issue, body, done=args.done,
+                       dry_run=args.dry_run)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 2 if result.get("status") == "blocked" else 0
     result = block(directory, args.story, args.reason, args.resolves,
                    source=args.source, dry_run=args.dry_run)
     print(json.dumps(result, ensure_ascii=False, indent=2))

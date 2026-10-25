@@ -1,6 +1,6 @@
 ---
 name: tk-studio-track
-description: Tracking verbs on the bound Jira project — `block` moves a story the loop cannot progress, and each dependent story, to "Blocked - Awaiting User" with a comment that @mentions the owner. Use when the user says "block this story", "tk track block", "put it in the owner's inbox", or a supervisor or engagement payload names this skill.
+description: Tracking verbs on the bound Jira project — `block` moves a story the loop cannot progress, and each dependent story, to "Blocked - Awaiting User" with a comment that @mentions the owner; `reply` posts the owner's answer (or "Done.") with the owner's host-only token and moves the issue to "Block Resolved". Use when the user says "block this story", "tk track block", "put it in the owner's inbox", "reply to the blocked issue", or a supervisor or engagement payload names this skill.
 ---
 
 # tk-studio-track
@@ -52,7 +52,36 @@ from those statuses. Every Atlassian write goes through the planning adapter
    `source` adds `--source <source>`; `dry_run` adds `--dry-run` (reads
    only, writes nothing).
 
-2. Blocking conditions (exit 2), each named in `reason`:
+   The `reply` verb (Story 31.6) is the owner's answer from the web's
+   Issue screen; only the supervisor's `POST /inbox/{key}/reply` calls it,
+   on the host:
+
+   ```bash
+   uv run "${CLAUDE_PLUGIN_ROOT}/lib/track.py" reply --directory <project-root> \
+     --issue <KEY> (--body-file <path> | --done) [--dry-run]
+   ```
+
+   It posts the comment (`--done` writes `Done.`; the body comes from a
+   UTF-8 file, never the command line) with the **owner** seat's client
+   (`TK_STUDIO_ATLASSIAN_OWNER_EMAIL` and `TK_STUDIO_ATLASSIAN_OWNER_TOKEN`,
+   host-only — outside the `TK_ATLASSIAN_` prefix the sandbox receives —
+   through the `TK_ATLASSIAN_CLOUD_ID` gateway, REST v2, plain text), then
+   moves the issue by name to `Block Resolved`; an issue already there
+   skips the transition, named in `skipped[]`. The comment is skipped — named in `skipped[]`, with `commented: true` and the existing `comment_id` — only when an owner comment with the same body already stands after the issue's newest agent comment (read live); a reply to a later re-block always posts. The result is `{ok, dry_run,
+   issue, commented, comment_id, transitioned, notes[], skipped[],
+   written[], retry?}` with the status block last; no local file is written
+   and nothing else is promoted. Payload mapping: `issue` maps to
+   `--issue`; `body` is written to a temp file passed as `--body-file`;
+   `done: true` adds `--done`; `dry_run` adds `--dry-run`. Its refusals
+   (exit 2), each named: an absent owner variable or cloud id, or no
+   `planning.jira` binding (no Atlassian call made — the agent's token never
+   stands in); no recorded `planning.jira.owner_account_id`; a created
+   comment whose author is not the owner (another seat's token: nothing
+   moved); no transition reaching `Block Resolved` (the comment stays,
+   `commented: true`). A temporary failure ends `partial` with `ok: false`
+   and `retry: true`.
+
+2. Blocking conditions of `block` (exit 2), each named in `reason`:
    - no `planning.jira` binding (run `plansync.py setup` first), or an
      absent agent-seat variable (`TK_ATLASSIAN_AGENT_EMAIL`,
      `TK_ATLASSIAN_AGENT_TOKEN`, `TK_ATLASSIAN_CLOUD_ID`) — no Atlassian
@@ -92,6 +121,6 @@ If the deterministic core is unrunnable — a tool call denied by permissions, `
 
 - No skill other than this one and `tk-studio-plan-sync` writes to Jira,
   and both only through `lib/jirabackend.py` (AD-4).
-- Only the status move and the block comment are written; entity fields
+- Only the status move and the block comment (or the owner's reply) are written; entity fields
   stay canonical (AD-5, D9) — the sync-back pulls the new status back.
 - All paths resolve through `${CLAUDE_PLUGIN_ROOT}`.
