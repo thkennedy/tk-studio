@@ -1,5 +1,9 @@
 """Tests for `tk-studio-engage reply` (Story 32.2, AC1 and AC2) and
-`questions` (Story 32.3, AC1: the cap, the shape, the state refusals).
+`questions` (Story 32.3, AC1: the cap, the shape, the state refusals) and
+`scope` (Story 32.4, AC1 and AC2: the shape check and its named refusals,
+the publish to `Engagements/ENG-NNN` against a fake Confluence REST with
+the skip, the update and the 429, nothing under `plan/`, the `revise` body
+and the `reply` memory's `scope`).
 
 The fixture project `fixtures/engage-project/` (copied to a temp root per
 test, so nothing writes into the tree) holds one engagement in `intake`
@@ -16,17 +20,25 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
 import time
 import unittest
+import urllib.parse
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import confluence  # noqa: E402
 import engage  # noqa: E402
+import plansync  # noqa: E402
+
+from test_publish import FakeConfluencePublish  # noqa: E402
+from test_tracking_setup import SetupTestCase, SITE  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "engage-project"
 ENG = "ENG-001"
@@ -544,6 +556,592 @@ class QuestionsTestCase(EngageTestCase):
         self.assert_status_block_last(result, "complete")
         self.assertEqual(json.loads(self.written().read_text("utf-8"))
                          ["run_id"], "r1")
+
+
+
+# ------------------------------------------------------- the scope (32.4)
+
+SCOPE = """# ENG-001: Scope of Work
+
+## Goal
+
+Owners export the monthly reports as CSV with the date range filter.
+
+## Deliverables
+
+### CSV export
+
+A **CSV** button on the reports page.
+
+Acceptance signal: the downloaded file holds the filtered rows.
+
+### Date range filter
+
+The filter applies to the export.
+
+Acceptance signal: a range of one month exports that month only.
+
+## Exclusions
+
+- No Excel format.
+- No scheduled exports.
+
+## What the studio needs from you
+
+- Read access to the reports service by 2026-11-02.
+- A sample export from production by 2026-11-05.
+
+## Milestones
+
+1. Export button: 2026-11-10.
+2. Filter applied: 2026-11-17.
+
+## Proposed epics and stories
+
+### Epic 1: Report exports
+
+#### Story 1.1: CSV button
+
+As a report reader,
+I want a CSV button,
+So that I can share the rows.
+
+**Acceptance Criteria:**
+
+**Given** the reports page **When** I press CSV **Then** a file downloads.
+
+#### Story 1.2: Filtered export
+
+As a report reader,
+I want the export to follow the date range,
+So that I export only what I see.
+
+**Acceptance Criteria:**
+
+**Given** a range **When** I export **Then** only that range is in the file.
+"""
+SCOPE_TITLE = "ENG-001: Scope of Work"
+SCOPE_REL = "_bmad-output/engagements/ENG-001/scope.md"
+REVISE_AT = "2026-10-25T05:30:00.000Z"
+FOLDERS_GET = ("GET", "confluence:/spaces/S-1/direct-children")
+
+
+class FakeEngagementConfluence(FakeConfluencePublish):
+    """FakeConfluencePublish whose folders keep their parent: `POST
+    /folders` with a `parentId` lands a child folder, listed (with the
+    pages) by `GET /folders/{id}/direct-children`."""
+
+    def __init__(self):
+        super().__init__()
+        self.child_folders: dict[str, list[dict]] = {}
+        self.folder_bodies: list[dict] = []
+
+    def _confluence(self, method, path, query, body):
+        if method == "POST" and path == "/folders":
+            self.folder_bodies.append(dict(body))
+            if body.get("parentId"):
+                entry = {"id": self._id(55000), "type": "folder",
+                         "title": body["title"], "parentId": body["parentId"]}
+                self.child_folders.setdefault(body["parentId"], []).append(
+                    entry)
+                return 200, entry
+        return super()._confluence(method, path, query, body)
+
+    def _pages(self, method, path, query, body):
+        m = re.match(r"^/folders/([^/]+)/direct-children$", path)
+        if method == "GET" and m:
+            q = {k: v[0] for k, v in urllib.parse.parse_qs(query).items()}
+            kids = [{"id": f["id"], "type": "folder", "title": f["title"]}
+                    for f in self.child_folders.get(m.group(1), [])]
+            kids += [{"id": p["id"], "type": "page", "title": p["title"]}
+                     for p in self.pages.values()
+                     if p["parentId"] == m.group(1)]
+            return self._cursor_page(path, kids, q)
+        return super()._pages(method, path, query, body)
+
+
+class ScopeTestCase(SetupTestCase):
+    def setUp(self):
+        super().setUp()
+        shutil.copytree(FIXTURE, self.root, dirs_exist_ok=True)
+        self.dir = self.root / "_bmad-output" / "engagements" / ENG
+        self.unbound = self.config.read_text(encoding="utf-8")
+        plansync.write_binding(self.root, {
+            "jira": {"site": SITE},
+            "confluence": {"space_key": "TKSTUDIO", "space_id": "S-1"}})
+        self.fake = FakeEngagementConfluence()
+        self.fake.folders["S-1"] = []
+        self.sleeps: list[float] = []
+        self.set_record(state="scoping")
+
+    def record(self) -> dict:
+        return json.loads((self.dir / "engagement.yaml")
+                          .read_text(encoding="utf-8"))
+
+    def set_record(self, **changes):
+        record = self.record()
+        record.update(changes)
+        (self.dir / "engagement.yaml").write_text(
+            json.dumps(record, indent=2) + "\n", encoding="utf-8")
+
+    def scope(self, text=SCOPE, **kwargs):
+        kwargs.setdefault("now", NOW)
+        return engage.scope(self.root, ENG, text=text, transport=self.fake,
+                            sleep=self.sleeps.append, **kwargs)
+
+    def scope_file(self) -> Path:
+        return self.dir / "scope.md"
+
+    def assert_status_block_last(self, result: dict, status: str):
+        self.assertEqual(list(result)[-4:],
+                         ["status", "intent", "artifacts", "reason"])
+        self.assertEqual(result["status"], status)
+        self.assertEqual(result["intent"], "tk-studio-engage")
+
+    def snapshot(self) -> dict:
+        """Every byte under plan/, the planning artifacts and .tk-studio/."""
+        files = {}
+        for rel in ("plan", "_bmad-output/planning-artifacts", ".tk-studio"):
+            base = self.root / rel
+            if base.is_dir():
+                for path in sorted(base.rglob("*")):
+                    if path.is_file():
+                        files[path.relative_to(self.root).as_posix()] = \
+                            path.read_bytes()
+        return files
+
+
+class ScopePublishTests(ScopeTestCase):
+    def test_the_planner_scope_lands_in_engagements_eng_nnn_and_records_scope_page(self):
+        result = self.scope()
+        self.assert_status_block_last(result, "complete")
+        self.assertTrue(result["ok"])
+        self.assertEqual((result["mode"], result["source"], result["scope"]),
+                         ("scope", "planner", SCOPE_REL))
+        # the folders: a top-level `Engagements`, its child `ENG-001`
+        top = [f for f in self.fake.folders["S-1"]
+               if f["title"] == "Engagements"]
+        self.assertEqual(len(top), 1)
+        child = self.fake.child_folders[top[0]["id"]]
+        self.assertEqual([f["title"] for f in child], [ENG])
+        self.assertEqual(self.fake.folder_bodies[1],
+                         {"spaceId": "S-1", "title": ENG,
+                          "parentId": top[0]["id"]})
+        # the page: titled per engagement, with the provenance footer
+        page = self.fake.page(SCOPE_TITLE)
+        self.assertEqual(page["parentId"], child[0]["id"])
+        self.assertIn("<h2>Goal</h2>", page["body"])
+        self.assertIn("<h3>CSV export</h3>", page["body"])
+        self.assertRegex(page["body"], r"<p><em>Published by tk-studio from "
+                         r"<code>_bmad-output/engagements/ENG-001/scope\.md"
+                         r"</code> at commit <code>[^<]+</code>\. "
+                         r"content-hash: sha256:[0-9a-f]{64}</em></p>$")
+        # recorded: {id, url, version}, merged with `updated`
+        url = f"https://{SITE}/wiki/spaces/TKSTUDIO/pages/{page['id']}"
+        self.assertEqual(result["page"], {"id": page["id"], "url": url,
+                                          "version": 1, "action": "created"})
+        record = self.record()
+        self.assertEqual(record["scope_page"], {"id": page["id"], "url": url,
+                                                "version": 1})
+        self.assertEqual(record["updated"], NOW)
+        self.assertEqual(record["state"], "scoping")
+        self.assertEqual(self.scope_file().read_text(encoding="utf-8"), SCOPE)
+        self.assertEqual(result["written"], [
+            SCOPE_REL, "_bmad-output/engagements/ENG-001/engagement.yaml"])
+        self.assertFalse((self.dir / "scope.lock").exists())
+
+    def test_an_unchanged_scope_is_skipped_and_a_changed_one_updated(self):
+        self.scope()
+        self.fake.calls.clear()
+        again = self.scope()
+        self.assert_status_block_last(again, "complete")
+        self.assertEqual(again["page"]["action"], "skipped")
+        self.assertEqual(self.fake.writes(), [])  # no PUT, no folder
+        self.assertNotIn(SCOPE_REL, again["written"])  # the same text
+        changed = self.scope(SCOPE.replace("monthly reports",
+                                           "monthly and weekly reports"))
+        self.assertEqual(changed["page"]["action"], "updated")
+        self.assertEqual(changed["page"]["version"], 2)
+        self.assertEqual(self.record()["scope_page"]["version"], 2)
+        self.assertEqual([c for c in self.fake.writes()],
+                         [("PUT", f"confluence:/pages/"
+                                  f"{changed['page']['id']}")])
+        self.assertIn("weekly", self.scope_file().read_text(encoding="utf-8"))
+        # the folders were found by title again, never created twice
+        self.assertEqual(len(self.fake.folder_bodies), 2)
+
+    def test_an_owner_bumped_version_with_an_unchanged_footer_is_updated_not_skipped(self):
+        first = self.scope()
+        page = self.fake.pages[first["page"]["id"]]
+        # the owner saved the page (version 2) with the footer untouched:
+        # the hash still matches, but the record is at 1, so local wins
+        page["version"] = 2
+        self.fake.calls.clear()
+        again = self.scope()
+        self.assert_status_block_last(again, "complete")
+        self.assertEqual(again["page"]["action"], "updated")
+        self.assertEqual(again["page"]["version"], 3)
+        self.assertEqual(self.record()["scope_page"]["version"], 3)
+        self.assertEqual(self.fake.writes(),
+                         [("PUT", f"confluence:/pages/{page['id']}")])
+        # recorded and remote agree again: skipped
+        self.assertEqual(self.scope()["page"]["action"], "skipped")
+
+    def test_a_429_or_a_5xx_is_partial_retry_scope_md_kept_scope_page_unchanged(self):
+        for status in (429, 503):
+            with self.subTest(status=status):
+                self.fake.force[FOLDERS_GET] = (status,
+                                                {"message": "slow down"})
+                result = self.scope()
+                self.assert_status_block_last(result, "partial")
+                self.assertTrue(result["ok"])
+                self.assertIs(result["retry"], True)
+                self.assertIsNone(self.record()["scope_page"])
+                self.assertEqual(self.scope_file().read_text("utf-8"), SCOPE)
+        self.assertTrue(self.sleeps)  # the 429 was retried before giving up
+        del self.fake.force[FOLDERS_GET]
+        self.assertEqual(self.scope()["page"]["action"], "created")
+
+    def test_a_refused_page_write_is_publish_refused(self):
+        self.fake.force[("POST", "confluence:/pages")] = (
+            400, {"message": "bad request"})
+        result = self.scope()
+        self.assert_status_block_last(result, "blocked")
+        self.assertIn("engage refused: PublishRefused: ", result["reason"])
+        self.assertIsNone(self.record()["scope_page"])
+
+    def test_a_scope_md_the_os_refuses_is_scope_unwritable(self):
+        with mock.patch.object(engage, "atomic_write_text",
+                               side_effect=PermissionError("denied")):
+            result = self.scope()
+        self.assert_status_block_last(result, "blocked")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "engage refused: ScopeUnwritable: "
+                         f"{SCOPE_REL}: PermissionError")
+        self.assertNotIn(str(self.root), json.dumps(result))
+        self.assertEqual(result["written"], [])
+        self.assertIsNone(self.record()["scope_page"])
+        self.assertFalse((self.dir / "scope.lock").exists())
+        self.assertEqual(self.fake.calls, [])  # nothing published
+
+    def test_a_record_merge_the_os_refuses_is_scope_unwritable_after_scope_md(self):
+        real = engage.atomic_write_text
+
+        def write(path, text):
+            if Path(path).name == "engagement.yaml":
+                raise OSError("disk full")
+            return real(path, text)
+
+        with mock.patch.object(engage, "atomic_write_text", side_effect=write):
+            result = self.scope()
+        self.assert_status_block_last(result, "blocked")
+        self.assertEqual(result["reason"], "engage refused: ScopeUnwritable: "
+                         "_bmad-output/engagements/ENG-001/engagement.yaml: "
+                         "OSError")
+        self.assertEqual(result["written"], [SCOPE_REL])  # honestly landed
+        self.assertEqual(self.scope_file().read_text("utf-8"), SCOPE)
+        self.assertIsNone(self.record()["scope_page"])
+
+    def test_a_scope_lock_the_os_refuses_is_scope_unwritable(self):
+        real = os.open
+
+        def refuse(path, *args, **kwargs):
+            if Path(path).name == "scope.lock":
+                raise PermissionError("denied")
+            return real(path, *args, **kwargs)
+
+        with mock.patch.object(engage.os, "open", side_effect=refuse):
+            result = self.scope()
+        self.assert_status_block_last(result, "blocked")
+        self.assertEqual(result["reason"], "engage refused: ScopeUnwritable: "
+                         "scope.lock: PermissionError")
+        self.assertEqual(result["written"], [])
+        self.assertFalse(self.scope_file().exists())
+        self.assertIsNone(self.record()["scope_page"])
+
+    def test_the_proposed_epics_and_stories_are_not_plan_entities(self):
+        (self.root / "plan").mkdir(exist_ok=True)
+        (self.root / "plan" / "index.md").write_text("# Plan\n",
+                                                     encoding="utf-8")
+        before = self.snapshot()
+        self.assertIn(".tk-studio/config.yaml", before)
+        self.assertEqual(self.scope()["status"], "complete")
+        self.assertEqual(self.snapshot(), before)
+        self.assertFalse((self.root / ".tk-studio" /
+                          "confluence-pages.json").exists())
+
+    def test_a_held_scope_lock_is_partial_retry_and_writes_nothing(self):
+        (self.dir / "scope.lock").write_text("", encoding="utf-8")
+        result = self.scope(lock_wait_s=0)
+        self.assert_status_block_last(result, "partial")
+        self.assertIs(result["retry"], True)
+        self.assertIn("ScopeBusy", result["reason"])
+        self.assertFalse(self.scope_file().exists())
+        self.assertEqual(self.fake.calls, [])
+
+
+class ScopeLockTests(ScopeTestCase):
+    def test_the_scope_lock_is_stale_only_well_past_a_slow_publish(self):
+        self.assertGreaterEqual(engage.SCOPE_LOCK_STALE_S, 600)
+        lock = self.dir / "scope.lock"
+        lock.write_text("someone", encoding="utf-8")
+        # 60 s old: stale for chat.lock, still held for scope.lock
+        old = time.time() - 60
+        os.utime(lock, (old, old))
+        result = self.scope(lock_wait_s=0)
+        self.assertIn("ScopeBusy", result["reason"])
+        self.assertEqual(lock.read_text(encoding="utf-8"), "someone")
+        # past SCOPE_LOCK_STALE_S it is retaken
+        old = time.time() - engage.SCOPE_LOCK_STALE_S - 5
+        os.utime(lock, (old, old))
+        self.assertEqual(self.scope(lock_wait_s=0)["status"], "complete")
+        self.assertFalse(lock.exists())
+
+    def test_release_never_removes_a_lock_another_holder_took_over(self):
+        lock = self.dir / "scope.lock"
+
+        def taken_over():
+            # this holder ran past the stale threshold; another writer
+            # retook the lock (its own token) before this one released
+            lock.unlink()
+            lock.write_text("the-second-holder", encoding="utf-8")
+            return "done"
+
+        self.assertEqual(engage._with_scope_lock(self.root, ENG, taken_over),
+                         "done")
+        self.assertEqual(lock.read_text(encoding="utf-8"),
+                         "the-second-holder")
+        lock.unlink()
+
+        def held():
+            self.assertTrue(lock.read_text(encoding="ascii"))  # a token
+            return "own"
+
+        self.assertEqual(engage._with_scope_lock(self.root, ENG, held), "own")
+        self.assertFalse(lock.exists())
+
+
+class ScopeRefusalTests(ScopeTestCase):
+    def assert_refused(self, result, name):
+        self.assert_status_block_last(result, "blocked")
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["reason"].startswith(
+            f"engage refused: {name}"), result["reason"])
+        self.assertFalse(self.scope_file().exists())
+        self.assertIsNone(self.record()["scope_page"])
+        self.assertEqual(self.fake.calls, [])
+
+    def test_a_deliverable_without_an_acceptance_signal_is_refused_by_name(self):
+        text = SCOPE.replace("Acceptance signal: a range of one month "
+                             "exports that month only.\n", "")
+        result = self.scope(text)
+        self.assert_refused(result, "DeliverableWithoutSignal")
+        self.assertEqual(result["reason"], "engage refused: "
+                         "DeliverableWithoutSignal: Date range filter")
+        # a signal line with nothing after it is no signal
+        empty = SCOPE.replace("Acceptance signal: the downloaded file holds "
+                              "the filtered rows.", "Acceptance signal:")
+        self.assertIn("DeliverableWithoutSignal: CSV export",
+                      self.scope(empty)["reason"])
+
+    def test_the_signal_colon_may_sit_inside_or_outside_the_bold(self):
+        plain = "Acceptance signal: a range of one month exports that month only."
+        self.assertIn(plain, SCOPE)
+        for form in ("**Acceptance signal:** a range of one month exports.",
+                     "**Acceptance signal**: a range of one month exports.",
+                     "__Acceptance signal__: a range of one month exports."):
+            with self.subTest(form=form):
+                engage.check_scope(SCOPE.replace(plain, form))
+        with self.assertRaises(engage.Refused) as caught:
+            engage.check_scope(SCOPE.replace(plain, "**Acceptance signal**:"))
+        self.assertEqual(caught.exception.name, "DeliverableWithoutSignal")
+
+    def test_each_bad_shape_is_scope_invalid_naming_what(self):
+        cases = {
+            "missing": (SCOPE.replace("## Exclusions\n\n- No Excel format.\n"
+                                      "- No scheduled exports.\n\n", ""),
+                        "section '## Exclusions' is missing"),
+            "empty": (SCOPE.replace("- No Excel format.\n- No scheduled "
+                                    "exports.\n", ""),
+                      "section '## Exclusions' is empty"),
+            "out of order": (SCOPE.replace("## Exclusions", "## Tmp")
+                             .replace("## Milestones", "## Exclusions")
+                             .replace("## Tmp", "## Milestones"),
+                             "is out of order"),
+            "unknown": (SCOPE + "\n## Risks\n\nNone.\n",
+                        "unknown section '## Risks'"),
+            "undated": (SCOPE.replace(" by 2026-11-05", " soon"),
+                        "dependency 2 has no date"),
+            "no story": (SCOPE[:SCOPE.index("#### Story 1.1")],
+                         "no proposed story"),
+            "story shape": (SCOPE.replace("So that I can share the rows.",
+                                          "Because."),
+                            "'#### Story 1.1: CSV button' has no 'So that'"),
+            "image": (SCOPE.replace("A **CSV** button",
+                                    "![shot](shot.png) A **CSV** button"),
+                      "an image (shot.png)"),
+            "no deliverable": (SCOPE.replace("### CSV export", "CSV export")
+                               .replace("### Date range filter", "Date"),
+                               "names no deliverable"),
+        }
+        for why, (text, detail) in cases.items():
+            with self.subTest(why=why):
+                result = self.scope(text)
+                self.assert_refused(result, "ScopeInvalid")
+                self.assertIn(detail, result["reason"])
+
+    def test_a_web_image_is_scope_invalid_too(self):
+        for src in ("https://example.com/shot.png", "//example.com/s.png"):
+            with self.subTest(src=src):
+                result = self.scope(SCOPE.replace(
+                    "A **CSV** button", f"![shot]({src}) A **CSV** button"))
+                self.assert_refused(result, "ScopeInvalid")
+                self.assertIn(f"an image ({src})", result["reason"])
+
+    def test_a_state_that_left_scoping_before_the_lock_is_not_scoping(self):
+        real = engage._with_scope_lock
+
+        def racing(root, engagement, fn, **kwargs):
+            def moved():
+                self.set_record(state="quoted")
+                return fn()
+            return real(root, engagement, moved, **kwargs)
+
+        with mock.patch("engage._with_scope_lock", racing):
+            result = self.scope()
+        self.assert_refused(result, "NotScoping")
+        self.assertEqual(result["reason"], "engage refused: NotScoping: "
+                         "ENG-001 is quoted; the scope is written only in "
+                         "scoping")
+        self.assertEqual(self.fake.writes(), [])
+
+    def test_an_assumption_not_named_in_the_assumptions_section_is_unstated(self):
+        self.set_record(assumptions=[
+            {"question": "db", "text": "Which database?",
+             "assumed": "postgres"},
+            {"question": "scope", "text": "How big?", "assumed": "Small"}])
+        result = self.scope(SCOPE + "\n## Assumptions\n\n- db: postgres "
+                                    "(the default)\n")
+        self.assert_refused(result, "AssumptionUnstated")
+        self.assertEqual(result["reason"],
+                         "engage refused: AssumptionUnstated: scope")
+        self.assertIn("AssumptionUnstated: db", self.scope()["reason"])
+        ok = self.scope(SCOPE + "\n## Assumptions\n\n- db: postgres\n"
+                                "- scope: Small\n")
+        self.assertEqual(ok["status"], "complete")
+
+    def test_the_state_the_binding_and_the_env_are_refused_by_name(self):
+        for state, name in (("intake", "NotScoping"), ("quoted", "NotScoping"),
+                            ("cancelled", "EngagementClosed"),
+                            ("delivered", "EngagementClosed")):
+            with self.subTest(state=state):
+                self.set_record(state=state)
+                self.assert_refused(self.scope(), name)
+        self.set_record(state="scoping")
+        os.environ.pop("TK_ATLASSIAN_AGENT_CONFLUENCE_TOKEN")
+        result = self.scope()
+        self.assert_refused(result, "ConfluenceEnvMissing")
+        self.assertIn("TK_ATLASSIAN_AGENT_CONFLUENCE_TOKEN is not set",
+                      result["reason"])
+        self.config.write_text(self.unbound, encoding="utf-8")
+        self.assert_refused(self.scope(), "ConfluenceUnbound")
+        self.assert_refused(engage.scope(self.root, "ENG-404", text=SCOPE),
+                            "UnknownEngagement")
+
+    def test_a_dry_run_checks_and_writes_nothing(self):
+        result = self.scope(dry_run=True)
+        self.assert_status_block_last(result, "partial")
+        self.assertEqual(result["written"], [])
+        self.assertFalse(self.scope_file().exists())
+        self.assertEqual(self.fake.calls, [])
+
+
+class ScopeReviseTests(ScopeTestCase):
+    BODY = "Just the CSV button, please — no filter.\n"
+
+    def add_revise(self, body=BODY, at=REVISE_AT):
+        record = self.record()
+        record["inputs"].append({"at": at, "verb": "revise",
+                                 "source": "cookie",
+                                 **({"payload": {"body": body}}
+                                    if body is not None else {}),
+                                 "from": "quoted", "to": "scoping"})
+        self.set_record(inputs=record["inputs"])
+
+    def test_a_revise_body_becomes_scope_md_verbatim_and_the_page(self):
+        self.add_revise()
+        result = engage.scope(self.root, ENG, revise_at=REVISE_AT,
+                              transport=self.fake, now=NOW)
+        self.assert_status_block_last(result, "complete")
+        self.assertEqual((result["source"], result["revise_at"]),
+                         ("revise", REVISE_AT))
+        # not shape-checked (D9): the owner's text as written
+        self.assertEqual(self.scope_file().read_text("utf-8"), self.BODY)
+        page = self.fake.page(SCOPE_TITLE)
+        self.assertIn("Just the CSV button", page["body"])
+        self.assertEqual(self.record()["scope_page"]["id"], page["id"])
+        # it replaces a planner scope wholesale
+        self.scope()
+        self.add_revise("Second thoughts.\n", "2026-10-25T05:40:00.000Z")
+        second = engage.scope(self.root, ENG,
+                              revise_at="2026-10-25T05:40:00.000Z",
+                              transport=self.fake, now=NOW)
+        self.assertEqual(second["page"]["action"], "updated")
+        self.assertEqual(self.scope_file().read_text("utf-8"),
+                         "Second thoughts.\n")
+
+    def test_a_revise_with_no_body_or_no_line_is_revise_not_found(self):
+        self.add_revise(body=None)
+        for at in (REVISE_AT, "2026-10-25T09:99:00.000Z"):
+            with self.subTest(at=at):
+                result = engage.scope(self.root, ENG, revise_at=at,
+                                      transport=self.fake)
+                self.assert_status_block_last(result, "blocked")
+                self.assertIn("ReviseNotFound", result["reason"])
+        self.assertFalse(self.scope_file().exists())
+
+
+class ScopeMemoryAndCliTests(ScopeTestCase):
+    def test_the_reply_memory_carries_the_scope(self):
+        self.assertIsNone(engage.reply(self.root, ENG)["scope"])
+        self.scope()
+        memory = engage.reply(self.root, ENG)
+        self.assert_status_block_last(memory, "complete")
+        self.assertEqual(memory["scope"], {"path": SCOPE_REL, "text": SCOPE})
+        self.assertEqual(sorted(memory["memory"]),
+                         ["confluence", "kb", "plan"])
+
+    def test_the_cli_publishes_from_the_scope_file_and_refuses_by_name(self):
+        def run(*argv):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), \
+                    mock.patch.object(confluence.ConfluenceClient, "_http",
+                                      lambda _s, m, u, b: self.fake(m, u, b)):
+                code = engage.main(["scope", "--directory", str(self.root),
+                                    "--engagement", ENG, *argv])
+            return code, json.loads(out.getvalue())
+
+        # the default source: the engagement's own scope.md
+        code, result = run()
+        self.assertEqual(code, 2)
+        self.assertIn("cannot read --scope-file", result["reason"])
+        self.scope_file().write_text(SCOPE, encoding="utf-8")
+        code, result = run()
+        self.assertEqual(code, 0)
+        self.assert_status_block_last(result, "complete")
+        self.assertEqual(result["page"]["action"], "created")
+        self.assertEqual(result["written"],
+                         ["_bmad-output/engagements/ENG-001/engagement.yaml"])
+        bad = Path(self._tmp.name) / "bad.md"
+        bad.write_text(SCOPE.replace("## Milestones", "## Timeline"),
+                       encoding="utf-8")
+        code, result = run("--scope-file", str(bad))
+        self.assertEqual(code, 2)
+        self.assert_status_block_last(result, "blocked")
+        self.assertIn("ScopeInvalid", result["reason"])
+        code, result = run("--revise-at", REVISE_AT)
+        self.assertEqual(code, 2)
+        self.assertIn("ReviseNotFound", result["reason"])
 
 
 if __name__ == "__main__":

@@ -18,6 +18,16 @@ is an `ri:url`; an absolute path or any other scheme is returned with
 `outside: True` for the caller to refuse, never read.
 All text is `html.escape`d.
 
+`to_markdown(storage) -> markdown` (Story 32.4) is the reverse for the
+subset `convert` emits, on stdlib `html.parser`: headings, paragraphs with
+strong, em, code and del, nested lists, tables, the `code` macro, block
+quotes, rules, `<a href>`, `ac:link` (its body text, else the page title)
+and images (`ri:attachment`, `ri:url`); a `<time>` is its `datetime` and
+an `ac:task-list` a `- [ ]`/`- [x]` list. An element it does not know keeps
+its text (the Confluence editor adds `local-id` attributes, `<span>`s and
+panels); the provenance footer paragraph (`Published by tk-studio from …`)
+is dropped. The sync-back mirrors an edited engagement scope page with it.
+
 `recompress_png` re-deflates a PNG's IDAT stream losslessly (zlib level 9,
 CRCs recomputed) and keeps the result only when it is smaller: the stdlib
 cannot resample, so this is the "compress" of the 31-1 carry.
@@ -28,6 +38,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import html.parser
 import posixpath
 import re
 import struct
@@ -342,6 +353,268 @@ def convert(md: str, source_path: str,
     conv = _Converter(source_path, titles_by_path or {})
     storage = "".join(conv.blocks(text.split("\n")))
     return storage, conv.attachments
+
+
+# ------------------------------------------------- storage -> Markdown
+
+FOOTER_PREFIX = "Published by tk-studio from"
+CDATA_RE = re.compile(r"<!\[CDATA\[(.*?)\]\]>", re.DOTALL)
+VOID_TAGS = {"br", "hr", "img", "col", "input", "meta", "link", "wbr",
+             "ri:page", "ri:attachment", "ri:url", "ri:user", "ri:space"}
+BLOCK_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "table",
+              "blockquote", "hr", "pre", "ac:structured-macro", "div",
+              "section", "ac:layout", "ac:layout-section", "ac:layout-cell",
+              "ac:rich-text-body", "ac:task-list", "tbody", "thead"}
+
+
+class _Node:
+    __slots__ = ("tag", "attrs", "children")
+
+    def __init__(self, tag: str, attrs: dict[str, str]):
+        self.tag = tag
+        self.attrs = attrs
+        self.children: list = []   # _Node or str
+
+
+class _TreeBuilder(html.parser.HTMLParser):
+    """A forgiving element tree: an end tag closes up to its open match
+    (none open: ignored); a void tag never opens."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.root = _Node("#root", {})
+        self.stack = [self.root]
+
+    def handle_starttag(self, tag, attrs):
+        node = _Node(tag, {k: (v or "") for k, v in attrs})
+        self.stack[-1].children.append(node)
+        if tag not in VOID_TAGS:
+            self.stack.append(node)
+
+    def handle_startendtag(self, tag, attrs):
+        self.stack[-1].children.append(
+            _Node(tag, {k: (v or "") for k, v in attrs}))
+
+    def handle_endtag(self, tag):
+        for i in range(len(self.stack) - 1, 0, -1):
+            if self.stack[i].tag == tag:
+                del self.stack[i:]
+                return
+
+    def handle_data(self, data):
+        self.stack[-1].children.append(data)
+
+
+def _text(node) -> str:
+    if isinstance(node, str):
+        return node
+    return "".join(_text(c) for c in node.children)
+
+
+def _squash(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _find(node, tag: str):
+    for child in node.children:
+        if isinstance(child, _Node):
+            if child.tag == tag:
+                return child
+            found = _find(child, tag)
+            if found is not None:
+                return found
+    return None
+
+
+def _is_block(node) -> bool:
+    return isinstance(node, _Node) and node.tag in BLOCK_TAGS
+
+
+def _wrap(mark: str, inner: str) -> str:
+    stripped = inner.strip()
+    if not stripped:
+        return inner
+    lead = inner[:len(inner) - len(inner.lstrip())]
+    trail = inner[len(inner.rstrip()):]
+    return f"{lead}{mark}{stripped}{mark}{trail}"
+
+
+def _inline(node) -> str:
+    if isinstance(node, str):
+        return node
+    tag = node.tag
+    inner = lambda: "".join(_inline(c) for c in node.children)  # noqa: E731
+    if tag in ("strong", "b"):
+        return _wrap("**", inner())
+    if tag in ("em", "i"):
+        return _wrap("*", inner())
+    if tag in ("del", "s", "strike"):
+        return _wrap("~~", inner())
+    if tag == "code":
+        text = _text(node)
+        return f"`{text}`" if text else ""
+    if tag == "br":
+        return " "
+    if tag == "a":
+        text = _squash(inner())
+        href = node.attrs.get("href", "")
+        return f"[{text or href}]({href})" if href else text
+    if tag == "ac:link":
+        body = _find(node, "ac:plain-text-link-body") \
+            or _find(node, "ac:link-body")
+        page = _find(node, "ri:page")
+        text = _squash(_text(body)) if body is not None else ""
+        return text or (page.attrs.get("ri:content-title", "")
+                        if page is not None else "")
+    if tag == "ac:image":
+        alt = node.attrs.get("ac:alt", "")
+        att = _find(node, "ri:attachment")
+        url = _find(node, "ri:url")
+        src = (att.attrs.get("ri:filename", "") if att is not None
+               else url.attrs.get("ri:value", "") if url is not None else "")
+        return f"![{alt}]({src})" if src else alt
+    if tag == "time":  # the editor's date picker: its date, else its text
+        return node.attrs.get("datetime", "") or inner()
+    if tag in ("ac:parameter", "ac:task-id", "ac:task-status"):
+        return ""
+    return inner()
+
+
+def _md_blocks(node) -> list[str]:
+    """The Markdown blocks of `node`'s children: inline runs between block
+    children become paragraphs."""
+    out: list[str] = []
+    run: list = []
+
+    def flush():
+        text = _squash("".join(_inline(c) for c in run))
+        plain = _squash("".join(_text(c) for c in run))
+        if text and not plain.startswith(FOOTER_PREFIX):
+            out.append(text)
+        run.clear()
+
+    for child in node.children:
+        if _is_block(child):
+            flush()
+            out.extend(_block(child))
+        else:
+            run.append(child)
+    flush()
+    return out
+
+
+def _list_lines(node, depth: int) -> list[str]:
+    lines: list[str] = []
+    ordered = node.tag == "ol"
+    number = 0
+    for item in node.children:
+        if not isinstance(item, _Node):
+            continue
+        if item.tag in ("ul", "ol"):  # a list straight inside a list
+            lines += _list_lines(item, depth + 1)
+            continue
+        number += 1
+        text_parts: list = []
+        nested: list[str] = []
+        for child in item.children:
+            if isinstance(child, _Node) and child.tag in ("ul", "ol"):
+                nested += _list_lines(child, depth + 1)
+            elif isinstance(child, _Node) and child.tag == "p":
+                text_parts.append(" ")
+                text_parts.append(child)
+                text_parts.append(" ")
+            else:
+                text_parts.append(child)
+        text = _squash("".join(_inline(c) for c in text_parts))
+        marker = f"{number}." if ordered else "-"
+        lines.append(f"{'  ' * depth}{marker} {text}".rstrip())
+        lines += nested
+    return lines
+
+
+def _rows(node) -> list[list[str]]:
+    rows = []
+    for child in node.children:
+        if not isinstance(child, _Node):
+            continue
+        if child.tag == "tr":
+            rows.append([_squash(_inline(c)).replace("|", "\\|")
+                         for c in child.children
+                         if isinstance(c, _Node) and c.tag in ("th", "td")])
+        else:
+            rows += _rows(child)
+    return rows
+
+
+def _block(node) -> list[str]:
+    tag = node.tag
+    if tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
+        text = _squash(_inline(node))
+        return [f"{'#' * int(tag[1])} {text}"] if text else []
+    if tag == "p":
+        text = _squash(_inline(node))
+        if not text or _squash(_text(node)).startswith(FOOTER_PREFIX):
+            return []
+        return [text]
+    if tag in ("ul", "ol"):
+        lines = _list_lines(node, 0)
+        return ["\n".join(lines)] if lines else []
+    if tag == "table":
+        rows = [r for r in _rows(node) if r]
+        if not rows:
+            return []
+        width = max(len(r) for r in rows)
+        rows = [r + [""] * (width - len(r)) for r in rows]
+        lines = ["| " + " | ".join(rows[0]) + " |",
+                 "|" + "|".join(["---"] * width) + "|"]
+        lines += ["| " + " | ".join(r) + " |" for r in rows[1:]]
+        return ["\n".join(lines)]
+    if tag == "blockquote":
+        inner = "\n\n".join(_md_blocks(node))
+        if not inner:
+            return []
+        return ["\n".join(("> " + line).rstrip() for line in
+                          inner.split("\n"))]
+    if tag == "hr":
+        return ["---"]
+    if tag == "ac:task-list":  # one checkbox line per task
+        lines = []
+        for task in node.children:
+            if not (isinstance(task, _Node) and task.tag == "ac:task"):
+                continue
+            status = _find(task, "ac:task-status")
+            body = _find(task, "ac:task-body")
+            done = (status is not None
+                    and _squash(_text(status)) == "complete")
+            text = _squash(_inline(body)) if body is not None else ""
+            lines.append(f"- [{'x' if done else ' '}] {text}".rstrip())
+        return ["\n".join(lines)] if lines else []
+    if tag == "pre":
+        return ["```\n" + _text(node).strip("\n") + "\n```"]
+    if tag == "ac:structured-macro" and node.attrs.get("ac:name") == "code":
+        lang = ""
+        for child in node.children:
+            if isinstance(child, _Node) and child.tag == "ac:parameter" \
+                    and child.attrs.get("ac:name") == "language":
+                lang = _squash(_text(child))
+        body = _find(node, "ac:plain-text-body")
+        text = _text(body) if body is not None else ""
+        return [f"```{lang}\n{text}\n```"]
+    # a container (a panel macro, a layout, a div): its blocks, its
+    # parameters left out
+    return _md_blocks(node)
+
+
+def to_markdown(storage: str) -> str:
+    """Markdown for a Confluence storage body (the subset `convert` emits;
+    see the module docstring). The tk-studio footer paragraph is dropped."""
+    text = CDATA_RE.sub(lambda m: html.escape(m.group(1), quote=False),
+                        storage or "")
+    builder = _TreeBuilder()
+    builder.feed(text)
+    builder.close()
+    blocks = _md_blocks(builder.root)
+    return "\n\n".join(blocks) + "\n" if blocks else ""
 
 
 # ---------------------------------------------------------------- PNG

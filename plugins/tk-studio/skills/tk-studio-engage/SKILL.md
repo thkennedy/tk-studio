@@ -26,8 +26,11 @@ presses through the supervisor's `POST /engagements/{id}/input`.
    ```
 
    The result is `{ok, dry_run, engagement, mode: "memory", record, chat[],
-   memory {plan, kb, confluence}, notes[], written[]}` with the status block
-   last. `record` is the engagement record (`engagement.yaml`, JSON text);
+   memory {plan, kb, confluence}, scope, notes[], written[]}` with the
+   status block last. `scope` (Story 32.4) is the engagement's current
+   `scope.md` as `{path, text}`, or `null` while none is written: read it
+   before writing a new scope, since an owner edit in Confluence or a
+   `revise` body may have replaced it since your last turn. `record` is the engagement record (`engagement.yaml`, JSON text);
    `chat[]` every chat line so far; each `memory` entry an index `{root,
    files: [{path, bytes, title}], truncated}` of
    `_bmad-output/planning-artifacts/`, `kb/` (without `kb/confluence/`) and
@@ -109,7 +112,65 @@ presses through the supervisor's `POST /engagements/{id}/input`.
    `EngagementRecordUnreadable`) and an unreadable `--questions-file`. A dry
    run writes nothing and ends `partial`.
 
-4. Blocking conditions (exit 2), each named in `reason`: `BadEngagement`
+4. Write the scope of work (Story 32.4, user flow F2 step 3) — only in
+   `scoping`. Write `_bmad-output/engagements/<id>/scope.md` (or a temp
+   file) with these `##` sections, in this order, each non-empty:
+
+   1. `## Goal`
+   2. `## Deliverables` — each deliverable a `### <title>` holding a line
+      that starts `Acceptance signal:` (or `**Acceptance signal:**` /
+      `**Acceptance signal**:`) followed by how the owner will know
+      it is done. Keep the signal on its own paragraph (a blank line before
+      it).
+   3. `## Exclusions`
+   4. `## What the studio needs from you` — a list; each item carries the
+      date it is needed by, `YYYY-MM-DD`.
+   5. `## Milestones`
+   6. `## Proposed epics and stories` — `### Epic <k>: <title>` and
+      `#### Story <k>.<m>: <title>`, each story in `epics.md`'s shape (the
+      `As a … / I want … / So that …` lines and `**Acceptance Criteria:**`);
+      the numbers are local (approval renumbers them); at least one story.
+   7. `## Assumptions` (last; required when the record's `assumptions[]` is
+      non-empty) — name each assumption's `question` id.
+
+   A `#` title before `## Goal` is fine; no other `##` section and no image.
+   Then publish it:
+
+   ```bash
+   uv run "${CLAUDE_PLUGIN_ROOT}/lib/engage.py" scope --directory <project_root> \
+     --engagement <ENG-NNN> [--scope-file <path>] [--dry-run]
+   ```
+
+   `--scope-file` defaults to the engagement's own `scope.md`. It checks the
+   shape, writes `scope.md` (under `scope.lock`), publishes it as the page
+   `ENG-NNN: Scope of Work` in the Confluence folder `Engagements/ENG-NNN`
+   (with the provenance footer; an unchanged scope on a page still at the
+   recorded version is `skipped`, an owner's unmirrored edit is overwritten) and
+   records `scope_page {id, url, version}` in the record. The result is
+   `{ok, dry_run, engagement, mode: "scope", source, scope, page {id, url,
+   version, action: created | updated | skipped}, written[], notes[]}` with
+   the status block last. The proposed epics and stories are **not** plan
+   entities: nothing is written under `plan/`,
+   `_bmad-output/planning-artifacts/` or `.tk-studio/` until the owner
+   approves (32.6). While `scoping` the page is the owner's to edit (D9):
+   an edit there (mirrored by the next sync-back) or a `revise` body from
+   the Chat screen replaces `scope.md` wholesale, unchecked — read `scope`
+   from the memory first and rewrite it into shape on your next turn. The
+   supervisor runs `engage.py scope --revise-at <at>` itself for a `revise`
+   body; the planner never does. Its refusals (exit 2), each named:
+   `DeliverableWithoutSignal: <title>`, `ScopeInvalid: <what>` (a section
+   missing, empty, out of order or unknown; an undated dependency; no
+   proposed story; an image), `AssumptionUnstated: <question id>`,
+   `NotScoping`, `EngagementClosed`, `ReviseNotFound`, `ConfluenceUnbound`
+   (no `planning.confluence.space_id`), `ConfluenceEnvMissing` (an absent
+   agent-seat variable, named), `PublishRefused`, `ScopeUnwritable:
+   <path>: <error>` (`scope.md`, the record or `scope.lock` refused by the
+   OS; `written` names what had already landed), plus the record's; a
+   held `scope.lock` (`ScopeBusy`), a 429 or a 5xx ends `partial` with
+   `retry: true` (`scope.md` kept, `scope_page` unchanged): run it again.
+   Then write the reply (mode 2) with the page's link.
+
+5. Blocking conditions (exit 2), each named in `reason`: `BadEngagement`
    (not like `ENG-001`), `UnknownEngagement` (no record),
    `EngagementRecordUnreadable` (not JSON, or not this engagement's record),
    `EngagementClosed` (`delivered`, `failed` or `cancelled`), `BodyEmpty`,
@@ -119,7 +180,7 @@ presses through the supervisor's `POST /engagements/{id}/input`.
    `--body-file` or `--proposals-file`. Nothing is appended on a refusal; a
    dry run appends nothing and ends `partial`.
 
-5. Report:
+6. Report:
    - **Attended:** show the reply line and its proposals.
    - **Headless:** no prompts (AD-11). Relay the core's `status`, `reason`
      and `artifacts` as they are — never infer the status from the exit
@@ -137,6 +198,7 @@ If the deterministic core is unrunnable — a tool call denied by permissions, `
   bearer or a CSRF token; its session runs with a worker's environment
   (every `TK_SUPERVISOR_*` secret and the owner seat stripped).
 - The only files written are the engagement's `chat.jsonl`, one line per
-  reply, and its `questions.json` (Story 32.3); nothing is committed,
-  nothing is promoted.
+  reply, its `questions.json` (Story 32.3), and its `scope.md` with the
+  record's `scope_page` and the Confluence scope page (Story 32.4); nothing
+  is committed, nothing is promoted.
 - All paths resolve through `${CLAUDE_PLUGIN_ROOT}`.

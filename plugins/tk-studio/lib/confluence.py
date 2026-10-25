@@ -241,15 +241,30 @@ def find_folders(client: ConfluenceClient, space_id: str) -> dict[str, str]:
             and isinstance(entry.get("title"), str)}
 
 
-def create_folder(client: ConfluenceClient, space_id: str,
-                  title: str) -> tuple[dict | None, str]:
-    status, data = client.request("POST", "/folders",
-                                  {"spaceId": space_id, "title": title},
+def create_folder(client: ConfluenceClient, space_id: str, title: str,
+                  parent_id: str | None = None) -> tuple[dict | None, str]:
+    """Create a folder at the space's top level, or (Story 32.4) inside the
+    folder `parent_id` (sent as `parentId`)."""
+    body = {"spaceId": space_id, "title": title}
+    if parent_id is not None:
+        body["parentId"] = parent_id
+    status, data = client.request("POST", "/folders", body,
                                   scope=SCOPE_FOLDER)
     if status not in (200, 201) or not isinstance(data, dict) \
             or not data.get("id"):
         return None, _refusal(status, data)
     return data, ""
+
+
+def find_child_folder(client: ConfluenceClient, folder_id: str,
+                      title: str) -> str | None:
+    """The id of the folder titled `title` directly under the folder
+    `folder_id` (Story 32.4: `Engagements/ENG-NNN`), every page."""
+    for entry in _paged_results(client, f"/folders/{folder_id}/direct-children",
+                                prefix="publish"):
+        if entry.get("type") == "folder" and entry.get("title") == title:
+            return str(entry.get("id"))
+    return None
 
 
 # ------------------------------------------------- design pages (Story 31.3)

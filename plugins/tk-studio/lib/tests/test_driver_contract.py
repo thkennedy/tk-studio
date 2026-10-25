@@ -1117,6 +1117,60 @@ class DriverContractTestCase(unittest.TestCase):
         for line in answers:
             self.assertIn("bearer \\| cookie \\| supervisor", line)
 
+    # --- Story 32.4: the same 0.1.27 entry adds the scope of work —
+    # `engage.py scope`, the page in `Engagements/ENG-NNN`, `scope_page`,
+    # the sync-back's engagement scope mirror and the `revise` body —
+    # additive, never a 0.1.28.
+
+    def test_0_1_27_story_32_4_adds_the_scope_of_work(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.27**", header)
+        self.assertNotIn("**0.1.28**", self.text)
+        self.assertLess(header.index("0.1.27 (Story 32.3) adds to this same "
+                                     "entry"),
+                        header.index("0.1.27 (Story 32.4) adds to this same "
+                                     "entry"))
+        clause = " ".join(header[header.index("0.1.27 (Story 32.4)"):]
+                          .split())
+        for phrase in ("`engage.py scope --directory <project_root> "
+                       "--engagement ENG-NNN [--scope-file PATH | "
+                       "--revise-at AT] [--dry-run]`", "`NotScoping`",
+                       "`DeliverableWithoutSignal: <title>`",
+                       "`ScopeInvalid: <what>`",
+                       "`AssumptionUnstated: <id>`", "`scope.lock`",
+                       "`ConfluenceEnvMissing` (each absent agent-seat "
+                       "variable named)",
+                       "`ENG-NNN: Scope of Work`", "`Engagements/ENG-NNN`",
+                       "`scope_page {id, url, version}`",
+                       "not plan entities", "`kb/confluence/<slug>.md`",
+                       "`engagement_pages`", "`engage.py scope --revise-at <at>`",
+                       "`scope {path, text} | null`", "(D9)",
+                       "— additive) |"):
+            self.assertIn(phrase, clause)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 32.4", stories)
+        engage = next(line for line in self.text.splitlines()
+                      if line.startswith("| `tk-studio-engage` "))
+        for phrase in ("`scope`, 0.1.27, Story 32.4",
+                       "`lib/engage.py scope` (Story 32.4)",
+                       "Stories 32.5 to 32.8 add the verbs `quote` and "
+                       "`closeout`", "`ConfluenceUnbound`",
+                       "`DeliverableWithoutSignal: <title>`",
+                       "`retry: true`", "taken verbatim"):
+            self.assertIn(phrase, engage)
+        self.assertNotIn("add the verbs `scope`", engage)
+        plan_sync = next(line for line in self.text.splitlines()
+                         if line.startswith("| `tk-studio-plan-sync` "))
+        for phrase in ("(0.1.27, Story 32.4) an engagement's `scope.md`",
+                       "`engagement_pages`", "`scopes_replaced`"):
+            self.assertIn(phrase, plan_sync)
+        read = next(line for line in self.text.splitlines()
+                    if line.startswith("| the engagement (Story 32.1, "
+                                       "0.1.27) | `GET /engagements/{id}` |"))
+        self.assertIn("`scope_page {id, url, version}`", read)
+
     def test_section_8_names_the_cli_drives(self):
         section = self.text[self.text.index("## 8. Conformance"):]
         flat = " ".join(section.split())

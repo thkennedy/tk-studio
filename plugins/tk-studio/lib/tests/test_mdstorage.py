@@ -1,4 +1,6 @@
-"""Tests for the Markdown -> Confluence storage converter (Story 31.3)."""
+"""Tests for the Markdown -> Confluence storage converter (Story 31.3) and
+its reverse, `to_markdown` (Story 32.4: the scope round trip, the editor's
+noise, the footer dropped)."""
 from __future__ import annotations
 
 import struct
@@ -10,8 +12,11 @@ import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import engage  # noqa: E402
 import mdstorage  # noqa: E402
+import plansync  # noqa: E402
 
 SRC = "plan/briefs/b1/brief.md"
 
@@ -252,6 +257,136 @@ class PngTests(unittest.TestCase):
         self.assertEqual(mdstorage.recompress_png(b"GIF89a..."), b"GIF89a...")
         self.assertEqual(mdstorage.recompress_png(mdstorage.PNG_SIGNATURE + b"\x00"),
                          mdstorage.PNG_SIGNATURE + b"\x00")
+
+
+
+class ToMarkdownTests(unittest.TestCase):
+    def back(self, md: str) -> str:
+        storage, _ = mdstorage.convert(md, SRC)
+        return mdstorage.to_markdown(storage)
+
+    def test_the_subset_convert_emits_comes_back(self):
+        md = ("# Title\n\n## Part\n\nSome **bold**, *em*, `code` and "
+              "~~gone~~ text.\n\n- a\n  - a1\n- b\n\n1. one\n2. two\n\n"
+              "| h1 | h2 |\n|---|---|\n| x | y\\|z |\n\n> quoted\n\n"
+              "```python\nx = ']]>' < 3\n```\n\n---\n\n"
+              "[site](https://example.com) and "
+              "![shot](https://example.com/a.png)\n")
+        self.assertEqual(self.back(md), md)
+
+    def test_links_to_pages_and_attachments(self):
+        storage, _ = mdstorage.convert(
+            "See [the brief](../b2/brief.md) and ![pic](pic.png).", SRC,
+            {"plan/briefs/b2/brief.md": "Brief: b2"})
+        self.assertEqual(mdstorage.to_markdown(storage),
+                         "See the brief and ![pic](pic.png).\n")
+        bare = ('<p><ac:link><ri:page ri:content-title="Brief: b2"/>'
+                '</ac:link></p>')
+        self.assertEqual(mdstorage.to_markdown(bare), "Brief: b2\n")
+
+    def test_the_provenance_footer_is_dropped(self):
+        footer = plansync.page_footer("x/scope.md", "no commit", "0" * 64)
+        self.assertEqual(mdstorage.to_markdown("<h2>Goal</h2>" + footer),
+                         "## Goal\n")
+
+    def test_editor_noise_keeps_its_text(self):
+        storage = (
+            '<h2 local-id="h-1">Goal</h2>'
+            '<p local-id="p-1"><span style="color: red;">Hello</span> '
+            '<span data-x="1">owner</span><br/>again</p>'
+            '<ac:structured-macro ac:name="info" ac:schema-version="1">'
+            '<ac:parameter ac:name="title">Note</ac:parameter>'
+            '<ac:rich-text-body><p>Panel text</p></ac:rich-text-body>'
+            '</ac:structured-macro>'
+            '<ul><li><p>item <strong>one</strong></p><ul><li><p>sub</p>'
+            '</li></ul></li></ul><custom-tag>kept text</custom-tag>')
+        self.assertEqual(mdstorage.to_markdown(storage),
+                         "## Goal\n\nHello owner again\n\nPanel text\n\n"
+                         "- item **one**\n  - sub\n\nkept text\n")
+
+    def test_a_date_picker_time_keeps_its_date(self):
+        storage = ('<ul><li><p>Read access by <time datetime="2026-11-02" />'
+                   '</p></li><li><p>Sample by <time>2026-11-05</time></p>'
+                   '</li></ul>')
+        self.assertEqual(mdstorage.to_markdown(storage),
+                         "- Read access by 2026-11-02\n"
+                         "- Sample by 2026-11-05\n")
+
+    def test_a_task_list_is_checkbox_lines_without_id_or_status(self):
+        storage = (
+            '<ac:task-list><ac:task><ac:task-id>1</ac:task-id>'
+            '<ac:task-status>incomplete</ac:task-status>'
+            '<ac:task-body>Send <strong>sample</strong></ac:task-body>'
+            '</ac:task><ac:task><ac:task-id>2</ac:task-id>'
+            '<ac:task-status>complete</ac:task-status>'
+            '<ac:task-body>Grant access by <time datetime="2026-11-02" />'
+            '</ac:task-body></ac:task></ac:task-list><p>after</p>')
+        self.assertEqual(mdstorage.to_markdown(storage),
+                         "- [ ] Send **sample**\n"
+                         "- [x] Grant access by 2026-11-02\n\nafter\n")
+
+    def test_an_empty_body_is_empty(self):
+        self.assertEqual(mdstorage.to_markdown(""), "")
+
+
+class ScopeRoundTripTests(unittest.TestCase):
+    """AC2: Markdown to storage format to mirrored Markdown keeps every
+    section, every deliverable's signal and every story heading, as
+    `engage.py`'s scope parser reads them."""
+
+    def test_the_scope_round_trip_keeps_every_section(self):
+        from test_engage import SCOPE
+        scope = SCOPE + "\n## Assumptions\n\n- db: postgres (the default)\n"
+        storage, attachments = mdstorage.convert(
+            scope, "_bmad-output/engagements/ENG-001/scope.md")
+        self.assertEqual(attachments, [])
+        footer = plansync.page_footer(
+            "_bmad-output/engagements/ENG-001/scope.md", "no commit",
+            plansync.page_hash("ENG-001: Scope of Work", storage, []))
+        mirrored = mdstorage.to_markdown(storage + footer)
+        self.assertNotIn("Published by tk-studio", mirrored)
+        before = engage.parse_scope(scope)["sections"]
+        after = engage.parse_scope(mirrored)["sections"]
+        self.assertEqual([t for t, _ in after], [t for t, _ in before])
+        self.assertEqual([t for t, _ in after],
+                         list(engage.SCOPE_SECTIONS) + ["Assumptions"])
+        # the mirrored scope passes the planner's own check
+        engage.check_scope(mirrored, [{"question": "db"}])
+        deliverables = engage._subsections(dict(after)["Deliverables"], 3)
+        self.assertEqual([t for t, _ in deliverables],
+                         ["CSV export", "Date range filter"])
+        signals = [line for _, lines in deliverables for line in lines
+                   if engage.SIGNAL_RE.match(line)]
+        self.assertEqual(signals, [
+            "Acceptance signal: the downloaded file holds the filtered rows.",
+            "Acceptance signal: a range of one month exports that month "
+            "only."])
+        for heading in ("### Epic 1: Report exports",
+                        "#### Story 1.1: CSV button",
+                        "#### Story 1.2: Filtered export"):
+            self.assertIn("\n" + heading + "\n", mirrored)
+        self.assertIn("- Read access to the reports service by 2026-11-02.",
+                      mirrored)
+        # converted again, the mirror is the same page body
+        self.assertEqual(mdstorage.convert(mirrored, "x.md")[0], storage)
+
+    def test_a_dependency_dated_by_the_date_picker_passes_the_date_rule(self):
+        from test_engage import SCOPE
+        storage, _ = mdstorage.convert(
+            SCOPE, "_bmad-output/engagements/ENG-001/scope.md")
+        plain = "Read access to the reports service by 2026-11-02."
+        self.assertIn(f"<li>{plain}</li>", storage)
+        # the owner re-picked the date in the editor
+        storage = storage.replace(
+            f"<li>{plain}</li>",
+            '<li><p>Read access to the reports service by '
+            '<time datetime="2026-11-02" /></p></li>')
+        mirrored = mdstorage.to_markdown(storage)
+        self.assertIn("- Read access to the reports service by 2026-11-02\n",
+                      mirrored)
+        self.assertEqual([t for t, _ in engage.parse_scope(mirrored)
+                          ["sections"]], list(engage.SCOPE_SECTIONS))
+        engage.check_scope(mirrored)  # no `dependency N has no date`
 
 
 if __name__ == "__main__":

@@ -198,6 +198,12 @@
     job-run mapping, merge-only into a fresh read). enqueue's stack is
     engagement-chat only: never pass it for run-epic-N. A run-epic run and a chat
     turn on one served root wait on the shared checkout lock.
+    Replan (from 32-4, 2026-10-25): scope.md is shape-checked only on the planner's
+    engage.py scope; an owner edit mirrored by mdstorage.to_markdown, or a revise
+    body, replaces it unchecked, so a story's As a / I want / So that / Acceptance
+    Criteria may be joined in one paragraph. Split stories on the #### headings, find
+    the parts as substrings (engage.py STORY_SHAPE), re-emit them in epics.md's line
+    shape when renumbering, and refuse by name a story that fails.
 
 - id: "32-7-the-chat-screen"
   title: "The Chat Screen"
@@ -279,3 +285,10 @@
     engagement pass merges only closeout and the state into a fresh read, or adds a
     shared record lock to every writer (chat spend pass, input route, engagement
     pass) named in the 0.1.27 entry. stack stays engagement-chat only.
+    Replan (from 32-4, 2026-10-25): parse deliverables with engage.py parse_scope and
+    SIGNAL_RE, then fall back to a substring search, because owner text (a mirrored
+    edit or a revise) is unchecked and may join or omit the signal. A deliverable
+    with no signal is reported "not done - no acceptance signal", never a crash.
+    Publish ENG-NNN: Closeout through 32.4's helpers (confluence.find_child_folder,
+    create_folder parent_id, the footer-hash AND version skip in engage.py
+    _publish_scope).

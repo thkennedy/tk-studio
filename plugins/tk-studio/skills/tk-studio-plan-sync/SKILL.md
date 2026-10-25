@@ -108,7 +108,18 @@ committed per-project counter at `.tk-studio/plan-counter.yaml`).
    attachments as links into `attachments.jsonl` (never downloaded or
    uploaded), and every owner-authored page of the recorded Confluence
    space into `kb/confluence/<slug>.md` with a provenance header (read-only:
-   a local edit is overwritten and named in `overwritten[]`). One paged JQL
+   a local edit is overwritten and named in `overwritten[]`). Story 32.4:
+   each engagement's scope page (the record's `scope_page.id`, agent-
+   published, so never in the owner-page mirror) is read by id; a version
+   above the record's `scope_page.version` is mirrored as Markdown into
+   `kb/confluence/<slug>.md` (the provenance header plus `engagement:
+   ENG-NNN`; its state under `sync-state.json` `engagement_pages`) and,
+   while the engagement is `scoping`, replaces its `scope.md` wholesale
+   (the page is authoritative, D9) and merges the version into the record;
+   in any other state only the mirror is written and `notes[]` says
+   `scope edit of ENG-NNN not applied: state <s> (send revise)` once per
+   version (no state moves). A page gone (404) is a note; counts gain
+   `engagement_pages_mirrored` and `scopes_replaced`. One paged JQL
    search per tick, never a GET per issue — only an issue whose
    `comment.total` exceeds the comments the search returned pages
    `GET /rest/api/2/issue/{key}/comment` (overflow only); the cursor in `_bmad-output/tracking/sync-state.json`

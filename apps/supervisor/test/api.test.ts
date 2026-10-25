@@ -1499,7 +1499,7 @@ describe("Story 32.1: the engagement routes (contract 0.1.27 additive)", () => {
     expect(fx.events()).toHaveLength(1); // the create's only
   });
 
-  test("Story 32.3: afterEngagementInput runs after an applied answer or go (the served root, the id), never after a refused or other input", async () => {
+  test("Story 32.3/32.4: afterEngagementInput runs after an applied answer, go or revise (the served root, the id), never after a refused or other input", async () => {
     const calls: [string, string][] = [];
     const fx = routed({ afterEngagementInput: async (root, id) => { calls.push([root, id]); throw new Error("the pass's errors are swallowed"); } });
     await fx.create();
@@ -1521,6 +1521,15 @@ describe("Story 32.1: the engagement routes (contract 0.1.27 additive)", () => {
     expect(body.to).toBe("scoping");
     expect(body.engagement.assumptions).toEqual([{ question: "q2", text: "?", assumed: "a" }]);
     expect(calls).toEqual([[fx.root, "ENG-001"], [fx.root, "ENG-001"]]);
+    // Story 32.4: an applied revise (its body becomes the scope through the scope pass) runs it too
+    const revise = await fx.call("POST", "/engagements/ENG-001/input", undefined, { verb: "revise", body: "Only the CSV button." });
+    expect(revise.status).toBe(200);
+    expect((await revise.json() as Record<string, any>).to).toBe("scoping");
+    expect(calls).toHaveLength(3);
+    // a refused revise (an oversize body) and a cancel run nothing
+    expect((await fx.call("POST", "/engagements/ENG-001/input", undefined, { verb: "revise", body: "x".repeat(32 * 1024 + 1) })).status).toBe(400);
+    expect((await fx.call("POST", "/engagements/ENG-001/input", undefined, { verb: "cancel" })).status).toBe(200);
+    expect(calls).toHaveLength(3);
   });
 
   test("POST /engagements/{id}/input: a legal input 200 {ok, engagement, from, to}, the inputs[] line, the event carrying from", async () => {

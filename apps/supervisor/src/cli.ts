@@ -128,6 +128,7 @@ import { mergePass, reviewPass, type PlanStatusDeps } from "./planstatus";
 import { resolutionPass, withQueuedPayload, withStoredPayload, type ResolutionDeps } from "./resolution";
 import { chatSpendPass, type ChatDeps, type ChatSpendDeps } from "./chat";
 import { questionsPass, type QuestionsDeps } from "./questions";
+import { scopePass, type ScopeDeps } from "./scope";
 import { ledgerPath } from "./board";
 import { CERT_CHECK_MS, CERT_RENEW_EXIT, certCheck, recordCertStart } from "./cert";
 import {
@@ -303,6 +304,8 @@ export interface RunOptions {
   chatSpend?: Partial<ChatSpendDeps> | false;
   /** Story 32.3: the engagement questions pass (`questionsQuietly`) — injected deps, or `false` to skip it. */
   questions?: Partial<QuestionsDeps> | false;
+  /** Story 32.4: the engagement scope pass (`scopeQuietly`) — injected deps, or `false` to skip it. */
+  scope?: Partial<ScopeDeps> | false;
 }
 
 /** Story 29.2: how a rebuild point rebuilds the `agents` table — the injected deps (tests), `false` (no rebuild),
@@ -653,6 +656,7 @@ export async function recoverQueue(opts: RunOptions = {}, verbRunner: VerbRunner
     await resolveQuietly(queue, opts); // Story 31.7: queue validate-resolution from resolved items; re-arm on a pass
     chatSpendQuietly(queue, opts); // Story 32.2: the chat runs' costs into each engagement's spend.planning_usd
     await questionsQuietly(queue, opts); // Story 32.3: the planner's questions applied, blocked, answered and closed
+    await scopeQuietly(queue, opts); // Story 32.4: a revise body becomes the scope and its Confluence page
     await afterCloseOuts(queue, opts); // Story 27.5: the orphan close-out, then the plan's review and merge passes
     await detectExternal(queue, verbRunner, jobPlacement, sbxDeps(opts.worktree)); // Story 27.2: runs started outside the queue
     writeStarterLocks(queue, opts.worktree?.env ?? process.env);
@@ -739,12 +743,22 @@ async function questionsQuietly(queue: Queue, opts: RunOptions): Promise<void> {
   try { await questionsPass(queue, { ...(opts.worktree ?? {}), ...(opts.questions ?? {}) }); } catch { /* the next tick */ }
 }
 
+/** Story 32.4: the engagement scope pass (src/scope.ts) right after the questions pass at every `finally` site
+ * (`recover`, `drain`, `run`): production runs `engage.py scope --revise-at` through the worktree deps' `uv` (default
+ * `runUv`); under `bun test` it runs only with injected deps (as `questionsQuietly`). Never throws. */
+async function scopeQuietly(queue: Queue, opts: RunOptions): Promise<void> {
+  if (opts.scope === false || (opts.scope === undefined && underBunTest())) return;
+  try { await scopePass(queue, { ...(opts.worktree ?? {}), ...(opts.scope ?? {}) }); } catch { /* the next tick */ }
+}
+
 /** Story 32.3: the input route's production `afterEngagementInput` — the questions pass for the one engagement an
- * applied `answer`/`go` moved (so a chat-card answer closes its issue without waiting for a run to end); skipped
- * under `bun test` unless deps are injected. Never throws. */
-export async function afterEngagementInput(queue: Queue, root: string, id: string, deps?: Partial<QuestionsDeps>): Promise<void> {
+ * applied `answer`/`go` moved (so a chat-card answer closes its issue without waiting for a run to end), then (Story
+ * 32.4) the scope pass for it (an applied `revise` with a body becomes the scope and its page); skipped under
+ * `bun test` unless deps are injected. Never throws. */
+export async function afterEngagementInput(queue: Queue, root: string, id: string, deps?: Partial<QuestionsDeps & ScopeDeps>): Promise<void> {
   if (deps === undefined && underBunTest()) return;
   try { await questionsPass(queue, deps ?? {}, { root, engagement: id }); } catch { /* the next run end */ }
+  try { await scopePass(queue, deps ?? {}, { root, engagement: id }); } catch { /* the next run end */ }
 }
 
 /** Story 32.2: the chat route's production deps — the `engagement-chat` definition for a served root as `validate`
@@ -850,6 +864,7 @@ export async function drainQueue(opts: RunOptions = {}, verbRunner: VerbRunner =
     await resolveQuietly(queue, opts); // Story 31.7
     chatSpendQuietly(queue, opts); // Story 32.2
     await questionsQuietly(queue, opts); // Story 32.3
+    await scopeQuietly(queue, opts); // Story 32.4
     await afterCloseOuts(queue, opts); // Story 27.5
     await rebuildQuietly(queue, opts.agents); // Story 29.2: the agent registry after the drain's claims and ends
     await sweepEnds(queue, opts.hygiene);
@@ -1211,6 +1226,7 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
     await resolveQuietly(queue, opts); // Story 31.7: queue validate-resolution from resolved items; re-arm on a pass
     chatSpendQuietly(queue, opts); // Story 32.2: the chat runs' costs into each engagement's spend.planning_usd
     await questionsQuietly(queue, opts); // Story 32.3: the planner's questions applied, blocked, answered and closed
+    await scopeQuietly(queue, opts); // Story 32.4: a revise body becomes the scope and its Confluence page
     await afterCloseOuts(queue, opts); // Story 27.5: the orphan close-out, then the plan's review and merge passes
     await rebuildQuietly(queue, opts.agents); // Story 29.2: every end this process drove rebuilds the agent registry
     await sweepEnds(queue, opts.hygiene); // Story 22.3: every end this process drove (resumes included)
