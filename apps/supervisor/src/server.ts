@@ -27,7 +27,7 @@ const CONSUMED_CONTRACT = "0.1.18";
 /** Pre-1.0 contract semver: the compatibility line is major.minor (`0.1`) —
  * breaking studio changes bump it (0.2.0), additive ones ride the patch. */
 const PINNED_LINE = "0.1";
-const SERVER_INFO = { name: "tk-studio-supervisor", version: "0.1.2" };
+const SERVER_INFO = { name: "tk-studio-supervisor", version: "0.1.3" };
 const PROTOCOL_VERSION = "2024-11-05";
 
 const DRIVER_JOB_VERBS = ["submit", "status", "resolve", "cancel", "wake"] as const;
