@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { ApiBindRefused, checkBind, checkResumeBody, checkSubmitBody, createApi, serve, type ApiDeps, type SubmitBody } from "../src/api";
 import { csrfToken, SESSION_COOKIE, signSession } from "../src/auth";
+import { listEngagements, readEngagement, writeEngagement } from "../src/engagement";
 import { ResumeRefused } from "../src/closeout";
 import { CancelRaced, cancelRun, CANCELLED_REASON, endCancelledLeftovers, launchStopGraceful, mirror, queueRecorder, recordMinted, StartError, type RunSummary } from "../src/cli";
 import { ApiBindMissing, ApiPortInvalid, ApiTokenMissing, apiBind, apiPort, apiToken } from "../src/env";
@@ -1334,3 +1335,298 @@ describe("Story 31.6: the issue read and POST /inbox/{key}/reply (contract 0.1.2
   });
 });
 
+
+describe("Story 32.1: the engagement routes (contract 0.1.27 additive)", () => {
+  const SECRET = "e".repeat(48);
+  const ENG = join("_bmad-output", "engagements");
+  function routed(o: Partial<ApiDeps> = {}) {
+    const root = mkdtempSync(join(tmpdir(), "tk-sup-eng-root-"));
+    const other = mkdtempSync(join(tmpdir(), "tk-sup-eng-other-"));
+    const queue = new Queue(join(mkdtempSync(join(tmpdir(), "tk-sup-eng-q-")), "q.db"), { ownerAlive: () => false, engineLive: async () => ({ live: false }) });
+    let t = Date.parse("2026-10-25T03:00:00.000Z");
+    const handler = createApi({
+      queue, token: TOKEN, session: { secret: SECRET }, submit: async () => { throw new Error("never"); }, now: () => (t += 1000),
+      registry: async () => ({ projects: { p: { root }, o: { root: other }, rootless: {} } }), env: { TK_STUDIO_HOME: mkdtempSync(join(tmpdir(), "tk-sup-eng-home-")) },
+      ...o,
+    });
+    const cookie = `${SESSION_COOKIE}=${signSession(SECRET, "token", Date.now())}`;
+    const csrf = csrfToken(SECRET, cookie.slice(SESSION_COOKIE.length + 1));
+    const call = (method: string, path: string, headers: Record<string, string> = { authorization: `Bearer ${TOKEN}` }, body?: unknown) =>
+      handler(new Request(`${BASE}${path}`, { method, headers: { ...(body !== undefined ? { "content-type": "application/json" } : {}), ...headers }, ...(body !== undefined ? { body: typeof body === "string" ? body : JSON.stringify(body) } : {}) }));
+    const create = async (request = "Build the export\nwith CSV", headers?: Record<string, string>, project = "p") =>
+      (await (await call("POST", "/engagements", headers, { project, request })).json()) as Record<string, any>;
+    const events = () => queue.serviceEvents("engagement").map((e) => e.detail);
+    return { root, other, queue, call, create, cookie, csrf, events };
+  }
+
+  test("bearer POST /engagements: 200 {ok, engagement} in intake, the record written, the counter minted, one service event from null", async () => {
+    const fx = routed();
+    const res = await fx.call("POST", "/engagements", undefined, { project: "p", request: "Build the export\nwith CSV" });
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, any>;
+    expect(body).toEqual({
+      ok: true,
+      engagement: {
+        shape_version: 1, id: "ENG-001", project: "p", state: "intake", request: "Build the export\nwith CSV", questions: [], assumptions: [],
+        scope_page: null, quote: null, autonomy: null, approved_at: null, closeout: null,
+        created: "2026-10-25T03:00:01.000Z", updated: "2026-10-25T03:00:01.000Z", spend: { planning_usd: 0, runs_usd: 0 }, inputs: [],
+      },
+    });
+    expect(readEngagement(fx.root, "ENG-001")).toEqual(body.engagement);
+    expect(readFileSync(join(fx.root, ".tk-studio", "plan-counter.yaml"), "utf-8")).toContain("engagement: 2");
+    expect(fx.events()).toEqual([{ id: "ENG-001", project: "p", state: "intake", from: null, source: "bearer" }]);
+    expect((await fx.create()).engagement.id).toBe("ENG-002");
+    expect(fx.queue.events()).toEqual([]); // no queue run
+  });
+
+  test("a cookie session creates with X-CSRF-Token (source cookie); without it, or a forged one, 403 CsrfRefused and nothing written; no auth 401", async () => {
+    const fx = routed();
+    const ok = await fx.call("POST", "/engagements", { cookie: fx.cookie, "x-csrf-token": fx.csrf }, { project: "p", request: "From the web" });
+    expect(ok.status).toBe(200);
+    expect(fx.events()).toEqual([{ id: "ENG-001", project: "p", state: "intake", from: null, source: "cookie" }]);
+    for (const headers of [{ cookie: fx.cookie }, { cookie: fx.cookie, "x-csrf-token": "forged" }] as Record<string, string>[]) {
+      const refused = await fx.call("POST", "/engagements", headers, { project: "p", request: "again" });
+      expect(refused.status).toBe(403);
+      expect(await refused.json()).toMatchObject({ ok: false, error: "CsrfRefused" });
+    }
+    expect((await fx.call("POST", "/engagements", {}, { project: "p", request: "x" })).status).toBe(401);
+    expect(listEngagements(fx.root).map((e) => e.id)).toEqual(["ENG-001"]);
+    expect(fx.events()).toHaveLength(1);
+  });
+
+  test("an unregistered project 404 UnknownProject; a registry entry with no root 500 EngagementRootMissing; nothing written", async () => {
+    const fx = routed();
+    const unknown = await fx.call("POST", "/engagements", undefined, { project: "nope", request: "x" });
+    expect(unknown.status).toBe(404);
+    expect(await unknown.json()).toMatchObject({ ok: false, error: "UnknownProject", project: "nope" });
+    const rootless = await fx.call("POST", "/engagements", undefined, { project: "rootless", request: "x" });
+    expect(rootless.status).toBe(500);
+    expect(await rootless.json()).toMatchObject({ ok: false, error: "EngagementRootMissing", project: "rootless" });
+    expect(existsSync(join(fx.root, ENG))).toBe(false);
+    expect(fx.events()).toEqual([]);
+  });
+
+  test("a registry root that is not on disk: POST /engagements 500 EngagementRootMissing, no phantom root (no counter, no record), no event", async () => {
+    const gone = mkdtempSync(join(tmpdir(), "tk-sup-eng-gone-"));
+    rmSync(gone, { recursive: true, force: true });
+    const fx = routed({ registry: async () => ({ projects: { gone: { root: gone } } }) });
+    const res = await fx.call("POST", "/engagements", undefined, { project: "gone", request: "x" });
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ ok: false, error: "EngagementRootMissing", project: "gone", detail: "the registry root does not exist" });
+    expect(existsSync(gone)).toBe(false);
+    expect(fx.events()).toEqual([]);
+  });
+
+  test("a bad body: an extra field (follows), an empty request, a non-object 400 SchemaError; not JSON 400 MalformedJson; nothing written", async () => {
+    const fx = routed();
+    for (const body of [{ project: "p", request: "x", follows: "ENG-001" }, { project: "p", request: "  " }, { project: "p" }, [1], { project: "p", request: "x".repeat(32 * 1024 + 1) }]) {
+      const res = await fx.call("POST", "/engagements", undefined, body);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ ok: false, error: "SchemaError" });
+    }
+    const malformed = await fx.call("POST", "/engagements", undefined, "{nope");
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toMatchObject({ ok: false, error: "MalformedJson" });
+    expect(existsSync(join(fx.root, ENG))).toBe(false);
+    expect(existsSync(join(fx.root, ".tk-studio"))).toBe(false); // no id minted for a refused body
+  });
+
+  test("GET /engagements?project=: the project's records newest first; a cookie reads it; no project 400; unknown 404", async () => {
+    const fx = routed();
+    for (const r of ["first", "second", "third"]) await fx.create(r);
+    await fx.create("elsewhere", undefined, "o");
+    const res = await fx.call("GET", "/engagements?project=p");
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, any>;
+    expect(body.ok).toBe(true);
+    expect(body.project).toBe("p");
+    expect(body.engagements.map((e: any) => [e.id, e.request])).toEqual([["ENG-003", "third"], ["ENG-002", "second"], ["ENG-001", "first"]]);
+    expect(body.problems).toEqual([]);
+    const viaCookie = await fx.call("GET", "/engagements?project=p", { cookie: fx.cookie });
+    expect(viaCookie.status).toBe(200);
+    expect(((await viaCookie.json()) as any).engagements).toHaveLength(3);
+    expect((await fx.call("GET", "/engagements")).status).toBe(400);
+    const unknown = await fx.call("GET", "/engagements?project=nope");
+    expect(unknown.status).toBe(404);
+    expect(await unknown.json()).toMatchObject({ ok: false, error: "UnknownProject" });
+  });
+
+  test("GET /engagements/{id}: the record and its chat pointer (scan, or ?project=); a cookie reads it; 400 BadEngagement; 404 UnknownEngagement", async () => {
+    const fx = routed();
+    await fx.create("in o", undefined, "o");
+    const res = await fx.call("GET", "/engagements/ENG-001");
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, any>;
+    expect(body).toMatchObject({ ok: true, project: "o", engagement: { id: "ENG-001", project: "o", state: "intake", request: "in o" } });
+    expect(body.chat).toEqual({ route: "/chat/ENG-001", path: "_bmad-output/engagements/ENG-001/chat.jsonl", last_seq: 0 });
+    writeFileSync(join(fx.other, ENG, "ENG-001", "chat.jsonl"), JSON.stringify({ seq: 1, author: "owner" }) + "\n" + JSON.stringify({ seq: 2, author: "planner" }) + "\n");
+    const scoped = await fx.call("GET", "/engagements/ENG-001?project=o", { cookie: fx.cookie });
+    expect(scoped.status).toBe(200);
+    expect(((await scoped.json()) as any).chat.last_seq).toBe(2);
+    const wrong = await fx.call("GET", "/engagements/ENG-001?project=p");
+    expect(wrong.status).toBe(404);
+    expect(await wrong.json()).toMatchObject({ ok: false, error: "UnknownEngagement", project: "p", engagement: "ENG-001" });
+    const missing = await fx.call("GET", "/engagements/ENG-077");
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({ ok: false, error: "UnknownEngagement", engagement: "ENG-077" });
+    for (const id of ["foo", "ENG-1", "eng-001", "%E0%A4"]) {
+      const bad = await fx.call("GET", `/engagements/${id}`);
+      expect(bad.status).toBe(400);
+      expect(await bad.json()).toMatchObject({ ok: false, error: "BadEngagement" });
+    }
+    writeFileSync(join(fx.other, ENG, "ENG-001", "engagement.yaml"), "shape_version: 7\n");
+    const invalid = await fx.call("GET", "/engagements/ENG-001");
+    expect(invalid.status).toBe(500);
+    const inv = await invalid.json() as Record<string, any>;
+    expect(inv).toMatchObject({ ok: false, error: "EngagementRecordInvalid", engagement: "ENG-001" });
+    expect(String(inv.detail)).not.toContain(fx.other);
+  });
+
+  test("an input on a record whose questions[] holds a non-mapping: 500 EngagementRecordInvalid (never an unhandled 500), nothing written", async () => {
+    const fx = routed();
+    await fx.create();
+    const path = join(fx.root, ENG, "ENG-001", "engagement.yaml");
+    const text = readFileSync(path, "utf-8").replace("state: intake", "state: awaiting-answers").replace("questions: []", "questions:\n  - null");
+    writeFileSync(path, text);
+    for (const body of [{ verb: "answer", answers: { q1: "a" } }, { verb: "go" }]) {
+      const res = await fx.call("POST", "/engagements/ENG-001/input", undefined, body);
+      expect(res.status).toBe(500);
+      expect(await res.json()).toMatchObject({ ok: false, error: "EngagementRecordInvalid", project: "p", engagement: "ENG-001" });
+    }
+    expect(readFileSync(path, "utf-8")).toBe(text);
+    expect(fx.events()).toHaveLength(1); // the create's only
+  });
+
+  test("POST /engagements/{id}/input: a legal input 200 {ok, engagement, from, to}, the inputs[] line, the event carrying from", async () => {
+    const fx = routed();
+    await fx.create();
+    const res = await fx.call("POST", "/engagements/ENG-001/input", undefined, { verb: "go" });
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, any>;
+    expect(body).toMatchObject({ ok: true, from: "intake", to: "scoping", engagement: { id: "ENG-001", state: "scoping" } });
+    expect(body.engagement.inputs).toEqual([{ at: body.engagement.updated, verb: "go", source: "bearer", from: "intake", to: "scoping" }]);
+    expect(readEngagement(fx.root, "ENG-001")).toEqual(body.engagement);
+    const viaCookie = await fx.call("POST", "/engagements/ENG-001/input?project=p", { cookie: fx.cookie, "x-csrf-token": fx.csrf }, { verb: "question", text: "how long?" });
+    expect(viaCookie.status).toBe(200);
+    expect(await viaCookie.json()).toMatchObject({ from: "scoping", to: "scoping" });
+    expect(fx.events()).toEqual([
+      { id: "ENG-001", project: "p", state: "intake", from: null, source: "bearer" },
+      { id: "ENG-001", project: "p", state: "scoping", from: "intake", verb: "go", source: "bearer" },
+      { id: "ENG-001", project: "p", state: "scoping", from: "scoping", verb: "question", source: "cookie" },
+    ]);
+    expect(readEngagement(fx.root, "ENG-001")!.inputs.map((l) => [l.verb, l.source])).toEqual([["go", "bearer"], ["question", "cookie"]]);
+  });
+
+  test("POST …/input refusals: 409 IllegalInput {state, verb} (and the no-quote guard), 409 EngagementClosed, 400 SchemaError, 403 CsrfRefused; state unchanged", async () => {
+    const fx = routed();
+    await fx.create();
+    const illegal = await fx.call("POST", "/engagements/ENG-001/input", undefined, { verb: "approve", autonomy: "ask" });
+    expect(illegal.status).toBe(409);
+    expect(await illegal.json()).toEqual({ ok: false, error: "IllegalInput", engagement: "ENG-001", state: "intake", verb: "approve" });
+    await fx.call("POST", "/engagements/ENG-001/input", undefined, { verb: "go" });
+    const guarded = await fx.call("POST", "/engagements/ENG-001/input", undefined, { verb: "go" });
+    expect(guarded.status).toBe(409);
+    expect(await guarded.json()).toEqual({ ok: false, error: "IllegalInput", engagement: "ENG-001", state: "scoping", verb: "go", detail: "no quote" });
+    for (const body of [{ verb: "launch" }, { verb: "go", cap: -1 }, { verb: "question", questions: [], run_id: "r" }, { verb: "go", project: "p" }, "[]"]) {
+      const res = await fx.call("POST", "/engagements/ENG-001/input", undefined, body);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ ok: false, error: "SchemaError" });
+    }
+    const malformed = await fx.call("POST", "/engagements/ENG-001/input", undefined, "{x");
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toMatchObject({ ok: false, error: "MalformedJson" });
+    const noCsrf = await fx.call("POST", "/engagements/ENG-001/input", { cookie: fx.cookie }, { verb: "cancel" });
+    expect(noCsrf.status).toBe(403);
+    expect(await noCsrf.json()).toMatchObject({ ok: false, error: "CsrfRefused" });
+    expect(readEngagement(fx.root, "ENG-001")!.state).toBe("scoping");
+    const cancel = await fx.call("POST", "/engagements/ENG-001/input", undefined, { verb: "cancel", reason: "not now" });
+    expect(await cancel.json()).toMatchObject({ ok: true, from: "scoping", to: "cancelled" });
+    for (const body of [{ verb: "question", text: "?" }, { verb: "go" }, { verb: "cancel" }]) {
+      const closed = await fx.call("POST", "/engagements/ENG-001/input", undefined, body);
+      expect(closed.status).toBe(409);
+      expect(await closed.json()).toEqual({ ok: false, error: "EngagementClosed", engagement: "ENG-001", state: "cancelled", verb: body.verb });
+    }
+    expect(fx.events().map((e) => e?.state)).toEqual(["intake", "scoping", "cancelled"]); // only applied inputs emit
+    const answerUnknown = await (async () => {
+      const fx2 = routed();
+      await fx2.create();
+      const r = readEngagement(fx2.root, "ENG-001")!;
+      writeEngagement(fx2.root, { ...r, state: "awaiting-answers", questions: [{ id: "q1", text: "?", options: ["a"], default: "a" }] });
+      return fx2.call("POST", "/engagements/ENG-001/input", undefined, { verb: "answer", answers: { q7: "a" } });
+    })();
+    expect(answerUnknown.status).toBe(400);
+    expect(await answerUnknown.json()).toMatchObject({ ok: false, error: "SchemaError", detail: "unknown question id q7" });
+    const missing = await fx.call("POST", "/engagements/ENG-404/input", undefined, { verb: "go" });
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toMatchObject({ ok: false, error: "UnknownEngagement", engagement: "ENG-404" });
+    const bad = await fx.call("POST", "/engagements/nope/input", undefined, { verb: "go" });
+    expect(bad.status).toBe(400);
+    expect(await bad.json()).toMatchObject({ ok: false, error: "BadEngagement", engagement: "nope" });
+  });
+
+  test("one id in two projects, no ?project=: GET and POST …/input are 409 AmbiguousEngagement naming both, nothing written; ?project= settles it", async () => {
+    const fx = routed();
+    await fx.create("in p", undefined, "p");
+    await fx.create("in o", undefined, "o");
+    const files = [join(fx.root, ENG, "ENG-001", "engagement.yaml"), join(fx.other, ENG, "ENG-001", "engagement.yaml")];
+    const before = files.map((f) => readFileSync(f, "utf-8"));
+    const got = await fx.call("GET", "/engagements/ENG-001");
+    expect(got.status).toBe(409);
+    expect(await got.json()).toEqual({ ok: false, error: "AmbiguousEngagement", engagement: "ENG-001", projects: ["p", "o"] });
+    const posted = await fx.call("POST", "/engagements/ENG-001/input", undefined, { verb: "go" });
+    expect(posted.status).toBe(409);
+    expect(await posted.json()).toEqual({ ok: false, error: "AmbiguousEngagement", engagement: "ENG-001", projects: ["p", "o"] });
+    expect(files.map((f) => readFileSync(f, "utf-8"))).toEqual(before);
+    expect(fx.events().map((e) => e?.verb)).toEqual([undefined, undefined]); // the two creates only
+    const scoped = await fx.call("GET", "/engagements/ENG-001?project=o");
+    expect(scoped.status).toBe(200);
+    expect(await scoped.json()).toMatchObject({ ok: true, project: "o", engagement: { request: "in o" } });
+    const scopedPost = await fx.call("POST", "/engagements/ENG-001/input?project=p", undefined, { verb: "go" });
+    expect(scopedPost.status).toBe(200);
+    expect(readEngagement(fx.root, "ENG-001")!.state).toBe("scoping");
+    expect(readFileSync(files[1]!, "utf-8")).toBe(before[1]!);
+  });
+
+  test("a malformed record in one project and a valid one in another: 409 AmbiguousEngagement (a file that exists is a hit)", async () => {
+    const fx = routed();
+    await fx.create("in p", undefined, "p");
+    mkdirSync(join(fx.other, ENG, "ENG-001"), { recursive: true });
+    writeFileSync(join(fx.other, ENG, "ENG-001", "engagement.yaml"), "shape_version: 7\n");
+    for (const [method, path, body] of [["GET", "/engagements/ENG-001", undefined], ["POST", "/engagements/ENG-001/input", { verb: "go" }]] as const) {
+      const res = await fx.call(method, path, undefined, body);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ ok: false, error: "AmbiguousEngagement", engagement: "ENG-001", projects: ["p", "o"] });
+    }
+    expect(readEngagement(fx.root, "ENG-001")!.state).toBe("intake");
+    expect((await fx.call("GET", "/engagements/ENG-001?project=p")).status).toBe(200);
+    expect((await fx.call("GET", "/engagements/ENG-001?project=o")).status).toBe(500);
+  });
+
+  test("two concurrent inputs on one record: both inputs[] lines land (read, apply and write with no await between)", async () => {
+    const fx = routed();
+    await fx.create();
+    const [a, b] = await Promise.all([
+      fx.call("POST", "/engagements/ENG-001/input", undefined, { verb: "question", text: "how long?" }),
+      fx.call("POST", "/engagements/ENG-001/input", undefined, { verb: "cancel", reason: "not now" }),
+    ]);
+    expect([a.status, b.status]).toEqual([200, 200]);
+    const record = readEngagement(fx.root, "ENG-001")!;
+    expect(record.inputs.map((l) => [l.verb, l.from, l.to]).sort()).toEqual([["cancel", "intake", "cancelled"], ["question", "intake", "intake"]]);
+    expect(record.state).toBe("cancelled");
+  });
+
+  test("a wrong method is 405 with Allow on each route; a cookie POST /engagements/{id} (no such route) is 401", async () => {
+    const fx = routed();
+    await fx.create();
+    for (const [method, path, allow] of [
+      ["PUT", "/engagements", "GET, POST"], ["DELETE", "/engagements", "GET, POST"], ["POST", "/engagements/ENG-001", "GET"],
+      ["GET", "/engagements/ENG-001/input", "POST"],
+    ] as const) {
+      const res = await fx.call(method, path);
+      expect(res.status).toBe(405);
+      expect(res.headers.get("allow")).toBe(allow);
+      expect(await res.json()).toMatchObject({ ok: false, error: "MethodNotAllowed", allow });
+    }
+    expect((await fx.call("POST", "/engagements/ENG-001", { cookie: fx.cookie, "x-csrf-token": fx.csrf })).status).toBe(401);
+  });
+});

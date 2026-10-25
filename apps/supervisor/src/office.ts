@@ -14,11 +14,20 @@
  * (the queue `paused` event's `paused_story_key`, else the standing journal `story-escalated` key) — maps, by the plan entity's `source: epics.md#story-N.M` in the run's project
  * root, to an entity with an `open` item in that root's `_bmad-output/tracking/inbox.json` (the sync-back's file,
  * re-read when it changes). Only the inbox moves it: a comment or a message never does.
+ *
+ * Story 32.1 (contract 0.1.27, additive): `engagements[]` `{id, project, state, title, needs_you}` — every engagement
+ * record (`engagement.ts` `listEngagements`) under each project's served root (the hub's `roots()`, the registry's,
+ * else its newest queue run's `root`), newest first per project; a malformed record is a `problems[]` line
+ * `project <project>: _bmad-output/engagements/<id>/engagement.yaml: <reason>` (root-relative, prefixed by the
+ * project, as a run's lines are by `run <run_id>: `). The hub emits `office.engagement` `{id, project, state,
+ * from, title, needs_you}` on each change (`state: null` once the record is gone). The records are the truth; the
+ * `engagement` service event is never read here.
  */
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { load as loadYaml } from "js-yaml";
 import { launchedSinceMove, pausedStory } from "./closeout";
+import { listEngagements, needsYou, titleOf } from "./engagement";
 import { planEntity, runPr, storyNumber } from "./planstatus";
 import { engineRoot, isTerminal, servedRoot, type Queue, type QueueEvent, type QueueRun } from "./queue";
 import { readAgents, ROLES, type Role } from "./registry";
@@ -361,8 +370,15 @@ const sameBlocked = (a: BlockedIssue | null | undefined, b: BlockedIssue | null 
 /** A project's newest terminal run (Story 30.4, contract 0.1.25): its end state, its PR (`runPr`) and when it ended
  * (the latest `ended`/`orphaned` event's `at`, else the run's `updated`), an ISO string. */
 export interface OfficeLastRun { run_id: string; state: string; pr: string | null; ended_at: string }
-/** `last_run` (Story 30.4, additive): keyed by project; a project that never ended a run has no entry. */
-export interface OfficeView { at: string; agents: OfficeAgent[]; runs: OfficeRun[]; problems: string[]; last_run: Record<string, OfficeLastRun> }
+/** Story 32.1 (contract 0.1.27, additive): an engagement as the office shows it. */
+export interface OfficeEngagement { id: string; project: string; state: string; title: string; needs_you: boolean }
+/** `last_run` (Story 30.4, additive): keyed by project; a project that never ended a run has no entry. `engagements`
+ * (Story 32.1, additive): every served project's engagement records — always set by `projectOffice` and the hub
+ * (`[]` with none); optional in the type only, so an injected projector or a page-built view may omit it. */
+export interface OfficeView {
+  at: string; agents: OfficeAgent[]; runs: OfficeRun[]; problems: string[]; last_run: Record<string, OfficeLastRun>;
+  engagements?: OfficeEngagement[];
+}
 
 const str = (v: unknown): string | null => (typeof v === "string" && v !== "" ? v : null);
 const lastIndex = <T>(xs: readonly T[], pred: (x: T) => boolean) => { for (let i = xs.length - 1; i >= 0; i--) if (pred(xs[i])) return i; return -1; };
@@ -601,15 +617,41 @@ function projectCore(queue: Queue, given?: readonly QueueRun[]): {
   };
 }
 
+/** Story 32.1: every engagement of the projects the registry agents or `roots` name (see the header). The root of a
+ * project is `roots[project]` (the registry's served root, where the routes and the board read and write), else its
+ * newest queue run's `root`; with `roots` known (defined: a registry read has succeeded), a registry project with
+ * neither is a problem line. */
+function engagementsOf(runs: readonly QueueRun[], agentProjects: readonly string[], roots: Record<string, string> | undefined, problems: string[]): OfficeEngagement[] {
+  const projects = [...new Set([...agentProjects, ...Object.keys(roots ?? {})])];
+  const out: OfficeEngagement[] = [];
+  for (const project of projects) {
+    const root = roots?.[project] ?? runs.findLast((r) => r.project_id === project)?.root;
+    if (!root) {
+      if (roots && agentProjects.includes(project)) problems.push(`engagements: no served root for ${project}`);
+      continue;
+    }
+    const found: string[] = [];
+    const listed = listEngagements(root, found);
+    for (const line of found) problems.push(`project ${project}: ${line}`);
+    for (const e of listed) {
+      const state = String(e.state);
+      out.push({ id: e.id, project, state, title: titleOf(typeof e.request === "string" ? e.request : ""), needs_you: needsYou(state) });
+    }
+  }
+  return out;
+}
+
 /** The raw (ungraced) projection: every registry agent (`readAgents`) exactly once with its state, the live runs
- * with story and epic progress, the time. A project with live runs but no registry rows adds no agents. */
-export function projectOffice(queue: Queue, deps: { now?: () => number } = {}): OfficeView {
+ * with story and epic progress, the time. A project with live runs but no registry rows adds no agents. Story 32.1:
+ * `roots` (project id → served root) feeds `engagements[]`. */
+export function projectOffice(queue: Queue, deps: { now?: () => number; roots?: () => Record<string, string> | undefined } = {}): OfficeView {
   const seen = new Set<string>();
   touched = seen;
   try {
     const core = projectCore(queue);
     const byProject = new Map<string, ReturnType<typeof core.forProject> & { blocked: BlockedIssue | null }>();
-    const agents: OfficeAgent[] = readAgents(queue).agents.map((row) => {
+    const rows = readAgents(queue).agents;
+    const agents: OfficeAgent[] = rows.map((row) => {
       let p = byProject.get(row.project);
       if (!p) {
         const f = core.forProject(row.project);
@@ -631,8 +673,9 @@ export function projectOffice(queue: Queue, deps: { now?: () => number } = {}): 
     });
     const runs = core.liveRuns();
     const last_run = core.lastRuns();
+    const engagements = engagementsOf(core.runs, rows.map((r) => r.project), deps.roots?.(), core.problems);
     pruneCaches(seen); // only after a whole projection: a throw keeps the caches as they were
-    return { at: new Date((deps.now ?? Date.now)()).toISOString(), agents, runs, problems: core.problems, last_run };
+    return { at: new Date((deps.now ?? Date.now)()).toISOString(), agents, runs, problems: core.problems, last_run, engagements };
   } finally { touched = null; }
 }
 
@@ -651,7 +694,7 @@ export function officeStates(queue: Queue, runs?: readonly QueueRun[]): Record<s
 
 // ------------------------------------------------------------ the hub (grace, ids, replay)
 
-export type OfficeEventKind = "office.agent" | "office.progress" | "office.run";
+export type OfficeEventKind = "office.agent" | "office.progress" | "office.run" | "office.engagement";
 export interface OfficeEvent { id: string; seq: number; kind: OfficeEventKind; data: Record<string, unknown> }
 export type OfficeSnapshot = OfficeView & { id: string };
 
@@ -667,6 +710,9 @@ export interface OfficeHubOptions {
   bufferSize?: number;
   /** The projector (default the raw `projectOffice`). */
   project?: (queue: Queue) => OfficeView;
+  /** Story 32.1: the served roots by project id (the registry's), for `engagements[]` (default none); `undefined`
+   * while the registry's roots are not yet known (no problem line then). */
+  roots?: () => Record<string, string> | undefined;
 }
 
 /** The graced live view and its delta stream. In memory only: the ids are `<boot>-<seq>` (boot the hub's start
@@ -694,7 +740,7 @@ export class OfficeHub {
     this.graceMs = o.graceMs ?? 20_000;
     this.pollMs = o.pollMs ?? 1000;
     this.bufferSize = Math.max(1, o.bufferSize ?? 1000);
-    this.project = o.project ?? ((q) => projectOffice(q, { now: this.now }));
+    this.project = o.project ?? ((q) => projectOffice(q, { now: this.now, ...(o.roots ? { roots: o.roots } : {}) }));
     // The process-start ms (Date.now at construction), kept distinct from every earlier hub of this process.
     OfficeHub.lastBoot = Math.max(Date.now(), OfficeHub.lastBoot + 1);
     this.boot = String(OfficeHub.lastBoot);
@@ -743,7 +789,8 @@ export class OfficeHub {
       return { ...a, state, reason: state === a.state ? (a.reason ?? null) : (p.reason ?? null) };
     });
     for (const id of [...this.demoting.keys()]) if (!agents.some((a) => a.agent_id === id)) this.demoting.delete(id);
-    const next: OfficeView = { at, agents, runs: raw.runs, problems: raw.problems, last_run: raw.last_run ?? {} };
+    const engagements = raw.engagements ?? [];
+    const next: OfficeView = { at, agents, runs: raw.runs, problems: raw.problems, last_run: raw.last_run ?? {}, engagements };
     this.view = next;
     this.viewAt = t;
     if (!prev) return [];
@@ -789,6 +836,19 @@ export class OfficeHub {
     for (const [project, last] of Object.entries(next.last_run)) {
       if (covered.has(project) || sameLastRun(prev.last_run[project], last)) continue;
       this.emit(out, "office.run", { run_id: last.run_id, project, state: last.state, from: null, last_run: last });
+    }
+    // Story 32.1: an engagement that appeared, changed state, title or needs_you, or vanished (`state: null`). Keyed by
+    // project and id: each served root mints its own `ENG-NNN` series.
+    const engKey = (e: OfficeEngagement) => `${e.project}\u0000${e.id}`;
+    const prevEngagements = new Map((prev.engagements ?? []).map((e) => [engKey(e), e]));
+    const nextIds = new Set(engagements.map(engKey));
+    for (const e of engagements) {
+      const p = prevEngagements.get(engKey(e));
+      if (p && p.state === e.state && p.title === e.title && p.needs_you === e.needs_you) continue;
+      this.emit(out, "office.engagement", { id: e.id, project: e.project, state: e.state, from: p?.state ?? null, title: e.title, needs_you: e.needs_you });
+    }
+    for (const p of prev.engagements ?? []) {
+      if (!nextIds.has(engKey(p))) this.emit(out, "office.engagement", { id: p.id, project: p.project, state: null, from: p.state });
     }
     if (out.length) {
       this.buffer.push(...out);

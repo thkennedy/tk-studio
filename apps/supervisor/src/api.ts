@@ -54,7 +54,27 @@
  *                            spawn) | ReplyRefused {reason, commented}, 503 ReplyRetry {reason, commented}, 500 ReplyFailed. No queue event
  *   GET  /office/events      with `Accept: text/event-stream`: `event:snapshot` first (or, for a valid `Last-Event-ID`,
  *                            the buffered deltas after it), then `office.agent` / `office.progress` / `office.run`
- *                            deltas (`id:<boot>-<seq>`), a `: heartbeat` comment every 10 s; without it the JSON snapshot
+ *                            deltas (`id:<boot>-<seq>`), a `: heartbeat` comment every 10 s; without it the JSON snapshot.
+ *                            Story 32.1 (0.1.27 additive): the snapshot's `engagements[]` and `office.engagement` deltas
+ *   POST /engagements        {project, request} (Story 32.1, `engagement.ts`, contract 0.1.27 additive): mints `ENG-NNN`
+ *                            from the plan counter's `engagement` series and writes `_bmad-output/engagements/<id>/
+ *                            engagement.yaml` in the served root in state `intake`; one `engagement` service event
+ *                            {id, project, state, from: null, source} (no queue run); 200 {ok, engagement}; 400
+ *                            SchemaError | MalformedJson, 403 CsrfRefused (a cookie session without `X-CSRF-Token`), 404
+ *                            UnknownProject, 500 EngagementRootMissing (no root, or a root not on disk: nothing created) |
+ *                            EngagementCounterInvalid
+ *   GET  /engagements?project=<id>  {ok, project, engagements, problems}: the project's records newest first; 400
+ *                            ProjectRequired, 404 UnknownProject
+ *   GET  /engagements/{id}   {ok, project, engagement, chat {route, path, last_seq}} ([?project=<id>] skips the registry
+ *                            scan); 400 BadEngagement, 404 UnknownEngagement, 409 AmbiguousEngagement {engagement,
+ *                            projects[]} (no `?project=` and more than one holder), 500 EngagementRecordInvalid
+ *   POST /engagements/{id}/input  {verb, …} (`answer`, `go`, `revise`, `question`, `approve`, `cancel`, each typed): one
+ *                            row of `TRANSITIONS`, logged in `inputs[]` with its source (`bearer` | `cookie`), then the
+ *                            `engagement` service event {id, project, state, from, verb, source}; 200 {ok, engagement,
+ *                            from, to}; 400 SchemaError | MalformedJson | BadEngagement, 403 CsrfRefused (a cookie session
+ *                            without `X-CSRF-Token`), 404 UnknownEngagement, 409 IllegalInput {state, verb, detail?} |
+ *                            EngagementClosed {state, verb} | AmbiguousEngagement {engagement, projects[]}, 500
+ *                            EngagementRecordInvalid
  *   GET  /                   Story 30.6: the home — the built web's `index.html` (as `GET /app`, `no-store`); with no
  *                            built web the read-only status page (Story 22.2, `page.ts`: server-rendered HTML, no
  *                            script, credential-shaped values redacted) with its "not built" note, never a 503
@@ -67,8 +87,8 @@
  * `POST /auth/account` (the owner's one account, created once) or `POST /auth/signin` (its username and
  * password, rate-limited with a lockout), all answered before any auth, and gets a signed session cookie.
  * The bearer header still authorises everything. Without it, a valid cookie authorises the GET routes, and
- * `POST /runs/{id}/cancel` and (Story 31.6) `POST /inbox/{key}/reply` with the page's CSRF token (else 403
- * CsrfRefused); never `POST /jobs`.
+ * `POST /runs/{id}/cancel`, (Story 31.6) `POST /inbox/{key}/reply` and (Story 32.1) `POST /engagements` and
+ * `POST /engagements/{id}/input` with the page's CSRF token (else 403 CsrfRefused); never `POST /jobs`.
  * `GET /` with no auth is the 401 HTML sign-in page (account creation while no account exists); so is a
  * `GET /app[/…]` (Story 30.2) and an HTML `GET /status` (Story 30.6; a non-HTML one stays 401 JSON), their forms
  * carrying the requested path and query as `next`, where a successful
@@ -79,7 +99,7 @@
  * drives or claims a run (drain and the pacer do).
  */
 import { createHash, timingSafeEqual } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   ACCOUNT_RELATIVE_PATH, AccountExists, AccountInvalid, accountPath, AccountRecordInvalid, createAccount, lockState, readAccount,
@@ -92,6 +112,11 @@ import { boardFor, type BoardAnswer } from "./board";
 import { CancelRaced, cancelRun, ExternalRunRefused, resumeRun, StartError, submitProject, type AgentsOption } from "./cli";
 import { ResumeRefused, type ResumeAnswer } from "./closeout";
 import { apiBind, apiPort, apiToken, checkTlsFiles, notifier, oauthLeftovers, sessionSecret, tlsConfig } from "./env";
+import {
+  applyInput, chatPointer, checkCreateBody, checkInputBody, ENGAGEMENT_ID_RE, EngagementCounterInvalid, engagementPath, EngagementRecordInvalid,
+  listEngagements, mintEngagementId, newEngagement, readEngagement, writeEngagement, type Engagement,
+} from "./engagement";
+import { underBunTest } from "./hygiene";
 import { checkReplyBody, issueRead, postReply, registryRoot, type IssueReadResult, type ReplyAnswer, type ReplyBody } from "./inbox";
 import { OfficeHub, readInbox, type InboxFile, type OfficeEvent } from "./office";
 import { gatherPage, holderOf, readLedgerTail, redactLedgerLine, renderPage } from "./page";
@@ -287,13 +312,62 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
   const resume = deps.resume ?? ((id: string, b: ResumeBody) => resumeRun(queue, id, b.restore_patch));
   const pollMs = deps.pollMs ?? 1000, keepaliveMs = deps.keepaliveMs ?? 15000;
   const clock = deps.now ?? Date.now;
-  const office = deps.office ?? new OfficeHub({ queue, now: clock, pollMs, ...(deps.graceMs !== undefined ? { graceMs: deps.graceMs } : {}) });
+  // Story 32.1: the served roots the registry last named (project id → root), refreshed on every registry read here;
+  // the office hub reads its engagement records from them. Until one registry read has succeeded (`rootsKnown`) the hub
+  // gets no map (`undefined`): the office then falls back to the runs' roots and names no "no served root" problem.
+  const knownRoots: Record<string, string> = {};
+  let rootsKnown = false;
+  let rootsTriedAt: number | null = null;
+  let rootsFirst: Promise<void> | null = null; // the first office read's registry read, while it is pending
+  const remember = (shown: Record<string, any> | null | undefined) => {
+    const projects = shown?.projects && typeof shown.projects === "object" ? shown.projects as Record<string, any> : null;
+    if (!projects) return;
+    for (const k of Object.keys(knownRoots)) delete knownRoots[k];
+    for (const [id, entry] of Object.entries(projects)) {
+      if (entry && typeof entry === "object" && typeof entry.root === "string" && entry.root) knownRoots[id] = entry.root;
+    }
+    rootsKnown = true;
+  };
+  const registry = async () => {
+    const shown = await (deps.registry ?? (() => registryShow()))();
+    remember(shown);
+    return shown;
+  };
+  /** Before an office read: the first one awaits a registry read (so the first snapshot already shows the
+   * engagements), and so does every office read that arrives while that read is pending (one shared promise); later
+   * ones re-read it in the background at most once a minute. Never on an unauthorised request, and never under
+   * `bun test` without an injected registry (no `registry.py show` child there). */
+  const rootsReady = async (): Promise<void> => {
+    if (!deps.registry && underBunTest()) return;
+    if (rootsTriedAt === null) {
+      rootsTriedAt = clock();
+      rootsFirst = registry().then(() => {}, () => { /* the map is kept as it was */ }).finally(() => { rootsFirst = null; });
+    }
+    if (rootsFirst) return await rootsFirst;
+    if (clock() - rootsTriedAt <= 60_000) return;
+    rootsTriedAt = clock();
+    registry().catch(() => { /* the map is kept as it was */ });
+  };
+  /** The hub's tick (an open office stream re-projects every second): when the last registry read is older than a
+   * minute, start one in the background. Fire-and-forget: never awaited, never throwing. Only once an authorised office
+   * read has primed the map (`rootsTriedAt`), so an unauthorised request still never reads the registry. */
+  const refreshRootsDetached = (): void => {
+    try {
+      if (rootsTriedAt === null) return;
+      if (!deps.registry && underBunTest()) return;
+      if (clock() - rootsTriedAt <= 60_000) return;
+      rootsTriedAt = clock();
+      registry().catch(() => { /* the map is kept as it was */ });
+    } catch { /* never from the tick */ }
+  };
+  const office = deps.office ?? new OfficeHub({
+    queue, now: clock, pollMs, roots: () => { refreshRootsDetached(); return rootsKnown ? { ...knownRoots } : undefined; }, ...(deps.graceMs !== undefined ? { graceMs: deps.graceMs } : {}),
+  });
   const heartbeatMs = deps.heartbeatMs ?? 10_000;
   const board = deps.board ?? ((project: string) => boardFor(project, {
-    queue, now: clock, env: deps.env, ledger: deps.ledger, registry: deps.registry ?? (() => registryShow()),
+    queue, now: clock, env: deps.env, ledger: deps.ledger, registry,
     liveRuns: () => office.snapshot().runs,
   }));
-  const registry = deps.registry ?? (() => registryShow());
   const inbox = deps.inbox ?? (async (project: string): Promise<InboxFile | null> => {
     const served = await registryRoot(project, registry);
     return served ? readInbox(served.root) : null;
@@ -359,6 +433,124 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
     if (!checked.ok) return fail(400, "SchemaError", { detail: checked.detail });
     const answer = await reply(key, checked.body);
     return json(answer.status, answer.body);
+  }
+
+  // ---------------------------------------------------------- the engagements (Story 32.1)
+
+  /** A project's served root: the root, or the refusal (404 UnknownProject, 500 EngagementRootMissing). With `create`
+   * (`POST /engagements`) a root that is not on disk is refused too, never recreated as a phantom project root (a read
+   * there finds no file). */
+  async function servedRootOf(project: string, create = false): Promise<{ root: string } | Response> {
+    const served = await registryRoot(project, registry);
+    if (!served) return fail(404, "UnknownProject", { project });
+    if (!served.root) return fail(500, "EngagementRootMissing", { project, detail: "the registry entry names no root" });
+    if (create && !existsSync(served.root)) return fail(500, "EngagementRootMissing", { project, detail: "the registry root does not exist" });
+    return { root: served.root };
+  }
+
+  /** The record `id`: under `?project=` when given; else the one registry project whose served root holds its file.
+   * With no `?project=`, a hit is a project whose record file exists (parsed or not): more than one hit is 409
+   * AmbiguousEngagement `{engagement, projects[]}` before any record is read (ids repeat across served roots); one hit
+   * reads as below (a malformed record 500 EngagementRecordInvalid); none is 404 UnknownEngagement. */
+  async function locateEngagement(id: string, project: string | null): Promise<{ project: string; root: string; record: Engagement } | Response> {
+    let candidates: [string, string][];
+    if (project) {
+      const served = await servedRootOf(project);
+      if (served instanceof Response) return served;
+      candidates = [[project, served.root]];
+    } else {
+      const shown = await registry();
+      const projects = shown?.projects && typeof shown.projects === "object" ? shown.projects as Record<string, any> : {};
+      candidates = Object.entries(projects)
+        .filter(([, e]) => e && typeof e === "object" && typeof e.root === "string" && e.root)
+        .map(([p, e]) => [p, e.root as string] as [string, string])
+        .filter(([, root]) => existsSync(engagementPath(root, id)));
+      if (candidates.length > 1) {
+        return fail(409, "AmbiguousEngagement", { engagement: id, projects: candidates.map(([p]) => p) });
+      }
+    }
+    for (const [p, root] of candidates) {
+      let record: Engagement | null;
+      try { record = readEngagement(root, id); } catch (e) {
+        if (e instanceof EngagementRecordInvalid) return fail(500, "EngagementRecordInvalid", { project: p, engagement: id, detail: e.message });
+        throw e;
+      }
+      if (record) return { project: p, root, record };
+    }
+    return fail(404, "UnknownEngagement", { ...(project ? { project } : {}), engagement: id });
+  }
+
+  /** `POST /engagements`: the body checked, the id minted (the counter saved first), the record written, then the
+   * `engagement` service event (the record is the truth, the event the signal). */
+  async function postEngagement(req: Request, via: "bearer" | "cookie"): Promise<Response> {
+    let raw: unknown;
+    try { raw = JSON.parse(await req.text()); }
+    catch (e) { return fail(400, "MalformedJson", { detail: `the body is not JSON: ${e instanceof Error ? e.message : String(e)}` }); }
+    const checked = checkCreateBody(raw);
+    if (!checked.ok) return fail(400, "SchemaError", { detail: checked.detail });
+    const { project, request } = checked.body;
+    const served = await servedRootOf(project, true);
+    if (served instanceof Response) return served;
+    const at = new Date(clock()).toISOString();
+    let record: Engagement;
+    try {
+      record = newEngagement(mintEngagementId(served.root), project, request, at);
+      writeEngagement(served.root, record);
+    } catch (e) {
+      if (e instanceof EngagementCounterInvalid) return fail(500, "EngagementCounterInvalid", { project, detail: e.message });
+      throw e;
+    }
+    queue.serviceEvent("engagement", { id: record.id, project, state: record.state, from: null, source: via }, at);
+    return json(200, { ok: true, engagement: record });
+  }
+
+  /** `GET /engagements?project=<id>`: the project's records, newest first. */
+  async function listEngagementsRoute(url: URL): Promise<Response> {
+    const project = url.searchParams.get("project")?.trim();
+    if (!project) return fail(400, "ProjectRequired", { detail: "the engagements need ?project=<id>" });
+    const served = await servedRootOf(project);
+    if (served instanceof Response) return served;
+    const problems: string[] = [];
+    const engagements = listEngagements(served.root, problems);
+    return json(200, { ok: true, project, engagements, problems });
+  }
+
+  /** `GET /engagements/{id}`: the record and its chat pointer. */
+  async function readEngagementRoute(url: URL, id: string): Promise<Response> {
+    const found = await locateEngagement(id, url.searchParams.get("project")?.trim() || null);
+    if (found instanceof Response) return found;
+    return json(200, { ok: true, project: found.project, engagement: found.record, chat: chatPointer(found.root, id) });
+  }
+
+  /** `POST /engagements/{id}/input`: the typed input checked, one table row applied, the record written, then the
+   * `engagement` service event carrying `from`. */
+  async function postInputRoute(req: Request, url: URL, id: string, via: "bearer" | "cookie"): Promise<Response> {
+    let raw: unknown;
+    try { raw = JSON.parse(await req.text()); }
+    catch (e) { return fail(400, "MalformedJson", { detail: `the body is not JSON: ${e instanceof Error ? e.message : String(e)}` }); }
+    const checked = checkInputBody(raw);
+    if (!checked.ok) return fail(400, "SchemaError", { detail: checked.detail });
+    const located = await locateEngagement(id, url.searchParams.get("project")?.trim() || null);
+    if (located instanceof Response) return located;
+    // The read, the apply and the write run with no await between them (two concurrent inputs never both apply to
+    // one stale record): the record is read again here, synchronously, after the await above.
+    let current: Engagement | null;
+    try { current = readEngagement(located.root, id); } catch (e) {
+      if (e instanceof EngagementRecordInvalid) return fail(500, "EngagementRecordInvalid", { project: located.project, engagement: id, detail: e.message });
+      throw e;
+    }
+    if (!current) return fail(404, "UnknownEngagement", { ...(url.searchParams.get("project")?.trim() ? { project: located.project } : {}), engagement: id });
+    const found = { ...located, record: current };
+    const at = new Date(clock()).toISOString();
+    const applied = applyInput(found.record, { verb: checked.body.verb, payload: checked.body.payload, source: via, at });
+    if (!applied.ok) {
+      const { error, state, verb, detail } = applied;
+      const extra = { engagement: id, state, verb, ...(detail ? { detail } : {}) };
+      return fail(error === "SchemaError" ? 400 : 409, error, extra);
+    }
+    writeEngagement(found.root, applied.record);
+    queue.serviceEvent("engagement", { id, project: found.project, state: applied.to, from: applied.from, verb: checked.body.verb, source: via }, at);
+    return json(200, { ok: true, engagement: applied.record, from: applied.from, to: applied.to });
   }
 
   function status(): Response {
@@ -712,17 +904,20 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
     try { return new URLSearchParams(await req.text()).get("csrf") ?? ""; } catch { return ""; }
   }
 
-  /** What a valid cookie session may do: the GET routes, and cancel with CSRF. Anything else 401. */
+  /** What a valid cookie session may do: the GET routes, and cancel, the reply and (Story 32.1) the engagement's create
+   * and typed inputs with CSRF. Anything else 401. */
   async function cookieRoute(req: Request, url: URL, path: string, method: string, cookie: string): Promise<Response> {
     const csrf = csrfToken(secret!, cookie);
     const readRoute = path === "/" || path === "/jobs" || path === "/status" || path === "/events" || path === "/agents"
       || path === "/board" || path === "/inbox" || path === "/office" || path === "/office/events" || /^\/runs\/[^/]+$/.test(path)
+      || path === "/engagements" || /^\/engagements\/[^/]+$/.test(path)
       || path === "/app" || path.startsWith("/app/");
-    if (method === "GET" && readRoute) return await route(req, url, path, method, csrf);
-    if (method === "POST" && (/^\/runs\/[^/]+\/cancel$/.test(path) || /^\/inbox\/[^/]+\/reply$/.test(path))) {
+    if (method === "GET" && readRoute) return await route(req, url, path, method, csrf, "cookie");
+    if (method === "POST" && (/^\/runs\/[^/]+\/cancel$/.test(path) || /^\/inbox\/[^/]+\/reply$/.test(path)
+      || path === "/engagements" || /^\/engagements\/[^/]+\/input$/.test(path))) {
       const given = await csrfGiven(req);
       if (!given || !safeEqual(given, csrf)) return fail(403, "CsrfRefused");
-      return await route(req, url, path, method);
+      return await route(req, url, path, method, undefined, "cookie");
     }
     return fail(401, "Unauthorized");
   }
@@ -753,8 +948,9 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
     }
   };
 
-  /** The API's routes (once authorised: the bearer, or a cookie session's allowed subset). */
-  async function route(req: Request, url: URL, path: string, method: string, csrf?: string): Promise<Response> {
+  /** The API's routes (once authorised: the bearer, or a cookie session's allowed subset). `via`: which of the two
+   * authorised the request (Story 32.1: an engagement input's `source`). */
+  async function route(req: Request, url: URL, path: string, method: string, csrf?: string, via: "bearer" | "cookie" = "bearer"): Promise<Response> {
     {
       // 405: the allowed methods in the `Allow` header (RFC 9110) and the body alike.
       const allow = (m: string) => json(405, { ok: false, error: "MethodNotAllowed", allow: m }, { allow: m });
@@ -807,9 +1003,35 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
         const key = decodeId(replyMatch[1]);
         return key === null ? fail(400, "BadIssue", { issue: replyMatch[1] }) : await postReplyRoute(req, key);
       }
+      // Story 32.1: the engagement record and its typed inputs (contract 0.1.27 additive).
+      if (path === "/engagements") {
+        if (method === "POST") return await postEngagement(req, via);
+        if (method === "GET") return await listEngagementsRoute(url);
+        return allow("GET, POST");
+      }
+      const inputMatch = /^\/engagements\/([^/]+)\/input$/.exec(path);
+      if (inputMatch) {
+        if (method !== "POST") return allow("POST");
+        const id = decodeId(inputMatch[1]);
+        return id === null || !ENGAGEMENT_ID_RE.test(id) ? fail(400, "BadEngagement", { engagement: id ?? inputMatch[1] }) : await postInputRoute(req, url, id, via);
+      }
+      const engMatch = /^\/engagements\/([^/]+)$/.exec(path);
+      if (engMatch) {
+        if (method !== "GET") return allow("GET");
+        const id = decodeId(engMatch[1]);
+        return id === null || !ENGAGEMENT_ID_RE.test(id) ? fail(400, "BadEngagement", { engagement: id ?? engMatch[1] }) : await readEngagementRoute(url, id);
+      }
       // Story 29.3: the graced office view (a read: nothing is written to the queue).
-      if (path === "/office") return method === "GET" ? json(200, { ok: true, ...officeSnapshot() }) : allow("GET");
-      if (path === "/office/events") return method === "GET" ? officeEvents(req) : allow("GET");
+      if (path === "/office") {
+        if (method !== "GET") return allow("GET");
+        await rootsReady(); // Story 32.1: the served roots the engagements are read from
+        return json(200, { ok: true, ...officeSnapshot() });
+      }
+      if (path === "/office/events") {
+        if (method !== "GET") return allow("GET");
+        await rootsReady();
+        return officeEvents(req);
+      }
       const cancelMatch = /^\/runs\/([^/]+)\/cancel$/.exec(path);
       if (cancelMatch) {
         if (method !== "POST") return allow("POST");

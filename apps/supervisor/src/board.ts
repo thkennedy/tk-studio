@@ -20,6 +20,9 @@
  *             or not a positive number: `null`.
  *   runs      the queue's runs of the project, composed per request: each story's latest run (state, PR, host
  *             verify, end time) and the triage (Needs-you, Working, Done).
+ *   engagements  Story 32.1 (contract 0.1.27, additive): the served root's engagement records waiting on the owner
+ *             (`awaiting-answers`, `quoted`) as Needs-you items `{engagement, state, title}`, after the run items,
+ *             newest first (`engagement.ts` `listEngagements`, cached on the records' files).
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { hostname, userInfo } from "node:os";
@@ -28,6 +31,7 @@ import { load as loadYaml } from "js-yaml";
 import { frontmatter, pausedStory } from "./closeout";
 import { studioHome } from "./env";
 import { isRed, type HostVerifyResult } from "./hostverify";
+import { listEngagements, needsYou, titleOf } from "./engagement";
 import { awaitingRuling, lastRunOf, LIVE_RUN_STATES, runWaitReason } from "./office";
 import { PLAN_REL, runPr, storyNumber } from "./planstatus";
 import { isTerminal, type Queue, type QueueEvent, type QueueRun } from "./queue";
@@ -46,9 +50,11 @@ export interface BoardStoryRun { run_id: string; state: string; pr: string | nul
 export interface BoardStory { id: string; key: string; title: string; status: string; findings: BoardFinding[]; run: BoardStoryRun | null }
 export interface BoardEpic { id: string; title: string; status: string; band_usd: number | null; spend_usd: number; findings: number; stories: BoardStory[] }
 export interface TriageItem { run_id: string; state: string; story_key: string | null; pr: string | null; ruling: string | null }
+/** Story 32.1 (contract 0.1.27, additive): an engagement waiting on the owner, in the Needs-you column. */
+export interface EngagementTriageItem { engagement: string; state: string; title: string }
 export interface BoardAnswer {
   ok: true; project: string; built_at: string; plan: { reason?: string }; epics: BoardEpic[];
-  triage: { needs_you: TriageItem[]; working: TriageItem[]; done: TriageItem[] };
+  triage: { needs_you: (TriageItem | EngagementTriageItem)[]; working: TriageItem[]; done: TriageItem[] };
 }
 
 /** The slice of an office live run the board reads: its story keys and statuses (`OfficeRun`). */
@@ -294,8 +300,9 @@ function factsOf(run: QueueRun, events: QueueEvent[], live: LiveRunProgress | un
   };
 }
 
-/** The triage (see the README): every live run in exactly one column, plus the runs ended on the host's local day. */
-function triage(facts: readonly RunFacts[], now: number): BoardAnswer["triage"] {
+/** The triage (see the README): every live run in exactly one column, plus the runs ended on the host's local day;
+ * Story 32.1: then the served root's engagements waiting on the owner, in Needs-you. */
+function triage(facts: readonly RunFacts[], now: number, root: string | null): BoardAnswer["triage"] {
   const out: BoardAnswer["triage"] = { needs_you: [], working: [], done: [] };
   const today = new Date(now);
   for (const f of facts) {
@@ -310,6 +317,10 @@ function triage(facts: readonly RunFacts[], now: number): BoardAnswer["triage"] 
     } else if (isTerminal(state) && f.endedAt && sameLocalDay(new Date(f.endedAt), today)) {
       (red ? out.needs_you : out.done).push(item);
     }
+  }
+  for (const e of listEngagements(root)) {
+    const state = String(e.state);
+    if (needsYou(state)) out.needs_you.push({ engagement: e.id, state, title: titleOf(typeof e.request === "string" ? e.request : "") });
   }
   return out;
 }
@@ -366,6 +377,6 @@ export async function boardFor(project: string, deps: BoardDeps): Promise<BoardA
   });
   return {
     ok: true, project, built_at: new Date(now).toISOString(), plan: plan.reason ? { reason: plan.reason } : {}, epics,
-    triage: triage(facts, now),
+    triage: triage(facts, now, root),
   };
 }
