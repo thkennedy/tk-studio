@@ -74,7 +74,14 @@
       "payload": {
         "source": { "type": "string", "required": true, "note": "retrospective | repeated-manual-work | research-job | other" },
         "description": { "type": "string", "required": true },
-        "evidence": { "type": "string", "required": false }
+        "evidence": { "type": "string", "required": false },
+        "kind": { "type": "string", "required": false, "note": "Story 32.5: \"meter\" on the trial meter's per-story record (lib/meter.py); a record without it is history the quote does not read" },
+        "story_key": { "type": "string", "required": false, "note": "Story 32.5: the metered story's key" },
+        "epic": { "type": "number", "required": false, "note": "Story 32.5: the story key's leading integer" },
+        "usd": { "type": "number", "required": false, "note": "Story 32.5: the story's usd_total at the prices_date list price" },
+        "legs": { "type": "object", "required": false, "note": "Story 32.5: <leg>: {usd, usage: {input, output, cache_read, cache_write}} -- `usage`, never `tokens` (the ledger sanitizer redacts any key matching token); cache_write = cache_write_5m + cache_write_1h" },
+        "route": { "type": "object", "required": false, "note": "Story 32.5: leg -> model (.bmad-loop/routing.current.json)" },
+        "prices_date": { "type": "string", "required": false, "note": "Story 32.5: the date of the prices.json the story was priced at" }
       }
     },
     "knowledge-promotion": {

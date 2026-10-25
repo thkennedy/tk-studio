@@ -89,6 +89,33 @@ an owner's edit of the page back through `apply_page_revision` (Settled
 shape 3). The `reply` memory carries `scope {path, text}` (null while
 there is none), so the planner's next turn reads the current scope.
 
+The `quote` verb (Story 32.5, user flow F2 step 4) is the engagement's
+price, the planner's turn after the scope (or by hand):
+
+  uv run engage.py quote --directory ROOT --engagement ENG-NNN [--seed N]
+      [--dry-run]
+
+In `scoping` only (else `NotScoping`, or `EngagementClosed`). It counts the
+proposed stories of `scope.md` by their headings (`scope_counts`; none, or
+no `scope.md`: `NoScope`), reads the project's structured meter records
+from every machine's ledger under the store's `measurements/` (deduped by
+`story_key`, the last kept; a free-text `meter:` line is counted as
+`unstructured`, never parsed) and resamples their per-story tokens and
+dollars over the proposed story count (`quote.py`: a seeded bootstrap of
+10,000 resamples, nearest-rank 50/85/95, `cap = p95 + one story at p85`;
+under eight records "thin history", widened ×1.5 from the Opus 5.5 trial's
+per-story dollars). Each band is `{tokens, usd, share}`, the share over
+`plan.window_tokens` of the user or studio config, else "share unknown".
+An unreadable `prices.json` or an unpriced route model is
+`PricesUnreadable`. The record is re-read fresh and only `quote {band50,
+band85, band95, cap, basis, computed_at}` and `updated` are merged into it
+(`cap` a number in USD); `.tk-studio/budget-bands.yaml` gains
+`epics.<EP-NNN>.usd_estimate` (the p85 dollars of each proposed epic, keyed
+by the id `plan-counter.yaml` predicts) with every other byte kept. The
+state does not move: the owner's `go` moves `scoping → quoted` (32.1's
+`quote-present` row). An OS refusal is `QuoteUnwritable` (`written` names
+what had landed).
+
 Refusals end `blocked` (exit 2), each named in `reason`: `BadEngagement`,
 `UnknownEngagement` (no record), `EngagementRecordUnreadable` (not JSON, or
 not a record), `EngagementClosed` (`delivered`, `failed`, `cancelled`),
@@ -888,13 +915,23 @@ def _release_scope_lock(lock: Path, token: str) -> None:
         pass
 
 
-def _merge_record(root: Path, engagement: str, changes: dict) -> None:
+def _merge_record(root: Path, engagement: str, changes,
+                  void_quote: bool = False) -> dict:
     """Re-read the record fresh and merge only `changes` (the
-    `chatSpendPass` rule), written atomically as JSON text."""
+    `chatSpendPass` rule), written atomically as JSON text. `changes` may
+    be a callable of the fresh record (a value derived from that read).
+    `void_quote`: a non-null `quote` is merged as null too (the scope it
+    priced was replaced). Answers the changes merged."""
     record = read_record(root, engagement)
+    if callable(changes):
+        changes = changes(record)
+    changes = dict(changes)
+    if void_quote and record.get("quote") is not None:
+        changes["quote"] = None
     record.update(changes)
     atomic_write_text(engagement_dir(root, engagement) / "engagement.yaml",
                       json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+    return changes
 
 
 class _Transient(Exception):
@@ -1059,7 +1096,25 @@ def scope(project_root: Path, engagement: str, text: str | None = None,
                 current = path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
                 current = None
-            if current != text:
+            rewrote = current != text
+            record_rel = f"_bmad-output/engagements/{engagement}/" \
+                         f"engagement.yaml"
+            if rewrote and fresh.get("quote") is not None:
+                # void first: a quote of the old scope is merged null before
+                # scope.md is replaced, so no later failure can leave it
+                # standing beside the new scope (`go` would pass
+                # `quote-present` at the old story count)
+                try:
+                    _merge_record(root, engagement,
+                                  {"updated": now or _now()},
+                                  void_quote=True)
+                except OSError as exc:
+                    raise Refused("ScopeUnwritable", f"{record_rel}: "
+                                  f"{exc.__class__.__name__}") from None
+                result["written"].append(record_rel)
+                result["notes"].append("scope.md replaced: the quote is "
+                                       "voided")
+            if rewrote:
                 try:
                     atomic_write_text(path, text)
                 except OSError as exc:
@@ -1075,13 +1130,16 @@ def scope(project_root: Path, engagement: str, text: str | None = None,
                 recorded_version = None
             page = _publish_scope(root, engagement, text, space_id, site,
                                   transport, sleep, recorded_version)
-            record_rel = f"_bmad-output/engagements/{engagement}/" \
-                         f"engagement.yaml"
             try:
-                _merge_record(root, engagement, {
+                merged = _merge_record(root, engagement, {
                     "scope_page": {"id": page["id"], "url": page["url"],
                                    "version": page["version"]},
-                    "updated": now or _now()})
+                    "updated": now or _now()}, void_quote=rewrote)
+                # a belt: the quote was voided before scope.md was replaced
+                if "quote" in merged and "scope.md replaced: the quote is " \
+                        "voided" not in result["notes"]:
+                    result["notes"].append("scope.md replaced: the quote is "
+                                           "voided")
             except OSError as exc:
                 # scope.md (in `written`) and the page are already out; only
                 # the record's scope_page is behind
@@ -1090,7 +1148,8 @@ def scope(project_root: Path, engagement: str, text: str | None = None,
                                        f"scope_page unchanged")
                 raise Refused("ScopeUnwritable", f"{record_rel}: "
                               f"{exc.__class__.__name__}") from None
-            result["written"].append(record_rel)
+            if record_rel not in result["written"]:
+                result["written"].append(record_rel)
             return page
 
         try:
@@ -1150,6 +1209,8 @@ def apply_page_revision(root: Path, engagement: str, page: dict,
         return out
     version = page.get("version")
     path = engagement_dir(root, engagement) / "scope.md"
+    record_rel = f"_bmad-output/engagements/{engagement}/engagement.yaml"
+    landed: list[str] = []  # what replace() wrote, kept on a later OSError
 
     def replace() -> bool:
         # re-checked under the lock: a concurrent `engage.py scope` may have
@@ -1170,10 +1231,29 @@ def apply_page_revision(root: Path, engagement: str, page: dict,
                 return False
         except (TypeError, ValueError):
             pass
-        atomic_write_text(path, out["markdown"])
+        try:
+            on_disk = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            on_disk = None
+        # as `scope`: only a scope.md actually replaced voids the quote (a
+        # version bump whose Markdown is unchanged keeps it)
+        rewrote = on_disk != out["markdown"]
+        if rewrote and fresh.get("quote") is not None:
+            # void first: a quote of the old scope is merged null before
+            # scope.md is replaced (the owner re-quotes before `go`); a
+            # failed void leaves scope.md untouched (an OSError: retry)
+            _merge_record(root, engagement, {"updated": now or _now()},
+                          void_quote=True)
+            landed.append(record_rel)
+        if rewrote:
+            atomic_write_text(path, out["markdown"])
+            landed.append(scope_rel(engagement))
         merged["version"] = version
         _merge_record(root, engagement, {"scope_page": merged,
-                                         "updated": now or _now()})
+                                         "updated": now or _now()},
+                      void_quote=rewrote)
+        if record_rel not in landed:
+            landed.append(record_rel)
         return True
 
     try:
@@ -1182,18 +1262,272 @@ def apply_page_revision(root: Path, engagement: str, page: dict,
     except Refused as exc:
         out["retry"] = exc.name == "ScopeBusy"
         out["note"] = f"scope edit of {engagement} not applied: {exc}"
+        out["written"] = list(landed)
         return out
     except OSError as exc:
         out["retry"] = True
         out["note"] = (f"scope edit of {engagement} not applied: "
                        f"{exc.__class__.__name__}")
+        # a void (or scope.md) that landed before the failure is named
+        out["written"] = list(landed)
         return out
     if not applied:
         return out  # already at or past this version: nothing to apply
     out["applied"] = True
-    out["written"] = [scope_rel(engagement),
-                      f"_bmad-output/engagements/{engagement}/engagement.yaml"]
+    out["written"] = [rel for rel in (scope_rel(engagement), record_rel)
+                      if rel in landed]
     return out
+
+
+# ------------------------------------------------------------ the quote (32.5)
+
+def scope_counts(text: str) -> dict:
+    """`{epics: [{k, title, stories}], stories}` of the scope's `## Proposed
+    epics and stories`, from the headings only (`### Epic <k>: …`, `####
+    Story <k>.<m>: …`), so an owner-edited `scope.md` still counts."""
+    body = next((lines for title, lines in parse_scope(text)["sections"]
+                 if title.casefold() == "proposed epics and stories"), None)
+    epics, total = [], 0
+    for etitle, elines in _subsections(body or [], 3):
+        m = EPIC_RE.match(etitle)
+        if not m:
+            continue
+        stories = sum(1 for stitle, _ in _subsections(elines, 4)
+                      if STORY_RE.match(stitle))
+        epics.append({"k": int(m.group(1)),
+                      "title": etitle.split(":", 1)[1].strip(),
+                      "stories": stories})
+        total += stories
+    return {"epics": epics, "stories": total}
+
+
+def plan_window() -> int | None:
+    """`plan.window_tokens` from the user and studio scopes (never the
+    project's), a positive int; else None ("share unknown")."""
+    try:
+        value, _ = configlib.resolve("plan.window_tokens")
+    except configlib.ConfigError:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def _next_epic(root: Path) -> int | None:
+    """`next.epic` of `.tk-studio/plan-counter.yaml` (1 with no counter),
+    or None when the counter is unreadable."""
+    import plansync
+    try:
+        return int(plansync.load_counter(root)["next"]["epic"])
+    except (plansync.PlanSyncError, OSError, UnicodeDecodeError):
+        return None
+
+
+def quote(project_root: Path, engagement: str, seed: int | None = None,
+          dry_run: bool = False, now=None, prices_path: Path | None = None,
+          measurements: Path | None = None,
+          lock_wait_s=SCOPE_LOCK_WAIT_S) -> dict:
+    """The `quote` verb (Story 32.5 Settled shape 2): the seeded 50/85/95
+    band over the scope's proposed stories, merged as `quote` (and
+    `updated`) into a fresh read of the record, and `epics.<EP-NNN>.
+    usd_estimate` in `.tk-studio/budget-bands.yaml`. The state stays
+    `scoping`: the owner's `go` moves it to `quoted` (Settled shape 3)."""
+    import consolidate
+    import ledger
+    import meter
+    import quote as quotelib
+    root = Path(project_root).resolve()
+    result = _result(engagement, "quote", dry_run)
+    result["quote"] = None
+    record_rel = f"_bmad-output/engagements/{engagement}/engagement.yaml"
+    try:
+        if not ENGAGEMENT_ID_RE.match(engagement or ""):
+            raise Refused("BadEngagement", f"--engagement {engagement!r} is "
+                          f"not an engagement id (ENG-001)")
+        if seed is not None and not quotelib.valid_seed(seed):
+            raise Refused("BadSeed", f"--seed {seed!r} is not an integer in "
+                          f"0 <= seed < 2**53")
+        record = read_record(root, engagement)
+        state = record.get("state")
+        if state in TERMINAL_STATES:
+            raise Refused("EngagementClosed", f"{engagement} is {state}; "
+                          f"nothing is written")
+        if state != "scoping":
+            raise Refused("NotScoping", f"{engagement} is {state}; the quote "
+                          f"is written only in scoping")
+
+        def price() -> dict:
+            # a real run holds scope.lock from the read of scope.md through
+            # the merge: a concurrent `scope` or sync-back cannot replace
+            # the scope between the count and the quote landing
+            nonlocal seed
+            scoped = read_scope(root, engagement)
+            if scoped is None:
+                raise Refused("NoScope", f"no {scope_rel(engagement)} (run "
+                              f"`engage.py scope` first)")
+            counts = scope_counts(scoped["text"])
+            ks = [e["k"] for e in counts["epics"]]
+            dups = sorted({k for k in ks if ks.count(k) > 1})
+            if dups:
+                raise Refused("NoScope", f"{scope_rel(engagement)} repeats "
+                              "epic "
+                              + ", ".join(f"### Epic {k}" for k in dups)
+                              + " (each proposed epic needs its own number)")
+            # the ids are EP-<next + k - 1>: only 1..m in order keys each
+            # proposed epic to a fresh id (an `### Epic 0` would key to a
+            # live epic, a gap to an id no epic takes)
+            if ks != list(range(1, len(ks) + 1)):
+                raise Refused("NoScope", f"{scope_rel(engagement)} numbers "
+                              "its epics "
+                              + ", ".join(f"### Epic {k}" for k in ks)
+                              + f" (the proposed epics are numbered 1 to "
+                              f"{len(ks)} in order)")
+            n = counts["stories"]
+            if n < 1:
+                raise Refused("NoScope", f"{scope_rel(engagement)} proposes "
+                              f"no story (#### Story <k>.<m>: <title>)")
+            try:
+                prices = meter.load_prices(prices_path)
+            except meter.MeterError as exc:
+                raise Refused("PricesUnreadable", str(exc)) from None
+            project = configlib.project_key(root)
+            try:
+                mdir = Path(measurements) if measurements is not None \
+                    else ledger.store_root() / "measurements"
+                events = consolidate.read_events(mdir)[0] \
+                    if mdir.is_dir() else []
+            except (OSError, UnicodeDecodeError) as exc:
+                raise Refused("QuoteUnwritable", f"measurements: "
+                              f"{exc.__class__.__name__}") from None
+            hist = quotelib.history(events, project)
+            samples = hist["samples"]
+            route = meter.route(root)
+            if route is None:
+                route = next((s["route"] for s in reversed(samples)
+                              if s["route"]), None)
+                if route is not None:  # the sample's route is unchecked data
+                    route = {leg: m for leg, m in route.items()
+                             if isinstance(m, str)} or None
+            unpriced = sorted({m for m in (route or {}).values()
+                               if meter._rates(prices, m) is None})
+            if unpriced:
+                raise Refused("PricesUnreadable", "no price for the route "
+                              "model(s) " + ", ".join(unpriced)
+                              + " in the price "
+                              f"table dated {prices.get('date')}")
+            window = plan_window()
+            if seed is None:
+                seed = quotelib.default_seed(engagement, n)
+            nxt = _next_epic(root)
+            epics = [{**e, "ep_id": None if nxt is None
+                      else f"EP-{nxt + e['k'] - 1:03d}"}
+                     for e in counts["epics"]]
+            figures = quotelib.compute(samples, n, epics, seed, window)
+            def planning_of(rec: dict):
+                spend = rec.get("spend") if isinstance(rec.get("spend"),
+                                                       dict) else {}
+                usd = spend.get("planning_usd")
+                return usd if isinstance(usd, (int, float)) \
+                    and not isinstance(usd, bool) else 0
+
+            planning = planning_of(record)
+            basis = {
+                "method": "bootstrap", "resamples": quotelib.RESAMPLES,
+                "seed": seed, "stories": n, "epics": epics,
+                "history": {"n": figures["history_n"],
+                            "unstructured": hist["unstructured"],
+                            "project": project},
+                "kind": "story", "thin": figures["thin"],
+                "at_cap": quotelib.AT_CAP, "route": route,
+                "autonomy": list(AUTONOMY_LEVELS),
+                "planning_usd": planning, "scoping_billable": planning > 0,
+                "prices_date": prices["date"], "window_tokens": window,
+                "cap_tokens": figures["cap_tokens"],
+                "notes": list(figures["notes"]),
+            }
+            if figures["thin"]:
+                basis["widen"] = quotelib.WIDEN
+                basis["prior"] = quotelib.PRIOR_SOURCE
+            q = {"band50": figures["band50"], "band85": figures["band85"],
+                 "band95": figures["band95"], "cap": figures["cap"],
+                 "basis": basis, "computed_at": now or _now()}
+            result["quote"] = q
+            result["notes"].extend(figures["notes"])
+            if window is None:
+                result["notes"].append("share unknown: no plan.window_tokens")
+            estimates = {e["ep_id"]: figures["epic_usd"][e["k"]] for e in epics
+                         if e["ep_id"] and e["k"] in figures["epic_usd"]}
+            if nxt is None:
+                result["notes"].append(".tk-studio/plan-counter.yaml is "
+                                       "unreadable: no epics band written")
+            bands_path = root / quotelib.BANDS_REL
+            bands_rel = quotelib.BANDS_REL.as_posix()
+            try:
+                current = bands_path.read_text(encoding="utf-8") \
+                    if bands_path.is_file() else None
+            except (OSError, UnicodeDecodeError) as exc:
+                raise Refused("QuoteUnwritable", f"{bands_rel}: "
+                              f"{exc.__class__.__name__}") from None
+            try:
+                bands_text = quotelib.epic_bands_text(current, estimates) \
+                    if estimates else None
+            except quotelib.QuoteError as exc:
+                raise Refused("QuoteUnwritable", str(exc)) from None
+            result["bands"] = estimates
+            if dry_run:
+                result["notes"].append("dry run: the quote was not merged and "
+                                       "the bands not written")
+                return _finish(result, "partial", "dry run: nothing "
+                               "written; a real run would merge `quote` and "
+                               "write the bands")
+            fresh = read_record(root, engagement)  # the state may have moved
+            if fresh.get("state") in TERMINAL_STATES:
+                raise Refused("EngagementClosed", f"{engagement} is "
+                              f"{fresh.get('state')}; nothing is written")
+            if fresh.get("state") != "scoping":
+                raise Refused("NotScoping", f"{engagement} is "
+                              f"{fresh.get('state')}; the quote is written "
+                              f"only "
+                              f"in scoping")
+            def with_fresh_spend(rec: dict) -> dict:
+                # the planning spend of the read the merge writes over (a
+                # concurrent chatSpendPass may have moved it since)
+                fresh_planning = planning_of(rec)
+                q["basis"]["planning_usd"] = fresh_planning
+                q["basis"]["scoping_billable"] = fresh_planning > 0
+                return {"quote": q, "updated": now or _now()}
+
+            try:
+                _merge_record(root, engagement, with_fresh_spend)
+            except OSError as exc:
+                raise Refused("QuoteUnwritable", f"{record_rel}: "
+                              f"{exc.__class__.__name__}") from None
+            result["written"].append(record_rel)
+            if bands_text is not None and bands_text != current:
+                try:
+                    bands_path.parent.mkdir(parents=True, exist_ok=True)
+                    atomic_write_text(bands_path, bands_text)
+                except OSError as exc:
+                    raise Refused("QuoteUnwritable", f"{bands_rel}: "
+                                  f"{exc.__class__.__name__}") from None
+                result["written"].append(bands_rel)
+            return _finish(result, "complete", None)
+
+        if dry_run:
+            return price()
+        try:
+            return _with_scope_lock(root, engagement, price,
+                                    wait_s=lock_wait_s)
+        except Refused as exc:
+            if exc.name != "ScopeBusy":
+                raise
+            raise Refused("QuoteUnwritable", f"_bmad-output/engagements/"
+                          f"{engagement}/scope.lock is held") from None
+        except OSError as exc:  # the lock itself refused by the OS
+            raise Refused("QuoteUnwritable", f"scope.lock: "
+                          f"{exc.__class__.__name__}") from None
+    except Refused as exc:
+        return _finish(result, "blocked", f"engage refused: {exc}")
 
 
 # --------------------------------------------------------------------- CLI
@@ -1279,12 +1613,26 @@ def main(argv: list[str] | None = None) -> int:
     source.add_argument("--revise-at", help="the `at` of the revise input "
                                             "whose body becomes the scope")
     scp.add_argument("--dry-run", action="store_true")
+    quo = sub.add_parser("quote")
+    quo.add_argument("--directory", required=True,
+                     help="project root (the served root, project_root)")
+    quo.add_argument("--engagement", required=True, help="ENG-NNN")
+    quo.add_argument("--seed", type=int, help="the bootstrap's seed, 0 <= N "
+                                              "< 2**53 (default: the first 6 "
+                                              "bytes of sha256 of "
+                                              "'<engagement>:<n>')")
+    quo.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     directory = configlib.find_project_root(Path(args.directory))
     if args.command == "questions":
         return _questions_main(directory, args)
     if args.command == "scope":
         return _scope_main(directory, args)
+    if args.command == "quote":
+        result = quote(directory, args.engagement, seed=args.seed,
+                       dry_run=args.dry_run)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 2 if result.get("status") == "blocked" else 0
     mode = "write" if args.body_file is not None else "memory"
     texts = {}
     for name in ("body_file", "proposals_file"):

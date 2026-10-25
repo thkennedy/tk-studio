@@ -151,6 +151,22 @@ describe("the plan, the findings, the spend (AC1)", () => {
     expect(b.epics[0]).toMatchObject({ id: "EP-030", spend_usd: 2 });
   });
 
+  test("band_usd follows the epics block engage.py quote writes (Story 32.5): comments and bands kept, an entry overwritten, another kept", async () => {
+    const w = world();
+    const bands = join(w.root, ".tk-studio", "budget-bands.yaml");
+    const head = "# Studio pipeline budget bands (fixture).\n# operator-tunable data\nbands_version: 1\ncurrency: usd\nbands:\n  S:\n    usd_estimate: 4.5\n";
+    // byte for byte quote.epic_bands_text's output (pinned by test_quote.py's
+    // test_the_board_test_literals_are_the_writers_output; the quote writes floats)
+    writeFileSync(bands, head + "epics:\n  EP-030:\n    usd_estimate: 40.0\n  EP-031:\n    usd_estimate: 61.27\n");
+    const b = await w.board();
+    expect(b.epics[0]).toMatchObject({ id: "EP-030", band_usd: 40 });
+    expect(b.epics[1]).toMatchObject({ id: "EP-031", band_usd: 61.27 });
+    // a re-quote overwrites its own entry and keeps the other epic's
+    writeFileSync(bands, head + "epics:\n  EP-030:\n    usd_estimate: 40.0\n  EP-031:\n    usd_estimate: 70.5\n");
+    expect((await w.board()).epics[1]).toMatchObject({ id: "EP-031", band_usd: 70.5 });
+    expect((await w.board()).epics[0]).toMatchObject({ id: "EP-030", band_usd: 40 });
+  });
+
   test("no band: no epics block, a non-positive or malformed value, an unparseable file", async () => {
     const w = world();
     const bands = join(w.root, ".tk-studio", "budget-bands.yaml");

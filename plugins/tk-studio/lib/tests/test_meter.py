@@ -972,6 +972,73 @@ class MeterTest(unittest.TestCase):
             self.assertEqual(out["harvested"], [])
             self.assertEqual(len(self.ledger_lines()), 1)
 
+    def test_the_observation_carries_the_structured_meter_fields(self):
+        # Story 32.5 Settled shape 1: additive; the description unchanged
+        self.add_session(f"{KEY}-dev-1", "s-dev", [
+            usage_line("m1", "model-a", inp=M, out=2, cw5=3, cw1=4, cr=5)],
+            subagents={"x1": ({"description": "Implement"},
+                              [usage_line("x1", "model-b", inp=7)])})
+        self.write_journal([{"ts": 100.0, "kind": "session-start", "story_key": KEY,
+                             "role": "dev", "model": "model-a"},
+                            {"ts": 160.5, "kind": "story-done", "story_key": KEY,
+                             "commit": "abc"}])
+        self.write_state(1)
+        rc, out = self.run_cli()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["tokens_by_leg"]["session"],
+                         {"input": M, "output": 2, "cache_read": 5, "cache_write": 7})
+        written = json.loads((self.story_dir() / meter.OBSERVATION).read_text(encoding="utf-8"))
+        self.assertEqual([written], self.ledger_lines())
+        payload = written["payload"]
+        self.assertEqual(payload["description"], meter.describe(KEY, out))
+        self.assertEqual(payload["kind"], "meter")
+        self.assertEqual(payload["story_key"], KEY)
+        self.assertEqual(payload["epic"], 9)
+        self.assertEqual(payload["usd"], out["usd_total"])
+        self.assertEqual(payload["route"], {"session": "model-a",
+                                            "implementer": "model-b"})
+        self.assertEqual(payload["prices_date"], "2000-01-01")
+        self.assertEqual(payload["legs"]["session"], {
+            "usd": out["usd_by_leg"]["session"],
+            "usage": {"input": M, "output": 2, "cache_read": 5, "cache_write": 7}})
+        self.assertEqual(payload["legs"]["implementer"]["usage"],
+                         {"input": 7, "output": 0, "cache_read": 0, "cache_write": 0})
+        self.assertEqual(sorted(payload["legs"]), sorted(out["usd_by_leg"]))
+        self.assertNotIn(ledger.REDACTED, json.dumps(payload, ensure_ascii=False))
+
+    def test_harvest_carries_the_structured_fields(self):
+        fields = {"kind": "meter", "story_key": KEY, "epic": 9, "usd": 1.25,
+                  "legs": {"session": {"usd": 1.25, "usage": {
+                      "input": 1, "output": 2, "cache_read": 3, "cache_write": 4}}},
+                  "route": {"session": "model-a"}, "prices_date": "2000-01-01"}
+        self.sandbox_observation(KEY, payload={
+            "source": "other", "description": f"meter: story={KEY} usd=1.25",
+            "evidence": f"transcripts/{KEY}", **fields})
+        rc, out = self.run_harvest()
+        self.assertEqual(rc, 0, out)
+        lines = self.ledger_lines()
+        self.assertEqual(len(lines), 1)
+        payload = lines[0]["payload"]
+        self.assertEqual(payload["description"], f"meter: story={KEY} usd=1.25")
+        for field, value in fields.items():
+            self.assertEqual(payload[field], value, field)
+
+    def test_harvest_refuses_a_structured_field_of_the_wrong_type(self):
+        self.sandbox_observation(KEY)  # sorts first, valid
+        for field, bad in (("usd", "1.0"), ("legs", [1]), ("epic", True),
+                           ("route", "model-a"), ("kind", 3)):
+            d = self.story_dir(OTHER)
+            d.mkdir(parents=True, exist_ok=True)
+            path = d / meter.OBSERVATION
+            path.write_text(json.dumps({"payload": {
+                "source": "other", "description": "x", field: bad}}),
+                encoding="utf-8")
+            rc, out = self.run_harvest()
+            self.assertEqual(rc, 2, (field, out))
+            self.assertTrue(out["error"].startswith(
+                f"observation {path} is unreadable: payload '{field}'"), out["error"])
+            self.assertEqual(self.ledger_lines(), [], field)
+
     def test_harvest_missing_run_dir_refuses(self):
         gone = self.tmp / "no-such-run"
         rc, out = self.run_harvest(gone)

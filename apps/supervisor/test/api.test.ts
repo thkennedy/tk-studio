@@ -1483,6 +1483,32 @@ describe("Story 32.1: the engagement routes (contract 0.1.27 additive)", () => {
     expect(String(inv.detail)).not.toContain(fx.other);
   });
 
+  test("GET /engagements/{id} carries the quote engage.py quote merged (Story 32.5); the owner's go then moves scoping → quoted", async () => {
+    const fx = routed();
+    await fx.create("quote me");
+    const path = join(fx.root, ENG, "ENG-001", "engagement.yaml");
+    const quote = {
+      band50: { tokens: 1200000, usd: 18.5, share: "share unknown" },
+      band85: { tokens: 1900000, usd: 27.25, share: "share unknown" },
+      band95: { tokens: 2300000, usd: 33.1, share: "share unknown" },
+      cap: 45.6,
+      basis: { method: "bootstrap", resamples: 10000, seed: 42, stories: 2, thin: false, kind: "story", cap_tokens: 3100000, autonomy: ["ask", "steady", "full"] },
+      computed_at: "2026-10-25T05:00:00.000Z",
+    };
+    const record = JSON.parse(readFileSync(path, "utf-8"));
+    writeFileSync(path, JSON.stringify({ ...record, state: "scoping", quote }, null, 2) + "\n");
+    const res = await fx.call("GET", "/engagements/ENG-001");
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, any>;
+    expect(body.engagement.state).toBe("scoping");
+    expect(body.engagement.quote).toEqual(quote);
+    const go = await fx.call("POST", "/engagements/ENG-001/input", undefined, { verb: "go" });
+    expect(go.status).toBe(200);
+    const after = await (await fx.call("GET", "/engagements/ENG-001")).json() as Record<string, any>;
+    expect(after.engagement.state).toBe("quoted");
+    expect(after.engagement.quote).toEqual(quote);
+  });
+
   test("an input on a record whose questions[] holds a non-mapping: 500 EngagementRecordInvalid (never an unhandled 500), nothing written", async () => {
     const fx = routed();
     await fx.create();

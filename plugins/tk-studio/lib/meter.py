@@ -16,11 +16,16 @@ plugin's meter_hook.py) the meter:
               pricing succeeded, guarded by `transcripts/<key>/metered.json`,
               and writes the emitted envelope to `transcripts/<key>/
               observation.json` before that marker, so the record survives
-              a recreated sandbox (Story 26.4).
+              a recreated sandbox (Story 26.4). The observation's payload
+              also carries the structured, additive fields (Story 32.5):
+              `kind: meter`, `story_key`, `epic`, `usd`, `legs.<leg> {usd,
+              usage {input, output, cache_read, cache_write}}`, `route`,
+              `prices_date`; the description string is unchanged.
 
 `harvest` (run on the host) appends every `transcripts/*/observation.json`
 not yet harvested to the host ledger through observe.record_observation,
-then writes `harvested.json` beside it (how: appended | in-ledger | seeded).
+then writes `harvested.json` beside it (how: appended | in-ledger | seeded),
+re-emitting the structured fields with it.
 The append comes before the marker: a crash between the two can re-append
 that story once on the next harvest (accepted; marker-first could lose the
 record). The harvested copy carries the host's ts/user/machine; the original
@@ -71,6 +76,11 @@ ADVISOR_ITERATION = "advisor_message"
 UNKNOWN_LEG = "unknown"
 ROLE_LEGS = {"dev": "session", "review": "review", "triage": "triage"}
 RATE_FIELDS = ("input", "output", "cache_write_5m", "cache_write_1h", "cache_read")
+# A leg's token usage in the structured observation (Story 32.5 Settled
+# shape 1): the key is `usage`, never `tokens` (ledger.sanitize redacts any
+# key matching `token`); cache_write = cache_write_5m + cache_write_1h.
+USAGE_FIELDS = ("input", "output", "cache_read", "cache_write")
+STORY_EPIC_RE = re.compile(r"^(\d+)-")
 # The table prices standard usage only; any other value of these usage fields
 # is a premium the table does not carry (usage field -> accepted values; an
 # absent field is standard).
@@ -477,6 +487,8 @@ def price(sources: list[tuple[str, Path]], prices: dict) -> dict:
     by_model: dict[str, float] = {}
     by_leg: dict[str, float] = {leg: 0.0 for leg in LEGS}
     tokens_by_model: dict[str, dict] = {}
+    tokens_by_leg: dict[str, dict] = {leg: dict.fromkeys(USAGE_FIELDS, 0)
+                                      for leg in LEGS}
     total = 0.0
     for leg, model, tokens in tallies:
         rates = _rates(prices, model)
@@ -487,13 +499,21 @@ def price(sources: list[tuple[str, Path]], prices: dict) -> dict:
         agg = tokens_by_model.setdefault(model, {f: 0 for f in RATE_FIELDS})
         for f in RATE_FIELDS:
             agg[f] += tokens[f]
+        usage = tokens_by_leg.setdefault(leg, dict.fromkeys(USAGE_FIELDS, 0))
+        usage["input"] += tokens["input"]
+        usage["output"] += tokens["output"]
+        usage["cache_read"] += tokens["cache_read"]
+        usage["cache_write"] += tokens["cache_write_5m"] + tokens["cache_write_1h"]
     if not by_leg.get(UNKNOWN_LEG):
         by_leg.pop(UNKNOWN_LEG, None)
+        if not any(tokens_by_leg.get(UNKNOWN_LEG, {}).values()):
+            tokens_by_leg.pop(UNKNOWN_LEG, None)
     return {
         "usd_total": round(total, 6),
         "usd_by_model": {m: round(v, 6) for m, v in sorted(by_model.items())},
         "usd_by_leg": {leg: round(v, 6) for leg, v in by_leg.items()},
         "tokens_by_model": tokens_by_model,
+        "tokens_by_leg": tokens_by_leg,
         "ttl_unknown": ttl_unknown,
     }
 
@@ -557,6 +577,31 @@ def describe(story_key: str, report: dict) -> str:
             f"prices_date={_val(report.get('prices_date'))}")
 
 
+def structured(story_key: str, report: dict) -> dict:
+    """The meter's structured, additive observation fields (Story 32.5
+    Settled shape 1): `kind: meter`, `story_key`, `epic` (the key's leading
+    integer, when it has one), `usd`, `legs.<leg> {usd, usage {input,
+    output, cache_read, cache_write}}`, `route` and `prices_date` (each when
+    the report carries it)."""
+    usage_by_leg = report.get("tokens_by_leg") or {}
+    legs = {}
+    for leg, usd in (report.get("usd_by_leg") or {}).items():
+        usage = usage_by_leg.get(leg) or {}
+        legs[leg] = {"usd": usd,
+                     "usage": {f: _int(usage.get(f)) for f in USAGE_FIELDS}}
+    fields: dict = {"kind": "meter", "story_key": story_key}
+    m = STORY_EPIC_RE.match(story_key)
+    if m:
+        fields["epic"] = int(m.group(1))
+    fields["usd"] = report["usd_total"]
+    fields["legs"] = legs
+    if isinstance(report.get("route"), dict):
+        fields["route"] = report["route"]
+    if isinstance(report.get("prices_date"), str):
+        fields["prices_date"] = report["prices_date"]
+    return fields
+
+
 def record(run_dir: Path, story_key: str, report: dict, repo_root: Path) -> bool:
     """Emit one observation for the story unless its marker already exists.
 
@@ -573,7 +618,8 @@ def record(run_dir: Path, story_key: str, report: dict, repo_root: Path) -> bool
         evidence = f"transcripts/{story_key}"
     envelope = observe.record_observation("other", describe(story_key, report),
                                           evidence=evidence,
-                                          project=job.project_key(repo_root))
+                                          project=job.project_key(repo_root),
+                                          fields=structured(story_key, report))
     # The envelope rides the mounted checkout (Story 26.4); metered.json
     # stays the last write, the done marker.
     _atomic_write_text(transcripts_dir / OBSERVATION,
@@ -586,6 +632,13 @@ def record(run_dir: Path, story_key: str, report: dict, repo_root: Path) -> bool
 
 
 # ------------------------------------------------------------------ harvest
+
+# The structured fields' types (Story 32.5 Settled shape 1, the taxonomy's
+# optional `observation` fields), checked before any append.
+STRUCTURED_TYPES = {"kind": str, "story_key": str, "epic": (int, float),
+                    "usd": (int, float), "legs": dict, "route": dict,
+                    "prices_date": str}
+
 
 def _read_observation(path: Path) -> dict:
     try:
@@ -614,7 +667,17 @@ def _read_observation(path: Path) -> dict:
     if not isinstance(envelope.get("project"), (str, type(None))):
         raise MeterError(f"observation {path} is unreadable: "
                          "'project' is not a string")
+    for field, kind in STRUCTURED_TYPES.items():  # Story 32.5, additive
+        value = payload.get(field)
+        if field in payload and (isinstance(value, bool)
+                                 or not isinstance(value, kind)):
+            raise MeterError(f"observation {path} is unreadable: payload "
+                             f"'{field}' is not a {_kind_name(kind)}")
     return envelope
+
+
+def _kind_name(kind) -> str:
+    return {str: "string", dict: "object"}.get(kind, "number")
 
 
 def _ledger_name_of(envelope: dict):
@@ -667,9 +730,11 @@ def harvest(run_dir: Path) -> dict:
             how, bucket = "in-ledger", "in_ledger"
         else:
             payload = envelope["payload"]
+            extra = {k: payload[k] for k in STRUCTURED_TYPES if k in payload}
             observe.record_observation(payload["source"], payload["description"],
                                        evidence=payload.get("evidence"),
-                                       project=envelope.get("project"))
+                                       project=envelope.get("project"),
+                                       fields=extra or None)
             how, bucket = "appended", "harvested"
         _atomic_write_text(marker, json.dumps(
             {"story_key": story_key,

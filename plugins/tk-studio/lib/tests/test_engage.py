@@ -1144,5 +1144,679 @@ class ScopeMemoryAndCliTests(ScopeTestCase):
         self.assertIn("ReviseNotFound", result["reason"])
 
 
+
+# ------------------------------------------------------- the quote (32.5)
+
+import quote as quotelib  # noqa: E402
+
+BANDS = """# Studio pipeline budget bands (fixture).
+# operator-tunable
+bands_version: 1
+currency: usd
+bands:
+  S:
+    usd_estimate: 4.5
+"""
+
+
+def meter_line(key, usd, tokens, project="project",
+               ts="2026-10-20T00:00:00.000+00:00", route=None):
+    payload = {"source": "other", "description": f"meter: story={key} "
+               f"usd={usd}", "kind": "meter", "story_key": key, "usd": usd,
+               "legs": {"session": {"usd": usd, "usage": {
+                   "input": tokens, "output": 0, "cache_read": 0,
+                   "cache_write": 0}}}}
+    if route is not None:
+        payload["route"] = route
+    return {"ts": ts, "event": "observation", "user": "u", "machine": "m",
+            "project": project, "payload": payload}
+
+
+class ScopeVoidsQuoteTests(ScopeTestCase):
+    """A scope rewritten in `scoping` voids a quote of the old scope in the
+    same merge (`scoping + revise -> scoping` carries no `void-quote`), so
+    the owner's `go` cannot pass `quote-present` at an old story count."""
+    QUOTE = {"band50": {"tokens": 1, "usd": 1.0, "share": "share unknown"},
+             "band85": {"tokens": 2, "usd": 2.0, "share": "share unknown"},
+             "band95": {"tokens": 3, "usd": 3.0, "share": "share unknown"},
+             "cap": 4.0, "basis": {"stories": 2}, "computed_at": NOW}
+
+    def test_a_rewritten_scope_voids_the_quote_and_an_unchanged_one_keeps_it(self):
+        self.scope()
+        self.set_record(quote=self.QUOTE, spend={"planning_usd": 0.5})
+        same = self.scope(now="2026-10-25T06:00:00.000Z")
+        self.assert_status_block_last(same, "complete")
+        self.assertEqual(self.record()["quote"], self.QUOTE)  # same text
+        changed = self.scope(SCOPE.replace("monthly reports",
+                                           "monthly and weekly reports"),
+                             now="2026-10-25T07:00:00.000Z")
+        self.assert_status_block_last(changed, "complete")
+        record = self.record()
+        self.assertIsNone(record["quote"])
+        self.assertEqual(record["updated"], "2026-10-25T07:00:00.000Z")
+        self.assertEqual(record["spend"], {"planning_usd": 0.5})
+        self.assertEqual(record["scope_page"]["version"], 2)
+        self.assertEqual(record["state"], "scoping")
+        self.assertIn("scope.md replaced: the quote is voided",
+                      changed["notes"])
+
+    def test_the_quote_is_voided_before_the_publish_so_a_failed_one_keeps_it_void(self):
+        self.set_record(quote=self.QUOTE)
+        self.fake.force[FOLDERS_GET] = (503, {"message": "slow down"})
+        result = self.scope()
+        self.assert_status_block_last(result, "partial")
+        self.assertIs(result["retry"], True)  # still the retryable 5xx
+        self.assertEqual(result["written"], [
+            "_bmad-output/engagements/ENG-001/engagement.yaml",
+            "_bmad-output/engagements/ENG-001/scope.md"])
+        self.assertIn("scope.md replaced: the quote is voided",
+                      result["notes"])
+        self.assertEqual(self.scope_file().read_text("utf-8"), SCOPE)
+        record = self.record()
+        self.assertIsNone(record["quote"])
+        self.assertIsNone(record["scope_page"])
+        # the rerun publishes; the quote stays void, the note is not repeated
+        del self.fake.force[FOLDERS_GET]
+        again = self.scope()
+        self.assert_status_block_last(again, "complete")
+        self.assertIsNone(self.record()["quote"])
+        self.assertNotIn("scope.md replaced: the quote is voided",
+                         again["notes"])
+
+    def test_a_failed_void_refuses_and_leaves_scope_md_unchanged(self):
+        self.scope()
+        self.set_record(quote=self.QUOTE)
+        before = self.record()
+        real = engage.atomic_write_text
+
+        def no_record(path, text):
+            if Path(path).name == "engagement.yaml":
+                raise PermissionError("denied")
+            real(path, text)
+
+        changed = SCOPE.replace("monthly reports", "weekly reports")
+        with mock.patch.object(engage, "atomic_write_text", no_record):
+            result = self.scope(changed)
+        self.assert_status_block_last(result, "blocked")
+        self.assertIn("ScopeUnwritable: _bmad-output/engagements/ENG-001/"
+                      "engagement.yaml: PermissionError", result["reason"])
+        self.assertEqual(result["written"], [])
+        self.assertEqual(self.scope_file().read_text("utf-8"), SCOPE)
+        self.assertEqual(self.record(), before)  # quote and page kept
+        self.assertFalse((self.dir / "scope.lock").exists())
+
+    def test_an_unreadable_record_at_the_void_is_its_own_refusal(self):
+        self.scope()
+        self.set_record(quote=self.QUOTE)
+        real = engage.read_record
+        calls = []
+
+        def unreadable_at_the_void(root, engagement):
+            calls.append(engagement)
+            if len(calls) == 3:  # scope(), its locked re-read, the void
+                raise engage.Refused("EngagementRecordUnreadable", "x")
+            return real(root, engagement)
+
+        changed = SCOPE.replace("monthly reports", "weekly reports")
+        with mock.patch.object(engage, "read_record", unreadable_at_the_void):
+            result = self.scope(changed)
+        self.assert_status_block_last(result, "blocked")
+        self.assertIn("EngagementRecordUnreadable", result["reason"])
+        self.assertEqual(result["written"], [])
+        self.assertEqual(self.scope_file().read_text("utf-8"), SCOPE)
+        self.assertEqual(self.record()["quote"], self.QUOTE)
+
+    def test_a_failed_void_of_a_page_revision_leaves_scope_md_unchanged(self):
+        first = self.scope()
+        self.set_record(quote=self.QUOTE)
+        page = {"id": first["page"]["id"], "version": 2,
+                "body": "<h2>Goal</h2><p>Owner edit.</p>"}
+        real = engage.atomic_write_text
+
+        def no_record(path, text):
+            if Path(path).name == "engagement.yaml":
+                raise PermissionError("denied")
+            real(path, text)
+
+        with mock.patch.object(engage, "atomic_write_text", no_record):
+            out = engage.apply_page_revision(self.root, ENG, page)
+        self.assertIs(out["applied"], False)
+        self.assertIs(out["retry"], True)
+        self.assertEqual(out["written"], [])
+        self.assertEqual(self.scope_file().read_text("utf-8"), SCOPE)
+        self.assertEqual(self.record()["quote"], self.QUOTE)
+        self.assertEqual(self.record()["scope_page"]["version"], 1)
+
+    def test_the_sync_back_page_revision_voids_the_quote(self):
+        first = self.scope()
+        self.set_record(quote=self.QUOTE)
+        page = {"id": first["page"]["id"], "version": 2,
+                "body": "<h2>Goal</h2><p>Owner edit.</p>"}
+        out = engage.apply_page_revision(self.root, ENG, page,
+                                         now="2026-10-25T08:00:00.000Z")
+        self.assertIs(out["applied"], True)
+        record = self.record()
+        self.assertIsNone(record["quote"])
+        self.assertEqual(record["scope_page"]["version"], 2)
+        self.assertEqual(record["updated"], "2026-10-25T08:00:00.000Z")
+        self.assertIn("Owner edit.", self.scope_file().read_text("utf-8"))
+        # a revision already applied changes nothing, quote or not
+        self.set_record(quote=self.QUOTE)
+        again = engage.apply_page_revision(self.root, ENG, page)
+        self.assertIs(again["applied"], False)
+        self.assertEqual(self.record()["quote"], self.QUOTE)
+
+
+    def test_a_version_bump_with_the_same_markdown_keeps_the_quote(self):
+        first = self.scope()
+        body = "<h2>Goal</h2><p>Owner edit.</p>"
+        page = {"id": first["page"]["id"], "version": 2, "body": body}
+        engage.apply_page_revision(self.root, ENG, page)
+        self.set_record(quote=self.QUOTE)
+        same = dict(page, version=3)  # a re-save: the Markdown is unchanged
+        before = self.scope_file().read_bytes()
+        out = engage.apply_page_revision(self.root, ENG, same,
+                                         now="2026-10-25T09:00:00.000Z")
+        self.assertIs(out["applied"], True)
+        self.assertEqual(out["written"], [
+            "_bmad-output/engagements/ENG-001/engagement.yaml"])
+        record = self.record()
+        self.assertEqual(record["quote"], self.QUOTE)
+        self.assertEqual(record["scope_page"]["version"], 3)
+        self.assertEqual(record["updated"], "2026-10-25T09:00:00.000Z")
+        self.assertEqual(self.scope_file().read_bytes(), before)
+
+    def test_a_write_failing_after_the_void_names_the_void_in_written(self):
+        record_rel = "_bmad-output/engagements/ENG-001/engagement.yaml"
+        for fail_at, landed in (("scope.md", [record_rel]),
+                                ("version", [record_rel, SCOPE_REL])):
+            with self.subTest(fail_at=fail_at):
+                first = self.scope()
+                self.set_record(quote=self.QUOTE)
+                version = self.record()["scope_page"]["version"]
+                page = {"id": first["page"]["id"], "version": version + 1,
+                        "body": f"<h2>Goal</h2><p>Edit {fail_at}.</p>"}
+                real = engage.atomic_write_text
+                record_writes = []
+
+                def failing(path, text):
+                    name = Path(path).name
+                    if name == "engagement.yaml":
+                        record_writes.append(path)
+                        if fail_at == "version" and len(record_writes) == 2:
+                            raise PermissionError("denied")
+                    elif name == "scope.md" and fail_at == "scope.md":
+                        raise PermissionError("denied")
+                    real(path, text)
+
+                with mock.patch.object(engage, "atomic_write_text", failing):
+                    out = engage.apply_page_revision(self.root, ENG, page)
+                self.assertIs(out["applied"], False)
+                self.assertIs(out["retry"], True)
+                self.assertEqual(out["written"], landed)
+                record = self.record()
+                self.assertIsNone(record["quote"])  # the void landed
+                self.assertEqual(record["scope_page"]["version"], version)
+                self.assertEqual(self.scope_file().read_text("utf-8") == SCOPE,
+                                 fail_at == "scope.md")
+
+    def add_revise(self, body, at):
+        record = self.record()
+        record["inputs"].append({"at": at, "verb": "revise",
+                                 "source": "cookie",
+                                 "payload": {"body": body},
+                                 "from": "quoted", "to": "scoping"})
+        self.set_record(inputs=record["inputs"])
+
+    def test_the_revise_pass_voids_the_quote_and_an_unchanged_one_keeps_it(self):
+        self.scope()
+        self.set_record(quote=self.QUOTE)
+        self.add_revise("Just the CSV button, please.\n", REVISE_AT)
+        result = engage.scope(self.root, ENG, revise_at=REVISE_AT,
+                              transport=self.fake, now=NOW)
+        self.assert_status_block_last(result, "complete")
+        self.assertEqual(result["source"], "revise")
+        record = self.record()
+        self.assertIsNone(record["quote"])
+        self.assertEqual(record["state"], "scoping")
+        self.assertIn("scope.md replaced: the quote is voided",
+                      result["notes"])
+        self.assertEqual(self.scope_file().read_text("utf-8"),
+                         "Just the CSV button, please.\n")
+        # a revise body equal to scope.md replaces nothing: the quote stays
+        self.set_record(quote=self.QUOTE)
+        again_at = "2026-10-25T05:45:00.000Z"
+        self.add_revise("Just the CSV button, please.\n", again_at)
+        again = engage.scope(self.root, ENG, revise_at=again_at,
+                             transport=self.fake, now=NOW)
+        self.assert_status_block_last(again, "complete")
+        record = self.record()
+        self.assertEqual(record["quote"], self.QUOTE)
+        self.assertEqual(record["state"], "scoping")
+        self.assertNotIn(SCOPE_REL, again["written"])
+
+
+class QuoteTestCase(EngageTestCase):
+    def setUp(self):
+        super().setUp()
+        self._old_home = os.environ.get("TK_STUDIO_HOME")
+        self.home = Path(self._tmp.name) / "store"
+        os.environ["TK_STUDIO_HOME"] = str(self.home)
+        self.set_record(state="scoping")
+        (self.dir / "scope.md").write_text(SCOPE, encoding="utf-8")
+        (self.root / ".tk-studio").mkdir()
+        (self.root / ".tk-studio" / "plan-counter.yaml").write_text(
+            "counter_version: 1\nnext:\n  epic: 33\n  story: 130\n"
+            "  task: 1\n", encoding="utf-8")
+        self.bands = self.root / ".tk-studio" / "budget-bands.yaml"
+        self.bands.write_text(BANDS, encoding="utf-8")
+
+    def tearDown(self):
+        if self._old_home is None:
+            os.environ.pop("TK_STUDIO_HOME", None)
+        else:
+            os.environ["TK_STUDIO_HOME"] = self._old_home
+        super().tearDown()
+
+    def history(self, k, **kwargs):
+        lines = [meter_line(f"9-{i + 1}-s", round(2.0 + i, 2),
+                            100_000 * (i + 1), **kwargs) for i in range(k)]
+        path = self.home / "measurements" / "u-m.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            for line in lines:
+                handle.write(json.dumps(line) + "\n")
+        return lines
+
+    def record(self) -> dict:
+        return json.loads((self.dir / "engagement.yaml")
+                          .read_text(encoding="utf-8"))
+
+    def quote(self, **kwargs):
+        kwargs.setdefault("now", NOW)
+        return engage.quote(self.root, ENG, **kwargs)
+
+    def files(self) -> dict:
+        return {"record": (self.dir / "engagement.yaml").read_bytes(),
+                "bands": self.bands.read_bytes()}
+
+
+class QuoteVerbTests(QuoteTestCase):
+    def test_a_rich_history_lands_the_quote_and_the_bands(self):
+        self.history(8)
+        result = self.quote()
+        self.assert_status_block_last(result, "complete")
+        self.assertEqual(result["written"], [
+            "_bmad-output/engagements/ENG-001/engagement.yaml",
+            ".tk-studio/budget-bands.yaml"])
+        record = self.record()
+        self.assertEqual(record["state"], "scoping")  # the owner's go moves it
+        self.assertEqual(record["updated"], NOW)
+        q = record["quote"]
+        self.assertEqual(sorted(q), ["band50", "band85", "band95", "basis",
+                                     "cap", "computed_at"])
+        self.assertEqual(q, result["quote"])
+        self.assertEqual(q["computed_at"], NOW)
+        seed = quotelib.default_seed(ENG, 2)
+        self.assertLess(seed, 2 ** 53)  # exact through the JSON rewrite
+        samples = [{"story_key": f"9-{i + 1}-s", "tokens": 100_000 * (i + 1),
+                    "usd": 2.0 + i, "route": None} for i in range(8)]
+        want = quotelib.compute(samples, 2, [{"k": 1, "stories": 2}], seed,
+                                None)
+        for band in ("band50", "band85", "band95"):
+            self.assertEqual(q[band], want[band])
+        self.assertIsInstance(q["cap"], float)
+        self.assertEqual(q["cap"], want["cap"])
+        basis = q["basis"]
+        self.assertEqual(basis["method"], "bootstrap")
+        self.assertEqual(basis["resamples"], 10000)
+        self.assertEqual(basis["seed"], seed)
+        self.assertEqual(basis["stories"], 2)
+        self.assertEqual(basis["epics"], [{"k": 1, "title": "Report exports",
+                                           "stories": 2,
+                                           "ep_id": "EP-033"}])
+        self.assertEqual(basis["history"], {"n": 8, "unstructured": 0,
+                                            "project": "project"})
+        self.assertEqual(basis["kind"], "story")
+        self.assertFalse(basis["thin"])
+        self.assertNotIn("widen", basis)
+        self.assertEqual(basis["at_cap"], "the run pauses partial, the "
+                         "engagement's issue blocks with the figures, the "
+                         "owner decides")
+        self.assertEqual(basis["autonomy"], ["ask", "steady", "full"])
+        self.assertEqual((basis["planning_usd"], basis["scoping_billable"]),
+                         (0, False))
+        self.assertEqual(basis["prices_date"],
+                         json.loads(Path(engage.__file__).with_name(
+                             "prices.json").read_text())["date"])
+        self.assertIsNone(basis["window_tokens"])
+        self.assertEqual(basis["cap_tokens"], want["cap_tokens"])
+        self.assertEqual(q["band50"]["share"], "share unknown")
+        # the bands: every byte before epics kept, EP-033 from the p85
+        text = self.bands.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith(BANDS))
+        self.assertEqual(text[len(BANDS):], "epics:\n  EP-033:\n    "
+                         f"usd_estimate: {want['epic_usd'][1]}\n")
+
+    def test_seeded_rerun_is_identical_and_another_seed_differs(self):
+        path = self.home / "measurements" / "u-m.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(meter_line(
+            f"9-{i}-s", round(1 + (i * 7.31) % 13, 2), 10_007 * (i * i + 3)))
+            + "\n" for i in range(12)), encoding="utf-8")
+        a = self.quote(dry_run=True)["quote"]
+        b = self.quote(dry_run=True)["quote"]
+        self.assertEqual(a, b)
+        c = self.quote(dry_run=True, seed=99)["quote"]
+        self.assertEqual(c["basis"]["seed"], 99)
+        self.assertNotEqual((a["band50"], a["band95"]),
+                            (c["band50"], c["band95"]))
+
+    def test_thin_history_widens_and_names_the_prior(self):
+        result = self.quote()
+        self.assert_status_block_last(result, "complete")
+        q = self.record()["quote"]
+        self.assertTrue(q["basis"]["thin"])
+        self.assertEqual(q["basis"]["widen"], 1.5)
+        self.assertEqual(q["basis"]["prior"], "kb/trial-record-opus-5-5.md")
+        self.assertEqual(q["basis"]["history"]["n"], 0)
+        self.assertIsNone(q["band85"]["tokens"])
+        self.assertIsNone(q["band85"]["share"])
+        self.assertGreater(q["band85"]["usd"], 0)
+        self.assertIn("thin history: 0 landed stories", result["notes"])
+        self.assertIn("tokens unknown: thin history (no metered story)",
+                      result["notes"])
+
+    def test_the_share_over_the_user_config_window(self):
+        self.history(8)
+        self.home.mkdir(parents=True, exist_ok=True)
+        (self.home / "config.yaml").write_text(
+            "plan:\n  window_tokens: 1000000\n", encoding="utf-8")
+        q = self.quote(dry_run=True)["quote"]
+        self.assertEqual(q["basis"]["window_tokens"], 1_000_000)
+        self.assertEqual(q["band50"]["share"],
+                         round(q["band50"]["tokens"] / 1_000_000, 4))
+        for bad in ("0", "lots", "true"):
+            (self.home / "config.yaml").write_text(
+                f"plan:\n  window_tokens: {bad}\n", encoding="utf-8")
+            q = self.quote(dry_run=True)["quote"]
+            self.assertEqual(q["band50"]["share"], "share unknown", bad)
+            self.assertIsNone(q["basis"]["window_tokens"])
+
+    def test_the_project_filter_and_unstructured_history(self):
+        self.history(3, project="someone-else")
+        path = self.home / "measurements" / "u-m.jsonl"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "ts": "t", "event": "observation", "project": "project",
+                "payload": {"source": "other",
+                            "description": "meter: story=1-1 usd=3.0"}})
+                + "\n")
+        basis = self.quote(dry_run=True)["quote"]["basis"]
+        self.assertEqual(basis["history"], {"n": 0, "unstructured": 1,
+                                            "project": "project"})
+
+    def test_the_merge_is_a_fresh_read_of_quote_and_updated_only(self):
+        self.history(8)
+        real = quotelib.compute
+
+        def concurrent(*args, **kwargs):
+            # the supervisor's chatSpendPass lands while the quote computes
+            record = self.record()
+            record["spend"] = {"planning_usd": 1.75, "runs_usd": 0}
+            (self.dir / "engagement.yaml").write_text(
+                json.dumps(record, indent=2) + "\n", encoding="utf-8")
+            return real(*args, **kwargs)
+
+        with mock.patch.object(quotelib, "compute", concurrent):
+            result = self.quote()
+        self.assert_status_block_last(result, "complete")
+        record = self.record()
+        self.assertEqual(record["spend"]["planning_usd"], 1.75)
+        self.assertIsNotNone(record["quote"])
+        self.assertEqual(record["state"], "scoping")
+        # the basis agrees with the spend it was merged beside
+        self.assertEqual((record["quote"]["basis"]["planning_usd"],
+                          record["quote"]["basis"]["scoping_billable"]),
+                         (1.75, True))
+        self.assertEqual(result["quote"], record["quote"])
+
+    def test_the_quote_prices_the_scope_on_disk_under_scope_lock(self):
+        self.history(8)
+        real = quotelib.compute
+        raced = []
+
+        def concurrent(*args, **kwargs):
+            # a `scope --revise-at` or the sync-back tries to replace
+            # scope.md while the quote computes: scope.lock is held
+            def rewrite():
+                (self.dir / "scope.md").write_text(
+                    SCOPE + "\n### Epic 2: More\n\n#### Story 2.1: One\n"
+                    "\ntext\n", encoding="utf-8")
+            try:
+                engage._with_scope_lock(self.root, ENG, rewrite, wait_s=0)
+            except engage.Refused as exc:
+                raced.append(exc.name)
+            return real(*args, **kwargs)
+
+        with mock.patch.object(quotelib, "compute", concurrent):
+            result = self.quote()
+        self.assert_status_block_last(result, "complete")
+        self.assertEqual(raced, ["ScopeBusy"])
+        on_disk = engage.scope_counts(
+            (self.dir / "scope.md").read_text(encoding="utf-8"))
+        self.assertEqual(self.record()["quote"]["basis"]["stories"],
+                         on_disk["stories"])
+        self.assertEqual(on_disk["stories"], 2)
+        self.assertFalse((self.dir / "scope.lock").exists())
+
+    def test_a_sample_route_keeps_only_string_models(self):
+        self.history(2, route={"session": 7, "review": "claude-opus-5-5"})
+        result = self.quote(dry_run=True)
+        self.assert_status_block_last(result, "partial")
+        self.assertEqual(result["quote"]["basis"]["route"],
+                         {"review": "claude-opus-5-5"})
+        self.history(1, route={"session": ["x"]})
+        result = self.quote(dry_run=True)
+        self.assert_status_block_last(result, "partial")
+        self.assertIsNone(result["quote"]["basis"]["route"])
+
+    def test_scoping_billable_from_the_planning_spend(self):
+        self.set_record(state="scoping",
+                        spend={"planning_usd": 0.42, "runs_usd": 0})
+        basis = self.quote(dry_run=True)["quote"]["basis"]
+        self.assertEqual((basis["planning_usd"], basis["scoping_billable"]),
+                         (0.42, True))
+
+    def test_a_voided_quote_is_requoted_and_the_memory_shows_it(self):
+        # a `revise` from quoted voided it (32.1): back in scoping, null
+        self.set_record(state="scoping", quote=None)
+        self.assertIsNone(engage.reply(self.root, ENG)["record"]["quote"])
+        result = self.quote()
+        self.assert_status_block_last(result, "complete")
+        memory = engage.reply(self.root, ENG)
+        self.assertEqual(memory["record"]["quote"], result["quote"])
+
+    def test_another_epics_entry_is_kept_and_this_one_overwritten(self):
+        self.bands.write_text(BANDS + "epics:\n  EP-010:\n    usd_estimate: "
+                              "7.5\n  EP-033:\n    usd_estimate: 1.0\n",
+                              encoding="utf-8")
+        self.quote()
+        text = self.bands.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith(BANDS))
+        import miniyaml
+        epics = miniyaml.loads(text)["epics"]
+        self.assertEqual(epics["EP-010"], {"usd_estimate": 7.5})
+        self.assertNotEqual(epics["EP-033"]["usd_estimate"], 1.0)
+
+    def test_the_dry_run_writes_nothing(self):
+        before = self.files()
+        result = self.quote(dry_run=True)
+        self.assert_status_block_last(result, "partial")
+        self.assertEqual(result["written"], [])
+        self.assertIsNotNone(result["quote"])
+        self.assertEqual(self.files(), before)
+
+
+class QuoteRefusalTests(QuoteTestCase):
+    def assert_refused(self, name, **kwargs):
+        before = self.files()
+        result = self.quote(**kwargs)
+        self.assert_status_block_last(result, "blocked")
+        self.assertFalse(result["ok"])
+        self.assertIn(f"{name}:", result["reason"])
+        self.assertEqual(result["written"], [])
+        self.assertEqual(self.files(), before)
+        return result
+
+    def test_each_named_refusal_writes_nothing(self):
+        record = self.dir / "engagement.yaml"
+        text = record.read_text(encoding="utf-8")
+        record.write_text("state: scoping\n", encoding="utf-8")
+        self.assert_refused("EngagementRecordUnreadable")
+        record.write_text(text, encoding="utf-8")
+        for state in ("delivered", "failed", "cancelled"):
+            self.set_record(state=state)
+            self.assert_refused("EngagementClosed")
+        for state in ("intake", "quoted", "approved"):
+            self.set_record(state=state)
+            self.assert_refused("NotScoping")
+        self.set_record(state="scoping")
+        (self.dir / "scope.md").write_text(
+            SCOPE.split("### Epic 1")[0], encoding="utf-8")
+        self.assert_refused("NoScope")
+        (self.dir / "scope.md").unlink()
+        self.assert_refused("NoScope")
+        (self.dir / "scope.md").write_text(SCOPE, encoding="utf-8")
+        bad = Path(self._tmp.name) / "prices.json"
+        bad.write_text("{nope", encoding="utf-8")
+        self.assert_refused("PricesUnreadable", prices_path=bad)
+        self.history(2, route={"session": "claude-unpriced-9"})
+        self.assert_refused("PricesUnreadable")
+
+    def test_a_repeated_epic_number_is_no_scope_naming_it(self):
+        (self.dir / "scope.md").write_text(
+            SCOPE + "\n### Epic 1: Again\n\n#### Story 1.1: Twice\n\ntext\n",
+            encoding="utf-8")
+        result = self.assert_refused("NoScope")
+        self.assertIn("repeats epic ### Epic 1", result["reason"])
+
+    def test_epics_not_numbered_one_to_m_are_no_scope(self):
+        # an `### Epic 0` would key to EP-032 (a live epic) and overwrite
+        # its band; 1 and 3 would key to a gap
+        zero = SCOPE.replace("### Epic 1:", "### Epic 0:").replace(
+            "#### Story 1.", "#### Story 0.")
+        self.assertIn("### Epic 0:", zero)
+        (self.dir / "scope.md").write_text(zero, encoding="utf-8")
+        result = self.assert_refused("NoScope")
+        self.assertIn("numbers its epics ### Epic 0", result["reason"])
+        self.assertIn("numbered 1 to 1 in order", result["reason"])
+        (self.dir / "scope.md").write_text(
+            SCOPE + "\n### Epic 3: Later\n\n#### Story 3.1: Gap\n\ntext\n",
+            encoding="utf-8")
+        result = self.assert_refused("NoScope")
+        self.assertIn("### Epic 1, ### Epic 3", result["reason"])
+        self.assertIn("numbered 1 to 2 in order", result["reason"])
+        self.assert_refused("NoScope", dry_run=True)
+
+    def test_a_held_scope_lock_is_quote_unwritable_and_writes_nothing(self):
+        self.history(8)
+        (self.dir / "scope.lock").write_text("other", encoding="utf-8")
+        result = self.assert_refused("QuoteUnwritable", lock_wait_s=0)
+        self.assertIn("_bmad-output/engagements/ENG-001/scope.lock is held",
+                      result["reason"])
+        self.assertIsNone(self.record().get("quote"))
+        self.assertEqual((self.dir / "scope.lock").read_text("utf-8"),
+                         "other")  # never removed by the refused quote
+
+    def test_an_os_refusal_is_quote_unwritable(self):
+        before = self.files()
+        with mock.patch.object(engage, "atomic_write_text",
+                               side_effect=PermissionError("denied")):
+            result = self.quote()
+        self.assert_status_block_last(result, "blocked")
+        self.assertIn("QuoteUnwritable:", result["reason"])
+        self.assertEqual(result["written"], [])
+        self.assertEqual(self.files(), before)
+
+    def test_bands_refused_after_the_record_names_the_record(self):
+        real = engage.atomic_write_text
+
+        def only_record(path, text):
+            if Path(path).name == "budget-bands.yaml":
+                raise PermissionError("denied")
+            real(path, text)
+
+        with mock.patch.object(engage, "atomic_write_text", only_record):
+            result = self.quote()
+        self.assert_status_block_last(result, "blocked")
+        self.assertIn("QuoteUnwritable: .tk-studio/budget-bands.yaml",
+                      result["reason"])
+        self.assertEqual(result["written"], [
+            "_bmad-output/engagements/ENG-001/engagement.yaml"])
+        self.assertEqual(self.bands.read_text(encoding="utf-8"), BANDS)
+
+
+    def test_a_scalar_epics_in_the_bands_is_quote_unwritable(self):
+        self.history(8)
+        self.bands.write_text(BANDS + 'epics: ""\n', encoding="utf-8")
+        before = self.files()
+        result = self.quote()
+        self.assert_status_block_last(result, "blocked")
+        self.assertIn("QuoteUnwritable: .tk-studio/budget-bands.yaml's "
+                      "top-level epics is", result["reason"])
+        self.assertEqual(result["written"], [])
+        self.assertEqual(self.files(), before)  # nothing written
+
+class QuoteCliTests(QuoteTestCase):
+    def run_cli(self, *argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = engage.main(["quote", "--directory", str(self.root),
+                                "--engagement", ENG, *argv])
+        return code, json.loads(out.getvalue())
+
+    def test_the_cli_quotes_with_a_seed_and_refuses_by_name(self):
+        code, result = self.run_cli("--seed", "5", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assert_status_block_last(result, "partial")
+        self.assertEqual(result["quote"]["basis"]["seed"], 5)
+        code, result = self.run_cli()
+        self.assertEqual(code, 0)
+        self.assert_status_block_last(result, "complete")
+        self.assertIsNotNone(self.record()["quote"])
+        self.set_record(state="quoted")
+        code, result = self.run_cli()
+        self.assertEqual(code, 2)
+        self.assert_status_block_last(result, "blocked")
+        self.assertIn("NotScoping", result["reason"])
+
+    def test_a_seed_outside_the_json_exact_range_refuses(self):
+        before = self.files()
+        for bad in ("-1", str(2 ** 53), str(2 ** 64)):
+            code, result = self.run_cli("--seed", bad)
+            self.assertEqual(code, 2, bad)
+            self.assert_status_block_last(result, "blocked")
+            self.assertIn("BadSeed", result["reason"])
+            self.assertEqual(result["written"], [])
+            self.assertIsNone(result["quote"])
+        self.assertEqual(self.files(), before)  # nothing written
+        code, result = self.run_cli("--seed", str(2 ** 53 - 1), "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertEqual(result["quote"]["basis"]["seed"], 2 ** 53 - 1)
+
+    def test_scope_counts_from_the_headings(self):
+        counts = engage.scope_counts(SCOPE)
+        self.assertEqual(counts, {"epics": [{"k": 1,
+                                             "title": "Report exports",
+                                             "stories": 2}],
+                                  "stories": 2})
+        two = SCOPE + ("\n### Epic 2: Later\n\n#### Story 2.1: One\n\n"
+                       "text\n")
+        self.assertEqual(engage.scope_counts(two)["stories"], 3)
+        self.assertEqual(engage.scope_counts("# nothing\n"),
+                         {"epics": [], "stories": 0})
+
+
 if __name__ == "__main__":
     unittest.main()
