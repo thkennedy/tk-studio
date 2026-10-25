@@ -107,6 +107,14 @@ describe("the office stream", () => {
     expect(s.view?.runs[0].state).toBe("paused");
   });
 
+  it("Story 32.7: listens for office.engagement deltas", () => {
+    start();
+    latest().emit("snapshot", "b-5", { ...snap("b-5"), engagements: [{ id: "ENG-001", project: "p", state: "intake", title: "t", needs_you: false }] });
+    latest().emit("office.engagement", "b-6", { id: "ENG-001", project: "p", state: "quoted", from: "scoping", title: "t", needs_you: true });
+    expect(store.getState().view?.engagements).toEqual([{ id: "ENG-001", project: "p", state: "quoted", title: "t", needs_you: true }]);
+    expect(store.getState().lastId).toBe("b-6");
+  });
+
   it("fills a gap by the browser's resume: reconnecting, then the replay applies, the overlap ignored", () => {
     start();
     const es = latest();

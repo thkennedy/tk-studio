@@ -321,3 +321,8 @@
     events carry kind, kind-less reads as questions). Side exits from engagement-cap /
     engagement-run-stop events. cancel applies at the next finally tick; the revise
     graceful stop is unbuilt (reuse launchStopGraceful as the cap does).
+    Replan (from 32-7, 2026-10-25): the contract's "Story / rulings" row now ends
+    "Story 32.6, Story 32.7 (Epic 32)"; append Story 32.8 in that shape and keep the
+    32.7 pin's strings.
+    Oversize (gate, 2026-10-25): plans/32-8.md lists 16 files, past band L; halt
+    blocked if the Files list must grow beyond the plan's list.

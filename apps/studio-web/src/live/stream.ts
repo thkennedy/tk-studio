@@ -9,7 +9,8 @@ export const WATCHDOG_MS = 15_000;
 export const BACKOFF_MIN_MS = 1_000;
 export const BACKOFF_MAX_MS = 30_000;
 
-const DELTA_KINDS = ["office.agent", "office.progress", "office.run"] as const;
+// Story 32.7: `office.engagement` (0.1.27) feeds the Chat nav count.
+const DELTA_KINDS = ["office.agent", "office.progress", "office.run", "office.engagement"] as const;
 const CONNECTING = 0;
 const CLOSED = 2;
 

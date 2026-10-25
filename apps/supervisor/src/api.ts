@@ -14,7 +14,8 @@
  *                            → the CLI's own submit path (`submitProject` → `submitJob` → `enqueue`);
  *                            a flagged run with no TK_SUPERVISOR_WORK is 400 WorkDirMissing (Story 22.3)
  *   GET  /jobs               the submitted jobs
- *   GET  /runs/{id}          the queue run and its events (kinds and details as stored)
+ *   GET  /runs/{id}          the queue run and its events (kinds and details as stored); Story 32.7 (0.1.27 additive):
+ *                            `cost_usd` — the ledger `job-run` `total_cost_usd` of its `studio_run_id`, else null
  *   POST /runs/{id}/cancel   ends the run `cancelled` (`cancelRun`); 409 once terminal; 409 ExternalRun on an
  *                            external run (Story 27.2: started outside the queue, never cancelled here)
  *   POST /runs/{id}/resume   {restore_patch?} (Story 27.3, bearer only): a paused run whose story did not land is
@@ -108,7 +109,7 @@ import {
 import {
   csrfToken, readCookie, safeEqual, sessionSubAccepted, SESSION_COOKIE, SESSION_TTL_S, setCookie, signInPage, type SignInMode, signSession, USERNAME_RE, verifySession,
 } from "./auth";
-import { boardFor, type BoardAnswer } from "./board";
+import { boardFor, ledgerPath, type BoardAnswer } from "./board";
 import { appendChatLineHeld, ChatBusy, chatSince, checkChatBody, dropChatLineHeld, mintChatTurn, prepareChatTurn, recordIsJsonText, withChatLockAsync, type ChatDeps, type ChatLine } from "./chat";
 import { afterEngagementInput, CancelRaced, cancelRun, chatDeps, ExternalRunRefused, resumeRun, StartError, submitProject, type AgentsOption } from "./cli";
 import { ResumeRefused, type ResumeAnswer } from "./closeout";
@@ -118,7 +119,7 @@ import {
   listEngagements, mintEngagementId, newEngagement, readEngagement, TERMINAL_STATES, writeEngagement, type Engagement,
 } from "./engagement";
 import { underBunTest } from "./hygiene";
-import { checkReplyBody, issueRead, postReply, registryRoot, type IssueReadResult, type ReplyAnswer, type ReplyBody } from "./inbox";
+import { checkReplyBody, issueRead, postReply, registryRoot, runCost, type IssueReadResult, type ReplyAnswer, type ReplyBody } from "./inbox";
 import { OfficeHub, readInbox, type InboxFile, type OfficeEvent } from "./office";
 import { gatherPage, holderOf, readLedgerTail, redactLedgerLine, renderPage } from "./page";
 import { readAgents, type RebuildResult } from "./registry";
@@ -1197,7 +1198,10 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
         if (runId === null) return fail(404, "RunNotFound", { run_id: runMatch[1] });
         const run = queue.get(runId);
         if (!run) return fail(404, "RunNotFound", { run_id: runId });
-        return json(200, { ok: true, run_id: run.run_id, studio_run_id: run.studio_run_id, state: run.state, run, events: queue.events(runId) });
+        // Story 32.7 (0.1.27 additive): the run's metered cost — the ledger `job-run` `total_cost_usd` of its studio run
+        // (`inbox.ts` `runCost`), null with no studio run id or no metered line.
+        const cost_usd = run.studio_run_id ? runCost(ledgerPath(deps.env ?? process.env, deps.ledger), run.studio_run_id) : null;
+        return json(200, { ok: true, run_id: run.run_id, studio_run_id: run.studio_run_id, state: run.state, cost_usd, run, events: queue.events(runId) });
       }
       return fail(404, "NotFound", { path });
     }

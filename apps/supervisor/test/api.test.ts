@@ -5,6 +5,7 @@ import { delimiter, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { ApiBindRefused, checkBind, checkResumeBody, checkSubmitBody, createApi, serve, type ApiDeps, type SubmitBody } from "../src/api";
 import { csrfToken, SESSION_COOKIE, signSession } from "../src/auth";
+import { ledgerPath } from "../src/board";
 import { listEngagements, readEngagement, writeEngagement } from "../src/engagement";
 import { ResumeRefused } from "../src/closeout";
 import { CancelRaced, cancelRun, CANCELLED_REASON, endCancelledLeftovers, launchStopGraceful, mirror, queueRecorder, recordMinted, StartError, type RunSummary } from "../src/cli";
@@ -298,6 +299,37 @@ describe("read routes (AC4)", () => {
     expect(got.events.map((e: any) => e.kind)).toEqual(["enqueued", "run-options"]);
     expect((await fx.call("GET", "/runs/x")).status).toBe(404);
     expect((await fx.call("POST", "/runs/x/cancel")).status).toBe(404);
+  });
+
+  test("Story 32.7: GET /runs/{id} cost_usd is the ledger job-run total_cost_usd of its studio run, else null", async () => {
+    const home = mkdtempSync(join(tmpdir(), "tk-sup-runcost-home-"));
+    const env = { TK_STUDIO_HOME: home };
+    const ledger = { user: "owner", machine: "box" };
+    const queue = new Queue(join(mkdtempSync(join(tmpdir(), "tk-sup-runcost-q-")), "q.db"), { ownerAlive: () => false, engineLive: async () => ({ live: false }) });
+    const handler = createApi({ queue, token: TOKEN, submit: async () => { throw new Error("never"); }, env, ledger });
+    const get = async (id: string) => await (await handler(new Request(`${BASE}/runs/${id}`, { headers: { authorization: `Bearer ${TOKEN}` } }))).json() as Record<string, any>;
+    const root = mkdtempSync(join(tmpdir(), "tk-sup-runcost-root-"));
+    const mint = (jobId: string) => queue.enqueue({ jobId, root, projectId: "p", target: "skill", definition: { id: jobId } }).run;
+    const metered = mint("engagement-chat");
+    const unmetered = mint("studio-health");
+    const bare = mint("validate-resolution");
+    queue.setStudioRun(metered.run_id, "engagement-chat-20261025T000001Z");
+    queue.setStudioRun(unmetered.run_id, "studio-health-20261025T000002Z");
+    // No ledger file yet: null, never a throw.
+    expect((await get(metered.run_id)).cost_usd).toBeNull();
+    const file = ledgerPath(env, ledger);
+    mkdirSync(join(home, "measurements"), { recursive: true });
+    writeFileSync(file, [
+      JSON.stringify({ event: "job-run", payload: { run_id: "engagement-chat-20261025T000001Z", total_cost_usd: 0.25 } }),
+      "{torn",
+      JSON.stringify({ event: "job-run", payload: { run_id: "engagement-chat-20261025T000001Z", total_cost_usd: 0.42 } }),
+      JSON.stringify({ event: "story-run", payload: { run_id: "studio-health-20261025T000002Z", total_cost_usd: 9 } }),
+    ].join("\n") + "\n");
+    const got = await get(metered.run_id);
+    expect(got).toMatchObject({ ok: true, run_id: metered.run_id, studio_run_id: "engagement-chat-20261025T000001Z", cost_usd: 0.42 });
+    expect((await get(unmetered.run_id)).cost_usd).toBeNull(); // a studio run id with no job-run line
+    const none = await get(bare.run_id);
+    expect(none).toMatchObject({ studio_run_id: null, cost_usd: null }); // no studio run id
   });
 
   test("a malformed escape in a run id (e.g. %E0%A4) is 404, not a 500", async () => {

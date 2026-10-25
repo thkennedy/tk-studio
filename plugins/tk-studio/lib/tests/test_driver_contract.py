@@ -1386,6 +1386,42 @@ class DriverContractTestCase(unittest.TestCase):
                       "`closeout`", engage)
         self.assertNotIn("every other byte", self.text)
 
+    # --- Story 32.7: the same 0.1.27 entry adds the Chat screen's one read —
+    # `GET /runs/{id}` `cost_usd` for the planner's run cost on hover —
+    # additive, never a 0.1.28; every earlier pin kept.
+
+    def test_0_1_27_story_32_7_adds_the_run_cost_read(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.27**", header)
+        self.assertNotIn("**0.1.28**", self.text)
+        self.assertLess(header.index("0.1.27 (Story 32.6) adds to this same "
+                                     "entry"),
+                        header.index("0.1.27 (Story 32.7) adds to this same "
+                                     "entry"))
+        self.assertEqual(header.count("0.1.27 (Story 32.7)"), 1)
+        clause = " ".join(header[header.index("0.1.27 (Story 32.7)"):]
+                          .split())
+        for phrase in ("`GET /runs/{id}` gains `cost_usd: number \\| null`",
+                       "the ledger `job-run` `total_cost_usd` of the run's "
+                       "`studio_run_id`", "`inbox.ts` `runCost`",
+                       "`null` with no studio run id or no metered line",
+                       "per planner chat line's `run_id` on hover or focus",
+                       "one read in flight per run",
+                       "a metered cost cached per run", "`not metered`",
+                       "a null or a failed read is read again",
+                       "no field is added to the chat line",
+                       "no route or table row changes", "— additive) |"):
+            self.assertIn(phrase, clause)
+        # 32.6's clause still closes before 32.7's opens
+        before = header[:header.index("0.1.27 (Story 32.7)")]
+        self.assertTrue(before.rstrip().endswith(
+            "closes only a `questions` block; no table row changes — "
+            "additive;"))
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 32.6, Story 32.7 (Epic 32)", stories)
+
     def test_section_8_names_the_cli_drives(self):
         section = self.text[self.text.index("## 8. Conformance"):]
         flat = " ".join(section.split())
