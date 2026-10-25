@@ -224,6 +224,19 @@ describe("Story 31.7: the resolution pass queues validate-resolution once per bl
     }
   });
 
+  test("Story 32.3: an engagement's questions item (resolved or validating) never queues validate-resolution", async () => {
+    const eng = (state: string) => ({ ...item(state), issue: "TKS-40", entity: undefined, engagement: "ENG-001", title: "ENG-001: questions" });
+    const q = newQueue(), root = project({ items: [eng("resolved"), eng("validating")] });
+    const { d } = deps(root);
+    expect(await resolutionPass(q, d)).toEqual({ queued: [], resumed: [] });
+    expect(validationRuns(q)).toEqual([]);
+    expect(q.serviceEvents("validate-queued")).toEqual([]);
+    // a story's resolved item beside it still queues
+    const q2 = newQueue(), both = project({ items: [eng("resolved"), item()] });
+    expect((await resolutionPass(q2, deps(both).d)).queued.length).toBe(1);
+    expect(validationRuns(q2).length).toBe(1);
+  });
+
   test("no paused run, no routing file: queued with null paused_run and spec, the job's own routing (no model)", async () => {
     const q = newQueue(), root = project({ items: [item("resolved", null)] });
     const { d } = deps(root);

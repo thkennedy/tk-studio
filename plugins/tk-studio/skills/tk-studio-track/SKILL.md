@@ -1,6 +1,6 @@
 ---
 name: tk-studio-track
-description: Tracking verbs on the bound Jira project — `block` moves a story the loop cannot progress, and each dependent story, to "Blocked - Awaiting User" with a comment that @mentions the owner; `reply` posts the owner's answer (or "Done.") with the owner's host-only token and moves the issue to "Block Resolved"; `validate` checks that resolution and passes the issue back to work or re-blocks it with a follow-up. Use when the user says "block this story", "tk track block", "put it in the owner's inbox", "reply to the blocked issue", "validate the resolution", or a supervisor or engagement payload names this skill.
+description: Tracking verbs on the bound Jira project — `block` moves a story the loop cannot progress, and each dependent story, to "Blocked - Awaiting User" with a comment that @mentions the owner (or, with `--engagement`, one engagement's questions issue, which `close` later moves to "Done"); `reply` posts the owner's answer (or "Done.") with the owner's host-only token and moves the issue to "Block Resolved"; `validate` checks that resolution and passes the issue back to work or re-blocks it with a follow-up. Use when the user says "block this story", "tk track block", "put it in the owner's inbox", "reply to the blocked issue", "validate the resolution", or a supervisor or engagement payload names this skill.
 ---
 
 # tk-studio-track
@@ -48,6 +48,53 @@ from those statuses. Every Atlassian write goes through the planning adapter
    written[], retry?}` with the status block last; no local file is written.
    `--source engagement` fixes the shape for the engagement loop's questions
    (EP-32); the supervisor's paused-run pass calls it with `--source run`.
+
+   An engagement's questions (Story 32.3) block one issue per engagement
+   instead of a story's; the supervisor's questions pass calls both verbs on
+   the host:
+
+   ```bash
+   uv run "${CLAUDE_PLUGIN_ROOT}/lib/track.py" block --directory <project-root> \
+     --engagement <ENG-NNN> [--dry-run]
+   uv run "${CLAUDE_PLUGIN_ROOT}/lib/track.py" close --directory <project-root> \
+     --engagement <ENG-NNN> [--dry-run]
+   ```
+
+   `--engagement` is exclusive with `--story`, implies `--source
+   engagement` and takes no `--reason` or `--resolves`. `block` finds the
+   issue by its exact summary `ENG-NNN: questions` in
+   `planning.jira.project_key` (`GET /search/jql`) or creates it (`POST
+   /issue`, type `Task`, label `tk-studio-engagement`, the request's first
+   line as its description), moves it to `Blocked - Awaiting User` by name
+   with the skip rules above, and comments the record's open questions:
+
+   ```text
+   [~accountid:<owner>] Blocked: ENG-NNN needs <n> answer(s)
+   Resolves when: reply with one "<id>: <option>" line per question
+
+   <id>: <text>
+   Impact: <impact>
+   - <label> (default)
+   - <label>
+   ```
+
+   The result is `{ok, dry_run, story: null, engagement, source:
+   "engagement", issues: [{issue, created, transitioned, commented,
+   skipped?}], notes[], written: [], retry?}`; its refusals add
+   `EngagementNotFound`, `NoOpenQuestions`, `IssueCreateRefused` (a 400
+   on the create, e.g. no `Task` type) and `EngagementLockUnwritable`. `close` (the agent seat) moves the
+   issue by name to `Block Resolved` (unless it is there or at `Done`), then
+   to `Done` — no validation leg: the planner's next turn judges the
+   answers; a move already in place is named in `skipped[]`, an absent issue
+   is `NoIssue`, a move no transition makes `NoTransition` (an issue never
+   blocked, e.g. at `To Do`, skips `Block Resolved` when no transition
+   reaches it, named in `skipped[]`); the result is `{ok, dry_run, engagement, issue, moved[],
+   skipped[], notes[], written: [], retry?}`.
+   Both verbs hold `_bmad-output/engagements/<id>/track.lock` (exclusive
+   create, stale after 300 s; a dry run takes none): a lock held ends
+   `partial` with `retry: true`, so two callers never create two issues. A
+   re-block after an owner reply that answered nothing posts the comment
+   again, even with the same body.
    Payload mapping: `story`, `reason`, `resolves` map to their flags;
    `source` adds `--source <source>`; `dry_run` adds `--dry-run` (reads
    only, writes nothing).

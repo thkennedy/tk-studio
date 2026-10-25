@@ -34,6 +34,24 @@ supervisor's rules (`checkInputBody`), `label` a non-empty string of at most
 80 characters. A proposal is a button the owner presses; the planner moves
 no state, holds no bearer and no CSRF token.
 
+The `questions` verb (Story 32.3, user flow F2 step 2) is the planner's
+clarifying questions, asked only when the turn finds gaps a default cannot
+cover:
+
+  uv run engage.py questions --directory ROOT --engagement ENG-NNN
+      --run-id RUN --questions-file PATH [--dry-run]
+
+writes `_bmad-output/engagements/<id>/questions.json` atomically (Settled
+shape 1): `{run_id, at, questions: [{id, text, options: [{label, default?:
+true}], impact}]}` — 1 to 3 questions, each `id` matching
+`^[a-z0-9][a-z0-9-]{0,15}$` and unique, `text` and `impact` non-empty, 2 to
+6 options with non-empty unique labels and exactly one `default: true`. The
+questions file is a JSON array of those questions. The supervisor applies
+the written file once per `run_id` (the 32.1 event row `questions`, source
+`planner`); this verb moves no state. Its refusals: `TooManyQuestions` (a
+fourth), `QuestionInvalid` (naming the index), `EngagementClosed`,
+`NotIntake` (any state but `intake`), `RunIdRequired`, plus the record's.
+
 Refusals end `blocked` (exit 2), each named in `reason`: `BadEngagement`,
 `UnknownEngagement` (no record), `EngagementRecordUnreadable` (not JSON, or
 not a record), `EngagementClosed` (`delivered`, `failed`, `cancelled`),
@@ -329,6 +347,125 @@ def check_proposals(proposals) -> list[dict]:
     return out
 
 
+# ------------------------------------------------------------ the questions
+
+QUESTION_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,15}$")
+QUESTIONS_MAX = 3
+OPTIONS_MIN, OPTIONS_MAX = 2, 6
+QUESTION_FIELDS = ("id", "text", "options", "impact")
+OPTION_FIELDS = ("label", "default")
+
+
+def questions_rel(engagement: str) -> str:
+    return f"_bmad-output/engagements/{engagement}/questions.json"
+
+
+def check_questions(questions) -> list[dict]:
+    """The questions checked (Settled shape 1): a fourth is
+    TooManyQuestions; any other bad shape is QuestionInvalid naming the
+    first bad index."""
+    if not isinstance(questions, list):
+        raise Refused("QuestionInvalid", "the questions must be a JSON array")
+    if not questions:
+        raise Refused("QuestionInvalid", "at least one question is asked")
+    if len(questions) > QUESTIONS_MAX:
+        raise Refused("TooManyQuestions", f"{len(questions)} questions; at "
+                      f"most {QUESTIONS_MAX} are asked (questions[3] is "
+                      f"one too many)")
+    out, ids = [], set()
+    for i, question in enumerate(questions):
+        def bad(why: str):
+            return Refused("QuestionInvalid", f"questions[{i}]: {why}")
+        if not isinstance(question, dict):
+            raise bad("not an object {id, text, options, impact}")
+        extra = [k for k in question if k not in QUESTION_FIELDS]
+        if extra:
+            raise bad(f"unknown field '{extra[0]}' (allowed: "
+                      f"{', '.join(QUESTION_FIELDS)})")
+        qid = question.get("id")
+        if not isinstance(qid, str) or not QUESTION_ID_RE.fullmatch(qid):
+            raise bad(f"field 'id' {json.dumps(qid)} must match "
+                      f"{QUESTION_ID_RE.pattern}")
+        if qid in ids:
+            raise bad(f"duplicate id '{qid}'")
+        ids.add(qid)
+        for key in ("text", "impact"):
+            if not _non_empty(question.get(key)):
+                raise bad(f"field '{key}' must be a non-empty string")
+        options = question.get("options")
+        if not isinstance(options, list) or not \
+                OPTIONS_MIN <= len(options) <= OPTIONS_MAX:
+            raise bad(f"field 'options' must hold {OPTIONS_MIN} to "
+                      f"{OPTIONS_MAX} options")
+        labels, defaults, kept = set(), 0, []
+        for j, option in enumerate(options):
+            if not isinstance(option, dict):
+                raise bad(f"options[{j}] is not an object {{label, default?}}")
+            extra = [k for k in option if k not in OPTION_FIELDS]
+            if extra:
+                raise bad(f"options[{j}]: unknown field '{extra[0]}' "
+                          f"(allowed: label, default)")
+            label = option.get("label")
+            if not _non_empty(label):
+                raise bad(f"options[{j}]: field 'label' must be a non-empty "
+                          f"string")
+            folded = label.strip().casefold()
+            if folded in labels:
+                raise bad(f"options[{j}]: duplicate label '{label.strip()}'")
+            labels.add(folded)
+            if "default" in option:
+                if option["default"] is not True:
+                    raise bad(f"options[{j}]: field 'default' must be true "
+                              f"when present")
+                defaults += 1
+            kept.append({"label": label.strip(),
+                         **({"default": True} if option.get("default")
+                            is True else {})})
+        if defaults != 1:
+            raise bad(f"exactly one option is the default ({defaults} are)")
+        out.append({"id": qid, "text": question["text"].strip(),
+                    "options": kept, "impact": question["impact"].strip()})
+    return out
+
+
+def questions(project_root: Path, engagement: str, asked=None,
+              run_id: str | None = None, dry_run: bool = False,
+              now=None) -> dict:
+    """The `questions` verb (see the module docstring): `asked` is the
+    parsed questions file."""
+    root = Path(project_root).resolve()
+    result = _result(engagement, "questions", dry_run)
+    try:
+        if not ENGAGEMENT_ID_RE.match(engagement or ""):
+            raise Refused("BadEngagement", f"--engagement {engagement!r} is "
+                          f"not an engagement id (ENG-001)")
+        record = read_record(root, engagement)
+        state = record.get("state")
+        if state in TERMINAL_STATES:
+            raise Refused("EngagementClosed", f"{engagement} is {state}; "
+                          f"nothing is written")
+        if state != "intake":
+            raise Refused("NotIntake", f"{engagement} is {state}; questions "
+                          f"are asked only in intake")
+        if not _non_empty(run_id):
+            raise Refused("RunIdRequired", "the questions name their run "
+                          "(--run-id, the payload's run_id)")
+        checked = check_questions(asked)
+        doc = {"run_id": run_id.strip(), "at": now or _now(),
+               "questions": checked}
+        result["questions"] = doc
+        if dry_run:
+            result["notes"].append("dry run: questions.json was not written")
+            return _finish(result, "partial", "dry run: nothing written; a "
+                           "real run would write `questions`")
+        atomic_write_text(engagement_dir(root, engagement) / "questions.json",
+                          json.dumps(doc, ensure_ascii=False, indent=2) + "\n")
+        result["written"].append(questions_rel(engagement))
+        return _finish(result, "complete", None)
+    except Refused as exc:
+        return _finish(result, "blocked", f"engage refused: {exc}")
+
+
 # ------------------------------------------------------------ the chat lock
 
 def _take_over_stale(lock: Path, clock) -> None:
@@ -465,6 +602,27 @@ def reply(project_root: Path, engagement: str, body: str | None = None,
 
 # --------------------------------------------------------------------- CLI
 
+def _questions_main(directory: Path, args) -> int:
+    def refused(why: str) -> int:
+        result = _finish(_result(args.engagement, "questions", args.dry_run),
+                         "blocked", f"engage refused: {why}; nothing written")
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 2
+    try:
+        text = Path(args.questions_file).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return refused(f"cannot read --questions-file: {exc}")
+    try:
+        asked = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return refused(f"QuestionInvalid: --questions-file is not JSON "
+                       f"({exc.msg})")
+    result = questions(directory, args.engagement, asked, run_id=args.run_id,
+                       dry_run=args.dry_run)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 2 if result.get("status") == "blocked" else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     # Headless output must survive a cp1252 Windows console (AD-11).
     if hasattr(sys.stdout, "reconfigure"):
@@ -483,8 +641,19 @@ def main(argv: list[str] | None = None) -> int:
     rep.add_argument("--run-id", help="the driven run's id (the payload's "
                                       "run_id)")
     rep.add_argument("--dry-run", action="store_true")
+    qst = sub.add_parser("questions")
+    qst.add_argument("--directory", required=True,
+                     help="project root (walks up to the nearest)")
+    qst.add_argument("--engagement", required=True, help="ENG-NNN")
+    qst.add_argument("--run-id", help="the driven run's id (the payload's "
+                                      "run_id)")
+    qst.add_argument("--questions-file", required=True,
+                     help="a JSON array of {id, text, options, impact}")
+    qst.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     directory = configlib.find_project_root(Path(args.directory))
+    if args.command == "questions":
+        return _questions_main(directory, args)
     mode = "write" if args.body_file is not None else "memory"
     texts = {}
     for name in ("body_file", "proposals_file"):

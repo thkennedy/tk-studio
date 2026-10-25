@@ -1054,6 +1054,69 @@ class DriverContractTestCase(unittest.TestCase):
                          [(["lib/engage.py", "reply"], "status-block",
                            "blocked", "UnknownEngagement")])
 
+    # --- Story 32.3: the same 0.1.27 entry adds the clarifying questions —
+    # `engage.py questions`, `track.py block --engagement` and `close`, the
+    # inbox item's `engagement?`, the planner desk's "!" and the `answer`
+    # rows' source `supervisor` — additive, never a 0.1.28.
+
+    def test_0_1_27_story_32_3_adds_the_questions(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.27**", header)
+        self.assertNotIn("**0.1.28**", self.text)
+        self.assertLess(header.index("0.1.27 (Story 32.2) adds to this same "
+                                     "entry"),
+                        header.index("0.1.27 (Story 32.3) adds to this same "
+                                     "entry"))
+        clause = " ".join(header[header.index("0.1.27 (Story 32.3)"):]
+                          .split())
+        for phrase in ("`engage.py questions --directory <project_root> "
+                       "--engagement ENG-NNN --run-id RUN --questions-file "
+                       "PATH [--dry-run]`", "`TooManyQuestions`",
+                       "`QuestionInvalid`", "source `planner`",
+                       "`engagement-questions-skipped",
+                       "`track.py block --directory ROOT --engagement "
+                       "ENG-NNN [--dry-run]`", "`ENG-NNN: questions`",
+                       "`Task`", "`tk-studio-engagement`",
+                       "`track.py close --directory ROOT --engagement "
+                       "ENG-NNN [--dry-run]`", "source `supervisor`",
+                       "`engagement?`", "`planner` agent",
+                       "nothing moves on a timer", "— additive) |",
+                       "no further call until a later `questions` or "
+                       "`answer` line, or an owner comment that applies "
+                       "nothing (`engagement-answers` with `ids: []`)"):
+            self.assertIn(phrase, clause)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 32.3", stories)
+        engage = next(line for line in self.text.splitlines()
+                      if line.startswith("| `tk-studio-engage` "))
+        for phrase in ("`questions`, 0.1.27, Story 32.3",
+                       "`lib/engage.py questions`", "`--questions-file`",
+                       "`TooManyQuestions`", "`NotIntake`",
+                       "`QuestionInvalid` (naming the index)"):
+            self.assertIn(phrase, engage)
+        track = next(line for line in self.text.splitlines()
+                     if line.startswith("| `tk-studio-track` "))
+        for phrase in ("`block` with `engagement`", "`close`, 0.1.27, Story "
+                       "32.3", "`lib/track.py close`", "`ENG-NNN: questions`",
+                       "`EngagementNotFound`", "`NoOpenQuestions`",
+                       "`IssueCreateRefused`", "`NoIssue`",
+                       "`NoTransition` `blocked`",
+                       "`Block Resolved`, then `Done`"):
+            self.assertIn(phrase, track)
+        inbox = next(line for line in self.text.splitlines()
+                     if line.startswith("| the inbox (Story 31.5, 0.1.26) |"))
+        for phrase in ("`{issue, entity?, engagement?, title?,",
+                       "the project's `planner` agent takes it from the "
+                       "first `open` item carrying `engagement`"):
+            self.assertIn(phrase, inbox)
+        answers = [line for line in self.text.splitlines()
+                   if line.startswith("| `awaiting-answers` | `answer` |")]
+        self.assertEqual(len(answers), 2)
+        for line in answers:
+            self.assertIn("bearer \\| cookie \\| supervisor", line)
+
     def test_section_8_names_the_cli_drives(self):
         section = self.text[self.text.index("## 8. Conformance"):]
         flat = " ".join(section.split())

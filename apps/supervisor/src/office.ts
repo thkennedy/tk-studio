@@ -13,7 +13,9 @@
  * project's `current_story` (`N-M…`) — or, when that gives nothing and the run is `paused`, the story it paused on
  * (the queue `paused` event's `paused_story_key`, else the standing journal `story-escalated` key) — maps, by the plan entity's `source: epics.md#story-N.M` in the run's project
  * root, to an entity with an `open` item in that root's `_bmad-output/tracking/inbox.json` (the sync-back's file,
- * re-read when it changes). Only the inbox moves it: a comment or a message never does.
+ * re-read when it changes). Only the inbox moves it: a comment or a message never does. Story 32.3: the project's
+ * `planner` agent takes it from the first `open` item carrying `engagement` (an engagement's questions issue) in the
+ * project's served root, with or without a run; the other agents keep the story's.
  *
  * Story 32.1 (contract 0.1.27, additive): `engagements[]` `{id, project, state, title, needs_you}` — every engagement
  * record (`engagement.ts` `listEngagements`) under each project's served root (the hub's `roots()`, the registry's,
@@ -365,6 +367,13 @@ export function blockedIssueFor(root: string | null | undefined, currentStory: s
   return hit ? { issue: hit.issue as string, state: "open" } : null;
 }
 
+/** Story 32.3: the planner's `blocked_issue` — the first `open` inbox item carrying `engagement`; null when none. */
+export function engagementBlockedIssue(root: string | null | undefined): BlockedIssue | null {
+  if (!root) return null;
+  const hit = readInbox(root).items.find((i) => i.state === "open" && typeof i.engagement === "string" && typeof i.issue === "string");
+  return hit ? { issue: hit.issue as string, state: "open" } : null;
+}
+
 const sameBlocked = (a: BlockedIssue | null | undefined, b: BlockedIssue | null | undefined): boolean =>
   (a?.issue ?? null) === (b?.issue ?? null) && (a?.state ?? null) === (b?.state ?? null);
 /** A project's newest terminal run (Story 30.4, contract 0.1.25): its end state, its PR (`runPr`) and when it ended
@@ -649,8 +658,9 @@ export function projectOffice(queue: Queue, deps: { now?: () => number; roots?: 
   touched = seen;
   try {
     const core = projectCore(queue);
-    const byProject = new Map<string, ReturnType<typeof core.forProject> & { blocked: BlockedIssue | null }>();
+    const byProject = new Map<string, ReturnType<typeof core.forProject> & { blocked: BlockedIssue | null; planner: BlockedIssue | null }>();
     const rows = readAgents(queue).agents;
+    const roots = deps.roots?.();
     const agents: OfficeAgent[] = rows.map((row) => {
       let p = byProject.get(row.project);
       if (!p) {
@@ -662,18 +672,23 @@ export function projectOffice(queue: Queue, deps: { now?: () => number; roots?: 
           blocked = f.run ? blockedIssueFor(f.run.root, f.current_story) : null;
           if (!blocked && f.run && f.paused_story && f.paused_story !== f.current_story) blocked = blockedIssueFor(f.run.root, f.paused_story);
         } catch { /* no signal */ }
-        p = { ...f, blocked };
+        // Story 32.3: the planner's "!" follows an engagement's questions issue, with or without a run
+        let planner: BlockedIssue | null = null;
+        try {
+          planner = engagementBlockedIssue(roots?.[row.project] ?? f.run?.root ?? core.runs.findLast((r) => r.project_id === row.project)?.root);
+        } catch { /* no signal */ }
+        p = { ...f, blocked, planner };
         byProject.set(row.project, p);
       }
       const state = (p.states as Record<string, OfficeState>)[row.role] ?? (p.run && LIVE_RUN_STATES.has(p.run.state) ? "idle" : "offline");
       return {
         agent_id: row.agent_id, project: row.project, role: row.role, state, current_run: p.run?.run_id ?? null, current_story: p.current_story,
-        reason: reasonFor(state, p.run, p.waitReason), blocked_issue: p.blocked,
+        reason: reasonFor(state, p.run, p.waitReason), blocked_issue: row.role === "planner" ? p.planner ?? p.blocked : p.blocked,
       };
     });
     const runs = core.liveRuns();
     const last_run = core.lastRuns();
-    const engagements = engagementsOf(core.runs, rows.map((r) => r.project), deps.roots?.(), core.problems);
+    const engagements = engagementsOf(core.runs, rows.map((r) => r.project), roots, core.problems);
     pruneCaches(seen); // only after a whole projection: a throw keeps the caches as they were
     return { at: new Date((deps.now ?? Date.now)()).toISOString(), agents, runs, problems: core.problems, last_run, engagements };
   } finally { touched = null; }

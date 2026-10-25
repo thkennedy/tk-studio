@@ -34,7 +34,54 @@ ends `partial` with `ok: false` and `retry: true`, so the caller calls again
 on its next pass. Every result ends with the
 §3 status block (AD-11). `--source engagement` fixes the shape for the
 engagement loop's questions (EP-32); the supervisor's paused-run pass is
-the caller today (`--source run`). Stdlib-only (NFR9); never prompts.
+the `--story` caller (`--source run`), and its questions pass
+(`apps/supervisor/src/questions.ts`, Story 32.3) the `--engagement` one
+(below). Stdlib-only (NFR9); never prompts.
+
+The engagement's questions (Story 32.3, user flow F2 step 2) block one
+issue per engagement instead of a story's:
+
+  uv run track.py block --directory ROOT --engagement ENG-NNN [--dry-run]
+
+(`--engagement` is exclusive with `--story`, implies `--source engagement`
+and takes no `--reason` or `--resolves`). The issue is found by its exact
+summary `ENG-NNN: questions` in `planning.jira.project_key` (`GET
+/search/jql`, the summary matched exactly in code) and created when absent
+(`POST /issue`, type `Task`, label `tk-studio-engagement`, the request's
+first line as its description). It moves to `Blocked - Awaiting User` by
+name with the `_block_issue` skip rules (but an owner comment newer than
+the newest agent comment, a reply that answered nothing, gets the comment
+again, naming what is still open), its comment the open questions of the
+record (`_bmad-output/engagements/<id>/engagement.yaml`, JSON text):
+
+    [~accountid:<owner>] Blocked: ENG-NNN needs <n> answer(s)
+    Resolves when: reply with one "<id>: <option>" line per question
+
+    <id>: <text>
+    Impact: <impact>
+    - <label> (default)
+    - <label>
+
+The result is `{ok, dry_run, story: null, engagement, source: "engagement",
+issues: [{issue, created, transitioned, commented, skipped?}], notes,
+written: []}`. Its refusals besides the binding, variable and owner ones:
+`EngagementNotFound`, `NoOpenQuestions`, `IssueCreateRefused` (a 400 on
+the create, e.g. no `Task` type) and `EngagementLockUnwritable`. The
+find-or-create and the comment (and `close`'s moves) run holding
+`_bmad-output/engagements/<id>/track.lock` (exclusive create, stale after
+300 s and retaken; never waited on): a lock held is `partial` with `ok:
+false` and `retry: true`, so two callers never create two issues or post
+one comment twice. A dry run takes no lock.
+
+  uv run track.py close --directory ROOT --engagement ENG-NNN [--dry-run]
+
+moves that issue (agent seat) by name to `Block Resolved` (unless it is
+there or at `Done`), then to `Done`; a move already in place is named in
+`skipped[]`, and so is `Block Resolved` for an issue never blocked (not in
+`Blocked - Awaiting User`, e.g. `To Do`) that no transition takes there;
+an absent issue is `NoIssue`, an absent engagement directory
+`EngagementNotFound`, a move no transition makes `NoTransition`. The result is `{ok, dry_run,
+engagement, issue, moved[], skipped[], notes, written: []}`.
 
 The `reply` verb (Story 31.6, §6.9 items 3 and 4) is the owner's answer:
 
@@ -112,6 +159,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -179,6 +227,23 @@ def newest_agent_comment(client, key: str, owner: str) -> dict | None:
     return best
 
 
+def owner_after_agent(client, key: str, owner: str) -> bool:
+    """Whether an owner comment is newer than the issue's newest agent
+    comment (both read live, Jira listing oldest first): the owner replied
+    since the agent last spoke."""
+    newest = newest_agent_comment(client, key, owner)
+    if newest is None:
+        return False
+    seen = False
+    for c in jirabackend.issue_comments(client, key):
+        if c is newest or (c.get("id") is not None
+                           and c.get("id") == newest.get("id")):
+            seen = True
+        elif seen and (c.get("author") or {}).get("accountId") == owner:
+            return True
+    return False
+
+
 def newest_agent_body(client, key: str, owner: str) -> str | None:
     """The plain body of the issue's newest agent comment (see
     `newest_agent_comment`). None when there is none."""
@@ -220,11 +285,16 @@ def _jira_key(front: dict) -> str | None:
 
 
 def _block_issue(client, owner: str, front: dict, key: str, role: str,
-                 body: str, dry_run: bool, notes: list[str]) -> dict:
+                 body: str, dry_run: bool, notes: list[str],
+                 repost_after_owner: bool = False) -> dict:
     """Move one issue and post its comment; the issue's entry. A refused
     transition sets `error` (and posts no comment); a comment refused by
     name after the transition sets `error` too, `transitioned` kept true. A
-    temporary failure raises (the caller's retry path)."""
+    temporary failure raises (the caller's retry path). With
+    `repost_after_owner` (the engagement's re-block, Settled shape 4) the
+    same body is posted again when an owner comment is newer than the
+    newest agent comment: the reply answered nothing, and the comment names
+    what is still open."""
     entry = {"issue": key, "entity": front["id"], "role": role,
              "transitioned": False, "commented": False}
     skipped: list[str] = []
@@ -246,7 +316,9 @@ def _block_issue(client, owner: str, front: dict, key: str, role: str,
     else:
         entry["transitioned"] = True
     if name == jirabackend.BLOCKED_STATUS and \
-            newest_agent_body(client, key, owner) == body.strip():
+            newest_agent_body(client, key, owner) == body.strip() and \
+            not (repost_after_owner
+                 and owner_after_agent(client, key, owner)):
         skipped.append(f"comment: {key}'s newest agent comment already "
                        f"says this")
     elif dry_run:
@@ -373,6 +445,396 @@ def block(project_root: Path, story: str, reason: str, resolves: str,
         return _finish(result, "partial", "dry run: nothing written; a real "
                        "run would move or comment as `notes[]` names")
     return _finish(result, "complete", None)
+
+
+# -------------------------------------------------------------- engagement
+
+ENGAGEMENT_ID_RE = re.compile(r"^ENG-\d{3,}$")
+ENGAGEMENT_ISSUE_TYPE = "Task"
+ENGAGEMENT_LABEL = "tk-studio-engagement"
+ENGAGEMENTS_REL = Path("_bmad-output") / "engagements"
+DONE_STATUS = "Done"
+ANSWER_RESOLVES = 'reply with one "<id>: <option>" line per question'
+
+
+ENGAGEMENT_LOCK = "track.lock"
+ENGAGEMENT_LOCK_STALE_S = 300.0  # past the supervisor's 120 s call bound
+
+
+class EngagementBusy(Exception):
+    pass
+
+
+def _take_engagement_lock(root: Path, engagement: str,
+                          clock=time.time) -> Path:
+    """Take `_bmad-output/engagements/<id>/track.lock` (exclusive create;
+    older than ENGAGEMENT_LOCK_STALE_S it is stale and retaken, the
+    `engage.py` `chat.lock` precedent: renamed aside, so of two takers one
+    wins). Held, it is EngagementBusy at once (the caller's retry); never
+    waited on. The lock serialises the find-or-create and the comment of
+    `block`/`close --engagement` across processes."""
+    lock = Path(root) / ENGAGEMENTS_REL / engagement / ENGAGEMENT_LOCK
+    for _ in range(3):
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                if clock() - lock.stat().st_mtime <= ENGAGEMENT_LOCK_STALE_S:
+                    raise EngagementBusy(
+                        f"_bmad-output/engagements/{engagement}/"
+                        f"{ENGAGEMENT_LOCK} is held") from None
+            except FileNotFoundError:
+                continue
+            aside = lock.with_name(f"{lock.name}.stale-{os.getpid()}-"
+                                   f"{os.urandom(4).hex()}")
+            try:
+                os.rename(lock, aside)
+            except FileNotFoundError:
+                continue
+            try:
+                if clock() - aside.stat().st_mtime <= ENGAGEMENT_LOCK_STALE_S:
+                    try:  # retaken meanwhile: put back, never over a lock
+                        os.link(aside, lock)
+                    except OSError:
+                        pass
+            finally:
+                try:
+                    aside.unlink()
+                except FileNotFoundError:
+                    pass
+            continue
+        os.close(fd)
+        return lock
+    raise EngagementBusy(f"_bmad-output/engagements/{engagement}/"
+                         f"{ENGAGEMENT_LOCK} is contended")
+
+
+def _release_engagement_lock(lock: Path) -> None:
+    try:
+        lock.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _locked(root: Path, engagement: str, result: dict, dry_run: bool, fn):
+    """Run `fn` holding the engagement's `track.lock` (a dry run writes
+    nothing and takes none). Held: `partial`, `ok: false`, `retry: true`;
+    the OS refusing the lock: EngagementLockUnwritable, `blocked`."""
+    if dry_run:
+        return fn()
+    try:
+        lock = _take_engagement_lock(root, engagement)
+    except EngagementBusy as exc:
+        result["retry"] = True
+        return _finish(result, "partial", f"track retry: {exc} — another "
+                       f"block or close of {engagement} is running; call "
+                       f"again on the next pass", ok=False)
+    except OSError as exc:
+        return _finish(result, "blocked", f"track refused: "
+                       f"EngagementLockUnwritable: {exc}; no Atlassian call "
+                       f"made")
+    try:
+        return fn()
+    finally:
+        _release_engagement_lock(lock)
+
+
+def engagement_summary(engagement: str) -> str:
+    return f"{engagement}: questions"
+
+
+def _answered(question: dict) -> bool:
+    answer = question.get("answer")
+    return answer is not None and answer != ""
+
+
+def read_engagement(root: Path, engagement: str) -> dict | None:
+    """The engagement record (JSON text, Story 32.2), or None when it is
+    absent, unreadable or not this engagement's."""
+    path = Path(root) / ENGAGEMENTS_REL / engagement / "engagement.yaml"
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(record, dict) or record.get("id") != engagement:
+        return None
+    return record
+
+
+def open_questions(record: dict) -> list[dict]:
+    return [q for q in record.get("questions") or []
+            if isinstance(q, dict) and q.get("id") and not _answered(q)]
+
+
+def engagement_comment(owner: str, engagement: str,
+                       questions: list[dict]) -> str:
+    """The engagement's block comment (Settled shape 2): the owner's
+    mention, then one block per open question with its options."""
+    lines = [f"[~accountid:{owner}] Blocked: {engagement} needs "
+             f"{len(questions)} answer(s)",
+             f"Resolves when: {ANSWER_RESOLVES}"]
+    for q in questions:
+        lines += ["", f"{q.get('id')}: {str(q.get('text') or '').strip()}",
+                  f"Impact: {str(q.get('impact') or '').strip()}"]
+        for option in q.get("options") or []:
+            if isinstance(option, dict):
+                label = str(option.get("label") or "").strip()
+                default = option.get("default") is True
+            else:
+                label, default = str(option).strip(), False
+            lines.append(f"- {label}" + (" (default)" if default else ""))
+    return "\n".join(lines)
+
+
+def find_engagement_issue(client, project_key: str,
+                          engagement: str) -> str | None:
+    """The key of the issue whose summary is exactly `ENG-NNN: questions`
+    in the project (`GET /search/jql`, then an exact match in code; the
+    lowest key number wins), else None."""
+    summary = engagement_summary(engagement)
+    jql = (f'project = "{project_key}" AND summary ~ "\\"{summary}\\""')
+    hits = []
+    for issue in jirabackend.search_jql(client, jql, "summary,status"):
+        fields = issue.get("fields") or {}
+        if str(fields.get("summary") or "").strip() == summary \
+                and issue.get("key"):
+            hits.append(str(issue["key"]))
+
+    def number(key: str) -> int:
+        tail = key.rsplit("-", 1)[-1]
+        return int(tail) if tail.isdigit() else 0
+    return min(hits, key=number) if hits else None
+
+
+class IssueCreateRefused(Exception):
+    pass
+
+
+def create_engagement_issue(client, project_key: str, engagement: str,
+                            description: str) -> str:
+    """`POST /issue` (the pattern inline in `jirabackend.promote`): a Task
+    labelled `tk-studio-engagement`. A 400 is IssueCreateRefused; any other
+    failure a JiraError (a 5xx is temporary)."""
+    fields = {"project": {"key": project_key},
+              "summary": engagement_summary(engagement),
+              "issuetype": {"name": ENGAGEMENT_ISSUE_TYPE},
+              "description": description,
+              "labels": [ENGAGEMENT_LABEL]}
+    posted, resp = client.request("POST", "/issue", {"fields": fields},
+                                  scope=jirabackend.SCOPE_WORK)
+    if posted == 400:
+        raise IssueCreateRefused(
+            f"creating {engagement_summary(engagement)!r} (issue type "
+            f"{ENGAGEMENT_ISSUE_TYPE!r}) returned "
+            f"{jirabackend._refusal(posted, resp)}")
+    if posted not in (200, 201) or not isinstance(resp, dict) \
+            or not resp.get("key"):
+        raise jirabackend.JiraError(f"track: POST /issue returned {posted}")
+    return str(resp["key"])
+
+
+def _agent_seat(root: Path) -> tuple[dict | None, str | None, str | None]:
+    """(settings, owner accountId, refusal) for the engagement verbs: the
+    binding, the agent seat's variables and the recorded owner, each
+    refused before any call."""
+    if plansync._recorded(root, "planning.jira.project_key") is None:
+        return None, None, ("planning.jira.project_key is not recorded (no "
+                            "planning.jira binding) — run `plansync.py "
+                            "setup` first; no Atlassian call made")
+    settings, gaps = jirabackend._resolve_settings(root, None)
+    if not os.environ.get(jirabackend.AGENT_TOKEN_ENV) \
+            and not os.environ.get(jirabackend.TOKEN_ENV):
+        gaps.insert(0, f"{jirabackend.AGENT_TOKEN_ENV} is not set (the "
+                       f"agent seat's Jira token)")
+    if gaps:
+        return None, None, "; ".join(gaps) + " — no Atlassian call made"
+    owner = plansync._recorded(root, "planning.jira.owner_account_id")
+    if owner is None:
+        return None, None, ("planning.jira.owner_account_id is not recorded "
+                            "— the block comment @mentions the owner; rerun "
+                            "`plansync.py setup --owner-account-id <id>`; no "
+                            "Atlassian call made")
+    return settings, owner, None
+
+
+def _first_line(text) -> str:
+    for line in str(text or "").splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def block_engagement(project_root: Path, engagement: str,
+                     dry_run: bool = False, transport=None,
+                     sleep=None) -> dict:
+    """`block --engagement` (see the module docstring)."""
+    root = Path(project_root).resolve()
+    result = _result(None, "engagement", dry_run)
+    result["engagement"] = engagement
+
+    def refuse(why: str) -> dict:
+        return _finish(result, "blocked", f"track refused: {why}")
+
+    if not ENGAGEMENT_ID_RE.match(engagement or ""):
+        return refuse(f"EngagementNotFound: --engagement {engagement!r} is "
+                      f"not an engagement id (ENG-001); no Atlassian call "
+                      f"made")
+    settings, owner, gap = _agent_seat(root)
+    if gap:
+        return refuse(gap)
+    record = read_engagement(root, engagement)
+    if record is None:
+        return refuse(f"EngagementNotFound: no readable record at "
+                      f"_bmad-output/engagements/{engagement}/engagement.yaml"
+                      f"; no Atlassian call made")
+    asked = open_questions(record)
+    if not asked:
+        return refuse(f"NoOpenQuestions: {engagement} has no unanswered "
+                      f"question; no Atlassian call made")
+
+    def run() -> dict:
+        project_key = str(plansync._recorded(root,
+                                             "planning.jira.project_key"))
+        client = jirabackend.client_for(settings, transport)
+        if sleep is not None:
+            client.sleep = sleep
+        notes = result["notes"]
+        key = None
+        try:
+            key = find_engagement_issue(client, project_key, engagement)
+            created = False
+            if key is None:
+                if dry_run:
+                    notes.append(f"dry run: "
+                                 f"{engagement_summary(engagement)!r} would "
+                                 f"be created ({ENGAGEMENT_ISSUE_TYPE}) and "
+                                 f"moved to {jirabackend.BLOCKED_STATUS!r}")
+                    result["issues"].append({"issue": None, "created": False,
+                                             "transitioned": False,
+                                             "commented": False})
+                    return _finish(result, "partial", "dry run: nothing "
+                                   "written; a real run would create, move "
+                                   "and comment as `notes[]` names")
+                key = create_engagement_issue(
+                    client, project_key, engagement,
+                    _first_line(record.get("request"))
+                    or engagement_summary(engagement))
+                created = True
+            moved = _block_issue(client, owner, {"id": engagement}, key,
+                                 "engagement",
+                                 engagement_comment(owner, engagement, asked),
+                                 dry_run, notes, repost_after_owner=True)
+        except IssueCreateRefused as exc:
+            return refuse(f"IssueCreateRefused: {exc}")
+        except jirabackend.JiraError as exc:
+            result["issues"].append({"issue": key, "created": False,
+                                     "transitioned": False,
+                                     "commented": False, "error": str(exc)})
+            if transient(exc):
+                result["retry"] = True
+                return _finish(result, "partial", f"track retry: "
+                               f"{engagement}: {exc} — a temporary failure; "
+                               f"call again on the next pass", ok=False)
+            return refuse(f"{engagement}: {exc}")
+        entry = {"issue": key, "created": created,
+                 "transitioned": moved["transitioned"],
+                 "commented": moved["commented"]}
+        for name in ("skipped", "error"):
+            if name in moved:
+                entry[name] = moved[name]
+        result["issues"].append(entry)
+        if "error" in entry:
+            return refuse(f"{key} ({engagement}): {entry['error']}")
+        if dry_run and any(n.startswith("dry run:") for n in notes):
+            return _finish(result, "partial", "dry run: nothing written; a "
+                           "real run would move or comment as `notes[]` "
+                           "names")
+        return _finish(result, "complete", None)
+
+    return _locked(root, engagement, result, dry_run, run)
+
+
+def close_engagement(project_root: Path, engagement: str,
+                     dry_run: bool = False, transport=None,
+                     sleep=None) -> dict:
+    """The `close` verb (see the module docstring)."""
+    root = Path(project_root).resolve()
+    result = {"ok": False, "dry_run": dry_run, "engagement": engagement,
+              "issue": None, "moved": [], "skipped": [], "notes": [],
+              "written": []}
+
+    def refuse(why: str) -> dict:
+        return _finish(result, "blocked", f"track refused: {why}")
+
+    if not ENGAGEMENT_ID_RE.match(engagement or ""):
+        return refuse(f"EngagementNotFound: --engagement {engagement!r} is "
+                      f"not an engagement id (ENG-001); no Atlassian call "
+                      f"made")
+    settings, _owner, gap = _agent_seat(root)
+    if gap:
+        return refuse(gap)
+    if not (root / ENGAGEMENTS_REL / engagement).is_dir():
+        return refuse(f"EngagementNotFound: no _bmad-output/engagements/"
+                      f"{engagement}/; no Atlassian call made")
+
+    def run() -> dict:
+        project_key = str(plansync._recorded(root,
+                                             "planning.jira.project_key"))
+        client = jirabackend.client_for(settings, transport)
+        if sleep is not None:
+            client.sleep = sleep
+        notes, skipped = result["notes"], result["skipped"]
+        try:
+            key = find_engagement_issue(client, project_key, engagement)
+            if key is None:
+                return refuse(f"NoIssue: no issue "
+                              f"{engagement_summary(engagement)!r} in "
+                              f"{project_key}")
+            result["issue"] = key
+            name, _ = jirabackend._current_status(client, key)
+            for target in (jirabackend.RESOLVED_STATUS, DONE_STATUS):
+                if name == target or (target == jirabackend.RESOLVED_STATUS
+                                      and name == DONE_STATUS):
+                    skipped.append(f"transition: {key} is already "
+                                   f"{'in' if name == target else 'past'} "
+                                   f"{target!r}")
+                    continue
+                if dry_run:
+                    notes.append(f"dry run: {key} would move from "
+                                 f"{name!r} to {target!r}")
+                    name = target
+                    continue
+                # setup adds only `Blocked - Awaiting User -> Block
+                # Resolved`: an issue never blocked (e.g. `To Do`) skips
+                # `Block Resolved` when no transition reaches it
+                optional = (target == jirabackend.RESOLVED_STATUS
+                            and name != jirabackend.BLOCKED_STATUS)
+                tried: list[str] = []
+                if jirabackend.transition_to_name(client, key, target,
+                                                  tried, engagement) is None:
+                    if optional:
+                        skipped.append(f"transition: {key} is not blocked "
+                                       f"({name}); {target!r} skipped")
+                        continue
+                    notes.extend(tried)
+                    return refuse(f"NoTransition: {key}: no transition "
+                                  f"reaches {target!r} from {name!r}")
+                notes.extend(tried)
+                result["moved"].append(target)
+                name = target
+        except jirabackend.JiraError as exc:
+            if transient(exc):
+                result["retry"] = True
+                return _finish(result, "partial", f"track retry: "
+                               f"{engagement}: {exc} — a temporary failure; "
+                               f"call again", ok=False)
+            return refuse(f"{engagement}: {exc}")
+        if dry_run and any(n.startswith("dry run:") for n in notes):
+            return _finish(result, "partial", "dry run: nothing written; a "
+                           "real run would move as `notes[]` names")
+        return _finish(result, "complete", None)
+
+    return _locked(root, engagement, result, dry_run, run)
 
 
 # ------------------------------------------------------------------- reply
@@ -900,13 +1362,22 @@ def main(argv: list[str] | None = None) -> int:
     blk = sub.add_parser("block")
     blk.add_argument("--directory", required=True,
                      help="project root (walks up to the nearest)")
-    blk.add_argument("--story", required=True,
+    # Exactly one of --story and --engagement, validated in code: a refusal
+    # stays JSON (exit 2).
+    blk.add_argument("--story",
                      help="entity id (ST-NNN) or loop story key (N-M-slug)")
-    blk.add_argument("--reason", required=True)
-    blk.add_argument("--resolves", required=True)
+    blk.add_argument("--engagement", help="ENG-NNN (Story 32.3: the "
+                                          "engagement's questions)")
+    blk.add_argument("--reason")
+    blk.add_argument("--resolves")
     # Validated in code, not argparse choices: a refusal stays JSON (exit 2).
-    blk.add_argument("--source", default="run")
+    blk.add_argument("--source")
     blk.add_argument("--dry-run", action="store_true")
+    cls = sub.add_parser("close")
+    cls.add_argument("--directory", required=True,
+                     help="project root (walks up to the nearest)")
+    cls.add_argument("--engagement", required=True, help="ENG-NNN")
+    cls.add_argument("--dry-run", action="store_true")
     rep = sub.add_parser("reply")
     rep.add_argument("--directory", required=True,
                      help="project root (walks up to the nearest)")
@@ -977,8 +1448,35 @@ def main(argv: list[str] | None = None) -> int:
                        dry_run=args.dry_run)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 2 if result.get("status") == "blocked" else 0
+    if args.command == "close":
+        result = close_engagement(directory, args.engagement,
+                                  dry_run=args.dry_run)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 2 if result.get("status") == "blocked" else 0
+    if args.engagement is not None:
+        if args.story is not None or args.reason is not None \
+                or args.resolves is not None or args.source not in (
+                    None, "engagement"):
+            result = _finish(_result(None, "engagement", args.dry_run),
+                             "blocked", "track refused: --engagement is "
+                             "exclusive with --story, takes no --reason or "
+                             "--resolves and implies --source engagement; no "
+                             "Atlassian call made")
+            result["engagement"] = args.engagement
+        else:
+            result = block_engagement(directory, args.engagement,
+                                      dry_run=args.dry_run)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 2 if result.get("status") == "blocked" else 0
+    if args.story is None or args.reason is None or args.resolves is None:
+        result = _finish(_result(args.story, args.source or "run",
+                                 args.dry_run), "blocked",
+                         "track refused: give --story with --reason and "
+                         "--resolves, or --engagement; no Atlassian call made")
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 2
     result = block(directory, args.story, args.reason, args.resolves,
-                   source=args.source, dry_run=args.dry_run)
+                   source=args.source or "run", dry_run=args.dry_run)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     # `partial` exits 0 (a temporary failure too: its JSON names `retry`)
     return 2 if result.get("status") == "blocked" else 0

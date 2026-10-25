@@ -213,7 +213,8 @@ async function queueResolved(queue: Queue, deps: ResolutionDeps, out: Resolution
     try {
       const root = str(projects[project]?.root);
       if (!root || !jiraBound(root)) continue;
-      const resolved = readInbox(root).items.filter((i) => i.state === "resolved" || i.state === "validating");
+      // Story 32.3: an engagement's questions item has no validation leg (the planner's next turn judges the answer)
+      const resolved = readInbox(root).items.filter((i) => (i.state === "resolved" || i.state === "validating") && i.engagement === undefined);
       for (const item of resolved) {
         const key = resolutionKey(project, item as Record<string, any>);
         if (!key || recorded.has(key)) continue;
