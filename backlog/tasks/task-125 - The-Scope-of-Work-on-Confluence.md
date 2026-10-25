@@ -1,9 +1,10 @@
 ---
 id: TASK-125
 title: The Scope of Work on Confluence
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-25 03:13'
+updated_date: '2026-10-25 10:43'
 labels:
   - ST-125
 milestone: The Engagement Loop v1

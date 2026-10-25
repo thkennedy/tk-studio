@@ -1,9 +1,10 @@
 ---
 id: TASK-123
 title: The Planner Leg Behind the Chat Route
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-25 03:13'
+updated_date: '2026-10-25 07:06'
 labels:
   - ST-123
 milestone: The Engagement Loop v1

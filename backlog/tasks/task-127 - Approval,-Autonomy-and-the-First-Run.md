@@ -1,9 +1,10 @@
 ---
 id: TASK-127
 title: Approval, Autonomy and the First Run
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-25 03:13'
+updated_date: '2026-10-25 15:36'
 labels:
   - ST-127
 milestone: The Engagement Loop v1

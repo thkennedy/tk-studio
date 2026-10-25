@@ -1,9 +1,10 @@
 ---
 id: TASK-124
 title: Clarifying Questions, Through the Inbox
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-25 03:13'
+updated_date: '2026-10-25 09:04'
 labels:
   - ST-124
 milestone: The Engagement Loop v1
