@@ -57,8 +57,38 @@ class ValidationTests(unittest.TestCase):
         ledger.validate("drift-detection", {"result": "clean", "planes": []})
         ledger.validate("report", {"description": "skill did the wrong thing"})
 
+    def test_the_meter_structured_observation_validates(self):
+        # Story 32.5 Settled shape 1: optional, additive observation fields
+        payload = {"source": "other", "description": "meter: story=9-1-a",
+                   "kind": "meter", "story_key": "9-1-a", "epic": 9,
+                   "usd": 1.5, "route": {"session": "model-a"},
+                   "prices_date": "2000-01-01",
+                   "legs": {"session": {"usd": 1.5, "usage": {
+                       "input": 1, "output": 2, "cache_read": 3,
+                       "cache_write": 4}}}}
+        ledger.validate("observation", payload)
+        ledger.validate("observation", {"source": "other",
+                                        "description": "x"})
+        for field, bad in (("usd", "1.5"), ("legs", []), ("epic", True),
+                           ("kind", 1)):
+            with self.assertRaises(ledger.LedgerError, msg=field):
+                ledger.validate("observation", {**payload, field: bad})
+        with self.assertRaises(ledger.LedgerError):
+            ledger.validate("observation", {**payload, "tokens": {}})
+
 
 class SanitizationTests(unittest.TestCase):
+    def test_the_meter_usage_is_not_redacted(self):
+        legs = {"session": {"usd": 1.5, "usage": {
+            "input": 1, "output": 2, "cache_read": 3, "cache_write": 4}}}
+        out = ledger.sanitize({"legs": legs, "story_key": "9-1-a",
+                               "prices_date": "2000-01-01"})
+        self.assertEqual(out["legs"], legs)
+        self.assertEqual(out["story_key"], "9-1-a")
+        # why the key is `usage`: a `tokens` key is redacted wholesale
+        self.assertEqual(ledger.sanitize({"tokens": {"input": 1}})["tokens"],
+                         ledger.REDACTED)
+
     def test_credential_key_redacted(self):
         out = ledger.sanitize({"api_key": "abc123", "detail": "fine"})
         self.assertEqual(out["api_key"], ledger.REDACTED)

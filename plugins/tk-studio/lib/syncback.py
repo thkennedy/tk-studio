@@ -519,7 +519,9 @@ def mirror_engagement_pages(root: Path, result: dict, state: dict, conf,
                                                  now=synced_at)
             if outcome["applied"]:
                 result["counts"]["scopes_replaced"] += 1
-                result["written"] += outcome["written"]
+            # a record write that landed before a later write failed is
+            # still reported (AD-11) — `written` is [] when nothing landed
+            result["written"] += outcome["written"]
             continue
         rel = known.get("path") if isinstance(known, dict) \
             and known.get("path") else \
@@ -539,9 +541,9 @@ def mirror_engagement_pages(root: Path, result: dict, state: dict, conf,
         if not result["dry_run"]:
             jirabackend._atomic_write(root / rel, header + markdown)
             result["written"].append(rel)
+        result["written"] += outcome["written"]  # [] when nothing landed
         if outcome["applied"]:
             result["counts"]["scopes_replaced"] += 1
-            result["written"] += outcome["written"]
         elif outcome["note"]:
             result["notes"].append(outcome["note"])
         if outcome["retry"]:

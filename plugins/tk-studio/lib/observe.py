@@ -34,8 +34,15 @@ SOURCES = ("retrospective", "repeated-manual-work", "research-job", "other")
 
 def record_observation(source: str, description: str,
                        evidence: str | None = None,
-                       project: str | None = None) -> dict:
-    """Emit one observation event. Returns the sanitized envelope written."""
+                       project: str | None = None,
+                       fields: dict | None = None) -> dict:
+    """Emit one observation event. Returns the sanitized envelope written.
+
+    `fields` are optional structured payload fields (Story 32.5: the
+    meter's `kind`, `story_key`, `epic`, `usd`, `legs`, `route`,
+    `prices_date`), merged after the fixed three and validated by the
+    taxonomy like them; they never replace `source`, `description` or
+    `evidence`."""
     if source not in SOURCES:
         raise ledger.LedgerError(
             f"source must be one of {', '.join(SOURCES)}, got '{source}'")
@@ -44,6 +51,11 @@ def record_observation(source: str, description: str,
     payload: dict = {"source": source, "description": description.strip()}
     if evidence:
         payload["evidence"] = evidence
+    for key, value in (fields or {}).items():
+        if key in ("source", "description", "evidence"):
+            raise ledger.LedgerError(f"structured field '{key}' would replace "
+                                     f"the observation's own field")
+        payload[key] = value
     return ledger.emit("observation", payload, project=project)
 
 

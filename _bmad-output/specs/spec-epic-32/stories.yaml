@@ -204,6 +204,15 @@
     Criteria may be joined in one paragraph. Split stories on the #### headings, find
     the parts as substrings (engage.py STORY_SHAPE), re-emit them in epics.md's line
     shape when renumbering, and refuse by name a story that fails.
+    Replan (from 32-5, 2026-10-25): the quote's basis.epics[] {k, title, stories,
+    ep_id} predicts EP-<next.epic+k-1>, and ep_id is null (no epics band written)
+    when the counter was unreadable. After plansync normalize, re-key each epic's
+    usd_estimate from the predicted id to the minted id, in quote.epic_bands_text's
+    byte shape, keeping other entries. A null ep_id writes no band and is reported.
+    quote.cap is a USD number; basis.notes is a list of strings; a scope.md rewrite
+    while scoping voids the quote first.
+    Oversize (gate, 2026-10-25): plans/32-6.md lists about 18 files, past band L;
+    halt blocked if the Files list must grow beyond the plan's list.
 
 - id: "32-7-the-chat-screen"
   title: "The Chat Screen"

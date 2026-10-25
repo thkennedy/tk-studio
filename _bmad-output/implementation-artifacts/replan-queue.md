@@ -386,3 +386,10 @@
 - What no longer holds: "each deliverable's acceptance signal checked against the landed stories' specs and PRs", read as a line-start `Acceptance signal:` parse.
 - Suggested adjustment: parse deliverables on `###` headings with `engage.py` `parse_scope`. Find the signal with `SIGNAL_RE`, and fall back to a substring search inside the deliverable's text. A deliverable with no signal is reported as `not done — no acceptance signal`, never as a crash. Publish `ENG-NNN: Closeout` through 32.4's folder and skip helpers in `engage.py`, and record the page the same way `scope_page` is recorded.
 - Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-25)
+
+## 32-6-approval-autonomy-and-the-first-run — scope: stories — from 32-5-the-quote-band — 2026-10-25
+
+- What changed: the quote's `basis.epics[] {k, title, stories, ep_id}` predicts `EP-<next.epic+k-1>`, and `ep_id` is `null` (with no `epics` band written) when the counter was unreadable. `basis.notes` is a list of strings. A `scope.md` rewrite while `scoping` voids the quote first. The `epics` writer is `quote.epic_bands_text`, which keeps other epics' entries.
+- What no longer holds: "the board draws the band against it" (not without re-keying the band to the minted EP id)
+- Suggested adjustment: at approve, read each new epic's minted EP id after `plansync normalize`. Where it differs from `basis.epics[].ep_id`, move that `usd_estimate` to the minted id in the epics block, in `epic_bands_text`'s byte shape. Where `ep_id` is `null`, write no band and report it. Read `quote.cap` as a USD number and `basis.notes` as strings.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-25)

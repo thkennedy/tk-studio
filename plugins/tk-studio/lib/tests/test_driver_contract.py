@@ -1171,6 +1171,133 @@ class DriverContractTestCase(unittest.TestCase):
                                        "0.1.27) | `GET /engagements/{id}` |"))
         self.assertIn("`scope_page {id, url, version}`", read)
 
+    # --- Story 32.5: the same 0.1.27 entry adds the quote — the meter's
+    # structured observation fields, `engage.py quote`, the record's
+    # `quote` and the `budget-bands.yaml` `epics` — additive, never a 0.1.28.
+
+    def test_0_1_27_story_32_5_adds_the_quote(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.27**", header)
+        self.assertNotIn("**0.1.28**", self.text)
+        self.assertLess(header.index("0.1.27 (Story 32.4) adds to this same "
+                                     "entry"),
+                        header.index("0.1.27 (Story 32.5) adds to this same "
+                                     "entry"))
+        clause = " ".join(header[header.index("0.1.27 (Story 32.5)"):]
+                          .split())
+        for phrase in ("`kind: meter`", "`story_key`", "`epic`", "`usd`",
+                       "`legs.<leg> {usd, usage {input, output, cache_read, "
+                       "cache_write}}`", "never `tokens`", "`route`",
+                       "`prices_date`", "`events/taxonomy.v1.json`",
+                       "`engage.py quote --directory <project_root> "
+                       "--engagement ENG-NNN [--seed N] [--dry-run]`",
+                       "`NotScoping`", "`NoScope`", "`PricesUnreadable`",
+                       "`QuoteUnwritable`", "`unstructured`, never parsed",
+                       "10,000 resamples",
+                       "`cap = p95 + one story at p85`",
+                       "`quote {band50, band85, band95, cap, basis, "
+                       "computed_at}`", "`\"share unknown\"`",
+                       "`epics.<EP-NNN>.usd_estimate`", "`band_usd`",
+                       "`quote-present`",
+                       # a scope replaced in scoping voids the quote,
+                       # first: before scope.md is replaced
+                       "voids a non-null `quote` first",
+                       "merged before `scope.md` is replaced",
+                       "carries no `void-quote`",
+                       "a repeated `### Epic <k>` number `NoScope`",
+                       # the 1..m rule, the held lock, the edges 32.6 reads
+                       "not numbered 1..m in order",
+                       "a held `scope.lock`",
+                       "/scope.lock is held`",
+                       "an unparseable `budget-bands.yaml`",
+                       "an unreadable `measurements/`",
+                       "`basis.notes` is a list of strings",
+                       "`thin history: <n> landed stories`",
+                       "`tokens unknown: thin history (no metered story)`",
+                       "`tokens unknown: thin history (no usd-per-token "
+                       "ratio)`",
+                       "`ep_id` `null` when that counter is unreadable",
+                       "no `epics` band is written",
+                       "every byte outside the top-level `epics:` block "
+                       "kept, other epics' entries kept and this quote's "
+                       "entries overwritten",
+                       # the seed stays exact through the JSON rewrite; a
+                       # scalar epics is refused, never a second key
+                       "a `--seed` outside `0 <= seed < 2**53` `BadSeed`",
+                       "the first 6 bytes of `sha256(\"<engagement>:<n>\")`",
+                       "a top-level `epics:` scalar other than empty, `~`, "
+                       "`null` or `{}`",
+                       "`ScopeUnwritable` from `scope`, a retry from the "
+                       "sync-back",
+                       "— additive) |"):
+            self.assertIn(phrase, clause)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 32.5", stories)
+        engage = next(line for line in self.text.splitlines()
+                      if line.startswith("| `tk-studio-engage` "))
+        for phrase in ("Stories 32.5 to 32.8 add the verbs `quote` and "
+                       "`closeout`", "`quote`, 0.1.27, Story 32.5",
+                       "`lib/engage.py quote` (Story 32.5)", "`NoScope`",
+                       "`PricesUnreadable`", "`QuoteUnwritable`",
+                       "voids a non-null `quote` first",
+                       "not numbered 1..m in order", "`scope.lock is held`",
+                       "`basis.notes` is a list of strings",
+                       "`basis.epics[].ep_id` is `null`",
+                       # the seed range and default
+                       "an integer `0 <= seed < 2**53`, exact as a JSON "
+                       "number; default the first 6 bytes of "
+                       "`sha256(\"<engagement>:<n>\")`",
+                       "`BadSeed` (a `--seed` outside `0 <= seed < 2**53`)",
+                       "a top-level `epics:` scalar other than empty, `~`, "
+                       "`null` or `{}`",
+                       # the quote verb's result shape
+                       "`{ok, dry_run, engagement, mode: \"quote\", quote, "
+                       "bands, written[], notes[]}`",
+                       "also on a dry run, `null` on a refusal before it is "
+                       "computed",
+                       "`bands` `{EP-NNN: usd}`",
+                       # a failed void: the scope refuses, the sync-back
+                       # (which never raises) retries
+                       "a failed void refuses `ScopeUnwritable` from `scope` "
+                       "and, from the sync-back, which never raises, ends "
+                       "not applied with `retry: true`",
+                       "the sync-back's `written[]` names a void that "
+                       "landed before a later failure",
+                       "a page version whose Markdown equals `scope.md` "
+                       "replaces nothing and keeps the quote"):
+            self.assertIn(phrase, engage)
+        self.assertNotIn("a failed void refuses `ScopeUnwritable` with "
+                         "`scope.md` untouched", engage)
+        self.assertNotIn("default from `sha256(", engage)
+        self.assertNotIn("every other byte", self.text)
+        read = next(line for line in self.text.splitlines()
+                    if line.startswith("| the engagement (Story 32.1, "
+                                       "0.1.27) | `GET /engagements/{id}` |"))
+        self.assertIn("`quote {band50, band85, band95, cap, basis, "
+                      "computed_at}`", read)
+        for phrase in ("`basis.epics[] {k, title, stories, ep_id}`",
+                       "`ep_id` `null`", "`basis.notes` a list of strings",
+                       "`thin history: <n> landed stories`"):
+            self.assertIn(phrase, read)
+        observe = next(line for line in self.text.splitlines()
+                       if line.startswith("| `tk-studio-observe` |"))
+        for field in ("kind", "story_key", "epic", "usd", "legs", "route",
+                      "prices_date"):
+            self.assertIn(f"`{field}`", observe)
+        # the taxonomy row and the contract mention land together
+        taxonomy = json.loads(
+            (PLUGIN_ROOT / "contracts" / "events" / "taxonomy.v1.json")
+            .read_text(encoding="utf-8"))
+        fields = taxonomy["events"]["observation"]["payload"]
+        for field, kind in (("kind", "string"), ("story_key", "string"),
+                            ("epic", "number"), ("usd", "number"),
+                            ("legs", "object"), ("route", "object"),
+                            ("prices_date", "string")):
+            self.assertEqual(fields[field]["type"], kind, field)
+            self.assertFalse(fields[field]["required"], field)
+
     def test_section_8_names_the_cli_drives(self):
         section = self.text[self.text.index("## 8. Conformance"):]
         flat = " ".join(section.split())

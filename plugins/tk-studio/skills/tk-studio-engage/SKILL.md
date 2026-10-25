@@ -1,6 +1,6 @@
 ---
 name: tk-studio-engage
-description: The planner leg of an engagement — `reply` reads the engagement's memory (the record, the chat so far, the plan under `_bmad-output/planning-artifacts/`, `kb/` and `kb/confluence/`) and writes the planner's reply line, with optional proposals the owner can press, to the engagement's `chat.jsonl`; `questions` writes at most three multiple-choice clarifying questions, each with a default, for the owner's inbox. Use when a supervisor `engagement-chat` payload names this skill, or the user says "reply in the engagement chat" or "tk engage reply".
+description: The planner leg of an engagement — `reply` reads the engagement's memory (the record, the chat so far, the plan under `_bmad-output/planning-artifacts/`, `kb/` and `kb/confluence/`) and writes the planner's reply line, with optional proposals the owner can press, to the engagement's `chat.jsonl`; `questions` writes at most three multiple-choice clarifying questions, each with a default, for the owner's inbox; `scope` writes and publishes the scope of work; `quote` prices the scope as a seeded 50/85/95 band with a hard cap from the studio's own history and proposes `go`. Use when a supervisor `engagement-chat` payload names this skill, or the user says "reply in the engagement chat" or "tk engage reply".
 ---
 
 # tk-studio-engage
@@ -170,7 +170,55 @@ presses through the supervisor's `POST /engagements/{id}/input`.
    `retry: true` (`scope.md` kept, `scope_page` unchanged): run it again.
    Then write the reply (mode 2) with the page's link.
 
-5. Blocking conditions (exit 2), each named in `reason`: `BadEngagement`
+5. Quote the scope (Story 32.5, user flow F2 step 4) — only in `scoping`,
+   on the turn after the scope is written (or by hand):
+
+   ```bash
+   uv run "${CLAUDE_PLUGIN_ROOT}/lib/engage.py" quote --directory <project_root> \
+     --engagement <ENG-NNN> [--seed N] [--dry-run]
+   ```
+
+   It counts the proposed stories of `scope.md` by their headings, reads
+   the project's structured meter records from the store's ledgers, and
+   resamples their per-story tokens and dollars over that count: a seeded
+   bootstrap (10,000 resamples) giving `band50`, `band85` and `band95`, each
+   `{tokens, usd, share}` (`share` over the user config's
+   `plan.window_tokens`, else `"share unknown"`), and `cap = p95 + one story
+   at p85` in USD. Under eight metered stories the band says "thin history"
+   (`basis.thin`) and is widened ×1.5 from the Opus 5.5 trial's per-story
+   dollars; with none, the tokens are `null` and the dollars carry. It
+   merges `quote {band50, band85, band95, cap, basis, computed_at}` into
+   the record (`basis` names the seed, the history, the route, the
+   autonomy levels on offer, `planning_usd` and `scoping_billable`, and
+   `at_cap`: the run pauses `partial`, the engagement's issue blocks with
+   the figures, the owner decides) and writes each proposed epic's
+   `epics.<EP-NNN>.usd_estimate` (its p85 dollars) into
+   `.tk-studio/budget-bands.yaml`. **The state does not move**: write the
+   reply (mode 2) stating the band, the cap and what happens at the cap,
+   never a bare number (say "thin history" when `basis.thin`), with the
+   proposal `{"verb": "go", "payload": {}, "label": "Accept the quote"}`;
+   the owner's `go` moves `scoping → quoted`. A `revise` voids the quote
+   (`quote: null`), and so does any replaced `scope.md` while `scoping`
+   (your `scope`, a `revise` body, or the owner's page edit mirrored by
+   the sync-back voids a non-null `quote` first, before `scope.md` is
+   replaced; a void that fails leaves `scope.md` untouched — your `scope`
+   refuses `ScopeUnwritable`, the sync-back retries on its next tick; a
+   page save whose text equals `scope.md` keeps the quote): quote again
+   after the new scope. `--seed` is an integer `0 <= N < 2**53` (default
+   the first 6 bytes of `sha256("<engagement>:<n>")`). Its refusals
+   (exit 2), each named: `BadSeed` (a `--seed` out of that range),
+   `NotScoping`, `EngagementClosed`, `NoScope` (no
+   `scope.md`, no proposed story, a repeated `### Epic <k>` number, or
+   proposed epics not numbered 1..m in order), `PricesUnreadable` (an
+   unreadable `prices.json` or an unpriced route model), `QuoteUnwritable`
+   (the record or the bands refused by the OS, an unparseable
+   `budget-bands.yaml` or a top-level `epics:` scalar other than empty,
+   `~`, `null` or `{}`, an unreadable `measurements/`, or `scope.lock is
+   held` — the quote holds it from reading `scope.md` through the merge;
+   `written` names what had landed), plus the record's.
+   A dry run writes nothing and ends `partial`.
+
+6. Blocking conditions (exit 2), each named in `reason`: `BadEngagement`
    (not like `ENG-001`), `UnknownEngagement` (no record),
    `EngagementRecordUnreadable` (not JSON, or not this engagement's record),
    `EngagementClosed` (`delivered`, `failed` or `cancelled`), `BodyEmpty`,
@@ -180,7 +228,7 @@ presses through the supervisor's `POST /engagements/{id}/input`.
    `--body-file` or `--proposals-file`. Nothing is appended on a refusal; a
    dry run appends nothing and ends `partial`.
 
-6. Report:
+7. Report:
    - **Attended:** show the reply line and its proposals.
    - **Headless:** no prompts (AD-11). Relay the core's `status`, `reason`
      and `artifacts` as they are — never infer the status from the exit
@@ -199,6 +247,7 @@ If the deterministic core is unrunnable — a tool call denied by permissions, `
   (every `TK_SUPERVISOR_*` secret and the owner seat stripped).
 - The only files written are the engagement's `chat.jsonl`, one line per
   reply, its `questions.json` (Story 32.3), and its `scope.md` with the
-  record's `scope_page` and the Confluence scope page (Story 32.4); nothing
-  is committed, nothing is promoted.
+  record's `scope_page` and the Confluence scope page (Story 32.4), and the
+  record's `quote` with `.tk-studio/budget-bands.yaml`'s `epics` entries
+  (Story 32.5); nothing is committed, nothing is promoted.
 - All paths resolve through `${CLAUDE_PLUGIN_ROOT}`.

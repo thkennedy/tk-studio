@@ -1317,6 +1317,29 @@ class EngagementScopeMirrorTests(SyncBackTestCase):
         self.assertEqual(self.scope_text(), published)
         self.assertEqual((self.dir / "engagement.yaml").read_bytes(), before)
 
+    def test_a_quote_void_landed_before_a_failed_scope_write_is_named(self):
+        record = self.record()
+        record["quote"] = {"band": "small"}
+        (self.dir / "engagement.yaml").write_text(
+            json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        self.fake.scope_page(SCOPE_PAGE, EDITED, 2)
+        real = engage.atomic_write_text
+
+        def failing(path, text, *args, **kwargs):
+            if Path(path).name == "scope.md":
+                raise OSError("disk full")
+            return real(path, text, *args, **kwargs)
+
+        with unittest.mock.patch("engage.atomic_write_text", failing):
+            result = self.run_tick()
+        self.assertIsNone(self.record()["quote"])  # the void landed
+        self.assertEqual(self.scope_text(), self.SCOPE)
+        self.assertIn(f"_bmad-output/engagements/{ENG}/engagement.yaml",
+                      result["written"])
+        self.assertEqual(result["written"].count(
+            f"_bmad-output/engagements/{ENG}/engagement.yaml"), 1)
+        self.assertEqual(result["counts"]["scopes_replaced"], 0)
+
     def test_a_dry_run_writes_nothing(self):
         self.fake.scope_page(SCOPE_PAGE, EDITED, 2)
         result = self.run_tick(dry_run=True)
