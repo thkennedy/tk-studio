@@ -114,19 +114,65 @@ export function fakeStudioRoot(realRoot: string = process.env.TK_STUDIO_ROOT!): 
  * `plugins/tk-studio/lib/plansync.py` (operator-decisions §1: in tests only). `status --directory D --id ST --status S
  * [--note N] [--caller C]` logs its argv to `calls` and answers from `answer` (rewritable between runs): `ok` →
  * `{ok: true, id, status, previous_status}` (exit 0); `refuse` → `{ok: false, error}` (exit 2); `blocked` →
- * `{ok: false, blocked: true, reason, written: true}` (exit 2); `crash` → a traceback on stderr, no JSON (exit 1). */
-export function fakePlansync(): { root: string; calls: () => string[][]; answer: (a: "ok" | "refuse" | "blocked" | "crash") => void } {
+ * `{ok: false, blocked: true, reason, written: true}` (exit 2); `crash` → a traceback on stderr, no JSON (exit 1).
+ * Story 32.6: `normalize|sync --directory D` mints one `plan/EP-<next.epic>.md` (`id`, `source: epics.md#epic-N`) per
+ * `## Epic N` of `_bmad-output/planning-artifacts/epics.md` no entity names yet, advances `.tk-studio/plan-counter.yaml`'s
+ * `next.epic`, and answers `{ok: true, written: [<absolute paths>]}` (exit 0); `sync` (rewritable between runs) answers
+ * `blocked` → `{ok: false, blocked: true, reason: "fake sync blocked", written: []}` (exit 2), `crash` → a traceback,
+ * `partial` → the minting done, then `{ok: false, blocked: true, reason: "fake sync partial", written: [...]}` (exit 2).
+ * `removes(paths)`: those `--directory`-relative files deleted after the minting and answered as `removed: [<absolute
+ * paths>]` (only when one was deleted). */
+export function fakePlansync(): {
+  root: string; calls: () => string[][]; answer: (a: "ok" | "refuse" | "blocked" | "crash") => void;
+  sync: (a: "ok" | "blocked" | "crash" | "partial") => void; removes: (paths: string[]) => void;
+} {
   const root = mkdtempSync(join(tmpdir(), "tk-sup-plansync-"));
   const lib = join(root, "plugins", "tk-studio", "lib");
   mkdirSync(lib, { recursive: true });
-  const log = join(root, "plansync-calls.jsonl"), answers = join(root, "plansync-answer.txt");
+  const log = join(root, "plansync-calls.jsonl"), answers = join(root, "plansync-answer.txt"), syncAnswer = join(root, "plansync-sync.txt");
+  const removals = join(root, "plansync-removes.json");
+  writeFileSync(removals, "[]");
   writeFileSync(answers, "ok");
+  writeFileSync(syncAnswer, "ok");
   writeFileSync(join(lib, "plansync.py"), [
-    "import json, sys",
+    "import json, os, re, sys",
     `with open(${JSON.stringify(log)}, "a", encoding="utf-8") as f: f.write(json.dumps(sys.argv[1:]) + "\\n")`,
     `answer = open(${JSON.stringify(answers)}, encoding="utf-8").read().strip()`,
     "a = sys.argv[1:]",
     "arg = lambda k: a[a.index(k) + 1] if k in a else None",
+    `if a and a[0] in ("normalize", "sync"):`,
+    `    how = open(${JSON.stringify(syncAnswer)}, encoding="utf-8").read().strip() if a[0] == "sync" else "ok"`,
+    `    if how == "blocked": print(json.dumps({"ok": False, "blocked": True, "reason": "fake sync blocked", "written": []})); sys.exit(2)`,
+    `    if how == "crash": print("Traceback (most recent call last):\\n  OSError: plan directory busy", file=sys.stderr); sys.exit(1)`,
+    "    d = os.path.abspath(arg('--directory'))",
+    "    plan = os.path.join(d, '_bmad-output', 'planning-artifacts', 'plan')",
+    "    counter = os.path.join(d, '.tk-studio', 'plan-counter.yaml')",
+    "    ctext = open(counter, encoding='utf-8').read()",
+    "    nxt = int(re.search(r'^  epic: (\\d+)$', ctext, re.M).group(1))",
+    "    os.makedirs(plan, exist_ok=True)",
+    "    named = set()",
+    "    for n in os.listdir(plan):",
+    "        m = re.search(r'^source: epics\\.md#epic-(\\d+)$', open(os.path.join(plan, n), encoding='utf-8').read(), re.M)",
+    "        if m: named.add(int(m.group(1)))",
+    "    epics = open(os.path.join(d, '_bmad-output', 'planning-artifacts', 'epics.md'), encoding='utf-8').read()",
+    "    written = []",
+    "    for m in re.finditer(r'^## Epic (\\d+): (.+)$', epics, re.M):",
+    "        if int(m.group(1)) in named: continue",
+    "        ep = 'EP-%03d' % nxt",
+    "        path = os.path.join(plan, ep + '.md')",
+    "        open(path, 'w', encoding='utf-8', newline='').write('---\\nshape_version: 1\\nid: %s\\ntype: epic\\ntitle: %s\\nstatus: planned\\nsource: epics.md#epic-%s\\n---\\n' % (ep, m.group(2), m.group(1)))",
+    "        written.append(path)",
+    "        nxt += 1",
+    "    if written:",
+    "        open(counter, 'w', encoding='utf-8', newline='').write(re.sub(r'^  epic: \\d+$', '  epic: %d' % nxt, ctext, flags=re.M))",
+    "        written.append(counter)",
+    "    removed = []",
+    `    for rel in json.load(open(${JSON.stringify(removals)}, encoding="utf-8")):`,
+    "        q = os.path.join(d, rel)",
+    "        if os.path.exists(q): os.remove(q); removed.append(q)",
+    "    out = {'ok': True, 'written': written, **({'removed': removed} if removed else {})}",
+    "    if how == 'partial': out.update(ok=False, blocked=True, reason='fake sync partial'); print(json.dumps(out)); sys.exit(2)",
+    "    print(json.dumps(out)); sys.exit(0)",
     `if answer == "ok": print(json.dumps({"ok": True, "id": arg("--id"), "status": arg("--status"), "previous_status": "draft"})); sys.exit(0)`,
     `if answer == "blocked": print(json.dumps({"ok": False, "blocked": True, "reason": "backend re-sync blocked", "written": True})); sys.exit(2)`,
     `if answer == "crash": print("Traceback (most recent call last):\\n  OSError: plan directory busy", file=sys.stderr); sys.exit(1)`,
@@ -136,6 +182,8 @@ export function fakePlansync(): { root: string; calls: () => string[][]; answer:
     root,
     calls: () => existsSync(log) ? readFileSync(log, "utf-8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [],
     answer: (a) => writeFileSync(answers, a),
+    sync: (a) => writeFileSync(syncAnswer, a),
+    removes: (paths) => writeFileSync(removals, JSON.stringify(paths)),
   };
 }
 

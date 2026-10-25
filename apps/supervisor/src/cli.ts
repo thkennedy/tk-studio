@@ -129,6 +129,7 @@ import { resolutionPass, withQueuedPayload, withStoredPayload, type ResolutionDe
 import { chatSpendPass, type ChatDeps, type ChatSpendDeps } from "./chat";
 import { questionsPass, type QuestionsDeps } from "./questions";
 import { scopePass, type ScopeDeps } from "./scope";
+import { approvePass, engagementRunPass, engagementRunSpendPass, type ApproveDeps, type RunSpendDeps, type Submitter } from "./approve";
 import { ledgerPath } from "./board";
 import { CERT_CHECK_MS, CERT_RENEW_EXIT, certCheck, recordCertStart } from "./cert";
 import {
@@ -306,6 +307,11 @@ export interface RunOptions {
   questions?: Partial<QuestionsDeps> | false;
   /** Story 32.4: the engagement scope pass (`scopeQuietly`) — injected deps, or `false` to skip it. */
   scope?: Partial<ScopeDeps> | false;
+  /** Story 32.6: the approve pass and the engagement-run pass (`approveQuietly`) — injected deps, or `false` to skip
+   * them. */
+  approve?: Partial<ApproveDeps> | false;
+  /** Story 32.6: the engagement run-spend pass (`runSpendQuietly`) — injected deps, or `false` to skip it. */
+  runSpend?: Partial<RunSpendDeps> | false;
 }
 
 /** Story 29.2: how a rebuild point rebuilds the `agents` table — the injected deps (tests), `false` (no rebuild),
@@ -655,8 +661,10 @@ export async function recoverQueue(opts: RunOptions = {}, verbRunner: VerbRunner
     await closeOutPaused(queue, pausedDeps(opts)); // Story 27.3: a paused run whose story landed is closed out
     await resolveQuietly(queue, opts); // Story 31.7: queue validate-resolution from resolved items; re-arm on a pass
     chatSpendQuietly(queue, opts); // Story 32.2: the chat runs' costs into each engagement's spend.planning_usd
+    runSpendQuietly(queue, opts); // Story 32.6: the engagement runs' costs into each engagement's spend.runs_usd
     await questionsQuietly(queue, opts); // Story 32.3: the planner's questions applied, blocked, answered and closed
     await scopeQuietly(queue, opts); // Story 32.4: a revise body becomes the scope and its Confluence page
+    await approveQuietly(queue, opts); // Story 32.6: the approve pass, then launched, autonomy and the cap
     await afterCloseOuts(queue, opts); // Story 27.5: the orphan close-out, then the plan's review and merge passes
     await detectExternal(queue, verbRunner, jobPlacement, sbxDeps(opts.worktree)); // Story 27.2: runs started outside the queue
     writeStarterLocks(queue, opts.worktree?.env ?? process.env);
@@ -751,14 +759,81 @@ async function scopeQuietly(queue: Queue, opts: RunOptions): Promise<void> {
   try { await scopePass(queue, { ...(opts.worktree ?? {}), ...(opts.scope ?? {}) }); } catch { /* the next tick */ }
 }
 
+/** Story 32.6: the engagement run-spend pass (src/approve.ts) beside the chat-spend pass at every `finally` site
+ * (`recover`, `drain`, `run`): the same host ledger (`ledgerPath`); under `bun test` it runs only with injected deps
+ * (as `chatSpendQuietly`). Never throws. */
+function runSpendQuietly(queue: Queue, opts: RunOptions): void {
+  if (opts.runSpend === false || (opts.runSpend === undefined && underBunTest())) return;
+  try { engagementRunSpendPass(queue, { ledgerFile: ledgerPath(opts.hygiene?.env ?? process.env), ...(opts.runSpend ?? {}) }); } catch { /* the next tick */ }
+}
+
+/** Story 32.6: the project's default worker placement for an engagement's `run-epic-N` (Settled shape 5), read from
+ * `TK_SUPERVISOR_CONFIG` (never written): the job's own `<project>/<job>` entry is `submitJob`'s usual resolution
+ * (`source: "config"`, nothing passed); else the placement of the project's highest-numbered `run-epic-*` entry
+ * (`source` that job id); else the host tier (`source: "host"`). */
+export function engagementPlacement(jobId: string, root: string): { tier?: Tier; sandbox?: string; source: string } {
+  let jobs: Record<string, JobOptions> = {};
+  let project: string;
+  try { jobs = loadSupervisorConfig().jobs; project = projectIdOf(root); } catch { return { tier: "host", source: "host" }; }
+  if (jobs[`${project}/${jobId}`]) return { source: "config" };
+  let best: { n: number; job: string; o: JobOptions } | null = null;
+  const prefix = `${project}/run-epic-`;
+  for (const [key, o] of Object.entries(jobs)) {
+    const m = key.startsWith(prefix) ? /^(\d+)$/.exec(key.slice(prefix.length)) : null;
+    if (m && (!best || Number(m[1]) > best.n)) best = { n: Number(m[1]), job: key.slice(project.length + 1), o };
+  }
+  if (!best) return { tier: "host", source: "host" };
+  const tier = best.o.tier ?? "host";
+  return { tier, ...(tier === "sbx" && best.o.sandbox ? { sandbox: best.o.sandbox } : {}), source: best.job };
+}
+
+/** Story 32.6: the approve module's production submitter — `submitJob` with the run's `payload {engagement, project}`
+ * and its `base_ref`, placed by `engagementPlacement` (the placement named in the answer). Never `stack`. */
+export function engagementSubmitter(opts: RunOptions = {}): Submitter {
+  return async (jobId, root, o) => {
+    const placement = engagementPlacement(jobId, root);
+    const out = await submitJob(jobId, root, {
+      ...opts, ...(o.baseRef ? { baseRef: o.baseRef } : {}), payload: o.payload,
+      ...(placement.tier ? { tier: placement.tier } : {}), ...(placement.sandbox ? { sandbox: placement.sandbox } : {}),
+    });
+    return { run_id: String(out.run_id), placement };
+  };
+}
+
+/** Story 32.6: the approve module's production deps — the worktree deps, the submitter on this queue, the graceful
+ * stop (`launchStopGraceful`) and the queued-run cancel (`cancelRun`). */
+function approveDeps(queue: Queue, opts: RunOptions = {}): ApproveDeps {
+  return {
+    ...(opts.worktree ?? {}),
+    submit: engagementSubmitter({ ...opts, queue }),
+    launchStop: launchStopGraceful,
+    cancelQueued: (runId) => cancelRun(queue, runId, { ...(opts.worktree ? { worktree: opts.worktree } : {}), ...(opts.hygiene ? { hygiene: opts.hygiene } : {}), agents: opts.agents }),
+    ...(opts.approve ? opts.approve : {}),
+  };
+}
+
+/** Story 32.6: the approve pass, then the engagement-run pass (src/approve.ts), after the scope pass at every
+ * `finally` site (`recover`, `drain`, `run`); under `bun test` they run only with injected deps (as
+ * `scopeQuietly`). Never throws. */
+async function approveQuietly(queue: Queue, opts: RunOptions): Promise<void> {
+  if (opts.approve === false || (opts.approve === undefined && underBunTest())) return;
+  const deps = approveDeps(queue, opts);
+  try { await approvePass(queue, deps); } catch { /* the next tick */ }
+  try { await engagementRunPass(queue, deps); } catch { /* the next tick */ }
+}
+
 /** Story 32.3: the input route's production `afterEngagementInput` — the questions pass for the one engagement an
  * applied `answer`/`go` moved (so a chat-card answer closes its issue without waiting for a run to end), then (Story
- * 32.4) the scope pass for it (an applied `revise` with a body becomes the scope and its page); skipped under
- * `bun test` unless deps are injected. Never throws. */
-export async function afterEngagementInput(queue: Queue, root: string, id: string, deps?: Partial<QuestionsDeps & ScopeDeps>): Promise<void> {
+ * 32.4) the scope pass for it (an applied `revise` with a body becomes the scope and its page), then (Story 32.6) the
+ * approve pass (an applied `approve` writes, publishes and queues the plan) and the engagement-run pass (a `go {cap}`
+ * from `partial` resubmits); skipped under `bun test` unless deps are injected. Never throws. */
+export async function afterEngagementInput(queue: Queue, root: string, id: string, deps?: Partial<QuestionsDeps & ScopeDeps & ApproveDeps>): Promise<void> {
   if (deps === undefined && underBunTest()) return;
   try { await questionsPass(queue, deps ?? {}, { root, engagement: id }); } catch { /* the next run end */ }
   try { await scopePass(queue, deps ?? {}, { root, engagement: id }); } catch { /* the next run end */ }
+  const approve = { ...approveDeps(queue), ...(deps ?? {}) };
+  try { await approvePass(queue, approve, { root, engagement: id }); } catch { /* the next run end */ }
+  try { await engagementRunPass(queue, approve, { root, engagement: id }); } catch { /* the next run end */ }
 }
 
 /** Story 32.2: the chat route's production deps — the `engagement-chat` definition for a served root as `validate`
@@ -863,8 +938,10 @@ export async function drainQueue(opts: RunOptions = {}, verbRunner: VerbRunner =
     await closeOutPaused(queue, pausedDeps(opts)); // Story 27.3
     await resolveQuietly(queue, opts); // Story 31.7
     chatSpendQuietly(queue, opts); // Story 32.2
+    runSpendQuietly(queue, opts); // Story 32.6
     await questionsQuietly(queue, opts); // Story 32.3
     await scopeQuietly(queue, opts); // Story 32.4
+    await approveQuietly(queue, opts); // Story 32.6
     await afterCloseOuts(queue, opts); // Story 27.5
     await rebuildQuietly(queue, opts.agents); // Story 29.2: the agent registry after the drain's claims and ends
     await sweepEnds(queue, opts.hygiene);
@@ -873,7 +950,10 @@ export async function drainQueue(opts: RunOptions = {}, verbRunner: VerbRunner =
 }
 
 /** `submit`: validate, then enqueue (idempotent). Nothing is driven. */
-export async function submitJob(jobId: string, directory: string, opts: RunOptions & { permissionMode?: string } = {}): Promise<Record<string, unknown>> {
+export async function submitJob(
+  jobId: string, directory: string,
+  opts: RunOptions & { permissionMode?: string; /** Story 32.6: the run's own payload (`runPayload`), stored on its `enqueued` event. */ payload?: Record<string, unknown> } = {},
+): Promise<Record<string, unknown>> {
   try { resolveStudioRoot(); requireCompatible(); }
   catch (e) { throw new StartError(message(e)); }
   const { queue, owned } = openQueue(opts);
@@ -893,7 +973,7 @@ export async function submitJob(jobId: string, directory: string, opts: RunOptio
     const { run, minted } = queue.enqueue({
       jobId, root: v.root, projectId: v.projectId, target: v.target, definition: v.defn, ...where,
       permissionMode: opts.permissionMode, tier: options.tier, sandbox: options.sandbox, model: options.model, effort: options.effort,
-      base_ref: opts.baseRef, ...(opts.editorInTheLoop ? { editorInTheLoop: true } : {}),
+      base_ref: opts.baseRef, ...(opts.editorInTheLoop ? { editorInTheLoop: true } : {}), ...(opts.payload ? { payload: opts.payload } : {}),
     });
     return { ok: true, job_id: jobId, project_id: v.projectId, run_id: run.run_id, state: run.state, minted };
   } finally { if (owned) queue.close(); }
@@ -1225,8 +1305,10 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
     await closeOutPaused(queue, pausedDeps(opts)); // Story 27.3: a paused run whose story landed is closed out
     await resolveQuietly(queue, opts); // Story 31.7: queue validate-resolution from resolved items; re-arm on a pass
     chatSpendQuietly(queue, opts); // Story 32.2: the chat runs' costs into each engagement's spend.planning_usd
+    runSpendQuietly(queue, opts); // Story 32.6: the engagement runs' costs into each engagement's spend.runs_usd
     await questionsQuietly(queue, opts); // Story 32.3: the planner's questions applied, blocked, answered and closed
     await scopeQuietly(queue, opts); // Story 32.4: a revise body becomes the scope and its Confluence page
+    await approveQuietly(queue, opts); // Story 32.6: the approve pass, then launched, autonomy and the cap
     await afterCloseOuts(queue, opts); // Story 27.5: the orphan close-out, then the plan's review and merge passes
     await rebuildQuietly(queue, opts.agents); // Story 29.2: every end this process drove rebuilds the agent registry
     await sweepEnds(queue, opts.hygiene); // Story 22.3: every end this process drove (resumes included)

@@ -17,7 +17,7 @@
  *                2. block — `awaiting-answers` with no `engagement-issue` `blocked` or block `refused` since its last
  *                   `questions` or partial `answer` line or its newest `engagement-answers` with `ids: []`:
  *                   `track.py block --engagement` through `uvRunner` (timeout 120), then
- *                   `engagement-issue {engagement, project, issue, action: "blocked"}` on `ok`; a refusal by name
+ *                   `engagement-issue {engagement, project, issue, action: "blocked", kind: "questions"}` on `ok`; a refusal by name
  *                   `engagement-issue {engagement, project, action: "refused", reason}` once per reason, and no further
  *                   call until a block is owed again (`retry: true`: nothing, the next pass calls again).
  *                3. Jira answers — the `inbox.json` item carrying `engagement`, every owner comment
@@ -234,9 +234,15 @@ function applyStep(queue: Queue, deps: QuestionsDeps, runId: string, t: Target, 
   out.applied.push(t.engagement);
 }
 
-/** A block-step event: `blocked`, or a block's named `refused` (a close's `refused` carries `step: "close"`). */
+/** Story 32.6: an `engagement-issue` event's block kind — `questions` (this pass's; an event without `kind` is one),
+ * `cap` or `ask` (the approve module's run pass, `track.py block --engagement --kind`). */
+export const blockKind = (e: { detail: Record<string, unknown> | null }): string =>
+  (typeof e.detail?.kind === "string" && e.detail.kind ? e.detail.kind : "questions");
+
+/** A block-step event of this pass: a `questions` block, or its named `refused` (a close's `refused` carries `step:
+ * "close"`). A `cap` or `ask` block is not this pass's (Story 32.6). */
 const isBlockDone = (e: { detail: Record<string, unknown> | null }) =>
-  e.detail?.action === "blocked" || (e.detail?.action === "refused" && e.detail?.step !== "close");
+  blockKind(e) === "questions" && (e.detail?.action === "blocked" || (e.detail?.action === "refused" && e.detail?.step !== "close"));
 
 /** Step 2: block the engagement's issue (`track.py block --engagement`). A refusal by name (`ok: false`, `blocked`:
  * `IssueCreateRefused`, a binding or owner gap) is one `engagement-issue {…, action: "refused", reason}` per reason
@@ -258,7 +264,7 @@ async function blockStep(queue: Queue, deps: QuestionsDeps, t: Target, record: E
     return;
   }
   const issue = Array.isArray(r.issues) && typeof r.issues[0]?.issue === "string" ? r.issues[0].issue : null;
-  queue.serviceEvent("engagement-issue", { engagement: t.engagement, project, issue, action: "blocked" }, at);
+  queue.serviceEvent("engagement-issue", { engagement: t.engagement, project, issue, action: "blocked", kind: "questions" }, at);
   out.blocked.push(t.engagement);
 }
 
@@ -343,11 +349,15 @@ function jiraAnswersStep(queue: Queue, deps: QuestionsDeps, t: Target, record: E
  * (`ok: false`, `blocked`: `NoIssue`, `NoTransition` (no transition to `Done`, or to `Block Resolved` from `Blocked`),
  * `EngagementNotFound`, a binding or owner gap) is one
  * `engagement-issue {…, action: "refused", step: "close", reason}` and owes no further call; a transient failure
- * emits nothing (the next pass calls again). */
+ * emits nothing (the next pass calls again). Story 32.6: only a `questions` block is closed here — the newest `blocked`
+ * counted is a `questions` one, and nothing is closed while the issue's newest block is a `cap` or `ask` one (the
+ * same Jira issue, blocked for the owner's `go {cap}` or `continue`). */
 async function closeStep(queue: Queue, deps: QuestionsDeps, t: Target, record: Engagement, out: QuestionsResult): Promise<void> {
   if (!record.inputs.some((l) => l.verb === "questions")) return;
   const issueEvents = eventsFor(queue, "engagement-issue", record.project, t.engagement);
-  const lastBlocked = issueEvents.findLastIndex((e) => e.detail?.action === "blocked");
+  const newestBlock = issueEvents.findLast((e) => e.detail?.action === "blocked");
+  if (newestBlock && blockKind(newestBlock) !== "questions") return;
+  const lastBlocked = issueEvents.findLastIndex((e) => e.detail?.action === "blocked" && blockKind(e) === "questions");
   const settled = issueEvents.slice(lastBlocked + 1)
     .some((e) => e.detail?.action === "closed" || (e.detail?.action === "refused" && e.detail?.step === "close"));
   if (settled) return;

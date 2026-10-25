@@ -343,3 +343,51 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261025-104418-de9f; this entry preserves the lingering recommendation for a deliberate later review.
 status: open
+
+### DW-46: The served root's uncommitted budget-bands.yaml (left by 32.5's quote) can block the plan pull-back after the approve PR merges, so the queued step keeps retrying.
+origin: spec-deferred cba1228d3bf4
+source_spec: `32-6-approval-autonomy-and-the-first-run-spec.md`
+location: apps/supervisor/src/approve.ts queueStep
+severity: medium
+reason: The approve PR changes .tk-studio/budget-bands.yaml; the served root holds the quote's uncommitted copy of it, and queueStep submits against the served root, which the pass never pulls (ruling (c)). Recorded against SPEC Open Question 3 / plans/32-6.md risk.
+status: open
+
+### DW-47: Nothing closes a cap or ask block after go or continue, and the questions pass will not close an owed questions block while the newest block is cap or ask.
+origin: spec-deferred 668eb901a685
+source_spec: `32-6-approval-autonomy-and-the-first-run-spec.md`
+location: apps/supervisor/src/approve.ts runStep; apps/supervisor/src/questions.ts closeStep
+severity: medium
+reason: runStep only blocks (step 5); questions.ts closeStep skips while the newest block kind is cap/ask. The issue stays Blocked - Awaiting User after the owner answers. Meets DEFERRAL DISCIPLINE (a).
+status: open
+
+### DW-48: ask autonomy on a project not bound to Jira pauses with no question to the owner and no route to continue.
+origin: spec-deferred f1785296bde4
+source_spec: `32-6-approval-autonomy-and-the-first-run-spec.md`
+location: apps/supervisor/src/approve.ts runStep steps 5-6
+severity: medium
+reason: The ask block is skipped when !jiraBound(root), and run-resumed is applied only from a Jira owner comment `continue`; paused takes only run-resumed, revise or cancel. Meets DEFERRAL DISCIPLINE (a).
+status: open
+
+### DW-49: Two engagements approved before either PR merges both run plansync sync from the same default-branch counter and mint the same EP/ST ids.
+origin: spec-deferred 2f814336d68a
+source_spec: `32-6-approval-autonomy-and-the-first-run-spec.md`
+location: apps/supervisor/src/approve.ts reservedEpics / the sync step
+severity: medium
+reason: plansync's plan-counter.yaml is branch-local; reservedEpics reserves only ## Epic numbers, so the second PR adds the same EP-<n>.md (an add/add conflict GitHub surfaces, not a silent duplicate). Pre-existing property of plansync's counter across unmerged branches. Meets DEFERRAL DISCIPLINE (b): AD-4 id uniqueness at risk.
+status: open
+
+### DW-50: Two engagements quoted before either approves predict the same EP id, so the shared budget-bands.yaml entry holds only the later quote's estimate and the re-key can move the other engagement's figure.
+origin: spec-deferred 27739241dd4d
+source_spec: `32-6-approval-autonomy-and-the-first-run-spec.md`
+location: apps/supervisor/src/approve.ts rekeyBands call in the job step
+severity: medium
+reason: 32.5's quote writes epics.<predicted EP>.usd_estimate into the served root's shared bands file and basis.epics[] carries no per-epic usd, so approve's rekeyBands reads the shared entry. Pre-existing in 32.5. Meets DEFERRAL DISCIPLINE (a): AC2's band re-key.
+status: open
+
+### DW-51: A re-approval after revise, before the first PR merges, resets the approve worktree to the default branch's tree, so the second plansync sync promotes fresh EP/ST entities to Jira and the first cycle'
+origin: spec-deferred 4ec1b6eb659c
+source_spec: `32-6-approval-autonomy-and-the-first-run-spec.md`
+location: apps/supervisor/src/approve.ts re-approval cut (read-tree reset) and the sync step
+severity: medium
+reason: approve.ts re-approval path (operator ruling (2), pass 5): `git read-tree -u --reset origin/<default>` drops the first cycle's entity files holding external.jira.key and resets plan-counter.yaml; the following `plansync.py sync` mints keyless entities and jirabackend.promote POSTs a new issue for each. Consequence of ruling (2)'s wholesale replacement; reconciling the earlier promote (drop/transition the orphans, or carry keys forward) needs an operator decision. Meets DEFERRAL DISCIPLINE (a): AC1's plansync sync (the promote to Jira).
+status: open
