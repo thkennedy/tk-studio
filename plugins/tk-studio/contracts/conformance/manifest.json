@@ -434,6 +434,19 @@
           "marker": "no Atlassian call made"
         }
       ]
+    },
+    "tk-studio-engage": {
+      "external_calls": false,
+      "auth_preflight": "none needed — local files only (Story 32.2): `reply` reads the served root's engagement record, chat and memory indexes and appends one line to the engagement's chat.jsonl; no Atlassian, no network, no credential (the planner holds no bearer and no CSRF token, and its session runs with a worker's environment); a missing record refuses by name before anything is written (the drive below proves it)",
+      "drives": [
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/engage.py", "reply", "--directory", "{sandbox}", "--engagement", "ENG-001"],
+          "expect": "status-block",
+          "status": "blocked",
+          "marker": "UnknownEngagement"
+        }
+      ]
     }
   },
   "cli_drives": {

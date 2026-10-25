@@ -119,13 +119,15 @@ import {
   closeOut, closeOutDetail, launchedCloseOutInput, meteredCost, pendingCloseOut, prepareWorktree, priorPr, sweepEngines, type WorktreeDeps,
 } from "./worktree";
 import {
-  checkoutKey, defaultProbes, engineRoot, servedRoot, isTerminal, LAUNCH_SKILL, VALIDATE_RESOLUTION_JOB, ORPHANED_REASON, probeLaunchEngine, processStartTime, Queue, RunTerminal, selfOwner, STUDIO_END_RETRY_LIMIT, workerMayRun,
+  checkoutKey, defaultProbes, engineRoot, servedRoot, isTerminal, LAUNCH_SKILL, VALIDATE_RESOLUTION_JOB, ENGAGEMENT_CHAT_JOB, ORPHANED_REASON, probeLaunchEngine, processStartTime, Queue, RunTerminal, selfOwner, STUDIO_END_RETRY_LIMIT, workerMayRun,
   type Holder, type LaunchEngine, type Owner, type QueueRun, type RecoverReport, type RunState, type StudioEnder, type StudioFinder, type StudioOps, type StudioResumer, type TerminalState,
   type WorkerKill,
 } from "./queue";
 import { closeOutPaused, launchedSinceMove, resumePaused, type PausedDeps, type ResumeAnswer, type ResumeDeps as EngineResumeDeps } from "./closeout";
 import { mergePass, reviewPass, type PlanStatusDeps } from "./planstatus";
 import { resolutionPass, withQueuedPayload, withStoredPayload, type ResolutionDeps } from "./resolution";
+import { chatSpendPass, type ChatDeps, type ChatSpendDeps } from "./chat";
+import { ledgerPath } from "./board";
 import { CERT_CHECK_MS, CERT_RENEW_EXIT, certCheck, recordCertStart } from "./cert";
 import {
   holdEngine, killRunEngine, pinSandbox, releasePin, respawnHolds, STARTER_LOCK_REFRESH_MS, studioRunDir, writeStarterLock, writeStarterLocks, type SandboxDeps,
@@ -296,6 +298,8 @@ export interface RunOptions {
   agents?: AgentsOption;
   /** Story 31.7: the resolution pass (`resolveQuietly`) — injected deps, or `false` to skip it. */
   resolution?: Partial<ResolutionDeps> | false;
+  /** Story 32.2: the chat-spend pass (`chatSpendQuietly`) — injected deps, or `false` to skip it. */
+  chatSpend?: Partial<ChatSpendDeps> | false;
 }
 
 /** Story 29.2: how a rebuild point rebuilds the `agents` table — the injected deps (tests), `false` (no rebuild),
@@ -644,6 +648,7 @@ export async function recoverQueue(opts: RunOptions = {}, verbRunner: VerbRunner
     await sweepEngines(queue, opts.worktree); // Story 27.1: engines that ended or paused are closed out
     await closeOutPaused(queue, pausedDeps(opts)); // Story 27.3: a paused run whose story landed is closed out
     await resolveQuietly(queue, opts); // Story 31.7: queue validate-resolution from resolved items; re-arm on a pass
+    chatSpendQuietly(queue, opts); // Story 32.2: the chat runs' costs into each engagement's spend.planning_usd
     await afterCloseOuts(queue, opts); // Story 27.5: the orphan close-out, then the plan's review and merge passes
     await detectExternal(queue, verbRunner, jobPlacement, sbxDeps(opts.worktree)); // Story 27.2: runs started outside the queue
     writeStarterLocks(queue, opts.worktree?.env ?? process.env);
@@ -712,6 +717,26 @@ async function resolveQuietly(queue: Queue, opts: RunOptions): Promise<void> {
     ...(opts.resolution ?? {}),
   };
   try { await resolutionPass(queue, deps); } catch { /* the next tick */ }
+}
+
+/** Story 32.2: the chat-spend pass (src/chat.ts) right after the resolution pass at every `finally` site (`recover`,
+ * `drain`, `run`): production reads the host ledger (`ledgerPath`); under `bun test` it runs only with injected deps
+ * (as `resolveQuietly`). Never throws. */
+function chatSpendQuietly(queue: Queue, opts: RunOptions): void {
+  if (opts.chatSpend === false || (opts.chatSpend === undefined && underBunTest())) return;
+  try { chatSpendPass(queue, { ledgerFile: ledgerPath(opts.hygiene?.env ?? process.env), ...(opts.chatSpend ?? {}) }); } catch { /* the next tick */ }
+}
+
+/** Story 32.2: the chat route's production deps — the `engagement-chat` definition for a served root as `validate`
+ * resolves it (the shipped type, undeclared, through `jobrun.py resolve`), and `resolveCheckout`. */
+export function chatDeps(guardCapS?: number): ChatDeps {
+  return {
+    resolveJob: async (root) => {
+      const v = await validate(ENGAGEMENT_CHAT_JOB, root, undefined, guardCapS);
+      return { projectId: v.projectId, root: v.root, definition: v.defn, target: v.target };
+    },
+    checkout: resolveCheckout,
+  };
 }
 
 /** Story 27.5 (DW-13): every `cancelled` run whose recorded studio run no record shows ended
@@ -803,6 +828,7 @@ export async function drainQueue(opts: RunOptions = {}, verbRunner: VerbRunner =
     await sweepEngines(queue, opts.worktree); // Story 27.1
     await closeOutPaused(queue, pausedDeps(opts)); // Story 27.3
     await resolveQuietly(queue, opts); // Story 31.7
+    chatSpendQuietly(queue, opts); // Story 32.2
     await afterCloseOuts(queue, opts); // Story 27.5
     await rebuildQuietly(queue, opts.agents); // Story 29.2: the agent registry after the drain's claims and ends
     await sweepEnds(queue, opts.hygiene);
@@ -1117,14 +1143,15 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
       run = queue.get(opts.runId)!;
       if (permissionMode !== undefined && run.state === "queued") run = queue.recordPermissionMode(run.run_id, permissionMode);
       if (run.state === "queued") run = queue.recordRunOptions(run.run_id, record);
-      // Story 31.7: a queued validate-resolution run carries the payload the resolution pass enqueued.
-      v = { ...v, defn: withStoredPayload(run.job_id, v.defn, queue.definition(run)) };
+      // Story 31.7: a queued validate-resolution run carries the payload the resolution pass enqueued; Story 32.2: an
+      // engagement-chat run its own (the `enqueued` event's) plus its run id.
+      v = { ...v, defn: withStoredPayload(run.job_id, v.defn, queue.definition(run), { run_id: run.run_id, payload: queue.runPayload(run.run_id) }) };
     } else {
       const where = await resolveCheckout(v.root);
       const enq = queue.enqueue({ jobId, root: v.root, projectId: v.projectId, target: v.target, definition: v.defn, owner, permissionMode, ...record, ...where });
       run = enq.run;
       // Story 31.7: an adopted (not minted) queued validate-resolution run keeps the payload the pass enqueued.
-      if (!enq.minted) v = { ...v, defn: withStoredPayload(run.job_id, v.defn, queue.definition(run)) };
+      if (!enq.minted) v = { ...v, defn: withStoredPayload(run.job_id, v.defn, queue.definition(run), { run_id: run.run_id, payload: queue.runPayload(run.run_id) }) };
     }
     const claim = await queue.claim(run.run_id, owner);
     // Story 27.2 (AC3): every claim rewrites the checkout's starter lock (the queue is the only starter).
@@ -1161,6 +1188,7 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
     await sweepEngines(queue, opts.worktree); // Story 27.1: engines that ended or paused are closed out
     await closeOutPaused(queue, pausedDeps(opts)); // Story 27.3: a paused run whose story landed is closed out
     await resolveQuietly(queue, opts); // Story 31.7: queue validate-resolution from resolved items; re-arm on a pass
+    chatSpendQuietly(queue, opts); // Story 32.2: the chat runs' costs into each engagement's spend.planning_usd
     await afterCloseOuts(queue, opts); // Story 27.5: the orphan close-out, then the plan's review and merge passes
     await rebuildQuietly(queue, opts.agents); // Story 29.2: every end this process drove rebuilds the agent registry
     await sweepEnds(queue, opts.hygiene); // Story 22.3: every end this process drove (resumes included)
@@ -1528,7 +1556,7 @@ export async function startRun(
     throw new WakeFailed(message(e), { root, projectId, target, verb, timeoutS, jobGuardS, before });
   }
   if (out.ok === false) throw refusal(`${verb}: ${out.error ?? "refused"}`);
-  const woke = withQueuedPayload(jobId, out, defn); // Story 31.7: the enqueued payload reaches the skill
+  const woke = withQueuedPayload(jobId, out, defn); // Stories 31.7 and 32.2: the enqueued payload reaches the skill
   if (woke.woken !== true && woke.accepted !== true) {
     return { summary: { job_id: jobId, project_id: projectId, ok: false, run_id: null, state: "not-woken", reason: String(woke.reason ?? "refused") } };
   }
@@ -1986,6 +2014,10 @@ export async function finishRun(
   let invoked: Record<string, unknown> | undefined, tripped: GuardTrip[] | undefined, account: RunSummary["account"];
   const routing = (woke.routing ?? {}) as Record<string, unknown>;
   const knowledge = directive.knowledge && typeof directive.knowledge === "object" ? directive.knowledge : undefined;
+  // Story 32.2: an engagement-chat run keeps the queue run id its overlaid payload carries (the contract: every chat
+  // run_id is the queue run id; the spend pass maps it via studio_run_id); every other job gets the studio run id.
+  const payloadRunId = jobId === ENGAGEMENT_CHAT_JOB && typeof directive.payload?.run_id === "string" && directive.payload.run_id
+    ? directive.payload.run_id as string : runId;
   // §5: the submission's override, else the resolved job's routing — verbatim; neither → none (AD-14).
   const model = s.model ?? routing.model, effort = s.effort ?? routing.effort;
   // Resume state (Story 21.6).
@@ -2019,7 +2051,7 @@ export async function finishRun(
       const recording = rec
         ? { ...(sid && !resuming ? { beforeSpawn: () => rec.session(sid) } : {}), onSpawn: (pid: number) => rec.worker(pid, spawnGuardS) } : {};
       const out = await invoke(workRoot ?? root, directive.skill, {
-        payload: { ...(directive.payload ?? {}), run_id: runId }, timeout_s: timeoutS, permission_mode: permissionMode,
+        payload: { ...(directive.payload ?? {}), run_id: payloadRunId }, timeout_s: timeoutS, permission_mode: permissionMode,
         ...(model !== undefined ? { model } : {}), ...(effort !== undefined ? { effort } : {}),
         ...(tier ? { tier } : {}), ...(sandbox ? { sandbox } : {}), ...(knowledge ? { knowledge } : {}),
       }, undefined, {

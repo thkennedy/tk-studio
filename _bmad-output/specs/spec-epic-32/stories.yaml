@@ -91,6 +91,17 @@
     `32-3-clarifying-questions-through-the-inbox-*.md`, and a file named
     `32-3-clarifying-questions-through-the-inbox.md` is read as pending (loop deficiency
     1, story 21-6).
+    Replan (from 32-2, 2026-10-25): the engagement-chat session runs in a worktree;
+    its payload is {engagement, project, project_root, seq} plus the queue run_id,
+    and project_root maps to engage.py --directory (the served root holds chat.jsonl
+    and the JSON record). Add engage.py questions beside reply under --directory
+    with the atomic write and status block; the supervisor reads the written file
+    from the served root and records the queue run_id. A later planner turn is
+    minted with chat.ts mintChatTurn (stack, engagement-chat only). A record write
+    outside the serve path re-reads fresh and merges only its own fields
+    (chatSpendPass rule).
+    Oversize (gate, 2026-10-25): plans/32-3.md lists 23 files, past band L; halt
+    blocked if the Files list must grow beyond the plan's list.
 
 - id: "32-4-the-scope-of-work-on-confluence"
   title: "The Scope of Work on Confluence"
@@ -118,6 +129,10 @@
     `32-4-the-scope-of-work-on-confluence-*.md`, and a file named
     `32-4-the-scope-of-work-on-confluence.md` is read as pending (loop deficiency 1,
     story 21-6).
+    Replan (from 32-2, 2026-10-25): engage.py scope takes --directory <project_root>
+    (the served root, not the session's worktree) and writes scope.md and scope_page
+    there; the record is JSON text; the update re-reads fresh and merges only the
+    fields it owns (chatSpendPass rule).
 
 - id: "32-5-the-quote-band"
   title: "The Quote Band"
@@ -143,6 +158,12 @@
     executor spec as `stories/32-5-the-quote-band-spec.md` in the spec folder; the
     engine resolves it by the glob `32-5-the-quote-band-*.md`, and a file named
     `32-5-the-quote-band.md` is read as pending (loop deficiency 1, story 21-6).
+    Replan (from 32-2, 2026-10-25): the planning spend is the record's
+    spend.planning_usd, kept by chat.ts chatSpendPass (queue run -> studio_run_id ->
+    ledger job-run). engage.py quote writes under --directory <project_root> and
+    merges only quote and the state into a fresh read; no shared engagement.yaml
+    lock exists, so either add one for every writer or record the read-rename window
+    as a risk.
 
 - id: "32-6-approval-autonomy-and-the-first-run"
   title: "Approval, Autonomy and the First Run"
@@ -170,6 +191,11 @@
     `32-6-approval-autonomy-and-the-first-run-*.md`, and a file named
     `32-6-approval-autonomy-and-the-first-run.md` is read as pending (loop deficiency 1,
     story 21-6).
+    Replan (from 32-2, 2026-10-25): compute spend.runs_usd beside chat.ts
+    chatSpendPass (same finally sites, same queue run -> studio_run_id -> ledger
+    job-run mapping, merge-only into a fresh read). enqueue's stack is
+    engagement-chat only: never pass it for run-epic-N. A run-epic run and a chat
+    turn on one served root wait on the shared checkout lock.
 
 - id: "32-7-the-chat-screen"
   title: "The Chat Screen"
@@ -202,6 +228,14 @@
     Always send ?project= (a repeated id is 409 AmbiguousEngagement). The CSRF token
     comes from GET /inbox as the inbox reply takes it. Needs-you items are TriageItem |
     EngagementTriageItem {engagement, state, title}.
+    Replan (from 32-2, 2026-10-25): GET /chat/{id}?since= answers {ok, project,
+    engagement, since, last_seq, lines}; SSE is id: <seq>, event: chat. POST answers
+    {ok, engagement, seq, run_id}; refusals 409 EngagementClosed /
+    AmbiguousEngagement, 500 ChatJobUnresolved / ChatQueueFailed (no line kept), 503
+    ChatBusy (retryable). A line's run_id is the queue run id and the line carries
+    no cost: get the hover cost through studio_run_id -> ledger job-run (GET
+    /runs/{id} has no cost; a server addition is additive on 0.1.27) or show none;
+    never add a field to the chat line.
 
 - id: "32-8-delivery-the-closeout-report-and-change-requests"
   title: "Delivery, the Closeout Report and Change Requests"
@@ -237,3 +271,9 @@
     rows through the exported applyEvent (source supervisor). List
     plugins/tk-studio/lib/tests/test_driver_contract.py in Files when the contract
     changes and keep its 32.1 pinned strings.
+    Replan (from 32-2, 2026-10-25): the planning spend is spend.planning_usd
+    (chatSpendPass). engage.py closeout takes --directory <project_root>. Chat
+    run_ids are queue run ids, mapped via studio_run_id to the ledger. The
+    engagement pass merges only closeout and the state into a fresh read, or adds a
+    shared record lock to every writer (chat spend pass, input route, engagement
+    pass) named in the 0.1.27 entry. stack stays engagement-chat only.

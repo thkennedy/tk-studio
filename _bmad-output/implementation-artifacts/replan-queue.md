@@ -330,3 +330,45 @@
 - What no longer holds: "the contract's … §7.1 the state table", read as a new §7.1 section.
 - Suggested adjustment: treat 32.1's subsection as the "§7.1" state table and amend it in place (any table change updates `TRANSITIONS` and the bun equality test together). Lift the `follows` refusal additively within 0.1.27. Wire the run-end rows through `applyEvent`. List `plugins/tk-studio/lib/tests/test_driver_contract.py` in Files when the contract changes, and keep the 32.1 pinned strings.
 - Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-25)
+
+## 32-3-clarifying-questions-through-the-inbox — scope: stories — from 32-2-the-planner-leg-behind-the-chat-route — 2026-10-25
+
+- What changed: an `engagement-chat` session runs in the run's worktree. Its payload is `{engagement, project, project_root, seq}` plus the queue `run_id`, and `project_root` (the served root) maps to `engage.py --directory`. `chat.jsonl` and `engagement.yaml` live untracked in the served root. The record is JSON text, and `engage.py` reads JSON only. `enqueue`'s `stack` applies to `engagement-chat` alone (`runs_one_live` leaves only it out). Any other job adopts the live run of its (job, checkout).
+- What no longer holds: "the planner writes `engage.py questions`" and "the supervisor applies on the planner's behalf from the written file … with source `planner` and the run id", read as the session writing in its cwd with a studio run id.
+- Suggested adjustment: add `questions` to `engage.py` beside `reply`, writing under `--directory <project_root>` with the same atomic write and status block. The supervisor reads the written file from the served root and records the queue `run_id` (the chat line's). A planner turn after answers is minted through `mintChatTurn` (`stack`), never a new job. A record write outside the serve path re-reads fresh and merges only its own fields (the `chatSpendPass` rule).
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-25)
+
+## 32-4-the-scope-of-work-on-confluence — scope: stories — from 32-2-the-planner-leg-behind-the-chat-route — 2026-10-25
+
+- What changed: as for 32-3. The planner session writes through `engage.py --directory <project_root>` into the served root, never its worktree. The record is JSON. The planner reads `kb/confluence/` at `<project_root>/<path>` (SKILL.md).
+- What no longer holds: "the planner writes `engage.py scope` from the turn's `scope.md`", read as a path in the session's cwd.
+- Suggested adjustment: `engage.py scope` takes `--directory` and writes `_bmad-output/engagements/<id>/scope.md` and `scope_page` in the served root. The record update re-reads fresh and merges only `scope_page` (and the scope fields).
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-25)
+
+## 32-5-the-quote-band — scope: stories — from 32-2-the-planner-leg-behind-the-chat-route — 2026-10-25
+
+- What changed: `spend.planning_usd` is kept by `chatSpendPass` (`chat.ts`) at the run-end `finally` sites. It maps each `chat-queued` queue run → `studio_run_id` → ledger `job-run` cost, re-reads the record fresh and merges only `planning_usd`. No shared `engagement.yaml` lock exists (consult 2026-10-25T06:03:23Z). A sub-ms read→rename window remains.
+- What no longer holds: "whether scoping was billable (the planning spend so far)", read as a figure the quote computes itself.
+- Suggested adjustment: read `spend.planning_usd` from the record. `engage.py quote` writes under `--directory <project_root>` and merges only `quote` (and the state) into a fresh read. If the story adds a shared record lock, `chatSpendPass` and the input route take it too; otherwise record the window as a risk.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-25)
+
+## 32-6-approval-autonomy-and-the-first-run — scope: stories — from 32-2-the-planner-leg-behind-the-chat-route — 2026-10-25
+
+- What changed: 32.2's spend pass sets the pattern for an engagement spend sum. Queue run ids are mapped through `studio_run_id` to the ledger `job-run` cost, and only the owned field is merged into a fresh read. The checkout lock is shared, so a `run-epic` run and a chat turn on the same served root wait on each other. `stack` is `engagement-chat` only, so the `run-epic-N` job keeps today's adoption.
+- What no longer holds: "`spend.runs_usd` sums the engagement's runs' `job-run` costs", read as a new mechanism.
+- Suggested adjustment: compute `spend.runs_usd` beside `chatSpendPass` (the same `finally` sites, the same queue → `studio_run_id` → ledger mapping, merge-only into a fresh read). Never pass `stack` for `run-epic-N`.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-25)
+
+## 32-7-the-chat-screen — scope: stories — from 32-2-the-planner-leg-behind-the-chat-route — 2026-10-25
+
+- What changed: `GET /chat/{id}?since=` answers `{ok, project, engagement, since, last_seq, lines}`. SSE uses `id: <seq>` and `event: chat`. `POST /chat/{id}` answers `{ok, engagement, seq, run_id}`. Its refusals include 409 EngagementClosed, 409 AmbiguousEngagement, 500 ChatJobUnresolved, 500 ChatQueueFailed (no line kept) and 503 ChatBusy (nothing appended). A planner line's `run_id` is the queue run id, not the studio run id, and the line carries no cost.
+- What no longer holds: "owner and planner lines, the planner's run cost on hover", read as a cost on the line.
+- Suggested adjustment: get the hover cost through the queue run id. `GET /runs/{run_id}` returns the run and its events but no cost, so map `studio_run_id` → ledger `job-run`, as the issue read's `cost_usd` does. Without that, show no cost; a server addition is additive on 0.1.27. Never add a field to the chat line from the web story. Render ChatBusy/ChatQueueFailed as retryable and EngagementClosed as final. Always send `?project=`.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-25)
+
+## 32-8-delivery-the-closeout-report-and-change-requests — scope: stories — from 32-2-the-planner-leg-behind-the-chat-route — 2026-10-25
+
+- What changed: the same seams as 32-3 and 32-6. `engage.py` writes under `--directory <project_root>`. Chat `run_id`s are queue run ids, mapped to the ledger through `studio_run_id`. `spend.planning_usd` is already summed. The spend pass's record write is merge-only into a fresh read, with no shared lock (left to 32-5/32-8 by consult). `stack` is `engagement-chat` only.
+- What no longer holds: "the planning spend" and "`engage.py closeout`", read as new computations in the served root's cwd.
+- Suggested adjustment: read the planning spend from `spend.planning_usd`. `engage.py closeout` takes `--directory`. The engagement pass merges only `closeout` and the state into a fresh read, or adds the shared record lock to every writer (chat spend pass, input route, engagement pass) and names it in the 0.1.27 entry.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-25)

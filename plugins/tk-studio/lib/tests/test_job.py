@@ -255,6 +255,26 @@ class JobTestCase(unittest.TestCase):
         self.assertNotIn("model", defn)
         self.assertEqual(joblib.load_instances(self.root)["jobs"], [])
 
+    # ---------------- Story 32.2: the shipped engagement-chat job type
+
+    def test_engagement_chat_ships_as_a_one_shot_engage_skill_job(self):
+        entry = joblib.load_types()["engagement-chat"]
+        self.assertEqual(entry["problems"], [])
+        defn = entry["definition"]
+        self.assertEqual(defn["target"], {"skill": "tk-studio-engage",
+                                          "payload": {"verb": "reply"}})
+        self.assertNotIn("core", defn["target"])
+        self.assertEqual(defn["trigger"], "one-shot")
+        self.assertNotIn("cadence", defn)
+        self.assertEqual(defn["guards"], {"max_turns": 80,
+                                          "max_wall_clock_seconds": 1800})
+        self.assertEqual(defn["stop"], {"until": "9999-12-31T23:59:59Z"})
+        self.assertNotIn("on_status", defn["stop"])
+        # the planner leg's model and effort are passed at enqueue; no tier
+        for key in ("model", "effort", "tier", "on_status"):
+            self.assertNotIn(key, defn)
+        self.assertEqual(joblib.load_instances(self.root)["jobs"], [])
+
     def _fake_core(self, stdout: dict, code: int = 0):
         seen = []
 

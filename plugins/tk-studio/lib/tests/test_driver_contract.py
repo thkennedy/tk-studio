@@ -995,6 +995,65 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertIn("**0.1.27 (Story 32.1, additive).**", flat)
         self.assertIn("keyed by project plus id", flat)
 
+    # --- Story 32.2: the same 0.1.27 entry adds the engagement's chat (two
+    # supervisor routes), the `tk-studio-engage` surface and the shipped
+    # `engagement-chat` job — additive, never a 0.1.28.
+
+    def test_0_1_27_story_32_2_adds_the_chat_and_the_engage_surface(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.27**", header)
+        self.assertNotIn("**0.1.28**", header)
+        self.assertNotIn("**0.1.28**", self.text)
+        self.assertLess(header.index("0.1.27 (Story 32.1)"),
+                        header.index("0.1.27 (Story 32.2) adds to this same "
+                                     "entry"))
+        clause = " ".join(header[header.index("0.1.27 (Story 32.2)"):]
+                          .split())
+        for phrase in ("`POST /chat/{engagement}`",
+                       "`GET /chat/{engagement}?since=<seq>`",
+                       "`tk-studio-engage`", "`engagement-chat`",
+                       "`chat-queued`", "`spend.planning_usd`",
+                       "JSON text", "— additive) |"):
+            self.assertIn(phrase, clause)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 32.2", stories)
+        chat = " ".join(line for line in self.text.splitlines()
+                        if line.startswith("| the engagement's chat "
+                                           "(Story 32.2, 0.1.27)"))
+        for phrase in ("| `POST /chat/{engagement}` |",
+                       "| `GET /chat/{engagement}?since=<seq>` |",
+                       "`200 {ok, engagement, seq, run_id}`",
+                       "`409 EngagementClosed", "`403 CsrfRefused`",
+                       "never refused, never adopted",
+                       "`event: chat`", "`: heartbeat`",
+                       "`Allow: GET, POST`", "`{verb, payload, label}`",
+                       "`{engagement, project, project_root, seq}`",
+                       "`500 ChatQueueFailed`", "`500 ChatJobUnresolved`"):
+            self.assertIn(phrase, chat)
+        row = next(line for line in self.text.splitlines()
+                   if line.startswith("| `tk-studio-engage` "))
+        for phrase in ("(0.1.27, Story 32.2)", "verb `reply`",
+                       "`lib/engage.py reply`", "`ProposalInvalid`",
+                       "`EngagementRecordUnreadable`", "`EngagementClosed`",
+                       "the planner moves no state"):
+            self.assertIn(phrase, row)
+        flat = " ".join(self.text.split())
+        for phrase in ("The shipped `engagement-chat` job (0.1.27, Story "
+                       "32.2)", "`payload.verb: reply`", "`tier: host`",
+                       "planner leg's model and effort", "`max_turns` 80",
+                       "no `model`", "project_root, seq}` (`project_root` "
+                       "the served registry root"):
+            self.assertIn(phrase, flat)
+        manifest = json.loads((PLUGIN_ROOT / "contracts" / "conformance"
+                               / "manifest.json").read_text("utf-8"))
+        drives = manifest["surfaces"]["tk-studio-engage"]["drives"]
+        self.assertEqual([(d["argv"][:2], d["expect"], d["status"],
+                           d["marker"]) for d in drives],
+                         [(["lib/engage.py", "reply"], "status-block",
+                           "blocked", "UnknownEngagement")])
+
     def test_section_8_names_the_cli_drives(self):
         section = self.text[self.text.index("## 8. Conformance"):]
         flat = " ".join(section.split())

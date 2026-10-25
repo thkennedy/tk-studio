@@ -15,7 +15,8 @@
  *                atomically before the record lands (a crash leaves a gap, never a duplicate: `plansync.py`), every
  *                other key and `counter_version` preserved, an id whose directory exists skipped.
  *   the chat     `chatPointer`: `{route: "/chat/<id>", path: "_bmad-output/engagements/<id>/chat.jsonl", last_seq}`
- *                (32.2 writes the file; `last_seq` 0 while it is absent).
+ *                (32.2 writes the file, `chat.ts`; `last_seq` 0 while it is absent).
+ *   the text     Story 32.2: `engagement.yaml` is written as JSON text (a YAML 1.2 document), read with js-yaml.
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -366,8 +367,9 @@ export class EngagementCounterInvalid extends Error {
 export const engagementPath = (root: string, id: string) => join(root, ENGAGEMENTS_REL, id, "engagement.yaml");
 export const shownPath = (id: string) => `_bmad-output/engagements/${id}/engagement.yaml`;
 
-/** Write `text` to `path` atomically: a sibling temp file, then a rename (as `plansync.py`'s `_atomic_write`). */
-function atomicWrite(path: string, text: string): void {
+/** Write `text` to `path` atomically: a sibling temp file, then a rename (as `plansync.py`'s `_atomic_write`). Exported for
+ * the chat file (Story 32.2, `chat.ts`). */
+export function atomicWrite(path: string, text: string): void {
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
   try {
@@ -413,9 +415,11 @@ export function readEngagement(root: string, id: string): Engagement | null {
   return record;
 }
 
-/** Write the record atomically (tmp then rename). */
+/** Write the record atomically (tmp then rename). Story 32.2 (Settled shape 1): as JSON text (`JSON.stringify(record,
+ * null, 2)` and a newline), a YAML 1.2 document `readEngagement`'s js-yaml load reads unchanged, so the plugin's
+ * stdlib cores (`engage.py`) read it with `json`. The plan counter stays block YAML. */
 export function writeEngagement(root: string, record: Engagement): void {
-  atomicWrite(engagementPath(root, record.id), dumpYaml(record, YAML_OPTIONS));
+  atomicWrite(engagementPath(root, record.id), JSON.stringify(record, null, 2) + "\n");
 }
 
 /** Newest first: `created` descending, then the id's number descending. */

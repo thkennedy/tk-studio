@@ -501,6 +501,8 @@ export interface QueueRun {
 
 /** Story 31.7: the shipped job the resolution pass queues; its claim never waits on a paused lock holder. */
 export const VALIDATE_RESOLUTION_JOB = "validate-resolution";
+/** Story 32.2: the shipped job the chat route queues (`chat.ts`), one run per owner line (`enqueue`'s `stack`). */
+export const ENGAGEMENT_CHAT_JOB = "engagement-chat";
 
 /** The worker options a run records while `queued` (Story 21.4). */
 export interface RunOptionsRecord { tier?: string | null; sandbox?: string | null; model?: string | null; effort?: string | null; base_ref?: string | null }
@@ -623,7 +625,7 @@ CREATE TABLE IF NOT EXISTS runs (
   created TEXT NOT NULL, updated TEXT NOT NULL,
   FOREIGN KEY (job_id, checkout) REFERENCES jobs (job_id, checkout)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS runs_one_live ON runs (job_id, checkout) WHERE state IN ('queued','running','paused','external');
+CREATE UNIQUE INDEX IF NOT EXISTS runs_one_live ON runs (job_id, checkout) WHERE state IN ('queued','running','paused','external') AND job_id <> 'engagement-chat';
 CREATE TABLE IF NOT EXISTS events (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, at TEXT NOT NULL, kind TEXT NOT NULL,
   from_state TEXT, to_state TEXT NOT NULL, detail TEXT
@@ -702,13 +704,15 @@ const ADDED_RUN_COLUMNS = [
 ] as const;
 
 /** Story 27.1: the one-live-run index — a `paused` run is the job's live run too (enqueue mints no second);
- * Story 27.2: so is an `external` one. */
-const LIVE_INDEX = "CREATE UNIQUE INDEX IF NOT EXISTS runs_one_live ON runs (job_id, checkout) WHERE state IN ('queued','running','paused','external')";
+ * Story 27.2: so is an `external` one. Story 32.2: `engagement-chat` (the one job `enqueue`'s `stack` applies to) is
+ * left out, so a chat turn mints behind a live one; every other job keeps one live run per checkout. */
+const LIVE_INDEX = `CREATE UNIQUE INDEX IF NOT EXISTS runs_one_live ON runs (job_id, checkout) WHERE state IN ('queued','running','paused','external') AND job_id <> '${ENGAGEMENT_CHAT_JOB}'`;
 
-/** Story 27.1/27.2: an index from before `paused` or `external` is dropped and recreated with them. */
+/** Story 27.1/27.2: an index from before `paused` or `external` (Story 32.2: or the `engagement-chat` exclusion) is
+ * dropped and recreated with them. */
 function widenLiveIndex(db: Database): void {
   const row = db.query("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'runs_one_live'").get() as { sql: string } | null;
-  if (row?.sql.includes("'paused'") && row.sql.includes("'external'")) return;
+  if (row?.sql.includes("'paused'") && row.sql.includes("'external'") && row.sql.includes(`'${ENGAGEMENT_CHAT_JOB}'`)) return;
   db.exec("DROP INDEX IF EXISTS runs_one_live");
   db.exec(LIVE_INDEX);
 }
@@ -1058,7 +1062,11 @@ export class Queue {
    * run of this job on this checkout is `queued` or `running`, nothing is
    * minted and that run is answered. An explicit `permissionMode` is stored on
    * the minted run, or recorded on the adopted run while it is `queued`; so are
-   * the worker options (tier, sandbox, model, effort). */
+   * the worker options (tier, sandbox, model, effort). Story 32.2: `stack: true` (opt-in; only the chat route passes
+   * it, and only for `engagement-chat` — any other job adopts as before) mints even while a run of this job on this
+   * checkout is live — the new run waits on the checkout lock in
+   * `claim`, never refused or adopted; `payload` is stored per run as the `enqueued` event's `detail.payload`
+   * (`runPayload`). */
   enqueue(input: {
     jobId: string; root: string; projectId?: string | null; target?: string | null;
     definition: Record<string, unknown>; owner?: Owner | null; permissionMode?: string | null;
@@ -1067,10 +1075,16 @@ export class Queue {
     /** Story 28.5: the root's git top-level as a lock key and its prefix, resolved once per submission
      * (`resolveCheckout`); absent: the root keys by itself, prefix `""`. Recorded on a minted run only. */
     lockCheckout?: string | null; prefix?: string | null;
+    /** Story 32.2: mint even while a run of this (job, checkout) is live (never adopt). */
+    stack?: boolean;
+    /** Story 32.2: this run's own payload, stored on its `enqueued` event (`runPayload`). */
+    payload?: Record<string, unknown> | null;
   } & RunOptionsRecord): { run: QueueRun; minted: boolean } {
     const checkout = checkoutKey(input.root);
+    // Story 32.2: `stack` applies to `engagement-chat` only (the live-run index leaves only it out); any other job adopts.
+    const stack = input.stack === true && input.jobId === ENGAGEMENT_CHAT_JOB;
     return this.db.transaction(() => {
-      const live = this.db.query(
+      const live = stack ? null : this.db.query(
         "SELECT * FROM runs WHERE job_id = ? AND checkout = ? AND state IN ('queued','running','paused','external') ORDER BY created LIMIT 1",
       ).get(input.jobId, checkout) as QueueRun | null;
       if (live) {
@@ -1103,9 +1117,19 @@ export class Queue {
         ...(owner ? { owner: ownerDetail(owner) } : {}), ...(mode ? { permission_mode: mode } : {}),
         ...Object.fromEntries(Object.entries(opts).filter(([, v]) => v !== null)),
         ...(flagged ? { editor_in_the_loop: true } : {}),
+        ...(input.payload ? { payload: input.payload } : {}),
       });
       return { run: this.must(runId), minted: true };
     }).immediate();
+  }
+
+  /** Story 32.2: the payload stored on a run's `enqueued` event (`enqueue`'s `payload`), else null. */
+  runPayload(runId: string): Record<string, unknown> | null {
+    const row = this.db.query("SELECT detail FROM events WHERE run_id = ? AND kind = 'enqueued' ORDER BY seq LIMIT 1").get(runId) as { detail: string | null } | null;
+    try {
+      const payload = row?.detail ? JSON.parse(row.detail)?.payload : null;
+      return payload && typeof payload === "object" && !Array.isArray(payload) ? payload : null;
+    } catch { return null; }
   }
 
   /** Record the caller's explicit permission mode on a `queued` run (a run

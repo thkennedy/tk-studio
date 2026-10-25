@@ -5,7 +5,7 @@ import { hostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { resolveCheckout, studioOps, studioRunFinder, watchCertificate } from "../src/cli";
 import {
-  canonicalPath, checkoutKey, defaultOwnerAlive, END_LEASE_STALE_MS, lockKeyOf, launchStatusProbe, NOTIFIED_BEFORE, ORPHANED_REASON, processStartTime, Queue, QueueDbMissing, QueueDbPlacementRefused,
+  canonicalPath, checkoutKey, defaultOwnerAlive, END_LEASE_STALE_MS, ENGAGEMENT_CHAT_JOB, lockKeyOf, launchStatusProbe, NOTIFIED_BEFORE, ORPHANED_REASON, processStartTime, Queue, QueueDbMissing, QueueDbPlacementRefused,
   queueDbPath, REQUEUED_REASON, runPowerShell, RunTerminal, selfOwner, type EngineProbe, type Owner, type Probes,
 } from "../src/queue";
 import { filetimeToIso, processCreationTime } from "../src/winproc";
@@ -1739,5 +1739,63 @@ describe("Story 28.5: one checkout lock for a nested project and its repository"
     expect(cols).toContain("lock_checkout");
     expect(cols).toContain("prefix");
     q.close();
+  });
+});
+
+describe("Story 32.2: enqueue's opt-in stack and the per-run payload", () => {
+  const CHAT = { id: ENGAGEMENT_CHAT_JOB, trigger: "one-shot", target: { skill: "tk-studio-engage", payload: { verb: "reply" } } };
+
+  test("stack mints an engagement-chat run behind a live one (it waits on the checkout lock); the payload is stored per run", async () => {
+    const fx = fixture();
+    const first = fx.queue.enqueue({ jobId: ENGAGEMENT_CHAT_JOB, root: fx.checkout, definition: CHAT, stack: true, payload: { engagement: "ENG-001", project: "p", seq: 1 } });
+    expect(first.minted).toBe(true);
+    expect((await fx.queue.claim(first.run.run_id, A)).claimed).toBe(true);
+    const second = fx.queue.enqueue({ jobId: ENGAGEMENT_CHAT_JOB, root: fx.checkout, definition: CHAT, stack: true, payload: { engagement: "ENG-001", project: "p", seq: 3 } });
+    expect(second.minted).toBe(true);
+    expect(second.run.run_id).not.toBe(first.run.run_id);
+    expect(second.run.state).toBe("queued");
+    expect(fx.queue.runPayload(first.run.run_id)).toEqual({ engagement: "ENG-001", project: "p", seq: 1 });
+    expect(fx.queue.runPayload(second.run.run_id)).toEqual({ engagement: "ENG-001", project: "p", seq: 3 });
+    expect(fx.queue.events(second.run.run_id)[0]?.detail).toEqual({ payload: { engagement: "ENG-001", project: "p", seq: 3 } });
+    const waited = await fx.queue.claim(second.run.run_id, B);
+    expect(waited).toMatchObject({ claimed: false, why: "lock" });
+    expect(fx.queue.get(second.run.run_id)!.state).toBe("queued");
+    // a third while both are live: minted too (never refused, never adopted)
+    expect(fx.queue.enqueue({ jobId: ENGAGEMENT_CHAT_JOB, root: fx.checkout, definition: CHAT, stack: true }).minted).toBe(true);
+    expect(fx.queue.runs().filter((r) => r.job_id === ENGAGEMENT_CHAT_JOB && r.state === "queued")).toHaveLength(2);
+    // no payload given: none stored
+    expect(fx.queue.runPayload(fx.queue.runs().at(-1)!.run_id)).toBeNull();
+  });
+
+  test("every other enqueue keeps the idempotent adoption — stack is ignored for any job but engagement-chat, and opt-in for it", () => {
+    const fx = fixture();
+    const a = fx.enqueue();
+    const b = fx.queue.enqueue({ jobId: "studio-health", root: fx.checkout, definition: { id: "studio-health" }, stack: true, payload: { x: 1 } });
+    expect(b).toMatchObject({ minted: false, run: { run_id: a.run.run_id } });
+    expect(fx.queue.runPayload(a.run.run_id)).toBeNull();
+    const c1 = fx.queue.enqueue({ jobId: ENGAGEMENT_CHAT_JOB, root: fx.checkout, definition: CHAT });
+    const c2 = fx.queue.enqueue({ jobId: ENGAGEMENT_CHAT_JOB, root: fx.checkout, definition: CHAT });
+    expect(c2).toMatchObject({ minted: false, run: { run_id: c1.run.run_id } });
+  });
+
+  test("a queue file whose live-run index predates the engagement-chat exclusion is migrated on open; other jobs stay one live run", () => {
+    const fx = fixture();
+    fx.queue.db.exec("DROP INDEX runs_one_live; CREATE UNIQUE INDEX runs_one_live ON runs (job_id, checkout) WHERE state IN ('queued','running','paused','external')");
+    fx.queue.close();
+    const q = new Queue(fx.db, fakeProbes(new Set([A.pid])).probes);
+    try {
+      const sql = (q.db.query("SELECT sql FROM sqlite_master WHERE name = 'runs_one_live'").get() as { sql: string }).sql;
+      expect(sql).toContain("'paused'");
+      expect(sql).toContain(`'${ENGAGEMENT_CHAT_JOB}'`);
+      q.enqueue({ jobId: ENGAGEMENT_CHAT_JOB, root: fx.checkout, definition: CHAT, stack: true });
+      expect(q.enqueue({ jobId: ENGAGEMENT_CHAT_JOB, root: fx.checkout, definition: CHAT, stack: true }).minted).toBe(true);
+      const now = new Date().toISOString();
+      q.db.query("INSERT INTO jobs (job_id, checkout, root, project_id, definition, created, updated) VALUES ('studio-health', ?, ?, NULL, '{}', ?, ?)")
+        .run(checkoutKey(fx.checkout), fx.checkout, now, now);
+      expect(() => q.db.query(`INSERT INTO runs (run_id, job_id, checkout, root, state, created, updated) VALUES ('x1', 'studio-health', ?, ?, 'queued', ?, ?)`)
+        .run(checkoutKey(fx.checkout), fx.checkout, now, now)).not.toThrow();
+      expect(() => q.db.query(`INSERT INTO runs (run_id, job_id, checkout, root, state, created, updated) VALUES ('x2', 'studio-health', ?, ?, 'queued', ?, ?)`)
+        .run(checkoutKey(fx.checkout), fx.checkout, now, now)).toThrow(/UNIQUE/);
+    } finally { q.close(); }
   });
 });

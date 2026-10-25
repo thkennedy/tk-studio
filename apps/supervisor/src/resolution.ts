@@ -38,7 +38,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { findSpec, jiraBound, trackBlockSincePause } from "./closeout";
 import { readInbox } from "./office";
-import { checkoutKey, isTerminal, servedRoot, VALIDATE_RESOLUTION_JOB, type Queue, type QueueRun } from "./queue";
+import { checkoutKey, ENGAGEMENT_CHAT_JOB, isTerminal, servedRoot, VALIDATE_RESOLUTION_JOB, type Queue, type QueueRun } from "./queue";
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const clip = (s: string, n = 500) => s.replace(/\/\/[^/@\s]+@/g, "//[redacted]@").trim().slice(0, n);
@@ -257,10 +257,23 @@ export async function resolutionPass(queue: Queue, deps: ResolutionDeps): Promis
   return out;
 }
 
+/** The jobs whose queued runs carry an enqueued payload (Story 31.7 `validate-resolution`, Story 32.2 `engagement-chat`). */
+const PAYLOAD_JOBS: ReadonlySet<string> = new Set([VALIDATE_RESOLUTION_JOB, ENGAGEMENT_CHAT_JOB]);
+
 /** Story 31.7: the definition a `validate-resolution` run is driven with — `defn` with the queue's stored
  * definition's `target.payload` (the payload the pass enqueued) overlaid; any other job, or no stored payload,
- * answers `defn` unchanged. */
-export function withStoredPayload(jobId: string, defn: Record<string, any>, stored: Record<string, any> | null | undefined): Record<string, any> {
+ * answers `defn` unchanged. Story 32.2: an `engagement-chat` run is driven with its own payload (`run.payload`, the
+ * `enqueued` event's: `{engagement, project, seq}`, never the job row's, which the latest mint overwrites) plus its
+ * `run_id`, over the definition's `target.payload` (`{verb: "reply"}`); no per-run payload answers `defn` unchanged. */
+export function withStoredPayload(
+  jobId: string, defn: Record<string, any>, stored: Record<string, any> | null | undefined,
+  run?: { run_id: string; payload?: Record<string, unknown> | null } | null,
+): Record<string, any> {
+  if (jobId === ENGAGEMENT_CHAT_JOB) {
+    const own = run?.payload;
+    if (!run || !own || typeof own !== "object") return defn;
+    return { ...defn, target: { ...(defn.target ?? {}), payload: { ...(defn.target?.payload ?? {}), ...own, run_id: run.run_id } } };
+  }
   const payload = stored?.target?.payload;
   if (jobId !== VALIDATE_RESOLUTION_JOB || !payload || typeof payload !== "object") return defn;
   return { ...defn, target: { ...(defn.target ?? {}), payload } };
@@ -268,11 +281,11 @@ export function withStoredPayload(jobId: string, defn: Record<string, any>, stor
 
 /** Story 31.7: a queued `validate-resolution` run is driven with the payload the pass enqueued — the stored
  * definition's `target.payload` overlaid on the invoke-skill directive `jobrun.py submit` answered (which carries
- * only the shipped type's `{verb: "validate"}`). Any other job, or a directive that is not invoke-skill, is
- * answered unchanged. */
+ * only the shipped type's `{verb: "validate"}`). Story 32.2: an `engagement-chat` run likewise (`{verb: "reply",
+ * engagement, project, seq, run_id}`). Any other job, or a directive that is not invoke-skill, is answered unchanged. */
 export function withQueuedPayload(jobId: string, woke: Record<string, any>, defn: Record<string, any> | null | undefined): Record<string, any> {
   const payload = defn?.target?.payload;
   const directive = woke?.directive;
-  if (jobId !== VALIDATE_RESOLUTION_JOB || !payload || typeof payload !== "object" || directive?.kind !== "invoke-skill") return woke;
+  if (!PAYLOAD_JOBS.has(jobId) || !payload || typeof payload !== "object" || directive?.kind !== "invoke-skill") return woke;
   return { ...woke, directive: { ...directive, payload: { ...(directive.payload ?? {}), ...payload } } };
 }
