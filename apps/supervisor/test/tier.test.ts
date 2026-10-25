@@ -232,6 +232,18 @@ describe("the worker command line per tier", () => {
     expect(userEnvFromRegistry(() => text)).toEqual({}); // under bun test the registry is never consulted
     expect(sbxEnvPassthrough(env)).toEqual(["TK_ATLASSIAN_AGENT_TOKEN", "TK_ATLASSIAN_SITE"]);
   });
+
+  test("Story 31.6: buildWorkerEnv strips the owner seat (host-only); the cloud id survives", () => {
+    const env = buildWorkerEnv({
+      PATH: "/usr/bin", TK_STUDIO_ATLASSIAN_OWNER_EMAIL: "owner@example.com", TK_STUDIO_ATLASSIAN_OWNER_TOKEN: "owner-secret",
+      TK_ATLASSIAN_CLOUD_ID: "cloud-test", TK_STUDIO_HOME: "z",
+    }, () => ({}));
+    expect(env.TK_STUDIO_ATLASSIAN_OWNER_EMAIL).toBeUndefined();
+    expect(env.TK_STUDIO_ATLASSIAN_OWNER_TOKEN).toBeUndefined();
+    expect(env.TK_ATLASSIAN_CLOUD_ID).toBe("cloud-test");
+    expect(env.TK_STUDIO_HOME).toBe("z");
+    expect(JSON.stringify(env)).not.toContain("owner-secret");
+  });
 });
 
 describe("invokeSkill on the sbx tier (injected spawner)", () => {

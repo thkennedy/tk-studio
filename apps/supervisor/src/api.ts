@@ -41,7 +41,17 @@
  *   GET  /inbox?project=<id> the inbox (Story 31.5, contract 0.1.26 additive): {ok, project, generated_at, items} — the
  *                            served project's `_bmad-output/tracking/inbox.json` (the sync-back's) items exactly as
  *                            written; a missing file is `items: []` with `generated_at: null`, never a 404; 400
- *                            ProjectRequired, 404 UnknownProject (an unregistered project). Readable by the cookie too
+ *                            ProjectRequired, 404 UnknownProject (an unregistered project). Readable by the cookie too.
+ *                            Story 31.6 (0.1.26 additive): `&issue=<KEY>` is the Issue screen's read (`inbox.ts`
+ *                            `issueRead`): {ok, project, generated_at, items (the matching item only), issue {key, entity,
+ *                            title, status, run, cost_usd, comments[]}}; 400 BadIssue, 404 UnknownIssue, 500 IssueReadFailed. On a cookie
+ *                            session every `GET /inbox` answer carries the session's CSRF token in `X-CSRF-Token`
+ *   POST /inbox/{key}/reply  {project, body? | done?: true} (Story 31.6, `inbox.ts` `postReply`): the owner's reply, or
+ *                            Done (`Done.`), posted on the host by `track.py reply` with the owner seat's host-only token
+ *                            (the body in a temp file, never on the command line); 200 {ok, project, issue, commented,
+ *                            transitioned, status}, 400 SchemaError | MalformedJson | BadIssue, 403 CsrfRefused (a cookie
+ *                            session without `X-CSRF-Token`), 404 UnknownProject, 409 OwnerSeatMissing {missing} (no
+ *                            spawn) | ReplyRefused {reason, commented}, 503 ReplyRetry {reason, commented}, 500 ReplyFailed. No queue event
  *   GET  /office/events      with `Accept: text/event-stream`: `event:snapshot` first (or, for a valid `Last-Event-ID`,
  *                            the buffered deltas after it), then `office.agent` / `office.progress` / `office.run`
  *                            deltas (`id:<boot>-<seq>`), a `: heartbeat` comment every 10 s; without it the JSON snapshot
@@ -57,7 +67,8 @@
  * `POST /auth/account` (the owner's one account, created once) or `POST /auth/signin` (its username and
  * password, rate-limited with a lockout), all answered before any auth, and gets a signed session cookie.
  * The bearer header still authorises everything. Without it, a valid cookie authorises the GET routes, and
- * `POST /runs/{id}/cancel` with the page's CSRF token (else 403 CsrfRefused); never `POST /jobs`.
+ * `POST /runs/{id}/cancel` and (Story 31.6) `POST /inbox/{key}/reply` with the page's CSRF token (else 403
+ * CsrfRefused); never `POST /jobs`.
  * `GET /` with no auth is the 401 HTML sign-in page (account creation while no account exists); so is a
  * `GET /app[/…]` (Story 30.2) and an HTML `GET /status` (Story 30.6; a non-HTML one stays 401 JSON), their forms
  * carrying the requested path and query as `next`, where a successful
@@ -81,6 +92,7 @@ import { boardFor, type BoardAnswer } from "./board";
 import { CancelRaced, cancelRun, ExternalRunRefused, resumeRun, StartError, submitProject, type AgentsOption } from "./cli";
 import { ResumeRefused, type ResumeAnswer } from "./closeout";
 import { apiBind, apiPort, apiToken, checkTlsFiles, notifier, oauthLeftovers, sessionSecret, tlsConfig } from "./env";
+import { checkReplyBody, issueRead, postReply, registryRoot, type IssueReadResult, type ReplyAnswer, type ReplyBody } from "./inbox";
 import { OfficeHub, readInbox, type InboxFile, type OfficeEvent } from "./office";
 import { gatherPage, holderOf, readLedgerTail, redactLedgerLine, renderPage } from "./page";
 import { readAgents, type RebuildResult } from "./registry";
@@ -163,6 +175,10 @@ export interface ApiDeps {
   /** Story 31.5: the inbox reader (default: the registry's root for `project`, then `readInbox`); null for a project
    * the registry does not serve. */
   inbox?: (project: string) => Promise<InboxFile | null>;
+  /** Story 31.6: the issue read (default `issueRead` on the registry, the board builder and this queue). */
+  issueRead?: (project: string, key: string) => Promise<IssueReadResult>;
+  /** Story 31.6: the owner's reply (default `postReply`: `track.py reply` on the host, `env`). */
+  reply?: (key: string, body: ReplyBody) => Promise<ReplyAnswer>;
   /** Story 30.2: the studio web's root (default: the installed slot from `current.json`, else the checkout's
    * `apps/studio-web/dist`). */
   web?: WebOptions;
@@ -277,13 +293,15 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
     queue, now: clock, env: deps.env, ledger: deps.ledger, registry: deps.registry ?? (() => registryShow()),
     liveRuns: () => office.snapshot().runs,
   }));
+  const registry = deps.registry ?? (() => registryShow());
   const inbox = deps.inbox ?? (async (project: string): Promise<InboxFile | null> => {
-    const shown = await (deps.registry ?? (() => registryShow()))();
-    const projects = shown?.projects && typeof shown.projects === "object" ? shown.projects as Record<string, any> : undefined;
-    const entry = projects && Object.hasOwn(projects, project) ? projects[project] : undefined;
-    if (!entry || typeof entry !== "object") return null;
-    return readInbox(typeof entry.root === "string" && entry.root ? entry.root : null);
+    const served = await registryRoot(project, registry);
+    return served ? readInbox(served.root) : null;
   });
+  const readIssue = deps.issueRead ?? ((project: string, key: string) => issueRead(project, key, {
+    registry, board, studioRunId: (id) => queue.get(id)?.studio_run_id ?? null, env: deps.env, ledger: deps.ledger,
+  }));
+  const reply = deps.reply ?? ((key: string, body: ReplyBody) => postReply(key, body, { registry, env: deps.env }));
 
   /** Constant time: both sides hashed to one length before `timingSafeEqual`. The scheme
    * matches case-insensitively (RFC 7235); the token is compared as sent. */
@@ -315,6 +333,32 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
       ...answer, run_id: runId, studio_run_id: run?.studio_run_id ?? null, state: run?.state ?? answer.state,
       ...(run?.base_ref ? { base_ref: run.base_ref } : {}), ...holder,
     });
+  }
+
+  /** `GET /inbox` (Story 31.5), or with `issue` the Issue screen's read (Story 31.6). */
+  async function inboxRead(project: string, issue: string | null): Promise<Response> {
+    if (issue === null) {
+      const file = await inbox(project);
+      return file ? json(200, { ok: true, project, generated_at: file.generated_at, items: file.items }) : fail(404, "UnknownProject", { project });
+    }
+    const key = issue.trim();
+    const read = await readIssue(project, key);
+    if (read.ok) return json(200, read.answer);
+    if (read.error === "BadIssue") return fail(400, "BadIssue", { issue: key, detail: "an issue key is like TKS-12" });
+    if (read.error === "UnknownProject") return fail(404, "UnknownProject", { project });
+    if (read.error === "IssueReadFailed") return fail(500, "IssueReadFailed", { project, issue: key, detail: redact(read.detail) });
+    return fail(404, "UnknownIssue", { project, issue: key });
+  }
+
+  /** `POST /inbox/{key}/reply` (Story 31.6): the body checked, then the reply (never a queue event). */
+  async function postReplyRoute(req: Request, key: string): Promise<Response> {
+    let raw: unknown;
+    try { raw = JSON.parse(await req.text()); }
+    catch (e) { return fail(400, "MalformedJson", { detail: `the body is not JSON: ${e instanceof Error ? e.message : String(e)}` }); }
+    const checked = checkReplyBody(raw);
+    if (!checked.ok) return fail(400, "SchemaError", { detail: checked.detail });
+    const answer = await reply(key, checked.body);
+    return json(answer.status, answer.body);
   }
 
   function status(): Response {
@@ -675,7 +719,7 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
       || path === "/board" || path === "/inbox" || path === "/office" || path === "/office/events" || /^\/runs\/[^/]+$/.test(path)
       || path === "/app" || path.startsWith("/app/");
     if (method === "GET" && readRoute) return await route(req, url, path, method, csrf);
-    if (method === "POST" && /^\/runs\/[^/]+\/cancel$/.test(path)) {
+    if (method === "POST" && (/^\/runs\/[^/]+\/cancel$/.test(path) || /^\/inbox\/[^/]+\/reply$/.test(path))) {
       const given = await csrfGiven(req);
       if (!given || !safeEqual(given, csrf)) return fail(403, "CsrfRefused");
       return await route(req, url, path, method);
@@ -749,9 +793,19 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
         if (method !== "GET") return allow("GET");
         // Story 31.5: the sync-back's inbox file as written (a read; a missing file is an empty list, never a 404).
         const project = url.searchParams.get("project")?.trim();
-        if (!project) return fail(400, "ProjectRequired", { detail: "the inbox needs ?project=<id>" });
-        const file = await inbox(project);
-        return file ? json(200, { ok: true, project, generated_at: file.generated_at, items: file.items }) : fail(404, "UnknownProject", { project });
+        // Story 31.6: a cookie session's answer — every one, the 400 ProjectRequired too — carries its CSRF token (the
+        // web's reply needs it); a bearer's none.
+        const answer = project
+          ? await inboxRead(project, url.searchParams.get("issue"))
+          : fail(400, "ProjectRequired", { detail: "the inbox needs ?project=<id>" });
+        if (csrf) answer.headers.set("x-csrf-token", csrf);
+        return answer;
+      }
+      const replyMatch = /^\/inbox\/([^/]+)\/reply$/.exec(path);
+      if (replyMatch) {
+        if (method !== "POST") return allow("POST");
+        const key = decodeId(replyMatch[1]);
+        return key === null ? fail(400, "BadIssue", { issue: replyMatch[1] }) : await postReplyRoute(req, key);
       }
       // Story 29.3: the graced office view (a read: nothing is written to the queue).
       if (path === "/office") return method === "GET" ? json(200, { ok: true, ...officeSnapshot() }) : allow("GET");

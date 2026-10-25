@@ -14,12 +14,14 @@ const throwing: StorageLike = {
 describe("the remembered screen (Story 30.6)", () => {
   it("the key and the screens", () => {
     expect(SCREEN_KEY).toBe("tk-studio.web.screen");
-    expect([...SCREENS]).toEqual(["office", "board", "status"]);
+    expect([...SCREENS]).toEqual(["office", "board", "status", "inbox", "issue"]);
   });
 
   it("status / bogus / absent / throwing → status / office / office / office", () => {
     expect(rememberedScreen(memory({ [SCREEN_KEY]: "status" }))).toBe("status");
     expect(rememberedScreen(memory({ [SCREEN_KEY]: "board" }))).toBe("board");
+    expect(rememberedScreen(memory({ [SCREEN_KEY]: "inbox" }))).toBe("inbox");
+    expect(rememberedScreen(memory({ [SCREEN_KEY]: "issue" }))).toBe("issue");
     expect(rememberedScreen(memory({ [SCREEN_KEY]: "bogus" }))).toBe("office");
     expect(rememberedScreen(memory())).toBe("office");
     expect(rememberedScreen(throwing)).toBe("office");

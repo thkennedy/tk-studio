@@ -9,6 +9,7 @@ silent 401).
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -750,6 +751,90 @@ class GatewayTests(JiraTestCase):
                                  scope=jirabackend.SCOPE_PROJECT)
         self.assertIn("manage:jira-project", reason)
         self.assertIn("new scoped token", reason)
+
+
+class OwnerSeatTests(JiraTestCase):
+    """Story 31.6: the owner seat's client, read only by `tk-studio-track
+    reply` on the host — its env names, its gaps by name, and a 401 that
+    names the owner's variables, never the agent's."""
+
+    ENV_KEYS = (*JiraTestCase.ENV_KEYS, *jirabackend.OWNER_ENV_NAMES)
+
+    def _owner_env(self):
+        os.environ[jirabackend.OWNER_EMAIL_ENV] = "owner@example.com"
+        os.environ[jirabackend.OWNER_TOKEN_ENV] = "fake-owner-token"
+        os.environ[jirabackend.CLOUD_ID_ENV] = "cloud-test"
+
+    def test_the_owner_names_sit_outside_the_sandbox_prefix(self):
+        self.assertEqual(jirabackend.OWNER_ENV_NAMES,
+                         ("TK_STUDIO_ATLASSIAN_OWNER_EMAIL",
+                          "TK_STUDIO_ATLASSIAN_OWNER_TOKEN",
+                          "TK_ATLASSIAN_CLOUD_ID"))
+        for name in (jirabackend.OWNER_EMAIL_ENV, jirabackend.OWNER_TOKEN_ENV):
+            self.assertFalse(name.startswith("TK_ATLASSIAN_"))
+            self.assertNotIn(name, jirabackend.AGENT_ENV_NAMES)
+
+    def test_each_absent_variable_is_a_named_gap(self):
+        for name in jirabackend.OWNER_ENV_NAMES:
+            os.environ.pop(name, None)
+        client, gaps = jirabackend.owner_client(self.fake)
+        self.assertIsNone(client)
+        self.assertEqual(len(gaps), 3)
+        for name, gap in zip(jirabackend.OWNER_ENV_NAMES, gaps):
+            self.assertTrue(gap.startswith(name + " is not set"), gap)
+        self._owner_env()
+        for name in jirabackend.OWNER_ENV_NAMES:
+            with self.subTest(name=name):
+                saved = os.environ.pop(name)
+                try:
+                    client, gaps = jirabackend.owner_client(self.fake)
+                finally:
+                    os.environ[name] = saved
+                self.assertIsNone(client)
+                self.assertEqual(len(gaps), 1)
+                self.assertIn(name, gaps[0])
+        self.assertEqual(self.fake.calls, [])
+
+    def test_the_agent_seat_never_stands_in(self):
+        os.environ[jirabackend.AGENT_TOKEN_ENV] = "fake-agent-token"
+        os.environ[jirabackend.AGENT_EMAIL_ENV] = "agent@example.com"
+        os.environ[jirabackend.CLOUD_ID_ENV] = "cloud-test"
+        client, gaps = jirabackend.owner_client(self.fake)
+        self.assertIsNone(client)
+        self.assertEqual(len(gaps), 2)
+
+    def test_the_owner_client_is_the_gateway_with_the_owner_names(self):
+        self._owner_env()
+        urls = []
+
+        def transport(method, url, body):
+            urls.append(url)
+            return 200, {"accountId": "acc-owner"}
+        client, gaps = jirabackend.owner_client(transport,
+                                                site="example.atlassian.net")
+        self.assertEqual(gaps, [])
+        self.assertEqual(client.base, "https://api.atlassian.com/ex/jira/"
+                                      "cloud-test/rest/api/2")
+        self.assertEqual(client.token_env, jirabackend.OWNER_TOKEN_ENV)
+        self.assertEqual(client.email_env, jirabackend.OWNER_EMAIL_ENV)
+        auth = base64.b64decode(client._headers["Authorization"].split()[1])
+        self.assertEqual(auth.decode(), "owner@example.com:fake-owner-token")
+        client.request("GET", "/myself")
+        self.assertEqual(urls, ["https://api.atlassian.com/ex/jira/cloud-test"
+                                "/rest/api/2/myself"])
+
+    def test_a_401_names_the_owner_variables(self):
+        self._owner_env()
+        client, _ = jirabackend.owner_client(
+            lambda m, u, b: (401, {"errorMessages": ["Unauthorized"]}),
+            site="example.atlassian.net")
+        with self.assertRaises(jirabackend.JiraError) as caught:
+            client.request("POST", "/issue/TKS-1/comment", {"body": "x"})
+        reason = str(caught.exception)
+        self.assertIn(jirabackend.OWNER_TOKEN_ENV, reason)
+        self.assertIn(jirabackend.OWNER_EMAIL_ENV, reason)
+        self.assertNotIn(jirabackend.AGENT_TOKEN_ENV, reason)
+        self.assertIn("example.atlassian.net", reason)
 
 
 class DesignPagesLinkTests(JiraTestCase):

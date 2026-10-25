@@ -69,7 +69,10 @@ EMAIL_ENV = "JIRA_EMAIL"
 API_PREFIX = "/rest/api/2"
 
 # The agent seat's variables (kb/atlassian-free-tier.md §1 step 7). The
-# owner seat's TK_STUDIO_ATLASSIAN_OWNER_* names are host-only: never read.
+# owner seat's TK_STUDIO_ATLASSIAN_OWNER_* names are host-only (outside the
+# TK_ATLASSIAN_ prefix the sandbox pass-through forwards): they are read only
+# by `owner_client`, which only the host-side `tk-studio-track reply` verb
+# calls (Story 31.6).
 SITE_ENV = "TK_ATLASSIAN_SITE"
 AGENT_EMAIL_ENV = "TK_ATLASSIAN_AGENT_EMAIL"
 AGENT_TOKEN_ENV = "TK_ATLASSIAN_AGENT_TOKEN"
@@ -77,6 +80,9 @@ AGENT_CONFLUENCE_TOKEN_ENV = "TK_ATLASSIAN_AGENT_CONFLUENCE_TOKEN"
 CLOUD_ID_ENV = "TK_ATLASSIAN_CLOUD_ID"
 AGENT_ENV_NAMES = (SITE_ENV, AGENT_EMAIL_ENV, AGENT_TOKEN_ENV,
                    AGENT_CONFLUENCE_TOKEN_ENV, CLOUD_ID_ENV)
+OWNER_EMAIL_ENV = "TK_STUDIO_ATLASSIAN_OWNER_EMAIL"
+OWNER_TOKEN_ENV = "TK_STUDIO_ATLASSIAN_OWNER_TOKEN"
+OWNER_ENV_NAMES = (OWNER_EMAIL_ENV, OWNER_TOKEN_ENV, CLOUD_ID_ENV)
 GATEWAY_HOST = "api.atlassian.com"
 PROXY_APPROVAL_MARK = "Approval required for"
 
@@ -379,6 +385,17 @@ class JiraClient:
         return cls(GATEWAY_HOST, email, token, transport,
                    base=f"https://{GATEWAY_HOST}/ex/jira/{cloud_id}{API_PREFIX}",
                    token_env=AGENT_TOKEN_ENV, email_env=AGENT_EMAIL_ENV,
+                   toggle_site=site)
+
+    @classmethod
+    def for_owner(cls, cloud_id: str, email: str, token: str,
+                  transport=None, site: str | None = None) -> "JiraClient":
+        """The owner seat's client (Story 31.6): the same gateway base as
+        `for_gateway`, so the comment's author is the owner's accountId; a
+        401 or 403 names the owner's variables, never the agent's."""
+        return cls(GATEWAY_HOST, email, token, transport,
+                   base=f"https://{GATEWAY_HOST}/ex/jira/{cloud_id}{API_PREFIX}",
+                   token_env=OWNER_TOKEN_ENV, email_env=OWNER_EMAIL_ENV,
                    toggle_site=site)
 
     def _http(self, method: str, url: str, body: dict | None):
@@ -899,6 +916,30 @@ def _resolve_settings(project_root: Path, runtime: dict | None) -> tuple[dict, l
         gaps.append(f"{TOKEN_ENV} is not set (headless Jira auth is "
                     f"API-token, never OAuth — AD-7, legacy-council ISS-008)")
     return settings, gaps
+
+
+def owner_gaps() -> list[str]:
+    """The owner seat's absent variables, each by name: the email, the
+    token and the gateway's cloud id (Story 31.6)."""
+    why = {OWNER_EMAIL_ENV: "the owner seat's account email",
+           OWNER_TOKEN_ENV: "the owner seat's Jira API token, host-only",
+           CLOUD_ID_ENV: f"the {GATEWAY_HOST} gateway's cloud id"}
+    return [f"{name} is not set ({why[name]})" for name in OWNER_ENV_NAMES
+            if not os.environ.get(name)]
+
+
+def owner_client(transport=None, site: str | None = None
+                 ) -> tuple[JiraClient | None, list[str]]:
+    """(the owner seat's gateway client, gaps): None with every absent
+    variable named — the caller refuses and never posts with another
+    identity. Read only by the host-side `tk-studio-track reply` verb."""
+    gaps = owner_gaps()
+    if gaps:
+        return None, gaps
+    return JiraClient.for_owner(os.environ[CLOUD_ID_ENV],
+                                os.environ[OWNER_EMAIL_ENV],
+                                os.environ[OWNER_TOKEN_ENV], transport,
+                                site=site), []
 
 
 def client_for(settings: dict, transport=None) -> JiraClient:

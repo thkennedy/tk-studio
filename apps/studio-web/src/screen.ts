@@ -4,7 +4,8 @@
 import type { StorageLike } from "./office/model";
 
 export const SCREEN_KEY = "tk-studio.web.screen";
-export const SCREENS = ["office", "board", "status"] as const;
+// Story 31.6: the Inbox and the Issue screens join the switch.
+export const SCREENS = ["office", "board", "status", "inbox", "issue"] as const;
 export type Screen = (typeof SCREENS)[number];
 export const DEFAULT_SCREEN: Screen = "office";
 

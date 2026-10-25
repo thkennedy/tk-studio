@@ -301,3 +301,11 @@
 - What no longer holds: "the supervisor's paused run resumes with the ruling written into the spec" read as tied to an `awaiting-ruling` event. Two of the three block triggers write none.
 - Suggested adjustment: key re-arming off the run's `track-block` event (story key, engine run id), not `awaiting-ruling`. Accept all three triggers. On a fail, re-block through `track.py block` (reason = the follow-up), treating `retry: true` as "call again" and recording nothing. Identify the owner's reply with both `author` and `update_author` = owner from `comments.jsonl`. Add no engine hook.
 - Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-24)
+
+## 31-7-validation-of-a-resolution — scope: stories — from 31-6-the-inbox-and-issue-screens — 2026-10-25
+
+- What changed: `buildWorkerEnv` (`apps/supervisor/src/server.ts`) strips `TK_STUDIO_ATLASSIAN_OWNER_*` from every worker's env, so a host-tier job never holds the owner seat. `track.py reply` skips an identical owner comment that stands after the issue's newest agent comment (read live; named in `skipped[]`, `commented: true`). The owner's Done posts the body `Done.` and makes the owner's transition into `Block Resolved`.
+- What no longer holds: "the session reads the reason and the reply" read as one owner comment per press: a repeated identical reply in the same block cycle is skipped, and the validation worker cannot act as the owner.
+- Suggested adjustment: the `validate-resolution` session acts on the agent seat only (never `track.py reply`, never the owner variables). The reply to judge is the owner comments (`author` and `update_author` both `owner`) after the newest agent comment; `Done.` is a valid simple answer. A fail re-blocks through `track.py block` with a new follow-up comment, which opens a new block cycle, so the owner's next reply posts.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-25)
+

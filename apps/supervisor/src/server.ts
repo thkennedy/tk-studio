@@ -575,6 +575,7 @@ export interface WorkerPlacement { tier?: Tier; sandbox?: string }
  * and the phone sign-in's session secret (Story 22.5), TK_SUPERVISOR_SESSION_SECRET. Story 29.1: every
  * other `TK_SUPERVISOR_*` variable whose name holds TOKEN, SECRET or PASSWORD is stripped by pattern too
  * (a leftover OAuth client secret, any future secret), so no supervisor secret reaches a worker.
+ * Story 31.6: every `TK_STUDIO_ATLASSIAN_OWNER_*` variable (the owner seat, host-only) is stripped too.
  * TK_STUDIO_HOME and the rest pass through untouched. */
 export function buildWorkerEnv(
   parent: Record<string, string | undefined> = process.env, registry: () => Record<string, string> = userEnvFromRegistry,
@@ -587,6 +588,8 @@ export function buildWorkerEnv(
   delete env.TK_SUPERVISOR_SESSION_SECRET;
   for (const k of Object.keys(env)) {
     if (/^TK_SUPERVISOR_.*(?:TOKEN|SECRET|PASSWORD)/i.test(k) || k === "TK_SUPERVISOR_NTFY_URL") delete env[k];
+    // Story 31.6: the owner seat is host-only — only the supervisor's own `track.py reply` child gets it.
+    if (k.startsWith("TK_STUDIO_ATLASSIAN_OWNER_")) delete env[k];
   }
   // Hole 60: the pass-through variables the console's environment lacks come from the User environment itself.
   for (const [k, v] of Object.entries(registry())) {
