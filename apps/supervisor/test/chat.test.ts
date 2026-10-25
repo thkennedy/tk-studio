@@ -21,7 +21,12 @@ import { buildWorkerEnv, invokeSkill, runProcess, type RunResult, type Spawner }
 
 const made: string[] = [];
 const temp = (prefix: string) => { const d = mkdtempSync(join(tmpdir(), prefix)); made.push(d); return d; };
-afterAll(() => { for (const d of made) rmSync(d, { recursive: true, force: true }); });
+// Windows: an open SQLite handle makes the temp dir EBUSY, so every queue the suite opened is closed before the rm.
+const queues: Queue[] = [];
+afterAll(() => {
+  for (const q of queues) { try { q.close(); } catch { /* already closed */ } }
+  for (const d of made) rmSync(d, { recursive: true, force: true });
+});
 
 const AT = "2026-10-25T05:00:00.000Z";
 const me: Owner = { pid: process.pid, host: hostname(), nonce: "chat-test" };
@@ -47,8 +52,11 @@ const fakeDeps = (): ChatDeps => ({
   resolveJob: async (r) => ({ projectId: "p", root: r, definition: structuredClone(SHIPPED_CHAT), target: "skill" }),
 });
 
-const newQueue = (alive = new Set<number>([me.pid])) =>
-  new Queue(join(temp("tk-sup-chat-q-"), "q.db"), { ownerAlive: (o) => alive.has(o.pid), engineLive: async () => ({ live: false }) });
+const newQueue = (alive = new Set<number>([me.pid])) => {
+  const q = new Queue(join(temp("tk-sup-chat-q-"), "q.db"), { ownerAlive: (o) => alive.has(o.pid), engineLive: async () => ({ live: false }) });
+  queues.push(q);
+  return q;
+};
 
 describe("the chat file (Settled shape 3)", () => {
   test("appendChatLine: seq grows by 1 from 1, the line as given, one JSON object per line; chatSince reads after a seq", () => {
