@@ -410,7 +410,7 @@
     },
     "tk-studio-track": {
       "external_calls": true,
-      "auth_preflight": "the jira binding's agent seat (AD-7), through the planning adapter (AD-4): no planning.jira binding or an absent TK_ATLASSIAN_* variable refuses by name before any call; the adapter's 401/403 split names the token, its email, its expiry, the org toggle, the proxy approval or the scope — never a silent 401 (the sandbox drive below proves the refusal without any network); the `reply` verb (Story 31.6) uses the owner seat instead, host-only (TK_STUDIO_ATLASSIAN_OWNER_EMAIL, TK_STUDIO_ATLASSIAN_OWNER_TOKEN, TK_ATLASSIAN_CLOUD_ID) — an absent owner variable or no binding refuses by name before any call, never posting with another identity (the second drive)",
+      "auth_preflight": "the jira binding's agent seat (AD-7), through the planning adapter (AD-4): no planning.jira binding or an absent TK_ATLASSIAN_* variable refuses by name before any call; the adapter's 401/403 split names the token, its email, its expiry, the org toggle, the proxy approval or the scope — never a silent 401 (the sandbox drive below proves the refusal without any network); the `reply` verb (Story 31.6) uses the owner seat instead, host-only (TK_STUDIO_ATLASSIAN_OWNER_EMAIL, TK_STUDIO_ATLASSIAN_OWNER_TOKEN, TK_ATLASSIAN_CLOUD_ID) — an absent owner variable or no binding refuses by name before any call, never posting with another identity (the second drive); the `validate` verb (Story 31.7) uses the agent seat only — no binding or an absent agent variable refuses by name before any call (the third drive)",
       "drives": [
         {
           "assertion": "blocked-on-ambiguity",
@@ -422,6 +422,13 @@
         {
           "assertion": "blocked-on-ambiguity",
           "argv": ["lib/track.py", "reply", "--directory", "{sandbox}", "--issue", "ST-1", "--done"],
+          "expect": "status-block",
+          "status": "blocked",
+          "marker": "no Atlassian call made"
+        },
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/track.py", "validate", "--directory", "{sandbox}", "--issue", "ST-1", "--check"],
           "expect": "status-block",
           "status": "blocked",
           "marker": "no Atlassian call made"

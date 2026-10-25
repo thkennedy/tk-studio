@@ -1,6 +1,6 @@
 ---
 name: tk-studio-track
-description: Tracking verbs on the bound Jira project — `block` moves a story the loop cannot progress, and each dependent story, to "Blocked - Awaiting User" with a comment that @mentions the owner; `reply` posts the owner's answer (or "Done.") with the owner's host-only token and moves the issue to "Block Resolved". Use when the user says "block this story", "tk track block", "put it in the owner's inbox", "reply to the blocked issue", or a supervisor or engagement payload names this skill.
+description: Tracking verbs on the bound Jira project — `block` moves a story the loop cannot progress, and each dependent story, to "Blocked - Awaiting User" with a comment that @mentions the owner; `reply` posts the owner's answer (or "Done.") with the owner's host-only token and moves the issue to "Block Resolved"; `validate` checks that resolution and passes the issue back to work or re-blocks it with a follow-up. Use when the user says "block this story", "tk track block", "put it in the owner's inbox", "reply to the blocked issue", "validate the resolution", or a supervisor or engagement payload names this skill.
 ---
 
 # tk-studio-track
@@ -80,6 +80,64 @@ from those statuses. Every Atlassian write goes through the planning adapter
    moved); no transition reaching `Block Resolved` (the comment stays,
    `commented: true`). A temporary failure ends `partial` with `ok: false`
    and `retry: true`.
+
+   The `validate` verb (Story 31.7, §6.9 items 4 and 5) checks a
+   resolution before the story continues, with the **agent** seat only
+   (never the owner's variables, never `reply`):
+
+   ```bash
+   uv run "${CLAUDE_PLUGIN_ROOT}/lib/track.py" validate --directory <project-root> \
+     --issue <KEY> (--check | --pass --to "In Progress"|"To Do" \
+       [--ruling-file <path> --spec <paused spec>] \
+       | --fail --follow-up-file <path>) [--dry-run]
+   ```
+
+   `--check` reads the changelog: `owner_resolved` is true only when the
+   newest transition into `Block Resolved` carries the recorded owner
+   accountId (an older owner transition never validates a later one; an
+   absent or empty id never matches). It reads `reason_comment` and
+   `replies[]` (the owner's comments after the newest agent comment;
+   `Done.` is a valid answer) from local memory only, and marks the inbox
+   item `validating`. The result is `{ok, dry_run, issue, mode, entity,
+   story, owner_resolved, transition, reason_comment, replies[], notes[],
+   written[], retry?}` with the status block last. `--pass` refuses when
+   `owner_resolved` is false; it checks a transition reaches `--to` before
+   writing anything, writes the ruling when given (`**Ruling (owner, <KEY>
+   comment <id>, <date>):** <text>` just before the spec's
+   `</intent-contract>` line, else `</frozen-after-approval>`; never
+   `status:`), then moves the issue by name to `--to`. `--fail` (whatever
+   `owner_resolved` says) re-blocks the issue with the follow-up as the
+   reason (a new `Blocked:` agent comment — back in the Inbox); a retried
+   `--fail` whose move into `Blocked - Awaiting User` already landed posts
+   the missing comment without moving the issue again, and a retried
+   `--pass` whose move into `--to` already landed (newer than the owner's
+   newest move into `Block Resolved`) writes the ruling (idempotent) and
+   the line without moving it again. A ruling the pass wrote is taken back
+   out when the pass then ends refused. Each
+   outcome appends one line to `_bmad-output/tracking/<KEY>/validation.jsonl`
+   (the supervisor's evidence for the resume), named in `written[]`.
+   Refusals (exit 2), each named: a bad key; no `planning.jira` binding or
+   an absent agent variable (no Atlassian call made); no recorded owner
+   accountId; a live status other than `Block Resolved`; a `--pass` when
+   `owner_resolved` is false; no transition reaching the target; an absent spec or block for the ruling. A temporary
+   failure ends `partial` with `ok: false` and `retry: true`, appends no
+   line — call again.
+
+   **Session procedure for `payload.verb: validate`** (the shipped
+   `validate-resolution` job; the payload is `{verb, project_root,
+   issues:[{issue, story, paused_run, spec}]}`): for each payload issue,
+   run `--check` with `--directory <project_root>`. On
+   `owner_resolved: false`, take `--fail` with a follow-up asking the owner
+   to resolve it from the Inbox. Otherwise read `reason_comment` and
+   `replies[]`: when the reason names something runnable on the host — a
+   command, a path, a sign-in — test it; else judge whether the replies are
+   enough. Pass → `--pass --to "In Progress"` (`--to "To Do"` when the
+   story's run never started), adding `--ruling-file <a temp file holding
+   the reply verbatim> --spec <spec>` when the reply carries a ruling (the
+   block's resolves text names "a ruling in the spec") and the payload
+   names a `spec`. Fail → `--fail --follow-up-file <a temp file>` saying
+   what is still missing. On `retry: true`, call the same verb again. End
+   on the status block; commit nothing.
 
 2. Blocking conditions of `block` (exit 2), each named in `reason`:
    - no `planning.jira` binding (run `plansync.py setup` first), or an

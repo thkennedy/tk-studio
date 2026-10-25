@@ -1109,6 +1109,71 @@ def issue_comments(client: JiraClient, key: str) -> list[dict]:
                     f"within {MAX_PAGES} pages")
 
 
+def issue_changelog(client: JiraClient, key: str) -> list[dict]:
+    """Every history of one issue, `GET /issue/{key}/changelog` paged by
+    `startAt` / `maxResults` / `isLast` (Story 31.7: read-only, used only by
+    `tk-studio-track validate --check`). Each history is `{id, created,
+    author: {accountId}, items: [{field, toString}]}`; the shape is ungraded
+    on the live site and pinned in the fakes. Any page's failure raises."""
+    histories: list[dict] = []
+    start = 0
+    for _ in range(MAX_PAGES):
+        status, data = client.request(
+            "GET", f"/issue/{key}/changelog",
+            query={"startAt": start, "maxResults": SEARCH_PAGE_SIZE},
+            scope=SCOPE_READ)
+        if status != 200 or not isinstance(data, dict):
+            raise JiraError(f"track: GET /issue/{key}/changelog returned "
+                            f"{status}")
+        page = [h for h in data.get("values") or [] if isinstance(h, dict)]
+        histories += page
+        start += len(page)
+        if data.get("isLast", True) or not page:
+            return histories
+    raise JiraError(f"track: GET /issue/{key}/changelog did not end within "
+                    f"{MAX_PAGES} pages")
+
+
+def last_transition_into(histories: list[dict], name: str) -> dict | None:
+    """The newest history that moved the issue into the status named
+    `name` (an item with `field == "status"` and `toString == name`, by
+    name, never by category) as `{id, created, account_id}`, else None.
+    `account_id` is "" when the history carries no author id. Newest is the
+    latest `created`; an equal or unparsed stamp keeps the later entry
+    (Jira lists oldest first)."""
+    best, best_at = None, None
+    for history in histories:
+        items = history.get("items") or []
+        if not any(isinstance(i, dict) and i.get("field") == "status"
+                   and i.get("toString") == name for i in items):
+            continue
+        at = _parse_stamp(history.get("created"))
+        if best is None or at is None or best_at is None or at >= best_at:
+            best, best_at = history, at
+    if best is None:
+        return None
+    author = best.get("author") if isinstance(best.get("author"), dict) else {}
+    account = author.get("accountId")
+    return {"id": None if best.get("id") is None else str(best["id"]),
+            "created": best.get("created"),
+            "account_id": account if isinstance(account, str) else ""}
+
+
+def _parse_stamp(value):
+    """A Jira timestamp (`…T…+0000` or ISO) as an aware datetime, or None."""
+    if not isinstance(value, str) or not value:
+        return None
+    for parse in (datetime.fromisoformat,
+                  lambda v: datetime.strptime(v, "%Y-%m-%dT%H:%M:%S.%f%z"),
+                  lambda v: datetime.strptime(v, "%Y-%m-%dT%H:%M:%S%z")):
+        try:
+            parsed = parse(value)
+        except ValueError:
+            continue
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return None
+
+
 # -------------------------------------------------------------------- block
 #
 # Story 31.5: the two writes `tk-studio-track block` makes (AD-4: through

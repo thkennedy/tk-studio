@@ -233,6 +233,28 @@ class JobTestCase(unittest.TestCase):
         # shipped undeclared: no project runs it until it declares it
         self.assertEqual(joblib.load_instances(self.root)["jobs"], [])
 
+    # ---------------- Story 31.7: the shipped validate-resolution job type
+
+    def test_validate_resolution_ships_as_a_one_shot_track_skill_job(self):
+        entry = joblib.load_types()["validate-resolution"]
+        self.assertEqual(entry["problems"], [])
+        defn = entry["definition"]
+        self.assertEqual(defn["target"], {"skill": "tk-studio-track",
+                                          "payload": {"verb": "validate"}})
+        self.assertNotIn("core", defn["target"])
+        self.assertEqual(defn["trigger"], "one-shot")
+        self.assertNotIn("cadence", defn)
+        self.assertEqual(defn["guards"], {"max_turns": 60,
+                                          "max_wall_clock_seconds": 1800})
+        # a far `until`, never `on_status`: one blocked validation must not
+        # halt every later one (`jobrun.evaluate_stop`)
+        self.assertEqual(defn["stop"], {"until": "9999-12-31T23:59:59Z"})
+        self.assertNotIn("on_status", defn["stop"])
+        self.assertEqual(defn["effort"], "high")
+        # the planner leg's model is passed at enqueue, never pinned here
+        self.assertNotIn("model", defn)
+        self.assertEqual(joblib.load_instances(self.root)["jobs"], [])
+
     def _fake_core(self, stdout: dict, code: int = 0):
         seen = []
 

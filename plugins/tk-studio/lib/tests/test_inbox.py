@@ -129,6 +129,26 @@ class StateTests(InboxTestCase):
         self.run_tick(minutes_later=20)
         self.assertEqual(self.items()[0]["state"], "open")
 
+    def test_mark_validating_rewrites_one_items_state_and_derive_keeps_it(self):
+        # Story 31.7: `validate --check` marks the item; nothing else moves
+        self.bind("ST-002", f"{KEY}-2", "To Do", "ready")
+        self.fake.issue(f"{KEY}-1", RESOLVED, "indeterminate", 30,
+                        comments=[self.block_comment("c1", 35)])
+        self.fake.issue(f"{KEY}-2", RESOLVED, "indeterminate", 25)
+        self.run_tick()
+        before = self.inbox()
+        self.assertTrue(inbox.mark_validating(self.root, f"{KEY}-1"))
+        after = self.inbox()
+        self.assertEqual(after["items"][0]["state"], "validating")
+        after["items"][0]["state"] = "resolved"
+        self.assertEqual(after, before)
+        # already validating, an unknown key, or no file: False, untouched
+        self.assertFalse(inbox.mark_validating(self.root, f"{KEY}-1"))
+        self.assertFalse(inbox.mark_validating(self.root, f"{KEY}-9"))
+        (self.root / inbox.INBOX_REL).unlink()
+        self.assertFalse(inbox.mark_validating(self.root, f"{KEY}-1"))
+        self.assertFalse((self.root / inbox.INBOX_REL).exists())
+
 
 class PriorityAndSortTests(InboxTestCase):
     def test_sorted_by_priority_rank_null_last_then_blocked_since(self):

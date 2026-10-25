@@ -53,12 +53,36 @@ class FakeJira:
         self.fail_auth = False
         self.users = [{"accountId": "acc-tim", "displayName": "Tim",
                        "emailAddress": "tim@example.com"}]
+        # Story 31.7: each issue's histories, oldest first, served by the
+        # pinned `GET /issue/{key}/changelog` shape (two per page)
+        self.changelogs: dict[str, list[dict]] = {}
+
+    def history(self, key, hid, account_id, to_name, created,
+                field="status"):
+        """Append one changelog history moving `key` into `to_name`;
+        `account_id` None leaves the author out, "" leaves it empty."""
+        entry = {"id": hid, "created": created,
+                 "items": [{"field": field, "fieldtype": "jira",
+                            "fromString": "x", "toString": to_name}]}
+        if account_id is not None:
+            entry["author"] = {"accountId": account_id}
+        self.changelogs.setdefault(key, []).append(entry)
+        return entry
 
     def __call__(self, method, url, body):
         path, _, query = url.split(jirabackend.API_PREFIX, 1)[1].partition("?")
         self.calls.append((method, path))
         if self.fail_auth:
             return 401, {"errorMessages": ["Unauthorized"]}
+        log_m = re.match(r"^/issue/([^/]+)/changelog$", path)
+        if log_m and method == "GET":
+            q = {k: v[0] for k, v in urllib.parse.parse_qs(query).items()}
+            values = self.changelogs.get(log_m.group(1), [])
+            start = int(q.get("startAt", 0))
+            page = values[start:start + 2]
+            return 200, {"values": page, "startAt": start, "maxResults": 2,
+                         "total": len(values),
+                         "isLast": start + len(page) >= len(values)}
         if method == "GET" and path == "/myself":
             return 200, {"displayName": "Tim",
                          "emailAddress": "tim@example.com"}
@@ -1025,3 +1049,77 @@ class BlockWriteTests(unittest.TestCase):
             jirabackend.add_comment(self.client, "TKS-9", "x")
         self.assertIn("POST /issue/TKS-9/comment returned 400",
                       str(caught.exception))
+
+
+class ChangelogReadTests(unittest.TestCase):
+    """Story 31.7: `issue_changelog` (paged, read-only) and the pure
+    `last_transition_into`, the owner check of `tk-studio-track validate`.
+    The REST shape is ungraded on the live site and pinned in FakeJira."""
+
+    RESOLVED = jirabackend.RESOLVED_STATUS
+
+    def setUp(self):
+        self.fake = FakeJira()
+        self.client = jirabackend.JiraClient("example.atlassian.net",
+                                             "a@example.com", "fake-token",
+                                             transport=self.fake)
+
+    def test_every_page_is_read_and_nothing_is_written(self):
+        for n in range(5):
+            self.fake.history("TKS-1", str(n), "acc-x", "In Progress",
+                              f"2026-10-24T10:0{n}:00.000+0000")
+        got = jirabackend.issue_changelog(self.client, "TKS-1")
+        self.assertEqual([h["id"] for h in got], ["0", "1", "2", "3", "4"])
+        self.assertEqual(self.fake.calls,
+                         [("GET", "/issue/TKS-1/changelog")] * 3)
+        self.assertEqual(self.fake.writes(), [])
+
+    def test_a_refused_page_raises(self):
+        def transport(method, url, body):
+            return 404, {"errorMessages": ["nope"]}
+        client = jirabackend.JiraClient("example.atlassian.net",
+                                        "a@example.com", "fake-token",
+                                        transport=transport)
+        with self.assertRaises(jirabackend.JiraError) as caught:
+            jirabackend.issue_changelog(client, "TKS-9")
+        self.assertIn("GET /issue/TKS-9/changelog returned 404",
+                      str(caught.exception))
+
+    def test_the_newest_transition_into_the_name_wins(self):
+        f = self.fake
+        f.history("K-1", "1", "acc-owner", self.RESOLVED,
+                  "2026-10-24T10:00:00.000+0000")
+        f.history("K-1", "2", "acc-agent", jirabackend.BLOCKED_STATUS,
+                  "2026-10-24T10:05:00.000+0000")
+        f.history("K-1", "3", "acc-agent", self.RESOLVED,
+                  "2026-10-24T10:10:00.000+0000")
+        f.history("K-1", "4", "acc-owner", "Block Resolved-ish",
+                  "2026-10-24T10:20:00.000+0000")
+        f.history("K-1", "5", "acc-owner", self.RESOLVED,
+                  "2026-10-24T10:30:00.000+0000", field="resolution")
+        got = jirabackend.last_transition_into(f.changelogs["K-1"],
+                                               self.RESOLVED)
+        # an older owner transition never validates a later one; only a
+        # `status` item by its exact name counts
+        self.assertEqual(got, {"id": "3",
+                               "created": "2026-10-24T10:10:00.000+0000",
+                               "account_id": "acc-agent"})
+
+    def test_an_absent_or_empty_author_is_an_empty_account(self):
+        f = self.fake
+        f.history("K-2", "1", None, self.RESOLVED,
+                  "2026-10-24T10:00:00.000+0000")
+        self.assertEqual(jirabackend.last_transition_into(
+            f.changelogs["K-2"], self.RESOLVED)["account_id"], "")
+        f.history("K-2", "2", "", self.RESOLVED,
+                  "2026-10-24T10:01:00.000+0000")
+        got = jirabackend.last_transition_into(f.changelogs["K-2"],
+                                               self.RESOLVED)
+        self.assertEqual((got["id"], got["account_id"]), ("2", ""))
+
+    def test_no_transition_into_the_name_is_none(self):
+        self.fake.history("K-3", "1", "acc-owner", "Done",
+                          "2026-10-24T10:00:00.000+0000")
+        self.assertIsNone(jirabackend.last_transition_into(
+            self.fake.changelogs["K-3"], self.RESOLVED))
+        self.assertIsNone(jirabackend.last_transition_into([], self.RESOLVED))

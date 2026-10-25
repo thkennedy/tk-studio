@@ -28,11 +28,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import interchange  # noqa: E402
 import jirabackend  # noqa: E402
+import inbox  # noqa: E402
 import plansync  # noqa: E402
 import track  # noqa: E402
 
-from test_syncback import (AGENT, KEY, OWNER, FakeSyncBack,  # noqa: E402
-                           SyncBackTestCase, comment)
+from test_syncback import (AGENT, KEY, NOW, OWNER, FakeSyncBack,  # noqa: E402
+                           SyncBackTestCase, comment, stamp)
 
 BLOCKED = jirabackend.BLOCKED_STATUS
 WORKFLOW = ["To Do", "In Progress", BLOCKED, jirabackend.RESOLVED_STATUS, "Done"]
@@ -51,6 +52,7 @@ class FakeTrack(FakeSyncBack):
         self.no_resolved: set[str] = set()  # ... into Block Resolved (31.6)
         self.comment_as = AGENT             # the seat the token belongs to
         self.posted: dict[str, list[str]] = {}
+        self.lacking: dict[str, set[str]] = {}  # 31.7: more missing targets
 
     def _jira(self, method, path, query, body):
         m = re.match(r"^/issue/([^/]+)$", path)
@@ -63,7 +65,8 @@ class FakeTrack(FakeSyncBack):
             names = [n for n in WORKFLOW if not (
                 n == BLOCKED and m.group(1) in self.no_blocked) and not (
                 n == jirabackend.RESOLVED_STATUS
-                and m.group(1) in self.no_resolved)]
+                and m.group(1) in self.no_resolved)
+                and n not in self.lacking.get(m.group(1), ())]
             if method == "GET":
                 return 200, {"transitions": [
                     {"id": str(10 * (WORKFLOW.index(n) + 1)),
@@ -73,6 +76,9 @@ class FakeTrack(FakeSyncBack):
             assert set(body) == {"transition"}, body
             self.status[m.group(1)] = WORKFLOW[
                 int(body["transition"]["id"]) // 10 - 1]
+            # the changelog (31.7) records the move as the token's seat
+            self.history(m.group(1), f"h{len(self.calls)}", self.comment_as,
+                         self.status[m.group(1)], stamp(0))
             return 204, None
         m = re.match(r"^/issue/([^/]+)/comment$", path)
         if method == "POST" and m:
@@ -782,6 +788,600 @@ class ReplyTransientTests(ReplyTestCase):
         self.assert_retry(result)
         self.assertIn("429", result["reason"])
         self.assertFalse(result["commented"])
+
+
+
+# ---------------------------------------------------------------- validate
+
+SPEC_TEXT = """---
+title: 'Beta'
+status: 'in-progress'
+---
+
+<intent-contract>
+
+## Intent
+
+Build the beta.
+
+</intent-contract>
+
+## Code Map
+"""
+
+
+class ValidateTestCase(TrackTestCase):
+    """Story 31.7: `track.validate` checks a resolution with the agent seat
+    only. The issue sits in `Block Resolved` after the owner's transition
+    (the fake's changelog), the sync-back's comment log holds the block
+    comment and the owner's reply, and `inbox.json` the `resolved` item."""
+
+    ISSUE = f"{KEY}-1"
+
+    def setUp(self):
+        super().setUp()
+        for name in (jirabackend.OWNER_EMAIL_ENV, jirabackend.OWNER_TOKEN_ENV):
+            self.assertNotIn(name, os.environ)
+        self.fake.status[self.ISSUE] = RESOLVED
+        self.fake.history(self.ISSUE, "h-1", AGENT, BLOCKED, stamp(60))
+        self.fake.history(self.ISSUE, "h-2", OWNER, RESOLVED, stamp(20))
+        self.log(("c1", "agent", "agent", body(), 60, ["owner"]),
+                 ("c0", "owner", "owner", "an older owner note", 90, []),
+                 ("c2", "owner", "owner", "Use the second option.", 25, []))
+        self.write_inbox("resolved")
+
+    # ---- helpers
+    def log(self, *entries):
+        path = self.root / "_bmad-output" / "tracking" / self.ISSUE / \
+            "comments.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8", newline="\n") as fh:
+            for cid, author, updater, text, ago, mentions in entries:
+                fh.write(json.dumps({
+                    "issue": self.ISSUE, "id": cid, "author": author,
+                    "update_author": updater, "body": text,
+                    "mentions": mentions, "created": stamp(ago),
+                    "updated": stamp(ago), "source": "jira"}) + "\n")
+
+    def write_inbox(self, state):
+        path = self.root / inbox.INBOX_REL
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "inbox_version": 1, "generated_at": NOW.isoformat(),
+            "project_key": KEY, "items": [{
+                "issue": self.ISSUE, "entity": "ST-001", "priority": None,
+                "blocked_since": stamp(60), "reason_comment": {
+                    "id": "c1", "body": body(), "created": stamp(60)},
+                "state": state}]}), encoding="utf-8")
+
+    def inbox_state(self):
+        return inbox.load(self.root)["items"][0]["state"]
+
+    def validate(self, issue=None, **kwargs):
+        return track.validate(self.root, issue or self.ISSUE,
+                              transport=self.fake, sleep=self.sleeps.append,
+                              now=NOW, **kwargs)
+
+    def lines(self):
+        path = self.root / "_bmad-output" / "tracking" / self.ISSUE / \
+            "validation.jsonl"
+        return [json.loads(l) for l in path.read_text("utf-8").splitlines()] \
+            if path.is_file() else []
+
+    def spec(self, text=SPEC_TEXT):
+        path = self.root / "_bmad-output" / "specs" / "1-2-beta-spec.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8", newline="\n")
+        return path
+
+    def assert_validate_block(self, result, status, ok=None):
+        self.assertEqual(list(result)[-4:], ["status", "intent", "artifacts",
+                                             "reason"])
+        self.assertEqual(result["status"], status)
+        self.assertEqual(result["intent"], "tk-studio-track")
+        self.assertEqual(result["ok"], status != "blocked" if ok is None
+                         else ok)
+        self.assertEqual(result["artifacts"], result["written"])
+        for name in ("dry_run", "issue", "mode", "entity", "story",
+                     "owner_resolved", "transition", "reason_comment",
+                     "replies", "notes", "written"):
+            self.assertIn(name, result)
+        self.assertNotIn("fake-jira-token", json.dumps(result))
+
+
+class ValidateCheckTests(ValidateTestCase):
+    def test_owner_resolved_fills_the_check_and_marks_validating(self):
+        result = self.validate(check=True)
+        self.assert_validate_block(result, "complete")
+        self.assertTrue(result["owner_resolved"])
+        self.assertEqual(result["transition"], {
+            "id": "h-2", "created": stamp(20), "account_id": OWNER})
+        self.assertEqual((result["entity"], result["story"], result["mode"]),
+                         ("ST-001", "1.1", "check"))
+        self.assertEqual(result["reason_comment"],
+                         {"id": "c1", "body": body(), "created": stamp(60)})
+        # only the owner's comments after the newest agent comment
+        self.assertEqual(result["replies"], [
+            {"id": "c2", "body": "Use the second option.",
+             "created": stamp(25)}])
+        self.assertEqual(self.inbox_state(), "validating")
+        self.assertEqual(result["written"], ["_bmad-output/tracking/inbox.json"])
+        # reads only: the status, then the changelog; nothing written
+        self.assertEqual(self.writes(), [])
+        self.assertIn(("GET", f"/issue/{self.ISSUE}/changelog"),
+                      self.fake.calls)
+        self.assertEqual(self.lines(), [])
+
+    def test_an_agent_transition_after_an_older_owner_one_is_not_the_owners(self):
+        self.fake.history(self.ISSUE, "h-3", AGENT, RESOLVED, stamp(5))
+        result = self.validate(check=True)
+        self.assert_validate_block(result, "complete")
+        self.assertFalse(result["owner_resolved"])
+        self.assertEqual(result["transition"]["account_id"], AGENT)
+        self.assertTrue(any("fail path" in n for n in result["notes"]))
+
+    def test_an_empty_or_absent_account_never_matches(self):
+        for hid, account in (("h-3", ""), ("h-4", None)):
+            with self.subTest(account=account):
+                self.fake.history(self.ISSUE, hid, account, RESOLVED,
+                                  stamp(4 if account is None else 5))
+                result = self.validate(check=True)
+                self.assert_validate_block(result, "complete")
+                self.assertFalse(result["owner_resolved"])
+                self.assertEqual(result["transition"]["id"], hid)
+
+    def test_an_edited_owner_reply_counts_only_when_the_owner_edited_it(self):
+        # c3 the owner wrote, the agent edited: not the owner's reply
+        self.log(("c3", "owner", "agent", "edited by another", 10, []),
+                 ("c4", "owner", "owner", "Done.", 8, []))
+        result = self.validate(check=True)
+        self.assertEqual([r["id"] for r in result["replies"]], ["c2", "c4"])
+
+    def test_dry_run_marks_nothing(self):
+        result = self.validate(check=True, dry_run=True)
+        self.assert_validate_block(result, "partial")
+        self.assertTrue(result["owner_resolved"])
+        self.assertEqual(self.inbox_state(), "resolved")
+        self.assertEqual(result["written"], [])
+
+    def test_the_owner_seat_is_never_used(self):
+        def boom(*args, **kwargs):
+            raise AssertionError("the owner seat was used")
+        with unittest.mock.patch.object(jirabackend, "owner_client", boom), \
+                unittest.mock.patch.object(jirabackend, "owner_gaps", boom), \
+                unittest.mock.patch.object(track, "reply", boom):
+            for kwargs in ({"check": True},
+                           {"passed": True, "to": "In Progress"}):
+                self.assert_validate_block(self.validate(**kwargs),
+                                           "complete")
+        self.assertTrue(all(u.startswith(
+            "https://api.atlassian.com/ex/jira/cloud-test/rest/api/2/")
+            for u in self.fake.urls))
+
+
+class ValidatePassTests(ValidateTestCase):
+    def test_a_pass_moves_the_issue_by_name_and_records_the_line(self):
+        result = self.validate(passed=True, to="In Progress")
+        self.assert_validate_block(result, "complete")
+        self.assertEqual(self.fake.status[self.ISSUE], "In Progress")
+        posts = [c for c in self.writes() if c[1].endswith("/transitions")]
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(self.lines(), [{
+            "issue": self.ISSUE, "outcome": "pass",
+            "at": NOW.isoformat(timespec="seconds"), "transition_id": "h-2",
+            "reply_ids": ["c2"], "to": "In Progress"}])
+        self.assertEqual(result["written"], [
+            f"_bmad-output/tracking/{self.ISSUE}/validation.jsonl"])
+        self.assertEqual(result["outcome"]["outcome"], "pass")
+
+    def test_to_do_is_a_target_too_and_lines_append(self):
+        self.assert_validate_block(self.validate(passed=True, to="To Do"),
+                                   "complete")
+        self.assertEqual(self.fake.status[self.ISSUE], "To Do")
+        self.fake.status[self.ISSUE] = RESOLVED
+        self.assert_validate_block(self.validate(passed=True,
+                                                 to="In Progress"),
+                                   "complete")
+        self.assertEqual([l["to"] for l in self.lines()],
+                         ["To Do", "In Progress"])
+
+    def test_no_transition_reaching_the_target_is_refused_by_name(self):
+        self.fake.lacking[self.ISSUE] = {"In Progress"}
+        result = self.validate(passed=True, to="In Progress")
+        self.assert_validate_block(result, "blocked")
+        self.assertIn("no transition reaches 'In Progress'", result["reason"])
+        self.assertEqual(self.fake.status[self.ISSUE], RESOLVED)
+        self.assertEqual(self.lines(), [])
+
+    def test_the_ruling_lands_inside_the_intent_contract(self):
+        spec = self.spec()
+        result = self.validate(passed=True, to="In Progress",
+                               ruling="Use the second option.\n", spec=spec)
+        self.assert_validate_block(result, "complete")
+        text = spec.read_text("utf-8")
+        line = (f"**Ruling (owner, {self.ISSUE} comment c2, "
+                f"{NOW.date().isoformat()}):** Use the second option.")
+        self.assertIn(line, text)
+        self.assertLess(text.index("Build the beta."), text.index(line))
+        self.assertLess(text.index(line), text.index("</intent-contract>"))
+        self.assertIn("status: 'in-progress'", text)
+        self.assertEqual(text.replace(line + "\n\n", ""), SPEC_TEXT)
+        self.assertEqual(self.lines()[0]["ruling"], str(spec))
+        self.assertIn(str(spec), result["written"])
+        # a retried pass never writes it twice
+        self.fake.status[self.ISSUE] = RESOLVED
+        self.validate(passed=True, to="In Progress",
+                      ruling="Use the second option.", spec=spec)
+        self.assertEqual(spec.read_text("utf-8").count(line), 1)
+
+    def test_else_inside_frozen_after_approval(self):
+        spec = self.spec(SPEC_TEXT.replace("intent-contract",
+                                           "frozen-after-approval"))
+        result = self.validate(passed=True, to="In Progress",
+                               ruling="Ship it.", spec=spec)
+        self.assert_validate_block(result, "complete")
+        text = spec.read_text("utf-8")
+        self.assertLess(text.index("Ship it."),
+                        text.index("</frozen-after-approval>"))
+
+    def test_a_tag_named_in_prose_is_never_the_insertion_point(self):
+        prose = ("\nThe ruling goes before `</intent-contract>` in a "
+                 "spec.\n")
+        spec = self.spec(SPEC_TEXT + prose)
+        result = self.validate(passed=True, to="In Progress",
+                               ruling="Ship it.", spec=spec)
+        self.assert_validate_block(result, "complete")
+        text = spec.read_text("utf-8")
+        self.assertLess(text.index("Ship it."),
+                        text.index("\n</intent-contract>\n"))
+        self.assertTrue(text.endswith(prose))
+        # a spec whose only closing tag sits in prose has no block
+        spec = self.spec("---\nstatus: 'x'\n---\n\nsee </intent-contract>\n")
+        self.assert_validate_block(
+            self.validate(passed=True, to="In Progress", ruling="x",
+                          spec=spec), "blocked")
+
+    def test_no_reachable_target_leaves_the_spec_unchanged(self):
+        spec = self.spec()
+        self.fake.lacking[self.ISSUE] = {"In Progress"}
+        result = self.validate(passed=True, to="In Progress",
+                               ruling="Use the second option.", spec=spec)
+        self.assert_validate_block(result, "blocked")
+        self.assertIn("no transition reaches 'In Progress'", result["reason"])
+        self.assertEqual(spec.read_text("utf-8"), SPEC_TEXT)
+        self.assertEqual(self.fake.status[self.ISSUE], RESOLVED)
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(self.lines(), [])
+
+    def test_a_failed_transition_after_the_ruling_restores_the_spec(self):
+        # the pre-check sees the transition; the move then finds none
+        spec = self.spec()
+        real = track._reaches
+
+        def reaches_then_lost(client, key, name):
+            answer = real(client, key, name)
+            self.fake.lacking[self.ISSUE] = {name}
+            return answer
+        with unittest.mock.patch.object(track, "_reaches", reaches_then_lost):
+            result = self.validate(passed=True, to="In Progress",
+                                   ruling="Use the second option.", spec=spec)
+        self.assert_validate_block(result, "blocked")
+        self.assertIn("no transition reaches 'In Progress'", result["reason"])
+        self.assertEqual(spec.read_bytes(), SPEC_TEXT.encode("utf-8"))
+        self.assertNotIn(str(spec), result["written"])
+        self.assertEqual(self.fake.status[self.ISSUE], RESOLVED)
+        self.assertEqual(self.lines(), [])
+
+    def test_a_refused_move_after_the_ruling_restores_the_spec(self):
+        spec = self.spec()
+        self.fake.force[("POST", f"/issue/{self.ISSUE}/transitions")] = (
+            400, {"errorMessages": ["no"]})
+        result = self.validate(passed=True, to="In Progress",
+                               ruling="Use the second option.", spec=spec)
+        self.assert_validate_block(result, "blocked")
+        self.assertEqual(spec.read_bytes(), SPEC_TEXT.encode("utf-8"))
+        self.assertEqual(result["written"], [])
+        self.assertEqual(self.lines(), [])
+
+    def test_a_pass_refuses_when_the_owner_did_not_resolve(self):
+        # the owner's h-2 (20 min ago) stays older under each newer one
+        spec = self.spec()
+        cases = (("agent", "h-3", AGENT, 5), ("empty account", "h-4", "", 4),
+                 ("absent account", "h-5", None, 3),
+                 ("another account", "h-6", "someone-else", 2))
+        for label, hid, account, ago in cases:
+            with self.subTest(label):
+                self.fake.history(self.ISSUE, hid, account, RESOLVED,
+                                  stamp(ago))
+                result = self.validate(passed=True, to="In Progress",
+                                       ruling="Ship it.", spec=spec)
+                self.assert_validate_block(result, "blocked")
+                self.assertIn("owner_resolved", result["reason"])
+                self.assertFalse(result["owner_resolved"])
+                self.assertEqual(spec.read_text("utf-8"), SPEC_TEXT)
+                self.assertEqual(self.fake.status[self.ISSUE], RESOLVED)
+                self.assertEqual(self.writes(), [])
+                self.assertEqual(self.lines(), [])
+                self.assertEqual(self.inbox_state(), "resolved")
+
+    def test_an_absent_spec_or_block_is_refused_with_no_call(self):
+        missing = self.root / "nope.md"
+        result = self.validate(passed=True, to="In Progress", ruling="x",
+                               spec=missing)
+        self.assert_validate_block(result, "blocked")
+        self.assertIn("does not exist", result["reason"])
+        spec = self.spec("---\nstatus: 'x'\n---\n\nno block\n")
+        result = self.validate(passed=True, to="In Progress", ruling="x",
+                               spec=spec)
+        self.assert_validate_block(result, "blocked")
+        self.assertIn("no <intent-contract>", result["reason"])
+        self.assertEqual(self.fake.calls, [])
+        self.assertEqual(self.fake.status[self.ISSUE], RESOLVED)
+
+
+class ValidateFailTests(ValidateTestCase):
+    def test_a_fail_re_blocks_with_the_follow_up(self):
+        result = self.validate(failed=True,
+                               follow_up="The token is still missing.")
+        self.assert_validate_block(result, "complete")
+        self.assertEqual(self.fake.status[self.ISSUE], BLOCKED)
+        (posted,) = self.fake.posted[self.ISSUE]
+        self.assertEqual(posted, body(
+            reason="The token is still missing.",
+            resolves="a reply in the Inbox that answers the follow-up"))
+        self.assertTrue(inbox.BLOCK_COMMENT_RE.match(posted))
+        (line,) = self.lines()
+        self.assertEqual(line["outcome"], "fail")
+        self.assertEqual(line["follow_up_comment_id"], "10001")
+        self.assertNotIn("to", line)
+        self.assertEqual(result["issues"][0]["transitioned"], True)
+        self.assertEqual(result["issues"][0]["commented"], True)
+
+    # the same non-owner cases as the pass refusal; a fail moves the issue
+    # and writes a line, so each case gets its own fresh fixture (setUp)
+    def assert_fail_runs_after_a_non_owner(self, hid, account, ago):
+        # the owner's h-2 (20 min ago) stays older under the newer one
+        self.assertEqual(self.fake.status[self.ISSUE], RESOLVED)
+        self.assertEqual(self.lines(), [])
+        self.fake.history(self.ISSUE, hid, account, RESOLVED, stamp(ago))
+        result = self.validate(failed=True, follow_up="Still missing.")
+        self.assert_validate_block(result, "complete")
+        self.assertFalse(result["owner_resolved"])
+        self.assertEqual(self.fake.status[self.ISSUE], BLOCKED)
+        self.assertEqual([l["outcome"] for l in self.lines()], ["fail"])
+
+    def test_a_fail_still_runs_when_an_agent_resolved(self):
+        self.assert_fail_runs_after_a_non_owner("h-3", AGENT, 5)
+
+    def test_a_fail_still_runs_when_the_account_is_empty(self):
+        self.assert_fail_runs_after_a_non_owner("h-4", "", 4)
+
+    def test_a_fail_still_runs_when_the_account_is_absent(self):
+        self.assert_fail_runs_after_a_non_owner("h-5", None, 3)
+
+    def test_a_fail_still_runs_when_another_account_resolved(self):
+        self.assert_fail_runs_after_a_non_owner("h-6", "someone-else", 2)
+
+    def test_dry_run_moves_and_writes_nothing(self):
+        result = self.validate(failed=True, follow_up="x", dry_run=True)
+        self.assert_validate_block(result, "partial")
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(self.lines(), [])
+        self.assertEqual(self.fake.status[self.ISSUE], RESOLVED)
+
+
+class ValidateRefusalTests(ValidateTestCase):
+    def assert_refused(self, result, *names, calls=False):
+        self.assert_validate_block(result, "blocked")
+        for name in names:
+            self.assertIn(name, result["reason"])
+        if not calls:
+            self.assertEqual(self.fake.calls, [])
+        self.assertEqual(self.lines(), [])
+
+    def test_a_bad_key_or_mode_is_refused_with_no_call(self):
+        self.assert_refused(self.validate("st-1", check=True),
+                            "not a Jira issue key", "no Atlassian call made")
+        self.assert_refused(self.validate(), "exactly one")
+        self.assert_refused(self.validate(check=True, failed=True),
+                            "exactly one")
+        self.assert_refused(self.validate(passed=True, to="Done"), "--to")
+        self.assert_refused(self.validate(passed=True, to="To Do",
+                                          ruling="x"), "go together")
+        self.assert_refused(self.validate(failed=True, follow_up="  "),
+                            "--follow-up-file")
+
+    def test_no_binding_makes_no_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = track.validate(Path(tmp), self.ISSUE, check=True,
+                                    transport=self.fake)
+        self.assert_refused(result, "planning.jira.project_key",
+                            "no Atlassian call made")
+
+    def test_an_absent_agent_variable_is_named_before_any_call(self):
+        for name in (jirabackend.AGENT_TOKEN_ENV,
+                     jirabackend.AGENT_EMAIL_ENV, jirabackend.CLOUD_ID_ENV):
+            with self.subTest(name=name):
+                saved = os.environ.pop(name)
+                try:
+                    result = self.validate(check=True)
+                finally:
+                    os.environ[name] = saved
+                self.assert_refused(result, "no Atlassian call made")
+        os.environ.pop(jirabackend.AGENT_TOKEN_ENV)
+        self.assert_refused(self.validate(check=True),
+                            jirabackend.AGENT_TOKEN_ENV)
+
+    def test_no_owner_account_id_is_refused(self):
+        text = self.config.read_text(encoding="utf-8")
+        self.config.write_text(re.sub(r"\n\s*owner_account_id:[^\n]*", "",
+                                      text), encoding="utf-8")
+        self.assert_refused(self.validate(check=True),
+                            "planning.jira.owner_account_id")
+
+    def test_a_live_status_other_than_block_resolved_is_refused(self):
+        self.fake.status[self.ISSUE] = BLOCKED
+        for kwargs in ({"check": True}, {"passed": True, "to": "To Do"},
+                       {"failed": True, "follow_up": "x"}):
+            with self.subTest(**{k: v for k, v in kwargs.items()
+                                 if k != "follow_up"}):
+                result = self.validate(**kwargs)
+                self.assert_refused(result, f"'{BLOCKED}'",
+                                    "'Block Resolved'", calls=True)
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(self.inbox_state(), "resolved")
+
+    def test_cli_no_env_exits_2_with_the_block_last(self):
+        for name in jirabackend.AGENT_ENV_NAMES:
+            os.environ.pop(name, None)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = track.main(["validate", "--directory", str(self.root),
+                               "--issue", self.ISSUE, "--check"])
+        self.assertEqual(code, 2)
+        result = json.loads(out.getvalue())
+        self.assert_validate_block(result, "blocked")
+        self.assertIn("no Atlassian call made", result["reason"])
+
+
+class ValidateTransientTests(ValidateTestCase):
+    def assert_retry(self, result):
+        self.assert_validate_block(result, "partial", ok=False)
+        self.assertTrue(result["retry"])
+        self.assertTrue(result["reason"].startswith("track retry: "))
+        self.assertEqual(self.lines(), [])
+
+    def test_a_5xx_on_the_changelog_is_retried_and_records_nothing(self):
+        self.fake.force[("GET", f"/issue/{self.ISSUE}/changelog")] = (
+            503, "unavailable")
+        for kwargs in ({"check": True}, {"passed": True, "to": "To Do"},
+                       {"failed": True, "follow_up": "x"}):
+            self.assert_retry(self.validate(**kwargs))
+        self.assertEqual(self.inbox_state(), "resolved")
+        self.assertEqual(self.writes(), [])
+
+    def test_an_exhausted_429_on_the_transition_is_retried(self):
+        self.fake.force[("POST", f"/issue/{self.ISSUE}/transitions")] = (
+            429, {}, {"Retry-After": "600"})
+        result = self.validate(passed=True, to="In Progress")
+        self.assert_retry(result)
+        self.assertIn("429", result["reason"])
+
+    def test_a_5xx_on_the_follow_up_comment_is_retried(self):
+        self.fake.force[("POST", f"/issue/{self.ISSUE}/comment")] = (
+            502, "bad gateway")
+        self.assert_retry(self.validate(failed=True, follow_up="x"))
+        # the transition landed; the retry resumes the block, not refuses
+        self.assertEqual(self.fake.status[self.ISSUE], BLOCKED)
+        del self.fake.force[("POST", f"/issue/{self.ISSUE}/comment")]
+        transitions = len([c for c in self.writes()
+                           if c[1].endswith("/transitions")])
+        result = self.validate(failed=True, follow_up="x")
+        self.assert_validate_block(result, "complete")
+        self.assertEqual(len([c for c in self.writes()
+                              if c[1].endswith("/transitions")]),
+                         transitions)
+        self.assertEqual(len(self.fake.posted[self.ISSUE]), 1)
+        self.assertEqual([l["outcome"] for l in self.lines()], ["fail"])
+        self.assertEqual(result["issues"][0]["transitioned"], False)
+        self.assertEqual(result["issues"][0]["commented"], True)
+        # once posted, a further --fail is refused (no second comment/line)
+        again = self.validate(failed=True, follow_up="x")
+        self.assert_validate_block(again, "blocked")
+        self.assertEqual(len(self.fake.posted[self.ISSUE]), 1)
+        self.assertEqual(len(self.lines()), 1)
+
+
+    def test_a_landed_move_answering_a_5xx_resumes_the_pass(self):
+        # the move into --to lands, then answers 502: retry, then the line
+        spec = self.spec()
+        real = self.fake._jira
+        landed = []
+
+        def lands_then_502(method, path, query, body):
+            if method == "POST" and path.endswith("/transitions"):
+                if not landed:
+                    landed.append(real(method, path, query, body))
+                return 502, "bad gateway"
+            return real(method, path, query, body)
+        self.fake._jira = lands_then_502
+        self.assert_retry(self.validate(passed=True, to="In Progress",
+                                        ruling="Use the second option.",
+                                        spec=spec))
+        self.assertEqual(self.fake.status[self.ISSUE], "In Progress")
+        ruled = spec.read_text("utf-8")
+        self.assertIn("Use the second option.", ruled)  # kept for the retry
+        self.fake._jira = real
+        transitions = len([c for c in self.writes()
+                           if c[1].endswith("/transitions")])
+        result = self.validate(passed=True, to="In Progress",
+                               ruling="Use the second option.", spec=spec)
+        self.assert_validate_block(result, "complete")
+        self.assertEqual(len([c for c in self.writes()
+                              if c[1].endswith("/transitions")]),
+                         transitions)
+        self.assertEqual(spec.read_text("utf-8"), ruled)
+        (line,) = self.lines()
+        self.assertEqual((line["outcome"], line["to"], line["transition_id"],
+                          line["ruling"]),
+                         ("pass", "In Progress", "h-2", str(spec)))
+        self.assertTrue(any("resuming the pass" in n
+                            for n in result["notes"]))
+
+    # a pass retry is refused unless its move into --to is newer than the
+    # newest Block Resolved move and that one is the owner's
+    def assert_pass_retry_refused(self, *histories):
+        for hid, account, status, ago in histories:
+            self.fake.history(self.ISSUE, hid, account, status, stamp(ago))
+        self.fake.status[self.ISSUE] = "In Progress"
+        result = self.validate(passed=True, to="In Progress")
+        self.assert_validate_block(result, "blocked")
+        self.assertIn("'In Progress', not 'Block Resolved'", result["reason"])
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(self.lines(), [])
+
+    def test_a_pass_retry_whose_move_predates_the_resolve_is_refused(self):
+        self.assert_pass_retry_refused(("h-3", AGENT, "In Progress", 30))
+
+    def test_a_pass_retry_after_a_non_owner_resolve_is_refused(self):
+        self.assert_pass_retry_refused(("h-3", AGENT, RESOLVED, 10),
+                                       ("h-4", AGENT, "In Progress", 5))
+
+
+class ValidateCliTests(ValidateTestCase):
+    def test_cli_pass_with_a_ruling_file(self):
+        spec = self.spec()
+        with tempfile.TemporaryDirectory() as tmp:
+            ruling = Path(tmp) / "ruling.txt"
+            ruling.write_text("Use the second option.", encoding="utf-8")
+            out = io.StringIO()
+            real = jirabackend.client_for
+            with unittest.mock.patch.object(
+                    jirabackend, "client_for",
+                    lambda settings, transport=None: real(settings,
+                                                          self.fake)), \
+                    contextlib.redirect_stdout(out):
+                code = track.main(["validate", "--directory", str(self.root),
+                                   "--issue", self.ISSUE, "--pass", "--to",
+                                   "In Progress", "--ruling-file",
+                                   str(ruling), "--spec", str(spec)])
+        self.assertEqual(code, 0, out.getvalue())
+        result = json.loads(out.getvalue())
+        self.assert_validate_block(result, "complete")
+        self.assertIn("Use the second option.", spec.read_text("utf-8"))
+        self.assertEqual(self.fake.status[self.ISSUE], "In Progress")
+
+    def test_cli_unreadable_follow_up_file_is_refused(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = track.main(["validate", "--directory", str(self.root),
+                               "--issue", self.ISSUE, "--fail",
+                               "--follow-up-file",
+                               str(self.root / "absent.txt")])
+        self.assertEqual(code, 2)
+        result = json.loads(out.getvalue())
+        self.assert_validate_block(result, "blocked")
+        self.assertIn("--follow-up-file", result["reason"])
 
 
 if __name__ == "__main__":

@@ -119,12 +119,13 @@ import {
   closeOut, closeOutDetail, launchedCloseOutInput, meteredCost, pendingCloseOut, prepareWorktree, priorPr, sweepEngines, type WorktreeDeps,
 } from "./worktree";
 import {
-  checkoutKey, defaultProbes, engineRoot, servedRoot, isTerminal, LAUNCH_SKILL, ORPHANED_REASON, probeLaunchEngine, processStartTime, Queue, RunTerminal, selfOwner, STUDIO_END_RETRY_LIMIT, workerMayRun,
+  checkoutKey, defaultProbes, engineRoot, servedRoot, isTerminal, LAUNCH_SKILL, VALIDATE_RESOLUTION_JOB, ORPHANED_REASON, probeLaunchEngine, processStartTime, Queue, RunTerminal, selfOwner, STUDIO_END_RETRY_LIMIT, workerMayRun,
   type Holder, type LaunchEngine, type Owner, type QueueRun, type RecoverReport, type RunState, type StudioEnder, type StudioFinder, type StudioOps, type StudioResumer, type TerminalState,
   type WorkerKill,
 } from "./queue";
 import { closeOutPaused, launchedSinceMove, resumePaused, type PausedDeps, type ResumeAnswer, type ResumeDeps as EngineResumeDeps } from "./closeout";
 import { mergePass, reviewPass, type PlanStatusDeps } from "./planstatus";
+import { resolutionPass, withQueuedPayload, withStoredPayload, type ResolutionDeps } from "./resolution";
 import { CERT_CHECK_MS, CERT_RENEW_EXIT, certCheck, recordCertStart } from "./cert";
 import {
   holdEngine, killRunEngine, pinSandbox, releasePin, respawnHolds, STARTER_LOCK_REFRESH_MS, studioRunDir, writeStarterLock, writeStarterLocks, type SandboxDeps,
@@ -293,6 +294,8 @@ export interface RunOptions {
   plan?: PlanStatusDeps;
   /** Story 29.2: the agent registry's rebuild (`rebuildQuietly`) — injected deps, or `false` to skip it. */
   agents?: AgentsOption;
+  /** Story 31.7: the resolution pass (`resolveQuietly`) — injected deps, or `false` to skip it. */
+  resolution?: Partial<ResolutionDeps> | false;
 }
 
 /** Story 29.2: how a rebuild point rebuilds the `agents` table — the injected deps (tests), `false` (no rebuild),
@@ -640,6 +643,7 @@ export async function recoverQueue(opts: RunOptions = {}, verbRunner: VerbRunner
   } finally {
     await sweepEngines(queue, opts.worktree); // Story 27.1: engines that ended or paused are closed out
     await closeOutPaused(queue, pausedDeps(opts)); // Story 27.3: a paused run whose story landed is closed out
+    await resolveQuietly(queue, opts); // Story 31.7: queue validate-resolution from resolved items; re-arm on a pass
     await afterCloseOuts(queue, opts); // Story 27.5: the orphan close-out, then the plan's review and merge passes
     await detectExternal(queue, verbRunner, jobPlacement, sbxDeps(opts.worktree)); // Story 27.2: runs started outside the queue
     writeStarterLocks(queue, opts.worktree?.env ?? process.env);
@@ -690,6 +694,24 @@ async function afterCloseOuts(queue: Queue, opts: RunOptions & { plan?: PlanStat
   const plan: PlanStatusDeps = { ...(opts.worktree ?? {}), ...(opts.plan ?? {}) };
   try { await reviewPass(queue, plan); } catch { /* the next tick */ }
   try { await mergePass(queue, plan); } catch { /* the next tick */ }
+}
+
+/** Story 31.7: the resolution pass (src/resolution.ts) right after the paused-run pass at every `finally` site
+ * (`recover`, `drain`, `run`): production deps are `registry.py show`, `validate`'s resolve, `resolveCheckout` and
+ * `resumeRun`; under `bun test` it runs only with injected deps (as `rebuildQuietly`). Never throws. */
+async function resolveQuietly(queue: Queue, opts: RunOptions): Promise<void> {
+  if (opts.resolution === false || (opts.resolution === undefined && underBunTest())) return;
+  const deps: ResolutionDeps = {
+    registry: () => registryShow(),
+    resolveJob: async (root) => {
+      const v = await validate(VALIDATE_RESOLUTION_JOB, root, undefined, opts.guardCapS);
+      return { projectId: v.projectId, root: v.root, definition: v.defn, target: v.target };
+    },
+    checkout: resolveCheckout,
+    resume: (q, runId) => resumeRun(q, runId, undefined, { ...(opts.worktree ?? {}), ...(opts.owner ? { self: opts.owner } : {}) }),
+    ...(opts.resolution ?? {}),
+  };
+  try { await resolutionPass(queue, deps); } catch { /* the next tick */ }
 }
 
 /** Story 27.5 (DW-13): every `cancelled` run whose recorded studio run no record shows ended
@@ -780,6 +802,7 @@ export async function drainQueue(opts: RunOptions = {}, verbRunner: VerbRunner =
   } finally {
     await sweepEngines(queue, opts.worktree); // Story 27.1
     await closeOutPaused(queue, pausedDeps(opts)); // Story 27.3
+    await resolveQuietly(queue, opts); // Story 31.7
     await afterCloseOuts(queue, opts); // Story 27.5
     await rebuildQuietly(queue, opts.agents); // Story 29.2: the agent registry after the drain's claims and ends
     await sweepEnds(queue, opts.hygiene);
@@ -1094,9 +1117,14 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
       run = queue.get(opts.runId)!;
       if (permissionMode !== undefined && run.state === "queued") run = queue.recordPermissionMode(run.run_id, permissionMode);
       if (run.state === "queued") run = queue.recordRunOptions(run.run_id, record);
+      // Story 31.7: a queued validate-resolution run carries the payload the resolution pass enqueued.
+      v = { ...v, defn: withStoredPayload(run.job_id, v.defn, queue.definition(run)) };
     } else {
       const where = await resolveCheckout(v.root);
-      run = queue.enqueue({ jobId, root: v.root, projectId: v.projectId, target: v.target, definition: v.defn, owner, permissionMode, ...record, ...where }).run;
+      const enq = queue.enqueue({ jobId, root: v.root, projectId: v.projectId, target: v.target, definition: v.defn, owner, permissionMode, ...record, ...where });
+      run = enq.run;
+      // Story 31.7: an adopted (not minted) queued validate-resolution run keeps the payload the pass enqueued.
+      if (!enq.minted) v = { ...v, defn: withStoredPayload(run.job_id, v.defn, queue.definition(run)) };
     }
     const claim = await queue.claim(run.run_id, owner);
     // Story 27.2 (AC3): every claim rewrites the checkout's starter lock (the queue is the only starter).
@@ -1132,6 +1160,7 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
     await resuming;
     await sweepEngines(queue, opts.worktree); // Story 27.1: engines that ended or paused are closed out
     await closeOutPaused(queue, pausedDeps(opts)); // Story 27.3: a paused run whose story landed is closed out
+    await resolveQuietly(queue, opts); // Story 31.7: queue validate-resolution from resolved items; re-arm on a pass
     await afterCloseOuts(queue, opts); // Story 27.5: the orphan close-out, then the plan's review and merge passes
     await rebuildQuietly(queue, opts.agents); // Story 29.2: every end this process drove rebuilds the agent registry
     await sweepEnds(queue, opts.hygiene); // Story 22.3: every end this process drove (resumes included)
@@ -1499,7 +1528,7 @@ export async function startRun(
     throw new WakeFailed(message(e), { root, projectId, target, verb, timeoutS, jobGuardS, before });
   }
   if (out.ok === false) throw refusal(`${verb}: ${out.error ?? "refused"}`);
-  const woke = out;
+  const woke = withQueuedPayload(jobId, out, defn); // Story 31.7: the enqueued payload reaches the skill
   if (woke.woken !== true && woke.accepted !== true) {
     return { summary: { job_id: jobId, project_id: projectId, ok: false, run_id: null, state: "not-woken", reason: String(woke.reason ?? "refused") } };
   }

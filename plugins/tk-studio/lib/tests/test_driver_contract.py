@@ -909,6 +909,59 @@ class DriverContractTestCase(unittest.TestCase):
                        "next sync-back", "additive"):
             self.assertIn(phrase, reply)
 
+    # --- Story 31.7: the same 0.1.26 entry names the `validate` verb, the
+    # shipped `validate-resolution` job and the `validate` no-env drive.
+
+    def test_0_1_26_names_validate_and_its_job(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.26**", header)
+        self.assertNotIn("**0.1.27**", header)
+        self.assertLess(header.index("0.1.26 (Story 31.6)"),
+                        header.index("0.1.26 (Story 31.7)"))
+        clause = " ".join(header[header.index("0.1.26 (Story 31.7)"):].split())
+        for phrase in ("`validate` verb",
+                       "`track.py validate --directory ROOT --issue <KEY> "
+                       "(--check | --pass --to \"To Do\"|\"In Progress\" "
+                       "[--ruling-file PATH --spec PATH] | --fail "
+                       "--follow-up-file PATH) [--dry-run]`",
+                       "the agent seat only", "changelog", "(AD-4)",
+                       "`owner_resolved`", "`planning.jira.owner_account_id`",
+                       "an older owner transition never validates a later "
+                       "one", "absent or empty accountId never matches",
+                       "`validating`", "`</intent-contract>`",
+                       "`</frozen-after-approval>`", "never `status:`",
+                       "`_bmad-output/tracking/<KEY>/validation.jsonl`",
+                       "no Atlassian call made", "`retry: true`",
+                       "`validate-resolution`", "planner leg", "DRIFT",
+                       "EP-32", "(D9)", "— additive"):
+            self.assertIn(phrase, clause)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 31.7", stories)
+        row = next(line for line in self.text.splitlines()
+                   if line.startswith("| `tk-studio-track` "))
+        for phrase in ("`validate`", "`lib/track.py validate`",
+                       "`--ruling-file`", "`--follow-up-file`",
+                       "`owner_resolved`", "`validation.jsonl`",
+                       "a live status other than `Block Resolved`"):
+            self.assertIn(phrase, row)
+        flat = " ".join(self.text.split())
+        for phrase in ("The shipped `validate-resolution` job (0.1.26, "
+                       "Story 31.7)", "`payload.verb: validate`",
+                       "`tier: host`", "planner leg's model and effort",
+                       "no `model`"):
+            self.assertIn(phrase, flat)
+        manifest = json.loads((PLUGIN_ROOT / "contracts" / "conformance"
+                               / "manifest.json").read_text("utf-8"))
+        drives = manifest["surfaces"]["tk-studio-track"]["drives"]
+        validate = [d for d in drives if d["argv"][1] == "validate"]
+        self.assertEqual(len(validate), 1)
+        self.assertEqual((validate[0]["status"], validate[0]["marker"],
+                          validate[0]["expect"]),
+                         ("blocked", "no Atlassian call made",
+                          "status-block"))
+
     def test_section_8_names_the_cli_drives(self):
         section = self.text[self.text.index("## 8. Conformance"):]
         flat = " ".join(section.split())

@@ -499,6 +499,9 @@ export interface QueueRun {
   created: string; updated: string;
 }
 
+/** Story 31.7: the shipped job the resolution pass queues; its claim never waits on a paused lock holder. */
+export const VALIDATE_RESOLUTION_JOB = "validate-resolution";
+
 /** The worker options a run records while `queued` (Story 21.4). */
 export interface RunOptionsRecord { tier?: string | null; sandbox?: string | null; model?: string | null; effort?: string | null; base_ref?: string | null }
 const RUN_OPTION_KEYS = ["tier", "sandbox", "model", "effort", "base_ref"] as const;
@@ -1193,10 +1196,17 @@ export class Queue {
           };
         }
         const detail: Record<string, unknown> = { owner: ownerDetail(owner) };
+        // Story 31.7: a `validate-resolution` run exists to un-pause the paused holder — it never waits on it,
+        // and claims without taking the lock, so the paused run keeps it for its resume.
+        let lockExempt = false;
         if (lock && lock.run_id !== runId) {
           let holder: Holder | undefined;
           const pausedHolder = this.get(lock.run_id)?.state === "paused";
-          if (pausedHolder) {
+          if (pausedHolder && run.job_id === VALIDATE_RESOLUTION_JOB) {
+            lockExempt = true;
+            detail.lock_exempt = { paused_holder: lock.run_id, job_id: lock.job_id, kind: lock.kind,
+              why: "a validate-resolution run does not wait on the paused run it un-pauses; the lock stays the paused run's" };
+          } else if (pausedHolder) {
             // Story 27.1: a paused run keeps its checkout lock (and its worktree) for the resume.
             holder = { kind: lock.kind, run_id: lock.run_id, job_id: lock.job_id,
               ...(lock.kind === "engine" ? { engine_run_id: lock.engine_run_id } : { pid: lock.owner_pid, host: lock.owner_host }),
@@ -1235,7 +1245,7 @@ export class Queue {
             return { claimed: false, run: this.must(runId), why: "lock", reason, holder };
           }
         }
-        this.db.query(
+        if (!lockExempt) this.db.query(
           `INSERT INTO locks (checkout, root, kind, run_id, job_id, owner_pid, owner_host, owner_nonce, owner_start, engine_run_id, acquired)
            VALUES (?, ?, 'run', ?, ?, ?, ?, ?, ?, NULL, ?)
            ON CONFLICT (checkout) DO UPDATE SET root = excluded.root, kind = 'run', run_id = excluded.run_id,
