@@ -2745,3 +2745,139 @@ So that a reply that did not resolve the block comes back to the inbox with a fo
 **Given** the engagement's questions and approvals and the loop's `escalate` rulings
 **When** they arise
 **Then** each is an issue with comments in the same project, so the owner has one inbox for everything; the supervisor's `awaiting-ruling` writes the block instead of a Telegram note alone, and a reply that carries a ruling is written into the spec by the validation session; the lib suite and `bun test` cover the queueing, the two outcomes and the ruling write with fakes
+
+## Epic 32: The Engagement Loop v1
+
+The design spec's §6.4, §7.1 and user flow F2 (`_bmad-output/planning-artifacts/design/studio-design-spec-2026-10-09/README.md`, `user-flows.md`), the build order's next epic after EP-31: hiring the studio becomes one record with a state, moved only by typed inputs, talked to through the supervisor's own chat route (D2: Hermes is out; the planner leg, a `claude -p` session with the plugin, answers with the project's plan, kb and synced Confluence pages as its memory), scoped on an editable Confluence page, quoted from the meter's own history as a 50/85/95 band with a hard cap (D4: tokens as the figure, dollars as the shadow), approved by one verb that fixes the autonomy level, run by the loop as today, and closed by a report that says done, not done and why. The research record's B5 (`research/studio-front-end-and-repo-structure-2026-10-09/research.md` §9) is the evidence: every surveyed product gates on a plan and none quotes before running or reports partial delivery; the template there (states, not prompts) is adopted as written, with Jules's enum renamed to §7.1's. What exists today: F2's steps 5 and 6 as `POST /jobs` plus the loop, the inbox and the two statuses (EP-31), the Confluence publish and the sync-back (31.3, 31.4), the board's hand-written budget band (`.tk-studio/budget-bands.yaml`). The engagement record is canonical in the served project's `_bmad-output/engagements/<id>/` (AD-5, like the plan); the supervisor holds the state machine and serves the API; the Confluence pages and the Jira comments stay backend-authoritative and append-only (D9, AD-22); the planner session never holds a bearer and never moves the state: it writes files through the new `tk-studio-engage` surface and proposes inputs the owner sends. Every surface is additive on contract 0.1.27. Planned 2026-10-25 (session 11's third day) from the spec, after EP-31 landed. Attended: Tim's owner seat (`TK_STUDIO_ATLASSIAN_OWNER_EMAIL`, `TK_STUDIO_ATLASSIAN_OWNER_TOKEN`) must be set on the box before 32.3's reply path is exercised live; the first live engagement (on the-universe-awaits or on tk-studio itself) is an attended acceptance after 32.8, recorded in `kb/`. Sizing: Epic-21-sized or larger (design spec §10); one story per run with a graceful stop after each, as EP-31 ran.
+
+### Story 32.1: The Engagement Record and Its States
+
+As the owner,
+I want an engagement created from a request and moved only by typed inputs,
+So that hiring the studio has one record whose state I can read and trust (§7.1; F2 steps 1 and 8).
+
+**Acceptance Criteria:**
+
+**Given** a registered project and a request in plain language
+**When** `POST /engagements {project, request}` arrives (the bearer, or a session cookie with `X-CSRF-Token`, else 403 CsrfRefused)
+**Then** the supervisor writes `_bmad-output/engagements/<id>/engagement.yaml` in the served project's root (the id `ENG-NNN` from the plan counter's new `engagement` series; `shape_version: 1`; the §7.1 fields `id, project, state, request, questions[], assumptions[], scope_page, quote, autonomy, approved_at, closeout`, plus `created`, `updated`, `spend {planning_usd, runs_usd}` and `inputs[]`, the typed-input log) in state `intake`, appends a queue event `engagement {id, project, state, from: null}`, and answers 200 `{ok, engagement}`; `GET /engagements?project=<id>` lists the project's engagements newest first and `GET /engagements/{id}` reads one with its chat pointer (32.2); a cookie session reads both; an unregistered project is 404 UnknownProject; contract 0.1.27 (additive) names the routes
+
+**Given** the states `intake → awaiting-answers → scoping → quoted → approved → in-progress → delivered` with the side exits `paused`, `failed`, `partial`, `cancelled`
+**When** `POST /engagements/{id}/input {verb, …}` arrives with one of `answer`, `go`, `revise`, `question`, `approve`, `cancel` (each with its typed payload, checked by schema)
+**Then** exactly the transitions of one exported table in `apps/supervisor/src/engagement.ts` apply (the table is written into the contract's §7.1 row and tested row by row); any other body is 400 SchemaError, a verb illegal in the current state is 409 IllegalInput `{state, verb}`, a terminal state 409 EngagementClosed; nothing else moves `state`: not a chat message, not the planner, not a timer (leaving planning is an explicit exit, F2 step 5); every applied input is appended to `inputs[]` with its time and its source (`bearer` | `cookie` | `planner` for 32.3's one exception) and emits an `engagement` event carrying `from`; `bun test` covers every row of the table and every refusal
+
+**Given** the office and the board
+**When** an engagement exists
+**Then** `GET /office` and the stream's snapshot carry `engagements[] {id, project, state, title (the request's first line, 80 characters), needs_you}` (contract 0.1.27, additive) and the hub emits `office.engagement {id, state, from}` deltas on each change; `GET /board`'s Needs-you column lists the project's engagements in `awaiting-answers` and `quoted` as items `{engagement, state, title}`; the office projection's and the board's tests cover the rows
+
+### Story 32.2: The Planner Leg Behind the Chat Route
+
+As the owner,
+I want to talk to the studio about an engagement from the web,
+So that the same brain the loop uses answers with the project's plan, kb and Confluence pages as its memory (§6.4, D2; F2 step 1).
+
+**Acceptance Criteria:**
+
+**Given** an engagement that is not terminal
+**When** `POST /chat/{engagement} {message}` arrives (the bearer or a cookie with `X-CSRF-Token`; the body at most 32 KiB UTF-8)
+**Then** the message is appended to `_bmad-output/engagements/<id>/chat.jsonl` as `{seq, at, author: owner, body}` and the supervisor queues one run of the shipped job `engagement-chat` (one-shot; host tier; the planner leg's model and effort from the project's routing, passed at enqueue as `validate-resolution`'s are; payload `{engagement, seq}`; `guards.max_turns` 80, `max_wall_clock_seconds` 1800): a `claude -p` session on the host in the served project's root with the plugin, driven by the new contract surface `tk-studio-engage` (`lib/engage.py`), which reads the record, the chat so far, the plan under `_bmad-output/planning-artifacts/`, `kb/` and `kb/confluence/` and writes the reply with `engage.py reply` as `{seq, at, author: planner, body, run_id, proposals[]}`; the run's `job-run` event carries the cost like any run and the record's `spend.planning_usd` sums it (scoping is metered; the quote says so, 32.5); the answer is 200 `{ok, engagement, seq, run_id}`; a message sent while a chat run is live is queued behind it on the checkout lock, never refused; a terminal engagement is 409 EngagementClosed
+
+**Given** the chat
+**When** `GET /chat/{engagement}?since=<seq>` is read (JSON, or `Accept: text/event-stream` with the office stream's id, replay and heartbeat conventions)
+**Then** the lines after `seq` are returned and the planner's reply reaches an open stream without a reload; a `proposals[]` entry is `{verb, payload, label}` (an input the planner suggests, which the web renders as a button and the owner sends through 32.1: the planner itself has no bearer and no CSRF token and moves nothing); the chat session's environment is a worker's (`buildWorkerEnv`: every `TK_SUPERVISOR_*` secret and the owner seat stripped); `bun test` covers the append, the queueing behind a live run, the stream and the refusals with a fake planner; the lib suite covers `engage.py reply` (the memory it assembles, the reply line, the proposal shape) with a fixture project
+
+### Story 32.3: Clarifying Questions, Through the Inbox
+
+As the owner,
+I want at most three multiple-choice questions with defaults, in my inbox,
+So that scoping waits on me loudly and never silently, and an absent owner leaves stated assumptions, not a stall (F2 step 2; B5 item 2).
+
+**Acceptance Criteria:**
+
+**Given** an engagement in `intake` whose planner turn finds gaps a default cannot cover
+**When** the planner writes `engage.py questions` (at most three, each `{id, text, options[] with exactly one default, impact}`; a fourth is refused by name)
+**Then** `questions[]` fills, the state moves `intake → awaiting-answers` by a `question` input the supervisor applies on the planner's behalf from the written file (the one exception to "the owner sends every input", recorded with source `planner` and the run id), one Jira issue per engagement (`ENG-NNN: questions`, issue type Task, in the project's Jira project) is created or updated through the planning adapter and moved to `Blocked - Awaiting User` with the questions as a comment that @mentions the owner (31.5's `track.py block` path, extended with `--engagement`), the sync-back's inbox lists it (the item carries `engagement: ENG-NNN`), and the office shows the "!" bubble on the planner's desk
+
+**Given** the owner's reply on the issue (31.6's Issue screen, Jira itself) or the Chat screen's answer cards
+**When** the sync-back pulls the comment, or `POST /engagements/{id}/input {verb: answer, answers: {<id>: <option>}}` arrives
+**Then** the answers land in `questions[].answer` (a comment is parsed as `<id>: <option>` lines, a free-text answer is kept verbatim for the planner to judge), the issue moves to `Block Resolved` and on to `Done` (no validation leg for a question: the planner's next turn judges the answer), and the state moves `awaiting-answers → scoping` once every question has an answer; `go` with questions open converts each unanswered question into its default as a stated assumption in `assumptions[]` (named on the scope page) and moves on; nothing moves on a timer; the lib suite and `bun test` cover the cap, the issue and the inbox item, the two answer paths and the assumptions with fake Atlassian REST
+
+### Story 32.4: The Scope of Work on Confluence
+
+As the owner,
+I want a scope-of-work page I can edit where I read everything else,
+So that the deliverables, their acceptance signals, the exclusions and the dated dependencies are fixed before any run (F2 step 3; B5 items 1 and 3).
+
+**Acceptance Criteria:**
+
+**Given** `scoping`
+**When** the planner writes `engage.py scope` from the turn's `scope.md` (the sections, in order: goal; deliverables, each with its acceptance signal; exclusions; what the studio needs from the owner, each dependency dated; milestones; proposed epics and stories in `epics.md`'s story shape)
+**Then** 31.3's publish puts the page in the engagement's Confluence folder (`Engagements/ENG-NNN/Scope of Work`; provenance footer; skipped by content hash when unchanged) and `scope_page {id, url, version}` is recorded; the proposed epics and stories are not plan entities yet (nothing under `plan/` before approval, 32.6); a scope with a deliverable lacking an acceptance signal is refused by name
+
+**Given** the owner edits the page in Confluence, or sends `revise` with a body from the Chat screen
+**When** the next sync-back mirrors the page (31.4, `kb/confluence/`) or the input arrives
+**Then** the revision replaces `scope.md` wholesale (the page is authoritative while `scoping`, D9; a `revise` body becomes the new page), a `revise` in `quoted` returns the state to `scoping` and voids the quote, and the planner's next turn reads the new scope; the lib suite covers the round trip (Markdown to storage format to mirrored Markdown keeps every section), the replace rule and the refusal with a fake Confluence REST
+
+### Story 32.5: The Quote Band
+
+As the owner,
+I want a 50/85/95 band from the studio's own history with a hard cap,
+So that I approve a price with its tail, not a hope (F2 step 4; D4; B5 item 4).
+
+**Acceptance Criteria:**
+
+**Given** the meter's per-story records (today a free-text `observation`; this story makes the meter's payload structured and additive: `kind: meter`, `story_key`, `epic`, `usd`, `tokens {input, output, cache_read, cache_write}` per leg and the route, written to `transcripts/<key>/observation.json` and harvested to the host ledger as before) and the scope's proposed stories
+**When** `engage.py quote` runs (the planner's turn after the scope, or by hand)
+**Then** it computes, for this project and story kind, a seeded bootstrap (10,000 resamples of per-story tokens over the proposed story count) 50/85/95 band in tokens, shown as plan-window share (the plan's weekly window from `~/.tk-studio/config.yaml`'s `plan.window_tokens`, else "share unknown") with the list-price dollar shadow (`prices.json`), the cap (`cap = p95 + one story at p85`) and what happens at the cap (the run pauses `partial`, the engagement's issue blocks with the figures, the owner decides), the route and the autonomy levels on offer (32.6), and whether scoping was billable (the planning spend so far); a history under eight landed stories says "thin history" and widens the band from the design spec §10's sizing by analogy, never a bare number; `quote {band50, band85, band95, cap, basis, computed_at}` lands in the record, the state moves `scoping → quoted`, and `.tk-studio/budget-bands.yaml` gains `epics.<proposed EP>.usd_estimate` from the 85th so the board draws the band against spend once the epics exist
+
+**Given** the quote
+**When** it is tested
+**Then** the lib suite covers the resampling (seeded, exact), the thin-history rule, the share, the cap and the voiding on `revise` with fixtures; `GET /engagements/{id}` carries the quote and `GET /board`'s `band_usd` follows it; `kb/quote-band.md` records the method and its first figures
+
+### Story 32.6: Approval, Autonomy and the First Run
+
+As the owner,
+I want one verb to approve with the autonomy I choose at that moment,
+So that approval alone creates the plan, publishes it and starts the work (F2 step 5; B5 item 5).
+
+**Acceptance Criteria:**
+
+**Given** `quoted`
+**When** `POST /engagements/{id}/input {verb: approve, autonomy: ask | steady | full, base_ref?}` arrives (the bearer or a cookie with `X-CSRF-Token`; nothing else approves: no chat line, no planner proposal, no timer)
+**Then** the supervisor runs on the host in the served root: the scope's proposed epics and stories appended to `epics.md` as `## Epic N` sections carrying `engagement: ENG-NNN`, `plansync normalize` (the EP- and ST- entities, the index, the backlog mirrors), `plansync sync` (the promote to Jira with the design pages' links), the engagement's `run-epic-N` job declared under `.tk-studio/jobs/` and in `.tk-studio/config.yaml`'s `jobs` (the placement from the project's default worker placement), one commit on a branch `engagement/ENG-NNN` opened as a PR (main is protected: the plan change is reviewed like any change; the run cuts from `base_ref` when given, else from main once the PR merges, the supervisor queuing it on the merge as the plan pull-back watches today); `autonomy` and `approved_at` are recorded, the state moves `quoted → approved`, and `approved → in-progress` on the first run's `launched` event; `ask` = a graceful stop after every story and a `question` to the owner before the next, `steady` = one story per run, resubmitted by the supervisor on each merge, `full` = the epic end to end
+
+**Given** `in-progress`
+**When** runs end
+**Then** `spend.runs_usd` sums the engagement's runs' `job-run` costs and the board draws the band against it; at the cap the supervisor stops the live run with a graceful stop, marks the engagement `partial`, blocks its issue (the inbox) with the figures, and waits for `go` (`{cap}` raises it by the owner's figure, back to `in-progress`) or `cancel`; `bun test` covers the approve path with a fake adapter (what is written, the PR, the job, the three autonomy levels, the cap) and every refusal
+
+### Story 32.7: The Chat Screen
+
+As the owner,
+I want the engagement conversation in the web,
+So that intake, questions, scope, quote and approval happen from the desktop or the iPad without a terminal (§6.3 Chat; F2).
+
+**Acceptance Criteria:**
+
+**Given** `GET /engagements`, `GET /chat/{id}` and the typed inputs
+**When** the Chat screen renders
+**Then** it lists the project's engagements by state with the open one's transcript (owner and planner lines, the planner's run cost on hover), a message box (`POST /chat/{id}`), the state as a stepper (`intake … delivered`, the side exits marked), the questions as cards with their options and defaults (an answer sends `answer`), the scope page's link and a **Revise** box (sends `revise`), the quote as the band (50/85/95 as share and dollars, the cap, the autonomy levels) and an **Approve** control with the autonomy choice (sends `approve`), **Go** and **Cancel** where the table allows them, and a planner `proposals[]` entry as a button sending exactly that input; a **New engagement** form (`POST /engagements`); the nav gains Chat, and an engagement in `awaiting-answers` or `quoted` puts a count on it; the web sends the CSRF token as the inbox reply does; the stream keeps the transcript live and the watchdog on `visibilitychange` reconnects it on the iPad
+
+**Given** the screen
+**When** it is tested
+**Then** vitest covers the stepper, the cards, the quote, each action and the refusals' rendering with a fixture; the studio-web gate stays green
+
+### Story 32.8: Delivery, the Closeout Report and Change Requests
+
+As the owner,
+I want delivery to say done, not done and why, with the cost per story,
+So that the engagement closes on evidence and a change after delivery is a new engagement with its own quote (F2 steps 7 to 9; B5 items 7 to 9).
+
+**Acceptance Criteria:**
+
+**Given** `in-progress` and the engagement's last run ending (`complete`, `partial`, `failed`, `cancelled`)
+**When** the supervisor's engagement pass runs (at the `finally` sites, as the resolution pass does)
+**Then** it writes `_bmad-output/engagements/<id>/closeout.md`: each deliverable's acceptance signal checked against the landed stories' specs and PRs (done / not done / why), the PRs, a per-story cost table from the meter's records and the runs' `job-run` events, the planning spend, the quote against the actual, and every side exit with its reason; publishes it as `Engagements/ENG-NNN/Closeout` beside the scope; sets `closeout` and the state `delivered` (every deliverable done) or leaves `partial` / `failed` with the report; moves the engagement's Jira issue to `Done`; the notifier sends one line with the link
+
+**Given** a live engagement
+**When** `question` (the owner asks; the planner's next turn answers; no state change), `revise` (back to `scoping` with the quote voided; a run in flight finishes its story through a graceful stop) or `go` (past a cap or past open questions) arrives
+**Then** it applies as 32.1's table says; after `delivered` a change is a new engagement (`POST /engagements {project, request, follows: ENG-NNN}`) with its own quote; `bun test` covers the closeout's composition and the three mid-run inputs with fakes; the lib suite covers the report's rendering and `engage.py closeout`; the contract's §2 names `tk-studio-engage` and its verbs (`reply`, `questions`, `scope`, `quote`, `closeout`; 0.1.27 additive) and §7.1 the state table; `kb/engagement-loop.md` describes the loop as built, for the attended first engagement and for EP-33
