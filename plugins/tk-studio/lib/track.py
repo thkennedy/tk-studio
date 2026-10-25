@@ -1,5 +1,5 @@
-"""tk-studio-track — the `block` verb (Story 31.5, §6.9 items 1 and 2, §7.4)
-and the `reply` verb (Story 31.6).
+"""tk-studio-track — the `block` verb (Story 31.5, §6.9 items 1 and 2, §7.4),
+the `reply` verb (Story 31.6) and the `validate` verb (Story 31.7).
 
 When the loop cannot progress a story, its Jira issue — and each dependent
 story's issue (the canonical story entities whose `depends_on` names it,
@@ -59,6 +59,51 @@ with the same body after the issue's newest agent comment (read live) is
 not posted again — a retry or a second Done — and is named in `skipped[]`
 (`commented: true`, its id), and the transition still runs. No local file is
 written and nothing else is promoted (D9).
+
+The `validate` verb (Story 31.7, §6.9 items 4 and 5) checks a resolution
+before the story continues; the shipped `validate-resolution` job's session
+calls it, with the agent seat only (`client_for`, never the owner's
+variables):
+
+  uv run track.py validate --directory ROOT --issue <KEY>
+      (--check | --pass --to "To Do"|"In Progress"
+                 [--ruling-file PATH --spec PATH]
+               | --fail --follow-up-file PATH) [--dry-run]
+
+Shared refusals end `blocked` (exit 2), each by name: a bad key; no
+`planning.jira` binding or an absent agent variable (before any call, `no
+Atlassian call made`); no recorded `planning.jira.owner_account_id`; an
+issue whose live status is not `Block Resolved`. `--check` reads the
+changelog (`GET /issue/<KEY>/changelog`): `owner_resolved` is true only when
+the newest transition into `Block Resolved` carries the owner's non-empty
+accountId (an older owner transition never validates a later one). It reads
+`reason_comment` (`inbox.reason_comment`) and `replies[]` (the
+`comments.jsonl` lines whose `author` and `update_author` are both `owner`,
+created after the newest agent comment) from local memory only, and marks
+the inbox item `validating`. `owner_resolved: false` is a `complete`
+result; the session takes the fail path. `--pass` refuses by name when
+`owner_resolved` is false (before any write); it then checks that a
+transition reaches `--to` (none is refused by name, the spec untouched),
+writes the ruling (when given: `**Ruling (owner, <KEY> comment <id>,
+<date>):** <text>` just before the spec's `</intent-contract>`, else
+`</frozen-after-approval>` — the closing tag on a line of its own; never
+`status:`; an absent spec or block is refused by name), then moves the
+issue by name to `--to`. `--fail` (allowed whatever `owner_resolved` says)
+re-blocks the issue through the `block` internals with the follow-up as the
+reason — a new `Blocked:` agent comment, a new cycle. A `--fail` retry whose
+move into `Blocked - Awaiting User` landed (newer than the newest move into
+`Block Resolved`) but whose comment did not resumes: it posts the comment
+and writes the line, with no transition. A `--pass` retry whose move into
+`--to` landed but answered a temporary failure resumes the same way (live
+status `--to`, its newest move newer than the newest move into `Block
+Resolved`, and that one the owner's): the ruling (idempotent) and the line,
+with no transition. A ruling this run wrote is taken back out (atomically)
+when the pass then ends refused; a temporary failure keeps it. Each
+outcome appends one line to `_bmad-output/tracking/<KEY>/validation.jsonl`
+(`{issue, outcome, at, transition_id, reply_ids[], to?, ruling?,
+follow_up_comment_id?}`, atomic, local memory, never promoted). A temporary
+failure ends `partial` with `ok: false` and `retry: true` and appends no
+line.
 """
 from __future__ import annotations
 
@@ -67,9 +112,11 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import config as configlib
+import inbox
 import jirabackend
 import plansync
 import syncback
@@ -115,8 +162,8 @@ def comment_body(owner: str, reason: str, resolves: str,
     return body
 
 
-def newest_agent_body(client, key: str, owner: str) -> str | None:
-    """The plain body of the issue's newest agent comment, read live (`GET
+def newest_agent_comment(client, key: str, owner: str) -> dict | None:
+    """The issue's newest agent comment, read live (`GET
     /issue/{key}/comment` through `jirabackend`, never the sync-back's log,
     which only the timer writes): agent is anyone not the owner, as the
     sync-back and the inbox read it. None when there is none."""
@@ -129,7 +176,13 @@ def newest_agent_body(client, key: str, owner: str) -> str | None:
         # Jira lists oldest first: a later equal (or unparsed) stamp wins
         if best is None or at is None or best_at is None or at >= best_at:
             best, best_at = c, at
-    body = (best or {}).get("body")
+    return best
+
+
+def newest_agent_body(client, key: str, owner: str) -> str | None:
+    """The plain body of the issue's newest agent comment (see
+    `newest_agent_comment`). None when there is none."""
+    body = (newest_agent_comment(client, key, owner) or {}).get("body")
     return body.strip() if isinstance(body, str) else None
 
 
@@ -451,6 +504,391 @@ def reply(project_root: Path, issue: str, body: str | None = None,
     return _finish(result, "complete", None)
 
 
+# ---------------------------------------------------------------- validate
+
+VALIDATE_TARGETS = ("To Do", "In Progress")
+FOLLOW_UP_RESOLVES = "a reply in the Inbox that answers the follow-up"
+VALIDATION_NAME = "validation.jsonl"
+SOURCE_STORY_RE = re.compile(r"^epics\.md#story-(\d+)\.(\d+)$")
+RULING_CLOSERS = ("</intent-contract>", "</frozen-after-approval>")
+# a closing tag counts only on a line of its own: the tag named in prose
+# elsewhere in the spec is never the insertion point
+RULING_CLOSER_RES = tuple(re.compile(rf"(?m)^{re.escape(c)}[ \t]*\r?$")
+                          for c in RULING_CLOSERS)
+
+
+def _ruling_closer(text: str):
+    """The whole-line match of `</intent-contract>`, else of
+    `</frozen-after-approval>`, else None."""
+    for pattern in RULING_CLOSER_RES:
+        m = pattern.search(text)
+        if m:
+            return m
+    return None
+
+
+def _validate_result(issue: str, mode: str | None, dry_run: bool) -> dict:
+    return {"ok": False, "dry_run": dry_run, "issue": issue, "mode": mode,
+            "entity": None, "story": None, "owner_resolved": None,
+            "transition": None, "reason_comment": None, "replies": [],
+            "notes": [], "written": []}
+
+
+def _entity_for_issue(plan_dir: Path, key: str) -> dict | None:
+    """The plan entity whose `external.jira.key` is `key`, else None."""
+    for _, front, _ in jirabackend._load_entities(plan_dir):
+        if _jira_key(front) == key:
+            return front
+    return None
+
+
+def owner_replies(root: Path, key: str) -> list[dict]:
+    """The owner's reply, from local memory only: the `comments.jsonl` lines
+    (the last line per id: an edit appends) whose `author` and
+    `update_author` are both `owner`, created after the newest agent
+    comment, oldest first. `Done.` is a valid answer."""
+    _, lines = syncback._log_lines(
+        Path(root) / inbox.TRACKING_REL / key / "comments.jsonl")
+    latest: dict[str, dict] = {}
+    for entry in lines:
+        latest[str(entry.get("id"))] = entry
+    newest_agent = None
+    for entry in latest.values():
+        if entry.get("author") == "agent":
+            at = syncback.parse_time(entry.get("created"))
+            if at is not None and (newest_agent is None or at > newest_agent):
+                newest_agent = at
+    replies = []
+    for entry in latest.values():
+        if entry.get("author") != "owner" or \
+                entry.get("update_author") != "owner":
+            continue
+        at = syncback.parse_time(entry.get("created"))
+        if newest_agent is not None and (at is None or at <= newest_agent):
+            continue
+        replies.append((at, {"id": entry.get("id"), "body": entry.get("body"),
+                             "created": entry.get("created")}))
+    replies.sort(key=lambda pair: (pair[0] is None,
+                                   pair[0].timestamp() if pair[0] else 0.0))
+    return [reply for _, reply in replies]
+
+
+def ruling_line(key: str, comment_id, date: str, text: str) -> str:
+    return (f"**Ruling (owner, {key} comment {comment_id}, {date}):** "
+            f"{text.strip()}")
+
+
+def _ruling_target(spec: Path) -> tuple[str | None, str | None]:
+    """(the spec's text, refusal): the block the ruling goes into must
+    exist — `<intent-contract>`, else `<frozen-after-approval>`."""
+    try:
+        text = spec.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return None, f"the paused spec {spec} cannot be read: {exc}"
+    if _ruling_closer(text) is None:
+        return None, (f"the paused spec {spec} has no <intent-contract> or "
+                      f"<frozen-after-approval> block to hold the ruling")
+    return text, None
+
+
+def write_ruling(spec: Path, text: str, line: str) -> bool:
+    """Insert the ruling line just before the closing tag of the spec's
+    `<intent-contract>` block (else `<frozen-after-approval>`); nothing
+    else changes (never `status:`). False when the line already stands (a
+    retried pass), True when written (atomically)."""
+    if line in text:
+        return False
+    at = _ruling_closer(text).start()
+    head = text[:at]
+    if head and not head.endswith("\n"):
+        head += "\n"
+    if head and not head.endswith("\n\n"):
+        head += "\n"
+    jirabackend._atomic_write(spec, head + line + "\n\n" + text[at:])
+    return True
+
+
+def _reaches(client, key: str, name: str) -> bool:
+    """Whether a transition on `key` reaches the status named `name` (`GET
+    /issue/{key}/transitions`, matched by name the way
+    `jirabackend.transition_to_name` matches): read before anything is
+    written, so a refusal leaves the spec unchanged."""
+    status, data = client.request("GET", f"/issue/{key}/transitions",
+                                  scope=jirabackend.SCOPE_READ)
+    if status != 200 or not isinstance(data, dict):
+        raise jirabackend.JiraError(f"track: GET /issue/{key}/transitions "
+                                    f"returned {status}")
+    return any(isinstance(tr, dict)
+               and (tr.get("to") or {}).get("name") == name
+               for tr in data.get("transitions") or [])
+
+
+def append_validation(root: Path, key: str, line: dict) -> str:
+    """Append one outcome line to `_bmad-output/tracking/<KEY>/
+    validation.jsonl` (atomically); returns its relative path."""
+    rel = inbox.TRACKING_REL / key / VALIDATION_NAME
+    path = Path(root) / rel
+    text, _ = syncback._log_lines(path)
+    if text and not text.endswith("\n"):
+        text += "\n"
+    jirabackend._atomic_write(path, text + json.dumps(
+        line, ensure_ascii=False) + "\n")
+    return rel.as_posix()
+
+
+def validate(project_root: Path, issue: str, check: bool = False,
+             passed: bool = False, failed: bool = False,
+             to: str | None = None, ruling: str | None = None,
+             spec: str | Path | None = None, follow_up: str | None = None,
+             dry_run: bool = False, transport=None, sleep=None,
+             now=None) -> dict:
+    """The `validate` verb (see the module docstring). `ruling` and
+    `follow_up` are texts (the CLI reads them from `--ruling-file` and
+    `--follow-up-file`); `spec` is the paused story's spec path."""
+    root = Path(project_root).resolve()
+    modes = [m for m, on in (("check", check), ("pass", passed),
+                             ("fail", failed)) if on]
+    result = _validate_result(issue, modes[0] if len(modes) == 1 else None,
+                              dry_run)
+
+    def refuse(why: str) -> dict:
+        return _finish(result, "blocked", f"track refused: {why}")
+
+    if not ISSUE_KEY_RE.match(issue or ""):
+        return refuse(f"--issue {issue!r} is not a Jira issue key "
+                      f"(KEY-123); no Atlassian call made")
+    if len(modes) != 1:
+        return refuse("give exactly one of --check, --pass and --fail; no "
+                      "Atlassian call made")
+    mode = modes[0]
+    spec_path = None
+    if mode == "pass":
+        if to not in VALIDATE_TARGETS:
+            return refuse(f"--pass needs --to naming one of "
+                          f"{', '.join(map(repr, VALIDATE_TARGETS))} (got "
+                          f"{to!r}); no Atlassian call made")
+        if (ruling is None) != (spec is None):
+            return refuse("--ruling-file and --spec go together; no "
+                          "Atlassian call made")
+        if ruling is not None and not ruling.strip():
+            return refuse("the ruling is empty; no Atlassian call made")
+        if spec is not None:
+            spec_path = Path(spec)
+            if not spec_path.is_absolute():
+                spec_path = root / spec_path
+            if not spec_path.is_file():
+                return refuse(f"the paused spec {spec_path} does not exist; "
+                              f"no Atlassian call made")
+            _, gap = _ruling_target(spec_path)
+            if gap:
+                return refuse(gap + "; no Atlassian call made")
+    if mode == "fail" and not (follow_up or "").strip():
+        return refuse("--fail needs a non-empty --follow-up-file; no "
+                      "Atlassian call made")
+    if plansync._recorded(root, "planning.jira.project_key") is None:
+        return refuse("planning.jira.project_key is not recorded (no "
+                      "planning.jira binding) — run `plansync.py setup` "
+                      "first; no Atlassian call made")
+    settings, gaps = jirabackend._resolve_settings(root, None)
+    if not os.environ.get(jirabackend.AGENT_TOKEN_ENV) \
+            and not os.environ.get(jirabackend.TOKEN_ENV):
+        gaps.insert(0, f"{jirabackend.AGENT_TOKEN_ENV} is not set (the "
+                       f"agent seat's Jira token)")
+    if gaps:
+        return refuse("; ".join(gaps) + " — no Atlassian call made")
+    owner = plansync._recorded(root, "planning.jira.owner_account_id")
+    if owner is None:
+        return refuse("planning.jira.owner_account_id is not recorded — "
+                      "only the owner's transition into "
+                      f"{jirabackend.RESOLVED_STATUS!r} validates; rerun "
+                      "`plansync.py setup --owner-account-id <id>`; no "
+                      "Atlassian call made")
+    front = _entity_for_issue(plansync.plan_dir(root), issue)
+    if front is not None:
+        result["entity"] = front.get("id")
+        m = SOURCE_STORY_RE.match(str(front.get("source") or "").strip())
+        if m:
+            result["story"] = f"{int(m.group(1))}.{int(m.group(2))}"
+    result["reason_comment"] = inbox.reason_comment(root, issue)
+    replies = owner_replies(root, issue)
+    result["replies"] = replies
+    now = now or datetime.now(timezone.utc)
+
+    client = jirabackend.client_for(settings, transport)
+    if sleep is not None:
+        client.sleep = sleep
+    notes = result["notes"]
+    target = jirabackend.RESOLVED_STATUS
+    follow_body = (comment_body(owner, follow_up, FOLLOW_UP_RESOLVES)
+                   if mode == "fail" else None)
+    pass_resumed = False
+    # the spec's text before this run's ruling, restored when the pass then
+    # ends refused (a temporary failure keeps it: the retry finds it standing)
+    ruled: str | None = None
+
+    def unrule() -> None:
+        nonlocal ruled
+        if ruled is None:
+            return
+        jirabackend._atomic_write(spec_path, ruled)
+        ruled = None
+        if str(spec_path) in result["written"]:
+            result["written"].remove(str(spec_path))
+        notes.append(f"the pass was refused: the ruling was taken back out "
+                     f"of {spec_path}")
+
+    try:
+        name, _ = jirabackend._current_status(client, issue)
+        histories = None
+        if name != target:
+            # a `--fail` retry whose move from Block Resolved to Blocked
+            # landed but whose follow-up comment did not: resume the block
+            # (post the comment, write the line, skip the transition). Only
+            # when the changelog's newest move into Blocked is newer than
+            # its newest move into Block Resolved, and the newest agent
+            # comment is not this follow-up. A `--pass` retry whose move
+            # into `--to` landed but answered a temporary failure resumes
+            # the same way (the ruling, idempotent, then the line; no
+            # transition): only when the newest move into `--to` is newer
+            # than the newest move into Block Resolved, and that one is
+            # still the owner's (the owner_resolved rule).
+            resumed = False
+            if mode == "pass" and name == to:
+                histories = jirabackend.issue_changelog(client, issue)
+                into_to = jirabackend.last_transition_into(histories, to)
+                into_resolved = jirabackend.last_transition_into(
+                    histories, target)
+                t_at = jirabackend._parse_stamp(
+                    (into_to or {}).get("created"))
+                r_at = jirabackend._parse_stamp(
+                    (into_resolved or {}).get("created"))
+                resumed = (t_at is not None and r_at is not None
+                           and t_at > r_at
+                           and bool(into_resolved.get("account_id"))
+                           and into_resolved["account_id"] == owner)
+                pass_resumed = resumed
+            if mode == "fail" and name == jirabackend.BLOCKED_STATUS:
+                histories = jirabackend.issue_changelog(client, issue)
+                into_blocked = jirabackend.last_transition_into(
+                    histories, jirabackend.BLOCKED_STATUS)
+                into_resolved = jirabackend.last_transition_into(
+                    histories, target)
+                b_at = jirabackend._parse_stamp(
+                    (into_blocked or {}).get("created"))
+                r_at = jirabackend._parse_stamp(
+                    (into_resolved or {}).get("created"))
+                resumed = (b_at is not None and r_at is not None
+                           and b_at > r_at
+                           and newest_agent_body(client, issue, owner)
+                           != follow_body.strip())
+            if not resumed:
+                return refuse(f"{issue}'s live status is {name!r}, not "
+                              f"{target!r} — there is no resolution to "
+                              f"validate")
+            if pass_resumed:
+                notes.append(f"{issue} already moved from {target!r} to "
+                             f"{to!r} — resuming the pass (no transition)")
+            else:
+                notes.append(f"{issue} already moved from {target!r} to "
+                             f"{jirabackend.BLOCKED_STATUS!r} without this "
+                             f"follow-up — resuming the fail (comment "
+                             f"only)")
+        if histories is None:
+            histories = jirabackend.issue_changelog(client, issue)
+        transition = jirabackend.last_transition_into(histories, target)
+        result["transition"] = transition
+        result["owner_resolved"] = bool(
+            transition and transition.get("account_id")
+            and transition["account_id"] == owner)
+        if mode == "pass" and not result["owner_resolved"]:
+            return refuse(f"{issue}: the newest transition into {target!r} "
+                          f"is not the owner's (owner_resolved is false) — "
+                          f"a pass is refused; take the fail path")
+        if mode == "check":
+            if not result["owner_resolved"]:
+                notes.append(f"{issue}: the newest transition into "
+                             f"{target!r} is not the owner's — take the "
+                             f"fail path")
+            if dry_run:
+                notes.append(f"dry run: {issue}'s inbox item would be "
+                             f"marked 'validating'")
+            elif inbox.mark_validating(root, issue):
+                result["written"].append(inbox.INBOX_REL.as_posix())
+            else:
+                notes.append(f"{issue}: no inbox item to mark 'validating' "
+                             f"(absent or already validating)")
+        line = {"issue": issue, "outcome": mode,
+                "at": now.isoformat(timespec="seconds"),
+                "transition_id": (transition or {}).get("id"),
+                "reply_ids": [r.get("id") for r in replies]}
+        if mode == "pass":
+            line["to"] = to
+            if not pass_resumed and not _reaches(client, issue, to):
+                notes.append(f"{result['entity'] or issue}: {issue} has no "
+                             f"transition into {to!r}")
+                return refuse(f"{issue}: no transition reaches {to!r} from "
+                              f"{name!r}")
+            if ruling is not None:
+                if not replies:
+                    return refuse(f"{issue} has no owner reply after the "
+                                  f"newest agent comment to cite for the "
+                                  f"ruling")
+                cited = replies[-1]
+                at = syncback.parse_time(cited.get("created"))
+                stamp = (at or now).date().isoformat()
+                text, gap = _ruling_target(spec_path)
+                if gap:
+                    return refuse(gap)
+                rline = ruling_line(issue, cited.get("id"), stamp, ruling)
+                if dry_run:
+                    notes.append(f"dry run: the ruling would be written "
+                                 f"into {spec_path}")
+                elif write_ruling(spec_path, text, rline):
+                    ruled = text
+                    result["written"].append(str(spec_path))
+                else:
+                    notes.append(f"the ruling already stands in "
+                                 f"{spec_path}")
+                line["ruling"] = str(spec_path)
+            if pass_resumed:
+                pass  # the move into --to landed on the earlier call
+            elif dry_run:
+                notes.append(f"dry run: {issue} would move from {name!r} "
+                             f"to {to!r}")
+            elif jirabackend.transition_to_name(client, issue, to, notes,
+                                                issue) is None:
+                unrule()
+                return refuse(f"{issue}: no transition reaches {to!r} from "
+                              f"{name!r}")
+        elif mode == "fail":
+            entry = _block_issue(
+                client, owner, front or {"id": issue}, issue, "story",
+                follow_body, dry_run, notes)
+            result["issues"] = [entry]
+            if "error" in entry:
+                return refuse(f"{issue}: {entry['error']}")
+            if not dry_run:
+                posted = newest_agent_comment(client, issue, owner)
+                line["follow_up_comment_id"] = (
+                    None if posted is None or posted.get("id") is None
+                    else str(posted["id"]))
+    except jirabackend.JiraError as exc:
+        if transient(exc):
+            result["retry"] = True
+            return _finish(result, "partial", f"track retry: {issue}: {exc} "
+                           f"— a temporary failure; call again", ok=False)
+        unrule()
+        return refuse(f"{issue}: {exc}")
+    if mode != "check":
+        result["outcome"] = line
+        if not dry_run:
+            result["written"].append(append_validation(root, issue, line))
+    if dry_run:
+        return _finish(result, "partial", "dry run: nothing written; a real "
+                       "run would act as `notes[]` names")
+    return _finish(result, "complete", None)
+
+
 # --------------------------------------------------------------------- CLI
 
 def main(argv: list[str] | None = None) -> int:
@@ -479,8 +917,50 @@ def main(argv: list[str] | None = None) -> int:
     rep.add_argument("--done", action="store_true",
                      help="the reply is `Done.`")
     rep.add_argument("--dry-run", action="store_true")
+    val = sub.add_parser("validate")
+    val.add_argument("--directory", required=True,
+                     help="project root (walks up to the nearest)")
+    val.add_argument("--issue", required=True, help="the Jira issue key")
+    # Exactly one of the three, validated in code: a refusal stays JSON.
+    val.add_argument("--check", action="store_true")
+    val.add_argument("--pass", dest="passed", action="store_true")
+    val.add_argument("--fail", dest="failed", action="store_true")
+    val.add_argument("--to", help='"To Do" or "In Progress" (--pass)')
+    val.add_argument("--ruling-file", help="the owner's ruling, UTF-8 "
+                                           "(--pass, with --spec)")
+    val.add_argument("--spec", help="the paused story's spec (--pass)")
+    val.add_argument("--follow-up-file", help="what is still missing, "
+                                              "UTF-8 (--fail)")
+    val.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     directory = configlib.find_project_root(Path(args.directory))
+    if args.command == "validate":
+        texts = {}
+        for name in ("ruling_file", "follow_up_file"):
+            value = getattr(args, name)
+            if value is None:
+                continue
+            try:
+                texts[name] = Path(value).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                mode = ("check" if args.check else "pass" if args.passed
+                        else "fail" if args.failed else None)
+                result = _finish(_validate_result(args.issue, mode,
+                                                  args.dry_run),
+                                 "blocked", f"track refused: cannot read "
+                                 f"--{name.replace('_', '-')}: {exc}; no "
+                                 f"Atlassian call made")
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+                return 2
+        result = validate(directory, args.issue, check=args.check,
+                          passed=args.passed, failed=args.failed, to=args.to,
+                          ruling=texts.get("ruling_file"),
+                          spec=(str(Path(args.spec).resolve()) if args.spec
+                                else None),
+                          follow_up=texts.get("follow_up_file"),
+                          dry_run=args.dry_run)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 2 if result.get("status") == "blocked" else 0
     if args.command == "reply":
         body = None
         if args.body_file is not None:

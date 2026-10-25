@@ -173,3 +173,23 @@ def derive(root: Path, result: dict, project_key: str, plan_dir: Path,
         inbox, ensure_ascii=False, indent=2) + "\n")
     result["written"].append(INBOX_REL.as_posix())
     return inbox
+
+
+def mark_validating(root: Path, key: str) -> bool:
+    """Story 31.7: rewrite one item's `state` to `validating` (atomically,
+    every other field and item untouched) while `tk-studio-track validate`
+    judges its resolution. True when the file was rewritten; False when
+    there is no inbox, no item for `key`, or it is already `validating`."""
+    root = Path(root)
+    inbox = load(root)
+    items = inbox.get("items")
+    if not isinstance(items, list):
+        return False
+    hit = next((i for i in items if isinstance(i, dict)
+                and str(i.get("issue")) == key), None)
+    if hit is None or hit.get("state") == "validating":
+        return False
+    hit["state"] = "validating"
+    jirabackend._atomic_write(root / INBOX_REL, json.dumps(
+        inbox, ensure_ascii=False, indent=2) + "\n")
+    return True

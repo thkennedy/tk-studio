@@ -454,6 +454,37 @@ describe("checkout lock", () => {
     expect(fx.queue.lock(fx.checkout)).toMatchObject({ kind: "run", run_id: b.run_id, owner_pid: B.pid });
   });
 
+  test("Story 31.7: a validate-resolution run claims past a paused holder without taking its lock; others still wait", async () => {
+    const fx = fixture();
+    const a = fx.enqueue("run-epic", A).run;
+    expect((await fx.queue.claim(a.run_id, A)).claimed).toBe(true);
+    fx.queue.markPaused(a.run_id, { engine: { paused_stage: "escalation" } });
+    const lockBefore = fx.queue.lock(fx.checkout);
+    expect(lockBefore).toMatchObject({ run_id: a.run_id });
+    // the validation exists to un-pause the holder: it never waits on it
+    const v = fx.enqueue("validate-resolution", B, "skill", "tk-studio-track").run;
+    const got = await fx.queue.claim(v.run_id, B);
+    expect(got.claimed).toBe(true);
+    expect(fx.queue.get(v.run_id)).toMatchObject({ state: "running" });
+    expect(fx.queue.events(v.run_id).at(-1)).toMatchObject({ kind: "claimed", detail: { lock_exempt: { paused_holder: a.run_id, job_id: "run-epic" } } });
+    // the paused run keeps its lock for its resume; the validation's end releases nothing of it
+    expect(fx.queue.lock(fx.checkout)).toEqual(lockBefore);
+    fx.queue.end(v.run_id, "complete");
+    expect(fx.queue.lock(fx.checkout)).toEqual(lockBefore);
+    // any other job still waits on the paused holder
+    const c = fx.enqueue("job-c", B).run;
+    expect(await fx.queue.claim(c.run_id, B)).toMatchObject({ claimed: false, why: "lock", holder: { run_id: a.run_id } });
+  });
+
+  test("Story 31.7: a validate-resolution run still waits on a running holder", async () => {
+    const fx = fixture();
+    const a = fx.enqueue("job-a", A).run;
+    expect((await fx.queue.claim(a.run_id, A)).claimed).toBe(true);
+    const v = fx.enqueue("validate-resolution", B, "skill", "tk-studio-track").run;
+    expect(await fx.queue.claim(v.run_id, B)).toMatchObject({ claimed: false, why: "lock", holder: { kind: "run", run_id: a.run_id } });
+    expect(fx.queue.get(v.run_id)).toMatchObject({ state: "queued" });
+  });
+
   test("a running run under another live owner is answered, not claimed", async () => {
     const fx = fixture();
     const a = fx.enqueue("j", A).run;

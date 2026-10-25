@@ -405,6 +405,13 @@ export function trackRecorded(events: readonly QueueEvent[], storyKey: string, e
   return events.slice(pause + 1).some((e) => e.kind === "track-block" && e.detail?.story_key === storyKey && e.detail?.engine_run_id === engineRunId);
 }
 
+/** Story 31.7: the latest `track-block` event's detail recorded since the run's latest `paused` event (the block the
+ * current pause owes), else undefined — the resolution pass finds a resolved issue's paused run by it (reads only). */
+export function trackBlockSincePause(events: readonly QueueEvent[]): Record<string, unknown> | undefined {
+  const pause = events.findLastIndex((e) => e.kind === "paused");
+  return events.slice(pause + 1).findLast((e) => e.kind === "track-block")?.detail ?? undefined;
+}
+
 /** Story 31.5: what a block names — the story key, its spec (a path) and the reason. The awaiting-ruling path
  * and a dev session's `blocked` end share it. */
 export interface BlockInput { story_key: string; spec: string; reason: string }
