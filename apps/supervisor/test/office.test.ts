@@ -8,6 +8,7 @@ import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readF
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApi } from "../src/api";
+import { newEngagement, writeEngagement, type EngagementState } from "../src/engagement";
 import { SESSION_COOKIE, signSession } from "../src/auth";
 import {
   blockedIssueFor, INBOX_REL, OFFICE_MAP, OFFICE_STATES, OfficeHub, officeCachedPaths, officeStates, projectOffice, readInbox, type OfficeState,
@@ -994,7 +995,8 @@ describe("the snapshot extras (Story 30.6, contract 0.1.25 additive)", () => {
     const status = await (await fx.call("/status")).json() as any;
     for (const path of ["/office", "/office/events"]) {
       const body = await (await fx.call(path)).json() as any;
-      expect(Object.keys(body).sort()).toEqual(["agents", "at", "id", "last_run", "ledger", "ok", "problems", "runs", "supervisor"]);
+      // Story 32.1 (0.1.27, additive): `engagements` joins the snapshot.
+      expect(Object.keys(body).sort()).toEqual(["agents", "at", "engagements", "id", "last_run", "ledger", "ok", "problems", "runs", "supervisor"]);
       expect(body.supervisor).toEqual({ version: PKG_VERSION, counts: status.counts });
       expect(body.supervisor.counts).toEqual({ running: 1, cancelled: 1 });
       expect(body.ledger).toEqual({ path: "measurements/u-m.jsonl", lines: lines.slice(-20) });
@@ -1131,5 +1133,189 @@ describe("the registry's live_state (Story 29.2's field, stamped at rebuild)", (
     if (!res.rebuilt) throw new Error("not rebuilt");
     expect(res.problems.some((p) => p.startsWith("OfficeProjectionFailed: journal exploded"))).toBe(true);
     expect(readAgents(w.queue).agents.every((a) => a.live_state === "offline")).toBe(true);
+  });
+});
+
+describe("engagements (Story 32.1, contract 0.1.27 additive)", () => {
+  const ENG = join("_bmad-output", "engagements");
+  /** A record of `project` in `state` under `root`, created at minute `minute`. */
+  const put = (root: string, id: string, state: EngagementState, request = `Request ${id}\nmore`, minute = Number(id.slice(4)), project = "p") =>
+    writeEngagement(root, { ...newEngagement(id, project, request, new Date(Date.UTC(2026, 9, 25, 3, minute)).toISOString()), state });
+
+  test("the snapshot carries engagements[] {id, project, state, title, needs_you} from injected roots, newest first; needs_you per state", () => {
+    const w = world();
+    const root = mkdtempSync(join(tmpdir(), "tk-sup-office-eng-"));
+    const states: EngagementState[] = ["intake", "awaiting-answers", "scoping", "quoted", "approved", "in-progress", "delivered", "paused", "failed", "partial", "cancelled"];
+    states.forEach((s, i) => put(root, `ENG-${String(i + 1).padStart(3, "0")}`, s));
+    put(root, "ENG-012", "intake", "  \n" + "x".repeat(90));
+    const v = projectOffice(w.queue, { roots: () => ({ p: root }) });
+    expect(v.engagements?.[0]).toEqual({ id: "ENG-012", project: "p", state: "intake", title: "x".repeat(80), needs_you: false });
+    expect(v.engagements?.slice(1).map((e): unknown[] => [e.id, e.state, e.needs_you])).toEqual(
+      states.map((s, i): unknown[] => [`ENG-${String(i + 1).padStart(3, "0")}`, s, s === "awaiting-answers" || s === "quoted"]).reverse(),
+    );
+    expect(v.engagements?.find((e) => e.id === "ENG-001")?.title).toBe("Request ENG-001");
+    // q has no root in the map: one problem line, named; p's records are fine
+    expect(v.problems).toEqual(["engagements: no served root for q"]);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("without roots, a project's newest queue run's root serves its engagements; no roots no problem line", () => {
+    const w = world();
+    w.enqueue();
+    put(w.checkout, "ENG-001", "quoted");
+    const v = projectOffice(w.queue);
+    expect(v.engagements).toEqual([{ id: "ENG-001", project: "p", state: "quoted", title: "Request ENG-001", needs_you: true }]);
+    expect(v.problems).toEqual([]);
+  });
+
+  test("an injected (registry) root wins over the newest queue run's root: the office reads where the routes and the board write", () => {
+    const w = world();
+    w.enqueue();
+    const root = mkdtempSync(join(tmpdir(), "tk-sup-office-eng-"));
+    put(w.checkout, "ENG-001", "quoted", "In the run's checkout");
+    put(root, "ENG-001", "intake", "In the registry's root");
+    put(root, "ENG-002", "scoping", "Only in the registry's root");
+    const v = projectOffice(w.queue, { roots: () => ({ p: root }) });
+    expect(v.engagements?.map((e) => [e.id, e.state, e.title])).toEqual([
+      ["ENG-002", "scoping", "Only in the registry's root"], ["ENG-001", "intake", "In the registry's root"],
+    ]);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("a malformed record is skipped and named root-relative in problems[]", () => {
+    const w = world();
+    const root = mkdtempSync(join(tmpdir(), "tk-sup-office-eng-"));
+    put(root, "ENG-001", "intake");
+    mkdirSync(join(root, ENG, "ENG-002"), { recursive: true });
+    writeFileSync(join(root, ENG, "ENG-002", "engagement.yaml"), "shape_version: 3\n");
+    const v = projectOffice(w.queue, { roots: () => ({ p: root, q: root }) });
+    expect(v.engagements?.map((e) => [e.project, e.id])).toEqual([["p", "ENG-001"], ["q", "ENG-001"]]);
+    expect(v.problems).toEqual(["project p: _bmad-output/engagements/ENG-002/engagement.yaml: shape_version must be 1, got 3", "project q: _bmad-output/engagements/ENG-002/engagement.yaml: shape_version must be 1, got 3"]);
+    expect(v.problems.join(" ")).not.toContain(root);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("office.engagement on create (from null), on each state change (from), on removal (state null); none on an unchanged refresh; since() replays", () => {
+    const w = world();
+    const root = mkdtempSync(join(tmpdir(), "tk-sup-office-eng-"));
+    const hub = new OfficeHub({ queue: w.queue, graceMs: 0, roots: () => ({ p: root }) });
+    expect(hub.refresh()).toEqual([]);
+    expect(hub.snapshot().engagements).toEqual([]);
+    const start = hub.currentId();
+    put(root, "ENG-001", "intake", "Ship the report");
+    const created = hub.refresh().filter((e) => e.kind === "office.engagement");
+    expect(created.map((e) => e.data)).toEqual([{ id: "ENG-001", project: "p", state: "intake", from: null, title: "Ship the report", needs_you: false }]);
+    expect(hub.refresh()).toEqual([]);
+    put(root, "ENG-001", "awaiting-answers", "Ship the report");
+    expect(hub.refresh().map((e) => [e.kind, e.data])).toEqual([
+      ["office.engagement", { id: "ENG-001", project: "p", state: "awaiting-answers", from: "intake", title: "Ship the report", needs_you: true }],
+    ]);
+    expect(hub.snapshot().engagements).toEqual([{ id: "ENG-001", project: "p", state: "awaiting-answers", title: "Ship the report", needs_you: true }]);
+    put(root, "ENG-001", "scoping", "Ship the report");
+    expect(hub.refresh().map((e) => e.data)).toEqual([{ id: "ENG-001", project: "p", state: "scoping", from: "awaiting-answers", title: "Ship the report", needs_you: false }]);
+    rmSync(join(root, ENG, "ENG-001"), { recursive: true, force: true });
+    expect(hub.refresh().map((e) => e.data)).toEqual([{ id: "ENG-001", project: "p", state: null, from: "scoping" }]);
+    expect(hub.snapshot().engagements).toEqual([]);
+    expect(hub.since(start)!.map((e) => [e.kind, e.data.state, e.data.from])).toEqual([
+      ["office.engagement", "intake", null], ["office.engagement", "awaiting-answers", "intake"], ["office.engagement", "scoping", "awaiting-answers"],
+      ["office.engagement", null, "scoping"],
+    ]);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("an open stream's tick re-reads the registry in the background once the roots are a minute old: a project registered later shows", async () => {
+    const w = world();
+    const p = mkdtempSync(join(tmpdir(), "tk-sup-office-eng-"));
+    const q = mkdtempSync(join(tmpdir(), "tk-sup-office-eng-"));
+    put(p, "ENG-001", "intake", "In p");
+    put(q, "ENG-001", "quoted", "In q", 1, "q");
+    let projects: Record<string, { root: string }> = { p: { root: p } };
+    let reads = 0;
+    let t = Date.parse("2026-10-25T03:00:00.000Z");
+    const handler = createApi({
+      queue: w.queue, token: TOKEN, session: { secret: SECRET }, env: {}, registry: async () => { reads += 1; return { projects }; },
+      ledger: { user: "u", machine: "m" }, submit: async () => { throw new Error("never"); }, heartbeatMs: 60_000, pollMs: 10, now: () => t,
+    });
+    const ctl = new AbortController();
+    const res = await handler(new Request(`${BASE}/office/events`, { headers: { authorization: `Bearer ${TOKEN}`, accept: "text/event-stream" }, signal: ctl.signal }));
+    expect(reads).toBe(1);
+    const rd = res.body!.getReader();
+    let text = "";
+    while (!text.includes("\n\n")) text += new TextDecoder().decode((await rd.read()).value);
+    expect(JSON.parse(text.split("\n").find((l) => l.startsWith("data:"))!.slice(5)).engagements.map((e: any) => e.project)).toEqual(["p"]);
+    projects = { p: { root: p }, q: { root: q } };
+    await Bun.sleep(50);
+    expect(reads).toBe(1); // within the minute: the tick reads nothing
+    t += 61_000;
+    while (!text.includes('"id":"ENG-001","project":"q"')) text += new TextDecoder().decode((await rd.read()).value);
+    ctl.abort();
+    expect(reads).toBe(2); // one background read, not one per tick
+    expect(text).toContain('"id":"ENG-001","project":"q","state":"quoted"');
+    rmSync(p, { recursive: true, force: true });
+    rmSync(q, { recursive: true, force: true });
+  });
+
+  test("two concurrent office reads both await the first registry read: both show the registry root's engagement", async () => {
+    const w = world();
+    const root = mkdtempSync(join(tmpdir(), "tk-sup-office-eng-"));
+    put(root, "ENG-001", "quoted", "Approve me");
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let reads = 0;
+    const handler = createApi({
+      queue: w.queue, token: TOKEN, session: { secret: SECRET }, env: {}, registry: async () => { reads += 1; await gate; return { projects: { p: { root } } }; },
+      ledger: { user: "u", machine: "m" }, submit: async () => { throw new Error("never"); }, heartbeatMs: 60_000, pollMs: 10,
+    });
+    const call = () => handler(new Request(`${BASE}/office`, { headers: { authorization: `Bearer ${TOKEN}` } }));
+    const first = call(), second = call();
+    await Bun.sleep(20);
+    release();
+    const bodies = await Promise.all([first, second].map(async (r) => (await r).json() as Promise<any>));
+    expect(reads).toBe(1);
+    for (const body of bodies) {
+      expect(body.engagements).toEqual([{ id: "ENG-001", project: "p", state: "quoted", title: "Approve me", needs_you: true }]);
+      expect(body.problems).toEqual(["engagements: no served root for q"]); // q is not in the registry read
+    }
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("a registry that throws (or has not been read yet): no \"no served root\" problem line; the runs' roots still serve", async () => {
+    const w = world();
+    w.enqueue();
+    put(w.checkout, "ENG-001", "quoted", "In the run's checkout");
+    expect(projectOffice(w.queue, { roots: () => undefined }).problems).toEqual([]);
+    const handler = createApi({
+      queue: w.queue, token: TOKEN, session: { secret: SECRET }, env: {}, registry: async () => { throw new Error("registry.py show failed"); },
+      ledger: { user: "u", machine: "m" }, submit: async () => { throw new Error("never"); }, heartbeatMs: 60_000, pollMs: 10,
+    });
+    for (let i = 0; i < 2; i++) {
+      const body = await (await handler(new Request(`${BASE}/office`, { headers: { authorization: `Bearer ${TOKEN}` } }))).json() as any;
+      expect(body.problems.filter((p: string) => p.startsWith("engagements: no served root"))).toEqual([]);
+      expect(body.engagements).toEqual([{ id: "ENG-001", project: "p", state: "quoted", title: "In the run's checkout", needs_you: true }]);
+    }
+  });
+
+  test("GET /office and the stream's snapshot carry engagements[] (the first office read awaits the registry's roots)", async () => {
+    const w = world();
+    const root = mkdtempSync(join(tmpdir(), "tk-sup-office-eng-"));
+    put(root, "ENG-001", "quoted", "Approve me");
+    const handler = createApi({
+      queue: w.queue, token: TOKEN, session: { secret: SECRET }, env: {}, registry: async () => ({ projects: { p: { root } } }),
+      ledger: { user: "u", machine: "m" }, submit: async () => { throw new Error("never"); }, heartbeatMs: 60_000, pollMs: 10,
+    });
+    const call = (path: string, headers: Record<string, string> = {}) => handler(new Request(`${BASE}${path}`, { headers: { authorization: `Bearer ${TOKEN}`, ...headers } }));
+    const body = await (await call("/office")).json() as any;
+    expect(body.engagements).toEqual([{ id: "ENG-001", project: "p", state: "quoted", title: "Approve me", needs_you: true }]);
+    const viaCookie = await (await handler(new Request(`${BASE}/office`, { headers: { cookie: `${SESSION_COOKIE}=${signSession(SECRET, "token", Date.now())}` } }))).json() as any;
+    expect(viaCookie.engagements).toHaveLength(1);
+    const ctl = new AbortController();
+    const res = await handler(new Request(`${BASE}/office/events`, { headers: { authorization: `Bearer ${TOKEN}`, accept: "text/event-stream" }, signal: ctl.signal }));
+    const rd = res.body!.getReader();
+    let text = "";
+    while (!text.includes("\n\n")) text += new TextDecoder().decode((await rd.read()).value);
+    ctl.abort();
+    const data = JSON.parse(text.split("\n").find((l) => l.startsWith("data:"))!.slice(5));
+    expect(data.engagements).toEqual(body.engagements);
+    rmSync(root, { recursive: true, force: true });
   });
 });

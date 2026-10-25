@@ -56,6 +56,14 @@
     `32-2-the-planner-leg-behind-the-chat-route-*.md`, and a file named
     `32-2-the-planner-leg-behind-the-chat-route.md` is read as pending (loop deficiency
     1, story 21-6).
+    Replan (from 32-1, 2026-10-25): ENG ids repeat across served roots; resolve the chat
+    route's engagement with 32.1's locateEngagement rule (accept ?project=, ambiguity is
+    409 AmbiguousEngagement, never the first hit). GET /engagements/{id} answers {ok,
+    project, engagement, chat {route, path, last_seq}}. Extend 0.1.27 additively, keep
+    the strings test_driver_contract.py test_0_1_27_opens_the_engagement_entry pins, and
+    list plugins/tk-studio/lib/tests/test_driver_contract.py in Files when the contract
+    changes. Oversize (gate, 2026-10-25): plans/32-2.md lists about 20 files, past band
+    L; halt blocked if the Files list must grow beyond the plan's list.
 
 - id: "32-3-clarifying-questions-through-the-inbox"
   title: "Clarifying Questions, Through the Inbox"
@@ -187,6 +195,13 @@
     executor spec as `stories/32-7-the-chat-screen-spec.md` in the spec folder; the
     engine resolves it by the glob `32-7-the-chat-screen-*.md`, and a file named
     `32-7-the-chat-screen.md` is read as pending (loop deficiency 1, story 21-6).
+    Replan (from 32-1, 2026-10-25): office engagements[] rows and the office.engagement
+    delta carry project and are keyed by project plus id (state: null = removed or
+    unreadable); OfficeView.engagements is optional in the type, present on the wire.
+    List {ok, project, engagements, problems}; read {ok, project, engagement, chat}.
+    Always send ?project= (a repeated id is 409 AmbiguousEngagement). The CSRF token
+    comes from GET /inbox as the inbox reply takes it. Needs-you items are TriageItem |
+    EngagementTriageItem {engagement, state, title}.
 
 - id: "32-8-delivery-the-closeout-report-and-change-requests"
   title: "Delivery, the Closeout Report and Change Requests"
@@ -215,3 +230,10 @@
     `32-8-delivery-the-closeout-report-and-change-requests-*.md`, and a file named
     `32-8-delivery-the-closeout-report-and-change-requests.md` is read as pending (loop
     deficiency 1, story 21-6).
+    Replan (from 32-1, 2026-10-25): the "§7.1 state table" is 32.1's contract subsection
+    '### The engagement state table (0.1.27, Story 32.1)'; amend it in place together
+    with TRANSITIONS (a bun test checks equality both ways). Lift the follows refusal
+    (400 SchemaError today, Settled shape 5) additively within 0.1.27; wire the run-end
+    rows through the exported applyEvent (source supervisor). List
+    plugins/tk-studio/lib/tests/test_driver_contract.py in Files when the contract
+    changes and keep its 32.1 pinned strings.

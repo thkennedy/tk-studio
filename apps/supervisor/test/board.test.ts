@@ -7,7 +7,8 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApi } from "../src/api";
 import { SESSION_COOKIE, signSession } from "../src/auth";
-import { boardFor, openFindings, readPlan, type BoardAnswer, type LiveRunProgress } from "../src/board";
+import { boardFor, openFindings, readPlan, type BoardAnswer, type EngagementTriageItem, type LiveRunProgress, type TriageItem } from "../src/board";
+import { ENGAGEMENT_STATES, newEngagement, writeEngagement } from "../src/engagement";
 import { Queue, type Owner, type Probes, type QueueRun, type WorkerKill } from "../src/queue";
 
 const FX = join(import.meta.dir, "fixtures", "board");
@@ -83,7 +84,9 @@ function world() {
 }
 
 const storyOf = (b: BoardAnswer, id: string) => b.epics.flatMap((e) => e.stories).find((s) => s.id === id)!;
-const ids = (items: { run_id: string }[]) => items.map((i) => i.run_id);
+/** The run items of a column (Story 32.1: Needs-you also carries engagement items). */
+const runItems = (items: readonly (TriageItem | EngagementTriageItem)[]): TriageItem[] => items.filter((i): i is TriageItem => "run_id" in i);
+const ids = (items: readonly (TriageItem | EngagementTriageItem)[]) => runItems(items).map((i) => i.run_id);
 
 describe("the plan, the findings, the spend (AC1)", () => {
   test("epics with their stories and canonical statuses, in plan order", async () => {
@@ -300,7 +303,7 @@ describe("the runs and the triage (AC1, AC2)", () => {
     expect(b.triage.done[0]).toEqual({ run_id: today.run_id, state: "complete", story_key: null, pr: PR(7), ruling: null });
     // Every live run in exactly one column.
     const live = [paused, awaiting, red, running, queued].map((r) => r.run_id);
-    const placed = [...b.triage.needs_you, ...b.triage.working].map((i) => i.run_id).filter((id) => live.includes(id));
+    const placed = runItems([...b.triage.needs_you, ...b.triage.working]).map((i) => i.run_id).filter((id) => live.includes(id));
     expect(placed.sort()).toEqual([...live].sort());
     // Tomorrow, the runs ended today are no longer done.
     const tomorrow = await w.board("p", Date.now() + 2 * 86_400_000);
@@ -345,7 +348,7 @@ describe("the runs and the triage (AC1, AC2)", () => {
     const fromState = await pausedWith("20261019-000001-board", { state: { paused_reason: "budget band exceeded" } });
     const fromJournal = await pausedWith("20261019-000002-board", { journal: [{ kind: "story-escalated", story_key: S3, reason: "the spec contradicts itself" }] });
     const b = await w.board();
-    expect(b.triage.needs_you.map((i) => [i.run_id, i.ruling])).toEqual([
+    expect(runItems(b.triage.needs_you).map((i) => [i.run_id, i.ruling])).toEqual([
       [fromState.run_id, "budget band exceeded"], [fromJournal.run_id, "the spec contradicts itself"],
     ]);
   });
@@ -411,5 +414,42 @@ describe("the route (AC1)", () => {
     expect(anon.status).toBe(401);
     expect(anon.headers.get("content-type")).toStartWith("application/json");
     expect(await anon.json()).toMatchObject({ ok: false, error: "Unauthorized" });
+  });
+});
+
+describe("the engagements in Needs-you (Story 32.1, contract 0.1.27 additive)", () => {
+  /** One record per state under the served root, created a minute apart (ENG-001 oldest). */
+  function seed(root: string, states: readonly string[]) {
+    states.forEach((state, i) => {
+      const at = new Date(Date.UTC(2026, 9, 25, 3, i)).toISOString();
+      const id = `ENG-${String(i + 1).padStart(3, "0")}`;
+      writeEngagement(root, { ...newEngagement(id, "p", `Request ${id} in ${state}\nsecond line`, at), state: state as any });
+    });
+  }
+
+  test("awaiting-answers and quoted engagements follow the run items, newest first; no other state is listed", async () => {
+    const w = world();
+    const paused = await w.claim(w.enqueue());
+    w.queue.markPaused(paused.run_id, { engine: {} });
+    seed(w.root, ENGAGEMENT_STATES);
+    const b = await w.board();
+    expect(ids(b.triage.needs_you)).toEqual([paused.run_id]);
+    expect(b.triage.needs_you[0]).toMatchObject({ run_id: paused.run_id });
+    expect(b.triage.needs_you.slice(1)).toEqual([
+      { engagement: "ENG-004", state: "quoted", title: "Request ENG-004 in quoted" },
+      { engagement: "ENG-002", state: "awaiting-answers", title: "Request ENG-002 in awaiting-answers" },
+    ]);
+    expect(b.triage.working.some((i) => "engagement" in i)).toBe(false);
+    expect(b.triage.done.some((i) => "engagement" in i)).toBe(false);
+  });
+
+  test("a state change is seen on the next read; a project with no engagements directory lists none", async () => {
+    const w = world();
+    seed(w.root, ["intake"]);
+    expect((await w.board()).triage.needs_you).toEqual([]);
+    const at = new Date(Date.UTC(2026, 9, 25, 4)).toISOString();
+    writeEngagement(w.root, { ...newEngagement("ENG-001", "p", "Request ENG-001, now quoted", at), state: "quoted" });
+    expect((await w.board()).triage.needs_you).toEqual([{ engagement: "ENG-001", state: "quoted", title: "Request ENG-001, now quoted" }]);
+    expect((await w.board("n")).triage.needs_you).toEqual([]);
   });
 });

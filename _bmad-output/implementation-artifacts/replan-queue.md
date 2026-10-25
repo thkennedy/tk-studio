@@ -309,3 +309,24 @@
 - Suggested adjustment: the `validate-resolution` session acts on the agent seat only (never `track.py reply`, never the owner variables). The reply to judge is the owner comments (`author` and `update_author` both `owner`) after the newest agent comment; `Done.` is a valid simple answer. A fail re-blocks through `track.py block` with a new follow-up comment, which opens a new block cycle, so the owner's next reply posts.
 - Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-25)
 
+
+## 32-2-the-planner-leg-behind-the-chat-route — scope: stories — from 32-1-the-engagement-record-and-its-states — 2026-10-25
+
+- What changed: ENG-NNN ids are minted per served root, so a project-less `/engagements/{id}` lookup is 409 AmbiguousEngagement `{engagement, projects[]}` when more than one root holds the id, and `?project=` settles it (`engagement.ts`/`api.ts` `locateEngagement`). `GET /engagements/{id}` answers `{ok, project, engagement, chat {route, path, last_seq}}`. `parseRecord` rejects malformed records as 500 EngagementRecordInvalid. The 32.1 lib test (`test_driver_contract.py` `test_0_1_27_opens_the_engagement_entry`) pins `**0.1.28**` absent, the `### The engagement state table (0.1.27, Story 32.1)` heading, `**0.1.27 (Story 32.1, additive).**` and "keyed by project plus id".
+- What no longer holds: "`POST /chat/{engagement} {message}`", read as an id that alone names one engagement.
+- Suggested adjustment: resolve the chat route's engagement with 32.1's `locateEngagement` rule (accept `?project=`; ambiguity is 409 AmbiguousEngagement; never take the first hit). Extend 0.1.27 additively and keep the pinned strings. If the story edits `driver-contract.md`, list `plugins/tk-studio/lib/tests/test_driver_contract.py` in Files.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-25)
+
+## 32-7-the-chat-screen — scope: stories — from 32-1-the-engagement-record-and-its-states — 2026-10-25
+
+- What changed: the office's `engagements[]` rows and the `office.engagement` delta carry `project`, and the delta is keyed by project plus id (`office.ts`). A removed or unreadable record emits `state: null`. `OfficeView.engagements` is optional in the TS type but always present on the wire. The answer shapes are `GET /engagements?project=` → `{ok, project, engagements, problems}` and `GET /engagements/{id}` → `{ok, project, engagement, chat}`. A repeated id with no `?project=` is 409 AmbiguousEngagement. No engagement GET returns `X-CSRF-Token`, because the session-scoped token comes from `GET /inbox`. Board Needs-you items are the union `TriageItem | EngagementTriageItem {engagement, state, title}`.
+- What no longer holds: "the hub emits `office.engagement {id, state, from}` deltas", read as keyed by id alone.
+- Suggested adjustment: key the web store's engagements by `project` + `id`, and drop the row on `state: null`. Always send `?project=` on engagement reads and inputs. Take the CSRF token as the inbox reply does (`GET /inbox`). Render `EngagementTriageItem` in Needs-you by its `engagement` key.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-25)
+
+## 32-8-delivery-the-closeout-report-and-change-requests — scope: stories — from 32-1-the-engagement-record-and-its-states — 2026-10-25
+
+- What changed: the state table is the contract subsection `### The engagement state table (0.1.27, Story 32.1)` at the end of §1's web-surfaces section. A bun test checks it equal to `TRANSITIONS` both ways, and the lib test pins its heading. `POST /engagements` refuses `follows` with 400 SchemaError (Settled shape 5). The event rows `launched`, `run-paused`, `run-resumed`, `cap` and `run-ended` are applied by the exported `applyEvent` with source `supervisor`.
+- What no longer holds: "the contract's … §7.1 the state table", read as a new §7.1 section.
+- Suggested adjustment: treat 32.1's subsection as the "§7.1" state table and amend it in place (any table change updates `TRANSITIONS` and the bun equality test together). Lift the `follows` refusal additively within 0.1.27. Wire the run-end rows through `applyEvent`. List `plugins/tk-studio/lib/tests/test_driver_contract.py` in Files when the contract changes, and keep the 32.1 pinned strings.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the gate session (2026-10-25)
