@@ -1,9 +1,10 @@
 ---
 id: TASK-116
 title: Project Setup From a Template
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-20 00:35'
+updated_date: '2026-10-24 19:28'
 labels:
   - ST-116
 milestone: Tracking on Atlassian and the Inbox

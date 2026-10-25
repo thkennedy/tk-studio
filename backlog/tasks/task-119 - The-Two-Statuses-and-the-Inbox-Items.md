@@ -1,9 +1,10 @@
 ---
 id: TASK-119
 title: The Two Statuses and the Inbox Items
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-20 00:35'
+updated_date: '2026-10-24 23:48'
 labels:
   - ST-119
 milestone: Tracking on Atlassian and the Inbox

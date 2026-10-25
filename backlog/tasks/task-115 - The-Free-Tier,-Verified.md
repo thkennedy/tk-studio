@@ -1,9 +1,10 @@
 ---
 id: TASK-115
 title: The Free Tier, Verified
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-20 00:35'
+updated_date: '2026-10-24 17:53'
 labels:
   - ST-115
 milestone: Tracking on Atlassian and the Inbox

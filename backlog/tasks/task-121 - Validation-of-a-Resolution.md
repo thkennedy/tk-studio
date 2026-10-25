@@ -1,9 +1,10 @@
 ---
 id: TASK-121
 title: Validation of a Resolution
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-20 00:35'
+updated_date: '2026-10-25 02:51'
 labels:
   - ST-121
 milestone: Tracking on Atlassian and the Inbox

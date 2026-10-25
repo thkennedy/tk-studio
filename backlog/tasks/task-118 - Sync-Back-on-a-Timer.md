@@ -1,9 +1,10 @@
 ---
 id: TASK-118
 title: Sync-Back on a Timer
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-20 00:35'
+updated_date: '2026-10-24 21:39'
 labels:
   - ST-118
 milestone: Tracking on Atlassian and the Inbox
