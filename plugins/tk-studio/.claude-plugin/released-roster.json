@@ -22,7 +22,7 @@
     "tk-studio-track"
   ],
   "archive": {
-    "url": "https://github.com/thkennedy/tk-studio/releases/download/tk-studio--v0.3.3/tk-studio-0.3.3.zip",
-    "sha256": "8f539ebe093204ace7eb68b46f9e62de185cba8c3c74971a1143818174ecc1f6"
+    "url": "https://github.com/thkennedy/tk-studio/releases/download/tk-studio--v0.3.4/tk-studio-0.3.4.zip",
+    "sha256": "fc44c2a6464cc19d0957ba32d059c7b555fdf550c9bc4351aa76db4a0031b554"
   }
 }
