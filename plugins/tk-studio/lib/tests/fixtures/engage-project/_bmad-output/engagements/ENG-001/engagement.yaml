@@ -1,0 +1,21 @@
+{
+  "shape_version": 1,
+  "id": "ENG-001",
+  "project": "fixture",
+  "state": "intake",
+  "request": "Add a CSV export to the reports page\nwith the date range filter",
+  "questions": [],
+  "assumptions": [],
+  "scope_page": null,
+  "quote": null,
+  "autonomy": null,
+  "approved_at": null,
+  "closeout": null,
+  "created": "2026-10-25T03:00:00.000Z",
+  "updated": "2026-10-25T03:00:00.000Z",
+  "spend": {
+    "planning_usd": 0,
+    "runs_usd": 0
+  },
+  "inputs": []
+}

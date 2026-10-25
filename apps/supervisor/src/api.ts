@@ -109,12 +109,13 @@ import {
   csrfToken, readCookie, safeEqual, sessionSubAccepted, SESSION_COOKIE, SESSION_TTL_S, setCookie, signInPage, type SignInMode, signSession, USERNAME_RE, verifySession,
 } from "./auth";
 import { boardFor, type BoardAnswer } from "./board";
-import { CancelRaced, cancelRun, ExternalRunRefused, resumeRun, StartError, submitProject, type AgentsOption } from "./cli";
+import { appendChatLineHeld, ChatBusy, chatSince, checkChatBody, dropChatLineHeld, mintChatTurn, prepareChatTurn, recordIsJsonText, withChatLockAsync, type ChatDeps, type ChatLine } from "./chat";
+import { CancelRaced, cancelRun, chatDeps, ExternalRunRefused, resumeRun, StartError, submitProject, type AgentsOption } from "./cli";
 import { ResumeRefused, type ResumeAnswer } from "./closeout";
 import { apiBind, apiPort, apiToken, checkTlsFiles, notifier, oauthLeftovers, sessionSecret, tlsConfig } from "./env";
 import {
   applyInput, chatPointer, checkCreateBody, checkInputBody, ENGAGEMENT_ID_RE, EngagementCounterInvalid, engagementPath, EngagementRecordInvalid,
-  listEngagements, mintEngagementId, newEngagement, readEngagement, writeEngagement, type Engagement,
+  listEngagements, mintEngagementId, newEngagement, readEngagement, TERMINAL_STATES, writeEngagement, type Engagement,
 } from "./engagement";
 import { underBunTest } from "./hygiene";
 import { checkReplyBody, issueRead, postReply, registryRoot, type IssueReadResult, type ReplyAnswer, type ReplyBody } from "./inbox";
@@ -207,6 +208,9 @@ export interface ApiDeps {
   /** Story 30.2: the studio web's root (default: the installed slot from `current.json`, else the checkout's
    * `apps/studio-web/dist`). */
   web?: WebOptions;
+  /** Story 32.2: the chat route's turn — the `engagement-chat` definition for a served root and its checkout (default
+   * `chatDeps()`: `validate`'s resolve and `resolveCheckout`). */
+  chat?: ChatDeps;
 }
 
 /** Story 27.3: the resume body — a restore patch relative to the run's worktree, optional. */
@@ -376,6 +380,7 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
     registry, board, studioRunId: (id) => queue.get(id)?.studio_run_id ?? null, env: deps.env, ledger: deps.ledger,
   }));
   const reply = deps.reply ?? ((key: string, body: ReplyBody) => postReply(key, body, { registry, env: deps.env }));
+  const chat = deps.chat ?? chatDeps();
 
   /** Constant time: both sides hashed to one length before `timingSafeEqual`. The scheme
    * matches case-insensitively (RFC 7235); the token is compared as sent. */
@@ -551,6 +556,125 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
     writeEngagement(found.root, applied.record);
     queue.serviceEvent("engagement", { id, project: found.project, state: applied.to, from: applied.from, verb: checked.body.verb, source: via }, at);
     return json(200, { ok: true, engagement: applied.record, from: applied.from, to: applied.to });
+  }
+
+  // ---------------------------------------------------------- the chat (Story 32.2)
+
+  /** `POST /chat/{engagement}`: the body checked, the engagement located (not terminal), the turn's job resolved, then
+   * — under the chat lock, with no await between — the record re-read, the owner's line appended, one `engagement-chat`
+   * run minted (`stack`: behind a live one, never refused) and the `chat-queued` service event; a failed mint removes
+   * the line again (500 ChatQueueFailed). */
+  async function postChatRoute(req: Request, url: URL, id: string): Promise<Response> {
+    let raw: unknown;
+    try { raw = JSON.parse(await req.text()); }
+    catch (e) { return fail(400, "MalformedJson", { detail: `the body is not JSON: ${e instanceof Error ? e.message : String(e)}` }); }
+    const checked = checkChatBody(raw);
+    if (!checked.ok) return fail(400, "SchemaError", { detail: checked.detail });
+    const scoped = url.searchParams.get("project")?.trim() || null;
+    const located = await locateEngagement(id, scoped);
+    if (located instanceof Response) return located;
+    if (TERMINAL_STATES.has(located.record.state)) return fail(409, "EngagementClosed", { engagement: id, state: located.record.state });
+    let prepared: Awaited<ReturnType<typeof prepareChatTurn>>;
+    try { prepared = await prepareChatTurn(chat, located.root); }
+    catch (e) { return fail(500, "ChatJobUnresolved", { project: located.project, engagement: id, detail: redact(e instanceof Error ? e.message : String(e)) }); }
+    // Under chat.lock (its wait an async sleep: a held lock never stalls the server), synchronously: the record
+    // re-read, the owner's line appended, the run minted — or, the mint failing, the line removed again (no owner line
+    // survives without a run; a retry never duplicates it).
+    let turned: Response | { seq: number; run_id: string };
+    try {
+      turned = await withChatLockAsync(located.root, id, (): Response | { seq: number; run_id: string } => {
+        let current: Engagement | null;
+        try { current = readEngagement(located.root, id); } catch (e) {
+          if (e instanceof EngagementRecordInvalid) return fail(500, "EngagementRecordInvalid", { project: located.project, engagement: id, detail: e.message });
+          throw e;
+        }
+        if (!current) return fail(404, "UnknownEngagement", { ...(scoped ? { project: located.project } : {}), engagement: id });
+        if (TERMINAL_STATES.has(current.state)) return fail(409, "EngagementClosed", { engagement: id, state: current.state });
+        // Settled shape 1: a record still in 32.1's block YAML is rewritten as JSON text before the turn is minted
+        // (engage.py reads it with `json`; block YAML is EngagementRecordUnreadable there).
+        if (!recordIsJsonText(located.root, id)) writeEngagement(located.root, current);
+        const at = new Date(clock()).toISOString();
+        const line = appendChatLineHeld(located.root, id, { at, author: "owner", body: checked.message });
+        try {
+          const minted = mintChatTurn(queue, prepared, { engagement: id, project: located.project, root: located.root, seq: line.seq });
+          return { seq: line.seq, run_id: minted.run_id };
+        } catch (e) {
+          let detail = redact(e instanceof Error ? e.message : String(e));
+          try { dropChatLineHeld(located.root, id, line.seq); }
+          catch (d) { detail += `; the owner line seq ${line.seq} could not be removed: ${redact(d instanceof Error ? d.message : String(d))}`; }
+          return fail(500, "ChatQueueFailed", { project: located.project, engagement: id, detail });
+        }
+      });
+    } catch (e) {
+      if (e instanceof ChatBusy) return fail(503, "ChatBusy", { engagement: id, detail: e.message });
+      throw e;
+    }
+    if (turned instanceof Response) return turned;
+    return json(200, { ok: true, engagement: id, seq: turned.seq, run_id: turned.run_id });
+  }
+
+  /** `GET /chat/{engagement}?since=<seq>`: the lines after `since` (JSON), or with `text/event-stream` the chat stream. */
+  async function readChatRoute(req: Request, url: URL, id: string): Promise<Response> {
+    const stream = (req.headers.get("accept") ?? "").includes("text/event-stream");
+    const lastId = req.headers.get("last-event-id");
+    // As `/events`: a numeric `Last-Event-ID` (an EventSource reconnect) wins over `?since=` on the stream.
+    const raw = stream && lastId !== null && /^\d+$/.test(lastId.trim()) ? lastId : url.searchParams.get("since")?.trim() || "0";
+    if (!/^\d+$/.test(raw.trim())) return fail(400, "SchemaError", { detail: `'since' must be a chat seq (a non-negative integer), got '${raw}'` });
+    const since = Number(raw.trim());
+    const located = await locateEngagement(id, url.searchParams.get("project")?.trim() || null);
+    if (located instanceof Response) return located;
+    if (!stream) {
+      const lines = chatSince(located.root, id, since);
+      // `last_seq`: the file's last line's seq (0 while absent), as GET /engagements/{id} chat.last_seq — never `since`.
+      return json(200, { ok: true, project: located.project, engagement: id, since, last_seq: chatPointer(located.root, id).last_seq, lines });
+    }
+    return chatSse(req, located.root, id, since);
+  }
+
+  /** The chat stream (a third handler, beside `sse()` and `officeSse()`, never factored with them): frames `id: <seq>`,
+   * `event: chat`, data = the line, first the lines after `since` (the replay), then each new line as the poll finds it;
+   * a `: heartbeat` comment every `heartbeatMs` on its own timer; the client's close clears both timers. Reads only. */
+  function chatSse(req: Request, root: string, id: string, since: number): Response {
+    const enc = new TextEncoder();
+    let last = since, closed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined, heartbeat: ReturnType<typeof setInterval> | undefined;
+    const frame = (l: ChatLine) => `id: ${l.seq}\nevent: chat\ndata: ${JSON.stringify(l)}\n\n`;
+    const cleanup = () => {
+      closed = true;
+      if (timer) { clearTimeout(timer); timer = undefined; }
+      if (heartbeat) { clearInterval(heartbeat); heartbeat = undefined; }
+    };
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const stop = () => {
+          if (closed) return;
+          cleanup();
+          try { controller.close(); } catch { /* already closed */ }
+        };
+        const send = (text: string) => {
+          if (closed) return;
+          try { controller.enqueue(enc.encode(text)); } catch { stop(); }
+        };
+        req.signal?.addEventListener("abort", stop);
+        if (req.signal?.aborted) { stop(); return; }
+        const tick = () => {
+          if (closed) return;
+          try {
+            const lines = chatSince(root, id, last);
+            if (lines.length) {
+              send(lines.map(frame).join(""));
+              last = Math.max(last, ...lines.map((l) => l.seq));
+            }
+          } catch { stop(); return; }
+          timer = setTimeout(tick, pollMs);
+        };
+        send("retry: 5000\n\n");
+        tick();
+        heartbeat = setInterval(() => send(": heartbeat\n\n"), heartbeatMs);
+      },
+      cancel() { cleanup(); },
+    });
+    return new Response(body, { status: 200, headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" } });
   }
 
   function status(): Response {
@@ -904,17 +1028,17 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
     try { return new URLSearchParams(await req.text()).get("csrf") ?? ""; } catch { return ""; }
   }
 
-  /** What a valid cookie session may do: the GET routes, and cancel, the reply and (Story 32.1) the engagement's create
-   * and typed inputs with CSRF. Anything else 401. */
+  /** What a valid cookie session may do: the GET routes, and cancel, the reply, (Story 32.1) the engagement's create
+   * and typed inputs and (Story 32.2) the chat's message with CSRF. Anything else 401. */
   async function cookieRoute(req: Request, url: URL, path: string, method: string, cookie: string): Promise<Response> {
     const csrf = csrfToken(secret!, cookie);
     const readRoute = path === "/" || path === "/jobs" || path === "/status" || path === "/events" || path === "/agents"
       || path === "/board" || path === "/inbox" || path === "/office" || path === "/office/events" || /^\/runs\/[^/]+$/.test(path)
-      || path === "/engagements" || /^\/engagements\/[^/]+$/.test(path)
+      || path === "/engagements" || /^\/engagements\/[^/]+$/.test(path) || /^\/chat\/[^/]+$/.test(path)
       || path === "/app" || path.startsWith("/app/");
     if (method === "GET" && readRoute) return await route(req, url, path, method, csrf, "cookie");
     if (method === "POST" && (/^\/runs\/[^/]+\/cancel$/.test(path) || /^\/inbox\/[^/]+\/reply$/.test(path)
-      || path === "/engagements" || /^\/engagements\/[^/]+\/input$/.test(path))) {
+      || path === "/engagements" || /^\/engagements\/[^/]+\/input$/.test(path) || /^\/chat\/[^/]+$/.test(path))) {
       const given = await csrfGiven(req);
       if (!given || !safeEqual(given, csrf)) return fail(403, "CsrfRefused");
       return await route(req, url, path, method, undefined, "cookie");
@@ -1020,6 +1144,14 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
         if (method !== "GET") return allow("GET");
         const id = decodeId(engMatch[1]);
         return id === null || !ENGAGEMENT_ID_RE.test(id) ? fail(400, "BadEngagement", { engagement: id ?? engMatch[1] }) : await readEngagementRoute(url, id);
+      }
+      // Story 32.2: the engagement's chat (contract 0.1.27 additive).
+      const chatMatch = /^\/chat\/([^/]+)$/.exec(path);
+      if (chatMatch) {
+        if (method !== "GET" && method !== "POST") return allow("GET, POST");
+        const id = decodeId(chatMatch[1]);
+        if (id === null || !ENGAGEMENT_ID_RE.test(id)) return fail(400, "BadEngagement", { engagement: id ?? chatMatch[1] });
+        return method === "POST" ? await postChatRoute(req, url, id) : await readChatRoute(req, url, id);
       }
       // Story 29.3: the graced office view (a read: nothing is written to the queue).
       if (path === "/office") {

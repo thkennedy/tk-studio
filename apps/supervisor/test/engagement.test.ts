@@ -468,6 +468,22 @@ describe("the record files", () => {
     expect(readdirSync(join(root, ENGAGEMENTS_REL, "ENG-001"))).toEqual(["engagement.yaml"]);
   });
 
+  test("Story 32.2 (Settled shape 1): the record is written as JSON text (JSON.stringify(record, null, 2) and a newline), read back by js-yaml and by JSON.parse alike; the plan counter stays block YAML", () => {
+    const root = tempRoot();
+    const r = { ...record("ENG-001", AT), request: "multi\nline: with: colons\n", questions: QUESTIONS.map((q) => ({ ...q })),
+      spend: { planning_usd: 0.75, runs_usd: 0 } };
+    writeEngagement(root, r);
+    const text = readFileSync(engagementPath(root, "ENG-001"), "utf-8");
+    expect(text).toBe(JSON.stringify(r, null, 2) + "\n");
+    expect(JSON.parse(text)).toEqual(r);
+    expect(loadYaml(text)).toEqual(r);
+    expect(readEngagement(root, "ENG-001")).toEqual(r);
+    mintEngagementId(root);
+    const counter = readFileSync(join(root, COUNTER_REL), "utf-8");
+    expect(counter.trimStart().startsWith("{")).toBe(false);
+    expect(counter).toContain("engagement: ");
+  });
+
   test("a missing record is null; one that is not a record is EngagementRecordInvalid naming the root-relative path", () => {
     const root = tempRoot();
     expect(readEngagement(root, "ENG-001")).toBeNull();
@@ -508,14 +524,16 @@ describe("the record files", () => {
   test("questions/assumptions/inputs entries that are not mappings, a question with no id, a non-string request: invalid on read, skipped and named", () => {
     const root = tempRoot();
     writeEngagement(root, record("ENG-001", "2026-10-25T01:00:00.000Z"));
-    const base = readFileSync(engagementPath(root, "ENG-001"), "utf-8").replace("id: ENG-001", "id: ENG-002");
+    // Story 32.2: the record is JSON text (Settled shape 1): each case is the written record with one field changed.
+    const base = { ...JSON.parse(readFileSync(engagementPath(root, "ENG-001"), "utf-8")), id: "ENG-002" } as Record<string, unknown>;
+    const variant = (o: Record<string, unknown>) => JSON.stringify({ ...base, ...o }, null, 2) + "\n";
     mkdirSync(join(root, ENGAGEMENTS_REL, "ENG-002"), { recursive: true });
     const cases: [string, string][] = [
-      [base.replace("questions: []", "questions:\n  - null"), "questions[0] is not a mapping"],
-      [base.replace("assumptions: []", "assumptions:\n  - 3"), "assumptions[0] is not a mapping"],
-      [base.replace("inputs: []", "inputs:\n  - [a]"), "inputs[0] is not a mapping"],
-      [base.replace("questions: []", "questions:\n  - {id: q1, text: a}\n  - {text: no id}"), "questions[1] has no id"],
-      [base.replace("request: Request ENG-001", "request: 7"), "request must be a string"],
+      [variant({ questions: [null] }), "questions[0] is not a mapping"],
+      [variant({ assumptions: [3] }), "assumptions[0] is not a mapping"],
+      [variant({ inputs: [["a"]] }), "inputs[0] is not a mapping"],
+      [variant({ questions: [{ id: "q1", text: "a" }, { text: "no id" }] }), "questions[1] has no id"],
+      [variant({ request: 7 }), "request must be a string"],
     ];
     for (const [text, why] of cases) {
       writeFileSync(engagementPath(root, "ENG-002"), text);
@@ -528,7 +546,8 @@ describe("the record files", () => {
       expect(problems).toEqual([`_bmad-output/engagements/ENG-002/engagement.yaml: ${why}`]);
     }
     // an absent array still defaults to []
-    writeFileSync(engagementPath(root, "ENG-002"), base.replace("questions: []\n", "").replace("inputs: []\n", ""));
+    const { questions: _q, inputs: _i, ...absent } = base;
+    writeFileSync(engagementPath(root, "ENG-002"), JSON.stringify(absent, null, 2) + "\n");
     expect(readEngagement(root, "ENG-002")).toMatchObject({ questions: [], inputs: [] });
   });
 

@@ -12,6 +12,7 @@ import { ApiBindMissing, ApiPortInvalid, ApiTokenMissing, apiBind, apiPort, apiT
 import { END_HYGIENE_EVENTS } from "../src/hygiene";
 import { type QueueEvent, Queue, RunTerminal, STUDIO_END_RETRY_LIMIT, type EngineProbe, type Owner, type Probes, type QueueRun, type WorkerKill } from "../src/queue";
 import { fakeBin } from "./fakes";
+import { dump as dumpYaml } from "js-yaml";
 
 const REPO = resolve(import.meta.dir, "..");
 
@@ -1486,7 +1487,8 @@ describe("Story 32.1: the engagement routes (contract 0.1.27 additive)", () => {
     const fx = routed();
     await fx.create();
     const path = join(fx.root, ENG, "ENG-001", "engagement.yaml");
-    const text = readFileSync(path, "utf-8").replace("state: intake", "state: awaiting-answers").replace("questions: []", "questions:\n  - null");
+    // Story 32.2: the record is JSON text (Settled shape 1).
+    const text = JSON.stringify({ ...JSON.parse(readFileSync(path, "utf-8")), state: "awaiting-answers", questions: [null] }, null, 2) + "\n";
     writeFileSync(path, text);
     for (const body of [{ verb: "answer", answers: { q1: "a" } }, { verb: "go" }]) {
       const res = await fx.call("POST", "/engagements/ENG-001/input", undefined, body);
@@ -1629,4 +1631,303 @@ describe("Story 32.1: the engagement routes (contract 0.1.27 additive)", () => {
     }
     expect((await fx.call("POST", "/engagements/ENG-001", { cookie: fx.cookie, "x-csrf-token": fx.csrf })).status).toBe(401);
   });
+});
+
+describe("Story 32.2: the chat routes (contract 0.1.27 additive)", () => {
+  const SECRET = "c".repeat(48);
+  const ENG = join("_bmad-output", "engagements");
+  const CHAT_JOB = {
+    job_schema_version: 1, id: "engagement-chat", trigger: "one-shot", target: { skill: "tk-studio-engage", payload: { verb: "reply" } },
+    guards: { max_turns: 80, max_wall_clock_seconds: 1800 }, stop: { until: "9999-12-31T23:59:59Z" },
+  };
+  function routed(o: Partial<ApiDeps> = {}) {
+    const root = mkdtempSync(join(tmpdir(), "tk-sup-chat-root-"));
+    const other = mkdtempSync(join(tmpdir(), "tk-sup-chat-other-"));
+    mkdirSync(join(root, ".bmad-loop"), { recursive: true });
+    writeFileSync(join(root, ".bmad-loop", "routing.current.json"), JSON.stringify({ planner: { model: "claude-opus-5-5", effort: "high" } }));
+    const alive = new Set<number>();
+    const queue = new Queue(join(mkdtempSync(join(tmpdir(), "tk-sup-chat-q-")), "q.db"), { ownerAlive: (w) => alive.has(w.pid), engineLive: async () => ({ live: false }) });
+    let t = Date.parse("2026-10-25T05:00:00.000Z");
+    const resolved: string[] = [];
+    const handler = createApi({
+      queue, token: TOKEN, session: { secret: SECRET }, submit: async () => { throw new Error("never"); }, now: () => (t += 1000),
+      registry: async () => ({ projects: { p: { root }, o: { root: other } } }), env: { TK_STUDIO_HOME: mkdtempSync(join(tmpdir(), "tk-sup-chat-home-")) },
+      chat: { resolveJob: async (r) => { resolved.push(r); return { projectId: r === root ? "p" : "o", root: r, definition: structuredClone(CHAT_JOB), target: "skill" }; } },
+      pollMs: 20, heartbeatMs: 40,
+      ...o,
+    });
+    const cookie = `${SESSION_COOKIE}=${signSession(SECRET, "token", Date.now())}`;
+    const csrf = csrfToken(SECRET, cookie.slice(SESSION_COOKIE.length + 1));
+    const call = (method: string, path: string, headers: Record<string, string> = { authorization: `Bearer ${TOKEN}` }, body?: unknown) =>
+      handler(new Request(`${BASE}${path}`, { method, headers: { ...(body !== undefined ? { "content-type": "application/json" } : {}), ...headers }, ...(body !== undefined ? { body: typeof body === "string" ? body : JSON.stringify(body) } : {}) }));
+    const create = async (project = "p", request = "Build the export") =>
+      (await (await call("POST", "/engagements", undefined, { project, request })).json()) as Record<string, any>;
+    const chatText = (r = root, id = "ENG-001") => { try { return readFileSync(join(r, ENG, id, "chat.jsonl"), "utf-8"); } catch { return null; } };
+    const chatRuns = () => queue.runs().filter((r) => r.job_id === "engagement-chat");
+    const queued = () => queue.serviceEvents("chat-queued").map((e) => e.detail);
+    return { root, other, queue, alive, handler, call, create, cookie, csrf, chatText, chatRuns, queued, resolved };
+  }
+
+  test("send: the owner's line {seq, at, author: owner, body} appended, one engagement-chat run (host, the planner leg, the per-run payload), chat-queued, 200 {ok, engagement, seq, run_id}", async () => {
+    const fx = routed();
+    await fx.create();
+    const res = await fx.call("POST", "/chat/ENG-001", undefined, { message: "Which reports?" });
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, any>;
+    const [run] = fx.chatRuns();
+    expect(body).toEqual({ ok: true, engagement: "ENG-001", seq: 1, run_id: run!.run_id });
+    const lines = fx.chatText()!.trim().split("\n").map((l) => JSON.parse(l));
+    expect(lines).toEqual([{ seq: 1, at: lines[0].at, author: "owner", body: "Which reports?" }]);
+    expect(Date.parse(lines[0].at)).not.toBeNaN();
+    expect(run).toMatchObject({ state: "queued", tier: "host", model: "claude-opus-5-5", effort: "high", project_id: "p", target: "skill" });
+    expect(fx.queue.runPayload(run!.run_id)).toEqual({ engagement: "ENG-001", project: "p", project_root: fx.root, seq: 1 });
+    expect(fx.queued()).toEqual([{ engagement: "ENG-001", project: "p", seq: 1, run_id: run!.run_id, model: "claude-opus-5-5", effort: "high" }]);
+    expect(fx.resolved).toEqual([fx.root]);
+    // the planner moves nothing: the record is untouched, no engagement event beyond the create
+    expect(readEngagement(fx.root, "ENG-001")!.state).toBe("intake");
+    expect(fx.queue.serviceEvents("engagement")).toHaveLength(1);
+    // the pointer follows the file
+    expect(((await (await fx.call("GET", "/engagements/ENG-001")).json()) as any).chat.last_seq).toBe(1);
+  });
+
+  test("send while a chat run is live: a second run is minted (stack) and waits on the checkout lock — never refused, never adopted", async () => {
+    const fx = routed();
+    await fx.create();
+    const first = await (await fx.call("POST", "/chat/ENG-001", undefined, { message: "one" })).json() as Record<string, any>;
+    const me: Owner = { pid: 920001, host: hostname(), nonce: "chat-api-a" };
+    fx.alive.add(me.pid);
+    expect((await fx.queue.claim(first.run_id, me)).claimed).toBe(true);
+    // the fake planner answers seq 2 while its run is live
+    const lines = fx.chatText()!;
+    writeFileSync(join(fx.root, ENG, "ENG-001", "chat.jsonl"), lines + JSON.stringify({ seq: 2, at: "2026-10-25T05:00:30.000Z", author: "planner", body: "All of them.", run_id: first.run_id, proposals: [] }) + "\n");
+    const second = await fx.call("POST", "/chat/ENG-001", undefined, { message: "two" });
+    expect(second.status).toBe(200);
+    const s = await second.json() as Record<string, any>;
+    expect(s.seq).toBe(3);
+    expect(s.run_id).not.toBe(first.run_id);
+    expect(fx.queue.get(first.run_id)!.state).toBe("running");
+    expect(fx.queue.get(s.run_id)!.state).toBe("queued");
+    const other: Owner = { pid: 920002, host: hostname(), nonce: "chat-api-b" };
+    fx.alive.add(other.pid);
+    expect(await fx.queue.claim(s.run_id, other)).toMatchObject({ claimed: false, why: "lock" });
+    expect(fx.queued().map((d) => [d?.seq, d?.run_id])).toEqual([[1, first.run_id], [3, s.run_id]]);
+    expect(fx.queue.runPayload(s.run_id)).toEqual({ engagement: "ENG-001", project: "p", project_root: fx.root, seq: 3 });
+  });
+
+  test("the refusals append nothing and queue nothing: cookie without CSRF 403, terminal 409, bad bodies 400, bad and unknown ids, a job that will not resolve 500", async () => {
+    const fx = routed();
+    await fx.create();
+    const noCsrf = await fx.call("POST", "/chat/ENG-001", { cookie: fx.cookie }, { message: "hi" });
+    expect(noCsrf.status).toBe(403);
+    expect(await noCsrf.json()).toMatchObject({ ok: false, error: "CsrfRefused" });
+    const forged = await fx.call("POST", "/chat/ENG-001", { cookie: fx.cookie, "x-csrf-token": "forged" }, { message: "hi" });
+    expect(forged.status).toBe(403);
+    for (const body of [{ message: "x".repeat(32 * 1024 + 1) }, { message: "" }, { message: "hi", seq: 1 }, {}, [1]]) {
+      const res = await fx.call("POST", "/chat/ENG-001", undefined, body);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ ok: false, error: "SchemaError" });
+    }
+    const malformed = await fx.call("POST", "/chat/ENG-001", undefined, "{nope");
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toMatchObject({ ok: false, error: "MalformedJson" });
+    for (const id of ["foo", "ENG-1", "%E0%A4"]) {
+      const bad = await fx.call("POST", `/chat/${id}`, undefined, { message: "hi" });
+      expect(bad.status).toBe(400);
+      expect(await bad.json()).toMatchObject({ ok: false, error: "BadEngagement" });
+    }
+    const unknown = await fx.call("POST", "/chat/ENG-077", undefined, { message: "hi" });
+    expect(unknown.status).toBe(404);
+    expect(await unknown.json()).toMatchObject({ ok: false, error: "UnknownEngagement", engagement: "ENG-077" });
+    const broken = routed({ chat: { resolveJob: async () => { throw new Error(`resolve: unknown job engagement-chat ${TOKEN}`); } } });
+    await broken.create();
+    const unresolved = await broken.call("POST", "/chat/ENG-001", undefined, { message: "hi" });
+    expect(unresolved.status).toBe(500);
+    const u = await unresolved.json() as Record<string, any>;
+    expect(u).toMatchObject({ ok: false, error: "ChatJobUnresolved", engagement: "ENG-001" });
+    expect(String(u.detail)).not.toContain(TOKEN);
+    expect(broken.chatText()).toBeNull();
+    for (const state of ["delivered", "failed", "cancelled"] as const) {
+      writeEngagement(fx.root, { ...readEngagement(fx.root, "ENG-001")!, state });
+      const closed = await fx.call("POST", "/chat/ENG-001", undefined, { message: "hi" });
+      expect(closed.status).toBe(409);
+      expect(await closed.json()).toEqual({ ok: false, error: "EngagementClosed", engagement: "ENG-001", state });
+    }
+    expect(fx.chatText()).toBeNull();
+    expect(fx.chatRuns()).toEqual([]);
+    expect(fx.queued()).toEqual([]);
+    // a cookie session with the token sends
+    writeEngagement(fx.root, { ...readEngagement(fx.root, "ENG-001")!, state: "scoping" });
+    const ok = await fx.call("POST", "/chat/ENG-001", { cookie: fx.cookie, "x-csrf-token": fx.csrf }, { message: "from the web" });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toMatchObject({ ok: true, seq: 1 });
+  });
+
+  test("one id in two projects, no ?project=: POST and GET are 409 AmbiguousEngagement, nothing appended; ?project= settles it", async () => {
+    const fx = routed();
+    await fx.create("p", "in p");
+    await fx.create("o", "in o");
+    for (const [method, body] of [["POST", { message: "hi" }], ["GET", undefined]] as const) {
+      const res = await fx.call(method, "/chat/ENG-001", undefined, body);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ ok: false, error: "AmbiguousEngagement", engagement: "ENG-001", projects: ["p", "o"] });
+    }
+    expect(fx.chatText(fx.root)).toBeNull();
+    expect(fx.chatText(fx.other)).toBeNull();
+    const scoped = await fx.call("POST", "/chat/ENG-001?project=o", undefined, { message: "hi o" });
+    expect(scoped.status).toBe(200);
+    expect(fx.chatText(fx.other)).toContain("hi o");
+    expect(fx.chatText(fx.root)).toBeNull();
+    expect(fx.queued()).toMatchObject([{ engagement: "ENG-001", project: "o", seq: 1 }]);
+  });
+
+  test("read: GET /chat/{id}?since=<seq> answers the lines after seq (JSON); a cookie reads it; a bad since 400; a wrong method 405 Allow: GET, POST", async () => {
+    const fx = routed();
+    await fx.create();
+    for (const m of ["one", "two", "three"]) await fx.call("POST", "/chat/ENG-001", undefined, { message: m });
+    const res = await fx.call("GET", "/chat/ENG-001?since=1");
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, any>;
+    expect(body).toMatchObject({ ok: true, project: "p", engagement: "ENG-001", since: 1, last_seq: 3 });
+    expect(body.lines.map((l: any) => [l.seq, l.body])).toEqual([[2, "two"], [3, "three"]]);
+    const all = await (await fx.call("GET", "/chat/ENG-001", { cookie: fx.cookie })).json() as Record<string, any>;
+    expect(all.lines).toHaveLength(3);
+    // last_seq is the file's last line's seq (as GET /engagements/{id} chat.last_seq), never `since`
+    const none = await (await fx.call("GET", "/chat/ENG-001?since=9")).json() as Record<string, any>;
+    expect(none).toMatchObject({ lines: [], since: 9, last_seq: 3 });
+    const fresh = routed();
+    await fresh.create();
+    expect(await (await fresh.call("GET", "/chat/ENG-001?since=4")).json()).toMatchObject({ lines: [], since: 4, last_seq: 0 });
+    expect((await fx.call("GET", "/chat/ENG-001?since=x")).status).toBe(400);
+    expect((await fx.call("GET", "/chat/ENG-404")).status).toBe(404);
+    for (const method of ["PUT", "DELETE"]) {
+      const wrong = await fx.call(method, "/chat/ENG-001");
+      expect(wrong.status).toBe(405);
+      expect(wrong.headers.get("allow")).toBe("GET, POST");
+    }
+    expect((await fx.call("PUT", "/chat/ENG-001", { cookie: fx.cookie, "x-csrf-token": fx.csrf })).status).toBe(401);
+  });
+
+  test("stream: id: <seq> / event: chat / data: the line after Last-Event-ID, then the planner's reply without a reload, a heartbeat, cleanup on abort", async () => {
+    const fx = routed();
+    await fx.create();
+    for (const m of ["one", "two", "three"]) await fx.call("POST", "/chat/ENG-001", undefined, { message: m });
+    const ctl = new AbortController();
+    const res = await fx.handler(new Request(`${BASE}/chat/ENG-001?since=0`, {
+      headers: { authorization: `Bearer ${TOKEN}`, accept: "text/event-stream", "last-event-id": "2" }, signal: ctl.signal,
+    }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("text/event-stream");
+    const reader = res.body!.getReader();
+    const dec = new TextDecoder();
+    let text = "";
+    const readUntil = async (needle: string) => {
+      const deadline = Date.now() + 5000;
+      while (!text.includes(needle) && Date.now() < deadline) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        text += dec.decode(value);
+      }
+    };
+    await readUntil("id: 3\n");
+    const lines = fx.chatText()!.trim().split("\n");
+    expect(text).toContain(`id: 3\nevent: chat\ndata: ${lines[2]}\n\n`);
+    expect(text).not.toContain("id: 1\n");
+    expect(text).not.toContain("id: 2\n");
+    // the fake planner writes its reply (engage.py's line shape): it reaches the open stream
+    const reply = { seq: 4, at: "2026-10-25T05:01:00.000Z", author: "planner", body: "Monthly only.", run_id: "r-1",
+      proposals: [{ verb: "go", payload: {}, label: "Start scoping" }] };
+    writeFileSync(join(fx.root, ENG, "ENG-001", "chat.jsonl"), fx.chatText()! + JSON.stringify(reply) + "\n");
+    await readUntil("id: 4\n");
+    expect(text).toContain(`id: 4\nevent: chat\ndata: ${JSON.stringify(reply)}\n\n`);
+    await readUntil(": heartbeat\n\n");
+    expect(text).toContain(": heartbeat\n\n");
+    ctl.abort();
+    await reader.cancel();
+    // a cookie session reads the stream too
+    const ctl2 = new AbortController();
+    const viaCookie = await fx.handler(new Request(`${BASE}/chat/ENG-001`, { headers: { cookie: fx.cookie, accept: "text/event-stream" }, signal: ctl2.signal }));
+    expect(viaCookie.status).toBe(200);
+    ctl2.abort();
+    await viaCookie.body!.cancel();
+  });
+
+  test("a failed mint leaves no owner line: 500 ChatQueueFailed, the line removed under the lock, a minted run cancelled; a retry is seq 1, never a duplicate", async () => {
+    const fx = routed();
+    await fx.create();
+    // the enqueue itself throws: nothing minted
+    const enqueue = fx.queue.enqueue.bind(fx.queue);
+    (fx.queue as any).enqueue = () => { throw new Error(`database is locked ${TOKEN}`); };
+    const failed = await fx.call("POST", "/chat/ENG-001", undefined, { message: "one" });
+    expect(failed.status).toBe(500);
+    const f = await failed.json() as Record<string, any>;
+    expect(f).toMatchObject({ ok: false, error: "ChatQueueFailed", project: "p", engagement: "ENG-001" });
+    expect(String(f.detail)).not.toContain(TOKEN);
+    expect(fx.chatText()).toBeNull();
+    expect(fx.chatRuns()).toEqual([]);
+    (fx.queue as any).enqueue = enqueue;
+    // the run is minted but its chat-queued fails: the run is cancelled and the line removed
+    const serviceEvent = fx.queue.serviceEvent.bind(fx.queue);
+    (fx.queue as any).serviceEvent = (kind: string, ...rest: any[]) => {
+      if (kind === "chat-queued") throw new Error("disk full");
+      return serviceEvent(kind, ...rest);
+    };
+    const half = await fx.call("POST", "/chat/ENG-001", undefined, { message: "one" });
+    expect(half.status).toBe(500);
+    expect(await half.json()).toMatchObject({ ok: false, error: "ChatQueueFailed", engagement: "ENG-001" });
+    expect(fx.chatText()).toBeNull();
+    expect(fx.chatRuns().map((r) => r.state)).toEqual(["cancelled"]);
+    expect(fx.queued()).toEqual([]);
+    (fx.queue as any).serviceEvent = serviceEvent;
+    // the retry lands once, as seq 1
+    const ok = await fx.call("POST", "/chat/ENG-001", undefined, { message: "one" });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toMatchObject({ ok: true, seq: 1 });
+    expect(fx.chatText()!.trim().split("\n").map((l) => JSON.parse(l).body)).toEqual(["one"]);
+    // a line already in the file is kept byte for byte when a later mint fails
+    (fx.queue as any).enqueue = () => { throw new Error("again"); };
+    const before = fx.chatText();
+    expect((await fx.call("POST", "/chat/ENG-001", undefined, { message: "two" })).status).toBe(500);
+    expect(fx.chatText()).toBe(before);
+    (fx.queue as any).enqueue = enqueue;
+  });
+
+  test("a record still in 32.1's block YAML is rewritten as JSON text before the turn is minted (engage.py reads JSON)", async () => {
+    const fx = routed();
+    await fx.create();
+    const path = join(fx.root, ENG, "ENG-001", "engagement.yaml");
+    const record = readEngagement(fx.root, "ENG-001")!;
+    writeFileSync(path, dumpYaml(record, { lineWidth: -1 }));
+    expect(() => JSON.parse(readFileSync(path, "utf-8"))).toThrow();
+    const res = await fx.call("POST", "/chat/ENG-001", undefined, { message: "hi" });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(readFileSync(path, "utf-8"))).toEqual(JSON.parse(JSON.stringify(record)));
+    expect(fx.chatRuns()).toHaveLength(1);
+  });
+
+  test("the lock wait never blocks the server: while POST /chat waits on a held chat.lock other requests answer; released, the POST lands; held past the wait, 503 ChatBusy, nothing appended", async () => {
+    const fx = routed();
+    await fx.create();
+    const lock = join(fx.root, ENG, "ENG-001", "chat.lock");
+    writeFileSync(lock, "");
+    const pending = fx.call("POST", "/chat/ENG-001", undefined, { message: "waits" });
+    let settled = false;
+    void pending.then(() => { settled = true; });
+    await Bun.sleep(60);
+    const status = await fx.call("GET", "/status");
+    expect(status.status).toBe(200);
+    expect(settled).toBe(false);
+    rmSync(lock);
+    const landed = await pending;
+    expect(landed.status).toBe(200);
+    expect(await landed.json()).toMatchObject({ ok: true, seq: 1 });
+    writeFileSync(lock, "");
+    const t0 = Date.now();
+    const busy = await fx.call("POST", "/chat/ENG-001", undefined, { message: "refused" });
+    expect(busy.status).toBe(503);
+    expect(await busy.json()).toMatchObject({ ok: false, error: "ChatBusy", engagement: "ENG-001" });
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(4_900);
+    expect(fx.chatText()!.trim().split("\n")).toHaveLength(1);
+    expect(fx.chatRuns()).toHaveLength(1);
+    rmSync(lock);
+  }, 20_000);
 });

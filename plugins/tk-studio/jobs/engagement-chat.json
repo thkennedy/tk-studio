@@ -1,0 +1,19 @@
+{
+  "job_schema_version": 1,
+  "id": "engagement-chat",
+  "description": "One planner turn of an engagement's chat (Story 32.2, design spec §6.4 and D2, user flow F2 step 1): the supervisor's chat route (`POST /chat/{engagement}`) appends the owner's line to `_bmad-output/engagements/<ENG-NNN>/chat.jsonl` and queues one run of this job per line on the host tier with the planner leg's model and effort (passed at enqueue, so no model here) and the run's own payload `{engagement, project, project_root, seq}` (delivered with its queue `run_id`; `project_root` is the served registry root, mapped to `engage.py --directory`). The tk-studio-engage session runs `engage.py reply` for the memory (the record, the chat, the plan, kb/ and kb/confluence/), then writes the planner's line `{seq, at, author: planner, body, run_id, proposals[]}` with `engage.py reply --body-file --proposals-file --run-id`. The planner moves no state, holds no bearer and no CSRF token: a proposal is a button the owner presses. Shipped undeclared, as validate-resolution is; the session commits nothing.",
+  "target": {
+    "skill": "tk-studio-engage",
+    "payload": {
+      "verb": "reply"
+    }
+  },
+  "trigger": "one-shot",
+  "guards": {
+    "max_turns": 80,
+    "max_wall_clock_seconds": 1800
+  },
+  "stop": {
+    "until": "9999-12-31T23:59:59Z"
+  }
+}
