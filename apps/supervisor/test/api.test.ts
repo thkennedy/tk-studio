@@ -1558,6 +1558,44 @@ describe("Story 32.1: the engagement routes (contract 0.1.27 additive)", () => {
     expect(calls).toHaveLength(3);
   });
 
+  test("Story 32.6: an applied approve (the bearer, or a cookie with X-CSRF-Token) starts the approve pass; a cookie without the token is refused and starts nothing; go from partial runs the pass that resubmits", async () => {
+    const calls: [string, string][] = [];
+    const fx = routed({ afterEngagementInput: async (root, id) => { calls.push([root, id]); } });
+    const quote = { band50: { usd: 20 }, band85: { usd: 30 }, band95: { usd: 38 }, cap: 40, basis: { epics: [] }, computed_at: "2026-10-25T03:00:00.000Z" };
+    await fx.create();
+    await fx.create();
+    for (const id of ["ENG-001", "ENG-002"]) writeEngagement(fx.root, { ...readEngagement(fx.root, id)!, state: "quoted", quote });
+    // a cookie without (or with a forged) X-CSRF-Token: 403, nothing applied, nothing started
+    for (const headers of [{ cookie: fx.cookie }, { cookie: fx.cookie, "x-csrf-token": "forged" }] as Record<string, string>[]) {
+      const refused = await fx.call("POST", "/engagements/ENG-001/input", headers, { verb: "approve", autonomy: "steady" });
+      expect(refused.status).toBe(403);
+      expect(await refused.json()).toMatchObject({ ok: false, error: "CsrfRefused" });
+    }
+    expect(readEngagement(fx.root, "ENG-001")!.state).toBe("quoted");
+    expect(calls).toEqual([]);
+    // the cookie with its token: approved, autonomy and approved_at recorded, the pass started for that engagement
+    const viaCookie = await fx.call("POST", "/engagements/ENG-001/input", { cookie: fx.cookie, "x-csrf-token": fx.csrf }, { verb: "approve", autonomy: "steady" });
+    expect(viaCookie.status).toBe(200);
+    const approved = (await viaCookie.json() as Record<string, any>).engagement;
+    expect(approved).toMatchObject({ state: "approved", autonomy: "steady" });
+    expect(typeof approved.approved_at).toBe("string");
+    expect(calls).toEqual([[fx.root, "ENG-001"]]);
+    // the bearer, with base_ref (kept on the inputs[] line for the queued run)
+    const viaBearer = await fx.call("POST", "/engagements/ENG-002/input", undefined, { verb: "approve", autonomy: "ask", base_ref: "release" });
+    expect(viaBearer.status).toBe(200);
+    expect(readEngagement(fx.root, "ENG-002")!.inputs.at(-1)).toMatchObject({ verb: "approve", payload: { autonomy: "ask", base_ref: "release" } });
+    expect(calls).toEqual([[fx.root, "ENG-001"], [fx.root, "ENG-002"]]);
+    // a second approve is illegal in approved: 409, nothing started
+    expect((await fx.call("POST", "/engagements/ENG-001/input", undefined, { verb: "approve", autonomy: "full" })).status).toBe(409);
+    expect(calls).toHaveLength(2);
+    // partial (the cap): go {cap} raises it, back to in-progress, and runs the pass that resubmits
+    writeEngagement(fx.root, { ...readEngagement(fx.root, "ENG-001")!, state: "partial" });
+    const go = await fx.call("POST", "/engagements/ENG-001/input", undefined, { verb: "go", cap: 80 });
+    expect(go.status).toBe(200);
+    expect(await go.json()).toMatchObject({ from: "partial", to: "in-progress", engagement: { quote: { cap: 80 } } });
+    expect(calls).toEqual([[fx.root, "ENG-001"], [fx.root, "ENG-002"], [fx.root, "ENG-001"]]);
+  });
+
   test("POST /engagements/{id}/input: a legal input 200 {ok, engagement, from, to}, the inputs[] line, the event carrying from", async () => {
     const fx = routed();
     await fx.create();

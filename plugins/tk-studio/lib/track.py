@@ -44,7 +44,8 @@ issue per engagement instead of a story's:
   uv run track.py block --directory ROOT --engagement ENG-NNN [--dry-run]
 
 (`--engagement` is exclusive with `--story`, implies `--source engagement`
-and takes no `--reason` or `--resolves`). The issue is found by its exact
+and takes no `--resolves`, nor `--reason` but with Story 32.6's `--kind cap`
+or `ask` below). The issue is found by its exact
 summary `ENG-NNN: questions` in `planning.jira.project_key` (`GET
 /search/jql`, the summary matched exactly in code) and created when absent
 (`POST /issue`, type `Task`, label `tk-studio-engagement`, the request's
@@ -82,6 +83,28 @@ there or at `Done`), then to `Done`; a move already in place is named in
 an absent issue is `NoIssue`, an absent engagement directory
 `EngagementNotFound`, a move no transition makes `NoTransition`. The result is `{ok, dry_run,
 engagement, issue, moved[], skipped[], notes, written: []}`.
+
+Story 32.6 adds the block's kind:
+
+  uv run track.py block --directory ROOT --engagement ENG-NNN
+      [--kind questions|cap|ask] [--reason TEXT] [--dry-run]
+
+`--kind questions` (the default) is the block above and takes no
+`--reason`. `cap` (the engagement reached its quote's cap; the supervisor's
+run pass) and `ask` (a story landed under `ask` autonomy; the next waits on
+the owner) need `--reason` and need no open questions; they block the same
+issue (found or created as above) with the 31.5 prefix kept:
+
+    [~accountid:<owner>] Blocked: ENG-NNN <the reason's first line>
+    Resolves when: <cap: reply with `go {cap}` from the web or the API, or
+                    `cancel` | ask: reply `continue` to run the next story>
+
+    <the reason's other lines>
+
+The result carries `kind`. More refusals by name, before any call:
+`UnknownKind` (a kind other than the three) and `ReasonMissing` (`cap` or
+`ask` without `--reason`); `--reason` with `--kind questions`, and `--kind`
+with `--story`, are refused as the flag mix is.
 
 The `reply` verb (Story 31.6, §6.9 items 3 and 4) is the owner's answer:
 
@@ -543,6 +566,15 @@ def engagement_summary(engagement: str) -> str:
     return f"{engagement}: questions"
 
 
+# Story 32.6: the engagement block's kinds (`--kind`) and what resolves the
+# two run-driven ones.
+ENGAGEMENT_BLOCK_KINDS = ("questions", "cap", "ask")
+ENGAGEMENT_RESOLVES = {
+    "cap": "reply with `go {cap}` from the web or the API, or `cancel`",
+    "ask": "reply `continue` to run the next story",
+}
+
+
 def _answered(question: dict) -> bool:
     answer = question.get("answer")
     return answer is not None and answer != ""
@@ -584,6 +616,21 @@ def engagement_comment(owner: str, engagement: str,
                 label, default = str(option).strip(), False
             lines.append(f"- {label}" + (" (default)" if default else ""))
     return "\n".join(lines)
+
+
+def engagement_run_comment(owner: str, engagement: str, kind: str,
+                           reason: str) -> str:
+    """The `cap` or `ask` block comment (Story 32.6): the 31.5 prefix with
+    the reason's first line, what resolves it, then the reason's other
+    lines (the figures)."""
+    lines = [line.rstrip() for line in str(reason).strip().splitlines()]
+    head = lines[0].strip() if lines else kind
+    rest = [line for line in lines[1:]]
+    out = [f"[~accountid:{owner}] Blocked: {engagement} {head}",
+           f"Resolves when: {ENGAGEMENT_RESOLVES[kind]}"]
+    if any(line.strip() for line in rest):
+        out += [""] + rest
+    return "\n".join(out)
 
 
 def find_engagement_issue(client, project_key: str,
@@ -666,15 +713,29 @@ def _first_line(text) -> str:
 
 def block_engagement(project_root: Path, engagement: str,
                      dry_run: bool = False, transport=None,
-                     sleep=None) -> dict:
-    """`block --engagement` (see the module docstring)."""
+                     sleep=None, kind: str = "questions",
+                     reason: str | None = None) -> dict:
+    """`block --engagement [--kind] [--reason]` (see the module
+    docstring)."""
     root = Path(project_root).resolve()
     result = _result(None, "engagement", dry_run)
     result["engagement"] = engagement
+    result["kind"] = kind
 
     def refuse(why: str) -> dict:
         return _finish(result, "blocked", f"track refused: {why}")
 
+    if kind not in ENGAGEMENT_BLOCK_KINDS:
+        return refuse(f"UnknownKind: --kind {kind!r} is not one of "
+                      f"{', '.join(ENGAGEMENT_BLOCK_KINDS)}; no Atlassian "
+                      f"call made")
+    if kind == "questions" and reason is not None:
+        return refuse("--kind questions takes no --reason (its comment is "
+                      "the open questions); no Atlassian call made")
+    if kind != "questions" and not str(reason or "").strip():
+        return refuse(f"ReasonMissing: --kind {kind} needs --reason (the "
+                      f"figures or the landed story); no Atlassian call "
+                      f"made")
     if not ENGAGEMENT_ID_RE.match(engagement or ""):
         return refuse(f"EngagementNotFound: --engagement {engagement!r} is "
                       f"not an engagement id (ENG-001); no Atlassian call "
@@ -688,9 +749,13 @@ def block_engagement(project_root: Path, engagement: str,
                       f"_bmad-output/engagements/{engagement}/engagement.yaml"
                       f"; no Atlassian call made")
     asked = open_questions(record)
-    if not asked:
+    if kind == "questions" and not asked:
         return refuse(f"NoOpenQuestions: {engagement} has no unanswered "
                       f"question; no Atlassian call made")
+    comment = (engagement_comment(owner, engagement, asked)
+               if kind == "questions"
+               else engagement_run_comment(owner, engagement, kind,
+                                           str(reason)))
 
     def run() -> dict:
         project_key = str(plansync._recorded(root,
@@ -722,8 +787,8 @@ def block_engagement(project_root: Path, engagement: str,
                 created = True
             moved = _block_issue(client, owner, {"id": engagement}, key,
                                  "engagement",
-                                 engagement_comment(owner, engagement, asked),
-                                 dry_run, notes, repost_after_owner=True)
+                                 comment, dry_run, notes,
+                                 repost_after_owner=True)
         except IssueCreateRefused as exc:
             return refuse(f"IssueCreateRefused: {exc}")
         except jirabackend.JiraError as exc:
@@ -1370,6 +1435,9 @@ def main(argv: list[str] | None = None) -> int:
                                           "engagement's questions)")
     blk.add_argument("--reason")
     blk.add_argument("--resolves")
+    # Story 32.6: --engagement's block kind (questions|cap|ask), validated in
+    # code: a refusal stays JSON (exit 2).
+    blk.add_argument("--kind")
     # Validated in code, not argparse choices: a refusal stays JSON (exit 2).
     blk.add_argument("--source")
     blk.add_argument("--dry-run", action="store_true")
@@ -1454,20 +1522,30 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 2 if result.get("status") == "blocked" else 0
     if args.engagement is not None:
-        if args.story is not None or args.reason is not None \
-                or args.resolves is not None or args.source not in (
-                    None, "engagement"):
+        if args.story is not None or args.resolves is not None \
+                or args.source not in (None, "engagement"):
             result = _finish(_result(None, "engagement", args.dry_run),
                              "blocked", "track refused: --engagement is "
-                             "exclusive with --story, takes no --reason or "
-                             "--resolves and implies --source engagement; no "
-                             "Atlassian call made")
+                             "exclusive with --story, takes no --resolves "
+                             "(and --reason only with --kind cap or ask) and "
+                             "implies --source engagement; no Atlassian call "
+                             "made")
             result["engagement"] = args.engagement
+            result["kind"] = args.kind or "questions"
         else:
             result = block_engagement(directory, args.engagement,
-                                      dry_run=args.dry_run)
+                                      dry_run=args.dry_run,
+                                      kind=args.kind or "questions",
+                                      reason=args.reason)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 2 if result.get("status") == "blocked" else 0
+    if args.kind is not None:
+        result = _finish(_result(args.story, args.source or "run",
+                                 args.dry_run), "blocked",
+                         "track refused: --kind is --engagement's (Story "
+                         "32.6), not --story's; no Atlassian call made")
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 2
     if args.story is None or args.reason is None or args.resolves is None:
         result = _finish(_result(args.story, args.source or "run",
                                  args.dry_run), "blocked",

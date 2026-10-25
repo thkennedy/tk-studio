@@ -310,6 +310,37 @@ class BandsFileTest(unittest.TestCase):
                          "usd_estimate: 40.0\n  EP-031:\n    usd_estimate: "
                          "70.5\n")
 
+    def test_the_approve_test_literals_are_the_writers_output(self):
+        # apps/supervisor/test/approve.test.ts (Story 32.6): the approve
+        # pass's TypeScript re-key (`rekeyBands`, the predicted EP id's band
+        # moved to the minted one) writes these literals; each is what this
+        # writer produces from the same input, byte for byte
+        head = ("# Studio pipeline budget bands (fixture).\nbands_version: 1"
+                "\ncurrency: usd\nepics:\n  EP-030:\n    usd_estimate: "
+                "12.0\n")
+        self.assertEqual(quote.epic_bands_text(head, {"EP-034": 40.0}),
+                         head + "  EP-034:\n    usd_estimate: 40.0\n")
+        self.assertEqual(
+            quote.epic_bands_text("bands_version: 1\ncurrency: usd\n",
+                                  {"EP-034": 40.0}),
+            "bands_version: 1\ncurrency: usd\nepics:\n  EP-034:\n    "
+            "usd_estimate: 40.0\n")
+        self.assertEqual(
+            quote.epic_bands_text(head + "other: 1\n", {"EP-030": 61.27}),
+            head.replace("12.0", "61.27") + "other: 1\n")
+        self.assertEqual(quote.epic_bands_text(None, {"EP-001": 1.0}),
+                         "epics:\n  EP-001:\n    usd_estimate: 1.0\n")
+        self.assertEqual(
+            quote.epic_bands_text("epics: {}\nx: 1\n", {"EP-001": 2.5}),
+            "epics:\n  EP-001:\n    usd_estimate: 2.5\nx: 1\n")
+        # the moved entry (EP-033 to EP-034): what is left once the predicted
+        # entry is gone, then the minted one set
+        self.assertEqual(
+            quote.epic_bands_text(head + "  EP-031:\n    usd_estimate: 5.0\n",
+                                  {"EP-034": 40.0}),
+            head + "  EP-031:\n    usd_estimate: 5.0\n  EP-034:\n    "
+            "usd_estimate: 40.0\n")
+
     def test_any_other_scalar_epics_line_refuses(self):
         for scalar in ('""', "0", "x", "'none'", "[]", "1  # one",
                        "{EP-001: {usd_estimate: 1}}"):

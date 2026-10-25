@@ -123,7 +123,7 @@ describe("Story 32.3: apply (Settled shape 1, once per queue run id)", () => {
     expect(calls.map((c) => [c.root, c.script.split(/[\\/]/).slice(-2).join("/"), c.args, c.timeoutS])).toEqual([
       [root, "lib/track.py", ["block", "--directory", root, "--engagement", ENG], 120],
     ]);
-    expect(kinds(queue, "engagement-issue")).toEqual([{ engagement: ENG, project: "p", issue: ISSUE, action: "blocked" }]);
+    expect(kinds(queue, "engagement-issue")).toEqual([{ engagement: ENG, project: "p", issue: ISSUE, action: "blocked", kind: "questions" }]);
     // once per run id: a second pass applies nothing and blocks nothing again
     const again = await questionsPass(queue, deps(uv));
     expect(again).toEqual({ applied: [], skipped: [], blocked: [], answered: [], closed: [] });
@@ -230,7 +230,7 @@ describe("Story 32.3: the block", () => {
     expect(calls).toHaveLength(2);
     retry = false;
     await questionsPass(queue, deps(uv));
-    expect(kinds(queue, "engagement-issue")).toEqual([{ engagement: ENG, project: "p", issue: ISSUE, action: "blocked" }]);
+    expect(kinds(queue, "engagement-issue")).toEqual([{ engagement: ENG, project: "p", issue: ISSUE, action: "blocked", kind: "questions" }]);
     await questionsPass(queue, deps(uv));
     expect(calls).toHaveLength(3);
     // a spawn failure is no throw
@@ -273,7 +273,7 @@ describe("Story 32.3: the block", () => {
     const slow: QuestionsDeps["uv"] = async (r, script, args, timeoutS) => { await Bun.sleep(30); return uv(r, script, args, timeoutS); };
     await Promise.all([questionsPass(queue, deps(slow)), questionsPass(queue, deps(slow), { root, engagement: ENG })]);
     expect(calls.map((c) => c.args[0])).toEqual(["block"]);
-    expect(kinds(queue, "engagement-issue")).toEqual([{ engagement: ENG, project: "p", issue: ISSUE, action: "blocked" }]);
+    expect(kinds(queue, "engagement-issue")).toEqual([{ engagement: ENG, project: "p", issue: ISSUE, action: "blocked", kind: "questions" }]);
   });
 });
 
@@ -417,7 +417,7 @@ describe("Story 32.3: the card answer and go (afterEngagementInput's pass)", () 
     retry = false;
     await questionsPass(queue, deps(uv), { root, engagement: ENG });
     expect(kinds(queue, "engagement-issue")).toEqual([
-      { engagement: ENG, project: "p", issue: ISSUE, action: "blocked" },
+      { engagement: ENG, project: "p", issue: ISSUE, action: "blocked", kind: "questions" },
       { engagement: ENG, project: "p", issue: ISSUE, action: "closed" },
     ]);
     expect(calls.filter((c) => c.args[0] === "close")).toHaveLength(2);
@@ -513,7 +513,7 @@ describe("Story 32.3: review fixes (lost re-block, late owner comments, close re
     const out = await questionsPass(queue, deps(uv, { now: at(7) }), { root, engagement: ENG });
     expect(out.closed).toEqual([]);
     expect(kinds(queue, "engagement-issue")).toEqual([
-      { engagement: ENG, project: "p", issue: ISSUE, action: "blocked" },
+      { engagement: ENG, project: "p", issue: ISSUE, action: "blocked", kind: "questions" },
       { engagement: ENG, project: "p", action: "refused", step: "close", reason },
     ]);
     await questionsPass(queue, deps(uv, { now: at(8) }));
@@ -535,7 +535,7 @@ describe("Story 32.3: review fixes (lost re-block, late owner comments, close re
     await questionsPass(queue, deps(uv, { now: at(8) }));
     expect(count("block")).toBe(3); // still owed: the close's refused does not count as the block done
     expect(kinds(queue, "engagement-issue")).toEqual([
-      { engagement: ENG, project: "p", issue: ISSUE, action: "blocked" },
+      { engagement: ENG, project: "p", issue: ISSUE, action: "blocked", kind: "questions" },
       { engagement: ENG, project: "p", action: "refused", step: "close", reason },
       { engagement: ENG, project: "p", action: "refused", reason }, // told, though the close's carried the same reason
     ]);
@@ -568,6 +568,27 @@ describe("Story 32.3: review fixes (lost re-block, late owner comments, close re
     cardAnswerAll(root);
     await questionsPass(queue, deps(uv, { now: at(7) }), { root, engagement: ENG });
     expect(kinds(queue, "engagement-issue").at(-1)).toEqual({ engagement: ENG, project: "p", issue: ISSUE, action: "closed" });
+  });
+
+  test("Story 32.6: a cap or ask block is not closed by the questions pass, and is not this pass's block", async () => {
+    for (const kind of ["cap", "ask"]) {
+      const { root, queue, uv, count } = await engagementWith();
+      cardAnswerAll(root);
+      // the run pass blocked the same issue for the owner's go {cap} or continue
+      queue.serviceEvent("engagement-issue", { engagement: ENG, project: "p", issue: ISSUE, action: "blocked", kind }, "2026-10-25T07:30:00.000Z");
+      const out = await questionsPass(queue, deps(uv, { now: at(8) }), { root, engagement: ENG });
+      expect(out.closed).toEqual([]);
+      expect(count("close")).toBe(0);
+      expect(kinds(queue, "engagement-issue").map((e) => [e!.action, e!.kind])).toEqual([["blocked", "questions"], ["blocked", kind]]);
+    }
+    // awaiting-answers: a cap block event is no questions block, so the questions block stays owed
+    const root = served(), queue = newQueue();
+    writeQuestions(root, await chatRun(queue, root));
+    const fake = fakeUv({ block: retry });
+    await questionsPass(queue, deps(fake.uv));
+    queue.serviceEvent("engagement-issue", { engagement: ENG, project: "p", issue: ISSUE, action: "blocked", kind: "cap" }, "2026-10-25T07:30:00.000Z");
+    await questionsPass(queue, deps(fake.uv, { now: at(8) }));
+    expect(fake.calls.filter((c) => c.args[0] === "block")).toHaveLength(2);
   });
 
   test("finding 5: parseAnswers ignores a copied question header (`<id>: <text>`): a pasted block comment answers nothing; a quoted header after a real answer does not overwrite it", () => {

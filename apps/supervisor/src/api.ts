@@ -211,9 +211,10 @@ export interface ApiDeps {
   /** Story 32.2: the chat route's turn — the `engagement-chat` definition for a served root and its checkout (default
    * `chatDeps()`: `validate`'s resolve and `resolveCheckout`). */
   chat?: ChatDeps;
-  /** Story 32.3: run after an applied `answer` or `go` (Story 32.4: or `revise`) on `POST /engagements/{id}/input`,
-   * fire-and-forget (its errors swallowed; default `afterEngagementInput`: the questions pass, then the scope pass,
-   * for that served root and engagement). */
+  /** Story 32.3: run after an applied `answer` or `go` (Story 32.4: or `revise`; Story 32.6: or `approve`, and `go`
+   * from `partial`) on `POST /engagements/{id}/input`, fire-and-forget (its errors swallowed; default
+   * `afterEngagementInput`: the questions pass, the scope pass, then the approve and engagement-run passes, for that
+   * served root and engagement). */
   afterEngagementInput?: (root: string, id: string) => Promise<unknown> | unknown;
 }
 
@@ -561,9 +562,11 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
     writeEngagement(found.root, applied.record);
     queue.serviceEvent("engagement", { id, project: found.project, state: applied.to, from: applied.from, verb: checked.body.verb, source: via }, at);
     // Story 32.3: an applied answer or go runs the questions pass (the issue closed once the state moves on); Story
-    // 32.4: an applied revise runs the scope pass (its body becomes the scope and the page); never awaited, never
-    // failing the input
-    if (checked.body.verb === "answer" || checked.body.verb === "go" || checked.body.verb === "revise") {
+    // 32.4: an applied revise runs the scope pass (its body becomes the scope and the page); Story 32.6: an applied
+    // approve runs the approve pass (the plan written, published and its first run queued), and a go from partial
+    // (the cap raised) the engagement-run pass that resubmits; never awaited, never failing the input
+    const verb = checked.body.verb;
+    if (verb === "answer" || verb === "go" || verb === "revise" || verb === "approve") {
       try { Promise.resolve(afterInput(found.root, id)).catch(() => { /* the next run end */ }); } catch { /* the next run end */ }
     }
     return json(200, { ok: true, engagement: applied.record, from: applied.from, to: applied.to });

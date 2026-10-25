@@ -1641,6 +1641,85 @@ class EngagementBlockTests(EngagementTestCase):
         self.assertEqual(result["source"], "engagement")
 
 
+CAP_REASON = ("reached its cap: runs_usd $41.5 of cap $40\nruns_usd: 41.5\n"
+              "cap: 40\nband85.usd: 30\nband95.usd: 38")
+
+
+class EngagementBlockKindTests(EngagementTestCase):
+    """Story 32.6: `block --engagement --kind cap|ask --reason`."""
+
+    def test_cap_needs_no_open_question_and_keeps_the_prefix(self):
+        self.record([dict(q, answer="x") for q in QUESTIONS],
+                    state="partial")
+        result = self.block_eng(kind="cap", reason=CAP_REASON)
+        self.assert_track_block(result, "complete")
+        self.assertEqual(result["kind"], "cap")
+        key = f"{KEY}-100"
+        self.assertEqual(self.fake.status[key], BLOCKED)
+        self.assertEqual(self.fake.created[0]["summary"], f"{ENG}: questions")
+        self.assertEqual(self.fake.posted[key], ["\n".join([
+            f"[~accountid:{OWNER}] Blocked: {ENG} reached its cap: runs_usd "
+            f"$41.5 of cap $40",
+            "Resolves when: reply with `go {cap}` from the web or the API, "
+            "or `cancel`",
+            "", "runs_usd: 41.5", "cap: 40", "band85.usd: 30",
+            "band95.usd: 38"])])
+        self.assertTrue(inbox.BLOCK_COMMENT_RE.match(self.fake.posted[key][0]))
+
+    def test_ask_blocks_the_same_issue_with_the_landed_story(self):
+        self.block_eng()
+        result = self.block_eng(kind="ask", reason="landed story 41-1-csv "
+                                                   "(spend so far: $3)")
+        self.assert_track_block(result, "complete")
+        self.assertEqual(result["kind"], "ask")
+        key = f"{KEY}-100"
+        self.assertEqual(len(self.fake.created), 1)
+        self.assertEqual(self.fake.posted[key][-1], "\n".join([
+            f"[~accountid:{OWNER}] Blocked: {ENG} landed story 41-1-csv "
+            f"(spend so far: $3)",
+            "Resolves when: reply `continue` to run the next story"]))
+        self.assertEqual(self.block_eng()["kind"], "questions")
+
+    def test_the_kind_refusals_by_name(self):
+        unknown = self.block_eng(kind="later", reason="x")
+        self.assert_track_block(unknown, "blocked")
+        self.assertIn("UnknownKind", unknown["reason"])
+        for kind in ("cap", "ask"):
+            missing = self.block_eng(kind=kind)
+            self.assert_track_block(missing, "blocked")
+            self.assertIn("ReasonMissing", missing["reason"])
+            self.assertIn("ReasonMissing", self.block_eng(
+                kind=kind, reason="  ")["reason"])
+        mixed = self.block_eng(kind="questions", reason="x")
+        self.assert_track_block(mixed, "blocked")
+        self.assertIn("takes no --reason", mixed["reason"])
+        self.assertEqual(self.fake.calls, [])
+
+    def test_the_cli_takes_kind_and_reason(self):
+        def run(*argv):
+            out = io.StringIO()
+            with unittest.mock.patch.object(jirabackend, "client_for",
+                                            _client_with(self.fake)), \
+                    contextlib.redirect_stdout(out):
+                code = track.main(["block", "--directory", str(self.root),
+                                   *argv])
+            return code, json.loads(out.getvalue())
+        code, result = run("--engagement", ENG, "--kind", "cap")
+        self.assertEqual(code, 2)
+        self.assertIn("ReasonMissing", result["reason"])
+        code, result = run("--story", "ST-001", "--reason", "r",
+                           "--resolves", "s", "--kind", "cap")
+        self.assertEqual(code, 2)
+        self.assertIn("--kind is --engagement's", result["reason"])
+        self.assertEqual(self.fake.calls, [])
+        code, result = run("--engagement", ENG, "--kind", "cap",
+                           "--reason", CAP_REASON)
+        self.assertEqual(code, 0)
+        self.assert_track_block(result, "complete")
+        self.assertEqual((result["kind"], result["source"]),
+                         ("cap", "engagement"))
+
+
 class EngagementCloseTests(EngagementTestCase):
     def test_close_moves_block_resolved_then_done(self):
         self.block_eng()

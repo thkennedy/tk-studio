@@ -253,6 +253,16 @@
     no cost: get the hover cost through studio_run_id -> ledger job-run (GET
     /runs/{id} has no cost; a server addition is additive on 0.1.27) or show none;
     never add a field to the chat line.
+    Replan (from 32-6, 2026-10-25): approve {autonomy ask|steady|full, base_ref?} only
+    opens the plan PR; the run is queued on its merge even with base_ref (operator
+    ruling (c)), so `approved` reads as waiting for the PR until launched moves it to
+    in-progress. The approve pass writes nothing into the record; its PR link is only in
+    engagement-approve service events (show it only through an additive 0.1.27 read,
+    never parse events in the web). partial shows the cap figures with Go {cap}
+    (replaces quote.cap) or Cancel; paused (ask) resumes by an owner `continue` comment
+    on the Jira issue, no web verb.
+    Oversize (gate, 2026-10-25): plans/32-7.md lists 19 files, past band L; halt
+    blocked if the Files list must grow beyond the plan's list.
 
 - id: "32-8-delivery-the-closeout-report-and-change-requests"
   title: "Delivery, the Closeout Report and Change Requests"
@@ -301,3 +311,13 @@
     Publish ENG-NNN: Closeout through 32.4's helpers (confluence.find_child_folder,
     create_folder parent_id, the footer-hash AND version skip in engage.py
     _publish_scope).
+    Replan (from 32-6, 2026-10-25): find the engagement's runs from
+    engagement-run-queued over every approve cycle (approve.ts allLinks); one run-epic-N
+    job is declared per appended epic but only the first queued, and steady/ask end a
+    run per story and resubmit, so "last run" = an ended linked run with no resubmit,
+    ask pause or cap block owed; report an unqueued epic's deliverables "not done - epic
+    not run". Per-story costs span all cycles (as spend.runs_usd). Close any open
+    cap/ask block before moving the issue to Done (DW-47; only blocked engagement-issue
+    events carry kind, kind-less reads as questions). Side exits from engagement-cap /
+    engagement-run-stop events. cancel applies at the next finally tick; the revise
+    graceful stop is unbuilt (reuse launchStopGraceful as the cap does).

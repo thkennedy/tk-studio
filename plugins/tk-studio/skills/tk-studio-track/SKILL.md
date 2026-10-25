@@ -95,7 +95,28 @@ from those statuses. Every Atlassian write goes through the planning adapter
    `partial` with `retry: true`, so two callers never create two issues. A
    re-block after an owner reply that answered nothing posts the comment
    again, even with the same body.
+
+   Story 32.6 adds the engagement block's kind; the supervisor's
+   engagement-run pass calls it on the host:
+
+   ```bash
+   uv run "${CLAUDE_PLUGIN_ROOT}/lib/track.py" block --directory <project-root> \
+     --engagement <ENG-NNN> [--kind questions|cap|ask] [--reason "<text>"] [--dry-run]
+   ```
+
+   `--kind questions` (the default) is the block above and takes no
+   `--reason`. `--kind cap` (the engagement reached its quote's cap) and
+   `--kind ask` (a story landed under `ask` autonomy) need `--reason` and no
+   open questions; they block the same `ENG-NNN: questions` issue with the
+   31.5 prefix kept — `[~accountid:<owner>] Blocked: ENG-NNN <the reason's
+   first line>`, then ``Resolves when: reply with `go {cap}` from the web or
+   the API, or `cancel` `` (cap) or ``Resolves when: reply `continue` to run
+   the next story`` (ask), then the reason's other lines (the figures). The
+   result carries `kind`; more refusals by name before any call:
+   `UnknownKind` and `ReasonMissing`, and `--kind` is refused with
+   `--story`.
    Payload mapping: `story`, `reason`, `resolves` map to their flags;
+   `kind` (with `engagement`) adds `--kind <kind>`;
    `source` adds `--source <source>`; `dry_run` adds `--dry-run` (reads
    only, writes nothing).
 

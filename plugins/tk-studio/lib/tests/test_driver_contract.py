@@ -1298,6 +1298,94 @@ class DriverContractTestCase(unittest.TestCase):
             self.assertEqual(fields[field]["type"], kind, field)
             self.assertFalse(fields[field]["required"], field)
 
+    # --- Story 32.6: the same 0.1.27 entry adds approval and the first run —
+    # the approve pass, `engagement/ENG-NNN`, the merge-gated first run, the
+    # autonomy levels, `spend.runs_usd`, the cap and `track.py block --kind`
+    # — additive, never a 0.1.28; every earlier pin kept.
+
+    def test_0_1_27_story_32_6_adds_approval_and_the_first_run(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.27**", header)
+        self.assertNotIn("**0.1.28**", self.text)
+        self.assertLess(header.index("0.1.27 (Story 32.5) adds to this same "
+                                     "entry"),
+                        header.index("0.1.27 (Story 32.6) adds to this same "
+                                     "entry"))
+        self.assertEqual(header.count("0.1.27 (Story 32.6)"), 1)
+        clause = " ".join(header[header.index("0.1.27 (Story 32.6)"):]
+                          .split())
+        for phrase in ("`approve {autonomy, base_ref?}`",
+                       "never a chat line, a planner proposal or a timer",
+                       "`apps/supervisor/src/approve.ts`",
+                       "`engagement/ENG-NNN`",
+                       "never switched or dirtied",
+                       "never a force push",
+                       "`engagement-approve {id, project, step, ok, "
+                       "detail}`",
+                       "`append`", "`sync`", "`job`", "`commit`", "`pr`",
+                       "`queued`", "`engagement: ENG-NNN`",
+                       "`### Story N.M:`", "`NoScope`",
+                       "`StoryShape: <k>.<m>`", "`NotApproved`",
+                       "`plansync.py sync --directory <worktree>`",
+                       "`.tk-studio/jobs/run-epic-N.json`",
+                       "the rest of the file kept byte for byte",
+                       "`TK_SUPERVISOR_CONFIG` never written",
+                       "`epic_bands_text`'s byte shape", "`no_band`",
+                       "`NonFastForward`", "`detail.pr {number, url}`",
+                       "`MERGED`", "with or without `base_ref`",
+                       "`payload {engagement, project}`",
+                       "highest-numbered `run-epic-*` entry",
+                       "`engagement-run-queued {engagement, project, "
+                       "run_id, job, after_run?}`",
+                       "`launched` (`approved → in-progress`, once per "
+                       "approval)", "`full`", "`steady`", "`ask`",
+                       "`launch.py stop --graceful`", "`run-paused`",
+                       "`run-resumed`", "`continue`",
+                       "`spend.runs_usd`", "`total_cost_usd`",
+                       "`spend.runs_usd >= quote.cap`",
+                       "`cap` (`in-progress → partial`)",
+                       "`runs_usd`, `cap`, `band85.usd` and `band95.usd`",
+                       "one notifier line", "`engagement-cap`",
+                       "`raise-cap`", "`--kind questions \\| cap \\| ask`",
+                       "`engagement-issue {action: blocked, kind}`",
+                       "`UnknownKind`", "`ReasonMissing`",
+                       "closes only a `questions` block",
+                       "no table row changes", "— additive) |"):
+            self.assertIn(phrase, clause)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 32.6", stories)
+        row = next(line for line in self.text.splitlines()
+                   if line.startswith("| the engagement's input (Story 32.1, "
+                                      "0.1.27) | `POST /engagements/{id}/"
+                                      "input` |"))
+        for phrase in ("Story 32.6: an applied `approve` starts the approve "
+                       "pass", "the first run queued once that PR merges",
+                       "an applied `go` from `partial`"):
+            self.assertIn(phrase, row)
+        table = " ".join(self.text[self.text.index(
+            "### The engagement state table (0.1.27, Story 32.1)"):]
+            .split())
+        self.assertNotIn("no route applies them in 0.1.27", table)
+        self.assertIn("Story 32.6 `launched`, `run-paused`, `run-resumed` "
+                      "and `cap`", table)
+        track = next(line for line in self.text.splitlines()
+                     if line.startswith("| `tk-studio-track` "))
+        for phrase in ("Story 32.6: `kind?` (`questions` \\| `cap` \\| "
+                       "`ask`, default `questions`)", "`--kind cap`",
+                       "`--kind ask`", "need no open questions",
+                       "`[~accountid:<owner>] Blocked: ENG-NNN <the "
+                       "reason's first line>`", "`UnknownKind`",
+                       "`ReasonMissing`", "the result carrying `kind`"):
+            self.assertIn(phrase, track)
+        # 32.4's engage row sentence kept verbatim
+        engage = next(line for line in self.text.splitlines()
+                      if line.startswith("| `tk-studio-engage` "))
+        self.assertIn("Stories 32.5 to 32.8 add the verbs `quote` and "
+                      "`closeout`", engage)
+        self.assertNotIn("every other byte", self.text)
+
     def test_section_8_names_the_cli_drives(self):
         section = self.text[self.text.index("## 8. Conformance"):]
         flat = " ".join(section.split())
