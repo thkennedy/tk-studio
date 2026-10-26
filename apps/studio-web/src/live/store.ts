@@ -12,6 +12,10 @@
 // Story 30.6 (0.1.25, additive): a snapshot also carries `supervisor {version, counts}` and the ledger tail; the
 // view keeps them from each snapshot (null when absent), deltas leave them as they are, and they are not an event
 // (`lastEventAt` compares the four fields above only).
+// Story 32.7 (0.1.27, additive): a snapshot carries `engagements[] {id, project, state, title, needs_you}` (replaced by
+// each snapshot, `[]` when absent) and an `office.engagement` delta `{id, project, state, from, title?, needs_you?}`
+// keyed by project + id sets one row (`state: null` removes it: the record vanished or became unreadable); the Chat
+// nav count reads them.
 
 // ------------------------------------------------------------ mirrored types (apps/supervisor/src/office.ts)
 // Mirrored, never imported across apps.
@@ -79,6 +83,14 @@ export interface SupervisorInfo {
 }
 /** The host ledger's last lines (redacted by the supervisor), or a note naming why there are none (Story 30.6). */
 export type LedgerTail = { path: string; lines: string[] } | { path: string; note: string };
+/** Story 32.7: an engagement as the office shows it (mirrored from apps/supervisor office.ts, 0.1.27). */
+export interface OfficeEngagement {
+  id: string;
+  project: string;
+  state: string;
+  title: string;
+  needs_you: boolean;
+}
 export interface OfficeView {
   at: string;
   agents: OfficeAgent[];
@@ -90,9 +102,11 @@ export interface OfficeView {
   supervisor?: SupervisorInfo | null;
   /** Story 30.6: from the last snapshot; null when it carried none. */
   ledger?: LedgerTail | null;
+  /** Story 32.7: every served project's engagements (snapshot + `office.engagement` deltas); optional in the type. */
+  engagements?: OfficeEngagement[];
 }
 
-export type OfficeDeltaKind = "office.agent" | "office.progress" | "office.run";
+export type OfficeDeltaKind = "office.agent" | "office.progress" | "office.run" | "office.engagement";
 
 // ------------------------------------------------------------ ids
 
@@ -252,6 +266,34 @@ function applyRun(view: OfficeView, d: Record<string, unknown>): OfficeView | nu
   return { ...view, runs: [...view.runs, run] };
 }
 
+/** A well-formed snapshot engagement row, or null. */
+function engagementOf(v: unknown): OfficeEngagement | null {
+  if (!isObj(v) || typeof v.id !== "string" || typeof v.project !== "string" || typeof v.state !== "string") return null;
+  return { id: v.id, project: v.project, state: v.state, title: typeof v.title === "string" ? v.title : "", needs_you: v.needs_you === true };
+}
+
+function engagementsOf(v: unknown): OfficeEngagement[] {
+  return Array.isArray(v) ? v.map(engagementOf).filter((e): e is OfficeEngagement => e !== null) : [];
+}
+
+/** Story 32.7: one row keyed by project + id; `state: null` removes it, else the row is set (added when new). */
+function applyEngagement(view: OfficeView, d: Record<string, unknown>): OfficeView | null {
+  if (typeof d.id !== "string" || typeof d.project !== "string") return null;
+  const rows = view.engagements ?? [];
+  const i = rows.findIndex((e) => e.project === d.project && e.id === d.id);
+  if (d.state === null) return i >= 0 ? { ...view, engagements: rows.filter((_, k) => k !== i) } : view;
+  if (typeof d.state !== "string") return null;
+  const prev = i >= 0 ? rows[i] : null;
+  const row: OfficeEngagement = {
+    id: d.id,
+    project: d.project,
+    state: d.state,
+    title: typeof d.title === "string" ? d.title : prev?.title ?? "",
+    needs_you: typeof d.needs_you === "boolean" ? d.needs_you : prev?.needs_you ?? false,
+  };
+  return { ...view, engagements: i >= 0 ? rows.map((e, k) => (k === i ? row : e)) : [...rows, row] };
+}
+
 /** Deep equality of JSON values, key order ignored. */
 function sameJson(a: unknown, b: unknown): boolean {
   if (a === b) return true;
@@ -290,7 +332,7 @@ export function createOfficeStore(deps: StoreDeps = {}): OfficeStore {
     },
     applySnapshot(id, data) {
       if (!parseId(id) || !isObj(data)) return;
-      const { at, agents, runs, problems, last_run, supervisor, ledger } = data;
+      const { at, agents, runs, problems, last_run, supervisor, ledger, engagements } = data;
       if (!Array.isArray(agents) || !Array.isArray(runs)) return;
       const view: OfficeView = {
         at: typeof at === "string" ? at : "",
@@ -300,6 +342,7 @@ export function createOfficeStore(deps: StoreDeps = {}): OfficeStore {
         last_run: lastRunsOf(last_run),
         supervisor: supervisorOf(supervisor),
         ledger: ledgerOf(ledger),
+        engagements: engagementsOf(engagements),
       };
       // A reconnect's identical snapshot keeps the time of the last real change.
       const changed = !state.view || state.lastEventAt === null || !sameContent(state.view, view);
@@ -315,6 +358,7 @@ export function createOfficeStore(deps: StoreDeps = {}): OfficeStore {
         if (kind === "office.agent") view = applyAgent(state.view, data);
         else if (kind === "office.progress") view = applyProgress(state.view, data);
         else if (kind === "office.run") view = applyRun(state.view, data);
+        else if (kind === "office.engagement") view = applyEngagement(state.view, data);
         else return;
       } catch {
         return;

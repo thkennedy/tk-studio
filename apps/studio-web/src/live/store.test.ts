@@ -323,3 +323,45 @@ describe("the snapshot extras (Story 30.6, contract 0.1.25)", () => {
     expect(store.getState().view?.ledger).toEqual({ ...ledger, lines: ['{"n":3}'] });
   });
 });
+
+describe("the engagements and office.engagement (Story 32.7, contract 0.1.27)", () => {
+  const rows = [
+    { id: "ENG-001", project: "proj", state: "awaiting-answers", title: "Add search", needs_you: true },
+    { id: "ENG-001", project: "other", state: "quoted", title: "Same id, other project", needs_you: true },
+    { id: "ENG-002", project: "proj", state: "scoping", title: "Docs", needs_you: false },
+  ];
+
+  it("keeps the snapshot's rows; absent or malformed is []", () => {
+    const store = createOfficeStore();
+    store.applySnapshot("b-5", { ...snapshot(), engagements: [...rows, { id: 7 }, null] });
+    expect(store.getState().view?.engagements).toEqual(rows);
+    store.applySnapshot("b-6", snapshot("b-6"));
+    expect(store.getState().view?.engagements).toEqual([]);
+  });
+
+  it("a delta keyed by project + id sets the state; a new one is added; state: null removes it", () => {
+    const store = createOfficeStore();
+    store.applySnapshot("b-5", { ...snapshot(), engagements: rows });
+    store.applyDelta("b-6", "office.engagement", { id: "ENG-001", project: "other", state: "approved", from: "quoted", title: "Same id, other project", needs_you: false });
+    let e = store.getState().view?.engagements ?? [];
+    expect(e.find((r) => r.project === "proj" && r.id === "ENG-001")?.state).toBe("awaiting-answers");
+    expect(e.find((r) => r.project === "other" && r.id === "ENG-001")).toEqual({ id: "ENG-001", project: "other", state: "approved", title: "Same id, other project", needs_you: false });
+    store.applyDelta("b-7", "office.engagement", { id: "ENG-003", project: "proj", state: "intake", from: null });
+    e = store.getState().view?.engagements ?? [];
+    expect(e.at(-1)).toEqual({ id: "ENG-003", project: "proj", state: "intake", title: "", needs_you: false });
+    store.applyDelta("b-8", "office.engagement", { id: "ENG-002", project: "proj", state: null, from: "scoping" });
+    e = store.getState().view?.engagements ?? [];
+    expect(e.map((r) => `${r.project}/${r.id}`)).toEqual(["proj/ENG-001", "other/ENG-001", "proj/ENG-003"]);
+    expect(store.getState().lastId).toBe("b-8");
+  });
+
+  it("a removal of an unknown row changes nothing; a malformed delta is ignored", () => {
+    const store = createOfficeStore();
+    store.applySnapshot("b-5", { ...snapshot(), engagements: rows });
+    store.applyDelta("b-6", "office.engagement", { id: "ENG-009", project: "proj", state: null, from: "intake" });
+    expect(store.getState().view?.engagements).toEqual(rows);
+    store.applyDelta("b-7", "office.engagement", { id: "ENG-001", state: "quoted" });
+    expect(store.getState().lastId).toBe("b-6");
+    expect(store.getState().view?.engagements).toEqual(rows);
+  });
+});

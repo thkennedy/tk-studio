@@ -10,10 +10,15 @@
 // Story 31.6: the Inbox and the Issue screens join the switch. The inbox rows are read here (`useInbox`), so the
 // open-item count sits on the Inbox nav item whichever screen is shown (no count for an empty inbox); choosing a row
 // opens the Issue screen for it, remembered per browser (`issue/model.ts`).
+// Story 32.7: the Chat screen joins the switch. Its nav count is the office store's engagements (snapshot +
+// `office.engagement` deltas) in `awaiting-answers` or `quoted`, across projects (none: no count, as the Inbox); the
+// same rows are passed to the Chat screen, which refetches its list and open record when they change.
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { createOfficeStore, LIVE_RUN_STATES } from "./live/store";
 import { openOfficeStream } from "./live/stream";
 import { BoardScreen } from "./board/BoardScreen";
+import { ChatScreen } from "./chat/ChatScreen";
+import { chatNavCount } from "./chat/model";
 import { InboxScreen, useInbox } from "./inbox/InboxScreen";
 import { navCount } from "./inbox/model";
 import { IssueScreen } from "./issue/IssueScreen";
@@ -25,7 +30,7 @@ import { StatusScreen } from "./status/StatusScreen";
 /** The tab's one store (module-level: it outlives StrictMode's remount, so the view is never cleared). */
 const officeStore = createOfficeStore();
 const STREAM_LABEL = { live: "stream live", connecting: "connecting", reconnecting: "reconnecting" } as const;
-const SCREEN_LABEL: Record<Screen, string> = { office: "Office", board: "Board", status: "Status", inbox: "Inbox", issue: "Issue" };
+const SCREEN_LABEL: Record<Screen, string> = { office: "Office", board: "Board", status: "Status", inbox: "Inbox", issue: "Issue", chat: "Chat" };
 
 export function App() {
   const [hud, setHud] = useState<CanvasStats>({ zoom: 0, ratio: window.devicePixelRatio || 1, fps: 0 });
@@ -37,6 +42,7 @@ export function App() {
   };
   const inbox = useInbox(officeStore);
   const count = navCount(inbox.rows);
+  const chatCount = chatNavCount(live.view?.engagements);
   const [issue, setIssue] = useState<IssueRef | null>(() => rememberedIssue());
   const openIssue = (project: string, key: string) => {
     const ref = { project, key };
@@ -61,6 +67,8 @@ export function App() {
         <InboxScreen rows={inbox.rows} errors={inbox.errors} loaded={inbox.loaded} onOpen={openIssue} />
       ) : screen === "issue" ? (
         <IssueScreen issue={issue} />
+      ) : screen === "chat" ? (
+        <ChatScreen engagements={live.view?.engagements} />
       ) : (
         <StatusScreen store={officeStore} />
       )}
@@ -69,6 +77,7 @@ export function App() {
           <button key={s} type="button" onClick={() => setScreen(s)} disabled={s === screen} style={{ font: "12px ui-monospace, Menlo, Consolas, monospace" }}>
             {SCREEN_LABEL[s]}
             {s === "inbox" && count !== null ? ` (${count})` : ""}
+            {s === "chat" && chatCount !== null ? ` (${chatCount})` : ""}
           </button>
         ))}
       </nav>

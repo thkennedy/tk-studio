@@ -136,6 +136,43 @@ answers the supervisor's read-only status page with its "not built" note. Build 
   the browser it is the supervisor's server-rendered page, which works without JavaScript. `/status` without
   `Accept: text/html` still answers the JSON the bearer API always has.
 
+## The Chat screen (Story 32.7)
+
+The engagement conversation (design spec §6.3 Chat, F2): intake, questions, scope, quote and approval from the
+desktop or the iPad, without a terminal. The switch gains Chat (`src/screen.ts`); the rules are pure functions in
+`src/chat/model.ts` (vitest, `environment: "node"`, against `src/chat/fixture.ts`), the composition is
+`src/chat/ChatScreen.tsx`, the live transcript `src/chat/stream.ts`.
+
+- **What it reads and sends.** `GET /engagements?project=`, `GET /engagements/{id}?project=`, `GET /chat/{id}?project=`
+  and `GET /runs/{id}` (its `cost_usd`, contract 0.1.27); it posts `POST /engagements` (the New engagement form),
+  `POST /chat/{id}` (the message box) and `POST /engagements/{id}/input` (each typed input). Every engagement read and
+  post carries `?project=<id>` (a repeated id is 409 AmbiguousEngagement without it). Every post carries the CSRF token
+  the project's `GET /inbox?project=<id>` answered (read again when the project changes), as the Issue screen's reply
+  does; with no token every send is disabled. Fetches and posts never throw; a refusal is shown by its error name
+  (409 IllegalInput names the state and the verb, 503 ChatBusy is retryable with the text kept, 500
+  ChatJobUnresolved / ChatQueueFailed say no line was kept).
+- **The open engagement.** The state as a stepper (`intake → awaiting-answers → scoping → quoted → approved →
+  in-progress → delivered`; a side exit `paused`, `partial`, `failed` or `cancelled` marked against the step it left,
+  read from the newest `inputs[]` line entering it, else the closest main step); the transcript with owner and planner
+  lines (the planner's run cost read per `run_id` on hover or focus, one read in flight per run, a metered cost
+  cached; `not metered` when null, and a null or a failed read is read again on the next hover or focus); the question cards with their options and the default pre-selected (Answer sends `answer`); the scope page's
+  link and a Revise box (`revise`); the quote as the band (50/85/95 as dollars and share of the weekly window, the
+  cap, the autonomy levels) with Approve and the autonomy choice (`approve {autonomy, base_ref?}`); Go (with a
+  positive cap in `partial`), Ask (`question`) and Cancel. `ACTIONS` mirrors the supervisor's `TRANSITIONS` verb
+  cells: a control outside its state's cell is never rendered, and a planner proposal outside it is a disabled button
+  naming the state; a proposal sends exactly `{verb, ...payload}`. `approved` reads "approved; the run starts when the
+  plan PR merges" (no PR link: the record carries none); `paused` says to reply `continue` on the engagement's Jira
+  issue (there is no web verb for it).
+- **Live.** The chat stream (`event: chat`, one line per seq, a duplicate seq ignored) has the office stream's
+  watchdog: 15 s of silence or `visibilitychange` to visible reopens it after the last seq, and a browser that gives
+  up is retried after a 1–30 s backoff. The record and the list refetch on focus and on visibility, and when the office
+  store's rows for the project change (an id or a state; the open engagement's state for the record), never on a
+  timer. A record read started before a post's applied record is dropped.
+- **The nav count.** The office store keeps the snapshot's `engagements[]` and the `office.engagement` deltas (keyed by
+  project and id, `state: null` removes the row); the Chat nav item counts the rows in `awaiting-answers` or `quoted`
+  across projects (none: no count). The open engagement is remembered per browser under `tk-studio.web.chat` as
+  `{project, id}`.
+
 ## Commands (from `apps/studio-web`)
 
 ```bash
