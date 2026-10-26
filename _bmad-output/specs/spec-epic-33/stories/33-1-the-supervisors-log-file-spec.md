@@ -3,6 +3,8 @@ title: "The Supervisor's Log File"
 type: 'feature'
 created: '2026-10-26'
 status: 'done'
+# Operator ruling 2026-10-26 (session 11): the gate session never ran (the attempt was deferred by the operator's mid-attempt commit, not by the work); the story landed with its own review, DW-55 recorded; nothing in 33-2 to 33-8 changes
+reconcile_verdict: not-required
 baseline_revision: '21cb68afe5497af0e6d23884ad5dcc136c18aa26'
 review_loop_iteration: 0
 followup_review_recommended: true
