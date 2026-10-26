@@ -5,9 +5,9 @@
   "type": "module",
   "description": "The studio web (D5, design spec §6.3): Vite plus React plus TypeScript, one PixiJS v8 canvas, built to static files in dist/.",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "test": "vitest run",
+    "dev": "bun x vite",
+    "build": "bun x vite build",
+    "test": "bun x vitest run",
     "verify": "bun install --frozen-lockfile && bun run build && bun run test",
     "sprites": "uv run --no-project python ../../tools/sprites/export.py"
   },
