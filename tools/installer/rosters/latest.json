@@ -6,9 +6,9 @@
   },
   "components": {
     "plugin": {
-      "tag": "tk-studio--v0.3.4",
-      "url": "https://github.com/thkennedy/tk-studio/releases/download/tk-studio--v0.3.4/tk-studio-0.3.4.zip",
-      "sha256": "fc44c2a6464cc19d0957ba32d059c7b555fdf550c9bc4351aa76db4a0031b554"
+      "tag": "tk-studio--v0.3.5",
+      "url": "https://github.com/thkennedy/tk-studio/releases/download/tk-studio--v0.3.5/tk-studio-0.3.5.zip",
+      "sha256": "0873e387ae16721d0475c70a83b83bbaf4c84ebd34047d1c37db3c9be74320ec"
     },
     "uv": {
       "version": "0.13.1",
