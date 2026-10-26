@@ -6,9 +6,9 @@
   },
   "components": {
     "plugin": {
-      "tag": "tk-studio--v0.3.4",
-      "url": "https://github.com/thkennedy/tk-studio/releases/download/tk-studio--v0.3.4/tk-studio-0.3.4.zip",
-      "sha256": "fc44c2a6464cc19d0957ba32d059c7b555fdf550c9bc4351aa76db4a0031b554"
+      "tag": "tk-studio--v0.3.5",
+      "url": "https://github.com/thkennedy/tk-studio/releases/download/tk-studio--v0.3.5/tk-studio-0.3.5.zip",
+      "sha256": "0873e387ae16721d0475c70a83b83bbaf4c84ebd34047d1c37db3c9be74320ec"
     },
     "uv": {
       "version": "0.13.1",
@@ -27,9 +27,9 @@
       }
     },
     "supervisor": {
-      "tag": "supervisor--v0.1.3",
-      "url": "https://github.com/thkennedy/tk-studio/releases/download/supervisor--v0.1.3/supervisor-0.1.3.zip",
-      "sha256": "0fc29b8a2350e0b251db1e0dfcbbfda09ff5cd88ad5da7fbb6f889d72360ae57"
+      "tag": "supervisor--v0.1.4",
+      "url": "https://github.com/thkennedy/tk-studio/releases/download/supervisor--v0.1.4/supervisor-0.1.4.zip",
+      "sha256": "98de614bdb727aea09e55b6e1210629e5bfd3771f5020a40092957d911e1a2ff"
     },
     "cli": {
       "tag": "cli--v0.1.2",
