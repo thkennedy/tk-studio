@@ -650,6 +650,16 @@ function engagementsOf(runs: readonly QueueRun[], agentProjects: readonly string
   return out;
 }
 
+/** Story 33.2 (0.1.28, additive): each queued run a drain pass could not claim is a `problems[]` line naming the run,
+ * its latest open refusal and what resolves it (`run <run_id>: claim refused: <reason> — resolve: <resolves>`). */
+function claimRefusalProblems(queue: Queue, runs: readonly QueueRun[], problems: string[]): void {
+  for (const r of runs) {
+    if (r.state !== "queued") continue;
+    const refused = queue.claimRefusal(r.run_id);
+    if (refused) problems.push(`run ${r.run_id}: claim refused: ${refused.reason}${refused.resolves ? ` — resolve: ${refused.resolves}` : ""}`);
+  }
+}
+
 /** The raw (ungraced) projection: every registry agent (`readAgents`) exactly once with its state, the live runs
  * with story and epic progress, the time. A project with live runs but no registry rows adds no agents. Story 32.1:
  * `roots` (project id → served root) feeds `engagements[]`. */
@@ -689,6 +699,7 @@ export function projectOffice(queue: Queue, deps: { now?: () => number; roots?: 
     const runs = core.liveRuns();
     const last_run = core.lastRuns();
     const engagements = engagementsOf(core.runs, rows.map((r) => r.project), roots, core.problems);
+    claimRefusalProblems(queue, core.runs, core.problems);
     pruneCaches(seen); // only after a whole projection: a throw keeps the caches as they were
     return { at: new Date((deps.now ?? Date.now)()).toISOString(), agents, runs, problems: core.problems, last_run, engagements };
   } finally { touched = null; }

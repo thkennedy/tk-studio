@@ -1371,3 +1371,20 @@ describe("engagements (Story 32.1, contract 0.1.27 additive)", () => {
     rmSync(root, { recursive: true, force: true });
   });
 });
+
+describe("Story 33.2 (0.1.28, additive): a queued run the drain could not claim is a `problems[]` line", () => {
+  test("the latest open refusal names the run, the reason and what resolves it; gone once the claim clears it", async () => {
+    const w = world();
+    const run = w.enqueue("a");
+    expect(projectOffice(w.queue).problems).toEqual([]);
+    w.queue.refuseClaim(run.run_id, "max-login", "harness auth: Max login missing or expired (not logged in)", "renew: sbx run --name s → /login → /exit");
+    w.queue.refuseClaim(run.run_id, "max-login", "harness auth: Max login missing or expired (not logged in)", "renew: sbx run --name s → /login → /exit");
+    expect(projectOffice(w.queue).problems).toEqual([
+      `run ${run.run_id}: claim refused: harness auth: Max login missing or expired (not logged in) — resolve: renew: sbx run --name s → /login → /exit`,
+    ]);
+    expect(statesOf(projectOffice(w.queue))).toEqual(all("idle")); // still row 3: queued
+    await w.claim(run);
+    w.queue.clearClaimRefusals(run.run_id);
+    expect(projectOffice(w.queue).problems).toEqual([]);
+  });
+});

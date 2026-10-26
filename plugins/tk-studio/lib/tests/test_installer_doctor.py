@@ -12,9 +12,11 @@ import io
 import json
 import os
 import ssl
+import subprocess
 import sys
 import unittest
 from contextlib import redirect_stdout
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -49,6 +51,12 @@ class DoctorHost(FakeHost):
         self.claude_out = "2.1.230 (Claude Code)\n"
         self.sbx_rc = 0
         self.longpaths: str | None = "true"     # None: unset (exit 1)
+        # Story 33.2: `sbx ls` and the two in-sandbox reads
+        self.sbx_ls = "SANDBOX            AGENT   STATUS\n"
+        self.auth_out = json.dumps({"loggedIn": True,
+                                    "authMethod": "claude.ai"})
+        self.expiry_out = ""
+        self.exec_timeout = False   # an `sbx exec` that times out
 
     def __call__(self, args, env=None):
         args = [str(a) for a in args]
@@ -56,6 +64,16 @@ class DoctorHost(FakeHost):
         if name == "claude" and args[1:] == ["--version"]:
             self.calls.append((args, env))
             return done(args, 0, self.claude_out)
+        if name == "sbx" and args[1:2] == ["ls"]:
+            self.calls.append((args, env))
+            return done(args, 0, self.sbx_ls)
+        if name == "sbx" and args[1:2] == ["exec"]:
+            self.calls.append((args, env))
+            if self.exec_timeout:
+                raise subprocess.TimeoutExpired(args, 20)
+            if "auth" in args:
+                return done(args, 0, self.auth_out + "\n")
+            return done(args, 0, self.expiry_out + "\n")
         if name == "sbx":
             self.calls.append((args, env))
             return done(args, self.sbx_rc, "running" if not self.sbx_rc
@@ -157,6 +175,34 @@ class DoctorCase(AppsCase):
         os.utime(path, (NOW - age_days * DAY,) * 2)
         return path
 
+    def engine_sandbox(self, name: str = "claude-tk-studio",
+                       days_left: float | None = 30,
+                       running: bool = True) -> Path:
+        """Story 33.2: a supervisor config naming one sandbox, listed by
+        the fake `sbx ls`, its refresh token expiring ``days_left`` from
+        NOW (milliseconds since the epoch; None: no field)."""
+        path = self.tmp / "supervisor.yaml"
+        path.write_text('jobs:\n  "tk-studio/run-epic":\n    tier: sbx\n'
+                        f'    sandbox: {name}\n', encoding="utf-8")
+        self.env["TK_SUPERVISOR_CONFIG"] = str(path)
+        state = "running" if running else "stopped"
+        self.host.sbx_ls = ("SANDBOX            AGENT   STATUS\n"
+                            f"{name}   claude  {state}\n")
+        self.host.expiry_out = "" if days_left is None \
+            else str(int((NOW + days_left * DAY) * 1000))
+        return path
+
+    def supervisor_log(self, lines: list[str], day: str = "2033-05-18"
+                       ) -> Path:
+        """Story 33.1: a day file under ``TK_SUPERVISOR_WORK`` (set here)."""
+        work = self.tmp / "work"
+        self.env["TK_SUPERVISOR_WORK"] = str(work)
+        path = work / "supervisor" / "logs" / f"supervisor-{day}.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(f"{line}\n" for line in lines),
+                        encoding="utf-8")
+        return path
+
 
 class AllFailing(DoctorCase):
     plat = WINDOWS
@@ -231,6 +277,8 @@ class AllPassing(DoctorCase):
         (self.root / "bin" / "tk-studio").write_text("cli")
         self.env["PATH"] += os.pathsep + str(self.root / "bin")
         self.env["TK_SUPERVISOR_TLS_CERT"] = str(self.cert(10))
+        self.supervisor_log([f"{stamp(NOW - 60)} [pacer] stopped (Ctrl+C)"])
+        self.engine_sandbox()   # Story 33.2: the engine sandbox, 30 days left
         before = self.snapshot()
         result, code = self.doctor(roster=roster)
         self.assertEqual((code, result["reason"]), (0, None), result)
@@ -239,13 +287,16 @@ class AllPassing(DoctorCase):
         self.assertEqual(set(statuses.values()), {"pass"}, statuses)
         self.assertEqual(sorted(statuses), sorted(
             ["claude-code", "plugin", "store", "sbx-daemon",
-             "folder-trust:proj", "path-launcher", "tailscale-cert",
-             "supervisor", "studio-web"]))
+             "sandbox-login", "folder-trust:proj", "path-launcher",
+             "tailscale-cert", "supervisor", "supervisor-log",
+             "studio-web"]))
         for check in result["checks"]:
             if check["status"] == "pass":
                 self.assertIsNone(check["fix"])
-        self.assertEqual(self.commands(),
-                         ["claude --version", "sbx daemon status"])
+        self.assertEqual([c[:25] for c in self.commands()],
+                         ["claude --version", "sbx daemon status",
+                          "sbx ls", "sbx exec claude-tk-studio",
+                          "sbx exec claude-tk-studio"])
         self.assertEqual(self.snapshot(), before)
         self.assertTrue(result["probe"]["answers"])
         self.assertTrue(result["probe"]["url"].startswith("https://"))
@@ -451,6 +502,156 @@ class Sbx(DoctorCase):
             "sbx-daemon"]
         self.assertEqual(check["status"], "skipped")
         self.assertNotIn("sbx daemon status", self.commands())
+
+
+class SandboxLogin(DoctorCase):
+    """Story 33.2 (AC2, rulings A and B): the engine sandbox's Max login,
+    read through ``sbx exec`` after ``sbx daemon status`` and ``sbx ls``;
+    warn from 7 days before ``refreshTokenExpiresAt``, fail once expired."""
+
+    def check(self) -> dict:
+        return self.checks(self.doctor(roster=self.full_roster())[0])[
+            "sandbox-login"]
+
+    def sbx_commands(self) -> list[str]:
+        return [c for c in self.commands() if c.startswith("sbx")]
+
+    def test_skipped_with_no_sandbox_configured_no_sbx_read(self):
+        check = self.check()
+        self.assertEqual(check["status"], "skipped")
+        self.assertIn("TK_SUPERVISOR_CONFIG not set", check["detail"])
+        self.assertTrue(check["fix"])
+        self.assertEqual(self.sbx_commands(), ["sbx daemon status"])
+        # a config naming no sandbox (a host-only box) is skipped too
+        path = self.tmp / "supervisor.yaml"
+        path.write_text("jobs:\n  p/j:\n    tier: host\n", encoding="utf-8")
+        self.env["TK_SUPERVISOR_CONFIG"] = str(path)
+        self.host.calls.clear()
+        check = self.check()
+        self.assertEqual(check["status"], "skipped")
+        self.assertIn("names no jobs.*.sandbox", check["detail"])
+        self.assertEqual(self.sbx_commands(), ["sbx daemon status"])
+
+    def test_skipped_when_sbx_is_absent_or_the_daemon_is_down(self):
+        self.engine_sandbox()
+        self.host.sbx_rc = 1
+        check = self.check()
+        self.assertEqual(check["status"], "skipped")
+        self.assertIn("sbx daemon status exit 1", check["detail"])
+        self.assertEqual(self.sbx_commands(), ["sbx daemon status"])
+        self.drop_tools("sbx")
+        self.host.calls.clear()
+        check = self.check()
+        self.assertEqual(check["status"], "skipped")
+        self.assertIn("sbx not on PATH", check["detail"])
+        self.assertEqual(self.sbx_commands(), [])
+
+    def test_a_stopped_sandbox_is_skipped_never_execed(self):
+        self.engine_sandbox(running=False)
+        check = self.check()
+        self.assertEqual(check["status"], "skipped")
+        self.assertIn("not running", check["detail"])
+        self.assertEqual(self.sbx_commands(), ["sbx daemon status", "sbx ls"])
+
+    def test_the_warning_window(self):
+        for days, status in ((30, "pass"), (7.05, "pass"), (7, "warn"),
+                             (1, "warn"), (0.01, "warn"), (0, "fail"),
+                             (-3, "fail")):
+            with self.subTest(days=days):
+                self.host.calls.clear()
+                self.engine_sandbox(days_left=days)
+                check = self.check()
+                self.assertEqual(check["status"], status, check)
+                if status == "pass":
+                    self.assertIsNone(check["fix"])
+                else:
+                    self.assertIn("sbx run --name claude-tk-studio → /login"
+                                  " → /exit", check["fix"])
+                self.assertIn("claude-tk-studio", check["detail"])
+        self.assertIn("expired at", check["detail"])
+
+    def test_reads_only_the_expiry_field_never_a_token(self):
+        self.engine_sandbox(days_left=3)
+        check = self.check()
+        execs = [a for a, _ in self.host.calls if a[1:2] == ["exec"]]
+        self.assertEqual(execs[0][2:], ["claude-tk-studio", "env", "-u",
+                                        "ANTHROPIC_API_KEY", "claude", "auth",
+                                        "status", "--json"])
+        self.assertEqual(execs[1][2:5], ["claude-tk-studio", "python3", "-c"])
+        script = execs[1][5]
+        self.assertIn("refreshTokenExpiresAt", script)
+        self.assertNotIn("accessToken", script)
+        self.assertNotIn("refreshToken'", script)
+        self.assertEqual(len(execs), 2)
+        expires = datetime.fromtimestamp(NOW + 3 * DAY, timezone.utc)
+        self.assertIn(expires.strftime("%Y-%m-%dT%H:%M:%SZ"), check["detail"])
+        self.assertEqual(check["sandboxes"][0]["case"], "expiring")
+
+    def test_logged_out_fails_and_an_unreadable_expiry_warns(self):
+        self.engine_sandbox()
+        self.host.auth_out = json.dumps({"loggedIn": False})
+        check = self.check()
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("logged out", check["detail"])
+        self.assertIn("/login", check["fix"])
+        self.host.auth_out = json.dumps({"loggedIn": True})
+        self.engine_sandbox(days_left=None)
+        check = self.check()
+        self.assertEqual(check["status"], "warn")
+        self.assertIn("could not be read", check["detail"])
+
+    def test_one_total_budget_a_spent_budget_is_skipped(self):
+        """The check's sbx reads share one budget (well below the
+        conformance runner's 60 s); a spent budget is skipped like a
+        daemon that is down, the detail naming the timeout."""
+        self.assertLess(doctor.SANDBOX_LOGIN_BUDGET, 60)
+        self.engine_sandbox()
+        with mock.patch.object(doctor, "SANDBOX_LOGIN_BUDGET", 0):
+            check = self.check()
+        self.assertEqual(check["status"], "skipped")
+        self.assertIn("budget", check["detail"])
+        self.assertIn("timed out at `sbx ls`", check["detail"])
+        self.assertTrue(check["fix"])
+        self.assertEqual(self.sbx_commands(), ["sbx daemon status"])
+        self.host.calls.clear()
+        self.host.exec_timeout = True
+        check = self.check()
+        self.assertEqual(check["status"], "skipped")
+        self.assertIn("timed out at `sbx exec claude-tk-studio`",
+                      check["detail"])
+
+    def test_a_later_timeout_keeps_an_expired_reading_failing(self):
+        """Two sandboxes, the first expired, the second timing out: the
+        check still fails on the first, never skipped by the second."""
+        path = self.engine_sandbox(days_left=-1)
+        path.write_text('jobs:\n  "p/a":\n    tier: sbx\n'
+                        '    sandbox: claude-tk-studio\n'
+                        '  "p/b":\n    tier: sbx\n'
+                        '    sandbox: claude-other\n', encoding="utf-8")
+        self.host.sbx_ls += "claude-other   claude  running\n"
+        real = self.host.__call__
+
+        def host(args, env=None):
+            if [str(a) for a in args][1:3] == ["exec", "claude-other"]:
+                self.host.calls.append(([str(a) for a in args], env))
+                raise subprocess.TimeoutExpired(args, 20)
+            return real(args, env)
+
+        with mock.patch.object(type(self.host), "__call__",
+                               lambda _self, args, env=None: host(args, env)):
+            check = self.check()
+        self.assertEqual(check["status"], "fail", check)
+        self.assertIn("claude-tk-studio: the Max login expired at",
+                      check["detail"])
+        self.assertIn("timed out at `sbx exec claude-other`",
+                      check["detail"])
+        self.assertEqual([s["case"] for s in check["sandboxes"]],
+                         ["expired", "no-sandbox"])
+
+    def test_an_expired_login_names_the_check_in_the_reason(self):
+        self.engine_sandbox(days_left=-1)
+        result, _ = self.doctor(roster=self.full_roster())
+        self.assertIn("sandbox-login", result["reason"])
 
 
 class FolderTrust(DoctorCase):
@@ -751,6 +952,101 @@ class Supervisor(DoctorCase):
             "cli-update-helper"]
         self.assertEqual(check["status"], "warn")
         self.assertTrue((tools / "cli-update.cmd").is_file())
+
+
+def stamp(seconds: float) -> str:
+    """A log line's ISO UTC stamp (apps/supervisor/src/log.ts formatLine)."""
+    return datetime.fromtimestamp(seconds, timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z")
+
+
+class SupervisorLog(DoctorCase):
+    """Story 33.1 (AC2): the newest log's last `stopped` or `uncaught` line
+    and its age when the API does not answer; read-only."""
+
+    def check(self, **kw) -> dict:
+        return self.checks(self.doctor(roster=self.full_roster(), **kw)[0])[
+            "supervisor-log"]
+
+    def test_work_unset_is_skipped(self):
+        self.env.pop("TK_SUPERVISOR_WORK", None)
+        check = self.check()
+        self.assertEqual(check["status"], "skipped", check)
+        self.assertIn("TK_SUPERVISOR_WORK not set", check["detail"])
+        self.assertTrue(check["fix"])
+
+    def test_no_folder_warns_no_log(self):
+        self.env["TK_SUPERVISOR_WORK"] = str(self.tmp / "work")
+        check = self.check()
+        self.assertEqual(check["status"], "warn", check)
+        self.assertTrue(check["detail"].startswith("no log"), check)
+        self.assertIn(str(self.tmp / "work" / "supervisor" / "logs"),
+                      check["fix"])
+        self.assertIn("start.ps1", check["fix"])
+        # a folder holding no day file is no log either
+        (self.tmp / "work" / "supervisor" / "logs").mkdir(parents=True)
+        (self.tmp / "work" / "supervisor" / "logs" / "notes.txt").write_text(
+            "x\n")
+        self.assertTrue(self.check()["detail"].startswith("no log"))
+
+    def test_api_answers_passes_naming_the_file_and_the_age(self):
+        self.run_cli(["install", "--roster", str(self.full_roster())])
+        self.supervisor_log([f"{stamp(NOW - 900)} [keeper] stopped (exit 75)",
+                             f"{stamp(NOW - 30)} [serve] listening"],
+                            day="2033-05-17")
+        newest = self.supervisor_log(
+            [f"{stamp(NOW - 300)} [pacer] started"])
+        check = self.check()
+        self.assertEqual(check["status"], "pass", check)
+        self.assertIn(str(newest), check["detail"])
+        self.assertIn("no stopped/uncaught line", check["detail"])
+        self.supervisor_log([f"{stamp(NOW - 300)} [tick] uncaught: boom",
+                             f"{stamp(NOW - 200)} [pacer] started"])
+        check = self.check()
+        self.assertEqual(check["status"], "pass", check)
+        self.assertEqual(check["detail"],
+                         f"{newest}; last uncaught line 5m ago")
+        self.assertIsNone(check["fix"])
+
+    def test_api_down_warns_with_the_line_verbatim_its_age_and_the_start(self):
+        self.run_cli(["install", "--roster", str(self.full_roster())])
+        self.host.calls.clear()
+        self.host.up = False
+        line = f"{stamp(NOW - 2 * 3600)} [keeper] stopped (exit 1)"
+        path = self.supervisor_log([
+            f"{stamp(NOW - 3 * 3600)} [pacer] started", line,
+            f"{stamp(NOW - 3600)} [tick] a later line"])
+        os.utime(path, (NOW - 3600, NOW - 3600))
+        before = (path.stat().st_mtime, path.read_bytes())
+        check = self.check()
+        self.assertEqual(check["status"], "warn", check)
+        self.assertEqual(check["detail"], f"{path}: {line} (2h ago)")
+        self.assertEqual(check["fix"], doctor.FIX_START)
+        self.assertEqual((path.stat().st_mtime, path.read_bytes()), before,
+                         "the log is read, never written")
+        self.assertTrue(set(self.commands()) <= ALLOWED, self.commands())
+
+    def test_api_down_redacts_a_credential_in_the_line(self):
+        self.run_cli(["install", "--roster", str(self.full_roster())])
+        self.host.up = False
+        path = self.supervisor_log(
+            [f"{stamp(NOW - 600)} [pacer] stopped (Bearer abc123)"])
+        check = self.check()
+        self.assertEqual(check["status"], "warn", check)
+        self.assertIn("[redacted]", check["detail"])
+        self.assertNotIn("abc123", check["detail"])
+        self.assertIn(str(path), check["detail"])
+
+    def test_the_check_follows_the_supervisor_group(self):
+        names = [c["check"] for c in self.doctor(
+            roster=self.full_roster())[0]["checks"]]
+        self.assertLess(names.index("supervisor"),
+                        names.index("supervisor-log"))
+        self.assertEqual(_age_cases(), ["59s", "1m", "2h", "3d"])
+
+
+def _age_cases() -> list[str]:
+    return [doctor._age(s) for s in (59, 60, 2 * 3600 + 5, 3 * DAY + 1)]
 
 
 class SupervisorCheckout(DoctorCase):

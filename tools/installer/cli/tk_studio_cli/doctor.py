@@ -4,12 +4,25 @@ reported as ``{check, status: pass|fail|warn|skipped, detail, fix}``.
 Read-only: doctor writes, deletes and renames nothing (a leftover
 ``cli-update.cmd`` is reported, never removed). The only processes it starts
 are ``claude --version``, ``sbx daemon status`` and ``git config --global
---get core.longpaths``, each through the injected runner, only when the
-executable is on PATH, and each bounded by ``PROCESS_TIMEOUT``. Its only
+--get core.longpaths`` (plus the sandbox-login check's sbx reads below),
+each through the injected runner, only when the executable is on PATH, and
+each bounded by ``PROCESS_TIMEOUT``. Its only
 network calls are the ``/status`` probe (through the injected probe) and the
 roster fetch when ``--roster`` is a URL or absent. The cut-over checks
 (Story 28.4, Windows only) start nothing: the Startup ``.lnk`` is parsed in
 Python and the git top-level is found by walking up for ``.git``.
+
+The supervisor log check (Story 33.1) reads the newest
+``<TK_SUPERVISOR_WORK>/supervisor/logs/supervisor-<date>.log`` and nothing
+else: no process, no network, the file never written.
+
+The sandbox-login check (Story 33.2) runs only once ``sbx daemon status``
+passed and the supervisor config (``TK_SUPERVISOR_CONFIG``) names a
+sandbox: then ``sbx ls``, and on each running sandbox two ``sbx exec``
+reads (``claude auth status --json`` and the one ``refreshTokenExpiresAt``
+field of ``~/.claude/.credentials.json``, never a token), each through the
+runner, all of them together bounded by one ``SANDBOX_LOGIN_BUDGET``
+(``sandbox_login.py``).
 
 Doctor's own status is ``complete`` whatever the checks find; ``reason``
 names every failing check. Every non-``pass`` check carries a ``fix``.
@@ -21,10 +34,12 @@ import re
 import shutil
 import ssl
 import subprocess
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Mapping
 
-from tk_studio_cli import apps, miniyaml, plugin_leg, skills_plane
+from tk_studio_cli import apps, miniyaml, plugin_leg, sandbox_login, skills_plane
 from tk_studio_cli.plugin_leg import Refusal
 
 PASS, FAIL, WARN, SKIPPED = "pass", "fail", "warn", "skipped"
@@ -78,11 +93,11 @@ def _found(ctx, name: str) -> bool:
     return bool(path) and shutil.which(name, path=path) is not None
 
 
-def _run(ctx, args: list):
+def _run(ctx, args: list, timeout: float = PROCESS_TIMEOUT):
     if ctx.runner is apps.default_runner:
         return apps.default_runner(
             args, dict(ctx.env) if ctx.explicit_env else None,
-            timeout=PROCESS_TIMEOUT)
+            timeout=min(PROCESS_TIMEOUT, timeout))
     return apps._run(ctx, args)
 
 
@@ -267,6 +282,50 @@ def check_sbx(ctx) -> dict:
         return _check(name, FAIL, f"sbx daemon status exit "
                       f"{proc.returncode}: {out[:200]}", FIX_SBX)
     return _check(name, PASS, f"sbx daemon status: {out[:200] or 'running'}")
+
+
+# --- the engine sandbox's Max login (Story 33.2) ------------------------------
+
+SANDBOX_LOGIN_STATUS = {sandbox_login.OK: PASS, sandbox_login.EXPIRING: WARN,
+                        sandbox_login.EXPIRED: FAIL,
+                        sandbox_login.NO_SANDBOX: SKIPPED}
+
+
+SANDBOX_LOGIN_BUDGET = sandbox_login.BUDGET_S   # seconds, every sbx read together
+
+
+def check_sandbox_login(ctx, sbx: dict, clock=time.monotonic) -> dict:
+    """Gated on ``check_sbx``: nothing runs unless the daemon passed. The
+    sandboxes are the supervisor config's ``jobs.*.sandbox`` values; warn
+    from ``sandbox_login.WARN_DAYS`` days before ``refreshTokenExpiresAt``,
+    fail once it passed (or the sandbox is logged out), the fix naming
+    ``sbx run --name <sandbox>`` → ``/login`` → ``/exit``. Its sbx reads
+    share one ``SANDBOX_LOGIN_BUDGET`` (each given the time left); a spent
+    budget is ``skipped`` like a daemon that is down, the detail naming the
+    timeout."""
+    name = "sandbox-login"
+    if sbx["status"] != PASS:
+        return _check(name, SKIPPED, f"{sbx['detail']}: the sandbox login "
+                      "is not read", sbx["fix"])
+    path = apps._var(ctx, "TK_SUPERVISOR_CONFIG")
+    if not path:
+        return _check(name, SKIPPED, "TK_SUPERVISOR_CONFIG not set: no "
+                      "engine sandbox configured", sandbox_login.FIX_NO_CONFIG)
+    try:
+        text = Path(path).read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        return _check(name, SKIPPED, f"TK_SUPERVISOR_CONFIG {path} is "
+                      f"unreadable ({exc}): no engine sandbox read",
+                      "point TK_SUPERVISOR_CONFIG at the supervisor's config "
+                      "file")
+    reading = sandbox_login.read_logins(
+        sandbox_login.config_sandboxes(text),
+        lambda args, left: _run(ctx, args, left), ctx.now(),
+        daemon_checked=True,
+        deadline=sandbox_login.Deadline(SANDBOX_LOGIN_BUDGET, clock))
+    return _check(name, SANDBOX_LOGIN_STATUS[reading["case"]],
+                  reading["detail"], reading["fix"] or "",
+                  sandboxes=reading["sandboxes"])
 
 
 # --- folder trust (holes 14 and 15) ------------------------------------------
@@ -543,6 +602,116 @@ def check_supervisor(ctx, fields: dict, roster: dict | None,
         return _check(name, PASS, f"{where}; {probe['url']} answers")
     url = probe["url"] if probe else apps.probe_url(ctx)
     return _check(name, FAIL, f"{where}; {url} does not answer", FIX_START)
+
+
+# --- the supervisor's log file (Story 33.1, hole 66) ------------------------
+
+LOG_DAY_FILE = re.compile(r"supervisor-\d{4}-\d{2}-\d{2}\.log")
+# `<ISO UTC time> [<tag>] <text>` (apps/supervisor/src/log.ts formatLine)
+LOG_LINE = re.compile(r"(\S+) \[(serve|tick|drain|keeper|pacer)\] (.*)")
+
+
+def _age(seconds: float) -> str:
+    s = max(0, int(seconds))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h"
+    return f"{s // 86400}d"
+
+
+def _last_end(text: str) -> tuple[str, str, float | None] | None:
+    """The last line whose text after the tag starts with ``stopped`` or
+    ``uncaught``: the line, its kind and its stamp (epoch seconds, None when
+    the stamp does not parse)."""
+    for line in reversed(text.splitlines()):
+        m = LOG_LINE.fullmatch(line.strip())
+        if not m:
+            continue
+        kind = next((k for k in ("stopped", "uncaught")
+                     if m.group(3).startswith(k)), None)
+        if kind is None:
+            continue
+        try:
+            stamp = datetime.fromisoformat(
+                m.group(1).replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            stamp = None
+        return line.strip(), kind, stamp
+    return None
+
+
+_SECRET_NAME = re.compile(r"^TK_SUPERVISOR_.*(?:TOKEN|SECRET)", re.IGNORECASE)
+_BEARER = re.compile(r"\b(Bearer)(\s+)[^\s\"',;]+", re.IGNORECASE)
+_BASIC = re.compile(r"\b(Basic)(\s+)[A-Za-z0-9+/=]{8,}", re.IGNORECASE)
+
+
+def _redact_log_line(ctx, line: str) -> str:
+    """The page's rule, in brief (NFR5): every ``TK_SUPERVISOR_*TOKEN*`` or
+    ``*SECRET*`` value (read as ``TK_SUPERVISOR_WORK`` is) becomes
+    ``[redacted]``, then a ``Bearer``/``Basic`` credential becomes
+    ``<scheme> [redacted]``."""
+    names = set(ctx.env)
+    store_names = getattr(ctx.env_store, "names", None)
+    if ctx.plat.windows and callable(store_names):
+        try:
+            names.update(store_names())
+        except OSError:
+            pass
+    values = sorted({v.strip() for v in (apps._var(ctx, n) or ""
+                                         for n in names
+                                         if _SECRET_NAME.match(n))
+                     if v.strip()}, key=len, reverse=True)
+    for value in values:
+        line = line.replace(value, "[redacted]")
+    line = _BEARER.sub(lambda m: f"{m.group(1)}{m.group(2)}[redacted]", line)
+    return _BASIC.sub(lambda m: f"{m.group(1)}{m.group(2)}[redacted]", line)
+
+
+def check_supervisor_log(ctx, fields: dict) -> dict:
+    name = "supervisor-log"
+    work = apps._var(ctx, "TK_SUPERVISOR_WORK")
+    if not work:
+        return _check(name, SKIPPED, "TK_SUPERVISOR_WORK not set (no log "
+                      "folder to read)",
+                      "set TK_SUPERVISOR_WORK (runbook §4.2): start.ps1 then "
+                      "logs under <work>\\supervisor\\logs")
+    folder = Path(work) / "supervisor" / "logs"
+    try:
+        files = sorted(p for p in folder.iterdir()
+                       if LOG_DAY_FILE.fullmatch(p.name) and p.is_file()) \
+            if folder.is_dir() else []
+    except OSError:
+        files = []
+    if not files:
+        return _check(name, WARN, f"no log: {folder} holds no "
+                      "supervisor-<date>.log",
+                      f"start the supervisor: start.ps1 writes {folder} "
+                      "(TK_SUPERVISOR_WORK set)")
+    newest = files[-1]
+    probe = fields.get("probe")
+    answers = bool(probe and probe.get("answers"))
+    try:
+        text = newest.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return _check(name, WARN, f"{newest} unreadable: {exc}",
+                      "check the log file's permissions" if answers
+                      else FIX_START)
+    end = _last_end(text)
+    age = None if end is None or end[2] is None \
+        else _age(ctx.now() - end[2])
+    if answers:
+        if end is None:
+            return _check(name, PASS, f"{newest}; no stopped/uncaught line")
+        when = f"{age} ago" if age else "at an unreadable time"
+        return _check(name, PASS, f"{newest}; last {end[1]} line {when}")
+    if end is None:
+        return _check(name, WARN, f"{newest}: no stopped/uncaught line "
+                      "(the API does not answer)", FIX_START)
+    return _check(name, WARN, f"{newest}: {_redact_log_line(ctx, end[0])} "
+                  f"({age + ' ago' if age else 'age unknown'})", FIX_START)
 
 
 # --- the cut-over (Story 28.4): root, registry, trust, Startup shortcut -----
@@ -954,13 +1123,18 @@ def run_doctor(ctx, *, roster: str | None, channel: str, fetch,
         check_plugin(ctx, loaded, refusal, channel),
         check_plugin_leftovers(ctx),
         check_store(ctx),
-        check_sbx(ctx),
+    ]
+    sbx = check_sbx(ctx)
+    checks += [
+        sbx,
+        check_sandbox_login(ctx, sbx),   # Story 33.2: gated on sbx-daemon
         *check_folder_trust(ctx),
         check_long_paths(ctx),
         check_path_launcher(ctx),
         check_tailscale_cert(ctx),
         supervisor,
         *check_cut_over(ctx, fields, supervisor),
+        check_supervisor_log(ctx, fields),
         check_stale_slots(ctx),
         check_studio_web(ctx, loaded, channel),
         check_cli_helper(ctx),

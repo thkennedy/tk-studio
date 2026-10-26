@@ -513,6 +513,26 @@ export interface QueueEvent {
   from_state: string | null; to_state: string; detail: Record<string, unknown> | null;
 }
 
+/** Story 33.2: the queue events of a claim a drain pass could not make, and of its refusal clearing. */
+export const CLAIM_REFUSED = "claim-refused";
+export const CLAIM_REFUSAL_CLEARED = "claim-refusal-cleared";
+
+/** Story 33.2: one open claim refusal — its stable dedup `key` (the cause class and its subject: `pin-failed:<sandbox>`,
+ * `lock:<holder run_id>`, `max-login`, `placement:<TierRefused|SbxSandboxMissing>`; kept off the 0.1.28 surfaces), its
+ * latest reason, what resolves it, the latest pass that met it (`pass_at`; all three updated in place), when it was
+ * first met (`since`, the event's `at`) and its event's seq. */
+export interface ClaimRefusal { key: string; reason: string; resolves: string | null; pass_at: string; since: string; seq: number }
+
+const claimRefusalOf = (e: QueueEvent): ClaimRefusal => ({
+  key: typeof e.detail?.key === "string" ? e.detail.key : String(e.detail?.reason ?? ""),
+  reason: String(e.detail?.reason ?? ""), resolves: typeof e.detail?.resolves === "string" ? e.detail.resolves : null,
+  pass_at: typeof e.detail?.pass_at === "string" ? e.detail.pass_at : e.at, since: e.at, seq: e.seq,
+});
+
+/** The refusal a pass met last (greatest `pass_at`; the later event on a tie), else null. */
+const latestRefusal = (open: readonly ClaimRefusal[]): ClaimRefusal | null =>
+  open.reduce<ClaimRefusal | null>((best, r) => (!best || r.pass_at >= best.pass_at ? r : best), null);
+
 /** A `stop.on_status` stop recorded on a terminal run (Story 21.5, AC4). */
 export interface StopDetail { condition: "on_status"; state: string; job_id: string }
 
@@ -1047,9 +1067,9 @@ export class Queue {
     return row?.pinned != null && (row.released == null || row.pinned > row.released);
   }
 
-  private event(runId: string, kind: string, from: string | null, to: string, detail?: Record<string, unknown>): void {
+  private event(runId: string, kind: string, from: string | null, to: string, detail?: Record<string, unknown>, at: string = now()): void {
     this.db.query("INSERT INTO events (run_id, at, kind, from_state, to_state, detail) VALUES (?, ?, ?, ?, ?, ?)")
-      .run(runId, now(), kind, from, to, detail && Object.keys(detail).length ? JSON.stringify(detail) : null);
+      .run(runId, at, kind, from, to, detail && Object.keys(detail).length ? JSON.stringify(detail) : null);
   }
 
   private must(runId: string): QueueRun {
@@ -2127,6 +2147,66 @@ export class Queue {
     this.db.transaction(() => {
       const run = this.must(runId);
       this.event(runId, kind, run.state, run.state, detail);
+    }).immediate();
+  }
+
+  /** Story 33.2: the run's open claim refusals — every `claim-refused` since its latest `claim-refusal-cleared`, oldest
+   * first. One event per distinct key (`refuseClaim`), so this is one entry per cause the open episode met. */
+  claimRefusals(runId: string): ClaimRefusal[] {
+    const events = this.events(runId);
+    const cleared = events.findLastIndex((e) => e.kind === CLAIM_REFUSAL_CLEARED);
+    return events.slice(cleared + 1).filter((e) => e.kind === CLAIM_REFUSED).map(claimRefusalOf);
+  }
+
+  /** Story 33.2: the latest open claim refusal of a `queued` run (the one a pass met last, by `pass_at`), else null. */
+  claimRefusal(runId: string): ClaimRefusal | null {
+    if (this.get(runId)?.state !== "queued") return null;
+    return latestRefusal(this.claimRefusals(runId));
+  }
+
+  /** Story 33.2: a drain pass could not claim a `queued` run. One `claim-refused {key, reason, resolves, pass_at}` per
+   * distinct stable `key` (the cause class and its subject, never the volatile text: a pin's reason embeds clipped sbx
+   * stderr, a lock's the holder's pid, host and detail) in the open episode: a key already recorded since the latest
+   * `claim-refusal-cleared` has `pass_at`, `reason` and `resolves` updated in place on that same event (never a second
+   * event, never a flood). Answers whether the event is new (`fresh`, the notifier's cue) and its seq; null when the
+   * run is not `queued`. */
+  refuseClaim(runId: string, key: string, reason: string, resolves: string): { fresh: boolean; seq: number } | null {
+    return this.db.transaction(() => {
+      const run = this.get(runId);
+      if (!run || run.state !== "queued") return null;
+      const at = now();
+      const same = this.claimRefusals(runId).find((r) => r.key === key);
+      if (same) {
+        const row = this.db.query("SELECT detail FROM events WHERE seq = ?").get(same.seq) as { detail: string | null };
+        const detail = { ...(row.detail ? JSON.parse(row.detail) : {}), key, reason, resolves, pass_at: at };
+        this.db.query("UPDATE events SET detail = ? WHERE seq = ?").run(JSON.stringify(detail), same.seq);
+        return { fresh: false, seq: same.seq };
+      }
+      this.event(runId, CLAIM_REFUSED, run.state, run.state, { key, reason, resolves, pass_at: at }, at);
+      const seq = (this.db.query("SELECT last_insert_rowid() AS seq").get() as { seq: number }).seq;
+      return { fresh: true, seq };
+    }).immediate();
+  }
+
+  /** Story 33.2: merge `patch` into one event's detail (the notifier's outcome on a fresh `claim-refused`). */
+  patchEventDetail(seq: number, patch: Record<string, unknown>): void {
+    this.db.transaction(() => {
+      const row = this.db.query("SELECT detail FROM events WHERE seq = ?").get(seq) as { detail: string | null } | null;
+      if (!row) return;
+      this.db.query("UPDATE events SET detail = ? WHERE seq = ?").run(JSON.stringify({ ...(row.detail ? JSON.parse(row.detail) : {}), ...patch }), seq);
+    }).immediate();
+  }
+
+  /** Story 33.2: the claim went through — a run with open claim refusals records `claim-refusal-cleared
+   * {reasons, pass_at}` (the episode closes; a later refusal opens a new one). Answers whether it was recorded. */
+  clearClaimRefusals(runId: string): boolean {
+    return this.db.transaction(() => {
+      const open = this.claimRefusals(runId);
+      const run = this.get(runId);
+      if (!open.length || !run) return false;
+      const at = now();
+      this.event(runId, CLAIM_REFUSAL_CLEARED, run.state, run.state, { reasons: open.map((r) => r.reason), pass_at: at }, at);
+      return true;
     }).immediate();
   }
 

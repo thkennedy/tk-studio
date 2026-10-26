@@ -9,7 +9,7 @@
   "surfaces": {
     "tk-studio-activate": {
       "external_calls": false,
-      "auth_preflight": "none needed — read-only local five-plane check (the tracking plane reads the last sync-back's recorded outcome, never the network); harness auth is the driver's preflight (driver-contract §1)",
+      "auth_preflight": "none needed — read-only local six-plane check (the tracking plane reads the last sync-back's recorded outcome, never the network; the sandbox-login plane reads the engine sandbox's login expiry through a local `sbx exec`, never a token); harness auth is the driver's preflight (driver-contract §1)",
       "drives": [
         {
           "assertion": "headless-clean",

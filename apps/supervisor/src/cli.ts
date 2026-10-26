@@ -109,11 +109,11 @@ import { existsSync, realpathSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import {
   buildWorkerCommand, checkTier, finishStateFor, invokeSkill, lastJsonObject, maxLoginPreflight, MISSING_STATUS_BLOCK,
-  readProjectConfig, registryShow, requireCompatible, resolveStudioRoot, runJobVerb, runProcess, runUv, SbxSandboxMissing, toVmPath, WORKER_RECORD_FAILED, type Tier,
+  readProjectConfig, registryShow, requireCompatible, resolveStudioRoot, runJobVerb, runProcess, runUv, SbxSandboxMissing, toVmPath, WORKER_RECORD_FAILED, type Spawner, type Tier,
 } from "./server";
 import { serve as serveApi } from "./api";
 import { notifier, pluginRoot, tlsConfig, WorkDirMissing, workDir } from "./env";
-import { canonicalPr, prUrl, snapshotOnce, sweepEnds, underBunTest, type HygieneDeps } from "./hygiene";
+import { canonicalPr, prUrl, recordClaimRefusal, snapshotOnce, sweepEnds, underBunTest, type HygieneDeps } from "./hygiene";
 import { rebuildAgents, type RebuildDeps, type RebuildResult } from "./registry";
 import {
   closeOut, closeOutDetail, launchedCloseOutInput, meteredCost, pendingCloseOut, prepareWorktree, priorPr, sweepEngines, type WorktreeDeps,
@@ -178,6 +178,9 @@ export interface RunSummary {
   finish_deferred?: true;
   /** Story 27.2: a tripped guard on an sbx launch run killed its in-VM engine by its recorded pid: the outcome. */
   engine_kill?: WorkerKill;
+  /** Story 33.2: `drain` could not claim the run (it stays `queued`): the reason recorded as `claim-refused` and what
+   * resolves it. */
+  claim_refused?: ClaimRefused;
   /** Story 27.5 (DW-23): `finish` was refused (the studio run already terminal): the refusal and the run's actual
    * state — `mirror` records them as a `finish-refused` event; the reason stays the worker's own. */
   finish_refused?: { error: string; actual_state: string };
@@ -414,7 +417,9 @@ function liveRun(queue: Queue, jobId: string, root: string): QueueRun | undefine
  * (SupervisorConfigInvalid), the project id read from its config file. */
 function resolveBeforeStart(jobId: string, root: string, explicit: OptionLayer, stored: QueueRun | null | undefined): { options: WorkerOptions; config: JobOptions } {
   const config = jobOptions(loadSupervisorConfig(), projectIdOf(root), jobId);
-  // A refusal: the options can never run as given (`drain` ends a stored run `blocked` naming it).
+  // A refusal: the options can never run as given. Story 33.2 (ruling D): `drain` leaves a stored run `queued` on a
+  // TierRefused or SbxSandboxMissing refusal (`placementRefusal`, recorded `claim-refused`) and ends it `blocked`
+  // naming any other.
   try { return { options: resolveWorkerOptions(explicit, storedLayer(stored), config, root), config }; }
   catch (e) { throw refusal(message(e)); }
 }
@@ -908,8 +913,8 @@ export async function drainQueue(opts: RunOptions = {}, verbRunner: VerbRunner =
       try {
         // `undefined` mode: runJob drives the run under the mode recorded on it (else the default).
         const summary = await runJob(r.job_id, r.root, undefined, { ...opts, queue, owner, skipRecover: true, runId: r.run_id });
-        // Report the run's actual queue state when the summary does not (a stop before
-        // the claim, e.g. no Max login, answers `blocked` with no run id while the run stays `queued`).
+        // Report the run's actual queue state when the summary does not (Story 33.2: a refused claim — no Max
+        // login, a failed pin, a refused placement — answers `queued` with its `claim_refused`).
         const now = queue.get(r.run_id)?.state;
         runs.push({
           run_id: r.run_id, job_id: r.job_id, summary: summary.run_id ? summary : { ...summary, run_id: r.run_id },
@@ -1214,6 +1219,104 @@ export class CancelRaced extends RunTerminal {
   }
 }
 
+// ------------------------------------------------------------ Story 33.2: refusals reach the owner
+
+/** A claim `drain` could not make: the reason (recorded as `claim-refused`) and what resolves it. */
+export interface ClaimRefused { reason: string; resolves: string }
+
+/** Story 33.2: a refusal with its stable dedup key (the cause class and its subject, never the volatile reason text);
+ * the key is stored on the `claim-refused` event only, never on a summary or a 0.1.28 surface. */
+interface KeyedRefusal extends ClaimRefused { key: string }
+
+/** What resolves a lock wait (the reason names the holder). */
+export const LOCK_RESOLVES = "the checkout lock's holder ends or is cancelled; the next drain pass claims the run";
+
+/** The sandbox Max login's renewal steps (the global `anthropic` sbx secret is renewed from inside the sandbox). */
+export const renewalSteps = (sb: string): string => `sbx run --name ${sb} → /login → /exit`;
+
+/** What resolves a refused Max-login preflight on the run's tier. */
+export const loginResolves = (options: Pick<WorkerOptions, "tier" | "sandbox">): string =>
+  options.tier === "sbx" && options.sandbox
+    ? `renew the sandbox's Max login: ${renewalSteps(options.sandbox)}; the next drain pass claims the run`
+    : "log the host's claude in to the Max subscription (`claude`, then `/login`); the next drain pass claims the run";
+
+/** What resolves a failed pin. */
+export const pinResolves = (sb: string): string =>
+  `make \`sbx run -d --name ${sb}\` succeed (\`sbx daemon status\` running, the sandbox listed by \`sbx ls\`); the next drain pass pins it again`;
+
+/** Story 33.2 (ruling D): the placement refusals a drained run waits out `queued` — TierRefused and SbxSandboxMissing —
+ * with what resolves each; any other refusal (a broken registry entry, `resolve`, `problems[]`) is null (it still ends
+ * the run `blocked`). */
+export function placementRefusal(reason: string): (ClaimRefused & { key: string }) | null {
+  if (reason.startsWith("TierRefused")) {
+    return { key: "placement:TierRefused", reason, resolves: "a tier of host or sbx: the job's TK_SUPERVISOR_CONFIG `tier` (a tier stored on the run changes only by cancelling it and resubmitting with --tier); the next drain pass claims the run" };
+  }
+  if (reason.startsWith("SbxSandboxMissing")) {
+    return { key: "placement:SbxSandboxMissing", reason, resolves: "a sandbox name: the job's TK_SUPERVISOR_CONFIG `sandbox` (or cancel the run and resubmit with --sandbox); the next drain pass claims the run" };
+  }
+  return null;
+}
+
+/** Record a refusal on the run (`recordClaimRefusal`: the event, and the notifier line when its key is new); answers
+ * it without the key. */
+async function recordedRefusal(queue: Queue, runId: string, r: KeyedRefusal, hygiene?: HygieneDeps): Promise<ClaimRefused> {
+  await recordClaimRefusal(queue, runId, r.key, r.reason, r.resolves, hygiene);
+  return { reason: r.reason, resolves: r.resolves };
+}
+
+/** The summary of a drained run left `queued` by a refused claim. */
+function refusedClaim(queue: Queue, runId: string, jobId: string, r: ClaimRefused): RunSummary {
+  const now = queue.get(runId);
+  return { ok: false, job_id: jobId, run_id: runId, studio_run_id: now?.studio_run_id ?? null, state: now?.state ?? "queued", reason: r.reason, claim_refused: r };
+}
+
+/** Story 33.2: the pin before the claim (moved from the drive's `invokeSkill`): `sbx run -d --name <sb>`, recorded
+ * `pinned` once while that pin stands (a pass that finds it standing adds none) and `pin-failed` once per failure
+ * episode on that sandbox (a pass that fails again updates that event's `error` in place — its clipped stderr may
+ * vary per pass). Null when pinned, else the failure. Never throws. */
+export async function pinBeforeClaim(queue: Queue, runId: string, sb: string, deps: SandboxDeps = {}): Promise<string | null> {
+  const failed = await pinSandbox(sb, deps);
+  try {
+    const last = queue.events(runId).findLast((e) => e.kind === "pinned" || e.kind === "pin-failed" || e.kind === "pin-released");
+    if (failed) {
+      if (last?.kind === "pin-failed" && last.detail?.sandbox === sb) {
+        if (last.detail?.error !== failed) queue.patchEventDetail(last.seq, { error: failed });
+      } else queue.note(runId, "pin-failed", { sandbox: sb, error: failed });
+    } else if (!(last?.kind === "pinned" && last.detail?.sandbox === sb && queue.pinOutstanding(sb))) {
+      queue.note(runId, "pinned", { sandbox: sb });
+    }
+  } catch { /* the run ended meanwhile: the pin answer still stands */ }
+  return failed;
+}
+
+export interface ClaimGateDeps {
+  /** The pin's `sbx` seams. */
+  sbx?: SandboxDeps;
+  /** The Max-login probe's spawner (default `runProcess`). */
+  spawner?: Spawner;
+  /** The notifier's environment and HTTP client. */
+  hygiene?: HygieneDeps;
+}
+
+/** Story 33.2: the drain's gate before it claims queued run `runId` under its resolved `options` — on sbx the pin
+ * (`pinBeforeClaim`), then the Max-login preflight. A refusal is recorded on the run (`claim-refused`, one per distinct
+ * reason, the notifier line when it is new) and answered; the run stays `queued`. Null: the claim may proceed. */
+export async function claimGate(queue: Queue, runId: string, options: WorkerOptions, deps: ClaimGateDeps = {}): Promise<ClaimRefused | null> {
+  if (options.tier === "sbx" && options.sandbox) {
+    // The pin is found through the run's recorded sandbox (`pinOutstanding`, `releasePin`): a queued run whose stored
+    // tier/sandbox differ from the resolved ones (a legacy row; config supplies the sandbox) records them first.
+    const stored = queue.get(runId);
+    if (stored?.state === "queued" && (stored.tier !== options.tier || stored.sandbox !== options.sandbox)) {
+      try { queue.recordRunOptions(runId, { tier: options.tier, sandbox: options.sandbox }); } catch { /* the run moved on meanwhile */ }
+    }
+    const failed = await pinBeforeClaim(queue, runId, options.sandbox, deps.sbx ?? {});
+    if (failed) return recordedRefusal(queue, runId, { key: `pin-failed:${options.sandbox}`, reason: failed, resolves: pinResolves(options.sandbox) }, deps.hygiene);
+  }
+  const login = await maxLoginPreflight(deps.spawner, { tier: options.tier, sandbox: options.sandbox });
+  if (login) return recordedRefusal(queue, runId, { key: "max-login", reason: login, resolves: loginResolves(options) }, deps.hygiene);
+  return null;
+}
+
 export async function runJob(jobId: string, directory: string, permissionMode?: string, opts: RunOptions = {}): Promise<RunSummary> {
   requireStudio(); // StudioRootMissing (AD-15), the contract pin
   requireNotifier(opts.hygiene?.env); // Story 22.3: a misconfigured notifier is a named start error
@@ -1247,9 +1350,21 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
       // Worker options resolved before anything starts: a host bypass is refused (AD-2
       // ruling), an unknown tier or an sbx tier without a sandbox too — nothing queued.
       const stored = opts.runId ? queue.get(opts.runId) : liveRun(queue, jobId, root);
-      ({ options, config } = resolveBeforeStart(jobId, root, explicit, stored));
-      const login = await maxLoginPreflight(undefined, { tier: options.tier, sandbox: options.sandbox });
-      if (login) return { ok: false, job_id: jobId, run_id: null, state: "blocked", reason: login };
+      try { ({ options, config } = resolveBeforeStart(jobId, root, explicit, stored)); }
+      catch (e) {
+        // Story 33.2: a drained run whose placement is refused stays `queued`, its refusal recorded, until it clears.
+        const placement = opts.runId ? placementRefusal(message(e)) : null;
+        if (placement) return await refusedClaim(queue, opts.runId!, jobId, await recordedRefusal(queue, opts.runId!, placement, opts.hygiene));
+        throw e;
+      }
+      if (opts.runId) {
+        // Story 33.2: the drain's gate before the claim — the pin (moved here from the drive), then the preflight.
+        const refused = await claimGate(queue, opts.runId, options, { sbx: sbxDeps(opts.worktree), ...(opts.hygiene ? { hygiene: opts.hygiene } : {}) });
+        if (refused) return refusedClaim(queue, opts.runId, jobId, refused);
+      } else {
+        const login = await maxLoginPreflight(undefined, { tier: options.tier, sandbox: options.sandbox });
+        if (login) return { ok: false, job_id: jobId, run_id: null, state: "blocked", reason: login };
+      }
       v = await validate(jobId, directory, permissionMode, opts.guardCapS);
     } catch (e) { throw e instanceof StartError ? e : new StartError(message(e)); }
 
@@ -1276,12 +1391,22 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
     // Story 27.2 (AC3): every claim rewrites the checkout's starter lock (the queue is the only starter).
     writeStarterLock({ project_id: v.projectId, root: v.root }, opts.worktree?.env ?? process.env);
     if (claim.claimed) await rebuildQuietly(queue, opts.agents); // Story 29.2: every claim rebuilds the agent registry
+    // Story 33.2: the claim went through — the run's open refusals are cleared (`claim-refusal-cleared`).
+    if (claim.claimed) { try { queue.clearClaimRefusals(run.run_id); } catch { /* the claim stands */ } }
     if (!claim.claimed && opts.runId && claim.why !== "lock") return skipped(claim.reason);
+    // Story 33.2: a drained run waiting on a live lock holder records the wait as its claim refusal, keyed on the
+    // holder's run id (its reason's pid, host and detail may change between passes), and answers it as `claim_refused`
+    // beside the existing `waited` (additive).
+    let lockRefused: ClaimRefused | undefined;
+    if (!claim.claimed && opts.runId) {
+      lockRefused = await recordedRefusal(queue, run.run_id, { key: `lock:${claim.holder?.run_id ?? "unknown"}`, reason: claim.reason, resolves: LOCK_RESOLVES }, opts.hygiene);
+    }
     if (!claim.claimed) {
       return {
         waited: claim.why,
         ok: false, job_id: jobId, project_id: v.projectId, run_id: run.run_id, studio_run_id: claim.run.studio_run_id,
         target: v.target, state: claim.run.state, reason: claim.reason, ...(claim.holder ? { holder: claim.holder } : {}),
+        ...(lockRefused ? { claim_refused: lockRefused } : {}),
       };
     }
     let summary: RunSummary;
@@ -1293,7 +1418,8 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
       const workRoot = await prepareWorktree(queue, claim.run, v.projectId, v.root, { ...opts.worktree, tier: eff.tier });
       // Story 22.3: a flagged Godot run is snapshot before the minting verb, once per queue run.
       await snapshotOnce(queue, claim.run, v.projectId, v.root, { env: opts.hygiene?.env });
-      summary = await drive(queue, run.run_id, { ...v, ...eff, workRoot }, opts.worktree);
+      // Story 33.2: a drained run was pinned before its claim (`claimGate`): the drive pins it no second time.
+      summary = await drive(queue, run.run_id, { ...v, ...eff, workRoot }, opts.worktree, opts.runId !== undefined && eff.tier === "sbx");
     }
     catch (e) {
       const err = e instanceof StartError ? e : new StartError(message(e));
@@ -1343,7 +1469,7 @@ export async function endAfterDriveFailure(
 }
 
 /** The 21-1 flow under a claimed lock: snapshot → wake/submit → invoke/finish. */
-async function drive(queue: Queue, queueRunId: string, v: Validated, worktree?: WorktreeDeps): Promise<RunSummary> {
+async function drive(queue: Queue, queueRunId: string, v: Validated, worktree?: WorktreeDeps, prePinned = false): Promise<RunSummary> {
   let started: Started | { summary: RunSummary };
   // "Started" is recorded, with the snapshot, just before the minting verb.
   try {
@@ -1358,7 +1484,8 @@ async function drive(queue: Queue, queueRunId: string, v: Validated, worktree?: 
   }
   if ("summary" in started) return started.summary;
   await recordMinted(queue, queueRunId, started);
-  return finishRun({ ...started, sessionId: randomUUID(), recorder: queueRecorder(queue, queueRunId, sbxDeps(worktree)) });
+  const recorder = queueRecorder(queue, queueRunId, sbxDeps(worktree));
+  return finishRun({ ...started, sessionId: randomUUID(), recorder: prePinned ? { ...recorder, pin: undefined } : recorder });
 }
 
 /** Records the studio run the minting verb created on the queue run, then (Story 21.6) the
@@ -2491,5 +2618,8 @@ export async function main(argv: string[]): Promise<number> {
 }
 
 if (import.meta.main) {
+  // Story 33.1: an uncaught error is one explicit `uncaught:` line (the log tee files it), then exit 70.
+  process.on("uncaughtException", (e) => { console.error(`uncaught: ${message(e)}`); process.exit(70); });
+  process.on("unhandledRejection", (e) => { console.error(`uncaught: ${message(e)}`); process.exit(70); });
   main(process.argv.slice(2)).then((code) => process.exit(code));
 }

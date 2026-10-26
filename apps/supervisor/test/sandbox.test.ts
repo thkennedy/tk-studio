@@ -5,7 +5,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { cancelRun, detectExternal, driveResumes, ExternalRunRefused, finishRun, mirror, queueRecorder, recoverQueue, watchStarterLocks, type ResumedRun, type Started } from "../src/cli";
+import { cancelRun, claimGate, detectExternal, pinBeforeClaim, driveResumes, ExternalRunRefused, finishRun, mirror, queueRecorder, recoverQueue, watchStarterLocks, type ResumedRun, type Started } from "../src/cli";
 import { checkoutKey, Queue, workerMayRun, type Owner, type Probes, type QueueRun, type StudioOps } from "../src/queue";
 import {
   holdArgv, holdEngine, killEngine, killRunEngine, lookupEnginePid, pinSandbox, probeEngine, releasePin, respawnHolds, STARTER, STARTER_LOCK_REFRESH_MS, starterLockPath,
@@ -125,7 +125,80 @@ describe("pin: `sbx run -d --name <sb>` before the preflight's `sbx exec`", () =
     expect(q.events(run.run_id).find((e) => e.kind === "pinned")?.detail).toEqual({ sandbox: SB });
   });
 
-  test("Pin fails → the run ends `blocked` naming the pin; no preflight, no worker", async () => {
+  test("Story 33.2 (ruling D, re-pinned): the drain's pin runs before the claim — a failed pin leaves the run `queued` with one `claim-refused` naming the pin (a repeat pass updates `pass_at`), no preflight, no claim", async () => {
+    sbx.answer({ pin: "fail" });
+    const q = newQueue();
+    const run = q.enqueue({ jobId: "launch-27", root: mkdtempSync(join(tmpdir(), "tk-sup-gate-")), projectId: "p27", definition: LAUNCH, tier: "sbx", sandbox: SB }).run;
+    const spawned: string[][] = [];
+    const gate = () => claimGate(q, run.run_id, { tier: "sbx", sandbox: SB }, { sbx: deps, spawner: spawnerOf(spawned), hygiene: { env: {} } });
+    const { out, calls } = await during(gate);
+    expect(calls).toEqual([["run", "-d", "--name", SB]]);
+    expect(spawned).toEqual([]); // no preflight after a failed pin
+    expect(out?.reason).toStartWith(`sbx pin failed: sbx run -d --name ${SB} exited 1`);
+    expect(out?.resolves).toContain(`sbx run -d --name ${SB}`);
+    const first = q.events(run.run_id).find((e) => e.kind === "claim-refused")!;
+    await gate();
+    expect(q.get(run.run_id)?.state).toBe("queued");
+    expect(kinds(q, run.run_id).filter((k) => k === "claim-refused")).toHaveLength(1);
+    expect(kinds(q, run.run_id).filter((k) => k === "pin-failed")).toHaveLength(1); // no flood either
+    expect(kinds(q, run.run_id)).not.toContain("claimed");
+    const again = q.events(run.run_id).find((e) => e.kind === "claim-refused")!;
+    expect(again.seq).toBe(first.seq);
+    expect(String(again.detail!.pass_at) >= String(first.detail!.pass_at)).toBe(true);
+    expect(q.claimRefusal(run.run_id)?.reason).toBe(out!.reason);
+    // The pin comes back: pinned once, the preflight runs, and the claim may proceed.
+    sbx.answer({});
+    expect(await gate()).toBeNull();
+    expect(await gate()).toBeNull();
+    expect(kinds(q, run.run_id).filter((k) => k === "pinned")).toHaveLength(1);
+    expect(spawned).toEqual([["exec", SB, "env", "-u", "ANTHROPIC_API_KEY", "claude", "auth", "status", "--json"], ["exec", SB, "env", "-u", "ANTHROPIC_API_KEY", "claude", "auth", "status", "--json"]]);
+  });
+
+  test("Story 33.2: the Max-login preflight refuses → `claim-refused` naming the renewal steps, the run stays `queued`; the host tier names the host login", async () => {
+    sbx.answer({});
+    const q = newQueue();
+    const run = q.enqueue({ jobId: "launch-27", root: mkdtempSync(join(tmpdir(), "tk-sup-gate-")), projectId: "p27", definition: LAUNCH, tier: "sbx", sandbox: SB }).run;
+    const loggedOut: Spawner = async () => ({ exit: 0, stderr: "", stdout: JSON.stringify({ loggedIn: false }) });
+    const out = await claimGate(q, run.run_id, { tier: "sbx", sandbox: SB }, { sbx: deps, spawner: loggedOut, hygiene: { env: {} } });
+    expect(out).toEqual({ reason: "harness auth: Max login missing or expired (not logged in)", resolves: `renew the sandbox's Max login: sbx run --name ${SB} → /login → /exit; the next drain pass claims the run` });
+    expect(q.get(run.run_id)?.state).toBe("queued");
+    expect(q.events(run.run_id).find((e) => e.kind === "claim-refused")?.detail).toMatchObject({ reason: out!.reason, resolves: out!.resolves });
+    const host = q.enqueue({ jobId: "host-job", root: mkdtempSync(join(tmpdir(), "tk-sup-gate-")), projectId: "p27", definition: LAUNCH }).run;
+    const before = sbx.calls().length;
+    const h = await claimGate(q, host.run_id, { tier: "host" }, { spawner: loggedOut, hygiene: { env: {} } });
+    expect(sbx.calls().length).toBe(before); // the host tier pins nothing
+    expect(h?.resolves).toContain("/login");
+    expect(h?.resolves).not.toContain("sbx");
+  });
+
+  test("Story 33.2: a pin failing pass after pass on the same sandbox records one `pin-failed`, its `error` updated in place to the latest failure", async () => {
+    const q = newQueue();
+    const run = q.enqueue({ jobId: "launch-27", root: mkdtempSync(join(tmpdir(), "tk-sup-gate-")), projectId: "p27", definition: LAUNCH, tier: "sbx", sandbox: SB }).run;
+    const failing = (stderr: string): SandboxDeps => ({ ...deps, run: async () => ({ exit: 1, stderr, stdout: "" }) });
+    const first = await pinBeforeClaim(q, run.run_id, SB, failing("sandbox busy (pid 101)"));
+    const second = await pinBeforeClaim(q, run.run_id, SB, failing("sandbox busy (pid 202)"));
+    expect(first).toContain("pid 101");
+    expect(second).toContain("pid 202");
+    const failed = q.events(run.run_id).filter((e) => e.kind === "pin-failed");
+    expect(failed).toHaveLength(1);
+    expect(failed[0]!.detail).toEqual({ sandbox: SB, error: second });
+  });
+
+  test("Story 33.2: a queued run with no stored sandbox (config supplies it) records it before the pin — a refused preflight twice leaves one `pinned`", async () => {
+    sbx.answer({});
+    const q = newQueue();
+    const run = q.enqueue({ jobId: "launch-27", root: mkdtempSync(join(tmpdir(), "tk-sup-gate-")), projectId: "p27", definition: LAUNCH }).run;
+    expect(run.sandbox).toBeNull();
+    const loggedOut: Spawner = async () => ({ exit: 0, stderr: "", stdout: JSON.stringify({ loggedIn: false }) });
+    const gate = () => claimGate(q, run.run_id, { tier: "sbx", sandbox: SB }, { sbx: deps, spawner: loggedOut, hygiene: { env: {} } });
+    expect((await gate())?.reason).toContain("Max login");
+    expect((await gate())?.reason).toContain("Max login");
+    expect(kinds(q, run.run_id).filter((k) => k === "pinned")).toHaveLength(1);
+    expect(q.get(run.run_id)).toMatchObject({ state: "queued", tier: "sbx", sandbox: SB });
+    expect(q.pinOutstanding(SB)).toBe(true);
+  });
+
+  test("Pin fails inside a drive (a relaunch's `invokeSkill` pin) → the run ends `blocked` naming the pin; no preflight, no worker", async () => {
     sbx.answer({ pin: "fail" });
     const q = newQueue();
     const { run, wt } = await sbxRun(q, { pinned: false });

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
 import { basename, join, sep } from "node:path";
 import { createApi } from "../src/api";
@@ -177,7 +177,8 @@ describe("the status page (AC1)", () => {
   test("the JSON routes answer as before", async () => {
     const fx = await populated();
     const status = await (await fx.call("GET", "/status")).json() as Record<string, any>;
-    expect(Object.keys(status).sort()).toEqual(["counts", "live", "locks", "ok"]);
+    // Story 33.1 (0.1.28, additive): `log` joins the four.
+    expect(Object.keys(status).sort()).toEqual(["counts", "live", "locks", "log", "ok"]);
     expect((await fx.call("GET", "/nope")).status).toBe(404);
   });
 
@@ -191,7 +192,7 @@ describe("the status page (AC1)", () => {
       answers.push(await res.text());
     }
     expect(new Set(answers).size).toBe(1);
-    expect(Object.keys(JSON.parse(answers[0])).sort()).toEqual(["counts", "live", "locks", "ok"]);
+    expect(Object.keys(JSON.parse(answers[0])).sort()).toEqual(["counts", "live", "locks", "log", "ok"]);
     const page = await fx.call("GET");
     expect(page.headers.get("vary")).toBe("Accept");
     expect(page.headers.get("content-type")).toBe("text/html; charset=utf-8");
@@ -206,6 +207,39 @@ describe("the status page (AC1)", () => {
     const index = await built.call("GET", "/");
     expect(index.status).toBe(200);
     expect(await index.text()).toBe("<!doctype html><title>web</title>");
+  });
+});
+
+describe("the supervisor log section (Story 33.1, AC1)", () => {
+  test("the page shows the log's last lines, redacted, right before the ledger; `no log` and unset work noted", async () => {
+    const work = mkdtempSync(join(tmpdir(), "tk-sup-page-work-"));
+    const at = Date.UTC(2026, 9, 26, 9);
+    const page = async (env: Record<string, string>) => {
+      const fx = fixture({ env });
+      const handler = createApi({ queue: fx.queue, token: TOKEN, env: fx.env, registry: async () => ({ projects: {} }), ledger: LEDGER, web: builtWeb(), now: () => at });
+      return (await handler(new Request(`${BASE}/status`, { headers: { authorization: `Bearer ${TOKEN}`, accept: "text/html" } }))).text();
+    };
+    try {
+      const unset = await page({});
+      expect(unset).toContain('<section id="log"><h2>Supervisor log</h2><p class="note">TK_SUPERVISOR_WORK is not set</p></section>');
+      expect(await page({ TK_SUPERVISOR_WORK: work })).toContain('<section id="log"><h2>Supervisor log</h2><p class="note">no log</p></section>');
+      const dir = join(work, "supervisor", "logs");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "supervisor-2026-10-26.log"), [
+        "2026-10-26T08:00:00.000Z [pacer] started",
+        `2026-10-26T08:00:01.000Z [serve] ${LEAKY} <b>`,
+        "2026-10-26T08:30:00.000Z [keeper] stopped (exit 1)",
+      ].join("\n") + "\n");
+      const body = await page({ TK_SUPERVISOR_WORK: work });
+      const section = body.slice(body.indexOf('<section id="log">'), body.indexOf('<section id="ledger">'));
+      expect(section).toContain("(last 3 lines)");
+      expect(section).toContain("2026-10-26T08:00:00.000Z [pacer] started\n");
+      expect(section).toContain("[keeper] stopped (exit 1)");
+      expect(section).toContain("&lt;b&gt;");
+      for (const v of PLANTED) expect(section).not.toContain(v);
+      expect(body.indexOf('<section id="log">')).toBeLessThan(body.indexOf('<section id="ledger">'));
+      expect(body.indexOf('<section id="workspaces">')).toBeLessThan(body.indexOf('<section id="log">'));
+    } finally { rmSync(work, { recursive: true, force: true }); }
   });
 });
 

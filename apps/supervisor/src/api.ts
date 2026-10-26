@@ -127,6 +127,7 @@ import { underBunTest } from "./hygiene";
 import { checkReplyBody, issueRead, postReply, registryRoot, runCost, type IssueReadResult, type ReplyAnswer, type ReplyBody } from "./inbox";
 import { OfficeHub, readInbox, type InboxFile, type OfficeEvent } from "./office";
 import { gatherPage, holderOf, readLedgerTail, redactLedgerLine, renderPage } from "./page";
+import { readLogTail } from "./log";
 import { readAgents, type RebuildResult } from "./registry";
 import { contentType, resolveWebPath, WEB_BUILD_COMMAND, webRoot, type WebOptions } from "./web";
 import { registryShow } from "./server";
@@ -710,9 +711,11 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
   function status(): Response {
     const runs = queue.runs();
     const counts = stateCounts(runs);
-    const live = runs.filter((r) => !isTerminal(r.state));
+    // Story 33.2 (0.1.28, additive): each live run carries its latest open claim refusal (`claimRefusalView`).
+    const live = runs.filter((r) => !isTerminal(r.state)).map((r) => ({ ...r, claim_refused: claimRefusalView(queue, r.run_id) }));
     const locks = queue.locks().map((l) => ({ checkout: l.checkout, root: l.root, acquired: l.acquired, holder: holderOf(l) }));
-    return json(200, { ok: true, counts, live, locks }, { vary: "Accept" });
+    // Story 33.1 (0.1.28, additive): the supervisor log's last lines, each redacted (`readLogTail`).
+    return json(200, { ok: true, counts, live, locks, log: readLogTail(deps.env ?? process.env, clock) }, { vary: "Accept" });
   }
 
   /** Story 30.6 (0.1.25, additive): the office snapshot with `supervisor {version, counts}` and the ledger tail —
@@ -875,7 +878,7 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
   /** The status page: reads only (queue, store, registry), rendered to HTML. A cookie session's page
    * carries its CSRF token in each live run's cancel form. */
   async function page(csrf?: string): Promise<Response> {
-    const data = await gatherPage({ queue, token: deps.token, env: deps.env, registry: deps.registry ?? (() => registryShow()), ledger: deps.ledger, office, web: deps.web ?? {} });
+    const data = await gatherPage({ queue, token: deps.token, env: deps.env, registry: deps.registry ?? (() => registryShow()), ledger: deps.ledger, office, web: deps.web ?? {}, now: clock });
     return new Response(renderPage(data, csrf ? { csrf } : {}), { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
   }
 
@@ -1216,11 +1219,20 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
         // Story 32.7 (0.1.27 additive): the run's metered cost — the ledger `job-run` `total_cost_usd` of its studio run
         // (`inbox.ts` `runCost`), null with no studio run id or no metered line.
         const cost_usd = run.studio_run_id ? runCost(ledgerPath(deps.env ?? process.env, deps.ledger), run.studio_run_id) : null;
-        return json(200, { ok: true, run_id: run.run_id, studio_run_id: run.studio_run_id, state: run.state, cost_usd, run, events: queue.events(runId) });
+        // Story 33.2 (0.1.28 additive): the latest reason a drain pass could not claim the queued run, else null.
+        const claim_refused = claimRefusalView(queue, runId);
+        return json(200, { ok: true, run_id: run.run_id, studio_run_id: run.studio_run_id, state: run.state, cost_usd, claim_refused, run, events: queue.events(runId) });
       }
       return fail(404, "NotFound", { path });
     }
   }
+}
+
+/** Story 33.2: a queued run's latest open claim refusal as the routes serve it — `{reason, resolves, pass_at, since}`
+ * (`Queue.claimRefusal`), else null (no open refusal, or the run is no longer `queued`). */
+export function claimRefusalView(queue: Queue, runId: string): { reason: string; resolves: string | null; pass_at: string; since: string } | null {
+  const r = queue.claimRefusal(runId);
+  return r ? { reason: r.reason, resolves: r.resolves, pass_at: r.pass_at, since: r.since } : null;
 }
 
 /** The part of `Bun.serve` `serve` uses (the injection seam: tests never bind a socket). */

@@ -253,8 +253,14 @@ export const REFUSED_UNDER_TEST = "refused: a real notifier send under bun test 
 export async function notify(
   n: Exclude<Notifier, { kind: "none" }>, notice: EndNotice, fetchFn: Fetch = fetch,
 ): Promise<{ ok: true; via: string } | { ok: false; via: string; error: string }> {
+  return sendText(n, noticeText(notice), fetchFn);
+}
+
+/** One composed text through the selected notifier (`notify`'s send; Story 33.2's claim-refusal line too). */
+export async function sendText(
+  n: Exclude<Notifier, { kind: "none" }>, text: string, fetchFn: Fetch = fetch,
+): Promise<{ ok: true; via: string } | { ok: false; via: string; error: string }> {
   if ((fetchFn as unknown) === globalThis.fetch && underBunTest()) return { ok: false, via: n.kind, error: REFUSED_UNDER_TEST };
-  const text = noticeText(notice);
   try {
     const res = n.kind === "ntfy"
       ? await fetchFn(n.url, { method: "POST", body: text, headers: { "content-type": "text/plain; charset=utf-8" }, signal: AbortSignal.timeout(SEND_TIMEOUT_MS) })
@@ -268,6 +274,39 @@ export async function notify(
     // Scrub before the cut: a cut could split a secret and leave a prefix of it unmatched.
     return { ok: false, via: n.kind, error: scrubNotifier(n, message(e)).slice(0, 300) };
   }
+}
+
+// ------------------------------------------------------------ Story 33.2: a claim the drain could not make
+
+/** The one notifier line of a new claim refusal: the run id, the reason and what resolves it (within
+ * NOTICE_MAX_BYTES; only the reason is ever cut). */
+export function claimRefusedLine(runId: string, reason: string, resolves: string): string {
+  const compose = (r: string) => `supervisor: run ${runId} stays queued, claim refused: ${r} — resolve: ${resolves}`;
+  const flat = reason.replace(/\s*\r?\n\s*/g, " ");
+  if (utf8Bytes(compose(flat)) <= NOTICE_MAX_BYTES) return compose(flat);
+  return compose(`${clipBytes(flat, NOTICE_MAX_BYTES - utf8Bytes(compose(TRUNCATED_MARKER)))}${TRUNCATED_MARKER}`);
+}
+
+/** Story 33.2: record that a drain pass could not claim queued run `runId` (`Queue.refuseClaim`: one `claim-refused`
+ * per distinct stable `key` — `pin-failed:<sandbox>`, `lock:<holder run_id>`, `max-login`,
+ * `placement:<TierRefused|SbxSandboxMissing>` — a repeat updating `pass_at`, `reason` and `resolves` in place) and,
+ * for a key new to the run's open episode only, send one notifier line naming the run and what resolves it; the
+ * send's outcome lands on the event as `notify`. Never throws: answers whether the refusal was new. */
+export async function recordClaimRefusal(
+  queue: Queue, runId: string, key: string, reason: string, resolves: string, deps: HygieneDeps = {},
+): Promise<boolean> {
+  let fresh: { fresh: boolean; seq: number } | null;
+  try { fresh = queue.refuseClaim(runId, key, reason, resolves); } catch { return false; }
+  if (!fresh?.fresh) return false;
+  let outcome: Record<string, unknown>;
+  try {
+    const selected = notifier(deps.env ?? process.env);
+    outcome = selected.kind === "none"
+      ? { ok: false, skipped: "no notifier configured (TK_SUPERVISOR_NOTIFY is unset)" }
+      : await sendText(selected, claimRefusedLine(runId, reason, resolves), deps.fetch ?? fetch);
+  } catch (e) { outcome = { ok: false, error: message(e).slice(0, 300) }; }
+  try { queue.patchEventDetail(fresh.seq, { notify: outcome }); } catch { /* the event stands without it */ }
+  return true;
 }
 
 // ------------------------------------------------------------ the per-run transcript copy

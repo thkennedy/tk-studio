@@ -4,7 +4,7 @@ import { hostname, tmpdir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
-  drainQueue, finishRun, guardsFor, launchedEngine, main, mirror, recoverAfterTimeout, recoverQueue, runJob, startRun, type TimeoutContext, type Validated,
+  drainQueue, finishRun, guardsFor, launchedEngine, main, mirror, recoverAfterTimeout, recoverQueue, runJob, startRun, type RunSummary, type TimeoutContext, type Validated,
 } from "../src/cli";
 import { claudeBin, studioRoot, StudioRootMissing } from "../src/env";
 import { END_HYGIENE_EVENTS } from "../src/hygiene";
@@ -608,6 +608,25 @@ describe.skipIf(!canRunE2E)("CLI end to end: studio-health (faked worker)", () =
     fx.expectNothingWoken();
   }, 120_000);
 
+  test("Story 33.2: drained with no Max login → the run stays `queued` with one `claim-refused` naming the login and the fix (two passes, one event), nothing woken", () => {
+    const fx = e2eFixture("unused", false);
+    const queued = JSON.parse(fx.submit().stdout);
+    for (let pass = 0; pass < 2; pass++) {
+      const res = fx.bare("drain");
+      expect(res.status).toBe(1);
+      expect(JSON.parse(res.stdout).runs[0]).toMatchObject({ run_id: queued.run_id, summary: { ok: false, state: "queued", reason: expect.stringContaining("Max login") } });
+    }
+    expect(fx.queue((q) => q.get(queued.run_id))!.state).toBe("queued");
+    const refused = fx.queue((q) => q.events(queued.run_id).filter((e) => e.kind === "claim-refused"));
+    expect(refused).toHaveLength(1);
+    expect(refused[0]!.detail).toMatchObject({ reason: expect.stringContaining("Max login"), resolves: expect.stringContaining("/login") });
+    // The notifier is not configured under the suite: the skip is recorded on the event, once.
+    expect(refused[0]!.detail!.notify).toMatchObject({ ok: false });
+    expect(fx.queue((q) => q.events(queued.run_id).map((e) => e.kind))).not.toContain("claimed");
+    expect(fx.calls().some((c) => c.args[0] === "-p")).toBe(false);
+    fx.expectNothingWoken();
+  }, 180_000);
+
   test("unknown job → non-zero naming the problem, nothing woken", () => {
     const fx = e2eFixture("unused");
     const res = fx.run("no-such-job");
@@ -1068,9 +1087,9 @@ describe.skipIf(!canRunE2E)("CLI end to end: restart recovery and drain", () => 
     const queued = JSON.parse(fx.submit().stdout);
     const res = fx.bare("drain");
     expect(res.status).toBe(1);
-    // The entry reports the run's actual queue state (`queued`), and the summary names the drained run.
+    // The summary names the drained run and its actual queue state (`queued`); Story 33.2: the refusal it records.
     const entry = JSON.parse(res.stdout).runs[0];
-    expect(entry).toMatchObject({ run_id: queued.run_id, state: "queued", summary: { ok: false, state: "blocked", run_id: queued.run_id } });
+    expect(entry).toMatchObject({ run_id: queued.run_id, summary: { ok: false, state: "queued", run_id: queued.run_id, claim_refused: { reason: expect.stringContaining("Max login") } } });
     expect(entry.summary.reason).toContain("Max login");
     expect(fx.queue((q) => q.get(queued.run_id))).toMatchObject({ state: "queued" });
     fx.expectNothingWoken();
@@ -1320,17 +1339,50 @@ describe.skipIf(!canRunE2E)("CLI end to end: worker tiers (Story 21.4)", () => {
     expect(flagValue(worker.args, "--permission-mode")).toBe("auto");
   }, 180_000);
 
-  test("stored drive: an invalid stored tier ends the drained run `blocked` naming it", () => {
+  test("Story 33.2 (ruling D, re-pinned): an invalid stored tier leaves the drained run `queued` with one `claim-refused` naming it; once it clears the next drain claims it (`claim-refusal-cleared`)", () => {
     const fx = e2eFixture(BLOCK_OK);
     const queued = JSON.parse(fx.submit().stdout);
     fx.queue((q) => q.db.run("UPDATE runs SET tier = 'gpu' WHERE run_id = ?", [queued.run_id]));
     const res = fx.bare("drain");
     expect(res.status).toBe(1);
-    const run = fx.queue((q) => q.get(queued.run_id))!;
-    expect(run.state).toBe("blocked");
-    expect(run.reason).toContain("TierRefused");
+    expect(JSON.parse(res.stdout).runs[0]).toMatchObject({ run_id: queued.run_id, summary: { ok: false, state: "queued", claim_refused: { reason: expect.stringContaining("TierRefused") } } });
+    let run = fx.queue((q) => q.get(queued.run_id))!;
+    expect(run.state).toBe("queued");
     expect(fx.calls().some((c) => c.args[0] === "-p")).toBe(false);
-  }, 180_000);
+    const refused = () => fx.queue((q) => q.events(queued.run_id).filter((e) => e.kind === "claim-refused"));
+    expect(refused()).toHaveLength(1);
+    expect(refused()[0]!.detail).toMatchObject({ reason: expect.stringContaining("TierRefused"), resolves: expect.stringContaining("tier") });
+    const firstPass = String(refused()[0]!.detail!.pass_at);
+    // A second pass over the same reason: the same event, `pass_at` moved, never a second event.
+    expect(fx.bare("drain").status).toBe(1);
+    expect(refused()).toHaveLength(1);
+    expect(String(refused()[0]!.detail!.pass_at) >= firstPass).toBe(true);
+    // The reason clears: the next pass claims the run and records the clearing.
+    fx.queue((q) => q.db.run("UPDATE runs SET tier = 'host' WHERE run_id = ?", [queued.run_id]));
+    expect(fx.bare("drain").status).toBe(0);
+    run = fx.queue((q) => q.get(queued.run_id))!;
+    expect(run.state).toBe("complete");
+    const ks = fx.queue((q) => q.events(queued.run_id).map((e) => e.kind));
+    expect(ks.filter((k) => k === "claim-refusal-cleared")).toHaveLength(1);
+    expect(ks.indexOf("claim-refusal-cleared")).toBeGreaterThan(ks.indexOf("claimed"));
+  }, 240_000);
+
+  test("Story 33.2 (ruling D): an sbx tier with no sandbox (SbxSandboxMissing) leaves the drained run `queued` with one `claim-refused` naming it across passes, nothing woken", () => {
+    const fx = e2eFixture(BLOCK_OK);
+    const queued = JSON.parse(fx.submit().stdout);
+    fx.queue((q) => q.db.run("UPDATE runs SET tier = 'sbx', sandbox = NULL WHERE run_id = ?", [queued.run_id]));
+    for (let pass = 0; pass < 2; pass++) {
+      const res = fx.bare("drain");
+      expect(res.status).toBe(1);
+      expect(JSON.parse(res.stdout).runs[0]).toMatchObject({ run_id: queued.run_id, summary: { ok: false, state: "queued", claim_refused: { reason: expect.stringContaining("SbxSandboxMissing") } } });
+    }
+    expect(fx.queue((q) => q.get(queued.run_id))!.state).toBe("queued");
+    const refused = fx.queue((q) => q.events(queued.run_id).filter((e) => e.kind === "claim-refused"));
+    expect(refused).toHaveLength(1);
+    expect(refused[0]!.detail).toMatchObject({ key: "placement:SbxSandboxMissing", reason: expect.stringContaining("SbxSandboxMissing"), resolves: expect.stringContaining("sandbox") });
+    expect(fx.queue((q) => q.events(queued.run_id).map((e) => e.kind))).not.toContain("claimed");
+    expect(fx.calls().some((c) => c.args[0] === "-p")).toBe(false);
+  }, 240_000);
 
   test("a tier frozen at enqueue never mixes with a mode configured for another tier: stored host + config sbx/bypass → drained on host under auto", () => {
     const cfgDir = mkdtempSync(join(tmpdir(), "tk-sup-cfg-"));
@@ -1776,6 +1828,53 @@ process.exit(${exit});
     }
     expect(fx.calls().some((c) => c.args[0] === "-p")).toBe(false);
   }, 180_000);
+
+  test("Story 33.2 (AC1): a drained run behind a checkout lock held by a live holder stays `queued` with exactly one `claim-refused` naming the holder across passes and one notifier line; once the lock frees the next pass claims it (`claim-refusal-cleared`)", async () => {
+    const fx = e2eFixture(`{"status":"complete","intent":"tk-studio-activate","artifacts":[]}`);
+    // A live holder that is not this process (the drain's own recovery would read this pid under another nonce as a
+    // dead supervisor): the test runner's parent, alive for the test's life.
+    const me = { pid: process.ppid, host: hostname(), nonce: "lock-holder-33-2" };
+    const prev = { home: process.env.TK_STUDIO_HOME, bin: process.env.CLAUDE_BIN, cfg: process.env.CLAUDE_CONFIG_DIR };
+    process.env.TK_STUDIO_HOME = fx.store;
+    process.env.CLAUDE_BIN = fx.fake;
+    process.env.CLAUDE_CONFIG_DIR = join(fx.store, "claude-config");
+    const q = new Queue(fx.queueDb);
+    const f = recordingFetch();
+    try {
+      const holder = q.enqueue({ jobId: "other-job", root: fx.project, definition: { id: "other-job" }, owner: me }).run;
+      expect((await q.claim(holder.run_id, me)).claimed).toBe(true);
+      const queued = JSON.parse(fx.submit().stdout);
+      const refused = () => q.events(queued.run_id).filter((e) => e.kind === "claim-refused");
+      for (let pass = 0; pass < 2; pass++) {
+        const report = await drainQueue({ queue: q, hygiene: { env: NTFY, fetch: f.fetchFn } });
+        expect(report.runs).toMatchObject([{ run_id: queued.run_id,
+          summary: { ok: false, state: "queued", waited: "lock", claim_refused: { reason: expect.stringContaining(holder.run_id) } } }]);
+        expect(Object.keys((report.runs[0] as { summary: RunSummary }).summary.claim_refused!).sort()).toEqual(["reason", "resolves"]);
+      }
+      expect(q.get(queued.run_id)!.state).toBe("queued");
+      expect(refused()).toHaveLength(1);
+      expect(refused()[0]!.detail).toMatchObject({ key: `lock:${holder.run_id}`, reason: expect.stringContaining(`checkout lock held by run ${holder.run_id}`), notify: { ok: true, via: "ntfy" } });
+      expect(f.bodies).toHaveLength(1);
+      expect(f.bodies[0]).toContain(`run ${queued.run_id} stays queued, claim refused:`);
+      expect(f.bodies[0]).toContain(holder.run_id);
+      expect(fx.calls().some((c) => c.args[0] === "-p")).toBe(false);
+      // The lock frees: the next pass claims the run and records the clearing once.
+      q.end(holder.run_id, "complete");
+      const drained = fx.bare("drain");
+      expect(drained.status).toBe(0);
+      expect(q.get(queued.run_id)!.state).toBe("complete");
+      const ks = q.events(queued.run_id).map((e) => e.kind);
+      expect(ks.filter((k) => k === "claim-refused")).toHaveLength(1);
+      expect(ks.filter((k) => k === "claim-refusal-cleared")).toHaveLength(1);
+      expect(ks.indexOf("claim-refusal-cleared")).toBeGreaterThan(ks.indexOf("claimed"));
+      expect(f.bodies).toHaveLength(1);
+    } finally {
+      for (const [k, v] of [["TK_STUDIO_HOME", prev.home], ["CLAUDE_BIN", prev.bin], ["CLAUDE_CONFIG_DIR", prev.cfg]] as const) {
+        if (v === undefined) delete process.env[k]; else process.env[k] = v;
+      }
+      q.close();
+    }
+  }, 240_000);
 
   test("a snapshot that fails (robocopy exit 8) ends the run `blocked` before wake: no studio run, no worker", () => {
     const work = mkdtempSync(join(tmpdir(), "tk-sup-e2e-work-"));

@@ -1,4 +1,4 @@
-"""tk-studio-activate — five-plane health/drift check (AD-13). Read-only, loud.
+"""tk-studio-activate — six-plane health/drift check (AD-13). Read-only, loud.
 
 Planes checked:
   bmad-base  installed _bmad/_config/manifest.yaml versions vs the bmad.lock pins,
@@ -31,6 +31,15 @@ Planes checked:
              and _bmad-output/tracking/sync-state.json only — never a network
              call. One case is named (field `case`): not-bound | never-run |
              ok | stale | token-missing | unreachable | deactivated | auth
+  sandbox-login  the engine sandbox's Max login (Story 33.2, operator ruling
+             C): refreshTokenExpiresAt and loggedIn read through `sbx exec`
+             (lib/sandbox_login.py; never a token) for each sandbox the
+             supervisor config (TK_SUPERVISOR_CONFIG jobs.*.sandbox) names;
+             `sbx daemon status` first, then `sbx ls`, `sbx exec` only on a
+             running sandbox. One case: ok (ok) | expiring (drift, 7 days
+             or fewer) | expired (error, or logged out) | no-sandbox
+             (missing: none configured, sbx absent, the daemon down, the
+             sandbox stopped)
 
 Per-plane status: ok | drift | missing | error. Overall:
   clean  → exit 0, drift-detection{result: clean}
@@ -55,6 +64,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
 import re
 import time
@@ -69,6 +80,7 @@ import bmadlock  # noqa: E402
 import config as configlib  # noqa: E402
 import ledger  # noqa: E402
 import registry  # noqa: E402
+import sandbox_login  # noqa: E402
 import store  # noqa: E402
 import vault  # noqa: E402
 # the skills-dir plane moved verbatim to lib/skills_plane.py (Story 25.5) so
@@ -588,6 +600,64 @@ def check_tracking(directory: Path, now: datetime | None = None) -> dict:
     return plane
 
 
+SANDBOX_LOGIN_STATUS = {sandbox_login.OK: "ok", sandbox_login.EXPIRING: "drift",
+                        sandbox_login.EXPIRED: "error",
+                        sandbox_login.NO_SANDBOX: "missing"}
+SBX_TIMEOUT = 30   # seconds per sbx call, at most (the plane's budget caps it)
+# the whole plane's budget: every sbx call together, well below the
+# conformance runner's 60 s DEFAULT_TIMEOUT on this script
+SANDBOX_LOGIN_BUDGET = sandbox_login.BUDGET_S
+
+
+def _sbx_runner(args: list[str], timeout: float = SBX_TIMEOUT):
+    """One bounded, argv-only sbx call (FileNotFoundError when absent)."""
+    exe = shutil.which(args[0])
+    if exe is None:
+        raise FileNotFoundError(args[0])
+    return subprocess.run([exe, *args[1:]], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace",
+                          timeout=min(SBX_TIMEOUT, timeout),
+                          stdin=subprocess.DEVNULL)
+
+
+def check_sandbox_login(env=None, run=None, now=None,
+                        clock=time.monotonic) -> dict:
+    """Story 33.2: the sixth plane. The sandboxes come from the supervisor
+    config alone (ruling A); the read is lib/sandbox_login.py's (ruling B's
+    order); the case maps onto the existing statuses (ruling C). Every sbx
+    call shares one ``SANDBOX_LOGIN_BUDGET`` (each given the time left); a
+    spent budget reads ``missing`` (no-sandbox) like a daemon that is down.
+    ``run(argv)`` is the test seam (the deadline is still checked before each
+    call)."""
+    env = os.environ if env is None else env
+    plane = {"plane": "sandbox-login", "status": "missing",
+             "case": sandbox_login.NO_SANDBOX}
+    path = (env.get("TK_SUPERVISOR_CONFIG") or "").strip()
+    if not path:
+        plane.update(detail="TK_SUPERVISOR_CONFIG is not set: no engine "
+                            "sandbox configured",
+                     fix=sandbox_login.FIX_NO_CONFIG)
+        return plane
+    try:
+        text = Path(path).read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        plane.update(detail=f"TK_SUPERVISOR_CONFIG {path} is unreadable "
+                            f"({exc}): no engine sandbox read",
+                     fix="point TK_SUPERVISOR_CONFIG at the supervisor's "
+                         "config file")
+        return plane
+    call = (lambda args, _left: run(args)) if run else _sbx_runner
+    reading = sandbox_login.read_logins(
+        sandbox_login.config_sandboxes(text), call,
+        time.time() if now is None else now,
+        deadline=sandbox_login.Deadline(SANDBOX_LOGIN_BUDGET, clock))
+    plane.update(status=SANDBOX_LOGIN_STATUS[reading["case"]],
+                 case=reading["case"], detail=reading["detail"])
+    if reading["fix"] and reading["case"] != sandbox_login.OK:
+        plane["fix"] = reading["fix"]
+    return plane
+
+
 def main(argv: list[str] | None = None) -> int:
     # Headless output must survive a cp1252 Windows console: payloads are
     # arbitrary unicode and must always print (AD-11).
@@ -626,6 +696,7 @@ def main(argv: list[str] | None = None) -> int:
         check_store,
         lambda: check_vault(directory),
         lambda: check_tracking(directory),
+        check_sandbox_login,
     ):
         started = time.monotonic()
         plane = check()
