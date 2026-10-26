@@ -11,6 +11,10 @@ roster fetch when ``--roster`` is a URL or absent. The cut-over checks
 (Story 28.4, Windows only) start nothing: the Startup ``.lnk`` is parsed in
 Python and the git top-level is found by walking up for ``.git``.
 
+The supervisor log check (Story 33.1) reads the newest
+``<TK_SUPERVISOR_WORK>/supervisor/logs/supervisor-<date>.log`` and nothing
+else: no process, no network, the file never written.
+
 Doctor's own status is ``complete`` whatever the checks find; ``reason``
 names every failing check. Every non-``pass`` check carries a ``fix``.
 """
@@ -21,6 +25,7 @@ import re
 import shutil
 import ssl
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Mapping
 
@@ -545,6 +550,116 @@ def check_supervisor(ctx, fields: dict, roster: dict | None,
     return _check(name, FAIL, f"{where}; {url} does not answer", FIX_START)
 
 
+# --- the supervisor's log file (Story 33.1, hole 66) ------------------------
+
+LOG_DAY_FILE = re.compile(r"supervisor-\d{4}-\d{2}-\d{2}\.log")
+# `<ISO UTC time> [<tag>] <text>` (apps/supervisor/src/log.ts formatLine)
+LOG_LINE = re.compile(r"(\S+) \[(serve|tick|drain|keeper|pacer)\] (.*)")
+
+
+def _age(seconds: float) -> str:
+    s = max(0, int(seconds))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h"
+    return f"{s // 86400}d"
+
+
+def _last_end(text: str) -> tuple[str, str, float | None] | None:
+    """The last line whose text after the tag starts with ``stopped`` or
+    ``uncaught``: the line, its kind and its stamp (epoch seconds, None when
+    the stamp does not parse)."""
+    for line in reversed(text.splitlines()):
+        m = LOG_LINE.fullmatch(line.strip())
+        if not m:
+            continue
+        kind = next((k for k in ("stopped", "uncaught")
+                     if m.group(3).startswith(k)), None)
+        if kind is None:
+            continue
+        try:
+            stamp = datetime.fromisoformat(
+                m.group(1).replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            stamp = None
+        return line.strip(), kind, stamp
+    return None
+
+
+_SECRET_NAME = re.compile(r"^TK_SUPERVISOR_.*(?:TOKEN|SECRET)", re.IGNORECASE)
+_BEARER = re.compile(r"\b(Bearer)(\s+)[^\s\"',;]+", re.IGNORECASE)
+_BASIC = re.compile(r"\b(Basic)(\s+)[A-Za-z0-9+/=]{8,}", re.IGNORECASE)
+
+
+def _redact_log_line(ctx, line: str) -> str:
+    """The page's rule, in brief (NFR5): every ``TK_SUPERVISOR_*TOKEN*`` or
+    ``*SECRET*`` value (read as ``TK_SUPERVISOR_WORK`` is) becomes
+    ``[redacted]``, then a ``Bearer``/``Basic`` credential becomes
+    ``<scheme> [redacted]``."""
+    names = set(ctx.env)
+    store_names = getattr(ctx.env_store, "names", None)
+    if ctx.plat.windows and callable(store_names):
+        try:
+            names.update(store_names())
+        except OSError:
+            pass
+    values = sorted({v.strip() for v in (apps._var(ctx, n) or ""
+                                         for n in names
+                                         if _SECRET_NAME.match(n))
+                     if v.strip()}, key=len, reverse=True)
+    for value in values:
+        line = line.replace(value, "[redacted]")
+    line = _BEARER.sub(lambda m: f"{m.group(1)}{m.group(2)}[redacted]", line)
+    return _BASIC.sub(lambda m: f"{m.group(1)}{m.group(2)}[redacted]", line)
+
+
+def check_supervisor_log(ctx, fields: dict) -> dict:
+    name = "supervisor-log"
+    work = apps._var(ctx, "TK_SUPERVISOR_WORK")
+    if not work:
+        return _check(name, SKIPPED, "TK_SUPERVISOR_WORK not set (no log "
+                      "folder to read)",
+                      "set TK_SUPERVISOR_WORK (runbook §4.2): start.ps1 then "
+                      "logs under <work>\\supervisor\\logs")
+    folder = Path(work) / "supervisor" / "logs"
+    try:
+        files = sorted(p for p in folder.iterdir()
+                       if LOG_DAY_FILE.fullmatch(p.name) and p.is_file()) \
+            if folder.is_dir() else []
+    except OSError:
+        files = []
+    if not files:
+        return _check(name, WARN, f"no log: {folder} holds no "
+                      "supervisor-<date>.log",
+                      f"start the supervisor: start.ps1 writes {folder} "
+                      "(TK_SUPERVISOR_WORK set)")
+    newest = files[-1]
+    probe = fields.get("probe")
+    answers = bool(probe and probe.get("answers"))
+    try:
+        text = newest.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return _check(name, WARN, f"{newest} unreadable: {exc}",
+                      "check the log file's permissions" if answers
+                      else FIX_START)
+    end = _last_end(text)
+    age = None if end is None or end[2] is None \
+        else _age(ctx.now() - end[2])
+    if answers:
+        if end is None:
+            return _check(name, PASS, f"{newest}; no stopped/uncaught line")
+        when = f"{age} ago" if age else "at an unreadable time"
+        return _check(name, PASS, f"{newest}; last {end[1]} line {when}")
+    if end is None:
+        return _check(name, WARN, f"{newest}: no stopped/uncaught line "
+                      "(the API does not answer)", FIX_START)
+    return _check(name, WARN, f"{newest}: {_redact_log_line(ctx, end[0])} "
+                  f"({age + ' ago' if age else 'age unknown'})", FIX_START)
+
+
 # --- the cut-over (Story 28.4): root, registry, trust, Startup shortcut -----
 
 TARGET = "C:\\GitHub\\tk-studio\\apps\\supervisor"     # runbook §4.3
@@ -961,6 +1076,7 @@ def run_doctor(ctx, *, roster: str | None, channel: str, fetch,
         check_tailscale_cert(ctx),
         supervisor,
         *check_cut_over(ctx, fields, supervisor),
+        check_supervisor_log(ctx, fields),
         check_stale_slots(ctx),
         check_studio_web(ctx, loaded, channel),
         check_cli_helper(ctx),

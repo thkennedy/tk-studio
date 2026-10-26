@@ -15,6 +15,7 @@ import ssl
 import sys
 import unittest
 from contextlib import redirect_stdout
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -157,6 +158,17 @@ class DoctorCase(AppsCase):
         os.utime(path, (NOW - age_days * DAY,) * 2)
         return path
 
+    def supervisor_log(self, lines: list[str], day: str = "2033-05-18"
+                       ) -> Path:
+        """Story 33.1: a day file under ``TK_SUPERVISOR_WORK`` (set here)."""
+        work = self.tmp / "work"
+        self.env["TK_SUPERVISOR_WORK"] = str(work)
+        path = work / "supervisor" / "logs" / f"supervisor-{day}.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(f"{line}\n" for line in lines),
+                        encoding="utf-8")
+        return path
+
 
 class AllFailing(DoctorCase):
     plat = WINDOWS
@@ -231,6 +243,7 @@ class AllPassing(DoctorCase):
         (self.root / "bin" / "tk-studio").write_text("cli")
         self.env["PATH"] += os.pathsep + str(self.root / "bin")
         self.env["TK_SUPERVISOR_TLS_CERT"] = str(self.cert(10))
+        self.supervisor_log([f"{stamp(NOW - 60)} [pacer] stopped (Ctrl+C)"])
         before = self.snapshot()
         result, code = self.doctor(roster=roster)
         self.assertEqual((code, result["reason"]), (0, None), result)
@@ -240,7 +253,7 @@ class AllPassing(DoctorCase):
         self.assertEqual(sorted(statuses), sorted(
             ["claude-code", "plugin", "store", "sbx-daemon",
              "folder-trust:proj", "path-launcher", "tailscale-cert",
-             "supervisor", "studio-web"]))
+             "supervisor", "supervisor-log", "studio-web"]))
         for check in result["checks"]:
             if check["status"] == "pass":
                 self.assertIsNone(check["fix"])
@@ -751,6 +764,101 @@ class Supervisor(DoctorCase):
             "cli-update-helper"]
         self.assertEqual(check["status"], "warn")
         self.assertTrue((tools / "cli-update.cmd").is_file())
+
+
+def stamp(seconds: float) -> str:
+    """A log line's ISO UTC stamp (apps/supervisor/src/log.ts formatLine)."""
+    return datetime.fromtimestamp(seconds, timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z")
+
+
+class SupervisorLog(DoctorCase):
+    """Story 33.1 (AC2): the newest log's last `stopped` or `uncaught` line
+    and its age when the API does not answer; read-only."""
+
+    def check(self, **kw) -> dict:
+        return self.checks(self.doctor(roster=self.full_roster(), **kw)[0])[
+            "supervisor-log"]
+
+    def test_work_unset_is_skipped(self):
+        self.env.pop("TK_SUPERVISOR_WORK", None)
+        check = self.check()
+        self.assertEqual(check["status"], "skipped", check)
+        self.assertIn("TK_SUPERVISOR_WORK not set", check["detail"])
+        self.assertTrue(check["fix"])
+
+    def test_no_folder_warns_no_log(self):
+        self.env["TK_SUPERVISOR_WORK"] = str(self.tmp / "work")
+        check = self.check()
+        self.assertEqual(check["status"], "warn", check)
+        self.assertTrue(check["detail"].startswith("no log"), check)
+        self.assertIn(str(self.tmp / "work" / "supervisor" / "logs"),
+                      check["fix"])
+        self.assertIn("start.ps1", check["fix"])
+        # a folder holding no day file is no log either
+        (self.tmp / "work" / "supervisor" / "logs").mkdir(parents=True)
+        (self.tmp / "work" / "supervisor" / "logs" / "notes.txt").write_text(
+            "x\n")
+        self.assertTrue(self.check()["detail"].startswith("no log"))
+
+    def test_api_answers_passes_naming_the_file_and_the_age(self):
+        self.run_cli(["install", "--roster", str(self.full_roster())])
+        self.supervisor_log([f"{stamp(NOW - 900)} [keeper] stopped (exit 75)",
+                             f"{stamp(NOW - 30)} [serve] listening"],
+                            day="2033-05-17")
+        newest = self.supervisor_log(
+            [f"{stamp(NOW - 300)} [pacer] started"])
+        check = self.check()
+        self.assertEqual(check["status"], "pass", check)
+        self.assertIn(str(newest), check["detail"])
+        self.assertIn("no stopped/uncaught line", check["detail"])
+        self.supervisor_log([f"{stamp(NOW - 300)} [tick] uncaught: boom",
+                             f"{stamp(NOW - 200)} [pacer] started"])
+        check = self.check()
+        self.assertEqual(check["status"], "pass", check)
+        self.assertEqual(check["detail"],
+                         f"{newest}; last uncaught line 5m ago")
+        self.assertIsNone(check["fix"])
+
+    def test_api_down_warns_with_the_line_verbatim_its_age_and_the_start(self):
+        self.run_cli(["install", "--roster", str(self.full_roster())])
+        self.host.calls.clear()
+        self.host.up = False
+        line = f"{stamp(NOW - 2 * 3600)} [keeper] stopped (exit 1)"
+        path = self.supervisor_log([
+            f"{stamp(NOW - 3 * 3600)} [pacer] started", line,
+            f"{stamp(NOW - 3600)} [tick] a later line"])
+        os.utime(path, (NOW - 3600, NOW - 3600))
+        before = (path.stat().st_mtime, path.read_bytes())
+        check = self.check()
+        self.assertEqual(check["status"], "warn", check)
+        self.assertEqual(check["detail"], f"{path}: {line} (2h ago)")
+        self.assertEqual(check["fix"], doctor.FIX_START)
+        self.assertEqual((path.stat().st_mtime, path.read_bytes()), before,
+                         "the log is read, never written")
+        self.assertTrue(set(self.commands()) <= ALLOWED, self.commands())
+
+    def test_api_down_redacts_a_credential_in_the_line(self):
+        self.run_cli(["install", "--roster", str(self.full_roster())])
+        self.host.up = False
+        path = self.supervisor_log(
+            [f"{stamp(NOW - 600)} [pacer] stopped (Bearer abc123)"])
+        check = self.check()
+        self.assertEqual(check["status"], "warn", check)
+        self.assertIn("[redacted]", check["detail"])
+        self.assertNotIn("abc123", check["detail"])
+        self.assertIn(str(path), check["detail"])
+
+    def test_the_check_follows_the_supervisor_group(self):
+        names = [c["check"] for c in self.doctor(
+            roster=self.full_roster())[0]["checks"]]
+        self.assertLess(names.index("supervisor"),
+                        names.index("supervisor-log"))
+        self.assertEqual(_age_cases(), ["59s", "1m", "2h", "3d"])
+
+
+def _age_cases() -> list[str]:
+    return [doctor._age(s) for s in (59, 60, 2 * 3600 + 5, 3 * DAY + 1)]
 
 
 class SupervisorCheckout(DoctorCase):

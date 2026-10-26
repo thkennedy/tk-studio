@@ -38,6 +38,15 @@
   retried with a back-off on later passes; every tick also recovers at its own start. Warnings name
   exit codes, never a variable's value.
 
+  Story 33.1 (hole 66): every line this console shows is also appended to
+  <TK_SUPERVISOR_WORK>\supervisor\logs\supervisor-<YYYY-MM-DD>.log (one file per UTC day, the newest 14
+  kept), stamped `<ISO UTC time> [serve|tick|drain|keeper|pacer]`: this script's own lines through
+  Write-SupervisorLog (tag `pacer`, or `keeper` under -ServeOnly), and serve, recover, tick and drain
+  under the tee `bun src/log.ts --tag <serve|tick|drain> -- <script>` (recover is the drain's rule: tag
+  `drain`). The tee answers the child's exit code, so $LASTEXITCODE and the keeper's exit-75 rule are
+  unchanged. Explicit `started`, `stopped (<why>)` and `uncaught: <error>` lines mark each end. With
+  TK_SUPERVISOR_WORK unset nothing is written and the start warns once, naming the variable.
+
   It never registers a scheduled task and never hides a worker's window: the supervisor runs only
   in this console tab. Never start it from a Claude desktop-app session.
 
@@ -64,11 +73,6 @@ $Repo = $PSScriptRoot
 $Self = $PSCommandPath
 $StartupCommand = "wt.exe -w studio nt --title supervisor pwsh -NoExit -File $Repo\start.ps1"
 
-if (-not $ServeOnly) {
-  Write-Host '[supervisor] the shell:startup shortcut command (runbook section 4):'
-  Write-Host "  $StartupCommand"
-}
-
 # 1. The environment: User scope first, else the process value; exported to every child.
 #    Only names are ever printed, never a value (NFR5). The keeper runs this step too.
 $Names = @(
@@ -92,15 +96,84 @@ function Import-SupervisorVariable {
 $Present = @{}
 foreach ($name in $Names) { $Present[$name] = Import-SupervisorVariable -Name $name }
 
-$Missing = @('TK_SUPERVISOR_BIND', 'TK_SUPERVISOR_TOKEN', 'TK_SUPERVISOR_SESSION_SECRET') | Where-Object { -not $Present[$_] }
-if ($Missing) {
-  throw "[supervisor] cannot start: $($Missing -join ', ') not set in the User environment (setx <name> <value>, then open a new tab)"
-}
-if (-not $ServeOnly -and -not $Present['TK_SUPERVISOR_TRANSCRIPT_BACKUP']) {
-  Write-Warning '[supervisor] TK_SUPERVISOR_TRANSCRIPT_BACKUP is not set: per-run transcript copies are skipped, and a host resume cannot restore a missing transcript'
+# Story 33.1: the log file. Every host line of this script goes through Write-SupervisorLog: the host line as
+# before, and `<ISO UTC time> [<tag>] <text>` appended to today's file (one file per UTC day; a new day's file
+# keeps the newest $LogKeepDays). The lines name variables, never values (NFR5); as a belt, every exported
+# TK_SUPERVISOR_*TOKEN*/*SECRET* value, and any Bearer/Basic credential, is replaced by [redacted] (the page's
+# rule). The append shares the file with the tees (ReadWrite share, up to 3 retries 50 ms apart). A failed
+# append never stops the supervisor: the console still has the line.
+$LogTag = if ($ServeOnly) { 'keeper' } else { 'pacer' }
+$LogDir = if ($Present['TK_SUPERVISOR_WORK']) { Join-Path $env:TK_SUPERVISOR_WORK 'supervisor\logs' } else { $null }
+$LogKeepDays = 14
+function Write-SupervisorLog {
+  param(
+    [Parameter(Mandatory)][string]$Text,
+    [ValidateSet('keeper', 'pacer')][string]$Tag = $LogTag,
+    [switch]$Warning
+  )
+  if ($Warning) { Write-Warning $Text } else { Write-Host $Text }
+  if (-not $LogDir) { return }
+  try {
+    $line = if ($Warning) { "warning: $Text" } else { $Text }
+    foreach ($item in (Get-ChildItem -Path Env: | Where-Object { $_.Name -match '^TK_SUPERVISOR_.*(TOKEN|SECRET)' -and $_.Value -and $_.Value.Trim() })) {
+      $line = $line.Replace($item.Value.Trim(), '[redacted]')
+    }
+    # An exception's text can carry a credential: Bearer/Basic become `<scheme> [redacted]` (the page's shape).
+    $line = $line -replace '(?i)\b(Bearer)(\s+)[^\s"'',;]+', '$1$2[redacted]'
+    $line = $line -replace '(?i)\b(Basic)(\s+)[A-Za-z0-9+/=]{8,}', '$1$2[redacted]'
+    $line = ($line -replace "`r", '') -replace "`n", ' '
+    $now = [DateTime]::UtcNow
+    $inv = [Globalization.CultureInfo]::InvariantCulture
+    $null = New-Item -ItemType Directory -Force -Path $LogDir
+    $file = Join-Path $LogDir "supervisor-$($now.ToString('yyyy-MM-dd', $inv)).log"
+    $fresh = -not (Test-Path -LiteralPath $file)
+    # Shared with up to three tees appending the same file: open it ReadWrite-shared, retry a held file briefly.
+    $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes("$($now.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", $inv)) [$Tag] $line`n")
+    $written = $false
+    for ($attempt = 1; -not $written -and $attempt -le 4; $attempt++) {
+      try {
+        $stream = [System.IO.File]::Open($file, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+        try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
+        $written = $true
+      } catch [System.IO.IOException] {
+        if ($attempt -lt 4) { Start-Sleep -Milliseconds 50 }
+      }
+    }
+    if ($fresh) {
+      # The newest $LogKeepDays day files are kept; any other file in the folder is never touched.
+      $days = @(Get-ChildItem -LiteralPath $LogDir -File | Where-Object { $_.Name -match '^supervisor-\d{4}-\d{2}-\d{2}\.log$' } | Sort-Object Name)
+      if ($days.Count -gt $LogKeepDays) { $days[0..($days.Count - $LogKeepDays - 1)] | Remove-Item -Force -ErrorAction SilentlyContinue }
+    }
+  } catch { }
 }
 
-$Bun = (Get-Command bun -ErrorAction Stop).Source
+# An end before the keeper or the pacer runs (a step-1 refusal): its `uncaught:` and `stopped` lines, then the throw.
+function Stop-SupervisorStart {
+  param([Parameter(Mandatory)][string]$Why)
+  Write-SupervisorLog -Text "uncaught: $Why"
+  Write-SupervisorLog -Text "stopped ($Why)"
+  throw $Why
+}
+
+if (-not $ServeOnly) {
+  Write-SupervisorLog -Text '[supervisor] the shell:startup shortcut command (runbook section 4):'
+  Write-SupervisorLog -Text "  $StartupCommand"
+}
+Write-SupervisorLog -Text $(if ($ServeOnly) { 'started (keeper)' } else { 'started' })
+if (-not $LogDir -and -not $ServeOnly) {
+  Write-Warning '[supervisor] TK_SUPERVISOR_WORK is not set: no log file is written (the console is the only log)'
+}
+
+$Missing = @('TK_SUPERVISOR_BIND', 'TK_SUPERVISOR_TOKEN', 'TK_SUPERVISOR_SESSION_SECRET') | Where-Object { -not $Present[$_] }
+if ($Missing) {
+  Stop-SupervisorStart -Why "[supervisor] cannot start: $($Missing -join ', ') not set in the User environment (setx <name> <value>, then open a new tab)"
+}
+if (-not $ServeOnly -and -not $Present['TK_SUPERVISOR_TRANSCRIPT_BACKUP']) {
+  Write-SupervisorLog -Warning -Text '[supervisor] TK_SUPERVISOR_TRANSCRIPT_BACKUP is not set: per-run transcript copies are skipped, and a host resume cannot restore a missing transcript'
+}
+
+try { $Bun = (Get-Command bun -ErrorAction Stop).Source }
+catch { Stop-SupervisorStart -Why "[supervisor] cannot start: bun not found on PATH ($($_.Exception.Message))" }
 Set-Location -LiteralPath $Repo
 
 # Story 22.5: with all three TLS variables set, renew the Tailscale certificate for the MagicDNS name
@@ -113,10 +186,10 @@ $TlsNames = @('TK_SUPERVISOR_TLS_CERT', 'TK_SUPERVISOR_TLS_KEY', 'TK_SUPERVISOR_
 function Invoke-TailscaleCert {
   $Tailscale = Get-Command tailscale -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
   if (-not $Tailscale) {
-    Write-Warning '[supervisor] tailscale not found: the certificate in TK_SUPERVISOR_TLS_CERT/TK_SUPERVISOR_TLS_KEY is not renewed'
+    Write-SupervisorLog -Warning -Text '[supervisor] tailscale not found: the certificate in TK_SUPERVISOR_TLS_CERT/TK_SUPERVISOR_TLS_KEY is not renewed'
     return
   }
-  Write-Host '[supervisor] tailscale cert (renews the certificate named by TK_SUPERVISOR_TLS_CERT/TK_SUPERVISOR_TLS_KEY/TK_SUPERVISOR_TLS_NAME)'
+  Write-SupervisorLog -Text '[supervisor] tailscale cert (renews the certificate named by TK_SUPERVISOR_TLS_CERT/TK_SUPERVISOR_TLS_KEY/TK_SUPERVISOR_TLS_NAME)'
   try {
     $psi = [System.Diagnostics.ProcessStartInfo]::new($Tailscale.Source)
     foreach ($arg in @('cert', '--cert-file', $env:TK_SUPERVISOR_TLS_CERT, '--key-file', $env:TK_SUPERVISOR_TLS_KEY, $env:TK_SUPERVISOR_TLS_NAME)) { $psi.ArgumentList.Add($arg) }
@@ -129,13 +202,13 @@ function Invoke-TailscaleCert {
       $cert.BeginErrorReadLine()
       if (-not $cert.WaitForExit($CertSeconds * 1000)) {
         try { $cert.Kill() } catch { } # only this process (its known pid)
-        Write-Warning "[supervisor] tailscale cert gave no answer within $CertSeconds s: the certificate is not renewed"
+        Write-SupervisorLog -Warning -Text "[supervisor] tailscale cert gave no answer within $CertSeconds s: the certificate is not renewed"
       } elseif ($cert.ExitCode -ne 0) {
-        Write-Warning "[supervisor] tailscale cert exited $($cert.ExitCode): the certificate is not renewed (is HTTPS enabled in the Tailscale admin console?)"
+        Write-SupervisorLog -Warning -Text "[supervisor] tailscale cert exited $($cert.ExitCode): the certificate is not renewed (is HTTPS enabled in the Tailscale admin console?)"
       }
     } finally { $cert.Dispose() }
   } catch {
-    Write-Warning "[supervisor] tailscale cert did not run: the certificate is not renewed"
+    Write-SupervisorLog -Warning -Text "[supervisor] tailscale cert did not run: the certificate is not renewed"
   }
 }
 $TlsPresent = -not ($TlsNames | Where-Object { -not $Present[$_] })
@@ -165,26 +238,38 @@ function Test-Due {
 if ($ServeOnly) {
   $ServeUpSeconds = 60
   $ServeBackoff = New-Backoff
-  while ($true) {
-    Write-Host '[supervisor] serve (the API)'
-    $started = Get-Date
-    try {
-      & $Bun src/cli.ts serve
-      $code = $LASTEXITCODE
-    } catch {
-      $code = "no exit code ($($_.Exception.Message))"
+  # Story 33.1: the keeper's own end is logged (`uncaught:` on an error, `stopped (<why>)` always; Ctrl+C
+  # leaves no error). A keeper tree the pacer stops cannot log: the pacer logs it for the keeper.
+  $StopWhy = 'Ctrl+C'
+  try {
+    while ($true) {
+      Write-SupervisorLog -Text '[supervisor] serve (the API)'
+      $started = Get-Date
+      try {
+        # Story 33.1: serve under the log tee, which exits with serve's own code ($LASTEXITCODE, the 75 rule).
+        & $Bun src/log.ts --tag serve '--' src/cli.ts serve
+        $code = $LASTEXITCODE
+      } catch {
+        $code = "no exit code ($($_.Exception.Message))"
+      }
+      if (((Get-Date) - $started).TotalSeconds -ge $ServeUpSeconds) { $ServeBackoff.Failures = 0 }
+      # Story 27.5 (DW-21): exit 75 is serve asking for a certificate renewal (within 14 days of expiry, no live
+      # run): the same bounded `tailscale cert`, then serve restarted at once, without the back-off.
+      if ($code -eq 75) {
+        Write-SupervisorLog -Text '[supervisor] serve asked for a certificate renewal (exit 75): tailscale cert, then serve restarts at once'
+        if ($TlsPresent) { Invoke-TailscaleCert }
+        continue
+      }
+      $delay = Register-Failure -Backoff $ServeBackoff
+      Write-SupervisorLog -Warning -Text "[supervisor] serve exited ${code} (right after logon Tailscale may not have bound its 100.x address yet): the API is down, restarting it in ${delay} s (the pacer keeps running)"
+      Start-Sleep -Seconds $delay
     }
-    if (((Get-Date) - $started).TotalSeconds -ge $ServeUpSeconds) { $ServeBackoff.Failures = 0 }
-    # Story 27.5 (DW-21): exit 75 is serve asking for a certificate renewal (within 14 days of expiry, no live
-    # run): the same bounded `tailscale cert`, then serve restarted at once, without the back-off.
-    if ($code -eq 75) {
-      Write-Host '[supervisor] serve asked for a certificate renewal (exit 75): tailscale cert, then serve restarts at once'
-      if ($TlsPresent) { Invoke-TailscaleCert }
-      continue
-    }
-    $delay = Register-Failure -Backoff $ServeBackoff
-    Write-Warning "[supervisor] serve exited ${code} (right after logon Tailscale may not have bound its 100.x address yet): the API is down, restarting it in ${delay} s (the pacer keeps running)"
-    Start-Sleep -Seconds $delay
+  } catch {
+    $StopWhy = $_.Exception.Message
+    Write-SupervisorLog -Text "uncaught: $StopWhy"
+    throw
+  } finally {
+    Write-SupervisorLog -Text "stopped ($StopWhy)"
   }
 }
 
@@ -193,7 +278,7 @@ if ($ServeOnly) {
 #    the script. Never hidden: it shares this console tab.
 $KeeperBackoff = New-Backoff
 function Start-SupervisorKeeper {
-  Write-Host '[supervisor] the API keeper (serve, restarted with a back-off)'
+  Write-SupervisorLog -Text '[supervisor] the API keeper (serve, restarted with a back-off)'
   try {
     # The script path is quoted: Start-Process joins -ArgumentList with spaces, unquoted.
     $proc = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList @('-NoProfile', '-File', "`"$Self`"", '-ServeOnly') -WorkingDirectory $Repo -NoNewWindow -PassThru
@@ -201,7 +286,7 @@ function Start-SupervisorKeeper {
     return $proc
   } catch {
     $delay = Register-Failure -Backoff $KeeperBackoff
-    Write-Warning "[supervisor] the API keeper did not start: $($_.Exception.Message); the API is down, retrying in ${delay} s or more (the pacer keeps running)"
+    Write-SupervisorLog -Warning -Text "[supervisor] the API keeper did not start: $($_.Exception.Message); the API is down, retrying in ${delay} s or more (the pacer keeps running)"
     return $null
   }
 }
@@ -211,7 +296,11 @@ function Start-SupervisorKeeper {
 function Stop-SupervisorKeeper {
   param($Keeper)
   if (-not $Keeper -or $Keeper.HasExited) { return }
-  try { $Keeper.Kill($true) } catch { Write-Warning "[supervisor] the API keeper did not stop: $($_.Exception.Message)" }
+  try {
+    $Keeper.Kill($true)
+    # Story 33.1: a killed keeper tree cannot log its own end; this script logs it for the keeper.
+    Write-SupervisorLog -Tag keeper -Text 'stopped (keeper tree stopped by the pacer)'
+  } catch { Write-SupervisorLog -Warning -Text "[supervisor] the API keeper did not stop: $($_.Exception.Message)" }
 }
 
 # 3. The Docker Sandboxes daemon: a read-only listing answers whether it runs. It is bounded: a
@@ -227,7 +316,7 @@ function Test-SbxDaemon {
     $psi.RedirectStandardError = $true
     $probe = [System.Diagnostics.Process]::Start($psi)
   } catch {
-    Write-Warning "[supervisor] sbx ls did not run: $($_.Exception.Message)"
+    Write-SupervisorLog -Warning -Text "[supervisor] sbx ls did not run: $($_.Exception.Message)"
     return $false
   }
   try {
@@ -235,7 +324,7 @@ function Test-SbxDaemon {
     $probe.BeginErrorReadLine()
     if (-not $probe.WaitForExit($SbxProbeSeconds * 1000)) {
       try { $probe.Kill() } catch { } # only this probe (its known pid); it may have just exited
-      Write-Warning "[supervisor] sbx ls gave no answer within $SbxProbeSeconds s: taking the daemon as not running"
+      Write-SupervisorLog -Warning -Text "[supervisor] sbx ls gave no answer within $SbxProbeSeconds s: taking the daemon as not running"
       return $false
     }
     # No parameterless WaitForExit: it would wait for the output's end, which a daemon the probe
@@ -250,66 +339,78 @@ function Test-SbxDaemon {
 #    the boolean.
 $RecoverBackoff = New-Backoff
 function Invoke-SupervisorRecover {
-  Write-Host '[supervisor] recover (the restart rule with resumes)'
+  Write-SupervisorLog -Text '[supervisor] recover (the restart rule with resumes)'
   try {
-    & $Bun src/cli.ts recover | Out-Host
+    # Story 33.1: under the log tee (recover is the drain's rule: tag `drain`); the tee exits with recover's code.
+    & $Bun src/log.ts --tag drain '--' src/cli.ts recover | Out-Host
     $code = $LASTEXITCODE
   } catch {
     $code = "no exit code ($($_.Exception.Message))"
   }
   if ($code -eq 0) { return $true }
   $delay = Register-Failure -Backoff $RecoverBackoff
-  Write-Warning "[supervisor] recover exited ${code}: retrying in ${delay} s or more (every tick also recovers at its start)"
+  Write-SupervisorLog -Warning -Text "[supervisor] recover exited ${code}: retrying in ${delay} s or more (every tick also recovers at its start)"
   return $false
 }
 
 # One pacer step (tick or drain): a failure warns; it never stops the pacer. Its output goes to the
 # console, never into the function's output.
 function Invoke-PacerStep {
-  param([Parameter(Mandatory)][string[]]$Arguments)
+  param(
+    [Parameter(Mandatory)][ValidateSet('tick', 'drain')][string]$Tag,
+    [Parameter(Mandatory)][string[]]$Arguments
+  )
   try {
-    & $Bun @Arguments | Out-Host
-    if ($LASTEXITCODE -ne 0) { Write-Warning "[supervisor] $($Arguments -join ' ') exited $LASTEXITCODE" }
+    # Story 33.1: under the log tee, which exits with the step's own code.
+    & $Bun src/log.ts --tag $Tag '--' @Arguments | Out-Host
+    if ($LASTEXITCODE -ne 0) { Write-SupervisorLog -Warning -Text "[supervisor] $($Arguments -join ' ') exited $LASTEXITCODE" }
   } catch {
-    Write-Warning "[supervisor] $($Arguments -join ' ') did not run: $($_.Exception.Message)"
+    Write-SupervisorLog -Warning -Text "[supervisor] $($Arguments -join ' ') did not run: $($_.Exception.Message)"
   }
 }
 
 $Keeper = Start-SupervisorKeeper
+# Story 33.1: the pacer's end is logged: `uncaught:` on an error, then `stopped (<why>)` (Ctrl+C leaves no error).
+$StopWhy = 'Ctrl+C'
 try {
   $Sbx = if ($Present['SBX_BIN']) { $env:SBX_BIN } else { 'sbx' }
   $SbxCommand = Get-Command $Sbx -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
   if ($SbxCommand) {
     if (-not (Test-SbxDaemon -Path $SbxCommand.Source)) {
-      Write-Host '[supervisor] the sbx daemon is not running: starting it from $HOME'
+      Write-SupervisorLog -Text '[supervisor] the sbx daemon is not running: starting it from $HOME'
       Push-Location -LiteralPath $HOME
       try {
         & $Sbx daemon start -d
-        if ($LASTEXITCODE -ne 0) { Write-Warning "[supervisor] sbx daemon start exited ${LASTEXITCODE}: sbx-tier runs will fail until it runs" }
+        if ($LASTEXITCODE -ne 0) { Write-SupervisorLog -Warning -Text "[supervisor] sbx daemon start exited ${LASTEXITCODE}: sbx-tier runs will fail until it runs" }
       } finally { Pop-Location }
     } else {
-      Write-Host '[supervisor] the sbx daemon is running'
+      Write-SupervisorLog -Text '[supervisor] the sbx daemon is running'
     }
   } else {
-    Write-Warning "[supervisor] $Sbx not found: sbx-tier runs will fail (host-tier runs are unaffected)"
+    Write-SupervisorLog -Warning -Text "[supervisor] $Sbx not found: sbx-tier runs will fail (host-tier runs are unaffected)"
   }
 
   $Recovered = Invoke-SupervisorRecover
 
   # 5. The pacer, in the foreground: tick, then drain (API-submitted runs), then sleep.
-  Write-Host "[supervisor] pacer every $IntervalSeconds s (Ctrl+C stops the supervisor)"
+  Write-SupervisorLog -Text "[supervisor] pacer every $IntervalSeconds s (Ctrl+C stops the supervisor)"
   while ($true) {
     if ($Keeper -and $Keeper.HasExited) {
       $delay = Register-Failure -Backoff $KeeperBackoff
-      Write-Warning "[supervisor] the API keeper exited $($Keeper.ExitCode): restarting it in ${delay} s or more"
+      Write-SupervisorLog -Warning -Text "[supervisor] the API keeper exited $($Keeper.ExitCode): restarting it in ${delay} s or more"
       $Keeper = $null
     }
     if (-not $Keeper -and (Test-Due -Backoff $KeeperBackoff)) { $Keeper = Start-SupervisorKeeper }
     if (-not $Recovered -and (Test-Due -Backoff $RecoverBackoff)) { $Recovered = Invoke-SupervisorRecover }
-    Invoke-PacerStep -Arguments @('src/tick.ts')
-    Invoke-PacerStep -Arguments @('src/cli.ts', 'drain')
+    Invoke-PacerStep -Tag tick -Arguments @('src/tick.ts')
+    Invoke-PacerStep -Tag drain -Arguments @('src/cli.ts', 'drain')
     Start-Sleep -Seconds $IntervalSeconds
   }
+} catch {
+  $StopWhy = $_.Exception.Message
+  Write-SupervisorLog -Text "uncaught: $StopWhy"
+  throw
 } finally {
   Stop-SupervisorKeeper -Keeper $Keeper
+  Write-SupervisorLog -Text "stopped ($StopWhy)"
 }

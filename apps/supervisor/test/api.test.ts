@@ -357,6 +357,34 @@ describe("read routes (AC4)", () => {
     expect(body.locks[0].holder).toMatchObject({ kind: "run", run_id: a.run_id, job_id: "a", pid: A.pid });
   });
 
+  test("Story 33.1 (0.1.28): GET /status carries `log {path, last_lines}`, the last 20 lines redacted; `no log` and unset work noted", async () => {
+    const fx = fixture();
+    const work = mkdtempSync(join(tmpdir(), "tk-sup-api-work-"));
+    const at = Date.UTC(2026, 9, 26, 12);
+    const status = async (env: Record<string, string | undefined>) => {
+      const handler = createApi({ queue: fx.queue, token: TOKEN, env, now: () => at, pollMs: 10 });
+      const res = await handler(new Request(`${BASE}/status`, { headers: { authorization: `Bearer ${TOKEN}` } }));
+      expect(res.status).toBe(200);
+      return (await res.json() as Record<string, any>).log;
+    };
+    try {
+      const env = { TK_SUPERVISOR_WORK: work, TK_SUPERVISOR_TELEGRAM_TOKEN: "123456789:AAapi-log-telegram-secret-0123456789xyz" };
+      const path = join(work, "supervisor", "logs", "supervisor-2026-10-26.log");
+      expect(await status(env)).toEqual({ path, last_lines: [], note: "no log" });
+      expect(await status({})).toEqual({ path: null, last_lines: [], note: "TK_SUPERVISOR_WORK is not set" });
+      mkdirSync(join(work, "supervisor", "logs"), { recursive: true });
+      const planted = Array.from({ length: 25 }, (_, i) => `2026-10-26T11:00:${String(i).padStart(2, "0")}.000Z [tick] line ${i + 1}`);
+      planted.push(`2026-10-26T11:59:00.000Z [serve] sent ${env.TK_SUPERVISOR_TELEGRAM_TOKEN} with Bearer ${TOKEN}`);
+      writeFileSync(path, planted.join("\n") + "\n");
+      const log = await status(env);
+      expect(log.path).toBe(path);
+      expect(log.note).toBeUndefined();
+      expect(log.last_lines).toHaveLength(20);
+      expect(log.last_lines[0]).toEndWith("[tick] line 7");
+      expect(log.last_lines[19]).toBe("2026-10-26T11:59:00.000Z [serve] sent [redacted] with Bearer [redacted]");
+    } finally { rmSync(work, { recursive: true, force: true }); }
+  });
+
   test("GET /events?since= polls events with seq > since; a bad since is 400", async () => {
     const fx = fixture();
     fx.enqueue("a");

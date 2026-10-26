@@ -629,7 +629,8 @@ describe("start.ps1 (AC1, AC2)", () => {
       .map((s) => text.indexOf(s));
     expect(order.every((i) => i > 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
-    expect(text).toContain("& $Bun src/cli.ts serve");
+    // Story 33.1: serve runs under the log tee (`src/log.ts --tag serve '--' <script>`).
+    expect(text).toContain("& $Bun src/log.ts --tag serve '--' src/cli.ts serve");
   });
 
   test("serve runs in its own same-console keeper (-ServeOnly), restarted with a back-off independent of recover/tick/drain", () => {
@@ -639,34 +640,70 @@ describe("start.ps1 (AC1, AC2)", () => {
     // The keeper branch comes after step 1 (it needs the variables) and before the sbx probe, recover
     // and the pacer, which it never reaches (its serve loop never ends).
     const branch = text.indexOf("if ($ServeOnly) {\n");
-    expect(branch).toBeGreaterThan(text.indexOf('throw "[supervisor] cannot start'));
+    expect(text.indexOf('Stop-SupervisorStart -Why "[supervisor] cannot start: $($Missing -join')).toBeGreaterThan(0);
+    expect(branch).toBeGreaterThan(text.indexOf('Stop-SupervisorStart -Why "[supervisor] cannot start: $($Missing -join'));
     expect(branch).toBeGreaterThan(text.indexOf("$Bun = (Get-Command bun -ErrorAction Stop).Source"));
     const keeperLoop = text.slice(branch, text.indexOf("\n}\n", branch));
-    expect(keeperLoop).toContain("& $Bun src/cli.ts serve");
+    // Story 33.1: serve under the tee, its exit code read at once ($LASTEXITCODE is the tee's, which is serve's).
+    expect(keeperLoop).toContain("& $Bun src/log.ts --tag serve '--' src/cli.ts serve\n        $code = $LASTEXITCODE");
     expect(keeperLoop).toContain("Register-Failure -Backoff $ServeBackoff");
     expect(keeperLoop).toContain("if (((Get-Date) - $started).TotalSeconds -ge $ServeUpSeconds) { $ServeBackoff.Failures = 0 }");
     for (const s of ["Invoke-SupervisorRecover", "Test-SbxDaemon", "src/tick.ts"]) expect(keeperLoop).not.toContain(s);
     expect(branch).toBeLessThan(text.indexOf("$Keeper = Start-SupervisorKeeper"));
     // The shell:startup print and the backup warning are the main script's only.
-    expect(text).toContain("if (-not $ServeOnly) {\n  Write-Host '[supervisor] the shell:startup shortcut command");
+    // Story 33.1: printed through Write-SupervisorLog, after the env import (the log folder is known) and
+    // before step 1's refusals.
+    const shortcut = text.indexOf("if (-not $ServeOnly) {\n  Write-SupervisorLog -Text '[supervisor] the shell:startup shortcut command");
+    expect(shortcut).toBeGreaterThan(text.indexOf("foreach ($name in $Names) { $Present[$name] = Import-SupervisorVariable -Name $name }"));
+    expect(shortcut).toBeGreaterThan(text.indexOf("function Write-SupervisorLog {"));
+    expect(shortcut).toBeLessThan(text.indexOf("$Missing = @('TK_SUPERVISOR_BIND'"));
+    expect(text.indexOf("function Write-SupervisorLog {")).toBeGreaterThan(0);
+    // Story 33.1 review: a Bearer/Basic credential in a line (an exception's text) is masked the page's way, and
+    // the append shares the day file with the tees (ReadWrite share, retried on a held file), never Add-Content.
+    const logger = text.slice(text.indexOf("function Write-SupervisorLog {"), text.indexOf("\n}\n", text.indexOf("function Write-SupervisorLog {")));
+    expect(logger).toContain(`$line = $line -replace '(?i)\\b(Bearer)(\\s+)[^\\s"'',;]+', '$1$2[redacted]'`);
+    expect(logger).toContain("$line = $line -replace '(?i)\\b(Basic)(\\s+)[A-Za-z0-9+/=]{8,}', '$1$2[redacted]'");
+    expect(logger).toContain("[System.IO.File]::Open($file, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)");
+    expect(logger).toContain("[System.Text.UTF8Encoding]::new($false)");
+    expect(logger).toContain("} catch [System.IO.IOException] {\n        if ($attempt -lt 4) { Start-Sleep -Milliseconds 50 }");
+    expect(logger).not.toContain("Add-Content");
+    expect(logger.indexOf("if ($Warning) { Write-Warning $Text } else { Write-Host $Text }")).toBeLessThan(logger.indexOf("try {"));
     // The main loop only watches the keeper; it stops only that process tree, never by name.
     expect(text).toContain("if (-not $Keeper -and (Test-Due -Backoff $KeeperBackoff)) { $Keeper = Start-SupervisorKeeper }");
     expect(text).toContain("$Keeper.Kill($true)");
-    expect(text).toContain("} finally {\n  Stop-SupervisorKeeper -Keeper $Keeper\n}");
+    // Story 33.1: the catch logs `uncaught:` and only re-throws; the finally stops the keeper tree, then logs `stopped`.
+    expect(text).toContain('} catch {\n  $StopWhy = $_.Exception.Message\n  Write-SupervisorLog -Text "uncaught: $StopWhy"\n  throw\n} finally {\n  Stop-SupervisorKeeper -Keeper $Keeper\n  Write-SupervisorLog -Text "stopped ($StopWhy)"\n}');
     expect(text).not.toMatch(/Stop-Process\s+-Name|taskkill[^\n]*\/IM/i);
     expect(text).not.toContain("'src/cli.ts', 'serve'"); // the main loop never starts serve itself
   });
 
   test("only step 1's checks end the script: serve, recover and the sbx probe warn and retry or go on; the exit code is readable", () => {
-    // The only throw is the missing BIND/TOKEN refusal, before anything starts (no bun is Get-Command's own stop).
-    expect(text.match(/\bthrow\b/g)).toHaveLength(1);
-    expect(text).toContain('throw "[supervisor] cannot start: $($Missing -join');
+    // Story 33.1: the only throw that starts an error is Stop-SupervisorStart's, called by step 1's two refusals
+    // (missing BIND/TOKEN/SECRET, no bun) before anything starts; the keeper's and the pacer's catch only
+    // re-throw (a bare `throw`) after logging `uncaught:`.
+    const code = text.slice(text.indexOf("#>\n")).split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
+    const throws = code.match(/^.*\bthrow\b.*$/gm) ?? [];
+    expect(throws.map((l) => l.trim())).toEqual(["throw $Why", "throw", "throw"]);
+    expect(code).toContain("function Stop-SupervisorStart {\n  param([Parameter(Mandatory)][string]$Why)\n  Write-SupervisorLog -Text \"uncaught: $Why\"\n  Write-SupervisorLog -Text \"stopped ($Why)\"\n  throw $Why\n}");
+    expect(code.match(/\bthrow\n\s*\} finally \{/g)).toHaveLength(2);
+    expect(code.match(/Write-SupervisorLog -Text "uncaught: \$StopWhy"\n\s*throw\n/g)).toHaveLength(2);
+    const calls = [...code.matchAll(/Stop-SupervisorStart -Why/g)].map((m) => m.index!);
+    expect(calls).toHaveLength(2);
+    for (const i of calls) {
+      expect(i).toBeLessThan(code.indexOf("if ($ServeOnly) {\n"));
+      expect(i).toBeLessThan(code.indexOf("$Keeper = Start-SupervisorKeeper"));
+    }
+    expect(text).toContain('Stop-SupervisorStart -Why "[supervisor] cannot start: $($Missing -join');
+    expect(text).toContain('catch { Stop-SupervisorStart -Why "[supervisor] cannot start: bun not found on PATH');
     expect(text).toContain("$null = $proc.Handle");
     expect(text).toContain("$PSNativeCommandUseErrorActionPreference = $false");
     expect(text).toContain("if (-not $Recovered -and (Test-Due -Backoff $RecoverBackoff)) { $Recovered = Invoke-SupervisorRecover }");
     // A native command's output goes to the console, never into a function's answer ($Recovered is the boolean only).
-    expect(text).toContain("& $Bun src/cli.ts recover | Out-Host");
-    expect(text).toContain("& $Bun @Arguments | Out-Host");
+    // Story 33.1: under the log tee, the `| Out-Host` kept; the tee exits with the child's code, read at once.
+    expect(text).toContain("& $Bun src/log.ts --tag drain '--' src/cli.ts recover | Out-Host\n    $code = $LASTEXITCODE");
+    expect(text).toContain("if ($code -eq 0) { return $true }");
+    expect(text).toContain("& $Bun src/log.ts --tag $Tag '--' @Arguments | Out-Host\n    if ($LASTEXITCODE -ne 0) {");
+    expect(text).not.toMatch(/^\s*& \$Bun (?!src\/log\.ts --tag)/m); // every bun child runs under the tee
     // The sbx probe is bounded: on timeout only that probe is killed and the daemon is taken as not running.
     expect(text).toContain("$SbxProbeSeconds = 30");
     expect(text).toContain("[System.Diagnostics.ProcessStartInfo]::new($Path, 'ls')");
@@ -675,8 +712,8 @@ describe("start.ps1 (AC1, AC2)", () => {
     expect(text).not.toMatch(/& \$Sbx ls/); // the unbounded probe is gone
     expect(text).not.toMatch(/\$probe\.WaitForExit\(\)/);
     // Output names variables and exit codes, never a value.
-    expect(text).not.toMatch(/Write-(Host|Warning)[^\n]*\$env:TK_SUPERVISOR_(TOKEN|TELEGRAM_TOKEN|NTFY_URL)/);
-    expect(text).not.toMatch(/Write-(Host|Warning)[^\n]*\$value/);
+    expect(text).not.toMatch(/Write-(Host|Warning|SupervisorLog)[^\n]*\$env:TK_SUPERVISOR_(TOKEN|TELEGRAM_TOKEN|NTFY_URL)/);
+    expect(text).not.toMatch(/Write-(Host|Warning|SupervisorLog)[^\n]*\$value/);
   });
 
   test.skipIf(!Bun.which("pwsh"))("the PowerShell parser reports 0 errors", () => {
@@ -693,7 +730,7 @@ describe("start.ps1 sign-in (Story 22.5 AC4)", () => {
 
   test("TK_SUPERVISOR_SESSION_SECRET is required beside BIND and TOKEN: missing, the script ends before anything starts", () => {
     expect(text).toContain("$Missing = @('TK_SUPERVISOR_BIND', 'TK_SUPERVISOR_TOKEN', 'TK_SUPERVISOR_SESSION_SECRET') | Where-Object { -not $Present[$_] }");
-    const refusal = text.indexOf('throw "[supervisor] cannot start: $($Missing -join');
+    const refusal = text.indexOf('Stop-SupervisorStart -Why "[supervisor] cannot start: $($Missing -join');
     expect(refusal).toBeGreaterThan(text.indexOf("$Missing = @('TK_SUPERVISOR_BIND'"));
     expect(refusal).toBeLessThan(text.indexOf("$Keeper = Start-SupervisorKeeper"));
   });
@@ -714,7 +751,7 @@ describe("start.ps1 sign-in (Story 22.5 AC4)", () => {
     const fn = text.indexOf("function Invoke-TailscaleCert {");
     const call = text.indexOf(certCall);
     const guard = text.indexOf(certGuard);
-    expect(fn).toBeGreaterThan(text.indexOf('throw "[supervisor] cannot start'));
+    expect(fn).toBeGreaterThan(text.indexOf('Stop-SupervisorStart -Why "[supervisor] cannot start: $($Missing -join'));
     expect(call).toBeGreaterThan(fn);
     expect(guard).toBeGreaterThan(call);
     expect(text.slice(guard, guard + 80)).toContain("Invoke-TailscaleCert");
@@ -727,7 +764,8 @@ describe("start.ps1 sign-in (Story 22.5 AC4)", () => {
   test("the keeper renews on serve's exit 75 and restarts serve at once, without the back-off (DW-21)", () => {
     const keeper = text.slice(text.indexOf("if ($ServeOnly) {\n"), text.indexOf("$KeeperBackoff = New-Backoff"));
     const renew = keeper.indexOf("if ($code -eq 75) {");
-    expect(renew).toBeGreaterThan(keeper.indexOf("& $Bun src/cli.ts serve"));
+    expect(keeper.indexOf("& $Bun src/log.ts --tag serve '--' src/cli.ts serve")).toBeGreaterThan(0);
+    expect(renew).toBeGreaterThan(keeper.indexOf("& $Bun src/log.ts --tag serve '--' src/cli.ts serve"));
     const branch = keeper.slice(renew, keeper.indexOf("}", keeper.indexOf("continue", renew)) + 1);
     expect(branch).toContain("if ($TlsPresent) { Invoke-TailscaleCert }");
     expect(branch).toContain("continue");
@@ -741,14 +779,14 @@ describe("start.ps1 sign-in (Story 22.5 AC4)", () => {
     expect(block).toContain("try { $cert.Kill() } catch { }");
     expect(block).not.toMatch(/\$cert\.WaitForExit\(\)/);
     for (const w of [
-      "Write-Warning '[supervisor] tailscale not found:",
-      'Write-Warning "[supervisor] tailscale cert gave no answer within $CertSeconds s:',
-      'Write-Warning "[supervisor] tailscale cert exited $($cert.ExitCode):',
-      'Write-Warning "[supervisor] tailscale cert did not run:',
+      "Write-SupervisorLog -Warning -Text '[supervisor] tailscale not found:",
+      'Write-SupervisorLog -Warning -Text "[supervisor] tailscale cert gave no answer within $CertSeconds s:',
+      'Write-SupervisorLog -Warning -Text "[supervisor] tailscale cert exited $($cert.ExitCode):',
+      'Write-SupervisorLog -Warning -Text "[supervisor] tailscale cert did not run:',
     ]) expect(block).toContain(w);
     expect(block).not.toMatch(/\bthrow\b|\bexit\b/);
     // Names only, never a value.
-    expect(block).not.toMatch(/Write-(Host|Warning)[^\n]*\$env:/);
-    expect(text).not.toMatch(/Write-(Host|Warning)[^\n]*\$env:TK_SUPERVISOR_(SESSION_SECRET|OAUTH_)/);
+    expect(block).not.toMatch(/Write-(Host|Warning|SupervisorLog)[^\n]*\$env:/);
+    expect(text).not.toMatch(/Write-(Host|Warning|SupervisorLog)[^\n]*\$env:TK_SUPERVISOR_(SESSION_SECRET|OAUTH_)/);
   });
 });

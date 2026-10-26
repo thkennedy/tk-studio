@@ -2491,5 +2491,8 @@ export async function main(argv: string[]): Promise<number> {
 }
 
 if (import.meta.main) {
+  // Story 33.1: an uncaught error is one explicit `uncaught:` line (the log tee files it), then exit 70.
+  process.on("uncaughtException", (e) => { console.error(`uncaught: ${message(e)}`); process.exit(70); });
+  process.on("unhandledRejection", (e) => { console.error(`uncaught: ${message(e)}`); process.exit(70); });
   main(process.argv.slice(2)).then((code) => process.exit(code));
 }
