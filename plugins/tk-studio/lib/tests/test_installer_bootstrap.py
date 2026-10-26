@@ -79,7 +79,8 @@ class SharedGuard(unittest.TestCase):
         self.assertNotIn("_SEMVER", text)
 
 
-SHARED_COPIES = ("skills_plane.py", "miniyaml.py")   # Story 25.5
+SHARED_COPIES = ("skills_plane.py", "miniyaml.py",   # Story 25.5
+                 "sandbox_login.py")                # Story 33.2
 
 
 class SharedCopies(unittest.TestCase):

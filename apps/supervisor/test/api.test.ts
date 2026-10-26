@@ -10,7 +10,7 @@ import { listEngagements, readEngagement, writeEngagement } from "../src/engagem
 import { ResumeRefused } from "../src/closeout";
 import { CancelRaced, cancelRun, CANCELLED_REASON, endCancelledLeftovers, launchStopGraceful, mirror, queueRecorder, recordMinted, StartError, type RunSummary } from "../src/cli";
 import { ApiBindMissing, ApiPortInvalid, ApiTokenMissing, apiBind, apiPort, apiToken } from "../src/env";
-import { END_HYGIENE_EVENTS } from "../src/hygiene";
+import { END_HYGIENE_EVENTS, recordClaimRefusal } from "../src/hygiene";
 import { type QueueEvent, Queue, RunTerminal, STUDIO_END_RETRY_LIMIT, type EngineProbe, type Owner, type Probes, type QueueRun, type WorkerKill } from "../src/queue";
 import { fakeBin } from "./fakes";
 import { dump as dumpYaml } from "js-yaml";
@@ -355,6 +355,61 @@ describe("read routes (AC4)", () => {
     expect(body.live.map((r: QueueRun) => r.job_id).sort()).toEqual(["a", "b"]);
     expect(body.locks).toHaveLength(1);
     expect(body.locks[0].holder).toMatchObject({ kind: "run", run_id: a.run_id, job_id: "a", pid: A.pid });
+  });
+
+  test("Story 33.2 (0.1.28, additive): GET /runs/{id} and GET /status's live list carry the latest open claim refusal, null once claimed", async () => {
+    const fx = fixture();
+    const a = fx.enqueue("a");
+    const b = fx.enqueue("b");
+    fx.queue.refuseClaim(a.run_id, "max-login", "harness auth: Max login missing or expired (not logged in)", "renew it");
+    Bun.sleepSync(5);
+    fx.queue.refuseClaim(a.run_id, "pin-failed:s", "sbx pin failed: down", "start it");
+    const got = await (await fx.call("GET", `/runs/${a.run_id}`)).json() as Record<string, any>;
+    expect(got.state).toBe("queued");
+    expect(got.claim_refused).toMatchObject({ reason: "sbx pin failed: down", resolves: "start it" });
+    expect(Object.keys(got.claim_refused).sort()).toEqual(["pass_at", "reason", "resolves", "since"]);
+    expect(got.events.filter((e: any) => e.kind === "claim-refused")).toHaveLength(2);
+    expect((await (await fx.call("GET", `/runs/${b.run_id}`)).json() as Record<string, any>).claim_refused).toBeNull();
+    let status = await (await fx.call("GET", "/status")).json() as Record<string, any>;
+    const live = Object.fromEntries(status.live.map((r: any) => [r.job_id, r]));
+    expect(live.a.claim_refused).toMatchObject({ reason: "sbx pin failed: down", resolves: "start it" });
+    expect(live.b.claim_refused).toBeNull();
+    expect((await fx.queue.claim(a.run_id, A)).claimed).toBe(true);
+    fx.queue.clearClaimRefusals(a.run_id);
+    expect((await (await fx.call("GET", `/runs/${a.run_id}`)).json() as Record<string, any>).claim_refused).toBeNull();
+    status = await (await fx.call("GET", "/status")).json() as Record<string, any>;
+    expect(status.live.find((r: any) => r.job_id === "a").claim_refused).toBeNull();
+  });
+
+  test("Story 33.2 (the consult's stable key): two passes with the same key but different clipped stderr or holder detail → one event, one notifier line, the latest text on GET /runs/{id}; the key stays off the surface", async () => {
+    const fx = fixture();
+    const calls: string[] = [];
+    const deps = { env: { TK_SUPERVISOR_NOTIFY: "ntfy", TK_SUPERVISOR_NTFY_URL: "https://ntfy.example/tk-supervisor" },
+      fetch: async (_url: string, init?: RequestInit) => { calls.push(String(init?.body)); return new Response("ok", { status: 200 }); } };
+    const cases = [
+      { key: "pin-failed:claude-p", texts: ["sbx pin failed: sbx run -d --name claude-p exited 1: daemon not running (pid 4411)", "sbx pin failed: sbx run -d --name claude-p exited 1: daemon not running (pid 4502)"] },
+      { key: "lock:q-holder-1", texts: ["waiting: checkout lock held by run q-holder-1 (job j, pid 10@host-a)", "waiting: checkout lock held by run q-holder-1 (job j, pid 11@host-b); owner dead, its recorded worker (pid 12) may still run: alive"] },
+    ];
+    for (const c of cases) {
+      const run = fx.enqueue(`job-${c.key.split(":")[0]}`);
+      calls.length = 0;
+      expect(await recordClaimRefusal(fx.queue, run.run_id, c.key, c.texts[0]!, "fix one", deps)).toBe(true);
+      Bun.sleepSync(5);
+      expect(await recordClaimRefusal(fx.queue, run.run_id, c.key, c.texts[1]!, "fix two", deps)).toBe(false);
+      const refused = fx.queue.events(run.run_id).filter((e) => e.kind === "claim-refused");
+      expect(refused).toHaveLength(1);
+      expect(refused[0]!.detail).toMatchObject({ key: c.key, reason: c.texts[1], resolves: "fix two", notify: { ok: true, via: "ntfy" } });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toContain(c.texts[0]);
+      const got = await (await fx.call("GET", `/runs/${run.run_id}`)).json() as Record<string, any>;
+      expect(got.claim_refused).toMatchObject({ reason: c.texts[1], resolves: "fix two" });
+      expect(Object.keys(got.claim_refused).sort()).toEqual(["pass_at", "reason", "resolves", "since"]);
+      expect(String(got.claim_refused.pass_at) > String(got.claim_refused.since)).toBe(true);
+      // A different key on the same run is a new event and a second line.
+      expect(await recordClaimRefusal(fx.queue, run.run_id, "max-login", "harness auth: Max login missing or expired (not logged in)", "renew", deps)).toBe(true);
+      expect(calls).toHaveLength(2);
+      expect(fx.queue.events(run.run_id).filter((e) => e.kind === "claim-refused")).toHaveLength(2);
+    }
   });
 
   test("Story 33.1 (0.1.28): GET /status carries `log {path, last_lines}`, the last 20 lines redacted; `no log` and unset work noted", async () => {

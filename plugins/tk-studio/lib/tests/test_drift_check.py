@@ -18,6 +18,7 @@ import hashlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -479,6 +480,9 @@ class SkillsDirPlaneTestCase(unittest.TestCase):
                                   return_value=dict(quiet, plane="vault")), \
                 mock.patch.object(drift_check, "check_tracking",
                                   return_value=dict(quiet, plane="tracking")), \
+                mock.patch.object(drift_check, "check_sandbox_login",
+                                  return_value=dict(quiet,
+                                                    plane="sandbox-login")), \
                 mock.patch.object(drift_check, "_emit"), \
                 redirect_stdout(out):
             code = drift_check.main(["--directory", str(self.project),
@@ -505,6 +509,9 @@ class SkillsDirPlaneTestCase(unittest.TestCase):
                                   return_value=dict(quiet, plane="vault")), \
                 mock.patch.object(drift_check, "check_tracking",
                                   return_value=dict(quiet, plane="tracking")), \
+                mock.patch.object(drift_check, "check_sandbox_login",
+                                  return_value=dict(quiet,
+                                                    plane="sandbox-login")), \
                 mock.patch.object(drift_check, "_emit"), \
                 redirect_stdout(out):
             code = drift_check.main(["--directory", str(self.project),
@@ -664,7 +671,9 @@ class TrackingPlaneTests(unittest.TestCase):
         plane = drift_check.check_tracking(PLUGIN_ROOT.parents[1])
         self.assertIn(plane["case"], ("not-bound", "never-run"))
 
-    def test_main_reports_five_planes(self):
+    def test_main_reports_six_planes(self):
+        # Story 33.2 (ruling C): the sandbox-login plane is appended after
+        # the five published planes
         quiet = {"plane": "x", "status": "ok", "detail": ""}
         out = io.StringIO()
         with mock.patch.object(drift_check, "check_bmad_base",
@@ -675,13 +684,296 @@ class TrackingPlaneTests(unittest.TestCase):
                                   return_value=dict(quiet, plane="store")), \
                 mock.patch.object(drift_check, "check_vault",
                                   return_value=dict(quiet, plane="vault")), \
+                mock.patch.object(drift_check, "check_sandbox_login",
+                                  return_value=dict(quiet,
+                                                    plane="sandbox-login")), \
                 mock.patch.object(drift_check, "_emit"), \
                 redirect_stdout(out):
             code = drift_check.main(["--directory", str(self.root)])
         report = json.loads(out.getvalue())
         self.assertEqual([p["plane"] for p in report["planes"]],
-                         ["bmad-base", "plugin", "store", "vault", "tracking"])
+                         ["bmad-base", "plugin", "store", "vault", "tracking",
+                          "sandbox-login"])
         self.assertEqual(code, 0)
+
+
+class SandboxLoginPlaneTests(unittest.TestCase):
+    """Story 33.2 (AC2, operator ruling C): the sixth plane reads the engine
+    sandbox's Max login through ``sbx exec`` (never a token) and reuses the
+    plane statuses: ok | drift (expiring, 7 days or fewer) | error (expired
+    or logged out) | missing (no-sandbox)."""
+
+    NOW = 2_000_000_000.0
+    DAY = 86400
+    SB = "claude-tk-studio"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.config = Path(self._tmp.name) / "supervisor.yaml"
+        self.config.write_text(
+            'jobs:\n  "tk-studio/run-epic":\n    tier: sbx\n'
+            f'    sandbox: {self.SB}\n'
+            '  "The Universe Awaits/run-epic":\n    tier: sbx\n'
+            f"    sandbox: '{self.SB}'  # the same sandbox\n",
+            encoding="utf-8")
+        self.env = {"TK_SUPERVISOR_CONFIG": str(self.config)}
+        self.calls: list[list[str]] = []
+        self.daemon_rc = 0
+        self.state = "running"
+        self.logged_in = True
+        self.expiry = str(int((self.NOW + 30 * self.DAY) * 1000))
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def run_sbx(self, args):
+        self.calls.append(list(args))
+        if args[1:] == ["daemon", "status"]:
+            return subprocess.CompletedProcess(args, self.daemon_rc,
+                                               "running", "")
+        if args[1:] == ["ls"]:
+            return subprocess.CompletedProcess(
+                args, 0, f"SANDBOX  AGENT  STATUS\n{self.SB}  claude  "
+                f"{self.state}\n", "")
+        if args[1] == "exec" and "auth" in args:
+            return subprocess.CompletedProcess(
+                args, 0, json.dumps({"loggedIn": self.logged_in}), "")
+        if args[1] == "exec" and args[3] == "python3":
+            return subprocess.CompletedProcess(args, 0, self.expiry + "\n",
+                                               "")
+        raise AssertionError(f"unexpected sbx call {args}")
+
+    def plane(self, env=None):
+        return drift_check.check_sandbox_login(
+            self.env if env is None else env, self.run_sbx, self.NOW)
+
+    def at(self, days: float) -> str:
+        return str(int((self.NOW + days * self.DAY) * 1000))
+
+    def test_no_sandbox_configured_is_missing_never_an_error(self):
+        plane = self.plane(env={})
+        self.assertEqual((plane["plane"], plane["status"], plane["case"]),
+                         ("sandbox-login", "missing", "no-sandbox"))
+        self.assertIn("TK_SUPERVISOR_CONFIG is not set", plane["detail"])
+        self.assertEqual(self.calls, [])
+        self.config.write_text("jobs:\n  p/j:\n    tier: host\n",
+                               encoding="utf-8")
+        plane = self.plane()
+        self.assertEqual((plane["status"], plane["case"]),
+                         ("missing", "no-sandbox"))
+        self.assertEqual(self.calls, [])
+
+    def test_the_daemon_first_and_no_exec_on_a_stopped_sandbox(self):
+        self.daemon_rc = 1
+        plane = self.plane()
+        self.assertEqual((plane["status"], plane["case"]),
+                         ("missing", "no-sandbox"))
+        self.assertIn("daemon is not running", plane["detail"])
+        self.assertEqual(self.calls, [["sbx", "daemon", "status"]])
+        self.daemon_rc, self.state, self.calls = 0, "stopped", []
+        plane = self.plane()
+        self.assertEqual((plane["status"], plane["case"]),
+                         ("missing", "no-sandbox"))
+        self.assertIn("not running", plane["detail"])
+        self.assertEqual(self.calls, [["sbx", "daemon", "status"],
+                                      ["sbx", "ls"]])
+
+    def test_the_name_matches_the_sandbox_column_only(self):
+        # a sandbox named like another row's AGENT value is not that row
+        self.config.write_text("jobs:\n  p/j:\n    tier: sbx\n"
+                               "    sandbox: claude\n", encoding="utf-8")
+        for own_row in ("", "claude  claude  stopped\n"):
+            self.calls = []
+
+            def run(args, own_row=own_row):
+                if args[1:] == ["ls"]:
+                    self.calls.append(list(args))
+                    return subprocess.CompletedProcess(
+                        args, 0, "SANDBOX  AGENT  STATUS\nother  claude  "
+                        f"running\n{own_row}", "")
+                return self.run_sbx(args)
+            with self.subTest(own_row=own_row):
+                plane = drift_check.check_sandbox_login(self.env, run,
+                                                        self.NOW)
+                self.assertEqual((plane["status"], plane["case"]),
+                                 ("missing", "no-sandbox"))
+                self.assertIn("not running", plane["detail"])
+                self.assertEqual(self.calls, [["sbx", "daemon", "status"],
+                                              ["sbx", "ls"]])
+
+    def test_sbx_absent_is_missing(self):
+        def absent(args):
+            raise FileNotFoundError(args[0])
+        plane = drift_check.check_sandbox_login(self.env, absent, self.NOW)
+        self.assertEqual((plane["status"], plane["case"]),
+                         ("missing", "no-sandbox"))
+        self.assertIn("sbx not on PATH", plane["detail"])
+
+    def test_the_warning_window_and_the_failed_check(self):
+        for days, status, case in ((30, "ok", "ok"),
+                                   (7.05, "ok", "ok"),
+                                   (7, "drift", "expiring"),
+                                   (0.5, "drift", "expiring"),
+                                   (0, "error", "expired"),
+                                   (-2, "error", "expired")):
+            with self.subTest(days=days):
+                self.expiry, self.calls = self.at(days), []
+                plane = self.plane()
+                self.assertEqual((plane["status"], plane["case"]),
+                                 (status, case), plane)
+                if status == "ok":
+                    self.assertNotIn("fix", plane)
+                else:
+                    self.assertIn(f"sbx run --name {self.SB} → /login → "
+                                  "/exit", plane["fix"])
+                # one sandbox, read once although two jobs name it
+                self.assertEqual(
+                    [c[:3] for c in self.calls],
+                    [["sbx", "daemon", "status"], ["sbx", "ls"],
+                     ["sbx", "exec", self.SB], ["sbx", "exec", self.SB]])
+        self.expiry = self.at(3)
+        expires = datetime.fromtimestamp(self.NOW + 3 * self.DAY,
+                                         timezone.utc)
+        self.assertIn(expires.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                      self.plane()["detail"])
+
+    def test_logged_out_is_the_failed_check(self):
+        self.logged_in = False
+        plane = self.plane()
+        self.assertEqual((plane["status"], plane["case"]),
+                         ("error", "expired"))
+        self.assertIn("logged out", plane["detail"])
+
+    def test_only_the_expiry_field_leaves_the_sandbox(self):
+        self.plane()
+        script = next(c for c in self.calls if "python3" in c)[-1]
+        self.assertIn("refreshTokenExpiresAt", script)
+        self.assertIn("print('' if v is None else v)", script)
+        self.assertNotIn("accessToken", script)
+        for call in self.calls:   # argv only: no shell in any call
+            self.assertNotIn("sh", call)
+            self.assertNotIn("bash", call)
+
+    def test_config_sandboxes_reads_flow_style_job_entries(self):
+        """The supervisor parses its config with js-yaml: a flow-style job
+        entry under ``jobs:`` is valid YAML and names its sandbox too."""
+        import sandbox_login
+        text = ('jobs:\n  "p/j": {tier: sbx, sandbox: s1}\n'
+                '  "p/k": { "sandbox": \'s2\' , tier: sbx }  # c\n'
+                '  "p/l": {tier: sbx,\n    sandbox: s3}\n'
+                '  "p/m":\n    sandbox: s4\n'
+                'other: {sandbox: not-a-job}\n')
+        self.assertEqual(sandbox_login.config_sandboxes(text),
+                         ["s1", "s2", "s3", "s4"])
+        self.assertEqual(sandbox_login.config_sandboxes(
+            'jobs: {"p/j": {tier: sbx, sandbox: a}, "p/k": {sandbox: b}}\n'),
+            ["a", "b"])
+        self.config.write_text('jobs:\n  "tk-studio/run-epic": '
+                               f'{{tier: sbx, sandbox: {self.SB}}}\n',
+                               encoding="utf-8")
+        plane = self.plane()
+        self.assertEqual((plane["status"], plane["case"]), ("ok", "ok"))
+        self.assertIn(self.SB, plane["detail"])
+
+    def test_the_plane_has_one_total_budget_below_the_runner_bound(self):
+        """Every sbx call shares one budget, well below the conformance
+        runner's 60 s DEFAULT_TIMEOUT; a spent budget reads missing
+        (no-sandbox) like a daemon that is down, naming the timeout."""
+        self.assertLess(drift_check.SANDBOX_LOGIN_BUDGET, 60)
+        self.assertLessEqual(drift_check.SANDBOX_LOGIN_BUDGET, 30)
+        clock = [0.0]
+
+        def slow(args):   # each sbx call takes 12 s of the budget
+            clock[0] += 12
+            return self.run_sbx(args)
+
+        plane = drift_check.check_sandbox_login(self.env, slow, self.NOW,
+                                                clock=lambda: clock[0])
+        self.assertEqual((plane["status"], plane["case"]),
+                         ("missing", "no-sandbox"))
+        self.assertIn("budget", plane["detail"])
+        self.assertIn("timed out at `sbx exec", plane["detail"])
+        # 20 s: daemon status and ls ran, the budget was spent before exec
+        self.assertEqual([c[1] for c in self.calls], ["daemon", "ls"])
+        # a call that times out under the budget spends it too
+        self.calls.clear()
+
+        def hangs(args):
+            self.calls.append(list(args))
+            raise subprocess.TimeoutExpired(args, 20)
+
+        plane = drift_check.check_sandbox_login(self.env, hangs, self.NOW)
+        self.assertEqual((plane["status"], plane["case"]),
+                         ("missing", "no-sandbox"))
+        self.assertIn("timed out at `sbx daemon status`", plane["detail"])
+        self.assertEqual(len(self.calls), 1)
+
+    def test_a_later_timeout_never_downgrades_an_expired_reading(self):
+        """Two sandboxes, the first expired, the second timing out: the
+        reading already taken stays, the timed-out sandbox reads
+        no-sandbox with the timeout detail, and the worst over both is
+        still expired (the plane's error), never missing."""
+        import sandbox_login
+        second = "claude-other"
+        self.config.write_text(
+            'jobs:\n  "p/a":\n    tier: sbx\n'
+            f'    sandbox: {self.SB}\n'
+            '  "p/b":\n    tier: sbx\n'
+            f'    sandbox: {second}\n', encoding="utf-8")
+        self.expiry = self.at(-1)
+
+        def run(args):
+            if args[1] == "ls":
+                self.calls.append(list(args))
+                return subprocess.CompletedProcess(
+                    args, 0, f"SANDBOX  AGENT  STATUS\n{self.SB}  claude  "
+                    f"running\n{second}  claude  running\n", "")
+            if args[1] == "exec" and args[2] == second:
+                self.calls.append(list(args))
+                raise subprocess.TimeoutExpired(args, 20)
+            return self.run_sbx(args)
+
+        plane = drift_check.check_sandbox_login(self.env, run, self.NOW)
+        self.assertEqual((plane["status"], plane["case"]),
+                         ("error", "expired"), plane)
+        self.assertIn(f"{self.SB}: the Max login expired at",
+                      plane["detail"])
+        self.assertIn(f"{second}: the sandbox login read ran out",
+                      plane["detail"])
+        self.assertIn(f"timed out at `sbx exec {second}`", plane["detail"])
+        self.assertIn(f"sbx run --name {self.SB} → /login → /exit",
+                      plane["fix"])
+        # the reading itself: both sandboxes kept, each with its own case
+        self.calls.clear()
+        reading = sandbox_login.read_logins(
+            [self.SB, second, "claude-third"],
+            lambda args, _left: run(args), self.NOW,
+            deadline=sandbox_login.Deadline(20))
+        self.assertEqual(reading["case"], "expired")
+        self.assertEqual(
+            [(r["sandbox"], r["case"]) for r in reading["sandboxes"]],
+            [(self.SB, "expired"), (second, "no-sandbox"),
+             ("claude-third", "no-sandbox")])
+        self.assertIn("budget", reading["sandboxes"][2]["detail"])
+        # nothing is called after the budget ran out
+        self.assertEqual([c[2] for c in self.calls if c[1] == "exec"],
+                         [self.SB, self.SB, second])
+
+    def test_config_sandboxes_reads_the_jobs_block_only(self):
+        import sandbox_login
+        text = ("# a comment\njobs:\n  \"a b/j\":\n    sandbox: \"s1\"\n"
+                "  c/j:\n    tier: sbx\n    sandbox: s2 # trailing\n"
+                "  d/j:\n    sandbox: s1\nother:\n  sandbox: not-a-job\n")
+        self.assertEqual(sandbox_login.config_sandboxes(text), ["s1", "s2"])
+        self.assertEqual(sandbox_login.config_sandboxes(""), [])
+        self.assertEqual(sandbox_login.parse_expiry("1795000000000"),
+                         1795000000.0)
+        self.assertEqual(sandbox_login.parse_expiry("1795000000"),
+                         1795000000.0)
+        self.assertIsNone(sandbox_login.parse_expiry("None"))
+        self.assertIsNone(sandbox_login.parse_expiry(""))
+        for absurd in ("nan", "inf", "-inf", "1e20"):
+            self.assertIsNone(sandbox_login.parse_expiry(absurd), absurd)
 
 
 if __name__ == "__main__":

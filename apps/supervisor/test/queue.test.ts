@@ -1799,3 +1799,65 @@ describe("Story 32.2: enqueue's opt-in stack and the per-run payload", () => {
     } finally { q.close(); }
   });
 });
+
+describe("Story 33.2: one `claim-refused` per distinct key, `pass_at` updated in place, cleared on the claim", () => {
+  const kinds = (q: Queue, id: string) => q.events(id).map((e) => e.kind);
+  const pause = () => Bun.sleepSync(5); // distinct ISO milliseconds between passes
+
+  test("a repeated reason updates `pass_at` on the same event (never a flood); a new reason is a new event; the latest is served", () => {
+    const fx = fixture();
+    const { run } = fx.enqueue();
+    const first = fx.queue.refuseClaim(run.run_id, "max-login", "harness auth: Max login missing or expired (not logged in)", "renew it");
+    expect(first).toMatchObject({ fresh: true });
+    const at1 = fx.queue.claimRefusal(run.run_id)!.pass_at;
+    pause();
+    expect(fx.queue.refuseClaim(run.run_id, "max-login", "harness auth: Max login missing or expired (not logged in)", "renew it")).toEqual({ fresh: false, seq: first!.seq });
+    pause();
+    expect(fx.queue.refuseClaim(run.run_id, "max-login", "harness auth: Max login missing or expired (not logged in)", "renew it")?.fresh).toBe(false);
+    expect(kinds(fx.queue, run.run_id).filter((k) => k === "claim-refused")).toHaveLength(1);
+    const ev = fx.queue.events(run.run_id).find((e) => e.kind === "claim-refused")!;
+    expect(ev).toMatchObject({ from_state: "queued", to_state: "queued", seq: first!.seq });
+    expect(ev.detail).toMatchObject({ reason: "harness auth: Max login missing or expired (not logged in)", resolves: "renew it" });
+    expect(String(ev.detail!.pass_at) > at1).toBe(true);
+    expect(ev.at).toBe(at1); // the event's own time stays the first pass's
+    pause();
+    expect(fx.queue.refuseClaim(run.run_id, "pin-failed:s", "sbx pin failed: sbx run -d --name s exited 1: down", "start it")?.fresh).toBe(true);
+    expect(fx.queue.claimRefusal(run.run_id)).toMatchObject({ reason: "sbx pin failed: sbx run -d --name s exited 1: down", resolves: "start it" });
+    pause();
+    // The first reason again: its own event's pass_at moves, and it is the latest again.
+    expect(fx.queue.refuseClaim(run.run_id, "max-login", "harness auth: Max login missing or expired (not logged in)", "renew it")?.fresh).toBe(false);
+    expect(fx.queue.claimRefusal(run.run_id)?.reason).toStartWith("harness auth");
+    expect(fx.queue.claimRefusals(run.run_id).map((r) => r.reason)).toHaveLength(2);
+    expect(fx.queue.get(run.run_id)?.state).toBe("queued");
+  });
+
+  test("the claim clears the open refusals once (`claim-refusal-cleared {reasons, pass_at}`); a later refusal opens a new episode", async () => {
+    const fx = fixture();
+    const { run } = fx.enqueue();
+    expect(fx.queue.clearClaimRefusals(run.run_id)).toBe(false); // nothing open: nothing recorded
+    fx.queue.refuseClaim(run.run_id, "r1", "r1", "x");
+    fx.queue.refuseClaim(run.run_id, "r2", "r2", "y");
+    expect((await fx.queue.claim(run.run_id, A)).claimed).toBe(true);
+    expect(fx.queue.clearClaimRefusals(run.run_id)).toBe(true);
+    expect(fx.queue.clearClaimRefusals(run.run_id)).toBe(false);
+    const cleared = fx.queue.events(run.run_id).filter((e) => e.kind === "claim-refusal-cleared");
+    expect(cleared).toHaveLength(1);
+    expect(cleared[0]!.detail).toMatchObject({ reasons: ["r1", "r2"] });
+    expect(typeof cleared[0]!.detail!.pass_at).toBe("string");
+    // Running: no open refusal is served, and a refusal is never recorded on a run that is not queued.
+    expect(fx.queue.claimRefusal(run.run_id)).toBeNull();
+    expect(fx.queue.refuseClaim(run.run_id, "r1", "r1", "x")).toBeNull();
+    // Re-queued later: the same reason is new to the new episode.
+    fx.queue.db.run("UPDATE runs SET state = 'queued' WHERE run_id = ?", [run.run_id]);
+    expect(fx.queue.refuseClaim(run.run_id, "r1", "r1", "x")?.fresh).toBe(true);
+    expect(kinds(fx.queue, run.run_id).filter((k) => k === "claim-refused")).toHaveLength(3);
+  });
+
+  test("patchEventDetail merges into one event's detail", () => {
+    const fx = fixture();
+    const { run } = fx.enqueue();
+    const r = fx.queue.refuseClaim(run.run_id, "r", "r", "x")!;
+    fx.queue.patchEventDetail(r.seq, { notify: { ok: true, via: "ntfy" } });
+    expect(fx.queue.events(run.run_id).find((e) => e.seq === r.seq)!.detail).toMatchObject({ reason: "r", resolves: "x", notify: { ok: true, via: "ntfy" } });
+  });
+});

@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { cancelRun, mirror, studioOps } from "../src/cli";
 import { NotifierConfigMissing, NotifierUnknown, notifier, workDir } from "../src/env";
 import {
-  canonicalPr, copyTranscript, END_HYGIENE_EVENTS, endNotice, isGodot, isWithin, NOTICE_MAX_BYTES, notifierSecrets, notify, noticeText, prUrl,
+  canonicalPr, claimRefusedLine, copyTranscript, END_HYGIENE_EVENTS, recordClaimRefusal, endNotice, isGodot, isWithin, NOTICE_MAX_BYTES, notifierSecrets, notify, noticeText, prUrl,
   REFUSED_UNDER_TEST, robocopyOk, scrubNotifier, snapshot, snapshotArgv, SnapshotFailed, snapshotOnce, snapshotTarget, sweepEnds, TRUNCATED_MARKER,
   underBunTest,
 } from "../src/hygiene";
@@ -788,5 +788,55 @@ describe("start.ps1 sign-in (Story 22.5 AC4)", () => {
     // Names only, never a value.
     expect(block).not.toMatch(/Write-(Host|Warning|SupervisorLog)[^\n]*\$env:/);
     expect(text).not.toMatch(/Write-(Host|Warning|SupervisorLog)[^\n]*\$env:TK_SUPERVISOR_(SESSION_SECRET|OAUTH_)/);
+  });
+});
+
+describe("Story 33.2: one notifier line per new claim refusal, naming the run and what resolves it", () => {
+  const LOGIN = "harness auth: Max login missing or expired (not logged in)";
+  const RESOLVES = "renew the sandbox's Max login: sbx run --name claude-p → /login → /exit; the next drain pass claims the run";
+
+  test("the line: one line with the run id, the reason and the resolution; only the reason is cut", () => {
+    const line = claimRefusedLine("q-j-1", LOGIN, RESOLVES);
+    expect(line).toBe(`supervisor: run q-j-1 stays queued, claim refused: ${LOGIN} — resolve: ${RESOLVES}`);
+    expect(line).not.toContain("\n");
+    expect(claimRefusedLine("q-j-1", "a\n  b", "x")).toBe("supervisor: run q-j-1 stays queued, claim refused: a b — resolve: x");
+    const long = claimRefusedLine("q-j-1", "é".repeat(5000), RESOLVES);
+    expect(Buffer.byteLength(long, "utf-8")).toBeLessThanOrEqual(NOTICE_MAX_BYTES);
+    expect(long).toContain(TRUNCATED_MARKER);
+    expect(long).toContain("q-j-1");
+    expect(long.endsWith(`— resolve: ${RESOLVES}`)).toBe(true);
+  });
+
+  test("a new reason sends once (outcome on the event); a repeat sends nothing; a second reason sends its own line; no token anywhere", async () => {
+    const fx = fixture();
+    const run = fx.enqueue();
+    const { calls, fetchFn } = fakeFetch();
+    const deps = { env: TG_ENV, fetch: fetchFn };
+    expect(await recordClaimRefusal(fx.queue, run.run_id, "max-login", LOGIN, RESOLVES, deps)).toBe(true);
+    expect(await recordClaimRefusal(fx.queue, run.run_id, "max-login", LOGIN, RESOLVES, deps)).toBe(false);
+    expect(await recordClaimRefusal(fx.queue, run.run_id, "max-login", LOGIN, RESOLVES, deps)).toBe(false);
+    expect(calls).toHaveLength(1);
+    const body = JSON.parse(String(calls[0]!.init!.body));
+    expect(body).toEqual({ chat_id: "-100777", text: claimRefusedLine(run.run_id, LOGIN, RESOLVES) });
+    expect(body.text).toContain(run.run_id);
+    expect(body.text).toContain("sbx run --name claude-p → /login → /exit");
+    const events = fx.queue.events(run.run_id).filter((e) => e.kind === "claim-refused");
+    expect(events).toHaveLength(1);
+    expect(events[0]!.detail).toMatchObject({ reason: LOGIN, resolves: RESOLVES, notify: { ok: true, via: "telegram" } });
+    expect(await recordClaimRefusal(fx.queue, run.run_id, "pin-failed:claude-p", "sbx pin failed: sbx run -d --name claude-p exited 1: down", "start it", deps)).toBe(true);
+    expect(calls).toHaveLength(2);
+    expect(JSON.stringify(fx.queue.events(run.run_id))).not.toContain(TG_TOKEN);
+  });
+
+  test("no notifier configured: the event still lands, its `notify` naming the skip; a run that is not queued records nothing", async () => {
+    const fx = fixture();
+    const run = fx.enqueue();
+    const { calls, fetchFn } = fakeFetch();
+    expect(await recordClaimRefusal(fx.queue, run.run_id, "max-login", LOGIN, RESOLVES, { env: {}, fetch: fetchFn })).toBe(true);
+    expect(calls).toHaveLength(0);
+    expect(fx.queue.events(run.run_id).find((e) => e.kind === "claim-refused")!.detail!.notify).toMatchObject({ ok: false, skipped: expect.stringContaining("TK_SUPERVISOR_NOTIFY") });
+    fx.queue.end(run.run_id, "cancelled", "by hand", { from: "queued" });
+    expect(await recordClaimRefusal(fx.queue, run.run_id, "other", "other", "x", { env: TG_ENV, fetch: fetchFn })).toBe(false);
+    expect(calls).toHaveLength(0);
   });
 });

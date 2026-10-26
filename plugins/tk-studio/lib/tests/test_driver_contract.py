@@ -764,7 +764,8 @@ class DriverContractTestCase(unittest.TestCase):
             self.assertIn(phrase, flat)
         section_6 = self.text[self.text.index("## 6. Drift-check"):]
         flat = " ".join(section_6.split())
-        for phrase in ("five-plane", '"tracking"', "`not-bound`",
+        # Story 33.2 (ruling C): §6 is six-plane now (five-plane at 0.1.26)
+        for phrase in ("six-plane", '"tracking"', "`not-bound`",
                        "`never-run`", "`stale`", "`token-missing`",
                        "`unreachable`", "`deactivated`", "`auth`",
                        "never a network call", "owner's sign-in",
@@ -1782,10 +1783,11 @@ class DriverContractTestCase(unittest.TestCase):
 
     def test_folds_in_the_deferred_wording(self):
         # DW-1: §4 submit is id-only; DW-3: four-plane (five-plane since
-        # Story 31.4's tracking plane) + unrunnable-core
+        # Story 31.4's tracking plane, six-plane since Story 33.2's
+        # sandbox-login plane) + unrunnable-core
         self.assertNotIn("a job definition (or the id", self.text)
         self.assertIn("id-only", self.text)
-        self.assertIn("five-plane", self.text)
+        self.assertIn("six-plane", self.text)
         self.assertNotIn("three-way", self.text)
         self.assertIn("unrunnable-core", self.text)
 
@@ -1828,7 +1830,82 @@ class DriverContractTestCase(unittest.TestCase):
             self.assertIn(phrase, note)
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
-        self.assertIn("Story 32.8 (Epic 32), Story 33.1 (Epic 33)", stories)
+        # Story 33.2 joins Epic 33's group
+        self.assertIn("Story 32.8 (Epic 32), Story 33.1, Story 33.2 (Epic 33)",
+                      stories)
+
+    # --- Story 33.2: the same 0.1.28 entry — `claim-refused` and
+    # `claim-refusal-cleared`, the latest reason on `GET /runs/{id}`, the
+    # live list and `problems[]`, and the sixth drift-check plane
+    # `sandbox-login` (operator ruling C: existing statuses, six planes).
+
+    def test_0_1_28_story_33_2_refusals_and_the_sandbox_login_plane(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertEqual(header.count("0.1.28 (Story 33.2"), 1)
+        self.assertLess(header.index("0.1.28 (Story 33.1"),
+                        header.index("0.1.28 (Story 33.2"))
+        clause = " ".join(header[header.index("0.1.28 (Story 33.2"):]
+                          .split())
+        for phrase in ("`claim-refused {reason, resolves, pass_at}`",
+                       "one per distinct cause (the event detail carries a "
+                       "stable `key` — `max-login`, `pin-failed:<sandbox>`, "
+                       "`placement:<TierRefused|SbxSandboxMissing>`, "
+                       "`lock:<holder run_id>` — and a repeated key updates "
+                       "`reason`, `resolves` and `pass_at` in place on the "
+                       "same event; `claim_refused`, the live list and "
+                       "`problems[]` do not carry `key`)",
+                       "one line per new reason",
+                       "`claim-refusal-cleared {reasons, pass_at}`",
+                       "`GET /runs/{id}` carries `claim_refused`",
+                       "`live` list", "`problems[]`",
+                       "`TierRefused`, `SbxSandboxMissing`",
+                       "sixth plane, `sandbox-login`", "— additive) |"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        note = flat[flat.index("**0.1.28 (Story 33.2, additive).**"):]
+        for phrase in ("one per distinct cause since its latest "
+                       "`claim-refusal-cleared`: the event detail carries a "
+                       "stable `key` (`max-login`, `pin-failed:<sandbox>`, "
+                       "`placement:<TierRefused|SbxSandboxMissing>`, "
+                       "`lock:<holder run_id>`), and a repeated key updates "
+                       "`reason`, `resolves` and `pass_at` in place on that "
+                       "same event (its `seq` and `at` unchanged), never a "
+                       "second event; `claim_refused`, the live list and "
+                       "`problems[]` do not carry `key`.",
+                       "its `seq` and `at` unchanged",
+                       "`supervisor: run <run_id> stays queued, claim "
+                       "refused: <reason> — resolve: <resolves>`",
+                       "`{reason, resolves, pass_at, since}`, else `null`",
+                       "still end the run `blocked`",
+                       "No event, line or answer carries a token",
+                       "Its `missing` (`no-sandbox`, a box with no engine "
+                       "sandbox) aggregates to `result: drift` (exit 1), "
+                       "like every `missing` plane",
+                       "only its `expired` (`error`) reaches `result: "
+                       "error` (exit 2)"):
+            self.assertIn(phrase, note)
+        section_6 = " ".join(self.text[self.text.index("## 6. Drift-check"):
+                                       self.text.index("## 7.")].split())
+        for phrase in ("six-plane", '"sandbox-login"',
+                       "The plane list is fixed at six",
+                       "a consumer that knows five ignores the sixth",
+                       "`jobs.*.sandbox`", "`sbx daemon status` first",
+                       "`sbx exec` only on a sandbox `sbx ls` lists as "
+                       "running", "`refreshTokenExpiresAt`",
+                       "never a token", "never a new one",
+                       "| `ok` |", "| `expiring` |", "| `expired` |",
+                       "| `no-sandbox` |",
+                       "`sbx run --name <sandbox>` → `/login` → `/exit`",
+                       "make `result: drift` (exit 1), like every "
+                       "`missing` or `drift` plane",
+                       "only its `error` (`expired`) makes `result: "
+                       "error` (exit 2)", "one total budget"):
+            self.assertIn(phrase, section_6)
+        row = next(line for line in self.text.splitlines()
+                   if line.startswith("| the home and the read-only page "
+                                      "(Story 30.6, 0.1.25) |"))
+        self.assertIn("carries `claim_refused` (0.1.28, Story 33.2", row)
 
     # --- AC 2: A7 dossier items covered or explicitly deferred with a seam
 

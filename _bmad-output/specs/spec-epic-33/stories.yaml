@@ -82,6 +82,15 @@
     `33-3-the-pin-restarts-a-logged-out-sandbox-*.md`, and a file named
     `33-3-the-pin-restarts-a-logged-out-sandbox.md` is read as pending (loop deficiency
     1, story 21-6).
+    Replan (gate, from 33-2, 2026-10-26): 33-2 moved a drained run's pin before the
+    claim (`claimGate` -> `pinBeforeClaim`, apps/supervisor/src/cli.ts:1277-1318, then
+    `maxLoginPreflight`). Run mode, relaunch and resume still pin in the drive
+    (`queueRecorder.pin`, cli.ts:1703 -> `invokeSkill`, server.ts:1115). Put the
+    probe-and-restart in one shared sandbox.ts seam that both call. A drained run still
+    logged out after the restart refuses through the existing `recordedRefusal` key
+    `max-login` (no new key); a relaunched or resumed run ends `blocked` through
+    `authPreflight` as today. Record `pin-restart` with the in-place rule of
+    `pin-failed` (never a flood). The plan's Settled shape governs.
 
 - id: "33-4-the-host-leg-runs-the-supervisors-suites"
   title: "The Host Leg Runs the Supervisor's Suites"
@@ -110,6 +119,16 @@
     `33-4-the-host-leg-runs-the-supervisors-suites-*.md`, and a file named
     `33-4-the-host-leg-runs-the-supervisors-suites.md` is read as pending (loop
     deficiency 1, story 21-6).
+    Replan (gate, from 33-1, 2026-10-26; hole 70): the `tk-sup-*` leak also fills the
+    engine sandbox's /tmp (1.3 M inodes while 33-1 ran). `test/tmp.ts` must remove what
+    it made on every platform and under every exit, Linux included. Add a verify step:
+    after the full suite runs in the sandbox, `find /tmp -maxdepth 1 -name 'tk-sup-*' |
+    wc -l` is 0. Suggested, outside the AC unless the plan settles them:
+    `tk-studio-launch check` warns below 50,000 free inodes (`df -i /` through `sbx
+    exec`), and the pin prunes `/tmp/tk-sup-*` and `/tmp/tmp.*` older than a day. Since
+    33-2 the drained pin is `pinBeforeClaim` (apps/supervisor/src/cli.ts:1277), and 33-3
+    reshapes it, so coordinate. If the plan does not include them, record them as
+    DRIFT/deferred, never silently.
 
 - id: "33-5-the-roster-gate-inside-the-engine-tracked"
   title: "The Roster Gate Inside the Engine, Tracked"

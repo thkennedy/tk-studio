@@ -4,8 +4,9 @@ reported as ``{check, status: pass|fail|warn|skipped, detail, fix}``.
 Read-only: doctor writes, deletes and renames nothing (a leftover
 ``cli-update.cmd`` is reported, never removed). The only processes it starts
 are ``claude --version``, ``sbx daemon status`` and ``git config --global
---get core.longpaths``, each through the injected runner, only when the
-executable is on PATH, and each bounded by ``PROCESS_TIMEOUT``. Its only
+--get core.longpaths`` (plus the sandbox-login check's sbx reads below),
+each through the injected runner, only when the executable is on PATH, and
+each bounded by ``PROCESS_TIMEOUT``. Its only
 network calls are the ``/status`` probe (through the injected probe) and the
 roster fetch when ``--roster`` is a URL or absent. The cut-over checks
 (Story 28.4, Windows only) start nothing: the Startup ``.lnk`` is parsed in
@@ -14,6 +15,14 @@ Python and the git top-level is found by walking up for ``.git``.
 The supervisor log check (Story 33.1) reads the newest
 ``<TK_SUPERVISOR_WORK>/supervisor/logs/supervisor-<date>.log`` and nothing
 else: no process, no network, the file never written.
+
+The sandbox-login check (Story 33.2) runs only once ``sbx daemon status``
+passed and the supervisor config (``TK_SUPERVISOR_CONFIG``) names a
+sandbox: then ``sbx ls``, and on each running sandbox two ``sbx exec``
+reads (``claude auth status --json`` and the one ``refreshTokenExpiresAt``
+field of ``~/.claude/.credentials.json``, never a token), each through the
+runner, all of them together bounded by one ``SANDBOX_LOGIN_BUDGET``
+(``sandbox_login.py``).
 
 Doctor's own status is ``complete`` whatever the checks find; ``reason``
 names every failing check. Every non-``pass`` check carries a ``fix``.
@@ -25,11 +34,12 @@ import re
 import shutil
 import ssl
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Mapping
 
-from tk_studio_cli import apps, miniyaml, plugin_leg, skills_plane
+from tk_studio_cli import apps, miniyaml, plugin_leg, sandbox_login, skills_plane
 from tk_studio_cli.plugin_leg import Refusal
 
 PASS, FAIL, WARN, SKIPPED = "pass", "fail", "warn", "skipped"
@@ -83,11 +93,11 @@ def _found(ctx, name: str) -> bool:
     return bool(path) and shutil.which(name, path=path) is not None
 
 
-def _run(ctx, args: list):
+def _run(ctx, args: list, timeout: float = PROCESS_TIMEOUT):
     if ctx.runner is apps.default_runner:
         return apps.default_runner(
             args, dict(ctx.env) if ctx.explicit_env else None,
-            timeout=PROCESS_TIMEOUT)
+            timeout=min(PROCESS_TIMEOUT, timeout))
     return apps._run(ctx, args)
 
 
@@ -272,6 +282,50 @@ def check_sbx(ctx) -> dict:
         return _check(name, FAIL, f"sbx daemon status exit "
                       f"{proc.returncode}: {out[:200]}", FIX_SBX)
     return _check(name, PASS, f"sbx daemon status: {out[:200] or 'running'}")
+
+
+# --- the engine sandbox's Max login (Story 33.2) ------------------------------
+
+SANDBOX_LOGIN_STATUS = {sandbox_login.OK: PASS, sandbox_login.EXPIRING: WARN,
+                        sandbox_login.EXPIRED: FAIL,
+                        sandbox_login.NO_SANDBOX: SKIPPED}
+
+
+SANDBOX_LOGIN_BUDGET = sandbox_login.BUDGET_S   # seconds, every sbx read together
+
+
+def check_sandbox_login(ctx, sbx: dict, clock=time.monotonic) -> dict:
+    """Gated on ``check_sbx``: nothing runs unless the daemon passed. The
+    sandboxes are the supervisor config's ``jobs.*.sandbox`` values; warn
+    from ``sandbox_login.WARN_DAYS`` days before ``refreshTokenExpiresAt``,
+    fail once it passed (or the sandbox is logged out), the fix naming
+    ``sbx run --name <sandbox>`` → ``/login`` → ``/exit``. Its sbx reads
+    share one ``SANDBOX_LOGIN_BUDGET`` (each given the time left); a spent
+    budget is ``skipped`` like a daemon that is down, the detail naming the
+    timeout."""
+    name = "sandbox-login"
+    if sbx["status"] != PASS:
+        return _check(name, SKIPPED, f"{sbx['detail']}: the sandbox login "
+                      "is not read", sbx["fix"])
+    path = apps._var(ctx, "TK_SUPERVISOR_CONFIG")
+    if not path:
+        return _check(name, SKIPPED, "TK_SUPERVISOR_CONFIG not set: no "
+                      "engine sandbox configured", sandbox_login.FIX_NO_CONFIG)
+    try:
+        text = Path(path).read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        return _check(name, SKIPPED, f"TK_SUPERVISOR_CONFIG {path} is "
+                      f"unreadable ({exc}): no engine sandbox read",
+                      "point TK_SUPERVISOR_CONFIG at the supervisor's config "
+                      "file")
+    reading = sandbox_login.read_logins(
+        sandbox_login.config_sandboxes(text),
+        lambda args, left: _run(ctx, args, left), ctx.now(),
+        daemon_checked=True,
+        deadline=sandbox_login.Deadline(SANDBOX_LOGIN_BUDGET, clock))
+    return _check(name, SANDBOX_LOGIN_STATUS[reading["case"]],
+                  reading["detail"], reading["fix"] or "",
+                  sandboxes=reading["sandboxes"])
 
 
 # --- folder trust (holes 14 and 15) ------------------------------------------
@@ -1069,7 +1123,11 @@ def run_doctor(ctx, *, roster: str | None, channel: str, fetch,
         check_plugin(ctx, loaded, refusal, channel),
         check_plugin_leftovers(ctx),
         check_store(ctx),
-        check_sbx(ctx),
+    ]
+    sbx = check_sbx(ctx)
+    checks += [
+        sbx,
+        check_sandbox_login(ctx, sbx),   # Story 33.2: gated on sbx-daemon
         *check_folder_trust(ctx),
         check_long_paths(ctx),
         check_path_launcher(ctx),
