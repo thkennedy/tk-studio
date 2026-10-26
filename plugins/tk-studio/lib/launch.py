@@ -47,6 +47,12 @@ Guarantees:
     readiness check that found a mismatch carries the `budget` object too.
     A band whose compared field is not a number puts that limit under
     `not_compared`, never compared on the remaining bands.
+  - `check` reports the engine sandbox (Story 33.3) as one advisory row,
+    never a gap: a sandbox the supervisor config names that `sbx ls` lists
+    as running with no supervisor pin record
+    (`<store>/sandboxes/<sandbox>.pin`) is named as a warning ("started
+    outside the supervisor; the next pin restarts it"). `sbx daemon status`
+    runs before `sbx ls`, and no other sbx command runs.
 
 Exit codes: 0 verb answered (a `check` with gaps is an answer: ok=false);
 2 bad invocation or refusal (`start` on a failing check, missing spec, an
@@ -71,6 +77,7 @@ from pathlib import Path
 
 import job as joblib
 import miniyaml
+import sandbox_login
 import store as storelib
 
 # statuses `bmad-loop list --json` reports for a run whose engine is gone;
@@ -144,6 +151,21 @@ def spawn_detached(args: list[str], *, cwd: Path, log_path: Path) -> int:
                                 stderr=subprocess.STDOUT, close_fds=True,
                                 **kwargs)
     return proc.pid
+
+
+SBX_TIMEOUT = 30  # seconds per sbx call, at most (the row's budget caps it)
+
+
+def run_sbx(args: list[str], timeout: float = SBX_TIMEOUT):
+    """One bounded, argv-only sbx call (FileNotFoundError when sbx is
+    absent). Module-level so tests inject a fake (no live sbx in tests)."""
+    exe = shutil.which(args[0])
+    if exe is None:
+        raise FileNotFoundError(args[0])
+    return subprocess.run([exe, *args[1:]], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace",
+                          timeout=min(SBX_TIMEOUT, timeout),
+                          stdin=subprocess.DEVNULL)
 
 
 def _json_out(text: str) -> dict | None:
@@ -339,6 +361,68 @@ def start_block(result: dict) -> tuple[str, list[str], str | None]:
     return "blocked", [], result.get("error") or "the engine never acknowledged the launch"
 
 
+# ------------------------------------------------------- the engine sandbox
+
+ENGINE_SANDBOX_CHECK = "engine sandbox"
+OUTSIDE_WARNING = ("warning: {sb} started outside the supervisor; the next "
+                   "pin restarts it")
+
+
+def pin_record_path(sandbox: str) -> Path:
+    """The supervisor's pin record (Story 33.3): written on every pin,
+    removed when its release stopped the sandbox."""
+    safe = re.sub(r"[^A-Za-z0-9._\-]", "_", sandbox)
+    return storelib.store_root() / "sandboxes" / f"{safe}.pin"
+
+
+def engine_sandbox_row(env=None) -> dict:
+    """Story 33.3: the advisory ``engine sandbox`` row (``ok`` always true,
+    never a gap). The sandboxes are the supervisor config's
+    ``jobs.*.sandbox`` (``sandbox_login.config_sandboxes``); ``sbx daemon
+    status`` runs before ``sbx ls`` and every call shares one budget. A
+    sandbox listed as running with no pin record reads ``warning: <sb>
+    started outside the supervisor; the next pin restarts it``; otherwise
+    ``pinned by the supervisor``, ``not running``, ``no engine sandbox
+    configured``, ``sbx absent`` or ``daemon down``."""
+    env = os.environ if env is None else env
+
+    def row(detail: str) -> dict:
+        return {"check": ENGINE_SANDBOX_CHECK, "ok": True, "detail": detail}
+
+    path = (env.get("TK_SUPERVISOR_CONFIG") or "").strip()
+    try:
+        text = Path(path).read_text(encoding="utf-8-sig") if path else ""
+    except (OSError, UnicodeDecodeError):
+        text = ""
+    sandboxes = sandbox_login.config_sandboxes(text)
+    if not sandboxes:
+        return row("no engine sandbox configured")
+    deadline = sandbox_login.Deadline(sandbox_login.BUDGET_S)
+    try:
+        daemon, why = sandbox_login._call(run_sbx, ["sbx", "daemon", "status"], deadline)
+        if why == "absent":
+            return row("sbx absent")
+        if daemon is None or daemon.returncode != 0:
+            return row("daemon down")
+        ls, why = sandbox_login._call(run_sbx, ["sbx", "ls"], deadline)
+    except sandbox_login._Spent:
+        return row("daemon down")
+    # a failed listing reads as not running (the supervisor's own rule)
+    listing = (ls.stdout or "") if ls is not None and ls.returncode == 0 else ""
+    parts = []
+    for sb in sandboxes:
+        line = sandbox_login._listed(listing, sb)
+        if line is None or "running" not in line.lower().split():
+            state = "not running"
+        elif pin_record_path(sb).is_file():
+            state = "pinned by the supervisor"
+        else:
+            parts.append(OUTSIDE_WARNING.format(sb=sb))
+            continue
+        parts.append(state if len(sandboxes) == 1 else f"{sb}: {state}")
+    return row("; ".join(parts))
+
+
 # --------------------------------------------------------------------- verbs
 
 def check(project_root: Path, spec_folder: str) -> dict:
@@ -385,6 +469,8 @@ def check(project_root: Path, spec_folder: str) -> dict:
     checks.append({"check": "studio-pipeline plugin", "ok": True,
                    "detail": ("present" if plugin.is_file()
                               else "absent — the run will have no gate session (advisory)")})
+    # Story 33.3: advisory like the plugin row — never a gap
+    checks.append(engine_sandbox_row())
 
     try:
         live = live_runs(list_runs(root))

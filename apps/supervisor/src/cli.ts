@@ -134,7 +134,8 @@ import { closeoutPass } from "./delivery";
 import { ledgerPath } from "./board";
 import { CERT_CHECK_MS, CERT_RENEW_EXIT, certCheck, recordCertStart } from "./cert";
 import {
-  holdEngine, killRunEngine, pinSandbox, releasePin, respawnHolds, STARTER_LOCK_REFRESH_MS, studioRunDir, writeStarterLock, writeStarterLocks, type SandboxDeps,
+  holdEngine, killRunEngine, pinWithRestart, releasePin, respawnHolds, STARTER_LOCK_REFRESH_MS, studioRunDir, writeStarterLock, writeStarterLocks, type PinContext,
+  type SandboxDeps,
 } from "./sandbox";
 import { jobOptions, loadSupervisorConfig, type JobOptions } from "./config";
 import {
@@ -285,6 +286,9 @@ export interface RunOptions {
   skipRecover?: boolean;
   /** `drain`: drive exactly this queued run — adopt it, never mint. */
   runId?: string;
+  /** Story 33.3: the sandboxes the pin restarted in this drain pass (`drainQueue` owns it and shares it with the
+   * pass's resumes and drained runs; one restart per pass). */
+  restarted?: Set<string>;
   /** Explicit worker options (the submission's flags); each wins over the stored run and the config. */
   tier?: string;
   sandbox?: string;
@@ -549,10 +553,12 @@ export async function recoverWithResume(
   return { report, prepared };
 }
 
-/** Drive taken-over runs one after another: `--resume <session-id>` on the stored tier, then finish and mirror. */
+/** Drive taken-over runs one after another: `--resume <session-id>` on the stored tier, then finish and mirror.
+ * Story 33.3: `restarted` is the drain pass's restarted set (`drainQueue` passes its own, so a resume's pin and the
+ * pass's drained runs restart a sandbox at most once in the pass); absent, each resume's recorder has its own. */
 export async function driveResumes(
   queue: Queue, runs: ResumedRun[], prepared: Map<string, Started>, verbRunner: VerbRunner = runJobVerb, invoke: SkillInvoker = invokeSkill,
-  sandbox: SandboxDeps = {},
+  sandbox: SandboxDeps = {}, restarted?: Set<string>,
 ): Promise<void> {
   for (const r of runs) {
     const s = prepared.get(r.run_id);
@@ -563,7 +569,7 @@ export async function driveResumes(
       continue;
     }
     let summary: RunSummary;
-    try { summary = await finishRun({ ...s, recorder: queueRecorder(queue, r.run_id) }, verbRunner, invoke); }
+    try { summary = await finishRun({ ...s, recorder: queueRecorder(queue, r.run_id, {}, restarted) }, verbRunner, invoke); }
     catch (e) {
       r.error = message(e);
       try { await queue.endDriven(r.run_id, "blocked", r.error); } catch { /* already ended */ }
@@ -906,13 +912,15 @@ export async function drainQueue(opts: RunOptions = {}, verbRunner: VerbRunner =
   const { queue, owned } = openQueue(opts);
   const owner = opts.owner ?? selfOwner();
   try {
+    // Story 33.3: one pass, one restart per sandbox — shared by the pass's resumes and every run it gates.
+    const restarted = new Set<string>();
     const { report: recovered, prepared } = await recoverWithResume(queue, owner, verbRunner);
-    await driveResumes(queue, recovered.resumed, prepared, verbRunner, invokeSkill, sbxDeps(opts.worktree));
+    await driveResumes(queue, recovered.resumed, prepared, verbRunner, invokeSkill, sbxDeps(opts.worktree), restarted);
     const runs: DrainReport["runs"] = [];
     for (const r of queue.drainable(owner)) {
       try {
         // `undefined` mode: runJob drives the run under the mode recorded on it (else the default).
-        const summary = await runJob(r.job_id, r.root, undefined, { ...opts, queue, owner, skipRecover: true, runId: r.run_id });
+        const summary = await runJob(r.job_id, r.root, undefined, { ...opts, queue, owner, skipRecover: true, runId: r.run_id, restarted });
         // Report the run's actual queue state when the summary does not (Story 33.2: a refused claim — no Max
         // login, a failed pin, a refused placement — answers `queued` with its `claim_refused`).
         const now = queue.get(r.run_id)?.state;
@@ -1273,9 +1281,10 @@ function refusedClaim(queue: Queue, runId: string, jobId: string, r: ClaimRefuse
 /** Story 33.2: the pin before the claim (moved from the drive's `invokeSkill`): `sbx run -d --name <sb>`, recorded
  * `pinned` once while that pin stands (a pass that finds it standing adds none) and `pin-failed` once per failure
  * episode on that sandbox (a pass that fails again updates that event's `error` in place — its clipped stderr may
- * vary per pass). Null when pinned, else the failure. Never throws. */
-export async function pinBeforeClaim(queue: Queue, runId: string, sb: string, deps: SandboxDeps = {}): Promise<string | null> {
-  const failed = await pinSandbox(sb, deps);
+ * vary per pass). Story 33.3: through `pinWithRestart` (a running, logged-out sandbox restarted once; `ctx` carries
+ * the pass's restarted set and the probe's spawner). Null when pinned, else the failure. Never throws. */
+export async function pinBeforeClaim(queue: Queue, runId: string, sb: string, deps: SandboxDeps = {}, ctx: PinContext = {}): Promise<string | null> {
+  const failed = await pinWithRestart(queue, runId, sb, deps, ctx);
   try {
     const last = queue.events(runId).findLast((e) => e.kind === "pinned" || e.kind === "pin-failed" || e.kind === "pin-released");
     if (failed) {
@@ -1296,6 +1305,8 @@ export interface ClaimGateDeps {
   spawner?: Spawner;
   /** The notifier's environment and HTTP client. */
   hygiene?: HygieneDeps;
+  /** Story 33.3: the sandboxes the pin restarted in this drain pass (default: a set of this gate's own). */
+  restarted?: Set<string>;
 }
 
 /** Story 33.2: the drain's gate before it claims queued run `runId` under its resolved `options` — on sbx the pin
@@ -1309,7 +1320,9 @@ export async function claimGate(queue: Queue, runId: string, options: WorkerOpti
     if (stored?.state === "queued" && (stored.tier !== options.tier || stored.sandbox !== options.sandbox)) {
       try { queue.recordRunOptions(runId, { tier: options.tier, sandbox: options.sandbox }); } catch { /* the run moved on meanwhile */ }
     }
-    const failed = await pinBeforeClaim(queue, runId, options.sandbox, deps.sbx ?? {});
+    const failed = await pinBeforeClaim(queue, runId, options.sandbox, deps.sbx ?? {}, {
+      ...(deps.restarted ? { restarted: deps.restarted } : {}), ...(deps.spawner ? { spawner: deps.spawner } : {}),
+    });
     if (failed) return recordedRefusal(queue, runId, { key: `pin-failed:${options.sandbox}`, reason: failed, resolves: pinResolves(options.sandbox) }, deps.hygiene);
   }
   const login = await maxLoginPreflight(deps.spawner, { tier: options.tier, sandbox: options.sandbox });
@@ -1359,7 +1372,9 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
       }
       if (opts.runId) {
         // Story 33.2: the drain's gate before the claim — the pin (moved here from the drive), then the preflight.
-        const refused = await claimGate(queue, opts.runId, options, { sbx: sbxDeps(opts.worktree), ...(opts.hygiene ? { hygiene: opts.hygiene } : {}) });
+        const refused = await claimGate(queue, opts.runId, options, {
+          sbx: sbxDeps(opts.worktree), ...(opts.hygiene ? { hygiene: opts.hygiene } : {}), ...(opts.restarted ? { restarted: opts.restarted } : {}),
+        });
         if (refused) return refusedClaim(queue, opts.runId, jobId, refused);
       } else {
         const login = await maxLoginPreflight(undefined, { tier: options.tier, sandbox: options.sandbox });
@@ -1699,11 +1714,13 @@ export interface RunRecorder {
   killEngine?(why: string, engineRunId?: string): Promise<WorkerKill | undefined>;
 }
 
-/** The queue-backed recorder of one queue run. */
-export function queueRecorder(queue: Queue, runId: string, sbx: SandboxDeps = {}): RunRecorder {
+/** The queue-backed recorder of one queue run. Story 33.3: its pin goes through `pinWithRestart` with `restarted` —
+ * the drain pass's set for a resume `drainQueue` drives (shared with the pass's drained runs), else a set of its own
+ * (one per recorder, so one per `finishRun` call). */
+export function queueRecorder(queue: Queue, runId: string, sbx: SandboxDeps = {}, restarted: Set<string> = new Set<string>()): RunRecorder {
   return {
     pin: async (sb) => {
-      const failed = await pinSandbox(sb, sbx);
+      const failed = await pinWithRestart(queue, runId, sb, sbx, { restarted });
       try { queue.note(runId, failed ? "pin-failed" : "pinned", { sandbox: sb, ...(failed ? { error: failed } : {}) }); }
       catch { /* the run ended meanwhile: the pin answer still stands */ }
       return failed;

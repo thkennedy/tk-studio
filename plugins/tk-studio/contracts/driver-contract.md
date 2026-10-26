@@ -261,6 +261,40 @@ with no engine sandbox) aggregates to `result: drift` (exit 1), like every
 (`error`) reaches `result: error` (exit 2). Every other field, kind and
 route is unchanged.
 
+**0.1.28 (Story 33.3, additive).** The supervisor's sbx pin restarts a
+sandbox that came up without its Max login (one started outside the
+supervisor, such as a session's `sbx exec` on a stopped sandbox). Both pin
+sites (the drain's pin before the claim, and the drive's pin for run mode,
+relaunch and resume) read `sbx ls` before `sbx run -d --name <sandbox>`.
+Only when the sandbox was listed as running (its first column is the
+sandbox exactly and its status is `running`; a failed `sbx ls` reads as
+not running) does the pin probe the login (`sbx exec <sandbox> env -u
+ANTHROPIC_API_KEY claude auth status --json`). When the probe says not
+logged in, the pin stops and starts the sandbox once (`sbx stop`, `sbx run
+-d --name`), probes again, and records the queue event `pin-restart
+{sandbox, probe_before, probe_after, pass_at}` on the run; each probe is
+`null` (the claude.ai login is present) or the preflight's gap text, never
+stdout or a token. The restart happens only when this pass has not
+restarted that sandbox, the run's open episode (since its latest
+`claim-refusal-cleared`, else the run's start) carries no `pin-restart`
+for it, and no other run holds it `running`, `paused` or `external` nor
+does an ended run's engine still live there; a repeat in the same episode
+updates that event in place, never a second event. The caller's
+Max-login preflight then judges: a drained run still logged out stays
+`queued` through the existing `max-login` refusal, and a relaunch or
+resume ends `blocked` as before. A failed `sbx stop` or `sbx run` during
+the restart is a pin failure (`sbx pin failed: …`, the same `pin-failed`
+episode and `pin-failed:<sandbox>` key). The supervisor also keeps a pin
+record, `~/.tk-studio/sandboxes/<sandbox>.pin` (`TK_STUDIO_HOME`
+honoured) = `{sandbox, since, run_id, supervisor_pid}`, written on every
+pin and removed when the release (`pin-released`) stopped the sandbox; it
+is advisory, like the starter lock (§4). `tk-studio-launch check` reads
+it: an engine sandbox `sbx ls` lists as running with no record is named in
+the advisory `engine sandbox` row as `warning: <sandbox> started outside
+the supervisor; the next pin restarts it`, never a gap. No new
+`claim-refused` key, no new drift-check plane. Every other field, kind and
+route is unchanged.
+
 **The rules a consumer may rely on** (the landed Story 29.3 rules, stated
 in full in the README's "The office projection (Story 29.3)" bullet):
 
