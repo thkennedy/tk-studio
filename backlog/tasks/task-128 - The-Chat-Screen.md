@@ -1,9 +1,10 @@
 ---
 id: TASK-128
 title: The Chat Screen
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-25 03:13'
+updated_date: '2026-10-26 13:31'
 labels:
   - ST-128
 milestone: The Engagement Loop v1
