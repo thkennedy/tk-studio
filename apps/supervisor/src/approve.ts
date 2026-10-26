@@ -61,7 +61,11 @@
  *                  `steady` resubmits (same payload) once that run's PR merges, the state staying `in-progress`;
  *                  `ask` applies `run-paused`, blocks the issue `--kind ask`, and an owner comment line `continue`
  *                  (the 32.3 comment-reader rule: an owner comment after the newest agent comment) applies
- *                  `run-resumed` and resubmits.
+ *                  `run-resumed` and resubmits;
+ *                - Story 32.8: a mid-run `revise` (any linked run of any cycle live while the record is `scoping`)
+ *                  stops each live engine gracefully with reason `revise` (a still-queued run cancelled), once per
+ *                  engine, and resubmits nothing (a re-approval starts a new cycle); a run that ends on its own (the
+ *                  epic done, or failed) is `delivery.ts`'s closeout pass (`run-ended`, the report, the issue Done).
  *                Events: `engagement-run-stop {engagement, project, run_id, engine_run_id, reason, story_key?, ok,
  *                detail}`, `engagement-cap {engagement, project, run_id, runs_usd, cap, notify}`,
  *                `engagement-continue {engagement, project, comment}`, `engagement-issue {…, action: "blocked", kind}`
@@ -137,7 +141,7 @@ export const CONFIG_REL = ".tk-studio/config.yaml";
 export const JOBS_REL = ".tk-studio/jobs";
 export const engagementBranch = (id: string) => `engagement/${id}`;
 
-type Target = { root: string; engagement: string };
+export type Target = { root: string; engagement: string };
 type Detail = Record<string, unknown>;
 
 const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
@@ -149,7 +153,7 @@ const num = (v: unknown): number | undefined => (typeof v === "number" && Number
 
 /** The in-process serialisation per served root (the `scope.ts` pattern). */
 const rootChains = new Map<string, Promise<void>>();
-function serialised(root: string, fn: () => Promise<void>): Promise<void> {
+export function serialised(root: string, fn: () => Promise<void>): Promise<void> {
   const next = (rootChains.get(root) ?? Promise.resolve()).then(fn).catch(() => { /* this root on the next pass */ });
   rootChains.set(root, next);
   void next.then(() => { if (rootChains.get(root) === next) rootChains.delete(root); });
@@ -157,7 +161,7 @@ function serialised(root: string, fn: () => Promise<void>): Promise<void> {
 }
 
 /** The service events of `kind` for one engagement (keyed `engagement`, or `id` for `engagement-approve`). */
-function eventsFor(queue: Queue, kind: string, project: string, engagement: string) {
+export function eventsFor(queue: Queue, kind: string, project: string, engagement: string) {
   const key = kind === APPROVE_EVENT ? "id" : "engagement";
   return queue.serviceEvents(kind).filter((e) => e.detail?.[key] === engagement && e.detail?.project === project);
 }
@@ -165,7 +169,7 @@ function eventsFor(queue: Queue, kind: string, project: string, engagement: stri
 /** The engagements a pass looks at: the input route's one (`only`), every engagement a `chat-queued` event names
  * (its root the run payload's `project_root`, as `chatSpendPass` reads it), every one an `engagement-run-queued`
  * event names (the run's root) and every one an `engagement-approve` event names (its `detail.root`). */
-function targetsOf(queue: Queue, only?: Target): Target[] {
+export function targetsOf(queue: Queue, only?: Target): Target[] {
   const out = new Map<string, Target>();
   const key = (t: Target) => `${t.root}\u0000${t.engagement}`;
   const add = (root: unknown, engagement: unknown) => {
@@ -202,7 +206,7 @@ function writeFresh(root: string, id: string, deps: ApproveDeps, apply: (fresh: 
 
 /** One supervisor-observed event row applied on a fresh read (only the row's fields merged), then the `engagement`
  * service event; `once` refuses when the fresh record already holds such a line. Answers whether it applied. */
-function applyRow(
+export function applyRow(
   queue: Queue, deps: ApproveDeps, t: Target, event: EngagementEvent, detail: Detail,
   once?: (fresh: Engagement) => boolean,
 ): boolean {
@@ -902,18 +906,18 @@ export async function approvePass(queue: Queue, deps: ApproveDeps = {}, only?: T
 
 // ------------------------------------------------------------ the engagement-run pass
 
-interface Link { run_id: string; job: string; after_run?: string; at: string }
+export interface Link { run_id: string; job: string; after_run?: string; at: string }
 
 /** The engagement's linked runs; `since` (the newest `approve` line's `at`): only those queued at or after it (a
  * re-approval after `revise` starts a new cycle — finding H1). */
-function linksOf(queue: Queue, project: string, id: string, since?: string): Link[] {
+export function linksOf(queue: Queue, project: string, id: string, since?: string): Link[] {
   return eventsFor(queue, RUN_QUEUED_EVENT, project, id)
     .filter((e) => typeof e.detail?.run_id === "string" && typeof e.detail?.job === "string" && (since === undefined || e.at >= since))
     .map((e) => ({ run_id: e.detail!.run_id as string, job: e.detail!.job as string, at: e.at,
       ...(typeof e.detail?.after_run === "string" ? { after_run: e.detail.after_run } : {}) }));
 }
 
-const stops = (queue: Queue, project: string, id: string) => eventsFor(queue, RUN_STOP_EVENT, project, id);
+export const stops = (queue: Queue, project: string, id: string) => eventsFor(queue, RUN_STOP_EVENT, project, id);
 
 /** Stop one linked run's engine gracefully, recording `engagement-run-stop` (a failure equal to the newest one for
  * this run and reason not repeated). A run with no engine yet is not stopped (nothing recorded). */
@@ -936,7 +940,7 @@ async function cancelQueued(queue: Queue, deps: ApproveDeps, t: Target, project:
   let ok = true, detail = "queued run cancelled before launch";
   try {
     if (deps.cancelQueued) await deps.cancelQueued(run.run_id);
-    else queue.end(run.run_id, "cancelled", `cancelled: engagement ${t.engagement} ${reason === "cap" ? "reached its cap" : "cancelled"}`, { from: "queued" });
+    else queue.end(run.run_id, "cancelled", `cancelled: engagement ${t.engagement} ${reason === "cap" ? "reached its cap" : reason === "revise" ? "revised" : "cancelled"}`, { from: "queued" });
   } catch (e) { ok = false; detail = `cancel failed: ${clip(message(e))}`; }
   if (!ok) {
     if (queue.get(run.run_id)?.state !== "queued") return false; // claimed or ended meanwhile: the next pass sees it
@@ -949,7 +953,7 @@ async function cancelQueued(queue: Queue, deps: ApproveDeps, t: Target, project:
 
 /** The story a live run landed: `storyLanded` on its pause, else its newest `close-out` (the paused-run pass closed
  * the landed story out and relaunched the epic). */
-function landedStory(queue: Queue, run: QueueRun): string | undefined {
+export function landedStory(queue: Queue, run: QueueRun): string | undefined {
   const events = queue.events(run.run_id);
   const landed = storyLanded(run, events);
   if (landed) return landed;
@@ -970,7 +974,7 @@ async function trackBlock(deps: ApproveDeps, root: string, id: string, kind: "ca
 
 /** A `cap` or `ask` block owed since `since` (the newest `cap` or `run-paused` line): no `engagement-issue` event of
  * that kind (blocked, or a block's named refusal) at or after it. */
-const blockOwed = (queue: Queue, project: string, id: string, kind: string, since: string) =>
+export const blockOwed = (queue: Queue, project: string, id: string, kind: string, since: string) =>
   !eventsFor(queue, "engagement-issue", project, id).some((e) => blockKind(e) === kind && (e.detail?.action === "blocked" || e.detail?.action === "refused") && e.at >= since);
 
 async function blockIssue(queue: Queue, deps: ApproveDeps, t: Target, project: string, kind: "cap" | "ask", reason: string): Promise<boolean> {
@@ -997,7 +1001,7 @@ function capReason(record: Engagement): string {
     + `runs_usd: ${record.spend?.runs_usd ?? 0}\ncap: ${q.cap ?? null}\nband85.usd: ${b85 ?? null}\nband95.usd: ${b95 ?? null}`;
 }
 
-async function defaultNotify(deps: ApproveDeps, notice: EndNotice): Promise<Record<string, unknown>> {
+export async function defaultNotify(deps: ApproveDeps, notice: EndNotice): Promise<Record<string, unknown>> {
   try {
     const selected = notifier(deps.env ?? process.env);
     if (selected.kind === "none") return { ok: false, skipped: "no notifier configured (TK_SUPERVISOR_NOTIFY is unset)" };
@@ -1086,11 +1090,12 @@ async function runStep(queue: Queue, deps: ApproveDeps, t: Target, out: Engageme
     }
   }
   reread();
-  // 4. partial (the cap) or cancelled: every live linked engine stopped gracefully, once per engine; a linked run
-  // still queued (unclaimed, no engine yet) cancelled through the queue's cancel path so it never launches; any
-  // approve cycle's (follow-up review F1)
-  if (record.state === "partial" || record.state === "cancelled") {
-    const reason = record.state === "partial" ? "cap" : "cancel";
+  // 4. partial (the cap), cancelled, or (Story 32.8) scoping after a mid-run revise: every live linked engine stopped
+  // gracefully, once per engine (it finishes its current story); a linked run still queued (unclaimed, no engine yet)
+  // cancelled through the queue's cancel path so it never launches; any approve cycle's (follow-up review F1); a
+  // revise stop is never resubmitted (step 7 runs only in-progress; a re-approval starts a new cycle)
+  if (record.state === "partial" || record.state === "cancelled" || record.state === "scoping") {
+    const reason = record.state === "partial" ? "cap" : record.state === "cancelled" ? "cancel" : "revise";
     for (const run of liveAll()) {
       if (run.state === "queued" && !run.engine_run_id) {
         if (await cancelQueued(queue, deps, t, project, run, reason)) out.stopped.push(run.run_id);

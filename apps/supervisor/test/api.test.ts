@@ -1450,9 +1450,9 @@ describe("Story 32.1: the engagement routes (contract 0.1.27 additive)", () => {
     expect(fx.events()).toEqual([]);
   });
 
-  test("a bad body: an extra field (follows), an empty request, a non-object 400 SchemaError; not JSON 400 MalformedJson; nothing written", async () => {
+  test("a bad body: an extra field, a malformed follows, an empty request, a non-object 400 SchemaError; not JSON 400 MalformedJson; nothing written", async () => {
     const fx = routed();
-    for (const body of [{ project: "p", request: "x", follows: "ENG-001" }, { project: "p", request: "  " }, { project: "p" }, [1], { project: "p", request: "x".repeat(32 * 1024 + 1) }]) {
+    for (const body of [{ project: "p", request: "x", other: 1 }, { project: "p", request: "x", follows: "ENG-1" }, { project: "p", request: "  " }, { project: "p" }, [1], { project: "p", request: "x".repeat(32 * 1024 + 1) }]) {
       const res = await fx.call("POST", "/engagements", undefined, body);
       expect(res.status).toBe(400);
       expect(await res.json()).toMatchObject({ ok: false, error: "SchemaError" });
@@ -1462,6 +1462,61 @@ describe("Story 32.1: the engagement routes (contract 0.1.27 additive)", () => {
     expect(await malformed.json()).toMatchObject({ ok: false, error: "MalformedJson" });
     expect(existsSync(join(fx.root, ENG))).toBe(false);
     expect(existsSync(join(fx.root, ".tk-studio"))).toBe(false); // no id minted for a refused body
+  });
+
+  test("Story 32.8: follows a delivered ENG-NNN → a new intake record carrying follows, the previous record untouched", async () => {
+    const fx = routed();
+    await fx.create("The first engagement");
+    const first = readEngagement(fx.root, "ENG-001")!;
+    writeEngagement(fx.root, { ...first, state: "delivered" });
+    const before = readFileSync(join(fx.root, ENG, "ENG-001", "engagement.yaml"), "utf-8");
+    const res = await fx.call("POST", "/engagements", undefined, { project: "p", request: "A change after delivery", follows: "ENG-001" });
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, any>;
+    expect(body.engagement).toMatchObject({ id: "ENG-002", state: "intake", follows: "ENG-001", quote: null });
+    expect(readEngagement(fx.root, "ENG-002")!.follows).toBe("ENG-001");
+    expect(readFileSync(join(fx.root, ENG, "ENG-001", "engagement.yaml"), "utf-8")).toBe(before);
+    expect("follows" in (await fx.create("no follows")).engagement).toBe(false);
+  });
+
+  test("Story 32.8: follows refused — unknown (or another project's) 404 UnknownEngagement, not delivered 409 FollowsNotDelivered; nothing minted", async () => {
+    const fx = routed();
+    await fx.create("The first engagement");
+    await fx.create("Elsewhere", undefined, "o");
+    const other = readEngagement(fx.other, "ENG-001")!;
+    writeEngagement(fx.other, { ...other, state: "delivered" });
+    const unknown = await fx.call("POST", "/engagements", undefined, { project: "p", request: "x", follows: "ENG-009" });
+    expect(unknown.status).toBe(404);
+    expect(await unknown.json()).toEqual({ ok: false, error: "UnknownEngagement", engagement: "ENG-009" });
+    const live = await fx.call("POST", "/engagements", undefined, { project: "p", request: "x", follows: "ENG-001" });
+    expect(live.status).toBe(409);
+    expect(await live.json()).toEqual({ ok: false, error: "FollowsNotDelivered", engagement: "ENG-001", state: "intake" });
+    // another project's delivered ENG-001 does not count: p's own ENG-001 is the one read
+    expect(readEngagement(fx.root, "ENG-001")!.state).toBe("intake");
+    expect(listEngagements(fx.root).map((e) => e.id)).toEqual(["ENG-001"]);
+    expect(fx.events()).toHaveLength(2); // the two creates only
+    const crossed = await fx.call("POST", "/engagements", undefined, { project: "p", request: "x", follows: "ENG-002" });
+    expect(crossed.status).toBe(404);
+  });
+
+  test("Story 32.8: follows a record that is not JSON (or not a record) → 500 EngagementRecordInvalid {project, engagement, detail}; nothing minted", async () => {
+    const fx = routed();
+    await fx.create("The first engagement");
+    const counter = join(fx.root, ".tk-studio", "plan-counter.yaml");
+    const recordFile = join(fx.root, "_bmad-output", "engagements", "ENG-001", "engagement.yaml");
+    for (const text of ["{not json", "[1, 2]"]) {
+      writeFileSync(recordFile, text);
+      const before = readFileSync(counter, "utf-8");
+      const res = await fx.call("POST", "/engagements", undefined, { project: "p", request: "x", follows: "ENG-001" });
+      expect(res.status).toBe(500);
+      const body = await res.json() as Record<string, any>;
+      expect(body).toMatchObject({ ok: false, error: "EngagementRecordInvalid", project: "p", engagement: "ENG-001" });
+      expect(typeof body.detail).toBe("string");
+      expect(readFileSync(counter, "utf-8")).toBe(before);
+      expect(existsSync(join(fx.root, "_bmad-output", "engagements", "ENG-002"))).toBe(false);
+      expect(readFileSync(recordFile, "utf-8")).toBe(text); // the followed record untouched
+      expect(fx.events()).toHaveLength(1); // the create only
+    }
   });
 
   test("GET /engagements?project=: the project's records newest first; a cookie reads it; no project 400; unknown 404", async () => {

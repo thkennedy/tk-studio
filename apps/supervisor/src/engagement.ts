@@ -17,6 +17,8 @@
  *   the chat     `chatPointer`: `{route: "/chat/<id>", path: "_bmad-output/engagements/<id>/chat.jsonl", last_seq}`
  *                (32.2 writes the file, `chat.ts`; `last_seq` 0 while it is absent).
  *   the text     Story 32.2: `engagement.yaml` is written as JSON text (a YAML 1.2 document), read with js-yaml.
+ *   follows      Story 32.8: a change after `delivered` is a new engagement, `follows: "ENG-NNN"` on the new record
+ *                (present only when given; the previous record is never touched), with its own quote.
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -70,13 +72,17 @@ export interface Engagement {
   updated: string;
   spend: { planning_usd: number; runs_usd: number };
   inputs: InputLine[];
+  /** Story 32.8: the delivered engagement this one changes (`POST /engagements {…, follows}`); present only when
+   * given. */
+  follows?: string;
 }
 
-/** A new record in `intake` (the create route's). */
-export function newEngagement(id: string, project: string, request: string, at: string): Engagement {
+/** A new record in `intake` (the create route's); Story 32.8: `follows` carried only when given. */
+export function newEngagement(id: string, project: string, request: string, at: string, follows?: string): Engagement {
   return {
     shape_version: 1, id, project, state: "intake", request, questions: [], assumptions: [], scope_page: null, quote: null,
     autonomy: null, approved_at: null, closeout: null, created: at, updated: at, spend: { planning_usd: 0, runs_usd: 0 }, inputs: [],
+    ...(follows !== undefined ? { follows } : {}),
   };
 }
 
@@ -85,21 +91,24 @@ const nonEmpty = (v: unknown): v is string => typeof v === "string" && v.trim() 
 
 // ------------------------------------------------------------ the bodies (Settled shape 3)
 
-export interface CreateBody { project: string; request: string }
+export interface CreateBody { project: string; request: string; follows?: string }
 
-/** `POST /engagements`: `{project, request}`, both non-empty strings, `request` at most REPLY_MAX_BYTES UTF-8; no
- * other field (32.8's `follows` is not accepted yet). */
+/** `POST /engagements`: `{project, request, follows?}`, both non-empty strings, `request` at most REPLY_MAX_BYTES
+ * UTF-8; Story 32.8: `follows` (a change after delivery) an engagement id (`ENGAGEMENT_ID_RE`); no other field. */
 export function checkCreateBody(raw: unknown): { ok: true; body: CreateBody } | { ok: false; detail: string } {
   if (!isObject(raw)) return { ok: false, detail: "the body must be a JSON object" };
   for (const k of Object.keys(raw)) {
-    if (k !== "project" && k !== "request") return { ok: false, detail: `unknown field '${k}' (allowed: project, request)` };
+    if (k !== "project" && k !== "request" && k !== "follows") return { ok: false, detail: `unknown field '${k}' (allowed: project, request, follows)` };
+  }
+  if ("follows" in raw && (typeof raw.follows !== "string" || !ENGAGEMENT_ID_RE.test(raw.follows))) {
+    return { ok: false, detail: "field 'follows' must be an engagement id (ENG-001)" };
   }
   if (!nonEmpty(raw.project)) return { ok: false, detail: "field 'project' must be a non-empty string" };
   if (!nonEmpty(raw.request)) return { ok: false, detail: "field 'request' must be a non-empty string" };
   if (Buffer.byteLength(raw.request, "utf-8") > REPLY_MAX_BYTES) {
     return { ok: false, detail: `field 'request' exceeds ${REPLY_MAX_BYTES} bytes (UTF-8)` };
   }
-  return { ok: true, body: { project: raw.project.trim(), request: raw.request } };
+  return { ok: true, body: { project: raw.project.trim(), request: raw.request, ...(typeof raw.follows === "string" ? { follows: raw.follows } : {}) } };
 }
 
 export interface InputBody { verb: InputVerb; payload: Record<string, unknown> }

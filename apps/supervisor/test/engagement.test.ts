@@ -356,14 +356,67 @@ describe("checkInputBody: the typed payload per verb", () => {
 });
 
 describe("checkCreateBody", () => {
-  test("{project, request}: both non-empty strings, no other field (`follows` is 32.8's), request at most 32 KiB", () => {
+  test("{project, request, follows?}: both non-empty strings, no other field (Story 32.8: `follows`), request at most 32 KiB", () => {
     expect(checkCreateBody({ project: " p ", request: "Do it\n" })).toEqual({ ok: true, body: { project: "p", request: "Do it\n" } });
     for (const [raw, detail] of [
       [null, "the body must be a JSON object"], [{ project: "p" }, "field 'request' must be a non-empty string"],
       [{ request: "x" }, "field 'project' must be a non-empty string"], [{ project: "p", request: " " }, "field 'request' must be a non-empty string"],
-      [{ project: "p", request: "x", follows: "ENG-001" }, "unknown field 'follows' (allowed: project, request)"],
+      [{ project: "p", request: "x", other: 1 }, "unknown field 'other' (allowed: project, request, follows)"],
       [{ project: "p", request: "x".repeat(32 * 1024 + 1) }, "field 'request' exceeds 32768 bytes (UTF-8)"],
     ] as const) expect(checkCreateBody(raw)).toEqual({ ok: false, detail });
+  });
+});
+
+describe("Story 32.8: follows and the three mid-run inputs", () => {
+  test("follows: an engagement id is accepted and carried by the new record; anything else is a SchemaError detail", () => {
+    expect(checkCreateBody({ project: "p", request: "Change it", follows: "ENG-001" })).toEqual({ ok: true, body: { project: "p", request: "Change it", follows: "ENG-001" } });
+    for (const follows of ["ENG-1", "eng-001", "", 7, null, ["ENG-001"], " ENG-001"]) {
+      expect(checkCreateBody({ project: "p", request: "x", follows })).toEqual({ ok: false, detail: "field 'follows' must be an engagement id (ENG-001)" });
+    }
+    expect(newEngagement("ENG-002", "p", "Change it", AT, "ENG-001").follows).toBe("ENG-001");
+    expect("follows" in newEngagement("ENG-002", "p", "Change it", AT)).toBe(false);
+  });
+
+  test("question: a self-loop in every live state, logged {verb, payload {text}, source}, nothing else moved", () => {
+    for (const state of ["in-progress", "paused", "partial", "approved"] as EngagementState[]) {
+      const before = inState(state);
+      const r = applyInput(before, { verb: "question", payload: { text: "how far along?" }, source: "bearer", at: AT });
+      if (!r.ok) throw new Error(`${state} refused`);
+      expect(r.to).toBe(state);
+      expect(r.record.inputs).toEqual([{ at: AT, verb: "question", source: "bearer", payload: { text: "how far along?" }, from: state, to: state }]);
+      expect({ ...r.record, inputs: [], updated: before.updated }).toEqual({ ...before, inputs: [] });
+    }
+  });
+
+  test("revise mid-run: in-progress, paused and partial go back to scoping with the quote voided", () => {
+    for (const state of ["in-progress", "paused", "partial"] as EngagementState[]) {
+      const r = applyInput(inState(state), { verb: "revise", payload: { body: "narrow it" }, source: "cookie", at: AT });
+      if (!r.ok) throw new Error(`${state} refused`);
+      expect([r.from, r.to, r.record.quote]).toEqual([state, "scoping", null]);
+    }
+  });
+
+  test("go past a cap (partial → in-progress, raise-cap) and past open questions (awaiting-answers → scoping, assume-defaults)", () => {
+    const capped = applyInput(inState("partial"), { verb: "go", payload: { cap: 400 }, source: "bearer", at: AT });
+    if (!capped.ok) throw new Error("refused");
+    expect([capped.to, capped.record.quote?.cap]).toEqual(["in-progress", 400]);
+    const asked = applyInput(inState("awaiting-answers"), { verb: "go", source: "bearer", at: AT });
+    if (!asked.ok) throw new Error("refused");
+    expect(asked.to).toBe("scoping");
+    expect(asked.record.assumptions.map((a) => a.question)).toEqual(["q1", "q2"]);
+  });
+
+  test("run-ended from in-progress and from partial moves per its outcome; a delivered record takes no further input", () => {
+    for (const from of ["in-progress", "partial"] as EngagementState[]) {
+      for (const outcome of ["delivered", "partial", "failed"]) {
+        const r = applyEvent(inState(from), { event: "run-ended", detail: { outcome, run_id: "q-1", closeout: "_bmad-output/engagements/ENG-001/closeout.md" }, at: AT });
+        if (!r.ok) throw new Error(`${from} ${outcome} refused`);
+        expect(r.to).toBe(outcome as EngagementState);
+        expect(r.record.inputs.at(-1)).toMatchObject({ verb: "run-ended", source: "supervisor", run_id: "q-1", detail: { outcome } });
+      }
+    }
+    expect(applyEvent(inState("paused"), { event: "run-ended", detail: { outcome: "partial" }, at: AT })).toMatchObject({ ok: false, error: "IllegalInput" });
+    expect(applyInput(inState("delivered"), { verb: "question", payload: { text: "?" }, source: "bearer", at: AT })).toMatchObject({ ok: false, error: "EngagementClosed" });
   });
 });
 

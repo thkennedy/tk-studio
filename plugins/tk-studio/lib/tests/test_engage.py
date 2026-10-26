@@ -1818,5 +1818,360 @@ class QuoteCliTests(QuoteTestCase):
                          {"epics": [], "stories": 0})
 
 
+# ------------------------------------------------------- the closeout (32.8)
+
+CLOSEOUT_REL = "_bmad-output/engagements/ENG-001/closeout.md"
+RECORD_REL = "_bmad-output/engagements/ENG-001/engagement.yaml"
+PR_1 = "https://github.com/acme/widget/pull/7"
+PR_2 = "https://github.com/acme/widget/pull/8"
+CLOSEOUT_QUOTE = {"band50": {"tokens": 1, "usd": 3.0, "share": "x"},
+                  "band85": {"tokens": 2, "usd": 5.0, "share": "x"},
+                  "band95": {"tokens": 3, "usd": 8.0, "share": "x"},
+                  "cap": 10.0, "basis": {"stories": 2}, "computed_at": NOW}
+
+
+def closeout_input(**changes) -> dict:
+    """The supervisor's composition (Settled shape 2): Epic 1 queued as
+    run-epic-41, both stories landed and merged, one cap side exit."""
+    data = {
+        "run_id": "q-2", "outcome_hint": "partial",
+        "runs": [{"run_id": "q-1", "job": "run-epic-41", "state": "partial",
+                  "studio_run_id": "s-1", "cost_usd": 2.5, "pr": PR_1},
+                 {"run_id": "q-2", "job": "run-epic-41", "state": "complete",
+                  "studio_run_id": "s-2", "cost_usd": None, "pr": PR_2}],
+        "stories": [{"key": "41-1-csv-button", "run_id": "q-1",
+                     "spec_status": "done", "pr": PR_1,
+                     "pr_state": "MERGED"},
+                    {"key": "41-2-filtered-export", "run_id": "q-2",
+                     "spec_status": "done", "pr": PR_2,
+                     "pr_state": "MERGED"}],
+        "epics": [{"job": "run-epic-41", "queued": True}],
+        "side_exits": [{"at": "2026-10-25T07:00:00.000Z", "to": "partial",
+                        "verb": "cap", "reason": "cap"}],
+        "spend": {"planning_usd": 0.5, "runs_usd": 4.0},
+        "quote": CLOSEOUT_QUOTE,
+    }
+    data.update(changes)
+    return data
+
+
+def story(key, run="q-2", status="done", pr=PR_2, state="MERGED") -> dict:
+    return {"key": key, "run_id": run, "spec_status": status, "pr": pr,
+            "pr_state": state}
+
+
+class CloseoutTestCase(ScopeTestCase):
+    def setUp(self):
+        super().setUp()
+        self.scope_file().write_text(SCOPE, encoding="utf-8")
+        self.set_record(state="in-progress", quote=CLOSEOUT_QUOTE,
+                        spend={"planning_usd": 0.5, "runs_usd": 4.0})
+        self.measurements = Path(self._tmp.name) / "measurements"
+        self.measurements.mkdir()
+
+    def closeout(self, data=None, **kwargs):
+        kwargs.setdefault("now", NOW)
+        kwargs.setdefault("measurements", self.measurements)
+        return engage.closeout(self.root, ENG, closeout_input()
+                               if data is None else data,
+                               transport=self.fake, sleep=self.sleeps.append,
+                               **kwargs)
+
+    def report(self) -> str:
+        return (self.dir / "closeout.md").read_text(encoding="utf-8")
+
+
+class CloseoutRenderTests(CloseoutTestCase):
+    def test_every_section_written_published_beside_the_scope_and_merged(self):
+        self.set_record(state="scoping")
+        self.scope()  # the scope's page: the folder the closeout joins
+        self.set_record(state="in-progress")
+        with (self.measurements / "u-m.jsonl").open("w") as handle:
+            handle.write(json.dumps(meter_line("41-1-csv-button", 1.25,
+                                               120_000,
+                                               project="tk-studio")) + "\n")
+        result = self.closeout()
+        self.assert_status_block_last(result, "complete")
+        self.assertEqual((result["mode"], result["outcome"]),
+                         ("closeout", "delivered"))
+        text = self.report()
+        sections = [line[3:] for line in text.split("\n")
+                    if line.startswith("## ")]
+        self.assertEqual(sections, ["Outcome", "Deliverables",
+                                    "Pull requests", "Cost per story",
+                                    "Spend", "Quote against actual",
+                                    "Side exits"])
+        for phrase in ("- Outcome: delivered", "### CSV export",
+                       "Acceptance signal: the downloaded file holds the "
+                       "filtered rows.", "Verdict: done",
+                       f"- {PR_1} (MERGED)", f"- {PR_2} (MERGED)",
+                       "| story | run | tokens | usd |",
+                       "| 41-1-csv-button | q-1 | 120000 | $1.25 |",
+                       "| 41-2-filtered-export | q-2 | — | — |",
+                       "| q-1 | run-epic-41 | partial | $2.50 |",
+                       "| q-2 | run-epic-41 | complete | — |",
+                       "- planning_usd: $0.50", "- runs_usd: $4.00",
+                       "- total: $4.50", "- band50: $3.00",
+                       "- band85: $5.00", "- band95: $8.00",
+                       "- cap: $10.00", "- actual (runs_usd): $4.00",
+                       "- band hit: within band85",
+                       "- cap hit: under the cap",
+                       "- 2026-10-25T07:00:00.000Z: cap → partial — cap"):
+            self.assertIn(phrase, text)
+        # the page: `ENG-001: Closeout` in the scope's ENG-001 folder
+        scope_page = self.fake.page(SCOPE_TITLE)
+        page = self.fake.page("ENG-001: Closeout")
+        self.assertEqual(page["parentId"], scope_page["parentId"])
+        self.assertIn("<h2>Cost per story</h2>", page["body"])
+        self.assertIn(f"<code>{CLOSEOUT_REL}</code>", page["body"])
+        url = f"https://{SITE}/wiki/spaces/TKSTUDIO/pages/{page['id']}"
+        self.assertEqual(result["page"], {"id": page["id"], "url": url,
+                                          "version": 1, "action": "created"})
+        record = self.record()
+        self.assertEqual(record["closeout"], {
+            "path": CLOSEOUT_REL,
+            "page": {"id": page["id"], "url": url, "version": 1},
+            "outcome": "delivered", "done": 2, "not_done": 0,
+            "run_id": "q-2", "at": NOW})
+        # run-ended is the supervisor's: the state does not move here
+        self.assertEqual(record["state"], "in-progress")
+        self.assertEqual(result["written"], [CLOSEOUT_REL, RECORD_REL])
+
+    def quote_section(self) -> list:
+        text = self.report()
+        start = text.index("## Quote against actual")
+        return text[start:text.index("## Side exits")].split("\n")
+
+    def test_quote_against_actual_compares_runs_usd_alone(self):
+        # planning pushes the total past band85; the bands and the cap are
+        # priced from story runs and the cap meters runs_usd: runs_usd alone
+        # is compared, planning and the total still printed
+        self.closeout(closeout_input(spend={"planning_usd": 1.5,
+                                            "runs_usd": 4.0}))
+        lines = self.quote_section()
+        for phrase in ("- actual (runs_usd): $4.00", "- planning_usd: $1.50",
+                       "- total: $5.50", "- band hit: within band85",
+                       "- cap hit: under the cap"):
+            self.assertIn(phrase, lines)
+        # runs_usd at the cap (the supervisor caps at runs_usd >= cap), a
+        # total over it is not what decides
+        self.closeout(closeout_input(spend={"planning_usd": 0.0,
+                                            "runs_usd": 10.0}))
+        lines = self.quote_section()
+        self.assertIn("- band hit: at or over the cap", lines)
+        self.assertIn("- cap hit: at or over the cap", lines)
+        self.closeout(closeout_input(spend={"planning_usd": 5.0,
+                                            "runs_usd": 9.0}))
+        lines = self.quote_section()
+        self.assertIn("- band hit: within the cap", lines)
+        self.assertIn("- cap hit: under the cap", lines)
+        self.assertIn("- total: $14.00", lines)
+
+    def test_an_unchanged_report_skips_the_page_and_a_repeat_replaces_it(self):
+        self.closeout()
+        self.fake.calls.clear()
+        again = self.closeout()
+        self.assertEqual(again["page"]["action"], "skipped")
+        self.assertEqual(self.fake.writes(), [])
+        self.assertNotIn(CLOSEOUT_REL, again["written"])
+        # a new last run after go {cap}: a new report replaces file and page
+        self.set_record(state="partial")
+        third = self.closeout(closeout_input(run_id="q-3"))
+        self.assertEqual(third["page"]["action"], "updated")
+        self.assertEqual(third["page"]["version"], 2)
+        self.assertIn("- Last run: q-3", self.report())
+        self.assertEqual(self.record()["closeout"]["run_id"], "q-3")
+
+    def test_no_confluence_binding_writes_the_file_with_page_null(self):
+        self.config.write_text(self.unbound, encoding="utf-8")
+        result = self.closeout()
+        self.assert_status_block_last(result, "complete")
+        self.assertIsNone(result["page"])
+        self.assertTrue(any(n.startswith("ConfluenceUnbound")
+                            for n in result["notes"]))
+        self.assertEqual(self.fake.calls, [])
+        self.assertIn("## Outcome", self.report())
+        self.assertIsNone(self.record()["closeout"]["page"])
+
+    def test_the_record_merge_keeps_every_other_field(self):
+        before = self.record()
+        self.closeout()
+        after = self.record()
+        self.assertEqual(list(after), list(before))
+        self.assertEqual({k: v for k, v in after.items() if k != "closeout"},
+                         {k: v for k, v in before.items() if k != "closeout"})
+
+    def test_a_transient_publish_ends_partial_with_retry_and_no_merge(self):
+        with mock.patch.object(engage, "_publish_scope",
+                               side_effect=engage._Transient("HTTP 503")):
+            result = self.closeout()
+        self.assert_status_block_last(result, "partial")
+        self.assertTrue(result["retry"])
+        self.assertIsNone(self.record().get("closeout"))
+        self.assertEqual(result["written"], [CLOSEOUT_REL])
+
+    def test_a_dry_run_writes_nothing(self):
+        result = self.closeout(dry_run=True)
+        self.assert_status_block_last(result, "partial")
+        self.assertEqual(result["outcome"], "delivered")
+        self.assertFalse((self.dir / "closeout.md").exists())
+        self.assertEqual(self.fake.calls, [])
+
+
+class CloseoutVerdictTests(unittest.TestCase):
+    def verdicts(self, text=SCOPE, **changes):
+        return engage.closeout_verdicts(text, closeout_input(**changes))
+
+    def test_the_why_in_order(self):
+        no_signal = SCOPE.replace("Acceptance signal: the downloaded file "
+                                  "holds the filtered rows.", "")
+        v = self.verdicts(no_signal, epics=[{"job": "run-epic-41",
+                                             "queued": False}])
+        self.assertEqual(v[0]["why"], "no acceptance signal")
+        self.assertEqual(v[1]["why"], "epic not run")
+        v = self.verdicts(stories=[story("41-1-csv-button", status="in-review",
+                                         state="OPEN")])
+        self.assertEqual(v[0]["why"], "story 41-1-csv-button not landed")
+        v = self.verdicts(stories=[story("41-1-csv-button")])
+        self.assertEqual(v[0]["why"], "story 41-2 not landed")
+        # no spec read (no worktree, no run branch ref): not landed
+        v = self.verdicts(stories=[story("41-1-csv-button", status=None)])
+        self.assertEqual(v[0]["why"], "story 41-1-csv-button not landed")
+        v = self.verdicts(stories=[story("41-1-csv-button", state="OPEN"),
+                                   story("41-2-filtered-export")])
+        self.assertEqual(v[0]["why"], f"PR {PR_2} not merged")
+        self.assertFalse(v[0]["done"])
+        v = self.verdicts()
+        self.assertEqual([x["done"] for x in v], [True, True])
+        self.assertEqual(engage.closeout_outcome(v, closeout_input()),
+                         "delivered")
+
+    def test_a_deliverable_takes_the_stories_naming_it(self):
+        named = SCOPE.replace("#### Story 1.1: CSV button",
+                              "#### Story 1.1: CSV export button")
+        v = self.verdicts(named, stories=[story("41-1-csv-button")])
+        self.assertEqual(v[0]["stories"], ["41-1-csv-button"])
+        self.assertTrue(v[0]["done"])
+        self.assertEqual(v[1]["stories"], ["41-1-csv-button", "41-2"])
+        self.assertEqual(v[1]["why"], "story 41-2 not landed")
+
+    def test_the_outcome_failed_for_a_blocked_last_run_else_partial(self):
+        runs = [{"run_id": "q-2", "job": "run-epic-41", "state": "blocked"}]
+        v = self.verdicts(stories=[], runs=runs)
+        self.assertEqual(engage.closeout_outcome(v, closeout_input(
+            stories=[], runs=runs)), "failed")
+        runs[0]["state"] = "cancelled"
+        self.assertEqual(engage.closeout_outcome(v, closeout_input(
+            stories=[], runs=runs)), "partial")
+
+    def test_the_signal_fallback_and_no_signal_never_crash(self):
+        text = SCOPE.replace("Acceptance signal: the downloaded file holds the "
+                             "filtered rows.",
+                             "> **ACCEPTANCE SIGNAL** — the file opens")
+        v = self.verdicts(text)
+        self.assertEqual(v[0]["signal"], "the file opens")
+        self.assertTrue(v[0]["done"])
+        bare = "# s\n\n## Deliverables\n\n### Thing\n\nNo signal here.\n"
+        v = self.verdicts(bare)
+        self.assertEqual((v[0]["signal"], v[0]["why"]),
+                         (None, "no acceptance signal"))
+        self.assertEqual(self.verdicts("no headings at all\n"), [])
+        self.assertEqual(engage.closeout_outcome([], closeout_input()),
+                         "partial")
+
+    def test_an_unqueued_epic_reads_epic_not_run(self):
+        two = SCOPE + ("\n### Epic 2: Later\n\n#### Story 2.1: Date range "
+                       "filter presets\n\nAs a u, I want x, So that y.\n\n"
+                       "**Acceptance Criteria:** z\n")
+        v = self.verdicts(two, epics=[{"job": "run-epic-41", "queued": True},
+                                      {"job": "run-epic-42",
+                                       "queued": False}])
+        self.assertEqual(v[1]["title"], "Date range filter")
+        self.assertEqual(v[1]["why"], "epic not run")
+
+
+class CloseoutRefusalTests(CloseoutTestCase):
+    def assert_refused(self, name, data=None):
+        before = self.record()
+        result = self.closeout(data)
+        self.assert_status_block_last(result, "blocked")
+        self.assertIn(f"engage refused: {name}", result["reason"])
+        self.assertEqual(result["written"], [])
+        self.assertFalse((self.dir / "closeout.md").exists())
+        self.assertEqual(self.fake.calls, [])
+        return before
+
+    def test_no_scope(self):
+        self.scope_file().unlink()
+        self.assert_refused("NoScope")
+
+    def test_bad_input(self):
+        for bad in ([], {"run_id": ""}, closeout_input(stories="x"),
+                    closeout_input(stories=[{"run_id": "q"}]),
+                    closeout_input(outcome_hint="done"),
+                    closeout_input(quote=3)):
+            self.assert_refused("CloseoutInputInvalid", bad)
+
+    def test_an_unreadable_record(self):
+        (self.dir / "engagement.yaml").write_text("not json", encoding="utf-8")
+        result = self.closeout()
+        self.assert_status_block_last(result, "blocked")
+        self.assertIn("EngagementRecordUnreadable", result["reason"])
+        self.assertFalse((self.dir / "closeout.md").exists())
+
+    def test_a_scoping_or_terminal_record(self):
+        self.set_record(state="scoping")
+        self.assert_refused("NotInProgress")
+        for state in ("cancelled", "delivered"):
+            self.set_record(state=state)
+            self.assert_refused("EngagementClosed")
+
+
+class CloseoutCliTests(CloseoutTestCase):
+    def run_cli(self, *argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), \
+                mock.patch.dict(os.environ, {"TK_STUDIO_HOME":
+                                             str(self.measurements.parent)}):
+            code = engage.main(["closeout", "--directory", str(self.root),
+                                "--engagement", ENG, *argv])
+        return code, json.loads(out.getvalue())
+
+    def test_the_cli_reads_the_input_file_and_refuses_a_bad_one(self):
+        self.config.write_text(self.unbound, encoding="utf-8")
+        path = Path(self._tmp.name) / "closeout-input.json"
+        path.write_text(json.dumps(closeout_input()), encoding="utf-8")
+        code, result = self.run_cli("--input-file", str(path), "--dry-run")
+        self.assertEqual(code, 0)
+        self.assert_status_block_last(result, "partial")
+        code, result = self.run_cli("--input-file", str(path))
+        self.assertEqual(code, 0)
+        self.assert_status_block_last(result, "complete")
+        self.assertEqual(result["outcome"], "delivered")
+        path.write_text("{not json", encoding="utf-8")
+        code, result = self.run_cli("--input-file", str(path))
+        self.assertEqual(code, 2)
+        self.assert_status_block_last(result, "blocked")
+        self.assertIn("CloseoutInputInvalid", result["reason"])
+
+    def test_an_os_refusal_reading_the_input_file_is_transient(self):
+        self.config.write_text(self.unbound, encoding="utf-8")
+        before = {p: p.read_bytes() for p in self.root.rglob("*")
+                  if p.is_file()}
+        for path in (Path(self._tmp.name) / "absent.json",
+                     Path(self._tmp.name)):  # absent; a directory
+            code, result = self.run_cli("--input-file", str(path))
+            self.assertEqual(code, 0)
+            self.assert_status_block_last(result, "partial")
+            self.assertIs(result["retry"], True)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["written"], [])
+            self.assertIn("transient", result["reason"])
+            self.assertNotIn("CloseoutInputInvalid", result["reason"])
+        self.assertFalse((self.dir / "closeout.md").exists())
+        self.assertEqual({p: p.read_bytes() for p in self.root.rglob("*")
+                          if p.is_file()}, before)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -63,7 +63,12 @@
  *                            {id, project, state, from: null, source} (no queue run); 200 {ok, engagement}; 400
  *                            SchemaError | MalformedJson, 403 CsrfRefused (a cookie session without `X-CSRF-Token`), 404
  *                            UnknownProject, 500 EngagementRootMissing (no root, or a root not on disk: nothing created) |
- *                            EngagementCounterInvalid
+ *                            EngagementCounterInvalid. Story 32.8: `follows?: "ENG-NNN"` (a change after delivery: a new
+ *                            engagement with its own quote) — not an engagement id 400 SchemaError; no such record in the
+ *                            same served project 404 UnknownEngagement {engagement}; unreadable (not JSON, not a record) 500
+ *                            EngagementRecordInvalid {project, engagement, detail}; not `delivered` 409
+ *                            FollowsNotDelivered {engagement, state}; the new record carries `follows`, the previous one
+ *                            is never touched
  *   GET  /engagements?project=<id>  {ok, project, engagements, problems}: the project's records newest first; 400
  *                            ProjectRequired, 404 UnknownProject
  *   GET  /engagements/{id}   {ok, project, engagement, chat {route, path, last_seq}} ([?project=<id>] skips the registry
@@ -500,13 +505,23 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
     catch (e) { return fail(400, "MalformedJson", { detail: `the body is not JSON: ${e instanceof Error ? e.message : String(e)}` }); }
     const checked = checkCreateBody(raw);
     if (!checked.ok) return fail(400, "SchemaError", { detail: checked.detail });
-    const { project, request } = checked.body;
+    const { project, request, follows } = checked.body;
     const served = await servedRootOf(project, true);
     if (served instanceof Response) return served;
+    if (follows !== undefined) {
+      // Story 32.8: a change after delivery — the followed record read only, never written
+      let previous: Engagement | null;
+      try { previous = readEngagement(served.root, follows); } catch (e) {
+        if (e instanceof EngagementRecordInvalid) return fail(500, "EngagementRecordInvalid", { project, engagement: follows, detail: e.message });
+        throw e;
+      }
+      if (!previous) return fail(404, "UnknownEngagement", { engagement: follows });
+      if (previous.state !== "delivered") return fail(409, "FollowsNotDelivered", { engagement: follows, state: previous.state });
+    }
     const at = new Date(clock()).toISOString();
     let record: Engagement;
     try {
-      record = newEngagement(mintEngagementId(served.root), project, request, at);
+      record = newEngagement(mintEngagementId(served.root), project, request, at, follows);
       writeEngagement(served.root, record);
     } catch (e) {
       if (e instanceof EngagementCounterInvalid) return fail(500, "EngagementCounterInvalid", { project, detail: e.message });
