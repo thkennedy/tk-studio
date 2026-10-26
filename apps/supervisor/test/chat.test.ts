@@ -2,9 +2,9 @@
 // mints behind a live chat run and waits on the checkout lock; the per-run payload; `chat-queued`), the payload the
 // skill receives at run start, the spend pass into `spend.planning_usd`, and the worker's environment for a chat run.
 // Every planner is a fake: no `claude`, no `uv` job, no registry.
-import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import {
   appendChatLine, CHAT_LOCK_STALE_MS, ChatBusy, chatFile, chatSince, chatSpendPass, checkChatBody, mintChatTurn, prepareChatTurn, readChat,
@@ -18,15 +18,9 @@ import { newEngagement, readEngagement, writeEngagement } from "../src/engagemen
 import { ENGAGEMENT_CHAT_JOB, Queue, type Owner } from "../src/queue";
 import { withQueuedPayload, withStoredPayload } from "../src/resolution";
 import { buildWorkerEnv, invokeSkill, runProcess, type RunResult, type Spawner } from "../src/server";
+import { tempDir, track } from "./tmp";
 
-const made: string[] = [];
-const temp = (prefix: string) => { const d = mkdtempSync(join(tmpdir(), prefix)); made.push(d); return d; };
-// Windows: an open SQLite handle makes the temp dir EBUSY, so every queue the suite opened is closed before the rm.
-const queues: Queue[] = [];
-afterAll(() => {
-  for (const q of queues) { try { q.close(); } catch { /* already closed */ } }
-  for (const d of made) rmSync(d, { recursive: true, force: true });
-});
+const temp = tempDir; // test/tmp.ts closes the tracked queues and removes the folders
 
 const AT = "2026-10-25T05:00:00.000Z";
 const me: Owner = { pid: process.pid, host: hostname(), nonce: "chat-test" };
@@ -53,8 +47,7 @@ const fakeDeps = (): ChatDeps => ({
 });
 
 const newQueue = (alive = new Set<number>([me.pid])) => {
-  const q = new Queue(join(temp("tk-sup-chat-q-"), "q.db"), { ownerAlive: (o) => alive.has(o.pid), engineLive: async () => ({ live: false }) });
-  queues.push(q);
+  const q = track(new Queue(join(temp("tk-sup-chat-q-"), "q.db"), { ownerAlive: (o) => alive.has(o.pid), engineLive: async () => ({ live: false }) }));
   return q;
 };
 

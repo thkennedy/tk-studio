@@ -2,7 +2,7 @@
 // merges — pinned against a real throwaway repository (the run branch carrying the specs the run marked done), the
 // fake planning adapter under a temp TK_STUDIO_ROOT (`fakePlansync`) and the fake `gh` (`pr view`).
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { atBranch, mergePass, PLAN_RETRY_LIMIT, planEntity, planOwner, registryRoot, reviewPass, specKey, storyNumber, type PlanStatusDeps } from "../src/planstatus";
@@ -10,6 +10,7 @@ import { Queue, type QueueEvent } from "../src/queue";
 import { runProcess, runUv } from "../src/server";
 import { runBranch } from "../src/worktree";
 import { fakeGh, fakePlansync, gitRepo, testGit } from "./fakes";
+import { tempDir } from "./tmp";
 
 const me = { pid: process.pid, host: hostname(), nonce: "planstatus-test" };
 const PR = "https://github.com/acme/widget/pull/42";
@@ -35,7 +36,7 @@ async function fixture(opts: { base?: Record<string, string>; branch?: Record<st
   const claim = await queue.claim(queued.run_id, me);
   if (!claim.claimed) throw new Error("not claimed");
   const runId = queued.run_id;
-  queue.recordWorktree(runId, join(mkdtempSync(join(tmpdir(), "tk-sup-ps-wt-")), "gone"), { branch: runBranch(runId), base_ref: "main" });
+  queue.recordWorktree(runId, join(tempDir("tk-sup-ps-wt-"), "gone"), { branch: runBranch(runId), base_ref: "main" });
   // The run branch, cut from main, with the run's work committed on it (the worktree itself is gone, as after a close-out).
   testGit(repo.checkout, "checkout", "-q", "-b", runBranch(runId));
   write(repo.checkout, opts.branch ?? { "_bmad-output/specs/spec-epic-27/stories/27-5-the-plan-follows-the-run-spec.md": spec("done") });
@@ -64,7 +65,7 @@ describe("the pieces", () => {
   });
 
   test("ST lookup: one entity → its id; none → `no plan entity …`; several → `several plan entities …`", () => {
-    const dir = mkdtempSync(join(tmpdir(), "tk-sup-ps-plan-"));
+    const dir = tempDir("tk-sup-ps-plan-");
     write(dir, {
       "_bmad-output/planning-artifacts/plan/ST-097.md": entity("ST-097", "27.5"),
       "_bmad-output/planning-artifacts/plan/ST-010.md": entity("ST-010", "9.9"), "_bmad-output/planning-artifacts/plan/ST-011.md": entity("ST-011", "9.9"),
@@ -82,7 +83,7 @@ describe("owner resolution", () => {
   });
 
   test("transcribed: epics.md `status: transcribed`, `source: \"<org>/<repo> …\"` → the registry entry keyed <repo>", async () => {
-    const owner = mkdtempSync(join(tmpdir(), "tk-sup-ps-owner-"));
+    const owner = tempDir("tk-sup-ps-owner-");
     write(owner, { "_bmad-output/planning-artifacts/plan/ST-097.md": entity("ST-097", "27.5") });
     const fx = await fixture({
       plan: null, registry: { "tk-studio": owner },
@@ -242,7 +243,7 @@ describe("Story 27.5 review patches: the lease, transient failures", () => {
   }, 60_000);
 
   test("registry: a failed lookup records nothing (asked again next tick, the lease let go); a missing entry is the skip", async () => {
-    const owner = mkdtempSync(join(tmpdir(), "tk-sup-ps-owner-"));
+    const owner = tempDir("tk-sup-ps-owner-");
     write(owner, { "_bmad-output/planning-artifacts/plan/ST-097.md": entity("ST-097", "27.5") });
     let answer: "fail" | "absent" | "ok" = "fail";
     const fx = await fixture({

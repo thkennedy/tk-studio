@@ -2,7 +2,7 @@
 // repository (a bare `origin`) and the fake `gh`; the studio scripts' runner is injected.
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { cancelRun, closeOutOrphans, endAfterDriveFailure, finishRun, mirror, resolveCheckout, type Started } from "../src/cli";
@@ -13,6 +13,7 @@ import {
   baseBranch, closeOut, closeOutDetail, COPIED_RUNTIME, engineStatus, isDefaultBranch, launchedCloseOutInput, openPrUrl, originRepo, prBody, prepareWorktree, runBranch, sweepEngines, worktreePath, WorktreeFailed, type WorktreeDeps,
 } from "../src/worktree";
 import { fakeGh, fakeSbx, gitRepo, testGit } from "./fakes";
+import { tempDir, track } from "./tmp";
 
 const me = { pid: process.pid, host: hostname(), nonce: "worktree-test" };
 
@@ -21,7 +22,7 @@ const me = { pid: process.pid, host: hostname(), nonce: "worktree-test" };
 async function fixture(opts: { baseRef?: string; files?: Record<string, string>; skill?: string; nested?: string } = {}) {
   const repo = gitRepo(opts.files);
   const gh = fakeGh();
-  const work = mkdtempSync(join(tmpdir(), "tk-sup-wt-work-"));
+  const work = tempDir("tk-sup-wt-work-");
   const argvs: { bin: string; args: string[]; cwd: string }[] = [];
   const studio: { script: string; args: string[]; root: string }[] = [];
   const verbs: string[][] = [];
@@ -950,7 +951,7 @@ describe("Story 27.4: the host verify leg runs before any PR opens", () => {
 
 describe("the queue file gains the `paused` state (Story 27.1)", () => {
   test("a runs table whose state CHECK predates `paused` is rebuilt once on open: rows and columns intact, `paused` accepted", async () => {
-    const path = join(mkdtempSync(join(tmpdir(), "tk-sup-wt-old-")), "q.db");
+    const path = join(tempDir("tk-sup-wt-old-"), "q.db");
     const old = new Database(path, { create: true });
     old.exec(`CREATE TABLE jobs (job_id TEXT NOT NULL, checkout TEXT NOT NULL, root TEXT NOT NULL, project_id TEXT,
         definition TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL, PRIMARY KEY (job_id, checkout));
@@ -964,7 +965,7 @@ describe("the queue file gains the `paused` state (Story 27.1)", () => {
       INSERT INTO runs (run_id, job_id, checkout, root, state, created, updated) VALUES ('q-old', 'j', '/x', '/x', 'running', 't', 't');`);
     old.close();
     for (let i = 0; i < 2; i++) {
-      const q = new Queue(path, { ownerAlive: () => false, engineLive: async () => ({ live: false }) });
+      const q = track(new Queue(path, { ownerAlive: () => false, engineLive: async () => ({ live: false }) }));
       try {
         expect((q.db.query("SELECT sql FROM sqlite_master WHERE name = 'runs'").get() as { sql: string }).sql).toContain("'paused'");
         expect(q.get("q-old")).toMatchObject({ state: i === 0 ? "running" : "paused", worktree: null, base_ref_source: null });
@@ -1130,12 +1131,12 @@ describe("review patches: enqueue while paused (P5), base_ref spellings (P6), re
   });
 
   test("P5: an existing file's live-run index gains `paused` (dropped and recreated)", () => {
-    const path = join(mkdtempSync(join(tmpdir(), "tk-sup-wt-idx-")), "q.db");
-    new Queue(path).close();
+    const path = join(tempDir("tk-sup-wt-idx-"), "q.db");
+    track(new Queue(path)).close();
     const db = new Database(path);
     db.exec("DROP INDEX runs_one_live; CREATE UNIQUE INDEX runs_one_live ON runs (job_id, checkout) WHERE state IN ('queued','running')");
     db.close();
-    const q = new Queue(path);
+    const q = track(new Queue(path));
     try { expect((q.db.query("SELECT sql FROM sqlite_master WHERE name = 'runs_one_live'").get() as { sql: string }).sql).toContain("'paused'"); }
     finally { q.close(); }
   });

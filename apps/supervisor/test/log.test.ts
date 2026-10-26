@@ -1,8 +1,7 @@
 // Story 33.1: the supervisor's log file — the line shape, the day file and its midnight switch, the rotation, the
 // redaction and the tee end to end, every clock a fake.
-import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import {
@@ -10,14 +9,13 @@ import {
   runUnderLog, TAIL_LINES,
 } from "../src/log";
 import { redactCredentials } from "../src/page";
+import { tempDir } from "./tmp";
 
 const REPO = resolve(import.meta.dir, "..");
 const TELEGRAM = "123456789:AAtelegram-bot-secret-value-xyz-0123456789";
 const BEARER = "bearer-planted-log-secret-77";
 const T0 = Date.UTC(2026, 9, 26, 23, 59, 58, 500); // 2026-10-26T23:59:58.500Z
-const made: string[] = [];
-const tmp = (prefix: string) => { const d = mkdtempSync(join(tmpdir(), prefix)); made.push(d); return d; };
-afterAll(() => { for (const d of made) rmSync(d, { recursive: true, force: true }); });
+const tmp = tempDir; // test/tmp.ts removes the folders
 
 /** A work folder and its env (the planted secret included). */
 function work(extra: Record<string, string> = {}) {

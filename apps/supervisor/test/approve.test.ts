@@ -3,9 +3,9 @@
 // cancel), the run spend, and every refusal. The "fake adapter" is the injected `uv` (the fake plansync through real
 // `uv`, a fake track.py answer), real git against a throwaway origin, `fakeGh`, a fake submitter and a fake graceful
 // stop: no live Atlassian, no live `gh`, no push beyond the throwaway origin.
-import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { basename, dirname as dirnameOf, join } from "node:path";
 import {
   addJobId, appendEpics, approvePass, engagementRunPass, engagementRunSpendPass, proposedEpics, rekeyBands,
@@ -17,14 +17,9 @@ import { Queue, type Owner } from "../src/queue";
 import { runProcess, type RunResult } from "../src/server";
 import { engagementPlacement } from "../src/cli";
 import { fakeGh, fakePlansync, gitRepo, testGit } from "./fakes";
+import { tempDir, track } from "./tmp";
 
-const made: string[] = [];
-const temp = (prefix: string) => { const d = mkdtempSync(join(tmpdir(), prefix)); made.push(d); return d; };
-const queues: Queue[] = [];
-afterAll(() => {
-  for (const q of queues) { try { q.close(); } catch { /* closed */ } }
-  for (const d of made) rmSync(d, { recursive: true, force: true });
-});
+const temp = tempDir; // test/tmp.ts closes the tracked queues and removes the folders
 
 const ENG = "ENG-001";
 const ISSUE = "TKS-40";
@@ -54,8 +49,7 @@ function clock(start = "2026-10-25T06:00:00.000Z") {
 }
 
 const newQueue = () => {
-  const q = new Queue(join(temp("tk-sup-ap-q-"), "q.db"), { ownerAlive: (o) => o.nonce === me.nonce, engineLive: async () => ({ live: false }) });
-  queues.push(q);
+  const q = track(new Queue(join(temp("tk-sup-ap-q-"), "q.db"), { ownerAlive: (o) => o.nonce === me.nonce, engineLive: async () => ({ live: false }) }));
   return q;
 };
 
@@ -78,7 +72,6 @@ function servedRepo(o: { scope?: string | null; record?: Engagement; bound?: boo
     "_bmad-output/planning-artifacts/epics.md": EPICS,
     "_bmad-output/planning-artifacts/plan/EP-030.md": PLAN_40,
   });
-  made.push(repo.checkout, repo.origin);
   const root = repo.checkout;
   writeFileSync(join(root, ".tk-studio", "budget-bands.yaml"), BANDS_HEAD + "  EP-033:\n    usd_estimate: 40.0\n");
   if (o.scope !== null) {
@@ -104,7 +97,6 @@ function fakeSubmit(queue: Queue, o: { fail?: string } = {}) {
 /** The deps: real git (the test identity), the fake gh, the fake plansync through `uv`, a fake `track.py`. */
 function approveDeps(queue: Queue, extra: Partial<ApproveDeps> & { track?: () => Record<string, unknown> } = {}) {
   const plansync = fakePlansync();
-  made.push(plansync.root);
   const gh = fakeGh(temp("tk-sup-ap-gh-"));
   const work = temp("tk-sup-ap-work-");
   const env: Record<string, string | undefined> = { ...process.env, ...IDENTITY, TK_STUDIO_ROOT: plansync.root, GH_BIN: gh.bin, TK_SUPERVISOR_WORK: work, TK_SUPERVISOR_NOTIFY: "" };

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -8,6 +8,7 @@ import {
   resolveDriveArgv, runDirectRunner, stagePluginFixture, translateDrive, type Check, type Drive, type RunnerExec, type StatusSchema,
 } from "../src/conformance";
 import { buildWorkerCommand, DenyProfileRefused, invokeSkill, validateDenyProfile, type Spawner } from "../src/server";
+import { tempDir } from "./tmp";
 
 const SANDBOX = join(tmpdir(), "tk-conf-sandbox");
 const PLUGIN = join(tmpdir(), "plugin-root");
@@ -56,8 +57,8 @@ describe("plugin-relative --directory", () => {
 describe("supervisor-routed plugin fixtures are staged into the sandbox", () => {
   const REL = "contracts/conformance/fixtures/unparseable-proposals-ledger";
   const setup = () => {
-    const plugin = mkdtempSync(join(tmpdir(), "tk-conf-plugin-"));
-    const sandbox = mkdtempSync(join(tmpdir(), "tk-conf-sbx-"));
+    const plugin = tempDir("tk-conf-plugin-");
+    const sandbox = tempDir("tk-conf-sbx-");
     mkdirSync(join(plugin, REL), { recursive: true });
     writeFileSync(join(plugin, REL, "proposals.md"), "not a ledger");
     return { plugin, sandbox };
@@ -186,7 +187,7 @@ describe("harness drives", () => {
 });
 
 describe("static checks (mirror runner.py)", () => {
-  const dir = mkdtempSync(join(tmpdir(), "tk-conf-skill-"));
+  const dir = tempDir("tk-conf-skill-");
   const skill = (name: string, body: string): string => {
     const path = join(dir, `${name}.md`);
     writeFileSync(path, body);
@@ -233,7 +234,7 @@ describe("static checks (mirror runner.py)", () => {
 });
 
 describe("deny-only settings profile", () => {
-  const dir = mkdtempSync(join(tmpdir(), "tk-conf-profile-"));
+  const dir = tempDir("tk-conf-profile-");
   const profile = (name: string, body: unknown): string => {
     const path = join(dir, `${name}.json`);
     writeFileSync(path, typeof body === "string" ? body : JSON.stringify(body));
@@ -285,7 +286,7 @@ describe("deny-only settings profile", () => {
       const block = { status: "blocked", intent: "tk-studio-detect", artifacts: [], reason: "core denied" };
       return { exit: 0, stdout: JSON.stringify({ result: JSON.stringify(block), is_error: false }), stderr: "" };
     };
-    const project = mkdtempSync(join(tmpdir(), "tk-conf-project-"));
+    const project = tempDir("tk-conf-project-");
     const out = await invokeSkill(project, "tk-studio-detect", { deny_profile: path }, spawner);
     const worker = calls.find((a) => a[0] === "-p");
     expect(worker).toBeDefined();

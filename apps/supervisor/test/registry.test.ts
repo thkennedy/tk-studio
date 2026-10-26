@@ -3,8 +3,8 @@
 // no `uv`, no real registry.
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createApi } from "../src/api";
@@ -15,6 +15,7 @@ import { Queue, type Owner, type Probes, type WorkerKill } from "../src/queue";
 import {
   loadPersonas, OFFLINE, PERSONAS_PATH, readAgents, rebuildAgents, ROLE_LEGS, ROLES, rowsFor, type RebuildDeps, type RebuildResult, type Route,
 } from "../src/registry";
+import { tempDir, track } from "./tmp";
 
 const TOKEN = "tok-29-2-registry-secret";
 const SECRET = "s".repeat(48);
@@ -34,15 +35,15 @@ const ROUTE: Route = {
 };
 
 function fixture() {
-  const dir = mkdtempSync(join(tmpdir(), "tk-sup-agents-"));
+  const dir = tempDir("tk-sup-agents-");
   const probes: Probes = {
     ownerAlive: (o) => o.nonce === ME.nonce,
     engineLive: async () => ({ live: false }),
     killWorker: async (pid, start): Promise<WorkerKill> => ({ pid, start, outcome: "killed" }),
   };
-  const queue = new Queue(join(dir, "q.db"), probes);
+  const queue = track(new Queue(join(dir, "q.db"), probes));
   const roots: Record<string, string> = {
-    p: mkdtempSync(join(tmpdir(), "tk-sup-agents-p-")), q: mkdtempSync(join(tmpdir(), "tk-sup-agents-q-")),
+    p: tempDir("tk-sup-agents-p-"), q: tempDir("tk-sup-agents-q-"),
   };
   let projects: string[] = ["p", "q"];
   let tick = 0;
@@ -97,7 +98,7 @@ describe("personas (AC1)", () => {
   });
 
   test("a missing role or file is persona null; malformed JSON is PersonasInvalid and the rebuild still writes rows", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "tk-sup-personas-"));
+    const dir = tempDir("tk-sup-personas-");
     const partial = join(dir, "partial.json");
     writeFileSync(partial, JSON.stringify({ session: { display_name: "Sess" } }));
     expect(loadPersonas(partial).personas).toMatchObject({ session: "Sess", planner: null });
@@ -120,7 +121,7 @@ describe("rebuildAgents: projects, the live leg, failures (AC1)", () => {
     const fx = fixture();
     const run = fx.queue.enqueue({ jobId: "j", root: fx.roots.p, projectId: "p", definition: { id: "j" }, owner: ME }).run;
     expect((await fx.queue.claim(run.run_id, ME)).claimed).toBe(true);
-    const wt = mkdtempSync(join(tmpdir(), "tk-sup-agents-wt-"));
+    const wt = tempDir("tk-sup-agents-wt-");
     fx.queue.recordWorktree(run.run_id, wt, { branch: `supervisor/run-${run.run_id}`, base_ref: "main" });
     mkdirSync(join(wt, ".bmad-loop"), { recursive: true });
     writeFileSync(join(wt, ".bmad-loop", "routing.current.json"), JSON.stringify({
@@ -146,7 +147,7 @@ describe("rebuildAgents: projects, the live leg, failures (AC1)", () => {
     const fx = fixture();
     const run = fx.queue.enqueue({ jobId: "j", root: fx.roots.p, projectId: "p", definition: { id: "j" }, owner: ME }).run;
     expect((await fx.queue.claim(run.run_id, ME)).claimed).toBe(true);
-    const wt = mkdtempSync(join(tmpdir(), "tk-sup-agents-wt-"));
+    const wt = tempDir("tk-sup-agents-wt-");
     fx.queue.recordWorktree(run.run_id, wt, { branch: `supervisor/run-${run.run_id}`, base_ref: "main" });
     mkdirSync(join(wt, ".bmad-loop"), { recursive: true });
     const earlier = new Date(Date.parse(run.created) - 60_000).toISOString().replace("Z", "+00:00");
@@ -170,7 +171,7 @@ describe("rebuildAgents: projects, the live leg, failures (AC1)", () => {
     const db = new Database(fx.db);
     db.query("UPDATE runs SET created = ? WHERE run_id = ?").run(created, run.run_id);
     db.close();
-    const wt = mkdtempSync(join(tmpdir(), "tk-sup-agents-wt-"));
+    const wt = tempDir("tk-sup-agents-wt-");
     fx.queue.recordWorktree(run.run_id, wt, { branch: `supervisor/run-${run.run_id}`, base_ref: "main" });
     expect(fx.queue.runs().find((r) => r.run_id === run.run_id)?.created).toBe(created);
     mkdirSync(join(wt, ".bmad-loop"), { recursive: true });
@@ -189,7 +190,7 @@ describe("rebuildAgents: projects, the live leg, failures (AC1)", () => {
     const fx = fixture();
     const run = fx.queue.enqueue({ jobId: "j", root: fx.roots.p, projectId: "p", definition: { id: "j" }, owner: ME }).run;
     expect((await fx.queue.claim(run.run_id, ME)).claimed).toBe(true);
-    const wt = mkdtempSync(join(tmpdir(), "tk-sup-agents-wt-"));
+    const wt = tempDir("tk-sup-agents-wt-");
     fx.queue.recordWorktree(run.run_id, wt, { branch: `supervisor/run-${run.run_id}`, base_ref: "main" });
     mkdirSync(join(wt, ".bmad-loop"), { recursive: true });
     writeFileSync(join(wt, ".bmad-loop", "routing.current.json"), "{ broken");
@@ -339,7 +340,7 @@ describe("the rebuild points (AC1)", () => {
   describe.skipIf(!process.env.TK_STUDIO_ROOT || spawnSync("uv", ["--version"]).status !== 0)("with the studio root", () => {
     test("recoverQueue (every tick) and drainQueue rebuild: rebuilt_at advances", async () => {
       const fx = fixture();
-      const home = mkdtempSync(join(tmpdir(), "tk-sup-agents-home-"));
+      const home = tempDir("tk-sup-agents-home-");
       const opts = { queue: fx.queue, owner: ME, hygiene: { env: {} }, worktree: { env: { ...process.env, TK_STUDIO_HOME: home } }, agents: fx.deps };
       const verbs = async () => ({ ok: true, runs: [] });
       await recoverQueue(opts, verbs);

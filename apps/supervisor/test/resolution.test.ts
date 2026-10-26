@@ -3,12 +3,13 @@
 // spec), and the paused run re-armed on a `pass` line. Every dependency is a fake: the registry, the job's
 // resolve, the resume. Never a real registry, `uv` or engine.
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { ResumeRefused } from "../src/closeout";
 import { Queue, VALIDATE_RESOLUTION_JOB, type Owner } from "../src/queue";
 import { MAX_RESUME_ATTEMPTS, plannerLeg, resolutionKey, resolutionPass, withQueuedPayload, withStoredPayload, type ResolutionDeps } from "../src/resolution";
+import { tempDir } from "./tmp";
 
 const me: Owner = { pid: process.pid, host: hostname(), nonce: "resolution-test" };
 const ISSUE = "TKS-7";
@@ -21,7 +22,7 @@ const SHIPPED = {
 
 /** A bound project root (or not) with an inbox holding `items`. */
 function project(opts: { bound?: boolean; items?: Record<string, unknown>[] | null } = {}) {
-  const root = mkdtempSync(join(tmpdir(), "tk-sup-res-proj-"));
+  const root = tempDir("tk-sup-res-proj-");
   mkdirSync(join(root, ".tk-studio"), { recursive: true });
   writeFileSync(join(root, ".tk-studio", "config.yaml"), opts.bound === false
     ? "project_id: p31\n" : "project_id: p31\nplanning:\n  backend: jira\n  jira:\n    project_key: TKS\n");
@@ -46,7 +47,7 @@ const item = (state = "resolved", reasonId: string | null = "10001") => ({
 async function pausedRun(queue: Queue, root: string, opts: { routing?: boolean; issue?: string; planner?: { model: string; effort: string } } = {}) {
   const run0 = queue.enqueue({ jobId: "run-epic", root, projectId: "p31", definition: { id: "run-epic" }, owner: me, tier: "host" }).run;
   expect((await queue.claim(run0.run_id, me)).claimed).toBe(true);
-  const wt = mkdtempSync(join(tmpdir(), "tk-sup-res-wt-"));
+  const wt = tempDir("tk-sup-res-wt-");
   queue.recordWorktree(run0.run_id, wt, { branch: `supervisor/run-${run0.run_id}`, base_ref: "main" });
   queue.markLaunched(run0.run_id, "20261025-010101-ab12", { end: { state: "complete", reason: null } });
   queue.markPaused(run0.run_id, { engine: { run_id: "20261025-010101-ab12", paused_stage: "escalation", paused_story_key: STORY } });
@@ -179,7 +180,7 @@ describe("Story 31.7: the resolution pass queues validate-resolution once per bl
   test("an item meeting a live validation run on the checkout waits: the live run keeps its own planner leg", async () => {
     const q = newQueue(), root = project({ items: [item(), { ...item(), issue: "TKS-9", reason_comment: { id: "20001", body: "Blocked: y", created: "2026-10-24T10:00:00.000+0000" } }] });
     await pausedRun(q, root);
-    await pausedRun(q, mkdtempSync(join(tmpdir(), "tk-sup-res-proj2-")), { issue: "TKS-9", planner: { model: "claude-sonnet-5", effort: "low" } });
+    await pausedRun(q, tempDir("tk-sup-res-proj2-"), { issue: "TKS-9", planner: { model: "claude-sonnet-5", effort: "low" } });
     const { d } = deps(root);
     expect((await resolutionPass(q, d)).queued.length).toBe(1);
     expect((await resolutionPass(q, d)).queued).toEqual([]);
@@ -416,7 +417,7 @@ describe("Story 31.7: helpers", () => {
   });
 
   test("the planner leg is read from the first root holding routing.current.json", () => {
-    const a = mkdtempSync(join(tmpdir(), "tk-sup-res-a-")), b = mkdtempSync(join(tmpdir(), "tk-sup-res-b-"));
+    const a = tempDir("tk-sup-res-a-"), b = tempDir("tk-sup-res-b-");
     mkdirSync(join(b, ".bmad-loop"));
     writeFileSync(join(b, ".bmad-loop", "routing.current.json"), JSON.stringify({ planner: { model: "m", effort: "e" } }));
     expect(plannerLeg(null, a, b)).toEqual({ model: "m", effort: "e" });

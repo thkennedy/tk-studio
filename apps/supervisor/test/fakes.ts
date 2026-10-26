@@ -1,8 +1,9 @@
 // Test-side fake executables, shared by the end-to-end suites.
 import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { tempDir } from "./tmp";
 
 /** win32 only: the launcher every fake there is a hard link of. Compiled once per bun build and cached in
  * the temp dir. It runs `bun <its own name>.js <args>` with the terminal inherited, answers that exit code,
@@ -10,7 +11,7 @@ import { dirname, join } from "node:path";
 export function fakeLauncher(): string {
   const exe = join(tmpdir(), `tk-sup-fake-launcher-${Bun.version}-${Bun.hash(process.execPath).toString(16)}.exe`);
   if (existsSync(exe)) return exe;
-  const dir = mkdtempSync(join(tmpdir(), "tk-sup-launcher-"));
+  const dir = tempDir("tk-sup-launcher-");
   const src = join(dir, "launcher.js");
   writeFileSync(src, [
     `const { spawnSync } = require("node:child_process");`,
@@ -73,7 +74,7 @@ function mirrorTree(real: string, fake: string, overrides: Record<string, string
  * (`drift_check.py`) replaced by fakes that log their argv to `calls` and answer from `answers`
  * (`{"install": "ok"|"fail", "drift": "clean"|"drift"}`, rewritable between runs). */
 export function fakeStudioRoot(realRoot: string = process.env.TK_STUDIO_ROOT!): { root: string; calls: () => { script: string; argv: string[] }[]; answer: (a: { install?: string; drift?: string; meter?: string }) => void } {
-  const root = mkdtempSync(join(tmpdir(), "tk-sup-studio-"));
+  const root = tempDir("tk-sup-studio-");
   const log = join(root, "studio-calls.jsonl"), answers = join(root, "studio-answers.json");
   writeFileSync(answers, JSON.stringify({ install: "ok", drift: "clean", meter: "ok" }));
   const py = (script: string, body: string) => [
@@ -126,7 +127,7 @@ export function fakePlansync(): {
   root: string; calls: () => string[][]; answer: (a: "ok" | "refuse" | "blocked" | "crash") => void;
   sync: (a: "ok" | "blocked" | "crash" | "partial") => void; removes: (paths: string[]) => void;
 } {
-  const root = mkdtempSync(join(tmpdir(), "tk-sup-plansync-"));
+  const root = tempDir("tk-sup-plansync-");
   const lib = join(root, "plugins", "tk-studio", "lib");
   mkdirSync(lib, { recursive: true });
   const log = join(root, "plansync-calls.jsonl"), answers = join(root, "plansync-answer.txt"), syncAnswer = join(root, "plansync-sync.txt");
@@ -195,7 +196,7 @@ export function fakePlansync(): {
  * `pr ready` (and `pr ready <pr> --undo`) → ok; `pr edit` → the PR URL (Story 27.4); `pr view <pr> --json state,mergedAt` →
  * `{state: view, mergedAt}` (Story 27.5: `OPEN` by default). `fail` names the subcommands (`"pr create"`, `"api"`, …) that exit 1. Never the network. */
 type GhAnswers = { default?: string; protected?: string[]; pr?: string; open?: string[]; fail?: string[]; view?: "OPEN" | "MERGED" | "CLOSED" };
-export function fakeGh(dir: string = mkdtempSync(join(tmpdir(), "tk-sup-gh-"))): {
+export function fakeGh(dir: string = tempDir("tk-sup-gh-")): {
   bin: string; calls: () => { argv: string[]; cwd: string; gh_repo: string | null; body?: string }[];
   answer: (a: GhAnswers) => void;
 } {
@@ -268,7 +269,7 @@ type SbxAnswers = {
  * `exec <sb> <home>/.local/bin/bmad-loop resolve --project <p> --no-interactive --resume [--restore-patch <x>] <id>`
  * → writes `resume_pid` to the run's `engine.pid` when given (`resolve: fail` exits 1). A VM path `/<d>/…` is
  * read as the host's `<D>:/…` on win32. Anything else exits 2. Never a real sandbox. */
-export function fakeSbx(dir: string = mkdtempSync(join(tmpdir(), "tk-sup-sbx-"))): {
+export function fakeSbx(dir: string = tempDir("tk-sup-sbx-")): {
   bin: string; calls: () => { argv: string[] }[]; answer: (a: SbxAnswers) => void; answers: () => Required<SbxAnswers>;
 } {
   const log = join(dir, "sbx-calls.jsonl"), answers = join(dir, "sbx-answers.json");
@@ -375,7 +376,7 @@ export const RUNTIME_GITIGNORE = ".bmad-loop/policy.toml\n.bmad-loop/routing.cur
  * with a bare `origin` beside it, pushed (so `refs/remotes/origin/main` exists: a PR base on origin), its
  * `origin/HEAD` set to `main`. A test basing a run on another branch pushes it too. Answers the origin path. */
 export function gitInit(checkout: string, files: Record<string, string> = {}): string {
-  const origin = mkdtempSync(join(tmpdir(), "tk-sup-origin-"));
+  const origin = tempDir("tk-sup-origin-");
   testGit(origin, "init", "-q", "--bare", "-b", "main");
   testGit(checkout, "init", "-q", "-b", "main");
   for (const [rel, content] of Object.entries(files)) { mkdirSync(dirname(join(checkout, rel)), { recursive: true }); writeFileSync(join(checkout, rel), content); }
@@ -389,7 +390,7 @@ export function gitInit(checkout: string, files: Record<string, string> = {}): s
 
 /** A throwaway git repository (`gitInit`) with the runtime `.gitignore` and the files given. */
 export function gitRepo(files: Record<string, string> = {}): { checkout: string; origin: string; git: Git } {
-  const checkout = join(mkdtempSync(join(tmpdir(), "tk-sup-repo-")), "checkout");
+  const checkout = join(tempDir("tk-sup-repo-"), "checkout");
   mkdirSync(checkout, { recursive: true });
   const origin = gitInit(checkout, { ".gitignore": RUNTIME_GITIGNORE, ...files });
   return { checkout, origin, git: testGit };

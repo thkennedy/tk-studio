@@ -2,13 +2,14 @@
 // files and their content types, the single-page fallback, the traversal refusal, the missing build, the sign-in's
 // return path. A temp dist only (the real apps/studio-web/dist is ignored and never read); no socket.
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApi } from "../src/api";
 import { SESSION_COOKIE, signInPage } from "../src/auth";
 import { Queue, type Probes, type WorkerKill } from "../src/queue";
 import { contentType, resolveWebPath, WEB_BUILD_COMMAND, webRoot } from "../src/web";
+import { tempDir, track } from "./tmp";
 
 const TOKEN = "tok-web-30-2-very-secret-value";
 const SECRET = "session-secret-web-0123456789abcdef-0123456";
@@ -21,7 +22,7 @@ const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3
 
 /** A temp web root: built (index.html, assets/app.js, sprites/x.png) or empty; a planted file beside it, outside. */
 function webDir(built = true): string {
-  const parent = mkdtempSync(join(tmpdir(), "tk-sup-web-"));
+  const parent = tempDir("tk-sup-web-");
   writeFileSync(join(parent, "outside.txt"), "outside the web root");
   const dir = join(parent, "dist");
   mkdirSync(dir);
@@ -36,15 +37,15 @@ function webDir(built = true): string {
 }
 
 function fixture(o: { built?: boolean } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), "tk-sup-web-q-"));
-  const store = mkdtempSync(join(tmpdir(), "tk-sup-web-store-"));
+  const dir = tempDir("tk-sup-web-q-");
+  const store = tempDir("tk-sup-web-store-");
   const probes: Probes = {
     ownerAlive: () => false,
     engineLive: async () => ({ live: false }),
     killWorker: async (pid, start): Promise<WorkerKill> => ({ pid, start, outcome: "killed" }),
     probeWorker: (pid, start): WorkerKill => ({ pid, start, outcome: "not running" }),
   };
-  const queue = new Queue(join(dir, "q.db"), probes);
+  const queue = track(new Queue(join(dir, "q.db"), probes));
   const env = { TK_STUDIO_HOME: store, TK_SUPERVISOR_TOKEN: TOKEN, TK_SUPERVISOR_SESSION_SECRET: SECRET };
   const web = webDir(o.built ?? true);
   const handler = createApi({
@@ -233,7 +234,7 @@ describe("no built web (AC2)", () => {
  * (`path` absolute or relative to `<root>`), the slot built or not; and a checkout layout `<co>/apps/supervisor/src`
  * whose `<co>/apps/studio-web/dist` is built or not. */
 function installLayout(o: { slot: "absolute" | "relative" | "none"; slotBuilt: boolean }): { appDir: string; slot: string } {
-  const root = mkdtempSync(join(tmpdir(), "tk-sup-web-install-"));
+  const root = tempDir("tk-sup-web-install-");
   const appDir = join(root, "supervisor", "0.1.0", "src");
   mkdirSync(appDir, { recursive: true });
   const slot = join(root, "studio-web", "0.1.0");
@@ -247,7 +248,7 @@ function installLayout(o: { slot: "absolute" | "relative" | "none"; slotBuilt: b
 }
 
 function checkoutLayout(distBuilt: boolean): { appDir: string; dist: string } {
-  const co = mkdtempSync(join(tmpdir(), "tk-sup-web-checkout-"));
+  const co = tempDir("tk-sup-web-checkout-");
   const appDir = join(co, "apps", "supervisor", "src");
   mkdirSync(appDir, { recursive: true });
   const dist = join(co, "apps", "studio-web", "dist");

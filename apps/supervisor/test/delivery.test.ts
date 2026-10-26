@@ -2,9 +2,9 @@
 // the issue Done, one notifier line, `engagement-closeout`). The fakes: the injected `uv` (`engage.py closeout` and
 // `track.py close` answered from the test, the input file captured), the injected command runner for `gh pr view`,
 // the notifier: no live Atlassian, no live `gh`, no notifier.
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { describe, expect, test } from "bun:test";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { basename, join } from "node:path";
 import { APPROVE_EVENT, RUN_QUEUED_EVENT, RUN_STOP_EVENT, engagementRunPass } from "../src/approve";
 import { CLOSEOUT_EVENT, closeoutPass, composeCloseout, lastRunEnded, type CloseoutInput, type DeliveryDeps } from "../src/delivery";
@@ -12,14 +12,9 @@ import { applyInput, newEngagement, readEngagement, writeEngagement, type Autono
 import type { EndNotice } from "../src/hygiene";
 import { Queue, type Owner } from "../src/queue";
 import type { RunResult } from "../src/server";
+import { tempDir, track } from "./tmp";
 
-const made: string[] = [];
-const temp = (prefix: string) => { const d = mkdtempSync(join(tmpdir(), prefix)); made.push(d); return d; };
-const queues: Queue[] = [];
-afterAll(() => {
-  for (const q of queues) { try { q.close(); } catch { /* closed */ } }
-  for (const d of made) rmSync(d, { recursive: true, force: true });
-});
+const temp = tempDir; // test/tmp.ts closes the tracked queues and removes the folders
 
 const ENG = "ENG-001";
 const ISSUE = "TKS-40";
@@ -40,8 +35,7 @@ function clock(start = "2026-10-25T06:00:00.000Z") {
 }
 
 const newQueue = () => {
-  const q = new Queue(join(temp("tk-sup-dl-q-"), "q.db"), { ownerAlive: (o) => o.nonce === me.nonce, engineLive: async () => ({ live: false }) });
-  queues.push(q);
+  const q = track(new Queue(join(temp("tk-sup-dl-q-"), "q.db"), { ownerAlive: (o) => o.nonce === me.nonce, engineLive: async () => ({ live: false }) }));
   return q;
 };
 

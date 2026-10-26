@@ -1,7 +1,7 @@
 // Story 22.5: sign in from the phone — the cookie session beside the bearer header (Story 29.1: the providers are gone).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import {
   csrfToken, INTENDED_USAGE, NEEDS_HTTPS_NOTE, readCookie, SESSION_COOKIE, SESSION_TTL_S, signInPage, signSession, verifySession,
@@ -13,6 +13,7 @@ import {
 import { renderPage, redactCredentials, type PageData } from "../src/page";
 import { Queue, type Owner, type Probes, type WorkerKill } from "../src/queue";
 import { buildWorkerEnv } from "../src/server";
+import { tempDir, track } from "./tmp";
 
 const TOKEN = "tok-auth-5e2b-very-secret-value";
 const SECRET = "session-secret-0123456789abcdef-0123456789abcdef";
@@ -45,9 +46,9 @@ afterAll(() => {
 interface FxOpts { session?: boolean; origin?: string }
 
 function fixture(o: FxOpts = {}) {
-  const dir = mkdtempSync(join(tmpdir(), "tk-sup-auth-"));
-  const store = mkdtempSync(join(tmpdir(), "tk-sup-auth-store-"));
-  const checkout = mkdtempSync(join(tmpdir(), "tk-sup-auth-checkout-"));
+  const dir = tempDir("tk-sup-auth-");
+  const store = tempDir("tk-sup-auth-store-");
+  const checkout = tempDir("tk-sup-auth-checkout-");
   let now = T0;
   const probes: Probes = {
     ownerAlive: (w) => w.pid === A.pid,
@@ -55,7 +56,7 @@ function fixture(o: FxOpts = {}) {
     killWorker: async (pid, start): Promise<WorkerKill> => ({ pid, start, outcome: "killed" }),
     probeWorker: (pid, start): WorkerKill => ({ pid, start, outcome: "not running" }),
   };
-  const queue = new Queue(join(dir, "q.db"), probes);
+  const queue = track(new Queue(join(dir, "q.db"), probes));
   const enqueue = (jobId = "studio-health") => queue.enqueue({
     jobId, root: checkout, projectId: "p", target: "skill", definition: { id: jobId, trigger: "one-shot", target: { skill: "tk-studio-activate" } },
   }).run;
@@ -377,14 +378,14 @@ describe("configuration and secrets (AC4, AC5)", () => {
   const refusal = (env: Record<string, string | undefined>) => { try { serve(env); } catch (e) { return (e as Error).message; } return "bound"; };
   /** Readable temp cert and key files (their content is never parsed: `Bun.serve` is faked or never reached). */
   const realTls = (() => {
-    const dir = mkdtempSync(join(tmpdir(), "tk-sup-auth-tls-"));
+    const dir = tempDir("tk-sup-auth-tls-");
     writeFileSync(join(dir, "box.crt"), "CERT");
     writeFileSync(join(dir, "box.key"), "KEY");
     return { TK_SUPERVISOR_TLS_CERT: join(dir, "box.crt"), TK_SUPERVISOR_TLS_KEY: join(dir, "box.key"), TK_SUPERVISOR_TLS_NAME: "box.tail1234.ts.net" };
   })();
   /** A queue database and store outside every repo, for a `serve` that gets past validation. */
   const queueEnv = () => {
-    const d = mkdtempSync(join(tmpdir(), "tk-sup-auth-serve-"));
+    const d = tempDir("tk-sup-auth-serve-");
     mkdirSync(join(d, "store"));
     return { TK_SUPERVISOR_DB: join(d, "q.db"), TK_STUDIO_HOME: join(d, "store") };
   };

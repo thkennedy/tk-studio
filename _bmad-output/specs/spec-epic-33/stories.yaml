@@ -162,6 +162,12 @@
     `33-5-the-roster-gate-inside-the-engine-tracked-*.md`, and a file named
     `33-5-the-roster-gate-inside-the-engine-tracked.md` is read as pending (loop
     deficiency 1, story 21-6).
+    Plan (gate, 2026-10-26): plans/33-5.md settles the sources (config key
+    `engine.verify_commands` overrides `<root>/plugins/tk-studio/pipeline/verify-commands.toml`,
+    tracked files only), the merge rule (operator order kept, missing tracked commands
+    appended), the placement and newline rules of the write, the named-gap refusals, and the
+    `verify commands` row and `verify_commands` result key. Conformance gets a new
+    e2e drive. Halt if the Files list grows beyond the plan's.
 
 - id: "33-6-a-stale-render-view-never-halts-a-story"
   title: "A Stale Render View Never Halts a Story"

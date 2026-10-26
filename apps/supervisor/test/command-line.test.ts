@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -16,6 +16,7 @@ import {
   buildWorkerCommand, buildWorkerEnv, CONTINUATION_PROMPT, HostBypassRefused, invokeSkill, MISSING_STATUS_BLOCK, type Spawner, toVmPath,
 } from "../src/server";
 import { fakeBin, fakeGh, fakePlansync, fakeStudioRoot, gitInit, gitRepo, testGit } from "./fakes";
+import { tempDir, track } from "./tmp";
 
 const REPO = resolve(import.meta.dir, "..");
 
@@ -42,7 +43,7 @@ const lifecycle = (q: Queue, runId?: string, since?: number): QueueEvent[] =>
 
 const FORBIDDEN_FLAGS = ["--dangerously-skip-permissions", "--settings", "--permission-prompt-tool", "--allowedTools", "--disallowedTools"];
 
-beforeAll(() => { process.env.TK_STUDIO_HOME = mkdtempSync(join(tmpdir(), "tk-sup-store-")); });
+beforeAll(() => { process.env.TK_STUDIO_HOME = tempDir("tk-sup-store-"); });
 
 describe("worker command line", () => {
   test("host default: -p <prompt> --output-format json --permission-mode auto", () => {
@@ -119,7 +120,7 @@ describe("argument parsing", () => {
   });
 
   test("a whitespace-only value is refused like an empty one: `--tier sbx --sandbox ' '` → exit 2, nothing queued", async () => {
-    const db = join(mkdtempSync(join(tmpdir(), "tk-sup-blank-")), "queue.db");
+    const db = join(tempDir("tk-sup-blank-"), "queue.db");
     const [err, prev] = [console.error, process.env.TK_SUPERVISOR_DB];
     const seen: string[] = [];
     console.error = (...a: unknown[]) => { seen.push(a.join(" ")); };
@@ -297,7 +298,7 @@ describe("Story 28.6: the queue's own verbs carry --force-starter; the MCP tk_jo
   });
 
   test("MCP tk_job submit and wake: the jobrun argv carries no --force-starter (a hand start, refused like one)", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "tk-sup-mcp-argv-"));
+    const dir = tempDir("tk-sup-mcp-argv-");
     const bin = join(dir, "bin");
     mkdirSync(bin);
     const log = join(dir, "uv-calls.jsonl");
@@ -306,7 +307,7 @@ describe("Story 28.6: the queue's own verbs carry --force-starter; the MCP tk_jo
       `appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + "\\n");`,
       `console.log(JSON.stringify({ ok: true, accepted: false, woken: false, run_id: null, reason: "fake" }));`,
     ].join("\n"));
-    const project = mkdtempSync(join(tmpdir(), "tk-sup-mcp-proj-"));
+    const project = tempDir("tk-sup-mcp-proj-");
     const client = new ConnectorClient({ TK_STUDIO_ROOT: resolve(REPO, "..", ".."), PATH: `${bin}${delimiter}${process.env.PATH ?? ""}` });
     try {
       await client.init("story-28-6-test");
@@ -392,8 +393,8 @@ describe("finishRun: model/effort per §5, tier forwarded, cost to finish (AC3/A
 const canRunE2E = !!process.env.TK_STUDIO_ROOT && spawnSync("uv", ["--version"]).status === 0;
 
 function e2eFixture(workerResult: string, loggedIn = true, opts: { selfFinish?: boolean; env?: Record<string, string> } = {}) {
-  const store = mkdtempSync(join(tmpdir(), "tk-sup-e2e-store-"));
-  const project = mkdtempSync(join(tmpdir(), "tk-sup-e2e-proj-"));
+  const store = tempDir("tk-sup-e2e-store-");
+  const project = tempDir("tk-sup-e2e-proj-");
   mkdirSync(join(project, ".tk-studio", "jobs"), { recursive: true });
   copyFileSync(join(REPO, ".tk-studio", "jobs", "studio-health.json"), join(project, ".tk-studio", "jobs", "studio-health.json"));
   const plugin = join(process.env.TK_STUDIO_ROOT!, "plugins", "tk-studio");
@@ -404,9 +405,9 @@ function e2eFixture(workerResult: string, loggedIn = true, opts: { selfFinish?: 
   // folder is set, `gh` is the fake (a protected `main`), and `tk install`/`tk activate` are fakes
   // under a throwaway TK_STUDIO_ROOT (the real studio mirrored around them).
   const origin = gitInit(project);
-  const gh = fakeGh(mkdtempSync(join(tmpdir(), "tk-sup-e2e-gh-")));
+  const gh = fakeGh(tempDir("tk-sup-e2e-gh-"));
   const studio = fakeStudioRoot(process.env.TK_STUDIO_ROOT!);
-  const work = mkdtempSync(join(tmpdir(), "tk-sup-e2e-work-"));
+  const work = tempDir("tk-sup-e2e-work-");
   const worktreeEnv = { TK_STUDIO_ROOT: studio.root, TK_SUPERVISOR_WORK: work, GH_BIN: gh.bin };
   const record = join(store, "worker-calls.jsonl");
   const fakeScript = join(store, "fake-claude.js");
@@ -513,7 +514,7 @@ const r = require("node:child_process").spawnSync(process.execPath, [${JSON.stri
 process.exit(r.status ?? 1);
 `);
   // The queue lives outside every repo and outside the store.
-  const queueDb = join(mkdtempSync(join(tmpdir(), "tk-sup-e2e-queue-")), "queue.db");
+  const queueDb = join(tempDir("tk-sup-e2e-queue-"), "queue.db");
   const extraEnv = { SBX_BIN: fakeSbx, CLAUDE_CONFIG_DIR: join(store, "claude-config"), FAKE_QUEUE_DB: queueDb, ...worktreeEnv, ...(opts.env ?? {}) };
   const cli = (verb: string, jobId: string, dir: string, extra: string[] = []) => spawnSync("bun", [join(REPO, "src", "cli.ts"), verb, jobId, "--directory", dir, ...extra], {
     env: { ...process.env, TK_STUDIO_HOME: store, TK_SUPERVISOR_DB: queueDb, CLAUDE_BIN: fake, ANTHROPIC_API_KEY: "sk-test-parent", ...extraEnv }, encoding: "utf-8", timeout: 120_000,
@@ -526,7 +527,7 @@ process.exit(r.status ?? 1);
   });
   /** Read the queue file (it may not exist yet: nothing opened it). */
   const queue = <T>(read: (q: Queue) => T): T => {
-    const q = new Queue(queueDb);
+    const q = track(new Queue(queueDb));
     try { return read(q); } finally { q.close(); }
   };
   const calls = () => existsSync(record) ? readFileSync(record, "utf-8").trim().split("\n").map((l) => JSON.parse(l)) : [];
@@ -676,7 +677,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: studio-health (faked worker)", () =
 
   test("unregistered directory claiming a registered project_id → exit 2 naming the root mismatch", () => {
     const fx = e2eFixture("unused");
-    const impostor = mkdtempSync(join(tmpdir(), "tk-sup-impostor-"));
+    const impostor = tempDir("tk-sup-impostor-");
     mkdirSync(join(impostor, ".tk-studio", "jobs"), { recursive: true });
     copyFileSync(join(REPO, ".tk-studio", "jobs", "studio-health.json"), join(impostor, ".tk-studio", "jobs", "studio-health.json"));
     writeFileSync(join(impostor, ".tk-studio", "config.yaml"), `project_id: ${fx.registeredId()}\n`);
@@ -737,9 +738,9 @@ describe.skipIf(!canRunE2E)("CLI end to end: studio-health (faked worker)", () =
     expect(summary).toMatchObject({ ok: false, state: actual });
     expect(summary.reason).toBe("finish failed: uv timed out after 720s");
     expect(summary.finish_refused).toBeUndefined();
-    const q = new Queue(join(mkdtempSync(join(tmpdir(), "tk-sup-dw23-q-")), "q.db"), { ownerAlive: () => true, engineLive: async () => ({ live: false }) });
+    const q = track(new Queue(join(tempDir("tk-sup-dw23-q-"), "q.db"), { ownerAlive: () => true, engineLive: async () => ({ live: false }) }));
     try {
-      const { run } = q.enqueue({ jobId: "s", root: mkdtempSync(join(tmpdir(), "tk-sup-dw23-co-")), target: "skill", definition: defn });
+      const { run } = q.enqueue({ jobId: "s", root: tempDir("tk-sup-dw23-co-"), target: "skill", definition: defn });
       await mirror(q, run.run_id, { jobId: "s", defn }, summary, runner);
       expect(q.events(run.run_id).filter((e) => e.kind === "finish-refused")).toEqual([]);
       expect(q.get(run.run_id)!.reason).toContain("finish failed: uv timed out after 720s");
@@ -748,7 +749,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: studio-health (faked worker)", () =
 
   test("unregistered project → non-zero naming the registry refusal", () => {
     const fx = e2eFixture("unused");
-    const res = fx.run("studio-health", mkdtempSync(join(tmpdir(), "tk-sup-unreg-")));
+    const res = fx.run("studio-health", tempDir("tk-sup-unreg-"));
     expect(res.status).toBe(2);
     expect(JSON.parse(res.stdout).error).toMatch(/registry: .*not registered/);
   }, 120_000);
@@ -855,7 +856,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: the durable queue", () => {
   test("run against a checkout held by a live run → stays queued naming the holder, exit 1; already running → its id, exit 1; nothing driven", async () => {
     const fx = e2eFixture("unused");
     const me = { pid: process.pid, host: hostname(), nonce: "test-holder" }; // this test process: alive
-    const q = new Queue(fx.queueDb);
+    const q = track(new Queue(fx.queueDb));
     const holder = q.enqueue({ jobId: "other-job", root: fx.project, definition: { id: "other-job" }, owner: me }).run;
     expect((await q.claim(holder.run_id, me)).claimed).toBe(true);
     const res = fx.run();
@@ -955,19 +956,19 @@ const deadPid = () => spawnSync("true").pid;
 
 describe("recover requires the studio first", () => {
   test("`recover` with TK_STUDIO_ROOT unset → exit 2 naming StudioRootMissing; the queue is unchanged", () => {
-    const db = join(mkdtempSync(join(tmpdir(), "tk-sup-rec-queue-")), "q.db");
-    const q = new Queue(db);
+    const db = join(tempDir("tk-sup-rec-queue-"), "q.db");
+    const q = track(new Queue(db));
     const dead = { pid: deadPid(), host: hostname(), nonce: "dead" };
-    const r = q.enqueue({ jobId: "j", root: mkdtempSync(join(tmpdir(), "tk-sup-checkout-")), definition: { id: "j" }, owner: dead }).run;
+    const r = q.enqueue({ jobId: "j", root: tempDir("tk-sup-checkout-"), definition: { id: "j" }, owner: dead }).run;
     q.close();
-    const env: Record<string, string | undefined> = { ...process.env, TK_SUPERVISOR_DB: db, TK_STUDIO_HOME: mkdtempSync(join(tmpdir(), "tk-sup-store-")) };
+    const env: Record<string, string | undefined> = { ...process.env, TK_SUPERVISOR_DB: db, TK_STUDIO_HOME: tempDir("tk-sup-store-") };
     delete env.TK_STUDIO_ROOT;
     for (const verb of ["recover", "drain"]) {
       const res = spawnSync("bun", [join(REPO, "src", "cli.ts"), verb], { env, encoding: "utf-8", timeout: 60_000 });
       expect(res.status).toBe(2);
       expect(JSON.parse(res.stdout).error).toContain("StudioRootMissing");
     }
-    const after = new Queue(db);
+    const after = track(new Queue(db));
     try {
       expect(after.get(r.run_id)).toMatchObject({ state: "queued", owner_nonce: "dead", reason: null });
       expect(after.events(r.run_id).map((e) => e.kind)).toEqual(["enqueued"]);
@@ -1038,7 +1039,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: restart recovery and drain", () => 
   test("drain mode: a listed run ended before it is driven is skipped — nothing minted, no studio verb", async () => {
     const fx = e2eFixture("unused");
     const queued = JSON.parse(fx.submit().stdout);
-    const q = new Queue(fx.queueDb);
+    const q = track(new Queue(fx.queueDb));
     try {
       q.end(queued.run_id, "cancelled", "ended elsewhere"); // another process drove and ended it after the listing
       const out = await runJob("studio-health", fx.project, undefined, { queue: q, runId: queued.run_id, skipRecover: true });
@@ -1055,7 +1056,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: restart recovery and drain", () => 
     const queued = JSON.parse(fx.submit().stdout);
     // A PATH where `uv` resolves nowhere. POSIX: bun's own folder, which the fake worker's shebang needs.
     // win32: an empty folder, because bun's folder may hold `uv` too (WinGet's Links does) and the fake is an .exe.
-    const noUv = process.platform === "win32" ? mkdtempSync(join(tmpdir(), "tk-sup-e2e-nopath-")) : dirname(process.execPath);
+    const noUv = process.platform === "win32" ? tempDir("tk-sup-e2e-nopath-") : dirname(process.execPath);
     const res = spawnSync(process.execPath, [join(REPO, "src", "cli.ts"), "drain"], {
       env: { ...process.env, PATH: noUv, TK_STUDIO_HOME: fx.store, TK_SUPERVISOR_DB: fx.queueDb,
         CLAUDE_BIN: fx.fake }, encoding: "utf-8", timeout: 120_000,
@@ -1118,7 +1119,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: restart recovery and drain", () => 
   test("`drain` drives a run queued by `run --permission-mode plan` (lock wait) under `plan`, not the default", async () => {
     const fx = e2eFixture(`{"status":"complete","intent":"tk-studio-activate","artifacts":[]}`);
     const me = { pid: process.pid, host: hostname(), nonce: "plan-holder" }; // this test process: alive
-    const q = new Queue(fx.queueDb);
+    const q = track(new Queue(fx.queueDb));
     try {
       const holder = q.enqueue({ jobId: "other-job", root: fx.project, definition: { id: "other-job" }, owner: me }).run;
       expect((await q.claim(holder.run_id, me)).claimed).toBe(true);
@@ -1203,7 +1204,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: restart recovery and drain", () => 
     // A second run on the checkout, probes injected: live → waits naming the engine; failed → waits naming the failure; gone → claims.
     let probe = { live: true } as { live: boolean; detail?: string };
     const me = { pid: process.pid, host: hostname(), nonce: "engine-test" };
-    const q = new Queue(fx.queueDb, { ownerAlive: () => true, engineLive: async () => probe });
+    const q = track(new Queue(fx.queueDb, { ownerAlive: () => true, engineLive: async () => probe }));
     try {
       const b = q.enqueue({ jobId: "studio-health", root: fx.project, definition: { id: "studio-health" }, owner: me }).run;
       const live = await q.claim(b.run_id, me);
@@ -1223,7 +1224,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: restart recovery and drain", () => 
     Object.assign(def, { id: "launch-probe", target: { skill: "tk-studio-launch", payload: { verb: "status" } } });
     writeFileSync(join(fx.project, ".tk-studio", "jobs", "launch-probe.json"), JSON.stringify(def));
     const probed: (string | null)[][] = [];
-    const q = new Queue(fx.queueDb, { ownerAlive: () => true, engineLive: async (root, id) => { probed.push([root, id]); return { live: true, run_ids: ["E9"] }; } });
+    const q = track(new Queue(fx.queueDb, { ownerAlive: () => true, engineLive: async (root, id) => { probed.push([root, id]); return { live: true, run_ids: ["E9"] }; } }));
     const prev = { home: process.env.TK_STUDIO_HOME, bin: process.env.CLAUDE_BIN, cfg: process.env.CLAUDE_CONFIG_DIR };
     process.env.TK_STUDIO_HOME = fx.store;
     process.env.CLAUDE_BIN = fx.fake;
@@ -1328,7 +1329,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: worker tiers (Story 21.4)", () => {
 
   test("sbx VM cwd is the run's worktree (Story 27.1), never the `--directory` spelling or the checkout (a symlink samePath accepts)", () => {
     const fx = e2eFixture(BLOCK_OK);
-    const spelled = join(mkdtempSync(join(tmpdir(), "tk-sup-e2e-spelled-")), basename(fx.project)); // same basename: the same project id
+    const spelled = join(tempDir("tk-sup-e2e-spelled-"), basename(fx.project)); // same basename: the same project id
     try { symlinkSync(fx.project, spelled, "dir"); }
     catch { console.warn("symlink unavailable on this platform — skipping the caller-spelling case"); return; }
     const res = fx.run("studio-health", spelled, ["--tier", "sbx", "--sandbox", "claude-p", "--permission-mode", "bypassPermissions"]);
@@ -1360,7 +1361,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: worker tiers (Story 21.4)", () => {
   }, 180_000);
 
   test("Story 33.3: a drained run whose sandbox runs logged out before the pin → stopped and started once, probed again, claimed; one `pin-restart {probe_before: gap, probe_after: null}`", () => {
-    const state = join(mkdtempSync(join(tmpdir(), "tk-sup-e2e-sbxstate-")), "state.json");
+    const state = join(tempDir("tk-sup-e2e-sbxstate-"), "state.json");
     writeFileSync(state, JSON.stringify({ running: ["s-restart"], logged_out: ["s-restart"] }));
     const fx = e2eFixture(BLOCK_OK, true, { env: { FAKE_SBX_STATE: state } });
     const queued = JSON.parse(fx.submit("studio-health", fx.project, ["--tier", "sbx", "--sandbox", "s-restart"]).stdout);
@@ -1427,7 +1428,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: worker tiers (Story 21.4)", () => {
   }, 240_000);
 
   test("a tier frozen at enqueue never mixes with a mode configured for another tier: stored host + config sbx/bypass → drained on host under auto", () => {
-    const cfgDir = mkdtempSync(join(tmpdir(), "tk-sup-cfg-"));
+    const cfgDir = tempDir("tk-sup-cfg-");
     const cfg = join(cfgDir, "supervisor.yaml");
     writeFileSync(cfg, ""); // no config at submission
     const fx = e2eFixture(BLOCK_OK, true, { env: { TK_SUPERVISOR_CONFIG: cfg } });
@@ -1447,7 +1448,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: worker tiers (Story 21.4)", () => {
   }, 180_000);
 
   test("supervisor config (TK_SUPERVISOR_CONFIG): acceptEdits for this job; a bad config → exit 2 SupervisorConfigInvalid, nothing queued", () => {
-    const cfgDir = mkdtempSync(join(tmpdir(), "tk-sup-cfg-"));
+    const cfgDir = tempDir("tk-sup-cfg-");
     const cfg = join(cfgDir, "supervisor.yaml");
     const fx = e2eFixture(BLOCK_OK, true, { env: { TK_SUPERVISOR_CONFIG: cfg } });
     writeFileSync(cfg, `jobs:\n  ${fx.registeredId()}/studio-health:\n    permission_mode: acceptEdits\n`);
@@ -1466,7 +1467,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: worker tiers (Story 21.4)", () => {
   }, 180_000);
 
   test("`submit` with a bad TK_SUPERVISOR_CONFIG → exit 2 SupervisorConfigInvalid; zero spawns, zero queue runs", () => {
-    const cfgDir = mkdtempSync(join(tmpdir(), "tk-sup-cfg-"));
+    const cfgDir = tempDir("tk-sup-cfg-");
     const cfg = join(cfgDir, "supervisor.yaml");
     writeFileSync(cfg, "jobs:\n  p/studio-health:\n    tier: gpu\n");
     const fx = e2eFixture(BLOCK_OK, true, { env: { TK_SUPERVISOR_CONFIG: cfg } });
@@ -1490,7 +1491,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: a killed run resumes or ends partia
   const BLOCK_TEXT = `Resumed and done.\n{"status":"complete","intent":"tk-studio-activate","artifacts":[]}`;
   /** A fake `uv` on PATH: runs the real uv, and once (a marker file) kills its parent supervisor at `at`. */
   function killingUv(at: "submit" | "finish") {
-    const dir = mkdtempSync(join(tmpdir(), "tk-sup-e2e-uv-"));
+    const dir = tempDir("tk-sup-e2e-uv-");
     const realUv = Bun.which("uv");
     if (!realUv) throw new Error("uv not on PATH");
     const marker = join(dir, "killed.marker");
@@ -1535,7 +1536,7 @@ process.exit(r.status ?? 1);
   }, 180_000);
 
   test("after `wake` (the studio run and the wake answer recorded; killed on the invoke's auth preflight, before the worker) → partial naming no session, events recorded", () => {
-    const marker = join(tmpdir(), `tk-sup-authkill-${process.pid}-${Date.now()}`);
+    const marker = join(tempDir("tk-sup-authkill-"), "marker");
     const fx = e2eFixture(BLOCK_TEXT, true, { env: { FAKE_CLAUDE_KILL_PARENT_ON_INVOKE_AUTH: marker } });
     const res = fx.run();
     expect(res.signal ?? res.status).toBe(KILLED);
@@ -1562,7 +1563,7 @@ process.exit(r.status ?? 1);
 
   test("drain's exit status counts the resumed runs it drives: a resumed run ending blocked → exit 1", () => {
     const blocked = `Could not finish.\n{"status":"blocked","intent":"tk-studio-activate","artifacts":[],"reason":"gap named"}`;
-    const fx = e2eFixture(blocked, true, { env: { FAKE_CLAUDE_KILL_PARENT_ONCE: join(tmpdir(), `tk-sup-kill-drain-${process.pid}-${Date.now()}`) } });
+    const fx = e2eFixture(blocked, true, { env: { FAKE_CLAUDE_KILL_PARENT_ONCE: join(tempDir("tk-sup-kill-drain-"), "marker") } });
     const res = fx.run();
     expect(res.signal ?? res.status).toBe(KILLED);
     const dead = onlyRun(fx);
@@ -1576,7 +1577,7 @@ process.exit(r.status ?? 1);
   }, 180_000);
 
   test("mid-invoke (the worker still running) → `recover` kills the recorded worker, then resumes it with --resume <session-id>; its block is finished", async () => {
-    const fx = e2eFixture(BLOCK_TEXT, true, { env: { FAKE_CLAUDE_KILL_PARENT_ONCE: join(tmpdir(), `tk-sup-kill-${process.pid}-${Date.now()}`) } });
+    const fx = e2eFixture(BLOCK_TEXT, true, { env: { FAKE_CLAUDE_KILL_PARENT_ONCE: join(tempDir("tk-sup-kill-"), "marker") } });
     const res = fx.run();
     expect(res.signal ?? res.status).toBe(KILLED);
     const dead = onlyRun(fx);
@@ -1651,7 +1652,7 @@ describe("the fake-bin helper (DW-5: win32-runnable fakes)", () => {
   });
 
   test("POSIX: the shebang script itself, executable; win32: an .exe beside the script that runs it, arguments and exit code kept", () => {
-    const dir = mkdtempSync(join(tmpdir(), "tk-sup-fakebin-"));
+    const dir = tempDir("tk-sup-fakebin-");
     const fake = fakeBin(join(dir, "fake-a.js"), `console.log(JSON.stringify(process.argv.slice(2))); process.exit(7);`);
     expect(fake).toBe(join(dir, process.platform === "win32" ? "fake-a.exe" : "fake-a.js"));
     expect(readFileSync(join(dir, "fake-a.js"), "utf-8")).toStartWith("#!/usr/bin/env bun\n");
@@ -1676,7 +1677,7 @@ describe("the fake-bin helper (DW-5: win32-runnable fakes)", () => {
 describe.skipIf(!canRunE2E)("CLI end to end: editor-in-the-loop snapshot and end hygiene (Story 22.3)", () => {
   /** A fake `robocopy` on PATH: records its argv, creates the target, exits `exit`. */
   function fakeRobocopy(exit: number) {
-    const dir = mkdtempSync(join(tmpdir(), "tk-sup-e2e-robocopy-"));
+    const dir = tempDir("tk-sup-e2e-robocopy-");
     const record = join(dir, "calls.jsonl");
     fakeBin(join(dir, "robocopy"), `const fs = require("node:fs");
 const args = process.argv.slice(2);
@@ -1700,7 +1701,7 @@ process.exit(${exit});
   }, 120_000);
 
   test("a flagged Godot run (project.godot in game/): robocopy <root> <work>/snapshots/<pid>/<run> /E before wake, the path on the run; its end notified-or-recorded once", () => {
-    const work = mkdtempSync(join(tmpdir(), "tk-sup-e2e-work-"));
+    const work = tempDir("tk-sup-e2e-work-");
     const robo = fakeRobocopy(1);
     const fx = e2eFixture(BLOCK, true, { env: { ...robo.env, TK_SUPERVISOR_WORK: work, TK_SUPERVISOR_NOTIFY: "" } });
     mkdirSync(join(fx.project, "game"));
@@ -1760,13 +1761,13 @@ process.exit(${exit});
   const NTFY = { TK_SUPERVISOR_NOTIFY: "ntfy", TK_SUPERVISOR_NTFY_URL: "https://ntfy.example/tk-e2e-topic" };
 
   test("`recover` sweeps the ends it makes: an orphaned run (dead owner, past its verb) → exactly one notification naming run id, state and reason", async () => {
-    const db = join(mkdtempSync(join(tmpdir(), "tk-sup-e2e-queue-")), "queue.db");
+    const db = join(tempDir("tk-sup-e2e-queue-"), "queue.db");
     const dead = { pid: deadPid(), host: hostname(), nonce: "dead-supervisor" };
     const me = { pid: process.pid, host: hostname(), nonce: "recover-sweep" };
-    const q = new Queue(db, { ownerAlive: (o) => o.nonce === me.nonce, engineLive: async () => ({ live: false }) });
+    const q = track(new Queue(db, { ownerAlive: (o) => o.nonce === me.nonce, engineLive: async () => ({ live: false }) }));
     try {
       const run = q.enqueue({
-        jobId: "studio-health", root: mkdtempSync(join(tmpdir(), "tk-sup-checkout-")), owner: dead,
+        jobId: "studio-health", root: tempDir("tk-sup-checkout-"), owner: dead,
         definition: { id: "studio-health", trigger: "one-shot", target: { skill: "tk-studio-activate" } },
       }).run;
       expect((await q.claim(run.run_id, dead)).claimed).toBe(true);
@@ -1789,14 +1790,14 @@ process.exit(${exit});
   }, 120_000);
 
   test("Story 27.5: `recover` ends a cancelled run's studio run the cancel left open, and its plan passes set review and done on a merged PR", async () => {
-    const db = join(mkdtempSync(join(tmpdir(), "tk-sup-e2e-queue-")), "queue.db");
+    const db = join(tempDir("tk-sup-e2e-queue-"), "queue.db");
     const me = { pid: process.pid, host: hostname(), nonce: "recover-wiring" };
-    const q = new Queue(db, { ownerAlive: (o) => o.nonce === me.nonce, engineLive: async () => ({ live: false, run_ids: [] }) });
+    const q = track(new Queue(db, { ownerAlive: (o) => o.nonce === me.nonce, engineLive: async () => ({ live: false, run_ids: [] }) }));
     try {
       // A cancelled run whose studio run no record shows ended (its cancel's ender never ran).
       const sid = "studio-health-20261016T121212Z";
       const cancelled = q.enqueue({
-        jobId: "studio-health", root: mkdtempSync(join(tmpdir(), "tk-sup-checkout-")), owner: me,
+        jobId: "studio-health", root: tempDir("tk-sup-checkout-"), owner: me,
         definition: { id: "studio-health", trigger: "one-shot", target: { skill: "tk-studio-activate" } },
       }).run;
       expect((await q.claim(cancelled.run_id, me)).claimed).toBe(true);
@@ -1806,7 +1807,7 @@ process.exit(${exit});
       const repo = gitRepo();
       const reviewed = q.enqueue({ jobId: "j", root: repo.checkout, projectId: "proj", definition: { id: "j", target: { skill: "tk-studio-launch" } }, owner: me, base_ref: "main" }).run;
       expect((await q.claim(reviewed.run_id, me)).claimed).toBe(true);
-      q.recordWorktree(reviewed.run_id, join(mkdtempSync(join(tmpdir(), "tk-sup-wt-")), "gone"), { branch: runBranch(reviewed.run_id), base_ref: "main" });
+      q.recordWorktree(reviewed.run_id, join(tempDir("tk-sup-wt-"), "gone"), { branch: runBranch(reviewed.run_id), base_ref: "main" });
       testGit(repo.checkout, "checkout", "-q", "-b", runBranch(reviewed.run_id));
       const specRel = "_bmad-output/specs/spec-epic-27/stories/27-5-the-plan-follows-the-run-spec.md";
       mkdirSync(dirname(join(repo.checkout, specRel)), { recursive: true });
@@ -1850,7 +1851,7 @@ process.exit(${exit});
     process.env.TK_STUDIO_HOME = fx.store;
     process.env.CLAUDE_BIN = fx.fake;
     process.env.CLAUDE_CONFIG_DIR = join(fx.store, "claude-config");
-    const q = new Queue(fx.queueDb);
+    const q = track(new Queue(fx.queueDb));
     const f = recordingFetch();
     try {
       const report = await drainQueue({ queue: q, hygiene: { env: NTFY, fetch: f.fetchFn } });
@@ -1880,7 +1881,7 @@ process.exit(${exit});
     process.env.TK_STUDIO_HOME = fx.store;
     process.env.CLAUDE_BIN = fx.fake;
     process.env.CLAUDE_CONFIG_DIR = join(fx.store, "claude-config");
-    const q = new Queue(fx.queueDb);
+    const q = track(new Queue(fx.queueDb));
     const f = recordingFetch();
     try {
       const holder = q.enqueue({ jobId: "other-job", root: fx.project, definition: { id: "other-job" }, owner: me }).run;
@@ -1919,7 +1920,7 @@ process.exit(${exit});
   }, 240_000);
 
   test("a snapshot that fails (robocopy exit 8) ends the run `blocked` before wake: no studio run, no worker", () => {
-    const work = mkdtempSync(join(tmpdir(), "tk-sup-e2e-work-"));
+    const work = tempDir("tk-sup-e2e-work-");
     const robo = fakeRobocopy(8);
     const fx = e2eFixture(BLOCK, true, { env: { ...robo.env, TK_SUPERVISOR_WORK: work } });
     writeFileSync(join(fx.project, "project.godot"), "");

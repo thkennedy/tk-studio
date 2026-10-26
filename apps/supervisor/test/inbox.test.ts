@@ -2,8 +2,7 @@
 // /inbox/{key}/reply`) in `src/inbox.ts`, driven through their seams: the registry, the board builder, the ledger
 // and the verb's runner are injected, so no test spawns `uv` or reaches Atlassian.
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { BoardAnswer } from "../src/board";
 import {
@@ -11,6 +10,7 @@ import {
   runCost, type ReplyRunner,
 } from "../src/inbox";
 import { buildSbxCommand, sbxEnvPassthrough } from "../src/server";
+import { tempDir } from "./tmp";
 
 const ITEMS = [
   { issue: "TKS-3", entity: "ST-003", title: "Gamma", priority: "Highest", blocked_since: "2026-10-24T09:00:00+00:00",
@@ -23,7 +23,7 @@ const OWNER_ENV = {
 };
 
 function project(o: { inbox?: boolean; entity?: boolean; comments?: string[] | null } = {}) {
-  const root = mkdtempSync(join(tmpdir(), "tk-sup-issue-root-"));
+  const root = tempDir("tk-sup-issue-root-");
   const tracking = join(root, "_bmad-output", "tracking");
   mkdirSync(tracking, { recursive: true });
   if (o.inbox !== false) {
@@ -58,7 +58,7 @@ const BOARD = (_root: string): BoardAnswer => ({
 });
 
 function readDeps(root: string, o: { ledger?: string[] } = {}) {
-  const home = mkdtempSync(join(tmpdir(), "tk-sup-issue-home-"));
+  const home = tempDir("tk-sup-issue-home-");
   if (o.ledger) {
     mkdirSync(join(home, "measurements"), { recursive: true });
     writeFileSync(join(home, "measurements", "u-m.jsonl"), o.ledger.join("\n") + "\n");
@@ -133,7 +133,7 @@ describe("Story 31.6: the issue read", () => {
     expect(entityForKey(root, "TKS-3")).toEqual({ id: "ST-003", title: "Gamma story", status: "Blocked - Awaiting User" });
     expect(entityForKey(root, "TKS-4")).toBeNull();
     expect(readComments(root, "TKS-404")).toBeNull();
-    const home = mkdtempSync(join(tmpdir(), "tk-sup-ledger-"));
+    const home = tempDir("tk-sup-ledger-");
     const file = join(home, "l.jsonl");
     writeFileSync(file, [jobRun("r", 0), "not json", jobRun("s", "x")].join("\n"));
     expect(runCost(file, "r")).toBe(0);

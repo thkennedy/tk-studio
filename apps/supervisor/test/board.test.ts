@@ -2,14 +2,15 @@
 // entities plus `index.md`, `deferred-work.md`, `budget-bands.yaml`, copied into a temp project root), a real
 // `Queue` on a temp file driven through its own verbs, and a ledger written into a temp `TK_STUDIO_HOME`.
 import { describe, expect, test } from "bun:test";
-import { appendFileSync, copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { appendFileSync, copyFileSync, cpSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { createApi } from "../src/api";
 import { SESSION_COOKIE, signSession } from "../src/auth";
 import { boardFor, openFindings, readPlan, type BoardAnswer, type EngagementTriageItem, type LiveRunProgress, type TriageItem } from "../src/board";
 import { ENGAGEMENT_STATES, newEngagement, writeEngagement } from "../src/engagement";
 import { Queue, type Owner, type Probes, type QueueRun, type WorkerKill } from "../src/queue";
+import { tempDir, track } from "./tmp";
 
 const FX = join(import.meta.dir, "fixtures", "board");
 const TOKEN = "tok-30-5-board-secret";
@@ -24,7 +25,7 @@ const GREEN = { ...RED, exit: 0, green: true, stderr_tail: [] };
 
 /** A project root holding the fixture at its real paths. */
 function fixtureRoot(): string {
-  const root = mkdtempSync(join(tmpdir(), "tk-sup-board-root-"));
+  const root = tempDir("tk-sup-board-root-");
   cpSync(join(FX, "plan"), join(root, PLAN), { recursive: true });
   mkdirSync(join(root, "_bmad-output", "implementation-artifacts"), { recursive: true });
   copyFileSync(join(FX, "deferred-work.md"), join(root, "_bmad-output", "implementation-artifacts", "deferred-work.md"));
@@ -39,16 +40,16 @@ const job = (project: string | null, jobId: string, runId: string, cost?: number
 });
 
 function world() {
-  const dir = mkdtempSync(join(tmpdir(), "tk-sup-board-"));
+  const dir = tempDir("tk-sup-board-");
   const probes: Probes = {
     ownerAlive: (o) => o.nonce === ME.nonce,
     engineLive: async () => ({ live: false }),
     killWorker: async (pid, start): Promise<WorkerKill> => ({ pid, start, outcome: "killed" }),
   };
-  const queue = new Queue(join(dir, "q.db"), probes);
+  const queue = track(new Queue(join(dir, "q.db"), probes));
   const root = fixtureRoot();
-  const bare = mkdtempSync(join(tmpdir(), "tk-sup-board-noplan-"));
-  const home = mkdtempSync(join(tmpdir(), "tk-sup-board-home-"));
+  const bare = tempDir("tk-sup-board-noplan-");
+  const home = tempDir("tk-sup-board-home-");
   mkdirSync(join(home, "measurements"), { recursive: true });
   const ledger = join(home, "measurements", "u-m.jsonl");
   writeFileSync(ledger, [
@@ -68,7 +69,7 @@ function world() {
   let live: LiveRunProgress[] = [];
   /** A run of `project` on its own checkout (one live run per job and checkout). */
   const enqueue = (project = "p", jobId = "run-epic-30") => {
-    const checkout = mkdtempSync(join(tmpdir(), "tk-sup-board-checkout-"));
+    const checkout = tempDir("tk-sup-board-checkout-");
     return queue.enqueue({ jobId, root: checkout, projectId: project, target: "skill", definition: { id: jobId } }).run;
   };
   const claim = async (run: QueueRun) => {
@@ -330,7 +331,7 @@ describe("the runs and the triage (AC1, AC2)", () => {
   test("a red host leg needs you only when recorded after the run's latest `launched`", async () => {
     const w = world();
     const launch = (run: QueueRun, engineId: string) => {
-      w.queue.recordWorktree(run.run_id, mkdtempSync(join(tmpdir(), "tk-sup-board-wt-")), { branch: "b", base_ref: "main" });
+      w.queue.recordWorktree(run.run_id, tempDir("tk-sup-board-wt-"), { branch: "b", base_ref: "main" });
       w.queue.markLaunched(run.run_id, engineId, { end: {} });
     };
     // Resumed or relaunched after a red host leg, no new host-verify yet: working.
@@ -352,7 +353,7 @@ describe("the runs and the triage (AC1, AC2)", () => {
     /** A paused run whose queue `paused` event carries no reason; its engine files under its worktree. */
     const pausedWith = async (engineId: string, files: { state?: unknown; journal?: unknown[] }) => {
       const run = await w.claim(w.enqueue());
-      w.queue.recordWorktree(run.run_id, mkdtempSync(join(tmpdir(), "tk-sup-board-wt-")), { branch: "b", base_ref: "main" });
+      w.queue.recordWorktree(run.run_id, tempDir("tk-sup-board-wt-"), { branch: "b", base_ref: "main" });
       const launched = w.queue.markLaunched(run.run_id, engineId, { end: {} });
       const runDir = join(launched.worktree!, ".bmad-loop", "runs", engineId);
       mkdirSync(runDir, { recursive: true });

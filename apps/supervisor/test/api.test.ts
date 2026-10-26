@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { ApiBindRefused, checkBind, checkResumeBody, checkSubmitBody, createApi, serve, type ApiDeps, type SubmitBody } from "../src/api";
@@ -14,6 +14,7 @@ import { END_HYGIENE_EVENTS, recordClaimRefusal } from "../src/hygiene";
 import { type QueueEvent, Queue, RunTerminal, STUDIO_END_RETRY_LIMIT, type EngineProbe, type Owner, type Probes, type QueueRun, type WorkerKill } from "../src/queue";
 import { fakeBin } from "./fakes";
 import { dump as dumpYaml } from "js-yaml";
+import { tempDir, track } from "./tmp";
 
 const REPO = resolve(import.meta.dir, "..");
 
@@ -67,15 +68,15 @@ interface FxOpts {
 }
 
 function fixture(o: FxOpts = {}) {
-  const dir = mkdtempSync(join(tmpdir(), "tk-sup-api-"));
-  const checkout = mkdtempSync(join(tmpdir(), "tk-sup-api-checkout-"));
+  const dir = tempDir("tk-sup-api-");
+  const checkout = tempDir("tk-sup-api-checkout-");
   const probes: Probes = {
     ownerAlive: (w) => w.pid === A.pid,
     engineLive: async (_root, id) => (o.engine ?? (() => ({ live: false })))(id),
     killWorker: o.killWorker ?? (async (pid, start): Promise<WorkerKill> => ({ pid, start, outcome: "killed" })),
     ...(o.now ? { now: o.now } : {}),
   };
-  const queue = new Queue(join(dir, "q.db"), probes);
+  const queue = track(new Queue(join(dir, "q.db"), probes));
   const enqueue = (jobId = "studio-health", extra: { skill?: string; tier?: string; sandbox?: string; target?: string } = {}) =>
     queue.enqueue({
       jobId, root: checkout, projectId: "p", target: extra.target ?? "skill", tier: extra.tier, sandbox: extra.sandbox,
@@ -302,13 +303,13 @@ describe("read routes (AC4)", () => {
   });
 
   test("Story 32.7: GET /runs/{id} cost_usd is the ledger job-run total_cost_usd of its studio run, else null", async () => {
-    const home = mkdtempSync(join(tmpdir(), "tk-sup-runcost-home-"));
+    const home = tempDir("tk-sup-runcost-home-");
     const env = { TK_STUDIO_HOME: home };
     const ledger = { user: "owner", machine: "box" };
-    const queue = new Queue(join(mkdtempSync(join(tmpdir(), "tk-sup-runcost-q-")), "q.db"), { ownerAlive: () => false, engineLive: async () => ({ live: false }) });
+    const queue = track(new Queue(join(tempDir("tk-sup-runcost-q-"), "q.db"), { ownerAlive: () => false, engineLive: async () => ({ live: false }) }));
     const handler = createApi({ queue, token: TOKEN, submit: async () => { throw new Error("never"); }, env, ledger });
     const get = async (id: string) => await (await handler(new Request(`${BASE}/runs/${id}`, { headers: { authorization: `Bearer ${TOKEN}` } }))).json() as Record<string, any>;
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-runcost-root-"));
+    const root = tempDir("tk-sup-runcost-root-");
     const mint = (jobId: string) => queue.enqueue({ jobId, root, projectId: "p", target: "skill", definition: { id: jobId } }).run;
     const metered = mint("engagement-chat");
     const unmetered = mint("studio-health");
@@ -414,7 +415,7 @@ describe("read routes (AC4)", () => {
 
   test("Story 33.1 (0.1.28): GET /status carries `log {path, last_lines}`, the last 20 lines redacted; `no log` and unset work noted", async () => {
     const fx = fixture();
-    const work = mkdtempSync(join(tmpdir(), "tk-sup-api-work-"));
+    const work = tempDir("tk-sup-api-work-");
     const at = Date.UTC(2026, 9, 26, 12);
     const status = async (env: Record<string, string | undefined>) => {
       const handler = createApi({ queue: fx.queue, token: TOKEN, env, now: () => at, pollMs: 10 });
@@ -817,9 +818,9 @@ describe("cancel races with the driver (AC4, AC5)", () => {
   });
 
   test.skipIf(process.platform !== "linux")("the refused record's real child is killed by the recorded-worker kill (its process group, never by name)", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "tk-sup-api-kill-"));
-    const queue = new Queue(join(dir, "q.db"), { ownerAlive: (w) => w.pid === A.pid, engineLive: async () => ({ live: false }) });
-    const checkout = mkdtempSync(join(tmpdir(), "tk-sup-api-kill-co-"));
+    const dir = tempDir("tk-sup-api-kill-");
+    const queue = track(new Queue(join(dir, "q.db"), { ownerAlive: (w) => w.pid === A.pid, engineLive: async () => ({ live: false }) }));
+    const checkout = tempDir("tk-sup-api-kill-co-");
     const run = queue.enqueue({ jobId: "j", root: checkout, projectId: "p", target: "skill", definition: { id: "j", target: { skill: "s" } } }).run;
     await queue.claim(run.run_id, A);
     await cancelRun(queue, run.run_id, { verbRunner: async () => { throw new Error("never called"); } });
@@ -920,9 +921,9 @@ describe("cancel races with the driver (AC4, AC5)", () => {
 // win32 too (DW-5): the fake is a bun script behind `fakeBin` (`uv.exe` there).
 describe("launchStopGraceful through runUv (AC4)", () => {
   test("stop --directory <root> --run-id <id> --graceful on lib/launch.py; ok, refused, no JSON", async () => {
-    const bin = mkdtempSync(join(tmpdir(), "tk-sup-api-uv-"));
-    const studio = mkdtempSync(join(tmpdir(), "tk-sup-api-studio-"));
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-api-root-"));
+    const bin = tempDir("tk-sup-api-uv-");
+    const studio = tempDir("tk-sup-api-studio-");
+    const root = tempDir("tk-sup-api-root-");
     // One argument per line into `argv`, then the canned answer from `out`.
     fakeBin(join(bin, "uv"), `const fs = require("node:fs");
 fs.writeFileSync(${JSON.stringify(join(bin, "argv"))}, process.argv.slice(2).map((a) => a + "\\n").join(""));
@@ -952,8 +953,8 @@ process.stdout.write(fs.readFileSync(${JSON.stringify(join(bin, "out"))}, "utf-8
 const canRunE2E = !!process.env.TK_STUDIO_ROOT && spawnSync("uv", ["--version"]).status === 0;
 
 describe.skipIf(!canRunE2E)("POST /jobs through the real submit path", () => {
-  const store = mkdtempSync(join(tmpdir(), "tk-sup-api-store-"));
-  const project = mkdtempSync(join(tmpdir(), "tk-sup-api-proj-"));
+  const store = tempDir("tk-sup-api-store-");
+  const project = tempDir("tk-sup-api-proj-");
   let prevHome: string | undefined, projectId = "";
   beforeAll(() => {
     prevHome = process.env.TK_STUDIO_HOME;
@@ -970,7 +971,7 @@ describe.skipIf(!canRunE2E)("POST /jobs through the real submit path", () => {
   afterAll(() => { if (prevHome === undefined) delete process.env.TK_STUDIO_HOME; else process.env.TK_STUDIO_HOME = prevHome; });
 
   const real = () => {
-    const queue = new Queue(join(mkdtempSync(join(tmpdir(), "tk-sup-api-q-")), "q.db"));
+    const queue = track(new Queue(join(tempDir("tk-sup-api-q-"), "q.db")));
     const handler = createApi({ queue, token: TOKEN });
     const post = (body: unknown) => handler(new Request(`${BASE}/jobs`, { method: "POST", body: JSON.stringify(body), headers: { authorization: `Bearer ${TOKEN}` } }));
     return { queue, post };
@@ -1013,7 +1014,7 @@ describe.skipIf(!canRunE2E)("POST /jobs through the real submit path", () => {
       expect(res.status).toBe(400);
       expect((await res.json() as Record<string, string>).error).toBe("WorkDirMissing");
       expect(queue.runs()).toEqual([]);
-      process.env.TK_SUPERVISOR_WORK = mkdtempSync(join(tmpdir(), "tk-sup-api-work-"));
+      process.env.TK_SUPERVISOR_WORK = tempDir("tk-sup-api-work-");
       const ok = await post({ project: projectId, job: "studio-health", editor_in_the_loop: true });
       expect(ok.status).toBe(200);
       const body = await ok.json() as Record<string, any>;
@@ -1275,13 +1276,13 @@ describe("Story 31.5: GET /inbox (contract 0.1.26 additive)", () => {
     { issue: "TKS-1", priority: null, blocked_since: "2026-10-24T08:00:00+00:00", reason_comment: null, state: "resolved" },
   ];
   function routed(o: { file?: string | null } = {}) {
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-inbox-root-"));
+    const root = tempDir("tk-sup-inbox-root-");
     if (o.file !== null) {
       mkdirSync(join(root, "_bmad-output", "tracking"), { recursive: true });
       writeFileSync(join(root, "_bmad-output", "tracking", "inbox.json"), o.file ?? JSON.stringify({
         inbox_version: 1, generated_at: "2026-10-24T12:00:00+00:00", project_key: "TKS", items: ITEMS }));
     }
-    const queue = new Queue(join(mkdtempSync(join(tmpdir(), "tk-sup-inbox-q-")), "q.db"), { ownerAlive: () => false, engineLive: async () => ({ live: false }) });
+    const queue = track(new Queue(join(tempDir("tk-sup-inbox-q-"), "q.db"), { ownerAlive: () => false, engineLive: async () => ({ live: false }) }));
     const handler = createApi({
       queue, token: TOKEN, session: { secret: SECRET }, submit: async () => { throw new Error("never"); },
       registry: async () => ({ projects: { p: { root } } }),
@@ -1332,14 +1333,14 @@ describe("Story 31.6: the issue read and POST /inbox/{key}/reply (contract 0.1.2
   const SECRET = "j".repeat(48);
   const ITEM = { issue: "TKS-3", entity: "ST-003", title: "Gamma", priority: "High", blocked_since: "2026-10-24T09:00:00+00:00", reason_comment: null, state: "open" };
   function routed(o: Partial<ApiDeps> = {}) {
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-reply-root-"));
+    const root = tempDir("tk-sup-reply-root-");
     mkdirSync(join(root, "_bmad-output", "tracking"), { recursive: true });
     writeFileSync(join(root, "_bmad-output", "tracking", "inbox.json"), JSON.stringify({ inbox_version: 1, generated_at: "2026-10-24T12:00:00+00:00", project_key: "TKS", items: [ITEM] }));
-    const queue = new Queue(join(mkdtempSync(join(tmpdir(), "tk-sup-reply-q-")), "q.db"), { ownerAlive: () => false, engineLive: async () => ({ live: false }) });
+    const queue = track(new Queue(join(tempDir("tk-sup-reply-q-"), "q.db"), { ownerAlive: () => false, engineLive: async () => ({ live: false }) }));
     const replies: { key: string; body: unknown }[] = [];
     const handler = createApi({
       queue, token: TOKEN, session: { secret: SECRET }, submit: async () => { throw new Error("never"); },
-      registry: async () => ({ projects: { p: { root } } }), env: { TK_STUDIO_HOME: mkdtempSync(join(tmpdir(), "tk-sup-reply-home-")) },
+      registry: async () => ({ projects: { p: { root } } }), env: { TK_STUDIO_HOME: tempDir("tk-sup-reply-home-") },
       reply: async (key, body) => { replies.push({ key, body }); return { status: 200, body: { ok: true, project: body.project, issue: key, commented: true, transitioned: true, status: "complete" } }; },
       ...o,
     });
@@ -1456,13 +1457,13 @@ describe("Story 32.1: the engagement routes (contract 0.1.27 additive)", () => {
   const SECRET = "e".repeat(48);
   const ENG = join("_bmad-output", "engagements");
   function routed(o: Partial<ApiDeps> = {}) {
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-eng-root-"));
-    const other = mkdtempSync(join(tmpdir(), "tk-sup-eng-other-"));
-    const queue = new Queue(join(mkdtempSync(join(tmpdir(), "tk-sup-eng-q-")), "q.db"), { ownerAlive: () => false, engineLive: async () => ({ live: false }) });
+    const root = tempDir("tk-sup-eng-root-");
+    const other = tempDir("tk-sup-eng-other-");
+    const queue = track(new Queue(join(tempDir("tk-sup-eng-q-"), "q.db"), { ownerAlive: () => false, engineLive: async () => ({ live: false }) }));
     let t = Date.parse("2026-10-25T03:00:00.000Z");
     const handler = createApi({
       queue, token: TOKEN, session: { secret: SECRET }, submit: async () => { throw new Error("never"); }, now: () => (t += 1000),
-      registry: async () => ({ projects: { p: { root }, o: { root: other }, rootless: {} } }), env: { TK_STUDIO_HOME: mkdtempSync(join(tmpdir(), "tk-sup-eng-home-")) },
+      registry: async () => ({ projects: { p: { root }, o: { root: other }, rootless: {} } }), env: { TK_STUDIO_HOME: tempDir("tk-sup-eng-home-") },
       ...o,
     });
     const cookie = `${SESSION_COOKIE}=${signSession(SECRET, "token", Date.now())}`;
@@ -1523,7 +1524,7 @@ describe("Story 32.1: the engagement routes (contract 0.1.27 additive)", () => {
   });
 
   test("a registry root that is not on disk: POST /engagements 500 EngagementRootMissing, no phantom root (no counter, no record), no event", async () => {
-    const gone = mkdtempSync(join(tmpdir(), "tk-sup-eng-gone-"));
+    const gone = tempDir("tk-sup-eng-gone-");
     rmSync(gone, { recursive: true, force: true });
     const fx = routed({ registry: async () => ({ projects: { gone: { root: gone } } }) });
     const res = await fx.call("POST", "/engagements", undefined, { project: "gone", request: "x" });
@@ -1908,17 +1909,17 @@ describe("Story 32.2: the chat routes (contract 0.1.27 additive)", () => {
     guards: { max_turns: 80, max_wall_clock_seconds: 1800 }, stop: { until: "9999-12-31T23:59:59Z" },
   };
   function routed(o: Partial<ApiDeps> = {}) {
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-chat-root-"));
-    const other = mkdtempSync(join(tmpdir(), "tk-sup-chat-other-"));
+    const root = tempDir("tk-sup-chat-root-");
+    const other = tempDir("tk-sup-chat-other-");
     mkdirSync(join(root, ".bmad-loop"), { recursive: true });
     writeFileSync(join(root, ".bmad-loop", "routing.current.json"), JSON.stringify({ planner: { model: "claude-opus-5-5", effort: "high" } }));
     const alive = new Set<number>();
-    const queue = new Queue(join(mkdtempSync(join(tmpdir(), "tk-sup-chat-q-")), "q.db"), { ownerAlive: (w) => alive.has(w.pid), engineLive: async () => ({ live: false }) });
+    const queue = track(new Queue(join(tempDir("tk-sup-chat-q-"), "q.db"), { ownerAlive: (w) => alive.has(w.pid), engineLive: async () => ({ live: false }) }));
     let t = Date.parse("2026-10-25T05:00:00.000Z");
     const resolved: string[] = [];
     const handler = createApi({
       queue, token: TOKEN, session: { secret: SECRET }, submit: async () => { throw new Error("never"); }, now: () => (t += 1000),
-      registry: async () => ({ projects: { p: { root }, o: { root: other } } }), env: { TK_STUDIO_HOME: mkdtempSync(join(tmpdir(), "tk-sup-chat-home-")) },
+      registry: async () => ({ projects: { p: { root }, o: { root: other } } }), env: { TK_STUDIO_HOME: tempDir("tk-sup-chat-home-") },
       chat: { resolveJob: async (r) => { resolved.push(r); return { projectId: r === root ? "p" : "o", root: r, definition: structuredClone(CHAT_JOB), target: "skill" }; } },
       pollMs: 20, heartbeatMs: 40,
       ...o,

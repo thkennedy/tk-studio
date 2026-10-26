@@ -1,12 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { homedir, hostname, tmpdir } from "node:os";
+import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { homedir, hostname } from "node:os";
 import { basename, join, sep } from "node:path";
 import { createApi } from "../src/api";
 import { studioHome } from "../src/env";
 import { credentialKey, holderOf, redactCredentials, redactLedgerLine, tailLines } from "../src/page";
 import { Queue, type Owner, type Probes, type WorkerKill } from "../src/queue";
+import { tempDir, track } from "./tmp";
 
 const TOKEN = "tok-page-7c1e-very-secret-value";
 const TELEGRAM = "123456789:AAtelegram-bot-secret-value-xyz-0123456789";
@@ -37,14 +38,14 @@ interface FxOpts {
 /** The default web root: an isolated temp dir holding index.html (built), so the page never reads the checkout's
  * apps/studio-web/dist. */
 function builtWeb(): { dir: string } {
-  const dir = mkdtempSync(join(tmpdir(), "tk-sup-page-web-built-"));
+  const dir = tempDir("tk-sup-page-web-built-");
   writeFileSync(join(dir, "index.html"), "<!doctype html><title>web</title>");
   return { dir };
 }
 
 function fixture(o: FxOpts = {}) {
-  const dir = mkdtempSync(join(tmpdir(), "tk-sup-page-"));
-  const store = mkdtempSync(join(tmpdir(), "tk-sup-page-store-"));
+  const dir = tempDir("tk-sup-page-");
+  const store = tempDir("tk-sup-page-store-");
   const probes: Probes = {
     ownerAlive: (w) => w.pid === A.pid,
     engineLive: async () => ({ live: false }),
@@ -53,7 +54,7 @@ function fixture(o: FxOpts = {}) {
     ...(o.now ? { now: o.now } : {}),
   };
   const db = join(dir, "q.db");
-  const queue = new Queue(db, probes);
+  const queue = track(new Queue(db, probes));
   const env = { TK_STUDIO_HOME: store, TK_SUPERVISOR_TELEGRAM_TOKEN: TELEGRAM, TK_SUPERVISOR_OTHER_TOKEN: OTHER_TOKEN, ...o.env };
   const registryCalls: number[] = [];
   const registry = o.registry ?? (async () => { registryCalls.push(1); return { ok: true, projects: { p: { root: "/work/p", vcs: "git", planning_backend: "files" } } }; });
@@ -66,7 +67,7 @@ function fixture(o: FxOpts = {}) {
     if (a) headers.accept = a;
     return handler(new Request(`${BASE}${path ?? "/status"}`, { method, headers }));
   };
-  const checkout = () => mkdtempSync(join(tmpdir(), "tk-sup-page-checkout-"));
+  const checkout = () => tempDir("tk-sup-page-checkout-");
   const enqueue = (jobId: string, root: string, extra: { tier?: string; sandbox?: string } = {}) =>
     queue.enqueue({ jobId, root, projectId: "p", target: "skill", tier: extra.tier, sandbox: extra.sandbox,
       definition: { id: jobId, trigger: "one-shot", target: { skill: "tk-studio-activate" } } }).run;
@@ -199,7 +200,7 @@ describe("the status page (AC1)", () => {
   });
 
   test("Story 30.6: GET / with no built web is the page (never a 503); with a built web, the web's index.html", async () => {
-    const none = fixture({ web: { dir: mkdtempSync(join(tmpdir(), "tk-sup-page-web-")) } });
+    const none = fixture({ web: { dir: tempDir("tk-sup-page-web-") } });
     const home = await none.call("GET", "/");
     expect(home.status).toBe(200);
     expect(await home.text()).toContain("The web is not built");
@@ -212,7 +213,7 @@ describe("the status page (AC1)", () => {
 
 describe("the supervisor log section (Story 33.1, AC1)", () => {
   test("the page shows the log's last lines, redacted, right before the ledger; `no log` and unset work noted", async () => {
-    const work = mkdtempSync(join(tmpdir(), "tk-sup-page-work-"));
+    const work = tempDir("tk-sup-page-work-");
     const at = Date.UTC(2026, 9, 26, 9);
     const page = async (env: Record<string, string>) => {
       const fx = fixture({ env });
@@ -247,7 +248,7 @@ describe("the web's not-built note (Story 30.2, AC2)", () => {
   const NOTE = '<p class="note">The web is not built: cd apps/studio-web &amp;&amp; bun install --frozen-lockfile &amp;&amp; bun run build</p>';
 
   test("no built web: one note line under the header naming the build command", async () => {
-    const fx = fixture({ web: { dir: mkdtempSync(join(tmpdir(), "tk-sup-page-web-")) } });
+    const fx = fixture({ web: { dir: tempDir("tk-sup-page-web-") } });
     const body = await (await fx.call("GET")).text();
     const header = body.indexOf('<h1>tk-studio supervisor</h1><p class="meta">generated ');
     expect(header).toBeGreaterThan(-1);
@@ -256,7 +257,7 @@ describe("the web's not-built note (Story 30.2, AC2)", () => {
   });
 
   test("a built web (index.html present): no note", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "tk-sup-page-web-"));
+    const dir = tempDir("tk-sup-page-web-");
     writeFileSync(join(dir, "index.html"), "<!doctype html>");
     const fx = fixture({ web: { dir } });
     const res = await fx.call("GET");
@@ -399,7 +400,7 @@ describe("what the page shows (AC2)", () => {
   });
 
   test("the ledger is read from its end: the last lines only", () => {
-    const dir = mkdtempSync(join(tmpdir(), "tk-sup-page-tail-"));
+    const dir = tempDir("tk-sup-page-tail-");
     const f = join(dir, "l.jsonl");
     writeFileSync(f, Array.from({ length: 5000 }, (_, i) => `{"n":${i},"pad":"${"p".repeat(40)}"}`).join("\n") + "\n");
     const tail = tailLines(f, 3);
@@ -457,7 +458,7 @@ describe("reads only, and no credential (AC3)", () => {
 
 describe("review patches", () => {
   test("tailLines: a multi-byte character straddling a chunk boundary stays whole", () => {
-    const dir = mkdtempSync(join(tmpdir(), "tk-sup-page-utf8-"));
+    const dir = tempDir("tk-sup-page-utf8-");
     const f = join(dir, "l.jsonl");
     // The em dash's first byte sits just before the last 8 KiB chunk; its other two bytes inside it.
     const after = Array.from({ length: 30 }, (_, i) => `{"n":${i}}`).join("\n") + "\n";

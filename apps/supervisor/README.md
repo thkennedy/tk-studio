@@ -19,6 +19,8 @@ bun test
 bunx tsc --noEmit
 ```
 
+**Tests (Story 33.4).** A suite makes every temp folder through `test/tmp.ts`: `tempDir("tk-sup-<what>-")`, never `mkdtempSync` (`grep -rn mkdtempSync test` lists only `tmp.ts`), and wraps each queue it opens in such a folder in `track(new Queue(…))`. `test/preload.ts` closes the tracked queues first (an open SQLite file cannot be removed on Windows, hole 63) and then removes the folders at the end of the `bun test` process (a preload's `afterAll` runs once, after its last file; under the host gate every file is its own process, so there it is per file), and at process exit and on SIGINT/SIGTERM (holes 64, 70). On the Windows host the run's host leg (`tools/verify_host.py`, its `supervisor` gate) runs each `test/*.test.ts` but the e2e `test/command-line.test.ts` in its own `bun test` (420 s each, every `TK_SUPERVISOR_*` unset, `TMPDIR`/`TEMP`/`TMP` at a per-run `tk-verify-supervisor-*` folder under the host's own temp folder, never inside a git checkout, which the queue refuses), then `bunx tsc --noEmit -p apps/supervisor`, whenever `apps/supervisor` changed; the e2e suite is run by hand.
+
 Conformance through the supervisor (driver contract §8). The manifest is read from the installed plugin. Drives the §2 payload can express go through `server.ts` over stdio as `tk_invoke` calls (identical payloads share one run). Fixture CLIs and non-payload verbs (research `seed|spine`, launch `pipeline.py resolve|apply`) run direct via uv under the §1 pure-data allowance:
 
 ```bash

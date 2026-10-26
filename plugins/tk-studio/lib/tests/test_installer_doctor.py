@@ -98,6 +98,10 @@ class DoctorCase(AppsCase):
         self.tools("claude", "sbx", "git")
         self.env["PATH"] = str(self.fakebin)
         self.env["TK_STUDIO_HOME"] = str(self.tmp / "store")
+        # Story 33.4: supervisor-temp reads TMPDIR (POSIX) or TEMP/TMP (Windows); never the box's own temp folder
+        self.temp = self.tmp / "temp"
+        self.temp.mkdir()
+        self.env["TMPDIR"] = self.env["TMP"] = str(self.temp)
         self.hklm_value: object = 1
 
     def tools(self, *names):
@@ -289,7 +293,7 @@ class AllPassing(DoctorCase):
             ["claude-code", "plugin", "store", "sbx-daemon",
              "sandbox-login", "folder-trust:proj", "path-launcher",
              "tailscale-cert", "supervisor", "supervisor-log",
-             "studio-web"]))
+             "supervisor-temp", "studio-web"]))
         for check in result["checks"]:
             if check["status"] == "pass":
                 self.assertIsNone(check["fix"])
@@ -1043,6 +1047,76 @@ class SupervisorLog(DoctorCase):
         self.assertLess(names.index("supervisor"),
                         names.index("supervisor-log"))
         self.assertEqual(_age_cases(), ["59s", "1m", "2h", "3d"])
+
+
+class SupervisorTemp(DoctorCase):
+    """Story 33.4 (AC2, hole 64): the leaked ``tk-sup-*`` folders in the
+    user's temp folder — warn above 500, never fail, never delete."""
+
+    def check(self) -> dict:
+        return self.checks(self.doctor(roster=self.full_roster())[0])[
+            "supervisor-temp"]
+
+    def folders(self, n: int, prefix: str = "tk-sup-queue-"):
+        for i in range(n):
+            (self.temp / f"{prefix}{i:04d}").mkdir()
+
+    def test_at_most_500_passes(self):
+        self.folders(500)
+        (self.temp / "tk-sup-fake-launcher-1.4.3.exe").write_text("a file")
+        self.folders(3, prefix="other-")
+        check = self.check()
+        self.assertEqual(check["status"], "pass", check)
+        self.assertEqual(check["detail"], f"500 tk-sup-* folders in {self.temp}")
+        self.assertIsNone(check["fix"])
+
+    def test_above_500_warns_with_the_cleanup_and_deletes_nothing(self):
+        self.folders(501)
+        roster = self.full_roster()
+        before = self.snapshot()
+        result, code = self.doctor(roster=roster)
+        check = self.checks(result)["supervisor-temp"]
+        self.assertEqual(check["status"], "warn", check)
+        self.assertEqual(check["detail"], f"501 tk-sup-* folders in {self.temp}")
+        self.assertEqual(check["fix"], doctor.FIX_SUPERVISOR_TEMP)
+        self.assertIn("Get-ChildItem $env:TEMP -Directory -Filter 'tk-sup-*'", check["fix"])
+        self.assertIn("find \"${TMPDIR:-/tmp}\" -maxdepth 1 -name 'tk-sup-*'", check["fix"])
+        self.assertNotIn("supervisor-temp", result["reason"] or "")
+        self.assertEqual(self.snapshot(), before, "doctor never deletes")
+
+    def test_posix_reads_tmpdir_then_tmp_like_bun(self):
+        # bun's os.tmpdir() made the folders: TMPDIR, else /tmp; TEMP and TMP are not read
+        temp = self.tmp / "temp-var"
+        temp.mkdir()
+        (temp / "tk-sup-a-1").mkdir()
+        self.env["TEMP"] = self.env["TMP"] = str(temp)
+        self.assertEqual(self.check()["detail"], f"0 tk-sup-* folders in {self.temp}")
+        del self.env["TMPDIR"]
+        self.assertTrue(self.check()["detail"].endswith(f" tk-sup-* folders in {Path('/tmp')}"))
+
+    def test_temp_folder_order_per_os(self):
+        def folder(plat, **env):
+            return doctor._temp_folder(mock.Mock(plat=plat, env=env))
+        # Windows: TEMP, then TMP, then %SystemRoot%\temp; a stray TMPDIR is never read
+        self.assertEqual(folder(WINDOWS, TMPDIR="/x", TEMP="C:\\t", TMP="C:\\u"), Path("C:\\t"))
+        self.assertEqual(folder(WINDOWS, TMPDIR="/x", TMP="C:\\u"), Path("C:\\u"))
+        self.assertEqual(folder(WINDOWS, TMPDIR="/x", SystemRoot="C:\\Windows"), Path("C:\\Windows\\temp"))
+        # POSIX: TMPDIR, then /tmp; TEMP and TMP are never read
+        self.assertEqual(folder(LINUX, TMPDIR="/x", TEMP="/t", TMP="/u"), Path("/x"))
+        self.assertEqual(folder(LINUX, TEMP="/t", TMP="/u"), Path("/tmp"))
+
+    def test_an_unreadable_folder_is_skipped(self):
+        self.env["TMPDIR"] = str(self.tmp / "missing")
+        check = self.check()
+        self.assertEqual(check["status"], "skipped", check)
+        self.assertIn("unreadable", check["detail"])
+        self.assertTrue(check["fix"])
+
+    def test_the_check_follows_supervisor_log(self):
+        names = [c["check"] for c in self.doctor(
+            roster=self.full_roster())[0]["checks"]]
+        self.assertEqual(names.index("supervisor-temp"),
+                         names.index("supervisor-log") + 1)
 
 
 def _age_cases() -> list[str]:

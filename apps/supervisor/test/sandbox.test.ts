@@ -2,8 +2,8 @@
 // kill-by-pid, the starter lock and external-run detection, pinned with a fake `sbx` (never a real one).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { cancelRun, claimGate, detectExternal, pinBeforeClaim, driveResumes, ExternalRunRefused, finishRun, mirror, queueRecorder, recoverQueue, watchStarterLocks, type ResumedRun, type Started } from "../src/cli";
 import { checkoutKey, Queue, workerMayRun, type Owner, type Probes, type QueueRun, type StudioOps } from "../src/queue";
@@ -15,6 +15,7 @@ import { invokeSkill, MISSING_STATUS_BLOCK, runProcess, toVmPath, type RunResult
 import { shouldWake } from "../src/tick";
 import { engineStatus, sweepEngines, type WorktreeDeps } from "../src/worktree";
 import { fakeSbx, fakeStudioRoot } from "./fakes";
+import { tempDir, track } from "./tmp";
 
 const SB = "claude-p";
 const ENGINE = "20261016-101010-ab12";
@@ -26,7 +27,7 @@ let deps: SandboxDeps;
 beforeAll(() => {
   sbx = fakeSbx();
   // Story 33.3: the pin record lands in a throwaway store, never the operator's.
-  deps = { env: { ...process.env, SBX_BIN: sbx.bin, TK_STUDIO_HOME: mkdtempSync(join(tmpdir(), "tk-sup-pin-home-")) }, waitMs: 400, pollMs: 50 };
+  deps = { env: { ...process.env, SBX_BIN: sbx.bin, TK_STUDIO_HOME: tempDir("tk-sup-pin-home-") }, waitMs: 400, pollMs: 50 };
 });
 afterAll(() => {
   // Every `sbx` call this suite made was argv only: no shell, no `-c` string (AC2).
@@ -47,7 +48,7 @@ const sweepWith = (status: "finished" | "paused" | "running"): WorktreeDeps => {
   // `uv` below answers only what still runs on the host).
   sbx.answer({ ...sbx.answers(), launch_status: { ok: true, runs: [], live: [], run } });
   return {
-    env: { ...process.env, TK_STUDIO_ROOT: mkdtempSync(join(tmpdir(), "tk-sup-studio-")), SBX_BIN: sbx.bin },
+    env: { ...process.env, TK_STUDIO_ROOT: tempDir("tk-sup-studio-"), SBX_BIN: sbx.bin },
     run: async () => ({ exit: 0, stdout: "", stderr: "" }),
     uv: async () => ({ exit: 0, stderr: "", stdout: JSON.stringify({ ok: true, run }) }),
     verbs: async () => ({ ok: true, state: "complete" }),
@@ -71,7 +72,7 @@ async function during<T>(fn: () => Promise<T>): Promise<{ out: T; calls: string[
 }
 /** A worktree with bmad-loop's `engine.pid` for `engine` (absent with `pidLine` null). */
 function worktreeWith(pidLine: string | null, engine = ENGINE): string {
-  const wt = mkdtempSync(join(tmpdir(), "tk-sup-sbx-wt-"));
+  const wt = tempDir("tk-sup-sbx-wt-");
   if (pidLine !== null) {
     mkdirSync(join(wt, ".bmad-loop", "runs", engine), { recursive: true });
     writeFileSync(join(wt, ".bmad-loop", "runs", engine, "engine.pid"), pidLine);
@@ -80,7 +81,7 @@ function worktreeWith(pidLine: string | null, engine = ENGINE): string {
 }
 /** A claimed sbx launch run with its worktree cut (and pinned unless `pinned: false`). */
 async function sbxRun(q: Queue, opts: { pidLine?: string | null; job?: string; sandbox?: string; pinned?: boolean } = {}): Promise<{ run: QueueRun; root: string; wt: string }> {
-  const root = mkdtempSync(join(tmpdir(), "tk-sup-sbx-checkout-"));
+  const root = tempDir("tk-sup-sbx-checkout-");
   const wt = worktreeWith(opts.pidLine === undefined ? "6509 125610.0" : opts.pidLine);
   const run = q.enqueue({ jobId: opts.job ?? "launch-27", root, projectId: "p27", definition: LAUNCH, owner: me, tier: "sbx", sandbox: opts.sandbox ?? SB }).run;
   expect((await q.claim(run.run_id, me)).claimed).toBe(true);
@@ -116,7 +117,7 @@ describe("pin: `sbx run -d --name <sb>` before the preflight's `sbx exec`", () =
     const rec = queueRecorder(q, run.run_id, deps);
     const spawned: string[][] = [];
     let spawnedAtPin = -1;
-    const { out, calls } = await during(() => invokeSkill(mkdtempSync(join(tmpdir(), "tk-sup-pin-")), "tk-studio-activate", { tier: "sbx", sandbox: SB }, spawnerOf(spawned), {
+    const { out, calls } = await during(() => invokeSkill(tempDir("tk-sup-pin-"), "tk-studio-activate", { tier: "sbx", sandbox: SB }, spawnerOf(spawned), {
       pin: async (sb) => { spawnedAtPin = spawned.length; return rec.pin!(sb); },
     }));
     // Story 33.3: `sbx ls` first (the sandbox is not listed: no probe, no restart), then the pin.
@@ -130,7 +131,7 @@ describe("pin: `sbx run -d --name <sb>` before the preflight's `sbx exec`", () =
   test("Story 33.2 (ruling D, re-pinned): the drain's pin runs before the claim — a failed pin leaves the run `queued` with one `claim-refused` naming the pin (a repeat pass updates `pass_at`), no preflight, no claim", async () => {
     sbx.answer({ pin: "fail" });
     const q = newQueue();
-    const run = q.enqueue({ jobId: "launch-27", root: mkdtempSync(join(tmpdir(), "tk-sup-gate-")), projectId: "p27", definition: LAUNCH, tier: "sbx", sandbox: SB }).run;
+    const run = q.enqueue({ jobId: "launch-27", root: tempDir("tk-sup-gate-"), projectId: "p27", definition: LAUNCH, tier: "sbx", sandbox: SB }).run;
     const spawned: string[][] = [];
     const gate = () => claimGate(q, run.run_id, { tier: "sbx", sandbox: SB }, { sbx: deps, spawner: spawnerOf(spawned), hygiene: { env: {} } });
     const { out, calls } = await during(gate);
@@ -159,13 +160,13 @@ describe("pin: `sbx run -d --name <sb>` before the preflight's `sbx exec`", () =
   test("Story 33.2: the Max-login preflight refuses → `claim-refused` naming the renewal steps, the run stays `queued`; the host tier names the host login", async () => {
     sbx.answer({});
     const q = newQueue();
-    const run = q.enqueue({ jobId: "launch-27", root: mkdtempSync(join(tmpdir(), "tk-sup-gate-")), projectId: "p27", definition: LAUNCH, tier: "sbx", sandbox: SB }).run;
+    const run = q.enqueue({ jobId: "launch-27", root: tempDir("tk-sup-gate-"), projectId: "p27", definition: LAUNCH, tier: "sbx", sandbox: SB }).run;
     const loggedOut: Spawner = async () => ({ exit: 0, stderr: "", stdout: JSON.stringify({ loggedIn: false }) });
     const out = await claimGate(q, run.run_id, { tier: "sbx", sandbox: SB }, { sbx: deps, spawner: loggedOut, hygiene: { env: {} } });
     expect(out).toEqual({ reason: "harness auth: Max login missing or expired (not logged in)", resolves: `renew the sandbox's Max login: sbx run --name ${SB} → /login → /exit; the next drain pass claims the run` });
     expect(q.get(run.run_id)?.state).toBe("queued");
     expect(q.events(run.run_id).find((e) => e.kind === "claim-refused")?.detail).toMatchObject({ reason: out!.reason, resolves: out!.resolves });
-    const host = q.enqueue({ jobId: "host-job", root: mkdtempSync(join(tmpdir(), "tk-sup-gate-")), projectId: "p27", definition: LAUNCH }).run;
+    const host = q.enqueue({ jobId: "host-job", root: tempDir("tk-sup-gate-"), projectId: "p27", definition: LAUNCH }).run;
     const before = sbx.calls().length;
     const h = await claimGate(q, host.run_id, { tier: "host" }, { spawner: loggedOut, hygiene: { env: {} } });
     expect(sbx.calls().length).toBe(before); // the host tier pins nothing
@@ -175,7 +176,7 @@ describe("pin: `sbx run -d --name <sb>` before the preflight's `sbx exec`", () =
 
   test("Story 33.2: a pin failing pass after pass on the same sandbox records one `pin-failed`, its `error` updated in place to the latest failure", async () => {
     const q = newQueue();
-    const run = q.enqueue({ jobId: "launch-27", root: mkdtempSync(join(tmpdir(), "tk-sup-gate-")), projectId: "p27", definition: LAUNCH, tier: "sbx", sandbox: SB }).run;
+    const run = q.enqueue({ jobId: "launch-27", root: tempDir("tk-sup-gate-"), projectId: "p27", definition: LAUNCH, tier: "sbx", sandbox: SB }).run;
     const failing = (stderr: string): SandboxDeps => ({ ...deps, run: async () => ({ exit: 1, stderr, stdout: "" }) });
     const first = await pinBeforeClaim(q, run.run_id, SB, failing("sandbox busy (pid 101)"));
     const second = await pinBeforeClaim(q, run.run_id, SB, failing("sandbox busy (pid 202)"));
@@ -189,7 +190,7 @@ describe("pin: `sbx run -d --name <sb>` before the preflight's `sbx exec`", () =
   test("Story 33.2: a queued run with no stored sandbox (config supplies it) records it before the pin — a refused preflight twice leaves one `pinned`", async () => {
     sbx.answer({});
     const q = newQueue();
-    const run = q.enqueue({ jobId: "launch-27", root: mkdtempSync(join(tmpdir(), "tk-sup-gate-")), projectId: "p27", definition: LAUNCH }).run;
+    const run = q.enqueue({ jobId: "launch-27", root: tempDir("tk-sup-gate-"), projectId: "p27", definition: LAUNCH }).run;
     expect(run.sandbox).toBeNull();
     const loggedOut: Spawner = async () => ({ exit: 0, stderr: "", stdout: JSON.stringify({ loggedIn: false }) });
     const gate = () => claimGate(q, run.run_id, { tier: "sbx", sandbox: SB }, { sbx: deps, spawner: loggedOut, hygiene: { env: {} } });
@@ -231,7 +232,7 @@ describe("Story 33.3: the pin restarts a running, logged-out sandbox once", () =
   /** The preflight's spawner through the fake `sbx` (its `auth` answers), as production's `runProcess` on SBX_BIN. */
   const viaSbx: Spawner = (_cmd, args, o) => runProcess(sbx.bin, args, { timeoutS: o.timeoutS });
   const queuedOn = (q: Queue, job = "launch-27") =>
-    q.enqueue({ jobId: job, root: mkdtempSync(join(tmpdir(), "tk-sup-restart-")), projectId: "p27", definition: LAUNCH, tier: "sbx", sandbox: SB }).run;
+    q.enqueue({ jobId: job, root: tempDir("tk-sup-restart-"), projectId: "p27", definition: LAUNCH, tier: "sbx", sandbox: SB }).run;
   const gateOf = (q: Queue, runId: string, restarted = new Set<string>()) =>
     claimGate(q, runId, { tier: "sbx", sandbox: SB }, { sbx: deps, spawner: viaSbx, hygiene: { env: {} }, restarted });
   const restarts = (q: Queue, runId: string) => q.events(runId).filter((e) => e.kind === "pin-restart");
@@ -608,9 +609,9 @@ describe("release: `sbx stop <sb>` at the deferred `ended`, never on paused, nev
     const q = newQueue();
     const { run } = await sbxRun(q);
     // A served job on another checkout whose supervisor config places it on the same sbx sandbox.
-    const extRoot = mkdtempSync(join(tmpdir(), "tk-sup-sbx-ext-placed-"));
+    const extRoot = tempDir("tk-sup-sbx-ext-placed-");
     q.end(q.enqueue({ jobId: "studio-health", root: extRoot, projectId: "p", definition: { id: "studio-health" } }).run.run_id, "complete", null);
-    const cfg = join(mkdtempSync(join(tmpdir(), "tk-sup-sbx-cfg-")), "supervisor.yaml");
+    const cfg = join(tempDir("tk-sup-sbx-cfg-"), "supervisor.yaml");
     writeFileSync(cfg, `jobs:\n  "${basename(extRoot)}/studio-health":\n    tier: sbx\n    sandbox: ${SB}\n`);
     const sid = "studio-health-20261016T111111Z";
     const prev = process.env.TK_SUPERVISOR_CONFIG;
@@ -631,7 +632,7 @@ describe("release: `sbx stop <sb>` at the deferred `ended`, never on paused, nev
 
   test("a job its config places on the host tier is recorded external with no sandbox (never a holder of one)", async () => {
     const q = newQueue();
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-sbx-ext-host-"));
+    const root = tempDir("tk-sup-sbx-ext-host-");
     q.end(q.enqueue({ jobId: "studio-health", root, projectId: "p", definition: { id: "studio-health" } }).run.run_id, "complete", null);
     const [id] = (await detectExternal(q, async () => ({ ok: true, runs: [{ run_id: "studio-health-20261016T121212Z", state: "running" }] }))).recorded;
     expect(q.get(id!)).toMatchObject({ state: "external", tier: "host", sandbox: null });
@@ -641,7 +642,7 @@ describe("release: `sbx stop <sb>` at the deferred `ended`, never on paused, nev
     sbx.answer({});
     const q = newQueue();
     const a = await sbxRun(q);
-    const b = q.enqueue({ jobId: "other-job", root: mkdtempSync(join(tmpdir(), "tk-sup-sbx-b-")), projectId: "p27", definition: LAUNCH, tier: "sbx", sandbox: SB }).run;
+    const b = q.enqueue({ jobId: "other-job", root: tempDir("tk-sup-sbx-b-"), projectId: "p27", definition: LAUNCH, tier: "sbx", sandbox: SB }).run;
     const { calls } = await during(async () => {
       q.end(a.run.run_id, "complete", null);
       expect(await releasePin(q, a.run.run_id, deps)).toBe("kept");
@@ -660,7 +661,7 @@ describe("release: `sbx stop <sb>` at the deferred `ended`, never on paused, nev
     sbx.answer({});
     const q = newQueue();
     const a = await sbxRun(q);
-    const extRoot = mkdtempSync(join(tmpdir(), "tk-sup-sbx-ext-last-"));
+    const extRoot = tempDir("tk-sup-sbx-ext-last-");
     q.end(q.enqueue({ jobId: "studio-health", root: extRoot, projectId: "p", definition: { id: "studio-health" } }).run.run_id, "complete", null);
     const sid = "studio-health-20261016T131313Z";
     let state = "running";
@@ -1191,9 +1192,9 @@ describe("Restart: `recoverQueue` respawns the hold of a launched sbx run whose 
 
 describe("Lock file: `<studioHome>/projects/<key>/starter.lock` names the queue as the only starter", () => {
   test("written atomically in the store for every served project, with the SPEC's JSON shape", () => {
-    const home = mkdtempSync(join(tmpdir(), "tk-sup-sbx-store-"));
+    const home = tempDir("tk-sup-sbx-store-");
     const q = newQueue();
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-sbx-served-"));
+    const root = tempDir("tk-sup-sbx-served-");
     q.enqueue({ jobId: "studio-health", root, projectId: "proj-27", definition: { id: "studio-health" } });
     const env = { TK_STUDIO_HOME: home };
     expect(writeStarterLocks(q, env)).toEqual([{ path: join(home, "projects", "proj-27", "starter.lock") }]);
@@ -1210,7 +1211,7 @@ describe("Lock file: `<studioHome>/projects/<key>/starter.lock` names the queue 
   });
 
   test("never in the checkout's tree: a store inside the checkout is refused, nothing written", () => {
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-sbx-intree-"));
+    const root = tempDir("tk-sup-sbx-intree-");
     const out = writeStarterLock({ project_id: "p", root }, { TK_STUDIO_HOME: join(root, ".store") });
     expect(out).toMatchObject({ error: expect.stringContaining("checkout's tree") });
     expect(existsSync(join(root, ".store"))).toBe(false);
@@ -1219,10 +1220,10 @@ describe("Lock file: `<studioHome>/projects/<key>/starter.lock` names the queue 
 
 describe("Story 28.6 (DW-6): serve refreshes every served project's starter lock every minute, `since` fresh", () => {
   test("written at once and on each injected tick with `since` = now and `supervisor_pid` = this process; stop clears it", () => {
-    const home = mkdtempSync(join(tmpdir(), "tk-sup-sbx-refresh-"));
+    const home = tempDir("tk-sup-sbx-refresh-");
     const q = newQueue();
-    const rootA = mkdtempSync(join(tmpdir(), "tk-sup-sbx-refresh-a-"));
-    const rootB = mkdtempSync(join(tmpdir(), "tk-sup-sbx-refresh-b-"));
+    const rootA = tempDir("tk-sup-sbx-refresh-a-");
+    const rootB = tempDir("tk-sup-sbx-refresh-b-");
     q.enqueue({ jobId: "studio-health", root: rootA, projectId: "proj-a", definition: { id: "studio-health" } });
     q.enqueue({ jobId: "studio-health", root: rootB, projectId: "proj-b", definition: { id: "studio-health" } });
     let closed = 0;
@@ -1290,7 +1291,7 @@ describe("External: a studio run started outside the queue is recorded and count
   const verbsFor = (state: () => string) => async (_root: string, a: string[]) =>
     a[0] === "status" ? { ok: true, runs: [{ run_id: SID, state: state() }] } : { ok: true };
   const served = (q: Queue) => {
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-sbx-ext-"));
+    const root = tempDir("tk-sup-sbx-ext-");
     const r = q.enqueue({ jobId: "studio-health", root, projectId: "p", definition: { id: "studio-health" } }).run;
     q.end(r.run_id, "complete", null);
     return root;
@@ -1329,7 +1330,7 @@ describe("External: a studio run started outside the queue is recorded and count
 
   /** A throwaway studio store (TK_STUDIO_HOME) for the vanished check, `sbx` the fake. */
   const storeDeps = (): SandboxDeps & { home: string } => {
-    const home = mkdtempSync(join(tmpdir(), "tk-sup-sbx-store-"));
+    const home = tempDir("tk-sup-sbx-store-");
     return { ...deps, env: { ...deps.env, TK_STUDIO_HOME: home }, home };
   };
 
@@ -1423,7 +1424,7 @@ describe("External: a studio run started outside the queue is recorded and count
   });
 
   test("a queue file whose state CHECK predates `external` is rebuilt with it", () => {
-    const path = join(mkdtempSync(join(tmpdir(), "tk-sup-sbx-db-")), "q.db");
+    const path = join(tempDir("tk-sup-sbx-db-"), "q.db");
     const db = new Database(path);
     db.exec(`CREATE TABLE jobs (job_id TEXT NOT NULL, checkout TEXT NOT NULL, root TEXT NOT NULL, project_id TEXT, definition TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL, PRIMARY KEY (job_id, checkout));
       CREATE TABLE runs (run_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, checkout TEXT NOT NULL, root TEXT NOT NULL, project_id TEXT, target TEXT,
@@ -1432,7 +1433,7 @@ describe("External: a studio run started outside the queue is recorded and count
         verb_snapshot TEXT, definition TEXT, created TEXT NOT NULL, updated TEXT NOT NULL);
       CREATE UNIQUE INDEX runs_one_live ON runs (job_id, checkout) WHERE state IN ('queued','running','paused');`);
     db.close();
-    const q = new Queue(path);
+    const q = track(new Queue(path));
     try {
       const sql = (q.db.query("SELECT sql FROM sqlite_master WHERE name = 'runs'").get() as { sql: string }).sql;
       expect(sql).toContain("'external'");
@@ -1450,10 +1451,10 @@ describe.skipIf(!process.env.TK_STUDIO_ROOT)("recoverQueue wiring: holds respawn
     const { run } = await sbxRun(q);
     launched(q, run.run_id);
     q.recordEnginePid(run.run_id, { pid: 6509, start: "125610.0", source: "engine.pid" });
-    const extRoot = mkdtempSync(join(tmpdir(), "tk-sup-sbx-recover-ext-"));
+    const extRoot = tempDir("tk-sup-sbx-recover-ext-");
     q.end(q.enqueue({ jobId: "studio-health", root: extRoot, projectId: "p-ext", definition: { id: "studio-health" } }).run.run_id, "complete", null);
     const sid = "studio-health-20261016T131313Z";
-    const home = mkdtempSync(join(tmpdir(), "tk-sup-sbx-recover-home-"));
+    const home = tempDir("tk-sup-sbx-recover-home-");
     const studio = fakeStudioRoot();
     const { spawned, hold } = fakeHold();
     const wdeps: WorktreeDeps = { ...sweepWith("running"), sbx: { ...deps, hold } };

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { cancelRun, mirror, studioOps } from "../src/cli";
@@ -14,6 +14,7 @@ import { NOTIFIER_VARS } from "./preload";
 import { END_LEASE_STALE_MS, NOTIFIED_BEFORE, Queue, type Owner, type Probes } from "../src/queue";
 import type { RunResult } from "../src/server";
 import { ensureTranscript } from "../src/transcript";
+import { tempDir, track } from "./tmp";
 
 const HOST = hostname();
 const A: Owner = { pid: 930001, host: HOST, nonce: "hyg-a" };
@@ -21,7 +22,7 @@ const B: Owner = { pid: 930002, host: HOST, nonce: "hyg-b" };
 const TG_TOKEN = "123456:tg-very-secret-token";
 const PR = "https://github.com/tk/universe/pull/42";
 
-const tmp = (p: string) => mkdtempSync(join(tmpdir(), p));
+const tmp = (p: string) => tempDir(p);
 
 function fixture(alive = new Set<number>([A.pid])) {
   const dir = tmp("tk-sup-hyg-");
@@ -31,7 +32,7 @@ function fixture(alive = new Set<number>([A.pid])) {
     engineLive: async () => ({ live: false }),
     killWorker: async (pid, start) => ({ pid, start, outcome: "not running" }),
   };
-  const queue = new Queue(join(dir, "q.db"), probes);
+  const queue = track(new Queue(join(dir, "q.db"), probes));
   const enqueue = (jobId = "j", extra: { tier?: string; sandbox?: string; flagged?: boolean; owner?: Owner } = {}) =>
     queue.enqueue({
       jobId, root: checkout, projectId: "p", target: "skill", tier: extra.tier, sandbox: extra.sandbox, owner: extra.owner,
@@ -430,7 +431,7 @@ describe("the notification (AC4)", () => {
     const fx = fixture();
     const r = fx.enqueue();
     fx.queue.end(r.run_id, "complete", null);
-    const other = new Queue(fx.db, fx.queue.probes);
+    const other = track(new Queue(fx.db, fx.queue.probes));
     try {
       const a = fakeFetch(), b = fakeFetch();
       const [x, y] = await Promise.all([sweepEnds(fx.queue, { env: NTFY_ENV, fetch: a.fetchFn }), sweepEnds(other, { env: NTFY_ENV, fetch: b.fetchFn })]);
@@ -602,7 +603,7 @@ describe("no history flood", () => {
     // Simulate a pre-22.3 file: the marker column dropped, the trigger recreated without it.
     fx.queue.db.exec("DROP TRIGGER runs_terminal_immutable; DROP TRIGGER runs_notified_once; ALTER TABLE runs DROP COLUMN notified;");
     fx.queue.close();
-    const q = new Queue(fx.db, fx.queue.probes);
+    const q = track(new Queue(fx.db, fx.queue.probes));
     try {
       expect(q.get(old.run_id)!.notified).toBe(NOTIFIED_BEFORE);
       const f = fakeFetch();
