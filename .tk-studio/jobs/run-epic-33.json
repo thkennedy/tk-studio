@@ -1,0 +1,11 @@
+{
+  "job_schema_version": 1,
+  "id": "run-epic-33",
+  "type": "run-epic",
+  "description": "tk-studio Epic 33 (Loop Hygiene: what Epics 31 and 32 taught the loop) through the supervisor queue (declared 2026-10-26 with the epic). Extends the shipped run-epic type: one-shot; the first launch bootstraps _bmad-output/specs/spec-epic-33 from epics.md (Story 26.1). Submit it with POST /jobs {project: tk-studio, job: run-epic-33}; placement tier sbx on claude-tk-studio; tools/verify_host.py is the host verify leg; the close-out opens the PR. One story per run with a graceful stop after each; stories touching apps/supervisor take the per-file suites by hand until 33.4 lands.",
+  "target": {
+    "payload": {
+      "epic": 33
+    }
+  }
+}
