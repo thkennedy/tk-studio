@@ -1907,6 +1907,45 @@ class DriverContractTestCase(unittest.TestCase):
                                       "(Story 30.6, 0.1.25) |"))
         self.assertIn("carries `claim_refused` (0.1.28, Story 33.2", row)
 
+    # --- Story 33.3: the same 0.1.28 entry — the pin's single restart of a
+    # running, logged-out sandbox (`pin-restart`) and the supervisor's pin
+    # record the launch check reads (additive; no new refusal key, no new
+    # drift plane).
+
+    def test_0_1_28_story_33_3_pin_restart_and_the_pin_record(self):
+        flat = " ".join(self.text.split())
+        self.assertEqual(flat.count("**0.1.28 (Story 33.3, additive).**"), 1)
+        self.assertLess(flat.index("**0.1.28 (Story 33.2, additive).**"),
+                        flat.index("**0.1.28 (Story 33.3, additive).**"))
+        note = flat[flat.index("**0.1.28 (Story 33.3, additive).**"):]
+        note = note[:note.index("Every other field, kind and route is "
+                                "unchanged.")]
+        for phrase in ("read `sbx ls` before `sbx run -d --name <sandbox>`",
+                       "a failed `sbx ls` reads as not running",
+                       "`sbx exec <sandbox> env -u ANTHROPIC_API_KEY claude "
+                       "auth status --json`",
+                       "stops and starts the sandbox once (`sbx stop`, "
+                       "`sbx run -d --name`), probes again",
+                       "`pin-restart {sandbox, probe_before, probe_after, "
+                       "pass_at}`",
+                       "never stdout or a token",
+                       "this pass has not restarted that sandbox",
+                       "since its latest `claim-refusal-cleared`, else the "
+                       "run's start",
+                       "`running`, `paused` or `external`",
+                       "updates that event in place, never a second event",
+                       "the existing `max-login` refusal",
+                       "the same `pin-failed` episode",
+                       "`~/.tk-studio/sandboxes/<sandbox>.pin`",
+                       "`{sandbox, since, run_id, supervisor_pid}`",
+                       "removed when the release (`pin-released`) stopped "
+                       "the sandbox",
+                       "`warning: <sandbox> started outside the supervisor; "
+                       "the next pin restarts it`, never a gap",
+                       "No new `claim-refused` key, no new drift-check "
+                       "plane"):
+            self.assertIn(phrase, note)
+
     # --- AC 2: A7 dossier items covered or explicitly deferred with a seam
 
     def test_all_six_dossier_items_have_a_disposition(self):

@@ -8,8 +8,8 @@ import { basename, dirname, join } from "node:path";
 import { cancelRun, claimGate, detectExternal, pinBeforeClaim, driveResumes, ExternalRunRefused, finishRun, mirror, queueRecorder, recoverQueue, watchStarterLocks, type ResumedRun, type Started } from "../src/cli";
 import { checkoutKey, Queue, workerMayRun, type Owner, type Probes, type QueueRun, type StudioOps } from "../src/queue";
 import {
-  holdArgv, holdEngine, killEngine, killRunEngine, lookupEnginePid, pinSandbox, probeEngine, releasePin, respawnHolds, STARTER, STARTER_LOCK_REFRESH_MS, starterLockPath,
-  writeStarterLock, writeStarterLocks, type HoldChild, type SandboxDeps,
+  holdArgv, holdEngine, killEngine, killRunEngine, lookupEnginePid, pinRecordPath, pinSandbox, pinWithRestart, probeEngine, releasePin, respawnHolds, sandboxHolders,
+  STARTER, STARTER_LOCK_REFRESH_MS, starterLockPath, writeStarterLock, writeStarterLocks, type HoldChild, type SandboxDeps,
 } from "../src/sandbox";
 import { invokeSkill, MISSING_STATUS_BLOCK, runProcess, toVmPath, type RunResult, type Spawner } from "../src/server";
 import { shouldWake } from "../src/tick";
@@ -25,7 +25,8 @@ let sbx: ReturnType<typeof fakeSbx>;
 let deps: SandboxDeps;
 beforeAll(() => {
   sbx = fakeSbx();
-  deps = { env: { ...process.env, SBX_BIN: sbx.bin }, waitMs: 400, pollMs: 50 };
+  // Story 33.3: the pin record lands in a throwaway store, never the operator's.
+  deps = { env: { ...process.env, SBX_BIN: sbx.bin, TK_STUDIO_HOME: mkdtempSync(join(tmpdir(), "tk-sup-pin-home-")) }, waitMs: 400, pollMs: 50 };
 });
 afterAll(() => {
   // Every `sbx` call this suite made was argv only: no shell, no `-c` string (AC2).
@@ -118,7 +119,8 @@ describe("pin: `sbx run -d --name <sb>` before the preflight's `sbx exec`", () =
     const { out, calls } = await during(() => invokeSkill(mkdtempSync(join(tmpdir(), "tk-sup-pin-")), "tk-studio-activate", { tier: "sbx", sandbox: SB }, spawnerOf(spawned), {
       pin: async (sb) => { spawnedAtPin = spawned.length; return rec.pin!(sb); },
     }));
-    expect(calls).toEqual([["run", "-d", "--name", SB]]);
+    // Story 33.3: `sbx ls` first (the sandbox is not listed: no probe, no restart), then the pin.
+    expect(calls).toEqual([["ls"], ["run", "-d", "--name", SB]]);
     expect(spawnedAtPin).toBe(0); // nothing spawned before the pin
     expect(spawned[0]).toEqual(["exec", SB, "env", "-u", "ANTHROPIC_API_KEY", "claude", "auth", "status", "--json"]);
     expect(out).toMatchObject({ ran: true, status_block: BLOCK });
@@ -132,7 +134,7 @@ describe("pin: `sbx run -d --name <sb>` before the preflight's `sbx exec`", () =
     const spawned: string[][] = [];
     const gate = () => claimGate(q, run.run_id, { tier: "sbx", sandbox: SB }, { sbx: deps, spawner: spawnerOf(spawned), hygiene: { env: {} } });
     const { out, calls } = await during(gate);
-    expect(calls).toEqual([["run", "-d", "--name", SB]]);
+    expect(calls).toEqual([["ls"], ["run", "-d", "--name", SB]]);
     expect(spawned).toEqual([]); // no preflight after a failed pin
     expect(out?.reason).toStartWith(`sbx pin failed: sbx run -d --name ${SB} exited 1`);
     expect(out?.resolves).toContain(`sbx run -d --name ${SB}`);
@@ -218,6 +220,289 @@ describe("pin: `sbx run -d --name <sb>` before the preflight's `sbx exec`", () =
     expect(finish[finish.indexOf("--state") + 1]).toBe("blocked");
     expect(kinds(q, run.run_id)).toContain("pin-failed");
     expect(await pinSandbox(SB, deps)).toContain("sbx pin failed");
+  });
+});
+
+// ---------------------------------------------------------------- Story 33.3: the pin restarts a logged-out sandbox
+
+describe("Story 33.3: the pin restarts a running, logged-out sandbox once", () => {
+  const AUTH = ["exec", SB, "env", "-u", "ANTHROPIC_API_KEY", "claude", "auth", "status", "--json"];
+  const GAP = "harness auth: Max login missing or expired (not logged in)";
+  /** The preflight's spawner through the fake `sbx` (its `auth` answers), as production's `runProcess` on SBX_BIN. */
+  const viaSbx: Spawner = (_cmd, args, o) => runProcess(sbx.bin, args, { timeoutS: o.timeoutS });
+  const queuedOn = (q: Queue, job = "launch-27") =>
+    q.enqueue({ jobId: job, root: mkdtempSync(join(tmpdir(), "tk-sup-restart-")), projectId: "p27", definition: LAUNCH, tier: "sbx", sandbox: SB }).run;
+  const gateOf = (q: Queue, runId: string, restarted = new Set<string>()) =>
+    claimGate(q, runId, { tier: "sbx", sandbox: SB }, { sbx: deps, spawner: viaSbx, hygiene: { env: {} }, restarted });
+  const restarts = (q: Queue, runId: string) => q.events(runId).filter((e) => e.kind === "pin-restart");
+  const stops = (calls: string[][]) => calls.filter((c) => c[0] === "stop");
+
+  test("Restart heals: running before the pin, the probe logged out → `sbx stop`, `sbx run -d --name`, a second probe, then the preflight; one `pin-restart {probe_before: gap, probe_after: null}`; the claim may proceed", async () => {
+    sbx.answer({ ls: { [SB]: "running" }, auth: ["out", "in"] });
+    const q = newQueue();
+    const run = queuedOn(q);
+    const { out, calls } = await during(() => gateOf(q, run.run_id));
+    expect(out).toBeNull();
+    expect(calls).toEqual([["ls"], ["run", "-d", "--name", SB], AUTH, ["stop", SB], ["run", "-d", "--name", SB], AUTH, AUTH]);
+    const r = restarts(q, run.run_id);
+    expect(r).toHaveLength(1);
+    expect(r[0]!.detail).toMatchObject({ sandbox: SB, probe_before: GAP, probe_after: null });
+    expect(typeof r[0]!.detail!.pass_at).toBe("string");
+    expect(Object.keys(r[0]!.detail!).sort()).toEqual(["pass_at", "probe_after", "probe_before", "sandbox"]);
+    expect(kinds(q, run.run_id)).not.toContain("claim-refused");
+    expect(kinds(q, run.run_id).filter((k) => k === "pinned")).toHaveLength(1);
+  });
+
+  test("Still logged out after the restart: one `pin-restart` with both gaps, the claim refused through 33.2's `max-login` naming the renewal", async () => {
+    sbx.answer({ ls: { [SB]: "running" }, auth: ["out"] });
+    const q = newQueue();
+    const run = queuedOn(q);
+    const out = await gateOf(q, run.run_id);
+    expect(out).toEqual({ reason: GAP, resolves: `renew the sandbox's Max login: sbx run --name ${SB} → /login → /exit; the next drain pass claims the run` });
+    expect(restarts(q, run.run_id).map((e) => e.detail)).toEqual([expect.objectContaining({ probe_before: GAP, probe_after: GAP })]);
+    expect(q.events(run.run_id).find((e) => e.kind === "claim-refused")?.detail).toMatchObject({ key: "max-login" });
+    expect(q.get(run.run_id)?.state).toBe("queued");
+  });
+
+  test("Single restart per pass: two queued runs on one logged-out sandbox in one pass → `sbx stop` once; the second refuses `max-login` with no `pin-restart`", async () => {
+    sbx.answer({ ls: { [SB]: "running" }, auth: ["out"] });
+    const q = newQueue();
+    const a = queuedOn(q), b = queuedOn(q, "other-job");
+    const pass = new Set<string>();
+    const { calls } = await during(async () => {
+      expect((await gateOf(q, a.run_id, pass))?.reason).toBe(GAP);
+      expect((await gateOf(q, b.run_id, pass))?.reason).toBe(GAP);
+    });
+    expect(stops(calls)).toEqual([["stop", SB]]);
+    expect(restarts(q, a.run_id)).toHaveLength(1);
+    expect(restarts(q, b.run_id)).toHaveLength(0);
+    expect(q.events(b.run_id).find((e) => e.kind === "claim-refused")?.detail).toMatchObject({ key: "max-login" });
+  });
+
+  test("Same episode, a later pass: the run's open episode already carries a `pin-restart` → no second restart; a new episode (after `claim-refusal-cleared`) may restart again", async () => {
+    sbx.answer({ ls: { [SB]: "running" }, auth: ["out"] });
+    const q = newQueue();
+    const run = queuedOn(q);
+    const { calls } = await during(async () => {
+      await gateOf(q, run.run_id); // pass 1: restarts
+      await gateOf(q, run.run_id); // pass 2 (its own set): the episode guard holds
+    });
+    expect(stops(calls)).toHaveLength(1);
+    expect(restarts(q, run.run_id)).toHaveLength(1);
+    expect(q.events(run.run_id).filter((e) => e.kind === "claim-refused")).toHaveLength(1);
+    expect(q.clearClaimRefusals(run.run_id)).toBe(true); // the episode closes
+    const again = await during(() => gateOf(q, run.run_id));
+    expect(stops(again.calls)).toHaveLength(1);
+    expect(restarts(q, run.run_id)).toHaveLength(2);
+  });
+
+  test.each(["running", "paused", "external"])("Live holder: another run holds the sandbox `%s` → no restart, no event; the preflight refuses `max-login`", async (state) => {
+    sbx.answer({ ls: { [SB]: "running" }, auth: ["out"] });
+    const q = newQueue();
+    const holder = await sbxRun(q, { job: "holder-job" });
+    expect(holder.run.state).toBe("running");
+    if (state !== "running") q.db.run("UPDATE runs SET state = ? WHERE run_id = ?", [state, holder.run.run_id]);
+    expect(q.get(holder.run.run_id)!.state).toBe(state);
+    const run = queuedOn(q);
+    const { out, calls } = await during(() => gateOf(q, run.run_id));
+    expect(out?.reason).toBe(GAP);
+    expect(stops(calls)).toEqual([]);
+    expect(restarts(q, run.run_id)).toHaveLength(0);
+    expect(q.events(run.run_id).find((e) => e.kind === "claim-refused")?.detail).toMatchObject({ key: "max-login" });
+    expect(await sandboxHolders(q, SB, run.run_id, ["running", "paused", "external"])).toEqual([holder.run.run_id]);
+  });
+
+  test("Live engine: an ended run on the sandbox whose engine is alive after its kill → no restart, no event; the preflight refuses `max-login`", async () => {
+    sbx.answer({ ls: { [SB]: "running" }, auth: ["out"] });
+    const q = newQueue({ engineProbe: async () => ({ alive: true, start: "125610.0" }) });
+    const ended = await sbxRun(q, { job: "holder-job" });
+    q.note(ended.run.run_id, "engine-kill", { why: "test", sandbox: SB, worker: { pid: 6509, start: "125610.0", outcome: "engine alive after kill" } });
+    q.end(ended.run.run_id, "partial", "guard tripped");
+    expect(q.get(ended.run.run_id)!.state).toBe("partial");
+    const run = queuedOn(q);
+    const { out, calls } = await during(() => gateOf(q, run.run_id));
+    expect(out?.reason).toBe(GAP);
+    expect(stops(calls)).toEqual([]);
+    expect(restarts(q, run.run_id)).toHaveLength(0);
+    expect(q.events(run.run_id).find((e) => e.kind === "claim-refused")?.detail).toMatchObject({ key: "max-login" });
+    expect(await sandboxHolders(q, SB, run.run_id, ["running", "paused", "external"])).toEqual([ended.run.run_id]);
+  });
+
+  test("A queued holder does not block the restart (the gated run is queued too)", async () => {
+    sbx.answer({ ls: { [SB]: "running" }, auth: ["out", "in"] });
+    const q = newQueue();
+    queuedOn(q, "other-job");
+    const run = queuedOn(q);
+    expect(await gateOf(q, run.run_id)).toBeNull();
+    expect(restarts(q, run.run_id)).toHaveLength(1);
+  });
+
+  test("Stopped before the pin (listed stopped, not listed, `sbx ls` failing) → no probe, no restart, no event; pinned as today", async () => {
+    const listings: (Record<string, string> | "fail")[] = [{ [SB]: "stopped" }, { "claude-p-other": "running" }, "fail"];
+    for (const ls of listings) {
+      sbx.answer({ ls, auth: ["out"] });
+      const q = newQueue();
+      const run = queuedOn(q);
+      const spawned: string[][] = [];
+      const loggedIn: Spawner = async (_c, args) => { spawned.push(args); return { exit: 0, stderr: "", stdout: JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }) }; };
+      const { out, calls } = await during(() => claimGate(q, run.run_id, { tier: "sbx", sandbox: SB }, { sbx: deps, spawner: loggedIn, hygiene: { env: {} } }));
+      expect(out).toBeNull();
+      expect(calls).toEqual([["ls"], ["run", "-d", "--name", SB]]);
+      expect(spawned).toEqual([AUTH]); // the preflight's own probe only
+      expect(restarts(q, run.run_id)).toHaveLength(0);
+    }
+  });
+
+  test("Restart fails: `sbx stop` (or the start) exits non-zero → a pin failure in the pin's words, the same `pin-failed` episode and `pin-failed:<sb>` refusal", async () => {
+    sbx.answer({ ls: { [SB]: "running" }, auth: ["out"], stop: "fail" });
+    const q = newQueue();
+    const run = queuedOn(q);
+    const out = await gateOf(q, run.run_id);
+    expect(out?.reason).toStartWith(`sbx pin failed: sbx stop ${SB} exited 1`);
+    expect(q.events(run.run_id).filter((e) => e.kind === "pin-failed").map((e) => e.detail)).toEqual([{ sandbox: SB, error: out!.reason }]);
+    expect(q.events(run.run_id).find((e) => e.kind === "claim-refused")?.detail).toMatchObject({ key: `pin-failed:${SB}` });
+    expect(restarts(q, run.run_id)).toHaveLength(0);
+  });
+
+  test("Restart fails at the start: `sbx stop` succeeds, the restart's `sbx run -d --name` exits non-zero → a pin failure in the pin's words, the same `pin-failed` episode and `pin-failed:<sb>` refusal; the pin record is removed", async () => {
+    const path = pinRecordPath(SB, deps.env);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify({ sandbox: SB, since: new Date().toISOString(), run_id: "earlier-run", supervisor_pid: process.pid }));
+    sbx.answer({ ls: { [SB]: "running" }, auth: ["out"], pin: "fail-after-stop" });
+    const q = newQueue();
+    const run = queuedOn(q);
+    const { out, calls } = await during(() => gateOf(q, run.run_id));
+    expect(calls).toEqual([["ls"], ["run", "-d", "--name", SB], AUTH, ["stop", SB], ["run", "-d", "--name", SB]]);
+    expect(out?.reason).toStartWith(`sbx pin failed: sbx run -d --name ${SB} exited 1`);
+    expect(q.events(run.run_id).filter((e) => e.kind === "pin-failed").map((e) => e.detail)).toEqual([{ sandbox: SB, error: out!.reason }]);
+    expect(q.events(run.run_id).find((e) => e.kind === "claim-refused")?.detail).toMatchObject({ key: `pin-failed:${SB}` });
+    expect(restarts(q, run.run_id)).toHaveLength(0);
+    expect(existsSync(path)).toBe(false); // left stopped: no pin stands
+  });
+
+  test("Cold-pinned in this pass: two queued runs on a sandbox stopped before the first pin that comes up logged out → no `sbx stop`, no `pin-restart`; both refuse `max-login`", async () => {
+    sbx.answer({ ls: { [SB]: "stopped" }, auth: ["out"] });
+    const q = newQueue();
+    const a = queuedOn(q), b = queuedOn(q, "other-job");
+    const pass = new Set<string>();
+    const { calls } = await during(async () => {
+      expect((await gateOf(q, a.run_id, pass))?.reason).toBe(GAP);
+      expect((await gateOf(q, b.run_id, pass))?.reason).toBe(GAP);
+    });
+    expect(stops(calls)).toEqual([]);
+    expect(restarts(q, a.run_id)).toHaveLength(0);
+    expect(restarts(q, b.run_id)).toHaveLength(0);
+    for (const r of [a, b]) expect(q.events(r.run_id).find((e) => e.kind === "claim-refused")?.detail).toMatchObject({ key: "max-login" });
+  });
+
+  test("The drive's recorder (relaunch/resume) restarts through the same seam once per recorder; still logged out its preflight ends the run `blocked`", async () => {
+    sbx.answer({ ls: { [SB]: "running" }, auth: ["out"] });
+    const q = newQueue();
+    const { run, wt } = await sbxRun(q, { pinned: false });
+    const rec = queueRecorder(q, run.run_id, deps);
+    const s: Started = {
+      jobId: "launch-27", root: run.root, projectId: "p27", runId: "launch-27-20261016T101010Z", guardS: 600, jobGuardS: 600, defn: LAUNCH,
+      woke: { accepted: true, run_id: "launch-27-20261016T101010Z", state: "queued", directive: { kind: "invoke-skill", skill: "tk-studio-launch", payload: {} } },
+      tier: "sbx", sandbox: SB, workRoot: wt, recorder: rec,
+    };
+    const invoke: Parameters<typeof finishRun>[2] = (r, skill, args, _sp, o) => invokeSkill(r, skill, args, viaSbx, o);
+    const { out: summaries, calls } = await during(async () => [ // the relaunch, then the resume: one recorder
+      await finishRun(s, async () => ({ ok: true }), invoke),
+      await finishRun(s, async () => ({ ok: true }), invoke),
+    ]);
+    for (const summary of summaries) {
+      expect(summary.state).toBe("blocked");
+      expect(summary.reason).toBe(`auth preflight: ${GAP}`);
+    }
+    expect(stops(calls)).toHaveLength(1);
+    expect(restarts(q, run.run_id)).toHaveLength(1);
+    expect(kinds(q, run.run_id).filter((k) => k === "pinned")).toHaveLength(2); // the recorder's own rule: one per pin
+  });
+
+  test("One set per drain pass: a resume `driveResumes` drives restarts the logged-out sandbox and ends `blocked`; a drained run's gate on it in the same pass (the same set) → `sbx stop` once in total", async () => {
+    sbx.answer({ ls: { [SB]: "running" }, auth: ["out"] });
+    const q = newQueue();
+    const { run: resumedRun, wt } = await sbxRun(q, { pinned: false });
+    const s: Started = {
+      jobId: "launch-27", root: resumedRun.root, projectId: "p27", runId: "launch-27-20261016T101010Z", guardS: 600, jobGuardS: 600, defn: LAUNCH,
+      woke: { accepted: true, run_id: "launch-27-20261016T101010Z", state: "queued", directive: { kind: "invoke-skill", skill: "tk-studio-launch", payload: {} } },
+      tier: "sbx", sandbox: SB, workRoot: wt, recorder: queueRecorder(q, resumedRun.run_id, deps),
+    };
+    const resumed: ResumedRun[] = [{ run_id: resumedRun.run_id, studio_run_id: "launch-27-20261016T101010Z", resume: 1 }];
+    const invoke: Parameters<typeof finishRun>[2] = (r, skill, args, _sp, o) => invokeSkill(r, skill, args, viaSbx, o);
+    const drained = queuedOn(q, "other-job");
+    const pass = new Set<string>();
+    // `driveResumes` builds the resume's recorder with no sbx deps (the process env): point it at the fake and a
+    // throwaway store for this test only.
+    const prev = { bin: process.env.SBX_BIN, home: process.env.TK_STUDIO_HOME };
+    process.env.SBX_BIN = sbx.bin;
+    process.env.TK_STUDIO_HOME = deps.env!.TK_STUDIO_HOME;
+    let calls: string[][];
+    try {
+      ({ calls } = await during(async () => {
+        await driveResumes(q, resumed, new Map([[resumedRun.run_id, s]]), async () => ({ ok: true }), invoke, deps, pass);
+        expect((await gateOf(q, drained.run_id, pass))?.reason).toBe(GAP);
+      }));
+    } finally {
+      if (prev.bin === undefined) delete process.env.SBX_BIN; else process.env.SBX_BIN = prev.bin;
+      if (prev.home === undefined) delete process.env.TK_STUDIO_HOME; else process.env.TK_STUDIO_HOME = prev.home;
+    }
+    expect(pass.has(SB)).toBe(true);
+    expect(q.get(resumedRun.run_id)!.state).toBe("blocked");
+    expect(stops(calls)).toEqual([["stop", SB]]);
+    expect(restarts(q, resumedRun.run_id)).toHaveLength(1);
+    expect(restarts(q, drained.run_id)).toHaveLength(0);
+    expect(q.events(drained.run_id).find((e) => e.kind === "claim-refused")?.detail).toMatchObject({ key: "max-login" });
+  });
+
+  test("Without the pass's set (each resume's recorder its own, as outside a drain): the same resume and gate each restart — the case the shared set closes", async () => {
+    sbx.answer({ ls: { [SB]: "running" }, auth: ["out"] });
+    const q = newQueue();
+    const { run: resumedRun } = await sbxRun(q, { pinned: false });
+    expect(await queueRecorder(q, resumedRun.run_id, deps).pin!(SB)).toBeNull(); // its own set
+    q.end(resumedRun.run_id, "blocked", "auth preflight: still logged out");
+    const drained = queuedOn(q, "other-job");
+    const { calls } = await during(() => gateOf(q, drained.run_id));
+    expect(stops(calls)).toEqual([["stop", SB]]);
+    expect(restarts(q, resumedRun.run_id)).toHaveLength(1);
+    expect(restarts(q, drained.run_id)).toHaveLength(1);
+  });
+
+  test("Pin record: written on a pin (`{sandbox, since, run_id, supervisor_pid}`), rewritten after a restart, removed when the release stopped the sandbox", async () => {
+    const path = pinRecordPath(SB, deps.env);
+    rmSync(path, { force: true });
+    sbx.answer({});
+    const q = newQueue();
+    const { run } = await sbxRun(q, { pinned: false });
+    expect(await queueRecorder(q, run.run_id, deps).pin!(SB)).toBeNull();
+    const rec = JSON.parse(readFileSync(path, "utf-8"));
+    expect(rec).toMatchObject({ sandbox: SB, run_id: run.run_id, supervisor_pid: process.pid });
+    expect(Object.keys(rec).sort()).toEqual(["run_id", "sandbox", "since", "supervisor_pid"]);
+    // After a restart (another run, its own gate) the record names that run.
+    rmSync(path, { force: true });
+    sbx.answer({ ls: { [SB]: "running" }, auth: ["out", "in"] });
+    const q2 = newQueue();
+    const queued = queuedOn(q2);
+    expect(await pinWithRestart(q2, queued.run_id, SB, deps)).toBeNull();
+    expect(restarts(q2, queued.run_id)).toHaveLength(1);
+    expect(JSON.parse(readFileSync(path, "utf-8"))).toMatchObject({ sandbox: SB, run_id: queued.run_id });
+    // The release stops the sandbox: the record goes with it.
+    sbx.answer({});
+    q.end(run.run_id, "complete", null);
+    expect(await releasePin(q, run.run_id, deps)).toBe("released");
+    expect(existsSync(path)).toBe(false);
+  });
+
+  test("Pin record: a failed release (`sbx stop` exits non-zero) keeps it", async () => {
+    const path = pinRecordPath(SB, deps.env);
+    sbx.answer({});
+    const q = newQueue();
+    const { run } = await sbxRun(q, { pinned: false });
+    expect(await queueRecorder(q, run.run_id, deps).pin!(SB)).toBeNull();
+    sbx.answer({ stop: "fail" });
+    q.end(run.run_id, "complete", null);
+    expect(await releasePin(q, run.run_id, deps)).toBe("failed");
+    expect(existsSync(path)).toBe(true);
   });
 });
 

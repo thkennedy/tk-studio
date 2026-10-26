@@ -423,3 +423,27 @@ location: tools/installer/cli/tk_studio_cli/doctor.py (check_supervisor_log, _la
 severity: medium
 reason: The tee writes `stopped (exit <code>)` around every tick and drain step (src/log.ts), about every 60 s; `_last_end` in doctor.py takes the last line starting with `stopped`/`uncaught`, whatever the tag or code. AC2 names that literal line, so the code meets the criterion; ranking process-level ends (keeper/pacer/serve, or non-zero exits) first needs a planner ruling. The same noise shortens the 20-line /status tail. Meets deferral (a): a defect in behaviour the story's criteria name.
 status: open
+
+### DW-56: The pin-restart episode is bounded only by claim-refusal-cleared or run start, so a run whose restart healed at its claim cannot be restarted at a later relaunch or resume.
+origin: spec-deferred ea7728db7fd4
+source_spec: `33-3-the-pin-restarts-a-logged-out-sandbox-spec.md`
+location: apps/supervisor/src/sandbox.ts openPinRestart
+severity: medium
+reason: clearClaimRefusals writes claim-refusal-cleared only when refusals were open (queue.ts:2202-2211); openPinRestart then still finds the old pin-restart; the run ends blocked naming the renewal (fail-safe). Consult ruling B, deferral criterion (a).
+status: open
+
+### DW-57: The launch check treats any .pin file as pinned by the supervisor, so a record left by a manual sbx stop, reboot or kept release hides AC2's started-outside warning.
+origin: spec-deferred 9c932b6c59fb
+source_spec: `33-3-the-pin-restarts-a-logged-out-sandbox-spec.md`
+location: plugins/tk-studio/lib/launch.py engine_sandbox_row
+severity: low
+reason: The record is removed only when pin-released stopped the sandbox (Settled shape 3); engine_sandbox_row reads presence only. Proposed: treat a .pin whose supervisor_pid is dead or whose since predates the sandbox start as absent. Consult ruling D, deferral criterion (a).
+status: open
+
+### DW-58: Several queued runs on one sandbox that stays logged out (a token no restart heals) restart it once per run, one per drain pass, because guard (d) reads only the gated run's own episode.
+origin: spec-deferred c443898760e1
+source_spec: `33-3-the-pin-restarts-a-logged-out-sandbox-spec.md`
+location: apps/supervisor/src/sandbox.ts openPinRestart / pinWithRestart
+severity: medium
+reason: openPinRestart reads queue.events(runId) only and the per-pass set is fresh each pass: runs A, B, C queued on S give a stop/start in pass 1 (A), pass 2 (B) and pass 3 (C), each able to cut off an operator's interactive `/login` renewal. Spec-conformant (Settled shape 2 guards (c)/(d) verbatim), so not a patch; deferral criterion (a), AC1's "stops and starts the sandbox once". Proposed: bound guard (d) per sandbox across the queue (any run's open pin-restart on S since S's last healed probe).
+status: open

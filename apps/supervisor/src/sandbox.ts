@@ -23,6 +23,12 @@
  *             ending run's own, or one an ended run left `pin-kept`), and only when no other
  *             queued/running/paused/external run — nor an ended run whose engine is alive after its kill —
  *             records the same sandbox (else `pin-kept`).
+ *   restart   Story 33.3: `pinWithRestart`, the one seam both pin sites call. A sandbox `sbx ls` listed as
+ *             running before the pin whose login probe says not logged in is stopped and started once
+ *             (`sbx stop`, `sbx run -d --name`), probed again and recorded `pin-restart`; the caller's
+ *             preflight then judges. The pin record `<studioHome>/sandboxes/<sb>.pin` is written on every
+ *             pin and removed when the release stopped the sandbox (the launch check's "started outside
+ *             the supervisor" warning reads its absence).
  *   starter   `<studioHome>/projects/<project key>/starter.lock`: JSON naming the queue as the only
  *             starter of runs on the checkout, written atomically per tick and per claim; never in the
  *             checkout's tree. Story 28.6: `serve` also rewrites every served project's lock each
@@ -33,13 +39,13 @@
  *
  * Every `sbx` call is argv only — never `bash`, `sh` or a `-c` string, never a pattern kill.
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { sbxBin, studioHome } from "./env";
 import {
   checkoutKey, isTerminal, parseStatGroup, probeRecordedWorker, processStartTime, servedRoot, type Queue, type QueueRun, type WorkerKill,
 } from "./queue";
-import { readProjectConfig, runProcess, toVmPath, type RunResult } from "./server";
+import { maxLoginPreflight, readProjectConfig, runProcess, toVmPath, type RunResult, type Spawner } from "./server";
 
 type Env = Record<string, string | undefined>;
 
@@ -83,6 +89,8 @@ const listHost = (deps: SandboxDeps, path: string): string[] => {
 
 export const pinArgv = (sb: string): string[] => ["run", "-d", "--name", sb];
 export const releaseArgv = (sb: string): string[] => ["stop", sb];
+/** Story 33.3: the sandbox listing read before the pin (is the sandbox already running?). */
+export const lsArgv = (): string[] => ["ls"];
 export const holdArgv = (sb: string, pid: number): string[] => ["exec", sb, "tail", `--pid=${pid}`, "-f", "/dev/null"];
 export const statArgv = (sb: string, pid: number): string[] => ["exec", sb, "cat", `/proc/${pid}/stat`];
 export const killArgv = (sb: string, pid: number, sig: "TERM" | "KILL"): string[] => ["exec", sb, "kill", `-${sig}`, "--", `-${pid}`];
@@ -141,6 +149,21 @@ export const SANDBOX_HOLDING_STATES = ["queued", "running", "paused", "external"
  * queued/running/paused/external run records the same sandbox, nor while an ended run's engine (this one's
  * included) is still alive after its kill (DW-3) — else a `pin-kept` event naming them. Never throws;
  * answers what it did. */
+/** The runs that hold sandbox `sb` besides `runId`: every other run recording it in one of `states`, plus every ended
+ * run recording it whose engine is still alive after its kill (`runId`'s own included — DW-3). Story 33.3: extracted
+ * from `releasePin` (its rule unchanged) so the pin's restart refuses to stop a sandbox a live run holds. */
+export async function sandboxHolders(
+  queue: Queue, sb: string, runId: string, states: readonly string[] = SANDBOX_HOLDING_STATES,
+): Promise<string[]> {
+  const sameSandbox = queue.runs().filter((r) => r.sandbox === sb);
+  const holders = sameSandbox.filter((r) => r.run_id !== runId && states.includes(r.state)).map((r) => r.run_id);
+  // An ended run whose kill left its engine alive still holds the sandbox while that pid runs.
+  for (const r of sameSandbox.filter((x) => isTerminal(x.state))) {
+    if (await queue.engineAliveAfterKill(r)) holders.push(r.run_id);
+  }
+  return holders;
+}
+
 export async function releasePin(queue: Queue, runId: string, deps: SandboxDeps = {}): Promise<"released" | "kept" | "failed" | "none"> {
   try {
     const run = queue.get(runId);
@@ -150,12 +173,7 @@ export async function releasePin(queue: Queue, runId: string, deps: SandboxDeps 
     if (!isTerminal(run.state)) return "none";
     const sb = run.sandbox;
     if (!queue.pinOutstanding(sb)) return "none";
-    const sameSandbox = queue.runs().filter((r) => r.sandbox === sb);
-    const holders = sameSandbox.filter((r) => r.run_id !== runId && (SANDBOX_HOLDING_STATES as readonly string[]).includes(r.state)).map((r) => r.run_id);
-    // An ended run whose kill left its engine alive still holds the sandbox while that pid runs.
-    for (const r of sameSandbox.filter((x) => isTerminal(x.state))) {
-      if (await queue.engineAliveAfterKill(r)) holders.push(r.run_id);
-    }
+    const holders = await sandboxHolders(queue, sb, runId);
     if (holders.length) {
       // Named once per run (a later release of the same run finds it kept already).
       const own = queue.events(runId).filter((e) => e.kind === "pin-kept" || e.kind === "pin-released");
@@ -168,8 +186,139 @@ export async function releasePin(queue: Queue, runId: string, deps: SandboxDeps 
       stop = r.exit === 0 ? { ok: true } : { ok: false, exit: r.exit, detail: clip(r.stderr || r.stdout) };
     } catch (e) { stop = { ok: false, detail: clip(message(e)) }; }
     queue.note(runId, "pin-released", { sandbox: sb, stop });
+    // Story 33.3: the sandbox is stopped — the supervisor's pin record goes with it.
+    if (stop.ok) removePinRecord(sb, deps.env ?? process.env);
     return stop.ok ? "released" : "failed";
   } catch { return "failed"; }
+}
+
+// ------------------------------------------------------------ Story 33.3: the pin restarts a logged-out sandbox
+
+/** The `sbx ls` rule (`sandbox_login._listed` plus its status test): a row whose first column (SANDBOX) is `sb` exactly
+ * and whose columns carry `running`. */
+export function listedRunning(lsOutput: string, sb: string): boolean {
+  for (const line of (lsOutput ?? "").split(/\r?\n/)) {
+    const cols = line.trim().split(/\s+/);
+    if (cols[0] === sb) return cols.some((c) => c.toLowerCase() === "running");
+  }
+  return false;
+}
+
+/** Is `sb` running per `sbx ls`? A failed listing counts as not running. Never throws. */
+export async function sandboxRunning(sb: string, deps: SandboxDeps = {}): Promise<boolean> {
+  try {
+    const r = await call(deps, lsArgv(), 60);
+    return r.exit === 0 && listedRunning(r.stdout, sb);
+  } catch { return false; }
+}
+
+/** One restart step (`sbx stop` or `sbx run -d --name`): null when it succeeded, else a pin failure in
+ * `pinSandbox`'s words (`sbx pin failed: sbx <argv> exited <n>: …`). Never throws. */
+async function restartStep(argv: string[], deps: SandboxDeps): Promise<string | null> {
+  try {
+    const r = await call(deps, argv, 120);
+    return r.exit === 0 ? null : `sbx pin failed: sbx ${argv.join(" ")} exited ${r.exit}: ${clip(r.stderr || r.stdout)}`;
+  } catch (e) { return `sbx pin failed: sbx ${argv.join(" ")}: ${clip(message(e))}`; }
+}
+
+/** The login probe's default spawner: the `sbx` the deps name (the same bin and runner as the pin). */
+const probeSpawner = (deps: SandboxDeps): Spawner => (_cmd, args, o) =>
+  deps.run ? deps.run(bin(deps), args, { timeoutS: o.timeoutS }) : runProcess(bin(deps), args, { timeoutS: o.timeoutS, env: o.env });
+
+/** The states in which another run's hold on the sandbox forbids the restart (a queued run does not: the run being
+ * gated is queued too). */
+export const RESTART_BLOCKING_STATES = ["running", "paused", "external"] as const;
+
+export const PIN_RESTART = "pin-restart";
+
+/** The seq of `runId`'s `pin-restart` for `sb` in its open episode (since its latest `claim-refusal-cleared`, else the
+ * run's start), else null. */
+export function openPinRestart(queue: Queue, runId: string, sb: string): number | null {
+  const events = queue.events(runId);
+  const cleared = events.findLastIndex((e) => e.kind === "claim-refusal-cleared");
+  const hit = events.slice(cleared + 1).findLast((e) => e.kind === PIN_RESTART && e.detail?.sandbox === sb);
+  return hit ? hit.seq : null;
+}
+
+export interface PinContext {
+  /** The sandboxes restarted in this pass (`drainQueue`'s, shared by the pass's resumes and drained runs; else one per
+   * recorder for a drive outside a drain pass). */
+  restarted?: Set<string>;
+  /** The login probe's spawner (default: the deps' `sbx`). */
+  spawner?: Spawner;
+  /** The pin record's clock (default now). */
+  now?: () => Date;
+}
+
+/** Story 33.3: the pin both sites call in place of the bare `pinSandbox`. `sbx ls` first (was `sb` running before this
+ * pin?), then `sbx run -d --name <sb>`. Only when it was running: probe the login (`maxLoginPreflight`, the
+ * preflight's own argv) and, when it says not logged in and (c) this pass has not restarted `sb`, (d) `runId`'s open
+ * episode carries no `pin-restart` for it and (e) no other run holds it running/paused/external nor an ended run's
+ * engine is alive there, stop and start it once, probe again and record `pin-restart {sandbox, probe_before,
+ * probe_after, pass_at}` (a repeat in the episode patches it in place). A failed stop or start is the pin's failure.
+ * The pin record is written once pinned. Null when pinned, else the failure; the caller records `pinned`/`pin-failed`
+ * and its preflight judges the login. Never throws. */
+export async function pinWithRestart(queue: Queue, runId: string, sb: string, deps: SandboxDeps = {}, ctx: PinContext = {}): Promise<string | null> {
+  const env = deps.env ?? process.env;
+  const running = await sandboxRunning(sb, deps);
+  const failed = await pinSandbox(sb, deps);
+  if (failed) return failed;
+  try {
+    if (!running) ctx.restarted?.add(sb); // cold-pinned in this pass: a later run in the pass does not restart it
+    else {
+      const spawner = ctx.spawner ?? probeSpawner(deps);
+      const probeBefore = await maxLoginPreflight(spawner, { tier: "sbx", sandbox: sb });
+      const restarted = ctx.restarted ?? new Set<string>();
+      if (probeBefore && !restarted.has(sb) && openPinRestart(queue, runId, sb) === null
+        && !(await sandboxHolders(queue, sb, runId, RESTART_BLOCKING_STATES)).length) {
+        restarted.add(sb);
+        const stopFailed = await restartStep(releaseArgv(sb), deps);
+        if (stopFailed) return stopFailed;
+        const startFailed = await restartStep(pinArgv(sb), deps);
+        if (startFailed) { removePinRecord(sb, env); return startFailed; } // stopped and not restarted: no pin stands
+        const probeAfter = await maxLoginPreflight(spawner, { tier: "sbx", sandbox: sb });
+        const detail = { sandbox: sb, probe_before: probeBefore, probe_after: probeAfter, pass_at: new Date().toISOString() };
+        try {
+          const seq = openPinRestart(queue, runId, sb);
+          if (seq !== null) queue.patchEventDetail(seq, detail);
+          else queue.note(runId, PIN_RESTART, detail);
+        } catch { /* the run ended meanwhile: the restart stands */ }
+      }
+    }
+  } catch { /* a probe or holder lookup that throws leaves the pin as it is: the preflight judges */ }
+  writePinRecord(sb, runId, env, ctx.now);
+  return null;
+}
+
+// ------------------------------------------------------------ Story 33.3: the supervisor's pin record
+
+/** `<studioHome>/sandboxes/<safe sandbox>.pin`. */
+export const pinRecordPath = (sb: string, env: Env = process.env): string => join(studioHome(env), "sandboxes", `${safeName(sb)}.pin`);
+
+/** Under `bun test` (the preload's marker) with no TK_STUDIO_HOME, the record would land in the operator's real store:
+ * it is not written there (tests set TK_STUDIO_HOME). */
+const storeUnsafe = (env: Env): boolean => env.TK_SUPERVISOR_UNDER_TEST === "1" && !env.TK_STUDIO_HOME?.trim();
+
+/** Write the pin record `{sandbox, since, run_id, supervisor_pid}` atomically (a temp file renamed over it). Never
+ * throws: answers the path written, or the error. */
+export function writePinRecord(sb: string, runId: string, env: Env = process.env, now: () => Date = () => new Date()): { path: string } | { error: string } {
+  try {
+    if (storeUnsafe(env)) return { error: "TK_STUDIO_HOME is not set under bun test — the pin record is not written" };
+    const path = pinRecordPath(sb, env);
+    mkdirSync(dirname(path), { recursive: true });
+    const tmp = `${path}.${process.pid}.tmp`;
+    writeFileSync(tmp, `${JSON.stringify({ sandbox: sb, since: now().toISOString(), run_id: runId, supervisor_pid: process.pid }, null, 2)}\n`, "utf-8");
+    renameSync(tmp, path);
+    return { path };
+  } catch (e) { return { error: clip(message(e)) }; }
+}
+
+/** Remove the pin record (the sandbox was stopped). Never throws. */
+export function removePinRecord(sb: string, env: Env = process.env): void {
+  try {
+    if (storeUnsafe(env)) return;
+    rmSync(pinRecordPath(sb, env), { force: true });
+  } catch { /* advisory: the launch check reads it as pinned until the next pin rewrites it */ }
 }
 
 // ------------------------------------------------------------ the engine pid

@@ -129,6 +129,11 @@
     33-2 the drained pin is `pinBeforeClaim` (apps/supervisor/src/cli.ts:1277), and 33-3
     reshapes it, so coordinate. If the plan does not include them, record them as
     DRIFT/deferred, never silently.
+    Plan (gate, 2026-10-26): plans/33-4.md settles the e2e file (command-line.test.ts),
+    the `.verify-tmp/` folder, the gate lines, `tmp.ts` and the doctor check
+    `supervisor-temp`, and records the inode warning and the /tmp prune as deferred work.
+    The band is oversize (about 45 files, mostly a mechanical swap): do not split, and halt
+    if the Files list grows beyond the plan's.
 
 - id: "33-5-the-roster-gate-inside-the-engine-tracked"
   title: "The Roster Gate Inside the Engine, Tracked"

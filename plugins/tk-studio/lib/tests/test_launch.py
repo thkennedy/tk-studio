@@ -135,17 +135,51 @@ class _FakeSubstrate:
         return 4242
 
 
+def _absent_sbx(args, timeout=None):
+    raise FileNotFoundError(args[0])
+
+
+class _FakeSbx:
+    """Scripted sbx for the engine-sandbox row: `daemon status` and `ls`
+    (the `SANDBOX AGENT STATUS` header and the rows); records every argv."""
+
+    def __init__(self, rows=None, *, daemon_rc=0, ls_rc=0):
+        self.rows = rows or {}
+        self.daemon_rc = daemon_rc
+        self.ls_rc = ls_rc
+        self.calls: list[list[str]] = []
+
+    def __call__(self, args, timeout=None):
+        import subprocess
+        self.calls.append(list(args))
+        if args[1:] == ["daemon", "status"]:
+            return subprocess.CompletedProcess(args, self.daemon_rc, "running" if not self.daemon_rc else "", "")
+        if args[1:] == ["ls"]:
+            out = "SANDBOX   AGENT   STATUS\n" + "".join(
+                f"{sb}   claude   {status}\n" for sb, status in self.rows.items())
+            return subprocess.CompletedProcess(args, self.ls_rc, out if not self.ls_rc else "", "")
+        return subprocess.CompletedProcess(args, 2, "", "unsupported")
+
+
 class LaunchTestCase(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
         self._old_home = os.environ.get("TK_STUDIO_HOME")
         os.environ["TK_STUDIO_HOME"] = str(self.tmp / "store")
-        self._orig = (launch.run_cli, launch.spawn_detached, launch._bmad_loop_binary)
+        self._orig = (launch.run_cli, launch.spawn_detached, launch._bmad_loop_binary,
+                      launch.run_sbx)
         launch._bmad_loop_binary = lambda: "bmad-loop"
+        # Story 33.3: never a live sbx — no config named, and sbx absent
+        self._old_config = os.environ.pop("TK_SUPERVISOR_CONFIG", None)
+        launch.run_sbx = _absent_sbx
 
     def tearDown(self):
-        launch.run_cli, launch.spawn_detached, launch._bmad_loop_binary = self._orig
+        (launch.run_cli, launch.spawn_detached, launch._bmad_loop_binary,
+         launch.run_sbx) = self._orig
+        os.environ.pop("TK_SUPERVISOR_CONFIG", None)
+        if self._old_config is not None:
+            os.environ["TK_SUPERVISOR_CONFIG"] = self._old_config
         if self._old_home is None:
             os.environ.pop("TK_STUDIO_HOME", None)
         else:
@@ -698,6 +732,71 @@ class LaunchTestCase(unittest.TestCase):
         self._cli(["start", "--directory", str(root), "--spec", spec, "--wait", "2",
                    "--allow-budget-mismatch"])
         self.assertEqual(_sha(policy), before)
+
+
+    # ---- the engine sandbox row (Story 33.3)
+
+    def _engine_row(self, sbx, config: str | None = 'jobs:\n  "p/run-epic":\n    tier: sbx\n    sandbox: claude-p\n'):
+        base = Path(tempfile.mkdtemp(dir=self.tmp))  # one project per call
+        os.environ.pop("TK_SUPERVISOR_CONFIG", None)
+        if config is not None:
+            path = base / "supervisor.yaml"
+            path.write_text(config, encoding="utf-8")
+            os.environ["TK_SUPERVISOR_CONFIG"] = str(path)
+        if sbx is not None:
+            launch.run_sbx = sbx
+        root, spec = _project(base)
+        self._wire(_FakeSubstrate())
+        result = launch.check(root, spec)
+        names = [c["check"] for c in result["checks"]]
+        row = next(c for c in result["checks"] if c["check"] == "engine sandbox")
+        self.assertEqual(names.index("engine sandbox"), names.index("studio-pipeline plugin") + 1)
+        self.assertTrue(row["ok"])
+        self.assertTrue(result["ok"], result["gaps"])
+        self.assertFalse(any("engine sandbox" in g for g in result["gaps"]))
+        return row, result
+
+    def test_engine_sandbox_running_without_a_pin_record_is_a_warning_never_a_gap(self):
+        sbx = _FakeSbx({"claude-p": "running"})
+        row, result = self._engine_row(sbx)
+        self.assertEqual(row["detail"],
+                         "warning: claude-p started outside the supervisor; the next pin restarts it")
+        self.assertEqual(result["gaps"], [])
+        self.assertEqual(sbx.calls, [["sbx", "daemon", "status"], ["sbx", "ls"]])
+
+    def test_engine_sandbox_with_the_supervisors_pin_record_reads_pinned(self):
+        record = Path(os.environ["TK_STUDIO_HOME"]) / "sandboxes" / "claude-p.pin"
+        record.parent.mkdir(parents=True)
+        record.write_text(json.dumps({"sandbox": "claude-p", "since": "2026-10-26T00:00:00Z",
+                                      "run_id": "q-1", "supervisor_pid": 1}), encoding="utf-8")
+        self.assertEqual(launch.pin_record_path("claude-p"), record)
+        row, _ = self._engine_row(_FakeSbx({"claude-p": "running"}))
+        self.assertEqual(row["detail"], "pinned by the supervisor")
+
+    def test_engine_sandbox_not_running_stopped_unlisted_or_ls_failing(self):
+        for sbx in (_FakeSbx({"claude-p": "stopped"}), _FakeSbx({"claude-p-two": "running"}),
+                    _FakeSbx({"claude-p": "running"}, ls_rc=1)):
+            with self.subTest(rows=sbx.rows, ls_rc=sbx.ls_rc):
+                row, _ = self._engine_row(sbx)
+                self.assertEqual(row["detail"], "not running")
+
+    def test_engine_sandbox_none_configured_absent_sbx_or_daemon_down(self):
+        row, _ = self._engine_row(None, config=None)
+        self.assertEqual(row["detail"], "no engine sandbox configured")
+        row, _ = self._engine_row(_absent_sbx)
+        self.assertEqual(row["detail"], "sbx absent")
+        down = _FakeSbx({"claude-p": "running"}, daemon_rc=1)
+        row, _ = self._engine_row(down)
+        self.assertEqual(row["detail"], "daemon down")
+        self.assertEqual(down.calls, [["sbx", "daemon", "status"]])  # no sbx ls after a down daemon
+
+    def test_engine_sandbox_several_sandboxes_are_named_each(self):
+        config = ('jobs:\n  "p/a":\n    sandbox: claude-p\n'
+                  '  "p/b":\n    sandbox: claude-q\n')
+        row, _ = self._engine_row(_FakeSbx({"claude-p": "running", "claude-q": "stopped"}), config=config)
+        self.assertEqual(row["detail"],
+                         "warning: claude-p started outside the supervisor; the next pin restarts it; "
+                         "claude-q: not running")
 
 
 if __name__ == "__main__":

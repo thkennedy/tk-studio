@@ -240,21 +240,30 @@ console.error("fake gh: unsupported " + argv.join(" ")); process.exit(2);
  * signal to its process group ends it (`never`: it survives TERM and KILL). */
 export type FakeProc = { start: string; state?: string; dies_on?: "TERM" | "KILL" | "never" };
 type SbxAnswers = {
-  pin?: "ok" | "fail"; stop?: "ok" | "fail"; procs?: Record<string, FakeProc>; pgrep?: string[]; sessions?: string[];
+  pin?: "ok" | "fail" | "fail-after-stop"; stop?: "ok" | "fail"; procs?: Record<string, FakeProc>; pgrep?: string[]; sessions?: string[];
   /** Story 27.3: the VM home (`printenv HOME`), the in-VM `bmad-loop archive|resolve` answers, and the
    * `engine.pid` line a resolve writes (none: not rewritten). */
   home?: string; archive?: "ok" | "fail"; resolve?: "ok" | "fail"; resume_pid?: string | null;
   /** Hole 38: what the in-VM `uv run …/launch.py status` prints (a JSON object), or `"fail"` (exit 2, no JSON). */
   launch_status?: Record<string, unknown> | "fail";
+  /** Story 33.3: the `sbx ls` rows, sandbox → status (`running`/`stopped`; none: the header alone), or `"fail"` (exit 1).
+   * `stop <sb>` makes a listed sandbox `stopped` and a successful `run -d --name <sb>` makes it `running`. */
+  ls?: Record<string, string> | "fail";
+  /** Story 33.3: the answers to `exec <sb> env -u ANTHROPIC_API_KEY claude auth status --json`, consumed one per call;
+   * the last one stays (`in`: logged in with claude.ai, `out`: loggedIn false). */
+  auth?: ("in" | "out")[];
 };
 
 /** The fake `sbx` (SBX_BIN): records `{argv}` per call to its log and answers from a JSON file (rewritable
- * between calls; a kill rewrites it): `run -d --name <sb>` → the pin (`pin: fail` exits 1); `stop <sb>` → the
+ * between calls; a kill rewrites it): `run -d --name <sb>` → the pin (`pin: fail` exits 1; `pin: fail-after-stop` exits 1
+ * only once a `stop` succeeded); `stop <sb>` → the
  * release; `exec <sb> cat /proc/<pid>/stat` → a stat line for a known process (field 22 its start), else
  * "No such file or directory"; `exec <sb> kill -<SIG> -- -<pid>` → ends the process when `dies_on` says so;
  * `exec <sb> pgrep -a -f …` → the `pgrep` lines (none: exit 1); `exec <sb> tail --pid=<pid> -f /dev/null` →
  * exits at once; `exec <sb> tmux kill-session -t =<name>` → ends a session `sessions` names, else "can't find
- * session" (exit 1); `exec <sb> printenv HOME` → `home`; `exec <sb> <home>/.local/bin/bmad-loop archive --project <p>
+ * session" (exit 1); `exec <sb> printenv HOME` → `home`;
+ * Story 33.3: `ls` → the `SANDBOX AGENT STATUS` header and the `ls` rows; `exec <sb> env -u ANTHROPIC_API_KEY claude auth
+ * status --json` → the next `auth` answer; `exec <sb> <home>/.local/bin/bmad-loop archive --project <p>
  * <id>` → moves `<p>/.bmad-loop/runs/<id>` to `<p>/.bmad-loop/archive/<id>` (`archive: fail` exits 1);
  * `exec <sb> <home>/.local/bin/bmad-loop resolve --project <p> --no-interactive --resume [--restore-patch <x>] <id>`
  * → writes `resume_pid` to the run's `engine.pid` when given (`resolve: fail` exits 1). A VM path `/<d>/…` is
@@ -265,7 +274,7 @@ export function fakeSbx(dir: string = mkdtempSync(join(tmpdir(), "tk-sup-sbx-"))
   const log = join(dir, "sbx-calls.jsonl"), answers = join(dir, "sbx-answers.json");
   const set = (a: SbxAnswers) => writeFileSync(answers, JSON.stringify({
     pin: "ok", stop: "ok", procs: {}, pgrep: [], sessions: [], home: "/home/agent", archive: "ok", resolve: "ok", resume_pid: null,
-    launch_status: { ok: true, runs: [], live: [] }, ...a,
+    launch_status: { ok: true, runs: [], live: [] }, ls: {}, auth: ["in"], ...a,
   }));
   set({});
   const bin = fakeBin(join(dir, "sbx.js"), `const fs = require("node:fs");
@@ -274,12 +283,29 @@ fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ argv }) + "\\n");
 const file = ${JSON.stringify(answers)};
 const a = JSON.parse(fs.readFileSync(file, "utf-8"));
 if (argv[0] === "run" && argv[1] === "-d" && argv[2] === "--name" && argv[3]) {
-  if (a.pin === "fail") { console.error("fake sbx: sandbox " + argv[3] + " could not start"); process.exit(1); }
+  if (a.pin === "fail" || (a.pin === "fail-after-stop" && a.stopped)) { console.error("fake sbx: sandbox " + argv[3] + " could not start"); process.exit(1); }
+  if (a.ls !== "fail" && a.ls[argv[3]] !== undefined) { a.ls[argv[3]] = "running"; fs.writeFileSync(file, JSON.stringify(a)); }
   process.exit(0);
 }
-if (argv[0] === "stop" && argv[1]) process.exit(a.stop === "fail" ? 1 : 0);
+if (argv[0] === "stop" && argv[1]) {
+  if (a.stop === "fail") { console.error("fake sbx: sandbox " + argv[1] + " could not stop"); process.exit(1); }
+  if (a.ls !== "fail" && a.ls[argv[1]] !== undefined) { a.ls[argv[1]] = "stopped"; fs.writeFileSync(file, JSON.stringify(a)); }
+  if (a.pin === "fail-after-stop") { a.stopped = true; fs.writeFileSync(file, JSON.stringify(a)); }
+  process.exit(0);
+}
+if (argv[0] === "ls" && argv.length === 1) {
+  if (a.ls === "fail") { console.error("fake sbx: daemon not running"); process.exit(1); }
+  console.log("SANDBOX   AGENT   STATUS");
+  for (const [sb, status] of Object.entries(a.ls)) console.log(sb + "   claude   " + status);
+  process.exit(0);
+}
 if (argv[0] !== "exec" || !argv[1]) { console.error("fake sbx: unsupported " + argv.join(" ")); process.exit(2); }
 const cmd = argv.slice(2);
+if (cmd.join(" ") === "env -u ANTHROPIC_API_KEY claude auth status --json") {
+  const answer = a.auth.length > 1 ? a.auth.shift() : a.auth[0];
+  fs.writeFileSync(file, JSON.stringify(a));
+  console.log(JSON.stringify(answer === "out" ? { loggedIn: false } : { loggedIn: true, authMethod: "claude.ai" })); process.exit(0);
+}
 if (cmd[0] === "cat" && /^\\/proc\\/\\d+\\/stat$/.test(cmd[1] ?? "") && cmd.length === 2) {
   const pid = cmd[1].split("/")[2], p = a.procs[pid];
   if (!p) { console.error("cat: " + cmd[1] + ": No such file or directory"); process.exit(1); }

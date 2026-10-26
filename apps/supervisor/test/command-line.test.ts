@@ -476,8 +476,28 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
   const fakeSbx = fakeBin(join(store, "fake-sbx.js"), `const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(sbxRecord)}, JSON.stringify({ args, apiKey: process.env.ANTHROPIC_API_KEY ?? null }) + "\\n");
-if (args[0] === "run" && args[1] === "-d" && args[2] === "--name" && args[3]) process.exit(0);
-if (args[0] === "stop" && args[1]) process.exit(0);
+// Story 33.3: with FAKE_SBX_STATE (a JSON file {running[], logged_out[]}) \`ls\` lists the running sandboxes, \`stop\` stops
+// one (a fresh start brings its login back), \`run -d\` starts it, and the login probe of a logged-out one answers
+// loggedIn false. Without it \`ls\` is unsupported (exit 97: not running, so no probe and no restart).
+const stateFile = process.env.FAKE_SBX_STATE;
+const st = stateFile && fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, "utf-8")) : null;
+const save = () => fs.writeFileSync(stateFile, JSON.stringify(st));
+if (st && args[0] === "ls" && args.length === 1) {
+  console.log("SANDBOX   AGENT   STATUS");
+  for (const sb of st.running) console.log(sb + "   claude   running");
+  process.exit(0);
+}
+if (args[0] === "run" && args[1] === "-d" && args[2] === "--name" && args[3]) {
+  if (st && !st.running.includes(args[3])) { st.running.push(args[3]); save(); }
+  process.exit(0);
+}
+if (args[0] === "stop" && args[1]) {
+  if (st) { st.running = st.running.filter((s) => s !== args[1]); st.logged_out = st.logged_out.filter((s) => s !== args[1]); save(); }
+  process.exit(0);
+}
+if (st && args[0] === "exec" && st.logged_out.includes(args[1]) && args.slice(2).join(" ") === "env -u ANTHROPIC_API_KEY claude auth status --json") {
+  console.log(JSON.stringify({ loggedIn: false })); process.exit(0);
+}
 if (args[0] === "exec" && args[2] === "cat" && /^\\/proc\\/\\d+\\/stat$/.test(args[3] ?? "")) { console.error("cat: " + args[3] + ": No such file or directory"); process.exit(1); }
 if (args[0] === "exec" && (args[2] === "kill" || args[2] === "tail")) process.exit(0);
 if (args[0] === "exec" && args[2] === "pgrep") process.exit(1);
@@ -1337,6 +1357,28 @@ describe.skipIf(!canRunE2E)("CLI end to end: worker tiers (Story 21.4)", () => {
     expect(flagValue(worker.args, "--model")).toBe("m-stored");
     expect(flagValue(worker.args, "--effort")).toBe("low");
     expect(flagValue(worker.args, "--permission-mode")).toBe("auto");
+  }, 180_000);
+
+  test("Story 33.3: a drained run whose sandbox runs logged out before the pin → stopped and started once, probed again, claimed; one `pin-restart {probe_before: gap, probe_after: null}`", () => {
+    const state = join(mkdtempSync(join(tmpdir(), "tk-sup-e2e-sbxstate-")), "state.json");
+    writeFileSync(state, JSON.stringify({ running: ["s-restart"], logged_out: ["s-restart"] }));
+    const fx = e2eFixture(BLOCK_OK, true, { env: { FAKE_SBX_STATE: state } });
+    const queued = JSON.parse(fx.submit("studio-health", fx.project, ["--tier", "sbx", "--sandbox", "s-restart"]).stdout);
+    const drained = fx.bare("drain");
+    // The claim is the gate's answer (what the worker's drive then does is the sbx-tier suite's own concern).
+    expect(JSON.parse(drained.stdout).runs[0]).toMatchObject({ run_id: queued.run_id });
+    expect(JSON.parse(drained.stdout).runs[0].summary?.claim_refused).toBeUndefined();
+    expect(fx.queue((q) => q.get(queued.run_id))!.state).not.toBe("queued");
+    const restarts = fx.queue((q) => q.events(queued.run_id).filter((e) => e.kind === "pin-restart"));
+    expect(restarts).toHaveLength(1);
+    expect(restarts[0]!.detail).toMatchObject({ sandbox: "s-restart", probe_before: "harness auth: Max login missing or expired (not logged in)", probe_after: null });
+    const ks = fx.queue((q) => q.events(queued.run_id).map((e) => e.kind));
+    expect(ks).not.toContain("claim-refused");
+    expect(ks).toContain("claimed");
+    expect(ks.indexOf("pin-restart")).toBeLessThan(ks.indexOf("claimed"));
+    // The gate's sbx verbs: the listing, the pin, the probe, the restart (stop, start), the second probe, the preflight.
+    const verbs = fx.sbxCalls().map((c) => c.args[0] === "exec" ? (c.args.includes("auth") ? "auth" : "exec") : c.args[0]);
+    expect(verbs.slice(0, 7)).toEqual(["ls", "run", "auth", "stop", "run", "auth", "auth"]);
   }, 180_000);
 
   test("Story 33.2 (ruling D, re-pinned): an invalid stored tier leaves the drained run `queued` with one `claim-refused` naming it; once it clears the next drain claims it (`claim-refusal-cleared`)", () => {
