@@ -1420,7 +1420,88 @@ class DriverContractTestCase(unittest.TestCase):
             "additive;"))
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
-        self.assertIn("Story 32.6, Story 32.7 (Epic 32)", stories)
+        self.assertIn("Story 32.6, Story 32.7", stories)
+
+    # --- Story 32.8: the same 0.1.27 entry adds delivery and change
+    # requests — `follows` on `POST /engagements`, the engage verb
+    # `closeout`, the supervisor's closeout pass, the revise stop — additive,
+    # never a 0.1.28; the state table unchanged; every earlier pin kept.
+
+    def test_0_1_27_story_32_8_adds_delivery_and_change_requests(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.27**", header)
+        self.assertNotIn("**0.1.28**", self.text)
+        self.assertLess(header.index("0.1.27 (Story 32.7) adds to this same "
+                                     "entry"),
+                        header.index("0.1.27 (Story 32.8) adds to this same "
+                                     "entry"))
+        self.assertEqual(header.count("0.1.27 (Story 32.8)"), 1)
+        clause = " ".join(header[header.index("0.1.27 (Story 32.8)"):]
+                          .split())
+        for phrase in ("`follows?: \"ENG-NNN\"`", "`400 SchemaError`",
+                       "`404 UnknownEngagement {engagement}`",
+                       "`409 FollowsNotDelivered {engagement, state}`",
+                       "the previous record never touched",
+                       "the verb `closeout`", "never by the planner",
+                       "`ENG-NNN: Closeout`", "`Engagements/ENG-NNN`",
+                       "`closeout {path, page, outcome, done, not_done, "
+                       "run_id, at}`", "`NoScope`",
+                       "`EngagementRecordUnreadable`",
+                       "`CloseoutInputInvalid`",
+                       "`run-ended {outcome: delivered \\| partial \\| "
+                       "failed}`", "`track.py close --engagement`",
+                       "one notifier line", "`engagement-closeout",
+                       "once per last run", "reason `revise`",
+                       "`question` stays a self-loop",
+                       "no field is added to the chat line",
+                       "`500 EngagementRecordInvalid {project, "
+                       "engagement, detail}`",
+                       "no new route, no version bump and no state-table "
+                       "row change",
+                       "— additive) |"):
+            self.assertIn(phrase, clause)
+        # 32.7's clause still closes before 32.8's opens
+        before = header[:header.index("0.1.27 (Story 32.8)")]
+        self.assertTrue(before.rstrip().endswith(
+            "no route or table row changes — additive;"))
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 32.6, Story 32.7, Story 32.8 (Epic 32)", stories)
+        # the §1 POST /engagements row: follows added in 0.1.27 (32.8), its
+        # refusals in order, no "refused until Story 32.8" left
+        create = next(line for line in self.text.splitlines()
+                      if line.startswith("| the engagement (Story 32.1, "
+                                         "0.1.27) | `POST /engagements` |"))
+        self.assertIn("`{project, request, follows?}` (`follows` added in "
+                      "0.1.27, Story 32.8)", create)
+        self.assertNotIn("refused until Story 32.8", create)
+        order = ["a malformed `follows`", "`400 SchemaError`",
+                 "`404 UnknownEngagement {engagement}`",
+                 "`500 EngagementRecordInvalid {project, engagement, "
+                 "detail}`", "`409 FollowsNotDelivered {engagement, state}`"]
+        tail = create[create.index("0.1.27 (Story 32.8): `follows?`"):]
+        self.assertEqual([tail.index(p) for p in order],
+                         sorted(tail.index(p) for p in order))
+        engage = next(line for line in self.text.splitlines()
+                      if line.startswith("| `tk-studio-engage` "))
+        for verb in ("`reply`", "`questions`", "`scope`", "`quote`",
+                     "`closeout`"):
+            self.assertIn(verb, engage)
+        for phrase in ("Stories 32.5 to 32.8 add the verbs `quote` and "
+                       "`closeout`", "or `closeout`, 0.1.27, Story 32.8",
+                       "`--input-file`", "`lib/engage.py closeout` (Story "
+                       "32.8)", "`NotInProgress`", "`page: null`",
+                       "the state does not move (the supervisor applies "
+                       "`run-ended`)"):
+            self.assertIn(phrase, engage)
+        # the state table subsection is unchanged by 32.8: it already names
+        # the run-ended rows this story wires
+        table = " ".join(self.text[self.text.index(
+            "### The engagement state table (0.1.27, Story 32.1)"):
+            self.text.index("### Project root (0.1.22)")].split())
+        self.assertIn("and Story 32.8 wires `run-ended`", table)
+        self.assertEqual(table.count("event `run-ended`"), 6)
 
     def test_section_8_names_the_cli_drives(self):
         section = self.text[self.text.index("## 8. Conformance"):]

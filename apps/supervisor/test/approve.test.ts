@@ -1061,3 +1061,69 @@ describe("Story 32.6 follow-up review patches", () => {
     expect(git(origin, "show", `engagement/${other}:_bmad-output/planning-artifacts/epics.md`)).toContain(`## Epic 42: Report exports\n\nengagement: ${other}`);
   }, 120_000);
 });
+
+describe("Story 32.8: revise mid-run, go past the cap, the run-end hand-off", () => {
+  test("revise mid-run: back to scoping (quote voided); the live engine stopped gracefully with reason revise, once; never resubmitted", async () => {
+    const queue = newQueue();
+    const { root, run } = linkedRoot(queue, { state: "in-progress", autonomy: "steady" });
+    const fx = approveDeps(queue);
+    await launch(queue, run);
+    input(root, fx.deps, "revise", { body: "narrow it" });
+    const r = readEngagement(root, ENG)!;
+    expect([r.state, r.quote]).toEqual(["scoping", null]);
+    expect((await engagementRunPass(queue, fx.deps, { root, engagement: ENG })).stopped).toEqual([run]);
+    await engagementRunPass(queue, fx.deps);
+    expect(fx.stopped).toEqual([{ root, engine: "E1" }]);
+    expect(queue.serviceEvents(RUN_STOP_EVENT).map((e) => e.detail)).toEqual([
+      { engagement: ENG, project: "p", run_id: run, engine_run_id: "E1", reason: "revise", ok: true, detail: "engine E1 stopping gracefully" },
+    ]);
+    // the engine finishes its story and stops: nothing resubmitted, no run-ended, the state stays scoping
+    queue.note(run, "close-out", { story_key: "41-1-csv-button" });
+    queue.end(run, "partial", null, { detail: { pr: PR } });
+    fx.gh.answer({ view: "MERGED" });
+    expect((await engagementRunPass(queue, fx.deps)).resubmitted).toEqual([]);
+    expect(fx.submitted).toEqual([]);
+    expect(readEngagement(root, ENG)!.state).toBe("scoping");
+    expect(readEngagement(root, ENG)!.inputs.some((l) => l.verb === "run-ended")).toBe(false);
+  });
+
+  test("revise with the linked run still queued: cancelled before it launches (reason revise), once", async () => {
+    const queue = newQueue();
+    const { root, run } = linkedRoot(queue, { state: "in-progress" });
+    const fx = approveDeps(queue);
+    input(root, fx.deps, "revise");
+    expect((await engagementRunPass(queue, fx.deps, { root, engagement: ENG })).stopped).toEqual([run]);
+    expect(queue.get(run)!.state).toBe("cancelled");
+    expect(queue.get(run)!.reason).toBe(`cancelled: engagement ${ENG} revised`);
+    expect(queue.serviceEvents(RUN_STOP_EVENT).map((e) => [e.detail?.reason, e.detail?.ok, e.detail?.engine_run_id])).toEqual([["revise", true, null]]);
+    await engagementRunPass(queue, fx.deps);
+    expect(queue.serviceEvents(RUN_STOP_EVENT)).toHaveLength(1);
+    expect(fx.stopped).toEqual([]);
+  });
+
+  test("go past the cap from partial: raise-cap, in-progress, the capped run resubmitted", async () => {
+    const queue = newQueue();
+    const { root, run } = linkedRoot(queue, { state: "in-progress", runsUsd: 41.5 });
+    const fx = approveDeps(queue);
+    await launch(queue, run);
+    expect((await engagementRunPass(queue, fx.deps)).capped).toEqual([ENG]);
+    queue.end(run, "partial");
+    input(root, fx.deps, "go", { cap: 90 });
+    expect(readEngagement(root, ENG)!.quote!.cap).toBe(90);
+    expect((await engagementRunPass(queue, fx.deps, { root, engagement: ENG })).resubmitted).toEqual([ENG]);
+    expect(readEngagement(root, ENG)!.state).toBe("in-progress");
+  });
+
+  test("the run-end hand-off: a run that ends on its own (no stop) is never resubmitted; the state is left to the closeout pass", async () => {
+    const queue = newQueue();
+    const { root, run } = linkedRoot(queue, { state: "in-progress", autonomy: "full" });
+    const fx = approveDeps(queue);
+    await launch(queue, run);
+    queue.end(run, "complete", null, { detail: { pr: PR } });
+    const out = await engagementRunPass(queue, fx.deps);
+    expect(out.resubmitted).toEqual([]);
+    expect(out.stopped).toEqual([]);
+    expect(fx.submitted).toEqual([]);
+    expect(readEngagement(root, ENG)!.state).toBe("in-progress");
+  });
+});

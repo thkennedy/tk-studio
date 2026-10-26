@@ -130,6 +130,7 @@ import { chatSpendPass, type ChatDeps, type ChatSpendDeps } from "./chat";
 import { questionsPass, type QuestionsDeps } from "./questions";
 import { scopePass, type ScopeDeps } from "./scope";
 import { approvePass, engagementRunPass, engagementRunSpendPass, type ApproveDeps, type RunSpendDeps, type Submitter } from "./approve";
+import { closeoutPass } from "./delivery";
 import { ledgerPath } from "./board";
 import { CERT_CHECK_MS, CERT_RENEW_EXIT, certCheck, recordCertStart } from "./cert";
 import {
@@ -813,13 +814,15 @@ function approveDeps(queue: Queue, opts: RunOptions = {}): ApproveDeps {
 }
 
 /** Story 32.6: the approve pass, then the engagement-run pass (src/approve.ts), after the scope pass at every
- * `finally` site (`recover`, `drain`, `run`); under `bun test` they run only with injected deps (as
- * `scopeQuietly`). Never throws. */
+ * `finally` site (`recover`, `drain`, `run`); Story 32.8: then the closeout pass (src/delivery.ts: the engagement's
+ * last run ended → the report, `run-ended`, the issue Done, one notifier line), with the host ledger for the runs'
+ * costs; under `bun test` they run only with injected deps (as `scopeQuietly`). Never throws. */
 async function approveQuietly(queue: Queue, opts: RunOptions): Promise<void> {
   if (opts.approve === false || (opts.approve === undefined && underBunTest())) return;
   const deps = approveDeps(queue, opts);
   try { await approvePass(queue, deps); } catch { /* the next tick */ }
   try { await engagementRunPass(queue, deps); } catch { /* the next tick */ }
+  try { await closeoutPass(queue, { ledgerFile: ledgerPath(opts.hygiene?.env ?? process.env), ...deps }); } catch { /* the next tick */ }
 }
 
 /** Story 32.3: the input route's production `afterEngagementInput` — the questions pass for the one engagement an

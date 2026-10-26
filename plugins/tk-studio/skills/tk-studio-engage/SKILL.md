@@ -1,6 +1,6 @@
 ---
 name: tk-studio-engage
-description: The planner leg of an engagement — `reply` reads the engagement's memory (the record, the chat so far, the plan under `_bmad-output/planning-artifacts/`, `kb/` and `kb/confluence/`) and writes the planner's reply line, with optional proposals the owner can press, to the engagement's `chat.jsonl`; `questions` writes at most three multiple-choice clarifying questions, each with a default, for the owner's inbox; `scope` writes and publishes the scope of work; `quote` prices the scope as a seeded 50/85/95 band with a hard cap from the studio's own history and proposes `go`. Use when a supervisor `engagement-chat` payload names this skill, or the user says "reply in the engagement chat" or "tk engage reply".
+description: The planner leg of an engagement — `reply` reads the engagement's memory (the record, the chat so far, the plan under `_bmad-output/planning-artifacts/`, `kb/` and `kb/confluence/`) and writes the planner's reply line, with optional proposals the owner can press, to the engagement's `chat.jsonl`; `questions` writes at most three multiple-choice clarifying questions, each with a default, for the owner's inbox; `scope` writes and publishes the scope of work; `quote` prices the scope as a seeded 50/85/95 band with a hard cap from the studio's own history and proposes `go`; `closeout` (run by the supervisor once the engagement's last run ends, never by the planner) writes and publishes the delivery report. Use when a supervisor `engagement-chat` payload names this skill, or the user says "reply in the engagement chat" or "tk engage reply".
 ---
 
 # tk-studio-engage
@@ -75,7 +75,12 @@ presses through the supervisor's `POST /engagements/{id}/input`.
    plan, kb and Confluence files the question needs, each at
    `<project_root>/<path>` (the index's `path` joined to the payload's
    `project_root`, never to the cwd or the worktree); answer in plain
-   language, naming the files you relied on. When a typed input would move
+   language, naming the files you relied on. Story 32.8: when the record's
+   `inputs[]` holds an owner `question` line (verb `question`, `payload
+   {text}`, source `bearer` or `cookie`) newer than your last chat line (the
+   newest `author: "planner"` line's `at`), answer the newest such question
+   in this reply — the owner's `question` moves no state and mints no turn of
+   its own; your next turn is its answer. When a typed input would move
    the engagement on (for example `go` in `intake`), offer it as a proposal
    rather than taking it. Write the body and the proposals to temp files
    and run mode 2 with the payload's `run_id`. End on the status block;
@@ -218,7 +223,38 @@ presses through the supervisor's `POST /engagements/{id}/input`.
    `written` names what had landed), plus the record's.
    A dry run writes nothing and ends `partial`.
 
-6. Blocking conditions (exit 2), each named in `reason`: `BadEngagement`
+6. Close out (Story 32.8, user flow F2 steps 7 to 9) — **the supervisor's
+   verb, never the planner's**: the supervisor's closeout pass runs it on
+   the host once the engagement's last run ended (in `in-progress` or
+   `partial`), with its own composition of the runs, the landed stories,
+   their specs and PRs, the declared epics, the side exits, the spend and
+   the quote written to a temp file:
+
+   ```bash
+   uv run "${CLAUDE_PLUGIN_ROOT}/lib/engage.py" closeout --directory <project_root> \
+     --engagement <ENG-NNN> --input-file <path> [--dry-run]
+   ```
+
+   It judges each `### <title>` of `scope.md`'s `## Deliverables` against
+   its stories (`done` when each landed with `spec_status: done` and its PR
+   is `MERGED`; else `not done —` `no acceptance signal`, `epic not run`,
+   `story <key> not landed` or `PR <url> not merged`), writes
+   `_bmad-output/engagements/<id>/closeout.md` (`Outcome`, `Deliverables`,
+   `Pull requests`, `Cost per story`, `Spend`, `Quote against actual`,
+   `Side exits`), publishes it as `ENG-NNN: Closeout` beside the scope page
+   (`page: null` with a note when the project has no Confluence binding)
+   and merges `closeout {path, page, outcome, done, not_done, run_id, at}`
+   into the record. The state does not move here: the supervisor then
+   applies `run-ended` (`delivered`, `partial` or `failed`), moves the
+   engagement's issue to `Done` and sends one notifier line. Its refusals
+   (exit 2): `NoScope`, `EngagementRecordUnreadable`,
+   `CloseoutInputInvalid`, `NotInProgress`, `EngagementClosed`, plus the
+   record's; a 429, a 5xx or an OS refusal ends `partial` with `retry:
+   true`. A change after `delivered` is a new engagement
+   (`POST /engagements {project, request, follows: ENG-NNN}`) with its own
+   scope and quote.
+
+7. Blocking conditions (exit 2), each named in `reason`: `BadEngagement`
    (not like `ENG-001`), `UnknownEngagement` (no record),
    `EngagementRecordUnreadable` (not JSON, or not this engagement's record),
    `EngagementClosed` (`delivered`, `failed` or `cancelled`), `BodyEmpty`,
@@ -228,7 +264,7 @@ presses through the supervisor's `POST /engagements/{id}/input`.
    `--body-file` or `--proposals-file`. Nothing is appended on a refusal; a
    dry run appends nothing and ends `partial`.
 
-7. Report:
+8. Report:
    - **Attended:** show the reply line and its proposals.
    - **Headless:** no prompts (AD-11). Relay the core's `status`, `reason`
      and `artifacts` as they are — never infer the status from the exit
@@ -249,5 +285,7 @@ If the deterministic core is unrunnable — a tool call denied by permissions, `
   reply, its `questions.json` (Story 32.3), and its `scope.md` with the
   record's `scope_page` and the Confluence scope page (Story 32.4), and the
   record's `quote` with `.tk-studio/budget-bands.yaml`'s `epics` entries
-  (Story 32.5); nothing is committed, nothing is promoted.
+  (Story 32.5); the supervisor's `closeout` (Story 32.8) writes
+  `closeout.md`, its Confluence page and the record's `closeout`; nothing
+  is committed, nothing is promoted.
 - All paths resolve through `${CLAUDE_PLUGIN_ROOT}`.

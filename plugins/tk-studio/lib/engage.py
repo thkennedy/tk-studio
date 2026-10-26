@@ -116,6 +116,43 @@ state does not move: the owner's `go` moves `scoping → quoted` (32.1's
 `quote-present` row). An OS refusal is `QuoteUnwritable` (`written` names
 what had landed).
 
+The `closeout` verb (Story 32.8, user flow F2 steps 7 to 9) is the
+engagement's delivery report, run by the supervisor's closeout pass once
+the engagement's last run ended (never by the planner):
+
+  uv run engage.py closeout --directory ROOT --engagement ENG-NNN
+      --input-file PATH [--dry-run]
+
+In `in-progress` or `partial` only (else `NotInProgress`, or
+`EngagementClosed`). The input file is the supervisor's composition, a
+JSON object `{run_id, outcome_hint, runs: [{run_id, job, state,
+studio_run_id, cost_usd, pr}], stories: [{key, run_id, spec_status, pr,
+pr_state}], epics: [{job, queued}], side_exits: [{at, to, verb, reason}],
+spend {planning_usd, runs_usd}, quote}` (else `CloseoutInputInvalid`). Each
+`### <title>` of `scope.md`'s `## Deliverables` (no `scope.md`: `NoScope`)
+is judged against its stories (the proposed stories naming its title,
+else every proposed story; the i-th proposed epic is the i-th declared
+`run-epic-N` job, its story `m` the landed key `N-m-…`): `done` when each
+landed (`spec_status: done`) and its PR is `MERGED`, else `not done — `
+the first of `no acceptance signal` (owner text is unchecked: the signal
+line, else any line naming `acceptance signal`), `epic not run`, `story
+<key> not landed`, `PR <url> not merged`. Every deliverable done is
+`delivered`; else the last run `blocked` is `failed`; else `partial`.
+`closeout.md` (the `##` sections `Outcome`, `Deliverables`, `Pull
+requests`, `Cost per story` — `story | run | tokens | usd` from the meter
+records by `story_key`, and the runs' `job-run` cost, `—` unmetered —
+`Spend`, `Quote against actual` — `runs_usd` against the bands and the
+cap, which are priced from story runs alone — and `Side exits`) is written
+atomically
+and published as `ENG-NNN: Closeout` in the scope's `Engagements/ENG-NNN`
+folder (skipped when the footer hash and the recorded version match); no
+Confluence binding, an absent agent-seat variable or a refused write
+leaves `page: null` with a note, never a refusal. Then `closeout {path,
+page, outcome, done, not_done, run_id, at}` alone is merged into a fresh
+read of the record; the state does not move here (the supervisor applies
+`run-ended`). A 429, a 5xx or an OS refusal ends `partial` with `retry:
+true`. The result is `{status, engagement, outcome, page, written[]}`.
+
 Refusals end `blocked` (exit 2), each named in `reason`: `BadEngagement`,
 `UnknownEngagement` (no record), `EngagementRecordUnreadable` (not JSON, or
 not a record), `EngagementClosed` (`delivered`, `failed`, `cancelled`),
@@ -150,6 +187,7 @@ ENGAGEMENTS_REL = Path("_bmad-output") / "engagements"
 TERMINAL_STATES = ("delivered", "failed", "cancelled")
 INPUT_VERBS = ("answer", "go", "revise", "question", "approve", "cancel")
 AUTONOMY_LEVELS = ("ask", "steady", "full")
+RUN_OUTCOMES = ("delivered", "partial", "failed")
 BODY_MAX_BYTES = 32 * 1024
 LABEL_MAX = 80
 INDEX_MAX = 200
@@ -947,12 +985,15 @@ def _page_url(site: str | None, webui: str | None) -> str | None:
 
 def _publish_scope(root: Path, engagement: str, text: str, space_id: str,
                    site: str | None, transport, sleep,
-                   recorded_version=None) -> dict:
+                   recorded_version=None, title: str | None = None,
+                   rel: str | None = None) -> dict:
     """The page `ENG-NNN: Scope of Work` in `Engagements/ENG-NNN` (Settled
     shape 2): `{id, url, version, action}`. `skipped` only when the footer
     hash matches and the page is still at `recorded_version` (or none is
     recorded): an owner's newer version is overwritten at version + 1
-    (local wins), never adopted unmirrored."""
+    (local wins), never adopted unmirrored. Story 32.8: `title` and `rel`
+    name another page of the same folder (`ENG-NNN: Closeout` from
+    `closeout.md`); default the scope's."""
     import confluence
     import plansync
     try:
@@ -983,8 +1024,8 @@ def _publish_scope(root: Path, engagement: str, text: str, space_id: str,
                 raise refused(f"folder {ENGAGEMENTS_FOLDER}/{engagement} "
                               f"create refused", detail)
             folder = str(made["id"])
-        title = SCOPE_TITLE.format(engagement=engagement)
-        rel = scope_rel(engagement)
+        title = title or SCOPE_TITLE.format(engagement=engagement)
+        rel = rel or scope_rel(engagement)
         storage, _images = mdstorage.convert(text, rel)
         digest = plansync.page_hash(title, storage, [])
         body = storage + plansync.page_footer(
@@ -1530,6 +1571,452 @@ def quote(project_root: Path, engagement: str, seed: int | None = None,
         return _finish(result, "blocked", f"engage refused: {exc}")
 
 
+# ------------------------------------------------------------ the closeout (32.8)
+
+CLOSEOUT_TITLE = "{engagement}: Closeout"
+CLOSEOUT_STATES = ("in-progress", "partial")
+SIGNAL_WORDS = "acceptance signal"
+UNMETERED = "—"
+LIST_FIELDS = ("runs", "stories", "epics", "side_exits")
+
+
+def closeout_rel(engagement: str) -> str:
+    return f"_bmad-output/engagements/{engagement}/closeout.md"
+
+
+def _signal_of(lines: list[str]) -> str | None:
+    """A deliverable's acceptance signal: the `SIGNAL_RE` line, else (owner
+    text is unchecked) the first line naming `acceptance signal` in any case,
+    its text after the words (or the next non-empty line); None when no
+    line names one."""
+    for line in lines:
+        m = SIGNAL_RE.match(line)
+        if m and m.group(1).strip():
+            return m.group(1).strip()
+    for n, line in enumerate(lines):
+        at = line.casefold().find(SIGNAL_WORDS)
+        if at < 0:
+            continue
+        rest = re.sub(r"^[\s*_:\-–—]+", "", line[at + len(SIGNAL_WORDS):])
+        rest = rest.strip()
+        if rest:
+            return rest
+        following = next((x.strip() for x in lines[n + 1:] if x.strip()),
+                         "")
+        return following or None
+    return None
+
+
+def closeout_deliverables(text: str) -> list[dict]:
+    """`[{title, signal}]` of the scope's `## Deliverables` `### <title>`
+    items (Settled shape 3); [] when the section is absent."""
+    body = next((lines for title, lines in parse_scope(text)["sections"]
+                 if title.casefold() == "deliverables"), None)
+    return [{"title": title, "signal": _signal_of(lines)}
+            for title, lines in _subsections(body or [], 3)]
+
+
+def _proposed_stories(text: str) -> list[dict]:
+    """The proposed epics that hold a story, in the scope's order (the
+    approve pass's order): `[{k, stories: [{m, title, body}]}]`."""
+    body = next((lines for title, lines in parse_scope(text)["sections"]
+                 if title.casefold() == "proposed epics and stories"), None)
+    epics = []
+    for etitle, elines in _subsections(body or [], 3):
+        m = EPIC_RE.match(etitle)
+        if not m:
+            continue
+        stories = []
+        for stitle, slines in _subsections(elines, 4):
+            sm = STORY_RE.match(stitle)
+            if sm:
+                stories.append({"m": int(sm.group(2)),
+                                "title": stitle.split(":", 1)[1].strip(),
+                                "body": "\n".join(slines)})
+        if stories:
+            epics.append({"k": int(m.group(1)), "stories": stories})
+    return epics
+
+
+def _check_closeout_input(data) -> dict:
+    """The supervisor's composition (Settled shape 2), checked; raises
+    `CloseoutInputInvalid` naming what is wrong."""
+    def bad(what: str):
+        return Refused("CloseoutInputInvalid", what)
+    if not isinstance(data, dict):
+        raise bad("the input is not a JSON object")
+    if not _non_empty(data.get("run_id")):
+        raise bad("'run_id' must be a non-empty string")
+    hint = data.get("outcome_hint")
+    if hint is not None and hint not in RUN_OUTCOMES:
+        raise bad(f"'outcome_hint' must be one of {', '.join(RUN_OUTCOMES)}")
+    for key in LIST_FIELDS:
+        value = data.get(key, [])
+        if not isinstance(value, list) or not all(isinstance(x, dict)
+                                                  for x in value):
+            raise bad(f"'{key}' must be a list of objects")
+    for n, story in enumerate(data.get("stories") or []):
+        if not _non_empty(story.get("key")):
+            raise bad(f"stories[{n}] has no key")
+    for n, epic in enumerate(data.get("epics") or []):
+        if not _non_empty(epic.get("job")):
+            raise bad(f"epics[{n}] has no job")
+    for key in ("spend", "quote"):
+        if data.get(key) is not None and not isinstance(data.get(key), dict):
+            raise bad(f"'{key}' must be an object or null")
+    return data
+
+
+def _num(value) -> float | None:
+    return float(value) if isinstance(value, (int, float)) \
+        and not isinstance(value, bool) and math.isfinite(value) else None
+
+
+def _usd(value) -> str:
+    n = _num(value)
+    return UNMETERED if n is None else f"${n:,.2f}"
+
+
+def _cell(value) -> str:
+    text = str(value) if value not in (None, "") else UNMETERED
+    return text.replace("|", "\\|").replace("\n", " ")
+
+
+def closeout_verdicts(text: str, data: dict) -> list[dict]:
+    """Each deliverable's verdict (Settled shape 3): `[{title, signal,
+    done, why, stories: [key], prs: [url]}]`. A deliverable's stories are
+    the proposed stories naming its title (case-insensitive), else every
+    proposed story; the i-th proposed epic is the i-th declared job
+    (`run-epic-N`), its story `m` the landed key `N-m-…`. `done` when each
+    landed (`spec_status: done`) and its PR is `MERGED`; else the first
+    why of `no acceptance signal`, `epic not run`, `story <key> not
+    landed`, `PR <url> not merged`."""
+    epics = data.get("epics") or []
+    landed = data.get("stories") or []
+    proposed = _proposed_stories(text)
+    members_all = []
+    for i, epic in enumerate(proposed):
+        job = epics[i] if i < len(epics) else None
+        m = re.search(r"(\d+)$", str((job or {}).get("job") or ""))
+        n = int(m.group(1)) if m else None
+        queued = bool(job and job.get("queued") is True)
+        for story in epic["stories"]:
+            entry = None
+            if n is not None:
+                key_re = re.compile(rf"^{n}-{story['m']}(?:-|$)")
+                hits = [s for s in landed if key_re.match(str(s["key"]))]
+                entry = next((s for s in reversed(hits)
+                              if s.get("spec_status") == "done"),
+                             hits[-1] if hits else None)
+            shown = entry["key"] if entry else (
+                f"{n}-{story['m']}" if n is not None
+                else f"{epic['k']}.{story['m']}")
+            members_all.append({"title": story["title"],
+                                "body": story["body"], "queued": queued,
+                                "entry": entry, "key": shown})
+    out = []
+    for d in closeout_deliverables(text):
+        folded = d["title"].casefold()
+        members = [s for s in members_all
+                   if folded in s["title"].casefold()
+                   or folded in s["body"].casefold()] or members_all
+        if not members_all:
+            members = [{"queued": True, "entry": s, "key": s["key"]}
+                       for s in landed]
+        prs = []
+        for s in members:
+            pr = (s["entry"] or {}).get("pr")
+            if _non_empty(pr) and pr not in prs:
+                prs.append(pr)
+        why = None
+        if not d["signal"]:
+            why = "no acceptance signal"
+        elif not members or any(not s["queued"] for s in members):
+            why = "epic not run"
+        else:
+            for s in members:
+                if (s["entry"] or {}).get("spec_status") != "done":
+                    why = f"story {s['key']} not landed"
+                    break
+            if why is None:
+                for s in members:
+                    state = str(s["entry"].get("pr_state") or "").upper()
+                    if state != "MERGED":
+                        why = (f"PR {s['entry'].get('pr') or 'none'} not "
+                               f"merged")
+                        break
+        out.append({"title": d["title"], "signal": d["signal"],
+                    "done": why is None, "why": why,
+                    "stories": [s["key"] for s in members], "prs": prs})
+    return out
+
+
+def closeout_outcome(verdicts: list[dict], data: dict) -> str:
+    """Settled shape 4: every deliverable done → `delivered`; else the last
+    run's queue state `blocked` → `failed`; else `partial`."""
+    if verdicts and all(v["done"] for v in verdicts):
+        return "delivered"
+    last = next((r for r in data.get("runs") or []
+                 if r.get("run_id") == data.get("run_id")), None)
+    if (last or {}).get("state") == "blocked" \
+            or (last is None and data.get("outcome_hint") == "failed"):
+        return "failed"
+    return "partial"
+
+
+def render_closeout(engagement: str, record: dict, data: dict,
+                    verdicts: list[dict], outcome: str,
+                    meter: dict | None = None) -> str:
+    """`closeout.md` (Settled shape 5): the `##` sections `Outcome`,
+    `Deliverables`, `Pull requests`, `Cost per story`, `Spend`, `Quote
+    against actual` and `Side exits`."""
+    meter = meter or {}
+    runs = data.get("runs") or []
+    stories = data.get("stories") or []
+    done = sum(1 for v in verdicts if v["done"])
+    last = next((r for r in runs if r.get("run_id") == data["run_id"]), {})
+    out = [f"# {engagement}: Closeout", ""]
+    out += ["## Outcome", "",
+            f"- Outcome: {outcome}",
+            f"- Last run: {data['run_id']} "
+            f"({last.get('state') or 'unknown'})",
+            f"- Deliverables done: {done} of {len(verdicts)}", ""]
+    out += ["## Deliverables", ""]
+    if not verdicts:
+        out += ["No deliverable (### <title>) in the scope's "
+                "## Deliverables.", ""]
+    for v in verdicts:
+        out += [f"### {v['title']}", "",
+                f"Acceptance signal: {v['signal'] or 'none'}", "",
+                "Verdict: " + ("done" if v["done"]
+                               else f"not done — {v['why']}"), ""]
+        out += [f"- Story: {key}" for key in v["stories"]]
+        out += [f"- PR: {pr}" for pr in v["prs"]]
+        if v["stories"] or v["prs"]:
+            out.append("")
+    out += ["## Pull requests", ""]
+    seen = []
+    for s in stories:
+        pr = s.get("pr")
+        if _non_empty(pr) and pr not in [p for p, _ in seen]:
+            seen.append((pr, s.get("pr_state")))
+    for r in runs:
+        pr = r.get("pr")
+        if _non_empty(pr) and pr not in [p for p, _ in seen]:
+            seen.append((pr, None))
+    out += [f"- {pr} ({state or 'state unknown'})" for pr, state in seen] \
+        or ["None."]
+    out.append("")
+    out += ["## Cost per story", "", "| story | run | tokens | usd |",
+            "| --- | --- | --- | --- |"]
+    keys = []
+    for s in stories:
+        if s["key"] not in [k for k, _ in keys]:
+            keys.append((s["key"], s.get("run_id")))
+    for key, run_id in keys:
+        sample = meter.get(key) or {}
+        tokens = sample.get("tokens")
+        out.append(f"| {_cell(key)} | {_cell(run_id)} | "
+                   f"{tokens if isinstance(tokens, int) else UNMETERED} | "
+                   f"{_usd(sample.get('usd'))} |")
+    if not keys:
+        out.append(f"| {UNMETERED} | {UNMETERED} | {UNMETERED} | "
+                   f"{UNMETERED} |")
+    out += ["", "| run | job | state | usd |", "| --- | --- | --- | --- |"]
+    for r in runs:
+        out.append(f"| {_cell(r.get('run_id'))} | {_cell(r.get('job'))} | "
+                   f"{_cell(r.get('state'))} | {_usd(r.get('cost_usd'))} |")
+    if not runs:
+        out.append(f"| {UNMETERED} | {UNMETERED} | {UNMETERED} | "
+                   f"{UNMETERED} |")
+    out.append("")
+    spend = data.get("spend") if isinstance(data.get("spend"), dict) \
+        else (record.get("spend") if isinstance(record.get("spend"), dict)
+              else {})
+    planning = _num(spend.get("planning_usd")) or 0.0
+    runs_usd = _num(spend.get("runs_usd")) or 0.0
+    total = round(planning + runs_usd, 6)
+    out += ["## Spend", "", f"- planning_usd: {_usd(planning)}",
+            f"- runs_usd: {_usd(runs_usd)}", f"- total: {_usd(total)}", ""]
+    out += ["## Quote against actual", ""]
+    q = data.get("quote") if isinstance(data.get("quote"), dict) \
+        else (record.get("quote") if isinstance(record.get("quote"), dict)
+              else None)
+    if q is None:
+        out += ["No quote on the record.", ""]
+    else:
+        def band(name):
+            b = q.get(name)
+            return _num(b.get("usd")) if isinstance(b, dict) else None
+        # the bands and the cap are priced from story-run samples alone
+        # and the supervisor's cap meters runs_usd alone: the actual is
+        # runs_usd (planning_usd and the total stand on their own lines)
+        cap = _num(q.get("cap"))
+        hit = next((name for name in ("band50", "band85", "band95")
+                    if band(name) is not None and runs_usd <= band(name)),
+                   None)
+        if hit is None:
+            hit = "above band95" if cap is None else (
+                "within the cap" if runs_usd < cap else "at or over the cap")
+        else:
+            hit = f"within {hit}"
+        cap_line = "no cap" if cap is None else (
+            "under the cap" if runs_usd < cap else "at or over the cap")
+        out += [f"- band50: {_usd(band('band50'))}",
+                f"- band85: {_usd(band('band85'))}",
+                f"- band95: {_usd(band('band95'))}",
+                f"- cap: {_usd(cap)}",
+                f"- actual (runs_usd): {_usd(runs_usd)}",
+                f"- planning_usd: {_usd(planning)}",
+                f"- total: {_usd(total)}",
+                f"- band hit: {hit}", f"- cap hit: {cap_line}", ""]
+    out += ["## Side exits", ""]
+    exits = data.get("side_exits") or []
+    out += [f"- {_cell(e.get('at'))}: {_cell(e.get('verb'))} → "
+            f"{_cell(e.get('to'))} — {_cell(e.get('reason'))}"
+            for e in exits] or ["None."]
+    out.append("")
+    return "\n".join(out)
+
+
+def _meter_samples(root: Path,
+                   measurements: Path | None) -> tuple[dict, str | None]:
+    """The project's meter records by `story_key` (`quote.py history`), and
+    a note when they could not be read (every figure then unmetered)."""
+    import consolidate
+    import ledger
+    import quote as quotelib
+    try:
+        mdir = Path(measurements) if measurements is not None \
+            else ledger.store_root() / "measurements"
+        events = consolidate.read_events(mdir)[0] if mdir.is_dir() else []
+    except (OSError, UnicodeDecodeError) as exc:
+        return {}, (f"measurements unreadable "
+                    f"({exc.__class__.__name__}): every story unmetered")
+    hist = quotelib.history(events, configlib.project_key(root))
+    return {s["story_key"]: s for s in hist["samples"]}, None
+
+
+def closeout(project_root: Path, engagement: str, data, dry_run: bool = False,
+             now=None, transport=None, sleep=None,
+             measurements: Path | None = None) -> dict:
+    """The `closeout` verb (Story 32.8, Settled shapes 2, 3 and 5): the
+    supervisor's composition `data` rendered as `closeout.md` (atomically),
+    published as `ENG-NNN: Closeout` beside the scope, and `closeout {path,
+    page, outcome, done, not_done, run_id, at}` merged alone into a fresh
+    read of the record. The state does not move here: the supervisor applies
+    `run-ended` after. Run by the supervisor's closeout pass only."""
+    import confluence
+    import plansync
+    root = Path(project_root).resolve()
+    result = _result(engagement, "closeout", dry_run)
+    result.update({"outcome": None, "page": None})
+    rel = closeout_rel(engagement)
+    record_rel = f"_bmad-output/engagements/{engagement}/engagement.yaml"
+    try:
+        if not ENGAGEMENT_ID_RE.match(engagement or ""):
+            raise Refused("BadEngagement", f"--engagement {engagement!r} is "
+                          f"not an engagement id (ENG-001)")
+        data = _check_closeout_input(data)
+        record = read_record(root, engagement)
+        state = record.get("state")
+        if state in TERMINAL_STATES:
+            raise Refused("EngagementClosed", f"{engagement} is {state}; "
+                          f"nothing is written")
+        if state not in CLOSEOUT_STATES:
+            raise Refused("NotInProgress", f"{engagement} is {state}; a "
+                          f"closeout is written only in in-progress or "
+                          f"partial")
+        scoped = read_scope(root, engagement)
+        if scoped is None:
+            raise Refused("NoScope", f"no {scope_rel(engagement)}")
+        meter, note = _meter_samples(root, measurements)
+        if note:
+            result["notes"].append(note)
+        verdicts = closeout_verdicts(scoped["text"], data)
+        outcome = closeout_outcome(verdicts, data)
+        text = render_closeout(engagement, record, data, verdicts, outcome,
+                               meter)
+        done = sum(1 for v in verdicts if v["done"])
+        result.update({"outcome": outcome, "closeout": rel, "done": done,
+                       "not_done": len(verdicts) - done})
+        if dry_run:
+            result["notes"].append("dry run: closeout.md was not written, "
+                                   "the page not published")
+            return _finish(result, "partial", "dry run: nothing written; a "
+                           "real run would write `closeout` and publish it")
+        path = engagement_dir(root, engagement) / "closeout.md"
+        try:
+            current = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            current = None
+        if current != text:
+            try:
+                atomic_write_text(path, text)
+            except OSError as exc:
+                result["retry"] = True
+                return _finish(result, "partial", f"engage closeout "
+                               f"transient: {rel}: "
+                               f"{exc.__class__.__name__}")
+            result["written"].append(rel)
+        page = None
+        space_id = plansync._recorded(root, "planning.confluence.space_id")
+        gaps = confluence.env_gaps() if space_id is not None else []
+        if space_id is None:
+            result["notes"].append("ConfluenceUnbound: planning.confluence."
+                                   "space_id is not recorded; the closeout "
+                                   "is not published (page: null)")
+        elif gaps:
+            result["notes"].append("ConfluenceEnvMissing: " + "; ".join(gaps)
+                                   + "; the closeout is not published "
+                                   "(page: null)")
+        else:
+            prior = record.get("closeout") \
+                if isinstance(record.get("closeout"), dict) else {}
+            recorded = prior.get("page") \
+                if isinstance(prior.get("page"), dict) else {}
+            try:
+                recorded_version = int(recorded["version"]) \
+                    if recorded.get("version") is not None else None
+            except (TypeError, ValueError):
+                recorded_version = None
+            try:
+                page = _publish_scope(
+                    root, engagement, text, space_id,
+                    plansync._recorded(root, "planning.jira.site"),
+                    transport, sleep, recorded_version,
+                    title=CLOSEOUT_TITLE.format(engagement=engagement),
+                    rel=rel)
+            except _Transient as exc:
+                result["retry"] = True
+                result["notes"].append("closeout.md kept; the record's "
+                                       "closeout unchanged; rerun to "
+                                       "publish")
+                return _finish(result, "partial", f"engage closeout "
+                               f"transient: {exc}")
+            except Refused as exc:
+                result["notes"].append(f"the closeout is not published "
+                                       f"(page: null): {exc}")
+        result["page"] = page
+        entry = {"path": rel,
+                 "page": None if page is None else
+                 {"id": page["id"], "url": page["url"],
+                  "version": page["version"]},
+                 "outcome": outcome, "done": done,
+                 "not_done": len(verdicts) - done,
+                 "run_id": data["run_id"], "at": now or _now()}
+        try:
+            _merge_record(root, engagement, {"closeout": entry})
+        except OSError as exc:
+            result["retry"] = True
+            return _finish(result, "partial", f"engage closeout transient: "
+                           f"{record_rel}: {exc.__class__.__name__}")
+        result["written"].append(record_rel)
+        return _finish(result, "complete", None)
+    except Refused as exc:
+        return _finish(result, "blocked", f"engage refused: {exc}")
+
+
 # --------------------------------------------------------------------- CLI
 
 def _questions_main(directory: Path, args) -> int:
@@ -1571,6 +2058,34 @@ def _scope_main(directory: Path, args, transport=None) -> int:
     result = scope(directory, args.engagement, text=text,
                    revise_at=args.revise_at, dry_run=args.dry_run,
                    transport=transport)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 2 if result.get("status") == "blocked" else 0
+
+
+def _closeout_main(directory: Path, args, transport=None) -> int:
+    try:
+        data = json.loads(Path(args.input_file).read_text(encoding="utf-8"))
+    except OSError as exc:
+        # an OS refusal is transient (the module docstring): `partial`,
+        # `retry: true`, never a named refusal the supervisor records
+        result = _result(args.engagement, "closeout", args.dry_run)
+        result.update({"outcome": None, "page": None, "retry": True})
+        result["notes"].append("nothing written; rerun to close out")
+        result = _finish(result, "partial", f"engage closeout transient: "
+                         f"--input-file: {exc.__class__.__name__}")
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        result = _result(args.engagement, "closeout", args.dry_run)
+        result.update({"outcome": None, "page": None})
+        result = _finish(result, "blocked", f"engage refused: "
+                         f"CloseoutInputInvalid: cannot read --input-file "
+                         f"as JSON ({exc.__class__.__name__}); nothing "
+                         f"written")
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 2
+    result = closeout(directory, args.engagement, data, dry_run=args.dry_run,
+                      transport=transport)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 2 if result.get("status") == "blocked" else 0
 
@@ -1622,12 +2137,23 @@ def main(argv: list[str] | None = None) -> int:
                                               "bytes of sha256 of "
                                               "'<engagement>:<n>')")
     quo.add_argument("--dry-run", action="store_true")
+    clo = sub.add_parser("closeout")
+    clo.add_argument("--directory", required=True,
+                     help="project root (the served root, project_root)")
+    clo.add_argument("--engagement", required=True, help="ENG-NNN")
+    clo.add_argument("--input-file", required=True,
+                     help="the supervisor's composition, a JSON object "
+                          "{run_id, outcome_hint, runs, stories, epics, "
+                          "side_exits, spend, quote}")
+    clo.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     directory = configlib.find_project_root(Path(args.directory))
     if args.command == "questions":
         return _questions_main(directory, args)
     if args.command == "scope":
         return _scope_main(directory, args)
+    if args.command == "closeout":
+        return _closeout_main(directory, args)
     if args.command == "quote":
         result = quote(directory, args.engagement, seed=args.seed,
                        dry_run=args.dry_run)
