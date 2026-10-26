@@ -2881,3 +2881,135 @@ So that the engagement closes on evidence and a change after delivery is a new e
 **Given** a live engagement
 **When** `question` (the owner asks; the planner's next turn answers; no state change), `revise` (back to `scoping` with the quote voided; a run in flight finishes its story through a graceful stop) or `go` (past a cap or past open questions) arrives
 **Then** it applies as 32.1's table says; after `delivered` a change is a new engagement (`POST /engagements {project, request, follows: ENG-NNN}`) with its own quote; `bun test` covers the closeout's composition and the three mid-run inputs with fakes; the lib suite covers the report's rendering and `engage.py closeout`; the contract's §2 names `tk-studio-engage` and its verbs (`reply`, `questions`, `scope`, `quote`, `closeout`; 0.1.27 additive) and §7.1 the state table; `kb/engagement-loop.md` describes the loop as built, for the attended first engagement and for EP-33
+
+## Epic 33: Loop Hygiene, What Epics 31 and 32 Taught the Loop
+
+Not in the design spec's build order (§10 names EP-33 the vertical-slice pack; that epic follows as EP-34 with its number in the plan, not the spec's): this epic turns the loop deficiencies the agent PC recorded while Epics 31 and 32 ran (holes 59 and 62 to 69 in the observation ledger, `~/.tk-studio/measurements/tim-Tim-PC-2.jsonl`, each with its fix to make, and the handoff's updates of 2026-10-25 and 2026-10-26) into stories, because each one cost hours of a day: the supervisor died with no log (66), its Max-login refusal reached only the console while a run sat queued (68, 69), a resumed engine's graceful stop ended runs `partial` (59), a stale sandbox view halted a story (65), the roster gate lived only on the host leg (62), the supervisor's own suites ran only by hand and leaked ninety thousand temp folders (63, 64), and a red host leg could only be re-run by hand (52). Planned 2026-10-26 (session 11's fourth day) by the session, from the ledger. The rules it must keep: the supervisor runs only in its console tab (or the `tk-studio supervisor` task) and never from a session; secrets never reach a worker, a log line, an event or a file; the engine's upstream BMad skills are never forked (fixes for upstream behaviour live on the supervisor's side); every surface change is additive on the contract (0.1.28). Holes 43, 45 and 48 stay open for a later pass (they did not recur). One story per run with a graceful stop after each, as EP-32 ran; `apps/supervisor` changes mean the per-file suites by hand until 33.4 lands, then the host leg carries them.
+
+### Story 33.1: The Supervisor's Log File
+
+As the operator,
+I want the supervisor to write what its console shows into a file on disk,
+So that a tab that dies leaves its cause behind and a session can read the last pass without the screen (hole 66).
+
+**Acceptance Criteria:**
+
+**Given** `start.ps1` and the three bun processes it runs (`serve`, `tick`, `drain`)
+**When** the supervisor runs
+**Then** every line the console shows is also appended to `<TK_SUPERVISOR_WORK>\supervisor\logs\supervisor-<YYYY-MM-DD>.log` (one file per UTC day, the last 14 kept, each line stamped `<ISO time> [serve|tick|drain|keeper|pacer]`), with explicit `started`, `stopped (<why>)` and `uncaught: <error>` lines from the script and from each process's exit; a line never carries a value of a `TK_SUPERVISOR_*` variable or any token (the page's redaction applies); `GET /status` gains `log {path, last_lines[]}` (the last 20 lines, redacted; contract 0.1.28, additive) and the HTML status page shows them
+
+**Given** the log
+**When** `tk-studio doctor` runs
+**Then** it reports the newest log's last `stopped` or `uncaught` line and its age when the API does not answer, and "no log" when the folder is absent; `bun test` covers the line shape, the rotation and the redaction with a fake clock; the runbook's hole-66 row names the file
+
+### Story 33.2: Refusals Reach the Owner, Not the Console
+
+As the owner,
+I want a run that cannot claim to say why in its record and in my inbox,
+So that an expired sandbox login or a failed pin never leaves a run silently queued for hours (holes 68, 69).
+
+**Acceptance Criteria:**
+
+**Given** a queued run the drain cannot claim (the Max-login preflight refuses, the pin fails, the placement is refused, the checkout lock is held by a live holder)
+**When** the drain passes over it
+**Then** the run stays `queued` and gains one queue event `claim-refused {reason, pass_at}` per distinct reason (a repeated reason updates `pass_at` on the same event, never a flood), the notifier sends one line per new reason with the run id and what resolves it, `GET /runs/{id}`, `GET /status`'s live list and the office's `problems[]` carry the latest reason (contract 0.1.28, additive), and the claim proceeds on the next pass once the reason clears, recorded as `claim-refusal-cleared`
+
+**Given** the engine sandbox's Max login (the global `anthropic` sbx secret, renewed from inside the sandbox with `/login`)
+**When** `tk-studio doctor` or the activate drift check runs
+**Then** they read `refreshTokenExpiresAt` from the sandbox's `~/.claude/.credentials.json` through `sbx exec` (never the tokens) and warn from 7 days before expiry, naming the renewal steps (`sbx run --name <sandbox>` → `/login` → `/exit`); an expired login is a failed check; `bun test` and the lib suite cover the events, the notifier line, the doctor reading and the warning window with fakes
+
+### Story 33.3: The Pin Restarts a Logged-Out Sandbox
+
+As the supervisor,
+I want the pin to notice a running sandbox without a Max login and restart it once,
+So that a sandbox started outside the supervisor never blocks every claim (hole 68).
+
+**Acceptance Criteria:**
+
+**Given** a run on the sbx tier whose sandbox is already running when the pin runs
+**When** the pin's login probe (`sbx exec <sb> env -u ANTHROPIC_API_KEY claude auth status --json`) answers not logged in
+**Then** the pin stops and starts the sandbox once (`sbx stop`, `sbx run -d --name`), probes again, and only then runs the preflight; both attempts are recorded on the run (`pin-restart {probe_before, probe_after}`); a sandbox still logged out after the restart refuses the claim through 33.2's event naming the renewal; a sandbox the supervisor itself pinned in this pass is never restarted twice
+
+**Given** `tk-studio-launch check` (the readiness check) and the runbook
+**When** the engine sandbox is running with no supervisor pin recorded for it
+**Then** the check names it as a warning ("started outside the supervisor; the next pin restarts it"), and the runbook's hole-68 row stays the rule for sessions; `bun test` covers the restart, the single-restart rule and the warning with a fake `sbx`
+
+### Story 33.4: The Host Leg Runs the Supervisor's Suites
+
+As the operator,
+I want `tools/verify_host.py` to run the supervisor's test suites when `apps/supervisor` changed,
+So that a Windows-only failure is caught by the gate and not by a hand recipe, and the suites stop leaking temp folders (holes 63, 64, 51, 56).
+
+**Acceptance Criteria:**
+
+**Given** a run whose diff touches `apps/supervisor`
+**When** the host leg runs
+**Then** `verify_host.py` adds a `supervisor` gate after `conformance`: each `test/*.test.ts` file but the e2e command-line suite in its own `bun test` under a per-file timeout (420 s), with every `TK_SUPERVISOR_*` variable stripped from its environment and `TMPDIR`/`TEMP` pointing at a per-run folder under the run's worktree that the gate removes afterwards, then `bunx tsc --noEmit -p apps/supervisor`; the gate's lines name each file's pass/fail counts and the slowest file; an unchanged `apps/supervisor` skips it like the studio-web gate; the recipe the handoff carried (hole 51/56) retires
+
+**Given** the suites
+**When** they create temp directories and queues
+**Then** a shared helper `apps/supervisor/test/tmp.ts` owns `mkdtemp`, the queues opened inside it and the removal in `afterAll` (queues closed first, hole 63), every suite uses it, and a run of the whole gate leaves no `tk-sup-*` folder behind; `tk-studio doctor` warns when the user's Temp holds more than 500 `tk-sup-*` folders and names the cleanup; the runbook's hole-64 row is updated
+
+### Story 33.5: The Roster Gate Inside the Engine, Tracked
+
+As the loop,
+I want the deterministic verify command that runs the lib roster gate inside the engine to live in the repository,
+So that a story adding a skill fails in the engine on every box, not only where an operator edited the policy overlay by hand (hole 62).
+
+**Acceptance Criteria:**
+
+**Given** the engine policy the launch materialises into every run worktree (`.bmad-loop/policy.toml`, a gitignored operator overlay today)
+**When** the launch's readiness check runs
+**Then** the `[verify] commands` list is reconciled from a tracked source (`plugins/tk-studio/pipeline/verify-commands.toml`, or the project's `.tk-studio/config.yaml` `engine.verify_commands`): a missing command is added, an operator's extra commands are kept, and the reconciliation is reported in the check's result; the tracked list carries `uv run --directory plugins/tk-studio/lib python -m unittest tests.test_release_roster` for tk-studio; a project without the list is unchanged; conformance covers the reconciliation and the lib suite covers the merge rules
+
+**Given** a story that adds a skill without its roster row
+**When** the engine's verify runs after a clean review
+**Then** the command fails, bmad-loop routes the failure to a dev fix session, and the host leg never sees the roster miss; the runbook's hole-62 row points at the tracked source
+
+### Story 33.6: A Stale Render View Never Halts a Story
+
+As the loop,
+I want the supervisor to recognise the one halt that is the sandbox's stale view of a freshly rendered skill snapshot and resume by itself,
+So that a story does not wait on an operator for a file that is already there (hole 65).
+
+**Acceptance Criteria:**
+
+**Given** a run paused on a CRITICAL escalation whose reason says the skill render failed and names the snapshot folder under `_bmad/render/`
+**When** the paused-run pass runs and the host sees that folder complete (every file the manifest names is present and non-empty)
+**Then** the pass removes the snapshot folder and the dev session's untracked `blocked` spec draft, resumes the run once (`POST /runs/{id}/resume`'s path), records `auto-resume {reason: stale-render-view, snapshot, attempt: 1}` and notifies one line; a second such pause on the same story is left for the operator with the reason naming the first attempt; the upstream skills are untouched (no fork)
+
+**Given** the pass
+**When** it is tested
+**Then** `bun test` covers the recognition (the reason text, the folder check), the single-attempt rule and the untouched other pauses with fixtures; the runbook's hole-65 row names the behaviour
+
+### Story 33.7: A Resumed Engine's Graceful Stop Ends Complete, and the Pacer's Passes Are Visible
+
+As the operator,
+I want a run whose resumed or relaunched engine stops gracefully after its story to end `complete`, and the pacer's slow passes to be visible,
+So that `partial` means something went wrong and a 30-minute tick is seen when it happens (hole 59; the 2026-10-26 tick).
+
+**Acceptance Criteria:**
+
+**Given** a run whose engine was resumed (`POST /runs/{id}/resume`) or relaunched by the paused-run pass and then ends `stopped` after a `story-done` for the story it was driving
+**When** the engine-end sweep runs
+**Then** the run ends `complete` exactly as a first engine's graceful stop does (`reason: null`, the PR not a draft), and `partial` is reserved for an engine that stopped before its story landed; `bun test` covers both paths on resumed and relaunched engines
+
+**Given** the pacer (`start.ps1`: tick, drain, sleep)
+**When** each pass runs
+**Then** its duration and exit code are logged (33.1's file) and the last ones are served in `GET /status` as `pacer {last_tick_ms, last_drain_ms, last_pass_at}` (contract 0.1.28, additive), a pass longer than 10 minutes is logged as a warning naming the pass and the run it was driving, and the status page shows the pacer line; the runbook's supervisor table gains the pacer's shape
+
+### Story 33.8: An Ended Run's Host Leg, Re-runnable
+
+As the operator,
+I want to re-run a run's host leg on its pushed branch through the supervisor after fixing what made it red,
+So that a roster miss or an environment fault never needs the hand recipe (hole 52).
+
+**Acceptance Criteria:**
+
+**Given** an ended run with a pushed branch and a PR (`partial` with `host_verify: red`, or any ended run)
+**When** `POST /runs/{id}/verify` arrives (the bearer only) or the cli verb `verify <run id>` runs
+**Then** the supervisor cuts a fresh worktree from the branch's tip, runs the project's `verify.host` there exactly as the close-out does, records a new `host-verify` event with the result, removes the worktree, and on green marks a draft PR ready and ends the run's `host_verify` state `green` (the run's terminal state is unchanged; the plan pull-back sees the PR as before); a live run, an external run or a run with no branch is a 409 by name; a leg already running for the run is 409 `VerifyRunning`; contract 0.1.28 names the route
+
+**Given** the verb
+**When** it is tested
+**Then** `bun test` covers the worktree, the recorded event, the draft-to-ready flip and every refusal with fakes; the README's route table and the runbook's "when a host leg is red" steps name it
