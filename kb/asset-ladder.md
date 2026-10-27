@@ -118,5 +118,29 @@ error, and `check` reports both entries `pass`. Record here: the Blender version
 `asset.generator` string, whether a second `greybox` into an empty art path gives the same `.glb` bytes,
 and the `check` output.
 
-Status: not yet run on the box (pending the operator's step; the art path must sit where the Godot
-project imports it).
+Status: **run on the box on 2026-10-27 (15:4xZ) by the operator session, green.** The TUA scratch clone
+`C:\agent-work\scratch\tua-playable` (branch `assets/greybox-trial`, nothing committed: the slice's manifest
+is the vertical-slice epic's to write) carried a two-entry manifest, `dorm-desk` (prop, box, 1.2 × 0.75 × 0.6 m,
+budget 500) and `student-stand-in` (character, capsule, 0.5 × 1.7 × 0.3 m, budget 400), with
+`--art-path art/world/greybox`.
+
+- Blender: `Blender 5.2.2 LTS (hash d13f752e3b9c built 2026-09-15 01:37:04)` through the `BLENDER` user
+  variable (set on the box that day); `asset.generator` in both files: `Khronos glTF Blender I/O v5.2.40`.
+- `check` before: `missing: 2`, status `complete`. `greybox`: `written: 2`, 11.9 s for the run (Blender 2.7 s
+  per asset); the artifacts `dorm-desk.label.png` (721 bytes), `dorm-desk.glb` (2,896 bytes),
+  `student-stand-in.label.png` (859 bytes), `student-stand-in.glb` (31,508 bytes).
+- `check` after: `pass: 2`. `dorm-desk`: 12 triangles, bounds 1.2/0.75/0.6, min (−0.6, 0, −0.3), max
+  (0.6, 0.75, 0.3), origin `base-center`, UV present, 1 material. `student-stand-in`: 400 triangles (the
+  capsule's segments reduced to the budget exactly), bounds 0.5/1.7/0.3, min (−0.25, 0, −0.15), max
+  (0.25, 1.7, 0.15), origin `base-center`, UV present, 1 material. `facts` on each file reports the same.
+- Determinism, the strong layer holds: a second `greybox` into an empty art path (`art/world/greybox-2`)
+  gave the same bytes for all four files (sha256 `df0cc519…` / `c569144e…` for the two `.glb`, `b86048c7…` /
+  `5c7e0e01…` for the two labels), so under Blender 5.2.2 the `.glb` is the same bytes for the same manifest.
+- Godot 4.7.2 Mono (`$env:GODOT`, `--headless --path game --import --quit`): both files imported in 4.6 s
+  with no error; the importer wrote `<name>.glb.import` and extracted the embedded label as
+  `<name>_<name>.png` (+ `.import`) beside each file, with the `.scn`/`.ctex` pairs under `.godot/imported/`.
+  TUA's `art/world/greybox` sits outside the Godot project (`game/`), as `art/ART-BIBLE.md` wants for the
+  working area: the trial copied the `.glb` files under `game/art/greybox-trial/` for the import and removed
+  them after. A slice that loads greyboxes in the game promotes them into the content folder the E9 stories
+  own (the manifest's `art_path` stays the working area), and the importer's sidecars land there — four
+  files per asset.
