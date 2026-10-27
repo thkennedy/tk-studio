@@ -436,3 +436,24 @@
 - What no longer holds: "the pin stops and starts the sandbox once …, probes again, and only then runs the preflight" as one site (there are two pin sites now), and "refuses the claim through 33.2's event" for every run (only drained runs claim).
 - Suggested adjustment: put the probe-and-restart in one shared seam in `sandbox.ts`, called by both `pinBeforeClaim` and `queueRecorder.pin`. A drained run still logged out after the restart refuses through the existing `max-login` key (`loginResolves`, which names the renewal). Do not add a new key. A relaunched or resumed run keeps ending `blocked` through `authPreflight`. Record `pin-restart` with the same in-place rule as `pin-failed`, so the events never flood. See plans/33-3.md.
 - Status: closed — applied to the unstarted 33-3 entry's invoke_dev_with and to plans/33-3.md by the gate session (2026-10-26)
+
+## 34-3-the-playable-verify-leg — scope: stories — from 34-1-the-engine-gate-on-the-host-leg — 2026-10-27
+
+- What changed: 34-1 made `engine?: EngineStep` optional on `HostVerifyRan` (`apps/supervisor/src/hostverify.ts`). The producer always writes it from contract 0.1.29, but recorded pre-34.1 events are re-read by the close-out and the re-run (consult ruling, score 2). `redReason` and `prSection` tolerate its absence.
+- What no longer holds: the plan's "prefer fixtures gaining `engine` over making it optional" (34-1 Code Map); 34-3's "the `host-verify` event carries `playable: pass | fail | skipped`" must follow the same pattern.
+- Suggested adjustment: add `playable` optional on `HostVerifyRan`, always written on a ran leg, and tested on the producer's output. Treat a missing `engine` or `playable` as "not run" in every reader. The leg's `green` becomes host green && engine not red && playable not fail. Extend the 0.1.29 paragraph and do not bump the version (SPEC design note, contract 0.1.29).
+- Status: closed — applied to the unstarted 34-3 entry's invoke_dev_with by the 34-1 gate session (2026-10-27)
+
+## 34-2-spike-a-playable-run-on-the-box — scope: stories — from 34-1-the-engine-gate-on-the-host-leg — 2026-10-27
+
+- What changed: 34-1 found that the box's console exe is `Godot_v4.7.2-stable_mono_win64_console.exe` (runbook §2). Prepending `dirname($GODOT)` to PATH does not make a bare `godot` resolve, so projects call `$GODOT`. A non-absolute `GODOT` gets no prepend, and the doctor's `engine` row fails it.
+- What no longer holds: the epic narrative's "Godot (`$env:GODOT`, `godot` on PATH)" for the host.
+- Suggested adjustment: `playable.py run` starts the absolute path in `$GODOT` (or a `--godot` flag), never a bare `godot`. Its refusal and the launch check warning name an unset or non-absolute `GODOT`, as the doctor row does.
+- Status: closed — applied to the unstarted 34-2 entry's invoke_dev_with and to plans/34-2.md by the 34-1 gate session (2026-10-27)
+
+## 34-4-engine-knowledge-pinned-per-project — scope: stories — from 34-1-the-engine-gate-on-the-host-leg — 2026-10-27
+
+- What changed: as for 34-2. On the box, the engine is reached only through `$GODOT` (an absolute path to the `*_console.exe`). `godot` on PATH is not the box's name for it. The sandbox's Linux Godot, when provisioned with `WITH_GODOT`, is the one place a bare `godot` exists (runbook :689-693).
+- What no longer holds: "`godot` on PATH" as the box's rule (epic narrative).
+- Suggested adjustment: the skill's `$env:GODOT` rule reads "on the host, call `& $env:GODOT …` (an absolute path to the console exe); a bare `godot` resolves only in a sandbox provisioned with `WITH_GODOT`".
+- Status: closed — applied to the unstarted 34-4 entry's invoke_dev_with by the 34-1 gate session (2026-10-27)

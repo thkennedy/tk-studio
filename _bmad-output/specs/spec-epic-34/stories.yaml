@@ -58,6 +58,11 @@
     `34-2-spike-a-playable-run-on-the-box-*.md`, and a file named
     `34-2-spike-a-playable-run-on-the-box.md` is read as pending (loop deficiency 1,
     story 21-6).
+    Gate note (from 34-1, 2026-10-27): on the box the engine is the absolute path in
+    `$GODOT` (the `*_console.exe`); a bare `godot` does not resolve there, so
+    `playable.py run` starts `$GODOT` (or a `--godot` flag), never `godot`, and its
+    refusal and the launch check warning name an unset or non-absolute `GODOT` as
+    the doctor's `engine` row does.
 
 - id: "34-3-the-playable-verify-leg"
   title: "The `playable-verify` Leg"
@@ -86,6 +91,12 @@
     the engine resolves it by the glob `34-3-the-playable-verify-leg-*.md`, and a file
     named `34-3-the-playable-verify-leg.md` is read as pending (loop deficiency 1, story
     21-6).
+    Gate note (from 34-1, 2026-10-27): 34-1 made `engine?` optional on
+    `HostVerifyRan` (always written from 0.1.29; pre-34.1 recorded events lack it).
+    Add `playable` the same way: optional on the type, always written on a ran leg,
+    tested on the producer's output. Readers treat a missing `engine` or `playable`
+    as not run. The leg's `green` is host green && engine not red && playable not
+    fail. Extend the 0.1.29 paragraph and do not bump the version.
 
 - id: "34-4-engine-knowledge-pinned-per-project"
   title: "Engine Knowledge, Pinned per Project"
@@ -114,6 +125,10 @@
     `34-4-engine-knowledge-pinned-per-project-*.md`, and a file named
     `34-4-engine-knowledge-pinned-per-project.md` is read as pending (loop deficiency 1,
     story 21-6).
+    Gate note (from 34-1, 2026-10-27): the box's `$env:GODOT` rule is: on the host,
+    call `& $env:GODOT ...` (an absolute path to the console exe), because a bare
+    `godot` does not resolve there. A bare `godot` exists only in a sandbox
+    provisioned with `WITH_GODOT` (runbook §3, the Linux Godot).
 
 - id: "34-5-one-engine-mcp-per-run-started-by-the-pin"
   title: "One Engine MCP per Run, Started by the Pin"

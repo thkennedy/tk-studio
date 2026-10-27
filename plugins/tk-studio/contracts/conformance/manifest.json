@@ -136,6 +136,12 @@
           "argv": ["contracts/conformance/e2e_verify_commands.py", "--directory", "{sandbox}"],
           "expect": "ok",
           "note": "the Story 33.5 e2e drive (hole 62): in projects it builds inside the sandbox, launch.py check reconciles the policy's [verify] commands from .tk-studio/config.yaml engine.verify_commands — the tracked command added after the operator's extra, the extra kept, the row and verify_commands key reporting it; a second check unchanged and byte-identical; a project with no tracked list byte-identical"
+        },
+        {
+          "assertion": "headless-clean",
+          "argv": ["contracts/conformance/e2e_engine_gate.py"],
+          "expect": "ok",
+          "note": "the Story 34.1 e2e drive: the host leg's engine gate drives a fake godot to green and red (Story 34.1) — bun test test/hostverify.test.ts from apps/supervisor under a fresh temp folder, bounded at 50 s (below the runner's 60 s drive timeout, so the drive kills a hung suite and removes its temp folder itself), the fake godot found only through the folder of GODOT prepended to PATH; not run (ok) without the checkout or bun on PATH, the cli_drives precedent"
         }
       ]
     },

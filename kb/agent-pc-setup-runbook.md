@@ -854,7 +854,19 @@ delete and check out the affected files again.
    naming the command and its last lines, the branch is still pushed, and the
    PR opens as a draft whose `## Host verify` section carries the failures; the
    notification names them. No attended host run before the PR is needed: fix
-   the failures named on the draft PR (supervisor Story 27.4). A run started
+   the failures named on the draft PR (supervisor Story 27.4). A game project
+   also declares `verify.engine` beside `verify.host` in the same file (TUA:
+   `verify.engine: bash scripts/engine-gate.sh`, the headless import then the
+   GoDotTest suite); after a green `verify.host` the supervisor runs it in the
+   same worktree with the folder of `$env:GODOT` first on PATH and records the
+   verdict as `engine` on the same `host-verify` event (`green`, `red`, or
+   `skipped` with why). An engine red is a red leg: `partial`, the draft PR,
+   the reason ``host verify red (engine): …`` (Story 34.1). The folder of
+   `GODOT` goes first on PATH so a binary in that folder resolves by name, but
+   the box's console exe is not named `godot` (§2): the project's command
+   calls the engine through `$GODOT`, as TUA's `engine-gate.sh` does. Set the
+   `GODOT` user variable (§2) and start the supervisor after it: a supervisor
+   started before it has no `GODOT`. A run started
    by hand (`launch-epic.sh`) still needs the host suite run by hand
    (`uv run python tools/verify_host.py`, the same command the key names)
    before its PR from `loop/epic-<N>` into `main`.
@@ -966,7 +978,7 @@ itself, a pacer, crash recovery, an HTTP API and a status page. It was built on
 | Item | Value |
 |---|---|
 | Checkout lock | (28.5) One lock per git checkout: its key is the project root's canonical, case-folded `git rev-parse --show-toplevel`, read once at submission and recorded on the run (a root outside git keys by itself). `apps\supervisor` and `C:\GitHub\tk-studio` therefore share one lock: the second queued run shows `lock-wait` naming the first on `/status`, and the two never run at once. The lock row and the status page still name the project root that holds it. The `starter.lock` stays per project. |
-| Served subpath | (28.5) A project below its git top-level is served at `<worktree>\<prefix>` (`git rev-parse --show-prefix`, for example `C:\agent-work\worktrees\<project>\<run id>\apps\supervisor`): the worker's cwd, `payload.directory`, the sbx VM path, `tk install`/`tk activate`, the copied runtime, the engine's `.bmad-loop`, and `verify.host` (read from `<base>:<prefix>.tk-studio/config.yaml`, run there). The worktree itself is still cut at the repository's top, and the push, PR and `git worktree remove` run there. A project at its top-level is unchanged. |
+| Served subpath | (28.5) A project below its git top-level is served at `<worktree>\<prefix>` (`git rev-parse --show-prefix`, for example `C:\agent-work\worktrees\<project>\<run id>\apps\supervisor`): the worker's cwd, `payload.directory`, the sbx VM path, `tk install`/`tk activate`, the copied runtime, the engine's `.bmad-loop`, and `verify.host` and `verify.engine` (34.1; both read from `<base>:<prefix>.tk-studio/config.yaml`, run there). The worktree itself is still cut at the repository's top, and the push, PR and `git worktree remove` run there. A project at its top-level is unchanged. |
 | Studio web | (30.2) The supervisor serves the built web at `/app` on its own origin, behind the bearer or the session cookie (a browser without a session gets the sign-in page and returns to the page it asked for). It lives in the installer's slot `<root>\studio-web\<version>\`, found through `current.json`'s `"studio-web".path`, else in the checkout's `apps\studio-web\dist`. Built by the release motion (`uv run python tools/release_archive.py run --app studio-web --version X.Y.Z`: `bun install --frozen-lockfile` and `bun run build` from the tag, `dist`'s contents zipped) or by hand: `cd apps\studio-web; bun install --frozen-lockfile; bun run build`. Not built: `GET /app` answers `503 WebNotBuilt` naming that command, and the status page shows a note saying so. |
 | The home | (30.6) The web is the home: a signed-in `GET /` answers the built web's `index.html` (the Office screen first, then whichever screen this browser last showed: Office, Board or Status). Build it as the row above says (`cd apps\studio-web; bun install --frozen-lockfile; bun run build`, the command a `503 WebNotBuilt` names) or install a release; until it is built, `GET /` answers the read-only status page with its "not built" note, never a 503. The read-only page moved to `GET /status`: a browser (an `Accept` naming `text/html`) gets the page, without JavaScript; anything else (`curl`, `set-supervisor-env.ps1`, §4.5) gets the same JSON as before. The web's Status screen links it. |
 | Pacer | (33.7) `start.ps1` runs tick, drain, then sleeps `-IntervalSeconds` (default 60). Each step runs under the log tee with `--pass` and logs `pass: <ms> ms, exit <code>`. A step over 10 min logs `warning: pass <step> took … driving <run ids>` and sends one notifier line. The last pass is in `<TK_SUPERVISOR_WORK>\supervisor\pacer.json` and on `GET /status` as `pacer {last_tick_ms, last_drain_ms, last_pass_at}`, and the status page shows its line. |
@@ -1241,7 +1253,7 @@ Epic 21 and 22 set:
 | `hold` | (27.2/27.3) The supervisor's own `sbx exec … tail --pid` (or the resume's child) holding the engine's sandbox open. |
 | `closing-out`, `closed_out`, `lock-released` | (27.1/27.5) A late close-out took its lease; a close-out recorded on a run already ended (`orphaned: true` for the orphan pass); a kept lock freed. |
 | `close-out`, `close-out-failed`, `awaiting-ruling`, `engine-resume` | (27.3) The paused-run pass relaunched a landed run; a step failed (retried next tick); a landed story with no verdict or `escalate` (one notification); `POST /runs/{id}/resume` moved the run back to `running`. |
-| `host-verify` | (27.4) The project's `verify.host` ran on the host in the worktree: exit, duration, the last lines; or skipped and why. (33.8) A re-run (`POST /runs/{id}/verify`, `bun src/cli.ts verify <id>`) adds `rerun {by, head, worktree, pr, pr_ready?}`. |
+| `host-verify` | (27.4) The project's `verify.host` ran on the host in the worktree: exit, duration, the last lines; or skipped and why. (34.1) A ran leg carries `engine {verdict: green\|red\|skipped, reason?, command?, exit?, stdout_tail?, stderr_tail?, godot_dir, …}`: the project's `verify.engine` after a green `verify.host`; an engine red makes the leg red. (33.8) A re-run (`POST /runs/{id}/verify`, `bun src/cli.ts verify <id>`) adds `rerun {by, head, worktree, pr, pr_ready?}`. |
 | `host-verify-leg` | (33.8) The lease of an ended run's host-leg re-run: `{owner, by}` taken, `{owner: null, released}` let go of after a failed cut; the re-run's `host-verify` closes it. |
 | `plan-status`, `plan-lease` | (27.5) The plan pull-back through `plansync.py status`: `review` when the PR opens, `done` when it merges, a skip naming why; never changes the run's state. The project that owns the plan comes from the host registry (tk-studio is registered on this box). |
 | `accounted`, `worker` | (21.6/27.5) The iteration's counts now carry `cost_usd` (`run.json`'s `total_cost_usd` is the sum across iterations); the worker record lands pid first, the start time after it (win32: `GetProcessTimes` natively). |
@@ -1333,7 +1345,11 @@ fail, warn or skipped and the fix: Claude Code against the roster floor, the
 skills-dir plugin against the roster, the per-user store, `sbx daemon status`
 (never another sbx command), folder trust for every registered root, long
 paths, the PATH launcher, the Tailscale certificate's age, the supervisor's
-slot or checkout and whether `/status` answers, studio-web, leftovers from an
+slot or checkout and whether `/status` answers, studio-web, the `engine` row
+(Story 34.1: `GODOT` set and naming a file, with the version
+`& $env:GODOT --version` prints; `skipped` `no engine` otherwise — the
+binary the host leg's `verify.engine` calls through `$GODOT`, its folder
+first on PATH), leftovers from an
 interrupted install or update, and Hermes' `auth.adopt_external_logins`. On
 Windows it also checks the cut-over (Epic 28): `supervisor-root` (the
 shortcut's working directory is the nested root `apps\supervisor`, not a
@@ -1392,7 +1408,7 @@ Doctor is read-only. The table keeps only what the CLI cannot check.
 | Restarting a running supervisor from a session: `Stop-ScheduledTask` leaves the tab's tree alive and a second `Start-ScheduledTask` instance cannot bind the port | agent PC, 2026-10-26 | find the `pwsh -NoExit -File ...start.ps1` process (`Get-CimInstance Win32_Process`), end its tree with `MSYS_NO_PATHCONV=1 taskkill /T /F /PID <pid>`, then `Start-ScheduledTask -TaskName 'tk-studio supervisor'`; the API answers within a minute (a keeper started early retries its bind with a back-off) |
 | A dev session sits idle at its prompt inside the sandbox (a halt it printed, waiting for an operator) and will burn its attempt to the 90-minute timeout | agent PC, 2026-10-26 | steer it from its pane: `sbx exec claude-tk-studio tmux send-keys -t bmad-loop-<engine run id>:1.0 "<message>"`, then send `Escape` and `Enter` as separate `send-keys` (a bare Enter after the text does not submit); never write or commit in a live run's worktree meanwhile (a mid-attempt commit moves the baseline and the loop defers the finished story) |
 | A supervisor PR stays open with no live run behind it: a cancelled run's close-out opened it (PR #161, run cancelled 2026-10-24 15:55Z, PR opened 16:41Z) and nothing closes it while the relaunch lands the same work (hole 73) | agent PC, 2026-10-27 | `gh pr list --state open` at the start of a session; a run PR whose run is `cancelled` or whose job has a later merged run is superseded: close it with a comment naming the cancellation and the landing PR; the fix to make: the close-out of a cancelled run opens no PR and the ended-run sweep closes a superseded one |
-| A game project's engine gate never runs in the loop: the engine sandbox (Linux) has no `godot`, and the host leg runs `scripts/verify.sh` without `TUA_ENGINE_GATE=1`, so the headless import and the GoDotTest suite are skipped on both sides (found planning Epic 34) | agent PC, 2026-10-27 | until Story 34.1 lands, run the gate by hand in the run's worktree on the host: `TUA_ENGINE_GATE=1 bash scripts/verify.sh` (or `bash scripts/engine-gate.sh`) with `$env:GODOT`'s folder on PATH; 34.1 adds `verify.engine` to the host leg |
+| A game project's engine gate never ran in the loop: the engine sandbox (Linux) has no `godot`, and the host leg ran `scripts/verify.sh` without `TUA_ENGINE_GATE=1`, so the headless import and the GoDotTest suite were skipped on both sides (found planning Epic 34) | agent PC, 2026-10-27 | landed in Story 34.1: the project declares `verify.engine` beside `verify.host` in its tracked `.tk-studio/config.yaml` (TUA: `bash scripts/engine-gate.sh`), and the host leg runs it after a green `verify.host` with `$env:GODOT`'s folder first on PATH, recording `engine` on `host-verify` (an engine red is a red leg); `tk-studio doctor`'s `engine` row shows whether `GODOT` answers `--version`; start the supervisor after setting `GODOT` (§3.8 step 5) |
 | CRLF checkout makes every BMad-installer rewrite show as modified | first agent PC, 2026-09-26 | `core.autocrlf false` before cloning; one-time re-checkout otherwise (§3.1) |
 | Plugin skills work in the desktop app but headless `claude -p /tk-studio:…` is "Unknown command" (no CLI install record) | first agent PC, 2026-09-27; "tk activate" plugin plane | `tk-studio install`: the CLI loads the skills-dir folder with no install record (§3.4) |
 | A detached bmad-loop engine and its tmux server die within a minute | sbx v0.45.1: the sandbox stops when no `exec` or session is attached (first agent PC, 2026-09-28) | hold an `sbx exec` for the engine's lifetime (`tools/sbx-engine/launch-epic.sh`, §3.8) |

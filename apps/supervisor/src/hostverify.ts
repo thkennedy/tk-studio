@@ -14,12 +14,24 @@
  *            `detached` on win32, the tree killed on timeout), the worker's env (`buildWorkerEnv`), under the
  *            host-tier worker's wall-clock guard; both streams go to files, so a timeout keeps their tails.
  *   result   a `host-verify` event: `{command, argv, cwd, exit, duration_ms, signal?, guard?, error?, green,
- *            stdout_tail, stderr_tail}`, or `{skipped: true, reason}`. Green is exit 0; a timeout, a spawn
- *            failure or a non-zero exit is red: the run ends `partial` naming the command, the PR a draft.
+ *            stdout_tail, stderr_tail, engine}`, or `{skipped: true, reason}` (no `engine`). Green is exit 0; a
+ *            timeout, a spawn failure or a non-zero exit is red: the run ends `partial` naming the command, the
+ *            PR a draft.
+ *   engine   Story 34.1: the engine gate. `verify: {engine: "<one command line>"}` beside `host` in the same
+ *            base config, split the same way, runs only after the host command is green, in the same cwd, as its
+ *            own step through the same wrapper under the same full guard. Its env is the host step's (worker env,
+ *            Git `usr\bin` first on win32) with the folder of `GODOT` (the leg's env) prepended under `pathKey`
+ *            (one key, hole 54); the leg never resolves `godot` itself (the bare-first-token rule of hole 52
+ *            applies to the engine argv as to the host's). Recorded as `engine: {verdict: green | red | skipped,
+ *            reason?, command?, argv?, cwd?, exit?, duration_ms?, signal?, guard?, error?, stdout_tail?,
+ *            stderr_tail?, godot_dir}` (`godot_dir` null when `GODOT` is unset or not an absolute path: the command
+ *            still runs, PATH unchanged). Skip reasons: `no verify.engine`, `verify.engine is not a non-empty string`,
+ *            `verify.host red`. The leg's `green` is host green and engine not red, so every consumer reads an
+ *            engine red through `isRed` as a red leg; its reason reads `host verify red (engine): …`.
  */
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, isAbsolute, join } from "node:path";
 
 /** Hole 46 (win32 only): Git for Windows' `usr\bin` (Git Bash, `bash.exe`) beside the `Git\cmd` or
  * `Git\bin` entry on PATH, or null. The console's bare `bash` is the WindowsApps WSL launcher, which runs a
@@ -55,6 +67,16 @@ export type HostVerifyRan = {
   git_bash?: string;
   /** Hole 52 (win32): the command's first token as spawned, when it was a bare name found in that `usr\bin`. */
   resolved?: string;
+  /** Story 34.1: the engine gate's step (`verify.engine`), run only after a green host command. Optional on
+   * the type only for `host-verify` events recorded before 34.1; every ran result of this leg carries it. */
+  engine?: EngineStep;
+};
+/** Story 34.1: the engine gate's step on a ran leg. `reason` only when skipped; the run fields mirror the host
+ * command's own; `godot_dir` the folder of `GODOT` prepended to PATH, null when unset or not absolute. */
+export type EngineStep = {
+  verdict: "green" | "red" | "skipped"; reason?: string; command?: string; argv?: string[]; cwd?: string;
+  exit?: number | null; duration_ms?: number; signal?: string; guard?: string; error?: string;
+  stdout_tail?: string[]; stderr_tail?: string[]; godot_dir: string | null;
 };
 export type HostVerifySkipped = { skipped: true; reason: string };
 export type HostVerifyResult = HostVerifyRan | HostVerifySkipped;
@@ -87,9 +109,15 @@ export function splitCommand(line: string): string[] {
   return out;
 }
 
+/** Story 34.1: the engine gate's command from the same base config, or why its step is skipped. */
+export type EngineCommand = { command: string; argv: string[] } | { skipped: string };
+export type VerifyCommand = { command: string; argv: string[]; engine: EngineCommand };
+
 /** The command the leg runs for `run`, or why it is skipped: another tier (the worker ran on the host),
- * a gone worktree, no config at the base, an unreadable one, no `verify.host`, or not a non-empty string. */
-export async function verifyCommand(run: Run, deps: Deps = {}): Promise<{ command: string; argv: string[] } | HostVerifySkipped> {
+ * a gone worktree, no config at the base, an unreadable one, no `verify.host`, or not a non-empty string.
+ * Story 34.1: with `engine`, `verify.engine` split the same way, or its skip (`no verify.engine`, or
+ * `verify.engine is not a non-empty string`); a host-side skip skips the whole leg, engine included. */
+export async function verifyCommand(run: Run, deps: Deps = {}): Promise<VerifyCommand | HostVerifySkipped> {
   if (run.tier !== "sbx") return { skipped: true, reason: "host-tier run: the worker ran on the host" };
   if (!run.worktree || !existsSync(run.worktree)) return { skipped: true, reason: "worktree gone" };
   const base = run.base_ref ?? "";
@@ -116,7 +144,15 @@ export async function verifyCommand(run: Run, deps: Deps = {}): Promise<{ comman
   const host = (verify as Record<string, unknown>).host;
   const argv = typeof host === "string" ? splitCommand(host) : [];
   if (typeof host !== "string" || !argv.length) return { skipped: true, reason: "verify.host is not a non-empty string" };
-  return { command: host.trim(), argv };
+  let engine: EngineCommand;
+  if (!("engine" in verify)) engine = { skipped: "no verify.engine" };
+  else {
+    const line = (verify as Record<string, unknown>).engine;
+    const engineArgv = typeof line === "string" ? splitCommand(line) : [];
+    engine = typeof line !== "string" || !engineArgv.length ? { skipped: "verify.engine is not a non-empty string" }
+      : { command: line.trim(), argv: engineArgv };
+  }
+  return { command: host.trim(), argv, engine };
 }
 
 /** The last `TAIL_LINES` non-empty-ended lines of a stream, each clipped and redacted. */
@@ -147,8 +183,63 @@ export const CAPTURE = [
 /** A guard trip as `runProcess` names it: "`<cmd>` timed out after <n>s (process tree killed)" (`<n>` may be fractional). */
 const TIMED_OUT = / timed out after [\d.]+s \(process tree killed\)/;
 
+/** One step's outcome: what the capture wrapper recorded, shaped as the event's run fields. */
+type StepOutcome = {
+  exit: number | null; duration_ms: number; signal?: string; guard?: string; error?: string; stdout_tail: string[]; stderr_tail: string[];
+};
+const stepGreen = (o: StepOutcome) => o.exit === 0 && !o.guard && !o.error;
+
+/** Hole 52: a bare first token that Git's `usr\bin` holds is spawned by its full path there (or null). */
+function resolveBare(argv: string[], gitBash: string | null): string | undefined {
+  if (!gitBash || !argv[0] || /[\\/]/.test(argv[0])) return undefined;
+  const exe = join(gitBash, /\.exe$/i.test(argv[0]) ? argv[0] : `${argv[0]}.exe`);
+  return existsSync(exe) ? exe : undefined;
+}
+
+/** Run one argv in `cwd` under the `CAPTURE` wrapper with `env`, bounded by `guardS` (the tree killed past
+ * it), and shape its outcome. Never throws. */
+async function runStep(argv: string[], cwd: string, env: Record<string, string | undefined>, guardS: number, deps: Deps): Promise<StepOutcome> {
+  const started = Date.now();
+  const out = (r: { exit: number | null; signal?: string; guard?: string; error?: string; stdout?: string; stderr?: string }): StepOutcome => ({
+    exit: r.exit, duration_ms: Date.now() - started,
+    ...(r.signal ? { signal: r.signal } : {}), ...(r.guard ? { guard: r.guard } : {}), ...(r.error ? { error: r.error } : {}),
+    stdout_tail: tail(r.stdout ?? ""), stderr_tail: tail(r.stderr ?? ""),
+  });
+  let dir: string;
+  try { dir = mkdtempSync(join(tmpdir(), "tk-sup-hv-")); }
+  catch (e) { return out({ exit: null, error: clip(`capture dir: ${message(e)}`) }); }
+  const files = { out: join(dir, "stdout"), err: join(dir, "stderr"), status: join(dir, "status.json") };
+  const read = (p: string) => { try { return readFileSync(p, "utf-8"); } catch { return ""; } };
+  const streams = () => ({ stdout: read(files.out), stderr: read(files.err) });
+  try {
+    const spec = join(dir, "spec.json");
+    writeFileSync(spec, JSON.stringify({ argv, cwd, ...files }), "utf-8");
+    const args = ["-e", CAPTURE, spec];
+    let res: RunResult;
+    try {
+      res = deps.run ? await deps.run(process.execPath, args, { cwd, timeoutS: guardS, env })
+        : await runProcess(process.execPath, args, { cwd, timeoutS: guardS, env });
+    } catch (e) {
+      const m = message(e);
+      if (TIMED_OUT.test(m)) return out({ exit: null, guard: wallClockTrip(guardS), ...streams() });
+      return out({ exit: null, error: clip(m), ...streams() });
+    }
+    let status: { exit?: number | null; signal?: string | null; error?: string } | undefined;
+    try { status = JSON.parse(read(files.status)); } catch { status = undefined; }
+    if (!status || typeof status !== "object") {
+      return out({ exit: null, error: clip(`capture wrapper exited ${res.exit}: ${res.stderr}${res.stdout}`), ...streams() });
+    }
+    if (status.error) return out({ exit: null, error: clip(status.error), ...streams() });
+    return out({ exit: typeof status.exit === "number" ? status.exit : null, ...(typeof status.signal === "string" && status.signal ? { signal: status.signal } : {}), ...streams() });
+  } catch (e) {
+    return out({ exit: null, error: clip(message(e)), ...streams() });
+  } finally { try { rmSync(dir, { recursive: true, force: true }); } catch { /* a temp dir left behind */ } }
+}
+
 /** Run the leg: the command from the base config, in the worktree, argv only, the worker's env, under
- * `guardS` seconds (the tree killed past it), through the `CAPTURE` wrapper. Never throws. */
+ * `guardS` seconds (the tree killed past it), through the `CAPTURE` wrapper; then (Story 34.1), when it is
+ * green, `verify.engine` the same way with the folder of `GODOT` first on PATH, under the full guard again.
+ * Never throws. */
 export async function hostVerify(run: Run, guardS: number, deps: Deps = {}): Promise<HostVerifyResult> {
   const cmd = await verifyCommand(run, deps);
   if ("skipped" in cmd) return cmd;
@@ -163,46 +254,31 @@ export async function hostVerify(run: Run, guardS: number, deps: Deps = {}): Pro
   // prefix alone still ran the WindowsApps stub (exit 127, nothing printed). A bare first token that Git's
   // `usr\bin` holds (`bash`, `sh`, …) is spawned by its full path there; the event records it as `resolved`.
   const argv = [...cmd.argv];
-  let resolved: string | undefined;
-  if (gitBash && argv[0] && !/[\\/]/.test(argv[0])) {
-    const exe = join(gitBash, /\.exe$/i.test(argv[0]) ? argv[0] : `${argv[0]}.exe`);
-    if (existsSync(exe)) { argv[0] = exe; resolved = exe; }
+  const resolved = resolveBare(argv, gitBash);
+  if (resolved) argv[0] = resolved;
+  const host = await runStep(argv, cwd, env, guardS, deps);
+  // Story 34.1: the engine gate. `GODOT` from the leg's env; its folder first on the step's PATH (one key).
+  // Only an absolute `GODOT`: a bare or relative one (`godot`, `godot.exe`) has `.` for its folder, which would
+  // put the worktree first, so a binary the run committed could shadow the gate; then PATH is left unchanged.
+  const godot = (deps.env ?? process.env).GODOT;
+  const godotDir = typeof godot === "string" && godot.trim() && isAbsolute(godot.trim()) ? dirname(godot.trim()) : null;
+  let engine: EngineStep;
+  if (!stepGreen(host)) engine = { verdict: "skipped", reason: "verify.host red", godot_dir: godotDir };
+  else if ("skipped" in cmd.engine) engine = { verdict: "skipped", reason: cmd.engine.skipped, godot_dir: godotDir };
+  else {
+    const engineEnv = { ...env };
+    if (godotDir) { const key = pathKey(engineEnv); engineEnv[key] = [godotDir, engineEnv[key]].filter((p) => p).join(delimiter); }
+    const engineArgv = [...cmd.engine.argv];
+    const engineResolved = resolveBare(engineArgv, gitBash);
+    if (engineResolved) engineArgv[0] = engineResolved;
+    const step = await runStep(engineArgv, cwd, engineEnv, guardS, deps);
+    engine = { verdict: stepGreen(step) ? "green" : "red", command: cmd.engine.command, argv: cmd.engine.argv, cwd, ...step, godot_dir: godotDir };
   }
-  const started = Date.now();
-  const ran = (r: Partial<HostVerifyRan> & { exit: number | null; stdout?: string; stderr?: string }): HostVerifyRan => ({
-    command: cmd.command, argv: cmd.argv, cwd, exit: r.exit, duration_ms: Date.now() - started, ...(gitBash ? { git_bash: gitBash } : {}), ...(resolved ? { resolved } : {}),
-    ...(r.signal ? { signal: r.signal } : {}), ...(r.guard ? { guard: r.guard } : {}), ...(r.error ? { error: r.error } : {}),
-    green: r.exit === 0 && !r.guard && !r.error, stdout_tail: tail(r.stdout ?? ""), stderr_tail: tail(r.stderr ?? ""),
-  });
-  let dir: string;
-  try { dir = mkdtempSync(join(tmpdir(), "tk-sup-hv-")); }
-  catch (e) { return ran({ exit: null, error: clip(`capture dir: ${message(e)}`) }); }
-  const files = { out: join(dir, "stdout"), err: join(dir, "stderr"), status: join(dir, "status.json") };
-  const read = (p: string) => { try { return readFileSync(p, "utf-8"); } catch { return ""; } };
-  const streams = () => ({ stdout: read(files.out), stderr: read(files.err) });
-  try {
-    const spec = join(dir, "spec.json");
-    writeFileSync(spec, JSON.stringify({ argv, cwd, ...files }), "utf-8");
-    const args = ["-e", CAPTURE, spec];
-    let res: RunResult;
-    try {
-      res = deps.run ? await deps.run(process.execPath, args, { cwd, timeoutS: guardS, env })
-        : await runProcess(process.execPath, args, { cwd, timeoutS: guardS, env });
-    } catch (e) {
-      const m = message(e);
-      if (TIMED_OUT.test(m)) return ran({ exit: null, guard: wallClockTrip(guardS), ...streams() });
-      return ran({ exit: null, error: clip(m), ...streams() });
-    }
-    let status: { exit?: number | null; signal?: string | null; error?: string } | undefined;
-    try { status = JSON.parse(read(files.status)); } catch { status = undefined; }
-    if (!status || typeof status !== "object") {
-      return ran({ exit: null, error: clip(`capture wrapper exited ${res.exit}: ${res.stderr}${res.stdout}`), ...streams() });
-    }
-    if (status.error) return ran({ exit: null, error: clip(status.error), ...streams() });
-    return ran({ exit: typeof status.exit === "number" ? status.exit : null, ...(typeof status.signal === "string" && status.signal ? { signal: status.signal } : {}), ...streams() });
-  } catch (e) {
-    return ran({ exit: null, error: clip(message(e)), ...streams() });
-  } finally { try { rmSync(dir, { recursive: true, force: true }); } catch { /* a temp dir left behind */ } }
+  return {
+    command: cmd.command, argv: cmd.argv, cwd, exit: host.exit, duration_ms: host.duration_ms, ...(gitBash ? { git_bash: gitBash } : {}), ...(resolved ? { resolved } : {}),
+    ...(host.signal ? { signal: host.signal } : {}), ...(host.guard ? { guard: host.guard } : {}), ...(host.error ? { error: host.error } : {}),
+    green: stepGreen(host) && engine.verdict !== "red", stdout_tail: host.stdout_tail, stderr_tail: host.stderr_tail, engine,
+  };
 }
 
 /** Is this result a red verify (it ran and was not green)? */
@@ -212,23 +288,38 @@ export const isRed = (v: HostVerifyResult | undefined): v is HostVerifyRan => !!
  * ``host verify red: `<command>` <how>; last lines: <the last 5 stderr lines, else
  * stdout, joined " | ">``. */
 export function redReason(v: HostVerifyRan): string {
-  const how = v.guard ? `timed out (${v.guard})` : v.error ? `failed to start: ${v.error}` : v.signal ? `killed by ${v.signal}` : `exited ${v.exit}`;
-  const lines = (v.stderr_tail.length ? v.stderr_tail : v.stdout_tail).slice(-REASON_LINES);
-  return `host verify red: \`${v.command}\` ${how}; last lines: ${lines.length ? lines.join(" | ") : "(none)"}`;
+  // Story 34.1: a green host command with a red engine gate names the engine command (`(engine)`).
+  const e = v.engine?.verdict === "red" ? v.engine : undefined;
+  const s = e ? { command: e.command ?? "", exit: e.exit ?? null, signal: e.signal, guard: e.guard, error: e.error, stdout_tail: e.stdout_tail ?? [], stderr_tail: e.stderr_tail ?? [] } : v;
+  const how = s.guard ? `timed out (${s.guard})` : s.error ? `failed to start: ${s.error}` : s.signal ? `killed by ${s.signal}` : `exited ${s.exit}`;
+  const lines = (s.stderr_tail.length ? s.stderr_tail : s.stdout_tail).slice(-REASON_LINES);
+  return `host verify red${e ? " (engine)" : ""}: \`${s.command}\` ${how}; last lines: ${lines.length ? lines.join(" | ") : "(none)"}`;
 }
 
 /** The PR body's `## Host verify` section: green (command, duration), skipped (reason), red (command, exit or
- * guard, duration, the tails fenced). */
+ * guard, duration, the tails fenced). Story 34.1: then one `Engine gate: green | red | skipped (<reason>)` line
+ * (a ran leg recorded before 34.1 has none); on red the engine command, exit or guard, duration and its tails
+ * fenced the same way. */
 export function prSection(v: HostVerifyResult): string[] {
   const head = ["## Host verify", ""];
   if (v.skipped) return [...head, `Skipped: ${v.reason}`];
-  const secs = `${(v.duration_ms / 1000).toFixed(1)}s`;
-  if (v.green) return [...head, `Green: \`${v.command}\` (${secs})`];
-  const how = v.guard ?? (v.error ? `failed to start: ${v.error}` : v.signal ? `killed by ${v.signal}` : `exit ${v.exit}`);
+  const secs = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
+  const how = (s: { exit?: number | null; signal?: string; guard?: string; error?: string }) =>
+    s.guard ?? (s.error ? `failed to start: ${s.error}` : s.signal ? `killed by ${s.signal}` : `exit ${s.exit}`);
   // The fence outruns any backtick run in its lines (min 3): a tail line holding ``` never closes it early.
   const fence = (name: string, lines: string[]) => {
     const tick = "`".repeat(Math.max(2, ...lines.map((l) => Math.max(0, ...(l.match(/`+/g) ?? []).map((m) => m.length)))) + 1);
     return [`${name}:`, "", tick, ...(lines.length ? lines : ["(empty)"]), tick, ""];
   };
-  return [...head, `**Red:** \`${v.command}\` — ${how} (${secs})`, "", ...fence("stderr (last lines)", v.stderr_tail), ...fence("stdout (last lines)", v.stdout_tail)].slice(0, -1);
+  const hostGreen = v.exit === 0 && !v.guard && !v.error;
+  const hostLines = hostGreen ? [`Green: \`${v.command}\` (${secs(v.duration_ms)})`]
+    : [`**Red:** \`${v.command}\` — ${how(v)} (${secs(v.duration_ms)})`, "", ...fence("stderr (last lines)", v.stderr_tail), ...fence("stdout (last lines)", v.stdout_tail)].slice(0, -1);
+  const e = v.engine;
+  if (!e) return [...head, ...hostLines];
+  let engineLines: string[];
+  if (e.verdict === "skipped") engineLines = [`Engine gate: skipped (${e.reason})`];
+  else if (e.verdict === "green") engineLines = [`Engine gate: green: \`${e.command}\` (${secs(e.duration_ms ?? 0)})`];
+  else engineLines = ["Engine gate: red", "", `**Red:** \`${e.command}\` — ${how(e)} (${secs(e.duration_ms ?? 0)})`, "",
+    ...fence("engine stderr (last lines)", e.stderr_tail ?? []), ...fence("engine stdout (last lines)", e.stdout_tail ?? [])].slice(0, -1);
+  return [...head, ...hostLines, "", ...engineLines];
 }
