@@ -574,7 +574,7 @@ source_spec: `34-6-the-asset-manifest-and-the-greybox-rung-spec.md`
 location: plugins/tk-studio/lib/assets.py (facts_of)
 severity: medium
 reason: Edge and blind layers: a .glb with a scaled, offset or instanced node gets wrong bounds, origin and triangle facts, so the gate judges cc0 and generated rung files wrongly. Greybox output (identity transforms) is unaffected. Plan 34-6 §7 chose accessor min/max; deferral category (a), behaviour AC2 names (facts bounds from the glTF), needed before 34.7 gates third-party files.
-status: open
+status: resolved 2026-10-27 by Story 34.7 (thkennedy/tk-studio#216): `facts_of` walks node transforms and instancing (assets.py docstring :850-855; 34-7 spec :118); closed on the EP-34 retro's finding C6
 
 ### DW-75: Follow-up review still recommended for 34-7-the-cc0-mirror-and-the-paid-rung-behind-a-cap after the damping cap was spent
 origin: review-budget-followup
@@ -598,4 +598,140 @@ source_spec: `34-8-the-run-vertical-slice-job-and-the-engagements-game-path-spec
 location: apps/supervisor/src/delivery.ts composeCloseout; plugins/tk-studio/lib/engage.py closeout
 severity: low
 reason: AC2 lists the proof media (the frames, a contact sheet, the report) landing on the run workspace, the PR body and the engagement's page. Plan shape 7/8 distributes them: the closeout input carries only slices[].contact_sheet (delivery.ts composeCloseout) and engage.py closeout copies and attaches only <key>-contact-sheet.png. A consult (second follow-up review) ruled the plan's distribution holds for this story. Attaching the sampled frames and report.json to ENG-NNN: Closeout is an open enhancement that changes the published 0.1.29 closeout input, so it needs a contract bump through planning.
+status: open
+
+### DW-78: The host leg's engine gate resolves a project's bare `godot` to WinGet's GUI link and hangs (hole 78).
+origin: operator ledger, hole 78 (2026-10-27T07:09Z)
+source_spec: `34-1-the-engine-gate-on-the-host-leg-spec.md`
+location: apps/supervisor/src/hostverify.ts (the engine step's PATH); The Universe Awaits scripts/engine-gate.sh
+severity: medium
+reason: Story 34.1's leg prepends the folder of GODOT to the step's PATH, but that folder holds the console exe under its full name and no file named `godot`, so a project's bare `godot` resolves further down PATH to WinGet's `godot.exe` link (the GUI build), whose `--headless --import --quit` never returns under a hidden window (45 minutes, killed by the operator). TUA's script now names `$GODOT`; the fix to make is a tk-studio-side shim (a `godot` on the step's PATH that execs GODOT) or a leg that refuses a bare `godot` with the reason.
+status: open
+
+### DW-79: The launch bootstrap writes a plan for the first story only; a relaunched story with open SPEC questions reaches its dev session with no plan (hole 81).
+origin: operator ledger, hole 81 (2026-10-27T14:06Z); retro C5
+source_spec: `34-6-the-asset-manifest-and-the-greybox-rung-spec.md`
+location: plugins/tk-studio/skills/tk-studio-launch (bootstrap); .bmad-loop/plugins/studio-pipeline (the gate's plan writing)
+severity: medium
+reason: Epic 34's bootstrap wrote plans/34-1.md only; the gates wrote 34-2 to 34-5 as they went, but 34.5's relaunch moved straight to 34.6 with no plans/34-6.md and no design note for CAP-11/CAP-12, so the session escalated six questions and paused; the operator wrote the plan by hand (dfa1ab2). Fix: the bootstrap writes every story's plan, and the gate refuses a story whose SPEC open questions have no design note (retro AI-9).
+status: open
+
+### DW-80: The engine's own `bun test` in the sandbox reports 15 Story 32.8 delivery tests red at baseline while the host passes all 1,494 (hole 84).
+origin: operator ledger, hole 84 (2026-10-27T22:02Z); retro C6, Open questions
+source_spec: `34-8-the-run-vertical-slice-job-and-the-engagements-game-path-spec.md`
+location: apps/supervisor/test/delivery.test.ts (the Story 32.8 closeout-pass block); the sandbox's bun at ~/.bun/bin
+severity: medium
+reason: Identical names fail at 6f836df in the Linux sandbox (25 on the full suite); the test fakes inject `uv`, so it is not a missing tool; the cause is not reproduced. Until it is, the engine cannot use the full supervisor suite as its gate (the host leg is). Fix: reproduce in the sandbox, then make the block platform-neutral or name it host-only in the plugin's sandbox notes.
+status: open
+
+### DW-81: Two of Story 34.8's three eval cases cannot run on the Windows host: the eval child can neither grant a shell nor read the plugin's docs (hole 85).
+origin: operator ledger, hole 85 + addendum (2026-10-27T22:1xZ); retro C7, AI-1
+source_spec: `34-8-the-run-vertical-slice-job-and-the-engagements-game-path-spec.md`
+location: plugins/tk-studio/evals/tk-studio-playable-judge-verdict, evals/asset-ladder-generated-rung; kb/acceptance-record-34-8-vertical-slice-on-tua.md step 7
+severity: low
+reason: `claude plugin eval` refuses a Bash/Write grant on the box (the Windows sandbox gate is off, `sandbox.failIfUnavailable` set) and, without one, Glob/Grep are refused in don't-ask mode and the plugin cache is denied by the kept deny list: pinned-facts 3 of 3, the judge and asset-ladder cases 0 of 3, measuring the host. Fix: run those cases on the sandbox tier (a job, or the maintenance path) or carry their facts in the skill text; the record names the tier per case. The sandbox setting stays the owner's.
+status: open
+
+### DW-82: A green host-leg re-run (`POST /runs/{id}/verify`) never refreshes the PR body's `## Host verify` section, which keeps the first leg's Red (hole 88).
+origin: operator ledger, hole 88 (2026-10-27T23:2xZ); retro C2, AI-9
+source_spec: `33-8-the-verify-verb (Epic 33)`
+location: apps/supervisor/src/hostleg.ts:20, :108 (the verify verb edits no body)
+severity: medium
+reason: 4 of Epic 34's 7 story PR bodies (#201, #206, #213, #216) read Red at merge while the verify verb had gone green; the green sits in a PR comment or only in the handoff. Fix: the verify verb rewrites the body's Host verify section and the status block with the latest leg's result, as the close-out does on the first open.
+status: open
+
+### DW-83: The 34.5 amend episode built two stories in one run and left 34-5 without a gate file, a `## Reconcile`, a review-budget DW entry or a metered cost (hole 89); the recommended follow-up review for 34-5 is this entry.
+origin: operator ledger, hole 89 (2026-10-27T23:2xZ); retro C4
+source_spec: `34-5-one-engine-mcp-per-run-started-by-the-pin-spec.md`
+location: the resume path (apps/supervisor src/resume.ts, closeout.ts); .bmad-loop/plugins/studio-pipeline (gate files per story); the ledger's job-run line for PR #213
+severity: medium
+reason: Halt (60cbc36) → operator answer amended (c5a212e) → pause → `reconcile_verdict: not-required` by hand (54780c8) → the relaunch moved to 34.6: 34-5 has no gate file, no Reconcile, no DW review-budget entry although `followup_review_recommended: true`, and PR #213 is not metered (ledger line 732 has no total_cost_usd). Rules recorded (never amend after a resume; runbook :1556). Fix: a resumed run that lands more than one story writes a gate file and a cost line per story, or the studio refuses a resume that would cross a story boundary; and 34.5's follow-up review (the engine MCP: B6, B7, AI-5) is owed.
+status: open
+
+### DW-84: `kb.py index` titles kb/index.md after the checkout folder, so every run that regenerates it restores the header by hand.
+origin: retro C6 (asked for in 34-4 spec :181, :189, :225)
+source_spec: `34-4-engine-knowledge-pinned-per-project-spec.md`
+location: plugins/tk-studio/lib/kb.py (index title)
+severity: low
+reason: In a run worktree the folder is `q-run-epic-34-…`, so the regenerated index is titled after the run and the implementer restored `tk-studio` by hand in 34.1, 34.4, 34.5 and 34.6 (a DRIFT line each). Fix: `kb.py index` takes the project name from the tracked config (project_id, else the repository's basename at the base ref), never the worktree folder.
+status: open
+
+### DW-85: Two import cycles introduced by Epic 34: `assets` ↔ `playable` (lib) and `enginemcp` → `hostverify` → `sandbox` → `enginemcp` (supervisor).
+origin: retro epic-34 (_bmad-output/specs/spec-epic-34/RETROSPECTIVE.md), A1
+source_spec: `_bmad-output/specs/spec-epic-34/RETROSPECTIVE.md`
+location: plugins/tk-studio/lib/assets.py:111, lib/playable.py:749, :781-784; apps/supervisor/src/enginemcp.ts:60, hostverify.ts:92, :489, sandbox.ts:44
+severity: medium
+reason: `assets.py` imports `playable` for `kill_tree` while `playable.py` lazily imports `assets` for the PNG codec; the supervisor's MCP stop reaches back through sandbox.ts, and hostverify.ts dodges a third cycle with a dynamic `./registry` import. Neither existed at 458b0e8. Fix: a shared `lib/_proc.py` / `_png.py` and a one-way seam for the MCP stop.
+status: open
+
+### DW-86: Duplication across the epic's stories: user-env reads ×3, engine/Blender resolution ×5 with three rule sets, base-ref `git show` ×2, status-block scaffolding ×4, `_write_atomic` ×6, run_engine/run_blender, e2e `_checkout` ×3, judge validation ×2.
+origin: retro epic-34 (_bmad-output/specs/spec-epic-34/RETROSPECTIVE.md), A3
+source_spec: `_bmad-output/specs/spec-epic-34/RETROSPECTIVE.md`
+location: plugins/tk-studio/lib (apps.py, assets.py, playable.py, engine_pin.py, playable_judge.py, doctor.py); apps/supervisor/src (server.ts, hostverify.ts, enginemcp.ts); contracts/conformance/e2e_*.py
+severity: low
+reason: See the retro's A3 row for the line ranges. Fix: one consolidation story: `lib/_core.py` for the status block, atomic writes and the HKCU-then-env read; one base-ref reader in the supervisor; one engine/Blender resolver with one rule set.
+status: open
+
+### DW-87: `assets.py` grew to 2,439 lines and twelve concerns; `enginemcp.ts` is also a process entry; `engage.py scope` grew 149 → 224 lines.
+origin: retro epic-34 (_bmad-output/specs/spec-epic-34/RETROSPECTIVE.md), A4
+source_spec: `_bmad-output/specs/spec-epic-34/RETROSPECTIVE.md`
+location: plugins/tk-studio/lib/assets.py; apps/supervisor/src/enginemcp.ts:345-361; plugins/tk-studio/lib/engage.py:1150-1373
+severity: low
+reason: `assets.py` holds a YAML-subset reader beside the imported `miniyaml`, the validator, a PNG codec, a GLB parser, two Blender runners, the kit indexer, the matcher, two gates, the manifest rewriter, a Meshy client and the CLI. Fix: split `assets.py` by section before the next ladder story.
+status: open
+
+### DW-88: The judge's rubric ids live three times with no cross-pin.
+origin: retro epic-34 (_bmad-output/specs/spec-epic-34/RETROSPECTIVE.md), B5
+source_spec: `34-3-the-playable-verify-leg-spec.md`
+location: apps/supervisor/src/hostverify.ts:478; plugins/tk-studio/lib/playable_judge.py:51-60; plugins/tk-studio/skills/tk-studio-playable-judge/SKILL.md:38-42
+severity: low
+reason: A rubric line added or renamed in one place drifts silently from the other two. Fix: one source (the core's list) that the supervisor reads and a test that pins the SKILL.md list to it.
+status: open
+
+### DW-89: A judge infrastructure failure reads as a failed game: a pin failure, an `sbx exec` outage or a missing status block becomes `playable.verdict: fail`.
+origin: retro epic-34 (_bmad-output/specs/spec-epic-34/RETROSPECTIVE.md), B10
+source_spec: `34-3-the-playable-verify-leg-spec.md`
+location: apps/supervisor/src/hostverify.ts:426, :619-630
+severity: medium
+reason: The run ends `partial` and the PR a draft for a cause that says nothing about the game. Fix: an `inconclusive` verdict that ends the leg `partial` with the infrastructure reason named, distinct from a rubric fail.
+status: open
+
+### DW-90: `is_game_project` is a `gds-` name prefix on the working set, so confirming the plugin-shipped `gds-engine-godot-4` alone makes every `scope` refuse `GameDocsMissing`.
+origin: retro epic-34 (_bmad-output/specs/spec-epic-34/RETROSPECTIVE.md), B11, Open questions
+source_spec: `34-8-the-run-vertical-slice-job-and-the-engagements-game-path-spec.md`
+location: plugins/tk-studio/lib/engage.py:797-799
+severity: medium
+reason: Now that the plugin itself ships a `gds-` skill, the prefix no longer means the gds module is installed. Fix: decide whether a game project requires the `gds` module (registry evidence) rather than a name; the contract's CAP-15 rule follows.
+status: open
+
+### DW-91: Regression gaps on the slice path: the sweep → `closeOut` `slice` flag has no end-to-end test; the sheet on a passing slice run is asserted nowhere; the bare-name contract between `sheet`'s `frames` and `proofCommit` is pinned by two independent literals.
+origin: retro epic-34 (_bmad-output/specs/spec-epic-34/RETROSPECTIVE.md), B14
+source_spec: `34-8-the-run-vertical-slice-job-and-the-engagements-game-path-spec.md`
+location: apps/supervisor/src/worktree.ts:917, :848, :445-448; apps/supervisor/test/hostverify.test.ts:902-909
+severity: medium
+reason: Every `host_commit` assertion calls `closeOut` directly and the one sheet test always harness-fails. Fix: one test story that drives the sweep to a slice close-out with a passing playable run and pins the frame-name contract in one place.
+status: open
+
+### DW-92: Smaller slice-path edges: `playable` without `verify.engine` reads `skipped: engine gate not green`; a `.mcp.json` with a BOM is refused; a moment at tick ≥ `--ticks` is never captured; `enginemcp.ts` reads the config at `run.prefix` but starts in the top level; the closeout page takes the last `host-verify`'s sheet; the `scoping` revise path never gains `game: true`.
+origin: retro epic-34 (_bmad-output/specs/spec-epic-34/RETROSPECTIVE.md), B15
+source_spec: `_bmad-output/specs/spec-epic-34/RETROSPECTIVE.md`
+location: apps/supervisor/src/hostverify.ts:420-421, enginemcp.ts:398-426, delivery.ts:240-245; plugins/tk-studio/lib/recommend.py:528, playable.py:302-314, engage.py:1190-1196
+severity: low
+reason: Six one-line fixes the retro's lenses found, none exercised by a run yet. Fix: one hygiene story.
+status: open
+
+### DW-93: The visual gate's shape after the box measurement: the floor stays `VISUAL_COVERAGE_MIN = 0.25`; a per-entry `coverage_min` override and a collision-aware rule are parked until a real slice needs them.
+origin: retro epic-34 (_bmad-output/specs/spec-epic-34/RETROSPECTIVE.md), C8, AI-4 (operator decision 2026-10-27)
+source_spec: `34-7-the-cc0-mirror-and-the-paid-rung-behind-a-cap-spec.md`
+location: plugins/tk-studio/lib/assets.py (VISUAL_COVERAGE_MIN); plugins/tk-studio/contracts/driver-contract.md (the visual gate paragraph); kb/asset-ladder.md:300-332
+severity: low
+reason: Five measured points (the crate 1.0, a synthetic pole 0.28, Kenney's lamp post 0.38, bench 0.52, pine 0.34) showed coverage of a real asset scaled into its box greybox is its fill of that box, so 0.25 keeps the gate a mis-framed-or-wrong-shape check (#219). Recorded as an accepted deviation so later retros stop re-flagging it; reopened only by a slice that fails the gate on a correct asset.
+status: accepted 2026-10-27 (operator decision, EP-34 retro AI-4); no code change owed
+
+### DW-94: Slice-path hardening (the retro's fix-now set, AI-2): the wall-clock tie, `match` fault by exit code alone, `.candidates/` staged by `proofCommit`, `sheet` sampling every movie frame, no proof without a green assets step, drive bounds above the runner cap, the Windows tree-kill branch untested.
+origin: retro epic-34 (_bmad-output/specs/spec-epic-34/RETROSPECTIVE.md), B1-B4, B8, B12, B13, AI-2
+source_spec: `34-8-the-run-vertical-slice-job-and-the-engagements-game-path-spec.md`
+location: apps/supervisor/src/hostverify.ts:445, :449, :547-549; src/worktree.ts:461-465, :547; plugins/tk-studio/lib/playable.py:392-400, :756-757; lib/assets.py:172, :1845-1877, :1917-1923; contracts/conformance/e2e_vertical_slice.py:43-44, e2e_engine_gate.py:44,48, runner.py:92
+severity: medium
+reason: One dev-loop story (band M): wall-clock margins (the leg's guard above the tool's `--wall`); `fault` read from the status block's reason/writeback/not-run; `.candidates` excluded and `git check-ignore` before staging; `sheet --report` samples the report's frames; the proof folder committed whenever a report exists; the drive bound asserts; the nt `taskkill /T /F` path tested where it runs. Filed here so the next epic's planner or a sweep reads it; the retro's rows carry the detail.
 status: open
