@@ -168,14 +168,16 @@ export const wallClockTrip = (guardS: number) => `guard: max_wall_clock_seconds 
  * argv only, `windowsHide`, never `detached` on win32, the tree killed past the guard, the worker's env). It
  * spawns the command argv-only (`windowsHide`, not detached: in the wrapper's tree) with its stdout/stderr
  * written straight to files, so a command the guard kills still has the output it printed before the hang
- * (both streams, whole lines). It records `{exit, signal}` or `{error}` (a spawn failure) in the status file. */
+ * (both streams, whole lines). The files are fresh in a fresh folder and opened for writing, never for
+ * appending (hole 77: MSYS bash cannot write to an append-only handle, `echo: write error: Bad file
+ * descriptor`, so a bash `verify.host` lost every line of its own and exited by its closing echo). It records `{exit, signal}` or `{error}` (a spawn failure) in the status file. */
 export const CAPTURE = [
   "const fs = require('fs'), cp = require('child_process');",
   "const s = JSON.parse(fs.readFileSync(process.argv[process.argv.length - 1], 'utf8'));",
   "const done = (r) => { fs.writeFileSync(s.status, JSON.stringify(r)); process.exit(0); };",
   "const fail = (e) => done({ error: String((e && e.message) || e) });",
   "let c;",
-  "try { c = cp.spawn(s.argv[0], s.argv.slice(1), { cwd: s.cwd, stdio: ['ignore', fs.openSync(s.out, 'a'), fs.openSync(s.err, 'a')], windowsHide: true }); } catch (e) { fail(e); }",
+  "try { c = cp.spawn(s.argv[0], s.argv.slice(1), { cwd: s.cwd, stdio: ['ignore', fs.openSync(s.out, 'w'), fs.openSync(s.err, 'w')], windowsHide: true }); } catch (e) { fail(e); }",
   "c.on('error', fail);",
   "c.on('exit', (code, signal) => done({ exit: code, signal: signal || null }));",
 ].join("\n");
