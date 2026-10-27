@@ -32,16 +32,22 @@ What landed (tk-studio, contract 0.1.29): the project's tracked `.tk-studio/conf
 
 ## Evidence
 
-To be filled by the operator on the box:
+Filled by the operator session on the box (2026-10-27):
 
 | Item | Value |
 |---|---|
-| Date, box | |
-| `tk-studio doctor --json` `engine` row (status, detail) | |
-| TUA PR adding `verify.engine` (URL, merge commit) | |
-| Run re-verified (run id, `head`) | |
-| How (`POST /runs/<id>/verify` or `bun src/cli.ts verify <id>`) | |
-| `host-verify` `green`; `engine.verdict`; `engine.exit`; `engine.duration_ms` | |
-| `engine.godot_dir` | |
-| `engine.stdout_tail` (the import and the GoDotTest lines) | |
-| `rerun.pr_ready` | |
+| Date, box | 2026-10-27, 05:58Z to 07:14Z, TIM-PC-2 (session 11's operator session; supervisor on `main` e74826f after PRs #201, #202 and #203) |
+| `tk-studio doctor --json` `engine` row (status, detail) | `pass`: `C:\Program Files\WinGet\Packages\GodotEngine.GodotEngine.Mono_Microsoft.Winget.Source_8wekyb3d8bbwe\Godot_v4.7.2-stable_mono_win64\Godot_v4.7.2-stable_mono_win64_console.exe; 4.7.2.stable.mono.official.ed1daf0bf` (the checkout's cli at 83b30fa) |
+| TUA PR adding `verify.engine` (URL, merge commit) | https://github.com/thkennedy/the-universe-awaits/pull/5 (`5900915`); and PR 6 (`371cede`), `scripts/engine-gate.sh` calling the engine through `GODOT` (hole 78), cherry-picked onto the run branch as `840caf1` because the verb runs the branch tip's scripts |
+| Run re-verified (run id, `head`) | `q-run-epic-2-20261017T224219Z-39ae5a`, `head` `840caf1` (the fifth attempt; the first four taught holes 75, 77 and 78, each in the ledger) |
+| How (`POST /runs/<id>/verify` or `bun src/cli.ts verify <id>`) | `POST /runs/<id>/verify` with the bearer: `202 {ok, state: partial, verify: started, head}`; once also `bun src/cli.ts verify <id>` from `apps/supervisor` (the same leg, the same result) |
+| `host-verify` `green`; `engine.verdict`; `engine.exit`; `engine.duration_ms` | `green: false`; the host step green (`exit 0`, 29,698 ms: the solution built, 1,058 Core tests passed, the content lint `0 hard, 31 warn`, `verify: OK`); `engine.verdict: red`; `engine.exit: 1`; `engine.duration_ms: 20550` |
+| `engine.godot_dir` | `C:\Program Files\WinGet\Packages\GodotEngine.GodotEngine.Mono_Microsoft.Winget.Source_8wekyb3d8bbwe\Godot_v4.7.2-stable_mono_win64` |
+| `engine.stdout_tail` (the import and the GoDotTest lines) | the game assembly built, the headless import ran, then the GoDotTest suite: `Test results: Passed: 125 \| Failed: 12 \| Skipped: 0`; every failure `KeyNotFoundException: The given key 'dalia.toy.cold_storage' was not present in the dictionary` in `TUA.Game.Phone.Conversation.Refresh()` under `ConversationTest.WithToyRoots`, after one `app.reload hard=1 warn=31` from the content watcher |
+| `rerun.pr_ready` | not reached (the leg is red by the engine step); `rerun: {by: api, head: 840caf1, worktree: removed, pr: TUA #4}` |
+
+## What the proof found
+
+- **The mechanism is proven.** For the first time a run's host leg ran a game project's engine gate on the Windows host: after a green `verify.host` the leg ran `bash scripts/engine-gate.sh` in the worktree with the `GODOT` folder first on PATH, the engine built, imported and ran the GoDotTest suite through the console exe, and the verdict, the exit, the duration and both tails landed on the `host-verify` event as `engine`. Before this day TUA's host leg had never been green at all (hole 77).
+- **The verdict is red by the game's own tests, not by the leg.** 12 of 137 engine tests fail on this box, by hand exactly as under the leg (`scripts/engine-gate.sh` with `GODOT` set, with or without the toy world regenerated: `Passed: 125 | Failed: 12`): `Phone.ConversationTest` cases under `WithToyRoots` throw `KeyNotFoundException 'dalia.toy.cold_storage'` in `Conversation.Refresh()` after the content watcher's reload reported `hard=1`. That is a TUA finding for its owner (a reload race or a content fixture the tests assume), outside this story.
+- **What the first four attempts taught, each fixed the same day:** hole 75 (the verb's materialise failed on the stopped sandbox's login plane, PR #202), hole 77 (the capture's append-mode files made every bash `verify.host` red, PR #203), hole 78 (a bare `godot` resolves to WinGet's GUI build and hangs headless; TUA PR 6). The runbook carries the rows.

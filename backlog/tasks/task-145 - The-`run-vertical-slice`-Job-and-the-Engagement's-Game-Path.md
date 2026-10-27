@@ -1,0 +1,33 @@
+---
+id: TASK-145
+title: "The `run-vertical-slice` Job and the Engagement's Game Path"
+status: To Do
+assignee: []
+created_date: '2026-10-27 04:08'
+labels:
+  - ST-145
+milestone: The Vertical-Slice Pack
+dependencies: []
+---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+As the owner,
+I want one message to a game project to end in a playable greybox slice with proof media, a report and a measured cost,
+So that the studio's promise (user flow F9) is a thing I can run, not a diagram.
+
+**Acceptance Criteria:**
+
+**Given** a game project engaged through the chat route (EP-32)
+**When** the scope step runs on a project whose working set carries GDS
+**Then** it runs `gds-create-game-brief` and `gds-gdd` (quick flow) and publishes both to the engagement's Confluence page beside the scope; approval mints the epics as today, and the plan's `run-epic-N.json` instances carry `type: run-vertical-slice`
+
+**Given** the shipped job type `plugins/tk-studio/jobs/run-vertical-slice.json`
+**When** a run of it executes
+**Then** the engine runs the story as `run-epic` does; the host leg runs the engine gate (34.1), the ladder's `check` and `greybox` (34.6; `match` when the mirror exists) and the `playable-verify` leg (34.3); the proof media (the frames, a contact sheet, the report) land in the run workspace, the PR body and the engagement's page; the closeout report (32.8) lists the slice's verdicts per story; guards and stop conditions per the job schema; the planner tier per the measured routing
+
+**Given** TUA
+**When** the acceptance runs
+**Then** one `POST /jobs` (or one chat message) on TUA ends in a merged PR with a playable greybox scene, the frames in the PR, a `job-run` ledger line with the cost, conformance green over every surface (the contract at 0.1.29 or later), the three new skills' eval cases above the threshold, and the acceptance record under `kb/`; the design spec's feature ledger flips Phase 3 to built
+<!-- SECTION:DESCRIPTION:END -->
