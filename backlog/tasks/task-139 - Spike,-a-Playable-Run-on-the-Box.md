@@ -1,9 +1,10 @@
 ---
 id: TASK-139
 title: Spike, a Playable Run on the Box
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-27 04:08'
+updated_date: '2026-10-27 09:30'
 labels:
   - ST-139
 milestone: The Vertical-Slice Pack
