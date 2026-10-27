@@ -506,3 +506,17 @@ describe("Story 34.1: the engine gate runs after a green verify.host", () => {
     expect(redReason(m)).toContain("`tk-sup-no-such-engine --x` failed to start: ");
   }, 30_000);
 });
+
+describe("hole 77: a shell script's own lines reach the capture", () => {
+  // MSYS bash cannot write to an append-only handle (`echo: write error: Bad file descriptor`): with the
+  // capture's files opened for appending, every echo failed, the script's lines vanished from the tails and
+  // its exit followed its closing echo (TUA's `verify: OK`): red on every run. The files are fresh, so they
+  // are opened for writing. On win32 the step's `bash` is Git's (hole 52); elsewhere the system's.
+  const haveBash = process.platform === "win32" ? gitUsrBin(process.env) !== null : Bun.which("bash") !== null;
+  test.skipIf(!haveBash)("bash: every echo lands in stdout_tail, in order, and the closing echo exits 0", async () => {
+    const fx = project(hostKey('bash -c "echo first; true; echo verify: OK"'));
+    const v = await hostVerify(fx.run, 60, { env: { ...process.env } }) as HostVerifyRan;
+    expect(v).toMatchObject({ green: true, exit: 0, stderr_tail: [] });
+    expect(v.stdout_tail).toEqual(["first", "verify: OK"]);
+  });
+});
