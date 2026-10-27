@@ -1,0 +1,33 @@
+---
+id: TASK-139
+title: Spike, a Playable Run on the Box
+status: To Do
+assignee: []
+created_date: '2026-10-27 04:08'
+labels:
+  - ST-139
+milestone: The Vertical-Slice Pack
+dependencies: []
+---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+As the operator,
+I want one proven way to run the game on the agent PC for a bounded number of ticks under a seeded, scripted input scenario and come back with frames and a pass or fail,
+So that the `playable-verify` leg (34.3) builds on facts measured on this box rather than on the research's claims.
+
+**Acceptance Criteria:**
+
+**Given** TUA on the box (Godot 4.7.2 Mono, the logged-in session's display)
+**When** `plugins/tk-studio/lib/playable.py run --directory <project> --scenario <file> --seed <n> --ticks <t> --out <dir>` runs on the host
+**Then** it starts the game with a `PlayableHarness` autoload (C#, shipped by the plugin as a template the project copies in; TUA carries it under `game/src/Debug`) that reads the scenario (JSON: named inputs per tick; invariants per tick such as "the player node exists", "no error line in the log", "the frame time stays under the budget"), drives the inputs deterministically from the seed, captures a frame from the active camera every k ticks, and quits 0 when every invariant held or 1 naming the first that failed; the run writes `<out>/report.json`, `<out>/frames/*.png` and `<out>/log.txt`, is bounded by a wall clock that kills an overrun, and ends in a status block (AD-11)
+
+**Given** the three rendering paths (the session's display, windowed; Movie Maker frames through `--write-movie`; `--headless`, which renders nothing)
+**When** the spike measures them on the box (the operator session runs the measurements on the host at the engine's request through the consult log, with the harness and `playable.py` the engine wrote)
+**Then** `kb/playable-verify-on-the-box.md` records which path produced frames, the time per tick and the pixel evidence, and names the one 34.3 uses (the story's ruling, in its consult log); `tk-studio-launch check` warns when that path's precondition is missing (no display session, no `$env:GODOT`)
+
+**Given** the lib suite
+**When** it runs
+**Then** `playable.py` is covered with a fake engine binary (the argv, the scenario parsing, the invariant verdicts, the wall clock); the harness depends on nothing in the studio, so a project can run it alone
+<!-- SECTION:DESCRIPTION:END -->
