@@ -596,10 +596,34 @@ export function closeOutDetail(c: CloseOut): Record<string, unknown> {
 export const ENGINE_ENDED = ["finished", "stopped", "interrupted", "crashed"] as const;
 
 /** A resumed run's end state from its engine's own terminal status (Story 27.3 consult ruling): `finished`
- * is `complete`; any other end (`stopped`, `interrupted`, `crashed`, a killed or gone engine) is `partial`
+ * is `complete`; Story 33.7 (hole 59): a graceful `stopped` after the story it was driving landed
+ * (`storyDone`, `storyLandedBeforeStop`) is `complete` too, as a first engine's graceful stop is; any other
+ * end (`stopped` before its story landed, `interrupted`, `crashed`, a killed or gone engine) is `partial`
  * (as `finishStateFor` takes a status it does not know). */
-export function engineEndState(status: unknown): TerminalState {
-  return status === "finished" ? "complete" : "partial";
+export function engineEndState(status: unknown, storyDone = false): TerminalState {
+  if (status === "finished") return "complete";
+  return status === "stopped" && storyDone ? "complete" : "partial";
+}
+
+/** Story 33.7: did the engine land the story it was driving before it stopped? Reads the engine journal
+ * `<journalDir>/journal.jsonl` (upstream bmad-loop, read only; unparsable lines skipped). The segment is the
+ * entries after the latest `run-start` or `run-resume` (the whole file when there is none); true when the
+ * segment's latest `story-start`/`story-done` entry is a `story-done` with a non-empty `story_key`. A missing
+ * or unreadable journal answers false. Never throws. */
+export function storyLandedBeforeStop(journalDir: string): boolean {
+  let text: string;
+  try { text = readFileSync(join(journalDir, "journal.jsonl"), "utf8"); } catch { return false; }
+  const entries: Record<string, unknown>[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const e = JSON.parse(line);
+      if (e && typeof e === "object" && !Array.isArray(e)) entries.push(e as Record<string, unknown>);
+    } catch { /* an unparsable line is skipped */ }
+  }
+  const start = entries.findLastIndex((e) => e.kind === "run-start" || e.kind === "run-resume");
+  const last = entries.slice(start + 1).findLast((e) => e.kind === "story-start" || e.kind === "story-done");
+  return last?.kind === "story-done" && typeof last.story_key === "string" && last.story_key.trim() !== "";
 }
 
 export type EnginePhase = { phase: "ended" | "paused" | "running" | "unknown"; detail: Record<string, unknown> };
@@ -732,24 +756,32 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
       let verify = paused ? undefined : recordedVerify(events);
       // An engine the supervisor killed runs no leg, its status ended (it handled TERM, or its worktree is
       // gone) or not (its end and reason computed as before).
-      if (!verify && !paused && !st.detail.killed && !(await killedEngine(queue, run))) {
+      const notKilled = !st.detail.killed && !(await killedEngine(queue, run));
+      if (!verify && !paused && notKilled) {
         const guardS = run.worker_guard_s ?? (Number(queue.definition(run)?.guards?.max_wall_clock_seconds) || 600);
         verify = await hostVerify(run, guardS, deps);
         queue.note(run.run_id, "host-verify", verify as Record<string, unknown>);
       }
+      // A resumed run (its `launched` written when the resolve child exited) or a relaunched one (its latest
+      // `launched` after a `close-out`, from the relaunch's `mirror`): the end is the engine's own terminal
+      // status, never the launch's recorded end. A killed relaunch keeps its recorded end (the trip's).
+      const resumed = launched.resumed === true;
+      const relaunched = !resumed && !st.detail.killed && events.findLastIndex((e) => e.kind === "close-out") >= 0
+        && events.findLastIndex((e) => e.kind === "launched") > events.findLastIndex((e) => e.kind === "close-out");
+      // Story 33.7 (hole 59): such an engine's graceful stop reads its journal (did the story it was driving
+      // land?) before the close-out, which may remove the worktree. An engine the supervisor killed (it
+      // handled TERM, so it reads `stopped`) never ends `complete` this way.
+      // No served root (no worktree cut): no journal, so `partial`.
+      const served = servedRoot(run);
+      const storyDone = !paused && notKilled && (resumed || relaunched) && st.detail.status === "stopped" && !!run.engine_run_id
+        && served !== null && storyLandedBeforeStop(join(served, ".bmad-loop", "runs", run.engine_run_id));
       const c = await closeOut(run, { paused, ...input, engineRunId: run.engine_run_id, ...(existingPr ? { existingPr } : {}), ...(verify ? { verify } : {}) }, deps);
       let next: PendingTransition;
       if (paused) next = { phase: "paused", detail: { engine: st.detail, ...closeOutDetail(c) } };
       else {
         const end = (launched.end ?? {}) as { state?: TerminalState; reason?: string | null; detail?: Record<string, unknown>; stop?: any };
-        // A resumed run (its `launched` written when the resolve child exited) or a relaunched one (its latest
-        // `launched` after a `close-out`, from the relaunch's `mirror`): the end is the engine's own terminal
-        // status, never the launch's recorded end. A killed relaunch keeps its recorded end (the trip's).
-        const resumed = launched.resumed === true;
-        const relaunched = !resumed && !st.detail.killed && events.findLastIndex((e) => e.kind === "close-out") >= 0
-          && events.findLastIndex((e) => e.kind === "launched") > events.findLastIndex((e) => e.kind === "close-out");
         const engineEnd = resumed || relaunched ? String(st.detail.status ?? "unknown") : undefined;
-        let state: TerminalState = engineEnd !== undefined ? engineEndState(engineEnd) : end.state ?? "complete";
+        let state: TerminalState = engineEnd !== undefined ? engineEndState(engineEnd, storyDone) : end.state ?? "complete";
         let reason: string | null = engineEnd !== undefined ? (state === "complete" ? null : `${resumed ? "resumed" : "relaunched"} engine ended '${engineEnd}'`) : end.reason ?? null;
         // A red host verify ends the run `partial` naming the command, whatever end was computed (`ended` and `finish`).
         if (isRed(verify)) { state = "partial"; reason = redReason(verify); }

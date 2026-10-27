@@ -361,8 +361,9 @@ function Invoke-PacerStep {
     [Parameter(Mandatory)][string[]]$Arguments
   )
   try {
-    # Story 33.1: under the log tee, which exits with the step's own code.
-    & $Bun src/log.ts --tag $Tag '--' @Arguments | Out-Host
+    # Story 33.1: under the log tee, which exits with the step's own code. Story 33.7: `--pass` logs the pass's
+    # duration and exit code (a pass over 10 min warns, naming the runs it drove) and records it in pacer.json.
+    & $Bun src/log.ts --tag $Tag --pass '--' @Arguments | Out-Host
     if ($LASTEXITCODE -ne 0) { Write-SupervisorLog -Warning -Text "[supervisor] $($Arguments -join ' ') exited $LASTEXITCODE" }
   } catch {
     Write-SupervisorLog -Warning -Text "[supervisor] $($Arguments -join ' ') did not run: $($_.Exception.Message)"

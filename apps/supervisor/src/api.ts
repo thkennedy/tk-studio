@@ -127,7 +127,7 @@ import { underBunTest } from "./hygiene";
 import { checkReplyBody, issueRead, postReply, registryRoot, runCost, type IssueReadResult, type ReplyAnswer, type ReplyBody } from "./inbox";
 import { OfficeHub, readInbox, type InboxFile, type OfficeEvent } from "./office";
 import { gatherPage, holderOf, readLedgerTail, redactLedgerLine, renderPage } from "./page";
-import { readLogTail } from "./log";
+import { readLogTail, readPacer } from "./log";
 import { readAgents, type RebuildResult } from "./registry";
 import { contentType, resolveWebPath, WEB_BUILD_COMMAND, webRoot, type WebOptions } from "./web";
 import { registryShow } from "./server";
@@ -715,7 +715,9 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
     const live = runs.filter((r) => !isTerminal(r.state)).map((r) => ({ ...r, claim_refused: claimRefusalView(queue, r.run_id) }));
     const locks = queue.locks().map((l) => ({ checkout: l.checkout, root: l.root, acquired: l.acquired, holder: holderOf(l) }));
     // Story 33.1 (0.1.28, additive): the supervisor log's last lines, each redacted (`readLogTail`).
-    return json(200, { ok: true, counts, live, locks, log: readLogTail(deps.env ?? process.env, clock) }, { vary: "Accept" });
+    // Story 33.7 (0.1.28, additive): the pacer's last passes (`readPacer`), always present.
+    const env = deps.env ?? process.env;
+    return json(200, { ok: true, counts, live, locks, log: readLogTail(env, clock), pacer: readPacer(env) }, { vary: "Accept" });
   }
 
   /** Story 30.6 (0.1.25, additive): the office snapshot with `supervisor {version, counts}` and the ledger tail —

@@ -1,12 +1,12 @@
 // Story 33.1: the supervisor's log file — the line shape, the day file and its midnight switch, the rotation, the
 // redaction and the tee end to end, every clock a fake.
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import {
-  appendLine, dayOf, formatLine, KEEP_DAYS, LOG_TAGS, logDir, logPath, parseTeeArgs, readLogTail, redactLine, rotateLogs,
-  runUnderLog, TAIL_LINES,
+  appendLine, dayOf, formatLine, KEEP_DAYS, LOG_TAGS, logDir, logPath, pacerPath, parseTeeArgs, readLogTail, readPacer, redactLine,
+  rotateLogs, runUnderLog, SLOW_PASS_MS, TAIL_LINES,
 } from "../src/log";
 import { redactCredentials } from "../src/page";
 import { tempDir } from "./tmp";
@@ -158,7 +158,7 @@ describe("the tee (AC1: serve, tick and drain under src/log.ts)", () => {
       expect(await runUnderLog(argv, {}, () => T0, c.io)).toBe(2);
       expect(c.err.join("")).toContain("usage: bun src/log.ts --tag <serve|tick|drain|keeper|pacer>");
     }
-    expect(parseTeeArgs(["--tag", "drain", "--", "src/cli.ts", "drain"])).toEqual({ tag: "drain", args: ["src/cli.ts", "drain"] });
+    expect(parseTeeArgs(["--tag", "drain", "--", "src/cli.ts", "drain"])).toEqual({ tag: "drain", pass: false, args: ["src/cli.ts", "drain"] });
   });
 
   test("stdout and stderr echoed and logged, `started` and `stopped (exit 3)`, the child's code answered", async () => {
@@ -246,4 +246,148 @@ describe("the processes' own uncaught handlers (cli.ts, tick.ts)", () => {
       }
     });
   }
+});
+
+// Story 33.7: a pacer pass — its duration and exit code logged, a slow one warned and sent once, the last ones
+// in pacer.json (`readPacer`). The clock is a fake the child's first output line moves forward.
+describe("a pacer pass (Story 33.7, AC2)", () => {
+  const script = (body: string) => {
+    const dir = tmp("tk-sup-log-script-");
+    const path = join(dir, "child.ts");
+    writeFileSync(path, body);
+    return path;
+  };
+  /** The io, its clock jumping to `T0 + ms` at the child's first output line, and a recording fetch. */
+  const passIo = (ms: number) => {
+    const c = clock(T0);
+    const sends: { url: string; body: string }[] = [];
+    const jump = () => { c.set(T0 + ms); };
+    const io = {
+      stdout: (_: string) => { jump(); }, stderr: (_: string) => { jump(); },
+      fetch: async (url: string, init?: RequestInit) => { sends.push({ url, body: String(init?.body ?? "") }); return new Response("ok"); },
+    };
+    return { c, io, sends };
+  };
+  const NTFY = { TK_SUPERVISOR_NOTIFY: "ntfy", TK_SUPERVISOR_NTFY_URL: "https://ntfy.invalid/pacer-topic" };
+  const rid = (i: number) => `q-run-epic-33-2026102${i % 10}T021118Z-${(0xabc000 + i).toString(16)}`;
+  // Every day file in order (T0 is a second before midnight: a long pass ends in the next day's file).
+  const tagged = (w: { dir: string }) => readdirSync(w.dir).filter((n) => n.startsWith("supervisor-")).sort()
+    .flatMap((n) => fileLines(join(w.dir, n))).map((l) => l.replace(/^\S+ /, ""));
+
+  test("--pass: `pass: <ms> ms, exit <code>` before `stopped`, pacer.json written; --pass is only for tick and drain", async () => {
+    const w = work();
+    const child = script(`console.log("ticking"); process.exitCode = 3;`);
+    const p = passIo(1234);
+    expect(await runUnderLog(["--tag", "tick", "--pass", "--", child], w.env, p.c.now, p.io)).toBe(3);
+    const lines = tagged(w);
+    expect(lines.slice(-2)).toEqual(["[tick] pass: 1234 ms, exit 3", "[tick] stopped (exit 3)"]);
+    expect(lines.some((l) => l.includes("warning:"))).toBe(false);
+    expect(p.sends).toEqual([]);
+    expect(readPacer(w.env)).toEqual({ last_tick_ms: 1234, last_drain_ms: null, last_pass_at: new Date(T0 + 1234).toISOString() });
+    expect(readdirSync(join(w.root, "supervisor")).sort()).toEqual(["logs", "pacer.json"]);
+
+    expect(parseTeeArgs(["--tag", "drain", "--pass", "--", "src/cli.ts", "drain"])).toEqual({ tag: "drain", pass: true, args: ["src/cli.ts", "drain"] });
+    for (const argv of [["--tag", "serve", "--pass", "--", child], ["--tag", "keeper", "--pass", "--", child], ["--tag", "tick", "--pass", child], ["--tag", "tick", "--pass", "--"]]) {
+      const err: string[] = [];
+      expect(parseTeeArgs(argv)).toBeNull();
+      expect(await runUnderLog(argv, w.env, () => T0, { stdout: () => {}, stderr: (s) => { err.push(s); } })).toBe(2);
+      expect(err.join("")).toContain("[--pass]");
+    }
+  });
+
+  test("without --pass: no pass line and no pacer.json", async () => {
+    const w = work();
+    const child = script(`console.log("draining");`);
+    const p = passIo(SLOW_PASS_MS + 1);
+    expect(await runUnderLog(["--tag", "drain", "--", child], { ...w.env, ...NTFY }, p.c.now, p.io)).toBe(0);
+    const lines = tagged(w);
+    expect(lines.some((l) => l.includes("pass:") || l.includes("warning:"))).toBe(false);
+    expect(lines.at(-1)).toBe("[drain] stopped (exit 0)");
+    expect(existsSync(pacerPath(w.env)!)).toBe(false);
+    expect(p.sends).toEqual([]);
+  });
+
+  test("over SLOW_PASS_MS: one warning naming the run ids it drove (distinct, first seen) and one notifier send", async () => {
+    expect(SLOW_PASS_MS).toBe(600_000);
+    const w = work();
+    const child = script(`console.log("[studio-tick] job: run ${rid(1)} running"); console.error("again ${rid(1)} and {\\"run_id\\":\\"${rid(2)}\\"}");`);
+    const p = passIo(SLOW_PASS_MS + 1);
+    expect(await runUnderLog(["--tag", "drain", "--pass", "--", child], { ...w.env, ...NTFY }, p.c.now, p.io)).toBe(0);
+    const warning = `warning: pass drain took ${SLOW_PASS_MS + 1} ms (over 10 min), driving ${rid(1)}, ${rid(2)}`;
+    expect(tagged(w).slice(-3)).toEqual([`[drain] pass: ${SLOW_PASS_MS + 1} ms, exit 0`, `[drain] ${warning}`, "[drain] stopped (exit 0)"]);
+    expect(p.sends).toEqual([{ url: NTFY.TK_SUPERVISOR_NTFY_URL, body: warning }]);
+  });
+
+  test("the warning: one id, none (`no run named`), six (`+1 more`); a failing send is swallowed", async () => {
+    const one = work();
+    const p1 = passIo(SLOW_PASS_MS + 5);
+    await runUnderLog(["--tag", "tick", "--pass", "--", script(`console.log("run ${rid(3)} queued");`)], one.env, p1.c.now, p1.io);
+    expect(tagged(one)).toContain(`[tick] warning: pass tick took ${SLOW_PASS_MS + 5} ms (over 10 min), driving ${rid(3)}`);
+    expect(p1.sends).toEqual([]); // no notifier selected: nothing sent
+
+    const none = work();
+    const p0 = passIo(SLOW_PASS_MS + 5);
+    p0.io.fetch = async () => { throw new Error("network down"); };
+    expect(await runUnderLog(["--tag", "tick", "--pass", "--", script(`console.log("nothing to do");`)], { ...none.env, ...NTFY }, p0.c.now, p0.io)).toBe(0);
+    expect(tagged(none).slice(-2)).toEqual([`[tick] warning: pass tick took ${SLOW_PASS_MS + 5} ms (over 10 min), driving no run named`, "[tick] stopped (exit 0)"]);
+
+    const six = work();
+    const p6 = passIo(SLOW_PASS_MS + 5);
+    const ids = [1, 2, 3, 4, 5, 6].map(rid);
+    await runUnderLog(["--tag", "drain", "--pass", "--", script(ids.map((id) => `console.log("run ${id}");`).join("\n"))], { ...six.env, ...NTFY }, p6.c.now, p6.io);
+    const text = `warning: pass drain took ${SLOW_PASS_MS + 5} ms (over 10 min), driving ${ids.slice(0, 5).join(", ")} +1 more`;
+    expect(tagged(six)).toContain(`[drain] ${text}`);
+    expect(p6.sends.map((x) => x.body)).toEqual([text]);
+  });
+
+  test("at the threshold: no warning, no send", async () => {
+    const w = work();
+    const p = passIo(SLOW_PASS_MS);
+    await runUnderLog(["--tag", "tick", "--pass", "--", script(`console.log("run ${rid(1)}");`)], { ...w.env, ...NTFY }, p.c.now, p.io);
+    expect(tagged(w).some((l) => l.includes("warning:"))).toBe(false);
+    expect(tagged(w)).toContain(`[tick] pass: ${SLOW_PASS_MS} ms, exit 0`);
+    expect(p.sends).toEqual([]);
+  });
+
+  test("pacer.json holds both steps across two passes, `last_pass_at` the later one", async () => {
+    const w = work();
+    const child = script(`console.log("step");`);
+    const tick = passIo(40);
+    await runUnderLog(["--tag", "tick", "--pass", "--", child], w.env, tick.c.now, tick.io);
+    const drain = passIo(75);
+    drain.c.set(T0 + 1000);
+    drain.io.stdout = () => { drain.c.set(T0 + 1075); };
+    await runUnderLog(["--tag", "drain", "--pass", "--", child], w.env, drain.c.now, drain.io);
+    expect(readPacer(w.env)).toEqual({ last_tick_ms: 40, last_drain_ms: 75, last_pass_at: new Date(T0 + 1075).toISOString() });
+    expect(JSON.parse(readFileSync(pacerPath(w.env)!, "utf-8"))).toEqual(readPacer(w.env));
+  });
+
+  test("a failing pacer.json write is swallowed: the pass line still stands before `stopped`, the child's code returned", async () => {
+    const w = work();
+    // pacer.json is a (non-empty) directory: the rename onto it fails even as root.
+    mkdirSync(pacerPath(w.env)!, { recursive: true });
+    writeFileSync(join(pacerPath(w.env)!, "keep"), "x");
+    const child = script(`console.log("ticking"); process.exitCode = 4;`);
+    const p = passIo(321);
+    expect(await runUnderLog(["--tag", "tick", "--pass", "--", child], w.env, p.c.now, p.io)).toBe(4);
+    expect(tagged(w).slice(-2)).toEqual(["[tick] pass: 321 ms, exit 4", "[tick] stopped (exit 4)"]);
+    expect(statSync(pacerPath(w.env)!).isDirectory()).toBe(true);
+    expect(readdirSync(join(w.root, "supervisor")).sort()).toEqual(["logs", "pacer.json"]); // no temp file left behind
+    expect(readPacer(w.env)).toEqual({ last_tick_ms: null, last_drain_ms: null, last_pass_at: null });
+  });
+
+  test("readPacer: absent, invalid and the work folder unset all answer nulls", () => {
+    const nulls = { last_tick_ms: null, last_drain_ms: null, last_pass_at: null };
+    const w = work();
+    expect(readPacer(w.env)).toEqual(nulls);
+    mkdirSync(join(w.root, "supervisor"), { recursive: true });
+    writeFileSync(pacerPath(w.env)!, "{not json");
+    expect(readPacer(w.env)).toEqual(nulls);
+    writeFileSync(pacerPath(w.env)!, JSON.stringify([1, 2]));
+    expect(readPacer(w.env)).toEqual(nulls);
+    writeFileSync(pacerPath(w.env)!, JSON.stringify({ last_tick_ms: "12", last_drain_ms: 9, last_pass_at: 5 }));
+    expect(readPacer(w.env)).toEqual({ last_tick_ms: null, last_drain_ms: 9, last_pass_at: null });
+    expect(readPacer({})).toEqual(nulls);
+    expect(pacerPath({})).toBeUndefined();
+  });
 });
