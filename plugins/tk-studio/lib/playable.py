@@ -12,10 +12,21 @@ bounds the run with a wall clock, keeps the engine's output in
 `<out>/log.txt`, merges `run` and `log_errors` into the report and ends in
 the AD-11 status block.
 
-Verb (ends with JSON on stdout; never prompts — AD-11):
+Verbs (end with JSON on stdout; never prompt — AD-11):
   uv run playable.py run --directory DIR --scenario FILE --seed N --ticks T
                          --out DIR [--mode display|movie|headless]
                          [--wall-clock S] [--godot PATH]
+  uv run playable.py sheet --frames DIR --out PNG [--columns 4] [--width 320]
+
+`sheet` (Story 34.8): the contact sheet of a run's frames. The `*.png`
+directly under `--frames`, in name order, at most SHEET_MAX_FRAMES of them
+sampled evenly (the first and the last always kept), each scaled
+nearest-neighbour to a cell `--width` pixels wide (the cell height keeps
+the first frame's aspect), laid out `--columns` to a row, written as one
+8-bit RGB PNG (filter 0) atomically to `--out`. No frame, an unreadable
+frame (anything but an 8-bit non-interlaced PNG of colour type 0, 2, 4 or
+6) or a bad flag is a refusal (exit 2) with the same status block
+(`intent: playable`); the PNG decode is `assets.png_pixels`.
 
 Guarantees:
   - The engine binary is `--godot`, else `GODOT` from the environment
@@ -677,6 +688,113 @@ def run(*, directory: str, scenario: str, seed: str, ticks: str, out: str,
             0 if passed else 1)
 
 
+# ------------------------------------------------------------- the sheet
+
+SHEET_MAX_FRAMES = 16
+SHEET_DEFAULT_COLUMNS = 4
+SHEET_DEFAULT_WIDTH = 320
+SHEET_MAX_COLUMNS = 16
+SHEET_WIDTH_RANGE = (16, 4096)
+
+
+def sample_frames(names: list[str], limit: int = SHEET_MAX_FRAMES) -> list[str]:
+    """At most ``limit`` of ``names`` (already in order), evenly spaced, the
+    first and the last always kept."""
+    if len(names) <= limit:
+        return list(names)
+    if limit == 1:
+        return [names[0]]
+    last = len(names) - 1
+    return [names[round(i * last / (limit - 1))] for i in range(limit)]
+
+
+def _rgb(width: int, height: int, channels: int, pixels: bytes) -> bytes:
+    """8-bit RGB rows of a decoded image (grey replicated, alpha dropped)."""
+    if channels == 3:
+        return pixels
+    out = bytearray(width * height * 3)
+    for i in range(width * height):
+        if channels in (1, 2):
+            g = pixels[i * channels]
+            out[3 * i:3 * i + 3] = bytes((g, g, g))
+        else:
+            out[3 * i:3 * i + 3] = pixels[4 * i:4 * i + 3]
+    return bytes(out)
+
+
+def _scaled(width: int, height: int, rgb: bytes, cell_w: int, cell_h: int) -> list[bytes]:
+    """Nearest-neighbour rows of ``cell_w`` x ``cell_h``."""
+    xs = [min(width - 1, (x * width) // cell_w) for x in range(cell_w)]
+    rows = []
+    for y in range(cell_h):
+        sy = min(height - 1, (y * height) // cell_h)
+        src = rgb[sy * width * 3:(sy + 1) * width * 3]
+        rows.append(b"".join(src[3 * x:3 * x + 3] for x in xs))
+    return rows
+
+
+def _int_flag(name: str, raw: object, lo: int, hi: int) -> int:
+    try:
+        value = int(str(raw), 10)
+    except ValueError:
+        raise Refusal(f"{name} {raw!r} is not an integer") from None
+    if not lo <= value <= hi:
+        raise Refusal(f"{name} {value} must be between {lo} and {hi}")
+    return value
+
+
+def sheet(*, frames: str, out: str, columns: str | int = SHEET_DEFAULT_COLUMNS,
+          width: str | int = SHEET_DEFAULT_WIDTH) -> tuple[dict, int]:
+    """The contact sheet. Returns ``(result with the status block, exit)``."""
+    import assets  # within lib/: the 34.6/34.7 PNG reader and writer (lazy: assets imports this module)
+    try:
+        cols = _int_flag("--columns", columns, 1, SHEET_MAX_COLUMNS)
+        cell_w = _int_flag("--width", width, *SHEET_WIDTH_RANGE)
+        folder = Path(frames).resolve()
+        if not folder.is_dir():
+            raise Refusal(f"--frames {folder} is not a folder")
+        names = sorted(p.name for p in folder.glob("*.png") if p.is_file())
+        if not names:
+            raise Refusal(f"--frames {folder} holds no *.png frame")
+        picked = sample_frames(names)
+        decoded = []
+        for name in picked:
+            try:
+                data = (folder / name).read_bytes()
+            except OSError as exc:
+                raise Refusal(f"frame {name}: {exc}") from None
+            image = assets.png_pixels(data)
+            if image is None:
+                raise Refusal(f"frame {name} is not a readable 8-bit non-interlaced PNG")
+            decoded.append(image)
+        w0, h0 = decoded[0][0], decoded[0][1]
+        cell_h = max(1, round(cell_w * h0 / w0))
+        used = min(cols, len(decoded))
+        n_rows = -(-len(decoded) // used)
+        sheet_w, sheet_h = used * cell_w, n_rows * cell_h
+        canvas = [bytearray(sheet_w * 3) for _ in range(sheet_h)]
+        for i, (w, h, ch, px) in enumerate(decoded):
+            r, c = divmod(i, used)
+            for y, row in enumerate(_scaled(w, h, _rgb(w, h, ch, px), cell_w, cell_h)):
+                canvas[r * cell_h + y][c * cell_w * 3:(c + 1) * cell_w * 3] = row
+        raw = b"".join(b"\x00" + bytes(row) for row in canvas)
+        ihdr = assets.struct.pack(">IIBBBBB", sheet_w, sheet_h, 8, 2, 0, 0, 0)
+        png = (b"\x89PNG\r\n\x1a\n" + assets._png_chunk(b"IHDR", ihdr)
+               + assets._png_chunk(b"IDAT", assets.zlib.compress(raw, 9))
+               + assets._png_chunk(b"IEND", b""))
+        out_path = Path(out).resolve()
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            _write_atomic(out_path, png)
+        except OSError as exc:
+            raise Refusal(f"--out {out_path}: {exc}") from None
+    except Refusal as exc:
+        return with_block({"ok": False, "error": str(exc)}, "blocked", [], str(exc)), 2
+    result = {"ok": True, "out": str(out_path), "frames": picked, "of": len(names),
+              "columns": used, "cell": [cell_w, cell_h], "size": [sheet_w, sheet_h]}
+    return with_block(result, "complete", [out_path.name], None), 0
+
+
 # ---------------------------------------------------------------------- cli
 
 class _Parser(argparse.ArgumentParser):
@@ -707,11 +825,23 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--wall-clock", default=DEFAULT_WALL_CLOCK_S,
                    help=f"seconds before an overrun is killed (default {DEFAULT_WALL_CLOCK_S})")
     p.add_argument("--godot", help="the engine binary (default: GODOT from the environment)")
+    s = sub.add_parser("sheet", help="a contact sheet of a run's frames (Story 34.8)")
+    s.add_argument("--frames", required=True, help="the folder holding the frames (*.png)")
+    s.add_argument("--out", required=True, help="the contact sheet PNG to write")
+    s.add_argument("--columns", default=SHEET_DEFAULT_COLUMNS,
+                   help=f"cells per row (default {SHEET_DEFAULT_COLUMNS})")
+    s.add_argument("--width", default=SHEET_DEFAULT_WIDTH,
+                   help=f"a cell's width in pixels (default {SHEET_DEFAULT_WIDTH})")
     try:
         args = parser.parse_args(argv)
     except Refusal as exc:
         _emit(with_block({"ok": False, "error": str(exc)}, "blocked", [], str(exc)))
         return 2
+    if args.command == "sheet":
+        result, code = sheet(frames=args.frames, out=args.out, columns=args.columns,
+                             width=args.width)
+        _emit(result)
+        return code
     result, code = run(directory=args.directory, scenario=args.scenario, seed=args.seed,
                        ticks=args.ticks, out=args.out, mode=args.mode,
                        wall_clock=args.wall_clock, godot=args.godot)

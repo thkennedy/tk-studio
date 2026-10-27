@@ -1119,3 +1119,29 @@ describe("Story 32.8: revise mid-run, go past the cap, the run-end hand-off", ()
     expect(readEngagement(root, ENG)!.state).toBe("in-progress");
   });
 });
+
+describe("Story 34.8: approve's type rule (AC1)", () => {
+  test("a record with game: true mints run-epic-N as type run-vertical-slice; the id stays run-epic-N", async () => {
+    const queue = newQueue();
+    const record = { ...approvedRecord({ baseRef: "release" }), game: true } as Engagement;
+    const { root, origin } = servedRepo({ record });
+    const fx = approveDeps(queue);
+    await approvePass(queue, fx.deps, { root, engagement: ENG });
+    expect(steps(queue).slice(0, 3)).toEqual([["append", true], ["sync", true], ["job", true]]);
+    const job = JSON.parse(git(origin, "show", "engagement/ENG-001:.tk-studio/jobs/run-epic-41.json"));
+    expect(job).toMatchObject({ job_schema_version: 1, id: "run-epic-41", type: "run-vertical-slice", target: { payload: { epic: 41 } } });
+    expect(approveEvents(queue).find((d) => d.step === "job")!.detail.jobs).toEqual(["run-epic-41"]);
+  });
+
+  test("a record without game (or game false) mints run-epic, unchanged", async () => {
+    for (const game of [undefined, false]) {
+      const queue = newQueue();
+      const record = { ...approvedRecord({ baseRef: "release" }), ...(game === undefined ? {} : { game }) } as Engagement;
+      const { root, origin } = servedRepo({ record });
+      const fx = approveDeps(queue);
+      await approvePass(queue, fx.deps, { root, engagement: ENG });
+      const job = JSON.parse(git(origin, "show", "engagement/ENG-001:.tk-studio/jobs/run-epic-41.json"));
+      expect(job.type).toBe("run-epic");
+    }
+  });
+});

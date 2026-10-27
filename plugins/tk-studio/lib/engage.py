@@ -56,7 +56,8 @@ The `scope` verb (Story 32.4, user flow F2 step 3) is the engagement's
 scope of work, published to Confluence:
 
   uv run engage.py scope --directory ROOT --engagement ENG-NNN
-      [--scope-file PATH | --revise-at AT] [--dry-run]
+      [--scope-file PATH | --revise-at AT]
+      [--brief-file PATH --gdd-file PATH] [--dry-run]
 
 In `scoping` only (else `NotScoping`, or `EngagementClosed`). The planner's
 `scope.md` (`--scope-file`, default the engagement's own `scope.md`) is
@@ -88,6 +89,22 @@ stories become plan entities only at approval (32.6). The sync-back mirrors
 an owner's edit of the page back through `apply_page_revision` (Settled
 shape 3). The `reply` memory carries `scope {path, text}` (null while
 there is none), so the planner's next turn reads the current scope.
+
+Story 34.8 (user flow F9): a game project is one whose tracked
+`.tk-studio/config.yaml` `working_set` has any role's list holding `gds`
+or an entry starting `gds-` (`is_game_project`; decided here only, never
+re-derived by the supervisor). On a game project `scope` takes the
+planner's quick-flow game brief and GDD (`--brief-file`, `--gdd-file`, the
+`gds-create-game-brief` Fast path and the `gds-gdd` Express path): both
+are required (`GameDocsMissing: brief | gdd`) unless `--revise-at` re-runs
+a scope already published (the record carries `scope_page`): that keeps
+whatever doc pages the record holds. On any other project
+either flag is `NotAGameProject`. Each lands as
+`_bmad-output/engagements/<id>/brief.md` / `gdd.md` (atomically, when it
+differs) and is published beside the scope in `Engagements/ENG-NNN` as
+`ENG-NNN: Game Brief` / `ENG-NNN: GDD` (the same footer and skip rule);
+the record then gains `brief_page` / `gdd_page` `{id, url, version}`
+(shaped like `scope_page`) and `game: true`, merged with `scope_page`.
 
 The `quote` verb (Story 32.5, user flow F2 step 4) is the engagement's
 price, the planner's turn after the scope (or by hand):
@@ -128,7 +145,15 @@ In `in-progress` or `partial` only (else `NotInProgress`, or
 JSON object `{run_id, outcome_hint, runs: [{run_id, job, state,
 studio_run_id, cost_usd, pr}], stories: [{key, run_id, spec_status, pr,
 pr_state}], epics: [{job, queued}], side_exits: [{at, to, verb, reason}],
-spend {planning_usd, runs_usd}, quote}` (else `CloseoutInputInvalid`). Each
+spend {planning_usd, runs_usd}, quote, slices?}` (else
+`CloseoutInputInvalid`). Story 34.8: `slices: [{story, engine, assets,
+playable, contact_sheet?}]` (one per slice run's story, from its last
+`host-verify` event) adds a `## Slice verdicts` section after
+`Deliverables` — one line per story, `<key> — engine <v>; assets <v>;
+playable <v>`, and its contact sheet (a host path) copied beside
+`closeout.md` as `<key>-contact-sheet.png`, embedded and uploaded to the
+page as an attachment (an unreadable sheet is a note); with no slice the
+section is absent. Each
 `### <title>` of `scope.md`'s `## Deliverables` (no `scope.md`: `NoScope`)
 is judged against its stories (the proposed stories naming its title,
 else every proposed story; the i-th proposed epic is the i-th declared
@@ -167,6 +192,7 @@ and no supervisor code.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import math
@@ -713,6 +739,12 @@ SCOPE_SECTIONS = ("Goal", "Deliverables", "Exclusions",
                   "Proposed epics and stories")
 ASSUMPTIONS_SECTION = "Assumptions"
 SCOPE_TITLE = "{engagement}: Scope of Work"
+# Story 34.8: a game project's quick-flow docs, published beside the scope
+BRIEF_TITLE = "{engagement}: Game Brief"
+GDD_TITLE = "{engagement}: GDD"
+GAME_DOCS = (("brief", "brief.md", BRIEF_TITLE, "brief_page"),
+             ("gdd", "gdd.md", GDD_TITLE, "gdd_page"))
+GDS_RESOURCE = "gds"
 ENGAGEMENTS_FOLDER = "Engagements"
 SCOPE_LOCK_WAIT_S = 5.0
 # scope.lock wraps Confluence I/O, so it is stale only well past the worst
@@ -742,6 +774,30 @@ SCOPE_TRANSIENT_RE = re.compile(r"\bcannot reach\b|\breturned 5\d\d\b|"
 
 def scope_rel(engagement: str) -> str:
     return f"_bmad-output/engagements/{engagement}/scope.md"
+
+
+def doc_rel(engagement: str, name: str) -> str:
+    return f"_bmad-output/engagements/{engagement}/{name}"
+
+
+def is_game_project(root: Path) -> bool:
+    """Story 34.8: the tracked `.tk-studio/config.yaml` `working_set` has a
+    role's list holding `gds` or an entry starting `gds-` (never the local
+    overlay or the user tier). An absent or unreadable config is not a game
+    project."""
+    import miniyaml
+    path = Path(root) / ".tk-studio" / configlib.TRACKED_NAME
+    try:
+        doc = miniyaml.load(path) if path.is_file() else None
+    except (OSError, UnicodeDecodeError, miniyaml.MiniYamlError):
+        return False
+    sets = doc.get("working_set") if isinstance(doc, dict) else None
+    if not isinstance(sets, dict):
+        return False
+    return any(isinstance(entry, str) and (entry == GDS_RESOURCE
+                                           or entry.startswith("gds-"))
+               for names in sets.values() if isinstance(names, list)
+               for entry in names)
 
 
 def read_scope(root: Path, engagement: str) -> dict | None:
@@ -986,14 +1042,19 @@ def _page_url(site: str | None, webui: str | None) -> str | None:
 def _publish_scope(root: Path, engagement: str, text: str, space_id: str,
                    site: str | None, transport, sleep,
                    recorded_version=None, title: str | None = None,
-                   rel: str | None = None) -> dict:
+                   rel: str | None = None,
+                   attachments: list | None = None) -> dict:
     """The page `ENG-NNN: Scope of Work` in `Engagements/ENG-NNN` (Settled
     shape 2): `{id, url, version, action}`. `skipped` only when the footer
     hash matches and the page is still at `recorded_version` (or none is
     recorded): an owner's newer version is overwritten at version + 1
     (local wins), never adopted unmirrored. Story 32.8: `title` and `rel`
     name another page of the same folder (`ENG-NNN: Closeout` from
-    `closeout.md`); default the scope's."""
+    `closeout.md`); default the scope's. Story 34.8: `attachments`
+    `[(filename, bytes)]` are uploaded to the page (each skipped when the
+    page already holds it with the same `sha256:` comment) and count in the
+    footer's content hash; a refused upload is named in the answer's
+    `attachment_errors`, never a refusal of the page."""
     import confluence
     import plansync
     try:
@@ -1027,7 +1088,26 @@ def _publish_scope(root: Path, engagement: str, text: str, space_id: str,
         title = title or SCOPE_TITLE.format(engagement=engagement)
         rel = rel or scope_rel(engagement)
         storage, _images = mdstorage.convert(text, rel)
-        digest = plansync.page_hash(title, storage, [])
+        uploads = [(name, content, hashlib.sha256(content).hexdigest())
+                   for name, content in attachments or []]
+        digest = plansync.page_hash(title, storage, [h for _, _, h in uploads])
+
+        def attach(page: dict) -> dict:
+            if not uploads:
+                return page
+            remote = {a.get("title"): a for a in
+                      confluence.list_attachments(client, page["id"])}
+            errors = []
+            for name, content, sha in uploads:
+                comment = f"sha256:{sha}"
+                if comment in str((remote.get(name) or {}).get("comment")
+                                  or ""):
+                    continue
+                ok, detail = confluence.upload_attachment(
+                    client, page["id"], name, content, comment)
+                if not ok:
+                    errors.append(f"{name}: {detail}")
+            return {**page, "attachment_errors": errors} if errors else page
         body = storage + plansync.page_footer(
             rel, plansync._provenance(root, rel), digest)
         page_id = confluence.find_page(client, folder, title)
@@ -1037,10 +1117,10 @@ def _publish_scope(root: Path, engagement: str, text: str, space_id: str,
             remote = confluence.page_version(page)
             if hashes and hashes[-1] == digest and (
                     recorded_version is None or remote == recorded_version):
-                return {"id": page_id,
-                        "url": _page_url(site, plansync._webui(page)),
-                        "version": confluence.page_version(page),
-                        "action": "skipped"}
+                return attach({"id": page_id,
+                               "url": _page_url(site, plansync._webui(page)),
+                               "version": confluence.page_version(page),
+                               "action": "skipped"})
             put, detail = confluence.update_page(
                 client, page_id, title, body,
                 confluence.page_version(page) + 1)
@@ -1049,16 +1129,16 @@ def _publish_scope(root: Path, engagement: str, text: str, space_id: str,
             webui = plansync._webui(put) or plansync._webui(page)
             version = confluence.page_version(put) \
                 or confluence.page_version(page) + 1
-            return {"id": page_id, "url": _page_url(site, webui),
-                    "version": version, "action": "updated"}
+            return attach({"id": page_id, "url": _page_url(site, webui),
+                           "version": version, "action": "updated"})
         made, detail = confluence.create_page(client, space_id, folder, title,
                                               body)
         if made is None:
             raise refused(f"page {title} create refused", detail)
-        return {"id": str(made["id"]),
-                "url": _page_url(site, plansync._webui(made)),
-                "version": confluence.page_version(made) or 1,
-                "action": "created"}
+        return attach({"id": str(made["id"]),
+                       "url": _page_url(site, plansync._webui(made)),
+                       "version": confluence.page_version(made) or 1,
+                       "action": "created"})
     except confluence.RateLimited as exc:
         raise _Transient(str(exc)) from None
     except confluence.ConfluenceError as exc:
@@ -1069,10 +1149,12 @@ def _publish_scope(root: Path, engagement: str, text: str, space_id: str,
 
 def scope(project_root: Path, engagement: str, text: str | None = None,
           revise_at: str | None = None, dry_run: bool = False, now=None,
-          transport=None, sleep=None, lock_wait_s=SCOPE_LOCK_WAIT_S) -> dict:
+          transport=None, sleep=None, lock_wait_s=SCOPE_LOCK_WAIT_S,
+          brief: str | None = None, gdd: str | None = None) -> dict:
     """The `scope` verb (see the module docstring): `text` is the planner's
     scope (checked); `revise_at` names the `revise` input whose body is
-    taken verbatim."""
+    taken verbatim. Story 34.8: `brief` and `gdd` are a game project's
+    quick-flow docs, published beside the scope."""
     import confluence
     import plansync
     root = Path(project_root).resolve()
@@ -1092,6 +1174,27 @@ def scope(project_root: Path, engagement: str, text: str | None = None,
         if state != "scoping":
             raise Refused("NotScoping", f"{engagement} is {state}; the scope "
                           f"is written only in scoping")
+        # Story 34.8: a game project's docs (decided here, from the tracked
+        # working set only)
+        game = is_game_project(root)
+        docs = {"brief": brief, "gdd": gdd}
+        if not game:
+            given = [k for k, v in docs.items() if v is not None]
+            if given:
+                raise Refused("NotAGameProject", f"--{given[0]}-file given, "
+                              f"but no working_set role carries gds")
+        else:
+            # a revise re-run of a scope already published (the supervisor's,
+            # with no doc flags) keeps whatever pages the record holds — a
+            # record scoped before 34.8 has none; the first scope needs both
+            revising = revise_at is not None \
+                and isinstance(record.get("scope_page"), dict)
+            for kind, _name, _title, key in GAME_DOCS:
+                if docs[kind] is None and not revising:
+                    raise Refused("GameDocsMissing", kind)
+                if docs[kind] is not None and not docs[kind].strip():
+                    raise Refused("GameDocsMissing", f"{kind} (empty)")
+        result["game"] = game
         if revise_at is not None:
             line = next((l for l in reversed(record.get("inputs") or [])
                          if isinstance(l, dict) and l.get("verb") == "revise"
@@ -1193,9 +1296,61 @@ def scope(project_root: Path, engagement: str, text: str | None = None,
                 result["written"].append(record_rel)
             return page
 
+        def write_and_publish_all() -> dict:
+            page = write_and_publish()
+            record_rel = f"_bmad-output/engagements/{engagement}/" \
+                         f"engagement.yaml"
+            if not game:
+                return page
+            pages = {}
+            for kind, name, title, key in GAME_DOCS:
+                body = docs[kind]
+                if body is None:
+                    continue  # a revise re-run: the published doc stands
+                rel = doc_rel(engagement, name)
+                doc_path = engagement_dir(root, engagement) / name
+                try:
+                    held = doc_path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    held = None
+                if held != body:
+                    try:
+                        atomic_write_text(doc_path, body)
+                    except OSError as exc:
+                        raise Refused("ScopeUnwritable", f"{rel}: "
+                                      f"{exc.__class__.__name__}") from None
+                    result["written"].append(rel)
+                prior = read_record(root, engagement).get(key)
+                try:
+                    version = int(prior["version"]) \
+                        if isinstance(prior, dict) \
+                        and prior.get("version") is not None else None
+                except (TypeError, ValueError):
+                    version = None
+                pages[key] = _publish_scope(
+                    root, engagement, body, space_id, site, transport, sleep,
+                    version, title=title.format(engagement=engagement),
+                    rel=rel)
+            if not pages:
+                # no game doc published by this call (a flagless revise of a
+                # pre-34.8 scope): `game: true` comes only with the published
+                # docs, so the record keeps whatever it holds
+                return page
+            changes = {key: {"id": p["id"], "url": p["url"],
+                             "version": p["version"]}
+                       for key, p in pages.items()}
+            changes.update(game=True, updated=now or _now())
+            try:
+                _merge_record(root, engagement, changes)
+            except OSError as exc:
+                raise Refused("ScopeUnwritable", f"{record_rel}: "
+                              f"{exc.__class__.__name__}") from None
+            result.update({key: p for key, p in pages.items()})
+            return page
+
         try:
             result["page"] = _with_scope_lock(root, engagement,
-                                              write_and_publish,
+                                              write_and_publish_all,
                                               wait_s=lock_wait_s)
         except _Transient as exc:
             result["retry"] = True
@@ -1584,6 +1739,28 @@ def closeout_rel(engagement: str) -> str:
     return f"_bmad-output/engagements/{engagement}/closeout.md"
 
 
+def _atomic_write_bytes(path: Path, content: bytes) -> None:
+    """`atomic_write_text`'s discipline for bytes (a contact sheet)."""
+    import tempfile
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name,
+                               suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def sheet_name(story: str) -> str:
+    """Story 34.8: a slice's contact sheet beside `closeout.md` (and its
+    attachment's filename on the page)."""
+    return re.sub(r"[^A-Za-z0-9._-]", "-", str(story)) + "-contact-sheet.png"
+
+
 def _signal_of(lines: list[str]) -> str | None:
     """A deliverable's acceptance signal: the `SIGNAL_RE` line, else (owner
     text is unchecked) the first line naming `acceptance signal` in any case,
@@ -1661,6 +1838,20 @@ def _check_closeout_input(data) -> dict:
     for n, epic in enumerate(data.get("epics") or []):
         if not _non_empty(epic.get("job")):
             raise bad(f"epics[{n}] has no job")
+    slices = data.get("slices", [])
+    if not isinstance(slices, list) or not all(isinstance(x, dict)
+                                               for x in slices):
+        raise bad("'slices' must be a list of objects")
+    for n, entry in enumerate(slices):
+        if not _non_empty(entry.get("story")):
+            raise bad(f"slices[{n}] has no story")
+        for field in ("engine", "assets", "playable"):
+            if not _non_empty(entry.get(field)):
+                raise bad(f"slices[{n}] {field} must be a non-empty string")
+        sheet = entry.get("contact_sheet")
+        if sheet is not None and not _non_empty(sheet):
+            raise bad(f"slices[{n}] contact_sheet must be a non-empty "
+                      f"string or absent")
     for key in ("spend", "quote"):
         if data.get(key) is not None and not isinstance(data.get(key), dict):
             raise bad(f"'{key}' must be an object or null")
@@ -1769,7 +1960,8 @@ def render_closeout(engagement: str, record: dict, data: dict,
                     meter: dict | None = None) -> str:
     """`closeout.md` (Settled shape 5): the `##` sections `Outcome`,
     `Deliverables`, `Pull requests`, `Cost per story`, `Spend`, `Quote
-    against actual` and `Side exits`."""
+    against actual` and `Side exits`; Story 34.8: `Slice verdicts` after
+    `Deliverables` when `data` carries a slice."""
     meter = meter or {}
     runs = data.get("runs") or []
     stories = data.get("stories") or []
@@ -1794,6 +1986,21 @@ def render_closeout(engagement: str, record: dict, data: dict,
         out += [f"- PR: {pr}" for pr in v["prs"]]
         if v["stories"] or v["prs"]:
             out.append("")
+    slices = data.get("slices") or []
+    if slices:
+        # Story 34.8: the slice's verdicts per story, each contact sheet
+        # embedded (the file beside closeout.md, an attachment on the page)
+        out += ["## Slice verdicts", ""]
+        for entry in slices:
+            out.append(f"- {_cell(entry.get('story'))} — engine "
+                       f"{_cell(entry.get('engine'))}; assets "
+                       f"{_cell(entry.get('assets'))}; playable "
+                       f"{_cell(entry.get('playable'))}")
+        out.append("")
+        for entry in slices:
+            if entry.get("contact_sheet"):
+                out += [f"![{entry['story']} contact sheet]"
+                        f"({sheet_name(entry['story'])})", ""]
     out += ["## Pull requests", ""]
     seen = []
     for s in stories:
@@ -1935,6 +2142,25 @@ def closeout(project_root: Path, engagement: str, data, dry_run: bool = False,
             result["notes"].append(note)
         verdicts = closeout_verdicts(scoped["text"], data)
         outcome = closeout_outcome(verdicts, data)
+        # Story 34.8: each slice's contact sheet read from its host path; an
+        # unreadable one is a note, its line kept without the image
+        sheets: list[tuple[str, bytes]] = []
+        if data.get("slices"):
+            kept = []
+            for entry in data["slices"]:
+                entry = dict(entry)
+                if entry.get("contact_sheet"):
+                    try:
+                        sheets.append((sheet_name(entry["story"]),
+                                       Path(entry["contact_sheet"])
+                                       .read_bytes()))
+                    except OSError as exc:
+                        result["notes"].append(
+                            f"contact sheet of {entry['story']} unreadable "
+                            f"({exc.__class__.__name__}): not embedded")
+                        entry.pop("contact_sheet")
+                kept.append(entry)
+            data = {**data, "slices": kept}
         text = render_closeout(engagement, record, data, verdicts, outcome,
                                meter)
         done = sum(1 for v in verdicts if v["done"])
@@ -1950,6 +2176,22 @@ def closeout(project_root: Path, engagement: str, data, dry_run: bool = False,
             current = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             current = None
+        for name, content in sheets:
+            sheet_path = engagement_dir(root, engagement) / name
+            try:
+                held = sheet_path.read_bytes()
+            except OSError:
+                held = None
+            if held == content:
+                continue
+            try:
+                _atomic_write_bytes(sheet_path, content)
+            except OSError as exc:
+                result["retry"] = True
+                return _finish(result, "partial", f"engage closeout "
+                               f"transient: {doc_rel(engagement, name)}: "
+                               f"{exc.__class__.__name__}")
+            result["written"].append(doc_rel(engagement, name))
         if current != text:
             try:
                 atomic_write_text(path, text)
@@ -1986,7 +2228,10 @@ def closeout(project_root: Path, engagement: str, data, dry_run: bool = False,
                     plansync._recorded(root, "planning.jira.site"),
                     transport, sleep, recorded_version,
                     title=CLOSEOUT_TITLE.format(engagement=engagement),
-                    rel=rel)
+                    rel=rel, attachments=sheets)
+                for detail in page.pop("attachment_errors", []):
+                    result["notes"].append(f"attachment not uploaded: "
+                                           f"{detail}")
             except _Transient as exc:
                 result["retry"] = True
                 result["notes"].append("closeout.md kept; the record's "
@@ -2055,9 +2300,24 @@ def _scope_main(directory: Path, args, transport=None) -> int:
                              f"{exc.__class__.__name__}; nothing written")
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 2
+    docs = {}
+    for kind in ("brief", "gdd"):
+        value = getattr(args, f"{kind}_file", None)
+        if value is None:
+            continue
+        try:
+            docs[kind] = Path(value).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            result = _finish(_result(args.engagement, "scope", args.dry_run),
+                             "blocked", f"engage refused: GameDocsMissing: "
+                             f"{kind}: cannot read --{kind}-file: "
+                             f"{exc.__class__.__name__}; nothing written")
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 2
     result = scope(directory, args.engagement, text=text,
                    revise_at=args.revise_at, dry_run=args.dry_run,
-                   transport=transport)
+                   transport=transport, brief=docs.get("brief"),
+                   gdd=docs.get("gdd"))
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 2 if result.get("status") == "blocked" else 0
 
@@ -2127,6 +2387,11 @@ def main(argv: list[str] | None = None) -> int:
                                              "own scope.md)")
     source.add_argument("--revise-at", help="the `at` of the revise input "
                                             "whose body becomes the scope")
+    scp.add_argument("--brief-file", help="a game project's quick-flow game "
+                                          "brief (gds-create-game-brief), "
+                                          "Story 34.8")
+    scp.add_argument("--gdd-file", help="a game project's quick-flow GDD "
+                                        "(gds-gdd), Story 34.8")
     scp.add_argument("--dry-run", action="store_true")
     quo = sub.add_parser("quote")
     quo.add_argument("--directory", required=True,

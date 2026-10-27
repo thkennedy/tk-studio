@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "verdict": "pass",
+  "failed": null,
+  "seed": 7,
+  "ticks": 60,
+  "ticks_run": 60,
+  "capture_every": 30,
+  "mode": "movie",
+  "frames": [
+    {
+      "tick": 0,
+      "file": "frames/tick-000000.png"
+    },
+    {
+      "tick": 30,
+      "file": "frames/tick-000030.png"
+    }
+  ],
+  "moments": [
+    {
+      "name": "spawn",
+      "tick": 0,
+      "frame": "frames/tick-000000.png"
+    }
+  ],
+  "frame_time_ms": {
+    "max": 18.2,
+    "mean": 16.6
+  },
+  "log_errors": []
+}

@@ -284,6 +284,52 @@ class JobTestCase(unittest.TestCase):
             self.assertNotIn(key, defn)
         self.assertEqual(joblib.load_instances(self.root)["jobs"], [])
 
+    # ---------------- Story 34.8: the shipped run-vertical-slice job type
+
+    def test_run_vertical_slice_ships_in_run_epics_shape(self):
+        types = joblib.load_types()
+        entry = types["run-vertical-slice"]
+        self.assertEqual(entry["problems"], [])
+        self.assertEqual(entry["path"], "jobs/run-vertical-slice.json")
+        defn, epic = entry["definition"], types["run-epic"]["definition"]
+        self.assertEqual(defn["id"], "run-vertical-slice")
+        self.assertNotIn("type", defn)
+        self.assertNotEqual(defn["description"], epic["description"])
+        # run-epic's shape: the launch surface, its payload, one-shot, the same
+        # guards and stop condition per the job schema, the planner effort
+        for key in ("job_schema_version", "target", "trigger", "guards", "stop", "effort"):
+            self.assertEqual(defn[key], epic[key], key)
+        self.assertEqual(defn["target"]["skill"], "tk-studio-launch")
+        self.assertEqual(set(defn), set(epic))
+        self.assertEqual(joblib.validate_definition(defn), [])
+
+    def test_a_run_epic_n_instance_of_the_slice_type_resolves_as_a_slice(self):
+        # approve.ts mints `run-epic-N` with `type: run-vertical-slice` for a game
+        # engagement; the resolved definition keeps the type (the supervisor's
+        # slice detection reads `type` or `id`)
+        self._declare_jobs("run-epic-41")
+        self._write_instance("run-epic-41", {
+            "job_schema_version": 1, "id": "run-epic-41", "type": "run-vertical-slice",
+            "description": "p Epic 41 for engagement ENG-001",
+            "target": {"payload": {"epic": 41}},
+        })
+        (entry,) = joblib.load_instances(self.root)["jobs"]
+        self.assertEqual(entry["problems"], [])
+        self.assertEqual(entry["extends"], "run-vertical-slice")
+        defn = entry["definition"]
+        self.assertEqual(defn["id"], "run-epic-41")
+        self.assertEqual(defn["type"], "run-vertical-slice")
+        self.assertEqual(defn["target"], {"skill": "tk-studio-launch", "payload": {
+            "verb": "start", "bootstrap": True, "epic": 41}})
+        self.assertEqual(defn["guards"], {"max_turns": 80, "max_wall_clock_seconds": 3600})
+        self.assertEqual(defn["stop"], {"on_status": ["blocked"]})
+        self.assertEqual(defn["effort"], "high")
+        # a run-epic instance resolves as run-epic, never as a slice
+        resolved, problems = joblib.resolve_instance(
+            {"job_schema_version": 1, "id": "run-epic-42", "type": "run-epic"})
+        self.assertEqual(problems, [])
+        self.assertEqual(resolved["type"], "run-epic")
+
     def _fake_core(self, stdout: dict, code: int = 0):
         seen = []
 

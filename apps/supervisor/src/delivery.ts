@@ -26,6 +26,14 @@
  *                  `gh pr view --json state` (null when gh fails); `epics` the jobs the newest ok `engagement-approve`
  *                  `job` step declared against the ones queued; `side_exits` the record's `inputs[]` lines whose `to` is
  *                  `paused`, `partial`, `failed` or `cancelled`, with `detail.reason`, a payload `reason` or the verb.
+ *                  Story 34.8: `slices: [{story, engine, assets, playable, contact_sheet?}]`, present only when a linked
+ *                  run is a slice (`isSlice` of its resolved definition, or its last `host-verify` event carries
+ *                  `assets`): one entry per story key (the run id when a run landed none; a later linked run's entry
+ *                  replaces an earlier one's), every story of a run taking the verdicts of that run's last `host-verify`
+ *                  event (the leg runs once per engine completion over the worktree all its stories landed in, or a
+ *                  later `POST /runs/{id}/verify` re-verify; the paused-ruling `close-out` path runs no leg) (`skipped`
+ *                  for a leg that skipped or recorded no step, `not run` with no event), `contact_sheet` its playable
+ *                  step's sheet path on the host.
  *                  Written to a temp file and run as `engage.py closeout --directory <served root> --engagement <id>
  *                  --input-file <path>` on the host (`uv`, timeout 300): the report, its page, the record's
  *                  `closeout`.
@@ -58,6 +66,7 @@ import { canonicalPr, type EndNotice } from "./hygiene";
 import { runPr } from "./planstatus";
 import { isTerminal, servedRoot, type Queue, type QueueRun } from "./queue";
 import { lastJsonObject, type RunResult } from "./server";
+import { isSlice } from "./hostverify";
 import { gh, runBranch, runner, studioScript, uvRunner } from "./worktree";
 
 export const CLOSEOUT_EVENT = "engagement-closeout";
@@ -79,6 +88,8 @@ export interface CloseoutInput {
   side_exits: { at: string; to: string; verb: string; reason: string }[];
   spend: { planning_usd: number; runs_usd: number };
   quote: Record<string, unknown> | null;
+  /** Story 34.8: one per story of a slice run (absent when no linked run is a slice). */
+  slices?: { story: string; engine: string; assets: string; playable: string; contact_sheet?: string }[];
 }
 
 export interface CloseoutResult { closed: string[]; refused: string[] }
@@ -200,6 +211,7 @@ export async function composeCloseout(queue: Queue, deps: DeliveryDeps, t: Targe
   const costs = jobRunCosts(ledgerText(deps));
   const runs: CloseoutInput["runs"] = [];
   const stories: CloseoutInput["stories"] = [];
+  const slices = new Map<string, NonNullable<CloseoutInput["slices"]>[number]>();
   const states = new Map<string, string | null>();
   const seen = new Set<string>();
   for (const link of links) {
@@ -221,6 +233,18 @@ export async function composeCloseout(queue: Queue, deps: DeliveryDeps, t: Targe
     }
     const landed = landedStory(queue, run);
     if (landed && !keys.includes(landed)) keys.push(landed);
+    // Story 34.8: the slice's verdicts per story: every story of the run takes the run's LAST `host-verify` event.
+    // The paused-ruling `close-out` path runs no host leg; the leg runs once per engine completion (over the worktree
+    // all the run's stories landed in) and on each `POST /runs/{id}/verify`, so the latest leg is the run's verdict.
+    // One entry per story key: a later linked run's replaces an earlier one's.
+    const hv = events.findLast((e) => e.kind === "host-verify")?.detail as Record<string, any> | undefined;
+    if (isSlice(queue.definition(run)) || isObject(hv?.assets)) {
+      for (const story of keys.length ? keys : [run.run_id]) {
+        const verdict = (step: unknown) => (isObject(step) && typeof step.verdict === "string" ? step.verdict : hv ? "skipped" : "not run");
+        const sheet = isObject(hv?.playable) && typeof hv!.playable.contact_sheet === "string" && hv!.playable.contact_sheet ? hv!.playable.contact_sheet as string : undefined;
+        slices.set(story, { story, engine: verdict(hv?.engine), assets: verdict(hv?.assets), playable: verdict(hv?.playable), ...(sheet ? { contact_sheet: sheet } : {}) });
+      }
+    }
     for (const key of keys) {
       if (seen.has(key)) continue; // a story counted once, at its first run
       seen.add(key);
@@ -248,6 +272,7 @@ export async function composeCloseout(queue: Queue, deps: DeliveryDeps, t: Targe
     run_id: last.run_id, outcome_hint: last.state === "blocked" ? "failed" : "partial", runs, stories, epics, side_exits,
     spend: { planning_usd: Number(spend.planning_usd) || 0, runs_usd: Number(spend.runs_usd) || 0 },
     quote: isObject(record.quote) ? record.quote : null,
+    ...(slices.size ? { slices: [...slices.values()] } : {}),
   };
 }
 

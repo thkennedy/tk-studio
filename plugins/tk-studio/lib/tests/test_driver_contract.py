@@ -2088,7 +2088,7 @@ class DriverContractTestCase(unittest.TestCase):
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
         self.assertIn("Story 34.1, Story 34.2, Story 34.3, Story 34.4, Story 34.5, Story 34.6, "
-                      "Story 34.7 (Epic 34)",
+                      "Story 34.7, Story 34.8 (Epic 34)",
                       stories)
 
     def test_0_1_29_story_34_4_engine_skill(self):
@@ -2130,7 +2130,7 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertIn("`lib/engine_pin.py check`", row)
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
-        self.assertIn("Story 34.3, Story 34.4, Story 34.5, Story 34.6, Story 34.7 (Epic 34)",
+        self.assertIn("Story 34.3, Story 34.4, Story 34.5, Story 34.6, Story 34.7, Story 34.8 (Epic 34)",
                       stories)
 
     def test_0_1_29_story_34_5_engine_mcp(self):
@@ -2179,7 +2179,7 @@ class DriverContractTestCase(unittest.TestCase):
             self.assertIn(phrase, sentence)
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
-        self.assertIn("Story 34.4, Story 34.5, Story 34.6, Story 34.7 (Epic 34)", stories)
+        self.assertIn("Story 34.4, Story 34.5, Story 34.6, Story 34.7, Story 34.8 (Epic 34)", stories)
 
     def test_0_1_29_story_34_6_asset_manifest(self):
         header = next(line for line in self.text.splitlines()
@@ -2239,7 +2239,7 @@ class DriverContractTestCase(unittest.TestCase):
             self.assertIn(phrase, section)
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
-        self.assertIn("Story 34.5, Story 34.6, Story 34.7 (Epic 34)", stories)
+        self.assertIn("Story 34.5, Story 34.6, Story 34.7, Story 34.8 (Epic 34)", stories)
 
     def test_0_1_29_story_34_7_asset_ladder(self):
         header = next(line for line in self.text.splitlines()
@@ -2319,7 +2319,85 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertIn("lib/assets.py generate", taxonomy["events"]["asset-generation"]["emitter"])
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
-        self.assertIn("Story 34.6, Story 34.7 (Epic 34)", stories)
+        self.assertIn("Story 34.6, Story 34.7, Story 34.8 (Epic 34)", stories)
+
+    def test_0_1_29_story_34_8_vertical_slice(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.29**", header)
+        self.assertNotIn("**0.1.30**", header)
+        self.assertEqual(header.count("Story 34.8, additive"), 1)
+        self.assertLess(header.index("Story 34.7, additive"),
+                        header.index("Story 34.8, additive"))
+        clause = " ".join(header[header.index("Story 34.8, additive"):].split())
+        for phrase in ("the shipped `run-vertical-slice` job type", "`type` or `id`",
+                       "`assets {verdict: green\\|red\\|skipped, reason?, manifest?, "
+                       "art_path?, steps[]}`", "never `generate` or `--mirror`",
+                       "`lib/playable.py sheet`", "`.tk-studio/proof/<run_id>/`",
+                       "`engage.py scope --brief-file --gdd-file`",
+                       "`brief_page`, `gdd_page` and `game`",
+                       "`type: run-vertical-slice`", "`## Slice verdicts`", "— additive) |"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        note = flat[flat.index("**0.1.29 (Story 34.1, additive).**"):]
+        note = note[:note.index("**The rules a consumer may rely on**")]
+        self.assertEqual(note.count("Story 34.8 adds the `run-vertical-slice` job"), 1)
+        self.assertLess(note.index("Story 34.7 adds the ladder's cc0 and generated rungs"),
+                        note.index("Story 34.8 adds the `run-vertical-slice` job"))
+        sentence = note[note.index("Story 34.8 adds the `run-vertical-slice` job"):]
+        sentence = sentence[:sentence.index("Every other field, kind and route")]
+        for phrase in ("`jobs/run-vertical-slice.json`", "no new schema field",
+                       "a resolved instance keeps its `type`", "`match` (never `generate`, never "
+                       "`--mirror`)", "`host verify red (assets)`", "`fault`, not red",
+                       "`lib/playable.py sheet`", "`contact_sheet`", "`sampled`",
+                       "`fault`, or `error` with no status block",
+                       "`POST /runs/{id}/verify`'s alike",
+                       "`host leg: placed assets and proof (run <run_id>)`",
+                       "`ENG-NNN: Game Brief`", "`ENG-NNN: GDD`", "`game: true`",
+                       "`slices`", "Slice verdicts"):
+            self.assertIn(phrase, sentence)
+        jobs = flat[flat.index("**The shipped `run-vertical-slice` job (0.1.29, Story 34.8):**"):]
+        jobs = jobs[:jobs.index("**The `{project_root}` core argument")]
+        for phrase in ("`run-epic`'s shape", "`tk-studio-launch`",
+                       "`payload {verb: start, bootstrap: true}`", "`max_turns` 80",
+                       "`max_wall_clock_seconds` 3600", "`stop.on_status: [blocked]`",
+                       "shipped undeclared", "`game: true`", "the ids stay `run-epic-N`"):
+            self.assertIn(phrase, jobs)
+        start = self.text.index("## Asset manifest (0.1.29, Story 34.6)")
+        section = " ".join(self.text[start:self.text.index("## 8. Conformance")].split())
+        self.assertEqual(section.count("**The slice's host leg (0.1.29, Story 34.8, "
+                                       "additive).**"), 1)
+        leg = section[section.index("**The slice's host leg"):]
+        for phrase in ("before the engine gate", "`skipped` with `no manifest`",
+                       "never passes `--mirror`", "calls `generate` zero times",
+                       "is `fault` — recorded, not red, the placeholder kept",
+                       "`Assets: green | red | skipped (<reason>)`",
+                       "at most 16 frames sampled evenly in name order",
+                       "`git add -- <art_path> <manifest> .tk-studio/proof/<run_id>/` (never `-A`)",
+                       "a commit failure is the close-out's `error`",
+                       "?raw=true)", "on pass and fail alike",
+                       "A non-slice run's host leg, PR body and close-out are unchanged"):
+            self.assertIn(phrase, leg)
+        record = next(line for line in self.text.splitlines()
+                      if line.startswith("| the engagement (Story 32.1, 0.1.27) | `GET /engagements/{id}`"))
+        self.assertIn("`brief_page` and `gdd_page`, shaped like `scope_page`, and `game: true`",
+                      record)
+        engage = next(line for line in self.text.splitlines()
+                      if line.startswith("| `tk-studio-engage`"))
+        for phrase in ("`brief_file?` and `gdd_file?`", "`GameDocsMissing: brief \\| gdd`",
+                       "`NotAGameProject`", "`slices: [{story, engine, assets, playable, "
+                       "contact_sheet?}]`"):
+            self.assertIn(phrase, engage)
+        # the shipped type file itself, and the job schema unchanged in shape
+        shipped = json.loads((PLUGIN_ROOT / "jobs" / "run-vertical-slice.json")
+                             .read_text(encoding="utf-8"))
+        epic = json.loads((PLUGIN_ROOT / "jobs" / "run-epic.json").read_text(encoding="utf-8"))
+        self.assertEqual(shipped["id"], "run-vertical-slice")
+        self.assertEqual({k: v for k, v in shipped.items() if k not in ("id", "description")},
+                         {k: v for k, v in epic.items() if k not in ("id", "description")})
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 34.7, Story 34.8 (Epic 34)", stories)
 
     # --- AC 2: A7 dossier items covered or explicitly deferred with a seam
 

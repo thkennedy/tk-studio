@@ -44,8 +44,24 @@
  *            playable`, `playable is malformed: <field>`, `engine gate not green`. On a configured project every
  *            other non-pass is `fail` (a harness fail, a refusal, a judge that ended blocked or failed). The leg's
  *            `green` is also playable not fail; its reason reads `host verify red (playable): …`.
+ *   slice    Story 34.8: a `run-vertical-slice` run (its resolved definition's `type` or `id`, `isSlice`, decided once
+ *            by the caller and passed as `opts.slice`). Only on a slice run: the assets step, after a green host
+ *            command and before the engine gate (the import sees the placed files): skipped `no manifest` when the
+ *            base config's `assets.manifest` (default `assets/manifest.yaml`) is absent in the served root, else
+ *            `uv run <plugin>/lib/assets.py check`, then `greybox`, then `match` (each `--directory <served root>
+ *            --manifest <m> --art-path <a>`, the base config's `assets.art_path`, default `art/greybox`), never
+ *            `--mirror` (the env or default resolves it; no mirror ends `complete`, its entries `skipped`) and never
+ *            `generate`. `check`/`greybox` not exit 0 is red, `match` exit 1 is `fault` (recorded, not red, the
+ *            placeholder kept), any other `match` non-zero is red; a red step ends the step (the later verbs not
+ *            run). Recorded as `assets: {verdict: green | red | skipped, reason?, manifest?, art_path?, steps:
+ *            [{verb, exit, status, duration_ms, stdout_tail?, stderr_tail?}]}` (`status` the verb's status block
+ *            status, `fault`, or `error` with no block). A red assets step skips the engine gate (`assets red`)
+ *            and makes the leg red (`host verify red (assets): …`). Then, after `playable.py run` wrote frames,
+ *            `playable.py sheet --frames <store>/frames --out <store>/contact-sheet.png` (copied with the media;
+ *            recorded as the playable step's `contact_sheet` — the leg's own copy under `<store>/sheets/` — and
+ *            `sampled`). A non-slice run's leg is unchanged.
  */
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join } from "node:path";
 
@@ -92,6 +108,17 @@ export type HostVerifyRan = {
    * `host-verify` events recorded before 34.3 (a reader treats a missing one as not run); every ran result of
    * this leg carries it. */
   playable?: PlayableStep;
+  /** Story 34.8: the assets step, written on every ran leg of a slice run only (absent on any other run). */
+  assets?: AssetsStep;
+};
+/** Story 34.8: one asset-ladder verb's run on a slice run's leg. */
+export type AssetsStepRun = {
+  verb: "check" | "greybox" | "match"; exit: number | null; status: string; duration_ms: number;
+  stdout_tail?: string[]; stderr_tail?: string[];
+};
+/** Story 34.8: the assets step. `manifest` and `art_path` are the base config's (what the close-out commits). */
+export type AssetsStep = {
+  verdict: "green" | "red" | "skipped"; reason?: string; manifest?: string; art_path?: string; steps: AssetsStepRun[];
 };
 /** Story 34.3: one judge (or harness) finding: the frame it names (out-relative, `frames/<name>.png`; null when a
  * harness fail names no frame) and the rubric line (`<rubric id>` or `harness: <invariant>`). */
@@ -104,6 +131,8 @@ export type PlayableJudgeOutcome = { status: string; verdict?: "pass" | "fail"; 
 export type PlayableStep = {
   verdict: "pass" | "fail" | "skipped"; reason?: string; exit?: number | null; status?: string; failed?: unknown;
   duration_ms?: number; store?: string; media?: string; judge?: PlayableJudgeOutcome; findings?: PlayableFinding[]; frames?: string[];
+  /** Story 34.8 (slice runs only): the contact sheet's store path and the frame names it sampled. */
+  contact_sheet?: string; sampled?: string[];
 };
 /** Story 34.1: the engine gate's step on a ran leg. `reason` only when skipped; the run fields mirror the host
  * command's own; `godot_dir` the folder of `GODOT` prepended to PATH, null when unset or not absolute. */
@@ -159,7 +188,32 @@ export type EngineCommand = { command: string; argv: string[] } | { skipped: str
 /** Story 34.3: `playable: {scenario, seed, ticks}` from the same base config, or why its step is skipped. Absent
  * from the command when the config declares no `playable` (the step then reads `no playable`). */
 export type PlayableConfig = { scenario: string; seed: number; ticks: number } | { skipped: string };
-export type VerifyCommand = { command: string; argv: string[]; engine: EngineCommand; playable?: PlayableConfig };
+/** Story 34.8: the asset layout from the same base config (`assets.manifest`, `assets.art_path`, served-root relative). */
+export type AssetsLayout = { manifest: string; art_path: string };
+export type VerifyCommand = { command: string; argv: string[]; engine: EngineCommand; playable?: PlayableConfig; assets?: AssetsLayout };
+
+/** Story 34.8: the shipped job type whose runs get the assets step, the contact sheet and the proof commit. */
+export const SLICE_JOB_TYPE = "run-vertical-slice";
+/** Story 34.8: a run is a slice when its resolved definition's `type` or `id` is `run-vertical-slice`. */
+export const isSlice = (defn: Record<string, any> | null | undefined): boolean =>
+  !!defn && (defn.type === SLICE_JOB_TYPE || defn.id === SLICE_JOB_TYPE);
+/** Story 34.8: `assets.py`'s layout defaults. */
+export const DEFAULT_MANIFEST = "assets/manifest.yaml";
+export const DEFAULT_ART_PATH = "art/greybox";
+const layoutPath = (v: unknown, dflt: string): string => {
+  const t = typeof v === "string" ? v.trim().replace(/\\/g, "/").replace(/\/+$/, "").replace(/^(\.\/+)+/, "") : "";
+  const parts = t.split("/");
+  // The served root itself (`.`), or a path under `.git` or `.tk-studio`, would stage more than the named paths.
+  return !t || t === "." || isAbsolute(t) || /^[A-Za-z]:/.test(t) || parts.includes("..")
+    || parts[0] === ".git" || parts[0] === ".tk-studio" ? dflt : t;
+};
+/** Story 34.8: the base config's asset layout (a missing, absolute or escaping value, the served root, or a path
+ * under `.git` or `.tk-studio`: the default). */
+export function assetsLayout(config: unknown): AssetsLayout {
+  const a = config && typeof config === "object" ? (config as Record<string, unknown>).assets : undefined;
+  const o = a && typeof a === "object" && !Array.isArray(a) ? a as Record<string, unknown> : {};
+  return { manifest: layoutPath(o.manifest, DEFAULT_MANIFEST), art_path: layoutPath(o.art_path, DEFAULT_ART_PATH) };
+}
 
 /** The largest `ticks` `playable.py` accepts (int32). */
 export const MAX_TICKS = 2147483647;
@@ -217,7 +271,11 @@ export async function verifyCommand(run: Run, deps: Deps = {}): Promise<VerifyCo
   }
   // Story 34.3: the top-level `playable` entry, read from the same parsed base config (never the worktree).
   const cfg = config as Record<string, unknown>;
-  return { command: host.trim(), argv, engine, ...("playable" in cfg ? { playable: playableConfig(cfg.playable) } : {}) };
+  return {
+    command: host.trim(), argv, engine, ...("playable" in cfg ? { playable: playableConfig(cfg.playable) } : {}),
+    // Story 34.8: the asset layout, only when the config names one (the leg falls back to the defaults).
+    ...("assets" in cfg ? { assets: assetsLayout(cfg) } : {}),
+  };
 }
 
 /** The last `TAIL_LINES` non-empty-ended lines of a stream, each clipped and redacted. */
@@ -314,7 +372,7 @@ async function runStep(
  * green, `verify.engine` the same way with the folder of `GODOT` first on PATH, under the full guard again;
  * then (Story 34.3), when the engine gate is green, the playable step (`playable.py run`, the media copy, the
  * judge). Never throws. */
-export async function hostVerify(run: Run, guardS: number, deps: Deps = {}): Promise<HostVerifyResult> {
+export async function hostVerify(run: Run, guardS: number, deps: Deps = {}, opts: { slice?: boolean } = {}): Promise<HostVerifyResult> {
   const cmd = await verifyCommand(run, deps);
   if ("skipped" in cmd) return cmd;
   const cwd = servedRoot(run)!; // Story 28.5: the root the run serves (`<worktree>/<prefix>`)
@@ -331,6 +389,13 @@ export async function hostVerify(run: Run, guardS: number, deps: Deps = {}): Pro
   const resolved = resolveBare(argv, gitBash);
   if (resolved) argv[0] = resolved;
   const host = await runStep(argv, cwd, env, guardS, deps);
+  // Story 34.8: the assets step (a slice run only), after a green host command, before the engine gate.
+  let assets: AssetsStep | undefined;
+  if (opts.slice) {
+    const layout = cmd.assets ?? assetsLayout(undefined);
+    if (!stepGreen(host)) assets = { verdict: "skipped", reason: "verify.host red", steps: [] };
+    else assets = await assetsStep(layout, cwd, env, guardS, deps);
+  }
   // Story 34.1: the engine gate. `GODOT` from the leg's env; its folder first on the step's PATH (one key).
   // Only an absolute `GODOT`: a bare or relative one (`godot`, `godot.exe`) has `.` for its folder, which would
   // put the worktree first, so a binary the run committed could shadow the gate; then PATH is left unchanged.
@@ -338,6 +403,7 @@ export async function hostVerify(run: Run, guardS: number, deps: Deps = {}): Pro
   const godotDir = typeof godot === "string" && godot.trim() && isAbsolute(godot.trim()) ? dirname(godot.trim()) : null;
   let engine: EngineStep;
   if (!stepGreen(host)) engine = { verdict: "skipped", reason: "verify.host red", godot_dir: godotDir };
+  else if (assets?.verdict === "red") engine = { verdict: "skipped", reason: "assets red", godot_dir: godotDir };
   else if ("skipped" in cmd.engine) engine = { verdict: "skipped", reason: cmd.engine.skipped, godot_dir: godotDir };
   else {
     const engineEnv = { ...env };
@@ -353,12 +419,45 @@ export async function hostVerify(run: Run, guardS: number, deps: Deps = {}): Pro
   if (!cmd.playable) playable = { verdict: "skipped", reason: NO_PLAYABLE };
   else if ("skipped" in cmd.playable) playable = { verdict: "skipped", reason: cmd.playable.skipped };
   else if (engine.verdict !== "green") playable = { verdict: "skipped", reason: "engine gate not green" };
-  else playable = await playableStep(run, cmd.playable, cwd, env, guardS, deps);
+  else playable = await playableStep(run, cmd.playable, cwd, env, guardS, deps, opts.slice === true);
   return {
     command: cmd.command, argv: cmd.argv, cwd, exit: host.exit, duration_ms: host.duration_ms, ...(gitBash ? { git_bash: gitBash } : {}), ...(resolved ? { resolved } : {}),
     ...(host.signal ? { signal: host.signal } : {}), ...(host.guard ? { guard: host.guard } : {}), ...(host.error ? { error: host.error } : {}),
-    green: stepGreen(host) && engine.verdict !== "red" && playable.verdict !== "fail", stdout_tail: host.stdout_tail, stderr_tail: host.stderr_tail, engine, playable,
+    green: stepGreen(host) && assets?.verdict !== "red" && engine.verdict !== "red" && playable.verdict !== "fail",
+    stdout_tail: host.stdout_tail, stderr_tail: host.stderr_tail, engine, playable, ...(assets ? { assets } : {}),
   };
+}
+
+/** Story 34.8: the ladder's verbs in order; never `generate`, never `--mirror`. */
+export const ASSET_VERBS = ["check", "greybox", "match"] as const;
+
+/** Story 34.8: the assets step (see the header). Never throws. */
+async function assetsStep(
+  layout: AssetsLayout, cwd: string, env: Record<string, string | undefined>, guardS: number, deps: Deps,
+): Promise<AssetsStep> {
+  const where = { manifest: layout.manifest, art_path: layout.art_path };
+  if (!existsSync(join(cwd, layout.manifest))) return { verdict: "skipped", reason: "no manifest", ...where, steps: [] };
+  let script: string;
+  try { script = join(pluginRoot(deps.env ?? process.env), "lib", "assets.py"); }
+  catch (e) { return { verdict: "red", reason: `assets.py not found: ${clip(message(e))}`, ...where, steps: [] }; }
+  const steps: AssetsStepRun[] = [];
+  for (const verb of ASSET_VERBS) {
+    const argv = ["uv", "run", script, verb, "--directory", cwd, "--manifest", layout.manifest, "--art-path", layout.art_path];
+    const sink: { stdout?: string } = {};
+    const o = await runStep(argv, cwd, { ...env, PYTHONIOENCODING: "utf-8" }, guardS, deps, sink);
+    const block = lastJsonObject(sink.stdout ?? "") as Record<string, unknown> | null;
+    const fault = verb === "match" && o.exit === 1 && !o.guard && !o.error;
+    const status = fault ? "fault" : typeof block?.status === "string" ? block.status : "error";
+    steps.push({
+      verb, exit: o.exit, status, duration_ms: o.duration_ms,
+      ...(o.stdout_tail.length ? { stdout_tail: o.stdout_tail } : {}), ...(o.stderr_tail.length ? { stderr_tail: o.stderr_tail } : {}),
+    });
+    if (stepGreen(o) || fault) continue;
+    const how = o.guard ? `timed out (${o.guard})` : o.error ? `failed to start: ${o.error}` : `exited ${o.exit}`;
+    const why = typeof block?.reason === "string" && block.reason ? `: ${clip(block.reason)}` : "";
+    return { verdict: "red", reason: `assets.py ${verb} ${how}${why}`, ...where, steps };
+  }
+  return { verdict: "green", ...where, steps };
 }
 
 /** Story 34.3: the skip reason of a project whose config declares no `playable`. */
@@ -368,7 +467,12 @@ export const PLAYABLE_JUDGE_SKILL = "tk-studio-playable-judge";
 export const PLAYABLE_LEG = "playable-verify";
 export const PLAYABLE_LEG_DEFAULT = { model: "claude-sonnet-5", effort: "medium" } as const;
 /** The media files `playable.py` writes and the leg copies into the worktree for the judge. */
-const MEDIA = ["report.json", "log.txt", "frames"];
+const MEDIA = ["report.json", "log.txt", "frames", "contact-sheet.png"];
+/** Story 34.8: the contact sheet `playable.py sheet` writes beside the report (slice runs only). */
+export const CONTACT_SHEET = "contact-sheet.png";
+/** Story 34.8: each slice leg's own copy of its sheet, under the store (never copied with the media). */
+const SHEETS_DIR = "sheets";
+let sheetSeq = 0;
 
 /** The judge's fixed rubric ids: a `judge.json` finding naming any other is refused. */
 export const PLAYABLE_RUBRIC = ["scene-loaded", "player-visible", "no-magenta-or-error-overlay", "hud-reads", "moments-shown"] as const;
@@ -427,7 +531,7 @@ function copyMedia(store: string, media: string): void {
 /** Story 34.3: run `playable.py`, copy its media, drive the judge. Every non-pass is `fail`. Never throws. */
 async function playableStep(
   run: Run, cfg: { scenario: string; seed: number; ticks: number }, cwd: string, env: Record<string, string | undefined>,
-  guardS: number, deps: Deps,
+  guardS: number, deps: Deps, slice = false,
 ): Promise<PlayableStep> {
   const legEnv = deps.env ?? process.env;
   const engineId = run.engine_run_id ?? "";
@@ -465,8 +569,31 @@ async function playableStep(
     ? (report!.frames as unknown[]).flatMap((f) => (f && typeof f === "object" && typeof (f as any).file === "string" ? [(f as any).file as string] : []))
     : [];
   const frames = frameList.map((f) => join(store, f));
-  const withFrames: PlayableStep = { ...base, ...(frames.length ? { frames } : {}) };
+  let withFrames: PlayableStep = { ...base, ...(frames.length ? { frames } : {}) };
   if (!report) return { ...withFrames, reason: `playable.py exited ${step.exit} with no readable report.json` };
+  // Story 34.8: the contact sheet (a slice run only), written into the store before the media copy. A sheet that
+  // fails is left out (no `contact_sheet`), never a verdict.
+  if (slice && frames.length) {
+    const sheetPath = join(store, CONTACT_SHEET);
+    try { rmSync(sheetPath, { force: true }); } catch { /* an earlier sheet: overwritten or left out below */ }
+    const sheetSink: { stdout?: string } = {};
+    const sheet = await runStep(["uv", "run", script, "sheet", "--frames", join(store, "frames"), "--out", sheetPath],
+      cwd, { ...env, PYTHONIOENCODING: "utf-8" }, guardS, deps, sheetSink);
+    const made = lastJsonObject(sheetSink.stdout ?? "") as Record<string, unknown> | null;
+    if (sheet.exit === 0 && existsSync(sheetPath)) {
+      const sampled = Array.isArray(made?.frames) ? (made!.frames as unknown[]).filter((f): f is string => typeof f === "string") : [];
+      // The store is per run and every leg of it writes the same `contact-sheet.png`: the sheet recorded is this
+      // leg's own copy under `<store>/sheets/`, so an earlier story's verdicts never embed a later leg's sheet.
+      let legSheet = sheetPath;
+      try {
+        const own = join(store, SHEETS_DIR, `${Date.now()}-${process.pid}-${++sheetSeq}.png`);
+        mkdirSync(dirname(own), { recursive: true });
+        copyFileSync(sheetPath, own);
+        legSheet = own;
+      } catch { /* the shared sheet, as before */ }
+      withFrames = { ...withFrames, contact_sheet: legSheet, sampled };
+    }
+  }
   // The harness-fail branch is decided before the copy: there the copy is best-effort (a failed one never masks the
   // `harness: <invariant>` finding); on the judge path it is required.
   const harnessFail = step.exit === 1 || report.verdict !== "pass";
@@ -533,6 +660,8 @@ export const isRed = (v: HostVerifyResult | undefined): v is HostVerifyRan => !!
  * ``host verify red: `<command>` <how>; last lines: <the last 5 stderr lines, else
  * stdout, joined " | ">``. */
 export function redReason(v: HostVerifyRan): string {
+  // Story 34.8: a green host command with a red assets step names the step's reason.
+  if (v.assets?.verdict === "red" && v.exit === 0 && !v.guard && !v.error) return `host verify red (assets): ${v.assets.reason ?? "red"}`;
   // Story 34.3: a green host and engine with a failed playable step names its first finding, else its reason.
   const p = v.playable?.verdict === "fail" && v.exit === 0 && !v.guard && !v.error && v.engine?.verdict !== "red" ? v.playable : undefined;
   if (p) {
@@ -554,7 +683,11 @@ export function redReason(v: HostVerifyRan): string {
  * fenced the same way. Story 34.3: then one `Playable: pass | fail | skipped (<reason>)` line (none on a leg
  * recorded before 34.3, nor for a project without `playable`: its section unchanged); on fail the reason, the
  * findings and every frame's store path. */
-export function prSection(v: HostVerifyResult): string[] {
+/** Story 34.8: the proof the close-out committed on a slice run: the contact sheet's web URL at the head commit
+ * (absent when origin's web URL is unknown or no sheet was made) and the committed frame paths (repo-relative). */
+export type PrProof = { sheetUrl?: string; frames: string[] };
+
+export function prSection(v: HostVerifyResult, proof?: PrProof): string[] {
   const head = ["## Host verify", ""];
   if (v.skipped) return [...head, `Skipped: ${v.reason}`];
   const secs = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
@@ -582,12 +715,21 @@ export function prSection(v: HostVerifyResult): string[] {
     playableLines = ["", "Playable: fail", ...(p.reason ? ["", `Reason: ${p.reason}`] : [])];
     if (p.findings?.length) playableLines.push("", "Findings:", "", ...p.findings.map((f) =>
       `- \`${f.frame ?? "(no frame)"}\` — ${f.rubric}${f.note ? `: ${f.note}` : ""}`));
-    if (p.frames?.length) playableLines.push("", "Frames:", "", ...p.frames.map((f) => `- \`${f}\``));
+    // Story 34.8: the store paths unless the proof lists committed frames (a failed sheet commits none).
+    if (p.frames?.length && !proof?.frames.length) playableLines.push("", "Frames:", "", ...p.frames.map((f) => `- \`${f}\``));
   }
+  // Story 34.8: a slice run's committed proof, on pass and fail alike: the contact sheet embedded, the frames listed.
+  if (proof) {
+    if (proof.sheetUrl) playableLines.push("", `![contact sheet](${proof.sheetUrl})`);
+    if (proof.frames.length) playableLines.push("", "Frames:", "", ...proof.frames.map((f) => `- \`${f}\``));
+  }
+  // Story 34.8: the assets step's line (a slice run only).
+  const a = v.assets;
+  const assetLines = !a ? [] : [a.verdict === "green" ? "Assets: green" : `Assets: ${a.verdict} (${a.reason ?? "no reason"})`, ""];
   let engineLines: string[];
   if (e.verdict === "skipped") engineLines = [`Engine gate: skipped (${e.reason})`];
   else if (e.verdict === "green") engineLines = [`Engine gate: green: \`${e.command}\` (${secs(e.duration_ms ?? 0)})`];
   else engineLines = ["Engine gate: red", "", `**Red:** \`${e.command}\` — ${how(e)} (${secs(e.duration_ms ?? 0)})`, "",
     ...fence("engine stderr (last lines)", e.stderr_tail ?? []), ...fence("engine stdout (last lines)", e.stdout_tail ?? [])].slice(0, -1);
-  return [...head, ...hostLines, "", ...engineLines, ...playableLines];
+  return [...head, ...hostLines, "", ...assetLines, ...engineLines, ...playableLines];
 }

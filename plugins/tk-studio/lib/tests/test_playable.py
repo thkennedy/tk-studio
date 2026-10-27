@@ -952,5 +952,92 @@ class PlayableTestCase(unittest.TestCase):
         self.assertNotRegex(text, r"tk[-_]studio|TkStudio")
 
 
+def _solid_png(width: int, height: int, rgb: tuple[int, int, int], ctype: int = 2) -> bytes:
+    """A solid 8-bit PNG (colour type 2 RGB or 6 RGBA), filter 0."""
+    import struct
+    import zlib
+    px = bytes(rgb) + (b"\xff" if ctype == 6 else b"")
+    raw = b"".join(b"\x00" + px * width for _ in range(height))
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + kind + data
+                + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, ctype, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+class ContactSheetTests(unittest.TestCase):
+    """Story 34.8: `playable.py sheet` (0 / 5 / 40 frames)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="tk-sheet-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+        self.frames = self.tmp / "frames"
+        self.frames.mkdir()
+        self.out = self.tmp / "contact-sheet.png"
+
+    def _frames(self, n: int, ctype: int = 2):
+        for i in range(n):
+            (self.frames / f"frame_{i:04d}.png").write_bytes(
+                _solid_png(8, 6, (i * 5 % 256, 100, 200), ctype))
+
+    def _main(self, *argv):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = playable.main(["sheet", *argv])
+        return code, json.loads(buf.getvalue())
+
+    def test_no_frame_is_a_refusal_with_the_block(self):
+        code, out = self._main("--frames", str(self.frames), "--out", str(self.out))
+        self.assertEqual(code, 2)
+        self.assertEqual(list(out)[-4:], BLOCK_KEYS)
+        self.assertEqual(out["status"], "blocked")
+        self.assertEqual(out["intent"], "playable")
+        self.assertIn("no *.png", out["reason"])
+        self.assertFalse(self.out.exists())
+
+    def test_five_frames_all_kept_in_name_order_rgb(self):
+        import assets
+        self._frames(5, ctype=6)
+        code, out = self._main("--frames", str(self.frames), "--out", str(self.out),
+                               "--columns", "4", "--width", "16")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(list(out)[-4:], BLOCK_KEYS)
+        self.assertEqual((out["status"], out["intent"]), ("complete", "playable"))
+        self.assertEqual(out["frames"], [f"frame_{i:04d}.png" for i in range(5)])
+        self.assertEqual(out["cell"], [16, 12])
+        self.assertEqual(out["size"], [64, 24])
+        w, h, ch, px = assets.png_pixels(self.out.read_bytes())
+        self.assertEqual((w, h, ch), (64, 24, 3))
+        # nearest-neighbour: cell 0 is frame 0's colour, cell 4 (row 2) frame 4's
+        self.assertEqual(px[0:3], bytes((0, 100, 200)))
+        self.assertEqual(px[(12 * 64) * 3:(12 * 64) * 3 + 3], bytes((20, 100, 200)))
+        # the rest of the last row is black
+        self.assertEqual(px[(12 * 64 + 16) * 3:(12 * 64 + 16) * 3 + 3], b"\x00\x00\x00")
+
+    def test_forty_frames_sample_sixteen_evenly(self):
+        self._frames(40)
+        code, out = self._main("--frames", str(self.frames), "--out", str(self.out))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(out["frames"]), 16)
+        self.assertEqual(out["of"], 40)
+        self.assertEqual(out["frames"][0], "frame_0000.png")
+        self.assertEqual(out["frames"][-1], "frame_0039.png")
+        self.assertEqual(out["frames"], sorted(out["frames"]))
+        self.assertEqual(len(set(out["frames"])), 16)
+        self.assertEqual(out["size"], [4 * 320, 4 * 240])
+
+    def test_bad_flags_and_unreadable_frames_are_refusals(self):
+        self._frames(2)
+        code, out = self._main("--frames", str(self.frames), "--out", str(self.out),
+                               "--columns", "0")
+        self.assertEqual((code, out["status"]), (2, "blocked"))
+        (self.frames / "frame_9999.png").write_bytes(b"not a png")
+        code, out = self._main("--frames", str(self.frames), "--out", str(self.out))
+        self.assertEqual((code, out["status"]), (2, "blocked"))
+        self.assertIn("frame_9999.png", out["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()
