@@ -457,3 +457,10 @@
 - What no longer holds: "`godot` on PATH" as the box's rule (epic narrative).
 - Suggested adjustment: the skill's `$env:GODOT` rule reads "on the host, call `& $env:GODOT …` (an absolute path to the console exe); a bare `godot` resolves only in a sandbox provisioned with `WITH_GODOT`".
 - Status: closed — applied to the unstarted 34-4 entry's invoke_dev_with by the 34-1 gate session (2026-10-27)
+
+## 34-3-the-playable-verify-leg — scope: stories — from 34-2-spike-a-playable-run-on-the-box — 2026-10-27
+
+- What changed: 34-2 shipped `playable.py run` with default `--mode movie` (the ruling, from the operator's baseline measurement 515fe86; harness-based re-measurement still pending); `frames[]` may include moment and failing-tick frames; the host `no_error_log` override counts only error lines before `PLAYABLE: harness detached`, so a `pass` report can carry a non-empty `log_errors[]`; exit 2 refuses a project without the `PlayableHarness` autoload, an unset/relative `GODOT`, or `--out` inside the Godot project folder.
+- What no longer holds: nothing in 34.3's acceptance criteria; the implicit reading "a clean run has an empty `log_errors[]`".
+- Suggested adjustment: the judge and the host leg read `report.json` `verdict` (never `log_errors` emptiness); map `playable.py` exit 0/1/2 explicitly (2 is a refusal, not a harness fail); keep `--out` outside the project's Godot folder; movie mode needs the logged-in desktop. See plans/34-3.md.
+- Status: closed — applied to the unstarted 34-3 entry's invoke_dev_with and to plans/34-3.md by the 34-2 gate session (2026-10-27)

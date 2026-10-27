@@ -1997,7 +1997,47 @@ class DriverContractTestCase(unittest.TestCase):
                       "34.1: two keys, never merged", launch)
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
-        self.assertIn("Story 33.2 (Epic 33), Story 34.1 (Epic 34)", stories)
+        self.assertIn("Story 33.2 (Epic 33), Story 34.1", stories)
+
+    # --- Story 34.2: extends 0.1.29 (no bump) — the advisory `playable
+    # path` row on `tk-studio-launch check`, naming `playable.py` as the
+    # runner 34.3 drives.
+
+    def test_0_1_29_story_34_2_playable_path_row(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.29**", header)
+        self.assertNotIn("**0.1.30**", header)
+        self.assertEqual(header.count("Story 34.2, additive"), 1)
+        self.assertLess(header.index("0.1.29 (Story 34.1"),
+                        header.index("Story 34.2, additive"))
+        clause = " ".join(header[header.index("Story 34.2, additive"):].split())
+        for phrase in ("the advisory `playable path` row", "never a gap",
+                       "`not a game project (no verify.engine)`",
+                       "`ready (<path>)`", "— additive) |"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        note = flat[flat.index("**0.1.29 (Story 34.1, additive).**"):]
+        note = note[:note.index("**The rules a consumer may rely on**")]
+        self.assertEqual(note.count("Story 34.2 adds one advisory row"), 1)
+        sentence = note[note.index("Story 34.2 adds one advisory row"):]
+        sentence = sentence[:sentence.index("the row starts no engine.")]
+        for phrase in ("`tk-studio-launch check`", "`playable path`",
+                       "after `engine sandbox`", "never a gap",
+                       "`not a game project (no verify.engine)`",
+                       "`warning: no $env:GODOT (unset or not an absolute "
+                       "file); playable runs refuse`",
+                       "`warning: no display session; the <path> path needs "
+                       "the logged-in desktop`",
+                       "(or `warning: display session unknown (<error>)`)",
+                       "`ready (<path>)`",
+                       "`plugins/tk-studio/lib/playable.py`, the runner 34.3 "
+                       "drives"):
+            self.assertIn(phrase, sentence)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 33.2 (Epic 33), Story 34.1, Story 34.2 (Epic 34)",
+                      stories)
 
     # --- AC 2: A7 dossier items covered or explicitly deferred with a seam
 

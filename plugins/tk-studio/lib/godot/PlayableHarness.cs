@@ -1,0 +1,718 @@
+// PlayableHarness — a bounded, seeded, scripted playable run (Story 34.2).
+//
+// A template the project copies in; it depends on nothing outside Godot and
+// .NET, so a project can run it alone (no studio needed):
+//
+//   1. Copy this file to <project>/src/Debug/PlayableHarness.cs
+//      (The Universe Awaits: game/src/Debug/PlayableHarness.cs).
+//   2. Register the autoload in project.godot:
+//        [autoload]
+//        PlayableHarness="*res://src/Debug/PlayableHarness.cs"
+//   3. Build the C# assembly (dotnet build) before the run.
+//
+// Precondition, enforced: the project's physics ticks per second
+// (physics/common/physics_ticks_per_second) is 60, the runner's
+// --fixed-fps. The harness counts a tick per _PhysicsProcess (one physics
+// step) while --fixed-fps 60 fixes the drawn frames; at another rate ticks
+// and frames diverge (capture_every, moments and the movie frame each tick
+// names stop lining up), so any other rate fails the run at tick 0 with
+// invariant "scenario" before a tick runs.
+//
+// Seeding: --playable-seed reaches GD.Seed and the harness's own input RNG
+// only, so a seed replays the scripted and random inputs tick for tick, but
+// System.Random and RandomNumberGenerator instances the game creates are
+// not seeded; the game's own RNG needs a hook the project exposes.
+//
+// Inert by default: unless OS.GetCmdlineUserArgs() carries
+// --playable-scenario=<abs path>, the node disables itself in _Ready and the
+// game plays normally. A run passes these user args after `--`:
+//
+//   --playable-scenario=<abs scenario.json>  the scenario (schema 1)
+//   --playable-seed=<n>                      seeds GD.Seed and the input RNG
+//   --playable-ticks=<t>                     physics ticks to run
+//   --playable-out=<abs out dir>             report.json and frames/ land here
+//                                            (required and absolute: a missing or
+//                                            relative one quits 1 before any folder
+//                                            is created, never writing into the
+//                                            project tree)
+//
+// Scenario (schema 1): {"schema": 1, "scene"?: "res://…", "capture_every"?: k
+// (default 30), "frame_budget_ms"?: ms (default 33.3), "inputs": [{"tick",
+// "action", "pressed"?, "strength"?, "hold_ticks"?}], "random_inputs"?:
+// {"actions": [...], "every": n}, "invariants": [{"name", "kind":
+// "node_exists" | "no_error_log" | "frame_time_under", "path"?, "budget_ms"?,
+// "from_tick"?}], "moments"?: [{"name", "tick"}]}.
+//
+// With "scene" set it swaps to that scene first and counts tick 0 only once
+// the scene is the current scene (bounded: if it is not within
+// SceneWaitFrames physics frames, the run fails with invariant "scene").
+// Each physics tick it applies the tick's inputs (Input.ParseInputEvent with
+// an InputEventAction), evaluates the invariants from their from_tick on, and
+// every capture_every ticks (and at each moment's tick) saves the viewport
+// (the active camera's view) to <out>/frames/<tick:D6>.png, taken after the
+// frame that tick draws (RenderingServer.FramePostDraw). In Movie Maker
+// mode (--write-movie) the engine writes every frame itself, so the harness
+// only names them. It stops at the first failing invariant or after the last
+// tick (whose effects get one more invariant pass on the next physics frame,
+// as this autoload runs before the scene's nodes), writes <out>/report.json
+// and quits 0 (every invariant held) or 1 (the report's "failed" names the
+// invariant and the tick); in display and movie modes it quits only after
+// one more frame is drawn, so the last capture lands.
+//
+// Report: {"schema": 1, "verdict": "pass" | "fail", "failed": null |
+// {"tick", "invariant", "detail"}, "seed", "ticks", "ticks_run",
+// "capture_every", "mode", "frames": [{"tick", "file"}], "moments":
+// [{"name", "tick", "frame"}], "frame_time_ms": {"max", "mean"}}; frame paths
+// are relative to the out dir. A host runner may merge "run" and
+// "log_errors" into it afterwards.
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text.Json;
+using Godot;
+
+public partial class PlayableHarness : Node
+{
+    private const string ArgScenario = "--playable-scenario=";
+    private const string ArgSeed = "--playable-seed=";
+    private const string ArgTicks = "--playable-ticks=";
+    private const string ArgOut = "--playable-out=";
+    // printed (stderr, so ordered with the engine's error lines) right before
+    // the logger detaches: the host runner counts only the error lines before
+    // it, as lines after it are shutdown's (e.g. "Resources still in use at
+    // exit"), no tick's
+    private const string DetachedMarker = "PLAYABLE: harness detached";
+
+    private sealed class InputStep
+    {
+        public int Tick;
+        public string Action = "";
+        public bool Pressed = true;
+        public float Strength = 1f;
+        public int HoldTicks = 1;
+    }
+
+    private sealed class Invariant
+    {
+        public string Name = "";
+        public string Kind = "";
+        public string Path = "";
+        public double BudgetMs;
+        public int FromTick;
+    }
+
+    private sealed class Moment
+    {
+        public string Name = "";
+        public int Tick;
+    }
+
+    // Collects error lines the engine logs (Godot 4.5+ Logger). Called from
+    // any thread, so it locks. One definition of an error line, shared with
+    // the host runner's ERROR_LINE scan (^\s*(SCRIPT ERROR:|SHADER ERROR:|ERROR:)):
+    // warnings never count; _LogError records only the non-warning types
+    // (Logger.ErrorType: Error = 0, Warning = 1, Script = 2, Shader = 3) and
+    // _LogMessage only lines that scan would match.
+    private sealed partial class ErrorLogger : Logger
+    {
+        private const int ErrorTypeError = 0;
+        private const int ErrorTypeWarning = 1;
+        private const int ErrorTypeScript = 2;
+        private const int ErrorTypeShader = 3;
+        private readonly object _gate = new();
+        private readonly List<(int Tick, string Line)> _errors = new();
+        public int Tick;
+
+        public override void _LogError(string function, string file, int line, string code,
+            string rationale, bool editorNotify, int errorType,
+            Godot.Collections.Array<ScriptBacktrace> scriptBacktraces)
+        {
+            if (errorType == ErrorTypeWarning)
+            {
+                return;
+            }
+            string label = errorType == ErrorTypeScript ? "SCRIPT ERROR:"
+                : errorType == ErrorTypeShader ? "SHADER ERROR:"
+                : "ERROR:"; // ErrorTypeError and anything newer
+            lock (_gate)
+            {
+                _errors.Add((Tick, $"{label} {code} {rationale} ({file}:{line})".Trim()));
+            }
+        }
+
+        public override void _LogMessage(string message, bool error)
+        {
+            var trimmed = message.TrimStart();
+            if (!error || !(trimmed.StartsWith("ERROR:") || trimmed.StartsWith("SCRIPT ERROR:")
+                    || trimmed.StartsWith("SHADER ERROR:")))
+            {
+                return;
+            }
+            lock (_gate)
+            {
+                _errors.Add((Tick, message.Trim()));
+            }
+        }
+
+        public string FirstSince(int tick)
+        {
+            lock (_gate)
+            {
+                foreach (var (t, l) in _errors)
+                {
+                    if (t >= tick)
+                    {
+                        return l;
+                    }
+                }
+            }
+            return null;
+        }
+    }
+
+    // physics frames to wait for the scenario's scene to become current
+    private const int SceneWaitFrames = 600;
+    // physics frames to wait, after Finish, for the one more drawn frame
+    // (a window that never draws, e.g. minimized, still quits)
+    private const int DrawWaitFrames = 30;
+    // the rate the tick count assumes: one physics tick per --fixed-fps 60 frame
+    private const int RequiredPhysicsTicksPerSecond = 60;
+
+    private bool _active;
+    private bool _done;
+    private bool _ticking; // the first tick has started (ticks_run counts from it)
+    private string _awaitScene; // the scenario's scene until it is current
+    private int _sceneWait;
+    private bool _finalCheck; // the last tick ran; its invariant pass is next
+    private Dictionary<string, object> _failed;
+    private bool _quitPending; // Finish ran; quit after one more drawn frame
+    private bool _quit;
+    private int _drawWait;
+    private bool _drawHooked;
+    private readonly List<int> _pendingCaptures = new(); // display: taken after the draw
+    private string _out = "";
+    private string _mode = "display";
+    private ulong _seed;
+    private int _ticks;
+    private int _tick;
+    private int _captureEvery = 30;
+    private double _frameBudgetMs = 33.3;
+    private readonly List<InputStep> _inputs = new();
+    private readonly List<string> _randomActions = new();
+    private int _randomEvery;
+    private readonly List<Invariant> _invariants = new();
+    private readonly List<Moment> _moments = new();
+    private readonly Dictionary<string, int> _releaseAt = new();
+    private readonly List<Dictionary<string, object>> _frames = new();
+    private readonly Dictionary<int, string> _frameAt = new();
+    private readonly RandomNumberGenerator _rng = new();
+    private ErrorLogger _logger;
+    private double _frameMax;
+    private double _frameSum;
+    private int _frameCount;
+
+    public override void _Ready()
+    {
+        string scenario = null;
+        foreach (var arg in OS.GetCmdlineUserArgs())
+        {
+            if (arg.StartsWith(ArgScenario)) scenario = arg.Substring(ArgScenario.Length);
+            else if (arg.StartsWith(ArgSeed)) ulong.TryParse(arg.Substring(ArgSeed.Length), out _seed);
+            else if (arg.StartsWith(ArgTicks)) int.TryParse(arg.Substring(ArgTicks.Length), out _ticks);
+            else if (arg.StartsWith(ArgOut)) _out = arg.Substring(ArgOut.Length);
+        }
+        if (string.IsNullOrEmpty(scenario))
+        {
+            // inert: no --playable-scenario, the game plays normally
+            SetPhysicsProcess(false);
+            SetProcess(false);
+            return;
+        }
+        if (string.IsNullOrEmpty(_out) || !System.IO.Path.IsPathRooted(_out))
+        {
+            // never fall back to the cwd (the project tree, imported as res://)
+            GD.PrintErr("PlayableHarness: --playable-out=<absolute dir> is required");
+            SetPhysicsProcess(false);
+            SetProcess(false);
+            GetTree().Quit(1);
+            return;
+        }
+        _active = true;
+        ProcessMode = ProcessModeEnum.Always;
+        _mode = DisplayServer.GetName() == "headless" ? "headless"
+            : OS.HasFeature("movie") ? "movie" : "display";
+        _logger = new ErrorLogger();
+        OS.AddLogger(_logger);
+        if (_mode != "headless")
+        {
+            RenderingServer.FramePostDraw += OnFramePostDraw;
+            _drawHooked = true;
+        }
+        Directory.CreateDirectory(System.IO.Path.Combine(_out, "frames"));
+        GD.Seed(_seed);
+        _rng.Seed = _seed;
+
+        string scene;
+        try
+        {
+            scene = LoadScenario(scenario);
+        }
+        catch (Exception ex)
+        {
+            Finish(new Dictionary<string, object>
+            {
+                ["tick"] = 0, ["invariant"] = "scenario", ["detail"] = ex.Message,
+            });
+            return;
+        }
+        if (_ticks <= 0)
+        {
+            Finish(new Dictionary<string, object>
+            {
+                ["tick"] = 0, ["invariant"] = "scenario", ["detail"] = "--playable-ticks must be > 0",
+            });
+            return;
+        }
+        if (Engine.PhysicsTicksPerSecond != RequiredPhysicsTicksPerSecond)
+        {
+            Finish(new Dictionary<string, object>
+            {
+                ["tick"] = 0, ["invariant"] = "scenario",
+                ["detail"] = $"physics_ticks_per_second is {Engine.PhysicsTicksPerSecond}; the harness "
+                    + $"needs {RequiredPhysicsTicksPerSecond} (one physics tick per --fixed-fps 60 frame)",
+            });
+            return;
+        }
+        if (!string.IsNullOrEmpty(scene))
+        {
+            if (!ResourceLoader.Exists(scene))
+            {
+                Finish(new Dictionary<string, object>
+                {
+                    ["tick"] = 0, ["invariant"] = "scene", ["detail"] = $"no scene at {scene}",
+                });
+                return;
+            }
+            // ticks start once this is the current scene (_PhysicsProcess)
+            _awaitScene = scene;
+            GetTree().CallDeferred(SceneTree.MethodName.ChangeSceneToFile, scene);
+        }
+    }
+
+    private string LoadScenario(string path)
+    {
+        using var doc = JsonDocument.Parse(File.ReadAllText(path));
+        var root = doc.RootElement;
+        if (!root.TryGetProperty("schema", out var schema) || schema.GetInt32() != 1)
+            throw new InvalidDataException("schema must be 1");
+        string scene = root.TryGetProperty("scene", out var s) ? s.GetString() : null;
+        if (root.TryGetProperty("capture_every", out var ce)) _captureEvery = Math.Max(1, ce.GetInt32());
+        if (root.TryGetProperty("frame_budget_ms", out var fb)) _frameBudgetMs = fb.GetDouble();
+        foreach (var item in root.GetProperty("inputs").EnumerateArray())
+        {
+            var step = new InputStep
+            {
+                Tick = item.GetProperty("tick").GetInt32(),
+                Action = item.GetProperty("action").GetString() ?? "",
+            };
+            if (item.TryGetProperty("pressed", out var p)) step.Pressed = p.GetBoolean();
+            if (item.TryGetProperty("strength", out var st)) step.Strength = (float)st.GetDouble();
+            if (item.TryGetProperty("hold_ticks", out var h)) step.HoldTicks = Math.Max(1, h.GetInt32());
+            if (!InputMap.HasAction(step.Action))
+                throw new InvalidDataException($"inputs: unknown InputMap action {step.Action}");
+            _inputs.Add(step);
+        }
+        if (root.TryGetProperty("random_inputs", out var ri))
+        {
+            foreach (var a in ri.GetProperty("actions").EnumerateArray())
+            {
+                var action = a.GetString() ?? "";
+                if (!InputMap.HasAction(action))
+                    throw new InvalidDataException($"random_inputs: unknown InputMap action {action}");
+                _randomActions.Add(action);
+            }
+            _randomEvery = Math.Max(1, ri.GetProperty("every").GetInt32());
+        }
+        foreach (var item in root.GetProperty("invariants").EnumerateArray())
+        {
+            var inv = new Invariant
+            {
+                Name = item.GetProperty("name").GetString() ?? "",
+                Kind = item.GetProperty("kind").GetString() ?? "",
+                BudgetMs = _frameBudgetMs,
+            };
+            if (item.TryGetProperty("path", out var np)) inv.Path = np.GetString() ?? "";
+            if (item.TryGetProperty("budget_ms", out var b)) inv.BudgetMs = b.GetDouble();
+            if (item.TryGetProperty("from_tick", out var ft)) inv.FromTick = ft.GetInt32();
+            if (inv.Kind != "node_exists" && inv.Kind != "no_error_log" && inv.Kind != "frame_time_under")
+                throw new InvalidDataException($"invariants: unknown kind {inv.Kind}");
+            _invariants.Add(inv);
+        }
+        if (root.TryGetProperty("moments", out var ms))
+        {
+            foreach (var item in ms.EnumerateArray())
+            {
+                _moments.Add(new Moment
+                {
+                    Name = item.GetProperty("name").GetString() ?? "",
+                    Tick = item.GetProperty("tick").GetInt32(),
+                });
+            }
+        }
+        return scene;
+    }
+
+    public override void _ExitTree()
+    {
+        Unhook();
+    }
+
+    private void Unhook()
+    {
+        if (_drawHooked)
+        {
+            RenderingServer.FramePostDraw -= OnFramePostDraw;
+            _drawHooked = false;
+        }
+    }
+
+    public override void _PhysicsProcess(double delta)
+    {
+        if (!_active)
+        {
+            return;
+        }
+        if (_done)
+        {
+            if (_quitPending && ++_drawWait > DrawWaitFrames)
+            {
+                // display captures never drawn fail the run (ticks_run stays _ticks)
+                if (_mode == "display" && _pendingCaptures.Count > 0 && _failed == null)
+                {
+                    _tick = _ticks - 1;
+                    _failed = new Dictionary<string, object>
+                    {
+                        ["tick"] = _pendingCaptures[_pendingCaptures.Count - 1],
+                        ["invariant"] = "frames",
+                        ["detail"] = $"{_pendingCaptures.Count} capture(s) not drawn within {DrawWaitFrames} frames",
+                    };
+                }
+                Complete(); // no frame was drawn: quit anyway
+            }
+            return;
+        }
+        if (_finalCheck)
+        {
+            FinalCheck();
+            return;
+        }
+        if (_awaitScene != null)
+        {
+            if (GetTree().CurrentScene?.SceneFilePath != _awaitScene)
+            {
+                if (++_sceneWait > SceneWaitFrames)
+                {
+                    Finish(new Dictionary<string, object>
+                    {
+                        ["tick"] = 0, ["invariant"] = "scene",
+                        ["detail"] = $"{_awaitScene} was not the current scene after {SceneWaitFrames} physics frames",
+                    });
+                }
+                return;
+            }
+            _awaitScene = null;
+        }
+        _ticking = true;
+        _logger.Tick = _tick;
+        ApplyInputs();
+
+        double frameMs = SampleFrameMs();
+
+        foreach (var inv in _invariants)
+        {
+            if (_tick < inv.FromTick)
+            {
+                continue;
+            }
+            string detail = Evaluate(inv, frameMs);
+            if (detail != null)
+            {
+                Capture();
+                Finish(new Dictionary<string, object>
+                {
+                    ["tick"] = _tick, ["invariant"] = inv.Name, ["detail"] = detail,
+                });
+                return;
+            }
+        }
+        if (_tick % _captureEvery == 0 || _moments.Exists(m => m.Tick == _tick))
+        {
+            Capture();
+        }
+        _tick++;
+        if (_tick >= _ticks)
+        {
+            _finalCheck = true; // FinalCheck on the next physics frame
+        }
+    }
+
+    private double SampleFrameMs()
+    {
+        double frameMs = Performance.GetMonitor(Performance.Monitor.TimeProcess) * 1000.0;
+        _frameMax = Math.Max(_frameMax, frameMs);
+        _frameSum += frameMs;
+        _frameCount++;
+        return frameMs;
+    }
+
+    // This autoload's _PhysicsProcess runs before the scene's nodes, so what
+    // they do in the last tick (an error line, a node removed) shows only on
+    // the next physics frame: one more pass over the invariants watching by
+    // then, with no inputs applied, the tick not advanced and no new capture;
+    // a failure is the last tick's.
+    private void FinalCheck()
+    {
+        _finalCheck = false;
+        int last = _ticks - 1;
+        double frameMs = SampleFrameMs();
+        foreach (var inv in _invariants)
+        {
+            if (inv.FromTick > last)
+            {
+                continue;
+            }
+            string detail = Evaluate(inv, frameMs);
+            if (detail != null)
+            {
+                _tick = last; // ticks_run stays _ticks (_tick + 1 on a failure)
+                Finish(new Dictionary<string, object>
+                {
+                    ["tick"] = last, ["invariant"] = inv.Name, ["detail"] = detail,
+                });
+                return;
+            }
+        }
+        Finish(null); // ticks_run is _tick, which is _ticks
+    }
+
+    private void ApplyInputs()
+    {
+        foreach (var pair in new List<KeyValuePair<string, int>>(_releaseAt))
+        {
+            if (pair.Value <= _tick)
+            {
+                Input.ParseInputEvent(new InputEventAction { Action = pair.Key, Pressed = false });
+                _releaseAt.Remove(pair.Key);
+            }
+        }
+        foreach (var step in _inputs)
+        {
+            if (step.Tick != _tick)
+            {
+                continue;
+            }
+            Input.ParseInputEvent(new InputEventAction
+            {
+                Action = step.Action, Pressed = step.Pressed, Strength = step.Strength,
+            });
+            if (step.Pressed)
+            {
+                _releaseAt[step.Action] = (int)Math.Min((long)_tick + step.HoldTicks, int.MaxValue);
+            }
+            else
+            {
+                _releaseAt.Remove(step.Action); // released by the script
+            }
+        }
+        if (_randomActions.Count > 0 && _tick > 0 && _tick % _randomEvery == 0)
+        {
+            // drawn from the harness's seeded RNG, so a seed replays these
+            // presses tick for tick (the game's own RNG is not seeded here)
+            var action = _randomActions[_rng.RandiRange(0, _randomActions.Count - 1)];
+            // a random press never shortens a hold: an action already held
+            // (by the script or an earlier press) keeps its later release
+            // and is not pressed again
+            if (!_releaseAt.ContainsKey(action))
+            {
+                Input.ParseInputEvent(new InputEventAction { Action = action, Pressed = true, Strength = 1f });
+                _releaseAt[action] = _tick + 1;
+            }
+        }
+    }
+
+    private string Evaluate(Invariant inv, double frameMs)
+    {
+        switch (inv.Kind)
+        {
+            case "node_exists":
+                return GetTree().Root.GetNodeOrNull(inv.Path) == null ? $"no node at {inv.Path}" : null;
+            case "frame_time_under":
+                return frameMs > inv.BudgetMs ? $"frame time {frameMs:F1} ms over the {inv.BudgetMs:F1} ms budget" : null;
+            case "no_error_log":
+                var line = _logger.FirstSince(inv.FromTick);
+                return line == null ? null : $"error line in the log: {line}";
+            default:
+                return $"unknown kind {inv.Kind}";
+        }
+    }
+
+    private void Capture()
+    {
+        if (_frameAt.ContainsKey(_tick) || _pendingCaptures.Contains(_tick))
+        {
+            return;
+        }
+        if (_mode == "movie")
+        {
+            // Movie Maker writes movie<N:D8>.png for every drawn frame; this
+            // tick's frame is the next one drawn (confirm the offset on the box).
+            var file = $"frames/movie{Engine.GetFramesDrawn():D8}.png";
+            _frameAt[_tick] = file;
+            _frames.Add(new Dictionary<string, object> { ["tick"] = _tick, ["file"] = file });
+        }
+        else if (_mode == "display")
+        {
+            // the viewport holds this tick's view only once the frame after it
+            // is drawn: TakePendingCaptures saves it then
+            _pendingCaptures.Add(_tick);
+        }
+        // headless: the dummy renderer draws nothing
+    }
+
+    private void OnFramePostDraw()
+    {
+        TakePendingCaptures();
+        if (_quitPending)
+        {
+            Complete();
+        }
+    }
+
+    private void TakePendingCaptures()
+    {
+        if (_pendingCaptures.Count == 0)
+        {
+            return;
+        }
+        var image = GetViewport().GetTexture()?.GetImage();
+        if (image != null && !image.IsEmpty())
+        {
+            foreach (var tick in _pendingCaptures)
+            {
+                var file = $"frames/{tick:D6}.png";
+                image.SavePng(System.IO.Path.Combine(_out, file));
+                _frameAt[tick] = file;
+                _frames.Add(new Dictionary<string, object> { ["tick"] = tick, ["file"] = file });
+            }
+        }
+        _pendingCaptures.Clear(); // an empty image is left out, frame null
+    }
+
+    // Stops the run. Headless writes the report and quits at once. Movie
+    // writes it now (its frame names are known) and display after the next
+    // draw (which takes the pending captures); both quit only after one more
+    // frame is drawn, so the last tick's frame is on disk. _done stays true,
+    // so no tick runs meanwhile.
+    private void Finish(Dictionary<string, object> failed)
+    {
+        _done = true;
+        _failed = failed;
+        if (_mode != "display")
+        {
+            TryWriteReport();
+        }
+        if (_mode == "headless")
+        {
+            Quit();
+            return;
+        }
+        _quitPending = true;
+    }
+
+    // After the one more drawn frame (or DrawWaitFrames without one).
+    private void Complete()
+    {
+        if (_quit)
+        {
+            return;
+        }
+        _quitPending = false;
+        if (_mode == "display")
+        {
+            TryWriteReport();
+        }
+        Quit();
+    }
+
+    // WriteReport, never throwing: an unwritable out folder (disk full, file
+    // locked) still reaches Quit, exit 1, instead of running to the wall
+    // clock. The "report" failure only sets the exit code (no report is on
+    // disk; the host runner calls that a harness fail).
+    private void TryWriteReport()
+    {
+        try
+        {
+            WriteReport();
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"PlayableHarness: report.json not written: {ex.Message}");
+            _failed ??= new Dictionary<string, object>
+            {
+                ["invariant"] = "report",
+                ["detail"] = ex.Message,
+            };
+        }
+    }
+
+    private void Quit()
+    {
+        _quit = true;
+        Unhook();
+        // the end marker, then detach: error lines after it are shutdown's
+        GD.PrintErr(DetachedMarker);
+        if (_logger != null)
+        {
+            OS.RemoveLogger(_logger);
+        }
+        GetTree().Quit(_failed == null ? 0 : 1);
+    }
+
+    private void WriteReport()
+    {
+        var failed = _failed;
+        var moments = new List<Dictionary<string, object>>();
+        foreach (var m in _moments)
+        {
+            moments.Add(new Dictionary<string, object>
+            {
+                ["name"] = m.Name, ["tick"] = m.Tick,
+                ["frame"] = _frameAt.TryGetValue(m.Tick, out var f) ? f : null,
+            });
+        }
+        var report = new Dictionary<string, object>
+        {
+            ["schema"] = 1,
+            ["verdict"] = failed == null ? "pass" : "fail",
+            ["failed"] = failed,
+            ["seed"] = _seed,
+            ["ticks"] = _ticks,
+            // a failure during a tick counts that tick; none before the
+            // first tick (a scenario or scene failure) is 0
+            ["ticks_run"] = failed == null ? _tick : _ticking ? _tick + 1 : 0,
+            ["capture_every"] = _captureEvery,
+            ["mode"] = _mode,
+            ["frames"] = _frames,
+            ["moments"] = moments,
+            ["frame_time_ms"] = new Dictionary<string, object>
+            {
+                ["max"] = Math.Round(_frameMax, 3),
+                ["mean"] = _frameCount == 0 ? 0.0 : Math.Round(_frameSum / _frameCount, 3),
+            },
+        };
+        var path = System.IO.Path.Combine(_out, "report.json");
+        var tmp = path + ".tmp";
+        File.WriteAllText(tmp, JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
+        File.Move(tmp, path, true);
+    }
+}

@@ -1066,6 +1066,73 @@ class LaunchTestCase(unittest.TestCase):
                          "warning: claude-p started outside the supervisor; the next pin restarts it; "
                          "claude-q: not running")
 
+    # ---- the playable path row (Story 34.2)
+
+    GAME_CONFIG = "verify:\n  host: bash scripts/verify.sh\n  engine: bash scripts/engine-gate.sh\n"
+
+    def _playable_row(self, *, config: str | None = GAME_CONFIG, godot: str | None = "file",
+                      display=lambda env=None: True):
+        base = Path(tempfile.mkdtemp(dir=self.tmp))
+        root, spec = _project(base)
+        if config is not None:
+            (root / ".tk-studio").mkdir(parents=True, exist_ok=True)
+            (root / ".tk-studio" / "config.yaml").write_text(config, encoding="utf-8")
+        old_godot = os.environ.pop("GODOT", None)
+        self.addCleanup(lambda: os.environ.__setitem__("GODOT", old_godot)
+                        if old_godot is not None else os.environ.pop("GODOT", None))
+        if godot == "file":
+            exe = base / "Godot_v4.7.2-stable_mono_win64_console.exe"
+            exe.write_bytes(b"")
+            os.environ["GODOT"] = str(exe)
+        elif godot is not None:
+            os.environ["GODOT"] = godot
+        orig = launch.display_session
+        self.addCleanup(setattr, launch, "display_session", orig)
+        launch.display_session = display
+        self._wire(_FakeSubstrate())
+        result = launch.check(root, spec)
+        names = [c["check"] for c in result["checks"]]
+        row = next(c for c in result["checks"] if c["check"] == "playable path")
+        self.assertEqual(names.index("playable path"), names.index("engine sandbox") + 1)
+        self.assertTrue(row["ok"])
+        self.assertTrue(result["ok"], result["gaps"])
+        self.assertFalse(any("playable path" in g for g in result["gaps"]))
+        return row
+
+    def test_playable_path_not_a_game_project_without_verify_engine(self):
+        self.assertEqual(self._playable_row(config=None)["detail"],
+                         "not a game project (no verify.engine)")
+        self.assertEqual(self._playable_row(config="verify:\n  host: bash x.sh\n")["detail"],
+                         "not a game project (no verify.engine)")
+
+    def test_playable_path_warns_without_godot(self):
+        want = "warning: no $env:GODOT (unset or not an absolute file); playable runs refuse"
+        for godot in (None, "   ", "godot", str(self.tmp / "missing.exe")):
+            with self.subTest(godot=godot):
+                self.assertEqual(self._playable_row(godot=godot)["detail"], want)
+
+    def test_playable_path_warns_without_a_display_session(self):
+        row = self._playable_row(display=lambda env=None: False)
+        self.assertEqual(row["detail"], f"warning: no display session; the "
+                                        f"{launch.PLAYABLE_PATH} path needs the logged-in desktop")
+
+    def test_playable_path_display_probe_raising_never_raises_out_of_check(self):
+        def boom(env=None):
+            raise OSError("user32 unavailable")
+        row = self._playable_row(display=boom)
+        self.assertEqual(row["detail"], "warning: display session unknown (user32 unavailable)")
+
+    def test_playable_path_ready(self):
+        self.assertEqual(self._playable_row()["detail"], f"ready ({launch.PLAYABLE_PATH})")
+
+    def test_display_session_posix_reads_display_or_wayland(self):
+        if sys.platform == "win32":
+            self.skipTest("POSIX probe")
+        self.assertTrue(launch.display_session({"DISPLAY": ":0"}))
+        self.assertTrue(launch.display_session({"WAYLAND_DISPLAY": "wayland-0"}))
+        self.assertFalse(launch.display_session({}))
+
+
 
 if __name__ == "__main__":
     unittest.main()
