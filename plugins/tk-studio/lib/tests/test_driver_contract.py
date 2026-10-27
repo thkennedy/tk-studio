@@ -2087,7 +2087,48 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertIn("`planner`, `playable-verify`", legs)
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
-        self.assertIn("Story 34.1, Story 34.2, Story 34.3 (Epic 34)", stories)
+        self.assertIn("Story 34.1, Story 34.2, Story 34.3, Story 34.4 (Epic 34)", stories)
+
+    def test_0_1_29_story_34_4_engine_skill(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.29**", header)
+        self.assertNotIn("**0.1.30**", header)
+        self.assertEqual(header.count("Story 34.4, additive"), 1)
+        self.assertLess(header.index("Story 34.3, additive"),
+                        header.index("Story 34.4, additive"))
+        clause = " ".join(header[header.index("Story 34.4, additive"):].split())
+        for phrase in ("the `gds-engine-godot-4` skill and `lib/engine_pin.py check`",
+                       "`suggests_skills` on the `game-godot` profile and the detect candidate",
+                       "skill entries with `warnings[]` in the onboard proposal",
+                       "the `verify commands` row's engine-gate clause", "— additive) |"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        self.assertIn("and the plugin-shipped engine-knowledge skill "
+                      "`skills/gds-engine-godot-4/` (0.1.29, Story 34.4), which keeps "
+                      "GDS's naming so its engine catalogue stays upstream (AD-1)", flat)
+        note = flat[flat.index("**0.1.29 (Story 34.1, additive).**"):]
+        note = note[:note.index("**The rules a consumer may rely on**")]
+        self.assertEqual(note.count("Story 34.4 ships the read-only engine-knowledge skill"), 1)
+        sentence = note[note.index("Story 34.4 ships the read-only engine-knowledge skill"):]
+        sentence = sentence[:sentence.index("Every other field, kind and route")]
+        for phrase in ("`gds-engine-godot-4`", "`lib/engine_pin.py check", "`config/features`",
+                       "\"Godot.NET.Sdk\"", "`pin.json`", "`intent: gds-engine-godot-4`",
+                       "`no project.godot`", "`unknown skill`", "`malformed global.json`",
+                       "`suggests_skills`", "`tk-studio-detect`", "`kind: skill`",
+                       "`warnings[]`", "`gds-engine-godot-4: `",
+                       "`engine gate: sandbox and host leg (engine.verify_commands, verify.engine)`",
+                       "`engine gate: sandbox list only (engine.verify_commands; not identified without verify.engine)`",
+                       "`engine gate: host leg (verify.engine, Story 34.1)`",
+                       "`warning: engine gate: none (...)`", "never turns the row red"):
+            self.assertIn(phrase, sentence)
+        row = next(line for line in self.text.splitlines()
+                   if line.startswith("| `gds-engine-godot-4`"))
+        self.assertIn("(0.1.29, Story 34.4)", row)
+        self.assertIn("`lib/engine_pin.py check`", row)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 34.3, Story 34.4 (Epic 34)", stories)
 
     # --- AC 2: A7 dossier items covered or explicitly deferred with a seam
 

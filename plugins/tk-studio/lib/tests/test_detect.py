@@ -119,6 +119,22 @@ class DetectTest(unittest.TestCase):
             self.assertGreaterEqual(
                 sum(int(m["weight"]) for m in det["markers"]),
                 int(det["confidence_min"]))
+            # Story 34.4: every suggested skill is shipped in the plugin
+            for name in profile.get("suggests_skills", []):
+                self.assertTrue(
+                    (PROFILES_DIR.parents[1] / name / "SKILL.md").is_file(),
+                    f"{profile['id']} suggests unshipped skill {name}")
+
+    def test_suggests_skills_passes_through(self):
+        root = self._project("godot")
+        (root / "project.godot").write_text("[application]\n", encoding="utf-8")
+        result = detect.detect(root)
+        self.assertEqual(result["outcome"], "confident")
+        top = result["candidates"][0]
+        self.assertEqual(top["id"], "game-godot")
+        self.assertEqual(top["suggests_skills"], ["gds-engine-godot-4"])
+        for other in result["candidates"][1:]:
+            self.assertEqual(other["suggests_skills"], [])
 
     def test_content_probe_and_suggests(self):
         root = self._project("web")

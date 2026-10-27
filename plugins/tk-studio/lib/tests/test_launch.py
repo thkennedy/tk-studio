@@ -1001,6 +1001,87 @@ class LaunchTestCase(unittest.TestCase):
         row = next(c for c in result["checks"] if c["check"] == "verify commands")
         self.assertTrue(row["detail"].startswith("added 1 from "))
 
+    # ---- the engine-gate placement clause (Story 34.4)
+
+    GATE = "bash scripts/engine-gate.sh"
+
+    def test_engine_gate_in_the_sandbox_list(self):
+        config = (f"verify:\n  engine: {self.GATE}\nengine:\n  verify_commands:\n"
+                  f"    - '  {self.GATE}  '\n")
+        root, spec, _ = self._verify_project(self.LIMITS, config=config)
+        result, row, _ = self._verify_check(root, spec)
+        self.assertTrue(row["ok"])
+        self.assertTrue(row["detail"].endswith(
+            "; engine gate: sandbox and host leg (engine.verify_commands, verify.engine)"),
+            row["detail"])
+
+    def test_engine_gate_on_the_host_leg(self):
+        for config in (f"verify:\n  engine: {self.GATE}\n",
+                       f"verify:\n  engine: {self.GATE}\nengine:\n  verify_commands:\n"
+                       "    - make check\n"):
+            with self.subTest(config=config):
+                root, spec, _ = self._verify_project(self.LIMITS, plugin=[self.ROSTER],
+                                                     config=config)
+                result, row, _ = self._verify_check(root, spec)
+                self.assertTrue(row["ok"])
+                self.assertTrue(row["detail"].endswith(
+                    "; engine gate: host leg (verify.engine, Story 34.1)"), row["detail"])
+                self.assertTrue(result["ok"], result["gaps"])
+
+    def test_engine_gate_none_warns_when_the_skill_is_in_a_working_set(self):
+        config = "working_set:\n  developer:\n    - bmm\n    - gds-engine-godot-4\n"
+        root, spec, _ = self._verify_project(self.LIMITS, plugin=[self.ROSTER], config=config)
+        result, row, _ = self._verify_check(root, spec)
+        self.assertTrue(row["ok"])
+        self.assertIn("warning: engine gate: none (set verify.engine for the host leg, "
+                      "or add the gate to engine.verify_commands only in a WITH_GODOT "
+                      "sandbox)", row["detail"])
+        self.assertTrue(result["ok"], result["gaps"])
+
+    def test_engine_gate_sandbox_list_only_without_verify_engine(self):
+        config = ("engine:\n  verify_commands:\n    - make check\n"
+                  "working_set:\n  developer:\n    - gds-engine-godot-4\n")
+        root, spec, _ = self._verify_project(self.LIMITS, config=config)
+        result, row, _ = self._verify_check(root, spec)
+        self.assertTrue(row["ok"])
+        self.assertTrue(row["detail"].endswith(
+            "; engine gate: sandbox list only (engine.verify_commands; not identified "
+            "without verify.engine)"), row["detail"])
+        self.assertNotIn("warning", row["detail"])
+        self.assertTrue(result["ok"], result["gaps"])
+        # an empty list is still the warning
+        config = ("engine:\n  verify_commands:\n"
+                  "working_set:\n  developer:\n    - gds-engine-godot-4\n")
+        root, spec, _ = self._verify_project(self.LIMITS, config=config)
+        _, row, _ = self._verify_check(root, spec)
+        self.assertIn("warning: engine gate: none (", row["detail"])
+
+    def test_engine_gate_clause_absent_without_gate_or_skill(self):
+        root, spec, _ = self._verify_project(
+            self.LIMITS, plugin=[self.ROSTER],
+            config="working_set:\n  developer:\n    - bmm\n")
+        _, row, _ = self._verify_check(root, spec)
+        self.assertNotIn("engine gate", row["detail"])
+
+    def test_engine_gate_reads_only_the_tracked_config(self):
+        root, spec, _ = self._verify_project(self.LIMITS, plugin=[self.ROSTER],
+                                             config="vcs: git\n")
+        (root / ".tk-studio" / "config.local.yaml").write_text(
+            f"verify:\n  engine: {self.GATE}\n", encoding="utf-8")
+        _, row, _ = self._verify_check(root, spec)
+        self.assertNotIn("engine gate", row["detail"])
+
+    def test_engine_gate_clause_never_turns_a_refusal_green_or_a_skip_red(self):
+        config = f"verify:\n  engine: {self.GATE}\n"
+        root, spec, _ = self._verify_project(None, plugin=[self.ROSTER], config=config)
+        _, row, _ = self._verify_check(root, spec)
+        self.assertTrue(row["ok"])
+        self.assertIn("engine gate: host leg", row["detail"])
+        root, spec, _ = self._verify_project("[limits\n", plugin=[self.ROSTER], config=config)
+        _, row, _ = self._verify_check(root, spec)
+        self.assertFalse(row["ok"])  # the policy refusal stays a gap
+
+
 
     # ---- the engine sandbox row (Story 33.3)
 

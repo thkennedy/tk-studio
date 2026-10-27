@@ -225,6 +225,26 @@
         }
       ]
     },
+    "gds-engine-godot-4": {
+      "external_calls": false,
+      "auth_preflight": "none needed — read-only engine knowledge; the core engine_pin.py reads project.godot, global.json and the skill's pin.json on disk and calls nothing (driver-contract §1)",
+      "drives": [
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/engine_pin.py", "check", "--directory", "{sandbox}"],
+          "expect": "refusal",
+          "marker": "no project.godot"
+        },
+        {
+          "assertion": "status-block-fresh",
+          "argv": ["lib/engine_pin.py", "check", "--directory", "{sandbox}"],
+          "expect": "status-block",
+          "intent": "gds-engine-godot-4",
+          "status": "blocked",
+          "marker": "no project.godot"
+        }
+      ]
+    },
     "tk-studio-job": {
       "external_calls": false,
       "auth_preflight": "none needed — local run-state reads/writes and substrate directives only; when a run invokes a target skill, that skill's own preflight posture applies (one surface, one preflight)",

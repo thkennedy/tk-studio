@@ -144,6 +144,7 @@ const SURFACE_CORES: Record<string, string[]> = {
   "tk-studio-launch": ["launch.py", "pipeline.py"],
   "tk-studio-track": ["track.py"], // contract 0.1.26 (Story 31.5)
   "tk-studio-playable-judge": ["playable_judge.py"], // Story 34.3
+  "gds-engine-godot-4": ["engine_pin.py"], // Story 34.4
 };
 
 /** Core verbs the §2 payload row does NOT declare — run-workspace-mediated

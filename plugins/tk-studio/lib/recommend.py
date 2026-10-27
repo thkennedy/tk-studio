@@ -20,7 +20,10 @@ Proposal sources, each a named evidence line per resource:
   role-default    conservative per-role module base (v1 roles; new roles are
                   configuration, not architecture)
   detection       the confident profile's `suggests`, citing type + score +
-                  the markers that fired
+                  the markers that fired; its `suggests_skills` (Story 34.4)
+                  join as `kind: skill` entries, resolved against the plugin's
+                  own skills/<name>/SKILL.md, with `engine-pin:` evidence and
+                  any version `warnings[]` (also appended to `notes`)
   user-authored   the project's own resources (first-class path, AD-17)
 
 CLI:
@@ -43,6 +46,7 @@ from pathlib import Path
 
 import config as configlib
 import detect as detectlib
+import engine_pin as enginepinlib
 import inventory as inventorylib
 import store as storelib
 
@@ -58,12 +62,39 @@ ROLE_BASE = {
 
 _ROLE_TOKEN_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 
+# Story 34.4: plugin-shipped skills a confident profile suggests resolve here
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+
 
 class RecommendError(Exception):
     """Bad invocation, unknown role shape, or unwritable config."""
 
 
 # ---------------------------------------------------------------- propose
+
+def _skill_status(name: str) -> str | None:
+    """`installed` when the plugin ships skills/<name>/SKILL.md."""
+    return "installed" if (PLUGIN_ROOT / "skills" / name / "SKILL.md").is_file() else None
+
+
+def _engine_pin(root: Path, name: str) -> tuple[str | None, list[str]]:
+    """(engine-pin evidence, warnings) for a skill carrying a pin.json;
+    (None, []) for one that does not. A refusal reads as a warning: the
+    operator decides, and the warning makes the mismatch visible."""
+    if not (PLUGIN_ROOT / "skills" / name / "pin.json").is_file():
+        return None, []
+    try:
+        result = enginepinlib.check(root, name)
+    except enginepinlib.Refusal as exc:
+        return f"engine pin not checked: {exc}", [f"engine pin not checked: {exc}"]
+    supported = f"supported {result['supported']['min']}..{result['supported']['below']}"
+    if result["pinned"] is None:
+        return f"pinned version unreadable; {supported}", list(result["warnings"])
+    source = ("global.json" if result["pinned"] == result["godot_net_sdk"]
+              else "project.godot")
+    return (f"pinned {result['pinned']} from {source}; {supported}",
+            list(result["warnings"]))
+
 
 def _module_status(inv: dict, name: str) -> str | None:
     for resource in inv["resources"]:
@@ -86,6 +117,7 @@ def propose(project_root: Path, role: str | None = None,
     det = detectlib.detect(root, profiles_dir=profiles_dir)
 
     proposed: dict[str, dict] = {}
+    skill_notes: list[str] = []
 
     def _add(name: str, kind: str, source: str, evidence: str,
              status: str | None) -> None:
@@ -107,6 +139,17 @@ def propose(project_root: Path, role: str | None = None,
                  f"detected {top['id']} (score {top['score']} ≥ floor "
                  f"{top['confidence_min']}): {fired}",
                  _module_status(inv, module))
+        for skill in top.get("suggests_skills", []):
+            _add(skill, "skill", "detection",
+                 f"detected {top['id']} (score {top['score']} ≥ floor "
+                 f"{top['confidence_min']}): {fired}",
+                 _skill_status(skill))
+            evidence, warnings = _engine_pin(root, skill)
+            if evidence is not None:
+                proposed[skill]["evidence"].append(f"engine-pin: {evidence}")
+            if warnings:
+                proposed[skill]["warnings"] = warnings
+                skill_notes.extend(f"{skill}: {w}" for w in warnings)
 
     for resource in inv["resources"]:
         if resource["origin"] == "user-authored":
@@ -116,10 +159,16 @@ def propose(project_root: Path, role: str | None = None,
 
     unavailable = sorted(n for n, e in proposed.items()
                          if e["kind"] == "module" and e["status"] is None)
+    unavailable_skills = sorted(n for n, e in proposed.items()
+                                if e["kind"] == "skill" and e["status"] is None)
     notes = list(inv["notes"])
     if unavailable:
         notes.append("proposed module(s) neither installed nor in the studio "
                      f"registry: {', '.join(unavailable)}")
+    if unavailable_skills:
+        notes.append("proposed skill(s) not shipped in the studio plugin: "
+                     f"{', '.join(unavailable_skills)}")
+    notes.extend(skill_notes)
     if det["outcome"] != detectlib.OUTCOME_CONFIDENT:
         notes.append(f"detection outcome '{det['outcome']}' — no "
                      "detection-derived suggestions; ask the operator what "

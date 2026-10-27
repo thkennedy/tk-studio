@@ -71,6 +71,16 @@ Guarantees:
     key `{source, tracked, added, kept, policy}` report it on every check;
     a source or policy that cannot be read or placed is a named gap ("fix
     it by hand"); no tracked list or no policy is an advisory skip.
+    The same row names where the engine gate runs (Story 34.4), from the
+    tracked config only: with a non-empty `verify.engine`, `engine gate:
+    sandbox and host leg (engine.verify_commands, verify.engine)` when an
+    `engine.verify_commands` entry equals it once stripped, else `engine
+    gate: host leg (verify.engine, Story 34.1)`; with no `verify.engine` but
+    `gds-engine-godot-4` in some `working_set.<role>`, `engine gate: sandbox
+    list only (engine.verify_commands; not identified without
+    verify.engine)` when `engine.verify_commands` has a non-empty entry,
+    else a warning (`engine gate: none (...)`). The clause never turns the
+    row red.
 
 Exit codes: 0 verb answered (a `check` with gaps is an answer: ok=false);
 2 bad invocation or refusal (`start` on a failing check, missing spec, an
@@ -118,6 +128,16 @@ CONFIG_REL = ".tk-studio/config.yaml"
 VERIFY_PLUGIN_REL = "plugins/tk-studio/pipeline/verify-commands.toml"
 VERIFY_CONFIG_SOURCE = ".tk-studio/config.yaml engine.verify_commands"
 VERIFY_CHECK = "verify commands"
+# Story 34.4: the verify-commands row's engine-gate placement clause
+ENGINE_SKILL = "gds-engine-godot-4"
+ENGINE_GATE_BOTH = ("engine gate: sandbox and host leg (engine.verify_commands, "
+                    "verify.engine)")
+ENGINE_GATE_SANDBOX_ONLY = ("engine gate: sandbox list only (engine.verify_commands; "
+                            "not identified without verify.engine)")
+ENGINE_GATE_HOST = "engine gate: host leg (verify.engine, Story 34.1)"
+ENGINE_GATE_NONE = ("warning: engine gate: none (set verify.engine for the host "
+                    "leg, or add the gate to engine.verify_commands only in a "
+                    "WITH_GODOT sandbox)")
 # policy `[limits]` key -> the band field its largest band is compared with
 BUDGET_COMPARED = (("max_tokens_per_story", "weighted_tokens"),
                    ("max_review_cycles", "review_cycles_max"))
@@ -495,6 +515,44 @@ def _write_atomic(path: Path, data: bytes) -> None:
             tmp.unlink()
 
 
+def engine_gate_clause(root: Path) -> str | None:
+    """Story 34.4: where the engine gate runs, read from the tracked
+    ``.tk-studio/config.yaml`` only (never config.local.yaml or the user
+    tier). ``engine.verify_commands`` is the in-sandbox list and
+    ``verify.engine`` the host leg's single command, two keys never merged.
+    A set ``verify.engine`` gives the host-leg (or both-places) clause
+    whatever the working set; only without it does a working set carrying
+    the engine skill give the sandbox-only or none clause. None when there
+    is nothing to say (no config, unparseable, no ``verify.engine`` and no
+    working set carrying the engine skill)."""
+    config = root / CONFIG_REL
+    if not config.is_file():
+        return None
+    try:
+        doc = miniyaml.load(config)
+    except (OSError, UnicodeDecodeError, miniyaml.MiniYamlError):
+        return None
+    if not isinstance(doc, dict):
+        return None
+    verify = doc.get("verify")
+    gate = verify.get("engine") if isinstance(verify, dict) else None
+    engine = doc.get("engine")
+    listed = engine.get("verify_commands") if isinstance(engine, dict) else None
+    listed = [c for c in listed if isinstance(c, str) and c.strip()] \
+        if isinstance(listed, list) else []
+    if isinstance(gate, str) and gate.strip():
+        # the 34.1 host leg runs verify.engine whenever it is set, so a
+        # command in both keys runs in both places
+        if any(c.strip() == gate.strip() for c in listed):
+            return ENGINE_GATE_BOTH
+        return ENGINE_GATE_HOST
+    working_set = doc.get("working_set")
+    if isinstance(working_set, dict) and any(
+            isinstance(v, list) and ENGINE_SKILL in v for v in working_set.values()):
+        return ENGINE_GATE_SANDBOX_ONLY if listed else ENGINE_GATE_NONE
+    return None
+
+
 def reconcile_verify_commands(root: Path) -> tuple[dict, dict]:
     """(verify_commands key, check row) — Story 33.5: the engine policy's
     ``[verify] commands`` reconciled from the tracked list. Tracked commands
@@ -503,8 +561,14 @@ def reconcile_verify_commands(root: Path) -> tuple[dict, dict]:
     leaves the file byte-identical. The write is atomic and re-read with
     tomllib; on any mismatch the original bytes are restored. Every problem
     is a named refusal (``ok`` false, a gap), never a guess; no tracked list
-    or no policy is an advisory skip and writes nothing."""
+    or no policy is an advisory skip and writes nothing. The detail ends
+    with the engine-gate clause when there is one (Story 34.4), which never
+    changes ``ok``."""
+    clause = engine_gate_clause(root)
+
     def row(ok: bool, detail: str) -> dict:
+        if clause:
+            detail = f"{detail}; {clause}"
         return {"check": VERIFY_CHECK, "ok": ok, "detail": detail}
 
     def refused(source: str | None, tracked: list[str], problem: str) -> tuple[dict, dict]:
