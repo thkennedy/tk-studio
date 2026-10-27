@@ -231,6 +231,16 @@
     `34-7-the-cc0-mirror-and-the-paid-rung-behind-a-cap-*.md`, and a file named
     `34-7-the-cc0-mirror-and-the-paid-rung-behind-a-cap.md` is read as pending (loop
     deficiency 1, story 21-6).
+    Gate note (from 34-6, 2026-10-27): manifest `bounds` are glTF axes, Y up (driver
+    contract `## Asset manifest`; `greybox.py` maps them to Blender X, Z, Y); `match`
+    and `generate` normalise on that convention and reuse `assets.py`'s `facts_of`,
+    `gate` and the never-overwrite hard-link publish. DW-74 is open: `facts_of` reads
+    POSITION accessor min/max and ignores node transforms and instancing; resolve it
+    in this story before the gate judges kit or generated files. A greybox entry with
+    a label of other pixels fails (`label_state: stale`); the visual gate's greybox
+    reference is a placed `.glb` whose label is `written` or `kept`. Status blocks use
+    `complete | partial | blocked` (status-block.schema.json). Oversize: the plan
+    sizes this story past band L. Halt if the Files list in plans/34-7.md grows.
 
 - id: "34-8-the-run-vertical-slice-job-and-the-engagements-game-path"
   title: "The `run-vertical-slice` Job and the Engagement's Game Path"
@@ -259,3 +269,9 @@
     `34-8-the-run-vertical-slice-job-and-the-engagements-game-path-*.md`, and a file
     named `34-8-the-run-vertical-slice-job-and-the-engagements-game-path.md` is read as
     pending (loop deficiency 1, story 21-6).
+    Gate note (from 34-6, 2026-10-27): `assets.py check` and `greybox` end in status
+    blocks with `complete | partial | blocked` (status-block.schema.json, `intent:
+    assets`), exit 0 ok, 1 gate red or Blender failure, 2 refusal (not a red gate);
+    `greybox` finds Blender through `--blender`, else `BLENDER`, else `blender` on PATH,
+    bounded by `--wall` (default 600 s); the art path is config `assets.art_path`
+    (TUA: `art/world/greybox`).

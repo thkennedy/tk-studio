@@ -1,0 +1,26 @@
+# The Story 34.6 conformance fixture: two entries, one with its greybox in
+# place (art/greybox/crate-small.glb, in budget), one not yet built
+# (barrel: `missing`, not a failure).
+schema: 1
+categories:
+  prop: "#8a8a8a"
+assets:
+  - name: crate-small
+    category: prop
+    tri_budget: 500
+    bounds: {x: 0.5, y: 0.5, z: 0.5}
+    origin: base-center
+    collision: box
+    licence: greybox
+    rung: greybox
+    status: placeholder
+    source: ""
+  - name: barrel
+    category: environment
+    tri_budget: 200
+    bounds: {x: 0.6, y: 1.0, z: 0.6}
+    origin: base-center
+    collision: capsule
+    licence: greybox
+    rung: greybox
+    status: placeholder

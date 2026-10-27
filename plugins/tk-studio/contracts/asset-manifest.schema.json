@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tk-studio/contracts/asset-manifest/v1",
+  "title": "tk-studio asset manifest",
+  "description": "Every asset a slice needs, declared once (Story 34.6, contract 0.1.29). The file lives at the project config's assets.manifest (default assets/manifest.yaml); each entry's file is derived, never declared: <assets.art_path>/<name>.glb (default art path art/greybox). `lib/assets.py check` validates it (names unique; tri_budget at least 12, a greybox cube) and gates every present file with `facts`; `lib/assets.py greybox` writes the greybox of every entry without one.",
+  "type": "object",
+  "required": ["schema", "assets"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": 1 },
+    "categories": {
+      "description": "Optional overrides of the default category colours (prop #8a8a8a, character #d98c3f, environment #5b8c5a, vehicle #4a78b5, ui #c7b84a, fx #9a5bb5).",
+      "type": "object",
+      "propertyNames": { "enum": ["prop", "character", "environment", "vehicle", "ui", "fx"] },
+      "additionalProperties": { "type": "string", "pattern": "^#[0-9a-f]{6}$" }
+    },
+    "assets": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/asset" }
+    }
+  },
+  "$defs": {
+    "asset": {
+      "type": "object",
+      "required": ["name", "category", "tri_budget", "bounds", "origin", "collision", "licence", "rung", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "The id and the file stem; unique in the manifest.",
+          "type": "string",
+          "pattern": "^[a-z0-9-]+$"
+        },
+        "category": { "enum": ["prop", "character", "environment", "vehicle", "ui", "fx"] },
+        "tri_budget": {
+          "description": "The triangle budget; `check` refuses one below 12 (a greybox cube).",
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "bounds": {
+          "description": "The extent in metres on glTF axes (Y up: y is the height).",
+          "type": "object",
+          "required": ["x", "y", "z"],
+          "additionalProperties": false,
+          "properties": {
+            "x": { "type": "number", "exclusiveMinimum": 0 },
+            "y": { "type": "number", "exclusiveMinimum": 0 },
+            "z": { "type": "number", "exclusiveMinimum": 0 }
+          }
+        },
+        "origin": { "enum": ["base-center", "center", "base-min-corner"] },
+        "collision": { "enum": ["none", "box", "capsule", "sphere", "mesh"] },
+        "licence": { "enum": ["greybox", "cc0", "cc-by", "generated", "proprietary"] },
+        "rung": {
+          "description": "The rung the entry stands on now.",
+          "enum": ["greybox", "cc0", "generated"]
+        },
+        "status": {
+          "description": "placeholder while the greybox is in place; candidate once a later rung's replacement has not passed both gates; accepted once it has.",
+          "enum": ["placeholder", "candidate", "accepted"]
+        },
+        "source": {
+          "description": "Provenance for the cc0 and generated rungs (Story 34.7); empty on greybox.",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

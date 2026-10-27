@@ -181,10 +181,20 @@ blender.org, or the portable zip into `%AGENT_WORK%\tools\blender\`. Download
 it in a browser: blender.org serves scripted downloads a bot-check page. The
 installer does not add Blender to PATH, so add its folder
 (`C:\Program Files\Blender Foundation\Blender 5.2`, or the unpacked zip) to
-the studio account's PATH and open a new terminal. Verify:
+the studio account's PATH and open a new terminal. Then point the `BLENDER`
+user environment variable at the exe; `assets.py greybox` (Story 34.6, the
+asset ladder's greybox rung, [kb/asset-ladder.md](asset-ladder.md)) reads
+it first and falls back to `blender` on PATH:
+
+```powershell
+[Environment]::SetEnvironmentVariable("BLENDER", "C:\Program Files\Blender Foundation\Blender 5.2\blender.exe", "User")
+```
+
+Open a new terminal. Verify:
 
 ```powershell
 blender -b --version
+& $env:BLENDER -b --version
 ```
 
 EEVEE has no headless mode on Windows; QA renders use Workbench or Cycles.
