@@ -2297,7 +2297,7 @@ class DriverContractTestCase(unittest.TestCase):
                        "`<blender> -b --python <plugin>/lib/blender/render.py -- --spec <json>`",
                        "`{input, camera, bounds, size, output}`", "Workbench", "128x128",
                        "`.candidates/<name>.greybox.png`", "`.candidates/<name>.render.png`",
-                       ">= 0.6", ">= 0.005", "`os.replace`", "the one sanctioned replace",
+                       ">= 0.25", ">= 0.005", "`os.replace`", "the one sanctioned replace",
                        "placeholder's bytes untouched", "`status: candidate`",
                        "only the `status`, `licence` and `source` lines",
                        "cannot map line by line", "TRS or `matrix`",
