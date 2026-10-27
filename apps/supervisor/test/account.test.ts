@@ -1,7 +1,6 @@
 // Story 29.1: the owner's account replaces the providers — creation, sign-in, the lockout, the removed routes, the reset.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   AccountExists, AccountRecordInvalid, accountPath, createAccount, LOCKOUT_FAILURES, LOCKOUT_MS, LOCKOUT_WINDOW_MS, readAccount, SIGNIN_DELAY_MS,
@@ -11,6 +10,7 @@ import { INTENDED_USAGE, NEEDS_HTTPS_NOTE, SESSION_COOKIE, verifySession } from 
 import * as envModule from "../src/env";
 import { Queue, type Probes, type WorkerKill } from "../src/queue";
 import { buildWorkerEnv } from "../src/server";
+import { tempDir, track } from "./tmp";
 
 const TOKEN = "tok-account-91c4-very-secret-value";
 const SECRET = "session-secret-account-0123456789abcdef-0123";
@@ -44,9 +44,9 @@ afterAll(() => {
 interface FxOpts { session?: boolean; origin?: string }
 
 function fixture(o: FxOpts = {}) {
-  const dir = mkdtempSync(join(tmpdir(), "tk-sup-acct-"));
-  const store = mkdtempSync(join(tmpdir(), "tk-sup-acct-store-"));
-  const checkout = mkdtempSync(join(tmpdir(), "tk-sup-acct-checkout-"));
+  const dir = tempDir("tk-sup-acct-");
+  const store = tempDir("tk-sup-acct-store-");
+  const checkout = tempDir("tk-sup-acct-checkout-");
   let now = T0;
   const probes: Probes = {
     ownerAlive: () => false,
@@ -54,7 +54,7 @@ function fixture(o: FxOpts = {}) {
     killWorker: async (pid, start): Promise<WorkerKill> => ({ pid, start, outcome: "killed" }),
     probeWorker: (pid, start): WorkerKill => ({ pid, start, outcome: "not running" }),
   };
-  const queue = new Queue(join(dir, "q.db"), probes);
+  const queue = track(new Queue(join(dir, "q.db"), probes));
   const env = { TK_STUDIO_HOME: store, TK_SUPERVISOR_TOKEN: TOKEN, TK_SUPERVISOR_SESSION_SECRET: SECRET };
   const sleeps: number[] = [];
   const submitted: unknown[] = [];
@@ -267,7 +267,7 @@ describe("account creation (AC1)", () => {
     try { readAccount(fx.env); } catch (e) { expect(e).toBeInstanceOf(AccountRecordInvalid); msg = (e as Error).message; }
     expect(msg).toContain("supervisor/account.json");
     expect(msg).not.toContain("planted-content-77");
-    expect(readAccount({ TK_STUDIO_HOME: mkdtempSync(join(tmpdir(), "tk-sup-acct-none-")) })).toBeNull();
+    expect(readAccount({ TK_STUDIO_HOME: tempDir("tk-sup-acct-none-") })).toBeNull();
   });
 
   test("two parallel creations: exactly one 303 and one 409, the record is the winner's, no temp file left", async () => {
@@ -282,7 +282,7 @@ describe("account creation (AC1)", () => {
     expect(fx.queue.serviceEvents("account-created").map((e) => e.detail)).toEqual([{ username: winner[0] }]);
     expect(readdirSync(join(fx.store, "supervisor"))).toEqual(["account.json"]);
     // The module itself: both pass the existence check before either places its file; the exclusive link refuses one.
-    const store = mkdtempSync(join(tmpdir(), "tk-sup-acct-race-"));
+    const store = tempDir("tk-sup-acct-race-");
     const env = { TK_STUDIO_HOME: store };
     const results = await Promise.allSettled([createAccount(env, "first-one", PASSWORD, "t"), createAccount(env, "second-one", PASSWORD, "t")]);
     expect(results.map((x) => x.status).sort()).toEqual(["fulfilled", "rejected"]);
@@ -517,7 +517,7 @@ describe("the providers are deleted (AC3)", () => {
   });
 
   test("serve with a leftover TK_SUPERVISOR_OAUTH_GITHUB_ALLOW: starts, one warning naming the variable and not its value", () => {
-    const d = mkdtempSync(join(tmpdir(), "tk-sup-acct-serve-"));
+    const d = tempDir("tk-sup-acct-serve-");
     mkdirSync(join(d, "store"));
     const value = "leftover-allow-value-5512";
     const seen: unknown[] = [];

@@ -1,11 +1,11 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   buildKnowledgeInjection, buildSkillPrompt, invokeSkill, judgeAuthStatus, MAX_LOGIN_MISSING, maxLoginPreflight, MISSING_STATUS_BLOCK,
   type RunResult, type Spawner,
 } from "../src/server";
+import { tempDir } from "./tmp";
 
 type Call = { cmd: string; args: string[]; env?: Record<string, string | undefined> };
 function fakeSpawner(auth: RunResult, worker: RunResult): { spawner: Spawner; calls: Call[] } {
@@ -18,8 +18,8 @@ const worker = (result: string, is_error = false): RunResult => ({ exit: 0, stde
 let root: string;
 beforeAll(() => {
   // Isolate from the real per-user store (the first invoke runs the §6 drift check).
-  process.env.TK_STUDIO_HOME = mkdtempSync(join(tmpdir(), "tk-sup-store-"));
-  root = mkdtempSync(join(tmpdir(), "tk-sup-proj-"));
+  process.env.TK_STUDIO_HOME = tempDir("tk-sup-store-");
+  root = tempDir("tk-sup-proj-");
 });
 
 describe("Max-login judgement (claude auth status --json)", () => {
@@ -153,7 +153,7 @@ describe("invokeSkill outcomes", () => {
 
 describe("headless prompt (§1: the skill line comes first)", () => {
   test("knowledge injected → the prompt still starts with /tk-studio:<skill>; the preamble follows it", async () => {
-    const spine = join(mkdtempSync(join(tmpdir(), "tk-sup-spine-")), "spine.md");
+    const spine = join(tempDir("tk-sup-spine-"), "spine.md");
     writeFileSync(spine, "# spine\nanchor S-1: the loop is headless.\n");
     const { spawner, calls } = fakeSpawner(LOGGED_IN, worker(`{"status":"complete","intent":"tk-studio-activate","artifacts":[]}`));
     const out = await invokeSkill(root, "tk-studio-activate",

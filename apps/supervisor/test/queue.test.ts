@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { resolveCheckout, studioOps, studioRunFinder, watchCertificate } from "../src/cli";
 import {
@@ -12,6 +12,7 @@ import { filetimeToIso, processCreationTime } from "../src/winproc";
 import { gitRepo } from "./fakes";
 import { gatherPage, renderPage } from "../src/page";
 import { CERT_CHECK_MS, CERT_RENEW_EXIT, certCheck, certNotAfter, FORCE_WITHIN_DAYS, recordCertStart } from "../src/cert";
+import { tempDir, track } from "./tmp";
 
 const REPO = resolve(import.meta.dir, "..");
 const HOST = hostname();
@@ -29,10 +30,10 @@ function fakeProbes(alive: Set<number>, engine: (id: string | null) => EnginePro
 }
 
 function fixture(alive = new Set<number>([A.pid, B.pid]), engine?: (id: string | null) => EngineProbe) {
-  const dir = mkdtempSync(join(tmpdir(), "tk-sup-queue-"));
-  const checkout = mkdtempSync(join(tmpdir(), "tk-sup-checkout-"));
+  const dir = tempDir("tk-sup-queue-");
+  const checkout = tempDir("tk-sup-checkout-");
   const { probes, engineCalls } = fakeProbes(alive, engine);
-  const queue = new Queue(join(dir, "q.db"), probes);
+  const queue = track(new Queue(join(dir, "q.db"), probes));
   const enqueue = (jobId = "studio-health", owner: Owner | null = null, target = "skill", skill = "tk-studio-activate") =>
     queue.enqueue({ jobId, root: checkout, projectId: "p", target,
       definition: { id: jobId, trigger: "one-shot", target: target === "core" ? { core: "c" } : { skill } }, owner });
@@ -42,7 +43,7 @@ function fixture(alive = new Set<number>([A.pid, B.pid]), engine?: (id: string |
 const count = (q: Queue, table: string) => (q.db.query(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
 
 describe("queue database placement", () => {
-  const safe = () => mkdtempSync(join(tmpdir(), "tk-sup-qpath-"));
+  const safe = () => tempDir("tk-sup-qpath-");
 
   test("unset → QueueDbMissing", () => {
     expect(() => queueDbPath({})).toThrow(QueueDbMissing);
@@ -152,7 +153,7 @@ q.close();
       if (code !== 0) throw new Error(`racer exited ${code}: ${err}`);
       return JSON.parse(out.trim()) as { run_id: string; minted: boolean };
     }));
-    const q = new Queue(fx.db, fakeProbes(new Set()).probes);
+    const q = track(new Queue(fx.db, fakeProbes(new Set()).probes));
     expect(count(q, "runs")).toBe(1);
     const id = q.runs()[0].run_id;
     expect(outs.every((o) => o.run_id === id)).toBe(true);
@@ -177,7 +178,7 @@ q.close();
     ]);
     // Re-read from the file: the column persists.
     fx.queue.close();
-    const q = new Queue(fx.db, fakeProbes(new Set([A.pid])).probes);
+    const q = track(new Queue(fx.db, fakeProbes(new Set([A.pid])).probes));
     try {
       expect(q.get(plain.run_id)!.permission_mode).toBe("plan");
       q.end(plain.run_id, "cancelled");
@@ -190,7 +191,7 @@ q.close();
       q.enqueue({ jobId: "j", root: fx.checkout, definition: def, permissionMode: "plan" });
       expect(q.recordPermissionMode(minted.run_id, "plan").permission_mode).toBe("acceptEdits");
       // The owner dies before the verb: re-queued with its mode intact.
-      const restarted = new Queue(fx.db, fakeProbes(new Set()).probes);
+      const restarted = track(new Queue(fx.db, fakeProbes(new Set()).probes));
       try {
         const rec = await restarted.recover({
           end: async () => ({ ok: true, detail: "" }), find: async () => ({ ok: true, run_id: null }),
@@ -217,7 +218,7 @@ q.close();
       ["run-options", { model: "m-2", previous: { model: "m-1" } }],
     ]);
     fx.queue.close();
-    const q = new Queue(fx.db, fakeProbes(new Set([A.pid])).probes);
+    const q = track(new Queue(fx.db, fakeProbes(new Set([A.pid])).probes));
     try {
       expect(q.get(plain.run_id)).toMatchObject({ tier: "sbx", sandbox: "claude-p", model: "m-2", effort: "high" });
       q.end(plain.run_id, "cancelled");
@@ -231,7 +232,7 @@ q.close();
   });
 
   test("an old-schema queue file gains the new nullable run columns on open (guarded ALTER), rows intact", () => {
-    const dir = mkdtempSync(join(tmpdir(), "tk-sup-queue-old-"));
+    const dir = tempDir("tk-sup-queue-old-");
     const path = join(dir, "q.db");
     const old = new Database(path, { create: true });
     old.exec(`CREATE TABLE jobs (job_id TEXT NOT NULL, checkout TEXT NOT NULL, root TEXT NOT NULL, project_id TEXT,
@@ -246,7 +247,7 @@ q.close();
       INSERT INTO runs (run_id, job_id, checkout, root, state, created, updated) VALUES ('q-old', 'j', '/x', '/x', 'queued', 't', 't');`);
     old.close();
     for (let i = 0; i < 2; i++) { // idempotent: a second open adds nothing
-      const q = new Queue(path, fakeProbes(new Set()).probes);
+      const q = track(new Queue(path, fakeProbes(new Set()).probes));
       try {
         const cols = (q.db.query("PRAGMA table_info(runs)").all() as { name: string }[]).map((c) => c.name);
         for (const c of ["permission_mode", "tier", "sandbox", "model", "effort", "session_id", "worker_pid", "worker_start", "worker_guard_s", "wake", "editor_in_the_loop", "notified"]) {
@@ -265,7 +266,7 @@ q.close();
   });
 
   test("Story 22.3: a file gaining the end marker marks its terminal runs (no history flood); live runs stay unmarked", () => {
-    const dir = mkdtempSync(join(tmpdir(), "tk-sup-queue-old-"));
+    const dir = tempDir("tk-sup-queue-old-");
     const path = join(dir, "q.db");
     const old = new Database(path, { create: true });
     old.exec(`CREATE TABLE jobs (job_id TEXT NOT NULL, checkout TEXT NOT NULL, root TEXT NOT NULL, project_id TEXT,
@@ -284,7 +285,7 @@ q.close();
       INSERT INTO runs (run_id, job_id, checkout, root, state, created, updated) VALUES ('q-done', 'j', '/x', '/x', 'complete', 't', 't');
       INSERT INTO runs (run_id, job_id, checkout, root, state, created, updated) VALUES ('q-live', 'k', '/x', '/x', 'queued', 't', 't');`);
     old.close();
-    const q = new Queue(path, fakeProbes(new Set()).probes);
+    const q = track(new Queue(path, fakeProbes(new Set()).probes));
     try {
       expect(q.get("q-done")!.notified).toBe(NOTIFIED_BEFORE);
       expect(q.get("q-live")!.notified).toBeNull();
@@ -296,7 +297,7 @@ q.close();
       expect(q.claimEnd("q-done")).toBeNull();
       expect(() => q.db.run("UPDATE runs SET notified = 'lease 2020-01-01T00:00:00.000Z pid 1@h' WHERE run_id = 'q-done'")).toThrow(/EndClaimed/);
     } finally { q.close(); }
-    const again = new Queue(path, fakeProbes(new Set()).probes); // a second open marks nothing new
+    const again = track(new Queue(path, fakeProbes(new Set()).probes)); // a second open marks nothing new
     try { expect(again.get("q-live")!.notified).toBeNull(); } finally { again.close(); }
   });
 });
@@ -410,7 +411,7 @@ describe("transitions", () => {
     const fx = fixture();
     const { run } = fx.enqueue("j", A);
     await fx.queue.claim(run.run_id, A);
-    const other = fx.queue.enqueue({ jobId: "k", root: mkdtempSync(join(tmpdir(), "tk-sup-checkout-")), definition: { id: "k" }, owner: A }).run;
+    const other = fx.queue.enqueue({ jobId: "k", root: tempDir("tk-sup-checkout-"), definition: { id: "k" }, owner: A }).run;
     const [runBefore, otherBefore, lockBefore, eventsBefore] =
       [fx.queue.get(run.run_id), fx.queue.get(other.run_id), fx.queue.lock(fx.checkout), fx.queue.events()];
     // The events INSERT fails inside the transaction, after the run UPDATE (and the lock change) already ran.
@@ -617,7 +618,7 @@ describe("restart recovery", () => {
   test("never started: queued with a dead owner, and running with no studio run → re-queued, lock released", async () => {
     const fx = fixture();
     const q = fx.enqueue("job-q", A).run;
-    const other = mkdtempSync(join(tmpdir(), "tk-sup-checkout-"));
+    const other = tempDir("tk-sup-checkout-");
     const r = fx.queue.enqueue({ jobId: "job-r", root: other, definition: { id: "job-r" }, owner: A }).run;
     await fx.queue.claim(r.run_id, A);
     fx.alive.delete(A.pid);
@@ -758,14 +759,14 @@ describe("restart recovery: owner identity", () => {
     const r = fx.enqueue("j", old).run;
     await fx.queue.claim(r.run_id, old);
     fx.queue.setStudioRun(r.run_id, "j-20260928T101010Z");
-    const q = fx.queue.enqueue({ jobId: "k", root: mkdtempSync(join(tmpdir(), "tk-sup-checkout-")), definition: { id: "k" }, owner: old }).run;
+    const q = fx.queue.enqueue({ jobId: "k", root: tempDir("tk-sup-checkout-"), definition: { id: "k" }, owner: old }).run;
     const report = await fx.queue.recover(studioOps(async (_r, a) => a[0] === "status"
       ? { runs: [{ run_id: "j-20260928T101010Z", state: "running" }] } : { state: "partial" }), restarted);
     expect(report.ended.map((e) => e.run_id)).toEqual([r.run_id]);
     expect(report.requeued).toEqual([q.run_id]);
     // Another live pid is left alone; my own nonce is never an orphan.
     const live = fx.enqueue("m", B).run;
-    const mine = fx.queue.enqueue({ jobId: "n", root: mkdtempSync(join(tmpdir(), "tk-sup-checkout-")), definition: { id: "n" }, owner: restarted }).run;
+    const mine = fx.queue.enqueue({ jobId: "n", root: tempDir("tk-sup-checkout-"), definition: { id: "n" }, owner: restarted }).run;
     expect(await fx.queue.recover(studioOps(async () => ({})), restarted)).toEqual({ ended: [], requeued: [], resumed: [] });
     expect(fx.queue.get(live.run_id)!.owner_nonce).toBe(B.nonce);
     expect(fx.queue.get(mine.run_id)!.owner_nonce).toBe("new-process");
@@ -791,9 +792,9 @@ describe("restart recovery: owner identity", () => {
         expect(defaultOwnerAlive({ ...owner, host: `${HOST}-elsewhere` })).toBe(true); // another host: fail closed
 
         // At the queue: the reused-pid owner is an orphan; the real one is not.
-        const dir = mkdtempSync(join(tmpdir(), "tk-sup-queue-"));
-        const queue = new Queue(join(dir, "q.db"), { ownerAlive: defaultOwnerAlive, engineLive: async () => ({ live: false }) });
-        const root = mkdtempSync(join(tmpdir(), "tk-sup-checkout-"));
+        const dir = tempDir("tk-sup-queue-");
+        const queue = track(new Queue(join(dir, "q.db"), { ownerAlive: defaultOwnerAlive, engineLive: async () => ({ live: false }) }));
+        const root = tempDir("tk-sup-checkout-");
         const reused = queue.enqueue({ jobId: "reused", root, definition: { id: "reused" }, owner: { ...owner, nonce: "r", start: "1" } }).run;
         const real = queue.enqueue({ jobId: "real", root, definition: { id: "real" }, owner }).run;
         const report = await queue.recover(studioOps(async () => ({})), B);
@@ -881,7 +882,7 @@ describe("restart recovery: the launch-orphan engine handover", () => {
 describe("drainable", () => {
   test("queued runs with no owner or a dead owner, oldest first; live-owned and running runs excluded", async () => {
     const fx = fixture(new Set([B.pid]));
-    const roots = Array.from({ length: 5 }, () => mkdtempSync(join(tmpdir(), "tk-sup-checkout-")));
+    const roots = Array.from({ length: 5 }, () => tempDir("tk-sup-checkout-"));
     const mk = (jobId: string, i: number, owner: Owner | null) =>
       fx.queue.enqueue({ jobId, root: roots[i], definition: { id: jobId }, owner }).run;
     const first = mk("first", 0, null);
@@ -899,7 +900,7 @@ describe("drainable", () => {
 describe("launchStatusProbe (the launch core's status, injected uv)", () => {
   const withRoot = async <T>(fn: () => Promise<T>) => {
     const prev = process.env.TK_STUDIO_ROOT;
-    process.env.TK_STUDIO_ROOT = prev || mkdtempSync(join(tmpdir(), "tk-sup-studio-"));
+    process.env.TK_STUDIO_ROOT = prev || tempDir("tk-sup-studio-");
     try { return await fn(); } finally { if (prev === undefined) delete process.env.TK_STUDIO_ROOT; }
   };
   const uv = (stdout: string, exit = 0, stderr = "") => async (_root: string, script: string, args: string[]) => {
@@ -1041,7 +1042,7 @@ describe("review pass 2 fixes", () => {
   });
 
   test("placement: darwin (case-insensitive by default) folds case — ~/.TK-Studio is still the store", () => {
-    const base = mkdtempSync(join(tmpdir(), "tk-sup-qpath-"));
+    const base = tempDir("tk-sup-qpath-");
     const env = { TK_SUPERVISOR_DB: join(base, ".TK-Studio", "q.db"), TK_STUDIO_HOME: join(base, ".tk-studio") };
     expect(() => queueDbPath(env, "darwin")).toThrow(QueueDbPlacementRefused);
     expect(() => queueDbPath(env, "win32")).toThrow(/studio store/);
@@ -1145,8 +1146,8 @@ describe("no owner or engine probe runs inside a transaction", () => {
         return engine(id);
       },
     };
-    queue = new Queue(join(mkdtempSync(join(tmpdir(), "tk-sup-queue-")), "q.db"), probes);
-    const checkout = () => mkdtempSync(join(tmpdir(), "tk-sup-checkout-"));
+    queue = track(new Queue(join(tempDir("tk-sup-queue-"), "q.db"), probes));
+    const checkout = () => tempDir("tk-sup-checkout-");
     const enqueue = (jobId: string, root: string, owner: Owner | null, skill = "tk-studio-activate") =>
       queue!.enqueue({ jobId, root, definition: { id: jobId, target: { skill } }, owner }).run;
     return { queue, seen, alive, checkout, enqueue };
@@ -1255,7 +1256,7 @@ describe("stop events and the pacer's read (Story 21.5)", () => {
       expect(p.lastEnded).toBe(fx.queue.events(second.run_id).find((e) => e.kind === "ended")!.at);
       expect(p.stopped).toBeNull();
       // Another checkout of the same job is its own pacing.
-      expect(fx.queue.pacing("j", mkdtempSync(join(tmpdir(), "tk-sup-other-co-"))).adoptable).toEqual([]);
+      expect(fx.queue.pacing("j", tempDir("tk-sup-other-co-")).adoptable).toEqual([]);
     } finally { fx.queue.close(); }
   });
 
@@ -1461,7 +1462,7 @@ describe("Story 27.5: the pacer, the worker record, the native start time, servi
     expect(fx.queue.serviceEvents("cert-renewed")).toHaveLength(1);
     expect(count(fx.queue, "events")).toBe(0);
     fx.queue.close();
-    const again = new Queue(fx.db);
+    const again = track(new Queue(fx.db));
     try { expect(again.serviceEvents()).toHaveLength(2); } finally { again.close(); }
   });
 });
@@ -1469,7 +1470,7 @@ describe("Story 27.5: the pacer, the worker record, the native start time, servi
 describe("Story 27.5: the certificate renews itself (DW-21)", () => {
   const notAfter30 = Date.parse("2026-11-15T08:19:16Z");
   function certFile(pem: string): string {
-    const p = join(mkdtempSync(join(tmpdir(), "tk-sup-cert-")), "cert.pem");
+    const p = join(tempDir("tk-sup-cert-"), "cert.pem");
     writeFileSync(p, pem);
     return p;
   }
@@ -1557,7 +1558,7 @@ describe("Story 27.5: the certificate renews itself (DW-21)", () => {
 describe("Story 27.5 (P8): serve's certificate watcher", () => {
   const notAfter30 = Date.parse("2026-11-15T08:19:16Z");
   const tlsEnv = () => {
-    const dir = mkdtempSync(join(tmpdir(), "tk-sup-certwatch-"));
+    const dir = tempDir("tk-sup-certwatch-");
     writeFileSync(join(dir, "cert.pem"), CERT_30D);
     return { TK_SUPERVISOR_TLS_CERT: join(dir, "cert.pem"), TK_SUPERVISOR_TLS_KEY: join(dir, "key.pem"), TK_SUPERVISOR_TLS_NAME: "box.tailnet.ts.net" };
   };
@@ -1610,7 +1611,7 @@ describe("Story 28.5: one checkout lock for a nested project and its repository"
   async function nestedFixture() {
     const repo = gitRepo({ "apps/sup/.tk-studio/config.yaml": "project_id: sup\n" });
     const nested = join(repo.checkout, "apps", "sup");
-    const queue = new Queue(join(mkdtempSync(join(tmpdir(), "tk-sup-queue-")), "q.db"), fakeProbes(new Set([A.pid, B.pid])).probes);
+    const queue = track(new Queue(join(tempDir("tk-sup-queue-"), "q.db"), fakeProbes(new Set([A.pid, B.pid])).probes));
     const enqueue = async (jobId: string, root: string, owner: Owner | null = null) =>
       queue.enqueue({ jobId, root, projectId: "p", target: "skill", definition: { id: jobId, trigger: "one-shot", target: { skill: "tk-studio-activate" } }, owner,
         ...(await resolveCheckout(root)) }).run;
@@ -1631,7 +1632,7 @@ describe("Story 28.5: one checkout lock for a nested project and its repository"
   });
 
   test("AC1: a root not inside a git checkout keys by itself, prefix \"\"; a failed git read never refuses (keys by the root)", async () => {
-    const outside = mkdtempSync(join(tmpdir(), "tk-sup-nogit-"));
+    const outside = tempDir("tk-sup-nogit-");
     expect(await resolveCheckout(outside)).toEqual({ lockCheckout: checkoutKey(outside), prefix: "" });
     const gone = join(outside, "missing");
     expect(await resolveCheckout(gone)).toEqual({ lockCheckout: checkoutKey(gone), prefix: "" });
@@ -1665,7 +1666,7 @@ describe("Story 28.5: one checkout lock for a nested project and its repository"
     const fx = await nestedFixture();
     const a = await fx.enqueue("job-a", fx.nested, A);
     expect((await fx.queue.claim(a.run_id, A)).claimed).toBe(true);
-    const env = { ...process.env, TK_STUDIO_HOME: mkdtempSync(join(tmpdir(), "tk-sup-page-home-")) };
+    const env = { ...process.env, TK_STUDIO_HOME: tempDir("tk-sup-page-home-") };
     const data = await gatherPage({ queue: fx.queue, token: "t0k", env, registry: async () => ({}), ledger: { user: "u", machine: "m" } });
     expect(data.locks).toEqual([expect.objectContaining({ root: fx.nested, checkout: checkoutKey(fx.repo.checkout), run_id: a.run_id })]);
     const html = renderPage(data);
@@ -1682,10 +1683,10 @@ describe("Story 28.5: one checkout lock for a nested project and its repository"
     const a = await fx.enqueue("job-a", fx.nested, A);
     expect((await fx.queue.claim(a.run_id, A)).claimed).toBe(true);
     // As `handToEngine` writes it after Story 28.5: the lock's `root` is the served root inside the worktree.
-    const served = join(mkdtempSync(join(tmpdir(), "tk-sup-work-")), "worktrees", "p", a.run_id, "apps", "sup");
+    const served = join(tempDir("tk-sup-work-"), "worktrees", "p", a.run_id, "apps", "sup");
     (fx.queue as any).db.query(`UPDATE locks SET kind = 'engine', root = ?, engine_run_id = 'E1', owner_pid = NULL, owner_host = NULL, owner_nonce = NULL, owner_start = NULL WHERE run_id = ?`).run(served, a.run_id);
     expect(fx.queue.locks()).toEqual([expect.objectContaining({ kind: "engine", root: served, run_id: a.run_id })]);
-    const env = { ...process.env, TK_STUDIO_HOME: mkdtempSync(join(tmpdir(), "tk-sup-page-home-")) };
+    const env = { ...process.env, TK_STUDIO_HOME: tempDir("tk-sup-page-home-") };
     const data = await gatherPage({ queue: fx.queue, token: "t0k", env, registry: async () => ({}), ledger: { user: "u", machine: "m" } });
     expect(data.locks).toEqual([expect.objectContaining({ kind: "engine", root: fx.nested, checkout: checkoutKey(fx.repo.checkout), run_id: a.run_id, kept: "handed to bmad-loop engine E1" })]);
     const html = renderPage(data);
@@ -1729,12 +1730,12 @@ describe("Story 28.5: one checkout lock for a nested project and its repository"
   });
 
   test("migration: a queue file from before the lock key gains the two run columns", () => {
-    const path = join(mkdtempSync(join(tmpdir(), "tk-sup-qmig-")), "q.db");
-    new Queue(path).close();
+    const path = join(tempDir("tk-sup-qmig-"), "q.db");
+    track(new Queue(path)).close();
     const raw = new Database(path);
     raw.exec("DROP TRIGGER IF EXISTS runs_terminal_immutable; ALTER TABLE runs DROP COLUMN lock_checkout; ALTER TABLE runs DROP COLUMN prefix;");
     raw.close();
-    const q = new Queue(path);
+    const q = track(new Queue(path));
     const cols = (q.db.query("PRAGMA table_info(runs)").all() as { name: string }[]).map((c) => c.name);
     expect(cols).toContain("lock_checkout");
     expect(cols).toContain("prefix");
@@ -1782,7 +1783,7 @@ describe("Story 32.2: enqueue's opt-in stack and the per-run payload", () => {
     const fx = fixture();
     fx.queue.db.exec("DROP INDEX runs_one_live; CREATE UNIQUE INDEX runs_one_live ON runs (job_id, checkout) WHERE state IN ('queued','running','paused','external')");
     fx.queue.close();
-    const q = new Queue(fx.db, fakeProbes(new Set([A.pid])).probes);
+    const q = track(new Queue(fx.db, fakeProbes(new Set([A.pid])).probes));
     try {
       const sql = (q.db.query("SELECT sql FROM sqlite_master WHERE name = 'runs_one_live'").get() as { sql: string }).sql;
       expect(sql).toContain("'paused'");

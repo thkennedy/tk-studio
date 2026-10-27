@@ -4,7 +4,7 @@
 // close), the routes, the status page's Office section and the registry's `live_state`. The queue side is a real
 // `Queue` on a temp file driven through its own verbs.
 import { describe, expect, test } from "bun:test";
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApi } from "../src/api";
@@ -17,6 +17,7 @@ import {
 import { gatherPage, renderPage } from "../src/page";
 import { Queue, type Owner, type Probes, type QueueRun, type WorkerKill } from "../src/queue";
 import { readAgents, rebuildAgents, ROLES, rowsFor, type Route } from "../src/registry";
+import { tempDir, track } from "./tmp";
 
 const FX = join(import.meta.dir, "fixtures", "office");
 const TOKEN = "tok-29-3-office-secret";
@@ -33,15 +34,15 @@ const CUT = { dev: 19, devEnded: 21, review: 22, gate: 26 } as const;
 let engineIds = 0;
 
 function world() {
-  const dir = mkdtempSync(join(tmpdir(), "tk-sup-office-"));
+  const dir = tempDir("tk-sup-office-");
   const probes: Probes = {
     ownerAlive: (o) => o.nonce === ME.nonce,
     engineLive: async () => ({ live: false }),
     killWorker: async (pid, start): Promise<WorkerKill> => ({ pid, start, outcome: "killed" }),
   };
   const db = join(dir, "q.db");
-  const queue = new Queue(db, probes);
-  const checkout = mkdtempSync(join(tmpdir(), "tk-sup-office-checkout-"));
+  const queue = track(new Queue(db, probes));
+  const checkout = tempDir("tk-sup-office-checkout-");
   queue.replaceAgents([...rowsFor("p", null, {}, null), ...rowsFor("q", null, {}, null)], "2026-10-18T00:00:00.000Z");
   const enqueue = (jobId = "run-epic-29") =>
     queue.enqueue({ jobId, root: checkout, projectId: "p", target: "skill", definition: { id: jobId } }).run;
@@ -49,7 +50,7 @@ function world() {
   const claim = async (run: QueueRun) => {
     const c = await queue.claim(run.run_id, ME);
     if (!c.claimed) throw new Error(`not claimed: ${c.why}`);
-    const wt = mkdtempSync(join(tmpdir(), "tk-sup-office-wt-"));
+    const wt = tempDir("tk-sup-office-wt-");
     return queue.recordWorktree(run.run_id, wt, { branch: "b", base_ref: "main" });
   };
   /** A launched run: claimed, worktree cut, `launched`, the engine files written under its served root. */
@@ -275,7 +276,7 @@ describe("the mapping table (AC1)", () => {
     w.queue.markPaused(paused.run_id, { engine: { paused_story_key: S2, paused_stage: "escalation", paused_reason: "x" } });
     w.queue.note(paused.run_id, "awaiting-ruling", { story_key: S2, reason: "a ruling" });
     // A newer run of another job on another checkout of the same project: running, its dev session open.
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-office-checkout-"));
+    const root = tempDir("tk-sup-office-checkout-");
     const other = await w.claim(w.queue.enqueue({ jobId: "another-job", root, projectId: "p", target: "skill", definition: { id: "another-job" } }).run);
     w.queue.markLaunched(other.run_id, "20261018-009999-other", { end: {} });
     const runDir = join(other.worktree!, ".bmad-loop", "runs", "20261018-009999-other");
@@ -289,7 +290,7 @@ describe("the mapping table (AC1)", () => {
 
   test("an engine-ended run with no queue launched (an adopted external run) is not row 10: idle, not running", async () => {
     const w = world();
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-office-checkout-"));
+    const root = tempDir("tk-sup-office-checkout-");
     const first = w.queue.enqueue({ jobId: "ext", root, projectId: "p", target: "skill", definition: { id: "ext" } }).run;
     w.queue.end(first.run_id, "cancelled", "test");
     const ext = w.queue.recordExternal("ext", root, "ext-20261018T000000Z", "running")!;
@@ -886,7 +887,7 @@ describe("the \"!\" follows blocked_issue (Story 31.5, contract 0.1.26 additive)
 
   test("Story 32.3: an open engagement item puts the \"!\" on the planner's desk only, with no run (the served root)", () => {
     const w = world();
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-office-eng-inbox-"));
+    const root = tempDir("tk-sup-office-eng-inbox-");
     engagementInbox(root, "open");
     const v = projectOffice(w.queue, { roots: () => ({ p: root }) });
     const roles = byRole(v);
@@ -916,7 +917,7 @@ describe("the \"!\" follows blocked_issue (Story 31.5, contract 0.1.26 additive)
 
   test("Story 32.3: the planner's \"!\" appearing is one office.agent delta for the planner", () => {
     const w = world();
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-office-eng-inbox-"));
+    const root = tempDir("tk-sup-office-eng-inbox-");
     let t = 0;
     const hub = new OfficeHub({ queue: w.queue, now: () => t, graceMs: 20_000, roots: () => ({ p: root }) });
     expect(hub.snapshot().agents.find((a) => a.agent_id === "p/planner")!.blocked_issue).toBeNull();
@@ -928,7 +929,7 @@ describe("the \"!\" follows blocked_issue (Story 31.5, contract 0.1.26 additive)
   });
 
   test("readInbox: the file's generated_at and items as written; missing or malformed is empty, never an error", () => {
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-inbox-"));
+    const root = tempDir("tk-sup-inbox-");
     expect(readInbox(root)).toEqual({ generated_at: null, items: [] });
     mkdirSync(join(root, "_bmad-output", "tracking"), { recursive: true });
     writeFileSync(join(root, INBOX_REL), "{not json");
@@ -1028,7 +1029,7 @@ describe("the snapshot extras (Story 30.6, contract 0.1.25 additive)", () => {
     // A second, ended run: the counts hold more than the live set.
     const ended = w.enqueue("nightly");
     w.queue.end(ended.run_id, "cancelled", "not wanted");
-    const store = mkdtempSync(join(tmpdir(), "tk-sup-office-store-"));
+    const store = tempDir("tk-sup-office-store-");
     if (o.ledger !== null) {
       mkdirSync(join(store, "measurements"), { recursive: true });
       writeFileSync(join(store, "measurements", "u-m.jsonl"), (o.ledger ?? []).join("\n") + "\n");
@@ -1130,7 +1131,7 @@ describe("the status page's Office section (AC3)", () => {
   test("a run without the project's agents names the run holding them; none at all keeps the plain note", async () => {
     const w = world();
     const older = await w.launch({ lines: CUT.dev });
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-office-checkout-"));
+    const root = tempDir("tk-sup-office-checkout-");
     const newer = await w.claim(w.queue.enqueue({ jobId: "another-job", root, projectId: "p", target: "skill", definition: { id: "another-job" } }).run);
     w.queue.enqueue({ jobId: "x", root, projectId: "unregistered", target: "skill", definition: { id: "x" } });
     const html = renderPage(await gatherPage({ queue: w.queue, token: TOKEN, env: {}, registry: async () => ({ projects: {} }), ledger: { user: "u", machine: "m" } }));
@@ -1196,7 +1197,7 @@ describe("engagements (Story 32.1, contract 0.1.27 additive)", () => {
 
   test("the snapshot carries engagements[] {id, project, state, title, needs_you} from injected roots, newest first; needs_you per state", () => {
     const w = world();
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-office-eng-"));
+    const root = tempDir("tk-sup-office-eng-");
     const states: EngagementState[] = ["intake", "awaiting-answers", "scoping", "quoted", "approved", "in-progress", "delivered", "paused", "failed", "partial", "cancelled"];
     states.forEach((s, i) => put(root, `ENG-${String(i + 1).padStart(3, "0")}`, s));
     put(root, "ENG-012", "intake", "  \n" + "x".repeat(90));
@@ -1223,7 +1224,7 @@ describe("engagements (Story 32.1, contract 0.1.27 additive)", () => {
   test("an injected (registry) root wins over the newest queue run's root: the office reads where the routes and the board write", () => {
     const w = world();
     w.enqueue();
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-office-eng-"));
+    const root = tempDir("tk-sup-office-eng-");
     put(w.checkout, "ENG-001", "quoted", "In the run's checkout");
     put(root, "ENG-001", "intake", "In the registry's root");
     put(root, "ENG-002", "scoping", "Only in the registry's root");
@@ -1236,7 +1237,7 @@ describe("engagements (Story 32.1, contract 0.1.27 additive)", () => {
 
   test("a malformed record is skipped and named root-relative in problems[]", () => {
     const w = world();
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-office-eng-"));
+    const root = tempDir("tk-sup-office-eng-");
     put(root, "ENG-001", "intake");
     mkdirSync(join(root, ENG, "ENG-002"), { recursive: true });
     writeFileSync(join(root, ENG, "ENG-002", "engagement.yaml"), "shape_version: 3\n");
@@ -1249,7 +1250,7 @@ describe("engagements (Story 32.1, contract 0.1.27 additive)", () => {
 
   test("office.engagement on create (from null), on each state change (from), on removal (state null); none on an unchanged refresh; since() replays", () => {
     const w = world();
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-office-eng-"));
+    const root = tempDir("tk-sup-office-eng-");
     const hub = new OfficeHub({ queue: w.queue, graceMs: 0, roots: () => ({ p: root }) });
     expect(hub.refresh()).toEqual([]);
     expect(hub.snapshot().engagements).toEqual([]);
@@ -1277,8 +1278,8 @@ describe("engagements (Story 32.1, contract 0.1.27 additive)", () => {
 
   test("an open stream's tick re-reads the registry in the background once the roots are a minute old: a project registered later shows", async () => {
     const w = world();
-    const p = mkdtempSync(join(tmpdir(), "tk-sup-office-eng-"));
-    const q = mkdtempSync(join(tmpdir(), "tk-sup-office-eng-"));
+    const p = tempDir("tk-sup-office-eng-");
+    const q = tempDir("tk-sup-office-eng-");
     put(p, "ENG-001", "intake", "In p");
     put(q, "ENG-001", "quoted", "In q", 1, "q");
     let projects: Record<string, { root: string }> = { p: { root: p } };
@@ -1309,7 +1310,7 @@ describe("engagements (Story 32.1, contract 0.1.27 additive)", () => {
 
   test("two concurrent office reads both await the first registry read: both show the registry root's engagement", async () => {
     const w = world();
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-office-eng-"));
+    const root = tempDir("tk-sup-office-eng-");
     put(root, "ENG-001", "quoted", "Approve me");
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
@@ -1349,7 +1350,7 @@ describe("engagements (Story 32.1, contract 0.1.27 additive)", () => {
 
   test("GET /office and the stream's snapshot carry engagements[] (the first office read awaits the registry's roots)", async () => {
     const w = world();
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-office-eng-"));
+    const root = tempDir("tk-sup-office-eng-");
     put(root, "ENG-001", "quoted", "Approve me");
     const handler = createApi({
       queue: w.queue, token: TOKEN, session: { secret: SECRET }, env: {}, registry: async () => ({ projects: { p: { root } } }),

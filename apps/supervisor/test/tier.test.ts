@@ -1,6 +1,5 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveWorkerOptions } from "../src/cli";
 import { jobOptions, loadSupervisorConfig, SupervisorConfigInvalid } from "../src/config";
@@ -9,6 +8,7 @@ import {
   buildSbxCommand, buildWorkerCommand, buildWorkerEnv, DenyProfileRefused, HostBypassRefused, invokeSkill, MAX_LOGIN_MISSING, maxLoginPreflight,
   parseRegQuery, SbxSandboxMissing, sbxEnvPassthrough, TierRefused, toVmPath, userEnvFromRegistry, type RunResult, type Spawner,
 } from "../src/server";
+import { tempDir } from "./tmp";
 
 type Call = { cmd: string; args: string[]; cwd?: string; env?: Record<string, string | undefined> };
 const LOGGED_IN: RunResult = { exit: 0, stderr: "", stdout: JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }) };
@@ -27,8 +27,8 @@ function fakeSpawner(auth: RunResult = LOGGED_IN, worker: RunResult = WORKER) {
 
 let root: string;
 beforeAll(() => {
-  process.env.TK_STUDIO_HOME = mkdtempSync(join(tmpdir(), "tk-sup-store-"));
-  root = mkdtempSync(join(tmpdir(), "tk-sup-tier-proj-"));
+  process.env.TK_STUDIO_HOME = tempDir("tk-sup-store-");
+  root = tempDir("tk-sup-tier-proj-");
 });
 
 describe("toVmPath: the host root as the sbx microVM mounts it", () => {
@@ -298,7 +298,7 @@ describe("invokeSkill on the sbx tier (injected spawner)", () => {
     await expect(invokeSkill(root, "tk-studio-activate", { tier: "sbx" }, spawner)).rejects.toThrow(SbxSandboxMissing);
     await expect(invokeSkill(root, "tk-studio-activate", { tier: "gpu" }, spawner)).rejects.toThrow(TierRefused);
     await expect(invokeSkill(root, "tk-studio-activate", { permission_mode: "bypassPermissions" }, spawner)).rejects.toThrow(HostBypassRefused);
-    const outside = join(mkdtempSync(join(tmpdir(), "tk-sup-outside-")), "deny.json");
+    const outside = join(tempDir("tk-sup-outside-"), "deny.json");
     writeFileSync(outside, JSON.stringify({ permissions: { deny: ["Bash"] } }));
     await expect(invokeSkill(root, "tk-studio-activate", { tier: "sbx", sandbox: "s", deny_profile: outside }, spawner))
       .rejects.toThrow(DenyProfileRefused);
@@ -319,10 +319,10 @@ describe("invokeSkill on the sbx tier (injected spawner)", () => {
   });
 
   test("vmHostRoot (the registry entry root) — not the caller's spelling of the root — gives the VM cwd, payload directory and deny-profile path", async () => {
-    const reg = mkdtempSync(join(tmpdir(), "tk-sup-reg-proj-"));
+    const reg = tempDir("tk-sup-reg-proj-");
     mkdirSync(join(reg, ".tk-studio"), { recursive: true });
     writeFileSync(join(reg, ".tk-studio", "deny.json"), JSON.stringify({ permissions: { deny: ["Bash(rm:*)"] } }));
-    const spelled = join(mkdtempSync(join(tmpdir(), "tk-sup-spelled-")), "p-link");
+    const spelled = join(tempDir("tk-sup-spelled-"), "p-link");
     try { symlinkSync(reg, spelled, "dir"); }
     catch { console.warn("symlink unavailable on this platform — skipping the caller-spelling case"); return; }
     const { calls, spawner } = fakeSpawner();
@@ -342,12 +342,12 @@ describe("invokeSkill on the sbx tier (injected spawner)", () => {
   });
 
   test("an sbx deny profile is checked on real paths: a real file inside maps; a symlink inside pointing outside is refused", () => {
-    const proj = mkdtempSync(join(tmpdir(), "tk-sup-real-proj-"));
+    const proj = tempDir("tk-sup-real-proj-");
     const inside = join(proj, "deny.json");
     writeFileSync(inside, JSON.stringify({ permissions: { deny: ["Bash(rm:*)"] } }));
     const argv = buildWorkerCommand({ prompt: "", tier: "sbx", root: proj, denyProfile: inside }).argv;
     expect(argv[argv.indexOf("--settings") + 1]).toBe(`${toVmPath(proj)}/deny.json`);
-    const outside = join(mkdtempSync(join(tmpdir(), "tk-sup-real-out-")), "deny.json");
+    const outside = join(tempDir("tk-sup-real-out-"), "deny.json");
     writeFileSync(outside, JSON.stringify({ permissions: { deny: ["Bash"] } }));
     const link = join(proj, "linked-deny.json");
     try { symlinkSync(outside, link, "file"); }

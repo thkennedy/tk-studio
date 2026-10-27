@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { finishRun, guardReason, hasTurnTokenGuard, mirror, recoverAfterTimeout, wallClockGuard, type Started, type TimeoutContext } from "../src/cli";
 import { Queue } from "../src/queue";
@@ -11,6 +10,7 @@ import {
 import {
   claudeConfigDir, locateTranscript, parseTranscript, parseTranscripts, resultCounts, transcriptCounts, TranscriptError, usageTokens,
 } from "../src/transcript";
+import { tempDir, track } from "./tmp";
 
 // ---------------------------------------------------------------- AC1: the process-tree kill
 
@@ -25,7 +25,7 @@ function alive(pid: number): boolean {
 
 describe.skipIf(process.platform === "win32")("wall-clock guard trip kills the whole POSIX process tree (DW-1)", () => {
   test("a worker that spawned a grandchild: both are gone after the trip; the error still reads `timed out`", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "tk-sup-tree-"));
+    const dir = tempDir("tk-sup-tree-");
     const pidFile = join(dir, "grandchild.pid");
     // The parent shell backgrounds a grandchild `sleep`, records its pid, then waits on it.
     const run = runProcess("sh", ["-c", `sleep 30 & echo $! > '${pidFile}'; wait`], { timeoutS: 1 });
@@ -43,7 +43,7 @@ describe.skipIf(process.platform === "win32")("wall-clock guard trip kills the w
 
 describe.skipIf(process.platform !== "win32")("wall-clock guard trip kills the whole win32 process tree (taskkill /F /T; DW-5)", () => {
   test("a worker that spawned a grandchild: both are gone after the trip; the error still reads `timed out`", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "tk-sup-tree-"));
+    const dir = tempDir("tk-sup-tree-");
     const pidFile = join(dir, "pids.json");
     // The worker (bun) starts a grandchild (bun) that idles, records both pids, then idles itself.
     const worker = join(dir, "worker.js");
@@ -92,7 +92,7 @@ const started = (guards: Record<string, number>, extra: Partial<Started> = {}): 
 
 /** A transcript for `sessionId` under a fresh config dir, pointed at by CLAUDE_CONFIG_DIR while `fn` runs. */
 async function withTranscript<T>(sessionId: string | null, lines: unknown[], fn: () => Promise<T>): Promise<T> {
-  const cfg = mkdtempSync(join(tmpdir(), "tk-sup-claude-cfg-"));
+  const cfg = tempDir("tk-sup-claude-cfg-");
   if (sessionId) {
     mkdirSync(join(cfg, "projects", "some-slug"), { recursive: true });
     writeFileSync(join(cfg, "projects", "some-slug", `${sessionId}.jsonl`), lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
@@ -257,7 +257,7 @@ describe("transcript: turns and tokens", () => {
   });
 
   test("locateTranscript: exactly one projects/*/<session>.jsonl; none, several or a path-like id → named", () => {
-    const cfg = mkdtempSync(join(tmpdir(), "tk-sup-loc-"));
+    const cfg = tempDir("tk-sup-loc-");
     expect(() => locateTranscript("s1", cfg)).toThrow(TranscriptError);
     mkdirSync(join(cfg, "projects", "a"), { recursive: true });
     writeFileSync(join(cfg, "projects", "a", "s1.jsonl"), "");
@@ -270,7 +270,7 @@ describe("transcript: turns and tokens", () => {
 
   /** A config dir holding the parent transcript and, optionally, `<session>/subagents/` files. */
   const sessionTree = (sessionId: string, parent: unknown[], subagents?: Record<string, unknown[]>) => {
-    const cfg = mkdtempSync(join(tmpdir(), "tk-sup-subagents-"));
+    const cfg = tempDir("tk-sup-subagents-");
     const slug = join(cfg, "projects", "slug");
     mkdirSync(slug, { recursive: true });
     const jsonl = (lines: unknown[]) => lines.map((l) => JSON.stringify(l)).join("\n") + "\n";
@@ -334,7 +334,7 @@ describe("sbx: the in-VM wall-clock guard rides the argv (no shell)", () => {
   });
 
   test("invokeSkill passes its timeout (the guard) to the in-VM `timeout`", async () => {
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-sbx-guard-"));
+    const root = tempDir("tk-sup-sbx-guard-");
     const calls: string[][] = [];
     const spawner: Spawner = async (_cmd, args): Promise<RunResult> => {
       calls.push(args);
@@ -369,9 +369,9 @@ describe("core run: the verb backstop trips → studio run cancelled, queue run 
     expect(summary.reason).toContain("studio run cancelled");
 
     // Mirrored into the queue: partial, the guard in reason and in the ended event.
-    const dir = mkdtempSync(join(tmpdir(), "tk-sup-guard-q-"));
-    const checkout = mkdtempSync(join(tmpdir(), "tk-sup-guard-co-"));
-    const q = new Queue(join(dir, "q.db"), { ownerAlive: () => true, engineLive: async () => ({ live: false }) });
+    const dir = tempDir("tk-sup-guard-q-");
+    const checkout = tempDir("tk-sup-guard-co-");
+    const q = track(new Queue(join(dir, "q.db"), { ownerAlive: () => true, engineLive: async () => ({ live: false }) }));
     try {
       const defn = { id: "c", trigger: "loop", target: { core: "x" }, guards: { max_wall_clock_seconds: 600 }, stop: { max_runs: 5 } };
       const { run } = q.enqueue({ jobId: "c", root: checkout, target: "core", definition: defn });
@@ -404,9 +404,9 @@ describe("core run: the verb backstop trips → studio run cancelled, queue run 
     expect(summary).toMatchObject({ ok: false, target: "skill", state: "partial", guards_tripped: [{ guard: "max_wall_clock_seconds", value: 600 }] });
     expect(summary.reason).toStartWith("guard: max_wall_clock_seconds (600s)");
 
-    const dir = mkdtempSync(join(tmpdir(), "tk-sup-guard-q-"));
-    const checkout = mkdtempSync(join(tmpdir(), "tk-sup-guard-co-"));
-    const q = new Queue(join(dir, "q.db"), { ownerAlive: () => true, engineLive: async () => ({ live: false }) });
+    const dir = tempDir("tk-sup-guard-q-");
+    const checkout = tempDir("tk-sup-guard-co-");
+    const q = track(new Queue(join(dir, "q.db"), { ownerAlive: () => true, engineLive: async () => ({ live: false }) }));
     try {
       const defn = { id: "s", trigger: "one-shot", target: { skill: "tk-studio-activate" }, guards: { max_wall_clock_seconds: 600 } };
       const { run } = q.enqueue({ jobId: "s", root: checkout, target: "skill", definition: defn });
@@ -427,8 +427,8 @@ describe("a backstop trip records the studio's real terminal state", () => {
       throw new Error(`unexpected verb ${args[0]}`);
     };
   };
-  const queueFixture = () => new Queue(join(mkdtempSync(join(tmpdir(), "tk-sup-studio-state-q-")), "q.db"),
-    { ownerAlive: () => true, engineLive: async () => ({ live: false }) });
+  const queueFixture = () => track(new Queue(join(tempDir("tk-sup-studio-state-q-"), "q.db"),
+    { ownerAlive: () => true, engineLive: async () => ({ live: false }) }));
 
   test("core + stop.on_status [partial], cancelled by the backstop: the queue run ends partial, no `stopped` event, studio_outcome cancelled", async () => {
     const ctx: TimeoutContext = { root: "proj", projectId: "p", target: "core", verb: "wake", timeoutS: 720, jobGuardS: 600, before: new Set() };
@@ -437,7 +437,7 @@ describe("a backstop trip records the studio's real terminal state", () => {
     const q = queueFixture();
     try {
       const defn = { id: "c", trigger: "loop", target: { core: "x" }, guards: { max_wall_clock_seconds: 600 }, stop: { on_status: ["partial"] } };
-      const { run } = q.enqueue({ jobId: "c", root: mkdtempSync(join(tmpdir(), "tk-sup-studio-state-co-")), target: "core", definition: defn });
+      const { run } = q.enqueue({ jobId: "c", root: tempDir("tk-sup-studio-state-co-"), target: "core", definition: defn });
       await mirror(q, run.run_id, { jobId: "c", defn }, summary);
       expect(q.get(run.run_id)).toMatchObject({ state: "partial" });
       expect(q.get(run.run_id)!.reason).toStartWith("guard: max_wall_clock_seconds (600s)");
@@ -460,7 +460,7 @@ describe("a backstop trip records the studio's real terminal state", () => {
     const q = queueFixture();
     try {
       const defn = { id: "s", trigger: "loop", target: { skill: "tk-studio-activate" }, guards: { max_wall_clock_seconds: 600 }, stop: { on_status: ["partial"] } };
-      const { run } = q.enqueue({ jobId: "s", root: mkdtempSync(join(tmpdir(), "tk-sup-studio-state-co-")), target: "skill", definition: defn });
+      const { run } = q.enqueue({ jobId: "s", root: tempDir("tk-sup-studio-state-co-"), target: "skill", definition: defn });
       await mirror(q, run.run_id, { jobId: "s", defn }, summary);
       const events = q.events(run.run_id);
       expect(events.find((e) => e.kind === "ended")!.detail).toMatchObject({ studio_outcome: { state: "partial" } });
@@ -491,7 +491,7 @@ describe.skipIf(process.platform === "win32")("a signal to the supervisor kills 
   // Only the signals this test process does not itself ignore (a child inherits an ignored one, e.g. under `nohup`).
   const handled = signalsToHandle(readProcStatus());
   test.each((["SIGTERM", "SIGHUP", "SIGINT"] as const).filter((sig) => handled.includes(sig)))("%s: the worker and its grandchild are gone; the supervisor dies of the signal", async (sig) => {
-    const dir = mkdtempSync(join(tmpdir(), "tk-sup-sig-"));
+    const dir = tempDir("tk-sup-sig-");
     const script = join(dir, "supervisor.ts");
     writeFileSync(script, [
       `import { runProcess } from ${JSON.stringify(SERVER)};`,
@@ -525,7 +525,7 @@ describe.skipIf(process.platform === "win32")("a signal to the supervisor kills 
   // supervisor as soon as it has written its pids, so the signal lands inside that gap: the handlers
   // must already be installed (run 20260928-191230-73a0 paused on this race, 2026-09-28).
   test.skipIf(!handled.includes("SIGTERM"))("SIGTERM from the child as it starts, while the spawn is still returning: its group is killed all the same", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "tk-sup-sig-"));
+    const dir = tempDir("tk-sup-sig-");
     const script = join(dir, "supervisor.ts");
     writeFileSync(script, [
       `import { runProcess } from ${JSON.stringify(SERVER)};`,
@@ -570,7 +570,7 @@ describe("signalsToHandle: a signal inherited as ignored is never handled", () =
 describe.skipIf(process.platform === "win32")("a supervisor started with SIGHUP ignored stays immune to SIGHUP", () => {
   const SERVER = join(import.meta.dir, "..", "src", "server.ts");
   test("SIGHUP after a tracked child ran, and during a tracked child: the supervisor and its child both survive", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "tk-sup-nohup-"));
+    const dir = tempDir("tk-sup-nohup-");
     const script = join(dir, "supervisor.ts");
     writeFileSync(script, [
       `import { runProcess } from ${JSON.stringify(SERVER)};`,
@@ -683,7 +683,7 @@ describe("finishRun: on sbx, the in-VM `timeout` exit (124/137) with no status b
   });
 
   test("invokeSkill reports worker_elapsed_s: the worker's own run time, the auth preflight's excluded", async () => {
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-sbx-elapsed-"));
+    const root = tempDir("tk-sup-sbx-elapsed-");
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     const spawner: Spawner = async (_cmd, args): Promise<RunResult> => {
       if (args.includes("auth")) { await sleep(400); return { exit: 0, stderr: "", stdout: JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }) }; }
@@ -743,9 +743,9 @@ describe("a host skill wall-clock trip through finishRun → mirror lands in the
   test("partial, the guard in the reason and in `guards_tripped`", async () => {
     const { summary } = await drive(started({ max_wall_clock_seconds: 600 }),
       () => { throw new Error("claude timed out after 600s (process tree killed); stdout tail: "); });
-    const dir = mkdtempSync(join(tmpdir(), "tk-sup-guard-host-q-"));
-    const checkout = mkdtempSync(join(tmpdir(), "tk-sup-guard-host-co-"));
-    const q = new Queue(join(dir, "q.db"), { ownerAlive: () => true, engineLive: async () => ({ live: false }) });
+    const dir = tempDir("tk-sup-guard-host-q-");
+    const checkout = tempDir("tk-sup-guard-host-co-");
+    const q = track(new Queue(join(dir, "q.db"), { ownerAlive: () => true, engineLive: async () => ({ live: false }) }));
     try {
       const defn = started({ max_wall_clock_seconds: 600 }).defn;
       const { run } = q.enqueue({ jobId: "s", root: checkout, target: "skill", definition: defn });

@@ -6,8 +6,8 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import {
   driveResumes, finishRun, mirror, queueRecorder, recoverWithResume, RESUME_CAP, resumeCheck, restartResumer, SBX_VM_WORKER, studioOps,
@@ -24,6 +24,7 @@ import {
 import {
   ensureTranscript, sbxSessionWorkers, sbxTranscriptArgv, sbxTranscriptExists, sbxWorkerArgv, sessionWorkerPids, TranscriptError, transcriptNewCounts,
 } from "../src/transcript";
+import { tempDir, track } from "./tmp";
 
 const HOST = hostname();
 const A: Owner = { pid: 910101, host: HOST, nonce: "nonce-dead" };
@@ -41,7 +42,7 @@ let cfg: string;
 const saved: Record<string, string | undefined> = {};
 beforeEach(() => {
   for (const k of ["CLAUDE_CONFIG_DIR", "TK_SUPERVISOR_TRANSCRIPT_BACKUP"]) saved[k] = process.env[k];
-  cfg = mkdtempSync(join(tmpdir(), "tk-sup-resume-cfg-"));
+  cfg = tempDir("tk-sup-resume-cfg-");
   process.env.CLAUDE_CONFIG_DIR = cfg;
   delete process.env.TK_SUPERVISOR_TRANSCRIPT_BACKUP;
 });
@@ -80,8 +81,8 @@ async function orphan(o: {
   engineLive?: Probes["engineLive"];
 } = {}) {
   const target = o.target ?? "skill";
-  const dir = mkdtempSync(join(tmpdir(), "tk-sup-resume-q-"));
-  const checkout = mkdtempSync(join(tmpdir(), "tk-sup-resume-co-"));
+  const dir = tempDir("tk-sup-resume-q-");
+  const checkout = tempDir("tk-sup-resume-co-");
   const alive = new Set([A.pid, B.pid]);
   const kills: { pid: number; start: string | null; lockOwner: string | null; state: string }[] = [];
   let queue!: Queue;
@@ -96,7 +97,7 @@ async function orphan(o: {
     }),
     ...(o.probeWorker ? { probeWorker: o.probeWorker } : {}), ...(o.now ? { now: o.now } : {}),
   };
-  queue = new Queue(join(dir, "q.db"), probes);
+  queue = track(new Queue(join(dir, "q.db"), probes));
   const defn = { id: "j", trigger: "one-shot", target: target === "core" ? { core: "c" } : { skill: "tk-studio-activate" }, guards: GUARDS, ...o.defn };
   const r = queue.enqueue({ jobId: "j", root: checkout, projectId: "p", target, definition: defn, owner: A, tier: o.tier ?? "host", sandbox: o.sandbox }).run;
   await queue.claim(r.run_id, A);
@@ -242,7 +243,7 @@ describe("restart: a dead supervisor's skill run resumes or ends partial naming 
 
   test("transcript GC'd, one copy in the backup → restored into its slug (+ subagents), then resumed", async () => {
     const fx = await orphan();
-    const backup = mkdtempSync(join(tmpdir(), "tk-sup-resume-backup-"));
+    const backup = tempDir("tk-sup-resume-backup-");
     writeTranscript(backup, SID, ["m1"], "the-slug");
     mkdirSync(join(backup, "the-slug", SID, "subagents"), { recursive: true });
     writeFileSync(join(backup, "the-slug", SID, "subagents", "agent-1.jsonl"), line("s1") + "\n");
@@ -503,7 +504,7 @@ describe("resumeCheck order and the pieces it rests on", () => {
       opts.onSpawn?.(4242);
       return { exit: 0, stderr: "", stdout: JSON.stringify({ result: JSON.stringify(BLOCK), session_id: SID }) };
     };
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-resume-inv-"));
+    const root = tempDir("tk-sup-resume-inv-");
     await invokeSkill(root, "tk-studio-activate", { timeout_s: 60 }, spawner, {
       sessionId: SID, resume: true, beforeSpawn: () => order.push("beforeSpawn"), onSpawn: (pid) => order.push(`onSpawn ${pid}`),
     });
@@ -516,13 +517,13 @@ describe("resumeCheck order and the pieces it rests on", () => {
   });
 
   test("ensureTranscript: present → found; missing + one backup copy → restored; none, unset, or ambiguous → `transcript missing: <sid>`", () => {
-    const backup = mkdtempSync(join(tmpdir(), "tk-sup-resume-bk-"));
+    const backup = tempDir("tk-sup-resume-bk-");
     expect(() => ensureTranscript(SID, cfg, undefined)).toThrow(`transcript missing: ${SID}`);
     expect(() => ensureTranscript(SID, cfg, backup)).toThrow(/transcript missing: .*no copy/);
     writeTranscript(backup, SID, ["m1"], "slug-a");
     expect(ensureTranscript(SID, cfg, backup)).toMatchObject({ restored: true, path: join(cfg, "projects", "slug-a", `${SID}.jsonl`) });
     expect(ensureTranscript(SID, cfg, backup)).toMatchObject({ restored: false });
-    const cfg2 = mkdtempSync(join(tmpdir(), "tk-sup-resume-cfg2-"));
+    const cfg2 = tempDir("tk-sup-resume-cfg2-");
     cpSync(join(backup, "slug-a"), join(backup, "slug-b"), { recursive: true });
     expect(() => ensureTranscript(SID, cfg2, backup)).toThrow(/transcript missing: .*ambiguous/);
   });
@@ -737,10 +738,10 @@ describe("restart accounting: only the process that won the takeover accounts, o
     const fx = await orphan();
     writeTranscript(join(cfg, "projects"), SID, ["m1", "m2"]);
     const C: Owner = { pid: 910103, host: HOST, nonce: "nonce-other" };
-    const other = new Queue(fx.queue.path, {
+    const other = track(new Queue(fx.queue.path, {
       ownerAlive: (w) => w.pid !== A.pid, engineLive: async () => ({ live: false }),
       killWorker: async (pid, start) => ({ pid, start, outcome: "not running" }),
-    });
+    }));
     // Both resume checks reach `status` before either answers: both have passed eligibility before any takeover.
     let arrived = 0, release!: () => void;
     const barrier = new Promise<void>((r) => { release = r; });
@@ -823,7 +824,7 @@ describe("recording failures are never swallowed", () => {
       const invoke = ((root: string, skill: string, args: Record<string, unknown>, _sp: unknown, opts: Record<string, unknown>) =>
         invokeSkill(root, skill, args, spawner, opts)) as unknown as typeof invokeSkill;
       const v = verbs();
-      const root = mkdtempSync(join(tmpdir(), "tk-sup-resume-rec-"));
+      const root = tempDir("tk-sup-resume-rec-");
       const summary = await finishRun({ sessionId: SID, recorder: rec, ...started({ root }) }, v.runner, invoke);
       expect(summary).toMatchObject({ ok: false, state: "blocked", reason: `${WORKER_RECORD_FAILED}: RunTerminal: already ended` });
       expect(flag(v.of("finish")[0], "--state")).toBe("blocked");
@@ -1025,14 +1026,14 @@ describe("an sbx silent exit is never resumed beside a worker that may still run
   async function sbxRun() {
     let clock = 0;
     const hostKills: number[] = [];
-    const dir = mkdtempSync(join(tmpdir(), "tk-sup-vm-q-"));
-    const checkout = mkdtempSync(join(tmpdir(), "tk-sup-vm-co-"));
-    const queue = new Queue(join(dir, "q.db"), {
+    const dir = tempDir("tk-sup-vm-q-");
+    const checkout = tempDir("tk-sup-vm-co-");
+    const queue = track(new Queue(join(dir, "q.db"), {
       ownerAlive: () => true, engineLive: async () => ({ live: false }), now: () => clock,
       // Never a real signal: the recorded pid is the fake invoker's.
       killWorker: async (pid, start) => { hostKills.push(pid); return { pid, start, outcome: "not running" }; },
       probeWorker: () => { throw new Error("an sbx worker is decided by its deadline, not the host pid"); },
-    });
+    }));
     const r = queue.enqueue({ jobId: "j", root: checkout, projectId: "p", target: "skill", definition: UNGUARDED, owner: B, ...SBX }).run;
     await queue.claim(r.run_id, B);
     queue.markVerbStarted(r.run_id, "submit", [], { target: "skill", definition: UNGUARDED });
@@ -1141,12 +1142,12 @@ describe("recover never resumes or ends a run another recoverer took over", () =
 
   /** Two running runs of a dead supervisor X on two checkouts: R0 (listed first) and R. */
   async function twoOrphans() {
-    const dir = mkdtempSync(join(tmpdir(), "tk-sup-race-q-"));
+    const dir = tempDir("tk-sup-race-q-");
     const db = join(dir, "q.db");
-    const setup = new Queue(db, { ownerAlive: () => true, engineLive: async () => ({ live: false }) });
+    const setup = track(new Queue(db, { ownerAlive: () => true, engineLive: async () => ({ live: false }) }));
     const ids: string[] = [];
     for (const [job, studio, pid] of [["j0", STUDIO_R0, 424240], ["j1", STUDIO_R, 424241]] as const) {
-      const checkout = mkdtempSync(join(tmpdir(), "tk-sup-race-co-"));
+      const checkout = tempDir("tk-sup-race-co-");
       const defn = { id: job, trigger: "one-shot", target: { skill: "tk-studio-activate" }, guards: GUARDS };
       const r = setup.enqueue({ jobId: job, root: checkout, projectId: "p", target: "skill", definition: defn, owner: X, tier: "host" }).run;
       await setup.claim(r.run_id, X);
@@ -1157,10 +1158,10 @@ describe("recover never resumes or ends a run another recoverer took over", () =
       ids.push(r.run_id);
     }
     setup.close();
-    const open = (kill: (pid: number) => Promise<WorkerKill["outcome"]>) => new Queue(db, {
+    const open = (kill: (pid: number) => Promise<WorkerKill["outcome"]>) => track(new Queue(db, {
       ownerAlive: (o) => o.pid !== X.pid, engineLive: async () => ({ live: false }),
       killWorker: async (pid, start) => ({ pid, start, outcome: await kill(pid) }),
-    });
+    }));
     return { r0: ids[0], r: ids[1], open };
   }
   const log = () => {

@@ -3,11 +3,11 @@
 // tails clipped and redacted. Verify commands are `process.execPath` (bun) `-e` scripts: the same test
 // runs on both hosts.
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { gitUsrBin, hostVerify, isRed, pathKey, prSection, redReason, splitCommand, tail, verifyCommand, wallClockTrip, type HostVerifyRan } from "../src/hostverify";
 import { gitRepo, testGit } from "./fakes";
+import { tempDir } from "./tmp";
 
 /** `"<bun>" -e "<script>"` as one command line (the script uses single quotes only). */
 const bunCmd = (script: string) => `"${process.execPath}" -e "${script}"`;
@@ -15,7 +15,7 @@ const bunCmd = (script: string) => `"${process.execPath}" -e "${script}"`;
 /** A repo whose base (`main`) config carries `config` (none: no file), and a worktree of it. */
 function project(config?: string) {
   const repo = gitRepo(config === undefined ? {} : { ".tk-studio/config.yaml": config });
-  const wt = join(mkdtempSync(join(tmpdir(), "tk-sup-hv-wt-")), "wt");
+  const wt = join(tempDir("tk-sup-hv-wt-"), "wt");
   testGit(repo.checkout, "worktree", "add", "-q", wt, "-b", "supervisor/run-q1", "main");
   return { repo, wt, run: { root: repo.checkout, worktree: wt, base_ref: "main", tier: "sbx" as string | null } };
 }
@@ -219,7 +219,7 @@ describe("the leg runs the command in the worktree under the guard", () => {
 
 describe("hole 46: Git Bash goes first on the leg's PATH on win32", () => {
   test("a `Git\\cmd` entry on PATH with a sibling `usr\\bin\\bash.exe` is prepended and recorded (win32 only); none: PATH unchanged", async () => {
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-git-"));
+    const root = tempDir("tk-sup-git-");
     mkdirSync(join(root, "Git", "cmd"), { recursive: true });
     writeFileSync(join(root, "Git", "cmd", "git.exe"), "");
     mkdirSync(join(root, "Git", "usr", "bin"), { recursive: true });
@@ -260,7 +260,7 @@ describe("hole 46: Git Bash goes first on the leg's PATH on win32", () => {
   });
 
   test("hole 54: an env that spells the key `Path` (a console-started process on Windows) is edited in place, never given a second `PATH`", async () => {
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-git-"));
+    const root = tempDir("tk-sup-git-");
     mkdirSync(join(root, "Git", "cmd"), { recursive: true });
     mkdirSync(join(root, "Git", "usr", "bin"), { recursive: true });
     writeFileSync(join(root, "Git", "usr", "bin", "bash.exe"), "");
@@ -288,7 +288,7 @@ describe("hole 46: Git Bash goes first on the leg's PATH on win32", () => {
   });
 
   test("hole 52: a first token that is already a path, or one Git's `usr\\bin` does not hold, is spawned as written", async () => {
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-git-"));
+    const root = tempDir("tk-sup-git-");
     mkdirSync(join(root, "Git", "cmd"), { recursive: true });
     mkdirSync(join(root, "Git", "usr", "bin"), { recursive: true });
     writeFileSync(join(root, "Git", "usr", "bin", "bash.exe"), "");

@@ -1,11 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { hostname } from "node:os";
 import { mirror, runJob, type RunSummary } from "../src/cli";
 import { Queue, type JobPacing, type QueueEvent, type QueueRun } from "../src/queue";
 import { shouldWake, tickJob, type Args } from "../src/tick";
+import { tempDir, track } from "./tmp";
 
 const NOW = Date.parse("2026-09-28T12:00:00.000Z");
 const DEFN = { id: "j", trigger: "loop", cadence: { mode: "self-paced", hint_seconds: 60 }, stop: { on_status: ["partial"] } };
@@ -92,9 +91,9 @@ describe("shouldWake over the queue's runs (AC3)", () => {
 
 describe("stop.on_status: recorded when the run ends, then the pacer skips the job (AC4)", () => {
   function fixture() {
-    const dir = mkdtempSync(join(tmpdir(), "tk-sup-tick-q-"));
-    const checkout = mkdtempSync(join(tmpdir(), "tk-sup-tick-co-"));
-    const queue = new Queue(join(dir, "q.db"), { ownerAlive: () => true, engineLive: async () => ({ live: false }) });
+    const dir = tempDir("tk-sup-tick-q-");
+    const checkout = tempDir("tk-sup-tick-co-");
+    const queue = track(new Queue(join(dir, "q.db"), { ownerAlive: () => true, engineLive: async () => ({ live: false }) }));
     const defn = { ...DEFN, target: { skill: "tk-studio-activate" } };
     const drive = async (s: Partial<RunSummary>) => {
       const { run } = queue.enqueue({ jobId: "j", root: checkout, target: "skill", definition: defn });
@@ -163,9 +162,9 @@ describe("tickJob paces from the real queue (AC3, AC4)", () => {
   const ARGS: Args = { dryRun: false, projects: [], directories: [], timeoutCapS: 3600 };
   const JOB = { id: "j", definition: { ...DEFN, target: { skill: "tk-studio-activate" } } };
   function fixture(ownerAlive = () => true) {
-    const dir = mkdtempSync(join(tmpdir(), "tk-sup-tickjob-q-"));
-    const checkout = mkdtempSync(join(tmpdir(), "tk-sup-tickjob-co-"));
-    const queue = new Queue(join(dir, "q.db"), { ownerAlive, engineLive: async () => ({ live: false }) });
+    const dir = tempDir("tk-sup-tickjob-q-");
+    const checkout = tempDir("tk-sup-tickjob-co-");
+    const queue = track(new Queue(join(dir, "q.db"), { ownerAlive, engineLive: async () => ({ live: false }) }));
     const lines: string[] = [];
     const calls: { minted: boolean; run_id: string }[] = [];
     // Stands in for runJob: its first step, the queue's idempotent mint, then a studio outcome mirrored.

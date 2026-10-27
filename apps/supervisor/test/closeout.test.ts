@@ -3,8 +3,8 @@
 // the fake `sbx` (its in-VM `bmad-loop archive|resolve`), a fake `meter.py` under a temp TK_STUDIO_ROOT and a
 // fake launch worker (the engine). Never a real sandbox, engine or ledger.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { createApi } from "../src/api";
 import { closeOutOrphans, relauncher, type Started } from "../src/cli";
@@ -14,6 +14,7 @@ import { Queue, type Owner, type Probes } from "../src/queue";
 import { runProcess, toVmPath, type RunResult } from "../src/server";
 import { COPIED_RUNTIME, launchedCloseOutInput, sweepEngines } from "../src/worktree";
 import { fakeSbx, fakeStudioRoot, gitRepo, RUNTIME_GITIGNORE, testGit } from "./fakes";
+import { tempDir } from "./tmp";
 
 const SB = "claude-p";
 const E1 = "20261016-101010-ab12", E2 = "20261016-121212-cd34";
@@ -47,7 +48,7 @@ const spec = (status: string, verdict?: string) =>
  * dir, the story's spec (uncommitted: the engine's staged harvest), the run launched then paused at `stage`. */
 async function pausedRun(opts: { status?: string; verdict?: string; stage?: string; key?: string | null; tier?: "sbx" | "host"; spec?: boolean; paused?: boolean } = {}) {
   const repo = gitRepo();
-  const work = mkdtempSync(join(tmpdir(), "tk-sup-co-work-"));
+  const work = tempDir("tk-sup-co-work-");
   const queue = new Queue(":memory:", { ownerAlive: (o) => o.nonce === me.nonce, engineLive: async () => ({ live: false }) });
   const tier = opts.tier ?? "sbx";
   const run0 = queue.enqueue({
@@ -148,7 +149,7 @@ describe("the paused story's spec and verdict", () => {
   test("frontmatter: only top-level keys, quotes stripped; findSpec: implementation-artifacts first, else one stories match", () => {
     expect(frontmatter(spec("done", "no-impact"))).toMatchObject({ status: "done", reconcile_verdict: "no-impact" });
     expect(frontmatter("no frontmatter\nstatus: done\n")).toEqual({});
-    const wt = mkdtempSync(join(tmpdir(), "tk-sup-co-spec-"));
+    const wt = tempDir("tk-sup-co-spec-");
     expect(findSpec(wt, KEY)).toBeUndefined();
     mkdirSync(join(wt, "_bmad-output", "specs", "a", "stories"), { recursive: true });
     writeFileSync(join(wt, "_bmad-output", "specs", "a", "stories", `${KEY}-spec.md`), spec("done"));
@@ -587,7 +588,7 @@ describe("Story 31.5: a bound project's paused run is blocked on Jira once per (
   const answer = (out: unknown, exit = 0) => async (): Promise<RunResult> => ({ exit, stdout: JSON.stringify(out), stderr: "" });
 
   test("jiraBound reads planning.jira.project_key from the tracked config only", () => {
-    const root = mkdtempSync(join(tmpdir(), "tk-sup-bound-"));
+    const root = tempDir("tk-sup-bound-");
     expect(jiraBound(root)).toBe(false);
     bind(root, "planning:\n  backend: bmad-files\n");
     expect(jiraBound(root)).toBe(false);

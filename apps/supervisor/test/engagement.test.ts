@@ -1,10 +1,9 @@
 // Story 32.1: the engagement record and its states — the one transition table row by row (every `(state, verb)` cell,
 // every event row, every refusal), the typed payloads, the title, the id minted from the plan counter (and read back
 // by `plansync.py`'s own reader), the record files and the chat pointer. Pure functions first; the files in temp roots.
-import { afterAll, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { load as loadYaml } from "js-yaml";
 import {
@@ -12,12 +11,11 @@ import {
   EngagementCounterInvalid, engagementPath, EngagementRecordInvalid, INPUT_VERBS, listEngagements, mintEngagementId, needsYou, newEngagement,
   readEngagement, TERMINAL_STATES, titleOf, TRANSITIONS, writeEngagement, type Engagement, type EngagementState, type InputVerb,
 } from "../src/engagement";
+import { tempDir } from "./tmp";
 
 const AT = "2026-10-25T04:00:00.000Z";
 const LIB = resolve(import.meta.dir, "..", "..", "..", "plugins", "tk-studio", "lib");
-const made: string[] = [];
-const tempRoot = () => { const d = mkdtempSync(join(tmpdir(), "tk-sup-engagement-")); made.push(d); return d; };
-afterAll(() => { for (const d of made) rmSync(d, { recursive: true, force: true }); });
+const tempRoot = () => tempDir("tk-sup-engagement-"); // test/tmp.ts removes the folders
 
 const QUESTIONS = [
   { id: "q1", text: "Which database?", options: ["sqlite", "postgres"], default: "sqlite", impact: "storage" },

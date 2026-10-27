@@ -24,6 +24,12 @@ field of ``~/.claude/.credentials.json``, never a token), each through the
 runner, all of them together bounded by one ``SANDBOX_LOGIN_BUDGET``
 (``sandbox_login.py``).
 
+The supervisor-temp check (Story 33.4, hole 64) counts the ``tk-sup-*``
+folders directly under the user's temp folder, read the way bun's
+``os.tmpdir()`` that made them does (on Windows ``TEMP``, then ``TMP``, then
+``%SystemRoot%\\temp``; elsewhere ``TMPDIR``, then ``/tmp``), and only warns:
+doctor never removes them.
+
 Doctor's own status is ``complete`` whatever the checks find; ``reason``
 names every failing check. Every non-``pass`` check carries a ``fix``.
 """
@@ -34,6 +40,7 @@ import re
 import shutil
 import ssl
 import subprocess
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -714,6 +721,51 @@ def check_supervisor_log(ctx, fields: dict) -> dict:
                   f"({age + ' ago' if age else 'age unknown'})", FIX_START)
 
 
+# --- the supervisor's leaked test temp folders (Story 33.4, hole 64) --------
+
+SUPERVISOR_TEMP_PREFIX = "tk-sup-"
+SUPERVISOR_TEMP_LIMIT = 500
+FIX_SUPERVISOR_TEMP = (
+    "close every bun test, then remove them: PowerShell Get-ChildItem "
+    "$env:TEMP -Directory -Filter 'tk-sup-*' | Remove-Item -Recurse -Force "
+    "(Linux: find \"${TMPDIR:-/tmp}\" -maxdepth 1 -name 'tk-sup-*' "
+    "-exec rm -rf {} +)")
+
+
+def _temp_folder(ctx) -> Path:
+    """The folder bun's ``os.tmpdir()`` makes the ``tk-sup-*`` folders in (not
+    ``tempfile.gettempdir()``'s order: a stray ``TMPDIR`` on Windows is not it)."""
+    for var in (("TEMP", "TMP") if ctx.plat.windows else ("TMPDIR",)):
+        value = ctx.env.get(var)
+        if value:
+            return Path(value)
+    if not ctx.plat.windows:
+        return Path("/tmp")
+    root = ctx.env.get("SystemRoot") or ctx.env.get("windir")
+    return Path(root.rstrip("\\/") + "\\temp") if root else Path(tempfile.gettempdir())
+
+
+def check_supervisor_temp(ctx) -> dict:
+    """``warn`` above 500 ``tk-sup-*`` folders in the temp folder, else
+    ``pass``; ``skipped`` when it cannot be read. Never ``fail``; never
+    deletes."""
+    name = "supervisor-temp"
+    temp = _temp_folder(ctx)
+    try:
+        with os.scandir(temp) as entries:
+            count = sum(1 for e in entries
+                        if e.name.startswith(SUPERVISOR_TEMP_PREFIX)
+                        and e.is_dir(follow_symlinks=False))
+    except OSError as exc:
+        return _check(name, SKIPPED, f"{temp} unreadable: {exc}",
+                      "check the temp folder (TMP/TEMP/TMPDIR) exists and "
+                      "is readable")
+    detail = f"{count} tk-sup-* folders in {temp}"
+    if count > SUPERVISOR_TEMP_LIMIT:
+        return _check(name, WARN, detail, FIX_SUPERVISOR_TEMP)
+    return _check(name, PASS, detail)
+
+
 # --- the cut-over (Story 28.4): root, registry, trust, Startup shortcut -----
 
 TARGET = "C:\\GitHub\\tk-studio\\apps\\supervisor"     # runbook §4.3
@@ -1135,6 +1187,7 @@ def run_doctor(ctx, *, roster: str | None, channel: str, fetch,
         supervisor,
         *check_cut_over(ctx, fields, supervisor),
         check_supervisor_log(ctx, fields),
+        check_supervisor_temp(ctx),      # Story 33.4: hole 64
         check_stale_slots(ctx),
         check_studio_web(ctx, loaded, channel),
         check_cli_helper(ctx),
