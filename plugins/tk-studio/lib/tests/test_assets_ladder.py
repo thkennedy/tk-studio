@@ -129,7 +129,7 @@ def square(lo: int, hi: int, size: int = assets.RENDER_SIZE) -> bytes:
 
 GREY_RENDER = square(32, 96)          # the greybox's silhouette (4096 px)
 GOOD_RENDER = square(30, 98)          # covers it
-SMALL_RENDER = square(60, 70)         # coverage 100/4096: below 0.6
+SMALL_RENDER = square(60, 70)         # coverage 100/4096: below 0.25
 BLANK_RENDER = square(0, 0)           # nothing: fill 0
 
 
@@ -557,7 +557,7 @@ class MaskTests(unittest.TestCase):
         self.assertIsNone(assets.alpha_mask(sixteen))
 
     def test_visual_gate_coverage_and_fill(self):
-        self.assertEqual(assets.VISUAL_COVERAGE_MIN, 0.6)
+        self.assertEqual(assets.VISUAL_COVERAGE_MIN, 0.25)  # retuned on the box, 2026-10-27
         self.assertEqual(assets.VISUAL_FILL_MIN, 0.005)
         reasons, metrics = assets.visual_gate(GOOD_RENDER, GREY_RENDER)
         self.assertEqual(reasons, [])
@@ -812,7 +812,7 @@ class MatchTests(Base):
 
     def test_coverage_failure_keeps_the_placeholder(self):
         result, _ = self.gate_fails(LadderBlender(render=SMALL_RENDER), "coverage")
-        self.assertLess(result["entries"][0]["coverage"], 0.6)
+        self.assertLess(result["entries"][0]["coverage"], 0.25)
 
     def test_blank_render_failure_keeps_the_placeholder(self):
         self.gate_fails(LadderBlender(render=BLANK_RENDER), "fill")

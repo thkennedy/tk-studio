@@ -1418,7 +1418,9 @@ entry's bounds, so both share one frame) to
 `.candidates/<name>.greybox.png` and `.candidates/<name>.render.png`; the
 masks are alpha > 0 (a render without an alpha channel fails the gate),
 and the gate passes when `coverage = |C ∩ G| / |G| >=
-0.6` and `fill = |C| / 128² >= 0.005` (not blank). Only when both gates
+0.25` (the floor measured on the box against a Kenney kit, Story 34.7's
+operator step; the planner's 0.6 passed only boxy replacements) and
+`fill = |C| / 128² >= 0.005` (not blank). Only when both gates
 pass, and only after the manifest write-back lands, does `os.replace` move
 the candidate over `<art_path>/<name>.glb`, the
 one sanctioned replace of a placeholder (greybox still never overwrites a
