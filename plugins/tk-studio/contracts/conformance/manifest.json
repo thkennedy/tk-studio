@@ -130,6 +130,12 @@
           "expect": "status-block",
           "intent": "tk-studio-launch",
           "marker": "2 entries"
+        },
+        {
+          "assertion": "headless-clean",
+          "argv": ["contracts/conformance/e2e_verify_commands.py", "--directory", "{sandbox}"],
+          "expect": "ok",
+          "note": "the Story 33.5 e2e drive (hole 62): in projects it builds inside the sandbox, launch.py check reconciles the policy's [verify] commands from .tk-studio/config.yaml engine.verify_commands — the tracked command added after the operator's extra, the extra kept, the row and verify_commands key reporting it; a second check unchanged and byte-identical; a project with no tracked list byte-identical"
         }
       ]
     },

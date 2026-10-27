@@ -733,6 +733,274 @@ class LaunchTestCase(unittest.TestCase):
                    "--allow-budget-mismatch"])
         self.assertEqual(_sha(policy), before)
 
+    # ---- the tracked [verify] commands (Story 33.5)
+
+    ROSTER = "uv run --directory plugins/tk-studio/lib python -m unittest tests.test_release_roster"
+    PLUGIN_SRC = "plugins/tk-studio/pipeline/verify-commands.toml"
+    CONFIG_SRC = ".tk-studio/config.yaml engine.verify_commands"
+    LIMITS = "[limits]\nmax_review_cycles = 3\nmax_tokens_per_story = 2000000\n"
+    ROUTING = ("# >>> routing (managed by tk-studio lib/pipeline.py) — do not edit inside this block\n"
+               "# story: 2-1-1\n[adapter.dev]\nmodel = \"opus\"\n# <<< routing\n")
+
+    def _verify_project(self, policy: str | None, *, plugin: list | str | None = None,
+                        config: str | None = None, newline: str = "\n"):
+        root, spec = _project(Path(tempfile.mkdtemp(dir=self.tmp)))
+        policy_path = root / ".bmad-loop" / "policy.toml"
+        if policy is not None:
+            policy_path.parent.mkdir(parents=True, exist_ok=True)
+            policy_path.write_bytes(policy.replace("\n", newline).encode("utf-8"))
+        if plugin is not None:
+            path = root / self.PLUGIN_SRC
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(plugin if isinstance(plugin, str)
+                            else "commands = " + json.dumps(plugin) + "\n", encoding="utf-8")
+        if config is not None:
+            (root / ".tk-studio").mkdir(parents=True, exist_ok=True)
+            (root / ".tk-studio" / "config.yaml").write_text(config, encoding="utf-8")
+        self._wire(_FakeSubstrate())
+        return root, spec, policy_path
+
+    def _verify_check(self, root, spec):
+        result = launch.check(root, spec)
+        row = next(c for c in result["checks"] if c["check"] == "verify commands")
+        return result, row, result["verify_commands"]
+
+    def test_verify_adds_the_table_before_the_routing_fence(self):
+        policy = "[gates]\nmode = \"per-epic\"\n\n" + self.LIMITS + "\n" + self.ROUTING
+        root, spec, path = self._verify_project(policy, plugin=[self.ROSTER])
+        result, row, key = self._verify_check(root, spec)
+        self.assertTrue(row["ok"])
+        self.assertEqual(row["detail"], f"added 1 from {self.PLUGIN_SRC}; kept 0 operator commands")
+        self.assertEqual(key, {"source": self.PLUGIN_SRC, "tracked": [self.ROSTER],
+                               "added": [self.ROSTER], "kept": [], "policy": "written"})
+        text = path.read_text(encoding="utf-8")
+        self.assertEqual(text, "[gates]\nmode = \"per-epic\"\n\n" + self.LIMITS + "\n"
+                         + "[verify]\ncommands = [" + json.dumps(self.ROSTER) + "]\n\n"
+                         + self.ROUTING)
+        self.assertTrue(text.endswith(self.ROUTING))  # the managed block stays last
+        self.assertIn(self.LIMITS, text)
+        self.assertTrue(result["ok"], result["gaps"])
+        # a second check: unchanged, byte-identical
+        before = _sha(path)
+        _, row, key = self._verify_check(root, spec)
+        self.assertEqual(row["detail"], "unchanged (1 tracked, 0 operator)")
+        self.assertEqual(key["policy"], "unchanged")
+        self.assertEqual(_sha(path), before)
+
+    def test_verify_appends_after_an_operator_extra(self):
+        policy = self.LIMITS + "\n[verify]\ncommands = [\"make lint\"]  # ops\n\n" + self.ROUTING
+        root, spec, path = self._verify_project(policy, plugin=[self.ROSTER])
+        _, row, key = self._verify_check(root, spec)
+        self.assertEqual(key["added"], [self.ROSTER])
+        self.assertEqual(key["kept"], ["make lint"])
+        self.assertEqual(row["detail"], f"added 1 from {self.PLUGIN_SRC}; kept 1 operator commands")
+        import tomllib
+        parsed = tomllib.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(parsed["verify"]["commands"], ["make lint", self.ROSTER])
+        self.assertIn("]  # ops\n", path.read_text(encoding="utf-8"))
+
+    def test_verify_already_present_is_unchanged_and_byte_identical(self):
+        policy = (self.LIMITS + "\n[verify]\ncommands = [\"x\", " + json.dumps(self.ROSTER)
+                  + "]\n\n" + self.ROUTING)
+        root, spec, path = self._verify_project(policy, plugin=[self.ROSTER])
+        before = _sha(path)
+        _, row, key = self._verify_check(root, spec)
+        self.assertEqual(row["detail"], "unchanged (1 tracked, 1 operator)")
+        self.assertEqual(key, {"source": self.PLUGIN_SRC, "tracked": [self.ROSTER],
+                               "added": [], "kept": ["x"], "policy": "unchanged"})
+        self.assertEqual(_sha(path), before)
+
+    def test_verify_multi_line_array_is_replaced_by_one_line(self):
+        policy = (self.LIMITS + "\n[verify]\ncommands = [\n  \"a ] b\",  # a comment ]\n"
+                  "  'lit',\n]\ntimeout_min = 5\n\n" + self.ROUTING)
+        root, spec, path = self._verify_project(policy, plugin=[self.ROSTER])
+        _, _, key = self._verify_check(root, spec)
+        self.assertEqual(key["policy"], "written")
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("[verify]\ncommands = [\"a ] b\", \"lit\", " + json.dumps(self.ROSTER)
+                      + "]\ntimeout_min = 5\n", text)
+
+    def test_verify_table_without_commands_gets_the_line_after_its_header(self):
+        policy = self.LIMITS + "\n[verify]\ntimeout_min = 5\n"
+        root, spec, path = self._verify_project(policy, plugin=[self.ROSTER])
+        self._verify_check(root, spec)
+        self.assertEqual(path.read_text(encoding="utf-8"), self.LIMITS
+                         + "\n[verify]\ncommands = [" + json.dumps(self.ROSTER) + "]\ntimeout_min = 5\n")
+
+    def test_verify_keeps_crlf(self):
+        policy = self.LIMITS + "\n" + self.ROUTING
+        root, spec, path = self._verify_project(policy, plugin=[self.ROSTER], newline="\r\n")
+        _, _, key = self._verify_check(root, spec)
+        self.assertEqual(key["policy"], "written")
+        raw = path.read_bytes()
+        self.assertEqual(raw.count(b"\n"), raw.count(b"\r\n"))
+        self.assertIn(b"[verify]\r\ncommands = [", raw)
+
+    def test_verify_keeps_crlf_with_an_existing_verify_table(self):
+        cases = [
+            ("with commands", "[verify]\ncommands = [\"make lint\"]\n", ["make lint", self.ROSTER],
+             None),
+            ("without commands", "[verify]\ntimeout_min = 5\n", [self.ROSTER], "timeout_min = 5"),
+            ("commands and an extra key", "[verify]\ncommands = [\"make lint\"]\ntimeout_min = 5\n",
+             ["make lint", self.ROSTER], "timeout_min = 5"),
+        ]
+        import tomllib
+        for name, table, commands, extra in cases:
+            with self.subTest(name):
+                policy = self.LIMITS + "\n" + table + "\n" + self.ROUTING
+                root, spec, path = self._verify_project(policy, plugin=[self.ROSTER],
+                                                        newline="\r\n")
+                _, row, key = self._verify_check(root, spec)
+                self.assertEqual(key["policy"], "written", row)
+                raw = path.read_bytes()
+                self.assertEqual(raw.count(b"\n"), raw.count(b"\r\n"))
+                self.assertIn(b"[verify]\r\ncommands = [", raw)
+                parsed = tomllib.loads(raw.decode("utf-8"))
+                self.assertEqual(parsed["verify"]["commands"], commands)
+                if extra is not None:
+                    self.assertIn(extra.encode("utf-8") + b"\r\n", raw)
+                    self.assertEqual(parsed["verify"]["timeout_min"], 5)
+
+    def test_verify_restores_the_original_when_the_re_read_mismatches(self):
+        policy = self.LIMITS + "\n" + self.ROUTING
+        root, spec, path = self._verify_project(policy, plugin=[self.ROSTER])
+        before = path.read_bytes()
+        real = launch._write_atomic
+        calls = []
+
+        def corrupting(target, data):
+            calls.append(data)
+            real(target, data.replace(b"[limits]", b"[limitz]") if len(calls) == 1 else data)
+
+        launch._write_atomic = corrupting
+        try:
+            result, row, key = self._verify_check(root, spec)
+        finally:
+            launch._write_atomic = real
+        self.assertEqual(len(calls), 2)  # the write, then the restore
+        self.assertEqual(path.read_bytes(), before)
+        self.assertFalse(row["ok"])
+        self.assertIn(".bmad-loop/policy.toml", row["detail"])
+        self.assertIn("fix it by hand", row["detail"])
+        self.assertEqual(key["policy"], "refused")
+        self.assertTrue(any(g.startswith("verify commands: ") for g in result["gaps"]))
+
+    def test_verify_ignores_the_key_in_config_local(self):
+        local = "engine:\n  verify_commands:\n    - make local\n"
+        for plugin in ([self.ROSTER], None):
+            with self.subTest(plugin=plugin):
+                root, spec, path = self._verify_project(self.LIMITS, plugin=plugin,
+                                                        config="vcs: git\n")
+                (root / ".tk-studio" / "config.local.yaml").write_text(local, encoding="utf-8")
+                _, _, key = self._verify_check(root, spec)
+                self.assertNotIn("make local", path.read_text(encoding="utf-8"))
+                if plugin:
+                    self.assertEqual(key["source"], self.PLUGIN_SRC)
+                    self.assertEqual(key["added"], [self.ROSTER])
+                else:
+                    self.assertIsNone(key["source"])
+                    self.assertEqual(key["policy"], "skipped (no tracked list)")
+
+    def test_verify_config_key_overrides_the_plugin_file(self):
+        config = "vcs: git\nengine:\n  verify_commands:\n    - make check\n"
+        root, spec, path = self._verify_project(self.LIMITS, plugin=[self.ROSTER], config=config)
+        _, row, key = self._verify_check(root, spec)
+        self.assertEqual(key["source"], self.CONFIG_SRC)
+        self.assertEqual(key["added"], ["make check"])
+        self.assertIn(f"from {self.CONFIG_SRC}", row["detail"])
+        self.assertNotIn(self.ROSTER, path.read_text(encoding="utf-8"))
+
+    def test_verify_empty_config_list_writes_nothing(self):
+        config = "engine:\n  verify_commands:\n"
+        root, spec, path = self._verify_project(self.LIMITS, plugin=[self.ROSTER], config=config)
+        before = _sha(path)
+        _, row, key = self._verify_check(root, spec)
+        self.assertEqual(key, {"source": self.CONFIG_SRC, "tracked": [], "added": [],
+                               "kept": [], "policy": "unchanged"})
+        self.assertEqual(row["detail"], "unchanged (0 tracked, 0 operator)")
+        self.assertEqual(_sha(path), before)
+
+    def test_verify_no_source_is_skipped_and_byte_identical(self):
+        root, spec, path = self._verify_project(self.LIMITS + "\n" + self.ROUTING,
+                                                config="vcs: git\n")
+        before = _sha(path)
+        result, row, key = self._verify_check(root, spec)
+        self.assertEqual(row, {"check": "verify commands", "ok": True,
+                               "detail": "skipped (no tracked list)"})
+        self.assertEqual(key, {"source": None, "tracked": [], "added": [], "kept": [],
+                               "policy": "skipped (no tracked list)"})
+        self.assertEqual(_sha(path), before)
+        self.assertTrue(result["ok"], result["gaps"])
+
+    def test_verify_no_policy_is_skipped_and_never_created(self):
+        root, spec, path = self._verify_project(None, plugin=[self.ROSTER])
+        result, row, key = self._verify_check(root, spec)
+        skip = "skipped (no .bmad-loop/policy.toml; bmad-loop init creates it)"
+        self.assertEqual(row["detail"], skip)
+        self.assertTrue(row["ok"])
+        self.assertEqual(key["policy"], skip)
+        self.assertFalse(path.exists())
+        self.assertTrue(result["ok"], result["gaps"])
+
+    def test_verify_refusals_are_named_gaps_and_leave_the_policy_alone(self):
+        good = self.LIMITS + "\n" + self.ROUTING
+        cases = [
+            ("unparseable source", good, "commands = [\n", None, self.PLUGIN_SRC),
+            ("non-list source", good, 'commands = "x"\n', None, self.PLUGIN_SRC),
+            ("non-string item", good, "commands = [1]\n", None, self.PLUGIN_SRC),
+            ("non-string config item", good, None,
+             "engine:\n  verify_commands:\n    - 3\n", ".tk-studio/config.yaml"),
+            ("unparseable config", good, [self.ROSTER], "engine: [\n", ".tk-studio/config.yaml"),
+            ("unparseable policy", "[limits\n", [self.ROSTER], None, ".bmad-loop/policy.toml"),
+            ("non-list commands", "[verify]\ncommands = \"x\"\n", [self.ROSTER], None,
+             ".bmad-loop/policy.toml"),
+            ("non-string command", "[verify]\ncommands = [1]\n", [self.ROSTER], None,
+             ".bmad-loop/policy.toml"),
+            ("dotted key", "verify.commands = [\"x\"]\n" + good, [self.ROSTER], None,
+             ".bmad-loop/policy.toml"),
+            ("inline table", "verify = { commands = [\"x\"] }\n" + good, [self.ROSTER], None,
+             ".bmad-loop/policy.toml"),
+        ]
+        for name, policy, plugin, config, named in cases:
+            with self.subTest(name):
+                root, spec, path = self._verify_project(policy, plugin=plugin, config=config)
+                before = _sha(path)
+                result, row, key = self._verify_check(root, spec)
+                self.assertFalse(row["ok"])
+                self.assertIn(named, row["detail"])
+                self.assertIn("fix it by hand", row["detail"])
+                self.assertEqual(key["policy"], "refused")
+                self.assertFalse(result["ok"])
+                self.assertTrue(any(g.startswith("verify commands: ") for g in result["gaps"]))
+                self.assertEqual(launch.check_block(result)[0], "blocked")
+                self.assertEqual(_sha(path), before)
+
+    def test_verify_key_is_on_every_check_result(self):
+        result = launch.check(self.tmp / "missing", "_bmad-output/specs/spec-epic-2")
+        self.assertIn("verify_commands", result)
+        root, spec, _ = self._verify_project(None)
+        launch._bmad_loop_binary = lambda: None  # the bmad-loop early return
+        self.assertEqual(launch.check(root, spec)["verify_commands"]["source"], None)
+        self.assertIn("verify_commands", launch.check(root, "_bmad-output/specs/none"))
+
+    def test_start_reconciles_before_the_spawn(self):
+        policy = self.LIMITS + "\n" + self.ROUTING
+        root, spec, path = self._verify_project(policy, plugin=[self.ROSTER])
+        seen = []
+        fake = _FakeSubstrate()
+
+        def spawn(args, *, cwd, log_path):
+            seen.append(path.read_text(encoding="utf-8"))
+            return fake.spawn_detached(args, cwd=cwd, log_path=log_path)
+
+        launch.spawn_detached = spawn
+        result = launch.start(root, spec, wait_s=2)
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(seen), 1)
+        self.assertIn("[verify]\ncommands = [" + json.dumps(self.ROSTER) + "]", seen[0])
+        row = next(c for c in result["checks"] if c["check"] == "verify commands")
+        self.assertTrue(row["detail"].startswith("added 1 from "))
+
 
     # ---- the engine sandbox row (Story 33.3)
 

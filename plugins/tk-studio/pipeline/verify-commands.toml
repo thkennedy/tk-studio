@@ -1,0 +1,18 @@
+# tk-studio's tracked engine verify commands (Story 33.5, runbook hole 62).
+#
+# bmad-loop runs the policy's `[verify] commands` (shell, cwd = the project
+# root) after a clean review and routes a failure to a dev fix session. The
+# policy (`.bmad-loop/policy.toml`) is a gitignored operator overlay, so the
+# list lives here instead: `lib/launch.py check` (run by every launch and by
+# `start`) reconciles the overlay's `[verify] commands` from this file —
+# a missing command is added, the operator's extra commands are kept, and
+# the check reports what it did.
+#
+# Read only at `<project root>/plugins/tk-studio/pipeline/verify-commands.toml`:
+# this is tk-studio's own list, never a default for other served projects.
+# A project's `.tk-studio/config.yaml` `engine.verify_commands` is that
+# project's source (and, when present, overrides this file here too).
+#
+# The roster gate: a skill added without its released-roster row fails here,
+# inside the engine, never first on the host leg.
+commands = ["uv run --directory plugins/tk-studio/lib python -m unittest tests.test_release_roster"]
