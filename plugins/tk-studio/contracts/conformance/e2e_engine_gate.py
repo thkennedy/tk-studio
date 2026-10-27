@@ -4,8 +4,10 @@ The supervisor's host leg runs a project's `verify.engine` after a green
 `verify.host`, with the folder of `GODOT` first on PATH, and records the
 verdict as `engine` on the `host-verify` event (contract 0.1.29). The leg is
 supervisor code (`apps/supervisor/src/hostverify.ts`, AD-2), so this drive
-proves it the way the supervisor's own gate does: it runs the leg's suite,
-`bun test test/hostverify.test.ts`, whose Story 34.1 cases drive the leg with
+proves it the way the supervisor's own gate does: it runs the Story 34.1 cases
+of the leg's suite, `bun test test/hostverify.test.ts -t "Story 34.1"` (never
+the whole suite: hole 76, its 33 cases take 43 s on the agent PC with real git
+worktrees, past this drive's bound), whose cases drive the leg with
 a fake `godot` (`fakeBin`: a bun-shebang file on POSIX, an `.exe` on Windows,
 never a `.cmd`) found only through the prepended folder, to green and to red.
 
@@ -34,6 +36,8 @@ from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 SUITE = "test/hostverify.test.ts"
+# Hole 76: only the story's own describe block (bun matches `-t` against the full test name).
+FILTER = "Story 34.1"
 # Below runner.py's 60 s drive timeout (DEFAULT_TIMEOUT), so this drive's own
 # timeout fires first: it kills `bun`, removes the temp folder in `finally`
 # (the Story 33.4 rule) and reports `ok: false`, never an orphaned suite.
@@ -71,7 +75,7 @@ def run() -> dict:
         started = time.monotonic()
         try:
             proc = subprocess.run(
-                [bun, "test", SUITE], cwd=str(supervisor), env=env,
+                [bun, "test", SUITE, "-t", FILTER], cwd=str(supervisor), env=env,
                 stdin=subprocess.DEVNULL, capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=BOUND_S)
         except subprocess.TimeoutExpired:
