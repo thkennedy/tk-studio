@@ -8,6 +8,7 @@ import { csrfToken, SESSION_COOKIE, signSession } from "../src/auth";
 import { ledgerPath } from "../src/board";
 import { listEngagements, readEngagement, writeEngagement } from "../src/engagement";
 import { ResumeRefused } from "../src/closeout";
+import { VerifyRefused, type HostLegStarted } from "../src/hostleg";
 import { CancelRaced, cancelRun, CANCELLED_REASON, endCancelledLeftovers, launchStopGraceful, mirror, queueRecorder, recordMinted, StartError, type RunSummary } from "../src/cli";
 import { ApiBindMissing, ApiPortInvalid, ApiTokenMissing, apiBind, apiPort, apiToken } from "../src/env";
 import { END_HYGIENE_EVENTS, recordClaimRefusal } from "../src/hygiene";
@@ -64,7 +65,7 @@ afterAll(() => {
 
 interface FxOpts {
   killWorker?: Probes["killWorker"]; engine?: (id: string | null) => EngineProbe; now?: () => number;
-  submit?: ApiDeps["submit"]; cancel?: ApiDeps["cancel"]; resume?: ApiDeps["resume"];
+  submit?: ApiDeps["submit"]; cancel?: ApiDeps["cancel"]; resume?: ApiDeps["resume"]; verify?: ApiDeps["verify"];
 }
 
 function fixture(o: FxOpts = {}) {
@@ -90,7 +91,7 @@ function fixture(o: FxOpts = {}) {
       definition: { id: b.job }, tier: b.tier, model: b.model, effort: b.effort, base_ref: b.base_ref });
     return { ok: true, job_id: b.job, project_id: b.project, run_id: run.run_id, state: run.state, minted };
   });
-  const handler = createApi({ queue, token: TOKEN, submit, ...(o.cancel ? { cancel: o.cancel } : {}), ...(o.resume ? { resume: o.resume } : {}), pollMs: 10 });
+  const handler = createApi({ queue, token: TOKEN, submit, ...(o.cancel ? { cancel: o.cancel } : {}), ...(o.resume ? { resume: o.resume } : {}), ...(o.verify ? { verify: o.verify } : {}), pollMs: 10 });
   const call = (method: string, path: string, init: { body?: string; auth?: string | null; headers?: Record<string, string> } = {}) =>
     handler(new Request(`${BASE}${path}`, {
       method, body: init.body,
@@ -1121,6 +1122,80 @@ describe("Story 27.3: POST /runs/{id}/resume, and an external run's cancel (DW-2
       expect(await r.json()).toMatchObject({ ok: false, error: "Unauthorized" });
     }
     expect(seen).toEqual([]);
+  });
+});
+
+describe("Story 33.8: POST /runs/{id}/verify — an ended run's host leg re-run (bearer only)", () => {
+  const started = (id: string): HostLegStarted => ({ run_id: id, state: "partial", head: "abc123", done: new Promise(() => {}) });
+
+  test("202 with the answer's keys, the leg not awaited; an empty body or {} only", async () => {
+    const seen: string[] = [];
+    const fx = fixture({ verify: async (id) => { seen.push(id); return started(id); } });
+    for (const body of [undefined, "", "{}"]) {
+      const r = await fx.call("POST", "/runs/q-1/verify", body === undefined ? {} : { body });
+      expect(r.status).toBe(202);
+      expect(await r.json()).toEqual({ ok: true, run_id: "q-1", state: "partial", verify: "started", head: "abc123" });
+    }
+    expect(seen).toEqual(["q-1", "q-1", "q-1"]);
+    for (const body of ["[]", JSON.stringify({ x: 1 }), "1", "null"]) {
+      const r = await fx.call("POST", "/runs/q-1/verify", { body });
+      expect(r.status).toBe(400);
+      expect(await r.json()).toMatchObject({ ok: false, error: "SchemaError" });
+    }
+    const malformed = await fx.call("POST", "/runs/q-1/verify", { body: "{nope" });
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toMatchObject({ error: "MalformedJson" });
+    expect((await fx.call("GET", "/runs/q-1/verify")).status).toBe(405);
+    expect(seen).toHaveLength(3);
+    // Bearer only: no auth is 401.
+    expect((await fx.call("POST", "/runs/q-1/verify", { auth: null })).status).toBe(401);
+  });
+
+  test("the refusals by name: 404 RunNotFound, 409 ExternalRun | RunNotEnded | NoBranch | VerifyRunning, 500 VerifyFailed; the detail redacted", async () => {
+    for (const [code, status] of [["RunNotFound", 404], ["ExternalRun", 409], ["RunNotEnded", 409], ["NoBranch", 409], ["VerifyRunning", 409], ["VerifyFailed", 500], ["SchemaError", 400]] as const) {
+      const fx = fixture({ verify: async () => { throw new VerifyRefused(code, `why, near ${TOKEN}`); } });
+      const r = await fx.call("POST", "/runs/q-1/verify");
+      expect(r.status).toBe(status);
+      const body = await r.json() as Record<string, any>;
+      expect(body).toMatchObject({ ok: false, error: code, run_id: "q-1" });
+      expect(body.detail).toContain("[redacted]");
+      expect(JSON.stringify(body)).not.toContain(TOKEN);
+    }
+  });
+
+  test("the default leg (`rerunHostLeg`): 404 for no run, 409 RunNotEnded for a queued one, 409 ExternalRun, 409 NoBranch with no worktree", async () => {
+    const { queue, enqueue, call, checkout } = fixture();
+    expect((await call("POST", "/runs/q-nope/verify")).status).toBe(404);
+    const queued = enqueue("verify-job");
+    const live = await call("POST", `/runs/${queued.run_id}/verify`);
+    expect(live.status).toBe(409);
+    expect(await live.json()).toMatchObject({ ok: false, error: "RunNotEnded", run_id: queued.run_id });
+    queue.end(queued.run_id, "partial", "test");
+    const noBranch = await call("POST", `/runs/${queued.run_id}/verify`);
+    expect(noBranch.status).toBe(409);
+    expect(await noBranch.json()).toMatchObject({ ok: false, error: "NoBranch" });
+    const ext = queue.recordExternal("verify-job", checkout, "verify-job-20261027T101010Z", "running")!;
+    expect(await (await call("POST", `/runs/${ext.run_id}/verify`)).json()).toMatchObject({ error: "ExternalRun" });
+    expect(queue.get(queued.run_id)!.state).toBe("partial");
+  });
+
+  test("a valid cookie session is refused, even with the page's CSRF token: bearer only", async () => {
+    const SECRET = "s".repeat(48);
+    const queue = new Queue(":memory:");
+    const seen: string[] = [];
+    const handler = createApi({ queue, token: TOKEN, session: { secret: SECRET }, verify: async (id) => { seen.push(id); return started(id); } });
+    const cookie = signSession(SECRET, "token", Date.now());
+    const csrf = csrfToken(SECRET, cookie);
+    for (const init of <{ headers: Record<string, string>; body: string }[]>[
+      { headers: { cookie: `${SESSION_COOKIE}=${cookie}`, "x-csrf-token": csrf }, body: "{}" },
+      { headers: { cookie: `${SESSION_COOKIE}=${cookie}`, "content-type": "application/x-www-form-urlencoded" }, body: `csrf=${encodeURIComponent(csrf)}` },
+    ]) {
+      const r = await handler(new Request(`${BASE}/runs/q-1/verify`, { method: "POST", ...init }));
+      expect(r.status).toBe(401);
+      expect(await r.json()).toMatchObject({ ok: false, error: "Unauthorized" });
+    }
+    expect(seen).toEqual([]);
+    queue.close();
   });
 });
 

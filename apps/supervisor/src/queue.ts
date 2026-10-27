@@ -1679,6 +1679,40 @@ export class Queue {
     }).immediate();
   }
 
+  /** Story 33.8: the lease of an ended run's host-leg re-run (`hostleg.ts`), taken atomically by appending a
+   * `host-verify-leg {owner, by}` event (the terminal row is never updated). Refused on a run that is not terminal,
+   * and while the latest lease is held by a live owner and neither a `host-verify` (the leg's result, which closes it)
+   * nor a later `host-verify-leg` follows it. A dead owner's lease is taken over. */
+  takeVerifyLeg(runId: string, self: Owner = selfOwner(), by?: string): boolean {
+    return this.db.transaction(() => {
+      const run = this.get(runId);
+      if (!run || !isTerminal(run.state)) return false;
+      const evs = this.events(runId);
+      const at = evs.findLastIndex((e) => e.kind === "host-verify-leg");
+      if (at >= 0) {
+        const lease = evs[at]!.detail?.owner as Owner | null | undefined;
+        const closed = evs.slice(at + 1).some((e) => e.kind === "host-verify" || e.kind === "host-verify-leg");
+        if (lease && !closed && this.ownerLive(lease, self)) return false;
+      }
+      this.event(runId, "host-verify-leg", run.state, run.state, { owner: ownerDetail(self), ...(by ? { by } : {}) });
+      return true;
+    }).immediate();
+  }
+
+  /** Story 33.8: a re-run's lease let go of without a `host-verify` (its cut or materialise failed): an appended
+   * `host-verify-leg {owner: null, released}`, only while the latest lease is `self`'s and no `host-verify` follows it. */
+  releaseVerifyLeg(runId: string, self: Owner = selfOwner()): void {
+    this.db.transaction(() => {
+      const run = this.get(runId);
+      if (!run) return;
+      const evs = this.events(runId);
+      const at = evs.findLastIndex((e) => e.kind === "host-verify-leg");
+      if (at < 0 || evs.slice(at + 1).some((e) => e.kind === "host-verify")) return;
+      const lease = evs[at]!.detail?.owner as Owner | null | undefined;
+      if (lease?.nonce === self.nonce) this.event(runId, "host-verify-leg", run.state, run.state, { owner: null, released: ownerDetail(self) });
+    }).immediate();
+  }
+
   /** What may still be live around a run before its worktree is closed out: its driver (a kept run
    * lock under a live owner), its recorded worker, or an engine in its worktree. Undefined: all dead. */
   async closeOutBlocker(run: QueueRun, self: Owner = selfOwner(), opts: { asDriver?: boolean } = {}): Promise<string | undefined> {
