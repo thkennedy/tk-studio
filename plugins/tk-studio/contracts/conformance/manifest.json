@@ -140,6 +140,7 @@
         {
           "assertion": "headless-clean",
           "argv": ["contracts/conformance/e2e_engine_gate.py"],
+          "timeout": 120,
           "expect": "ok",
           "note": "the Story 34.1 e2e drive: the host leg's engine gate drives a fake godot to green and red (Story 34.1) — bun test test/hostverify.test.ts from apps/supervisor under a fresh temp folder, bounded at 50 s (below the runner's 60 s drive timeout, so the drive kills a hung suite and removes its temp folder itself), the fake godot found only through the folder of GODOT prepended to PATH; not run (ok) without the checkout or bun on PATH, the cli_drives precedent"
         }
