@@ -1,0 +1,11 @@
+{
+  "job_schema_version": 1,
+  "id": "run-epic-35",
+  "type": "run-epic",
+  "description": "tk-studio Epic 35 (loop hygiene 2, the slice path hardened: the re-run as a whole leg, a plan and records for every story, the slice host leg hardened, the engine MCP before the first flagged run, the sandbox and the host agreeing on the gates, the closeout carrying the proof, the run-sweep job type) through the supervisor queue (declared 2026-10-27 with the epic, planned from the EP-34 retrospective's action items, holes 78/81/84/85/88/89 and DW-76 to DW-94). Extends the shipped run-epic type: one-shot; the first launch bootstraps _bmad-output/specs/spec-epic-35 from epics.md (Story 26.1). Submit it with POST /jobs {project: tk-studio, job: run-epic-35}; placement tier sbx on claude-tk-studio; tools/verify_host.py is the host verify leg; the close-out opens the PR. One story per run with a graceful stop after each, in the epic's order (35.1 first, the sweep last); a story whose proof needs the host or the sandbox tier asks through the consult log and the operator session does that step on the box.",
+  "target": {
+    "payload": {
+      "epic": 35
+    }
+  }
+}

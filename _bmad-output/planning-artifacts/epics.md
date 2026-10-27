@@ -3173,3 +3173,147 @@ So that the studio's promise (user flow F9) is a thing I can run, not a diagram.
 **Given** TUA
 **When** the acceptance runs
 **Then** one `POST /jobs` (or one chat message) on TUA ends in a merged PR with a playable greybox scene, the frames in the PR, a `job-run` ledger line with the cost, conformance green over every surface (the contract at 0.1.29 or later), the three new skills' eval cases above the threshold, and the acceptance record under `kb/`; the design spec's feature ledger flips Phase 3 to built
+
+## Epic 35: Loop Hygiene 2, the Slice Path Hardened
+
+Epic 34 closed on 2026-10-27 with the retrospective's verdict `accepted-with-open-items` (`_bmad-output/specs/spec-epic-34/RETROSPECTIVE.md`, PR #231): every capability of the vertical-slice pack is built and pinned, and what it left open is the loop's own. This epic is the second loop-hygiene pass (Epic 33 was the first), planned by the operator session on Tim's go of 2026-10-27 from the retrospective's action items (AI-2, AI-3, AI-5, AI-9; the findings B1 to B16, C2, C4, C5), the observation ledger's holes 78, 81, 84, 85, 88 and 89 (each a row of `kb/agent-pc-setup-runbook.md`'s fixes table with the fix to make) and the deferred-work ledger's DW-76 to DW-94 (`_bmad-output/implementation-artifacts/deferred-work.md`). Its sources, in that order of authority, then the handoff's day-7 addenda (`_bmad-output/implementation-artifacts/handoff-phase1-loop-2026-10-09.md`) and the contract at 0.1.29 (`plugins/tk-studio/contracts/driver-contract.md`). What exists today: the host leg runs `verify.host`, the engine gate, the assets step, `playable.py` and the judge on a run's close-out (Stories 27.4, 33.4, 34.1, 34.3, 34.6 to 34.8), and 33.8's verify verb re-runs that leg on the branch tip in a throwaway `.verify` worktree that commits nothing and leaves the PR body's `## Host verify` section as the first leg wrote it, so 4 of Epic 34's 7 story PRs read Red at merge while the verb had gone green; the launch bootstrap writes the first story's plan only, and a resumed run that crosses a story boundary records the last story only (the 34.5 episode: no gate file, no reconcile, no cost line for 34-5); the engine's own `bun test` in the sandbox reports 15 Story 32.8 delivery tests red at baseline that the host passes; two of Story 34.8's three eval cases cannot run on the host, where the eval child can neither grant a shell nor read the plugin's docs; the per-run engine MCP (34.5) takes one fixed port per box and lets go of its children before recording the start; the deferred-work sweep (`bmad-loop-sweep`) runs only inside a bmad-loop sweep session (`BMAD_LOOP_MODE=1`, `[sweep] auto = "never"` in `.bmad-loop/policy.toml`) and the studio ships no job that starts one, so DW-46 to DW-65 and the retrospective's deferred findings have no path to a PR. The rules the epic keeps: everything Epic 34 kept (engines only in the project's Docker Sandbox, never with bypass on the host; the host leg runs deterministic scripts and the engine binaries, never a model; secrets by name only; every surface change additive on the contract at 0.1.30 and up, ending in a status block (AD-11), covered by conformance (AD-19), its cost in the ledger); a fix to the loop lands through the loop, one story per run with a graceful stop after each and the host leg green before the PR, and an operator PR that touches lib, its tests or the contract runs the whole host gate before merge (hole 86); the retrospective's dispositions stand, and two of its decisions are taken here: DW-76 (B9) is decided as "the re-run is a whole leg" and AI-4's visual-gate floor stays 0.25 (DW-93); a sweep executes a bundle only as a supervisor run with a worktree, a host leg and a PR, never a direct commit; where a story's proof needs the host or the sandbox tier (a flagged run on TUA, an eval run, a sweep), the engine asks through the spec's consult log and the operator session does that step and answers with the evidence; the engine never runs on the host. Planned 2026-10-27 (session 11's fifth day) by the session. Seven stories in dependency order: the re-run first, since every later story's fix-forward relies on it; the sweep last, over whatever the ledger still holds.
+
+### Story 35.1: The Re-run Is a Whole Leg
+
+As the loop,
+I want 33.8's verify verb to re-run the host leg the way the close-out runs it, commit and push what a green leg produces, and rewrite the PR's `## Host verify` section and status block with the latest result,
+So that a fixed-forward run's PR reads the truth at merge and a slice's placed art and proof survive the re-run (hole 88, DW-76, DW-82; the retrospective's C2, B9, AI-3, AI-9).
+
+**Acceptance Criteria:**
+
+**Given** a run whose close-out ended `partial` on a red host leg and a fix pushed to its branch
+**When** `POST /runs/{id}/verify` runs the leg green
+**Then** the PR body's `## Host verify` section and its status block carry the latest leg's result (the first leg's text replaced, a one-line history of the legs kept), the PR is marked ready, and the `host-verify` event names `rerun: true`; a red re-run rewrites the section red, leaves the PR a draft and says why (`apps/supervisor/src/hostleg.ts:20, :108`)
+
+**Given** a slice run (`type: run-vertical-slice`)
+**When** the re-run's assets step places art or its playable step writes proof
+**Then** the re-run commits and pushes them on the run's branch as the close-out does (`host leg: placed assets and proof (run <id>)`, `worktree.ts proofCommit`), so the `.verify` worktree is no longer throwaway for a slice (DW-76 decided: the re-run is a whole leg), and the per-leg proof store (`<store>/sheets/`, 34.8's DRIFT) is read by the closeout and the PR body the same way
+
+**Given** the supervisor suites and conformance
+**When** they run
+**Then** the body rewrite, the slice re-run's commit and the ready/draft transitions are covered with fakes (`test/hostleg.test.ts`, `test/worktree.test.ts`, the `e2e_vertical_slice` drive); the contract (0.1.30, additive) names the re-run's commit and the PR-body rule; DW-76 and DW-82 close by this PR
+
+### Story 35.2: Every Story Gets Its Plan and Its Records
+
+As the loop,
+I want the launch bootstrap to write a plan for every story of the epic and refuse a story whose SPEC open questions have no design note, and a resumed run that lands more than one story to write a gate file and a cost line per story,
+So that no dev session starts with nothing to build from and no story lands unrecorded (holes 81 and 89; DW-79, DW-83; the retrospective's C4, C5, AI-9).
+
+**Acceptance Criteria:**
+
+**Given** an epic launched with `bootstrap: true`
+**When** the bootstrap runs at the planner tier
+**Then** `plans/<story>.md` exists for every story in `stories.yaml` in list order (a Code Map and the band each), and a story whose SPEC open questions (`CAP-N`) have no design note is refused with the questions listed (the status block `blocked`, the reason naming the CAPs) before any dev session; the launch's advisory row names the stories still without a plan
+
+**Given** a paused run resumed after an operator answer
+**When** the resumed run lands commits for more than one story (the 34.5 shape)
+**Then** the gate writes a result file per story and each spec gets its `## Reconcile`, the close-out writes one `job-run` ledger line per story (the cost split by the engine's per-story turns, or one line naming both with the cost) and the PR body lists both; or the supervisor refuses a resume that would cross a story boundary with the reason and the graceful stop re-armed — the planner picks one and the contract names it (0.1.30, additive)
+
+**Given** the lib suite, the supervisor suites and conformance
+**When** they run
+**Then** the plan-per-story rule, the refusal and the per-story records are covered with fakes; the runbook's rule "never amend after a resume" stays and its row points at this story; DW-79 and DW-83 close by this PR
+
+### Story 35.3: The Slice Path, Hardened
+
+As the loop,
+I want the slice's host leg to fail for the right reasons and keep its proof: a wall-clock margin between the leg's guard and the tools' own, `match` judged by its status block, no `.candidates/` or ignored file staged, the contact sheet sampled from the report's frames, the proof committed whenever a report exists, the drives' bounds under the runner's cap, the Windows tree-kill tested where it runs, the judge's infrastructure failures `inconclusive` and its rubric ids in one place,
+So that a slice run's red means the game or the asset, never the box (DW-94: the retrospective's B1 to B4, B8, B12, B13; DW-88, DW-89; AI-2).
+
+**Acceptance Criteria:**
+
+**Given** the slice host leg
+**When** a tool overruns or fails
+**Then** the leg's guard is the tool's own `--wall` plus a margin (`hostverify.ts:547-549, :445`; `assets.py:172`), so the tool's kill writes its report and the leg reads `wall-clock` from it; a crashed, `not-run` or write-back-failed `match` is `fault` from the status block's `reason`, `writeback` and `not-run` fields, red (`hostverify.ts:449`; `assets.py:1917-1923`); `proofCommit` runs `git check-ignore` and stages the art path without `.candidates/` (`worktree.ts:461-465`); the proof folder is committed whenever `report.json` exists, a `skipped: no manifest` assets step included (`worktree.ts:547`)
+
+**Given** `playable.py sheet` and the conformance drives
+**When** they run
+**Then** `sheet --report` samples from the report's `frames[]`, the judge's citable set, never every movie frame (`playable.py:756-757`); `e2e_vertical_slice.py` and `e2e_engine_gate.py` assert their bounds under `runner.py`'s cap or raise it through the manifest's `timeout` (DW-70 closed with them); the nt `taskkill /T /F` path of `kill_tree` is tested on nt (`test_playable.py:666`, `test_assets.py:865`)
+
+**Given** the judge
+**When** the pin, `sbx exec` or the status block fails
+**Then** `playable.verdict: inconclusive` names the infrastructure reason and the run ends `partial` without a rubric fail (`hostverify.ts:426, :619-630`); the rubric ids live in the core's list, read by the supervisor and pinned to the skill's text by a test (`hostverify.ts:478`, `playable_judge.py:51-60`, `skills/tk-studio-playable-judge/SKILL.md:38-42`); the contract (0.1.30, additive) names `inconclusive`; DW-88, DW-89 and DW-94 close by this PR
+
+### Story 35.4: The Engine MCP Before the First Flagged Run
+
+As the loop,
+I want the per-run engine MCP (34.5) to take per-run ports, record its start before it lets go of its children, kill them on a failed note, warn when a project's `engine.mcp.start` carries no `--exclude-domains`, and prove that the sandbox reaches the forwarder,
+So that the first editor-in-the-loop run on The Universe Awaits starts clean and verify-only (the retrospective's B6, B7, AI-5; the follow-up review DW-83 owed 34.5).
+
+**Acceptance Criteria:**
+
+**Given** a flagged run's pin
+**When** the MCP starts
+**Then** the forwarder and the server take free per-run ports (`port: 0` resolved, `{port}` substituted into `engine.mcp.start`; `env.ts:117-124`, `enginemcp.ts:410`), two flagged runs on one box no longer serialise into `start-failed`, the start is recorded in the queue before the three children are `unref`'d (`enginemcp.ts:447-449`), a failed `queue.note` kills them and ends the pin with the reason, and the release stops them and the event says so
+
+**Given** a project's tracked config
+**When** `tk-studio-launch check` or the pin reads an `engine.mcp.start` without `--exclude-domains` (or the server's equivalent filter)
+**Then** an advisory names the verify-only rule (`kb/engine-mcp-godot.md`) and the run proceeds; the contract (0.1.30, additive) names the per-run ports and the advisory
+
+**Given** TUA on the box
+**When** the operator runs one flagged run at the engine's request through the consult log
+**Then** the sandbox's call reaches `127.0.0.1:<port>/mcp` through the forwarder behind the per-run bearer (the reachability proof the 34.5 spec left open) and `kb/engine-mcp-godot.md` records it; the supervisor suites cover the ports, the record-before-unref and the kill with fakes
+
+### Story 35.5: The Sandbox and the Host Agree
+
+As the operator,
+I want the gates the engine runs in the sandbox and the gates the host runs to disagree only on what the box has: the 15 delivery tests red only in the sandbox reproduced and fixed, the eval cases that need a shell or the repository tree run on the sandbox tier through a job, a `godot` shim on the engine step's PATH, and the plugin's Windows notes for sandbox-written tests,
+So that the engine can trust its own suite and an acceptance record names a tier that works (holes 78, 84, 85; DW-78, DW-80, DW-81; the retrospective's C1, C6, C7, AI-7).
+
+**Acceptance Criteria:**
+
+**Given** the sandbox `claude-tk-studio` at main
+**When** `bun test test/delivery.test.ts` runs there
+**Then** the 15 Story 32.8 closeout-pass tests pass, the cause reproduced and fixed in the tests or the code (a path, a locale, the sandbox's bun at `~/.bun/bin`, whichever it is) and named in the plugin's sandbox notes, so the engine's gate may run the whole supervisor suite again (hole 84, DW-80)
+
+**Given** the plugin's eval cases
+**When** the shipped `maintenance-conformance` job type (or a `maintenance-evals` sibling of it) runs on the sandbox tier
+**Then** it runs `claude plugin eval` for the cases the host cannot (`tk-studio-playable-judge-verdict`, `asset-ladder-generated-rung`: the sandbox has the tree and a shell), writes the scores to the run workspace and a `job-run` ledger line, and `kb/acceptance-record-34-8-vertical-slice-on-tua.md`'s step 7 names the tier per case, the host keeping `gds-engine-godot-4-pinned-facts` (hole 85, DW-81); the operator queues it once and fills the record's eval row
+
+**Given** the engine step of the host leg and the plugin's docs
+**When** a project's command calls a bare `godot`, and when a sandbox-written test reaches the host
+**Then** the step's PATH holds a tk-studio shim named `godot` that execs `$env:GODOT` (or the leg refuses a bare `godot` with the reason; the planner picks and the runbook row says which; hole 78, DW-78), and the plugin's Windows notes for sandbox-written tests name case-folding file systems, PATHEXT, YAML backslashes, HKCU reads and append-mode handles (holes 74, 77, 82, 83) with one lib-suite example each that runs on Windows
+
+### Story 35.6: The Closeout Carries the Proof
+
+As the owner,
+I want the engagement's closeout page to carry each slice's sampled frames and `report.json` beside the contact sheet and the verdicts, each story reading its own leg's sheet, and the closeout's smaller edges closed,
+So that the page I read is the whole proof (DW-77, DW-92; the retrospective's B15).
+
+**Acceptance Criteria:**
+
+**Given** a slice run's closeout
+**When** `delivery.ts composeCloseout` composes and `engage.py closeout` publishes
+**Then** the closeout input carries each slice's `report.json` and its sampled frames (paths under the run workspace), the page attaches the sheet and the frames and embeds the report's verdict table, and each story reads its own leg's sheet, not the run's last (`delivery.ts:240-245`); the contract (0.1.30, additive) names the closeout input's media shape and the engagement conformance drive is extended
+
+**Given** the edges
+**When** a run hits them
+**Then** `playable` declared without `verify.engine` reads `skipped: no verify.engine`, not `engine gate not green` (`hostverify.ts:420-421`); `recommend.py` reads a `.mcp.json` with a BOM (`utf-8-sig`, `:528`, as `engine_pin.py:134` does); a moment at tick ≥ `--ticks` is captured on the last tick (`playable.py:302-314`); `enginemcp.ts` starts the server in the folder whose config it read (`run.prefix`, `:398-426`); the `scoping` revise path sets `game: true` (`engage.py:1190-1196`); each with a test
+
+**Given** the lib and supervisor suites and conformance
+**When** they run
+**Then** the closeout's media and the five edges are covered; DW-77 and DW-92 close by this PR; the design spec's feature-ledger Phase 3 row is untouched (the TUA acceptance stays the operator's, AI-1)
+
+### Story 35.7: The `run-sweep` Job Type
+
+As the owner,
+I want a shipped job type that runs a deferred-work sweep through the supervisor: the triage in the sandbox (`bmad-loop-sweep` in a sweep session, `BMAD_LOOP_MODE=1`), each bundle executed as a run with a worktree, a host leg and a PR, and the ledger's entries closed by the merge,
+So that DW-46 to DW-65 and the retrospective's deferred findings (DW-85 to DW-87 and whatever this epic leaves) have a path to main that keeps every rule a story run keeps (the planning finding: no job starts a sweep today, `[sweep] auto = "never"`).
+
+**Acceptance Criteria:**
+
+**Given** `plugins/tk-studio/jobs/run-sweep.json` (one-shot, guards, `stop.on_status`, effort, in `run-epic.json`'s shape) and a project instance naming it
+**When** `POST /jobs {project, job}` queues it
+**Then** the supervisor pins the sandbox and starts the engine's sweep session detached (the triage pass: `bmad-loop-sweep` reads `deferred-work.md` and returns the partition; `max_bundles` and the attempt caps from `.bmad-loop/policy.toml`), records the triage result in the run workspace and a `sweep-triage` event (the taxonomy extended additively), and the launch's status block names the bundles, the blocked entries and the human decisions
+
+**Given** a validated triage
+**When** the bundles execute
+**Then** each bundle is one engine dev pass in the run's worktree followed by the host leg and the close-out's PR (one PR per bundle, or one per sweep with the bundles listed: the planner decides and the contract names it), the `blocked` and `human decision` entries are listed in the PR body and the inbox line, a merged PR flips its entries to `resolved … by #N` through the plan pull-back, and the sweep ends `complete | partial | blocked` with the status block and a `job-run` ledger line
+
+**Given** tk-studio
+**When** the operator queues `run-sweep` once on the sandbox tier at the engine's request through the consult log
+**Then** one real sweep runs over the open ledger (its first targets: DW-46 to DW-65 and the consolidation entries DW-85 to DW-87; `max_bundles` bounds it), its PRs are merged on green by the operator, the ledger reads the closures; conformance drives the surface with a fake engine; the contract (0.1.30, additive) names the job type; the cost lands in the ledger
