@@ -137,12 +137,13 @@ candidate with Workbench (flat, one colour, transparent film, 128x128, orthograp
 
 | Visual gate | Threshold | Constant |
 | --- | --- | --- |
-| coverage: the share of the greybox's silhouette G the candidate's C covers (C ∩ G over G) | at least 0.6 | `VISUAL_COVERAGE_MIN` |
+| coverage: the share of the greybox's silhouette G the candidate's C covers (C ∩ G over G) | at least 0.25 (the planner's 0.6 until the box run below) | `VISUAL_COVERAGE_MIN` |
 | fill: the candidate's silhouette over the 128² frame (not a blank render) | at least 0.005 | `VISUAL_FILL_MIN` |
 
 The silhouettes are the renders' alpha > 0; a render without an alpha channel has none and fails the gate.
 
-The thresholds are planner defaults, not yet measured; the operator's box run retunes them here.
+The coverage floor was retuned from the planner's 0.6 to 0.25 on the box (the record below: Kenney's lamp post,
+bench and pine measure 0.38, 0.52 and 0.34 against their box greyboxes); the fill floor stays.
 Since `normalise.py` scales every candidate to the entry's bounds, the coverage of a thin or non-box asset
 (a lamp post, a chair, a tree) against a `collision: box` greybox is roughly its fill of that box, so
 such an asset can sit well below 0.6 and stay `candidate`.
@@ -289,9 +290,23 @@ unset: the default folder resolved, which is how 34.8's host leg calls `match`.
   measured **coverage 0.2841, fill 0.012**: `candidate`, the placeholder's bytes kept, `status: candidate`, the
   run `partial` (exit 1). The thin post scaled into its box greybox covers about the share of the box its
   silhouette fills, as predicted above.
-- The retune: not done on two synthetic points. With the 0.6 floor only boxy replacements pass; a thin asset
-  lands near 0.28. The call for 34.8's planner (or the EP-34 retro): make the floor collision-aware (a non-box
-  replacement for a `collision: box` greybox judged on its fill against the greybox's, or a lower floor for that
-  pair) or per-entry (`visual: {coverage_min}` in the manifest), and measure again on a real kit (a Kenney lamp
-  post, chair and tree) once one is mirrored.
+- **Re-measured on a real kit (20:4xZ, on Tim's OK to download one):** the Kenney Graveyard Kit 5.0 (CC0,
+  `kenney_graveyard-kit_5.0.zip`, 3.6 MB from kenney.nl) mirrored as `C:\agent-work\assets\kenney-graveyard-kit`
+  (`Models/` holds the 91 `.glb` of its `GLB format` folder, `License.txt` at the root; `mirror-index --category prop`:
+  `assets: 91`), the synthetic lamp post removed from `fixture-crate`. Three entries on the trial manifest, each
+  `collision: box` with the kit file's own proportions (normalise scales non-uniformly): `lamp-post` (0.4 × 2.4 ×
+  0.9 m, tags `lightpost`, `single`) matched `Models/lightpost-single.glb` (score 2, 352 triangles); `chair`
+  (0.8 × 0.5 × 0.45 m, tag `bench`) matched `Models/bench-damaged.glb` (score 1: the tie with `bench.glb` fell to the
+  path order, 240 triangles); `tree` (1.2 × 2.3 × 1.35 m, tag `pine`) matched `Models/pine-crooked.glb` (score 1, the
+  same tie rule, 336 triangles). `greybox` wrote the three in one run; `match` took 29 s for the three (normalise
+  and two renders each) and the gate measured **lamp post coverage 0.3792, fill 0.0287; bench 0.5196, 0.067; pine
+  0.3357, 0.0438** — every real asset `candidate` under the 0.6 floor, the renders correct (the box greybox framed,
+  the asset inside it: a thin post, a bench with gaps, a conical tree). With the crate (1.0) and the synthetic pole
+  (0.28) that is five points: coverage of a real asset scaled into its box greybox is its fill of that box, 0.3 to
+  0.5 for ordinary props, so the floor is a mis-framed-or-wrong-shape check, not a shape-fidelity gate.
+  **Retuned: `VISUAL_COVERAGE_MIN = 0.25`** (this record's PR; the tests, the contract and the table above follow),
+  which accepts all five measured assets and still fails a blank or mis-framed render (`SMALL_RENDER` in the suite
+  is 0.024). A per-entry override and a collision-aware rule stay open for the EP-34 retro if a slice needs them.
+  Re-run under the retuned floor: the three accepted, placed, the manifest rewritten (`source:
+  kenney-graveyard-kit/Models/<file>`), `check` pass 6 of 6, Godot 4.7.2 headless import clean.
 - Step 5 (`generate`) was not run: no `assets.credit_cap` and no `TK_ASSETS_MESHY_KEY` on the box, by design.

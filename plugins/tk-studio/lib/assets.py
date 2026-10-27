@@ -75,7 +75,7 @@ Guarantees:
     `TK_ASSETS_MESHY_KEY` exists as a User environment variable) normalise
     the replacement through `lib/blender/normalise.py`, publish it to
     `<art_path>/.candidates/<name>.glb`, run the `facts` gate and the
-    visual gate (`lib/blender/render.py`: coverage >= 0.6 of the greybox's
+    visual gate (`lib/blender/render.py`: coverage >= 0.25 of the greybox's
     silhouette, fill >= 0.005) and only then replace the placeholder
     (`os.replace`); they rewrite only the moved entries' `status`,
     `licence` and `source` lines. `generate` records every call through
@@ -1258,10 +1258,15 @@ CANDIDATES_DIR = ".candidates"
 MATCH_ACTIONS = ("accepted", "candidate", "unmatched", "skipped", "failed", "not-run")
 GENERATE_ACTIONS = ("accepted", "candidate", "skipped", "failed", "not-run")
 
-# The visual gate (Settled shape 6): planner defaults, retuned only in the
-# kb row after the operator's box run.
+# The visual gate (Settled shape 6). The coverage floor was retuned on the box
+# (2026-10-27, kb/asset-ladder.md §The operator's box step for Story 34.7):
+# normalise.py scales every candidate into the entry's bounds, so coverage
+# measures how much of its box greybox a real asset fills, and Kenney's lamp
+# post, bench and pine measured 0.38, 0.52 and 0.34 (a synthetic 0.1 m pole
+# 0.28). The planner's 0.6 passed only boxy replacements; 0.25 keeps the
+# floor as the mis-framed-or-wrong-shape check it is meant to be.
 RENDER_SIZE = 128
-VISUAL_COVERAGE_MIN = 0.6
+VISUAL_COVERAGE_MIN = 0.25
 VISUAL_FILL_MIN = 0.005
 
 # The generated rung (Settled shape 7).
