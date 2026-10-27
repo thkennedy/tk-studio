@@ -317,7 +317,8 @@ def load_types() -> dict:
 
 def resolve_instance(defn: dict, types: dict | None = None) -> tuple[dict, list[str]]:
     """Apply type extension: instance fields override the shipped type's,
-    target keys overlay, payload shallow-merges (instance wins)."""
+    target keys overlay, payload shallow-merges (instance wins); the merged
+    definition carries the instance's ``type`` (Story 34.8)."""
     if "type" not in defn:
         return defn, []
     types = load_types() if types is None else types
@@ -330,6 +331,10 @@ def resolve_instance(defn: dict, types: dict | None = None) -> tuple[dict, list[
         return defn, [f"job type '{type_id}' is itself invalid: "
                       + "; ".join(entry["problems"])]
     merged = json.loads(json.dumps(entry["definition"]))
+    # Story 34.8: the merged definition keeps the type it extends, so a
+    # consumer of the resolved definition (the supervisor's slice detection:
+    # `type` or `id` is `run-vertical-slice`) can tell an instance's type.
+    merged["type"] = type_id
     for key, value in defn.items():
         if key == "type":
             continue

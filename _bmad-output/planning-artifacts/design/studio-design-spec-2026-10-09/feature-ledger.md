@@ -13,7 +13,7 @@ Source: [planning pass 2026-09-26](../../briefs/planning-pass-agent-pc-and-super
 | 0. Agent PC provisioning | runbook §7 smoke green | **built** (TIM-PC-2 live since 2026-10-07; survived the 10-08 reboot) | kept; the installer's `doctor` verb takes over the smoke table |
 | 1. Supervisor extraction | queue, pacer, guards, tiers, API, status page, logon start, contract 0.1.18 | **built** (Epics 20 to 22; 599 tests) | C2 Supervisor, kept and extended |
 | 2. Hermes front door | 0.21.x install, Telegram, dashboard on the tailnet, learning gated, `tk-submit` and `tk-status` skills, one cron, `hermes mcp serve` | **superseded** (D2 ruled B, 2026-10-14): Hermes is dropped; the outbound notifier stays; see A.5 | the studio's own chat (EP-32); a native bot later if wanted |
-| 3. Vertical-slice pack | `playable-verify` leg, engine MCP wiring, asset-manifest ladder, `run-vertical-slice` job, contract bump, eval cases | **open**, nothing started | EP-28 Vertical-slice pack (game projects) |
+| 3. Vertical-slice pack | `playable-verify` leg, engine MCP wiring, asset-manifest ladder, `run-vertical-slice` job, contract bump, eval cases | **built, TUA acceptance pending** | EP-28 Vertical-slice pack (game projects) |
 | 4. ClaudeOS retirement | disable the last task, push, tag, remove the worktree | one elevated-shell step left (runbook §9) | operator step; not in the design |
 
 ## A.2 Epics 20 to 24 (the Phase 1 plan, story by story)

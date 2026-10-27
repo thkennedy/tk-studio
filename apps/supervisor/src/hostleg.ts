@@ -27,7 +27,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
 import { workDir } from "./env";
 import { canonicalPr } from "./hygiene";
-import { hostVerify, type HostVerifyResult } from "./hostverify";
+import { hostVerify, isSlice, type HostVerifyResult } from "./hostverify";
 import { isTerminal, selfOwner, servedRoot, type Owner, type Queue, type QueueEvent, type QueueRun, type RunState } from "./queue";
 import { lastJsonObject, type RunResult } from "./server";
 import { gh, materialise, openPrUrl, priorPr, runBranch, runner, type WorktreeDeps } from "./worktree";
@@ -161,7 +161,8 @@ async function runLeg(
   const rerun: HostLegRerun = { by: at.by, head: at.head, worktree: "kept", pr: null };
   try {
     const guardS = run.worker_guard_s ?? (Number(queue.definition(run)?.guards?.max_wall_clock_seconds) || 600);
-    verify = await hostVerify({ ...run, worktree: path }, guardS, deps);
+    // Story 34.8: a slice run's re-run gets the assets step too (the close-out's detection, from the resolved definition).
+    verify = await hostVerify({ ...run, worktree: path }, guardS, deps, { slice: isSlice(queue.definition(run)) });
     rerun.worktree = await removeWorktree(run.root, path, deps);
     rerun.pr = await runPr(run, queue.events(run.run_id), at.branch, deps);
     if (rerun.pr && !verify.skipped && verify.green) rerun.pr_ready = await markReady(run.root, rerun.pr, deps);

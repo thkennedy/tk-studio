@@ -612,3 +612,89 @@ describe("Story 32.8 follow-up review: a closed PR, a record moved on, another p
     expect(closeouts(queue2)).toEqual([other2]);
   });
 });
+
+describe("Story 34.8: the slice's verdicts per story in the closeout input (AC2)", () => {
+  test("a slice run's last host-verify gives one slice per story; a non-slice run gives none (no `slices` key)", async () => {
+    const queue = newQueue();
+    const root = servedRoot(queue);
+    const job = "run-epic-41";
+    const { run } = queue.enqueue({ jobId: job, root, projectId: "p", definition: { id: job, type: "run-vertical-slice" }, payload: { engagement: ENG, project: "p" } });
+    queue.serviceEvent(RUN_QUEUED_EVENT, { engagement: ENG, project: "p", run_id: run.run_id, job });
+    await launch(queue, run.run_id, "E1");
+    // the real order: the paused-ruling close-out notes run no leg; the leg runs once, at the engine's completion
+    queue.note(run.run_id, "close-out", { story_key: "41-1-csv-button" });
+    queue.note(run.run_id, "close-out", { story_key: "41-2-filtered-export" });
+    queue.note(run.run_id, "host-verify", { green: true, engine: { verdict: "green" }, assets: { verdict: "green", steps: [] }, playable: { verdict: "pass", contact_sheet: "/store/run-77/playable/contact-sheet.png" } });
+    queue.end(run.run_id, "complete", null, { detail: { pr: PR_1 } });
+    const fx = deps();
+    const input = await composeCloseout(queue, fx.deps, { root, engagement: ENG }, readEngagement(root, ENG)!, queue.get(run.run_id)!);
+    expect(input.slices).toEqual([
+      { story: "41-1-csv-button", engine: "green", assets: "green", playable: "pass", contact_sheet: "/store/run-77/playable/contact-sheet.png" },
+      { story: "41-2-filtered-export", engine: "green", assets: "green", playable: "pass", contact_sheet: "/store/run-77/playable/contact-sheet.png" },
+    ]);
+
+    const plain = newQueue();
+    const plainRoot = servedRoot(plain);
+    const r = link(plain, plainRoot);
+    await launch(plain, r, "E2");
+    plain.note(r, "close-out", { story_key: "41-1-csv-button" });
+    plain.note(r, "host-verify", { green: true, engine: { verdict: "green" }, playable: { verdict: "skipped", reason: "no playable" } });
+    plain.end(r, "complete", null, { detail: { pr: PR_1 } });
+    const plainInput = await composeCloseout(plain, fx.deps, { root: plainRoot, engagement: ENG }, readEngagement(plainRoot, ENG)!, plain.get(r)!);
+    expect("slices" in plainInput).toBe(false);
+  });
+
+  test("a later host-verify (a re-verify) supersedes the earlier leg for every story of the run", async () => {
+    const queue = newQueue();
+    const root = servedRoot(queue);
+    const { run } = queue.enqueue({ jobId: "run-epic-41", root, projectId: "p", definition: { id: "run-epic-41", type: "run-vertical-slice" }, payload: { engagement: ENG, project: "p" } });
+    queue.serviceEvent(RUN_QUEUED_EVENT, { engagement: ENG, project: "p", run_id: run.run_id, job: "run-epic-41" });
+    await launch(queue, run.run_id, "E1");
+    queue.note(run.run_id, "close-out", { story_key: "41-1-csv-button" });
+    queue.note(run.run_id, "close-out", { story_key: "41-2-filtered-export" });
+    queue.note(run.run_id, "host-verify", { green: true, engine: { verdict: "green" }, assets: { verdict: "green", steps: [] }, playable: { verdict: "pass", contact_sheet: "/store/sheets/leg-1.png" } });
+    queue.end(run.run_id, "complete", null, {});
+    queue.note(run.run_id, "host-verify", { green: false, engine: { verdict: "green" }, assets: { verdict: "red", steps: [] }, playable: { verdict: "fail", contact_sheet: "/store/sheets/leg-2.png" } });
+    const input = await composeCloseout(queue, deps().deps, { root, engagement: ENG }, readEngagement(root, ENG)!, queue.get(run.run_id)!);
+    expect(input.slices).toEqual([
+      { story: "41-1-csv-button", engine: "green", assets: "red", playable: "fail", contact_sheet: "/store/sheets/leg-2.png" },
+      { story: "41-2-filtered-export", engine: "green", assets: "red", playable: "fail", contact_sheet: "/store/sheets/leg-2.png" },
+    ]);
+  });
+
+  test("a slice run with no host-verify event reads `not run`; a skipped leg reads `skipped`", async () => {
+    for (const [hv, want] of [[undefined, "not run"], [{ skipped: true, reason: "worktree gone" }, "skipped"]] as const) {
+      const queue = newQueue();
+      const root = servedRoot(queue);
+      const { run } = queue.enqueue({ jobId: "run-epic-41", root, projectId: "p", definition: { id: "run-epic-41", type: "run-vertical-slice" }, payload: { engagement: ENG, project: "p" } });
+      queue.serviceEvent(RUN_QUEUED_EVENT, { engagement: ENG, project: "p", run_id: run.run_id, job: "run-epic-41" });
+      await launch(queue, run.run_id, "E1");
+      if (hv) queue.note(run.run_id, "host-verify", hv);
+      queue.end(run.run_id, "complete", null, {});
+      const input = await composeCloseout(queue, deps().deps, { root, engagement: ENG }, readEngagement(root, ENG)!, queue.get(run.run_id)!);
+      expect(input.slices).toEqual([{ story: run.run_id, engine: want, assets: want, playable: want }]);
+    }
+  });
+
+  test("one story key in two linked slice runs (a resubmit): one slice line, the later run's", async () => {
+    const queue = newQueue();
+    const root = servedRoot(queue);
+    const slice = (after?: string) => {
+      const { run } = queue.enqueue({ jobId: "run-epic-41", root, projectId: "p", definition: { id: "run-epic-41", type: "run-vertical-slice" }, payload: { engagement: ENG, project: "p" } });
+      queue.serviceEvent(RUN_QUEUED_EVENT, { engagement: ENG, project: "p", run_id: run.run_id, job: "run-epic-41", ...(after ? { after_run: after } : {}) });
+      return run.run_id;
+    };
+    const first = slice();
+    await launch(queue, first, "E1");
+    queue.note(first, "host-verify", { green: false, engine: { verdict: "green" }, assets: { verdict: "red", steps: [] }, playable: { verdict: "skipped" } });
+    queue.note(first, "close-out", { story_key: "41-1-csv-button" });
+    queue.end(first, "partial", null, {});
+    const second = slice(first);
+    await launch(queue, second, "E2");
+    queue.note(second, "host-verify", { green: true, engine: { verdict: "green" }, assets: { verdict: "green", steps: [] }, playable: { verdict: "pass", contact_sheet: "/store/s-2/contact-sheet.png" } });
+    queue.note(second, "close-out", { story_key: "41-1-csv-button" });
+    queue.end(second, "complete", null, {});
+    const input = await composeCloseout(queue, deps().deps, { root, engagement: ENG }, readEngagement(root, ENG)!, queue.get(second)!);
+    expect(input.slices).toEqual([{ story: "41-1-csv-button", engine: "green", assets: "green", playable: "pass", contact_sheet: "/store/s-2/contact-sheet.png" }]);
+  });
+});

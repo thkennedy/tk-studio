@@ -31,7 +31,8 @@
  *                  sync    `plansync.py sync --directory <worktree>` (normalize, then the projection: the EP- and ST-
  *                          entities, the index, the backlog mirrors, the promote to Jira); its `written[]` and `removed[]` kept;
  *                  job     each appended epic's `run-epic-N` job declared (`.tk-studio/jobs/run-epic-N.json` and its id
- *                          appended to `.tk-studio/config.yaml`'s `jobs:`, every other byte kept), and
+ *                          appended to `.tk-studio/config.yaml`'s `jobs:`, every other byte kept; Story 34.8: `type:
+ *                          "run-vertical-slice"` when the record carries `game: true`, else `"run-epic"`), and
  *                          `.tk-studio/budget-bands.yaml` re-keyed: each `quote.basis.epics[].ep_id`'s `usd_estimate`
  *                          (read from the served root) moved to the minted EP id in `quote.epic_bands_text`'s byte
  *                          shape, other entries kept; a `null` `ep_id` writes no band and is named in `no_band`;
@@ -88,6 +89,7 @@ import {
   type Engagement, type EngagementEvent, type EngagementState, type InputLine,
 } from "./engagement";
 import { notifier, workDir } from "./env";
+import { SLICE_JOB_TYPE } from "./hostverify";
 import { notify as sendNotice, type EndNotice } from "./hygiene";
 import { readComments } from "./inbox";
 import { readInbox } from "./office";
@@ -692,13 +694,16 @@ async function worktreeSteps(queue: Queue, deps: ApproveDeps, t: Target, record:
     const at = nowIso(deps).slice(0, 10);
     let config = "";
     try { config = readFileSync(join(served, CONFIG_REL), "utf-8"); } catch { /* absent: a new config */ }
+    // Story 34.8: a game engagement (`game: true`, decided by `engage.py scope`, never re-derived here) mints its
+    // `run-epic-N` jobs as the shipped `run-vertical-slice` type; the ids stay `run-epic-N` (board, cli place by id).
+    const jobType = (record as unknown as Record<string, unknown>).game === true ? SLICE_JOB_TYPE : "run-epic";
     for (const e of appendedEpics) {
       const jobId = `run-epic-${e.n}`;
       const jobPath = join(served, JOBS_REL, `${jobId}.json`);
       // a resumed pass keeps the job file it already wrote (its declared date)
       if (!(resume && existsSync(jobPath))) {
         const job = {
-          job_schema_version: 1, id: jobId, type: "run-epic",
+          job_schema_version: 1, id: jobId, type: jobType,
           description: `${project} Epic ${e.n} (${e.title}) for engagement ${id} through the supervisor queue (declared ${at} by the approve pass, Story 32.6).`,
           target: { payload: { epic: e.n } },
         };

@@ -2173,5 +2173,208 @@ class CloseoutCliTests(CloseoutTestCase):
                           if p.is_file()}, before)
 
 
+# ---------------------------------------------- Story 34.8: the game path
+
+BRIEF = "# Game Brief\n\nA greybox courier run across one moon.\n"
+GDD = "# GDD\n\n## Core loop\n\nPick up, fly, deliver.\n"
+BRIEF_REL = "_bmad-output/engagements/ENG-001/brief.md"
+GDD_REL = "_bmad-output/engagements/ENG-001/gdd.md"
+
+
+class GameScopeTests(ScopeTestCase):
+    def make_game(self, entry="gds"):
+        with self.config.open("a", encoding="utf-8") as handle:
+            handle.write(f"working_set:\n  developer:\n    - {entry}\n")
+
+    def test_detection_reads_the_tracked_working_set_only(self):
+        self.assertFalse(engage.is_game_project(self.root))
+        self.make_game("gds-engine-godot-4")
+        self.assertTrue(engage.is_game_project(self.root))
+        self.assertFalse(engage.is_game_project(self.root / "nowhere"))
+
+    def test_a_game_scope_publishes_brief_and_gdd_beside_the_scope(self):
+        self.make_game()
+        result = self.scope(brief=BRIEF, gdd=GDD)
+        self.assert_status_block_last(result, "complete")
+        self.assertTrue(result["game"])
+        scope_page = self.fake.page(SCOPE_TITLE)
+        brief = self.fake.page("ENG-001: Game Brief")
+        gdd = self.fake.page("ENG-001: GDD")
+        # the same Engagements/ENG-001 folder as the scope
+        self.assertEqual(brief["parentId"], scope_page["parentId"])
+        self.assertEqual(gdd["parentId"], scope_page["parentId"])
+        self.assertIn("<code>_bmad-output/engagements/ENG-001/brief.md</code>",
+                      brief["body"])
+        self.assertIn("<h2>Core loop</h2>", gdd["body"])
+        self.assertEqual((self.dir / "brief.md").read_text(encoding="utf-8"),
+                         BRIEF)
+        self.assertEqual((self.dir / "gdd.md").read_text(encoding="utf-8"),
+                         GDD)
+        record = self.record()
+        self.assertIs(record["game"], True)
+        for key, page in (("brief_page", brief), ("gdd_page", gdd)):
+            url = f"https://{SITE}/wiki/spaces/TKSTUDIO/pages/{page['id']}"
+            self.assertEqual(record[key], {"id": page["id"], "url": url,
+                                           "version": 1})
+            self.assertEqual(result[key]["action"], "created")
+        self.assertIn(BRIEF_REL, result["written"])
+        self.assertIn(GDD_REL, result["written"])
+        # a second run with the same docs skips every page
+        self.fake.calls.clear()
+        again = self.scope(brief=BRIEF, gdd=GDD)
+        self.assert_status_block_last(again, "complete")
+        self.assertEqual(again["brief_page"]["action"], "skipped")
+        self.assertEqual(again["gdd_page"]["action"], "skipped")
+        self.assertEqual(self.fake.writes(), [])
+
+    def test_a_game_project_without_either_doc_is_refused(self):
+        self.make_game()
+        for kwargs, missing in (({"gdd": GDD}, "brief"),
+                                ({"brief": BRIEF}, "gdd"), ({}, "brief")):
+            result = self.scope(**kwargs)
+            self.assert_status_block_last(result, "blocked")
+            self.assertIn(f"GameDocsMissing: {missing}", result["reason"])
+        self.assertFalse(self.scope_file().exists())
+        self.assertNotIn("game", self.record())
+
+    def test_a_revise_of_a_scope_published_before_34_8_needs_no_doc_flags(self):
+        # a game engagement scoped before 34.8: scope_page, no brief/gdd page
+        self.scope()
+        self.make_game()
+        self.assertIn("scope_page", self.record())
+        record = self.record()
+        record["inputs"] = list(record.get("inputs") or []) + [{
+            "at": REVISE_AT, "verb": "revise", "source": "bearer",
+            "payload": {"body": "# revised scope\n"}, "from": "scoping",
+            "to": "scoping"}]
+        self.set_record(inputs=record["inputs"])
+        result = self.scope(text=None, revise_at=REVISE_AT)
+        self.assert_status_block_last(result, "complete")
+        self.assertTrue(result["game"])
+        self.assertNotIn("brief_page", self.record())
+        self.assertNotIn("gdd_page", self.record())
+        # no doc published by this revise: no `game` key minted
+        self.assertNotIn("game", self.record())
+        # a record already carrying `game: true` keeps it through a flagless revise
+        self.set_record(game=True)
+        kept = self.scope(text=None, revise_at=REVISE_AT)
+        self.assert_status_block_last(kept, "complete")
+        self.assertIs(self.record().get("game"), True)
+        # the first scope of a fresh game engagement still needs both
+        self.set_record(scope_page=None)
+        refused = self.scope(text=None, revise_at=REVISE_AT)
+        self.assertIn("GameDocsMissing: brief", refused["reason"])
+
+    def test_doc_flags_on_another_project_are_refused(self):
+        result = self.scope(brief=BRIEF, gdd=GDD)
+        self.assert_status_block_last(result, "blocked")
+        self.assertIn("NotAGameProject", result["reason"])
+        self.assertFalse(self.scope_file().exists())
+        # no flag on another project: unchanged, no game key
+        plain = self.scope()
+        self.assert_status_block_last(plain, "complete")
+        self.assertFalse(plain["game"])
+        self.assertNotIn("game", self.record())
+        self.assertNotIn("brief_page", self.record())
+
+    def test_the_cli_takes_the_doc_files(self):
+        self.make_game()
+        brief = Path(self._tmp.name) / "brief-in.md"
+        brief.write_text(BRIEF, encoding="utf-8")
+        scope_in = Path(self._tmp.name) / "scope-in.md"
+        scope_in.write_text(SCOPE, encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = engage._scope_main(self.root, engage.argparse.Namespace(
+                engagement=ENG, scope_file=str(scope_in), revise_at=None,
+                dry_run=False, brief_file=str(brief), gdd_file=None),
+                transport=self.fake)
+        result = json.loads(out.getvalue())
+        self.assertEqual(code, 2)
+        self.assertIn("GameDocsMissing: gdd", result["reason"])
+
+
+class CloseoutSliceTests(CloseoutTestCase):
+    def sheet(self) -> Path:
+        path = Path(self._tmp.name) / "store" / "contact-sheet.png"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"\x89PNG\r\n\x1a\nfake-sheet")
+        return path
+
+    def test_no_slice_no_section(self):
+        self.closeout()
+        self.assertNotIn("## Slice verdicts", self.report())
+
+    def test_slice_verdicts_per_story_with_the_contact_sheet_attached(self):
+        self.set_record(state="scoping")
+        self.scope()
+        self.set_record(state="in-progress")
+        sheet = self.sheet()
+        result = self.closeout(closeout_input(slices=[
+            {"story": "41-1-csv-button", "engine": "green", "assets": "green",
+             "playable": "pass", "contact_sheet": str(sheet)},
+            {"story": "41-2-filtered-export", "engine": "red",
+             "assets": "skipped", "playable": "skipped"}]))
+        self.assert_status_block_last(result, "complete")
+        text = self.report()
+        sections = [line[3:] for line in text.split("\n")
+                    if line.startswith("## ")]
+        self.assertEqual(sections[:3], ["Outcome", "Deliverables",
+                                        "Slice verdicts"])
+        self.assertIn("- 41-1-csv-button — engine green; assets green; "
+                      "playable pass", text)
+        self.assertIn("- 41-2-filtered-export — engine red; assets skipped; "
+                      "playable skipped", text)
+        self.assertIn("![41-1-csv-button contact sheet]"
+                      "(41-1-csv-button-contact-sheet.png)", text)
+        copied = self.dir / "41-1-csv-button-contact-sheet.png"
+        self.assertEqual(copied.read_bytes(), sheet.read_bytes())
+        page = self.fake.page("ENG-001: Closeout")
+        self.assertIn('ri:filename="41-1-csv-button-contact-sheet.png"',
+                      page["body"])
+        files = self.fake.attachments[page["id"]]
+        self.assertEqual([f["title"] for f in files],
+                         ["41-1-csv-button-contact-sheet.png"])
+        self.assertEqual(files[0]["content"], sheet.read_bytes())
+        # a re-run with the same sheet uploads nothing again
+        self.fake.calls.clear()
+        self.closeout(closeout_input(slices=[
+            {"story": "41-1-csv-button", "engine": "green", "assets": "green",
+             "playable": "pass", "contact_sheet": str(sheet)},
+            {"story": "41-2-filtered-export", "engine": "red",
+             "assets": "skipped", "playable": "skipped"}]))
+        self.assertFalse([c for c in self.fake.calls
+                          if c[0] == "PUT" and "attachment" in c[1]])
+
+    def test_an_unreadable_sheet_is_a_note_and_bad_slices_are_refused(self):
+        result = self.closeout(closeout_input(slices=[
+            {"story": "41-1-csv-button", "engine": "green", "assets": "green",
+             "playable": "pass",
+             "contact_sheet": str(Path(self._tmp.name) / "missing.png")}]))
+        self.assert_status_block_last(result, "complete")
+        self.assertTrue(any("contact sheet of 41-1-csv-button unreadable" in n
+                            for n in result["notes"]))
+        self.assertNotIn("contact sheet](", self.report())
+        bad = self.closeout(closeout_input(slices=[{"engine": "green"}]))
+        self.assert_status_block_last(bad, "blocked")
+        self.assertIn("CloseoutInputInvalid", bad["reason"])
+
+    def test_a_slice_without_engine_assets_or_playable_is_refused(self):
+        whole = {"story": "41-1-csv-button", "engine": "green",
+                 "assets": "green", "playable": "pass"}
+        for field in ("engine", "assets", "playable"):
+            for value in (None, "", "  ", 3):
+                entry = dict(whole)
+                if value is None:
+                    del entry[field]
+                else:
+                    entry[field] = value
+                with self.subTest(field=field, value=value):
+                    bad = self.closeout(closeout_input(slices=[entry]))
+                    self.assert_status_block_last(bad, "blocked")
+                    self.assertIn("CloseoutInputInvalid", bad["reason"])
+                    self.assertIn(f"slices[0] {field}", bad["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -172,7 +172,7 @@ on, the owner sets both:
 
    ```yaml
    assets:
-     credit_cap: 100   # per generate invocation; the 34.8 host leg calls generate at most once per run
+     credit_cap: 100   # per generate invocation; the 34.8 host leg never calls generate (zero calls per run)
    ```
 
 2. the key, as a User environment variable by name, never in a file:
@@ -193,6 +193,31 @@ overshoot. Every call, failed ones included, is one `asset-generation` line in t
 (`{run_id, asset, provider, task_id?, credits, estimated?, state, reason?}`); a line that does not land
 ends the run `partial` naming the entry, and every later entry is `not-run: ledger unwritable`, with no
 further call. The key never appears in output, a file, the ledger or argv.
+
+## The host leg's calls (Story 34.8)
+
+A `run-vertical-slice` run (the job type a game engagement's approval mints; plain `run-epic` runs are
+untouched) runs the ladder on the host, in the supervisor's host leg, after a green `verify.host` and before
+the engine gate, so the headless import sees the placed files:
+
+1. skipped `no manifest` when the base config's `assets.manifest` (default `assets/manifest.yaml`) is absent
+   in the run's worktree; the leg goes on to the engine gate;
+2. else `uv run <plugin>/lib/assets.py check`, then `greybox`, then `match`, each with `--directory <served
+   root> --manifest <assets.manifest> --art-path <assets.art_path>` read from the tracked config at the run's
+   base (TUA's art path is `art/world/greybox`), under the leg's guard;
+3. `match` gets no `--mirror`: `TK_ASSETS_MIRROR` or the default `C:\agent-work\assets` resolves it, and with
+   no mirror it ends `complete` with its entries `skipped: no mirror`;
+4. `generate` is never called: the paid rung stays the operator's hand step, so the cap's "at most once per
+   run" holds as zero.
+
+`check` or `greybox` exiting 1 or 2 is red (the later verbs and the engine gate are not run; the run ends
+`partial`, `host verify red (assets): …`); a `match` exit 1 (a Blender or normalise failure, a `candidate`)
+is `fault`, recorded and not red, its placeholder kept; any other `match` non-zero is red. The leg records
+`assets {verdict, reason?, manifest?, art_path?, steps[]}` on its `host-verify` event and the PR's `## Host
+verify` section reads `Assets: green | red | skipped (<reason>)`. After a green (or fault) step the close-out
+commits, by name and before the push, the changed files under the art path, the manifest and
+`.tk-studio/proof/<run_id>/` (the playable report, the contact sheet `playable.py sheet` drew and the
+frames it sampled) with the message `host leg: placed assets and proof (run <run_id>)`.
 
 ## The Blender pin and determinism
 

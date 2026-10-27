@@ -1,0 +1,21 @@
+{
+  "job_schema_version": 1,
+  "id": "run-vertical-slice",
+  "description": "Studio pipeline job type (Story 34.8, user flow F9): run one game project's epic as a playable vertical slice. The engine runs the story as run-epic does (tk-studio-launch distills the epic SPEC, bootstraps the first story's task manifest at the planner tier, starts bmad-loop detached with a pre-minted run id); the supervisor's host leg then runs, in order, the project's host command, the asset ladder's check, greybox and match (never generate, never --mirror), the engine gate and the playable-verify leg (with a contact sheet of its frames), and the close-out commits the placed art and the proof media (report, frames, contact sheet) under .tk-studio/proof/<run_id>/ before the PR. Approval mints run-epic-N instances of this type for an engagement whose record carries game: true.",
+  "target": {
+    "skill": "tk-studio-launch",
+    "payload": {
+      "verb": "start",
+      "bootstrap": true
+    }
+  },
+  "trigger": "one-shot",
+  "guards": {
+    "max_turns": 80,
+    "max_wall_clock_seconds": 3600
+  },
+  "stop": {
+    "on_status": ["blocked"]
+  },
+  "effort": "high"
+}

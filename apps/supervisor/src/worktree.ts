@@ -48,6 +48,15 @@
  *              An engine the supervisor killed (`killedEngine`) never writes its own end — its status
  *              stays in-progress — so a running/unknown status is read as ended once its recorded kill
  *              shows it gone.
+ *   slice      Story 34.8: a `run-vertical-slice` run (`isSlice` of `queue.definition(run)`, decided once in the sweep and
+ *              passed to `hostVerify` and the close-out). After a green assets step (a `match` fault counts green) the
+ *              close-out copies the proof — the playable store's `report.json`, `contact-sheet.png` and the frames the
+ *              sheet sampled — into `<served root>/.tk-studio/proof/<run_id>/`, then commits on the run branch, before
+ *              the push, only `git add -- <assets.art_path> <assets.manifest> .tk-studio/proof/<run_id>/` (named
+ *              paths, never `-A`; a clean index commits nothing) with the message `host leg: placed assets and proof
+ *              (run <run_id>)`. A failure there is the close-out's `error` (nothing pushed, the worktree kept). The
+ *              PR body then embeds the sheet (`<origin web URL>/blob/<head sha>/<path>?raw=true`) and lists the
+ *              committed frames, on pass and fail alike. A non-slice run's close-out is unchanged.
  *   retries    a close-out run again (its record lost) is idempotent: the commits and the push are
  *              read from the checkout once the worktree is gone (the removal counted done), and an open
  *              PR from the run branch (`gh pr list --head`) is adopted, never opened twice.
@@ -56,12 +65,12 @@
  * origin's repository (`GH_REPO`, parsed from `git remote get-url origin`). Credentials never reach an
  * event: a failing command's output is clipped and any URL userinfo redacted.
  */
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { ghBin, pluginRoot, WorkDirMissing, workDir } from "./env";
 import { canonicalPr, isWithin } from "./hygiene";
-import { hostVerify, isRed, prSection, redReason, type HostVerifyResult, type PlayableJudge, type PlayableRoute } from "./hostverify";
+import { CONTACT_SHEET, hostVerify, isRed, isSlice, prSection, redReason, type HostVerifyResult, type PlayableJudge, type PlayableRoute, type PrProof } from "./hostverify";
 import { accountedCostOf, isTerminal, RunTerminal, servedRoot, type EngineWhere, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
 import { releasePin, sameStart, vmLaunchStatus, type SandboxDeps } from "./sandbox";
 import { lastJsonObject, runJobVerb, runProcess, runUv, toVmPath, type RunResult, type Tier } from "./server";
@@ -368,7 +377,7 @@ export function meteredCost(worktree: string, engineRunId: string | null | undef
 /** The PR body, in order: the launch status block (fenced JSON), `Engine run: <id>`, the landed
  * commits (`git log --oneline <base_ref>..HEAD`), the metered cost (or "not metered"), and the host
  * verify leg's `## Host verify` section when it was run or skipped (Story 27.4). */
-export function prBody(input: { statusBlock?: unknown; engineRunId?: string | null; commits: string[]; costUsd?: number; runId: string; verify?: HostVerifyResult }): string {
+export function prBody(input: { statusBlock?: unknown; engineRunId?: string | null; commits: string[]; costUsd?: number; runId: string; verify?: HostVerifyResult; proof?: PrProof }): string {
   return [
     `Opened by the supervisor for queue run \`${input.runId}\`.`,
     "",
@@ -387,7 +396,7 @@ export function prBody(input: { statusBlock?: unknown; engineRunId?: string | nu
     "## Metered cost",
     "",
     input.costUsd === undefined ? "not metered" : `$${input.costUsd.toFixed(4)} (total_cost_usd)`,
-    ...(input.verify ? ["", ...prSection(input.verify)] : []),
+    ...(input.verify ? ["", ...prSection(input.verify, input.proof)] : []),
   ].join("\n");
 }
 
@@ -399,12 +408,92 @@ export interface CloseOut {
   branch?: "deleted" | string;
   /** Story 27.4: the host verify leg's outcome, when the close-out was given one. */
   host_verify?: "green" | "red" | "skipped";
+  /** Story 34.8: the host-side commit of a slice run (its sha, or "nothing to commit"). */
+  host_commit?: string;
+}
+
+/** Story 34.8: the proof folder of a run, served-root relative. */
+export const proofRel = (runId: string) => `.tk-studio/proof/${runId}`;
+/** Story 34.8: the host-side commit's message. */
+export const hostCommitMessage = (runId: string) => `host leg: placed assets and proof (run ${runId})`;
+
+/** Story 34.8: copy the proof into the served root and commit the named paths on the run branch (see the header).
+ * Answers the committed frame paths, the sha (or "nothing to commit") and whether the sheet landed; throws a
+ * message on any failure. */
+async function proofCommit(
+  run: Pick<QueueRun, "run_id" | "worktree" | "prefix">, verify: HostVerifyResult, deps: WorktreeDeps,
+): Promise<{ sha: string; frames: string[]; sheet?: string; head?: string }> {
+  if (verify.skipped || !verify.assets) throw new Error("no assets step recorded");
+  const served = servedRoot(run as QueueRun)!;
+  const branch = runBranch(run.run_id);
+  const at = await git(deps, served, ["rev-parse", "--abbrev-ref", "HEAD"], 30);
+  if (at.exit !== 0) throw new Error(`git rev-parse --abbrev-ref HEAD ${failed(at)}`);
+  if (at.stdout.trim() !== branch) throw new Error(`the worktree is on '${clip(at.stdout.trim() || "?")}', not the run branch '${branch}'`);
+  const rel = proofRel(run.run_id);
+  const dir = join(served, ...rel.split("/"));
+  const p = verify.playable;
+  const frames: string[] = [];
+  let sheet: string | undefined;
+  if (p?.store && existsSync(join(p.store, "report.json"))) {
+    rmSync(dir, { recursive: true, force: true });
+    mkdirSync(dir, { recursive: true });
+    copyFileSync(join(p.store, "report.json"), join(dir, "report.json"));
+    if (p.contact_sheet && existsSync(p.contact_sheet)) {
+      copyFileSync(p.contact_sheet, join(dir, CONTACT_SHEET));
+      sheet = `${rel}/${CONTACT_SHEET}`;
+    }
+    for (const name of p.sampled ?? []) {
+      if (/[\\/]/.test(name) || name.includes("..")) continue;
+      const from = join(p.store, "frames", name);
+      if (!existsSync(from)) continue;
+      mkdirSync(join(dir, "frames"), { recursive: true });
+      cpSync(from, join(dir, "frames", name));
+      frames.push(`${rel}/frames/${name}`);
+    }
+  } else {
+    // The store gone (a retried or late close-out after it was pruned): the proof already in the served root is
+    // kept, never deleted unstaged, and its sheet and frames still embedded.
+    if (existsSync(join(dir, CONTACT_SHEET))) sheet = `${rel}/${CONTACT_SHEET}`;
+    if (existsSync(join(dir, "frames"))) {
+      for (const name of readdirSync(join(dir, "frames")).sort()) frames.push(`${rel}/frames/${name}`);
+    }
+  }
+  const paths = [verify.assets.art_path, verify.assets.manifest, rel]
+    .filter((x): x is string => typeof x === "string" && x !== "" && existsSync(join(served, x)));
+  if (paths.length) {
+    const add = await git(deps, served, ["add", "--", ...paths]);
+    if (add.exit !== 0) throw new Error(`git add -- ${paths.join(" ")} ${failed(add)}`);
+  }
+  // A clean index is `nothing to commit` by exit code (never git's localized wording).
+  // Both scoped to the named paths: anything else already staged never lands in the host commit.
+  let committed = false;
+  if (paths.length) {
+    const diff = await git(deps, served, ["diff", "--cached", "--quiet", "--", ...paths], 60);
+    if (diff.exit !== 0 && diff.exit !== 1) throw new Error(`git diff --cached --quiet ${failed(diff)}`);
+    committed = diff.exit === 1;
+  }
+  if (committed) {
+    const c = await git(deps, served, ["commit", "-m", hostCommitMessage(run.run_id), "--", ...paths]);
+    if (c.exit !== 0) throw new Error(`git commit ${failed(c)}`);
+  }
+  // The head either way: a retried close-out (the proof already committed) still embeds the sheet at it.
+  const head = await git(deps, served, ["rev-parse", "HEAD"], 30);
+  const tip = head.exit === 0 ? head.stdout.trim() : undefined;
+  const sha = committed ? tip ?? "committed" : "nothing to commit";
+  return { sha, frames, ...(sheet ? { sheet } : {}), ...(tip ? { head: tip } : {}) };
+}
+
+/** `https://<host>/<owner>/<repo>` of origin (a GitHub remote), else undefined. */
+async function originWebUrl(deps: WorktreeDeps, cwd: string): Promise<string | undefined> {
+  const repo = await originGhRepo(deps, cwd);
+  if (!repo) return undefined;
+  return repo.split("/").length === 2 ? `https://github.com/${repo}` : `https://${repo}`;
 }
 
 /** The close-out of a run's worktree (see the header). Never throws: a failure is `error`. */
 export async function closeOut(
   run: Pick<QueueRun, "run_id" | "job_id" | "root" | "worktree" | "base_ref" | "prefix">,
-  input: { paused: boolean; statusBlock?: unknown; engineRunId?: string | null; costUsd?: number; existingPr?: string; verify?: HostVerifyResult },
+  input: { paused: boolean; statusBlock?: unknown; engineRunId?: string | null; costUsd?: number; existingPr?: string; verify?: HostVerifyResult; slice?: boolean },
   deps: WorktreeDeps = {},
 ): Promise<CloseOut> {
   const wt = run.worktree!, base = run.base_ref ?? "", branch = runBranch(run.run_id);
@@ -452,6 +541,18 @@ export async function closeOut(
       if (r.exit !== 0) { branchGone = true; out.no_changes = true; return finish(); }
     } catch { /* probed again by the git log below */ }
   }
+  // Story 34.8: a slice run's host-side commit (after a green assets step), before the commits are read and pushed.
+  let proof: PrProof | undefined;
+  const v = input.verify;
+  if (input.slice && !gone && !input.paused && v && !v.skipped && v.assets?.verdict === "green") {
+    try {
+      const done = await proofCommit(run, v, deps);
+      out.host_commit = done.sha;
+      const prefix = run.prefix ?? "";
+      const web = done.head && done.sheet ? await originWebUrl(deps, at) : undefined;
+      proof = { frames: done.frames.map((f) => `${prefix}${f}`), ...(web ? { sheetUrl: `${web}/blob/${done.head}/${prefix}${done.sheet}?raw=true` } : {}) };
+    } catch (e) { out.error = `host commit: ${clip(message(e))}`; return finish(); }
+  }
   try {
     const r = await git(deps, at, ["log", "--oneline", `${base}..${gone ? branch : "HEAD"}`]);
     if (r.exit !== 0) { out.error = `git log ${failed(r)}`; return finish(); }
@@ -477,7 +578,7 @@ export async function closeOut(
     // The body through a file: a long run's body passes the win32 command-line limit as an argument.
     const withBody = async <T>(use: (bodyFile: string) => Promise<T>): Promise<T> => {
       // The metered cost read where the engine wrote it: the served root (`<worktree>/<prefix>`, Story 28.5).
-      const body = prBody({ statusBlock: input.statusBlock, engineRunId: input.engineRunId, commits: out.commits, costUsd: input.costUsd ?? (gone ? undefined : meteredCost(servedRoot(run)!, input.engineRunId)), runId: run.run_id, ...(input.verify ? { verify: input.verify } : {}) });
+      const body = prBody({ statusBlock: input.statusBlock, engineRunId: input.engineRunId, commits: out.commits, costUsd: input.costUsd ?? (gone ? undefined : meteredCost(servedRoot(run)!, input.engineRunId)), runId: run.run_id, ...(input.verify ? { verify: input.verify } : {}), ...(proof ? { proof } : {}) });
       const dir = mkdtempSync(join(tmpdir(), "tk-sup-pr-body-"));
       try {
         const bodyFile = join(dir, "body.md");
@@ -615,6 +716,7 @@ export function closeOutDetail(c: CloseOut): Record<string, unknown> {
       commits: c.commits, ...(c.pushed ? { pushed: c.pushed } : {}), ...(c.error ? { error: c.error } : {}), worktree: c.worktree,
       ...(c.branch ? { branch: c.branch } : {}),
       ...(c.host_verify ? { host_verify: c.host_verify } : {}),
+      ...(c.host_commit ? { host_commit: c.host_commit } : {}),
     },
   };
 }
@@ -743,7 +845,7 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         const existingPr = priorPr(events);
         // A recorded `host-verify` goes with it (a red draft never marked ready); the leg is never run here.
         const verify = recordedVerify(events);
-        const c = await closeOut(r, { paused: false, ...launchedCloseOutInput(events, r), ...(existingPr ? { existingPr } : {}), ...(verify ? { verify } : {}) }, deps);
+        const c = await closeOut(r, { paused: false, ...launchedCloseOutInput(events, r), ...(existingPr ? { existingPr } : {}), ...(verify ? { verify } : {}), ...(isSlice(queue.definition(r)) ? { slice: true } : {}) }, deps);
         queue.note(r.run_id, "closed_out", closeOutDetail(c));
         // The worktree is gone: an engine lock this run still holds would be probed there forever.
         if (c.worktree === "removed") queue.releaseEngineLock(r.run_id, "its worktree was closed out and removed (its engine confirmed dead)");
@@ -792,9 +894,11 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
       // An engine the supervisor killed runs no leg, its status ended (it handled TERM, or its worktree is
       // gone) or not (its end and reason computed as before).
       const notKilled = !st.detail.killed && !(await killedEngine(queue, run));
+      // Story 34.8: a slice run, decided once here from the resolved definition, passed to the leg and the close-out.
+      const slice = isSlice(queue.definition(run));
       if (!verify && !paused && notKilled) {
         const guardS = run.worker_guard_s ?? (Number(queue.definition(run)?.guards?.max_wall_clock_seconds) || 600);
-        verify = await hostVerify(run, guardS, deps);
+        verify = await hostVerify(run, guardS, deps, slice ? { slice } : {});
         queue.note(run.run_id, "host-verify", verify as Record<string, unknown>);
       }
       // A resumed run (its `launched` written when the resolve child exited) or a relaunched one (its latest
@@ -810,7 +914,7 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
       const served = servedRoot(run);
       const storyDone = !paused && notKilled && (resumed || relaunched) && st.detail.status === "stopped" && !!run.engine_run_id
         && served !== null && storyLandedBeforeStop(join(served, ".bmad-loop", "runs", run.engine_run_id));
-      const c = await closeOut(run, { paused, ...input, engineRunId: run.engine_run_id, ...(existingPr ? { existingPr } : {}), ...(verify ? { verify } : {}) }, deps);
+      const c = await closeOut(run, { paused, ...input, engineRunId: run.engine_run_id, ...(existingPr ? { existingPr } : {}), ...(verify ? { verify } : {}), ...(slice ? { slice } : {}) }, deps);
       let next: PendingTransition;
       if (paused) next = { phase: "paused", detail: { engine: st.detail, ...closeOutDetail(c) } };
       else {

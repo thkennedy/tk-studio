@@ -25,7 +25,7 @@ const verifyConfig = (code: number) => `vcs: git\nverify:\n  host: ${JSON.string
 type GhView = { state: string; isDraft: boolean };
 
 /** An ended sbx run with its branch pushed to origin and its worktree removed, as a close-out leaves one. */
-async function fixture(o: { code?: number; pr?: string | null; push?: boolean; worktree?: boolean } = {}) {
+async function fixture(o: { code?: number; pr?: string | null; push?: boolean; worktree?: boolean; definition?: Record<string, unknown> } = {}) {
   const repo = gitRepo({ ".tk-studio/config.yaml": verifyConfig(o.code ?? 0) });
   const work = tempDir("tk-sup-hostleg-work-");
   const alive = new Set<string>([me.nonce]);
@@ -59,7 +59,7 @@ async function fixture(o: { code?: number; pr?: string | null; push?: boolean; w
       return { exit: 2, stdout: "", stderr: "unexpected script" };
     },
   };
-  const queued = queue.enqueue({ jobId: "j", root: repo.checkout, projectId: "proj", definition: { id: "j", target: { skill: "tk-studio-launch" } }, owner: me, base_ref: "main" }).run;
+  const queued = queue.enqueue({ jobId: "j", root: repo.checkout, projectId: "proj", definition: o.definition ?? { id: "j", target: { skill: "tk-studio-launch" } }, owner: me, base_ref: "main" }).run;
   const claim = await queue.claim(queued.run_id, me);
   if (!claim.claimed) throw new Error("not claimed");
   const id = queued.run_id;
@@ -311,4 +311,22 @@ describe("AC1: the cli verb `verify <run id>`", () => {
     expect(ok.value).toBe(0);
     expect(JSON.parse(ok.out)).toEqual({ ok: true, run_id: fx.id, state: "partial", head: fx.tip, green: true, pr: PR, pr_ready: "marked", worktree: "removed" });
   }, 60_000);
+});
+
+describe("Story 34.8: a slice run's re-verify runs the assets step", () => {
+  test("a run-vertical-slice run's re-run records `assets` on its host-verify; a non-slice re-run does not", async () => {
+    for (const definition of [
+      { id: "run-epic-41", type: "run-vertical-slice", target: { skill: "tk-studio-launch" } },
+      { id: "run-epic-41", type: "run-epic", target: { skill: "tk-studio-launch" } },
+    ]) {
+      const fx = await fixture({ code: 0, definition });
+      await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done;
+      const detail = fx.hostVerifies().at(-1)!.detail as Record<string, unknown>;
+      expect(detail.green).toBe(true);
+      if (definition.type === "run-vertical-slice") {
+        // no manifest in the fixture repo: the step is recorded, skipped, the leg continues
+        expect(detail.assets).toEqual({ verdict: "skipped", reason: "no manifest", manifest: "assets/manifest.yaml", art_path: "art/greybox", steps: [] });
+      } else expect("assets" in detail).toBe(false);
+    }
+  }, 120_000);
 });

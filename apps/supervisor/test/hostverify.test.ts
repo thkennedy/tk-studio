@@ -857,3 +857,203 @@ describe("hole 77: a shell script's own lines reach the capture", () => {
     expect(v.stdout_tail).toEqual(["first", "verify: OK"]);
   });
 });
+
+describe("Story 34.8: a slice run's assets step, contact sheet and PR section", () => {
+  const PLAYABLE = "playable:\n  scenario: scenarios/smoke.json\n  seed: 7\n  ticks: 120\n";
+  const base = verifyKeys({ host: "uv run tools/verify_host.py", engine: "bash scripts/engine-gate.sh" });
+  const REPORT = {
+    schema: 1, verdict: "pass", failed: null, seed: 7, ticks: 120, ticks_run: 120, capture_every: 30, mode: "movie",
+    frames: [{ tick: 0, file: "frames/tick-000000.png" }, { tick: 30, file: "frames/tick-000030.png" }],
+    moments: [], frame_time_ms: { max: 20, mean: 16.6 }, log_errors: [],
+  };
+  const legEnv = () => ({ TK_STUDIO_ROOT: tempDir("tk-sup-vs-studio-"), TK_STUDIO_HOME: tempDir("tk-sup-vs-home-"), PATH: "/usr/bin", GODOT: "/opt/godot/godot" });
+  /** A slice fixture: the base config, the run's 34.3 fields, and (unless `manifest: false`) the manifest in the worktree. */
+  function fixture(config: string, o: { manifest?: boolean } = {}) {
+    const fx = project(config);
+    if (o.manifest !== false) { mkdirSync(join(fx.wt, "assets"), { recursive: true }); writeFileSync(join(fx.wt, "assets", "manifest.yaml"), "schema: 1\n"); }
+    return { ...fx, run: { ...fx.run, sandbox: "tk-sbx", engine_run_id: "20261027-eng", studio_run_id: "run-77", project_id: "acme" } };
+  }
+  /** The runner: the config; the host and engine steps exit per `exits`; `assets.py <verb>` exits per `assets`; `playable.py
+   * run` writes the report and frames; `playable.py sheet` writes the sheet and names the sampled frames. */
+  function recorder(config: string, o: { exits?: number[]; assets?: Record<string, number>; sheet?: number } = {}) {
+    const steps: string[][] = [];
+    let plain = 0;
+    const run = async (bin: string, args: string[]) => {
+      if (bin === "git") return { exit: 0, stdout: config, stderr: "" };
+      const spec = JSON.parse(readFileSync(args[2]!, "utf-8"));
+      const argv = spec.argv as string[];
+      steps.push(argv);
+      const script = String(argv[2] ?? "");
+      const status = (exit: number, block?: Record<string, unknown>) => {
+        writeFileSync(spec.out, block ? JSON.stringify(block, null, 2) + "\n" : `step\n`);
+        writeFileSync(spec.status, JSON.stringify({ exit, signal: null }));
+        return { exit: 0, stdout: "", stderr: "" };
+      };
+      if (script.endsWith("assets.py")) {
+        const exit = o.assets?.[argv[3]!] ?? 0;
+        return status(exit, { ok: exit === 0, entries: [], status: exit === 0 ? "complete" : exit === 1 ? "partial" : "blocked", intent: "assets", artifacts: [], reason: exit ? `${argv[3]} not ok` : null });
+      }
+      if (script.endsWith("playable.py") && argv[3] === "sheet") {
+        const out = argv[argv.indexOf("--out") + 1]!;
+        const exit = o.sheet ?? 0;
+        if (exit === 0) writeFileSync(out, "sheet-png");
+        return status(exit, { ok: exit === 0, frames: ["tick-000000.png", "tick-000030.png"], status: exit === 0 ? "complete" : "blocked", intent: "playable", artifacts: [], reason: null });
+      }
+      if (script.endsWith("playable.py")) {
+        const out = argv[argv.indexOf("--out") + 1]!;
+        mkdirSync(join(out, "frames"), { recursive: true });
+        for (const f of REPORT.frames) writeFileSync(join(out, f.file), "png");
+        writeFileSync(join(out, "report.json"), JSON.stringify(REPORT));
+        writeFileSync(join(out, "log.txt"), "log\n");
+        return status(1, { ok: false, verdict: "fail", failed: null, status: "partial", intent: "playable", artifacts: [], reason: "harness" });
+      }
+      return status(o.exits?.[plain++] ?? 0);
+    };
+    return { steps, run };
+  }
+  const verbs = (steps: string[][]) => steps.map((a) => String(a[2] ?? "").endsWith("assets.py") || String(a[2] ?? "").endsWith("playable.py")
+    ? `${String(a[2]).split(/[\\/]/).at(-1)} ${a[3]}` : String(a.at(-1)));
+
+  test("isSlice: the resolved definition's type or id is run-vertical-slice", async () => {
+    const { isSlice, SLICE_JOB_TYPE } = await import("../src/hostverify");
+    expect(SLICE_JOB_TYPE).toBe("run-vertical-slice");
+    expect(isSlice({ id: "run-epic-41", type: "run-vertical-slice" })).toBe(true);
+    expect(isSlice({ id: "run-vertical-slice" })).toBe(true);
+    expect(isSlice({ id: "run-epic-41", type: "run-epic" })).toBe(false);
+    expect(isSlice(null)).toBe(false);
+  });
+
+  test("assetsLayout: the served root, .git, .tk-studio, absolute or escaping values fall back to the defaults; ./ is stripped", async () => {
+    const { assetsLayout, DEFAULT_ART_PATH, DEFAULT_MANIFEST } = await import("../src/hostverify");
+    for (const bad of [".", "./", "", " ", ".//", "./.", ".git", ".git/hooks", "./.git/x", ".tk-studio", ".tk-studio/proof", "/abs", "C:/x", "../up", "a/../../b"]) {
+      expect(assetsLayout({ assets: { art_path: bad, manifest: bad } })).toEqual({ manifest: DEFAULT_MANIFEST, art_path: DEFAULT_ART_PATH });
+    }
+    expect(assetsLayout({ assets: { art_path: "./art", manifest: ".\\assets\\m.yaml" } })).toEqual({ manifest: "assets/m.yaml", art_path: "art" });
+    expect(assetsLayout({ assets: { art_path: "art/world/greybox/", manifest: "assets/manifest.yaml" } })).toEqual({ manifest: "assets/manifest.yaml", art_path: "art/world/greybox" });
+  });
+
+  test("assets green: check, greybox, match after the host command and before the engine gate; never generate, never --mirror", async () => {
+    const config = base + PLAYABLE + "assets:\n  manifest: assets/manifest.yaml\n  art_path: art/world/greybox\n";
+    const fx = fixture(config);
+    const { steps, run } = recorder(config);
+    const env = legEnv();
+    const v = await hostVerify(fx.run, 60, { env, run: run as any }, { slice: true }) as HostVerifyRan;
+    expect(verbs(steps)).toEqual(["tools/verify_host.py", "assets.py check", "assets.py greybox", "assets.py match", "scripts/engine-gate.sh", "playable.py run", "playable.py sheet"]);
+    for (const a of steps.filter((x) => String(x[2]).endsWith("assets.py"))) {
+      expect(a.slice(4)).toEqual(["--directory", fx.wt, "--manifest", "assets/manifest.yaml", "--art-path", "art/world/greybox"]);
+      expect(a).not.toContain("--mirror");
+    }
+    expect(steps.some((a) => a.includes("generate"))).toBe(false);
+    expect(v.assets).toMatchObject({ verdict: "green", manifest: "assets/manifest.yaml", art_path: "art/world/greybox" });
+    expect(v.assets!.steps.map((s) => [s.verb, s.exit, s.status])).toEqual([["check", 0, "complete"], ["greybox", 0, "complete"], ["match", 0, "complete"]]);
+    expect(v.engine!.verdict).toBe("green");
+    // the harness failed here: the sheet still made from the frames and copied with the media
+    expect(dirname(v.playable!.contact_sheet!)).toBe(join(v.playable!.store!, "sheets")); // this leg's own copy
+    expect(existsSync(join(v.playable!.store!, "contact-sheet.png"))).toBe(true);
+    expect(v.playable!.sampled).toEqual(["tick-000000.png", "tick-000030.png"]);
+    expect(existsSync(join(v.playable!.media!, "contact-sheet.png"))).toBe(true);
+    expect(prSection(v)).toContain("Assets: green");
+  }, 30_000);
+
+  test("two slice legs on one store: each records its own contact_sheet, the first one's still on disk; the media copy unchanged", async () => {
+    const config = base + PLAYABLE;
+    const fx = fixture(config);
+    const env = legEnv();
+    const one = await hostVerify(fx.run, 60, { env, run: recorder(config).run as any }, { slice: true }) as HostVerifyRan;
+    const two = await hostVerify(fx.run, 60, { env, run: recorder(config).run as any }, { slice: true }) as HostVerifyRan;
+    expect(one.playable!.store).toBe(two.playable!.store!);
+    const store = one.playable!.store!;
+    for (const v of [one, two]) {
+      expect(dirname(v.playable!.contact_sheet!)).toBe(join(store, "sheets"));
+      expect(v.playable!.contact_sheet!.endsWith(".png")).toBe(true);
+    }
+    expect(one.playable!.contact_sheet).not.toBe(two.playable!.contact_sheet);
+    expect(existsSync(one.playable!.contact_sheet!)).toBe(true);
+    expect(existsSync(two.playable!.contact_sheet!)).toBe(true);
+    // the media copy keeps the contact-sheet.png name and never gains the per-leg sheets
+    expect(existsSync(join(two.playable!.media!, "contact-sheet.png"))).toBe(true);
+    expect(existsSync(join(two.playable!.media!, "sheets"))).toBe(false);
+  }, 30_000);
+
+  test("match exit 1 is a fault: recorded, not red; the engine gate runs", async () => {
+    const config = base;
+    const fx = fixture(config);
+    const { steps, run } = recorder(config, { assets: { match: 1 } });
+    const v = await hostVerify(fx.run, 60, { env: legEnv(), run: run as any }, { slice: true }) as HostVerifyRan;
+    expect(v.assets!.verdict).toBe("green");
+    expect(v.assets!.steps.at(-1)).toMatchObject({ verb: "match", exit: 1, status: "fault" });
+    expect(v.assets).toMatchObject({ manifest: "assets/manifest.yaml", art_path: "art/greybox" }); // the defaults
+    expect(verbs(steps)).toContain("scripts/engine-gate.sh");
+    expect(v.green).toBe(true);
+  }, 30_000);
+
+  test("assets red (check or greybox exit 1 or 2, match exit 2): the later verbs and the engine gate skipped, the leg red", async () => {
+    for (const [verb, exit, ran] of [["check", 1, 1], ["check", 2, 1], ["greybox", 1, 2], ["greybox", 2, 2], ["match", 2, 3]] as const) {
+      const fx = fixture(base);
+      const { steps, run } = recorder(base, { assets: { [verb]: exit } });
+      const v = await hostVerify(fx.run, 60, { env: legEnv(), run: run as any }, { slice: true }) as HostVerifyRan;
+      expect(v.assets!.verdict).toBe("red");
+      expect(v.assets!.steps).toHaveLength(ran);
+      expect(v.assets!.reason).toContain(`assets.py ${verb} exited ${exit}`);
+      expect(v.engine).toMatchObject({ verdict: "skipped", reason: "assets red" });
+      expect(verbs(steps)).not.toContain("scripts/engine-gate.sh");
+      expect(v.green).toBe(false);
+      expect(isRed(v)).toBe(true);
+      expect(redReason(v)).toStartWith("host verify red (assets): assets.py ");
+      expect(prSection(v)).toContain(`Assets: red (${v.assets!.reason})`);
+    }
+  }, 60_000);
+
+  test("no manifest: skipped (no manifest), the leg continues; a red host command skips the step", async () => {
+    const fx = fixture(base, { manifest: false });
+    const { steps, run } = recorder(base);
+    const v = await hostVerify(fx.run, 60, { env: legEnv(), run: run as any }, { slice: true }) as HostVerifyRan;
+    expect(v.assets).toMatchObject({ verdict: "skipped", reason: "no manifest", steps: [] });
+    expect(verbs(steps)).toEqual(["tools/verify_host.py", "scripts/engine-gate.sh"]);
+    expect(prSection(v)).toContain("Assets: skipped (no manifest)");
+    const red = recorder(base, { exits: [1] });
+    const r = await hostVerify(fixture(base).run, 60, { env: legEnv(), run: red.run as any }, { slice: true }) as HostVerifyRan;
+    expect(r.assets).toEqual({ verdict: "skipped", reason: "verify.host red", steps: [] });
+    expect(verbs(red.steps)).toEqual(["tools/verify_host.py"]);
+  }, 30_000);
+
+  test("a non-slice run: no assets step, no sheet, no assets field, the PR section unchanged", async () => {
+    const config = base + PLAYABLE;
+    const fx = fixture(config);
+    const { steps, run } = recorder(config);
+    const v = await hostVerify(fx.run, 60, { env: legEnv(), run: run as any }) as HostVerifyRan;
+    expect(verbs(steps)).toEqual(["tools/verify_host.py", "scripts/engine-gate.sh", "playable.py run"]);
+    expect("assets" in v).toBe(false);
+    expect(v.playable!.contact_sheet).toBeUndefined();
+    expect(prSection(v).some((l) => l.startsWith("Assets:"))).toBe(false);
+  }, 30_000);
+
+  test("the PR section with the committed proof: the sheet embedded and the frames listed, on pass and fail alike", () => {
+    const proof = { sheetUrl: "https://github.com/acme/tua/blob/abc123/.tk-studio/proof/q1/contact-sheet.png?raw=true", frames: [".tk-studio/proof/q1/frames/tick-000000.png"] };
+    const ran = (playable: HostVerifyRan["playable"]): HostVerifyRan => ({
+      command: "c", argv: ["c"], cwd: "/w", exit: 0, duration_ms: 1, green: true, stdout_tail: [], stderr_tail: [],
+      engine: { verdict: "green", command: "e", duration_ms: 1, godot_dir: null }, playable,
+      assets: { verdict: "green", steps: [] },
+    });
+    for (const p of [{ verdict: "pass" as const }, { verdict: "fail" as const, reason: "harness", frames: ["/store/frames/tick-000000.png"] }]) {
+      const lines = prSection(ran(p), proof);
+      expect(lines).toContain(`![contact sheet](${proof.sheetUrl})`);
+      expect(lines).toContain("- `.tk-studio/proof/q1/frames/tick-000000.png`");
+      expect(lines.filter((l) => l === "Frames:")).toHaveLength(1);
+      expect(lines.indexOf("Assets: green")).toBeLessThan(lines.findIndex((l) => l.startsWith("Engine gate:")));
+    }
+  });
+
+  test("proof with no committed frames (the sheet failed): a failed playable still lists its store frame paths", () => {
+    const v: HostVerifyRan = {
+      command: "c", argv: ["c"], cwd: "/w", exit: 0, duration_ms: 1, green: false, stdout_tail: [], stderr_tail: [],
+      engine: { verdict: "green", command: "e", duration_ms: 1, godot_dir: null },
+      playable: { verdict: "fail", reason: "harness", frames: ["/store/frames/tick-000000.png"] },
+      assets: { verdict: "green", steps: [] },
+    };
+    const lines = prSection(v, { frames: [] });
+    expect(lines).toContain("- `/store/frames/tick-000000.png`");
+    expect(lines.filter((l) => l === "Frames:")).toHaveLength(1);
+    expect(lines.some((l) => l.startsWith("![contact sheet]"))).toBe(false);
+  });
+});

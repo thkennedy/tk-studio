@@ -143,8 +143,13 @@ presses through the supervisor's `POST /engagements/{id}/input`.
 
    ```bash
    uv run "${CLAUDE_PLUGIN_ROOT}/lib/engage.py" scope --directory <project_root> \
-     --engagement <ENG-NNN> [--scope-file <path>] [--dry-run]
+     --engagement <ENG-NNN> [--scope-file <path>] \
+     [--brief-file <path> --gdd-file <path>] [--dry-run]
    ```
+
+   On a game project do step 4a first: this one `scope` call then carries
+   `--brief-file` and `--gdd-file` (a game project's call without them is
+   refused); on any other project never pass them.
 
    `--scope-file` defaults to the engagement's own `scope.md`. It checks the
    shape, writes `scope.md` (under `scope.lock`), publishes it as the page
@@ -174,6 +179,37 @@ presses through the supervisor's `POST /engagements/{id}/input`.
    held `scope.lock` (`ScopeBusy`), a 429 or a 5xx ends `partial` with
    `retry: true` (`scope.md` kept, `scope_page` unchanged): run it again.
    Then write the reply (mode 2) with the page's link.
+
+4a. A game project's brief and GDD (Story 34.8, user flow F9) — only in
+   `scoping`, before step 4's `scope` call. A game project is one
+   whose tracked `.tk-studio/config.yaml` `working_set` has any role's list
+   holding `gds` or an entry starting `gds-`; `engage.py` decides it (the
+   `scope` result's `game`), so never guess: a game project's `scope`
+   without both docs is refused `GameDocsMissing: brief | gdd`, and the
+   flags on any other project are refused `NotAGameProject` (exit 2). In
+   quick flow, in this order:
+
+   1. Run `gds-create-game-brief` (create intent) on its **Fast path**:
+      batch the gaps into one consolidated pass and draft the full brief
+      with `[ASSUMPTION]` tags where you inferred, from the record, the
+      chat and the answers. Unattended (this `claude -p` session), run it
+      per the skill's `## Headless Mode`: never ask; halt `blocked` if the
+      intent is ambiguous.
+   2. Then run `gds-gdd` (create intent) on its **Express** path, from that
+      brief: resolve the critical gaps in one short batch, then draft the
+      full GDD at once; unattended, per its `## Headless Mode`
+      (`references/headless.md`).
+   3. Write `scope.md` (step 4's shape) and make step 4's one `scope`
+      call with the docs: `engage.py scope … --brief-file <brief.md>
+      --gdd-file <gdd.md>`, never a call without them first. The
+      docs land as `_bmad-output/engagements/<id>/brief.md` and `gdd.md` and
+      are published beside the scope in `Engagements/ENG-NNN` as `ENG-NNN:
+      Game Brief` and `ENG-NNN: GDD`; the record gains `brief_page`,
+      `gdd_page` (`{id, url, version}`, shaped like `scope_page`) and
+      `game: true`, which makes approval (32.6) mint the epics' `run-epic-N`
+      jobs as `type: run-vertical-slice`. A `revise` re-run (`--revise-at`,
+      the supervisor's) of a scope already published keeps whatever doc
+      pages the record holds. Put the three page links in the reply.
 
 5. Quote the scope (Story 32.5, user flow F2 step 4) — only in `scoping`,
    on the turn after the scope is written (or by hand):

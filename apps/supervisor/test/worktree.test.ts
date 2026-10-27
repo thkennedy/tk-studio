@@ -2,7 +2,7 @@
 // repository (a bare `origin`) and the fake `gh`; the studio scripts' runner is injected.
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { cancelRun, closeOutOrphans, endAfterDriveFailure, finishRun, mirror, resolveCheckout, type Started } from "../src/cli";
@@ -2106,5 +2106,183 @@ describe("hole 75: materialise judges only the planes it owns", () => {
     expect(worktreeClean(null)).toBe(false);
     expect(worktreeClean({ result: "drift" })).toBe(false);
     expect(driftingPlanes({ result: "drift" })).toBe("result 'drift'");
+  });
+});
+
+describe("Story 34.8: a slice run's proof folder and host-side commit, before the push", () => {
+  type Ran = Extract<import("../src/hostverify").HostVerifyResult, { skipped?: false }>;
+  /** A prepared worktree with one engine commit; origin's fetch URL a GitHub one (its push URL the bare origin). */
+  async function prepared(files: Record<string, string> = {}) {
+    const fx = await fixture({ baseRef: "main", files });
+    const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+    commitIn(wt, "a.txt", "engine: story one");
+    testGit(wt, "remote", "set-url", "origin", "https://github.com/acme/tua.git");
+    testGit(wt, "remote", "set-url", "--push", "origin", fx.repo.origin);
+    return { ...fx, wt, run: fx.get() };
+  }
+  /** The playable store: the report, two frames, the sheet. */
+  function store() {
+    const dir = tempDir("tk-sup-vs-store-");
+    mkdirSync(join(dir, "frames"), { recursive: true });
+    writeFileSync(join(dir, "report.json"), JSON.stringify({ verdict: "pass" }));
+    writeFileSync(join(dir, "log.txt"), "log\n");
+    for (const f of ["tick-000000.png", "tick-000030.png", "tick-000060.png"]) writeFileSync(join(dir, "frames", f), f);
+    writeFileSync(join(dir, "contact-sheet.png"), "sheet");
+    return dir;
+  }
+  const verify = (o: { assets?: Ran["assets"]; store?: string } = {}): Ran => ({
+    command: "c", argv: ["c"], cwd: "/w", exit: 0, duration_ms: 1, green: true, stdout_tail: [], stderr_tail: [],
+    engine: { verdict: "green", command: "e", duration_ms: 1, godot_dir: null },
+    playable: o.store ? { verdict: "pass", store: o.store, contact_sheet: join(o.store, "contact-sheet.png"), sampled: ["tick-000000.png", "tick-000060.png"] } : { verdict: "skipped", reason: "no playable" },
+    assets: o.assets ?? { verdict: "green", manifest: "assets/manifest.yaml", art_path: "art/greybox", steps: [] },
+  });
+
+  test("green assets: the art, the manifest and .tk-studio/proof/<run_id>/ committed by name, before the push; the PR embeds the sheet", async () => {
+    const fx = await prepared();
+    mkdirSync(join(fx.wt, "art", "greybox"), { recursive: true });
+    mkdirSync(join(fx.wt, "assets"), { recursive: true });
+    writeFileSync(join(fx.wt, "art", "greybox", "crate.glb"), "glb");
+    writeFileSync(join(fx.wt, "assets", "manifest.yaml"), "schema: 1\n");
+    writeFileSync(join(fx.wt, "stray.txt"), "never committed"); // not a named path
+    const st = store();
+    const c = await closeOut(fx.run, { paused: false, verify: verify({ store: st }), slice: true }, fx.deps);
+    expect(c.error).toBeUndefined();
+    expect(c.pr).toBe("https://github.com/acme/widget/pull/42");
+    const branch = runBranch(fx.run.run_id);
+    const subject = testGit(fx.repo.origin, "log", "-1", "--format=%s", branch);
+    expect(subject).toBe(`host leg: placed assets and proof (run ${fx.run.run_id})`);
+    const proof = `.tk-studio/proof/${fx.run.run_id}`;
+    expect(testGit(fx.repo.origin, "show", "--name-only", "--format=", branch).split("\n").sort()).toEqual([
+      `${proof}/contact-sheet.png`, `${proof}/frames/tick-000000.png`, `${proof}/frames/tick-000060.png`, `${proof}/report.json`,
+      "art/greybox/crate.glb", "assets/manifest.yaml",
+    ]);
+    expect(c.commits[0]).toContain("host leg: placed assets and proof");
+    expect(c.host_commit).toMatch(/^[0-9a-f]{40}$/);
+    // `git add` with named paths only (never -A), before the push
+    const adds = fx.argvs.filter((a) => a.bin === "git" && a.args[0] === "add");
+    expect(adds.map((a) => a.args)).toEqual([["add", "--", "art/greybox", "assets/manifest.yaml", proof]]);
+    const commitAt = fx.argvs.findIndex((a) => a.args[0] === "commit"), pushAt = fx.argvs.findIndex((a) => a.args[0] === "push");
+    expect(commitAt).toBeGreaterThan(-1);
+    expect(commitAt).toBeLessThan(pushAt);
+    const body = fx.gh.calls().find((x) => x.argv[1] === "create")!.body!;
+    expect(body).toContain(`![contact sheet](https://github.com/acme/tua/blob/${c.host_commit}/${proof}/contact-sheet.png?raw=true)`);
+    expect(body).toContain(`- \`${proof}/frames/tick-000000.png\``);
+    expect(body).toContain("Assets: green");
+    expect(closeOutDetail(c)).toMatchObject({ closeout: { host_commit: c.host_commit } });
+  });
+
+  test("a retried slice close-out (the proof already committed): nothing to commit, the PR still embeds the sheet at the head", async () => {
+    const fx = await prepared();
+    mkdirSync(join(fx.wt, "art", "greybox"), { recursive: true });
+    writeFileSync(join(fx.wt, "art", "greybox", "crate.glb"), "glb");
+    const st = store();
+    fx.gh.answer({ fail: ["pr create"] });
+    const first = await closeOut(fx.run, { paused: false, verify: verify({ store: st }), slice: true }, fx.deps);
+    expect(first.error).toStartWith("gh pr create");
+    expect(first.worktree).toBe("kept");
+    expect(first.host_commit).toMatch(/^[0-9a-f]{40}$/);
+    fx.gh.answer({});
+    const again = await closeOut(fx.run, { paused: false, verify: verify({ store: st }), slice: true }, fx.deps);
+    expect(again.error).toBeUndefined();
+    expect(again.host_commit).toBe("nothing to commit");
+    expect(fx.argvs.filter((a) => a.bin === "git" && a.args[0] === "commit")).toHaveLength(1);
+    const body = fx.gh.calls().filter((x) => x.argv[1] === "create").at(-1)!.body!;
+    expect(body).toContain(`![contact sheet](https://github.com/acme/tua/blob/${first.host_commit}/.tk-studio/proof/${fx.run.run_id}/contact-sheet.png?raw=true)`);
+  });
+
+  test("a retried close-out after the store was pruned: the committed proof kept, the worktree clean, the sheet still embedded", async () => {
+    const fx = await prepared();
+    mkdirSync(join(fx.wt, "art", "greybox"), { recursive: true });
+    writeFileSync(join(fx.wt, "art", "greybox", "crate.glb"), "glb");
+    const st = store();
+    fx.gh.answer({ fail: ["pr create"] });
+    const first = await closeOut(fx.run, { paused: false, verify: verify({ store: st }), slice: true }, fx.deps);
+    expect(first.host_commit).toMatch(/^[0-9a-f]{40}$/);
+    rmSync(st, { recursive: true, force: true });
+    fx.gh.answer({});
+    const again = await closeOut(fx.run, { paused: false, verify: verify({ store: st }), slice: true }, fx.deps);
+    expect(again.error).toBeUndefined();
+    expect(again.host_commit).toBe("nothing to commit");
+    const proof = `.tk-studio/proof/${fx.run.run_id}`;
+    // the proof never deleted unstaged: the worktree clean enough to go, the pushed branch still carrying the sheet
+    expect(again.worktree).toBe("removed");
+    expect(testGit(fx.repo.origin, "ls-tree", "-r", "--name-only", runBranch(fx.run.run_id), "--", proof).split("\n")).toContain(`${proof}/contact-sheet.png`);
+    const body = fx.gh.calls().filter((x) => x.argv[1] === "create").at(-1)!.body!;
+    expect(body).toContain(`![contact sheet](https://github.com/acme/tua/blob/${first.host_commit}/${proof}/contact-sheet.png?raw=true)`);
+    expect(body).toContain(`- \`${proof}/frames/tick-000000.png\``);
+  });
+
+  test("the host commit is scoped to the named paths: diff and commit carry the pathspec, a stray staged file stays out", async () => {
+    const fx = await prepared();
+    mkdirSync(join(fx.wt, "art", "greybox"), { recursive: true });
+    writeFileSync(join(fx.wt, "art", "greybox", "crate.glb"), "glb");
+    writeFileSync(join(fx.wt, "stray.txt"), "staged elsewhere");
+    testGit(fx.wt, "add", "--", "stray.txt");
+    const c = await closeOut(fx.run, { paused: false, verify: verify({ store: store() }), slice: true }, fx.deps);
+    expect(c.error).toBeUndefined();
+    const proof = `.tk-studio/proof/${fx.run.run_id}`;
+    const named = ["art/greybox", proof];
+    const diff = fx.argvs.find((a) => a.bin === "git" && a.args[0] === "diff" && a.args.includes("--cached"))!;
+    expect(diff.args).toEqual(["diff", "--cached", "--quiet", "--", ...named]);
+    const commit = fx.argvs.find((a) => a.bin === "git" && a.args[0] === "commit")!;
+    expect(commit.args).toEqual(["commit", "-m", `host leg: placed assets and proof (run ${fx.run.run_id})`, "--", ...named]);
+    const shown = testGit(fx.repo.origin, "show", "--name-only", "--format=", runBranch(fx.run.run_id)).split("\n");
+    expect(shown).not.toContain("stray.txt");
+  });
+
+  test("no named path present: nothing to commit, no diff and no commit call", async () => {
+    const fx = await prepared();
+    const c = await closeOut(fx.run, { paused: false, verify: verify(), slice: true }, fx.deps);
+    expect(c.error).toBeUndefined();
+    expect(c.host_commit).toBe("nothing to commit");
+    expect(fx.argvs.some((a) => a.bin === "git" && (a.args[0] === "add" || a.args[0] === "commit"))).toBe(false);
+    expect(fx.argvs.some((a) => a.bin === "git" && a.args[0] === "diff" && a.args.includes("--cached"))).toBe(false);
+  });
+
+  test("a commit failure is the close-out's error: nothing pushed, the worktree kept", async () => {
+    const fx = await prepared({ ".gitignore": ".bmad-loop/runs/\nart/\n" });
+    mkdirSync(join(fx.wt, "art", "greybox"), { recursive: true });
+    writeFileSync(join(fx.wt, "art", "greybox", "crate.glb"), "glb");
+    const c = await closeOut(fx.run, { paused: false, verify: verify(), slice: true }, fx.deps);
+    expect(c.error).toStartWith("host commit: git add -- art/greybox");
+    expect(c.pushed).toBeUndefined();
+    expect(c.worktree).toBe("kept");
+    expect(fx.gh.calls().some((x) => x.argv[1] === "create")).toBe(false);
+  });
+
+  test("red or skipped assets, or a non-slice run: no host commit, the close-out as before", async () => {
+    for (const [v, slice] of [
+      [verify({ assets: { verdict: "red", reason: "assets.py check exited 1", steps: [] } }), true],
+      [verify({ assets: { verdict: "skipped", reason: "no manifest", steps: [] } }), true],
+      [verify(), false],
+    ] as const) {
+      const fx = await prepared();
+      mkdirSync(join(fx.wt, "art", "greybox"), { recursive: true });
+      writeFileSync(join(fx.wt, "art", "greybox", "crate.glb"), "glb");
+      const c = await closeOut(fx.run, { paused: false, verify: v, ...(slice ? { slice } : {}) }, fx.deps);
+      expect(c.host_commit).toBeUndefined();
+      expect(fx.argvs.some((a) => a.bin === "git" && (a.args[0] === "add" || a.args[0] === "commit"))).toBe(false);
+      expect(existsSync(join(fx.wt, ".tk-studio", "proof"))).toBe(false);
+    }
+  });
+
+  test("the sweep decides the slice from the resolved definition and passes it to the leg", async () => {
+    const config = `vcs: git\nverify:\n  host: ${JSON.stringify(`"${process.execPath}" -e "console.log('ok')"`)}\n`;
+    for (const defn of [{ id: "run-epic-41", type: "run-vertical-slice", target: { skill: "tk-studio-launch" } }, { id: "run-epic-41", type: "run-epic", target: { skill: "tk-studio-launch" } }]) {
+      const fx = await fixture({ baseRef: "main", files: { ".tk-studio/config.yaml": config } });
+      const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+      fx.queue.markVerbStarted(fx.run.run_id, "wake", [], { target: "skill", definition: defn });
+      await mirror(fx.queue, fx.run.run_id, { jobId: "j", defn }, {
+        ok: true, job_id: "j", run_id: "j-20261016T101010Z", target: "skill", state: "complete",
+        status_block: { status: "complete", intent: "tk-studio-launch", artifacts: [".bmad-loop/runs/E1"] }, total_cost_usd: 0.25, finish_deferred: true,
+      }, async () => ({}), fx.deps);
+      (fx.queue as any).db.query("UPDATE runs SET tier = 'sbx' WHERE run_id = ?").run(fx.run.run_id);
+      commitIn(wt, "a.txt", "engine: story one");
+      fx.answers.launch = { ok: true, run: { status: "finished" } };
+      expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+      const ev = fx.queue.events(fx.run.run_id).find((e) => e.kind === "host-verify")!;
+      if (defn.type === "run-vertical-slice") expect(ev.detail!.assets).toEqual({ verdict: "skipped", reason: "no manifest", manifest: "assets/manifest.yaml", art_path: "art/greybox", steps: [] });
+      else expect("assets" in ev.detail!).toBe(false);
+    }
   });
 });
