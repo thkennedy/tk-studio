@@ -860,7 +860,7 @@ def resolve_blender(arg: str | None, env=None) -> str:
     if found is None:
         raise Refusal("no blender: BLENDER is unset and no blender is on PATH "
                       "(set BLENDER to blender.exe, runbook §2)")
-    return found
+    return str(Path(found).resolve())  # resolved like the BLENDER branch (Windows' which answers in PATHEXT's case)
 
 
 def blender_argv(blender: str, spec_path: Path) -> list[str]:

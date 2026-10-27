@@ -159,7 +159,9 @@ class Base(unittest.TestCase):
         patcher = mock.patch.dict(os.environ, {"TK_STUDIO_HOME": str(home)})
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.blender = self.root / "bin" / "blender"
+        # The platform's executable name: shutil.which on Windows finds only PATHEXT names
+        # (the fake is never spawned; run_blender is mocked).
+        self.blender = self.root / "bin" / ("blender.exe" if sys.platform == "win32" else "blender")
         self.blender.parent.mkdir()
         self.blender.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         self.blender.chmod(0o755)
@@ -771,7 +773,7 @@ class GreyboxTests(Base):
 
     def test_blender_found_on_path_when_blender_is_unset(self):
         self.assertEqual(assets.resolve_blender(None, {"PATH": str(self.blender.parent)}),
-                         str(self.blender))
+                         str(self.blender.resolve()))
         self.assertEqual(assets.resolve_blender(None, {"BLENDER": f" {self.blender} ",
                                                        "PATH": ""}),
                          str(self.blender.resolve()))

@@ -130,7 +130,7 @@ function gitAt(files: Files, calls: string[][] = []): EngineMcpDeps["git"] {
   };
 }
 const MCP_JSON = JSON.stringify({ mcpServers: { [NAME]: { type: "http", url: "${TK_ENGINE_MCP_URL}", headers: { Authorization: "Bearer ${TK_ENGINE_MCP_BEARER}" } } } });
-const configFor = (start: string, port: number) => `verify:\n  host: scripts/verify.sh\nengine:\n  mcp:\n    name: ${NAME}\n    start: "${start}"\n    port: ${port}\n`;
+const configFor = (start: string, port: number) => `verify:\n  host: scripts/verify.sh\nengine:\n  mcp:\n    name: ${NAME}\n    start: ${JSON.stringify(start)}\n    port: ${port}\n`; // JSON-quoted: a Windows path's backslashes would be YAML escapes in a bare double-quoted scalar
 
 /** Deps for a start: the fake git, GODOT, the loopback bind and an ephemeral forwarder port. */
 function depsFor(files: Files, extra: Partial<EngineMcpDeps> & { env?: Record<string, string | undefined> } = {}): EngineMcpDeps & { fwd: number } {

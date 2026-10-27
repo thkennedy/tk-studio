@@ -130,9 +130,13 @@ def supervisor_files() -> list[str]:
 
 def supervisor_env(tmp: Path) -> dict[str, str]:
     """The host's environment without any TK_SUPERVISOR_* variable, with TMPDIR/TEMP/TMP at `tmp`
-    (TMP too: Windows' GetTempPath reads it first)."""
+    (TMP too: Windows' GetTempPath reads it first), and TK_STUDIO_ROOT at the repo under verification
+    (hole 82: the suites' end-to-end legs resolve job definitions and run lib verbs through the plugin
+    at TK_STUDIO_ROOT; the box's variable names the served checkout, so a story that changes the plugin
+    and tests the supervisor against the change ran against `main`'s plugin and went red)."""
     env = {k: v for k, v in os.environ.items() if not k.upper().startswith(SUPERVISOR_ENV_PREFIXES)}
-    env.update({"PYTHONIOENCODING": "utf-8", "TMPDIR": str(tmp), "TEMP": str(tmp), "TMP": str(tmp)})
+    env.update({"PYTHONIOENCODING": "utf-8", "TMPDIR": str(tmp), "TEMP": str(tmp), "TMP": str(tmp),
+                "TK_STUDIO_ROOT": str(ROOT)})
     return env
 
 
