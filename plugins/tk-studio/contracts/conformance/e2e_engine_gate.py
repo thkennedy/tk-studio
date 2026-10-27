@@ -42,6 +42,10 @@ FILTER = "Story 34.1"
 # timeout fires first: it kills `bun`, removes the temp folder in `finally`
 # (the Story 33.4 rule) and reports `ok: false`, never an orphaned suite.
 BOUND_S = 50
+# Hole 80: a fresh worktree has no apps/supervisor/node_modules; the suite cannot load without them, so the
+# drive installs from the lockfile first (warm cache on the box: about a second), under its own bound. The
+# manifest gives this drive `timeout: 120` so the install and the suite fit under the runner's bound.
+INSTALL_BOUND_S = 40
 TAIL = 20
 
 
@@ -72,6 +76,23 @@ def run() -> dict:
         env = {k: v for k, v in os.environ.items()
                if not k.startswith("TK_SUPERVISOR_")}
         env.update(TMPDIR=temp, TEMP=temp, TMP=temp)
+        if not (supervisor / "node_modules").is_dir():
+            try:
+                inst = subprocess.run(
+                    [bun, "install", "--frozen-lockfile"], cwd=str(supervisor), env=env,
+                    stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", timeout=INSTALL_BOUND_S)
+            except subprocess.TimeoutExpired:
+                steps.append({"step": "install", "ok": False,
+                              "detail": f"bun install hung past {INSTALL_BOUND_S}s"})
+                return {"ok": False, "steps": steps}
+            if inst.returncode != 0:
+                steps.append({"step": "install", "ok": False,
+                              "detail": f"bun install exit {inst.returncode}: "
+                                        f"{(inst.stderr or inst.stdout).strip()[-300:]}"})
+                return {"ok": False, "steps": steps}
+            steps.append({"step": "install", "ok": True,
+                          "detail": "bun install --frozen-lockfile (node_modules was absent)"})
         started = time.monotonic()
         try:
             proc = subprocess.run(
