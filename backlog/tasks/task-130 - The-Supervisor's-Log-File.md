@@ -1,9 +1,10 @@
 ---
 id: TASK-130
 title: "The Supervisor's Log File"
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-26 16:40'
+updated_date: '2026-10-26 21:28'
 labels:
   - ST-130
 milestone: Loop Hygiene, What Epics 31 and 32 Taught the Loop

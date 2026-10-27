@@ -1,9 +1,10 @@
 ---
 id: TASK-131
 title: Refusals Reach the Owner, Not the Console
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-26 16:40'
+updated_date: '2026-10-26 21:28'
 labels:
   - ST-131
 milestone: Loop Hygiene, What Epics 31 and 32 Taught the Loop

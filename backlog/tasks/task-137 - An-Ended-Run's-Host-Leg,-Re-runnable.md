@@ -1,9 +1,10 @@
 ---
 id: TASK-137
 title: "An Ended Run's Host Leg, Re-runnable"
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-26 16:40'
+updated_date: '2026-10-27 03:46'
 labels:
   - ST-137
 milestone: Loop Hygiene, What Epics 31 and 32 Taught the Loop

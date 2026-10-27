@@ -1,9 +1,10 @@
 ---
 id: TASK-134
 title: The Roster Gate Inside the Engine, Tracked
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-26 16:40'
+updated_date: '2026-10-27 01:00'
 labels:
   - ST-134
 milestone: Loop Hygiene, What Epics 31 and 32 Taught the Loop
