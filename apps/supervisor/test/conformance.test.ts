@@ -38,6 +38,12 @@ describe("evolve and launch surfaces", () => {
     expect(isDirectDrive("tk-studio-launch", { argv: ["lib/pipeline.py", "resolve", "--directory", "{sandbox}", "--story", "1-1-conformance"] })).toBe(true);
     expect(isDirectDrive("tk-studio-launch", { argv: ["lib/pipeline.py", "apply", "--directory", "{sandbox}", "--dry-run"] })).toBe(true);
   });
+
+  test("Story 34.3: playable-judge's e2e_playable_verify.py drive runs direct; playable_judge.py prepare|verdict do not", () => {
+    expect(isDirectDrive("tk-studio-playable-judge", { argv: ["contracts/conformance/e2e_playable_verify.py"] })).toBe(true);
+    expect(isDirectDrive("tk-studio-playable-judge", { argv: ["lib/playable_judge.py", "prepare", "--media", "{sandbox}"] })).toBe(false);
+    expect(isDirectDrive("tk-studio-playable-judge", { argv: ["lib/playable_judge.py", "verdict", "--media", "{sandbox}", "--answer", "{sandbox}/answer.json"] })).toBe(false);
+  });
 });
 
 describe("plugin-relative --directory", () => {

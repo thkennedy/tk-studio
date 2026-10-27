@@ -45,6 +45,7 @@ CLI (all verbs end with JSON on stdout; never prompts — AD-11):
   uv run jobrun.py finish  --directory DIR --run-id RID --state STATE
                            [--reason R] [--status-block JSON]
                            [--total-cost-usd USD]
+                           [--playable-verify-cost-usd USD]
 
 Exit codes: 0 verb answered (including accepted=false / woken=false — a
 refusal is an answer); 2 bad invocation or unknown id; 1 unexpected
@@ -119,6 +120,10 @@ def _emit_job_event(record: dict, key: str, detail: str | None = None) -> None:
         payload["elapsed_ms"] = round(elapsed, 3)
     if "total_cost_usd" in record:  # key presence: a cost of 0 is carried
         payload["total_cost_usd"] = record["total_cost_usd"]
+    # Story 34.3: the playable-verify judge's cost, its own line (also
+    # counted in total_cost_usd); absent when the driver sent none
+    if "playable_verify_cost_usd" in record:
+        payload["playable_verify_cost_usd"] = record["playable_verify_cost_usd"]
     try:
         ledger.emit("job-run", payload, project=key)
     except Exception:
@@ -653,13 +658,14 @@ def account(project_root: Path, run_id: str, turns: int = 0,
                                     "named in reason (§4)"}
 
 
-def _validate_cost(value) -> float:
+def _validate_cost(value, field: str = "total_cost_usd") -> float:
     """The run's cost as a finite non-negative float, or a named refusal —
     never a guessed value (AD-3). bool is refused though it is an int; an
     int too large for a float is refused, not an OverflowError; -0.0 is
-    recorded as 0.0 (no signed zero in a non-negative field)."""
+    recorded as 0.0 (no signed zero in a non-negative field). ``field``
+    names the refused field (Story 34.3: ``playable_verify_cost_usd``)."""
     refusal = JobRunError(
-        f"total_cost_usd must be a finite non-negative number, "
+        f"{field} must be a finite non-negative number, "
         f"got {value!r}")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise refusal
@@ -674,16 +680,25 @@ def _validate_cost(value) -> float:
 
 def finish(project_root: Path, run_id: str, state: str,
            reason: str | None = None, status_block: dict | None = None,
-           total_cost_usd: float | None = None) -> dict:
+           total_cost_usd: float | None = None,
+           playable_verify_cost_usd: float | None = None) -> dict:
     """Terminal-ize a skill-target run; emits the job-run event (the
     wrapper's one job-level emission for this run — AD-12). An optional
     total_cost_usd (the worker's --output-format json result) lands in
-    run.json and the event; it is validated before anything is written."""
+    run.json and the event; it is validated before anything is written.
+    Story 34.3: an optional playable_verify_cost_usd (the playable-verify
+    judge's cost, also counted in total_cost_usd) lands the same way, as
+    its own field."""
     cost = None if total_cost_usd is None else _validate_cost(total_cost_usd)
+    pv_cost = (None if playable_verify_cost_usd is None
+               else _validate_cost(playable_verify_cost_usd,
+                                   "playable_verify_cost_usd"))
     key = joblib.project_key(Path(project_root))
     changes: dict = {"state": state}
     if cost is not None:
         changes["total_cost_usd"] = cost
+    if pv_cost is not None:
+        changes["playable_verify_cost_usd"] = pv_cost
     if reason is not None:
         changes["reason"] = reason
     if status_block is not None:
@@ -736,6 +751,11 @@ def main(argv: list[str] | None = None) -> int:
                 cmd.add_argument("--total-cost-usd",
                                  help="run cost in USD (worker's "
                                       "--output-format json result)")
+                # Story 34.3: the playable-verify judge's cost, its own line
+                cmd.add_argument("--playable-verify-cost-usd",
+                                 help="the playable-verify judge's cost in "
+                                      "USD (also counted in "
+                                      "--total-cost-usd)")
         if name in ("submit", "wake"):
             cmd.add_argument("--force-starter", action="store_true",
                              help="start despite a live supervisor "
@@ -775,9 +795,19 @@ def main(argv: list[str] | None = None) -> int:
                     raise JobRunError(
                         f"total_cost_usd must be a finite non-negative "
                         f"number, got {args.total_cost_usd!r}")
+            pv_cost = None
+            if args.playable_verify_cost_usd is not None:
+                try:
+                    pv_cost = float(args.playable_verify_cost_usd)
+                except ValueError:
+                    raise JobRunError(
+                        f"playable_verify_cost_usd must be a finite "
+                        f"non-negative number, got "
+                        f"{args.playable_verify_cost_usd!r}")
             result = finish(Path(args.directory), args.run_id, args.state,
                             reason=args.reason, status_block=block,
-                            total_cost_usd=cost)
+                            total_cost_usd=cost,
+                            playable_verify_cost_usd=pv_cost)
     except (JobRunError, joblib.JobError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
         return 2

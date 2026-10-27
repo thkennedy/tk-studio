@@ -82,7 +82,7 @@ RESOURCE = "tk-studio-launch"
 RESOURCE_TOML = PLUGIN_ROOT / "skills" / RESOURCE / "customize.toml"
 
 LEGS = ("session", "implementer", "reviewers", "consult", "seam",
-        "review", "triage", "supervise", "planner")
+        "review", "triage", "supervise", "planner", "playable-verify")
 # legs bmad-loop itself routes, and the stage table each one writes
 STAGE_OF = {"session": "dev", "review": "review", "triage": "triage"}
 FIELDS = ("model", "effort", "advisor", "skill", "agent", "note")
