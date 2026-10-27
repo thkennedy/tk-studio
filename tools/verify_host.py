@@ -14,7 +14,7 @@ is unavailable.
 
 The studio-web gate is `bun run verify` in apps/studio-web. The supervisor gate (holes 51, 56, 63, 64)
 runs every apps/supervisor/test/*.test.ts but the e2e suite (command-line.test.ts) in its own
-`bun test <file>`, each under a 420 s timeout (the tree killed past it), with every TK_SUPERVISOR_*
+`bun test <file>`, each under a 420 s timeout (the tree killed past it), with every TK_SUPERVISOR_*, TK_ATLASSIAN_* and TK_STUDIO_ATLASSIAN_*
 variable stripped from the environment and TMPDIR/TEMP/TMP at a per-run folder
 `<tempfile.gettempdir()>/tk-verify-supervisor-<UTC stamp>-<pid>/` (the gate's own temp folder, outside
 any git checkout: the suites' queues refuse a path inside one, and the gate fails before the first file
@@ -63,7 +63,7 @@ SUPERVISOR = ROOT / "apps" / "supervisor"
 SUPERVISOR_GATE = "supervisor"
 SUPERVISOR_E2E = "command-line.test.ts"  # spawns `bun src/cli.ts`; run by hand, type-checked by tsc
 SUPERVISOR_FILE_TIMEOUT = 420
-SUPERVISOR_ENV_PREFIX = "TK_SUPERVISOR_"
+SUPERVISOR_ENV_PREFIXES = ("TK_SUPERVISOR_", "TK_ATLASSIAN_", "TK_STUDIO_ATLASSIAN_")  # the box's seats never shape a test
 TEMP_PREFIX = "tk-verify-supervisor"
 TSC_ARGV = (["bunx", "tsc", "--noEmit", "-p", "apps/supervisor"], ["bun", "x", "tsc", "--noEmit", "-p", "apps/supervisor"])
 REMOVE_TRIES = 3
@@ -130,7 +130,7 @@ def supervisor_files() -> list[str]:
 def supervisor_env(tmp: Path) -> dict[str, str]:
     """The host's environment without any TK_SUPERVISOR_* variable, with TMPDIR/TEMP/TMP at `tmp`
     (TMP too: Windows' GetTempPath reads it first)."""
-    env = {k: v for k, v in os.environ.items() if not k.upper().startswith(SUPERVISOR_ENV_PREFIX)}
+    env = {k: v for k, v in os.environ.items() if not k.upper().startswith(SUPERVISOR_ENV_PREFIXES)}
     env.update({"PYTHONIOENCODING": "utf-8", "TMPDIR": str(tmp), "TEMP": str(tmp), "TMP": str(tmp)})
     return env
 

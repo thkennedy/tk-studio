@@ -1899,7 +1899,11 @@ describe("Story 28.5 (DW-25): a project below its git top-level is served at <wo
     const { fx, served, worker, payload } = await invokeNested("sbx");
     const vm = toVmPath(served);
     expect(vm.endsWith(`/${NESTED}`)).toBe(true);
-    expect(worker.args.slice(0, 2)).toEqual(["exec", "claude-p"]);
+    // The box's own TK_ATLASSIAN_* variables add `-e NAME` pairs right after `exec` (Story 31.1): skip them, so the
+    // assertion holds whatever the host leg's environment carries.
+    const withoutPassThrough: string[] = [];
+    for (let i = 0; i < worker.args.length; i++) { if (worker.args[i] === "-e") { i++; continue; } withoutPassThrough.push(worker.args[i]!); }
+    expect(withoutPassThrough.slice(0, 2)).toEqual(["exec", "claude-p"]);
     expect(worker.args[worker.args.indexOf("-C") + 1]).toBe(vm);
     expect(payload.directory).toBe(vm);
     expect(worker.cwd).toBe(served);
