@@ -3013,3 +3013,163 @@ So that a roster miss or an environment fault never needs the hand recipe (hole 
 **Given** the verb
 **When** it is tested
 **Then** `bun test` covers the worktree, the recorded event, the draft-to-ready flip and every refusal with fakes; the README's route table and the runbook's "when a host leg is red" steps name it
+
+## Epic 34: The Vertical-Slice Pack
+
+The design spec's build order (§10) calls this epic EP-33, the vertical-slice pack of Phase 3; it is EP-34 in the plan because Epic 33 (loop hygiene) took the number first. Its sources, in order of authority: the planning pass of 2026-09-26 (`_bmad-output/planning-artifacts/briefs/planning-pass-agent-pc-and-supervisor-2026-09-26.md`, Phase 3: the `playable-verify` leg, the engine MCP wiring, the asset-manifest ladder, the `run-vertical-slice` job type, a contract bump with eval cases), the research of the same day (`research/agent-studio-next-level-2026-09-26/research.md` §4: build on others, own the gates; digests 01 and 02), user flow F9 and the feature ledger's Phase 3 row in the design spec, and the 3D tooling note (`kb/agentic-3d-asset-tooling-2026-10.md`). The Universe Awaits (`C:\GitHub\the-universe-awaits`, a Godot 4.7.2 Mono project with its GoDotTest suite, served by the supervisor since Story 23.3) is the reference project throughout; nothing in this epic changes TUA's `main` except through TUA's own run PRs. What exists today: TUA's `scripts/engine-gate.sh` (headless import, then the engine tests) and the `TUA_ENGINE_GATE=1` branch of its `scripts/verify.sh`; the supervisor's host leg (Stories 27.4, 33.4 and 33.8), which runs a project's `verify.host` on the Windows host in the run's worktree before the PR, where Godot (`$env:GODOT`, `godot` on PATH) and Blender 5.2 live; the engagement loop (EP-32), for which a game project is only a project whose working set carries the GDS skills. The finding of this planning pass: no run has ever imported the game or run its engine tests, because the engine runs in a Linux sandbox that has no `godot` and the host leg runs `verify.sh` without the flag, so "it builds" has stood in for "it plays" since the first TUA run. The rules the epic keeps: engines (every `claude` session) run only in the project's Docker Sandbox, never with bypass on the host; the host leg runs deterministic scripts and the engine binaries, never a model; the judge that looks at frames is a routed leg on the sandbox tier over the mounted worktree, and it never sees code; no 3D generation runs natively on the host (the research's Windows rule); GDS stays at the pin and its engine catalogue stays upstream-owned (AD-1); one engine MCP per run, paired with a skill that pins the engine version, and `.mcp.json` only on confirmation; secrets reach a worker by name only; a placeholder is kept until its replacement passes the same gates; every surface change is additive on the contract (0.1.29 and up), ends in a status block (AD-11), is covered by conformance (AD-19) and lands its cost in the ledger. Spikes come first where the research's claims are untested on the box (34.2 the playable run, 34.5's comparison), as EP-30 did with the renderer. Planned 2026-10-27 (session 11's fifth day) by the session. One story per run with a graceful stop after each, as EP-32 and EP-33 ran; a story proved on TUA records its proof in `kb/` the way Story 23.3 did.
+
+### Story 34.1: The Engine Gate on the Host Leg
+
+As the loop,
+I want the host leg to run a game project's engine gate (the headless import, then the engine's own tests) on the Windows host where the engine lives,
+So that a story that breaks the game's scenes or its engine tests goes red before its PR opens, not after (today the gate never runs in the loop).
+
+**Acceptance Criteria:**
+
+**Given** a project config that declares `verify.engine: <one command line>` beside `verify.host` (additive; TUA's is `bash scripts/engine-gate.sh`)
+**When** the host leg runs (the close-out, or 33.8's `verify`)
+**Then** after `verify.host` is green it runs `verify.engine` in the worktree with the folder of `$env:GODOT` prepended to PATH (so `godot` resolves to the console binary the box has) and the project's own flags left to the project; the `host-verify` event carries `engine: green | red | skipped (no verify.engine)` with the exit code and the log tail; `red` ends the run `partial` with `host_verify: red` exactly as a red `verify.host` does; `bun test` covers the ordering, the PATH composition, the event and both verdicts with a fake engine binary
+
+**Given** the box
+**When** `tk-studio doctor` runs
+**Then** it reports an engine row: `$env:GODOT` set and the file present, the version `godot --version` prints, and "no engine" otherwise; the runbook names the row and the `verify.engine` key
+
+**Given** tk-studio's conformance
+**When** it runs
+**Then** an e2e drives the host leg with a fake `godot` to both verdicts; contract 0.1.29 adds `verify.engine` and the event field (additive); the story's proof on TUA (an ended TUA run re-verified through `POST /runs/{id}/verify`, the import and the GoDotTest suite green on the host) is recorded in `kb/`
+
+### Story 34.2: Spike, a Playable Run on the Box
+
+As the operator,
+I want one proven way to run the game on the agent PC for a bounded number of ticks under a seeded, scripted input scenario and come back with frames and a pass or fail,
+So that the `playable-verify` leg (34.3) builds on facts measured on this box rather than on the research's claims.
+
+**Acceptance Criteria:**
+
+**Given** TUA on the box (Godot 4.7.2 Mono, the logged-in session's display)
+**When** `plugins/tk-studio/lib/playable.py run --directory <project> --scenario <file> --seed <n> --ticks <t> --out <dir>` runs on the host
+**Then** it starts the game with a `PlayableHarness` autoload (C#, shipped by the plugin as a template the project copies in; TUA carries it under `game/src/Debug`) that reads the scenario (JSON: named inputs per tick; invariants per tick such as "the player node exists", "no error line in the log", "the frame time stays under the budget"), drives the inputs deterministically from the seed, captures a frame from the active camera every k ticks, and quits 0 when every invariant held or 1 naming the first that failed; the run writes `<out>/report.json`, `<out>/frames/*.png` and `<out>/log.txt`, is bounded by a wall clock that kills an overrun, and ends in a status block (AD-11)
+
+**Given** the three rendering paths (the session's display, windowed; Movie Maker frames through `--write-movie`; `--headless`, which renders nothing)
+**When** the spike measures them on the box
+**Then** `kb/playable-verify-on-the-box.md` records which path produced frames, the time per tick and the pixel evidence, and names the one 34.3 uses (the story's ruling, in its consult log); `tk-studio-launch check` warns when that path's precondition is missing (no display session, no `$env:GODOT`)
+
+**Given** the lib suite
+**When** it runs
+**Then** `playable.py` is covered with a fake engine binary (the argv, the scenario parsing, the invariant verdicts, the wall clock); the harness depends on nothing in the studio, so a project can run it alone
+
+### Story 34.3: The `playable-verify` Leg
+
+As the loop,
+I want a routed leg that runs the scenario on the host after the engine gate, has a model judge the frames by a screenshot-only rubric, and writes the verdict where the owner reads it,
+So that "it builds" and "it plays" are two different greens (the research's own finding: nobody one-shots game feel; verify from the runtime).
+
+**Acceptance Criteria:**
+
+**Given** a project config that declares `playable: {scenario: <file>, seed: <n>, ticks: <t>}` (additive)
+**When** the host leg's engine gate is green
+**Then** the host leg runs 34.2's `playable.py run` in the worktree, writes the media under the run workspace (`~/.tk-studio/runs/<run>/playable/`) and the worktree's ignored `.bmad-loop/runs/<engine>/playable/`, then drives the judge: a `claude -p` session on the project's sandbox tier (`sbx exec`, the plugin's `tk-studio-playable-judge` skill, routed by `[pipeline.legs] playable-verify` with its own `model` and `effort` through `pipeline.py`'s tables) that reads only `report.json` and the frames (never the code or the spec), answers the rubric (the scene loaded; the player is visible and framed; no missing-texture magenta and no error overlay; the HUD reads; the scenario's named moments appear in the frames they name) with `verdict: pass | fail` and `findings[]` each naming a frame and a rubric line, and ends in a status block; the `host-verify` event carries `playable: pass | fail | skipped` and the findings
+
+**Given** a `fail`
+**When** the close-out continues
+**Then** the run ends `partial` with `host_verify: red (playable)`, the PR body carries the findings and the frames' paths, the inbox gets the line, and 33.8's `verify` re-runs the leg after a fix; `pass` lets the PR go ready; a project without `playable` is `skipped` and unchanged
+
+**Given** the suites
+**When** they run
+**Then** `bun test` covers the ordering, the event, the PR body and both verdicts with fakes; the lib suite covers the rubric parsing and the judge's refusals (no frames, a malformed report); conformance adds the skill's roster row and an e2e over a fake judge; contract 0.1.29 names the leg; the leg's cost lands in the ledger's `job-run` as its own line
+
+### Story 34.4: Engine Knowledge, Pinned per Project
+
+As the dev session,
+I want the engine's version, its quirks and its rules in my context when the project is a game,
+So that I never hand-edit a serialised scene, never guess an API that changed, and run the engine the way this box runs it (the research's recurring finding: engine knowledge injection beats model priors).
+
+**Acceptance Criteria:**
+
+**Given** the `game-godot` detect profile
+**When** `tk-studio-onboard` proposes a working set for a project it detects as Godot
+**Then** the proposal carries, with its evidence, the plugin-shipped engine skill `gds-engine-godot-4` (read-only knowledge: the pinned version read from `project.godot`'s `config/features` and `global.json`'s SDK, the headless flags, the C# and GoDotTest conventions, the rule that `.tscn` and `.tres` files are written only the way the editor writes them, the import-cache rule, the `$env:GODOT` rule on the box) and records it in `working_set.<role>` only on confirmation; a project whose pinned version falls outside the skill's supported range gets a warning, never a silent mismatch; `recommend.py`'s tests cover the suggestion and the version check
+
+**Given** a run on a game project
+**When** the launch materialises the worktree
+**Then** the engine skill reaches the dev session the way the studio's other skills do (the skills mount), and `engine.verify_commands` (33.5) carries the project's engine gate when the sandbox can run it and names the host leg (34.1) when it cannot; the roster row, the README row and the kb row exist; a `claude plugin eval` case checks the skill answers the three pinned facts
+
+**Given** GDS's own engine catalogue (`gds-game-architecture/engine-mcps.yaml`, upstream-owned, AD-1)
+**When** the skill is written
+**Then** it cites the catalogue and never forks it
+
+### Story 34.5: One Engine MCP per Run, Started by the Pin
+
+As the loop,
+I want the engine's MCP server chosen once per project, written into `.mcp.json` only on confirmation, and started on the host for a run that asks for the editor,
+So that a dev session can run the project's tests, verify it and take a frame from the engine without a human, and nothing more.
+
+**Acceptance Criteria:**
+
+**Given** the three candidates (`beremaran/godot-agent-loop`, `hi-godot/godot-ai`, `gdai-mcp-plugin-godot`)
+**When** the story's spike compares them on the box against Godot 4.7.2 Mono (install, `run_project_tests`, `verify_project`, `game_screenshot`, Windows status, licence, last release)
+**Then** `kb/engine-mcp-godot.md` records the table and the pick with evidence, the research ledger gets the seeds, and the `game-godot` profile's recommendation names the pick (through 34.4's proposal) with the `.mcp.json` entry written only by `recommend.py record --mcp` on confirmation, never by detection
+
+**Given** a run whose job sets `editor_in_the_loop: true`
+**When** the supervisor pins the sandbox
+**Then** it snapshots the project with `robocopy` to `C:\agent-work\backups\<project>\<run>` (the brief's Phase 1 item 7), starts the engine MCP on the host bound to the tailnet address with a per-run bearer, passes its URL and the bearer to the sandbox by name (`-e`, never a file), and stops it at release; a run without the flag starts nothing; `bun test` covers the start, the stop, the snapshot and the refusals (no `.mcp.json`, no engine)
+
+**Given** the verify-only rule
+**When** the MCP is wired
+**Then** its scene-editing tools are not exposed to the dev session in this version (the engine skill says so and the server's allowlist enforces it where the server has one); the runbook names the port and the rule
+
+### Story 34.6: The Asset Manifest and the Greybox Rung
+
+As the loop,
+I want every asset a slice needs declared in one manifest and the ladder's first rung (greybox) produced from it deterministically,
+So that a slice is playable with placeholders before any art exists, and every later asset replaces a placeholder that passed the same gates.
+
+**Acceptance Criteria:**
+
+**Given** `assets/manifest.yaml` (its schema `plugins/tk-studio/contracts/asset-manifest.schema.json`: name, category, triangle budget, bounds in metres, origin rule, collision shape, licence tag, rung, status)
+**When** `plugins/tk-studio/lib/assets.py check --directory <project>` runs
+**Then** it validates the manifest and reports every entry's rung and status; `assets.py greybox --directory <project>` writes, for every entry without a file, a greybox mesh (primitives sized to the bounds, the origin per the rule, a flat material in the category's colour with the name baked into a label texture) as glTF under the project's art path (TUA: `art/world/greybox/`, following `art/ART-BIBLE.md`) through headless Blender on the host (`blender -b --python plugins/tk-studio/lib/blender/greybox.py`), deterministic (the same manifest gives the same bytes) and never touching an existing file; each verb ends in a status block (AD-11)
+
+**Given** a produced mesh
+**When** `assets.py facts <file>` runs
+**Then** it reports the triangle count, the bounds, the origin, UV presence and the material count from the glTF itself (stdlib, no Blender), and `check` fails any entry whose facts break its budget or bounds (the `facts` gate); the lib suite covers the schema, the gate and the greybox verb with a fake `blender`; conformance adds the manifest check; the README and the kb name the ladder
+
+### Story 34.7: The CC0 Mirror and the Paid Rung Behind a Cap
+
+As the loop,
+I want the ladder's second rung to draw from pre-mirrored CC0 kits on the box and its third from a generator only behind a per-run credit cap,
+So that a slice gets real-looking placeholders for nothing and generated art only when the owner paid for it on purpose.
+
+**Acceptance Criteria:**
+
+**Given** a mirror under `C:\agent-work\assets\<kit>` (Kenney, Quaternius, Poly Haven; each with its licence file and the index the mirror script writes)
+**When** `assets.py match --directory <project>` runs
+**Then** every manifest entry on the `cc0` rung is matched by category and tags to a kit asset, normalised through headless Blender (scaled to the bounds, the origin per the rule, decimated to the triangle budget, exported as glTF) into the project's art path, passed through the `facts` gate and a visual gate (a Workbench render from the manifest's camera, compared with the greybox render for silhouette coverage and with a blank for emptiness), and the placeholder is kept until both gates pass; the kit, the licence tag and the source path land in the entry's provenance
+
+**Given** the `generated` rung
+**When** a manifest entry asks for it
+**Then** `assets.py generate` refuses unless the project's `budget-bands.yaml` carries an `assets.credit_cap` for the run and the generator's key exists as a User environment variable by name (`TK_ASSETS_MESHY_KEY`, never in a file), spends at most the cap, records every call and its cost in the ledger, and runs the same two gates; the rung is off by default and the runbook says how it is turned on
+
+**Given** the suites
+**When** they run
+**Then** the lib suite covers the matching, the normalisation argv, both gates and the cap refusals with fakes; nothing generates natively on the host (the Windows rule stands)
+
+### Story 34.8: The `run-vertical-slice` Job and the Engagement's Game Path
+
+As the owner,
+I want one message to a game project to end in a playable greybox slice with proof media, a report and a measured cost,
+So that the studio's promise (user flow F9) is a thing I can run, not a diagram.
+
+**Acceptance Criteria:**
+
+**Given** a game project engaged through the chat route (EP-32)
+**When** the scope step runs on a project whose working set carries GDS
+**Then** it runs `gds-create-game-brief` and `gds-gdd` (quick flow) and publishes both to the engagement's Confluence page beside the scope; approval mints the epics as today, and the plan's `run-epic-N.json` instances carry `type: run-vertical-slice`
+
+**Given** the shipped job type `plugins/tk-studio/jobs/run-vertical-slice.json`
+**When** a run of it executes
+**Then** the engine runs the story as `run-epic` does; the host leg runs the engine gate (34.1), the ladder's `check` and `greybox` (34.6; `match` when the mirror exists) and the `playable-verify` leg (34.3); the proof media (the frames, a contact sheet, the report) land in the run workspace, the PR body and the engagement's page; the closeout report (32.8) lists the slice's verdicts per story; guards and stop conditions per the job schema; the planner tier per the measured routing
+
+**Given** TUA
+**When** the acceptance runs
+**Then** one `POST /jobs` (or one chat message) on TUA ends in a merged PR with a playable greybox scene, the frames in the PR, a `job-run` ledger line with the cost, conformance green over every surface (the contract at 0.1.29 or later), the three new skills' eval cases above the threshold, and the acceptance record under `kb/`; the design spec's feature ledger flips Phase 3 to built
