@@ -53,6 +53,18 @@ Guarantees:
     (`<store>/sandboxes/<sandbox>.pin`) is named as a warning ("started
     outside the supervisor; the next pin restarts it"). `sbx daemon status`
     runs before `sbx ls`, and no other sbx command runs.
+  - `check` launches nothing; its one write (Story 33.5, hole 62) is the
+    policy's `[verify] commands`, reconciled from a tracked list — the
+    project's `.tk-studio/config.yaml` `engine.verify_commands` when the key
+    is present, else `plugins/tk-studio/pipeline/verify-commands.toml`
+    (never config.local.yaml or the user tier). A missing tracked command
+    is appended after the operator's, which are kept in order; nothing to
+    add leaves the file byte-identical. The write is atomic and re-read
+    with tomllib (the original bytes restored on any mismatch); `[limits]`
+    stays read-only. The `verify commands` row and the `verify_commands`
+    key `{source, tracked, added, kept, policy}` report it on every check;
+    a source or policy that cannot be read or placed is a named gap ("fix
+    it by hand"); no tracked list or no policy is an advisory skip.
 
 Exit codes: 0 verb answered (a `check` with gaps is an answer: ok=false);
 2 bad invocation or refusal (`start` on a failing check, missing spec, an
@@ -79,6 +91,7 @@ import job as joblib
 import miniyaml
 import sandbox_login
 import store as storelib
+from pipeline import LEGACY_BEGIN_RE
 
 # statuses `bmad-loop list --json` reports for a run whose engine is gone;
 # anything else owns the checkout (a paused engine is still a live process)
@@ -93,6 +106,12 @@ BLOCK_KEYS = ("status", "intent", "artifacts", "reason")
 
 POLICY_REL = ".bmad-loop/policy.toml"
 BANDS_REL = ".tk-studio/budget-bands.yaml"
+# Story 33.5: the tracked [verify] commands the readiness check reconciles
+# into the policy (the project config's key overrides the plugin file)
+CONFIG_REL = ".tk-studio/config.yaml"
+VERIFY_PLUGIN_REL = "plugins/tk-studio/pipeline/verify-commands.toml"
+VERIFY_CONFIG_SOURCE = ".tk-studio/config.yaml engine.verify_commands"
+VERIFY_CHECK = "verify commands"
 # policy `[limits]` key -> the band field its largest band is compared with
 BUDGET_COMPARED = (("max_tokens_per_story", "weighted_tokens"),
                    ("max_review_cycles", "review_cycles_max"))
@@ -323,6 +342,224 @@ def compare_budget(project_root: Path) -> tuple[dict, dict]:
     return budget, {"check": "budget", "ok": not mismatch, "detail": detail}
 
 
+# ------------------------------------------- the tracked [verify] commands
+
+def _verify_key(source: str | None, tracked: list[str], policy: str, *,
+                added: list[str] | None = None, kept: list[str] | None = None) -> dict:
+    return {"source": source, "tracked": list(tracked), "added": list(added or []),
+            "kept": list(kept or []), "policy": policy}
+
+
+def _strings(value: object, *, non_empty: bool) -> bool:
+    return isinstance(value, list) and all(
+        isinstance(v, str) and (v.strip() or not non_empty) for v in value)
+
+
+def tracked_verify_commands(root: Path) -> tuple[str | None, list[str], str | None]:
+    """(source, tracked, problem) — Story 33.5's resolution order, tracked
+    files only (never config.local.yaml or the user tier): the project
+    config's ``engine.verify_commands`` when the key is present (no value
+    reads as the empty list: nothing tracked), else the plugin's
+    ``pipeline/verify-commands.toml`` ``commands``, else no source.
+    ``problem`` names a source that does not parse or is not a list of
+    non-empty strings."""
+    config = root / CONFIG_REL
+    if config.is_file():
+        try:
+            doc = miniyaml.load(config)
+        except (OSError, UnicodeDecodeError, miniyaml.MiniYamlError) as exc:
+            return CONFIG_REL, [], f"{CONFIG_REL} unparseable: {exc}"
+        engine = doc.get("engine") if isinstance(doc, dict) else None
+        if isinstance(engine, dict) and "verify_commands" in engine:
+            value = engine["verify_commands"]
+            value = [] if value is None else value
+            if not _strings(value, non_empty=True):
+                return VERIFY_CONFIG_SOURCE, [], (
+                    f"{CONFIG_REL} engine.verify_commands is not a list of non-empty strings")
+            return VERIFY_CONFIG_SOURCE, list(value), None
+    plugin = root / VERIFY_PLUGIN_REL
+    if plugin.is_file():
+        try:
+            with open(plugin, "rb") as fh:
+                doc = tomllib.load(fh)
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+            return VERIFY_PLUGIN_REL, [], f"{VERIFY_PLUGIN_REL} unparseable: {exc}"
+        value = doc.get("commands")
+        if not _strings(value, non_empty=True):
+            return VERIFY_PLUGIN_REL, [], (
+                f"{VERIFY_PLUGIN_REL} commands is not a list of non-empty strings")
+        return VERIFY_PLUGIN_REL, list(value), None
+    return None, [], None
+
+
+def _array_end(text: str, start: int) -> int:
+    """Index just past the ``]`` closing the TOML array opening at
+    ``text[start] == "["`` — a bracket scan honouring basic, literal and
+    multi-line strings and comments; -1 when it never closes."""
+    depth, i, n = 0, start, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "\"'":
+            triple = text.startswith(ch * 3, i)
+            close = ch * 3 if triple else ch
+            i += len(close)
+            while i < n and not text.startswith(close, i):
+                if ch == '"' and text[i] == "\\":
+                    i += 1
+                elif not triple and text[i] in "\r\n":
+                    return -1
+                i += 1
+            if i >= n:
+                return -1
+            i += len(close)
+            continue
+        if ch == "#":
+            while i < n and text[i] not in "\r\n":
+                i += 1
+            continue
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return -1
+
+
+def _place_verify_commands(text: str, data: dict, desired: list[str]) -> str | None:
+    """``text`` with ``[verify] commands`` set to ``desired`` (one line, TOML
+    basic strings, the file's newline kept); None when the key cannot be
+    located (a dotted key, an inline table)."""
+    nl = "\r\n" if "\r\n" in text else "\n"
+    line = "commands = [" + ", ".join(json.dumps(c, ensure_ascii=False) for c in desired) + "]"
+    header = re.search(r"^[ \t]*\[[ \t]*verify[ \t]*\][ \t]*(?:#[^\r\n]*)?\r?$", text, re.M)
+    verify = data.get("verify")
+    if header is None:
+        if verify is not None:
+            return None  # `verify.commands = ...` or `verify = {...}`: never guessed
+        block = f"[verify]{nl}{line}{nl}"
+        fence = re.search(r"^" + LEGACY_BEGIN_RE, text, re.M)
+        if fence is not None:
+            return text[:fence.start()] + block + nl + text[fence.start():]
+        base = text
+        if base and not base.endswith(nl):
+            base += nl
+        if base and not base.endswith(nl + nl):
+            base += nl
+        return base + block
+    after = text.find("\n", header.end())
+    body_start = len(text) if after < 0 else after + 1
+    nxt = re.search(r"^[ \t]*\[", text[body_start:], re.M)
+    body_end = body_start + nxt.start() if nxt else len(text)
+    key = re.search(r"^[ \t]*commands[ \t]*=[ \t]*", text[body_start:body_end], re.M)
+    if not isinstance(verify, dict):
+        return None
+    if "commands" not in verify:
+        if key is not None:
+            return None
+        prefix = text[:body_start] if after >= 0 else text + nl
+        return prefix + line + nl + text[body_start:]
+    if key is None:
+        return None
+    open_at = body_start + key.end()
+    if open_at >= len(text) or text[open_at] != "[":
+        return None
+    close_at = _array_end(text, open_at)
+    if close_at < 0:
+        return None
+    value_start = body_start + key.start()
+    return text[:value_start] + line + text[close_at:]
+
+
+def _write_atomic(path: Path, data: bytes) -> None:
+    tmp = path.with_name(f"{path.name}.tk-studio-{os.getpid()}.tmp")
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            shutil.copymode(path, tmp)
+        except OSError:
+            pass
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def reconcile_verify_commands(root: Path) -> tuple[dict, dict]:
+    """(verify_commands key, check row) — Story 33.5: the engine policy's
+    ``[verify] commands`` reconciled from the tracked list. Tracked commands
+    the policy lacks are appended after the operator's, in tracked order;
+    the operator's commands are never reordered or removed; nothing to add
+    leaves the file byte-identical. The write is atomic and re-read with
+    tomllib; on any mismatch the original bytes are restored. Every problem
+    is a named refusal (``ok`` false, a gap), never a guess; no tracked list
+    or no policy is an advisory skip and writes nothing."""
+    def row(ok: bool, detail: str) -> dict:
+        return {"check": VERIFY_CHECK, "ok": ok, "detail": detail}
+
+    def refused(source: str | None, tracked: list[str], problem: str) -> tuple[dict, dict]:
+        return (_verify_key(source, tracked, "refused"),
+                row(False, f"refused: {problem} — fix it by hand"))
+
+    source, tracked, problem = tracked_verify_commands(root)
+    if problem:
+        return refused(source, tracked, problem)
+    if source is None:
+        skip = "skipped (no tracked list)"
+        return _verify_key(None, [], skip), row(True, skip)
+    policy_path = root / POLICY_REL
+    if not policy_path.is_file():
+        skip = f"skipped (no {POLICY_REL}; bmad-loop init creates it)"
+        return _verify_key(source, tracked, skip), row(True, skip)
+    try:
+        original = policy_path.read_bytes()
+        text = original.decode("utf-8")
+        data = tomllib.loads(text)
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        return refused(source, tracked, f"{POLICY_REL} unparseable: {exc}")
+    verify = data.get("verify", {})
+    current = verify.get("commands", []) if isinstance(verify, dict) else None
+    if not _strings(current, non_empty=False):
+        return refused(source, tracked,
+                       f"{POLICY_REL} verify.commands is not a list of strings")
+    desired = list(current)
+    for command in tracked:
+        if command not in desired:
+            desired.append(command)
+    added = desired[len(current):]
+    kept = [c for c in current if c not in tracked]
+    if not added:
+        return (_verify_key(source, tracked, "unchanged", kept=kept),
+                row(True, f"unchanged ({len(tracked)} tracked, {len(kept)} operator)"))
+    new_text = _place_verify_commands(text, data, desired)
+    if new_text is None:
+        return refused(source, tracked,
+                       f"{POLICY_REL} [verify] commands cannot be located "
+                       "(a dotted key or an inline table)")
+    expected = {**data, "verify": {**(verify or {}), "commands": desired}}
+    try:
+        _write_atomic(policy_path, new_text.encode("utf-8"))
+        with open(policy_path, "rb") as fh:
+            ok = tomllib.load(fh) == expected
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        ok = False
+    if not ok:
+        try:
+            _write_atomic(policy_path, original)
+        except OSError as exc:
+            return refused(source, tracked,
+                           f"{POLICY_REL} reconciliation did not verify and the original "
+                           f"could not be restored: {exc}")
+        return refused(source, tracked,
+                       f"{POLICY_REL} reconciliation did not verify; the original is restored")
+    return (_verify_key(source, tracked, "written", added=added, kept=kept),
+            row(True, f"added {len(added)} from {source}; kept {len(kept)} operator commands"))
+
+
 def mismatch_text(entry: dict) -> str:
     """One mismatch, both numbers named."""
     return (f"{entry['limit']} {entry['policy']} < band {entry['band']} "
@@ -427,7 +664,8 @@ def engine_sandbox_row(env=None) -> dict:
 
 def check(project_root: Path, spec_folder: str) -> dict:
     """Readiness gates for a launch. ok=false names every gap; nothing is
-    launched or written."""
+    launched, and the one write is the policy's ``[verify] commands``
+    reconciliation (``verify_commands``; Story 33.5)."""
     checks: list[dict] = []
     gaps: list[str] = []
 
@@ -439,11 +677,16 @@ def check(project_root: Path, spec_folder: str) -> dict:
     root = project_root.resolve()
     add("project", root.is_dir(), f"{root}" if root.is_dir() else f"not a directory: {root}")
     if not root.is_dir():
-        return {"ok": False, "checks": checks, "gaps": gaps, "budget": _empty_budget()}
+        return {"ok": False, "checks": checks, "gaps": gaps, "budget": _empty_budget(),
+                "verify_commands": _verify_key(None, [], "skipped (no project directory)")}
 
     # the budget comparison is advisory to `ok`: a mismatch is never a gap
     budget, budget_check = compare_budget(root)
     checks.append(budget_check)
+    # Story 33.5: check's one write — the policy's [verify] commands
+    # reconciled from the tracked list; a refusal is a gap
+    verify_commands, verify_row = reconcile_verify_commands(root)
+    add(verify_row["check"], verify_row["ok"], verify_row["detail"])
 
     folder_abs, rel = _spec_paths(root, spec_folder)
     spec_md = folder_abs / "SPEC.md"
@@ -463,7 +706,8 @@ def check(project_root: Path, spec_folder: str) -> dict:
     add("bmad-loop", binary is not None,
         binary or "bmad-loop is not on PATH (install: uv tool install bmad-loop)")
     if binary is None or not folder_abs.is_dir():
-        return {"ok": not gaps, "checks": checks, "gaps": gaps, "budget": budget}
+        return {"ok": not gaps, "checks": checks, "gaps": gaps, "budget": budget,
+                "verify_commands": verify_commands}
 
     plugin = root / ".bmad-loop" / "plugins" / "studio-pipeline" / "plugin.toml"
     checks.append({"check": "studio-pipeline plugin", "ok": True,
@@ -495,7 +739,8 @@ def check(project_root: Path, spec_folder: str) -> dict:
                         if f.get("severity") == "problem"]
             add("bmad-loop validate", bool(parsed.get("ok")) and not problems,
                 "ok" if parsed.get("ok") else "; ".join(problems) or "validate reported not ok")
-    return {"ok": not gaps, "checks": checks, "gaps": gaps, "budget": budget}
+    return {"ok": not gaps, "checks": checks, "gaps": gaps, "budget": budget,
+            "verify_commands": verify_commands}
 
 
 def start(project_root: Path, spec_folder: str, *, run_id: str | None = None,
