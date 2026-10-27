@@ -1,0 +1,483 @@
+/**
+ * enginemcp.ts — one engine MCP per run, started by the pin (Story 34.5).
+ *
+ *   flag      a queue run whose `editor_in_the_loop` is set (the submission flag of Story 22.3, OR its job
+ *             definition's). A run without it starts nothing and records nothing.
+ *   config    the tracked `.tk-studio/config.yaml` at the run's `base_ref` (`git show`, `run.prefix`, as
+ *             `verify.host` is read): `engine.mcp: {name, start, port}` — `name` the `.mcp.json` `mcpServers` key,
+ *             `start` one command line (argv-split, no shell; `{worktree}` replaced by the run's host worktree),
+ *             `port` the loopback port the server listens on (`127.0.0.1:<port>`). Optional `path`: the server's
+ *             endpoint path (default `/mcp`).
+ *   refusals  checked in this order, nothing started on any, the run ending `blocked` with the key in its reason: `engine-mcp:no-config` (no or a malformed
+ *             `engine.mcp`), `engine-mcp:no-mcp-json` (no `.mcp.json` at the base, or no `mcpServers.<name>`),
+ *             `engine-mcp:no-engine` (`GODOT` unset or naming no file), `engine-mcp:start-failed` (a forwarder
+ *             bind outside the tailnet (`checkBind`, 100.64.0.0/10) or a loopback port already answering, both
+ *             refused before anything is spawned; the child exits, or its port does not answer within the bound;
+ *             the forwarder cannot bind — whatever was spawned is killed).
+ *   start     the child runs on the host, cwd the worktree, env the worker env (`buildWorkerEnv`) with `GODOT`.
+ *             Then the forwarder: its own detached child process (`bun src/enginemcp.ts forward --bind <b> --port
+ *             <p> --upstream <u>`), a Bun server on `TK_SUPERVISOR_BIND`:`TK_SUPERVISOR_ENGINE_MCP_PORT` (default
+ *             8788) that proxies to `127.0.0.1:<port>` only a request carrying `Authorization: Bearer <per-run
+ *             token>` (sha256 + `timingSafeEqual`), bodies streamed both ways; anything else is 401. No JSON-RPC
+ *             tool filter: the verify-only rule is the engine skill's and the server's own allowlist. Both
+ *             children are detached and let go (unref), so they outlive the process that started them: a
+ *             drain-launched run-epic run keeps its MCP after the one-shot `drain` exits (`start.ps1`'s pacer).
+ *   bearer    `randomBytes(32).toString("base64url")`: in the starting process's memory (for its own sessions'
+ *             `-e` env) and in the forwarder's spawn env (`TK_ENGINE_MCP_FORWARD_BEARER`) only — never an event,
+ *             a log, a file or an argv value. The sandbox gets `-e TK_ENGINE_MCP_URL -e TK_ENGINE_MCP_BEARER`,
+ *             the values in the spawn env (`engineMcpEnv`).
+ *   events    `engine-mcp-start {name, pid, start, url, forwarder_pid, forwarder_start}` (`pid`/`start` the
+ *             server child, `forwarder_*` the forwarder child; each `start` the process start time, as `hold`
+ *             records it) and `engine-mcp-stop {name, pid, forwarder_pid, why}`. Idempotent per run through its
+ *             start event.
+ *   stop      at release (`releasePin`, also on a kept pin), from any process: the starting process kills its
+ *             two children; any other kills both recorded pids (`killRecordedWorker`, by pid and start time,
+ *             never by name). The stop is recorded once both are gone. Idempotent. A child that exits on its own
+ *             in the starting process takes the other with it, recorded `engine-mcp-stop {why: "exited"}`.
+ *   recovery  a recorded start with no stop, not live in this process: left alone while its driver lives, or
+ *             while its run is non-terminal with an engine launched (`engine_run_id`) and both recorded pids
+ *             alive; otherwise (a terminal run, a lost driver, a dead server or forwarder) both pids are killed
+ *             and `engine-mcp-stop {why: "supervisor restarted"}` recorded once both are gone (else a later
+ *             recovery retries). Never re-armed.
+ */
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { existsSync, statSync } from "node:fs";
+import { connect } from "node:net";
+import { load as loadYaml } from "js-yaml";
+import { apiBind, engineMcpPort } from "./env";
+import { splitCommand } from "./hostverify";
+import {
+  isTerminal, killRecordedWorker, probeRecordedWorker, processStartTime, workerMayRun, type Queue, type QueueRun, type WorkerKill,
+} from "./queue";
+import { buildWorkerEnv, runProcess, type RunResult } from "./server";
+
+type Env = Record<string, string | undefined>;
+
+export const ENGINE_MCP_START = "engine-mcp-start";
+export const ENGINE_MCP_STOP = "engine-mcp-stop";
+/** The two names the sandbox gets by `-e` (values in the spawn env only). */
+export const ENGINE_MCP_URL_ENV = "TK_ENGINE_MCP_URL";
+export const ENGINE_MCP_BEARER_ENV = "TK_ENGINE_MCP_BEARER";
+export const ENGINE_MCP_ENV_NAMES = [ENGINE_MCP_URL_ENV, ENGINE_MCP_BEARER_ENV] as const;
+/** The forwarder child's bearer: its spawn env only (`buildWorkerEnv` strips every `TK_ENGINE_MCP_*` from a worker). */
+export const FORWARD_BEARER_ENV = "TK_ENGINE_MCP_FORWARD_BEARER";
+/** The forwarder child's first stdout line once it is bound. */
+const FORWARD_READY = "engine-mcp-forwarder ready";
+
+const CONFIG_PATH = ".tk-studio/config.yaml";
+const MCP_JSON = ".mcp.json";
+/** The server's endpoint path when `engine.mcp.path` is absent. */
+export const DEFAULT_ENGINE_MCP_PATH = "/mcp";
+/** How long the child's loopback port (and the forwarder's bind) may take to answer (ms). */
+export const ENGINE_MCP_START_TIMEOUT_MS = 60_000;
+/** How long a killed child may take to go (ms). */
+const STOP_WAIT_MS = 5_000;
+
+export interface EngineMcpConfig { name: string; start: string; port: number; path: string }
+export interface EngineMcpRefusal { key: string; reason: string; resolves: string }
+
+/** A host child of the engine MCP (the server, or the forwarder). */
+export interface McpChild { pid?: number; exited: Promise<unknown>; kill(): void; /** Let the starting process exit without it. */ unref?(): void }
+
+export interface EngineMcpDeps {
+  /** GODOT, TK_SUPERVISOR_BIND, TK_SUPERVISOR_ENGINE_MCP_PORT and the worker env are read from here (default `process.env`). */
+  env?: Env;
+  /** `git show` at the base (default `runProcess`). */
+  git?: (args: string[], opts: { cwd: string; env: Env }) => Promise<RunResult>;
+  /** Spawns the server child (default: node `spawn`, no shell, detached so it outlives the starting process). */
+  spawn?: (argv: string[], opts: { cwd: string; env: Env }) => McpChild;
+  /** The forwarder bind's tailnet check (default api.ts `checkBind`, 100.64.0.0/10). Tests only may pass another,
+   * to bind loopback. */
+  checkBind?: (addr: string) => string;
+  /** The bound on the port's first answer (ms, default 60 000) and its poll interval (ms, default 100). */
+  startTimeoutMs?: number;
+  pollMs?: number;
+  /** The kill of a recorded pid by its start time, from any process (default `killRecordedWorker`). */
+  killRecorded?: (pid: number, start: string | null) => Promise<WorkerKill>;
+  /** May a recorded pid still be its process (default `probeRecordedWorker` + `workerMayRun`)? */
+  recordedAlive?: (pid: number, start: string | null) => boolean;
+}
+
+interface Live {
+  name: string; url: string; bearer: string;
+  server: McpChild; forwarder: McpChild; pid: number | null; forwarderPid: number | null;
+}
+
+/** The engine MCPs this process started, by queue run id: the handles of its two children and the bearer for this
+ * process's own sessions. Another process stops them by their recorded pids. */
+const live = new Map<string, Live>();
+
+const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
+const clip = (s: string, n = 300) => s.replace(/\s+/g, " ").trim().slice(0, n);
+
+/** Is an engine MCP this process started for `runId` live? */
+export const engineMcpLive = (runId: string): boolean => live.has(runId);
+
+/** The sandbox env of a run with a live engine MCP this process started — `{TK_ENGINE_MCP_URL, TK_ENGINE_MCP_BEARER}` —
+ * else undefined. */
+export function engineMcpEnv(runId: string): Record<string, string> | undefined {
+  const l = live.get(runId);
+  return l ? { [ENGINE_MCP_URL_ENV]: l.url, [ENGINE_MCP_BEARER_ENV]: l.bearer } : undefined;
+}
+
+/** Tests: drop this process's handle of the run's engine MCP without stopping anything — what the starting process's
+ * exit does (its children, detached, run on). */
+export function letGoEngineMcp(runId: string): boolean {
+  return live.delete(runId);
+}
+
+/** A refusal as the run's `blocked` reason: `<reason> (<key>; resolves: <what>)`. */
+export const engineMcpRefusalText = (r: EngineMcpRefusal): string => `${r.reason} (${r.key}; resolves: ${r.resolves})`;
+
+// ------------------------------------------------------------ the config at the base
+
+const refusal = (key: string, reason: string, resolves: string): { refused: EngineMcpRefusal } =>
+  ({ refused: { key: `engine-mcp:${key}`, reason: `engine MCP: ${reason}`, resolves } });
+
+const NO_CONFIG_RESOLVES = "add `engine.mcp: {name, start, port}` to the project's tracked .tk-studio/config.yaml at the run's base "
+  + "(or submit the run without editor_in_the_loop)";
+const NO_MCP_JSON_RESOLVES = "confirm the engine MCP with `recommend.py record --mcp <name>` and commit the project's .mcp.json at the run's base";
+const NO_ENGINE_RESOLVES = "set GODOT (a User environment variable) to the Godot binary on the host, then restart the supervisor";
+const startFailedResolves = (port: number) =>
+  `make \`engine.mcp.start\` serve on 127.0.0.1:${port} from the run's worktree (nothing else listening there), and `
+  + "TK_SUPERVISOR_BIND (a tailnet address, 100.64.0.0/10):TK_SUPERVISOR_ENGINE_MCP_PORT free to bind";
+
+async function showAtBase(run: QueueRun, path: string, deps: EngineMcpDeps): Promise<{ text: string } | { missing: true } | { error: string }> {
+  const env = { ...(deps.env ?? process.env), LC_ALL: "C" };
+  const args = ["show", `${run.base_ref ?? ""}:${run.prefix ?? ""}${path}`];
+  let res: RunResult;
+  try {
+    res = deps.git ? await deps.git(args, { cwd: run.root, env }) : await runProcess("git", args, { cwd: run.root, timeoutS: 60, env });
+  } catch (e) { return { error: `git show: ${clip(message(e))}` }; }
+  if (res.exit === 0) return { text: res.stdout };
+  const err = `${res.stderr}${res.stdout}`;
+  if (/does not exist|exists on disk, but not in/i.test(err)) return { missing: true };
+  return { error: `git show exited ${res.exit}: ${clip(err)}` };
+}
+
+/** `engine.mcp` from a parsed config, or why it is malformed (null: absent). */
+export function parseEngineMcp(config: unknown): EngineMcpConfig | { malformed: string } | null {
+  const engine = config && typeof config === "object" ? (config as Record<string, unknown>).engine : undefined;
+  if (!engine || typeof engine !== "object" || !("mcp" in engine)) return null;
+  const mcp = (engine as Record<string, unknown>).mcp;
+  if (!mcp || typeof mcp !== "object" || Array.isArray(mcp)) return { malformed: "engine.mcp is not a mapping" };
+  const m = mcp as Record<string, unknown>;
+  if (typeof m.name !== "string" || !m.name.trim()) return { malformed: "engine.mcp.name is not a non-empty string" };
+  if (typeof m.start !== "string" || !splitCommand(m.start).length) return { malformed: "engine.mcp.start is not a non-empty command line" };
+  if (typeof m.port !== "number" || !Number.isInteger(m.port) || m.port < 1 || m.port > 65535) return { malformed: "engine.mcp.port is not a port number (1-65535)" };
+  if (m.path !== undefined && (typeof m.path !== "string" || !m.path.startsWith("/"))) return { malformed: "engine.mcp.path does not start with /" };
+  return { name: m.name.trim(), start: m.start.trim(), port: m.port, path: typeof m.path === "string" ? m.path : DEFAULT_ENGINE_MCP_PATH };
+}
+
+/** The run's `engine.mcp` and `.mcp.json` entry at its base, and `GODOT` — the config, or the first refusal. */
+export async function engineMcpPlan(run: QueueRun, deps: EngineMcpDeps = {}): Promise<{ config: EngineMcpConfig; godot: string } | { refused: EngineMcpRefusal }> {
+  const base = run.base_ref ?? "";
+  const configPath = `${run.prefix ?? ""}${CONFIG_PATH}`;
+  const shown = await showAtBase(run, CONFIG_PATH, deps);
+  if ("missing" in shown) return refusal("no-config", `no ${configPath} at ${base}`, NO_CONFIG_RESOLVES);
+  if ("error" in shown) return refusal("no-config", `config unreadable: ${shown.error}`, NO_CONFIG_RESOLVES);
+  let parsed: unknown;
+  try { parsed = loadYaml(shown.text); }
+  catch (e) { return refusal("no-config", `config unreadable: ${clip(message(e))}`, NO_CONFIG_RESOLVES); }
+  const cfg = parseEngineMcp(parsed);
+  if (!cfg) return refusal("no-config", `no engine.mcp in ${configPath} at ${base}`, NO_CONFIG_RESOLVES);
+  if ("malformed" in cfg) return refusal("no-config", cfg.malformed, NO_CONFIG_RESOLVES);
+
+  const mcpPath = `${run.prefix ?? ""}${MCP_JSON}`;
+  const mcp = await showAtBase(run, MCP_JSON, deps);
+  if (!("text" in mcp)) return refusal("no-mcp-json", "missing" in mcp ? `no ${mcpPath} at ${base}` : `${mcpPath} unreadable: ${mcp.error}`, NO_MCP_JSON_RESOLVES);
+  let servers: unknown;
+  try { servers = (JSON.parse(mcp.text) as Record<string, unknown> | null)?.mcpServers; }
+  catch (e) { return refusal("no-mcp-json", `${mcpPath} is not JSON: ${clip(message(e))}`, NO_MCP_JSON_RESOLVES); }
+  if (!servers || typeof servers !== "object" || !(cfg.name in (servers as Record<string, unknown>))) {
+    return refusal("no-mcp-json", `${mcpPath} at ${base} has no mcpServers.${cfg.name}`, NO_MCP_JSON_RESOLVES);
+  }
+
+  const godot = (deps.env ?? process.env).GODOT?.trim();
+  let isFile = false;
+  try { isFile = !!godot && statSync(godot).isFile(); } catch { isFile = false; }
+  if (!godot) return refusal("no-engine", "GODOT is not set", NO_ENGINE_RESOLVES);
+  if (!isFile) return refusal("no-engine", `GODOT '${godot}' names no file`, NO_ENGINE_RESOLVES);
+  return { config: cfg, godot };
+}
+
+// ------------------------------------------------------------ the children
+
+/** A spawned child as an `McpChild`: its exit, a kill of its whole tree (POSIX: its process group — it is detached,
+ * so it leads one; win32: `taskkill /F /T`), never by name. */
+function handleOf(child: ChildProcess): McpChild {
+  const exited = new Promise<unknown>((res) => { child.once("exit", res); child.once("error", res); });
+  return {
+    pid: child.pid, exited,
+    kill: () => {
+      const pid = child.pid;
+      if (!pid || child.exitCode !== null || child.signalCode !== null) return;
+      try {
+        if (process.platform === "win32") spawnSync("taskkill", ["/F", "/T", "/PID", String(pid)], { windowsHide: true, timeout: 30_000 });
+        else process.kill(-pid, "SIGKILL");
+      } catch { try { child.kill("SIGKILL"); } catch { /* gone */ } }
+    },
+    unref: () => { try { child.unref(); } catch { /* gone */ } },
+  };
+}
+
+/** The server child: no shell, detached on every platform (win32 included: a non-detached child dies with its
+ * parent's job), so it outlives the process that started it. */
+const defaultSpawn = (argv: string[], opts: { cwd: string; env: Env }): McpChild =>
+  handleOf(spawn(argv[0]!, argv.slice(1), { cwd: opts.cwd, env: opts.env as NodeJS.ProcessEnv, stdio: "ignore", windowsHide: true, detached: true }));
+
+/** The forwarder child (`bun <this file> forward …`, detached), the bearer in its spawn env only. `ready`: null once it
+ * reports itself bound, else why not (it exited, or the bound passed). */
+function spawnForwarder(o: { bind: string; port: number; upstream: number; bearer: string; env: Env; timeoutMs: number }): McpChild & { ready: Promise<string | null> } {
+  const child = spawn(process.execPath, [import.meta.path, "forward", "--bind", o.bind, "--port", String(o.port), "--upstream", String(o.upstream)], {
+    env: { ...o.env, [FORWARD_BEARER_ENV]: o.bearer } as NodeJS.ProcessEnv, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, detached: true,
+  });
+  const h = handleOf(child);
+  let out = "", err = "";
+  const ready = new Promise<string | null>((res) => {
+    let settled = false;
+    const settle = (v: string | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      // Its pipes go: the forwarder writes nothing after it is ready, and the starting process may exit without it.
+      try { child.stdout?.destroy(); child.stderr?.destroy(); } catch { /* closed */ }
+      res(v);
+    };
+    const timer = setTimeout(() => settle(`the forwarder did not report itself bound within ${Math.round(o.timeoutMs / 1000)} s`), o.timeoutMs);
+    child.stdout?.on("data", (d: Buffer) => { out += d.toString("utf-8"); if (out.includes(FORWARD_READY)) settle(null); });
+    child.stderr?.on("data", (d: Buffer) => { err += d.toString("utf-8"); });
+    void h.exited.then(() => settle(`the forwarder exited${err.trim() ? `: ${clip(err, 200)}` : ""}`));
+  });
+  return { ...h, ready };
+}
+
+/** Does `127.0.0.1:<port>` accept a TCP connection? */
+function portAnswers(port: number): Promise<boolean> {
+  return new Promise((res) => {
+    const s = connect({ host: "127.0.0.1", port });
+    const done = (ok: boolean) => { s.removeAllListeners(); s.destroy(); res(ok); };
+    s.once("connect", () => done(true));
+    s.once("error", () => done(false));
+    s.setTimeout(1000, () => done(false));
+  });
+}
+
+/** Wait for the child's port, the child's exit or the bound: null when the port answered and the child still runs
+ * after it, else why not. */
+async function awaitPort(child: McpChild, port: number, deps: EngineMcpDeps): Promise<string | null> {
+  let exited = false;
+  void child.exited.then(() => { exited = true; });
+  const bound = deps.startTimeoutMs ?? ENGINE_MCP_START_TIMEOUT_MS;
+  const poll = deps.pollMs ?? 100;
+  const deadline = Date.now() + bound;
+  for (;;) {
+    if (exited) return "the server exited before its port answered";
+    if (await portAnswers(port)) {
+      // The answer is the child's only if the child still runs after it.
+      await Bun.sleep(Math.min(poll, 100));
+      return exited ? `the server exited after 127.0.0.1:${port} answered (another process answers there)` : null;
+    }
+    if (Date.now() >= deadline) return `127.0.0.1:${port} did not answer within ${Math.round(bound / 1000)} s`;
+    await Bun.sleep(poll);
+  }
+}
+
+/** The forwarder's handler: a request with exactly `Authorization: Bearer <bearer>` is proxied to
+ * `127.0.0.1:<upstream>` (path and query kept, the bearer and host headers dropped, bodies streamed); anything else
+ * is 401. Exported for the tests. */
+export function forwarder(bearer: string, upstream: number): (req: Request) => Promise<Response> {
+  const expected = createHash("sha256").update(`Bearer ${bearer}`).digest();
+  return async (req) => {
+    const got = createHash("sha256").update(req.headers.get("authorization") ?? "").digest();
+    if (!timingSafeEqual(got, expected)) return new Response("unauthorized\n", { status: 401, headers: { "content-type": "text/plain" } });
+    const u = new URL(req.url);
+    const headers = new Headers(req.headers);
+    headers.delete("authorization");
+    headers.delete("host");
+    try {
+      const init: RequestInit & { duplex?: string; decompress?: boolean } = {
+        method: req.method, headers, redirect: "manual", decompress: false,
+        ...(req.method === "GET" || req.method === "HEAD" ? {} : { body: req.body, duplex: "half" }),
+      };
+      const res = await fetch(`http://127.0.0.1:${upstream}${u.pathname}${u.search}`, init);
+      return new Response(res.body, { status: res.status, statusText: res.statusText, headers: res.headers });
+    } catch (e) {
+      return new Response(`engine MCP unreachable: ${clip(message(e), 120)}\n`, { status: 502, headers: { "content-type": "text/plain" } });
+    }
+  };
+}
+
+/** The forwarder child's entry (`forward --bind <b> --port <p> --upstream <u>`, the bearer in `TK_ENGINE_MCP_FORWARD_BEARER`):
+ * binds, reports `engine-mcp-forwarder ready <port>` on stdout, and serves until it is killed. Answers an exit code
+ * when it cannot start. */
+export function forwardMain(argv: string[]): number | null {
+  const flag = (f: string) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : undefined; };
+  const bearer = process.env[FORWARD_BEARER_ENV];
+  delete process.env[FORWARD_BEARER_ENV];
+  const bind = flag("--bind"), port = Number(flag("--port")), upstream = Number(flag("--upstream"));
+  if (!bearer || !bind || !Number.isInteger(port) || !Number.isInteger(upstream) || port < 1 || upstream < 1) {
+    console.error(`forward: needs --bind, --port, --upstream and ${FORWARD_BEARER_ENV}`);
+    return 2;
+  }
+  let server: { port?: number };
+  try { server = Bun.serve({ hostname: bind, port, idleTimeout: 0, fetch: forwarder(bearer, upstream) }); }
+  catch (e) { console.error(`could not bind ${bind}:${port}: ${clip(message(e))}`); return 3; }
+  process.stdout.write(`${FORWARD_READY} ${server.port ?? port}\n`);
+  return null;
+}
+
+// ------------------------------------------------------------ start, stop, recovery
+
+export type EngineMcpStart = { started: true; url: string } | { live: true; url: string } | { skipped: string } | { refused: EngineMcpRefusal };
+
+/** Kill a child and wait (bounded) for it to go. */
+async function killAndWait(c: McpChild): Promise<void> {
+  try { c.kill(); } catch { /* gone */ }
+  await Promise.race([c.exited, Bun.sleep(STOP_WAIT_MS)]);
+}
+
+/** The `engine-mcp-stop` detail. */
+const stopDetail = (name: string | null, pid: number | null, forwarderPid: number | null, why: string, extra: Record<string, unknown> = {}) =>
+  ({ name, pid, forwarder_pid: forwarderPid, why, ...extra });
+
+/** Start the run's engine MCP once (see the header): nothing for a run without the flag (`skipped`), the live one
+ * again for a run this process already started, nothing for a run whose start is recorded but not live here (never
+ * re-armed); else the refusal or the start, recorded `engine-mcp-start`. Never throws. */
+export async function startEngineMcp(queue: Queue, runId: string, deps: EngineMcpDeps = {}): Promise<EngineMcpStart> {
+  let run: QueueRun | null;
+  try { run = queue.get(runId); } catch (e) { return { skipped: `run unreadable: ${clip(message(e))}` }; }
+  if (!run || !run.editor_in_the_loop) return { skipped: "not an editor-in-the-loop run" };
+  const have = live.get(runId);
+  if (have) return { live: true, url: have.url };
+  if (queue.events(runId).some((e) => e.kind === ENGINE_MCP_START)) return { skipped: "engine MCP already started for this run (never re-armed)" };
+  const plan = await engineMcpPlan(run, deps);
+  if ("refused" in plan) return plan;
+  const { config } = plan;
+  const failed = (why: string) => refusal("start-failed", why, startFailedResolves(config.port));
+  const worktree = run.worktree;
+  if (!worktree || !existsSync(worktree)) return failed("the run has no worktree to start the server in");
+  const env = deps.env ?? process.env;
+  // The forwarder binds the tailnet address only — refused before anything is spawned.
+  let bind: string, port: number;
+  try { bind = apiBind(env); } catch (e) { return failed(`no forwarder bind: ${clip(message(e))}`); }
+  try { bind = (deps.checkBind ?? (await import("./api")).checkBind)(bind); }
+  catch (e) { return failed(`the forwarder bind '${bind}' is refused: ${clip(message(e))}`); }
+  try { port = engineMcpPort(env); } catch (e) { return failed(clip(message(e))); }
+  // A port already answering would pass for the server's: refused before the server is spawned.
+  if (await portAnswers(config.port)) return failed(`127.0.0.1:${config.port}: port already in use before the server started`);
+  const argv = splitCommand(config.start).map((a) => a.split("{worktree}").join(worktree));
+  const workerEnv = buildWorkerEnv(env, () => ({}));
+  let server: McpChild;
+  try { server = (deps.spawn ?? defaultSpawn)(argv, { cwd: worktree, env: { ...workerEnv, GODOT: plan.godot } }); }
+  catch (e) { return failed(`the server did not spawn: ${clip(message(e))}`); }
+  const waited = await awaitPort(server, config.port, deps);
+  if (waited) { await killAndWait(server); return failed(waited); }
+  const bearer = randomBytes(32).toString("base64url");
+  let fwd: McpChild & { ready: Promise<string | null> };
+  try { fwd = spawnForwarder({ bind, port, upstream: config.port, bearer, env: workerEnv, timeoutMs: deps.startTimeoutMs ?? ENGINE_MCP_START_TIMEOUT_MS }); }
+  catch (e) { await killAndWait(server); return failed(`the forwarder did not spawn: ${clip(message(e))}`); }
+  const notReady = await fwd.ready;
+  if (notReady) {
+    await Promise.all([killAndWait(fwd), killAndWait(server)]);
+    return failed(`the forwarder could not bind ${bind}:${port}: ${notReady}`);
+  }
+  // Both run on without this process (a drain exits; the run's release, from any process, stops them by pid).
+  server.unref?.();
+  fwd.unref?.();
+  const url = `http://${bind}:${port}${config.path}`;
+  const pid = server.pid ?? null, forwarderPid = fwd.pid ?? null;
+  const entry: Live = { name: config.name, url, bearer, server, forwarder: fwd, pid, forwarderPid };
+  live.set(runId, entry);
+  // One of the two ended on its own: the other goes with it, and the stop is recorded (no dead URL handed out).
+  const onExit = (which: "server" | "forwarder") => async () => {
+    if (live.get(runId) !== entry) return; // stopped, or let go
+    live.delete(runId);
+    await killAndWait(which === "server" ? fwd : server);
+    try { queue.note(runId, ENGINE_MCP_STOP, stopDetail(config.name, pid, forwarderPid, "exited", { exited: which })); }
+    catch { /* the queue is busy, or the run ended: recovery stops what is left */ }
+  };
+  void server.exited.then(onExit("server"));
+  void fwd.exited.then(onExit("forwarder"));
+  const start = pid ? processStartTime(pid) : null;
+  const forwarderStart = forwarderPid ? processStartTime(forwarderPid) : null;
+  try { queue.note(runId, ENGINE_MCP_START, { name: config.name, pid, start, url, forwarder_pid: forwarderPid, forwarder_start: forwarderStart }); }
+  catch { /* the run ended meanwhile: its release stops the MCP */ }
+  return { started: true, url };
+}
+
+/** The run's recorded engine MCP start with no stop after it, else null. */
+function openStart(queue: Queue, runId: string): { name: string | null; pid: number | null; start: string | null; forwarderPid: number | null; forwarderStart: string | null } | null {
+  const last = queue.events(runId).filter((e) => e.kind === ENGINE_MCP_START || e.kind === ENGINE_MCP_STOP).at(-1);
+  if (!last || last.kind !== ENGINE_MCP_START) return null;
+  const d = (last.detail ?? {}) as Record<string, unknown>;
+  const num = (v: unknown) => (typeof v === "number" && Number.isInteger(v) && v > 0 ? v : null);
+  const str = (v: unknown) => (typeof v === "string" ? v : null);
+  return { name: str(d.name), pid: num(d.pid), start: str(d.start), forwarderPid: num(d.forwarder_pid), forwarderStart: str(d.forwarder_start) };
+}
+
+/** Is a kill's answer "that process is gone" (killed, not running, or its pid now another process's)? */
+const gone = (w: WorkerKill) => w.outcome === "killed" || w.outcome === "group killed" || w.outcome === "not running" || w.outcome === "start time differs";
+
+/** Kill both recorded pids from any process: true once both are gone. */
+async function stopRecorded(rec: NonNullable<ReturnType<typeof openStart>>, deps: EngineMcpDeps): Promise<boolean> {
+  const kill = deps.killRecorded ?? killRecordedWorker;
+  let ok = true;
+  for (const [pid, start] of [[rec.pid, rec.start], [rec.forwarderPid, rec.forwarderStart]] as const) {
+    if (!pid) continue;
+    try { if (!gone(await kill(pid, start))) ok = false; } catch { ok = false; }
+  }
+  return ok;
+}
+
+/** Stop the run's engine MCP, from any process: the one this process started through its handles, else the recorded
+ * one by both its pids (`killRecordedWorker`); `engine-mcp-stop` recorded once both are gone. Idempotent (nothing
+ * started, or already stopped: nothing done). Answers whether it recorded the stop. Never throws. */
+export async function stopEngineMcp(queue: Queue, runId: string, why: string, deps: EngineMcpDeps = {}): Promise<boolean> {
+  const l = live.get(runId);
+  if (l) {
+    live.delete(runId);
+    await Promise.all([killAndWait(l.forwarder), killAndWait(l.server)]);
+    try { queue.note(runId, ENGINE_MCP_STOP, stopDetail(l.name, l.pid, l.forwarderPid, why)); } catch { return false; }
+    return true;
+  }
+  let rec: ReturnType<typeof openStart>;
+  try { rec = openStart(queue, runId); } catch { return false; }
+  if (!rec) return false;
+  if (!(await stopRecorded(rec, deps))) return false; // a later release or recovery tries again
+  try { queue.note(runId, ENGINE_MCP_STOP, stopDetail(rec.name, rec.pid, rec.forwarderPid, why)); } catch { return false; }
+  return true;
+}
+
+/** The restart rule (see the header): every recorded engine MCP start with no stop, not live in this process, is
+ * left alone while its driver lives or while its run is non-terminal with an engine launched and both recorded pids
+ * alive; else both pids are killed and `engine-mcp-stop {why: "supervisor restarted"}` recorded once both are gone.
+ * Never re-armed. Answers the run ids stopped. Never throws. */
+export async function recoverEngineMcps(queue: Queue, deps: EngineMcpDeps = {}): Promise<string[]> {
+  const out: string[] = [];
+  const alive = deps.recordedAlive ?? ((pid: number, start: string | null) => workerMayRun(probeRecordedWorker(pid, start)));
+  let runs: QueueRun[];
+  try { runs = queue.runs(); } catch { return out; }
+  for (const r of runs) {
+    try {
+      if (live.has(r.run_id)) continue;
+      const rec = openStart(queue, r.run_id);
+      if (!rec) continue;
+      if (!isTerminal(r.state)) {
+        if (queue.ownerAlive(r)) continue; // its driver (another process) still holds it
+        // A launched engine runs on after its driver let go (`markLaunched`): its MCP stays while both pids live.
+        if (r.engine_run_id && rec.pid && rec.forwarderPid && alive(rec.pid, rec.start) && alive(rec.forwarderPid, rec.forwarderStart)) continue;
+      }
+      if (!(await stopRecorded(rec, deps))) continue; // not gone yet: the next recovery tries again
+      queue.note(r.run_id, ENGINE_MCP_STOP, stopDetail(rec.name, rec.pid, rec.forwarderPid, "supervisor restarted"));
+      out.push(r.run_id);
+    } catch { /* the next recovery tries again */ }
+  }
+  return out;
+}
+
+if (import.meta.main && process.argv[2] === "forward") {
+  const code = forwardMain(process.argv.slice(3));
+  if (code !== null) process.exit(code);
+}

@@ -75,8 +75,9 @@ minor. A `blocked` result (`no project.godot`, `unknown skill`,
 `.tscn` and `.tres` files are written only the way the editor writes them.
 Never hand-edit the serialised text (ids, `uid://` references, sub-resource
 ordering and `load_steps` are the editor's bookkeeping). Change a scene
-through the editor, through the engine MCP the project uses, or through code
-that instances and configures nodes at runtime.
+through the editor or through code that instances and configures nodes at
+runtime — never through the engine MCP in this version (the verify-only
+rule, below).
 
 ## The import cache
 
@@ -119,6 +120,27 @@ The Godot MCP servers are catalogued upstream by GDS in
 upstream-owned, AD-1). Read the catalogue there; this skill copies none of
 its entries, and choosing one per project is the catalogue's and the
 architecture workflow's job.
+
+## The engine MCP is verify-only (Story 34.5)
+
+A run flagged `editor_in_the_loop` gets the project's one engine MCP,
+started on the host for that run and reached at `$TK_ENGINE_MCP_URL` with
+the bearer `$TK_ENGINE_MCP_BEARER` (both by name; the project's
+`.mcp.json` entry, written only by `recommend.py record --mcp`, reads
+them as `${TK_ENGINE_MCP_URL:-}` and `${TK_ENGINE_MCP_BEARER:-}`, so a
+session of a run without the flag sees both empty and no engine MCP). The
+pick and its evidence are in `kb/engine-mcp-godot.md`.
+
+- Use it only to verify: run the project's tests, verify the project and
+  take a frame from the running game (`run_project_tests`,
+  `verify_project`, `game_screenshot`, or the pick's equivalents).
+- Never call its scene-editing tools (creating, changing or saving
+  scenes, nodes, resources or scripts), in this version. Where the server
+  has a tool allowlist, the project's `engine.mcp.start` restricts it to
+  the verify tools; where it has none, this rule is the enforcement.
+- No MCP in the session (an unflagged run, a refused start): verify with
+  the engine gate (`verify.engine`) as above; never start a server
+  yourself.
 
 ## Behavior (headless)
 

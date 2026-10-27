@@ -2087,7 +2087,7 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertIn("`planner`, `playable-verify`", legs)
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
-        self.assertIn("Story 34.1, Story 34.2, Story 34.3, Story 34.4 (Epic 34)", stories)
+        self.assertIn("Story 34.1, Story 34.2, Story 34.3, Story 34.4, Story 34.5 (Epic 34)", stories)
 
     def test_0_1_29_story_34_4_engine_skill(self):
         header = next(line for line in self.text.splitlines()
@@ -2128,7 +2128,51 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertIn("`lib/engine_pin.py check`", row)
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
-        self.assertIn("Story 34.3, Story 34.4 (Epic 34)", stories)
+        self.assertIn("Story 34.3, Story 34.4, Story 34.5 (Epic 34)", stories)
+
+    def test_0_1_29_story_34_5_engine_mcp(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.29**", header)
+        self.assertNotIn("**0.1.30**", header)
+        self.assertEqual(header.count("Story 34.5, additive"), 1)
+        self.assertLess(header.index("Story 34.4, additive"),
+                        header.index("Story 34.5, additive"))
+        clause = " ".join(header[header.index("Story 34.5, additive"):].split())
+        for phrase in ("`editor_in_the_loop` on a job definition",
+                       "`suggests_mcp` on the detect candidate", "`kind: mcp` entries",
+                       "`recommend.py record --mcp`", "`engine.mcp` in the project config",
+                       "`TK_ENGINE_MCP_URL` and `TK_ENGINE_MCP_BEARER` by name",
+                       "`engine-mcp-start` and `engine-mcp-stop` events",
+                       "the `engine-mcp:` refusal keys", "— additive) |"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        note = flat[flat.index("**0.1.29 (Story 34.1, additive).**"):]
+        note = note[:note.index("**The rules a consumer may rely on**")]
+        self.assertEqual(note.count("Story 34.5 adds one engine MCP per editor-in-the-loop run"), 1)
+        # 34.4's `record` sentence stands; 34.5 extends it, never rewrites it
+        self.assertIn("`record` is unchanged (only a confirmed set lands)", note)
+        sentence = note[note.index("Story 34.5 adds one engine MCP"):]
+        sentence = sentence[:sentence.index("Every other field, kind and route")]
+        for phrase in ("`editor_in_the_loop`", "`durable`", "`suggests_mcp`", "`kind: mcp`",
+                       "`kb: kb/engine-mcp-godot.md`", "`status: configured`", "`not-configured`",
+                       "never write `.mcp.json`", "`record` gains `--mcp <name>`",
+                       '"url": "${TK_ENGINE_MCP_URL:-}"',
+                       '"Bearer ${TK_ENGINE_MCP_BEARER:-}"',
+                       "`engine.mcp: {name, start, port}` (optional `path`, default `/mcp`)",
+                       "`TK_SUPERVISOR_ENGINE_MCP_PORT`", "a tailnet address",
+                       "its own detached child process (`bun src/enginemcp.ts forward`",
+                       "the bearer in its spawn env only",
+                       "`8788`", "(`sbx exec -e`)",
+                       "`engine-mcp-start {name, pid, start, url, forwarder_pid, forwarder_start}`",
+                       "two pids", "`engine-mcp-stop {name, pid, forwarder_pid, why}`",
+                       "stops both at release from any process", "`engine-mcp:no-config`",
+                       "`engine-mcp:no-mcp-json`", "`engine-mcp:no-engine`",
+                       "`engine-mcp:start-failed`", "verify-only"):
+            self.assertIn(phrase, sentence)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 34.4, Story 34.5 (Epic 34)", stories)
 
     # --- AC 2: A7 dossier items covered or explicitly deferred with a seam
 

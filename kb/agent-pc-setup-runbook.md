@@ -1028,6 +1028,7 @@ User scope each time it starts, so a change needs no new logon.
 | `TK_SUPERVISOR_TOKEN` | always | the API's bearer token. Never logged, never rendered |
 | `TK_SUPERVISOR_SESSION_SECRET` | always | signs the browser's session cookie (Story 22.5). Random, at least 32 bytes, else `serve` refuses with `SessionSecretWeak`. Never logged, never rendered |
 | `TK_SUPERVISOR_PORT` | no | the API's port, default `8787` |
+| `TK_SUPERVISOR_ENGINE_MCP_PORT` | no (Story 34.5) | the engine MCP forwarder's port on `TK_SUPERVISOR_BIND`, default `8788` (§4.8). Nothing else listens in the 8000 range |
 | `TK_SUPERVISOR_TRANSCRIPT_BACKUP` | no, warned when unset | the nightly backup's `claude-projects` folder (§6). A resume restores a missing transcript from it, and every host run's transcript is copied into it |
 | `TK_SUPERVISOR_NOTIFY` | no | the notification target: `ntfy` or `telegram`. Unset sends nothing |
 | `TK_SUPERVISOR_NTFY_URL` | with `ntfy` | the full topic URL. The topic is its secret |
@@ -1274,6 +1275,70 @@ Claude session), after each supervisor release: the real `sbx run -d`, `exec`
 and `stop` and the kill through `sbx exec`; the console-hosted host-verify leg
 on a real run; the `tailscale cert` renew and `serve` restart on exit 75 as a
 dry run; `plansync.py status` into tk-studio's plan.
+
+### 4.8 The engine MCP
+
+Story 34.5. A run flagged `editor_in_the_loop` (its submission, or its job
+definition's `editor_in_the_loop: true`) gets one engine MCP server for its
+life, started on this host by the supervisor with the run's sandbox pin and
+stopped at its release.
+
+- **The server** is the project's tracked `.tk-studio/config.yaml` key
+  `engine.mcp: {name, start, port}` (optional `path`, the server's
+  endpoint path, default `/mcp`), read at the run's base: `start` runs in
+  the run's worktree with `GODOT` in its env and listens on
+  `127.0.0.1:<port>` only (a port something already answers on is refused
+  before the server starts). The pick and its line are in
+  `kb/engine-mcp-godot.md`. The project's `.mcp.json` carries the entry,
+  written only by `recommend.py record --mcp <name>` on confirmation; it
+  names the URL and the bearer as `${TK_ENGINE_MCP_URL:-}` and
+  `${TK_ENGINE_MCP_BEARER:-}`, never a value (the empty default keeps the
+  file parseable in every other session, where neither is set).
+- **The port.** The supervisor fronts the server with a forwarder on
+  `TK_SUPERVISOR_BIND` (the tailnet address, checked inside
+  `100.64.0.0/10`: `0.0.0.0` or a LAN address fails
+  `engine-mcp:start-failed` before anything starts) port
+  `TK_SUPERVISOR_ENGINE_MCP_PORT`, default **8788**. One flagged run at a
+  time holds it; a second concurrent flagged run's start fails
+  `engine-mcp:start-failed`.
+- **Two processes per run.** The forwarder is its own detached child
+  process (`bun src/enginemcp.ts forward`), beside the server child, so
+  both outlive the one-shot `drain` that launched a `run-epic` run (the
+  pacer runs `tick` and `drain` as separate processes). The start event
+  records both: `pid`/`start` for the server and
+  `forwarder_pid`/`forwarder_start` for the forwarder. Any later tick
+  stops both by pid and start time at the run's release; `recover` leaves
+  them while the launched run's engine lives and both pids are alive, and
+  otherwise kills both. A server or forwarder that dies on its own takes
+  the other with it (`engine-mcp-stop {why: "exited"}`) when the starting
+  process is still up, else at the next `recover`.
+- **The bearer** is minted per run (32 random bytes, base64url), held in
+  the starting process's memory (for its own sessions) and in the
+  forwarder's spawn env only, never in an event, a log, a file or an argv
+  value. The forwarder answers `401` to any request without exactly
+  `Authorization: Bearer <it>`. The worker's sandbox gets
+  `sbx exec -e TK_ENGINE_MCP_URL -e TK_ENGINE_MCP_BEARER` (by name; the
+  values ride the spawn env). A restarted supervisor never re-arms a
+  recorded MCP: `recover` kills both recorded pids
+  (`engine-mcp-stop {why: "supervisor restarted"}`), and records the stop
+  only once both are gone, so a failed kill is retried.
+- **The sandbox must reach `TK_SUPERVISOR_BIND:8788`.** If the sandbox's
+  network policy blocks the tailnet address, allow it by hand (§3.8); the
+  loop never changes sbx network policy.
+- **The rule: verify-only, in this version.** The dev session may run the
+  project's tests, verify the project and take a frame through the MCP; it
+  never uses the server's scene-editing tools (the `gds-engine-godot-4`
+  skill says so, and the server's allowlist enforces it where the server
+  has one). Scenes change through the editor or through code.
+- **Refusals** (nothing started, the run ends `blocked`):
+  `engine-mcp:no-config` (no or a malformed `engine.mcp`),
+  `engine-mcp:no-mcp-json` (no `.mcp.json` at the base, or no
+  `mcpServers.<name>`), `engine-mcp:no-engine` (`GODOT` unset or naming no
+  file), `engine-mcp:start-failed` (a non-tailnet bind or a loopback port
+  already in use, refused before anything starts; the server exits or its
+  port does not answer within 60 s; the forwarder cannot bind). The events
+  are `engine-mcp-start {name, pid, start, url, forwarder_pid,
+  forwarder_start}` and `engine-mcp-stop {name, pid, forwarder_pid, why}`.
 
 ## 5. Hardening checklist
 

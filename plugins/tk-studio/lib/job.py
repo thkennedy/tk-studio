@@ -253,6 +253,9 @@ def validate_definition(defn: object) -> list[str]:
     _validate_cadence(defn, problems)
     if "durable" in defn and not isinstance(defn["durable"], bool):
         problems.append("durable must be a boolean")
+    if ("editor_in_the_loop" in defn
+            and not isinstance(defn["editor_in_the_loop"], bool)):
+        problems.append("editor_in_the_loop must be a boolean")
     if "guards" in defn:
         _validate_guards(defn["guards"], problems)
     if "stop" in defn:

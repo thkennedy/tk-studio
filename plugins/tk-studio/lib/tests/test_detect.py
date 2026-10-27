@@ -7,6 +7,7 @@ performs zero writes and lists the evidence behind every scored marker.
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -124,6 +125,12 @@ class DetectTest(unittest.TestCase):
                 self.assertTrue(
                     (PROFILES_DIR.parents[1] / name / "SKILL.md").is_file(),
                     f"{profile['id']} suggests unshipped skill {name}")
+            # Story 34.5: `suggests_mcp`, when present, is a list of
+            # `.mcp.json` server names (the engine MCP pick, kb-recorded)
+            mcp = profile.get("suggests_mcp", [])
+            self.assertIsInstance(mcp, list)
+            for name in mcp:
+                self.assertRegex(name, r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
     def test_suggests_skills_passes_through(self):
         root = self._project("godot")
@@ -135,6 +142,26 @@ class DetectTest(unittest.TestCase):
         self.assertEqual(top["suggests_skills"], ["gds-engine-godot-4"])
         for other in result["candidates"][1:]:
             self.assertEqual(other["suggests_skills"], [])
+
+    def test_suggests_mcp_passes_through(self):
+        # Story 34.5: on a fixture profile (the shipped game-godot profile
+        # carries no pick until the spike's ruling); default [] elsewhere.
+        root = self._project("godot-mcp")
+        (root / "project.godot").write_text("[application]\n", encoding="utf-8")
+        profiles = Path(tempfile.mkdtemp(prefix="tk-detect-mcp-"))
+        self.addCleanup(shutil.rmtree, profiles, ignore_errors=True)
+        for path in PROFILES_DIR.glob("*.json"):
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if data.get("id") == "game-godot":
+                data["suggests_mcp"] = ["fixture-engine-mcp"]
+            (profiles / path.name).write_text(json.dumps(data), encoding="utf-8")
+        result = detect.detect(root, profiles_dir=profiles)
+        top = result["candidates"][0]
+        self.assertEqual(top["id"], "game-godot")
+        self.assertEqual(top["suggests_mcp"], ["fixture-engine-mcp"])
+        for other in result["candidates"][1:]:
+            self.assertEqual(other["suggests_mcp"], [])
+        self.assertFalse((root / ".mcp.json").exists())
 
     def test_content_probe_and_suggests(self):
         root = self._project("web")

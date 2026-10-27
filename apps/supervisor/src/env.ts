@@ -68,6 +68,8 @@ export function supervisorConfigPath(env: Env = process.env): string | undefined
 //                        checked by api.ts `checkBind`)
 //   TK_SUPERVISOR_PORT   the API's port (optional, default 8787)
 //   TK_SUPERVISOR_TOKEN  the bearer token (required) — never logged, never rendered
+//   TK_SUPERVISOR_ENGINE_MCP_PORT  Story 34.5: the engine MCP forwarder's port on TK_SUPERVISOR_BIND (optional,
+//                        default 8788)
 
 /** The default API port (operator-decisions §2). */
 export const DEFAULT_API_PORT = 8787;
@@ -108,6 +110,22 @@ export function apiPort(env: Env = process.env): number {
   const v = raw.trim();
   const n = Number(v);
   if (!/^\d{1,5}$/.test(v) || !Number.isInteger(n) || n < 1 || n > 65535) throw new ApiPortInvalid(raw);
+  return n;
+}
+
+/** Story 34.5: the engine MCP forwarder's default port (operator-decisions §2: nothing else listens in the 8000 range). */
+export const DEFAULT_ENGINE_MCP_PORT = 8788;
+
+/** Story 34.5: the port the engine MCP forwarder binds on TK_SUPERVISOR_BIND — TK_SUPERVISOR_ENGINE_MCP_PORT when set
+ * (a port number, else an error naming the variable), else 8788. */
+export function engineMcpPort(env: Env = process.env): number {
+  const raw = env.TK_SUPERVISOR_ENGINE_MCP_PORT;
+  if (raw === undefined || !raw.trim()) return DEFAULT_ENGINE_MCP_PORT;
+  const v = raw.trim();
+  const n = Number(v);
+  if (!/^\d{1,5}$/.test(v) || !Number.isInteger(n) || n < 1 || n > 65535) {
+    throw new Error(`TK_SUPERVISOR_ENGINE_MCP_PORT '${raw}' is not a port number (1-65535)`);
+  }
   return n;
 }
 

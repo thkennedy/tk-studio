@@ -41,6 +41,7 @@
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
+import { stopEngineMcp } from "./enginemcp";
 import { sbxBin, studioHome } from "./env";
 import {
   checkoutKey, isTerminal, parseStatGroup, probeRecordedWorker, processStartTime, servedRoot, type Queue, type QueueRun, type WorkerKill,
@@ -171,6 +172,8 @@ export async function releasePin(queue: Queue, runId: string, deps: SandboxDeps 
     // Only a terminal run is ever released: never at launch return, never a running run, never a paused
     // one (a paused run keeps its pin, operator-decisions §2).
     if (!isTerminal(run.state)) return "none";
+    // Story 34.5: the run's engine MCP stops at its release — also when the sandbox is kept for another holder.
+    await stopEngineMcp(queue, runId, "released");
     const sb = run.sandbox;
     if (!queue.pinOutstanding(sb)) return "none";
     const holders = await sandboxHolders(queue, sb, runId);
