@@ -464,3 +464,17 @@
 - What no longer holds: nothing in 34.3's acceptance criteria; the implicit reading "a clean run has an empty `log_errors[]`".
 - Suggested adjustment: the judge and the host leg read `report.json` `verdict` (never `log_errors` emptiness); map `playable.py` exit 0/1/2 explicitly (2 is a refusal, not a harness fail); keep `--out` outside the project's Godot folder; movie mode needs the logged-in desktop. See plans/34-3.md.
 - Status: closed — applied to the unstarted 34-3 entry's invoke_dev_with and to plans/34-3.md by the 34-2 gate session (2026-10-27)
+
+## 34-7-the-cc0-mirror-and-the-paid-rung-behind-a-cap — scope: stories — from 34-6-the-asset-manifest-and-the-greybox-rung — 2026-10-27
+
+- What changed: 34-6 fixed manifest `bounds` as glTF axes, Y up (`y` is height; `greybox.py` maps to Blender X, Z, Y; `facts` and the origin rule use the same), pinned in driver-contract.md `## Asset manifest`. A greybox entry whose existing `<name>.label.png` decodes to other pixels fails (`action: failed`, `label_state: stale`); greybox rows carry `label_state: written | kept | stale`. `greybox` gates Blender's export through `facts_of` + `gate` before placing it. DW-74 is open: `facts_of` reads POSITION accessor min/max and ignores node transforms and instancing.
+- What no longer holds: an unstated axis convention for "scaled to the bounds, the origin per the rule"; `facts` being sound on third-party `.glb` files ("passed through the `facts` gate").
+- Suggested adjustment: `match`/`generate` normalisation uses the contract's glTF Y-up bounds (same mapping as `greybox.py`) and reuses `facts_of`/`gate` and the hard-link `_publish_new`; resolve DW-74 (node transforms, instancing) inside 34.7 before the gate judges kit or generated files; the visual gate's greybox reference is the placed `.glb` with a `kept`/`written` label, never a `stale` one.
+- Status: closed — applied to the unstarted 34-7 entry's invoke_dev_with and to plans/34-7.md by the 34-6 gate session (2026-10-27)
+
+## 34-8-the-run-vertical-slice-job-and-the-engagements-game-path — scope: stories — from 34-6-the-asset-manifest-and-the-greybox-rung — 2026-10-27
+
+- What changed: `assets.py` verbs end in status blocks with `status: complete | partial | blocked` (status-block.schema.json; `intent: assets`), exit 0 ok, 1 gate red or Blender failure (`partial`), 2 refusal (`blocked`); `greybox` needs `BLENDER` (else `--blender`, else `blender` on PATH) and is bounded by `--wall` (default 600 s); art path is config `assets.art_path` (TUA sets `art/world/greybox`).
+- What no longer holds: plan 34-6 Design Notes' `done | failed | blocked` value set, if 34.8's plan reads it from there.
+- Suggested adjustment: the host leg reads `check`/`greybox` results from status-block.schema.json values and exit codes 0/1/2 (2 is a refusal, not a red gate); the box's `BLENDER` user variable is set per the runbook; TUA's config carries `assets.art_path: art/world/greybox`.
+- Status: closed — applied to the unstarted 34-8 entry's invoke_dev_with by the 34-6 gate session (2026-10-27)

@@ -591,6 +591,17 @@ describe("release: `sbx stop <sb>` at the deferred `ended`, never on paused, nev
     expect(again).toEqual({ out: "none", calls: [] });
   });
 
+  test("Story 34.5: a run without the flag — its release records no engine MCP event and stops only the sandbox", async () => {
+    sbx.answer({});
+    const q = newQueue();
+    const { run } = await sbxRun(q);
+    q.end(run.run_id, "complete", null);
+    const { out, calls } = await during(() => releasePin(q, run.run_id, deps));
+    expect(out).toBe("released");
+    expect(calls).toEqual([["stop", SB]]);
+    expect(kinds(q, run.run_id).filter((k) => k.startsWith("engine-mcp"))).toEqual([]);
+  });
+
   test.each(["running", "paused"])("Release, second holder: another %s run records the sandbox → no `sbx stop`", async (state) => {
     sbx.answer({});
     const q = newQueue();

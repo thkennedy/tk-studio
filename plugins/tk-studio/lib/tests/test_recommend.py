@@ -6,8 +6,11 @@ touching any other role's entry.
 """
 from __future__ import annotations
 
+import io
+import json
 import os
 import tempfile
+from contextlib import redirect_stdout
 import unittest
 from pathlib import Path
 import sys
@@ -209,6 +212,180 @@ class RecommendTestCase(unittest.TestCase):
                          recommend.read_working_set(self.root)["developer"])
         recommend.record(self.root, "developer", ["bmm", "tea", "gds", "gds-engine-godot-4"])
         self.assertIn("gds-engine-godot-4", recommend.read_working_set(self.root)["developer"])
+
+    # --- Story 34.5: the engine MCP — proposed on a fixture profile, written only by record --mcp
+
+    MCP = "fixture-engine-mcp"
+
+    def _mcp_profiles(self) -> Path:
+        """The shipped profiles with a fixture `suggests_mcp` on game-godot
+        only (the tests never depend on the shipped pick)."""
+        profiles = Path(self._tmp.name) / "profiles"
+        profiles.mkdir(exist_ok=True)
+        for path in recommend.detectlib.DEFAULT_PROFILES_DIR.glob("*.json"):
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if data.get("id") == "game-godot":
+                data["suggests_mcp"] = [self.MCP]
+            (profiles / path.name).write_text(json.dumps(data), encoding="utf-8")
+        return profiles
+
+    def _mcp_entry(self, result):
+        return next((e for e in result["proposal"] if e["name"] == self.MCP), None)
+
+    def _propose_mcp(self):
+        return recommend.propose(self.root, role="developer", lock_path=self.lock,
+                                 profiles_dir=self._mcp_profiles())
+
+    def test_confident_godot_proposes_the_mcp_not_configured_and_writes_nothing(self):
+        self._make_godot()
+        profiles = self._mcp_profiles()
+        before = _tree_snapshot(self.root)
+        result = recommend.propose(self.root, role="developer", lock_path=self.lock,
+                                   profiles_dir=profiles)
+        self.assertEqual(before, _tree_snapshot(self.root))  # propose never writes
+        self.assertFalse((self.root / ".mcp.json").exists())
+        entry = self._mcp_entry(result)
+        self.assertEqual(entry["kind"], "mcp")
+        self.assertEqual(entry["status"], "not-configured")
+        self.assertTrue(any(ev.startswith("detection: detected game-godot (score ")
+                            for ev in entry["evidence"]))
+        self.assertIn("kb: kb/engine-mcp-godot.md", entry["evidence"])
+
+    def test_mcp_status_configured_when_mcp_json_has_the_server(self):
+        self._make_godot()
+        (self.root / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {self.MCP: {"type": "http"}}}), encoding="utf-8")
+        self.assertEqual(self._mcp_entry(self._propose_mcp())["status"], "configured")
+
+    def test_ask_outcome_proposes_no_mcp(self):
+        result = self._propose_mcp()  # empty project → unknown — ask
+        self.assertIsNone(self._mcp_entry(result))
+        self.assertFalse(any(e["kind"] == "mcp" for e in result["proposal"]))
+
+    def test_shipped_profiles_propose_the_ruled_pick(self):
+        # The spike's ruling (kb/engine-mcp-godot.md): the shipped game-godot
+        # profile names godot-ai, proposed and never written.
+        self._make_godot()
+        before = _tree_snapshot(self.root)
+        mcps = [e for e in self._propose()["proposal"] if e["kind"] == "mcp"]
+        self.assertEqual([e["name"] for e in mcps], ["godot-ai"])
+        self.assertEqual(mcps[0]["status"], "not-configured")
+        self.assertIn("kb: kb/engine-mcp-godot.md", mcps[0]["evidence"])
+        self.assertEqual(before, _tree_snapshot(self.root))
+        self.assertFalse((self.root / ".mcp.json").exists())
+
+    def test_record_mcp_writes_only_when_confirmed_merges_and_is_idempotent(self):
+        self._make_godot()
+        profiles = self._mcp_profiles()
+        self._propose_mcp()
+        self.assertFalse((self.root / ".mcp.json").exists())  # proposing wrote nothing
+        other = {"type": "stdio", "command": "other-server", "args": ["--x"]}
+        target = self.root / ".mcp.json"
+        target.write_text(json.dumps({"mcpServers": {"other": other}, "keep": 1}), encoding="utf-8")
+        result = recommend.record_mcp(self.root, self.MCP, profiles_dir=profiles)
+        self.assertTrue(result["changed"])
+        data = json.loads(target.read_text(encoding="utf-8"))
+        self.assertEqual(data["mcpServers"]["other"], other)  # other servers untouched
+        self.assertEqual(data["keep"], 1)
+        # The `${VAR:-}` default form: the file still parses where neither is set.
+        self.assertEqual(data["mcpServers"][self.MCP], {
+            "type": "http", "url": "${TK_ENGINE_MCP_URL:-}",
+            "headers": {"Authorization": "Bearer ${TK_ENGINE_MCP_BEARER:-}"}})
+        self.assertTrue(target.read_text(encoding="utf-8").endswith("}\n"))
+        first = target.read_bytes()
+        again = recommend.record_mcp(self.root, self.MCP, profiles_dir=profiles)
+        self.assertFalse(again["changed"])
+        self.assertEqual(target.read_bytes(), first)
+        self.assertEqual(self._mcp_entry(self._propose_mcp())["status"], "configured")
+        self.assertEqual(sorted(p.name for p in self.root.iterdir() if p.name.startswith(".mcp")),
+                         [".mcp.json"])  # no temp file left behind
+
+    def test_record_mcp_rewrites_an_entry_in_the_earlier_form_without_a_default(self):
+        profiles = self._mcp_profiles()
+        target = self.root / ".mcp.json"
+        old = {"type": "http", "url": "${TK_ENGINE_MCP_URL}",
+               "headers": {"Authorization": "Bearer ${TK_ENGINE_MCP_BEARER}"}}
+        target.write_text(json.dumps({"mcpServers": {self.MCP: old}}), encoding="utf-8")
+        result = recommend.record_mcp(self.root, self.MCP, profiles_dir=profiles)
+        self.assertTrue(result["changed"])  # rewritten, not treated as the same entry
+        self.assertEqual(json.loads(target.read_text(encoding="utf-8"))["mcpServers"][self.MCP],
+                         recommend.MCP_ENTRY)
+        self.assertFalse(recommend.record_mcp(self.root, self.MCP, profiles_dir=profiles)["changed"])
+
+    def test_record_with_role_and_a_refused_mcp_writes_neither(self):
+        self._standup()
+        profiles = str(self._mcp_profiles())
+        config = self.root / ".tk-studio" / "config.yaml"
+        before = config.read_bytes()
+        for mcp, mcp_json in (("not-a-pick", None), (self.MCP, "{not json"),
+                              (self.MCP, json.dumps({"mcpServers": []}))):
+            if mcp_json is not None:
+                (self.root / ".mcp.json").write_text(mcp_json, encoding="utf-8")
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = recommend.main(["record", "--directory", str(self.root), "--role", "developer",
+                                       "--resources", "bmm,tea", "--mcp", mcp, "--profiles-dir", profiles])
+            self.assertEqual(code, 2, mcp_json)
+            self.assertFalse(json.loads(out.getvalue())["ok"])
+            self.assertEqual(config.read_bytes(), before)  # no half write: the working set untouched
+        self.assertEqual((self.root / ".mcp.json").read_text(encoding="utf-8"),
+                         json.dumps({"mcpServers": []}))
+        # Both valid: both land.
+        (self.root / ".mcp.json").unlink()
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = recommend.main(["record", "--directory", str(self.root), "--role", "developer",
+                                   "--resources", "bmm,tea", "--mcp", self.MCP, "--profiles-dir", profiles])
+        self.assertEqual(code, 0)
+        self.assertEqual(recommend.read_working_set(self.root)["developer"], ["bmm", "tea"])
+        self.assertIn(self.MCP, json.loads((self.root / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"])
+
+    def test_record_mcp_creates_the_file_and_honours_dry_run(self):
+        profiles = self._mcp_profiles()
+        dry = recommend.record_mcp(self.root, self.MCP, dry_run=True, profiles_dir=profiles)
+        self.assertTrue(dry["changed"])
+        self.assertTrue(dry["dry_run"])
+        self.assertFalse((self.root / ".mcp.json").exists())
+        recommend.record_mcp(self.root, self.MCP, profiles_dir=profiles)
+        self.assertIn(self.MCP, json.loads((self.root / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"])
+
+    def test_record_mcp_refuses_unknown_name_and_malformed_json(self):
+        profiles = self._mcp_profiles()
+        with self.assertRaises(recommend.RecommendError):
+            recommend.record_mcp(self.root, "not-a-pick", profiles_dir=profiles)
+        with self.assertRaises(recommend.RecommendError):
+            recommend.record_mcp(self.root, self.MCP)  # the shipped profiles name no pick
+        (self.root / ".mcp.json").write_text("{not json", encoding="utf-8")
+        with self.assertRaises(recommend.RecommendError):
+            recommend.record_mcp(self.root, self.MCP, profiles_dir=profiles)
+        self.assertEqual((self.root / ".mcp.json").read_text(encoding="utf-8"), "{not json")
+
+    def test_record_mcp_cli_exit_codes_and_status_block(self):
+        profiles = str(self._mcp_profiles())
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = recommend.main(["record", "--directory", str(self.root), "--mcp", "nope",
+                                   "--profiles-dir", profiles])
+        self.assertEqual(code, 2)
+        self.assertFalse(json.loads(out.getvalue())["ok"])
+        self.assertFalse((self.root / ".mcp.json").exists())
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = recommend.main(["record", "--directory", str(self.root), "--mcp", self.MCP,
+                                   "--profiles-dir", profiles, "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertTrue(json.loads(out.getvalue())["ok"])
+        self.assertFalse((self.root / ".mcp.json").exists())
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = recommend.main(["record", "--directory", str(self.root), "--mcp", self.MCP,
+                                   "--profiles-dir", profiles])
+        self.assertEqual(code, 0)
+        self.assertTrue((self.root / ".mcp.json").is_file())
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = recommend.main(["record", "--directory", str(self.root)])
+        self.assertEqual(code, 2)
 
     # --- AC 2: explicit confirmation → working_set.<role>, idempotent
 

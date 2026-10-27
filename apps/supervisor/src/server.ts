@@ -517,10 +517,14 @@ export const SBX_GUARD_KILL_AFTER_S = 10;
  * `env -u ANTHROPIC_API_KEY` strips the key inside the VM and `env -C`
  * sets the worker's cwd to the project's microVM path. The VM worker binary
  * is literal `claude` (CLAUDE_BIN is host-only). */
-export function buildSbxCommand(opts: { sandbox: string; vmRoot: string; worker: WorkerCommand; guardS: number }, env: Record<string, string | undefined> = buildWorkerEnv()): WorkerCommand {
+export function buildSbxCommand(
+  opts: { sandbox: string; vmRoot: string; worker: WorkerCommand; guardS: number; /** Story 34.5: names passed by `-e` too (their values in the spawn env). */ extraEnv?: readonly string[] },
+  env: Record<string, string | undefined> = buildWorkerEnv(),
+): WorkerCommand {
+  const names = [...sbxEnvPassthrough(env), ...(opts.extraEnv ?? [])];
   return {
     bin: sbxBin(),
-    argv: ["exec", ...sbxEnvPassthrough(env).flatMap((name) => ["-e", name]), opts.sandbox,
+    argv: ["exec", ...[...new Set(names)].flatMap((name) => ["-e", name]), opts.sandbox,
       "timeout", "-k", String(SBX_GUARD_KILL_AFTER_S), String(opts.guardS),
       "env", "-u", "ANTHROPIC_API_KEY", "-C", opts.vmRoot, "claude", ...opts.worker.argv],
   };
@@ -590,6 +594,8 @@ export function buildWorkerEnv(
     if (/^TK_SUPERVISOR_.*(?:TOKEN|SECRET|PASSWORD)/i.test(k) || k === "TK_SUPERVISOR_NTFY_URL") delete env[k];
     // Story 31.6: the owner seat is host-only — only the supervisor's own `track.py reply` child gets it.
     if (k.startsWith("TK_STUDIO_ATLASSIAN_OWNER_")) delete env[k];
+    // Story 34.5: the engine MCP's URL and bearer reach a worker only for its own run (`InvokeOptions.engineMcpEnv`).
+    if (k.startsWith("TK_ENGINE_MCP_")) delete env[k];
   }
   // Hole 60: the pass-through variables the console's environment lacks come from the User environment itself.
   for (const [k, v] of Object.entries(registry())) {
@@ -602,9 +608,11 @@ export type Spawner = (cmd: string, args: string[], opts: {
   cwd?: string; timeoutS: number; env?: Record<string, string | undefined>; onSpawn?: (pid: number) => void;
 }) => Promise<RunResult>;
 
-async function runClaude(cmd: WorkerCommand, cwd: string, timeoutS: number, spawner: Spawner, onSpawn?: (pid: number) => void): Promise<RunResult> {
+async function runClaude(
+  cmd: WorkerCommand, cwd: string, timeoutS: number, spawner: Spawner, onSpawn?: (pid: number) => void, extraEnv: Record<string, string> = {},
+): Promise<RunResult> {
   try {
-    return await spawner(cmd.bin, cmd.argv, { cwd, timeoutS, env: buildWorkerEnv(), ...(onSpawn ? { onSpawn } : {}) });
+    return await spawner(cmd.bin, cmd.argv, { cwd, timeoutS, env: { ...buildWorkerEnv(), ...extraEnv }, ...(onSpawn ? { onSpawn } : {}) });
   } catch (e) {
     // A timeout and a failed worker record keep their own names.
     throw e instanceof Error && !/timed out/.test(e.message) && !e.message.startsWith(WORKER_RECORD_FAILED)
@@ -1051,6 +1059,9 @@ export interface InvokeOptions {
   /** Story 27.2: on the sbx tier, pins the sandbox (`sbx run -d --name <sb>`) before the login preflight;
    * answers null when pinned, else the failure — the run then ends `blocked` naming the pin. */
   pin?: (sandbox: string) => Promise<string | null>;
+  /** Story 34.5: read after the pin — the run's live engine MCP env (`TK_ENGINE_MCP_URL`, `TK_ENGINE_MCP_BEARER`), passed
+   * into the sandbox by name (`sbx exec -e <NAME>`), the values in the spawn env only; undefined: none. sbx tier only. */
+  engineMcpEnv?: () => Record<string, string> | undefined;
 }
 
 /** The one `-p` item of a resumed worker (`--resume <session-id>`): the session's
@@ -1109,7 +1120,7 @@ export async function invokeSkill(
     denyProfile: args.deny_profile === undefined ? undefined : String(args.deny_profile),
     ...(opts.sessionId ? { sessionId: opts.sessionId, resume: opts.resume === true } : {}),
   });
-  const cmd = vmRoot ? buildSbxCommand({ sandbox: sandbox!, vmRoot, worker: workerCmd, guardS: timeoutS }) : workerCmd;
+  let cmd = vmRoot ? buildSbxCommand({ sandbox: sandbox!, vmRoot, worker: workerCmd, guardS: timeoutS }) : workerCmd;
 
   // Story 27.2: the sandbox pinned first, so the preflight's own `sbx exec` finds it up.
   if (vmRoot && opts.pin) {
@@ -1117,6 +1128,11 @@ export async function invokeSkill(
     if (pinFailed) {
       return { status_block: { status: "blocked", intent: skill, artifacts: [], reason: pinFailed }, pin: pinFailed, ran: false };
     }
+  }
+  // Story 34.5: the run's engine MCP (started by the pin) reaches the sandbox by name, never a file or an argv value.
+  const mcpEnv = vmRoot ? opts.engineMcpEnv?.() : undefined;
+  if (vmRoot && mcpEnv && Object.keys(mcpEnv).length) {
+    cmd = buildSbxCommand({ sandbox: sandbox!, vmRoot, worker: workerCmd, guardS: timeoutS, extraEnv: Object.keys(mcpEnv) });
   }
   const gaps = await authPreflight(skill, payload, root, spawner, { tier, sandbox });
   if (gaps.length) {
@@ -1134,7 +1150,7 @@ export async function invokeSkill(
   // above are not part of the guard's budget (the host timer starts here).
   opts.beforeSpawn?.();
   const spawnedMs = performance.now();
-  const res = await runClaude(cmd, root, timeoutS, spawner, opts.onSpawn);
+  const res = await runClaude(cmd, root, timeoutS, spawner, opts.onSpawn, mcpEnv ?? {});
   const workerElapsedS = (performance.now() - spawnedMs) / 1000;
   const worker = parseWorkerResult(res.stdout);
   const block = extractStatusBlock(worker.text);

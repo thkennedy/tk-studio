@@ -181,10 +181,20 @@ blender.org, or the portable zip into `%AGENT_WORK%\tools\blender\`. Download
 it in a browser: blender.org serves scripted downloads a bot-check page. The
 installer does not add Blender to PATH, so add its folder
 (`C:\Program Files\Blender Foundation\Blender 5.2`, or the unpacked zip) to
-the studio account's PATH and open a new terminal. Verify:
+the studio account's PATH and open a new terminal. Then point the `BLENDER`
+user environment variable at the exe; `assets.py greybox` (Story 34.6, the
+asset ladder's greybox rung, [kb/asset-ladder.md](asset-ladder.md)) reads
+it first and falls back to `blender` on PATH:
+
+```powershell
+[Environment]::SetEnvironmentVariable("BLENDER", "C:\Program Files\Blender Foundation\Blender 5.2\blender.exe", "User")
+```
+
+Open a new terminal. Verify:
 
 ```powershell
 blender -b --version
+& $env:BLENDER -b --version
 ```
 
 EEVEE has no headless mode on Windows; QA renders use Workbench or Cycles.
@@ -1028,6 +1038,7 @@ User scope each time it starts, so a change needs no new logon.
 | `TK_SUPERVISOR_TOKEN` | always | the API's bearer token. Never logged, never rendered |
 | `TK_SUPERVISOR_SESSION_SECRET` | always | signs the browser's session cookie (Story 22.5). Random, at least 32 bytes, else `serve` refuses with `SessionSecretWeak`. Never logged, never rendered |
 | `TK_SUPERVISOR_PORT` | no | the API's port, default `8787` |
+| `TK_SUPERVISOR_ENGINE_MCP_PORT` | no (Story 34.5) | the engine MCP forwarder's port on `TK_SUPERVISOR_BIND`, default `8788` (§4.8). Nothing else listens in the 8000 range |
 | `TK_SUPERVISOR_TRANSCRIPT_BACKUP` | no, warned when unset | the nightly backup's `claude-projects` folder (§6). A resume restores a missing transcript from it, and every host run's transcript is copied into it |
 | `TK_SUPERVISOR_NOTIFY` | no | the notification target: `ntfy` or `telegram`. Unset sends nothing |
 | `TK_SUPERVISOR_NTFY_URL` | with `ntfy` | the full topic URL. The topic is its secret |
@@ -1274,6 +1285,106 @@ Claude session), after each supervisor release: the real `sbx run -d`, `exec`
 and `stop` and the kill through `sbx exec`; the console-hosted host-verify leg
 on a real run; the `tailscale cert` renew and `serve` restart on exit 75 as a
 dry run; `plansync.py status` into tk-studio's plan.
+
+### 4.8 The engine MCP
+
+Story 34.5. A run flagged `editor_in_the_loop` (its submission, or its job
+definition's `editor_in_the_loop: true`) gets one engine MCP server for its
+life, started on this host by the supervisor with the run's sandbox pin and
+stopped at its release.
+
+- **The server** is the project's tracked `.tk-studio/config.yaml` key
+  `engine.mcp: {name, start, port}` (optional `path`, the server's
+  endpoint path, default `/mcp`), read at the run's base: `start` runs in
+  the run's worktree with `GODOT` in its env and listens on
+  `127.0.0.1:<port>` only (a port something already answers on is refused
+  before the server starts). The pick is `hi-godot/godot-ai`; its line,
+  its measurements and its allowlist are in `kb/engine-mcp-godot.md`.
+  The supervisor starts it in the pick's measured launch shape: the
+  server with a per-run capability in its env (`GODOT_AI_HTTP_CAPABILITY`
+  and `GODOT_AI_WS_TOKEN`, with `GODOT_AI_DISABLE_TELEMETRY=1`), then,
+  once its port answers, the Godot editor on the project (`$GODOT
+  --editor --path <the folder of project.godot>`, a window on this
+  session) whose add-on adopts the server; the project carries the
+  godot-ai add-on enabled in `project.godot`. A worktree with no
+  `project.godot` is refused `engine-mcp:start-failed`. The project's
+  `.mcp.json` carries the entry,
+  written only by `recommend.py record --mcp <name>` on confirmation; it
+  names the URL and the bearer as `${TK_ENGINE_MCP_URL:-}` and
+  `${TK_ENGINE_MCP_BEARER:-}`, never a value (the empty default keeps the
+  file parseable in every other session, where neither is set).
+- **The port.** The supervisor fronts the server with a forwarder on
+  `TK_SUPERVISOR_BIND` (the tailnet address, checked inside
+  `100.64.0.0/10`: `0.0.0.0` or a LAN address fails
+  `engine-mcp:start-failed` before anything starts) port
+  `TK_SUPERVISOR_ENGINE_MCP_PORT`, default **8788**. One flagged run at a
+  time holds it; a second concurrent flagged run's start fails
+  `engine-mcp:start-failed`.
+- **The server's own ports.** Only the server's HTTP port
+  (`engine.mcp.port`, 8000 in TUA's line) is checked before the server
+  starts; its WebSocket port (`--ws-port`, 9500 in TUA's line) is not
+  pre-checked. An editor the operator opened on this box with the
+  godot-ai add-on enabled holds 8000 and 9500 itself, so a flagged run
+  fails `engine-mcp:start-failed` while that editor is open: close it
+  before a flagged run starts.
+- **Three processes per run.** The forwarder is its own detached child
+  process (`bun src/enginemcp.ts forward`), beside the server and editor
+  children, so all three outlive the one-shot `drain` that launched a
+  `run-epic` run (the pacer runs `tick` and `drain` as separate
+  processes). The start event records each: `pid`/`start` for the
+  server, `forwarder_pid`/`forwarder_start` for the forwarder and
+  `editor_pid`/`editor_start` for the editor. Any later tick stops them
+  by pid and start time at the run's release, the editor before the
+  server; `recover` leaves them while the launched run's engine lives and
+  every pid is alive, and otherwise kills them all. A server, editor or
+  forwarder that dies on its own takes the others with it
+  (`engine-mcp-stop {why: "exited"}`) when the starting process is still
+  up, else at the next `recover`. A drain-launched run's MCP serves only
+  the sessions the starting process gives its env to (the in-process
+  session limit, accepted for this version).
+- **The bearer** is minted per run (32 random bytes, base64url), held in
+  the starting process's memory (for its own sessions) and in the
+  forwarder's spawn env only, never in an event, a log, a file or an argv
+  value. The forwarder answers `401` to any request without exactly
+  `Authorization: Bearer <it>`, and passes every other one to the server
+  with the server's capability as its bearer instead (the capability and
+  the WebSocket token, like the bearer, live only in the children's spawn
+  env). The worker's sandbox gets
+  `sbx exec -e TK_ENGINE_MCP_URL -e TK_ENGINE_MCP_BEARER` (by name; the
+  values ride the spawn env). A restarted supervisor never re-arms a
+  recorded MCP: `recover` kills all three recorded pids (server,
+  forwarder and editor; `engine-mcp-stop {why: "supervisor restarted"}`),
+  and records the stop only once all three are gone, so a failed kill is
+  retried.
+- **Editor readiness.** The start returns once the forwarder is bound,
+  before the editor's add-on has adopted the server (measured about
+  25 s). For up to about 25 s after the run starts, editor tools may
+  answer `EDITOR_NOT_READY`; the session retries (checking
+  `editor_state`) before treating the MCP as down. An editor that exits
+  before the forwarder is ready fails the start `engine-mcp:start-failed`
+  (every child stopped, no `engine-mcp-start`).
+- **The sandbox must reach `TK_SUPERVISOR_BIND:8788`.** If the sandbox's
+  network policy blocks the tailnet address, allow it by hand (§3.8); the
+  loop never changes sbx network policy.
+- **The rule: verify-only, in this version.** The dev session may run the
+  project's tests, verify the project and take a frame through the MCP; it
+  never uses the server's scene-editing tools (the `gds-engine-godot-4`
+  skill says so, and the server's allowlist enforces it: godot-ai's
+  `--exclude-domains` in `engine.mcp.start`, the 22 editing domains and
+  `batch` excluded, which leaves 14 read-and-run tools; keep `editor` in).
+  Scenes change through the editor or through code.
+- **Refusals** (nothing started, the run ends `blocked`):
+  `engine-mcp:no-config` (no or a malformed `engine.mcp`),
+  `engine-mcp:no-mcp-json` (no `.mcp.json` at the base, or no
+  `mcpServers.<name>`), `engine-mcp:no-engine` (`GODOT` unset or naming no
+  file), `engine-mcp:start-failed` (a non-tailnet bind, a loopback port
+  already in use or no `project.godot` in the worktree, refused before
+  anything starts; the server exits or its port does not answer within
+  60 s; the editor does not spawn or exits before the MCP is ready; the
+  forwarder cannot bind). The events
+  are `engine-mcp-start {name, pid, start, url, forwarder_pid,
+  forwarder_start, editor_pid, editor_start}` and `engine-mcp-stop {name,
+  pid, forwarder_pid, editor_pid, why}`.
 
 ## 5. Hardening checklist
 

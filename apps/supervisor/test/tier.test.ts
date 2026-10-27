@@ -213,6 +213,15 @@ describe("the worker command line per tier", () => {
     expect(buildSbxCommand({ sandbox: "claude-p", vmRoot: "/vm/p", worker, guardS: 300 }, { PATH: "/usr/bin" }).argv.slice(0, 2)).toEqual(["exec", "claude-p"]);
   });
 
+  test("Story 34.5: buildSbxCommand passes the engine MCP's names by `-e` (never a value); buildWorkerEnv strips any TK_ENGINE_MCP_* it inherits", () => {
+    const worker = buildWorkerCommand({ prompt: "p", tier: "sbx", permissionMode: "bypassPermissions", bin: "host-only-claude" });
+    const cmd = buildSbxCommand({ sandbox: "claude-p", vmRoot: "/vm/p", worker, guardS: 300, extraEnv: ["TK_ENGINE_MCP_URL", "TK_ENGINE_MCP_BEARER"] }, { PATH: "/usr/bin" });
+    expect(cmd.argv.slice(0, 6)).toEqual(["exec", "-e", "TK_ENGINE_MCP_URL", "-e", "TK_ENGINE_MCP_BEARER", "claude-p"]);
+    const env = buildWorkerEnv({ PATH: "/usr/bin", TK_ENGINE_MCP_URL: "http://stale", TK_ENGINE_MCP_BEARER: "stale-bearer" }, () => ({}));
+    expect(env.TK_ENGINE_MCP_URL).toBeUndefined();
+    expect(env.TK_ENGINE_MCP_BEARER).toBeUndefined();
+  });
+
   test("hole 60: buildWorkerEnv fills the pass-through variables from the User environment registry when the console lacks them", () => {
     const text = [
       "", "HKEY_CURRENT_USER\\Environment", "    Path    REG_EXPAND_SZ    C:\\Users\\tim\\bin;%PATH%",
@@ -247,6 +256,29 @@ describe("the worker command line per tier", () => {
 });
 
 describe("invokeSkill on the sbx tier (injected spawner)", () => {
+  test("Story 34.5: a run with a live engine MCP gets `-e TK_ENGINE_MCP_URL -e TK_ENGINE_MCP_BEARER`, the values in the spawn env only; none without", async () => {
+    const mcp = { TK_ENGINE_MCP_URL: "http://100.64.0.9:8788/mcp", TK_ENGINE_MCP_BEARER: "per-run-bearer-value" };
+    const order: string[] = [];
+    const { calls, spawner } = fakeSpawner();
+    await invokeSkill(root, "tk-studio-activate", { tier: "sbx", sandbox: "claude-p", permission_mode: "bypassPermissions" }, spawner, {
+      pin: async () => { order.push("pin"); return null; }, engineMcpEnv: () => { order.push("env"); return mcp; },
+    });
+    expect(order).toEqual(["pin", "env"]); // read after the pin that starts it
+    const worker = calls.find((c) => c.args.includes("-p"))!;
+    // (Any TK_ATLASSIAN_* names the console carries come first; the two names sit just before the sandbox.)
+    const sb = worker.args.indexOf("claude-p");
+    expect(worker.args.slice(sb - 4, sb + 1)).toEqual(["-e", "TK_ENGINE_MCP_URL", "-e", "TK_ENGINE_MCP_BEARER", "claude-p"]);
+    expect(worker.args.join(" ")).not.toContain("per-run-bearer-value");
+    expect(worker.args.join(" ")).not.toContain("100.64.0.9");
+    expect(worker.env).toMatchObject(mcp);
+    // Without a live MCP: no names, no values.
+    const plain = fakeSpawner();
+    await invokeSkill(root, "tk-studio-activate", { tier: "sbx", sandbox: "claude-p", permission_mode: "bypassPermissions" }, plain.spawner, { engineMcpEnv: () => undefined });
+    const w2 = plain.calls.find((c) => c.args.includes("-p"))!;
+    expect(w2.args.filter((a) => a.startsWith("TK_ENGINE_MCP_"))).toEqual([]);
+    expect(Object.keys(w2.env ?? {}).filter((k) => k.startsWith("TK_ENGINE_MCP_"))).toEqual([]);
+  });
+
   test("login probe and worker both run through `sbx exec`; the prompt is one argv item; --settings/--model/--effort ride inside", async () => {
     mkdirSync(join(root, ".tk-studio"), { recursive: true });
     const profile = join(root, ".tk-studio", "deny.settings.json");

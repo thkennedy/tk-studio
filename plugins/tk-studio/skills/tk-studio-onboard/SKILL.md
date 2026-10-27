@@ -75,6 +75,26 @@ Run each step through the plugin root; all are idempotent.
    - **Headless:** confirmation must arrive in the payload (an explicit
      `resources` list). No payload set → do NOT record; end `blocked` naming
      the missing confirmation (AD-11 — never prompt, never guess).
+   - **The engine MCP (Story 34.5):** a confident game profile can also
+     propose its engine MCP — a `kind: mcp` entry with `detection:` and
+     `kb: kb/engine-mcp-godot.md` evidence, status `configured` (the
+     project's `.mcp.json` already has it) or `not-configured`. It is never
+     part of `--resources`; only after an explicit yes for that entry
+     (attended), or an explicit `mcp` name in the payload (headless), record
+     it — the one write of the project's `.mcp.json`:
+
+     ```bash
+     uv run "${CLAUDE_PLUGIN_ROOT}/lib/recommend.py" record --directory <project-root> --mcp <name>
+     ```
+
+     It merges `mcpServers.<name>` with the URL and bearer as
+     `${TK_ENGINE_MCP_URL:-}` / `${TK_ENGINE_MCP_BEARER:-}` (never a value;
+     the empty default keeps `.mcp.json` parseable in every session where
+     the supervisor set neither), rewrites an entry in the earlier `${VAR}`
+     form, leaves every other server untouched, and refuses a name no
+     profile suggests or a malformed `.mcp.json` (exit 2). Given with
+     `--role`/`--resources` in one call, both are checked before either is
+     written. Detection and `propose` never write it.
 
    Recording lands in tracked config `working_set.<role>` — a role-keyed
    map: this role's entry replaced, every other role's entry and every

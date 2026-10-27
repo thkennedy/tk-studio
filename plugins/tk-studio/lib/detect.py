@@ -22,6 +22,9 @@ Profiles may carry a `suggests` list (module names) — data consumed by the
 recommendation step (ST-4.3), never acted on here.
 Profiles may also carry a `suggests_skills` list (plugin-shipped skill names,
 Story 34.4) — passed through on the candidate (default `[]`), never acted on here.
+Profiles may also carry a `suggests_mcp` list (engine MCP server names, the
+`.mcp.json` `mcpServers` keys, Story 34.5) — passed through on the candidate
+(default `[]`), never acted on here: detection never writes `.mcp.json`.
 
 CLI:
   uv run detect.py scan --directory DIR [--profiles-dir DIR] [--margin N]
@@ -188,6 +191,7 @@ def score(profiles: list[dict], root: Path) -> tuple[list[dict], dict]:
             "confidence_min": int(det.get("confidence_min", 4)),
             "suggests": profile.get("suggests", []),
             "suggests_skills": profile.get("suggests_skills", []),
+            "suggests_mcp": profile.get("suggests_mcp", []),
             "evidence": evidence,
             "_order": order,
         })
@@ -218,7 +222,8 @@ def detect(project_root: Path, profiles_dir: Path | None = None,
     candidates, vcs = score(profiles, root)
     rec = recommend(candidates, margin)
     public = [{k: c[k] for k in ("id", "display_name", "score", "confidence_min",
-                                 "suggests", "suggests_skills", "evidence")}
+                                 "suggests", "suggests_skills", "suggests_mcp",
+                                 "evidence")}
               for c in candidates]
     return {
         "detect_version": DETECT_VERSION,

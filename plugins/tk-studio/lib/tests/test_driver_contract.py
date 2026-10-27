@@ -2087,7 +2087,8 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertIn("`planner`, `playable-verify`", legs)
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
-        self.assertIn("Story 34.1, Story 34.2, Story 34.3, Story 34.4 (Epic 34)", stories)
+        self.assertIn("Story 34.1, Story 34.2, Story 34.3, Story 34.4, Story 34.5, Story 34.6 (Epic 34)",
+                      stories)
 
     def test_0_1_29_story_34_4_engine_skill(self):
         header = next(line for line in self.text.splitlines()
@@ -2128,7 +2129,115 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertIn("`lib/engine_pin.py check`", row)
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
-        self.assertIn("Story 34.3, Story 34.4 (Epic 34)", stories)
+        self.assertIn("Story 34.3, Story 34.4, Story 34.5, Story 34.6 (Epic 34)", stories)
+
+    def test_0_1_29_story_34_5_engine_mcp(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.29**", header)
+        self.assertNotIn("**0.1.30**", header)
+        self.assertEqual(header.count("Story 34.5, additive"), 1)
+        self.assertLess(header.index("Story 34.4, additive"),
+                        header.index("Story 34.5, additive"))
+        clause = " ".join(header[header.index("Story 34.5, additive"):].split())
+        for phrase in ("`editor_in_the_loop` on a job definition",
+                       "`suggests_mcp` on the detect candidate", "`kind: mcp` entries",
+                       "`recommend.py record --mcp`", "`engine.mcp` in the project config",
+                       "`TK_ENGINE_MCP_URL` and `TK_ENGINE_MCP_BEARER` by name",
+                       "`engine-mcp-start` and `engine-mcp-stop` events",
+                       "the `engine-mcp:` refusal keys", "— additive) |"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        note = flat[flat.index("**0.1.29 (Story 34.1, additive).**"):]
+        note = note[:note.index("**The rules a consumer may rely on**")]
+        self.assertEqual(note.count("Story 34.5 adds one engine MCP per editor-in-the-loop run"), 1)
+        # 34.4's `record` sentence stands; 34.5 extends it, never rewrites it
+        self.assertIn("`record` is unchanged (only a confirmed set lands)", note)
+        sentence = note[note.index("Story 34.5 adds one engine MCP"):]
+        sentence = sentence[:sentence.index("Every other field, kind and route")]
+        for phrase in ("`editor_in_the_loop`", "`durable`", "`suggests_mcp`", "`kind: mcp`",
+                       "`kb: kb/engine-mcp-godot.md`", "`status: configured`", "`not-configured`",
+                       "never write `.mcp.json`", "`record` gains `--mcp <name>`",
+                       '"url": "${TK_ENGINE_MCP_URL:-}"',
+                       '"Bearer ${TK_ENGINE_MCP_BEARER:-}"',
+                       "`engine.mcp: {name, start, port}` (optional `path`, default `/mcp`)",
+                       "`TK_SUPERVISOR_ENGINE_MCP_PORT`", "a tailnet address",
+                       "its own detached child process (`bun src/enginemcp.ts forward`",
+                       "the bearer in its spawn env only",
+                       "`hi-godot/godot-ai`", "`GODOT_AI_HTTP_CAPABILITY` and `GODOT_AI_WS_TOKEN`",
+                       "`$GODOT --editor --path`", "the server's capability put on each request upstream",
+                       "`8788`", "(`sbx exec -e`)",
+                       "`engine-mcp-start {name, pid, start, url, forwarder_pid, forwarder_start, editor_pid, editor_start}`",
+                       "three pids",
+                       "`engine-mcp-stop {name, pid, forwarder_pid, editor_pid, why}`",
+                       "stops all three at release from any process, the editor before the server",
+                       "`engine-mcp:no-config`",
+                       "`engine-mcp:no-mcp-json`", "`engine-mcp:no-engine`",
+                       "`engine-mcp:start-failed`", "verify-only"):
+            self.assertIn(phrase, sentence)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 34.4, Story 34.5, Story 34.6 (Epic 34)", stories)
+
+    def test_0_1_29_story_34_6_asset_manifest(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.29**", header)
+        self.assertNotIn("**0.1.30**", header)
+        self.assertEqual(header.count("Story 34.6, additive"), 1)
+        self.assertLess(header.index("Story 34.5, additive"),
+                        header.index("Story 34.6, additive"))
+        clause = " ".join(header[header.index("Story 34.6, additive"):].split())
+        for phrase in ("`asset-manifest.schema.json`", "`assets.manifest` and `assets.art_path`",
+                       "`lib/assets.py check\\|greybox\\|facts`", "`lib/blender/greybox.py`",
+                       "the greybox rung of the asset ladder", "— additive) |"):
+            self.assertIn(phrase, clause)
+        companions = next(line for line in self.text.splitlines()
+                          if line.startswith("| Companion schemas"))
+        self.assertIn("`asset-manifest.schema.json` (v1, shipped Story 34.6", companions)
+        flat = " ".join(self.text.split())
+        note = flat[flat.index("**0.1.29 (Story 34.1, additive).**"):]
+        note = note[:note.index("**The rules a consumer may rely on**")]
+        self.assertEqual(note.count("Story 34.6 adds the asset manifest"), 1)
+        # 34.5's sentence stands; 34.6 follows it
+        self.assertLess(note.index("Story 34.5 adds one engine MCP"),
+                        note.index("Story 34.6 adds the asset manifest"))
+        sentence = note[note.index("Story 34.6 adds the asset manifest"):]
+        sentence = sentence[:sentence.index("Every other field, kind and route")]
+        for phrase in ("`asset-manifest.schema.json` (schema 1)", "`assets.manifest`",
+                       "`assets/manifest.yaml`", "`<assets.art_path>/<name>.glb`",
+                       "`art/greybox`", "`lib/assets.py check|greybox|facts`", "`intent: assets`",
+                       "naming the entry and the field", "`tri_budget`", "1 %",
+                       "`BLENDER`", "never overwrites one", "with the stdlib"):
+            self.assertIn(phrase, sentence)
+        self.assertLess(self.text.index("## 7. Driver integration"),
+                        self.text.index("## Asset manifest (0.1.29, Story 34.6)"))
+        self.assertLess(self.text.index("## Asset manifest (0.1.29, Story 34.6)"),
+                        self.text.index("## 8. Conformance"))
+        section = " ".join(self.text[self.text.index("## Asset manifest (0.1.29, Story 34.6)"):
+                                     self.text.index("## 8. Conformance")].split())
+        for phrase in ("JSON Schema draft 2020-12", "`assets.manifest`", "`assets.art_path`",
+                       "`art/world/greybox`", "never manifest keys",
+                       "`prop #8a8a8a`", "`fx #9a5bb5`",
+                       "`prop | character | environment | vehicle | ui | fx`",
+                       "`base-center | center | base-min-corner`",
+                       "`none | box | capsule | sphere | mesh`",
+                       "`greybox | cc0 | cc-by | generated | proprietary`",
+                       "`greybox | cc0 | generated`", "`placeholder | candidate | accepted`",
+                       "`<art_path>/<name>.glb`", "`intent: assets`",
+                       "`{name, rung, status, file, present, facts, verdict: pass | fail | missing, reasons[]}`",
+                       "by more than 1 %", "`missing`, not a failure", "engine verify command",
+                       "`--blender`, else `BLENDER`, else `blender` on PATH",
+                       "`<art_path>/<name>.label.png`",
+                       "`<blender> -b --python <plugin>/lib/blender/greybox.py -- --spec <json>`",
+                       "`{name, category, colour, bounds, origin, collision, tri_budget, label, output}`",
+                       "never overwrites an existing `.glb` or label", "`--wall` (default 600 s)",
+                       "`asset.generator`", "`triangles`", "`TEXCOORD_0`", "`materials`",
+                       "Story 34.7's", "Story 34.8's"):
+            self.assertIn(phrase, section)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 34.5, Story 34.6 (Epic 34)", stories)
 
     # --- AC 2: A7 dossier items covered or explicitly deferred with a seam
 

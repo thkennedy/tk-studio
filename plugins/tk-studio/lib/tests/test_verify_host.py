@@ -182,6 +182,7 @@ class TestSupervisorGate(VerifyHostCase):
             self.assertEqual(timeout, 420)
             self.assertFalse([k for k in env if k.upper().startswith("TK_SUPERVISOR_")])
             self.assertEqual(env["KEEP_ME"], "1")
+            self.assertEqual(env["TK_STUDIO_ROOT"], str(vh.ROOT))  # hole 82: the suites use this repo's plugin
             self.assertEqual(env["TMPDIR"], env["TEMP"])
             self.assertEqual(env["TMPDIR"], env["TMP"])
             self.assertTrue(existed, "the per-run folder exists while the files run")

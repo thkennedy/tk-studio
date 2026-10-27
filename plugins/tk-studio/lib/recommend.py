@@ -15,6 +15,16 @@ Recommendations are two-dimensional (role × project) and evidence-backed:
             and every human comment in the file are preserved byte-for-byte.
             Re-recording an identical set is a no-op. Only this verb (invoked
             by tk-studio-onboard after the operator confirms) writes the key.
+            Story 34.5: `record --mcp <name>` is the one writer of the
+            project root's `.mcp.json` — `<name>` confirmed and named by a
+            profile's `suggests_mcp`; it merges `mcpServers.<name>` (the URL
+            and bearer as `${TK_ENGINE_MCP_URL:-}` / `${TK_ENGINE_MCP_BEARER:-}`,
+            never a value; the empty default keeps the file parseable in a
+            session where the supervisor set neither), leaves every other
+            server untouched, is idempotent (an entry in the earlier
+            `${VAR}` form is rewritten), honours --dry-run and writes
+            atomically. With --role/--resources too, the MCP name and the
+            `.mcp.json` are checked before either write.
 
 Proposal sources, each a named evidence line per resource:
   role-default    conservative per-role module base (v1 roles; new roles are
@@ -23,12 +33,17 @@ Proposal sources, each a named evidence line per resource:
                   the markers that fired; its `suggests_skills` (Story 34.4)
                   join as `kind: skill` entries, resolved against the plugin's
                   own skills/<name>/SKILL.md, with `engine-pin:` evidence and
-                  any version `warnings[]` (also appended to `notes`)
+                  any version `warnings[]` (also appended to `notes`); its
+                  `suggests_mcp` (Story 34.5) join as `kind: mcp` entries with
+                  `kb:` evidence, status `configured` when the project's
+                  `.mcp.json` already has `mcpServers.<name>`, else
+                  `not-configured` — proposing never writes `.mcp.json`
   user-authored   the project's own resources (first-class path, AD-17)
 
 CLI:
   uv run recommend.py propose --directory DIR [--role ROLE]
   uv run recommend.py record  --directory DIR --role ROLE --resources a,b,c [--dry-run]
+  uv run recommend.py record  --directory DIR --mcp NAME [--dry-run]
 
 Exit codes: 0 ok; 2 bad invocation / classification refusal.
 Stdlib-only (NFR9); never prompts (AD-11).
@@ -65,6 +80,22 @@ _ROLE_TOKEN_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 # Story 34.4: plugin-shipped skills a confident profile suggests resolve here
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 
+# Story 34.5: the engine MCP's spike record, and the one `.mcp.json` entry
+# shape `record --mcp` merges (the supervisor passes both values into the
+# sandbox by name for an editor-in-the-loop run; the file carries no secret).
+# The `${VAR:-}` default form: Claude Code refuses a `.mcp.json` whose `${VAR}`
+# has no default and is unset, and every session but a flagged run's own (the
+# host, an interactive one, an unflagged run: `buildWorkerEnv` strips
+# `TK_ENGINE_MCP_*`) has both unset.
+ENGINE_MCP_KB = "kb/engine-mcp-godot.md"
+MCP_JSON_NAME = ".mcp.json"
+MCP_ENTRY = {
+    "type": "http",
+    "url": "${TK_ENGINE_MCP_URL:-}",
+    "headers": {"Authorization": "Bearer ${TK_ENGINE_MCP_BEARER:-}"},
+}
+_MCP_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
 
 class RecommendError(Exception):
     """Bad invocation, unknown role shape, or unwritable config."""
@@ -94,6 +125,17 @@ def _engine_pin(root: Path, name: str) -> tuple[str | None, list[str]]:
               else "project.godot")
     return (f"pinned {result['pinned']} from {source}; {supported}",
             list(result["warnings"]))
+
+
+def _mcp_status(root: Path, name: str) -> str:
+    """`configured` when the project's .mcp.json has mcpServers.<name>, else
+    `not-configured` (an absent or unreadable file included). Pure read."""
+    try:
+        data = json.loads((root / MCP_JSON_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "not-configured"
+    servers = data.get("mcpServers") if isinstance(data, dict) else None
+    return "configured" if isinstance(servers, dict) and name in servers else "not-configured"
 
 
 def _module_status(inv: dict, name: str) -> str | None:
@@ -150,6 +192,12 @@ def propose(project_root: Path, role: str | None = None,
             if warnings:
                 proposed[skill]["warnings"] = warnings
                 skill_notes.extend(f"{skill}: {w}" for w in warnings)
+        for mcp in top.get("suggests_mcp", []):
+            _add(mcp, "mcp", "detection",
+                 f"detected {top['id']} (score {top['score']} ≥ floor "
+                 f"{top['confidence_min']}): {fired}",
+                 _mcp_status(root, mcp))
+            proposed[mcp]["evidence"].append(f"kb: {ENGINE_MCP_KB}")
 
     for resource in inv["resources"]:
         if resource["origin"] == "user-authored":
@@ -290,6 +338,89 @@ def record(project_root: Path, role: str, resources: list[str],
     }
 
 
+# ------------------------------------------------------------- record --mcp
+
+def suggested_mcps(profiles_dir: Path | None = None) -> set[str]:
+    """Every engine MCP name a detection profile's `suggests_mcp` names."""
+    names: set[str] = set()
+    for profile in detectlib.load_profiles(profiles_dir or detectlib.DEFAULT_PROFILES_DIR):
+        value = profile.get("suggests_mcp", [])
+        if isinstance(value, list):
+            names.update(n for n in value if isinstance(n, str))
+    return names
+
+
+def record_mcp(project_root: Path, name: str, dry_run: bool = False,
+               profiles_dir: Path | None = None) -> dict:
+    """Merge the confirmed engine MCP into the project root's .mcp.json.
+
+    The one writer of `.mcp.json` (Story 34.5): `name` must be named by a
+    profile's `suggests_mcp`; `mcpServers.<name>` becomes MCP_ENTRY, every
+    other key and server is left as it was. Idempotent (an entry already
+    equal to MCP_ENTRY is not rewritten; one in any other form, the earlier
+    `${VAR}` form without a default included, is replaced); --dry-run writes
+    nothing and checks everything a write would; the write is atomic (temp
+    file, fsync, os.replace).
+    """
+    root = Path(project_root).resolve()
+    name = (name or "").strip()
+    if not _MCP_NAME_RE.match(name):
+        raise RecommendError(f"'{name}' is not a valid MCP server name")
+    known = suggested_mcps(profiles_dir)
+    if name not in known:
+        raise RecommendError(
+            f"'{name}' is not named by any detection profile's suggests_mcp "
+            f"(known: {', '.join(sorted(known)) or 'none'}) — record only a "
+            "confirmed, profile-suggested engine MCP")
+    if not root.is_dir():
+        raise RecommendError(f"project root {root} is not a directory")
+    target = root / MCP_JSON_NAME
+    text = None
+    data: dict = {}
+    if target.is_file():
+        text = target.read_text(encoding="utf-8")
+        try:
+            loaded = json.loads(text)
+        except ValueError as exc:
+            raise RecommendError(f"{target} is not valid JSON: {exc}") from exc
+        if not isinstance(loaded, dict):
+            raise RecommendError(f"{target} is not a JSON object")
+        data = loaded
+    servers = data.get("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise RecommendError(f"{target}: mcpServers is not an object")
+    changed = servers.get(name) != MCP_ENTRY
+    if changed:
+        data = {**data, "mcpServers": {**servers, name: MCP_ENTRY}}
+        if not dry_run:
+            _atomic_write_json(target, data)
+    return {
+        "project_root": str(root),
+        "mcp": name,
+        "mcp_json": str(target),
+        "entry": MCP_ENTRY,
+        "changed": changed,
+        "dry_run": dry_run,
+    }
+
+
+def _atomic_write_json(path: Path, data: dict) -> None:
+    """indent 2 plus a trailing newline (job.py's JSON writer precedent)."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 # --------------------------------------------------------------------- CLI
 
 def main(argv: list[str] | None = None) -> int:
@@ -308,9 +439,14 @@ def main(argv: list[str] | None = None) -> int:
 
     rec = sub.add_parser("record", help="record a confirmed set (the write)")
     rec.add_argument("--directory", required=True, help="project root")
-    rec.add_argument("--role", required=True)
-    rec.add_argument("--resources", required=True,
-                     help="comma-separated confirmed resource names")
+    rec.add_argument("--role", help="required unless --mcp alone")
+    rec.add_argument("--resources",
+                     help="comma-separated confirmed resource names "
+                          "(required with --role)")
+    rec.add_argument("--mcp", help="Story 34.5: the confirmed engine MCP "
+                                   "(a profile's suggests_mcp) to merge into "
+                                   "the project's .mcp.json")
+    rec.add_argument("--profiles-dir", help="detection profiles dir (tests)")
     rec.add_argument("--dry-run", action="store_true",
                      help="show the resulting entry without writing")
 
@@ -322,8 +458,26 @@ def main(argv: list[str] | None = None) -> int:
                              profiles_dir=Path(args.profiles_dir)
                              if args.profiles_dir else None)
         else:
-            result = record(Path(args.directory), args.role,
-                            args.resources.split(","), dry_run=args.dry_run)
+            if args.mcp is None and (args.role is None or args.resources is None):
+                raise RecommendError("record needs --role and --resources, "
+                                     "or --mcp")
+            if (args.role is None) != (args.resources is None):
+                raise RecommendError("--role and --resources go together")
+            profiles = Path(args.profiles_dir) if args.profiles_dir else None
+            if args.mcp is not None and args.role is not None:
+                # The MCP name and the .mcp.json are checked before either
+                # write: a refusal never leaves the working set half-recorded.
+                record_mcp(Path(args.directory), args.mcp, dry_run=True,
+                           profiles_dir=profiles)
+            result = {}
+            if args.role is not None:
+                result = record(Path(args.directory), args.role,
+                                args.resources.split(","), dry_run=args.dry_run)
+            if args.mcp is not None:
+                mcp = record_mcp(Path(args.directory), args.mcp,
+                                 dry_run=args.dry_run, profiles_dir=profiles)
+                # With --role too: the working-set answer, the MCP's beside it.
+                result = {**result, "mcp_record": mcp} if result else mcp
         print(json.dumps({"ok": True, **result}, ensure_ascii=False, indent=2))
         return 0
     except (RecommendError, inventorylib.InventoryError, detectlib.DetectError,

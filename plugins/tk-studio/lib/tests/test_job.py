@@ -138,6 +138,15 @@ class JobTestCase(unittest.TestCase):
             self._defn(guards={"max_turns": 5, "max_cost": 1}))
         self.assertTrue(any("guards has unknown" in p for p in problems))
 
+    def test_editor_in_the_loop_is_an_optional_boolean(self):
+        # Story 34.5: validated like `durable`.
+        for value in (True, False):
+            self.assertEqual(
+                joblib.validate_definition(self._defn(editor_in_the_loop=value)), [])
+        for value in ("yes", 1, None):
+            problems = joblib.validate_definition(self._defn(editor_in_the_loop=value))
+            self.assertIn("editor_in_the_loop must be a boolean", problems)
+
     def test_guard_and_stop_value_shapes(self):
         bad = [
             self._defn(guards={"max_turns": 0}),

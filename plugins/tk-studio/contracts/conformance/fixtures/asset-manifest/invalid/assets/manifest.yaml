@@ -1,0 +1,14 @@
+# The Story 34.6 conformance fixture: one closed-set violation
+# (category: monster), which `assets.py check` refuses naming the entry
+# and the field.
+schema: 1
+assets:
+  - name: crate-small
+    category: monster
+    tri_budget: 500
+    bounds: {x: 0.5, y: 0.5, z: 0.5}
+    origin: base-center
+    collision: box
+    licence: greybox
+    rung: greybox
+    status: placeholder

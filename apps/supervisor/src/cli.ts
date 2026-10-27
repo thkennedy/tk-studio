@@ -114,6 +114,7 @@ import {
 } from "./server";
 import { serve as serveApi } from "./api";
 import { notifier, pluginRoot, tlsConfig, WorkDirMissing, workDir } from "./env";
+import { engineMcpEnv, engineMcpRefusalText, recoverEngineMcps, startEngineMcp, type EngineMcpDeps } from "./enginemcp";
 import { canonicalPr, prUrl, recordClaimRefusal, snapshotOnce, sweepEnds, underBunTest, type HygieneDeps } from "./hygiene";
 import { rebuildAgents, type RebuildDeps, type RebuildResult } from "./registry";
 import {
@@ -303,6 +304,8 @@ export interface RunOptions {
   editorInTheLoop?: boolean;
   /** Story 22.3: the end sweep's environment and HTTP client (tests inject them). */
   hygiene?: HygieneDeps;
+  /** Story 34.5: a drained flagged run's engine MCP start (tests inject its seams; default: the worktree env). */
+  engineMcp?: EngineMcpDeps;
   /** Story 27.1: the worktree's environment and spawners (tests inject them; default process.env). */
   worktree?: WorktreeDeps;
   /** Story 27.5: the plan pull-back's registry lookup (tests inject it; default `registry.py show`). */
@@ -666,6 +669,7 @@ export async function recoverQueue(opts: RunOptions = {}, verbRunner: VerbRunner
   const { queue, owned } = openQueue(opts);
   try {
     await respawnHolds(queue, sbxDeps(opts.worktree));
+    await recoverEngineMcps(queue); // Story 34.5: an engine MCP a restart lost is stopped by its pid, never re-armed
     const { report, prepared } = await recoverWithResume(queue, opts.owner ?? selfOwner(), verbRunner);
     await driveResumes(queue, report.resumed, prepared, verbRunner, invokeSkill, sbxDeps(opts.worktree));
     await endCancelledLeftovers(queue, verbRunner); // Story 27.5 (DW-13): a cancelled run's studio run left open
@@ -985,13 +989,16 @@ export async function submitJob(
       // Worker options resolved before any process (a host bypass is refused, nothing queued).
       ({ options } = resolveBeforeStart(jobId, root, explicitLayer(opts.permissionMode, opts), liveRun(queue, jobId, root)));
       v = await validate(jobId, directory, undefined, opts.guardCapS);
+      // Story 34.5: a run its job definition flags needs the work folder too (the same refusal, nothing queued).
+      if (v.defn?.editor_in_the_loop === true && !workDir(opts.hygiene?.env)) throw refusal(new WorkDirMissing().message);
     }
     catch (e) { throw e instanceof StartError ? e : new StartError(message(e)); }
     const where = await resolveCheckout(v.root);
     const { run, minted } = queue.enqueue({
       jobId, root: v.root, projectId: v.projectId, target: v.target, definition: v.defn, ...where,
       permissionMode: opts.permissionMode, tier: options.tier, sandbox: options.sandbox, model: options.model, effort: options.effort,
-      base_ref: opts.baseRef, ...(opts.editorInTheLoop ? { editorInTheLoop: true } : {}), ...(opts.payload ? { payload: opts.payload } : {}),
+      // Story 34.5: the queued run's flag is the submission's OR its job definition's.
+      base_ref: opts.baseRef, ...(opts.editorInTheLoop || v.defn?.editor_in_the_loop === true ? { editorInTheLoop: true } : {}), ...(opts.payload ? { payload: opts.payload } : {}),
     });
     return { ok: true, job_id: jobId, project_id: v.projectId, run_id: run.run_id, state: run.state, minted };
   } finally { if (owned) queue.close(); }
@@ -1398,8 +1405,13 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
       // engagement-chat run its own (the `enqueued` event's) plus its run id.
       v = { ...v, defn: withStoredPayload(run.job_id, v.defn, queue.definition(run), { run_id: run.run_id, payload: queue.runPayload(run.run_id) }) };
     } else {
+      // Story 34.5: a run its job definition flags needs the work folder its snapshot lands in (Story 22.3's refusal).
+      if (v.defn?.editor_in_the_loop === true && !workDir(opts.hygiene?.env)) throw refusal(new WorkDirMissing().message);
       const where = await resolveCheckout(v.root);
-      const enq = queue.enqueue({ jobId, root: v.root, projectId: v.projectId, target: v.target, definition: v.defn, owner, permissionMode, ...record, ...where });
+      const enq = queue.enqueue({
+        jobId, root: v.root, projectId: v.projectId, target: v.target, definition: v.defn, owner, permissionMode, ...record, ...where,
+        ...(v.defn?.editor_in_the_loop === true ? { editorInTheLoop: true } : {}), // Story 34.5: the definition's flag
+      });
       run = enq.run;
       // Story 31.7: an adopted (not minted) queued validate-resolution run keeps the payload the pass enqueued.
       if (!enq.minted) v = { ...v, defn: withStoredPayload(run.job_id, v.defn, queue.definition(run), { run_id: run.run_id, payload: queue.runPayload(run.run_id) }) };
@@ -1436,7 +1448,15 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
       // Story 22.3: a flagged Godot run is snapshot before the minting verb, once per queue run.
       await snapshotOnce(queue, claim.run, v.projectId, v.root, { env: opts.hygiene?.env });
       // Story 33.2: a drained run was pinned before its claim (`claimGate`): the drive pins it no second time.
-      summary = await drive(queue, run.run_id, { ...v, ...eff, workRoot }, opts.worktree, opts.runId !== undefined && eff.tier === "sbx");
+      const prePinned = opts.runId !== undefined && eff.tier === "sbx";
+      // Story 34.5: so a flagged drained run's engine MCP starts here, its worktree now cut (the recorder's pin starts
+      // it on the other paths). A refusal ends the run `blocked`, its key and what resolves it in the reason (the run
+      // is claimed by now, so no `claim-refused` event: those are recorded on a queued run only).
+      if (prePinned) {
+        const mcp = await startEngineMcp(queue, run.run_id, { env: opts.worktree?.env ?? process.env, ...opts.engineMcp });
+        if ("refused" in mcp) throw new StartError(engineMcpRefusalText(mcp.refused));
+      }
+      summary = await drive(queue, run.run_id, { ...v, ...eff, workRoot }, opts.worktree, prePinned);
     }
     catch (e) {
       const err = e instanceof StartError ? e : new StartError(message(e));
@@ -1710,6 +1730,8 @@ export interface RunRecorder {
   /** Story 27.2: pin the sbx sandbox before the worker's login preflight (`pinned`/`pin-failed` recorded):
    * null when pinned, else the failure. */
   pin?(sandbox: string): Promise<string | null>;
+  /** Story 34.5: the run's live engine MCP env for the worker's sandbox (`InvokeOptions.engineMcpEnv`). */
+  engineMcpEnv?(): Record<string, string> | undefined;
   /** Story 27.2: a tripped guard on an sbx launch run kills its in-VM engine by its recorded pid (recorded
    * `engine-kill`); undefined when the run has no engine to kill or no pid is known. `engineRunId`: the engine
    * the launch status block names (a trip at launch return), for its agent session (`killEngine`). */
@@ -1719,14 +1741,21 @@ export interface RunRecorder {
 /** The queue-backed recorder of one queue run. Story 33.3: its pin goes through `pinWithRestart` with `restarted` —
  * the drain pass's set for a resume `drainQueue` drives (shared with the pass's drained runs), else a set of its own
  * (one per recorder, so one per `finishRun` call). */
-export function queueRecorder(queue: Queue, runId: string, sbx: SandboxDeps = {}, restarted: Set<string> = new Set<string>()): RunRecorder {
+export function queueRecorder(
+  queue: Queue, runId: string, sbx: SandboxDeps = {}, restarted: Set<string> = new Set<string>(), mcp: EngineMcpDeps = { env: sbx.env ?? process.env },
+): RunRecorder {
   return {
     pin: async (sb) => {
       const failed = await pinWithRestart(queue, runId, sb, sbx, { restarted });
       try { queue.note(runId, failed ? "pin-failed" : "pinned", { sandbox: sb, ...(failed ? { error: failed } : {}) }); }
       catch { /* the run ended meanwhile: the pin answer still stands */ }
-      return failed;
+      if (failed) return failed;
+      // Story 34.5: a flagged run's engine MCP starts with its pin (once per run); a refusal fails the pin, so the run
+      // ends `blocked` naming it.
+      const started = await startEngineMcp(queue, runId, mcp);
+      return "refused" in started ? engineMcpRefusalText(started.refused) : null;
     },
+    engineMcpEnv: () => engineMcpEnv(runId),
     killEngine: async (why, engineRunId) => {
       const r = queue.get(runId);
       if (!r || r.tier !== "sbx" || (!r.engine_run_id && queue.definition(r)?.target?.skill !== LAUNCH_SKILL)) return undefined;
@@ -2327,6 +2356,7 @@ export async function finishRun(
         ...(workRoot !== undefined ? { vmHostRoot: workRoot } : registryRoot !== undefined ? { vmHostRoot: registryRoot } : {}),
         ...(sid ? { sessionId: sid, ...(resuming ? { resume: true } : {}) } : {}), ...recording,
         ...(rec?.pin ? { pin: (sb: string) => rec.pin!(sb) } : {}),
+        ...(rec?.engineMcpEnv ? { engineMcpEnv: () => rec.engineMcpEnv!() } : {}),
       });
       // The worker's own time, from its spawn (invokeSkill's worker_elapsed_s) —
       // not the auth preflight or drift check before it; the injected clock only
