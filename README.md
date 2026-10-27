@@ -191,6 +191,7 @@ All 18 studio surfaces, grouped by pillar. Every one runs attended **and** headl
 | --- | --- | --- |
 | `tk-studio-detect` | "tk detect", "what's installed" | Read-only inventory of the full resource universe — installed BMad modules/skills, known-but-uninstalled official modules, and the project's own user-authored resources — plus evidence-scored project-type detection. Never guesses; ambiguity is surfaced as an ask. |
 | `tk-studio-onboard` | "tk onboard", "onboard this project" | Taxonomy standup + propose/confirm/record of the role × project working set (see Quick start step 4). Idempotent; re-onboarding an unchanged setup is a no-op. |
+| `gds-engine-godot-4` | "which Godot version is this project on", "how do I run Godot headless here" | Read-only engine knowledge for Godot 4 C#/GoDotTest projects, proposed by onboarding on a confident `game-godot` detection: the project's pinned version (`project.godot` `config/features`, `global.json`'s `Godot.NET.Sdk`) checked by `lib/engine_pin.py` against the skill's `pin.json` range (a mismatch warns, never silent), the headless flags, the `.tscn`/`.tres` and import-cache rules, the box's `& $env:GODOT` rule and where the engine gate runs. Cites GDS's engine catalogue, never forks it. See [kb/engine-godot-4-pinned.md](kb/engine-godot-4-pinned.md). |
 
 ### Orchestration and roles
 

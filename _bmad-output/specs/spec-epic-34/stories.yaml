@@ -165,6 +165,15 @@
     `34-5-one-engine-mcp-per-run-started-by-the-pin-*.md`, and a file named
     `34-5-one-engine-mcp-per-run-started-by-the-pin.md` is read as pending (loop
     deficiency 1, story 21-6).
+    Gate note (from 34-4, 2026-10-27): 34-4 re-pinned the 34.3 stories-line
+    assertion in test_driver_contract.py; re-pin the 34.3 and 34.4 assertions for
+    Story 34.5 and record it as a DRIFT (score 1). Story 22.3 already ships the
+    submission flag `editor_in_the_loop` and the robocopy `snapshotOnce`: reuse
+    both (see plans/34-5.md Risks on the snapshot path). `beremaran/godot-agent-loop`
+    no longer exists on GitHub (handoff-phase1-loop-2026-10-09.md:18). Spike
+    measurements and the pick come only from the operator through the consult log;
+    halt for them. Oversize: the plan sizes this story past band L. Halt if the
+    Files list in plans/34-5.md grows.
 
 - id: "34-6-the-asset-manifest-and-the-greybox-rung"
   title: "The Asset Manifest and the Greybox Rung"

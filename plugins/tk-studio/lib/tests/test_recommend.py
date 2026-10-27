@@ -71,6 +71,16 @@ class RecommendTestCase(unittest.TestCase):
         (d / "SKILL.md").write_text(
             "---\nname: my-reviewer\ndescription: Mine.\n---\n", encoding="utf-8")
 
+    def _make_godot(self, features="4.7", sdk="4.7.2"):
+        (self.root / "project.godot").write_text(
+            "config_version=5\n\n[application]\n\nconfig/name=\"Fixture\"\n"
+            f"config/features=PackedStringArray(\"{features}\", \"C#\", \"Forward Plus\")\n",
+            encoding="utf-8")
+        if sdk is not None:
+            (self.root / "global.json").write_text(
+                '{"sdk": {"version": "8.0.100"}, '
+                f'"msbuild-sdks": {{"Godot.NET.Sdk": "{sdk}"}}}}', encoding="utf-8")
+
     def _propose(self, role="developer"):
         return recommend.propose(self.root, role=role, lock_path=self.lock)
 
@@ -113,6 +123,92 @@ class RecommendTestCase(unittest.TestCase):
         giver = self._propose(role="direction-giver")
         self.assertIn("tea", {e["name"] for e in dev["proposal"]})
         self.assertIn("cis", {e["name"] for e in giver["proposal"]})
+
+    # --- Story 34.4: the plugin-shipped engine skill, pinned per project
+
+    def _engine_entry(self, result):
+        return next((e for e in result["proposal"] if e["name"] == "gds-engine-godot-4"), None)
+
+    def test_confident_godot_suggests_the_engine_skill_with_evidence(self):
+        self._make_godot()
+        result = self._propose()
+        self.assertEqual(result["detection_outcome"], "confident")
+        entry = self._engine_entry(result)
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["kind"], "skill")
+        self.assertEqual(entry["status"], "installed")
+        self.assertTrue(any(ev.startswith("detection: detected game-godot (score ")
+                            for ev in entry["evidence"]))
+        self.assertIn("engine-pin: pinned 4.7.2 from global.json; supported 4.7..4.8",
+                      entry["evidence"])
+        self.assertNotIn("warnings", entry)
+        self.assertFalse(any(n.startswith("gds-engine-godot-4: ") for n in result["notes"]))
+
+    def test_ask_outcome_suggests_no_engine_skill(self):
+        (self.root / "main.gd").write_text("extends Node\n", encoding="utf-8")
+        result = self._propose()
+        self.assertNotEqual(result["detection_outcome"], "confident")
+        self.assertIsNone(self._engine_entry(result))
+
+    def test_out_of_range_warns_on_the_entry_and_in_notes(self):
+        for features, sdk in (("4.8", "4.8.0"), ("4.6", "4.6.1")):
+            with self.subTest(sdk=sdk):
+                self._make_godot(features=features, sdk=sdk)
+                result = self._propose()
+                entry = self._engine_entry(result)
+                self.assertIsNotNone(entry)  # still proposed: the operator decides
+                self.assertEqual(len(entry["warnings"]), 1)
+                self.assertIn(sdk, entry["warnings"][0])
+                self.assertIn(f"gds-engine-godot-4: {entry['warnings'][0]}", result["notes"])
+
+    def test_non_numeric_sdk_pins_from_project_godot(self):
+        self._make_godot(features="4.7", sdk="$(GodotVersion)")
+        result = self._propose()
+        entry = self._engine_entry(result)
+        self.assertIn("engine-pin: pinned 4.7 from project.godot; supported 4.7..4.8",
+                      entry["evidence"])
+        self.assertTrue(any("$(GodotVersion)" in w for w in entry["warnings"]))
+
+    def test_features_sdk_disagreement_warns(self):
+        self._make_godot(features="4.7", sdk="4.8.1")
+        entry = self._engine_entry(self._propose())
+        self.assertTrue(any("major.minor disagreement" in w for w in entry["warnings"]))
+
+    def test_unreadable_pin_warns(self):
+        (self.root / "project.godot").write_text("[application]\n", encoding="utf-8")
+        result = self._propose()
+        entry = self._engine_entry(result)
+        self.assertTrue(any("pinned version unreadable" in w for w in entry["warnings"]))
+        self.assertTrue(any(n.startswith("gds-engine-godot-4: pinned version unreadable")
+                            for n in result["notes"]))
+
+    def test_pin_refusal_still_proposes_with_a_not_checked_warning(self):
+        self._make_godot(sdk=None)
+        (self.root / "global.json").write_text("// pin\n{not json", encoding="utf-8")
+        self._standup()
+        result = self._propose()
+        self.assertEqual(result["detection_outcome"], "confident")
+        entry = self._engine_entry(result)
+        self.assertIsNotNone(entry)  # still proposed: the operator decides
+        self.assertTrue(any(ev.startswith("engine-pin: engine pin not checked: "
+                                          "malformed global.json")
+                            for ev in entry["evidence"]))
+        self.assertEqual(len(entry["warnings"]), 1)
+        self.assertTrue(entry["warnings"][0].startswith(
+            "engine pin not checked: malformed global.json"))
+        self.assertIn(f"gds-engine-godot-4: {entry['warnings'][0]}", result["notes"])
+        self.assertIsNone(recommend.read_working_set(self.root).get("developer"))
+
+    def test_record_writes_the_engine_skill_only_when_confirmed(self):
+        self._make_godot()
+        self._standup()
+        self.assertIsNotNone(self._engine_entry(self._propose()))
+        self.assertIsNone(recommend.read_working_set(self.root).get("developer"))
+        recommend.record(self.root, "developer", ["bmm", "tea", "gds"])
+        self.assertNotIn("gds-engine-godot-4",
+                         recommend.read_working_set(self.root)["developer"])
+        recommend.record(self.root, "developer", ["bmm", "tea", "gds", "gds-engine-godot-4"])
+        self.assertIn("gds-engine-godot-4", recommend.read_working_set(self.root)["developer"])
 
     # --- AC 2: explicit confirmation → working_set.<role>, idempotent
 

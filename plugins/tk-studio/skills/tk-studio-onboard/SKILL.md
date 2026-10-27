@@ -52,6 +52,17 @@ Run each step through the plugin root; all are idempotent.
    On an ask outcome (`ambiguous — ask` / `unknown — ask`) the proposal
    carries no detection-derived entries and a note saying so.
 
+   A confident game profile can also propose a plugin-shipped engine skill
+   (`game-godot` → `gds-engine-godot-4`, Story 34.4): a `kind: skill` entry
+   with `detection:` and `engine-pin:` evidence (the project's pinned engine
+   version against the skill's supported range). A pin outside the range,
+   a features/SDK disagreement or an unreadable pin adds the entry's
+   `warnings[]` and a `gds-engine-godot-4: ` note; a pin that cannot be
+   checked (no readable `project.godot`, a malformed `global.json`) is still
+   proposed and carries an `engine pin not checked: <reason>` warning;
+   attended, show that warning to the operator before they confirm. Headless onboarding records
+   nothing new: it records only what the payload confirms.
+
 3. **Confirm, then record**:
    - **Attended:** present the proposal with its evidence; the operator
      edits/accepts the set. On an ask outcome, ask what the project is

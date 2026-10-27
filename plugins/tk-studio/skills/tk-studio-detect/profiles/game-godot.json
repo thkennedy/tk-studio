@@ -2,6 +2,7 @@
   "id": "game-godot",
   "display_name": "Godot game project",
   "suggests": ["gds", "tea"],
+  "suggests_skills": ["gds-engine-godot-4"],
   "detection": {
     "confidence_min": 4,
     "markers": [

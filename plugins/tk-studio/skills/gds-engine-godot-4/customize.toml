@@ -1,0 +1,15 @@
+# Customization surface for gds-engine-godot-4.
+#
+# Override files (not edited here):
+#   {project-root}/_bmad/custom/gds-engine-godot-4.toml         (team)
+#   {project-root}/_bmad/custom/gds-engine-godot-4.user.toml    (personal)
+#
+# The supported engine range is data, not configuration: it lives in this
+# skill's pin.json and widens only after the knowledge here has been checked
+# against the new minor (Story 34.4).
+
+# Model/effort defaults (AD-14). Precedence: runtime override > project config
+# > this resource default. Read-only knowledge plus one pure core call.
+[model]
+default = "claude-sonnet-5"
+effort = "low"

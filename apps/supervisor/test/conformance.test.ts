@@ -44,6 +44,13 @@ describe("evolve and launch surfaces", () => {
     expect(isDirectDrive("tk-studio-playable-judge", { argv: ["lib/playable_judge.py", "prepare", "--media", "{sandbox}"] })).toBe(false);
     expect(isDirectDrive("tk-studio-playable-judge", { argv: ["lib/playable_judge.py", "verdict", "--media", "{sandbox}", "--answer", "{sandbox}/answer.json"] })).toBe(false);
   });
+
+  test("Story 34.4: gds-engine-godot-4's engine_pin.py check is its §2 core, not a direct drive", () => {
+    const check: Drive = { argv: ["lib/engine_pin.py", "check", "--directory", "{sandbox}"] };
+    expect(isDirectDrive("gds-engine-godot-4", check)).toBe(false);
+    expect(isDirectDrive("gds-engine-godot-4", { argv: ["lib/detect.py", "scan", "--directory", "{sandbox}"] })).toBe(true);
+    expect(translateDrive("gds-engine-godot-4", check, SANDBOX, PLUGIN)).toEqual({ directory: SANDBOX });
+  });
 });
 
 describe("plugin-relative --directory", () => {
