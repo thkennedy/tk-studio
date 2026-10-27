@@ -1,9 +1,10 @@
 ---
 id: TASK-144
 title: The CC0 Mirror and the Paid Rung Behind a Cap
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-27 04:08'
+updated_date: '2026-10-27 20:07'
 labels:
   - ST-144
 milestone: The Vertical-Slice Pack

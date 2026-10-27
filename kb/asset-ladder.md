@@ -267,4 +267,31 @@ Asked through the story's consult log, as for 34.6:
 6. Record here: the kit, the match, the coverage and fill the gate measured for the box and the non-box
    asset (and any retuned threshold), the Godot import, and for the optional call the credits Meshy charged.
 
-Status: **not yet run.**
+Status: **run on the box on 2026-10-27 (17:5xZ to 20:1xZ) by the operator session, with the fixture kit.** No
+CC0 kit was on the box and a web download is Tim's call (downloading the kits is the operator's step), so the
+mirror is `C:\agent-work\assets\fixture-crate`: the conformance fixture kit (`LICENSE.txt`,
+`Models/crateWooden.glb`, 936 bytes) plus a synthetic thin lamp post built in Blender for step 4
+(`Models/lampPost.glb`: a 0.1 m cylinder 2.8 m tall with a 0.3 m head, 56 triangles). `mirror-index --category prop`
+indexed both (`assets: 2`; tags `crate`/`models`/`wooden` and `lamp`/`models`/`post`). `TK_ASSETS_MIRROR` stays
+unset: the default folder resolved, which is how 34.8's host leg calls `match`.
+
+- The box asset, `storage-crate` (prop, box 0.6 × 0.6 × 0.6 m, budget 500, tags `wooden`, `crate`, rung cc0), on
+  the TUA scratch clone's trial manifest (`C:\agent-work\scratch\tua-playable`, branch `assets/greybox-trial`,
+  nothing committed): `greybox` wrote it in 2.6 s; `match` accepted it in 10.1 s (normalise and the two renders,
+  about 3.4 s each under Blender 5.2.2): the normalised candidate 12 triangles, bounds 0.6/0.6/0.6, min
+  (−0.3, 0, −0.3), max (0.3, 0.6, 0.3), origin `base-center`, UV, 1 material; **coverage 1.0, fill 0.1428**; the
+  placeholder replaced (1,868 bytes) and the manifest rewritten to `licence: cc0`, `status: accepted`,
+  `source: fixture-crate/Models/crateWooden.glb` with every other line's bytes kept. `check` after: `pass: 3`
+  (the two 34.6 entries and the crate). Godot 4.7.2 headless `--import` (the files copied under `game/` for the
+  test, as in 34.6) reimported `storage-crate.glb` clean in 4 s.
+- The non-box asset, `lamp-post` (prop, `collision: box` 0.4 × 3.0 × 0.4 m, budget 400, tags `lamp`, `post`):
+  `match` found `lampPost.glb` (score 2), normalised it (56 triangles, the bounds exact) and the visual gate
+  measured **coverage 0.2841, fill 0.012**: `candidate`, the placeholder's bytes kept, `status: candidate`, the
+  run `partial` (exit 1). The thin post scaled into its box greybox covers about the share of the box its
+  silhouette fills, as predicted above.
+- The retune: not done on two synthetic points. With the 0.6 floor only boxy replacements pass; a thin asset
+  lands near 0.28. The call for 34.8's planner (or the EP-34 retro): make the floor collision-aware (a non-box
+  replacement for a `collision: box` greybox judged on its fill against the greybox's, or a lower floor for that
+  pair) or per-entry (`visual: {coverage_min}` in the manifest), and measure again on a real kit (a Kenney lamp
+  post, chair and tree) once one is mirrored.
+- Step 5 (`generate`) was not run: no `assets.credit_cap` and no `TK_ASSETS_MESHY_KEY` on the box, by design.
