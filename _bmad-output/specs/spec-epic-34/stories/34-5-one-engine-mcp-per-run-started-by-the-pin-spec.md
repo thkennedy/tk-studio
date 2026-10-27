@@ -2,7 +2,7 @@
 title: 'One Engine MCP per Run, Started by the Pin'
 type: 'feature'
 created: '2026-10-27'
-status: 'blocked'
+status: ready-for-dev
 baseline_revision: '37b00618a4e71c69063c296054951b0660c42b38'
 review_loop_iteration: 0
 followup_review_recommended: true
@@ -237,87 +237,3 @@ DRIFT: the engine MCP server is spawned detached on every platform, win32 includ
 - 2026-10-27T12:54Z — trigger: high-severity-finding — question: the forwarder and bearer live in the one-shot drain process's module map, so a drain-launched run-epic run loses the forwarder at drain exit, and the next tick's `recoverEngineMcps` kills the server while the engine runs: A) a detached forwarder child, B) limit to in-process sessions, or C) escalate? — ruling: accept-deviation score 2 — do: take Option A, a detached forwarder child of `enginemcp.ts` (`bun src/enginemcp.ts forward`), with the bearer only in its spawn env (never argv, file, event or log), `{pid, start}` for both the server and the forwarder on `engine-mcp-start`, and a DRIFT against Settled shape 4; in `releasePin`/sweep and `recoverEngineMcps`, stop both recorded pids from any process without a `live` entry, where recovery skips a non-terminal run with `engine_run_id` set only while both pids are alive, and otherwise stops both and never re-arms; add `bun test` fakes (a drain-launched run survives drain exit, the next tick's recovery leaves it alone, a later tick's release stops both, no bearer in argv or events) and name the change in the contract sentence and runbook §4.8 — rule candidate: Plans never keep a resource that must outlive a drain-launched run (a listener, a child, a secret) in supervisor process memory or a module map; record it by {pid, start} on an event so any later tick process can stop it (tick and drain are separate one-shot processes, apps/supervisor/start.ps1:31)
 - 2026-10-27T13:19Z — trigger: halt (with the pass-2 deviation-gt-0 locals folded in) — question: HALT blocked for the operator's spike answer, or finish done with AC1 unverifiable-here; commit locally first; accept the pass-2 locals? — ruling: apply — do: HALT `blocked` awaiting the operator's spike answer (measurements, pick, seeds) in the Consult Log, leaving `game-godot.json` without `suggests_mcp` and every kb cell `not measured`; first make one local commit of the reviewed, green work (never push, tag or open a PR); accept the pass-2 deviations at story score 2, keeping the three DRIFT lines (the forwarder shape is the already-ruled score-2 seam; the rest are local, score 1) — rule candidate: When a story Block If names HALT blocked as its expected terminal state, it overrides the customization rule operator action -> unverifiable-here, do not HALT; commit the reviewed green work locally before that HALT
 
-## Auto Run Result
-
-Status: blocked
-Blocking condition: awaiting the operator's spike answer (the measurements against Godot 4.7.2 Mono, the pick, its `engine.mcp` line with the endpoint path and HTTP-on-loopback confirmation, and the seeds' run id) in this spec's `## Consult Log`. The request is the 2026-10-27 dev pass 1 entry, and the steps are in `kb/engine-mcp-godot.md` `## Measurement commands`. This is the spec's Block If and the invocation's "halt for them", confirmed by the consult (`halt`, ruling `apply`).
-
-Studio: activated as developer; working set bmm, tea, bmb, bmad-loop, gds; drift drift; fixes: nothing to do on a box with no engine sandbox; on the engine box set TK_SUPERVISOR_CONFIG to the supervisor config naming jobs.<project>/<job>.sandbox; routing implementer=claude-opus-5-5 reviewers=claude-opus-5-5 consult=claude-opus-5-5; knowledge spine absent
-
-**Summary.** Everything in Story 34.5 that does not depend on the pick is built, reviewed and green.
-- **Supervisor (`enginemcp.ts`):**
-  - For a run flagged `editor_in_the_loop` (the submission flag OR the new job-definition field), it reads `engine.mcp {name, start, port, path?}` and `.mcp.json` at the run's base and refuses with `engine-mcp:no-config`, `no-mcp-json`, `no-engine` or `start-failed`.
-  - It starts the server child in the worktree on `127.0.0.1:<port>`, with no shell.
-  - It fronts the server with a detached forwarder child on the tailnet-checked `TK_SUPERVISOR_BIND:TK_SUPERVISOR_ENGINE_MCP_PORT` (default 8788). The per-run bearer is checked with sha256 and `timingSafeEqual`, and is never in argv, an event, a log or a file.
-  - It passes `-e TK_ENGINE_MCP_URL -e TK_ENGINE_MCP_BEARER` to the sandbox by name.
-  - It stops both processes at `releasePin` from any process, a kept pin included. Recovery stops by recorded `{pid, start}` and never re-arms.
-- **Snapshot:** Story 22.3's `snapshotOnce` is reused unchanged.
-- **Plugin side:**
-  - The `editor_in_the_loop` boolean is a job-definition field.
-  - `detect.py` passes `suggests_mcp` through.
-  - `recommend.py propose` adds `kind: "mcp"` (`configured` or `not-configured`, never on an ask outcome, never writing).
-  - `recommend.py record --mcp <name>` is the only writer of `mcpServers.<name>` in `.mcp.json`: an atomic merge, idempotent, `--dry-run`, exit 2 on an unknown name or malformed JSON.
-- **Verify-only rule:** in the engine skill (and its :78 fix), and in runbook §4.8 with port 8788.
-- **Contract:** 0.1.29 is extended additively for 34.5.
-- **Spike record:** `kb/engine-mcp-godot.md` is a skeleton (rank 64). `beremaran/godot-agent-loop` is recorded `not available`, and every other cell reads `not measured`.
-
-**Files changed.**
-- `apps/supervisor/src/enginemcp.ts` (new): the config and `.mcp.json` read at base, the refusals, the bearer, the server and forwarder children, cross-process stop and recovery.
-- `apps/supervisor/test/enginemcp.test.ts` (new): start, stop, kept pin, no flag, each refusal, tailnet bind, port in use, a child exiting, restart recovery, a drain-launched run surviving, the snapshot, 200 and 401, and no bearer in argv or events.
-- `apps/supervisor/src/sandbox.ts`: `releasePin` stops this run's MCP.
-- `apps/supervisor/src/cli.ts`: the start beside `snapshotOnce` and in `queueRecorder.pin`; the definition flag at enqueue, with the `WorkDirMissing` refusal; recovery.
-- `apps/supervisor/src/server.ts`: the `-e` names, the spawn-env values, and `buildWorkerEnv` stripping `TK_ENGINE_MCP_*`.
-- `apps/supervisor/src/env.ts`: `TK_SUPERVISOR_ENGINE_MCP_PORT` (default 8788).
-- `apps/supervisor/test/sandbox.test.ts`, `apps/supervisor/test/tier.test.ts`: the release stop, the `-e` names and env, and the drained-run start and refusal.
-- `apps/supervisor/README.md`: the editor-in-the-loop section.
-- `plugins/tk-studio/contracts/job.schema.json`, `plugins/tk-studio/lib/job.py`, `plugins/tk-studio/lib/tests/test_job.py`: the `editor_in_the_loop` definition field.
-- `plugins/tk-studio/lib/recommend.py`, `plugins/tk-studio/lib/tests/test_recommend.py`: the `kind: "mcp"` proposal and `record --mcp`.
-- `plugins/tk-studio/lib/detect.py`, `plugins/tk-studio/lib/tests/test_detect.py`: the `suggests_mcp` passthrough.
-- `plugins/tk-studio/skills/gds-engine-godot-4/SKILL.md`: the verify-only rule, and the :78 rewrite.
-- `plugins/tk-studio/skills/tk-studio-onboard/SKILL.md`: the `record --mcp` step.
-- `plugins/tk-studio/contracts/driver-contract.md`, `plugins/tk-studio/lib/tests/test_driver_contract.py`: the 0.1.29 extension for 34.5, `test_0_1_29_story_34_5_engine_mcp`, and the 34.3 and 34.4 stories-line re-pins.
-- `kb/engine-mcp-godot.md` (new), `kb/index.md`: the spike skeleton and its index row.
-- `kb/agent-pc-setup-runbook.md`: the §4.2 port row and `### 4.8 The engine MCP`.
-- `plugins/tk-studio/skills/tk-studio-detect/profiles/game-godot.json`: **not touched**, because the ruling is absent.
-
-**Review.** Both layers ran (band L).
-- Patches: 12 (high 1, medium 7, low 4).
-- Deferred: 0.
-- Rejected: 0.
-- Consults: 3, on `deviation-gt-0`, `high-severity-finding` and `halt`.
-- Follow-up review recommended: true. A patched finding was high, and the score is 3×7 + 1×4 = 25.
-
-**Verification.**
-- From `plugins/tk-studio/lib`, `uv run python -m unittest discover tests`: `Ran 2227 tests`, OK (skipped=2).
-- From `plugins/tk-studio/lib`, `uv run python ../contracts/conformance/runner.py run`: `ok: True`, failures `[]`.
-- From `apps/supervisor` (`~/.bun/bin` on PATH), in a clean env (`TK_ATLASSIAN_*` unset, `TK_STUDIO_ROOT` set):
-  - `bun test`: 1585 pass, 6 skip, 0 fail.
-  - `bun node_modules/typescript/bin/tsc --noEmit`: exit 0.
-- Under the console's own env, 25 tests fail. The baseline `37b0061` fails a superset (26) under the same env.
-- No orphan forwarder or server process remained. Runs left no new `tk-sup-*` apart from the known `tk-sup-store-*` fixture, which was removed. 104 older leftovers predate this story.
-- I/O matrix audit: every row is covered by a test that ran.
-
-**unverifiable-here (operator, agent PC).**
-1. The spike: install `hi-godot/godot-ai` and `gdai-mcp-plugin-godot` against Godot 4.7.2 Mono and fill the table, by the steps in `kb/engine-mcp-godot.md` `## Measurement commands`.
-2. The pick is followed by the `suggests_mcp` profile line and the ruling (a re-drive of this story).
-3. File the seeds: `uv run plugins/tk-studio/lib/research.py seed --run-id <id> --file <seeds>`.
-4. A flagged TUA run whose dev session lists the MCP's tools through the forwarder (and no scene-edit tool), runs `run_project_tests`, and sees both processes stop at release.
-5. The sandbox reaches `TK_SUPERVISOR_BIND:8788` (sbx network policy).
-6. The detached server and forwarder outlive `drain` on win32.
-
-**Residual risks.**
-- A recorded start time that cannot be read (`start: null`) blocks a safe cross-process kill, so recovery keeps retrying.
-- Only one flagged run can hold port 8788 at a time; a second fails `start-failed`.
-- A host-tier flagged run starts no MCP.
-- Where the pick has no tool allowlist, the skill rule and the kb row are the whole enforcement of verify-only.
-- A drain-launched run's MCP survives the process-exit stand-in in tests, but not yet on the box.
-
-DRIFT: `engine.mcp` gains an optional `path` (default `/mcp`) — `TK_ENGINE_MCP_URL` needs the server's endpoint path — affects: 34-5 (the operator's TUA `engine.mcp` line)
-DRIFT: `engine-mcp-start.start` is the process start time, not the command line — pid-plus-start recovery as `hold` — affects: none
-DRIFT: a drained run's engine-mcp refusal ends the run `blocked` with the key in the reason, with no `claim-refused` event — the MCP starts after the claim — affects: none
-DRIFT: `buildWorkerEnv` strips inherited `TK_ENGINE_MCP_*` — no stray bearer on an unflagged run — affects: none
-DRIFT: the snapshot stays `<TK_SUPERVISOR_WORK>\snapshots\…` per operator-decisions §3, not `C:\agent-work\backups\…` — the recorded operator ruling, shipped by 22.3 — affects: none
-DRIFT: test_driver_contract 34.3 and 34.4 stories-line assertions re-pinned to include Story 34.5 — the stories row gains 34.5 — affects: none
-DRIFT: the engine MCP forwarder is a detached child process (`bun src/enginemcp.ts forward`), with the bearer only in its spawn env, and `engine-mcp-start` carries `forwarder_pid` and `forwarder_start` — tick and drain are separate one-shot processes (consult ruling 2) — affects: none
-DRIFT: the `.mcp.json` entry uses `${TK_ENGINE_MCP_URL:-}` and `Bearer ${TK_ENGINE_MCP_BEARER:-}` — an unset variable with no default fails the parse on unflagged sessions (plan Settled shape 2's fallback) — affects: none
-DRIFT: the engine MCP server is spawned detached on every platform, win32 included — it must outlive the drain process (unproven on the box) — affects: none
