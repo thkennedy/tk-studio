@@ -1,9 +1,10 @@
 ---
 id: TASK-141
 title: Engine Knowledge, Pinned per Project
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-27 04:08'
+updated_date: '2026-10-27 16:08'
 labels:
   - ST-141
 milestone: The Vertical-Slice Pack
