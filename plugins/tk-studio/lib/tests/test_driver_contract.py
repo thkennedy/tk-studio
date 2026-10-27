@@ -2087,7 +2087,8 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertIn("`planner`, `playable-verify`", legs)
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
-        self.assertIn("Story 34.1, Story 34.2, Story 34.3, Story 34.4, Story 34.5, Story 34.6 (Epic 34)",
+        self.assertIn("Story 34.1, Story 34.2, Story 34.3, Story 34.4, Story 34.5, Story 34.6, "
+                      "Story 34.7 (Epic 34)",
                       stories)
 
     def test_0_1_29_story_34_4_engine_skill(self):
@@ -2129,7 +2130,8 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertIn("`lib/engine_pin.py check`", row)
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
-        self.assertIn("Story 34.3, Story 34.4, Story 34.5, Story 34.6 (Epic 34)", stories)
+        self.assertIn("Story 34.3, Story 34.4, Story 34.5, Story 34.6, Story 34.7 (Epic 34)",
+                      stories)
 
     def test_0_1_29_story_34_5_engine_mcp(self):
         header = next(line for line in self.text.splitlines()
@@ -2177,7 +2179,7 @@ class DriverContractTestCase(unittest.TestCase):
             self.assertIn(phrase, sentence)
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
-        self.assertIn("Story 34.4, Story 34.5, Story 34.6 (Epic 34)", stories)
+        self.assertIn("Story 34.4, Story 34.5, Story 34.6, Story 34.7 (Epic 34)", stories)
 
     def test_0_1_29_story_34_6_asset_manifest(self):
         header = next(line for line in self.text.splitlines()
@@ -2237,7 +2239,87 @@ class DriverContractTestCase(unittest.TestCase):
             self.assertIn(phrase, section)
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
-        self.assertIn("Story 34.5, Story 34.6 (Epic 34)", stories)
+        self.assertIn("Story 34.5, Story 34.6, Story 34.7 (Epic 34)", stories)
+
+    def test_0_1_29_story_34_7_asset_ladder(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.29**", header)
+        self.assertNotIn("**0.1.30**", header)
+        self.assertEqual(header.count("Story 34.7, additive"), 1)
+        self.assertLess(header.index("Story 34.6, additive"),
+                        header.index("Story 34.7, additive"))
+        clause = " ".join(header[header.index("Story 34.7, additive"):].split())
+        for phrase in ("`lib/assets.py mirror-index\\|match\\|generate`",
+                       "`lib/blender/normalise.py`", "`lib/blender/render.py`",
+                       "`tags`, `prompt` and `camera`", "`TK_ASSETS_MIRROR`",
+                       "`assets.credit_cap`", "`TK_ASSETS_MESHY_KEY` by name",
+                       "the `asset-generation` taxonomy event", "node transforms in `facts`",
+                       "— additive) |"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        note = flat[flat.index("**0.1.29 (Story 34.1, additive).**"):]
+        note = note[:note.index("**The rules a consumer may rely on**")]
+        self.assertEqual(note.count("Story 34.7 adds the ladder's cc0 and generated rungs"), 1)
+        self.assertLess(note.index("Story 34.6 adds the asset manifest"),
+                        note.index("Story 34.7 adds the ladder's cc0 and generated rungs"))
+        sentence = note[note.index("Story 34.7 adds the ladder's cc0"):]
+        sentence = sentence[:sentence.index("Every other field, kind and route")]
+        for phrase in ("`lib/assets.py mirror-index|match|generate`", "(schema still 1)",
+                       "`TK_ASSETS_MIRROR`", "`.tk-studio/budget-bands.yaml`",
+                       "`assets.credit_cap`", "`TK_ASSETS_MESHY_KEY`",
+                       "`lib/blender/normalise.py`", "`lib/blender/render.py`",
+                       "`asset-generation`", "node transforms"):
+            self.assertIn(phrase, sentence)
+        start = self.text.index("## Asset manifest (0.1.29, Story 34.6)")
+        section = " ".join(self.text[start:self.text.index("## 8. Conformance")].split())
+        self.assertEqual(section.count("**The cc0 and generated rungs (0.1.29, Story 34.7, "
+                                       "additive).**"), 1)
+        ladder = section[section.index("**The cc0 and generated rungs"):]
+        for phrase in ("`tags`", "`[a-z0-9-]+`", "`prompt`", "`low poly game asset`",
+                       "`camera: {yaw, pitch}`", "`{yaw: 45, pitch: 30}`",
+                       "`<kit>/<path>`", "`meshy:<task id>`",
+                       "`mirror-index --kit <dir> --category <cat> [--licence cc0]`",
+                       "`{schema: 1, kit, licence, licence_file, assets: [{path, category, tags[]}]}`",
+                       "sorted by path", "`skipped`", "`LICENSE*`", "`--mirror`, else "
+                       "`TK_ASSETS_MIRROR`, else `C:\\agent-work\\assets`",
+                       "`skipped: no mirror`", "`run greybox first`", "`unmatched`",
+                       "then the kit name, then the path",
+                       "`generate --directory <project> --run-id <id>",
+                       "`assets: {credit_cap: <Meshy credits > 0>}`", "before any network call or write",
+                       "`HKCU\\Environment`", "per `generate` invocation",
+                       "at most once per run", "`not-run: credit cap`",
+                       "`{run_id, asset, provider: \"meshy\", task_id?, credits, estimated?, "
+                       "state: complete | failed, reason?}`",
+                       "`<blender> -b --python <plugin>/lib/blender/normalise.py -- --spec <json>`",
+                       "`{name, input, bounds, origin, tri_budget, output}`",
+                       "`<art_path>/.candidates/<name>.glb`",
+                       "`<blender> -b --python <plugin>/lib/blender/render.py -- --spec <json>`",
+                       "`{input, camera, bounds, size, output}`", "Workbench", "128x128",
+                       "`.candidates/<name>.greybox.png`", "`.candidates/<name>.render.png`",
+                       ">= 0.6", ">= 0.005", "`os.replace`", "the one sanctioned replace",
+                       "placeholder's bytes untouched", "`status: candidate`",
+                       "only the `status`, `licence` and `source` lines",
+                       "cannot map line by line", "TRS or `matrix`",
+                       "triangles count once per node instancing a mesh",
+                       "greybox output gives the same facts as before",
+                       "An explicit `--mirror` naming a missing folder is a refusal (exit 2)",
+                       "a missing `TK_ASSETS_MIRROR` folder, or a missing default folder, ends "
+                       "`complete` with each cc0 entry `skipped` and the reason given",
+                       "A Blender or normalise failure is action `failed`: the run ends "
+                       "`partial` (exit 1) and the entry's `status` is left unchanged",
+                       "the pre-check uses the estimate, so a call priced above the estimate "
+                       "can overshoot by at most one call",
+                       "ends action `failed` with `not placed: the manifest was not rewritten`",
+                       "A replace failure after the write-back rolls the entry's lines back"):
+            self.assertIn(phrase, ladder)
+        taxonomy = json.loads((PLUGIN_ROOT / "contracts" / "events" / "taxonomy.v1.json")
+                              .read_text(encoding="utf-8"))
+        self.assertEqual(taxonomy["taxonomy_version"], 1)
+        self.assertIn("lib/assets.py generate", taxonomy["events"]["asset-generation"]["emitter"])
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 34.6, Story 34.7 (Epic 34)", stories)
 
     # --- AC 2: A7 dossier items covered or explicitly deferred with a seam
 

@@ -478,3 +478,10 @@
 - What no longer holds: plan 34-6 Design Notes' `done | failed | blocked` value set, if 34.8's plan reads it from there.
 - Suggested adjustment: the host leg reads `check`/`greybox` results from status-block.schema.json values and exit codes 0/1/2 (2 is a refusal, not a red gate); the box's `BLENDER` user variable is set per the runbook; TUA's config carries `assets.art_path: art/world/greybox`.
 - Status: closed — applied to the unstarted 34-8 entry's invoke_dev_with by the 34-6 gate session (2026-10-27)
+
+## 34-8-the-run-vertical-slice-job-and-the-engagements-game-path — scope: stories — from 34-7-the-cc0-mirror-and-the-paid-rung-behind-a-cap — 2026-10-27
+
+- What changed: 34-7 shipped `assets.py mirror-index | match | generate`. If an explicit `--mirror` names a missing folder, `match` refuses (exit 2). If the `TK_ASSETS_MIRROR` or default folder is missing, or there is no mirror at all, it ends `complete` with cc0 entries `skipped`. A Blender or normalise failure gives action `failed` with exit 1 and leaves the entry `status` unchanged. An accepted row whose write-back fails ends `failed` ("not placed"), and a failed replace is rolled back. `generate`'s cap is per invocation, may overshoot by at most one call (the run ends `partial`), and is `not-run: ledger unwritable` after a ledger failure. Tag-token scoring is in driver-contract.md:1359-1361 and :1371-1376.
+- What no longer holds: an implicit reading of "`match` when the mirror exists" in which the host leg passes `--mirror` itself, or treats every exit 1 as a red gate.
+- Suggested adjustment: the host leg calls `match` without `--mirror` (the env or the default resolves it) and treats exit 1 with action `failed` as a tool fault, not a gate verdict. It calls `generate` at most once per run, only when the owner has set `assets.credit_cap` and `TK_ASSETS_MESHY_KEY`, and reads the driver-contract.md 34.7 paragraph (:1359-1361, :1371-1376) as the seam.
+- Status: closed — applied to the unstarted 34-8 entry's invoke_dev_with and to plans/34-8.md (Settled shape 5) by the 34-7 gate session (2026-10-27)

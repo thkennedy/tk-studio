@@ -95,6 +95,19 @@
         "detail": { "type": "string", "required": false }
       }
     },
+    "asset-generation": {
+      "emitter": "lib/assets.py generate alone (Story 34.7, the asset ladder's generated rung): one event per generator call, failed ones included, written through ledger.emit (AD-12); the generator's key never lands here",
+      "payload": {
+        "run_id": { "type": "string", "required": true, "note": "the run the call is charged to (generate --run-id)" },
+        "asset": { "type": "string", "required": true, "note": "the manifest entry's name" },
+        "provider": { "type": "string", "required": true, "enum": ["meshy"] },
+        "task_id": { "type": "string", "required": false, "note": "the provider's task id, when the submit returned one" },
+        "credits": { "type": "number", "required": true, "note": "the provider's reported charge when the response carries one, else the per-task estimate (MESHY_CREDITS_PER_TASK) with estimated: true" },
+        "estimated": { "type": "boolean", "required": false, "note": "true when credits is the per-task estimate" },
+        "state": { "type": "string", "required": true, "enum": ["complete", "failed"] },
+        "reason": { "type": "string", "required": false, "note": "why the call failed" }
+      }
+    },
     "report": {
       "emitter": "reporter (tk-studio-report — the human-authored defect verb)",
       "payload": {

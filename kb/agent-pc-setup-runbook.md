@@ -199,6 +199,31 @@ blender -b --version
 
 EEVEE has no headless mode on Windows; QA renders use Workbench or Cycles.
 
+**The asset mirror and the generated rung (Story 34.7).** The ladder's cc0
+rung (`assets.py match`) reads a mirror of CC0 kits on this box:
+`C:\agent-work\assets\<kit>` (one folder per Kenney, Quaternius or Poly
+Haven kit, each with its licence file), indexed with
+`assets.py mirror-index --kit <dir> --category <cat>`. The engine never
+downloads kits; mirroring them is the operator's step. Another root is set
+by name, as a User variable (read from `HKCU\Environment` like the Meshy
+key, so no new terminal is needed):
+
+```powershell
+[Environment]::SetEnvironmentVariable("TK_ASSETS_MIRROR", "C:\agent-work\assets", "User")
+```
+
+The generated rung (`assets.py generate`) is off by default. It turns on
+only when the project's `.tk-studio/budget-bands.yaml` sets
+`assets: {credit_cap: <Meshy credits>}` (per `generate` invocation) and the
+Meshy key exists as a User environment variable, never in a file:
+
+```powershell
+[Environment]::SetEnvironmentVariable("TK_ASSETS_MESHY_KEY", "<the Meshy API key>", "User")
+```
+
+The details, and the visual gate's thresholds, are in
+[kb/asset-ladder.md](asset-ladder.md).
+
 ## 3. Sign in as the studio account for everything below
 
 Hardened model: log off, log on as `agent`. Single-account box: stay signed

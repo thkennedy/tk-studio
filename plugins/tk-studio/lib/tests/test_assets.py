@@ -253,7 +253,7 @@ class ReaderTests(unittest.TestCase):
     def test_refuses_anything_outside_the_subset(self):
         for text, needle in (
                 ("schema: 1\nassets:\n  - name: a\n    bounds:\n      x: 1\n", "nested blocks"),
-                ("schema: 1\nassets: [a, b]\n", "flow lists"),
+                ("schema: 1\nassets: [a, {b: c}]\n", "flow lists"),
                 ("schema: 1\nassets:\n\t- name: a\n", "tab indentation"),
                 ("schema: 1\nschema: 1\n", "duplicate key schema"),
                 ("schema: 1\nassets:\n  - name: a\n    name: b\n", "duplicate key name"),
