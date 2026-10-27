@@ -1,9 +1,10 @@
 ---
 id: TASK-140
 title: The `playable-verify` Leg
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-27 04:08'
+updated_date: '2026-10-27 10:53'
 labels:
   - ST-140
 milestone: The Vertical-Slice Pack
