@@ -3278,6 +3278,10 @@ So that the engine can trust its own suite and an acceptance record names a tier
 **When** a project's command calls a bare `godot`, and when a sandbox-written test reaches the host
 **Then** the step's PATH holds a tk-studio shim named `godot` that execs `$env:GODOT` (or the leg refuses a bare `godot` with the reason; the planner picks and the runbook row says which; hole 78, DW-78), and the plugin's Windows notes for sandbox-written tests name case-folding file systems, PATHEXT, YAML backslashes, HKCU reads and append-mode handles (holes 74, 77, 82, 83) with one lib-suite example each that runs on Windows
 
+**Given** an engine job type (`run-epic`, `run-vertical-slice`, 35.7's `run-sweep`)
+**When** a project submits an instance of it with no per-job placement on the sandbox tier (hole 90: an unplaced `run-epic-35` claimed on the host tier and ran the launch skill as a host `claude -p` for five turns before blocking)
+**Then** the job type declares the tier it requires (`requires: {tier: sbx}` in `job.schema.json`, additive) and `submit` refuses a host placement for it with `placement:TierRequired` before any process starts; the contract (0.1.30, additive) and the runbook's planning checklist name the supervisor's per-job config entry
+
 ### Story 35.6: The Closeout Carries the Proof
 
 As the owner,
