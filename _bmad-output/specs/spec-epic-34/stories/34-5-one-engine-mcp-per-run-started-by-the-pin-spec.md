@@ -3,6 +3,7 @@ title: 'One Engine MCP per Run, Started by the Pin'
 type: 'feature'
 created: '2026-10-27'
 status: done
+reconcile_verdict: not-required
 baseline_revision: 'c5a212eb8f63d3a28c3e0a31e0c45926f8a33411'
 review_loop_iteration: 0
 followup_review_recommended: true
