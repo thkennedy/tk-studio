@@ -148,7 +148,7 @@
           "assertion": "headless-clean",
           "argv": ["contracts/conformance/e2e_asset_manifest.py"],
           "expect": "ok",
-          "note": "the Story 34.6 e2e drive: lib/assets.py check (an engine verify command; stdlib, no Blender) over contracts/conformance/fixtures/asset-manifest — the valid manifest (two entries, one in-budget .glb under the default art path art/greybox) to a complete status block with the present entry pass and its facts and the absent one missing, the invalid one (category: monster) to a blocked refusal naming the entry and the field"
+          "note": "the Story 34.6 e2e drive: lib/assets.py check (an engine verify command; stdlib, no Blender) over contracts/conformance/fixtures/asset-manifest — the valid manifest (two entries, one in-budget .glb under the default art path art/greybox) to a complete status block with the present entry pass and its facts and the absent one missing, the invalid one (category: monster) to a blocked refusal naming the entry and the field; and Story 34.7's ladder over fixtures/asset-manifest/ladder and kit/fixture-kit (copied to a temp folder; no Blender, no network): generate with no credit cap blocked naming assets.credit_cap, with a cap but no TK_ASSETS_MESHY_KEY blocked naming the variable, match with no mirror complete with the cc0 entry skipped, mirror-index over two copies of the kit the same index.json bytes"
         }
       ]
     },

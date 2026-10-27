@@ -20,11 +20,13 @@ An asset climbs three rungs, and a rung is only ever replaced by one that passes
 
 1. **greybox** (this story): a primitive sized to the bounds, the origin per the rule, a flat material in
    the category's colour with the name baked into a label texture. Always available, costs nothing.
-2. **cc0** (Story 34.7): a matched asset from a local mirror of CC0 kits, normalised through headless
-   Blender to the same bounds, origin and budget.
-3. **generated** (Story 34.7): a generator call, only when the owner paid for it on purpose (a credit cap).
+2. **cc0** (Story 34.7, `match`): a matched asset from the box's mirror of CC0 kits, normalised through
+   headless Blender to the same bounds, origin and budget.
+3. **generated** (Story 34.7, `generate`): a Meshy text-to-3D call, only when the owner paid for it on
+   purpose (a credit cap); off by default.
 
-`rung` is the rung the entry stands on; `status` is `placeholder` while the greybox is in place,
+`rung` is the rung the entry is assigned to; `status` says which file is in place (a `rung: cc0` entry
+with `status: placeholder` still stands on the greybox): `placeholder` while the greybox is in place,
 `candidate` once a later rung produced a replacement that has not passed both gates (the `facts` gate here
 and the visual gate of 34.7), `accepted` once it has. The placeholder stays in place until its
 replacement passes; nothing is ever removed for a candidate that failed.
@@ -38,6 +40,7 @@ replacement passes; nothing is ever removed for a candidate that failed.
 schema: 1
 categories:            # optional overrides of the default palette, "#rrggbb"
   prop: "#8a8a8a"
+camera: {yaw: 45, pitch: 30}   # optional (34.7): the visual gate's view in degrees, pitch in [-89, 89]
 assets:
   - name: crate-small  # [a-z0-9-]+, unique, the file stem
     category: prop     # prop | character | environment | vehicle | ui | fx
@@ -49,18 +52,22 @@ assets:
     rung: greybox         # greybox | cc0 | generated
     status: placeholder   # placeholder | candidate | accepted
     source: ""            # provenance for cc0 and generated; empty on greybox
+    tags: [wooden, box]   # optional (34.7): match tags for the cc0 rung, each [a-z0-9-]+; default []
+    prompt: "a small wooden crate"   # optional (34.7): read only on the generated rung
 ```
 
 The file of an entry is derived, never declared: `<art_path>/<name>.glb`, where the art path is the
 config's `assets.art_path` (default `art/greybox`; The Universe Awaits uses `art/world/greybox`, following
 its `art/ART-BIBLE.md`). The default colours are `prop #8a8a8a`, `character #d98c3f`, `environment
 #5b8c5a`, `vehicle #4a78b5`, `ui #c7b84a`, `fx #9a5bb5`; none is magenta, the judge's missing-texture
-signal. The reader is `assets.py`'s own, narrow on purpose: exactly this subset (a list of mappings and
-`{x:, y:, z:}` flow maps, which the studio's `miniyaml.py` refuses), and a refusal for anything else.
+signal. The reader is `assets.py`'s own, narrow on purpose: exactly this subset (a list of mappings, the
+`{x:, y:, z:}` and top-level `camera: {yaw:, pitch:}` flow maps, and `tags: [a, b]` flow lists of plain
+scalars, which the studio's `miniyaml.py` refuses), and a refusal for anything else.
 
 ## The verbs
 
-All three are `uv run plugins/tk-studio/lib/assets.py <verb>`, stdlib only, and end in the status block
+All six verbs (`check`, `greybox` and `facts` here; `mirror-index`, `match` and `generate` in the Story
+34.7 sections below) are `uv run plugins/tk-studio/lib/assets.py <verb>`, stdlib only, and end in the status block
 (`intent: assets`; exit 0 ok, 1 gate red or a Blender failure, 2 refusal):
 
 - `check --directory <project>`: validates the manifest (a refusal names the entry and the field) and
@@ -85,6 +92,106 @@ All three are `uv run plugins/tk-studio/lib/assets.py <verb>`, stdlib only, and 
 The greybox primitive follows `collision`: `box`, `none` and `mesh` give a cube (12 triangles; a greybox
 never carries a mesh collider), `sphere` a UV sphere and `capsule` a capsule whose segments are reduced
 until they fit `tri_budget`.
+
+## The CC0 mirror and `match` (Story 34.7)
+
+The mirror is a folder on the box, never project layout: `--mirror`, else the `TK_ASSETS_MIRROR` user
+variable (read like the key: `HKCU\Environment`, then the process env, so a User variable set below is
+seen without a new terminal), else `C:\agent-work\assets` when it exists. It holds one folder per kit (`kenney-<kit>`,
+`quaternius-<kit>`, `polyhaven-<kit>`), each with the kit's licence file at the kit root (`LICENSE*` or `LICENCE*` in any case, or a
+`*license*.txt` or `*licence*.txt`) and the `index.json` that
+`uv run plugins/tk-studio/lib/assets.py mirror-index --kit <dir> --category <cat> [--licence cc0]` writes
+(`{schema: 1, kit, licence, licence_file, assets: [{path, category, tags[]}]}`, sorted by path, the same
+kit giving the same bytes). An index `path` that is absolute or has a `..` segment is a refusal naming
+the kit and the path, as is one with a backslash (not a posix path: run `mirror-index` on the kit). The
+`.glb`, `.gltf`, `.fbx` and `.obj` files are indexed; their tags are the
+lowercase tokens of the path's folders and stem (camelCase split, digits dropped). `.blend` files are not
+indexed, only counted in the result's `skipped`. A kit without a licence file is refused. Downloading the
+kits is the operator's step; the engine never downloads.
+
+```powershell
+[Environment]::SetEnvironmentVariable("TK_ASSETS_MIRROR", "C:\agent-work\assets", "User")
+uv run plugins/tk-studio/lib/assets.py mirror-index --kit C:\agent-work\assets\kenney-<kit> --category prop
+```
+
+`match --directory <project>` takes every entry with `rung: cc0` and `status: placeholder | candidate`.
+An entry may carry `tags: [wooden, box]`; a kit asset of the same category scores the size of
+`(tag tokens ∪ name tokens) ∩ asset tags`, at least 1 (each tag tokenised as the index's tags are:
+`street-lamp` is `street` and `lamp`, `barrel2` is `barrel`), ties to the higher score, then the kit name, then the
+path. No mirror: the run is `complete`, every cc0 entry `skipped: no mirror`. An explicit `--mirror` naming
+a missing folder is a refusal (exit 2). A missing `TK_ASSETS_MIRROR` folder, or a missing default folder,
+ends `complete` with each cc0 entry `skipped` and the reason given. No greybox `.glb`: skipped,
+`run greybox first`. No match: `unmatched`, the placeholder kept (not a failure). A stale greybox label
+fails the entry as `greybox` does.
+
+## The gates and the placement (Story 34.7)
+
+Both later rungs normalise the replacement through
+`<blender> -b --python plugins/tk-studio/lib/blender/normalise.py -- --spec <json>` (import by extension,
+every transform applied, one mesh, decimated to `tri_budget`, scaled to the bounds, the origin per the rule,
+exported with greybox's options) to `<art_path>/.candidates/<name>.glb` (a dot folder, so Godot skips it).
+The `facts` gate runs on it, then the visual gate: `lib/blender/render.py` renders the greybox and the
+candidate with Workbench (flat, one colour, transparent film, 128x128, orthographic, the manifest's
+`camera: {yaw, pitch}`, default `{yaw: 45, pitch: 30}`, framed on the entry's bounds) to
+`.candidates/<name>.greybox.png` and `.candidates/<name>.render.png`.
+
+| Visual gate | Threshold | Constant |
+| --- | --- | --- |
+| coverage: the share of the greybox's silhouette G the candidate's C covers (C ∩ G over G) | at least 0.6 | `VISUAL_COVERAGE_MIN` |
+| fill: the candidate's silhouette over the 128² frame (not a blank render) | at least 0.005 | `VISUAL_FILL_MIN` |
+
+The silhouettes are the renders' alpha > 0; a render without an alpha channel has none and fails the gate.
+
+The thresholds are planner defaults, not yet measured; the operator's box run retunes them here.
+Since `normalise.py` scales every candidate to the entry's bounds, the coverage of a thin or non-box asset
+(a lamp post, a chair, a tree) against a `collision: box` greybox is roughly its fill of that box, so
+such an asset can sit well below 0.6 and stay `candidate`.
+
+Only when both gates pass, and only after the manifest write-back lands, does the candidate replace
+`<art_path>/<name>.glb` (`os.replace`); a write-back that fails leaves every placeholder untouched and
+every candidate in `.candidates/` (those entries `failed`, the run `partial`).
+An accepted row whose manifest write-back fails ends action `failed` with `not placed: the manifest was not rewritten`. A replace failure after the write-back rolls the entry's lines back: a compensating write-back returns its `status`, `licence` and `source` lines to their prior bytes (an inserted `source` line removed), the candidate stays in `.candidates/`, the row is `failed` and the run `partial`; a compensating write that fails is added to the row's reason.
+Otherwise the entry
+becomes `status: accepted` with `licence: cc0` and `source: <kit>/<path>` (or `licence: generated`,
+`source: meshy:<task id>`). A failed gate keeps the placeholder's bytes, sets `status: candidate` and
+lists the reasons. A Blender or normalise failure is action `failed`: the run ends `partial` (exit 1)
+and the entry's `status` is left unchanged. The verbs rewrite only those `status`, `licence` and `source` lines; the rest of the
+manifest keeps its bytes. `facts` reads node transforms (DW-74), so a kit file's scaled or instanced nodes
+are judged in world space.
+
+## The generated rung (Story 34.7): off until the owner turns it on
+
+`generate --directory <project> --run-id <id>` takes every entry with `rung: generated` and `status:
+placeholder | candidate`; the entry's `prompt` (default the name's words, the category, `low poly game
+asset`) goes to Meshy's text-to-3D preview, the mesh is generated in the provider's cloud (nothing
+generates on the host), downloaded, then normalised and gated as above. It is off by default. To turn it
+on, the owner sets both:
+
+1. the cap, in Meshy credits, in the project's `.tk-studio/budget-bands.yaml`:
+
+   ```yaml
+   assets:
+     credit_cap: 100   # per generate invocation; the 34.8 host leg calls generate at most once per run
+   ```
+
+2. the key, as a User environment variable by name, never in a file:
+
+   ```powershell
+   [Environment]::SetEnvironmentVariable("TK_ASSETS_MESHY_KEY", "<the Meshy API key>", "User")
+   ```
+
+Without the cap `generate` refuses naming `assets.credit_cap`; without the key it refuses naming
+`TK_ASSETS_MESHY_KEY`; both before any call or write. Before each call, when the credits spent plus the
+per-task charge (`MESHY_CREDITS_PER_TASK`, 20) would pass the cap, that entry and every later one is
+`not-run: credit cap`. Once a provider has reported a charge above the estimate, the check uses the highest
+charge reported in the invocation instead; a reported charge counts only when it is a number > 0, else
+the estimate is recorded with `estimated: true`. After a call leaves the credits spent at or over the cap,
+every later entry is `not-run: credit cap`; the pre-check uses the estimate, so a call priced above the
+estimate can overshoot by at most one call, and when it does the run ends `partial` with a reason naming the
+overshoot. Every call, failed ones included, is one `asset-generation` line in the ledger
+(`{run_id, asset, provider, task_id?, credits, estimated?, state, reason?}`); a line that does not land
+ends the run `partial` naming the entry, and every later entry is `not-run: ledger unwritable`, with no
+further call. The key never appears in output, a file, the ledger or argv.
 
 ## The Blender pin and determinism
 
@@ -144,3 +251,20 @@ budget 500) and `student-stand-in` (character, capsule, 0.5 × 1.7 × 0.3 m, bud
   them after. A slice that loads greyboxes in the game promotes them into the content folder the E9 stories
   own (the manifest's `art_path` stays the working area), and the importer's sidecars land there — four
   files per asset.
+
+## The operator's box step for Story 34.7 (unverifiable in the sandbox)
+
+Asked through the story's consult log, as for 34.6:
+
+1. Mirror one Kenney kit under `C:\agent-work\assets\kenney-<kit>` (with its licence file) and run
+   `assets.py mirror-index` on it.
+2. On a TUA scratch clone with one cc0 entry, run `assets.py greybox`, then `assets.py match`.
+3. `& $env:GODOT --headless --import`, then `assets.py check`: green.
+4. Run `match` on at least one non-box asset too (a thin one, such as a lamp post, against its
+   `collision: box` greybox) and note its measured coverage and fill beside the box asset's, so the
+   retune of the thresholds above is informed by both.
+5. Optional, only with a cap and the key set: one `generate` call, its ledger line read back.
+6. Record here: the kit, the match, the coverage and fill the gate measured for the box and the non-box
+   asset (and any retuned threshold), the Godot import, and for the optional call the credits Meshy charged.
+
+Status: **not yet run.**

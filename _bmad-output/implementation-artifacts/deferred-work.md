@@ -575,3 +575,11 @@ location: plugins/tk-studio/lib/assets.py (facts_of)
 severity: medium
 reason: Edge and blind layers: a .glb with a scaled, offset or instanced node gets wrong bounds, origin and triangle facts, so the gate judges cc0 and generated rung files wrongly. Greybox output (identity transforms) is unaffected. Plan 34-6 §7 chose accessor min/max; deferral category (a), behaviour AC2 names (facts bounds from the glTF), needed before 34.7 gates third-party files.
 status: open
+
+### DW-75: Follow-up review still recommended for 34-7-the-cc0-mirror-and-the-paid-rung-behind-a-cap after the damping cap was spent
+origin: review-budget-followup
+source_spec: `34-7-the-cc0-mirror-and-the-paid-rung-behind-a-cap-spec.md`
+location: n/a
+severity: low
+reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261027-160949-d39b; this entry preserves the lingering recommendation for a deliberate later review.
+status: open

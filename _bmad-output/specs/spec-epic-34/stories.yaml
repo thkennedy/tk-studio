@@ -275,3 +275,10 @@
     `greybox` finds Blender through `--blender`, else `BLENDER`, else `blender` on PATH,
     bounded by `--wall` (default 600 s); the art path is config `assets.art_path`
     (TUA: `art/world/greybox`).
+    Gate note (from 34-7, 2026-10-27): the host leg calls `assets.py match` without
+    `--mirror` (the env or the default resolves it; an explicit missing `--mirror` is a
+    refusal, exit 2; no mirror ends `complete` with cc0 entries `skipped`); exit 1 with
+    action `failed` is a tool fault, not a gate verdict; `generate`'s cap is per
+    invocation, so the host leg calls it at most once per run (the plan rules zero
+    calls); the seam is driver-contract.md's 34.7 paragraph (:1355-1376). Oversize: the
+    plan sizes this story past band L. Halt if the Files list in plans/34-8.md grows.

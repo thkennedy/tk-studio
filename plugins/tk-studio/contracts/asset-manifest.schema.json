@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "tk-studio/contracts/asset-manifest/v1",
   "title": "tk-studio asset manifest",
-  "description": "Every asset a slice needs, declared once (Story 34.6, contract 0.1.29). The file lives at the project config's assets.manifest (default assets/manifest.yaml); each entry's file is derived, never declared: <assets.art_path>/<name>.glb (default art path art/greybox). `lib/assets.py check` validates it (names unique; tri_budget at least 12, a greybox cube) and gates every present file with `facts`; `lib/assets.py greybox` writes the greybox of every entry without one.",
+  "description": "Every asset a slice needs, declared once (Story 34.6, contract 0.1.29). The file lives at the project config's assets.manifest (default assets/manifest.yaml); each entry's file is derived, never declared: <assets.art_path>/<name>.glb (default art path art/greybox). `lib/assets.py check` validates it (names unique; tri_budget at least 12, a greybox cube) and gates every present file with `facts`; `lib/assets.py greybox` writes the greybox of every entry without one; `lib/assets.py match` and `generate` (Story 34.7) replace a placeholder on the cc0 and generated rungs once the facts gate and the visual gate pass.",
   "type": "object",
   "required": ["schema", "assets"],
   "additionalProperties": false,
@@ -17,6 +17,15 @@
     "assets": {
       "type": "array",
       "items": { "$ref": "#/$defs/asset" }
+    },
+    "camera": {
+      "description": "The visual gate's camera (Story 34.7): yaw and pitch in degrees for the Workbench renders of the greybox and its replacement; default {yaw: 45, pitch: 30}.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "yaw": { "type": "number" },
+        "pitch": { "type": "number", "minimum": -89, "maximum": 89 }
+      }
     }
   },
   "$defs": {
@@ -51,7 +60,7 @@
         "collision": { "enum": ["none", "box", "capsule", "sphere", "mesh"] },
         "licence": { "enum": ["greybox", "cc0", "cc-by", "generated", "proprietary"] },
         "rung": {
-          "description": "The rung the entry stands on now.",
+          "description": "The rung the entry is assigned to; status says which file is in place (a cc0 entry with status placeholder still stands on the greybox).",
           "enum": ["greybox", "cc0", "generated"]
         },
         "status": {
@@ -59,8 +68,18 @@
           "enum": ["placeholder", "candidate", "accepted"]
         },
         "source": {
-          "description": "Provenance for the cc0 and generated rungs (Story 34.7); empty on greybox.",
+          "description": "Provenance for the cc0 and generated rungs (Story 34.7): `<kit>/<path relative to the kit root, forward slashes>` on cc0, `meshy:<task id>` on generated; empty on greybox. Written by `match`/`generate` when the replacement is accepted.",
           "type": "string"
+        },
+        "tags": {
+          "description": "Match tags for the cc0 rung (Story 34.7), a flow list [a, b]; default [].",
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z0-9-]+$" }
+        },
+        "prompt": {
+          "description": "The generator's prompt, read only on the generated rung (Story 34.7); default the name's words, then the category, then `low poly game asset`.",
+          "type": "string",
+          "minLength": 1
         }
       }
     }
