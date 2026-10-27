@@ -2,8 +2,8 @@
 title: 'One Engine MCP per Run, Started by the Pin'
 type: 'feature'
 created: '2026-10-27'
-status: ready-for-dev
-baseline_revision: '37b00618a4e71c69063c296054951b0660c42b38'
+status: done
+baseline_revision: 'c5a212eb8f63d3a28c3e0a31e0c45926f8a33411'
 review_loop_iteration: 0
 followup_review_recommended: true
 deviation_score: 2
@@ -139,6 +139,8 @@ Key seams, a summary of the plan:
 
 ## Spec Change Log
 
+- 2026-10-27, re-drive (pass 3): the operator session's spike answer is in `## Consult Log` (restored verbatim from commit `ee89a42`, where it sat below the pass-2 `## Auto Run Result` that the loop's amend `c5a212e` removed). The first Block If is therefore met. Per plan §Files 17 and Settled shape 5, this pass lands what waited on the ruling (the `game-godot.json` profile line, the kb record and seeds per the answer's items 1 and 4) and fits the pin to the answer's measured launch shape (item 2) and allowlist (item 3). Pass 1 and 2 work stays as committed in `60cbc36`.
+
 ## Review Triage Log
 
 ### 2026-10-27 — Review pass
@@ -162,6 +164,23 @@ Both layers ran (band L): blind-hunter (10 findings) and edge-case-hunter (5). A
   - `[low]` `[patch]` `record --role … --mcp` could half-write. The MCP is now validated before either write.
   - `[low]` `[patch]` The contract sentence lacked `path` (consult ruling 1). Now added to the contract and runbook §4.8, and pinned in the test.
 - Verification after the patches: the lib suite is 2227 OK (skipped 2) and conformance is `ok: true`. `bun test` in a clean env gives 1585 pass, 6 skip, 0 fail, and `tsc` exits 0. No orphan forwarder or server remains, and the one known `tk-sup-store-*` fixture leftover was removed.
+
+### 2026-10-27 — Review pass (pass 3 re-drive)
+Both layers ran (band L): blind-hunter (7 findings) and edge-case-hunter (1). After dedup there were 7.
+- intent_gap: 0
+- bad_spec: 0
+- patch: 6 (high 0, medium 2, low 4)
+- defer: 0
+- reject: 1 (low 1)
+- addressed_findings:
+  - `[medium]` `[patch]` An editor that spawned with a pid but exited before the forwarder was ready still returned `started: true`, so the flagged run went on with no MCP and was never blocked (both layers). The start now stops all three children in order and refuses `engine-mcp:start-failed` ("the editor exited before the MCP was ready"), with a test.
+  - `[medium]` `[patch]` The start returns before the editor's add-on adopts the server (about 25 s, `EDITOR_NOT_READY`). The engine skill's verify-only section and runbook §4.8 now name the window and the retry through `editor_state`. There is no readiness poll.
+  - `[low]` `[patch]` The server's `--ws-port` is not pre-checked, and an operator-opened editor with the godot-ai add-on holds 8000/9500. Runbook §4.8 now says so: close that editor first.
+  - `[low]` `[patch]` The in-process stop order (editor before server, per the contract sentence) was not asserted. A new test logs the kills.
+  - `[low]` `[patch]` Stale "both pids" wording, at runbook §4.8 `recover` and the `enginemcp.ts` recovery comment, now reads all three.
+  - `[low]` `[patch]` The drain-launched test's argv-secret check left out the editor pid and the capability and WebSocket token. It now covers all three pids and all three secrets.
+- rejected: the editor writes Godot's cache and sidecars into the run's worktree. The 34.1 engine gate already runs Godot on the worktree, the project's `.gitignore` governs the cache, and no criterion names it.
+- Verification after the patches: lib 2227 OK (skipped 2); conformance `ok: true`; `bun test` 1591 pass, 6 skip, 0 fail; `tsc --noEmit` exit 0. One orphan fake `mcp-server.js` (pid 310602, started 13:44:55 during the patch implementer's own runs) was stopped by pid. The orchestrator's full run left no process and only the known `tk-sup-store-*` fixture, which was removed.
 
 ## Design Notes
 
@@ -224,6 +243,33 @@ DRIFT: the engine MCP forwarder is a detached child process (`bun src/enginemcp.
 DRIFT: the `.mcp.json` entry uses `${TK_ENGINE_MCP_URL:-}` and `Bearer ${TK_ENGINE_MCP_BEARER:-}` — an unset variable with no default fails the parse on unflagged sessions (plan Settled shape 2's fallback) — affects: none
 DRIFT: the engine MCP server is spawned detached on every platform, win32 included — it must outlive the drain process (unproven on the box) — affects: none
 
+### pass 3 (2026-10-27, implementer, re-drive on the operator's answer)
+
+DEVIATIONS (as reported):
+- planned: `engine-mcp-start {name, pid, start, url}` / `engine-mcp-stop {name, pid, why}` (and pass 2's forwarder fields) / actual: added `editor_pid` and `editor_start` on start and `editor_pid` on stop; recovery's "still running" check includes the editor / why: the operator's measured launch shape (consult item 2) needs the editor as a third host process / may affect: none
+- planned: Settled shape 4: the forwarder proxies requests and drops the bearer upstream; the server's env is the worker env plus `GODOT` / actual: the server and editor env also get per-run `GODOT_AI_HTTP_CAPABILITY`, `GODOT_AI_WS_TOKEN` and `GODOT_AI_DISABLE_TELEMETRY=1`; the forwarder replaces the bearer with `Bearer <capability>` (new env `TK_ENGINE_MCP_FORWARD_UPSTREAM_BEARER`); the godot-ai env names are fixed in the supervisor / why: godot-ai answers 401 `TRANSPORT_AUTH_REQUIRED` without its capability (consult item 2) / may affect: none
+- planned: `engine-mcp:start-failed` covers the bind, the port, a child exit, a timeout and the forwarder bind / actual: it also covers no `project.godot` in the worktree (checked before any spawn) and the editor failing to spawn; new test hook `EngineMcpDeps.spawnEditor` / why: the editor needs the project folder for `--path` / may affect: none
+- planned: the stop kills the forwarder and server in parallel; a recorded stop kills the server, then the forwarder / actual: in-process the forwarder, editor, then server, one after another; recorded stops kill the editor, server, then forwarder / why: the measured stop is editor before server / may affect: none
+- planned: the end-to-end drain test checks `snapshot-skipped` / actual: the project now has `game/project.godot`, a fake `robocopy` is put on PATH, and the test checks `snapshot` / why: the editor needs a Godot project, which makes Story 22.3's snapshot run / may affect: none
+- planned: `test_shipped_profiles_propose_no_mcp` / actual: replaced by `test_shipped_profiles_propose_the_ruled_pick` / why: the ruling now exists and the profile names `godot-ai` / may affect: none
+- planned: AC1: the research ledger gets the seeds / actual: no seeds written; the kb Seeds section stays the operator's to file with `research.py seed` / why: operator ruling 3b in the consult log / may affect: none
+
+DEVIATION SCORE: 2
+
+DRIFT: the engine MCP start launches the Godot editor as a third detached host process (`$GODOT --editor --path <project.godot folder>`), with `editor_pid`/`editor_start` on `engine-mcp-start` and `editor_pid` on `engine-mcp-stop`, stopped editor before server — the operator's measured launch shape (answer item 2) — affects: none
+DRIFT: the supervisor mints per-run `GODOT_AI_HTTP_CAPABILITY` and `GODOT_AI_WS_TOKEN` into the server and editor env (with `GODOT_AI_DISABLE_TELEMETRY=1`), and the forwarder swaps the sandbox bearer for `Bearer <capability>` upstream (spawn env `TK_ENGINE_MCP_FORWARD_UPSTREAM_BEARER`); the names are godot-ai's, fixed in the supervisor — godot-ai answers 401 without its capability (answer item 2) — affects: none
+DRIFT: `engine-mcp:start-failed` also covers a worktree with no `project.godot` and an editor that fails to spawn — the editor needs `--path` — affects: none
+DRIFT: AC1's seeds are not filed; `## Seeds` stays the operator's to write with `research.py seed` — operator ruling 3b — affects: none
+
+### pass 4 (2026-10-27, implementer, review patches)
+
+DEVIATIONS (as reported):
+- planned: the new tests for the early-exiting editor and the in-process stop order use the existing `fakeBin` children started by the module's default spawn / actual: they use a test helper (`loggedChild`) that starts the children itself and logs each kill, plus a pure fake for the early-exiting editor / why: the default spawn functions are not exported and the forwarder cannot be swapped out, so this is the only way to observe kill order; a pure fake makes the early exit deterministic / may affect: none (these test children are not detached, unlike production)
+
+DEVIATION SCORE: 1 (story score stays 2)
+
+DRIFT: the early-exit and stop-order tests use a test-owned `loggedChild` helper and a pure editor fake instead of the module's default spawn — the default spawns are not exported and kill order is otherwise unobservable — affects: none
+
 ## Consult Log
 
 - **2026-10-27, dev pass 1: request to the operator session (Block If: the spike answer is absent).** The pick-agnostic code, the fixture-profile tests and the kb skeleton are built; `game-godot.json` carries no `suggests_mcp`. Asked of the operator session on TIM-PC-2, against Godot 4.7.2 Mono in a scratch clone of TUA, by the steps in `kb/engine-mcp-godot.md` `## Measurement commands`:
@@ -237,3 +283,94 @@ DRIFT: the engine MCP server is spawned detached on every platform, win32 includ
 - 2026-10-27T12:54Z — trigger: high-severity-finding — question: the forwarder and bearer live in the one-shot drain process's module map, so a drain-launched run-epic run loses the forwarder at drain exit, and the next tick's `recoverEngineMcps` kills the server while the engine runs: A) a detached forwarder child, B) limit to in-process sessions, or C) escalate? — ruling: accept-deviation score 2 — do: take Option A, a detached forwarder child of `enginemcp.ts` (`bun src/enginemcp.ts forward`), with the bearer only in its spawn env (never argv, file, event or log), `{pid, start}` for both the server and the forwarder on `engine-mcp-start`, and a DRIFT against Settled shape 4; in `releasePin`/sweep and `recoverEngineMcps`, stop both recorded pids from any process without a `live` entry, where recovery skips a non-terminal run with `engine_run_id` set only while both pids are alive, and otherwise stops both and never re-arms; add `bun test` fakes (a drain-launched run survives drain exit, the next tick's recovery leaves it alone, a later tick's release stops both, no bearer in argv or events) and name the change in the contract sentence and runbook §4.8 — rule candidate: Plans never keep a resource that must outlive a drain-launched run (a listener, a child, a secret) in supervisor process memory or a module map; record it by {pid, start} on an event so any later tick process can stop it (tick and drain are separate one-shot processes, apps/supervisor/start.ps1:31)
 - 2026-10-27T13:19Z — trigger: halt (with the pass-2 deviation-gt-0 locals folded in) — question: HALT blocked for the operator's spike answer, or finish done with AC1 unverifiable-here; commit locally first; accept the pass-2 locals? — ruling: apply — do: HALT `blocked` awaiting the operator's spike answer (measurements, pick, seeds) in the Consult Log, leaving `game-godot.json` without `suggests_mcp` and every kb cell `not measured`; first make one local commit of the reviewed, green work (never push, tag or open a PR); accept the pass-2 deviations at story score 2, keeping the three DRIFT lines (the forwarder shape is the already-ruled score-2 seam; the rest are local, score 1) — rule candidate: When a story Block If names HALT blocked as its expected terminal state, it overrides the customization rule operator action -> unverifiable-here, do not HALT; commit the reviewed green work locally before that HALT
 
+- **2026-10-27T13:2xZ, the operator session's answer (TIM-PC-2, the RDP session, Godot 4.7.2 Mono, the TUA scratch clone; raw notes `C:\agent-work\scratch\mcp-trial\godot-ai-measurements.md`).**
+  1. **The table is filled in `kb/engine-mcp-godot.md`** (this commit). `hi-godot/godot-ai` v4.3.1 installed and ran: the release zip extracted to `game/addons/godot_ai/` and enabled in `project.godot`; the add-on starts the PyPI server `godot-ai==4.3.1` through `uvx` and connects over WebSocket in about 25 s; 47 tools; `test_run` covers GDScript suites under `res://tests/` only (on TUA: `No test suites found`, 155 ms — the engine gate stays the test runner); no `verify_project`, but `project_run` had the game live in 4.8 s, `editor_state` 46 to 155 ms, `logs_read source=game` returns the game's lines; `editor_screenshot source=game` returned a 640×360 PNG of the running game in 250 ms; Windows 11 without WSL; MIT; v4.3.1 of 2026-10-24. `gdai-mcp-plugin-godot` is a closed product distributed from gdaimcp.com (the GitHub repository holds a demo and a version file, 0.3.3; no licence file, no releases): not installed. `tugcantopaloglu/godot-mcp` (MIT, v3.1.0, "tested with Godot 4.7", C#-aware) joins the table as an operator-added, read-only row: the live open alternative, not installed.
+  2. **The pick: `hi-godot/godot-ai`.** It speaks streamable-HTTP on loopback: endpoint `/mcp` (so `engine.mcp.path` keeps its default), but every request needs `Authorization: Bearer <capability>`: without one the server answers `401 {"error":{"code":"TRANSPORT_AUTH_REQUIRED"}}`. The capability is the `http` token of the record the server publishes at `%LOCALAPPDATA%\godot-ai\capabilities\http-<port>.json` (`{version, http, websocket, instance_nonce}`), and the supervisor can **supply** it at launch: `GODOT_AI_HTTP_CAPABILITY=<urlsafe token, 32 to 128 chars>` and `GODOT_AI_WS_TOKEN=<64 hex>` (both or neither) in the server's environment; proven with `initialize` → `200` and `tools/list` over plain HTTP with that bearer. The measured shape for the pin, in this order:
+     - start the server: `uvx --from godot-ai==4.3.1 godot-ai --transport streamable-http --port <port> --ws-port <port+1500> --exclude-domains <csv>` with `GODOT_AI_HTTP_CAPABILITY`, `GODOT_AI_WS_TOKEN` and `GODOT_AI_DISABLE_TELEMETRY=1` in its environment (telemetry is on by default), cwd the project;
+     - start the editor on the project (`$GODOT --editor --path <godot dir>`): its add-on (enabled in `project.godot`) adopts the running server (`MCP | adopted external server … authenticated with server`) and the tools go live; without the editor the server answers but every editor tool reports `EDITOR_NOT_READY`;
+     - the forwarder adds the bearer to each request; stop = end the editor, then the server (`--owner-pid` is for the add-on-launched case; a supervisor-managed server is simply killed; nothing listens afterwards).
+     TUA's line: `engine: {mcp: {name: "godot-ai", start: "uvx --from godot-ai==4.3.1 godot-ai --transport streamable-http --port 8000 --ws-port 9500 --exclude-domains scene,node,script,filesystem,resource,animation,material,particle,camera,audio,tilemap,tileset,gridmap,navigation,csg,ui,theme,signal,autoload,input_map,api,client,custom,batch", port: 8000}}` (the default port 8000 is free on the box; `path` default `/mcp`). The add-on under `game/addons/godot_ai/` and the `[editor_plugins]` line are a TUA PR of the operator's once the story lands (they are untracked in the scratch clone today).
+  3. **The allowlist for the verify-only rule:** `--exclude-domains` is the server's own allowlist (also accepted by the attach bridge). With the 22 editing domains and `batch` excluded, the server lists the read-and-run set: `editor_state`, `scene_get_hierarchy`, `node_get_properties`, `project_run`, `project_manage` (stop), `game_manage` (runtime inspection and input), `test_run`, `test_manage`, `logs_read`, `editor_screenshot`, `editor_reload_plugin`, `editor_manage`, `session_activate`, `session_manage` (14 tools; measured 10 when `editor` is excluded as well, which also removes `logs_read` and `editor_screenshot`, so `editor` stays in). No scene, node, script, resource or filesystem tool reaches the dev session.
+  4. **Seeds:** the ruling is 3b — `## Seeds` stays the operator's to write; the operator files them with `research.py seed` against the next ecosystem-watch run (none ran today), one anchor per claim as the record says.
+  5. **The snapshot folder:** the recorded ruling stands (operator-decisions §3 of spec-epic-22: `<TK_SUPERVISOR_WORK>\snapshots\<project id>\<run id>`); the AC's `C:\agent-work\backups\…` wording yields to it.
+  6. **The forwarder's home (your 12:54Z ruling):** accepted as ruled; the in-process-session limit is fine for this version and the runbook names it.
+- 2026-10-27T13:41Z — trigger: deviation-gt-0 (pass 3) — question: accept the seven pass-3 deviations (editor as a third detached process with editor_pid/editor_start; per-run godot-ai capability and WS token in server/editor env, forwarder swapping the bearer upstream, names hard-coded; start-failed for no project.godot or editor spawn failure; serialized stop order; drain e2e asserting snapshot; the shipped-pick profile test; seeds left to the operator per 3b) at score 2? — ruling: accept-deviation score 2 — do: accept all seven as reported and keep the four pass-3 DRIFT lines as written; keep the godot-ai env names as named constants in enginemcp.ts, add no keys to engine.mcp, keep the capability and WS token out of argv, events, logs and files; record AC1's seeds as met by operator ruling 3b, not unverifiable-here, and file no seeds — rule candidate: When an operator answer in the Consult Log gives a measured launch or stop shape, the implementer follows it without a consult: record DRIFT lines scored 2 if they change an event or contract field this same story introduced, else 1, and consult only if it touches a surface from an earlier story
+- 2026-10-27T13:54Z — trigger: deviation-gt-0 (pass 4) — question: accept the review-patch tests (early-exiting editor refusal; in-process stop order) built on a test-owned `loggedChild` helper and a pure editor fake through `EngineMcpDeps.spawn`/`spawnEditor`, instead of the module's default spawn, at score 1? — ruling: accept-deviation score 1 — do: keep the two loggedChild / pure-editor-fake tests as they are and make no test-driven change to enginemcp.ts; keep the pass-4 DRIFT line as written and leave the story score at 2 — rule candidate: A test that swaps in its own child through an existing deps injection point (spawn/spawnEditor/killRecorded) instead of the module default is not a deviation when no production surface changes: record it as a test note, not a DRIFT, and never export a default implementation only so tests can reach it
+
+## Auto Run Result
+
+Status: done
+
+Studio: activated as developer; working set bmm, tea, bmb, bmad-loop, gds; drift drift; fixes: nothing to do on a box with no engine sandbox; on the engine box set TK_SUPERVISOR_CONFIG to the supervisor config naming jobs.<project>/<job>.sandbox; routing implementer=claude-opus-5-5 reviewers=claude-opus-5-5 consult=claude-opus-5-5; knowledge spine absent
+
+**Summary.** This is a re-drive on the operator's spike answer. It is restored verbatim into `## Consult Log` from `ee89a42`, after the loop's amend `c5a212e` dropped it with the old result. Passes 1 and 2 (commit `60cbc36`) built the pick-agnostic code. Pass 3 lands the pick, `hi-godot/godot-ai`, and its measured launch shape:
+- **Launch secrets:** for a run flagged `editor_in_the_loop`, the supervisor mints per-run `GODOT_AI_HTTP_CAPABILITY` and `GODOT_AI_WS_TOKEN`, with telemetry off, into the env of the server and the editor.
+- **Start order:** it starts the server from `engine.mcp.start`, waits for the port, then starts the Godot editor (`$GODOT --editor --path <the project.godot folder>`) as a third detached process.
+- **Forwarder:** the forwarder swaps the sandbox's per-run bearer for `Bearer <capability>` upstream.
+- **Stop order:** at release, and in recovery from any process, the editor stops before the server.
+- **Refusals:** `engine-mcp:start-failed` also covers a worktree with no `project.godot`, an editor that fails to spawn, and an editor that exits before the MCP is ready.
+- **Pick recorded:** `game-godot.json` now carries `suggests_mcp: ["godot-ai"]`. `kb/engine-mcp-godot.md` holds the ruling, TUA's `engine.mcp` line, and the 14-tool `--exclude-domains` allowlist that enforces verify-only (AC3).
+- **Docs:** the contract's 34.5 sentence is extended additively (still 0.1.29). The README, runbook §4.8 (port 8788, the server's own ports, the editor-readiness window) and the engine skill all follow.
+- **AC1 seeds:** met by operator ruling 3b. The operator files them with `research.py seed`, by consult ruling.
+
+**Files changed (this pass).**
+- `apps/supervisor/src/enginemcp.ts`: capability and WS-token minting; the editor spawn, early-exit refusal and stop order; the forwarder's upstream bearer; three-pid recovery.
+- `apps/supervisor/test/enginemcp.test.ts`: tests for the editor's argv and env, the capability arriving upstream, no secret in argv or events (the drain path included), the editor exiting early or late, no `project.godot`, the editor failing to spawn, and the in-process and recorded stop order.
+- `apps/supervisor/README.md`: the launch shape.
+- `plugins/tk-studio/skills/tk-studio-detect/profiles/game-godot.json`: `suggests_mcp: ["godot-ai"]`.
+- `plugins/tk-studio/lib/tests/test_recommend.py`, `test_detect.py`: the shipped pick.
+- `plugins/tk-studio/contracts/driver-contract.md`, `lib/tests/test_driver_contract.py`: the editor fields and the stop order in the 34.5 sentence, re-pinned.
+- `plugins/tk-studio/skills/gds-engine-godot-4/SKILL.md`: the verify-only allowlist and the `EDITOR_NOT_READY` retry.
+- `kb/engine-mcp-godot.md`, `kb/index.md`: the ruling (index regenerated, header line restored).
+- `kb/agent-pc-setup-runbook.md`: §4.8 with the launch shape, ports, readiness and three-pid recovery.
+
+**Review.** Both layers ran (band L).
+- Patches: 6 (high 0, medium 2, low 4).
+- Deferred: 0.
+- Rejected: 1.
+- Consults this pass: 2, both `deviation-gt-0`: accept at score 2, then accept at score 1.
+- Follow-up review recommended: true. The score is 3×2 + 1×4 = 10.
+
+**Verification.**
+- From `plugins/tk-studio/lib`, `uv run python -m unittest discover tests`: `Ran 2227 tests`, OK (skipped=2).
+- From `plugins/tk-studio/lib`, `uv run python ../contracts/conformance/runner.py run`: `ok: true`, failures `[]`.
+- From `apps/supervisor`, with `TK_ATLASSIAN_*` unset and `TK_STUDIO_ROOT` set:
+  - `bun test`: 1591 pass, 6 skip, 0 fail.
+  - `bun node_modules/typescript/bin/tsc --noEmit`: exit 0.
+- `kb.py index`: no diff apart from the known header line.
+- `/tmp`: the run added only the known `tk-sup-store-*` fixture, which was removed. One orphan fake server from the patch implementer's runs was stopped by pid.
+- I/O matrix audit: every row is covered by a test that ran, now including the editor refusals.
+
+**unverifiable-here (operator, agent PC).**
+1. TUA's PR: the `engine.mcp` line from `kb/engine-mcp-godot.md`, the `game/addons/godot_ai/` add-on and its `[editor_plugins]` line.
+2. File the seeds: `uv run plugins/tk-studio/lib/research.py seed --run-id <id> --file <seeds>`.
+3. A flagged TUA run where all of these hold:
+   - the editor adopts the supervisor-started server;
+   - the dev session lists the 14 tools through the forwarder, with no scene-edit tool;
+   - `test_run` and `editor_screenshot` answer;
+   - all three processes stop at release.
+4. The sandbox reaches `TK_SUPERVISOR_BIND:8788` (sbx network policy).
+5. The detached server, editor and forwarder outlive `drain` on win32. Note the console and editor windows a detached Godot opens.
+
+**Residual risks.**
+- **Hard-coded names:** the godot-ai env names are fixed in the supervisor, by consult ruling, so another pick needs code.
+- **Startup window:** editor tools answer `EDITOR_NOT_READY` for about 25 s after the start. This is documented, with no readiness poll.
+- **Ports:** `--ws-port` is not pre-checked, and an operator-opened editor holds 8000/9500. One flagged run at a time can hold 8788.
+- **Unreadable start time:** a recorded start time that cannot be read (`start: null`) blocks a safe cross-process kill.
+- **Worktree writes:** the editor writes Godot's import cache into the run's worktree.
+- **Host tier:** a host-tier flagged run starts no MCP.
+
+DRIFT: `engine.mcp` gains an optional `path` (default `/mcp`) — `TK_ENGINE_MCP_URL` needs the server's endpoint path — affects: 34-5 (the operator's TUA `engine.mcp` line)
+DRIFT: `engine-mcp-start.start` is the process start time, not the command line — pid-plus-start recovery as `hold` — affects: none
+DRIFT: a drained run's engine-mcp refusal ends the run `blocked` with the key in the reason, with no `claim-refused` event — the MCP starts after the claim — affects: none
+DRIFT: `buildWorkerEnv` strips inherited `TK_ENGINE_MCP_*` — no stray bearer on an unflagged run — affects: none
+DRIFT: the snapshot stays `<TK_SUPERVISOR_WORK>\snapshots\…` per operator-decisions §3, not `C:\agent-work\backups\…` — the recorded operator ruling, shipped by 22.3 — affects: none
+DRIFT: test_driver_contract 34.3 and 34.4 stories-line assertions re-pinned to include Story 34.5 — the stories row gains 34.5 — affects: none
+DRIFT: the engine MCP forwarder is a detached child process (`bun src/enginemcp.ts forward`), with the bearer only in its spawn env, and `engine-mcp-start` carries `forwarder_pid` and `forwarder_start` — tick and drain are separate one-shot processes (consult ruling 2) — affects: none
+DRIFT: the `.mcp.json` entry uses `${TK_ENGINE_MCP_URL:-}` and `Bearer ${TK_ENGINE_MCP_BEARER:-}` — an unset variable with no default fails the parse on unflagged sessions (plan Settled shape 2's fallback) — affects: none
+DRIFT: the engine MCP server is spawned detached on every platform, win32 included — it must outlive the drain process (unproven on the box) — affects: none
+DRIFT: the engine MCP start launches the Godot editor as a third detached host process (`$GODOT --editor --path <project.godot folder>`), with `editor_pid`/`editor_start` on `engine-mcp-start` and `editor_pid` on `engine-mcp-stop`, stopped editor before server — the operator's measured launch shape (answer item 2) — affects: none
+DRIFT: the supervisor mints per-run `GODOT_AI_HTTP_CAPABILITY` and `GODOT_AI_WS_TOKEN` into the server and editor env (with `GODOT_AI_DISABLE_TELEMETRY=1`), and the forwarder swaps the sandbox bearer for `Bearer <capability>` upstream (spawn env `TK_ENGINE_MCP_FORWARD_UPSTREAM_BEARER`); the names are godot-ai's, fixed in the supervisor — godot-ai answers 401 without its capability (answer item 2) — affects: none
+DRIFT: `engine-mcp:start-failed` also covers a worktree with no `project.godot`, an editor that fails to spawn, and an editor that exits before the MCP is ready — the editor needs `--path`, and a dead editor is no MCP — affects: none
+DRIFT: AC1's seeds are not filed; `## Seeds` stays the operator's to write with `research.py seed` — operator ruling 3b — affects: none
+DRIFT: the early-exit and stop-order tests use a test-owned `loggedChild` helper and a pure editor fake instead of the module's default spawn — the default spawns are not exported and kill order is otherwise unobservable — affects: none

@@ -1,6 +1,6 @@
 ---
 title: The engine MCP for Godot — one server per project, chosen on the box (Story 34.5's spike record)
-description: Story 34.5's comparison of the three Godot MCP candidates against Godot 4.7.2 Mono on TIM-PC-2 (install, run_project_tests, verify_project, game_screenshot, Windows status, licence, last release, scene-edit tools and allowlist), the exact measurement commands the operator session runs, the pending ruling, and the seeds for the research ledger. Every cell is "not measured" until the operator answers in the story's consult log.
+description: Story 34.5's comparison of the Godot MCP candidates against Godot 4.7.2 Mono on TIM-PC-2 (install, run_project_tests, verify_project, game_screenshot, Windows status, licence, last release, scene-edit tools and allowlist), the measurement commands the operator session ran, the ruling (hi-godot/godot-ai, its engine.mcp line, its launch shape and its verify-only allowlist), and the seeds the operator files for the research ledger.
 rank: 64
 scope: project
 ---
@@ -44,7 +44,7 @@ Evidence on the removed candidate: the operator session's read-only comparison (
 `_bmad-output/implementation-artifacts/handoff-phase1-loop-2026-10-09.md`, the 07:2xZ and 11:0xZ updates'
 "Epic 34 state" lines) found `beremaran/godot-agent-loop` gone from GitHub. That session's read-only
 shortlist also named `tugcantopaloglu/godot-mcp`; it is not one of the story's three candidates, and it
-joins the table only if the operator adds it in the consult answer.
+joins the table as an operator-added, read-only row (the consult answer of 2026-10-27).
 
 What the forwarder needs from the pick: an HTTP transport on loopback (`127.0.0.1:<port>`). A pick that
 speaks stdio only has no place behind the supervisor's forwarder in this version (the story's Block If).
@@ -79,20 +79,54 @@ port}` line (and its endpoint path), and the allowlist setting for the verify-on
 
 ## Ruling
 
-Pending: the operator session's answer in the story's consult log. Until it exists, the `game-godot`
-profile carries no `suggests_mcp`, and no project's `.mcp.json` names an engine MCP.
+The operator session's answer, 2026-10-27, in the story's consult log: **the pick is `hi-godot/godot-ai`**
+(v4.3.1, MIT). The `game-godot` profile names it (`"suggests_mcp": ["godot-ai"]`), `recommend.py propose`
+shows it as a `kind: mcp` entry, and only `recommend.py record --mcp godot-ai`, on confirmation, writes the
+project's `.mcp.json` entry. `gdai-mcp-plugin-godot` is a closed product with no licence file and no
+release on GitHub; `beremaran/godot-agent-loop` is gone; `tugcantopaloglu/godot-mcp` stays the open
+alternative should the pick fail.
 
-The rule the pick must keep (verify-only, in this version): the dev session may run the project's tests,
-verify the project and take a frame; it never calls the server's scene-editing tools. Where the server
-has a tool allowlist, `engine.mcp.start` restricts it to the verify tools; where it has none, the
-`gds-engine-godot-4` skill's rule is the enforcement (a residual risk this record names once the pick is
-known).
+- **Transport.** Streamable HTTP on loopback, endpoint `/mcp` (so `engine.mcp.path` keeps its default).
+  Every request needs `Authorization: Bearer <capability>`: without it the server answers `401
+  TRANSPORT_AUTH_REQUIRED`. The supervisor supplies the capability at launch, per run, in the server's
+  environment: `GODOT_AI_HTTP_CAPABILITY` (a urlsafe token, 32 to 128 characters) and `GODOT_AI_WS_TOKEN`
+  (64 hex), both or neither, with `GODOT_AI_DISABLE_TELEMETRY=1` (telemetry is on by default).
+- **The launch shape, in this order.** Start the server (the `engine.mcp.start` line below, cwd the
+  project, the launch capabilities in its env); then the editor on the project (`$GODOT --editor --path
+  <the folder of project.godot>`), whose add-on (enabled in `project.godot`) adopts the running server:
+  without the editor the server answers but every editor tool reports `EDITOR_NOT_READY`. The forwarder
+  puts the capability on each request it passes upstream. Stop: the editor, then the server (a
+  supervisor-managed server is simply killed; nothing listens afterwards).
+- **TUA's line** (its `.tk-studio/config.yaml`; port 8000 is free on the box, `path` defaults to `/mcp`):
+
+  ```yaml
+  engine: {mcp: {name: "godot-ai", start: "uvx --from godot-ai==4.3.1 godot-ai --transport streamable-http --port 8000 --ws-port 9500 --exclude-domains scene,node,script,filesystem,resource,animation,material,particle,camera,audio,tilemap,tileset,gridmap,navigation,csg,ui,theme,signal,autoload,input_map,api,client,custom,batch", port: 8000}}
+  ```
+
+  The add-on under `game/addons/godot_ai/` and its `[editor_plugins]` line in `project.godot` are a TUA
+  PR of the operator's once this story lands.
+- **The verify-only rule, enforced by the server's own allowlist.** `--exclude-domains` (on the server and
+  on the attach bridge) with the 22 editing domains and `batch` excluded leaves the read-and-run set of 14
+  tools: `editor_state`, `scene_get_hierarchy`, `node_get_properties`, `project_run`, `project_manage`
+  (stop), `game_manage` (runtime inspection and input), `test_run`, `test_manage`, `logs_read`,
+  `editor_screenshot`, `editor_reload_plugin`, `editor_manage`, `session_activate`, `session_manage`. No
+  scene, node, script, resource or filesystem tool reaches the dev session. `editor` stays in: excluding
+  it also removes `logs_read` and `editor_screenshot` (measured 10 tools). The `gds-engine-godot-4`
+  skill's rule stands beside it.
+- **What it does not replace.** `test_run` covers GDScript suites under `res://tests/` only (TUA's C#
+  suites answer `No test suites found`), so the engine gate (`verify.engine`, Story 34.1) stays the test
+  runner; `project_run` plus `logs_read source=game` is the verify, and `editor_screenshot source=game` the
+  frame.
+- **The snapshot folder** stays `<TK_SUPERVISOR_WORK>\snapshots\<project id>\<run id>` (operator-decisions
+  §3 of spec-epic-22), which the AC's `C:\agent-work\backups\…` wording yields to.
 
 ## Seeds
 
-Pending: the seeds are written from the operator's measurements, never before. Their form is the
-`knowledge.py` seed format (`tier: seed`, `status: provisional`, `authority:
-mission-scoped-supersedes-canonical`, one `[SEED-<run-id>-A<n>]` anchor per claim: one per candidate's
-licence, last release, Windows status and verify-tool coverage, and one for the ruling). The operator files
-them in the research ledger the ecosystem-watch job writes (`plugins/tk-studio/jobs/research-ecosystem.json`)
-with `uv run plugins/tk-studio/lib/research.py seed --run-id <run-id> --file <seed.md>`.
+The operator's ruling (3b): this section stays the operator's to write. The operator files the seeds with
+`research.py seed` against the next ecosystem-watch run (none ran on 2026-10-27), one anchor per claim of
+the table above; the loop writes none. Their form is the `knowledge.py` seed format (`tier: seed`,
+`status: provisional`, `authority: mission-scoped-supersedes-canonical`, one `[SEED-<run-id>-A<n>]` anchor
+per claim: one per candidate's licence, last release, Windows status and verify-tool coverage, and one for
+the ruling), filed in the research ledger the ecosystem-watch job writes
+(`plugins/tk-studio/jobs/research-ecosystem.json`) with `uv run plugins/tk-studio/lib/research.py seed
+--run-id <run-id> --file <seed.md>`.

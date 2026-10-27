@@ -140,12 +140,14 @@ class DetectTest(unittest.TestCase):
         top = result["candidates"][0]
         self.assertEqual(top["id"], "game-godot")
         self.assertEqual(top["suggests_skills"], ["gds-engine-godot-4"])
+        # Story 34.5: the spike's ruled pick (kb/engine-mcp-godot.md)
+        self.assertEqual(top["suggests_mcp"], ["godot-ai"])
         for other in result["candidates"][1:]:
             self.assertEqual(other["suggests_skills"], [])
 
     def test_suggests_mcp_passes_through(self):
-        # Story 34.5: on a fixture profile (the shipped game-godot profile
-        # carries no pick until the spike's ruling); default [] elsewhere.
+        # Story 34.5: on a fixture profile (independent of the shipped
+        # pick); default [] elsewhere.
         root = self._project("godot-mcp")
         (root / "project.godot").write_text("[application]\n", encoding="utf-8")
         profiles = Path(tempfile.mkdtemp(prefix="tk-detect-mcp-"))

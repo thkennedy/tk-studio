@@ -524,16 +524,24 @@ untouched, idempotent, an entry in the earlier `${VAR}` form rewritten,
 2). For a flagged sbx run the supervisor reads `engine.mcp: {name, start,
 port}` (optional `path`, default `/mcp`) from the tracked
 `.tk-studio/config.yaml` at the run's base, starts it on the host with the
-pin, fronts it on `TK_SUPERVISOR_BIND` (a tailnet address, else
+pin in the pick's measured launch shape (`hi-godot/godot-ai`,
+`kb/engine-mcp-godot.md`: the server with a per-run capability in its
+spawn env, `GODOT_AI_HTTP_CAPABILITY` and `GODOT_AI_WS_TOKEN`, telemetry
+off; then the editor, `$GODOT --editor --path` the worktree's Godot
+folder, `engine-mcp:start-failed` when it holds no `project.godot`),
+fronts it on `TK_SUPERVISOR_BIND` (a tailnet address, else
 `engine-mcp:start-failed`) port `TK_SUPERVISOR_ENGINE_MCP_PORT` (default
 `8788`) behind a per-run bearer through a forwarder that is its own
 detached child process (`bun src/enginemcp.ts forward`, the bearer in its
-spawn env only), passes `TK_ENGINE_MCP_URL` and `TK_ENGINE_MCP_BEARER`
+spawn env only, the server's capability put on each request upstream),
+passes `TK_ENGINE_MCP_URL` and `TK_ENGINE_MCP_BEARER`
 into the sandbox by name only (`sbx exec -e`), records `engine-mcp-start
-{name, pid, start, url, forwarder_pid, forwarder_start}` (two pids, the
-server's and the forwarder's, each with its process start time) and
-`engine-mcp-stop {name, pid, forwarder_pid, why}`, and stops both at
-release from any process (a one-shot `drain` may have exited since); a
+{name, pid, start, url, forwarder_pid, forwarder_start, editor_pid,
+editor_start}` (three pids, the server's, the forwarder's and the
+editor's, each with its process start time) and `engine-mcp-stop {name,
+pid, forwarder_pid, editor_pid, why}`, and stops all three at release
+from any process, the editor before the server (a one-shot `drain` may
+have exited since); a
 refusal (`engine-mcp:no-config`, `engine-mcp:no-mcp-json`,
 `engine-mcp:no-engine`, `engine-mcp:start-failed`) starts nothing and ends
 the run `blocked`. The MCP is verify-only in this version: its

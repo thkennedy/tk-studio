@@ -1,11 +1,13 @@
 // Story 34.5: one engine MCP per run, started by the pin — the start, the stop (a kept pin too), no start without the
 // flag, every refusal, the restart recovery, the snapshot still taken and the forwarder's 200/401. Fakes only: a
-// `fakeBin` server on an ephemeral loopback port, a fake `git show`, a fake `sbx`; never a real engine.
+// `fakeBin` server on an ephemeral loopback port, a `fakeBin` editor as GODOT, a fake `git show`, a fake `sbx`;
+// never a real engine. The launch shape is the operator's measured one for `hi-godot/godot-ai`: the server with its
+// launch capabilities in its env, then the editor on the project, the forwarder putting the capability upstream.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, delimiter, join, resolve } from "node:path";
 import { queueRecorder, runJob, StartError, submitJob } from "../src/cli";
 import {
   ENGINE_MCP_START, ENGINE_MCP_STOP, engineMcpEnv, engineMcpLive, forwarder, letGoEngineMcp, parseEngineMcp, recoverEngineMcps, startEngineMcp,
@@ -31,11 +33,31 @@ async function gone(pid: number, ms = 5000): Promise<boolean> {
   for (const until = Date.now() + ms; Date.now() < until; await Bun.sleep(50)) if (!pidRunning(pid)) return true;
   return !pidRunning(pid);
 }
-/** No child's command line carries the bearer (Linux: /proc/<pid>/cmdline; elsewhere the argv is ours, checked by
- * construction: `--bind/--port/--upstream` only). */
-function expectNoBearerInArgv(pids: number[], bearer: string) {
+/** No child's command line carries a secret (Linux: /proc/<pid>/cmdline; elsewhere the argv is ours, checked by
+ * construction: `--bind/--port/--upstream` and `--editor --path` only). */
+function expectNoBearerInArgv(pids: number[], ...secrets: string[]) {
   if (process.platform !== "linux") return;
-  for (const pid of pids) expect(readFileSync(`/proc/${pid}/cmdline`, "utf-8")).not.toContain(bearer);
+  for (const pid of pids) for (const s of secrets) expect(readFileSync(`/proc/${pid}/cmdline`, "utf-8")).not.toContain(s);
+}
+/** What the fake editor wrote at its start (`editor.json` in its cwd, the worktree): its argv and its env's capabilities. */
+async function editorSaw(wt: string): Promise<{ argv: string[]; capability: string | null; ws: string | null; telemetry: string | null }> {
+  const f = join(wt, "editor.json");
+  for (const until = Date.now() + 5000; Date.now() < until; await Bun.sleep(50)) {
+    try { return JSON.parse(readFileSync(f, "utf-8")); } catch { /* not yet */ }
+  }
+  return JSON.parse(readFileSync(f, "utf-8"));
+}
+
+/** A child spawned by the test (through the `spawn`/`spawnEditor` seams) whose kill is logged by name, with whether
+ * the given other pids still ran at that moment. */
+function loggedChild(argv: string[], opts: { cwd: string; env: Record<string, string | undefined> }, name: string,
+  log: { name: string; running: Record<number, boolean> }[], watch: () => number[] = () => []) {
+  const p = Bun.spawn(argv, { cwd: opts.cwd, env: opts.env, stdout: "ignore", stderr: "ignore" });
+  return {
+    pid: p.pid, exited: p.exited,
+    kill() { log.push({ name, running: Object.fromEntries(watch().map((w) => [w, pidRunning(w)])) }); p.kill(); },
+    unref() { p.unref(); },
+  };
 }
 
 /** A free loopback port (bound once, released). */
@@ -58,14 +80,19 @@ Bun.serve({ hostname: "127.0.0.1", port, async fetch(req) {
   const u = new URL(req.url);
   return Response.json({ method: req.method, path: u.pathname, search: u.search, auth: req.headers.get("authorization"),
     body: req.method === "POST" ? await req.text() : null, cwd: process.cwd(), godot: process.env.GODOT ?? null,
-    bearer_env: process.env.TK_ENGINE_MCP_BEARER ?? null });
+    bearer_env: process.env.TK_ENGINE_MCP_BEARER ?? null, capability_env: process.env.GODOT_AI_HTTP_CAPABILITY ?? null,
+    ws_env: process.env.GODOT_AI_WS_TOKEN ?? null, telemetry_env: process.env.GODOT_AI_DISABLE_TELEMETRY ?? null });
 } });
 setInterval(() => {}, 1 << 30);
 `);
   exitBin = fakeBin(join(dir, "mcp-exit.js"), `process.exit(3);\n`);
   idleBin = fakeBin(join(dir, "mcp-idle.js"), `setInterval(() => {}, 1 << 30);\n`);
-  godot = join(dir, "Godot_v4.7.2-stable_mono_win64.exe");
-  writeFileSync(godot, "");
+  // The fake Godot editor: records its argv and its env's launch capabilities in its cwd, then idles.
+  godot = fakeBin(join(dir, "Godot_v4.7.2-stable_mono_win64.js"), `require("node:fs").writeFileSync("editor.json", JSON.stringify({
+  argv: process.argv.slice(2), capability: process.env.GODOT_AI_HTTP_CAPABILITY ?? null, ws: process.env.GODOT_AI_WS_TOKEN ?? null,
+  telemetry: process.env.GODOT_AI_DISABLE_TELEMETRY ?? null }));
+setInterval(() => {}, 1 << 30);
+`);
   sbx = fakeSbx();
 });
 afterAll(async () => {
@@ -76,10 +103,12 @@ const started: [Queue, string][] = [];
 
 const newQueue = () => track(new Queue(":memory:", { ownerAlive: (o) => o.nonce === me.nonce, engineLive: async () => ({ live: false }) }));
 
-/** A claimed sbx run with its worktree cut, flagged unless `flag: false`. */
+/** A claimed sbx run with its worktree cut (a Godot project in its `game/` folder, as TUA's), flagged unless `flag: false`. */
 async function flaggedRun(q: Queue, opts: { flag?: boolean } = {}): Promise<{ run: QueueRun; wt: string; root: string }> {
   const root = tempDir("tk-sup-enginemcp-root-");
   const wt = tempDir("tk-sup-enginemcp-wt-");
+  mkdirSync(join(wt, "game"));
+  writeFileSync(join(wt, "game", "project.godot"), "");
   const run = q.enqueue({
     jobId: "run-epic", root, projectId: "tua", definition: JOB, owner: me, tier: "sbx", sandbox: SB, base_ref: "main",
     ...(opts.flag === false ? {} : { editorInTheLoop: true }),
@@ -135,7 +164,7 @@ describe("parseEngineMcp: engine.mcp {name, start, port}", () => {
 });
 
 describe("start: a flagged run's engine MCP on the host, behind the bearer forwarder", () => {
-  test("Start: the child in the worktree with GODOT, the forwarder on bind:port, `engine-mcp-start` without the bearer, the env by name", async () => {
+  test("Start: the server in the worktree with GODOT and its capabilities, the editor on the project, the forwarder on bind:port, `engine-mcp-start` without a secret, the env by name", async () => {
     const q = newQueue();
     const { run, wt } = await flaggedRun(q);
     const { out, deps } = await startOk(q, run);
@@ -143,7 +172,7 @@ describe("start: a flagged run's engine MCP on the host, behind the bearer forwa
     expect(out).toEqual({ started: true, url });
     expect(engineMcpLive(run.run_id)).toBe(true);
     const ev = q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_START)!;
-    expect(Object.keys(ev.detail!).sort()).toEqual(["forwarder_pid", "forwarder_start", "name", "pid", "start", "url"]);
+    expect(Object.keys(ev.detail!).sort()).toEqual(["editor_pid", "editor_start", "forwarder_pid", "forwarder_start", "name", "pid", "start", "url"]);
     expect(ev.detail).toMatchObject({ name: NAME, url });
     expect(typeof ev.detail!.pid).toBe("number");
     // The forwarder is its own child process, recorded beside the server.
@@ -151,19 +180,35 @@ describe("start: a flagged run's engine MCP on the host, behind the bearer forwa
     expect(ev.detail!.forwarder_pid).not.toBe(ev.detail!.pid);
     expect(ev.detail!.forwarder_pid).not.toBe(process.pid);
     expect(pidRunning(ev.detail!.forwarder_pid as number)).toBe(true);
+    // The editor: its own child, `$GODOT --editor --path <the project's folder>`, with the server's capabilities.
+    const epid = ev.detail!.editor_pid as number;
+    expect(typeof epid).toBe("number");
+    expect(new Set([epid, ev.detail!.pid, ev.detail!.forwarder_pid]).size).toBe(3);
+    expect(pidRunning(epid)).toBe(true);
+    const ed = await editorSaw(wt);
+    expect(ed.argv).toEqual(["--editor", "--path", join(wt, "game")]);
     const env = engineMcpEnv(run.run_id)!;
     expect(Object.keys(env)).toEqual(["TK_ENGINE_MCP_URL", "TK_ENGINE_MCP_BEARER"]);
     expect(env.TK_ENGINE_MCP_URL).toBe(url);
     expect(env.TK_ENGINE_MCP_BEARER).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    // The bearer is never in an event, nor in either child's argv.
-    expect(JSON.stringify(q.events(run.run_id))).not.toContain(env.TK_ENGINE_MCP_BEARER);
-    expectNoBearerInArgv([ev.detail!.pid as number, ev.detail!.forwarder_pid as number], env.TK_ENGINE_MCP_BEARER!);
 
-    // Forwarder: 200 proxied with the exact bearer (path, query and body kept, the bearer dropped upstream), 401 otherwise.
+    // Forwarder: 200 proxied with the exact bearer (path, query and body kept, the sandbox's bearer replaced upstream by
+    // the server's capability), 401 otherwise.
     const ok = await fetch(`${url}?x=1`, { method: "POST", headers: { Authorization: `Bearer ${env.TK_ENGINE_MCP_BEARER}` }, body: '{"jsonrpc":"2.0"}' });
     expect(ok.status).toBe(200);
     const echoed = await ok.json() as Record<string, unknown>;
-    expect(echoed).toMatchObject({ method: "POST", path: "/mcp", search: "?x=1", auth: null, body: '{"jsonrpc":"2.0"}', godot, bearer_env: null });
+    expect(echoed).toMatchObject({ method: "POST", path: "/mcp", search: "?x=1", body: '{"jsonrpc":"2.0"}', godot, bearer_env: null, telemetry_env: "1" });
+    // The launch capabilities: per run, the HTTP one urlsafe (32 to 128 chars), the WebSocket one 64 hex, the
+    // editor given the same; the capability is what reaches the server, never the sandbox's bearer.
+    const capability = String(echoed.capability_env);
+    expect(capability).toMatch(/^[A-Za-z0-9_-]{32,128}$/);
+    expect(String(echoed.ws_env)).toMatch(/^[0-9a-f]{64}$/);
+    expect(capability).not.toBe(env.TK_ENGINE_MCP_BEARER);
+    expect(echoed.auth).toBe(`Bearer ${capability}`);
+    expect(ed).toMatchObject({ capability, ws: echoed.ws_env, telemetry: "1" });
+    // No secret in an event, nor in any child's argv.
+    for (const secret of [env.TK_ENGINE_MCP_BEARER!, capability, String(echoed.ws_env)]) expect(JSON.stringify(q.events(run.run_id))).not.toContain(secret);
+    expectNoBearerInArgv([ev.detail!.pid as number, ev.detail!.forwarder_pid as number, epid], env.TK_ENGINE_MCP_BEARER!, capability, String(echoed.ws_env));
     expect(String(echoed.cwd).toLowerCase()).toBe(wt.toLowerCase());
     for (const h of [undefined, "Bearer wrong", `bearer ${env.TK_ENGINE_MCP_BEARER}`, `Bearer ${env.TK_ENGINE_MCP_BEARER}x`]) {
       const r = await fetch(url, { headers: h ? { Authorization: h } : {} });
@@ -248,17 +293,18 @@ describe("stop: at release, also on a kept pin", () => {
     const { run } = await flaggedRun(q);
     const { deps } = await startOk(q, run);
     const startEv = q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_START)!.detail!;
-    const pid = startEv.pid as number, fpid = startEv.forwarder_pid as number;
+    const pid = startEv.pid as number, fpid = startEv.forwarder_pid as number, epid = startEv.editor_pid as number;
     // Not terminal: releasePin keeps everything.
     expect(await releasePin(q, run.run_id, sbxDeps())).toBe("none");
     expect(engineMcpLive(run.run_id)).toBe(true);
     q.end(run.run_id, "complete", null);
     expect(await releasePin(q, run.run_id, sbxDeps())).toBe("released");
     expect(engineMcpLive(run.run_id)).toBe(false);
-    expect(q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_STOP)?.detail).toEqual({ name: NAME, pid, forwarder_pid: fpid, why: "released" });
+    expect(q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_STOP)?.detail).toEqual({ name: NAME, pid, forwarder_pid: fpid, editor_pid: epid, why: "released" });
     await expect(fetch(`http://127.0.0.1:${deps.fwd}/mcp`)).rejects.toThrow();
     expect(await gone(pid)).toBe(true);
     expect(await gone(fpid)).toBe(true);
+    expect(await gone(epid)).toBe(true);
     // Idempotent: a second release records no second stop.
     await releasePin(q, run.run_id, sbxDeps());
     expect(kinds(q, run.run_id).filter((k) => k === ENGINE_MCP_STOP)).toHaveLength(1);
@@ -310,7 +356,7 @@ describe("the recorder's pin starts it; recovery after a supervisor restart", ()
     q.end(run.run_id, "blocked", "supervisor restarted");
     expect(await recoverEngineMcps(q, { killRecorded })).toEqual([run.run_id]);
     expect(killed).toEqual([[987654, "133000000000000000"]]);
-    expect(q.events(run.run_id).at(-1)).toMatchObject({ kind: ENGINE_MCP_STOP, detail: { name: NAME, pid: 987654, why: "supervisor restarted" } });
+    expect(q.events(run.run_id).at(-1)).toMatchObject({ kind: ENGINE_MCP_STOP, detail: { name: NAME, pid: 987654, editor_pid: null, why: "supervisor restarted" } });
     // Once: a second recovery finds it stopped.
     expect(await recoverEngineMcps(q, { killRecorded })).toEqual([]);
     // Never re-armed: a later start of the same run starts nothing.
@@ -372,55 +418,159 @@ describe("a child that exits on its own mid-run", () => {
     const { out } = await startOk(q, run);
     expect("started" in out).toBe(true);
     const d = q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_START)!.detail!;
-    const pid = d.pid as number, fpid = d.forwarder_pid as number;
+    const pid = d.pid as number, fpid = d.forwarder_pid as number, epid = d.editor_pid as number;
     expect((await killRecordedWorker(pid, d.start as string)).outcome).toBe("killed");
     for (const until = Date.now() + 5000; engineMcpLive(run.run_id) && Date.now() < until;) await Bun.sleep(50);
     expect(engineMcpLive(run.run_id)).toBe(false);
     expect(engineMcpEnv(run.run_id)).toBeUndefined(); // no dead URL handed out
     for (const until = Date.now() + 5000; !kinds(q, run.run_id).includes(ENGINE_MCP_STOP) && Date.now() < until;) await Bun.sleep(50);
-    expect(q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_STOP)?.detail).toEqual({ name: NAME, pid, forwarder_pid: fpid, why: "exited", exited: "server" });
+    expect(q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_STOP)?.detail).toEqual({ name: NAME, pid, forwarder_pid: fpid, editor_pid: epid, why: "exited", exited: "server" });
     expect(await gone(fpid)).toBe(true);
+    expect(await gone(epid)).toBe(true);
     // Stopped once: the release records no second stop.
     expect(await stopEngineMcp(q, run.run_id, "released")).toBe(false);
     expect(kinds(q, run.run_id).filter((k) => k === ENGINE_MCP_STOP)).toHaveLength(1);
   });
 });
 
-describe("consult ruling 2: the forwarder outlives the process that started it (a drain-launched run)", () => {
-  test("the starting process lets go: a working forwarder; the next tick's recovery leaves it; a later release stops both pids", async () => {
-    sbx.answer({});
+describe("the editor: its own child, stopped before the server", () => {
+  test("the editor exits on its own: the server and the forwarder go too, `engine-mcp-stop {why: \"exited\", exited: \"editor\"}`", async () => {
     const q = newQueue();
     const { run } = await flaggedRun(q);
+    expect("started" in (await startOk(q, run)).out).toBe(true);
+    const d = q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_START)!.detail!;
+    expect((await killRecordedWorker(d.editor_pid as number, d.editor_start as string)).outcome).toBe("killed");
+    for (const until = Date.now() + 5000; !kinds(q, run.run_id).includes(ENGINE_MCP_STOP) && Date.now() < until;) await Bun.sleep(50);
+    expect(q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_STOP)?.detail).toMatchObject({ why: "exited", exited: "editor" });
+    expect(engineMcpLive(run.run_id)).toBe(false);
+    expect(await gone(d.pid as number)).toBe(true);
+    expect(await gone(d.forwarder_pid as number)).toBe(true);
+  });
+
+  test("start-failed: no project.godot in the worktree (root or a first-level folder) — nothing spawned", async () => {
+    const q = newQueue();
+    const { run, wt } = await flaggedRun(q);
+    rmSync(join(wt, "game"), { recursive: true, force: true });
+    let spawned = 0;
+    const port = freePort();
+    const deps = depsFor({ config: configFor(`${serverBin} --port ${port}`, port), mcp: MCP_JSON });
+    const out = await startEngineMcp(q, run.run_id, { ...deps, spawn: () => { spawned++; throw new Error("never spawned"); } });
+    expect("refused" in out && out.refused).toMatchObject({ key: "engine-mcp:start-failed", reason: expect.stringContaining("project.godot") });
+    expect(spawned).toBe(0);
+    expect(kinds(q, run.run_id).filter((k) => k.startsWith("engine-mcp"))).toEqual([]);
+  });
+
+  test("start-failed: the editor does not spawn — the server is killed, nothing live", async () => {
+    const q = newQueue();
+    const { run } = await flaggedRun(q);
+    const port = freePort();
+    const deps = depsFor({ config: configFor(`${serverBin} --port ${port}`, port), mcp: MCP_JSON });
+    const out = await startEngineMcp(q, run.run_id, { ...deps, spawnEditor: () => { throw new Error("no editor"); } });
+    expect("refused" in out && out.refused).toMatchObject({ key: "engine-mcp:start-failed", reason: expect.stringContaining("editor") });
+    expect(engineMcpLive(run.run_id)).toBe(false);
+    // The server was killed: its port no longer answers.
+    for (const until = Date.now() + 5000; Date.now() < until; await Bun.sleep(50)) {
+      try { await fetch(`http://127.0.0.1:${port}/`); } catch { break; }
+    }
+    await expect(fetch(`http://127.0.0.1:${port}/`)).rejects.toThrow();
+  });
+
+  test("start-failed: the editor exits before the forwarder is ready — every child stopped, no `engine-mcp-start`", async () => {
+    const q = newQueue();
+    const { run } = await flaggedRun(q);
+    const port = freePort();
+    const log: { name: string; running: Record<number, boolean> }[] = [];
+    let serverPid = 0;
+    const deps = depsFor({ config: configFor(`${serverBin} --port ${port}`, port), mcp: MCP_JSON });
+    const out = await startEngineMcp(q, run.run_id, {
+      ...deps,
+      spawn: (argv, opts) => { const c = loggedChild(argv, opts, "server", log); serverPid = c.pid; return c; },
+      // An editor that spawned (a pid) and exited at once.
+      spawnEditor: () => ({ pid: 2_000_000_000, exited: Promise.resolve(1), kill() { log.push({ name: "editor", running: {} }); } }),
+    });
+    expect("refused" in out && out.refused).toMatchObject({ key: "engine-mcp:start-failed", reason: expect.stringContaining("the editor exited before the MCP was ready") });
+    expect(engineMcpLive(run.run_id)).toBe(false);
+    expect(kinds(q, run.run_id).filter((k) => k.startsWith("engine-mcp"))).toEqual([]);
+    expect(log.map((l) => l.name)).toEqual(["editor", "server"]);
+    expect(await gone(serverPid)).toBe(true);
+    // The forwarder was stopped too: its port no longer answers.
+    await expect(fetch(`http://127.0.0.1:${deps.fwd}/mcp`)).rejects.toThrow();
+  });
+
+  test("a release from the starting process stops the forwarder, then the editor, then the server", async () => {
+    const q = newQueue();
+    const { run } = await flaggedRun(q);
+    const port = freePort();
+    const log: { name: string; running: Record<number, boolean> }[] = [];
+    let fpid = 0;
+    const deps = depsFor({ config: configFor(`${serverBin} --port ${port}`, port), mcp: MCP_JSON });
+    const out = await startEngineMcp(q, run.run_id, {
+      ...deps,
+      spawn: (argv, opts) => loggedChild(argv, opts, "server", log, () => [fpid]),
+      spawnEditor: (argv, opts) => loggedChild(argv, opts, "editor", log, () => [fpid]),
+    });
+    started.push([q, run.run_id]);
+    expect("started" in out).toBe(true);
+    const d = q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_START)!.detail!;
+    fpid = d.forwarder_pid as number;
+    expect(await stopEngineMcp(q, run.run_id, "released")).toBe(true);
+    // The forwarder first (already gone when the editor is killed), the editor before the server.
+    expect(log).toEqual([{ name: "editor", running: { [fpid]: false } }, { name: "server", running: { [fpid]: false } }]);
+    expect(await gone(d.pid as number)).toBe(true);
+    expect(await gone(d.editor_pid as number)).toBe(true);
+  });
+
+  test("a recorded stop from another process kills the editor first, then the server, then the forwarder", async () => {
+    const q = newQueue();
+    const { run } = await flaggedRun(q);
+    q.note(run.run_id, ENGINE_MCP_START, { name: NAME, pid: 11, start: "a", url: "u", forwarder_pid: 12, forwarder_start: "b", editor_pid: 13, editor_start: "c" });
+    const killed: [number, string | null][] = [];
+    const killRecorded = async (pid: number, start: string | null) => { killed.push([pid, start]); return { pid, start, outcome: "killed" as const }; };
+    expect(await stopEngineMcp(q, run.run_id, "released", { killRecorded })).toBe(true);
+    expect(killed).toEqual([[13, "c"], [11, "a"], [12, "b"]]);
+    expect(q.events(run.run_id).at(-1)).toMatchObject({ kind: ENGINE_MCP_STOP, detail: { pid: 11, forwarder_pid: 12, editor_pid: 13, why: "released" } });
+  });
+});
+
+describe("consult ruling 2: the forwarder outlives the process that started it (a drain-launched run)", () => {
+  test("the starting process lets go: a working forwarder; the next tick's recovery leaves it; a later release stops all three pids", async () => {
+    sbx.answer({});
+    const q = newQueue();
+    const { run, wt } = await flaggedRun(q);
     const { out, deps } = await startOk(q, run);
     expect("started" in out).toBe(true);
     const { TK_ENGINE_MCP_URL: url, TK_ENGINE_MCP_BEARER: bearer } = engineMcpEnv(run.run_id)!;
     const d = q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_START)!.detail!;
-    const pid = d.pid as number, fpid = d.forwarder_pid as number;
+    const pid = d.pid as number, fpid = d.forwarder_pid as number, epid = d.editor_pid as number;
     // run-epic's launch returns: the driver lets go (owner cleared, engine recorded); then the drain process exits.
     q.markLaunched(run.run_id, "E1", { end: { state: "complete", reason: null } });
     expect(letGoEngineMcp(run.run_id)).toBe(true);
     expect(engineMcpLive(run.run_id)).toBe(false);
     // The forwarder still works: its own process, the bearer in its spawn env only.
-    expect(pidRunning(pid) && pidRunning(fpid)).toBe(true);
+    expect(pidRunning(pid) && pidRunning(fpid) && pidRunning(epid)).toBe(true);
     const ok = await fetch(url!, { method: "POST", headers: { Authorization: `Bearer ${bearer}` }, body: "{}" });
     expect(ok.status).toBe(200);
     await ok.text();
     const no = await fetch(url!, { method: "POST", body: "{}" });
     expect(no.status).toBe(401);
     await no.text();
-    expectNoBearerInArgv([pid, fpid], bearer!);
+    const ed = await editorSaw(wt);
+    expect(ed.capability).toMatch(/^[A-Za-z0-9_-]{32,128}$/);
+    expect(ed.ws).toMatch(/^[0-9a-f]{64}$/);
+    expectNoBearerInArgv([pid, fpid, epid], bearer!, ed.capability!, ed.ws!);
     expect(processStartTime(fpid)).toBe(d.forwarder_start as string);
-    // The next tick: a non-terminal launched run, both pids alive — left alone (real probes, no injected kill).
+    // The next tick: a non-terminal launched run, every pid alive — left alone (real probes, no injected kill).
     expect(await recoverEngineMcps(q)).toEqual([]);
     expect(kinds(q, run.run_id)).not.toContain(ENGINE_MCP_STOP);
-    expect(pidRunning(pid) && pidRunning(fpid)).toBe(true);
+    expect(pidRunning(pid) && pidRunning(fpid) && pidRunning(epid)).toBe(true);
     // A later tick: the engine ended, the deferred `ended` releases the pin — this process holds nothing, so both
     // recorded pids are killed by pid and start time and the stop recorded.
     q.end(run.run_id, "complete", null);
     expect(await releasePin(q, run.run_id, sbxDeps())).toBe("released");
-    expect(q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_STOP)?.detail).toEqual({ name: NAME, pid, forwarder_pid: fpid, why: "released" });
+    expect(q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_STOP)?.detail).toEqual({ name: NAME, pid, forwarder_pid: fpid, editor_pid: epid, why: "released" });
     expect(await gone(pid)).toBe(true);
     expect(await gone(fpid)).toBe(true);
+    expect(await gone(epid)).toBe(true);
     await expect(fetch(`http://127.0.0.1:${deps.fwd}/mcp`)).rejects.toThrow();
     expect(JSON.stringify(q.events(run.run_id))).not.toContain(bearer!);
     // Idempotent: nothing left to stop.
@@ -433,12 +583,13 @@ describe("consult ruling 2: the forwarder outlives the process that started it (
     const { run } = await flaggedRun(q);
     await startOk(q, run);
     const d = q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_START)!.detail!;
-    const pid = d.pid as number, fpid = d.forwarder_pid as number;
+    const pid = d.pid as number, fpid = d.forwarder_pid as number, epid = d.editor_pid as number;
     q.markLaunched(run.run_id, "E1", { end: { state: "complete", reason: null } });
     letGoEngineMcp(run.run_id);
     expect((await killRecordedWorker(fpid, d.forwarder_start as string)).outcome).toBe("killed");
     expect(await recoverEngineMcps(q)).toEqual([run.run_id]);
     expect(await gone(pid)).toBe(true);
+    expect(await gone(epid)).toBe(true);
     expect(q.events(run.run_id).at(-1)).toMatchObject({ kind: ENGINE_MCP_STOP, detail: { pid, forwarder_pid: fpid, why: "supervisor restarted" } });
   });
 
@@ -494,10 +645,14 @@ describe.skipIf(!canRunE2E)("end to end: the definition's flag, and a drained fl
   const plugin = () => join(process.env.TK_STUDIO_ROOT!, "plugins", "tk-studio");
   const prev: Record<string, string | undefined> = {};
   beforeAll(() => {
-    for (const k of ["TK_STUDIO_HOME", "SBX_BIN", "TK_SUPERVISOR_NOTIFY"]) prev[k] = process.env[k];
+    for (const k of ["TK_STUDIO_HOME", "SBX_BIN", "TK_SUPERVISOR_NOTIFY", "PATH"]) prev[k] = process.env[k];
     process.env.TK_STUDIO_HOME = store;
     process.env.SBX_BIN = sbx.bin;
     delete process.env.TK_SUPERVISOR_NOTIFY;
+    // The project is a Godot one (the editor opens it), so Story 22.3's snapshot runs: a fake robocopy on PATH.
+    const bin = tempDir("tk-sup-enginemcp-robocopy-");
+    fakeBin(join(bin, process.platform === "win32" ? "robocopy.js" : "robocopy"), "process.exit(1);\n");
+    process.env.PATH = [bin, process.env.PATH].filter((p) => p).join(delimiter);
   });
   afterAll(() => { for (const [k, v] of Object.entries(prev)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } });
 
@@ -554,15 +709,17 @@ describe.skipIf(!canRunE2E)("end to end: the definition's flag, and a drained fl
     sbx.answer({});
     const port = freePort();
     const before = sbx.calls().length;
-    const { q, runId } = await drainOne({ ".tk-studio/config.yaml": configFor(`${serverBin} --port ${port} --root {worktree}`, port), ".mcp.json": MCP_JSON });
+    const { q, runId } = await drainOne({
+      ".tk-studio/config.yaml": configFor(`${serverBin} --port ${port} --root {worktree}`, port), ".mcp.json": MCP_JSON, "game/project.godot": "",
+    });
     // The worker's `sbx exec` got the two names by `-e`, never a value.
     const worker = sbx.calls().slice(before).find((c) => c.argv[0] === "exec" && c.argv.includes("-p"))!;
     expect(worker.argv.slice(0, worker.argv.indexOf(SB))).toEqual(expect.arrayContaining(["-e", "TK_ENGINE_MCP_URL", "TK_ENGINE_MCP_BEARER"]));
     expect(worker.argv.join(" ")).not.toContain("http://127.0.0.1");
     const ks = kinds(q, runId);
-    for (const k of ["claimed", "worktree", "snapshot-skipped", ENGINE_MCP_START]) expect(ks).toContain(k);
-    expect(ks.indexOf("snapshot-skipped")).toBeGreaterThan(ks.indexOf("worktree"));
-    expect(ks.indexOf(ENGINE_MCP_START)).toBeGreaterThan(ks.indexOf("snapshot-skipped"));
+    for (const k of ["claimed", "worktree", "snapshot", ENGINE_MCP_START]) expect(ks).toContain(k);
+    expect(ks.indexOf("snapshot")).toBeGreaterThan(ks.indexOf("worktree"));
+    expect(ks.indexOf(ENGINE_MCP_START)).toBeGreaterThan(ks.indexOf("snapshot"));
     const d = q.events(runId).find((e) => e.kind === ENGINE_MCP_START)!.detail!;
     expect(d).toMatchObject({ name: NAME });
     // The MCP started before the drive: the worker's session ran after it (the fake sbx answers no status block).
@@ -573,6 +730,7 @@ describe.skipIf(!canRunE2E)("end to end: the definition's flag, and a drained fl
     expect(kinds(q, runId)).toContain(ENGINE_MCP_STOP);
     expect(await gone(d.pid as number)).toBe(true);
     expect(await gone(d.forwarder_pid as number)).toBe(true);
+    expect(await gone(d.editor_pid as number)).toBe(true);
   }, 180_000);
 
   test("Patch: a refusal there ends the drained run `blocked`, the key in its reason; nothing started, no worker", async () => {

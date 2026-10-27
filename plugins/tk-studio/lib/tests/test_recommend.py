@@ -218,8 +218,8 @@ class RecommendTestCase(unittest.TestCase):
     MCP = "fixture-engine-mcp"
 
     def _mcp_profiles(self) -> Path:
-        """The shipped profiles with `suggests_mcp` on game-godot only (the
-        shipped profile carries no pick until the spike's ruling)."""
+        """The shipped profiles with a fixture `suggests_mcp` on game-godot
+        only (the tests never depend on the shipped pick)."""
         profiles = Path(self._tmp.name) / "profiles"
         profiles.mkdir(exist_ok=True)
         for path in recommend.detectlib.DEFAULT_PROFILES_DIR.glob("*.json"):
@@ -262,9 +262,17 @@ class RecommendTestCase(unittest.TestCase):
         self.assertIsNone(self._mcp_entry(result))
         self.assertFalse(any(e["kind"] == "mcp" for e in result["proposal"]))
 
-    def test_shipped_profiles_propose_no_mcp(self):
+    def test_shipped_profiles_propose_the_ruled_pick(self):
+        # The spike's ruling (kb/engine-mcp-godot.md): the shipped game-godot
+        # profile names godot-ai, proposed and never written.
         self._make_godot()
-        self.assertFalse(any(e["kind"] == "mcp" for e in self._propose()["proposal"]))
+        before = _tree_snapshot(self.root)
+        mcps = [e for e in self._propose()["proposal"] if e["kind"] == "mcp"]
+        self.assertEqual([e["name"] for e in mcps], ["godot-ai"])
+        self.assertEqual(mcps[0]["status"], "not-configured")
+        self.assertIn("kb: kb/engine-mcp-godot.md", mcps[0]["evidence"])
+        self.assertEqual(before, _tree_snapshot(self.root))
+        self.assertFalse((self.root / ".mcp.json").exists())
 
     def test_record_mcp_writes_only_when_confirmed_merges_and_is_idempotent(self):
         self._make_godot()

@@ -2163,10 +2163,14 @@ class DriverContractTestCase(unittest.TestCase):
                        "`TK_SUPERVISOR_ENGINE_MCP_PORT`", "a tailnet address",
                        "its own detached child process (`bun src/enginemcp.ts forward`",
                        "the bearer in its spawn env only",
+                       "`hi-godot/godot-ai`", "`GODOT_AI_HTTP_CAPABILITY` and `GODOT_AI_WS_TOKEN`",
+                       "`$GODOT --editor --path`", "the server's capability put on each request upstream",
                        "`8788`", "(`sbx exec -e`)",
-                       "`engine-mcp-start {name, pid, start, url, forwarder_pid, forwarder_start}`",
-                       "two pids", "`engine-mcp-stop {name, pid, forwarder_pid, why}`",
-                       "stops both at release from any process", "`engine-mcp:no-config`",
+                       "`engine-mcp-start {name, pid, start, url, forwarder_pid, forwarder_start, editor_pid, editor_start}`",
+                       "three pids",
+                       "`engine-mcp-stop {name, pid, forwarder_pid, editor_pid, why}`",
+                       "stops all three at release from any process, the editor before the server",
+                       "`engine-mcp:no-config`",
                        "`engine-mcp:no-mcp-json`", "`engine-mcp:no-engine`",
                        "`engine-mcp:start-failed`", "verify-only"):
             self.assertIn(phrase, sentence)

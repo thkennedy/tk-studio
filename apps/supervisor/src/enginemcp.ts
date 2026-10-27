@@ -14,30 +14,40 @@
  *             bind outside the tailnet (`checkBind`, 100.64.0.0/10) or a loopback port already answering, both
  *             refused before anything is spawned; the child exits, or its port does not answer within the bound;
  *             the forwarder cannot bind — whatever was spawned is killed).
- *   start     the child runs on the host, cwd the worktree, env the worker env (`buildWorkerEnv`) with `GODOT`.
- *             Then the forwarder: its own detached child process (`bun src/enginemcp.ts forward --bind <b> --port
+ *   start     the measured launch shape of the pick (`hi-godot/godot-ai`, `kb/engine-mcp-godot.md`), in this order:
+ *             the server child runs on the host, cwd the worktree, env the worker env (`buildWorkerEnv`) with `GODOT`
+ *             and the launch capabilities: a per-run upstream capability in `GODOT_AI_HTTP_CAPABILITY` (32 random
+ *             bytes, base64url), a per-run `GODOT_AI_WS_TOKEN` (64 hex) and `GODOT_AI_DISABLE_TELEMETRY=1`. Once its
+ *             port answers, the editor child: `$GODOT --editor --path <the worktree's Godot folder>` (the folder of
+ *             its `project.godot`, the root or a first-level folder: none is `start-failed` before anything is
+ *             spawned), the same env, so its add-on adopts the running server. Then the forwarder: its own detached child process (`bun src/enginemcp.ts forward --bind <b> --port
  *             <p> --upstream <u>`), a Bun server on `TK_SUPERVISOR_BIND`:`TK_SUPERVISOR_ENGINE_MCP_PORT` (default
  *             8788) that proxies to `127.0.0.1:<port>` only a request carrying `Authorization: Bearer <per-run
  *             token>` (sha256 + `timingSafeEqual`), bodies streamed both ways; anything else is 401. No JSON-RPC
- *             tool filter: the verify-only rule is the engine skill's and the server's own allowlist. Both
- *             children are detached and let go (unref), so they outlive the process that started them: a
+ *             tool filter: the verify-only rule is the engine skill's and the server's own allowlist
+ *             (`--exclude-domains` in `engine.mcp.start`). Upstream, the forwarder replaces the sandbox's bearer with
+ *             the server's capability (`Authorization: Bearer <capability>`, every request). The three children
+ *             are detached and let go (unref), so they outlive the process that started them: a
  *             drain-launched run-epic run keeps its MCP after the one-shot `drain` exits (`start.ps1`'s pacer).
  *   bearer    `randomBytes(32).toString("base64url")`: in the starting process's memory (for its own sessions'
  *             `-e` env) and in the forwarder's spawn env (`TK_ENGINE_MCP_FORWARD_BEARER`) only — never an event,
- *             a log, a file or an argv value. The sandbox gets `-e TK_ENGINE_MCP_URL -e TK_ENGINE_MCP_BEARER`,
+ *             a log, a file or an argv value. The capability and the WebSocket token likewise: the server's and the
+ *             editor's spawn env, the capability also the forwarder's (`TK_ENGINE_MCP_FORWARD_UPSTREAM_BEARER`). The sandbox gets `-e TK_ENGINE_MCP_URL -e TK_ENGINE_MCP_BEARER`,
  *             the values in the spawn env (`engineMcpEnv`).
- *   events    `engine-mcp-start {name, pid, start, url, forwarder_pid, forwarder_start}` (`pid`/`start` the
- *             server child, `forwarder_*` the forwarder child; each `start` the process start time, as `hold`
- *             records it) and `engine-mcp-stop {name, pid, forwarder_pid, why}`. Idempotent per run through its
+ *   events    `engine-mcp-start {name, pid, start, url, forwarder_pid, forwarder_start, editor_pid, editor_start}`
+ *             (`pid`/`start` the server child, `forwarder_*` the forwarder child, `editor_*` the editor child; each
+ *             `start` the process start time, as `hold` records it) and `engine-mcp-stop {name, pid, forwarder_pid,
+ *             editor_pid, why}`. Idempotent per run through its
  *             start event.
- *   stop      at release (`releasePin`, also on a kept pin), from any process: the starting process kills its
- *             two children; any other kills both recorded pids (`killRecordedWorker`, by pid and start time,
- *             never by name). The stop is recorded once both are gone. Idempotent. A child that exits on its own
- *             in the starting process takes the other with it, recorded `engine-mcp-stop {why: "exited"}`.
+ *   stop      at release (`releasePin`, also on a kept pin), from any process, in this order: the forwarder, the
+ *             editor, then the server (the measured stop: the editor before the server). The starting process
+ *             kills its children; any other kills the recorded pids (`killRecordedWorker`, by pid and start time,
+ *             never by name). The stop is recorded once all are gone. Idempotent. A child that exits on its own
+ *             in the starting process takes the others with it, recorded `engine-mcp-stop {why: "exited"}`.
  *   recovery  a recorded start with no stop, not live in this process: left alone while its driver lives, or
- *             while its run is non-terminal with an engine launched (`engine_run_id`) and both recorded pids
- *             alive; otherwise (a terminal run, a lost driver, a dead server or forwarder) both pids are killed
- *             and `engine-mcp-stop {why: "supervisor restarted"}` recorded once both are gone (else a later
+ *             while its run is non-terminal with an engine launched (`engine_run_id`) and every recorded pid
+ *             alive; otherwise (a terminal run, a lost driver, a dead server, forwarder or editor) every pid is
+ *             killed and `engine-mcp-stop {why: "supervisor restarted"}` recorded once all are gone (else a later
  *             recovery retries). Never re-armed.
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
@@ -45,8 +55,10 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { connect } from "node:net";
 import { load as loadYaml } from "js-yaml";
+import { dirname } from "node:path";
 import { apiBind, engineMcpPort } from "./env";
 import { splitCommand } from "./hostverify";
+import { isGodot } from "./hygiene";
 import {
   isTerminal, killRecordedWorker, probeRecordedWorker, processStartTime, workerMayRun, type Queue, type QueueRun, type WorkerKill,
 } from "./queue";
@@ -62,6 +74,14 @@ export const ENGINE_MCP_BEARER_ENV = "TK_ENGINE_MCP_BEARER";
 export const ENGINE_MCP_ENV_NAMES = [ENGINE_MCP_URL_ENV, ENGINE_MCP_BEARER_ENV] as const;
 /** The forwarder child's bearer: its spawn env only (`buildWorkerEnv` strips every `TK_ENGINE_MCP_*` from a worker). */
 export const FORWARD_BEARER_ENV = "TK_ENGINE_MCP_FORWARD_BEARER";
+/** The server's capability the forwarder puts upstream: the forwarder child's spawn env only. */
+export const FORWARD_UPSTREAM_BEARER_ENV = "TK_ENGINE_MCP_FORWARD_UPSTREAM_BEARER";
+/** The pick's launch capabilities (`hi-godot/godot-ai`, the operator's spike, `kb/engine-mcp-godot.md`): the server's
+ * HTTP bearer and its WebSocket token, supplied per run in the server's and the editor's spawn env (both or neither),
+ * and its telemetry off (on by default). */
+export const SERVER_HTTP_CAPABILITY_ENV = "GODOT_AI_HTTP_CAPABILITY";
+export const SERVER_WS_TOKEN_ENV = "GODOT_AI_WS_TOKEN";
+export const SERVER_TELEMETRY_OFF_ENV = "GODOT_AI_DISABLE_TELEMETRY";
 /** The forwarder child's first stdout line once it is bound. */
 const FORWARD_READY = "engine-mcp-forwarder ready";
 
@@ -87,6 +107,8 @@ export interface EngineMcpDeps {
   git?: (args: string[], opts: { cwd: string; env: Env }) => Promise<RunResult>;
   /** Spawns the server child (default: node `spawn`, no shell, detached so it outlives the starting process). */
   spawn?: (argv: string[], opts: { cwd: string; env: Env }) => McpChild;
+  /** Spawns the editor child (default: as `spawn`, its window shown). */
+  spawnEditor?: (argv: string[], opts: { cwd: string; env: Env }) => McpChild;
   /** The forwarder bind's tailnet check (default api.ts `checkBind`, 100.64.0.0/10). Tests only may pass another,
    * to bind loopback. */
   checkBind?: (addr: string) => string;
@@ -101,10 +123,11 @@ export interface EngineMcpDeps {
 
 interface Live {
   name: string; url: string; bearer: string;
-  server: McpChild; forwarder: McpChild; pid: number | null; forwarderPid: number | null;
+  server: McpChild; forwarder: McpChild; editor: McpChild;
+  pid: number | null; forwarderPid: number | null; editorPid: number | null;
 }
 
-/** The engine MCPs this process started, by queue run id: the handles of its two children and the bearer for this
+/** The engine MCPs this process started, by queue run id: the handles of its three children and the bearer for this
  * process's own sessions. Another process stops them by their recorded pids. */
 const live = new Map<string, Live>();
 
@@ -227,11 +250,15 @@ function handleOf(child: ChildProcess): McpChild {
 const defaultSpawn = (argv: string[], opts: { cwd: string; env: Env }): McpChild =>
   handleOf(spawn(argv[0]!, argv.slice(1), { cwd: opts.cwd, env: opts.env as NodeJS.ProcessEnv, stdio: "ignore", windowsHide: true, detached: true }));
 
-/** The forwarder child (`bun <this file> forward …`, detached), the bearer in its spawn env only. `ready`: null once it
+/** The editor child: as the server's, its window not hidden (the Godot editor is a window on the host's session). */
+const defaultEditorSpawn = (argv: string[], opts: { cwd: string; env: Env }): McpChild =>
+  handleOf(spawn(argv[0]!, argv.slice(1), { cwd: opts.cwd, env: opts.env as NodeJS.ProcessEnv, stdio: "ignore", windowsHide: false, detached: true }));
+
+/** The forwarder child (`bun <this file> forward …`, detached), the bearer and the upstream capability in its spawn env only. `ready`: null once it
  * reports itself bound, else why not (it exited, or the bound passed). */
-function spawnForwarder(o: { bind: string; port: number; upstream: number; bearer: string; env: Env; timeoutMs: number }): McpChild & { ready: Promise<string | null> } {
+function spawnForwarder(o: { bind: string; port: number; upstream: number; bearer: string; upstreamBearer: string; env: Env; timeoutMs: number }): McpChild & { ready: Promise<string | null> } {
   const child = spawn(process.execPath, [import.meta.path, "forward", "--bind", o.bind, "--port", String(o.port), "--upstream", String(o.upstream)], {
-    env: { ...o.env, [FORWARD_BEARER_ENV]: o.bearer } as NodeJS.ProcessEnv, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, detached: true,
+    env: { ...o.env, [FORWARD_BEARER_ENV]: o.bearer, [FORWARD_UPSTREAM_BEARER_ENV]: o.upstreamBearer } as NodeJS.ProcessEnv, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, detached: true,
   });
   const h = handleOf(child);
   let out = "", err = "";
@@ -285,9 +312,10 @@ async function awaitPort(child: McpChild, port: number, deps: EngineMcpDeps): Pr
 }
 
 /** The forwarder's handler: a request with exactly `Authorization: Bearer <bearer>` is proxied to
- * `127.0.0.1:<upstream>` (path and query kept, the bearer and host headers dropped, bodies streamed); anything else
- * is 401. Exported for the tests. */
-export function forwarder(bearer: string, upstream: number): (req: Request) => Promise<Response> {
+ * `127.0.0.1:<upstream>` (path and query kept, the host header dropped, the bearer replaced by `Bearer
+ * <upstreamBearer>` — the server's capability — or dropped without one, bodies streamed); anything else is 401.
+ * Exported for the tests. */
+export function forwarder(bearer: string, upstream: number, upstreamBearer?: string): (req: Request) => Promise<Response> {
   const expected = createHash("sha256").update(`Bearer ${bearer}`).digest();
   return async (req) => {
     const got = createHash("sha256").update(req.headers.get("authorization") ?? "").digest();
@@ -296,6 +324,7 @@ export function forwarder(bearer: string, upstream: number): (req: Request) => P
     const headers = new Headers(req.headers);
     headers.delete("authorization");
     headers.delete("host");
+    if (upstreamBearer) headers.set("authorization", `Bearer ${upstreamBearer}`);
     try {
       const init: RequestInit & { duplex?: string; decompress?: boolean } = {
         method: req.method, headers, redirect: "manual", decompress: false,
@@ -309,20 +338,23 @@ export function forwarder(bearer: string, upstream: number): (req: Request) => P
   };
 }
 
-/** The forwarder child's entry (`forward --bind <b> --port <p> --upstream <u>`, the bearer in `TK_ENGINE_MCP_FORWARD_BEARER`):
+/** The forwarder child's entry (`forward --bind <b> --port <p> --upstream <u>`, the bearer in `TK_ENGINE_MCP_FORWARD_BEARER`,
+ * the server's capability in `TK_ENGINE_MCP_FORWARD_UPSTREAM_BEARER`):
  * binds, reports `engine-mcp-forwarder ready <port>` on stdout, and serves until it is killed. Answers an exit code
  * when it cannot start. */
 export function forwardMain(argv: string[]): number | null {
   const flag = (f: string) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : undefined; };
   const bearer = process.env[FORWARD_BEARER_ENV];
+  const upstreamBearer = process.env[FORWARD_UPSTREAM_BEARER_ENV] || undefined;
   delete process.env[FORWARD_BEARER_ENV];
+  delete process.env[FORWARD_UPSTREAM_BEARER_ENV];
   const bind = flag("--bind"), port = Number(flag("--port")), upstream = Number(flag("--upstream"));
   if (!bearer || !bind || !Number.isInteger(port) || !Number.isInteger(upstream) || port < 1 || upstream < 1) {
     console.error(`forward: needs --bind, --port, --upstream and ${FORWARD_BEARER_ENV}`);
     return 2;
   }
   let server: { port?: number };
-  try { server = Bun.serve({ hostname: bind, port, idleTimeout: 0, fetch: forwarder(bearer, upstream) }); }
+  try { server = Bun.serve({ hostname: bind, port, idleTimeout: 0, fetch: forwarder(bearer, upstream, upstreamBearer) }); }
   catch (e) { console.error(`could not bind ${bind}:${port}: ${clip(message(e))}`); return 3; }
   process.stdout.write(`${FORWARD_READY} ${server.port ?? port}\n`);
   return null;
@@ -339,8 +371,15 @@ async function killAndWait(c: McpChild): Promise<void> {
 }
 
 /** The `engine-mcp-stop` detail. */
-const stopDetail = (name: string | null, pid: number | null, forwarderPid: number | null, why: string, extra: Record<string, unknown> = {}) =>
-  ({ name, pid, forwarder_pid: forwarderPid, why, ...extra });
+const stopDetail = (name: string | null, pid: number | null, forwarderPid: number | null, editorPid: number | null, why: string, extra: Record<string, unknown> = {}) =>
+  ({ name, pid, forwarder_pid: forwarderPid, editor_pid: editorPid, why, ...extra });
+
+/** Stop the children in the measured order: the forwarder (no new request), the editor, then the server. */
+async function killInOrder(c: { forwarder: McpChild; editor: McpChild; server: McpChild }): Promise<void> {
+  await killAndWait(c.forwarder);
+  await killAndWait(c.editor);
+  await killAndWait(c.server);
+}
 
 /** Start the run's engine MCP once (see the header): nothing for a run without the flag (`skipped`), the live one
  * again for a run this process already started, nothing for a run whose start is recorded but not live here (never
@@ -358,6 +397,8 @@ export async function startEngineMcp(queue: Queue, runId: string, deps: EngineMc
   const failed = (why: string) => refusal("start-failed", why, startFailedResolves(config.port));
   const worktree = run.worktree;
   if (!worktree || !existsSync(worktree)) return failed("the run has no worktree to start the server in");
+  const projectGodot = isGodot(worktree);
+  if (!projectGodot) return failed("the worktree holds no project.godot (its root or a first-level folder) to open the editor on");
   const env = deps.env ?? process.env;
   // The forwarder binds the tailnet address only — refused before anything is spawned.
   let bind: string, port: number;
@@ -369,62 +410,95 @@ export async function startEngineMcp(queue: Queue, runId: string, deps: EngineMc
   if (await portAnswers(config.port)) return failed(`127.0.0.1:${config.port}: port already in use before the server started`);
   const argv = splitCommand(config.start).map((a) => a.split("{worktree}").join(worktree));
   const workerEnv = buildWorkerEnv(env, () => ({}));
+  // The launch capabilities, per run: the server's HTTP bearer (the forwarder's upstream) and its WebSocket token.
+  const capability = randomBytes(32).toString("base64url");
+  const childEnv: Env = {
+    ...workerEnv, GODOT: plan.godot,
+    [SERVER_HTTP_CAPABILITY_ENV]: capability, [SERVER_WS_TOKEN_ENV]: randomBytes(32).toString("hex"), [SERVER_TELEMETRY_OFF_ENV]: "1",
+  };
   let server: McpChild;
-  try { server = (deps.spawn ?? defaultSpawn)(argv, { cwd: worktree, env: { ...workerEnv, GODOT: plan.godot } }); }
+  try { server = (deps.spawn ?? defaultSpawn)(argv, { cwd: worktree, env: childEnv }); }
   catch (e) { return failed(`the server did not spawn: ${clip(message(e))}`); }
   const waited = await awaitPort(server, config.port, deps);
   if (waited) { await killAndWait(server); return failed(waited); }
+  // The editor on the project: its add-on adopts the running server.
+  let editor: McpChild;
+  try { editor = (deps.spawnEditor ?? defaultEditorSpawn)([plan.godot, "--editor", "--path", dirname(projectGodot)], { cwd: worktree, env: childEnv }); }
+  catch (e) { await killAndWait(server); return failed(`the editor did not spawn: ${clip(message(e))}`); }
+  if (!editor.pid) { await killAndWait(editor); await killAndWait(server); return failed("the editor did not spawn"); }
+  // An editor that exits before the forwarder is ready leaves no MCP: tracked so the start refuses instead.
+  let editorExited = false;
+  void editor.exited.then(() => { editorExited = true; });
   const bearer = randomBytes(32).toString("base64url");
   let fwd: McpChild & { ready: Promise<string | null> };
-  try { fwd = spawnForwarder({ bind, port, upstream: config.port, bearer, env: workerEnv, timeoutMs: deps.startTimeoutMs ?? ENGINE_MCP_START_TIMEOUT_MS }); }
-  catch (e) { await killAndWait(server); return failed(`the forwarder did not spawn: ${clip(message(e))}`); }
+  try {
+    fwd = spawnForwarder({ bind, port, upstream: config.port, bearer, upstreamBearer: capability, env: workerEnv, timeoutMs: deps.startTimeoutMs ?? ENGINE_MCP_START_TIMEOUT_MS });
+  } catch (e) { await killAndWait(editor); await killAndWait(server); return failed(`the forwarder did not spawn: ${clip(message(e))}`); }
   const notReady = await fwd.ready;
   if (notReady) {
-    await Promise.all([killAndWait(fwd), killAndWait(server)]);
+    await killInOrder({ forwarder: fwd, editor, server });
     return failed(`the forwarder could not bind ${bind}:${port}: ${notReady}`);
   }
-  // Both run on without this process (a drain exits; the run's release, from any process, stops them by pid).
+  if (editorExited) {
+    await killInOrder({ forwarder: fwd, editor, server });
+    return failed("the editor exited before the MCP was ready");
+  }
+  // All three run on without this process (a drain exits; the run's release, from any process, stops them by pid).
   server.unref?.();
+  editor.unref?.();
   fwd.unref?.();
   const url = `http://${bind}:${port}${config.path}`;
-  const pid = server.pid ?? null, forwarderPid = fwd.pid ?? null;
-  const entry: Live = { name: config.name, url, bearer, server, forwarder: fwd, pid, forwarderPid };
+  const pid = server.pid ?? null, forwarderPid = fwd.pid ?? null, editorPid = editor.pid ?? null;
+  const entry: Live = { name: config.name, url, bearer, server, forwarder: fwd, editor, pid, forwarderPid, editorPid };
   live.set(runId, entry);
-  // One of the two ended on its own: the other goes with it, and the stop is recorded (no dead URL handed out).
-  const onExit = (which: "server" | "forwarder") => async () => {
+  // One of the three ended on its own: the others go with it, and the stop is recorded (no dead URL handed out).
+  const onExit = (which: "server" | "forwarder" | "editor") => async () => {
     if (live.get(runId) !== entry) return; // stopped, or let go
     live.delete(runId);
-    await killAndWait(which === "server" ? fwd : server);
-    try { queue.note(runId, ENGINE_MCP_STOP, stopDetail(config.name, pid, forwarderPid, "exited", { exited: which })); }
+    await killInOrder(entry);
+    try { queue.note(runId, ENGINE_MCP_STOP, stopDetail(config.name, pid, forwarderPid, editorPid, "exited", { exited: which })); }
     catch { /* the queue is busy, or the run ended: recovery stops what is left */ }
   };
   void server.exited.then(onExit("server"));
   void fwd.exited.then(onExit("forwarder"));
+  void editor.exited.then(onExit("editor"));
   const start = pid ? processStartTime(pid) : null;
   const forwarderStart = forwarderPid ? processStartTime(forwarderPid) : null;
-  try { queue.note(runId, ENGINE_MCP_START, { name: config.name, pid, start, url, forwarder_pid: forwarderPid, forwarder_start: forwarderStart }); }
+  const editorStart = editorPid ? processStartTime(editorPid) : null;
+  try {
+    queue.note(runId, ENGINE_MCP_START, {
+      name: config.name, pid, start, url, forwarder_pid: forwarderPid, forwarder_start: forwarderStart, editor_pid: editorPid, editor_start: editorStart,
+    });
+  }
   catch { /* the run ended meanwhile: its release stops the MCP */ }
   return { started: true, url };
 }
 
 /** The run's recorded engine MCP start with no stop after it, else null. */
-function openStart(queue: Queue, runId: string): { name: string | null; pid: number | null; start: string | null; forwarderPid: number | null; forwarderStart: string | null } | null {
+function openStart(queue: Queue, runId: string): {
+  name: string | null; pid: number | null; start: string | null; forwarderPid: number | null; forwarderStart: string | null;
+  editorPid: number | null; editorStart: string | null;
+} | null {
   const last = queue.events(runId).filter((e) => e.kind === ENGINE_MCP_START || e.kind === ENGINE_MCP_STOP).at(-1);
   if (!last || last.kind !== ENGINE_MCP_START) return null;
   const d = (last.detail ?? {}) as Record<string, unknown>;
   const num = (v: unknown) => (typeof v === "number" && Number.isInteger(v) && v > 0 ? v : null);
   const str = (v: unknown) => (typeof v === "string" ? v : null);
-  return { name: str(d.name), pid: num(d.pid), start: str(d.start), forwarderPid: num(d.forwarder_pid), forwarderStart: str(d.forwarder_start) };
+  return {
+    name: str(d.name), pid: num(d.pid), start: str(d.start), forwarderPid: num(d.forwarder_pid), forwarderStart: str(d.forwarder_start),
+    editorPid: num(d.editor_pid), editorStart: str(d.editor_start),
+  };
 }
 
 /** Is a kill's answer "that process is gone" (killed, not running, or its pid now another process's)? */
 const gone = (w: WorkerKill) => w.outcome === "killed" || w.outcome === "group killed" || w.outcome === "not running" || w.outcome === "start time differs";
 
-/** Kill both recorded pids from any process: true once both are gone. */
+/** Kill the recorded pids from any process, in the measured order (the editor before the server, the forwarder
+ * last: a record without an editor keeps the server-then-forwarder order): true once all are gone. */
 async function stopRecorded(rec: NonNullable<ReturnType<typeof openStart>>, deps: EngineMcpDeps): Promise<boolean> {
   const kill = deps.killRecorded ?? killRecordedWorker;
   let ok = true;
-  for (const [pid, start] of [[rec.pid, rec.start], [rec.forwarderPid, rec.forwarderStart]] as const) {
+  for (const [pid, start] of [[rec.editorPid, rec.editorStart], [rec.pid, rec.start], [rec.forwarderPid, rec.forwarderStart]] as const) {
     if (!pid) continue;
     try { if (!gone(await kill(pid, start))) ok = false; } catch { ok = false; }
   }
@@ -432,27 +506,27 @@ async function stopRecorded(rec: NonNullable<ReturnType<typeof openStart>>, deps
 }
 
 /** Stop the run's engine MCP, from any process: the one this process started through its handles, else the recorded
- * one by both its pids (`killRecordedWorker`); `engine-mcp-stop` recorded once both are gone. Idempotent (nothing
+ * one by its pids (`killRecordedWorker`); `engine-mcp-stop` recorded once all are gone. Idempotent (nothing
  * started, or already stopped: nothing done). Answers whether it recorded the stop. Never throws. */
 export async function stopEngineMcp(queue: Queue, runId: string, why: string, deps: EngineMcpDeps = {}): Promise<boolean> {
   const l = live.get(runId);
   if (l) {
     live.delete(runId);
-    await Promise.all([killAndWait(l.forwarder), killAndWait(l.server)]);
-    try { queue.note(runId, ENGINE_MCP_STOP, stopDetail(l.name, l.pid, l.forwarderPid, why)); } catch { return false; }
+    await killInOrder(l);
+    try { queue.note(runId, ENGINE_MCP_STOP, stopDetail(l.name, l.pid, l.forwarderPid, l.editorPid, why)); } catch { return false; }
     return true;
   }
   let rec: ReturnType<typeof openStart>;
   try { rec = openStart(queue, runId); } catch { return false; }
   if (!rec) return false;
   if (!(await stopRecorded(rec, deps))) return false; // a later release or recovery tries again
-  try { queue.note(runId, ENGINE_MCP_STOP, stopDetail(rec.name, rec.pid, rec.forwarderPid, why)); } catch { return false; }
+  try { queue.note(runId, ENGINE_MCP_STOP, stopDetail(rec.name, rec.pid, rec.forwarderPid, rec.editorPid, why)); } catch { return false; }
   return true;
 }
 
 /** The restart rule (see the header): every recorded engine MCP start with no stop, not live in this process, is
- * left alone while its driver lives or while its run is non-terminal with an engine launched and both recorded pids
- * alive; else both pids are killed and `engine-mcp-stop {why: "supervisor restarted"}` recorded once both are gone.
+ * left alone while its driver lives or while its run is non-terminal with an engine launched and every recorded pid
+ * alive; else every pid is killed and `engine-mcp-stop {why: "supervisor restarted"}` recorded once all are gone.
  * Never re-armed. Answers the run ids stopped. Never throws. */
 export async function recoverEngineMcps(queue: Queue, deps: EngineMcpDeps = {}): Promise<string[]> {
   const out: string[] = [];
@@ -466,11 +540,12 @@ export async function recoverEngineMcps(queue: Queue, deps: EngineMcpDeps = {}):
       if (!rec) continue;
       if (!isTerminal(r.state)) {
         if (queue.ownerAlive(r)) continue; // its driver (another process) still holds it
-        // A launched engine runs on after its driver let go (`markLaunched`): its MCP stays while both pids live.
-        if (r.engine_run_id && rec.pid && rec.forwarderPid && alive(rec.pid, rec.start) && alive(rec.forwarderPid, rec.forwarderStart)) continue;
+        // A launched engine runs on after its driver let go (`markLaunched`): its MCP stays while all three recorded pids (server, forwarder, editor) live.
+        if (r.engine_run_id && rec.pid && rec.forwarderPid && alive(rec.pid, rec.start) && alive(rec.forwarderPid, rec.forwarderStart)
+          && (!rec.editorPid || alive(rec.editorPid, rec.editorStart))) continue;
       }
       if (!(await stopRecorded(rec, deps))) continue; // not gone yet: the next recovery tries again
-      queue.note(r.run_id, ENGINE_MCP_STOP, stopDetail(rec.name, rec.pid, rec.forwarderPid, "supervisor restarted"));
+      queue.note(r.run_id, ENGINE_MCP_STOP, stopDetail(rec.name, rec.pid, rec.forwarderPid, rec.editorPid, "supervisor restarted"));
       out.push(r.run_id);
     } catch { /* the next recovery tries again */ }
   }

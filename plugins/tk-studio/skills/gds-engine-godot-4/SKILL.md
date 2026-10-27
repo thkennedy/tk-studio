@@ -129,15 +129,23 @@ the bearer `$TK_ENGINE_MCP_BEARER` (both by name; the project's
 `.mcp.json` entry, written only by `recommend.py record --mcp`, reads
 them as `${TK_ENGINE_MCP_URL:-}` and `${TK_ENGINE_MCP_BEARER:-}`, so a
 session of a run without the flag sees both empty and no engine MCP). The
-pick and its evidence are in `kb/engine-mcp-godot.md`.
+pick is `hi-godot/godot-ai`; its evidence is in `kb/engine-mcp-godot.md`.
 
 - Use it only to verify: run the project's tests, verify the project and
   take a frame from the running game (`run_project_tests`,
-  `verify_project`, `game_screenshot`, or the pick's equivalents).
+  `verify_project`, `game_screenshot`, or the pick's equivalents: with
+  godot-ai, `test_run` for GDScript suites only, so the engine gate stays
+  the test runner; `project_run` plus `logs_read source=game` to verify;
+  `editor_screenshot source=game` for the frame).
 - Never call its scene-editing tools (creating, changing or saving
-  scenes, nodes, resources or scripts), in this version. Where the server
-  has a tool allowlist, the project's `engine.mcp.start` restricts it to
-  the verify tools; where it has none, this rule is the enforcement.
+  scenes, nodes, resources or scripts), in this version. The server's
+  allowlist enforces it: the project's `engine.mcp.start` passes godot-ai's
+  `--exclude-domains` with every editing domain and `batch` excluded, so
+  only the read-and-run tools are listed; this rule stands beside it.
+- The editor needs time to come up: for up to about 25 s after the run
+  starts, editor tools may answer `EDITOR_NOT_READY` while the editor's
+  add-on adopts the server. Retry (check `editor_state`) before treating
+  the MCP as down.
 - No MCP in the session (an unflagged run, a refused start): verify with
   the engine gate (`verify.engine`) as above; never start a server
   yourself.
