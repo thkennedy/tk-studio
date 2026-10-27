@@ -1,9 +1,10 @@
 ---
 id: TASK-145
 title: "The `run-vertical-slice` Job and the Engagement's Game Path"
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-27 04:08'
+updated_date: '2026-10-27 21:58'
 labels:
   - ST-145
 milestone: The Vertical-Slice Pack
