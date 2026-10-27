@@ -210,11 +210,36 @@ export const COPIED_RUNTIME = [".bmad-loop/policy.toml", ".bmad-loop/routing.cur
  * was skipped because the worktree was already at the pin (hole 42). */
 export type MaterialiseInstall = "ran" | "skipped: drift-clean";
 
+/** Hole 75: the drift-check plane materialise reports but never judges. The `sandbox-login` plane
+ * (Story 33.2) describes the project's sandbox, which the pin owns (33.3) and which is stopped whenever
+ * no run holds it (the verify verb of 33.8 never pins), so it can never decide whether a fresh
+ * worktree's runtime is at the pin; the first real `POST /runs/{id}/verify` failed on it. */
+export const MATERIALISE_IGNORED_PLANES: ReadonlySet<string> = new Set(["sandbox-login"]);
+
+/** Whether the drift check's answer means the worktree's runtime is at the pin: `clean`, or every
+ * judged plane `ok` with only an ignored plane not. No answer (no JSON, no planes) is never clean. */
+export function worktreeClean(out: Record<string, any> | null | undefined): boolean {
+  if (!out) return false;
+  if (out.result === "clean") return true;
+  const planes = Array.isArray(out.planes) ? out.planes : null;
+  if (!planes || planes.length === 0) return false;
+  return planes.every((p) => MATERIALISE_IGNORED_PLANES.has(String(p?.plane)) || p?.status === "ok");
+}
+
+/** What a materialise refusal names: every judged plane that is not `ok`, or the bare result. */
+export function driftingPlanes(out: Record<string, any> | null | undefined): string {
+  const planes: any[] = Array.isArray(out?.planes) ? out!.planes : [];
+  const bad = planes.filter((p) => !MATERIALISE_IGNORED_PLANES.has(String(p?.plane)) && p?.status !== "ok")
+    .map((p) => `${String(p?.plane)}: ${String(p?.status)}`);
+  return bad.length ? bad.join(", ") : `result '${String(out?.result)}'`;
+}
+
 /** The engine's untracked runtime in a fresh worktree, by the studio's own motions: the drift check
  * first, `tk install` at the pin inside it only when that check reports drift (hole 42: a fresh worktree
  * of a project whose committed base is at the pin is already clean, and the install would only re-render
  * committed config into a dirty tree the launch refuses), the policy/routing/overlay files copied from the
- * checkout (when present), and `tk activate` clean inside it. Throws `WorktreeFailed` naming the step. */
+ * checkout (when present), and `tk activate` clean inside it on the planes materialise judges (hole 75:
+ * the `sandbox-login` plane is reported, never judged). Throws `WorktreeFailed` naming the step. */
 export async function materialise(checkout: string, worktree: string, deps: WorktreeDeps = {}): Promise<{ copied: string[]; install: MaterialiseInstall }> {
   const uv = uvRunner(deps);
   const driftCheck = async (): Promise<{ out: Record<string, any> | null; res: RunResult }> => {
@@ -224,7 +249,7 @@ export async function materialise(checkout: string, worktree: string, deps: Work
     return { out: lastJsonObject(res.stdout) as Record<string, any> | null, res };
   };
   let install: MaterialiseInstall = "skipped: drift-clean";
-  if ((await driftCheck()).out?.result !== "clean") {
+  if (!worktreeClean((await driftCheck()).out)) {
     let res: RunResult;
     try { res = await uv(worktree, studioScript(deps, "skills", "tk-studio-install", "scripts", "install_base.py"), ["--directory", worktree], 1800); }
     catch (e) { throw new WorktreeFailed("install", clip(message(e))); }
@@ -246,7 +271,7 @@ export async function materialise(checkout: string, worktree: string, deps: Work
     }
   } catch (e) { throw new WorktreeFailed("copy", clip(message(e))); }
   const { out: drift, res: last } = await driftCheck();
-  if (drift?.result !== "clean") throw new WorktreeFailed("activate drift", drift ? `result '${String(drift.result)}'` : failed(last));
+  if (!worktreeClean(drift)) throw new WorktreeFailed("activate drift", drift ? driftingPlanes(drift) : failed(last));
   return { copied, install };
 }
 

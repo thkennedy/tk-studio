@@ -11,6 +11,7 @@ import { checkoutKey, Queue, selfOwner, servedRoot } from "../src/queue";
 import { invokeSkill, runProcess, toVmPath, type RunResult, type Spawner } from "../src/server";
 import {
   baseBranch, closeOut, closeOutDetail, COPIED_RUNTIME, engineStatus, isDefaultBranch, launchedCloseOutInput, openPrUrl, originRepo, prBody, prepareWorktree, runBranch, sweepEngines, worktreePath, WorktreeFailed, type WorktreeDeps,
+  driftingPlanes, worktreeClean,
 } from "../src/worktree";
 import { fakeGh, fakeSbx, gitRepo, testGit } from "./fakes";
 import { tempDir, track } from "./tmp";
@@ -1959,5 +1960,23 @@ describe("Story 28.5 (DW-25): a project below its git top-level is served at <wo
     expect(engineState("$&/")[0]).toBe(":(exclude,glob)$&/.bmad-loop/run[s]/**");
     // A real repository: unescaped, `apps/s[u]p/.bmad-loop/...` would match `apps/sup/...` and the state would be committed.
     await pausedCloseOutNested("apps/s[u]p");
+  });
+});
+
+describe("hole 75: materialise judges only the planes it owns", () => {
+  const plane = (plane: string, status: string) => ({ plane, status, detail: "" });
+  test("a stopped sandbox's login plane never fails a materialise (the pin owns the login)", () => {
+    expect(worktreeClean({ result: "clean", planes: [] })).toBe(true);
+    expect(worktreeClean({ result: "drift", planes: [plane("bmad-base", "ok"), plane("plugin", "ok"), plane("store", "ok"),
+      plane("vault", "ok"), plane("tracking", "ok"), plane("sandbox-login", "missing")] })).toBe(true);
+    expect(worktreeClean({ result: "error", planes: [plane("plugin", "ok"), plane("sandbox-login", "error")] })).toBe(true);
+  });
+  test("a judged plane that drifts still refuses, and the refusal names it", () => {
+    const out = { result: "drift", planes: [plane("bmad-base", "ok"), plane("plugin", "drift"), plane("sandbox-login", "missing")] };
+    expect(worktreeClean(out)).toBe(false);
+    expect(driftingPlanes(out)).toBe("plugin: drift");
+    expect(worktreeClean(null)).toBe(false);
+    expect(worktreeClean({ result: "drift" })).toBe(false);
+    expect(driftingPlanes({ result: "drift" })).toBe("result 'drift'");
   });
 });
