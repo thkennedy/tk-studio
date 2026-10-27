@@ -1,9 +1,10 @@
 ---
 id: TASK-136
 title: "A Resumed Engine's Graceful Stop Ends Complete, and the Pacer's Passes Are Visible"
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-26 16:40'
+updated_date: '2026-10-27 03:08'
 labels:
   - ST-136
 milestone: Loop Hygiene, What Epics 31 and 32 Taught the Loop

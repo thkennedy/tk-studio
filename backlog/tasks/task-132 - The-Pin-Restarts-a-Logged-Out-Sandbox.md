@@ -1,9 +1,10 @@
 ---
 id: TASK-132
 title: The Pin Restarts a Logged-Out Sandbox
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-26 16:40'
+updated_date: '2026-10-26 22:31'
 labels:
   - ST-132
 milestone: Loop Hygiene, What Epics 31 and 32 Taught the Loop

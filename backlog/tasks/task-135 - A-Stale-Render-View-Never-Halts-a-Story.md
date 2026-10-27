@@ -1,9 +1,10 @@
 ---
 id: TASK-135
 title: A Stale Render View Never Halts a Story
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-26 16:40'
+updated_date: '2026-10-27 02:12'
 labels:
   - ST-135
 milestone: Loop Hygiene, What Epics 31 and 32 Taught the Loop
