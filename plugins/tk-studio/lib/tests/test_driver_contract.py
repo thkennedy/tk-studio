@@ -2036,8 +2036,58 @@ class DriverContractTestCase(unittest.TestCase):
             self.assertIn(phrase, sentence)
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
-        self.assertIn("Story 33.2 (Epic 33), Story 34.1, Story 34.2 (Epic 34)",
+        # re-pinned at Story 34.3 (the stories line gains 34.3)
+        self.assertIn("Story 33.2 (Epic 33), Story 34.1, Story 34.2",
                       stories)
+
+    # --- Story 34.3: extends 0.1.29 (no bump) — the `playable-verify` leg
+    # (`playable` in the project config, `playable` on `host-verify`, the
+    # `tk-studio-playable-judge` skill, the §5.1 leg, the `job-run` cost).
+
+    def test_0_1_29_story_34_3_playable_verify_leg(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.29**", header)
+        self.assertNotIn("**0.1.30**", header)
+        self.assertEqual(header.count("Story 34.3, additive"), 1)
+        self.assertLess(header.index("Story 34.2, additive"),
+                        header.index("Story 34.3, additive"))
+        clause = " ".join(header[header.index("Story 34.3, additive"):].split())
+        for phrase in ("the `playable-verify` leg",
+                       "`playable: {scenario, seed, ticks}`",
+                       "`tk-studio-playable-judge`",
+                       "`[pipeline.legs] playable-verify`",
+                       "`playable {verdict: pass\\|fail\\|skipped",
+                       "`host_verify: red`", "`host verify red (playable)`",
+                       "`playable_verify_cost_usd`", "— additive) |"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        note = flat[flat.index("**0.1.29 (Story 34.1, additive).**"):]
+        note = note[:note.index("**The rules a consumer may rely on**")]
+        self.assertEqual(note.count("Story 34.3 adds the `playable-verify` leg"), 1)
+        sentence = note[note.index("Story 34.3 adds the `playable-verify` leg"):]
+        sentence = sentence[:sentence.index("Every other field, kind and route")]
+        for phrase in ("`playable: {scenario:", "only after a green engine gate",
+                       "never `--mode`", "`.bmad-loop/runs/<engine run id>/playable/`",
+                       "`tk-studio-playable-judge`", "`sbx exec`",
+                       "reads only `report.json` and the frames, never the code or the spec",
+                       "`scene-loaded`", "`player-visible`",
+                       "`no-magenta-or-error-overlay`", "`hud-reads`", "`moments-shown`",
+                       "`playable {verdict: \"pass\" | \"fail\" | \"skipped\"",
+                       "`no playable`", "`playable is malformed: <field>`",
+                       "`engine gate not green`", "host verify red (playable)",
+                       "`Playable: pass | fail | skipped (<reason>)`",
+                       "`POST /runs/{id}/verify`", "`playable_verify_cost_usd`"):
+            self.assertIn(phrase, sentence)
+        row = next(line for line in self.text.splitlines()
+                   if line.startswith("| `tk-studio-playable-judge`"))
+        self.assertIn("`lib/playable_judge.py prepare\\|verdict`", row)
+        legs = flat[flat.index("### 5.1 Execution-pipeline legs"):]
+        legs = legs[:legs.index("The launch resource ships")]
+        self.assertIn("`planner`, `playable-verify`", legs)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 34.1, Story 34.2, Story 34.3 (Epic 34)", stories)
 
     # --- AC 2: A7 dossier items covered or explicitly deferred with a seam
 

@@ -198,6 +198,33 @@
         }
       ]
     },
+    "tk-studio-playable-judge": {
+      "external_calls": false,
+      "auth_preflight": "none needed in the core — playable_judge.py reads report.json and the frames on disk and writes judge.json; the judge session is a routed claude -p leg the supervisor's host leg drives through invokeSkill on the sandbox tier, which carries the harness auth preflight (driver-contract §1)",
+      "drives": [
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/playable_judge.py", "prepare", "--media", "{sandbox}"],
+          "expect": "refusal",
+          "marker": "no report.json"
+        },
+        {
+          "assertion": "status-block-fresh",
+          "argv": ["lib/playable_judge.py", "verdict", "--media", "{sandbox}", "--answer", "{sandbox}/answer.json"],
+          "expect": "status-block",
+          "intent": "tk-studio-playable-judge",
+          "status": "blocked",
+          "marker": "no report.json"
+        },
+        {
+          "assertion": "headless-clean",
+          "argv": ["contracts/conformance/e2e_playable_verify.py"],
+          "timeout": 60,
+          "expect": "ok",
+          "note": "the Story 34.3 e2e drive: the judge's core over a fake judge (a media folder with report.json and frames, a scripted pass answer and a fail answer, judge.json read back, a no-frames refusal), then the host leg's playable step — bun test test/hostverify.test.ts -t \"Story 34.3\" from apps/supervisor under a fresh temp folder, bounded at 30 s (the drive's worst case — four 4 s core calls, a 12 s install, the 30 s suite — below the runner's 60 s drive timeout, so the drive's own timeouts fire first), a fake playable.py runner and a fake judge driving pass, fail, skipped and the refusals; the suite step not run (ok) without the checkout or bun on PATH, the cli_drives precedent"
+        }
+      ]
+    },
     "tk-studio-job": {
       "external_calls": false,
       "auth_preflight": "none needed — local run-state reads/writes and substrate directives only; when a run invokes a target skill, that skill's own preflight posture applies (one surface, one preflight)",

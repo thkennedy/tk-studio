@@ -61,7 +61,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { ghBin, pluginRoot, WorkDirMissing, workDir } from "./env";
 import { canonicalPr, isWithin } from "./hygiene";
-import { hostVerify, isRed, prSection, redReason, type HostVerifyResult } from "./hostverify";
+import { hostVerify, isRed, prSection, redReason, type HostVerifyResult, type PlayableJudge, type PlayableRoute } from "./hostverify";
 import { accountedCostOf, isTerminal, RunTerminal, servedRoot, type EngineWhere, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
 import { releasePin, sameStart, vmLaunchStatus, type SandboxDeps } from "./sandbox";
 import { lastJsonObject, runJobVerb, runProcess, runUv, toVmPath, type RunResult, type Tier } from "./server";
@@ -83,6 +83,10 @@ export interface WorktreeDeps {
   verbs?: (root: string, args: string[], timeoutS?: number) => Promise<Record<string, any>>;
   /** Story 27.2: the `sbx` seams the pin, hold, kill and release run through (default `runProcess`). */
   sbx?: SandboxDeps;
+  /** Story 34.3: the host leg's playable judge session (default `invokeSkill` on the sbx tier). */
+  judge?: PlayableJudge;
+  /** Story 34.3: the route reader that picks the judge's model and effort (default `resolveRoute`). */
+  route?: PlayableRoute;
 }
 
 /** The `sbx` seams of a worktree run (the pin's env and the injected runner), for the pin, the release and
@@ -678,10 +682,15 @@ export async function engineStatus(worktree: string, engineRunId: string, deps: 
 }
 
 /** The deferred `finish` of a launch run's studio run, at its engine's end: the deferred state and
- * reason, the launch status block (the PR URL added to its artifacts) and the metered cost. Never throws. */
+ * reason, the launch status block (the PR URL added to its artifacts) and the metered cost. Story 34.3: the
+ * playable-verify judge's cost (`playableCost`) goes as its own `--playable-verify-cost-usd` and is added into
+ * `--total-cost-usd` when the engine's cost is metered; an unmetered engine cost leaves `--total-cost-usd` absent
+ * (never zero-filled with the judge's alone). Never throws. */
 async function finishStudio(
-  run: QueueRun, state: string, reason: string | null, block: unknown, pr: string | undefined, cost: number | undefined, deps: WorktreeDeps,
+  run: QueueRun, state: string, reason: string | null, block: unknown, pr: string | undefined, engineCost: number | undefined, deps: WorktreeDeps,
+  playableCost?: number,
 ): Promise<{ ok: boolean; detail: string }> {
+  const cost = playableCost === undefined || engineCost === undefined ? engineCost : engineCost + playableCost;
   if (!run.studio_run_id) return { ok: false, detail: "no studio run recorded" };
   const b = block && typeof block === "object" ? { ...(block as Record<string, unknown>) } : undefined;
   if (b && pr) b.artifacts = [...(Array.isArray(b.artifacts) ? b.artifacts : []), pr];
@@ -689,6 +698,7 @@ async function finishStudio(
     const out = await (deps.verbs ?? runJobVerb)(run.root, [
       "finish", "--directory", run.root, "--run-id", run.studio_run_id, "--state", state, ...(reason ? ["--reason", reason] : []),
       ...(b ? ["--status-block", JSON.stringify(b)] : []), ...(cost !== undefined ? ["--total-cost-usd", String(cost)] : []),
+      ...(playableCost !== undefined ? ["--playable-verify-cost-usd", String(playableCost)] : []),
     ]);
     if (out.ok === false) return { ok: false, detail: `finish refused: ${clip(String(out.error ?? "refused"))}` };
     return { ok: true, detail: `studio run ${run.studio_run_id} finished ${typeof out.state === "string" ? out.state : state}` };
@@ -810,7 +820,10 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         let reason: string | null = engineEnd !== undefined ? (state === "complete" ? null : `${resumed ? "resumed" : "relaunched"} engine ended '${engineEnd}'`) : end.reason ?? null;
         // A red host verify ends the run `partial` naming the command, whatever end was computed (`ended` and `finish`).
         if (isRed(verify)) { state = "partial"; reason = redReason(verify); }
-        const finish = await finishStudio(run, state, reason, launched.status_block, c.pr, input.costUsd, deps);
+        // Story 34.3: the playable-verify judge's cost, its own ledger line (and counted in the total).
+        const judgeCost = verify && !verify.skipped ? verify.playable?.judge?.cost_usd : undefined;
+        const finish = await finishStudio(run, state, reason, launched.status_block, c.pr, input.costUsd, deps,
+          typeof judgeCost === "number" && Number.isFinite(judgeCost) && judgeCost >= 0 ? judgeCost : undefined);
         next = { phase: "ended", state, reason, detail: { ...(end.detail ?? {}), engine: st.detail, ...closeOutDetail(c), finish }, ...(end.stop ? { stop: end.stop } : {}) };
       }
       try { applyTransition(queue, run.run_id, next); }

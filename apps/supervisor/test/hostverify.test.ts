@@ -3,9 +3,13 @@
 // tails clipped and redacted. Verify commands are `process.execPath` (bun) `-e` scripts: the same test
 // runs on both hosts.
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
-import { gitUsrBin, hostVerify, isRed, pathKey, prSection, redReason, splitCommand, tail, verifyCommand, wallClockTrip, type HostVerifyRan } from "../src/hostverify";
+import {
+  gitUsrBin, hostVerify, isRed, pathKey, playableConfig, prSection, redReason, splitCommand, tail, verifyCommand, wallClockTrip,
+  type HostVerifyRan, type PlayableJudge,
+} from "../src/hostverify";
+import { studioRunDir } from "../src/sandbox";
 import { fakeBin, gitRepo, testGit } from "./fakes";
 import { tempDir } from "./tmp";
 
@@ -504,6 +508,339 @@ describe("Story 34.1: the engine gate runs after a green verify.host", () => {
     expect(m.engine!.error).toBeTruthy();
     expect(isRed(m)).toBe(true);
     expect(redReason(m)).toContain("`tk-sup-no-such-engine --x` failed to start: ");
+  }, 30_000);
+});
+
+describe("Story 34.3: the playable-verify step runs after a green engine gate", () => {
+  const PLAYABLE = "playable:\n  scenario: scenarios/smoke.json\n  seed: 7\n  ticks: 120\n";
+  const base = verifyKeys({ host: "uv run tools/verify_host.py", engine: "bash scripts/engine-gate.sh" });
+  const REPORT = {
+    schema: 1, verdict: "pass", failed: null, seed: 7, ticks: 120, ticks_run: 120, capture_every: 30, mode: "movie",
+    frames: [{ tick: 0, file: "frames/tick-000000.png" }, { tick: 30, file: "frames/tick-000030.png" }],
+    moments: [{ name: "jump", tick: 30, frame: "frames/tick-000030.png" }], frame_time_ms: { max: 20, mean: 16.6 }, log_errors: [],
+  };
+  type PlayableFake = { exit: number; report?: Record<string, unknown> | null; block?: Record<string, unknown> };
+  /** A leg env: the plugin root (`TK_STUDIO_ROOT`) and the store (`TK_STUDIO_HOME`) in temp folders. */
+  function legEnv() {
+    const studio = tempDir("tk-sup-pv-studio-"), home = tempDir("tk-sup-pv-home-");
+    return { studio, home, env: { TK_STUDIO_ROOT: studio, TK_STUDIO_HOME: home, PATH: "/usr/bin", GODOT: "/opt/godot/godot" } };
+  }
+  /** An injected runner: answers the config, then the host and engine steps with `exits`, then a fake `playable.py`:
+   * it writes `report.json`, `log.txt` and the frames under the argv's `--out`, its status block on stdout. */
+  function recorder(config: string, exits: number[], fake: PlayableFake = { exit: 0, report: REPORT }) {
+    const steps: { env: Record<string, string | undefined>; argv: string[]; cwd: string }[] = [];
+    const run = async (bin: string, args: string[], o: { cwd: string; timeoutS: number; env?: Record<string, string | undefined> }) => {
+      if (bin === "git") return { exit: 0, stdout: config, stderr: "" };
+      const spec = JSON.parse(readFileSync(args[2]!, "utf-8"));
+      steps.push({ env: o.env ?? {}, argv: spec.argv, cwd: spec.cwd });
+      if (!String(spec.argv[2] ?? "").endsWith("playable.py")) { // the host and engine steps
+        writeFileSync(spec.status, JSON.stringify({ exit: exits[steps.length - 1] ?? 0, signal: null }));
+        writeFileSync(spec.out, `step ${steps.length}\n`);
+        return { exit: 0, stdout: "", stderr: "" };
+      }
+      const out = spec.argv[spec.argv.indexOf("--out") + 1] as string;
+      if (fake.report) {
+        mkdirSync(join(out, "frames"), { recursive: true });
+        for (const f of (fake.report.frames as { file: string }[] | undefined) ?? []) writeFileSync(join(out, f.file), "png");
+        writeFileSync(join(out, "report.json"), JSON.stringify(fake.report));
+        writeFileSync(join(out, "log.txt"), "log\n");
+      }
+      const block = fake.block ?? { ok: fake.exit === 0, verdict: fake.report?.verdict, failed: fake.report?.failed ?? null, out, mode: "movie",
+        exit: fake.exit, timed_out: false, duration_ms: 1200, status: fake.exit === 0 ? "complete" : "partial", intent: "playable",
+        artifacts: ["report.json", "log.txt", "frames/"], reason: null };
+      writeFileSync(spec.out, JSON.stringify(block, null, 2) + "\n");
+      writeFileSync(spec.status, JSON.stringify({ exit: fake.exit, signal: null }));
+      return { exit: 0, stdout: "", stderr: "" };
+    };
+    return { steps, run };
+  }
+  /** A fake judge: records its calls and writes `answer` as `judge.json` into the payload's media folder. */
+  function fakeJudge(answer: Record<string, unknown> | null, result: Record<string, unknown> = {
+    status_block: { status: "complete", intent: "tk-studio-playable-judge", artifacts: ["judge.json"], reason: null }, total_cost_usd: 0.42,
+  }) {
+    const calls: { root: string; args: Parameters<PlayableJudge>[1] }[] = [];
+    const judge: PlayableJudge = async (root, args) => {
+      calls.push({ root, args });
+      const media = join(root, args.payload.media);
+      expect(existsSync(join(media, "report.json"))).toBe(true); // the copy is in place before the judge runs
+      if (answer) writeFileSync(join(media, "judge.json"), JSON.stringify(answer));
+      return result;
+    };
+    return { calls, judge };
+  }
+  const route = async () => ({ "playable-verify": { model: "claude-opus-5", effort: "high" } });
+  /** A project whose base config carries `config`, its run carrying the 34.3 fields. */
+  function fixture(config: string) {
+    const fx = project(config);
+    return { ...fx, run: { ...fx.run, sandbox: "tk-sbx", engine_run_id: "20261027-eng", studio_run_id: "run-77", project_id: "acme" } };
+  }
+
+  test("verifyCommand: `playable` read from the base config; absent → no key; malformed → named field", async () => {
+    expect(await verifyCommand(fixture(base + PLAYABLE).run)).toMatchObject({ playable: { scenario: "scenarios/smoke.json", seed: 7, ticks: 120 } });
+    expect("playable" in (await verifyCommand(fixture(base).run) as object)).toBe(false);
+    expect(playableConfig("x")).toEqual({ skipped: "playable is malformed: playable" });
+    expect(playableConfig([1])).toEqual({ skipped: "playable is malformed: playable" });
+    expect(playableConfig({ seed: 1, ticks: 2 })).toEqual({ skipped: "playable is malformed: scenario" });
+    expect(playableConfig({ scenario: "/abs.json", seed: 1, ticks: 2 })).toEqual({ skipped: "playable is malformed: scenario" });
+    expect(playableConfig({ scenario: "../up.json", seed: 1, ticks: 2 })).toEqual({ skipped: "playable is malformed: scenario" });
+    expect(playableConfig({ scenario: "s.json", seed: -1, ticks: 2 })).toEqual({ skipped: "playable is malformed: seed" });
+    expect(playableConfig({ scenario: "s.json", seed: "1", ticks: 2 })).toEqual({ skipped: "playable is malformed: seed" });
+    expect(playableConfig({ scenario: "s.json", seed: 1, ticks: 0 })).toEqual({ skipped: "playable is malformed: ticks" });
+    expect(playableConfig({ scenario: "s.json", seed: 1, ticks: 1.5 })).toEqual({ skipped: "playable is malformed: ticks" });
+    expect(playableConfig({ scenario: "s.json", seed: 0, ticks: 1 })).toEqual({ scenario: "s.json", seed: 0, ticks: 1 });
+    // `seed` a safe non-negative integer; `ticks` at most int32 (`playable.py` refuses beyond it).
+    expect(playableConfig({ scenario: "s.json", seed: 1.5, ticks: 2 })).toEqual({ skipped: "playable is malformed: seed" });
+    expect(playableConfig({ scenario: "s.json", seed: 2 ** 53, ticks: 2 })).toEqual({ skipped: "playable is malformed: seed" });
+    expect(playableConfig({ scenario: "s.json", seed: 1, ticks: 2147483648 })).toEqual({ skipped: "playable is malformed: ticks" });
+    expect(playableConfig({ scenario: "s.json", seed: Number.MAX_SAFE_INTEGER, ticks: 2147483647 }))
+      .toEqual({ scenario: "s.json", seed: Number.MAX_SAFE_INTEGER, ticks: 2147483647 });
+  }, 60_000);
+
+  test("ordering and pass: host, engine, then playable.py (no --mode, the store --out), the media copied, the routed judge on sbx", async () => {
+    const config = base + PLAYABLE;
+    const { steps, run } = recorder(config, [0, 0]);
+    const { calls, judge } = fakeJudge({ verdict: "pass", findings: [] });
+    const { env, studio } = legEnv();
+    const fx = fixture(config);
+    const v = await hostVerify(fx.run, 60, { env, run: run as any, judge, route }) as HostVerifyRan;
+    expect(steps).toHaveLength(3);
+    expect(steps[0]!.argv.at(-1)).toBe("tools/verify_host.py");
+    expect(steps[1]!.argv.at(-1)).toBe("scripts/engine-gate.sh");
+    const store = join(studioRunDir({ project_id: "acme", root: fx.run.root }, "run-77", env), "playable");
+    expect(steps[2]!.argv).toEqual(["uv", "run", join(studio, "plugins", "tk-studio", "lib", "playable.py"), "run",
+      "--directory", fx.wt, "--scenario", join(fx.wt, "scenarios/smoke.json"), "--seed", "7", "--ticks", "120", "--out", store, "--wall-clock", "60"]);
+    expect(steps[2]!.argv).not.toContain("--mode");
+    expect(steps[2]!.cwd).toBe(fx.wt);
+    const media = join(fx.wt, ".bmad-loop", "runs", "20261027-eng", "playable");
+    for (const f of ["report.json", "log.txt", "frames/tick-000000.png", "frames/tick-000030.png"]) expect(existsSync(join(media, f))).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.root).toBe(fx.wt);
+    expect(calls[0]!.args).toEqual({ tier: "sbx", sandbox: "tk-sbx", model: "claude-opus-5", effort: "high", timeout_s: 60, payload: { media: ".bmad-loop/runs/20261027-eng/playable" } });
+    expect(v.green).toBe(true);
+    expect(isRed(v)).toBe(false);
+    expect(v.playable).toMatchObject({
+      verdict: "pass", exit: 0, status: "complete", store, media,
+      judge: { status: "complete", verdict: "pass", cost_usd: 0.42, model: "claude-opus-5", effort: "high" },
+      frames: [join(store, "frames/tick-000000.png"), join(store, "frames/tick-000030.png")],
+    });
+    expect(v.playable!.reason).toBeUndefined();
+    expect(prSection(v).at(-1)).toBe("Playable: pass (judge claude-opus-5)");
+  }, 30_000);
+
+  test("a route without the leg (or none at all) falls back to {claude-sonnet-5, medium}", async () => {
+    for (const r of [async () => ({ session: { model: "claude-opus-5" } }), async () => { throw new Error("no route"); }]) {
+      const config = base + PLAYABLE;
+      const { run } = recorder(config, [0, 0]);
+      const { calls, judge } = fakeJudge({ verdict: "pass", findings: [] });
+      const v = await hostVerify(fixture(config).run, 60, { env: legEnv().env, run: run as any, judge, route: r }) as HostVerifyRan;
+      expect(calls[0]!.args).toMatchObject({ model: "claude-sonnet-5", effort: "medium" });
+      expect(v.playable!.judge).toMatchObject({ model: "claude-sonnet-5", effort: "medium" });
+    }
+  }, 30_000);
+
+  test("skipped: no playable (the PR section unchanged), malformed, the engine gate red or skipped; nothing spawned past the gate", async () => {
+    const cases: [string, number[], number, string][] = [
+      [base, [0, 0], 2, "no playable"],
+      [base + "playable: smoke\n", [0, 0], 2, "playable is malformed: playable"],
+      [base + "playable:\n  scenario: s.json\n  seed: 1\n", [0, 0], 2, "playable is malformed: ticks"],
+      [base + PLAYABLE, [0, 1], 2, "engine gate not green"],
+      [hostKey("uv run tools/verify_host.py") + PLAYABLE, [0], 1, "engine gate not green"],
+      [base + PLAYABLE, [3], 1, "engine gate not green"],
+    ];
+    for (const [config, exits, spawned, reason] of cases) {
+      const { steps, run } = recorder(config, exits);
+      const { calls, judge } = fakeJudge({ verdict: "pass" });
+      const v = await hostVerify(fixture(config).run, 60, { env: legEnv().env, run: run as any, judge, route }) as HostVerifyRan;
+      expect(steps).toHaveLength(spawned);
+      expect(calls).toHaveLength(0);
+      expect(v.playable).toEqual({ verdict: "skipped", reason });
+      const section = prSection(v);
+      if (reason === "no playable") {
+        expect(v.green).toBe(true);
+        expect(section.join("\n")).not.toContain("Playable");
+        expect(section.at(-1)).toStartWith("Engine gate: green: `bash scripts/engine-gate.sh` ("); // the 34.1 section, unchanged
+      } else expect(section.at(-1)).toBe(`Playable: skipped (${reason})`);
+    }
+  }, 60_000);
+
+  test("a host-side skip carries no `playable`", async () => {
+    const v = await hostVerify({ ...fixture("verify:\n  engine: godot\n" + PLAYABLE).run }, 60);
+    expect(v).toEqual({ skipped: true, reason: "no verify.host" });
+  });
+
+  test("judge fail: `fail` with the findings and every store frame path; red (playable); the PR section lists both", async () => {
+    const config = base + PLAYABLE;
+    const { run } = recorder(config, [0, 0]);
+    const findings = [{ frame: "frames/tick-000030.png", rubric: "no-magenta-or-error-overlay", note: "magenta floor" },
+      { frame: "frames/tick-000000.png", rubric: "hud-reads" }];
+    const { judge } = fakeJudge({ verdict: "fail", findings });
+    const fx = fixture(config);
+    const env = legEnv().env;
+    const v = await hostVerify(fx.run, 60, { env, run: run as any, judge, route }) as HostVerifyRan;
+    const store = join(studioRunDir({ project_id: "acme", root: fx.run.root }, "run-77", env), "playable");
+    expect(v.exit).toBe(0);
+    expect(v.engine!.verdict).toBe("green");
+    expect(v.green).toBe(false);
+    expect(isRed(v)).toBe(true);
+    expect(v.playable).toMatchObject({ verdict: "fail", findings, judge: { status: "complete", verdict: "fail", cost_usd: 0.42 },
+      frames: [join(store, "frames/tick-000000.png"), join(store, "frames/tick-000030.png")] });
+    expect(redReason(v)).toBe("host verify red (playable): no-magenta-or-error-overlay at frames/tick-000030.png: magenta floor");
+    const section = prSection(v).join("\n");
+    expect(section).toContain("Engine gate: green");
+    expect(section).toContain("Playable: fail");
+    expect(section).toContain("- `frames/tick-000030.png` — no-magenta-or-error-overlay: magenta floor");
+    expect(section).toContain("- `frames/tick-000000.png` — hud-reads");
+    expect(section).toContain(`- \`${join(store, "frames/tick-000030.png")}\``);
+  }, 30_000);
+
+  test("harness fail (exit 1): `fail`, the judge never run, one finding naming the invariant and the failing tick's frame", async () => {
+    const config = base + PLAYABLE;
+    const report = { ...REPORT, verdict: "fail", failed: { tick: 30, invariant: "player exists", detail: "node /root/Player missing" } };
+    const { run } = recorder(config, [0, 0], { exit: 1, report });
+    const { calls, judge } = fakeJudge({ verdict: "pass" });
+    const v = await hostVerify(fixture(config).run, 60, { env: legEnv().env, run: run as any, judge, route }) as HostVerifyRan;
+    expect(calls).toHaveLength(0);
+    expect(v.green).toBe(false);
+    expect(v.playable).toMatchObject({ verdict: "fail", exit: 1, status: "partial",
+      findings: [{ frame: "frames/tick-000030.png", rubric: "harness: player exists", note: "node /root/Player missing" }] });
+    expect(v.playable!.judge).toBeUndefined();
+    expect(redReason(v)).toBe("host verify red (playable): harness: player exists at frames/tick-000030.png: node /root/Player missing");
+    // A failing tick with no frame captured names none.
+    const noFrame = recorder(config, [0, 0], { exit: 1, report: { ...report, failed: { tick: 7, invariant: "wall-clock", detail: "60s exceeded" } } });
+    const w = await hostVerify(fixture(config).run, 60, { env: legEnv().env, run: noFrame.run as any, judge, route }) as HostVerifyRan;
+    expect(w.playable!.findings).toEqual([{ frame: null, rubric: "harness: wall-clock", note: "60s exceeded" }]);
+    expect(redReason(w)).toBe("host verify red (playable): harness: wall-clock: 60s exceeded");
+  }, 30_000);
+
+  test("refusal (exit 2): `fail` with `playable.py refused: <reason>`, nothing copied, no judge", async () => {
+    const config = base + PLAYABLE;
+    const why = "GODOT is unset: set the GODOT user variable to the console binary";
+    const { run } = recorder(config, [0, 0], { exit: 2, report: null, block: { ok: false, error: why, status: "blocked", intent: "playable", artifacts: [], reason: why } });
+    const { calls, judge } = fakeJudge({ verdict: "pass" });
+    const fx = fixture(config);
+    const v = await hostVerify(fx.run, 60, { env: legEnv().env, run: run as any, judge, route }) as HostVerifyRan;
+    expect(calls).toHaveLength(0);
+    expect(v.playable).toMatchObject({ verdict: "fail", exit: 2, status: "blocked", reason: `playable.py refused: ${why}` });
+    expect(existsSync(join(fx.wt, ".bmad-loop", "runs", "20261027-eng", "playable"))).toBe(false);
+    expect(redReason(v)).toBe(`host verify red (playable): playable.py refused: ${why}`);
+    expect(prSection(v).join("\n")).toContain(`Reason: playable.py refused: ${why}`);
+  }, 30_000);
+
+  test("judge broken: blocked, failed, no status block, a throw, no judge.json, a fail without findings, no sandbox → `fail`, never throws", async () => {
+    const config = base + PLAYABLE;
+    const blocked = { status_block: { status: "blocked", intent: "tk-studio-playable-judge", artifacts: [], reason: "no frames" }, total_cost_usd: 0.1 };
+    const cases: [ReturnType<typeof fakeJudge>["judge"] | undefined, string, Partial<Record<string, unknown>>][] = [
+      [fakeJudge(null, blocked).judge, "judge: blocked: no frames", { judge: { status: "blocked", cost_usd: 0.1 } }],
+      [fakeJudge(null, { conformance_failure: "conformance failure (AD-11): run terminated without a JSON status block (§3)" }).judge,
+        "judge: conformance failure (AD-11): run terminated without a JSON status block (§3)", {}],
+      [async () => { throw new Error("SbxSandboxMissing"); }, "judge: SbxSandboxMissing", {}],
+      [fakeJudge(null).judge, "judge: no readable judge.json verdict", {}],
+      [fakeJudge({ verdict: "fail", findings: [] }).judge, "judge: a fail with no findings", {}],
+    ];
+    for (const [judge, reason, extra] of cases) {
+      const { run } = recorder(config, [0, 0]);
+      const v = await hostVerify(fixture(config).run, 60, { env: legEnv().env, run: run as any, judge, route }) as HostVerifyRan;
+      expect(v.green).toBe(false);
+      expect(v.playable).toMatchObject({ verdict: "fail", reason, ...extra });
+      expect(redReason(v)).toBe(`host verify red (playable): ${reason}`);
+    }
+    const { run } = recorder(config, [0, 0]);
+    const { calls, judge } = fakeJudge({ verdict: "pass" });
+    const fx = fixture(config);
+    const v = await hostVerify({ ...fx.run, sandbox: null }, 60, { env: legEnv().env, run: run as any, judge, route }) as HostVerifyRan;
+    expect(calls).toHaveLength(0);
+    expect(v.playable).toMatchObject({ verdict: "fail", reason: "judge: no sandbox recorded for the run" });
+  }, 60_000);
+
+  test("a stale worktree copy (an earlier judge.json) is replaced before the judge runs", async () => {
+    const config = base + PLAYABLE;
+    const fx = fixture(config);
+    const media = join(fx.wt, ".bmad-loop", "runs", "20261027-eng", "playable");
+    mkdirSync(media, { recursive: true });
+    writeFileSync(join(media, "judge.json"), JSON.stringify({ verdict: "pass", findings: [] }));
+    const { run } = recorder(config, [0, 0]);
+    const v = await hostVerify(fx.run, 60, { env: legEnv().env, run: run as any, judge: fakeJudge(null).judge, route }) as HostVerifyRan;
+    expect(v.playable).toMatchObject({ verdict: "fail", reason: "judge: no readable judge.json verdict" });
+  }, 30_000);
+
+  test("the default judge pins the sandbox (`sbx run -d --name <sb>`) before its first `sbx exec`; a pin failure is `fail` (`judge: …`)", async () => {
+    const config = base + PLAYABLE;
+    const log: string[] = [];
+    const spawner = async (_bin: string, args: string[]) => {
+      log.push(`spawn ${args.join(" ")}`);
+      return { exit: 1, stdout: "", stderr: "not logged in" }; // the Max-login probe fails: nothing past it runs
+    };
+    const pinOk = { run: async (_bin: string, args: string[]) => { log.push(`sbx ${args.join(" ")}`); return { exit: 0, stdout: "", stderr: "" }; } };
+    const { run } = recorder(config, [0, 0]);
+    const v = await hostVerify(fixture(config).run, 60, { env: legEnv().env, run: run as any, route, sbx: pinOk as any, spawner }) as HostVerifyRan;
+    expect(log[0]).toBe("sbx run -d --name tk-sbx");
+    expect(log[1]).toStartWith("spawn exec tk-sbx ");
+    expect(v.playable).toMatchObject({ verdict: "fail", judge: { status: "blocked" } });
+    expect(v.playable!.reason).toStartWith("judge: blocked: auth preflight: ");
+
+    log.length = 0;
+    const pinBad = { run: async (_bin: string, args: string[]) => { log.push(`sbx ${args.join(" ")}`); return { exit: 1, stdout: "", stderr: "no such sandbox" }; } };
+    const again = recorder(config, [0, 0]);
+    const w = await hostVerify(fixture(config).run, 60, { env: legEnv().env, run: again.run as any, route, sbx: pinBad as any, spawner }) as HostVerifyRan;
+    expect(log).toEqual(["sbx run -d --name tk-sbx"]); // never an exec into the stopped sandbox
+    expect(w.green).toBe(false);
+    expect(w.playable).toMatchObject({ verdict: "fail", reason: "judge: blocked: sbx pin failed: sbx run -d --name tk-sbx exited 1: no such sandbox" });
+  }, 30_000);
+
+  test("judge.json re-validated by the host: verdict, rubric ids, frames of report.json, a fail with findings; else `fail` (`judge: …`)", async () => {
+    const config = base + PLAYABLE;
+    const cases: [Record<string, unknown>, string][] = [
+      [{ verdict: "maybe", findings: [] }, "judge: no readable judge.json verdict"],
+      [{ verdict: "fail", findings: "lots" }, "judge: judge.json findings is not a list"],
+      [{ verdict: "fail", findings: ["x"] }, "judge: finding 0 is not an object"],
+      [{ verdict: "fail", findings: [{ frame: "frames/tick-000030.png", rubric: "looks-fun" }] }, 'judge: finding 0 names an unknown rubric "looks-fun"'],
+      [{ verdict: "pass", findings: [{ frame: "frames/tick-000000.png", rubric: "hud-reads" }, { frame: "frames/tick-999999.png", rubric: "hud-reads" }] },
+        'judge: finding 1 names a frame not in report.json "frames/tick-999999.png"'],
+      [{ verdict: "fail", findings: [{ rubric: "hud-reads" }] }, "judge: finding 0 names a frame not in report.json null"],
+      [{ verdict: "fail" }, "judge: a fail with no findings"],
+    ];
+    for (const [answer, reason] of cases) {
+      const { run } = recorder(config, [0, 0]);
+      const v = await hostVerify(fixture(config).run, 60, { env: legEnv().env, run: run as any, judge: fakeJudge(answer).judge, route }) as HostVerifyRan;
+      expect(v.green).toBe(false);
+      expect(v.playable).toMatchObject({ verdict: "fail", reason });
+      expect(v.playable!.findings).toBeUndefined();
+    }
+    // Every fixed rubric id on a reported frame is accepted.
+    const all = ["scene-loaded", "player-visible", "no-magenta-or-error-overlay", "hud-reads", "moments-shown"]
+      .map((rubric) => ({ frame: "frames/tick-000030.png", rubric }));
+    const { run } = recorder(config, [0, 0]);
+    const v = await hostVerify(fixture(config).run, 60, { env: legEnv().env, run: run as any, judge: fakeJudge({ verdict: "fail", findings: all }).judge, route }) as HostVerifyRan;
+    expect(v.playable).toMatchObject({ verdict: "fail", findings: all });
+    expect(v.playable!.reason).toBeUndefined();
+  }, 60_000);
+
+  test("a failed media copy never masks a harness fail (best-effort there), and is still required on the judge path", async () => {
+    const config = base + PLAYABLE;
+    const blockCopy = (wt: string) => { // the media's parent a file: the copy throws
+      mkdirSync(join(wt, ".bmad-loop", "runs"), { recursive: true });
+      writeFileSync(join(wt, ".bmad-loop", "runs", "20261027-eng"), "not a folder");
+    };
+    const report = { ...REPORT, verdict: "fail", failed: { tick: 30, invariant: "player exists", detail: "node /root/Player missing" } };
+    const harness = recorder(config, [0, 0], { exit: 1, report });
+    const fx = fixture(config);
+    blockCopy(fx.wt);
+    const { calls, judge } = fakeJudge({ verdict: "pass" });
+    const v = await hostVerify(fx.run, 60, { env: legEnv().env, run: harness.run as any, judge, route }) as HostVerifyRan;
+    expect(calls).toHaveLength(0);
+    expect(v.playable).toMatchObject({ verdict: "fail", exit: 1,
+      findings: [{ frame: "frames/tick-000030.png", rubric: "harness: player exists", note: "node /root/Player missing" }] });
+    expect(v.playable!.media).toBeUndefined();
+    expect(redReason(v)).toBe("host verify red (playable): harness: player exists at frames/tick-000030.png: node /root/Player missing");
+
+    const pass = recorder(config, [0, 0]);
+    const gx = fixture(config);
+    blockCopy(gx.wt);
+    const j = fakeJudge({ verdict: "pass" });
+    const w = await hostVerify(gx.run, 60, { env: legEnv().env, run: pass.run as any, judge: j.judge, route }) as HostVerifyRan;
+    expect(j.calls).toHaveLength(0);
+    expect(w.playable!.verdict).toBe("fail");
+    expect(w.playable!.reason).toStartWith("media copy: ");
   }, 30_000);
 });
 

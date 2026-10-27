@@ -1,0 +1,13 @@
+# Customization surface for tk-studio-playable-judge.
+#
+# Override files (not edited here):
+#   {project-root}/_bmad/custom/tk-studio-playable-judge.toml         (team)
+#   {project-root}/_bmad/custom/tk-studio-playable-judge.user.toml    (personal)
+
+# Model/effort defaults (AD-14). Precedence: runtime override > project config
+# > this resource default. The host leg routes this session through
+# `[pipeline.legs] playable-verify` (tk-studio-launch/customize.toml), whose
+# shipped default these values mirror (Story 34.3).
+[model]
+default = "claude-sonnet-5"
+effort = "medium"

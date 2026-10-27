@@ -319,6 +319,72 @@ class JobRunTestCase(unittest.TestCase):
         with self.assertRaises(ledger.LedgerError):
             ledger.validate("job-run", dict(base, total_cost_usd="1.5"))
 
+    # ------------- Story 34.3: the playable-verify leg's cost, its own line
+
+    def test_finish_with_playable_verify_cost_records_its_own_field(self):
+        run_id = self._queued_skill_run()
+        jobrun.finish(self.root, run_id, "partial", reason="host verify red",
+                      total_cost_usd=1.5, playable_verify_cost_usd=0.25)
+        record = joblib.read_run("proj", run_id)
+        self.assertEqual(record["playable_verify_cost_usd"], 0.25)
+        self.assertEqual(record["total_cost_usd"], 1.5)
+        (event,) = self._job_run_events()
+        self.assertEqual(event["payload"]["playable_verify_cost_usd"], 0.25)
+        self.assertEqual(event["payload"]["total_cost_usd"], 1.5)
+
+    def test_finish_zero_playable_verify_cost_is_carried(self):
+        run_id = self._queued_skill_run()
+        jobrun.finish(self.root, run_id, "complete", total_cost_usd=0,
+                      playable_verify_cost_usd=0)
+        (event,) = self._job_run_events()
+        self.assertEqual(event["payload"]["playable_verify_cost_usd"], 0)
+
+    def test_finish_without_playable_verify_cost_leaves_field_absent(self):
+        run_id = self._queued_skill_run()
+        jobrun.finish(self.root, run_id, "complete", total_cost_usd=1.0)
+        self.assertNotIn("playable_verify_cost_usd",
+                         joblib.read_run("proj", run_id))
+        (event,) = self._job_run_events()
+        self.assertNotIn("playable_verify_cost_usd", event["payload"])
+
+    def test_cli_finish_with_playable_verify_cost(self):
+        run_id = self._queued_skill_run()
+        code, out = self._cli("finish", "--directory", str(self.root),
+                              "--run-id", run_id, "--state", "complete",
+                              "--total-cost-usd", "1.23",
+                              "--playable-verify-cost-usd", "0.2")
+        self.assertEqual(code, 0, out)
+        (event,) = self._job_run_events()
+        self.assertEqual(event["payload"]["playable_verify_cost_usd"], 0.2)
+
+    def test_finish_refuses_invalid_playable_verify_cost(self):
+        for bad in (-0.01, float("nan"), float("inf"), True, "0.2"):
+            with self.subTest(cost=bad):
+                run_id = self._queued_skill_run()
+                with self.assertRaises(jobrun.JobRunError) as ctx:
+                    jobrun.finish(self.root, run_id, "complete",
+                                  playable_verify_cost_usd=bad)
+                self.assertIn("playable_verify_cost_usd", str(ctx.exception))
+                self._assert_refused_untouched(run_id)
+        for bad in ("abc", "-1", "nan"):
+            with self.subTest(cli=bad):
+                run_id = self._queued_skill_run()
+                code, out = self._cli("finish", "--directory", str(self.root),
+                                      "--run-id", run_id,
+                                      "--state", "complete",
+                                      f"--playable-verify-cost-usd={bad}")
+                self.assertEqual(code, 2)
+                self.assertIn("playable_verify_cost_usd", out["error"])
+                self._assert_refused_untouched(run_id)
+
+    def test_job_run_taxonomy_declares_optional_playable_verify_cost(self):
+        base = {"job_id": "a", "run_id": "b", "state": "complete"}
+        ledger.validate("job-run", dict(base, playable_verify_cost_usd=0.4,
+                                        total_cost_usd=1.0))
+        ledger.validate("job-run", base)
+        with self.assertRaises(ledger.LedgerError):
+            ledger.validate("job-run", dict(base, playable_verify_cost_usd="x"))
+
     # --------------------------------- AC1: stop conditions gate schedule
 
     def test_stop_max_runs_refuses_further_wakes(self):

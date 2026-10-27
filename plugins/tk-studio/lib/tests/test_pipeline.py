@@ -138,6 +138,8 @@ class ResourceDefaultsTests(unittest.TestCase):
             "triage": {"model": "claude-opus-5", "effort": "high"},
             "supervise": {"model": "claude-sonnet-5", "effort": "low"},
             "planner": {"model": "claude-fable-5-1", "effort": "high"},
+            # Story 34.3: the host leg's screenshot judge
+            "playable-verify": {"model": "claude-sonnet-5", "effort": "medium"},
         })
 
 

@@ -521,9 +521,9 @@ describe("Story 27.4: the host verify leg runs before any PR opens", () => {
     : `vcs: git\nverify:\n  host: ${JSON.stringify(host)}\n${engine === undefined ? "" : `  engine: ${JSON.stringify(engine)}\n`}`;
 
   /** A launched sbx run (as the AC3 sweep's `launched()`) whose base config carries `host` (and Story 34.1's
-   * `engine`, when given); one engine commit. */
-  async function launchedSbx(host: string | undefined, tier: "sbx" | "host" = "sbx", engine?: string) {
-    const fx = await fixture({ baseRef: "main", files: { ".tk-studio/config.yaml": config(host, engine) } });
+   * `engine`, when given; Story 34.3: `extra` config lines appended); one engine commit. */
+  async function launchedSbx(host: string | undefined, tier: "sbx" | "host" = "sbx", engine?: string, extra = "") {
+    const fx = await fixture({ baseRef: "main", files: { ".tk-studio/config.yaml": config(host, engine) + extra } });
     const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
     fx.queue.markVerbStarted(fx.run.run_id, "wake", [], { target: "skill", definition: fx.defn });
     const BLOCK = { status: "complete", intent: "tk-studio-launch", artifacts: [".bmad-loop/runs/E1"] };
@@ -609,6 +609,109 @@ describe("Story 27.4: the host verify leg runs before any PR opens", () => {
     expect(fx.verbs[0]![fx.verbs[0]!.indexOf("--state") + 1]).toBe("partial");
     expect(fx.verbs[0]![fx.verbs[0]!.indexOf("--reason") + 1]).toBe(reason);
     expectNoForbiddenArgv(fx.argvs, fx.gh.calls());
+  });
+
+  /** Story 34.3: a launched run declaring `playable`, its sandbox recorded, the store in a temp folder, a fake
+   * `playable.py` (the capture spec whose argv runs `playable.py` writes the media under `--out` and passes) and a
+   * fake judge answering `answer` at a cost of $0.50. */
+  async function launchedPlayable(answer: Record<string, unknown>) {
+    const GREEN = bunCmd("console.log('all green')");
+    const fx = await launchedSbx(GREEN, "sbx", GREEN, "playable:\n  scenario: scenarios/smoke.json\n  seed: 3\n  ticks: 60\n");
+    // The run's sandbox recorded (the judge's tier); its engine status read through a fake `sbx` (hole 38).
+    const sbx = fakeSbx();
+    fx.queue.db.run("UPDATE runs SET sandbox = 'tk-sbx' WHERE run_id = ?", [fx.run.run_id]);
+    sbx.answer({ launch_status: { ok: true, runs: [{ run_id: "E1", status: "finished" }], live: [], run: { run_id: "E1", status: "finished" } } });
+    fx.deps.env = { ...fx.deps.env, SBX_BIN: sbx.bin, TK_STUDIO_HOME: tempDir("tk-sup-pv-store-") };
+    const inner = fx.deps.run!;
+    const playableArgv: string[][] = [];
+    fx.deps.run = async (bin, args, o) => {
+      const spec = bin === process.execPath && args[0] === "-e" ? JSON.parse(readFileSync(args[2]!, "utf-8")) : undefined;
+      if (!spec || !String(spec.argv[2] ?? "").endsWith("playable.py")) return inner(bin, args, o);
+      playableArgv.push(spec.argv);
+      const out = spec.argv[spec.argv.indexOf("--out") + 1] as string;
+      mkdirSync(join(out, "frames"), { recursive: true });
+      writeFileSync(join(out, "frames", "tick-000000.png"), "png");
+      writeFileSync(join(out, "frames", "tick-000030.png"), "png");
+      writeFileSync(join(out, "report.json"), JSON.stringify({ schema: 1, verdict: "pass", failed: null,
+        frames: [{ tick: 0, file: "frames/tick-000000.png" }, { tick: 30, file: "frames/tick-000030.png" }], moments: [] }));
+      writeFileSync(spec.out, JSON.stringify({ ok: true, verdict: "pass", exit: 0, status: "complete", intent: "playable", artifacts: [], reason: null }));
+      writeFileSync(spec.status, JSON.stringify({ exit: 0, signal: null }));
+      return { exit: 0, stdout: "", stderr: "" };
+    };
+    const judged: string[] = [];
+    fx.deps.judge = async (root, args) => {
+      judged.push(join(root, args.payload.media));
+      writeFileSync(join(root, args.payload.media, "judge.json"), JSON.stringify(answer));
+      return { status_block: { status: "complete", intent: "tk-studio-playable-judge", artifacts: ["judge.json"], reason: null }, total_cost_usd: 0.5 };
+    };
+    fx.deps.route = async () => ({});
+    return { ...fx, playableArgv, judged };
+  }
+  const flag = (args: string[], name: string) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
+
+  test("Story 34.3: host and engine green, the judge fails → `partial` red (playable), `--draft` with the findings and the store frame paths, the cost its own line", async () => {
+    const findings = [{ frame: "frames/tick-000030.png", rubric: "player-visible", note: "the player is off screen" }];
+    const fx = await launchedPlayable({ verdict: "fail", findings });
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(fx.playableArgv).toHaveLength(1);
+    expect(fx.judged).toHaveLength(1);
+    const ev = hv(fx);
+    expect(ev).toHaveLength(1);
+    const store = flag(fx.playableArgv[0]!, "--out")!;
+    expect(ev[0]!.detail).toMatchObject({ green: false, exit: 0, engine: { verdict: "green" },
+      playable: { verdict: "fail", findings, store, judge: { status: "complete", verdict: "fail", cost_usd: 0.5, model: "claude-sonnet-5", effort: "medium" } } });
+    const reason = "host verify red (playable): player-visible at frames/tick-000030.png: the player is off screen";
+    expect(fx.get()).toMatchObject({ state: "partial", reason });
+    const create = fx.gh.calls().find((c) => c.argv[1] === "create")!;
+    expect(create.argv).toContain("--draft");
+    expect(create.body).toContain("Playable: fail");
+    expect(create.body).toContain("- `frames/tick-000030.png` — player-visible: the player is off screen");
+    expect(create.body).toContain(`- \`${join(store, "frames/tick-000030.png")}\``);
+    expect(prCalls(fx).some((c) => c.argv[1] === "ready")).toBe(false);
+    const ended = fx.queue.events(fx.run.run_id).find((e) => e.kind === "ended")!;
+    expect(ended).toMatchObject({ to_state: "partial" });
+    // The notifier's line (the inbox) is the ended reason: no writer of its own.
+    expect(ended.detail).toMatchObject({ reason, closeout: { result: "draft PR", host_verify: "red", worktree: "removed" } });
+    expect(fx.verbs).toHaveLength(1);
+    expect(flag(fx.verbs[0]!, "--state")).toBe("partial");
+    expect(flag(fx.verbs[0]!, "--reason")).toBe(reason);
+    expect(flag(fx.verbs[0]!, "--playable-verify-cost-usd")).toBe("0.5");
+    expect(flag(fx.verbs[0]!, "--total-cost-usd")).toBe("0.75"); // the engine's $0.25 plus the judge's
+    expectNoForbiddenArgv(fx.argvs, fx.gh.calls());
+  }, 30_000);
+
+  test("Story 34.3: the judge passes → the PR opens ready with `Playable: pass`, the run as computed, the cost its own line", async () => {
+    const fx = await launchedPlayable({ verdict: "pass", findings: [] });
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(hv(fx)[0]!.detail).toMatchObject({ green: true, playable: { verdict: "pass", judge: { verdict: "pass", cost_usd: 0.5 } } });
+    const create = fx.gh.calls().find((c) => c.argv[1] === "create")!;
+    expect(create.argv).not.toContain("--draft");
+    expect(create.body).toContain("Playable: pass");
+    expect(fx.get()).toMatchObject({ state: "complete" });
+    expect(flag(fx.verbs[0]!, "--state")).toBe("complete");
+    expect(flag(fx.verbs[0]!, "--playable-verify-cost-usd")).toBe("0.5");
+    expect(flag(fx.verbs[0]!, "--total-cost-usd")).toBe("0.75");
+  }, 30_000);
+
+  test("Story 34.3: an unmetered engine cost → `--total-cost-usd` absent (never zero-filled with the judge's), `--playable-verify-cost-usd` still sent", async () => {
+    const fx = await launchedPlayable({ verdict: "pass", findings: [] });
+    // The launch worker's cost removed from its `launched` event, and no engine run.json: the engine cost is unmetered.
+    (fx.queue as any).db.query("UPDATE events SET detail = json_remove(detail, '$.worker_cost_usd') WHERE run_id = ? AND kind = 'launched'").run(fx.run.run_id);
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(fx.judged).toHaveLength(1);
+    expect(fx.verbs).toHaveLength(1);
+    expect(flag(fx.verbs[0]!, "--playable-verify-cost-usd")).toBe("0.5");
+    expect(fx.verbs[0]).not.toContain("--total-cost-usd");
+  }, 30_000);
+
+  test("Story 34.3: a project without `playable` → `playable: skipped (no playable)` on the event, no judge, no cost line, the PR as before", async () => {
+    const fx = await launchedSbx(bunCmd("console.log('all green')"));
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(hv(fx)[0]!.detail).toMatchObject({ green: true, playable: { verdict: "skipped", reason: "no playable" } });
+    expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.body).not.toContain("Playable");
+    expect(fx.verbs[0]).not.toContain("--playable-verify-cost-usd");
+    expect(flag(fx.verbs[0]!, "--total-cost-usd")).toBe("0.25");
   });
 
   test("red on a paused run's existing draft: no `host-verify` on the pause; at the end no `gh pr ready`, `gh pr edit <pr> --body-file` with the failures", async () => {
