@@ -63,6 +63,7 @@ SUPERVISOR = ROOT / "apps" / "supervisor"
 SUPERVISOR_GATE = "supervisor"
 SUPERVISOR_E2E = "command-line.test.ts"  # spawns `bun src/cli.ts`; run by hand, type-checked by tsc
 SUPERVISOR_FILE_TIMEOUT = 420
+SUPERVISOR_INSTALL_TIMEOUT = 300  # hole 80: `bun install --frozen-lockfile` when a fresh worktree has no node_modules
 SUPERVISOR_ENV_PREFIXES = ("TK_SUPERVISOR_", "TK_ATLASSIAN_", "TK_STUDIO_ATLASSIAN_")  # the box's seats never shape a test
 TEMP_PREFIX = "tk-verify-supervisor"
 TSC_ARGV = (["bunx", "tsc", "--noEmit", "-p", "apps/supervisor"], ["bun", "x", "tsc", "--noEmit", "-p", "apps/supervisor"])
@@ -270,6 +271,24 @@ def run_supervisor_gate() -> tuple[int, str]:
         if not failed and not files:  # the folder moved or the glob broke: 0 files is no pass
             refuse(f"== {SUPERVISOR_GATE}: no test/*.test.ts files under {SUPERVISOR / 'test'}")
         env = supervisor_env(tmp) if tmp is not None and not failed else {}
+        if not failed and files and not (SUPERVISOR / "node_modules").is_dir():
+            # Hole 80: a fresh worktree (every verify, every story whose dev session never ran `bun install`)
+            # has no node_modules; the suites cannot load (`Cannot find package 'js-yaml'`) and tsc finds no
+            # `bun` types. The gate installs what it needs, from the lockfile, before the first suite.
+            t0 = time.monotonic()
+            try:
+                rc, out = spawn(["bun", "install", "--frozen-lockfile"], SUPERVISOR, env, SUPERVISOR_INSTALL_TIMEOUT)
+            except OSError as exc:
+                rc, out = 127, f"cannot start 'bun': {exc}"
+            seconds = time.monotonic() - t0
+            if rc == 0:
+                print(f"== {SUPERVISOR_GATE}: bun install (node_modules absent) ok in {seconds:.0f}s", flush=True)
+            else:
+                shown = f"timed out after {SUPERVISOR_INSTALL_TIMEOUT}s" if rc is None else f"rc={rc}"
+                refuse(f"== {SUPERVISOR_GATE}: bun install (node_modules absent) FAILED {shown} in {seconds:.0f}s")
+                tails.append(f"--- bun install\n{out.rstrip()}")
+                files = []
+                env = {}  # no dependencies: neither the suites nor tsc can run
         for rel in files:
             t0 = time.monotonic()
             try:

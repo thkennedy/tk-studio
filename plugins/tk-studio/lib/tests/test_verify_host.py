@@ -67,6 +67,7 @@ class VerifyHostCase(unittest.TestCase):
         (self.sup / "test").mkdir(parents=True)
         for name in ("api.test.ts", "queue.test.ts", "command-line.test.ts", "fakes.ts", "tmp.ts"):
             (self.sup / "test" / name).write_text("// fixture\n", encoding="utf-8")
+        (self.sup / "node_modules").mkdir()  # hole 80: the dependencies are present unless a test removes them
         self.base = self.root / "temp"  # the gate's own temp folder, outside any checkout
         self.base.mkdir()
         self.calls: list[tuple] = []  # every gate run and spawn, in order
@@ -422,3 +423,39 @@ class TestSpawn(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDependencyInstall(VerifyHostCase):
+    """Hole 80: a fresh worktree has no node_modules; the gate installs from the lockfile before the suites."""
+    CHANGED = {"apps/supervisor": "apps/supervisor/src/queue.ts\n"}
+
+    def test_node_modules_absent_installs_first_then_runs_the_suites(self):
+        (self.sup / "node_modules").rmdir()
+        rc, out = self.run_main(self.CHANGED)
+        self.assertEqual(rc, 0, out)
+        spawns = self.spawns()
+        self.assertEqual(spawns[0][1], ("bun", "install", "--frozen-lockfile"))
+        self.assertEqual(spawns[0][2], self.sup)
+        self.assertEqual(spawns[0][4], vh.SUPERVISOR_INSTALL_TIMEOUT)
+        self.assertNotIn("TK_SUPERVISOR_NOTIFY", spawns[0][3])  # the stripped gate env, as every suite gets
+        self.assertTrue(all(s[1][:2] == ("bun", "test") for s in spawns[1:-1]), spawns)
+        self.assertIn("== supervisor: bun install (node_modules absent) ok in", out)
+
+    def test_node_modules_present_installs_nothing(self):
+        rc, out = self.run_main(self.CHANGED)
+        self.assertEqual(rc, 0, out)
+        self.assertFalse([s for s in self.spawns() if s[1][:2] == ("bun", "install")])
+        self.assertNotIn("bun install", out)
+
+    def test_failed_install_fails_the_gate_and_runs_no_suite(self):
+        (self.sup / "node_modules").rmdir()
+
+        def spawn(argv, cwd, env, timeout):
+            self.calls.append(("spawn", tuple(argv), cwd, dict(env), timeout, True))
+            return (1, "error: lockfile had changes, but lockfile is frozen\n") if argv[1] == "install" else (0, bun_out(1, 0))
+
+        rc, out = self.run_main(self.CHANGED, spawn=spawn)
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(len(self.spawns()), 1)
+        self.assertIn("== supervisor: bun install (node_modules absent) FAILED rc=1", out)
+        self.assertIn("lockfile is frozen", out)
