@@ -864,6 +864,25 @@ delete and check out the affected files again.
    an operator produces) in the SPEC's `## Design notes`, and never halts the
    dev session on them (Story 26.2).
 
+**When a host leg is red** (a supervisor run ended `partial` naming
+`verify.host`, its draft PR carrying the failures). Read the draft PR's
+`## Host verify` section (or the run's `host-verify` event) and fix the
+cause: on the branch (push the fix to `supervisor/run-<id>`), or on the box
+(a roster row, an environment fault). A fix to `verify.host` itself only
+counts once it is on the run's base in the checkout: the command is read at
+`base_ref` there, as the close-out reads it. Then re-run the leg with
+`POST /runs/<id>/verify` (bearer only, body empty or `{}`), or from
+`apps/supervisor` with `bun src/cli.ts verify <id>`. The supervisor cuts a
+fresh worktree from the branch's tip on origin, runs `verify.host` there,
+removes it, and records a new `host-verify` event (its `rerun` names the
+tip, the worktree's removal, the PR and `pr_ready`). Green marks the draft
+PR ready and the board's `host_verify` turns green; the run stays `partial`
+(its terminal state never changes). Red leaves the PR a draft: read the new
+event and fix again. A run still live is `409 RunNotEnded`, one with no
+pushed branch `409 NoBranch`, and a re-run already going `409
+VerifyRunning` (supervisor Story 33.8). This replaces the hand recipe (cut
+a worktree, run `verify.host`, flip the PR by hand).
+
 **When a supervisor run pauses** (the queue run is `paused`; its worktree,
 lock, pin and draft PR are kept). After every engine-end sweep (each tick) the
 supervisor reads the story the engine paused on (`launch.py status` →
@@ -1222,7 +1241,8 @@ Epic 21 and 22 set:
 | `hold` | (27.2/27.3) The supervisor's own `sbx exec … tail --pid` (or the resume's child) holding the engine's sandbox open. |
 | `closing-out`, `closed_out`, `lock-released` | (27.1/27.5) A late close-out took its lease; a close-out recorded on a run already ended (`orphaned: true` for the orphan pass); a kept lock freed. |
 | `close-out`, `close-out-failed`, `awaiting-ruling`, `engine-resume` | (27.3) The paused-run pass relaunched a landed run; a step failed (retried next tick); a landed story with no verdict or `escalate` (one notification); `POST /runs/{id}/resume` moved the run back to `running`. |
-| `host-verify` | (27.4) The project's `verify.host` ran on the host in the worktree: exit, duration, the last lines; or skipped and why. |
+| `host-verify` | (27.4) The project's `verify.host` ran on the host in the worktree: exit, duration, the last lines; or skipped and why. (33.8) A re-run (`POST /runs/{id}/verify`, `bun src/cli.ts verify <id>`) adds `rerun {by, head, worktree, pr, pr_ready?}`. |
+| `host-verify-leg` | (33.8) The lease of an ended run's host-leg re-run: `{owner, by}` taken, `{owner: null, released}` let go of after a failed cut; the re-run's `host-verify` closes it. |
 | `plan-status`, `plan-lease` | (27.5) The plan pull-back through `plansync.py status`: `review` when the PR opens, `done` when it merges, a skip naming why; never changes the run's state. The project that owns the plan comes from the host registry (tk-studio is registered on this box). |
 | `accounted`, `worker` | (21.6/27.5) The iteration's counts now carry `cost_usd` (`run.json`'s `total_cost_usd` is the sum across iterations); the worker record lands pid first, the start time after it (win32: `GetProcessTimes` natively). |
 | `studio-run-ended`, `studio-run-end-failed`, `finish-refused` | (27.5) A cancel's late studio-run end (or the next `recover`'s); a refused `finish` keeps the worker's own reason. |

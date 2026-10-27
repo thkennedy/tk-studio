@@ -9,6 +9,7 @@
  *   bun src/cli.ts recover
  *   bun src/cli.ts drain
  *   bun src/cli.ts serve   (the HTTP API, src/api.ts — Story 22.1)
+ *   bun src/cli.ts verify <run id>   (Story 33.8: an ended run's host leg re-run, src/hostleg.ts)
  *
  * The queue (src/queue.ts, SQLite at TK_SUPERVISOR_DB) owns minting.
  * `submit`: registry `show` → `resolve` (the plugin's one validator of
@@ -123,6 +124,7 @@ import {
   type Holder, type LaunchEngine, type Owner, type QueueRun, type RecoverReport, type RunState, type StudioEnder, type StudioFinder, type StudioOps, type StudioResumer, type TerminalState,
   type WorkerKill,
 } from "./queue";
+import { rerunHostLeg, VerifyRefused, type HostLegStarted } from "./hostleg";
 import { closeOutPaused, launchedSinceMove, resumePaused, type PausedDeps, type ResumeAnswer, type ResumeDeps as EngineResumeDeps } from "./closeout";
 import { mergePass, reviewPass, type PlanStatusDeps } from "./planstatus";
 import { resolutionPass, withQueuedPayload, withStoredPayload, type ResolutionDeps } from "./resolution";
@@ -2563,7 +2565,37 @@ const USAGE = [
   "       bun src/cli.ts recover",
   "       bun src/cli.ts drain",
   "       bun src/cli.ts serve   (the HTTP API on TK_SUPERVISOR_BIND:TK_SUPERVISOR_PORT, bearer TK_SUPERVISOR_TOKEN)",
+  "       bun src/cli.ts verify <run id>",
 ].join("\n");
+
+/** Story 33.8: the `verify` verb's seams (tests): the queue (default `Queue.open()`, closed after) and the leg
+ * (default `rerunHostLeg`, `by: "cli"`). */
+export interface VerifyVerbSeams { queue?: Queue; leg?: (queue: Queue, runId: string) => Promise<HostLegStarted> }
+
+/** Story 33.8: `bun src/cli.ts verify <run id>` — an ended run's host leg re-run in the foreground (`hostleg.ts`). One
+ * JSON object: `{ok: true, run_id, state, head, green, skipped?, reason?, pr, pr_ready?, worktree}`; exit 0 green, 1 red
+ * or skipped, 2 a refusal (`{ok: false, error, detail}`) or a usage error. */
+export async function verifyVerb(args: string[], seams: VerifyVerbSeams = {}): Promise<number> {
+  if (args.length !== 1 || !args[0]!.trim()) { console.error(USAGE); return 2; }
+  const runId = args[0]!;
+  let queue: Queue | undefined = seams.queue;
+  const owned = !queue;
+  try {
+    queue ??= Queue.open();
+    const started = await (seams.leg ?? ((q: Queue, id: string) => rerunHostLeg(q, id, { by: "cli" })))(queue, runId);
+    const r = await started.done;
+    const green = !r.skipped && r.green;
+    console.log(JSON.stringify({
+      ok: true, run_id: started.run_id, state: started.state, head: started.head, green,
+      ...(r.skipped ? { skipped: true, reason: r.reason } : {}), pr: r.rerun.pr,
+      ...(r.rerun.pr_ready !== undefined ? { pr_ready: r.rerun.pr_ready } : {}), worktree: r.rerun.worktree,
+    }, null, 2));
+    return green ? 0 : 1;
+  } catch (e) {
+    console.log(JSON.stringify(e instanceof VerifyRefused ? { ok: false, error: e.code, detail: e.message } : { ok: false, error: "VerifyFailed", detail: message(e) }, null, 2));
+    return 2;
+  } finally { if (owned) { try { queue?.close(); } catch { /* closing failed */ } } }
+}
 
 export async function main(argv: string[]): Promise<number> {
   const [cmd, ...args] = argv;
@@ -2582,6 +2614,7 @@ export async function main(argv: string[]): Promise<number> {
     // Story 28.6: every served project's starter lock is refreshed at once and every minute (fresh `since`).
     return new Promise<number>((done) => { watchStarterLocks(); watchCertificate(done); });
   }
+  if (cmd === "verify") return verifyVerb(args);
   if (cmd === "recover" || cmd === "drain") {
     if (args.length) { console.error(`unknown argument '${args[0]}'\n${USAGE}`); return 2; }
     try {

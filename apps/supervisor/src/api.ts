@@ -22,6 +22,12 @@
  *                            resumed (`resumeRun`: `bmad-loop resolve … --resume`); 200 {ok, run_id, state, engine_run_id},
  *                            400 SchemaError | MalformedJson, 404 RunNotFound, 409 RunNotPaused | ExternalRun | StoryLanded,
  *                            500 ResumeFailed
+ *   POST /runs/{id}/verify   {} (Story 33.8, `hostleg.ts`, bearer only): an ended run's host leg re-run — a fresh worktree
+ *                            cut from its pushed branch tip, `verify.host` run there as the close-out does, a new
+ *                            `host-verify` event (`rerun`), the worktree removed, a draft PR marked ready on green; the
+ *                            run's state unchanged. 202 {ok, run_id, state, verify: "started", head}, 400 SchemaError |
+ *                            MalformedJson, 404 RunNotFound, 409 ExternalRun | RunNotEnded | NoBranch | VerifyRunning,
+ *                            500 VerifyFailed
  *   GET  /status             counts per state, the live runs, the held checkout locks (JSON); Story 30.6: content-negotiated —
  *                            an `Accept` naming `text/html` answers the read-only status page (`page.ts`), any other
  *                            `Accept` (none, the wildcard, `application/json`) this JSON unchanged; both `vary: Accept`
@@ -118,6 +124,7 @@ import { boardFor, ledgerPath, type BoardAnswer } from "./board";
 import { appendChatLineHeld, ChatBusy, chatSince, checkChatBody, dropChatLineHeld, mintChatTurn, prepareChatTurn, recordIsJsonText, withChatLockAsync, type ChatDeps, type ChatLine } from "./chat";
 import { afterEngagementInput, CancelRaced, cancelRun, chatDeps, ExternalRunRefused, resumeRun, StartError, submitProject, type AgentsOption } from "./cli";
 import { ResumeRefused, type ResumeAnswer } from "./closeout";
+import { rerunHostLeg, VerifyRefused, type HostLegStarted } from "./hostleg";
 import { apiBind, apiPort, apiToken, checkTlsFiles, notifier, oauthLeftovers, sessionSecret, tlsConfig } from "./env";
 import {
   applyInput, chatPointer, checkCreateBody, checkInputBody, ENGAGEMENT_ID_RE, EngagementCounterInvalid, engagementPath, EngagementRecordInvalid,
@@ -171,6 +178,8 @@ export interface ApiDeps {
   cancel?: (runId: string) => Promise<QueueRun>;
   /** Story 27.3: the resume (default: `resumeRun` on this queue). */
   resume?: (runId: string, body: ResumeBody) => Promise<ResumeAnswer>;
+  /** Story 33.8: the host-leg re-run (default: `rerunHostLeg` on this queue, `by: "api"`); its `done` is not awaited. */
+  verify?: (runId: string) => Promise<HostLegStarted>;
   /** SSE: how often new events are polled for (ms, default 1000). */
   pollMs?: number;
   /** SSE: a keepalive comment after this long without an event (ms, default 15000). */
@@ -326,6 +335,7 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
   // Story 29.2: the cancel's agent-registry rebuild is started, not awaited: the answer never waits on it (Story 22.3).
   const cancel = deps.cancel ?? ((id: string) => cancelRun(queue, id, { agents: deps.agents, detachRebuild: (p) => { deps.onAgentsRebuild?.(p); } }));
   const resume = deps.resume ?? ((id: string, b: ResumeBody) => resumeRun(queue, id, b.restore_patch));
+  const verify = deps.verify ?? ((id: string) => rerunHostLeg(queue, id, { by: "api" }));
   const pollMs = deps.pollMs ?? 1000, keepaliveMs = deps.keepaliveMs ?? 15000;
   const clock = deps.now ?? Date.now;
   // Story 32.1: the served roots the registry last named (project id → root), refreshed on every registry read here;
@@ -774,6 +784,28 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
     }
   }
 
+  /** Story 33.8: `POST /runs/{id}/verify` (bearer only). The refusals, the lease and the cut answer here; the leg runs on. */
+  async function postVerify(req: Request, runId: string): Promise<Response> {
+    const text = await req.text();
+    let raw: unknown = {};
+    if (text.trim()) {
+      try { raw = JSON.parse(text); }
+      catch (e) { return fail(400, "MalformedJson", { detail: `the body is not JSON: ${e instanceof Error ? e.message : String(e)}` }); }
+    }
+    if (!raw || typeof raw !== "object" || Array.isArray(raw) || Object.keys(raw).length) {
+      return fail(400, "SchemaError", { detail: "the body must be empty or {}" });
+    }
+    try {
+      const started = await verify(runId);
+      started.done.catch(() => { /* the leg's result (or its failure) is the run's `host-verify` event */ });
+      return json(202, { ok: true, run_id: started.run_id, state: started.state, verify: "started", head: started.head });
+    } catch (e) {
+      if (!(e instanceof VerifyRefused)) throw e;
+      const status = e.code === "RunNotFound" ? 404 : e.code === "SchemaError" ? 400 : e.code === "VerifyFailed" ? 500 : 409;
+      return fail(status, e.code, { run_id: runId, detail: redact(e.message) });
+    }
+  }
+
   function events(req: Request, url: URL): Response {
     const stream = (req.headers.get("accept") ?? "").includes("text/event-stream");
     const lastId = req.headers.get("last-event-id");
@@ -1210,6 +1242,12 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
         if (method !== "POST") return allow("POST");
         const runId = decodeId(resumeMatch[1]);
         return runId === null ? fail(404, "RunNotFound", { run_id: resumeMatch[1] }) : await postResume(req, runId);
+      }
+      const verifyMatch = /^\/runs\/([^/]+)\/verify$/.exec(path);
+      if (verifyMatch) {
+        if (method !== "POST") return allow("POST");
+        const runId = decodeId(verifyMatch[1]);
+        return runId === null ? fail(404, "RunNotFound", { run_id: verifyMatch[1] }) : await postVerify(req, runId);
       }
       const runMatch = /^\/runs\/([^/]+)$/.exec(path);
       if (runMatch) {

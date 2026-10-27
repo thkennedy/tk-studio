@@ -1862,3 +1862,48 @@ describe("Story 33.2: one `claim-refused` per distinct key, `pass_at` updated in
     expect(fx.queue.events(run.run_id).find((e) => e.seq === r.seq)!.detail).toMatchObject({ reason: "r", resolves: "x", notify: { ok: true, via: "ntfy" } });
   });
 });
+
+describe("Story 33.8: the host-leg re-run's lease (`takeVerifyLeg`, `releaseVerifyLeg`)", () => {
+  const legs = (q: Queue, id: string) => q.events(id).filter((e) => e.kind === "host-verify-leg").map((e) => e.detail);
+
+  test("take on a terminal run; refused while its live owner holds it; a `host-verify` closes it; refused on a non-terminal run", () => {
+    const { queue, enqueue } = fixture();
+    const { run } = enqueue();
+    expect(queue.takeVerifyLeg(run.run_id, A, "api")).toBe(false); // queued: not terminal
+    expect(legs(queue, run.run_id)).toEqual([]);
+    queue.end(run.run_id, "partial", "host verify red");
+    expect(queue.takeVerifyLeg(run.run_id, A, "api")).toBe(true);
+    expect(legs(queue, run.run_id)).toEqual([{ owner: { pid: A.pid, host: A.host, nonce: A.nonce }, by: "api" }]);
+    expect(queue.takeVerifyLeg(run.run_id, A, "cli")).toBe(false); // held by a live owner (this one too)
+    expect(queue.takeVerifyLeg(run.run_id, B, "cli")).toBe(false);
+    queue.note(run.run_id, "host-verify", { green: true });
+    expect(queue.takeVerifyLeg(run.run_id, B, "cli")).toBe(true); // closed by the leg's result
+    expect(queue.get(run.run_id)!.state).toBe("partial"); // the terminal row never changes
+    expect(queue.takeVerifyLeg("q-nope", A)).toBe(false);
+  });
+
+  test("a dead owner's lease is taken over", () => {
+    const { queue, enqueue, alive } = fixture();
+    const { run } = enqueue();
+    queue.end(run.run_id, "complete");
+    expect(queue.takeVerifyLeg(run.run_id, B, "api")).toBe(true);
+    expect(queue.takeVerifyLeg(run.run_id, A, "api")).toBe(false);
+    alive.delete(B.pid);
+    expect(queue.takeVerifyLeg(run.run_id, A, "api")).toBe(true);
+  });
+
+  test("released only by its owner, and only before a `host-verify` follows it", () => {
+    const { queue, enqueue } = fixture();
+    const { run } = enqueue();
+    queue.end(run.run_id, "partial");
+    expect(queue.takeVerifyLeg(run.run_id, A)).toBe(true);
+    queue.releaseVerifyLeg(run.run_id, B); // not B's
+    expect(legs(queue, run.run_id)).toHaveLength(1);
+    queue.releaseVerifyLeg(run.run_id, A);
+    expect(legs(queue, run.run_id).at(-1)).toEqual({ owner: null, released: { pid: A.pid, host: A.host, nonce: A.nonce } });
+    expect(queue.takeVerifyLeg(run.run_id, B)).toBe(true); // let go of: B takes it
+    queue.note(run.run_id, "host-verify", { green: false });
+    queue.releaseVerifyLeg(run.run_id, B); // closed by the result: nothing appended
+    expect(legs(queue, run.run_id)).toHaveLength(3);
+  });
+});
