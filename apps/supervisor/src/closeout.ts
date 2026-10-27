@@ -6,7 +6,24 @@
  *              `paused` event (`engine.paused_story_key`, carried by `engineStatus`), and that story's spec
  *              found in the worktree (`_bmad-output/implementation-artifacts/spec-<key>.md`, else the single
  *              match of `_bmad-output/specs/<any>/stories/<key>-*.md`; only the frontmatter `status` and
- *              `reconcile_verdict` are read). Three outcomes:
+ *              `reconcile_verdict` are read). Six outcomes:
+ *                - Story 33.6, checked first among the stories that did not land: a stale render view (hole 65) —
+ *                  paused at stage `escalation` on `CRITICAL escalation from dev session`, the reason quoting a
+ *                  renderer message (`corrupt existing generation`, `generation contains unexpected or missing
+ *                  files`, `failed to verify`, `generation output hash mismatch`) or `render_skill.py` and naming
+ *                  exactly one snapshot folder `_bmad/render/<skill>/<slug>/<generation>` (any prefix, any
+ *                  separator) that resolves under `<served root>/_bmad/render/`, the story's spec `status:
+ *                  blocked` and untracked (`git -C <served root> ls-files --error-unmatch` exits 1), and the host
+ *                  sees the folder complete (`manifest.json`'s `outputs` non-empty, each a non-empty regular file;
+ *                  no hashes compared). Once per story (no `auto-resume` with `attempt: 1` for its key, under any
+ *                  engine run id): under the lease the folder is renamed aside (`<generation>.stale-<pid>-<ms>`),
+ *                  the draft removed (a failure renames the folder back), the aside folder removed best effort, the run resumed
+ *                  (`PausedDeps.resume`, default `resumePaused`; a `ResumeRefused` is recorded, never thrown), one
+ *                  `auto-resume {reason: "stale-render-view", snapshot, story_key, engine_run_id, attempt: 1,
+ *                  resumed, notify}` (`error` on a refusal) and one notifier line; a removal that fails records
+ *                  nothing and the next pass retries. A second such pause of the story: one `auto-resume
+ *                  {…, attempt: 2, resumed: false, first_at}` and one line per pause, nothing removed or resumed,
+ *                  then the 31.5 block below as before;
  *                - landed (spec `status: done`, paused at the commit gate or on an escalation) with a closable
  *                  verdict (any non-empty `reconcile_verdict` other than `escalate`): closed out — the harvest
  *                  commit, the meter harvest, the archive, the relaunch (below);
@@ -65,11 +82,11 @@
  *
  * Every command is argv only — never a shell.
  */
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
+import { existsSync, lstatSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { load as loadYaml } from "js-yaml";
 import { notifier, sbxBin } from "./env";
-import { canonicalPr, isWithin, notify, type EndNotice } from "./hygiene";
+import { canonicalPr, isWithin, notify, NOTICE_MAX_BYTES, sendText, TRUNCATED_MARKER, type EndNotice } from "./hygiene";
 import { selfOwner, servedRoot, type Owner, type Queue, type QueueEvent, type QueueRun } from "./queue";
 import { HOLD_TIMEOUT_S, parseEnginePid, sameStart, type HoldChild } from "./sandbox";
 import { lastJsonObject, runProcess, toVmPath, type RunResult } from "./server";
@@ -199,6 +216,8 @@ export interface PausedDeps extends WorktreeDeps {
   relaunch?: (queue: Queue, run: QueueRun) => Promise<() => Promise<unknown>>;
   /** This process (default `selfOwner()`). */
   self?: Owner;
+  /** Story 33.6: the auto-resume's resume (default `resumePaused` under this process; throws `ResumeRefused`). */
+  resume?: (queue: Queue, runId: string) => Promise<unknown>;
 }
 
 const envOf = (deps: WorktreeDeps): Env => deps.env ?? process.env;
@@ -505,6 +524,159 @@ async function awaitRuling(queue: Queue, run: QueueRun, l: Extract<Landing, { ou
   return true;
 }
 
+// ------------------------------------------------------------ Story 33.6: a stale render view (hole 65)
+
+/** The `auto-resume` queue event, and its `reason`. */
+export const AUTO_RESUME = "auto-resume";
+export const STALE_RENDER_VIEW = "stale-render-view";
+/** The prefix bmad-loop gives a dev session's CRITICAL escalation (`escalation.decide_dev`). */
+export const DEV_ESCALATION = "CRITICAL escalation from dev session";
+/** `render_skill.py` `_verify_existing`'s messages a stale view of an existing generation produces. */
+export const RENDER_HALT_MESSAGES = [
+  "corrupt existing generation", "generation contains unexpected or missing files", "failed to verify", "generation output hash mismatch",
+] as const;
+const NO_NOTIFIER = { ok: false, skipped: "no notifier configured (TK_SUPERVISOR_NOTIFY is unset)" };
+
+/** `_bmad/render/<skill>/<slug>/<generation>`, any separator (a path running on to a file is cut to the folder), `_bmad`
+ * at the start, after a separator or after any other character outside `[A-Za-z0-9_.-]`. */
+const SNAPSHOT_RE = /(?<![A-Za-z0-9_.-])_bmad[\\/]+render[\\/]+([A-Za-z0-9._-]+)[\\/]+([A-Za-z0-9._-]+)[\\/]+([A-Za-z0-9._-]+)/g;
+
+/** The distinct snapshot folders a reason names (`<skill>/<slug>/<generation>`); undefined when one names a `.` or
+ * `..` segment. */
+export function snapshotFolders(reason: string): string[] | undefined {
+  const out = new Set<string>();
+  for (const m of reason.matchAll(SNAPSHOT_RE)) {
+    // A path ending a sentence (`…/<generation>.`) is the folder: the generation's trailing dots are dropped.
+    const segs = [m[1]!, m[2]!, m[3]!.replace(/\.+$/, "")];
+    if (segs.some((s) => s === "" || s === "." || s === "..")) return undefined;
+    out.add(segs.join("/"));
+  }
+  return [...out];
+}
+
+/** A recognised stale-render halt: the story, its snapshot (relative to the served root, `/` separators) and the
+ * two paths the auto-resume removes. */
+export interface StaleRender { story_key: string; snapshot: string; dir: string; spec: string }
+
+/** Story 33.6: is the paused run's latest pause a stale render view (see the header)? Reads only (one argv-only
+ * `git ls-files`). The folder check (`snapshotComplete`) is separate. */
+export async function staleRenderView(run: Pick<QueueRun, "worktree" | "prefix">, events: readonly QueueEvent[], deps: WorktreeDeps = {}): Promise<StaleRender | undefined> {
+  const { story_key: key, stage, reason } = pausedStory(events);
+  if (!key || stage !== "escalation" || !reason?.includes(DEV_ESCALATION)) return undefined;
+  if (!RENDER_HALT_MESSAGES.some((m) => reason.includes(m)) && !reason.includes("render_skill.py")) return undefined;
+  const folders = snapshotFolders(reason);
+  if (!folders || folders.length !== 1 || !run.worktree) return undefined;
+  const served = servedRoot(run)!;
+  const base = resolve(served, "_bmad", "render"), dir = resolve(base, ...folders[0]!.split("/"));
+  if (!isWithin(base, dir) || dir === base) return undefined;
+  const { spec, fm } = storySpec(run, events);
+  if (!spec || fm?.status !== "blocked") return undefined;
+  const rel = relative(served, spec).split("\\").join("/");
+  try {
+    const r = await runner(deps)("git", ["-C", served, "ls-files", "--error-unmatch", "--", rel], { cwd: served, timeoutS: 30 });
+    if (r.exit !== 1) return undefined; // 0 tracked; 128, a timeout or anything else: unknown — never removed
+  } catch { return undefined; }
+  return { story_key: key, snapshot: relative(served, dir).split("\\").join("/"), dir, spec };
+}
+
+/** Story 33.6: the host sees the snapshot complete — `manifest.json` parses to an object whose `outputs` is a
+ * non-empty object, and each of its keys is a relative path inside `dir` naming a non-empty regular file. No hash
+ * is compared. */
+export function snapshotComplete(dir: string): boolean {
+  try {
+    const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf-8"));
+    const outputs = manifest?.outputs;
+    if (!outputs || typeof outputs !== "object" || Array.isArray(outputs)) return false;
+    const names = Object.keys(outputs);
+    if (names.length === 0) return false;
+    for (const name of names) {
+      const path = resolve(dir, name);
+      if (!name || isAbsolute(name) || !isWithin(dir, path) || path === resolve(dir)) return false;
+      const st = lstatSync(path);
+      if (!st.isFile() || st.size <= 0) return false;
+    }
+    return true;
+  } catch { return false; }
+}
+
+/** One notifier line: flattened, clipped to `NOTICE_MAX_BYTES` (as `claimRefusedLine`). */
+function oneLine(text: string): string {
+  const flat = text.replace(/\s*\r?\n\s*/g, " ");
+  if (Buffer.byteLength(flat, "utf-8") <= NOTICE_MAX_BYTES) return flat;
+  const budget = NOTICE_MAX_BYTES - Buffer.byteLength(TRUNCATED_MARKER, "utf-8");
+  let out = "", used = 0;
+  for (const ch of flat) {
+    const n = Buffer.byteLength(ch, "utf-8");
+    if (used + n > budget) break;
+    out += ch; used += n;
+  }
+  return `${out}${TRUNCATED_MARKER}`;
+}
+
+/** Story 33.6's lines (attempt 1 resumed, attempt 1 refused, attempt 2). */
+export const autoResumedLine = (runId: string, key: string, snapshot: string): string =>
+  oneLine(`supervisor: run ${runId} auto-resumed: story ${key} halted on a stale render view of ${snapshot} (attempt 1)`);
+export const autoResumeRefusedLine = (runId: string, key: string, snapshot: string, error: string): string =>
+  oneLine(`supervisor: run ${runId} stays paused: auto-resume of story ${key} after a stale render view of ${snapshot} refused: ${error}`);
+export const secondHaltLine = (runId: string, key: string, snapshot: string, firstAt: string): string =>
+  oneLine(`supervisor: run ${runId} stays paused for the operator: story ${key} halted on a stale render view of ${snapshot} again after the auto-resume at ${firstAt}`);
+
+/** The story's attempt — an `auto-resume` with its key and `attempt: 1`, under any engine run id. */
+export const autoResumeAttempt = (events: readonly QueueEvent[], key: string): QueueEvent | undefined =>
+  events.find((e) => e.kind === AUTO_RESUME && e.detail?.story_key === key && e.detail?.attempt === 1);
+
+/** An `attempt: 2` record for the story since the run's latest `paused` event. */
+export function secondHaltRecorded(events: readonly QueueEvent[], key: string): boolean {
+  const pause = events.findLastIndex((e) => e.kind === "paused");
+  return events.slice(pause + 1).some((e) => e.kind === AUTO_RESUME && e.detail?.story_key === key && e.detail?.attempt === 2);
+}
+
+/** One line through the notifier; its outcome for the event (`awaitRuling`'s `none` skip). Never throws. */
+async function sendLine(deps: PausedDeps, text: string): Promise<Record<string, unknown>> {
+  try {
+    const selected = notifier(deps.hygiene?.env ?? envOf(deps));
+    return selected.kind === "none" ? { ...NO_NOTIFIER } : await sendText(selected, text, deps.hygiene?.fetch ?? fetch);
+  } catch (e) { return { ok: false, error: clip(message(e)) }; }
+}
+
+/** Attempt 1 (under the lease): remove the snapshot and the draft, resume, record, notify. Never throws. The folder
+ * is first renamed aside atomically (the renderer writes the original path, so a leftover is harmless), then the
+ * draft removed; a failure of either leaves both as they were (the folder renamed back), records nothing, and the
+ * next pass tries again. */
+async function autoResume(queue: Queue, run: QueueRun, s: StaleRender, deps: PausedDeps, self: Owner): Promise<void> {
+  const aside = `${s.dir}.stale-${process.pid}-${Date.now()}`;
+  try { renameSync(s.dir, aside); } catch { return; /* nothing changed: the next pass tries again */ }
+  try { rmSync(s.spec); } catch {
+    try { renameSync(aside, s.dir); } catch { /* best effort */ }
+    return;
+  }
+  try { rmSync(aside, { recursive: true, force: true }); } catch { /* a leftover is harmless */ }
+  const resume = deps.resume ?? ((q: Queue, id: string) => resumePaused(q, id, {}, { ...deps, self }));
+  let error: string | undefined;
+  try { await resume(queue, run.run_id); }
+  catch (e) { error = e instanceof ResumeRefused ? clip(e.message) : `ResumeFailed: ${clip(message(e))}`; }
+  const notify = await sendLine(deps, error === undefined
+    ? autoResumedLine(run.run_id, s.story_key, s.snapshot)
+    : autoResumeRefusedLine(run.run_id, s.story_key, s.snapshot, error));
+  try {
+    queue.note(run.run_id, AUTO_RESUME, {
+      reason: STALE_RENDER_VIEW, snapshot: s.snapshot, story_key: s.story_key, engine_run_id: run.engine_run_id, attempt: 1,
+      resumed: error === undefined, ...(error !== undefined ? { error } : {}), notify,
+    });
+  } catch { /* not recorded */ }
+}
+
+/** Attempt 2 (under the lease): one record and one line for this pause; nothing removed or resumed. Never throws. */
+async function noteSecondHalt(queue: Queue, run: QueueRun, s: StaleRender, first: QueueEvent, deps: PausedDeps): Promise<void> {
+  const notify = await sendLine(deps, secondHaltLine(run.run_id, s.story_key, s.snapshot, first.at));
+  try {
+    queue.note(run.run_id, AUTO_RESUME, {
+      reason: STALE_RENDER_VIEW, snapshot: s.snapshot, story_key: s.story_key, engine_run_id: run.engine_run_id, attempt: 2,
+      resumed: false, first_at: first.at, notify,
+    });
+  } catch { /* not recorded: the next pass records it */ }
+}
+
 /** The paused-run pass (see the header). Answers the runs it closed out (relaunched, out of `paused`) and the runs it
  * newly recorded awaiting a ruling. Never throws. */
 export async function closeOutPaused(queue: Queue, deps: PausedDeps = {}): Promise<{ closed: string[]; awaiting: string[] }> {
@@ -518,12 +690,28 @@ export async function closeOutPaused(queue: Queue, deps: PausedDeps = {}): Promi
       if (!existsSync(servedRoot(r)!)) continue;
       const l = landing(r, queue.events(r.run_id));
       if (l.outcome === "not-landed") {
+        // Story 33.6: a stale render view is auto-resumed once per story; a second one is recorded for the
+        // operator, then falls through to the block below unchanged.
+        const s = await staleRenderView(r, queue.events(r.run_id), deps);
+        if (s && snapshotComplete(s.dir)) {
+          const seen = autoResumeAttempt(queue.events(r.run_id), s.story_key);
+          if (!seen || !secondHaltRecorded(queue.events(r.run_id), s.story_key)) {
+            const run = queue.takeForCloseOut(r.run_id, self);
+            if (!run || run.state !== "paused") continue;
+            taken = true;
+            // Re-read under the lease: a concurrent pass (serve and the sweep) may have recorded the attempt
+            // between the read above and the take; a recorded attempt 1 makes this the attempt-2 path.
+            const events = queue.events(r.run_id), first = autoResumeAttempt(events, s.story_key);
+            if (!first) { await autoResume(queue, run, s, deps, self); continue; }
+            if (!secondHaltRecorded(events, s.story_key) && snapshotComplete(s.dir)) await noteSecondHalt(queue, run, s, first, deps);
+          }
+        }
         // Story 31.5: a dev session's `blocked` end, or an engine-raised escalation (paused at stage `escalation`,
         // the spec neither done nor blocked), owes the block (no ruling record, no notification); any other story
         // that did not land is left paused for the resume (AC3).
         const b = devBlocked(r, queue.events(r.run_id)) ?? escalationBlocked(r, queue.events(r.run_id));
         if (!b || !trackOwed(r, queue.events(r.run_id), b.story_key)) continue;
-        const run = queue.takeForCloseOut(r.run_id, self);
+        const run = taken ? queue.get(r.run_id) : queue.takeForCloseOut(r.run_id, self);
         if (!run || run.state !== "paused") continue;
         taken = true;
         await trackBlock(queue, run, b, deps);

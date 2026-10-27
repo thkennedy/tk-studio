@@ -322,6 +322,31 @@ the detail naming the file and "fix it by hand"); no tracked list or no
 policy is advisory. `[limits]` stays read-only. Every other field, verb
 and outcome is unchanged.
 
+**0.1.28 (Story 33.6, additive).** The paused-run pass gains the queue
+event `auto-resume` (hole 65: a stale sandbox view of a fresh render
+snapshot). A run paused at stage `escalation` whose engine `paused_reason`
+is a dev session's CRITICAL escalation quoting a `render_skill.py` message
+(or naming `render_skill.py`) and exactly one snapshot folder
+`_bmad/render/<skill>/<slug>/<generation>` that resolves under the served
+root, whose story's spec is `status: blocked` and untracked, and whose
+folder the host sees complete (every `manifest.json` output present and
+non-empty; no hash compared), is handled before the Story 31.5 block. Once
+per story, under any engine run id: the folder and the draft spec are
+removed, the run resumed through `POST /runs/{id}/resume`'s path, and one
+`auto-resume {reason: "stale-render-view", snapshot, story_key,
+engine_run_id, attempt: 1, resumed, notify}` recorded (`error`
+`"<code>: <detail>"` when the resume refused; the run then stays
+`paused`), with one notifier line (`supervisor: run <run_id> auto-resumed:
+story <key> halted on a stale render view of <snapshot> (attempt 1)`, or
+the `stays paused: … refused: <error>` line). A second such pause of the
+same story records one `auto-resume {…, attempt: 2, resumed: false,
+first_at}` and one line per pause (`supervisor: run <run_id> stays paused
+for the operator: … again after the auto-resume at <first_at>`), removes
+and resumes nothing, and the Story 31.5 block follows unchanged. `snapshot`
+is relative to the served root with `/` separators; `notify` is the send's
+outcome (`{ok: false, skipped: …}` with no notifier). The pass's answer
+and every other field, kind and route is unchanged.
+
 **The rules a consumer may rely on** (the landed Story 29.3 rules, stated
 in full in the README's "The office projection (Story 29.3)" bullet):
 
