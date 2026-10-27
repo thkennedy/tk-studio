@@ -97,6 +97,14 @@
     tested on the producer's output. Readers treat a missing `engine` or `playable`
     as not run. The leg's `green` is host green && engine not red && playable not
     fail. Extend the 0.1.29 paragraph and do not bump the version.
+    Gate note (from 34-2, 2026-10-27): `playable.py run` defaults to `--mode movie`
+    (the ruling; movie needs the logged-in desktop). Exit 0 is a pass, 1 a fail and
+    2 a refusal (unset or relative `GODOT`, no `PlayableHarness` autoload, `--out`
+    inside the Godot project folder). A `pass` report can carry a non-empty
+    `log_errors[]` (shutdown lines after `PLAYABLE: harness detached`), so read
+    `verdict`, never `log_errors` emptiness. `frames[]` may hold moment and
+    failing-tick frames. Oversize: the plan sizes this story past band L. Halt if
+    the Files list in plans/34-3.md grows.
 
 - id: "34-4-engine-knowledge-pinned-per-project"
   title: "Engine Knowledge, Pinned per Project"

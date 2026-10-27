@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "scene": "res://Main.tscn",
+  "capture_every": 30,
+  "frame_budget_ms": 33.3,
+  "inputs": [
+    {"tick": 30, "action": "ui_right", "pressed": true, "strength": 1.0, "hold_ticks": 30},
+    {"tick": 75, "action": "ui_accept"}
+  ],
+  "random_inputs": {"actions": ["ui_left", "ui_right"], "every": 45},
+  "invariants": [
+    {"name": "the main scene is loaded", "kind": "node_exists", "path": "/root/Main"},
+    {"name": "no error line in the log", "kind": "no_error_log"},
+    {"name": "the frame time stays under the budget", "kind": "frame_time_under", "budget_ms": 33.3, "from_tick": 10}
+  ],
+  "moments": [
+    {"name": "after moving right", "tick": 60}
+  ]
+}

@@ -353,7 +353,7 @@ describe("Story 34.1: the engine gate runs after a green verify.host", () => {
     for (const tail of ["  engine: 5\n", "  engine: \"\"\n", "  engine: \"  \"\n", "  engine: [godot]\n", "  engine:\n"]) {
       expect(await verifyCommand(project(hostKey("bun test") + tail).run)).toMatchObject({ engine: { skipped: "verify.engine is not a non-empty string" } });
     }
-  });
+  }, 60_000); // hole 79: seven real repositories and worktrees in one case; bun's 5 s default was a coin toss on the agent PC
 
   test("ordering: host green then engine green → one result, `green: true`, the host spawned before the engine, in the worktree", async () => {
     const config = verifyKeys({ host: "uv run tools/verify_host.py", engine: "bash scripts/engine-gate.sh" });

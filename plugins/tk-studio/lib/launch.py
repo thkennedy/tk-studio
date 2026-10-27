@@ -53,6 +53,12 @@ Guarantees:
     (`<store>/sandboxes/<sandbox>.pin`) is named as a warning ("started
     outside the supervisor; the next pin restarts it"). `sbx daemon status`
     runs before `sbx ls`, and no other sbx command runs.
+  - `check` reports the playable path (Story 34.2) as one advisory row
+    after the engine sandbox, never a gap: for a project whose tracked
+    `.tk-studio/config.yaml` declares `verify.engine`, a `GODOT` that is
+    unset or not an absolute file, or no display session for the ruled
+    path (`PLAYABLE_PATH`, shared with `playable.py`), reads as a warning;
+    it starts no engine.
   - `check` launches nothing; its one write (Story 33.5, hole 62) is the
     policy's `[verify] commands`, reconciled from a tracked list — the
     project's `.tk-studio/config.yaml` `engine.verify_commands` when the key
@@ -660,6 +666,73 @@ def engine_sandbox_row(env=None) -> dict:
     return row("; ".join(parts))
 
 
+# ----------------------------------------------------- the playable path
+
+PLAYABLE_PATH_CHECK = "playable path"
+# The ruled rendering path (kb/playable-verify-on-the-box.md `## Ruling`);
+# playable.py's default `--mode` is the same constant (a test pins both).
+PLAYABLE_PATH = "movie"
+NO_GODOT_WARNING = ("warning: no $env:GODOT (unset or not an absolute file); "
+                    "playable runs refuse")
+NO_DISPLAY_WARNING = ("warning: no display session; the {path} path needs "
+                      "the logged-in desktop")
+
+
+def display_session(env=None) -> bool:
+    """Whether a logged-in display session is there. Windows: the input
+    desktop opens (a locked console or no session does not); POSIX:
+    ``DISPLAY`` or ``WAYLAND_DISPLAY``. Module-level so tests inject a
+    fake; may raise (the row reads the error)."""
+    env = os.environ if env is None else env
+    if sys.platform == "win32":
+        import ctypes
+        user32 = ctypes.windll.user32
+        user32.OpenInputDesktop.restype = ctypes.c_void_p
+        user32.CloseDesktop.argtypes = [ctypes.c_void_p]
+        handle = user32.OpenInputDesktop(0, False, 0x0100)  # DESKTOP_SWITCHDESKTOP
+        if not handle:
+            return False
+        user32.CloseDesktop(handle)
+        return True
+    return bool((env.get("DISPLAY") or "").strip()
+                or (env.get("WAYLAND_DISPLAY") or "").strip())
+
+
+def playable_path_row(root: Path, env=None) -> dict:
+    """Story 34.2: the advisory ``playable path`` row (``ok`` always true,
+    never a gap). A project without ``verify.engine`` in its tracked config
+    reads ``not a game project (no verify.engine)``; then ``GODOT`` (an
+    absolute file) and, for the ``display`` and ``movie`` paths, a display
+    session; otherwise ``ready (<path>)``. Starts nothing."""
+    env = os.environ if env is None else env
+
+    def row(detail: str) -> dict:
+        return {"check": PLAYABLE_PATH_CHECK, "ok": True, "detail": detail}
+
+    engine = None
+    config = root / CONFIG_REL
+    if config.is_file():
+        try:
+            doc = miniyaml.load(config)
+        except (OSError, UnicodeDecodeError, miniyaml.MiniYamlError):
+            doc = None
+        verify = doc.get("verify") if isinstance(doc, dict) else None
+        engine = verify.get("engine") if isinstance(verify, dict) else None
+    if not (isinstance(engine, str) and engine.strip()):
+        return row("not a game project (no verify.engine)")
+    godot = (env.get("GODOT") or "").strip()
+    if not godot or not Path(godot).is_absolute() or not Path(godot).is_file():
+        return row(NO_GODOT_WARNING)
+    if PLAYABLE_PATH in ("display", "movie"):
+        try:
+            present = display_session(env)
+        except Exception as exc:  # noqa: BLE001 - never raise out of check
+            return row(f"warning: display session unknown ({exc})")
+        if not present:
+            return row(NO_DISPLAY_WARNING.format(path=PLAYABLE_PATH))
+    return row(f"ready ({PLAYABLE_PATH})")
+
+
 # --------------------------------------------------------------------- verbs
 
 def check(project_root: Path, spec_folder: str) -> dict:
@@ -715,6 +788,8 @@ def check(project_root: Path, spec_folder: str) -> dict:
                               else "absent — the run will have no gate session (advisory)")})
     # Story 33.3: advisory like the plugin row — never a gap
     checks.append(engine_sandbox_row())
+    # Story 34.2: advisory too — never a gap, starts no engine
+    checks.append(playable_path_row(root))
 
     try:
         live = live_runs(list_runs(root))
