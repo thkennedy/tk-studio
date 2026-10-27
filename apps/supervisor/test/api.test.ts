@@ -441,6 +441,30 @@ describe("read routes (AC4)", () => {
     } finally { rmSync(work, { recursive: true, force: true }); }
   });
 
+  test("Story 33.7 (0.1.28): GET /status carries `pacer {last_tick_ms, last_drain_ms, last_pass_at}`, nulls before a pass, JSON vary Accept", async () => {
+    const fx = fixture();
+    const work = tempDir("tk-sup-api-work-");
+    const status = async (env: Record<string, string | undefined>) => {
+      const handler = createApi({ queue: fx.queue, token: TOKEN, env, pollMs: 10 });
+      const res = await handler(new Request(`${BASE}/status`, { headers: { authorization: `Bearer ${TOKEN}` } }));
+      expect(res.status).toBe(200);
+      expect(res.headers.get("vary")).toBe("Accept");
+      expect(res.headers.get("content-type")).toBe("application/json; charset=utf-8");
+      return (await res.json() as Record<string, any>).pacer;
+    };
+    try {
+      const nulls = { last_tick_ms: null, last_drain_ms: null, last_pass_at: null };
+      expect(await status({})).toEqual(nulls);
+      const env = { TK_SUPERVISOR_WORK: work };
+      expect(await status(env)).toEqual(nulls);
+      mkdirSync(join(work, "supervisor"), { recursive: true });
+      writeFileSync(join(work, "supervisor", "pacer.json"), JSON.stringify({ last_tick_ms: 812, last_drain_ms: 4021, last_pass_at: "2026-10-27T02:00:04.021Z" }));
+      const pacer = await status(env);
+      expect(pacer).toEqual({ last_tick_ms: 812, last_drain_ms: 4021, last_pass_at: "2026-10-27T02:00:04.021Z" });
+      expect(Object.keys(pacer)).toEqual(["last_tick_ms", "last_drain_ms", "last_pass_at"]);
+    } finally { rmSync(work, { recursive: true, force: true }); }
+  });
+
   test("GET /events?since= polls events with seq > since; a bad since is 400", async () => {
     const fx = fixture();
     fx.enqueue("a");

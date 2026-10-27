@@ -17,12 +17,20 @@
  * `start.ps1`'s `$LASTEXITCODE` (and the keeper's exit-75 rule) read the child's exit as before. Ctrl+C reaches the
  * child through the shared console; the tee ignores SIGINT (and SIGBREAK on Windows) while the child runs, so it
  * outlives the child to log its `stopped` line, and forwards nothing and kills nothing.
+ *
+ * A pacer pass (Story 33.7): `--tag <tick|drain> --pass -- …` (only `start.ps1`'s `Invoke-PacerStep` passes it; the
+ * recover step never does) also times the child from spawn to `close` and, before its `stopped` line, appends
+ * `pass: <ms> ms, exit <code>`; a pass over `SLOW_PASS_MS` appends `warning: pass <tag> took <ms> ms (over 10 min),
+ * driving <run ids>` (the queue run ids its output named) and sends that line once through the notifier. The last
+ * pass of each step lands in `<TK_SUPERVISOR_WORK>/supervisor/pacer.json` (`readPacer`), served on `GET /status` as
+ * `pacer` (contract 0.1.28) and shown on the status page.
  */
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import { workDir } from "./env";
+import { notifier, workDir } from "./env";
+import { NOTICE_MAX_BYTES, sendText } from "./hygiene";
 import { redactCredentials, tailLines } from "./page";
 
 type Env = Record<string, string | undefined>;
@@ -112,6 +120,77 @@ export function readLogTail(env: Env, now: () => number, n = TAIL_LINES): LogTai
   catch { return { path, last_lines: [], note: "no log" }; }
 }
 
+// ------------------------------------------------------------ the pacer's last pass (Story 33.7)
+
+/** A pass longer than this (ms, 10 min) is logged as a warning and sent once through the notifier. */
+export const SLOW_PASS_MS = 600_000;
+/** The pacer steps a `--pass` may time. */
+export const PASS_TAGS = ["tick", "drain"] as const;
+/** The last pass of each pacer step: `GET /status`'s `pacer` (contract 0.1.28) and the page's line. */
+export type Pacer = { last_tick_ms: number | null; last_drain_ms: number | null; last_pass_at: string | null };
+
+const NO_PACER: Pacer = { last_tick_ms: null, last_drain_ms: null, last_pass_at: null };
+/** The queue run id shape (`queue.ts` `mintRunId`: `q-<job id>-<yyyymmddThhmmssZ>-<6 hex>`). */
+const RUN_ID = /\bq-[A-Za-z0-9][A-Za-z0-9._-]*-\d{8}T\d{6}Z-[0-9a-f]{6}\b/g;
+/** Run ids a slow-pass warning names before `+<n> more`. */
+const NAMED_IDS = 5;
+
+/** `<TK_SUPERVISOR_WORK>/supervisor/pacer.json`, or undefined when the work folder is unset. */
+export function pacerPath(env: Env = process.env): string | undefined {
+  const work = workDir(env);
+  return work ? join(work, "supervisor", "pacer.json") : undefined;
+}
+
+/** The last pacer passes: each field a number, an ISO string or `null`; all `null` when the file is absent,
+ * unreadable or invalid, or the work folder is unset. Never throws. */
+export function readPacer(env: Env = process.env): Pacer {
+  const path = pacerPath(env);
+  if (!path) return { ...NO_PACER };
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf8"));
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ...NO_PACER };
+    const ms = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+    return {
+      last_tick_ms: ms(raw.last_tick_ms), last_drain_ms: ms(raw.last_drain_ms),
+      last_pass_at: typeof raw.last_pass_at === "string" && raw.last_pass_at ? raw.last_pass_at : null,
+    };
+  } catch { return { ...NO_PACER }; }
+}
+
+/** Records one pass (read-modify-write: only its step's field and `last_pass_at`), atomically (a temp file, then a
+ * rename). Nothing is written with the work folder unset; a failure is swallowed (the log line still stands). */
+export function writePacer(env: Env, tag: (typeof PASS_TAGS)[number], ms: number, at: string): void {
+  const path = pacerPath(env);
+  if (!path) return;
+  const tmp = `${path}.tmp-${process.pid}`;
+  try {
+    const next: Pacer = { ...readPacer(env), [`last_${tag}_ms`]: ms, last_pass_at: at };
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(tmp, JSON.stringify(next) + "\n");
+    renameSync(tmp, path);
+  } catch {
+    try { unlinkSync(tmp); } catch { /* never written */ }
+  }
+}
+
+/** The slow-pass warning: the step, the duration and the run ids its output named (at most `NAMED_IDS`). */
+export function slowPassLine(tag: string, ms: number, ids: string[]): string {
+  const named = ids.length === 0 ? "no run named"
+    : ids.slice(0, NAMED_IDS).join(", ") + (ids.length > NAMED_IDS ? ` +${ids.length - NAMED_IDS} more` : "");
+  return `warning: pass ${tag} took ${ms} ms (over 10 min), driving ${named}`;
+}
+
+/** The longest prefix of `s` (whole code points) within `max` UTF-8 bytes. */
+function clipUtf8(s: string, max: number): string {
+  if (Buffer.byteLength(s, "utf-8") <= max) return s;
+  let out = "";
+  for (const ch of s) {
+    if (Buffer.byteLength(out + ch, "utf-8") > max) break;
+    out += ch;
+  }
+  return out;
+}
+
 // ------------------------------------------------------------ the tee
 
 export interface TeeIo {
@@ -120,15 +199,21 @@ export interface TeeIo {
   /** The bun that runs the child (default `process.execPath`). */
   execPath?: string;
   cwd?: string;
+  /** The slow-pass notifier send's fetch (default the global; Story 33.7). */
+  fetch?: (input: string, init?: RequestInit) => Promise<Response>;
 }
 
-const USAGE = `usage: bun src/log.ts --tag <${LOG_TAGS.join("|")}> -- <bun script> [args...]`;
+const USAGE = `usage: bun src/log.ts --tag <${LOG_TAGS.join("|")}> [--pass] -- <bun script> [args...]  (--pass only with ${PASS_TAGS.join("|")})`;
 const ERROR_LINE = /^(error|uncaught|unhandled)/i;
 
-/** `--tag <tag> -- <script> [args…]`, or null (the usage). */
-export function parseTeeArgs(argv: string[]): { tag: LogTag; args: string[] } | null {
-  if (argv[0] !== "--tag" || !(LOG_TAGS as readonly string[]).includes(argv[1] ?? "") || argv[2] !== "--" || argv.length < 4) return null;
-  return { tag: argv[1] as LogTag, args: argv.slice(3) };
+/** `--tag <tag> [--pass] -- <script> [args…]` (`--pass` only with `tick` or `drain`), or null (the usage). */
+export function parseTeeArgs(argv: string[]): { tag: LogTag; pass: boolean; args: string[] } | null {
+  if (argv[0] !== "--tag" || !(LOG_TAGS as readonly string[]).includes(argv[1] ?? "")) return null;
+  const pass = argv[2] === "--pass";
+  if (pass && !(PASS_TAGS as readonly string[]).includes(argv[1]!)) return null;
+  const sep = pass ? 3 : 2;
+  if (argv[sep] !== "--" || argv.length < sep + 2) return null;
+  return { tag: argv[1] as LogTag, pass, args: argv.slice(sep + 1) };
 }
 
 /** The tee's body (injectable for the test): answers the exit code the wrapper exits with (the child's; `null` → 1;
@@ -136,19 +221,41 @@ export function parseTeeArgs(argv: string[]): { tag: LogTag; args: string[] } | 
 export function runUnderLog(argv: string[], env: Env, now: () => number, io: TeeIo): Promise<number> {
   const parsed = parseTeeArgs(argv);
   if (!parsed) { io.stderr(USAGE + "\n"); return Promise.resolve(2); }
-  const { tag, args } = parsed;
+  const { tag, pass, args } = parsed;
   const log = (text: string) => { try { appendLine(env, tag, text, now); } catch { /* the console still has it */ } };
   return new Promise<number>((resolve) => {
     let settled = false;
     let errorLine: string | null = null;
+    const runIds: string[] = [];
+    let started = 0;
     const finish = (code: number, why: string) => {
       if (settled) return;
       settled = true;
       if (code !== 0 && errorLine !== null && !/^uncaught:/i.test(errorLine)) log(`uncaught: ${errorLine}`);
-      log(`stopped (${why})`);
-      resolve(code);
+      let sent: Promise<unknown> = Promise.resolve();
+      if (pass) {
+        const end = now();
+        const ms = Math.max(0, end - started);
+        log(`pass: ${ms} ms, exit ${code}`);
+        if (ms > SLOW_PASS_MS) {
+          const warning = slowPassLine(tag, ms, runIds);
+          log(warning);
+          sent = (async () => {
+            try {
+              const n = notifier(env);
+              if (n.kind !== "none") await sendText(n, clipUtf8(warning, NOTICE_MAX_BYTES), io.fetch ?? fetch);
+            } catch { /* a notifier unset, misconfigured or failing: the log line stands */ }
+          })();
+        }
+        writePacer(env, tag as (typeof PASS_TAGS)[number], ms, new Date(end).toISOString());
+      }
+      void sent.then(() => {
+        log(`stopped (${why})`);
+        resolve(code);
+      });
     };
     log(`started: bun ${args.join(" ")}`);
+    started = now();
     let child: ReturnType<typeof spawn>;
     try {
       child = spawn(io.execPath ?? process.execPath, args, { stdio: ["inherit", "pipe", "pipe"], env, cwd: io.cwd, windowsHide: false });
@@ -164,6 +271,7 @@ export function runUnderLog(argv: string[], env: Env, now: () => number, io: Tee
         const text = raw.replace(/\r$/, "");
         write(text + "\n");
         log(text);
+        if (pass) for (const id of text.match(RUN_ID) ?? []) if (!runIds.includes(id)) runIds.push(id);
         if (isErr && ERROR_LINE.test(text.trim())) errorLine = text.trim();
       };
       const done = new Promise<void>((ok) => {

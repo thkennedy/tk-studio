@@ -12,7 +12,7 @@ import { closeSync, fstatSync, openSync, readFileSync, readSync } from "node:fs"
 import { homedir, hostname, userInfo } from "node:os";
 import { basename, join } from "node:path";
 import { studioHome } from "./env";
-import { readLogTail, type LogTail } from "./log";
+import { readLogTail, readPacer, type LogTail, type Pacer } from "./log";
 import { isTerminal, type Holder, type LockRow, type Queue, type QueueEvent, type QueueRun } from "./queue";
 import { projectOffice, type OfficeHub, type OfficeView } from "./office";
 import { readAgents, type AgentRow } from "./registry";
@@ -94,6 +94,9 @@ export interface PageData {
   /** Story 33.1: the supervisor log's last lines (`readLogTail`, as `GET /status` carries them). `gatherPage` always
    * fills it; absent (a hand-built `PageData`), the section notes no log. */
   log?: LogTail;
+  /** Story 33.7: the pacer's last passes (`readPacer`, as `GET /status` carries them). `gatherPage` always fills it;
+   * absent (a hand-built `PageData`), no pacer line. */
+  pacer?: Pacer;
   /** For the renderer's redaction. */
   secrets: { token: string; env: Env };
 }
@@ -277,6 +280,7 @@ export async function gatherPage(deps: PageDeps): Promise<PageData> {
 
   const ledger = readLedgerTail(env, deps.ledger);
   const log = readLogTail(env, deps.now ?? Date.now);
+  const pacer = readPacer(env);
 
   let registry: PageData["registry"];
   try {
@@ -301,7 +305,7 @@ export async function gatherPage(deps: PageDeps): Promise<PageData> {
 
   return {
     generated: new Date().toISOString(), counts, jobs: queue.jobs(), runs, runsOmitted: Math.max(0, all.length - shown.length),
-    locks, statusBlocks, ledger, log, registry, agents: { rebuilt_at: read.rebuilt_at, byProject }, office,
+    locks, statusBlocks, ledger, log, pacer, registry, agents: { rebuilt_at: read.rebuilt_at, byProject }, office,
     web: { built: webRoot(deps.web ?? {}) !== null }, secrets: { token: deps.token, env },
   };
 }
@@ -502,6 +506,12 @@ ${l.reason ? `<p class="reason">${t(l.reason)}</p>` : ""}
       ? `<p class="meta">${t(data.log.path)} (last ${data.log.last_lines.length} lines)</p><pre>${data.log.last_lines.map((l) => t(l)).join("\n")}</pre>`
       : note(data.log.note ?? `${data.log.path ?? "the log"} is empty`))
     : note("no log");
+  // Story 33.7: the pacer line opens the section (each missing value `-`).
+  const pc = data.pacer;
+  const pacer = !pc ? ""
+    : pc.last_tick_ms === null && pc.last_drain_ms === null && pc.last_pass_at === null
+      ? `<p class="meta">pacer: no pass recorded</p>`
+      : `<p class="meta">${t(`pacer: last tick ${pc.last_tick_ms ?? "-"} ms · last drain ${pc.last_drain_ms ?? "-"} ms · last pass ${pc.last_pass_at ?? "-"}`)}</p>`;
 
   const registry = data.registry.ok
     ? (Object.keys(data.registry.projects).length ? Object.entries(data.registry.projects).map(([id, e]) =>
@@ -539,7 +549,7 @@ ${lines ? `<ul>${lines}</ul>` : note(elsewhere(r.project))}</div>`;
 <section id="locks"><h2>Kept locks</h2>${locks}</section>
 <section id="status-blocks"><h2>Latest status blocks</h2>${blocks}</section>
 <section id="workspaces"><h2>Run workspaces</h2>${workspaces}</section>
-<section id="log"><h2>Supervisor log</h2>${log}</section>
+<section id="log"><h2>Supervisor log</h2>${pacer}${log}</section>
 <section id="ledger"><h2>Ledger tail</h2>${ledger}</section>
 <section id="registry"><h2>Registry projects</h2>${registry}</section>
 <section id="agents"><h2>Agents</h2>${agents}</section>

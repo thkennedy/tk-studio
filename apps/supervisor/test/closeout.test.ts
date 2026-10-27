@@ -12,8 +12,8 @@ import { closableVerdict, closeOutPaused, ESCALATION_BLOCKED_REASON, findSpec, f
 import { renderPage, type PageData } from "../src/page";
 import { Queue, type Owner, type Probes } from "../src/queue";
 import { runProcess, toVmPath, type RunResult } from "../src/server";
-import { COPIED_RUNTIME, launchedCloseOutInput, sweepEngines } from "../src/worktree";
-import { fakeSbx, fakeStudioRoot, gitRepo, RUNTIME_GITIGNORE, testGit } from "./fakes";
+import { COPIED_RUNTIME, launchedCloseOutInput, storyLandedBeforeStop, sweepEngines } from "../src/worktree";
+import { fakeGh, fakeSbx, fakeStudioRoot, gitRepo, RUNTIME_GITIGNORE, testGit } from "./fakes";
 import { tempDir } from "./tmp";
 
 const SB = "claude-p";
@@ -981,6 +981,182 @@ describe("AC3: a story with no landed work is left for the resume", () => {
       if (state === "partial") expect(finishes[0]).toContain(`relaunched engine ended '${status}'`);
       else expect(finishes[0]).not.toContain("--reason");
     }
+  });
+
+  // Story 33.7 (hole 59): a resumed or relaunched engine's graceful `stopped` ends `complete` when its journal says
+  // the story it was driving landed (its last story entry a `story-done`), `partial` when it stopped before.
+  describe("a resumed or relaunched engine's graceful stop (Story 33.7, AC1)", () => {
+    /** The engine journal at `<served root>/.bmad-loop/runs/<engine>/journal.jsonl` (raw lines kept as given). */
+    const journal = (wt: string, engine: string, entries: (Record<string, unknown> | string)[]) => {
+      const dir = join(wt, ".bmad-loop", "runs", engine);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "journal.jsonl"), entries.map((e) => (typeof e === "string" ? e : JSON.stringify(e))).join("\n") + "\n");
+    };
+    const at = (kind: string, extra: Record<string, unknown> = {}) => ({ ts: "2026-10-27T00:00:00Z", kind, ...extra });
+    /** A paused run resumed through `POST /runs/{id}/resume`'s pass, its resolve child handed back. */
+    const resumed = async () => {
+      const fx = await pausedRun({ status: "in-progress" });
+      const p = passDeps(fx);
+      sbx.answer({ resume_pid: "7001 200000" });
+      try { await resumePaused(fx.queue, fx.run.run_id, {}, { ...p.deps, pidPolls: 40, pollMs: 25 }); }
+      finally { sbx.answer({}); }
+      for (let i = 0; i < 100 && !handedBack(fx); i++) await Bun.sleep(20);
+      expect((ev(fx.queue, fx.run.run_id, "launched").at(-1)!.detail as Record<string, any>).resumed).toBe(true);
+      return { fx, p, engine: E1 };
+    };
+    /** A paused run relaunched by the paused-run pass (a `launched` after its `close-out`). */
+    const relaunched = async () => {
+      const fx = await pausedRun({ verdict: "no-impact" });
+      const p = passDeps(fx);
+      expect(await closeOutPaused(fx.queue, p.deps)).toEqual({ closed: [fx.run.run_id], awaiting: [] });
+      const k = kinds(fx.queue, fx.run.run_id);
+      expect(k.lastIndexOf("close-out")).toBeLessThan(k.lastIndexOf("launched"));
+      return { fx, p, engine: E2 };
+    };
+    /** The engine-end sweep with the engine answering `stopped`, a fake `gh` and the studio `finish` recorded. */
+    const sweepStopped = async (s: Awaited<ReturnType<typeof resumed>>) => {
+      const { fx, p, engine } = s;
+      const gh = fakeGh();
+      const finishes: string[][] = [];
+      statusAnswer({ run_id: engine, status: "stopped" });
+      const uv = async (root: string, script: string, args: string[], timeoutS?: number): Promise<RunResult> =>
+        script.endsWith("launch.py") && args[0] === "status"
+          ? { exit: 0, stdout: JSON.stringify({ ok: true, run: { run_id: engine, status: "stopped" } }), stderr: "" }
+          : p.deps.uv!(root, script, args, timeoutS);
+      const verbs = async (_root: string, args: string[]) => { finishes.push(args); return { ok: true, state: args[args.indexOf("--state") + 1] }; };
+      const env = { ...p.deps.env, GH_BIN: gh.bin };
+      expect(await sweepEngines(fx.queue, { ...p.deps, env, uv, verbs })).toEqual([fx.run.run_id]);
+      expect(finishes).toHaveLength(1);
+      const ended = ev(fx.queue, fx.run.run_id, "ended").at(-1)!;
+      expect(ended.detail).toMatchObject({ engine: { run_id: engine, status: "stopped" } });
+      return { finish: finishes[0]!, ended, prCalls: gh.calls().filter((c) => c.argv[0] === "pr").map((c) => c.argv) };
+    };
+    const stateOf = (finish: string[]) => finish[finish.indexOf("--state") + 1];
+
+    test("resumed, landed (`run-start, story-start, run-paused, run-resume, story-done`): `complete`, no reason, the PR marked ready", async () => {
+      const s = await resumed();
+      journal(s.fx.wt, s.engine, [at("run-start"), at("story-start", { story_key: KEY }), at("run-paused"), at("run-resume", { was_paused: true }), at("story-done", { story_key: KEY })]);
+      const r = await sweepStopped(s);
+      expect(s.fx.get()).toMatchObject({ state: "complete", reason: null });
+      expect(r.ended).toMatchObject({ to_state: "complete" });
+      expect(stateOf(r.finish)).toBe("complete");
+      expect(r.finish).not.toContain("--reason");
+      expect(r.prCalls).toContainEqual(["pr", "ready", PR]);
+      expect(r.prCalls.some((a) => a.includes("--undo"))).toBe(false);
+      expect(r.ended.detail).toMatchObject({ pr: PR, closeout: { result: "PR" } });
+    });
+
+    test("resumed, not landed (no `story-done` after the `run-resume`, or a `story-start` last): `partial`, `resumed engine ended 'stopped'`", async () => {
+      for (const entries of [
+        [at("run-start"), at("story-start", { story_key: KEY }), at("story-done", { story_key: KEY }), at("run-paused"), at("run-resume")],
+        [at("run-start"), at("run-resume"), at("story-done", { story_key: KEY }), at("story-start", { story_key: "9-2-the-next" })],
+      ]) {
+        const s = await resumed();
+        journal(s.fx.wt, s.engine, entries);
+        const r = await sweepStopped(s);
+        expect(s.fx.get()).toMatchObject({ state: "partial", reason: "resumed engine ended 'stopped'" });
+        expect(stateOf(r.finish)).toBe("partial");
+        expect(r.finish[r.finish.indexOf("--reason") + 1]).toBe("resumed engine ended 'stopped'");
+      }
+    });
+
+    test("relaunched: a `story-done` last ends `complete` (no reason, the PR ready); a `story-start` last ends `partial`", async () => {
+      for (const [last, state] of [["story-done", "complete"], ["story-start", "partial"]] as const) {
+        const s = await relaunched();
+        journal(s.fx.wt, s.engine, [at("run-start"), at("story-start", { story_key: KEY }), ...(last === "story-done" ? [at("story-done", { story_key: KEY })] : []), at("run-stop", { graceful: true })]);
+        const r = await sweepStopped(s);
+        expect(s.fx.get().state).toBe(state);
+        expect(stateOf(r.finish)).toBe(state);
+        if (state === "complete") {
+          expect(s.fx.get().reason).toBeNull();
+          expect(r.finish).not.toContain("--reason");
+          expect(r.prCalls).toContainEqual(["pr", "ready", PR]);
+        } else {
+          expect(s.fx.get().reason).toBe("relaunched engine ended 'stopped'");
+          expect(r.finish[r.finish.indexOf("--reason") + 1]).toBe("relaunched engine ended 'stopped'");
+        }
+      }
+    });
+
+    test("a missing journal ends `partial`; a red host verify with a `story-done` still ends `partial`, naming the red command", async () => {
+      const missing = await resumed();
+      await sweepStopped(missing);
+      expect(missing.fx.get()).toMatchObject({ state: "partial", reason: "resumed engine ended 'stopped'" });
+
+      const red = await resumed();
+      journal(red.fx.wt, red.engine, [at("run-start"), at("story-start", { story_key: KEY }), at("run-resume"), at("story-done", { story_key: KEY })]);
+      red.fx.queue.note(red.fx.run.run_id, "host-verify", {
+        command: "bun test", argv: ["bun", "test"], cwd: red.fx.wt, exit: 3, duration_ms: 5, green: false, stdout_tail: [], stderr_tail: ["1 failing"],
+      });
+      const r = await sweepStopped(red);
+      const reason = "host verify red: `bun test` exited 3; last lines: 1 failing";
+      expect(red.fx.get()).toMatchObject({ state: "partial", reason });
+      expect(r.finish[r.finish.indexOf("--reason") + 1]).toBe(reason);
+      expect(r.prCalls).toContainEqual(["pr", "ready", PR, "--undo"]);
+    });
+
+    test("a resumed engine ended `stopped` whose taken run has no worktree (no served root): the sweep never throws, `partial`", async () => {
+      const s = await resumed();
+      journal(s.fx.wt, s.engine, [at("run-start"), at("story-start", { story_key: KEY }), at("run-resume"), at("story-done", { story_key: KEY })]);
+      // The probe sees the worktree; the run the close-out takes carries none (`servedRoot` answers null).
+      const take = s.fx.queue.takeForCloseOut.bind(s.fx.queue);
+      s.fx.queue.takeForCloseOut = (id, self) => { const run = take(id, self); return run && { ...run, worktree: null }; };
+      const r = await sweepStopped(s);
+      expect(s.fx.get()).toMatchObject({ state: "partial", reason: "resumed engine ended 'stopped'" });
+      expect(stateOf(r.finish)).toBe("partial");
+      expect(r.finish[r.finish.indexOf("--reason") + 1]).toBe("resumed engine ended 'stopped'");
+    });
+
+    /** The supervisor killed the engine (pid and start recorded, killed); it handled TERM, so its status reads `stopped`. */
+    const killedBySupervisor = (s: Awaited<ReturnType<typeof resumed>>) => {
+      s.fx.queue.recordEnginePid(s.fx.run.run_id, { pid: 6509, start: "125610.0", source: "engine.pid" });
+      s.fx.queue.note(s.fx.run.run_id, "engine-kill", { why: "test", sandbox: SB, worker: { pid: 6509, start: "125610.0", outcome: "killed" } });
+    };
+
+    test("a resumed engine the supervisor killed that ended `stopped` with a landed journal stays `partial`, no host verify", async () => {
+      const s = await resumed();
+      journal(s.fx.wt, s.engine, [at("run-start"), at("story-start", { story_key: KEY }), at("run-resume"), at("story-done", { story_key: KEY })]);
+      killedBySupervisor(s);
+      const r = await sweepStopped(s);
+      expect(s.fx.get()).toMatchObject({ state: "partial", reason: "resumed engine ended 'stopped'" });
+      expect(r.ended).toMatchObject({ to_state: "partial" });
+      expect(stateOf(r.finish)).toBe("partial");
+      expect(r.finish[r.finish.indexOf("--reason") + 1]).toBe("resumed engine ended 'stopped'");
+      expect(ev(s.fx.queue, s.fx.run.run_id, "host-verify")).toHaveLength(0);
+      // Deliberately no draft assertion: `closeOut` marks a resumed/relaunched run's PR ready on a skipped verify
+      // whatever the end state — pre-existing, deferred in the 33-7 spec ("a killed engine's PR marked ready on a partial end").
+    });
+
+    test("a relaunched engine the supervisor killed that ended `stopped` with a landed journal never ends `complete`, no host verify", async () => {
+      const s = await relaunched();
+      journal(s.fx.wt, s.engine, [at("run-start"), at("story-start", { story_key: KEY }), at("story-done", { story_key: KEY }), at("run-stop", { graceful: true })]);
+      killedBySupervisor(s);
+      const r = await sweepStopped(s);
+      // Its status read `stopped` (not `running`), so the relaunch's end is still the engine's own: `partial`, never `complete`.
+      // This pins today's pre-existing behaviour: `relaunched` tests only `st.detail.killed`, so a killed relaunch whose engine
+      // handled TERM and reads `stopped` does not keep `launched.end` — deferred in the 33-7 spec
+      // ("a killed TERM-handling relaunch loses launched.end").
+      expect(s.fx.get()).toMatchObject({ state: "partial", reason: "relaunched engine ended 'stopped'" });
+      expect(stateOf(r.finish)).toBe("partial");
+      expect(r.finish[r.finish.indexOf("--reason") + 1]).toBe("relaunched engine ended 'stopped'");
+      expect(ev(s.fx.queue, s.fx.run.run_id, "host-verify")).toHaveLength(0);
+    });
+
+    test("storyLandedBeforeStop: the segment after the latest `run-start`/`run-resume`, unparsable lines skipped, an empty `story_key` not counted", () => {
+      const dir = (entries: (Record<string, unknown> | string)[]) => {
+        const wt = tempDir("tk-sup-co-journal-");
+        journal(wt, "E", entries);
+        return join(wt, ".bmad-loop", "runs", "E");
+      };
+      expect(storyLandedBeforeStop(join(tempDir("tk-sup-co-journal-"), "none"))).toBe(false);
+      expect(storyLandedBeforeStop(dir([at("story-start", { story_key: KEY }), at("story-done", { story_key: KEY })]))).toBe(true); // no run-start: the whole file
+      expect(storyLandedBeforeStop(dir([at("story-done", { story_key: KEY }), at("run-resume")]))).toBe(false);
+      expect(storyLandedBeforeStop(dir([at("run-start"), at("story-done", { story_key: KEY }), "{not json", "", at("run-stop")]))).toBe(true);
+      expect(storyLandedBeforeStop(dir([at("run-start"), at("story-done", { story_key: "" })]))).toBe(false);
+      expect(storyLandedBeforeStop(dir([at("run-start"), at("story-done", { story_key: "  " })]))).toBe(false);
+      expect(storyLandedBeforeStop(dir([at("run-start"), at("story-done")]))).toBe(false);
+      expect(storyLandedBeforeStop(dir([at("run-start"), at("story-done", { story_key: KEY }), at("story-start", { story_key: KEY })]))).toBe(false);
+    });
   });
 
   test("a relaunched run whose engine the supervisor killed ends with the relaunch's `launched.end` (the trip's state and guard reason), whether its status reads `running` or fails", async () => {

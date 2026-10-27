@@ -196,7 +196,7 @@ describe("GET /app (AC1)", () => {
         expect(res.status).toBe(200);
         expect(res.headers.get("content-type")).toBe("application/json; charset=utf-8");
         expect(res.headers.get("vary")).toBe("Accept");
-        expect(await res.text()).toBe(JSON.stringify({ ok: true, counts: {}, live: [], locks: [], log: { path: null, last_lines: [], note: "TK_SUPERVISOR_WORK is not set" } }));
+        expect(await res.text()).toBe(JSON.stringify({ ok: true, counts: {}, live: [], locks: [], log: { path: null, last_lines: [], note: "TK_SUPERVISOR_WORK is not set" }, pacer: { last_tick_ms: null, last_drain_ms: null, last_pass_at: null } }));
       }
     }
   });

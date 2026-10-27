@@ -703,7 +703,7 @@ describe("start.ps1 (AC1, AC2)", () => {
     // Story 33.1: under the log tee, the `| Out-Host` kept; the tee exits with the child's code, read at once.
     expect(text).toContain("& $Bun src/log.ts --tag drain '--' src/cli.ts recover | Out-Host\n    $code = $LASTEXITCODE");
     expect(text).toContain("if ($code -eq 0) { return $true }");
-    expect(text).toContain("& $Bun src/log.ts --tag $Tag '--' @Arguments | Out-Host\n    if ($LASTEXITCODE -ne 0) {");
+    expect(text).toContain("& $Bun src/log.ts --tag $Tag --pass '--' @Arguments | Out-Host\n    if ($LASTEXITCODE -ne 0) {");
     expect(text).not.toMatch(/^\s*& \$Bun (?!src\/log\.ts --tag)/m); // every bun child runs under the tee
     // The sbx probe is bounded: on timeout only that probe is killed and the daemon is taken as not running.
     expect(text).toContain("$SbxProbeSeconds = 30");

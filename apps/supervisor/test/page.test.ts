@@ -178,8 +178,8 @@ describe("the status page (AC1)", () => {
   test("the JSON routes answer as before", async () => {
     const fx = await populated();
     const status = await (await fx.call("GET", "/status")).json() as Record<string, any>;
-    // Story 33.1 (0.1.28, additive): `log` joins the four.
-    expect(Object.keys(status).sort()).toEqual(["counts", "live", "locks", "log", "ok"]);
+    // Story 33.1 (0.1.28, additive): `log` joins the four; Story 33.7 (0.1.28, additive): `pacer` too.
+    expect(Object.keys(status).sort()).toEqual(["counts", "live", "locks", "log", "ok", "pacer"]);
     expect((await fx.call("GET", "/nope")).status).toBe(404);
   });
 
@@ -193,7 +193,7 @@ describe("the status page (AC1)", () => {
       answers.push(await res.text());
     }
     expect(new Set(answers).size).toBe(1);
-    expect(Object.keys(JSON.parse(answers[0])).sort()).toEqual(["counts", "live", "locks", "log", "ok"]);
+    expect(Object.keys(JSON.parse(answers[0])).sort()).toEqual(["counts", "live", "locks", "log", "ok", "pacer"]);
     const page = await fx.call("GET");
     expect(page.headers.get("vary")).toBe("Accept");
     expect(page.headers.get("content-type")).toBe("text/html; charset=utf-8");
@@ -222,8 +222,9 @@ describe("the supervisor log section (Story 33.1, AC1)", () => {
     };
     try {
       const unset = await page({});
-      expect(unset).toContain('<section id="log"><h2>Supervisor log</h2><p class="note">TK_SUPERVISOR_WORK is not set</p></section>');
-      expect(await page({ TK_SUPERVISOR_WORK: work })).toContain('<section id="log"><h2>Supervisor log</h2><p class="note">no log</p></section>');
+      // Story 33.7: the pacer line opens the section.
+      expect(unset).toContain('<section id="log"><h2>Supervisor log</h2><p class="meta">pacer: no pass recorded</p><p class="note">TK_SUPERVISOR_WORK is not set</p></section>');
+      expect(await page({ TK_SUPERVISOR_WORK: work })).toContain('<section id="log"><h2>Supervisor log</h2><p class="meta">pacer: no pass recorded</p><p class="note">no log</p></section>');
       const dir = join(work, "supervisor", "logs");
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, "supervisor-2026-10-26.log"), [
@@ -240,6 +241,26 @@ describe("the supervisor log section (Story 33.1, AC1)", () => {
       for (const v of PLANTED) expect(section).not.toContain(v);
       expect(body.indexOf('<section id="log">')).toBeLessThan(body.indexOf('<section id="ledger">'));
       expect(body.indexOf('<section id="workspaces">')).toBeLessThan(body.indexOf('<section id="log">'));
+    } finally { rmSync(work, { recursive: true, force: true }); }
+  });
+});
+
+describe("the pacer line (Story 33.7, AC2)", () => {
+  test("the section opens with the pacer's last passes (a missing value `-`), or `no pass recorded`", async () => {
+    const work = tempDir("tk-sup-page-work-");
+    const page = async () => {
+      const fx = fixture({ env: { TK_SUPERVISOR_WORK: work } });
+      const handler = createApi({ queue: fx.queue, token: TOKEN, env: fx.env, registry: async () => ({ projects: {} }), ledger: LEDGER, web: builtWeb() });
+      const body = await (await handler(new Request(`${BASE}/status`, { headers: { authorization: `Bearer ${TOKEN}`, accept: "text/html" } }))).text();
+      return body.slice(body.indexOf('<section id="log">'), body.indexOf('<section id="ledger">'));
+    };
+    try {
+      expect(await page()).toStartWith('<section id="log"><h2>Supervisor log</h2><p class="meta">pacer: no pass recorded</p>');
+      mkdirSync(join(work, "supervisor"), { recursive: true });
+      writeFileSync(join(work, "supervisor", "pacer.json"), JSON.stringify({ last_tick_ms: 812, last_drain_ms: 4021, last_pass_at: "2026-10-27T02:00:04.021Z" }));
+      expect(await page()).toStartWith('<section id="log"><h2>Supervisor log</h2><p class="meta">pacer: last tick 812 ms · last drain 4021 ms · last pass 2026-10-27T02:00:04.021Z</p>');
+      writeFileSync(join(work, "supervisor", "pacer.json"), JSON.stringify({ last_tick_ms: 812, last_drain_ms: null, last_pass_at: "2026-10-27T02:00:00.812Z" }));
+      expect(await page()).toContain('<p class="meta">pacer: last tick 812 ms · last drain - ms · last pass 2026-10-27T02:00:00.812Z</p>');
     } finally { rmSync(work, { recursive: true, force: true }); }
   });
 });
