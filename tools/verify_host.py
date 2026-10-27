@@ -41,6 +41,11 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timezone
+
+# The console may be cp1252 (the supervisor's host leg on Windows); bun's output carries arrows and ticks.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
