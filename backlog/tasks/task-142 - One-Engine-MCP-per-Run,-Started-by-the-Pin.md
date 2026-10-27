@@ -1,9 +1,10 @@
 ---
 id: TASK-142
 title: One Engine MCP per Run, Started by the Pin
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-27 04:08'
+updated_date: '2026-10-27 16:06'
 labels:
   - ST-142
 milestone: The Vertical-Slice Pack

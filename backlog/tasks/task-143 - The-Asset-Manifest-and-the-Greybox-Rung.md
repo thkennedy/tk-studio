@@ -1,9 +1,10 @@
 ---
 id: TASK-143
 title: The Asset Manifest and the Greybox Rung
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-27 04:08'
+updated_date: '2026-10-27 16:06'
 labels:
   - ST-143
 milestone: The Vertical-Slice Pack
