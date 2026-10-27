@@ -6,7 +6,8 @@ Read-only: doctor writes, deletes and renames nothing (a leftover
 are ``claude --version``, ``sbx daemon status`` and ``git config --global
 --get core.longpaths`` (plus the sandbox-login check's sbx reads below),
 each through the injected runner, only when the executable is on PATH, and
-each bounded by ``PROCESS_TIMEOUT``. Its only
+each bounded by ``PROCESS_TIMEOUT``; and ``godot --version`` (the engine
+check below, only when ``GODOT`` is an absolute path to a file). Its only
 network calls are the ``/status`` probe (through the injected probe) and the
 roster fetch when ``--roster`` is a URL or absent. The cut-over checks
 (Story 28.4, Windows only) start nothing: the Startup ``.lnk`` is parsed in
@@ -23,6 +24,13 @@ reads (``claude auth status --json`` and the one ``refreshTokenExpiresAt``
 field of ``~/.claude/.credentials.json``, never a token), each through the
 runner, all of them together bounded by one ``SANDBOX_LOGIN_BUDGET``
 (``sandbox_login.py``).
+
+The engine check (Story 34.1) reads ``GODOT`` (the user variable, then the
+environment) and, only when it is an absolute path to a file, starts
+``<GODOT> --version`` (written ``godot --version`` below) through the
+runner, bounded by ``PROCESS_TIMEOUT``; unset or no file: ``skipped`` ``no
+engine``, nothing started; not absolute: ``fail``, nothing started (the host
+leg leaves PATH unchanged for it).
 
 The supervisor-temp check (Story 33.4, hole 64) counts the ``tk-sup-*``
 folders directly under the user's temp folder, read the way bun's
@@ -89,7 +97,7 @@ def _check(name: str, status: str, detail: str, fix: str | None = None,
             "fix": fix if status != PASS else None, **extra}
 
 
-# --- processes (only these three, only through the runner) -----------------
+# --- processes (only these, only through the runner) ------------------------
 
 def _path_value(ctx) -> str:
     return ctx.env.get("PATH") or ctx.env.get("Path") or ""
@@ -1055,6 +1063,53 @@ def check_studio_web(ctx, roster: dict | None, channel: str) -> dict:
     return _check(name, PASS, f"slot {version} at {path}")
 
 
+FIX_ENGINE = ("set the GODOT user variable to the Godot console binary "
+              "(runbook §2) and start the supervisor after it (one started "
+              "before has no GODOT); the host leg puts its folder first on "
+              "PATH, and verify.engine calls the engine through $GODOT, the "
+              "console exe not being named `godot`")
+FIX_ENGINE_RUN = ("point GODOT at the real console exe, not winget's "
+                  "godot_console link (runbook §2), and check with "
+                  "`& $env:GODOT --version`")
+
+
+def check_engine(ctx) -> dict:
+    """Story 34.1: the engine ``GODOT`` names, which the host leg's
+    ``verify.engine`` calls through ``$GODOT`` (its folder goes first on the
+    step's PATH). Value stripped, as the host leg trims it. Unset: ``skipped``
+    (``no engine``); not absolute: ``fail``, nothing started (the host leg
+    puts only an absolute ``GODOT``'s folder on PATH); missing or not a file:
+    ``skipped`` (``no engine``, saying which);
+    ``<GODOT> --version`` exit 0: ``pass`` with the path and its first line;
+    otherwise ``fail``."""
+    name = "engine"
+    value = (apps._var(ctx, "GODOT") or "").strip()
+    if not value:
+        return _check(name, SKIPPED, "no engine", FIX_ENGINE)
+    path = Path(value)
+    if not path.is_absolute():
+        return _check(name, FAIL, f"GODOT {value} is not an absolute path: "
+                      "the host leg leaves PATH unchanged", FIX_ENGINE)
+    if not path.is_file():
+        why = "is not a file" if path.exists() else "does not exist"
+        return _check(name, SKIPPED,
+                      f"no engine (GODOT names {value}, which {why})",
+                      FIX_ENGINE)
+    try:
+        proc = _run(ctx, [value, "--version"])
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return _check(name, FAIL, f"{value} --version failed: "
+                      f"{type(exc).__name__}: {exc}", FIX_ENGINE_RUN)
+    lines = [ln.strip() for ln in (proc.stdout or "").splitlines()
+             if ln.strip()]
+    if proc.returncode != 0:
+        out = (proc.stderr or "").strip() or (proc.stdout or "").strip()
+        return _check(name, FAIL, f"{value} --version exit "
+                      f"{proc.returncode} ({out[:120]!r})", FIX_ENGINE_RUN)
+    return _check(name, PASS,
+                  f"{value}; {lines[0] if lines else '(no version printed)'}")
+
+
 def check_cli_helper(ctx) -> dict | None:
     tools = ctx.root / "tools"
     helper, log = tools / apps.CLI_HELPER, tools / apps.CLI_HELPER_LOG
@@ -1190,6 +1245,7 @@ def run_doctor(ctx, *, roster: str | None, channel: str, fetch,
         check_supervisor_temp(ctx),      # Story 33.4: hole 64
         check_stale_slots(ctx),
         check_studio_web(ctx, loaded, channel),
+        check_engine(ctx),               # Story 34.1: the engine gate's godot
         check_cli_helper(ctx),
         check_hermes(ctx),
     ]

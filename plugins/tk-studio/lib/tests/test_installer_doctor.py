@@ -4,7 +4,8 @@ the read-only invariant, the store verdict pinned to the drift check's, the
 
 Offline by construction: the fakes and the socket guard of
 ``test_installer_apps``; ``claude``, ``sbx`` and ``git`` are fake
-executables on a temp PATH, answered by the fake runner.
+executables on a temp PATH, answered by the fake runner (and Story 34.1's
+``godot``, a fake file ``GODOT`` names).
 """
 from __future__ import annotations
 
@@ -36,7 +37,8 @@ from tk_studio_cli import doctor  # noqa: E402
 NOW = 2_000_000_000.0
 DAY = 86400
 ALLOWED = {"claude --version", "sbx daemon status",
-           "git config --global --get core.longpaths"}
+           "git config --global --get core.longpaths",
+           "godot --version"}     # Story 34.1: the engine row, GODOT set
 SCHEMA = json.loads((PLUGIN_ROOT / "contracts" / "status-block.schema.json")
                     .read_text(encoding="utf-8"))
 AC1 = ("claude-code", "plugin", "store", "sbx-daemon", "long-paths",
@@ -57,6 +59,9 @@ class DoctorHost(FakeHost):
                                     "authMethod": "claude.ai"})
         self.expiry_out = ""
         self.exec_timeout = False   # an `sbx exec` that times out
+        # Story 34.1: `<GODOT> --version`
+        self.godot_rc = 0
+        self.godot_out = "4.7.2.stable.mono.official.f2d6a3a5e\n"
 
     def __call__(self, args, env=None):
         args = [str(a) for a in args]
@@ -78,6 +83,13 @@ class DoctorHost(FakeHost):
             self.calls.append((args, env))
             return done(args, self.sbx_rc, "running" if not self.sbx_rc
                         else "", "daemon not running" if self.sbx_rc else "")
+        if name == "godot" and args[1:] == ["--version"]:
+            self.calls.append((args, env))
+            if self.godot_rc is None:
+                raise subprocess.TimeoutExpired(args, 30)
+            return done(args, self.godot_rc,
+                        self.godot_out if not self.godot_rc else "",
+                        "" if not self.godot_rc else "signal 11")
         if name == "git":
             self.calls.append((args, env))
             if self.longpaths is None:
@@ -196,6 +208,14 @@ class DoctorCase(AppsCase):
             else str(int((NOW + days_left * DAY) * 1000))
         return path
 
+    def godot(self) -> Path:
+        """Story 34.1: a fake console binary for ``GODOT`` (answered by the
+        fake runner), outside the fake PATH."""
+        path = self.tmp / "Godot_v4.7.2" / "godot.exe"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("fake godot\n")
+        return path
+
     def supervisor_log(self, lines: list[str], day: str = "2033-05-18"
                        ) -> Path:
         """Story 33.1: a day file under ``TK_SUPERVISOR_WORK`` (set here)."""
@@ -258,7 +278,9 @@ class AllFailing(DoctorCase):
         self.assertIn("Claude-login risk", checks["hermes-logins"]["detail"])
         self.assertIn("DW-12", checks["studio-web"]["detail"])
         self.assertIn("install failed", checks["cli-update-helper"]["detail"])
-        self.assertEqual(set(self.commands()), ALLOWED)
+        # Story 34.1: GODOT unset here: the engine row is skipped, no godot
+        self.assertEqual(checks["engine"]["status"], "skipped")
+        self.assertEqual(set(self.commands()), ALLOWED - {"godot --version"})
         self.assertEqual(len(self.host.calls), 3)
         self.assertEqual(self.snapshot(), before, "doctor is read-only")
         self.assertEqual(self.store.values.keys(), {"TK_SUPERVISOR_TLS_CERT"})
@@ -283,6 +305,7 @@ class AllPassing(DoctorCase):
         self.env["TK_SUPERVISOR_TLS_CERT"] = str(self.cert(10))
         self.supervisor_log([f"{stamp(NOW - 60)} [pacer] stopped (Ctrl+C)"])
         self.engine_sandbox()   # Story 33.2: the engine sandbox, 30 days left
+        self.env["GODOT"] = str(self.godot())   # Story 34.1: the engine row
         before = self.snapshot()
         result, code = self.doctor(roster=roster)
         self.assertEqual((code, result["reason"]), (0, None), result)
@@ -293,14 +316,14 @@ class AllPassing(DoctorCase):
             ["claude-code", "plugin", "store", "sbx-daemon",
              "sandbox-login", "folder-trust:proj", "path-launcher",
              "tailscale-cert", "supervisor", "supervisor-log",
-             "supervisor-temp", "studio-web"]))
+             "supervisor-temp", "studio-web", "engine"]))
         for check in result["checks"]:
             if check["status"] == "pass":
                 self.assertIsNone(check["fix"])
         self.assertEqual([c[:25] for c in self.commands()],
                          ["claude --version", "sbx daemon status",
                           "sbx ls", "sbx exec claude-tk-studio",
-                          "sbx exec claude-tk-studio"])
+                          "sbx exec claude-tk-studio", "godot --version"])
         self.assertEqual(self.snapshot(), before)
         self.assertTrue(result["probe"]["answers"])
         self.assertTrue(result["probe"]["url"].startswith("https://"))
@@ -1123,6 +1146,95 @@ class SupervisorTemp(DoctorCase):
 
 def _age_cases() -> list[str]:
     return [doctor._age(s) for s in (59, 60, 2 * 3600 + 5, 3 * DAY + 1)]
+
+
+class Engine(DoctorCase):
+    """Story 34.1 (AC2): the engine row — ``GODOT`` unset or naming no
+    file: ``skipped`` ``no engine``, nothing started; not absolute: ``fail``,
+    nothing started; ``--version`` exit 0:
+    ``pass`` with the path and its first line; otherwise ``fail``."""
+
+    def check(self) -> dict:
+        return self.checks(self.doctor(roster=self.full_roster())[0])[
+            "engine"]
+
+    def godot_calls(self) -> list[str]:
+        return [c for c in self.commands() if c.startswith("godot")]
+
+    def test_unset_is_skipped_no_engine(self):
+        self.env.pop("GODOT", None)
+        check = self.check()
+        self.assertEqual((check["status"], check["detail"]),
+                         ("skipped", "no engine"))
+        self.assertIn("GODOT", check["fix"])
+        self.assertEqual(self.godot_calls(), [])
+
+    def test_a_missing_file_is_skipped_no_engine(self):
+        self.env["GODOT"] = str(self.tmp / "gone" / "godot.exe")
+        check = self.check()
+        self.assertEqual(check["status"], "skipped")
+        self.assertTrue(check["detail"].startswith("no engine"), check)
+        self.assertIn(self.env["GODOT"], check["detail"])
+        self.assertTrue(check["fix"])
+        self.assertEqual(self.godot_calls(), [])
+
+    def test_a_folder_is_skipped_not_a_file(self):
+        folder = self.godot().parent
+        self.env["GODOT"] = str(folder)
+        check = self.check()
+        self.assertEqual((check["status"], check["detail"]),
+                         ("skipped", f"no engine (GODOT names {folder}, "
+                          "which is not a file)"))
+        self.assertEqual(check["fix"], doctor.FIX_ENGINE)
+        self.assertEqual(self.godot_calls(), [])
+
+    def test_a_relative_path_fails_nothing_started(self):
+        self.godot()
+        self.env["GODOT"] = "godot.exe"
+        check = self.check()
+        self.assertEqual((check["status"], check["detail"]),
+                         ("fail", "GODOT godot.exe is not an absolute path: "
+                          "the host leg leaves PATH unchanged"))
+        self.assertEqual(check["fix"], doctor.FIX_ENGINE)
+        self.assertEqual(self.godot_calls(), [])
+
+    def test_version_green_passes_with_the_path_and_first_line(self):
+        godot = self.godot()
+        self.env["GODOT"] = str(godot)
+        check = self.check()
+        self.assertEqual((check["status"], check["detail"], check["fix"]),
+                         ("pass", f"{godot}; 4.7.2.stable.mono.official"
+                          ".f2d6a3a5e", None))
+        self.assertEqual(self.godot_calls(), ["godot --version"])
+        self.assertEqual(Path(self.host.calls[-1][0][0]), godot)
+
+    def test_a_whitespace_padded_value_is_stripped_and_passes(self):
+        godot = self.godot()
+        self.env["GODOT"] = f"  {godot}\t"
+        check = self.check()
+        self.assertEqual((check["status"], check["detail"]),
+                         ("pass", f"{godot}; 4.7.2.stable.mono.official"
+                          ".f2d6a3a5e"))
+        self.assertEqual(Path(self.host.calls[-1][0][0]), godot)
+
+    def test_version_red_fails_and_doctor_stays_complete(self):
+        self.env["GODOT"] = str(self.godot())
+        self.host.godot_rc = 139
+        result, code = self.doctor(roster=self.full_roster())
+        check = self.checks(result)["engine"]
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("exit 139", check["detail"])
+        self.assertIn("signal 11", check["detail"])
+        self.assertTrue(check["fix"])
+        self.assertEqual((code, result["status"]), (0, "complete"))
+        self.assertIn("engine", result["reason"])
+
+    def test_version_timeout_fails(self):
+        self.env["GODOT"] = str(self.godot())
+        self.host.godot_rc = None
+        check = self.check()
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("TimeoutExpired", check["detail"])
 
 
 class SupervisorCheckout(DoctorCase):

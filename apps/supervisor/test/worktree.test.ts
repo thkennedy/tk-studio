@@ -516,11 +516,13 @@ describe("Story 27.4: the host verify leg runs before any PR opens", () => {
   /** `"<bun>" -e "<script>"`: the same verify command on both hosts (the script uses single quotes only). */
   const bunCmd = (script: string) => `"${process.execPath}" -e "${script}"`;
   const RED = bunCmd("console.log('ran 12 tests'); console.error('FAIL win32 path test'); console.error('1 failing'); process.exit(3)");
-  const config = (host?: string) => host === undefined ? "vcs: git\n" : `vcs: git\nverify:\n  host: ${JSON.stringify(host)}\n`;
+  const config = (host?: string, engine?: string) => host === undefined ? "vcs: git\n"
+    : `vcs: git\nverify:\n  host: ${JSON.stringify(host)}\n${engine === undefined ? "" : `  engine: ${JSON.stringify(engine)}\n`}`;
 
-  /** A launched sbx run (as the AC3 sweep's `launched()`) whose base config carries `host`; one engine commit. */
-  async function launchedSbx(host: string | undefined, tier: "sbx" | "host" = "sbx") {
-    const fx = await fixture({ baseRef: "main", files: { ".tk-studio/config.yaml": config(host) } });
+  /** A launched sbx run (as the AC3 sweep's `launched()`) whose base config carries `host` (and Story 34.1's
+   * `engine`, when given); one engine commit. */
+  async function launchedSbx(host: string | undefined, tier: "sbx" | "host" = "sbx", engine?: string) {
+    const fx = await fixture({ baseRef: "main", files: { ".tk-studio/config.yaml": config(host, engine) } });
     const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
     fx.queue.markVerbStarted(fx.run.run_id, "wake", [], { target: "skill", definition: fx.defn });
     const BLOCK = { status: "complete", intent: "tk-studio-launch", artifacts: [".bmad-loop/runs/E1"] };
@@ -580,6 +582,29 @@ describe("Story 27.4: the host verify leg runs before any PR opens", () => {
     expect(existsSync(fx.wt)).toBe(false);
     // The deferred studio `finish` carries the red end.
     expect(fx.verbs).toHaveLength(1);
+    expect(fx.verbs[0]![fx.verbs[0]!.indexOf("--state") + 1]).toBe("partial");
+    expect(fx.verbs[0]![fx.verbs[0]!.indexOf("--reason") + 1]).toBe(reason);
+    expectNoForbiddenArgv(fx.argvs, fx.gh.calls());
+  });
+
+  test("Story 34.1: host green, engine gate red → `partial` naming the engine command, `--draft`, the event's `engine.verdict: red`", async () => {
+    const ENGINE = bunCmd("console.log('importing'); console.error('SCRIPT ERROR: res://main.tscn'); process.exit(1)");
+    const fx = await launchedSbx(bunCmd("console.log('all green')"), "sbx", ENGINE);
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    const ev = hv(fx);
+    expect(ev).toHaveLength(1);
+    expect(ev[0]!.detail).toMatchObject({ green: false, exit: 0, stdout_tail: ["all green"], engine: { verdict: "red", exit: 1, command: ENGINE, cwd: fx.wt, stderr_tail: ["SCRIPT ERROR: res://main.tscn"] } });
+    const reason = `host verify red (engine): \`${ENGINE}\` exited 1; last lines: SCRIPT ERROR: res://main.tscn`;
+    expect(fx.get()).toMatchObject({ state: "partial", reason });
+    const create = fx.gh.calls().find((c) => c.argv[1] === "create")!;
+    expect(create.argv).toContain("--draft");
+    expect(create.body).toContain("Engine gate: red");
+    expect(create.body).toContain("SCRIPT ERROR: res://main.tscn");
+    expect(prCalls(fx).some((c) => c.argv[1] === "ready")).toBe(false);
+    const ended = fx.queue.events(fx.run.run_id).find((e) => e.kind === "ended")!;
+    expect(ended).toMatchObject({ to_state: "partial" });
+    expect(ended.detail).toMatchObject({ reason, closeout: { result: "draft PR", host_verify: "red", worktree: "removed" } });
     expect(fx.verbs[0]![fx.verbs[0]!.indexOf("--state") + 1]).toBe("partial");
     expect(fx.verbs[0]![fx.verbs[0]!.indexOf("--reason") + 1]).toBe(reason);
     expectNoForbiddenArgv(fx.argvs, fx.gh.calls());

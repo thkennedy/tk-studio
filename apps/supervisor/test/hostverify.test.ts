@@ -4,9 +4,9 @@
 // runs on both hosts.
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { gitUsrBin, hostVerify, isRed, pathKey, prSection, redReason, splitCommand, tail, verifyCommand, wallClockTrip, type HostVerifyRan } from "../src/hostverify";
-import { gitRepo, testGit } from "./fakes";
+import { fakeBin, gitRepo, testGit } from "./fakes";
 import { tempDir } from "./tmp";
 
 /** `"<bun>" -e "<script>"` as one command line (the script uses single quotes only). */
@@ -20,6 +20,9 @@ function project(config?: string) {
   return { repo, wt, run: { root: repo.checkout, worktree: wt, base_ref: "main", tier: "sbx" as string | null } };
 }
 const hostKey = (cmd: string) => `vcs: git\nverify:\n  host: ${JSON.stringify(cmd)}\n`;
+/** Story 34.1: `verify.host` and (when given) `verify.engine`. */
+const verifyKeys = (k: { host: string; engine?: string }) =>
+  `${hostKey(k.host)}${k.engine === undefined ? "" : `  engine: ${JSON.stringify(k.engine)}\n`}`;
 
 describe("the command line: split into argv, never a shell", () => {
   test("whitespace splits; \"…\" and '…' group; backslashes stay literal; adjacent quoted text joins", () => {
@@ -37,7 +40,7 @@ describe("the command line: split into argv, never a shell", () => {
 describe("the command is read from the base's tracked config", () => {
   test("verify.host at base_ref → the command and its argv", async () => {
     const fx = project(hostKey("bun test"));
-    expect(await verifyCommand(fx.run)).toEqual({ command: "bun test", argv: ["bun", "test"] });
+    expect(await verifyCommand(fx.run)).toEqual({ command: "bun test", argv: ["bun", "test"], engine: { skipped: "no verify.engine" } });
   });
 
   test("a run commit that edits verify.host is ignored: the base's command is used", async () => {
@@ -45,7 +48,7 @@ describe("the command is read from the base's tracked config", () => {
     writeFileSync(join(fx.wt, ".tk-studio", "config.yaml"), hostKey("true"));
     testGit(fx.wt, "commit", "-q", "-am", "weaken the gate");
     writeFileSync(join(fx.wt, ".tk-studio", "config.yaml"), "verify: 7\n"); // and an uncommitted edit
-    expect(await verifyCommand(fx.run)).toEqual({ command: "bun test", argv: ["bun", "test"] });
+    expect(await verifyCommand(fx.run)).toEqual({ command: "bun test", argv: ["bun", "test"], engine: { skipped: "no verify.engine" } });
   });
 
   test("absent: no verify block or no host key → skipped `no verify.host`", async () => {
@@ -306,4 +309,200 @@ describe("hole 46: Git Bash goes first on the leg's PATH on win32", () => {
       expect(specs.at(-1)!.argv).toEqual(v.argv);
     }
   });
+});
+
+describe("Story 34.1: the engine gate runs after a green verify.host", () => {
+  /** A fake `godot` in its own folder that prints a version line and its argv, then exits `code`. */
+  function fakeGodot(code: number, lines: string[] = []) {
+    const dir = tempDir("tk-sup-godot-");
+    const script = [
+      "console.log('4.7.2.stable.mono');",
+      ...lines.map((l) => `console.error(${JSON.stringify(l)});`),
+      "console.log('args ' + process.argv.slice(2).join(' '));",
+      `process.exit(${code});`,
+    ].join("\n");
+    const bin = fakeBin(join(dir, "godot"), script);
+    return { dir, bin };
+  }
+  /** A leg env whose PATH holds bun's and git's folders only (the fake's shebang needs `bun`, the config read
+   * needs `git`; no `godot` there: the GODOT-less case below proves it fails to start). */
+  const bareEnv = (extra: Record<string, string> = {}) => ({
+    TK_STUDIO_HOME: "store", PATH: [dirname(process.execPath), dirname(Bun.which("git")!)].join(delimiter), ...extra,
+  });
+  /** An injected runner: answers the config, records each step's env and spec in order, answers `exits` in turn. */
+  function recorder(config: string, exits: number[]) {
+    const steps: { env: Record<string, string | undefined>; argv: string[]; cwd: string }[] = [];
+    const run = async (bin: string, args: string[], o: { cwd: string; timeoutS: number; env?: Record<string, string | undefined> }) => {
+      if (bin === "git") return { exit: 0, stdout: config, stderr: "" };
+      const spec = JSON.parse(readFileSync(args[2]!, "utf-8"));
+      steps.push({ env: o.env ?? {}, argv: spec.argv, cwd: spec.cwd });
+      writeFileSync(spec.status, JSON.stringify({ exit: exits[steps.length - 1] ?? 0, signal: null }));
+      writeFileSync(spec.out, `step ${steps.length}\n`);
+      return { exit: 0, stdout: "", stderr: "" };
+    };
+    return { steps, run };
+  }
+
+  test("verifyCommand: verify.engine split the same way; absent → `no verify.engine`; not a non-empty string → skipped", async () => {
+    const fx = project(verifyKeys({ host: "bun test", engine: `bash scripts/engine-gate.sh --x "a b"` }));
+    expect(await verifyCommand(fx.run)).toEqual({
+      command: "bun test", argv: ["bun", "test"],
+      engine: { command: `bash scripts/engine-gate.sh --x "a b"`, argv: ["bash", "scripts/engine-gate.sh", "--x", "a b"] },
+    });
+    expect(await verifyCommand(project(hostKey("bun test")).run)).toMatchObject({ engine: { skipped: "no verify.engine" } });
+    for (const tail of ["  engine: 5\n", "  engine: \"\"\n", "  engine: \"  \"\n", "  engine: [godot]\n", "  engine:\n"]) {
+      expect(await verifyCommand(project(hostKey("bun test") + tail).run)).toMatchObject({ engine: { skipped: "verify.engine is not a non-empty string" } });
+    }
+  });
+
+  test("ordering: host green then engine green → one result, `green: true`, the host spawned before the engine, in the worktree", async () => {
+    const config = verifyKeys({ host: "uv run tools/verify_host.py", engine: "bash scripts/engine-gate.sh" });
+    const { steps, run } = recorder(config, [0, 0]);
+    const fx = project(config);
+    const v = await hostVerify(fx.run, 60, { env: bareEnv({ GODOT: "/opt/godot/godot" }), run: run as any }) as HostVerifyRan;
+    expect(steps).toHaveLength(2);
+    expect(steps[0]!.argv.at(-1)).toBe("tools/verify_host.py"); // the host first
+    expect(steps[1]!.argv.at(-1)).toBe("scripts/engine-gate.sh"); // then the engine
+    expect(steps[1]!.cwd).toBe(fx.wt);
+    expect(v.green).toBe(true);
+    expect(v.stdout_tail).toEqual(["step 1"]);
+    expect(v.engine).toMatchObject({ verdict: "green", exit: 0, command: "bash scripts/engine-gate.sh", argv: ["bash", "scripts/engine-gate.sh"], cwd: fx.wt, stdout_tail: ["step 2"], stderr_tail: [], godot_dir: dirname("/opt/godot/godot") });
+    expect(v.engine!.reason).toBeUndefined();
+    expect(typeof v.engine!.duration_ms).toBe("number");
+    expect(isRed(v)).toBe(false);
+    expect(prSection(v).join("\n")).toContain("Engine gate: green: `bash scripts/engine-gate.sh` (");
+  });
+
+  test("host red: the engine is never spawned, `skipped (verify.host red)`, the reason the host's text unchanged", async () => {
+    const config = verifyKeys({ host: "uv run tools/verify_host.py", engine: "godot --headless --quit" });
+    const { steps, run } = recorder(config, [2]);
+    const v = await hostVerify(project(config).run, 60, { env: bareEnv({ GODOT: "/opt/godot/godot" }), run: run as any }) as HostVerifyRan;
+    expect(steps).toHaveLength(1);
+    expect(v.green).toBe(false);
+    expect(v.engine).toEqual({ verdict: "skipped", reason: "verify.host red", godot_dir: dirname("/opt/godot/godot") });
+    expect(redReason(v)).toBe("host verify red: `uv run tools/verify_host.py` exited 2; last lines: step 1");
+    expect(prSection(v).at(-1)).toBe("Engine gate: skipped (verify.host red)");
+  });
+
+  test("no verify.engine: skipped `no verify.engine`, `green` follows the host; a bad key: skipped, nothing spawned", async () => {
+    for (const [config, reason] of [
+      [hostKey("uv run tools/verify_host.py"), "no verify.engine"],
+      [hostKey("uv run tools/verify_host.py") + "  engine: 7\n", "verify.engine is not a non-empty string"],
+    ] as const) {
+      const { steps, run } = recorder(config, [0]);
+      const v = await hostVerify(project(config).run, 60, { env: bareEnv(), run: run as any }) as HostVerifyRan;
+      expect(steps).toHaveLength(1);
+      expect(v.green).toBe(true);
+      expect(v.engine).toEqual({ verdict: "skipped", reason, godot_dir: null });
+      expect(prSection(v).at(-1)).toBe(`Engine gate: skipped (${reason})`);
+    }
+  });
+
+  test("a host-side skip (no verify.host) carries no `engine`", async () => {
+    const v = await hostVerify(project("verify:\n  engine: godot\n").run, 60);
+    expect(v).toEqual({ skipped: true, reason: "no verify.host" });
+  });
+
+  test("PATH composition: the engine step has the folder of GODOT first under the parent's key; the host step does not", async () => {
+    const config = verifyKeys({ host: "uv run tools/verify_host.py", engine: "godot --headless --quit" });
+    const godot = join("/opt", "Godot_v4.7.2", "godot_console");
+    for (const key of ["PATH", "Path"]) {
+      const original = ["/usr/local/bin", "/usr/bin"].join(delimiter);
+      const { steps, run } = recorder(config, [0, 0]);
+      const v = await hostVerify(project(config).run, 60, { env: { TK_STUDIO_HOME: "store", [key]: original, GODOT: godot }, run: run as any }) as HostVerifyRan;
+      expect(steps).toHaveLength(2);
+      for (const s of steps) expect(Object.keys(s.env).filter((k) => k.toUpperCase() === "PATH")).toEqual([key]); // one key (hole 54)
+      expect(steps[0]!.env[key]).toBe(original);
+      expect(steps[1]!.env[key]).toBe(`${dirname(godot)}${delimiter}${original}`);
+      expect(steps[1]!.env[key]!.split(delimiter)[0]).toBe(dirname(godot));
+      expect(v.engine!.godot_dir).toBe(dirname(godot));
+      expect(steps[1]!.argv).toEqual(["godot", "--headless", "--quit"]); // never resolved by the leg
+    }
+  });
+
+  test("PATH composition with GODOT unset: the engine still runs, PATH unchanged, `godot_dir: null`", async () => {
+    const config = verifyKeys({ host: "uv run tools/verify_host.py", engine: "bash scripts/engine-gate.sh" });
+    const { steps, run } = recorder(config, [0, 1]);
+    const env = { TK_STUDIO_HOME: "store", PATH: "/usr/bin" };
+    const v = await hostVerify(project(config).run, 60, { env, run: run as any }) as HostVerifyRan;
+    expect(steps).toHaveLength(2);
+    expect(steps[1]!.env.PATH).toBe(steps[0]!.env.PATH!);
+    expect(v.engine).toMatchObject({ verdict: "red", exit: 1, godot_dir: null });
+  });
+
+  test("a bare GODOT (`godot`): no folder prepended (never `.`, the worktree), `godot_dir: null`, the engine still runs", async () => {
+    const config = verifyKeys({ host: "uv run tools/verify_host.py", engine: "bash scripts/engine-gate.sh" });
+    const { steps, run } = recorder(config, [0, 0]);
+    const env = { TK_STUDIO_HOME: "store", PATH: "/usr/bin", GODOT: "godot" };
+    const v = await hostVerify(project(config).run, 60, { env, run: run as any }) as HostVerifyRan;
+    expect(steps).toHaveLength(2);
+    expect(steps[1]!.env.PATH).toBe(steps[0]!.env.PATH!);
+    expect(steps[1]!.env.PATH!.split(delimiter)).not.toContain(".");
+    expect(v.engine).toMatchObject({ verdict: "green", exit: 0, godot_dir: null });
+  });
+
+  test.skipIf(process.platform !== "win32")("win32: Git's usr\\bin stays first for the host step and sits behind the GODOT folder for the engine", async () => {
+    const root = tempDir("tk-sup-git-");
+    mkdirSync(join(root, "Git", "cmd"), { recursive: true });
+    mkdirSync(join(root, "Git", "usr", "bin"), { recursive: true });
+    writeFileSync(join(root, "Git", "usr", "bin", "bash.exe"), "");
+    const usrBin = join(root, "Git", "usr", "bin");
+    const original = join(root, "Git", "cmd");
+    const config = verifyKeys({ host: "uv run tools/verify_host.py", engine: "bash scripts/engine-gate.sh" });
+    const { steps, run } = recorder(config, [0, 0]);
+    const godot = join(root, "Godot", "godot_console.exe");
+    const v = await hostVerify(project(config).run, 60, { env: { Path: original, GODOT: godot }, run: run as any }) as HostVerifyRan;
+    expect(steps[0]!.env.Path).toBe(`${usrBin};${original}`);
+    expect(steps[1]!.env.Path).toBe(`${dirname(godot)};${usrBin};${original}`);
+    expect(steps[1]!.argv).toEqual([join(usrBin, "bash.exe"), "scripts/engine-gate.sh"]); // hole 52 as for the host
+    expect(v.engine!.argv).toEqual(["bash", "scripts/engine-gate.sh"]);
+  });
+
+  test("both verdicts through a fake `godot` found only through the prepended folder", async () => {
+    const green = fakeGodot(0);
+    const config = verifyKeys({ host: bunCmd("console.log('host ok')"), engine: "godot --headless --quit" });
+    const fxG = project(config);
+    const g = await hostVerify(fxG.run, 60, { env: bareEnv({ GODOT: green.bin }) }) as HostVerifyRan;
+    expect(g.engine).toMatchObject({ verdict: "green", exit: 0, godot_dir: green.dir, cwd: fxG.wt, argv: ["godot", "--headless", "--quit"] });
+    expect(g.engine!.stdout_tail).toEqual(["4.7.2.stable.mono", "args --headless --quit"]);
+    expect(g.green).toBe(true);
+
+    const red = fakeGodot(1, ["SCRIPT ERROR: Parse Error", "GoDotTest: 1 failing"]);
+    const v = await hostVerify(project(config).run, 60, { env: bareEnv({ GODOT: red.bin }) }) as HostVerifyRan;
+    expect(v.exit).toBe(0); // the host command itself was green
+    expect(v.green).toBe(false);
+    expect(v.engine).toMatchObject({ verdict: "red", exit: 1, godot_dir: red.dir, command: "godot --headless --quit" });
+    expect(v.engine!.stderr_tail).toEqual(["SCRIPT ERROR: Parse Error", "GoDotTest: 1 failing"]);
+    expect(isRed(v)).toBe(true);
+    expect(redReason(v)).toBe("host verify red (engine): `godot --headless --quit` exited 1; last lines: SCRIPT ERROR: Parse Error | GoDotTest: 1 failing");
+    const section = prSection(v).join("\n");
+    expect(section).toContain("Green: `");
+    expect(section).toContain("Engine gate: red");
+    expect(section).toContain("**Red:** `godot --headless --quit` — exit 1 (");
+    expect(section).toContain("```\nSCRIPT ERROR: Parse Error\nGoDotTest: 1 failing\n```");
+
+    // Without GODOT the bare `godot` is found nowhere: the engine fails to start, red.
+    const none = await hostVerify(project(config).run, 60, { env: bareEnv() }) as HostVerifyRan;
+    expect(none.engine).toMatchObject({ verdict: "red", exit: null, godot_dir: null });
+    expect(none.engine!.error).toBeTruthy();
+    expect(redReason(none)).toStartWith("host verify red (engine): `godot --headless --quit` failed to start: ");
+  }, 30_000);
+
+  test("engine guard trip and spawn failure: `guard` / `error` set, both red", async () => {
+    const hung = verifyKeys({ host: bunCmd("console.log('host ok')"), engine: bunCmd("console.error('importing'); setTimeout(() => {}, 60000)") });
+    const t = await hostVerify(project(hung).run, 2) as HostVerifyRan;
+    expect(t.exit).toBe(0);
+    expect(t.engine).toMatchObject({ verdict: "red", exit: null, guard: "guard: max_wall_clock_seconds (2s)", stderr_tail: ["importing"] });
+    expect(t.green).toBe(false);
+    expect(redReason(t)).toContain("host verify red (engine): ");
+    expect(redReason(t)).toContain("timed out (guard: max_wall_clock_seconds (2s))");
+    expect(prSection(t).join("\n")).toContain("— guard: max_wall_clock_seconds (2s) (");
+
+    const missing = verifyKeys({ host: bunCmd("console.log('host ok')"), engine: "tk-sup-no-such-engine --x" });
+    const m = await hostVerify(project(missing).run, 60) as HostVerifyRan;
+    expect(m.engine).toMatchObject({ verdict: "red", exit: null, argv: ["tk-sup-no-such-engine", "--x"] });
+    expect(m.engine!.error).toBeTruthy();
+    expect(isRed(m)).toBe(true);
+    expect(redReason(m)).toContain("`tk-sup-no-such-engine --x` failed to start: ");
+  }, 30_000);
 });

@@ -1,0 +1,244 @@
+# stories.yaml: Epic 34 of this project, transcribed 1:1 from _bmad-output/planning-artifacts/epics.md
+# by .bmad-loop/plugins/studio-pipeline/transcribe.py on 2026-10-27. The epics document is
+# the plan; the studio gate may append remediation entries (`<key>-r<n>`) and revise
+# UNSTARTED entries' invoke_dev_with, nothing else.
+
+- id: "34-1-the-engine-gate-on-the-host-leg"
+  title: "The Engine Gate on the Host Leg"
+  description: >-
+    I want the host leg to run a game project's engine gate (the headless import, then
+    the engine's own tests) on the Windows host where the engine lives, So that a story
+    that breaks the game's scenes or its engine tests goes red before its PR opens, not
+    after (today the gate never runs in the loop). Canonical: ST-138.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 34.1: The
+    Engine Gate on the Host Leg", the authoritative specification (user story and
+    acceptance criteria). Read the epic's own narrative (the paragraphs under "## Epic
+    34:") for scope, rulings and the repo the story targets; transcribe the story into
+    the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/34-1.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/34-1-the-engine-gate-on-the-host-leg-spec.md` in the spec
+    folder; the engine resolves it by the glob
+    `34-1-the-engine-gate-on-the-host-leg-*.md`, and a file named
+    `34-1-the-engine-gate-on-the-host-leg.md` is read as pending (loop deficiency 1,
+    story 21-6).
+
+- id: "34-2-spike-a-playable-run-on-the-box"
+  title: "Spike, a Playable Run on the Box"
+  description: >-
+    I want one proven way to run the game on the agent PC for a bounded number of ticks
+    under a seeded, scripted input scenario and come back with frames and a pass or
+    fail, So that the `playable-verify` leg (34.3) builds on facts measured on this box
+    rather than on the research's claims. Canonical: ST-139.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 34.2:
+    Spike, a Playable Run on the Box", the authoritative specification (user story and
+    acceptance criteria). Read the epic's own narrative (the paragraphs under "## Epic
+    34:") for scope, rulings and the repo the story targets; transcribe the story into
+    the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/34-2.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/34-2-spike-a-playable-run-on-the-box-spec.md` in the spec
+    folder; the engine resolves it by the glob
+    `34-2-spike-a-playable-run-on-the-box-*.md`, and a file named
+    `34-2-spike-a-playable-run-on-the-box.md` is read as pending (loop deficiency 1,
+    story 21-6).
+    Gate note (from 34-1, 2026-10-27): on the box the engine is the absolute path in
+    `$GODOT` (the `*_console.exe`); a bare `godot` does not resolve there, so
+    `playable.py run` starts `$GODOT` (or a `--godot` flag), never `godot`, and its
+    refusal and the launch check warning name an unset or non-absolute `GODOT` as
+    the doctor's `engine` row does.
+
+- id: "34-3-the-playable-verify-leg"
+  title: "The `playable-verify` Leg"
+  description: >-
+    I want a routed leg that runs the scenario on the host after the engine gate, has a
+    model judge the frames by a screenshot-only rubric, and writes the verdict where the
+    owner reads it, So that "it builds" and "it plays" are two different greens (the
+    research's own finding: nobody one-shots game feel; verify from the runtime).
+    Canonical: ST-140.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 34.3: The
+    `playable-verify` Leg", the authoritative specification (user story and acceptance
+    criteria). Read the epic's own narrative (the paragraphs under "## Epic 34:") for
+    scope, rulings and the repo the story targets; transcribe the story into the spec's
+    intent contract and never re-derive, generalise or extend it. Plan: plans/34-3.md
+    when present (its Code Map is the investigation). Project rules and the verify gate:
+    the studio customization (_bmad/custom/bmad-build-auto.toml). Routing:
+    .bmad-loop/routing.current.json; pass the model, effort and advisor of implementer
+    and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/34-3-the-playable-verify-leg-spec.md` in the spec folder;
+    the engine resolves it by the glob `34-3-the-playable-verify-leg-*.md`, and a file
+    named `34-3-the-playable-verify-leg.md` is read as pending (loop deficiency 1, story
+    21-6).
+    Gate note (from 34-1, 2026-10-27): 34-1 made `engine?` optional on
+    `HostVerifyRan` (always written from 0.1.29; pre-34.1 recorded events lack it).
+    Add `playable` the same way: optional on the type, always written on a ran leg,
+    tested on the producer's output. Readers treat a missing `engine` or `playable`
+    as not run. The leg's `green` is host green && engine not red && playable not
+    fail. Extend the 0.1.29 paragraph and do not bump the version.
+
+- id: "34-4-engine-knowledge-pinned-per-project"
+  title: "Engine Knowledge, Pinned per Project"
+  description: >-
+    I want the engine's version, its quirks and its rules in my context when the project
+    is a game, So that I never hand-edit a serialised scene, never guess an API that
+    changed, and run the engine the way this box runs it (the research's recurring
+    finding: engine knowledge injection beats model priors). Canonical: ST-141.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 34.4:
+    Engine Knowledge, Pinned per Project", the authoritative specification (user story
+    and acceptance criteria). Read the epic's own narrative (the paragraphs under "##
+    Epic 34:") for scope, rulings and the repo the story targets; transcribe the story
+    into the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/34-4.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/34-4-engine-knowledge-pinned-per-project-spec.md` in the
+    spec folder; the engine resolves it by the glob
+    `34-4-engine-knowledge-pinned-per-project-*.md`, and a file named
+    `34-4-engine-knowledge-pinned-per-project.md` is read as pending (loop deficiency 1,
+    story 21-6).
+    Gate note (from 34-1, 2026-10-27): the box's `$env:GODOT` rule is: on the host,
+    call `& $env:GODOT ...` (an absolute path to the console exe), because a bare
+    `godot` does not resolve there. A bare `godot` exists only in a sandbox
+    provisioned with `WITH_GODOT` (runbook §3, the Linux Godot).
+
+- id: "34-5-one-engine-mcp-per-run-started-by-the-pin"
+  title: "One Engine MCP per Run, Started by the Pin"
+  description: >-
+    I want the engine's MCP server chosen once per project, written into `.mcp.json`
+    only on confirmation, and started on the host for a run that asks for the editor, So
+    that a dev session can run the project's tests, verify it and take a frame from the
+    engine without a human, and nothing more. Canonical: ST-142.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 34.5: One
+    Engine MCP per Run, Started by the Pin", the authoritative specification (user story
+    and acceptance criteria). Read the epic's own narrative (the paragraphs under "##
+    Epic 34:") for scope, rulings and the repo the story targets; transcribe the story
+    into the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/34-5.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/34-5-one-engine-mcp-per-run-started-by-the-pin-spec.md` in
+    the spec folder; the engine resolves it by the glob
+    `34-5-one-engine-mcp-per-run-started-by-the-pin-*.md`, and a file named
+    `34-5-one-engine-mcp-per-run-started-by-the-pin.md` is read as pending (loop
+    deficiency 1, story 21-6).
+
+- id: "34-6-the-asset-manifest-and-the-greybox-rung"
+  title: "The Asset Manifest and the Greybox Rung"
+  description: >-
+    I want every asset a slice needs declared in one manifest and the ladder's first
+    rung (greybox) produced from it deterministically, So that a slice is playable with
+    placeholders before any art exists, and every later asset replaces a placeholder
+    that passed the same gates. Canonical: ST-143.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 34.6: The
+    Asset Manifest and the Greybox Rung", the authoritative specification (user story
+    and acceptance criteria). Read the epic's own narrative (the paragraphs under "##
+    Epic 34:") for scope, rulings and the repo the story targets; transcribe the story
+    into the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/34-6.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/34-6-the-asset-manifest-and-the-greybox-rung-spec.md` in
+    the spec folder; the engine resolves it by the glob
+    `34-6-the-asset-manifest-and-the-greybox-rung-*.md`, and a file named
+    `34-6-the-asset-manifest-and-the-greybox-rung.md` is read as pending (loop
+    deficiency 1, story 21-6).
+
+- id: "34-7-the-cc0-mirror-and-the-paid-rung-behind-a-cap"
+  title: "The CC0 Mirror and the Paid Rung Behind a Cap"
+  description: >-
+    I want the ladder's second rung to draw from pre-mirrored CC0 kits on the box and
+    its third from a generator only behind a per-run credit cap, So that a slice gets
+    real-looking placeholders for nothing and generated art only when the owner paid for
+    it on purpose. Canonical: ST-144.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 34.7: The
+    CC0 Mirror and the Paid Rung Behind a Cap", the authoritative specification (user
+    story and acceptance criteria). Read the epic's own narrative (the paragraphs under
+    "## Epic 34:") for scope, rulings and the repo the story targets; transcribe the
+    story into the spec's intent contract and never re-derive, generalise or extend it.
+    Plan: plans/34-7.md when present (its Code Map is the investigation). Project rules
+    and the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as
+    `stories/34-7-the-cc0-mirror-and-the-paid-rung-behind-a-cap-spec.md` in the spec
+    folder; the engine resolves it by the glob
+    `34-7-the-cc0-mirror-and-the-paid-rung-behind-a-cap-*.md`, and a file named
+    `34-7-the-cc0-mirror-and-the-paid-rung-behind-a-cap.md` is read as pending (loop
+    deficiency 1, story 21-6).
+
+- id: "34-8-the-run-vertical-slice-job-and-the-engagements-game-path"
+  title: "The `run-vertical-slice` Job and the Engagement's Game Path"
+  description: >-
+    I want one message to a game project to end in a playable greybox slice with proof
+    media, a report and a measured cost, So that the studio's promise (user flow F9) is
+    a thing I can run, not a diagram. Canonical: ST-145.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 34.8: The
+    `run-vertical-slice` Job and the Engagement's Game Path", the authoritative
+    specification (user story and acceptance criteria). Read the epic's own narrative
+    (the paragraphs under "## Epic 34:") for scope, rulings and the repo the story
+    targets; transcribe the story into the spec's intent contract and never re-derive,
+    generalise or extend it. Plan: plans/34-8.md when present (its Code Map is the
+    investigation). Project rules and the verify gate: the studio customization
+    (_bmad/custom/bmad-build-auto.toml). Routing: .bmad-loop/routing.current.json; pass
+    the model, effort and advisor of implementer and reviewers explicitly on every
+    subagent launch. Advisor: when routing.current.json gives the session an advisor
+    other than `off`, consult the advisor on: verify-red, halt, deviation above 0, a
+    high-severity finding, a tripwire, a file outside Files, and before declaring the
+    story done; append a `## Consult Log` entry per advisor call. Deviations: one
+    `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto Run Result.
+    Spec file: write the executor spec as
+    `stories/34-8-the-run-vertical-slice-job-and-the-engagements-game-path-spec.md` in
+    the spec folder; the engine resolves it by the glob
+    `34-8-the-run-vertical-slice-job-and-the-engagements-game-path-*.md`, and a file
+    named `34-8-the-run-vertical-slice-job-and-the-engagements-game-path.md` is read as
+    pending (loop deficiency 1, story 21-6).

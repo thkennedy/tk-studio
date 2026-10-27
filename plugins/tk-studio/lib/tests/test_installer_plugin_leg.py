@@ -94,6 +94,9 @@ class LegCase(unittest.TestCase):
         self.staging = self.config / "skills" / ".tk-studio.new"
         self.previous = self.config / "skills" / ".tk-studio.previous"
         self.claude = FakeClaude()
+        # Hole 74 (Story 34.1): an empty user-variable store, so the box's HKCU GODOT never reaches
+        # a test (doctor's engine row would call `<GODOT> --version` through the fake runner).
+        self.store = {}
         # Belt and braces: no test reaches the real home.
         patcher = mock.patch.object(Path, "home", return_value=self.tmp / "home")
         patcher.start()
@@ -111,7 +114,8 @@ class LegCase(unittest.TestCase):
 
     def run_cli(self, argv, fetch=None):
         return cli_main.run(argv, fetch=fetch or FakeFetch({}),
-                            runner=self.claude, env=self.env)
+                            runner=self.claude, env=self.env,
+                            env_store=self.store)
 
     def install(self, version: str, verb: str = "install", data=None):
         data = data if data is not None else plugin_zip(version)
