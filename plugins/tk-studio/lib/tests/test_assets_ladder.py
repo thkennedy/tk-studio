@@ -404,10 +404,10 @@ class IndexTests(Base):
         self.assertEqual(assets.mirror_index(kit=str(kit), category="prop")[1], 0)
 
     def test_licence_files_match_either_spelling_in_any_case(self):
-        for name in ("LICENCE.txt", "licence.md", "license", "LICENSE", "License.txt",
-                     "Licence", "cc0-LICENCE.TXT", "kit_license.txt"):
+        for index, name in enumerate(("LICENCE.txt", "licence.md", "license", "LICENSE", "License.txt",
+                     "Licence", "cc0-LICENCE.TXT", "kit_license.txt")):
             with self.subTest(name=name):
-                kit = self.root / "kits" / name.replace(".", "_")
+                kit = self.root / "kits" / f"kit-{index}"  # one folder per case: Windows folds license and LICENSE into one
                 kit.mkdir(parents=True)
                 (kit / name).write_text("CC0", encoding="utf-8")
                 self.assertEqual(assets._licence_file(kit), kit / name)
