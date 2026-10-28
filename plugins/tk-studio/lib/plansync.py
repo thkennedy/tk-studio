@@ -1441,7 +1441,19 @@ def setup(project_root: Path, dry_run: bool = False,
                 conf_binding["space_key"] = key
         if space is not None:
             conf_binding["space_id"] = str(space.get("id"))
-            titles = confluence.find_folders(conf, str(space.get("id")))
+            try:
+                titles = confluence.find_folders(conf, str(space.get("id")))
+            except confluence.ConfluenceError as exc:
+                # Confluence's space-children listing wants read:custom-content
+                # beside read:hierarchical-content (hole 91): without it the
+                # folders are still created, just never adopted from the site.
+                if "scope" not in str(exc).lower():
+                    raise
+                titles = {}
+                notes.append("folder listing refused by scope (the Confluence key "
+                             "lacks read:custom-content:confluence, which the space "
+                             "children endpoint requires): folders created without "
+                             "adoption; a folder made by hand is not recognised")
             refused = []
             for name, title in confluence.FOLDERS:
                 if title in titles:
