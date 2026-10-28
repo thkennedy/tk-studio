@@ -87,7 +87,7 @@ export function gitUsrBin(env: Record<string, string | undefined>): string | nul
 }
 import { load as loadYaml } from "js-yaml";
 import { buildWorkerEnv, invokeSkill, lastJsonObject, runProcess, type RunResult, type Spawner } from "./server";
-import { servedRoot, type QueueRun } from "./queue";
+import { servedRoot, type QueueEvent, type QueueRun } from "./queue";
 import { pluginRoot, studioHome } from "./env";
 import { pinSandbox, studioRunDir } from "./sandbox";
 import type { WorktreeDeps } from "./worktree";
@@ -687,8 +687,36 @@ export function redReason(v: HostVerifyRan): string {
  * (absent when origin's web URL is unknown or no sheet was made) and the committed frame paths (repo-relative). */
 export type PrProof = { sheetUrl?: string; frames: string[] };
 
-export function prSection(v: HostVerifyResult, proof?: PrProof): string[] {
-  const head = ["## Host verify", ""];
+/** Story 35.1: one host leg of a run in the PR body's `Legs:` line — the close-out's leg, or a re-run (`by`). */
+export type LegHistoryEntry = { leg: "close-out" | "re-run"; verdict: "green" | "red" | "skipped"; recorded_at: string; by?: "api" | "cli" };
+
+/** Story 35.1: a leg's verdict word. */
+export const legVerdict = (v: HostVerifyResult): LegHistoryEntry["verdict"] => (v.skipped ? "skipped" : v.green ? "green" : "red");
+
+/** Story 35.1: the run's legs, oldest first: its `host-verify` events after its latest `launched` (the `recordedVerify`
+ * rule; a `rerun` member makes a re-run, its `by` kept), plus `current`, the one being written (not yet an event). */
+export function legHistory(events: readonly QueueEvent[], current?: LegHistoryEntry): LegHistoryEntry[] {
+  const from = events.findLastIndex((e) => e.kind === "launched");
+  const legs: LegHistoryEntry[] = [];
+  for (const e of events.slice(from + 1)) {
+    if (e.kind !== "host-verify" || !e.detail || typeof e.detail !== "object") continue;
+    const d = e.detail as Record<string, any>;
+    const verdict = d.skipped === true ? "skipped" : d.green === true ? "green" : "red";
+    const rerun = d.rerun && typeof d.rerun === "object" ? d.rerun as Record<string, unknown> : undefined;
+    const by = rerun?.by === "api" || rerun?.by === "cli" ? rerun.by : undefined;
+    legs.push(rerun ? { leg: "re-run", verdict, recorded_at: e.at, ...(by ? { by } : {}) } : { leg: "close-out", verdict, recorded_at: e.at });
+  }
+  return current ? [...legs, current] : legs;
+}
+
+/** Story 35.1: the `Legs: <k> — …` line (entries oldest first, joined by `; `). */
+export const legsLine = (legs: readonly LegHistoryEntry[]): string =>
+  `Legs: ${legs.length} — ${legs.map((l) => `${l.leg} ${l.verdict} ${l.recorded_at}${l.leg === "re-run" && l.by ? ` (by ${l.by})` : ""}`).join("; ")}`;
+
+/** Story 35.1: `legs` (the run's host legs, the latest last) renders the `Legs:` history as the first line under the
+ * heading, then the latest leg's section as before; none (or an empty list) leaves the section unchanged. */
+export function prSection(v: HostVerifyResult, proof?: PrProof, legs?: readonly LegHistoryEntry[]): string[] {
+  const head = ["## Host verify", "", ...(legs?.length ? [legsLine(legs), ""] : [])];
   if (v.skipped) return [...head, `Skipped: ${v.reason}`];
   const secs = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
   const how = (s: { exit?: number | null; signal?: string; guard?: string; error?: string }) =>

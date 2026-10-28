@@ -23,9 +23,11 @@
  *                            400 SchemaError | MalformedJson, 404 RunNotFound, 409 RunNotPaused | ExternalRun | StoryLanded,
  *                            500 ResumeFailed
  *   POST /runs/{id}/verify   {} (Story 33.8, `hostleg.ts`, bearer only): an ended run's host leg re-run — a fresh worktree
- *                            cut from its pushed branch tip, `verify.host` run there as the close-out does, a new
- *                            `host-verify` event (`rerun`), the worktree removed, a draft PR marked ready on green; the
- *                            run's state unchanged. 202 {ok, run_id, state, verify: "started", head}, 400 SchemaError |
+ *                            cut on its run branch at the pushed tip, `verify.host` run there as the close-out does (Story
+ *                            35.1: a whole leg — a slice run's placed art and proof committed and pushed, an open PR's body
+ *                            regenerated with the latest leg and its `Legs:` history, a draft marked ready on green, a
+ *                            ready PR back to a draft on red), a new `host-verify` event (`rerun`), the worktree removed;
+ *                            the run's state unchanged. 202 {ok, run_id, state, verify: "started", head}, 400 SchemaError |
  *                            MalformedJson, 404 RunNotFound, 409 ExternalRun | RunNotEnded | NoBranch | VerifyRunning,
  *                            500 VerifyFailed
  *   GET  /status             counts per state, the live runs, the held checkout locks (JSON); Story 30.6: content-negotiated —

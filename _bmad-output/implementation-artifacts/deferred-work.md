@@ -590,7 +590,7 @@ source_spec: `34-8-the-run-vertical-slice-job-and-the-engagements-game-path-spec
 location: apps/supervisor/src/hostleg.ts:155-180
 severity: medium
 reason: hostleg.ts runLeg runs hostVerify with { slice } in the detached .verify worktree, where greybox/match write the placed art. It then calls removeWorktree, and markReady when the leg is green. proofCommit (worktree.ts) runs only at the close-out. If the close-out's assets step was red (no host commit) and the re-run is green, the PR goes ready while its branch has no greybox art, no .tk-studio/proof/<run_id>/ and no embedded sheet. The consult ruled that this cannot be fixed here: the contract fixes the re-run as verify-only and marks green PRs ready (driver-contract.md:385-390). Operator to decide: skip pr_ready for slice runs, or have the re-run commit and push.
-status: open
+status: resolved 2026-10-27 by this story's PR (35.1: the re-run is a whole leg — a slice re-run cut on the run branch with `-B` commits the placed art and `.tk-studio/proof/<run_id>/` through `worktree.ts proofCommit` under the close-out's condition and pushes before the PR is touched; contract 0.1.30)
 
 ### DW-77: The engagement's closeout page carries each slice's contact sheet and verdicts, but not the sampled frames or report.json.
 origin: spec-deferred 408ccad7fc6f
@@ -638,7 +638,7 @@ source_spec: `33-8-the-verify-verb (Epic 33)`
 location: apps/supervisor/src/hostleg.ts:20, :108 (the verify verb edits no body)
 severity: medium
 reason: 4 of Epic 34's 7 story PR bodies (#201, #206, #213, #216) read Red at merge while the verify verb had gone green; the green sits in a PR comment or only in the handoff. Fix: the verify verb rewrites the body's Host verify section and the status block with the latest leg's result, as the close-out does on the first open.
-status: open
+status: resolved 2026-10-27 by this story's PR (35.1: the re-run regenerates an open PR's body through `prBody` from the record, its `## Host verify` the latest leg's under a `Legs:` history line, then marks a draft ready on green or `gh pr ready --undo` on red; contract 0.1.30)
 
 ### DW-83: The 34.5 amend episode built two stories in one run and left 34-5 without a gate file, a `## Reconcile`, a review-budget DW entry or a metered cost (hole 89); the recommended follow-up review for 34-5 is this entry.
 origin: operator ledger, hole 89 (2026-10-27T23:2xZ); retro C4

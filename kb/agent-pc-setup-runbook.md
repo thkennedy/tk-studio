@@ -920,12 +920,33 @@ counts once it is on the run's base in the checkout: the command is read at
 `base_ref` there, as the close-out reads it. Then re-run the leg with
 `POST /runs/<id>/verify` (bearer only, body empty or `{}`), or from
 `apps/supervisor` with `bun src/cli.ts verify <id>`. The supervisor cuts a
-fresh worktree from the branch's tip on origin, runs `verify.host` there,
-removes it, and records a new `host-verify` event (its `rerun` names the
-tip, the worktree's removal, the PR and `pr_ready`). Green marks the draft
+fresh worktree on the run branch at its tip on origin (`git worktree add -B
+supervisor/run-<id>`, so a stale local branch is moved to the tip; a local
+branch ahead of origin, with commits never pushed, is `500 VerifyFailed`
+naming the branch and listing those commits, never moved: push them or drop
+them yourself, then re-run; another worktree still holding the branch is
+`500 VerifyFailed` naming that worktree's path: remove that worktree
+yourself, then re-run), runs `verify.host` there as the
+close-out does, and on a slice run commits the placed art and the proof
+(`host leg: placed assets and proof (run <id>)`) and pushes the branch,
+never forced. It then rewrites the open PR's body (supervisor Story 35.1):
+the status block, the landed commits and the cost re-rendered from the
+record, and the `## Host verify` section the latest leg's under a one-line
+history (`Legs: 2 — close-out red <at>; re-run green <at> (by api)`), so the
+PR reads the truth at merge (hole 88). It removes the worktree and records
+a new `host-verify` event (its `rerun` names the tip, the worktree's
+removal, the PR, `pr_body`, `pr_ready` or `pr_draft`, and on a slice run
+`commit` and `pushed`; the verb prints `rerun: true`). Green marks the draft
 PR ready and the board's `host_verify` turns green; the run stays `partial`
-(its terminal state never changes). Red leaves the PR a draft: read the new
-event and fix again. A run still live is `409 RunNotEnded`, one with no
+(its terminal state never changes). Red rewrites the section red, turns a
+ready PR back to a draft (`gh pr ready --undo`) and names why in the event's
+`reason`: read it and fix again. A failed slice commit or push
+(`rerun.commit`/`rerun.pushed: "error: …"`) leaves the body untouched and
+flips nothing on green, but a red leg still turns a ready PR back to a draft;
+a failed push rolls the supervisor's own proof commit back to the tip it was
+cut at, so re-running once the push can land is not refused (only a failed
+rollback, `; local branch left ahead: …` on `rerun.pushed`, needs the local
+branch reset by hand). A run still live is `409 RunNotEnded`, one with no
 pushed branch `409 NoBranch`, and a re-run already going `409
 VerifyRunning` (supervisor Story 33.8). This replaces the hand recipe (cut
 a worktree, run `verify.host`, flip the PR by hand).
@@ -1289,7 +1310,7 @@ Epic 21 and 22 set:
 | `hold` | (27.2/27.3) The supervisor's own `sbx exec … tail --pid` (or the resume's child) holding the engine's sandbox open. |
 | `closing-out`, `closed_out`, `lock-released` | (27.1/27.5) A late close-out took its lease; a close-out recorded on a run already ended (`orphaned: true` for the orphan pass); a kept lock freed. |
 | `close-out`, `close-out-failed`, `awaiting-ruling`, `engine-resume` | (27.3) The paused-run pass relaunched a landed run; a step failed (retried next tick); a landed story with no verdict or `escalate` (one notification); `POST /runs/{id}/resume` moved the run back to `running`. |
-| `host-verify` | (27.4) The project's `verify.host` ran on the host in the worktree: exit, duration, the last lines; or skipped and why. (34.1) A ran leg carries `engine {verdict: green\|red\|skipped, reason?, command?, exit?, stdout_tail?, stderr_tail?, godot_dir, …}`: the project's `verify.engine` after a green `verify.host`; an engine red makes the leg red. (33.8) A re-run (`POST /runs/{id}/verify`, `bun src/cli.ts verify <id>`) adds `rerun {by, head, worktree, pr, pr_ready?}`. |
+| `host-verify` | (27.4) The project's `verify.host` ran on the host in the worktree: exit, duration, the last lines; or skipped and why. (34.1) A ran leg carries `engine {verdict: green\|red\|skipped, reason?, command?, exit?, stdout_tail?, stderr_tail?, godot_dir, …}`: the project's `verify.engine` after a green `verify.host`; an engine red makes the leg red. (33.8) A re-run (`POST /runs/{id}/verify`, `bun src/cli.ts verify <id>`) adds `rerun {by, head, worktree, pr, pr_ready?}`. (35.1) The re-run is a whole leg: `rerun` also carries `commit?` (a slice run's host-side commit `{sha, frames, sheet?}`, `skipped: <why>` or `error: …`), `pushed?`, `pr_body?` (`edited` or `error: …`) and `pr_draft?` (`undone`, `already`, `not open` or `error: …`, on red); a red re-run's `reason` says why. |
 | `host-verify-leg` | (33.8) The lease of an ended run's host-leg re-run: `{owner, by}` taken, `{owner: null, released}` let go of after a failed cut; the re-run's `host-verify` closes it. |
 | `plan-status`, `plan-lease` | (27.5) The plan pull-back through `plansync.py status`: `review` when the PR opens, `done` when it merges, a skip naming why; never changes the run's state. The project that owns the plan comes from the host registry (tk-studio is registered on this box). |
 | `accounted`, `worker` | (21.6/27.5) The iteration's counts now carry `cost_usd` (`run.json`'s `total_cost_usd` is the sum across iterations); the worker record lands pid first, the start time after it (win32: `GetProcessTimes` natively). |
