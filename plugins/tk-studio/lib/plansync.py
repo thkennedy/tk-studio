@@ -1447,7 +1447,9 @@ def setup(project_root: Path, dry_run: bool = False,
                 # Confluence's space-children listing wants read:custom-content
                 # beside read:hierarchical-content (hole 91): without it the
                 # folders are still created, just never adopted from the site.
-                if "scope" not in str(exc).lower():
+                # the client folds the 401 into its own message (the token, its email,
+                # the org toggle), so a 401 on this one listing counts as the scope gap
+                if "scope" not in str(exc).lower() and " 401 " not in str(exc):
                     raise
                 titles = {}
                 notes.append("folder listing refused by scope (the Confluence key "
