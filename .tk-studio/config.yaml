@@ -52,3 +52,24 @@ working_set:
 # argv-only entry point. Red ends the run partial and opens the PR as a draft naming the failures.
 verify:
   host: uv run python tools/verify_host.py
+
+# Planning backend (AD-4): jira since 2026-10-28 (Story 35.8, the stage log mirrored to the story issue;
+# the binding below written by plansync.py setup). backlog-md stays as the files under backlog/ until the sweep retires them.
+planning:
+  backend: jira
+  jira:
+    site: "timothyhkennedy.atlassian.net"
+    project_key: "TKSTUDIO"
+    owner_account_id: "712020:9d5fe414-a0f6-4032-ad69-9cc34abd315f"
+    agent_account_id: "712020:e8b8d8fe-31f1-4ec3-a412-373cf2b5110f"
+    project_id: "10001"
+    filter_id: "10002"
+  confluence:
+    space_key: "TKSTUDIO"
+    space_id: "393219"
+    folders:
+      brief: "1310722"
+      gdd: "1343489"
+      scope-of-work: "1376257"
+      decisions: "1409025"
+      records: "1441793"
