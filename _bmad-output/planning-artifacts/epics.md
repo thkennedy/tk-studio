@@ -3321,3 +3321,23 @@ So that DW-46 to DW-65 and the retrospective's deferred findings (DW-85 to DW-87
 **Given** tk-studio
 **When** the operator queues `run-sweep` once on the sandbox tier at the engine's request through the consult log
 **Then** one real sweep runs over the open ledger (its first targets: DW-46 to DW-65 and the consolidation entries DW-85 to DW-87; `max_bundles` bounds it), its PRs are merged on green by the operator, the ledger reads the closures; conformance drives the surface with a fake engine; the contract (0.1.30, additive) names the job type; the cost lands in the ledger
+
+### Story 35.8: Every Stage Leaves a Start and a Stop
+
+As the owner,
+I want every stage of a story's life (its planning, the dev pass, each review pass, each consult, the gate, each host leg, the close-out and the merge) to log its start and stop with the model, the effort and the tokens it used, in the story's own document and mirrored as timestamped comments on the story's Jira issue,
+So that I can read how long each epic, story and stage takes and what it costs the way I would read a developer's timesheet, with Jira's server clock as the cross-check against any box's clock (the EP-34 retrospective had to infer stage times from PR timestamps; the ledger's `job-run` line carries one cost per run and the launch session's turns only, never the engine's passes). Planned 2026-10-28 on Tim's design: start and stop stamps per stage, never a stored elapsed; the loop's own per-pass token counts; Jira comments as the external record, a worklog beside them so Jira's time tracking reads too.
+
+**Acceptance Criteria:**
+
+**Given** a story run by the loop
+**When** a stage starts and when it stops (the planner's plan, the dev pass, review pass 1, 2, 3 …, each consult, the gate; then the supervisor's host leg and each of its legs, a re-run, the close-out, the merge)
+**Then** the story's spec file carries a `## Stage Log` table with one row per stage occurrence: `stage`, `pass`, `started`, `ended` (ISO-8601 UTC from the clock of whoever ran it), `session_id`, `model`, `effort`, `tokens_in`, `tokens_out`, `cost_usd` (when metered), `outcome`; the engine's hook (`.bmad-loop/bmad_loop_hook.py`, the studio-pipeline gate plugin) writes the rows it runs from bmad-loop's own per-pass session records (the stream's usage lines summed at pass end), the supervisor appends its legs through the plan pull-back after the merge, the operator's planning stage is a row the planning session writes by hand through `plansync.py` (`stage --start | --stop`); elapsed is never stored, only derived; a gap between a stop and the next start is reported as a gap, never hidden
+
+**Given** a project bound to Jira (`planning.jira`, `plansync.py setup`; tk-studio is the first)
+**When** a stage row is written
+**Then** the supervisor (never the sandboxed engine, which has no Jira reach) posts one comment on the story's Jira issue at the start (`Stage <name> [pass n] started — <engine timestamp>; model: X; effort: Y`) and one at the stop (`… finished — <engine timestamp>; model: X; effort: Y; tokens: in/out; cost: $Z`), so the comment's server-side `created` stamp is the external clock and `created` minus the body's own timestamp measures relay lag and clock skew; a worklog with the derived span is added at the stop so Jira's time-tracking reports read the same stages; a post that fails is retried on the next tick and never blocks the run (the row in the doc is the record of truth); the epic's issue gets a rollup comment at the retro
+
+**Given** the ledger and the retro
+**When** `measurepush.py push` and `tk-studio-report` run
+**Then** a `stage` event (the taxonomy extended additively) carries each row to the ledger, the report verb rolls them up per story and per epic (cycle time from the first start to the merge, hands-on time as the sum of the spans, the planning share, review rounds, re-runs, tokens and cost per stage type) beside Jira's own numbers with the skew named, the retrospective reads the rollup instead of PR timestamps, and the contract (0.1.30 or the next, additive) names the table, the comment shapes and the event; conformance drives the table writer and the comment poster with fakes
