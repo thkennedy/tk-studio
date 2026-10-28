@@ -1,0 +1,34 @@
+---
+id: TASK-146
+title: The Re-run Is a Whole Leg
+status: Done
+assignee: []
+created_date: '2026-10-27 23:26'
+updated_date: '2026-10-28 03:15'
+labels:
+  - ST-146
+milestone: Loop Hygiene 2, the Slice Path Hardened
+dependencies: []
+---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+As the loop,
+I want 33.8's verify verb to re-run the host leg the way the close-out runs it, commit and push what a green leg produces, and rewrite the PR's `## Host verify` section and status block with the latest result,
+So that a fixed-forward run's PR reads the truth at merge and a slice's placed art and proof survive the re-run (hole 88, DW-76, DW-82; the retrospective's C2, B9, AI-3, AI-9).
+
+**Acceptance Criteria:**
+
+**Given** a run whose close-out ended `partial` on a red host leg and a fix pushed to its branch
+**When** `POST /runs/{id}/verify` runs the leg green
+**Then** the PR body's `## Host verify` section and its status block carry the latest leg's result (the first leg's text replaced, a one-line history of the legs kept), the PR is marked ready, and the `host-verify` event names `rerun: true`; a red re-run rewrites the section red, leaves the PR a draft and says why (`apps/supervisor/src/hostleg.ts:20, :108`)
+
+**Given** a slice run (`type: run-vertical-slice`)
+**When** the re-run's assets step places art or its playable step writes proof
+**Then** the re-run commits and pushes them on the run's branch as the close-out does (`host leg: placed assets and proof (run <id>)`, `worktree.ts proofCommit`), so the `.verify` worktree is no longer throwaway for a slice (DW-76 decided: the re-run is a whole leg), and the per-leg proof store (`<store>/sheets/`, 34.8's DRIFT) is read by the closeout and the PR body the same way
+
+**Given** the supervisor suites and conformance
+**When** they run
+**Then** the body rewrite, the slice re-run's commit and the ready/draft transitions are covered with fakes (`test/hostleg.test.ts`, `test/worktree.test.ts`, the `e2e_vertical_slice` drive); the contract (0.1.30, additive) names the re-run's commit and the PR-body rule; DW-76 and DW-82 close by this PR
+<!-- SECTION:DESCRIPTION:END -->
