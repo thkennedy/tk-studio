@@ -2099,6 +2099,9 @@ describe("hole 75: materialise judges only the planes it owns", () => {
     expect(worktreeClean({ result: "drift", planes: [plane("bmad-base", "ok"), plane("plugin", "ok"), plane("store", "ok"),
       plane("vault", "ok"), plane("tracking", "ok"), plane("sandbox-login", "missing")] })).toBe(true);
     expect(worktreeClean({ result: "error", planes: [plane("plugin", "ok"), plane("sandbox-login", "error")] })).toBe(true);
+    // hole 93: a fresh worktree never has the served checkout's sync-back state; the plane is reported, not judged
+    expect(worktreeClean({ result: "drift", planes: [plane("plugin", "ok"), plane("tracking", "missing")] })).toBe(true);
+    expect(driftingPlanes({ result: "drift", planes: [plane("plugin", "drift"), plane("tracking", "missing")] })).toBe("plugin: drift");
   });
   test("a judged plane that drifts still refuses, and the refusal names it", () => {
     const out = { result: "drift", planes: [plane("bmad-base", "ok"), plane("plugin", "drift"), plane("sandbox-login", "missing")] };
