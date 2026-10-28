@@ -645,7 +645,8 @@ describe("Story 35.1: a slice re-run commits and pushes its placed art and proof
     const e = await refusal(rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps));
     expect(e.code).toBe("VerifyFailed");
     expect(e.message).toContain(`the run branch '${fx.branch}' is held by another worktree`);
-    expect(e.message).toContain(held);
+    // git names the held worktree with forward slashes on Windows too: compare separator-insensitively
+    expect(e.message.replaceAll("\\", "/")).toContain(held.replaceAll("\\", "/"));
     expect(existsSync(join(held, "feature.txt"))).toBe(true);
     expect(fx.queue.takeVerifyLeg(fx.id, other)).toBe(true);
   }, 60_000);
