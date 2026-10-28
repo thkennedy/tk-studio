@@ -10,11 +10,15 @@ the launch surface with its `type` kept (the supervisor's slice detection
 reads `type` or `id`). Approve's type rule and the slice's host leg (the
 assets step, the contact sheet, the PR section) are supervisor code
 (`apps/supervisor/src/approve.ts`, `hostverify.ts`, AD-2), so the drive
-runs their Story 34.8 cases the way the supervisor's own gate does:
+runs their Story 34.8 cases the way the supervisor's own gate does, and
+Story 35.1's re-run cases (`hostleg.ts`: the PR body rewritten with the
+`Legs:` history, the ready and `--undo` flips, a slice re-run's art and
+proof committed and pushed on the run branch):
 
     locate the checkout (walk up from the plugin root to the folder holding
     `apps/supervisor/package.json`) → find `bun` on PATH → `bun test
-    test/approve.test.ts test/hostverify.test.ts -t "Story 34.8"` from
+    test/approve.test.ts test/hostverify.test.ts test/hostleg.test.ts
+    -t "Story 34.8|Story 35.1"` from
     `apps/supervisor` under a fresh temp folder (`TMPDIR`/`TEMP`/`TMP`,
     removed afterwards: the Story 33.4 rule), `TK_SUPERVISOR_*` stripped,
     bounded at `BOUND_S` → judge its exit
@@ -36,12 +40,17 @@ import time
 from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
-SUITES = ["test/approve.test.ts", "test/hostverify.test.ts"]
-FILTER = "Story 34.8"
+SUITES = ["test/approve.test.ts", "test/hostverify.test.ts", "test/hostleg.test.ts"]
+# bun's `-t` is a regex: Story 34.8's cases and Story 35.1's re-run (the body rewrite, both flips, the slice commit).
+FILTER = "Story 34.8|Story 35.1"
 TYPE_ID = "run-vertical-slice"
-# Below the manifest's `timeout: 120` for this drive, with the install's bound beside it.
-BOUND_S = 60
+# Below the manifest's `timeout: 240` for this drive (the runner honours it since Story 35.1's
+# fix-forward), with the install's bound beside it: the suite step measured about 100 s on the
+# Windows host with the Story 35.1 filter (hole 87's lesson: bounds follow the box, not the planner).
+BOUND_S = 180
 INSTALL_BOUND_S = 40
+MANIFEST_TIMEOUT_S = 240  # keep in step with manifest.json's entry for this drive
+assert BOUND_S + INSTALL_BOUND_S < MANIFEST_TIMEOUT_S, "the drive's bounds must sit under the manifest's timeout"
 TAIL = 20
 
 

@@ -11,7 +11,7 @@ import { checkoutKey, Queue, selfOwner, servedRoot } from "../src/queue";
 import { invokeSkill, runProcess, toVmPath, type RunResult, type Spawner } from "../src/server";
 import {
   baseBranch, closeOut, closeOutDetail, COPIED_RUNTIME, engineStatus, isDefaultBranch, launchedCloseOutInput, openPrUrl, originRepo, prBody, prepareWorktree, runBranch, sweepEngines, worktreePath, WorktreeFailed, type WorktreeDeps,
-  driftingPlanes, worktreeClean,
+  driftingPlanes, worktreeClean, editPrBody, markPrDraft, markPrReady, proofCommit,
 } from "../src/worktree";
 import { fakeGh, fakeSbx, gitRepo, testGit } from "./fakes";
 import { tempDir, track } from "./tmp";
@@ -385,7 +385,8 @@ describe("AC3: the engine-end sweep (operator-decisions §2)", () => {
     expect(prCalls).toEqual([["pr", "list"], ["pr", "create"], ["pr", "ready"], ["pr", "edit"]]);
     expect(fx.gh.calls().at(-2)!.argv).toEqual(["pr", "ready", "https://github.com/acme/widget/pull/42"]);
     expect(fx.gh.calls().at(-1)!.argv.slice(0, 4)).toEqual(["pr", "edit", "https://github.com/acme/widget/pull/42", "--body-file"]);
-    expect(fx.gh.calls().at(-1)!.body).toContain("## Host verify\n\nSkipped: host-tier run: the worker ran on the host");
+    // Story 35.1: the close-out's first body carries `Legs: 1 — close-out …` under the heading.
+    expect(fx.gh.calls().at(-1)!.body).toMatch(/## Host verify\n\nLegs: 1 — close-out skipped \S+\n\nSkipped: host-tier run: the worker ran on the host/);
     expect(existsSync(fx.wt)).toBe(false);
     expect(fx.queue.lock(fx.repo.checkout)).toBeNull();
     expect(fx.head()).toEqual(fx.headBefore);
@@ -837,7 +838,7 @@ describe("Story 27.4: the host verify leg runs before any PR opens", () => {
     expect(prCalls(fx)[2]!.argv).toEqual(["pr", "ready", pr]);
     const edit = prCalls(fx)[3]!;
     expect(edit.argv.slice(0, 4)).toEqual(["pr", "edit", pr, "--body-file"]);
-    expect(edit.body).toContain("## Host verify\n\nGreen: `");
+    expect(edit.body).toMatch(/## Host verify\n\nLegs: 1 — close-out green \S+\n\nGreen: `/);
     expect(fx.get().state).toBe("complete");
     const ended = fx.queue.events(fx.run.run_id).find((e) => e.kind === "ended")!;
     expect(ended.detail).toMatchObject({ pr, closeout: { result: "PR", host_verify: "green", worktree: "removed" } });
@@ -2264,7 +2265,7 @@ describe("Story 34.8: a slice run's proof folder and host-side commit, before th
       expect(fx.argvs.some((a) => a.bin === "git" && (a.args[0] === "add" || a.args[0] === "commit"))).toBe(false);
       expect(existsSync(join(fx.wt, ".tk-studio", "proof"))).toBe(false);
     }
-  });
+  }, 30_000);
 
   test("the sweep decides the slice from the resolved definition and passes it to the leg", async () => {
     const config = `vcs: git\nverify:\n  host: ${JSON.stringify(`"${process.execPath}" -e "console.log('ok')"`)}\n`;
@@ -2284,5 +2285,82 @@ describe("Story 34.8: a slice run's proof folder and host-side commit, before th
       if (defn.type === "run-vertical-slice") expect(ev.detail!.assets).toEqual({ verdict: "skipped", reason: "no manifest", manifest: "assets/manifest.yaml", art_path: "art/greybox", steps: [] });
       else expect("assets" in ev.detail!).toBe(false);
     }
+  }, 30_000);
+});
+
+describe("Story 35.1: the re-run's shared motions — the `Legs:` line, the lifted body edit and flips, proofCommit on the `-B` cut", () => {
+  type Ran = Extract<import("../src/hostverify").HostVerifyResult, { skipped?: false }>;
+  const red: Ran = { command: "c", argv: ["c"], cwd: "/w", exit: 1, duration_ms: 1, green: false, stdout_tail: [], stderr_tail: ["boom"] };
+  const legs = [
+    { leg: "close-out" as const, verdict: "red" as const, recorded_at: "2026-10-27T01:00:00Z" },
+    { leg: "re-run" as const, verdict: "green" as const, recorded_at: "2026-10-27T02:00:00Z", by: "api" as const },
+  ];
+
+  test("Story 35.1: prBody with `legs`: one `Legs:` line first under `## Host verify`, everything else (the status block) unchanged", () => {
+    const input = { statusBlock: { status: "complete" }, engineRunId: "E1", commits: ["abc one"], costUsd: 1, runId: "q-1", verify: red };
+    const plain = prBody(input), withLegs = prBody({ ...input, legs });
+    expect(withLegs).toContain("## Host verify\n\nLegs: 2 — close-out red 2026-10-27T01:00:00Z; re-run green 2026-10-27T02:00:00Z (by api)\n\n**Red:** `c`");
+    expect(withLegs.replace("Legs: 2 — close-out red 2026-10-27T01:00:00Z; re-run green 2026-10-27T02:00:00Z (by api)\n\n", "")).toBe(plain);
+    expect(prBody({ ...input, legs: [legs[0]!] })).toContain("Legs: 1 — close-out red 2026-10-27T01:00:00Z\n\n");
+  });
+
+  test("Story 35.1: editPrBody, markPrReady and markPrDraft: `--body-file` (read at call time), `gh pr ready`, `gh pr ready --undo`; a failure answered, never thrown", async () => {
+    const fx = await fixture();
+    const pr = "https://github.com/acme/widget/pull/42";
+    expect(await editPrBody(fx.deps, fx.repo.checkout, pr, "the body")).toBeUndefined();
+    expect(await markPrReady(fx.deps, fx.repo.checkout, pr)).toBeUndefined();
+    expect(await markPrDraft(fx.deps, fx.repo.checkout, pr)).toBeUndefined();
+    const calls = fx.gh.calls();
+    expect(calls.map((c) => c.argv.slice(0, 3))).toEqual([["pr", "edit", pr], ["pr", "ready", pr], ["pr", "ready", pr]]);
+    expect(calls[0]!.argv[3]).toBe("--body-file");
+    expect(calls[0]!.body).toBe("the body");
+    expect(calls[1]!.argv).toEqual(["pr", "ready", pr]);
+    expect(calls[2]!.argv).toEqual(["pr", "ready", pr, "--undo"]);
+    fx.gh.answer({ fail: ["pr edit", "pr ready"] });
+    expect(await editPrBody(fx.deps, fx.repo.checkout, pr, "b")).toMatch(/^gh pr edit exit 1: fake gh: pr edit failed/);
+    expect(await markPrReady(fx.deps, fx.repo.checkout, pr)).toMatch(/^gh pr ready exit 1: /);
+    expect(await markPrDraft(fx.deps, fx.repo.checkout, pr)).toMatch(/^gh pr ready --undo exit 1: /);
+    const throwing: WorktreeDeps = { ...fx.deps, run: async () => { throw new Error("spawn failed"); } };
+    expect(await markPrDraft(throwing, fx.repo.checkout, pr)).toBe("gh pr ready --undo: spawn failed");
+  });
+
+  test("Story 35.1: closeOut goes through the lifted motions: a red verify on an open PR is `--undo` then `gh pr edit`, its body carrying the passed `legs`", async () => {
+    const fx = await fixture({ baseRef: "main" });
+    const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+    commitIn(wt, "a.txt", "engine: story one");
+    const pr = "https://github.com/acme/widget/pull/42";
+    const c = await closeOut(fx.get(), { paused: false, existingPr: pr, verify: red, legs: [legs[0]!] }, fx.deps);
+    expect(c).toMatchObject({ pr, draft: true });
+    expect(c.error).toBeUndefined();
+    const calls = fx.gh.calls().filter((x) => x.argv[0] === "pr");
+    expect(calls.map((x) => x.argv)).toEqual([["pr", "ready", pr, "--undo"], ["pr", "edit", pr, "--body-file", expect.any(String)]]);
+    expect(calls[1]!.body).toContain("## Host verify\n\nLegs: 1 — close-out red 2026-10-27T01:00:00Z\n\n**Red:**");
+  });
+
+  test("Story 35.1: proofCommit on a worktree cut `-B <run branch> <remote tip>` over a stale local branch: committed on the branch, fast-forward of the tip; a detached cut is refused", async () => {
+    const fx = await fixture({ baseRef: "main" });
+    const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+    commitIn(wt, "a.txt", "engine: story one");
+    const branch = runBranch(fx.run.run_id);
+    testGit(wt, "push", "-q", "origin", branch);
+    const tip = testGit(wt, "rev-parse", "HEAD");
+    testGit(fx.repo.checkout, "worktree", "remove", "--force", wt);
+    testGit(fx.repo.checkout, "branch", "-f", branch, "main"); // the kept local branch, behind origin
+    const path = `${wt}.verify`;
+    testGit(fx.repo.checkout, "fetch", "-q", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`);
+    testGit(fx.repo.checkout, "worktree", "add", "-q", "--relative-paths", "-B", branch, path, tip);
+    mkdirSync(join(path, "art", "greybox"), { recursive: true });
+    writeFileSync(join(path, "art", "greybox", "crate.glb"), "glb");
+    const v: Ran = { ...red, exit: 0, green: true, stderr_tail: [], assets: { verdict: "green", manifest: "assets/manifest.yaml", art_path: "art/greybox", steps: [] } };
+    const done = await proofCommit({ run_id: fx.run.run_id, worktree: path, prefix: null }, v, fx.deps);
+    expect(done.sha).toMatch(/^[0-9a-f]{40}$/);
+    expect(testGit(path, "rev-parse", "--abbrev-ref", "HEAD")).toBe(branch);
+    expect(testGit(path, "rev-parse", "HEAD^")).toBe(tip);
+    expect(testGit(path, "log", "-1", "--format=%s")).toBe(`host leg: placed assets and proof (run ${fx.run.run_id})`);
+    testGit(path, "push", "-q", "origin", branch); // a fast-forward, never forced
+    expect(testGit(fx.repo.origin, "rev-parse", branch)).toBe(done.sha);
+    testGit(fx.repo.checkout, "worktree", "remove", "--force", path);
+    testGit(fx.repo.checkout, "worktree", "add", "-q", "--detach", path, tip);
+    await expect(proofCommit({ run_id: fx.run.run_id, worktree: path, prefix: null }, v, fx.deps)).rejects.toThrow(/not the run branch/);
   });
 });

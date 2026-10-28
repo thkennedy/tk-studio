@@ -2603,8 +2603,10 @@ const USAGE = [
 export interface VerifyVerbSeams { queue?: Queue; leg?: (queue: Queue, runId: string) => Promise<HostLegStarted> }
 
 /** Story 33.8: `bun src/cli.ts verify <run id>` — an ended run's host leg re-run in the foreground (`hostleg.ts`). One
- * JSON object: `{ok: true, run_id, state, head, green, skipped?, reason?, pr, pr_ready?, worktree}`; exit 0 green, 1 red
- * or skipped, 2 a refusal (`{ok: false, error, detail}`) or a usage error. */
+ * JSON object: `{ok: true, run_id, state, head, rerun: true, green, skipped?, reason?, pr, pr_ready?, pr_draft?, pr_body?,
+ * commit?, pushed?, worktree}` (Story 35.1: `rerun: true`, a red leg's `reason`, and the `rerun` member's new fields — the
+ * body rewrite, the red flip, a slice run's commit and push); exit 0 green, 1 red or skipped, 2 a refusal
+ * (`{ok: false, error, detail}`) or a usage error. */
 export async function verifyVerb(args: string[], seams: VerifyVerbSeams = {}): Promise<number> {
   if (args.length !== 1 || !args[0]!.trim()) { console.error(USAGE); return 2; }
   const runId = args[0]!;
@@ -2615,10 +2617,13 @@ export async function verifyVerb(args: string[], seams: VerifyVerbSeams = {}): P
     const started = await (seams.leg ?? ((q: Queue, id: string) => rerunHostLeg(q, id, { by: "cli" })))(queue, runId);
     const r = await started.done;
     const green = !r.skipped && r.green;
+    const x = r.rerun;
     console.log(JSON.stringify({
-      ok: true, run_id: started.run_id, state: started.state, head: started.head, green,
-      ...(r.skipped ? { skipped: true, reason: r.reason } : {}), pr: r.rerun.pr,
-      ...(r.rerun.pr_ready !== undefined ? { pr_ready: r.rerun.pr_ready } : {}), worktree: r.rerun.worktree,
+      ok: true, run_id: started.run_id, state: started.state, head: started.head, rerun: true, green,
+      ...(r.skipped ? { skipped: true, reason: r.reason } : r.reason !== undefined ? { reason: r.reason } : {}), pr: x.pr,
+      ...(x.pr_ready !== undefined ? { pr_ready: x.pr_ready } : {}), ...(x.pr_draft !== undefined ? { pr_draft: x.pr_draft } : {}),
+      ...(x.pr_body !== undefined ? { pr_body: x.pr_body } : {}), ...(x.commit !== undefined ? { commit: x.commit } : {}),
+      ...(x.pushed !== undefined ? { pushed: x.pushed } : {}), worktree: x.worktree,
     }, null, 2));
     return green ? 0 : 1;
   } catch (e) {
