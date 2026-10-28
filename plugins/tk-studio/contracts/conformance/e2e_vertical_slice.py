@@ -44,9 +44,13 @@ SUITES = ["test/approve.test.ts", "test/hostverify.test.ts", "test/hostleg.test.
 # bun's `-t` is a regex: Story 34.8's cases and Story 35.1's re-run (the body rewrite, both flips, the slice commit).
 FILTER = "Story 34.8|Story 35.1"
 TYPE_ID = "run-vertical-slice"
-# Below the manifest's `timeout: 120` for this drive, with the install's bound beside it.
-BOUND_S = 60
+# Below the manifest's `timeout: 240` for this drive (the runner honours it since Story 35.1's
+# fix-forward), with the install's bound beside it: the suite step measured about 100 s on the
+# Windows host with the Story 35.1 filter (hole 87's lesson: bounds follow the box, not the planner).
+BOUND_S = 180
 INSTALL_BOUND_S = 40
+MANIFEST_TIMEOUT_S = 240  # keep in step with manifest.json's entry for this drive
+assert BOUND_S + INSTALL_BOUND_S < MANIFEST_TIMEOUT_S, "the drive's bounds must sit under the manifest's timeout"
 TAIL = 20
 
 

@@ -225,6 +225,9 @@ def _run_drive(surface: str, drive: dict, sandbox: Path, store: Path,
         check["detail"] = f"drive target {argv[0]} does not exist"
         return check
     env = {**os.environ, **(env_overlay or {}), "TK_STUDIO_HOME": str(store)}
+    # A drive may carry its own `timeout` in the manifest (an e2e drive that
+    # runs a bun suite needs more than the runner's cap); the cap is the default.
+    bound = int(drive.get("timeout", timeout))
     try:
         # Every shipped CLI reconfigures its stdout to utf-8 (AD-11, enforced
         # by test_utf8_guard) — decode the same way, or Windows' cp1252
@@ -233,9 +236,9 @@ def _run_drive(surface: str, drive: dict, sandbox: Path, store: Path,
             [sys.executable, str(script), *argv[1:]],
             stdin=subprocess.DEVNULL, capture_output=True, text=True,
             encoding="utf-8", errors="replace",
-            timeout=timeout, env=env, cwd=str(root))
+            timeout=bound, env=env, cwd=str(root))
     except subprocess.TimeoutExpired:
-        check["detail"] = (f"hung past {timeout}s — a prompt or wait, never "
+        check["detail"] = (f"hung past {bound}s — a prompt or wait, never "
                           "allowed headless (AD-11)")
         return check
     stdout = proc.stdout.strip()
