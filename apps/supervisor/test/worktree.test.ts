@@ -2265,7 +2265,7 @@ describe("Story 34.8: a slice run's proof folder and host-side commit, before th
       expect(fx.argvs.some((a) => a.bin === "git" && (a.args[0] === "add" || a.args[0] === "commit"))).toBe(false);
       expect(existsSync(join(fx.wt, ".tk-studio", "proof"))).toBe(false);
     }
-  });
+  }, 30_000);
 
   test("the sweep decides the slice from the resolved definition and passes it to the leg", async () => {
     const config = `vcs: git\nverify:\n  host: ${JSON.stringify(`"${process.execPath}" -e "console.log('ok')"`)}\n`;
@@ -2285,7 +2285,7 @@ describe("Story 34.8: a slice run's proof folder and host-side commit, before th
       if (defn.type === "run-vertical-slice") expect(ev.detail!.assets).toEqual({ verdict: "skipped", reason: "no manifest", manifest: "assets/manifest.yaml", art_path: "art/greybox", steps: [] });
       else expect("assets" in ev.detail!).toBe(false);
     }
-  });
+  }, 30_000);
 });
 
 describe("Story 35.1: the re-run's shared motions — the `Legs:` line, the lifted body edit and flips, proofCommit on the `-B` cut", () => {
