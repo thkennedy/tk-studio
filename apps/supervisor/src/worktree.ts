@@ -231,7 +231,9 @@ export type MaterialiseInstall = "ran" | "skipped: drift-clean";
  * (Story 33.2) describes the project's sandbox, which the pin owns (33.3) and which is stopped whenever
  * no run holds it (the verify verb of 33.8 never pins), so it can never decide whether a fresh
  * worktree's runtime is at the pin; the first real `POST /runs/{id}/verify` failed on it. */
-export const MATERIALISE_IGNORED_PLANES: ReadonlySet<string> = new Set(["sandbox-login"]);
+// Hole 93: the tracking plane reads the served checkout's untracked sync-back state, which a fresh
+// worktree never has, and the engine never reaches Jira: materialise reports it and never judges it.
+export const MATERIALISE_IGNORED_PLANES: ReadonlySet<string> = new Set(["sandbox-login", "tracking"]);
 
 /** Whether the drift check's answer means the worktree's runtime is at the pin: `clean`, or every
  * judged plane `ok` with only an ignored plane not. No answer (no JSON, no planes) is never clean. */
