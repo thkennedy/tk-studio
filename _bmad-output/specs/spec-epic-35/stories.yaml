@@ -33,35 +33,6 @@
     and a file named `35-1-the-re-run-is-a-whole-leg.md` is read as pending (loop
     deficiency 1, story 21-6).
 
-- id: "35-2-every-story-gets-its-plan-and-its-records"
-  title: "Every Story Gets Its Plan and Its Records"
-  description: >-
-    I want the launch bootstrap to write a plan for every story of the epic and refuse a
-    story whose SPEC open questions have no design note, and a resumed run that lands
-    more than one story to write a gate file and a cost line per story, So that no dev
-    session starts with nothing to build from and no story lands unrecorded (holes 81
-    and 89; DW-79, DW-83; the retrospective's C4, C5, AI-9). Canonical: ST-147.
-  invoke_dev_with: >-
-    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 35.2: Every
-    Story Gets Its Plan and Its Records", the authoritative specification (user story
-    and acceptance criteria). Read the epic's own narrative (the paragraphs under "##
-    Epic 35:") for scope, rulings and the repo the story targets; transcribe the story
-    into the spec's intent contract and never re-derive, generalise or extend it. Plan:
-    plans/35-2.md when present (its Code Map is the investigation). Project rules and
-    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
-    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
-    implementer and reviewers explicitly on every subagent launch. Advisor: when
-    routing.current.json gives the session an advisor other than `off`, consult the
-    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
-    tripwire, a file outside Files, and before declaring the story done; append a `##
-    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
-    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
-    executor spec as `stories/35-2-every-story-gets-its-plan-and-its-records-spec.md` in
-    the spec folder; the engine resolves it by the glob
-    `35-2-every-story-gets-its-plan-and-its-records-*.md`, and a file named
-    `35-2-every-story-gets-its-plan-and-its-records.md` is read as pending (loop
-    deficiency 1, story 21-6).
-
 - id: "35-8-every-stage-leaves-a-start-and-a-stop"
   title: "Every Stage Leaves a Start and a Stop"
   description: >-
@@ -87,6 +58,35 @@
     Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
     affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
     executor spec as `stories/35-8-every-stage-leaves-a-start-and-a-stop-spec.md` in
+    the spec folder; the engine resolves it by the glob
+    `35-2-every-story-gets-its-plan-and-its-records-*.md`, and a file named
+    `35-2-every-story-gets-its-plan-and-its-records.md` is read as pending (loop
+    deficiency 1, story 21-6).
+
+- id: "35-2-every-story-gets-its-plan-and-its-records"
+  title: "Every Story Gets Its Plan and Its Records"
+  description: >-
+    I want the launch bootstrap to write a plan for every story of the epic and refuse a
+    story whose SPEC open questions have no design note, and a resumed run that lands
+    more than one story to write a gate file and a cost line per story, So that no dev
+    session starts with nothing to build from and no story lands unrecorded (holes 81
+    and 89; DW-79, DW-83; the retrospective's C4, C5, AI-9). Canonical: ST-147.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 35.2: Every
+    Story Gets Its Plan and Its Records", the authoritative specification (user story
+    and acceptance criteria). Read the epic's own narrative (the paragraphs under "##
+    Epic 35:") for scope, rulings and the repo the story targets; transcribe the story
+    into the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/35-2.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/35-2-every-story-gets-its-plan-and-its-records-spec.md` in
     the spec folder; the engine resolves it by the glob
     `35-2-every-story-gets-its-plan-and-its-records-*.md`, and a file named
     `35-2-every-story-gets-its-plan-and-its-records.md` is read as pending (loop
