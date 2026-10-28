@@ -216,7 +216,7 @@ def _paged_results(client: ConfluenceClient, path: str,
 
 def find_space(client: ConfluenceClient, key: str) -> dict | None:
     for entry in _paged_results(client, "/spaces", {"keys": key}):
-        if entry.get("key") == key:
+        if str(entry.get("key", "")).lower() == key.lower():  # Confluence keys are unique case-insensitively (a created key may come back lowercase)
             return entry
     return None
 
