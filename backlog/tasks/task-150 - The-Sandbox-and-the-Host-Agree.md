@@ -1,0 +1,37 @@
+---
+id: TASK-150
+title: The Sandbox and the Host Agree
+status: To Do
+assignee: []
+created_date: '2026-10-27 23:26'
+labels:
+  - ST-150
+milestone: Loop Hygiene 2, the Slice Path Hardened
+dependencies: []
+---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+As the operator,
+I want the gates the engine runs in the sandbox and the gates the host runs to disagree only on what the box has: the 15 delivery tests red only in the sandbox reproduced and fixed, the eval cases that need a shell or the repository tree run on the sandbox tier through a job, a `godot` shim on the engine step's PATH, and the plugin's Windows notes for sandbox-written tests,
+So that the engine can trust its own suite and an acceptance record names a tier that works (holes 78, 84, 85; DW-78, DW-80, DW-81; the retrospective's C1, C6, C7, AI-7).
+
+**Acceptance Criteria:**
+
+**Given** the sandbox `claude-tk-studio` at main
+**When** `bun test test/delivery.test.ts` runs there
+**Then** the 15 Story 32.8 closeout-pass tests pass, the cause reproduced and fixed in the tests or the code (a path, a locale, the sandbox's bun at `~/.bun/bin`, whichever it is) and named in the plugin's sandbox notes, so the engine's gate may run the whole supervisor suite again (hole 84, DW-80)
+
+**Given** the plugin's eval cases
+**When** the shipped `maintenance-conformance` job type (or a `maintenance-evals` sibling of it) runs on the sandbox tier
+**Then** it runs `claude plugin eval` for the cases the host cannot (`tk-studio-playable-judge-verdict`, `asset-ladder-generated-rung`: the sandbox has the tree and a shell), writes the scores to the run workspace and a `job-run` ledger line, and `kb/acceptance-record-34-8-vertical-slice-on-tua.md`'s step 7 names the tier per case, the host keeping `gds-engine-godot-4-pinned-facts` (hole 85, DW-81); the operator queues it once and fills the record's eval row
+
+**Given** the engine step of the host leg and the plugin's docs
+**When** a project's command calls a bare `godot`, and when a sandbox-written test reaches the host
+**Then** the step's PATH holds a tk-studio shim named `godot` that execs `$env:GODOT` (or the leg refuses a bare `godot` with the reason; the planner picks and the runbook row says which; hole 78, DW-78), and the plugin's Windows notes for sandbox-written tests name case-folding file systems, PATHEXT, YAML backslashes, HKCU reads and append-mode handles (holes 74, 77, 82, 83) with one lib-suite example each that runs on Windows
+
+**Given** an engine job type (`run-epic`, `run-vertical-slice`, 35.7's `run-sweep`)
+**When** a project submits an instance of it with no per-job placement on the sandbox tier (hole 90: an unplaced `run-epic-35` claimed on the host tier and ran the launch skill as a host `claude -p` for five turns before blocking)
+**Then** the job type declares the tier it requires (`requires: {tier: sbx}` in `job.schema.json`, additive) and `submit` refuses a host placement for it with `placement:TierRequired` before any process starts; the contract (0.1.30, additive) and the runbook's planning checklist name the supervisor's per-job config entry
+<!-- SECTION:DESCRIPTION:END -->
