@@ -4,7 +4,7 @@
 // runs on both hosts.
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { delimiter, dirname, join } from "node:path";
+import { basename, delimiter, dirname, join } from "node:path";
 import {
   gitUsrBin, hostVerify, inconclusiveReason, isInconclusive, isRed, pathKey, playableConfig, prSection, redReason, splitCommand, tail,
   TOOL_WALL_MARGIN_S, verifyCommand, wallClockTrip, type HostVerifyRan, type PlayableJudge,
@@ -531,6 +531,86 @@ describe("Story 34.1: the engine gate runs after a green verify.host", () => {
     expect(m.engine!.error).toBeTruthy();
     expect(isRed(m)).toBe(true);
     expect(redReason(m)).toContain("`tk-sup-no-such-engine --x` failed to start: ");
+  }, 30_000);
+
+  // Story 35.5 (CAP-11, hole 78): the `godot` shim. The fake is named `godot_console`, never `godot`: a bare `godot`
+  // reaches it only through the shim (argv[0] spawned as `$GODOT`, or the shim dir first on PATH).
+  function fakeConsole(code = 0) {
+    const dir = tempDir("tk-sup-godot-");
+    return { dir, bin: fakeBin(join(dir, "godot_console"), `console.log('4.7.2.stable.mono');\nconsole.log('args ' + process.argv.slice(2).join(' '));\nprocess.exit(${code});`) };
+  }
+
+  test("Story 35.5: GODOT an absolute file — a bare `godot` argv[0] (any case, no separator) is spawned as $GODOT; the shim dir (in the step's tk-sup-hv- dir) is first on PATH, before the GODOT folder; `engine.godot_shim` names it", async () => {
+    const godot = fakeConsole().bin;
+    for (const first of ["godot", "GODOT.EXE", "Godot"]) {
+      const config = verifyKeys({ host: "uv run tools/verify_host.py", engine: `${first} --headless --quit` });
+      const shims: string[] = [];
+      const { steps, run } = recorder(config, [0, 0]);
+      const spy = async (bin: string, args: string[], o: any) => {
+        const r = await run(bin, args, o);
+        if (bin !== "git" && steps.length === 2) {
+          const shim = o.env.PATH.split(delimiter)[0];
+          shims.push(readFileSync(join(shim, "godot"), "utf-8"));
+        }
+        return r;
+      };
+      const v = await hostVerify(project(config).run, 60, { env: { TK_STUDIO_HOME: "store", PATH: "/usr/bin", GODOT: godot }, run: spy as any }) as HostVerifyRan;
+      expect(steps).toHaveLength(2);
+      expect(steps[0]!.argv[0]).toBe("uv"); // the host step: untouched
+      expect(steps[0]!.env.PATH).toBe("/usr/bin");
+      expect(steps[1]!.argv).toEqual([godot, "--headless", "--quit"]);
+      const shim = v.engine!.godot_shim!;
+      expect(basename(shim)).toBe("godot-shim");
+      expect(basename(dirname(shim))).toStartWith("tk-sup-hv-");
+      expect(steps[1]!.env.PATH).toBe([shim, dirname(godot), "/usr/bin"].join(delimiter));
+      expect(steps[1]!.env.GODOT).toBe(godot);
+      expect(shims).toEqual(['#!/bin/sh\nexec "$GODOT" "$@"\n']);
+      expect(v.engine).toMatchObject({ verdict: "green", godot_dir: dirname(godot), argv: [first, "--headless", "--quit"] });
+      expect(existsSync(shim)).toBe(false); // removed with the step's temp dir
+    }
+    // a path-qualified `./godot` is the project's own: never rewritten
+    const config = verifyKeys({ host: "uv run tools/verify_host.py", engine: "./godot --x" });
+    const { steps, run } = recorder(config, [0, 0]);
+    await hostVerify(project(config).run, 60, { env: { TK_STUDIO_HOME: "store", PATH: "/usr/bin", GODOT: godot }, run: run as any });
+    expect(steps[1]!.argv).toEqual(["./godot", "--x"]);
+  });
+
+  test("Story 35.5: no shim without GODOT an absolute file (unset, bare, absolute but missing): no `godot_shim`, argv and PATH as in 0.1.29", async () => {
+    const config = verifyKeys({ host: "uv run tools/verify_host.py", engine: "godot --headless" });
+    for (const godot of [undefined, "godot", join("/opt", "no-such-godot", "godot_console")]) {
+      const { steps, run } = recorder(config, [0, 0]);
+      const env: Record<string, string> = { TK_STUDIO_HOME: "store", PATH: "/usr/bin", ...(godot ? { GODOT: godot } : {}) };
+      const v = await hostVerify(project(config).run, 60, { env, run: run as any }) as HostVerifyRan;
+      expect(steps[1]!.argv).toEqual(["godot", "--headless"]);
+      expect(v.engine!.godot_shim).toBeUndefined();
+      expect("godot_shim" in v.engine!).toBe(false);
+      expect(steps[1]!.env.PATH!.split(delimiter)[0]).toBe(godot && godot !== "godot" ? dirname(godot) : "/usr/bin");
+    }
+  });
+
+  test("Story 35.5: real spawns — a bare `godot` argv[0] and a `godot` inside a shell script both reach the fake at GODOT", async () => {
+    const fake = fakeConsole();
+    const bare = await hostVerify(project(verifyKeys({ host: bunCmd("console.log('host ok')"), engine: "godot --headless --quit" })).run, 60,
+      { env: bareEnv({ GODOT: fake.bin }) }) as HostVerifyRan;
+    expect(bare.engine).toMatchObject({ verdict: "green", exit: 0, godot_dir: fake.dir });
+    expect(bare.engine!.stdout_tail).toEqual(["4.7.2.stable.mono", "args --headless --quit"]);
+    expect(bare.engine!.godot_shim).toBeTruthy();
+    if (process.platform === "win32" || !Bun.which("sh")) return; // the win32 shell case below
+    const env = bareEnv({ GODOT: fake.bin });
+    env.PATH = [env.PATH, dirname(Bun.which("sh")!)].join(delimiter);
+    const script = await hostVerify(project(verifyKeys({ host: bunCmd("console.log('host ok')"), engine: `sh -c "godot --version"` })).run, 60,
+      { env }) as HostVerifyRan;
+    expect(script.engine).toMatchObject({ verdict: "green", exit: 0 });
+    expect(script.engine!.stdout_tail).toEqual(["4.7.2.stable.mono", "args --version"]);
+  }, 30_000);
+
+  test.skipIf(process.platform !== "win32" || gitUsrBin(process.env) === null)("Story 35.5 win32: Git's bash reaches $GODOT through the shim (`godot` inside `bash -c`)", async () => {
+    const fake = fakeConsole();
+    const v = await hostVerify(project(verifyKeys({ host: bunCmd("console.log('host ok')"), engine: `bash -c "godot --version"` })).run, 60,
+      { env: { ...process.env, GODOT: fake.bin } }) as HostVerifyRan;
+    expect(v.engine).toMatchObject({ verdict: "green", exit: 0 });
+    expect(v.engine!.stdout_tail).toEqual(["4.7.2.stable.mono", "args --version"]);
+    expect(v.engine!.godot_shim).toBeTruthy();
   }, 30_000);
 });
 

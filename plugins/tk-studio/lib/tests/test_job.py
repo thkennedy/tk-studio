@@ -147,6 +147,27 @@ class JobTestCase(unittest.TestCase):
             problems = joblib.validate_definition(self._defn(editor_in_the_loop=value))
             self.assertIn("editor_in_the_loop must be a boolean", problems)
 
+    def test_requires_is_an_optional_tier_object(self):
+        # Story 35.5 (CAP-12): {tier: host|sbx} and nothing else.
+        for tier in ("sbx", "host"):
+            self.assertEqual(joblib.validate_definition(
+                self._defn(requires={"tier": tier})), [])
+        for value in ("sbx", {"tier": "vm"}, {"tier": "sbx", "x": 1}, {}, None):
+            problems = joblib.validate_definition(self._defn(requires=value))
+            self.assertTrue(any(p.startswith("requires must be") for p in problems),
+                            (value, problems))
+
+    def test_requires_overlay_instance_overrides_type(self):
+        # Story 35.5: an instance's own `requires` overrides its type's.
+        types = joblib.load_types()
+        inst = {"job_schema_version": 1, "id": "run-epic-35", "type": "run-epic"}
+        resolved, problems = joblib.resolve_instance(inst, types)
+        self.assertEqual(problems, [])
+        self.assertEqual(resolved["requires"], {"tier": "sbx"})
+        resolved, _ = joblib.resolve_instance(
+            dict(inst, requires={"tier": "host"}), types)
+        self.assertEqual(resolved["requires"], {"tier": "host"})
+
     def test_guard_and_stop_value_shapes(self):
         bad = [
             self._defn(guards={"max_turns": 0}),
@@ -221,6 +242,30 @@ class JobTestCase(unittest.TestCase):
         self.assertEqual(entry["problems"], [])
         self.assertEqual(entry["definition"]["trigger"], "cron")
         self.assertTrue(entry["definition"]["durable"])
+
+    # ------------- Story 35.5: engine types require sbx; maintenance-evals
+
+    def test_engine_types_require_the_sandbox_tier(self):
+        types = joblib.load_types()
+        for type_id in ("run-epic", "run-vertical-slice", "maintenance-evals"):
+            self.assertEqual(types[type_id]["problems"], [], type_id)
+            self.assertEqual(types[type_id]["definition"]["requires"],
+                             {"tier": "sbx"}, type_id)
+        self.assertNotIn("requires", types["maintenance-conformance"]["definition"])
+
+    def test_maintenance_evals_ships_as_a_one_shot_evals_skill_job(self):
+        entry = joblib.load_types()["maintenance-evals"]
+        self.assertEqual(entry["problems"], [])
+        defn = entry["definition"]
+        self.assertEqual(defn["trigger"], "one-shot")
+        self.assertNotIn("cadence", defn)
+        self.assertEqual(defn["target"], {
+            "skill": "tk-studio-evals",
+            "payload": {"cases": ["tk-studio-playable-judge-verdict",
+                                  "asset-ladder-generated-rung"], "runs": 3}})
+        self.assertGreaterEqual(defn["guards"]["max_wall_clock_seconds"], 3600)
+        self.assertEqual(defn["stop"], {"on_status": ["blocked"]})
+        self.assertEqual(defn["effort"], "low")
 
     # ---------------- Story 31.4: the shipped atlassian-sync-back job type
 

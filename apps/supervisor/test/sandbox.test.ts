@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { cancelRun, claimGate, detectExternal, pinBeforeClaim, driveResumes, ExternalRunRefused, finishRun, mirror, queueRecorder, recoverQueue, watchStarterLocks, type ResumedRun, type Started } from "../src/cli";
 import { checkoutKey, Queue, workerMayRun, type Owner, type Probes, type QueueRun, type StudioOps } from "../src/queue";
 import {
@@ -52,7 +52,9 @@ const sweepWith = (status: "finished" | "paused" | "running"): WorktreeDeps => {
     run: async () => ({ exit: 0, stdout: "", stderr: "" }),
     uv: async () => ({ exit: 0, stderr: "", stdout: JSON.stringify({ ok: true, run }) }),
     verbs: async () => ({ ok: true, state: "complete" }),
-    sbx: deps,
+    // Story 35.5: the in-VM status probe reads `TK_STUDIO_ROOT` from the sbx deps' env, so it carries it (the repo
+    // root, as delivery.test.ts's `deps()`), never inheriting the host's user variable from `process.env`.
+    sbx: { ...deps, env: { ...deps.env, TK_STUDIO_ROOT: resolve(import.meta.dir, "..", "..", "..") } },
   };
 };
 /** The cancel's deps: the studio verbs ok (recorded in `verbCalls`), the graceful stop ok, `sbx` the fake. */

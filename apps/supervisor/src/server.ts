@@ -393,6 +393,16 @@ export class SbxSandboxMissing extends Error {
   }
 }
 
+/** Story 35.5 (CAP-12): a job whose definition `requires` a tier its resolved placement does not have — refused at
+ * submit before anything is queued or spawned; the reason names the supervisor's per-job config entry. */
+export class TierRequired extends Error {
+  constructor(jobId: string, projectId: string, required: string, resolved: string, source: string) {
+    super(`TierRequired: job ${jobId} requires tier ${required}; placement resolved ${resolved} (${source}) — set `
+      + `jobs.${projectId}/${jobId} {tier: "${required}"${required === "sbx" ? ', sandbox: "<name>"' : ""}} in TK_SUPERVISOR_CONFIG`);
+    this.name = "TierRequired";
+  }
+}
+
 /** A tier value checked: undefined → `host`; anything else must be a TIERS member. */
 export function checkTier(tier: unknown): Tier {
   if (tier === undefined || tier === null) return "host";

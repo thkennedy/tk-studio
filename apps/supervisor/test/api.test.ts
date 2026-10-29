@@ -243,6 +243,8 @@ describe("POST /jobs (AC3)", () => {
       [refused("HostBypassRefused: permission mode 'bypassPermissions' is forbidden on the host"), "HostBypassRefused"],
       [refused("TierRefused: tier 'gpu' is not one of host|sbx"), "TierRefused"],
       [refused("SbxSandboxMissing: the sbx tier needs a sandbox name"), "SbxSandboxMissing"],
+      // Story 35.5 (CAP-12): a job requiring a tier its placement lacks
+      [refused('TierRequired: job run-epic-35 requires tier sbx; placement resolved host (default) — set jobs.p/run-epic-35 {tier: "sbx", sandbox: "<name>"} in TK_SUPERVISOR_CONFIG'), "TierRequired"],
       [new StartError("SupervisorConfigInvalid: TK_SUPERVISOR_CONFIG 'x' is unreadable"), "SupervisorConfigInvalid"],
       [refused("VmPathUnderivable: cannot derive the sbx microVM path of 'x'"), "VmPathUnderivable"],
       [refused("WorkDirMissing: TK_SUPERVISOR_WORK is not set — an editor-in-the-loop run needs the work folder its snapshot lands in"), "WorkDirMissing"],
@@ -1045,6 +1047,36 @@ describe.skipIf(!canRunE2E)("POST /jobs through the real submit path", () => {
       const body = await ok.json() as Record<string, any>;
       expect(queue.get(body.run_id)).toMatchObject({ state: "queued", editor_in_the_loop: 1 });
     } finally { if (prev === undefined) delete process.env.TK_SUPERVISOR_WORK; else process.env.TK_SUPERVISOR_WORK = prev; }
+  }, 60_000);
+
+  test("Story 35.5: an unplaced run-epic instance → 400 TierRequired naming the per-job config entry, nothing queued; placed by the config → queued on sbx", async () => {
+    writeFileSync(join(project, ".tk-studio", "jobs", "run-epic-35.json"),
+      JSON.stringify({ job_schema_version: 1, id: "run-epic-35", type: "run-epic", target: { payload: { epic: 35 } } }));
+    const prev = process.env.TK_SUPERVISOR_CONFIG;
+    try {
+      delete process.env.TK_SUPERVISOR_CONFIG;
+      const { queue, post } = real();
+      const res = await post({ project: projectId, job: "run-epic-35" });
+      expect(res.status).toBe(400);
+      const body = await res.json() as Record<string, string>;
+      expect(body.error).toBe("TierRequired");
+      expect(body.detail).toBe(`TierRequired: job run-epic-35 requires tier sbx; placement resolved host (default) — set jobs.${projectId}/run-epic-35 {tier: "sbx", sandbox: "<name>"} in TK_SUPERVISOR_CONFIG`);
+      expect(queue.runs()).toEqual([]);
+      // an explicit host placement is refused the same way (its source named)
+      const host = await post({ project: projectId, job: "run-epic-35", tier: "host" });
+      expect((await host.json() as Record<string, string>).detail).toContain("placement resolved host (explicit)");
+      expect(queue.runs()).toEqual([]);
+      const cfg = join(tempDir("tk-sup-api-cfg-"), "supervisor.yaml");
+      writeFileSync(cfg, `jobs:\n  "${projectId}/run-epic-35":\n    tier: sbx\n    sandbox: claude-p\n`);
+      process.env.TK_SUPERVISOR_CONFIG = cfg;
+      const ok = await post({ project: projectId, job: "run-epic-35" });
+      expect(ok.status).toBe(200);
+      const queued = await ok.json() as Record<string, any>;
+      expect(queue.get(queued.run_id)).toMatchObject({ state: "queued", tier: "sbx", sandbox: "claude-p", job_id: "run-epic-35" });
+    } finally {
+      if (prev === undefined) delete process.env.TK_SUPERVISOR_CONFIG; else process.env.TK_SUPERVISOR_CONFIG = prev;
+      rmSync(join(project, ".tk-studio", "jobs", "run-epic-35.json"), { force: true });
+    }
   }, 60_000);
 
   test("valid → queued with the run id and base_ref stored", async () => {

@@ -226,7 +226,12 @@
     folder; the engine resolves it by the glob
     `35-6-the-closeout-carries-the-proof-*.md`, and a file named
     `35-6-the-closeout-carries-the-proof.md` is read as pending (loop deficiency 1,
-    story 21-6).
+    story 21-6). Size (gate of 35-5, 2026-10-29): plans/35-6.md is band L and
+    oversize (18 files, two ACs of different kinds). Halt (the `halt` consult) if the
+    Files list grows past the plan's; never split the story. The CAP-13 media shape
+    and the story-leg window rule are settled in SPEC.md's design notes and the
+    plan's Settled shape; the supervisor suites are not in the lib gate, so run the
+    plan's Verify bun steps.
 
 - id: "35-7-the-run-sweep-job-type"
   title: "The `run-sweep` Job Type"

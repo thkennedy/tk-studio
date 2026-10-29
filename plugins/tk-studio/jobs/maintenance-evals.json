@@ -1,0 +1,24 @@
+{
+  "job_schema_version": 1,
+  "id": "maintenance-evals",
+  "description": "Maintenance job type (Story 35.5, hole 85, CAP-10): the sandbox-tier sibling of maintenance-conformance, which stays a host core job. The tk-studio-evals surface runs claude plugin eval for the plugin's eval cases the host cannot run (they need a shell and the repository tree), writes <out>/<case>.json and <out>/scores.json (in the VM's run workspace), and ends in a status block whose artifacts list scores.json and whose reason is the per-case summary; finish lands it in the host run's run.json and the run's job-run ledger line carries it. One-shot: the operator queues it once.",
+  "target": {
+    "skill": "tk-studio-evals",
+    "payload": {
+      "cases": ["tk-studio-playable-judge-verdict", "asset-ladder-generated-rung"],
+      "runs": 3
+    }
+  },
+  "trigger": "one-shot",
+  "requires": {
+    "tier": "sbx"
+  },
+  "guards": {
+    "max_turns": 80,
+    "max_wall_clock_seconds": 3600
+  },
+  "stop": {
+    "on_status": ["blocked"]
+  },
+  "effort": "low"
+}

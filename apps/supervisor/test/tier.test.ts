@@ -1,12 +1,12 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { resolveWorkerOptions } from "../src/cli";
+import { placementRefusal, resolveWorkerOptions } from "../src/cli";
 import { jobOptions, loadSupervisorConfig, SupervisorConfigInvalid } from "../src/config";
 import { claudeBin, sbxBin, supervisorConfigPath } from "../src/env";
 import {
   buildSbxCommand, buildWorkerCommand, buildWorkerEnv, DenyProfileRefused, HostBypassRefused, invokeSkill, MAX_LOGIN_MISSING, maxLoginPreflight,
-  parseRegQuery, SbxSandboxMissing, sbxEnvPassthrough, TierRefused, toVmPath, userEnvFromRegistry, type RunResult, type Spawner,
+  parseRegQuery, SbxSandboxMissing, sbxEnvPassthrough, TierRefused, TierRequired, toVmPath, userEnvFromRegistry, type RunResult, type Spawner,
 } from "../src/server";
 import { tempDir } from "./tmp";
 
@@ -173,6 +173,27 @@ describe("tier resolution: explicit ?? stored ?? config ?? host", () => {
     expect(() => resolveWorkerOptions({ tier: "gpu" })).toThrow(TierRefused);
     expect(() => resolveWorkerOptions({}, { tier: "gpu" })).toThrow(TierRefused);
     expect(() => resolveWorkerOptions({ tier: "sbx" })).toThrow(SbxSandboxMissing);
+  });
+});
+
+describe("Story 35.5: TierRequired (CAP-12)", () => {
+  test("the reason names the job, the tiers, the placement's source and the per-job config entry", () => {
+    const e = new TierRequired("run-epic-35", "tk studio/x", "sbx", "host", "default");
+    expect(e.name).toBe("TierRequired");
+    expect(e.message).toBe('TierRequired: job run-epic-35 requires tier sbx; placement resolved host (default) — set '
+      + 'jobs.tk studio/x/run-epic-35 {tier: "sbx", sandbox: "<name>"} in TK_SUPERVISOR_CONFIG');
+    expect(new TierRequired("j", "p", "host", "sbx", "config").message).toContain('set jobs.p/j {tier: "host"} in TK_SUPERVISOR_CONFIG');
+  });
+
+  test("its placement refusal key is placement:TierRequired, with what resolves it", () => {
+    const reason = new TierRequired("run-epic-35", "p", "sbx", "host", "explicit").message;
+    const r = placementRefusal(reason)!;
+    expect(r.key).toBe("placement:TierRequired");
+    expect(r.reason).toBe(reason);
+    expect(r.resolves).toContain("TK_SUPERVISOR_CONFIG entry jobs.<project-id>/<job-id>");
+    // the 0.1.28 keys unchanged
+    expect(placementRefusal(new TierRefused("gpu").message)!.key).toBe("placement:TierRefused");
+    expect(placementRefusal(new SbxSandboxMissing().message)!.key).toBe("placement:SbxSandboxMissing");
   });
 });
 
