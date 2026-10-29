@@ -2529,8 +2529,8 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertNotIn("are a retry, bound or not", note)
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
-        # relaxed by Story 35.2 only to admit it after 35.8
-        self.assertIn("Story 35.1, Story 35.8, Story 35.2 (Epic 35)", stories)
+        # relaxed by Story 35.2 only to admit it after 35.8, and by Story 35.3 only to admit it after 35.2
+        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2(, Story 35\.3)? \(Epic 35\)")
         taxonomy = json.loads((PLUGIN_ROOT / "contracts" / "events" / "taxonomy.v1.json")
                               .read_text(encoding="utf-8"))
         stage = taxonomy["events"]["stage"]
@@ -2607,7 +2607,73 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertNotIn("first-story plan", row)
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
-        self.assertIn("Story 35.1, Story 35.8, Story 35.2 (Epic 35)", stories)
+        # relaxed by Story 35.3 only to admit it after 35.2
+        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2(, Story 35\.3)? \(Epic 35\)")
+
+    # --- Story 35.3: 0.1.30 (additive) — the slice path hardened: the tools' walls under the
+    # guard's margin, the `match` red cases, the widened proof commit, `sheet --report`, the
+    # `rubric` verb, and the supervisor's `inconclusive` verdict.
+
+    def test_0_1_30_story_35_3_slice_hardened(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.30**", header)
+        self.assertNotIn("**0.1.31**", header)
+        self.assertEqual(header.count("0.1.30 (Story 35.3, additive)"), 1)
+        self.assertLess(header.index("0.1.30 (Story 35.2, additive)"),
+                        header.index("0.1.30 (Story 35.3, additive)"))
+        clause = " ".join(header[header.index("0.1.30 (Story 35.3, additive)"):].split())
+        for phrase in ("`assets.py --wall`", "`playable.py --wall-clock`", "`TOOL_WALL_MARGIN_S` (30 s)",
+                       "reads `wall-clock` from it", "a crashed, `not-run` or write-back-failed `match` is "
+                       "`fault` and red", "whenever `report.json` exists",
+                       "this leg's playable step ran (`playable.py` exited 0 or 1)", "`skipped: no manifest` included",
+                       "`git check-ignore`", "`skipped_ignored`", "`<art_path>/.candidates/`",
+                       "`playable.py sheet --report`", "`playable_judge.py rubric`",
+                       "`playable.verdict: inconclusive`",
+                       "`infrastructure: <pin|sbx|status-block|auth|rubric>: <detail>`",
+                       "never a rubric fail", "— additive) |"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        self.assertNotIn("**0.1.31**", flat)
+        self.assertEqual(flat.count("**0.1.30 (Story 35.3, additive).**"), 1)
+        self.assertLess(flat.index("**0.1.30 (Story 35.2, additive).**"),
+                        flat.index("**0.1.30 (Story 35.3, additive).**"))
+        note = flat[flat.index("**0.1.30 (Story 35.3, additive).**"):]
+        note = note[:note.index("## 8. Conformance")]
+        for phrase in ("**The walls:**", "`toolWall = min(max(1, guard), 86400)`", "`--wall <toolWall>`",
+                       "`check` takes none", "`--wall-clock <toolWall>`",
+                       "`toolWall + TOOL_WALL_MARGIN_S`", "`TOOL_WALL_MARGIN_S = 30`",
+                       "`failed.invariant: \"wall-clock\"`", "A guard trip still reads `timed out (guard…)`",
+                       "The host, engine, sheet and judge steps keep the guard",
+                       "**The `match` fault:**", "this supersedes the 34.8 paragraph's `match` sentence",
+                       "`counts[\"not-run\"] > 0`", "(`writeback` non-null)",
+                       "`assets.py match crashed (exited <n>, no status block): <last line>`",
+                       "keeps the non-red `fault`", "`reason?`, `writeback?` and `not_run?`",
+                       "**The proof commit:**", "its playable store holds `report.json`",
+                       "`skipped: no manifest`", "a red assets step commits nothing",
+                       "runs `git check-ignore`", "`skipped_ignored`",
+                       "`:(exclude)<art_path>/.candidates`", "**The sheet:**",
+                       "`playable.py sheet --report <store>/report.json`",
+                       "never every movie frame", "**The rubric:**", "`lib/playable_judge.py rubric`",
+                       "`{ids: [...], rubric: [{id, line}]}`", "the supervisor keeps no copy",
+                       "**`inconclusive`:**", "(`pin`, `ran: false`)", "(`preflight`, `ran: false`)",
+                       "(`conformance_failure`)", "`verdict: \"inconclusive\"`",
+                       "`reason: \"infrastructure: <pin|sbx|status-block|auth|rubric>: <detail>\"`",
+                       "the run ends `partial` with `host verify inconclusive (playable): <reason>`",
+                       "no finding is recorded", "`Playable: inconclusive — <reason>`",
+                       "it is never the judge's", "The judge's own `blocked` with a game cause stays `fail`",
+                       "An inconclusive leg's `Legs:` entry and its `host_verify` read `inconclusive`, and it "
+                       "flips no PR: the close-out leaves a draft",
+                       "the re-run marks nothing ready",
+                       "its own playable step ran (not `skipped`, `playable.py` exited 0 or 1)",
+                       "a named path with nothing staged after the add is left out of the commit",
+                       "only a staged sheet and staged frames are embedded"):
+            self.assertIn(phrase, note)
+        # 35.8's paragraph slice runs to `## 8. Conformance`, so it holds this one: its refused phrase stays out
+        self.assertNotIn("are a retry, bound or not", note)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 35.1, Story 35.8, Story 35.2, Story 35.3 (Epic 35)", stories)
 
     # --- AC 2: A7 dossier items covered or explicitly deferred with a seam
 

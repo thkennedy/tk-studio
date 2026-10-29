@@ -18,6 +18,10 @@ uses this core twice:
       `{"verdict": "pass"|"fail", "findings": [{"frame": "frames/<name>.png",
       "rubric": "<id>", "note": "<one line>"}]}` against the same report and
       write `<DIR>/judge.json` atomically (the file the host leg reads back).
+  uv run playable_judge.py rubric
+      Story 35.3: print the fixed rubric, `{ids: [...], rubric: [{id, line}]}`,
+      in a `complete` status block: the one home of the ids, which the host
+      leg reads to validate a finding (it keeps no copy of its own).
 
 Rubric ids are fixed (RUBRIC). Refusals end `blocked` with exit 2 and name
 the refusal: `no report.json`, `malformed report: <field>`, `no frames`;
@@ -198,6 +202,13 @@ def prepare(media: str) -> tuple[dict, int]:
     return with_block(result, "complete", [], None), 0
 
 
+def rubric() -> tuple[dict, int]:
+    """Story 35.3: the fixed rubric, ids first, in a `complete` status block."""
+    result = {"ok": True, "ids": list(RUBRIC_IDS),
+              "rubric": [{"id": rid, "line": line} for rid, line in RUBRIC]}
+    return with_block(result, "complete", [], None), 0
+
+
 def verdict(media: str, answer: str) -> tuple[dict, int]:
     try:
         folder = Path(media)
@@ -247,6 +258,7 @@ def main(argv: list[str] | None = None) -> int:
     v = sub.add_parser("verdict", help="parse the answer; write judge.json")
     v.add_argument("--media", required=True, help="the folder holding report.json and frames/")
     v.add_argument("--answer", required=True, help="the answer JSON file")
+    sub.add_parser("rubric", help="print the fixed rubric ids and lines (Story 35.3)")
     try:
         args = parser.parse_args(argv)
     except Refusal as exc:
@@ -254,6 +266,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.command == "prepare":
         result, code = prepare(args.media)
+    elif args.command == "rubric":
+        result, code = rubric()
     else:
         result, code = verdict(args.media, args.answer)
     _emit(result)

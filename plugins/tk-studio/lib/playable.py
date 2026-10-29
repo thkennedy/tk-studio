@@ -16,7 +16,7 @@ Verbs (end with JSON on stdout; never prompt — AD-11):
   uv run playable.py run --directory DIR --scenario FILE --seed N --ticks T
                          --out DIR [--mode display|movie|headless]
                          [--wall-clock S] [--godot PATH]
-  uv run playable.py sheet --frames DIR --out PNG [--columns 4] [--width 320]
+  uv run playable.py sheet (--frames DIR | --report FILE) --out PNG [--columns 4] [--width 320]
 
 `sheet` (Story 34.8): the contact sheet of a run's frames. The `*.png`
 directly under `--frames`, in name order, at most SHEET_MAX_FRAMES of them
@@ -26,7 +26,14 @@ the first frame's aspect), laid out `--columns` to a row, written as one
 8-bit RGB PNG (filter 0) atomically to `--out`. No frame, an unreadable
 frame (anything but an 8-bit non-interlaced PNG of colour type 0, 2, 4 or
 6) or a bad flag is a refusal (exit 2) with the same status block
-(`intent: playable`); the PNG decode is `assets.png_pixels`.
+(`intent: playable`); the PNG decode is `assets.png_pixels`. Story 35.3:
+with `--report FILE` (a run's `report.json`) the frames are the report's
+`frames[].file` only (relative to the report's folder, in report order,
+duplicates once) — the judge's citable set, never every movie frame — and
+`frames`/`of` count those; the sampled `frames` stay bare file names. An
+unreadable report, no `frames[]`, or a named frame outside the report's
+folder or missing is a refusal. `--report` wins over `--frames`; one of
+them is required.
 
 Guarantees:
   - The engine binary is `--godot`, else `GODOT` from the environment
@@ -743,24 +750,64 @@ def _int_flag(name: str, raw: object, lo: int, hi: int) -> int:
     return value
 
 
-def sheet(*, frames: str, out: str, columns: str | int = SHEET_DEFAULT_COLUMNS,
-          width: str | int = SHEET_DEFAULT_WIDTH) -> tuple[dict, int]:
-    """The contact sheet. Returns ``(result with the status block, exit)``."""
+def _report_frames(report: str) -> list[tuple[str, Path]]:
+    """Story 35.3: the report's ``frames[].file`` as ``(bare name, path)``,
+    in report order, each once; a named refusal otherwise."""
+    path = Path(report).resolve()
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise Refusal(f"--report {path}: not a readable JSON report ({exc})") from None
+    items = doc.get("frames") if isinstance(doc, dict) else None
+    if not isinstance(items, list) or not items:
+        raise Refusal(f"--report {path} names no frames[]")
+    root = path.parent
+    out: list[tuple[str, Path]] = []
+    seen: set[str] = set()  # bare names: the sheet's `frames` and the proof's file names
+    for i, item in enumerate(items):
+        name = item.get("file") if isinstance(item, dict) else None
+        if not isinstance(name, str) or not name:
+            raise Refusal(f"--report {path}: frames[{i}].file is not a file name")
+        target = (root / name).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            raise Refusal(f"--report {path}: frames[{i}].file {name!r} is outside the report's folder") from None
+        if not target.is_file():
+            raise Refusal(f"--report {path}: frames[{i}].file {name!r} does not exist")
+        if target.name not in seen:
+            seen.add(target.name)
+            out.append((target.name, target))
+    return out
+
+
+def sheet(*, frames: str | None = None, out: str, columns: str | int = SHEET_DEFAULT_COLUMNS,
+          width: str | int = SHEET_DEFAULT_WIDTH, report: str | None = None) -> tuple[dict, int]:
+    """The contact sheet. Returns ``(result with the status block, exit)``.
+    Story 35.3: ``report`` samples only the report's ``frames[]``."""
     import assets  # within lib/: the 34.6/34.7 PNG reader and writer (lazy: assets imports this module)
     try:
         cols = _int_flag("--columns", columns, 1, SHEET_MAX_COLUMNS)
         cell_w = _int_flag("--width", width, *SHEET_WIDTH_RANGE)
-        folder = Path(frames).resolve()
-        if not folder.is_dir():
-            raise Refusal(f"--frames {folder} is not a folder")
-        names = sorted(p.name for p in folder.glob("*.png") if p.is_file())
-        if not names:
-            raise Refusal(f"--frames {folder} holds no *.png frame")
+        if report is not None:
+            listed = _report_frames(report)
+        elif frames is not None:
+            folder = Path(frames).resolve()
+            if not folder.is_dir():
+                raise Refusal(f"--frames {folder} is not a folder")
+            listed = [(p.name, p) for p in sorted(folder.glob("*.png"), key=lambda q: q.name)
+                      if p.is_file()]
+            if not listed:
+                raise Refusal(f"--frames {folder} holds no *.png frame")
+        else:
+            raise Refusal("one of --frames or --report is required")
+        names = [name for name, _ in listed]
+        paths = dict(listed)
         picked = sample_frames(names)
         decoded = []
         for name in picked:
             try:
-                data = (folder / name).read_bytes()
+                data = paths[name].read_bytes()
             except OSError as exc:
                 raise Refusal(f"frame {name}: {exc}") from None
             image = assets.png_pixels(data)
@@ -826,7 +873,8 @@ def main(argv: list[str] | None = None) -> int:
                    help=f"seconds before an overrun is killed (default {DEFAULT_WALL_CLOCK_S})")
     p.add_argument("--godot", help="the engine binary (default: GODOT from the environment)")
     s = sub.add_parser("sheet", help="a contact sheet of a run's frames (Story 34.8)")
-    s.add_argument("--frames", required=True, help="the folder holding the frames (*.png)")
+    s.add_argument("--frames", help="the folder holding the frames (*.png)")
+    s.add_argument("--report", help="a run's report.json: sample only its frames[] (Story 35.3)")
     s.add_argument("--out", required=True, help="the contact sheet PNG to write")
     s.add_argument("--columns", default=SHEET_DEFAULT_COLUMNS,
                    help=f"cells per row (default {SHEET_DEFAULT_COLUMNS})")
@@ -839,7 +887,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.command == "sheet":
         result, code = sheet(frames=args.frames, out=args.out, columns=args.columns,
-                             width=args.width)
+                             width=args.width, report=args.report)
         _emit(result)
         return code
     result, code = run(directory=args.directory, scenario=args.scenario, seed=args.seed,

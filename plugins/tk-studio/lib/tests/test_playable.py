@@ -689,6 +689,38 @@ class PlayableTestCase(unittest.TestCase):
             os.kill(gpid, 9)
             self.fail(f"grandchild {gpid} survived the overrun kill")
 
+    @unittest.skipUnless(os.name == "nt", "the taskkill /T /F path is the Windows path (the operator runs it on the host)")
+    def test_kill_tree_on_nt_kills_the_child_and_the_grandchild(self):
+        # Story 35.3: real processes, the real `taskkill /T /F` — never mocked here.
+        pid_file = self.tmp / "grandchild.pid"
+        child = (
+            "import subprocess, sys, time\n"
+            "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            f"open({str(pid_file)!r}, 'w').write(str(g.pid))\n"
+            "time.sleep(60)\n"
+        )
+        proc = subprocess.Popen([sys.executable, "-c", child], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.monotonic() + 15
+        while not (pid_file.is_file() and pid_file.read_text().strip()) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(pid_file.is_file(), "the child started its grandchild")
+        gpid = int(pid_file.read_text())
+
+        def nt_alive(pid: int) -> bool:
+            done = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True,
+                                  text=True, timeout=10, check=False)
+            return str(pid) in done.stdout
+
+        self.assertTrue(playable.kill_tree(proc))
+        self.assertIsNotNone(proc.poll(), "the child is gone")
+        deadline = time.monotonic() + 10
+        while nt_alive(gpid) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        if nt_alive(gpid):  # never leave it behind, then fail
+            subprocess.run(["taskkill", "/F", "/PID", str(gpid)], capture_output=True, check=False)
+            self.fail(f"grandchild {gpid} survived kill_tree")
+
     def test_template_review_patches(self):
         text = TEMPLATE.read_text(encoding="utf-8")
         # 1: warnings never count
@@ -1027,6 +1059,43 @@ class ContactSheetTests(unittest.TestCase):
         self.assertEqual(out["frames"], sorted(out["frames"]))
         self.assertEqual(len(set(out["frames"])), 16)
         self.assertEqual(out["size"], [4 * 320, 4 * 240])
+
+    def _report(self, files: list[str]) -> Path:
+        path = self.tmp / "report.json"
+        path.write_text(json.dumps({"schema": 1, "verdict": "pass", "frames": [
+            {"tick": i * 30, "file": f} for i, f in enumerate(files)]}), encoding="utf-8")
+        return path
+
+    def test_report_names_three_of_forty_frames_and_only_those_are_sampled(self):
+        # Story 35.3: the judge's citable set (the report's frames[]), never every movie frame.
+        self._frames(40)
+        named = ["frames/frame_0003.png", "frames/frame_0017.png", "frames/frame_0039.png"]
+        report = self._report(named)
+        code, out = self._main("--report", str(report), "--out", str(self.out))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out["frames"], ["frame_0003.png", "frame_0017.png", "frame_0039.png"])
+        self.assertEqual(out["of"], 3)
+        self.assertEqual(out["size"], [3 * 320, 240])
+        self.assertTrue(self.out.is_file())
+        # --report wins over --frames (the folder's 40 never counted)
+        code, out = self._main("--report", str(report), "--frames", str(self.frames),
+                               "--out", str(self.out))
+        self.assertEqual((code, out["of"]), (0, 3))
+
+    def test_report_refusals_name_the_frame_or_the_report(self):
+        self._frames(2)
+        for files, why in ((["frames/frame_0000.png", "frames/missing.png"], "missing.png"),
+                           (["../outside.png"], "outside the report's folder"),
+                           ([], "names no frames[]")):
+            code, out = self._main("--report", str(self._report(files)), "--out", str(self.out))
+            self.assertEqual((code, out["status"]), (2, "blocked"), out)
+            self.assertIn(why, out["reason"])
+        (self.tmp / "report.json").write_text("{not json", encoding="utf-8")
+        code, out = self._main("--report", str(self.tmp / "report.json"), "--out", str(self.out))
+        self.assertEqual((code, out["status"]), (2, "blocked"))
+        code, out = self._main("--out", str(self.out))
+        self.assertEqual((code, out["status"]), (2, "blocked"))
+        self.assertIn("one of --frames or --report", out["reason"])
 
     def test_bad_flags_and_unreadable_frames_are_refusals(self):
         self._frames(2)

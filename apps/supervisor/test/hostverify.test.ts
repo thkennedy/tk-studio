@@ -6,8 +6,8 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
 import {
-  gitUsrBin, hostVerify, isRed, pathKey, playableConfig, prSection, redReason, splitCommand, tail, verifyCommand, wallClockTrip,
-  type HostVerifyRan, type PlayableJudge,
+  gitUsrBin, hostVerify, inconclusiveReason, isInconclusive, isRed, pathKey, playableConfig, prSection, redReason, splitCommand, tail,
+  TOOL_WALL_MARGIN_S, verifyCommand, wallClockTrip, type HostVerifyRan, type PlayableJudge,
 } from "../src/hostverify";
 import { studioRunDir } from "../src/sandbox";
 import { fakeBin, gitRepo, testGit } from "./fakes";
@@ -27,6 +27,14 @@ const hostKey = (cmd: string) => `vcs: git\nverify:\n  host: ${JSON.stringify(cm
 /** Story 34.1: `verify.host` and (when given) `verify.engine`. */
 const verifyKeys = (k: { host: string; engine?: string }) =>
   `${hostKey(k.host)}${k.engine === undefined ? "" : `  engine: ${JSON.stringify(k.engine)}\n`}`;
+/** Story 35.3: the core's five rubric ids, as a fake `playable_judge.py rubric` answers them (the core's own test pins
+ * the real verb's output to the skill's table and the contract). */
+const RUBRIC_IDS = ["scene-loaded", "player-visible", "no-magenta-or-error-overlay", "hud-reads", "moments-shown"];
+const rubricBlock = (ids: string[] = RUBRIC_IDS) => ({
+  ok: true, ids, rubric: ids.map((id) => ({ id, line: id })), status: "complete", intent: "tk-studio-playable-judge", artifacts: [], reason: null,
+});
+/** Story 35.3: is this capture spec's argv `playable_judge.py rubric`? */
+const isRubric = (argv: string[]) => String(argv[2] ?? "").endsWith("playable_judge.py") && argv[3] === "rubric";
 
 describe("the command line: split into argv, never a shell", () => {
   test("whitespace splits; \"…\" and '…' group; backslashes stay literal; adjacent quoted text joins", () => {
@@ -534,7 +542,8 @@ describe("Story 34.3: the playable-verify step runs after a green engine gate", 
     frames: [{ tick: 0, file: "frames/tick-000000.png" }, { tick: 30, file: "frames/tick-000030.png" }],
     moments: [{ name: "jump", tick: 30, frame: "frames/tick-000030.png" }], frame_time_ms: { max: 20, mean: 16.6 }, log_errors: [],
   };
-  type PlayableFake = { exit: number; report?: Record<string, unknown> | null; block?: Record<string, unknown> };
+  /** Story 35.3: `rubric` the fake `playable_judge.py rubric` answer (its exit and stdout; default the five ids, exit 0). */
+  type PlayableFake = { exit: number; report?: Record<string, unknown> | null; block?: Record<string, unknown>; rubric?: { exit: number; stdout: string } };
   /** A leg env: the plugin root (`TK_STUDIO_ROOT`) and the store (`TK_STUDIO_HOME`) in temp folders. */
   function legEnv() {
     const studio = tempDir("tk-sup-pv-studio-"), home = tempDir("tk-sup-pv-home-");
@@ -543,11 +552,20 @@ describe("Story 34.3: the playable-verify step runs after a green engine gate", 
   /** An injected runner: answers the config, then the host and engine steps with `exits`, then a fake `playable.py`:
    * it writes `report.json`, `log.txt` and the frames under the argv's `--out`, its status block on stdout. */
   function recorder(config: string, exits: number[], fake: PlayableFake = { exit: 0, report: REPORT }) {
-    const steps: { env: Record<string, string | undefined>; argv: string[]; cwd: string }[] = [];
+    const steps: { env: Record<string, string | undefined>; argv: string[]; cwd: string; timeoutS: number }[] = [];
+    /** Story 35.3: the `playable_judge.py rubric` calls (never counted among `steps`). */
+    const rubric: { argv: string[]; timeoutS: number }[] = [];
     const run = async (bin: string, args: string[], o: { cwd: string; timeoutS: number; env?: Record<string, string | undefined> }) => {
       if (bin === "git") return { exit: 0, stdout: config, stderr: "" };
       const spec = JSON.parse(readFileSync(args[2]!, "utf-8"));
-      steps.push({ env: o.env ?? {}, argv: spec.argv, cwd: spec.cwd });
+      if (isRubric(spec.argv)) {
+        rubric.push({ argv: spec.argv, timeoutS: o.timeoutS });
+        const r = fake.rubric ?? { exit: 0, stdout: JSON.stringify(rubricBlock()) };
+        writeFileSync(spec.out, r.stdout);
+        writeFileSync(spec.status, JSON.stringify({ exit: r.exit, signal: null }));
+        return { exit: 0, stdout: "", stderr: "" };
+      }
+      steps.push({ env: o.env ?? {}, argv: spec.argv, cwd: spec.cwd, timeoutS: o.timeoutS });
       if (!String(spec.argv[2] ?? "").endsWith("playable.py")) { // the host and engine steps
         writeFileSync(spec.status, JSON.stringify({ exit: exits[steps.length - 1] ?? 0, signal: null }));
         writeFileSync(spec.out, `step ${steps.length}\n`);
@@ -567,7 +585,7 @@ describe("Story 34.3: the playable-verify step runs after a green engine gate", 
       writeFileSync(spec.status, JSON.stringify({ exit: fake.exit, signal: null }));
       return { exit: 0, stdout: "", stderr: "" };
     };
-    return { steps, run };
+    return { steps, rubric, run };
   }
   /** A fake judge: records its calls and writes `answer` as `judge.json` into the payload's media folder. */
   function fakeJudge(answer: Record<string, unknown> | null, result: Record<string, unknown> = {
@@ -613,12 +631,17 @@ describe("Story 34.3: the playable-verify step runs after a green engine gate", 
 
   test("ordering and pass: host, engine, then playable.py (no --mode, the store --out), the media copied, the routed judge on sbx", async () => {
     const config = base + PLAYABLE;
-    const { steps, run } = recorder(config, [0, 0]);
+    const { steps, rubric, run } = recorder(config, [0, 0]);
     const { calls, judge } = fakeJudge({ verdict: "pass", findings: [] });
     const { env, studio } = legEnv();
     const fx = fixture(config);
     const v = await hostVerify(fx.run, 60, { env, run: run as any, judge, route }) as HostVerifyRan;
     expect(steps).toHaveLength(3);
+    // Story 35.3: the host and engine steps under the guard; playable.py under its own wall plus the margin; the
+    // core's rubric read once, under the guard.
+    expect(steps.map((s) => s.timeoutS)).toEqual([60, 60, 60 + TOOL_WALL_MARGIN_S]);
+    expect(TOOL_WALL_MARGIN_S).toBe(30);
+    expect(rubric).toEqual([{ argv: ["uv", "run", join(studio, "plugins", "tk-studio", "lib", "playable_judge.py"), "rubric"], timeoutS: 60 }]);
     expect(steps[0]!.argv.at(-1)).toBe("tools/verify_host.py");
     expect(steps[1]!.argv.at(-1)).toBe("scripts/engine-gate.sh");
     const store = join(studioRunDir({ project_id: "acme", root: fx.run.root }, "run-77", env), "playable");
@@ -741,14 +764,35 @@ describe("Story 34.3: the playable-verify step runs after a green engine gate", 
     expect(prSection(v).join("\n")).toContain(`Reason: playable.py refused: ${why}`);
   }, 30_000);
 
-  test("judge broken: blocked, failed, no status block, a throw, no judge.json, a fail without findings, no sandbox → `fail`, never throws", async () => {
+  test("Story 35.3: an earlier leg's report.json in the reused store is removed before playable.py runs, never read as this leg's", async () => {
     const config = base + PLAYABLE;
-    const blocked = { status_block: { status: "blocked", intent: "tk-studio-playable-judge", artifacts: [], reason: "no frames" }, total_cost_usd: 0.1 };
-    const cases: [ReturnType<typeof fakeJudge>["judge"] | undefined, string, Partial<Record<string, unknown>>][] = [
+    // playable.py exits 1 before writing any report (an uncaught exception ahead of its own stale-report removal)
+    const { run } = recorder(config, [0, 0], { exit: 1, report: null, block: { ok: false, status: "failed", intent: "playable", artifacts: [], reason: "Traceback" } });
+    const { env } = legEnv();
+    const fx = fixture(config);
+    const store = join(studioRunDir({ project_id: "acme", root: fx.run.root }, "run-77", env), "playable");
+    mkdirSync(store, { recursive: true });
+    writeFileSync(join(store, "report.json"), JSON.stringify(REPORT)); // the earlier leg's pass
+    let staleAtRun: boolean | undefined;
+    const spy = async (bin: string, args: string[], o: { cwd: string; timeoutS: number; env?: Record<string, string | undefined> }) => {
+      if (bin !== "git" && String(JSON.parse(readFileSync(args[2]!, "utf-8")).argv[2] ?? "").endsWith("playable.py")) {
+        staleAtRun = existsSync(join(store, "report.json"));
+      }
+      return run(bin, args, o);
+    };
+    const { calls, judge } = fakeJudge({ verdict: "pass", findings: [] });
+    const v = await hostVerify(fx.run, 60, { env, run: spy as any, judge, route }) as HostVerifyRan;
+    expect(staleAtRun).toBe(false);
+    expect(existsSync(join(store, "report.json"))).toBe(false);
+    expect(calls).toHaveLength(0);
+    expect(v.playable).toMatchObject({ verdict: "fail", exit: 1, store, reason: "playable.py exited 1 with no readable report.json" });
+  }, 30_000);
+
+  test("judge broken by the game or the judge itself: its own blocked, no judge.json, a fail without findings → `fail`, never throws", async () => {
+    const config = base + PLAYABLE;
+    const blocked = { status_block: { status: "blocked", intent: "tk-studio-playable-judge", artifacts: [], reason: "no frames" }, total_cost_usd: 0.1, ran: true };
+    const cases: [ReturnType<typeof fakeJudge>["judge"], string, Partial<Record<string, unknown>>][] = [
       [fakeJudge(null, blocked).judge, "judge: blocked: no frames", { judge: { status: "blocked", cost_usd: 0.1 } }],
-      [fakeJudge(null, { conformance_failure: "conformance failure (AD-11): run terminated without a JSON status block (§3)" }).judge,
-        "judge: conformance failure (AD-11): run terminated without a JSON status block (§3)", {}],
-      [async () => { throw new Error("SbxSandboxMissing"); }, "judge: SbxSandboxMissing", {}],
       [fakeJudge(null).judge, "judge: no readable judge.json verdict", {}],
       [fakeJudge({ verdict: "fail", findings: [] }).judge, "judge: a fail with no findings", {}],
     ];
@@ -756,16 +800,85 @@ describe("Story 34.3: the playable-verify step runs after a green engine gate", 
       const { run } = recorder(config, [0, 0]);
       const v = await hostVerify(fixture(config).run, 60, { env: legEnv().env, run: run as any, judge, route }) as HostVerifyRan;
       expect(v.green).toBe(false);
+      expect(isRed(v)).toBe(true);
+      expect(isInconclusive(v)).toBe(false);
       expect(v.playable).toMatchObject({ verdict: "fail", reason, ...extra });
       expect(redReason(v)).toBe(`host verify red (playable): ${reason}`);
     }
+  }, 60_000);
+
+  test("Story 35.3: the judge's infrastructure fails (no sandbox, a throw, no status block, the rubric unreadable) → `inconclusive`, neither green nor red, no finding", async () => {
+    const config = base + PLAYABLE;
+    const noBlock = { conformance_failure: "conformance failure (AD-11): run terminated without a JSON status block (§3)", ran: true, total_cost_usd: 0.2 };
+    const cases: [ReturnType<typeof fakeJudge>["judge"], PlayableFake | undefined, string][] = [
+      [fakeJudge(null, noBlock).judge, undefined, "infrastructure: status-block: conformance failure (AD-11): run terminated without a JSON status block (§3)"],
+      [async () => { throw new Error("SbxSandboxMissing"); }, undefined, "infrastructure: sbx: SbxSandboxMissing"],
+      [fakeJudge({ verdict: "pass" }).judge, { exit: 0, report: REPORT, rubric: { exit: 1, stdout: "Traceback (most recent call last):" } },
+        "infrastructure: rubric: playable_judge.py rubric exited 1 with no status block"],
+      [fakeJudge({ verdict: "pass" }).judge, { exit: 0, report: REPORT, rubric: { exit: 0, stdout: JSON.stringify({ ...rubricBlock(), ids: [] }) } },
+        "infrastructure: rubric: playable_judge.py rubric answered no list of ids"],
+    ];
+    for (const [judge, fake, reason] of cases) {
+      const { run } = recorder(config, [0, 0], fake);
+      const v = await hostVerify(fixture(config).run, 60, { env: legEnv().env, run: run as any, judge, route }) as HostVerifyRan;
+      expect(v.green).toBe(false);
+      expect(isRed(v)).toBe(false);
+      expect(isInconclusive(v)).toBe(true);
+      expect(v.playable).toMatchObject({ verdict: "inconclusive", reason });
+      expect(v.playable!.findings).toBeUndefined();
+      expect(inconclusiveReason(v)).toBe(`host verify inconclusive (playable): ${reason}`);
+      expect(prSection(v).at(-1)).toBe(`Playable: inconclusive — ${reason}`);
+    }
+    // the judge's cost is still recorded on an inconclusive step that ran
     const { run } = recorder(config, [0, 0]);
+    const w = await hostVerify(fixture(config).run, 60, { env: legEnv().env, run: run as any, judge: fakeJudge(null, noBlock).judge, route }) as HostVerifyRan;
+    expect(w.playable!.judge).toMatchObject({ cost_usd: 0.2 });
+    // no sandbox: the judge never called, the rubric never read
+    const none = recorder(config, [0, 0]);
     const { calls, judge } = fakeJudge({ verdict: "pass" });
     const fx = fixture(config);
-    const v = await hostVerify({ ...fx.run, sandbox: null }, 60, { env: legEnv().env, run: run as any, judge, route }) as HostVerifyRan;
+    const x = await hostVerify({ ...fx.run, sandbox: null }, 60, { env: legEnv().env, run: none.run as any, judge, route }) as HostVerifyRan;
     expect(calls).toHaveLength(0);
-    expect(v.playable).toMatchObject({ verdict: "fail", reason: "judge: no sandbox recorded for the run" });
+    expect(none.rubric).toHaveLength(0);
+    expect(x.playable).toMatchObject({ verdict: "inconclusive", reason: "infrastructure: sbx: no sandbox recorded for the run" });
+    expect(isRed(x)).toBe(false);
   }, 60_000);
+
+  test("Story 35.3: the rubric ids are the core's: a finding is validated against `playable_judge.py rubric`, the supervisor keeps no copy", async () => {
+    const config = base + PLAYABLE;
+    const only = { exit: 0, report: REPORT, rubric: { exit: 0, stdout: JSON.stringify(rubricBlock(["hud-reads", "brand-new-line"])) } };
+    const ok = recorder(config, [0, 0], only);
+    const fresh = { frame: "frames/tick-000030.png", rubric: "brand-new-line" };
+    const v = await hostVerify(fixture(config).run, 60, { env: legEnv().env, run: ok.run as any, judge: fakeJudge({ verdict: "fail", findings: [fresh] }).judge, route }) as HostVerifyRan;
+    expect(v.playable).toMatchObject({ verdict: "fail", findings: [fresh] });
+    const refused = recorder(config, [0, 0], only);
+    const w = await hostVerify(fixture(config).run, 60, { env: legEnv().env, run: refused.run as any,
+      judge: fakeJudge({ verdict: "fail", findings: [{ frame: "frames/tick-000030.png", rubric: "scene-loaded" }] }).judge, route }) as HostVerifyRan;
+    expect(w.playable).toMatchObject({ verdict: "fail", reason: 'judge: finding 0 names an unknown rubric "scene-loaded"' });
+    expect("PLAYABLE_RUBRIC" in (await import("../src/hostverify"))).toBe(false);
+  }, 30_000);
+
+  test("Story 35.3: the tool's own wall fires first: `--wall-clock <guard>` under guard + margin, the leg reads `wall-clock` from report.json; a guard trip still reads `timed out (guard…)`", async () => {
+    const config = base + PLAYABLE;
+    const report = { ...REPORT, verdict: "fail", failed: { tick: 0, invariant: "wall-clock", detail: "60s exceeded (engine killed)" } };
+    const { steps, run } = recorder(config, [0, 0], { exit: 1, report });
+    const v = await hostVerify(fixture(config).run, 60, { env: legEnv().env, run: run as any, route }) as HostVerifyRan;
+    const argv = steps[2]!.argv;
+    expect(argv[argv.indexOf("--wall-clock") + 1]).toBe("60");
+    expect(steps[2]!.timeoutS).toBe(90);
+    expect(v.playable!.findings).toEqual([{ frame: "frames/tick-000000.png", rubric: "harness: wall-clock", note: "60s exceeded (engine killed)" }]);
+    expect(redReason(v)).toBe("host verify red (playable): harness: wall-clock at frames/tick-000000.png: 60s exceeded (engine killed)");
+    // the guard (wall + margin) trips: the guard's reason, never the tool's
+    const tripped = recorder(config, [0, 0]);
+    const trip = async (bin: string, args: string[], o: { cwd: string; timeoutS: number; env?: Record<string, string | undefined> }) => {
+      if (bin !== "git" && String(JSON.parse(readFileSync(args[2]!, "utf-8")).argv[2] ?? "").endsWith("playable.py")) {
+        throw new Error(`bun timed out after ${o.timeoutS}s (process tree killed)`);
+      }
+      return tripped.run(bin, args, o);
+    };
+    const w = await hostVerify(fixture(config).run, 60, { env: legEnv().env, run: trip as any, route }) as HostVerifyRan;
+    expect(w.playable).toMatchObject({ verdict: "fail", reason: `playable.py timed out (${wallClockTrip(90)})` });
+  }, 30_000);
 
   test("a stale worktree copy (an earlier judge.json) is replaced before the judge runs", async () => {
     const config = base + PLAYABLE;
@@ -778,7 +891,7 @@ describe("Story 34.3: the playable-verify step runs after a green engine gate", 
     expect(v.playable).toMatchObject({ verdict: "fail", reason: "judge: no readable judge.json verdict" });
   }, 30_000);
 
-  test("the default judge pins the sandbox (`sbx run -d --name <sb>`) before its first `sbx exec`; a pin failure is `fail` (`judge: …`)", async () => {
+  test("the default judge pins the sandbox (`sbx run -d --name <sb>`) before its first `sbx exec`; a pin failure is `inconclusive` (`infrastructure: pin: …`)", async () => {
     const config = base + PLAYABLE;
     const log: string[] = [];
     const spawner = async (_bin: string, args: string[]) => {
@@ -790,8 +903,10 @@ describe("Story 34.3: the playable-verify step runs after a green engine gate", 
     const v = await hostVerify(fixture(config).run, 60, { env: legEnv().env, run: run as any, route, sbx: pinOk as any, spawner }) as HostVerifyRan;
     expect(log[0]).toBe("sbx run -d --name tk-sbx");
     expect(log[1]).toStartWith("spawn exec tk-sbx ");
-    expect(v.playable).toMatchObject({ verdict: "fail", judge: { status: "blocked" } });
-    expect(v.playable!.reason).toStartWith("judge: blocked: auth preflight: ");
+    // Story 35.3: the auth preflight blocked (`ran: false`, `preflight`) is the judge's infrastructure: `inconclusive`.
+    expect(v.playable).toMatchObject({ verdict: "inconclusive", judge: { status: "blocked" } });
+    expect(v.playable!.reason).toStartWith("infrastructure: auth: auth preflight: ");
+    expect(isRed(v)).toBe(false);
 
     log.length = 0;
     const pinBad = { run: async (_bin: string, args: string[]) => { log.push(`sbx ${args.join(" ")}`); return { exit: 1, stdout: "", stderr: "no such sandbox" }; } };
@@ -799,7 +914,8 @@ describe("Story 34.3: the playable-verify step runs after a green engine gate", 
     const w = await hostVerify(fixture(config).run, 60, { env: legEnv().env, run: again.run as any, route, sbx: pinBad as any, spawner }) as HostVerifyRan;
     expect(log).toEqual(["sbx run -d --name tk-sbx"]); // never an exec into the stopped sandbox
     expect(w.green).toBe(false);
-    expect(w.playable).toMatchObject({ verdict: "fail", reason: "judge: blocked: sbx pin failed: sbx run -d --name tk-sbx exited 1: no such sandbox" });
+    expect(isRed(w)).toBe(false);
+    expect(w.playable).toMatchObject({ verdict: "inconclusive", reason: "infrastructure: pin: sbx pin failed: sbx run -d --name tk-sbx exited 1: no such sandbox" });
   }, 30_000);
 
   test("judge.json re-validated by the host: verdict, rubric ids, frames of report.json, a fail with findings; else `fail` (`judge: …`)", async () => {
@@ -890,14 +1006,17 @@ describe("Story 34.8: a slice run's assets step, contact sheet and PR section", 
   }
   /** The runner: the config; the host and engine steps exit per `exits`; `assets.py <verb>` exits per `assets`; `playable.py
    * run` writes the report and frames; `playable.py sheet` writes the sheet and names the sampled frames. */
-  function recorder(config: string, o: { exits?: number[]; assets?: Record<string, number>; sheet?: number } = {}) {
+  /** Story 35.3: `blocks` a verb's own stdout block (null: none, a crash's traceback), `timeouts` each step's guard. */
+  function recorder(config: string, o: { exits?: number[]; assets?: Record<string, number>; sheet?: number; blocks?: Record<string, Record<string, unknown> | null> } = {}) {
     const steps: string[][] = [];
+    const timeouts: number[] = [];
     let plain = 0;
-    const run = async (bin: string, args: string[]) => {
+    const run = async (bin: string, args: string[], ro: { timeoutS: number }) => {
       if (bin === "git") return { exit: 0, stdout: config, stderr: "" };
       const spec = JSON.parse(readFileSync(args[2]!, "utf-8"));
       const argv = spec.argv as string[];
       steps.push(argv);
+      timeouts.push(ro.timeoutS);
       const script = String(argv[2] ?? "");
       const status = (exit: number, block?: Record<string, unknown>) => {
         writeFileSync(spec.out, block ? JSON.stringify(block, null, 2) + "\n" : `step\n`);
@@ -906,10 +1025,17 @@ describe("Story 34.8: a slice run's assets step, contact sheet and PR section", 
       };
       if (script.endsWith("assets.py")) {
         const exit = o.assets?.[argv[3]!] ?? 0;
-        return status(exit, { ok: exit === 0, entries: [], status: exit === 0 ? "complete" : exit === 1 ? "partial" : "blocked", intent: "assets", artifacts: [], reason: exit ? `${argv[3]} not ok` : null });
+        const own = o.blocks?.[argv[3]!];
+        if (own === null) {
+          writeFileSync(spec.err, "Traceback (most recent call last):\nKeyError: 'colour'\n");
+          return status(exit);
+        }
+        return status(exit, own ?? { ok: exit === 0, entries: [], status: exit === 0 ? "complete" : exit === 1 ? "partial" : "blocked", intent: "assets", artifacts: [], reason: exit ? `${argv[3]} not ok` : null });
       }
       if (script.endsWith("playable.py") && argv[3] === "sheet") {
         const out = argv[argv.indexOf("--out") + 1]!;
+        expect(argv).not.toContain("--frames"); // Story 35.3: the report's citable frames only
+        expect(existsSync(argv[argv.indexOf("--report") + 1]!)).toBe(true);
         const exit = o.sheet ?? 0;
         if (exit === 0) writeFileSync(out, "sheet-png");
         return status(exit, { ok: exit === 0, frames: ["tick-000000.png", "tick-000030.png"], status: exit === 0 ? "complete" : "blocked", intent: "playable", artifacts: [], reason: null });
@@ -924,7 +1050,7 @@ describe("Story 34.8: a slice run's assets step, contact sheet and PR section", 
       }
       return status(o.exits?.[plain++] ?? 0);
     };
-    return { steps, run };
+    return { steps, timeouts, run };
   }
   const verbs = (steps: string[][]) => steps.map((a) => String(a[2] ?? "").endsWith("assets.py") || String(a[2] ?? "").endsWith("playable.py")
     ? `${String(a[2]).split(/[\\/]/).at(-1)} ${a[3]}` : String(a.at(-1)));
@@ -950,14 +1076,20 @@ describe("Story 34.8: a slice run's assets step, contact sheet and PR section", 
   test("assets green: check, greybox, match after the host command and before the engine gate; never generate, never --mirror", async () => {
     const config = base + PLAYABLE + "assets:\n  manifest: assets/manifest.yaml\n  art_path: art/world/greybox\n";
     const fx = fixture(config);
-    const { steps, run } = recorder(config);
+    const { steps, timeouts, run } = recorder(config);
     const env = legEnv();
     const v = await hostVerify(fx.run, 60, { env, run: run as any }, { slice: true }) as HostVerifyRan;
     expect(verbs(steps)).toEqual(["tools/verify_host.py", "assets.py check", "assets.py greybox", "assets.py match", "scripts/engine-gate.sh", "playable.py run", "playable.py sheet"]);
     for (const a of steps.filter((x) => String(x[2]).endsWith("assets.py"))) {
-      expect(a.slice(4)).toEqual(["--directory", fx.wt, "--manifest", "assets/manifest.yaml", "--art-path", "art/world/greybox"]);
+      // Story 35.3: `greybox` and `match` get the tool's own wall (`check` takes none)
+      expect(a.slice(4)).toEqual(["--directory", fx.wt, "--manifest", "assets/manifest.yaml", "--art-path", "art/world/greybox", ...(a[3] === "check" ? [] : ["--wall", "60"])]);
       expect(a).not.toContain("--mirror");
     }
+    // Story 35.3: greybox, match and playable.py under their wall plus the margin; host, check (no wall of its own),
+    // engine and sheet under the guard
+    expect(timeouts).toEqual([60, 60, 90, 90, 60, 90, 60]);
+    const sheetArgv = steps.at(-1)!;
+    expect(sheetArgv[sheetArgv.indexOf("--report") + 1]).toBe(join(v.playable!.store!, "report.json"));
     expect(steps.some((a) => a.includes("generate"))).toBe(false);
     expect(v.assets).toMatchObject({ verdict: "green", manifest: "assets/manifest.yaml", art_path: "art/world/greybox" });
     expect(v.assets!.steps.map((s) => [s.verb, s.exit, s.status])).toEqual([["check", 0, "complete"], ["greybox", 0, "complete"], ["match", 0, "complete"]]);
@@ -1002,6 +1134,42 @@ describe("Story 34.8: a slice run's assets step, contact sheet and PR section", 
     expect(v.green).toBe(true);
   }, 30_000);
 
+  test("Story 35.3: match exit 1 with ordinary rung outcomes (failed or candidate rows only) stays the non-red fault", async () => {
+    const block = { ok: false, entries: [{ name: "crate", action: "candidate" }, { name: "door", action: "failed" }],
+      counts: { accepted: 0, candidate: 1, unmatched: 0, skipped: 0, failed: 1, "not-run": 0 }, writeback: null,
+      status: "partial", intent: "assets", artifacts: [], reason: "match: crate: coverage; door: blender exit 1" };
+    const { run } = recorder(base, { assets: { match: 1 }, blocks: { match: block } });
+    const v = await hostVerify(fixture(base).run, 60, { env: legEnv(), run: run as any }, { slice: true }) as HostVerifyRan;
+    expect(v.assets!.verdict).toBe("green");
+    expect(v.assets!.steps.at(-1)).toMatchObject({ verb: "match", exit: 1, status: "fault", reason: "match: crate: coverage; door: blender exit 1" });
+    expect(v.assets!.steps.at(-1)!.not_run).toBeUndefined();
+    expect(v.assets!.steps.at(-1)!.writeback).toBeUndefined();
+    expect(v.green).toBe(true);
+  }, 30_000);
+
+  test("Story 35.3: a crashed, not-run or write-back-failed match is `fault` and red, its reason from the block", async () => {
+    const counts = (notRun: number) => ({ accepted: 1, candidate: 0, unmatched: 0, skipped: 0, failed: notRun ? 1 : 0, "not-run": notRun });
+    const notRun = { ok: false, entries: [], counts: counts(2), writeback: null, status: "partial", intent: "assets", artifacts: [],
+      reason: "match: crate: wall clock: 60s exceeded (blender killed); door: wall clock spent; lamp: wall clock spent" };
+    const wb = { ok: false, entries: [], counts: counts(0), writeback: "compensating write-back failed: manifest locked", status: "partial", intent: "assets", artifacts: [],
+      reason: "match: compensating write-back failed: manifest locked" };
+    const cases: [Record<string, unknown> | null, number, string, Record<string, unknown>][] = [
+      [null, 1, "assets.py match crashed (exited 1, no status block): KeyError: 'colour'", {}],
+      [notRun, 1, `assets.py match fault: 2 not-run: ${notRun.reason}`, { not_run: 2, reason: notRun.reason }],
+      [wb, 1, `assets.py match fault: write-back failed: ${wb.writeback}; ${wb.reason}`, { writeback: wb.writeback, reason: wb.reason }],
+    ];
+    for (const [block, exit, reason, fields] of cases) {
+      const { steps, run } = recorder(base, { assets: { match: exit }, blocks: { match: block } });
+      const v = await hostVerify(fixture(base).run, 60, { env: legEnv(), run: run as any }, { slice: true }) as HostVerifyRan;
+      expect(v.assets).toMatchObject({ verdict: "red", reason });
+      expect(v.assets!.steps.at(-1)).toMatchObject({ verb: "match", exit, status: "fault", ...fields });
+      expect(v.engine).toMatchObject({ verdict: "skipped", reason: "assets red" });
+      expect(verbs(steps)).not.toContain("scripts/engine-gate.sh");
+      expect(isRed(v)).toBe(true);
+      expect(redReason(v)).toBe(`host verify red (assets): ${reason}`);
+    }
+  }, 60_000);
+
   test("assets red (check or greybox exit 1 or 2, match exit 2): the later verbs and the engine gate skipped, the leg red", async () => {
     for (const [verb, exit, ran] of [["check", 1, 1], ["check", 2, 1], ["greybox", 1, 2], ["greybox", 2, 2], ["match", 2, 3]] as const) {
       const fx = fixture(base);
@@ -1018,6 +1186,42 @@ describe("Story 34.8: a slice run's assets step, contact sheet and PR section", 
       expect(prSection(v)).toContain(`Assets: red (${v.assets!.reason})`);
     }
   }, 60_000);
+
+  test("Story 35.3: the assets tool's own wall fires first: the leg's assets reason is the block's `wall clock: …`, never a guard trip", async () => {
+    // no not-run rows, no write-back: red through the tool's own exit and reason, not the not-run branch
+    const block = { ok: false, entries: [{ name: "crate", action: "failed", reason: "wall clock: 60s exceeded (blender killed)" }],
+      counts: { built: 0, failed: 1, "not-run": 0 }, writeback: null, status: "partial", intent: "assets", artifacts: [],
+      reason: "greybox: crate: wall clock: 60s exceeded (blender killed)" };
+    const { steps, timeouts, run } = recorder(base, { assets: { greybox: 1 }, blocks: { greybox: block } });
+    const v = await hostVerify(fixture(base).run, 60, { env: legEnv(), run: run as any }, { slice: true }) as HostVerifyRan;
+    const greybox = steps.findIndex((a) => String(a[2]).endsWith("assets.py") && a[3] === "greybox");
+    expect(steps[greybox]!.slice(-2)).toEqual(["--wall", "60"]);
+    expect(timeouts[greybox]).toBe(90); // the tool's wall plus the margin
+    expect(v.assets).toMatchObject({ verdict: "red", reason: `assets.py greybox exited 1: ${block.reason}` });
+    expect(v.assets!.reason).toContain("wall clock: 60s exceeded (blender killed)");
+    expect(v.assets!.reason).not.toContain("timed out");
+    expect(v.assets!.steps.at(-1)).toMatchObject({ verb: "greybox", exit: 1, status: "partial" });
+    expect(redReason(v)).toBe(`host verify red (assets): assets.py greybox exited 1: ${block.reason}`);
+  }, 30_000);
+
+  test("Story 35.3: the assets step's guard (wall + margin) trips: the reason reads `timed out (guard…)`, never the tool's wall", async () => {
+    const { run: inner } = recorder(base);
+    const trip = async (bin: string, args: string[], o: { cwd: string; timeoutS: number; env?: Record<string, string | undefined> }) => {
+      if (bin !== "git") {
+        const argv = JSON.parse(readFileSync(args[2]!, "utf-8")).argv as string[];
+        if (String(argv[2] ?? "").endsWith("assets.py") && argv[3] === "match") {
+          expect(o.timeoutS).toBe(60 + TOOL_WALL_MARGIN_S);
+          throw new Error(`bun timed out after ${o.timeoutS}s (process tree killed)`);
+        }
+      }
+      return inner(bin, args, o);
+    };
+    const v = await hostVerify(fixture(base).run, 60, { env: legEnv(), run: trip as any }, { slice: true }) as HostVerifyRan;
+    expect(v.assets).toMatchObject({ verdict: "red", reason: `assets.py match timed out (${wallClockTrip(90)})` });
+    expect(v.assets!.reason).not.toContain("wall clock:");
+    expect(v.assets!.steps.at(-1)).toMatchObject({ verb: "match", exit: null });
+    expect(isRed(v)).toBe(true);
+  }, 30_000);
 
   test("no manifest: skipped (no manifest), the leg continues; a red host command skips the step", async () => {
     const fx = fixture(base, { manifest: false });

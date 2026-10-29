@@ -1356,8 +1356,10 @@ class LaunchTestCase(unittest.TestCase):
                                      "CAP-13", "CAP-16"} <= parsed["noted_caps"])
                 else:
                     self.assertEqual(set(parsed["questions"]), {"CAP-1", "CAP-2", "CAP-3", "CAP-7"})
-                    self.assertEqual(parsed["noted_caps"],
-                                     {"CAP-1", "CAP-2", "CAP-3", "CAP-4", "CAP-17", "CAP-18"})
+                    # the planner adds a design note per story it plans, so the
+                    # noted set only grows: pin the notes the spec carried at distillation
+                    self.assertTrue({"CAP-1", "CAP-2", "CAP-3", "CAP-4", "CAP-17", "CAP-18"}
+                                    <= parsed["noted_caps"])
 
     def test_spec_open_questions_cap_lists_in_questions_and_notes(self):
         text = ("## Capabilities\n\n- **CAP-4** (2.2)\n- **CAP-5** (2.2)\n- **CAP-9** (2.2)\n"

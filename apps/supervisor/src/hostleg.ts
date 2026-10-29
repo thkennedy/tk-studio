@@ -17,8 +17,9 @@
  *             worktree holding the branch is `VerifyFailed` naming that worktree's path (never removed here). Then `materialise`d as `prepareWorktree` does.
  *   the leg   `hostVerify` on a copy of the run naming the fresh worktree, under the sweep's guard: exactly as the
  *             close-out runs it (the command read at the run's `base_ref` in the checkout).
- *   the proof Story 35.1 (DW-76: the re-run is a whole leg): on a slice run, under the close-out's own condition (a ran
- *             leg, `assets.verdict` green — a `match` fault counts green — on playable pass and fail alike), the
+ *   the proof Story 35.1 (DW-76: the re-run is a whole leg): on a slice run, under the close-out's own condition (Story
+ *             35.3, `proofCommitDue`: a ran leg whose own playable step ran (exited 0 or 1) and whose store holds `report.json` and whose assets step is not
+ *             red — green, a non-red `match` fault, or `skipped: no manifest` — on playable pass and fail alike), the
  *             placed art, the manifest and `.tk-studio/proof/<run_id>/` committed through `worktree.ts proofCommit`
  *             (`host leg: placed assets and proof (run <id>)`), then `git push origin <branch>` (never forced). A
  *             failure of either is `rerun.commit`/`rerun.pushed: "error: …"`: the leg still recorded, the body never
@@ -36,7 +37,9 @@
  *             leg's section under a `Legs: <k> — …` history line) and `gh pr edit --body-file`; then green marks an
  *             open draft ready (`gh pr ready <pr>`) only once the body is `edited` (a failed edit leaves the PR as it
  *             was, `pr_ready` unset), red turns an open ready PR back to a draft (`gh pr ready <pr>
- *             --undo`, the event's `reason` is `redReason`), skipped flips nothing. A PR not open, or unreadable,
+ *             --undo`, the event's `reason` is `redReason`), skipped flips nothing; Story 35.3: an inconclusive leg
+ *             flips nothing either (never marked ready; the event's `reason` is `host verify inconclusive (playable): <reason>`,
+ *             `inconclusiveReason`). A PR not open, or unreadable,
  *             is never edited; an unreadable one is `pr_body: "error: gh pr view …"` whatever the verdict.
  *             The worktree is then removed (best effort).
  *   result    one `host-verify` event: the leg's detail plus `rerun {by, head, worktree, pr, pr_ready?, commit?,
@@ -49,12 +52,12 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
 import { workDir } from "./env";
 import { canonicalPr } from "./hygiene";
-import { hostVerify, isRed, isSlice, legHistory, legVerdict, redReason, type HostVerifyResult, type PrProof } from "./hostverify";
+import { hostVerify, inconclusiveReason, isInconclusive, isRed, isSlice, legHistory, legVerdict, redReason, type HostVerifyResult, type PrProof } from "./hostverify";
 import { isTerminal, selfOwner, servedRoot, type Owner, type Queue, type QueueEvent, type QueueRun, type RunState } from "./queue";
 import { lastJsonObject, type RunResult } from "./server";
 import {
   editPrBody, gh, launchedCloseOutInput, markPrDraft, markPrReady, materialise, meteredCost, meteredCostSection, openPrUrl, originWebUrl,
-  prBody, priorPr, proofCommit, runBranch, runner, type WorktreeDeps,
+  prBody, priorPr, proofCommit, proofCommitDue, runBranch, runner, type WorktreeDeps,
 } from "./worktree";
 
 export type VerifyRefusal = "RunNotFound" | "ExternalRun" | "RunNotEnded" | "NoBranch" | "VerifyRunning" | "SchemaError" | "VerifyFailed";
@@ -77,7 +80,7 @@ export interface HostLegRerun {
   pr_ready?: string;
   /** Story 35.1: a slice run's host-side commit (`{sha, frames, sheet?}`, sha `nothing to commit` on a clean index),
    * `skipped: <why>` off the close-out's condition, or `error: <clipped>`. */
-  commit?: { sha: string; frames: string[]; sheet?: string } | string;
+  commit?: { sha: string; frames: string[]; sheet?: string; skipped_ignored?: string[] } | string;
   /** Story 35.1: the branch pushed after a commit, or `error: <clipped>`. */
   pushed?: string;
   /** Story 35.1: an open PR's body regenerated: `edited` or `error: <clipped>`; the PR's state unreadable (no edit):
@@ -156,15 +159,13 @@ async function prState(root: string, pr: string, deps: WorktreeDeps): Promise<{ 
 async function sliceCommit(
   run: QueueRun, path: string, branch: string, tip: string, verify: HostVerifyResult, rerun: HostLegRerun, deps: WorktreeDeps,
 ): Promise<{ ok: boolean; proof?: PrProof }> {
-  if (verify.skipped) { rerun.commit = "skipped: the leg was skipped"; return { ok: true }; }
-  if (verify.assets?.verdict !== "green") {
-    rerun.commit = `skipped: assets ${verify.assets ? `${verify.assets.verdict}${verify.assets.reason ? ` (${clip(verify.assets.reason, 120)})` : ""}` : "not run"}`;
-    return { ok: true };
-  }
+  // Story 35.3: the close-out's widened condition (the proof exists, the assets step not red).
+  const due = proofCommitDue(verify, { run_id: run.run_id, worktree: path, prefix: run.prefix });
+  if (!due.due) { rerun.commit = `skipped: ${due.why}`; return { ok: true }; }
   let done: Awaited<ReturnType<typeof proofCommit>>;
   try { done = await proofCommit({ run_id: run.run_id, worktree: path, prefix: run.prefix }, verify, deps); }
   catch (e) { rerun.commit = `error: ${clip(message(e))}`; return { ok: false }; }
-  rerun.commit = { sha: done.sha, frames: done.frames, ...(done.sheet ? { sheet: done.sheet } : {}) };
+  rerun.commit = { sha: done.sha, frames: done.frames, ...(done.sheet ? { sheet: done.sheet } : {}), ...(done.skipped_ignored ? { skipped_ignored: done.skipped_ignored } : {}) };
   if (done.sha !== "nothing to commit") {
     let pushError: string | undefined;
     try {
@@ -322,7 +323,8 @@ async function runLeg(
     verify = { skipped: true, reason: `re-run failed: ${clip(message(e))}` };
     rerun.worktree = existsSync(path) ? await removeWorktree(run.root, path, deps) : "removed";
   }
-  const result = { ...verify, ...(isRed(verify) ? { reason: redReason(verify) } : {}), rerun } as HostLegResult;
+  // Story 35.3: an inconclusive leg names its reason too (it flips no PR: neither green nor red above).
+  const result = { ...verify, ...(isRed(verify) ? { reason: redReason(verify) } : isInconclusive(verify) ? { reason: inconclusiveReason(verify) } : {}), rerun } as HostLegResult;
   try { queue.note(run.run_id, "host-verify", result as unknown as Record<string, unknown>); }
   catch (e) {
     // Not recorded (the queue busy): the lease is let go of, so the next re-run is not `VerifyRunning`.

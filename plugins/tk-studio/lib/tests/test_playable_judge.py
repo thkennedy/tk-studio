@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -79,6 +80,36 @@ class JudgeCoreTests(unittest.TestCase):
         self.assertEqual(playable_judge.RUBRIC_IDS, (
             "scene-loaded", "player-visible", "no-magenta-or-error-overlay",
             "hud-reads", "moments-shown"))
+
+    def test_rubric_verb_prints_the_ids_and_lines_in_a_complete_block(self):
+        # Story 35.3: the one home of the ids, read by the host leg.
+        code, out = self._cli("rubric")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(list(out)[-4:], BLOCK_KEYS)
+        self.assertEqual((out["status"], out["intent"], out["artifacts"], out["reason"]),
+                         ("complete", "tk-studio-playable-judge", [], None))
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["ids"], list(playable_judge.RUBRIC_IDS))
+        self.assertEqual(out["rubric"], [{"id": rid, "line": line}
+                                         for rid, line in playable_judge.RUBRIC])
+
+    def test_rubric_ids_are_pinned_to_the_skill_table_and_the_contract(self):
+        # Story 35.3: the skill's table (parsed) and the contract's 34.3 sentence name the core's ids, in order.
+        plugin = Path(__file__).resolve().parents[2]
+        skill = (plugin / "skills" / "tk-studio-playable-judge" / "SKILL.md").read_text(encoding="utf-8")
+        table = skill[skill.index("| id | rubric line |"):]
+        rows = []
+        for line in table.splitlines()[2:]:
+            m = re.match(r"\s*\|\s*`([^`]+)`\s*\|\s*(.+?)\s*\|\s*$", line)
+            if not m:
+                break
+            rows.append((m.group(1), m.group(2)))
+        self.assertEqual(tuple(rid for rid, _ in rows), playable_judge.RUBRIC_IDS)
+        self.assertEqual(tuple(rows), playable_judge.RUBRIC)
+        contract = (plugin / "contracts" / "driver-contract.md").read_text(encoding="utf-8")
+        start = contract.index("answers the fixed rubric (") + len("answers the fixed rubric (")
+        named = re.findall(r"`([^`]+)`", contract[start:contract.index(")", start)])
+        self.assertEqual(tuple(named), playable_judge.RUBRIC_IDS)
 
     def test_prepare_prints_frames_moments_and_rubric(self):
         self._media(_report())
@@ -213,8 +244,9 @@ class JudgeCoreTests(unittest.TestCase):
 
 class DriveBoundsTests(unittest.TestCase):
     """The e2e drive's own worst case (every core call, the install and the
-    suite each spent to its bound) sits below the runner's drive timeout and
-    its manifest entry's, so the drive's own timeouts always fire first."""
+    suite each spent to its bound) sits below its manifest entry's timeout
+    (hole 97: 120, not the runner's 60 s default), so the drive's own timeouts
+    always fire first."""
 
     def test_worst_case_below_the_runner_and_manifest_timeouts(self):
         conformance = Path(__file__).resolve().parents[2] / "contracts" / "conformance"
@@ -225,12 +257,14 @@ class DriveBoundsTests(unittest.TestCase):
         finally:
             sys.path.remove(str(conformance))
         worst = drive.CORE_CALLS * drive.CORE_BOUND_S + drive.INSTALL_BOUND_S + drive.BOUND_S
-        self.assertEqual(drive.RUNNER_BOUND_S, runner.DEFAULT_TIMEOUT)
-        self.assertLess(worst, runner.DEFAULT_TIMEOUT)
         manifest = json.loads((conformance / "manifest.json").read_text(encoding="utf-8"))
         entry = next(d for d in manifest["surfaces"]["tk-studio-playable-judge"]["drives"]
                      if d["argv"] == ["contracts/conformance/e2e_playable_verify.py"])
-        self.assertLess(worst, entry.get("timeout", runner.DEFAULT_TIMEOUT))
+        # hole 97: the drive budgets from its manifest timeout, which runner.py honours over
+        # DEFAULT_TIMEOUT; the two must agree, and the worst case sits under them
+        self.assertEqual(entry.get("timeout", runner.DEFAULT_TIMEOUT), drive.MANIFEST_TIMEOUT_S)
+        self.assertGreater(drive.MANIFEST_TIMEOUT_S, runner.DEFAULT_TIMEOUT)
+        self.assertLess(worst, drive.MANIFEST_TIMEOUT_S)
         # The core makes exactly CORE_CALLS judge calls, each under CORE_BOUND_S.
         real, calls = drive._core, []
         drive._core = lambda *argv: (calls.append(argv), real(*argv))[1]
@@ -240,6 +274,32 @@ class DriveBoundsTests(unittest.TestCase):
             drive._core = real
         self.assertTrue(all(step["ok"] for step in steps), steps)
         self.assertEqual(len(calls), drive.CORE_CALLS)
+
+    def _supervisor_drive(self, module: str):
+        conformance = Path(__file__).resolve().parents[2] / "contracts" / "conformance"
+        sys.path.insert(0, str(conformance))
+        try:
+            drive = __import__(module)
+            import runner  # noqa: E402
+        finally:
+            sys.path.remove(str(conformance))
+        manifest = json.loads((conformance / "manifest.json").read_text(encoding="utf-8"))
+        entries = [d for surface in manifest["surfaces"].values() for d in surface.get("drives", [])
+                   if d.get("argv", [None])[0] == f"contracts/conformance/{module}.py"]
+        self.assertEqual(len(entries), 1, module)
+        return drive, entries[0].get("timeout", runner.DEFAULT_TIMEOUT), runner
+
+    def test_story_35_3_engine_gate_and_vertical_slice_bounds_below_their_manifest_timeouts(self):
+        # Story 35.3 (DW-70): both bun-suite drives' worst case (the install and the suite each spent to its bound)
+        # sits below the manifest entry's `timeout`, read from manifest.json (never a copy), which raises the
+        # runner's 60 s cap; each drive's own copy of that timeout matches it.
+        for module in ("e2e_engine_gate", "e2e_vertical_slice"):
+            with self.subTest(drive=module):
+                drive, timeout, runner = self._supervisor_drive(module)
+                worst = drive.BOUND_S + drive.INSTALL_BOUND_S
+                self.assertGreater(worst, runner.DEFAULT_TIMEOUT)  # so the manifest raises the cap
+                self.assertLess(worst, timeout)
+                self.assertEqual(drive.MANIFEST_TIMEOUT_S, timeout)
 
 
 if __name__ == "__main__":

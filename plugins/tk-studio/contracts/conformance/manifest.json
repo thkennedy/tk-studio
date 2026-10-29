@@ -151,7 +151,7 @@
           "argv": ["contracts/conformance/e2e_engine_gate.py"],
           "timeout": 120,
           "expect": "ok",
-          "note": "the Story 34.1 e2e drive: the host leg's engine gate drives a fake godot to green and red (Story 34.1) — bun test test/hostverify.test.ts from apps/supervisor under a fresh temp folder, bounded at 50 s (below the runner's 60 s drive timeout, so the drive kills a hung suite and removes its temp folder itself), the fake godot found only through the folder of GODOT prepended to PATH; not run (ok) without the checkout or bun on PATH, the cli_drives precedent"
+          "note": "the Story 34.1 e2e drive: the host leg's engine gate drives a fake godot to green and red (Story 34.1) — bun test test/hostverify.test.ts from apps/supervisor under a fresh temp folder, the suite bounded at 50 s and the install at 40 s (together below this entry's timeout of 120 s, asserted by the drive and by test_playable_judge.py, so the drive kills a hung suite and removes its temp folder itself), the fake godot found only through the folder of GODOT prepended to PATH; not run (ok) without the checkout or bun on PATH, the cli_drives precedent"
         },
         {
           "assertion": "headless-clean",
@@ -164,7 +164,7 @@
           "argv": ["contracts/conformance/e2e_vertical_slice.py"],
           "timeout": 240,
           "expect": "ok",
-          "note": "the Story 34.8 e2e drive: the shipped run-vertical-slice job type loads with no problem, has run-epic's shape under its own id and description, and an approve-minted run-epic-41 instance of it resolves to tk-studio-launch with its type kept (lib/job.py, in process); then approve's type rule and the slice's host leg (the assets step's verdicts, the contact sheet, the PR section) — bun test test/approve.test.ts test/hostverify.test.ts test/hostleg.test.ts -t \"Story 34.8|Story 35.1\" from apps/supervisor under a fresh temp folder, bounded at 60 s, fakes for every git remote, gh, assets.py, playable.py and Blender call; Story 35.1's re-run (hostleg.ts): the PR body's ## Host verify rewritten with its Legs: history, a draft marked ready on green and an open PR back to a draft (gh pr ready --undo) on red, a slice re-run's placed art and proof committed (host leg: placed assets and proof) and pushed on the run branch cut with -B at origin's tip; the suite step not run (ok) without the checkout or bun on PATH, the cli_drives precedent"
+          "note": "the Story 34.8 e2e drive: the shipped run-vertical-slice job type loads with no problem, has run-epic's shape under its own id and description, and an approve-minted run-epic-41 instance of it resolves to tk-studio-launch with its type kept (lib/job.py, in process); then approve's type rule and the slice's host leg (the assets step's verdicts, the contact sheet, the PR section) — bun test test/approve.test.ts test/hostverify.test.ts test/hostleg.test.ts -t \"Story 34.8|Story 35.1\" from apps/supervisor under a fresh temp folder, the suite bounded at 180 s and the install at 40 s (together below this entry's timeout of 240 s, asserted by the drive and by test_playable_judge.py), fakes for every git remote, gh, assets.py, playable.py and Blender call; Story 35.1's re-run (hostleg.ts): the PR body's ## Host verify rewritten with its Legs: history, a draft marked ready on green and an open PR back to a draft (gh pr ready --undo) on red, a slice re-run's placed art and proof committed (host leg: placed assets and proof) and pushed on the run branch cut with -B at origin's tip; the suite step not run (ok) without the checkout or bun on PATH, the cli_drives precedent"
         }
       ]
     },
@@ -254,9 +254,9 @@
         {
           "assertion": "headless-clean",
           "argv": ["contracts/conformance/e2e_playable_verify.py"],
-          "timeout": 60,
+          "timeout": 120,
           "expect": "ok",
-          "note": "the Story 34.3 e2e drive: the judge's core over a fake judge (a media folder with report.json and frames, a scripted pass answer and a fail answer, judge.json read back, a no-frames refusal), then the host leg's playable step — bun test test/hostverify.test.ts -t \"Story 34.3\" from apps/supervisor under a fresh temp folder, bounded at 30 s (the drive's worst case — four 4 s core calls, a 12 s install, the 30 s suite — below the runner's 60 s drive timeout, so the drive's own timeouts fire first), a fake playable.py runner and a fake judge driving pass, fail, skipped and the refusals; the suite step not run (ok) without the checkout or bun on PATH, the cli_drives precedent"
+          "note": "the Story 34.3 e2e drive: the judge's core over a fake judge (a media folder with report.json and frames, a scripted pass answer and a fail answer, judge.json read back, a no-frames refusal), then the host leg's playable step — bun test test/hostverify.test.ts -t \"Story 34.3\" from apps/supervisor under a fresh temp folder, the suite bounded at 75 s (the drive's worst case — four 4 s core calls, a 12 s install, the 75 s suite — below this entry's timeout: 120, which runner.py honours over its 60 s default, so the drive's own timeouts fire first; hole 97: the Story 34.3 block carries Story 35.3's hardening cases too, 17 tests, about 28 s idle on the agent PC), a fake playable.py runner and a fake judge driving pass, fail, skipped and the refusals; the suite step not run (ok) without the checkout or bun on PATH, the cli_drives precedent"
         }
       ]
     },
