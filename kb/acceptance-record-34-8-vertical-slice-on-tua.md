@@ -46,14 +46,14 @@ Filled by the operator session on the box:
 
 | Item | Value |
 |---|---|
-| Date, box | 2026-10-27, Tim-PC-2 (the operator session; steps 1, 2, 6 and 7 done, 3 to 5 waiting on the engine gate) |
+| Date, box | 2026-10-27, Tim-PC-2 (the operator session; steps 1, 2, 6 and 7 done; 3 to 5 PARKED on Tim's decision of 2026-10-28) |
 | TUA PR adding `playable`, `assets` and the manifest (URL, merge commit) | `playable`: TUA PR 9 (Story 34.3); `assets` + `assets/manifest.yaml` (six entries: two greybox, four cc0 with tags): https://github.com/thkennedy/the-universe-awaits/pull/11, merged f49d3fd; `assets.py check` on the fresh manifest: ok, 6 missing, `complete` |
-| The job instance and the `POST /jobs` answer (run id) | not run yet: TUA's engine gate is red (12 `Phone.ConversationTest` failures, the owner's since 34.3) and the slice's host leg runs that gate after the assets step, so a slice run today ends `partial` with the playable proof skipped; launched once the gate is green |
-| `host-verify` `assets` (verdict, steps); `engine.verdict`; `playable.verdict`, `contact_sheet` | pending the run |
-| Close-out `host_commit`; the PR (URL, merged commit) | pending the run |
-| The PR's embedded contact sheet and frame list (present?) | pending the run |
-| The playable greybox scene (what the sheet shows) | pending the run |
-| `job-run` ledger line (`total_cost_usd`, `playable_verify_cost_usd`) | pending the run |
+| The job instance and the `POST /jobs` answer (run id) | PARKED (Tim, 2026-10-28): TUA's engine gate is red (12 `Phone.ConversationTest` failures, the owner's since 34.3) and the slice's host leg runs that gate after the assets step, so a slice run today ends `partial` with the playable proof skipped. Tim keeps those failures as they are: they are the studio's real "needs the owner's input" fixture (Blocked - Awaiting User, the Needs-you filter, the chat route, the stage log's gaps), and TUA work not needed to test tk-studio stays separate. The proof waits on no one; it runs when Tim wants TUA's gate green |
+| `host-verify` `assets` (verdict, steps); `engine.verdict`; `playable.verdict`, `contact_sheet` | parked with the run |
+| Close-out `host_commit`; the PR (URL, merged commit) | parked with the run |
+| The PR's embedded contact sheet and frame list (present?) | parked with the run |
+| The playable greybox scene (what the sheet shows) | parked with the run |
+| `job-run` ledger line (`total_cost_usd`, `playable_verify_cost_usd`) | parked with the run |
 | Conformance (`ok`, the drive's suite step) | ok: the 34.8 host leg's conformance ran `e2e_vertical_slice.py` green (queue event seq 4085 of `q-run-epic-34-20261027T200732Z-3113ff`, host verify green in 1075 s), and the operator's hand gate on main after the merge (`tools/verify_host.py`) |
 | Eval runs (case: passes of 3) | on the Windows host, 3 runs each: `gds-engine-godot-4-pinned-facts` 3 of 3; `tk-studio-playable-judge-verdict` 0 of 3; `asset-ladder-generated-rung` 0 of 3. The host's eval child cannot grant a shell (the Windows sandbox gate is off) and, without one, cannot read the plugin's docs (Glob/Grep refused in don't-ask mode, the plugin cache denied by the kept deny list), so the two failures measure the host, not the skills (hole 85); they need the sandbox tier |
 | Threshold kept at 2 of 3, or retuned to | kept at 2 of 3; unmeasured for the two host-blocked cases until they run on the sandbox tier |
