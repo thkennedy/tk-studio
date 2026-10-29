@@ -161,6 +161,20 @@ def _passed(run: object) -> bool | None:
     return None
 
 
+def _run_list(entry: dict) -> object:
+    """The case's per-run entries: a `runs` or `results` list, else (claude
+    2.1.312, hole 99) the ablation's `with` arm — the runs made with the
+    plugin loaded, the ones the acceptance bar counts; the `without` arm is
+    the control and never scores the skill."""
+    for key in ("runs", "results"):
+        if isinstance(entry.get(key), list):
+            return entry[key]
+    arms = entry.get("arms")
+    if isinstance(arms, dict) and isinstance(arms.get("with"), list):
+        return arms["with"]
+    return None
+
+
 def _names_case(entry: dict, case: str) -> bool | None:
     """True when ``entry`` names ``case`` (name/case/id), False when it names
     another, None when it names none."""
@@ -196,7 +210,7 @@ def score_case(doc: object, case: str, runs: int) -> dict:
     entry = _case_entry(doc, case)
     if entry is None:
         raise Refusal(f"case {case}: not in the result JSON")
-    run_list = entry.get("runs") if isinstance(entry.get("runs"), list) else entry.get("results")
+    run_list = _run_list(entry)
     if isinstance(run_list, list) and run_list:
         verdicts = [_passed(r) for r in run_list]
         # A run without a recognisable verdict is unreadable, never a failed
@@ -217,6 +231,10 @@ def score_case(doc: object, case: str, runs: int) -> dict:
     if not 0 <= n_passed <= n_runs:
         raise Refusal(f"case {case}: unreadable run verdicts")
     score = entry.get("score")
+    if not isinstance(score, (int, float)) or isinstance(score, bool):
+        # claude 2.1.312 (hole 99): the case's score sits under `aggregates`
+        aggregates = entry.get("aggregates")
+        score = aggregates.get("score") if isinstance(aggregates, dict) else None
     if not isinstance(score, (int, float)) or isinstance(score, bool):
         score = round(n_passed / n_runs, 4) if n_runs else 0.0
     return {"runs": int(n_runs), "passed": int(n_passed), "score": score}
