@@ -542,7 +542,7 @@ source_spec: `34-3-the-playable-verify-leg-spec.md`
 location: plugins/tk-studio/contracts/conformance/e2e_engine_gate.py; plugins/tk-studio/contracts/conformance/manifest.json
 severity: low
 reason: Consult ruling 2026-10-27 (deviation-gt-0, patch pass): runner.py:92, :210-211, :236, :520, :831-832. Deferral class (b): the AD-19 conformance invariant.
-status: open
+status: resolved 2026-10-29 by this story's PR (35.3: `runner.py` honours a manifest `timeout` since 35.1's fix-forward; `e2e_engine_gate.py` now asserts its 50 + 40 s bounds under its manifest `timeout: 120` as `e2e_vertical_slice.py` does under 240, `test_playable_judge.py` pins both drives' worst case below the `timeout` read from `manifest.json`, and the stale "below the runner's 60 s" comments and manifest notes are fixed; contract 0.1.30)
 
 ### DW-71: The launch check's engine-gate clause cannot tell whether the engine sandbox was provisioned WITH_GODOT, so a gate in engine.verify_commands on a sandbox without Godot gets no warning.
 origin: spec-deferred d688aa7fdcf8
@@ -686,7 +686,7 @@ source_spec: `34-3-the-playable-verify-leg-spec.md`
 location: apps/supervisor/src/hostverify.ts:478; plugins/tk-studio/lib/playable_judge.py:51-60; plugins/tk-studio/skills/tk-studio-playable-judge/SKILL.md:38-42
 severity: low
 reason: A rubric line added or renamed in one place drifts silently from the other two. Fix: one source (the core's list) that the supervisor reads and a test that pins the SKILL.md list to it.
-status: open
+status: resolved 2026-10-29 by this story's PR (35.3: the core's `RUBRIC` is the one home — `playable_judge.py rubric` prints `{ids, rubric: [{id, line}]}` in a `complete` block, `hostverify.ts` runs it once per judge step and validates findings against it (`PLAYABLE_RUBRIC` removed), and `test_playable_judge.py` pins `RUBRIC_IDS` to the `SKILL.md` table, parsed, and to the contract's 34.3 sentence; contract 0.1.30)
 
 ### DW-89: A judge infrastructure failure reads as a failed game: a pin failure, an `sbx exec` outage or a missing status block becomes `playable.verdict: fail`.
 origin: retro epic-34 (_bmad-output/specs/spec-epic-34/RETROSPECTIVE.md), B10
@@ -694,7 +694,7 @@ source_spec: `34-3-the-playable-verify-leg-spec.md`
 location: apps/supervisor/src/hostverify.ts:426, :619-630
 severity: medium
 reason: The run ends `partial` and the PR a draft for a cause that says nothing about the game. Fix: an `inconclusive` verdict that ends the leg `partial` with the infrastructure reason named, distinct from a rubric fail.
-status: open
+status: resolved 2026-10-29 by this story's PR (35.3: no sandbox, a thrown invoke, the pin (`pin`, `ran: false`), the auth preflight (`preflight`, `ran: false`), no status block (`conformance_failure`) or an unreadable rubric make `playable.verdict: inconclusive` with `infrastructure: <pin|sbx|status-block|auth|rubric>: <detail>`; the leg is neither green nor red, the run ends `partial` with `host verify inconclusive (playable): <reason>`, no finding recorded; the judge's own `blocked` stays `fail`; contract 0.1.30)
 
 ### DW-90: `is_game_project` is a `gds-` name prefix on the working set, so confirming the plugin-shipped `gds-engine-godot-4` alone makes every `scope` refuse `GameDocsMissing`.
 origin: retro epic-34 (_bmad-output/specs/spec-epic-34/RETROSPECTIVE.md), B11, Open questions
@@ -734,7 +734,7 @@ source_spec: `34-8-the-run-vertical-slice-job-and-the-engagements-game-path-spec
 location: apps/supervisor/src/hostverify.ts:445, :449, :547-549; src/worktree.ts:461-465, :547; plugins/tk-studio/lib/playable.py:392-400, :756-757; lib/assets.py:172, :1845-1877, :1917-1923; contracts/conformance/e2e_vertical_slice.py:43-44, e2e_engine_gate.py:44,48, runner.py:92
 severity: medium
 reason: One dev-loop story (band M): wall-clock margins (the leg's guard above the tool's `--wall`); `fault` read from the status block's reason/writeback/not-run; `.candidates` excluded and `git check-ignore` before staging; `sheet --report` samples the report's frames; the proof folder committed whenever a report exists; the drive bound asserts; the nt `taskkill /T /F` path tested where it runs. Filed here so the next epic's planner or a sweep reads it; the retro's rows carry the detail.
-status: open
+status: resolved 2026-10-29 by this story's PR (35.3: the tools' walls under `TOOL_WALL_MARGIN_S = 30` (assets `--wall`, playable `--wall-clock`); a crashed, `not-run` or write-back-failed `match` is `fault` and red; `proofCommit` runs `git check-ignore`, skips ignored paths (`skipped_ignored`) and stages the art path with `:(exclude)<art_path>/.candidates`, committed whenever `report.json` exists and the assets step is not red (`skipped: no manifest` included); `playable.py sheet --report` samples the report's `frames[]`; the drive bounds asserted (DW-70); the nt `taskkill /T /F` path of `kill_tree` tested on nt (`skipUnless`, the operator runs it on the host); contract 0.1.30)
 
 ### DW-95: The plan status dropped has no Jira status: promote skips a dropped entry and the pull-back would read a Done-category status as done.
 origin: owner decision (Tim, 2026-10-28): a DNI status in the Done category instead of deleting issues
@@ -774,4 +774,28 @@ source_spec: `35-2-every-story-gets-its-plan-and-its-records-spec.md`
 location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261029-024051-cdae; this entry preserves the lingering recommendation for a deliberate later review.
+status: open
+
+### DW-100: The board and the plan status misread an inconclusive host-verify leg: green on the board, red in planstatus.
+origin: review of 35-3-the-slice-path-hardened
+source_spec: `35-3-the-slice-path-hardened-spec.md`
+location: apps/supervisor/src/board.ts:262 (hostVerifyOf); apps/supervisor/src/planstatus.ts:444
+severity: medium
+reason: `apps/supervisor/src/board.ts hostVerifyOf` (~:262) and `planstatus.ts` (~:444) show an inconclusive host-verify leg as green (board, files the run under done instead of needs_you) or red (planstatus); the contract says they read the latest host-verify through `green`. Found by 35.3's review; outside 35.3's Files.
+status: open
+
+### DW-101: board.ts hostVerifyOf and planstatus.ts misread an inconclusive host-verify leg (green on the board, filed under done; red in planstatus).
+origin: spec-deferred ad45d836e227
+source_spec: `35-3-the-slice-path-hardened-spec.md`
+location: apps/supervisor/src/board.ts:262
+severity: medium
+reason: Both review layers: board.ts ~:262 uses isRed(d) ? "red" : "green"; planstatus.ts ~:444 uses green ? "green" : "red". 35.3 made isRed false for an inconclusive leg. Both files are outside the plan's Files; the consult ruled to defer (DW-100). Meets deferral class (a): behaviour AC3 names (the run ends partial).
+status: open
+
+### DW-102: Follow-up review still recommended for 35-3-the-slice-path-hardened after the damping cap was spent
+origin: review-budget-followup
+source_spec: `35-3-the-slice-path-hardened-spec.md`
+location: n/a
+severity: low
+reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261029-045514-f337; this entry preserves the lingering recommendation for a deliberate later review.
 status: open

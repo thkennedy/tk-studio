@@ -11,8 +11,9 @@ import { checkoutKey, Queue, selfOwner, servedRoot } from "../src/queue";
 import { invokeSkill, runProcess, toVmPath, type RunResult, type Spawner } from "../src/server";
 import {
   baseBranch, closeOut, closeOutDetail, COPIED_RUNTIME, engineStatus, isDefaultBranch, launchedCloseOutInput, openPrUrl, originRepo, prBody, prepareWorktree, runBranch, sweepEngines, worktreePath, WorktreeFailed, type WorktreeDeps,
-  driftingPlanes, worktreeClean, editPrBody, markPrDraft, markPrReady, proofCommit,
+  driftingPlanes, worktreeClean, editPrBody, markPrDraft, markPrReady, proofCommit, proofCommitDue,
 } from "../src/worktree";
+import { legVerdict } from "../src/hostverify";
 import { fakeGh, fakeSbx, gitRepo, testGit } from "./fakes";
 import { tempDir, track } from "./tmp";
 
@@ -614,8 +615,9 @@ describe("Story 27.4: the host verify leg runs before any PR opens", () => {
 
   /** Story 34.3: a launched run declaring `playable`, its sandbox recorded, the store in a temp folder, a fake
    * `playable.py` (the capture spec whose argv runs `playable.py` writes the media under `--out` and passes) and a
-   * fake judge answering `answer` at a cost of $0.50. */
-  async function launchedPlayable(answer: Record<string, unknown>) {
+   * fake judge answering `answer` at a cost of $0.50 (Story 35.3: `result` its invoke result instead; the core's
+   * `playable_judge.py rubric` answered with the five ids). */
+  async function launchedPlayable(answer: Record<string, unknown>, result?: Record<string, unknown>) {
     const GREEN = bunCmd("console.log('all green')");
     const fx = await launchedSbx(GREEN, "sbx", GREEN, "playable:\n  scenario: scenarios/smoke.json\n  seed: 3\n  ticks: 60\n");
     // The run's sandbox recorded (the judge's tier); its engine status read through a fake `sbx` (hole 38).
@@ -627,6 +629,12 @@ describe("Story 27.4: the host verify leg runs before any PR opens", () => {
     const playableArgv: string[][] = [];
     fx.deps.run = async (bin, args, o) => {
       const spec = bin === process.execPath && args[0] === "-e" ? JSON.parse(readFileSync(args[2]!, "utf-8")) : undefined;
+      if (spec && String(spec.argv[2] ?? "").endsWith("playable_judge.py") && spec.argv[3] === "rubric") {
+        const ids = ["scene-loaded", "player-visible", "no-magenta-or-error-overlay", "hud-reads", "moments-shown"];
+        writeFileSync(spec.out, JSON.stringify({ ok: true, ids, rubric: ids.map((id) => ({ id, line: id })), status: "complete", intent: "tk-studio-playable-judge", artifacts: [], reason: null }));
+        writeFileSync(spec.status, JSON.stringify({ exit: 0, signal: null }));
+        return { exit: 0, stdout: "", stderr: "" };
+      }
       if (!spec || !String(spec.argv[2] ?? "").endsWith("playable.py")) return inner(bin, args, o);
       playableArgv.push(spec.argv);
       const out = spec.argv[spec.argv.indexOf("--out") + 1] as string;
@@ -643,7 +651,7 @@ describe("Story 27.4: the host verify leg runs before any PR opens", () => {
     fx.deps.judge = async (root, args) => {
       judged.push(join(root, args.payload.media));
       writeFileSync(join(root, args.payload.media, "judge.json"), JSON.stringify(answer));
-      return { status_block: { status: "complete", intent: "tk-studio-playable-judge", artifacts: ["judge.json"], reason: null }, total_cost_usd: 0.5 };
+      return result ?? { status_block: { status: "complete", intent: "tk-studio-playable-judge", artifacts: ["judge.json"], reason: null }, total_cost_usd: 0.5 };
     };
     fx.deps.route = async () => ({});
     return { ...fx, playableArgv, judged };
@@ -692,6 +700,22 @@ describe("Story 27.4: the host verify leg runs before any PR opens", () => {
     expect(flag(fx.verbs[0]!, "--state")).toBe("complete");
     expect(flag(fx.verbs[0]!, "--playable-verify-cost-usd")).toBe("0.5");
     expect(flag(fx.verbs[0]!, "--total-cost-usd")).toBe("0.75");
+  }, 30_000);
+
+  test("Story 35.3: the judge's infrastructure fails (the pin) → `inconclusive`: the run `partial` naming it, no rubric fail, no finding", async () => {
+    const pin = "sbx pin failed: sbx run -d --name tk-sbx exited 1: no such sandbox";
+    const fx = await launchedPlayable({ verdict: "pass", findings: [] },
+      { status_block: { status: "blocked", intent: "tk-studio-playable-judge", artifacts: [], reason: pin }, pin, ran: false });
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    const reason = `infrastructure: pin: ${pin}`;
+    expect(hv(fx)[0]!.detail).toMatchObject({ green: false, playable: { verdict: "inconclusive", reason, judge: { status: "blocked" } } });
+    expect((hv(fx)[0]!.detail as any).playable.findings).toBeUndefined();
+    expect(fx.get()).toMatchObject({ state: "partial", reason: `host verify inconclusive (playable): ${reason}` });
+    expect(flag(fx.verbs[0]!, "--state")).toBe("partial");
+    expect(flag(fx.verbs[0]!, "--reason")).toBe(`host verify inconclusive (playable): ${reason}`);
+    const create = fx.gh.calls().find((c) => c.argv[1] === "create")!;
+    expect(create.body).toContain(`Playable: inconclusive — ${reason}`);
+    expect(create.body).not.toContain("Playable: fail");
   }, 30_000);
 
   test("Story 34.3: an unmetered engine cost → `--total-cost-usd` absent (never zero-filled with the judge's), `--playable-verify-cost-usd` still sent", async () => {
@@ -2134,11 +2158,11 @@ describe("Story 34.8: a slice run's proof folder and host-side commit, before th
     writeFileSync(join(dir, "contact-sheet.png"), "sheet");
     return dir;
   }
-  const verify = (o: { assets?: Ran["assets"]; store?: string } = {}): Ran => ({
+  const verify = (o: { assets?: Ran["assets"] | null; store?: string } = {}): Ran => ({
     command: "c", argv: ["c"], cwd: "/w", exit: 0, duration_ms: 1, green: true, stdout_tail: [], stderr_tail: [],
     engine: { verdict: "green", command: "e", duration_ms: 1, godot_dir: null },
-    playable: o.store ? { verdict: "pass", store: o.store, contact_sheet: join(o.store, "contact-sheet.png"), sampled: ["tick-000000.png", "tick-000060.png"] } : { verdict: "skipped", reason: "no playable" },
-    assets: o.assets ?? { verdict: "green", manifest: "assets/manifest.yaml", art_path: "art/greybox", steps: [] },
+    playable: o.store ? { verdict: "pass", exit: 0, store: o.store, contact_sheet: join(o.store, "contact-sheet.png"), sampled: ["tick-000000.png", "tick-000060.png"] } : { verdict: "skipped", reason: "no playable" },
+    ...(o.assets === null ? {} : { assets: o.assets ?? { verdict: "green", manifest: "assets/manifest.yaml", art_path: "art/greybox", steps: [] } }),
   });
 
   test("green assets: the art, the manifest and .tk-studio/proof/<run_id>/ committed by name, before the push; the PR embeds the sheet", async () => {
@@ -2164,7 +2188,7 @@ describe("Story 34.8: a slice run's proof folder and host-side commit, before th
     expect(c.host_commit).toMatch(/^[0-9a-f]{40}$/);
     // `git add` with named paths only (never -A), before the push
     const adds = fx.argvs.filter((a) => a.bin === "git" && a.args[0] === "add");
-    expect(adds.map((a) => a.args)).toEqual([["add", "--", "art/greybox", "assets/manifest.yaml", proof]]);
+    expect(adds.map((a) => a.args)).toEqual([["add", "--", "art/greybox", "assets/manifest.yaml", proof, ":(exclude)art/greybox/.candidates"]]);
     const commitAt = fx.argvs.findIndex((a) => a.args[0] === "commit"), pushAt = fx.argvs.findIndex((a) => a.args[0] === "push");
     expect(commitAt).toBeGreaterThan(-1);
     expect(commitAt).toBeLessThan(pushAt);
@@ -2225,7 +2249,7 @@ describe("Story 34.8: a slice run's proof folder and host-side commit, before th
     const c = await closeOut(fx.run, { paused: false, verify: verify({ store: store() }), slice: true }, fx.deps);
     expect(c.error).toBeUndefined();
     const proof = `.tk-studio/proof/${fx.run.run_id}`;
-    const named = ["art/greybox", proof];
+    const named = ["art/greybox", proof, ":(exclude)art/greybox/.candidates"];
     const diff = fx.argvs.find((a) => a.bin === "git" && a.args[0] === "diff" && a.args.includes("--cached"))!;
     expect(diff.args).toEqual(["diff", "--cached", "--quiet", "--", ...named]);
     const commit = fx.argvs.find((a) => a.bin === "git" && a.args[0] === "commit")!;
@@ -2236,29 +2260,32 @@ describe("Story 34.8: a slice run's proof folder and host-side commit, before th
 
   test("no named path present: nothing to commit, no diff and no commit call", async () => {
     const fx = await prepared();
-    const c = await closeOut(fx.run, { paused: false, verify: verify(), slice: true }, fx.deps);
-    expect(c.error).toBeUndefined();
-    expect(c.host_commit).toBe("nothing to commit");
+    // Story 35.3: no store (no proof to copy) and no art or manifest on disk: proofCommit itself stages nothing
+    const c = await proofCommit(fx.run, verify(), fx.deps);
+    expect(c.sha).toBe("nothing to commit");
     expect(fx.argvs.some((a) => a.bin === "git" && (a.args[0] === "add" || a.args[0] === "commit"))).toBe(false);
     expect(fx.argvs.some((a) => a.bin === "git" && a.args[0] === "diff" && a.args.includes("--cached"))).toBe(false);
   });
 
   test("a commit failure is the close-out's error: nothing pushed, the worktree kept", async () => {
-    const fx = await prepared({ ".gitignore": ".bmad-loop/runs/\nart/\n" });
+    const fx = await prepared();
     mkdirSync(join(fx.wt, "art", "greybox"), { recursive: true });
     writeFileSync(join(fx.wt, "art", "greybox", "crate.glb"), "glb");
-    const c = await closeOut(fx.run, { paused: false, verify: verify(), slice: true }, fx.deps);
-    expect(c.error).toStartWith("host commit: git add -- art/greybox");
+    // Story 35.3: an ignored path is skipped now, never a failure: the worktree off the run branch fails the commit
+    testGit(fx.wt, "checkout", "-q", "-b", "elsewhere");
+    const c = await closeOut(fx.run, { paused: false, verify: verify({ store: store() }), slice: true }, fx.deps);
+    expect(c.error).toStartWith("host commit: the worktree is on 'elsewhere', not the run branch");
     expect(c.pushed).toBeUndefined();
     expect(c.worktree).toBe("kept");
     expect(fx.gh.calls().some((x) => x.argv[1] === "create")).toBe(false);
   });
 
-  test("red or skipped assets, or a non-slice run: no host commit, the close-out as before", async () => {
+  test("red assets, no report.json in the store, or a non-slice run: no host commit, no art staged, the close-out as before", async () => {
     for (const [v, slice] of [
-      [verify({ assets: { verdict: "red", reason: "assets.py check exited 1", steps: [] } }), true],
-      [verify({ assets: { verdict: "skipped", reason: "no manifest", steps: [] } }), true],
-      [verify(), false],
+      [verify({ assets: { verdict: "red", reason: "assets.py check exited 1", steps: [] }, store: store() }), true],
+      [verify({ assets: { verdict: "red", reason: "assets.py match fault: 2 not-run", manifest: "assets/manifest.yaml", art_path: "art/greybox", steps: [] }, store: store() }), true],
+      [verify(), true],
+      [verify({ store: store() }), false],
     ] as const) {
       const fx = await prepared();
       mkdirSync(join(fx.wt, "art", "greybox"), { recursive: true });
@@ -2268,6 +2295,163 @@ describe("Story 34.8: a slice run's proof folder and host-side commit, before th
       expect(fx.argvs.some((a) => a.bin === "git" && (a.args[0] === "add" || a.args[0] === "commit"))).toBe(false);
       expect(existsSync(join(fx.wt, ".tk-studio", "proof"))).toBe(false);
     }
+  }, 30_000);
+
+  test("Story 35.3: `skipped: no manifest` with report.json in the store: the proof committed (no art, no manifest)", async () => {
+    const fx = await prepared();
+    const st = store();
+    const c = await closeOut(fx.run, { paused: false, verify: verify({ store: st, assets: { verdict: "skipped", reason: "no manifest", manifest: "assets/manifest.yaml", art_path: "art/greybox", steps: [] } }), slice: true }, fx.deps);
+    expect(c.error).toBeUndefined();
+    expect(c.host_commit).toMatch(/^[0-9a-f]{40}$/);
+    const proof = `.tk-studio/proof/${fx.run.run_id}`;
+    expect(testGit(fx.repo.origin, "show", "--name-only", "--format=", runBranch(fx.run.run_id)).split("\n").sort()).toEqual([
+      `${proof}/contact-sheet.png`, `${proof}/frames/tick-000000.png`, `${proof}/frames/tick-000060.png`, `${proof}/report.json`,
+    ]);
+    // the leg with no assets step at all (an older record) commits its proof too
+    const gx = await prepared();
+    const d = await closeOut(gx.run, { paused: false, verify: verify({ store: store(), assets: null }), slice: true }, gx.deps);
+    expect(d.host_commit).toMatch(/^[0-9a-f]{40}$/);
+  }, 30_000);
+
+  test("Story 35.3: a non-red match fault commits the art and proof; `.candidates/` and an ignored path never staged, the ignored one in `skipped_ignored`", async () => {
+    const fx = await prepared({ ".gitignore": ".bmad-loop/runs/\nassets/\n" });
+    mkdirSync(join(fx.wt, "art", "greybox", ".candidates"), { recursive: true });
+    mkdirSync(join(fx.wt, "assets"), { recursive: true });
+    writeFileSync(join(fx.wt, "art", "greybox", "crate.glb"), "glb");
+    writeFileSync(join(fx.wt, "art", "greybox", ".candidates", "door.glb"), "candidate");
+    writeFileSync(join(fx.wt, "assets", "manifest.yaml"), "schema: 1\n"); // ignored by the project
+    const fault = { verdict: "green" as const, manifest: "assets/manifest.yaml", art_path: "art/greybox",
+      steps: [{ verb: "match" as const, exit: 1, status: "fault", duration_ms: 1, reason: "match: door: coverage" }] };
+    const v = verify({ store: store(), assets: fault });
+    const done = await proofCommit(fx.run, v, fx.deps);
+    expect(done.sha).toMatch(/^[0-9a-f]{40}$/);
+    expect(done.skipped_ignored).toEqual(["assets/manifest.yaml"]);
+    const proof = `.tk-studio/proof/${fx.run.run_id}`;
+    const shown = testGit(fx.wt, "show", "--name-only", "--format=", "HEAD").split("\n");
+    expect(shown).toContain("art/greybox/crate.glb");
+    expect(shown).not.toContain("art/greybox/.candidates/door.glb");
+    expect(shown).not.toContain("assets/manifest.yaml");
+    expect(shown).toContain(`${proof}/report.json`);
+    const ci = fx.argvs.findIndex((a) => a.bin === "git" && a.args[0] === "check-ignore");
+    const add = fx.argvs.findIndex((a) => a.bin === "git" && a.args[0] === "add");
+    expect(ci).toBeGreaterThan(-1);
+    expect(ci).toBeLessThan(add);
+    expect(fx.argvs[add]!.args).toEqual(["add", "--", "art/greybox", proof, ":(exclude)art/greybox/.candidates"]);
+    // the close-out commits under the same condition (a fault that is not red)
+    const gx = await prepared();
+    mkdirSync(join(gx.wt, "art", "greybox"), { recursive: true });
+    writeFileSync(join(gx.wt, "art", "greybox", "crate.glb"), "glb");
+    const c = await closeOut(gx.run, { paused: false, verify: verify({ store: store(), assets: fault }), slice: true }, gx.deps);
+    expect(c.host_commit).toMatch(/^[0-9a-f]{40}$/);
+  }, 30_000);
+
+  test("Story 35.3: an ignored path with non-ASCII characters is matched (`check-ignore -q` per path, its exit code read, never its C-quoted output) and never staged", async () => {
+    const fx = await prepared({ ".gitignore": ".bmad-loop/runs/\nassets/\n" });
+    mkdirSync(join(fx.wt, "art", "greybox"), { recursive: true });
+    mkdirSync(join(fx.wt, "assets"), { recursive: true });
+    writeFileSync(join(fx.wt, "art", "greybox", "crate.glb"), "glb");
+    writeFileSync(join(fx.wt, "assets", "mänifest ü.yaml"), "schema: 1\n"); // ignored, and C-quoted without -z
+    const v = verify({ store: store(), assets: { verdict: "green", manifest: "assets/mänifest ü.yaml", art_path: "art/greybox", steps: [] } });
+    const done = await proofCommit(fx.run, v, fx.deps);
+    expect(done.sha).toMatch(/^[0-9a-f]{40}$/);
+    expect(done.skipped_ignored).toEqual(["assets/mänifest ü.yaml"]);
+    const ci = fx.argvs.filter((a) => a.bin === "git" && a.args[0] === "check-ignore").map((a) => a.args);
+    expect(ci).toContainEqual(["check-ignore", "-q", "--", "assets/mänifest ü.yaml"]);
+    const add = fx.argvs.find((a) => a.bin === "git" && a.args[0] === "add")!;
+    expect(add.args).not.toContain("assets/mänifest ü.yaml");
+  }, 30_000);
+
+  test("Story 35.3: the proof folder itself ignored: in `skipped_ignored`, no sheet and no frames answered, the PR body embeds no contact sheet", async () => {
+    const fx = await prepared({ ".gitignore": ".bmad-loop/runs/\n.tk-studio/proof/\n" });
+    mkdirSync(join(fx.wt, "art", "greybox"), { recursive: true });
+    writeFileSync(join(fx.wt, "art", "greybox", "crate.glb"), "glb");
+    const proof = `.tk-studio/proof/${fx.run.run_id}`;
+    const done = await proofCommit(fx.run, verify({ store: store() }), fx.deps);
+    expect(done.sha).toMatch(/^[0-9a-f]{40}$/);
+    expect(done.skipped_ignored).toEqual([proof]);
+    expect(done.sheet).toBeUndefined();
+    expect(done.frames).toEqual([]);
+    expect(testGit(fx.wt, "show", "--name-only", "--format=", "HEAD").split("\n")).not.toContain(`${proof}/report.json`);
+    // the close-out's PR body through the same answer: no contact-sheet link, no frame links
+    const gx = await prepared({ ".gitignore": ".bmad-loop/runs/\n.tk-studio/proof/\n" });
+    mkdirSync(join(gx.wt, "art", "greybox"), { recursive: true });
+    writeFileSync(join(gx.wt, "art", "greybox", "crate.glb"), "glb");
+    const c = await closeOut(gx.run, { paused: false, verify: verify({ store: store() }), slice: true }, gx.deps);
+    expect(c.error).toBeUndefined();
+    expect(c.host_commit).toMatch(/^[0-9a-f]{40}$/);
+    const body = gx.gh.calls().find((x) => x.argv[1] === "create")!.body!;
+    expect(body).not.toContain("contact-sheet.png");
+    expect(body).not.toContain(`.tk-studio/proof/${gx.run.run_id}/frames/`);
+  }, 30_000);
+
+  test("Story 35.3: the art path holding only `.candidates/`: left out of the diff and commit, the proof still committed", async () => {
+    const fx = await prepared();
+    mkdirSync(join(fx.wt, "art", "greybox", ".candidates"), { recursive: true });
+    writeFileSync(join(fx.wt, "art", "greybox", ".candidates", "door.glb"), "candidate");
+    const fault = { verdict: "green" as const, manifest: "assets/manifest.yaml", art_path: "art/greybox",
+      steps: [{ verb: "match" as const, exit: 1, status: "fault", duration_ms: 1, reason: "match: door: coverage" }] };
+    const done = await proofCommit(fx.run, verify({ store: store(), assets: fault }), fx.deps);
+    expect(done.sha).toMatch(/^[0-9a-f]{40}$/);
+    const proof = `.tk-studio/proof/${fx.run.run_id}`;
+    const shown = testGit(fx.wt, "show", "--name-only", "--format=", "HEAD").split("\n");
+    expect(shown).toContain(`${proof}/report.json`);
+    expect(shown.some((f) => f.includes(".candidates"))).toBe(false);
+    const commit = fx.argvs.find((a) => a.bin === "git" && a.args[0] === "commit")!;
+    expect(commit.args).toEqual(["commit", "-m", `host leg: placed assets and proof (run ${fx.run.run_id})`, "--", proof]);
+    expect(done.sheet).toBe(`${proof}/contact-sheet.png`);
+  }, 30_000);
+
+  test("Story 35.3: an ignore rule matching files inside the proof folder (`*.png`): report.json committed, no sheet, no frames", async () => {
+    const fx = await prepared({ ".gitignore": ".bmad-loop/runs/\n*.png\n" });
+    mkdirSync(join(fx.wt, "art", "greybox"), { recursive: true });
+    writeFileSync(join(fx.wt, "art", "greybox", "crate.glb"), "glb");
+    const proof = `.tk-studio/proof/${fx.run.run_id}`;
+    const done = await proofCommit(fx.run, verify({ store: store() }), fx.deps);
+    expect(done.sha).toMatch(/^[0-9a-f]{40}$/);
+    expect(done.skipped_ignored).toBeUndefined();
+    expect(done.sheet).toBeUndefined();
+    expect(done.frames).toEqual([]);
+    const shown = testGit(fx.wt, "show", "--name-only", "--format=", "HEAD").split("\n");
+    expect(shown).toContain(`${proof}/report.json`);
+    expect(shown).not.toContain(`${proof}/contact-sheet.png`);
+  }, 30_000);
+
+  test("Story 35.3: proofCommitDue: a playable exit 2 or a guard trip (exit null) is never due, and the close-out commits nothing", async () => {
+    for (const exit of [2, null]) {
+      const fx = await prepared();
+      mkdirSync(join(fx.wt, "art", "greybox"), { recursive: true });
+      writeFileSync(join(fx.wt, "art", "greybox", "crate.glb"), "glb");
+      const v = verify({ store: store() });
+      v.playable = { ...v.playable!, exit, reason: exit === null ? "timed out (guard)" : "playable.py exited 2" } as Ran["playable"];
+      const due = proofCommitDue(v, fx.run);
+      expect(due.due).toBe(false);
+      if (!due.due) expect(due.why).toStartWith("the playable step never finished");
+      const c = await closeOut(fx.run, { paused: false, verify: v, slice: true }, fx.deps);
+      expect(c.host_commit).toBeUndefined();
+      expect(fx.argvs.some((a) => a.bin === "git" && (a.args[0] === "add" || a.args[0] === "commit"))).toBe(false);
+      expect(existsSync(join(fx.wt, ".tk-studio", "proof"))).toBe(false);
+    }
+  }, 30_000);
+
+  test("Story 35.3: proofCommitDue's served-root fallback only when the store itself is gone, never for a store without report.json", async () => {
+    const fx = await prepared();
+    const proofDir = join(fx.wt, ".tk-studio", "proof", fx.run.run_id);
+    mkdirSync(proofDir, { recursive: true });
+    writeFileSync(join(proofDir, "report.json"), JSON.stringify({ verdict: "pass" })); // an earlier leg's proof
+    // the store pruned (its path missing): the served root's proof is due (a retried close-out)
+    const pruned = store();
+    rmSync(pruned, { recursive: true, force: true });
+    expect(proofCommitDue(verify({ store: pruned }), fx.run)).toEqual({ due: true });
+    // the store present without report.json (a crash that wrote none): never due, the stale proof never re-embedded
+    const crashed = store();
+    rmSync(join(crashed, "report.json"));
+    const v = verify({ store: crashed });
+    v.playable = { ...v.playable!, exit: 1 } as Ran["playable"];
+    expect(proofCommitDue(v, fx.run)).toEqual({ due: false, why: "no report.json in the playable store" });
+    // no store recorded at all, the served root's proof present: the fallback still answers
+    const bare = verify({ store: pruned });
+    delete (bare.playable as { store?: string }).store;
+    expect(proofCommitDue(bare, fx.run)).toEqual({ due: true });
   }, 30_000);
 
   test("the sweep decides the slice from the resolved definition and passes it to the leg", async () => {
@@ -2338,6 +2522,37 @@ describe("Story 35.1: the re-run's shared motions — the `Legs:` line, the lift
     const calls = fx.gh.calls().filter((x) => x.argv[0] === "pr");
     expect(calls.map((x) => x.argv)).toEqual([["pr", "ready", pr, "--undo"], ["pr", "edit", pr, "--body-file", expect.any(String)]]);
     expect(calls[1]!.body).toContain("## Host verify\n\nLegs: 1 — close-out red 2026-10-27T01:00:00Z\n\n**Red:**");
+  });
+
+  test("Story 35.3: an inconclusive leg flips no PR: `host_verify: inconclusive`, a new PR opened `--draft`, an open one never marked ready (body still edited)", async () => {
+    const inconclusive: Ran = { command: "c", argv: ["c"], cwd: "/w", exit: 0, duration_ms: 1, green: false, stdout_tail: [], stderr_tail: [],
+      engine: { verdict: "green", command: "e", duration_ms: 1, godot_dir: null },
+      playable: { verdict: "inconclusive", reason: "infrastructure: sbx: exec failed" } };
+    expect(legVerdict(inconclusive)).toBe("inconclusive");
+    // a new PR: opened as a draft, never marked ready
+    const fx = await fixture({ baseRef: "main" });
+    const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+    commitIn(wt, "a.txt", "engine: story one");
+    const c = await closeOut(fx.get(), { paused: false, verify: inconclusive }, fx.deps);
+    expect(c.error).toBeUndefined();
+    expect(c).toMatchObject({ host_verify: "inconclusive", draft: true });
+    expect(closeOutDetail(c)).toMatchObject({ closeout: { result: "draft PR", host_verify: "inconclusive" } });
+    const create = fx.gh.calls().find((x) => x.argv[1] === "create")!;
+    expect(create.argv).toContain("--draft");
+    expect(fx.gh.calls().some((x) => x.argv[1] === "ready")).toBe(false);
+    // an open PR: its body regenerated, never `gh pr ready` (nor `--undo`)
+    const gx = await fixture({ baseRef: "main" });
+    const gwt = await prepareWorktree(gx.queue, gx.run, "proj", gx.repo.checkout, gx.deps);
+    commitIn(gwt, "a.txt", "engine: story one");
+    const pr = "https://github.com/acme/widget/pull/42";
+    const legs1 = [{ leg: "close-out" as const, verdict: "inconclusive" as const, recorded_at: "2026-10-27T01:00:00Z" }];
+    const d = await closeOut(gx.get(), { paused: false, existingPr: pr, verify: inconclusive, legs: legs1 }, gx.deps);
+    expect(d.error).toBeUndefined();
+    expect(d).toMatchObject({ pr, host_verify: "inconclusive" });
+    const calls = gx.gh.calls().filter((x) => x.argv[0] === "pr");
+    expect(calls.map((x) => x.argv[1])).toEqual(["edit"]);
+    expect(calls[0]!.body).toContain("## Host verify\n\nLegs: 1 — close-out inconclusive 2026-10-27T01:00:00Z\n\n");
+    expect(calls[0]!.body).toContain("Playable: inconclusive — infrastructure: sbx: exec failed");
   });
 
   test("Story 35.1: proofCommit on a worktree cut `-B <run branch> <remote tip>` over a stale local branch: committed on the branch, fast-forward of the tip; a detached cut is refused", async () => {

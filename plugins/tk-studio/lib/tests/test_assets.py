@@ -896,6 +896,30 @@ class RealRunnerTests(Base):
         self.assertFalse((self.art() / "crate-small.glb").exists())
 
 
+@unittest.skipUnless(os.name == "nt", "the taskkill /T /F path is the Windows path (the operator runs it on the host)")
+class RealRunnerNtTests(Base):
+    """Story 35.3: the real `run_blender` and `kill_tree` (`taskkill /T /F`) on nt, against a hung fake `blender`
+    (a `.cmd` wrapper that starts python: the wrapper and its child are one tree, as Blender's launcher is)."""
+
+    def fake_exe(self, body: str) -> Path:
+        script = self.root / "bin" / "fake_blender.py"
+        script.write_text(f"import json, sys, time\n{body}", encoding="utf-8")
+        exe = self.root / "bin" / "fake-blender.cmd"
+        exe.write_text(f'@"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
+        return exe
+
+    def test_a_hung_blender_is_killed_at_the_wall_clock(self):
+        self.write_manifest(manifest_text(ENTRY_CRATE))
+        exe = self.fake_exe("print('hung', flush=True)\ntime.sleep(60)\n")
+        started = time.monotonic()
+        result, code = assets.greybox(directory=str(self.project), blender=str(exe), wall="2")
+        self.assertLess(time.monotonic() - started, 30)
+        self.assertEqual(code, 1, result)
+        self.assertEqual(result["entries"][0]["action"], "failed")
+        self.assertIn("wall clock", result["entries"][0]["reason"])
+        self.assertFalse((self.art() / "crate-small.glb").exists())
+
+
 # ------------------------------------------------------- the real geometry
 
 def _newell(pts):

@@ -15,8 +15,10 @@ never a `.cmd`) found only through the prepended folder, to green and to red.
     `apps/supervisor/package.json`) → find `bun` on PATH → run the suite
     from `apps/supervisor` under a fresh temp folder (`TMPDIR`/`TEMP`/`TMP`,
     removed afterwards: the Story 33.4 rule), `TK_SUPERVISOR_*` stripped,
-    bounded at `BOUND_S` (50 s, below the runner's 60 s drive timeout, so a
-    hung suite is killed and its temp folder removed here) → judge its exit
+    bounded at `BOUND_S` (50 s; with the install's `INSTALL_BOUND_S` beside it
+    the worst case sits below the manifest's `timeout: 120` for this drive,
+    asserted below, so a hung suite is killed and its temp folder removed
+    here) → judge its exit
 
 No checkout (an extracted plugin archive) or no `bun` on PATH: `ok: true`
 with a `not_run` step naming which (the `cli_drives` "not run" precedent).
@@ -38,14 +40,18 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 SUITE = "test/hostverify.test.ts"
 # Hole 76: only the story's own describe block (bun matches `-t` against the full test name).
 FILTER = "Story 34.1"
-# Below runner.py's 60 s drive timeout (DEFAULT_TIMEOUT), so this drive's own
-# timeout fires first: it kills `bun`, removes the temp folder in `finally`
-# (the Story 33.4 rule) and reports `ok: false`, never an orphaned suite.
+# With the install's bound beside it, below the manifest's `timeout: 120` for
+# this drive (runner.py honours a manifest `timeout` over its 60 s
+# DEFAULT_TIMEOUT), so this drive's own timeout fires first: it kills `bun`,
+# removes the temp folder in `finally` (the Story 33.4 rule) and reports
+# `ok: false`, never an orphaned suite.
 BOUND_S = 50
 # Hole 80: a fresh worktree has no apps/supervisor/node_modules; the suite cannot load without them, so the
 # drive installs from the lockfile first (warm cache on the box: about a second), under its own bound. The
 # manifest gives this drive `timeout: 120` so the install and the suite fit under the runner's bound.
 INSTALL_BOUND_S = 40
+MANIFEST_TIMEOUT_S = 120  # keep in step with manifest.json's entry for this drive (Story 35.3: a test pins it)
+assert BOUND_S + INSTALL_BOUND_S < MANIFEST_TIMEOUT_S, "the drive's bounds must sit under the manifest's timeout"
 TAIL = 20
 
 

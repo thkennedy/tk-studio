@@ -49,14 +49,22 @@
  *              stays in-progress — so a running/unknown status is read as ended once its recorded kill
  *              shows it gone.
  *   slice      Story 34.8: a `run-vertical-slice` run (`isSlice` of `queue.definition(run)`, decided once in the sweep and
- *              passed to `hostVerify` and the close-out). After a green assets step (a `match` fault counts green) the
+ *              passed to `hostVerify` and the close-out). Story 35.3 (`proofCommitDue`): on a ran leg whose own playable step
+ *              ran (not skipped, exited 0 or 1), whose playable store holds `report.json` and whose assets step is not red (green, a non-red `match` fault, or `skipped:
+ *              no manifest`; a red assets step commits nothing, so red art is never placed) the
  *              close-out copies the proof — the playable store's `report.json`, `contact-sheet.png` and the frames the
  *              sheet sampled — into `<served root>/.tk-studio/proof/<run_id>/`, then commits on the run branch, before
  *              the push, only `git add -- <assets.art_path> <assets.manifest> .tk-studio/proof/<run_id>/` (named
- *              paths, never `-A`; a clean index commits nothing) with the message `host leg: placed assets and proof
+ *              paths that exist, never `-A`; a clean index commits nothing; Story 35.3: `git check-ignore` first, an
+ *              ignored path skipped and listed as `skipped_ignored`, the art path staged with
+ *              `:(exclude)<art_path>/.candidates`, so the ladder's candidates never land; a named path with nothing in the index after the add left out of the diff and
+ *              the commit) with the message `host leg: placed assets and proof
  *              (run <run_id>)`. A failure there is the close-out's `error` (nothing pushed, the worktree kept). The
  *              PR body then embeds the sheet (`<origin web URL>/blob/<head sha>/<path>?raw=true`) and lists the
- *              committed frames, on pass and fail alike. A non-slice run's close-out is unchanged.
+ *              committed frames (Story 35.3: only those in the index), on pass and fail alike. A non-slice run's close-out is unchanged.
+ *              Story 35.3: a leg whose only non-green step is an `inconclusive` playable (the judge's infrastructure
+ *              failed) ends the run `partial` with `host verify inconclusive (playable): <reason>` (not red); its
+ *              `host_verify` reads `inconclusive` and it flips no PR (a new PR opened as a draft, an open one never marked ready).
  *   legs       Story 35.1: the `## Host verify` section's first line is `Legs: <k> — <leg> <verdict> <recorded_at>; …`
  *              (the run's `host-verify` events after its latest `launched`, oldest first; the close-out's first body
  *              `Legs: 1 — close-out …`). `proofCommit`, `originWebUrl`, `editPrBody`, `markPrReady` and `markPrDraft` are
@@ -74,7 +82,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { ghBin, pluginRoot, WorkDirMissing, workDir } from "./env";
 import { canonicalPr, isWithin } from "./hygiene";
-import { CONTACT_SHEET, hostVerify, isRed, isSlice, legHistory, prSection, redReason, type HostVerifyResult, type LegHistoryEntry, type PlayableJudge, type PlayableRoute, type PrProof } from "./hostverify";
+import { CONTACT_SHEET, hostVerify, inconclusiveReason, isInconclusive, isRed, isSlice, legHistory, legVerdict, prSection, redReason, type HostVerifyResult, type LegHistoryEntry, type PlayableJudge, type PlayableRoute, type PrProof } from "./hostverify";
 import { accountedCostOf, isTerminal, RunTerminal, servedRoot, type EngineWhere, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
 import { releasePin, sameStart, vmLaunchStatus, type SandboxDeps } from "./sandbox";
 import { lastJsonObject, runJobVerb, runProcess, runUv, toVmPath, type RunResult, type Tier } from "./server";
@@ -424,9 +432,32 @@ export interface CloseOut {
   /** Hole 34: after a "no changes" end the local run branch (at base_ref, never pushed) goes with the worktree. */
   branch?: "deleted" | string;
   /** Story 27.4: the host verify leg's outcome, when the close-out was given one. */
-  host_verify?: "green" | "red" | "skipped";
+  host_verify?: "green" | "red" | "skipped" | "inconclusive";
   /** Story 34.8: the host-side commit of a slice run (its sha, or "nothing to commit"). */
   host_commit?: string;
+}
+
+/** Story 35.3: the ladder's candidates folder under the art path (`assets.py CANDIDATES_DIR`), never committed. */
+export const CANDIDATES_DIR = ".candidates";
+
+/** Story 35.3: is a slice leg's proof commit due? A ran leg whose assets step is not red (green, a non-red `match` fault,
+ * or `skipped: no manifest`), whose own playable step ran (present, not `skipped`, `playable.py` exited 0 or 1 — never
+ * a refusal, a crash or a guard trip) and whose playable store holds `report.json` — or, the store itself gone (pruned:
+ * a retried close-out), whose proof folder in the run's served root already does; else why not. A red assets step never
+ * is, nor a leg whose playable never ran, nor one whose store exists without `report.json` (a crash that wrote none): a
+ * re-run cut at a tip already holding an earlier leg's proof never re-embeds it. */
+export function proofCommitDue(verify: HostVerifyResult, run?: Pick<QueueRun, "run_id" | "worktree" | "prefix">): { due: true } | { due: false; why: string } {
+  if (verify.skipped) return { due: false, why: "the leg was skipped" };
+  if (verify.assets?.verdict === "red") return { due: false, why: `assets red${verify.assets.reason ? ` (${clip(verify.assets.reason, 120)})` : ""}` };
+  const p = verify.playable;
+  if (!p || p.verdict === "skipped") return { due: false, why: `the playable step never ran${p?.reason ? ` (${clip(p.reason, 120)})` : ""}` };
+  if (p.exit !== 0 && p.exit !== 1) return { due: false, why: `the playable step never finished${p.reason ? ` (${clip(p.reason, 120)})` : ""}` };
+  const store = p.store;
+  if (store && existsSync(join(store, "report.json"))) return { due: true };
+  if (store && existsSync(store)) return { due: false, why: "no report.json in the playable store" };
+  const served = run ? servedRoot(run as QueueRun) : null;
+  if (run && served && existsSync(join(served, ...proofRel(run.run_id).split("/"), "report.json"))) return { due: true };
+  return { due: false, why: "no report.json in the playable store" };
 }
 
 /** Story 34.8: the proof folder of a run, served-root relative. */
@@ -439,8 +470,8 @@ export const hostCommitMessage = (runId: string) => `host leg: placed assets and
  * message on any failure. Story 35.1: exported, the re-run's slice commit (`hostleg.ts`) goes through it too. */
 export async function proofCommit(
   run: Pick<QueueRun, "run_id" | "worktree" | "prefix">, verify: HostVerifyResult, deps: WorktreeDeps,
-): Promise<{ sha: string; frames: string[]; sheet?: string; head?: string }> {
-  if (verify.skipped || !verify.assets) throw new Error("no assets step recorded");
+): Promise<{ sha: string; frames: string[]; sheet?: string; head?: string; skipped_ignored?: string[] }> {
+  if (verify.skipped) throw new Error("the leg was skipped");
   const served = servedRoot(run as QueueRun)!;
   const branch = runBranch(run.run_id);
   const at = await git(deps, served, ["rev-parse", "--abbrev-ref", "HEAD"], 30);
@@ -475,29 +506,63 @@ export async function proofCommit(
       for (const name of readdirSync(join(dir, "frames")).sort()) frames.push(`${rel}/frames/${name}`);
     }
   }
-  const paths = [verify.assets.art_path, verify.assets.manifest, rel]
+  const art = verify.assets?.art_path;
+  const named = [art, verify.assets?.manifest, rel]
     .filter((x): x is string => typeof x === "string" && x !== "" && existsSync(join(served, x)));
-  if (paths.length) {
-    const add = await git(deps, served, ["add", "--", ...paths]);
-    if (add.exit !== 0) throw new Error(`git add -- ${paths.join(" ")} ${failed(add)}`);
+  // Story 35.3: an ignored named path is skipped (git refuses to add it) and recorded; never forced in.
+  // `git check-ignore -q -- <path>`, one per named path (at most three), read by its exit code alone — 0 ignored, 1 not,
+  // anything else an error — so a path git would C-quote (special or non-ASCII characters) is never mis-matched
+  // (`-z` needs `--stdin`, and the runner passes none).
+  const skippedIgnored: string[] = [];
+  for (const x of named) {
+    const ci = await git(deps, served, ["check-ignore", "-q", "--", x], 60);
+    if (ci.exit !== 0 && ci.exit !== 1) throw new Error(`git check-ignore ${failed(ci)}`);
+    if (ci.exit === 0) skippedIgnored.push(x);
   }
+  const paths = named.filter((x) => !skippedIgnored.includes(x));
+  // Story 35.3: the art path staged without the ladder's `.candidates/` (the add, the diff and the commit alike).
+  const spec = (xs: string[]) => [...xs, ...(art && xs.includes(art) ? [`:(exclude)${art}/${CANDIDATES_DIR}`] : [])];
+  const pathspec = spec(paths);
+  if (paths.length) {
+    const add = await git(deps, served, ["add", "--", ...pathspec]);
+    if (add.exit !== 0) throw new Error(`git add -- ${pathspec.join(" ")} ${failed(add)}`);
+  }
+  // Story 35.3: after the add, a named path with nothing in the index (an art path holding only `.candidates/`, or only
+  // files an ignore pattern matches) is left out of the diff and the commit — git refuses a commit pathspec that matches
+  // no known file. `git ls-files -z -- <path>` (the art path with its `.candidates` exclude), NUL-split, never C-quoted.
+  const indexed = new Map<string, Set<string>>();
+  for (const x of paths) {
+    const ls = await git(deps, served, ["ls-files", "-z", "--", ...spec([x])], 60);
+    if (ls.exit !== 0) throw new Error(`git ls-files ${failed(ls)}`);
+    const entries = new Set(ls.stdout.split("\0").filter((e) => e !== ""));
+    if (entries.size) indexed.set(x, entries);
+  }
+  const staged = paths.filter((x) => indexed.has(x));
+  const commitSpec = spec(staged);
+  // Story 35.3: only a sheet and frames in the index are embedded — the proof folder itself ignored (or an ignore rule
+  // matching the files inside it) never lands, so its sheet and frames never link.
+  const proofIndexed = indexed.get(rel) ?? new Set<string>();
+  if (sheet && !proofIndexed.has(sheet)) sheet = undefined;
+  const kept = frames.filter((f) => proofIndexed.has(f));
+  frames.length = 0;
+  frames.push(...kept);
   // A clean index is `nothing to commit` by exit code (never git's localized wording).
   // Both scoped to the named paths: anything else already staged never lands in the host commit.
   let committed = false;
-  if (paths.length) {
-    const diff = await git(deps, served, ["diff", "--cached", "--quiet", "--", ...paths], 60);
+  if (staged.length) {
+    const diff = await git(deps, served, ["diff", "--cached", "--quiet", "--", ...commitSpec], 60);
     if (diff.exit !== 0 && diff.exit !== 1) throw new Error(`git diff --cached --quiet ${failed(diff)}`);
     committed = diff.exit === 1;
   }
   if (committed) {
-    const c = await git(deps, served, ["commit", "-m", hostCommitMessage(run.run_id), "--", ...paths]);
+    const c = await git(deps, served, ["commit", "-m", hostCommitMessage(run.run_id), "--", ...commitSpec]);
     if (c.exit !== 0) throw new Error(`git commit ${failed(c)}`);
   }
   // The head either way: a retried close-out (the proof already committed) still embeds the sheet at it.
   const head = await git(deps, served, ["rev-parse", "HEAD"], 30);
   const tip = head.exit === 0 ? head.stdout.trim() : undefined;
   const sha = committed ? tip ?? "committed" : "nothing to commit";
-  return { sha, frames, ...(sheet ? { sheet } : {}), ...(tip ? { head: tip } : {}) };
+  return { sha, frames, ...(sheet ? { sheet } : {}), ...(tip ? { head: tip } : {}), ...(skippedIgnored.length ? { skipped_ignored: skippedIgnored } : {}) };
 }
 
 /** `https://<host>/<owner>/<repo>` of origin (a GitHub remote), else undefined. */
@@ -558,7 +623,10 @@ export async function closeOut(
   const out: CloseOut = { commits: [], worktree: "kept" };
   // Story 27.4: a red host verify opens the PR as a draft carrying the failures (never marked ready).
   const red = isRed(input.verify);
-  if (input.verify) out.host_verify = input.verify.skipped ? "skipped" : input.verify.green ? "green" : "red";
+  // Story 35.3: an inconclusive leg (the judge's infrastructure failed) is neither: only green marks a PR ready, so it
+  // opens a new PR as a draft and never marks an open one ready (the body still regenerated).
+  const inconclusive = isInconclusive(input.verify);
+  if (input.verify) out.host_verify = legVerdict(input.verify);
   // Hole 34: a "no changes" end leaves the run branch at base_ref and never pushed; it is deleted with
   // the worktree (a branch that carried commits is on origin by then and stays, as the resume paths and
   // a lost-record close-out read it by name).
@@ -595,10 +663,11 @@ export async function closeOut(
       if (r.exit !== 0) { branchGone = true; out.no_changes = true; return finish(); }
     } catch { /* probed again by the git log below */ }
   }
-  // Story 34.8: a slice run's host-side commit (after a green assets step), before the commits are read and pushed.
+  // Story 34.8: a slice run's host-side commit, before the commits are read and pushed. Story 35.3: whenever the proof
+  // exists (`report.json` in the store) and the assets step is not red (`proofCommitDue`).
   let proof: PrProof | undefined;
   const v = input.verify;
-  if (input.slice && !gone && !input.paused && v && !v.skipped && v.assets?.verdict === "green") {
+  if (input.slice && !gone && !input.paused && v && !v.skipped && proofCommitDue(v, run).due) {
     try {
       const done = await proofCommit(run, v, deps);
       out.host_commit = done.sha;
@@ -648,6 +717,11 @@ export async function closeOut(
         else out.draft = true;
         await editBody(existingPr, errors);
         if (errors.length) out.error = errors.join("; ");
+      } else if (inconclusive && !input.paused) {
+        // Story 35.3: an inconclusive verify on a PR already open: never marked ready (nor undone), its body regenerated.
+        const errors: string[] = [];
+        await editBody(existingPr, errors);
+        if (errors.length) out.error = errors.join("; ");
       } else if (!input.paused) {
         if (!input.verify) {
           const r = await markPrReady(deps, at, existingPr);
@@ -664,7 +738,7 @@ export async function closeOut(
         }
       } else out.draft = true;
     } else {
-      const draft = input.paused || red;
+      const draft = input.paused || red || inconclusive;
       const r = await withBodyFile(body(), (bodyFile) => gh(deps, at, [
         "pr", "create", "--base", baseBranch(base), "--head", branch, "--title", `supervisor: ${run.job_id} (${run.run_id})`, "--body-file", bodyFile,
         ...(draft ? ["--draft"] : []),
@@ -967,6 +1041,8 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         let reason: string | null = engineEnd !== undefined ? (state === "complete" ? null : `${resumed ? "resumed" : "relaunched"} engine ended '${engineEnd}'`) : end.reason ?? null;
         // A red host verify ends the run `partial` naming the command, whatever end was computed (`ended` and `finish`).
         if (isRed(verify)) { state = "partial"; reason = redReason(verify); }
+        // Story 35.3: the judge's infrastructure failed (`inconclusive`): `partial`, never a rubric fail.
+        else if (isInconclusive(verify)) { state = "partial"; reason = inconclusiveReason(verify); }
         // Story 34.3: the playable-verify judge's cost, its own ledger line (and counted in the total).
         const judgeCost = verify && !verify.skipped ? verify.playable?.judge?.cost_usd : undefined;
         const finish = await finishStudio(run, state, reason, launched.status_block, c.pr, input.costUsd, deps,

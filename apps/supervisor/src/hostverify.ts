@@ -39,10 +39,11 @@
  *            judge can read. On exit 0 with `verdict: pass` the judge runs: `tk-studio-playable-judge` through
  *            `invokeSkill` on the sbx tier (`deps.judge`), its model and effort from the route's `playable-verify`
  *            leg (default `claude-sonnet-5`, `medium`), reading only `report.json` and the frames; its verdict is
- *            read back from `<media>/judge.json`. Recorded as `playable: {verdict: pass | fail | skipped, reason?,
+ *            read back from `<media>/judge.json`. Recorded as `playable: {verdict: pass | fail | skipped | inconclusive, reason?,
  *            exit?, status?, failed?, duration_ms?, store?, media?, judge?, findings?, frames?}`. Skip reasons: `no
  *            playable`, `playable is malformed: <field>`, `engine gate not green`. On a configured project every
- *            other non-pass is `fail` (a harness fail, a refusal, a judge that ended blocked or failed). The leg's
+ *            other non-pass is `fail` (a harness fail, a refusal, a judge that ended blocked or failed), except a judge that
+ *            cannot run or answer (infrastructure), which is `inconclusive` (Story 35.3, `judge` below). The leg's
  *            `green` is also playable not fail; its reason reads `host verify red (playable): …`.
  *   slice    Story 34.8: a `run-vertical-slice` run (its resolved definition's `type` or `id`, `isSlice`, decided once
  *            by the caller and passed as `opts.slice`). Only on a slice run: the assets step, after a green host
@@ -53,13 +54,32 @@
  *            `--mirror` (the env or default resolves it; no mirror ends `complete`, its entries `skipped`) and never
  *            `generate`. `check`/`greybox` not exit 0 is red, `match` exit 1 is `fault` (recorded, not red, the
  *            placeholder kept), any other `match` non-zero is red; a red step ends the step (the later verbs not
- *            run). Recorded as `assets: {verdict: green | red | skipped, reason?, manifest?, art_path?, steps:
- *            [{verb, exit, status, duration_ms, stdout_tail?, stderr_tail?}]}` (`status` the verb's status block
- *            status, `fault`, or `error` with no block). A red assets step skips the engine gate (`assets red`)
+ *            run). Story 35.3: a `match` that crashed (a non-zero exit with no status block), left entries
+ *            `not-run` (`counts["not-run"] > 0`) or failed its write-back (`writeback` non-null) is `fault` and red,
+ *            its reason naming which from the block's `reason`; only a `match` exit 1 whose block shows ordinary
+ *            rung outcomes (failed or candidate rows) stays the non-red `fault`. `greybox` and `match` get
+ *            `--wall <tool wall>` (`check` takes none). Recorded as `assets: {verdict: green | red | skipped,
+ *            reason?, manifest?, art_path?, steps: [{verb, exit, status, duration_ms, reason?, writeback?, not_run?,
+ *            stdout_tail?, stderr_tail?}]}` (`status` the verb's status block status, `fault`, or `error` with no
+ *            block). A red assets step skips the engine gate (`assets red`)
  *            and makes the leg red (`host verify red (assets): …`). Then, after `playable.py run` wrote frames,
- *            `playable.py sheet --frames <store>/frames --out <store>/contact-sheet.png` (copied with the media;
- *            recorded as the playable step's `contact_sheet` — the leg's own copy under `<store>/sheets/` — and
- *            `sampled`). A non-slice run's leg is unchanged.
+ *            `playable.py sheet --report <store>/report.json --out <store>/contact-sheet.png` (Story 35.3: sampled
+ *            only from the report's `frames[]`, the judge's citable set; copied with the media; recorded as the
+ *            playable step's `contact_sheet` — the leg's own copy under `<store>/sheets/` — and `sampled`). A
+ *            non-slice run's leg is unchanged.
+ *   walls    Story 35.3: a tool with its own wall clock gets `toolWall = min(max(1, guard), 86400)` (`assets.py
+ *            --wall`, `playable.py --wall-clock`) and its step runs under `toolWall + TOOL_WALL_MARGIN_S`, so the
+ *            tool's own kill writes its report first and the leg reads `wall-clock` from it (assets the block's
+ *            `reason`, playable `report.json failed.invariant`); a guard trip still reads `timed out (guard…)`. The
+ *            host, engine, `assets.py check`, sheet and judge steps keep the guard.
+ *   judge    Story 35.3: the rubric ids are the core's (`playable_judge.py rubric`, run once per judge step under
+ *            the guard); a finding naming another id is refused. A judge that cannot run or answer — no sandbox, a
+ *            thrown invoke, the sandbox pin failed, the auth preflight blocked (`ran: false`), no status block
+ *            (`conformance_failure`), or an unreadable rubric — is `playable.verdict: inconclusive` with `reason:
+ *            infrastructure: <pin|sbx|status-block|auth|rubric>: <detail>`, never a rubric `fail`: the leg is not
+ *            green and not red (`isInconclusive`), the run ends `partial` (`host verify inconclusive (playable):
+ *            <reason>`), no finding recorded, the PR line `Playable: inconclusive — <reason>`. The judge's own
+ *            `blocked` (a game cause) stays `fail`.
  */
 import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -117,6 +137,8 @@ export type HostVerifyRan = {
 /** Story 34.8: one asset-ladder verb's run on a slice run's leg. */
 export type AssetsStepRun = {
   verb: "check" | "greybox" | "match"; exit: number | null; status: string; duration_ms: number;
+  /** Story 35.3 (`match` only): the block's `reason`, its `writeback` failure and its `counts["not-run"]`, when set. */
+  reason?: string; writeback?: string; not_run?: number;
   stdout_tail?: string[]; stderr_tail?: string[];
 };
 /** Story 34.8: the assets step. `manifest` and `art_path` are the base config's (what the close-out commits). */
@@ -132,7 +154,8 @@ export type PlayableJudgeOutcome = { status: string; verdict?: "pass" | "fail"; 
  * `exit`, `status`, `failed`, `duration_ms` are `playable.py`'s; `store` its `--out`; `media` the worktree copy the
  * judge reads; `frames` the store paths of every frame. */
 export type PlayableStep = {
-  verdict: "pass" | "fail" | "skipped"; reason?: string; exit?: number | null; status?: string; failed?: unknown;
+  /** Story 35.3: `inconclusive` is the supervisor's verdict (the judge could not run or answer), never the judge's. */
+  verdict: "pass" | "fail" | "skipped" | "inconclusive"; reason?: string; exit?: number | null; status?: string; failed?: unknown;
   duration_ms?: number; store?: string; media?: string; judge?: PlayableJudgeOutcome; findings?: PlayableFinding[]; frames?: string[];
   /** Story 34.8 (slice runs only): the contact sheet's store path and the frame names it sampled. */
   contact_sheet?: string; sampled?: string[];
@@ -287,6 +310,11 @@ export function tail(text: string, n = TAIL_LINES): string[] {
   return t ? t.split(/\r?\n/).slice(-n).map((l) => clip(l)) : [];
 }
 
+/** Story 35.3: the guard's margin over a tool's own wall clock (above `KILL_TREE_TIMEOUT_S` plus the report's write). */
+export const TOOL_WALL_MARGIN_S = 30;
+/** Story 35.3: a tool's own wall clock under the leg's guard. */
+export const toolWall = (guardS: number) => Math.min(Math.max(1, guardS), 86400);
+
 /** `guard: max_wall_clock_seconds (<n>s)` — as a host-tier worker's trip is named (cli.ts `guardReason`). */
 export const wallClockTrip = (guardS: number) => `guard: max_wall_clock_seconds (${guardS}s)`;
 
@@ -427,7 +455,7 @@ export async function hostVerify(run: Run, guardS: number, deps: Deps = {}, opts
   return {
     command: cmd.command, argv: cmd.argv, cwd, exit: host.exit, duration_ms: host.duration_ms, started_at: startedAt, ...(gitBash ? { git_bash: gitBash } : {}), ...(resolved ? { resolved } : {}),
     ...(host.signal ? { signal: host.signal } : {}), ...(host.guard ? { guard: host.guard } : {}), ...(host.error ? { error: host.error } : {}),
-    green: stepGreen(host) && assets?.verdict !== "red" && engine.verdict !== "red" && playable.verdict !== "fail",
+    green: stepGreen(host) && assets?.verdict !== "red" && engine.verdict !== "red" && playable.verdict !== "fail" && playable.verdict !== "inconclusive",
     stdout_tail: host.stdout_tail, stderr_tail: host.stderr_tail, engine, playable, ...(assets ? { assets } : {}),
   };
 }
@@ -445,17 +473,38 @@ async function assetsStep(
   try { script = join(pluginRoot(deps.env ?? process.env), "lib", "assets.py"); }
   catch (e) { return { verdict: "red", reason: `assets.py not found: ${clip(message(e))}`, ...where, steps: [] }; }
   const steps: AssetsStepRun[] = [];
+  // Story 35.3: `greybox`/`match` under their own wall plus the margin; `check` (no `--wall`, no clock of its own)
+  // under the guard.
+  const wall = toolWall(guardS);
   for (const verb of ASSET_VERBS) {
-    const argv = ["uv", "run", script, verb, "--directory", cwd, "--manifest", layout.manifest, "--art-path", layout.art_path];
+    const argv = ["uv", "run", script, verb, "--directory", cwd, "--manifest", layout.manifest, "--art-path", layout.art_path,
+      ...(verb === "check" ? [] : ["--wall", String(wall)])];
     const sink: { stdout?: string } = {};
-    const o = await runStep(argv, cwd, { ...env, PYTHONIOENCODING: "utf-8" }, guardS, deps, sink);
+    const o = await runStep(argv, cwd, { ...env, PYTHONIOENCODING: "utf-8" }, verb === "check" ? guardS : wall + TOOL_WALL_MARGIN_S, deps, sink);
     const block = lastJsonObject(sink.stdout ?? "") as Record<string, unknown> | null;
-    const fault = verb === "match" && o.exit === 1 && !o.guard && !o.error;
+    // Story 35.3: a `match` that ran to a non-zero exit (no guard trip, no spawn error).
+    const ranMatch = verb === "match" && !o.guard && !o.error && o.exit !== 0;
+    const crashed = ranMatch && !block;
+    const counts = block?.counts && typeof block.counts === "object" ? block.counts as Record<string, unknown> : undefined;
+    const notRun = typeof counts?.["not-run"] === "number" && counts["not-run"] > 0 ? counts["not-run"] : 0;
+    const writeback = typeof block?.writeback === "string" && block.writeback ? block.writeback : undefined;
+    const blockReason = typeof block?.reason === "string" && block.reason ? clip(block.reason) : undefined;
+    const fault = crashed || (ranMatch && o.exit === 1);
+    const faultRed = crashed || (fault && (notRun > 0 || writeback !== undefined));
     const status = fault ? "fault" : typeof block?.status === "string" ? block.status : "error";
     steps.push({
       verb, exit: o.exit, status, duration_ms: o.duration_ms,
+      ...(verb === "match" && blockReason ? { reason: blockReason } : {}),
+      ...(verb === "match" && writeback ? { writeback: clip(writeback) } : {}), ...(verb === "match" && notRun ? { not_run: notRun } : {}),
       ...(o.stdout_tail.length ? { stdout_tail: o.stdout_tail } : {}), ...(o.stderr_tail.length ? { stderr_tail: o.stderr_tail } : {}),
     });
+    if (faultRed) {
+      const last = clip(o.stderr_tail.at(-1) ?? o.stdout_tail.at(-1) ?? "(no output)"); // a traceback's last line
+      const which = crashed ? `crashed (exited ${o.exit}, no status block): ${last}`
+        : writeback !== undefined ? `fault: write-back failed: ${clip(writeback)}${blockReason ? `; ${blockReason}` : ""}`
+        : `fault: ${notRun} not-run${blockReason ? `: ${blockReason}` : ""}`;
+      return { verdict: "red", reason: `assets.py match ${which}`, ...where, steps };
+    }
     if (stepGreen(o) || fault) continue;
     const how = o.guard ? `timed out (${o.guard})` : o.error ? `failed to start: ${o.error}` : `exited ${o.exit}`;
     const why = typeof block?.reason === "string" && block.reason ? `: ${clip(block.reason)}` : "";
@@ -478,8 +527,36 @@ export const CONTACT_SHEET = "contact-sheet.png";
 const SHEETS_DIR = "sheets";
 let sheetSeq = 0;
 
-/** The judge's fixed rubric ids: a `judge.json` finding naming any other is refused. */
-export const PLAYABLE_RUBRIC = ["scene-loaded", "player-visible", "no-magenta-or-error-overlay", "hud-reads", "moments-shown"] as const;
+/** Story 35.3: the judge's core, whose `rubric` verb answers the fixed rubric ids (a `judge.json` finding naming any
+ * other is refused); the supervisor keeps no copy of them. */
+const PLAYABLE_JUDGE_CORE = "playable_judge.py";
+/** Story 35.3: an infrastructure cause of an `inconclusive` playable step. */
+export type InfraCause = "pin" | "sbx" | "status-block" | "auth" | "rubric";
+const inconclusive = (cause: InfraCause, detail: string) => `infrastructure: ${cause}: ${clip(detail)}`;
+
+/** Story 35.3: the rubric ids from the core (`uv run <plugin>/lib/playable_judge.py rubric`, a `complete` status block
+ * with `ids: [...]`), under the guard; or why they could not be read. Never throws. */
+async function rubricIds(
+  legEnv: Record<string, string | undefined>, cwd: string, env: Record<string, string | undefined>, guardS: number, deps: Deps,
+): Promise<{ ids: string[] } | { error: string }> {
+  let script: string;
+  try { script = join(pluginRoot(legEnv), "lib", PLAYABLE_JUDGE_CORE); }
+  catch (e) { return { error: `${PLAYABLE_JUDGE_CORE} not found: ${message(e)}` }; }
+  const sink: { stdout?: string } = {};
+  const o = await runStep(["uv", "run", script, "rubric"], cwd, { ...env, PYTHONIOENCODING: "utf-8" }, guardS, deps, sink);
+  if (o.guard) return { error: `${PLAYABLE_JUDGE_CORE} rubric timed out (${o.guard})` };
+  if (o.error) return { error: `${PLAYABLE_JUDGE_CORE} rubric failed to start: ${o.error}` };
+  const block = lastJsonObject(sink.stdout ?? "") as Record<string, unknown> | null;
+  if (!block) return { error: `${PLAYABLE_JUDGE_CORE} rubric exited ${o.exit} with no status block` };
+  if (o.exit !== 0 || block.status !== "complete") {
+    return { error: `${PLAYABLE_JUDGE_CORE} rubric exited ${o.exit}, status ${JSON.stringify(block.status ?? null)}` };
+  }
+  const ids = block.ids;
+  if (!Array.isArray(ids) || !ids.length || !ids.every((i) => typeof i === "string" && i)) {
+    return { error: `${PLAYABLE_JUDGE_CORE} rubric answered no list of ids` };
+  }
+  return { ids: ids as string[] };
+}
 
 /** The default judge: `invokeSkill` with the sandbox pinned first (`sbx run -d --name <sb>`), so a re-run on an
  * ended run (its sandbox stopped) never `sbx exec`s into a stopped sandbox; a pin failure is a `blocked` block. */
@@ -548,13 +625,18 @@ async function playableStep(
     : join(studioHome(legEnv), "runs", engineId, "playable");
   const mediaRel = `.bmad-loop/runs/${engineId}/playable`;
   const media = join(cwd, ".bmad-loop", "runs", engineId, "playable");
-  const wallClock = Math.min(Math.max(1, guardS), 86400);
+  const wallClock = toolWall(guardS);
   const argv = ["uv", "run", script, "run", "--directory", cwd, "--scenario", join(cwd, cfg.scenario),
     "--seed", String(cfg.seed), "--ticks", String(cfg.ticks), "--out", store, "--wall-clock", String(wallClock)];
   try { mkdirSync(store, { recursive: true }); }
   catch (e) { return { verdict: "fail", reason: `playable store: ${clip(message(e))}`, store }; }
+  // Story 35.3: the store is reused by every leg of a run, and `playable.py` removes a stale `report.json` only after it
+  // resolves its arguments: removed here first, so any `report.json` present afterwards is this leg's own.
+  try { rmSync(join(store, "report.json"), { force: true }); }
+  catch (e) { return { verdict: "fail", reason: `playable store: ${clip(message(e))}`, store }; }
   const sink: { stdout?: string } = {};
-  const step = await runStep(argv, cwd, { ...env, PYTHONIOENCODING: "utf-8" }, guardS, deps, sink);
+  // Story 35.3: the guard is the tool's own wall plus the margin, so `playable.py`'s kill writes `report.json` first.
+  const step = await runStep(argv, cwd, { ...env, PYTHONIOENCODING: "utf-8" }, wallClock + TOOL_WALL_MARGIN_S, deps, sink);
   const block = lastJsonObject(sink.stdout ?? "") as Record<string, unknown> | null;
   const base: PlayableStep = {
     verdict: "fail", exit: step.exit, duration_ms: step.duration_ms, store,
@@ -581,7 +663,8 @@ async function playableStep(
     const sheetPath = join(store, CONTACT_SHEET);
     try { rmSync(sheetPath, { force: true }); } catch { /* an earlier sheet: overwritten or left out below */ }
     const sheetSink: { stdout?: string } = {};
-    const sheet = await runStep(["uv", "run", script, "sheet", "--frames", join(store, "frames"), "--out", sheetPath],
+    // Story 35.3: sampled from the report's `frames[]` (the judge's citable set), never every movie frame.
+    const sheet = await runStep(["uv", "run", script, "sheet", "--report", join(store, "report.json"), "--out", sheetPath],
       cwd, { ...env, PYTHONIOENCODING: "utf-8" }, guardS, deps, sheetSink);
     const made = lastJsonObject(sheetSink.stdout ?? "") as Record<string, unknown> | null;
     if (sheet.exit === 0 && existsSync(sheetPath)) {
@@ -621,16 +704,27 @@ async function playableStep(
   const { model, effort } = await judgeRoute(run, deps);
   const judgeBase: PlayableJudgeOutcome = { status: "blocked", model, effort };
   const sandbox = typeof run.sandbox === "string" ? run.sandbox.trim() : "";
-  if (!sandbox) return { ...withMedia, judge: judgeBase, reason: "judge: no sandbox recorded for the run" };
+  // Story 35.3: a judge that cannot run or answer is `inconclusive` (an infrastructure reason), never a rubric fail.
+  const infra = (judge: PlayableJudgeOutcome, cause: InfraCause, detail: string): PlayableStep =>
+    ({ ...withMedia, verdict: "inconclusive", judge, reason: inconclusive(cause, detail) });
+  if (!sandbox) return infra(judgeBase, "sbx", "no sandbox recorded for the run");
+  const rubric = await rubricIds(legEnv, cwd, env, guardS, deps);
+  if ("error" in rubric) return infra(judgeBase, "rubric", rubric.error);
   let res: Record<string, unknown>;
   try {
     res = await (deps.judge ?? defaultJudge(deps))(cwd, { tier: "sbx", sandbox, model, effort, timeout_s: guardS, payload: { media: mediaRel } });
-  } catch (e) { return { ...withMedia, judge: judgeBase, reason: `judge: ${clip(message(e))}` }; }
+  } catch (e) { return infra(judgeBase, "sbx", message(e)); }
   const cost = typeof res?.total_cost_usd === "number" && Number.isFinite(res.total_cost_usd) && res.total_cost_usd >= 0 ? res.total_cost_usd : undefined;
   const sb = res?.status_block as Record<string, unknown> | undefined;
   const status = typeof sb?.status === "string" ? sb.status : "failed";
   const judge: PlayableJudgeOutcome = { status, ...(cost !== undefined ? { cost_usd: cost } : {}), model, effort };
-  if (!sb) return { ...withMedia, judge, reason: `judge: ${clip(String(res?.conformance_failure ?? "no status block"))}` };
+  // `invokeSkill`'s structured discriminators: `pin` (the sandbox pin failed) and `preflight` (the auth preflight), both
+  // `ran: false`; no status block (`conformance_failure`). Never a reason-string match.
+  if (res?.ran === false) {
+    const why = String(res.pin ?? sb?.reason ?? "the judge never ran");
+    return infra(judge, typeof res.pin === "string" ? "pin" : Array.isArray(res.preflight) ? "auth" : "sbx", why);
+  }
+  if (!sb) return infra(judge, "status-block", String(res?.conformance_failure ?? "no status block"));
   if (status !== "complete") return { ...withMedia, judge, reason: `judge: ${status}: ${clip(String(sb.reason ?? "no reason"))}` };
   // The host re-validates `judge.json` (never trusts the session's own check): a `pass|fail` verdict, every finding
   // on a fixed rubric id and a frame of `report.json`'s `frames[]`, a `fail` with at least one finding.
@@ -644,7 +738,7 @@ async function playableStep(
   for (const [i, f] of (rawFindings as unknown[]).entries()) {
     const x = f && typeof f === "object" && !Array.isArray(f) ? f as Record<string, unknown> : undefined;
     if (!x) return { ...withMedia, judge, reason: `judge: finding ${i} is not an object` };
-    if (typeof x.rubric !== "string" || !(PLAYABLE_RUBRIC as readonly string[]).includes(x.rubric)) {
+    if (typeof x.rubric !== "string" || !rubric.ids.includes(x.rubric)) {
       return { ...withMedia, judge, reason: `judge: finding ${i} names an unknown rubric ${clip(JSON.stringify(x.rubric ?? null), 80)}` };
     }
     if (typeof x.frame !== "string" || !frameList.includes(x.frame)) {
@@ -657,8 +751,15 @@ async function playableStep(
   return { ...withMedia, judge, findings };
 }
 
-/** Is this result a red verify (it ran and was not green)? */
-export const isRed = (v: HostVerifyResult | undefined): v is HostVerifyRan => !!v && !v.skipped && !v.green;
+/** Story 35.3: did the judge's infrastructure fail (`playable.verdict: inconclusive`)? Such a leg is neither green nor red. */
+export const isInconclusive = (v: HostVerifyResult | undefined): v is HostVerifyRan =>
+  !!v && !v.skipped && !v.green && v.playable?.verdict === "inconclusive";
+
+/** Is this result a red verify (it ran and was not green)? Story 35.3: an `inconclusive` playable step alone is not red. */
+export const isRed = (v: HostVerifyResult | undefined): v is HostVerifyRan => !!v && !v.skipped && !v.green && !isInconclusive(v);
+
+/** Story 35.3: an inconclusive run's reason: `host verify inconclusive (playable): <reason>`. */
+export const inconclusiveReason = (v: HostVerifyRan): string => `host verify inconclusive (playable): ${v.playable?.reason ?? "infrastructure"}`;
 
 /** The red run's reason (`<how>`: exited <n>, timed out (<guard>), failed to start: <error>, or killed by <signal>):
  * ``host verify red: `<command>` <how>; last lines: <the last 5 stderr lines, else
@@ -684,7 +785,8 @@ export function redReason(v: HostVerifyRan): string {
 /** The PR body's `## Host verify` section: green (command, duration), skipped (reason), red (command, exit or
  * guard, duration, the tails fenced). Story 34.1: then one `Engine gate: green | red | skipped (<reason>)` line
  * (a ran leg recorded before 34.1 has none); on red the engine command, exit or guard, duration and its tails
- * fenced the same way. Story 34.3: then one `Playable: pass | fail | skipped (<reason>)` line (none on a leg
+ * fenced the same way. Story 34.3: then one `Playable: pass | fail | skipped (<reason>)` line (Story 35.3: or
+ * `Playable: inconclusive — <reason>`) (none on a leg
  * recorded before 34.3, nor for a project without `playable`: its section unchanged); on fail the reason, the
  * findings and every frame's store path. */
 /** Story 34.8: the proof the close-out committed on a slice run: the contact sheet's web URL at the head commit
@@ -692,10 +794,12 @@ export function redReason(v: HostVerifyRan): string {
 export type PrProof = { sheetUrl?: string; frames: string[] };
 
 /** Story 35.1: one host leg of a run in the PR body's `Legs:` line — the close-out's leg, or a re-run (`by`). */
-export type LegHistoryEntry = { leg: "close-out" | "re-run"; verdict: "green" | "red" | "skipped"; recorded_at: string; by?: "api" | "cli" };
+export type LegHistoryEntry = { leg: "close-out" | "re-run"; verdict: "green" | "red" | "skipped" | "inconclusive"; recorded_at: string; by?: "api" | "cli" };
 
-/** Story 35.1: a leg's verdict word. */
-export const legVerdict = (v: HostVerifyResult): LegHistoryEntry["verdict"] => (v.skipped ? "skipped" : v.green ? "green" : "red");
+/** Story 35.1: a leg's verdict word. Story 35.3: a leg neither green nor red whose playable step is `inconclusive`
+ * reads `inconclusive`. */
+export const legVerdict = (v: HostVerifyResult): LegHistoryEntry["verdict"] =>
+  (v.skipped ? "skipped" : v.green ? "green" : isInconclusive(v) ? "inconclusive" : "red");
 
 /** Story 35.1: the run's legs, oldest first: its `host-verify` events after its latest `launched` (the `recordedVerify`
  * rule; a `rerun` member makes a re-run, its `by` kept), plus `current`, the one being written (not yet an event). */
@@ -705,7 +809,7 @@ export function legHistory(events: readonly QueueEvent[], current?: LegHistoryEn
   for (const e of events.slice(from + 1)) {
     if (e.kind !== "host-verify" || !e.detail || typeof e.detail !== "object") continue;
     const d = e.detail as Record<string, any>;
-    const verdict = d.skipped === true ? "skipped" : d.green === true ? "green" : "red";
+    const verdict = d.skipped === true ? "skipped" : d.green === true ? "green" : d.playable?.verdict === "inconclusive" ? "inconclusive" : "red";
     const rerun = d.rerun && typeof d.rerun === "object" ? d.rerun as Record<string, unknown> : undefined;
     const by = rerun?.by === "api" || rerun?.by === "cli" ? rerun.by : undefined;
     legs.push(rerun ? { leg: "re-run", verdict, recorded_at: e.at, ...(by ? { by } : {}) } : { leg: "close-out", verdict, recorded_at: e.at });
@@ -743,6 +847,8 @@ export function prSection(v: HostVerifyResult, proof?: PrProof, legs?: readonly 
   if (p?.verdict === "skipped" && p.reason === NO_PLAYABLE) playableLines = [];
   else if (p?.verdict === "skipped") playableLines = ["", `Playable: skipped (${p.reason})`];
   else if (p?.verdict === "pass") playableLines = ["", `Playable: pass${p.judge?.model ? ` (judge ${p.judge.model})` : ""}`];
+  // Story 35.3: the judge's infrastructure failed: no rubric verdict, no findings.
+  else if (p?.verdict === "inconclusive") playableLines = ["", `Playable: inconclusive — ${p.reason ?? "infrastructure"}`];
   else if (p) {
     playableLines = ["", "Playable: fail", ...(p.reason ? ["", `Reason: ${p.reason}`] : [])];
     if (p.findings?.length) playableLines.push("", "Findings:", "", ...p.findings.map((f) =>

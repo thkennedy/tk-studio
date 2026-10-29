@@ -11,7 +11,7 @@ import { rerunHostLeg, VerifyRefused, type HostLegResult, type HostLegStarted } 
 import { Queue, type Owner } from "../src/queue";
 import { runProcess, type RunResult } from "../src/server";
 import { runBranch, type WorktreeDeps } from "../src/worktree";
-import { gitRepo, testGit } from "./fakes";
+import { gitRepo, RUNTIME_GITIGNORE, testGit } from "./fakes";
 import { tempDir } from "./tmp";
 
 const me: Owner = { pid: process.pid, host: hostname(), nonce: "hostleg-test" };
@@ -486,9 +486,12 @@ describe("Story 35.1: a slice re-run commits and pushes its placed art and proof
 
   /** The re-run fixture as a slice run: the manifest on main, `assets.py` faked green (greybox places `art/greybox/crate.glb`),
    * `playable.py run` writing the report and frames into the store (`pass` exit 0, else a harness fail exit 1), `sheet`
-   * the sheet; the judge passes; origin's URL read as a GitHub one so the body embeds the sheet. */
-  async function sliceFixture(o: { hostCode?: number; playable?: "pass" | "fail" } = {}) {
-    const fx = await fixture({ config: sliceConfig(o.hostCode ?? 0), files: { "assets/manifest.yaml": "schema: 1\n" }, definition: SLICE, engine: true });
+   * the sheet; the judge passes; origin's URL read as a GitHub one so the body embeds the sheet. Story 35.3: the core's
+   * `playable_judge.py rubric` answers the five ids; `manifest: false` leaves the manifest off main (`skipped: no
+   * manifest`); `assets` a verb's exit (a red one ends the assets step); `ignore` lines added to main's `.gitignore`. */
+  async function sliceFixture(o: { hostCode?: number; playable?: "pass" | "fail"; manifest?: boolean; assets?: Record<string, number>; ignore?: string } = {}) {
+    const files = { ...(o.manifest === false ? {} : { "assets/manifest.yaml": "schema: 1\n" }), ...(o.ignore ? { ".gitignore": RUNTIME_GITIGNORE + o.ignore } : {}) };
+    const fx = await fixture({ config: sliceConfig(o.hostCode ?? 0), files, definition: SLICE, engine: true });
     const home = tempDir("tk-sup-hostleg-home-");
     fx.deps.env = { ...fx.deps.env, TK_STUDIO_HOME: home };
     const inner = fx.deps.run!;
@@ -505,6 +508,10 @@ describe("Story 35.1: a slice re-run commits and pushes its placed art and proof
           writeFileSync(spec.status, JSON.stringify({ exit, signal: null }));
           return { exit: 0, stdout: "", stderr: "" };
         };
+        if (script.endsWith("playable_judge.py") && argv[3] === "rubric") {
+          const ids = ["scene-loaded", "player-visible", "no-magenta-or-error-overlay", "hud-reads", "moments-shown"];
+          return status(0, { ok: true, ids, rubric: ids.map((id) => ({ id, line: id })), status: "complete", intent: "tk-studio-playable-judge", artifacts: [], reason: null });
+        }
         if (script.endsWith("assets.py")) {
           verbs.push(`assets ${argv[3]}`);
           if (argv[3] === "greybox") {
@@ -512,7 +519,8 @@ describe("Story 35.1: a slice re-run commits and pushes its placed art and proof
             mkdirSync(join(dir, "art", "greybox"), { recursive: true });
             writeFileSync(join(dir, "art", "greybox", "crate.glb"), "glb");
           }
-          return status(0, { ok: true, status: "complete", intent: "assets", artifacts: [] });
+          const exit = o.assets?.[argv[3]!] ?? 0;
+          return status(exit, { ok: exit === 0, status: exit === 0 ? "complete" : "partial", intent: "assets", artifacts: [], reason: exit ? `${argv[3]} not ok` : null });
         }
         if (script.endsWith("playable.py") && argv[3] === "sheet") {
           verbs.push("playable sheet");
@@ -586,11 +594,83 @@ describe("Story 35.1: a slice re-run commits and pushes its placed art and proof
     const fx = await sliceFixture({ hostCode: 1 });
     const r = await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done;
     expect(r).toMatchObject({ green: false, assets: { verdict: "skipped", reason: "verify.host red" } });
-    expect(r.rerun.commit).toBe("skipped: assets skipped (verify.host red)");
+    expect(r.rerun.commit).toBe("skipped: the playable step never ran (engine gate not green)"); // Story 35.3: no proof, nothing to commit
     expect("pushed" in r.rerun).toBe(false);
     expect(testGit(fx.repo.origin, "rev-parse", fx.branch)).toBe(fx.tip);
     expect(fx.argvs.some((a) => a.bin === "git" && (a.args[0] === "commit" || a.args[0] === "push"))).toBe(false);
     expect(r.rerun.pr_body).toBe("edited");
+  }, 120_000);
+
+  test("Story 35.3: a host-red re-run on a tip already holding an earlier leg's committed proof: no commit, the old proof never embedded as this leg's", async () => {
+    const fx = await sliceFixture({ hostCode: 1 });
+    // an earlier leg's proof already committed and pushed on the run branch (origin's tip)
+    const side = join(tempDir("tk-sup-hostleg-side-"), "wt");
+    testGit(fx.repo.checkout, "worktree", "add", "-q", side, fx.branch);
+    mkdirSync(join(side, ...fx.proof.split("/"), "frames"), { recursive: true });
+    writeFileSync(join(side, ...fx.proof.split("/"), "report.json"), JSON.stringify(REPORT("pass")));
+    writeFileSync(join(side, ...fx.proof.split("/"), "contact-sheet.png"), "the old leg's sheet");
+    writeFileSync(join(side, ...fx.proof.split("/"), "frames", "tick-000000.png"), "png");
+    testGit(side, "add", "--", ".tk-studio");
+    testGit(side, "commit", "-q", "-m", "host leg: placed assets and proof (an earlier leg)");
+    testGit(side, "push", "-q", "origin", fx.branch);
+    const tip = testGit(side, "rev-parse", "HEAD");
+    testGit(fx.repo.checkout, "worktree", "remove", "--force", side);
+    const r = await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done;
+    expect(r).toMatchObject({ green: false, assets: { verdict: "skipped", reason: "verify.host red" }, playable: { verdict: "skipped" } });
+    expect(r.rerun.commit).toBe("skipped: the playable step never ran (engine gate not green)");
+    expect("pushed" in r.rerun).toBe(false);
+    expect(testGit(fx.repo.origin, "rev-parse", fx.branch)).toBe(tip);
+    expect(fx.argvs.some((a) => a.bin === "git" && (a.args[0] === "add" || a.args[0] === "commit" || a.args[0] === "push"))).toBe(false);
+    expect(r.rerun.pr_body).toBe("edited");
+    expect(fx.bodies[0]).not.toContain("contact sheet");
+    expect(fx.bodies[0]).not.toContain(`${fx.proof}/frames/`);
+  }, 120_000);
+
+  test("Story 35.3: an inconclusive re-run (the judge's infrastructure failed) flips no PR: never marked ready, nor undone; its reason recorded, the `Legs:` entry `inconclusive`", async () => {
+    for (const isDraft of [true, false]) {
+      const fx = await sliceFixture();
+      fx.answers.view = { state: "OPEN", isDraft };
+      fx.deps.judge = async () => { throw new Error("sbx exec: the sandbox is gone"); };
+      const r = await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done;
+      expect(r).toMatchObject({ green: false, playable: { verdict: "inconclusive" } });
+      expect(r.reason).toStartWith("host verify inconclusive (playable): infrastructure: ");
+      expect(fx.hostVerifies().at(-1)!.detail).toMatchObject({ reason: r.reason });
+      expect(r.rerun.pr_body).toBe("edited");
+      expect("pr_ready" in r.rerun).toBe(false);
+      expect("pr_draft" in r.rerun).toBe(false);
+      expect(fx.gh.some((a) => a[1] === "ready")).toBe(false);
+      expect(fx.bodies[0]).toMatch(/Legs: 2 — close-out red \S+; re-run inconclusive \S+ \(by api\)/);
+      expect(fx.bodies[0]).toContain("Playable: inconclusive — infrastructure: ");
+    }
+  }, 240_000);
+
+  test("Story 35.3: the widened condition on the re-run: `skipped: no manifest` commits the proof; a red assets step commits nothing", async () => {
+    const fx = await sliceFixture({ manifest: false });
+    const r = await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done;
+    expect(r).toMatchObject({ green: true, assets: { verdict: "skipped", reason: "no manifest" }, playable: { verdict: "pass" } });
+    const sha = testGit(fx.repo.origin, "rev-parse", fx.branch);
+    expect(r.rerun).toMatchObject({ commit: { sha }, pushed: fx.branch });
+    expect(testGit(fx.repo.origin, "show", "--name-only", "--format=", fx.branch).split("\n").sort()).toEqual([
+      `${fx.proof}/contact-sheet.png`, `${fx.proof}/frames/tick-000000.png`, `${fx.proof}/frames/tick-000030.png`, `${fx.proof}/report.json`,
+    ]);
+
+    const red = await sliceFixture({ assets: { greybox: 1 } });
+    const w = await (await rerunHostLeg(red.queue, red.id, { by: "api" }, red.deps)).done;
+    expect(w).toMatchObject({ green: false, assets: { verdict: "red" } });
+    expect(w.rerun.commit).toStartWith("skipped: assets red (assets.py greybox exited 1");
+    expect(red.argvs.some((a) => a.bin === "git" && (a.args[0] === "add" || a.args[0] === "commit" || a.args[0] === "push"))).toBe(false);
+    expect(testGit(red.repo.origin, "rev-parse", red.branch)).toBe(red.tip);
+  }, 180_000);
+
+  test("Story 35.3: an ignored placed-art path on the re-run is skipped and listed on `rerun.commit.skipped_ignored`; the proof still committed", async () => {
+    const fx = await sliceFixture({ ignore: "art/\n" });
+    const r = await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done;
+    expect(r).toMatchObject({ green: true, playable: { verdict: "pass" } });
+    const sha = testGit(fx.repo.origin, "rev-parse", fx.branch);
+    expect(r.rerun).toMatchObject({ commit: { sha, skipped_ignored: ["art/greybox"] }, pushed: fx.branch });
+    const shown = testGit(fx.repo.origin, "show", "--name-only", "--format=", fx.branch).split("\n");
+    expect(shown).toContain(`${fx.proof}/report.json`);
+    expect(shown).not.toContain("art/greybox/crate.glb");
   }, 120_000);
 
   test("Story 35.1: a push refused: `pushed: error: …`, the leg still recorded, the PR left as it was (no edit, no flip)", async () => {
