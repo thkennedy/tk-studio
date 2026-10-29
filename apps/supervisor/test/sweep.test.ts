@@ -427,7 +427,7 @@ describe("Story 35.7: the run-sweep job type", () => {
     expect(evs).toHaveLength(PLAN_RETRY_LIMIT + 1);
     expect(evs.slice(0, -1).every((e) => e.detail?.settled === undefined)).toBe(true);
     expect(evs.at(-1)!.detail).toMatchObject({ ok: true, pending: ["DW-1"], settled: true, skipped: true, reason: `gave up after ${PLAN_RETRY_LIMIT + 1} attempts: pending: DW-1` });
-  });
+  }, 60_000); // 25 ledger passes, each reading git: 5.0 s at bun's 5 s default with nothing else on the box (hole 97)
 
   test("review 8: a CLOSED (unmerged) PR settles the ledger pass skipped, plansync never called", async () => {
     const fx = await sweepFixture();
