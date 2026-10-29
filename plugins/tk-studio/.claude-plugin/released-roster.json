@@ -1,5 +1,5 @@
 {
-  "version": "0.3.8",
+  "version": "0.3.9",
   "skills": [
     "gds-engine-godot-4",
     "tk-studio-activate",
@@ -26,7 +26,7 @@
     "tk-studio-track"
   ],
   "archive": {
-    "url": "https://github.com/thkennedy/tk-studio/releases/download/tk-studio--v0.3.8/tk-studio-0.3.8.zip",
-    "sha256": "30531dac7699f39fd3de88826c46060941b449d12991cb49942bed3791a4f794"
+    "url": "https://github.com/thkennedy/tk-studio/releases/download/tk-studio--v0.3.9/tk-studio-0.3.9.zip",
+    "sha256": "a02330f0655c266289fc2464a1ac42174389fb4a954fb36d94ef00640036f299"
   }
 }
