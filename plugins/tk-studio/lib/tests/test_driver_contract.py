@@ -204,7 +204,8 @@ class DriverContractTestCase(unittest.TestCase):
                         header.index("0.1.21 (Epic 26)"))
         row = next(line for line in self.text.splitlines()
                    if line.startswith("| `tk-studio-launch` |"))
-        for phrase in ("loop(epic-<N>): SPEC, manifest and first-story plan "
+        # Story 35.2: the bootstrap plans every story, so its commit names them all
+        for phrase in ("loop(epic-<N>): SPEC, manifest and story plans "
                        "from the launch bootstrap",
                        "relaunch", "status, intent, artifacts, reason",
                        "budget_mismatch", "allow_budget_mismatch",
@@ -2528,7 +2529,8 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertNotIn("are a retry, bound or not", note)
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
-        self.assertIn("Story 35.1, Story 35.8 (Epic 35)", stories)
+        # relaxed by Story 35.2 only to admit it after 35.8
+        self.assertIn("Story 35.1, Story 35.8, Story 35.2 (Epic 35)", stories)
         taxonomy = json.loads((PLUGIN_ROOT / "contracts" / "events" / "taxonomy.v1.json")
                               .read_text(encoding="utf-8"))
         stage = taxonomy["events"]["stage"]
@@ -2536,6 +2538,76 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertEqual({f for f, r in stage["payload"].items() if r.get("required")},
                          {"story", "stage", "started", "row_key"})
         self.assertFalse(any("token" in f for f in stage["payload"]))
+
+    # --- Story 35.2: 0.1.30 (additive) — every story gets its plan (the bootstrap plans every
+    # entry, the `open questions` gap, the `story plans` row) and, of AC2's either/or, the
+    # refusal: no relaunch across a story boundary while a graceful stop is in force.
+
+    def test_0_1_30_story_35_2_plans_and_records(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.30**", header)
+        self.assertNotIn("**0.1.31**", header)
+        self.assertEqual(header.count("0.1.30 (Story 35.2, additive)"), 1)
+        self.assertLess(header.index("0.1.30 (Story 35.8, additive)"),
+                        header.index("0.1.30 (Story 35.2, additive)"))
+        clause = " ".join(header[header.index("0.1.30 (Story 35.2, additive)"):].split())
+        for phrase in ("plans every manifest entry in list order",
+                       "`loop(epic-<N>): SPEC, manifest and story plans from the launch bootstrap`",
+                       "the gap `open questions`", "`story plans` row", "the planner picks the refusal",
+                       "`stop-request.json`", "`stop-request-discarded`", "`run-resume`/`run-start`",
+                       "`story-boundary`", "`StoryBoundary`", "`graceful_stop: \"kept\"`",
+                       "`graceful-stop`", "per-story records are not built", "— additive) |"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        self.assertNotIn("**0.1.31**", flat)
+        self.assertEqual(flat.count("**0.1.30 (Story 35.2, additive).**"), 1)
+        self.assertLess(flat.index("**0.1.30 (Story 35.8, additive).**"),
+                        flat.index("**0.1.30 (Story 35.2, additive).**"))
+        note = flat[flat.index("**0.1.30 (Story 35.2, additive).**"):]
+        note = note[:note.index("## 8. Conformance")]
+        for phrase in ("**The plan per story:**", "plans every manifest entry in list order",
+                       "`loop(epic-<N>): SPEC, manifest and story plans from the launch bootstrap`",
+                       "**The open-question refusal:**", "the gap `open questions`",
+                       "`<story id>: CAP-N has no design note — <question, clipped>`",
+                       "or a CAP list — `CAP-9 and CAP-10`, `CAP-11/CAP-12`, `CAP-4, CAP-5` — the line "
+                       "counting for each CAP named", "a CAP-list subject notes each",
+                       "any `## Open Questions` bullet naming the CAP",
+                       "a bullet naming the CAP anywhere else (`- Is X in scope for CAP-2?`, "
+                       "`(CAP-2)`; the whole bullet is the question, once per CAP named)",
+                       "one per question line",
+                       "a later story's un-noted CAP never does", "`story plans`",
+                       "`all <n> planned`", "`without a plan: <id>, …`",
+                       "`; un-noted open questions: CAP-N (<id>), …`",
+                       "**The planner's pick (AC2):** the refusal, never per-story records",
+                       "`stop-request.json` (existence only, any content)",
+                       "`stop-request-discarded`", "no `run-resume` or `run-start` entry after it",
+                       "a missing or unreadable journal is no stop", "Read before the archive step",
+                       "neither archives nor relaunches", "`story-boundary`", "code: \"StoryBoundary\"",
+                       "graceful_stop: \"kept\"", "once since its latest `paused`",
+                       "`before the pause, discarded at pause`",
+                       "`POST /runs/{id}/cancel`",
+                       "`graceful-stop {engine_run_id, rearmed: true, ok, detail}`",
+                       "the resume's answer is unchanged", "is not built",
+                       "`graceful-stop {engine_run_id, rearmed: false, ok: false, detail: \"engine.pid "
+                       "not rewritten by the resume: re-arm skipped\"}`",
+                       "A skipped re-arm, or one whose stop answers or throws `ok: false`, also "
+                       "sends one notifier line",
+                       "re-issue `launch.py stop --graceful` for its engine run id",
+                       "save after a skipped or failed re-arm, which that notifier line puts to "
+                       "the operator"):
+            self.assertIn(phrase, note)
+        row = next(line for line in self.text.splitlines()
+                   if line.startswith("| `tk-studio-launch` |"))
+        for phrase in ("the bootstrap plans every manifest entry in list order",
+                       "`plans/<N>-<M>.md` for every entry",
+                       "loop(epic-<N>): SPEC, manifest and story plans from the launch bootstrap",
+                       "the gap `open questions`", "**Story plans (0.1.30, Story 35.2):**"):
+            self.assertIn(phrase, row)
+        self.assertNotIn("first-story plan", row)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 35.1, Story 35.8, Story 35.2 (Epic 35)", stories)
 
     # --- AC 2: A7 dossier items covered or explicitly deferred with a seam
 

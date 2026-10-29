@@ -29,13 +29,20 @@ import launch  # noqa: E402
 
 
 def _project(tmp: Path, *, spec: bool = True, entries: int = 2,
-             ran_before: bool = False) -> tuple[Path, str]:
+             ran_before: bool = False, spec_text: str | None = None,
+             ids: list[str] | None = None) -> tuple[Path, str]:
+    """``spec_text`` replaces the bare SPEC.md (Story 35.2: CAP lines, open
+    questions, design notes); ``ids`` replaces the ``2-1-<n>`` entries."""
     root = tmp / "proj"
     folder = root / "_bmad-output" / "specs" / "spec-epic-2"
     folder.mkdir(parents=True)
     if spec:
-        (folder / "SPEC.md").write_text("# SPEC\n", encoding="utf-8")
-    if entries >= 0:
+        (folder / "SPEC.md").write_text(spec_text or "# SPEC\n", encoding="utf-8")
+    if ids is not None:
+        (folder / "stories.yaml").write_text(
+            "".join(f'- id: "{i}"\n  title: t\n  description: d\n' for i in ids),
+            encoding="utf-8")
+    elif entries >= 0:
         lines = []
         for n in range(1, entries + 1):
             lines.append(f'- id: "2-1-{n}"\n  title: t{n}\n  description: d{n}\n')
@@ -1213,6 +1220,253 @@ class LaunchTestCase(unittest.TestCase):
         self.assertTrue(launch.display_session({"WAYLAND_DISPLAY": "wayland-0"}))
         self.assertFalse(launch.display_session({}))
 
+
+
+    # ---- Story 35.2: the next story's open questions and the story plans row
+
+    IDS_35 = ["2-1-first-story", "2-3-third-story", "2-2-second-story", "2-4-fourth-story"]
+
+    @staticmethod
+    def _spec_35(questions: str = "", notes: str = "") -> str:
+        text = ("# SPEC\n\n## Capabilities\n\n"
+                "- **CAP-1** (2.1)\n  - **intent:** one\n"
+                "- **CAP-2** (2.3)\n  - **intent:** two\n"
+                "- **CAP-3** (2.2)\n  - **intent:** three\n"
+                "- **CAP-4** (2.2)\n  - **intent:** four\n"
+                "- **CAP-7** (2.4)\n  - **intent:** seven\n")
+        if questions:
+            text += "\n## Open Questions\n\n" + questions
+        if notes:
+            text += "\n## Design notes (settled shape, planner, 2026-10-27)\n" + notes
+        return text
+
+    def _check_35(self, spec_text: str, *, done=("2-1-first-story", "2-3-third-story"),
+                  plans=("2-1", "2-3", "2-2", "2-4")):
+        base = Path(tempfile.mkdtemp(dir=self.tmp))
+        root, spec = _project(base, spec_text=spec_text, ids=self.IDS_35)
+        folder = root / spec
+        (folder / "stories").mkdir()
+        for key in done:
+            (folder / "stories" / f"{key}-spec.md").write_text(
+                "---\ntitle: 'x'\nstatus: 'done'\n---\n", encoding="utf-8")
+        (folder / "plans").mkdir()
+        for story in plans:
+            (folder / "plans" / f"{story}.md").write_text("---\nband: S\n---\n", encoding="utf-8")
+        self._wire(_FakeSubstrate())
+        result = launch.check(root, spec)
+        row = next(c for c in result["checks"] if c["check"] == "story plans")
+        names = [c["check"] for c in result["checks"]]
+        self.assertEqual(names.index("story plans"), names.index("playable path") + 1)
+        self.assertTrue(row["ok"])
+        self.assertFalse(any(g.startswith("story plans") for g in result["gaps"]))
+        return result, row
+
+    def test_open_questions_next_story_one_cap_is_a_gap_and_blocks(self):
+        result, _ = self._check_35(self._spec_35(
+            "- CAP-3: does the refusal block the whole launch or only that story?\n"))
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["gaps"], [
+            "open questions: 2-2-second-story: CAP-3 has no design note — "
+            "does the refusal block the whole launch or only that story?"])
+        status, artifacts, reason = launch.check_block(result)
+        self.assertEqual((status, artifacts), ("blocked", []))
+        self.assertIn("CAP-3", reason)
+
+    def test_open_questions_two_caps_are_one_gap_joined(self):
+        result, _ = self._check_35(self._spec_35(
+            "- CAP-4: second?\n- CAP-3: first?\n- CAP-2: another story's, noted below\n",
+            "- CAP-2 — x: named placeholder rule — per a.md\n"))
+        gaps = [g for g in result["gaps"] if g.startswith("open questions")]
+        self.assertEqual(gaps, ["open questions: 2-2-second-story: CAP-3 has no design note — first?; "
+                                "2-2-second-story: CAP-4 has no design note — second?"])
+        reason = launch.check_block(result)[2]
+        self.assertIn("CAP-3", reason)
+        self.assertIn("CAP-4", reason)
+
+    def test_open_questions_a_cap_or_story_keyed_note_settles_it(self):
+        questions = "- CAP-3: first?\n- CAP-4: second?\n"
+        for notes in ("- 2.2 — the refusal: named placeholder rule — per a.md\n",
+                      "- 2-2 — the refusal: named placeholder rule — per a.md\n",
+                      "- CAP-3 — a: named placeholder rule — per a.md\n"
+                      "- CAP-4 — b: optional entry — per a.md\n"):
+            with self.subTest(notes=notes):
+                result, _ = self._check_35(self._spec_35(questions, notes))
+                self.assertEqual(result["gaps"], [])
+                self.assertTrue(result["ok"])
+        # one CAP noted, the other still open
+        result, _ = self._check_35(self._spec_35(questions, "- CAP-3 — a: x — per a.md\n"))
+        self.assertEqual(result["gaps"], [
+            "open questions: 2-2-second-story: CAP-4 has no design note — second?"])
+
+    def test_open_questions_a_later_storys_cap_is_never_a_gap_but_the_row_names_it(self):
+        result, row = self._check_35(self._spec_35("- CAP-7: is the port pinned?\n"))
+        self.assertTrue(result["ok"], result["gaps"])
+        self.assertEqual(row["detail"],
+                         "all 4 planned; un-noted open questions: CAP-7 (2-4-fourth-story)")
+
+    def test_open_questions_without_the_section_is_no_gap(self):
+        result, row = self._check_35(self._spec_35())
+        self.assertTrue(result["ok"], result["gaps"])
+        self.assertEqual(row["detail"], "all 4 planned")
+        # a question line outside `## Open Questions` is no question
+        result, _ = self._check_35(self._spec_35() + "\n## Assumptions\n\n- CAP-3: not a question\n")
+        self.assertTrue(result["ok"], result["gaps"])
+
+    def test_open_questions_the_next_story_is_the_first_not_done(self):
+        # 2-1 done only: 2-3 is next (manifest order), so CAP-3 (2.2) is later
+        result, row = self._check_35(self._spec_35("- CAP-3: first?\n- CAP-2: two?\n"),
+                                     done=("2-1-first-story",))
+        self.assertEqual(result["gaps"], [
+            "open questions: 2-3-third-story: CAP-2 has no design note — two?"])
+        self.assertEqual(row["detail"],
+                         "all 4 planned; un-noted open questions: CAP-3 (2-2-second-story)")
+
+    def test_story_plans_names_the_missing_plans_in_manifest_order(self):
+        _, row = self._check_35(self._spec_35(), plans=("2-1",))
+        self.assertEqual(row["detail"],
+                         "without a plan: 2-3-third-story, 2-2-second-story, 2-4-fourth-story")
+        _, row = self._check_35(self._spec_35("- CAP-7: open\n"), plans=("2-1", "2-2"))
+        self.assertEqual(row["detail"], "without a plan: 2-3-third-story, 2-4-fourth-story; "
+                                        "un-noted open questions: CAP-7 (2-4-fourth-story)")
+
+    def test_spec_open_questions_reads_the_real_spec_shapes(self):
+        repo = Path(__file__).resolve().parents[4]
+        for epic in (34, 35):
+            path = repo / "_bmad-output" / "specs" / f"spec-epic-{epic}" / "SPEC.md"
+            if not path.is_file():
+                self.skipTest("the epic SPECs are not in this checkout")
+            with self.subTest(epic=epic):
+                parsed = launch.spec_open_questions(path.read_text(encoding="utf-8"))
+                self.assertEqual(parsed["caps"]["CAP-3"], f"{epic}-2")
+                self.assertEqual(parsed["caps"]["CAP-16"], {34: "34-8", 35: "35-7"}[epic])
+                # every capability line is mapped (16 in Epic 34, 18 in Epic 35)
+                self.assertEqual(len(parsed["caps"]), {34: 16, 35: 18}[epic])
+                self.assertEqual(parsed["noted_stories"], set())
+                if epic == 34:
+                    # the real multi-CAP lines map to each CAP named
+                    self.assertEqual(set(parsed["questions"]),
+                                     {"CAP-3", "CAP-4", "CAP-5", "CAP-9", "CAP-10",
+                                      "CAP-11", "CAP-13", "CAP-16"})
+                    self.assertEqual(parsed["questions"]["CAP-9"], parsed["questions"]["CAP-10"])
+                    self.assertTrue(parsed["questions"]["CAP-9"][0].startswith(
+                        "the engine MCP's host port"))
+                    self.assertTrue(parsed["questions"]["CAP-4"][0].startswith(
+                        "when the rendering path 34.2 picks"))
+                    self.assertTrue({"CAP-1", "CAP-2", "CAP-7", "CAP-8", "CAP-9", "CAP-10",
+                                     "CAP-13", "CAP-16"} <= parsed["noted_caps"])
+                else:
+                    self.assertEqual(set(parsed["questions"]), {"CAP-1", "CAP-2", "CAP-3", "CAP-7"})
+                    self.assertEqual(parsed["noted_caps"],
+                                     {"CAP-1", "CAP-2", "CAP-3", "CAP-4", "CAP-17", "CAP-18"})
+
+    def test_spec_open_questions_cap_lists_in_questions_and_notes(self):
+        text = ("## Capabilities\n\n- **CAP-4** (2.2)\n- **CAP-5** (2.2)\n- **CAP-9** (2.2)\n"
+                "- **CAP-10** (2.2)\n- **CAP-11** (2.2)\n- **CAP-12** (2.2)\n\n"
+                "## Open Questions\n\n- CAP-9 and CAP-10: port?\n- CAP-11/CAP-12: colour?\n"
+                "- CAP-4, CAP-5: display?\n- CAP-4: again?\n\n"
+                "## Design notes (settled shape, planner, 2026-10-27)\n\n"
+                "- CAP-11/CAP-12 — the map: optional entry — per a.md\n"
+                "- CAP-9 and CAP-10 — the port: named placeholder rule — per a.md\n")
+        parsed = launch.spec_open_questions(text)
+        self.assertEqual(parsed["questions"]["CAP-9"], ["port?"])
+        self.assertEqual(parsed["questions"]["CAP-10"], ["port?"])
+        self.assertEqual(parsed["questions"]["CAP-12"], ["colour?"])
+        self.assertEqual(parsed["questions"]["CAP-4"], ["display?", "again?"])
+        self.assertEqual(parsed["questions"]["CAP-5"], ["display?"])
+        self.assertEqual(parsed["noted_caps"], {"CAP-9", "CAP-10", "CAP-11", "CAP-12"})
+        self.assertEqual(launch.unnoted_questions(parsed, "2-2-x"),
+                         [("CAP-4", "display?"), ("CAP-4", "again?"), ("CAP-5", "display?")])
+
+    def test_open_questions_the_possessive_form_is_a_question(self):
+        # the real shapes: spec-epic-33 `- CAP-9's tracked source: …`,
+        # spec-epic-29 `- CAP-9's "deferred" terminal kind: …`, and
+        # spec-epic-30 `- CAP-13's "the epic's band" is …` (no colon after)
+        text = ("## Capabilities\n\n- **CAP-9** (2.2)\n- **CAP-11** (2.2)\n"
+                "- **CAP-13** (2.2)\n- **CAP-14** (2.2)\n\n"
+                "## Open Questions\n\n- CAP-9's tracked source: which file?\n"
+                "- CAP-11's \"dev session's draft\": its path?\n"
+                "- CAP-13's \"the epic's band\" is unsettled\n"
+                "- CAP-14\u2019s and CAP-9 and more: curly?\n"
+                "- CAP-1x: not a CAP\n")
+        parsed = launch.spec_open_questions(text)
+        self.assertEqual(parsed["questions"]["CAP-9"], ["tracked source: which file?"])
+        self.assertEqual(parsed["questions"]["CAP-11"], ["\"dev session's draft\": its path?"])
+        self.assertEqual(parsed["questions"]["CAP-13"], ["\"the epic's band\" is unsettled"])
+        self.assertEqual(parsed["questions"]["CAP-14"], ["and CAP-9 and more: curly?"])
+        self.assertNotIn("CAP-1", parsed["questions"])
+        # an un-noted possessive question of the next story is the gap
+        result, _ = self._check_35(self._spec_35("- CAP-3's refusal: whole launch?\n"))
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["gaps"], [
+            "open questions: 2-2-second-story: CAP-3 has no design note — refusal: whole launch?"])
+        result, _ = self._check_35(self._spec_35("- CAP-4's \"band\" is unsettled\n"))
+        self.assertEqual(result["gaps"], [
+            'open questions: 2-2-second-story: CAP-4 has no design note — "band" is unsettled'])
+
+    def test_open_questions_a_cap_list_note_with_its_story_notes_the_caps(self):
+        # the real shape: spec-epic-28 `- CAP-2/CAP-3 (28.1) — …`
+        notes = "- CAP-3/CAP-4 (2.2) — the four hooks: named placeholder rule — per a.md\n"
+        parsed = launch.spec_open_questions(self._spec_35("- CAP-3: first?\n", notes))
+        self.assertEqual(parsed["noted_caps"], {"CAP-3", "CAP-4"})
+        self.assertEqual(parsed["noted_stories"], set())
+        result, _ = self._check_35(self._spec_35("- CAP-3: first?\n- CAP-4: second?\n", notes))
+        self.assertEqual(result["gaps"], [])
+        self.assertTrue(result["ok"])
+
+    def test_open_questions_a_cap_with_several_questions_lists_them_all(self):
+        result, _ = self._check_35(self._spec_35(
+            "- CAP-3 and CAP-4: both?\n- CAP-3: first?\n",
+            "- CAP-4 — b: optional entry — per a.md\n"))
+        self.assertEqual(result["gaps"], [
+            "open questions: 2-2-second-story: CAP-3 has no design note — both?; "
+            "2-2-second-story: CAP-3 has no design note — first?"])
+
+    def test_open_questions_a_cap_named_mid_sentence_is_a_question(self):
+        # Story 35.2: the bmad-spec template's `- Is offline playback in scope
+        # for CAP-2?` and spec-epic-24's `- How are … per story (CAP-9)?`
+        for line in ("- Is X in scope for CAP-3?\n", "- How is X captured per story (CAP-3)?\n"):
+            with self.subTest(line=line):
+                result, _ = self._check_35(self._spec_35(line))
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["gaps"], [
+                    f"open questions: 2-2-second-story: CAP-3 has no design note — {line[2:-1]}"])
+        # every CAP named is asked once per bullet; a CAP-led bullet keeps its lead
+        parsed = launch.spec_open_questions(self._spec_35(
+            "- Does CAP-3 or CAP-4 own it, and does CAP-3 move?\n- CAP-7: and CAP-3 too?\n"))
+        q = "Does CAP-3 or CAP-4 own it, and does CAP-3 move?"
+        self.assertEqual(parsed["questions"], {"CAP-3": [q], "CAP-4": [q], "CAP-7": ["and CAP-3 too?"]})
+
+    def test_open_questions_a_mid_sentence_question_of_a_noted_cap_is_no_gap(self):
+        result, _ = self._check_35(self._spec_35(
+            "- Is X in scope for CAP-3?\n", "- CAP-3 — a: named placeholder rule — per a.md\n"))
+        self.assertEqual(result["gaps"], [])
+        self.assertTrue(result["ok"])
+
+    def test_open_questions_a_bullet_naming_no_cap_is_ignored(self):
+        result, row = self._check_35(self._spec_35(
+            "- Is offline playback in scope?\n- What about CAP-1x or XCAP-3?\n"))
+        self.assertTrue(result["ok"], result["gaps"])
+        self.assertEqual(row["detail"], "all 4 planned")
+        self.assertEqual(launch.spec_open_questions(self._spec_35(
+            "- Is offline playback in scope?\n"))["questions"], {})
+
+    def test_open_questions_a_capability_line_with_text_after_the_story_maps_it(self):
+        # Story 35.2: the real spec-epic-28 shape `- **CAP-16** (28.5; added by
+        # correct-course 2026-10-17, carved out of CAP-10)`
+        text = ("# SPEC\n\n## Capabilities\n\n"
+                "- **CAP-3** (2.1; added by correct-course 2026-10-17, carved out of CAP-1)\n"
+                "- **CAP-5** (2.15)\n- **CAP-6** (2.1.4)\n\n"
+                "## Open Questions\n\n- CAP-3: is the carve-out its own story?\n")
+        parsed = launch.spec_open_questions(text)
+        # `2.15` is not `2.1`, and `2.1.4` names no story
+        self.assertEqual(parsed["caps"], {"CAP-3": "2-1", "CAP-5": "2-15"})
+        base = Path(tempfile.mkdtemp(dir=self.tmp))
+        root, spec = _project(base, spec_text=text, ids=["2-1-carved-story"])
+        self._wire(_FakeSubstrate())
+        result = launch.check(root, spec)
+        self.assertEqual([g for g in result["gaps"] if g.startswith("open questions")], [
+            "open questions: 2-1-carved-story: CAP-3 has no design note — "
+            "is the carve-out its own story?"])
 
 
 if __name__ == "__main__":

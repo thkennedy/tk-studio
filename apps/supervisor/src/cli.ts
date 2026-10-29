@@ -747,7 +747,9 @@ async function resolveQuietly(queue: Queue, opts: RunOptions): Promise<void> {
       return { projectId: v.projectId, root: v.root, definition: v.defn, target: v.target };
     },
     checkout: resolveCheckout,
-    resume: (q, runId) => resumeRun(q, runId, undefined, { ...(opts.worktree ?? {}), ...(opts.owner ? { self: opts.owner } : {}) }),
+    resume: (q, runId) => resumeRun(q, runId, undefined, {
+      ...(opts.worktree ?? {}), ...(opts.hygiene ? { hygiene: opts.hygiene } : {}), ...(opts.owner ? { self: opts.owner } : {}),
+    }),
     ...(opts.resolution ?? {}),
   };
   try { await resolutionPass(queue, deps); } catch { /* the next tick */ }
@@ -2157,12 +2159,14 @@ export function relauncher(opts: {
 const pausedDeps = (opts: RunOptions): PausedDeps => ({
   ...(opts.worktree ?? {}), ...(opts.hygiene ? { hygiene: opts.hygiene } : {}), ...(opts.owner ? { self: opts.owner } : {}),
   relaunch: relauncher({ ...(opts.worktree ? { worktree: opts.worktree } : {}) }),
+  launchStop: launchStopGraceful, // Story 35.2: the auto-resume's re-arm of a graceful stop in force
 });
 
 /** Story 27.3: the `resume` verb `POST /runs/{id}/resume` calls — `bmad-loop resolve … --resume` for a paused
  * run whose story did not land (`resumePaused`; throws `ResumeRefused`). */
 export function resumeRun(queue: Queue, runId: string, restorePatch?: string, deps: EngineResumeDeps = {}): Promise<ResumeAnswer> {
-  return resumePaused(queue, runId, restorePatch !== undefined ? { restorePatch } : {}, deps);
+  // Story 35.2: a graceful stop in force is re-armed on the resumed engine (`launchStopGraceful` unless injected).
+  return resumePaused(queue, runId, restorePatch !== undefined ? { restorePatch } : {}, { launchStop: launchStopGraceful, ...deps });
 }
 
 export interface ResumeDeps {

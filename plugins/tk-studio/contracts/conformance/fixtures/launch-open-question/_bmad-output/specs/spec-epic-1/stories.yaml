@@ -1,0 +1,10 @@
+# stories.yaml: the open-question fixture's manifest (two entries; the first is done).
+
+- id: "1-1-open-question-first"
+  title: "First story, already done"
+  description: >-
+    The story a previous launch of this epic completed.
+- id: "1-2-open-question-second"
+  title: "Second story, its CAP un-noted"
+  description: >-
+    The story the launch would start next, refused on its open question.

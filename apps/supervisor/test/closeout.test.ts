@@ -8,7 +8,7 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { createApi } from "../src/api";
 import { closeOutOrphans, relauncher, type Started } from "../src/cli";
-import { closableVerdict, closeOutPaused, ESCALATION_BLOCKED_REASON, findSpec, frontmatter, harvestMessage, jiraBound, landing, launchedSinceMove, NOT_HANDED, resumePaused, ResumeRefused, trackArgs, type PausedDeps } from "../src/closeout";
+import { closableVerdict, closeOutPaused, ESCALATION_BLOCKED_REASON, findSpec, frontmatter, gracefulStopInForce, harvestMessage, jiraBound, landing, launchedSinceMove, NOT_HANDED, REARM_SKIPPED, rearmFailedLine, resumePaused, ResumeRefused, trackArgs, type PausedDeps } from "../src/closeout";
 import { renderPage, type PageData } from "../src/page";
 import { Queue, type Owner, type Probes } from "../src/queue";
 import { runProcess, toVmPath, type RunResult } from "../src/server";
@@ -1424,5 +1424,179 @@ describe("Story 27.5 (P5): the archived engine's recorded cost when its relaunch
     rmSync(fx.runDir, { recursive: true, force: true });
     expect(fx.get().engine_run_id).toBe(E1);
     expect(launchedCloseOutInput(fx.queue.events(fx.run.run_id), fx.get())).toMatchObject({ engineRunId: E1, costUsd: 1.5 });
+  });
+});
+
+describe("Story 35.2: no relaunch across a story boundary while a graceful stop is in force; a resume re-arms it", () => {
+  const journal = (dir: string, kinds: (string | { kind: string; ts?: number })[]) =>
+    writeFileSync(join(dir, "journal.jsonl"), kinds.map((k) => JSON.stringify(typeof k === "string" ? { ts: 1761700000, kind: k } : k)).join("\n") + "\n");
+  const mainSteps = (order: string[]) =>
+    order.filter((s) => s.startsWith("git commit") || s.startsWith("uv meter.py") || s.includes("bmad-loop") || s === "rebuild" || s === "invoke");
+
+  /** The refused relaunch: committed and metered, never archived or relaunched, still paused, one record and one
+   * line; a second pass does nothing. */
+  async function expectRefused(setup: (runDir: string) => void, requested: string) {
+    const fx = await pausedRun({ verdict: "no-impact" });
+    writeFileSync(join(fx.runDir, "run.json"), JSON.stringify({ total_cost_usd: 1.25 }));
+    setup(fx.runDir);
+    const p = passDeps(fx);
+    const headBefore = testGit(fx.wt, "rev-parse", "HEAD");
+    expect(await closeOutPaused(fx.queue, p.deps)).toEqual({ closed: [], awaiting: [] });
+    expect(mainSteps(p.order)).toEqual(["git commit", "uv meter.py harvest"]);
+    expect(testGit(fx.wt, "log", "-1", "--format=%s")).toBe(harvestMessage(KEY, fx.run.run_id, E1));
+    expect(testGit(fx.wt, "rev-parse", "HEAD~1")).toBe(headBefore);
+    expect(existsSync(fx.runDir)).toBe(true); // never archived
+    expect(p.invoked).toHaveLength(0);
+    expect(fx.get()).toMatchObject({ state: "paused", engine_run_id: E1, owner_pid: null });
+    expect(ev(fx.queue, fx.run.run_id, "accounted").map((e) => e.detail)).toEqual([{ cost_usd: 1.25, engine_run_id: E1, source: "engine" }]);
+    const reason = `a graceful stop is in force (requested ${requested}): relaunching would start the next story in this run`;
+    expect(ev(fx.queue, fx.run.run_id, "story-boundary").map((e) => e.detail)).toEqual([
+      { story_key: KEY, engine_run_id: E1, code: "StoryBoundary", reason, graceful_stop: "kept" },
+    ]);
+    expect(kinds(fx.queue, fx.run.run_id)).not.toContain("close-out");
+    expect(kinds(fx.queue, fx.run.run_id)).not.toContain("close-out-failed");
+    expect(p.sent).toHaveLength(1);
+    expect(p.sent[0]).toContain(`story ${KEY} landed, not relaunched`);
+    expect(p.sent[0]).toContain("a graceful stop is in force");
+    // The second pass: nothing run, nothing recorded, nothing sent.
+    const before = kinds(fx.queue, fx.run.run_id);
+    const again = passDeps(fx);
+    expect(await closeOutPaused(fx.queue, again.deps)).toEqual({ closed: [], awaiting: [] });
+    expect(again.order).toEqual([]);
+    expect(again.sent).toEqual([]);
+    expect(kinds(fx.queue, fx.run.run_id)).toEqual(before);
+    return fx;
+  }
+
+  test("Story 35.2: landed with `stop-request.json` present: committed and metered, not archived or relaunched, paused, one `story-boundary` and one line", async () => {
+    await expectRefused((dir) => writeFileSync(join(dir, "stop-request.json"), JSON.stringify({ requested_at: "2026-10-29T01:02:03Z", mode: "graceful" })), "2026-10-29T01:02:03Z");
+  });
+
+  test("Story 35.2: any `stop-request.json` content counts (existence only)", async () => {
+    await expectRefused((dir) => writeFileSync(join(dir, "stop-request.json"), "not json"), "at an unknown time");
+  });
+
+  test("Story 35.2: landed with the stop discarded at the pause (journal `stop-request-discarded`, no later resume): refused the same way", async () => {
+    await expectRefused((dir) => journal(dir, ["run-start", "story-start", "run-resume", "story-done", "stop-request-discarded"]),
+      "before the pause, discarded at pause");
+  });
+
+  test("Story 35.2: a stale discard (a `run-resume` or `run-start` after it) or no stop at all: relaunched as today", async () => {
+    for (const setup of [
+      (dir: string) => journal(dir, ["run-start", "stop-request-discarded", "run-resume", "story-done"]),
+      (dir: string) => journal(dir, ["stop-request-discarded", "run-start"]),
+      (_dir: string) => {},
+    ]) {
+      const fx = await pausedRun({ verdict: "no-impact" });
+      setup(fx.runDir);
+      const p = passDeps(fx);
+      expect(await closeOutPaused(fx.queue, p.deps)).toEqual({ closed: [fx.run.run_id], awaiting: [] });
+      expect(mainSteps(p.order)).toEqual(["git commit", "uv meter.py harvest", `sbx exec ${SB} /home/agent/.local/bin/bmad-loop archive`, "rebuild", "invoke"]);
+      expect(ev(fx.queue, fx.run.run_id, "story-boundary")).toHaveLength(0);
+      expect(fx.get()).toMatchObject({ state: "running", engine_run_id: E2 });
+    }
+  });
+
+  test("Story 35.2: the reader — a missing, garbage or unreadable journal is no stop; it never throws", () => {
+    const dir = tempDir("tk-sup-stop-");
+    expect(gracefulStopInForce(dir)).toBeUndefined();
+    expect(gracefulStopInForce(join(dir, "missing"))).toBeUndefined();
+    writeFileSync(join(dir, "journal.jsonl"), "garbage\n{not json\n[1,2]\n\n");
+    expect(gracefulStopInForce(dir)).toBeUndefined();
+    writeFileSync(join(dir, "journal.jsonl"), "garbage\n" + JSON.stringify({ ts: 1761700000, kind: "stop-request-discarded" }) + "\n{oops\n");
+    expect(gracefulStopInForce(dir)).toEqual({ source: "journal", at: new Date(1761700000 * 1000).toISOString() });
+    const asDir = tempDir("tk-sup-stop-dir-");
+    mkdirSync(join(asDir, "journal.jsonl"));
+    expect(gracefulStopInForce(asDir)).toBeUndefined();
+    writeFileSync(join(dir, "stop-request.json"), "");
+    expect(gracefulStopInForce(dir)).toEqual({ source: "stop-request" });
+  });
+
+  async function resumeWith(setup: (runDir: string) => void, stopper?: (root: string, id: string) => Promise<{ ok: boolean; detail: string }>, o: { resumePid?: string; pidPolls?: number } = {}) {
+    const fx = await pausedRun({ status: "in-progress" });
+    setup(fx.runDir);
+    const p = passDeps(fx);
+    const calls: { root: string; id: string }[] = [];
+    const launchStop = async (root: string, id: string) => { calls.push({ root, id }); return stopper ? stopper(root, id) : { ok: true, detail: `engine ${id} stopping gracefully` }; };
+    sbx.answer({ resume_pid: o.resumePid ?? "7001 200000" });
+    let answer;
+    try { answer = await resumePaused(fx.queue, fx.run.run_id, {}, { ...p.deps, pidPolls: o.pidPolls ?? 40, pollMs: 25, launchStop }); }
+    finally { sbx.answer({}); }
+    for (let i = 0; i < 100 && !handedBack(fx); i++) await Bun.sleep(20);
+    return { fx, answer, calls, sent: p.sent };
+  }
+
+  test("Story 35.2: a resume with a stop in force re-arms it once on the resumed engine after the pid re-read; the answer unchanged", async () => {
+    const { fx, answer, calls, sent } = await resumeWith((dir) => writeFileSync(join(dir, "stop-request.json"), JSON.stringify({ requested_at: "2026-10-29T01:02:03Z", mode: "graceful" })));
+    expect(answer).toEqual({ ok: true, run_id: fx.run.run_id, state: "running", engine_run_id: E1 });
+    expect(calls).toEqual([{ root: fx.wt, id: E1 }]);
+    expect(sent).toEqual([]); // a re-arm that holds tells nobody
+    const gs = ev(fx.queue, fx.run.run_id, "graceful-stop");
+    expect(gs.map((e) => e.detail)).toEqual([{ engine_run_id: E1, rearmed: true, ok: true, detail: `engine ${E1} stopping gracefully` }]);
+    const evs = fx.queue.events(fx.run.run_id);
+    expect(evs.findIndex((e) => e.kind === "graceful-stop")).toBeGreaterThan(evs.findIndex((e) => e.kind === "engine-pid" && e.detail?.resumed === true));
+  });
+
+  test("Story 35.2: a resume with the stop discarded at the pause re-arms it; a failing stop is recorded `ok: false` and the answer stands", async () => {
+    const { fx, answer, calls } = await resumeWith((dir) => journal(dir, ["run-start", "stop-request-discarded"]), async () => ({ ok: false, detail: "launch stop refused: no such run" }));
+    expect(answer).toMatchObject({ ok: true, state: "running" });
+    expect(calls).toHaveLength(1);
+    expect(ev(fx.queue, fx.run.run_id, "graceful-stop").map((e) => e.detail)).toEqual([{ engine_run_id: E1, rearmed: true, ok: false, detail: "launch stop refused: no such run", notify: { ok: true, via: "ntfy" } }]);
+    const thrown = await resumeWith((dir) => writeFileSync(join(dir, "stop-request.json"), "{}"), async () => { throw new Error("uv missing"); });
+    expect(thrown.answer).toMatchObject({ ok: true, state: "running" });
+    expect(ev(thrown.fx.queue, thrown.fx.run.run_id, "graceful-stop").map((e) => e.detail)).toEqual([{ engine_run_id: E1, rearmed: true, ok: false, detail: "uv missing", notify: { ok: true, via: "ntfy" } }]);
+  });
+
+  test("Story 35.2: an `ok: false` re-arm (returned or thrown) sends one notifier line naming the re-issue, recorded on the event", async () => {
+    for (const stopper of [
+      async () => ({ ok: false, detail: "launch stop refused: no such run" }),
+      async (): Promise<{ ok: boolean; detail: string }> => { throw new Error("uv missing"); },
+    ]) {
+      const { fx, sent } = await resumeWith((dir) => writeFileSync(join(dir, "stop-request.json"), "{}"), stopper);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toBe(rearmFailedLine(fx.run.run_id, E1, ev(fx.queue, fx.run.run_id, "graceful-stop")[0]!.detail!.detail as string));
+      expect(sent[0]).toContain(`graceful stop was not re-armed on resumed engine ${E1}`);
+      expect(sent[0]).toContain(`re-issue \`launch.py stop --graceful --run-id ${E1}\``);
+      const gs = ev(fx.queue, fx.run.run_id, "graceful-stop");
+      expect(gs).toHaveLength(1);
+      expect(gs[0]!.detail).toMatchObject({ rearmed: true, ok: false, notify: { ok: true, via: "ntfy" } });
+    }
+  });
+
+  test("Story 35.2: a resume whose engine.pid was never rewritten skips the re-arm and records `rearmed: false`", async () => {
+    // The fake resolve rewrites engine.pid with the pid the pause left: the re-read never sees another process.
+    const { fx, answer, calls } = await resumeWith((dir) => writeFileSync(join(dir, "stop-request.json"), "{}"), undefined, { resumePid: "6509 125610.0", pidPolls: 3 });
+    expect(answer).toEqual({ ok: true, run_id: fx.run.run_id, state: "running", engine_run_id: E1 });
+    expect(ev(fx.queue, fx.run.run_id, "engine-pid").at(-1)!.detail).toMatchObject({ why: "engine.pid was not rewritten by the resume" });
+    expect(calls).toEqual([]);
+    expect(ev(fx.queue, fx.run.run_id, "graceful-stop").map((e) => e.detail)).toEqual([
+      { engine_run_id: E1, rearmed: false, ok: false, detail: "engine.pid not rewritten by the resume: re-arm skipped", notify: { ok: true, via: "ntfy" } },
+    ]);
+  });
+
+  test("Story 35.2: a skipped re-arm sends one notifier line naming the re-issue; a failed send is recorded, never thrown", async () => {
+    const { fx, sent } = await resumeWith((dir) => writeFileSync(join(dir, "stop-request.json"), "{}"), undefined, { resumePid: "6509 125610.0", pidPolls: 3 });
+    expect(sent).toEqual([rearmFailedLine(fx.run.run_id, E1, REARM_SKIPPED)]);
+    expect(sent[0]).toContain(`re-issue \`launch.py stop --graceful --run-id ${E1}\``);
+    expect(ev(fx.queue, fx.run.run_id, "graceful-stop").map((e) => e.detail?.notify)).toEqual([{ ok: true, via: "ntfy" }]);
+    // no notifier configured: the event records the skip
+    const quiet = await pausedRun({ status: "in-progress" });
+    writeFileSync(join(quiet.runDir, "stop-request.json"), "{}");
+    const p = passDeps(quiet, { notify: false });
+    sbx.answer({ resume_pid: "6509 125610.0" });
+    try { await resumePaused(quiet.queue, quiet.run.run_id, {}, { ...p.deps, pidPolls: 3, pollMs: 25, launchStop: async () => ({ ok: true, detail: "x" }) }); }
+    finally { sbx.answer({}); }
+    for (let i = 0; i < 100 && !handedBack(quiet); i++) await Bun.sleep(20);
+    expect(p.sent).toEqual([]);
+    expect(ev(quiet.queue, quiet.run.run_id, "graceful-stop")[0]!.detail).toMatchObject({ rearmed: false, notify: { ok: false, skipped: expect.stringContaining("no notifier configured") } });
+  });
+
+  test("Story 35.2: a resume with no stop in force (none, or a stale discard) makes no call", async () => {
+    for (const setup of [(_dir: string) => {}, (dir: string) => journal(dir, ["stop-request-discarded", "run-resume"])]) {
+      const { fx, answer, calls } = await resumeWith(setup);
+      expect(answer).toMatchObject({ ok: true, state: "running" });
+      expect(calls).toEqual([]);
+      expect(ev(fx.queue, fx.run.run_id, "graceful-stop")).toHaveLength(0);
+    }
   });
 });

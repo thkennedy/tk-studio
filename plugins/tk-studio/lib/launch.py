@@ -81,6 +81,15 @@ Guarantees:
     verify.engine)` when `engine.verify_commands` has a non-empty entry,
     else a warning (`engine gate: none (...)`). The clause never turns the
     row red.
+  - `check` refuses the story the launch would start (Story 35.2) — the
+    first manifest entry with no `stories/<id>-*.md` at `status: done` —
+    with the gap `open questions` when one of its SPEC CAPs (`- **CAP-N**
+    (E.S)`) has a `- CAP-N:` line under `## Open Questions` and no bullet
+    under `## Design notes (settled shape, planner, <date>)` names that CAP
+    or the story; a later story's un-noted CAP is never a gap. The advisory
+    `story plans` row (after `playable path`, never a gap) reads `all <n>
+    planned` or `without a plan: <id>, …` (manifest order), plus `;
+    un-noted open questions: CAP-N (<id>), …` for later stories.
 
 Exit codes: 0 verb answered (a `check` with gaps is an answer: ok=false);
 2 bad invocation or refusal (`start` on a failing check, missing spec, an
@@ -797,6 +806,203 @@ def playable_path_row(root: Path, env=None) -> dict:
     return row(f"ready ({PLAYABLE_PATH})")
 
 
+# ------------------------------------------- story plans and open questions
+
+OPEN_QUESTIONS_CHECK = "open questions"
+STORY_PLANS_CHECK = "story plans"
+# Story 35.2: a SPEC capability line names its story (`35.2` -> ids `35-2-…`);
+# any non-digit may follow the story (`(28.5; added by correct-course …)`)
+CAP_LINE_RE = re.compile(r"^- \*\*CAP-(\d+)\*\* \((\d+)\.(\d+)(?![\d.])")
+# a CAP list: `CAP-9`, `CAP-9 and CAP-10`, `CAP-11/CAP-12`, `CAP-4, CAP-5`
+CAP_LIST = r"CAP-\d+(?:\s*(?:,|/|&|\band\b)\s*(?:and\s+)?CAP-\d+)*"
+# an open question: any bullet naming a CAP. One led by a CAP list,
+# possessive or not (`- CAP-9: …`, `- CAP-9's tracked source: …`), is a
+# question of the lead CAPs only, its text the rest, past a colon right after
+# the lead; any other (`- Is X in scope for CAP-2?`) is a question of every
+# CAP it names, its text the whole bullet
+OPEN_QUESTION_RE = re.compile(rf"^- ({CAP_LIST})(?:['’]s\b)?(?=[\s:]|$):?\s*(.*)$")
+# a design-note subject: a CAP list, optionally with its story (`CAP-2/CAP-3 (28.1)`)
+NOTE_CAPS_RE = re.compile(rf"^({CAP_LIST})(?:\s*\(\d+[.-]\d+\))?$")
+NOTES_HEADING_RE = re.compile(r"^## Design notes \(settled shape, planner, [^)]*\)\s*$")
+NOTE_STORY_RE = re.compile(r"^(\d+)[.-](\d+)$")
+QUESTION_CLIP = 160
+
+
+def _manifest_ids(path: Path) -> list[str]:
+    """The `- id:` values of a stories.yaml, in list order (quotes stripped)."""
+    ids = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return ids
+    for line in lines:
+        m = re.match(r"^\s*-\s+id:\s*(\S.*?)\s*$", line)
+        if m:
+            ids.append(m.group(1).strip().strip("'\""))
+    return ids
+
+
+def _clip(text: str, n: int = QUESTION_CLIP) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= n else text[: n - 1].rstrip() + "…"
+
+
+def _caps_in(cap_list: str) -> list[str]:
+    """`CAP-9 and CAP-10` → [`CAP-9`, `CAP-10`] (normalized, in order)."""
+    return [f"CAP-{int(n)}" for n in re.findall(r"\bCAP-(\d+)(?!\w)", cap_list)]
+
+
+def spec_open_questions(text: str) -> dict:
+    """Story 35.2: the SPEC's CAP → story map (`"35-2"`), its open questions
+    (any bullet under `## Open Questions` naming `CAP-N`: one led by a CAP
+    list — `CAP-9 and CAP-10`, `CAP-11/CAP-12`, `CAP-4, CAP-5` — optionally
+    possessive, `CAP-9's …`, is a question of the lead CAPs, the text past
+    the lead; any other is a question of each CAP it names, the whole
+    bullet; CAP → every question naming it) and its design-note
+    subjects (bullets under any `## Design notes (settled shape, planner,
+    <date>)` heading: the text before the first ` — ` or `:`; a CAP list,
+    optionally with its story `(28.1)`, notes each CAP), split into noted
+    CAPs and noted stories (`35.2`/`35-2` → `"35-2"`)."""
+    caps: dict[str, str] = {}
+    questions: dict[str, list[str]] = {}
+    noted_caps: set[str] = set()
+    noted_stories: set[str] = set()
+    section = None
+    for line in text.splitlines():
+        if line.startswith("## "):
+            if line.strip() == "## Open Questions":
+                section = "questions"
+            elif NOTES_HEADING_RE.match(line):
+                section = "notes"
+            else:
+                section = None
+            continue
+        cap = CAP_LINE_RE.match(line)
+        if cap:
+            caps.setdefault(f"CAP-{int(cap.group(1))}", f"{int(cap.group(2))}-{int(cap.group(3))}")
+        if section == "questions":
+            q = OPEN_QUESTION_RE.match(line)
+            if q:
+                named, text = _caps_in(q.group(1)), q.group(2).strip()
+            elif line.startswith("- "):
+                named, text = _caps_in(line), line[2:].strip()
+            else:
+                named = []
+            for cap in dict.fromkeys(named):
+                questions.setdefault(cap, []).append(text)
+        elif section == "notes" and line.startswith("- "):
+            body = line[2:]
+            cuts = [i for i in (body.find(" — "), body.find(":")) if i >= 0]
+            subject = (body[:min(cuts)] if cuts else body).strip()
+            caps_note = NOTE_CAPS_RE.match(subject)
+            if caps_note:
+                noted_caps.update(_caps_in(caps_note.group(1)))
+                continue
+            m = NOTE_STORY_RE.match(subject)
+            if m:
+                noted_stories.add(f"{int(m.group(1))}-{int(m.group(2))}")
+    return {"caps": caps, "questions": questions,
+            "noted_caps": noted_caps, "noted_stories": noted_stories}
+
+
+def _story_of(entry_id: str) -> str | None:
+    """`35-2` of a manifest id `35-2-<slug>` (None for any other shape)."""
+    m = re.match(r"^(\d+)-(\d+)-", entry_id)
+    return f"{int(m.group(1))}-{int(m.group(2))}" if m else None
+
+
+def _spec_done(folder: Path, entry_id: str) -> bool:
+    """The entry's single `stories/<id>-*.md` (closeout.ts `findSpec`'s
+    glob) has frontmatter `status: done`."""
+    stories = folder / "stories"
+    try:
+        hits = [p for p in stories.iterdir()
+                if p.name.startswith(f"{entry_id}-") and p.name.endswith(".md")]
+    except OSError:
+        return False
+    if len(hits) != 1:
+        return False
+    try:
+        lines = hits[0].read_text(encoding="utf-8-sig").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not lines or lines[0].strip() != "---":
+        return False
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        m = re.match(r"^status:\s*(.*?)\s*$", line)
+        if m:
+            return m.group(1).strip("'\"") == "done"
+    return False
+
+
+def next_story(folder: Path, ids: list[str]) -> str | None:
+    """The story the launch would start: the first manifest entry whose
+    spec is not at `status: done` (None when every entry is done)."""
+    return next((i for i in ids if not _spec_done(folder, i)), None)
+
+
+def unnoted_questions(parsed: dict, entry_id: str) -> list[tuple[str, str]]:
+    """(CAP, question) for each open question of each of the entry's CAPs
+    with no design note naming the CAP or the story, in CAP order (a CAP
+    with several question lines gives one pair each)."""
+    story = _story_of(entry_id)
+    if story is None or story in parsed["noted_stories"]:
+        return []
+    out = []
+    for cap, qs in sorted(parsed["questions"].items(), key=lambda kv: int(kv[0][4:])):
+        if parsed["caps"].get(cap) == story and cap not in parsed["noted_caps"]:
+            out.extend((cap, q) for q in qs)
+    return out
+
+
+def open_questions_gap(folder: Path, spec_md: Path, manifest: Path) -> str | None:
+    """Story 35.2: the `open questions` gap's detail for the next story
+    (`<id>: CAP-N has no design note — <question>`, `; ` between CAPs), or
+    None. A SPEC without `## Open Questions`, or unreadable, is no gap."""
+    try:
+        text = spec_md.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        return None
+    nxt = next_story(folder, _manifest_ids(manifest))
+    if nxt is None:
+        return None
+    missing = unnoted_questions(spec_open_questions(text), nxt)
+    if not missing:
+        return None
+    return "; ".join(f"{nxt}: {cap} has no design note — {_clip(q)}" for cap, q in missing)
+
+
+def story_plans_row(folder: Path, spec_md: Path, manifest: Path) -> dict:
+    """Story 35.2: the advisory ``story plans`` row (``ok`` always true,
+    never a gap): ``all <n> planned`` or ``without a plan: <id>, …``
+    (manifest order; a plan is ``plans/<N>-<M>.md``), plus ``; un-noted
+    open questions: CAP-N (<id>), …`` for the stories after the next one."""
+    ids = _manifest_ids(manifest) if manifest.is_file() else []
+    unplanned = [i for i in ids
+                 if (s := _story_of(i)) is None or not (folder / "plans" / f"{s}.md").is_file()]
+    detail = (f"all {len(ids)} planned" if not unplanned
+              else "without a plan: " + ", ".join(unplanned))
+    try:
+        text = spec_md.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        text = ""
+    if text:
+        parsed = spec_open_questions(text)
+        nxt = next_story(folder, ids)
+        later = ids[ids.index(nxt) + 1:] if nxt is not None else []
+        named, seen = [], set()
+        for i in later:  # a remediation entry shares its story's CAPs: named once
+            for cap, _ in unnoted_questions(parsed, i):
+                if cap not in seen:
+                    seen.add(cap)
+                    named.append(f"{cap} ({i})")
+        if named:
+            detail += "; un-noted open questions: " + ", ".join(named)
+    return {"check": STORY_PLANS_CHECK, "ok": True, "detail": detail}
+
+
 # --------------------------------------------------------------------- verbs
 
 def check(project_root: Path, spec_folder: str) -> dict:
@@ -838,6 +1044,11 @@ def check(project_root: Path, spec_folder: str) -> dict:
             f"{n} entries" if n > 0 else "stories.yaml has no entries — bootstrap the first story's tasks first")
     else:
         add("task manifest", False, "stories.yaml missing — bootstrap the first story's tasks first")
+    # Story 35.2: the next story's un-noted open questions refuse the launch
+    if spec_md.is_file() and manifest.is_file():
+        questions = open_questions_gap(folder_abs, spec_md, manifest)
+        if questions:
+            add(OPEN_QUESTIONS_CHECK, False, questions)
 
     binary = _bmad_loop_binary()
     add("bmad-loop", binary is not None,
@@ -854,6 +1065,8 @@ def check(project_root: Path, spec_folder: str) -> dict:
     checks.append(engine_sandbox_row())
     # Story 34.2: advisory too — never a gap, starts no engine
     checks.append(playable_path_row(root))
+    # Story 35.2: advisory too — the stories still without a plan
+    checks.append(story_plans_row(folder_abs, spec_md, manifest))
 
     try:
         live = live_runs(list_runs(root))

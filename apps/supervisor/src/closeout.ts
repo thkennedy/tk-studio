@@ -26,7 +26,11 @@
  *                  then the 31.5 block below as before;
  *                - landed (spec `status: done`, paused at the commit gate or on an escalation) with a closable
  *                  verdict (any non-empty `reconcile_verdict` other than `escalate`): closed out — the harvest
- *                  commit, the meter harvest, the archive, the relaunch (below);
+ *                  commit, the meter harvest, the archive, the relaunch (below); Story 35.2: with a graceful stop
+ *                  in force (`gracefulStopInForce`, read before the archive) the commit, the meter and the engine
+ *                  cost still run, but neither the archive nor the relaunch: the run stays `paused`, one
+ *                  `story-boundary` event `{story_key, engine_run_id, code: "StoryBoundary", reason, graceful_stop:
+ *                  "kept"}` and one notifier line once since the latest `paused`, and the pass skips the run after;
  *                - landed with no verdict, or `escalate`: left `paused` for a human — one `awaiting-ruling`
  *                  event and one notification per (story key, engine run id); the page says "awaiting a
  *                  ruling"; Story 31.5: for a project with a `planning.jira` binding (`planning.jira.project_key`
@@ -73,12 +77,26 @@
  *                            meter, archive}` (`Queue.resumeFromPause`), then driven through `finishRun` with
  *                            the pinning recorder and `mirror` (the new `launched`). Nothing story-specific is
  *                            passed: `tk-studio-launch` skips done stories itself. The pin is never released here.
+ *   stop       Story 35.2: a graceful stop is in force for a paused run when its engine run dir holds
+ *              `stop-request.json` (existence only — bmad-loop's own `graceful_stop_requested`), or its
+ *              `journal.jsonl` has a `stop-request-discarded` entry with no `run-resume` or `run-start` after it
+ *              (bmad-loop deletes a pending request on every exit and journals the discard); a missing or
+ *              unreadable journal is no stop. Read only, never a bmad-loop call. A relaunch would carry the next
+ *              story in this engine run past the operator's stop, so it is refused (the contract's 0.1.30 Story
+ *              35.2 paragraph: the refusal, never per-story records).
  *   resume     `resumePaused` (`POST /runs/{id}/resume`): a paused run whose story did not land —
  *              `bmad-loop resolve --project <worktree> --no-interactive --resume [--restore-patch <path>] <engine
  *              id>` (on sbx through `sbx exec`, the VM paths) spawned as the supervisor's own child (the engine's
  *              hold for the resume's life); the run `paused` → `running` with `engine-resume`; the engine pid
  *              re-read from `engine.pid` (`Queue.recordEnginePid`). When the child exits, the run is handed back
- *              to the engine-end sweep with a fresh `launched` event (the same engine id).
+ *              to the engine-end sweep with a fresh `launched` event (the same engine id). Story 35.2: with a
+ *              graceful stop in force before the resume (the resume clears the file), the stop is re-armed once
+ *              on the resumed engine after the pid re-read (`deps.launchStop`, default `launchStopGraceful`) and
+ *              recorded `graceful-stop {engine_run_id, rearmed: true, ok, detail}`; when `engine.pid` was never
+ *              rewritten no call is made and `graceful-stop {engine_run_id, rearmed: false, ok: false, detail:
+ *              "engine.pid not rewritten by the resume: re-arm skipped"}` is recorded; a skipped or `ok: false`
+ *              re-arm also sends one notifier line (`rearmFailedLine`: re-issue `launch.py stop --graceful`), its
+ *              outcome the event's `notify`; the answer is unchanged.
  *
  * Every command is argv only — never a shell.
  */
@@ -87,7 +105,7 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { load as loadYaml } from "js-yaml";
 import { notifier, sbxBin } from "./env";
 import { canonicalPr, isWithin, notify, NOTICE_MAX_BYTES, sendText, TRUNCATED_MARKER, type EndNotice } from "./hygiene";
-import { selfOwner, servedRoot, type Owner, type Queue, type QueueEvent, type QueueRun } from "./queue";
+import { engineRoot, selfOwner, servedRoot, type Owner, type Queue, type QueueEvent, type QueueRun } from "./queue";
 import { HOLD_TIMEOUT_S, parseEnginePid, sameStart, type HoldChild } from "./sandbox";
 import { lastJsonObject, runProcess, toVmPath, type RunResult } from "./server";
 import { COPIED_RUNTIME, meteredCost, runner, studioScript, uvRunner, type WorktreeDeps } from "./worktree";
@@ -218,7 +236,12 @@ export interface PausedDeps extends WorktreeDeps {
   self?: Owner;
   /** Story 33.6: the auto-resume's resume (default `resumePaused` under this process; throws `ResumeRefused`). */
   resume?: (queue: Queue, runId: string) => Promise<unknown>;
+  /** Story 35.2: the graceful stop the auto-resume's resume re-arms (default `cli.ts` `launchStopGraceful`). */
+  launchStop?: GracefulStopper;
 }
+
+/** Story 35.2: a graceful stop of a launched engine (`cli.ts` `launchStopGraceful`). A failure is returned, never thrown. */
+export type GracefulStopper = (root: string, engineRunId: string) => Promise<{ ok: boolean; detail: string }>;
 
 const envOf = (deps: WorktreeDeps): Env => deps.env ?? process.env;
 
@@ -366,6 +389,71 @@ function noteEngineCost(queue: Queue, run: QueueRun): void {
   } catch { /* not recorded: the final close-out reads the latest engine only */ }
 }
 
+// ------------------------------------------------------------ Story 35.2: a graceful stop in force
+
+/** The `story-boundary` queue event, and its code. */
+export const STORY_BOUNDARY = "story-boundary";
+export const STORY_BOUNDARY_CODE = "StoryBoundary";
+
+/** Where a graceful stop in force was read: the pending `stop-request.json` (its `requested_at`, when it names
+ * one) or a `stop-request-discarded` journal entry no `run-resume`/`run-start` follows (its time, when given). */
+export interface StopInForce { source: "stop-request" | "journal"; at?: string }
+
+/** Story 35.2: is a graceful stop in force for the engine run dir (see the header)? Reads only. Never throws. */
+export function gracefulStopInForce(runDir: string): StopInForce | undefined {
+  try {
+    const file = join(runDir, "stop-request.json");
+    if (existsSync(file)) {
+      let at: string | undefined;
+      try {
+        const doc = JSON.parse(readFileSync(file, "utf-8"));
+        if (typeof doc?.requested_at === "string" && doc.requested_at.trim()) at = doc.requested_at.trim();
+      } catch { /* any content: existence is the signal */ }
+      return { source: "stop-request", ...(at ? { at } : {}) };
+    }
+    let text: string;
+    try { text = readFileSync(join(runDir, "journal.jsonl"), "utf-8"); } catch { return undefined; }
+    const entries: Record<string, unknown>[] = [];
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      try {
+        const e = JSON.parse(line);
+        if (e && typeof e === "object" && !Array.isArray(e)) entries.push(e as Record<string, unknown>);
+      } catch { /* an unparsable line is skipped */ }
+    }
+    const discard = entries.findLastIndex((e) => e.kind === "stop-request-discarded");
+    if (discard < 0) return undefined;
+    if (entries.slice(discard + 1).some((e) => e.kind === "run-resume" || e.kind === "run-start")) return undefined;
+    const ts = entries[discard]!.ts;
+    const at = typeof ts === "number" && Number.isFinite(ts) ? new Date(ts * 1000).toISOString() : undefined;
+    return { source: "journal", ...(at ? { at } : {}) };
+  } catch { return undefined; }
+}
+
+/** The `story-boundary` reason a stop in force gives. */
+export const storyBoundaryReason = (stop: StopInForce): string =>
+  `a graceful stop is in force (requested ${stop.source === "stop-request" ? stop.at ?? "at an unknown time" : "before the pause, discarded at pause"}): relaunching would start the next story in this run`;
+
+/** The `story-boundary` notifier line. */
+export const storyBoundaryLine = (runId: string, key: string, reason: string): string =>
+  oneLine(`supervisor: run ${runId} stays paused: story ${key} landed, not relaunched: ${reason}`);
+
+/** One `story-boundary` (story key, engine run id) recorded since the run's latest `paused` event. */
+export function storyBoundaryRecorded(events: readonly QueueEvent[], storyKey: string, engineRunId: string | null): boolean {
+  const pause = events.findLastIndex((e) => e.kind === "paused");
+  return events.slice(pause + 1).some((e) => e.kind === STORY_BOUNDARY && e.detail?.story_key === storyKey && e.detail?.engine_run_id === engineRunId);
+}
+
+/** Story 35.2: the refused relaunch's one record and one notifier line for this pause. Never throws. */
+async function noteStoryBoundary(queue: Queue, run: QueueRun, key: string, stop: StopInForce, deps: PausedDeps): Promise<void> {
+  try {
+    if (storyBoundaryRecorded(queue.events(run.run_id), key, run.engine_run_id)) return;
+    const reason = storyBoundaryReason(stop);
+    await sendLine(deps, storyBoundaryLine(run.run_id, key, reason));
+    queue.note(run.run_id, STORY_BOUNDARY, { story_key: key, engine_run_id: run.engine_run_id, code: STORY_BOUNDARY_CODE, reason, graceful_stop: "kept" });
+  } catch { /* not recorded: the next pass tries again */ }
+}
+
 async function closeOutLanded(queue: Queue, run: QueueRun, l: Extract<Landing, { outcome: "close-out" }>, deps: PausedDeps): Promise<boolean> {
   const key = l.story_key;
   const commit = await commitStep(run, key, deps);
@@ -373,6 +461,9 @@ async function closeOutLanded(queue: Queue, run: QueueRun, l: Extract<Landing, {
   const meter = await meterStep(run, deps);
   if (!meter.ok) { noteFailed(queue, run, key, "meter", meter.error); return false; }
   noteEngineCost(queue, run);
+  // Story 35.2: read before the archive moves the run dir; a stop in force keeps the run paused.
+  const stop = gracefulStopInForce(runDirOf(run));
+  if (stop) { await noteStoryBoundary(queue, run, key, stop, deps); return false; }
   const archive = await archiveStep(run, deps);
   if (!archive.ok) { noteFailed(queue, run, key, "archive", archive.error); return false; }
   if (!deps.relaunch) { noteFailed(queue, run, key, "relaunch", "no relaunch driver"); return false; }
@@ -632,7 +723,7 @@ export function secondHaltRecorded(events: readonly QueueEvent[], key: string): 
 }
 
 /** One line through the notifier; its outcome for the event (`awaitRuling`'s `none` skip). Never throws. */
-async function sendLine(deps: PausedDeps, text: string): Promise<Record<string, unknown>> {
+async function sendLine(deps: Pick<PausedDeps, "hygiene" | "env">, text: string): Promise<Record<string, unknown>> {
   try {
     const selected = notifier(deps.hygiene?.env ?? envOf(deps));
     return selected.kind === "none" ? { ...NO_NOTIFIER } : await sendText(selected, text, deps.hygiene?.fetch ?? fetch);
@@ -719,6 +810,8 @@ export async function closeOutPaused(queue: Queue, deps: PausedDeps = {}): Promi
       }
       if (l.outcome === "awaiting-ruling" && rulingRecorded(queue.events(r.run_id), l.story_key, r.engine_run_id)
         && !trackOwed(r, queue.events(r.run_id), l.story_key)) continue;
+      // Story 35.2: a relaunch refused at the story boundary is not retried while this pause lasts.
+      if (l.outcome === "close-out" && storyBoundaryRecorded(queue.events(r.run_id), l.story_key, r.engine_run_id)) continue;
       const run = queue.takeForCloseOut(r.run_id, self);
       if (!run || run.state !== "paused") continue;
       taken = true;
@@ -750,6 +843,10 @@ export interface ResumeDeps extends WorktreeDeps {
   pollMs?: number;
   sleep?: (ms: number) => Promise<void>;
   self?: Owner;
+  /** Story 35.2: the re-arm of a graceful stop in force (default `cli.ts` `launchStopGraceful`). */
+  launchStop?: GracefulStopper;
+  /** Story 35.2: the notifier a skipped or failed re-arm tells (as `PausedDeps.hygiene`). */
+  hygiene?: { env?: Env; fetch?: Fetch };
 }
 
 export interface ResumeAnswer { ok: true; run_id: string; state: "running"; engine_run_id: string }
@@ -794,6 +891,36 @@ function handBack(queue: Queue, runId: string, engineRunId: string, result: unkn
   backToPaused(queue, runId, { resume_failed: `the resumed run could not be handed to the engine-end sweep: ${lastError}` });
 }
 
+/** The `graceful-stop` detail when the resume never rewrote `engine.pid`. */
+export const REARM_SKIPPED = "engine.pid not rewritten by the resume: re-arm skipped";
+
+/** The notifier line of a re-arm skipped or failed: the resumed engine runs with no graceful stop. */
+export const rearmFailedLine = (runId: string, engineRunId: string, detail: string): string =>
+  oneLine(`supervisor: run ${runId}: the graceful stop was not re-armed on resumed engine ${engineRunId} (${detail}): it may carry into the next story; re-issue \`launch.py stop --graceful --run-id ${engineRunId}\``);
+
+/** Story 35.2: re-arm a graceful stop in force on the resumed engine, once, and record it. Only once the resume
+ * rewrote `engine.pid`: bmad-loop clears `stop-request.json` just before that write, so a stop sent earlier could
+ * be deleted while recorded ok — unrewritten, the call is skipped and `rearmed: false` recorded. A skipped or
+ * failed (`ok: false`) re-arm also sends one notifier line, its outcome the event's `notify`. Never throws. */
+async function rearmStop(queue: Queue, run: QueueRun, deps: ResumeDeps, pidRewritten: boolean): Promise<void> {
+  const id = run.engine_run_id!;
+  if (!pidRewritten) {
+    const notify = await sendLine(deps, rearmFailedLine(run.run_id, id, REARM_SKIPPED));
+    try { queue.note(run.run_id, "graceful-stop", { engine_run_id: id, rearmed: false, ok: false, detail: REARM_SKIPPED, notify }); }
+    catch { /* not recorded */ }
+    return;
+  }
+  let r: { ok: boolean; detail: string };
+  try {
+    const stopper = deps.launchStop ?? (await import("./cli")).launchStopGraceful;
+    r = await stopper(engineRoot(run), id);
+  } catch (e) { r = { ok: false, detail: clip(message(e)) }; }
+  const ok = r.ok === true, detail = clip(String(r.detail ?? ""), 500);
+  const notify = ok ? undefined : await sendLine(deps, rearmFailedLine(run.run_id, id, detail));
+  try { queue.note(run.run_id, "graceful-stop", { engine_run_id: id, rearmed: true, ok, detail, ...(notify ? { notify } : {}) }); }
+  catch { /* not recorded */ }
+}
+
 /** `POST /runs/{id}/resume` (see the header). Throws `ResumeRefused`. */
 export async function resumePaused(queue: Queue, runId: string, opts: { restorePatch?: string } = {}, deps: ResumeDeps = {}): Promise<ResumeAnswer> {
   const run = queue.get(runId);
@@ -826,6 +953,8 @@ export async function resumePaused(queue: Queue, runId: string, opts: { restoreP
   const pidFile = join(runDirOf(run), "engine.pid");
   const readPid = () => { try { return parseEnginePid(readFileSync(pidFile, "utf-8")); } catch { return null; } };
   const before = readPid() ?? { pid: run.engine_pid, start: run.engine_start };
+  // Story 35.2: read before the resume, which clears a pending stop request.
+  const stop = gracefulStopInForce(runDirOf(run));
   try {
     queue.resumeFromPause(runId, "engine-resume", { engine_run_id: id, argv: args, ...(patch ? { restore_patch: patch } : {}) }, deps.self ?? selfOwner());
   } catch (e) { throw new ResumeRefused("RunNotPaused", clip(message(e))); }
@@ -853,5 +982,6 @@ export async function resumePaused(queue: Queue, runId: string, opts: { restoreP
     if (found) queue.recordEnginePid(runId, { ...found, source: "engine.pid" }, { ...(sb ? { sandbox: sb } : {}), resumed: true });
     else queue.recordEnginePid(runId, null, { ...(sb ? { sandbox: sb } : {}), why: "engine.pid was not rewritten by the resume", resumed: true });
   } catch { /* ended meanwhile */ }
+  if (stop) await rearmStop(queue, run, deps, found !== null);
   return { ok: true, run_id: runId, state: "running", engine_run_id: id };
 }
