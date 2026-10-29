@@ -10,6 +10,9 @@ datum came from):
                              "module set" is the studio's installer registry)
   user-authored              project .claude/skills (minus BMad-synced names),
                              project .claude/agents, _bmad/custom/ content
+  studio-plugin skills       the tk-studio plugin's own skills/*/SKILL.md
+                             (additive, scanned last: a name an earlier plane
+                             already produced always wins)
 
 User-authored is a first-class recommendation path (AD-17). A .claude/skills
 entry whose name appears in the installed skill manifest is the installer's
@@ -144,17 +147,21 @@ def _rel(path: Path, root: Path) -> str:
     return str(path.relative_to(root)).replace("\\", "/")
 
 
-def scan(project_root: Path, lock_path: Path | None = None) -> dict:
+def scan(project_root: Path, lock_path: Path | None = None, *,
+         plugin_skills_dir: Path | None = None) -> dict:
     """Enumerate the full resource universe for a machine + project.
 
     Pure read. Missing planes degrade to notes, never errors — a project
     without _bmad/ still gets the known-module registry and its own
-    user-authored resources.
+    user-authored resources. ``plugin_skills_dir`` (default: the plugin's
+    own skills/ folder) is injectable so tests stay hermetic.
     """
     root = Path(project_root).resolve()
     if not root.is_dir():
         raise InventoryError(f"project root {root} is not a directory")
     lock_path = Path(lock_path) if lock_path else DEFAULT_LOCK_PATH
+    plugin_skills_dir = (Path(plugin_skills_dir) if plugin_skills_dir
+                         else PLUGIN_ROOT / "skills")
 
     resources: list[dict] = []
     notes: list[str] = []
@@ -293,13 +300,44 @@ def scan(project_root: Path, lock_path: Path | None = None) -> dict:
                 "provenance": prov,
             })
 
+    # -- studio-plugin: skills the tk-studio plugin itself ships (additive;
+    # an existing resource name always wins, so earlier planes are unchanged)
+    sources["plugin_skills"] = plugin_skills_dir.is_dir()
+    if sources["plugin_skills"]:
+        taken = {r["name"] for r in resources}
+        for entry in sorted(plugin_skills_dir.iterdir()):
+            skill_md = entry / "SKILL.md"
+            if not entry.is_dir() or not skill_md.is_file():
+                continue
+            summary = read_frontmatter_summary(skill_md)
+            name = summary.get("name", entry.name)
+            if name in taken:
+                continue
+            taken.add(name)
+            resolved = entry.resolve()
+            try:
+                path = _rel(resolved, root)
+            except ValueError:
+                path = resolved.as_posix()
+            resources.append({
+                "kind": "skill",
+                "name": name,
+                "status": "installed",
+                "origin": "studio-plugin",
+                "description": summary.get("description"),
+                "path": path,
+                "provenance": "tk-studio plugin skills/",
+            })
+
     counts = {
         "modules_installed": sum(1 for r in resources
                                  if r["kind"] == "module" and r["status"] == "installed"),
         "modules_known_uninstalled": sum(1 for r in resources
                                          if r["status"] == "known-uninstalled"),
         "skills_installed": sum(1 for r in resources
-                                if r["kind"] == "skill" and r["origin"] != "user-authored"),
+                                if r["kind"] == "skill"
+                                and r["origin"] not in ("user-authored", "studio-plugin")),
+        "plugin_skills": sum(1 for r in resources if r["origin"] == "studio-plugin"),
         "user_authored": sum(1 for r in resources if r["origin"] == "user-authored"),
         "total": len(resources),
     }

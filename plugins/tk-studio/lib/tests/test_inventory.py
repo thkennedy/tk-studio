@@ -217,6 +217,64 @@ class InventoryTest(unittest.TestCase):
             self.assertIn("origin", resource)
             self.assertIn(resource["kind"], ("module", "skill", "agent", "custom"))
 
+    # --- DW-72: studio-plugin plane (skills the tk-studio plugin ships)
+
+    def _plugin_dir(self, *names: str) -> Path:
+        plugin = Path(self._tmp.name) / "plugin-skills"
+        plugin.mkdir(exist_ok=True)
+        for name in names:
+            d = plugin / name
+            d.mkdir()
+            (d / "SKILL.md").write_text(
+                f"---\nname: {name}\ndescription: Shipped {name}.\n---\n",
+                encoding="utf-8")
+        return plugin
+
+    def test_plugin_plane_emits_shipped_skill(self):
+        plugin = self._plugin_dir("gds-engine-demo")
+        result = inventory.scan(self.root, lock_path=self.lock,
+                                plugin_skills_dir=plugin)
+        self.assertTrue(result["sources"]["plugin_skills"])
+        skill = self._by_name(result, "gds-engine-demo")
+        self.assertEqual((skill["kind"], skill["status"], skill["origin"]),
+                         ("skill", "installed", "studio-plugin"))
+        self.assertEqual(skill["description"], "Shipped gds-engine-demo.")
+        self.assertEqual(skill["provenance"], "tk-studio plugin skills/")
+        self.assertEqual(skill["path"],
+                         (plugin / "gds-engine-demo").resolve().as_posix())
+        self.assertEqual(result["counts"]["plugin_skills"], 1)
+
+    def test_plugin_plane_name_collision_keeps_existing_resource(self):
+        plugin = self._plugin_dir("bmad-help", "my-reviewer")
+        result = inventory.scan(self.root, lock_path=self.lock,
+                                plugin_skills_dir=plugin)
+        for name in ("bmad-help", "my-reviewer"):
+            matches = [r for r in result["resources"] if r["name"] == name]
+            self.assertEqual(len(matches), 1, name)
+            self.assertNotEqual(matches[0]["origin"], "studio-plugin", name)
+        self.assertEqual(result["counts"]["plugin_skills"], 0)
+
+    def test_absent_plugin_skills_dir_degrades_without_error(self):
+        result = inventory.scan(self.root, lock_path=self.lock,
+                                plugin_skills_dir=Path(self._tmp.name) / "nope")
+        self.assertFalse(result["sources"]["plugin_skills"])
+        self.assertFalse(any(r["origin"] == "studio-plugin"
+                             for r in result["resources"]))
+
+    def test_plugin_plane_leaves_existing_counts_unchanged(self):
+        without = inventory.scan(self.root, lock_path=self.lock,
+                                 plugin_skills_dir=Path(self._tmp.name) / "nope")
+        plugin = self._plugin_dir("gds-engine-demo", "tk-studio-demo")
+        with_plugin = inventory.scan(self.root, lock_path=self.lock,
+                                     plugin_skills_dir=plugin)
+        for key in ("modules_installed", "modules_known_uninstalled",
+                    "skills_installed", "user_authored"):
+            self.assertEqual(without["counts"][key], with_plugin["counts"][key], key)
+        self.assertEqual(with_plugin["counts"]["plugin_skills"], 2)
+        self.assertEqual(with_plugin["resources"][:len(without["resources"])],
+                         without["resources"])
+        self.assertEqual(with_plugin["notes"], without["notes"])
+
     # --- read-only discipline
 
     def test_scan_is_a_pure_read(self):

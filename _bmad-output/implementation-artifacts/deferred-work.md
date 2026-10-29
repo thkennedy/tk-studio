@@ -83,7 +83,8 @@ source_spec: `25-3-the-drift-check-and-conformance-read-the-folder-and-the-the-d
 location: plugins/tk-studio/lib/consolidate.py:246
 severity: low
 reason: plugins/tk-studio/lib/consolidate.py:246-247 builds the fix "run the guided fix on the affected machine (tk install / /plugin marketplace update)". Story 25-3 removed that flow from the drift check, SKILL.md, driver-contract §6 (pinned by test_driver_contract assertNotIn("/plugin marketplace update")) and amended AD-13 to the folder and the roster. Under AD-21 a marketplace copy is the `shadowed` condition, so evolve proposals built from drift-detection events give guidance that contradicts the plane's own fixes. The text pre-dates this story and the file is outside its Files boundary. Deferral criterion (b): an AD rule (AD-13 as amended) left contradicted by a shipped fix text.
-status: open
+status: done 2026-10-29
+resolution: resolved by sweep bundle dw-studio-drift-and-routing-text
 
 ### DW-12: A studio-web update while the supervisor leg is `reported` (source checkout) or `skipped` renames the live studio-web slot aside with nothing restarted, so a running supervisor may serve a renamed pat
 origin: spec-deferred 8afffc622e6a
@@ -573,7 +574,8 @@ source_spec: `34-4-engine-knowledge-pinned-per-project-spec.md`
 location: plugins/tk-studio/lib/orchestrate.py _resolve_routes; plugins/tk-studio/lib/inventory.py planes
 severity: low
 reason: Plan 34-4 Risks and the spec's Never rule ("Widen inventory.py/orchestrate.py routing (recorded as a deferral instead)") require this deferral; follow-up blind review found it unrecorded. Class (a): the routing display of AC1's confirmed skill. Display only: the skills mount does not depend on it.
-status: open
+status: done 2026-10-29
+resolution: resolved by sweep bundle dw-studio-drift-and-routing-text
 
 ### DW-73: Follow-up review still recommended for 34-4-engine-knowledge-pinned-per-project after the damping cap was spent
 origin: review-budget-followup
