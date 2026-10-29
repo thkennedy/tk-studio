@@ -1663,7 +1663,7 @@ class Hermes(DoctorCase):
         home = self.tmp / "local" / "hermes"
         home.mkdir(parents=True, exist_ok=True)
         if text is not None:
-            (home / "config.yaml").write_text(text)
+            (home / "config.yaml").write_text(text, encoding="utf-8")
         return home / "config.yaml"
 
     def test_no_hermes_home_is_not_reported(self):
