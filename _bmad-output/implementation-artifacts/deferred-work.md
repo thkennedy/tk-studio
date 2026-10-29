@@ -92,7 +92,8 @@ source_spec: `25-4-the-bootstrap-and-the-meta-cli-the-bootstrap-and-the-meta-cli
 location: tools/installer/cli/tk_studio_cli/apps.py apply_slots / run_legs
 severity: medium
 reason: apply_slots computes restart = live_sup only when the supervisor leg is `unchanged`; for `reported`/`skipped` restart is None, must_start is False, and swap() still renames the old web slot to .<version>.previous. Consult 2026-10-14 ruled a `reported` studio_web status out of scope for a review patch (AC3 is supervisor-only, spec Design Notes; a new leg status needs a planned I/O-matrix entry). Deferral rule (a): behaviour AC2 names (the supervisor serves the studio-web slot). Reader: 25-5.
-status: open
+status: done 2026-10-29
+resolution: already resolved: Commit 603192a (Story 30-2, 2026-10-19, after the deferral): the supervisor resolves the studio-web root per request — apps/supervisor/src/api.ts:926 web() calls webRoot() (apps/supervisor/src/web.ts:44-51), which reads current.json's "studio-web".path fresh each time (slotRoot, web.ts:31-41), so after swap() rewrites current.json (tools/installer/cli/tk_studio_cli/apps.py swap) a running supervisor serves the new slot without a restart; a source-checkout supervisor serves apps/studio-web/dist and never the renamed slot.
 
 ### DW-13: Follow-up review still recommended for 25-4-the-bootstrap-and-the-meta-cli after the damping cap was spent
 origin: review-budget-followup
