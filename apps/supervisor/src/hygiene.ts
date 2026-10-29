@@ -150,15 +150,29 @@ export function prUrl(block: unknown): string | undefined {
 export interface EndNotice {
   run_id: string; job_id: string; project_id: string | null; studio_run_id: string | null;
   state: string; reason: string | null; pr?: string;
+  /** Story 35.7: a sweep run's line content (`<landed>/<n> bundles; blocked: …; decisions: …`), from its ending event. */
+  sweep?: string;
 }
+
+/** Story 35.7: a terminal sweep run's line read live (undefined for a run that is not a sweep). Registered by
+ * `sweep.ts` — hygiene never imports it (sweep → worktree → hygiene would cycle). */
+type SweepLineReader = (queue: Queue, run: QueueRun) => string | undefined;
+let sweepLineReader: SweepLineReader | undefined;
+export function registerSweepLine(read: SweepLineReader): void { sweepLineReader = read; }
 
 /** The notice of a terminal queue run: the PR from its ending event's detail (`mirror` records it). */
 export function endNotice(queue: Queue, run: QueueRun): EndNotice {
-  const ending = queue.events(run.run_id).findLast((e) => e.kind === "ended" || e.kind === "orphaned");
+  const events = queue.events(run.run_id);
+  const ending = events.findLast((e) => e.kind === "ended" || e.kind === "orphaned");
   const pr = canonicalPr(ending?.detail?.pr);
+  // A sweep's line from its ending event, else from its latest `closed_out` (a terminal run's late close-out), else
+  // read live: a run made terminal before its close-out (a cancel) still has its worktree. Any failure omits the line.
+  const notice = (d: Record<string, unknown> | null | undefined) => (d?.sweep as Record<string, unknown> | undefined)?.notice;
+  let sweep = notice(ending?.detail) ?? notice(events.findLast((e) => e.kind === "closed_out" && notice(e.detail) !== undefined)?.detail);
+  if (sweep === undefined && sweepLineReader) { try { sweep = sweepLineReader(queue, run); } catch { /* no line */ } }
   return {
     run_id: run.run_id, job_id: run.job_id, project_id: run.project_id, studio_run_id: run.studio_run_id,
-    state: run.state, reason: run.reason, ...(pr ? { pr } : {}),
+    state: run.state, reason: run.reason, ...(pr ? { pr } : {}), ...(typeof sweep === "string" && sweep ? { sweep } : {}),
   };
 }
 
@@ -184,19 +198,27 @@ function clipBytes(s: string, budget: number): string {
 
 /** The notification text: the run, its state, its reason, and its PR when there is one — within
  * NOTICE_MAX_BYTES. Only the reason is ever cut (ending with TRUNCATED_MARKER); the run id, the
- * state and the PR are kept whole. */
+ * state and the PR are kept whole. Story 35.7: a sweep run adds one `sweep: …` line before the PR — omitted only
+ * when the reason line as composed (after any clipping) already carries `sweep: <notice>` verbatim. */
 export function noticeText(n: EndNotice): string {
   const head = `supervisor: run ${n.run_id} ended ${n.state}`;
   const job = `job: ${n.job_id}${n.project_id ? ` (project ${n.project_id})` : ""}${n.studio_run_id ? `, studio run ${n.studio_run_id}` : ""}`;
-  const pr = n.pr ? [`PR: ${n.pr}`] : [];
   const reason = n.reason ?? "none";
-  const compose = (jobLine: string, r: string) => [head, ...(jobLine ? [jobLine] : []), `reason: ${r}`, ...pr].join("\n");
-  const full = compose(job, reason);
-  if (utf8Bytes(full) <= NOTICE_MAX_BYTES) return full;
-  // The reason is cut first; the job line only when it alone overflows (ids are short in practice).
-  const jobLine = utf8Bytes(compose(job, TRUNCATED_MARKER)) <= NOTICE_MAX_BYTES ? job : clipBytes(job, 300);
-  const budget = NOTICE_MAX_BYTES - utf8Bytes(compose(jobLine, TRUNCATED_MARKER));
-  return compose(jobLine, `${clipBytes(reason, budget)}${TRUNCATED_MARKER}`);
+  const prLine = n.pr ? [`PR: ${n.pr}`] : [];
+  const build = (tail: string[]): { text: string; reasonLine: string } => {
+    const compose = (jobLine: string, r: string) => [head, ...(jobLine ? [jobLine] : []), `reason: ${r}`, ...tail].join("\n");
+    const full = compose(job, reason);
+    if (utf8Bytes(full) <= NOTICE_MAX_BYTES) return { text: full, reasonLine: reason };
+    // The reason is cut first; the job line only when it alone overflows (ids are short in practice).
+    const jobLine = utf8Bytes(compose(job, TRUNCATED_MARKER)) <= NOTICE_MAX_BYTES ? job : clipBytes(job, 300);
+    const budget = NOTICE_MAX_BYTES - utf8Bytes(compose(jobLine, TRUNCATED_MARKER));
+    const cut = `${clipBytes(reason, budget)}${TRUNCATED_MARKER}`;
+    return { text: compose(jobLine, cut), reasonLine: cut };
+  };
+  if (!n.sweep) return build(prLine).text;
+  const bare = build(prLine);
+  if (bare.reasonLine.includes(`sweep: ${n.sweep}`)) return bare.text;
+  return build([`sweep: ${clipBytes(n.sweep, 600)}`, ...prLine]).text;
 }
 
 const SEND_TIMEOUT_MS = 15_000;

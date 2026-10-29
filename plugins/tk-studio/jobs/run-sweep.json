@@ -1,0 +1,23 @@
+{
+  "job_schema_version": 1,
+  "id": "run-sweep",
+  "description": "Studio pipeline job type (Story 35.7): run one deferred-work sweep on the execution substrate through the studio. The tk-studio-launch surface's sweep verb starts `bmad-loop sweep --no-prompt` detached in the run's worktree with a pre-minted run id and waits for the triage (bmad-loop-sweep's partition of deferred-work.md); max_bundles and the attempt caps come from .bmad-loop/policy.toml (an instance may add max_bundles to the payload). One-shot: every bundle commits on the run branch, the host leg runs once at the engine's end, and the close-out opens one PR listing the bundles, the blocked entries and the human decisions; the merge flips the entries to resolved through the plan pull-back.",
+  "target": {
+    "skill": "tk-studio-launch",
+    "payload": {
+      "verb": "sweep"
+    }
+  },
+  "trigger": "one-shot",
+  "requires": {
+    "tier": "sbx"
+  },
+  "guards": {
+    "max_turns": 80,
+    "max_wall_clock_seconds": 3600
+  },
+  "stop": {
+    "on_status": ["blocked"]
+  },
+  "effort": "high"
+}

@@ -16,13 +16,14 @@ checkout until it finishes, pauses, or is stopped.
 
 ## Payload
 
-- `verb` — `start` (default) | `status` | `stop`
+- `verb` — `start` (default) | `status` | `stop` | `sweep` (Story 35.7, the `run-sweep` job type)
 - `directory` — the project root (the nested root for a supervisor epic, never an engine worktree); `lib/launch.py` walks `--directory` up to the nearest folder holding `.tk-studio/config.yaml` (driver contract 0.1.22), so a nested project launches against its own root and store
 - `epic` — epic number (`start`; required unless `spec_folder` is given)
 - `spec_folder?` — project-relative epic spec folder; default `_bmad-output/specs/spec-epic-<N>`
 - `story?` — the first story to bootstrap as `<epic>-<story>` (default: the epic's first story)
 - `bootstrap?` — `true` (default) prepares SPEC.md, the epic's manifest and a plan for every story in it (list order) when absent; `false` refuses instead
 - `allow_budget_mismatch?` — `start`: `true` acknowledges a `budget_mismatch` and launches anyway (passed to the core as `--allow-budget-mismatch`); default `false` refuses it
+- `max_bundles?` — `sweep`: an integer ≥ 1 bounding the sweep's bundles (passed as `--max-bundles`; default: the policy's `[sweep] max_bundles`)
 - `run_id?` — `status`/`stop`: the run to address (default: the live run)
 - `graceful?` — `stop` after the current unit instead of immediately
 
@@ -81,6 +82,20 @@ checkout until it finishes, pauses, or is stopped.
 
 7. **Report.** Attended and headless alike: the run id, the spec folder, the stories planned (none on a relaunch) and the `story plans` row, the route (session / implementer / reviewers / consult models and where each came from), any `budget_mismatch` with both numbers, and how to watch it — the studio supervisor's status page, `launch.py status` (this surface's `status` verb), and `bmad-loop tui`. Then end with the status block (below).
 
+### `sweep`
+
+Story 35.7: one deferred-work sweep through the studio (the `run-sweep` job type). Resolve `<root>` as `start` step 0 does, then run — no route, no bootstrap, no `check` (the core refuses on its own):
+
+```bash
+uv run "${CLAUDE_PLUGIN_ROOT}/lib/launch.py" sweep --directory <root> --triage-wait 540 [--max-bundles <max_bundles>]
+```
+
+Run it with the Bash tool timeout set to 600000 ms: the status block must print inside the tool's 600 s cap (the wait counts from the call's start), so the skill waits 540 s; the core's default stays 1500 s. A longer triage ends `complete` / `triage still running` and the supervisor's watch records it.
+
+The core refuses before spawning anything (`blocked`, the gap named): no `.bmad-loop/policy.toml`, no `_bmad-output/implementation-artifacts/deferred-work.md`, a live engine owning the checkout (one engine per checkout, as `start`: the run ids and statuses named — never stopped to make room, never a second engine), a dirty tree (`git status --porcelain`, the paths named), an existing run dir. Otherwise it starts `bmad-loop sweep --project <root> --no-prompt --run-id <rid> [--max-bundles <n>]` detached (the triage pass: `bmad-loop-sweep` partitions the ledger; `max_bundles` and the attempt caps come from the policy, whose `[sweep] auto` stays `never` — an explicit start ignores it), waits for its `state.json`, then for `.bmad-loop/runs/<rid>/triage.json` (`--triage-wait`: the skill waits 540 s; the core's default stays 1500 s). A read triage is emitted once as the `sweep-triage` ledger event and returned as `triage {bundles: [{name, dw_ids}], blocked: [{id, blocker}], decisions: [{id, question}], already_resolved: [id], skip: [id]}`. Never clean the tree, never edit the policy or the ledger, never answer a decision: under `--no-prompt` they are skipped unattended and listed for `bmad-loop decisions`.
+
+Report the bundles, the blocked entries and the human decisions, then end on the core's block. The bundles run in the engine afterwards; the supervisor closes the run out (one PR per sweep) and flips the ledger after the merge.
+
 ### `status`
 
 ```bash
@@ -105,6 +120,8 @@ Every path — `start` fresh or relaunch, `status`, `stop`, attended or headless
 {"status": "complete", "intent": "tk-studio-launch", "artifacts": [".bmad-loop/runs/20260903-101500-ab12", "_bmad-output/specs/spec-epic-2"], "reason": null}
 ```
 
+A `sweep` ends on its block: `complete` with `artifacts: [".bmad-loop/runs/<rid>", ".bmad-loop/runs/<rid>/triage.json"]` and the one-line reason `bundles: <name> (DW-a, DW-b); …; blocked: DW-x, …; decisions: DW-y, …` (`none` for an empty list); `complete` with `artifacts: [".bmad-loop/runs/<rid>"]` and `reason: "triage still running"` when the wait elapsed with the engine live (the supervisor's watch records the triage later); `blocked` when the engine ended or paused before any `triage.json` (the triage escalated — or, when the engine's journal holds `sweep-nothing-open`, `reason` names `sweep: nothing open in the ledger`) or leaving a `triage.json` that does not parse (`sweep triage unreadable`, no full wait), or a refusal.
+
 `blocked` names the gap verbatim: the readiness check's `gaps[]` (an `open questions` gap naming every CAP of the next story that has no design note), an unacknowledged `budget_mismatch`, the missing project resource, an unconfirmed launch. A path that ends before any core call (an unresolvable input, an unignored routing write, a missing `bmad-spec`) prints the same block shape itself, `blocked` with the gap. `partial` is the core's `check` naming a `budget_mismatch`.
 
 If the deterministic core is unrunnable — a tool call denied by permissions, `uv`/python unavailable — end `blocked` with the status block naming the unrunnable core as `reason`: never a question, never a headless run that ends without the block (AD-11).
@@ -115,5 +132,5 @@ If the deterministic core is unrunnable — a tool call denied by permissions, `
 - The core never writes into the project tree: run state is the engine's, launch logs live in the per-user store (AD-3).
 - SPEC.md comes from `bmad-spec`, the task manifest from the project's task-planning instructions — this surface authors neither.
 - The route comes from `lib/pipeline.py` — the shipped legs are measured defaults (AD-14 resource tier); a project overrides them in `.bmad-loop/routing.toml`, a driver per invocation with `--set leg.field=value`. Escalation is deliberate: this surface never routes a leg onto a larger model than the resolved value, and never launches a subagent on the planner tier.
-- Job-level events belong to the job wrapper (`job-run`); this surface emits none of its own (AD-12).
+- Job-level events belong to the job wrapper (`job-run`); this surface emits none of its own (AD-12) except `sweep-triage`, which the core's `sweep` verb alone emits once per triage read (Story 35.7).
 - All paths resolve through `${CLAUDE_PLUGIN_ROOT}`.

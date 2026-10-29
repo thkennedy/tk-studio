@@ -247,7 +247,7 @@ class JobTestCase(unittest.TestCase):
 
     def test_engine_types_require_the_sandbox_tier(self):
         types = joblib.load_types()
-        for type_id in ("run-epic", "run-vertical-slice", "maintenance-evals"):
+        for type_id in ("run-epic", "run-vertical-slice", "maintenance-evals", "run-sweep"):
             self.assertEqual(types[type_id]["problems"], [], type_id)
             self.assertEqual(types[type_id]["definition"]["requires"],
                              {"tier": "sbx"}, type_id)
@@ -328,6 +328,26 @@ class JobTestCase(unittest.TestCase):
         for key in ("model", "effort", "tier", "on_status"):
             self.assertNotIn(key, defn)
         self.assertEqual(joblib.load_instances(self.root)["jobs"], [])
+
+    # ---------------- Story 35.7: the shipped run-sweep job type
+
+    def test_run_sweep_ships_in_run_epics_shape(self):
+        types = joblib.load_types()
+        entry = types["run-sweep"]
+        self.assertEqual(entry["problems"], [])
+        self.assertEqual(entry["path"], "jobs/run-sweep.json")
+        defn, epic = entry["definition"], types["run-epic"]["definition"]
+        self.assertEqual(defn["id"], "run-sweep")
+        self.assertEqual(set(defn), set(epic))
+        for key in ("job_schema_version", "trigger", "requires", "guards", "stop", "effort"):
+            self.assertEqual(defn[key], epic[key], key)
+        self.assertEqual(defn["target"], {"skill": "tk-studio-launch",
+                                          "payload": {"verb": "sweep"}})
+        self.assertEqual(defn["guards"], {"max_turns": 80, "max_wall_clock_seconds": 3600})
+        self.assertEqual(defn["stop"], {"on_status": ["blocked"]})
+        self.assertEqual(defn["effort"], "high")
+        self.assertNotEqual(defn["description"], epic["description"])
+        self.assertEqual(joblib.validate_definition(defn), [])
 
     # ---------------- Story 34.8: the shipped run-vertical-slice job type
 

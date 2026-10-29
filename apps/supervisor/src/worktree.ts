@@ -65,6 +65,11 @@
  *              Story 35.3: a leg whose only non-green step is an `inconclusive` playable (the judge's infrastructure
  *              failed) ends the run `partial` with `host verify inconclusive (playable): <reason>` (not red); its
  *              `host_verify` reads `inconclusive` and it flips no PR (a new PR opened as a draft, an open one never marked ready).
+ *   sweep run  Story 35.7: a `run-sweep` run (`isSweep`, `sweep.ts`): each probe records its triage once
+ *              (`recordTriage`: the run-workspace copy and the `sweep-triage` queue note); at the engine's end — or its
+ *              pause, which a sweep never keeps (`stopSweepEngine` stops the engine; never `closeOutPaused`'s relaunch) —
+ *              the host leg runs once, the close-out's PR body gains `## Sweep` (`sweepSummary`, read before the
+ *              worktree goes), the end is `sweepEndState`'s and the `ended` detail carries the `sweep` record.
  *   legs       Story 35.1: the `## Host verify` section's first line is `Legs: <k> — <leg> <verdict> <recorded_at>; …`
  *              (the run's `host-verify` events after its latest `launched`, oldest first; the close-out's first body
  *              `Legs: 1 — close-out …`). `proofCommit`, `originWebUrl`, `editPrBody`, `markPrReady` and `markPrDraft` are
@@ -86,6 +91,7 @@ import { CONTACT_SHEET, hostVerify, inconclusiveReason, isInconclusive, isRed, i
 import { accountedCostOf, isTerminal, RunTerminal, servedRoot, type EngineWhere, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
 import { releasePin, sameStart, vmLaunchStatus, type SandboxDeps } from "./sandbox";
 import { lastJsonObject, runJobVerb, runProcess, runUv, toVmPath, type RunResult, type Tier } from "./server";
+import { isSweep, recordTriage, stopSweepEngine, SWEEP_ENGINE_STOP, sweepEndState, sweepNotice, sweepRecord, sweepSection, sweepSummary, type SweepSummary } from "./sweep";
 
 type Env = Record<string, string | undefined>;
 /** An argv-only spawner (never a shell). `env`: variables added to the child's environment. */
@@ -402,7 +408,7 @@ export function meteredCostSection(body: string | undefined): string | undefined
  * verify leg's `## Host verify` section when it was run or skipped (Story 27.4). Story 35.1: `legs` (the run's
  * host legs, the latest last) gives the section its `Legs:` history line — the close-out's and the re-run's body
  * through this one renderer; `costText` (a re-run's carried-back `## Metered cost` text) replaces the rendered cost. */
-export function prBody(input: { statusBlock?: unknown; engineRunId?: string | null; commits: string[]; costUsd?: number; costText?: string; runId: string; verify?: HostVerifyResult; proof?: PrProof; legs?: readonly LegHistoryEntry[] }): string {
+export function prBody(input: { statusBlock?: unknown; engineRunId?: string | null; commits: string[]; costUsd?: number; costText?: string; runId: string; verify?: HostVerifyResult; proof?: PrProof; legs?: readonly LegHistoryEntry[]; sweep?: SweepSummary }): string {
   return [
     `Opened by the supervisor for queue run \`${input.runId}\`.`,
     "",
@@ -421,6 +427,8 @@ export function prBody(input: { statusBlock?: unknown; engineRunId?: string | nu
     "## Metered cost",
     "",
     input.costText ?? (input.costUsd === undefined ? "not metered" : `$${input.costUsd.toFixed(4)} (total_cost_usd)`),
+    // Story 35.7: a sweep run's bundles, blocked entries and human decisions, before `## Host verify`.
+    ...(input.sweep ? ["", ...sweepSection(input.sweep)] : []),
     ...(input.verify ? ["", ...prSection(input.verify, input.proof, input.legs)] : []),
   ].join("\n");
 }
@@ -612,7 +620,7 @@ export async function markPrDraft(deps: WorktreeDeps, cwd: string, pr: string): 
 /** The close-out of a run's worktree (see the header). Never throws: a failure is `error`. */
 export async function closeOut(
   run: Pick<QueueRun, "run_id" | "job_id" | "root" | "worktree" | "base_ref" | "prefix">,
-  input: { paused: boolean; statusBlock?: unknown; engineRunId?: string | null; costUsd?: number; existingPr?: string; verify?: HostVerifyResult; slice?: boolean; legs?: readonly LegHistoryEntry[] },
+  input: { paused: boolean; statusBlock?: unknown; engineRunId?: string | null; costUsd?: number; existingPr?: string; verify?: HostVerifyResult; slice?: boolean; legs?: readonly LegHistoryEntry[]; sweep?: SweepSummary },
   deps: WorktreeDeps = {},
 ): Promise<CloseOut> {
   const wt = run.worktree!, base = run.base_ref ?? "", branch = runBranch(run.run_id);
@@ -699,7 +707,7 @@ export async function closeOut(
       existingPr = openPrUrl(r.stdout);
     }
     // The metered cost read where the engine wrote it: the served root (`<worktree>/<prefix>`, Story 28.5).
-    const body = () => prBody({ statusBlock: input.statusBlock, engineRunId: input.engineRunId, commits: out.commits, costUsd: input.costUsd ?? (gone ? undefined : meteredCost(servedRoot(run)!, input.engineRunId)), runId: run.run_id, ...(input.verify ? { verify: input.verify } : {}), ...(proof ? { proof } : {}), ...(input.legs?.length ? { legs: input.legs } : {}) });
+    const body = () => prBody({ statusBlock: input.statusBlock, engineRunId: input.engineRunId, commits: out.commits, costUsd: input.costUsd ?? (gone ? undefined : meteredCost(servedRoot(run)!, input.engineRunId)), runId: run.run_id, ...(input.verify ? { verify: input.verify } : {}), ...(proof ? { proof } : {}), ...(input.legs?.length ? { legs: input.legs } : {}), ...(input.sweep ? { sweep: input.sweep } : {}) });
     // `gh pr edit <pr> --body-file` with the regenerated body (`editPrBody`); a failure pushed to `errors`.
     const editBody = async (pr: string, errors: string[]) => {
       const e = await editPrBody(deps, at, pr, body());
@@ -960,8 +968,12 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         const verify = recordedVerify(events);
         // Story 35.1: the body's `Legs:` history, from the recorded legs.
         const legs = verify ? legHistory(events) : [];
-        const c = await closeOut(r, { paused: false, ...launchedCloseOutInput(events, r), ...(existingPr ? { existingPr } : {}), ...(verify ? { verify } : {}), ...(isSlice(queue.definition(r)) ? { slice: true } : {}), ...(legs.length ? { legs } : {}) }, deps);
-        queue.note(r.run_id, "closed_out", closeOutDetail(c));
+        // Story 35.7: a sweep's triage recorded (once) and its summary read before the worktree goes.
+        const lateSweep = isSweep(queue.definition(r)) ? (recordTriage(queue, r, deps.env), sweepSummary(queue, r)) : undefined;
+        const c = await closeOut(r, { paused: false, ...launchedCloseOutInput(events, r), ...(existingPr ? { existingPr } : {}), ...(verify ? { verify } : {}), ...(isSlice(queue.definition(r)) ? { slice: true } : {}), ...(legs.length ? { legs } : {}), ...(lateSweep ? { sweep: lateSweep } : {}) }, deps);
+        // The sweep's end rule, applied here too: the terminal row is never updated, so its three-way end is
+        // recorded on the `closed_out` (`sweep_end`), beside the `sweep` record the inbox line reads.
+        queue.note(r.run_id, "closed_out", { ...closeOutDetail(c), ...(lateSweep ? { sweep: sweepRecord(lateSweep), sweep_end: sweepEndState(lateSweep, verify) } : {}) });
         // The worktree is gone: an engine lock this run still holds would be probed there forever.
         if (c.worktree === "removed") queue.releaseEngineLock(r.run_id, "its worktree was closed out and removed (its engine confirmed dead)");
         await release(queue, r.run_id, deps);
@@ -980,6 +992,8 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         done.push(run.run_id);
         continue;
       }
+      // Story 35.7: a sweep run's triage, recorded the first time the engine wrote it (whatever its phase).
+      if (existsSync(r.worktree!) && isSweep(queue.definition(r))) recordTriage(queue, r, deps.env);
       // Its worktree gone with no pending record (a close-out whose transition and record both failed):
       // no engine can run there, so it is closed out (from the checkout) and ended, never probed forever.
       let st: EnginePhase = existsSync(r.worktree!) ? await engineStatus(servedRoot(r)!, r.engine_run_id!, deps, { tier: r.tier, sandbox: r.sandbox })
@@ -992,13 +1006,27 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         st = { phase: "ended", detail: { ...st.detail, run_id: r.engine_run_id, killed } };
       }
       if (st.phase === "paused" && r.state === "paused") continue;
+      // Story 35.7: a sweep is never kept paused: its paused engine is stopped, before the take, and the run
+      // closed out as an end only once the stop answered `stopped`. A failed stop leaves the run, its worktree
+      // and its branch as they are (one `engine-stop` note per engine run); the next watch tick retries it.
+      const sweep = isSweep(queue.definition(r));
+      let engineStop: string | undefined;
+      if (sweep && st.phase === "paused") {
+        engineStop = await stopSweepEngine(r, deps);
+        if (engineStop !== "stopped") {
+          if (!queue.events(r.run_id).some((e) => e.kind === SWEEP_ENGINE_STOP && e.detail?.engine_run_id === r.engine_run_id)) {
+            queue.note(r.run_id, SWEEP_ENGINE_STOP, { engine_run_id: r.engine_run_id, error: engineStop, engine: st.detail });
+          }
+          continue;
+        }
+      }
       const run = queue.takeForCloseOut(r.run_id);
       if (!run) continue;
       taken = true;
       const events = queue.events(run.run_id);
       const launched = (events.findLast((e) => e.kind === "launched")?.detail ?? {}) as Record<string, any>;
       const existingPr = priorPr(events);
-      const paused = st.phase === "paused";
+      const paused = st.phase === "paused" && !sweep;
       // The status block and the metered cost, read before the close-out removes the worktree.
       const input = launchedCloseOutInput(events, run);
       // Story 27.4: an engine that completed on its own (not paused, not killed) gets the host verify leg,
@@ -1031,7 +1059,9 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         && served !== null && storyLandedBeforeStop(join(served, ".bmad-loop", "runs", run.engine_run_id));
       // Story 35.1: the body's `Legs:` history (the close-out's first body: `Legs: 1 — close-out …`), from the recorded legs.
       const legs = verify ? legHistory(queue.events(run.run_id)) : [];
-      const c = await closeOut(run, { paused, ...input, engineRunId: run.engine_run_id, ...(existingPr ? { existingPr } : {}), ...(verify ? { verify } : {}), ...(slice ? { slice } : {}), ...(legs.length ? { legs } : {}) }, deps);
+      // Story 35.7: the sweep's summary (the triage, each bundle landed or not), read before the worktree goes.
+      const summary = sweep ? sweepSummary(queue, run, st.phase === "paused" ? st.detail : undefined) : undefined;
+      const c = await closeOut(run, { paused, ...input, engineRunId: run.engine_run_id, ...(existingPr ? { existingPr } : {}), ...(verify ? { verify } : {}), ...(slice ? { slice } : {}), ...(legs.length ? { legs } : {}), ...(summary ? { sweep: summary } : {}) }, deps);
       let next: PendingTransition;
       if (paused) next = { phase: "paused", detail: { engine: st.detail, ...closeOutDetail(c) } };
       else {
@@ -1043,11 +1073,16 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         if (isRed(verify)) { state = "partial"; reason = redReason(verify); }
         // Story 35.3: the judge's infrastructure failed (`inconclusive`): `partial`, never a rubric fail.
         else if (isInconclusive(verify)) { state = "partial"; reason = inconclusiveReason(verify); }
+        // Story 35.7: a sweep ends by its own three-way rule (the bundles landed, the host leg) — except one the
+        // supervisor killed (a tripped guard), which keeps the kill's state and reason, the sweep line appended.
+        if (summary && notKilled) ({ state, reason } = sweepEndState(summary, verify));
+        else if (summary) reason = `${reason ? `${reason}; ` : ""}sweep: ${sweepNotice(summary)}`;
         // Story 34.3: the playable-verify judge's cost, its own ledger line (and counted in the total).
         const judgeCost = verify && !verify.skipped ? verify.playable?.judge?.cost_usd : undefined;
         const finish = await finishStudio(run, state, reason, launched.status_block, c.pr, input.costUsd, deps,
           typeof judgeCost === "number" && Number.isFinite(judgeCost) && judgeCost >= 0 ? judgeCost : undefined);
-        next = { phase: "ended", state, reason, detail: { ...(end.detail ?? {}), engine: st.detail, ...closeOutDetail(c), finish }, ...(end.stop ? { stop: end.stop } : {}) };
+        next = { phase: "ended", state, reason, detail: { ...(end.detail ?? {}), engine: st.detail, ...closeOutDetail(c), finish,
+          ...(summary ? { sweep: sweepRecord(summary) } : {}), ...(engineStop ? { engine_stop: engineStop } : {}) }, ...(end.stop ? { stop: end.stop } : {}) };
       }
       try { applyTransition(queue, run.run_id, next); }
       catch (e) {
@@ -1057,6 +1092,8 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
           // terminal run's `closed_out`, so the late close-out never runs it again.
           queue.note(run.run_id, "closed_out", {
             ...closeOutDetail(c), engine: st.detail, ...(next.phase === "ended" ? { finish: next.detail.finish } : {}), raced: clip(message(e)),
+            // a sweep's computed three-way end, as the late close-out records it (the terminal row never updated)
+            ...(summary ? { sweep: sweepRecord(summary), ...(next.phase === "ended" ? { sweep_end: { state: next.state, reason: next.reason } } : {}) } : {}),
           });
           if (c.worktree === "removed") queue.releaseEngineLock(run.run_id, "its worktree was closed out and removed (its engine confirmed dead)");
           if (next.phase === "ended") await release(queue, run.run_id, deps);

@@ -2533,7 +2533,7 @@ class DriverContractTestCase(unittest.TestCase):
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
         # relaxed by Story 35.2 only to admit it after 35.8, and by Story 35.3 only to admit it after 35.2
-        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2(, Story 35\.3(, Story 35\.4(, Story 35\.5(, Story 35\.6)?)?)?)? \(Epic 35\)")
+        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2(, Story 35\.3(, Story 35\.4(, Story 35\.5(, Story 35\.6(, Story 35\.7)?)?)?)?)? \(Epic 35\)")
         taxonomy = json.loads((PLUGIN_ROOT / "contracts" / "events" / "taxonomy.v1.json")
                               .read_text(encoding="utf-8"))
         stage = taxonomy["events"]["stage"]
@@ -2611,7 +2611,7 @@ class DriverContractTestCase(unittest.TestCase):
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
         # relaxed by Story 35.3 only to admit it after 35.2
-        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2(, Story 35\.3(, Story 35\.4(, Story 35\.5(, Story 35\.6)?)?)?)? \(Epic 35\)")
+        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2(, Story 35\.3(, Story 35\.4(, Story 35\.5(, Story 35\.6(, Story 35\.7)?)?)?)?)? \(Epic 35\)")
 
     # --- Story 35.3: 0.1.30 (additive) — the slice path hardened: the tools' walls under the
     # guard's margin, the `match` red cases, the widened proof commit, `sheet --report`, the
@@ -2677,7 +2677,7 @@ class DriverContractTestCase(unittest.TestCase):
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
         # relaxed only to admit Story 35.4 after it
-        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2, Story 35\.3(, Story 35\.4(, Story 35\.5(, Story 35\.6)?)?)? \(Epic 35\)")
+        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2, Story 35\.3(, Story 35\.4(, Story 35\.5(, Story 35\.6(, Story 35\.7)?)?)?)? \(Epic 35\)")
 
     def test_0_1_30_story_35_4_engine_mcp_ports(self):
         header = next(line for line in self.text.splitlines()
@@ -2743,7 +2743,7 @@ class DriverContractTestCase(unittest.TestCase):
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
         # relaxed only to admit Story 35.5 after it
-        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2, Story 35\.3, Story 35\.4(, Story 35\.5(, Story 35\.6)?)? \(Epic 35\)")
+        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2, Story 35\.3, Story 35\.4(, Story 35\.5(, Story 35\.6(, Story 35\.7)?)?)? \(Epic 35\)")
 
     # --- Story 35.5: 0.1.30 (additive) — the sandbox and the host agree: `requires.tier` and
     # `placement:TierRequired`, the `godot` shim, `maintenance-evals` and the `tk-studio-evals` surface.
@@ -2804,12 +2804,12 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertIn("`requires` `{tier}` added at 0.1.30, Story 35.5", flat)
         schema = json.loads((PLUGIN_ROOT / "contracts" / "job.schema.json").read_text(encoding="utf-8"))
         self.assertEqual(schema["definition"]["fields"]["requires"]["fields"]["tier"]["enum"], ["host", "sbx"])
-        for type_id in ("run-epic", "run-vertical-slice", "maintenance-evals"):
+        for type_id in ("run-epic", "run-vertical-slice", "maintenance-evals", "run-sweep"):
             defn = json.loads((PLUGIN_ROOT / "jobs" / f"{type_id}.json").read_text(encoding="utf-8"))
             self.assertEqual(defn["requires"], {"tier": "sbx"}, type_id)
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
-        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2, Story 35\.3, Story 35\.4, Story 35\.5(, Story 35\.6)? \(Epic 35\)")
+        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2, Story 35\.3, Story 35\.4, Story 35\.5(, Story 35\.6(, Story 35\.7)?)? \(Epic 35\)")
 
     # --- Story 35.6: 0.1.30 (additive) — the closeout carries the proof: the per-leg report and frames,
     # each story's own leg, the closeout input's media and the page, and the five B15 edges.
@@ -2868,7 +2868,83 @@ class DriverContractTestCase(unittest.TestCase):
                       "not green`", flat)
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
-        self.assertIn("Story 35.1, Story 35.8, Story 35.2, Story 35.3, Story 35.4, Story 35.5, Story 35.6 (Epic 35)", stories)
+        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2, Story 35\.3, Story 35\.4, Story 35\.5, Story 35\.6(, Story 35\.7)? \(Epic 35\)")
+
+    # --- Story 35.7: 0.1.30 (additive) — the run-sweep job type: the launch verb, the sweep-triage event,
+    # one PR per sweep, the end, and the ledger flip after the merge.
+
+    def test_0_1_30_story_35_7_the_run_sweep_job_type(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.30**", header)
+        self.assertNotIn("**0.1.31**", header)
+        self.assertEqual(header.count("0.1.30 (Story 35.7, additive)"), 1)
+        self.assertLess(header.index("0.1.30 (Story 35.6, additive)"),
+                        header.index("0.1.30 (Story 35.7, additive)"))
+        clause = " ".join(header[header.index("0.1.30 (Story 35.7, additive)"):].split())
+        for phrase in ("the `run-sweep` job type", "`tk-studio-launch` verb `sweep`", "`sweep-triage`",
+                       "one PR per sweep", "`## Sweep`", "`sweep:` inbox line", "`plansync.py ledger-resolve`",
+                       "`resolved … by #N`", "— additive) |"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        self.assertNotIn("**0.1.31**", flat)
+        self.assertEqual(flat.count("**0.1.30 (Story 35.7, additive).**"), 1)
+        self.assertLess(flat.index("**0.1.30 (Story 35.6, additive).**"),
+                        flat.index("**0.1.30 (Story 35.7, additive).**"))
+        note = flat[flat.index("**0.1.30 (Story 35.7, additive).**"):]
+        note = note[:note.index("## 8. Conformance")]
+        for phrase in ("**The launch verb:**", "`bmad-loop sweep --project <root> --no-prompt --run-id <rid> "
+                       "[--max-bundles <n>]` detached", "the skill waits 540 s; the core's default stays 1500 s", "a dirty tree (`git status --porcelain`, "
+                       "the paths named)", "`reason: \"triage still running\"`", "`blocked` when the engine ended or "
+                       "paused before any `triage.json`", "**The `sweep-triage` event, two records:**",
+                       "by `launch.py sweep` alone", "once per engine run", "`<studioHome>/projects/<key>/runs/"
+                       "<studio_run_id>/sweep/ triage.json`", "never recorded", "**One PR per sweep:**",
+                       "`scm.isolation = \"none\"`", "the host leg runs once at the engine's end",
+                       "`## Sweep` section before `## Host verify`", "`### Blocked`", "`### Human decisions`",
+                       "`bmad-loop decisions` answers them", "`sweep: <landed>/<n> bundles; blocked: DW-x, …; "
+                       "decisions: DW-y, …`", "**The end:**", "never relaunched through the paused-run pass",
+                       "`--total-cost-usd` from the sweep's `run.json`", "**The ledger flip:**",
+                       "`resolved <date> by <owner/repo>#N (sweep bundle dw-<name>;", "`plan-lease {phase: "
+                       "\"ledger\"}`", "`ledger-resolve {pr, ids, resolved, pending, ok, settled?, error?, skipped?, reason?}`",
+                       "`PLAN_RETRY_LIMIT`", "The supervisor commits nothing",
+                       "Every other field, kind and route is unchanged."):
+            self.assertIn(phrase, note)
+        self.assertIn("- **The shipped `run-sweep` job (0.1.30, Story 35.7):**", flat)
+        launch_row = next(line for line in self.text.splitlines()
+                          if line.startswith("| `tk-studio-launch` |"))
+        self.assertIn("verb (`start\\|status\\|stop\\|sweep`", launch_row)
+        self.assertIn("`lib/launch.py check\\|start\\|status\\|stop\\|sweep`", launch_row)
+        # the row's block and failure-modes columns carry the sweep's outcomes and refusals
+        for phrase in ("(`check`, `start`, `status`, `stop`, `sweep`, and the exit-2 refusal",
+                       "`reason: \"triage still running\"`", "`sweep: nothing open in the ledger`",
+                       "`sweep triage unreadable`", "a `sweep` refusal (0.1.30, Story 35.7",
+                       "no `_bmad-output/implementation-artifacts/deferred-work.md`",
+                       "a dirty tree (`git status --porcelain`, the paths named), an existing run dir |"):
+            self.assertIn(phrase, launch_row)
+        taxonomy = json.loads((PLUGIN_ROOT / "contracts" / "events" / "taxonomy.v1.json")
+                              .read_text(encoding="utf-8"))
+        names = list(taxonomy["events"])
+        self.assertEqual(names.index("sweep-triage"), names.index("stage") + 1)
+        self.assertIn("lib/launch.py sweep alone", taxonomy["events"]["sweep-triage"]["emitter"])
+        defn = json.loads((PLUGIN_ROOT / "jobs" / "run-sweep.json").read_text(encoding="utf-8"))
+        self.assertEqual(defn["requires"], {"tier": "sbx"})
+        manifest = json.loads((PLUGIN_ROOT / "contracts" / "conformance" / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        argvs = [d["argv"] for d in manifest["surfaces"]["tk-studio-launch"]["drives"]]
+        self.assertIn(["contracts/conformance/e2e_run_sweep.py"], argvs)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 35.1, Story 35.8, Story 35.2, Story 35.3, Story 35.4, Story 35.5, Story 35.6, "
+                      "Story 35.7 (Epic 35)", stories)
+
+    def test_story_35_7_the_skill_sweep_waits_540_s_inside_the_bash_cap(self):
+        # the skill's one sweep call must print its block inside the Bash tool's 600 s cap
+        skill = (PLUGIN_ROOT / "skills" / "tk-studio-launch" / "SKILL.md").read_text(encoding="utf-8")
+        section = skill[skill.index("### `sweep`"):skill.index("### `status`")]
+        command = next(line for line in section.splitlines() if "launch.py\" sweep" in line)
+        self.assertIn("--triage-wait 540", command)
+        self.assertIn("600000 ms", section)
+        self.assertIn("the skill waits 540 s; the core's default stays 1500 s", section)
 
     # --- AC 2: A7 dossier items covered or explicitly deferred with a seam
 

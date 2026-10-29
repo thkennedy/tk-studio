@@ -871,5 +871,119 @@ class CliTests(PlanSyncTestCase):
         self.assertFalse(out["ok"])
 
 
+
+LEDGER_DOC = """# Deferred Work
+
+### DW-1: first
+origin: spec-deferred aaa
+reason: r
+status: done 2026-10-29
+resolution: resolved by sweep bundle dw-alpha
+
+### DW-2: second
+origin: spec-deferred bbb
+status: open
+
+### DW-3: third
+status: done 2026-10-28
+resolution: already resolved: plugins/tk-studio/lib/x.py:12
+
+## Deferred from: elsewhere
+
+### DW-4: fourth
+status: resolved 2026-09-28 by thkennedy/tk-studio#77 (by hand)
+"""
+
+
+class LedgerResolveTests(PlanSyncTestCase):
+    """Story 35.7: `plansync.py ledger-resolve` flips the engine's `done`
+    entries to `resolved … by #N` after the sweep's PR merged."""
+
+    def _ledger(self, text: str = LEDGER_DOC) -> Path:
+        path = self.impl / "deferred-work.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8", newline="\n")
+        return path
+
+    def _cli(self, *args: str) -> tuple[int, dict]:
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = plansync.main(["ledger-resolve", "--directory", str(self.root), *args])
+        return code, json.loads(out.getvalue())
+
+    def test_done_entries_are_resolved_by_the_pr_then_unchanged(self):
+        path = self._ledger()
+        code, out = self._cli("--pr", "https://github.com/thkennedy/tk-studio/pull/300",
+                              "--ids", "DW-1,DW-3,DW-4")
+        self.assertEqual(code, 0)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["resolved"], ["DW-1", "DW-3"])
+        self.assertEqual(out["unchanged"], ["DW-4"])
+        self.assertEqual(out["pending"], [])
+        self.assertEqual(list(out)[-4:], ["status", "intent", "artifacts", "reason"])
+        self.assertEqual(out["status"], "complete")
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("status: resolved 2026-10-29 by thkennedy/tk-studio#300 "
+                      "(sweep bundle dw-alpha; resolved by sweep bundle dw-alpha)\n"
+                      "resolution: resolved by sweep bundle dw-alpha\n", text)
+        self.assertIn("status: resolved 2026-10-28 by thkennedy/tk-studio#300 "
+                      "(sweep; already resolved: plugins/tk-studio/lib/x.py:12)\n", text)
+        self.assertIn("status: resolved 2026-09-28 by thkennedy/tk-studio#77 (by hand)", text)
+        before = path.read_bytes()
+        code, again = self._cli("--pr", "thkennedy/tk-studio#300", "--ids", "DW-1,DW-3")
+        self.assertEqual(code, 0)
+        self.assertEqual(again["resolved"], [])
+        self.assertEqual(again["unchanged"], ["DW-1", "DW-3"])
+        self.assertEqual(again["written"], [])
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_an_open_or_absent_entry_is_pending_and_ok(self):
+        path = self._ledger()
+        before = path.read_bytes()
+        code, out = self._cli("--pr", "thkennedy/tk-studio#300", "--ids", "DW-2,DW-9",
+                              "--date", "2026-10-30")
+        self.assertEqual(code, 0)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["pending"], ["DW-2", "DW-9"])
+        self.assertEqual(out["status"], "partial")
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_the_date_flag_wins_and_the_rest_of_the_ledger_is_kept(self):
+        path = self._ledger()
+        self._cli("--pr", "thkennedy/tk-studio#300", "--ids", "DW-1", "--date", "2026-11-01")
+        text = path.read_text(encoding="utf-8")
+        self.assertEqual(text, LEDGER_DOC.replace(
+            "status: done 2026-10-29",
+            "status: resolved 2026-11-01 by thkennedy/tk-studio#300 "
+            "(sweep bundle dw-alpha; resolved by sweep bundle dw-alpha)"))
+
+    def test_a_long_resolution_keeps_its_bundle_name_past_the_clip(self):
+        long = "x" * 200 + " resolved by sweep bundle dw-late-name"
+        status = plansync.resolved_status("2026-10-29", "thkennedy/tk-studio#300", long)
+        self.assertTrue(status.startswith(
+            "resolved 2026-10-29 by thkennedy/tk-studio#300 (sweep bundle dw-late-name; xxx"), status)
+        self.assertNotIn("dw-late-name)", status)  # the text itself is still clipped
+        self.assertTrue(status.endswith("…)"), status)
+        path = self._ledger(LEDGER_DOC.replace("resolution: resolved by sweep bundle dw-alpha",
+                                               f"resolution: {long}"))
+        code, out = self._cli("--pr", "thkennedy/tk-studio#300", "--ids", "DW-1")
+        self.assertEqual(code, 0)
+        self.assertEqual(out["resolved"], ["DW-1"])
+        self.assertIn("by thkennedy/tk-studio#300 (sweep bundle dw-late-name; ",
+                      path.read_text(encoding="utf-8"))
+
+    def test_refusals_end_blocked(self):
+        code, out = self._cli("--pr", "thkennedy/tk-studio#300", "--ids", "DW-1")
+        self.assertEqual(code, 2)  # no ledger
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["status"], "blocked")
+        self._ledger()
+        for args in (("--pr", "300", "--ids", "DW-1"),
+                     ("--pr", "a/b#1", "--ids", "DW-1,nope")):
+            code, out = self._cli(*args)
+            self.assertEqual(code, 2, args)
+            self.assertEqual(out["status"], "blocked")
+
+
 if __name__ == "__main__":
     unittest.main()

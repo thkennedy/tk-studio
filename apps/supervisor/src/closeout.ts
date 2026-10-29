@@ -58,6 +58,8 @@
  *                  done — the run stays `paused` for `POST /runs/{id}/resume` (`resumePaused`).
  *              The pass takes the run as the sweep does (`Queue.takeForCloseOut`, released after), so `serve`
  *              and a tick never close the same run out twice.
+ *              Story 35.7: a `run-sweep` run (`isSweep`) is never taken here — a sweep is never relaunched as an
+ *              epic; the engine sweep closes a paused sweep out as an end (`sweep.ts`).
  *   close-out  in the run's kept worktree, on its `supervisor/run-<id>` branch, in this order, each step
  *              idempotent; a failed step leaves the run `paused` with one `close-out-failed` event per
  *              (step, error), never undoes a done step, and the next pass retries:
@@ -109,6 +111,7 @@ import { engineRoot, selfOwner, servedRoot, type Owner, type Queue, type QueueEv
 import { HOLD_TIMEOUT_S, parseEnginePid, sameStart, type HoldChild } from "./sandbox";
 import { lastJsonObject, runProcess, toVmPath, type RunResult } from "./server";
 import { COPIED_RUNTIME, meteredCost, runner, studioScript, uvRunner, type WorktreeDeps } from "./worktree";
+import { isSweep } from "./sweep";
 
 type Env = Record<string, string | undefined>;
 type Fetch = (input: string, init?: RequestInit) => Promise<Response>;
@@ -774,7 +777,8 @@ export async function closeOutPaused(queue: Queue, deps: PausedDeps = {}): Promi
   const out = { closed: [] as string[], awaiting: [] as string[] };
   const self = deps.self ?? selfOwner();
   let runs: QueueRun[];
-  try { runs = queue.runs().filter((r) => r.state === "paused" && r.worktree && r.engine_run_id); } catch { return out; }
+  // Story 35.7: a sweep run never takes this pass (no epic relaunch): the engine sweep closes a paused sweep out as an end.
+  try { runs = queue.runs().filter((r) => r.state === "paused" && r.worktree && r.engine_run_id && !isSweep(queue.definition(r))); } catch { return out; }
   for (const r of runs) {
     let taken = false;
     try {

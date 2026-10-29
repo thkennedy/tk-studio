@@ -66,6 +66,9 @@ CLI:
                            [--phase P] --worktree W
   uv run plansync.py stage-post --directory ROOT --id ST-NNN [--story KEY]
                                 [--dry-run]
+  uv run plansync.py ledger-resolve --directory ROOT --pr OWNER/REPO#N
+                                    --ids DW-a,DW-b [--date YYYY-MM-DD]
+                                    [--dry-run]
 
 `stage` (Story 35.8) writes the story spec's append-only `## Stage Log`
 table (stage, pass, started, ended, session_id, model, effort, tokens_in,
@@ -117,6 +120,18 @@ before any call; an absent Confluence token, owner accountId or space id,
 a conflict or an interrupted read ends `partial`. The shipped cron job
 `atlassian-sync-back` runs it every 10 minutes. The AD-11 status block ends
 the result.
+
+`ledger-resolve` (Story 35.7) is the sweep's plan pull-back after its PR
+merged: each named `_bmad-output/implementation-artifacts/deferred-work.md`
+entry whose `status:` is the engine's `done <date>` is rewritten to
+`resolved <date> by <owner/repo>#N (sweep bundle dw-<name>; <the engine's
+resolution, clipped>)` — the one line, every other byte kept, one atomic
+write. An entry already `resolved … by <owner/repo>#N` (or closed any other
+way) is `unchanged`; a still-`open` or absent one is `pending` (the owner
+checkout has not pulled the merge yet: asked again). `ok` is true on every
+answer but a refusal (no ledger, a malformed `--pr` or id); the result
+names `resolved[]`, `pending[]`, `unchanged[]` and ends with the AD-11
+status block (`partial` while anything is pending).
 
 `status` is the driver's status pull-back (Story 26.5, AD-5 status-class
 only): it sets one canonical story's `status`, stamps `updated`, replaces
@@ -3187,6 +3202,103 @@ def stage_rows(project_root: Path) -> list[dict]:
 
 # --------------------------------------------------------------------- CLI
 
+# ------------------------------------------- Story 35.7: the sweep's ledger flip
+
+LEDGER_REL = IMPL_REL / "deferred-work.md"
+_DW_HEAD_RE = re.compile(r"^### (DW-\d+): ", re.MULTILINE)
+_ANY_HEAD_RE = re.compile(r"^#{1,6} ", re.MULTILINE)
+_DW_STATUS_RE = re.compile(r"^status:[ \t]*(.*)$", re.MULTILINE)
+_DW_RESOLUTION_RE = re.compile(r"^resolution:[ \t]*(.*)$", re.MULTILINE)
+_DW_ID_RE = re.compile(r"^DW-\d+$")
+_PR_REF_RE = re.compile(r"^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(\d+)$")
+_PR_URL_RE = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/(\d+)/?$")
+_DONE_DATE_RE = re.compile(r"^done\s+(\d{4}-\d{2}-\d{2})")
+_BUNDLE_RE = re.compile(r"sweep bundle (dw\d*-[a-z0-9-]+)")
+LEDGER_RESOLUTION_MAX = 160
+
+
+def pr_ref(pr: str) -> str:
+    """`owner/repo#N` from that form or a GitHub pull-request URL."""
+    text = (pr or "").strip()
+    m = _PR_REF_RE.match(text) or _PR_URL_RE.match(text)
+    if not m:
+        raise PlanSyncError(f"ledger-resolve: --pr must be <owner/repo>#N or a GitHub PR URL: {pr!r}")
+    return f"{m.group(1)}#{m.group(2)}"
+
+
+def _ledger_spans(text: str) -> dict[str, tuple[int, int]]:
+    """Each `### DW-NN:` entry's span (it ends at the next heading of any level)."""
+    spans: dict[str, tuple[int, int]] = {}
+    heads = list(_DW_HEAD_RE.finditer(text))
+    for i, m in enumerate(heads):
+        end = heads[i + 1].start() if i + 1 < len(heads) else len(text)
+        other = _ANY_HEAD_RE.search(text, m.end(), end)
+        spans.setdefault(m.group(1), (m.start(), other.start() if other else end))
+    return spans
+
+
+def resolved_status(date: str, ref: str, resolution: str) -> str:
+    """`resolved <date> by <ref> (sweep bundle dw-<name>; <resolution, clipped>)`."""
+    resolution = " ".join(resolution.split())
+    # the bundle named from the whole text, before the clip can cut it off
+    bundle = _BUNDLE_RE.search(resolution)
+    if len(resolution) > LEDGER_RESOLUTION_MAX:
+        resolution = resolution[:LEDGER_RESOLUTION_MAX - 1].rstrip() + "…"
+    head = f"sweep bundle {bundle.group(1)}" if bundle else "sweep"
+    return f"resolved {date} by {ref} ({head}{'; ' + resolution if resolution else ''})"
+
+
+def ledger_resolve(project_root: Path, pr: str, ids: list[str], date: str | None = None,
+                   dry_run: bool = False) -> dict:
+    """The sweep's ledger flip (see the module docstring)."""
+    root = Path(project_root)
+    ref = pr_ref(pr)
+    bad = [i for i in ids if not _DW_ID_RE.match(i)]
+    if bad:
+        raise PlanSyncError(f"ledger-resolve: not DW ids: {', '.join(bad)}")
+    if date is not None and not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+        raise PlanSyncError(f"ledger-resolve: --date must be YYYY-MM-DD: {date!r}")
+    path = root / LEDGER_REL
+    if not path.is_file():
+        raise PlanSyncError(f"ledger-resolve: no ledger at {LEDGER_REL.as_posix()}")
+    text = path.read_text(encoding="utf-8")
+    resolved: list[str] = []
+    pending: list[str] = []
+    unchanged: list[str] = []
+    edits: list[tuple[int, int, str]] = []
+    spans = _ledger_spans(text)
+    for dw in dict.fromkeys(ids):
+        span = spans.get(dw)
+        body = text[span[0]:span[1]] if span else ""
+        status_m = _DW_STATUS_RE.search(body) if span else None
+        value = status_m.group(1).strip() if status_m else ""
+        first = value.split()[0] if value else ""
+        if not span or first == "open":
+            pending.append(dw)
+            continue
+        if first != "done":
+            unchanged.append(dw)  # already resolved (by this PR or another way)
+            continue
+        done = _DONE_DATE_RE.match(value)
+        when = date or (done.group(1) if done else datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+        res_m = _DW_RESOLUTION_RE.search(body)
+        line = "status: " + resolved_status(when, ref, res_m.group(1).strip() if res_m else "")
+        edits.append((span[0] + status_m.start(), span[0] + status_m.end(), line))
+        resolved.append(dw)
+    for start, end, line in sorted(edits, reverse=True):
+        text = text[:start] + line + text[end:]
+    rel = LEDGER_REL.as_posix()
+    if edits and not dry_run:
+        _atomic_write(path, text)
+    result = {"ok": True, "ledger": rel, "pr": ref, "dry_run": dry_run,
+              "resolved": resolved, "pending": pending, "unchanged": unchanged,
+              "written": [rel] if edits else []}
+    _finish_stage(result, "partial" if pending else "complete",
+                  f"pending (still open at the owner root): {', '.join(pending)}" if pending else None)
+    result["ok"] = True  # every answer but a refusal: `pending` is retried, never refused
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     # Headless output must survive a cp1252 Windows console: entity titles
     # are arbitrary unicode and the status JSON must always print (AD-11).
@@ -3254,6 +3366,12 @@ def main(argv: list[str] | None = None) -> int:
                      help="--from-pass: the run's repo root, whose buffered "
                           "rows (the planner's plan row) are flushed too")
     stg.add_argument("--dry-run", action="store_true")
+    lrs = sub.add_parser("ledger-resolve")
+    lrs.add_argument("--directory", required=True, help="the owner root (walks up to the nearest)")
+    lrs.add_argument("--pr", required=True, help="<owner/repo>#N (or the PR URL)")
+    lrs.add_argument("--ids", required=True, help="comma-separated DW ids")
+    lrs.add_argument("--date", default=None, help="YYYY-MM-DD (default: the engine's done date)")
+    lrs.add_argument("--dry-run", action="store_true")
     spo = sub.add_parser("stage-post")
     spo.add_argument("--directory", required=True, help="project root (walks up to the nearest)")
     spo.add_argument("--id", required=True, dest="entity_id",
@@ -3265,6 +3383,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "stage":
         return _stage_main(args)
+    if args.command == "ledger-resolve":
+        return _ledger_resolve_main(args)
     # --directory walks up to the nearest project root (driver contract
     # 0.1.22): from inside a nested project the nested counter is minted.
     args.directory = configlib.find_project_root(Path(args.directory))
@@ -3306,6 +3426,27 @@ def main(argv: list[str] | None = None) -> int:
     except PlanSyncError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
         return 2
+
+
+def _ledger_resolve_main(args) -> int:
+    """`ledger-resolve`: every answer ends in the JSON status block (AD-11);
+    a refusal exits 2."""
+    root = configlib.find_project_root(Path(args.directory))
+    ids = [i.strip() for i in (args.ids or "").split(",") if i.strip()]
+    try:
+        result = ledger_resolve(root, args.pr, ids, date=args.date, dry_run=args.dry_run)
+    except PlanSyncError as exc:
+        result = _finish_stage({"written": []}, "blocked", str(exc))
+        result["error"] = str(exc)
+    except Exception as exc:  # never a traceback: the caller retries
+        result = _finish_stage({"written": []}, "blocked",
+                               f"ledger-resolve: {type(exc).__name__}: {exc}")
+        result["error"] = result["reason"]
+        result["retryable"] = True
+    block = {k: result.pop(k) for k in ("status", "intent", "artifacts", "reason")}
+    result.update(block)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result.get("ok") else 2
 
 
 def _stage_main(args) -> int:
