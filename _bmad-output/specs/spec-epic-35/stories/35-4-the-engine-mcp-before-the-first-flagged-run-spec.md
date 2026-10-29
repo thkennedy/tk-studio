@@ -228,6 +228,9 @@ DRIFT: `start-failed` resolves forwarder half follows whether TK_SUPERVISOR_ENGI
 | dev | 1 | 2026-10-29T08:09:48Z | 2026-10-29T08:48:55Z | 0e99d1cc-7e30-4eee-89d3-125b1d27854f | claude-opus-5-5 | medium | 17936888 | 125051 | 9.9986 | completed |
 | review | 1 | 2026-10-29T08:48:55Z | 2026-10-29T09:03:08Z | f4dbbe9b-fae6-4bda-936b-d16f6b52ee3b | claude-opus-5-5 | medium | 4893405 | 57428 | 4.6150 | completed |
 | gate | 1 | 2026-10-29T09:03:08Z | 2026-10-29T09:17:32Z | bd5cc1fd-f1b6-49e2-b941-8ba1d3476c13 | claude-opus-5-5 | medium | 9167818 | 73728 | 5.6072 | completed |
+| host-leg | 1 | 2026-10-29T09:18:02Z | 2026-10-29T09:44:54Z | — | — | — | — | — | — | green |
+| close-out | 1 | 2026-10-29T09:44:54Z | 2026-10-29T09:45:01Z | — | — | — | — | — | — | PR |
+| merge | — | 2026-10-29T09:45:35Z | 2026-10-29T09:45:35Z | — | — | — | — | — | — | merged |
 
 
 ## Auto Run Result
