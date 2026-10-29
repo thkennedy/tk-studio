@@ -92,7 +92,7 @@ source_spec: `25-4-the-bootstrap-and-the-meta-cli-the-bootstrap-and-the-meta-cli
 location: tools/installer/cli/tk_studio_cli/apps.py apply_slots / run_legs
 severity: medium
 reason: apply_slots computes restart = live_sup only when the supervisor leg is `unchanged`; for `reported`/`skipped` restart is None, must_start is False, and swap() still renames the old web slot to .<version>.previous. Consult 2026-10-14 ruled a `reported` studio_web status out of scope for a review patch (AC3 is supervisor-only, spec Design Notes; a new leg status needs a planned I/O-matrix entry). Deferral rule (a): behaviour AC2 names (the supervisor serves the studio-web slot). Reader: 25-5.
-status: done 2026-10-29
+status: resolved 2026-10-29 by thkennedy/tk-studio#293 (sweep; already resolved: Commit 603192a (Story 30-2, 2026-10-19, after the deferral): the supervisor resolves the studio-web root per request — apps/supervisor/src/ap…)
 resolution: already resolved: Commit 603192a (Story 30-2, 2026-10-19, after the deferral): the supervisor resolves the studio-web root per request — apps/supervisor/src/api.ts:926 web() calls webRoot() (apps/supervisor/src/web.ts:44-51), which reads current.json's "studio-web".path fresh each time (slotRoot, web.ts:31-41), so after swap() rewrites current.json (tools/installer/cli/tk_studio_cli/apps.py swap) a running supervisor serves the new slot without a restart; a source-checkout supervisor serves apps/studio-web/dist and never the renamed slot.
 
 ### DW-13: Follow-up review still recommended for 25-4-the-bootstrap-and-the-meta-cli after the damping cap was spent
@@ -133,7 +133,7 @@ source_spec: `25-5-doctor-says-what-is-wrong-doctor-says-what-is-wrong.md`
 location: tools/installer/cli/tk_studio_cli/doctor.py (hermes-logins check); tools/installer/cli/tk_studio_cli/miniyaml.py (copy of plugins/tk-studio/lib/miniyaml.py)
 severity: low
 reason: Hermes's `config.yaml` carries flow-style values (`{}`) that the stdlib-only miniyaml does not parse ("unsupported YAML construct: '{}'"), so the check ends `warn: config.yaml unreadable` and never reads the setting it exists for. The operator set the flag to `false` by hand on 2026-10-14, so nothing is at risk today. Fix candidate: a targeted line scan for `adopt_external_logins:` under the `auth:` block when the full parse fails, or teach miniyaml the empty flow mapping; cover with a fixture copied from a real Hermes config.
-status: done 2026-10-29
+status: resolved 2026-10-29 by thkennedy/tk-studio#293 (sweep bundle dw-doctor-hermes-config-fallback; resolved by sweep bundle dw-doctor-hermes-config-fallback)
 resolution: resolved by sweep bundle dw-doctor-hermes-config-fallback
 
 ### DW-18: Follow-up review still recommended for 26-1-launch-ends-every-path-with-the-block-and-owns-its-bootstrap after the damping cap was spent
@@ -270,7 +270,7 @@ source_spec: `30-7-our-own-assets-spec.md`
 location: .gitattributes
 severity: medium
 reason: .gitattributes:3,7 pin eol=lf only for measurements/*.jsonl and tools/installer/install.*. Story criterion (a): AC1 says the export is reproducible, checked by a test. A fix outside the plan's 17-entry Files list was ruled out by consult (Consult Log). Operator fix: add `apps/studio-web/public/sprites/office.json text eol=lf` to .gitattributes.
-status: done 2026-10-29
+status: resolved 2026-10-29 by thkennedy/tk-studio#293 (sweep bundle dw-office-json-eol-pin; resolved by sweep bundle dw-office-json-eol-pin)
 resolution: resolved by sweep bundle dw-office-json-eol-pin
 
 ### DW-35: Follow-up review still recommended for 31-1-the-free-tier-verified after the damping cap was spent
@@ -675,7 +675,7 @@ source_spec: `34-4-engine-knowledge-pinned-per-project-spec.md`
 location: plugins/tk-studio/lib/kb.py (index title)
 severity: low
 reason: In a run worktree the folder is `q-run-epic-34-…`, so the regenerated index is titled after the run and the implementer restored `tk-studio` by hand in 34.1, 34.4, 34.5 and 34.6 (a DRIFT line each). Fix: `kb.py index` takes the project name from the tracked config (project_id, else the repository's basename at the base ref), never the worktree folder.
-status: done 2026-10-29
+status: resolved 2026-10-29 by thkennedy/tk-studio#293 (sweep bundle dw-kb-index-title; resolved by sweep bundle dw-kb-index-title)
 resolution: resolved by sweep bundle dw-kb-index-title
 
 ### DW-85: Two import cycles introduced by Epic 34: `assets` ↔ `playable` (lib) and `enginemcp` → `hostverify` → `sandbox` → `enginemcp` (supervisor).
@@ -773,7 +773,7 @@ source_spec: `35-8-every-stage-leaves-a-start-and-a-stop-spec.md`
 location: plugins/tk-studio/lib/measurepush.py:300
 severity: medium
 reason: harvest_stages(directory) is called with the push's single --directory (the studio repo root); AC3 says a stage event carries each row. Deferral class (a): behaviour the criteria name.
-status: done 2026-10-29
+status: resolved 2026-10-29 by thkennedy/tk-studio#293 (sweep bundle dw-measurepush-registered-roots; resolved by sweep bundle dw-measurepush-registered-roots)
 resolution: resolved by sweep bundle dw-measurepush-registered-roots
 
 ### DW-97: Follow-up review still recommended for 35-8-every-stage-leaves-a-start-and-a-stop after the damping cap was spent
@@ -830,7 +830,7 @@ source_spec: `35-5-the-sandbox-and-the-host-agree-spec.md`
 location: plugins/tk-studio/evals/tk-studio-playable-judge-verdict/
 severity: medium
 reason: On the sandbox tier (claude 2.1.312, plugin 0.3.8) all three `with` runs ended `blocked`, judge votes FAIL x3: the prompt's `{media: "media"}` resolves against the eval harness's temp working directory (`/tmp/claude-eval-*/`), which holds no fixture, so the skill reports the media folder absent and never judges; the case measures the harness, not the skill (as hole 85's host runs measured the host). Fix: the case carries its fixture into the working directory (the eval's setup, or an absolute path under the plugin root the prompt names), then the maintenance-evals job runs again and the acceptance record's row is re-read.
-status: done 2026-10-29
+status: resolved 2026-10-29 by thkennedy/tk-studio#293 (sweep bundle dw-judge-eval-media-fixture; resolved by sweep bundle dw-judge-eval-media-fixture)
 resolution: resolved by sweep bundle dw-judge-eval-media-fixture
 
 ### DW-104: Follow-up review still recommended for 35-7-the-run-sweep-job-type after the damping cap was spent
@@ -1033,4 +1033,12 @@ source_spec: `_bmad-output/specs/spec-epic-35/stories/35-7-the-run-sweep-job-typ
 location: apps/supervisor/src/closeout.ts and hostleg.ts (`## Metered cost` from the worker's `accounted` events only); plugins/tk-studio/lib/jobrun.py finish (`total_cost_usd` from the worker); plugins/tk-studio/lib/plansync.py stage-post (posts per story issue; a bundle has none); the engine run's `journal.jsonl` / `state.json` (per-bundle token totals, priced by nothing)
 severity: medium
 reason: The second sweep landed five bundles in 1 h 42 min of engine time (7,036,449 weighted tokens, 46,573,870 raw incl. cache reads per the engine's ATTENTION line) and reported `$0.7246 (total_cost_usd)`: the worker's three turns. A story run's engine cost reaches the stage log through its Jira issue (35.5: the 35.7 run's 34.52 USD); a sweep's bundles post nowhere. Fix: the close-out reads the engine run's journal (per-bundle token totals) and prices them with the routing's model rates into `## Metered cost` (worker + engine, one line per bundle) and the job-run line's cost; the stage log posts a sweep's bundles to the rollup page or the measurements ledger instead of a story issue; the sweep's `ended` event carries `engine_cost_usd`.
+status: open
+
+### DW-132: The sandbox gate passes a test that writes non-ASCII text through `Path.write_text` (or `open`) with no encoding, and the Windows host leg fails it: Linux defaults to UTF-8, the host to cp1252, so a bundle green in the engine lands red on the host (hole 103).
+origin: hole 103 (the third run-sweep, q-run-sweep-20261029T200840Z-2846e6, PR #293, 2026-10-29 22:43Z)
+source_spec: `_bmad-output/specs/sweeps/spec-dw-17-doctor-hermes-config-fallback.md` (the bundle whose tests failed); `kb/agent-pc-setup-runbook.md` (the hole-103 row)
+location: plugins/tk-studio/lib/tests/test_installer_doctor.py `Hermes.hermes` (the write, fixed by hand in 961bc20); plugins/tk-studio/lib/tests/test_conformance.py (no encoding rule); AGENTS.md (no pitfall line); plugins/tk-studio/lib and tools/installer at large (`write_text(`/`read_text(`/`open(` without `encoding=`)
+severity: medium
+reason: The DW-17 bundle's Hermes tests rewrite a fixture that holds an em dash through `write_text(text)`; the engine's gate ran them on Linux and passed, the close-out's host leg ran them on Windows and twelve failed (`'utf-8' codec can't decode byte 0x97`), so the sweep ended `partial` on a red leg with every bundle sound, and the operator fixed one line and re-ran the leg (`POST /runs/{id}/verify`). The host leg is the gate of record, but a difference the engine cannot see should not cost a leg. Fix: a conformance rule that rejects `write_text`, `read_text`, `open` and `Path.open` without an explicit `encoding=` under `plugins/tk-studio/lib`, `tools/installer` and `apps/*/scripts` (text mode only; binary calls exempt), and a pitfall line in AGENTS.md so the engine never writes one; optionally the sandbox runs the lib suite with `PYTHONUTF8=0` and `LC_ALL=C` once to shake out the rest.
 status: open
