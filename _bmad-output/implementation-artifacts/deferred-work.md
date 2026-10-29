@@ -675,7 +675,8 @@ source_spec: `34-4-engine-knowledge-pinned-per-project-spec.md`
 location: plugins/tk-studio/lib/kb.py (index title)
 severity: low
 reason: In a run worktree the folder is `q-run-epic-34-…`, so the regenerated index is titled after the run and the implementer restored `tk-studio` by hand in 34.1, 34.4, 34.5 and 34.6 (a DRIFT line each). Fix: `kb.py index` takes the project name from the tracked config (project_id, else the repository's basename at the base ref), never the worktree folder.
-status: open
+status: done 2026-10-29
+resolution: resolved by sweep bundle dw-kb-index-title
 
 ### DW-85: Two import cycles introduced by Epic 34: `assets` ↔ `playable` (lib) and `enginemcp` → `hostverify` → `sandbox` → `enginemcp` (supervisor).
 origin: retro epic-34 (_bmad-output/specs/spec-epic-34/RETROSPECTIVE.md), A1
