@@ -193,7 +193,12 @@
     folder; the engine resolves it by the glob
     `35-5-the-sandbox-and-the-host-agree-*.md`, and a file named
     `35-5-the-sandbox-and-the-host-agree.md` is read as pending (loop deficiency 1,
-    story 21-6).
+    story 21-6). Size (gate of 35-4, 2026-10-29): plans/35-5.md is band L and
+    oversize (about 30 files, four independent ACs). Halt (the `halt` consult) if the
+    Files list grows past the plan's; never split the story. The AC1 cause is already
+    reproduced in plans/35-5.md (an unset TK_STUDIO_ROOT through the delivery tests'
+    fake env). Widen the four 0.1.30 Stories-row pins by `(, Story 35\.5)?` per the 35-4
+    consult of 08:31:57Z.
 
 - id: "35-6-the-closeout-carries-the-proof"
   title: "The Closeout Carries the Proof"

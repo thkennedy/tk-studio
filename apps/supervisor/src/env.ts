@@ -113,14 +113,16 @@ export function apiPort(env: Env = process.env): number {
   return n;
 }
 
-/** Story 34.5: the engine MCP forwarder's default port (operator-decisions §2: nothing else listens in the 8000 range). */
+/** Story 34.5: the engine MCP forwarder's documented fixed port (operator-decisions §2: nothing else listens in the
+ * 8000 range). Story 35.4: no longer the default — set TK_SUPERVISOR_ENGINE_MCP_PORT=8788 to keep it fixed. */
 export const DEFAULT_ENGINE_MCP_PORT = 8788;
 
 /** Story 34.5: the port the engine MCP forwarder binds on TK_SUPERVISOR_BIND — TK_SUPERVISOR_ENGINE_MCP_PORT when set
- * (a port number, else an error naming the variable), else 8788. */
+ * (a port number, else an error naming the variable; the forwarder fixed, one flagged run at a time). Story 35.4:
+ * unset or blank answers 0, a per-run port (the forwarder binds `:0` and reports the port it got). */
 export function engineMcpPort(env: Env = process.env): number {
   const raw = env.TK_SUPERVISOR_ENGINE_MCP_PORT;
-  if (raw === undefined || !raw.trim()) return DEFAULT_ENGINE_MCP_PORT;
+  if (raw === undefined || !raw.trim()) return 0;
   const v = raw.trim();
   const n = Number(v);
   if (!/^\d{1,5}$/.test(v) || !Number.isInteger(n) || n < 1 || n > 65535) {
