@@ -975,6 +975,18 @@ class PlayableTestCase(unittest.TestCase):
                       "Directory.CreateDirectory("):
             self.assertLess(check, ready.index(later), later)
 
+    def test_template_clamps_a_moment_past_the_ticks_to_the_last_tick(self):
+        # Story 35.6 (hole 92): a moment at tick >= --ticks is captured on the
+        # last tick, and the report looks its frame up there
+        text = TEMPLATE.read_text(encoding="utf-8")
+        physics = self._method_body(text, "public override void _PhysicsProcess(")
+        self.assertIn("|| (m.Tick >= _ticks && _tick == _ticks - 1)", physics)
+        self.assertIn("m.Tick == _tick", physics)
+        report = self._method_body(text, "private void WriteReport(")
+        self.assertIn("_frameAt.TryGetValue(Math.Min(m.Tick, _ticks - 1), out var f)", report)
+        self.assertNotIn("_frameAt.TryGetValue(m.Tick,", report)
+        self.assertIn("a moment at tick >=", text.split("using ", 1)[0])  # the header names it
+
     def test_template_depends_on_nothing_in_the_studio(self):
         text = TEMPLATE.read_text(encoding="utf-8")
         usings = re.findall(r"^using\s+([\w.]+);", text, flags=re.M)

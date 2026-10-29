@@ -45,7 +45,8 @@
  *            leg (default `claude-sonnet-5`, `medium`), reading only `report.json` and the frames; its verdict is
  *            read back from `<media>/judge.json`. Recorded as `playable: {verdict: pass | fail | skipped | inconclusive, reason?,
  *            exit?, status?, failed?, duration_ms?, store?, media?, judge?, findings?, frames?}`. Skip reasons: `no
- *            playable`, `playable is malformed: <field>`, `engine gate not green`. On a configured project every
+ *            playable`, `playable is malformed: <field>`, `no verify.engine` (Story 35.6: a declared `playable`
+ *            with no `verify.engine`), `engine gate not green`. On a configured project every
  *            other non-pass is `fail` (a harness fail, a refusal, a judge that ended blocked or failed), except a judge that
  *            cannot run or answer (infrastructure), which is `inconclusive` (Story 35.3, `judge` below). The leg's
  *            `green` is also playable not fail; its reason reads `host verify red (playable): …`.
@@ -69,8 +70,10 @@
  *            and makes the leg red (`host verify red (assets): …`). Then, after `playable.py run` wrote frames,
  *            `playable.py sheet --report <store>/report.json --out <store>/contact-sheet.png` (Story 35.3: sampled
  *            only from the report's `frames[]`, the judge's citable set; copied with the media; recorded as the
- *            playable step's `contact_sheet` — the leg's own copy under `<store>/sheets/` — and `sampled`). A
- *            non-slice run's leg is unchanged.
+ *            playable step's `contact_sheet` — the leg's own copy under `<store>/sheets/` — and `sampled`). Story 35.6
+ *            (CAP-13): with the same `<stamp>` the leg copies `report.json` and the sampled frames into
+ *            `<store>/legs/<stamp>/{report.json,frames/<name>}`, recorded as `report` and `leg_frames` (best-effort:
+ *            a failed copy leaves both out, never a verdict). A non-slice run's leg is unchanged.
  *   walls    Story 35.3: a tool with its own wall clock gets `toolWall = min(max(1, guard), 86400)` (`assets.py
  *            --wall`, `playable.py --wall-clock`) and its step runs under `toolWall + TOOL_WALL_MARGIN_S`, so the
  *            tool's own kill writes its report first and the leg reads `wall-clock` from it (assets the block's
@@ -163,6 +166,9 @@ export type PlayableStep = {
   duration_ms?: number; store?: string; media?: string; judge?: PlayableJudgeOutcome; findings?: PlayableFinding[]; frames?: string[];
   /** Story 34.8 (slice runs only): the contact sheet's store path and the frame names it sampled. */
   contact_sheet?: string; sampled?: string[];
+  /** Story 35.6 (slice runs only, best-effort): the leg's own copy of `report.json` and of the sampled frames (sheet
+   * order, at most 16) under `<store>/legs/<stamp>/`. */
+  report?: string; leg_frames?: string[];
 };
 /** Story 34.1: the engine gate's step on a ran leg. `reason` only when skipped; the run fields mirror the host
  * command's own; `godot_dir` the folder of `GODOT` prepended to PATH, null when unset or not absolute. */
@@ -484,6 +490,8 @@ export async function hostVerify(run: Run, guardS: number, deps: Deps = {}, opts
   let playable: PlayableStep;
   if (!cmd.playable) playable = { verdict: "skipped", reason: NO_PLAYABLE };
   else if ("skipped" in cmd.playable) playable = { verdict: "skipped", reason: cmd.playable.skipped };
+  // Story 35.6 (hole 92): a project with no `verify.engine` reads that reason, not the gate's.
+  else if (engine.verdict === "skipped" && engine.reason === "no verify.engine") playable = { verdict: "skipped", reason: "no verify.engine" };
   else if (engine.verdict !== "green") playable = { verdict: "skipped", reason: "engine gate not green" };
   else playable = await playableStep(run, cmd.playable, cwd, env, guardS, deps, opts.slice === true);
   return {
@@ -560,6 +568,9 @@ export const CONTACT_SHEET = "contact-sheet.png";
 /** Story 34.8: each slice leg's own copy of its sheet, under the store (never copied with the media). */
 const SHEETS_DIR = "sheets";
 let sheetSeq = 0;
+/** Story 35.6 (CAP-13): each slice leg's own copy of its report and sampled frames, `<store>/legs/<stamp>/`. */
+const LEGS_DIR = "legs";
+const LEG_FRAMES_MAX = 16;
 
 /** Story 35.3: the judge's core, whose `rubric` verb answers the fixed rubric ids (a `judge.json` finding naming any
  * other is refused); the supervisor keeps no copy of them. */
@@ -643,6 +654,30 @@ function copyMedia(store: string, media: string): void {
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 }
 
+/** Story 35.6 (CAP-13): the leg's own copy of its `report.json` and the sheet's sampled frames, under
+ * `<store>/legs/<stamp>/` (`report.json`, `frames/<name>`), `<stamp>` the sheet copy's own. Best-effort: any failure
+ * leaves both fields out (the partial copy removed), never a verdict. */
+function legProof(store: string, stamp: string, frames: string[], sampled: string[]): { report?: string; leg_frames?: string[] } {
+  const dir = join(store, LEGS_DIR, stamp);
+  try {
+    const byName = new Map(frames.map((f) => [basename(f), f] as const));
+    const names = sampled.slice(0, LEG_FRAMES_MAX);
+    const sources = names.map((n) => {
+      const from = byName.get(n);
+      if (!from || basename(n) !== n) throw new Error(`sampled frame ${n} is not one of the report's frames`);
+      return [n, from] as const;
+    });
+    mkdirSync(join(dir, "frames"), { recursive: true });
+    const report = join(dir, "report.json");
+    copyFileSync(join(store, "report.json"), report);
+    const legFrames = sources.map(([n, from]) => { const to = join(dir, "frames", n); copyFileSync(from, to); return to; });
+    return { report, ...(legFrames.length ? { leg_frames: legFrames } : {}) };
+  } catch {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* a partial copy left behind */ }
+    return {};
+  }
+}
+
 /** Story 34.3: run `playable.py`, copy its media, drive the judge. Every non-pass is `fail`. Never throws. */
 async function playableStep(
   run: Run, cfg: { scenario: string; seed: number; ticks: number }, cwd: string, env: Record<string, string | undefined>,
@@ -706,13 +741,14 @@ async function playableStep(
       // The store is per run and every leg of it writes the same `contact-sheet.png`: the sheet recorded is this
       // leg's own copy under `<store>/sheets/`, so an earlier story's verdicts never embed a later leg's sheet.
       let legSheet = sheetPath;
+      const stamp = `${Date.now()}-${process.pid}-${++sheetSeq}`;
       try {
-        const own = join(store, SHEETS_DIR, `${Date.now()}-${process.pid}-${++sheetSeq}.png`);
+        const own = join(store, SHEETS_DIR, `${stamp}.png`);
         mkdirSync(dirname(own), { recursive: true });
         copyFileSync(sheetPath, own);
         legSheet = own;
       } catch { /* the shared sheet, as before */ }
-      withFrames = { ...withFrames, contact_sheet: legSheet, sampled };
+      withFrames = { ...withFrames, contact_sheet: legSheet, sampled, ...legProof(store, stamp, frames, sampled) };
     }
   }
   // The harness-fail branch is decided before the copy: there the copy is best-effort (a failed one never masks the

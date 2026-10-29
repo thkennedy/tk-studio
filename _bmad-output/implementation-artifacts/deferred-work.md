@@ -598,7 +598,7 @@ source_spec: `34-8-the-run-vertical-slice-job-and-the-engagements-game-path-spec
 location: apps/supervisor/src/delivery.ts composeCloseout; plugins/tk-studio/lib/engage.py closeout
 severity: low
 reason: AC2 lists the proof media (the frames, a contact sheet, the report) landing on the run workspace, the PR body and the engagement's page. Plan shape 7/8 distributes them: the closeout input carries only slices[].contact_sheet (delivery.ts composeCloseout) and engage.py closeout copies and attaches only <key>-contact-sheet.png. A consult (second follow-up review) ruled the plan's distribution holds for this story. Attaching the sampled frames and report.json to ENG-NNN: Closeout is an open enhancement that changes the published 0.1.29 closeout input, so it needs a contract bump through planning.
-status: open
+status: resolved 2026-10-29 by this story's PR (35.6: each slice leg copies its `report.json` and sampled frames to `<store>/legs/<stamp>/` (`playable.report`, `playable.leg_frames`), `composeCloseout` carries them as `slices[].report`/`frames` from each story's own leg, and `engage.py closeout` writes and attaches them as `<key>-report.json` and `<key>-frame-<name>` with the report's `| Report | Value |` verdict table under the story; the `e2e_closeout_media.py` drive; contract 0.1.30)
 
 ### DW-78: The host leg's engine gate resolves a project's bare `godot` to WinGet's GUI link and hangs (hole 78).
 origin: operator ledger, hole 78 (2026-10-27T07:09Z)
@@ -718,7 +718,7 @@ source_spec: `_bmad-output/specs/spec-epic-34/RETROSPECTIVE.md`
 location: apps/supervisor/src/hostverify.ts:420-421, enginemcp.ts:398-426, delivery.ts:240-245; plugins/tk-studio/lib/recommend.py:528, playable.py:302-314, engage.py:1190-1196
 severity: low
 reason: Six one-line fixes the retro's lenses found, none exercised by a run yet. Fix: one hygiene story.
-status: open
+status: resolved 2026-10-29 by this story's PR (35.6: a declared `playable` with no `verify.engine` is skipped `no verify.engine`; `recommend.py` reads `.mcp.json` as `utf-8-sig` in `_mcp_status` and `record_mcp`; `PlayableHarness.cs` captures a moment at tick ≥ `--ticks` on the last tick and looks its report frame up at `Math.Min(tick, ticks - 1)`; `startEngineMcp` starts the server and the editor in `servedRoot(run)`; each story's closeout slice takes its own leg's sheet; a flagless `scoping` revise merges `game: true`; each with a test; contract 0.1.30)
 
 ### DW-93: The visual gate's shape after the box measurement: the floor stays `VISUAL_COVERAGE_MIN = 0.25`; a per-entry `coverage_min` override and a collision-aware rule are parked until a real slice needs them.
 origin: retro epic-34 (_bmad-output/specs/spec-epic-34/RETROSPECTIVE.md), C8, AI-4 (operator decision 2026-10-27)

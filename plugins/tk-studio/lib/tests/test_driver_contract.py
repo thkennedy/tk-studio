@@ -1053,10 +1053,13 @@ class DriverContractTestCase(unittest.TestCase):
         manifest = json.loads((PLUGIN_ROOT / "contracts" / "conformance"
                                / "manifest.json").read_text("utf-8"))
         drives = manifest["surfaces"]["tk-studio-engage"]["drives"]
+        # relaxed only to admit Story 35.6's closeout drive after it
         self.assertEqual([(d["argv"][:2], d["expect"], d["status"],
-                           d["marker"]) for d in drives],
+                           d["marker"]) for d in drives[:1]],
                          [(["lib/engage.py", "reply"], "status-block",
                            "blocked", "UnknownEngagement")])
+        self.assertEqual([(d["assertion"], d["argv"], d["expect"]) for d in drives[1:]],
+                         [("headless-clean", ["contracts/conformance/e2e_closeout_media.py"], "ok")])
 
     # --- Story 32.3: the same 0.1.27 entry adds the clarifying questions —
     # `engage.py questions`, `track.py block --engagement` and `close`, the
@@ -2530,7 +2533,7 @@ class DriverContractTestCase(unittest.TestCase):
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
         # relaxed by Story 35.2 only to admit it after 35.8, and by Story 35.3 only to admit it after 35.2
-        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2(, Story 35\.3(, Story 35\.4(, Story 35\.5)?)?)? \(Epic 35\)")
+        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2(, Story 35\.3(, Story 35\.4(, Story 35\.5(, Story 35\.6)?)?)?)? \(Epic 35\)")
         taxonomy = json.loads((PLUGIN_ROOT / "contracts" / "events" / "taxonomy.v1.json")
                               .read_text(encoding="utf-8"))
         stage = taxonomy["events"]["stage"]
@@ -2608,7 +2611,7 @@ class DriverContractTestCase(unittest.TestCase):
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
         # relaxed by Story 35.3 only to admit it after 35.2
-        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2(, Story 35\.3(, Story 35\.4(, Story 35\.5)?)?)? \(Epic 35\)")
+        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2(, Story 35\.3(, Story 35\.4(, Story 35\.5(, Story 35\.6)?)?)?)? \(Epic 35\)")
 
     # --- Story 35.3: 0.1.30 (additive) — the slice path hardened: the tools' walls under the
     # guard's margin, the `match` red cases, the widened proof commit, `sheet --report`, the
@@ -2674,7 +2677,7 @@ class DriverContractTestCase(unittest.TestCase):
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
         # relaxed only to admit Story 35.4 after it
-        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2, Story 35\.3(, Story 35\.4(, Story 35\.5)?)? \(Epic 35\)")
+        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2, Story 35\.3(, Story 35\.4(, Story 35\.5(, Story 35\.6)?)?)? \(Epic 35\)")
 
     def test_0_1_30_story_35_4_engine_mcp_ports(self):
         header = next(line for line in self.text.splitlines()
@@ -2740,7 +2743,7 @@ class DriverContractTestCase(unittest.TestCase):
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
         # relaxed only to admit Story 35.5 after it
-        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2, Story 35\.3, Story 35\.4(, Story 35\.5)? \(Epic 35\)")
+        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2, Story 35\.3, Story 35\.4(, Story 35\.5(, Story 35\.6)?)? \(Epic 35\)")
 
     # --- Story 35.5: 0.1.30 (additive) — the sandbox and the host agree: `requires.tier` and
     # `placement:TierRequired`, the `godot` shim, `maintenance-evals` and the `tk-studio-evals` surface.
@@ -2806,7 +2809,66 @@ class DriverContractTestCase(unittest.TestCase):
             self.assertEqual(defn["requires"], {"tier": "sbx"}, type_id)
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
-        self.assertIn("Story 35.1, Story 35.8, Story 35.2, Story 35.3, Story 35.4, Story 35.5 (Epic 35)", stories)
+        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2, Story 35\.3, Story 35\.4, Story 35\.5(, Story 35\.6)? \(Epic 35\)")
+
+    # --- Story 35.6: 0.1.30 (additive) — the closeout carries the proof: the per-leg report and frames,
+    # each story's own leg, the closeout input's media and the page, and the five B15 edges.
+
+    def test_0_1_30_story_35_6_closeout_carries_the_proof(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.30**", header)
+        self.assertNotIn("**0.1.31**", header)
+        self.assertEqual(header.count("0.1.30 (Story 35.6, additive)"), 1)
+        self.assertLess(header.index("0.1.30 (Story 35.5, additive)"),
+                        header.index("0.1.30 (Story 35.6, additive)"))
+        clause = " ".join(header[header.index("0.1.30 (Story 35.6, additive)"):].split())
+        for phrase in ("the closeout carries the proof", "`<store>/legs/<stamp>/`", "`playable.report?`",
+                       "`playable.leg_frames?`", "each story reading its own leg", "`slices[].report?`/`frames?`",
+                       "`<key>-report.json`", "`<key>-frame-<name>`", "`no verify.engine`", "served root",
+                       "`game: true`", "— additive) |"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        self.assertNotIn("**0.1.31**", flat)
+        self.assertEqual(flat.count("**0.1.30 (Story 35.6, additive).**"), 1)
+        self.assertLess(flat.index("**0.1.30 (Story 35.5, additive).**"),
+                        flat.index("**0.1.30 (Story 35.6, additive).**"))
+        note = flat[flat.index("**0.1.30 (Story 35.6, additive).**"):]
+        note = note[:note.index("## 8. Conformance")]
+        for phrase in ("**The per-leg proof:**", "`<store>/legs/<stamp>/report.json`",
+                       "`<store>/legs/<stamp>/frames/<name>`", "the same `<ms>-<pid>-<seq>` as its "
+                       "`<store>/sheets/<stamp>.png`", "`report?: \"<abs path>\"`", "`leg_frames?: [\"<abs path>\", …]`",
+                       "at most 16", "a failed copy leaves both fields out and never sets a verdict",
+                       "`frames` and `sampled` keep their 0.1.29 meaning", "**A story's own leg:**",
+                       "from just after the previous different story's `close-out` up to and including its own "
+                       "`close-out`", "the re-runs on the branch tip",
+                       "a `landedStory` key with no `close-out` takes the window after the run's last `close-out`",
+                       "a window with no `host-verify` reads `not run`", "This supersedes 0.1.29 Story 34.8's",
+                       "**The closeout input's media:**", "paths under the run workspace", "`CloseoutInputInvalid`",
+                       "the report as `<key>-report.json` and each frame as `<key>-frame-<name>`",
+                       "an unreadable file is a note and is dropped", "`| Report | Value |`",
+                       "`log errors` (the count)", "`Frames: [<name>](<key>-frame-<name>), …; "
+                       "[report.json](<key>-report.json)`",
+                       "A report that is not a JSON object gives a note and no table",
+                       "A slice with neither field renders exactly as in 0.1.29", "**The edges:**",
+                       "is skipped `no verify.engine`, not `engine gate not green`", "`utf-8-sig`",
+                       "a moment at tick ≥ `--ticks` on the last tick", "`min(tick, ticks - 1)`",
+                       "`servedRoot(run)`", "`{worktree}` in `engine.mcp.start` keeping its 0.1.29 meaning",
+                       "merges `game: true`", "`ScopeUnwritable`", "measured on the box only",
+                       "Every other field, kind and route is unchanged."):
+            self.assertIn(phrase, note)
+        # the 0.1.29 Story 34.8 sentence stays as it was; the supersession is named only above
+        self.assertIn("every story of a run taking the verdicts of that run's last", flat)
+        engage = next(line for line in self.text.splitlines()
+                      if line.startswith("| `tk-studio-engage`"))
+        for phrase in ("`slices: [{story, engine, assets, playable, contact_sheet?}]`",
+                       "Story 35.6, 0.1.30: each entry also carries `report?`, `frames?`"):
+            self.assertIn(phrase, engage)
+        self.assertIn("`playable is malformed: <field>`, `no verify.engine` (0.1.30, Story 35.6), `engine gate "
+                      "not green`", flat)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 35.1, Story 35.8, Story 35.2, Story 35.3, Story 35.4, Story 35.5, Story 35.6 (Epic 35)", stories)
 
     # --- AC 2: A7 dossier items covered or explicitly deferred with a seam
 

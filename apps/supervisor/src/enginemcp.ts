@@ -21,12 +21,14 @@
  *             refused before anything is spawned; the child exits, or its port does not answer within the bound;
  *             the forwarder cannot bind — whatever was spawned is killed).
  *   start     the measured launch shape of the pick (`hi-godot/godot-ai`, `kb/engine-mcp-godot.md`), in this order:
- *             the server child runs on the host, cwd the worktree, env the worker env (`buildWorkerEnv`) with `GODOT`
+ *             the server child runs on the host, cwd the served root (Story 35.6: `servedRoot(run)`, `<worktree>/<prefix>`,
+ *             the folder whose config it read; `{worktree}` in `start` stays the worktree top), env the worker env
+ *             (`buildWorkerEnv`) with `GODOT`
  *             and the launch capabilities: a per-run upstream capability in `GODOT_AI_HTTP_CAPABILITY` (32 random
  *             bytes, base64url), a per-run `GODOT_AI_WS_TOKEN` (64 hex) and `GODOT_AI_DISABLE_TELEMETRY=1`. Once its
- *             port answers, the editor child: `$GODOT --editor --path <the worktree's Godot folder>` (the folder of
+ *             port answers, the editor child: `$GODOT --editor --path <the served root's Godot folder>` (the folder of
  *             its `project.godot`, the root or a first-level folder: none is `start-failed` before anything is
- *             spawned), the same env, so its add-on adopts the running server. Then the forwarder: its own detached child process (`bun src/enginemcp.ts forward --bind <b> --port
+ *             spawned), cwd the served root, the same env, so its add-on adopts the running server. Then the forwarder: its own detached child process (`bun src/enginemcp.ts forward --bind <b> --port
  *             <p> --upstream <u>`), a Bun server on `TK_SUPERVISOR_BIND`:`TK_SUPERVISOR_ENGINE_MCP_PORT` (Story 35.4:
  *             unset or blank binds `:0`, the port read from its `engine-mcp-forwarder ready <port>` line; a set value
  *             keeps it fixed) that proxies to `127.0.0.1:<port>` only a request carrying `Authorization: Bearer <per-run
@@ -72,7 +74,7 @@ import { apiBind, engineMcpPort } from "./env";
 import { splitCommand } from "./hostverify";
 import { isGodot } from "./hygiene";
 import {
-  isTerminal, killRecordedWorker, probeRecordedWorker, processStartTime, workerMayRun, type Queue, type QueueRun, type WorkerKill,
+  isTerminal, killRecordedWorker, probeRecordedWorker, processStartTime, servedRoot, workerMayRun, type Queue, type QueueRun, type WorkerKill,
 } from "./queue";
 import { buildWorkerEnv, runProcess, type RunResult } from "./server";
 
@@ -459,8 +461,10 @@ export async function startEngineMcp(queue: Queue, runId: string, deps: EngineMc
   const failed = (why: string) => refusal("start-failed", why, startFailedResolves(config.port, deps.env ?? process.env));
   const worktree = run.worktree;
   if (!worktree || !existsSync(worktree)) return failed("the run has no worktree to start the server in");
-  const projectGodot = isGodot(worktree);
-  if (!projectGodot) return failed("the worktree holds no project.godot (its root or a first-level folder) to open the editor on");
+  // Story 35.6 (hole 92): the server starts in the folder whose config it read (`run.prefix`): the served root.
+  const served = servedRoot(run)!;
+  const projectGodot = isGodot(served);
+  if (!projectGodot) return failed("the served root holds no project.godot (its root or a first-level folder) to open the editor on");
   const env = deps.env ?? process.env;
   // The forwarder binds the tailnet address only — refused before anything is spawned.
   let bind: string, port: number;
@@ -495,13 +499,13 @@ export async function startEngineMcp(queue: Queue, runId: string, deps: EngineMc
     [SERVER_HTTP_CAPABILITY_ENV]: capability, [SERVER_WS_TOKEN_ENV]: randomBytes(32).toString("hex"), [SERVER_TELEMETRY_OFF_ENV]: "1",
   };
   let server: McpChild;
-  try { server = (deps.spawn ?? defaultSpawn)(argv, { cwd: worktree, env: childEnv }); }
+  try { server = (deps.spawn ?? defaultSpawn)(argv, { cwd: served, env: childEnv }); }
   catch (e) { return failed(`the server did not spawn: ${clip(message(e))}`); }
   const waited = await awaitPort(server, serverPort, deps);
   if (waited) { await killAndWait(server); return failed(waited); }
   // The editor on the project: its add-on adopts the running server.
   let editor: McpChild;
-  try { editor = (deps.spawnEditor ?? defaultEditorSpawn)([plan.godot, "--editor", "--path", dirname(projectGodot)], { cwd: worktree, env: childEnv }); }
+  try { editor = (deps.spawnEditor ?? defaultEditorSpawn)([plan.godot, "--editor", "--path", dirname(projectGodot)], { cwd: served, env: childEnv }); }
   catch (e) { await killAndWait(server); return failed(`the editor did not spawn: ${clip(message(e))}`); }
   if (!editor.pid) { await killAndWait(editor); await killAndWait(server); return failed("the editor did not spawn"); }
   // An editor that exits before the forwarder is ready leaves no MCP: tracked so the start refuses instead.

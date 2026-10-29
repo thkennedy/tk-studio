@@ -261,4 +261,11 @@
     executor spec as `stories/35-7-the-run-sweep-job-type-spec.md` in the spec folder;
     the engine resolves it by the glob `35-7-the-run-sweep-job-type-*.md`, and a file
     named `35-7-the-run-sweep-job-type.md` is read as pending (loop deficiency 1, story
-    21-6).
+    21-6). Size (gate of 35-6, 2026-10-29): plans/35-7.md is band L and oversize (about
+    20 files across lib, supervisor and contract). Halt (the `halt` consult) if the
+    Files list grows past the plan's; never split the story. One PR per sweep, the
+    launch verb, the two `sweep-triage` records, the end state and the post-merge
+    `ledger-resolve` are settled in SPEC.md's design notes (CAP-15, CAP-16) and the
+    plan's Settled shape. AC3's real sweep is the operator's: ask it through the
+    consult log and record it `unverifiable-here`; never run a real sweep or fix a DW
+    entry in this story. Run the plan's Verify bun steps (not in the lib gate).

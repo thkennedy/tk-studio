@@ -762,7 +762,7 @@ describe("Story 34.3: the playable-verify step runs after a green engine gate", 
       [base + "playable: smoke\n", [0, 0], 2, "playable is malformed: playable"],
       [base + "playable:\n  scenario: s.json\n  seed: 1\n", [0, 0], 2, "playable is malformed: ticks"],
       [base + PLAYABLE, [0, 1], 2, "engine gate not green"],
-      [hostKey("uv run tools/verify_host.py") + PLAYABLE, [0], 1, "engine gate not green"],
+      [hostKey("uv run tools/verify_host.py") + PLAYABLE, [0], 1, "no verify.engine"], // Story 35.6 (hole 92)
       [base + PLAYABLE, [3], 1, "engine gate not green"],
     ];
     for (const [config, exits, spawned, reason] of cases) {
@@ -1087,7 +1087,7 @@ describe("Story 34.8: a slice run's assets step, contact sheet and PR section", 
   /** The runner: the config; the host and engine steps exit per `exits`; `assets.py <verb>` exits per `assets`; `playable.py
    * run` writes the report and frames; `playable.py sheet` writes the sheet and names the sampled frames. */
   /** Story 35.3: `blocks` a verb's own stdout block (null: none, a crash's traceback), `timeouts` each step's guard. */
-  function recorder(config: string, o: { exits?: number[]; assets?: Record<string, number>; sheet?: number; blocks?: Record<string, Record<string, unknown> | null> } = {}) {
+  function recorder(config: string, o: { exits?: number[]; assets?: Record<string, number>; sheet?: number; blocks?: Record<string, Record<string, unknown> | null>; report?: Record<string, unknown> } = {}) {
     const steps: string[][] = [];
     const timeouts: number[] = [];
     let plain = 0;
@@ -1124,7 +1124,7 @@ describe("Story 34.8: a slice run's assets step, contact sheet and PR section", 
         const out = argv[argv.indexOf("--out") + 1]!;
         mkdirSync(join(out, "frames"), { recursive: true });
         for (const f of REPORT.frames) writeFileSync(join(out, f.file), "png");
-        writeFileSync(join(out, "report.json"), JSON.stringify(REPORT));
+        writeFileSync(join(out, "report.json"), JSON.stringify(o.report ?? REPORT));
         writeFileSync(join(out, "log.txt"), "log\n");
         return status(1, { ok: false, verdict: "fail", failed: null, status: "partial", intent: "playable", artifacts: [], reason: "harness" });
       }
@@ -1200,6 +1200,52 @@ describe("Story 34.8: a slice run's assets step, contact sheet and PR section", 
     // the media copy keeps the contact-sheet.png name and never gains the per-leg sheets
     expect(existsSync(join(two.playable!.media!, "contact-sheet.png"))).toBe(true);
     expect(existsSync(join(two.playable!.media!, "sheets"))).toBe(false);
+  }, 30_000);
+
+  test("Story 35.6: a slice leg copies its report and sampled frames under <store>/legs/<stamp>/, the sheet's stamp", async () => {
+    const config = base + PLAYABLE;
+    const v = await hostVerify(fixture(config).run, 60, { env: legEnv(), run: recorder(config).run as any }, { slice: true }) as HostVerifyRan;
+    const store = v.playable!.store!;
+    const stamp = basename(v.playable!.contact_sheet!, ".png");
+    expect(v.playable!.report).toBe(join(store, "legs", stamp, "report.json"));
+    expect(v.playable!.leg_frames).toEqual([join(store, "legs", stamp, "frames", "tick-000000.png"), join(store, "legs", stamp, "frames", "tick-000030.png")]);
+    expect(JSON.parse(readFileSync(v.playable!.report!, "utf-8"))).toEqual(REPORT);
+    for (const f of v.playable!.leg_frames!) expect(readFileSync(f, "utf-8")).toBe("png");
+    // `frames` and `sampled` keep their 0.1.29 meaning; the media copy never gains the legs
+    expect(v.playable!.frames).toEqual([join(store, "frames/tick-000000.png"), join(store, "frames/tick-000030.png")]);
+    expect(v.playable!.sampled).toEqual(["tick-000000.png", "tick-000030.png"]);
+    expect(existsSync(join(v.playable!.media!, "legs"))).toBe(false);
+  }, 30_000);
+
+  test("Story 35.6: two slice legs on one store keep two distinct report copies", async () => {
+    const config = base + PLAYABLE;
+    const fx = fixture(config);
+    const env = legEnv();
+    const one = await hostVerify(fx.run, 60, { env, run: recorder(config, { report: { ...REPORT, seed: 1 } }).run as any }, { slice: true }) as HostVerifyRan;
+    const two = await hostVerify(fx.run, 60, { env, run: recorder(config, { report: { ...REPORT, seed: 2 } }).run as any }, { slice: true }) as HostVerifyRan;
+    expect(one.playable!.report).not.toBe(two.playable!.report);
+    expect(JSON.parse(readFileSync(one.playable!.report!, "utf-8")).seed).toBe(1);
+    expect(JSON.parse(readFileSync(two.playable!.report!, "utf-8")).seed).toBe(2);
+    expect(one.playable!.leg_frames![0]).not.toBe(two.playable!.leg_frames![0]);
+    expect(existsSync(one.playable!.leg_frames![0]!)).toBe(true);
+  }, 30_000);
+
+  test("Story 35.6: a failed leg copy leaves report and leg_frames out, the verdict and the sheet unchanged; a non-slice leg has neither", async () => {
+    const config = base + PLAYABLE;
+    const fx = fixture(config);
+    const env = legEnv();
+    const first = await hostVerify(fx.run, 60, { env, run: recorder(config).run as any }, { slice: true }) as HostVerifyRan;
+    const store = first.playable!.store!;
+    rmSync(join(store, "legs"), { recursive: true, force: true });
+    writeFileSync(join(store, "legs"), "not a folder"); // every copy under it fails
+    const v = await hostVerify(fx.run, 60, { env, run: recorder(config).run as any }, { slice: true }) as HostVerifyRan;
+    expect(v.playable!.verdict).toBe(first.playable!.verdict);
+    expect(v.playable!.contact_sheet).toBeDefined();
+    expect("report" in v.playable!).toBe(false);
+    expect("leg_frames" in v.playable!).toBe(false);
+    const plain = await hostVerify(fixture(config).run, 60, { env: legEnv(), run: recorder(config).run as any }) as HostVerifyRan;
+    expect("report" in plain.playable!).toBe(false);
+    expect("leg_frames" in plain.playable!).toBe(false);
   }, 30_000);
 
   test("match exit 1 is a fault: recorded, not red; the engine gate runs", async () => {

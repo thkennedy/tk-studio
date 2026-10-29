@@ -7,7 +7,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { APPROVE_EVENT, RUN_QUEUED_EVENT, RUN_STOP_EVENT, engagementRunPass } from "../src/approve";
-import { CLOSEOUT_EVENT, closeoutPass, composeCloseout, lastRunEnded, type CloseoutInput, type DeliveryDeps } from "../src/delivery";
+import { CLOSEOUT_EVENT, closeoutPass, composeCloseout, lastRunEnded, storyLegs, type CloseoutInput, type DeliveryDeps } from "../src/delivery";
 import { applyInput, newEngagement, readEngagement, writeEngagement, type Autonomy, type Engagement } from "../src/engagement";
 import type { EndNotice } from "../src/hygiene";
 import { Queue, type Owner } from "../src/queue";
@@ -623,16 +623,17 @@ describe("Story 34.8: the slice's verdicts per story in the closeout input (AC2)
     const { run } = queue.enqueue({ jobId: job, root, projectId: "p", definition: { id: job, type: "run-vertical-slice" }, payload: { engagement: ENG, project: "p" } });
     queue.serviceEvent(RUN_QUEUED_EVENT, { engagement: ENG, project: "p", run_id: run.run_id, job });
     await launch(queue, run.run_id, "E1");
-    // the real order: the paused-ruling close-out notes run no leg; the leg runs once, at the engine's completion
+    // the real order (`worktree.ts`): each completion notes its `host-verify` before that story's `close-out`
+    queue.note(run.run_id, "host-verify", { green: true, engine: { verdict: "green" }, assets: { verdict: "green", steps: [] }, playable: { verdict: "pass", contact_sheet: "/store/sheets/leg-1.png" } });
     queue.note(run.run_id, "close-out", { story_key: "41-1-csv-button" });
+    queue.note(run.run_id, "host-verify", { green: true, engine: { verdict: "green" }, assets: { verdict: "green", steps: [] }, playable: { verdict: "pass", contact_sheet: "/store/sheets/leg-2.png" } });
     queue.note(run.run_id, "close-out", { story_key: "41-2-filtered-export" });
-    queue.note(run.run_id, "host-verify", { green: true, engine: { verdict: "green" }, assets: { verdict: "green", steps: [] }, playable: { verdict: "pass", contact_sheet: "/store/run-77/playable/contact-sheet.png" } });
     queue.end(run.run_id, "complete", null, { detail: { pr: PR_1 } });
     const fx = deps();
     const input = await composeCloseout(queue, fx.deps, { root, engagement: ENG }, readEngagement(root, ENG)!, queue.get(run.run_id)!);
     expect(input.slices).toEqual([
-      { story: "41-1-csv-button", engine: "green", assets: "green", playable: "pass", contact_sheet: "/store/run-77/playable/contact-sheet.png" },
-      { story: "41-2-filtered-export", engine: "green", assets: "green", playable: "pass", contact_sheet: "/store/run-77/playable/contact-sheet.png" },
+      { story: "41-1-csv-button", engine: "green", assets: "green", playable: "pass", contact_sheet: "/store/sheets/leg-1.png" },
+      { story: "41-2-filtered-export", engine: "green", assets: "green", playable: "pass", contact_sheet: "/store/sheets/leg-2.png" },
     ]);
 
     const plain = newQueue();
@@ -646,22 +647,63 @@ describe("Story 34.8: the slice's verdicts per story in the closeout input (AC2)
     expect("slices" in plainInput).toBe(false);
   });
 
-  test("a later host-verify (a re-verify) supersedes the earlier leg for every story of the run", async () => {
+  test("Story 35.6: a later host-verify (a re-run on the branch tip) supersedes only the last story's leg; the earlier story keeps its own", async () => {
     const queue = newQueue();
     const root = servedRoot(queue);
     const { run } = queue.enqueue({ jobId: "run-epic-41", root, projectId: "p", definition: { id: "run-epic-41", type: "run-vertical-slice" }, payload: { engagement: ENG, project: "p" } });
     queue.serviceEvent(RUN_QUEUED_EVENT, { engagement: ENG, project: "p", run_id: run.run_id, job: "run-epic-41" });
     await launch(queue, run.run_id, "E1");
-    queue.note(run.run_id, "close-out", { story_key: "41-1-csv-button" });
-    queue.note(run.run_id, "close-out", { story_key: "41-2-filtered-export" });
     queue.note(run.run_id, "host-verify", { green: true, engine: { verdict: "green" }, assets: { verdict: "green", steps: [] }, playable: { verdict: "pass", contact_sheet: "/store/sheets/leg-1.png" } });
+    queue.note(run.run_id, "close-out", { story_key: "41-1-csv-button" });
+    queue.note(run.run_id, "host-verify", { green: true, engine: { verdict: "green" }, assets: { verdict: "green", steps: [] }, playable: { verdict: "pass", contact_sheet: "/store/sheets/leg-2.png" } });
+    queue.note(run.run_id, "close-out", { story_key: "41-2-filtered-export" });
     queue.end(run.run_id, "complete", null, {});
-    queue.note(run.run_id, "host-verify", { green: false, engine: { verdict: "green" }, assets: { verdict: "red", steps: [] }, playable: { verdict: "fail", contact_sheet: "/store/sheets/leg-2.png" } });
+    queue.note(run.run_id, "host-verify", { green: false, reason: "host verify red (assets): x", engine: { verdict: "green" }, assets: { verdict: "red", steps: [] }, playable: { verdict: "fail", contact_sheet: "/store/sheets/leg-3.png" } });
     const input = await composeCloseout(queue, deps().deps, { root, engagement: ENG }, readEngagement(root, ENG)!, queue.get(run.run_id)!);
     expect(input.slices).toEqual([
-      { story: "41-1-csv-button", engine: "green", assets: "red", playable: "fail", contact_sheet: "/store/sheets/leg-2.png" },
-      { story: "41-2-filtered-export", engine: "green", assets: "red", playable: "fail", contact_sheet: "/store/sheets/leg-2.png" },
+      { story: "41-1-csv-button", engine: "green", assets: "green", playable: "pass", contact_sheet: "/store/sheets/leg-1.png" },
+      { story: "41-2-filtered-export", engine: "green", assets: "red", playable: "fail", contact_sheet: "/store/sheets/leg-3.png" },
     ]);
+  });
+
+  test("Story 35.6: each story carries its own leg's report and frames; absent when the leg has none", async () => {
+    const queue = newQueue();
+    const root = servedRoot(queue);
+    const { run } = queue.enqueue({ jobId: "run-epic-41", root, projectId: "p", definition: { id: "run-epic-41", type: "run-vertical-slice" }, payload: { engagement: ENG, project: "p" } });
+    queue.serviceEvent(RUN_QUEUED_EVENT, { engagement: ENG, project: "p", run_id: run.run_id, job: "run-epic-41" });
+    await launch(queue, run.run_id, "E1");
+    const leg = (stamp: string) => ({
+      verdict: "pass", contact_sheet: `/store/sheets/${stamp}.png`, report: `/store/legs/${stamp}/report.json`,
+      leg_frames: [`/store/legs/${stamp}/frames/tick-000000.png`, `/store/legs/${stamp}/frames/tick-000030.png`],
+      frames: ["/store/frames/tick-000000.png"], sampled: ["tick-000000.png", "tick-000030.png"],
+    });
+    queue.note(run.run_id, "host-verify", { green: true, engine: { verdict: "green" }, assets: { verdict: "green", steps: [] }, playable: leg("1-1-1") });
+    queue.note(run.run_id, "close-out", { story_key: "41-1-csv-button" });
+    queue.note(run.run_id, "host-verify", { green: true, engine: { verdict: "green" }, assets: { verdict: "green", steps: [] }, playable: leg("2-2-2") });
+    queue.note(run.run_id, "close-out", { story_key: "41-2-filtered-export" });
+    // a paused-ruling close-out runs no leg: its window holds none
+    queue.note(run.run_id, "close-out", { story_key: "41-3-paused" });
+    queue.end(run.run_id, "complete", null, {});
+    const input = await composeCloseout(queue, deps().deps, { root, engagement: ENG }, readEngagement(root, ENG)!, queue.get(run.run_id)!);
+    expect(input.slices).toEqual([
+      { story: "41-1-csv-button", engine: "green", assets: "green", playable: "pass", contact_sheet: "/store/sheets/1-1-1.png",
+        report: "/store/legs/1-1-1/report.json", frames: ["/store/legs/1-1-1/frames/tick-000000.png", "/store/legs/1-1-1/frames/tick-000030.png"] },
+      { story: "41-2-filtered-export", engine: "green", assets: "green", playable: "pass", contact_sheet: "/store/sheets/2-2-2.png",
+        report: "/store/legs/2-2-2/report.json", frames: ["/store/legs/2-2-2/frames/tick-000000.png", "/store/legs/2-2-2/frames/tick-000030.png"] },
+      { story: "41-3-paused", engine: "not run", assets: "not run", playable: "not run" },
+    ]);
+  });
+
+  test("Story 35.6: storyLegs windows: a landed key with no close-out takes the window after the run's last close-out", () => {
+    const ev = (kind: string, detail: Record<string, unknown>) => ({ kind, detail }) as any;
+    const a = { leg: "a" }, b = { leg: "b" }, c = { leg: "c" };
+    const events = [ev("host-verify", a), ev("close-out", { story_key: "A" }), ev("close-out", { story_key: "B" }), ev("host-verify", b), ev("host-verify", c)];
+    const legs = storyLegs(events, ["A", "B", "L"]);
+    expect(legs.get("A")).toBe(a);
+    expect(legs.get("B")).toBe(c); // the last story takes the re-runs after its close-out
+    expect(legs.get("L")).toBe(c); // after the last close-out
+    expect(storyLegs([ev("close-out", { story_key: "A" })], ["A"]).get("A")).toBeUndefined();
+    expect(storyLegs([ev("host-verify", a)], ["run-1"]).get("run-1")).toBe(a);
   });
 
   test("a slice run with no host-verify event reads `not run`; a skipped leg reads `skipped`", async () => {

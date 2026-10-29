@@ -2253,8 +2253,9 @@ class GameScopeTests(ScopeTestCase):
         self.assertTrue(result["game"])
         self.assertNotIn("brief_page", self.record())
         self.assertNotIn("gdd_page", self.record())
-        # no doc published by this revise: no `game` key minted
-        self.assertNotIn("game", self.record())
+        # Story 35.6 (hole 92): no doc published by this revise, yet the
+        # record of a game project gains `game: true`
+        self.assertIs(self.record().get("game"), True)
         # a record already carrying `game: true` keeps it through a flagless revise
         self.set_record(game=True)
         kept = self.scope(text=None, revise_at=REVISE_AT)
@@ -2264,6 +2265,31 @@ class GameScopeTests(ScopeTestCase):
         self.set_record(scope_page=None)
         refused = self.scope(text=None, revise_at=REVISE_AT)
         self.assertIn("GameDocsMissing: brief", refused["reason"])
+
+    def test_a_flagless_revise_whose_game_merge_the_os_refuses_is_scope_unwritable(self):
+        self.scope()
+        self.make_game()
+        record = self.record()
+        record["inputs"] = list(record.get("inputs") or []) + [{
+            "at": REVISE_AT, "verb": "revise", "source": "bearer",
+            "payload": {"body": "# revised scope\n"}, "from": "scoping",
+            "to": "scoping"}]
+        self.set_record(inputs=record["inputs"])
+        real = engage._merge_record
+
+        def merge(root, engagement, changes, *args, **kwargs):
+            if isinstance(changes, dict) and changes.get("game") is True:
+                raise OSError("disk full")
+            return real(root, engagement, changes, *args, **kwargs)
+
+        with mock.patch.object(engage, "_merge_record", side_effect=merge):
+            result = self.scope(text=None, revise_at=REVISE_AT)
+        self.assert_status_block_last(result, "blocked")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "engage refused: ScopeUnwritable: "
+                         "_bmad-output/engagements/ENG-001/engagement.yaml: "
+                         "OSError")
+        self.assertNotIn("game", self.record())
 
     def test_doc_flags_on_another_project_are_refused(self):
         result = self.scope(brief=BRIEF, gdd=GDD)
@@ -2375,6 +2401,148 @@ class CloseoutSliceTests(CloseoutTestCase):
                     self.assertIn("CloseoutInputInvalid", bad["reason"])
                     self.assertIn(f"slices[0] {field}", bad["reason"])
 
+
+    # Story 35.6 (CAP-13): the closeout carries the proof
+
+    def leg(self, stamp: str, report=None, frames=("tick-000000.png",
+                                                     "tick-000030.png")):
+        """One leg's copy under the store: `legs/<stamp>/report.json` (the
+        given text, else a pass report) and `frames/<name>`."""
+        root = Path(self._tmp.name) / "store" / "legs" / stamp
+        (root / "frames").mkdir(parents=True, exist_ok=True)
+        if report is None:
+            report = json.dumps({
+                "schema": 1, "verdict": "fail",
+                "failed": {"invariant": "node_exists", "tick": 30,
+                           "detail": "Player missing"},
+                "seed": 7, "ticks": 120, "ticks_run": 90, "mode": "movie",
+                "frames": [], "log_errors": ["E 1", "E 2"],
+                "moments": [{"name": "spawn", "tick": 0},
+                            {"name": "boss", "tick": 90}]})
+        (root / "report.json").write_text(report, encoding="utf-8")
+        paths = []
+        for name in frames:
+            (root / "frames" / name).write_bytes(
+                b"\x89PNG\r\n\x1a\n" + f"{stamp}-{name}".encode())
+            paths.append(str(root / "frames" / name))
+        return str(root / "report.json"), paths
+
+    def test_35_6_report_table_and_frames_attached_per_story(self):
+        report, frames = self.leg("1-1-1")
+        sheet = self.sheet()
+        result = self.closeout(closeout_input(slices=[
+            {"story": "41-1-csv-button", "engine": "green", "assets": "green",
+             "playable": "fail", "contact_sheet": str(sheet),
+             "report": report, "frames": frames}]))
+        self.assert_status_block_last(result, "complete")
+        text = self.report()
+        image = ("![41-1-csv-button contact sheet]"
+                 "(41-1-csv-button-contact-sheet.png)")
+        self.assertIn(image, text)
+        table = "\n".join([
+            "| Report | Value |", "| --- | --- |", "| verdict | fail |",
+            "| failed | node_exists: Player missing |", "| ticks | 90/120 |",
+            "| seed | 7 |", "| mode | movie |",
+            "| moments | spawn@0, boss@90 |", "| log errors | 2 |"])
+        self.assertIn(table, text)
+        self.assertLess(text.index(image), text.index(table))
+        self.assertIn(
+            "Frames: [tick-000000.png](41-1-csv-button-frame-tick-000000.png),"
+            " [tick-000030.png](41-1-csv-button-frame-tick-000030.png); "
+            "[report.json](41-1-csv-button-report.json)", text)
+        for name, source in [("41-1-csv-button-report.json", report),
+                             ("41-1-csv-button-frame-tick-000000.png",
+                              frames[0]),
+                             ("41-1-csv-button-frame-tick-000030.png",
+                              frames[1])]:
+            self.assertEqual((self.dir / name).read_bytes(),
+                             Path(source).read_bytes())
+        page = self.fake.page("ENG-001: Closeout")
+        self.assertIn("<table>", page["body"])
+        files = self.fake.attachments[page["id"]]
+        self.assertEqual(sorted(f["title"] for f in files), sorted([
+            "41-1-csv-button-contact-sheet.png", "41-1-csv-button-report.json",
+            "41-1-csv-button-frame-tick-000000.png",
+            "41-1-csv-button-frame-tick-000030.png"]))
+
+    def test_35_6_two_stories_carry_their_own_legs(self):
+        one, f1 = self.leg("1-1-1")
+        two, f2 = self.leg("2-2-2", report=json.dumps({
+            "verdict": "pass", "failed": None, "seed": 9, "ticks": 60,
+            "ticks_run": 60, "mode": "movie", "moments": [],
+            "log_errors": []}), frames=("tick-000060.png",))
+        self.closeout(closeout_input(slices=[
+            {"story": "41-1-a", "engine": "green", "assets": "green",
+             "playable": "fail", "report": one, "frames": f1},
+            {"story": "41-2-b", "engine": "green", "assets": "green",
+             "playable": "pass", "report": two, "frames": f2}]))
+        text = self.report()
+        self.assertIn("| seed | 7 |", text)
+        self.assertIn("| seed | 9 |", text)
+        self.assertIn("| failed | — |", text)
+        self.assertIn("| moments | — |", text)
+        self.assertIn("[tick-000060.png](41-2-b-frame-tick-000060.png)", text)
+        self.assertEqual((self.dir / "41-2-b-frame-tick-000060.png")
+                         .read_bytes(), Path(f2[0]).read_bytes())
+        self.assertFalse((self.dir / "41-2-b-frame-tick-000000.png").exists())
+
+    def test_35_6_an_unreadable_report_or_frame_is_a_note_and_dropped(self):
+        _, frames = self.leg("1-1-1")
+        missing = str(Path(self._tmp.name) / "gone" / "report.json")
+        gone = str(Path(self._tmp.name) / "gone" / "tick-000090.png")
+        result = self.closeout(closeout_input(slices=[
+            {"story": "41-1-csv-button", "engine": "green", "assets": "green",
+             "playable": "pass", "report": missing,
+             "frames": [frames[0], gone]}]))
+        self.assert_status_block_last(result, "complete")
+        notes = "\n".join(result["notes"])
+        self.assertIn("report.json of 41-1-csv-button unreadable", notes)
+        self.assertIn("tick-000090.png of 41-1-csv-button unreadable", notes)
+        text = self.report()
+        self.assertNotIn("| Report | Value |", text)
+        self.assertNotIn("41-1-csv-button-report.json", text)
+        self.assertNotIn("tick-000090", text)
+        self.assertIn("[tick-000000.png]"
+                      "(41-1-csv-button-frame-tick-000000.png)", text)
+        self.assertIsNotNone(self.fake.page("ENG-001: Closeout"))
+
+    def test_35_6_a_report_that_is_not_an_object_gives_no_table(self):
+        for body in ("[]", "{not json"):
+            with self.subTest(body=body):
+                report, _ = self.leg("1-1-1", report=body, frames=())
+                result = self.closeout(closeout_input(slices=[
+                    {"story": "41-1-csv-button", "engine": "green",
+                     "assets": "green", "playable": "pass",
+                     "report": report}]))
+                self.assert_status_block_last(result, "complete")
+                self.assertTrue(any("is not a JSON object" in n
+                                    for n in result["notes"]))
+                text = self.report()
+                self.assertNotIn("| Report | Value |", text)
+                self.assertIn("[report.json](41-1-csv-button-report.json)",
+                              text)
+
+    def test_35_6_a_slice_with_neither_field_renders_as_before(self):
+        entry = {"story": "41-1-csv-button", "engine": "green",
+                 "assets": "green", "playable": "pass"}
+        self.closeout(closeout_input(slices=[entry]))
+        text = self.report()
+        self.assertNotIn("| Report | Value |", text)
+        self.assertNotIn("Frames:", text)
+        self.assertNotIn("report.json", text)
+
+    def test_35_6_bad_report_or_frames_types_are_refused(self):
+        whole = {"story": "41-1-csv-button", "engine": "green",
+                 "assets": "green", "playable": "pass"}
+        for field, value in [("report", ""), ("report", 3), ("report", []),
+                             ("frames", "a.png"), ("frames", [""]),
+                             ("frames", [3]), ("frames", {})]:
+            with self.subTest(field=field, value=value):
+                bad = self.closeout(closeout_input(
+                    slices=[{**whole, field: value}]))
+                self.assert_status_block_last(bad, "blocked")
+                self.assertIn("CloseoutInputInvalid", bad["reason"])
+                self.assertIn(f"slices[0] {field}", bad["reason"])
 
 if __name__ == "__main__":
     unittest.main()

@@ -105,14 +105,15 @@ const started: [Queue, string][] = [];
 const newQueue = () => track(new Queue(":memory:", { ownerAlive: (o) => o.nonce === me.nonce, engineLive: async () => ({ live: false }) }));
 
 /** A claimed sbx run with its worktree cut (a Godot project in its `game/` folder, as TUA's), flagged unless `flag: false`. */
-async function flaggedRun(q: Queue, opts: { flag?: boolean } = {}): Promise<{ run: QueueRun; wt: string; root: string }> {
+/** Story 35.6: `prefix` the project's place in its worktree (`run.prefix`, e.g. `game/`: the served root is `<wt>/game`). */
+async function flaggedRun(q: Queue, opts: { flag?: boolean; prefix?: string } = {}): Promise<{ run: QueueRun; wt: string; root: string }> {
   const root = tempDir("tk-sup-enginemcp-root-");
   const wt = tempDir("tk-sup-enginemcp-wt-");
   mkdirSync(join(wt, "game"));
   writeFileSync(join(wt, "game", "project.godot"), "");
   const run = q.enqueue({
     jobId: "run-epic", root, projectId: "tua", definition: JOB, owner: me, tier: "sbx", sandbox: SB, base_ref: "main",
-    ...(opts.flag === false ? {} : { editorInTheLoop: true }),
+    ...(opts.flag === false ? {} : { editorInTheLoop: true }), ...(opts.prefix ? { prefix: opts.prefix } : {}),
   }).run;
   expect((await q.claim(run.run_id, me)).claimed).toBe(true);
   q.recordWorktree(run.run_id, wt, { branch: `supervisor/run-${run.run_id}`, base_ref: "main" });
@@ -267,6 +268,34 @@ describe("refusals: nothing started on any", () => {
     const out = await startEngineMcp(q, run.run_id, depsFor({ config: configFor(exitBin, p), mcp: MCP_JSON }));
     expect("refused" in out && out.refused).toMatchObject({ key: "engine-mcp:start-failed", reason: expect.stringContaining("exited") });
     expect(engineMcpLive(run.run_id)).toBe(false);
+  });
+
+  test("Story 35.6: a prefixed run's server and editor start in the served root (the folder whose config was read); {worktree} stays the worktree top", async () => {
+    const q = newQueue();
+    const { run, wt } = await flaggedRun(q, { prefix: "game/" });
+    const served = join(wt, "game");
+    const port = freePort();
+    const log: { name: string; running: Record<number, boolean> }[] = [];
+    const seen: { name: string; argv: string[]; cwd: string }[] = [];
+    const git: string[][] = [];
+    const deps = depsFor({ config: configFor(`${serverBin} --port ${port} --root {worktree}`, port), mcp: MCP_JSON });
+    const out = await startEngineMcp(q, run.run_id, {
+      ...deps, git: gitAt({ config: configFor(`${serverBin} --port ${port} --root {worktree}`, port), mcp: MCP_JSON }, git),
+      spawn: (argv, o) => { seen.push({ name: "server", argv, cwd: o.cwd }); return loggedChild(argv, o, "server", log); },
+      spawnEditor: (argv, o) => { seen.push({ name: "editor", argv, cwd: o.cwd }); return loggedChild(argv, o, "editor", log); },
+    });
+    started.push([q, run.run_id]);
+    expect(out).toMatchObject({ started: true });
+    // the config and `.mcp.json` were read under the prefix
+    expect(git.map((a) => a[1]).sort()).toEqual(["main:game/.mcp.json", "main:game/.tk-studio/config.yaml"]);
+    const server = seen.find((x) => x.name === "server")!, editor = seen.find((x) => x.name === "editor")!;
+    expect(server.cwd).toBe(served);
+    expect(server.argv.slice(1)).toEqual(["--port", String(port), "--root", wt]);
+    expect(editor.cwd).toBe(served);
+    expect(editor.argv.slice(1)).toEqual(["--editor", "--path", served]);
+    const env = engineMcpEnv(run.run_id)!;
+    const echoed = await (await fetch(env.TK_ENGINE_MCP_URL!, { headers: { Authorization: `Bearer ${env.TK_ENGINE_MCP_BEARER}` } })).json() as Record<string, unknown>;
+    expect(String(echoed.cwd).toLowerCase()).toBe(served.toLowerCase());
   });
 
   test("start-failed: the port does not answer within the bound — the child is killed", async () => {

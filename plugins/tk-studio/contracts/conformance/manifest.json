@@ -561,6 +561,12 @@
           "expect": "status-block",
           "status": "blocked",
           "marker": "UnknownEngagement"
+        },
+        {
+          "assertion": "headless-clean",
+          "argv": ["contracts/conformance/e2e_closeout_media.py"],
+          "expect": "ok",
+          "note": "the Story 35.6 e2e drive: engage.closeout in process (stdlib; no bun, no network) in a temp served root with an in-progress engagement record and its scope, two slice stories each with its own leg's report.json, frames and contact sheet (legs/<stamp>/, sheets/<stamp>.png) and the closeout input naming them (slices[].report, frames), against a fake Confluence transport copied into the drive (the shape of test_engage.py's FakeEngagementConfluence, never imported from tests): a complete status block, closeout.md carrying each story's own sheet, its | Report | Value | verdict table and its frame and report links, each file written beside closeout.md with its own leg's bytes, and the page's attachments holding <key>-report.json, every <key>-frame-<name> and the sheets"
         }
       ]
     }

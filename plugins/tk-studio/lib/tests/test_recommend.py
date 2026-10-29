@@ -257,6 +257,14 @@ class RecommendTestCase(unittest.TestCase):
             json.dumps({"mcpServers": {self.MCP: {"type": "http"}}}), encoding="utf-8")
         self.assertEqual(self._mcp_entry(self._propose_mcp())["status"], "configured")
 
+    def test_mcp_status_configured_when_mcp_json_with_a_bom_has_the_server(self):
+        # Story 35.6 (hole 92): a .mcp.json saved with a UTF-8 BOM still reads
+        self._make_godot()
+        (self.root / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {self.MCP: {"type": "http"}}}), encoding="utf-8-sig")
+        self.assertTrue((self.root / ".mcp.json").read_bytes().startswith(b"\xef\xbb\xbf"))
+        self.assertEqual(self._mcp_entry(self._propose_mcp())["status"], "configured")
+
     def test_ask_outcome_proposes_no_mcp(self):
         result = self._propose_mcp()  # empty project → unknown — ask
         self.assertIsNone(self._mcp_entry(result))
@@ -310,6 +318,21 @@ class RecommendTestCase(unittest.TestCase):
         self.assertTrue(result["changed"])  # rewritten, not treated as the same entry
         self.assertEqual(json.loads(target.read_text(encoding="utf-8"))["mcpServers"][self.MCP],
                          recommend.MCP_ENTRY)
+        self.assertFalse(recommend.record_mcp(self.root, self.MCP, profiles_dir=profiles)["changed"])
+
+    def test_record_mcp_rewrites_an_entry_in_a_mcp_json_with_a_bom(self):
+        # Story 35.6 (hole 92): the BOM sibling of the earlier-form rewrite
+        profiles = self._mcp_profiles()
+        target = self.root / ".mcp.json"
+        old = {"type": "http", "url": "${TK_ENGINE_MCP_URL}",
+               "headers": {"Authorization": "Bearer ${TK_ENGINE_MCP_BEARER}"}}
+        target.write_text(json.dumps({"mcpServers": {self.MCP: old}, "keep": 1}),
+                          encoding="utf-8-sig")
+        result = recommend.record_mcp(self.root, self.MCP, profiles_dir=profiles)
+        self.assertTrue(result["changed"])
+        data = json.loads(target.read_text(encoding="utf-8"))
+        self.assertEqual(data["mcpServers"][self.MCP], recommend.MCP_ENTRY)
+        self.assertEqual(data["keep"], 1)
         self.assertFalse(recommend.record_mcp(self.root, self.MCP, profiles_dir=profiles)["changed"])
 
     def test_record_with_role_and_a_refused_mcp_writes_neither(self):
