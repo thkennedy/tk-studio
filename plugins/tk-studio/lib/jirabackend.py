@@ -1085,7 +1085,7 @@ def search_jql(client: JiraClient, jql: str, fields: str) -> list[dict]:
                     f"{MAX_PAGES} pages")
 
 
-def issue_comments(client: JiraClient, key: str) -> list[dict]:
+def issue_comments(client: JiraClient, key: str, who: str = "sync-back") -> list[dict]:
     """Every comment of one issue, `GET /issue/{key}/comment` paged by
     `startAt` — the sync-back's overflow read only, when the search's
     embedded `comment.total` exceeds the comments it returned."""
@@ -1097,7 +1097,7 @@ def issue_comments(client: JiraClient, key: str) -> list[dict]:
             query={"startAt": start, "maxResults": SEARCH_PAGE_SIZE},
             scope=SCOPE_READ)
         if status != 200 or not isinstance(data, dict):
-            raise JiraError(f"sync-back: GET /issue/{key}/comment returned "
+            raise JiraError(f"{who}: GET /issue/{key}/comment returned "
                             f"{status}")
         page = [c for c in data.get("comments") or [] if isinstance(c, dict)]
         comments += page
@@ -1105,7 +1105,7 @@ def issue_comments(client: JiraClient, key: str) -> list[dict]:
         total = data.get("total")
         if not page or not isinstance(total, int) or start >= total:
             return comments
-    raise JiraError(f"sync-back: GET /issue/{key}/comment did not end "
+    raise JiraError(f"{who}: GET /issue/{key}/comment did not end "
                     f"within {MAX_PAGES} pages")
 
 
@@ -1215,6 +1215,62 @@ def add_comment(client: JiraClient, key: str, body: str) -> dict:
     if status not in (200, 201):
         raise JiraError(f"track: POST /issue/{key}/comment returned {status}")
     return data if isinstance(data, dict) else {}
+
+
+def list_comments(client: JiraClient, key: str) -> list[dict]:
+    """Every comment of one issue (`GET /issue/{key}/comment`, paged) — the
+    stage poster's dedupe read before it posts (Story 35.8): a comment
+    already carrying a row's `[stage:<key> start|stop]` marker is recorded,
+    never posted twice."""
+    return issue_comments(client, key, who="stage")
+
+
+def jira_started(stamp: str) -> str:
+    """An ISO-8601 stamp in the worklog's `started` format,
+    `YYYY-MM-DDTHH:MM:SS.000+0000` (UTC)."""
+    text = stamp.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    moment = datetime.fromisoformat(text)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+0000")
+
+
+def add_worklog(client: JiraClient, key: str, started: str, seconds: int,
+                comment: str) -> dict:
+    """`POST /issue/{key}/worklog {started, timeSpentSeconds, comment}`
+    (REST v2: the comment is plain text) — the stage's derived span, the
+    secondary record (Story 35.8). Returns the created worklog."""
+    status, data = client.request(
+        "POST", f"/issue/{key}/worklog",
+        {"started": jira_started(started), "timeSpentSeconds": int(seconds),
+         "comment": comment}, scope=SCOPE_WORK)
+    if status not in (200, 201):
+        raise JiraError(f"stage: POST /issue/{key}/worklog returned {status}")
+    return data if isinstance(data, dict) else {}
+
+
+def list_worklogs(client: JiraClient, key: str) -> list[dict]:
+    """Every worklog of one issue (`GET /issue/{key}/worklog`, paged by
+    `startAt`) — the stage poster's worklog dedupe read (Story 35.8)."""
+    worklogs: list[dict] = []
+    start = 0
+    for _ in range(MAX_PAGES):
+        status, data = client.request(
+            "GET", f"/issue/{key}/worklog",
+            query={"startAt": start, "maxResults": SEARCH_PAGE_SIZE},
+            scope=SCOPE_READ)
+        if status != 200 or not isinstance(data, dict):
+            raise JiraError(f"stage: GET /issue/{key}/worklog returned {status}")
+        page = [w for w in data.get("worklogs") or [] if isinstance(w, dict)]
+        worklogs += page
+        start += len(page)
+        total = data.get("total")
+        if not page or not isinstance(total, int) or start >= total:
+            return worklogs
+    raise JiraError(f"stage: GET /issue/{key}/worklog did not end within "
+                    f"{MAX_PAGES} pages")
 
 
 def get_project(client: JiraClient, key: str) -> dict | None:

@@ -8,7 +8,11 @@ ever pushes is its own measurement branch.
 
 Discipline:
   - Mover, not emitter (AD-12): emits no measurement events of its own — the
-    events it moves were emitted by their one named emitter each.
+    events it moves were emitted by their one named emitter each. The one
+    exception is the `stage` event (Story 35.8), whose named emitter this
+    surface is: before the push, every completed `## Stage Log` row of the
+    repo's specs and plan entities whose row_key the ledger does not hold
+    yet becomes one `stage` event (harvest_stages); a second push adds none.
   - Per-user-per-machine: only this machine's file is ever staged; nothing
     else under measurements/ is touched.
   - Sanitization re-check pre-commit: every line about to land is re-checked
@@ -37,7 +41,9 @@ import sys
 from pathlib import Path
 
 import classify
+import config as configlib
 import ledger
+import plansync
 
 MEASUREMENTS_DIR = "measurements"
 
@@ -200,6 +206,85 @@ def check(directory: Path | None = None) -> dict:
     return result
 
 
+# --------------------------------------------------------- stage harvest
+
+def _ledger_stage_keys() -> set[str]:
+    keys: set[str] = set()
+    for line in ledger_lines():
+        try:
+            envelope = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(envelope, dict) and envelope.get("event") == "stage":
+            key = (envelope.get("payload") or {}).get("row_key")
+            if isinstance(key, str):
+                keys.add(key)
+    return keys
+
+
+def stage_payload(entry: dict, project: str | None) -> dict:
+    """One Stage Log row as a `stage` event payload: `—` cells left out,
+    the tokens under `usage {input, output}` (never a token-named key)."""
+    row = entry["row"]
+
+    def cell(name):
+        value = row.get(name)
+        return None if value in (None, "", plansync.NO_VALUE) else value
+
+    def number(name):
+        value = cell(name)
+        try:
+            return None if value is None else (int(value) if value.isdigit()
+                                               else float(value))
+        except ValueError:
+            return None
+
+    payload: dict = {"story": entry["story"], "stage": row["stage"],
+                     "started": row["started"], "row_key": entry["key"],
+                     "source": entry["path"]}
+    if project:
+        payload["project"] = project
+    for name in ("ended", "session_id", "model", "effort", "outcome"):
+        if cell(name) is not None:
+            payload[name] = cell(name)
+    if number("pass") is not None:
+        payload["pass"] = number("pass")
+    usage = {k: number(c) for k, c in (("input", "tokens_in"),
+                                       ("output", "tokens_out"))
+             if number(c) is not None}
+    if usage:
+        payload["usage"] = usage
+    if number("cost_usd") is not None:
+        payload["cost_usd"] = float(number("cost_usd"))
+    return payload
+
+
+def harvest_stages(directory: Path, dry_run: bool = False) -> dict:
+    """Emit one `stage` event per completed Stage Log row not yet in the
+    ledger (by row_key). Open rows (`ended: —`) wait for their stop."""
+    directory = Path(directory).resolve()
+    project = None
+    try:
+        if configlib.in_project(directory):
+            project = configlib.project_info(directory)["project_id"]
+    except Exception:  # an unreadable config never stops the push
+        project = None
+    known = _ledger_stage_keys()
+    emitted, skipped = [], 0
+    for entry in plansync.stage_rows(directory):
+        if entry["row"]["ended"] == plansync.NO_VALUE:
+            continue
+        if entry["key"] in known:
+            skipped += 1
+            continue
+        ledger.emit("stage", stage_payload(entry, project), project=project,
+                    dry_run=dry_run)
+        known.add(entry["key"])
+        emitted.append(entry["key"])
+    return {"emitted": len(emitted), "already": skipped, "row_keys": emitted,
+            "dry_run": dry_run}
+
+
 # --------------------------------------------------------------------- push
 
 def push(directory: Path, base: str | None = None, dry_run: bool = False,
@@ -212,9 +297,15 @@ def push(directory: Path, base: str | None = None, dry_run: bool = False,
                           f"{directory} is not the studio repo root "
                           "(needs .claude-plugin/marketplace.json inside a git work tree)")
 
+    try:  # the harvest never stops the push
+        stages = harvest_stages(directory, dry_run=dry_run)
+    except Exception as exc:
+        stages = {"ok": False, "dry_run": dry_run,
+                  "error": f"{type(exc).__name__}: {exc}"[:300]}
     local = ledger_lines()
     branch, path = branch_name(), repo_file()
-    result: dict = {"ok": True, "branch": branch, "file": path}
+    result: dict = {"ok": True, "branch": branch, "file": path,
+                    "stage_events": stages}
     if not local:
         result.update(result_state="no-op", new_events=0,
                       detail="local ledger is empty — nothing to push")

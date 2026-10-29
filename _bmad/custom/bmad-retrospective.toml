@@ -1,0 +1,24 @@
+# Team override for bmad-retrospective in tk-studio: the epic retrospective
+# reads its time and cost numbers from the Stage Log rollup (story 35-8).
+#
+# What it adds:
+#   - one persistent fact: run the studio rollup for the epic with --post
+#     (one idempotent rollup comment on the epic's issue when the project is
+#     Jira-bound) and take stage times, cycle time, hands-on time, planning
+#     share, review rounds, re-runs, and tokens and cost per stage type from
+#     it, never inferred from PR timestamps; the post's result is reported
+#     verbatim, a blocked post a gap reported, never a stop
+#
+# The stock skill runs untouched (AD-4, zero forks); this file is user-authored
+# studio content (AD-17). BMad merge rules: lists APPEND to the skill defaults,
+# strings replace.
+
+[workflow]
+
+persistent_facts = [
+  """
+STUDIO STAGE ROLLUP: the epic's timing and cost evidence comes from its Stage Log rows. Run:
+  uv run plugins/tk-studio/lib/report.py rollup --directory {project-root} --epic <N> --post
+with <N> the epic under review. `--post` adds the epic's rollup comment on its Jira issue (idempotent by `[stage-rollup:epic-<N>]`; a project not bound to Jira posts nothing and answers `posted: "skipped: not bound"`). Report the `post` result verbatim (`posted`, the issue and the comment). A post that is blocked (the answer `blocked` with a `rollup` result in it: no plan entity for the epic, no agent token, a failed Jira call) is a gap reported verbatim with its `reason`, never a stop: still take the numbers from that `rollup` result. Take these numbers from its `rollup` result, as they are: stage times (`by_stage`), cycle time (`cycle_s`), hands-on time (`hands_on_s`), planning share (`planning_share`), review rounds and re-runs (per story), and tokens and cost per stage type (`by_stage`). Never infer any of them from PR timestamps, commit times or session guesses. Skip the rollup only when the epic has no Stage Log rows (the rollup answers `blocked` naming none); then say the numbers are unavailable for that reason. Any other `blocked` answer (no `rollup` result in it) is reported verbatim as a gap in the evidence.
+""",
+]

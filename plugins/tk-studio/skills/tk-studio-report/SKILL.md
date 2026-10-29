@@ -35,6 +35,35 @@ status block:
 
 If the deterministic core is unrunnable — a tool call denied by permissions, `uv`/python unavailable — end `blocked` with the status block naming the unrunnable core as `reason`: never a question, never a headless run that ends without the block (AD-11).
 
+## Rollup (Story 35.8): the Stage Log read like a timesheet
+
+`report.py rollup` rolls a story's or an epic's `## Stage Log` rows up
+(elapsed derived from `started`/`ended`, never stored):
+
+```bash
+uv run "${CLAUDE_PLUGIN_ROOT}/skills/tk-studio-report/scripts/report.py" rollup \
+  --directory <project-root> --epic <N> [--post --id <EP-NNN>]
+```
+
+(`--story <key>` for one story.) The JSON names per story and per epic the
+cycle time (first start to the merge), hands-on time (the sum of the spans;
+a row wholly inside another engine row's span, a consult inside its review
+pass, is listed under `nested` and not counted twice),
+the planning share, review rounds, re-runs, every gap between a stop and
+the next start, tokens and cost per stage type, and Jira's own stamps
+(`_bmad-output/tracking/stage-posts.json`) beside them with each boundary's
+skew (`created` minus the comment body's timestamp) and the max named.
+The epic rollup counts each span once: shared supervisor rows (`host-leg`,
+`re-run`, `close-out`, `merge` — one run resolving several stories) are
+matched on stage, pass, started and ended, and a span inside another story's
+engine span is counted as nested; each story's own numbers stay as they are.
+`--post --id <EP-NNN>` adds one rollup comment to the epic's Jira issue
+(idempotent by `[stage-rollup:epic-<N>]`; not bound: `posted: "skipped: not
+bound"`). **The retrospective reads this rollup for stage times and cost
+instead of inferring them from PR timestamps.** It ends with the status
+block (intent `tk-studio-report`); a story or epic with no rows, or a
+refused post, ends `blocked` naming why.
+
 ## Rules
 
 - The description is the operator's account, not your diagnosis — record what

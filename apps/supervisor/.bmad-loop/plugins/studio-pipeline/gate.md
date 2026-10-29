@@ -40,4 +40,5 @@ Then write the completion marker exactly as your prompt's **Completion signal** 
   - `plans/`
   - `_bmad-output/implementation-artifacts/replan-queue.md`
   - `stories.yaml`: append remediation entries, or revise the `invoke_dev_with` of unstarted entries only
+- The unit's `## Stage Log` table is append-only and machine-written (the `post_session` hook, `plansync.py stage`): never hand-edit, reorder or delete a row. Your own planning in Part B brackets itself with `stage --start` / `--stop` as `task-planning.md` section 3 says.
 - Keep every record short. It is read by the next gate session, the retrospective, and any human who resumes a paused run.

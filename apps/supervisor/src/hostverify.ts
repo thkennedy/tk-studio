@@ -95,6 +95,9 @@ import type { WorktreeDeps } from "./worktree";
 /** The leg's result: what ran (`green` decides), or why it was skipped. */
 export type HostVerifyRan = {
   skipped?: false; command: string; argv: string[]; cwd: string; exit: number | null; duration_ms: number;
+  /** Story 35.8: when the leg started (ISO, the host's clock) — the Stage Log's host-leg row starts here and ends at
+   * the `host-verify` event's `at`. Optional on the type only for events recorded before 35.8. */
+  started_at?: string;
   /** The signal that killed the command (not the guard), when one did. */
   signal?: string; guard?: string; error?: string; green: boolean; stdout_tail: string[]; stderr_tail: string[];
   /** Hole 46 (win32): Git's `usr\bin` put first on the leg's PATH, when it was there. */
@@ -373,6 +376,7 @@ async function runStep(
  * then (Story 34.3), when the engine gate is green, the playable step (`playable.py run`, the media copy, the
  * judge). Never throws. */
 export async function hostVerify(run: Run, guardS: number, deps: Deps = {}, opts: { slice?: boolean } = {}): Promise<HostVerifyResult> {
+  const startedAt = new Date().toISOString();
   const cmd = await verifyCommand(run, deps);
   if ("skipped" in cmd) return cmd;
   const cwd = servedRoot(run)!; // Story 28.5: the root the run serves (`<worktree>/<prefix>`)
@@ -421,7 +425,7 @@ export async function hostVerify(run: Run, guardS: number, deps: Deps = {}, opts
   else if (engine.verdict !== "green") playable = { verdict: "skipped", reason: "engine gate not green" };
   else playable = await playableStep(run, cmd.playable, cwd, env, guardS, deps, opts.slice === true);
   return {
-    command: cmd.command, argv: cmd.argv, cwd, exit: host.exit, duration_ms: host.duration_ms, ...(gitBash ? { git_bash: gitBash } : {}), ...(resolved ? { resolved } : {}),
+    command: cmd.command, argv: cmd.argv, cwd, exit: host.exit, duration_ms: host.duration_ms, started_at: startedAt, ...(gitBash ? { git_bash: gitBash } : {}), ...(resolved ? { resolved } : {}),
     ...(host.signal ? { signal: host.signal } : {}), ...(host.guard ? { guard: host.guard } : {}), ...(host.error ? { error: host.error } : {}),
     green: stepGreen(host) && assets?.verdict !== "red" && engine.verdict !== "red" && playable.verdict !== "fail",
     stdout_tail: host.stdout_tail, stderr_tail: host.stderr_tail, engine, playable, ...(assets ? { assets } : {}),

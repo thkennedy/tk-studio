@@ -6,6 +6,11 @@ hand-escaped JSON (the payload is assembled and validated here).
 Usage:
   uv run report.py --description TEXT [--surface SKILL] [--project KEY]
                    [--skill NAME] [--mode attended|headless]
+  uv run report.py rollup --directory ROOT (--story KEY | --epic N)
+                   [--post --id EP-NNN]
+
+`rollup` (Story 35.8) delegates to lib/report.py: the Stage Log rolled up
+per story and per epic beside Jira's stamps (see that module).
 
 Output: one JSON object; exit 0 ok, 2 validation error.
 Stdlib-only (NFR9); never prompts (AD-11).
@@ -23,11 +28,24 @@ sys.path.insert(0, str(PLUGIN_ROOT / "lib"))
 import ledger  # noqa: E402
 
 
+def _rollup(argv: list[str]) -> int:
+    """lib/report.py's verb, loaded by path (this script shares its name)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "tk_studio_lib_report", PLUGIN_ROOT / "lib" / "report.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.main(argv)
+
+
 def main(argv: list[str] | None = None) -> int:
     # Headless output must survive a cp1252 Windows console: payloads are
     # arbitrary unicode and must always print (AD-11).
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "rollup":
+        return _rollup(argv)
     parser = argparse.ArgumentParser()
     parser.add_argument("--description", required=True,
                         help="what the skill did wrong, in the operator's words")

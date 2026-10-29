@@ -122,17 +122,26 @@ export function fakeStudioRoot(realRoot: string = process.env.TK_STUDIO_ROOT!): 
  * `blocked` → `{ok: false, blocked: true, reason: "fake sync blocked", written: []}` (exit 2), `crash` → a traceback,
  * `partial` → the minting done, then `{ok: false, blocked: true, reason: "fake sync partial", written: [...]}` (exit 2).
  * `removes(paths)`: those `--directory`-relative files deleted after the minting and answered as `removed: [<absolute
- * paths>]` (only when one was deleted). */
+ * paths>]` (only when one was deleted).
+ * Story 35.8: `stage --append --row-json R` and `stage-post` answer from `stage` (rewritable between runs): `ok` →
+ * `{ok: true, appended: <rows in R>}` and `{ok: true, posted: {start, stop, worklog, found}, unposted: 0}` (exit 0);
+ * `post-fail` → stage-post `{ok: false, posted: {…0}, unposted: 4, retryable: true, reason: "stage-post failed: Jira
+ * answered 503"}` (exit 2); `post-pending` → stage-post `{ok: false, unposted: 1, retryable: true, status: partial}`
+ * (exit 2); `post-refuse` → stage-post `{ok: false, reason: "… carries no external.jira.key …"}` (exit 2, no
+ * `retryable`); `append-fail` → stage `{ok: false, error: "fake stage refused"}` (exit 2, a refusal); `append-crash` →
+ * a traceback (exit 1); `buffered` → stage `{ok: true, appended: <rows in R>, buffered: true}`. */
 export function fakePlansync(): {
   root: string; calls: () => string[][]; answer: (a: "ok" | "refuse" | "blocked" | "crash") => void;
   sync: (a: "ok" | "blocked" | "crash" | "partial") => void; removes: (paths: string[]) => void;
+  stage: (a: "ok" | "post-fail" | "post-pending" | "post-refuse" | "append-fail" | "append-crash" | "buffered") => void;
 } {
   const root = tempDir("tk-sup-plansync-");
   const lib = join(root, "plugins", "tk-studio", "lib");
   mkdirSync(lib, { recursive: true });
   const log = join(root, "plansync-calls.jsonl"), answers = join(root, "plansync-answer.txt"), syncAnswer = join(root, "plansync-sync.txt");
-  const removals = join(root, "plansync-removes.json");
+  const removals = join(root, "plansync-removes.json"), stageAnswer = join(root, "plansync-stage.txt");
   writeFileSync(removals, "[]");
+  writeFileSync(stageAnswer, "ok");
   writeFileSync(answers, "ok");
   writeFileSync(syncAnswer, "ok");
   writeFileSync(join(lib, "plansync.py"), [
@@ -174,6 +183,17 @@ export function fakePlansync(): {
     "    out = {'ok': True, 'written': written, **({'removed': removed} if removed else {})}",
     "    if how == 'partial': out.update(ok=False, blocked=True, reason='fake sync partial'); print(json.dumps(out)); sys.exit(2)",
     "    print(json.dumps(out)); sys.exit(0)",
+    `if a and a[0] in ("stage", "stage-post"):`,
+    `    how = open(${JSON.stringify(stageAnswer)}, encoding="utf-8").read().strip()`,
+    `    if a[0] == "stage":`,
+    `        if how == "append-fail": print(json.dumps({"ok": False, "error": "fake stage refused", "status": "blocked"})); sys.exit(2)`,
+    `        if how == "append-crash": print("Traceback (most recent call last):\\n  OSError: disk busy", file=sys.stderr); sys.exit(1)`,
+    "        rows = json.loads(arg('--row-json') or '[]')",
+    `        print(json.dumps({"ok": True, "appended": len(rows) if isinstance(rows, list) else 1, **({"buffered": True} if how == "buffered" else {}), "status": "complete"})); sys.exit(0)`,
+    `    if how == "post-fail": print(json.dumps({"ok": False, "posted": {"start": 0, "stop": 0, "worklog": 0, "found": 0}, "unposted": 4, "retryable": True, "reason": "stage-post failed: Jira answered 503", "status": "blocked"})); sys.exit(2)`,
+    `    if how == "post-pending": print(json.dumps({"ok": False, "posted": {"start": 1, "stop": 0, "worklog": 0, "found": 0}, "unposted": 1, "retryable": True, "reason": "stage-post pending: 1 row(s) not yet posted", "status": "partial"})); sys.exit(2)`,
+    `    if how == "post-refuse": print(json.dumps({"ok": False, "posted": {"start": 0, "stop": 0, "worklog": 0, "found": 0}, "unposted": 4, "reason": "stage-post: ST-097 carries no external.jira.key", "status": "blocked"})); sys.exit(2)`,
+    `    print(json.dumps({"ok": True, "posted": {"start": 4, "stop": 4, "worklog": 4, "found": 0}, "unposted": 0, "status": "complete"})); sys.exit(0)`,
     `if answer == "ok": print(json.dumps({"ok": True, "id": arg("--id"), "status": arg("--status"), "previous_status": "draft"})); sys.exit(0)`,
     `if answer == "blocked": print(json.dumps({"ok": False, "blocked": True, "reason": "backend re-sync blocked", "written": True})); sys.exit(2)`,
     `if answer == "crash": print("Traceback (most recent call last):\\n  OSError: plan directory busy", file=sys.stderr); sys.exit(1)`,
@@ -185,6 +205,7 @@ export function fakePlansync(): {
     answer: (a) => writeFileSync(answers, a),
     sync: (a) => writeFileSync(syncAnswer, a),
     removes: (paths) => writeFileSync(removals, JSON.stringify(paths)),
+    stage: (a) => writeFileSync(stageAnswer, a),
   };
 }
 

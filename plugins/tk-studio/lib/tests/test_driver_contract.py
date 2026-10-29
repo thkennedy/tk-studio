@@ -2458,7 +2458,84 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertIn("red or skipped never touches the PR. The run's terminal state", flat)
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
-        self.assertIn("Story 34.8 (Epic 34), Story 35.1 (Epic 35)", stories)
+        self.assertIn("Story 34.8 (Epic 34), Story 35.1", stories)
+
+    # --- Story 35.8: 0.1.30 (additive) — every stage leaves a start and a stop: the Stage Log
+    # table, the verbs, the comment shapes, the worklog, stage-posts.json, the `stage` event,
+    # the rollup; the header clause extended, 35.1's pins kept.
+
+    def test_0_1_30_story_35_8_stage_log(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.30**", header)
+        self.assertNotIn("**0.1.31**", header)
+        self.assertEqual(header.count("0.1.30 (Story 35.8, additive)"), 1)
+        self.assertLess(header.index("0.1.30 (Story 35.1, additive)"),
+                        header.index("0.1.30 (Story 35.8, additive)"))
+        clause = " ".join(header[header.index("0.1.30 (Story 35.8, additive)"):].split())
+        for phrase in ("every stage leaves a start and a stop", "append-only `## Stage Log` table",
+                       "`tokens_in`, `tokens_out`, `cost_usd`, `outcome`; elapsed never stored",
+                       "after `## Consult Log`", "`post_session` hook", "`plansync.py stage-post`",
+                       "`_bmad-output/tracking/stage-posts.json`", "`started_at` on `host-verify`",
+                       "the `stage` taxonomy event", "`lib/report.py rollup`", "— additive) |"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        self.assertEqual(flat.count("**0.1.30 (Story 35.8, additive).**"), 1)
+        self.assertLess(flat.index("**0.1.30 (Story 35.1, additive).**"),
+                        flat.index("**0.1.30 (Story 35.8, additive).**"))
+        note = flat[flat.index("**0.1.30 (Story 35.8, additive).**"):]
+        note = note[:note.index("## 8. Conformance")]
+        for phrase in ("**The table:**", "`stage`, `pass`, `started`, `ended`, `session_id`, `model`, "
+                       "`effort`, `tokens_in`, `tokens_out`, `cost_usd`, `outcome`",
+                       "elapsed is never stored, only derived", "reported as a gap, never hidden",
+                       "never after `## Auto Run Result`", "`sha1(\"<story>|<stage>|<pass>|<started>\")[:12]`",
+                       "`<spec_folder>/stages/<key>.jsonl`", "`--entity EP-NNN`",
+                       "**The verbs**", "`stage --append --story <key> --row-json <row | [rows]>`",
+                       "`[hooks.post_session]`", "`# Consult: a ruling on one objective trigger`",
+                       "`host-leg`", "`re-run`", "`close-out`", "`merge` row at gh's `mergedAt`",
+                       "**The comment shapes:**",
+                       "`Stage <name> [pass n] started — <row's started>; model: X; effort: Y [stage:<key> start]`",
+                       "`Stage <name> [pass n] finished — <row's ended>; model: X; effort: Y; tokens: in/out; "
+                       "cost: $Z [stage:<key> stop]`",
+                       "**the worklog**", "`[stage:<key> worklog]`",
+                       "`{<row key>: {start: {id, created}, stop: {id, created}, worklog: {id}}}`",
+                       "`posted: \"skipped: not bound\"`",
+                       "`stage-post {story_key, id, directory, appended, posted, ok, detail?, unposted?, "
+                       "settled?, merged_at?}`",
+                       "never blocking the run or changing its state",
+                       "`worklog: \"skipped: span <60s\"`", "`partial`, `retryable: true`",
+                       "`ok: true` only once nothing is unposted", "recorded once `settled: true`, never retried",
+                       "bounded at `PLAN_RETRY_LIMIT`", "a newer `host-verify` (a re-run's leg) re-enters",
+                       "`--repo-root <root>`", "one per record",
+                       "not counted twice, still listed in its stage type",
+                       "**The event:**", "`measurepush.py push` alone", "usage? {input, output}",
+                       "**The rollup:**", "`[stage-rollup:epic-<N>]`",
+                       "The retrospective reads this rollup instead of PR timestamps",
+                       # the follow-up review: buffered rows are a wait, old runs never back-filled,
+                       # a paused close-out is a row, the epic counts each span once
+                       "rows only buffered at the owner root (bound or not) are an uncounted wait, "
+                       "never a retry — never counted toward `PLAN_RETRY_LIMIT`, never settled, never "
+                       "the give-up, recorded once while it lasts",
+                       "no lease is taken while the owner checkout has no "
+                       "`_bmad-output/specs/*/stories/<key>-*.md`",
+                       "a tick whose only non-ok outcomes are waits lets the lease go settled",
+                       "(its `done` event carries `stage: true`",
+                       "runs merged before 35.8 get no supervisor rows and are never back-filled",
+                       "on an `ended`, `closed_out` or `paused` event",
+                       "the epic rollup counts each span once",
+                       "a span inside another story's engine span counted as nested"):
+            self.assertIn(phrase, note)
+        self.assertNotIn("are a retry, bound or not", note)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 35.1, Story 35.8 (Epic 35)", stories)
+        taxonomy = json.loads((PLUGIN_ROOT / "contracts" / "events" / "taxonomy.v1.json")
+                              .read_text(encoding="utf-8"))
+        stage = taxonomy["events"]["stage"]
+        self.assertIn("lib/measurepush.py push alone", stage["emitter"])
+        self.assertEqual({f for f, r in stage["payload"].items() if r.get("required")},
+                         {"story", "stage", "started", "row_key"})
+        self.assertFalse(any("token" in f for f in stage["payload"]))
 
     # --- AC 2: A7 dossier items covered or explicitly deferred with a seam
 
