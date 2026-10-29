@@ -36,6 +36,9 @@ jobs:
   - run-epic-35
   - research-atlassian-free-tier
   - maintenance-evals
+  # run-sweep (2026-10-29, Story 35.7): the shipped deferred-work sweep, queued once on the
+  # sandbox tier after the EP-35 retrospective (placement tk-studio/run-sweep, hole 90).
+  - run-sweep
 
 # Role-keyed working sets (AD-17) — recorded only on explicit
 # confirmation via tk-studio-onboard; one entry per role.
