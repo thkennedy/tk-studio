@@ -156,7 +156,8 @@ source_spec: `26-2-the-planner-settles-schema-shape-and-the-spec-file-name-the-p
 location: plugins/tk-studio/lib/pipeline.py:322; .bmad-loop/plugins/studio-pipeline/consult.md
 severity: medium
 reason: `pipeline.py:322` writes `consult_scope`. No other code or customization reads that key: `bmad-build-auto.toml` reads only `consult_triggers`. The consult subagent's prompt is `.bmad-loop/plugins/studio-pipeline/consult.md` followed by the question, and consult.md carries its own fixed scope list. So the schema-shape-as-planner-matter rule exists as text only. The wiring gap predates this story. Deferral criterion (a): this is the behaviour AC1's consult-scope clause names.
-status: open
+status: done 2026-10-29
+resolution: resolved by sweep bundle dw-consult-scope-wiring
 
 ### DW-21: Follow-up review still recommended for 26-5-the-adapter-takes-a-status-pull-back-from-a-driver after the damping cap was spent
 origin: review-budget-followup
