@@ -51,12 +51,20 @@ Guarantees:
     `not_compared`, never compared on the remaining bands.
   - `check` reports the engine sandbox (Story 33.3) as one advisory row,
     never a gap: a sandbox the supervisor config names that `sbx ls` lists
-    as running with no supervisor pin record
+    as running with no live supervisor pin record
     (`<store>/sandboxes/<sandbox>.pin`) is named as a warning ("started
-    outside the supervisor; the next pin restarts it"). `sbx daemon status`
-    runs before `sbx ls`, and no other sbx command runs.
+    outside the supervisor; the next pin restarts it"). A record counts
+    only when it parses, its `supervisor_pid` is alive on this host and
+    its `since` is not older than the sandbox's start (host-now minus
+    `sbx exec <sb> cat /proc/uptime`, read only for a live pid) by more
+    than `PIN_SKEW_S` seconds; an unreadable uptime leaves the pid verdict.
+    `sbx daemon status` runs before `sbx ls`, and before any `sbx exec`.
+  - `check` reports the engine sandbox's free inodes (DW-59) as one
+    advisory row right after it, never a gap: `sbx exec <sb> df -i /` on
+    each running engine sandbox; fewer than 50,000 free inodes on / read
+    as a warning, a failed or unparseable read as `<sb>: inodes unknown`.
   - `check` reports the playable path (Story 34.2) as one advisory row
-    after the engine sandbox, never a gap: for a project whose tracked
+    after the engine sandbox inodes, never a gap: for a project whose tracked
     `.tk-studio/config.yaml` declares `verify.engine`, a `GODOT` that is
     unset or not an absolute file, or no display session for the ruled
     path (`PLAYABLE_PATH`, shared with `playable.py`), reads as a warning;
@@ -141,6 +149,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import secrets
@@ -149,10 +158,11 @@ import subprocess
 import sys
 import time
 import tomllib
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import job as joblib
+import jobrun
 import ledger
 import miniyaml
 import sandbox_login
@@ -738,15 +748,72 @@ def pin_record_path(sandbox: str) -> Path:
     return storelib.store_root() / "sandboxes" / f"{safe}.pin"
 
 
+# DW-57: slack for host/guest clock jitter when comparing a pin's ``since``
+# to the sandbox's start (host-now minus guest /proc/uptime)
+PIN_SKEW_S = 120
+
+
+def _pin_live(sb: str, deadline) -> bool:
+    """DW-57: whether ``sb``'s pin record is the live supervisor's. The
+    record ``{sandbox, since, run_id, supervisor_pid}`` counts as absent when
+    it is missing or unreadable (not JSON, ``supervisor_pid`` missing or not
+    an int, ``since`` not ISO-8601), when ``supervisor_pid`` is not a live
+    process on this host (``jobrun._pid_alive``; no sbx call then), or when
+    ``since`` predates the sandbox's start (host-now minus ``sbx exec <sb>
+    cat /proc/uptime``) by more than ``PIN_SKEW_S`` seconds. An unknowable
+    start (a failed, garbled or out-of-budget read) leaves the pid verdict
+    alone. Never raises."""
+    try:
+        record = json.loads(pin_record_path(sb).read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return False
+    if not isinstance(record, dict):
+        return False
+    pid, since = record.get("supervisor_pid"), record.get("since")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    if not isinstance(since, str):
+        return False
+    try:
+        pinned = datetime.fromisoformat(since.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if pinned.tzinfo is None:
+        pinned = pinned.replace(tzinfo=timezone.utc)
+    if not jobrun._pid_alive(pid):
+        return False
+    try:
+        proc, _ = sandbox_login._call(
+            run_sbx, ["sbx", "exec", sb, "cat", "/proc/uptime"], deadline)
+    except sandbox_login._Spent:
+        return True
+    if proc is None or proc.returncode != 0:
+        return True
+    try:
+        uptime = float(((proc.stdout or "").split() or [""])[0])
+    except ValueError:
+        return True
+    if not math.isfinite(uptime) or uptime < 0:
+        return True
+    try:
+        start = datetime.now(timezone.utc) - timedelta(seconds=uptime)
+        floor = start - timedelta(seconds=PIN_SKEW_S)
+    except OverflowError:
+        return True
+    return pinned >= floor
+
+
 def engine_sandbox_row(env=None) -> dict:
     """Story 33.3: the advisory ``engine sandbox`` row (``ok`` always true,
     never a gap). The sandboxes are the supervisor config's
     ``jobs.*.sandbox`` (``sandbox_login.config_sandboxes``); ``sbx daemon
     status`` runs before ``sbx ls`` and every call shares one budget. A
-    sandbox listed as running with no pin record reads ``warning: <sb>
-    started outside the supervisor; the next pin restarts it``; otherwise
-    ``pinned by the supervisor``, ``not running``, ``no engine sandbox
-    configured``, ``sbx absent`` or ``daemon down``."""
+    sandbox listed as running with no live pin record (``_pin_live``)
+    reads ``warning: <sb> started outside the supervisor; the next pin
+    restarts it``; otherwise ``pinned by the supervisor``, ``not running``,
+    ``no engine sandbox configured``, ``sbx absent`` or ``daemon down``.
+    The one ``sbx exec`` (``cat /proc/uptime``) runs only for a running
+    sandbox whose record names a live supervisor pid."""
     env = os.environ if env is None else env
 
     def row(detail: str) -> dict:
@@ -777,11 +844,95 @@ def engine_sandbox_row(env=None) -> dict:
         line = sandbox_login._listed(listing, sb)
         if line is None or "running" not in line.lower().split():
             state = "not running"
-        elif pin_record_path(sb).is_file():
+        elif _pin_live(sb, deadline):
             state = "pinned by the supervisor"
         else:
             parts.append(OUTSIDE_WARNING.format(sb=sb))
             continue
+        parts.append(state if len(sandboxes) == 1 else f"{sb}: {state}")
+    return row("; ".join(parts))
+
+
+# ------------------------------------------- the engine sandbox's inodes
+
+ENGINE_INODES_CHECK = "engine sandbox inodes"
+INODE_FLOOR = 50000
+LOW_INODES_WARNING = ("warning: {sb} has {free} free inodes on / (below "
+                      "{floor}); the engine may fail to write")
+
+
+def _free_inodes(df_out: str) -> int | None:
+    """IFree from ``df -i /``: the last non-empty line's third column from
+    the end (a wrapped filesystem name leaves it intact); ``None`` when it
+    is not an integer, or when the Inodes column (fifth from the end) is
+    0 or not an integer (dynamic-inode filesystems such as btrfs report
+    Inodes 0 / IFree 0)."""
+    lines = [line for line in (df_out or "").splitlines() if line.strip()]
+    if len(lines) < 2:
+        return None
+    cols = lines[-1].split()
+    if len(cols) < 5:
+        return None
+    try:
+        total, free = int(cols[-5]), int(cols[-3])
+    except ValueError:
+        return None
+    return free if total > 0 else None
+
+
+def engine_sandbox_inode_row(env=None) -> dict:
+    """DW-59: the advisory ``engine sandbox inodes`` row (``ok`` always
+    true, never a gap), right after ``engine sandbox`` and read the same
+    way (config, then ``sbx daemon status``, then ``sbx ls``, one budget).
+    For each sandbox ``sbx ls`` lists as running, ``sbx exec <sb> df -i /``
+    reads its free inodes: ``<n> free inodes on /``, or ``warning: <sb> has
+    <n> free inodes on / (below 50000); the engine may fail to write``
+    below ``INODE_FLOOR``, or ``<sb>: inodes unknown`` when the read fails,
+    times out or does not parse. Otherwise ``not running``, ``no engine
+    sandbox configured``, ``sbx absent`` or ``daemon down``."""
+    env = os.environ if env is None else env
+
+    def row(detail: str) -> dict:
+        return {"check": ENGINE_INODES_CHECK, "ok": True, "detail": detail}
+
+    path = (env.get("TK_SUPERVISOR_CONFIG") or "").strip()
+    try:
+        text = Path(path).read_text(encoding="utf-8-sig") if path else ""
+    except (OSError, UnicodeDecodeError):
+        text = ""
+    sandboxes = sandbox_login.config_sandboxes(text)
+    if not sandboxes:
+        return row("no engine sandbox configured")
+    deadline = sandbox_login.Deadline(sandbox_login.BUDGET_S)
+    try:
+        daemon, why = sandbox_login._call(run_sbx, ["sbx", "daemon", "status"], deadline)
+        if why == "absent":
+            return row("sbx absent")
+        if daemon is None or daemon.returncode != 0:
+            return row("daemon down")
+        ls, why = sandbox_login._call(run_sbx, ["sbx", "ls"], deadline)
+    except sandbox_login._Spent:
+        return row("daemon down")
+    listing = (ls.stdout or "") if ls is not None and ls.returncode == 0 else ""
+    parts = []
+    for sb in sandboxes:
+        line = sandbox_login._listed(listing, sb)
+        if line is None or "running" not in line.lower().split():
+            state = "not running"
+        else:
+            try:
+                df, _ = sandbox_login._call(run_sbx, ["sbx", "exec", sb, "df", "-i", "/"], deadline)
+            except sandbox_login._Spent:
+                df = None
+            free = (_free_inodes(df.stdout or "")
+                    if df is not None and df.returncode == 0 else None)
+            if free is None:
+                parts.append(f"{sb}: inodes unknown")
+                continue
+            if free < INODE_FLOOR:
+                parts.append(LOW_INODES_WARNING.format(sb=sb, free=free, floor=INODE_FLOOR))
+                continue
+            state = f"{free} free inodes on /"
         parts.append(state if len(sandboxes) == 1 else f"{sb}: {state}")
     return row("; ".join(parts))
 
@@ -1221,6 +1372,8 @@ def check(project_root: Path, spec_folder: str) -> dict:
                               else "absent — the run will have no gate session (advisory)")})
     # Story 33.3: advisory like the plugin row — never a gap
     checks.append(engine_sandbox_row())
+    # DW-59: advisory too — the engine sandbox's free inodes on /
+    checks.append(engine_sandbox_inode_row())
     # Story 34.2: advisory too — never a gap, starts no engine
     checks.append(playable_path_row(root))
     # Story 35.2: advisory too — the stories still without a plan

@@ -149,14 +149,31 @@ def _absent_sbx(args, timeout=None):
 
 
 class _FakeSbx:
-    """Scripted sbx for the engine-sandbox row: `daemon status` and `ls`
-    (the `SANDBOX AGENT STATUS` header and the rows); records every argv."""
+    """Scripted sbx for the engine-sandbox rows: `daemon status` and `ls`
+    (the `SANDBOX AGENT STATUS` header and the rows), `exec <sb> cat
+    /proc/uptime` (`uptime[sb]`) and `exec <sb> df -i /` (`df[sb]`), each an
+    output text (rc 0) or `(rc, text)`; an unscripted exec fails (rc 1).
+    Records every argv."""
 
-    def __init__(self, rows=None, *, daemon_rc=0, ls_rc=0):
+    def __init__(self, rows=None, *, daemon_rc=0, ls_rc=0, uptime=None, df=None):
         self.rows = rows or {}
         self.daemon_rc = daemon_rc
         self.ls_rc = ls_rc
+        self.uptime = uptime or {}
+        self.df = df or {}
         self.calls: list[list[str]] = []
+
+    @staticmethod
+    def _scripted(args, table, sb):
+        import subprocess
+        if sb not in table:
+            return subprocess.CompletedProcess(args, 1, "", "no such sandbox")
+        out = table[sb]
+        rc, out = out if isinstance(out, tuple) else (0, out)
+        return subprocess.CompletedProcess(args, rc, out, "")
+
+    def execs(self):
+        return [c for c in self.calls if c[1:2] == ["exec"]]
 
     def __call__(self, args, timeout=None):
         import subprocess
@@ -167,6 +184,10 @@ class _FakeSbx:
             out = "SANDBOX   AGENT   STATUS\n" + "".join(
                 f"{sb}   claude   {status}\n" for sb, status in self.rows.items())
             return subprocess.CompletedProcess(args, self.ls_rc, out if not self.ls_rc else "", "")
+        if args[1:2] == ["exec"] and args[3:] == ["cat", "/proc/uptime"]:
+            return self._scripted(args, self.uptime, args[2])
+        if args[1:2] == ["exec"] and args[3:] == ["df", "-i", "/"]:
+            return self._scripted(args, self.df, args[2])
         return subprocess.CompletedProcess(args, 2, "", "unsupported")
 
 
@@ -1120,16 +1141,195 @@ class LaunchTestCase(unittest.TestCase):
         self.assertEqual(row["detail"],
                          "warning: claude-p started outside the supervisor; the next pin restarts it")
         self.assertEqual(result["gaps"], [])
-        self.assertEqual(sbx.calls, [["sbx", "daemon", "status"], ["sbx", "ls"]])
+        # the pin row: no exec (no record); the inode row: one df -i
+        self.assertEqual(sbx.calls[:2], [["sbx", "daemon", "status"], ["sbx", "ls"]])
+        self.assertEqual(sbx.execs(), [["sbx", "exec", "claude-p", "df", "-i", "/"]])
+
+    # ---- DW-57: a live pin record only
+
+    OUTSIDE = "warning: claude-p started outside the supervisor; the next pin restarts it"
+
+    def _pin(self, record, *, raw: str | None = None) -> Path:
+        path = launch.pin_record_path("claude-p")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(raw if raw is not None else json.dumps(record, indent=2) + "\n",
+                        encoding="utf-8")
+        return path
+
+    @staticmethod
+    def _iso(seconds_ago: float) -> str:
+        from datetime import datetime, timedelta, timezone
+        t = datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
+        return t.strftime("%Y-%m-%dT%H:%M:%S.") + f"{t.microsecond // 1000:03d}Z"
+
+    def _record(self, **over):
+        rec = {"sandbox": "claude-p", "since": self._iso(60), "run_id": "q-1",
+               "supervisor_pid": os.getpid()}
+        rec.update(over)
+        return rec
+
+    def _pin_execs(self, sbx):
+        return [c for c in sbx.execs() if c[3:] == ["cat", "/proc/uptime"]]
 
     def test_engine_sandbox_with_the_supervisors_pin_record_reads_pinned(self):
-        record = Path(os.environ["TK_STUDIO_HOME"]) / "sandboxes" / "claude-p.pin"
-        record.parent.mkdir(parents=True)
-        record.write_text(json.dumps({"sandbox": "claude-p", "since": "2026-10-26T00:00:00Z",
-                                      "run_id": "q-1", "supervisor_pid": 1}), encoding="utf-8")
-        self.assertEqual(launch.pin_record_path("claude-p"), record)
-        row, _ = self._engine_row(_FakeSbx({"claude-p": "running"}))
+        record = self._pin(self._record())  # pinned 60 s ago, the sandbox up 3600 s
+        self.assertEqual(launch.pin_record_path("claude-p"),
+                         Path(os.environ["TK_STUDIO_HOME"]) / "sandboxes" / "claude-p.pin")
+        self.assertTrue(record.is_file())
+        sbx = _FakeSbx({"claude-p": "running"}, uptime={"claude-p": "3600.12 7000.00\n"})
+        row, _ = self._engine_row(sbx)
         self.assertEqual(row["detail"], "pinned by the supervisor")
+        self.assertEqual(self._pin_execs(sbx), [["sbx", "exec", "claude-p", "cat", "/proc/uptime"]])
+
+    def test_engine_sandbox_pin_record_with_a_dead_pid_is_a_warning_with_no_exec(self):
+        orig = launch.jobrun._pid_alive
+        self.addCleanup(setattr, launch.jobrun, "_pid_alive", orig)
+        launch.jobrun._pid_alive = lambda pid, platform=None: False
+        self._pin(self._record(supervisor_pid=424242))
+        sbx = _FakeSbx({"claude-p": "running"}, uptime={"claude-p": "3600.12 7000.00\n"})
+        row, result = self._engine_row(sbx)
+        self.assertEqual(row["detail"], self.OUTSIDE)
+        self.assertEqual(result["gaps"], [])
+        self.assertEqual(self._pin_execs(sbx), [])  # no sbx exec for a dead pid
+
+    def test_engine_sandbox_pin_record_older_than_the_sandbox_start_is_a_warning(self):
+        self._pin(self._record(since=self._iso(7200)))  # pinned 2 h ago, the sandbox up 1 h
+        sbx = _FakeSbx({"claude-p": "running"}, uptime={"claude-p": "3600.00 100.00\n"})
+        row, _ = self._engine_row(sbx)
+        self.assertEqual(row["detail"], self.OUTSIDE)
+
+    def test_engine_sandbox_pin_record_just_before_the_start_within_tolerance_reads_pinned(self):
+        # pinned 3630 s ago, the sandbox up 3600 s: 30 s of host/guest jitter
+        self.assertGreater(launch.PIN_SKEW_S, 30)
+        self._pin(self._record(since=self._iso(3630)))
+        sbx = _FakeSbx({"claude-p": "running"}, uptime={"claude-p": "3600.00 100.00\n"})
+        row, _ = self._engine_row(sbx)
+        self.assertEqual(row["detail"], "pinned by the supervisor")
+
+    def test_engine_sandbox_bad_pin_record_is_a_warning(self):
+        cases = {"not json": "{nope",
+                 "a list": "[1, 2]",
+                 "no pid": json.dumps({"sandbox": "claude-p", "since": self._iso(60)}),
+                 "string pid": json.dumps(self._record(supervisor_pid=str(os.getpid()))),
+                 "bool pid": json.dumps(self._record(supervisor_pid=True)),
+                 "bad since": json.dumps(self._record(since="yesterday")),
+                 "no since": json.dumps({"sandbox": "claude-p", "supervisor_pid": os.getpid()})}
+        for name, raw in cases.items():
+            with self.subTest(name):
+                self._pin(None, raw=raw)
+                sbx = _FakeSbx({"claude-p": "running"}, uptime={"claude-p": "3600.00 1.00\n"})
+                row, _ = self._engine_row(sbx)
+                self.assertEqual(row["detail"], self.OUTSIDE)
+                self.assertEqual(self._pin_execs(sbx), [])
+
+    def test_engine_sandbox_unreadable_uptime_keeps_the_pid_verdict(self):
+        self._pin(self._record(since=self._iso(10 ** 6)))  # would be stale if the start were known
+        for uptime in ({}, {"claude-p": (1, "")}, {"claude-p": "garbage\n"}, {"claude-p": ""},
+                       {"claude-p": "nan 1\n"}, {"claude-p": "-5 1\n"}):
+            with self.subTest(uptime=uptime):
+                sbx = _FakeSbx({"claude-p": "running"}, uptime=uptime)
+                row, _ = self._engine_row(sbx)
+                self.assertEqual(row["detail"], "pinned by the supervisor")
+        # a timed-out read spends the budget: still no raise, the pid verdict stands
+        import subprocess
+
+        def timing_out(args, timeout=None):
+            if args[1:2] == ["exec"]:
+                raise subprocess.TimeoutExpired(args, timeout or 0)
+            return _FakeSbx({"claude-p": "running"})(args, timeout)
+        row, result = self._engine_row(timing_out)
+        self.assertEqual(row["detail"], "pinned by the supervisor")
+        inodes = next(c for c in result["checks"] if c["check"] == "engine sandbox inodes")
+        self.assertEqual(inodes["detail"], "claude-p: inodes unknown")
+
+    def test_engine_sandbox_uptime_near_datetime_min_keeps_the_pid_verdict(self):
+        # a finite garbage uptime that puts the start ~60 s above datetime.min:
+        # host-now minus uptime succeeds, but the start minus PIN_SKEW_S would
+        # overflow. Drift between here and the check only raises the start, so
+        # the floor still overflows unless the check runs > 60 s later.
+        from datetime import datetime, timezone
+        self.assertGreater(launch.PIN_SKEW_S, 60)
+        span = datetime.now(timezone.utc) - datetime.min.replace(tzinfo=timezone.utc)
+        uptime = span.total_seconds() - 60
+        self._pin(self._record())  # pinned 60 s ago by this (live) process
+        sbx = _FakeSbx({"claude-p": "running"}, uptime={"claude-p": f"{uptime:.3f} 1.00\n"})
+        row, _ = self._engine_row(sbx)
+        self.assertEqual(row["detail"], "pinned by the supervisor")
+        self.assertEqual(self._pin_execs(sbx), [["sbx", "exec", "claude-p", "cat", "/proc/uptime"]])
+
+    # ---- DW-59: the engine sandbox inodes row
+
+    DF_HEAD = "Filesystem      Inodes  IUsed   IFree IUse% Mounted on\n"
+
+    def _inode_row(self, sbx, **kw):
+        _, result = self._engine_row(sbx, **kw)
+        names = [c["check"] for c in result["checks"]]
+        self.assertEqual(names.index("engine sandbox inodes"), names.index("engine sandbox") + 1)
+        row = next(c for c in result["checks"] if c["check"] == "engine sandbox inodes")
+        self.assertTrue(row["ok"])
+        self.assertTrue(result["ok"], result["gaps"])
+        self.assertFalse(any("inodes" in g for g in result["gaps"]))
+        return row, result
+
+    def test_engine_sandbox_inodes_ok(self):
+        df = self.DF_HEAD + "overlay        1000000 100000  900000   10% /\n"
+        row, _ = self._inode_row(_FakeSbx({"claude-p": "running"}, df={"claude-p": df}))
+        self.assertEqual(row["detail"], "900000 free inodes on /")
+
+    def test_engine_sandbox_inodes_low_is_a_warning_never_a_gap(self):
+        df = self.DF_HEAD + "overlay        1000000 988000   12000   99% /\n"
+        row, result = self._inode_row(_FakeSbx({"claude-p": "running"}, df={"claude-p": df}))
+        self.assertEqual(row["detail"], "warning: claude-p has 12000 free inodes on / "
+                                        "(below 50000); the engine may fail to write")
+        self.assertEqual(result["gaps"], [])
+
+    def test_engine_sandbox_inodes_wrapped_filesystem_name_parses(self):
+        df = self.DF_HEAD + "/dev/mapper/a-very-long-volume-name\n        1000000 100000  900000   10% /\n"
+        row, _ = self._inode_row(_FakeSbx({"claude-p": "running"}, df={"claude-p": df}))
+        self.assertEqual(row["detail"], "900000 free inodes on /")
+
+    def test_engine_sandbox_inodes_unknown(self):
+        for df in ({}, {"claude-p": (1, "")},
+                   {"claude-p": self.DF_HEAD + "overlay  -  -  -  -  /\n"},
+                   {"claude-p": "garbage\n"}, {"claude-p": ""}):
+            with self.subTest(df=df):
+                row, _ = self._inode_row(_FakeSbx({"claude-p": "running"}, df=df))
+                self.assertEqual(row["detail"], "claude-p: inodes unknown")
+
+    def test_engine_sandbox_inodes_dynamic_inode_filesystem_is_unknown_not_low(self):
+        # btrfs and similar report Inodes 0 / IFree 0: no reading, not a warning
+        for line in ("/dev/sda2            0     0       0     - /\n",
+                     "/dev/sda2            -     0       0     - /\n"):
+            with self.subTest(line=line):
+                df = {"claude-p": self.DF_HEAD + line}
+                row, _ = self._inode_row(_FakeSbx({"claude-p": "running"}, df=df))
+                self.assertEqual(row["detail"], "claude-p: inodes unknown")
+
+    def test_engine_sandbox_inodes_not_running_none_absent_or_down(self):
+        sbx = _FakeSbx({"claude-p": "stopped"})
+        row, _ = self._inode_row(sbx)
+        self.assertEqual(row["detail"], "not running")
+        self.assertEqual(sbx.execs(), [])
+        row, _ = self._inode_row(None, config=None)
+        self.assertEqual(row["detail"], "no engine sandbox configured")
+        row, _ = self._inode_row(_absent_sbx)
+        self.assertEqual(row["detail"], "sbx absent")
+        down = _FakeSbx({"claude-p": "running"}, daemon_rc=1)
+        row, _ = self._inode_row(down)
+        self.assertEqual(row["detail"], "daemon down")
+        self.assertEqual(down.execs(), [])
+
+    def test_engine_sandbox_inodes_several_sandboxes_are_named_each(self):
+        config = ('jobs:\n  "p/a":\n    sandbox: claude-p\n'
+                  '  "p/b":\n    sandbox: claude-q\n  "p/c":\n    sandbox: claude-r\n')
+        df = {"claude-p": self.DF_HEAD + "overlay 1000000 100000 900000 10% /\n",
+              "claude-r": self.DF_HEAD + "overlay 1000000 988000 12000 99% /\n"}
+        sbx = _FakeSbx({"claude-p": "running", "claude-q": "stopped", "claude-r": "running"}, df=df)
+        row, _ = self._inode_row(sbx, config=config)
+        self.assertEqual(row["detail"],
+                         "claude-p: 900000 free inodes on /; claude-q: not running; "
+                         "warning: claude-r has 12000 free inodes on / (below 50000); "
+                         "the engine may fail to write")
 
     def test_engine_sandbox_not_running_stopped_unlisted_or_ls_failing(self):
         for sbx in (_FakeSbx({"claude-p": "stopped"}), _FakeSbx({"claude-p-two": "running"}),
@@ -1146,7 +1346,8 @@ class LaunchTestCase(unittest.TestCase):
         down = _FakeSbx({"claude-p": "running"}, daemon_rc=1)
         row, _ = self._engine_row(down)
         self.assertEqual(row["detail"], "daemon down")
-        self.assertEqual(down.calls, [["sbx", "daemon", "status"]])  # no sbx ls after a down daemon
+        # no sbx ls after a down daemon (each of the two sandbox rows asks it once)
+        self.assertEqual(down.calls, [["sbx", "daemon", "status"]] * 2)
 
     def test_engine_sandbox_several_sandboxes_are_named_each(self):
         config = ('jobs:\n  "p/a":\n    sandbox: claude-p\n'
@@ -1183,7 +1384,7 @@ class LaunchTestCase(unittest.TestCase):
         result = launch.check(root, spec)
         names = [c["check"] for c in result["checks"]]
         row = next(c for c in result["checks"] if c["check"] == "playable path")
-        self.assertEqual(names.index("playable path"), names.index("engine sandbox") + 1)
+        self.assertEqual(names.index("playable path"), names.index("engine sandbox inodes") + 1)
         self.assertTrue(row["ok"])
         self.assertTrue(result["ok"], result["gaps"])
         self.assertFalse(any("playable path" in g for g in result["gaps"]))

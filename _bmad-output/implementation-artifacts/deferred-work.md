@@ -1,13 +1,24 @@
 # Deferred Work
 
-## Deferred from: code review of feat/tk-studio-connector (2026-08-06)
+### DW-124: Contract §4 `submit` admitted a full job definition but the CLI/skill surface was id-only
+origin: migrated from legacy ledger ("Deferred from: code review of feat/tk-studio-connector (2026-08-06)"), 2026-10-29
+location: plugins/tk-studio/contracts/driver-contract.md §4 submit
+reason: Legacy item DW-1. Contract §4 `submit` admitted "a job definition (or the id …)" but the CLI/skill surface was id-only; the wording fix was deferred to fold into the deliberate 1.7.0 MINOR contract bump.
+status: done 2026-08-07
+resolution: Resolved 2026-08-07 (ST-039, contract 0.1.7, shipped as 1.7.0 and renumbered to pre-1.0 the same day): §4 `submit` now reads id-only ("the id of a shipped/project job instance — a full-definition submit form is not part of this surface"), folded into the 1.7.0 MINOR bump as planned.
 
-- ~~**DW-1**~~ — **Resolved 2026-08-07 (ST-039, contract 0.1.7 — shipped as 1.7.0, renumbered to pre-1.0 the same day):** §4 `submit` now reads id-only ("the id of a shipped/project job instance — a full-definition submit form is not part of this surface"), folded into the deliberate 1.7.0 MINOR bump as planned. *(Original: contract §4 `submit` admitted "a job definition (or the id …)" but the CLI/skill surface was id-only.)*
-- **DW-2** — Connector test suite (`ClaudeOS/connectors/tk-studio/server.test.ts`) is live-integration by design: it asserts against the real registry and studio install, so it cannot run on a machine without an onboarded tk-studio. Acceptable for the personal ClaudeOS repo (no CI); add a fixture/mock path only if the repo ever grows CI.
+### DW-125: Connector test suite is live-integration only and cannot run without an onboarded tk-studio
+origin: migrated from legacy ledger ("Deferred from: code review of feat/tk-studio-connector (2026-08-06)"), 2026-10-29
+location: ClaudeOS/connectors/tk-studio/server.test.ts
+reason: Legacy item DW-2. The connector test suite is live-integration by design: it asserts against the real registry and studio install, so it cannot run on a machine without an onboarded tk-studio. Acceptable for the personal ClaudeOS repo (no CI); add a fixture/mock path only if the repo ever grows CI.
+status: open
 
-## Deferred from: AD-11/AD-13 hardening PRs (2026-08-06)
-
-- ~~**DW-3**~~ — **Resolved 2026-08-07 (ST-039, contract 0.1.7):** §8 names the suite's `unrunnable-core` assertion and §6 reads four-plane (base, plugin incl. harness loadability, store, vault), folded into the 1.7.0 bump with DW-1. *(Original: PATCH-level wording drift — behavior had already shipped and been asserted by the suite.)*
+### DW-126: Contract §8/§6 PATCH-level wording drift (unrunnable-core assertion, four-plane health)
+origin: migrated from legacy ledger ("Deferred from: AD-11/AD-13 hardening PRs (2026-08-06)"), 2026-10-29
+location: plugins/tk-studio/contracts/driver-contract.md §6, §8
+reason: Legacy item DW-3. PATCH-level wording drift: the behavior had already shipped and been asserted by the suite, but §8 did not name the suite's `unrunnable-core` assertion and §6 did not read four-plane.
+status: done 2026-08-07
+resolution: Resolved 2026-08-07 (ST-039, contract 0.1.7): §8 names the suite's `unrunnable-core` assertion and §6 reads four-plane (base, plugin incl. harness loadability, store, vault), folded into the 1.7.0 bump together with legacy DW-1 (now DW-124).
 
 ### DW-4: Pre-existing platform-dependent failure: test_job.JobTestCase.test_target_rules expects "C:/abs/path.py" refused as absolute; accepted on Linux
 origin: spec-deferred ef269254c0b5
@@ -23,7 +34,8 @@ source_spec: `20-1-finish-records-what-the-run-cost-finish-records-what-the-run-
 location: plugins/tk-studio/lib/jobrun.py finish / plugins/tk-studio/lib/job.py:570
 severity: low
 reason: job.update_run allows new_state == record state on a terminal run (job.py:570), and finish always calls _finalize_run, which emits. This behaviour predates this story for reason/status_block. It touches the AD-12 one-event-per-terminal-transition invariant (deferral class (b)). Raised by the edge-case-hunter review layer.
-status: open
+status: done 2026-10-29
+resolution: resolved by sweep bundle dw-job-finish-idempotence
 
 ### DW-6: The contract names no executing wrapper for a one-shot run started from the invoke-skill directive that `submit` returns, and gives no path for Hermes (which submits but never executes) to hand that d
 origin: spec-deferred a6391be903d9
@@ -71,7 +83,8 @@ source_spec: `25-3-the-drift-check-and-conformance-read-the-folder-and-the-the-d
 location: plugins/tk-studio/lib/consolidate.py:246
 severity: low
 reason: plugins/tk-studio/lib/consolidate.py:246-247 builds the fix "run the guided fix on the affected machine (tk install / /plugin marketplace update)". Story 25-3 removed that flow from the drift check, SKILL.md, driver-contract §6 (pinned by test_driver_contract assertNotIn("/plugin marketplace update")) and amended AD-13 to the folder and the roster. Under AD-21 a marketplace copy is the `shadowed` condition, so evolve proposals built from drift-detection events give guidance that contradicts the plane's own fixes. The text pre-dates this story and the file is outside its Files boundary. Deferral criterion (b): an AD rule (AD-13 as amended) left contradicted by a shipped fix text.
-status: open
+status: done 2026-10-29
+resolution: resolved by sweep bundle dw-studio-drift-and-routing-text
 
 ### DW-12: A studio-web update while the supervisor leg is `reported` (source checkout) or `skipped` renames the live studio-web slot aside with nothing restarted, so a running supervisor may serve a renamed pat
 origin: spec-deferred 8afffc622e6a
@@ -143,7 +156,8 @@ source_spec: `26-2-the-planner-settles-schema-shape-and-the-spec-file-name-the-p
 location: plugins/tk-studio/lib/pipeline.py:322; .bmad-loop/plugins/studio-pipeline/consult.md
 severity: medium
 reason: `pipeline.py:322` writes `consult_scope`. No other code or customization reads that key: `bmad-build-auto.toml` reads only `consult_triggers`. The consult subagent's prompt is `.bmad-loop/plugins/studio-pipeline/consult.md` followed by the question, and consult.md carries its own fixed scope list. So the schema-shape-as-planner-matter rule exists as text only. The wiring gap predates this story. Deferral criterion (a): this is the behaviour AC1's consult-scope clause names.
-status: open
+status: done 2026-10-29
+resolution: resolved by sweep bundle dw-consult-scope-wiring
 
 ### DW-21: Follow-up review still recommended for 26-5-the-adapter-takes-a-status-pull-back-from-a-driver after the damping cap was spent
 origin: review-budget-followup
@@ -270,7 +284,8 @@ source_spec: `31-2-project-setup-from-a-template-spec.md`
 location: kb/atlassian-free-tier.md:21
 severity: medium
 reason: confluence.py:31-32 sends POST /spaces and the folder creates as needing write:space:confluence and write:folder:confluence. kb §1 step 5 (and §2 Q3) lists only the read/write page, read space and attachment scopes for TK_ATLASSIAN_AGENT_CONFLUENCE_TOKEN. A token built from the record therefore meets a scope 403 on the first live setup's space create (AC1). Setup names the missing scope as designed, but the operator's instructions are incomplete. The fix belongs in 31.1's record, outside 31-2's Files.
-status: open
+status: done 2026-10-29
+resolution: resolved by sweep bundle dw-atlassian-round-trip
 
 ### DW-37: Follow-up review still recommended for 31-2-project-setup-from-a-template after the damping cap was spent
 origin: review-budget-followup
@@ -438,7 +453,8 @@ source_spec: `33-3-the-pin-restarts-a-logged-out-sandbox-spec.md`
 location: plugins/tk-studio/lib/launch.py engine_sandbox_row
 severity: low
 reason: The record is removed only when pin-released stopped the sandbox (Settled shape 3); engine_sandbox_row reads presence only. Proposed: treat a .pin whose supervisor_pid is dead or whose since predates the sandbox start as absent. Consult ruling D, deferral criterion (a).
-status: open
+status: done 2026-10-29
+resolution: resolved by sweep bundle dw-launch-check-advisories
 
 ### DW-58: Several queued runs on one sandbox that stays logged out (a token no restart heals) restart it once per run, one per drain pass, because guard (d) reads only the gated run's own episode.
 origin: spec-deferred c443898760e1
@@ -454,7 +470,8 @@ source_spec: `33-4-the-host-leg-runs-the-supervisors-suites-spec.md`
 location: plugins/tk-studio/lib/launch.py (the advisory rows of `check`)
 severity: low
 reason: Evidence hole 70: the supervisor suites' `tk-sup-*` leak filled the engine sandbox's /tmp to 1.3 M inodes during 33-1. Story 33.4 removes the cause (`apps/supervisor/test/tmp.ts` cleans every suite's folders under every exit) but not the symptom check. Proposed: an advisory `check` row that warns below 50,000 free inodes, read with `df -i /` through `sbx exec`. Outside 33-4's AC1/AC2 and its oversize band, so deferred. DRIFT: the inode warning deferred — affects: none.
-status: open
+status: done 2026-10-29
+resolution: resolved by sweep bundle dw-launch-check-advisories
 
 ### DW-60: The supervisor's pin (`pinBeforeClaim`) does not prune the engine sandbox's /tmp, so `tk-sup-*` and `tmp.*` leftovers from earlier runs (hole 70) accumulate until removed by hand.
 origin: spec-deferred 33-4 (plans/33-4.md Settled shape 6, the replan suggestion from 33-1)
@@ -558,7 +575,8 @@ source_spec: `34-4-engine-knowledge-pinned-per-project-spec.md`
 location: plugins/tk-studio/lib/orchestrate.py _resolve_routes; plugins/tk-studio/lib/inventory.py planes
 severity: low
 reason: Plan 34-4 Risks and the spec's Never rule ("Widen inventory.py/orchestrate.py routing (recorded as a deferral instead)") require this deferral; follow-up blind review found it unrecorded. Class (a): the routing display of AC1's confirmed skill. Display only: the skills mount does not depend on it.
-status: open
+status: done 2026-10-29
+resolution: resolved by sweep bundle dw-studio-drift-and-routing-text
 
 ### DW-73: Follow-up review still recommended for 34-4-engine-knowledge-pinned-per-project after the damping cap was spent
 origin: review-budget-followup
@@ -742,7 +760,8 @@ source_spec: Story 31.4 (jira promote / pull-back), the TKSTUDIO workflow
 location: plugins/tk-studio/lib/jirabackend.py:752 (promote skips dropped); the pull-back status map (plansync.py SPRINT_STATUS_MAP, the category mapping)
 severity: low
 reason: Deleting a Jira issue is the owner's action and the Delete option is permission-gated on a company-managed project, so an orphan or an abandoned entry needs a terminal status instead: the owner adds DNI (Done category, a global transition) by hand. The studio should round-trip it: promote transitions a dropped entry's existing issue to DNI (and creates nothing for a dropped entry without one), the pull-back maps DNI to dropped rather than done, and setup creates DNI with its global transition on a new project. First case: TKSTUDIO-6, an orphan twin of EP-006 from the interrupted first sync. Hole 100 (2026-10-29): until the promote picker skipped `DNI`, every canonical `done` landed there (five stories, moved back to `Done` by hand); the picker now skips `DROPPED_STATUS_NAMES`, the DNI round trip (pull-back to `dropped`, setup creating it) stays open here. Remaining scope (EP-35 retro C7, AI-5): done are `dropped` → `DNI` on promote (#254) and the picker skipping `DROPPED_STATUS_NAMES` with a note on an issue whose only route into the category is a dropped status (#275); still owed are the pull-back mapping `DNI` to canonical `dropped` (today a Done-category status reads `done`, so a dropped issue comes back `done`), `setup` creating `DNI` with its global transition on a new project (with DW-107's workflow fixes), and the loud-note rule for a snapshot whose backend status is not the category's canonical name (DW-114).
-status: open
+status: done 2026-10-29
+resolution: resolved by sweep bundle dw-atlassian-round-trip
 
 ### DW-96: `measurepush.py push` harvests Stage Log rows only from the studio repo it is given, so rows in other registered project roots never become `stage` events.
 origin: spec-deferred 2d886fb1f616
@@ -838,7 +857,8 @@ source_spec: `kb/agent-pc-setup-runbook.md` fixes row "hole 92"; `handoff-phase1
 location: plugins/tk-studio/lib/plansync.py setup / plugins/tk-studio/lib/jirabackend.py (the workflow update: `GET /workflow/search` copied into `POST /workflows/update`; the To Do status lookup)
 severity: low
 reason: The setup copies the transitions from `GET /workflow/search`, whose types come back lowercase, into `POST /workflows/update`, which takes `INITIAL`/`GLOBAL`/`DIRECTED`, and that search carries no workflow version; and the simplified workflow's To Do category holds `Backlog`, not `To Do`. The owner edited the TKSTUDIO workflow by hand instead (the three statuses, the Blocked → Block Resolved transition, two global transitions into To Do and Blocked). Fix: uppercase the copied types, read the version from the v3 workflows search, accept any status in the To Do category, and make setup add the global transitions it needs (and, with DW-95, create `DNI`).
-status: open
+status: done 2026-10-29
+resolution: resolved by sweep bundle dw-atlassian-round-trip
 
 ### DW-108: Binding the project to Jira made every fresh run worktree fail activation: the `tracking` plane read the served checkout's untracked sync-back state, which a worktree never has (hole 93).
 origin: operator ledger, hole 93 (2026-10-28); retro-epic-35 C6, AI-5
@@ -894,7 +914,8 @@ source_spec: `kb/agent-pc-setup-runbook.md` fixes row "hole 100"; `handoff-phase
 location: plugins/tk-studio/lib/plansync.py (the pull-back's status snapshot and category mapping); plugins/tk-studio/lib/jirabackend.py `_transition_to_category` (the picker, fixed in #275)
 severity: medium
 reason: `_transition_to_category` took the first transition into the target category, which since the owner's `DNI` status (2026-10-28, DW-95) was `DNI`, so TKSTUDIO-184, 185, 186, 187 and 189 (35.2, 35.3, 35.5, 35.6, 35.8) were moved to `DNI` instead of `Done`; `DNI` maps to `done` by category, the plan files read `status: DNI` beside `canonical_status: done`, and nothing flagged it — the mirror, not the loop, found it (retro C9). Repaired by hand through the API (TKSTUDIO-6, the owner's own `DNI` move, kept); the picker now skips `DROPPED_STATUS_NAMES` and notes an issue whose only route into the category is a dropped status (#275). The `DNI` round trip (pull-back to `dropped`, setup creating it) is DW-95's. Fix here: a landed story's pull-back snapshot whose backend status name differs from the category's canonical name is a loud note on the pull-back result and in the plan file, never a silent `done`.
-status: open
+status: done 2026-10-29
+resolution: resolved by sweep bundle dw-atlassian-round-trip
 
 ### DW-115: A story-boundary refusal parks the run: after the harvest commit the run stays `paused` with its lock and pin, the relaunch skipped every pass, `resume` answering `StoryLanded`, the only exit `POST /runs/{id}/cancel`.
 origin: retro-epic-35, B4
@@ -968,7 +989,31 @@ severity: low
 reason: The 35-7 spec names it a residual risk; no test. Fix: pass `sweepSummary(queue, run)` when `isSweep`; one test that re-runs a sweep's leg and reads `## Sweep` back. Before the first real sweep (AI-2).
 status: open
 
-### DW-124: A block the operator resolved by resuming the run leaves its Jira issue in `Blocked - Awaiting User`: no resume path transitions out of the block, and the Done promotion then holds as an AD-5 conflict with the owner still tagged (hole 101).
+### DW-127: The `POST /workflows/update` transitions keep the legacy `from`/`to` keys copied from `GET /workflow/search` and new GLOBAL transitions carry no `id`; the live endpoint may want `toStatusReference`/`l
+origin: spec-deferred af7f5c7070ac
+source_spec: `spec-dw-atlassian-round-trip.md`
+location: plugins/tk-studio/lib/jirabackend.py update_workflow
+severity: medium
+reason: Both review layers flagged it. The test fake checks only uppercase types and the version, so any transition shape passes. The spec's Design Notes kept the body shape ungraded (kb §2 Q1 grade C), so the first live setup may still be refused and fall back to the owner steps. Deferral class (a): a defect in the workflow-update behaviour DW-107 names.
+status: open
+
+### DW-128: A _land_summary failure inside _finalize_run raises before _emit_job_event, leaving a terminal run with no job-run event; with DW-5 a same-state retry no longer repairs it.
+origin: spec-deferred 10fc2e0ce39e
+source_spec: `spec-dw-5-job-finish-idempotence.md`
+location: plugins/tk-studio/lib/jobrun.py:375
+severity: low
+reason: update_run persists the terminal state before _finalize_run; _finalize_run guards only capture, and _land_summary (write_workspace_json) can raise before the emit. Before DW-5 a repeat finish re-ran _finalize_run. The intent mandates the no-op, so the fix belongs in _finalize_run ordering or a finalized marker (deferral class b, AD-12 exactly-once).
+status: open
+
+### DW-129: Two concurrent finish calls on the same non-terminal run can both pass the pre-read and both emit a job-run event.
+origin: spec-deferred a597f7911645
+source_spec: `spec-dw-5-job-finish-idempotence.md`
+location: plugins/tk-studio/lib/jobrun.py:701
+severity: low
+reason: The read_run check in finish and the write in update_run are separate, unlocked steps, and update_run accepts a same-state terminal rewrite (job.py:586). This race predates DW-5 (which only closes the sequential repeat); closing it needs a check inside update_run or a lock, which the DW-5 spec forbids changing (deferral class b, AD-12).
+status: open
+
+### DW-130: A block the operator resolved by resuming the run leaves its Jira issue in `Blocked - Awaiting User`: no resume path transitions out of the block, and the Done promotion then holds as an AD-5 conflict with the owner still tagged (hole 101).
 origin: hole 101 (Story 35.2's run, 2026-10-29 02:52Z; noticed by the owner 19:xxZ)
 source_spec: `_bmad-output/specs/spec-epic-35/stories/35-2-every-story-gets-its-plan-and-its-records-spec.md` (the block's spec); `kb/agent-pc-setup-runbook.md` (the hole-101 row)
 location: apps/supervisor/src/closeout.ts (`track.py block` on a `blocked` end, the one `track-block` event per pause); apps/supervisor/src/api.ts (`POST /runs/{id}/resume`) and the hole-65 auto-resume (no counterpart call); plugins/tk-studio/lib/track.py (story-side verbs: `block` in, nothing out — `close` is engagement-only, `reply` is the owner's, `validate --pass` needs the owner's transition); plugins/tk-studio/lib/jirabackend.py `pull_back` (canonical `done` vs backend `Blocked - Awaiting User` with the promoted `draft` is a conflict, held until a human picks a side) and the supervisor's plan-status pass (`ok: true` with the conflict in the projection notes)

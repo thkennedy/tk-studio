@@ -51,7 +51,17 @@ FOLDER_TITLES = ["Brief", "GDD", "Scope of Work", "Decisions", "Records"]
 class FakeAtlassian(FakeJira):
     """FakeJira plus the setup routes and the Confluence v2 routes. The
     create shapes are ungraded on the live site, so they are pinned here.
-    Every list it serves is paged (`page_size`), as the live site pages."""
+    Every list it serves is paged (`page_size`), as the live site pages.
+    DW-107: each status has its category; the legacy `/workflow/search`
+    spells transition types lowercase and carries no version, which only
+    `/workflows/search` serves; `/workflows/update` refuses a lowercase
+    type or a stale version, as the live site did."""
+
+    CATEGORIES = {"To Do": "TODO", "Backlog": "TODO",
+                  "Selected for Development": "TODO",
+                  "Done": "DONE", "DNI": "DONE"}
+    _CATEGORY_KEYS = {"TODO": "new", "IN_PROGRESS": "indeterminate",
+                      "DONE": "done"}
 
     def __init__(self):
         super().__init__()
@@ -67,6 +77,7 @@ class FakeAtlassian(FakeJira):
         self.statuses: list[dict] = []   # every status on the site
         self.in_use: set[str] = set()    # status ids the project's flow uses
         self.workflows: list[dict] = []
+        self.update_bodies: list[dict] = []   # every POST /workflows/update
         self.filters: list[dict] = []
         self.spaces: dict[str, dict] = {}
         self.folders: dict[str, list[dict]] = {}
@@ -81,11 +92,13 @@ class FakeAtlassian(FakeJira):
     def status(self, name):
         return next((e for e in self.statuses if e["name"] == name), None)
 
-    def _new_status(self, name, project_scoped):
+    def _new_status(self, name, project_scoped, category=None):
         scope = ({"type": "PROJECT", "project": {"id": self.project["id"]}}
                  if project_scoped else {"type": "GLOBAL"})
         entry = {"id": self._id(20000), "name": name,
-                 "statusCategory": "IN_PROGRESS", "scope": scope}
+                 "statusCategory": category
+                 or self.CATEGORIES.get(name, "IN_PROGRESS"),
+                 "scope": scope}
         self.statuses.append(entry)
         return entry
 
@@ -114,7 +127,7 @@ class FakeAtlassian(FakeJira):
                 "version": {"versionNumber": 1, "id": "v1"},
                 "statuses": [{"id": i} for i in ids],
                 "transitions": [{"id": "11", "name": "Create", "from": [],
-                                 "to": ids[0]}]})
+                                 "to": ids[0], "type": "INITIAL"}]})
 
     def add_status(self, name):
         """The owner's browser steps: the status lands on the project's
@@ -161,8 +174,10 @@ class FakeAtlassian(FakeJira):
         if method == "GET" and m:
             if not self.project or m.group(1) != self.project["key"]:
                 return 404, {"errorMessages": ["No project"]}
-            used = [{"id": e["id"], "name": e["name"]} for e in self.statuses
-                    if e["id"] in self.in_use]
+            used = [{"id": e["id"], "name": e["name"],
+                     "statusCategory": {
+                         "key": self._CATEGORY_KEYS[e["statusCategory"]]}}
+                    for e in self.statuses if e["id"] in self.in_use]
             return 200, [{"name": "Story", "statuses": used},
                          {"name": "Epic", "statuses": used}]
         if method == "GET" and path.startswith("/project/"):
@@ -183,15 +198,36 @@ class FakeAtlassian(FakeJira):
             return 200, self._page(values, q)
         if method == "POST" and path == "/statuses":
             assert body["scope"] == {"type": "GLOBAL"}, body["scope"]
-            return 200, [self._new_status(e["name"], False)
+            return 200, [self._new_status(e["name"], False,
+                                          e["statusCategory"])
                          for e in body["statuses"]]
         if method == "GET" and path == "/workflow/search":
-            return 200, self._page([w for w in self.workflows
-                                    if q.get("queryString", "") in w["id"]["name"]], q)
+            # the legacy shape: lowercase types, no version
+            legacy = [{"id": w["id"], "statuses": w["statuses"],
+                       "transitions": [
+                           {**t, "type": t["type"].lower()} if t.get("type")
+                           else t for t in w["transitions"]]}
+                      for w in self.workflows
+                      if q.get("queryString", "") in w["id"]["name"]]
+            return 200, self._page(legacy, q)
+        if method == "GET" and path == "/workflows/search":
+            return 200, self._page([
+                {"id": w["id"]["entityId"], "name": w["id"]["name"],
+                 "version": w["version"]} for w in self.workflows
+                if q.get("queryString", "") in w["id"]["name"]], q)
         if method == "POST" and path == "/workflows/update":
+            self.update_bodies.append(body)
             flow = body["workflows"][0]
             target = next(w for w in self.workflows
                           if w["id"]["entityId"] == flow["id"])
+            if flow.get("version") != target["version"]:
+                return 400, {"errorMessages": ["version is required"]}
+            if any(t.get("type") != str(t.get("type")).upper()
+                   for t in flow["transitions"]):
+                return 400, {"errorMessages": ["bad transition type"]}
+            target["version"] = {
+                "versionNumber": target["version"]["versionNumber"] + 1,
+                "id": f"v{target['version']['versionNumber'] + 1}"}
             target["statuses"] = [{"id": s["statusReference"]}
                                   for s in flow["statuses"]]
             target["transitions"] = flow["transitions"]
@@ -305,9 +341,9 @@ class TemplateTests(SetupTestCase):
         self.assertEqual(body["leadAccountId"], "acc-owner")
         self.assertIn("issue type Epic", result["found"])
         self.assertIn("issue type Story", result["found"])
-        # the two statuses and their transition
+        # the two statuses, DNI (DW-95) and their transitions
         self.assertEqual(sorted(e["name"] for e in self.fake.statuses),
-                         sorted(jirabackend.TEMPLATE_STATUSES))
+                         sorted(jirabackend.TEMPLATE_STATUSES + ("DNI",)))
         for name in ("To Do", "In Progress", "Done"):
             self.assertIn(f"status {name}", result["found"])
         blocked = self.fake.status("Blocked - Awaiting User")["id"]
@@ -433,9 +469,11 @@ class PartialTests(SetupTestCase):
         # the owner follows the steps; the rerun verifies them by search
         self.fake.add_status("Blocked - Awaiting User")
         self.fake.add_status("Block Resolved")
+        self.fake.add_status("DNI")
         again = self._setup()
         self.assert_block_last(again, "complete")
         self.assertIn("status Block Resolved", again["found"])
+        self.assertIn("status DNI", again["found"])
 
     def test_refused_status_create_prints_company_managed_steps(self):
         self.fake.force[("POST", "/statuses")] = (400, {"errorMessages": ["no"]})
@@ -697,8 +735,9 @@ class ReviewFindingTests(SetupTestCase):
 
     # 1. the five-status workflow is verified on the project
     def test_template_without_to_do_ends_partial_naming_it(self):
-        self.fake.template_statuses = ["Backlog", "Selected for Development",
-                                       "In Progress", "Done"]
+        # DW-107: no status of the To Do category at all (a `Backlog` would
+        # fill the slot — DW107SetupTests)
+        self.fake.template_statuses = ["In Progress", "Done"]
         result = self._setup(owner_account_id="acc-owner")
         self.assert_block_last(result, "partial")
         self.assertIn("Add status `To Do` in the To Do category",
@@ -714,9 +753,16 @@ class ReviewFindingTests(SetupTestCase):
         del self.fake.force[("POST", "/statuses")]
         blocked = self.fake.add_status("Blocked - Awaiting User")
         resolved = self.fake.add_status("Block Resolved")
+        dni = self.fake.add_status("DNI")
+        todo = self.fake.status("To Do")
         self.fake.workflow["transitions"].append(
             {"id": "99", "name": "Block Resolved", "from": [blocked["id"]],
-             "to": resolved["id"]})
+             "to": resolved["id"], "type": "DIRECTED"})
+        # the owner's steps also tick the three global transitions (DW-107)
+        for i, entry in enumerate((todo, blocked, dni)):
+            self.fake.workflow["transitions"].append(
+                {"id": str(100 + i), "name": entry["name"], "from": [],
+                 "to": entry["id"], "type": "GLOBAL"})
         self.assertEqual(blocked["scope"], {"type": "GLOBAL"})
         calls = len(self.fake.calls)
         again = self._setup()
@@ -1156,6 +1202,165 @@ class ThirdReviewTests(SetupTestCase):
         self.assertEqual(binding["jira"]["project_key"], "TKSTUDIO")
         self.assertEqual(binding["jira"]["site"], "example.atlassian.net")
         self.assertEqual(binding["backend"], "jira")
+
+
+class DW107SetupTests(SetupTestCase):
+    """DW-95 / DW-107 (hole 92): setup accepts any To Do-category status,
+    creates `DNI` in the Done category, and sends a workflow update whose
+    body fixes the type case (uppercase) and the `/workflows/search`
+    version; the rest of its shape, the GLOBAL transitions included, is
+    ungraded (kb §2 Q1) until the operator's attended rerun."""
+
+    def _steps(self, result):
+        return " ".join(result["owner_steps"])
+
+    def _globals(self, body):
+        return [t for t in body["workflows"][0]["transitions"]
+                if t["type"] == "GLOBAL"]
+
+    def test_backlog_fills_the_to_do_slot_and_the_update_is_complete(self):
+        self.fake.template_statuses = ["Backlog", "In Progress", "Done"]
+        result = self._setup(owner_account_id="acc-owner")
+        self.assert_block_last(result, "complete")
+        self.assertIn("status To Do (satisfied by Backlog)", result["found"])
+        self.assertNotIn("`To Do`", self._steps(result))
+        self.assertNotIn("To Do", result["reason"] or "")
+        # DNI created in the Done category beside the two setup statuses
+        self.assertEqual(self.fake.status("DNI")["statusCategory"], "DONE")
+        for name in ("Blocked - Awaiting User", "Block Resolved"):
+            self.assertEqual(self.fake.status(name)["statusCategory"],
+                             "IN_PROGRESS")
+        self.assertIn("status DNI", result["created"])
+        # the single update, with a GLOBAL transition into Backlog
+        self.assertEqual(len(self.fake.update_bodies), 1)
+        backlog = self.fake.status("Backlog")["id"]
+        self.assertIn(backlog, [t["to"] for t in
+                                self._globals(self.fake.update_bodies[0])])
+        self.assertIn("global transition -> Backlog", result["created"])
+        # the rerun is complete with no further writes
+        writes = len(self.fake.writes())
+        again = self._setup()
+        self.assert_block_last(again, "complete")
+        self.assertEqual(again["created"], [])
+        self.assertEqual(len(self.fake.writes()), writes)
+        self.assertIn("global transition -> Backlog", again["found"])
+
+    def test_dni_create_refused_names_dni_in_company_steps(self):
+        self.fake.force[("POST", "/statuses")] = (400, {"errorMessages": ["no"]})
+        result = self._setup(owner_account_id="acc-owner")
+        self.assert_block_last(result, "partial")
+        steps = self._steps(result)
+        self.assertIn("create `DNI` in the Done category", steps)
+        self.assertIn("create `Block Resolved` in the In Progress category",
+                      steps)
+        self.assertIn("`To Do`, `Blocked - Awaiting User` and `DNI`", steps)
+        self.assertTrue(any("status create refused" in n
+                            for n in result["notes"]))
+
+    def test_team_managed_steps_ask_for_dni_with_a_global_transition(self):
+        self.fake.team_managed = True
+        result = self._setup(owner_account_id="acc-owner")
+        self.assert_block_last(result, "partial")
+        steps = self._steps(result)
+        self.assertIn("Add status `DNI` in the Done category.", steps)
+        # the same three global transitions the company steps ask for
+        self.assertIn("On each of `To Do`, `Blocked - Awaiting User` and "
+                      "`DNI`, tick Allow all statuses to transition to this "
+                      "one", steps)
+        self.assertNotIn(("POST", "/statuses"), self.fake.calls)
+
+    def test_to_do_slot_status_off_the_workflow_is_in_the_update(self):
+        # the project's only To Do-category status is a PROJECT-scoped
+        # `Backlog` that is not on the workflow: the GLOBAL transition into
+        # it needs it among the update's statuses
+        self.fake.template_statuses = ["In Progress", "Done"]
+        original = self.fake.add_project
+
+        def add_project(key="TKSTUDIO"):
+            original(key)
+            entry = self.fake._new_status("Backlog", True)
+            self.assertNotIn({"id": entry["id"]},
+                             self.fake.workflow["statuses"])
+        self.fake.add_project = add_project
+        result = self._setup(owner_account_id="acc-owner")
+        self.assert_block_last(result, "complete")
+        self.assertIn("status To Do (satisfied by Backlog)", result["found"])
+        backlog = self.fake.status("Backlog")["id"]
+        flow = self.fake.update_bodies[0]["workflows"][0]
+        self.assertIn({"statusReference": backlog}, flow["statuses"])
+        self.assertIn(backlog, [t["to"] for t in self._globals(
+            self.fake.update_bodies[0])])
+
+    def test_workflow_update_body(self):
+        # the owner already made one GLOBAL transition into To Do: it is
+        # kept, never duplicated
+        original = self.fake.add_project
+
+        def add_project(key="TKSTUDIO"):
+            original(key)
+            todo = self.fake.status("To Do")["id"]
+            self.fake.workflow["transitions"].append(
+                {"id": "12", "name": "To Do", "from": [], "to": todo,
+                 "type": "GLOBAL"})
+        self.fake.add_project = add_project
+        result = self._setup(owner_account_id="acc-owner")
+        self.assert_block_last(result, "complete")
+        self.assertEqual(len(self.fake.update_bodies), 1)
+        flow = self.fake.update_bodies[0]["workflows"][0]
+        self.assertEqual(flow["id"], "wf-1")
+        self.assertEqual(flow["version"], {"versionNumber": 1, "id": "v1"})
+        types = [t["type"] for t in flow["transitions"]]
+        self.assertEqual(types, [t.upper() for t in types])
+        self.assertIn("INITIAL", types)   # the legacy `initial`, uppercased
+        ids = {n: self.fake.status(n)["id"]
+               for n in ("To Do", "Blocked - Awaiting User", "Block Resolved",
+                         "DNI")}
+        self.assertIn({"statusReference": ids["DNI"]}, flow["statuses"])
+        directed = [t for t in flow["transitions"] if t["type"] == "DIRECTED"]
+        self.assertEqual([(t["from"], t["to"]) for t in directed],
+                         [([ids["Blocked - Awaiting User"]],
+                           ids["Block Resolved"])])
+        into = sorted(t["to"] for t in flow["transitions"]
+                      if t["type"] == "GLOBAL")
+        self.assertEqual(into, sorted([ids["To Do"],
+                                       ids["Blocked - Awaiting User"],
+                                       ids["DNI"]]))
+        for t in flow["transitions"]:
+            if t["type"] == "GLOBAL":
+                self.assertEqual(t["from"], [])
+        self.assertIn("global transition -> To Do", result["found"])
+        self.assertIn("global transition -> DNI", result["created"])
+
+    def test_no_exact_name_in_workflows_search_writes_nothing(self):
+        self.fake.force[("GET", "/workflows/search")] = (200, {
+            "values": [{"id": "wf-1", "name": "TKSTUDIO other flow",
+                        "version": {"versionNumber": 1, "id": "v1"}}],
+            "startAt": 0, "isLast": True})
+        result = self._setup(owner_account_id="acc-owner")
+        self.assert_block_last(result, "partial")
+        self.assertNotIn(("POST", "/workflows/update"), self.fake.calls)
+        self.assertTrue(any("/workflows/search" in n for n in result["notes"]))
+        self.assertIn("Settings > Work items > Workflows", self._steps(result))
+
+    def test_rerun_of_a_complete_workflow_is_found_without_an_update(self):
+        self._setup(owner_account_id="acc-owner")
+        calls = len(self.fake.calls)
+        again = self._setup()
+        self.assert_block_last(again, "complete")
+        self.assertNotIn(("POST", "/workflows/update"),
+                         self.fake.calls[calls:])
+        for label in ("transition Blocked - Awaiting User -> Block Resolved",
+                      "global transition -> To Do",
+                      "global transition -> Blocked - Awaiting User",
+                      "global transition -> DNI", "status DNI"):
+            self.assertIn(label, again["found"])
+
+    def test_dry_run_names_dni_and_the_global_transitions(self):
+        result = self._setup(dry_run=True, owner_account_id="acc-owner")
+        self.assertEqual(self.fake.writes(), [])
+        for label in ("status DNI", "global transition -> DNI",
+                      "global transition -> Blocked - Awaiting User"):
+            self.assertIn(label, result["would_create"])
 
 
 if __name__ == "__main__":

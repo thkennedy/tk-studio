@@ -106,7 +106,8 @@ FROM_BACKEND_CATEGORY = {
 # history instead of being deleted). A promote into a category never lands
 # in one of these (hole 100: the project's first done-category transition
 # was `DNI`, and five landed stories went there instead of `Done`).
-DROPPED_STATUS_NAMES = frozenset({"DNI"})
+DNI_STATUS = "DNI"   # a literal, so setup creates the same name every run
+DROPPED_STATUS_NAMES = frozenset({DNI_STATUS})
 
 DEFAULT_TYPE_MAPPING = {"epic": "Epic", "story": "Story", "task": "Sub-task"}
 
@@ -127,12 +128,34 @@ class RateLimited(JiraError):
 def canonical_status(name: str | None, category: str | None) -> str | None:
     """The canonical status for a Jira status: by name first — the two
     template statuses (`SETUP_STATUSES`) are canonical `blocked` (AD-22,
-    AD-6) — then by status category. None when neither maps. `pull_back`
-    and the sync-back share it, so `sync` and `sync-back` never flip an
-    entity between `in-progress` and `blocked`."""
+    AD-6) and the dropped names (`DROPPED_STATUS_NAMES`, DW-95) canonical
+    `dropped` — then by status category. None when neither maps.
+    `pull_back` and the sync-back share it, so `sync` and `sync-back` never
+    flip an entity between `in-progress` and `blocked`, and a `DNI` issue
+    never pulls back as `done`."""
     if name in SETUP_STATUSES:
         return "blocked"
+    if name in DROPPED_STATUS_NAMES:
+        return "dropped"
     return FROM_BACKEND_CATEGORY.get(category)
+
+
+# The Done category's canonical name (DW-114): a landed issue in any other
+# Done-category status that is not a dropped name is kept as `done`, but
+# loudly — a `notes` line and the snapshot's `status_note`.
+CANONICAL_DONE_STATUS = "Done"
+
+
+def _landed_status_note(name: str | None, category: str | None) -> str | None:
+    """The snapshot's `status_note` for a non-canonical Done-category name,
+    None for every other status (To Do / In Progress names vary per
+    workflow and round-trip by category, AD-5; the name-mapped ones are
+    canonical by definition)."""
+    if category != "done" or name == CANONICAL_DONE_STATUS \
+            or name in DROPPED_STATUS_NAMES or name in SETUP_STATUSES:
+        return None
+    return (f"backend status {name!r} is not the Done category's canonical "
+            f"{CANONICAL_DONE_STATUS!r} (DW-114)")
 
 
 def _now_iso() -> str:
@@ -553,7 +576,12 @@ def apply_statuses(plan_dir: Path, statuses: dict, dry_run: bool = False,
     both-changed entity is a conflict, reported, never resolved. When the
     backend name changed but already maps onto the canonical status, only
     the snapshot is refreshed: its `status` (the Jira original) and, when
-    it was stale, its `canonical_status`. `assignees`
+    it was stale, its `canonical_status`. A Done-category backend name
+    other than `Done` or a dropped name (DW-114) is never a silent `done`:
+    while the entity is `done` and not a conflict, a `notes` line names it
+    on every pass and the snapshot records it as `status_note` (removed
+    once the name is canonical or the entity is not `done`; a changed
+    `status_note` alone is written). `assignees`
     (`{key: name | None}`, pull_back's) adds the assignee class; without
     it the assignee is never read or changed. `{applied, conflicts, notes}`.
     """
@@ -602,10 +630,14 @@ def apply_statuses(plan_dir: Path, statuses: dict, dry_run: bool = False,
             # several canonical statuses (`review` and `in-progress` both
             # promote into `indeterminate`), so a category-mapped snapshot
             # differing from its canonical status is the AD-5 round trip
-            # of an unrepresentable status, not a stale mapping
+            # of an unrepresentable status, not a stale mapping. The
+            # dropped names qualify the same way (hole 100: a `DNI`
+            # snapshot pulled back by category as `done`)
             mapped = canonical_status(b_status, b_category)
             promoted = snapshot.get("canonical_status")
-            if b_status in SETUP_STATUSES and mapped != promoted and \
+            name_mapped = b_status in SETUP_STATUSES \
+                or b_status in DROPPED_STATUS_NAMES
+            if name_mapped and mapped != promoted and \
                     front["status"] == promoted:
                 changes["status"] = (mapped, b_status)
 
@@ -627,7 +659,21 @@ def apply_statuses(plan_dir: Path, statuses: dict, dry_run: bool = False,
             conflicts.append({"id": front["id"], "canonical": str(path),
                               "backend": key, "fields": conflict_fields})
             continue
-        if not changes and not refresh:
+        # the DW-114 note only when the entity is (or becomes) `done`: an
+        # unpromoted local status kept over a non-canonical Done name is
+        # not "kept as `done`"
+        resulting = changes["status"][0] if "status" in changes \
+            else front["status"]
+        status_note = _landed_status_note(b_status, b_category) \
+            if resulting == "done" else None
+        if status_note:
+            notes.append(f"{front['id']}: {key} backend status {b_status!r} "
+                         f"is in the Done category but is not the canonical "
+                         f"{CANONICAL_DONE_STATUS!r} — kept as `done`; move "
+                         f"the issue to {CANONICAL_DONE_STATUS!r} (or a "
+                         f"dropped status) in Jira (DW-114)")
+        note_changed = snapshot.get("status_note") != status_note
+        if not changes and not refresh and not note_changed:
             continue
         if "status" in changes:
             mapped, backend_name = changes["status"]
@@ -644,13 +690,19 @@ def apply_statuses(plan_dir: Path, statuses: dict, dry_run: bool = False,
                 front["assignee"] = changes["assignee"]
             snapshot["assignee"] = changes["assignee"] or ""
             snapshot["canonical_assignee"] = changes["assignee"] or ""
+        if status_note:
+            snapshot["status_note"] = status_note
+        else:
+            snapshot.pop("status_note", None)
         if changes:
             front["updated"] = _now_iso()
         snapshot["synced_at"] = _now_iso()
         if not dry_run:
             _atomic_write(path, interchange.render_entity(front, body))
         applied.append({"id": front["id"],
-                        "fields": sorted(changes) or ["external.jira.status"],
+                        "fields": sorted(changes) or (
+                            ["external.jira.status"] if refresh
+                            else ["external.jira.status_note"]),
                         "path": str(path)})
     return {"applied": applied, "conflicts": conflicts, "notes": notes}
 
@@ -1032,6 +1084,18 @@ RESOLVED_STATUS = "Block Resolved"
 SETUP_STATUSES = (BLOCKED_STATUS, RESOLVED_STATUS)
 TEMPLATE_STATUSES = ("To Do", "In Progress", BLOCKED_STATUS, RESOLVED_STATUS,
                      "Done")
+TODO_STATUS = "To Do"   # the slot any To Do-category status fills (DW-107)
+# DW-95: setup creates `DNI_STATUS` beside the two setup statuses, in the
+# Done category (they stay In Progress)
+DNI_CATEGORY = "DONE"
+CREATED_STATUSES = SETUP_STATUSES + (DNI_STATUS,)
+STATUS_CATEGORY = {BLOCKED_STATUS: "IN_PROGRESS",
+                   RESOLVED_STATUS: "IN_PROGRESS",
+                   DNI_STATUS: DNI_CATEGORY}
+# a status's category as `/statuses/search` (`TODO`) or the project's
+# in-use list (`{"key": "new"}`) spells it
+_CATEGORY_KEYS = {"new": "TODO", "indeterminate": "IN_PROGRESS",
+                  "done": "DONE"}
 SETUP_ISSUE_TYPES = ("Epic", "Story")
 NEEDS_YOU_FILTER = "Needs you"
 NEEDS_YOU_JQL = ('status = "Blocked - Awaiting User" '
@@ -1364,9 +1428,12 @@ def find_statuses(client: JiraClient, project_id: str,
     statuses/search` (a company-managed project's statuses are GLOBAL, so
     the projectId search may not return them) and the statuses the
     project's workflows use (`GET /project/<key>/statuses`). The two new
-    statuses count when any read has them; the three template statuses only
-    when the project itself has them (a global `To Do` elsewhere on the site
-    is not this project's). On a team-managed project only its own
+    statuses and `DNI` count when any read has them; the three template
+    statuses only when the project itself has them (a global `To Do`
+    elsewhere on the site is not this project's). The `To Do` slot is
+    filled by any project status in the To Do category (DW-107: the
+    simplified workflow's is `Backlog`), a status named `To Do` first; the
+    entry keeps its own name. On a team-managed project only its own
     PROJECT-scoped statuses and its in-use list count: a GLOBAL status of
     the same name is another project's and cannot be on this one."""
     scoped = _paged_values(client, "/statuses/search",
@@ -1380,28 +1447,41 @@ def find_statuses(client: JiraClient, project_id: str,
     in_use = [st for it in by_type if isinstance(it, dict)
               for st in it.get("statuses") or [] if isinstance(st, dict)]
     have: dict[str, dict] = {}
-    for entry in in_use + [e for e in scoped
-                           if _in_scope(e, project_id, team_managed)]:
+    project_own = in_use + [e for e in scoped
+                            if _in_scope(e, project_id, team_managed)]
+    for entry in project_own:
         if entry.get("name") in TEMPLATE_STATUSES:
             have.setdefault(entry["name"], entry)
+    for entry in project_own:
+        if _category(entry) == "TODO":
+            have.setdefault(TODO_STATUS, entry)
     for entry in site:
-        if entry.get("name") in SETUP_STATUSES \
+        if entry.get("name") in CREATED_STATUSES \
                 and _in_scope(entry, project_id, team_managed):
             have.setdefault(entry["name"], entry)
     return have
 
 
+def _category(entry: dict) -> str | None:
+    """`TODO` / `IN_PROGRESS` / `DONE` from either status read's shape."""
+    cat = entry.get("statusCategory")
+    if isinstance(cat, dict):
+        return _CATEGORY_KEYS.get(cat.get("key"))
+    return cat if isinstance(cat, str) else None
+
+
 def create_statuses(client: JiraClient, project_id: str,
                     names: list[str]) -> tuple[list[dict] | None, str]:
     """POST /statuses on a company-managed project: scope GLOBAL (kb §2
-    Q1 — PROJECT is the team-managed scope), category In Progress. Jira has
-    three categories (To Do, In Progress, Done) and both statuses are In
-    Progress, so the unchanged pull-back maps them onto canonical
-    `in-progress` by category; mapping them onto canonical `blocked` is
-    left to Stories 31.5/31.7. Only the returned entries that carry a
+    Q1 — PROJECT is the team-managed scope), each name in its
+    `STATUS_CATEGORY`: the two setup statuses In Progress (the pull-back
+    maps them onto canonical `blocked` by name), `DNI` Done (DW-95; mapped
+    onto `dropped` by name). Only the returned entries that carry a
     requested name count as created."""
     body = {"scope": {"type": "GLOBAL"},
-            "statuses": [{"name": n, "statusCategory": "IN_PROGRESS",
+            "statuses": [{"name": n,
+                          "statusCategory": STATUS_CATEGORY.get(
+                              n, "IN_PROGRESS"),
                           "description": "tk-studio template status"}
                          for n in names]}
     status, data = client.request("POST", "/statuses", body,
@@ -1429,6 +1509,30 @@ def find_workflow(client: JiraClient, project_key: str) -> tuple[dict | None, st
                   f"(of {len(values)} the search returned) — none updated")
 
 
+def find_workflow_version(client: JiraClient,
+                          project_key: str) -> tuple[dict | None, str]:
+    """(version, note): the `version` of the workflow named exactly as
+    `find_workflow`'s, read from `GET /workflows/search` (DW-107: the
+    legacy `/workflow/search` carries none; the update needs it). This
+    fixes the version only; the rest of the update body shape is ungraded
+    (kb §2 Q1) pending the operator's attended `plansync setup` rerun.
+    None and a note when none or several match exactly."""
+    wanted = WORKFLOW_NAME.format(key=project_key)
+    values = _paged_values(client, "/workflows/search",
+                           {"queryString": project_key},
+                           scope=SCOPE_CONFIGURATION)
+    exact = [w for w in values if w.get("name") == wanted]
+    if len(exact) == 1 and exact[0].get("version") is not None:
+        return exact[0]["version"], ""
+    return None, (f"{len(exact)} workflows named exactly {wanted!r} carry a "
+                  f"version in GET /workflows/search (of {len(values)} it "
+                  f"returned) — none updated")
+
+
+def _is_type(tr: dict, kind: str) -> bool:
+    return str(tr.get("type") or "").upper() == kind
+
+
 def has_resolution_transition(workflow: dict, blocked_id: str,
                               resolved_id: str) -> bool:
     for tr in workflow.get("transitions") or []:
@@ -1438,21 +1542,62 @@ def has_resolution_transition(workflow: dict, blocked_id: str,
     return False
 
 
-def add_resolution_transition(client: JiraClient, workflow: dict,
-                              blocked_id: str,
-                              resolved_id: str) -> tuple[bool, str]:
-    """The workflow update: both statuses on the workflow and the
-    `Blocked - Awaiting User` -> `Block Resolved` transition."""
+def has_global_transition(workflow: dict, to_id: str) -> bool:
+    """A GLOBAL transition (any type spelling) into `to_id`."""
+    return any(_is_type(tr, "GLOBAL") and str(tr.get("to")) == str(to_id)
+               for tr in workflow.get("transitions") or [])
+
+
+def workflow_transitions(workflow: dict, have: dict[str, dict]
+                         ) -> list[tuple[str, dict, bool]]:
+    """`(label, transition, present)` for every transition the template
+    needs on the workflow (DW-107): DIRECTED `Blocked - Awaiting User` ->
+    `Block Resolved`, and a GLOBAL (`from: []`) transition into the To
+    Do-category status, `Blocked - Awaiting User` and `DNI`. A status not in
+    `have` is skipped. The workflow is complete when every one is present."""
+    ids = {n: str(e.get("id")) for n, e in have.items()}
+    out: list[tuple[str, dict, bool]] = []
+    if BLOCKED_STATUS in ids and RESOLVED_STATUS in ids:
+        out.append((f"transition {BLOCKED_STATUS} -> {RESOLVED_STATUS}",
+                    {"name": RESOLVED_STATUS, "type": "DIRECTED",
+                     "from": [ids[BLOCKED_STATUS]],
+                     "to": ids[RESOLVED_STATUS]},
+                    has_resolution_transition(workflow, ids[BLOCKED_STATUS],
+                                              ids[RESOLVED_STATUS])))
+    for slot in (TODO_STATUS, BLOCKED_STATUS, DNI_STATUS):
+        if slot not in ids:
+            continue
+        name = have[slot].get("name") or slot
+        out.append((f"global transition -> {name}",
+                    {"name": name, "type": "GLOBAL", "from": [],
+                     "to": ids[slot]},
+                    has_global_transition(workflow, ids[slot])))
+    return out
+
+
+def update_workflow(client: JiraClient, workflow: dict, version,
+                    status_ids: list[str],
+                    transitions: list[dict]) -> tuple[bool, str]:
+    """The workflow update (DW-107): `status_ids` on the workflow, the
+    existing transitions with their types uppercased (the legacy search
+    spells them `initial` / `directed` / `global`) plus `transitions`, and
+    the `version` from `GET /workflows/search`. It fixes the type case and
+    the version; the rest of the body shape is ungraded (kb §2 Q1) pending
+    the operator's attended `plansync setup` rerun."""
     ident = workflow.get("id") or {}
     on_flow = {str(s.get("id")) for s in workflow.get("statuses") or []}
     statuses = [{"statusReference": sid}
-                for sid in sorted(on_flow | {str(blocked_id), str(resolved_id)})]
+                for sid in sorted(on_flow | {str(i) for i in status_ids})]
+    existing = []
+    for tr in workflow.get("transitions") or []:
+        tr = dict(tr)
+        if tr.get("type"):
+            tr["type"] = str(tr["type"]).upper()
+        existing.append(tr)
     body = {"workflows": [{
-        "id": ident.get("entityId"), "version": workflow.get("version"),
+        "id": ident.get("entityId"), "version": version,
         "statuses": statuses,
-        "transitions": list(workflow.get("transitions") or []) + [{
-            "name": RESOLVED_STATUS, "type": "DIRECTED",
-            "from": [str(blocked_id)], "to": str(resolved_id)}]}]}
+        "transitions": existing + list(transitions)}]}
     status, data = client.request("POST", "/workflows/update", body,
                                   scope=SCOPE_CONFIGURATION)
     if status not in (200, 201, 204):

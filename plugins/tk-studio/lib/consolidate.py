@@ -53,6 +53,19 @@ SEVERITY = {
     "report": "Medium",
 }
 
+# The single-machine drift remedy: the skills_plane folder-and-roster guided
+# fix (FIX_UPDATE / FIX_INSTALL / FIX_SHADOWED) condensed to fit one ledger
+# cell un-truncated (_cell's 200-char bound). The path is a code span so a
+# rendered ledger shows <home> literally instead of hiding it as an HTML tag.
+DRIFT_FIX = ("run the guided fix on the affected machine: tk-studio update or "
+             "install (writes the skills-dir plugin folder "
+             "`<home>/skills/tk-studio/` at the roster's version); remove a "
+             "marketplace copy shadowing it")
+# Retired tool-written drift fix: still recognised as tool-written so old
+# ledger rows upgrade to the current fix, never emitted.
+LEGACY_DRIFT_FIX = ("run the guided fix on the affected machine (tk install / "
+                    "/plugin marketplace update)")
+
 DISTRIBUTION_FIX = ("revise the distribution mechanism (AD-1/O1 revision "
                     "channel — repeated {what} across machines)")
 
@@ -243,9 +256,7 @@ def describe(key: tuple, members: list[dict]) -> dict:
         eva = ("Expected: installed planes match the pins on every machine "
                "(AD-13). Actual: drift reported"
                + (f" — {detail}" if detail else ""))
-        fixes = ("run the guided fix on the affected machine (tk install / "
-                 "/plugin marketplace update)",
-                 DISTRIBUTION_FIX.format(what="drift"))
+        fixes = (DRIFT_FIX, DISTRIBUTION_FIX.format(what="drift"))
         fix = fixes[1] if multi else fixes[0]
     elif category == "onboarding-failure":
         stage = key[1]
@@ -273,8 +284,11 @@ def describe(key: tuple, members: list[dict]) -> dict:
                f"report): {description}")
         fixes = ("",)
         fix = fixes[0]
+    machine_fixes = [_cell(f) for f in fixes]
+    if category == "drift":
+        machine_fixes.append(_cell(LEGACY_DRIFT_FIX))
     return {"title": _cell(title), "expected_vs_actual": _cell(eva, 300),
-            "fix": _cell(fix), "machine_fixes": [_cell(f) for f in fixes],
+            "fix": _cell(fix), "machine_fixes": machine_fixes,
             "severity": SEVERITY[category]}
 
 

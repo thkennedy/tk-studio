@@ -157,6 +157,21 @@ class ConsolidateTest(unittest.TestCase):
         fix = result["created"][0]["fix_candidate"]
         self.assertIn("guided fix", fix, "single machine: guided fix, not "
                                          "a distribution revision")
+        # DW-11: the folder-and-roster guided fix, never the retired flow
+        self.assertEqual(fix, consolidate.DRIFT_FIX)
+        self.assertLessEqual(len(fix), 200, "fits one ledger cell")
+        self.assertFalse(fix.endswith("…"), "never truncated")
+        self.assertIn("tk-studio update", fix)
+        self.assertIn("install", fix)
+        self.assertIn("<home>/skills/tk-studio/", fix)
+        self.assertIn("`<home>/skills/tk-studio/`", fix,
+                      "code span keeps <home> visible in a rendered table")
+        self.assertIn("roster's version", fix)
+        self.assertIn("marketplace copy shadowing", fix)
+        self.assertNotIn("/plugin marketplace update", fix)
+        self.assertNotIn("tk install", fix)
+        self.assertEqual(self._rows()["ISS-001"][6], fix,
+                         "the ledger cell holds the whole fix")
 
         self._write("bob-m2.jsonl", [
             _env("drift-detection", {"result": "drift", "planes": []},
@@ -167,6 +182,45 @@ class ConsolidateTest(unittest.TestCase):
         row = self._rows()["ISS-001"]
         self.assertIn("revise the distribution mechanism", row[6])
         self.assertIn("alice-m1+bob-m2", row[5], "evidence names both sources")
+
+    def test_legacy_drift_fix_upgrades_to_the_current_guided_fix(self):
+        self._write("alice-m1.jsonl", [
+            _env("drift-detection", {"result": "drift", "planes": []})])
+        consolidate.consolidate(self.repo)
+        text = self.ledger.read_text(encoding="utf-8")
+        self.assertIn(consolidate.DRIFT_FIX, text)
+        # a ledger written before DW-11 holds the retired tool-written fix
+        self.ledger.write_text(
+            text.replace(consolidate.DRIFT_FIX, consolidate.LEGACY_DRIFT_FIX),
+            encoding="utf-8")
+        self.assertEqual(self._rows()["ISS-001"][6],
+                         consolidate.LEGACY_DRIFT_FIX)
+
+        result = consolidate.consolidate(self.repo)
+
+        self.assertEqual(result["updated"], ["ISS-001"])
+        row = self._rows()["ISS-001"]
+        self.assertEqual(row[6], consolidate.DRIFT_FIX,
+                         "the retired text is tool-written, so it upgrades")
+        self.assertNotIn("/plugin marketplace update",
+                         self.ledger.read_text(encoding="utf-8"))
+
+    def test_legacy_drift_fix_upgrades_to_distribution_fix_across_machines(self):
+        self._write("alice-m1.jsonl", [
+            _env("drift-detection", {"result": "drift", "planes": []})])
+        consolidate.consolidate(self.repo)
+        text = self.ledger.read_text(encoding="utf-8")
+        self.ledger.write_text(
+            text.replace(consolidate.DRIFT_FIX, consolidate.LEGACY_DRIFT_FIX),
+            encoding="utf-8")
+        self._write("bob-m2.jsonl", [
+            _env("drift-detection", {"result": "drift", "planes": []},
+                 ts="2026-08-04T10:00:00+00:00", user="bob", machine="m2")])
+
+        consolidate.consolidate(self.repo)
+
+        self.assertIn("revise the distribution mechanism",
+                      self._rows()["ISS-001"][6])
 
     # --- idempotence, id allocation, refusals
 

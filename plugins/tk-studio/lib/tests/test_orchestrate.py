@@ -163,6 +163,19 @@ class OrchestrateTestCase(unittest.TestCase):
         self.assertEqual((route["name"], route["kind"], route["status"]),
                          ("my-reviewer", "skill", "installed"))
 
+    def test_shipped_plugin_skill_routes_as_installed(self):
+        # DW-72: a skill the tk-studio plugin itself ships is in the inventory
+        self._store_with_role("developer")
+        self._confirmed_set(resources=("gds-engine-godot-4",))
+        result = self._resolve()
+        route = result["routes"][0]
+        self.assertEqual((route["name"], route["kind"], route["status"]),
+                         ("gds-engine-godot-4", "skill", "installed"))
+        self.assertIn("path", route)
+        self.assertIn("description", route)
+        self.assertFalse(any("not in the inventory" in n
+                             for n in result["notes"]))
+
     # --- addressing: display_name rides along from the store (never the role)
 
     def _store_with_display_name(self, role="developer", name="Tim-Senpai"):
