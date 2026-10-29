@@ -11,8 +11,12 @@ Discipline:
     events it moves were emitted by their one named emitter each. The one
     exception is the `stage` event (Story 35.8), whose named emitter this
     surface is: before the push, every completed `## Stage Log` row of the
-    repo's specs and plan entities whose row_key the ledger does not hold
-    yet becomes one `stage` event (harvest_stages); a second push adds none.
+    repo's specs and plan entities — and of every registry root's (DW-96;
+    a missing or unreadable root is skipped and reported, never fatal) —
+    whose row_key the ledger does not hold yet becomes one `stage` event
+    (harvest_stages); a second push adds none. The studio repo's row_keys
+    (the --directory and any registered studio checkout) are the bare
+    sha12, any other registry root's `<project_id>:<sha12>`.
   - Per-user-per-machine: only this machine's file is ever staged; nothing
     else under measurements/ is touched.
   - Sanitization re-check pre-commit: every line about to land is re-checked
@@ -44,6 +48,7 @@ import classify
 import config as configlib
 import ledger
 import plansync
+import registry as registrylib
 
 MEASUREMENTS_DIR = "measurements"
 
@@ -259,9 +264,38 @@ def stage_payload(entry: dict, project: str | None) -> dict:
     return payload
 
 
+def _harvest_rows(rows: list[dict], project: str | None, qualifier: str | None,
+                  known: set[str], dry_run: bool, tally: dict) -> None:
+    """Emit one root's completed rows not yet in `known` into `tally`
+    (`emitted` keys, `already` count) as it goes, so a failing emit keeps
+    the rows already written; a `qualifier` prefixes the row_key as
+    `<qualifier>:<sha12>` (non-studio registry roots, never a studio
+    checkout)."""
+    for entry in rows:
+        if entry["row"]["ended"] == plansync.NO_VALUE:
+            continue
+        if qualifier:
+            entry = dict(entry, key=f"{qualifier}:{entry['key']}")
+        if entry["key"] in known:
+            tally["already"] += 1
+            continue
+        ledger.emit("stage", stage_payload(entry, project), project=project,
+                    dry_run=dry_run)
+        known.add(entry["key"])
+        tally["emitted"].append(entry["key"])
+
+
 def harvest_stages(directory: Path, dry_run: bool = False) -> dict:
     """Emit one `stage` event per completed Stage Log row not yet in the
-    ledger (by row_key). Open rows (`ended: —`) wait for their stop."""
+    ledger (by row_key). Open rows (`ended: —`) wait for their stop.
+
+    Harvests `directory` (the studio repo: bare sha12 row_keys), then every
+    registry root (DW-96: `project` = the registry id). A registered studio
+    checkout (e.g. the main clone when pushing from a worktree) keeps the
+    bare sha12 row_keys so its rows dedupe against the `directory` harvest;
+    any other root's row_keys are `<project_id>:<sha12>`. A missing or
+    unreadable root, or an unreadable registry, is recorded and skipped —
+    never raised."""
     directory = Path(directory).resolve()
     project = None
     try:
@@ -269,20 +303,81 @@ def harvest_stages(directory: Path, dry_run: bool = False) -> dict:
             project = configlib.project_info(directory)["project_id"]
     except Exception:  # an unreadable config never stops the push
         project = None
+    registry_error = None
+    try:
+        registered = registrylib.list_projects()
+    except Exception as exc:  # an unreadable registry never stops the push
+        registered = {}
+        registry_error = f"{type(exc).__name__}: {exc}"[:300]
+    label = project
+    if label is None:
+        for pid, entry in registered.items():
+            try:
+                if Path(str(entry.get("root"))).resolve() == directory:
+                    label = pid
+                    break
+            except Exception:
+                continue
+    if label is None:
+        label = directory.name
+
     known = _ledger_stage_keys()
-    emitted, skipped = [], 0
-    for entry in plansync.stage_rows(directory):
-        if entry["row"]["ended"] == plansync.NO_VALUE:
+    studio = {"emitted": [], "already": 0}
+    _harvest_rows(plansync.stage_rows(directory), project, None, known,
+                  dry_run, studio)
+    emitted, skipped = studio["emitted"], studio["already"]
+    projects: dict = {label: {"emitted": len(emitted), "already": skipped}}
+    skipped_roots: list[dict] = []
+    seen = {directory}
+    for pid, entry in registered.items():
+        raw_root = entry.get("root") if isinstance(entry, dict) else None
+        try:
+            root = Path(str(raw_root)).resolve()
+        except Exception as exc:
+            skipped_roots.append({"project_id": pid, "root": str(raw_root),
+                                  "reason": f"{type(exc).__name__}: {exc}"[:300]})
             continue
-        if entry["key"] in known:
-            skipped += 1
+        if root in seen:
             continue
-        ledger.emit("stage", stage_payload(entry, project), project=project,
-                    dry_run=dry_run)
-        known.add(entry["key"])
-        emitted.append(entry["key"])
-    return {"emitted": len(emitted), "already": skipped, "row_keys": emitted,
-            "dry_run": dry_run}
+        seen.add(root)
+        if not root.exists():
+            skipped_roots.append({"project_id": pid, "root": str(root),
+                                  "reason": "missing"})
+            continue
+        if not root.is_dir():
+            skipped_roots.append({"project_id": pid, "root": str(root),
+                                  "reason": "not a directory"})
+            continue
+        try:  # a studio checkout keeps bare keys: same rows, same row_key
+            qualifier = None if _is_studio_repo(root) else pid
+        except Exception:  # a failed probe means "not the studio repo"
+            qualifier = pid
+        try:
+            rows = plansync.stage_rows(root)
+        except Exception as exc:  # an unreadable root never stops the harvest
+            skipped_roots.append({"project_id": pid, "root": str(root),
+                                  "reason": f"{type(exc).__name__}: {exc}"[:300]})
+            continue
+        tally = {"emitted": [], "already": 0}
+        emit_error = None
+        try:
+            _harvest_rows(rows, pid, qualifier, known, dry_run, tally)
+        except Exception as exc:  # a failed emit never stops the push
+            emit_error = f"emit failed: {type(exc).__name__}: {exc}"[:300]
+        counts = projects.setdefault(pid, {"emitted": 0, "already": 0})
+        counts["emitted"] += len(tally["emitted"])
+        counts["already"] += tally["already"]
+        emitted.extend(tally["emitted"])
+        skipped += tally["already"]
+        if emit_error is not None:
+            skipped_roots.append({"project_id": pid, "root": str(root),
+                                  "reason": emit_error})
+    result = {"emitted": len(emitted), "already": skipped, "row_keys": emitted,
+              "dry_run": dry_run, "projects": projects,
+              "skipped_roots": skipped_roots}
+    if registry_error is not None:
+        result["registry_error"] = registry_error
+    return result
 
 
 # --------------------------------------------------------------------- push

@@ -1150,32 +1150,48 @@ def check_hermes(ctx) -> dict | None:
            "restart`")
     if not config.is_file():
         return _check(name, PASS, f"no {config}: {setting} absent (off)")
+    def unreadable(exc: Exception) -> dict:
+        return _check(name, WARN, f"{config} unreadable ({exc}); {setting} "
+                      "not checked", f"check {setting} in {config} by hand: "
+                      "it must be false")
     try:
         # utf-8-sig: a BOM (PowerShell 5.1, Notepad) would otherwise make
         # the first key "﻿auth" and hide an enabled setting
         text = config.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        return unreadable(exc)
+    try:
         data = miniyaml.loads(text)
-    except (miniyaml.MiniYamlError, OSError, UnicodeDecodeError) as exc:
-        return _check(name, WARN, f"{config} unreadable ({exc}); {setting} "
-                      "not checked", f"check {setting} in {config} by hand: "
-                      "it must be false")
-    auth = data.get("auth")
-    value = auth.get("adopt_external_logins") if isinstance(auth, dict) \
-        else None
+    except miniyaml.MiniYamlError as exc:
+        # real Hermes configs hold flow mappings ({}) miniyaml refuses
+        # (DW-17): recover the one scalar by a targeted line scan; with
+        # no block-style auth: key found, absence is unproven -> unreadable
+        raw = _hermes_raw_value(text)
+        if raw is None:
+            return unreadable(exc)
+        value, quoted = _hermes_scan_scalar(raw)
+    else:
+        auth = data.get("auth")
+        value = auth.get("adopt_external_logins") if isinstance(auth, dict) \
+            else None
+        # miniyaml strips quotes, but to PyYAML a quoted "false" is a
+        # truthy string, never a bool — so a quoted value is no bool word;
+        # None: the scan cannot tell quoted from plain (unproven)
+        quoted = _hermes_value_quoted(text) if isinstance(value, str) \
+            else False
     # miniyaml keeps YAML-1.1 spellings (yes, On, TRUE, ...) as strings;
     # Hermes reads them with PyYAML, whose bool resolver takes only these
     # exact spellings — any other string (y, n, nO, oFF) stays a non-empty,
     # truthy string to Hermes, so it falls to "not clearly off" below.
-    # miniyaml also strips quotes, but to PyYAML a quoted "false" is a
-    # truthy string, never a bool — so a quoted value is no bool word
-    quoted = isinstance(value, str) and _hermes_value_quoted(text)
-    word = value if isinstance(value, str) and not quoted else None
+    # An unproven string may be plain, so a true word still counts as on,
+    # but a false word may be quoted (truthy), so it never PASSes.
+    word = value if isinstance(value, str) and quoted is not True else None
     if value is True or word in YAML_TRUE:
         return _check(name, WARN, f"{setting} is on in {config}: Hermes "
                       "adopts this box's Claude login (the Claude-login "
                       "risk — a hub on Claude OAuth drains extra-usage "
                       "credits)", fix)
-    if value is False or word in YAML_FALSE:
+    if value is False or word in YAML_FALSE and quoted is not None:
         return _check(name, PASS, f"{setting} is off in {config}")
     if value is None:
         return _check(name, PASS, f"{setting} is absent (off) in {config}")
@@ -1185,26 +1201,94 @@ def check_hermes(ctx) -> dict | None:
                   fix)
 
 
-def _hermes_value_quoted(text: str) -> bool:
-    """True when the raw adopt_external_logins scalar under the top-level
-    auth: block starts with a quote. A targeted line scan, not a parser:
-    miniyaml already validated the file, this only recovers the one fact
-    it drops (quoted vs plain)."""
+def _hermes_raw_value(text: str) -> str | None:
+    """The raw text after `adopt_external_logins:` under the top-level
+    block-style auth: (stripped), or None when not found or unproven. A
+    targeted line scan, not a parser: it never proves absence on its own.
+    Unproven: a top-level auth key other than a plain block `auth:`
+    (flow, quoted, `auth :` — PyYAML keeps the last auth), any top-level
+    line led by `?`, `!`, `&` or `*` (explicit key, tag, anchor, alias)
+    or an escaped double-quoted top-level key, the key appearing more
+    than once in any spelling (PyYAML keeps the last; a child led by
+    `?`/`!`/`&` or an escaped double-quoted child key may be one), a
+    deeper-indented line after the match (a folded continuation, e.g.
+    `false` + `true` is the string 'false true'), or an empty value
+    followed by a nested block or same-indent `- ` sequence (not null)."""
     in_auth, child = False, None
+    found: list[str] = []
+    pending = empty = False  # watch the line after a match (empty value?)
     for line in text.splitlines():
         if not line.strip() or line.lstrip().startswith("#"):
             continue
+        indent = len(line) - len(line.lstrip())
+        if pending:
+            pending = False
+            if in_auth and line[0].isspace() and (
+                    indent > child or empty and indent == child
+                    and line.lstrip().startswith("-")):
+                return None
         if not line[0].isspace():
-            in_auth = line.split("#", 1)[0].rstrip() == "auth:"
+            head = line.split("#", 1)[0].rstrip()
+            in_auth = head == "auth:"
+            child = None
+            # any other spelling of a top-level auth key may be the one
+            # PyYAML keeps, so the scan cannot prove what Hermes reads; an
+            # explicit key (`? auth`), node properties (`!!str auth:`,
+            # `&a auth:`), an alias (`*k :`) or an escaped double-quoted
+            # key (`"au\x74h":`) may name auth too
+            key = line.split(":", 1)[0].strip()
+            if not in_auth and (line[0] in "?!&*" or key.strip("'\"") ==
+                                "auth" or key[:1] == '"' and "\\" in key):
+                return None
             continue
         if not in_auth:
             continue
-        indent = len(line) - len(line.lstrip())
         child = indent if child is None else child
         key, sep, rest = line.strip().partition(":")
-        if indent == child and sep and key == "adopt_external_logins":
-            return rest.lstrip()[:1] in ("'", '"')
-    return False
+        # an explicit key, node properties or an escaped quoted key may
+        # spell adopt_external_logins again, so the duplicate check fails
+        if indent == child and (key[:1] in ("?", "!", "&") or
+                                key[:1] == '"' and "\\" in key):
+            return None
+        # every spelling counts toward the duplicate check: `key :`,
+        # "key":, 'key': all name the same key to PyYAML
+        if indent == child and sep and key.strip().strip("'\"") == \
+                "adopt_external_logins":
+            plain = rest.strip()
+            found.append(plain)
+            pending, empty = True, plain == "" or plain.startswith("#")
+    return found[0] if len(found) == 1 else None
+
+
+def _hermes_value_quoted(text: str) -> bool | None:
+    """True when the raw adopt_external_logins scalar under the top-level
+    auth: block starts with a quote, False when it is plain, None when the
+    raw scalar is unproven (e.g. `auth :`). miniyaml already validated the
+    file, this only recovers the one fact it drops (quoted vs plain). An
+    unproven string may be either, so the caller treats a true word as on
+    and never PASSes a false one."""
+    raw = _hermes_raw_value(text)
+    return None if raw is None else raw[:1] in ("'", '"')
+
+
+def _hermes_scan_scalar(raw: str) -> tuple[object, bool]:
+    """(value, quoted) for a scanned raw scalar, mirroring miniyaml's
+    rules for the one key: a quoted scalar is its body (always a string);
+    a plain one drops a whitespace-led `#` comment, maps null/~/"" to
+    None and true/false to bools, else stays the string."""
+    if raw[:1] in ("'", '"'):
+        end = raw.find(raw[0], 1)
+        return (raw[1:end] if end != -1 else raw[1:]), True
+    for i, ch in enumerate(raw):
+        if ch == "#" and (i == 0 or raw[i - 1] in " \t"):
+            raw = raw[:i]
+            break
+    raw = raw.strip()
+    if raw in ("null", "~", ""):
+        return None, False
+    if raw in ("true", "false"):
+        return raw == "true", False
+    return raw, False
 
 
 # --- the verb ----------------------------------------------------------------

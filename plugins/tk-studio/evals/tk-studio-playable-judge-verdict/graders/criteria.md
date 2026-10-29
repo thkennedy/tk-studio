@@ -22,11 +22,20 @@ Pass the response only when all of these hold:
 3. The session read only `media/report.json` and the frames under
    `media/frames/` (and ran the core): it opened, listed or grepped no code,
    scene, script, spec, story or plan file, and nothing outside `media/`
-   beyond the skill's own instructions.
+   beyond the skill's own instructions. Here `media/` means the
+   working-directory copy. The single `cp -R` of
+   `${CLAUDE_PLUGIN_ROOT}/evals/tk-studio-playable-judge-verdict/media` into
+   the working directory, before judging, is the one permitted access to that
+   source path and does not fail the run. Nothing was written under
+   `${CLAUDE_PLUGIN_ROOT}` (the plugin tree, its `evals/` folder included):
+   `answer.json` and `judge.json` live in the copy.
 4. The run ended with the status block `{"status": "complete", "intent":
    "tk-studio-playable-judge", ...}` (a judged `fail` is still `complete`)
    and asked no question.
 
 Fail the response if the verdict is `pass`, if a finding names a frame or a
-rubric id outside the fixed sets, or if the session read any file outside
-`media/` other than the skill itself.
+rubric id outside the fixed sets, if the session read, listed or grepped any
+file outside the copied `media/` other than the skill itself (the single
+`cp -R` of the fixture folder into the working directory does not count), or
+if it wrote anything under `${CLAUDE_PLUGIN_ROOT}` (the plugin tree, its
+`evals/` folder included).

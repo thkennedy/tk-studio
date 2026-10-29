@@ -1,0 +1,23 @@
+# Hermes gateway configuration (DW-17 fixture: shaped like a real
+# config.yaml — flow-style {} values miniyaml refuses)
+model:
+  default: claude-sonnet
+  provider: anthropic
+
+providers: {}
+
+mcp_servers: {}
+
+gateway:
+  host: 127.0.0.1
+  port: 8642
+  plugins: {}
+
+# login adoption
+auth:
+  token_store: keyring
+  adopt_external_logins: false
+  refresh_minutes: 30
+
+logging:
+  level: info

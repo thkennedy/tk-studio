@@ -13,6 +13,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -24,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import ledger  # noqa: E402
 import measurepush  # noqa: E402
 import plansync  # noqa: E402
+import registry  # noqa: E402
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
@@ -402,6 +404,215 @@ class MeasurePushTest(unittest.TestCase):
         self.assertEqual((second["stage_events"]["emitted"], second["stage_events"]["already"]),
                          (0, 3))
         self.assertEqual(second["stage_events"]["row_keys"], [])
+
+    # --- DW-96: the harvest covers every registered project root
+
+    def _project_root(self, name: str, story: str = "1-1-shared") -> Path:
+        root = Path(self._tmp.name) / name
+        stories = root / "_bmad-output" / "specs" / "spec-epic-1" / "stories"
+        stories.mkdir(parents=True)
+        (stories / f"{story}-spec.md").write_text(
+            "---\ntitle: 'shared'\nstatus: 'in-progress'\n---\n\nbody\n",
+            encoding="utf-8", newline="\n")
+        plansync.stage_append(root, [
+            {"stage": "dev", "pass": 1, "started": "2026-10-28T23:41:00Z",
+             "ended": "2026-10-28T23:52:10Z", "outcome": "done"},
+            {"stage": "review", "pass": 1, "started": "2026-10-28T23:53:00Z",
+             "ended": "2026-10-29T00:03:00Z", "outcome": "clean"}], story=story)
+        return root
+
+    def _stage_events(self) -> list[dict]:
+        events = [json.loads(line) for line in self._file_on(f"origin/{self.branch}")]
+        return [e for e in events if e["event"] == "stage"]
+
+    def test_registered_roots_emit_project_qualified_events_then_none(self):
+        alpha = self._project_root("alpha")
+        beta = self._project_root("beta")
+        registry.register(alpha, "onboard", project_id="alpha")
+        registry.register(beta, "onboard", project_id="beta")
+        bare = sorted(e["key"] for e in plansync.stage_rows(alpha))
+        self.assertEqual(bare, sorted(e["key"] for e in plansync.stage_rows(beta)))
+
+        first = measurepush.push(self.repo, no_pr=True)
+        stages = first["stage_events"]
+        self.assertEqual(first["result_state"], "pushed")
+        self.assertEqual(stages["emitted"], 4)
+        self.assertEqual(stages["projects"]["alpha"], {"emitted": 2, "already": 0})
+        self.assertEqual(stages["projects"]["beta"], {"emitted": 2, "already": 0})
+        self.assertEqual(stages["skipped_roots"], [])
+        self.assertNotIn("registry_error", stages)
+        events = self._stage_events()
+        self.assertEqual(
+            sorted((e["payload"]["project"], e["payload"]["row_key"]) for e in events),
+            sorted([("alpha", f"alpha:{k}") for k in bare]
+                   + [("beta", f"beta:{k}") for k in bare]))
+        for e in events:
+            self.assertEqual(e["project"], e["payload"]["project"])
+
+        second = measurepush.push(self.repo, no_pr=True)
+        stages = second["stage_events"]
+        self.assertEqual((stages["emitted"], stages["already"]), (0, 4))
+        self.assertEqual(stages["row_keys"], [])
+        self.assertEqual(stages["projects"]["alpha"], {"emitted": 0, "already": 2})
+        self.assertEqual(stages["projects"]["beta"], {"emitted": 0, "already": 2})
+
+    def test_a_missing_registered_root_is_skipped_and_the_push_still_reports(self):
+        alpha = self._project_root("alpha")
+        gone = self._project_root("gone")
+        registry.register(alpha, "onboard", project_id="alpha")
+        registry.register(gone, "onboard", project_id="gone")
+        shutil.rmtree(gone)
+        self._emit("an event")
+        code, out = self._push_cli()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out["result_state"], "pushed")
+        stages = out["stage_events"]
+        self.assertEqual(stages["projects"]["alpha"]["emitted"], 2)
+        self.assertNotIn("gone", stages["projects"])
+        self.assertEqual([(s["project_id"], s["reason"]) for s in stages["skipped_roots"]],
+                         [("gone", "missing")])
+
+    def test_an_unreadable_registry_still_harvests_the_studio_repo(self):
+        stories = self.repo / "_bmad-output" / "specs" / "spec-epic-1" / "stories"
+        stories.mkdir(parents=True)
+        (stories / "1-1-s-spec.md").write_text(
+            "---\ntitle: 's'\nstatus: 'in-progress'\n---\n\nbody\n",
+            encoding="utf-8", newline="\n")
+        plansync.stage_append(self.repo, [
+            {"stage": "dev", "pass": 1, "started": "2026-10-28T23:41:00Z",
+             "ended": "2026-10-28T23:52:10Z", "outcome": "done"}], story="1-1-s")
+        path = registry.registry_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("registry_version: 7\nprojects: []\n", encoding="utf-8")
+        stages = measurepush.harvest_stages(self.repo, dry_run=True)
+        self.assertEqual(stages["emitted"], 1)
+        self.assertIn("registry_error", stages)
+        self.assertEqual(stages["skipped_roots"], [])
+
+    def test_a_registered_studio_repo_is_harvested_once_with_bare_keys(self):
+        stories = self.repo / "_bmad-output" / "specs" / "spec-epic-1" / "stories"
+        stories.mkdir(parents=True)
+        (stories / "1-1-s-spec.md").write_text(
+            "---\ntitle: 's'\nstatus: 'in-progress'\n---\n\nbody\n",
+            encoding="utf-8", newline="\n")
+        plansync.stage_append(self.repo, [
+            {"stage": "dev", "pass": 1, "started": "2026-10-28T23:41:00Z",
+             "ended": "2026-10-28T23:52:10Z", "outcome": "done"}], story="1-1-s")
+        _git(self.repo, "add", "-A")
+        _git(self.repo, "commit", "-q", "-m", "a spec with its Stage Log")
+        registry.register(self.repo, "onboard", project_id="studio")
+        bare = [e["key"] for e in plansync.stage_rows(self.repo)]
+
+        first = measurepush.push(self.repo, no_pr=True)
+        stages = first["stage_events"]
+        self.assertEqual(stages["emitted"], 1)
+        self.assertEqual(stages["row_keys"], bare)
+        self.assertEqual(stages["projects"], {"studio": {"emitted": 1, "already": 0}})
+        self.assertEqual([e["payload"]["row_key"] for e in self._stage_events()], bare)
+
+    def test_an_unreadable_registered_root_is_skipped_and_others_harvested(self):
+        alpha = self._project_root("alpha")
+        bad = self._project_root("bad")
+        registry.register(alpha, "onboard", project_id="alpha")
+        registry.register(bad, "onboard", project_id="bad")
+        real = plansync.stage_rows
+
+        def flaky(root):
+            if Path(root).resolve() == bad.resolve():
+                raise PermissionError("denied")
+            return real(root)
+
+        plansync.stage_rows = flaky
+        try:
+            stages = measurepush.harvest_stages(self.repo, dry_run=True)
+        finally:
+            plansync.stage_rows = real
+        self.assertEqual(stages["projects"]["alpha"], {"emitted": 2, "already": 0})
+        self.assertNotIn("bad", stages["projects"])
+        self.assertEqual(len(stages["skipped_roots"]), 1)
+        skip = stages["skipped_roots"][0]
+        self.assertEqual(skip["project_id"], "bad")
+        self.assertIn("PermissionError", skip["reason"])
+
+    def test_an_emit_failure_mid_root_keeps_the_rows_already_written(self):
+        alpha = self._project_root("alpha")
+        registry.register(alpha, "onboard", project_id="alpha")
+        real = ledger.emit
+        calls = []
+
+        def once(*args, **kwargs):
+            calls.append(args)
+            if len(calls) > 1:
+                raise OSError("disk full")
+            return real(*args, **kwargs)
+
+        ledger.emit = once
+        try:
+            stages = measurepush.harvest_stages(self.repo, dry_run=True)
+        finally:
+            ledger.emit = real
+        self.assertEqual(stages["emitted"], 1)
+        self.assertEqual(len(stages["row_keys"]), 1)
+        self.assertTrue(stages["row_keys"][0].startswith("alpha:"))
+        self.assertEqual(stages["projects"]["alpha"], {"emitted": 1, "already": 0})
+        self.assertEqual([s["project_id"] for s in stages["skipped_roots"]], ["alpha"])
+        self.assertTrue(stages["skipped_roots"][0]["reason"].startswith("emit failed: "))
+
+    def test_a_registered_second_studio_checkout_emits_bare_keys_once(self):
+        # the live shape: `push` runs from one studio checkout while another
+        # (the main clone) is registered — shared rows must not double-emit
+        stories = self.repo / "_bmad-output" / "specs" / "spec-epic-1" / "stories"
+        stories.mkdir(parents=True)
+        (stories / "1-1-s-spec.md").write_text(
+            "---\ntitle: 's'\nstatus: 'in-progress'\n---\n\nbody\n",
+            encoding="utf-8", newline="\n")
+        plansync.stage_append(self.repo, [
+            {"stage": "dev", "pass": 1, "started": "2026-10-28T23:41:00Z",
+             "ended": "2026-10-28T23:52:10Z", "outcome": "done"},
+            {"stage": "review", "pass": 1, "started": "2026-10-28T23:53:00Z",
+             "ended": "2026-10-29T00:03:00Z", "outcome": "clean"}], story="1-1-s")
+        _git(self.repo, "add", "-A")
+        _git(self.repo, "commit", "-q", "-m", "a spec with its Stage Log")
+        shared = sorted(e["key"] for e in plansync.stage_rows(self.repo))
+
+        other = Path(self._tmp.name) / "other-checkout"
+        _git(Path(self._tmp.name), "clone", "-q", str(self.repo), str(other))
+        for key, value in (("user.email", "t@example.com"), ("user.name", "T"),
+                           ("commit.gpgsign", "false"), ("core.autocrlf", "false")):
+            _git(other, "config", key, value)
+        _git(other, "remote", "set-url", "origin", str(self.origin))
+        plansync.stage_append(other, [
+            {"stage": "merge", "started": "2026-10-29T01:00:00Z",
+             "ended": "2026-10-29T01:00:00Z", "outcome": "merged"}], story="1-1-s")
+        _git(other, "add", "-A")
+        _git(other, "commit", "-q", "-m", "one more row")
+        self.assertTrue(measurepush._is_studio_repo(other))
+        extra = sorted(set(e["key"] for e in plansync.stage_rows(other)) - set(shared))
+        self.assertEqual(len(extra), 1)
+        registry.register(other, "onboard", project_id="tk-studio")
+
+        first = measurepush.push(self.repo, no_pr=True)
+        stages = first["stage_events"]
+        self.assertEqual(first["result_state"], "pushed")
+        self.assertEqual(stages["skipped_roots"], [])
+        self.assertEqual(sorted(stages["row_keys"]), sorted(shared + extra))
+        self.assertEqual(stages["projects"]["tk-studio"],
+                         {"emitted": 1, "already": 2})
+        events = self._stage_events()
+        keys = [e["payload"]["row_key"] for e in events]
+        self.assertFalse([k for k in keys if ":" in k], keys)
+        self.assertEqual(len(keys), len(set(keys)), "no row emitted twice")
+        self.assertEqual(sorted(keys), sorted(shared + extra))
+        by_key = {e["payload"]["row_key"]: e for e in events}
+        self.assertEqual(by_key[extra[0]]["payload"]["project"], "tk-studio")
+        self.assertEqual(by_key[extra[0]]["project"], "tk-studio")
+
+        again = measurepush.push(self.repo, no_pr=True)
+        self.assertEqual(again["stage_events"]["emitted"], 0)
+        from_other = measurepush.push(other, no_pr=True)
+        self.assertEqual(from_other["stage_events"]["emitted"], 0)
+        self.assertEqual(from_other["stage_events"]["row_keys"], [])
+        self.assertEqual(from_other["result_state"], "no-op")
 
 if __name__ == "__main__":
     unittest.main()

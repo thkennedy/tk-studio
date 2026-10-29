@@ -5,3 +5,9 @@ measurements/*.jsonl text eol=lf
 # The bootstrap scripts are served raw and their SHA-256 is published in the
 # README: checkout must never rewrite their bytes (Story 25.4).
 tools/installer/install.* text eol=lf
+
+# The office sprite atlas is compared byte-for-byte with the exporter's LF
+# output (test_sprites_export, export.py --check): checkout must never rewrite
+# the committed export bytes (Story 30.7).
+apps/studio-web/public/sprites/office.json text eol=lf
+apps/studio-web/public/sprites/office.png binary
