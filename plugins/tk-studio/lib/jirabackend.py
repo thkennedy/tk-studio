@@ -101,6 +101,13 @@ FROM_BACKEND_CATEGORY = {
     "new": "ready", "indeterminate": "in-progress", "done": "done",
 }
 
+# Status names the owner reserves for entries that will not be implemented
+# (DW-95: `DNI` sits in the Done category so an abandoned issue keeps its
+# history instead of being deleted). A promote into a category never lands
+# in one of these (hole 100: the project's first done-category transition
+# was `DNI`, and five landed stories went there instead of `Done`).
+DROPPED_STATUS_NAMES = frozenset({"DNI"})
+
 DEFAULT_TYPE_MAPPING = {"epic": "Epic", "story": "Story", "task": "Sub-task"}
 
 
@@ -667,15 +674,28 @@ def _transition_to_category(client: JiraClient, key: str, target: str,
     if status != 200 or not isinstance(data, dict):
         raise JiraError(f"promote: GET /issue/{key}/transitions returned "
                         f"{status}")
+    dropped_route = None
     for tr in data.get("transitions") or []:
         to = tr.get("to") or {}
-        if ((to.get("statusCategory") or {}).get("key")) == target:
-            posted, _ = client.request("POST", f"/issue/{key}/transitions",
-                                       {"transition": {"id": tr.get("id")}})
-            if posted not in (200, 204):
-                raise JiraError(f"promote: transition on {key} returned "
-                                f"{posted}")
-            return to.get("name")
+        if ((to.get("statusCategory") or {}).get("key")) != target:
+            continue
+        if to.get("name") in DROPPED_STATUS_NAMES:
+            # hole 100: a dropped-reserved status is never the pick, even
+            # when it is the first (or the only) route into the category
+            dropped_route = to.get("name")
+            continue
+        posted, _ = client.request("POST", f"/issue/{key}/transitions",
+                                   {"transition": {"id": tr.get("id")}})
+        if posted not in (200, 204):
+            raise JiraError(f"promote: transition on {key} returned "
+                            f"{posted}")
+        return to.get("name")
+    if dropped_route is not None:
+        notes.append(f"{entity_id}: {key}'s only transition into status "
+                     f"category {target!r} is the dropped status "
+                     f"{dropped_route!r} — backend status left as-is "
+                     f"(hole 100: a promote never lands in a dropped status)")
+        return None
     notes.append(f"{entity_id}: {key} has no transition into status "
                  f"category {target!r} — backend status left as-is "
                  f"(the snapshot keeps the round trip stable, AD-5)")
