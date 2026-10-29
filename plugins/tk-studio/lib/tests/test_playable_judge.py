@@ -244,8 +244,9 @@ class JudgeCoreTests(unittest.TestCase):
 
 class DriveBoundsTests(unittest.TestCase):
     """The e2e drive's own worst case (every core call, the install and the
-    suite each spent to its bound) sits below the runner's drive timeout and
-    its manifest entry's, so the drive's own timeouts always fire first."""
+    suite each spent to its bound) sits below its manifest entry's timeout
+    (hole 97: 120, not the runner's 60 s default), so the drive's own timeouts
+    always fire first."""
 
     def test_worst_case_below_the_runner_and_manifest_timeouts(self):
         conformance = Path(__file__).resolve().parents[2] / "contracts" / "conformance"
@@ -256,12 +257,14 @@ class DriveBoundsTests(unittest.TestCase):
         finally:
             sys.path.remove(str(conformance))
         worst = drive.CORE_CALLS * drive.CORE_BOUND_S + drive.INSTALL_BOUND_S + drive.BOUND_S
-        self.assertEqual(drive.RUNNER_BOUND_S, runner.DEFAULT_TIMEOUT)
-        self.assertLess(worst, runner.DEFAULT_TIMEOUT)
         manifest = json.loads((conformance / "manifest.json").read_text(encoding="utf-8"))
         entry = next(d for d in manifest["surfaces"]["tk-studio-playable-judge"]["drives"]
                      if d["argv"] == ["contracts/conformance/e2e_playable_verify.py"])
-        self.assertLess(worst, entry.get("timeout", runner.DEFAULT_TIMEOUT))
+        # hole 97: the drive budgets from its manifest timeout, which runner.py honours over
+        # DEFAULT_TIMEOUT; the two must agree, and the worst case sits under them
+        self.assertEqual(entry.get("timeout", runner.DEFAULT_TIMEOUT), drive.MANIFEST_TIMEOUT_S)
+        self.assertGreater(drive.MANIFEST_TIMEOUT_S, runner.DEFAULT_TIMEOUT)
+        self.assertLess(worst, drive.MANIFEST_TIMEOUT_S)
         # The core makes exactly CORE_CALLS judge calls, each under CORE_BOUND_S.
         real, calls = drive._core, []
         drive._core = lambda *argv: (calls.append(argv), real(*argv))[1]
