@@ -1703,7 +1703,19 @@ blocking the run or changing its state.
 alone before the push, one per completed row whose `row_key` the ledger lacks:
 `{project?, story, stage, pass?, started, ended?, session_id?, model?,
 effort?, usage? {input, output}, cost_usd?, outcome?, row_key, source?}` (no
-token-named key). **The rollup:** `lib/report.py rollup --directory <root>
+token-named key). The harvest covers the `--directory` studio repo plus every
+registry root (DW-96; a missing or unreadable root, or an unreadable registry,
+is skipped and reported under `skipped_roots` / `registry_error`, never
+fatal); `row_key` is the bare sha12 for the studio repo (the `--directory` and
+any registered studio checkout) and `<project_id>:<sha12>` for other registry
+roots; a registry root's `project` is its registry id; the result counts per
+project under `projects` (label -> `{emitted, already}`; the studio's label is
+its config `project_id`, else the matching registry id, else the directory
+name); `skipped_roots` entries are `{project_id, root, reason}`, the reason
+`missing`, `not a directory`, the read error, or `emit failed: …` (an emit
+failing partway through a root, whose partial counts stay in `projects`);
+`registry_error` is present only when the registry read fails. **The rollup:**
+`lib/report.py rollup --directory <root>
 (--story <key> | --epic <N>) [--post --id <EP-NNN>]` (also
 `tk-studio-report`'s `report.py rollup`) names per story and per epic the cycle
 time (first start to the merge's end), hands-on time (the sum of the spans,

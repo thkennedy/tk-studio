@@ -773,7 +773,8 @@ source_spec: `35-8-every-stage-leaves-a-start-and-a-stop-spec.md`
 location: plugins/tk-studio/lib/measurepush.py:300
 severity: medium
 reason: harvest_stages(directory) is called with the push's single --directory (the studio repo root); AC3 says a stage event carries each row. Deferral class (a): behaviour the criteria name.
-status: open
+status: done 2026-10-29
+resolution: resolved by sweep bundle dw-measurepush-registered-roots
 
 ### DW-97: Follow-up review still recommended for 35-8-every-stage-leaves-a-start-and-a-stop after the damping cap was spent
 origin: review-budget-followup
