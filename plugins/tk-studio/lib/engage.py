@@ -98,7 +98,9 @@ planner's quick-flow game brief and GDD (`--brief-file`, `--gdd-file`, the
 `gds-create-game-brief` Fast path and the `gds-gdd` Express path): both
 are required (`GameDocsMissing: brief | gdd`) unless `--revise-at` re-runs
 a scope already published (the record carries `scope_page`): that keeps
-whatever doc pages the record holds. On any other project
+whatever doc pages the record holds (Story 35.6: and still merges
+`game: true`, so a revise of a scope published before 34.8 gains it). On
+any other project
 either flag is `NotAGameProject`. Each lands as
 `_bmad-output/engagements/<id>/brief.md` / `gdd.md` (atomically, when it
 differs) and is published beside the scope in `Engagements/ENG-NNN` as
@@ -147,13 +149,21 @@ studio_run_id, cost_usd, pr}], stories: [{key, run_id, spec_status, pr,
 pr_state}], epics: [{job, queued}], side_exits: [{at, to, verb, reason}],
 spend {planning_usd, runs_usd}, quote, slices?}` (else
 `CloseoutInputInvalid`). Story 34.8: `slices: [{story, engine, assets,
-playable, contact_sheet?}]` (one per slice run's story, from its last
-`host-verify` event) adds a `## Slice verdicts` section after
+playable, contact_sheet?, report?, frames?}]` (one per slice run's story,
+from its own leg's `host-verify` event, Story 35.6) adds a `## Slice verdicts` section after
 `Deliverables` — one line per story, `<key> — engine <v>; assets <v>;
 playable <v>`, and its contact sheet (a host path) copied beside
 `closeout.md` as `<key>-contact-sheet.png`, embedded and uploaded to the
 page as an attachment (an unreadable sheet is a note); with no slice the
-section is absent. Each
+section is absent. Story 35.6 (CAP-13): an entry's `report?` (its own leg's
+`report.json`) and `frames?` (its sampled frames), host paths under the run
+workspace, are read the same way and written beside `closeout.md` and
+attached as `<key>-report.json` and `<key>-frame-<name>`; under the story,
+after its sheet, a `| Report | Value |` table (verdict, failed, ticks, seed,
+mode, moments, log errors; none for a report that is not a JSON object,
+a note) and the line `Frames: [<name>](<key>-frame-<name>), …;
+[report.json](<key>-report.json)`. An unreadable file is a note and is
+dropped; an entry with neither renders as in 0.1.29. Each
 `### <title>` of `scope.md`'s `## Deliverables` (no `scope.md`: `NoScope`)
 is judged against its stories (the proposed stories naming its title,
 else every proposed story; the i-th proposed epic is the i-th declared
@@ -1333,8 +1343,15 @@ def scope(project_root: Path, engagement: str, text: str | None = None,
                     rel=rel)
             if not pages:
                 # no game doc published by this call (a flagless revise of a
-                # pre-34.8 scope): `game: true` comes only with the published
-                # docs, so the record keeps whatever it holds
+                # pre-34.8 scope). Story 35.6 (hole 92): the project is a
+                # game project, so the record still gains `game: true` (its
+                # doc pages, if any, kept as they are)
+                try:
+                    _merge_record(root, engagement,
+                                  {"game": True, "updated": now or _now()})
+                except OSError as exc:
+                    raise Refused("ScopeUnwritable", f"{record_rel}: "
+                                  f"{exc.__class__.__name__}") from None
                 return page
             changes = {key: {"id": p["id"], "url": p["url"],
                              "version": p["version"]}
@@ -1755,10 +1772,31 @@ def _atomic_write_bytes(path: Path, content: bytes) -> None:
             os.unlink(tmp)
 
 
+def _file_key(text: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]", "-", str(text))
+
+
 def sheet_name(story: str) -> str:
     """Story 34.8: a slice's contact sheet beside `closeout.md` (and its
     attachment's filename on the page)."""
-    return re.sub(r"[^A-Za-z0-9._-]", "-", str(story)) + "-contact-sheet.png"
+    return _file_key(story) + "-contact-sheet.png"
+
+
+def report_name(story: str) -> str:
+    """Story 35.6: a slice leg's `report.json` beside `closeout.md` (and its
+    attachment's filename on the page)."""
+    return _file_key(story) + "-report.json"
+
+
+def frame_name(story: str, frame: str) -> str:
+    """Story 35.6: a slice leg's sampled frame beside `closeout.md`,
+    `<key>-frame-<name>` (`<name>` the frame's basename)."""
+    return _file_key(story) + "-frame-" + _frame_base(frame)
+
+
+def _frame_base(frame: str) -> str:
+    """A frame path's basename (either separator), file-safe."""
+    return _file_key(re.split(r"[\\/]", str(frame))[-1])
 
 
 def _signal_of(lines: list[str]) -> str | None:
@@ -1852,6 +1890,15 @@ def _check_closeout_input(data) -> dict:
         if sheet is not None and not _non_empty(sheet):
             raise bad(f"slices[{n}] contact_sheet must be a non-empty "
                       f"string or absent")
+        report = entry.get("report")
+        if report is not None and not _non_empty(report):
+            raise bad(f"slices[{n}] report must be a non-empty string or "
+                      f"absent")
+        frames = entry.get("frames")
+        if frames is not None and (not isinstance(frames, list) or not all(
+                _non_empty(f) for f in frames)):
+            raise bad(f"slices[{n}] frames must be a list of non-empty "
+                      f"strings or absent")
     for key in ("spend", "quote"):
         if data.get(key) is not None and not isinstance(data.get(key), dict):
             raise bad(f"'{key}' must be an object or null")
@@ -1955,14 +2002,47 @@ def closeout_outcome(verdicts: list[dict], data: dict) -> str:
     return "partial"
 
 
+def _report_value(value) -> str:
+    text = str(value) if value not in (None, "") else "—"
+    return text.replace("|", "\\|").replace("\n", " ")
+
+
+def report_table(report: dict) -> list[str]:
+    """Story 35.6 (CAP-13): a slice leg's `report.json` as the two-column
+    `| Report | Value |` table: verdict, failed, ticks, seed, mode, moments
+    and log errors."""
+    failed = report.get("failed")
+    failed = failed if isinstance(failed, dict) else {}
+    invariant, detail = failed.get("invariant"), failed.get("detail")
+    failed_text = f"{invariant or '?'}: {detail}" if detail \
+        else (invariant or None)
+    run, total = report.get("ticks_run"), report.get("ticks")
+    ticks = None if run is None and total is None else \
+        f"{'—' if run is None else run}/{'—' if total is None else total}"
+    moments = report.get("moments")
+    named = [f"{m.get('name')}@{m.get('tick')}" for m in moments
+             if isinstance(m, dict)] if isinstance(moments, list) else []
+    errors = report.get("log_errors")
+    rows = [("verdict", report.get("verdict")), ("failed", failed_text),
+            ("ticks", ticks), ("seed", report.get("seed")),
+            ("mode", report.get("mode")),
+            ("moments", ", ".join(named) or None),
+            ("log errors", len(errors) if isinstance(errors, list) else 0)]
+    return ["| Report | Value |", "| --- | --- |"] + [
+        f"| {name} | {_report_value(value)} |" for name, value in rows]
+
+
 def render_closeout(engagement: str, record: dict, data: dict,
                     verdicts: list[dict], outcome: str,
-                    meter: dict | None = None) -> str:
+                    meter: dict | None = None,
+                    reports: dict | None = None) -> str:
     """`closeout.md` (Settled shape 5): the `##` sections `Outcome`,
     `Deliverables`, `Pull requests`, `Cost per story`, `Spend`, `Quote
     against actual` and `Side exits`; Story 34.8: `Slice verdicts` after
-    `Deliverables` when `data` carries a slice."""
+    `Deliverables` when `data` carries a slice. Story 35.6: `reports` maps
+    a slice's story to its parsed `report.json` (the verdict table)."""
     meter = meter or {}
+    reports = reports or {}
     runs = data.get("runs") or []
     stories = data.get("stories") or []
     done = sum(1 for v in verdicts if v["done"])
@@ -2001,6 +2081,21 @@ def render_closeout(engagement: str, record: dict, data: dict,
             if entry.get("contact_sheet"):
                 out += [f"![{entry['story']} contact sheet]"
                         f"({sheet_name(entry['story'])})", ""]
+            # Story 35.6: the leg's report as a verdict table, then its
+            # sampled frames and the report itself (attachments on the page)
+            story = entry["story"]
+            if isinstance(reports.get(story), dict):
+                out += report_table(reports[story]) + [""]
+            links = []
+            if entry.get("frames"):
+                frame_links = ", ".join(
+                    f"[{_frame_base(f)}]({frame_name(story, f)})"
+                    for f in entry["frames"])
+                links.append(f"Frames: {frame_links}")
+            if entry.get("report"):
+                links.append(f"[report.json]({report_name(story)})")
+            if links:
+                out += ["; ".join(links), ""]
     out += ["## Pull requests", ""]
     seen = []
     for s in stories:
@@ -2145,24 +2240,65 @@ def closeout(project_root: Path, engagement: str, data, dry_run: bool = False,
         # Story 34.8: each slice's contact sheet read from its host path; an
         # unreadable one is a note, its line kept without the image
         sheets: list[tuple[str, bytes]] = []
+        # Story 35.6 (CAP-13): each slice leg's report and sampled frames,
+        # read the same way (an unreadable file is a note and is dropped),
+        # written beside closeout.md and attached with the sheet
+        reports: dict[str, dict] = {}
         if data.get("slices"):
             kept = []
             for entry in data["slices"]:
                 entry = dict(entry)
+                story = entry["story"]
                 if entry.get("contact_sheet"):
                     try:
-                        sheets.append((sheet_name(entry["story"]),
+                        sheets.append((sheet_name(story),
                                        Path(entry["contact_sheet"])
                                        .read_bytes()))
                     except OSError as exc:
                         result["notes"].append(
-                            f"contact sheet of {entry['story']} unreadable "
+                            f"contact sheet of {story} unreadable "
                             f"({exc.__class__.__name__}): not embedded")
                         entry.pop("contact_sheet")
+                if entry.get("report"):
+                    try:
+                        raw = Path(entry["report"]).read_bytes()
+                    except OSError as exc:
+                        result["notes"].append(
+                            f"report.json of {story} unreadable "
+                            f"({exc.__class__.__name__}): not attached")
+                        entry.pop("report")
+                    else:
+                        sheets.append((report_name(story), raw))
+                        try:
+                            doc = json.loads(raw.decode("utf-8-sig"))
+                        except (UnicodeDecodeError, ValueError):
+                            doc = None
+                        if isinstance(doc, dict):
+                            reports[story] = doc
+                        else:
+                            result["notes"].append(
+                                f"report.json of {story} is not a JSON "
+                                f"object: no verdict table")
+                if entry.get("frames"):
+                    frames = []
+                    for frame in entry["frames"]:
+                        try:
+                            sheets.append((frame_name(story, frame),
+                                           Path(frame).read_bytes()))
+                        except OSError as exc:
+                            result["notes"].append(
+                                f"frame {frame} of {story} unreadable "
+                                f"({exc.__class__.__name__}): not attached")
+                            continue
+                        frames.append(frame)
+                    if frames:
+                        entry["frames"] = frames
+                    else:
+                        entry.pop("frames")
                 kept.append(entry)
             data = {**data, "slices": kept}
         text = render_closeout(engagement, record, data, verdicts, outcome,
-                               meter)
+                               meter, reports)
         done = sum(1 for v in verdicts if v["done"])
         result.update({"outcome": outcome, "closeout": rel, "done": done,
                        "not_done": len(verdicts) - done})

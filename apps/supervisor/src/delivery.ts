@@ -26,14 +26,16 @@
  *                  `gh pr view --json state` (null when gh fails); `epics` the jobs the newest ok `engagement-approve`
  *                  `job` step declared against the ones queued; `side_exits` the record's `inputs[]` lines whose `to` is
  *                  `paused`, `partial`, `failed` or `cancelled`, with `detail.reason`, a payload `reason` or the verb.
- *                  Story 34.8: `slices: [{story, engine, assets, playable, contact_sheet?}]`, present only when a linked
- *                  run is a slice (`isSlice` of its resolved definition, or its last `host-verify` event carries
- *                  `assets`): one entry per story key (the run id when a run landed none; a later linked run's entry
- *                  replaces an earlier one's), every story of a run taking the verdicts of that run's last `host-verify`
- *                  event (the leg runs once per engine completion over the worktree all its stories landed in, or a
- *                  later `POST /runs/{id}/verify` re-verify; the paused-ruling `close-out` path runs no leg) (`skipped`
- *                  for a leg that skipped or recorded no step, `not run` with no event), `contact_sheet` its playable
- *                  step's sheet path on the host.
+ *                  Story 34.8: `slices: [{story, engine, assets, playable, contact_sheet?, report?, frames?}]`, present
+ *                  only when a linked run is a slice (`isSlice` of its resolved definition, or its last `host-verify`
+ *                  event carries `assets`): one entry per story key (the run id when a run landed none; a later linked
+ *                  run's entry replaces an earlier one's). Story 35.6 (CAP-13): each story takes the verdicts of its own
+ *                  leg, the latest `host-verify` event in its window (`storyLegs`: from just after the previous
+ *                  different story's `close-out` up to and including its own; the run's last story also takes the
+ *                  re-runs after its `close-out`; a key with no `close-out` the window after the last one; the
+ *                  paused-ruling `close-out` path runs no leg) (`skipped` for a leg that skipped or recorded no step,
+ *                  `not run` with no event in the window), `contact_sheet` its playable step's sheet path on the host,
+ *                  `report`/`frames` its `playable.report`/`playable.leg_frames` (paths under the run workspace).
  *                  Written to a temp file and run as `engage.py closeout --directory <served root> --engagement <id>
  *                  --input-file <path>` on the host (`uv`, timeout 300): the report, its page, the record's
  *                  `closeout`.
@@ -64,7 +66,7 @@ import { findSpec, frontmatter, jiraBound } from "./closeout";
 import { readEngagement, type Engagement } from "./engagement";
 import { canonicalPr, type EndNotice } from "./hygiene";
 import { runPr } from "./planstatus";
-import { isTerminal, servedRoot, type Queue, type QueueRun } from "./queue";
+import { isTerminal, servedRoot, type Queue, type QueueEvent, type QueueRun } from "./queue";
 import { lastJsonObject, type RunResult } from "./server";
 import { isSlice } from "./hostverify";
 import { gh, runBranch, runner, studioScript, uvRunner } from "./worktree";
@@ -89,7 +91,12 @@ export interface CloseoutInput {
   spend: { planning_usd: number; runs_usd: number };
   quote: Record<string, unknown> | null;
   /** Story 34.8: one per story of a slice run (absent when no linked run is a slice). */
-  slices?: { story: string; engine: string; assets: string; playable: string; contact_sheet?: string }[];
+  slices?: {
+    story: string; engine: string; assets: string; playable: string; contact_sheet?: string;
+    /** Story 35.6: the chosen leg's own `report.json` and sampled frames (`playable.report`, `playable.leg_frames`),
+     * paths under the run workspace; absent when the leg has none. */
+    report?: string; frames?: string[];
+  }[];
 }
 
 export interface CloseoutResult { closed: string[]; refused: string[] }
@@ -204,6 +211,35 @@ function ledgerText(deps: DeliveryDeps): string {
   try { return readFileSync(deps.ledgerFile, "utf-8"); } catch { return ""; }
 }
 
+/** Story 35.6 (CAP-13): each story key's own leg, the latest `host-verify` event's detail in its window (undefined:
+ * none). A story's window runs from just after the previous different story's `close-out` up to and including its own
+ * (the leg notes `host-verify` before the close-out it gates); the run's last story (by `close-out` order) also takes
+ * every `host-verify` after its `close-out` (the re-runs on the branch tip); a key with no `close-out` (`landedStory`,
+ * or the run id) takes the window after the run's last `close-out`. */
+export function storyLegs(events: readonly QueueEvent[], keys: readonly string[]): Map<string, Record<string, any> | undefined> {
+  const spans = new Map<string, [number, number]>();
+  let prevKey: string | null = null, prevEnd = -1, start = 0;
+  events.forEach((e, i) => {
+    const k = e.kind === "close-out" ? str(e.detail?.story_key) : null;
+    if (!k) return;
+    if (k !== prevKey) start = prevEnd + 1;
+    spans.set(k, [start, i]);
+    prevKey = k; prevEnd = i;
+  });
+  const end = events.length - 1;
+  if (prevKey) spans.set(prevKey, [spans.get(prevKey)![0], end]);
+  const out = new Map<string, Record<string, any> | undefined>();
+  for (const key of keys) {
+    const [from, to] = spans.get(key) ?? [prevEnd + 1, end];
+    let leg: Record<string, any> | undefined;
+    for (let i = to; i >= from; i--) {
+      if (events[i]!.kind === "host-verify") { leg = (events[i]!.detail ?? undefined) as Record<string, any> | undefined; break; }
+    }
+    out.set(key, leg);
+  }
+  return out;
+}
+
 /** The composition the lib renders (see the header). */
 export async function composeCloseout(queue: Queue, deps: DeliveryDeps, t: Target, record: Engagement, last: QueueRun): Promise<CloseoutInput> {
   const project = record.project, id = t.engagement;
@@ -233,16 +269,22 @@ export async function composeCloseout(queue: Queue, deps: DeliveryDeps, t: Targe
     }
     const landed = landedStory(queue, run);
     if (landed && !keys.includes(landed)) keys.push(landed);
-    // Story 34.8: the slice's verdicts per story: every story of the run takes the run's LAST `host-verify` event.
-    // The paused-ruling `close-out` path runs no host leg; the leg runs once per engine completion (over the worktree
-    // all the run's stories landed in) and on each `POST /runs/{id}/verify`, so the latest leg is the run's verdict.
+    // Story 34.8: the slice's verdicts per story. Story 35.6 (CAP-13): each story takes its OWN leg, the latest
+    // `host-verify` event in its window (`storyLegs`), never the run's last; a window with none reads `not run`.
     // One entry per story key: a later linked run's replaces an earlier one's.
-    const hv = events.findLast((e) => e.kind === "host-verify")?.detail as Record<string, any> | undefined;
-    if (isSlice(queue.definition(run)) || isObject(hv?.assets)) {
-      for (const story of keys.length ? keys : [run.run_id]) {
+    const lastLeg = events.findLast((e) => e.kind === "host-verify")?.detail as Record<string, any> | undefined;
+    if (isSlice(queue.definition(run)) || isObject(lastLeg?.assets)) {
+      const legs = storyLegs(events, keys.length ? keys : [run.run_id]);
+      for (const [story, hv] of legs) {
         const verdict = (step: unknown) => (isObject(step) && typeof step.verdict === "string" ? step.verdict : hv ? "skipped" : "not run");
-        const sheet = isObject(hv?.playable) && typeof hv!.playable.contact_sheet === "string" && hv!.playable.contact_sheet ? hv!.playable.contact_sheet as string : undefined;
-        slices.set(story, { story, engine: verdict(hv?.engine), assets: verdict(hv?.assets), playable: verdict(hv?.playable), ...(sheet ? { contact_sheet: sheet } : {}) });
+        const p = isObject(hv?.playable) ? hv!.playable as Record<string, unknown> : undefined;
+        const sheet = str(p?.contact_sheet) ? p!.contact_sheet as string : undefined;
+        const report = str(p?.report) ? p!.report as string : undefined;
+        const frames = Array.isArray(p?.leg_frames) ? (p!.leg_frames as unknown[]).filter((f): f is string => !!str(f)) : [];
+        slices.set(story, {
+          story, engine: verdict(hv?.engine), assets: verdict(hv?.assets), playable: verdict(hv?.playable),
+          ...(sheet ? { contact_sheet: sheet } : {}), ...(report ? { report } : {}), ...(frames.length ? { frames } : {}),
+        });
       }
     }
     for (const key of keys) {

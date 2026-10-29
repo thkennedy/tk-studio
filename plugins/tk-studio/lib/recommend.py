@@ -131,7 +131,8 @@ def _mcp_status(root: Path, name: str) -> str:
     """`configured` when the project's .mcp.json has mcpServers.<name>, else
     `not-configured` (an absent or unreadable file included). Pure read."""
     try:
-        data = json.loads((root / MCP_JSON_NAME).read_text(encoding="utf-8"))
+        # Story 35.6 (hole 92): a BOM-led .mcp.json reads (as engine_pin.py does)
+        data = json.loads((root / MCP_JSON_NAME).read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return "not-configured"
     servers = data.get("mcpServers") if isinstance(data, dict) else None
@@ -378,7 +379,7 @@ def record_mcp(project_root: Path, name: str, dry_run: bool = False,
     text = None
     data: dict = {}
     if target.is_file():
-        text = target.read_text(encoding="utf-8")
+        text = target.read_text(encoding="utf-8-sig")  # Story 35.6: a BOM reads
         try:
             loaded = json.loads(text)
         except ValueError as exc:

@@ -53,7 +53,8 @@
 // SceneWaitFrames physics frames, the run fails with invariant "scene").
 // Each physics tick it applies the tick's inputs (Input.ParseInputEvent with
 // an InputEventAction), evaluates the invariants from their from_tick on, and
-// every capture_every ticks (and at each moment's tick) saves the viewport
+// every capture_every ticks (and at each moment's tick; a moment at tick >=
+// --ticks on the last tick, its report frame looked up there) saves the viewport
 // (the active camera's view) to <out>/frames/<tick:D6>.png, taken after the
 // frame that tick draws (RenderingServer.FramePostDraw). In Movie Maker
 // mode (--write-movie) the engine writes every frame itself, so the harness
@@ -450,7 +451,9 @@ public partial class PlayableHarness : Node
                 return;
             }
         }
-        if (_tick % _captureEvery == 0 || _moments.Exists(m => m.Tick == _tick))
+        // a moment at tick >= --ticks is captured on the last tick (Story 35.6)
+        if (_tick % _captureEvery == 0
+            || _moments.Exists(m => m.Tick == _tick || (m.Tick >= _ticks && _tick == _ticks - 1)))
         {
             Capture();
         }
@@ -692,7 +695,7 @@ public partial class PlayableHarness : Node
             moments.Add(new Dictionary<string, object>
             {
                 ["name"] = m.Name, ["tick"] = m.Tick,
-                ["frame"] = _frameAt.TryGetValue(m.Tick, out var f) ? f : null,
+                ["frame"] = _frameAt.TryGetValue(Math.Min(m.Tick, _ticks - 1), out var f) ? f : null,
             });
         }
         var report = new Dictionary<string, object>
