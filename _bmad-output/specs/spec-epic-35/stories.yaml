@@ -59,8 +59,8 @@
     affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
     executor spec as `stories/35-8-every-stage-leaves-a-start-and-a-stop-spec.md` in
     the spec folder; the engine resolves it by the glob
-    `35-2-every-story-gets-its-plan-and-its-records-*.md`, and a file named
-    `35-2-every-story-gets-its-plan-and-its-records.md` is read as pending (loop
+    `35-8-every-stage-leaves-a-start-and-a-stop-*.md`, and a file named
+    `35-8-every-stage-leaves-a-start-and-a-stop.md` is read as pending (loop
     deficiency 1, story 21-6).
 
 - id: "35-2-every-story-gets-its-plan-and-its-records"
