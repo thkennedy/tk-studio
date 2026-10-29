@@ -1329,6 +1329,124 @@ class LaunchTestCase(unittest.TestCase):
         self.assertEqual(row["detail"], "without a plan: 2-3-third-story, 2-4-fourth-story; "
                                         "un-noted open questions: CAP-7 (2-4-fourth-story)")
 
+    # ---- Story 35.4: the engine mcp row
+
+    MCP_WARNING = ("warning: engine.mcp.start has no {flag}; the verify-only rule "
+                   "(kb/engine-mcp-godot.md) rests on the engine skill alone; port {port}")
+
+    def _engine_mcp_row(self, config: str | None):
+        base = Path(tempfile.mkdtemp(dir=self.tmp))
+        root, spec = _project(base)
+        if config is not None:
+            (root / ".tk-studio").mkdir(parents=True, exist_ok=True)
+            (root / ".tk-studio" / "config.yaml").write_text(config, encoding="utf-8")
+        self._wire(_FakeSubstrate())
+        result = launch.check(root, spec)
+        names = [c["check"] for c in result["checks"]]
+        self.assertEqual(names.index("engine mcp"), names.index("story plans") + 1)
+        row = next(c for c in result["checks"] if c["check"] == "engine mcp")
+        self.assertTrue(row["ok"])
+        self.assertFalse(any(g.startswith("engine mcp") for g in result["gaps"]))
+        return result, row
+
+    @staticmethod
+    def _mcp_config(start: str, port: int, filter_line: str = "") -> str:
+        return ("verify:\n  host: bash scripts/verify.sh\nengine:\n  mcp:\n    name: godot-ai\n"
+                f"    start: '{start}'\n    port: {port}\n{filter_line}")
+
+    def test_engine_mcp_not_configured(self):
+        for config in (None, "verify:\n  host: bash x.sh\n", "engine:\n  verify_commands:\n    - bash x.sh\n"):
+            with self.subTest(config=config):
+                result, row = self._engine_mcp_row(config)
+                self.assertEqual(row["detail"], "not configured (no engine.mcp)")
+                self.assertTrue(result["ok"], result["gaps"])
+
+    def test_engine_mcp_filter_present_names_the_filter_and_the_port(self):
+        for start in ("uvx godot-ai --port {port} --exclude-domains scene,node",
+                      "uvx godot-ai --port {port} --exclude-domains=scene,node"):
+            with self.subTest(start=start):
+                result, row = self._engine_mcp_row(self._mcp_config(start, 0))
+                self.assertEqual(row["detail"], "verify-only filter --exclude-domains; port per-run")
+                self.assertTrue(result["ok"], result["gaps"])
+        _, row = self._engine_mcp_row(self._mcp_config("srv --deny scene --port 8000", 8000,
+                                                       "    filter: --deny\n"))
+        self.assertEqual(row["detail"], "verify-only filter --deny; port fixed 8000 (one flagged run at a time)")
+
+    def test_engine_mcp_filter_missing_is_a_warning_never_a_gap(self):
+        result, row = self._engine_mcp_row(self._mcp_config("uvx godot-ai --port {port}", 0))
+        self.assertEqual(row["detail"], self.MCP_WARNING.format(flag="--exclude-domains", port="per-run"))
+        self.assertTrue(result["ok"], result["gaps"])
+        status, _, _ = launch.check_block(result)
+        self.assertNotEqual(status, "blocked")
+        # a token that only starts with the flag is not the flag; a fixed port is named
+        result, row = self._engine_mcp_row(self._mcp_config("srv --exclude-domainsX --port 8000", 8000))
+        self.assertEqual(row["detail"], self.MCP_WARNING.format(
+            flag="--exclude-domains", port="fixed 8000 (one flagged run at a time)"))
+        self.assertTrue(result["ok"], result["gaps"])
+        # the project's own filter: the default flag alone does not satisfy it
+        _, row = self._engine_mcp_row(self._mcp_config("srv --exclude-domains scene --port {port}", 0,
+                                                       "    filter: --deny\n"))
+        self.assertEqual(row["detail"], self.MCP_WARNING.format(flag="--deny", port="per-run"))
+
+    NO_CONFIG = "warning: {reason}; the pin refuses engine-mcp:no-config"
+
+    def _assert_no_config(self, config: str, reason: str) -> None:
+        result, row = self._engine_mcp_row(config)
+        self.assertEqual(row["detail"], self.NO_CONFIG.format(reason=reason))
+        self.assertTrue(result["ok"], result["gaps"])
+
+    def test_engine_mcp_port_0_without_port_placeholder_reads_the_pins_refusal(self):
+        self._assert_no_config(self._mcp_config("uvx godot-ai --exclude-domains scene", 0),
+                               "engine.mcp.start has no {port} for port: 0")
+
+    def test_engine_mcp_bad_port_reads_the_pins_refusal(self):
+        reason = "engine.mcp.port is not a port number (0 per run, or 1-65535)"
+        base = ("engine:\n  mcp:\n    name: godot-ai\n"
+                "    start: 'uvx godot-ai --port {port} --exclude-domains scene'\n")
+        for port_line in ("", "    port: abc\n", "    port: 80.5\n", "    port: -1\n",
+                          "    port: 70000\n", "    port: true\n"):
+            with self.subTest(port_line=port_line):
+                self._assert_no_config(base + port_line, reason)
+
+    def test_engine_mcp_bad_filter_reads_the_pins_refusal(self):
+        start = "uvx godot-ai --port {port} --exclude-domains scene"
+        for filter_line in ("    filter: ''\n", "    filter: 7\n", "    filter: --deny --more\n"):
+            with self.subTest(filter_line=filter_line):
+                self._assert_no_config(self._mcp_config(start, 0, filter_line),
+                                       "engine.mcp.filter is not one flag")
+
+    def test_engine_mcp_null_reads_the_pins_not_a_mapping_refusal(self):
+        # a block-style `mcp:` with no value is null, not "not configured"
+        for config in ("verify:\n  host: bash scripts/verify.sh\nengine:\n  mcp:\n",
+                       "engine:\n  mcp:\n  verify_commands:\n    - bash x.sh\n"):
+            with self.subTest(config=config):
+                self._assert_no_config(config, "engine.mcp is not a mapping")
+
+    def test_engine_mcp_unbalanced_quote_splits_as_the_pin_does(self):
+        # the pin's splitCommand tolerates the unclosed quote
+        config = ("engine:\n  mcp:\n    name: godot-ai\n"
+                  "    start: uvx godot-ai --exclude-domains scene --port {port} --x \"oops\n"
+                  "    port: 0\n")
+        _, row = self._engine_mcp_row(config)
+        self.assertEqual(row["detail"], "verify-only filter --exclude-domains; port per-run")
+        self.assertEqual(launch._split_command('a "b c" \'d e'), ["a", "b c", "d e"])
+
+    def test_engine_mcp_backslash_is_not_an_escape_as_in_the_pin(self):
+        # Story 35.4: splitCommand has no escapes, so `\--exclude-domains` is not the flag
+        _, row = self._engine_mcp_row(self._mcp_config("srv \\--exclude-domains scene --port {port}", 0))
+        self.assertEqual(row["detail"], self.MCP_WARNING.format(flag="--exclude-domains", port="per-run"))
+        self.assertEqual(launch._split_command("srv \\--exclude-domains scene"),
+                         ["srv", "\\--exclude-domains", "scene"])
+
+    def test_engine_mcp_flow_style_config_reads_as_a_warning_naming_block_style(self):
+        config = ("verify:\n  host: bash scripts/verify.sh\n"
+                  "engine:\n  mcp: {name: godot-ai, start: 'uvx godot-ai', port: 8000}\n")
+        _, row = self._engine_mcp_row(config)
+        self.assertTrue(row["detail"].startswith(
+            "warning: .tk-studio/config.yaml unreadable by the lib's YAML subset ("), row["detail"])
+        self.assertTrue(row["detail"].endswith("); write engine.mcp in block style"), row["detail"])
+        self.assertIn("unsupported YAML construct", row["detail"])
+
     def test_spec_open_questions_reads_the_real_spec_shapes(self):
         repo = Path(__file__).resolve().parents[4]
         for epic in (34, 35):

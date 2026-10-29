@@ -97,11 +97,24 @@ alternative should the pick fail.
   without the editor the server answers but every editor tool reports `EDITOR_NOT_READY`. The forwarder
   puts the capability on each request it passes upstream. Stop: the editor, then the server (a
   supervisor-managed server is simply killed; nothing listens afterwards).
-- **TUA's line** (its `.tk-studio/config.yaml`; port 8000 is free on the box, `path` defaults to `/mcp`):
+- **TUA's line** (its `.tk-studio/config.yaml`; `path` defaults to `/mcp`). Story 35.4: block style (the
+  lib's YAML subset refuses flow collections, so `launch.py check` reads a flow-style line as a warning)
+  and `port: 0`, the per-run port: the supervisor puts a free `127.0.0.1` port in for `{port}` and a
+  second one for `{ws_port}` at each flagged run's pin. A fixed `port: 8000` (with `--port 8000` or
+  `--port {port}`) stays valid and means one flagged run at a time:
 
   ```yaml
-  engine: {mcp: {name: "godot-ai", start: "uvx --from godot-ai==4.3.1 godot-ai --transport streamable-http --port 8000 --ws-port 9500 --exclude-domains scene,node,script,filesystem,resource,animation,material,particle,camera,audio,tilemap,tileset,gridmap,navigation,csg,ui,theme,signal,autoload,input_map,api,client,custom,batch", port: 8000}}
+  engine:
+    mcp:
+      name: godot-ai
+      start: "uvx --from godot-ai==4.3.1 godot-ai --transport streamable-http --port {port} --ws-port {ws_port} --exclude-domains scene,node,script,filesystem,resource,animation,material,particle,camera,audio,tilemap,tileset,gridmap,navigation,csg,ui,theme,signal,autoload,input_map,api,client,custom,batch"
+      port: 0
   ```
+
+  The edit itself is the operator's (a TUA PR or their own step on the box); the loop never writes TUA.
+  Optional `filter` names the server's allowlist flag when it is not `--exclude-domains`; a start line
+  without it starts anyway, with an `advisory` on `engine-mcp-start` and a warning on the launch check's
+  `engine mcp` row.
 
   The add-on under `game/addons/godot_ai/` and its `[editor_plugins]` line in `project.godot` are a TUA
   PR of the operator's once this story lands.
@@ -119,6 +132,25 @@ alternative should the pick fail.
   frame.
 - **The snapshot folder** stays `<TK_SUPERVISOR_WORK>\snapshots\<project id>\<run id>` (operator-decisions
   §3 of spec-epic-22), which the AC's `C:\agent-work\backups\…` wording yields to.
+
+## Reachability proof (Story 35.4)
+
+pending: asked through 35-4's consult log
+(`_bmad-output/specs/spec-epic-35/stories/35-4-the-engine-mcp-before-the-first-flagged-run-spec.md`,
+`## Consult Log`). The operator applies TUA's block-style `engine.mcp` above, submits one flagged run and,
+from the sandbox, posts `editor_state` to `$TK_ENGINE_MCP_URL` with `Authorization: Bearer
+$TK_ENGINE_MCP_BEARER`: a 200 through the forwarder on `TK_SUPERVISOR_BIND:<forwarder_port>`, which reaches
+`127.0.0.1:<port>/mcp`, and a 401 without the bearer. Both answers and the ports from `engine-mcp-start` are
+recorded here.
+
+- **The add-on's WebSocket port: measured on the box only.** Nothing documents how the godot-ai add-on in
+  the editor finds a server whose `--ws-port` is not the default 9500 (the launch shape says only that it
+  adopts the running server), and the supervisor invents no env var for it. The fakes' two-run start is
+  the suite's bar; whether two concurrent real flagged runs each reach their own editor (the add-on
+  following `{ws_port}`) is measured on the box only, and recorded here with the proof. The fallback for
+  the proof step: if the editor never adopts the server started with `--ws-port {ws_port}` (every editor
+  tool still `EDITOR_NOT_READY` past ~25 s), put a literal `--ws-port 9500` in `engine.mcp.start` instead,
+  which means one flagged run at a time, and record here which of the two happened.
 
 ## Seeds
 

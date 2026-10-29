@@ -10,9 +10,10 @@ import { hostname } from "node:os";
 import { basename, delimiter, join, resolve } from "node:path";
 import { queueRecorder, runJob, StartError, submitJob } from "../src/cli";
 import {
-  ENGINE_MCP_START, ENGINE_MCP_STOP, engineMcpEnv, engineMcpLive, forwarder, letGoEngineMcp, parseEngineMcp, recoverEngineMcps, startEngineMcp,
+  ENGINE_MCP_START, ENGINE_MCP_STOP, engineMcpAdvisory, engineMcpEnv, engineMcpLive, forwarder, letGoEngineMcp, parseEngineMcp, recoverEngineMcps, startEngineMcp,
   stopEngineMcp, type EngineMcpDeps,
 } from "../src/enginemcp";
+import { engineMcpPort } from "../src/env";
 import { snapshotOnce } from "../src/hygiene";
 import { killRecordedWorker, processStartTime, Queue, type Owner, type QueueRun } from "../src/queue";
 import { releasePin, type SandboxDeps } from "../src/sandbox";
@@ -159,7 +160,7 @@ describe("parseEngineMcp: engine.mcp {name, start, port}", () => {
     expect(parseEngineMcp({ engine: { mcp: { name: "", start: "a", port: 1 } } })).toMatchObject({ malformed: expect.stringContaining("name") });
     expect(parseEngineMcp({ engine: { mcp: { name: "n", start: "  ", port: 1 } } })).toMatchObject({ malformed: expect.stringContaining("start") });
     expect(parseEngineMcp({ engine: { mcp: { name: "n", start: "a", port: 70000 } } })).toMatchObject({ malformed: expect.stringContaining("port") });
-    expect(parseEngineMcp({ engine: { mcp: { name: "n", start: "a b", port: 9000 } } })).toEqual({ name: "n", start: "a b", port: 9000, path: "/mcp" });
+    expect(parseEngineMcp({ engine: { mcp: { name: "n", start: "a b", port: 9000 } } })).toEqual({ name: "n", start: "a b", port: 9000, path: "/mcp", filter: "--exclude-domains" });
   });
 });
 
@@ -167,13 +168,16 @@ describe("start: a flagged run's engine MCP on the host, behind the bearer forwa
   test("Start: the server in the worktree with GODOT and its capabilities, the editor on the project, the forwarder on bind:port, `engine-mcp-start` without a secret, the env by name", async () => {
     const q = newQueue();
     const { run, wt } = await flaggedRun(q);
-    const { out, deps } = await startOk(q, run);
+    const { out, deps, port } = await startOk(q, run);
     const url = `http://127.0.0.1:${deps.fwd}/mcp`;
     expect(out).toEqual({ started: true, url });
     expect(engineMcpLive(run.run_id)).toBe(true);
     const ev = q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_START)!;
-    expect(Object.keys(ev.detail!).sort()).toEqual(["editor_pid", "editor_start", "forwarder_pid", "forwarder_start", "name", "pid", "start", "url"]);
-    expect(ev.detail).toMatchObject({ name: NAME, url });
+    // Story 35.4: the ports in use (fixed here) and the verify-only advisory (this start line has no --exclude-domains).
+    expect(Object.keys(ev.detail!).sort()).toEqual([
+      "advisory", "editor_pid", "editor_start", "forwarder_pid", "forwarder_port", "forwarder_start", "name", "pid", "port", "start", "url",
+    ]);
+    expect(ev.detail).toMatchObject({ name: NAME, url, port, forwarder_port: deps.fwd });
     expect(typeof ev.detail!.pid).toBe("number");
     // The forwarder is its own child process, recorded beside the server.
     expect(typeof ev.detail!.forwarder_pid).toBe("number");
@@ -291,7 +295,7 @@ describe("stop: at release, also on a kept pin", () => {
     sbx.answer({});
     const q = newQueue();
     const { run } = await flaggedRun(q);
-    const { deps } = await startOk(q, run);
+    const { deps, port } = await startOk(q, run);
     const startEv = q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_START)!.detail!;
     const pid = startEv.pid as number, fpid = startEv.forwarder_pid as number, epid = startEv.editor_pid as number;
     // Not terminal: releasePin keeps everything.
@@ -300,7 +304,9 @@ describe("stop: at release, also on a kept pin", () => {
     q.end(run.run_id, "complete", null);
     expect(await releasePin(q, run.run_id, sbxDeps())).toBe("released");
     expect(engineMcpLive(run.run_id)).toBe(false);
-    expect(q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_STOP)?.detail).toEqual({ name: NAME, pid, forwarder_pid: fpid, editor_pid: epid, why: "released" });
+    expect(q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_STOP)?.detail).toEqual({
+      name: NAME, pid, forwarder_pid: fpid, editor_pid: epid, why: "released", port, forwarder_port: deps.fwd,
+    });
     await expect(fetch(`http://127.0.0.1:${deps.fwd}/mcp`)).rejects.toThrow();
     expect(await gone(pid)).toBe(true);
     expect(await gone(fpid)).toBe(true);
@@ -415,7 +421,7 @@ describe("a child that exits on its own mid-run", () => {
   test("the server dies: the forwarder goes too, the entry is dropped, `engine-mcp-stop {why: \"exited\"}` recorded", async () => {
     const q = newQueue();
     const { run } = await flaggedRun(q);
-    const { out } = await startOk(q, run);
+    const { out, deps, port } = await startOk(q, run);
     expect("started" in out).toBe(true);
     const d = q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_START)!.detail!;
     const pid = d.pid as number, fpid = d.forwarder_pid as number, epid = d.editor_pid as number;
@@ -424,7 +430,9 @@ describe("a child that exits on its own mid-run", () => {
     expect(engineMcpLive(run.run_id)).toBe(false);
     expect(engineMcpEnv(run.run_id)).toBeUndefined(); // no dead URL handed out
     for (const until = Date.now() + 5000; !kinds(q, run.run_id).includes(ENGINE_MCP_STOP) && Date.now() < until;) await Bun.sleep(50);
-    expect(q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_STOP)?.detail).toEqual({ name: NAME, pid, forwarder_pid: fpid, editor_pid: epid, why: "exited", exited: "server" });
+    expect(q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_STOP)?.detail).toEqual({
+      name: NAME, pid, forwarder_pid: fpid, editor_pid: epid, why: "exited", port, forwarder_port: deps.fwd, exited: "server",
+    });
     expect(await gone(fpid)).toBe(true);
     expect(await gone(epid)).toBe(true);
     // Stopped once: the release records no second stop.
@@ -537,7 +545,7 @@ describe("consult ruling 2: the forwarder outlives the process that started it (
     sbx.answer({});
     const q = newQueue();
     const { run, wt } = await flaggedRun(q);
-    const { out, deps } = await startOk(q, run);
+    const { out, deps, port } = await startOk(q, run);
     expect("started" in out).toBe(true);
     const { TK_ENGINE_MCP_URL: url, TK_ENGINE_MCP_BEARER: bearer } = engineMcpEnv(run.run_id)!;
     const d = q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_START)!.detail!;
@@ -567,7 +575,9 @@ describe("consult ruling 2: the forwarder outlives the process that started it (
     // recorded pids are killed by pid and start time and the stop recorded.
     q.end(run.run_id, "complete", null);
     expect(await releasePin(q, run.run_id, sbxDeps())).toBe("released");
-    expect(q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_STOP)?.detail).toEqual({ name: NAME, pid, forwarder_pid: fpid, editor_pid: epid, why: "released" });
+    expect(q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_STOP)?.detail).toEqual({
+      name: NAME, pid, forwarder_pid: fpid, editor_pid: epid, why: "released", port, forwarder_port: deps.fwd,
+    });
     expect(await gone(pid)).toBe(true);
     expect(await gone(fpid)).toBe(true);
     expect(await gone(epid)).toBe(true);
@@ -606,6 +616,256 @@ describe("consult ruling 2: the forwarder outlives the process that started it (
     expect(await recoverEngineMcps(q, { killRecorded: killing })).toEqual([run.run_id]);
     expect(killed).toEqual([987654, 987655]);
     expect(kinds(q, run.run_id).filter((k) => k === ENGINE_MCP_STOP)).toHaveLength(1);
+  });
+
+  test("Story 35.4: a stop of a start recorded without ports (pre-0.1.30) records port and forwarder_port null", async () => {
+    const killing = async (pid: number, start: string | null) => ({ pid, start, outcome: "killed" as const });
+    const pre030 = { name: NAME, pid: 987654, start: "1", url: "u", forwarder_pid: 987655, forwarder_start: "2", editor_pid: 987656, editor_start: "3" };
+    const want = (why: string) => ({ name: NAME, pid: 987654, forwarder_pid: 987655, editor_pid: 987656, why, port: null, forwarder_port: null });
+    // The cross-process stop (this process holds nothing: the recorded pids are killed).
+    const q = newQueue();
+    const { run } = await flaggedRun(q);
+    q.note(run.run_id, ENGINE_MCP_START, pre030);
+    expect(await stopEngineMcp(q, run.run_id, "released", { killRecorded: killing })).toBe(true);
+    expect(q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_STOP)!.detail).toEqual(want("released"));
+    // The recovery path.
+    const q2 = newQueue();
+    const { run: run2 } = await flaggedRun(q2);
+    q2.note(run2.run_id, ENGINE_MCP_START, pre030);
+    q2.end(run2.run_id, "blocked", "x");
+    expect(await recoverEngineMcps(q2, { killRecorded: killing })).toEqual([run2.run_id]);
+    expect(q2.events(run2.run_id).find((e) => e.kind === ENGINE_MCP_STOP)!.detail).toEqual(want("supervisor restarted"));
+  });
+});
+
+// Story 35.4: per-run ports, the start recorded before the children are let go (and their kill on a failed record),
+// the verify-only advisory. Fakes only, as above.
+describe("Story 35.4: the engine MCP before the first flagged run", () => {
+  /** A config with `port` and optional `filter` (block style, the start JSON-quoted). */
+  const config354 = (start: string, port: number, filter?: string) => configFor(start, port) + (filter ? `    filter: ${JSON.stringify(filter)}\n` : "");
+  /** The deps with the forwarder per run (TK_SUPERVISOR_ENGINE_MCP_PORT unset). */
+  const perRunDeps = (files: Files, extra: Partial<EngineMcpDeps> = {}) => depsFor(files, { ...extra, env: { TK_SUPERVISOR_ENGINE_MCP_PORT: undefined } });
+  /** A server child through the `spawn` seam that records its argv and its calls (`unref`, `kill`) in `order`. */
+  const recording = (order: string[], name: string, argvs: string[][] = []) => (argv: string[], opts: { cwd: string; env: Record<string, string | undefined> }) => {
+    argvs.push(argv);
+    const p = Bun.spawn(argv, { cwd: opts.cwd, env: opts.env, stdout: "ignore", stderr: "ignore" });
+    return { pid: p.pid, exited: p.exited, kill() { order.push(`kill:${name}`); p.kill(); }, unref() { order.push(`unref:${name}`); p.unref(); } };
+  };
+
+  test("parse: `port: 0` admitted with `{port}` in start, `no-config` without it; `filter` optional (default --exclude-domains)", async () => {
+    expect(parseEngineMcp({ engine: { mcp: { name: "n", start: "srv --port {port}", port: 0 } } }))
+      .toEqual({ name: "n", start: "srv --port {port}", port: 0, path: "/mcp", filter: "--exclude-domains" });
+    expect(parseEngineMcp({ engine: { mcp: { name: "n", start: "srv --port 8000", port: 0 } } })).toEqual({ malformed: "engine.mcp.start has no {port} for port: 0" });
+    expect(parseEngineMcp({ engine: { mcp: { name: "n", start: "srv", port: -1 } } })).toMatchObject({ malformed: expect.stringContaining("port") });
+    expect(parseEngineMcp({ engine: { mcp: { name: "n", start: "srv", port: 8000, filter: "--deny" } } })).toMatchObject({ port: 8000, filter: "--deny" });
+    for (const filter of ["", "  ", 3, "--a --b"]) {
+      expect(parseEngineMcp({ engine: { mcp: { name: "n", start: "srv", port: 8000, filter } } })).toEqual({ malformed: "engine.mcp.filter is not one flag" });
+    }
+    // At the pin: nothing spawned, the run's reason names the key.
+    const q = newQueue();
+    const { run } = await flaggedRun(q);
+    let spawned = 0;
+    const out = await startEngineMcp(q, run.run_id, { ...perRunDeps({ config: config354(`${serverBin} --port 8000`, 0), mcp: MCP_JSON }), spawn: () => { spawned++; throw new Error("never"); } });
+    expect("refused" in out && out.refused).toMatchObject({ key: "engine-mcp:no-config", reason: "engine MCP: engine.mcp.start has no {port} for port: 0" });
+    expect(spawned).toBe(0);
+    expect(kinds(q, run.run_id).filter((k) => k.startsWith("engine-mcp"))).toEqual([]);
+  });
+
+  test("`port: 0`: a free server port put in for `{port}`, a second for `{ws_port}`; the events carry them", async () => {
+    const q = newQueue();
+    const { run } = await flaggedRun(q);
+    const order: string[] = [], argvs: string[][] = [];
+    const resolved: number[] = [];
+    const out = await startEngineMcp(q, run.run_id, {
+      ...perRunDeps({ config: config354(`${serverBin} --port {port} --ws-port {ws_port} --root {worktree}`, 0), mcp: MCP_JSON }),
+      freePort: async () => { const p = freePort(); resolved.push(p); return p; },
+      spawn: recording(order, "server", argvs),
+    });
+    started.push([q, run.run_id]);
+    expect("started" in out).toBe(true);
+    expect(resolved).toHaveLength(2);
+    const [port, ws] = resolved as [number, number];
+    expect(port).not.toBe(ws);
+    expect(argvs[0]!.slice(1)).toEqual(["--port", String(port), "--ws-port", String(ws), "--root", run.worktree!]);
+    const d = q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_START)!.detail!;
+    expect(d).toMatchObject({ port, ws_port: ws });
+    expect(await stopEngineMcp(q, run.run_id, "test")).toBe(true);
+    expect(q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_STOP)!.detail).toMatchObject({ port, forwarder_port: d.forwarder_port, ws_port: ws });
+  });
+
+  test("two flagged runs on one box, `port: 0` and the forwarder per run: both start, distinct ports, neither start-failed", async () => {
+    const q = newQueue();
+    const a = (await flaggedRun(q)).run, b = (await flaggedRun(q)).run;
+    const files = { config: config354(`${serverBin} --port {port}`, 0), mcp: MCP_JSON };
+    const outA = await startEngineMcp(q, a.run_id, perRunDeps(files));
+    started.push([q, a.run_id]);
+    const outB = await startEngineMcp(q, b.run_id, perRunDeps(files));
+    started.push([q, b.run_id]);
+    expect("started" in outA && "started" in outB).toBe(true);
+    const da = q.events(a.run_id).find((e) => e.kind === ENGINE_MCP_START)!.detail!;
+    const db = q.events(b.run_id).find((e) => e.kind === ENGINE_MCP_START)!.detail!;
+    for (const d of [da, db]) {
+      expect(typeof d.port).toBe("number");
+      expect(typeof d.forwarder_port).toBe("number");
+      expect(d.port).toBeGreaterThan(0);
+      expect(d.forwarder_port).toBeGreaterThan(0);
+      expect(d).not.toHaveProperty("ws_port");
+    }
+    expect(da.port).not.toBe(db.port);
+    expect(da.forwarder_port).not.toBe(db.forwarder_port);
+    // The forwarder on `:0` reports the port it bound: the URL carries it, and it serves behind the bearer.
+    for (const [id, d] of [[a.run_id, da], [b.run_id, db]] as const) {
+      const env = engineMcpEnv(id)!;
+      expect(env.TK_ENGINE_MCP_URL).toBe(`http://127.0.0.1:${d.forwarder_port}/mcp`);
+      expect(d.url).toBe(env.TK_ENGINE_MCP_URL);
+      const ok = await fetch(env.TK_ENGINE_MCP_URL!, { method: "POST", headers: { Authorization: `Bearer ${env.TK_ENGINE_MCP_BEARER}` }, body: "{}" });
+      expect(ok.status).toBe(200);
+      await ok.text();
+    }
+    expect(await stopEngineMcp(q, a.run_id, "test")).toBe(true);
+    expect(await stopEngineMcp(q, b.run_id, "test")).toBe(true);
+  });
+
+  test("a fixed port keeps its 34.5 meaning: `{port}` replaced with it, the port on the event; a busy one still pre-checks", async () => {
+    const q = newQueue();
+    const { run } = await flaggedRun(q);
+    const fixed = freePort();
+    const argvs: string[][] = [];
+    let asked = 0;
+    const out = await startEngineMcp(q, run.run_id, {
+      ...depsFor({ config: config354(`${serverBin} --port {port}`, fixed), mcp: MCP_JSON }),
+      freePort: async () => { asked++; return freePort(); }, spawn: recording([], "server", argvs),
+    });
+    started.push([q, run.run_id]);
+    expect("started" in out).toBe(true);
+    expect(asked).toBe(0); // never resolved, never ignored
+    expect(argvs[0]!.slice(1)).toEqual(["--port", String(fixed)]);
+    expect(q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_START)!.detail).toMatchObject({ port: fixed });
+    await stopEngineMcp(q, run.run_id, "test");
+
+    const squatter = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("someone else") });
+    try {
+      const q2 = newQueue();
+      const r2 = (await flaggedRun(q2)).run;
+      let spawned = 0;
+      const busy = await startEngineMcp(q2, r2.run_id, {
+        ...depsFor({ config: config354(`${serverBin} --port {port}`, squatter.port!), mcp: MCP_JSON }), spawn: () => { spawned++; throw new Error("never"); },
+      });
+      expect("refused" in busy && busy.refused).toMatchObject({ key: "engine-mcp:start-failed", reason: expect.stringContaining(`127.0.0.1:${squatter.port}: port already in use`) });
+      expect(spawned).toBe(0);
+    } finally { squatter.stop(true); }
+  });
+
+  test("the start is recorded before any of the children is let go (unref)", async () => {
+    const q = newQueue();
+    const { run } = await flaggedRun(q);
+    const order: string[] = [];
+    const note = q.note.bind(q);
+    q.note = (id, kind, detail) => { order.push(`note:${kind}`); note(id, kind, detail); };
+    const out = await startEngineMcp(q, run.run_id, {
+      ...perRunDeps({ config: config354(`${serverBin} --port {port}`, 0), mcp: MCP_JSON }),
+      spawn: recording(order, "server"), spawnEditor: recording(order, "editor"),
+    });
+    started.push([q, run.run_id]);
+    expect("started" in out).toBe(true);
+    expect(order).toEqual([`note:${ENGINE_MCP_START}`, "unref:server", "unref:editor"]);
+    await stopEngineMcp(q, run.run_id, "test");
+  });
+
+  test("a record that throws: all three killed (forwarder, editor, server), none let go, nothing live, start-failed with the reason", async () => {
+    const q = newQueue();
+    const { run } = await flaggedRun(q);
+    const order: string[] = [];
+    const note = q.note.bind(q);
+    q.note = (id, kind, detail) => { if (kind === ENGINE_MCP_START) throw new Error("database is locked"); note(id, kind, detail); };
+    const deps = depsFor({ config: config354(`${serverBin} --port {port}`, 0), mcp: MCP_JSON });
+    let serverPid = 0, editorPid = 0;
+    const out = await startEngineMcp(q, run.run_id, {
+      ...deps,
+      spawn: (argv, o) => { const c = recording(order, "server")(argv, o); serverPid = c.pid; return c; },
+      spawnEditor: (argv, o) => { const c = recording(order, "editor")(argv, o); editorPid = c.pid; return c; },
+    });
+    expect("refused" in out && out.refused).toMatchObject({
+      key: "engine-mcp:start-failed", reason: "engine MCP: the start could not be recorded: database is locked",
+    });
+    expect(order).toEqual(["kill:editor", "kill:server"]);
+    expect(engineMcpLive(run.run_id)).toBe(false);
+    expect(engineMcpEnv(run.run_id)).toBeUndefined();
+    expect(kinds(q, run.run_id).filter((k) => k.startsWith("engine-mcp"))).toEqual([]);
+    expect(await gone(serverPid)).toBe(true);
+    expect(await gone(editorPid)).toBe(true);
+    // The forwarder went first: its port no longer answers.
+    await expect(fetch(`http://127.0.0.1:${deps.fwd}/mcp`)).rejects.toThrow();
+  });
+
+  test("the verify-only advisory on `engine-mcp-start`: absent with the filter (`<filter>` or `<filter>=…`), named without it; never refused", async () => {
+    const want = "warning: engine.mcp.start has no --exclude-domains; the verify-only rule (kb/engine-mcp-godot.md) rests on the engine skill alone; port per-run";
+    expect(engineMcpAdvisory({ start: "srv --port {port}", port: 0, filter: "--exclude-domains" })).toBe(want);
+    expect(engineMcpAdvisory({ start: "srv --port 8000", port: 8000, filter: "--deny" }))
+      .toBe("warning: engine.mcp.start has no --deny; the verify-only rule (kb/engine-mcp-godot.md) rests on the engine skill alone; port fixed 8000 (one flagged run at a time)");
+    expect(engineMcpAdvisory({ start: "srv --exclude-domains scene,node", port: 0, filter: "--exclude-domains" })).toBeNull();
+    expect(engineMcpAdvisory({ start: "srv --exclude-domains=scene,node", port: 0, filter: "--exclude-domains" })).toBeNull();
+    expect(engineMcpAdvisory({ start: "srv --exclude-domainsX", port: 0, filter: "--exclude-domains" })).toBe(want);
+    expect(engineMcpAdvisory({ start: "srv --deny scene", port: 0, filter: "--deny" })).toBeNull();
+    for (const [start, filter, advisory] of [
+      [`${serverBin} --port {port}`, undefined, want],
+      [`${serverBin} --port {port} --exclude-domains=scene`, undefined, undefined],
+      [`${serverBin} --port {port} --deny scene`, "--deny", undefined],
+    ] as const) {
+      const q = newQueue();
+      const { run } = await flaggedRun(q);
+      const out = await startEngineMcp(q, run.run_id, perRunDeps({ config: config354(start, 0, filter), mcp: MCP_JSON }));
+      started.push([q, run.run_id]);
+      expect("started" in out).toBe(true);
+      const d = q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_START)!.detail!;
+      if (advisory) expect(d.advisory).toBe(advisory);
+      else expect(d).not.toHaveProperty("advisory");
+      await stopEngineMcp(q, run.run_id, "test");
+    }
+  });
+
+  test("start-failed resolves: `port: 0` names the per-run `{port}`, never `:0` or the port it got; a fixed port's is unchanged", async () => {
+    const refusedBy = async (deps: EngineMcpDeps) => {
+      const q = newQueue();
+      const { run } = await flaggedRun(q);
+      const out = await startEngineMcp(q, run.run_id, deps);
+      expect("refused" in out && out.refused.key).toBe("engine-mcp:start-failed");
+      return "refused" in out ? out.refused.resolves : "";
+    };
+    const noSpawn = () => { throw new Error("no spawn"); };
+    const perRun = "make `engine.mcp.start` serve on 127.0.0.1:{port} (the per-run port, `port: 0`) from the run's worktree "
+      + "(nothing else listening there), and TK_SUPERVISOR_BIND (a tailnet address, 100.64.0.0/10) free to bind "
+      + "(a per-run port; TK_SUPERVISOR_ENGINE_MCP_PORT unset)";
+    const files0 = { config: config354(`${serverBin} --port {port}`, 0), mcp: MCP_JSON };
+    // before the port resolves (the bind refused), and after (the server does not spawn on the port it got)
+    const before = await refusedBy({ ...perRunDeps(files0), checkBind: () => { throw new Error("no bind"); } });
+    const got = freePort();
+    const after = await refusedBy({ ...perRunDeps(files0), freePort: async () => got, spawn: noSpawn });
+    for (const r of [before, after]) {
+      expect(r).toBe(perRun);
+      expect(r).not.toContain("127.0.0.1:0");
+      expect(r).not.toContain(String(got));
+    }
+    // a fixed port with TK_SUPERVISOR_ENGINE_MCP_PORT set: today's text
+    const p = freePort();
+    expect(await refusedBy({ ...depsFor({ config: config354(`${serverBin} --port ${p}`, p), mcp: MCP_JSON }), spawn: noSpawn })).toBe(
+      `make \`engine.mcp.start\` serve on 127.0.0.1:${p} from the run's worktree (nothing else listening there), and `
+      + "TK_SUPERVISOR_BIND (a tailnet address, 100.64.0.0/10):TK_SUPERVISOR_ENGINE_MCP_PORT free to bind");
+    // a fixed port with TK_SUPERVISOR_ENGINE_MCP_PORT unset: the fixed server port, the per-run forwarder
+    const p2 = freePort();
+    expect(await refusedBy({ ...perRunDeps({ config: config354(`${serverBin} --port ${p2}`, p2), mcp: MCP_JSON }), spawn: noSpawn })).toBe(
+      `make \`engine.mcp.start\` serve on 127.0.0.1:${p2} from the run's worktree (nothing else listening there), and `
+      + "TK_SUPERVISOR_BIND (a tailnet address, 100.64.0.0/10) free to bind (a per-run port; TK_SUPERVISOR_ENGINE_MCP_PORT unset)");
+  });
+
+  test("engineMcpPort: unset or blank is 0 (per run), a port is fixed, anything else throws naming the variable", () => {
+    expect(engineMcpPort({})).toBe(0);
+    for (const v of ["", "  ", "\t"]) expect(engineMcpPort({ TK_SUPERVISOR_ENGINE_MCP_PORT: v })).toBe(0);
+    expect(engineMcpPort({ TK_SUPERVISOR_ENGINE_MCP_PORT: "8788" })).toBe(8788);
+    expect(engineMcpPort({ TK_SUPERVISOR_ENGINE_MCP_PORT: " 8788 " })).toBe(8788);
+    for (const v of ["abc", "0", "70000", "-1", "80.5"]) {
+      expect(() => engineMcpPort({ TK_SUPERVISOR_ENGINE_MCP_PORT: v })).toThrow(/TK_SUPERVISOR_ENGINE_MCP_PORT/);
+    }
   });
 });
 

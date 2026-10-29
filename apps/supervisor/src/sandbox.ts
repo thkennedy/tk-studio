@@ -22,7 +22,8 @@
  *   release   `sbx stop <sb>` when a run recording the sandbox ends while a pin on it is outstanding (the
  *             ending run's own, or one an ended run left `pin-kept`), and only when no other
  *             queued/running/paused/external run — nor an ended run whose engine is alive after its kill —
- *             records the same sandbox (else `pin-kept`).
+ *             records the same sandbox (else `pin-kept`). Story 35.4: for a run that started an engine MCP,
+ *             both events carry `engine_mcp: "stopped" | "stop pending"` (its stop at this release).
  *   restart   Story 33.3: `pinWithRestart`, the one seam both pin sites call. A sandbox `sbx ls` listed as
  *             running before the pin whose login probe says not logged in is stopped and started once
  *             (`sbx stop`, `sbx run -d --name`), probed again and recorded `pin-restart`; the caller's
@@ -41,7 +42,7 @@
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
-import { stopEngineMcp } from "./enginemcp";
+import { ENGINE_MCP_START, ENGINE_MCP_STOP, stopEngineMcp } from "./enginemcp";
 import { sbxBin, studioHome } from "./env";
 import {
   checkoutKey, isTerminal, parseStatGroup, probeRecordedWorker, processStartTime, servedRoot, type Queue, type QueueRun, type WorkerKill,
@@ -174,13 +175,18 @@ export async function releasePin(queue: Queue, runId: string, deps: SandboxDeps 
     if (!isTerminal(run.state)) return "none";
     // Story 34.5: the run's engine MCP stops at its release — also when the sandbox is kept for another holder.
     await stopEngineMcp(queue, runId, "released");
+    // Story 35.4: the release events say so — only for a run that started one: `stopped` once its last start has a
+    // stop after it, else `stop pending` (a later release or recovery stops it).
+    const mcpEvents = queue.events(runId).filter((e) => e.kind === ENGINE_MCP_START || e.kind === ENGINE_MCP_STOP);
+    const engineMcp: Record<string, unknown> = !mcpEvents.length ? {}
+      : { engine_mcp: mcpEvents.at(-1)!.kind === ENGINE_MCP_STOP ? "stopped" : "stop pending" };
     const sb = run.sandbox;
     if (!queue.pinOutstanding(sb)) return "none";
     const holders = await sandboxHolders(queue, sb, runId);
     if (holders.length) {
       // Named once per run (a later release of the same run finds it kept already).
       const own = queue.events(runId).filter((e) => e.kind === "pin-kept" || e.kind === "pin-released");
-      if (!own.length) queue.note(runId, "pin-kept", { sandbox: sb, held_by: holders });
+      if (!own.length) queue.note(runId, "pin-kept", { sandbox: sb, held_by: holders, ...engineMcp });
       return "kept";
     }
     let stop: Record<string, unknown>;
@@ -188,7 +194,7 @@ export async function releasePin(queue: Queue, runId: string, deps: SandboxDeps 
       const r = await call(deps, releaseArgv(sb), 120);
       stop = r.exit === 0 ? { ok: true } : { ok: false, exit: r.exit, detail: clip(r.stderr || r.stdout) };
     } catch (e) { stop = { ok: false, detail: clip(message(e)) }; }
-    queue.note(runId, "pin-released", { sandbox: sb, stop });
+    queue.note(runId, "pin-released", { sandbox: sb, stop, ...engineMcp });
     // Story 33.3: the sandbox is stopped — the supervisor's pin record goes with it.
     if (stop.ok) removePinRecord(sb, deps.env ?? process.env);
     return stop.ok ? "released" : "failed";

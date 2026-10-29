@@ -90,6 +90,22 @@ Guarantees:
     `story plans` row (after `playable path`, never a gap) reads `all <n>
     planned` or `without a plan: <id>, …` (manifest order), plus `;
     un-noted open questions: CAP-N (<id>), …` for later stories.
+  - `check` reports the engine MCP (Story 35.4) as one advisory row `engine
+    mcp` after `story plans`, never a gap, from the tracked
+    `.tk-studio/config.yaml`: `not configured (no engine.mcp)`, or
+    `verify-only filter <flag>; port <per-run|fixed <n> (one flagged run at
+    a time)>` when `engine.mcp.start` carries the server's allowlist flag
+    (`engine.mcp.filter`, default `--exclude-domains`; the token `<flag>` or
+    `<flag>=…`), else `warning: engine.mcp.start has no <flag>; the
+    verify-only rule (kb/engine-mcp-godot.md) rests on the engine skill
+    alone; port …`. An `engine.mcp` the pin's `parseEngineMcp` refuses
+    (`port: 0` with no `{port}` in `start`, a missing or non-integer port,
+    an empty or multi-token `filter`, …) reads `warning: <the pin's reason,
+    e.g. engine.mcp.filter is not one flag>; the pin refuses
+    engine-mcp:no-config`. `start` is split as the pin's `splitCommand`
+    does (quotes group, no backslash escapes). A config the lib's YAML subset refuses (flow style)
+    reads `warning: .tk-studio/config.yaml unreadable by the lib's YAML
+    subset (<err>); write engine.mcp in block style`. It starts nothing.
 
 Exit codes: 0 verb answered (a `check` with gaps is an answer: ok=false);
 2 bad invocation or refusal (`start` on a failing check, missing spec, an
@@ -1003,6 +1019,117 @@ def story_plans_row(folder: Path, spec_md: Path, manifest: Path) -> dict:
     return {"check": STORY_PLANS_CHECK, "ok": True, "detail": detail}
 
 
+# ------------------------------------------------- the engine MCP (35.4)
+
+ENGINE_MCP_CHECK = "engine mcp"
+# Story 35.4: the server's verify-only allowlist flag when `engine.mcp.filter`
+# is absent (kb/engine-mcp-godot.md; the supervisor's DEFAULT_ENGINE_MCP_FILTER)
+DEFAULT_ENGINE_MCP_FILTER = "--exclude-domains"
+
+
+def _split_command(line: str) -> list[str]:
+    """The supervisor's ``splitCommand`` (hostverify.ts), always: quotes
+    group, no backslash escapes, an unclosed quote tolerated, so the row
+    reads ``start`` as the pin does (Story 35.4)."""
+    out: list[str] = []
+    cur, started, quote = "", False, None
+    for ch in line:
+        if quote:
+            if ch == quote:
+                quote = None
+            else:
+                cur += ch
+            continue
+        if ch in "\"'":
+            quote, started = ch, True
+            continue
+        if ch.isspace():
+            if started:
+                out.append(cur)
+                cur, started = "", False
+            continue
+        cur += ch
+        started = True
+    if started:
+        out.append(cur)
+    return out
+
+
+def _engine_mcp_malformed(mcp: object) -> str | None:
+    """Why the pin's ``parseEngineMcp`` (enginemcp.ts) refuses ``engine.mcp``
+    as ``engine-mcp:no-config`` (its reason text), else None: the same
+    checks in the same order."""
+    if not isinstance(mcp, dict):
+        return "engine.mcp is not a mapping"
+    name, start, port = mcp.get("name"), mcp.get("start"), mcp.get("port")
+    if not isinstance(name, str) or not name.strip():
+        return "engine.mcp.name is not a non-empty string"
+    if not isinstance(start, str) or not _split_command(start):
+        return "engine.mcp.start is not a non-empty command line"
+    integral = (isinstance(port, int) and not isinstance(port, bool)) or (
+        isinstance(port, float) and port.is_integer())
+    if not integral or not 0 <= port <= 65535:
+        return "engine.mcp.port is not a port number (0 per run, or 1-65535)"
+    if port == 0 and "{port}" not in start:
+        return "engine.mcp.start has no {port} for port: 0"
+    path = mcp.get("path", None)
+    if "path" in mcp and (not isinstance(path, str) or not path.startswith("/")):
+        return "engine.mcp.path does not start with /"
+    flt = mcp.get("filter")
+    if "filter" in mcp and (not isinstance(flt, str) or not flt.strip()
+                            or re.search(r"\s", flt.strip())):
+        return "engine.mcp.filter is not one flag"
+    return None
+
+
+def engine_mcp_row(root: Path) -> dict:
+    """Story 35.4: the advisory ``engine mcp`` row (``ok`` always true, never
+    a gap), from the tracked ``.tk-studio/config.yaml``: ``not configured (no
+    engine.mcp)``; ``verify-only filter <flag>; port <…>`` when
+    ``engine.mcp.start`` carries the filter (``engine.mcp.filter``, default
+    ``--exclude-domains``) as the token ``<flag>`` or ``<flag>=…``; else
+    ``warning: engine.mcp.start has no <flag>; the verify-only rule
+    (kb/engine-mcp-godot.md) rests on the engine skill alone; port <…>``.
+    The port reads ``per-run`` for ``port: 0``, else ``fixed <n> (one flagged
+    run at a time)``. A config the pin's ``parseEngineMcp`` refuses reads
+    ``warning: <its reason>; the pin refuses engine-mcp:no-config``, the
+    reason the pin's own text (``engine.mcp is not a mapping``,
+    ``engine.mcp.port is not a port number (0 per run, or 1-65535)``,
+    ``engine.mcp.start has no {port} for port: 0``, ``engine.mcp.filter is
+    not one flag``, …). A config the lib's
+    YAML subset refuses (flow style) reads as a warning naming block style.
+    Starts nothing."""
+
+    def row(detail: str) -> dict:
+        return {"check": ENGINE_MCP_CHECK, "ok": True, "detail": detail}
+
+    config = root / CONFIG_REL
+    if not config.is_file():
+        return row("not configured (no engine.mcp)")
+    try:
+        doc = miniyaml.load(config)
+    except (OSError, UnicodeDecodeError, miniyaml.MiniYamlError) as exc:
+        return row(f"warning: {CONFIG_REL} unreadable by the lib's YAML subset ({exc}); "
+                   "write engine.mcp in block style")
+    engine = doc.get("engine") if isinstance(doc, dict) else None
+    if not isinstance(engine, dict) or "mcp" not in engine:
+        return row("not configured (no engine.mcp)")
+    mcp = engine.get("mcp")
+    malformed = _engine_mcp_malformed(mcp)
+    if malformed:
+        return row(f"warning: {malformed}; the pin refuses engine-mcp:no-config")
+    flag = mcp.get("filter")
+    flag = flag.strip() if isinstance(flag, str) else DEFAULT_ENGINE_MCP_FILTER
+    tokens = _split_command(mcp["start"])
+    port = int(mcp["port"])
+    port_text = ("port per-run" if port == 0
+                 else f"port fixed {port} (one flagged run at a time)")
+    if any(t == flag or t.startswith(f"{flag}=") for t in tokens):
+        return row(f"verify-only filter {flag}; {port_text}")
+    return row(f"warning: engine.mcp.start has no {flag}; the verify-only rule "
+               f"(kb/engine-mcp-godot.md) rests on the engine skill alone; {port_text}")
+
+
 # --------------------------------------------------------------------- verbs
 
 def check(project_root: Path, spec_folder: str) -> dict:
@@ -1067,6 +1194,8 @@ def check(project_root: Path, spec_folder: str) -> dict:
     checks.append(playable_path_row(root))
     # Story 35.2: advisory too — the stories still without a plan
     checks.append(story_plans_row(folder_abs, spec_md, manifest))
+    # Story 35.4: advisory too — the engine MCP's verify-only filter and port
+    checks.append(engine_mcp_row(root))
 
     try:
         live = live_runs(list_runs(root))

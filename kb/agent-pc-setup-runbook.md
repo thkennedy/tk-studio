@@ -1084,7 +1084,7 @@ User scope each time it starts, so a change needs no new logon.
 | `TK_SUPERVISOR_TOKEN` | always | the API's bearer token. Never logged, never rendered |
 | `TK_SUPERVISOR_SESSION_SECRET` | always | signs the browser's session cookie (Story 22.5). Random, at least 32 bytes, else `serve` refuses with `SessionSecretWeak`. Never logged, never rendered |
 | `TK_SUPERVISOR_PORT` | no | the API's port, default `8787` |
-| `TK_SUPERVISOR_ENGINE_MCP_PORT` | no (Story 34.5) | the engine MCP forwarder's port on `TK_SUPERVISOR_BIND`, default `8788` (§4.8). Nothing else listens in the 8000 range |
+| `TK_SUPERVISOR_ENGINE_MCP_PORT` | no (Story 34.5; Story 35.4) | the engine MCP forwarder's port on `TK_SUPERVISOR_BIND` (§4.8). Unset (Story 35.4): a free port per run. Set (e.g. `8788`; nothing else listens in the 8000 range): fixed, one flagged run at a time — set it when the sandbox's network policy allows the tailnet address by host:port |
 | `TK_SUPERVISOR_TRANSCRIPT_BACKUP` | no, warned when unset | the nightly backup's `claude-projects` folder (§6). A resume restores a missing transcript from it, and every host run's transcript is copied into it |
 | `TK_SUPERVISOR_NOTIFY` | no | the notification target: `ntfy` or `telegram`. Unset sends nothing |
 | `TK_SUPERVISOR_NTFY_URL` | with `ntfy` | the full topic URL. The topic is its secret |
@@ -1363,16 +1363,29 @@ stopped at its release.
   `TK_SUPERVISOR_BIND` (the tailnet address, checked inside
   `100.64.0.0/10`: `0.0.0.0` or a LAN address fails
   `engine-mcp:start-failed` before anything starts) port
-  `TK_SUPERVISOR_ENGINE_MCP_PORT`, default **8788**. One flagged run at a
-  time holds it; a second concurrent flagged run's start fails
-  `engine-mcp:start-failed`.
-- **The server's own ports.** Only the server's HTTP port
-  (`engine.mcp.port`, 8000 in TUA's line) is checked before the server
-  starts; its WebSocket port (`--ws-port`, 9500 in TUA's line) is not
-  pre-checked. An editor the operator opened on this box with the
-  godot-ai add-on enabled holds 8000 and 9500 itself, so a flagged run
-  fails `engine-mcp:start-failed` while that editor is open: close it
-  before a flagged run starts.
+  `TK_SUPERVISOR_ENGINE_MCP_PORT`. Story 35.4: ports are per run by
+  default — unset or blank, the forwarder binds a free port and reports
+  it (`engine-mcp-forwarder ready <port>`); the URL the sandbox gets and
+  `engine-mcp-start`'s `forwarder_port` carry it. A set
+  `TK_SUPERVISOR_ENGINE_MCP_PORT` (the 34.5 default was **8788**) keeps
+  the forwarder fixed: one flagged run at a time holds it, and a second
+  concurrent flagged run's start fails `engine-mcp:start-failed`. If the
+  sandbox's network policy allows the tailnet address by host:port rather
+  than by host, set `TK_SUPERVISOR_ENGINE_MCP_PORT` (a per-run port would
+  be unreachable, and the loop never changes sbx network policy).
+- **The server's own ports.** `engine.mcp.port: 0` (Story 35.4, TUA's
+  line) is the per-run port: a free `127.0.0.1` port goes in for `{port}`
+  in `engine.mcp.start` and a second for `{ws_port}`, both recorded on
+  `engine-mcp-start` (`port`, `ws_port`). A positive `engine.mcp.port`
+  (e.g. 8000) stays fixed: checked before the server starts, `{port}`
+  replaced with it, one flagged run at a time. Only the HTTP port is
+  checked before the server starts; the WebSocket port is not
+  pre-checked. Whether the godot-ai add-on follows a non-default
+  `--ws-port` is measured on the box only (`kb/engine-mcp-godot.md`,
+  Reachability proof). An editor the operator opened on this box with the
+  godot-ai add-on enabled holds its own ports (8000 and 9500 by default),
+  so a flagged run on a fixed port fails `engine-mcp:start-failed` while
+  that editor is open: close it before a flagged run starts.
 - **Three processes per run.** The forwarder is its own detached child
   process (`bun src/enginemcp.ts forward`), beside the server and editor
   children, so all three outlive the one-shot `drain` that launched a
@@ -1409,9 +1422,12 @@ stopped at its release.
   `editor_state`) before treating the MCP as down. An editor that exits
   before the forwarder is ready fails the start `engine-mcp:start-failed`
   (every child stopped, no `engine-mcp-start`).
-- **The sandbox must reach `TK_SUPERVISOR_BIND:8788`.** If the sandbox's
-  network policy blocks the tailnet address, allow it by hand (§3.8); the
-  loop never changes sbx network policy.
+- **The sandbox must reach `TK_SUPERVISOR_BIND:<forwarder_port>`** (per
+  run by default, Story 35.4; the fixed `TK_SUPERVISOR_ENGINE_MCP_PORT`
+  when set). If the sandbox's network policy blocks the tailnet address,
+  allow it by hand (§3.8); the loop never changes sbx network policy. The
+  reachability proof on TUA is pending (`kb/engine-mcp-godot.md`,
+  `## Reachability proof (Story 35.4)`).
 - **The rule: verify-only, in this version.** The dev session may run the
   project's tests, verify the project and take a frame through the MCP; it
   never uses the server's scene-editing tools (the `gds-engine-godot-4`

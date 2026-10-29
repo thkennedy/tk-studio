@@ -2530,7 +2530,7 @@ class DriverContractTestCase(unittest.TestCase):
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
         # relaxed by Story 35.2 only to admit it after 35.8, and by Story 35.3 only to admit it after 35.2
-        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2(, Story 35\.3)? \(Epic 35\)")
+        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2(, Story 35\.3(, Story 35\.4)?)? \(Epic 35\)")
         taxonomy = json.loads((PLUGIN_ROOT / "contracts" / "events" / "taxonomy.v1.json")
                               .read_text(encoding="utf-8"))
         stage = taxonomy["events"]["stage"]
@@ -2608,7 +2608,7 @@ class DriverContractTestCase(unittest.TestCase):
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
         # relaxed by Story 35.3 only to admit it after 35.2
-        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2(, Story 35\.3)? \(Epic 35\)")
+        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2(, Story 35\.3(, Story 35\.4)?)? \(Epic 35\)")
 
     # --- Story 35.3: 0.1.30 (additive) — the slice path hardened: the tools' walls under the
     # guard's margin, the `match` red cases, the widened proof commit, `sheet --report`, the
@@ -2673,7 +2673,73 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertNotIn("are a retry, bound or not", note)
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
-        self.assertIn("Story 35.1, Story 35.8, Story 35.2, Story 35.3 (Epic 35)", stories)
+        # relaxed only to admit Story 35.4 after it
+        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2, Story 35\.3(, Story 35\.4)? \(Epic 35\)")
+
+    def test_0_1_30_story_35_4_engine_mcp_ports(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.30**", header)
+        self.assertNotIn("**0.1.31**", header)
+        self.assertEqual(header.count("0.1.30 (Story 35.4, additive)"), 1)
+        self.assertLess(header.index("0.1.30 (Story 35.3, additive)"),
+                        header.index("0.1.30 (Story 35.4, additive)"))
+        clause = " ".join(header[header.index("0.1.30 (Story 35.4, additive)"):].split())
+        for phrase in ("`engine.mcp.port: 0` is the per-run port", "`{port}`", "`{ws_port}`",
+                       "`engine-mcp:no-config`", "a positive port stays fixed (one flagged run at a time)",
+                       "`TK_SUPERVISOR_ENGINE_MCP_PORT`", "(`:0`)",
+                       "`port`, `forwarder_port` and `ws_port?`", "`advisory?`",
+                       "`engine_mcp?: \"stopped\" | \"stop pending\"`",
+                       "recorded before the children are let go", "a failed record kills all three",
+                       "`engine.mcp.filter` (default `--exclude-domains`)", "`engine mcp` row",
+                       "— additive) |"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        self.assertNotIn("**0.1.31**", flat)
+        self.assertEqual(flat.count("**0.1.30 (Story 35.4, additive).**"), 1)
+        self.assertLess(flat.index("**0.1.30 (Story 35.3, additive).**"),
+                        flat.index("**0.1.30 (Story 35.4, additive).**"))
+        note = flat[flat.index("**0.1.30 (Story 35.4, additive).**"):]
+        note = note[:note.index("## 8. Conformance")]
+        for phrase in ("**The ports:**", "`engine.mcp.port: 0` is the per-run port",
+                       "put in for `{port}` in `engine.mcp.start`", "for `{ws_port}` when the start line carries it",
+                       "`engine-mcp:no-config` (`engine.mcp.start has no {port} for port: 0`)",
+                       "keeps its 0.1.29 meaning", "never refused or ignored",
+                       "a fixed port means one flagged run at a time",
+                       "a set `TK_SUPERVISOR_ENGINE_MCP_PORT` keeps the forwarder fixed",
+                       "the forwarder binds `:0`", "`engine-mcp-forwarder ready <port>`",
+                       "This unset-means-per-run reading supersedes 0.1.29's default `8788`: a box whose "
+                       "sandbox network policy was opened by hand for `:8788` needs only to set "
+                       "`TK_SUPERVISOR_ENGINE_MCP_PORT` to `8788`.",
+                       "the race guards", "**The events:**",
+                       "`engine-mcp-start` and `engine-mcp-stop` gain `port`, `forwarder_port` and `ws_port?`",
+                       "`engine-mcp-start` gains `advisory?`",
+                       "`pin-released` and `pin-kept` gain `engine_mcp?: \"stopped\" | \"stop pending\"`",
+                       "present only when the run has an `engine-mcp-start`",
+                       "**Record before unref:**", "before the three children are let go (`unref`)",
+                       "a record that fails kills all three (the forwarder, the editor, then the server)",
+                       "`engine-mcp:start-failed` (`the start could not be recorded: <clipped>`)",
+                       "**The advisory:**", "the optional `filter`", "default `--exclude-domains`",
+                       "the token `<filter>` or `<filter>=…`", "the advisory row `engine mcp` after `story plans`, never a gap",
+                       "`not configured (no engine.mcp)`",
+                       "`verify-only filter <flag>; port <per-run|fixed <n> (one flagged run at a time)>`",
+                       "`warning: engine.mcp.start has no <flag>; the verify-only rule (kb/engine-mcp-godot.md) "
+                       "rests on the engine skill alone; port …`",
+                       "an `engine.mcp` the pin itself refuses reads `warning: <the pin's reason>; "
+                       "the pin refuses engine-mcp:no-config`",
+                       "write engine.mcp in block style`", "the advisory never refuses a start",
+                       "**Measured on the box only:**", "measured on the box only",
+                       "`## Reachability proof (Story 35.4)`",
+                       "Every other field, kind and route is unchanged."):
+            self.assertIn(phrase, note)
+        # the 0.1.29 Story 34.5 sentences stay as they were
+        for phrase in ("port `TK_SUPERVISOR_ENGINE_MCP_PORT` (default `8788`)",
+                       "records `engine-mcp-start {name, pid, start, url, forwarder_pid, forwarder_start, editor_pid, "
+                       "editor_start}`"):
+            self.assertIn(phrase, flat)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 35.1, Story 35.8, Story 35.2, Story 35.3, Story 35.4 (Epic 35)", stories)
 
     # --- AC 2: A7 dossier items covered or explicitly deferred with a seam
 
