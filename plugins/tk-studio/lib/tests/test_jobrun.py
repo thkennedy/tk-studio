@@ -222,6 +222,55 @@ class JobRunTestCase(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["payload"]["run_id"], run_id)
 
+    # ------------------------- DW-5: a repeat same-state finish is a no-op
+
+    def test_finish_repeat_same_state_is_noop(self):
+        self._declare("agentic", self._skill_defn("agentic"))
+        run_id = jobrun.submit(self.root, "agentic")["run_id"]
+        first = jobrun.finish(self.root, run_id, "complete",
+                              total_cost_usd=1.0)
+        self.assertIn("capture", first)
+        run_json = joblib.run_path("proj", run_id)
+        before_bytes = run_json.read_bytes()
+        before_events = self._ledger_events()
+        again = jobrun.finish(self.root, run_id, "complete",
+                              total_cost_usd=9.9, status_block={
+                                  "status": "complete",
+                                  "intent": "tk-studio-observe",
+                                  "artifacts": [], "reason": None})
+        self.assertEqual(again, {"run_id": run_id, "state": "complete",
+                                 "reason": None})
+        self.assertNotIn("capture", again)
+        self.assertEqual(run_json.read_bytes(), before_bytes)
+        self.assertEqual(self._ledger_events(), before_events)
+        self.assertEqual(len(self._job_run_events()), 1)
+
+    def test_finish_repeat_partial_keeps_original_reason(self):
+        self._declare("agentic", self._skill_defn("agentic"))
+        run_id = jobrun.submit(self.root, "agentic")["run_id"]
+        jobrun.finish(self.root, run_id, "partial", reason="reason A")
+        run_json = joblib.run_path("proj", run_id)
+        before_bytes = run_json.read_bytes()
+        again = jobrun.finish(self.root, run_id, "partial", reason="reason B")
+        self.assertEqual(again, {"run_id": run_id, "state": "partial",
+                                 "reason": "reason A"})
+        self.assertEqual(run_json.read_bytes(), before_bytes)
+        self.assertEqual(joblib.read_run("proj", run_id)["reason"],
+                         "reason A")
+        self.assertEqual(len(self._job_run_events()), 1)
+
+    def test_finish_different_terminal_state_still_refused(self):
+        self._declare("agentic", self._skill_defn("agentic"))
+        run_id = jobrun.submit(self.root, "agentic")["run_id"]
+        jobrun.finish(self.root, run_id, "complete")
+        run_json = joblib.run_path("proj", run_id)
+        before_bytes = run_json.read_bytes()
+        with self.assertRaises(joblib.JobError) as ctx:
+            jobrun.finish(self.root, run_id, "partial", reason="late")
+        self.assertIn("terminal", str(ctx.exception))
+        self.assertEqual(run_json.read_bytes(), before_bytes)
+        self.assertEqual(len(self._job_run_events()), 1)
+
     # ------------------------- ST-061 / Story 20.1: finish records the cost
 
     def _queued_skill_run(self) -> str:

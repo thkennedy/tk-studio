@@ -688,12 +688,22 @@ def finish(project_root: Path, run_id: str, state: str,
     run.json and the event; it is validated before anything is written.
     Story 34.3: an optional playable_verify_cost_usd (the playable-verify
     judge's cost, also counted in total_cost_usd) lands the same way, as
-    its own field."""
+    its own field.
+    A repeat finish on a run already terminal in the requested state is a
+    no-op (DW-5, AD-12): run.json is not rewritten, nothing is captured or
+    landed, no second job-run event is emitted; the current record's
+    result shape returns, without `capture`. A different terminal state is
+    still refused by update_run (terminal states are immutable)."""
     cost = None if total_cost_usd is None else _validate_cost(total_cost_usd)
     pv_cost = (None if playable_verify_cost_usd is None
                else _validate_cost(playable_verify_cost_usd,
                                    "playable_verify_cost_usd"))
     key = joblib.project_key(Path(project_root))
+    current = joblib.read_run(key, run_id)
+    if (current["state"] in joblib.TERMINAL_STATES
+            and current["state"] == state):
+        return {"run_id": run_id, "state": current["state"],
+                "reason": current.get("reason")}
     changes: dict = {"state": state}
     if cost is not None:
         changes["total_cost_usd"] = cost

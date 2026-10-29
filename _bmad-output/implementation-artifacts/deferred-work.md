@@ -34,7 +34,8 @@ source_spec: `20-1-finish-records-what-the-run-cost-finish-records-what-the-run-
 location: plugins/tk-studio/lib/jobrun.py finish / plugins/tk-studio/lib/job.py:570
 severity: low
 reason: job.update_run allows new_state == record state on a terminal run (job.py:570), and finish always calls _finalize_run, which emits. This behaviour predates this story for reason/status_block. It touches the AD-12 one-event-per-terminal-transition invariant (deferral class (b)). Raised by the edge-case-hunter review layer.
-status: open
+status: done 2026-10-29
+resolution: resolved by sweep bundle dw-job-finish-idempotence
 
 ### DW-6: The contract names no executing wrapper for a one-shot run started from the invoke-skill directive that `submit` returns, and gives no path for Hermes (which submits but never executes) to hand that d
 origin: spec-deferred a6391be903d9
@@ -991,4 +992,20 @@ source_spec: `spec-dw-atlassian-round-trip.md`
 location: plugins/tk-studio/lib/jirabackend.py update_workflow
 severity: medium
 reason: Both review layers flagged it. The test fake checks only uppercase types and the version, so any transition shape passes. The spec's Design Notes kept the body shape ungraded (kb §2 Q1 grade C), so the first live setup may still be refused and fall back to the owner steps. Deferral class (a): a defect in the workflow-update behaviour DW-107 names.
+status: open
+
+### DW-128: A _land_summary failure inside _finalize_run raises before _emit_job_event, leaving a terminal run with no job-run event; with DW-5 a same-state retry no longer repairs it.
+origin: spec-deferred 10fc2e0ce39e
+source_spec: `spec-dw-5-job-finish-idempotence.md`
+location: plugins/tk-studio/lib/jobrun.py:375
+severity: low
+reason: update_run persists the terminal state before _finalize_run; _finalize_run guards only capture, and _land_summary (write_workspace_json) can raise before the emit. Before DW-5 a repeat finish re-ran _finalize_run. The intent mandates the no-op, so the fix belongs in _finalize_run ordering or a finalized marker (deferral class b, AD-12 exactly-once).
+status: open
+
+### DW-129: Two concurrent finish calls on the same non-terminal run can both pass the pre-read and both emit a job-run event.
+origin: spec-deferred a597f7911645
+source_spec: `spec-dw-5-job-finish-idempotence.md`
+location: plugins/tk-studio/lib/jobrun.py:701
+severity: low
+reason: The read_run check in finish and the write in update_run are separate, unlocked steps, and update_run accepts a same-state terminal rewrite (job.py:586). This race predates DW-5 (which only closes the sequential repeat); closing it needs a check inside update_run or a lock, which the DW-5 spec forbids changing (deferral class b, AD-12).
 status: open
