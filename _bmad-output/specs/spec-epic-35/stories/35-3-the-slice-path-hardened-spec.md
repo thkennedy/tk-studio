@@ -236,6 +236,11 @@ DRIFT: worktree fixture `exit: 0` and one hostleg expectation updated — follow
 | review | 1 | 2026-10-29T05:46:28Z | 2026-10-29T06:04:11Z | 74b28fc5-93d2-473b-a8aa-cb1f2822f424 | claude-opus-5-5 | medium | 6327345 | 50260 | 4.4552 | completed |
 | review | 2 | 2026-10-29T06:04:11Z | 2026-10-29T06:20:59Z | 09d1d1f4-213a-4a16-9318-46bebf893a5d | claude-opus-5-5 | medium | 6788670 | 55976 | 4.9207 | completed |
 | gate | 1 | 2026-10-29T06:20:59Z | 2026-10-29T06:26:24Z | a4f8418c-3b48-4861-8f40-c756b3050427 | claude-opus-5-5 | medium | 3039696 | 25393 | 2.1380 | completed |
+| host-leg | 1 | 2026-10-29T06:27:04Z | 2026-10-29T06:53:39Z | — | — | — | — | — | — | red |
+| close-out | 1 | 2026-10-29T06:53:39Z | 2026-10-29T06:53:46Z | — | — | — | — | — | — | draft PR |
+| re-run | 1 | 2026-10-29T06:55:26Z | 2026-10-29T07:23:15Z | — | — | — | — | — | — | red |
+| re-run | 2 | 2026-10-29T07:35:37Z | 2026-10-29T08:03:47Z | — | — | — | — | — | — | green |
+| merge | — | 2026-10-29T08:04:43Z | 2026-10-29T08:04:43Z | — | — | — | — | — | — | merged |
 
 ## Auto Run Result
 
