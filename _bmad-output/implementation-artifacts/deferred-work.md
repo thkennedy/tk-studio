@@ -270,7 +270,8 @@ source_spec: `30-7-our-own-assets-spec.md`
 location: .gitattributes
 severity: medium
 reason: .gitattributes:3,7 pin eol=lf only for measurements/*.jsonl and tools/installer/install.*. Story criterion (a): AC1 says the export is reproducible, checked by a test. A fix outside the plan's 17-entry Files list was ruled out by consult (Consult Log). Operator fix: add `apps/studio-web/public/sprites/office.json text eol=lf` to .gitattributes.
-status: open
+status: done 2026-10-29
+resolution: resolved by sweep bundle dw-office-json-eol-pin
 
 ### DW-35: Follow-up review still recommended for 31-1-the-free-tier-verified after the damping cap was spent
 origin: review-budget-followup
