@@ -2530,7 +2530,7 @@ class DriverContractTestCase(unittest.TestCase):
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
         # relaxed by Story 35.2 only to admit it after 35.8, and by Story 35.3 only to admit it after 35.2
-        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2(, Story 35\.3(, Story 35\.4)?)? \(Epic 35\)")
+        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2(, Story 35\.3(, Story 35\.4(, Story 35\.5)?)?)? \(Epic 35\)")
         taxonomy = json.loads((PLUGIN_ROOT / "contracts" / "events" / "taxonomy.v1.json")
                               .read_text(encoding="utf-8"))
         stage = taxonomy["events"]["stage"]
@@ -2608,7 +2608,7 @@ class DriverContractTestCase(unittest.TestCase):
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
         # relaxed by Story 35.3 only to admit it after 35.2
-        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2(, Story 35\.3(, Story 35\.4)?)? \(Epic 35\)")
+        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2(, Story 35\.3(, Story 35\.4(, Story 35\.5)?)?)? \(Epic 35\)")
 
     # --- Story 35.3: 0.1.30 (additive) — the slice path hardened: the tools' walls under the
     # guard's margin, the `match` red cases, the widened proof commit, `sheet --report`, the
@@ -2674,7 +2674,7 @@ class DriverContractTestCase(unittest.TestCase):
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
         # relaxed only to admit Story 35.4 after it
-        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2, Story 35\.3(, Story 35\.4)? \(Epic 35\)")
+        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2, Story 35\.3(, Story 35\.4(, Story 35\.5)?)? \(Epic 35\)")
 
     def test_0_1_30_story_35_4_engine_mcp_ports(self):
         header = next(line for line in self.text.splitlines()
@@ -2739,7 +2739,74 @@ class DriverContractTestCase(unittest.TestCase):
             self.assertIn(phrase, flat)
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
-        self.assertIn("Story 35.1, Story 35.8, Story 35.2, Story 35.3, Story 35.4 (Epic 35)", stories)
+        # relaxed only to admit Story 35.5 after it
+        self.assertRegex(stories, r"Story 35\.1, Story 35\.8, Story 35\.2, Story 35\.3, Story 35\.4(, Story 35\.5)? \(Epic 35\)")
+
+    # --- Story 35.5: 0.1.30 (additive) — the sandbox and the host agree: `requires.tier` and
+    # `placement:TierRequired`, the `godot` shim, `maintenance-evals` and the `tk-studio-evals` surface.
+
+    def test_0_1_30_story_35_5_sandbox_and_host(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.30**", header)
+        self.assertNotIn("**0.1.31**", header)
+        self.assertEqual(header.count("0.1.30 (Story 35.5, additive)"), 1)
+        self.assertLess(header.index("0.1.30 (Story 35.4, additive)"),
+                        header.index("0.1.30 (Story 35.5, additive)"))
+        clause = " ".join(header[header.index("0.1.30 (Story 35.5, additive)"):].split())
+        for phrase in ("`requires: {tier: \"sbx\" | \"host\"}`", "`placement:TierRequired`",
+                       "before anything is queued or spawned", "`jobs.<project-id>/<job-id>` in `TK_SUPERVISOR_CONFIG`",
+                       "`POST /jobs` 400 by name", "`godot` shim", "`engine.godot_shim`",
+                       "`maintenance-evals`", "`tk-studio-evals`", "`lib/evals.py run`", "— additive) |"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        self.assertNotIn("**0.1.31**", flat)
+        self.assertEqual(flat.count("**0.1.30 (Story 35.5, additive).**"), 1)
+        self.assertLess(flat.index("**0.1.30 (Story 35.4, additive).**"),
+                        flat.index("**0.1.30 (Story 35.5, additive).**"))
+        note = flat[flat.index("**0.1.30 (Story 35.5, additive).**"):]
+        note = note[:note.index("## 8. Conformance")]
+        for phrase in ("**`requires.tier`:**", "optional `requires: {tier: \"sbx\" | \"host\"}`",
+                       "An instance's own `requires` overrides its type's",
+                       "`run-epic`, `run-vertical-slice` and `maintenance-evals` ship `{tier: \"sbx\"}`",
+                       "35.7's `run-sweep` ships it too", "**`placement:TierRequired`:**",
+                       "refuses before `queue.enqueue`: nothing is queued and nothing is spawned",
+                       "requires tier sbx; placement resolved <tier> (<explicit|stored|config|default>) — set "
+                       "jobs.<project-id>/<job-id> {tier: \"sbx\", sandbox: \"<name>\"} in TK_SUPERVISOR_CONFIG",
+                       "`POST /jobs` answers it 400 by name", "its claim refusal key is `placement:TierRequired`",
+                       "refused the same way on the drain's claim path",
+                       "before its claim gate spawns anything", "left `queued` until its placement is fixed",
+                       "no new event shape", "`requires` is never loosened for it",
+                       "**The `godot` shim:**", "an absolute path to a file", "`tk-sup-hv-` temp dir",
+                       "`exec \"$GODOT\" \"$@\"`", "`godot.cmd`, `@\"%GODOT%\" %*`",
+                       "prepended before the `GODOT` folder under the same PATH key",
+                       "is spawned as `$GODOT` itself", "`godot_shim?`",
+                       "where the command runs as in 0.1.29",
+                       "This supersedes 0.1.29 Story 34.1's \"the leg never resolves `godot` itself\" only when "
+                       "`GODOT` is an absolute path to a file.",
+                       "**`maintenance-evals`:**", "which stays a host core job", "`target.skill: \"tk-studio-evals\"`",
+                       "the operator queues it once", "**The `tk-studio-evals` surface** (§2)",
+                       "--trust-plugin --allow-tools Bash Write --no-publish --threshold 0 --case <case> --runs <n> "
+                       "--json <out>/<case>.json",
+                       "`{cases: {<case>: {runs, passed, score}}, cli: \"<claude --version>\"}`",
+                       "its `reason` is `<case> <passed>/<runs>; …`", "the run's `job-run` ledger line carries",
+                       "measured on the box only", "Every other field, kind and route is unchanged."):
+            self.assertIn(phrase, note)
+        # the 0.1.29 Story 34.1 sentence stays as it was
+        self.assertIn("the leg never resolves `godot` itself", flat[:flat.index("**0.1.30 (Story 35.5, additive).**")])
+        row = next(line for line in self.text.splitlines()
+                   if line.startswith("| `tk-studio-evals` (0.1.30, Story 35.5) |"))
+        self.assertIn("`lib/evals.py run`", row)
+        self.assertIn("`<out>/scores.json`", row)
+        self.assertIn("`requires` `{tier}` added at 0.1.30, Story 35.5", flat)
+        schema = json.loads((PLUGIN_ROOT / "contracts" / "job.schema.json").read_text(encoding="utf-8"))
+        self.assertEqual(schema["definition"]["fields"]["requires"]["fields"]["tier"]["enum"], ["host", "sbx"])
+        for type_id in ("run-epic", "run-vertical-slice", "maintenance-evals"):
+            defn = json.loads((PLUGIN_ROOT / "jobs" / f"{type_id}.json").read_text(encoding="utf-8"))
+            self.assertEqual(defn["requires"], {"tier": "sbx"}, type_id)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertIn("Story 35.1, Story 35.8, Story 35.2, Story 35.3, Story 35.4, Story 35.5 (Epic 35)", stories)
 
     # --- AC 2: A7 dossier items covered or explicitly deferred with a seam
 

@@ -5,7 +5,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createApi } from "../src/api";
 import { closeOutOrphans, relauncher, type Started } from "../src/cli";
 import { closableVerdict, closeOutPaused, ESCALATION_BLOCKED_REASON, findSpec, frontmatter, gracefulStopInForce, harvestMessage, jiraBound, landing, launchedSinceMove, NOT_HANDED, REARM_SKIPPED, rearmFailedLine, resumePaused, ResumeRefused, trackArgs, type PausedDeps } from "../src/closeout";
@@ -29,7 +29,8 @@ const IDENTITY = { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", 
 
 let sbx: ReturnType<typeof fakeSbx>;
 let studio: ReturnType<typeof fakeStudioRoot>;
-beforeAll(() => { sbx = fakeSbx(); studio = fakeStudioRoot(); });
+// Story 35.5: the mirrored studio is the repo root, passed explicitly (never inherited from `process.env.TK_STUDIO_ROOT`).
+beforeAll(() => { sbx = fakeSbx(); studio = fakeStudioRoot(resolve(import.meta.dir, "..", "..", "..")); });
 
 /** Hole 38: an sbx run's engine status (`launch.py status`) is read inside its sandbox, so the fake `sbx`
  * answers it; a test's host `uv` override keeps answering a host-tier run. `"fail"`: the probe fails. */

@@ -3,7 +3,7 @@
 // cancel), the run spend, and every refusal. The "fake adapter" is the injected `uv` (the fake plansync through real
 // `uv`, a fake track.py answer), real git against a throwaway origin, `fakeGh`, a fake submitter and a fake graceful
 // stop: no live Atlassian, no live `gh`, no push beyond the throwaway origin.
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname as dirnameOf, join } from "node:path";
@@ -15,7 +15,8 @@ import { applyInput, newEngagement, readEngagement, writeEngagement, type Autono
 import type { EndNotice } from "../src/hygiene";
 import { Queue, type Owner } from "../src/queue";
 import { runProcess, type RunResult } from "../src/server";
-import { engagementPlacement } from "../src/cli";
+import { spawnSync } from "node:child_process";
+import { engagementPlacement, engagementSubmitter, StartError } from "../src/cli";
 import { fakeGh, fakePlansync, gitRepo, testGit } from "./fakes";
 import { tempDir, track } from "./tmp";
 
@@ -1144,4 +1145,59 @@ describe("Story 34.8: approve's type rule (AC1)", () => {
       expect(job.type).toBe("run-epic");
     }
   });
+});
+
+describe("Story 35.5: an approve-minted run-epic-N the host placement cannot run (hole 90)", () => {
+  test("the submit's TierRequired refusal rides the queued step's existing refusal path: queued false naming the per-job config entry, nothing queued; requires never loosened", async () => {
+    const queue = newQueue();
+    const { root } = servedRepo({ record: approvedRecord({ baseRef: "release" }) });
+    const reason = 'TierRequired: job run-epic-41 requires tier sbx; placement resolved host (explicit) — set jobs.p/run-epic-41 {tier: "sbx", sandbox: "<name>"} in TK_SUPERVISOR_CONFIG';
+    const refusing = fakeSubmit(queue, { fail: reason });
+    const fx = approveDeps(queue, { submit: refusing.submit });
+    await approvePass(queue, fx.deps, { root, engagement: ENG });
+    expect(steps(queue)).toEqual([["append", true], ["sync", true], ["job", true], ["commit", true], ["pr", true]]);
+    fx.gh.answer({ view: "MERGED" });
+    await approvePass(queue, fx.deps);
+    expect(steps(queue).slice(5)).toEqual([["queued", false]]);
+    expect(approveEvents(queue).find((d) => d.step === "queued")!.detail).toMatchObject({ reason });
+    expect(refusing.calls.map((c) => c.jobId)).toEqual(["run-epic-41"]);
+    expect(queue.runs()).toEqual([]);
+    expect(queue.serviceEvents(RUN_QUEUED_EVENT)).toEqual([]);
+  }, 60_000);
+});
+
+// Story 35.5 (review): the real chain an approve-minted run takes — `engagementSubmitter` → `engagementPlacement`'s host
+// fallback → `submitJob` (the registry, `resolve`) → the requires-tier check — against a throwaway store (as
+// enginemcp.test.ts's e2e block does), with no per-job entry anywhere in the supervisor config.
+const canRunChain = !!process.env.TK_STUDIO_ROOT && spawnSync("uv", ["--version"]).status === 0;
+
+describe.skipIf(!canRunChain)("Story 35.5: the production submitter on the host fallback (hole 90)", () => {
+  const store = temp("tk-sup-ap-store-");
+  const prev: Record<string, string | undefined> = {};
+  beforeAll(() => {
+    for (const k of ["TK_STUDIO_HOME", "TK_SUPERVISOR_CONFIG"]) prev[k] = process.env[k];
+    process.env.TK_STUDIO_HOME = store;
+    delete process.env.TK_SUPERVISOR_CONFIG; // no config: the host fallback
+  });
+  afterAll(() => { for (const [k, v] of Object.entries(prev)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } });
+
+  test("an approve-minted run-epic-N placed on the host fallback is refused TierRequired by name through the real submit, nothing enqueued", async () => {
+    const repo = gitRepo({
+      ".tk-studio/config.yaml": CONFIG.replace("run-epic-40", "run-epic-41"),
+      ".tk-studio/jobs/run-epic-41.json": JSON.stringify({ job_schema_version: 1, id: "run-epic-41", type: "run-epic", target: { payload: { epic: 41 } } }),
+    });
+    const root = repo.checkout;
+    const plugin = join(process.env.TK_STUDIO_ROOT!, "plugins", "tk-studio");
+    const reg = spawnSync("uv", ["run", join(plugin, "lib", "registry.py"), "register", "--directory", root, "--writer", "onboard"],
+      { env: { ...process.env, TK_STUDIO_HOME: store }, encoding: "utf-8", timeout: 120_000 });
+    if (reg.status !== 0) throw new Error(`register failed: ${reg.stdout}${reg.stderr}`);
+    expect(engagementPlacement("run-epic-41", root)).toEqual({ tier: "host", source: "host" });
+    const queue = newQueue();
+    const err = await engagementSubmitter({ queue })("run-epic-41", root, { payload: { engagement: ENG, project: "p" } }).catch((e) => e);
+    expect(err).toBeInstanceOf(StartError);
+    expect(String(err.message)).toBe('TierRequired: job run-epic-41 requires tier sbx; placement resolved host (explicit) — set '
+      + 'jobs.p/run-epic-41 {tier: "sbx", sandbox: "<name>"} in TK_SUPERVISOR_CONFIG');
+    expect(queue.runs()).toEqual([]);
+    expect(queue.serviceEvents(RUN_QUEUED_EVENT)).toEqual([]);
+  }, 180_000);
 });

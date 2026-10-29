@@ -920,6 +920,27 @@ class RealRunnerNtTests(Base):
         self.assertFalse((self.art() / "crate-small.glb").exists())
 
 
+class ChildOutputHandleTests(unittest.TestCase):
+    """Story 35.5 (hole 77): a child's output handle is opened for writing,
+    never for appending — MSYS bash cannot write to an append-only handle
+    (`echo: write error: Bad file descriptor`), so a bash child lost every
+    line. The real `run_blender` hands its child a fresh `"wb"` log: a stale
+    log is truncated, and the child's lines land in order. Runs on Windows
+    (the child is this interpreter, no shebang)."""
+
+    def test_run_blender_hands_its_child_a_write_handle_not_an_append_handle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "blender.log"
+            log.write_text("stale line from an earlier run\n", encoding="utf-8")
+            code, timed_out, _ = assets.run_blender(
+                [sys.executable, "-c", "import sys; print('first'); print('second', file=sys.stderr, flush=True); print('verify: OK')"],
+                cwd=Path(tmp), log_path=log, timeout_s=30)
+            self.assertEqual((code, timed_out), (0, False))
+            lines = log.read_text(encoding="utf-8").split()
+            self.assertNotIn("stale", lines)
+            self.assertEqual(sorted(lines), sorted(["first", "second", "verify:", "OK"]))
+
+
 # ------------------------------------------------------- the real geometry
 
 def _newell(pts):

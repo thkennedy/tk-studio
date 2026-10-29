@@ -1,7 +1,9 @@
 """Tests for the minimal YAML subset (ST-2.1 foundation; registry reuses it)."""
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -160,6 +162,30 @@ class DumpTests(unittest.TestCase):
     def test_rejects_list_of_collections(self):
         with self.assertRaises(miniyaml.MiniYamlError):
             miniyaml.dumps({"items": [{"k": "v"}]})
+
+
+class WindowsPathInTestYamlTests(unittest.TestCase):
+    """Story 35.5 (hole 82): a sandbox-written test that puts a temp path into
+    a config YAML must quote it so the backslashes survive on Windows —
+    `json.dumps` (a double-quoted scalar, every backslash doubled) or single
+    quotes — never a bare f-string inside double quotes. Runs everywhere: on
+    Windows the temp path holds the backslashes this guards."""
+
+    def test_a_temp_path_written_through_json_dumps_or_single_quotes_reads_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "store dir" / "x")
+            unc = "\\\\server\\share\\" + Path(tmp).name
+            for value in (path, unc, "C:\\Users\\tim\\AppData\\Local\\Temp\\tmpab12"):
+                config = Path(tmp) / "config.yaml"
+                config.write_text(f"root: {json.dumps(value, ensure_ascii=False)}\nsingle: '{value}'\n",
+                                  encoding="utf-8")
+                self.assertEqual(miniyaml.load(config), {"root": value, "single": value})
+
+    def test_a_bare_double_quoted_backslash_pair_collapses(self):
+        # the hazard: `f'root: "{path}"'` reads a doubled backslash (a UNC
+        # prefix) back as one — the reason the rule above exists
+        unc = "\\\\server\\share"
+        self.assertEqual(miniyaml.loads(f'root: "{unc}"\n'), {"root": "\\server\\share"})
 
 
 if __name__ == "__main__":

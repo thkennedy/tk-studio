@@ -31,6 +31,14 @@
       },
       "durable": { "type": "boolean", "required": false, "note": "durable-recurring requirement: local harness schedules are session-scoped, so a session-scoped binding MUST surface this constraint (cloud routine or external harness needed) instead of silently losing the schedule (ST-6.2)" },
       "editor_in_the_loop": { "type": "boolean", "required": false, "default": false, "note": "Story 34.5: a run of this job is an editor-in-the-loop run — the supervisor ORs it with the submission flag (Story 22.3): the Godot snapshot, then one engine MCP on the host started with the sandbox pin and stopped at release (driver-contract 0.1.29)" },
+      "requires": {
+        "type": "object",
+        "required": false,
+        "note": "Story 35.5 (CAP-12, additive): the tier a run of this job requires; an instance's own requires overrides its type's (the overlay rule above). submit refuses a resolved placement whose tier differs with placement:TierRequired before anything is queued or spawned (driver-contract 0.1.30)",
+        "fields": {
+          "tier": { "type": "string", "enum": ["host", "sbx"], "note": "the only key; run-epic, run-vertical-slice and maintenance-evals ship sbx" }
+        }
+      },
       "guards": {
         "type": "object",
         "note": "budget guards — at least one required, values > 0; a guard hit ends the run partial with the guard named in reason (§4)",

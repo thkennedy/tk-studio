@@ -110,7 +110,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import {
   buildWorkerCommand, checkTier, finishStateFor, invokeSkill, lastJsonObject, maxLoginPreflight, MISSING_STATUS_BLOCK,
-  readProjectConfig, registryShow, requireCompatible, resolveStudioRoot, runJobVerb, runProcess, runUv, SbxSandboxMissing, toVmPath, WORKER_RECORD_FAILED, type Spawner, type Tier,
+  readProjectConfig, registryShow, requireCompatible, resolveStudioRoot, runJobVerb, runProcess, runUv, SbxSandboxMissing, TierRequired, toVmPath, WORKER_RECORD_FAILED, type Spawner, type Tier,
 } from "./server";
 import { serve as serveApi } from "./api";
 import { notifier, pluginRoot, tlsConfig, WorkDirMissing, workDir } from "./env";
@@ -431,6 +431,24 @@ function resolveBeforeStart(jobId: string, root: string, explicit: OptionLayer, 
   // naming any other.
   try { return { options: resolveWorkerOptions(explicit, storedLayer(stored), config, root), config }; }
   catch (e) { throw refusal(message(e)); }
+}
+
+/** Story 35.5 (CAP-12): which layer the resolved tier came from — explicit ?? stored ?? config ?? default. */
+function placementSource(explicit: OptionLayer, stored: QueueRun | null | undefined, config: JobOptions): string {
+  const set = (v: unknown) => v !== undefined && v !== null && v !== "";
+  if (set(explicit.tier)) return "explicit";
+  if (set(storedLayer(stored).tier)) return "stored";
+  return set(config.tier) ? "config" : "default";
+}
+
+/** Story 35.5 (CAP-12, hole 90): a definition whose `requires.tier` the resolved placement does not have is refused
+ * (TierRequired, named) before `queue.enqueue` — nothing queued, nothing spawned — and, on the drain's claim path,
+ * before the claim gate (`placementRefusal` keys it `placement:TierRequired`; the run stays `queued`). */
+function requireTier(v: Pick<Validated, "jobId" | "projectId" | "defn">, options: WorkerOptions, source: string): void {
+  const required = v.defn?.requires?.tier;
+  if (typeof required === "string" && required !== options.tier) {
+    throw refusal(new TierRequired(v.jobId, v.projectId, required, options.tier, source).message);
+  }
 }
 
 const explicitLayer = (permissionMode: string | undefined, opts: RunOptions): OptionLayer =>
@@ -982,15 +1000,18 @@ export async function submitJob(
   catch (e) { throw new StartError(message(e)); }
   const { queue, owned } = openQueue(opts);
   try {
-    let v: Validated, options: WorkerOptions;
+    let v: Validated, options: WorkerOptions, config: JobOptions;
     try {
       // Story 22.3: a flagged run needs the work folder its snapshot lands in — refused, nothing queued.
       if (opts.editorInTheLoop && !workDir(opts.hygiene?.env)) throw refusal(new WorkDirMissing().message);
       const root = resolve(directory);
       if (!existsSync(root)) throw refusal(`directory does not exist: ${directory}`);
       // Worker options resolved before any process (a host bypass is refused, nothing queued).
-      ({ options } = resolveBeforeStart(jobId, root, explicitLayer(opts.permissionMode, opts), liveRun(queue, jobId, root)));
+      const explicit = explicitLayer(opts.permissionMode, opts), stored = liveRun(queue, jobId, root);
+      ({ options, config } = resolveBeforeStart(jobId, root, explicit, stored));
       v = await validate(jobId, directory, undefined, opts.guardCapS);
+      // Story 35.5: a job that requires a tier its placement lacks (TierRequired, nothing queued or spawned).
+      requireTier(v, options, placementSource(explicit, stored, config));
       // Story 34.5: a run its job definition flags needs the work folder too (the same refusal, nothing queued).
       if (v.defn?.editor_in_the_loop === true && !workDir(opts.hygiene?.env)) throw refusal(new WorkDirMissing().message);
     }
@@ -1270,6 +1291,9 @@ export function placementRefusal(reason: string): (ClaimRefused & { key: string 
   if (reason.startsWith("TierRefused")) {
     return { key: "placement:TierRefused", reason, resolves: "a tier of host or sbx: the job's TK_SUPERVISOR_CONFIG `tier` (a tier stored on the run changes only by cancelling it and resubmitting with --tier); the next drain pass claims the run" };
   }
+  if (reason.startsWith("TierRequired")) {
+    return { key: "placement:TierRequired", reason, resolves: "the job's TK_SUPERVISOR_CONFIG entry jobs.<project-id>/<job-id> with the tier its definition requires (sbx: and a sandbox), or cancel the run and resubmit with --tier; the next drain pass claims the run" };
+  }
   if (reason.startsWith("SbxSandboxMissing")) {
     return { key: "placement:SbxSandboxMissing", reason, resolves: "a sandbox name: the job's TK_SUPERVISOR_CONFIG `sandbox` (or cancel the run and resubmit with --sandbox); the next drain pass claims the run" };
   }
@@ -1374,24 +1398,35 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
       // Worker options resolved before anything starts: a host bypass is refused (AD-2
       // ruling), an unknown tier or an sbx tier without a sandbox too — nothing queued.
       const stored = opts.runId ? queue.get(opts.runId) : liveRun(queue, jobId, root);
-      try { ({ options, config } = resolveBeforeStart(jobId, root, explicit, stored)); }
-      catch (e) {
-        // Story 33.2: a drained run whose placement is refused stays `queued`, its refusal recorded, until it clears.
+      // Story 33.2: a drained run whose placement is refused stays `queued`, its refusal recorded, until it clears.
+      const claimRefusal = async (e: unknown): Promise<RunSummary | null> => {
         const placement = opts.runId ? placementRefusal(message(e)) : null;
-        if (placement) return await refusedClaim(queue, opts.runId!, jobId, await recordedRefusal(queue, opts.runId!, placement, opts.hygiene));
-        throw e;
-      }
+        return placement ? refusedClaim(queue, opts.runId!, jobId, await recordedRefusal(queue, opts.runId!, placement, opts.hygiene)) : null;
+      };
+      try { ({ options, config } = resolveBeforeStart(jobId, root, explicit, stored)); }
+      catch (e) { const r = await claimRefusal(e); if (r) return r; throw e; }
       if (opts.runId) {
+        // Story 35.5 (hole 90): a drained run whose definition requires a tier its placement lacks is refused before the
+        // claim gate spawns anything (`placement:TierRequired`, the run left `queued`) — read from the run's stored
+        // definition here, and from the freshly resolved one after `validate` below.
+        try { requireTier({ jobId, projectId: projectIdOf(root), defn: (stored ? queue.definition(stored) : null) ?? {} }, options, placementSource(explicit, stored, config)); }
+        catch (e) { const r = await claimRefusal(e); if (r) return r; throw e; }
         // Story 33.2: the drain's gate before the claim — the pin (moved here from the drive), then the preflight.
         const refused = await claimGate(queue, opts.runId, options, {
           sbx: sbxDeps(opts.worktree), ...(opts.hygiene ? { hygiene: opts.hygiene } : {}), ...(opts.restarted ? { restarted: opts.restarted } : {}),
         });
         if (refused) return refusedClaim(queue, opts.runId, jobId, refused);
+        v = await validate(jobId, directory, permissionMode, opts.guardCapS);
+        try { requireTier(v, options, placementSource(explicit, stored, config)); }
+        catch (e) { const r = await claimRefusal(e); if (r) return r; throw e; }
       } else {
+        // Story 35.5 (AC4): validated (the registry and `resolve`, no claude) and the requires-tier check made before the
+        // login preflight spawns `claude auth status` — a TierRequired refusal starts no process and is never masked.
+        v = await validate(jobId, directory, permissionMode, opts.guardCapS);
+        requireTier(v, options, placementSource(explicit, stored, config));
         const login = await maxLoginPreflight(undefined, { tier: options.tier, sandbox: options.sandbox });
         if (login) return { ok: false, job_id: jobId, run_id: null, state: "blocked", reason: login };
       }
-      v = await validate(jobId, directory, permissionMode, opts.guardCapS);
     } catch (e) { throw e instanceof StartError ? e : new StartError(message(e)); }
 
     // An explicit --permission-mode is recorded on the queue run it mints or adopts

@@ -73,6 +73,8 @@ GUARD_KEYS = tuple(_DEF_FIELDS["guards"]["fields"])
 STOP_KEYS = tuple(_DEF_FIELDS["stop"]["fields"])
 STOP_STATUSES = tuple(_DEF_FIELDS["stop"]["fields"]["on_status"]["enum"])
 EFFORTS = tuple(_DEF_FIELDS["effort"]["enum"])
+REQUIRES_KEYS = tuple(_DEF_FIELDS["requires"]["fields"])
+REQUIRES_TIERS = tuple(_DEF_FIELDS["requires"]["fields"]["tier"]["enum"])
 RUN_STATES = tuple(_SCHEMA["run"]["fields"]["state"]["enum"])
 RESUMABLE_STATES = ("queued", "running")
 TERMINAL_STATES = tuple(s for s in RUN_STATES if s not in RESUMABLE_STATES)
@@ -220,6 +222,14 @@ def _validate_stop(stop: object, problems: list[str]) -> None:
                             f"{'|'.join(STOP_STATUSES)}")
 
 
+def _validate_requires(requires: object, problems: list[str]) -> None:
+    """Story 35.5 (CAP-12): an object whose only key is ``tier``."""
+    if (not isinstance(requires, dict) or set(requires) != set(REQUIRES_KEYS)
+            or requires["tier"] not in REQUIRES_TIERS):
+        problems.append("requires must be an object {tier: "
+                        f"{'|'.join(REQUIRES_TIERS)}}} and nothing else")
+
+
 def validate_definition(defn: object) -> list[str]:
     """All schema violations in one pass; empty list = valid."""
     if not isinstance(defn, dict):
@@ -256,6 +266,8 @@ def validate_definition(defn: object) -> list[str]:
     if ("editor_in_the_loop" in defn
             and not isinstance(defn["editor_in_the_loop"], bool)):
         problems.append("editor_in_the_loop must be a boolean")
+    if "requires" in defn:
+        _validate_requires(defn["requires"], problems)
     if "guards" in defn:
         _validate_guards(defn["guards"], problems)
     if "stop" in defn:

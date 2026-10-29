@@ -260,6 +260,27 @@
         }
       ]
     },
+    "tk-studio-evals": {
+      "external_calls": false,
+      "auth_preflight": "none needed in the core's drives — evals.py runs the claude CLI it is given (CLAUDE_BIN or --claude-bin; the drives' fake is lib/tests/test_evals.py run as a script); the live claude plugin eval children run on the sandbox tier inside the maintenance-evals worker, whose invokeSkill carries the harness auth preflight (driver-contract §1)",
+      "drives": [
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/evals.py", "run", "--cases", "no-such-case", "--out", "{sandbox}/evals"],
+          "expect": "refusal",
+          "marker": "unknown case: no-such-case"
+        },
+        {
+          "assertion": "status-block-fresh",
+          "argv": ["lib/evals.py", "run", "--cases", "[\"asset-ladder-generated-rung\"]", "--runs", "1", "--out", "{sandbox}/evals", "--claude-bin", "lib/tests/test_evals.py"],
+          "expect": "status-block",
+          "intent": "tk-studio-evals",
+          "status": "complete",
+          "marker": "asset-ladder-generated-rung 1/1",
+          "note": "the Story 35.5 drive: one claude plugin eval argv per case against a fake claude (lib/tests/test_evals.py run as a script: --version answered, a canned --json result written), scores.json in the output folder and the per-case passes as the status block's reason"
+        }
+      ]
+    },
     "gds-engine-godot-4": {
       "external_calls": false,
       "auth_preflight": "none needed — read-only engine knowledge; the core engine_pin.py reads project.godot, global.json and the skill's pin.json on disk and calls nothing (driver-contract §1)",

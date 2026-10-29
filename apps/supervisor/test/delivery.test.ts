@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { APPROVE_EVENT, RUN_QUEUED_EVENT, RUN_STOP_EVENT, engagementRunPass } from "../src/approve";
 import { CLOSEOUT_EVENT, closeoutPass, composeCloseout, lastRunEnded, type CloseoutInput, type DeliveryDeps } from "../src/delivery";
 import { applyInput, newEngagement, readEngagement, writeEngagement, type Autonomy, type Engagement } from "../src/engagement";
@@ -134,7 +134,9 @@ function deps(o: {
     return state ? { exit: 0, stdout: JSON.stringify({ state }), stderr: "" } : { exit: 1, stdout: "", stderr: "gh failed" };
   };
   const d: DeliveryDeps = {
-    env: { ...process.env, GH_BIN: "gh-fake", TK_SUPERVISOR_NOTIFY: "" }, uv, run, now: clock(), ledgerFile: ledger,
+    // Story 35.5 (hole 84): the injected env carries every variable production reads — `studioScript` reaches
+    // `TK_STUDIO_ROOT`, which the host's user env happens to set and the sandbox does not.
+    env: { ...process.env, TK_STUDIO_ROOT: resolve(import.meta.dir, "..", "..", ".."), GH_BIN: "gh-fake", TK_SUPERVISOR_NOTIFY: "" }, uv, run, now: clock(), ledgerFile: ledger,
     notify: async (n) => { notices.push(n); return { ok: true, via: "fake" }; },
     launchStop: async (_root, engine) => ({ ok: true, detail: `engine ${engine} stopping gracefully` }),
   };

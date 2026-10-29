@@ -256,7 +256,7 @@ const BOOLEAN_FIELDS = ["editor_in_the_loop"] as const;
 const REQUIRED_FIELDS = ["project", "job"] as const;
 
 /** The refusal names the submit path raises (each a 400 naming it; nothing queued). */
-export const NAMED_REFUSALS = ["HostBypassRefused", "TierRefused", "SbxSandboxMissing", "SupervisorConfigInvalid", "VmPathUnderivable", "WorkDirMissing"] as const;
+export const NAMED_REFUSALS = ["HostBypassRefused", "TierRefused", "TierRequired", "SbxSandboxMissing", "SupervisorConfigInvalid", "VmPathUnderivable", "WorkDirMissing"] as const;
 
 const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json; charset=utf-8", ...headers } });

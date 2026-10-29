@@ -25,7 +25,11 @@
  *            applies to the engine argv as to the host's). Recorded as `engine: {verdict: green | red | skipped,
  *            reason?, command?, argv?, cwd?, exit?, duration_ms?, signal?, guard?, error?, stdout_tail?,
  *            stderr_tail?, godot_dir}` (`godot_dir` null when `GODOT` is unset or not an absolute path: the command
- *            still runs, PATH unchanged). Skip reasons: `no verify.engine`, `verify.engine is not a non-empty string`,
+ *            still runs, PATH unchanged). Story 35.5 (CAP-11, hole 78): when `GODOT` is an absolute path to a file,
+            the step's temp dir holds a shim dir (`godot`: `exec "$GODOT" "$@"`; on win32 also `godot.cmd`)
+            prepended before the `GODOT` folder under the same key, an argv[0] of `godot`/`godot.exe` (any case,
+            no separator) is spawned as `$GODOT` itself, and the event gains `godot_shim` (the shim dir; absent
+            otherwise, the command running as in 0.1.29). Skip reasons: `no verify.engine`, `verify.engine is not a non-empty string`,
  *            `verify.host red`. The leg's `green` is host green and engine not red, so every consumer reads an
  *            engine red through `isRed` as a red leg; its reason reads `host verify red (engine): …`.
  *   playable Story 34.3: the playable-verify step. `playable: {scenario, seed, ticks}` (top level of the same base
@@ -81,7 +85,7 @@
  *            <reason>`), no finding recorded, the PR line `Playable: inconclusive — <reason>`. The judge's own
  *            `blocked` (a game cause) stays `fail`.
  */
-import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join } from "node:path";
 
@@ -166,6 +170,8 @@ export type EngineStep = {
   verdict: "green" | "red" | "skipped"; reason?: string; command?: string; argv?: string[]; cwd?: string;
   exit?: number | null; duration_ms?: number; signal?: string; guard?: string; error?: string;
   stdout_tail?: string[]; stderr_tail?: string[]; godot_dir: string | null;
+  /** Story 35.5: the step's `godot` shim dir (prepended first on PATH); absent when `GODOT` is not an absolute file. */
+  godot_shim?: string;
 };
 export type HostVerifySkipped = { skipped: true; reason: string };
 export type HostVerifyResult = HostVerifyRan | HostVerifySkipped;
@@ -352,11 +358,29 @@ function resolveBare(argv: string[], gitBash: string | null): string | undefined
   return existsSync(exe) ? exe : undefined;
 }
 
+const isFile = (p: string) => { try { return statSync(p).isFile(); } catch { return false; } };
+
+/** Story 35.5 (CAP-11): an argv[0] of `godot`/`godot.exe` (any case, no path separator) — a shell-less spawn on
+ * Windows finds only `.exe`/`.com`, so the engine step spawns it as `$GODOT` itself. */
+const isBareGodot = (arg: string | undefined) => !!arg && !/[\\/]/.test(arg) && /^godot(\.exe)?$/i.test(arg);
+
+/** Story 35.5 (CAP-11): write the `godot` shim into `dir` (`#!/bin/sh` `exec "$GODOT" "$@"`; on win32 also
+ * `godot.cmd`) and prepend it to `env`'s PATH key, before the `GODOT` folder. */
+function writeGodotShim(dir: string, env: Record<string, string | undefined>): void {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "godot"), '#!/bin/sh\nexec "$GODOT" "$@"\n', { encoding: "utf-8", mode: 0o755 });
+  if (process.platform === "win32") writeFileSync(join(dir, "godot.cmd"), '@"%GODOT%" %*\r\n', "utf-8");
+  const key = pathKey(env);
+  env[key] = [dir, env[key]].filter((p) => p).join(delimiter);
+}
+
 /** Run one argv in `cwd` under the `CAPTURE` wrapper with `env`, bounded by `guardS` (the tree killed past
- * it), and shape its outcome. Never throws. */
+ * it), and shape its outcome. Story 35.5: with `shim`, the `godot` shim dir is made in the step's temp dir and
+ * prepended to the step's PATH (`godot_shim` on the outcome). Never throws. */
 async function runStep(
   argv: string[], cwd: string, env: Record<string, string | undefined>, guardS: number, deps: Deps, sink?: { stdout?: string },
-): Promise<StepOutcome> {
+  shim?: boolean,
+): Promise<StepOutcome & { godot_shim?: string }> {
   const started = Date.now();
   const out = (r: { exit: number | null; signal?: string; guard?: string; error?: string; stdout?: string; stderr?: string }): StepOutcome => {
     // Story 34.3: the whole stdout for a caller that reads a status block from it (never on the event).
@@ -373,7 +397,12 @@ async function runStep(
   const files = { out: join(dir, "stdout"), err: join(dir, "stderr"), status: join(dir, "status.json") };
   const read = (p: string) => { try { return readFileSync(p, "utf-8"); } catch { return ""; } };
   const streams = () => ({ stdout: read(files.out), stderr: read(files.err) });
+  const shimDir = shim ? join(dir, "godot-shim") : undefined;
+  // `godot_shim` names the shim dir only once it was written (a failed write reports its error, no shim dir).
+  let shimmed = false;
+  const withShim = (o: StepOutcome): StepOutcome & { godot_shim?: string } => shimDir && shimmed ? { ...o, godot_shim: shimDir } : o;
   try {
+    if (shimDir) { env = { ...env }; writeGodotShim(shimDir, env); shimmed = true; }
     const spec = join(dir, "spec.json");
     writeFileSync(spec, JSON.stringify({ argv, cwd, ...files }), "utf-8");
     const args = ["-e", CAPTURE, spec];
@@ -383,18 +412,18 @@ async function runStep(
         : await runProcess(process.execPath, args, { cwd, timeoutS: guardS, env });
     } catch (e) {
       const m = message(e);
-      if (TIMED_OUT.test(m)) return out({ exit: null, guard: wallClockTrip(guardS), ...streams() });
-      return out({ exit: null, error: clip(m), ...streams() });
+      if (TIMED_OUT.test(m)) return withShim(out({ exit: null, guard: wallClockTrip(guardS), ...streams() }));
+      return withShim(out({ exit: null, error: clip(m), ...streams() }));
     }
     let status: { exit?: number | null; signal?: string | null; error?: string } | undefined;
     try { status = JSON.parse(read(files.status)); } catch { status = undefined; }
     if (!status || typeof status !== "object") {
-      return out({ exit: null, error: clip(`capture wrapper exited ${res.exit}: ${res.stderr}${res.stdout}`), ...streams() });
+      return withShim(out({ exit: null, error: clip(`capture wrapper exited ${res.exit}: ${res.stderr}${res.stdout}`), ...streams() }));
     }
-    if (status.error) return out({ exit: null, error: clip(status.error), ...streams() });
-    return out({ exit: typeof status.exit === "number" ? status.exit : null, ...(typeof status.signal === "string" && status.signal ? { signal: status.signal } : {}), ...streams() });
+    if (status.error) return withShim(out({ exit: null, error: clip(status.error), ...streams() }));
+    return withShim(out({ exit: typeof status.exit === "number" ? status.exit : null, ...(typeof status.signal === "string" && status.signal ? { signal: status.signal } : {}), ...streams() }));
   } catch (e) {
-    return out({ exit: null, error: clip(message(e)), ...streams() });
+    return withShim(out({ exit: null, error: clip(message(e)), ...streams() }));
   } finally { try { rmSync(dir, { recursive: true, force: true }); } catch { /* a temp dir left behind */ } }
 }
 
@@ -440,10 +469,15 @@ export async function hostVerify(run: Run, guardS: number, deps: Deps = {}, opts
   else {
     const engineEnv = { ...env };
     if (godotDir) { const key = pathKey(engineEnv); engineEnv[key] = [godotDir, engineEnv[key]].filter((p) => p).join(delimiter); }
+    // Story 35.5 (CAP-11, hole 78): with `GODOT` an absolute path to a file, a bare `godot` (argv[0], or inside a
+    // script the step runs) reaches `$GODOT`: argv[0] spawned as `$GODOT`, the shim dir first on PATH.
+    const godotFile = godotDir && isFile(godot!.trim()) ? godot!.trim() : null;
+    if (godotFile) engineEnv.GODOT = godotFile;
     const engineArgv = [...cmd.engine.argv];
+    if (godotFile && isBareGodot(engineArgv[0])) engineArgv[0] = godotFile;
     const engineResolved = resolveBare(engineArgv, gitBash);
     if (engineResolved) engineArgv[0] = engineResolved;
-    const step = await runStep(engineArgv, cwd, engineEnv, guardS, deps);
+    const step = await runStep(engineArgv, cwd, engineEnv, guardS, deps, undefined, !!godotFile);
     engine = { verdict: stepGreen(step) ? "green" : "red", command: cmd.engine.command, argv: cmd.engine.argv, cwd, ...step, godot_dir: godotDir };
   }
   // Story 34.3: the playable-verify step, only after a green engine gate.

@@ -1290,6 +1290,20 @@ describe.skipIf(!canRunE2E)("CLI end to end: worker tiers (Story 21.4)", () => {
     expect(fx.queue((q) => q.runs().length)).toBe(0);
   }, 120_000);
 
+  test.each([["submit", true], ["run", true], ["run", false]] as const)("Story 35.5: `%s` of an unplaced run-epic instance (logged in: %p) → exit 2 TierRequired naming the per-job config entry; nothing queued, no claude process at all (not even `auth`), a missing login never masking it", (verb, loggedIn) => {
+    const fx = e2eFixture("unused", loggedIn);
+    writeFileSync(join(fx.project, ".tk-studio", "jobs", "run-epic-35.json"),
+      JSON.stringify({ job_schema_version: 1, id: "run-epic-35", type: "run-epic", target: { payload: { epic: 35 } } }));
+    const res = (verb === "submit" ? fx.submit : fx.run)("run-epic-35", fx.project, []);
+    expect(res.status).toBe(2);
+    const answer = JSON.parse(res.stdout);
+    expect(answer).toMatchObject({ ok: false, run_id: null, state: "not-started" });
+    expect(answer.error).toStartWith("TierRequired: job run-epic-35 requires tier sbx; placement resolved host (default) — set ");
+    expect(answer.error).toContain(`{tier: "sbx", sandbox: "<name>"} in TK_SUPERVISOR_CONFIG`);
+    expect([fx.calls(), fx.sbxCalls()]).toEqual([[], []]);
+    expect(fx.queue((q) => q.runs().length)).toBe(0);
+  }, 120_000);
+
   test("`run --tier sbx --sandbox claude-p --permission-mode bypassPermissions`: login probe and worker through `sbx exec`", () => {
     const fx = e2eFixture(BLOCK_OK);
     const res = fx.run("studio-health", fx.project, ["--tier", "sbx", "--sandbox", "claude-p", "--permission-mode", "bypassPermissions", "--model", "m-over"]);
@@ -1423,6 +1437,41 @@ describe.skipIf(!canRunE2E)("CLI end to end: worker tiers (Story 21.4)", () => {
     const refused = fx.queue((q) => q.events(queued.run_id).filter((e) => e.kind === "claim-refused"));
     expect(refused).toHaveLength(1);
     expect(refused[0]!.detail).toMatchObject({ key: "placement:SbxSandboxMissing", reason: expect.stringContaining("SbxSandboxMissing"), resolves: expect.stringContaining("sandbox") });
+    expect(fx.queue((q) => q.events(queued.run_id).map((e) => e.kind))).not.toContain("claimed");
+    expect(fx.calls().some((c) => c.args[0] === "-p")).toBe(false);
+  }, 240_000);
+
+  test("Story 35.5 (hole 90): a queued run-epic whose placement resolves host is refused on the claim path (`placement:TierRequired`), left `queued`, one `claim-refused` across passes, no claude process; a stored definition without `requires` is caught after the fresh resolve, still before any worker", () => {
+    const fx = e2eFixture("unused");
+    writeFileSync(join(fx.project, ".tk-studio", "jobs", "run-epic-35.json"),
+      JSON.stringify({ job_schema_version: 1, id: "run-epic-35", type: "run-epic", target: { payload: { epic: 35 } } }));
+    const sub = fx.submit("run-epic-35", fx.project, ["--tier", "sbx", "--sandbox", "claude-p"]);
+    expect(sub.status).toBe(0);
+    const queued = JSON.parse(sub.stdout);
+    // The hole-90 shape: a run queued with a host placement (a pre-35.5 row, or one stored host).
+    fx.queue((q) => q.db.run("UPDATE runs SET tier = 'host', sandbox = NULL WHERE run_id = ?", [queued.run_id]));
+    for (let pass = 0; pass < 2; pass++) {
+      const res = fx.bare("drain");
+      expect(res.status).toBe(1);
+      expect(JSON.parse(res.stdout).runs[0]).toMatchObject({ run_id: queued.run_id, summary: { ok: false, state: "queued", claim_refused: { reason: expect.stringContaining("TierRequired: job run-epic-35 requires tier sbx; placement resolved host (stored)") } } });
+    }
+    expect(fx.queue((q) => q.get(queued.run_id))!.state).toBe("queued");
+    const refused = () => fx.queue((q) => q.events(queued.run_id).filter((e) => e.kind === "claim-refused"));
+    expect(refused()).toHaveLength(1);
+    expect(refused()[0]!.detail).toMatchObject({ key: "placement:TierRequired", resolves: expect.stringContaining("TK_SUPERVISOR_CONFIG entry jobs.<project-id>/<job-id>") });
+    // Before the claim gate: no `claude` at all (not even `auth status`), no `sbx`.
+    expect([fx.calls(), fx.sbxCalls()]).toEqual([[], []]);
+    // A stored definition that predates `requires`: the fresh `resolve` carries it, refused the same way (same key, so
+    // no second event), the run still `queued` and no worker spawned.
+    fx.queue((q) => {
+      const row = q.db.query("SELECT definition FROM jobs WHERE job_id = 'run-epic-35'").get() as { definition: string };
+      const defn = JSON.parse(row.definition); delete defn.requires;
+      q.db.run("UPDATE jobs SET definition = ? WHERE job_id = 'run-epic-35'", [JSON.stringify(defn)]);
+    });
+    const res = fx.bare("drain");
+    expect(JSON.parse(res.stdout).runs[0]).toMatchObject({ run_id: queued.run_id, summary: { ok: false, state: "queued", claim_refused: { reason: expect.stringContaining("TierRequired:") } } });
+    expect(fx.queue((q) => q.get(queued.run_id))!.state).toBe("queued");
+    expect(refused()).toHaveLength(1);
     expect(fx.queue((q) => q.events(queued.run_id).map((e) => e.kind))).not.toContain("claimed");
     expect(fx.calls().some((c) => c.args[0] === "-p")).toBe(false);
   }, 240_000);
