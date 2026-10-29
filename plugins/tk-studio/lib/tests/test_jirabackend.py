@@ -1123,3 +1123,32 @@ class ChangelogReadTests(unittest.TestCase):
         self.assertIsNone(jirabackend.last_transition_into(
             self.fake.changelogs["K-3"], self.RESOLVED))
         self.assertIsNone(jirabackend.last_transition_into([], self.RESOLVED))
+
+class DroppedStatusPickTests(JiraTestCase):
+    """Hole 100: the owner's `DNI` status sits in the Done category (DW-95)
+    and, as a global transition, came first in the transition list, so a
+    promote into `done` landed in `DNI`. The picker skips the dropped
+    status names whatever their position."""
+
+    def test_done_never_promotes_into_a_dropped_status(self):
+        self.fake.STATUSES = {"To Do": "new", "In Progress": "indeterminate",
+                              "DNI": "done", "Done": "done"}
+        self._project()
+        self._set_canonical("ST-001", status="done")
+        self._project()
+        key = self._jira_key("ST-001")
+        self.assertEqual(self.fake.issues[key]["status"], "Done")
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["external"]["jira"]["status"], "Done")
+        self.assertEqual(front["external"]["jira"]["canonical_status"], "done")
+
+    def test_only_a_dropped_route_into_the_category_is_a_note_not_a_move(self):
+        self.fake.STATUSES = {"To Do": "new", "In Progress": "indeterminate",
+                              "DNI": "done"}
+        self._project()
+        self._set_canonical("ST-001", status="done")
+        result = self._project()
+        key = self._jira_key("ST-001")
+        self.assertEqual(self.fake.issues[key]["status"], "To Do")
+        self.assertIn("dropped status 'DNI'", json.dumps(result))
+

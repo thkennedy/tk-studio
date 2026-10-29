@@ -165,6 +165,9 @@ DRIFT: engine MCP no-project.godot refusal names the served root, not the worktr
 | plan | — | 2026-10-29T11:13:16Z | 2026-10-29T11:19:12Z | — | claude-opus-5-5 | high | — | — | — | done |
 | dev | 1 | 2026-10-29T12:34:57Z | 2026-10-29T13:11:09Z | 7c582c78-b0a2-43a1-9e9a-44a066bbc9d1 | claude-opus-5-5 | medium | 19671005 | 115535 | 9.4991 | completed |
 | gate | 1 | 2026-10-29T13:11:10Z | 2026-10-29T13:20:15Z | 52a7ffbe-a3f7-4a37-a64c-866234ee4413 | claude-opus-5-5 | medium | 14829882 | 71891 | 7.1339 | completed |
+| host-leg | 1 | 2026-10-29T13:21:11Z | 2026-10-29T13:50:32Z | — | — | — | — | — | — | green |
+| close-out | 1 | 2026-10-29T13:50:32Z | 2026-10-29T13:50:40Z | — | — | — | — | — | — | PR |
+| merge | — | 2026-10-29T13:51:41Z | 2026-10-29T13:51:41Z | — | — | — | — | — | — | merged |
 
 ## Auto Run Result
 
