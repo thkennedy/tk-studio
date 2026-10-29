@@ -1143,24 +1143,49 @@ def _project_steps(site: str, key: str, name: str) -> list[str]:
 def _company_status_steps(site: str, key: str,
                           existing=()) -> list[str]:
     """The company-managed workflow steps; a status that already exists on
-    the site (`existing`) is added to the workflow, never created again."""
+    the site (`existing`) is added to the workflow, never created again.
+    The global transitions go into the To Do-category status (`existing`'s
+    `To Do` slot names it, DW-107), `Blocked - Awaiting User` and `DNI`."""
     def add(name: str) -> str:
         if name in existing:
             return (f"Choose Add status and add the existing status "
                     f"`{name}` to the workflow (do not create a new one).")
-        return (f"Choose Add status, create `{name}` in the In Progress "
+        category = _STATUS_CATEGORY[
+            jirabackend.STATUS_CATEGORY[name]]
+        return (f"Choose Add status, create `{name}` in the {category} "
                 f"category.")
+    todo = jirabackend.TODO_STATUS
+    if isinstance(existing, dict) and isinstance(existing.get(todo), dict):
+        todo = existing[todo].get("name") or todo
     return [f"Sign in to https://{site} as the owner seat and open Settings "
             f"> Work items > Workflows; choose Edit on the workflow project "
             f"`{key}` uses.",
             add(jirabackend.BLOCKED_STATUS),
             add(jirabackend.RESOLVED_STATUS),
+            add(jirabackend.DNI_STATUS),
             f"Add a transition from `{jirabackend.BLOCKED_STATUS}` to "
-            f"`{jirabackend.RESOLVED_STATUS}`, then choose Update workflow."]
+            f"`{jirabackend.RESOLVED_STATUS}`.",
+            f"On each of `{todo}`, `{jirabackend.BLOCKED_STATUS}` and "
+            f"`{jirabackend.DNI_STATUS}`, tick Allow all statuses to "
+            f"transition to this one (a global transition), then choose "
+            f"Update workflow."]
 
 
 _STATUS_CATEGORY = {"To Do": "To Do", "In Progress": "In Progress",
-                    "Done": "Done"}
+                    "Done": "Done", "IN_PROGRESS": "In Progress",
+                    "DONE": "Done"}
+
+
+def _workflow_labels(have: dict) -> list[str]:
+    """The transition labels setup reports, by name, before the statuses
+    have ids (the dry run)."""
+    todo = (have.get(jirabackend.TODO_STATUS) or {}).get("name") \
+        or jirabackend.TODO_STATUS
+    return [f"transition {jirabackend.BLOCKED_STATUS} -> "
+            f"{jirabackend.RESOLVED_STATUS}",
+            f"global transition -> {todo}",
+            f"global transition -> {jirabackend.BLOCKED_STATUS}",
+            f"global transition -> {jirabackend.DNI_STATUS}"]
 
 
 def _template_status_steps(site: str, key: str, missing: list[str],
@@ -1174,7 +1199,12 @@ def _template_status_steps(site: str, key: str, missing: list[str],
                f"category, then save the workflow." for name in missing])
 
 
-def _team_status_steps(site: str, key: str) -> list[str]:
+def _team_status_steps(site: str, key: str, have=None) -> list[str]:
+    """The team-managed workflow steps; the global transitions go into the
+    To Do-category status (`have`'s `To Do` slot names it, DW-107),
+    `Blocked - Awaiting User` and `DNI`, as on a company-managed project."""
+    todo = ((have or {}).get(jirabackend.TODO_STATUS) or {}).get("name") \
+        or jirabackend.TODO_STATUS
     return [f"Sign in to https://{site} as the owner seat, open project "
             f"`{key}` > Project settings > Issue types > Story, and choose "
             f"Edit workflow.",
@@ -1182,9 +1212,13 @@ def _team_status_steps(site: str, key: str) -> list[str]:
             f"category.",
             f"Add status `{jirabackend.RESOLVED_STATUS}` in the In progress "
             f"category.",
+            f"Add status `{jirabackend.DNI_STATUS}` in the Done category.",
             f"Add a transition from `{jirabackend.BLOCKED_STATUS}` to "
-            f"`{jirabackend.RESOLVED_STATUS}`, then choose Save changes; "
-            f"repeat for the Epic issue type."]
+            f"`{jirabackend.RESOLVED_STATUS}`.",
+            f"On each of `{todo}`, `{jirabackend.BLOCKED_STATUS}` and "
+            f"`{jirabackend.DNI_STATUS}`, tick Allow all statuses to "
+            f"transition to this one (a global transition), then choose "
+            f"Save changes; repeat for the Epic issue type."]
 
 
 def _issue_type_steps(site: str, key: str, missing: list[str]) -> list[str]:
@@ -1372,7 +1406,8 @@ def setup(project_root: Path, dry_run: bool = False,
         if proj is not None:
             jira_binding["project_id"] = str(proj.get("id"))
 
-        # 3. issue types, 4. the five-status workflow and the transition
+        # 3. issue types, 4. the five-status workflow, DNI and the
+        # transitions
         if proj is not None:
             pid = str(proj.get("id"))
             have_types, missing_types = jirabackend.confirm_issue_types(proj)
@@ -1381,18 +1416,23 @@ def setup(project_root: Path, dry_run: bool = False,
                 groups.append(_issue_type_steps(site, key, missing_types))
             team = jirabackend.is_team_managed(proj)
             have = jirabackend.find_statuses(jira, pid, key, team)
-            found += [f"status {n}" for n in jirabackend.TEMPLATE_STATUSES
-                      if n in have]
+            for n in jirabackend.TEMPLATE_STATUSES + (jirabackend.DNI_STATUS,):
+                if n not in have:
+                    continue
+                actual = have[n].get("name")
+                found.append(f"status {n}" if actual in (None, n)
+                             else f"status {n} (satisfied by {actual})")
             missing_template = [n for n in jirabackend.TEMPLATE_STATUSES
                                 if n not in have
                                 and n not in jirabackend.SETUP_STATUSES]
             if missing_template:
                 groups.append(_template_status_steps(site, key,
                                                      missing_template, team))
-            missing = [n for n in jirabackend.SETUP_STATUSES if n not in have]
+            missing = [n for n in jirabackend.CREATED_STATUSES
+                       if n not in have]
             company_steps = False
             if missing and team:
-                groups.append(_team_status_steps(site, key))
+                groups.append(_team_status_steps(site, key, have))
             elif missing and dry_run:
                 would.extend(f"status {n}" for n in missing)
             elif missing:
@@ -1412,36 +1452,48 @@ def setup(project_root: Path, dry_run: bool = False,
                     groups.append(_company_status_steps(site, key, have))
                     company_steps = True
             if not team and not company_steps:
-                both = all(n in have for n in jirabackend.SETUP_STATUSES)
-                label = (f"transition {jirabackend.BLOCKED_STATUS} -> "
-                         f"{jirabackend.RESOLVED_STATUS}")
-                if not both:
+                if not all(n in have for n in jirabackend.CREATED_STATUSES):
                     if dry_run:
-                        would.append(label)
+                        would.extend(_workflow_labels(have))
                 else:
-                    blocked_id = have[jirabackend.BLOCKED_STATUS].get("id")
-                    resolved_id = have[jirabackend.RESOLVED_STATUS].get("id")
                     flow, why = jirabackend.find_workflow(jira, key)
-                    if flow is not None and jirabackend.has_resolution_transition(
-                            flow, blocked_id, resolved_id):
-                        found.append(label)
-                    elif flow is None:
+                    if flow is None:
                         notes.append(f"workflow not selected: {why}")
                         groups.append(_company_status_steps(site, key, have))
-                    elif dry_run:
-                        would.append(label)
                     else:
-                        done, detail = jirabackend.add_resolution_transition(
-                            jira, flow, blocked_id, resolved_id)
-                        if done:
-                            created.append(label)
-                        else:
-                            notes.append(f"workflow update refused: {detail}")
-                            groups.append(_company_status_steps(site, key, have))
+                        needed = jirabackend.workflow_transitions(flow, have)
+                        found += [lb for lb, _, ok in needed if ok]
+                        absent = [(lb, tr) for lb, tr, ok in needed if not ok]
+                        if absent and dry_run:
+                            would.extend(lb for lb, _ in absent)
+                        elif absent:
+                            version, why = jirabackend.find_workflow_version(
+                                jira, key)
+                            if version is None:
+                                notes.append(f"workflow not selected: {why}")
+                                groups.append(
+                                    _company_status_steps(site, key, have))
+                            else:
+                                done, detail = jirabackend.update_workflow(
+                                    jira, flow, version,
+                                    # the To Do slot's status too: a
+                                    # GLOBAL transition into it needs it
+                                    # on the workflow
+                                    [str(have[n].get("id")) for n in
+                                     jirabackend.CREATED_STATUSES
+                                     + (jirabackend.TODO_STATUS,)
+                                     if n in have],
+                                    [tr for _, tr in absent])
+                                if done:
+                                    created.extend(lb for lb, _ in absent)
+                                else:
+                                    notes.append(
+                                        f"workflow update refused: {detail}")
+                                    groups.append(_company_status_steps(
+                                        site, key, have))
         elif dry_run:
-            would.extend(f"status {n}" for n in jirabackend.SETUP_STATUSES)
-            would.append(f"transition {jirabackend.BLOCKED_STATUS} -> "
-                         f"{jirabackend.RESOLVED_STATUS}")
+            would.extend(f"status {n}" for n in jirabackend.CREATED_STATUSES)
+            would.extend(_workflow_labels({}))
 
         # 5. the "Needs you" filter
         saved = jirabackend.find_filter(jira, agent_id)

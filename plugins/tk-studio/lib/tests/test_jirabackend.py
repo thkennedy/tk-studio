@@ -659,6 +659,205 @@ class DryRunTests(JiraTestCase):
         self.assertEqual(result["projection"]["action"], "dry-run")
 
 
+class DroppedPullBackTests(JiraTestCase):
+    """DW-95 / DW-114: `DNI` pulls back as canonical `dropped` by name, and
+    a landed issue in a Done-category status other than `Done` is never a
+    silent `done`."""
+
+    def setUp(self):
+        super().setUp()
+        self.fake.STATUSES = {"To Do": "new", "In Progress": "indeterminate",
+                              "Done": "done", "DNI": "done",
+                              "Closed": "done"}
+
+    def _landed(self):
+        self._project()
+        key = self._jira_key("ST-001")
+        self.fake.issues[key]["status"] = "Done"
+        self._project()
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["status"], "done")
+        return key
+
+    def test_canonical_status_maps_dni_to_dropped(self):
+        self.assertEqual(jirabackend.canonical_status("DNI", "done"),
+                         "dropped")
+        self.assertEqual(jirabackend.canonical_status("Closed", "done"),
+                         "done")
+
+    def test_dni_pulls_back_as_dropped(self):
+        key = self._landed()
+        self.fake.issues[key]["status"] = "DNI"
+        result = self._project()
+        self.assertEqual(result["conflicts"], [])
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["status"], "dropped")
+        self.assertEqual(front["external"]["jira"]["status"], "DNI")
+        self.assertEqual(front["external"]["jira"]["canonical_status"],
+                         "dropped")
+        # promote never moves a dropped entity back out of DNI
+        self._project()
+        self.assertEqual(self.fake.issues[key]["status"], "DNI")
+
+    def _legacy_dni_snapshot(self, local_status):
+        # hole 100: a pull-back mapped `DNI` by category, as `done`
+        key = self._landed()
+        path, front, body = self._canonical("ST-001")
+        front["status"] = local_status
+        front["external"]["jira"]["status"] = "DNI"
+        front["external"]["jira"]["canonical_status"] = "done"
+        path.write_text(interchange.render_entity(front, body),
+                        encoding="utf-8", newline="\n")
+        return key
+
+    def test_a_legacy_dni_snapshot_re_maps_to_dropped(self):
+        key = self._legacy_dni_snapshot("done")
+        result = jirabackend.apply_statuses(plansync.plan_dir(self.root),
+                                            {key: ("DNI", "done")})
+        self.assertEqual([(a["id"], a["fields"]) for a in result["applied"]],
+                         [("ST-001", ["status"])])
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["status"], "dropped")
+        self.assertEqual(front["external"]["jira"]["canonical_status"],
+                         "dropped")
+
+    def test_a_legacy_dni_snapshot_with_a_local_change_is_untouched(self):
+        key = self._legacy_dni_snapshot("in-progress")
+        path = plansync.plan_dir(self.root) / "ST-001.md"
+        before = path.read_text("utf-8")
+        result = jirabackend.apply_statuses(plansync.plan_dir(self.root),
+                                            {key: ("DNI", "done")})
+        self.assertEqual(result["applied"], [])
+        self.assertEqual(path.read_text("utf-8"), before)
+
+    def test_a_non_canonical_landed_name_is_a_loud_note(self):
+        key = self._landed()
+        self.fake.issues[key]["status"] = "Closed"
+        result = self._project()
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["status"], "done")
+        snap = front["external"]["jira"]
+        self.assertEqual(snap["status"], "Closed")
+        self.assertIn("'Closed'", snap["status_note"])
+        self.assertIn("'Done'", snap["status_note"])
+        notes = [n for n in result["pull_back"]["notes"] if "'Closed'" in n]
+        self.assertEqual(len(notes), 1)
+        for part in ("ST-001", key, "'Done'"):
+            self.assertIn(part, notes[0])
+        # the note repeats while the name stays; nothing is rewritten
+        again = self._project()
+        self.assertTrue(any("'Closed'" in n for n in again["pull_back"]["notes"]))
+        self.assertEqual(again["pull_back"]["applied"], [])
+
+    def test_the_canonical_done_name_clears_the_note(self):
+        key = self._landed()
+        self.fake.issues[key]["status"] = "Closed"
+        self._project()
+        self.fake.issues[key]["status"] = "Done"
+        result = self._project()
+        self.assertFalse(any("'Closed'" in n or "DW-114" in n
+                             for n in result["pull_back"]["notes"]))
+        _, front, _ = self._canonical("ST-001")
+        self.assertNotIn("status_note", front["external"]["jira"])
+        self.assertEqual(front["external"]["jira"]["status"], "Done")
+        self.assertEqual(front["status"], "done")
+
+    def test_the_sync_back_shares_the_note(self):
+        key = self._landed()
+        result = jirabackend.apply_statuses(plansync.plan_dir(self.root),
+                                            {key: ("Closed", "done")})
+        self.assertTrue(any("'Closed'" in n for n in result["notes"]))
+        _, front, _ = self._canonical("ST-001")
+        self.assertIn("status_note", front["external"]["jira"])
+
+    def _dw114(self, notes):
+        return [n for n in notes if "DW-114" in n]
+
+    def _edit_landed(self, local_status, snap_status, status_note=None):
+        key = self._landed()
+        path, front, body = self._canonical("ST-001")
+        front["status"] = local_status
+        snap = front["external"]["jira"]
+        snap["status"] = snap_status
+        snap["canonical_status"] = "done"
+        if status_note is None:
+            snap.pop("status_note", None)
+        else:
+            snap["status_note"] = status_note
+        path.write_text(interchange.render_entity(front, body),
+                        encoding="utf-8", newline="\n")
+        return key, path
+
+    def test_closed_over_an_unpromoted_change_is_a_conflict_without_the_note(self):
+        # Jira moves to `Closed` while a local `in-progress` is unpromoted:
+        # a conflict, never "kept as `done`"
+        key, path = self._edit_landed("in-progress", "Done")
+        before = path.read_text("utf-8")
+        result = jirabackend.apply_statuses(plansync.plan_dir(self.root),
+                                            {key: ("Closed", "done")})
+        self.assertEqual([c["id"] for c in result["conflicts"]], ["ST-001"])
+        self.assertEqual(self._dw114(result["notes"]), [])
+        self.assertEqual(result["applied"], [])
+        self.assertEqual(path.read_text("utf-8"), before)
+
+    def test_closed_under_an_unpromoted_review_claims_no_done(self):
+        # Jira stays `Closed` while a local `review` is unpromoted: no note
+        # line, and the stale `status_note` is removed once, not rewritten
+        key, path = self._edit_landed(
+            "review", "Closed",
+            status_note=jirabackend._landed_status_note("Closed", "done"))
+        result = jirabackend.apply_statuses(plansync.plan_dir(self.root),
+                                            {key: ("Closed", "done")})
+        self.assertEqual(result["conflicts"], [])
+        self.assertEqual(self._dw114(result["notes"]), [])
+        self.assertEqual([(a["id"], a["fields"]) for a in result["applied"]],
+                         [("ST-001", ["external.jira.status_note"])])
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["status"], "review")
+        self.assertNotIn("status_note", front["external"]["jira"])
+        before = path.read_text("utf-8")
+        again = jirabackend.apply_statuses(plansync.plan_dir(self.root),
+                                           {key: ("Closed", "done")})
+        self.assertEqual(self._dw114(again["notes"]), [])
+        self.assertEqual(again["applied"], [])
+        self.assertEqual(path.read_text("utf-8"), before)
+
+    def test_a_missing_note_alone_is_written(self):
+        # a snapshot already on `Closed` (canonical `done`) but without its
+        # `status_note`: the pull-back writes the note and nothing else
+        key, path = self._edit_landed("done", "Closed")
+        result = jirabackend.apply_statuses(plansync.plan_dir(self.root),
+                                            {key: ("Closed", "done")})
+        self.assertEqual([(a["id"], a["fields"]) for a in result["applied"]],
+                         [("ST-001", ["external.jira.status_note"])])
+        self.assertEqual(len(self._dw114(result["notes"])), 1)
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["status"], "done")
+        self.assertEqual(front["external"]["jira"]["status_note"],
+                         jirabackend._landed_status_note("Closed", "done"))
+        # the second pass repeats the note line but writes nothing
+        before = path.read_text("utf-8")
+        again = jirabackend.apply_statuses(plansync.plan_dir(self.root),
+                                           {key: ("Closed", "done")})
+        self.assertEqual(again["applied"], [])
+        self.assertEqual(len(self._dw114(again["notes"])), 1)
+        self.assertEqual(path.read_text("utf-8"), before)
+
+    def test_a_conflict_over_an_existing_note_leaves_the_file_byte_identical(self):
+        # a snapshot on `Closed` carrying its `status_note`, a local
+        # `in-progress` unpromoted, and Jira moves on to `Done`: a conflict,
+        # and the entity file (note included) is not rewritten by one byte
+        key, path = self._edit_landed(
+            "in-progress", "Closed",
+            status_note=jirabackend._landed_status_note("Closed", "done"))
+        before = path.read_bytes()
+        result = jirabackend.apply_statuses(plansync.plan_dir(self.root),
+                                            {key: ("Done", "done")})
+        self.assertEqual([c["id"] for c in result["conflicts"]], ["ST-001"])
+        self.assertEqual(result["applied"], [])
+        self.assertEqual(path.read_bytes(), before)
+
+
 if __name__ == "__main__":
     unittest.main()
 
