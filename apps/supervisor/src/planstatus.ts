@@ -87,6 +87,11 @@
  * each story still retrying records one `{…, ok: false, settled: true, skipped: true, reason: "gave up after <n>
  * attempts: <the retry's reason>"}` and the lease settles — no claim is taken again until a newer `host-verify`
  * re-enters the story. Never throws, never blocks a run.
+ *
+ * Story 35.7 — the ledger pass (`ledgerPass`, `sweep.ts`, after the stage pass in every merge pass): a merged `run-sweep`
+ * run's landed bundles and already-resolved entries are flipped to `resolved … by #N` through `plansync.py
+ * ledger-resolve` under its `plan-lease {phase: "ledger"}` (one `ledger-resolve` event per attempt, `pending` retried,
+ * bounded by `PLAN_RETRY_LIMIT`). A sweep's review pass finding no `N.M` spec is expected.
  */
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
@@ -94,6 +99,7 @@ import { frontmatter, jiraBound } from "./closeout";
 import { canonicalPr } from "./hygiene";
 import { isTerminal, selfOwner, type Owner, type Queue, type QueueEvent, type QueueRun } from "./queue";
 import { lastJsonObject, registryShow, type RunResult } from "./server";
+import { ledgerPass } from "./sweep";
 import { gh, runBranch, runner, studioScript, uvRunner, type WorktreeDeps } from "./worktree";
 
 export const PLAN_CALLER = "tk-studio-supervisor";
@@ -369,7 +375,11 @@ export async function mergePass(queue: Queue, deps: PlanStatusDeps = {}): Promis
   /** Story 35.8: each merged run's `mergedAt`, as this pass read it (the stage pass's `merge` row). */
   const merged = new Map<string, string>();
   try { return await mergeRuns(queue, deps, out, merged); }
-  finally { try { await stagePass(queue, deps, merged); } catch { /* the next tick tries again */ } }
+  finally {
+    try { await stagePass(queue, deps, merged); } catch { /* the next tick tries again */ }
+    // Story 35.7: a merged sweep's ledger entries flipped to `resolved … by #N` (`sweep.ts`).
+    try { await ledgerPass(queue, deps); } catch { /* the next tick tries again */ }
+  }
 }
 
 async function mergeRuns(queue: Queue, deps: PlanStatusDeps, out: string[], merged: Map<string, string>): Promise<string[]> {

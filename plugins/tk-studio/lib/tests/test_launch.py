@@ -19,7 +19,9 @@ import json
 import os
 import re
 import tempfile
+import time
 import unittest
+from unittest import mock
 from pathlib import Path
 import sys
 
@@ -1587,6 +1589,263 @@ class LaunchTestCase(unittest.TestCase):
         self.assertEqual([g for g in result["gaps"] if g.startswith("open questions")], [
             "open questions: 2-1-carved-story: CAP-3 has no design note — "
             "is the carve-out its own story?"])
+
+
+
+TRIAGE = {
+    "workflow": "deferred-sweep-triage",
+    "open_ids": ["DW-1", "DW-2", "DW-3", "DW-4", "DW-5"],
+    "already_resolved": [],
+    "bundles": [{"name": "a", "dw_ids": ["DW-1", "DW-2"], "intent": "one goal"},
+                {"name": "b", "dw_ids": ["DW-3"], "intent": "another"}],
+    "blocked": [{"id": "DW-4", "blocker": "Story 36.1 must land first"}],
+    "skip": [],
+    "decisions": [{"id": "DW-5", "question": "keep or drop?", "context": "c",
+                   "options": [], "recommendation": "1"}],
+    "escalations": [],
+}
+
+
+class _SweepSubstrate(_FakeSubstrate):
+    """The engine's sweep: the spawner writes state.json and, when given,
+    triage.json (``triage``: a dict, or raw text) and journal.jsonl
+    (``journal``: its records); ``status`` is what `bmad-loop status --json`
+    reports for the run."""
+
+    def __init__(self, *, triage=None, status="in-progress", paused_stage=None, journal=None, **kw):
+        super().__init__(**kw)
+        self.triage = triage
+        self.journal = journal
+        self.status = status
+        self.paused_stage = paused_stage
+
+    def run_cli(self, args, *, cwd=None, timeout=120):
+        if args[0] == "status":
+            self.calls.append(list(args))
+            return 0, json.dumps({"run_id": args[-1], "status": self.status,
+                                  "paused_stage": self.paused_stage, "tasks": []}), ""
+        return super().run_cli(args, cwd=cwd, timeout=timeout)
+
+    def spawn_detached(self, args, *, cwd, log_path):
+        pid = super().spawn_detached(args, cwd=cwd, log_path=log_path)
+        if self.journal is not None:
+            rid = args[args.index("--run-id") + 1]
+            path = Path(cwd) / ".bmad-loop" / "runs" / rid / "journal.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("".join(json.dumps(e) + "\n" for e in self.journal), encoding="utf-8")
+        if self.triage is not None:
+            rid = args[args.index("--run-id") + 1]
+            path = Path(cwd) / ".bmad-loop" / "runs" / rid / "triage.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(self.triage if isinstance(self.triage, str)
+                            else json.dumps(self.triage), encoding="utf-8")
+        return pid
+
+
+def _git(root: Path, *args: str) -> None:
+    import subprocess
+    subprocess.run(["git", *args], cwd=str(root), check=True, capture_output=True,
+                   stdin=subprocess.DEVNULL)
+
+
+class SweepVerbTestCase(unittest.TestCase):
+    """Story 35.7: `launch.py sweep` — refusals, the detached spawn, the
+    triage wait, the block and its one-line reason, the ledger event."""
+
+    RID = "20261029-120000-abcd"
+    # the launch fixture's isolation (store, fakes), without its tests
+    setUp = LaunchTestCase.setUp
+    tearDown = LaunchTestCase.tearDown
+    _wire = LaunchTestCase._wire
+    _cli = LaunchTestCase._cli
+
+    def _sweep_project(self, *, policy=True, ledger=True, commit=True) -> Path:
+        root = self.tmp / "sweepproj"
+        root.mkdir()
+        (root / ".gitignore").write_text(".bmad-loop/runs/\n", encoding="utf-8")
+        if policy:
+            (root / ".bmad-loop").mkdir()
+            (root / ".bmad-loop" / "policy.toml").write_text("[sweep]\nauto = \"never\"\n",
+                                                            encoding="utf-8")
+        if ledger:
+            led = root / "_bmad-output" / "implementation-artifacts" / "deferred-work.md"
+            led.parent.mkdir(parents=True)
+            led.write_text("# Deferred Work\n", encoding="utf-8")
+        _git(root, "init", "-q")
+        if commit:
+            _git(root, "add", "-A")
+            _git(root, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init")
+        return root
+
+    def _ledger_lines(self) -> list[dict]:
+        import ledger
+        path = ledger.ledger_path()
+        if not path.is_file():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+    def test_sweep_reads_the_triage_and_names_bundles_blocked_and_decisions(self):
+        root = self._sweep_project()
+        fake = self._wire(_SweepSubstrate(triage=TRIAGE))
+        code, parsed = self._cli(["sweep", "--directory", str(root), "--run-id", self.RID,
+                                  "--max-bundles", "3", "--triage-wait", "5"])
+        self.assertEqual(code, 0)
+        self.assertEqual(fake.spawned[0]["args"], [
+            "sweep", "--project", str(root.resolve()), "--no-prompt", "--run-id", self.RID,
+            "--max-bundles", "3"])
+        self.assertEqual(list(parsed)[-4:], BLOCK_KEYS)
+        self.assertEqual(parsed["status"], "complete")
+        self.assertEqual(parsed["intent"], "tk-studio-launch")
+        self.assertEqual(parsed["artifacts"], [f".bmad-loop/runs/{self.RID}",
+                                               f".bmad-loop/runs/{self.RID}/triage.json"])
+        self.assertEqual(parsed["reason"],
+                         "bundles: a (DW-1, DW-2); b (DW-3); blocked: DW-4; decisions: DW-5")
+        self.assertEqual(parsed["triage"], {
+            "bundles": [{"name": "a", "dw_ids": ["DW-1", "DW-2"]}, {"name": "b", "dw_ids": ["DW-3"]}],
+            "blocked": [{"id": "DW-4", "blocker": "Story 36.1 must land first"}],
+            "decisions": [{"id": "DW-5", "question": "keep or drop?"}],
+            "already_resolved": [], "skip": []})
+        events = [e for e in self._ledger_lines() if e["event"] == "sweep-triage"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["payload"], {
+            "run_id": self.RID, "bundles": 2, "dw_ids": ["DW-1", "DW-2", "DW-3"],
+            "blocked": ["DW-4"], "decisions": ["DW-5"], "already_resolved": [], "skip": []})
+
+    def test_sweep_reason_reads_none_for_empty_lists(self):
+        self.assertEqual(launch.triage_reason(launch.triage_summary({})),
+                         "bundles: none; blocked: none; decisions: none")
+
+    def test_sweep_triage_still_running_is_complete_with_no_ledger_event(self):
+        root = self._sweep_project()
+        self._wire(_SweepSubstrate())
+        code, parsed = self._cli(["sweep", "--directory", str(root), "--run-id", self.RID,
+                                  "--triage-wait", "0"])
+        self.assertEqual(code, 0)
+        self.assertEqual(parsed["status"], "complete")
+        self.assertEqual(parsed["reason"], "triage still running")
+        self.assertEqual(parsed["artifacts"], [f".bmad-loop/runs/{self.RID}"])
+        self.assertEqual(self._ledger_lines(), [])
+
+    def test_sweep_total_wait_is_bounded_by_the_triage_wait_from_the_call_start(self):
+        # the engine never writes triage.json; every status probe's timeout is clamped
+        # to what is left of the call's --triage-wait (floor 1 s), so the call returns
+        # within that wait plus a small margin, `complete` / `triage still running`
+        root = self._sweep_project()
+        fake = self._wire(_SweepSubstrate())
+        timeouts = []
+        probe = fake.run_cli
+
+        def recording(args, *, cwd=None, timeout=120):
+            if args[0] == "status":
+                timeouts.append(timeout)
+            return probe(args, cwd=cwd, timeout=timeout)
+        launch.run_cli = recording
+        started = time.monotonic()
+        with mock.patch.object(launch, "TRIAGE_STATUS_EVERY_S", 0.0):
+            code, parsed = self._cli(["sweep", "--directory", str(root), "--run-id", self.RID,
+                                      "--triage-wait", "2"])
+        self.assertLess(time.monotonic() - started, 2 + 3, "the call outlived its triage wait")
+        self.assertEqual(code, 0)
+        self.assertEqual(parsed["status"], "complete")
+        self.assertEqual(parsed["reason"], "triage still running")
+        self.assertTrue(timeouts)
+        self.assertTrue(all(1.0 <= t <= 2.0 for t in timeouts), timeouts)
+
+    def test_sweep_engine_ended_before_any_triage_is_blocked(self):
+        root = self._sweep_project()
+        for status, stage in (("finished", None), ("in-progress", "triage")):
+            fake = self._wire(_SweepSubstrate(status=status, paused_stage=stage))
+            rid = f"20261029-12000{1 if stage else 2}-abcd"
+            code, parsed = self._cli(["sweep", "--directory", str(root), "--run-id", rid,
+                                      "--triage-wait", "0"])
+            self.assertEqual(code, 0)
+            self.assertEqual(parsed["status"], "blocked", status)
+            self.assertIn("sweep triage escalated", parsed["reason"])
+            self.assertEqual(parsed["artifacts"], [f".bmad-loop/runs/{rid}"])
+            self.assertTrue(any(c[0] == "status" for c in fake.calls))
+        self.assertEqual(self._ledger_lines(), [])
+
+    def test_sweep_nothing_open_is_blocked_naming_the_empty_ledger_not_an_escalation(self):
+        root = self._sweep_project()
+        self._wire(_SweepSubstrate(status="finished", journal=[
+            {"ts": 1, "kind": "run-start"}, {"ts": 2, "kind": "sweep-nothing-open", "ledger": "x"}]))
+        code, parsed = self._cli(["sweep", "--directory", str(root), "--run-id", self.RID,
+                                  "--triage-wait", "0"])
+        self.assertEqual(code, 0)
+        self.assertEqual(parsed["status"], "blocked")
+        self.assertTrue(parsed["reason"].startswith("sweep: nothing open in the ledger"), parsed["reason"])
+        self.assertNotIn("escalated", parsed["reason"])
+        self.assertTrue(parsed["nothing_open"])
+        self.assertEqual(parsed["artifacts"], [f".bmad-loop/runs/{self.RID}"])
+        self.assertEqual(self._ledger_lines(), [])
+
+    def test_sweep_refuses_a_live_engine_on_the_checkout_and_spawns_nothing(self):
+        root = self._sweep_project()
+        fake = self._wire(_SweepSubstrate(triage=TRIAGE, runs=[
+            {"run_id": "20261029-110000-aaaa", "status": "in-progress"},
+            {"run_id": "20261029-100000-bbbb", "status": "finished"}]))
+        code, parsed = self._cli(["sweep", "--directory", str(root), "--run-id", self.RID])
+        self.assertEqual(code, 2)
+        self.assertEqual(parsed["status"], "blocked")
+        self.assertIn("a run already owns this checkout: 20261029-110000-aaaa (in-progress)",
+                      parsed["reason"])
+        self.assertNotIn("20261029-100000-bbbb", parsed["reason"])
+        self.assertEqual(fake.spawned, [])
+        self.assertFalse((root / ".bmad-loop" / "runs" / self.RID).exists())
+
+    def test_sweep_engine_ended_with_an_unreadable_triage_is_blocked_without_the_full_wait(self):
+        root = self._sweep_project()
+        for status, stage in (("finished", None), ("in-progress", "bundle")):
+            self._wire(_SweepSubstrate(triage="{not json", status=status, paused_stage=stage))
+            rid = f"20261029-12001{1 if stage else 2}-abcd"
+            started = time.monotonic()
+            with mock.patch.object(launch, "TRIAGE_STATUS_EVERY_S", 0.0):
+                code, parsed = self._cli(["sweep", "--directory", str(root), "--run-id", rid,
+                                          "--triage-wait", "60"])
+            self.assertLess(time.monotonic() - started, 20, "waited out the triage wait")
+            self.assertEqual(code, 0)
+            self.assertEqual(parsed["status"], "blocked", status)
+            self.assertIn("sweep triage unreadable", parsed["reason"])
+            self.assertIn(f".bmad-loop/runs/{rid}/triage.json does not parse", parsed["reason"])
+            self.assertNotIn("triage still running", parsed["reason"])
+            self.assertEqual(parsed["artifacts"], [f".bmad-loop/runs/{rid}"])
+        self.assertEqual(self._ledger_lines(), [])
+
+    def test_sweep_refuses_a_dirty_tree_naming_the_paths_and_spawns_nothing(self):
+        root = self._sweep_project()
+        (root / "stray.txt").write_text("x", encoding="utf-8")
+        fake = self._wire(_SweepSubstrate(triage=TRIAGE))
+        code, parsed = self._cli(["sweep", "--directory", str(root), "--run-id", self.RID])
+        self.assertEqual(code, 2)
+        self.assertEqual(parsed["status"], "blocked")
+        self.assertIn("stray.txt", parsed["reason"])
+        self.assertEqual(fake.spawned, [])
+        self.assertFalse((root / ".bmad-loop" / "runs").exists())
+
+    def test_sweep_refuses_a_missing_policy_or_ledger(self):
+        for kw, gap in (({"policy": False}, ".bmad-loop/policy.toml"),
+                        ({"ledger": False}, "deferred-work.md")):
+            base = Path(tempfile.mkdtemp(dir=self.tmp))
+            self.tmp, old = base, self.tmp
+            try:
+                root = self._sweep_project(**kw)
+            finally:
+                self.tmp = old
+            fake = self._wire(_SweepSubstrate(triage=TRIAGE))
+            code, parsed = self._cli(["sweep", "--directory", str(root)])
+            self.assertEqual(code, 2)
+            self.assertEqual(parsed["status"], "blocked")
+            self.assertIn(gap, parsed["reason"])
+            self.assertEqual(fake.spawned, [])
+
+    def test_sweep_refuses_an_existing_run_dir_as_start_does(self):
+        root = self._sweep_project()
+        (root / ".bmad-loop" / "runs" / self.RID).mkdir(parents=True)
+        fake = self._wire(_SweepSubstrate(triage=TRIAGE))
+        code, parsed = self._cli(["sweep", "--directory", str(root), "--run-id", self.RID])
+        self.assertEqual(code, 2)
+        self.assertIn("run id already exists", parsed["reason"])
+        self.assertEqual(fake.spawned, [])
 
 
 if __name__ == "__main__":

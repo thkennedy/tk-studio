@@ -36,7 +36,7 @@
         "required": false,
         "note": "Story 35.5 (CAP-12, additive): the tier a run of this job requires; an instance's own requires overrides its type's (the overlay rule above). submit refuses a resolved placement whose tier differs with placement:TierRequired before anything is queued or spawned (driver-contract 0.1.30)",
         "fields": {
-          "tier": { "type": "string", "enum": ["host", "sbx"], "note": "the only key; run-epic, run-vertical-slice and maintenance-evals ship sbx" }
+          "tier": { "type": "string", "enum": ["host", "sbx"], "note": "the only key; run-epic, run-vertical-slice, maintenance-evals and run-sweep (Story 35.7) ship sbx" }
         }
       },
       "guards": {

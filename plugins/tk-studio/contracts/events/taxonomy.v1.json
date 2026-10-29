@@ -127,6 +127,18 @@
         "source": { "type": "string", "required": false, "note": "the project-relative document the row was read from" }
       }
     },
+    "sweep-triage": {
+      "emitter": "lib/launch.py sweep alone (Story 35.7, AD-12): once per triage read, when the engine's .bmad-loop/runs/<run_id>/triage.json is read by the launch verb, written through ledger.emit; the supervisor's queue note of the same name is a different store, and bmad-loop's own journal sweep-triage key is never recorded here",
+      "payload": {
+        "run_id": { "type": "string", "required": true, "note": "the engine run id (the sweep's pre-minted --run-id)" },
+        "bundles": { "type": "number", "required": true, "note": "how many bundles the triage partitioned" },
+        "dw_ids": { "type": "array", "required": true, "note": "every DW id the bundles carry, in bundle order" },
+        "blocked": { "type": "array", "required": true, "note": "the blocked DW ids" },
+        "decisions": { "type": "array", "required": true, "note": "the DW ids awaiting a human decision (skipped unattended under --no-prompt)" },
+        "already_resolved": { "type": "array", "required": true, "note": "the DW ids the triage found already resolved" },
+        "skip": { "type": "array", "required": true, "note": "the DW ids the triage skipped" }
+      }
+    },
     "report": {
       "emitter": "reporter (tk-studio-report — the human-authored defect verb)",
       "payload": {

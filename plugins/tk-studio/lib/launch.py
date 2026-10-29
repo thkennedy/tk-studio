@@ -18,6 +18,8 @@ Verbs (all end with JSON on stdout; never prompt — AD-11):
                           [--allow-budget-mismatch]
   uv run launch.py status --directory DIR [--run-id ID]
   uv run launch.py stop   --directory DIR --run-id ID [--graceful]
+  uv run launch.py sweep  --directory DIR [--run-id ID] [--max-bundles N]
+                          [--triage-wait S]
 
 Guarantees:
   - `start` never launches onto a checkout that already has a live engine
@@ -107,6 +109,28 @@ Guarantees:
     reads `warning: .tk-studio/config.yaml unreadable by the lib's YAML
     subset (<err>); write engine.mcp in block style`. It starts nothing.
 
+`sweep` (Story 35.7, the `run-sweep` job type) starts one deferred-work
+sweep: it refuses, naming the gap and spawning nothing, a project with no
+`.bmad-loop/policy.toml` or no `_bmad-output/implementation-artifacts/
+deferred-work.md`, a live engine owning the checkout (as `start`: the run
+ids and statuses named), a dirty tree (`git status --porcelain`, the paths
+named) and an existing run dir; then spawns `bmad-loop sweep --project <root>
+--no-prompt --run-id <rid> [--max-bundles <n>]` detached, polls for its
+`state.json` as `start` does, and waits up to `--triage-wait` (default
+1500 s, counted from the call's start) for `<run dir>/triage.json` or the
+engine's end or pause. A read
+triage is emitted once as the `sweep-triage` ledger event (its only
+emitter) and carried as `triage {bundles, blocked, decisions,
+already_resolved, skip}`; the block's reason is one line, `bundles: <name>
+(DW-a, DW-b); …; blocked: DW-x, …; decisions: DW-y, …` (`none` for an empty
+list), or `triage still running` when the wait elapsed with the engine
+live (`complete` both); an engine that ended or paused with no triage is
+`blocked` (the triage escalated — or, when its journal holds
+`sweep-nothing-open`, `sweep: nothing open in the ledger`), as is one that ended or paused leaving a
+`triage.json` that does not parse (`sweep triage unreadable`). The artifacts are `.bmad-loop/runs/<rid>`
+(plus its `triage.json` when read), so the supervisor hands the run to the
+engine as for `start`.
+
 Exit codes: 0 verb answered (a `check` with gaps is an answer: ok=false);
 2 bad invocation or refusal (`start` on a failing check, missing spec, an
 unacknowledged budget mismatch);
@@ -129,6 +153,7 @@ from datetime import datetime
 from pathlib import Path
 
 import job as joblib
+import ledger
 import miniyaml
 import sandbox_login
 import store as storelib
@@ -309,6 +334,12 @@ def live_runs(runs: list[dict]) -> list[dict]:
     alone — a stale `paused_stage` on a finished run must never block
     every later launch."""
     return [r for r in runs if str(r.get("status", "")) not in TERMINAL_STATUSES]
+
+
+def owning_runs_text(live: list[dict]) -> str:
+    """``a run already owns this checkout: <id> (<status>), …`` — the live-engine gap's words."""
+    return "a run already owns this checkout: " + ", ".join(
+        f"{r.get('run_id')} ({r.get('status')})" for r in live)
 
 
 def _number(value: object) -> bool:
@@ -1202,9 +1233,7 @@ def check(project_root: Path, spec_folder: str) -> dict:
     except LaunchError as exc:
         add("live engine", False, str(exc))
     else:
-        add("live engine", not live,
-            "none" if not live else "a run already owns this checkout: "
-            + ", ".join(f"{r.get('run_id')} ({r.get('status')})" for r in live))
+        add("live engine", not live, "none" if not live else owning_runs_text(live))
 
     try:
         rc, out, err = run_cli(["validate", "--json", "--project", str(root), "--spec", rel])
@@ -1328,6 +1357,242 @@ def stop(project_root: Path, run_id: str, *, graceful: bool = False) -> dict:
             "output": (out + err).strip()[:800]}
 
 
+# --------------------------------------------------------- Story 35.7: sweep
+
+LEDGER_REL = "_bmad-output/implementation-artifacts/deferred-work.md"
+DEFAULT_TRIAGE_WAIT_S = 1500.0
+# how often the triage wait asks the engine whether it ended or paused
+TRIAGE_STATUS_EVERY_S = 15.0
+SWEEP_TRIAGE_EVENT = "sweep-triage"
+# the engine journal's empty-ledger end (`sweep.py`): no triage.json is ever written
+SWEEP_NOTHING_OPEN = "sweep-nothing-open"
+
+
+def _dirty_paths(root: Path) -> list[str]:
+    """`git status --porcelain` paths of the project (a failed git is a
+    refusal naming it)."""
+    try:
+        proc = subprocess.run(["git", "status", "--porcelain"], cwd=str(root),
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=60, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise LaunchError(f"sweep refused: git status --porcelain failed: {exc}") from exc
+    if proc.returncode != 0:
+        raise LaunchError("sweep refused: git status --porcelain failed: "
+                          + (proc.stderr or proc.stdout).strip()[:300])
+    return [line[3:].strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def _journal_has(run_dir: Path, kind: str) -> bool:
+    """The engine's `journal.jsonl` holds a ``kind`` record (read only; bad lines skipped)."""
+    try:
+        lines = (run_dir / "journal.jsonl").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return False
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(entry, dict) and entry.get("kind") == kind:
+            return True
+    return False
+
+
+def _ids(items) -> list[str]:
+    """The ids of a triage list whose items are ``{id, …}`` objects (or bare ids)."""
+    out = []
+    for item in items if isinstance(items, list) else []:
+        value = item.get("id") if isinstance(item, dict) else item
+        if isinstance(value, str) and value:
+            out.append(value)
+    return out
+
+
+def triage_summary(raw: dict) -> dict:
+    """The block's ``triage`` from the engine's partition (bmad-loop-sweep's
+    result schema): bundles ``{name, dw_ids}``, blocked ``{id, blocker}``,
+    decisions ``{id, question}``, already_resolved and skip as ids."""
+    def objects(key):
+        value = raw.get(key)
+        return [x for x in value if isinstance(x, dict)] if isinstance(value, list) else []
+    return {
+        "bundles": [{"name": str(b.get("name") or ""),
+                     "dw_ids": [str(i) for i in (b.get("dw_ids") or []) if isinstance(i, str)]}
+                    for b in objects("bundles")],
+        "blocked": [{"id": str(b.get("id") or ""), "blocker": str(b.get("blocker") or "")}
+                    for b in objects("blocked")],
+        "decisions": [{"id": str(d.get("id") or ""), "question": str(d.get("question") or "")}
+                      for d in objects("decisions")],
+        "already_resolved": _ids(raw.get("already_resolved")),
+        "skip": _ids(raw.get("skip")),
+    }
+
+
+def triage_reason(triage: dict) -> str:
+    """One line: ``bundles: a (DW-1, DW-2); b (DW-3); blocked: DW-4; decisions: DW-5``."""
+    bundles = "; ".join(f"{b['name']} ({', '.join(b['dw_ids'])})" for b in triage["bundles"])
+    blocked = ", ".join(b["id"] for b in triage["blocked"])
+    decisions = ", ".join(d["id"] for d in triage["decisions"])
+    return (f"bundles: {bundles or 'none'}; blocked: {blocked or 'none'}; "
+            f"decisions: {decisions or 'none'}")
+
+
+def _sweep_engine_phase(root: Path, rid: str, timeout: float = 120) -> tuple[str, str] | None:
+    """('ended'|'paused', detail) from `bmad-loop status --json`, else None
+    (still running, or the probe failed or timed out: the wait goes on)."""
+    try:
+        rc, out, _err = run_cli(["status", "--json", "--project", str(root), rid], timeout=timeout)
+    except (LaunchError, OSError, subprocess.SubprocessError):
+        return None
+    parsed = _json_out(out)
+    if parsed is None:
+        return None
+    st = str(parsed.get("status") or "")
+    if st in TERMINAL_STATUSES:
+        return "ended", f"the engine ended '{st}'"
+    if parsed.get("paused_stage") or parsed.get("paused_reason"):
+        return "paused", (f"the engine paused at {parsed.get('paused_stage') or '?'}"
+                          + (f": {parsed.get('paused_reason')}" if parsed.get("paused_reason") else ""))
+    return None
+
+
+def sweep(project_root: Path, *, run_id: str | None = None, max_bundles: int | None = None,
+          triage_wait_s: float = DEFAULT_TRIAGE_WAIT_S, wait_s: float = DEFAULT_WAIT_S) -> dict:
+    """Start one deferred-work sweep detached and wait for its triage (see the
+    module docstring). Refusals raise LaunchError before anything is spawned.
+    The whole call is bounded by ``triage_wait_s`` (plus a few seconds): its
+    deadline is taken here, and every wait after it is clamped to what is left."""
+    deadline = time.monotonic() + max(0.0, triage_wait_s)
+
+    def left(cap: float) -> float:
+        """What is left of the call's wait, at most ``cap``, never under 1 s."""
+        return max(1.0, min(cap, deadline - time.monotonic()))
+
+    root = project_root.resolve()
+    gaps = []
+    if not (root / POLICY_REL).is_file():
+        gaps.append(f"no {POLICY_REL}")
+    if not (root / LEDGER_REL).is_file():
+        gaps.append(f"no {LEDGER_REL}")
+    if gaps:
+        raise LaunchError("sweep refused: " + "; ".join(gaps))
+    # one engine per checkout, as `start`: a retried sweep never spawns a second engine
+    live = live_runs(list_runs(root))
+    if live:
+        raise LaunchError("sweep refused: " + owning_runs_text(live))
+    dirty = _dirty_paths(root)
+    if dirty:
+        raise LaunchError("sweep refused: the tree is dirty (bmad-loop sweep refuses it): "
+                          + ", ".join(dirty[:20]) + (" …" if len(dirty) > 20 else ""))
+    if max_bundles is not None and max_bundles < 1:
+        raise LaunchError(f"--max-bundles must be >= 1: {max_bundles}")
+    rid = run_id or mint_run_id()
+    if not RUN_ID_RE.match(rid):
+        raise LaunchError(f"run id must look like YYYYMMDD-HHMMSS-hex4: {rid!r}")
+    run_dir = root / ".bmad-loop" / "runs" / rid
+    if run_dir.exists():
+        raise LaunchError(f"run id already exists: {run_dir}")
+    log_path = launches_dir(root) / f"{rid}.log"
+    args = ["sweep", "--project", str(root), "--no-prompt", "--run-id", rid]
+    if max_bundles is not None:
+        args += ["--max-bundles", str(max_bundles)]
+    pid = spawn_detached(args, cwd=root, log_path=log_path)
+    state = run_dir / "state.json"
+    state_wait = left(max(0.0, wait_s))
+    state_deadline = time.monotonic() + state_wait
+    seen = state.is_file()
+    while not seen and time.monotonic() < state_deadline:
+        time.sleep(POLL_S)
+        seen = state.is_file()
+    rel = f".bmad-loop/runs/{rid}"
+    result: dict = {"ok": seen, "run_id": rid, "run_dir": rel, "run_dir_abs": str(run_dir),
+                    "log": str(log_path), "pid": pid, "state_seen": seen}
+    if not seen:
+        result["error"] = (f"engine did not write {state} within {state_wait:g}s — it may still be "
+                           f"starting (pid {pid}); inspect the log before launching again")
+        return result
+    triage_path = run_dir / "triage.json"
+    next_status = time.monotonic() + TRIAGE_STATUS_EVERY_S
+    raw = None
+    unreadable = None
+    stopped = None
+    while True:
+        if triage_path.is_file():
+            try:
+                parsed = json.loads(triage_path.read_text(encoding="utf-8"))
+                raw = parsed if isinstance(parsed, dict) else None
+                unreadable = None if raw is not None else "not a JSON object"
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                unreadable = f"{type(exc).__name__}: {exc}"  # mid-write: read again
+            if raw is not None:
+                break
+        now = time.monotonic()
+        if now >= next_status or now >= deadline:
+            next_status = now + TRIAGE_STATUS_EVERY_S
+            stopped = _sweep_engine_phase(root, rid, timeout=left(120))
+            # an engine that ended or paused writes no more: no triage, or one that
+            # does not parse, is final (never the full wait, then `triage still running`)
+            if stopped is not None and (not triage_path.is_file() or unreadable is not None):
+                break
+        if now >= deadline:
+            break
+        time.sleep(POLL_S)
+    if raw is None and stopped is not None and not triage_path.is_file():
+        result["ok"] = False
+        result["engine"] = stopped[0]
+        if _journal_has(run_dir, SWEEP_NOTHING_OPEN):
+            result["nothing_open"] = True
+            result["error"] = f"sweep: nothing open in the ledger ({stopped[1]}, no {rel}/triage.json)"
+        else:
+            result["error"] = (f"sweep triage escalated: {stopped[1]} before {rel}/triage.json "
+                               f"(the triage failed [sweep] max_triage_attempts)")
+        return result
+    if raw is None and stopped is not None and unreadable is not None:
+        result["ok"] = False
+        result["engine"] = stopped[0]
+        result["triage_error"] = unreadable[:300]
+        result["error"] = (f"sweep triage unreadable: {stopped[1]} and {rel}/triage.json does not "
+                           f"parse ({unreadable[:300]})")
+        return result
+    if raw is None:
+        result["triage_pending"] = True
+        if unreadable:
+            result["triage_error"] = unreadable[:300]
+        return result
+    triage = triage_summary(raw)
+    result["triage"] = triage
+    result["triage_path"] = f"{rel}/triage.json"
+    payload = {
+        "run_id": rid,
+        "bundles": len(triage["bundles"]),
+        "dw_ids": [i for b in triage["bundles"] for i in b["dw_ids"]],
+        "blocked": [b["id"] for b in triage["blocked"]],
+        "decisions": [d["id"] for d in triage["decisions"]],
+        "already_resolved": list(triage["already_resolved"]),
+        "skip": list(triage["skip"]),
+    }
+    try:
+        ledger.emit(SWEEP_TRIAGE_EVENT, payload, project=joblib.project_key(root))
+        result["ledger_event"] = SWEEP_TRIAGE_EVENT
+    except Exception as exc:  # the launch stands; the gap is named, never raised
+        result["ledger_error"] = f"{type(exc).__name__}: {exc}"[:300]
+    return result
+
+
+def sweep_block(result: dict) -> tuple[str, list[str], str | None]:
+    """sweep: complete on a read triage (the one-line reason) or a triage
+    still running; blocked when unacknowledged, escalated or nothing open."""
+    if not result.get("state_seen"):
+        return "blocked", [], result.get("error") or "the engine never acknowledged the sweep"
+    artifacts = [result["run_dir"]]
+    if not result.get("ok"):
+        return "blocked", artifacts, result.get("error")
+    if "triage" in result:
+        return "complete", artifacts + [result["triage_path"]], triage_reason(result["triage"])
+    return "complete", artifacts, "triage still running"
+
+
 # ----------------------------------------------------------------------- CLI
 
 def main(argv: list[str] | None = None) -> int:
@@ -1351,6 +1616,14 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--allow-budget-mismatch", action="store_true",
                            help="start despite a policy limit the budget bands exceed "
                                 "(the payload's allow_budget_mismatch: true)")
+
+    p = sub.add_parser("sweep", help="start one deferred-work sweep detached; wait for its triage")
+    p.add_argument("--directory", required=True)
+    p.add_argument("--run-id", help="pre-minted run id (default: minted here)")
+    p.add_argument("--max-bundles", type=int, default=None,
+                   help="bound the sweep's bundles (default: the policy's [sweep] max_bundles)")
+    p.add_argument("--triage-wait", type=float, default=DEFAULT_TRIAGE_WAIT_S,
+                   help="seconds to wait for the engine's triage.json, counted from the call's start")
 
     p = sub.add_parser("status", help="runs on the checkout; detail for the live or named run")
     p.add_argument("--directory", required=True)
@@ -1381,6 +1654,11 @@ def main(argv: list[str] | None = None) -> int:
                            allow_budget_mismatch=args.allow_budget_mismatch)
             _emit(with_block(result, *start_block(result)))
             return 0 if result["ok"] else 1
+        if args.command == "sweep":
+            result = sweep(root, run_id=args.run_id, max_bundles=args.max_bundles,
+                           triage_wait_s=args.triage_wait)
+            _emit(with_block(result, *sweep_block(result)))
+            return 0 if result.get("state_seen") else 1
         if args.command == "status":
             _emit(with_block(status(root, args.run_id), "complete", [], None))
             return 0
