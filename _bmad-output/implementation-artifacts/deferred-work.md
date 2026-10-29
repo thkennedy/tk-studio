@@ -450,7 +450,8 @@ source_spec: `33-3-the-pin-restarts-a-logged-out-sandbox-spec.md`
 location: plugins/tk-studio/lib/launch.py engine_sandbox_row
 severity: low
 reason: The record is removed only when pin-released stopped the sandbox (Settled shape 3); engine_sandbox_row reads presence only. Proposed: treat a .pin whose supervisor_pid is dead or whose since predates the sandbox start as absent. Consult ruling D, deferral criterion (a).
-status: open
+status: done 2026-10-29
+resolution: resolved by sweep bundle dw-launch-check-advisories
 
 ### DW-58: Several queued runs on one sandbox that stays logged out (a token no restart heals) restart it once per run, one per drain pass, because guard (d) reads only the gated run's own episode.
 origin: spec-deferred c443898760e1
@@ -466,7 +467,8 @@ source_spec: `33-4-the-host-leg-runs-the-supervisors-suites-spec.md`
 location: plugins/tk-studio/lib/launch.py (the advisory rows of `check`)
 severity: low
 reason: Evidence hole 70: the supervisor suites' `tk-sup-*` leak filled the engine sandbox's /tmp to 1.3 M inodes during 33-1. Story 33.4 removes the cause (`apps/supervisor/test/tmp.ts` cleans every suite's folders under every exit) but not the symptom check. Proposed: an advisory `check` row that warns below 50,000 free inodes, read with `df -i /` through `sbx exec`. Outside 33-4's AC1/AC2 and its oversize band, so deferred. DRIFT: the inode warning deferred — affects: none.
-status: open
+status: done 2026-10-29
+resolution: resolved by sweep bundle dw-launch-check-advisories
 
 ### DW-60: The supervisor's pin (`pinBeforeClaim`) does not prune the engine sandbox's /tmp, so `tk-sup-*` and `tmp.*` leftovers from earlier runs (hole 70) accumulate until removed by hand.
 origin: spec-deferred 33-4 (plans/33-4.md Settled shape 6, the replan suggestion from 33-1)
