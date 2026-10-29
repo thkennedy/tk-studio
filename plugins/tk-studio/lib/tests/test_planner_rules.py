@@ -140,6 +140,62 @@ class SettledShapeRuleTest(unittest.TestCase):
         self.assertLess(section3.index("\n## Settled shape\n"), section3.index("\n## Files\n"))
         self.assertIn("there is never a second dated section", flat)
 
+    @unittest.skipUnless(TASK_PLANNING.is_file(), "studio-pipeline plugin not in this checkout")
+    def test_task_planning_plans_every_story_and_refuses_open_questions(self):
+        # Story 35.2: the bootstrap plans every manifest entry in list order (section 3
+        # each, the named story first); an un-noted open question of the story's CAPs is
+        # an escalate, never a plan without it; the finish line counts the plans; the
+        # Story 35.8 Stage Log bracket stays in section 3
+        text = TASK_PLANNING.read_text(encoding="utf-8")
+        section1 = _flat(text.split("## 1.", 1)[1].split("\n## 2.", 1)[0])
+        section3 = _flat(text.split("## 3.", 1)[1].split("\n## 4.", 1)[0])
+        section4 = text.split("\n## 4.", 1)[1]
+        self.assertIn("## 1. Bootstrap: transcribe the epic, then plan every story", text)
+        self.assertNotIn("plan its first story", text)
+        self.assertIn("plan every manifest entry in list order, each through section 3, "
+                      "the story the launch named first", section1)
+        self.assertIn("with a Code Map and a `band`", section1)
+        self.assertNotIn("Then plan the story the launch named in section 3.", section1)
+        # an existing manifest (a relaunch after a `blocked` bootstrap) still plans every
+        # entry without a plan, never only the named story
+        self.assertIn("If `stories.yaml` already has `- id:` entries, skip the transcription "
+                      "and plan, through section 3, every entry that has no `plans/<N>-<M>.md` "
+                      "yet, in list order, the named story first.", section1)
+        self.assertNotIn("skip straight to section 3 for the named story", text)
+        self.assertIn("**Open questions (Story 35.2).**", section3)
+        self.assertIn("`## Open Questions`", section3)
+        # any bullet naming one of the story's CAPs is its open question, the shape
+        # `launch.py check` reads (not only a `- CAP-N:` line)
+        self.assertIn("`## Open Questions` for a bullet that names one of the story's CAPs",
+                      section3)
+        self.assertNotIn("for a `- CAP-N:` line", section3)
+        # the design note's subject is the shape `launch.py check` reads
+        self.assertIn("the note's subject (the bullet's text before the first ` — ` or `:`) is "
+                      "the CAP, a CAP list, optionally with `(N.M)`, or the story `N.M`, the "
+                      "shape `launch.py check` reads", section3)
+        self.assertIn("For the story being started — the story boundary's next story, or the "
+                      "bootstrap's named (next) story — an open question of its CAPs that you "
+                      "cannot settle into a design note is an `escalate`", section3)
+        self.assertIn("never a plan written without it", section3)
+        self.assertIn("For a later story planned at bootstrap, an unsettled CAP never blocks the "
+                      "launch (earlier stories proceed)", section3)
+        self.assertIn("under `## Risks and open decisions` as a Block If naming the CAP", section3)
+        self.assertIn("the gap `open questions` once it is next", section3)
+        # section 2: the next story is the first entry with no spec file; a bootstrap plan is
+        # re-checked and refreshed, never a reason to call the epic complete
+        section2 = _flat(text.split("## 2.", 1)[1].split("\n## 3.", 1)[0])
+        self.assertIn("It is the first entry in `stories.yaml` with no spec file.", section2)
+        self.assertNotIn("no spec file and no plan", section2)
+        self.assertIn("Only when no entry lacks a spec file, record `epic complete: no next story`",
+                      section2)
+        self.assertIn("re-run section 3's open-question rule against it (write the design note, "
+                      "or `escalate`) and refresh that plan in place", section2)
+        self.assertIn("**Stage Log (Story 35.8).**", section3)
+        self.assertLess(section3.index("**Stage Log (Story 35.8).**"),
+                        section3.index("**Open questions (Story 35.2).**"))
+        self.assertIn("- `transcribed <n> stories, planned <n> plans`", section4)
+        self.assertNotIn("`transcribed <n> stories, planned <key>`", section4)
+
 
 class ConsultScopeTest(unittest.TestCase):
     def test_scope_names_schema_shape_a_planner_matter(self):

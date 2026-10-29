@@ -17,9 +17,9 @@ You are headless (AD-11): never ask, never wait. Every uncertainty is resolved h
 - `.tk-studio/budget-bands.yaml`, for the S/M/L bands. It is operator-tunable, so never hard-code its numbers.
 - The architecture spine (`_bmad-output/planning-artifacts/architecture/architecture-tk-studio-2026-07-26/ARCHITECTURE-SPINE.md`) and `plugins/tk-studio/contracts/driver-contract.md`. Read them for constraints; do not re-derive the plan from them.
 
-## 1. Bootstrap: transcribe the epic, then plan its first story
+## 1. Bootstrap: transcribe the epic, then plan every story
 
-If `stories.yaml` already has `- id:` entries, skip straight to section 3 for the named story.
+If `stories.yaml` already has `- id:` entries, skip the transcription and plan, through section 3, every entry that has no `plans/<N>-<M>.md` yet, in list order, the named story first.
 
 Otherwise, from the project root, run:
 
@@ -29,7 +29,7 @@ uv run --no-project python .bmad-loop/plugins/studio-pipeline/transcribe.py --ro
 
 It writes one entry per story of the epic, in document order. The ids are `<N>-<M>-<slug>`, and each `invoke_dev_with` points at the story's section; the script prints JSON. On `ok: false`, end `blocked` with its `error` verbatim. Never hand-write a manifest in its place: the transcription is deterministic on purpose.
 
-Then plan the story the launch named in section 3. That is the epic's first story unless the payload named another.
+Then plan every manifest entry in list order, each through section 3, the story the launch named first (the epic's first story unless the payload named another). Each entry gets its own `plans/<N>-<M>.md` with a Code Map and a `band`, so a relaunch reaches every dev session with a plan (Story 35.2).
 
 ## 2. Story boundary (gate Part B): accept the finished story
 
@@ -61,7 +61,7 @@ Cite the evidence for each: a test, a file, or an Auto Run Result line. Then app
 
 **Replan queue.** For every `Status: open` entry that names an unstarted story (one with no `stories/<key>-*.md` yet), revise that entry's `invoke_dev_with` in place with the suggested adjustment. Never touch a started entry. Then set the queue entry to `Status: closed — <what you did>`.
 
-**Next story.** It is the first entry in `stories.yaml` with no spec file and no plan. If none remains, record `epic complete: no next story` and stop. Otherwise, plan it in section 3.
+**Next story.** It is the first entry in `stories.yaml` with no spec file. Only when no entry lacks a spec file, record `epic complete: no next story` and stop. Otherwise plan it in section 3. When its `plans/<N>-<M>.md` already exists (the bootstrap plans every entry, Story 35.2), re-run section 3's open-question rule against it (write the design note, or `escalate`) and refresh that plan in place instead of writing a new one.
 
 ## 3. Write the story plan
 
@@ -128,13 +128,15 @@ Every entry's `invoke_dev_with` already names `plans/<N>-<M>.md`, so the dev ses
 
 `<shape>` is one of `optional entry`, `deferred entry`, `per-platform map` or `named placeholder rule`, each with its concrete text. The plan's own "Settled shape" section carries the detail. A settled shape is never a Block If and never an `open_questions[]` item. It stays a Block If naming an operator ruling only when no design document constrains it. Appending design notes to SPEC.md is a planner write, not a `bmad-spec` edit (AD-4).
 
+**Open questions (Story 35.2).** Before you write a story's plan, read `SPEC.md` `## Open Questions` for a bullet that names one of the story's CAPs (a `- **CAP-N** (<N>.<M>)` capability line names its story). Settle each into a design note above when the design documents constrain it; the note's subject (the bullet's text before the first ` — ` or `:`) is the CAP, a CAP list, optionally with `(N.M)`, or the story `N.M`, the shape `launch.py check` reads. For the story being started — the story boundary's next story, or the bootstrap's named (next) story — an open question of its CAPs that you cannot settle into a design note is an `escalate` (bootstrap: end `blocked` naming the CAPs and their questions), never a plan written without it. For a later story planned at bootstrap, an unsettled CAP never blocks the launch (earlier stories proceed): leave it un-noted and record it in that story's plan under `## Risks and open decisions` as a Block If naming the CAP and its question; the `story plans` row lists it, the story's boundary (section 2) re-checks it, and `launch.py check` refuses the story with the gap `open questions` once it is next while one of its CAPs has no design note.
+
 ## 4. Validate
 
 Run `bmad-loop validate --project <project root> --spec <spec folder, project-relative>`. A dirty working tree is expected mid-run, so ignore that line. Fix any manifest finding. A manifest that does not parse must never be left behind: restore the previous entries and record `planning failed: <reason>` instead.
 
 Finish with one line for the gate or launch record:
 
-- `transcribed <n> stories, planned <key>`
+- `transcribed <n> stories, planned <n> plans`
 - `story accepted, planned <key>`
 - `remediation entry <id> appended`
 - `epic complete: no next story`

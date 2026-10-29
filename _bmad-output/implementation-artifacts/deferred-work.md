@@ -614,7 +614,7 @@ source_spec: `34-6-the-asset-manifest-and-the-greybox-rung-spec.md`
 location: plugins/tk-studio/skills/tk-studio-launch (bootstrap); .bmad-loop/plugins/studio-pipeline (the gate's plan writing)
 severity: medium
 reason: Epic 34's bootstrap wrote plans/34-1.md only; the gates wrote 34-2 to 34-5 as they went, but 34.5's relaunch moved straight to 34.6 with no plans/34-6.md and no design note for CAP-11/CAP-12, so the session escalated six questions and paused; the operator wrote the plan by hand (dfa1ab2). Fix: the bootstrap writes every story's plan, and the gate refuses a story whose SPEC open questions have no design note (retro AI-9).
-status: open
+status: resolved 2026-10-29 by this story's PR (35.2: the launch bootstrap plans every manifest entry in list order (`task-planning.md` §1, the commit `loop(epic-<N>): SPEC, manifest and story plans from the launch bootstrap`); `launch.py check` refuses the next story with the gap `open questions` while one of its CAPs has an open question and no design note, the status block `blocked` naming every CAP; the advisory `story plans` row names the stories still without a plan; contract 0.1.30)
 
 ### DW-80: The engine's own `bun test` in the sandbox reports 15 Story 32.8 delivery tests red at baseline while the host passes all 1,494 (hole 84).
 origin: operator ledger, hole 84 (2026-10-27T22:02Z); retro C6, Open questions
@@ -646,7 +646,7 @@ source_spec: `34-5-one-engine-mcp-per-run-started-by-the-pin-spec.md`
 location: the resume path (apps/supervisor src/resume.ts, closeout.ts); .bmad-loop/plugins/studio-pipeline (gate files per story); the ledger's job-run line for PR #213
 severity: medium
 reason: Halt (60cbc36) → operator answer amended (c5a212e) → pause → `reconcile_verdict: not-required` by hand (54780c8) → the relaunch moved to 34.6: 34-5 has no gate file, no Reconcile, no DW review-budget entry although `followup_review_recommended: true`, and PR #213 is not metered (ledger line 732 has no total_cost_usd). Rules recorded (never amend after a resume; runbook :1556). Fix: a resumed run that lands more than one story writes a gate file and a cost line per story, or the studio refuses a resume that would cross a story boundary; and 34.5's follow-up review (the engine MCP: B6, B7, AI-5) is owed.
-status: open
+status: resolved 2026-10-29 by this story's PR (35.2: the planner picked the refusal — while a graceful stop is in force (`stop-request.json` in the engine run dir, or a journal `stop-request-discarded` no `run-resume`/`run-start` follows) the paused-run pass commits and meters the landed story but never archives or relaunches across the story boundary (one `story-boundary` event, `StoryBoundary`, `graceful_stop: "kept"`, one notifier line), and `POST /runs/{id}/resume` re-arms the stop on the resumed engine (`graceful-stop`); per-story records are not built; contract 0.1.30. 34.5's owed follow-up review (the engine MCP: B6, B7, AI-5) is left to the operator, outside this story)
 
 ### DW-84: `kb.py index` titles kb/index.md after the checkout folder, so every run that regenerates it restores the header by hand.
 origin: retro C6 (asked for in 34-4 spec :181, :189, :225)
@@ -758,4 +758,20 @@ source_spec: `35-8-every-stage-leaves-a-start-and-a-stop-spec.md`
 location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261028-234105-ee1e; this entry preserves the lingering recommendation for a deliberate later review.
+status: open
+
+### DW-98: Story 35.2's spec and plan pinned two contradictions into its intent contract; both were fixed in its review, the source wording is still wrong.
+origin: review of 35-2-every-story-gets-its-plan-and-its-records (consult: accept-deviation, score 2)
+source_spec: `35-2-every-story-gets-its-plan-and-its-records-spec.md`
+location: _bmad-output/specs/spec-epic-35/plans/35-2.md (Settled shape, Code Map); _bmad-output/specs/spec-epic-35/SPEC.md (CAP-3 design note); the 35-2 spec's Boundaries & Constraints
+severity: low
+reason: (1) "Change nothing else in that file" left `task-planning.md` §2's "Next story" as "the first entry with no spec file and no plan", so once the bootstrap plans every entry the first story boundary would record `epic complete` while stories remain; (2) the open-question shape was pinned as the single-CAP `^- CAP-(\d+):`, which misses the real Epic 34 SPEC's `- CAP-9 and CAP-10:` and `- CAP-4 and CAP-5:` lines (the plan asked the parser to handle those SPECs). The review fixed both (§2: the next story is the first entry with no spec file, an existing bootstrap plan re-checked and refreshed; the parser takes CAP lists in questions and design-note subjects) and limited the bootstrap's open-question block to the named/next story (a later story's unsettled CAP is a Block If in its plan). Fix: correct the plan's and SPEC's wording at the next spec pass.
+status: open
+
+### DW-99: Follow-up review still recommended for 35-2-every-story-gets-its-plan-and-its-records after the damping cap was spent
+origin: review-budget-followup
+source_spec: `35-2-every-story-gets-its-plan-and-its-records-spec.md`
+location: n/a
+severity: low
+reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261029-024051-cdae; this entry preserves the lingering recommendation for a deliberate later review.
 status: open

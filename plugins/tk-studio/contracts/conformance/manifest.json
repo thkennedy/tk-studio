@@ -132,6 +132,15 @@
           "marker": "2 entries"
         },
         {
+          "assertion": "status-block-open-question",
+          "argv": ["lib/launch.py", "check", "--directory", "contracts/conformance/fixtures/launch-open-question", "--epic", "1"],
+          "expect": "status-block",
+          "intent": "tk-studio-launch",
+          "status": "blocked",
+          "marker": "1-2-open-question-second: CAP-2 has no design note",
+          "note": "the Story 35.2 refusal: the next story (the first manifest entry not done) has a CAP whose open question no design note settles, so check ends blocked with the gap `open questions` naming the CAP; the noted CAP-1 of the done story is never a gap"
+        },
+        {
           "assertion": "headless-clean",
           "argv": ["contracts/conformance/e2e_verify_commands.py", "--directory", "{sandbox}"],
           "expect": "ok",
