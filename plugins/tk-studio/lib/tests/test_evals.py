@@ -366,3 +366,41 @@ if __name__ == "__main__":
     if sys.argv[1:2] in (["--version"], ["plugin"]):
         sys.exit(fake_claude(sys.argv[1:]))
     unittest.main()
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures" / "claude-plugin-eval"
+
+
+class RealCliShapeTests(unittest.TestCase):
+    """Hole 99: claude 2.1.312's `plugin eval --json` writes `cases[].arms.{with,without}[]`
+    per run (an ablation), `runsPerCase` and `aggregates.{score,passRate}` — not a `runs`
+    list. The two fixtures are the real results of the first maintenance-evals run on the
+    box (2026-10-29, q-maintenance-evals-20261029T121940Z-40fe02); the core scores the
+    `with` arm, the runs made with the plugin loaded."""
+
+    def _doc(self, case: str) -> dict:
+        return json.loads((FIXTURES / f"{case}.json").read_text(encoding="utf-8"))
+
+    def test_the_real_2_1_312_result_scores_through_the_with_arm(self):
+        for case, passed, score in (("tk-studio-playable-judge-verdict", 0, 0),
+                                    ("asset-ladder-generated-rung", 3, 1)):
+            self.assertEqual(evals.score_case(self._doc(case), case, 3),
+                             {"runs": 3, "passed": passed, "score": score}, case)
+
+    def test_the_without_arm_is_the_control_never_the_score(self):
+        doc = self._doc("asset-ladder-generated-rung")
+        entry = doc["cases"][0]
+        self.assertEqual(sum(1 for r in entry["arms"]["without"] if r["passed"]), 1)
+        self.assertEqual(evals.score_case(doc, "asset-ladder-generated-rung", 3)["passed"], 3)
+
+    def test_a_short_with_arm_is_a_named_refusal_not_a_score(self):
+        doc = {"cases": [{"name": "c", "arms": {"with": [{"passed": True}], "without": []},
+                          "aggregates": {"score": 1}}]}
+        with self.assertRaises(evals.Refusal) as ctx:
+            evals.score_case(doc, "c", 3)
+        self.assertEqual(str(ctx.exception), "case c: 1 runs reported, 3 requested")
+
+    def test_an_arm_run_without_a_verdict_is_unreadable(self):
+        doc = {"cases": [{"name": "c", "arms": {"with": [{"turns": 3}] * 3, "without": []}}]}
+        with self.assertRaises(evals.Refusal) as ctx:
+            evals.score_case(doc, "c", 3)
+        self.assertEqual(str(ctx.exception), "case c: unreadable run verdicts")

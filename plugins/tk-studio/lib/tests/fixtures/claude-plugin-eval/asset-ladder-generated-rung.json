@@ -1,0 +1,233 @@
+{
+  "schemaVersion": 1,
+  "claudeVersion": "2.1.312",
+  "startedAt": "2026-10-29T12:23:41.342Z",
+  "durationSeconds": 243,
+  "costUsd": 1.4204694,
+  "partial": false,
+  "suite": {
+    "root": "/run/sbx/skills-shared/tk-studio",
+    "ablation": "with-without",
+    "caseFilter": "asset-ladder-generated-rung",
+    "threshold": 0,
+    "concurrency": 1,
+    "plugins": [
+      {
+        "name": "tk-studio",
+        "version": "0.3.8",
+        "path": "/run/sbx/skills-shared/tk-studio"
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "asset-ladder-generated-rung",
+      "dir": "evals/asset-ladder-generated-rung",
+      "source": "prose",
+      "promptMarkdown": "I run the tk-studio plugin's asset ladder (`lib/assets.py`, Stories 34.6\nand 34.7) on a game project on the studio's Windows agent PC. The greybox\nand cc0 rungs work. How do I turn the **generated** rung on, so that\n`assets.py generate` may call the paid generator for the entries with\n`rung: generated`? Read the plugin's own docs to answer (the asset ladder\nnote under `kb/`, the driver contract's asset manifest section and the\n`assets.py` docstring), then answer in at most ten lines: which file and\nkey set the cap and in what unit, where the generator's API key lives and\nhow it is set, and what the cap bounds.",
+      "runsPerCase": 3,
+      "timeoutSeconds": 300,
+      "maxTurns": 10,
+      "graders": [
+        {
+          "name": "criteria",
+          "type": "llm",
+          "weight": 1,
+          "graderMarkdown": "The response names all three facts of the generated rung's switch:\n\n1. The cap: a top-level `assets: {credit_cap: <n>}` in the project's\n   `.tk-studio/budget-bands.yaml`, `n` in Meshy credits and greater than 0.\n   Without it `generate` refuses naming `assets.credit_cap` (the rung is\n   off by default), before any network call or write.\n2. The key: `TK_ASSETS_MESHY_KEY`, set as a **User** environment variable\n   (for example `[Environment]::SetEnvironmentVariable(\"TK_ASSETS_MESHY_KEY\",\n   \"<key>\", \"User\")`, read from `HKCU\\Environment`, then the process env),\n   never written into a file, a config, the ledger or a command line; its\n   value never appears in output.\n3. The bound: the cap is per `generate` invocation (and the supervisor's\n   host leg calls `generate` at most once per run — in this version zero\n   times), each call checked against the credits already spent before it is\n   made.\n\nFail the response if any of the three is missing or wrong, if it tells the\noperator to put the key in a tracked file, `.env`, the project config or a\ncommand-line flag, or if it describes the cap as a dollar amount or a\nper-asset limit.",
+          "config": {
+            "criteria": "The response names all three facts of the generated rung's switch:\n\n1. The cap: a top-level `assets: {credit_cap: <n>}` in the project's\n   `.tk-studio/budget-bands.yaml`, `n` in Meshy credits and greater than 0.\n   Without it `generate` refuses naming `assets.credit_cap` (the rung is\n   off by default), before any network call or write.\n2. The key: `TK_ASSETS_MESHY_KEY`, set as a **User** environment variable\n   (for example `[Environment]::SetEnvironmentVariable(\"TK_ASSETS_MESHY_KEY\",\n   \"<key>\", \"User\")`, read from `HKCU\\Environment`, then the process env),\n   never written into a file, a config, the ledger or a command line; its\n   value never appears in output.\n3. The bound: the cap is per `generate` invocation (and the supervisor's\n   host leg calls `generate` at most once per run — in this version zero\n   times), each call checked against the credits already spent before it is\n   made.\n\nFail the response if any of the three is missing or wrong, if it tells the\noperator to put the key in a tracked file, `.env`, the project config or a\ncommand-line flag, or if it describes the cap as a dollar amount or a\nper-asset limit.",
+            "focus": "last_message"
+          }
+        }
+      ],
+      "arms": {
+        "with": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 9,
+            "costUsd": 0.2919509,
+            "judgeCostUsd": 0.0012853,
+            "durationSeconds": 57,
+            "startedAt": "2026-10-29T12:23:41.385Z",
+            "error": null,
+            "tracePath": "/tmp/claude-eval-ccoup0/out/trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": true,
+                "weight": 1,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "1. **Cap:** in the project's `.tk-studio/budget-bands.yaml`, add a top-level `assets: {credit_cap: <n>}`. It's counted in **Meshy credits** and must be a number above 0. If the key is missing, the rung stays off and `generate` refuses with exit 2, naming `assets.credit_cap`.\n2. **API key:** `TK_ASSETS_MESHY_KEY`, kept as a **User environment variable** on the agent PC (`HKCU\\Environment`, or the process env). Set it with e.g. `[Environment]::SetEnvironmentVariable('TK_ASSETS_MESHY_KEY','<key>','User')`. That command is my suggestion; the docs only name the location. Without the variable, `generate` refuses before any network call. The key never appears in output, files, argv or the ledger.\n3. **What the cap bounds:** credits spent in **one `generate` run**, not per entry or per day. The Story 34.8 host leg calls `generate` at most once per run. Before each Meshy text-to-3D preview call, if credits spent plus the per-task charge would pass the cap, that entry and every later one becomes `not-run: credit cap` and the run ends `partial`. The per-task charge is the 20-credit estimate, or the highest charge reported so far if that is higher. A call that costs more than expected can go over the cap by at most one call; the run then ends `partial` with a reason naming the overshoot. Every call is logged as an `asset-generation` event in the ledger.\n\nSources: `contracts/driver-contract.md` (the generate notes near lines 560 and 1415) and the `lib/assets.py` docstring. The plugin has no `kb/` folder, so I couldn't read the asset ladder note."
+              }
+            ]
+          },
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 7,
+            "costUsd": 0.2921575,
+            "judgeCostUsd": 0.0013166999999999996,
+            "durationSeconds": 35,
+            "startedAt": "2026-10-29T12:24:38.532Z",
+            "error": null,
+            "tracePath": "/tmp/claude-eval-zXBd7T/out/trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": true,
+                "weight": 1,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "I can't give you the asset ladder note: `kb/asset-ladder.md` isn't in the installed plugin. A copy of the source repo exists at `/c/GitHub/tk-studio/kb`, but it's outside this session's workspace, so I didn't open it. This answer comes from the driver contract (§Asset manifest, Story 34.7) and the `assets.py` docstring and code, which agree with each other:\n\n1. **Cap file and key:** in the game project, `.tk-studio/budget-bands.yaml` needs a top-level `assets:` mapping with `credit_cap: <n>` (written in block style as `assets:` then `  credit_cap: 200`). The unit is **Meshy credits**, and it must be a number above 0.\n2. If the key is missing, zero or not a number, `generate` refuses with exit 2 before any network call or write, and the refusal names `assets.credit_cap`. That missing key is how the rung stays off by default.\n3. **API key:** a User environment variable named `TK_ASSETS_MESHY_KEY`. On the Windows agent PC, `generate` reads it from `HKCU\\Environment` first (no new terminal needed), then from the process environment. Set it with `[Environment]::SetEnvironmentVariable('TK_ASSETS_MESHY_KEY','<key>','User')` (or `setx`). Never put it in a file. The value is never printed or written to argv, files or the ledger.\n4. **What the cap bounds:** the Meshy credits spent in **one `generate` invocation**. It is not a daily or project-wide total. The host leg calls `generate` at most once per run.\n5. Before each call, if the credits spent so far plus the charge per task (an estimate of 20, or a higher charge already reported in that invocation) would pass the cap, that entry and every later one becomes `not-run: credit cap` and the run ends `partial`.\n6. If a call costs more than the estimate, spending can go over the cap by at most one call, and the run reports that overshoot. Every call is logged in the ledger as an `asset-generation` event with its credits."
+              }
+            ]
+          },
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 9,
+            "costUsd": 0.3248408,
+            "judgeCostUsd": 0.0012704,
+            "durationSeconds": 41,
+            "startedAt": "2026-10-29T12:25:13.850Z",
+            "error": null,
+            "tracePath": "/tmp/claude-eval-DlD7Ma/out/trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": true,
+                "weight": 1,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "1. **Cap:** in the project's `.tk-studio/budget-bands.yaml`, set the top-level key `assets: {credit_cap: N}`. N is in **Meshy credits** and must be a number above 0. With no cap set, `generate` stops with exit 2 and an error naming `assets.credit_cap`, before any network call or file write. That is how the rung stays off by default.\n2. **Key:** `TK_ASSETS_MESHY_KEY`, a Windows **User environment variable**. `assets.py` reads it from `HKCU\\Environment`, then from the process env, so you don't need a new terminal. The docs say to set it by name and never in a file. One way to set it is `[Environment]::SetEnvironmentVariable('TK_ASSETS_MESHY_KEY','<key>','User')`; that command is standard Windows, not from the docs. The key is never printed or written to the output, a file, the ledger or argv.\n3. **What the cap bounds:** credits spent in **one `generate` run** (the 34.8 host leg calls `generate` at most once per run). Before each Meshy call it checks credits spent plus the per-task charge (an estimate of 20, or the highest charge reported so far if higher). If that would pass the cap, that entry and every later one is marked `not-run: credit cap` and the run ends `partial`. A call priced above the estimate can go over the cap by at most one call, and the run's reason names the overshoot. Every call is logged to the ledger as an `asset-generation` event.\n\nThe `kb/asset-ladder.md` note that `assets.py` points to isn't in the installed plugin (it has no `kb/` folder). This answer comes from the `assets.py` docstring and code and the driver contract's generated-rung section."
+              }
+            ]
+          }
+        ],
+        "without": [
+          {
+            "score": 0,
+            "passed": false,
+            "turns": 8,
+            "costUsd": 0.148863,
+            "judgeCostUsd": 0.00026159999999999985,
+            "durationSeconds": 24,
+            "startedAt": "2026-10-29T12:25:54.703Z",
+            "error": null,
+            "tracePath": "/tmp/claude-eval-ahE2UT/out/trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": false,
+                "weight": 1,
+                "explanation": "judge votes: FAIL FAIL FAIL",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  false,
+                  false,
+                  false
+                ],
+                "evidence": "I can't answer this from the plugin's docs because the tk-studio plugin isn't anywhere I'm allowed to read.\n\n- `/run/sbx/skills-shared/`, where shared plugins are normally mounted, is empty. There's no `tk-studio` folder in it.\n- I searched the working directory and the home directory and found no `lib/assets.py`, no asset ladder note under `kb/`, and no driver contract.\n- My one attempt to look in the Claude config `plugins` folder was denied, so I stopped there.\n\nI won't guess the cap key, its unit, or how the generator key is stored. A wrong answer about a paid API could cost money.\n\nTo get the answer, do one of these:\n1. Mount or copy the tk-studio plugin somewhere I can read, such as the working directory, then ask again.\n2. Paste the three sections here: the asset ladder note, the \"asset manifest\" section of the driver contract, and the `assets.py` docstring."
+              }
+            ]
+          },
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 10,
+            "costUsd": 0.2414866,
+            "judgeCostUsd": 0.0010834,
+            "durationSeconds": 56,
+            "startedAt": "2026-10-29T12:26:18.464Z",
+            "error": null,
+            "tracePath": "/tmp/claude-eval-bzWmRT/out/trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": true,
+                "weight": 1,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "You need to set two things. Without either one, `assets.py generate` refuses before it makes any call or writes anything:\n\n1. **The cap:** in the game project's `.tk-studio/budget-bands.yaml`, set `assets:` → `credit_cap: <n>`. The unit is Meshy credits (the docs' example is `credit_cap: 100`). If it's missing, the refusal names `assets.credit_cap`.\n2. **The key:** it lives only in a Windows User environment variable called `TK_ASSETS_MESHY_KEY`, never in a file. Set it once on the agent PC with `[Environment]::SetEnvironmentVariable(\"TK_ASSETS_MESHY_KEY\", \"<Meshy API key>\", \"User\")`. It's read from `HKCU\\Environment` first, so a new terminal isn't needed. It never appears in output, files, the ledger or argv.\n3. **What the cap bounds:** the credits spent in one `generate` run, not per entry or per day. Before each call, if credits spent plus the estimate (20 per task, or the highest charge reported so far in the run) would go over the cap, that entry and all later ones become `not-run: credit cap`. A call priced above the estimate can overshoot by at most one call; the run then ends `partial` and the reason says so. Every call, failed ones included, is logged to the ledger as an `asset-generation` line.\n\nAutomated `run-vertical-slice` runs never call `generate`; it is always a manual step. Sources: `kb/asset-ladder.md` (\"The generated rung\") and the `lib/assets.py` docstring. I only grepped `contracts/driver-contract.md` for these terms, and its asset manifest section didn't come up, so I didn't use it."
+              }
+            ]
+          },
+          {
+            "score": 0,
+            "passed": false,
+            "turns": 6,
+            "costUsd": 0.1211706,
+            "judgeCostUsd": 0.0002909999999999996,
+            "durationSeconds": 30,
+            "startedAt": "2026-10-29T12:27:14.188Z",
+            "error": null,
+            "tracePath": "/tmp/claude-eval-Hdf9Ah/out/trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": false,
+                "weight": 1,
+                "explanation": "judge votes: FAIL FAIL FAIL",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  false,
+                  false,
+                  false
+                ],
+                "evidence": "I couldn't read the plugin's docs, so I can't answer this yet. I'd rather not guess at a feature that spends money.\n\n- **What I tried:** `lib/assets.py`, the `kb/` asset ladder note and the driver contract, all under `/run/sbx/skills-shared/tk-studio`.\n- **What blocked me:** Read, Grep and Glob calls on that directory were refused because this session runs in \"don't ask\" mode. Bash fails even before it runs a command. The sandbox config also lists `/run/sbx/skills-shared` as a path I'm not allowed to read.\n- **What I won't do:** make up a config file, key name, cap unit or API-key location for the paid generator. A wrong guess could let it spend more than you meant to.\n\nTo get the answer, either allow reads of `/run/sbx/skills-shared/tk-studio` (or copy the plugin into `/tmp/claude-eval-Hdf9Ah/home/cwd`) and ask again, or paste the asset ladder note, the driver contract's asset manifest section and the `assets.py` docstring here. Then I'll give the ten-line answer: which file and key set the cap and in what unit, where the API key lives and how it's set, and what the cap bounds."
+              }
+            ]
+          }
+        ]
+      },
+      "aggregates": {
+        "score": 1,
+        "passRate": 1,
+        "scoreWithout": 0.3333333333333333,
+        "passRateWithout": 0.3333333333333333,
+        "delta": 0.6666666666666667
+      }
+    }
+  ],
+  "aggregates": {
+    "casesTotal": 1,
+    "casesPassed": 1,
+    "overallScore": 1,
+    "overallPassRate": 1,
+    "meanDelta": 0.6666666666666667
+  }
+}

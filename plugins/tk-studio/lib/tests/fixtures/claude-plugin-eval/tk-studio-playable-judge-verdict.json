@@ -1,0 +1,233 @@
+{
+  "schemaVersion": 1,
+  "claudeVersion": "2.1.312",
+  "startedAt": "2026-10-29T12:20:35.842Z",
+  "durationSeconds": 185,
+  "costUsd": 0.9261851999999999,
+  "partial": false,
+  "suite": {
+    "root": "/run/sbx/skills-shared/tk-studio",
+    "ablation": "with-without",
+    "caseFilter": "tk-studio-playable-judge-verdict",
+    "threshold": 0,
+    "concurrency": 1,
+    "plugins": [
+      {
+        "name": "tk-studio",
+        "version": "0.3.8",
+        "path": "/run/sbx/skills-shared/tk-studio"
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "tk-studio-playable-judge-verdict",
+      "dir": "evals/tk-studio-playable-judge-verdict",
+      "source": "prose",
+      "promptMarkdown": "Use the `tk-studio-playable-judge` skill to judge a playable run, headless.\nThe payload is `{media: \"media\"}` with `directory` this case's folder (the\nfolder holding this prompt): the run's `media/report.json` and its frames\nunder `media/frames/` are already there. Follow the skill: prepare through\nits core (`playable_judge.py prepare --media <directory>/media`), look at\nevery frame it lists, write `media/answer.json`, record the verdict through\nthe core (`playable_judge.py verdict`), and end with the status block.\n\nThen print the `judge.json` the core wrote, as JSON, and stop.",
+      "runsPerCase": 3,
+      "timeoutSeconds": 300,
+      "maxTurns": 12,
+      "graders": [
+        {
+          "name": "criteria",
+          "type": "llm",
+          "weight": 1,
+          "graderMarkdown": "The fixture's `report.json` lists two frames: `frames/tick-000000.png` (a\ngrey scene, a HUD strip at the top, a blue player block) and\n`frames/tick-000030.png` (the same HUD and player, the lower half of the\nframe flat magenta: a missing texture).\n\nPass the response only when all of these hold:\n\n1. The printed `judge.json` is a JSON object with `verdict` `\"fail\"` and a\n   `findings` list holding at least one finding whose `frame` is\n   `frames/tick-000030.png` and whose `rubric` is\n   `no-magenta-or-error-overlay`; every finding names a `frame` from the\n   report's `frames[]` and a `rubric` that is one of the five fixed ids\n   (`scene-loaded`, `player-visible`, `no-magenta-or-error-overlay`,\n   `hud-reads`, `moments-shown`), with a one-line `note`.\n2. The verdict was recorded through the skill's core (`playable_judge.py\n   verdict`), not written by hand as `judge.json`.\n3. The session read only `media/report.json` and the frames under\n   `media/frames/` (and ran the core): it opened, listed or grepped no code,\n   scene, script, spec, story or plan file, and nothing outside `media/`\n   beyond the skill's own instructions.\n4. The run ended with the status block `{\"status\": \"complete\", \"intent\":\n   \"tk-studio-playable-judge\", ...}` (a judged `fail` is still `complete`)\n   and asked no question.\n\nFail the response if the verdict is `pass`, if a finding names a frame or a\nrubric id outside the fixed sets, or if the session read any file outside\n`media/` other than the skill itself.",
+          "config": {
+            "criteria": "The fixture's `report.json` lists two frames: `frames/tick-000000.png` (a\ngrey scene, a HUD strip at the top, a blue player block) and\n`frames/tick-000030.png` (the same HUD and player, the lower half of the\nframe flat magenta: a missing texture).\n\nPass the response only when all of these hold:\n\n1. The printed `judge.json` is a JSON object with `verdict` `\"fail\"` and a\n   `findings` list holding at least one finding whose `frame` is\n   `frames/tick-000030.png` and whose `rubric` is\n   `no-magenta-or-error-overlay`; every finding names a `frame` from the\n   report's `frames[]` and a `rubric` that is one of the five fixed ids\n   (`scene-loaded`, `player-visible`, `no-magenta-or-error-overlay`,\n   `hud-reads`, `moments-shown`), with a one-line `note`.\n2. The verdict was recorded through the skill's core (`playable_judge.py\n   verdict`), not written by hand as `judge.json`.\n3. The session read only `media/report.json` and the frames under\n   `media/frames/` (and ran the core): it opened, listed or grepped no code,\n   scene, script, spec, story or plan file, and nothing outside `media/`\n   beyond the skill's own instructions.\n4. The run ended with the status block `{\"status\": \"complete\", \"intent\":\n   \"tk-studio-playable-judge\", ...}` (a judged `fail` is still `complete`)\n   and asked no question.\n\nFail the response if the verdict is `pass`, if a finding names a frame or a\nrubric id outside the fixed sets, or if the session read any file outside\n`media/` other than the skill itself.",
+            "focus": "last_message"
+          }
+        }
+      ],
+      "arms": {
+        "with": [
+          {
+            "score": 0,
+            "passed": false,
+            "turns": 10,
+            "costUsd": 0.1969844,
+            "judgeCostUsd": 0.00034560000000000005,
+            "durationSeconds": 48,
+            "startedAt": "2026-10-29T12:20:35.936Z",
+            "error": null,
+            "tracePath": "/tmp/claude-eval-frKbTo/out/trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": false,
+                "weight": 1,
+                "explanation": "judge votes: FAIL FAIL FAIL",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  false,
+                  false,
+                  false
+                ],
+                "evidence": "I couldn't judge the run, so it ends `blocked` and no `judge.json` exists to print.\n\n- **The media folder isn't here.** The working directory (`/tmp/claude-eval-frKbTo/home/cwd`) holds only `.claude/`, with no `media/report.json` and no `media/frames/`. When I tried to look for the case folder elsewhere, including under `/run/sbx/skills-shared/tk-studio/evals/`, the permission mode denied the searches.\n- **The judge script won't start.** `uv run …/playable_judge.py prepare` exits right away because `uv` can't create its cache directory: the filesystem is read-only, at the default path and at `$TMPDIR`.\n- **I couldn't write the outputs either.** With the filesystem read-only, `answer.json` and `judge.json` can't be written even if the media were found.\n\nTo get a real verdict, put `media/` (with `report.json` and `frames/`) in a folder I can reach and give the session a writable directory for the `uv` cache and the media folder. Then I can re-run it.\n\n```json\n{\"status\": \"blocked\", \"intent\": \"tk-studio-playable-judge\", \"artifacts\": [], \"reason\": \"core unrunnable: uv cannot create its cache (read-only filesystem), and media/report.json is not present in the reachable case directory\"}\n```"
+              }
+            ]
+          },
+          {
+            "score": 0,
+            "passed": false,
+            "turns": 8,
+            "costUsd": 0.1845354,
+            "judgeCostUsd": 0.0003924000000000001,
+            "durationSeconds": 27,
+            "startedAt": "2026-10-29T12:21:24.132Z",
+            "error": null,
+            "tracePath": "/tmp/claude-eval-odfTl9/out/trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": false,
+                "weight": 1,
+                "explanation": "judge votes: FAIL FAIL FAIL",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  false,
+                  false,
+                  false
+                ],
+                "evidence": "I couldn't judge this run: the judge core never ran, so no `judge.json` exists and there's nothing to print.\n\nWhat stopped it:\n\n1. **No `media` folder in the working directory.** The working directory (`/tmp/claude-eval-odfTl9/home/cwd`) holds only `.claude`, and no `media/report.json` exists anywhere under the home tree. The case folder is probably the eval directory under `/run/sbx/skills-shared/tk-studio/evals/`, but the sandbox doesn't let me read it (\"Permission to read … has been denied\"). It's also inside the write-denied `tk-studio` tree, so I couldn't have written `answer.json` or `judge.json` there anyway.\n2. **`uv` can't start.** `playable_judge.py prepare` failed before it began: `Failed to initialize cache at /tmp/claude-eval-odfTl9/home/.cache/uv … Read-only file system`.\n\nI didn't open any frames or write `answer.json`.\n\nTo make it runnable, either put the case's `media/` folder somewhere this session can read and write (for example the working directory), or allow read/write on the eval case folder. Also point `UV_CACHE_DIR` at a writable directory. Both are sandbox settings for you to change.\n\nStatus block (the core is unrunnable, so the run is `blocked`):\n\n```json\n{\"status\": \"blocked\", \"intent\": \"tk-studio-playable-judge\", \"artifacts\": [], \"reason\": \"core unrunnable: payload media folder not readable/writable in sandbox (case directory under /run/sbx/skills-shared/tk-studio/evals is read- and write-denied; no media/ in cwd) and uv cache dir /tmp/claude-eval-odfTl9/home/.cache/uv is on a read-only filesystem\"}\n```"
+              }
+            ]
+          },
+          {
+            "score": 0,
+            "passed": false,
+            "turns": 8,
+            "costUsd": 0.1904069,
+            "judgeCostUsd": 0.0003669000000000001,
+            "durationSeconds": 48,
+            "startedAt": "2026-10-29T12:21:51.233Z",
+            "error": null,
+            "tracePath": "/tmp/claude-eval-rThz33/out/trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": false,
+                "weight": 1,
+                "explanation": "judge votes: FAIL FAIL FAIL",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  false,
+                  false,
+                  false
+                ],
+                "evidence": "I couldn't judge this run. The `media` folder isn't anywhere I'm allowed to reach, so the run ends `blocked` and no `judge.json` exists to print.\n\n- **No media folder:** the working directory (`/tmp/claude-eval-rThz33/home/cwd`) holds only an empty `.claude/` folder. There is no `media/report.json` and no `media/frames/` in it. When I tried to look for the case folder under the plugin's `evals/` tree, the permission check denied the command. That tree is outside what this session was given, so I stopped looking there.\n- **Core can't start:** `uv run … playable_judge.py prepare` fails before doing anything. `uv` can't create its cache at `~/.cache/uv` or in `$TMPDIR`, because both are read-only in this sandbox. So the core wouldn't run even if the media were present.\n\nBecause `prepare` never ran, I didn't look at any frames or write an `answer.json`, and `verdict` was never recorded.\n\n```json\n{\"status\": \"blocked\", \"intent\": \"tk-studio-playable-judge\", \"artifacts\": [], \"reason\": \"core unrunnable: no media/report.json or media/frames under the reachable case directory, and uv cannot create its cache (read-only filesystem at ~/.cache/uv and $TMPDIR)\"}\n```\n\nTo rerun this, the case folder with `media/` needs to be the working directory or somewhere readable, and `uv` needs a writable cache directory, for example by setting `UV_CACHE_DIR` to a path that allows writes."
+              }
+            ]
+          }
+        ],
+        "without": [
+          {
+            "score": 0,
+            "passed": false,
+            "turns": 5,
+            "costUsd": 0.12250989999999999,
+            "judgeCostUsd": 0.0003590999999999998,
+            "durationSeconds": 23,
+            "startedAt": "2026-10-29T12:22:39.003Z",
+            "error": null,
+            "tracePath": "/tmp/claude-eval-vPyZ9I/out/trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": false,
+                "weight": 1,
+                "explanation": "judge votes: FAIL FAIL FAIL",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  false,
+                  false,
+                  false
+                ],
+                "evidence": "I couldn't run this judgment. Nothing was judged and no `judge.json` exists, so there is no JSON to print.\n\nTwo things are missing:\n\n1. **The skill isn't installed in this session.** Invoking `tk-studio-playable-judge` returned `Unknown skill`, and it isn't in the list of available skills.\n2. **The case folder has no media.** The working directory (`/tmp/claude-eval-vPyZ9I/home/cwd`) holds only an empty `.claude/` directory. There is no `media/report.json` and no `media/frames/`, so `prepare --media <directory>/media` would have nothing to read.\n\nA search did turn up copies of `playable_judge.py` in other checkouts on the machine (`/c/GitHub/tk-studio/...` and an agent worktree). The sandbox blocks the shared skills and evals directory (`/run/sbx/skills-shared/tk-studio/evals`). I didn't use those other copies: they belong to your other projects, not to this task. Even with them, I'd have no frames to look at, and I won't write a verdict without them.\n\n**Status:** blocked. Nothing ran: no prepare, no frames reviewed, no `answer.json`, no verdict.\n\nTo run it, make the `tk-studio-playable-judge` skill available to this session and put the case's `media/` folder (with `report.json` and `frames/`) in the working directory. Or tell me the right case directory if it lives somewhere I'm allowed to read."
+              }
+            ]
+          },
+          {
+            "score": 0,
+            "passed": false,
+            "turns": 4,
+            "costUsd": 0.1128023,
+            "judgeCostUsd": 0.0003423,
+            "durationSeconds": 21,
+            "startedAt": "2026-10-29T12:23:02.232Z",
+            "error": null,
+            "tracePath": "/tmp/claude-eval-xuUnSJ/out/trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": false,
+                "weight": 1,
+                "explanation": "judge votes: FAIL FAIL FAIL",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  false,
+                  false,
+                  false
+                ],
+                "evidence": "I couldn't run the judgment, so there is no `judge.json` to print. Two things the task needs are missing from this session:\n\n1. **The skill isn't installed.** Calling the Skill tool with `tk-studio-playable-judge` failed with `Unknown skill`, and it isn't in this session's skill list.\n2. **The case folder has no run media.** The working directory (`/tmp/claude-eval-xuUnSJ/home/cwd`) contains only a `.claude/` folder. There is no `media/report.json`, no `media/frames/`, and no prompt file. The folder you described isn't here.\n\nA copy of `playable_judge.py` does exist elsewhere on this machine, under `/c/GitHub/tk-studio/...` and an agent worktree in `/c/agent-work/...`. Those are in your other checkouts, outside what this session was given, so I didn't run them. Even if I had, there are no frames to look at, and any verdict or `judge.json` would be made up.\n\n**Status:** blocked. No `answer.json` written, no verdict recorded, no `judge.json` produced.\n\nTo run it, the session needs the `tk-studio-playable-judge` skill installed and the case's `media/` folder (with `report.json` and `frames/`) placed in the working directory, or a pointer to where they actually are."
+              }
+            ]
+          },
+          {
+            "score": 0,
+            "passed": false,
+            "turns": 4,
+            "costUsd": 0.11894629999999999,
+            "judgeCostUsd": 0.0003470999999999997,
+            "durationSeconds": 18,
+            "startedAt": "2026-10-29T12:23:22.778Z",
+            "error": null,
+            "tracePath": "/tmp/claude-eval-jk11HJ/out/trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": false,
+                "weight": 1,
+                "explanation": "judge votes: FAIL FAIL FAIL",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  false,
+                  false,
+                  false
+                ],
+                "evidence": "I couldn't run the judge, so there's no verdict and no `judge.json` to print.\n\nWhat blocked it:\n\n1. **The skill isn't installed in this session.** Calling `tk-studio-playable-judge` returned \"Unknown skill\", and it isn't in my list of available skills.\n2. **I can't find the case folder.** My working directory (`/tmp/claude-eval-jk11HJ/home/cwd`) has no `media/`, `report.json` or `frames/`. The evals tree that probably holds this case (`/run/sbx/skills-shared/tk-studio/evals`) is blocked from reading by the sandbox.\n\nA search did turn up a copy of `playable_judge.py` and the skill in another git worktree at `/c/agent-work/worktrees/tk-studio/q-maintenance-evals-…`. That isn't part of what this session was given, so I didn't use it. It also wouldn't help on its own, because the case's `media/` folder still isn't readable.\n\nTo fix this, do one of the following:\n- install the `tk-studio-playable-judge` skill in this session, or\n- allow the sandbox to read the case folder, or\n- copy the case folder (with `media/report.json` and `media/frames/`) into the working directory.\n\nThen I can run `prepare`, look at every frame, write `answer.json`, record the verdict and print `judge.json`."
+              }
+            ]
+          }
+        ]
+      },
+      "aggregates": {
+        "score": 0,
+        "passRate": 0,
+        "scoreWithout": 0,
+        "passRateWithout": 0,
+        "delta": 0
+      }
+    }
+  ],
+  "aggregates": {
+    "casesTotal": 1,
+    "casesPassed": 1,
+    "overallScore": 0,
+    "overallPassRate": 0,
+    "meanDelta": 0
+  }
+}
