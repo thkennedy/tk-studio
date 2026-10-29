@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import ledger  # noqa: E402
 import measurepush  # noqa: E402
+import plansync  # noqa: E402
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
@@ -330,6 +331,77 @@ class MeasurePushTest(unittest.TestCase):
         self.assertEqual(out["unpushed"], 1)
         self.assertIn("note", out)
 
+
+    # --- 35-8: the Stage Log harvest never stops the push
+
+    def _push_cli(self, *extra: str) -> tuple[int, dict]:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = measurepush.main(["push", "--directory", str(self.repo),
+                                     "--no-pr", *extra])
+        return code, json.loads(out.getvalue())
+
+    def test_a_non_utf8_spec_is_skipped_and_the_push_still_reports(self):
+        stories = self.repo / "_bmad-output" / "specs" / "x" / "stories"
+        stories.mkdir(parents=True)
+        (stories / "1-1-bad-spec.md").write_bytes(
+            b"## Stage Log\n\xff\xfe not utf-8 \x81\n")
+        self._emit("an event")
+        code, out = self._push_cli("--dry-run")
+        self.assertEqual(code, 0, out)
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["stage_events"]["emitted"], 0)
+        self.assertIn("result_state", out)
+
+    def test_a_failing_harvest_is_recorded_and_the_push_continues(self):
+        real = measurepush.harvest_stages
+
+        def boom(directory, dry_run=False):
+            raise OSError("ledger refused the stage event")
+        measurepush.harvest_stages = boom
+        try:
+            self._emit("an event")
+            code, out = self._push_cli()
+        finally:
+            measurepush.harvest_stages = real
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out["result_state"], "pushed")
+        self.assertFalse(out["stage_events"]["ok"])
+        self.assertIn("ledger refused", out["stage_events"]["error"])
+
+    def test_push_emits_one_stage_event_per_completed_row_then_none(self):
+        # Story 35.8 (AC3): `push` itself harvests the Stage Log before it moves the ledger
+        stories = self.repo / "_bmad-output" / "specs" / "spec-epic-35" / "stories"
+        stories.mkdir(parents=True)
+        (stories / "35-8-a-story-spec.md").write_text(
+            "---\ntitle: 'a story'\nstatus: 'in-progress'\n---\n\nbody\n",
+            encoding="utf-8", newline="\n")
+        plansync.stage_append(self.repo, [
+            {"stage": "dev", "pass": 1, "started": "2026-10-28T23:41:00Z",
+             "ended": "2026-10-28T23:52:10Z", "outcome": "done"},
+            {"stage": "review", "pass": 1, "started": "2026-10-28T23:53:00Z",
+             "ended": "2026-10-29T00:03:00Z", "outcome": "clean"},
+            {"stage": "merge", "started": "2026-10-29T01:00:00Z",
+             "ended": "2026-10-29T01:00:00Z", "outcome": "merged"}], story="35-8-a-story")
+        plansync.stage_start(self.repo, "gate", story="35-8-a-story", pass_=1)  # open: waits
+        _git(self.repo, "add", "-A")
+        _git(self.repo, "commit", "-q", "-m", "a spec with its Stage Log")
+        completed = [e["key"] for e in plansync.stage_rows(self.repo)
+                     if e["row"]["ended"] != plansync.NO_VALUE]
+        self.assertEqual(len(completed), 3)
+
+        first = measurepush.push(self.repo, no_pr=True)
+        self.assertEqual(first["result_state"], "pushed")
+        self.assertEqual(first["stage_events"]["emitted"], 3)
+        self.assertEqual(sorted(first["stage_events"]["row_keys"]), sorted(completed))
+        events = [json.loads(line) for line in self._file_on(f"origin/{self.branch}")]
+        self.assertEqual(sorted(e["payload"]["row_key"] for e in events if e["event"] == "stage"),
+                         sorted(completed))
+
+        second = measurepush.push(self.repo, no_pr=True)
+        self.assertEqual((second["stage_events"]["emitted"], second["stage_events"]["already"]),
+                         (0, 3))
+        self.assertEqual(second["stage_events"]["row_keys"], [])
 
 if __name__ == "__main__":
     unittest.main()

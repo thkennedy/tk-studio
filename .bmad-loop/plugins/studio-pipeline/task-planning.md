@@ -65,6 +65,20 @@ Cite the evidence for each: a test, a file, or an Auto Run Result line. Then app
 
 ## 3. Write the story plan
 
+**Stage Log (Story 35.8).** The story's planning is one row of its spec's `## Stage Log`. Open it before you read anything for the plan, from the project root, with the `planner` leg's model and effort from `.bmad-loop/routing.current.json`. `<studio root>` is the nearest ancestor-or-self of the project root holding the studio's planning adapter, `plansync.py`, under `plugins/tk-studio/lib/`:
+
+```bash
+uv run --no-project python <studio root>/plugins/tk-studio/lib/plansync.py stage --start --directory . --story <the stories.yaml id> --stage plan --model <planner model> --effort <planner effort>
+```
+
+and close it once section 4 has validated (or with `--outcome failed` when planning failed):
+
+```bash
+uv run --no-project python <studio root>/plugins/tk-studio/lib/plansync.py stage --stop --directory . --story <the stories.yaml id> --stage plan
+```
+
+The spec does not exist yet, so the row waits in `<spec folder>/stages/<id>.jsonl` and lands in the table on the story's first engine pass. Both print JSON; a refusal (`ok: false`) is recorded in your finish line and never blocks planning.
+
 Read the story's section in `epics.md`, the epic narrative, `SPEC.md` and its companions, and the code the story touches. Investigate yourself, or through foreground subagents that return distilled summaries. Never read a subagent's transcript or output file.
 
 Size the story in a band from `budget-bands.yaml`. If it plainly exceeds the largest band, do not split it here. Record `oversize` under Risks, and add a note to its `invoke_dev_with` asking the dev session to halt if the Files list grows past the band.

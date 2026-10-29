@@ -743,3 +743,19 @@ location: plugins/tk-studio/lib/jirabackend.py:752 (promote skips dropped); the 
 severity: low
 reason: Deleting a Jira issue is the owner's action and the Delete option is permission-gated on a company-managed project, so an orphan or an abandoned entry needs a terminal status instead: the owner adds DNI (Done category, a global transition) by hand. The studio should round-trip it: promote transitions a dropped entry's existing issue to DNI (and creates nothing for a dropped entry without one), the pull-back maps DNI to dropped rather than done, and setup creates DNI with its global transition on a new project. First case: TKSTUDIO-6, an orphan twin of EP-006 from the interrupted first sync.
 status: open
+
+### DW-96: `measurepush.py push` harvests Stage Log rows only from the studio repo it is given, so rows in other registered project roots never become `stage` events.
+origin: spec-deferred 2d886fb1f616
+source_spec: `35-8-every-stage-leaves-a-start-and-a-stop-spec.md`
+location: plugins/tk-studio/lib/measurepush.py:300
+severity: medium
+reason: harvest_stages(directory) is called with the push's single --directory (the studio repo root); AC3 says a stage event carries each row. Deferral class (a): behaviour the criteria name.
+status: open
+
+### DW-97: Follow-up review still recommended for 35-8-every-stage-leaves-a-start-and-a-stop after the damping cap was spent
+origin: review-budget-followup
+source_spec: `35-8-every-stage-leaves-a-start-and-a-stop-spec.md`
+location: n/a
+severity: low
+reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261028-234105-ee1e; this entry preserves the lingering recommendation for a deliberate later review.
+status: open

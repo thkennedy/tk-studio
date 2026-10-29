@@ -5,7 +5,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { atBranch, mergePass, PLAN_RETRY_LIMIT, planEntity, planOwner, registryRoot, reviewPass, specKey, storyNumber, type PlanStatusDeps } from "../src/planstatus";
+import { atBranch, mergePass, PLAN_RETRY_LIMIT, planEntity, planOwner, registryRoot, reviewPass, specKey, stagePass, storyNumber, supervisorRows, type PlanStatusDeps } from "../src/planstatus";
 import { Queue, type QueueEvent } from "../src/queue";
 import { runProcess, runUv } from "../src/server";
 import { runBranch } from "../src/worktree";
@@ -113,7 +113,7 @@ describe("owner resolution", () => {
     expect(fx.plansync.calls()).toEqual([]);
     expect(fx.plan().map((e) => e.detail)).toEqual([
       { phase: "review", pr: PR, owner: "tk-studio", ok: false, skipped: true, reason: "owner tk-studio not in the registry" },
-      { phase: "done", pr: PR, owner: "tk-studio", ok: false, skipped: true, reason: "owner tk-studio not in the registry" },
+      { phase: "done", pr: PR, stage: true, owner: "tk-studio", ok: false, skipped: true, reason: "owner tk-studio not in the registry" },
     ]);
   }, 60_000);
 
@@ -158,9 +158,10 @@ describe("the review pass (PR open) and the merge pass (PR merged)", () => {
     fx.gh.answer({ view: "MERGED" });
     await mergePass(fx.queue, fx.deps);
     await mergePass(fx.queue, fx.deps);
-    expect(fx.plansync.calls().map((a) => a[a.indexOf("--status") + 1])).toEqual(["review", "done"]);
+    // Story 35.8: the stage pass's `stage --append` call rides the merge; only the status calls here.
+    expect(fx.plansync.calls().filter((a) => a[0] === "status").map((a) => a[a.indexOf("--status") + 1])).toEqual(["review", "done"]);
     expect(fx.plan().at(-1)!.detail).toEqual({
-      phase: "done", pr: PR, owner: "proj", directory: fx.repo.checkout, story_key: "27-5-the-plan-follows-the-run-spec", id: "ST-097", ok: true, previous_status: "draft",
+      phase: "done", pr: PR, stage: true, owner: "proj", directory: fx.repo.checkout, story_key: "27-5-the-plan-follows-the-run-spec", id: "ST-097", ok: true, previous_status: "draft",
     });
     expect(fx.gh.calls().filter((c) => c.argv[0] === "pr" && c.argv[1] === "view").map((c) => c.argv)).toEqual([
       ["pr", "view", PR, "--json", "state,mergedAt"], ["pr", "view", PR, "--json", "state,mergedAt"],
@@ -174,7 +175,7 @@ describe("the review pass (PR open) and the merge pass (PR merged)", () => {
     await mergePass(fx.queue, fx.deps);
     await mergePass(fx.queue, fx.deps);
     expect(fx.plansync.calls().map((a) => a[a.indexOf("--status") + 1])).toEqual(["review"]);
-    expect(fx.plan().at(-1)!.detail).toEqual({ phase: "done", pr: PR, ok: false, skipped: true, reason: "pr closed unmerged" });
+    expect(fx.plan().at(-1)!.detail).toEqual({ phase: "done", pr: PR, stage: true, ok: false, skipped: true, reason: "pr closed unmerged" });
     expect(fx.gh.calls().filter((c) => c.argv[1] === "view")).toHaveLength(1);
   }, 60_000);
 
@@ -235,10 +236,10 @@ describe("Story 27.5 review patches: the lease, transient failures", () => {
     expect(fx.queue.claimPlanPhase(fx.runId, "review", { pid: 1, host: hostname(), nonce: "other-process" })).toBe(false);
     fx.gh.answer({ view: "MERGED" });
     await Promise.all([mergePass(fx.queue, fx.deps), mergePass(fx.queue, fx.deps)]);
-    expect(fx.plansync.calls().map((a) => a[a.indexOf("--status") + 1])).toEqual(["review", "done"]);
+    expect(fx.plansync.calls().filter((a) => a[0] === "status").map((a) => a[a.indexOf("--status") + 1])).toEqual(["review", "done"]);
     expect(fx.plan().map((e) => e.detail!.phase)).toEqual(["review", "done"]);
-    // One claim per phase, each let go settled once recorded (never counted as a retry).
-    expect(fx.queue.events(fx.runId).filter((e) => e.kind === "plan-lease").map((e) => [e.detail!.phase, e.detail!.owner === null ? "settled" : "claimed", e.detail!.settled ?? null]))
+    // One claim per phase, each let go settled once recorded (never counted as a retry); Story 35.8's stage lease aside.
+    expect(fx.queue.events(fx.runId).filter((e) => e.kind === "plan-lease" && e.detail!.phase !== "stage").map((e) => [e.detail!.phase, e.detail!.owner === null ? "settled" : "claimed", e.detail!.settled ?? null]))
       .toEqual([["review", "claimed", null], ["review", "settled", true], ["done", "claimed", null], ["done", "settled", true]]);
   }, 60_000);
 
@@ -439,6 +440,342 @@ describe("Story 27.5 second follow-up: done waits for the review, transient verb
     expect(leases(fx, "review").at(-1)!.detail).toMatchObject({ owner: null, settled: true });
     await reviewPass(fx.queue, fx.deps);
     expect(fx.plan()).toHaveLength(2); // never asked again
+  }, 60_000);
+});
+
+describe("Story 35.8: the stage pass — the supervisor's Stage Log rows after the merge, mirrored to Jira", () => {
+  const MERGED_AT = "2026-10-16T00:00:00Z"; // the fake gh's mergedAt
+  /** The run's legs: the close-out's host leg, its close-out, then a re-run (the host clock's stamps). */
+  function legs(fx: Awaited<ReturnType<typeof fixture>>): void {
+    fx.queue.note(fx.runId, "host-verify", { command: "bun test", green: true, duration_ms: 1000, started_at: "2026-10-15T10:00:00.000Z" });
+    fx.queue.note(fx.runId, "closed_out", { pr: PR, closeout: { result: "PR", commits: [], worktree: "removed" } });
+    fx.queue.note(fx.runId, "host-verify", { command: "bun test", green: false, duration_ms: 1000, started_at: "2026-10-15T11:00:00.000Z", rerun: { by: "cli" } });
+  }
+  const stageCalls = (fx: Awaited<ReturnType<typeof fixture>>, verb: string) => fx.plansync.calls().filter((a) => a[0] === verb);
+  const stagePosts = (fx: Awaited<ReturnType<typeof fixture>>) => fx.queue.events(fx.runId).filter((e) => e.kind === "stage-post");
+  const bind = (fx: Awaited<ReturnType<typeof fixture>>) => write(fx.repo.checkout, { ".tk-studio/config.yaml": "planning:\n  jira:\n    project_key: TKS\n" });
+  const stageLeases = (fx: Awaited<ReturnType<typeof fixture>>) => fx.queue.events(fx.runId).filter((e) => e.kind === "plan-lease" && e.detail!.phase === "stage");
+  /** The story's spec at the owner checkout (the run's work merged and pulled): the stage pass's precondition. */
+  const STAGE_SPEC = "_bmad-output/specs/spec-epic-27/stories/27-5-the-plan-follows-the-run-spec.md";
+  const ownerSpec = (fx: Awaited<ReturnType<typeof fixture>>) => write(fx.repo.checkout, { [STAGE_SPEC]: spec("done") });
+
+  test("supervisorRows: each host-verify a host-leg (close-out legs) or re-run row from started_at to the event, each close-out from the leg before it, the merge at mergedAt", () => {
+    const at = (seq: number, kind: string, detail: Record<string, unknown>, when: string): QueueEvent =>
+      ({ seq, run_id: "r", at: when, kind, from_state: "complete", to_state: "complete", detail });
+    const rows = supervisorRows([
+      at(1, "host-verify", { green: true, started_at: "2026-10-15T10:00:00.000Z" }, "2026-10-15T10:05:00.000Z"),
+      at(2, "ended", { pr: PR, closeout: { result: "PR" } }, "2026-10-15T10:06:00.000Z"),
+      at(3, "host-verify", { skipped: true, reason: "no verify.host", rerun: { by: "api" } }, "2026-10-15T12:00:00.000Z"),
+      at(4, "plan-status", { phase: "done", ok: true }, "2026-10-16T00:01:00.000Z"),
+    ], MERGED_AT);
+    expect(rows).toEqual([
+      { stage: "host-leg", pass: 1, started: "2026-10-15T10:00:00.000Z", ended: "2026-10-15T10:05:00.000Z", outcome: "green" },
+      { stage: "close-out", pass: 1, started: "2026-10-15T10:05:00.000Z", ended: "2026-10-15T10:06:00.000Z", outcome: "PR" },
+      { stage: "re-run", pass: 1, started: "2026-10-15T12:00:00.000Z", ended: "2026-10-15T12:00:00.000Z", outcome: "skipped" },
+      { stage: "merge", started: MERGED_AT, ended: MERGED_AT, outcome: "merged" },
+    ]);
+    expect(supervisorRows([])).toEqual([]);
+  });
+
+  test("supervisorRows: a busy queue's closed_out {closeout, pending} and the ended written from it are one close-out", () => {
+    const at = (seq: number, kind: string, detail: Record<string, unknown>, when: string): QueueEvent =>
+      ({ seq, run_id: "r", at: when, kind, from_state: "complete", to_state: "complete", detail });
+    const closeout = { result: "PR", commits: ["abc"], worktree: "removed", branch: "supervisor/run-r" };
+    const rows = supervisorRows([
+      at(1, "host-verify", { green: true, started_at: "2026-10-15T10:00:00.000Z" }, "2026-10-15T10:05:00.000Z"),
+      at(2, "closed_out", { pr: PR, closeout, pending: { phase: "ended", state: "complete" } }, "2026-10-15T10:06:00.000Z"),
+      // the same record, key order aside, on the deferred end
+      at(3, "ended", { pr: PR, closeout: { worktree: "removed", branch: "supervisor/run-r", commits: ["abc"], result: "PR" }, finish: {} }, "2026-10-15T10:07:00.000Z"),
+      at(4, "host-verify", { green: true, started_at: "2026-10-15T11:00:00.000Z" }, "2026-10-15T11:05:00.000Z"),
+      at(5, "closed_out", { pr: PR, closeout: { ...closeout, commits: ["abc", "def"] } }, "2026-10-15T11:06:00.000Z"),
+    ]);
+    expect(rows.filter((r) => r.stage === "close-out")).toEqual([
+      { stage: "close-out", pass: 1, started: "2026-10-15T10:05:00.000Z", ended: "2026-10-15T10:06:00.000Z", outcome: "PR" },
+      { stage: "close-out", pass: 2, started: "2026-10-15T11:05:00.000Z", ended: "2026-10-15T11:06:00.000Z", outcome: "PR" },
+    ]);
+  });
+
+  test("supervisorRows: a paused close-out (commit, push, draft PR on the `paused` transition), then a relaunch's leg and its ended close-out, are two close-out rows", () => {
+    const at = (seq: number, kind: string, detail: Record<string, unknown>, when: string): QueueEvent =>
+      ({ seq, run_id: "r", at: when, kind, from_state: "running", to_state: kind === "paused" ? "paused" : "complete", detail });
+    const rows = supervisorRows([
+      at(1, "host-verify", { green: true, started_at: "2026-10-15T10:00:00.000Z" }, "2026-10-15T10:05:00.000Z"),
+      at(2, "paused", { engine: { status: "paused" }, pr: PR, closeout: { result: "draft PR", commits: ["abc"], worktree: "kept" } }, "2026-10-15T10:06:00.000Z"),
+      at(3, "host-verify", { green: true, started_at: "2026-10-15T11:00:00.000Z" }, "2026-10-15T11:05:00.000Z"),
+      at(4, "ended", { pr: PR, closeout: { result: "PR", commits: ["abc", "def"], worktree: "removed" } }, "2026-10-15T11:06:00.000Z"),
+    ]);
+    expect(rows.filter((r) => r.stage === "close-out")).toEqual([
+      { stage: "close-out", pass: 1, started: "2026-10-15T10:05:00.000Z", ended: "2026-10-15T10:06:00.000Z", outcome: "draft PR" },
+      { stage: "close-out", pass: 2, started: "2026-10-15T11:05:00.000Z", ended: "2026-10-15T11:06:00.000Z", outcome: "PR" },
+    ]);
+  });
+
+  test("a run pulled back to done before Story 35.8 (its done ok event carries no `stage`) is never back-filled: no lease, no gh pr view, no stage --append, no stage-post", async () => {
+    const fx = await fixture();
+    ownerSpec(fx);
+    legs(fx);
+    bind(fx);
+    // the pre-35.8 supervisor's review and done events, as it recorded them
+    fx.queue.note(fx.runId, "plan-status", { phase: "review", pr: PR, owner: "proj", directory: fx.repo.checkout, story_key: "27-5-the-plan-follows-the-run-spec", id: "ST-097", ok: true, previous_status: "draft" });
+    fx.queue.note(fx.runId, "plan-status", { phase: "done", pr: PR, owner: "proj", directory: fx.repo.checkout, story_key: "27-5-the-plan-follows-the-run-spec", id: "ST-097", ok: true, previous_status: "review" });
+    fx.gh.answer({ view: "MERGED" });
+    const events = fx.queue.events(fx.runId).length;
+    await mergePass(fx.queue, fx.deps);
+    await stagePass(fx.queue, fx.deps);
+    expect(stageLeases(fx)).toEqual([]);
+    expect(fx.gh.calls().filter((c) => c.argv[1] === "view")).toEqual([]);
+    expect(stageCalls(fx, "stage")).toEqual([]);
+    expect(stageCalls(fx, "stage-post")).toEqual([]);
+    expect(fx.queue.events(fx.runId)).toHaveLength(events); // nothing recorded
+  }, 60_000);
+
+  test("merged, not bound to Jira: the rows appended to the owner root's spec once, nothing posted, the run's state untouched", async () => {
+    const fx = await fixture();
+    ownerSpec(fx);
+    legs(fx);
+    await reviewPass(fx.queue, fx.deps);
+    const before = fx.queue.get(fx.runId)!;
+    fx.gh.answer({ view: "MERGED" });
+    await mergePass(fx.queue, fx.deps);
+    await mergePass(fx.queue, fx.deps);
+    const appends = stageCalls(fx, "stage");
+    expect(appends).toHaveLength(1);
+    const argv = appends[0]!;
+    expect(argv.slice(0, 6)).toEqual(["stage", "--append", "--directory", fx.repo.checkout, "--story", "27-5-the-plan-follows-the-run-spec"]);
+    expect(JSON.parse(argv[argv.indexOf("--row-json") + 1]!).map((r: Record<string, unknown>) => [r.stage, r.pass ?? null, r.outcome])).toEqual([
+      ["host-leg", 1, "green"], ["close-out", 1, "PR"], ["re-run", 1, "red"], ["merge", null, "merged"],
+    ]);
+    expect(stageCalls(fx, "stage-post")).toEqual([]);
+    expect(stagePosts(fx).map((e) => e.detail)).toEqual([{
+      story_key: "27-5-the-plan-follows-the-run-spec", id: "ST-097", directory: fx.repo.checkout, appended: 4,
+      posted: "skipped: not bound", ok: true, merged_at: MERGED_AT,
+    }]);
+    expect(fx.queue.get(fx.runId)).toEqual(before); // the run's state never changes
+    // the merge pass read mergedAt once: the stage pass asked gh nothing of its own
+    expect(fx.gh.calls().filter((c) => c.argv[1] === "view")).toHaveLength(1);
+  }, 60_000);
+
+  test("bound to Jira: a failed post is recorded ok:false (state untouched) and retried next pass, an identical failure not re-recorded; posted once it succeeds, then never again", async () => {
+    const fx = await fixture();
+    ownerSpec(fx);
+    legs(fx);
+    bind(fx);
+    await reviewPass(fx.queue, fx.deps);
+    const before = fx.queue.get(fx.runId)!;
+    fx.plansync.stage("post-fail");
+    fx.gh.answer({ view: "MERGED" });
+    await mergePass(fx.queue, fx.deps);
+    expect(stageCalls(fx, "stage-post")).toEqual([["stage-post", "--directory", fx.repo.checkout, "--story", "27-5-the-plan-follows-the-run-spec", "--id", "ST-097"]]);
+    expect(stagePosts(fx).map((e) => e.detail)).toEqual([expect.objectContaining({ ok: false, appended: 4, detail: "stage-post failed: Jira answered 503", merged_at: MERGED_AT })]);
+    expect(fx.queue.get(fx.runId)).toEqual(before);
+    await mergePass(fx.queue, fx.deps); // retried: called again, the same failure not recorded twice
+    expect(stageCalls(fx, "stage-post")).toHaveLength(2);
+    expect(stagePosts(fx)).toHaveLength(1);
+    fx.plansync.stage("ok");
+    await stagePass(fx.queue, fx.deps); // the merged_at recorded on the failure: no gh call needed
+    expect(stagePosts(fx).map((e) => [e.detail!.ok, e.detail!.posted])).toEqual([[false, { start: 0, stop: 0, worklog: 0, found: 0 }], [true, { start: 4, stop: 4, worklog: 4, found: 0 }]]);
+    await mergePass(fx.queue, fx.deps);
+    expect(stageCalls(fx, "stage-post")).toHaveLength(3);
+    expect(stageCalls(fx, "stage")).toHaveLength(3); // every attempt re-appends (idempotent by row key in plansync)
+    expect(fx.gh.calls().filter((c) => c.argv[1] === "view")).toHaveLength(1);
+    expect(fx.queue.get(fx.runId)).toEqual(before);
+  }, 60_000);
+
+  test("a refused append is settled: recorded once, never retried, no lease taken again", async () => {
+    const fx = await fixture();
+    ownerSpec(fx);
+    await reviewPass(fx.queue, fx.deps);
+    await stagePass(fx.queue, fx.deps);
+    expect(stagePosts(fx)).toEqual([]); // nothing merged yet
+    fx.plansync.stage("append-fail");
+    fx.gh.answer({ view: "MERGED" });
+    await mergePass(fx.queue, fx.deps);
+    expect(stagePosts(fx).map((e) => e.detail)).toEqual([expect.objectContaining({ ok: false, settled: true, appended: 0, posted: "not attempted", detail: "fake stage refused" })]);
+    const events = fx.queue.events(fx.runId).length;
+    await mergePass(fx.queue, fx.deps);
+    await stagePass(fx.queue, fx.deps);
+    expect(stageCalls(fx, "stage")).toHaveLength(1);
+    expect(fx.queue.events(fx.runId)).toHaveLength(events); // no claim, no release, nothing recorded
+    expect(stageLeases(fx).at(-1)!.detail).toMatchObject({ owner: null, settled: true });
+  }, 60_000);
+
+  test("a refused stage-post (no external.jira.key) is settled once; a crashed append (no JSON) is a retry", async () => {
+    const fx = await fixture();
+    ownerSpec(fx);
+    legs(fx);
+    bind(fx);
+    await reviewPass(fx.queue, fx.deps);
+    fx.plansync.stage("append-crash");
+    fx.gh.answer({ view: "MERGED" });
+    await mergePass(fx.queue, fx.deps);
+    expect(stagePosts(fx).map((e) => e.detail)).toEqual([expect.objectContaining({ ok: false, appended: 0, posted: "not attempted" })]);
+    expect(stagePosts(fx)[0]!.detail!.settled).toBeUndefined();
+    expect(stageLeases(fx).at(-1)!.detail!.settled).toBeUndefined(); // a retry: counted against the limit
+    fx.plansync.stage("post-refuse");
+    await stagePass(fx.queue, fx.deps);
+    expect(stagePosts(fx).at(-1)!.detail).toMatchObject({ ok: false, settled: true, detail: "stage-post: ST-097 carries no external.jira.key" });
+    await stagePass(fx.queue, fx.deps);
+    expect(stageCalls(fx, "stage-post")).toHaveLength(1); // never retried
+    expect(stagePosts(fx)).toHaveLength(2);
+  }, 60_000);
+
+  test("rows only buffered (the append's answer, the spec present) are a wait: recorded once, uncounted, never the give-up, the lease settled; ok once the spec holds them", async () => {
+    const fx = await fixture();
+    ownerSpec(fx);
+    legs(fx);
+    await reviewPass(fx.queue, fx.deps);
+    fx.plansync.stage("buffered");
+    fx.gh.answer({ view: "MERGED" });
+    await mergePass(fx.queue, fx.deps);
+    expect(stagePosts(fx).map((e) => e.detail)).toEqual([expect.objectContaining({
+      ok: false, appended: 4, posted: "not attempted", waiting: true,
+      detail: `waiting for the owner checkout: rows buffered, no spec for 27-5-the-plan-follows-the-run-spec under ${fx.repo.checkout} yet`,
+    })]);
+    for (let i = 0; i <= PLAN_RETRY_LIMIT + 1; i++) await stagePass(fx.queue, fx.deps); // asked again, never given up
+    expect(stageCalls(fx, "stage")).toHaveLength(PLAN_RETRY_LIMIT + 3);
+    expect(stagePosts(fx)).toHaveLength(1); // the same wait not recorded twice
+    expect(stagePosts(fx).some((e) => e.detail!.skipped === true || e.detail!.settled === true)).toBe(false);
+    // a wait is no retry: every stage lease let go of settled, none counted
+    expect(stageLeases(fx).filter((e) => e.detail!.owner === null && e.detail!.settled !== true)).toEqual([]);
+    fx.plansync.stage("ok");
+    await stagePass(fx.queue, fx.deps);
+    expect(stagePosts(fx).at(-1)!.detail).toMatchObject({ ok: true, posted: "skipped: not bound" });
+    await stagePass(fx.queue, fx.deps);
+    expect(stageCalls(fx, "stage")).toHaveLength(PLAN_RETRY_LIMIT + 4);
+  }, 120_000);
+
+  test("no spec at the owner checkout: the story waits across more than PLAN_RETRY_LIMIT ticks — no lease, no call, no give-up; once the spec lands the next tick claims, appends, posts and settles ok", async () => {
+    const fx = await fixture();
+    legs(fx);
+    bind(fx);
+    await reviewPass(fx.queue, fx.deps);
+    fx.plansync.stage("buffered");
+    fx.gh.answer({ view: "MERGED" });
+    await mergePass(fx.queue, fx.deps);
+    for (let i = 0; i <= PLAN_RETRY_LIMIT + 1; i++) await stagePass(fx.queue, fx.deps);
+    expect(stageLeases(fx)).toEqual([]);
+    expect(stageCalls(fx, "stage")).toEqual([]);
+    expect(stagePosts(fx)).toEqual([]);
+    ownerSpec(fx);
+    fx.plansync.stage("ok");
+    await stagePass(fx.queue, fx.deps);
+    expect(stageLeases(fx).map((e) => e.detail!.owner === null ? (e.detail!.settled === true ? "settled" : "released") : "held")).toEqual(["held", "settled"]);
+    expect(stageCalls(fx, "stage")).toHaveLength(1);
+    expect(stageCalls(fx, "stage-post")).toHaveLength(1);
+    expect(stagePosts(fx).map((e) => e.detail)).toEqual([expect.objectContaining({ ok: true, appended: 4, merged_at: MERGED_AT })]);
+    await stagePass(fx.queue, fx.deps);
+    expect(stageCalls(fx, "stage")).toHaveLength(1); // settled: never again
+  }, 120_000);
+
+  test("supervisorRows: a close-out after a re-run spans from the re-run's end — host-leg, close-out, re-run, close-out; and host-leg, re-run, close-out", () => {
+    const at = (seq: number, kind: string, detail: Record<string, unknown>, when: string): QueueEvent =>
+      ({ seq, run_id: "r", at: when, kind, from_state: "complete", to_state: "complete", detail });
+    const closeOuts = (rows: ReturnType<typeof supervisorRows>) => rows.filter((r) => r.stage === "close-out").map((r) => [r.started, r.ended]);
+    expect(closeOuts(supervisorRows([
+      at(1, "host-verify", { green: true, started_at: "2026-10-15T10:00:00.000Z" }, "2026-10-15T10:05:00.000Z"),
+      at(2, "closed_out", { pr: PR, closeout: { result: "PR", n: 1 } }, "2026-10-15T10:06:00.000Z"),
+      at(3, "host-verify", { green: true, started_at: "2026-10-15T11:00:00.000Z", rerun: { by: "cli" } }, "2026-10-15T11:05:00.000Z"),
+      at(4, "closed_out", { pr: PR, closeout: { result: "PR", n: 2 } }, "2026-10-15T11:06:00.000Z"),
+    ]))).toEqual([["2026-10-15T10:05:00.000Z", "2026-10-15T10:06:00.000Z"], ["2026-10-15T11:05:00.000Z", "2026-10-15T11:06:00.000Z"]]);
+    expect(closeOuts(supervisorRows([
+      at(1, "host-verify", { green: false, started_at: "2026-10-15T10:00:00.000Z" }, "2026-10-15T10:05:00.000Z"),
+      at(2, "host-verify", { green: true, started_at: "2026-10-15T10:30:00.000Z", rerun: { by: "api" } }, "2026-10-15T10:40:00.000Z"),
+      at(3, "ended", { pr: PR, closeout: { result: "PR" } }, "2026-10-15T10:41:00.000Z"),
+    ]))).toEqual([["2026-10-15T10:40:00.000Z", "2026-10-15T10:41:00.000Z"]]);
+  });
+
+  test("bound: stage-post's unposted rows keep the story not ok and retried; ok:true only once nothing is unposted", async () => {
+    const fx = await fixture();
+    ownerSpec(fx);
+    legs(fx);
+    bind(fx);
+    await reviewPass(fx.queue, fx.deps);
+    fx.plansync.stage("post-pending");
+    fx.gh.answer({ view: "MERGED" });
+    await mergePass(fx.queue, fx.deps);
+    expect(stagePosts(fx).map((e) => e.detail)).toEqual([expect.objectContaining({ ok: false, unposted: 1, detail: "stage-post pending: 1 row(s) not yet posted" })]);
+    fx.plansync.stage("ok");
+    await stagePass(fx.queue, fx.deps);
+    expect(stagePosts(fx).at(-1)!.detail).toMatchObject({ ok: true, unposted: 0 });
+    await stagePass(fx.queue, fx.deps);
+    expect(stageCalls(fx, "stage-post")).toHaveLength(2);
+  }, 60_000);
+
+  test("a newer host-verify (a re-run) after the story's ok:true stage-post re-enters it: the re-run row appended and posted", async () => {
+    const fx = await fixture();
+    ownerSpec(fx);
+    legs(fx);
+    await reviewPass(fx.queue, fx.deps);
+    fx.gh.answer({ view: "MERGED" });
+    await mergePass(fx.queue, fx.deps);
+    expect(stagePosts(fx).map((e) => e.detail!.ok)).toEqual([true]);
+    await stagePass(fx.queue, fx.deps);
+    expect(stageCalls(fx, "stage")).toHaveLength(1);
+    fx.queue.note(fx.runId, "host-verify", { command: "bun test", green: true, duration_ms: 1000, started_at: "2026-10-17T09:00:00.000Z", rerun: { by: "cli" } });
+    await stagePass(fx.queue, fx.deps);
+    const appends = stageCalls(fx, "stage");
+    expect(appends).toHaveLength(2);
+    const rows = JSON.parse(appends[1]![appends[1]!.indexOf("--row-json") + 1]!);
+    expect(rows.map((r: Record<string, unknown>) => [r.stage, r.pass ?? null, r.outcome])).toEqual([
+      ["host-leg", 1, "green"], ["close-out", 1, "PR"], ["re-run", 1, "red"], ["re-run", 2, "green"], ["merge", null, "merged"],
+    ]);
+    expect(stagePosts(fx).map((e) => [e.detail!.ok, e.detail!.merged_at])).toEqual([[true, MERGED_AT], [true, MERGED_AT]]);
+    await stagePass(fx.queue, fx.deps);
+    expect(stageCalls(fx, "stage")).toHaveLength(2);
+    expect(fx.gh.calls().filter((c) => c.argv[1] === "view")).toHaveLength(1);
+  }, 60_000);
+
+  test("Jira down: retries are bounded at PLAN_RETRY_LIMIT, one settled give-up recorded, then no lease is claimed again", async () => {
+    const fx = await fixture();
+    ownerSpec(fx);
+    legs(fx);
+    bind(fx);
+    await reviewPass(fx.queue, fx.deps);
+    fx.plansync.stage("post-fail");
+    fx.gh.answer({ view: "MERGED" });
+    await mergePass(fx.queue, fx.deps);
+    expect(stageLeases(fx).filter((e) => e.detail!.owner === null && e.detail!.settled !== true)).toHaveLength(1);
+    // the earlier attempts, as other passes left them
+    for (let i = 1; i < PLAN_RETRY_LIMIT; i++) {
+      expect(fx.queue.claimPlanPhase(fx.runId, "stage", me)).toBe(true);
+      fx.queue.releasePlanPhase(fx.runId, "stage", me);
+    }
+    await stagePass(fx.queue, fx.deps);
+    const posts = stagePosts(fx);
+    expect(posts).toHaveLength(2);
+    expect(posts[1]!.detail).toMatchObject({ ok: false, settled: true, skipped: true });
+    expect(String(posts[1]!.detail!.reason)).toBe(`gave up after ${PLAN_RETRY_LIMIT + 1} attempts: stage-post failed: Jira answered 503`);
+    expect(stageLeases(fx).at(-1)!.detail).toMatchObject({ owner: null, settled: true });
+    const events = fx.queue.events(fx.runId).length;
+    await stagePass(fx.queue, fx.deps);
+    await mergePass(fx.queue, fx.deps);
+    expect(fx.queue.events(fx.runId)).toHaveLength(events); // the event stream stops growing
+    expect(stageCalls(fx, "stage-post")).toHaveLength(2);
+    // a newer leg re-enters the story, the retry count starting afresh
+    fx.plansync.stage("ok");
+    fx.queue.note(fx.runId, "host-verify", { command: "bun test", green: true, duration_ms: 1000, started_at: "2026-10-17T09:00:00.000Z", rerun: { by: "cli" } });
+    await stagePass(fx.queue, fx.deps);
+    expect(stagePosts(fx).at(-1)!.detail).toMatchObject({ ok: true });
+  }, 120_000);
+
+  test("the owed stories are read again under the lease: a story another process settled meanwhile is not called", async () => {
+    const fx = await fixture();
+    ownerSpec(fx);
+    legs(fx);
+    await reviewPass(fx.queue, fx.deps);
+    fx.gh.answer({ view: "MERGED" });
+    await mergePass(fx.queue, fx.deps); // done recorded, the stage pass settles it
+    fx.queue.note(fx.runId, "host-verify", { command: "bun test", green: true, duration_ms: 1000, rerun: { by: "cli" } });
+    // between this pass's first read and its claim, another process posts the re-entered story
+    const real = fx.queue.claimPlanPhase.bind(fx.queue);
+    fx.queue.claimPlanPhase = (runId, phase, self) => {
+      const ok = real(runId, phase, self);
+      if (ok && phase === "stage") fx.queue.note(runId, "stage-post", { story_key: "27-5-the-plan-follows-the-run-spec", ok: true });
+      return ok;
+    };
+    await stagePass(fx.queue, fx.deps);
+    expect(stageCalls(fx, "stage")).toHaveLength(1); // only the first pass's append
+    expect(stageLeases(fx).at(-1)!.detail).toMatchObject({ owner: null, settled: true });
   }, 60_000);
 });
 

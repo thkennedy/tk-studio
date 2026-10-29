@@ -105,6 +105,21 @@ describe("the command is read from the base's tracked config", () => {
   });
 });
 
+describe("Story 35.8: a ran leg carries its started_at (the Stage Log's host-leg row starts there)", () => {
+  test("started_at: an ISO stamp taken before the command ran, never on the PR section; a skipped leg carries none", async () => {
+    const fx = project(hostKey(bunCmd("console.log('ok')")));
+    const before = Date.now();
+    const v = await hostVerify(fx.run, 60) as HostVerifyRan;
+    expect(v.green).toBe(true);
+    expect(v.started_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(Date.parse(v.started_at!)).toBeGreaterThanOrEqual(before - 1000);
+    expect(Date.parse(v.started_at!)).toBeLessThanOrEqual(Date.now());
+    expect(prSection(v).join("\n")).not.toContain(v.started_at!);
+    rmSync(fx.wt, { recursive: true, force: true });
+    expect(await hostVerify(fx.run, 60)).toEqual({ skipped: true, reason: "worktree gone" });
+  });
+});
+
 describe("the leg runs the command in the worktree under the guard", () => {
   test("green: exit 0, in the worktree, the worker's env (no API key), tails recorded", async () => {
     const fx = project(hostKey(bunCmd("console.log(process.cwd()); console.log(process.env.ANTHROPIC_API_KEY ?? 'no-key')")));

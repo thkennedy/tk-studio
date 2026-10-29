@@ -138,6 +138,38 @@ committed per-project counter at `.tk-studio/plan-counter.yaml`).
    `sync_back: true` runs `plansync.py sync-back --directory <directory>`;
    `dry_run` adds `--dry-run` (reads only, writes nothing).
 
+   `stage` (Story 35.8) writes the story spec's append-only `## Stage
+   Log` table — one row per stage occurrence, the columns `stage`, `pass`,
+   `started`, `ended`, `session_id`, `model`, `effort`, `tokens_in`,
+   `tokens_out`, `cost_usd`, `outcome` (`—` for empty; elapsed is never
+   stored, only derived) — after `## Consult Log` (else before `## Auto Run
+   Result`). The planner brackets its plan session with
+   `stage --start --story <key> --stage plan --model <m> --effort <e>` and
+   `stage --stop --story <key> --stage plan` (the epic's planning:
+   `--entity EP-NNN`); `--stop` with no open row is a refusal naming it. The
+   supervisor appends its legs with `stage --append --story <key>
+   --row-json <rows>`; the engine's studio-pipeline `post_session` hook
+   writes each pass with `stage --from-pass` (never by hand). A row written
+   before the spec exists waits in `<spec_folder>/stages/<key>.jsonl` and is
+   flushed by the next write; a row already on record is skipped
+   (`appended: 0`). `stage-post --directory <root> --id ST-NNN [--story
+   <key>] [--dry-run]` mirrors the rows onto the story's Jira issue (the
+   agent seat, through the gateway): `Stage <name> [pass n] started —
+   <stamp>; model: X; effort: Y [stage:<key> start]`, `… finished — <stamp>;
+   model: X; effort: Y; tokens: in/out; cost: $Z [stage:<key> stop]` and a
+   worklog of the derived span (none under Jira's 60 s minimum: `worklog:
+   "skipped: span <60s"`), each recorded in
+   `_bmad-output/tracking/stage-posts.json` and never posted twice (the
+   markers are looked up first). Not bound to Jira: nothing posted
+   (`posted: "skipped: not bound"`). `unposted` counts the rows not yet
+   mirrored (buffered, open, or a post missing): while any remain it ends
+   `partial`, `ok: false`, `retryable: true`; a failed Jira call ends
+   `blocked`, `retryable: true` — the supervisor retries both next pass; a
+   refusal (no `external.jira.key`, no agent token) carries no `retryable`
+   and is not retried. `stage --from-pass --repo-root <root>` also flushes
+   the planner's buffer left under the project root. Both end with the
+   status block.
+
    `normalize --directory <root>` runs the canonicalization pass
    alone. Add `--dry-run` to preview without writing (under `jira` a
    dry-run never contacts the backend). The normalize pass:
@@ -177,6 +209,10 @@ committed per-project counter at `.tk-studio/plan-counter.yaml`).
      one title — each named, no Atlassian call.
    - **sync-back refusal** — no `planning.jira` binding or an absent Jira
      variable — each named, no Atlassian call.
+   - **stage refusal** — `stage --stop` with no open row, several specs
+     matching the story, or a row field outside the Stage Log's columns;
+     `stage-post` with an absent agent-seat variable or an entity with no
+     `external.jira.key` — each named, no Atlassian call.
 
 3. Report:
    - **Attended:** summarize actions (created/repaired/unchanged, minted
@@ -190,7 +226,9 @@ committed per-project counter at `.tk-studio/plan-counter.yaml`).
      `sync-back` do: `complete`, `partial` or `blocked`), relay that
      `status`, its `reason` and its `artifacts` as they are — never infer
      the status from the exit code (`setup`, `publish` and `sync-back`
-     exit 0 on `partial`). For `sync`,
+     exit 0 on `partial`); `stage` and `stage-post` carry theirs too
+     (`stage`: `complete` or `blocked`; `stage-post`: `complete`,
+     `partial` while rows are still unposted, or `blocked`). For `sync`,
      `normalize` and `status`, whose results carry no `status`: `complete`
      on exit 0 (report conflicts as `partial` with the conflict list in
      `reason`), `blocked` on exit 2 with the blocking reason:

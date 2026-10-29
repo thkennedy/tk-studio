@@ -28,6 +28,11 @@
 #                       session + subagent transcripts into <run_dir>/transcripts/,
 #                       prices them from plugins/tk-studio/lib/prices.json and records
 #                       one `observation`. Never blocks: exits 0 on every path.
+#   [hooks.post_session] meter_hook.py again (Story 35.8): on BMAD_LOOP_STAGE=post_session
+#                       it writes the pass that just ended (dev, review n, the gate,
+#                       and each consult subagent) into the story spec's
+#                       `## Stage Log` through `plansync.py stage --from-pass`.
+#                       Never blocks: exits 0 on every path.
 #
 # Not ported yet: TUA's pre-dispatch seam check (seam_check.py). It reads TUA's
 # per-epic epics files and routes through TUA's scripts/loop/apply-route.py.
@@ -85,5 +90,11 @@ fail_closed = false
 [hooks.post_commit]
 cmd = "uv run --no-project python \"{scripts}/meter_hook.py\""
 timeout_sec = 300
+blocking = false
+fail_closed = false
+
+[hooks.post_session]
+cmd = "uv run --no-project python \"{scripts}/meter_hook.py\""
+timeout_sec = 120
 blocking = false
 fail_closed = false

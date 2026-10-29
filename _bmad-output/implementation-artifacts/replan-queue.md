@@ -485,3 +485,10 @@
 - What no longer holds: an implicit reading of "`match` when the mirror exists" in which the host leg passes `--mirror` itself, or treats every exit 1 as a red gate.
 - Suggested adjustment: the host leg calls `match` without `--mirror` (the env or the default resolves it) and treats exit 1 with action `failed` as a tool fault, not a gate verdict. It calls `generate` at most once per run, only when the owner has set `assets.credit_cap` and `TK_ASSETS_MESHY_KEY`, and reads the driver-contract.md 34.7 paragraph (:1359-1361, :1371-1376) as the seam.
 - Status: closed — applied to the unstarted 34-8 entry's invoke_dev_with and to plans/34-8.md (Settled shape 5) by the 34-7 gate session (2026-10-27)
+
+## 35-2-every-story-gets-its-plan-and-its-records — scope: stories — from 35-8-every-stage-leaves-a-start-and-a-stop — 2026-10-29
+
+- What changed: 35-8 added `**0.1.30 (Story 35.8, additive).**` after 35.1's paragraph (driver-contract.md :1600; `## 8. Conformance` is now at :1710) and a header clause after 35.1's. `test_driver_contract.py` pins the order 35.1 < 35.8 and the Stories row `Story 35.1, Story 35.8 (Epic 35)`. `task-planning.md` §3 now opens with the `**Stage Log (Story 35.8).**` paragraph (`plansync.py stage --start/--stop --stage plan`). The supervisor copy `apps/supervisor/.bmad-loop/plugins/studio-pipeline/task-planning.md` must equal `tools/restructure/nest_pipeline.py`'s render (`test_nest_pipeline`).
+- What no longer holds: plans/35-2.md "The 35.1 paragraph runs :1531-1598; add `**0.1.30 (Story 35.2, additive).**` before `## 8. Conformance` (:1600)."
+- Suggested adjustment: Put the 35.2 paragraph and header clause after 35.8's, and pin the order 35.8 < 35.2 and the Stories row `Story 35.1, Story 35.8, Story 35.2 (Epic 35)` (relax 35.8's exact-row check only to admit 35.2). In the §1 bootstrap rewrite, keep §3's Stage Log bracket, one `stage --start/--stop` per plan written. Re-render the nested `task-planning.md` with `nest_pipeline.py`, a test-pinned mirror (score 1 per the 35-8 consult rule).
+- Status: closed — applied to the unstarted 35-2 entry's invoke_dev_with by the gate session (2026-10-29)

@@ -208,6 +208,19 @@
           "argv": ["lib/plansync.py", "sync-back", "--directory", "{sandbox}"],
           "expect": "refusal",
           "marker": "sync-back refused"
+        },
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/plansync.py", "stage", "--stop", "--directory", "{sandbox}", "--story", "1-1-conformance", "--stage", "plan"],
+          "expect": "refusal",
+          "marker": "no open plan row"
+        },
+        {
+          "assertion": "headless-clean",
+          "argv": ["contracts/conformance/e2e_stage_log.py"],
+          "timeout": 120,
+          "expect": "ok",
+          "note": "the Story 35.8 e2e drive: the Stage Log writer through lib/plansync.py stage over a fixture project in a temp folder — --from-pass after dev, review, review (one consult subagent) and the gate to rows dev 1, review 1, review 2, consult 1, gate 1 with the dev row's tokens summed (input + cache-read + cache-creation / output) and priced from prices.json, no elapsed column, the same pass again appended 0; --start before the spec exists buffered in <spec_folder>/stages/<key>.jsonl and flushed by --stop once the spec is written; the supervisor's --append after the engine rows, again appended 0; --stop with no open row a blocked refusal; then the poster (plansync.stage_post) in process over a fake Jira transport (dummy agent-seat variables, no network): a 503 ok:false with the rows unposted, the next run the start and finish comments in AC2's shapes with the [stage:<key> start|stop] marker and one worklog of the derived span, a third run posting nothing"
         }
       ]
     },

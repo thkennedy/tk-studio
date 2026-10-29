@@ -90,7 +90,16 @@
     the spec folder; the engine resolves it by the glob
     `35-2-every-story-gets-its-plan-and-its-records-*.md`, and a file named
     `35-2-every-story-gets-its-plan-and-its-records.md` is read as pending (loop
-    deficiency 1, story 21-6).
+    deficiency 1, story 21-6). Replan (gate of 35-8, 2026-10-29): 35-8 landed first,
+    so plans/35-2.md's contract anchors are stale. Put the `**0.1.30 (Story 35.2,
+    additive).**` paragraph and header clause after 35.8's (driver-contract.md :1600;
+    `## 8. Conformance` is now at :1710). Pin the order 35.8 < 35.2 and the Stories row
+    `Story 35.1, Story 35.8, Story 35.2 (Epic 35)`, relaxing 35.8's exact-row check
+    only to admit 35.2. Keep task-planning.md §3's `**Stage Log (Story 35.8).**`
+    bracket: the bootstrap runs one `stage --start/--stop --stage plan` per plan it
+    writes. Re-render `apps/supervisor/.bmad-loop/plugins/studio-pipeline/task-planning.md`
+    with `tools/restructure/nest_pipeline.py`; `test_nest_pipeline` pins it, and it is a
+    mirror outside Files.
 
 - id: "35-3-the-slice-path-hardened"
   title: "The Slice Path, Hardened"
@@ -121,7 +130,9 @@
     executor spec as `stories/35-3-the-slice-path-hardened-spec.md` in the spec folder;
     the engine resolves it by the glob `35-3-the-slice-path-hardened-*.md`, and a file
     named `35-3-the-slice-path-hardened.md` is read as pending (loop deficiency 1, story
-    21-6).
+    21-6). Size (gate of 35-8, 2026-10-29): plans/35-3.md is band L and oversize (16
+    files). Halt (the `halt` consult) if the Files list grows past the plan's; never
+    split the story.
 
 - id: "35-4-the-engine-mcp-before-the-first-flagged-run"
   title: "The Engine MCP Before the First Flagged Run"

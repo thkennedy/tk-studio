@@ -108,6 +108,25 @@
         "reason": { "type": "string", "required": false, "note": "why the call failed" }
       }
     },
+    "stage": {
+      "emitter": "lib/measurepush.py push alone (Story 35.8): before the push, one event per completed `## Stage Log` row whose row_key the ledger does not hold yet, written through ledger.emit (AD-12); elapsed is never carried, only derived from started/ended",
+      "payload": {
+        "project": { "type": "string", "required": false, "note": "the project id the row's document belongs to" },
+        "story": { "type": "string", "required": true, "note": "the story key (or the plan entity id, for the epic's planning row)" },
+        "stage": { "type": "string", "required": true, "note": "plan, dev, review, consult, gate, host-leg, re-run, close-out, merge, …" },
+        "pass": { "type": "number", "required": false, "note": "the stage's occurrence number, when it has one" },
+        "started": { "type": "string", "required": true, "note": "ISO-8601 UTC, the clock of whoever ran the stage" },
+        "ended": { "type": "string", "required": false, "note": "ISO-8601 UTC" },
+        "session_id": { "type": "string", "required": false },
+        "model": { "type": "string", "required": false },
+        "effort": { "type": "string", "required": false },
+        "usage": { "type": "object", "required": false, "note": "{input, output}: the row's tokens_in / tokens_out (the key is usage, never a token-named key: ledger.sanitize redacts those)" },
+        "cost_usd": { "type": "number", "required": false, "note": "when metered" },
+        "outcome": { "type": "string", "required": false },
+        "row_key": { "type": "string", "required": true, "note": "sha1(story|stage|pass|started)[:12], the dedupe key" },
+        "source": { "type": "string", "required": false, "note": "the project-relative document the row was read from" }
+      }
+    },
     "report": {
       "emitter": "reporter (tk-studio-report — the human-authored defect verb)",
       "payload": {
