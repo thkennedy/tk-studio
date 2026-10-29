@@ -232,6 +232,10 @@ DRIFT: launch.py open-question parsing reads any `## Open Questions` bullet nami
 | review | 1 | 2026-10-29T03:44:50Z | 2026-10-29T04:08:17Z | fa0da100-8f42-461d-94b4-b020b67c78b4 | claude-opus-5-5 | medium | 10220570 | 80289 | 6.2152 | completed |
 | review | 2 | 2026-10-29T04:08:17Z | 2026-10-29T04:22:45Z | 8cbdd4f4-a862-42bd-8950-08779fbb84aa | claude-opus-5-5 | medium | 8068878 | 71431 | 5.5846 | completed |
 | gate | 1 | 2026-10-29T04:22:46Z | 2026-10-29T04:26:49Z | 06a16052-a88c-4924-8730-185a9da796b2 | claude-opus-5-5 | medium | 3310141 | 17499 | 1.8248 | completed |
+| close-out | 1 | 2026-10-29T02:52:14Z | 2026-10-29T02:52:14Z | — | — | — | — | — | — | no changes |
+| host-leg | 1 | 2026-10-29T04:27:28Z | 2026-10-29T04:50:37Z | — | — | — | — | — | — | green |
+| close-out | 2 | 2026-10-29T04:50:37Z | 2026-10-29T04:50:44Z | — | — | — | — | — | — | PR |
+| merge | — | 2026-10-29T04:51:34Z | 2026-10-29T04:51:34Z | — | — | — | — | — | — | merged |
 
 
 
