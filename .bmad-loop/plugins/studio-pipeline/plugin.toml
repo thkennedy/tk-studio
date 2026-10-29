@@ -88,12 +88,18 @@ blocking = false
 fail_closed = false
 
 [hooks.post_commit]
+# Meter the landed story (tk-studio ST-24.1): copy its session and subagent
+# transcripts out of the microVM into <run_dir>/transcripts/, price them from
+# $TK_STUDIO_ROOT/plugins/tk-studio/lib/prices.json, record one observation.
 cmd = "uv run --no-project python \"{scripts}/meter_hook.py\""
 timeout_sec = 300
 blocking = false
 fail_closed = false
 
 [hooks.post_session]
+# Story 35.8: write the pass that just ended (dev, review n, the gate, each
+# consult subagent) into the story spec's `## Stage Log` through
+# `plansync.py stage --from-pass`. Never blocks: exits 0 on every path.
 cmd = "uv run --no-project python \"{scripts}/meter_hook.py\""
 timeout_sec = 120
 blocking = false

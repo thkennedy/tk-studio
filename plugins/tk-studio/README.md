@@ -80,3 +80,10 @@ Windows (not skipped there):
   descriptor`). `lib/tests/test_assets.py`
   `ChildOutputHandleTests.test_run_blender_hands_its_child_a_write_handle_not_an_append_handle`
   (the supervisor's own case is `hostverify.test.ts` `hole 77`).
+- **UTF-8 BOMs** (DW-92, Story 35.6): a JSON or text file saved by a Windows
+  editor may start with a BOM, which `json.loads` refuses; project files
+  are read with `encoding="utf-8-sig"` (`recommend.py` `_mcp_status` and
+  `record_mcp` on `.mcp.json`, `engage.py closeout` on a slice's
+  `report.json`, the lib's other reads of project files), never bare
+  `utf-8`. `lib/tests/test_recommend.py`
+  `RecommendTestCase.test_mcp_status_configured_when_mcp_json_with_a_bom_has_the_server`.
