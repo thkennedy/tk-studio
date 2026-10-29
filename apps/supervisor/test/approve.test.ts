@@ -1144,7 +1144,7 @@ describe("Story 34.8: approve's type rule (AC1)", () => {
       const job = JSON.parse(git(origin, "show", "engagement/ENG-001:.tk-studio/jobs/run-epic-41.json"));
       expect(job.type).toBe("run-epic");
     }
-  });
+  }, 60_000); // two served repos per case: 5.2 s idle on the host, past bun's 5 s default under an engine's load (hole 97)
 });
 
 describe("Story 35.5: an approve-minted run-epic-N the host placement cannot run (hole 90)", () => {
