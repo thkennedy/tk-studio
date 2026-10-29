@@ -240,6 +240,9 @@ Residual (consult 2026-10-29T10:50:15Z): a run queued before `requires` existed 
 | review | 1 | 2026-10-29T10:51:18Z | 2026-10-29T11:01:01Z | 84393f24-4c6f-49cb-8265-533d843f0104 | claude-opus-5-5 | medium | 4772619 | 44717 | 3.7585 | completed |
 | review | 2 | 2026-10-29T11:01:01Z | 2026-10-29T11:11:55Z | c1f2af3d-0406-418c-8289-fbba93d88b39 | claude-opus-5-5 | medium | 4814535 | 42439 | 3.7048 | completed |
 | gate | 1 | 2026-10-29T11:11:56Z | 2026-10-29T11:19:37Z | ab938ba9-e129-4550-93b4-01a3ebc041d0 | claude-opus-5-5 | medium | 8903359 | 57595 | 5.0199 | completed |
+| host-leg | 1 | 2026-10-29T11:19:50Z | 2026-10-29T11:47:10Z | — | — | — | — | — | — | green |
+| close-out | 1 | 2026-10-29T11:47:10Z | 2026-10-29T11:47:17Z | — | — | — | — | — | — | PR |
+| merge | — | 2026-10-29T11:48:13Z | 2026-10-29T11:48:13Z | — | — | — | — | — | — | merged |
 
 
 ## Auto Run Result

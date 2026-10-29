@@ -35,6 +35,7 @@ jobs:
   - run-epic-34
   - run-epic-35
   - research-atlassian-free-tier
+  - maintenance-evals
 
 # Role-keyed working sets (AD-17) — recorded only on explicit
 # confirmation via tk-studio-onboard; one entry per role.
