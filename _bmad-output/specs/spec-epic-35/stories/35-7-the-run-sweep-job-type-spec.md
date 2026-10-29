@@ -288,6 +288,9 @@ DRIFT: `launch.py sweep`'s `--triage-wait` counts from the call's start, clampin
 | review | 1 | 2026-10-29T14:50:02Z | 2026-10-29T15:19:17Z | 0db6a934-8b29-4bcd-8215-f7520e12a88c | claude-opus-5-5 | medium | 13207750 | 109149 | 7.9629 | completed |
 | review | 2 | 2026-10-29T15:19:17Z | 2026-10-29T15:41:58Z | 530b3370-635a-4976-a494-4b099f5c1ce6 | claude-opus-5-5 | medium | 17006608 | 96557 | 8.7621 | completed |
 | gate | 1 | 2026-10-29T15:41:58Z | 2026-10-29T15:43:06Z | 1e3c82c8-a01d-4fa9-ad31-000c2be990b2 | claude-opus-5-5 | medium | 703658 | 5543 | 0.7984 | completed |
+| host-leg | 1 | 2026-10-29T15:43:51Z | 2026-10-29T16:14:30Z | — | — | — | — | — | — | green |
+| close-out | 1 | 2026-10-29T16:14:30Z | 2026-10-29T16:14:38Z | — | — | — | — | — | — | PR |
+| merge | — | 2026-10-29T16:15:21Z | 2026-10-29T16:15:21Z | — | — | — | — | — | — | merged |
 
 ## Reconcile
 
