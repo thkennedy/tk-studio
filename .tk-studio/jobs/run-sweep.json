@@ -1,0 +1,9 @@
+{
+  "job_schema_version": 1,
+  "id": "run-sweep",
+  "type": "run-sweep",
+  "description": "tk-studio's instance of the shipped run-sweep job type (Story 35.7): one deferred-work sweep through the supervisor queue on the sandbox tier (placement tk-studio/run-sweep: sbx on claude-tk-studio, hole 90). Declared 2026-10-29 after the EP-35 retrospective; the first run (q-run-sweep-20261029T170922Z-c46198) ended blocked on hole 98 (the sandbox skills store at plugin 0.3.8 had no sweep verb), and the shipped type's on_status [blocked] stop then refuses every resubmission (hole 93), so this instance carries max_runs 3 instead: the hole-98 re-queue after plugin 0.3.9 is imported, plus two more sweeps before the stop is revisited. Operator path while the retro's AI-2 fixes are open: never resume a paused sweep (B2); cancel it over the API and keep its landed bundles on its PR (B3, B4); pull the merge into the checkout within the ledger pass's window (B5).",
+  "stop": {
+    "max_runs": 3
+  }
+}
