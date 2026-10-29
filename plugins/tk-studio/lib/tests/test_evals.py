@@ -404,3 +404,57 @@ class RealCliShapeTests(unittest.TestCase):
         with self.assertRaises(evals.Refusal) as ctx:
             evals.score_case(doc, "c", 3)
         self.assertEqual(str(ctx.exception), "case c: unreadable run verdicts")
+
+
+class JudgeCaseFixtureTests(unittest.TestCase):
+    """DW-103: `claude plugin eval` runs the session in an empty temp working
+    directory, so the playable-judge case must name its fixture through
+    `${CLAUDE_PLUGIN_ROOT}` (copied into the working directory before judging),
+    not as `media` "already there" in the case folder."""
+
+    CASE = Path(__file__).resolve().parents[2] / "evals" / "tk-studio-playable-judge-verdict"
+
+    def test_the_prompt_names_the_fixture_under_the_plugin_root(self):
+        prompt = (self.CASE / "prompt.md").read_text(encoding="utf-8")
+        self.assertIn("${CLAUDE_PLUGIN_ROOT}/evals/tk-studio-playable-judge-verdict/media", prompt)
+        self.assertNotIn("already there", prompt)
+
+    def test_the_fixture_is_complete(self):
+        media = self.CASE / "media"
+        report = json.loads((media / "report.json").read_text(encoding="utf-8"))
+        self.assertTrue(report["frames"])
+        for frame in report["frames"]:
+            self.assertTrue((media / frame["file"]).is_file(), frame["file"])
+
+    def test_a_rerun_replaces_the_prior_copy_before_copying(self):
+        # I/O matrix row "Re-run in a dirty cwd": the prior copy is removed
+        # first, so no stale answer.json/judge.json survives into the judging.
+        prompt = (self.CASE / "prompt.md").read_text(encoding="utf-8")
+        rm = prompt.find("rm -rf ./tk-studio-playable-judge-verdict")
+        cp = prompt.find('cp -R "${CLAUDE_PLUGIN_ROOT}/evals/tk-studio-playable-judge-verdict/media"')
+        self.assertNotEqual(rm, -1, "prompt does not remove the prior copy")
+        self.assertNotEqual(cp, -1, "prompt does not copy the fixture")
+        self.assertLess(rm, cp, "prior copy must be removed before the fixture is copied")
+
+    def test_the_harness_run_writes_only_into_the_working_directory_copy(self):
+        # I/O matrix row "Harness run": the copy lands under the working
+        # directory, and nothing the judging writes ships in the plugin tree.
+        prompt = (self.CASE / "prompt.md").read_text(encoding="utf-8")
+        self.assertIn(
+            'cp -R "${CLAUDE_PLUGIN_ROOT}/evals/tk-studio-playable-judge-verdict/media"'
+            " ./tk-studio-playable-judge-verdict/media", prompt)
+        for written in ("answer.json", "judge.json"):
+            self.assertEqual(list(self.CASE.rglob(written)), [], written)
+
+    def test_the_judging_targets_the_working_directory_copy(self):
+        # AC: the prompt copies the fixture before judging and judges the copy
+        # (never the plugin tree).
+        prompt = (self.CASE / "prompt.md").read_text(encoding="utf-8")
+        self.assertIn("absolute path of `./tk-studio-playable-judge-verdict`", prompt)
+        cp = prompt.find('cp -R "${CLAUDE_PLUGIN_ROOT}/evals/tk-studio-playable-judge-verdict/media"')
+        prepare = prompt.find("prepare --media <directory>/media")
+        self.assertNotEqual(cp, -1, "prompt does not copy the fixture")
+        self.assertNotEqual(prepare, -1, "prompt does not prepare the copied media")
+        self.assertLess(cp, prepare, "the fixture must be copied before it is prepared")
+        self.assertNotIn('--media "${CLAUDE_PLUGIN_ROOT}', prompt)
+        self.assertNotIn("--media ${CLAUDE_PLUGIN_ROOT}", prompt)

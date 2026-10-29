@@ -830,7 +830,8 @@ source_spec: `35-5-the-sandbox-and-the-host-agree-spec.md`
 location: plugins/tk-studio/evals/tk-studio-playable-judge-verdict/
 severity: medium
 reason: On the sandbox tier (claude 2.1.312, plugin 0.3.8) all three `with` runs ended `blocked`, judge votes FAIL x3: the prompt's `{media: "media"}` resolves against the eval harness's temp working directory (`/tmp/claude-eval-*/`), which holds no fixture, so the skill reports the media folder absent and never judges; the case measures the harness, not the skill (as hole 85's host runs measured the host). Fix: the case carries its fixture into the working directory (the eval's setup, or an absolute path under the plugin root the prompt names), then the maintenance-evals job runs again and the acceptance record's row is re-read.
-status: open
+status: done 2026-10-29
+resolution: resolved by sweep bundle dw-judge-eval-media-fixture
 
 ### DW-104: Follow-up review still recommended for 35-7-the-run-sweep-job-type after the damping cap was spent
 origin: review-budget-followup
