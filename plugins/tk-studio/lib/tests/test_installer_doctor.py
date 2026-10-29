@@ -1737,6 +1737,37 @@ class Hermes(DoctorCase):
                     self.assertIn("not clearly off", check["detail"])
                     self.assertIn(raw.strip("'\""), check["detail"])
 
+    def test_unproven_raw_scalar_on_parsed_path_is_not_clearly_off(self):
+        # miniyaml accepts `auth :`, but the raw scan cannot prove the
+        # string was a plain bool word (PyYAML sees the quoted "false")
+        text = 'auth :\n  adopt_external_logins: "false"\n'
+        self.assertEqual(doctor.miniyaml.loads(text),
+                         {"auth": {"adopt_external_logins": "false"}})
+        self.hermes(text)
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "hermes-logins"]
+        self.assertEqual(check["status"], "warn", check)
+        self.assertNotEqual(check["status"], "pass", check)
+        self.assertIn("not clearly off", check["detail"])
+
+    def test_unproven_plain_string_on_parsed_path_is_not_called_quoted(self):
+        # PyYAML reads a plain `yes` as True even when the scan cannot
+        # prove the raw scalar (`auth :`), so it is on, not a quoted string
+        text = "auth :\n  adopt_external_logins: yes\n"
+        self.assertEqual(doctor.miniyaml.loads(text),
+                         {"auth": {"adopt_external_logins": "yes"}})
+        self.hermes(text)
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "hermes-logins"]
+        self.assertEqual(check["status"], "warn", check)
+        self.assertIn("is on in", check["detail"])
+        self.hermes("auth :\n  adopt_external_logins: maybe\n")
+        check = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "hermes-logins"]
+        self.assertEqual(check["status"], "warn", check)
+        self.assertIn("not clearly off", check["detail"])
+        self.assertNotIn("quoted string", check["detail"])
+
     def test_bom_does_not_hide_the_auth_block(self):
         path = self.hermes(None)
         path.write_bytes(b"\xef\xbb\xbfauth:\n  adopt_external_logins: true\n")
@@ -1751,6 +1782,160 @@ class Hermes(DoctorCase):
             "hermes-logins"]
         self.assertEqual(check["status"], "warn")
         self.assertIn(str(path), check["detail"])
+
+    # DW-17: a real Hermes config.yaml holds flow mappings ({}) miniyaml
+    # refuses; doctor falls back to a line scan for the one auth scalar
+    FIXTURE = (Path(__file__).resolve().parent / "fixtures"
+               / "hermes-config" / "config.yaml")
+    OFF = "  adopt_external_logins: false\n"
+
+    def fixture(self, value: str | None = None) -> str:
+        text = self.FIXTURE.read_text(encoding="utf-8")
+        self.assertIn(self.OFF, text)
+        if value is None:
+            return text
+        return text.replace(self.OFF, f"  adopt_external_logins: {value}\n")
+
+    def check_for(self, text: str) -> tuple[dict, Path]:
+        path = self.hermes(text)
+        return self.checks(self.doctor(roster=self.full_roster())[0])[
+            "hermes-logins"], path
+
+    def test_miniyaml_refuses_the_fixture(self):
+        # the fallback is what is under test, so the full parse must fail
+        with self.assertRaises(doctor.miniyaml.MiniYamlError):
+            doctor.miniyaml.loads(self.fixture())
+
+    def test_off_passes(self):
+        check, _ = self.check_for(self.fixture())
+        self.assertEqual(check["status"], "pass", check)
+        self.assertIn("is off in", check["detail"])
+        self.assertNotIn("unreadable", check["detail"])
+
+    def test_on_warns_naming_the_fix(self):
+        for word in ("true", "yes", "On"):
+            with self.subTest(word=word):
+                check, _ = self.check_for(self.fixture(word))
+                self.assertEqual(check["status"], "warn", check)
+                self.assertIn("is on in", check["detail"])
+                self.assertIn("hermes gateway restart", check["fix"])
+
+    def test_quoted_is_a_string_not_clearly_off(self):
+        for raw in ('"false"', "'false'  # quoted"):
+            with self.subTest(raw=raw):
+                check, _ = self.check_for(self.fixture(raw))
+                self.assertEqual(check["status"], "warn", check)
+                self.assertIn("not clearly off", check["detail"])
+                self.assertIn("quoted string 'false'", check["detail"])
+
+    def test_trailing_comment_is_stripped(self):
+        check, _ = self.check_for(self.fixture("false  # set by hand"))
+        self.assertEqual(check["status"], "pass", check)
+        self.assertIn("is off in", check["detail"])
+
+    def test_null_or_empty_is_absent_off(self):
+        for raw in ("null", "~", "", "# nothing set"):
+            with self.subTest(raw=raw):
+                check, _ = self.check_for(self.fixture(raw))
+                self.assertEqual(check["status"], "pass", check)
+                self.assertIn("absent (off)", check["detail"])
+
+    def test_key_not_under_block_auth_stays_unreadable(self):
+        base = self.fixture()
+        for text in (base.replace(self.OFF, ""),
+                     "providers: [a, b]\n",
+                     "providers: {}\nauth: {}\n",
+                     "providers: {}\nauth: {adopt_external_logins: true}\n"):
+            with self.subTest(text=text):
+                check, path = self.check_for(text)
+                self.assertEqual(check["status"], "warn", check)
+                self.assertIn("unreadable", check["detail"])
+                self.assertIn(str(path), check["detail"])
+
+    def test_empty_value_with_deeper_continuation_is_unproven(self):
+        # PyYAML reads a continuation scalar (True) or a nested block (a
+        # non-empty dict) here, never null — so the scan must not PASS
+        for value in ("\n    true", "\n    enabled: true",
+                      "  # see below\n    true"):
+            with self.subTest(value=value):
+                check, path = self.check_for(self.fixture(value))
+                self.assertEqual(check["status"], "warn", check)
+                self.assertIn("unreadable", check["detail"])
+                self.assertIn(str(path), check["detail"])
+
+    def test_empty_value_before_a_sibling_stays_absent(self):
+        # the fixture's next auth key is a sibling, so empty really is null
+        check, _ = self.check_for(self.fixture(""))
+        self.assertEqual(check["status"], "pass", check)
+        self.assertIn("absent (off)", check["detail"])
+
+    def test_duplicate_key_is_unproven(self):
+        # PyYAML keeps the last occurrence; the scan must not pick one
+        same_block = self.fixture("false\n  adopt_external_logins: true")
+        second_block = (self.fixture()
+                        + "auth:\n  adopt_external_logins: true\n")
+        for text in (same_block, second_block):
+            with self.subTest(text=text):
+                check, path = self.check_for(text)
+                self.assertEqual(check["status"], "warn", check)
+                self.assertIn("unreadable", check["detail"])
+                self.assertIn(str(path), check["detail"])
+
+    def assert_unproven(self, texts) -> None:
+        for text in texts:
+            with self.subTest(text=text):
+                check, path = self.check_for(text)
+                self.assertEqual(check["status"], "warn", check)
+                self.assertIn("unreadable", check["detail"])
+                self.assertIn(str(path), check["detail"])
+
+    def test_other_top_level_auth_spelling_is_unproven(self):
+        # PyYAML keeps the last auth key, whatever its style or quoting
+        base = self.fixture()
+        self.assert_unproven(
+            base + tail for tail in (
+                "auth: {adopt_external_logins: true}\n",
+                '"auth":\n  adopt_external_logins: true\n',
+                "'auth':\n  adopt_external_logins: true\n",
+                "auth :\n  adopt_external_logins: true\n"))
+
+    def test_deeper_line_after_a_value_is_unproven(self):
+        # PyYAML folds `false` + a deeper `true` into 'false true' (truthy)
+        self.assert_unproven(self.fixture(value) for value in (
+            "false\n    true", "false  # off\n    true", "off\n    on"))
+
+    def test_empty_value_then_indentless_sequence_is_unproven(self):
+        # `key:` + a same-indent `- true` is the list [True], not null
+        self.assert_unproven(self.fixture(value) for value in (
+            "\n  - true", "# see below\n  - false"))
+
+    def test_differently_spelled_duplicate_key_is_unproven(self):
+        self.assert_unproven(
+            self.fixture(f"false\n  {key}: true") for key in (
+                "adopt_external_logins ", '"adopt_external_logins"',
+                "'adopt_external_logins'"))
+
+    def test_top_level_explicit_key_or_node_property_is_unproven(self):
+        # `? auth`, `!!str auth:`, `&a auth:`, an alias of an anchored
+        # "auth" and an escaped "au\x74h" all name auth to PyYAML, which
+        # keeps the last one
+        base = self.fixture()
+        self.assert_unproven(
+            base + tail for tail in (
+                "? auth\n: {adopt_external_logins: true}\n",
+                "!!str auth:\n  adopt_external_logins: true\n",
+                "&a auth:\n  adopt_external_logins: true\n",
+                "name: &k auth\n*k :\n  adopt_external_logins: true\n",
+                '"au\\x74h":\n  adopt_external_logins: true\n'))
+
+    def test_child_explicit_key_property_or_escape_is_unproven(self):
+        # each line may name adopt_external_logins again (PyYAML keeps it)
+        self.assert_unproven(
+            self.fixture(f"false\n  {line}") for line in (
+                "&a adopt_external_logins: true",
+                "!!str adopt_external_logins: true",
+                "? adopt_external_logins\n  : true",
+                '"adopt\\x5fexternal_logins": true'))
 
 
 class JsonShape(DoctorCase):
