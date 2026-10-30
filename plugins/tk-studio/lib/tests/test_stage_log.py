@@ -687,6 +687,31 @@ class RollupTests(StageFixture):
         (self.stories / f"{key}-spec.md").write_text(SPEC_TEXT, encoding="utf-8", newline="\n")
         plansync.stage_append(self.root, rows, story=key)
 
+    def test_story_36_1_an_inconclusive_leg_counts_as_neither_green_nor_red(self):
+        self.engine_passes()
+        plansync.stage_append(self.root, [
+            {"stage": "host-leg", "pass": 1, "started": "2026-10-29T00:30:00Z", "ended": "2026-10-29T00:35:00Z",
+             "outcome": "inconclusive"},
+            {"stage": "re-run", "pass": 1, "started": "2026-10-29T00:40:00Z", "ended": "2026-10-29T00:45:00Z",
+             "outcome": "inconclusive"}], story=KEY)
+        self.assertEqual([r["outcome"] for r in self.table() if r["stage"] in ("host-leg", "re-run")],
+                         ["inconclusive", "inconclusive"])
+        r = report.rollup_epic(self.root, 35)
+        self.assertEqual(r["by_stage"]["host-leg"]["rows"], 1)
+        self.assertEqual(r["by_stage"]["re-run"]["rows"], 1)
+        self.assertEqual(r["reruns"], 1)
+        # no verdict count anywhere in the rollup, at any depth
+        def keys(value):
+            if isinstance(value, dict):
+                for k, v in value.items():
+                    yield k
+                    yield from keys(v)
+            elif isinstance(value, list):
+                for v in value:
+                    yield from keys(v)
+        names = set(keys(r))
+        self.assertFalse(names & {"green", "red", "inconclusive"}, names)
+
     def test_rollup_epic_counts_one_runs_shared_supervisor_rows_once(self):
         # one supervisor run resolved three stories: its host leg, re-run, close-out and
         # merge rows land on each story's spec, the same occurrence three times

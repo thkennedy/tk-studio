@@ -732,7 +732,7 @@ source_spec: `34-8-the-run-vertical-slice-job-and-the-engagements-game-path-spec
 location: apps/supervisor/src/worktree.ts:917, :848, :445-448; apps/supervisor/test/hostverify.test.ts:902-909
 severity: medium
 reason: Every `host_commit` assertion calls `closeOut` directly and the one sheet test always harness-fails. Fix: one test story that drives the sweep to a slice close-out with a passing playable run and pins the frame-name contract in one place.
-status: open
+status: resolved 2026-10-30 by this story's PR (36.1: `sweepEngines` driven to `closeOut` with `slice: true` on a passing playable run asserts the sheet; `FRAMES_DIR` is the one literal `MEDIA`, `legProof` and `proofCommit` read, the bare-name contract with `playable.py sheet` pinned on both sides)
 
 ### DW-92: Smaller slice-path edges: `playable` without `verify.engine` reads `skipped: engine gate not green`; a `.mcp.json` with a BOM is refused; a moment at tick ≥ `--ticks` is never captured; `enginemcp.ts` reads the config at `run.prefix` but starts in the top level; the closeout page takes the last `host-verify`'s sheet; the `scoping` revise path never gains `game: true`.
 origin: retro epic-34 (_bmad-output/specs/spec-epic-34/RETROSPECTIVE.md), B15
@@ -806,7 +806,7 @@ source_spec: `35-3-the-slice-path-hardened-spec.md`
 location: apps/supervisor/src/board.ts:262 (hostVerifyOf); apps/supervisor/src/planstatus.ts:444
 severity: medium
 reason: `apps/supervisor/src/board.ts hostVerifyOf` (~:262) and `planstatus.ts` (~:444) show an inconclusive host-verify leg as green (board, files the run under done instead of needs_you) or red (planstatus); the contract says they read the latest host-verify through `green`. Found by 35.3's review; outside 35.3's Files. EP-35 retro (B1, AI-1): every consumer outside 35.3's Files misreads it — `board.ts:262` `isRed(d) ? "red" : "green"` shows an inconclusive leg green; `planstatus.ts:454` writes the leg's Stage Log row as `red`, which `stage-post` mirrors to Jira and `report.py` counts (a new consumer: #255 merged before #261 widened the verdict); the verdict is derived three times (`hostverify.ts:871-872`, `:881` inline, `planstatus.ts:454`) and only the first two know `inconclusive`; no test feeds an inconclusive leg to board, planstatus or sweep (`planstatus.test.ts:462-700` covers green/red/skipped). Fix: one exported `legVerdict` read by `hostVerifyOf`, `supervisorRows` and the sweep; tests feeding an inconclusive leg to each. DW-101 was the same finding filed twice by the run (both review layers); merged into this entry by the EP-35 retro hygiene (C7).
-status: open
+status: resolved 2026-10-30 by this story's PR (36.1: board, plan status, `legHistory` and the sweep's end state read `legVerdict`; the board files an inconclusive run under `needs_you`)
 
 ### DW-101: board.ts hostVerifyOf and planstatus.ts misread an inconclusive host-verify leg (green on the board, filed under done; red in planstatus).
 origin: spec-deferred ad45d836e227
@@ -1041,4 +1041,28 @@ source_spec: `_bmad-output/specs/sweeps/spec-dw-17-doctor-hermes-config-fallback
 location: plugins/tk-studio/lib/tests/test_installer_doctor.py `Hermes.hermes` (the write, fixed by hand in 961bc20); plugins/tk-studio/lib/tests/test_conformance.py (no encoding rule); AGENTS.md (no pitfall line); plugins/tk-studio/lib and tools/installer at large (`write_text(`/`read_text(`/`open(` without `encoding=`)
 severity: medium
 reason: The DW-17 bundle's Hermes tests rewrite a fixture that holds an em dash through `write_text(text)`; the engine's gate ran them on Linux and passed, the close-out's host leg ran them on Windows and twelve failed (`'utf-8' codec can't decode byte 0x97`), so the sweep ended `partial` on a red leg with every bundle sound, and the operator fixed one line and re-ran the leg (`POST /runs/{id}/verify`). The host leg is the gate of record, but a difference the engine cannot see should not cost a leg. Fix: a conformance rule that rejects `write_text`, `read_text`, `open` and `Path.open` without an explicit `encoding=` under `plugins/tk-studio/lib`, `tools/installer` and `apps/*/scripts` (text mode only; binary calls exempt), and a pitfall line in AGENTS.md so the engine never writes one; optionally the sandbox runs the lib suite with `PYTHONUTF8=0` and `LC_ALL=C` once to shake out the rest.
+status: open
+
+### DW-133: The re-run verb exits 1 on an inconclusive leg, but no contract note states it: the re-run exit list in the 0.1.28 note still reads "1 red or skipped".
+origin: review of story 36-1
+source_spec: `36-1-one-verdict-for-every-consumer-spec.md`
+location: apps/supervisor/src/cli.ts:2658, :2667; plugins/tk-studio/contracts/driver-contract.md:396
+severity: low
+reason: `cli.ts` derives `green` from the leg and returns `green ? 0 : 1`, so an inconclusive leg exits 1, and no contract note states this. The contract's re-run exit list (`driver-contract.md:396`, in the 0.1.28 note) still reads "1 red or skipped"; that note is history and stays as written, so the statement belongs in a current version's note.
+status: open
+
+### DW-134: The 0.1.31 note says an inconclusive leg ends a sweep `partial` unconditionally, while `sweepEndState`'s `blocked` rules (no triage, no bundle landed) apply first.
+origin: spec-deferred 6a5dfd428d7c
+source_spec: `36-1-one-verdict-for-every-consumer-spec.md`
+location: plugins/tk-studio/contracts/driver-contract.md:2114
+severity: medium
+reason: Edge Case Hunter; `apps/supervisor/src/sweep.ts:311-314` return `blocked` before the verdict is read. Meets deferral rule (b), a contract statement left imprecise. The consult ruled the 0.1.31 paragraph is not edited in this story; a later 36.x clause can state the precedence.
+status: open
+
+### DW-135: The re-run verb exits 1 on an inconclusive leg, but no contract note states it. Filed as DW-133.
+origin: spec-deferred 96c53f15da28
+source_spec: `36-1-one-verdict-for-every-consumer-spec.md`
+location: apps/supervisor/src/cli.ts:2667
+severity: low
+reason: `apps/supervisor/src/cli.ts:2658, :2667`; `driver-contract.md:396` reads "1 red or skipped" and is 0.1.28 history. Meets deferral rule (b).
 status: open

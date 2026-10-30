@@ -87,7 +87,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { ghBin, pluginRoot, WorkDirMissing, workDir } from "./env";
 import { canonicalPr, isWithin } from "./hygiene";
-import { CONTACT_SHEET, hostVerify, inconclusiveReason, isInconclusive, isRed, isSlice, legHistory, legVerdict, prSection, redReason, type HostVerifyResult, type LegHistoryEntry, type PlayableJudge, type PlayableRoute, type PrProof } from "./hostverify";
+import { CONTACT_SHEET, FRAMES_DIR, hostVerify, inconclusiveReason, isInconclusive, isRed, isSlice, legHistory, legVerdict, prSection, redReason, type HostVerifyResult, type LegHistoryEntry, type PlayableJudge, type PlayableRoute, type PrProof } from "./hostverify";
 import { accountedCostOf, isTerminal, RunTerminal, servedRoot, type EngineWhere, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
 import { releasePin, sameStart, vmLaunchStatus, type SandboxDeps } from "./sandbox";
 import { lastJsonObject, runJobVerb, runProcess, runUv, toVmPath, type RunResult, type Tier } from "./server";
@@ -500,18 +500,18 @@ export async function proofCommit(
     }
     for (const name of p.sampled ?? []) {
       if (/[\\/]/.test(name) || name.includes("..")) continue;
-      const from = join(p.store, "frames", name);
+      const from = join(p.store, FRAMES_DIR, name);
       if (!existsSync(from)) continue;
-      mkdirSync(join(dir, "frames"), { recursive: true });
-      cpSync(from, join(dir, "frames", name));
-      frames.push(`${rel}/frames/${name}`);
+      mkdirSync(join(dir, FRAMES_DIR), { recursive: true });
+      cpSync(from, join(dir, FRAMES_DIR, name));
+      frames.push(`${rel}/${FRAMES_DIR}/${name}`);
     }
   } else {
     // The store gone (a retried or late close-out after it was pruned): the proof already in the served root is
     // kept, never deleted unstaged, and its sheet and frames still embedded.
     if (existsSync(join(dir, CONTACT_SHEET))) sheet = `${rel}/${CONTACT_SHEET}`;
-    if (existsSync(join(dir, "frames"))) {
-      for (const name of readdirSync(join(dir, "frames")).sort()) frames.push(`${rel}/frames/${name}`);
+    if (existsSync(join(dir, FRAMES_DIR))) {
+      for (const name of readdirSync(join(dir, FRAMES_DIR)).sort()) frames.push(`${rel}/${FRAMES_DIR}/${name}`);
     }
   }
   const art = verify.assets?.art_path;

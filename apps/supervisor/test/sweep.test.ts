@@ -501,3 +501,17 @@ describe("Story 35.7: the run-sweep job type", () => {
     expect(clipped).toContain("… [reason truncated]\nsweep: 1/2 bundles; blocked: none; decisions: none\nPR: " + PR);
   });
 });
+
+describe("Story 36.1: an inconclusive leg at the sweep's end", () => {
+  const summary = { triage: { bundles: [], blocked: [], decisions: [] }, bundles: [{ name: "b", ids: [], landed: true }] } as unknown as SweepSummary;
+  const inconclusive = { command: "c", argv: ["c"], cwd: "/w", exit: 0, duration_ms: 1, green: false, stdout_tail: [], stderr_tail: [],
+    playable: { verdict: "inconclusive", reason: "infrastructure: sbx: x" } } as any;
+
+  test("sweepEndState: `partial`, the reason naming the inconclusive leg, never red and never complete", () => {
+    const r = sweepEndState(summary, inconclusive);
+    expect(r.state).toBe("partial");
+    expect(r.reason).toMatch(/^host verify inconclusive \(playable\)/);
+    expect(r.reason).toContain("infrastructure: sbx: x");
+    expect(r.reason).not.toMatch(/host verify red/);
+  });
+});

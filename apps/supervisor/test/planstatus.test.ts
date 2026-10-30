@@ -477,6 +477,21 @@ describe("Story 35.8: the stage pass — the supervisor's Stage Log rows after t
     expect(supervisorRows([])).toEqual([]);
   });
 
+  test("Story 36.1: supervisorRows: an inconclusive leg reads `inconclusive` on its host-leg and re-run rows, beside green and red", () => {
+    const at = (seq: number, kind: string, detail: Record<string, unknown>, when: string): QueueEvent =>
+      ({ seq, run_id: "r", at: when, kind, from_state: "complete", to_state: "complete", detail });
+    const inconclusive = { green: false, playable: { verdict: "inconclusive", reason: "infrastructure: sbx: x" } };
+    const rows = supervisorRows([
+      at(1, "host-verify", { ...inconclusive, started_at: "2026-10-15T10:00:00.000Z" }, "2026-10-15T10:05:00.000Z"),
+      at(2, "host-verify", { ...inconclusive, rerun: { by: "cli" } }, "2026-10-15T11:00:00.000Z"),
+      at(3, "host-verify", { green: true, rerun: { by: "api" } }, "2026-10-15T12:00:00.000Z"),
+      at(4, "host-verify", { green: false, rerun: { by: "api" } }, "2026-10-15T13:00:00.000Z"),
+    ]);
+    expect(rows.map((r) => [r.stage, r.pass, r.outcome])).toEqual([
+      ["host-leg", 1, "inconclusive"], ["re-run", 1, "inconclusive"], ["re-run", 2, "green"], ["re-run", 3, "red"],
+    ]);
+  });
+
   test("supervisorRows: a busy queue's closed_out {closeout, pending} and the ended written from it are one close-out", () => {
     const at = (seq: number, kind: string, detail: Record<string, unknown>, when: string): QueueEvent =>
       ({ seq, run_id: "r", at: when, kind, from_state: "complete", to_state: "complete", detail });

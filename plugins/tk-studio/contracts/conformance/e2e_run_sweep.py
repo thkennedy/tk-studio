@@ -22,7 +22,7 @@ then the supervisor half (the triage record, the `## Sweep` PR body, the
 inbox line, the end-state rule, the paused sweep, the ledger pass) the way
 the supervisor's own gate runs it: locate the checkout (the folder holding
 `apps/supervisor/package.json`) → find `bun` → `bun test test/sweep.test.ts
--t "Story 35.7"` from `apps/supervisor` under a fresh temp folder,
+-t "Story 35.7|Story 36.1"` from `apps/supervisor` under a fresh temp folder,
 `TK_SUPERVISOR_*` stripped, bounded at `BOUND_S`. No checkout or no `bun`:
 that step is `ok: true` with `not_run` naming which (the `cli_drives`
 precedent). Prints one JSON object {ok, steps[]} and exits nonzero on a red
@@ -43,7 +43,7 @@ from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 SUITES = ["test/sweep.test.ts"]
-FILTER = "Story 35.7"
+FILTER = "Story 35.7|Story 36.1"
 TYPE_ID = "run-sweep"
 BOUND_S = 60
 INSTALL_BOUND_S = 40

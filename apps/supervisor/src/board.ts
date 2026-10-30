@@ -30,7 +30,7 @@ import { join } from "node:path";
 import { load as loadYaml } from "js-yaml";
 import { frontmatter, pausedStory } from "./closeout";
 import { studioHome } from "./env";
-import { isRed, type HostVerifyResult } from "./hostverify";
+import { legVerdict, type HostVerifyResult } from "./hostverify";
 import { listEngagements, needsYou, titleOf } from "./engagement";
 import { awaitingRuling, lastRunOf, LIVE_RUN_STATES, runWaitReason } from "./office";
 import { PLAN_REL, runPr, storyNumber } from "./planstatus";
@@ -44,7 +44,7 @@ export const BANDS_REL = join(".tk-studio", "budget-bands.yaml");
 
 // ------------------------------------------------------------ the answer (shared with 30.6 and the web)
 
-export type HostVerifyOutcome = "green" | "red" | "skipped";
+export type HostVerifyOutcome = "green" | "red" | "skipped" | "inconclusive";
 export interface BoardFinding { id: string; title: string; severity: string | null }
 export interface BoardStoryRun { run_id: string; state: string; pr: string | null; host_verify: HostVerifyOutcome | null; ended_at: string | null }
 export interface BoardStory { id: string; key: string; title: string; status: string; findings: BoardFinding[]; run: BoardStoryRun | null }
@@ -258,14 +258,16 @@ export function readBands(root: string): Record<string, number> {
 export function hostVerifyOf(events: readonly QueueEvent[]): HostVerifyOutcome | null {
   const d = events.findLast((e) => e.kind === "host-verify")?.detail as HostVerifyResult | null | undefined;
   if (!d || typeof d !== "object") return null;
-  if (d.skipped) return "skipped";
-  return isRed(d) ? "red" : "green";
+  return legVerdict(d);
 }
 
-/** Red only when the latest `host-verify` follows the latest `launched` (worktree.ts `recordedVerify`'s rule). */
-function redSinceLaunch(events: readonly QueueEvent[]): boolean {
+/** Story 36.1: a red or inconclusive leg needs you, only when the latest `host-verify` follows the latest `launched`
+ * (worktree.ts `recordedVerify`'s rule). */
+function needsYouSince(events: readonly QueueEvent[]): boolean {
   const at = events.findLastIndex((e) => e.kind === "host-verify");
-  return at > events.findLastIndex((e) => e.kind === "launched") && hostVerifyOf(events) === "red";
+  if (at <= events.findLastIndex((e) => e.kind === "launched")) return false;
+  const outcome = hostVerifyOf(events);
+  return outcome === "red" || outcome === "inconclusive";
 }
 
 const sameLocalDay = (a: Date, b: Date) =>
@@ -310,12 +312,12 @@ function triage(facts: readonly RunFacts[], now: number, root: string | null): B
     const live = state !== null && LIVE_RUN_STATES.has(state);
     const ruling = live ? str(runWaitReason(f.run, f.events)) : null;
     const item: TriageItem = { run_id: f.run.run_id, state, story_key: f.storyKey, pr: f.pr, ruling };
-    const red = redSinceLaunch(f.events);
+    const legNeedsYou = needsYouSince(f.events);
     if (live) {
-      if (state === "paused" || awaitingRuling(f.events) !== null || red) out.needs_you.push(item);
+      if (state === "paused" || awaitingRuling(f.events) !== null || legNeedsYou) out.needs_you.push(item);
       else out.working.push(item);
     } else if (isTerminal(state) && f.endedAt && sameLocalDay(new Date(f.endedAt), today)) {
-      (red ? out.needs_you : out.done).push(item);
+      (legNeedsYou ? out.needs_you : out.done).push(item);
     }
   }
   for (const e of listEngagements(root)) {

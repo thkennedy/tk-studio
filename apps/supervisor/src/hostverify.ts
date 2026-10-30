@@ -561,8 +561,11 @@ export const NO_PLAYABLE = "no playable";
 export const PLAYABLE_JUDGE_SKILL = "tk-studio-playable-judge";
 export const PLAYABLE_LEG = "playable-verify";
 export const PLAYABLE_LEG_DEFAULT = { model: "claude-sonnet-5", effort: "medium" } as const;
+/** Story 36.1 (DW-91): the frames' directory in the store, the media copy, a leg's copy and the proof folder, the one
+ * literal on this side; `playable.py FRAMES` is the other language's, the two pinned by tests on both sides. */
+export const FRAMES_DIR = "frames";
 /** The media files `playable.py` writes and the leg copies into the worktree for the judge. */
-const MEDIA = ["report.json", "log.txt", "frames", "contact-sheet.png"];
+const MEDIA = ["report.json", "log.txt", FRAMES_DIR, "contact-sheet.png"];
 /** Story 34.8: the contact sheet `playable.py sheet` writes beside the report (slice runs only). */
 export const CONTACT_SHEET = "contact-sheet.png";
 /** Story 34.8: each slice leg's own copy of its sheet, under the store (never copied with the media). */
@@ -667,10 +670,10 @@ function legProof(store: string, stamp: string, frames: string[], sampled: strin
       if (!from || basename(n) !== n) throw new Error(`sampled frame ${n} is not one of the report's frames`);
       return [n, from] as const;
     });
-    mkdirSync(join(dir, "frames"), { recursive: true });
+    mkdirSync(join(dir, FRAMES_DIR), { recursive: true });
     const report = join(dir, "report.json");
     copyFileSync(join(store, "report.json"), report);
-    const legFrames = sources.map(([n, from]) => { const to = join(dir, "frames", n); copyFileSync(from, to); return to; });
+    const legFrames = sources.map(([n, from]) => { const to = join(dir, FRAMES_DIR, n); copyFileSync(from, to); return to; });
     return { report, ...(legFrames.length ? { leg_frames: legFrames } : {}) };
   } catch {
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* a partial copy left behind */ }
@@ -879,7 +882,7 @@ export function legHistory(events: readonly QueueEvent[], current?: LegHistoryEn
   for (const e of events.slice(from + 1)) {
     if (e.kind !== "host-verify" || !e.detail || typeof e.detail !== "object") continue;
     const d = e.detail as Record<string, any>;
-    const verdict = d.skipped === true ? "skipped" : d.green === true ? "green" : d.playable?.verdict === "inconclusive" ? "inconclusive" : "red";
+    const verdict = legVerdict(d as HostVerifyResult);
     const rerun = d.rerun && typeof d.rerun === "object" ? d.rerun as Record<string, unknown> : undefined;
     const by = rerun?.by === "api" || rerun?.by === "cli" ? rerun.by : undefined;
     legs.push(rerun ? { leg: "re-run", verdict, recorded_at: e.at, ...(by ? { by } : {}) } : { leg: "close-out", verdict, recorded_at: e.at });

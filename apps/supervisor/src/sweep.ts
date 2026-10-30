@@ -44,7 +44,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pluginRoot, sbxBin } from "./env";
-import { inconclusiveReason, isInconclusive, isRed, redReason, type HostVerifyResult } from "./hostverify";
+import { inconclusiveReason, legVerdict, redReason, type HostVerifyResult } from "./hostverify";
 import { registerSweepLine } from "./hygiene";
 import { PLAN_RETRY_LIMIT, runPr, type PlanStatusDeps } from "./planstatus";
 import { isTerminal, selfOwner, servedRoot, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
@@ -313,8 +313,11 @@ export function sweepEndState(s: SweepSummary, verify?: HostVerifyResult): { sta
   if (!s.triage) return { state: "blocked", reason: `sweep: no triage.json (the triage escalated)${s.triage_error ? `: ${s.triage_error}` : ""}` };
   const landed = s.bundles.filter((b) => b.landed).length;
   if (s.bundles.length && !landed) return { state: "blocked", reason: `${line}; no bundle landed` };
-  if (isRed(verify)) return { state: "partial", reason: `${redReason(verify)}; ${line}` };
-  if (isInconclusive(verify)) return { state: "partial", reason: `${inconclusiveReason(verify)}; ${line}` };
+  if (verify && !verify.skipped) {
+    const v = legVerdict(verify);
+    if (v === "red") return { state: "partial", reason: `${redReason(verify)}; ${line}` };
+    if (v === "inconclusive") return { state: "partial", reason: `${inconclusiveReason(verify)}; ${line}` };
+  }
   if (landed < s.bundles.length) return { state: "partial", reason: line };
   return { state: "complete", reason: line };
 }
