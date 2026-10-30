@@ -3390,7 +3390,7 @@ So that the sweeps' real spend reaches the quota pacing and the rollup, and a fo
 
 As the operator,
 I want every pause to have a bounded, recorded exit: the resume's stop re-arm routed by tier, the story's Jira block closed by the resume, a failed first render auto-resumed once, a paused sweep's stop retry bounded and its WIP kept out of the leg, a story-boundary refusal ending the run rather than parking it, a killed resumed engine's PR left a draft with its guard reason kept, and an engagement's cap or ask block closed by the owner's go,
-So that the operator path for a pause is the API, never a hand edit of the worktree or the issue (holes 95 and 101; AI-2's B2, B3; the retrospective's B3/B4 decided; DW-110, DW-115, DW-120, DW-121, DW-130; DW-64, DW-65, DW-47).
+So that the operator path for a pause is the API, never a hand edit of the worktree or the issue, and a story being built reads In Progress from its launch (holes 95, 101 and 104; AI-2's B2, B3; the retrospective's B3/B4 decided; DW-110, DW-115, DW-120, DW-121, DW-130; DW-64, DW-65, DW-47).
 
 **Acceptance Criteria:**
 
@@ -3405,6 +3405,10 @@ So that the operator path for a pause is the API, never a hand edit of the workt
 **Given** a resumed or relaunched engine the supervisor killed, and an engagement whose owner answered go or continue after a cap or ask block
 **When** the close-out skipped the host verify, and when `approve.ts runStep` runs
 **Then** the PR stays a draft (`worktree.ts closeOut ~:480-483`; DW-64), a killed relaunch keeps `launched.end` with the guard's reason (`sweepEngines`' relaunched predicate; DW-65), and the cap or ask block is closed and the owed questions block after it (`approve.ts runStep`, `questions.ts closeStep`; DW-47); the supervisor suites cover each with fakes; the contract (0.1.31, additive) names `track-unblock` and the bounded stop; the entries close by this PR
+
+**Given** a story the launch is about to run (`tk-studio-launch` for a `run-epic` job: the first story and every later one, a resume included)
+**When** the engine starts on it
+**Then** the launch calls `plansync.py status --directory <owner root> --id ST-NNN --status in-progress` once (the verb the review and done phases use), recorded as a `plan-status` event with `phase: in-progress`, `ok` and `previous_status`, so the story's issue reads In Progress from the build's start instead of Backlog; a refusal or a blocked re-sync is one event and never stops the launch; the review phase at PR open and the done phase at the merge follow as now, a block's `Blocked - Awaiting User` wins while it stands, and the plan-status suite covers the third phase with a fake; the contract names it (hole 104, DW-133)
 
 ### Story 36.4: The Host Leg Goes Red for Code Only
 
