@@ -243,6 +243,18 @@ describe("AC3: the close-out pushes the run branch and opens a PR against base_r
     expect(prBody({ commits: [], runId: "q-1" })).toContain("not metered");
   });
 
+  test("Story 36.2: a priced sweep's `## Metered cost`: worker + engine = total, one line per bundle, a later cycle named; an unpriced summary keeps the plain figure", () => {
+    const bundle = { dw_ids: ["DW-1"], landed: true };
+    const sweep = { engine_cost_usd: 3, bundles: [
+      { ...bundle, name: "a", cycle: 1, key: "dw-a", cost_usd: 1, source: "metered" },
+      { ...bundle, name: "b", cycle: 2, key: "dw2-b", cost_usd: 2, source: "sessions" },
+      { ...bundle, name: "c", cycle: 1, key: "dw-c", cost_usd: null },
+    ] };
+    expect(prBody({ commits: [], runId: "q-1", costUsd: 0.5, sweep })).toContain(
+      "## Metered cost\n\n$0.5000 (worker turns) + $3.0000 (engine) = $3.5000\n\n- a: $1.0000 (metered)\n- b (cycle 2): $2.0000 (sessions)\n- c: not metered\n\n## Sweep");
+    expect(prBody({ commits: [], runId: "q-1", costUsd: 0.5, sweep: { bundles: [] } })).toContain("## Metered cost\n\n$0.5000 (total_cost_usd)");
+  });
+
   test("engine completes with commits: pushed (no force), `gh pr create --base <base_ref>` with the body, the worktree removed", async () => {
     const fx = await fixture({ baseRef: "main" });
     const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);

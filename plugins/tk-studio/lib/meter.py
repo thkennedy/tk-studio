@@ -38,10 +38,20 @@ kept); a later recorded run removes it. A refusal never emits an observation.
 
 The journal's `tokens` / `tokens_weighted` counters are never used for dollars.
 
+`price-run` (Story 36.2, run on the host at a sweep's close-out) prices an
+engine run per bundle, the one reader of this table for it: a bundle's
+`transcripts/<key>/metered.json` `usd_total` when present (`source: metered`),
+else its `state.json` `tasks[key].sessions[].usage` at the table's rates
+(`source: sessions`, `bound: upper`, `ttl: unknown`: no `message.id` dedupe, no
+subagents, cache writes at the 5m rate), each session's own model winning and
+the routing's model for its role only when that is empty. A bundle with
+neither reads `usd: null`, never a guess. Nothing is recorded.
+
 CLI:
   uv run meter.py story --run-dir D --story-key K [--repo-root R]
                         [--prices P] [--no-record]
   uv run meter.py harvest --run-dir D
+  uv run meter.py price-run --run-dir D [--routing F] [--prices P] [--json]
 
 Prints one JSON object. Exit codes: 0 ok; 2 refusal (`{"ok": false, "error": ...}`,
 AD-11). Stdlib-only (NFR9); never prompts.
@@ -81,6 +91,8 @@ RATE_FIELDS = ("input", "output", "cache_write_5m", "cache_write_1h", "cache_rea
 # key matching `token`); cache_write = cache_write_5m + cache_write_1h.
 USAGE_FIELDS = ("input", "output", "cache_read", "cache_write")
 STORY_EPIC_RE = re.compile(r"^(\d+)-")
+# A sweep bundle's engine task key (`dw-<name>`, `dw<N>-<name>` for cycle N).
+BUNDLE_KEY_RE = re.compile(r"^dw\d*-.+$")
 # The table prices standard usage only; any other value of these usage fields
 # is a premium the table does not carry (usage field -> accepted values; an
 # absent field is standard).
@@ -547,7 +559,11 @@ def timing(run_dir: Path, story_key: str) -> dict:
 
 def route(repo_root: Path) -> dict | None:
     """Leg -> model map from `<repo_root>/.bmad-loop/routing.current.json`."""
-    data = _read_json(Path(repo_root) / ".bmad-loop" / "routing.current.json")
+    return _route_file(Path(repo_root) / ".bmad-loop" / "routing.current.json")
+
+
+def _route_file(path: Path) -> dict | None:
+    data = _read_json(path)
     if data is None:
         return None
     return {leg: value["model"] for leg, value in data.items()
@@ -805,6 +821,93 @@ def meter_story(run_dir: Path, story_key: str, repo_root: Path | None = None,
     return report
 
 
+# ------------------------------------------------------------------ price-run
+
+def _bundle_keys(run_dir: Path, tasks: dict) -> list[str]:
+    """Every bundle key of an engine run, once: the triages' first (`triage.json`,
+    then `triage-<N>.json` to the first missing), so a triaged bundle with no
+    record still gets its line; then any other `dw*-` task or transcripts dir."""
+    keys: list[str] = []
+    cycle = 1
+    while True:
+        name = "triage.json" if cycle == 1 else f"triage-{cycle}.json"
+        triage = _read_json(run_dir / name)
+        if triage is None:
+            break
+        bundles = triage.get("bundles")
+        for bundle in bundles if isinstance(bundles, list) else []:
+            bundle_name = bundle.get("name") if isinstance(bundle, dict) else None
+            if isinstance(bundle_name, str) and bundle_name:
+                keys.append(f"dw-{bundle_name}" if cycle == 1 else f"dw{cycle}-{bundle_name}")
+        cycle += 1
+    transcripts = run_dir / "transcripts"
+    on_disk = sorted(p.name for p in transcripts.iterdir() if p.is_dir()) if transcripts.is_dir() else []
+    for key in [*tasks, *on_disk]:
+        if isinstance(key, str) and BUNDLE_KEY_RE.match(key):
+            keys.append(key)
+    return list(dict.fromkeys(keys))
+
+
+def _session_usd(key: str, session: dict, prices: dict, routing: dict) -> float | None:
+    """One `state.json` session's dollars at the table's rates; None when it has
+    no usage to price. Its own model wins; only an empty one takes the routing's
+    model for its role. A model the table lacks (or none at all) is a refusal."""
+    usage = session.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    tokens, _ = _tokens({"input_tokens": usage.get("input_tokens"),
+                         "output_tokens": usage.get("output_tokens"),
+                         "cache_read_input_tokens": usage.get("cache_read_tokens"),
+                         "cache_creation_input_tokens": usage.get("cache_creation_tokens")})
+    if not any(tokens.values()):
+        return None
+    model = session.get("model") if isinstance(session.get("model"), str) else ""
+    role = session.get("role") if isinstance(session.get("role"), str) else ""
+    if not model:
+        model = routing.get(ROLE_LEGS.get(role, role), "")
+    if not model:
+        raise MeterError(f"bundle '{key}': a session with usage names no model and the "
+                         f"routing has none for role '{role}'; never a guess")
+    rates = _rates(prices, model)
+    if rates is None:
+        raise MeterError(f"no price for model '{model}' (bundle '{key}') in the price table "
+                         f"dated {prices.get('date')}; add it to prices.json from a sourced "
+                         "table, never a guess")
+    return sum(tokens[f] * rates[f] for f in RATE_FIELDS) / MTOK
+
+
+def price_run(run_dir: Path, routing_path: Path | None = None,
+              prices_path: Path | None = None) -> dict:
+    """Price an engine run per bundle (see the module docstring). `usd_total` is
+    the priced bundles' sum, None when no bundle could be priced (never zero-filled)."""
+    run_dir = Path(run_dir)
+    if not run_dir.is_dir():
+        raise MeterError(f"run dir not found: {run_dir}")
+    prices = load_prices(prices_path)
+    routing = _route_file(Path(routing_path) if routing_path
+                          else run_dir.parent.parent / "routing.current.json") or {}
+    tasks = _state_tasks(run_dir)
+    bundles: list[dict] = []
+    for key in _bundle_keys(run_dir, tasks):
+        usd = _metered_usd(run_dir / "transcripts" / key)
+        if isinstance(usd, (int, float)) and not isinstance(usd, bool) and usd >= 0:
+            bundles.append({"key": key, "usd": round(usd, 6), "source": "metered"})
+            continue
+        task = tasks.get(key)
+        sessions = task.get("sessions") if isinstance(task, dict) else None
+        priced = [_session_usd(key, s, prices, routing)
+                  for s in (sessions if isinstance(sessions, list) else []) if isinstance(s, dict)]
+        priced = [p for p in priced if p is not None]
+        if priced:
+            bundles.append({"key": key, "usd": round(sum(priced), 6), "source": "sessions",
+                            "bound": "upper", "ttl": "unknown"})
+        else:
+            bundles.append({"key": key, "usd": None})
+    known = [b["usd"] for b in bundles if b["usd"] is not None]
+    return {"bundles": bundles, "usd_total": round(sum(known), 6) if known else None,
+            "prices_date": prices["date"]}
+
+
 def _refusal_path(run_dir: Path, story_key: str) -> Path:
     return Path(run_dir) / "transcripts" / story_key / REFUSAL
 
@@ -849,7 +952,23 @@ def main(argv: list[str] | None = None) -> int:
     hcmd = sub.add_parser("harvest", help="append a run dir's observation.json "
                           "files to this host's ledger, once each")
     hcmd.add_argument("--run-dir", required=True)
+    pcmd = sub.add_parser("price-run", help="price an engine run per bundle "
+                          "(metered marker, else its sessions); records nothing")
+    pcmd.add_argument("--run-dir", required=True)
+    pcmd.add_argument("--routing", help="routing.current.json (defaults to the run's .bmad-loop)")
+    pcmd.add_argument("--prices", help="price table (defaults to lib/prices.json)")
+    pcmd.add_argument("--json", action="store_true", help="accepted: the output is always JSON")
     args = parser.parse_args(argv)
+    if args.command == "price-run":
+        try:
+            result = price_run(Path(args.run_dir),
+                               routing_path=Path(args.routing) if args.routing else None,
+                               prices_path=Path(args.prices) if args.prices else None)
+        except (MeterError, OSError) as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+            return 2
+        print(json.dumps({"ok": True, **result}, ensure_ascii=False))
+        return 0
     if args.command == "harvest":
         try:
             result = harvest(Path(args.run_dir))

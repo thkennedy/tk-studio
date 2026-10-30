@@ -5,11 +5,13 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
-import { hostVerifyOf } from "../src/board";
+import { hostVerifyOf, jobRunCosts } from "../src/board";
 import { main, verifyVerb } from "../src/cli";
 import { rerunHostLeg, VerifyRefused, type HostLegResult, type HostLegStarted } from "../src/hostleg";
+import { runCost } from "../src/inbox";
 import { Queue, type Owner } from "../src/queue";
 import { runProcess, type RunResult } from "../src/server";
+import { sweepRecord, type SweepSummary } from "../src/sweep";
 import { runBranch, type WorktreeDeps } from "../src/worktree";
 import { gitRepo, RUNTIME_GITIGNORE, testGit } from "./fakes";
 import { tempDir } from "./tmp";
@@ -27,7 +29,7 @@ type GhView = { state: string; isDraft: boolean; body?: string };
 const LAUNCH_BLOCK = { status: "complete", intent: "tk-studio-launch", artifacts: [".bmad-loop/runs/E1"] };
 
 /** An ended sbx run with its branch pushed to origin and its worktree removed, as a close-out leaves one. */
-async function fixture(o: { code?: number; pr?: string | null; push?: boolean; worktree?: boolean; definition?: Record<string, unknown>; config?: string; files?: Record<string, string>; engine?: boolean } = {}) {
+async function fixture(o: { code?: number; pr?: string | null; push?: boolean; worktree?: boolean; definition?: Record<string, unknown>; config?: string; files?: Record<string, string>; engine?: boolean; studioRunId?: string } = {}) {
   const repo = gitRepo({ ".tk-studio/config.yaml": o.config ?? verifyConfig(o.code ?? 0), ...(o.files ?? {}) });
   const work = tempDir("tk-sup-hostleg-work-");
   const alive = new Set<string>([me.nonce]);
@@ -75,6 +77,7 @@ async function fixture(o: { code?: number; pr?: string | null; push?: boolean; w
   queue.db.query("UPDATE runs SET tier = 'sbx' WHERE run_id = ?").run(id);
   // Story 35.1: a slice re-run's playable step needs the engine run id and the sandbox (the judge's tier).
   if (o.engine) queue.db.query("UPDATE runs SET engine_run_id = 'E1', sandbox = 'tk-sbx' WHERE run_id = ?").run(id);
+  if (o.studioRunId) queue.db.query("UPDATE runs SET studio_run_id = ? WHERE run_id = ?").run(o.studioRunId, id);
   const branch = runBranch(id);
   const wt = join(work, "worktrees", "proj", id);
   let tip = "";
@@ -453,6 +456,54 @@ describe("Story 35.1: the re-run is a whole leg — the PR body, both flips, the
     expect(fy.bodies[0]).toContain("## Metered cost\n\n$0.5000 (total_cost_usd)");
   }, 90_000);
 
+  test("Story 36.2: the judge's suffixed line neither drops nor double-counts the run's own cost in the readers", () => {
+    const line = (run_id: string, total_cost_usd: number) => JSON.stringify({ event: "job-run", project: "proj", payload: { job_id: "run-epic-36", run_id, state: "complete", total_cost_usd } });
+    const text = [line("studio-1", 4), line("studio-1:verify-1", 0.25), line("studio-1:verify-2", 0.5)].join("\n");
+    const costs = jobRunCosts(text);
+    expect(costs.get("studio-1")!.cost).toBe(4);
+    expect([...costs.values()].reduce((sum, c) => sum + c.cost, 0)).toBe(4.75); // `spendByEpic`'s sum: the run once, each judge once
+    const file = join(tempDir("tk-sup-hostleg-ledger-"), "l.jsonl");
+    writeFileSync(file, text);
+    expect(runCost(file, "studio-1")).toBe(4); // the exact id: the judge's line never overwrites the run's
+  });
+
+  test("Story 36.2: a sweep's re-run body keeps `## Sweep` and its priced cost, from the record, the worktree gone", async () => {
+    const fx = await fixture({ definition: { id: "run-sweep", target: { skill: "tk-studio-launch" } } });
+    fx.queue.note(fx.id, "sweep-triage", { engine_run_id: "E1", bundles: [{ name: "a", dw_ids: ["DW-1"] }], blocked: [{ id: "DW-4", blocker: "later" }], decisions: [], already_resolved: [], skip: [] });
+    const ended = fx.queue.events(fx.id).find((e) => e.kind === "ended")!;
+    fx.queue.patchEventDetail(ended.seq, { sweep: { notice: "1/2 bundles", triage: true, already_resolved: [], engine_cost_usd: 2,
+      bundles: [{ name: "a", dw_ids: ["DW-1"], landed: true, cost_usd: 2, source: "metered" }, { name: "b", dw_ids: ["DW-2"], landed: false, why: "skipped by the engine", cost_usd: null }] } });
+    fx.answers.view = { state: "OPEN", isDraft: true, body: "## Metered cost\n\n$9.0000 (stale)\n\n## Host verify\n\nold" };
+    const r = await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done;
+    expect(r.rerun.pr_body).toBe("edited");
+    expect(r.rerun.job_run).toBeUndefined(); // no judge cost, no line
+    const body = fx.bodies[0]!;
+    expect(body).toContain("## Metered cost\n\n$0.5000 (worker turns) + $2.0000 (engine) = $2.5000\n\n- a: $2.0000 (metered)\n- b: not metered\n\n## Sweep");
+    expect(body).toContain("- a (DW-1): landed\n- b (DW-2): not landed — skipped by the engine\n\n### Blocked\n\n- DW-4: later");
+    expect(body.indexOf("## Sweep")).toBeLessThan(body.indexOf("## Host verify"));
+    expect(body).not.toContain("$9.0000");
+  }, 90_000);
+
+  test("Story 36.2: a two-cycle sweep's re-run body keeps the later cycle's blocked entry and decision, and reads the close-out's worker figure", async () => {
+    const fx = await fixture({ definition: { id: "run-sweep", target: { skill: "tk-studio-launch" } } });
+    // the note is the first triage's alone
+    fx.queue.note(fx.id, "sweep-triage", { engine_run_id: "E1", bundles: [{ name: "a", dw_ids: ["DW-1"] }], blocked: [{ id: "DW-4", blocker: "cycle one" }], decisions: [], already_resolved: [], skip: [] });
+    const ended = fx.queue.events(fx.id).find((e) => e.kind === "ended")!;
+    const merged: SweepSummary = {
+      triage: { bundles: [{ name: "a", dw_ids: ["DW-1"], cycle: 1 }, { name: "c", dw_ids: ["DW-7"], cycle: 2 }], already_resolved: [], skip: [],
+        blocked: [{ id: "DW-4", blocker: "cycle one" }, { id: "DW-10", blocker: "cycle two" }], decisions: [{ id: "DW-11", question: "cycle two?" }] },
+      bundles: [{ name: "a", dw_ids: ["DW-1"], cycle: 1, key: "dw-a", landed: true, cost_usd: 1, source: "metered" }, { name: "c", dw_ids: ["DW-7"], cycle: 2, key: "dw2-c", landed: true, cost_usd: 1, source: "metered" }],
+      engine_cost_usd: 2,
+    };
+    fx.queue.patchEventDetail(ended.seq, { sweep: sweepRecord(merged) });
+    fx.answers.view = { state: "OPEN", isDraft: true, body: "## Metered cost\n\nold\n\n## Host verify\n\nold" };
+    const r = await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done;
+    expect(r.rerun.pr_body).toBe("edited");
+    const body = fx.bodies[0]!;
+    expect(body).toContain("### Blocked\n\n- DW-4: cycle one\n- DW-10: cycle two\n\n### Human decisions\n\n- DW-11: cycle two?");
+    expect(body).toContain("$0.5000 (worker turns) + $2.0000 (engine) = $2.5000");
+  }, 90_000);
+
   test("Story 35.1: legHistory and prSection: one line, the latest leg's section below it; no legs leaves the section unchanged", async () => {
     const { legHistory, prSection } = await import("../src/hostverify");
     const ev = (seq: number, kind: string, detail: Record<string, unknown> | null) => ({ seq, run_id: "q", at: `2026-10-27T00:00:0${seq}Z`, kind, from_state: null, to_state: "partial", detail });
@@ -489,9 +540,9 @@ describe("Story 35.1: a slice re-run commits and pushes its placed art and proof
    * the sheet; the judge passes; origin's URL read as a GitHub one so the body embeds the sheet. Story 35.3: the core's
    * `playable_judge.py rubric` answers the five ids; `manifest: false` leaves the manifest off main (`skipped: no
    * manifest`); `assets` a verb's exit (a red one ends the assets step); `ignore` lines added to main's `.gitignore`. */
-  async function sliceFixture(o: { hostCode?: number; playable?: "pass" | "fail"; manifest?: boolean; assets?: Record<string, number>; ignore?: string } = {}) {
+  async function sliceFixture(o: { hostCode?: number; playable?: "pass" | "fail"; manifest?: boolean; assets?: Record<string, number>; ignore?: string; studioRunId?: string } = {}) {
     const files = { ...(o.manifest === false ? {} : { "assets/manifest.yaml": "schema: 1\n" }), ...(o.ignore ? { ".gitignore": RUNTIME_GITIGNORE + o.ignore } : {}) };
-    const fx = await fixture({ config: sliceConfig(o.hostCode ?? 0), files, definition: SLICE, engine: true });
+    const fx = await fixture({ config: sliceConfig(o.hostCode ?? 0), files, definition: SLICE, engine: true, ...(o.studioRunId ? { studioRunId: o.studioRunId } : {}) });
     const home = tempDir("tk-sup-hostleg-home-");
     fx.deps.env = { ...fx.deps.env, TK_STUDIO_HOME: home };
     const inner = fx.deps.run!;
@@ -546,6 +597,41 @@ describe("Story 35.1: a slice re-run commits and pushes its placed art and proof
     };
     return { ...fx, verbs, proof: `.tk-studio/proof/${fx.id}` };
   }
+
+  test("Story 36.2: a re-run's judge lands as its own `job-run` line, `<id>:verify-<n>`; a failed emit is recorded and the leg still finishes", async () => {
+    const fx = await sliceFixture({ studioRunId: "studio-1" });
+    const emits: string[][] = [];
+    const inner = fx.deps.uv!;
+    let answer: RunResult = { exit: 0, stdout: JSON.stringify({ ok: true }), stderr: "" };
+    fx.deps.uv = async (root, script, args, t) => {
+      if (script.endsWith("ledger.py")) { emits.push(args); return answer; }
+      return inner(root, script, args, t);
+    };
+    const first = await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done;
+    expect(first.rerun.job_run).toBe("studio-1:verify-1");
+    expect(emits).toHaveLength(1);
+    expect(emits[0]!.slice(0, 3)).toEqual(["emit", "--event", "job-run"]);
+    expect(emits[0]!.slice(-2)).toEqual(["--project", "proj"]);
+    expect(JSON.parse(emits[0]![emits[0]!.indexOf("--payload") + 1]!)).toEqual({ job_id: "j", run_id: "studio-1:verify-1", state: "complete", total_cost_usd: 0.01 });
+    answer = { exit: 2, stdout: JSON.stringify({ ok: false, error: "ledger refused" }), stderr: "" };
+    const second = await (await rerunHostLeg(fx.queue, fx.id, { by: "cli" }, fx.deps)).done;
+    expect(second.rerun.job_run).toBe("error: ledger refused");
+    expect(JSON.parse(emits[1]![emits[1]!.indexOf("--payload") + 1]!).run_id).toBe("studio-1:verify-2");
+    expect(fx.hostVerifies().filter((e) => e.detail?.rerun)).toHaveLength(2);
+  }, 90_000);
+
+  test("Story 36.2: a re-run's judge with no studio run: no line, `rerun.job_run` is `skipped: <why>`", async () => {
+    const fx = await sliceFixture();
+    const emits: string[][] = [];
+    const inner = fx.deps.uv!;
+    fx.deps.uv = async (root, script, args, t) => {
+      if (script.endsWith("ledger.py")) { emits.push(args); return { exit: 0, stdout: JSON.stringify({ ok: true }), stderr: "" }; }
+      return inner(root, script, args, t);
+    };
+    const r = await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done;
+    expect(r.rerun.job_run).toBe("skipped: no studio run recorded");
+    expect(emits).toEqual([]);
+  }, 90_000);
 
   test("Story 35.1: green assets on a stale local branch: `-B` resets it to origin's tip, the art and proof committed (`host leg: placed assets and proof`) and pushed fast-forward, the body embeds the committed sheet, the draft marked ready", async () => {
     const fx = await sliceFixture();

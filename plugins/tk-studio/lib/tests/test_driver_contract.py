@@ -2911,7 +2911,7 @@ class DriverContractTestCase(unittest.TestCase):
                               .read_text(encoding="utf-8"))
         names = list(taxonomy["events"])
         self.assertEqual(names.index("sweep-triage"), names.index("stage") + 1)
-        self.assertIn("lib/launch.py sweep alone", taxonomy["events"]["sweep-triage"]["emitter"])
+        self.assertIn("lib/launch.py sweep", taxonomy["events"]["sweep-triage"]["emitter"])  # the sole emitter until Story 36.2
         defn = json.loads((PLUGIN_ROOT / "jobs" / "run-sweep.json").read_text(encoding="utf-8"))
         self.assertEqual(defn["requires"], {"tier": "sbx"})
         manifest = json.loads((PLUGIN_ROOT / "contracts" / "conformance" / "manifest.json")
@@ -2922,6 +2922,44 @@ class DriverContractTestCase(unittest.TestCase):
                        if line.startswith("| Story / rulings"))
         self.assertIn("Story 35.1, Story 35.8, Story 35.2, Story 35.3, Story 35.4, Story 35.5, Story 35.6, "
                       "Story 35.7 (Epic 35)", stories)
+
+    def test_0_1_31_story_36_2_the_sweeps_records_are_whole(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.31**", header)
+        self.assertEqual(header.count("0.1.31 (Story 36.2, additive)"), 1)
+        self.assertLess(header.index("0.1.31 (Story 36.1, additive)"),
+                        header.index("0.1.31 (Story 36.2, additive)"))
+        clause = " ".join(header[header.index("0.1.31 (Story 36.2, additive)"):].split())
+        for phrase in ("`meter.py price-run`", "`engine_cost_usd`", "the host emits the `sweep-triage` ledger event",
+                       "`<run_id>:verify-<n>`", "uncounted wait", "the engine's own end is kept",
+                       "`## Sweep` survives a re-run", "— additive) |"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        self.assertEqual(flat.count("**0.1.31 (Story 36.2, additive).**"), 1)
+        self.assertLess(flat.index("**0.1.31 (Story 36.1, additive).**"),
+                        flat.index("**0.1.31 (Story 36.2, additive).**"))
+        note = flat[flat.index("**0.1.31 (Story 36.2, additive).**"):]
+        note = note[:note.index("## 8. Conformance")]
+        for phrase in ("`meter.py price-run", "one pricing table", "`report.py` gains no pricing code",
+                       "`source: \"metered\"`", "`bound: \"upper\"`", "`ttl: \"unknown\"`", "never priced (Story 24.1)",
+                       "`$<worker> (worker turns) + $<engine> (engine) = $<total>`", "`engine_cost_usd`",
+                       "`engine not priced: <why>`", "`ledger: \"emitted\" | \"error: <clipped>\"`",
+                       "run_id: \"<run_id>:verify-<n>\"", "`rerun.job_run`", "carries `worker_cost_usd` forward",
+                       "waiting: true}", "`PLAN_RETRY_LIMIT`", "names the bundle once",
+                       "`sweepEndState` applies its `blocked` rules first", "`engine ended '<status>' after <n>/<m> bundles`",
+                       "not penalised", "never from the removed worktree", "Every other field, kind and route is unchanged.",
+                       "run_id: \"<run_id>:engine\"", "`engine_job_run`", "`error: <why>` or `skipped: <why>`",
+                       "is not priced", "`fingerprint`", "stopped: true | error}"):
+            self.assertIn(phrase, note)
+        self.assertIn("the 0.1.31 Story 36.2 note below", flat)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertRegex(stories, r"Story 36\.1, Story 36\.2(, Story 36\.\d+)* \(Epic 36\)")
+        taxonomy = json.loads((PLUGIN_ROOT / "contracts" / "events" / "taxonomy.v1.json").read_text(encoding="utf-8"))
+        self.assertIn("Story 36.2", taxonomy["events"]["sweep-triage"]["emitter"])
+        self.assertIn("<run_id>:verify-<n>", taxonomy["events"]["job-run"]["emitter"])
+        self.assertIn("cli.ts", taxonomy["events"]["job-run"]["emitter"])
 
     def test_0_1_31_story_36_1_one_verdict(self):
         header = next(line for line in self.text.splitlines()

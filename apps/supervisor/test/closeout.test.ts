@@ -12,7 +12,7 @@ import { closableVerdict, closeOutPaused, ESCALATION_BLOCKED_REASON, findSpec, f
 import { renderPage, type PageData } from "../src/page";
 import { Queue, type Owner, type Probes } from "../src/queue";
 import { runProcess, toVmPath, type RunResult } from "../src/server";
-import { COPIED_RUNTIME, launchedCloseOutInput, storyLandedBeforeStop, sweepEngines } from "../src/worktree";
+import { COPIED_RUNTIME, launchedCloseOutInput, prBody, storyLandedBeforeStop, sweepEngines } from "../src/worktree";
 import { fakeGh, fakeSbx, fakeStudioRoot, gitRepo, RUNTIME_GITIGNORE, testGit } from "./fakes";
 import { tempDir } from "./tmp";
 
@@ -953,6 +953,30 @@ describe("AC3: a story with no landed work is left for the resume", () => {
       if (state === "partial") expect(finishes[0]).toContain(`resumed engine ended '${status}'`);
       else expect(finishes[0]).not.toContain("--reason");
     }
+  });
+
+  test("Story 36.2: a resumed run carries its worker's metered cost: the job-run line and the PR body read the number, never `not metered`", async () => {
+    const fx = await pausedRun({ status: "in-progress" });
+    const p = passDeps(fx);
+    (fx.queue as any).db.query("UPDATE events SET detail = json_set(detail, '$.worker_cost_usd', 1.25) WHERE run_id = ? AND kind = 'launched'").run(fx.run.run_id);
+    sbx.answer({ resume_pid: "7001 200000" });
+    try { await resumePaused(fx.queue, fx.run.run_id, {}, { ...p.deps, pidPolls: 40, pollMs: 25 }); }
+    finally { sbx.answer({}); }
+    for (let i = 0; i < 100 && !handedBack(fx); i++) await Bun.sleep(20);
+    const launched = ev(fx.queue, fx.run.run_id, "launched").at(-1)!.detail as Record<string, any>;
+    expect(launched).toMatchObject({ resumed: true, worker_cost_usd: 1.25 });
+    const input = launchedCloseOutInput(fx.queue.events(fx.run.run_id), fx.get());
+    expect(input.costUsd).toBe(1.25);
+    expect(prBody({ ...input, commits: [], runId: fx.run.run_id })).toContain("## Metered cost\n\n$1.2500 (total_cost_usd)");
+    const finishes: string[][] = [];
+    statusAnswer({ run_id: E1, status: "finished" });
+    const uv = async (root: string, script: string, args: string[], timeoutS?: number): Promise<RunResult> =>
+      script.endsWith("launch.py") && args[0] === "status"
+        ? { exit: 0, stdout: JSON.stringify({ ok: true, run: { run_id: E1, status: "finished" } }), stderr: "" }
+        : p.deps.uv!(root, script, args, timeoutS);
+    const verbs = async (_root: string, args: string[]) => { finishes.push(args); return { ok: true, state: args[args.indexOf("--state") + 1] }; };
+    expect(await sweepEngines(fx.queue, { ...p.deps, uv, verbs })).toEqual([fx.run.run_id]);
+    expect(finishes[0]![finishes[0]!.indexOf("--total-cost-usd") + 1]).toBe("1.25");
   });
 
   test("a relaunched run's end is its engine's own terminal status, not the relaunch's `launched.end`: `crashed` ends `partial`, `finished` ends `complete`", async () => {

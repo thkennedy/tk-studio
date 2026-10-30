@@ -94,7 +94,11 @@
     the spec folder; the engine resolves it by the glob
     `36-3-a-paused-or-resumed-run-is-never-parked-*.md`, and a file named
     `36-3-a-paused-or-resumed-run-is-never-parked.md` is read as pending (loop
-    deficiency 1, story 21-6).
+    deficiency 1, story 21-6). Replan (36-2 gate, 2026-10-30): the paused-sweep
+    deadline starts only from an `engine-stop` note carrying `error`, as 36.2's note
+    may be `{stopped: true}`; set the deadline's `blocked` end explicitly, not through
+    `sweepEndState`, whose engine cap reads it `partial`; plans/36-3.md Settled shape 5
+    and its refreshed anchors carry the detail.
 
 - id: "36-4-the-host-leg-goes-red-for-code-only"
   title: "The Host Leg Goes Red for Code Only"
@@ -221,4 +225,7 @@
     spec folder; the engine resolves it by the glob
     `36-7-the-cycles-cut-and-the-docs-caught-up-*.md`, and a file named
     `36-7-the-cycles-cut-and-the-docs-caught-up.md` is read as pending (loop deficiency
-    1, story 21-6).
+    1, story 21-6). Replan (36-2 gate, 2026-10-30): `sweep.ts` imports `DEFERRED_REL`
+    from `board.ts`, merging the sweep and board SCCs; cut that edge through a leaf and
+    re-derive the SCCs from the tree before fixing the allowlist; see plans/36-7.md
+    Risks.

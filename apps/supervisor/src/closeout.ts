@@ -887,6 +887,8 @@ function handBack(queue: Queue, runId: string, engineRunId: string, result: unkn
         ...(launched.status_block !== undefined ? { status_block: launched.status_block } : {}),
         end: (launched.end && typeof launched.end === "object" ? launched.end : {}) as Record<string, unknown>, resumed: true,
         resolve: resolveOutcome(result),
+        // Story 36.2 (DW-119): the launch worker's metered cost stays the run's; the resume's own session is the engine's.
+        ...(typeof launched.worker_cost_usd === "number" ? { worker_cost_usd: launched.worker_cost_usd } : {}),
       };
       queue.markLaunched(runId, engineRunId, detail);
       return;

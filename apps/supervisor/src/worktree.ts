@@ -91,7 +91,7 @@ import { CONTACT_SHEET, FRAMES_DIR, hostVerify, inconclusiveReason, isInconclusi
 import { accountedCostOf, isTerminal, RunTerminal, servedRoot, type EngineWhere, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
 import { releasePin, sameStart, vmLaunchStatus, type SandboxDeps } from "./sandbox";
 import { lastJsonObject, runJobVerb, runProcess, runUv, toVmPath, type RunResult, type Tier } from "./server";
-import { isSweep, recordTriage, stopSweepEngine, SWEEP_ENGINE_STOP, sweepEndState, sweepNotice, sweepRecord, sweepSection, sweepSummary, type SweepSummary } from "./sweep";
+import { emitTriage, engineCostOf, engineEndStatus, engineJobRun, isSweep, recordTriage, stopSweepEngine, SWEEP_ENGINE_STOP, sweepCostText, sweepEndState, sweepNotice, sweepRecord, sweepSection, sweepSummary, sweepTotalCost, withEngineCost, type SweepSummary } from "./sweep";
 
 type Env = Record<string, string | undefined>;
 /** An argv-only spawner (never a shell). `env`: variables added to the child's environment. */
@@ -407,7 +407,8 @@ export function meteredCostSection(body: string | undefined): string | undefined
  * commits (`git log --oneline <base_ref>..HEAD`), the metered cost (or "not metered"), and the host
  * verify leg's `## Host verify` section when it was run or skipped (Story 27.4). Story 35.1: `legs` (the run's
  * host legs, the latest last) gives the section its `Legs:` history line — the close-out's and the re-run's body
- * through this one renderer; `costText` (a re-run's carried-back `## Metered cost` text) replaces the rendered cost. */
+ * through this one renderer; `costText` (a re-run's carried-back `## Metered cost` text) replaces the rendered cost.
+ * Story 36.2: a priced sweep's cost reads as the worker's turns plus the engine, one line per bundle (`sweepCostText`). */
 export function prBody(input: { statusBlock?: unknown; engineRunId?: string | null; commits: string[]; costUsd?: number; costText?: string; runId: string; verify?: HostVerifyResult; proof?: PrProof; legs?: readonly LegHistoryEntry[]; sweep?: SweepSummary }): string {
   return [
     `Opened by the supervisor for queue run \`${input.runId}\`.`,
@@ -426,7 +427,7 @@ export function prBody(input: { statusBlock?: unknown; engineRunId?: string | nu
     "",
     "## Metered cost",
     "",
-    input.costText ?? (input.costUsd === undefined ? "not metered" : `$${input.costUsd.toFixed(4)} (total_cost_usd)`),
+    input.costText ?? (input.sweep ? sweepCostText(input.sweep, input.costUsd) : undefined) ?? (input.costUsd === undefined ? "not metered" : `$${input.costUsd.toFixed(4)} (total_cost_usd)`),
     // Story 35.7: a sweep run's bundles, blocked entries and human decisions, before `## Host verify`.
     ...(input.sweep ? ["", ...sweepSection(input.sweep)] : []),
     ...(input.verify ? ["", ...prSection(input.verify, input.proof, input.legs)] : []),
@@ -707,7 +708,7 @@ export async function closeOut(
       existingPr = openPrUrl(r.stdout);
     }
     // The metered cost read where the engine wrote it: the served root (`<worktree>/<prefix>`, Story 28.5).
-    const body = () => prBody({ statusBlock: input.statusBlock, engineRunId: input.engineRunId, commits: out.commits, costUsd: input.costUsd ?? (gone ? undefined : meteredCost(servedRoot(run)!, input.engineRunId)), runId: run.run_id, ...(input.verify ? { verify: input.verify } : {}), ...(proof ? { proof } : {}), ...(input.legs?.length ? { legs: input.legs } : {}), ...(input.sweep ? { sweep: input.sweep } : {}) });
+    const body = () => prBody({ statusBlock: input.statusBlock, engineRunId: input.engineRunId, commits: out.commits, costUsd: input.costUsd ?? (gone || input.sweep ? undefined : meteredCost(servedRoot(run)!, input.engineRunId)), runId: run.run_id, ...(input.verify ? { verify: input.verify } : {}), ...(proof ? { proof } : {}), ...(input.legs?.length ? { legs: input.legs } : {}), ...(input.sweep ? { sweep: input.sweep } : {}) });
     // `gh pr edit <pr> --body-file` with the regenerated body (`editPrBody`); a failure pushed to `errors`.
     const editBody = async (pr: string, errors: string[]) => {
       const e = await editPrBody(deps, at, pr, body());
@@ -773,17 +774,19 @@ export function openPrUrl(stdout: string): string | undefined {
  * the engine run id and the metered cost — the engine's `run.json`, read before the worktree is
  * removed, else the launch worker's. A run with no `launched` event: its engine id only.
  * Story 27.5 (DW-15): plus the metered cost of every engine run an earlier close-out archived (its `accounted`
- * events, `source: "engine"`), so a relaunched run's cost is the sum across its engines. */
+ * events, `source: "engine"`), so a relaunched run's cost is the sum across its engines.
+ * Story 36.2: `workerOnly` (a sweep): the launch worker's figure alone, so an engine figure is never labelled the worker's
+ * turns and summed with the priced engine, and the close-out and a re-run read the same number. */
 export function launchedCloseOutInput(
-  events: readonly QueueEvent[], run: Pick<QueueRun, "worktree" | "engine_run_id" | "prefix">,
+  events: readonly QueueEvent[], run: Pick<QueueRun, "worktree" | "engine_run_id" | "prefix">, opts: { workerOnly?: boolean } = {},
 ): { statusBlock?: unknown; engineRunId: string | null; costUsd?: number } {
   const launched = (events.findLast((e) => e.kind === "launched")?.detail ?? {}) as Record<string, any>;
   const engineRunId: string | null = run.engine_run_id ?? (typeof launched.engine_run_id === "string" ? launched.engine_run_id : null);
-  const metered = run.worktree && existsSync(run.worktree) ? meteredCost(servedRoot(run)!, engineRunId) : undefined;
+  const metered = !opts.workerOnly && run.worktree && existsSync(run.worktree) ? meteredCost(servedRoot(run)!, engineRunId) : undefined;
   const latest = metered ?? (typeof launched.worker_cost_usd === "number" ? launched.worker_cost_usd : undefined);
   // The current engine's own recorded cost is left out only when its metered cost was read here: an engine archived
   // (its cost recorded) whose relaunch failed still names the run's engine, with no run.json left to read.
-  const archived = accountedCostOf(events, "engine", metered !== undefined ? engineRunId : null);
+  const archived = opts.workerOnly ? undefined : accountedCostOf(events, "engine", metered !== undefined ? engineRunId : null);
   const cost = archived === undefined ? latest : archived + (latest ?? 0);
   return { ...(launched.status_block !== undefined ? { statusBlock: launched.status_block } : {}), engineRunId, ...(cost !== undefined ? { costUsd: cost } : {}) };
 }
@@ -969,11 +972,25 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         // Story 35.1: the body's `Legs:` history, from the recorded legs.
         const legs = verify ? legHistory(events) : [];
         // Story 35.7: a sweep's triage recorded (once) and its summary read before the worktree goes.
-        const lateSweep = isSweep(queue.definition(r)) ? (recordTriage(queue, r, deps.env), sweepSummary(queue, r)) : undefined;
-        const c = await closeOut(r, { paused: false, ...launchedCloseOutInput(events, r), ...(existingPr ? { existingPr } : {}), ...(verify ? { verify } : {}), ...(isSlice(queue.definition(r)) ? { slice: true } : {}), ...(legs.length ? { legs } : {}), ...(lateSweep ? { sweep: lateSweep } : {}) }, deps);
+        // Story 36.2: and the engine priced, its run dir still there.
+        let lateSweep: SweepSummary | undefined, lateStatus: string | undefined;
+        if (isSweep(queue.definition(r))) {
+          recordTriage(queue, r, deps.env);
+          await emitTriage(queue, r, deps);
+          lateSweep = withEngineCost(sweepSummary(queue, r), await engineCostOf(r, deps));
+          // The engine's own end, read while its run dir is there: only a terminal status caps the end. Its worktree
+          // gone, or an engine that never wrote one (a cancel's, still `running` on disk): not known, so no cap.
+          const late = r.engine_run_id && existsSync(r.worktree!) ? await engineStatus(servedRoot(r)!, r.engine_run_id, deps, { tier: r.tier, sandbox: r.sandbox }) : undefined;
+          if (late?.phase === "ended") lateStatus = engineEndStatus(events, r.engine_run_id, String(late.detail.status ?? "unknown"));
+        }
+        const c = await closeOut(r, { paused: false, ...launchedCloseOutInput(events, r, { workerOnly: !!lateSweep }), ...(existingPr ? { existingPr } : {}), ...(verify ? { verify } : {}), ...(isSlice(queue.definition(r)) ? { slice: true } : {}), ...(legs.length ? { legs } : {}), ...(lateSweep ? { sweep: lateSweep } : {}) }, deps);
         // The sweep's end rule, applied here too: the terminal row is never updated, so its three-way end is
         // recorded on the `closed_out` (`sweep_end`), beside the `sweep` record the inbox line reads.
-        queue.note(r.run_id, "closed_out", { ...closeOutDetail(c), ...(lateSweep ? { sweep: sweepRecord(lateSweep), sweep_end: sweepEndState(lateSweep, verify) } : {}) });
+        // Story 36.2: `finish` already ran on the worker's cost, so the priced engine goes on as its own `job-run` line.
+        const engineUsd = lateSweep?.engine_cost_usd;
+        const engineLine = engineUsd !== undefined ? await engineJobRun(r, engineUsd, deps) : undefined;
+        queue.note(r.run_id, "closed_out", { ...closeOutDetail(c), ...(lateSweep ? { sweep: sweepRecord(lateSweep), sweep_end: sweepEndState(lateSweep, verify, lateStatus),
+          ...(engineUsd !== undefined ? { engine_cost_usd: engineUsd, engine_job_run: engineLine } : {}) } : {}) });
         // The worktree is gone: an engine lock this run still holds would be probed there forever.
         if (c.worktree === "removed") queue.releaseEngineLock(r.run_id, "its worktree was closed out and removed (its engine confirmed dead)");
         await release(queue, r.run_id, deps);
@@ -993,7 +1010,10 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         continue;
       }
       // Story 35.7: a sweep run's triage, recorded the first time the engine wrote it (whatever its phase).
-      if (existsSync(r.worktree!) && isSweep(queue.definition(r))) recordTriage(queue, r, deps.env);
+      if (existsSync(r.worktree!) && isSweep(queue.definition(r))) {
+        recordTriage(queue, r, deps.env);
+        await emitTriage(queue, r, deps); // Story 36.2: the host ledger's event, once
+      }
       // Its worktree gone with no pending record (a close-out whose transition and record both failed):
       // no engine can run there, so it is closed out (from the checkout) and ended, never probed forever.
       let st: EnginePhase = existsSync(r.worktree!) ? await engineStatus(servedRoot(r)!, r.engine_run_id!, deps, { tier: r.tier, sandbox: r.sandbox })
@@ -1013,12 +1033,12 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
       let engineStop: string | undefined;
       if (sweep && st.phase === "paused") {
         engineStop = await stopSweepEngine(r, deps);
-        if (engineStop !== "stopped") {
-          if (!queue.events(r.run_id).some((e) => e.kind === SWEEP_ENGINE_STOP && e.detail?.engine_run_id === r.engine_run_id)) {
-            queue.note(r.run_id, SWEEP_ENGINE_STOP, { engine_run_id: r.engine_run_id, error: engineStop, engine: st.detail });
-          }
-          continue;
+        // Story 36.2: one note per engine run, a stop that answered `stopped` too: a later tick's `stopped` status is known
+        // for the supervisor's own stop (`engineEndStatus`) if this tick's close-out never finishes.
+        if (!queue.events(r.run_id).some((e) => e.kind === SWEEP_ENGINE_STOP && e.detail?.engine_run_id === r.engine_run_id)) {
+          queue.note(r.run_id, SWEEP_ENGINE_STOP, { engine_run_id: r.engine_run_id, ...(engineStop === "stopped" ? { stopped: true } : { error: engineStop }), engine: st.detail });
         }
+        if (engineStop !== "stopped") continue;
       }
       const run = queue.takeForCloseOut(r.run_id);
       if (!run) continue;
@@ -1028,7 +1048,7 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
       const existingPr = priorPr(events);
       const paused = st.phase === "paused" && !sweep;
       // The status block and the metered cost, read before the close-out removes the worktree.
-      const input = launchedCloseOutInput(events, run);
+      const input = launchedCloseOutInput(events, run, { workerOnly: sweep });
       // Story 27.4: an engine that completed on its own (not paused, not killed) gets the host verify leg,
       // run before the close-out pushes and opens the PR; one `host-verify` event, skipped or ran.
       // A `host-verify` already recorded for this engine completion is reused whatever a later kill says: the
@@ -1060,7 +1080,8 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
       // Story 35.1: the body's `Legs:` history (the close-out's first body: `Legs: 1 — close-out …`), from the recorded legs.
       const legs = verify ? legHistory(queue.events(run.run_id)) : [];
       // Story 35.7: the sweep's summary (the triage, each bundle landed or not), read before the worktree goes.
-      const summary = sweep ? sweepSummary(queue, run, st.phase === "paused" ? st.detail : undefined) : undefined;
+      // Story 36.2: and the engine priced per bundle, its run dir still there.
+      const summary = sweep ? withEngineCost(sweepSummary(queue, run, st.phase === "paused" ? st.detail : undefined), await engineCostOf(run, deps)) : undefined;
       const c = await closeOut(run, { paused, ...input, engineRunId: run.engine_run_id, ...(existingPr ? { existingPr } : {}), ...(verify ? { verify } : {}), ...(slice ? { slice } : {}), ...(legs.length ? { legs } : {}), ...(summary ? { sweep: summary } : {}) }, deps);
       let next: PendingTransition;
       if (paused) next = { phase: "paused", detail: { engine: st.detail, ...closeOutDetail(c) } };
@@ -1075,14 +1096,16 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         else if (isInconclusive(verify)) { state = "partial"; reason = inconclusiveReason(verify); }
         // Story 35.7: a sweep ends by its own three-way rule (the bundles landed, the host leg) — except one the
         // supervisor killed (a tripped guard), which keeps the kill's state and reason, the sweep line appended.
-        if (summary && notKilled) ({ state, reason } = sweepEndState(summary, verify));
+        // Story 36.2: the engine's own end kept, unless it is the supervisor's paused-sweep stop (this tick's or an earlier one's).
+        if (summary && notKilled) ({ state, reason } = sweepEndState(summary, verify, engineEndStatus(events, run.engine_run_id, String(st.detail.status ?? "unknown"), engineStop === "stopped")));
         else if (summary) reason = `${reason ? `${reason}; ` : ""}sweep: ${sweepNotice(summary)}`;
         // Story 34.3: the playable-verify judge's cost, its own ledger line (and counted in the total).
         const judgeCost = verify && !verify.skipped ? verify.playable?.judge?.cost_usd : undefined;
-        const finish = await finishStudio(run, state, reason, launched.status_block, c.pr, input.costUsd, deps,
+        const finish = await finishStudio(run, state, reason, launched.status_block, c.pr, sweepTotalCost(summary, input.costUsd), deps,
           typeof judgeCost === "number" && Number.isFinite(judgeCost) && judgeCost >= 0 ? judgeCost : undefined);
         next = { phase: "ended", state, reason, detail: { ...(end.detail ?? {}), engine: st.detail, ...closeOutDetail(c), finish,
-          ...(summary ? { sweep: sweepRecord(summary) } : {}), ...(engineStop ? { engine_stop: engineStop } : {}) }, ...(end.stop ? { stop: end.stop } : {}) };
+          ...(summary ? { sweep: sweepRecord(summary) } : {}), ...(summary?.engine_cost_usd !== undefined ? { engine_cost_usd: summary.engine_cost_usd } : {}),
+          ...(engineStop ? { engine_stop: engineStop } : {}) }, ...(end.stop ? { stop: end.stop } : {}) };
       }
       try { applyTransition(queue, run.run_id, next); }
       catch (e) {
@@ -1090,10 +1113,16 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         if (e instanceof RunTerminal) {
           // Ended meanwhile (a cancel that lost the take, `closeout: skipped`): the close-out is this
           // terminal run's `closed_out`, so the late close-out never runs it again.
+          // Story 36.2: a refused `finish` put the priced engine on no line, so it goes on as its own; a `finish` that
+          // succeeded holds the sum on the run's own line (a second would count it twice).
+          const racedUsd = next.phase === "ended" ? summary?.engine_cost_usd : undefined;
+          const finished = next.phase === "ended" && (next.detail.finish as { ok?: boolean } | undefined)?.ok === true;
+          const racedLine = racedUsd !== undefined && !finished ? await engineJobRun(run, racedUsd, deps) : undefined;
           queue.note(run.run_id, "closed_out", {
             ...closeOutDetail(c), engine: st.detail, ...(next.phase === "ended" ? { finish: next.detail.finish } : {}), raced: clip(message(e)),
             // a sweep's computed three-way end, as the late close-out records it (the terminal row never updated)
             ...(summary ? { sweep: sweepRecord(summary), ...(next.phase === "ended" ? { sweep_end: { state: next.state, reason: next.reason } } : {}) } : {}),
+            ...(racedUsd !== undefined ? { engine_cost_usd: racedUsd, ...(racedLine !== undefined ? { engine_job_run: racedLine } : {}) } : {}),
           });
           if (c.worktree === "removed") queue.releaseEngineLock(run.run_id, "its worktree was closed out and removed (its engine confirmed dead)");
           if (next.phase === "ended") await release(queue, run.run_id, deps);

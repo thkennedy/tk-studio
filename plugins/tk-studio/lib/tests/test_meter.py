@@ -1058,5 +1058,89 @@ class MeterTest(unittest.TestCase):
         }))
 
 
+class PriceRunTest(MeterTest):
+    """Story 36.2: `price-run`, one line per bundle (rates: model-a in 1, out 2, 5m 3, read 5; model-b x10)."""
+    USAGE = {"input_tokens": M, "output_tokens": M, "cache_read_tokens": M, "cache_creation_tokens": M}
+
+    def state(self, tasks):
+        (self.run_dir / "state.json").write_text(json.dumps({"tasks": tasks}), encoding="utf-8")
+
+    def marker(self, key, usd):
+        path = self.run_dir / "transcripts" / key / "metered.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"story_key": key, "usd_total": usd}), encoding="utf-8")
+
+    def cli(self, *extra):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = meter.main(["price-run", "--run-dir", str(self.run_dir), "--prices", str(self.prices),
+                             "--json", *extra])
+        return rc, json.loads(buf.getvalue())
+
+    def test_the_metered_marker_wins_over_the_sessions(self):
+        self.marker("dw-a", 1.5)
+        self.state({"dw-a": {"sessions": [{"role": "dev", "model": "model-a", "usage": self.USAGE}]}})
+        rc, out = self.cli()
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, {"ok": True, "bundles": [{"key": "dw-a", "usd": 1.5, "source": "metered"}],
+                               "usd_total": 1.5, "prices_date": "2000-01-01"})
+
+    def test_the_sessions_fallback_is_an_upper_bound_at_the_5m_rate_and_the_records_model_wins(self):
+        self.state({"dw-a": {"sessions": [{"role": "dev", "model": "model-a", "usage": self.USAGE},
+                                          {"role": "review", "model": "model-a-alias", "usage": self.USAGE}]},
+                    "sweep-triage": {"sessions": [{"role": "triage", "model": "model-a", "usage": self.USAGE}]}})
+        rc, out = self.cli()
+        self.assertEqual(rc, 0)
+        self.assertEqual(out["bundles"], [{"key": "dw-a", "usd": 22.0, "source": "sessions",
+                                           "bound": "upper", "ttl": "unknown"}])
+        self.assertEqual(out["usd_total"], 22.0)
+
+    def test_an_empty_model_takes_the_routings_model_for_its_role(self):
+        routing = self.tmp / "routing.json"
+        routing.write_text(json.dumps({"session": {"model": "model-b"}, "review": {"model": "model-a"}}), encoding="utf-8")
+        self.state({"dw-a": {"sessions": [{"role": "dev", "model": "", "usage": self.USAGE}]},
+                    "dw2-b": {"sessions": [{"role": "review", "model": "", "usage": self.USAGE}]}})
+        rc, out = self.cli("--routing", str(routing))
+        self.assertEqual(rc, 0)
+        self.assertEqual([(b["key"], b["usd"]) for b in out["bundles"]], [("dw-a", 110.0), ("dw2-b", 11.0)])
+        # no --routing: the run's own `.bmad-loop/routing.current.json` (session -> model-a)
+        rc, out = self.cli()
+        self.assertEqual(rc, 2)  # review has no routing there
+        self.assertIn("role 'review'", out["error"])
+
+    def test_a_model_missing_from_the_table_is_a_named_refusal(self):
+        self.state({"dw-a": {"sessions": [{"role": "dev", "model": "model-z", "usage": self.USAGE}]}})
+        rc, out = self.cli()
+        self.assertEqual(rc, 2)
+        self.assertFalse(out["ok"])
+        self.assertIn("'model-z'", out["error"])
+
+    def test_a_bundle_with_no_record_reads_null_never_a_guess(self):
+        (self.run_dir / "triage.json").write_text(json.dumps({"bundles": [{"name": "a"}, {"name": "b"}]}), encoding="utf-8")
+        (self.run_dir / "triage-2.json").write_text(json.dumps({"bundles": [{"name": "c"}]}), encoding="utf-8")
+        self.marker("dw-a", 2)
+        self.state({"dw-b": {"sessions": [{"role": "dev", "model": "", "usage": {"input_tokens": 0}}, {"role": "dev"}]}})
+        rc, out = self.cli()
+        self.assertEqual(rc, 0)
+        self.assertEqual(out["bundles"], [{"key": "dw-a", "usd": 2, "source": "metered"}, {"key": "dw-b", "usd": None},
+                                          {"key": "dw2-c", "usd": None}])
+        self.assertEqual(out["usd_total"], 2)
+
+    def test_nothing_priced_is_null_never_zero_and_a_missing_dir_is_a_refusal(self):
+        (self.run_dir / "triage.json").write_text(json.dumps({"bundles": [{"name": "a"}]}), encoding="utf-8")
+        rc, out = self.cli()
+        self.assertEqual(rc, 0)
+        self.assertIsNone(out["usd_total"])
+        rc, out = self.cli("--run-dir", str(self.tmp / "gone"))
+        self.assertEqual(rc, 2)
+
+    def test_the_journals_scalar_tokens_are_never_priced(self):
+        self.write_journal([{"kind": "session-end", "story_key": "dw-a", "tokens": 9 * M, "tokens_weighted": 9 * M}])
+        self.state({"dw-a": {"sessions": []}})
+        rc, out = self.cli()
+        self.assertEqual(rc, 0)
+        self.assertEqual(out["bundles"], [{"key": "dw-a", "usd": None}])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -43,7 +43,7 @@ from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 SUITES = ["test/sweep.test.ts"]
-FILTER = "Story 35.7|Story 36.1"
+FILTER = "Story 35.7|Story 36.1|Story 36.2"
 TYPE_ID = "run-sweep"
 BOUND_S = 60
 INSTALL_BOUND_S = 40
@@ -168,7 +168,7 @@ def lib_steps() -> list[dict]:
         text = path.read_text(encoding="utf-8")
         again = plansync.ledger_resolve(led_root, "thkennedy/tk-studio#300", ["DW-1"])
         ok = (first["ok"] and first["resolved"] == ["DW-1"] and first["pending"] == ["DW-2"]
-              and "status: resolved 2026-10-29 by thkennedy/tk-studio#300 (sweep bundle dw-a; " in text
+              and "status: resolved 2026-10-29 by thkennedy/tk-studio#300 (sweep bundle dw-a)" in text
               and again["unchanged"] == ["DW-1"] and again["resolved"] == []
               and path.read_text(encoding="utf-8") == text)
         steps.append({"step": "ledger-resolve", "ok": bool(ok),

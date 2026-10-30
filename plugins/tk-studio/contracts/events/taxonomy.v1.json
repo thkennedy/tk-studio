@@ -58,7 +58,7 @@
       }
     },
     "job-run": {
-      "emitter": "job wrapper alone (tk-studio-job — lib/jobrun.py), one event per terminal run transition; the target skill emits its own surface events — never both for one failure (AD-12)",
+      "emitter": "job wrapper alone (tk-studio-job — lib/jobrun.py), one event per terminal run transition; the target skill emits its own surface events — never both for one failure (AD-12). Story 36.2, additive: the supervisor's host-leg re-run (apps/supervisor hostleg.ts, through ledger.py emit) emits the playable judge's cost as its own line under a distinct run_id `<run_id>:verify-<n>`, the run's own line untouched; the supervisor emits a sweep's priced engine as its own line under `<run_id>:engine` (through ledger.py emit) when the run's own line does not hold it: the late close-out of a terminal sweep and the close-out that lost the race to a cancel, its `finish` refused (apps/supervisor worktree.ts), and a cancel's immediate close-out (apps/supervisor cli.ts)",
       "payload": {
         "job_id": { "type": "string", "required": true },
         "run_id": { "type": "string", "required": true },
@@ -128,7 +128,7 @@
       }
     },
     "sweep-triage": {
-      "emitter": "lib/launch.py sweep alone (Story 35.7, AD-12): once per triage read, when the engine's .bmad-loop/runs/<run_id>/triage.json is read by the launch verb, written through ledger.emit; the supervisor's queue note of the same name is a different store, and bmad-loop's own journal sweep-triage key is never recorded here",
+      "emitter": "lib/launch.py sweep (Story 35.7, AD-12): once per triage read, when the engine's .bmad-loop/runs/<run_id>/triage.json is read by the launch verb, written through ledger.emit into its own process's ledger; Story 36.2, additive: the supervisor on the host (apps/supervisor sweep.ts, through ledger.py emit), once per engine run after it copies triage.json, the payload a projection of its queue note of the same name (a different store) — on the sandbox tier the lib's lands in the sandbox's ledger and the host's in the host's, so one store never holds both; bmad-loop's own journal sweep-triage key is never recorded here",
       "payload": {
         "run_id": { "type": "string", "required": true, "note": "the engine run id (the sweep's pre-minted --run-id)" },
         "bundles": { "type": "number", "required": true, "note": "how many bundles the triage partitioned" },

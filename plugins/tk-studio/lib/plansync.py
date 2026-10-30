@@ -3266,6 +3266,7 @@ _PR_REF_RE = re.compile(r"^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(\d+)$")
 _PR_URL_RE = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/(\d+)/?$")
 _DONE_DATE_RE = re.compile(r"^done\s+(\d{4}-\d{2}-\d{2})")
 _BUNDLE_RE = re.compile(r"sweep bundle (dw\d*-[a-z0-9-]+)")
+_BUNDLE_CLAUSE_RE = re.compile(r"([;,.\s]*)resolved by sweep bundle dw\d*-[a-z0-9-]+([;,.\s]*)")
 LEDGER_RESOLUTION_MAX = 160
 
 
@@ -3290,10 +3291,16 @@ def _ledger_spans(text: str) -> dict[str, tuple[int, int]]:
 
 
 def resolved_status(date: str, ref: str, resolution: str) -> str:
-    """`resolved <date> by <ref> (sweep bundle dw-<name>; <resolution, clipped>)`."""
+    """`resolved <date> by <ref> (sweep bundle dw-<name>; <resolution, clipped>)`.
+    The engine's `resolved by sweep bundle <key>` clause adds nothing: removed
+    wherever it stands, so the line names the bundle once (Story 36.2)."""
     resolution = " ".join(resolution.split())
     # the bundle named from the whole text, before the clip can cut it off
     bundle = _BUNDLE_RE.search(resolution)
+    # mid-text one separator stays; at either end what is left behind goes
+    resolution, removed = _BUNDLE_CLAUSE_RE.subn(lambda m: m.group(1) or m.group(2), resolution)
+    if removed:
+        resolution = resolution.strip(" ;,.")
     if len(resolution) > LEDGER_RESOLUTION_MAX:
         resolution = resolution[:LEDGER_RESOLUTION_MAX - 1].rstrip() + "…"
     head = f"sweep bundle {bundle.group(1)}" if bundle else "sweep"
