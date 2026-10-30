@@ -39,6 +39,9 @@ jobs:
   # run-sweep (2026-10-29, Story 35.7): the shipped deferred-work sweep, queued once on the
   # sandbox tier after the EP-35 retrospective (placement tk-studio/run-sweep, hole 90).
   - run-sweep
+  # run-epic-36 (2026-10-29): Epic 36, loop hygiene 3, planned after the three sweeps on Tim's go;
+  # place tk-studio/run-epic-36 {tier: sbx} in the supervisor's per-job config before the first POST (hole 90).
+  - run-epic-36
 
 # Role-keyed working sets (AD-17) — recorded only on explicit
 # confirmation via tk-studio-onboard; one entry per role.

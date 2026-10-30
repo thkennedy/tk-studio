@@ -3341,3 +3341,147 @@ So that I can read how long each epic, story and stage takes and what it costs t
 **Given** the ledger and the retro
 **When** `measurepush.py push` and `tk-studio-report` run
 **Then** a `stage` event (the taxonomy extended additively) carries each row to the ledger, the report verb rolls them up per story and per epic (cycle time from the first start to the merge, hands-on time as the sum of the spans, the planning share, review rounds, re-runs, tokens and cost per stage type) beside Jira's own numbers with the skew named, the retrospective reads the rollup instead of PR timestamps, and the contract (0.1.30 or the next, additive) names the table, the comment shapes and the event; conformance drives the table writer and the comment poster with fakes
+
+## Epic 36: Loop Hygiene 3, What the Sweeps Taught the Loop
+
+Epic 35 closed on 2026-10-29 with the retrospective's verdict `accepted-with-open-items` (`_bmad-output/specs/spec-epic-35/RETROSPECTIVE.md`, PR #280), and on Tim's call of the same day ("sweeps first") three `run-sweep` runs went before any new surface: the first blocked on hole 98, the second (#290) and the third (#293) landed fifteen bundles and closed sixteen ledger entries, leaving 84 open, 68 of them handed back by the triage as human decisions. This epic is the third loop-hygiene pass (Epics 33 and 35 were the first two), planned by the operator session on Tim's go of 2026-10-29 ("Plan Epic 36") from the retrospective's action items (AI-1, AI-2, AI-8, and the docs half of AI-7), the observation ledger's holes 92 and 94 to 103 (each a row of `kb/agent-pc-setup-runbook.md`'s fixes table with the fix to make) and the deferred-work ledger's sweep-era entries DW-105 to DW-132 together with the older medium entries the triage keeps handing back to a human (DW-38, DW-47, DW-55, DW-56, DW-58, DW-60, DW-62 to DW-65, DW-67, DW-71, DW-85 to DW-87, DW-90, DW-91, DW-100; `_bmad-output/implementation-artifacts/deferred-work.md`). Its sources, in that order of authority, then the handoff's day-7u to day-7y addenda (`_bmad-output/implementation-artifacts/handoff-phase1-loop-2026-10-09.md`) and the contract at 0.1.30 (`plugins/tk-studio/contracts/driver-contract.md`). What exists today: the host leg's verdict is derived three times and only two of them know `inconclusive`, so the board shows an inconclusive leg green while the plan status writes it red (DW-100); a sweep's `## Metered cost` and job-run line carry the worker's turns only while the engine spent millions of weighted tokens per sweep (hole 102, DW-131), its `sweep-triage` event lands in the sandbox's own ledger (DW-116), `## Sweep` is lost on a re-run (DW-123), the engine's own `failed`/`blocked` end is overridden by the bundle count (DW-118), and the ledger pass's `pending` is a counted retry that gives up after 24 ticks (DW-122); the resume's stop re-arm runs on the host for a sandbox run (DW-120), a paused sweep is either stuck or stripped (DW-121), a story-boundary refusal parks the run (DW-115), a failed first render is not auto-resumed (hole 95, DW-110), and a block the operator resolves by resuming leaves the story's Jira issue in `Blocked - Awaiting User` with the owner tagged for hours (hole 101, DW-130); the host leg went red three times on things no bundle changed: a test pinning a live planning artifact (hole 96, DW-111), a drive's budget (hole 97, DW-112) and a Windows default encoding the Linux gate cannot see (hole 103, DW-132); the supervisor's tick respawns the engine hold every minute (hole 94, DW-109), a run that blocks before any engine starts keeps the checkout lock and its own `on_status [blocked]` stop refuses the resubmission (hole 90's second half, DW-105), `submit` does not check that a sandbox-tier job's target skill is in the skills store (hole 98, DW-113), a core's own `blocked` status never lifts into the run state (DW-38); `plansync setup`'s workflow update is still refused by Jira (hole 92, DW-127); and Epic 34 and 35 left the supervisor with an eleven-module import cycle and three dynamic-import dodges (DW-85) and the READMEs without rows for `tk-studio-evals`, `maintenance-evals`, `run-sweep`, `evals.py` and `report.py` (AI-7). The rules the epic keeps: everything Epic 35 kept (engines only in the project's Docker Sandbox, never with bypass on the host; the host leg runs deterministic scripts and the engine binaries, never a model; secrets by name only; every surface change additive on the contract at 0.1.31 and up, ending in a status block (AD-11), covered by conformance (AD-19), its cost in the ledger); a fix to the loop lands through the loop, one story per run with a graceful stop after each and the host leg green before the PR, and an operator PR that touches lib, its tests or the contract runs the whole host gate before merge (hole 86); the host leg stays the gate of record, and a story whose fix changes the serve process says so in its spec so the operator stops the supervisor tab before the loop builds `apps/supervisor` and restarts it through the scheduled task after the merge; the retrospective's dispositions stand, and its open questions B3/B4 (a paused run's exit) are decided here in Story 36.3; a story that must touch `_bmad-output` planning artifacts or the Jira seat does so through the lib verbs, never a hand edit; where a story's proof needs the host or the sandbox tier (the nt `kill_tree` tests, a hold count on a live run, a real `plansync setup` against the owner's site), the engine asks through the spec's consult log and the operator session does that step and answers with the evidence; the engine never runs on the host. What the epic does not take: the follow-up-review entries (the "damping cap" rows DW-8 to DW-104), the engagement-side DW-46 to DW-53, the office and board DW-26 to DW-32 and the low jobrun races DW-128 and DW-129 stay the sweeps' (a fourth sweep needs the instance's `max_runs` raised), and the triage's human decisions on them are Tim's; the TUA reachability proof and the attended first engagement stay his too (AI-9). Planned 2026-10-29 (session 11's seventh day) by the session. Seven stories in dependency order: the verdict first, since every later story's board and plan rows read it; the sweep's records and the resume paths next, so a fourth sweep lands whole; the gates, so a leg's red means the code; the supervisor's and the Jira seat's own faults; the cycles and the docs last, over the module graph the earlier stories leave.
+
+### Story 36.1: One Verdict for Every Consumer
+
+As the loop,
+I want the host leg's verdict (green, red, inconclusive) derived once and read by the board, the plan status, the stage log, the rollup and the sweep, with a test feeding an inconclusive leg to each, and the slice path's regression gaps closed,
+So that an inconclusive leg files a run under `needs_you` on every screen, never green on one and red on another (AI-1; DW-100, DW-91).
+
+**Acceptance Criteria:**
+
+**Given** an ended run whose latest `host-verify` event is inconclusive
+**When** `board.ts hostVerifyOf` (~:262) and `planstatus.ts supervisorRows` (~:444-454) read it
+**Then** both read through `hostverify.ts legVerdict` (the inline derivations at `hostverify.ts:871-872, :881` and `planstatus.ts:454` collapse to the one), the board files the run under `needs_you` with `inconclusive`, the Stage Log row and its Jira mirror (`stage-post`) read `inconclusive`, and `report.py rollup` counts it as neither green nor red
+
+**Given** the slice path
+**When** the supervisor suites run
+**Then** one test drives the sweep to `closeOut` with `slice: true` on a passing playable run and asserts the sheet (`worktree.ts:917, :848, :445-448`), and the frame-name contract between `sheet`'s `frames` and `proofCommit` is pinned by one literal both read (DW-91)
+
+**Given** the supervisor suites and conformance
+**When** they run
+**Then** an inconclusive leg is fed to the board, the plan status, the stage log and the sweep tests (`planstatus.test.ts` beside its green/red cases); the contract (0.1.31, additive) names the one-verdict rule; DW-100 and DW-91 close by this PR
+
+### Story 36.2: The Sweep's Records Are Whole
+
+As the owner,
+I want a sweep's cost, its triage and its summary to reach the records a story's do: the engine's per-bundle cost priced into `## Metered cost` and the job-run line, the `sweep-triage` event in the host's ledger, `## Sweep` surviving a re-run, the engine's own `failed`/`blocked` end kept, and the ledger pass's `pending` a wait rather than a counted retry,
+So that the sweeps' real spend reaches the quota pacing and the rollup, and a fourth sweep's end state and body are true (hole 102; AI-2's B5, B9, B10; DW-116, DW-118, DW-122, DW-123, DW-131; DW-67 and DW-119, the same cost shape on the re-run and the resume).
+
+**Acceptance Criteria:**
+
+**Given** a `run-sweep` close-out, a 33.8 re-run and a resumed run's close-out
+**When** `## Metered cost` and the `job-run` ledger line are written
+**Then** the engine run's journal per-bundle token totals are priced with the routing's model rates (one pricing table in lib, read by the close-out and `report.py`) into `## Metered cost` as the worker's turns plus the engine, one line per bundle, and into the job-run line's `total_cost_usd`; the sweep's `ended` event carries `engine_cost_usd`; a re-run's judge lands as its own job-run line (`hostleg.ts runLeg`; DW-67); a resumed run meters its worker sessions as a first-launch run does and the PR body reads the number (`closeout.ts`; DW-119)
+
+**Given** the sweep's triage and its ledger pass
+**When** the supervisor copies `triage.json`, and when `ledger-resolve` answers `pending` only
+**Then** the host side emits the `sweep-triage` ledger event with the payload the queue store holds (one shape for both records; `launch.py:1576`; DW-116), and the ledger pass waits uncounted and lease-free as the stage pass does (`planstatus.ts:513`, `sweep.ts:414`), the retry count kept for errors (`PLAN_RETRY_LIMIT`; DW-122); the flip's status line names the bundle once (`resolved … by #N (sweep bundle X)`, the doubled note of #290 and #293 gone)
+
+**Given** a sweep whose engine ended `failed` or `blocked` after its last bundle, and a sweep's re-run
+**When** `sweepEndState` runs (`worktree.ts:1078`) and `rewriteBody` renders the body (`hostleg.ts:209`)
+**Then** the engine's own end is kept (`partial` at best when every bundle landed; DW-118) and `rewriteBody` passes `sweepSummary(queue, run)` so `## Sweep` survives (DW-123); one test each; the contract (0.1.31, additive) names the priced cost and the event; the entries close by this PR
+
+### Story 36.3: A Paused or Resumed Run Is Never Parked
+
+As the operator,
+I want every pause to have a bounded, recorded exit: the resume's stop re-arm routed by tier, the story's Jira block closed by the resume, a failed first render auto-resumed once, a paused sweep's stop retry bounded and its WIP kept out of the leg, a story-boundary refusal ending the run rather than parking it, a killed resumed engine's PR left a draft with its guard reason kept, and an engagement's cap or ask block closed by the owner's go,
+So that the operator path for a pause is the API, never a hand edit of the worktree or the issue (holes 95 and 101; AI-2's B2, B3; the retrospective's B3/B4 decided; DW-110, DW-115, DW-120, DW-121, DW-130; DW-64, DW-65, DW-47).
+
+**Acceptance Criteria:**
+
+**Given** a sandbox-tier run resumed over `POST /runs/{id}/resume` or the hole-65 auto-resume
+**When** `closeout.ts` re-arms the graceful stop (`:919 launchStopGraceful`) and the run had ended `blocked` with a `track-block`
+**Then** the re-arm runs on the run's tier as `stopSweepEngine` does, with a test that has no host injection (DW-120); the resume calls a story-side `track.py unblock --story <key> --reason` once per `track-block` since the latest pause (`Blocked - Awaiting User` → `Block Resolved` with a `Resolved:` agent comment and no owner mention, idempotent), recorded as `track-unblock`, and a plan-status pass that holds an AD-5 conflict ends `partial` and notifies instead of `ok: true` (DW-130, hole 101); a failed first render (an empty or absent generation beside its staging folder) counts as the one snapshot and auto-resumes once, and `render_skill.py`'s staging rename retries on `EACCES`/`EPERM` as a studio-managed base patch (DW-110, hole 95)
+
+**Given** a paused sweep, and a run refused at a story boundary
+**When** the stop does not answer `stopped`, and when `resume` answers `StoryLanded`
+**Then** the stop retry is bounded (a count or a deadline), then a notifier line and a `blocked` end that releases the lock and the pin, and a paused bundle's WIP is committed as WIP on the run branch or the sweep is kept paused for the operator, never the leg on a half-written tree (`worktree.ts:1012-1021`; DW-121); the story-boundary refusal ends the run at the boundary (push, PR, release) rather than parking it (`queue.ts:1254`; DW-115; B3/B4 decided here, the contract naming it)
+
+**Given** a resumed or relaunched engine the supervisor killed, and an engagement whose owner answered go or continue after a cap or ask block
+**When** the close-out skipped the host verify, and when `approve.ts runStep` runs
+**Then** the PR stays a draft (`worktree.ts closeOut ~:480-483`; DW-64), a killed relaunch keeps `launched.end` with the guard's reason (`sweepEngines`' relaunched predicate; DW-65), and the cap or ask block is closed and the owed questions block after it (`approve.ts runStep`, `questions.ts closeStep`; DW-47); the supervisor suites cover each with fakes; the contract (0.1.31, additive) names `track-unblock` and the bounded stop; the entries close by this PR
+
+### Story 36.4: The Host Leg Goes Red for Code Only
+
+As the loop,
+I want the host leg to fail only on what the story or the bundle changed: no host test pinning a live planning artifact, every drive budgeting from its manifest timeout with headroom and git- or uv-spawning tests above bun's 5 s, every text read and write under the lib and the installer naming its encoding, an in-process drain test for the claim-path `TierRequired`, and the planner's Stories-row regex rule in its contract-test guidance,
+So that a leg's red means the code, never the box, the clock or the planner (holes 96, 97, 103; AI-8; DW-111, DW-112, DW-132).
+
+**Acceptance Criteria:**
+
+**Given** the lib suite and the supervisor suites
+**When** a test asserts the exact state of a planning artifact under `_bmad-output` (a live spec's design-note set, a stories list)
+**Then** a guard in the lib suite finds the exact-set assertion over a live spec folder and fails naming it; shape tests read fixtures, and a real-artifact test asserts only what cannot change (the capability count, the story map; `test_launch.py`; DW-111, hole 96)
+
+**Given** every conformance drive that runs a bun suite, and every test that spawns git or uv under bun
+**When** the drive and the test run
+**Then** the drive's suite bound derives from its manifest `timeout` with headroom through one helper the drives share (`contracts/conformance/`, `runner.py`), and git- or uv-spawning tests carry a preload default above bun's 5 s (DW-112, hole 97); an in-process drain test asserts the claim-path `TierRequired` inside the host gate (B11); the planner's contract-test guidance carries the Stories-row regex rule (C8); the nt `kill_tree` tests run once on the host by the operator through the consult log and the spec records the result (35.3's `unverifiable-here`)
+
+**Given** a text-mode `write_text`, `read_text`, `open` or `Path.open` under `plugins/tk-studio/lib`, `tools/installer` and `apps/*/scripts`
+**When** conformance runs
+**Then** a call with no explicit `encoding=` fails the run naming the call site (binary modes exempt), the existing call sites are fixed, and `AGENTS.md` carries the pitfall line (DW-132, hole 103); the contract (0.1.31, additive) names the rule; DW-111, DW-112 and DW-132 close by this PR
+
+### Story 36.5: The Supervisor's Own Faults
+
+As the operator,
+I want the supervisor to stop causing the blocks it then refuses to clear: a run that blocks before any engine starts releases the checkout lock and an `on_status [blocked]` stop skips a block of the supervisor's own making, the tick never respawns holds, `submit` refuses a sandbox-tier job whose target skill is absent from the skills store, a core's own `blocked` status lifts into the run state, the pin-restart bounded per sandbox with the engine sandbox's `/tmp` pruned at the pin, a pacer pass visible while it runs, and doctor reading a process-level end over the routine tee lines,
+So that the supervisor's own faults are recorded as its own and never cost a hand-deleted lock row, a 1.26 USD host claim or 133 hold events (holes 90, 94, 98; DW-105, DW-109, DW-113, DW-38; DW-55, DW-56, DW-58, DW-60, DW-63).
+
+**Acceptance Criteria:**
+
+**Given** a run that ends `blocked` before an engine started, and a job whose `stop.on_status` holds `blocked`
+**When** the close-out runs and the next submission arrives
+**Then** the checkout lock is released (no unverified engine holder for later claims to re-probe), `cancel` answers it, and the stop skips a block whose reason is the supervisor's own (placement, lock, pin, render) so the next submission is woken, the loop-caused blocks of holes 90 and 93 the test cases (DW-105); a sandbox-tier job whose target skill is absent from the skills store (`sbx skills ls`, or the store's `plugin.json`) is refused at `submit` naming the release and the import, and a status block missing `intent` is reported malformed, not absent (DW-113, hole 98)
+
+**Given** the one-minute tick beside a live serve, and a core job whose JSON status is `blocked`
+**When** `recoverQueue` → `respawnHolds` runs, and when `jobrun.execute_core` records the run
+**Then** the tick spawns no hold (the serve process, which lives, owns them) or detaches and records its holds so the serve adopts them, one test that a tick beside a live serve spawns none, and a run's `hold` events count the restarts, not the ticks (DW-109, hole 94); the core's own `status` lifts into the run `state` so `stop.on_status: ["blocked"]` fires for `atlassian-sync-back` and every shipped core (DW-38)
+
+**Given** the pin, the pacer and doctor
+**When** a sandbox stays logged out across several queued runs, a pass runs long, and the newest log ends on a tee line
+**Then** the pin-restart episode is bounded per sandbox across the queue, any run's open pin-restart since the sandbox's last healed probe counting (`sandbox.ts openPinRestart`; DW-56, DW-58), the pin prunes `tk-sup-*` and `tmp.*` from the engine sandbox's `/tmp` (`cli.ts pinBeforeClaim`; DW-60), the slow-pass warning, the notifier line and `pacer.json` are written while the pass runs (`log.ts runUnderLog`; DW-63), and doctor ranks a keeper, pacer or serve end or a non-zero exit above the routine `[tick]`/`[drain] stopped (exit 0)` lines (`doctor.py _last_end`; DW-55); the supervisor suites and the lib suite cover each with fakes; the contract (0.1.31, additive) names the refusal and the lifted status; the entries close by this PR
+
+### Story 36.6: Setup and the Launch Check, by Evidence
+
+As the owner,
+I want `plansync setup` to write the workflow it needs without my hand (uppercase transition types, the version from the v3 search, any status in the To Do category, the global transitions it adds carrying ids), the launch check to refuse writing a tracked `policy.toml` and to know whether the engine sandbox has Godot, and `scope`'s game-project rule to read the registry rather than a name prefix,
+So that a fresh project's setup needs no manual workflow edit and a game project is one by evidence (hole 92; DW-127, DW-62, DW-71, DW-90).
+
+**Acceptance Criteria:**
+
+**Given** `plansync.py setup` against a simplified-workflow project
+**When** it updates the workflow
+**Then** the transitions copied from `GET /workflow/search` carry `INITIAL`/`GLOBAL`/`DIRECTED` types, the version comes from the v3 workflows search, the setup accepts any status in the To Do category where it asked for a literal `To Do`, the global transitions it adds (Blocked → Block Resolved, into To Do, into Blocked) carry ids in the `POST /workflows/update` payload and the legacy `from`/`to` keys are dropped (`jirabackend.py update_workflow`; DW-127, hole 92); the live call runs once by the operator through the consult log against the owner's site and the spec records the answer
+
+**Given** `launch.py check` on a served project whose `.bmad-loop/policy.toml` is tracked, and an `engine.verify_commands` gate on a sandbox
+**When** `reconcile_verify_commands` would write the policy, and when the engine-gate clause reads the sandbox
+**Then** the write is refused or reported through `pipeline.unignored_writes` and the tree stays clean (`launch.py`; DW-62), and the clause reads whether the sandbox was provisioned `WITH_GODOT` from a record the pin writes (the tracked config or the sandbox's own marker) and warns on a gate without it (`launch.py engine_gate_clause`; DW-71)
+
+**Given** a project whose working set confirms the plugin-shipped `gds-engine-godot-4` alone
+**When** `engage.py scope` decides `is_game_project`
+**Then** it reads the registry's evidence that the `gds` module is installed, not a `gds-` name prefix (`engage.py:797-799`), and the contract's CAP-15 rule follows (DW-90); the lib suite covers each with fakes; the contract (0.1.31, additive) names the rules; the entries close by this PR
+
+### Story 36.7: The Cycles Cut and the Docs Caught Up
+
+As the loop,
+I want the supervisor's eleven-module import cycle and the lib's `assets` ↔ `playable` cycle cut to one-way seams with the dynamic-import dodges removed, the duplication the ledger names folded into shared helpers, `assets.py` split along its concerns as far as one story carries, and the docs the retrospective lists landed,
+So that the next epic adds surface on a module graph a reader can hold and the READMEs name every verb that ships (AI-7; DW-85, DW-86, DW-87).
+
+**Acceptance Criteria:**
+
+**Given** the supervisor and the lib
+**When** a cycle test runs in the host gate (a script over the TypeScript imports and a lib test importing each module alone)
+**Then** `sweep ⇄ worktree`, `sweep ⇄ planstatus` and `closeout → sweep → planstatus → closeout` are gone, the `registerSweepLine` dodge (`hygiene.ts:159-172`, `sweep.ts:283`) and the `closeout.ts:919 → cli` and `hostverify.ts → ./registry` dynamic imports are gone, `assets.py` and `playable.py` share `_proc.py` and `_png.py` instead of importing each other, and the MCP stop reaches the sandbox through a one-way seam (DW-85); the test pins zero cycles among the named modules
+
+**Given** the duplication and the size the ledger names
+**When** the story lands
+**Then** the user-env reads, the engine and Blender resolution, the base-ref `git show` and the status-block scaffolding each live in one helper (DW-86), `assets.py`'s concerns are split into named modules as far as one story carries with the remainder stated on the entry, and `engage.py scope` is back under its Epic 34 size (DW-87); behaviour pinned by the existing suites, no surface change
+
+**Given** the READMEs and the plugin's notes
+**When** the story lands
+**Then** the root and `apps/supervisor` READMEs carry rows for `tk-studio-evals`, `maintenance-evals`, `run-sweep`, `evals.py` and `report.py` and the EP-34 rows for `tk-studio-playable-judge`, `tk-studio-track` and `tk-studio-engage`; `apps/supervisor/README.md:332` and the `engine mcp` advisory name the per-run forwarder port and the host:port-policy case; the Windows notes carry the `utf-8-sig` bullet and the encoding rule of Story 36.4; the mirror's hook comments are aligned (AI-7); the contract (0.1.31, additive) is unchanged in surface; DW-85, DW-86 and DW-87 close or narrow by this PR

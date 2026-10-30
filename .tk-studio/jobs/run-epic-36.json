@@ -1,0 +1,14 @@
+{
+  "job_schema_version": 1,
+  "id": "run-epic-36",
+  "type": "run-epic",
+  "description": "tk-studio Epic 36 (loop hygiene 3, what the sweeps taught the loop: one verdict for every consumer, the sweep's records whole, a paused or resumed run never parked, the host leg red for code only, the supervisor's own faults, setup and the launch check by evidence, the cycles cut and the docs caught up) through the supervisor queue (declared 2026-10-29 with the epic, planned from the EP-35 retrospective's AI-1/AI-2/AI-7/AI-8, holes 92 and 94-103 and DW-105 to DW-132 with the older medium entries the triage hands back). Extends the shipped run-epic type: one-shot; the first launch bootstraps _bmad-output/specs/spec-epic-36 from epics.md (Story 26.1). Submit it with POST /jobs {project: tk-studio, job: run-epic-36} only after tk-studio/run-epic-36 is placed {tier: sbx, sandbox: claude-tk-studio} in the supervisor's per-job config (hole 90); tools/verify_host.py is the host verify leg; the close-out opens the PR. One story per run with a graceful stop after each, in the epic's order (36.1 first, the cycles and docs last); a story whose proof needs the host or the sandbox tier asks through the consult log and the operator session does that step on the box; a story that changes the serve process says so and the operator restarts the supervisor through the scheduled task after the merge. Stop: max_runs 12 for this epic (the Epic 35 figure, hole 93): an on_status [blocked] stop refuses every resubmission after an operator-side block.",
+  "target": {
+    "payload": {
+      "epic": 36
+    }
+  },
+  "stop": {
+    "max_runs": 12
+  }
+}
