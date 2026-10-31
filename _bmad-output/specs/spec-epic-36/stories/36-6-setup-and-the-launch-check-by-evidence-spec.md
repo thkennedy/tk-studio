@@ -278,6 +278,9 @@ DRIFT: `armRefusedLine` takes the run and env, `gracefulStopCommand` exported �
 | review | 1 | 2026-10-31T18:28:38Z | 2026-10-31T19:02:38Z | 90f40fcc-7226-4768-b1d9-f8b067a5f399 | claude-opus-5-5 | medium | 6161386 | 120823 | 8.8783 | completed |
 | review | 2 | 2026-10-31T19:02:38Z | 2026-10-31T19:49:58Z | 690e2239-9bbb-4ec7-a454-5e3baea71e12 | claude-opus-5-5 | medium | 8167975 | 158765 | 10.5045 | completed |
 | gate | 1 | 2026-10-31T19:49:59Z | 2026-10-31T19:54:16Z | 7002149b-5a2a-45e3-b604-acbcc0d70a1b | claude-opus-5-5 | medium | 1230336 | 19479 | 1.5744 | completed |
+| host-leg | 1 | 2026-10-31T19:54:25Z | 2026-10-31T20:46:04Z | — | — | — | — | — | — | green |
+| close-out | 1 | 2026-10-31T20:46:04Z | 2026-10-31T20:46:12Z | — | — | — | — | — | — | PR |
+| merge | — | 2026-10-31T20:46:42Z | 2026-10-31T20:46:42Z | — | — | — | — | — | — | merged |
 
 ## Auto Run Result
 
