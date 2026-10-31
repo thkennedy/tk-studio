@@ -240,6 +240,21 @@ When a run's PR opens, the supervisor sets `review` on every story the run marke
 
 The supervisor's own runs resolve to tk-studio (its `epics.md` is transcribed from `thkennedy/tk-studio`): until tk-studio is registered on the host, they record the skip.
 
+## Jobs and the lib verbs the supervisor runs
+
+Story 36.7 (AI-7). The plugin's own table is in the root `README.md`.
+
+| Name | Kind | What it does here |
+|------|------|-------------------|
+| `run-sweep` | job | A deferred-work sweep: the engine's sweep on the sandbox tier (`src/sweep.ts`; **The plan follows the run**) |
+| `maintenance-evals` | job | The shipped headless job that drives `tk-studio-evals` on the sandbox tier |
+| `tk-studio-evals` | skill | The plugin's eval runner, for the cases the host cannot run (they need a shell and the repository tree) |
+| `evals.py` | lib verb | `tk-studio-evals`'s core: runs each case and writes its result and `scores.json` |
+| `report.py` | lib verb, skill script | `lib/report.py rollup`, the Stage Log's roll-up for a story or an epic; the `tk-studio-report` script records one human defect report as a `report` event |
+| `tk-studio-playable-judge` | skill | The host verify leg's screenshot judge (`src/hostverify.ts`, `invokeSkill` on the sbx tier) |
+| `tk-studio-track` | skill | The tracking verbs on the bound project; the close-out passes run `track.py block` and `unblock` (`src/closeout.ts`), the API's owner reply `track.py reply` (`src/api.ts`) |
+| `tk-studio-engage` | skill | The planner leg of an engagement; `engage.py reply` writes the file `src/chat.ts` reads, and `engage.py scope` decides what `src/approve.ts` mints |
+
 ## Worker tiers
 
 Each run picks a tier: `host` (the default) or `sbx`. The tier comes from the submission or the supervisor's own per-job config, never from the plugin (AD-2).

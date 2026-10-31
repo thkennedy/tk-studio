@@ -8,6 +8,7 @@ import { hostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { cancelRun, claimGate, detectExternal, pinBeforeClaim, driveResumes, ExternalRunRefused, finishRun, mirror, queueRecorder, recoverQueue, watchStarterLocks, type ResumedRun, type Started } from "../src/cli";
 import { checkoutKey, Queue, workerMayRun, type Owner, type Probes, type QueueRun, type StudioOps } from "../src/queue";
+import { stopEngineMcp } from "../src/enginemcp";
 import {
   defaultHold, holdArgv, holdEngine, killEngine, killRunEngine, lookupEnginePid, pinRecordPath, pinSandbox, pinWithRestart, probeEngine, parseSkillsList, pruneEngineTmp, pruneTmpArgv, releasePin, respawnHolds, sandboxHolders, skillInStore, skillsLsArgv,
   STARTER, STARTER_LOCK_REFRESH_MS, starterLockPath, writeStarterLock, writeStarterLocks, type HoldChild, type SandboxDeps,
@@ -617,7 +618,7 @@ describe("release: `sbx stop <sb>` at the deferred `ended`, never on paused, nev
     const { run } = await sbxRun(q);
     recordedMcp(q, run.run_id);
     q.end(run.run_id, "complete", null);
-    expect((await during(() => releasePin(q, run.run_id, deps))).out).toBe("released");
+    expect((await during(() => releasePin(q, run.run_id, { ...deps, stopEngineMcp }))).out).toBe("released");
     expect(q.events(run.run_id).find((e) => e.kind === "engine-mcp-stop")?.detail).toMatchObject({ why: "released", port: 50001, forwarder_port: 50002 });
     expect(q.events(run.run_id).find((e) => e.kind === "pin-released")?.detail).toEqual({ sandbox: SB, stop: { ok: true }, engine_mcp: "stopped" });
   });
@@ -629,7 +630,7 @@ describe("release: `sbx stop <sb>` at the deferred `ended`, never on paused, nev
     const other = await sbxRun(q, { job: "other-job" });
     recordedMcp(q, run.run_id);
     q.end(run.run_id, "complete", null);
-    expect((await during(() => releasePin(q, run.run_id, deps))).out).toBe("kept");
+    expect((await during(() => releasePin(q, run.run_id, { ...deps, stopEngineMcp }))).out).toBe("kept");
     expect(q.events(run.run_id).find((e) => e.kind === "pin-kept")?.detail).toEqual({ sandbox: SB, held_by: [other.run.run_id], engine_mcp: "stopped" });
 
     // The stop cannot be recorded (the queue refuses the note): left to a later release or recovery.
@@ -639,7 +640,7 @@ describe("release: `sbx stop <sb>` at the deferred `ended`, never on paused, nev
     q2.end(r2.run_id, "complete", null);
     const note = q2.note.bind(q2);
     q2.note = (id, kind, detail) => { if (kind === "engine-mcp-stop") throw new Error("database is locked"); note(id, kind, detail); };
-    expect((await during(() => releasePin(q2, r2.run_id, deps))).out).toBe("released");
+    expect((await during(() => releasePin(q2, r2.run_id, { ...deps, stopEngineMcp }))).out).toBe("released");
     expect(kinds(q2, r2.run_id)).not.toContain("engine-mcp-stop");
     expect(q2.events(r2.run_id).find((e) => e.kind === "pin-released")?.detail).toEqual({ sandbox: SB, stop: { ok: true }, engine_mcp: "stop pending" });
   });

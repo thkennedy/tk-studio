@@ -33,13 +33,14 @@ import { studioHome } from "./env";
 import { legVerdict, type HostVerifyResult } from "./hostverify";
 import { listEngagements, needsYou, titleOf } from "./engagement";
 import { awaitingRuling, lastRunOf, LIVE_RUN_STATES, runWaitReason } from "./office";
+import { DEFERRED_REL } from "./planseams";
 import { PLAN_REL, runPr, storyNumber } from "./planstatus";
 import { isTerminal, type Queue, type QueueEvent, type QueueRun } from "./queue";
 import { priorPr } from "./worktree";
 
 type Env = Record<string, string | undefined>;
 
-export const DEFERRED_REL = join("_bmad-output", "implementation-artifacts", "deferred-work.md");
+export { DEFERRED_REL };
 export const BANDS_REL = join(".tk-studio", "budget-bands.yaml");
 
 // ------------------------------------------------------------ the answer (shared with 30.6 and the web)

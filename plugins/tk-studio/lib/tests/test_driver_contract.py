@@ -2983,6 +2983,16 @@ class DriverContractTestCase(unittest.TestCase):
         stories = next(line for line in self.text.splitlines() if line.startswith("| Story / rulings"))
         self.assertRegex(stories, r"Story 36\.1, Story 36\.2, Story 36\.3, Story 36\.4, Story 36\.5(, Story 36\.\d+)* \(Epic 36\)")
 
+    def test_0_1_31_story_36_7_no_surface_change(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.31**", header)
+        self.assertNotIn("**0.1.32**", header)
+        self.assertEqual(header.count("0.1.31 (Story 36.7, additive)"), 1)
+        self.assertIn("36.7: no surface change; the module graph and the docs", header)
+        stories = next(line for line in self.text.splitlines() if line.startswith("| Story / rulings"))
+        self.assertIn("Story 36.7", stories)
+
     def test_0_1_31_story_36_6_setup_and_launch_by_evidence(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))

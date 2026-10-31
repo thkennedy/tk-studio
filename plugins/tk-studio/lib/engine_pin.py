@@ -43,9 +43,11 @@ import re
 import sys
 from pathlib import Path
 
+import _core
+
 INTENT = "gds-engine-godot-4"
 DEFAULT_SKILL = "gds-engine-godot-4"
-BLOCK_KEYS = ("status", "intent", "artifacts", "reason")
+BLOCK_KEYS = _core.BLOCK_KEYS
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 SKILLS_DIR = PLUGIN_ROOT / "skills"
@@ -68,10 +70,7 @@ class Refusal(Exception):
 def with_block(result: dict, status: str, artifacts: list[str],
                reason: str | None) -> dict:
     """``result`` with the AD-11 block keys appended last, in order."""
-    out = {k: v for k, v in result.items() if k not in BLOCK_KEYS}
-    out.update(status=status, intent=INTENT, artifacts=list(artifacts),
-               reason=reason)
-    return out
+    return _core.with_block(result, status, artifacts, reason, intent=INTENT)
 
 
 # ------------------------------------------------------------------- reads

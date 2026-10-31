@@ -48,7 +48,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
-import { ENGINE_MCP_START, ENGINE_MCP_STOP, stopEngineMcp } from "./enginemcp";
+import { ENGINE_MCP_START, ENGINE_MCP_STOP } from "./enginemcp-kinds";
 import { sbxBin, studioHome } from "./env";
 import {
   checkoutKey, isTerminal, parseStatGroup, probeRecordedWorker, processStartTime, servedRoot, workerMayRun, type Queue, type QueueRun, type WorkerKill,
@@ -67,6 +67,9 @@ export interface SandboxDeps {
   run?: (bin: string, args: string[], opts: { timeoutS: number }) => Promise<RunResult>;
   /** Spawns the long-lived hold (default `defaultHold`, detached and unref'd). */
   hold?: (bin: string, args: string[]) => HoldChild;
+  /** Story 36.7 (DW-85): the run's engine MCP stop at release, injected where the deps are built (`enginemcp.ts`'s
+   * `stopEngineMcp`; `cli.ts sbxDeps`, `worktree.ts sbxOf`), so this module never imports the engine MCP. */
+  stopEngineMcp?: (queue: Queue, runId: string, why: string) => Promise<boolean>;
   /** Reads a host file; null when it cannot be read (default `readFileSync`). */
   readFile?: (path: string) => string | null;
   /** Lists a host directory; [] when it cannot be read (default `readdirSync`). */
@@ -185,7 +188,7 @@ export async function releasePin(queue: Queue, runId: string, deps: SandboxDeps 
     // one (a paused run keeps its pin, operator-decisions §2).
     if (!isTerminal(run.state)) return "none";
     // Story 34.5: the run's engine MCP stops at its release — also when the sandbox is kept for another holder.
-    await stopEngineMcp(queue, runId, "released");
+    await deps.stopEngineMcp?.(queue, runId, "released");
     // Story 35.4: the release events say so — only for a run that started one: `stopped` once its last start has a
     // stop after it, else `stop pending` (a later release or recovery stops it).
     const mcpEvents = queue.events(runId).filter((e) => e.kind === ENGINE_MCP_START || e.kind === ENGINE_MCP_STOP);

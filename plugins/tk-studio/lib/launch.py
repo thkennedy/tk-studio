@@ -104,7 +104,9 @@ Guarantees:
     mcp` after `story plans`, never a gap, from the tracked
     `.tk-studio/config.yaml`: `not configured (no engine.mcp)`, or
     `verify-only filter <flag>; port <per-run|fixed <n> (one flagged run at
-    a time)>` when `engine.mcp.start` carries the server's allowlist flag
+    a time)>; forwarder <…>; a host:port sandbox policy needs the fixed
+    forwarder port (runbook)` when `engine.mcp.start` carries the server's
+    allowlist flag
     (`engine.mcp.filter`, default `--exclude-domains`; the token `<flag>` or
     `<flag>=…`), else `warning: engine.mcp.start has no <flag>; the
     verify-only rule (kb/engine-mcp-godot.md) rests on the engine skill
@@ -161,6 +163,7 @@ import tomllib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import _core
 import config as configlib
 import job as joblib
 import jobrun
@@ -179,7 +182,7 @@ POLL_S = 0.5
 
 INTENT = "tk-studio-launch"
 # the AD-11 status block, last in every result and in this order (§3)
-BLOCK_KEYS = ("status", "intent", "artifacts", "reason")
+BLOCK_KEYS = _core.BLOCK_KEYS
 
 POLICY_REL = ".bmad-loop/policy.toml"
 BANDS_REL = ".tk-studio/budget-bands.yaml"
@@ -829,9 +832,7 @@ def mismatch_text(entry: dict) -> str:
 def with_block(result: dict, status: str, artifacts: list[str],
                reason: str | None) -> dict:
     """``result`` with the AD-11 block keys appended last, in order."""
-    out = {k: v for k, v in result.items() if k not in BLOCK_KEYS}
-    out.update(status=status, intent=INTENT, artifacts=list(artifacts), reason=reason)
-    return out
+    return _core.with_block(result, status, artifacts, reason, intent=INTENT)
 
 
 def check_block(result: dict) -> tuple[str, list[str], str | None]:
@@ -1115,8 +1116,7 @@ def playable_path_row(root: Path, env=None) -> dict:
         engine = verify.get("engine") if isinstance(verify, dict) else None
     if not (isinstance(engine, str) and engine.strip()):
         return row("not a game project (no verify.engine)")
-    godot = (env.get("GODOT") or "").strip()
-    if not godot or not Path(godot).is_absolute() or not Path(godot).is_file():
+    if _core.resolve_binary(None, env, "GODOT", require_absolute=True).path is None:
         return row(NO_GODOT_WARNING)
     if PLAYABLE_PATH in ("display", "movie"):
         try:
@@ -1361,6 +1361,10 @@ def _split_command(line: str) -> list[str]:
     return out
 
 
+# What JavaScript's ``trim`` removes, which ``str.strip`` does not quite match.
+_JS_WHITESPACE = "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+
+
 def _engine_mcp_malformed(mcp: object) -> str | None:
     """Why the pin's ``parseEngineMcp`` (enginemcp.ts) refuses ``engine.mcp``
     as ``engine-mcp:no-config`` (its reason text), else None: the same
@@ -1388,6 +1392,22 @@ def _engine_mcp_malformed(mcp: object) -> str | None:
     return None
 
 
+def _forwarder_text(raw: str | None) -> str:
+    """The forwarder's port as this process reads it, by ``engineMcpPort``'s
+    rule (env.ts): blank is unset, else 1-5 ASCII digits in 1-65535."""
+    value = (raw or "").strip(_JS_WHITESPACE)
+    if not value:
+        return ("port not fixed here (TK_SUPERVISOR_ENGINE_MCP_PORT unset in the process running "
+                "this check; the supervisor's own environment decides: set, fixed; unset, per-run "
+                "and engine-mcp-forwarder reports its free port)")
+    if not re.fullmatch(r"[0-9]{1,5}", value) or not 1 <= int(value) <= 65535:
+        return (f"value the supervisor would refuse (TK_SUPERVISOR_ENGINE_MCP_PORT '{raw}' "
+                "is not a port number (1-65535), read in the process running this check; "
+                "the supervisor's own environment decides)")
+    return (f"fixed {int(value)} here (TK_SUPERVISOR_ENGINE_MCP_PORT in the process running this "
+            "check; the supervisor's own environment decides)")
+
+
 def engine_mcp_row(root: Path) -> dict:
     """Story 35.4: the advisory ``engine mcp`` row (``ok`` always true, never
     a gap), from the tracked ``.tk-studio/config.yaml``: ``not configured (no
@@ -1397,7 +1417,19 @@ def engine_mcp_row(root: Path) -> dict:
     ``warning: engine.mcp.start has no <flag>; the verify-only rule
     (kb/engine-mcp-godot.md) rests on the engine skill alone; port <…>``.
     The port reads ``per-run`` for ``port: 0``, else ``fixed <n> (one flagged
-    run at a time)``. A config the pin's ``parseEngineMcp`` refuses reads
+    run at a time)``; Story 36.7 appends the forwarder's port as this process
+    reads ``TK_SUPERVISOR_ENGINE_MCP_PORT``, by ``engineMcpPort``'s rule (env.ts)
+    (unset or blank: ``forwarder port not fixed here
+    (TK_SUPERVISOR_ENGINE_MCP_PORT unset in the process running this check; the
+    supervisor's own environment decides: set, fixed; unset, per-run and
+    engine-mcp-forwarder reports its free port)``; a port: ``forwarder fixed
+    <n> here (TK_SUPERVISOR_ENGINE_MCP_PORT in the process running this check;
+    the supervisor's own environment decides)``; else ``forwarder value the
+    supervisor would refuse (TK_SUPERVISOR_ENGINE_MCP_PORT '<value>' is not a
+    port number (1-65535), read in the process running this check; the
+    supervisor's own environment decides)``)
+    and the host:port-policy case (``a host:port sandbox policy needs the fixed forwarder port
+    (runbook)``). A config the pin's ``parseEngineMcp`` refuses reads
     ``warning: <its reason>; the pin refuses engine-mcp:no-config``, the
     reason the pin's own text (``engine.mcp is not a mapping``,
     ``engine.mcp.port is not a port number (0 per run, or 1-65535)``,
@@ -1430,6 +1462,8 @@ def engine_mcp_row(root: Path) -> dict:
     port = int(mcp["port"])
     port_text = ("port per-run" if port == 0
                  else f"port fixed {port} (one flagged run at a time)")
+    port_text += ("; forwarder " + _forwarder_text(os.environ.get("TK_SUPERVISOR_ENGINE_MCP_PORT"))
+                  + "; a host:port sandbox policy needs the fixed forwarder port (runbook)")
     if any(t == flag or t.startswith(f"{flag}=") for t in tokens):
         return row(f"verify-only filter {flag}; {port_text}")
     return row(f"warning: engine.mcp.start has no {flag}; the verify-only rule "

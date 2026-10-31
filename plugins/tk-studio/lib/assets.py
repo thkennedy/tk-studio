@@ -97,21 +97,24 @@ import math
 import os
 import re
 import shutil
-import struct
-import subprocess
 import sys
 import tempfile
 import time
-import zlib
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+import _core
 import config
 import ledger
 import miniyaml
-import playable
+from _core import Refusal, _hkcu_value, _write_atomic
+from _glb import (AXES, BOUNDS_TOLERANCE, CHUNK_BIN, CHUNK_JSON, GLB_MAGIC, _IDENTITY, _accessor, _close,
+                  _mat_mul, _mesh_instances, _node_matrix, _number, _vec3, classify_origin,
+                  facts_of, gate, read_glb)
+from _png import alpha_mask, png_chunk as _png_chunk, png_encode, png_image as _png_image, png_pixels
+from _proc import run_logged
 
 INTENT = "assets"
-BLOCK_KEYS = ("status", "intent", "artifacts", "reason")
+BLOCK_KEYS = _core.BLOCK_KEYS
 
 LIB = Path(__file__).resolve().parent
 PLUGIN_ROOT = LIB.parent
@@ -146,7 +149,6 @@ TOP_KEYS = ("schema", "categories", "assets", "camera")
 CAMERA_KEYS = ("yaw", "pitch")
 DEFAULT_CAMERA = {"yaw": 45.0, "pitch": 30.0}
 MAX_PITCH = 89
-AXES = ("x", "y", "z")
 NAME_PATTERN = re.compile(r"^[a-z0-9-]+$")
 COLOUR_PATTERN = re.compile(r"^#[0-9a-f]{6}$")
 # a cube is 12 triangles: the smallest greybox there is (plan §6)
@@ -168,14 +170,9 @@ DEFAULT_COLOURS = {
 SPEC_KEYS = ("name", "category", "colour", "bounds", "origin", "collision", "tri_budget",
              "label", "output")
 
-BOUNDS_TOLERANCE = 0.01
 DEFAULT_WALL_S = 600
 MAX_WALL_S = 86400
 LOG_TAIL = 10
-
-
-class Refusal(Exception):
-    """A refusal: nothing written (status blocked, exit 2)."""
 
 
 # ------------------------------------------------------------- the reader
@@ -369,11 +366,6 @@ def _block_list(block, label) -> list:
 
 
 # ---------------------------------------------------------- the validator
-
-def _number(value) -> bool:
-    return (isinstance(value, (int, float)) and not isinstance(value, bool)
-            and math.isfinite(value))
-
 
 def validate(doc, label: str = "manifest") -> dict:
     """The manifest normalised (``categories`` resolved to the full colour
@@ -615,11 +607,6 @@ def label_lines(name: str) -> tuple[list[str], int] | None:
     return lines, scale
 
 
-def _png_chunk(kind: bytes, data: bytes) -> bytes:
-    return (struct.pack(">I", len(data)) + kind + data
-            + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
-
-
 def label_png(name: str, colour: str) -> bytes:
     """The label texture's PNG bytes, deterministic (ruling (f))."""
     size = LABEL_SIZE
@@ -657,287 +644,15 @@ def label_png(name: str, colour: str) -> bytes:
                             if LABEL_BORDER <= px < size - LABEL_BORDER:
                                 pixels[py][3 * px:3 * px + 3] = black
     raw = b"".join(b"\x00" + bytes(r) for r in pixels)
-    ihdr = struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)
-    return (b"\x89PNG\r\n\x1a\n" + _png_chunk(b"IHDR", ihdr)
-            + _png_chunk(b"IDAT", zlib.compress(raw, 9)) + _png_chunk(b"IEND", b""))
-
-
-def _png_image(data: bytes):
-    """A PNG's decoded image ``(IHDR, decompressed IDAT data)``, or None when
-    ``data`` is not a readable PNG; independent of the zlib build."""
-    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return None
-    offset, ihdr, idat, ended = 8, None, [], False
-    while offset + 12 <= len(data):
-        length, kind = struct.unpack_from(">I4s", data, offset)
-        end = offset + 12 + length
-        if end > len(data):
-            return None
-        body = data[offset + 8:offset + 8 + length]
-        if struct.unpack_from(">I", data, end - 4)[0] != zlib.crc32(kind + body) & 0xFFFFFFFF:
-            return None
-        if kind == b"IHDR":
-            ihdr = body
-        elif kind == b"IDAT":
-            idat.append(body)
-        elif kind == b"IEND":
-            ended = True
-            break
-        offset = end
-    if ihdr is None or not idat or not ended:
-        return None
-    try:
-        return ihdr, zlib.decompress(b"".join(idat))
-    except zlib.error:
-        return None
-
-
-# ------------------------------------------------------------ the GLB reader
-
-GLB_MAGIC = b"glTF"
-CHUNK_JSON = 0x4E4F534A
-CHUNK_BIN = 0x004E4942
-
-
-def _accessor(doc: dict, index, what: str) -> dict:
-    accessors = doc.get("accessors")
-    if not isinstance(index, int) or isinstance(index, bool) or not isinstance(accessors, list) \
-            or not 0 <= index < len(accessors) or not isinstance(accessors[index], dict):
-        raise Refusal(f"malformed GLB: {what} names no accessor ({index!r})")
-    acc = accessors[index]
-    if not isinstance(acc.get("count"), int) or acc["count"] < 0:
-        raise Refusal(f"malformed GLB: accessor {index} has no count")
-    return acc
-
-
-def _vec3(value, what: str) -> list[float]:
-    if not isinstance(value, list) or len(value) != 3 or not all(_number(v) for v in value):
-        raise Refusal(f"malformed GLB: {what} is not three numbers")
-    return [float(v) for v in value]
-
-
-def _close(value: float, extent: float) -> bool:
-    return abs(value) <= max(1e-6, BOUNDS_TOLERANCE * extent)
-
-
-def classify_origin(lo: list[float], hi: list[float]) -> str:
-    """The bounds' relation to zero: ``center``, ``base-center`` (Y up),
-    ``base-min-corner``, else ``other``."""
-    ext = [h - l for l, h in zip(lo, hi)]
-    mid = [(l + h) / 2 for l, h in zip(lo, hi)]
-    if all(_close(m, e) for m, e in zip(mid, ext)):
-        return "center"
-    if _close(lo[1], ext[1]) and _close(mid[0], ext[0]) and _close(mid[2], ext[2]):
-        return "base-center"
-    if all(_close(l, e) for l, e in zip(lo, ext)):
-        return "base-min-corner"
-    return "other"
-
-
-def read_glb(data: bytes) -> tuple[dict, bytes | None]:
-    """``(json document, BIN chunk or None)``; a refusal when malformed."""
-    if len(data) < 12:
-        raise Refusal("malformed GLB: shorter than its 12-byte header")
-    magic, version, length = struct.unpack_from("<4sII", data, 0)
-    if magic != GLB_MAGIC:
-        raise Refusal("malformed GLB: no glTF magic")
-    if version != 2:
-        raise Refusal(f"malformed GLB: version {version} (expected 2)")
-    if length != len(data):
-        raise Refusal(f"malformed GLB: header length {length} is not the file size {len(data)}")
-    chunks = []
-    offset = 12
-    while offset < length:
-        if offset + 8 > length:
-            raise Refusal("malformed GLB: truncated chunk header")
-        clen, ctype = struct.unpack_from("<II", data, offset)
-        if offset + 8 + clen > length:
-            raise Refusal("malformed GLB: chunk runs past the end")
-        chunks.append((ctype, data[offset + 8:offset + 8 + clen]))
-        offset += 8 + clen
-    if not chunks or chunks[0][0] != CHUNK_JSON:
-        raise Refusal("malformed GLB: the first chunk is not JSON")
-    try:
-        doc = json.loads(chunks[0][1].decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise Refusal(f"malformed GLB: JSON chunk unreadable ({exc})") from None
-    if not isinstance(doc, dict):
-        raise Refusal("malformed GLB: JSON chunk is not an object")
-    binary = next((c for t, c in chunks[1:] if t == CHUNK_BIN), None)
-    return doc, binary
-
-
-_IDENTITY = ((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0),
-             (0.0, 0.0, 0.0, 1.0))
-
-
-def _mat_mul(a, b):
-    return tuple(tuple(sum(a[r][k] * b[k][c] for k in range(4)) for c in range(4))
-                 for r in range(4))
-
-
-def _node_matrix(node: dict, where: str):
-    """A node's local transform (row-major 4x4): its ``matrix`` (glTF's
-    column-major 16 numbers), else ``T * R * S``."""
-    if "matrix" in node:
-        m = node["matrix"]
-        if not isinstance(m, list) or len(m) != 16 or not all(_number(v) for v in m):
-            raise Refusal(f"malformed GLB: {where} matrix is not sixteen numbers")
-        return tuple(tuple(float(m[c * 4 + r]) for c in range(4)) for r in range(4))
-    t = _vec3(node.get("translation", [0, 0, 0]), f"{where} translation")
-    s = _vec3(node.get("scale", [1, 1, 1]), f"{where} scale")
-    q = node.get("rotation", [0, 0, 0, 1])
-    if not isinstance(q, list) or len(q) != 4 or not all(_number(v) for v in q):
-        raise Refusal(f"malformed GLB: {where} rotation is not four numbers")
-    x, y, z, w = (float(v) for v in q)
-    rot = ((1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)),
-           (2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)),
-           (2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)))
-    return tuple(tuple(rot[r][c] * s[c] for c in range(3)) + (t[r],) for r in range(3)) \
-        + ((0.0, 0.0, 0.0, 1.0),)
-
-
-def _mesh_instances(doc: dict, mesh_count: int) -> list:
-    """``[(mesh index, world matrix)]`` for every node that instances a
-    mesh under the default scene (``scene``, else scene 0, else every root
-    node), transforms composed down the tree (DW-74, plans/34-7.md §Settled
-    shape 9). Empty when the file has no nodes."""
-    nodes = doc.get("nodes")
-    if not isinstance(nodes, list) or not nodes:
-        return []
-    for ni, node in enumerate(nodes):
-        if not isinstance(node, dict):
-            raise Refusal(f"malformed GLB: node {ni} is not an object")
-        kids = node.get("children", [])
-        if not isinstance(kids, list) or any(
-                not isinstance(c, int) or isinstance(c, bool) for c in kids):
-            raise Refusal(f"malformed GLB: node {ni} children is not a list of node indices")
-    scenes = doc.get("scenes")
-    roots = None
-    if isinstance(scenes, list) and scenes:
-        index = doc.get("scene", 0)
-        if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(scenes):
-            index = 0
-        scene = scenes[index]
-        roots = scene.get("nodes", []) if isinstance(scene, dict) else None
-        if not isinstance(roots, list):
-            raise Refusal(f"malformed GLB: scene {index} nodes is not a list")
-    if roots is None:
-        children = {c for node in nodes for c in node.get("children", [])}
-        roots = [i for i in range(len(nodes)) if i not in children]
-    out = []
-    stack = [(r, _IDENTITY, ()) for r in reversed(roots)]
-    while stack:
-        ni, parent, path = stack.pop()
-        if not isinstance(ni, int) or isinstance(ni, bool) or not 0 <= ni < len(nodes):
-            raise Refusal(f"malformed GLB: a node reference names no node ({ni!r})")
-        if ni in path:
-            raise Refusal(f"malformed GLB: node {ni} is its own ancestor")
-        node = nodes[ni]
-        world = _mat_mul(parent, _node_matrix(node, f"node {ni}"))
-        if "mesh" in node:
-            mi = node["mesh"]
-            if not isinstance(mi, int) or isinstance(mi, bool) or not 0 <= mi < mesh_count:
-                raise Refusal(f"malformed GLB: node {ni} names no mesh ({mi!r})")
-            out.append((mi, world))
-        kids = node.get("children") or []
-        if not isinstance(kids, list):
-            raise Refusal(f"malformed GLB: node {ni} children is not a list")
-        stack.extend((c, world, path + (ni,)) for c in reversed(kids))
-    return out
-
-
-def facts_of(data: bytes) -> dict:
-    """The facts of one GLB: triangles, bounds, origin, uv, materials.
-    Bounds are world bounds: every node instancing a mesh transforms that
-    mesh's POSITION box corners, and its triangles count once per instance
-    (DW-74); a file with no nodes (or none instancing a mesh) keeps the
-    mesh-only reading."""
-    doc, _binary = read_glb(data)
-    meshes = doc.get("meshes")
-    if not isinstance(meshes, list) or not meshes:
-        raise Refusal("malformed GLB: no meshes")
-    uv = False
-    per_mesh = []
-    for mi, mesh in enumerate(meshes):
-        prims = mesh.get("primitives") if isinstance(mesh, dict) else None
-        if not isinstance(prims, list) or not prims:
-            raise Refusal(f"malformed GLB: mesh {mi} has no primitives")
-        tris = 0
-        mlo = [math.inf] * 3
-        mhi = [-math.inf] * 3
-        for pi, prim in enumerate(prims):
-            where = f"mesh {mi} primitive {pi}"
-            attrs = prim.get("attributes") if isinstance(prim, dict) else None
-            if not isinstance(attrs, dict) or "POSITION" not in attrs:
-                raise Refusal(f"malformed GLB: {where} has no POSITION")
-            pos = _accessor(doc, attrs["POSITION"], f"{where} POSITION")
-            if "min" not in pos or "max" not in pos:
-                raise Refusal(f"malformed GLB: {where} POSITION has no min/max")
-            pmin = _vec3(pos["min"], f"{where} POSITION min")
-            pmax = _vec3(pos["max"], f"{where} POSITION max")
-            mlo = [min(a, b) for a, b in zip(mlo, pmin)]
-            mhi = [max(a, b) for a, b in zip(mhi, pmax)]
-            if "TEXCOORD_0" in attrs:
-                uv = True
-            count = (_accessor(doc, prim["indices"], f"{where} indices")["count"]
-                     if "indices" in prim else pos["count"])
-            mode = prim.get("mode", 4)
-            if mode == 4:
-                tris += count // 3
-            elif mode in (5, 6):
-                tris += max(0, count - 2)
-        per_mesh.append((tris, mlo, mhi))
-    instances = _mesh_instances(doc, len(meshes))
-    triangles = 0
-    lo = [math.inf] * 3
-    hi = [-math.inf] * 3
-    if not instances:
-        for tris, mlo, mhi in per_mesh:
-            triangles += tris
-            lo = [min(a, b) for a, b in zip(lo, mlo)]
-            hi = [max(a, b) for a, b in zip(hi, mhi)]
-    for mi, world in instances:
-        tris, mlo, mhi = per_mesh[mi]
-        triangles += tris
-        for corner in ((x, y, z) for x in (mlo[0], mhi[0]) for y in (mlo[1], mhi[1])
-                       for z in (mlo[2], mhi[2])):
-            p = [world[r][0] * corner[0] + world[r][1] * corner[1] + world[r][2] * corner[2]
-                 + world[r][3] for r in range(3)]
-            lo = [min(a, b) for a, b in zip(lo, p)]
-            hi = [max(a, b) for a, b in zip(hi, p)]
-    materials = doc.get("materials")
-    extent = [h - l for l, h in zip(lo, hi)]
-    return {
-        "triangles": triangles,
-        "bounds": {a: round(e, 6) for a, e in zip(AXES, extent)},
-        "min": [round(v, 6) for v in lo],
-        "max": [round(v, 6) for v in hi],
-        "origin": classify_origin(lo, hi),
-        "uv": uv,
-        "materials": len(materials) if isinstance(materials, list) else 0,
-    }
-
-
-def gate(entry: dict, facts: dict) -> list[str]:
-    """Why ``facts`` break ``entry``'s budget or bounds (empty: pass)."""
-    reasons = []
-    if facts["triangles"] > entry["tri_budget"]:
-        reasons.append(f"triangles {facts['triangles']} over tri_budget {entry['tri_budget']}")
-    for axis in AXES:
-        want = entry["bounds"][axis]
-        got = facts["bounds"][axis]
-        if abs(got - want) > BOUNDS_TOLERANCE * want + 1e-9:
-            reasons.append(f"bounds.{axis} {got:g} off {want:g} by more than 1 %")
-    return reasons
+    return png_encode(raw, size, size)
 
 
 # ------------------------------------------------------------- the status
 
-def with_block(result: dict, status: str, artifacts: list[str], reason: str | None) -> dict:
-    out = {k: v for k, v in result.items() if k not in BLOCK_KEYS}
-    out.update(status=status, intent=INTENT, artifacts=list(artifacts), reason=reason)
-    return out
+def with_block(result: dict, status: str, artifacts: list[str],
+               reason: str | None) -> dict:
+    """``result`` with the AD-11 block keys appended last, in order."""
+    return _core.with_block(result, status, artifacts, reason, intent=INTENT)
 
 
 def _blocked(exc: Exception) -> tuple[dict, int]:
@@ -1031,19 +746,14 @@ def check(*, directory: str, manifest: str | None = None,
 def resolve_blender(arg: str | None, env=None) -> str:
     """``--blender``, else ``BLENDER`` (stripped), else ``blender`` on PATH."""
     env = os.environ if env is None else env
-    if arg is not None or (env.get("BLENDER") or "").strip():
-        name = "--blender" if arg is not None else "BLENDER"
-        value = (arg if arg is not None else env["BLENDER"]).strip()
-        path = Path(value)
-        if not value or not path.is_file():
-            raise Refusal(f"no blender: {name} names {value!r}, which is not a file "
-                          "(set BLENDER to blender.exe, runbook §2)")
-        return str(path.resolve())
-    found = shutil.which("blender", path=env.get("PATH"))
-    if found is None:
+    got = _core.resolve_binary(arg, env, "BLENDER", flag="--blender", allow_which="blender")
+    if got.path is not None:
+        return str(Path(got.path).resolve())  # resolved on both branches (Windows' which answers in PATHEXT's case)
+    if got.problem == "unset":
         raise Refusal("no blender: BLENDER is unset and no blender is on PATH "
                       "(set BLENDER to blender.exe, runbook §2)")
-    return str(Path(found).resolve())  # resolved like the BLENDER branch (Windows' which answers in PATHEXT's case)
+    raise Refusal(f"no blender: {got.name} names {got.value!r}, which is not a file "
+                  "(set BLENDER to blender.exe, runbook §2)")
 
 
 def blender_argv(blender: str, spec_path: Path, script: Path = GREYBOX_SCRIPT) -> list[str]:
@@ -1057,18 +767,9 @@ def run_blender(argv: list[str], *, cwd: Path, log_path: Path,
     """Start Blender with its output in ``log_path``; kill its tree on
     overrun. Returns ``(exit | None, timed_out, duration_ms)``.
     Module-level so tests inject a fake."""
-    started = time.monotonic()
-    extra = {} if os.name == "nt" else {"start_new_session": True}
-    with open(log_path, "wb") as log:
-        proc = subprocess.Popen(argv, cwd=str(cwd), stdin=subprocess.DEVNULL,
-                                stdout=log, stderr=subprocess.STDOUT, **extra)
-        try:
-            code: int | None = proc.wait(timeout=timeout_s)
-            timed_out = False
-        except subprocess.TimeoutExpired:
-            playable.kill_tree(proc)
-            code, timed_out = None, True
-    return code, timed_out, int((time.monotonic() - started) * 1000)
+    code, timed_out, duration_ms, _confirmed = run_logged(
+        argv, cwd=cwd, log_path=log_path, timeout_s=timeout_s)
+    return code, timed_out, duration_ms
 
 
 def _tail(log_path: Path) -> str:
@@ -1312,21 +1013,6 @@ def path_tags(rel: str) -> list[str]:
     return sorted(tags)
 
 
-def _write_atomic(path: Path, data: bytes) -> None:
-    """``data`` at ``path``, whole or not at all (a temp file beside it,
-    flushed, then ``os.replace``)."""
-    tmp = path.with_name(f"{path.name}.tk-studio-{os.getpid()}.tmp")
-    try:
-        with open(tmp, "wb") as fh:
-            fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-    finally:
-        if tmp.exists():
-            tmp.unlink()
-
-
 # ---------------------------------------------------------- the index
 
 def _licence_file(kit: Path) -> Path | None:
@@ -1493,70 +1179,6 @@ def match_asset(entry: dict, mirror: list[dict]) -> dict | None:
 
 
 # ---------------------------------------------------------- the masks
-
-def png_pixels(data: bytes):
-    """``(width, height, channels, pixels)`` of an 8-bit, non-interlaced
-    PNG of colour type 0, 2, 4 or 6, its rows un-filtered (types 0 to 4);
-    None when ``data`` is anything else."""
-    image = _png_image(data)
-    if image is None:
-        return None
-    ihdr, raw = image
-    if len(ihdr) != 13:
-        return None
-    width, height, depth, ctype, _comp, _filt, interlace = struct.unpack(">IIBBBBB", ihdr)
-    channels = {0: 1, 2: 3, 4: 2, 6: 4}.get(ctype)
-    if depth != 8 or channels is None or interlace != 0 or not width or not height:
-        return None
-    stride = width * channels
-    if len(raw) < height * (stride + 1):
-        return None
-    out = bytearray(height * stride)
-    prev = bytearray(stride)
-    pos = 0
-    for y in range(height):
-        kind = raw[pos]
-        line = bytearray(raw[pos + 1:pos + 1 + stride])
-        pos += stride + 1
-        if kind == 1:
-            for i in range(channels, stride):
-                line[i] = (line[i] + line[i - channels]) & 0xFF
-        elif kind == 2:
-            for i in range(stride):
-                line[i] = (line[i] + prev[i]) & 0xFF
-        elif kind == 3:
-            for i in range(stride):
-                left = line[i - channels] if i >= channels else 0
-                line[i] = (line[i] + ((left + prev[i]) >> 1)) & 0xFF
-        elif kind == 4:
-            for i in range(stride):
-                a = line[i - channels] if i >= channels else 0
-                b = prev[i]
-                c = prev[i - channels] if i >= channels else 0
-                p = a + b - c
-                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
-                pred = a if pa <= pb and pa <= pc else (b if pb <= pc else c)
-                line[i] = (line[i] + pred) & 0xFF
-        elif kind != 0:
-            return None
-        out[y * stride:(y + 1) * stride] = line
-        prev = line
-    return width, height, channels, bytes(out)
-
-
-def alpha_mask(data: bytes):
-    """``(width, height, mask)``: one bool per pixel, alpha > 0; None when
-    the PNG is unreadable or has no alpha channel (colour type 0 or 2: a
-    render without alpha has no silhouette, so the visual gate fails it)."""
-    decoded = png_pixels(data)
-    if decoded is None:
-        return None
-    width, height, channels, pixels = decoded
-    if channels not in (2, 4):
-        return None
-    mask = [pixels[i] > 0 for i in range(channels - 1, len(pixels), channels)]
-    return width, height, mask
-
 
 def visual_gate(candidate_png: bytes, greybox_png: bytes) -> tuple[list[str], dict]:
     """``(reasons, {coverage, fill})``: the candidate's silhouette must cover
@@ -2070,29 +1692,9 @@ def credit_cap(project: Path) -> float:
     return float(cap)
 
 
-def _hkcu_value(name: str):
-    """``HKCU\\Environment``'s value for ``name`` through winreg (Windows
-    only; None elsewhere or when unset). Module-level so tests stub it."""
-    if os.name != "nt":
-        return None
-    try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
-            return winreg.QueryValueEx(key, name)[0]
-    except (ImportError, OSError):
-        return None
-
-
 def user_env(name: str, env=None) -> str | None:
-    """A User environment variable by name: ``HKCU\\Environment`` on
-    Windows (set without a new terminal), then the process env. The value
-    is returned to the caller only; it is never printed or written."""
-    value = _hkcu_value(name)
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    env = os.environ if env is None else env
-    value = (env.get(name) or "").strip()
-    return value or None
+    """`_core.user_env`, reading this module's `_hkcu_value` (tests stub it)."""
+    return _core.user_env(name, env, read=_hkcu_value)
 
 
 class GeneratorError(Exception):

@@ -87,3 +87,11 @@ Windows (not skipped there):
   `report.json`, the lib's other reads of project files), never bare
   `utf-8`. `lib/tests/test_recommend.py`
   `RecommendTestCase.test_mcp_status_configured_when_mcp_json_with_a_bom_has_the_server`.
+- **Text encodings** (DW-132, hole 103, Story 36.4): Linux defaults a text-mode
+  open to UTF-8 and the Windows host to its code page, so a bare call is green
+  in the sandbox and red on the host. Every text-mode `open`, `Path.open`,
+  `read_text` and `write_text` names an encoding by keyword, `encoding="utf-8"`
+  unless the BOM bullet's `encoding="utf-8-sig"` applies;
+  `contracts/conformance/e2e_text_encoding.py` fails a call site that names
+  none, naming `<file>:<line> <call>`. `lib/tests/test_installer_doctor.py` carries the fix
+  that rule came from; `lib/tests/test_conformance.py` proves the drive.

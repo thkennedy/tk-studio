@@ -17,6 +17,7 @@ import { engineMcpPort } from "../src/env";
 import { snapshotOnce } from "../src/hygiene";
 import { killRecordedWorker, processStartTime, Queue, type Owner, type QueueRun } from "../src/queue";
 import { releasePin, type SandboxDeps } from "../src/sandbox";
+import { release } from "../src/worktree";
 import type { RunResult } from "../src/server";
 import { fakeBin, fakeGh, fakeSbx, fakeStudioRoot, gitInit, RUNTIME_GITIGNORE } from "./fakes";
 import { tempDir, track } from "./tmp";
@@ -144,7 +145,7 @@ function depsFor(files: Files, extra: Partial<EngineMcpDeps> & { env?: Record<st
   };
 }
 const kinds = (q: Queue, id: string) => q.events(id).map((e) => e.kind);
-const sbxDeps = (): SandboxDeps => ({ env: { ...process.env, SBX_BIN: sbx.bin, TK_STUDIO_HOME: tempDir("tk-sup-enginemcp-home-") } });
+const sbxDeps = (): SandboxDeps => ({ stopEngineMcp, env: { ...process.env, SBX_BIN: sbx.bin, TK_STUDIO_HOME: tempDir("tk-sup-enginemcp-home-") } });
 
 async function startOk(q: Queue, run: QueueRun) {
   const port = freePort();
@@ -320,6 +321,17 @@ describe("refusals: nothing started on any", () => {
 });
 
 describe("stop: at release, also on a kept pin", () => {
+  test("Story 36.7 (DW-85): the default wiring injects the stop: `worktree.release` stops the run's MCP with no `sbx.stopEngineMcp` given", async () => {
+    sbx.answer({});
+    const q = newQueue();
+    const { run } = await flaggedRun(q);
+    await startOk(q, run);
+    q.end(run.run_id, "complete", null);
+    expect(await release(q, run.run_id, { env: sbxDeps().env! })).toBe("released");
+    expect(engineMcpLive(run.run_id)).toBe(false);
+    expect(q.events(run.run_id).find((e) => e.kind === ENGINE_MCP_STOP)?.detail).toMatchObject({ why: "released" });
+  });
+
   test("Release: the terminal run's MCP stops — the forwarder closed, the child gone, `engine-mcp-stop` recorded", async () => {
     sbx.answer({});
     const q = newQueue();

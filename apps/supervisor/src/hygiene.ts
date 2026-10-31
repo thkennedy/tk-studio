@@ -30,9 +30,11 @@
  */
 import { cpSync, copyFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { basename, dirname, join, posix, win32 } from "node:path";
-import { notifier, WorkDirMissing, workDir, type Notifier } from "./env";
+import { notifier, underBunTest, WorkDirMissing, workDir, type Notifier } from "./env";
+import { canonicalPr } from "./planseams";
 import type { Queue, QueueRun } from "./queue";
 import { runProcess, type RunResult } from "./server";
+import { isSweep, sweepNotice, sweepSummary } from "./sweep";
 import { claudeConfigDir, locateTranscript, subagentTranscripts, transcriptBackupRoot } from "./transcript";
 
 type Env = Record<string, string | undefined>;
@@ -128,15 +130,7 @@ export async function snapshotOnce(
 
 // ------------------------------------------------------------ the notification
 
-/** A GitHub pull-request URL (owner ≤39, repo ≤100 characters, GitHub's own limits); a trailing
- * path, query or fragment is matched but not kept. */
-const GITHUB_PR = /^(https:\/\/github\.com\/[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}\/pull\/\d{1,12})(?:[/?#]\S*)?$/;
-
-/** The canonical `https://github.com/<owner>/<repo>/pull/<n>` of a pull-request URL (any trailing
- * suffix dropped, so the notice's PR line is bounded), else undefined. */
-export function canonicalPr(s: unknown): string | undefined {
-  return typeof s === "string" ? GITHUB_PR.exec(s.trim())?.[1] : undefined;
-}
+export { canonicalPr, underBunTest };
 
 /** The first GitHub pull-request URL among a status block's `artifacts[]`, canonical, else undefined. */
 export function prUrl(block: unknown): string | undefined {
@@ -154,12 +148,6 @@ export interface EndNotice {
   sweep?: string;
 }
 
-/** Story 35.7: a terminal sweep run's line read live (undefined for a run that is not a sweep). Registered by
- * `sweep.ts` — hygiene never imports it (sweep → worktree → hygiene would cycle). */
-type SweepLineReader = (queue: Queue, run: QueueRun) => string | undefined;
-let sweepLineReader: SweepLineReader | undefined;
-export function registerSweepLine(read: SweepLineReader): void { sweepLineReader = read; }
-
 /** The notice of a terminal queue run: the PR from its ending event's detail (`mirror` records it). */
 export function endNotice(queue: Queue, run: QueueRun): EndNotice {
   const events = queue.events(run.run_id);
@@ -169,7 +157,7 @@ export function endNotice(queue: Queue, run: QueueRun): EndNotice {
   // read live: a run made terminal before its close-out (a cancel) still has its worktree. Any failure omits the line.
   const notice = (d: Record<string, unknown> | null | undefined) => (d?.sweep as Record<string, unknown> | undefined)?.notice;
   let sweep = notice(ending?.detail) ?? notice(events.findLast((e) => e.kind === "closed_out" && notice(e.detail) !== undefined)?.detail);
-  if (sweep === undefined && sweepLineReader) { try { sweep = sweepLineReader(queue, run); } catch { /* no line */ } }
+  if (sweep === undefined) { try { if (isSweep(queue.definition(run))) sweep = sweepNotice(sweepSummary(queue, run)); } catch { /* no line */ } }
   return {
     run_id: run.run_id, job_id: run.job_id, project_id: run.project_id, studio_run_id: run.studio_run_id,
     state: run.state, reason: run.reason, ...(pr ? { pr } : {}), ...(typeof sweep === "string" && sweep ? { sweep } : {}),
@@ -259,13 +247,6 @@ export function notifierSecrets(n: Exclude<Notifier, { kind: "none" }>): string[
 /** `s` with every notifier secret replaced by `[redacted]`. */
 export function scrubNotifier(n: Exclude<Notifier, { kind: "none" }>, s: string): string {
   return notifierSecrets(n).reduce((acc, x) => acc.split(x).join("[redacted]"), s);
-}
-
-/** Hole 31: the suite runs under `bun test` with `test/preload.ts` (bunfig.toml), which strips the
- * operator's notifier variables and sets this marker; a send through the real `fetch` is then refused,
- * so a test reaches a notifier only through an injected fake. `NODE_ENV=test` counts too. */
-export function underBunTest(env: Env = process.env): boolean {
-  return env.TK_SUPERVISOR_UNDER_TEST === "1" || env.NODE_ENV === "test";
 }
 
 export const REFUSED_UNDER_TEST = "refused: a real notifier send under bun test (hole 31) — tests inject a fake fetch";

@@ -54,10 +54,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+import _core
 import job as joblib
 
 INTENT = "tk-studio-evals"
-BLOCK_KEYS = ("status", "intent", "artifacts", "reason")
+BLOCK_KEYS = _core.BLOCK_KEYS
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 SCORES = "scores.json"
 # The run verdict strings read as a pass or a fail; any other is unreadable.
@@ -80,10 +81,7 @@ class Refusal(Exception):
 def with_block(result: dict, status: str, artifacts: list[str],
                reason: str | None) -> dict:
     """``result`` with the AD-11 block keys appended last, in order."""
-    out = {k: v for k, v in result.items() if k not in BLOCK_KEYS}
-    out.update(status=status, intent=INTENT, artifacts=list(artifacts),
-               reason=reason)
-    return out
+    return _core.with_block(result, status, artifacts, reason, intent=INTENT)
 
 
 def _write_atomic(path: Path, text: str) -> None:

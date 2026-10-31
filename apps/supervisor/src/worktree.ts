@@ -85,12 +85,14 @@
 import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { ghBin, notifier, pluginRoot, WorkDirMissing, workDir } from "./env";
+import { stopEngineMcp } from "./enginemcp";
+import { notifier, WorkDirMissing, workDir } from "./env";
 import { canonicalPr, isWithin, sendText } from "./hygiene";
 import { CONTACT_SHEET, FRAMES_DIR, hostVerify, inconclusiveReason, isInconclusive, isRed, isSlice, legHistory, legVerdict, prSection, redReason, type HostVerifyResult, type LegHistoryEntry, type PlayableJudge, type PlayableRoute, type PrProof } from "./hostverify";
 import { accountedCostOf, isTerminal, RunTerminal, servedRoot, type EngineWhere, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
+import { gh, originGhRepo, originRepo, runner, studioScript, uvRunner } from "./runners";
 import { releasePin, sameStart, vmLaunchStatus, type SandboxDeps } from "./sandbox";
-import { lastJsonObject, runJobVerb, runProcess, runUv, toVmPath, type RunResult, type Tier } from "./server";
+import { lastJsonObject, runJobVerb, runProcess, toVmPath, type RunResult, type Tier } from "./server";
 import { emitTriage, engineCostOf, engineEndStatus, engineJobRun, isSweep, recordTriage, stopSweepEngine, SWEEP_ENGINE_STOP, sweepStopPastDeadline, sweepCostText, sweepEndState, sweepNotice, sweepRecord, sweepSection, sweepSummary, sweepTotalCost, withEngineCost, type SweepSummary } from "./sweep";
 
 type Env = Record<string, string | undefined>;
@@ -122,7 +124,7 @@ export interface WorktreeDeps {
 
 /** The `sbx` seams of a worktree run (the pin's env and the injected runner), for the pin, the release and
  * the in-VM engine probe (hole 38). */
-const sbxOf = (deps: WorktreeDeps): SandboxDeps => ({ ...(deps.env ? { env: deps.env } : {}), ...(deps.sbx ?? {}) });
+const sbxOf = (deps: WorktreeDeps): SandboxDeps => ({ stopEngineMcp, ...(deps.env ? { env: deps.env } : {}), ...(deps.sbx ?? {}) });
 
 /** Story 27.2: the deferred `ended` releases the run's pin (`sbx stop`, when no other run records its sandbox). */
 export const release = (queue: Queue, runId: string, deps: WorktreeDeps) => releasePin(queue, runId, sbxOf(deps));
@@ -131,10 +133,7 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 /** Command output for an event: URL userinfo redacted, clipped. */
 const clip = (s: string, n = 300) => s.replace(/\/\/[^/@\s]+@/g, "//[redacted]@").trim().slice(0, n);
 
-export const runner = (deps: WorktreeDeps): CommandRunner =>
-  deps.run ?? ((bin, args, opts) => runProcess(bin, args, { cwd: opts.cwd, timeoutS: opts.timeoutS, env: { ...(deps.env ?? process.env), ...(opts.env ?? {}) } }));
-export const uvRunner = (deps: WorktreeDeps): UvScriptRunner => deps.uv ?? runUv;
-export const studioScript = (deps: WorktreeDeps, ...rel: string[]) => join(pluginRoot(deps.env ?? process.env), ...rel);
+export { gh, originRepo, runner, studioScript, uvRunner };
 
 /** A prepare step that failed: the run ends `blocked` naming it (`worktree <step>: <detail>`). */
 export class WorktreeFailed extends Error {
@@ -161,35 +160,6 @@ export function worktreeAddArgv(path: string, branch: string, baseRef: string): 
 
 async function git(deps: WorktreeDeps, cwd: string, args: string[], timeoutS = 120): Promise<RunResult> {
   return runner(deps)("git", args, { cwd, timeoutS });
-}
-
-/** `[HOST/]OWNER/REPO` of a GitHub remote URL (https, `ssh://`, or scp-like `git@host:owner/repo`;
- * a `.git` suffix and any userinfo dropped; `github.com` answered as `OWNER/REPO`), else undefined
- * (a local path, an ssh host alias with no domain, anything else). */
-export function originRepo(url: string): string | undefined {
-  const u = url.trim();
-  const m = /^(?:https?|ssh|git):\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/.exec(u)
-    ?? /^(?:[^@/:]+@)?([^/:]+):(?!\/)([^/]+)\/([^/]+?)(?:\.git)?\/?$/.exec(u);
-  if (!m) return undefined;
-  const host = m[1]!.toLowerCase() === "ssh.github.com" ? "github.com" : m[1]!.toLowerCase();
-  if (!host.includes(".")) return undefined;
-  return host === "github.com" ? `${m[2]}/${m[3]}` : `${host}/${m[2]}/${m[3]}`;
-}
-
-/** The repository every `gh` call is pinned to (`GH_REPO`): origin's, from `git remote get-url origin`
- * in `cwd` — never gh's own default-remote choice (an `upstream` remote beside `origin`). Undefined when
- * it cannot be read or parsed: gh's default then. */
-async function originGhRepo(deps: WorktreeDeps, cwd: string): Promise<string | undefined> {
-  try {
-    const r = await git(deps, cwd, ["remote", "get-url", "origin"], 30);
-    return r.exit === 0 ? originRepo(r.stdout) : undefined;
-  } catch { return undefined; }
-}
-
-/** `gh <args>` in `cwd`, pinned to origin's repository (`GH_REPO`); argv only. Story 27.5: exported for the merge pass. */
-export async function gh(deps: WorktreeDeps, cwd: string, args: string[], timeoutS = 120): Promise<RunResult> {
-  const repo = await originGhRepo(deps, cwd);
-  return runner(deps)(ghBin(deps.env ?? process.env), args, { cwd, timeoutS, ...(repo ? { env: { GH_REPO: repo } } : {}) });
 }
 
 const failed = (r: RunResult) => `exit ${r.exit}: ${clip(r.stderr || r.stdout)}`;

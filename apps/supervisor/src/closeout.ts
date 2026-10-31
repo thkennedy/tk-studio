@@ -115,11 +115,11 @@ import { load as loadYaml } from "js-yaml";
 import { notifier, pluginRoot, sbxBin, studioRoot } from "./env";
 import { canonicalPr, isWithin, notify, NOTICE_MAX_BYTES, sendText, TRUNCATED_MARKER, type EndNotice } from "./hygiene";
 import { hostVerify, inconclusiveReason, isInconclusive, isRed, isSlice, legHistory, redReason, type HostVerifyResult, type LegHistoryEntry } from "./hostverify";
-import { engineRoot, isTerminal, RunTerminal, selfOwner, servedRoot, STUDIO_END_RETRY_LIMIT, type EngineWhere, type Owner, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
+import { engineRoot, isSweep, isTerminal, RunTerminal, selfOwner, servedRoot, STUDIO_END_RETRY_LIMIT, type EngineWhere, type Owner, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
 import { HOLD_TIMEOUT_S, parseEnginePid, sameStart, type HoldChild } from "./sandbox";
 import { lastJsonObject, runProcess, toVmPath, type RunResult } from "./server";
 import { applyTransition, closeOut, closeOutDetail, engineState, finishStudio, killedEngine, launchedCloseOutInput, meteredCost, priorPr, recordedVerify, release, runner, studioScript, uvRunner, type PendingTransition, type WorktreeDeps } from "./worktree";
-import { isSweep, stopEngine } from "./sweep";
+import { stopEngine } from "./runners";
 
 type Env = Record<string, string | undefined>;
 
