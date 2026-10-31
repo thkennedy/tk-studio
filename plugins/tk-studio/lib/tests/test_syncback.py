@@ -285,7 +285,7 @@ class HappyTickTests(SyncBackTestCase):
                           "ratelimit-policy": "burst"})
         self.assertNotIn("fake-jira-token", json.dumps(result))
         self.assertNotIn("fake-jira-token",
-                         (self.root / syncback.STATE_REL).read_text("utf-8"))
+                         (self.root / syncback.STATE_REL).read_text(encoding="utf-8"))
 
     def test_duplicate_key_across_pages_takes_the_latest(self):
         self.fake.issue(f"{KEY}-1", "In Progress", "indeterminate", 50)
@@ -353,13 +353,13 @@ class StatusMappingTests(SyncBackTestCase):
         index = plansync.plan_dir(self.root) / "index.md"
         rel = "_bmad-output/planning-artifacts/plan/index.md"
         plansync.generate_plan_index(self.root)  # as the last `sync` left it
-        self.assertNotIn("`done`", index.read_text("utf-8"))
+        self.assertNotIn("`done`", index.read_text(encoding="utf-8"))
         self.fake.issue(f"{KEY}-1", "Done", "done", 30)
         result = self.run_tick()
         self.assertIn(rel, result["written"])
         self.assertIn(rel, result["artifacts"])
-        self.assertIn("`done`", index.read_text("utf-8"))
-        self.assertEqual(index.read_text("utf-8"), plansync.render_plan_index(
+        self.assertIn("`done`", index.read_text(encoding="utf-8"))
+        self.assertEqual(index.read_text(encoding="utf-8"), plansync.render_plan_index(
             self.root.resolve().name,
             [interchange.parse_entity(p)[0] for p in
              interchange.scan_entities(plansync.plan_dir(self.root))[0]]))
@@ -369,10 +369,10 @@ class StatusMappingTests(SyncBackTestCase):
         self.assertNotIn(rel, second["written"])
         self.fake.search_issues = []
         self.fake.issue(f"{KEY}-1", "To Do", "new", 2)
-        before = index.read_text("utf-8")
+        before = index.read_text(encoding="utf-8")
         dry = self.run_tick(minutes_later=20, dry_run=True)
         self.assertNotIn(rel, dry["written"])
-        self.assertEqual(index.read_text("utf-8"), before)
+        self.assertEqual(index.read_text(encoding="utf-8"), before)
 
     def test_a_snapshot_only_refresh_is_not_counted(self):
         # `In Review` moves within the same canonical `in-progress`
@@ -473,7 +473,7 @@ class InboxSeamTests(SyncBackTestCase):
         result = self.run_tick()
         self.assert_block_last(result, "complete")
         self.assertIn(self.INBOX, result["written"])
-        data = json.loads((self.root / self.INBOX).read_text("utf-8"))
+        data = json.loads((self.root / self.INBOX).read_text(encoding="utf-8"))
         self.assertEqual([(i["issue"], i["state"], i["priority"])
                           for i in data["items"]],
                          [(f"{KEY}-1", "open", "High")])
@@ -487,7 +487,7 @@ class InboxSeamTests(SyncBackTestCase):
                         "indeterminate", 30, summary="ENG-001: questions")
         result = self.run_tick()
         self.assert_block_last(result, "complete")
-        data = json.loads((self.root / self.INBOX).read_text("utf-8"))
+        data = json.loads((self.root / self.INBOX).read_text(encoding="utf-8"))
         self.assertEqual([(i["issue"], i.get("engagement"), i.get("title"))
                           for i in data["items"]],
                          [(f"{KEY}-40", "ENG-001", "ENG-001: questions")])
@@ -573,7 +573,7 @@ class InboxSeamTests(SyncBackTestCase):
         self.assertIn(self.INBOX, result["written"])
         self.assertEqual(self.fake.jql, [syncback.jql_for(
             KEY, prior, NOW + timedelta(minutes=20))])
-        data = json.loads((self.root / self.INBOX).read_text("utf-8"))
+        data = json.loads((self.root / self.INBOX).read_text(encoding="utf-8"))
         self.assertNotIn(f"{KEY}-1", [i["issue"] for i in data["items"]])
         self.assertEqual(self.state()["cursor"], stamp(5))
         # re-reading appended nothing twice
@@ -638,19 +638,19 @@ class MirrorTests(SyncBackTestCase):
         self.fake.page("P-1", "Owner Notes", "<p>two</p>", version=2)
         second = self.run_tick(minutes_later=10)
         self.assertIn(self.MIRROR, second["written"])
-        self.assertTrue((self.root / self.MIRROR).read_text("utf-8")
+        self.assertTrue((self.root / self.MIRROR).read_text(encoding="utf-8")
                         .endswith("<p>two</p>"))
         self.assertEqual(second["overwritten"], [])
 
     def test_a_local_edit_is_overwritten_and_reported(self):
         self.run_tick()
         path = self.root / self.MIRROR
-        path.write_text(path.read_text("utf-8") + "\nmy local note\n",
+        path.write_text(path.read_text(encoding="utf-8") + "\nmy local note\n",
                         encoding="utf-8", newline="\n")
         second = self.run_tick(minutes_later=10)
         self.assertEqual(second["overwritten"], [self.MIRROR])
         self.assertIn(self.MIRROR, second["written"])
-        self.assertNotIn("my local note", path.read_text("utf-8"))
+        self.assertNotIn("my local note", path.read_text(encoding="utf-8"))
         self.assertEqual(second["counts"]["pages_overwritten"], 1)
 
     def test_a_crlf_checkout_is_not_a_local_edit(self):
@@ -669,7 +669,7 @@ class MirrorTests(SyncBackTestCase):
     def test_a_header_only_edit_is_overwritten_and_reported(self):
         self.run_tick()
         path = self.root / self.MIRROR
-        original = path.read_text("utf-8")
+        original = path.read_text(encoding="utf-8")
         self.assertIn("read_only: true\n", original)
         path.write_text(original.replace("read_only: true",
                                          "read_only: false"),
@@ -678,7 +678,7 @@ class MirrorTests(SyncBackTestCase):
         self.assertEqual(second["overwritten"], [self.MIRROR])
         self.assertIn(self.MIRROR, second["written"])
         self.assertEqual(second["counts"]["pages_overwritten"], 1)
-        restored = path.read_text("utf-8")
+        restored = path.read_text(encoding="utf-8")
         self.assertIn("read_only: true\n", restored)
         self.assertNotIn("read_only: false", restored)
 
@@ -694,7 +694,7 @@ class MirrorTests(SyncBackTestCase):
         self.assertEqual(second["overwritten"], [])
         self.assertEqual(second["counts"]["pages_overwritten"], 0)
         self.assertIn(self.MIRROR, second["written"])
-        text = path.read_text("utf-8")
+        text = path.read_text(encoding="utf-8")
         self.assertTrue(text.endswith("<p>two</p>"))
         self.assertIn("version: 2\n", text)
         # a header-only edit is still caught with the state lost
@@ -703,7 +703,7 @@ class MirrorTests(SyncBackTestCase):
         (self.root / syncback.STATE_REL).unlink()
         third = self.run_tick(minutes_later=20)
         self.assertEqual(third["overwritten"], [self.MIRROR])
-        self.assertIn("read_only: true\n", path.read_text("utf-8"))
+        self.assertIn("read_only: true\n", path.read_text(encoding="utf-8"))
 
     def test_the_confluence_rate_limit_lands_in_the_record(self):
         real = self.fake._confluence
@@ -991,7 +991,7 @@ class RefusalTests(SyncBackTestCase):
 
     def test_no_owner_account_id_skips_logs_and_mirror(self):
         config = self.root / ".tk-studio" / "config.yaml"
-        config.write_text(config.read_text("utf-8").replace(
+        config.write_text(config.read_text(encoding="utf-8").replace(
             f'    owner_account_id: "{OWNER}"\n', ""), encoding="utf-8",
             newline="\n")
         self.happy()
@@ -1011,7 +1011,7 @@ class RefusalTests(SyncBackTestCase):
         # the cursor did not move past the skipped comments and attachments
         self.assertEqual(self.state()["cursor"], prior)
         # once the owner is recorded the next tick logs them
-        config.write_text(config.read_text("utf-8").replace(
+        config.write_text(config.read_text(encoding="utf-8").replace(
             f'    agent_account_id: "{AGENT}"\n',
             f'    owner_account_id: "{OWNER}"\n'
             f'    agent_account_id: "{AGENT}"\n'), encoding="utf-8",

@@ -54,7 +54,7 @@ def _alive(pid: int) -> bool:
     except PermissionError:
         return True
     try:
-        stat = Path(f"/proc/{pid}/stat").read_text()
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
         return stat.rsplit(")", 1)[1].split()[0] != "Z"
     except (OSError, IndexError):
         return True
@@ -681,7 +681,7 @@ class PlayableTestCase(unittest.TestCase):
         self.assertTrue(timed_out)
         self.assertIsNone(code)
         self.assertTrue(pid_file.is_file(), "the child started its grandchild before the kill")
-        gpid = int(pid_file.read_text())
+        gpid = int(pid_file.read_text(encoding="utf-8"))
         deadline = time.monotonic() + 5
         while _alive(gpid) and time.monotonic() < deadline:
             time.sleep(0.05)
@@ -702,10 +702,10 @@ class PlayableTestCase(unittest.TestCase):
         proc = subprocess.Popen([sys.executable, "-c", child], stdin=subprocess.DEVNULL,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         deadline = time.monotonic() + 15
-        while not (pid_file.is_file() and pid_file.read_text().strip()) and time.monotonic() < deadline:
+        while not (pid_file.is_file() and pid_file.read_text(encoding="utf-8").strip()) and time.monotonic() < deadline:
             time.sleep(0.05)
         self.assertTrue(pid_file.is_file(), "the child started its grandchild")
-        gpid = int(pid_file.read_text())
+        gpid = int(pid_file.read_text(encoding="utf-8"))
 
         def nt_alive(pid: int) -> bool:
             done = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True,

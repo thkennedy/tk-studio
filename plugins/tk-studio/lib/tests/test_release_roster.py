@@ -976,7 +976,7 @@ class ReleaseMotionTestCase(unittest.TestCase):
             return done(out="o/sup\n" if cwd == self.sup else "o/r\n")
         if args[:2] == ["uv", "build"]:
             self.build_env = kw.get("env")
-            self.build_src = (Path(args[-1]) / "a.txt").read_text("utf-8")
+            self.build_src = (Path(args[-1]) / "a.txt").read_text(encoding="utf-8")
             out = Path(args[args.index("--out-dir") + 1])
             out.mkdir(parents=True, exist_ok=True)
             (out / f"tk_cli-{self.wheel_version}-py3-none-any.whl").write_bytes(
@@ -984,7 +984,7 @@ class ReleaseMotionTestCase(unittest.TestCase):
             return done()
         if args[0] == "bun":
             self.bun_calls.append((list(args),
-                                   (Path(cwd) / "a.txt").read_text("utf-8"),
+                                   (Path(cwd) / "a.txt").read_text(encoding="utf-8"),
                                    kw.get("env")))
             if self.bun_fails == " ".join(args[1:]):
                 return done(1)
@@ -993,8 +993,8 @@ class ReleaseMotionTestCase(unittest.TestCase):
                 dist = Path(cwd) / "dist"
                 (dist / "assets").mkdir(parents=True, exist_ok=True)
                 (dist / "index.html").write_text(
-                    '<script src="/app/assets/app.js"></script>', "utf-8")
-                (dist / "assets" / "app.js").write_text("app", "utf-8")
+                    '<script src="/app/assets/app.js"></script>', encoding="utf-8")
+                (dist / "assets" / "app.js").write_text("app", encoding="utf-8")
             return done()
         if args[:3] == ["gh", "release", "view"]:
             return done(0 if self.release_exists else 1)
@@ -1029,11 +1029,11 @@ class ReleaseMotionTestCase(unittest.TestCase):
         self.assertIn("--latest=false", create[0])  # make_latest: false
         self.assertTrue(result["verified"])
         self.assertEqual(result["asset"], "tk-studio-1.2.3.zip")
-        roster = json.loads((self.rosters / "latest.json").read_text("utf-8"))
+        roster = json.loads((self.rosters / "latest.json").read_text(encoding="utf-8"))
         self.assertEqual(roster["components"]["plugin"],
                          {"tag": "tk-studio--v1.2.3", "url": FIX_URL,
                           "sha256": result["sha256"]})
-        record = json.loads(self.record.read_text("utf-8"))
+        record = json.loads(self.record.read_text(encoding="utf-8"))
         self.assertEqual(record["archive"],
                          {"url": FIX_URL, "sha256": result["sha256"]})
         self.assertEqual(record["skills"], ["tk-a"])
@@ -1057,7 +1057,7 @@ class ReleaseMotionTestCase(unittest.TestCase):
                             or "archive" in a))
         self.assertIn("supervisor--v0.1.0:", [a[-1] for a, _ in self.calls
                                              if "archive" in a])
-        roster = json.loads((self.rosters / "latest.json").read_text("utf-8"))
+        roster = json.loads((self.rosters / "latest.json").read_text(encoding="utf-8"))
         self.assertEqual(roster["components"]["supervisor"], {
             "tag": "supervisor--v0.1.0",
             "url": "https://github.com/o/sup/releases/download/"
@@ -1088,7 +1088,7 @@ class ReleaseMotionTestCase(unittest.TestCase):
         with zipfile.ZipFile(io.BytesIO(self.uploaded)) as z:
             self.assertEqual(sorted(z.namelist()),
                              ["package.json", "src/index.ts"])
-        roster = json.loads((self.rosters / "latest.json").read_text("utf-8"))
+        roster = json.loads((self.rosters / "latest.json").read_text(encoding="utf-8"))
         self.assertEqual(roster["components"]["supervisor"], {
             "tag": "supervisor--v0.1.1",
             "url": "https://github.com/o/r/releases/download/"
@@ -1119,7 +1119,7 @@ class ReleaseMotionTestCase(unittest.TestCase):
         with zipfile.ZipFile(io.BytesIO(self.uploaded)) as z:
             self.assertEqual(sorted(z.namelist()),
                              ["package.json", "src/index.ts"])
-        roster = json.loads((self.rosters / "latest.json").read_text("utf-8"))
+        roster = json.loads((self.rosters / "latest.json").read_text(encoding="utf-8"))
         self.assertNotIn("source", roster["components"]["supervisor"])
         self.assertEqual(roster["components"]["supervisor"]["sha256"],
                          result["sha256"])
@@ -1166,7 +1166,7 @@ class ReleaseMotionTestCase(unittest.TestCase):
         upload = self._gh_calls("upload")[0]
         self.assertEqual(Path(upload[4]).name, wheel)
         self.assertEqual(self.build_env["SOURCE_DATE_EPOCH"], "1754000000")
-        roster = json.loads((self.rosters / "latest.json").read_text("utf-8"))
+        roster = json.loads((self.rosters / "latest.json").read_text(encoding="utf-8"))
         self.assertEqual(roster["components"]["cli"], {
             "tag": "cli--v0.1.0",
             "url": f"https://github.com/o/r/releases/download/cli--v0.1.0/{wheel}",
@@ -1192,7 +1192,7 @@ class ReleaseMotionTestCase(unittest.TestCase):
             self.assertEqual(sorted(z.namelist()),
                              ["assets/app.js", "index.html"])
             self.assertIn(b"/app/assets/", z.read("index.html"))
-        roster = json.loads((self.rosters / "latest.json").read_text("utf-8"))
+        roster = json.loads((self.rosters / "latest.json").read_text(encoding="utf-8"))
         self.assertEqual(roster["components"]["studio-web"], {
             "tag": "studio-web--v0.1.0",
             "url": "https://github.com/o/r/releases/download/"
@@ -1227,7 +1227,7 @@ class ReleaseMotionTestCase(unittest.TestCase):
             {"version": "1.2.3", "skills": ["tk-a"]}), encoding="utf-8")
         result = release_archive.run(False, app="studio-web", version="0.1.0")
         self.assertTrue(result["verified"])
-        roster = json.loads((self.rosters / "latest.json").read_text("utf-8"))
+        roster = json.loads((self.rosters / "latest.json").read_text(encoding="utf-8"))
         self.assertEqual(roster["components"]["studio-web"]["tag"],
                          "studio-web--v0.1.0")
 
@@ -1240,7 +1240,7 @@ class ReleaseMotionTestCase(unittest.TestCase):
                                      channel="stable")
         self.assertEqual(result["written"],
                          ["tools/installer/rosters/stable.json"])
-        roster = json.loads((self.rosters / "stable.json").read_text("utf-8"))
+        roster = json.loads((self.rosters / "stable.json").read_text(encoding="utf-8"))
         self.assertEqual(roster["components"]["plugin"], _TRAILING_PLUGIN)
 
     def test_latest_out_of_gate_is_never_published(self):
@@ -1385,7 +1385,7 @@ class ReleaseMotionTestCase(unittest.TestCase):
         result = release_archive.run(False, app="studio-web", version="0.1.0",
                                      channel="stable")
         self.assertEqual(result["source"], "o/r")
-        roster = json.loads((self.rosters / "stable.json").read_text("utf-8"))
+        roster = json.loads((self.rosters / "stable.json").read_text(encoding="utf-8"))
         self.assertEqual(roster["components"]["studio-web"]["source"], "o/r")
         self.assertEqual(drift_check.roster_problems(roster), [])
 

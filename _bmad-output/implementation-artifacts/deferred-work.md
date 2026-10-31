@@ -896,7 +896,7 @@ source_spec: `kb/agent-pc-setup-runbook.md` fixes row "hole 96"; `handoff-phase1
 location: plugins/tk-studio/lib/tests/test_launch.py (`test_spec_open_questions_reads_the_real_spec_shapes`); every other lib-suite read of the live `_bmad-output/specs/` and `_bmad-output/planning-artifacts/`
 severity: low
 reason: The 35.3 gate noted CAP-7 and CAP-8 while planning 35.4, the test failed one in 2432, the run ended `partial` with a draft PR and 27 min of host leg were lost; fixed forward on the run branch (`4025c42`: the epic-35 branch of the test checks a subset, as its epic-34 branch did). The rule is enforced nowhere. Fix: no host-suite test pins the exact state of a planning artifact under `_bmad-output` (the planner rewrites them every story); shape tests read fixtures, and a real-artifact test asserts only what cannot change (the capability count, the story map); a guard (a test or a review check) that finds exact-set assertions over live spec folders.
-status: open
+status: resolved 2026-10-31 by this story's PR (36.4: no host-suite test pins a live planning artifact: `test_planning_pins_guard.py` fails naming an exact-set assertion over one, lib AST and supervisor textual; the question-set shape reads `fixtures/open-questions/SPEC.md`)
 
 ### DW-112: Host legs and hand gates go red on test budgets, not code: a conformance drive's bun suite bound under the runner's cap, and tests that spawn git or uv under bun's 5 s default (hole 97 and its recurrence).
 origin: operator ledger, hole 97 (2026-10-29T07:23Z, 35.3's second leg; recurrence 14:0xZ on #275's hand gate); retro-epic-35 C1, C6, AI-8
@@ -904,7 +904,7 @@ source_spec: `kb/agent-pc-setup-runbook.md` fixes row "hole 97"; `handoff-phase1
 location: plugins/tk-studio/contracts/conformance/ (every e2e drive that runs a growing bun suite: `e2e_playable_verify.py`, `e2e_engine_gate.py`, the launch drive); apps/supervisor/test (the git- and uv-spawning tests at bun's default timeout; no preload default); tools/verify_host.py (the gate's tail)
 severity: medium
 reason: `e2e_playable_verify.py` ran `bun test test/hostverify.test.ts -t "Story 34.3"` under a 30 s suite bound inside the runner's 60 s default; 35.3 put four cases inside the Story 34.3 describe block (17 tests, 28 s idle) and under the leg's load the drive reported `hung past 30s` — fixed forward (`3ce0f52`: manifest `timeout: 120`, the suite bounded at 75 s, the lib pin reading the manifest entry). Then the hole-100 fix's hand gate went red three times on the launch drive because the Story 34.8 approve test 'a record without game' serves two git repos per case under bun's default 5 s (5.2 s idle beside a running engine); that test now carries 60 s (`7fbd76b`). Each fix was one test or one drive; the class stays. Fix: every drive that runs a growing bun suite budgets from its manifest timeout with headroom; a story that adds tests inside another story's describe block re-checks that block's drive budget (a gate check on `-t` filters); the supervisor suite's preload sets a default timeout above 5 s for tests that spawn git or uv; and the gate's tail names the failing test.
-status: open
+status: resolved 2026-10-31 by this story's PR (36.4: every bun-suite drive's bound derives from its manifest `timeout` through `_budget.py`; the preload default stands at 30 s, hole 108's, reaching only the first file of a multi-file `bun test` on bun 1.4.3, so the two multi-file drives pass `--timeout 30000` and a hand run of the whole suite stays at 5 s past its first file, tracked as DW-155; two fix items are not built and stay stated here, not in the AC: the gate's tail naming the failing test, and the gate check on `-t` filters when a story adds tests inside another story's describe block)
 
 ### DW-113: A sandbox-tier job whose target skill is new on main ends `partial` after two one-turn workers: the engine sandboxes load skills from sbx's shared skills store, a copy of the released plugin, and nothing checks it at submit (hole 98).
 origin: operator ledger, hole 98 (2026-10-29T11:52Z, the first `maintenance-evals` run); retro-epic-35 C6, AI-5
@@ -1041,7 +1041,7 @@ source_spec: `_bmad-output/specs/sweeps/spec-dw-17-doctor-hermes-config-fallback
 location: plugins/tk-studio/lib/tests/test_installer_doctor.py `Hermes.hermes` (the write, fixed by hand in 961bc20); plugins/tk-studio/lib/tests/test_conformance.py (no encoding rule); AGENTS.md (no pitfall line); plugins/tk-studio/lib and tools/installer at large (`write_text(`/`read_text(`/`open(` without `encoding=`)
 severity: medium
 reason: The DW-17 bundle's Hermes tests rewrite a fixture that holds an em dash through `write_text(text)`; the engine's gate ran them on Linux and passed, the close-out's host leg ran them on Windows and twelve failed (`'utf-8' codec can't decode byte 0x97`), so the sweep ended `partial` on a red leg with every bundle sound, and the operator fixed one line and re-ran the leg (`POST /runs/{id}/verify`). The host leg is the gate of record, but a difference the engine cannot see should not cost a leg. Fix: a conformance rule that rejects `write_text`, `read_text`, `open` and `Path.open` without an explicit `encoding=` under `plugins/tk-studio/lib`, `tools/installer` and `apps/*/scripts` (text mode only; binary calls exempt), and a pitfall line in AGENTS.md so the engine never writes one; optionally the sandbox runs the lib suite with `PYTHONUTF8=0` and `LC_ALL=C` once to shake out the rest.
-status: open
+status: resolved 2026-10-31 by this story's PR (36.4: the `e2e_text_encoding` drive fails a text-mode open with no `encoding=` naming the call site; the 147 lib-test sites fixed; `AGENTS.md` carries the pitfall line)
 
 ### DW-133: The re-run verb exits 1 on an inconclusive leg, but no contract note states it: the re-run exit list in the 0.1.28 note still reads "1 red or skipped".
 origin: review of story 36-1
@@ -1216,4 +1216,20 @@ source_spec: `kb/agent-pc-setup-runbook.md` (the hole-110 row); `kb/bmad-base-pa
 location: apps/supervisor/src/sweep.ts `stopEngineAt` (now `toVmPath(studioRoot(env))` + the POSIX tail, as sandbox.ts:119); `_bmad/scripts/render_skill.py` and `apps/supervisor/_bmad/scripts/render_skill.py` `_publish` (the retry clears an empty destination before the next try; a Windows rename refuses an existing directory, WinError 183, a POSIX rename replaces an empty one); apps/supervisor/test/sweep.test.ts (the test's `/studio` root is POSIX by design); plugins/tk-studio/lib/tests/test_basepatch.py
 severity: medium
 reason: The engine's gate runs on Linux and the host leg on Windows; every class of difference so far (encoding, hole 103; time bounds, hole 108; path joins and rename semantics, hole 110) costs a 40-minute red leg and a hand fix on the run branch, and the leg's 20-line tail hides earlier suites' failures behind the last one. Fix to make (Story 36.4, the host leg goes red for code only): the engine's gate runs a Windows-semantics check for the known classes (a `path.join`/`resolve` whose result reaches `toVmPath` or an `sbx exec` argv; `os.rename`/`Path.rename` onto a path that may exist; text-mode opens without an encoding; `bun test` bounds under the host figure), or the planner's test guidance names them with the host figures; the leg's event keeps every suite's own verdict line.
+status: open
+
+### DW-155: A bare multi-file `bun test` reads bun's 5 s past its first file on bun 1.4.3: the preload's `setDefaultTimeout` reaches only the first file, and a bunfig `[test] timeout` does not help.
+origin: spec-deferred, consult ruling 2026-10-31T09:48:21Z (deviation-gt-0) on Story 36.4's preload default
+source_spec: `36-4-the-host-leg-goes-red-for-code-only-spec.md`
+location: apps/supervisor/test/preload.ts (`setDefaultTimeout(30_000)`); apps/supervisor (any bare multi-file `bun test`); plugins/tk-studio/contracts/conformance/e2e_paused_exits.py and e2e_vertical_slice.py (the two multi-file drives, which pass `--timeout 30000`)
+severity: medium
+reason: Measured on bun 1.4.3 outside the repo: 3 files of 6 s tests under the preload, the first file passes and the next two time out at 5000 ms; `[test] timeout = 30000` in a throwaway `bunfig.toml` still failed all three at 5000 ms. So a git- or uv-spawning test past a run's first file reads bun's 5 s unless the run passes `--timeout`. May affect 36-5 and 36-7, whose plans run the whole suite. Fix to make: run the whole suite with an explicit `--timeout`, or per file, or re-measure on a later bun.
+status: open
+
+### DW-156: Follow-up review still recommended for 36-4-the-host-leg-goes-red-for-code-only after the damping cap was spent
+origin: review-budget-followup
+source_spec: `36-4-the-host-leg-goes-red-for-code-only-spec.md`
+location: n/a
+severity: low
+reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261031-091634-c382; this entry preserves the lingering recommendation for a deliberate later review.
 status: open

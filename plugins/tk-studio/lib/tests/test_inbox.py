@@ -33,7 +33,7 @@ RESOLVED = jirabackend.RESOLVED_STATUS
 
 class InboxTestCase(SyncBackTestCase):
     def inbox(self) -> dict:
-        return json.loads((self.root / inbox.INBOX_REL).read_text("utf-8"))
+        return json.loads((self.root / inbox.INBOX_REL).read_text(encoding="utf-8"))
 
     def items(self) -> list[dict]:
         return self.inbox()["items"]
@@ -142,7 +142,7 @@ class StateTests(InboxTestCase):
         self.run_tick()
         data = self.inbox()
         data["items"][0]["state"] = "validating"  # 31.7 writes it
-        (self.root / inbox.INBOX_REL).write_text(json.dumps(data), "utf-8")
+        (self.root / inbox.INBOX_REL).write_text(json.dumps(data), encoding="utf-8")
         self.fake.search_issues = []
         self.fake.issue(f"{KEY}-1", RESOLVED, "indeterminate", 5)
         self.run_tick(minutes_later=10)

@@ -196,7 +196,7 @@ class FakeHost:
         if name in ("sh", "wt.exe"):
             slot = args[-1] if name == "sh" else str(Path(args[-1]).parent)
             current = self.root / "current.json" if self.root else None
-            self.starts.append((slot, json.loads(current.read_text())
+            self.starts.append((slot, json.loads(current.read_text(encoding="utf-8"))
                                 if current and current.exists() else None))
             if not self.fail_start and slot not in self.fail_slots:
                 self.up = True
@@ -237,7 +237,7 @@ class FakeHost:
             bin_dir.mkdir(parents=True, exist_ok=True)
             if not self.uv_rc:
                 (bin_dir / ("tk-studio.exe" if name.endswith(".exe")
-                            else "tk-studio")).write_text("new cli")
+                            else "tk-studio")).write_text("new cli", encoding="utf-8")
             return done(args, self.uv_rc)
         if name == "claude":
             return done(args, self.claude_rc,
@@ -370,9 +370,9 @@ class AppsCase(unittest.TestCase):
     def seed_uv(self):
         uv = self.root / "tools" / f"uv-{UV_VERSION}"
         uv.mkdir(parents=True)
-        (uv / "uv").write_text("uv")
+        (uv / "uv").write_text("uv", encoding="utf-8")
         (self.root / "bin").mkdir()
-        (self.root / "bin" / "tk-studio").write_text("old")
+        (self.root / "bin" / "tk-studio").write_text("old", encoding="utf-8")
 
     # --- running ------------------------------------------------------------
 
@@ -510,7 +510,7 @@ class FreshInstall(AppsCase):
         checkout = self.tmp / "co"
         manifest = checkout / "plugins" / "tk-studio" / ".claude-plugin"
         manifest.mkdir(parents=True)
-        (manifest / "plugin.json").write_text('{"version": "9.9.9"}')
+        (manifest / "plugin.json").write_text('{"version": "9.9.9"}', encoding="utf-8")
         result, code = self.run_cli(["install", "--link", str(checkout)])
         self.assertEqual((code, result["status"]), (0, "complete"))
         self.assertEqual(result["mode"], "link")
@@ -578,7 +578,7 @@ class Update(AppsCase):
         stale_web = self.root / "studio-web" / ".0.0.9.previous"
         for path in (stale_sup, stale_web):
             path.mkdir()
-            (path / "f").write_text("x")
+            (path / "f").write_text("x", encoding="utf-8")
         result, code = self.update_v2()
         self.assertEqual((code, result["status"]), (0, "complete"), result)
         self.assertEqual(sorted(result["supervisor"]["deleted_stale"]),
@@ -842,7 +842,7 @@ class Digests(AppsCase):
     def test_refusal_keeps_the_plugin_legs_partial_reason(self):
         self.seed_marketplace()
         roster = self.full_roster()
-        entry = json.loads(roster.read_text())["components"]["supervisor"]
+        entry = json.loads(roster.read_text(encoding="utf-8"))["components"]["supervisor"]
         self.tamper(entry["url"])
         result, code = self.run_cli(["install", "--roster", str(roster)])
         self.assertEqual((code, result["status"]), (1, "blocked"))
@@ -872,7 +872,7 @@ class Digests(AppsCase):
 
     def test_supervisor_zip_mismatch(self):
         roster = self.full_roster()
-        entry = json.loads(roster.read_text())["components"]["supervisor"]
+        entry = json.loads(roster.read_text(encoding="utf-8"))["components"]["supervisor"]
         self.tamper(entry["url"])
         result, code = self.run_cli(["install", "--roster", str(roster)])
         self.assertEqual((code, result["status"]), (1, "blocked"))
@@ -884,7 +884,7 @@ class Digests(AppsCase):
 
     def test_studio_web_zip_mismatch(self):
         roster = self.full_roster()
-        entry = json.loads(roster.read_text())["components"]["studio-web"]
+        entry = json.loads(roster.read_text(encoding="utf-8"))["components"]["studio-web"]
         self.tamper(entry["url"])
         result, code = self.run_cli(["install", "--roster", str(roster)])
         self.assertEqual((code, result["status"]), (1, "blocked"))
@@ -917,7 +917,7 @@ class Digests(AppsCase):
         self.assertTrue(result["reason"].startswith("DigestMismatch:"))
         self.assertIn("cli", result["reason"])
         self.assertFalse((self.root / "tools" / "wheels").exists())
-        self.assertEqual((self.root / "bin" / "tk-studio").read_text(), "old")
+        self.assertEqual((self.root / "bin" / "tk-studio").read_text(encoding="utf-8"), "old")
 
     def test_platform_not_pinned(self):
         roster = self.full_roster()
@@ -950,8 +950,8 @@ class CliSelfUpdate(AppsCase):
         self.assertEqual((code, result["status"]), (0, "complete"), result)
         self.assertEqual(result["cli"]["status"], "updated")
         old = self.root / "bin" / ".tk-studio.old"
-        self.assertEqual(old.read_text(), "old")
-        self.assertEqual((self.root / "bin" / "tk-studio").read_text(),
+        self.assertEqual(old.read_text(encoding="utf-8"), "old")
+        self.assertEqual((self.root / "bin" / "tk-studio").read_text(encoding="utf-8"),
                          "new cli")
         wheel = self.root / "tools" / "wheels" / cli["url"].rsplit("/", 1)[1]
         self.assertEqual(sha(wheel.read_bytes()), cli["sha256"])
@@ -986,7 +986,7 @@ class CliSelfUpdate(AppsCase):
         result, code = self.run_cli(["update", "--roster", str(roster)])
         self.assertEqual((code, result["status"]), (1, "blocked"))
         self.assertTrue(result["reason"].startswith("CliUpdateFailed:"))
-        self.assertEqual((self.root / "bin" / "tk-studio").read_text(), "old")
+        self.assertEqual((self.root / "bin" / "tk-studio").read_text(encoding="utf-8"), "old")
 
     def test_no_uv_is_named(self):
         roster = self.roster(plugin=self.plugin(), uv=self.uv(),
@@ -1267,7 +1267,7 @@ class WindowsRollback(AppsCase):
         roster = self.roster(plugin=self.plugin(), uv=self.uv(), cli=cli)
         uv = self.root / "tools" / f"uv-{UV_VERSION}" / "uv.exe"
         uv.parent.mkdir(parents=True)
-        uv.write_text("uv")
+        uv.write_text("uv", encoding="utf-8")
         result, code = self.run_cli(["update", "--roster", str(roster)])
         self.assertEqual((code, result["status"]), (0, "complete"), result)
         raw = Path(result["cli"]["helper"]).read_bytes()
@@ -1315,7 +1315,7 @@ class WindowsRollback(AppsCase):
         roster = self.roster(plugin=self.plugin(), uv=self.uv(), cli=cli)
         uv = self.root / "tools" / f"uv-{UV_VERSION}" / "uv.exe"
         uv.parent.mkdir(parents=True)
-        uv.write_text("uv")
+        uv.write_text("uv", encoding="utf-8")
         self.spawn.error = FileNotFoundError("cmd")
         result, code = self.run_cli(["update", "--roster", str(roster)])
         self.assertEqual((code, result["status"]), (1, "blocked"))
@@ -1333,10 +1333,10 @@ class WindowsRollback(AppsCase):
         roster = self.roster(plugin=self.plugin(), uv=self.uv(), cli=cli)
         uv = self.root / "tools" / f"uv-{UV_VERSION}" / "uv.exe"
         uv.parent.mkdir(parents=True)
-        uv.write_text("uv")
+        uv.write_text("uv", encoding="utf-8")
         exe = self.root / "bin" / "tk-studio.exe"
         exe.parent.mkdir()
-        exe.write_text("old")
+        exe.write_text("old", encoding="utf-8")
         result, code = self.run_cli(["update", "--roster", str(roster)])
         self.assertEqual((code, result["status"]), (0, "complete"), result)
         leg = result["cli"]
@@ -1347,7 +1347,7 @@ class WindowsRollback(AppsCase):
         self.assertEqual(leg["command"], [str(uv), "tool", "install",
                                           "--force", str(wheel)])
         self.assertNotIn("uv.exe", self.host.names(), "not run in-process")
-        self.assertEqual(exe.read_text(), "old")
+        self.assertEqual(exe.read_text(encoding="utf-8"), "old")
         self.assertNotIn("cmd", self.host.names(), "never the runner")
         launch = [a for a, _ in self.spawn.calls]
         self.assertEqual(launch, [["cmd", "/c", "start", "tk-studio cli "
@@ -1372,9 +1372,9 @@ class WindowsRollback(AppsCase):
         uv = self.root / "tools" / f"uv-{UV_VERSION}" / "uv.exe"
         if not uv.exists():
             uv.parent.mkdir(parents=True)
-            uv.write_text("uv")
+            uv.write_text("uv", encoding="utf-8")
             (self.root / "bin").mkdir()
-            (self.root / "bin" / "tk-studio.exe").write_text("old")
+            (self.root / "bin" / "tk-studio.exe").write_text("old", encoding="utf-8")
         with mock.patch.object(apps.os, "getpid", return_value=pid):
             result, code = self.run_cli(["update", "--roster", str(roster)])
         self.assertEqual((code, result["status"]), (0, "complete"), result)
@@ -1453,7 +1453,7 @@ class SourceCheckout(AppsCase):
         co = self.checkout()
         self.point_shortcut(co)
         roster = self.full_roster()
-        sup_url = json.loads(roster.read_text())["components"]["supervisor"][
+        sup_url = json.loads(roster.read_text(encoding="utf-8"))["components"]["supervisor"][
             "url"]
         result, code = self.run_cli(["update", "--roster", str(roster)])
         self.assertEqual((code, result["status"]), (0, "complete"), result)
@@ -1470,7 +1470,7 @@ class SourceCheckout(AppsCase):
         co = self.checkout()
         self.point_shortcut(co)
         roster = self.full_roster()
-        components = json.loads(roster.read_text())["components"]
+        components = json.loads(roster.read_text(encoding="utf-8"))["components"]
         bun_url = apps.BUN_URL.format(v=BUN_VERSION,
                                       asset="bun-windows-x64.zip")
         del self.fetch.blobs[bun_url]          # it would fail if fetched
@@ -1515,19 +1515,19 @@ class SourceCheckout(AppsCase):
         outer = self.tmp / "GitHub" / "tk-studio"
         (outer / ".git").mkdir(parents=True)
         (outer / ".tk-studio").mkdir()
-        (outer / ".tk-studio" / "config.yaml").write_text("schema: 1\n")
+        (outer / ".tk-studio" / "config.yaml").write_text("schema: 1\n", encoding="utf-8")
         nested = outer / "apps" / "supervisor"
         (nested / ".tk-studio").mkdir(parents=True)
         (nested / ".tk-studio" / "config.yaml").write_text(
-            "project_id: supervisor\n")
-        (nested / "start.ps1").write_text("# start\n")
+            "project_id: supervisor\n", encoding="utf-8")
+        (nested / "start.ps1").write_text("# start\n", encoding="utf-8")
         self.point_shortcut(nested)
         return nested
 
     def test_update_on_the_nested_root_reports_and_replaces_nothing(self):
         nested = self.cut_over()
         roster = self.full_roster()
-        sup_url = json.loads(roster.read_text())["components"]["supervisor"][
+        sup_url = json.loads(roster.read_text(encoding="utf-8"))["components"]["supervisor"][
             "url"]
         result, code = self.run_cli(["update", "--roster", str(roster)])
         self.assertEqual((code, result["status"]), (0, "complete"), result)

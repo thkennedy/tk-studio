@@ -527,3 +527,24 @@
 - What no longer holds: "`closeout → sweep` is `isSweep` only" and "Cut: the dep becomes required (an absent dep answers `{ok: false, detail: "no stopper injected"}`)" (plans/36-7.md); moving `isSweep` alone leaves `closeout → sweep → planstatus → closeout`.
 - Suggested adjustment: Move `stopEngine` and `stopEngineAt` to a leaf with the runner seams (or inject `stopEngine` into `closeout.ts`), keeping the sbx default that DW-120's no-injection test pins. Keep the test's no-`import("./…")` check on `closeout.ts`. Re-derive the SCCs first (the 36-2 entry's rule).
 - Status: closed — applied to the unstarted 36-7 entry's invoke_dev_with and to plans/36-7.md (Risks) by the 36-3 gate session (2026-10-31)
+
+## 36-5-the-supervisors-own-faults — scope: stories — from 36-4-the-host-leg-goes-red-for-code-only — 2026-10-31
+
+- What changed: on bun 1.4.3 the preload's 30 s default reaches only a run's first file (DW-155). `AGENTS.md` exists. New text-mode opens fail conformance without the `encoding=` keyword. `drain.test.ts` pins `placement:TierRequired` on the claim path. The contract's 36.4 paragraph is at :2277, before `## 8. Conformance`.
+- What no longer holds: "bun test                                                   # the whole suite before the commit" as a 30 s run; "(5) No `AGENTS.md` yet (36.4 creates it)." (plans/36-5.md)
+- Suggested adjustment: Run multi-file suites with `--timeout 30000`. Keep the store check after `requireTier` on the claim path so `drain.test.ts` stays green. Name `encoding=` on new opens, and use the prefix regex for the Stories row.
+- Status: closed — applied to the unstarted 36-5 entry's invoke_dev_with and to plans/36-5.md (Anchors after 36.4, facts, Verify, Risks) by the 36-4 gate session (2026-10-31)
+
+## 36-6-setup-and-the-launch-check-by-evidence — scope: stories — from 36-4-the-host-leg-goes-red-for-code-only — 2026-10-31
+
+- What changed: as for 36-5: the preload's default reaches only a run's first file on bun 1.4.3 (DW-155).
+- What no longer holds: "bun test test/planstatus.test.ts test/queue.test.ts" (plans/36-6.md Verify) as a 30 s run past its first file; 36-4's DRIFT line did not name this story.
+- Suggested adjustment: Run it with `--timeout 30000`, as any multi-file run on this bun. Name `encoding=` on new opens. Use the prefix regex for the Stories row.
+- Status: closed — applied to the unstarted 36-6 entry's invoke_dev_with and to plans/36-6.md (Verify, Risks) by the 36-4 gate session (2026-10-31)
+
+## 36-7-the-cycles-cut-and-the-docs-caught-up — scope: stories — from 36-4-the-host-leg-goes-red-for-code-only — 2026-10-31
+
+- What changed: as for 36-5 (DW-155). `e2e_text_encoding` scans every `*.py` under the lib, so the modules 36.7 splits out are in its scope.
+- What no longer holds: "bun test                                                   # the whole suite: behaviour pinned by the existing suites" (plans/36-7.md Verify) as a 30 s run past its first file.
+- Suggested adjustment: Run the whole suite with `--timeout 30000`. Moved and new modules keep the `encoding=` keyword.
+- Status: closed — applied to the unstarted 36-7 entry's invoke_dev_with and to plans/36-7.md (Verify, Risks) by the 36-4 gate session (2026-10-31)

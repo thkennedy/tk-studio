@@ -26,13 +26,15 @@ import tempfile
 import time
 from pathlib import Path
 
+from _budget import suite_bound  # the sibling helper: the suite's bound derives from the manifest entry's timeout
+
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 SUITES = ["test/closeout.test.ts", "test/sweep.test.ts"]
 FILTER = "Story 36.3"
-BOUND_S = 240
 INSTALL_BOUND_S = 40
-MANIFEST_TIMEOUT_S = 300  # keep in step with manifest.json's entry for this drive
-assert BOUND_S + INSTALL_BOUND_S < MANIFEST_TIMEOUT_S, "the drive's bounds must sit under the manifest's timeout"
+BOUND_S = suite_bound("e2e_paused_exits.py", install_s=INSTALL_BOUND_S)
+# A multi-file run needs the flag: the preload's `setDefaultTimeout` reaches only the first file (bun 1.4.3).
+TEST_TIMEOUT_MS = "30000"
 TAIL = 20
 
 
@@ -97,7 +99,7 @@ def suite_steps() -> list[dict]:
         started = time.monotonic()
         try:
             proc = subprocess.run(
-                [bun, "test", *SUITES, "-t", FILTER], cwd=str(supervisor), env=env,
+                [bun, "test", "--timeout", TEST_TIMEOUT_MS, *SUITES, "-t", FILTER], cwd=str(supervisor), env=env,
                 stdin=subprocess.DEVNULL, capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=BOUND_S)
         except subprocess.TimeoutExpired:

@@ -120,7 +120,7 @@ class DoctorCase(AppsCase):
         for name in names:
             for exe in (name, f"{name}.exe"):
                 path = self.fakebin / exe
-                path.write_text("#!/bin/sh\n")
+                path.write_text("#!/bin/sh\n", encoding="utf-8")
                 path.chmod(0o755)
 
     def drop_tools(self, *names):
@@ -187,7 +187,7 @@ class DoctorCase(AppsCase):
     def cert(self, age_days: float) -> Path:
         path = self.tmp / "tls" / "box.ts.net.crt"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("not a pem\n")
+        path.write_text("not a pem\n", encoding="utf-8")
         os.utime(path, (NOW - age_days * DAY,) * 2)
         return path
 
@@ -213,7 +213,7 @@ class DoctorCase(AppsCase):
         fake runner), outside the fake PATH."""
         path = self.tmp / "Godot_v4.7.2" / "godot.exe"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("fake godot\n")
+        path.write_text("fake godot\n", encoding="utf-8")
         return path
 
     def supervisor_log(self, lines: list[str], day: str = "2033-05-18"
@@ -247,16 +247,16 @@ class AllFailing(DoctorCase):
         (self.root / "supervisor" / ".0.0.9.previous").mkdir()
         (self.root / "current.json").write_text(json.dumps({
             "supervisor": {"version": "0.1.0", "path": str(sup)},
-            "studio-web": {"version": "0.1.0", "path": str(gone)}}))
+            "studio-web": {"version": "0.1.0", "path": str(gone)}}), encoding="utf-8")
         (self.config / "skills" / ".tk-studio.new").mkdir(parents=True)
         tools = self.root / "tools"
         tools.mkdir()
-        (tools / "cli-update.cmd").write_text("rem helper\n")
-        (tools / "cli-update.log").write_text("install failed: exit 2\n")
+        (tools / "cli-update.cmd").write_text("rem helper\n", encoding="utf-8")
+        (tools / "cli-update.log").write_text("install failed: exit 2\n", encoding="utf-8")
         hermes = self.tmp / "local" / "hermes"
         hermes.mkdir(parents=True)
         (hermes / "config.yaml").write_text(
-            "auth:\n  adopt_external_logins: true\n")
+            "auth:\n  adopt_external_logins: true\n", encoding="utf-8")
         before = self.snapshot()
 
         result, code = self.doctor(roster=roster)
@@ -300,7 +300,7 @@ class AllPassing(DoctorCase):
         self.registry({"proj": str(project)})
         self.trust({str(project): True})
         (self.root / "bin").mkdir(exist_ok=True)
-        (self.root / "bin" / "tk-studio").write_text("cli")
+        (self.root / "bin" / "tk-studio").write_text("cli", encoding="utf-8")
         self.env["PATH"] += os.pathsep + str(self.root / "bin")
         self.env["TK_SUPERVISOR_TLS_CERT"] = str(self.cert(10))
         self.supervisor_log([f"{stamp(NOW - 60)} [pacer] stopped (Ctrl+C)"])
@@ -356,14 +356,14 @@ class ClaudeCode(DoctorCase):
         self.assertNotIn("claude --version", self.commands())
 
     def test_a_roster_refusal_fails_naming_it(self):
-        bad = json.loads(self.full_roster().read_text())
+        bad = json.loads(self.full_roster().read_text(encoding="utf-8"))
         bad["requires"] = {"claude-code": "2.1"}
         invalid = self.tmp / "invalid.json"
-        invalid.write_text(json.dumps(bad))
-        entry = json.loads(self.full_roster().read_text())
+        invalid.write_text(json.dumps(bad), encoding="utf-8")
+        entry = json.loads(self.full_roster().read_text(encoding="utf-8"))
         entry["components"]["supervisor"]["sha256"] = "nope"
         entry_bad = self.tmp / "entry.json"
-        entry_bad.write_text(json.dumps(entry))
+        entry_bad.write_text(json.dumps(entry), encoding="utf-8")
         for path, name in ((invalid, "RosterInvalid"),
                            (entry_bad, "RosterEntryInvalid"),
                            (self.tmp / "absent.json", "RosterUnreadable")):
@@ -408,7 +408,7 @@ class PluginPlane(DoctorCase):
     def test_shadowed_names_each_uninstall(self):
         self.plugin_folder("0.2.16")
         (self.config / "settings.json").write_text(json.dumps(
-            {"enabledPlugins": {"tk-studio@tk-studio": True}}))
+            {"enabledPlugins": {"tk-studio@tk-studio": True}}), encoding="utf-8")
         before = (self.config / "settings.json").read_bytes()
         check = self.checks(self.doctor(roster=self.full_roster())[0])[
             "plugin"]
@@ -420,7 +420,7 @@ class PluginPlane(DoctorCase):
 
     def test_error_carries_no_case_and_names_the_path(self):
         self.plugin_folder("0.2.16")
-        (self.config / "settings.json").write_text("{not json")
+        (self.config / "settings.json").write_text("{not json", encoding="utf-8")
         check = self.checks(self.doctor(roster=self.full_roster())[0])[
             "plugin"]
         self.assertEqual(check["status"], "fail")
@@ -737,13 +737,13 @@ class FolderTrust(DoctorCase):
 
     def test_unreadable_registry_or_state_fails_naming_the_path(self):
         path = self.registry({"a": "C:\\x"})
-        path.write_text("projects: [a, b]\n")
+        path.write_text("projects: [a, b]\n", encoding="utf-8")
         check = self.checks(self.doctor(roster=self.full_roster())[0])[
             "folder-trust"]
         self.assertEqual(check["status"], "fail")
         self.assertIn(str(path), check["detail"])
         self.registry({"a": "C:\\x"})
-        (self.config / ".claude.json").write_text("{broken")
+        (self.config / ".claude.json").write_text("{broken", encoding="utf-8")
         check = self.checks(self.doctor(roster=self.full_roster())[0])[
             "folder-trust"]
         self.assertEqual(check["status"], "fail")
@@ -801,7 +801,7 @@ class PathLauncher(DoctorCase):
     def test_launcher_on_the_hkcu_path_passes(self):
         bin_dir = self.root / "bin"
         bin_dir.mkdir(parents=True)
-        (bin_dir / "tk-studio.exe").write_text("cli")
+        (bin_dir / "tk-studio.exe").write_text("cli", encoding="utf-8")
         self.store.values["Path"] = f"C:\\Windows;{bin_dir}\\"
         check = self.checks(self.doctor(roster=self.full_roster())[0])[
             "path-launcher"]
@@ -813,7 +813,7 @@ class PathLauncher(DoctorCase):
         # %LOCALAPPDATA% entry unexpanded, and doctor expands it from env
         bin_dir = self.root / "bin"
         bin_dir.mkdir(parents=True)
-        (bin_dir / "tk-studio.exe").write_text("cli")
+        (bin_dir / "tk-studio.exe").write_text("cli", encoding="utf-8")
         self.env["LOCALAPPDATA"] = str(self.tmp / "local")
         self.assertNotIn(str(bin_dir), self.env["PATH"])
         for ref in ("%LOCALAPPDATA%", "%LocalAppData%"):   # names fold case
@@ -829,7 +829,7 @@ class PathLauncher(DoctorCase):
     def test_an_unknown_reference_stays_unexpanded(self):
         bin_dir = self.root / "bin"
         bin_dir.mkdir(parents=True)
-        (bin_dir / "tk-studio.exe").write_text("cli")
+        (bin_dir / "tk-studio.exe").write_text("cli", encoding="utf-8")
         self.store.values["Path"] = "%NOSUCHVAR%\\tk-studio\\bin"
         check = self.checks(self.doctor(roster=self.full_roster())[0])[
             "path-launcher"]
@@ -892,7 +892,7 @@ class TailscaleCertPem(DoctorCase):
     def cert_check(self, now: float) -> dict:
         path = self.tmp / "tls" / "box.ts.net.crt"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(PEM)
+        path.write_text(PEM, encoding="utf-8")
         # an mtime that contradicts every case: the certificate must win
         os.utime(path, (now - 45 * DAY if now - PEM_NOT_BEFORE >= 90 * DAY
                         else now - 200 * DAY,) * 2)
@@ -962,9 +962,9 @@ class Supervisor(DoctorCase):
         roster = self.full_roster()
         self.run_cli(["install", "--roster", str(roster)])
         web = self.root / "studio-web" / "0.1.0"
-        current = json.loads((self.root / "current.json").read_text())
+        current = json.loads((self.root / "current.json").read_text(encoding="utf-8"))
         current["studio-web"]["path"] = str(self.root / "studio-web" / "9.9")
-        (self.root / "current.json").write_text(json.dumps(current))
+        (self.root / "current.json").write_text(json.dumps(current), encoding="utf-8")
         check = self.checks(self.doctor(roster=roster)[0])["studio-web"]
         self.assertEqual(check["status"], "fail")
         self.assertIn("does not exist (DW-12)", check["detail"])
@@ -974,7 +974,7 @@ class Supervisor(DoctorCase):
     def test_cli_helper_is_reported_never_deleted(self):
         tools = self.root / "tools"
         tools.mkdir(parents=True)
-        (tools / "cli-update.cmd").write_text("rem\n")
+        (tools / "cli-update.cmd").write_text("rem\n", encoding="utf-8")
         check = self.checks(self.doctor(roster=self.full_roster())[0])[
             "cli-update-helper"]
         self.assertEqual(check["status"], "warn")
@@ -1013,7 +1013,7 @@ class SupervisorLog(DoctorCase):
         # a folder holding no day file is no log either
         (self.tmp / "work" / "supervisor" / "logs").mkdir(parents=True)
         (self.tmp / "work" / "supervisor" / "logs" / "notes.txt").write_text(
-            "x\n")
+            "x\n", encoding="utf-8")
         self.assertTrue(self.check()["detail"].startswith("no log"))
 
     def test_api_answers_passes_naming_the_file_and_the_age(self):
@@ -1086,7 +1086,7 @@ class SupervisorTemp(DoctorCase):
 
     def test_at_most_500_passes(self):
         self.folders(500)
-        (self.temp / "tk-sup-fake-launcher-1.4.3.exe").write_text("a file")
+        (self.temp / "tk-sup-fake-launcher-1.4.3.exe").write_text("a file", encoding="utf-8")
         self.folders(3, prefix="other-")
         check = self.check()
         self.assertEqual(check["status"], "pass", check)
@@ -1285,12 +1285,12 @@ class CutOver(DoctorCase):
         self.outer = self.tmp / "GitHub" / "tk-studio"
         (self.outer / ".git").mkdir(parents=True)
         (self.outer / ".tk-studio").mkdir()
-        (self.outer / ".tk-studio" / "config.yaml").write_text("schema: 1\n")
+        (self.outer / ".tk-studio" / "config.yaml").write_text("schema: 1\n", encoding="utf-8")
         self.nested = self.outer / "apps" / "supervisor"
         (self.nested / ".tk-studio").mkdir(parents=True)
         (self.nested / ".tk-studio" / "config.yaml").write_text(
-            "project_id: supervisor\n")
-        (self.nested / "start.ps1").write_text("# start\n")
+            "project_id: supervisor\n", encoding="utf-8")
+        (self.nested / "start.ps1").write_text("# start\n", encoding="utf-8")
         self.lnk = (self.tmp / "roaming" / "Microsoft" / "Windows"
                     / "Start Menu" / "Programs" / "Startup"
                     / "tk-studio supervisor.lnk")
@@ -1360,7 +1360,7 @@ class CutOver(DoctorCase):
     def test_old_layout_fails_naming_its_own_repository(self):
         old = self.tmp / "GitHub" / "tk-studio-supervisor"
         (old / ".git").mkdir(parents=True)
-        (old / "start.ps1").write_text("# old\n")
+        (old / "start.ps1").write_text("# old\n", encoding="utf-8")
         self.shortcut(old)
         self.healthy()
         checks = self.cut_over()
@@ -1386,8 +1386,8 @@ class CutOver(DoctorCase):
         (old / ".git").mkdir(parents=True)
         (old / ".tk-studio").mkdir()
         (old / ".tk-studio" / "config.yaml").write_text(
-            "project_id: supervisor\n")
-        (old / "start.ps1").write_text("# old\n")
+            "project_id: supervisor\n", encoding="utf-8")
+        (old / "start.ps1").write_text("# old\n", encoding="utf-8")
         self.shortcut(old)
         self.healthy()
         checks = self.cut_over()
@@ -1418,7 +1418,7 @@ class CutOver(DoctorCase):
     def test_a_checkout_subfolder_without_studio_config_is_no_root(self):
         plain = self.outer / "plugins"
         plain.mkdir()
-        (plain / "start.ps1").write_text("#\n")
+        (plain / "start.ps1").write_text("#\n", encoding="utf-8")
         check = doctor.check_supervisor_root(None, str(plain))
         self.assertEqual(check["status"], "fail", check)
         self.assertIn(str(plain), check["detail"])
@@ -1476,7 +1476,7 @@ class CutOver(DoctorCase):
                 self.assertIn("--project-id supervisor", check["fix"])
 
     def test_project_id_defaults_to_the_basename(self):
-        (self.nested / ".tk-studio" / "config.yaml").write_text("schema: 1\n")
+        (self.nested / ".tk-studio" / "config.yaml").write_text("schema: 1\n", encoding="utf-8")
         self.registry({"supervisor": str(self.nested)})
         self.trust({str(self.nested): True})
         self.assertEqual(self.cut_over()["supervisor-registry"]["status"],
@@ -1509,7 +1509,7 @@ class CutOver(DoctorCase):
         self.healthy()
         elsewhere = self.tmp / "elsewhere"
         elsewhere.mkdir()
-        (elsewhere / "start.ps1").write_text("#\n")
+        (elsewhere / "start.ps1").write_text("#\n", encoding="utf-8")
         for label, kw, needle in (
                 ("no -File", {"arguments": "-w studio nt pwsh -NoExit"},
                  "no `-File"),
@@ -1532,7 +1532,7 @@ class CutOver(DoctorCase):
         self.healthy()
         spaced = self.tmp / "My Dir"
         spaced.mkdir()
-        (spaced / "start.ps1").write_text("#\n")
+        (spaced / "start.ps1").write_text("#\n", encoding="utf-8")
         self.shortcut(spaced)                 # -File <tmp>/My Dir/start.ps1
         check = self.cut_over()["startup-shortcut"]
         self.assertEqual(check["status"], "fail", check)
@@ -1596,7 +1596,7 @@ class CutOver(DoctorCase):
         slot = self.root / "supervisor" / "0.1.0"
         slot.mkdir(parents=True)
         (self.root / "current.json").write_text(json.dumps({
-            "supervisor": {"version": "0.1.0", "path": str(slot)}}))
+            "supervisor": {"version": "0.1.0", "path": str(slot)}}), encoding="utf-8")
         self.shortcut(slot, arguments="pwsh -NoExit")
         fix = self.cut_over()["startup-shortcut"]["fix"]
         self.assertIn("`tk-studio update` rewrites the shortcut", fix)
@@ -1611,9 +1611,9 @@ class CutOver(DoctorCase):
     def test_slot_box_passes_and_stays_a_slot(self):
         slot = self.root / "supervisor" / "0.1.0"
         slot.mkdir(parents=True)
-        (slot / "start.ps1").write_text("# slot\n")
+        (slot / "start.ps1").write_text("# slot\n", encoding="utf-8")
         (self.root / "current.json").write_text(json.dumps({
-            "supervisor": {"version": "0.1.0", "path": str(slot)}}))
+            "supervisor": {"version": "0.1.0", "path": str(slot)}}), encoding="utf-8")
         self.shortcut(slot)
         checks = self.cut_over()
         self.assertEqual(list(checks), ["startup-shortcut"])
@@ -1625,9 +1625,9 @@ class CutOver(DoctorCase):
         stale = self.root / "supervisor" / "0.0.9"
         for slot in (current, stale):
             slot.mkdir(parents=True)
-            (slot / "start.ps1").write_text("# slot\n")
+            (slot / "start.ps1").write_text("# slot\n", encoding="utf-8")
         (self.root / "current.json").write_text(json.dumps({
-            "supervisor": {"version": "0.1.0", "path": str(current)}}))
+            "supervisor": {"version": "0.1.0", "path": str(current)}}), encoding="utf-8")
         self.shortcut(stale)
         check = self.cut_over()["startup-shortcut"]
         self.assertEqual(check["status"], "fail", check)
@@ -1639,7 +1639,7 @@ class CutOver(DoctorCase):
     def test_a_loose_folder_with_start_ps1_fails(self):
         loose = self.tmp / "loose"
         loose.mkdir()
-        (loose / "start.ps1").write_text("#\n")
+        (loose / "start.ps1").write_text("#\n", encoding="utf-8")
         self.shortcut(loose)
         checks = self.cut_over()
         self.assertEqual(list(checks), ["startup-shortcut"])
@@ -2053,7 +2053,7 @@ class SuiteCliDrives(AppsCase):
         path = self.tmp / "manifest.json"
         path.write_text(json.dumps({
             "conformance_version": manifest.get("conformance_version", 1),
-            "surfaces": {}, "cli_drives": {"drives": [drive]}}))
+            "surfaces": {}, "cli_drives": {"drives": [drive]}}), encoding="utf-8")
         with mock.patch.object(conformance, "_run_cli_drive",
                                return_value=check) as run:
             report = conformance.run_suite(skills_dir=skills,

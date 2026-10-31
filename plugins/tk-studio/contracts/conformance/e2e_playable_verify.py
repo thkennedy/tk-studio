@@ -16,8 +16,8 @@ proves both halves without a model, Godot or a sandbox:
            `bun test test/hostverify.test.ts -t "Story 34.3"` from
            `apps/supervisor` under a fresh temp folder (removed afterwards:
            the Story 33.4 rule), `TK_SUPERVISOR_*` stripped, bounded at
-           `BOUND_S` (the whole drive's worst case below the manifest's
-           `timeout: 120` for this drive)
+           `BOUND_S` (derived from the manifest's `timeout` for this drive
+           through `_budget.py`)
            → judge its exit; its cases drive the leg with a fake
            `playable.py` runner and a fake judge to pass, fail and skipped
 
@@ -38,21 +38,21 @@ import tempfile
 import time
 from pathlib import Path
 
+from _budget import suite_bound  # the sibling helper: the suite's bound derives from the manifest entry's timeout
+
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 SUITE = "test/hostverify.test.ts"
 # Hole 76: only the story's own describe block (bun matches `-t` against the full test name).
 FILTER = "Story 34.3"
 # The drive's own worst case, every bound spent in turn (the core's `CORE_CALLS` calls
 # at `CORE_BOUND_S`, then `INSTALL_BOUND_S`, then `BOUND_S`), sits below the manifest's
-# `timeout: 120` for this drive (runner.py honours a manifest `timeout` over its 60 s
+# `timeout` for this drive (runner.py honours a manifest `timeout` over its
 # DEFAULT_TIMEOUT). So this drive's own timeouts fire first: it kills the hung child,
 # removes the temp folder in `finally` (the Story 33.4 rule) and reports `ok: false`,
 # never an orphaned suite. The story's own cases (`-t "Story 34.3"`, hole 76) grew with
 # Story 35.3's hardening cases in the same describe block: 17 tests, about 28 s idle on
-# the agent PC, so the suite's bound is 75 s (hole 97: the 30 s bound under the runner's
+# the agent PC, so the suite's bound is derived, never restated (hole 97: the 30 s bound under the runner's
 # 60 s went red on the host leg).
-MANIFEST_TIMEOUT_S = 120  # keep in step with manifest.json's entry for this drive (a test pins it)
-BOUND_S = 75
 # Hole 80: a fresh worktree has no apps/supervisor/node_modules; the suite cannot load
 # without them, so the drive installs from the lockfile first (warm cache on the box:
 # about a second), under its own bound.
@@ -72,8 +72,7 @@ JUDGE_CORE = PLUGIN_ROOT / "lib" / "playable_judge.py"
 # Each `playable_judge.py` call (stdlib, local files only): prepare, two verdicts, the refusal.
 CORE_BOUND_S = 4
 CORE_CALLS = 4
-assert CORE_CALLS * CORE_BOUND_S + INSTALL_BOUND_S + BOUND_S < MANIFEST_TIMEOUT_S, \
-    "the drive's bounds must sit under the manifest's timeout"
+BOUND_S = suite_bound("e2e_playable_verify.py", install_s=INSTALL_BOUND_S, other_s=CORE_CALLS * CORE_BOUND_S)
 REPORT = {
     "schema": 1, "verdict": "pass", "failed": None, "seed": 1, "ticks": 60,
     "ticks_run": 60, "capture_every": 30, "mode": "movie",

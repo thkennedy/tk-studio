@@ -16,6 +16,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -243,28 +244,32 @@ class JudgeCoreTests(unittest.TestCase):
 
 
 class DriveBoundsTests(unittest.TestCase):
-    """The e2e drive's own worst case (every core call, the install and the
-    suite each spent to its bound) sits below its manifest entry's timeout
-    (hole 97: 120, not the runner's 60 s default), so the drive's own timeouts
-    always fire first."""
+    """Every bun-suite drive's bound derives from its manifest entry's `timeout` through
+    `_budget.py` (Story 36.4, DW-112, hole 97), so the drive's own timeouts always fire
+    before the runner's, and no drive carries a copy of the timeout."""
 
-    def test_worst_case_below_the_runner_and_manifest_timeouts(self):
+    BUN_DRIVES = ("e2e_engine_gate", "e2e_vertical_slice", "e2e_run_sweep", "e2e_paused_exits", "e2e_playable_verify")
+
+    def _conformance(self, module: str):
         conformance = Path(__file__).resolve().parents[2] / "contracts" / "conformance"
         sys.path.insert(0, str(conformance))
         try:
-            import e2e_playable_verify as drive  # noqa: E402
-            import runner  # noqa: E402
+            return __import__(module), conformance
         finally:
             sys.path.remove(str(conformance))
+
+    def test_worst_case_below_the_runner_and_manifest_timeouts(self):
+        drive, conformance = self._conformance("e2e_playable_verify")
+        runner, _ = self._conformance("runner")
+        budget, _ = self._conformance("_budget")
         worst = drive.CORE_CALLS * drive.CORE_BOUND_S + drive.INSTALL_BOUND_S + drive.BOUND_S
         manifest = json.loads((conformance / "manifest.json").read_text(encoding="utf-8"))
         entry = next(d for d in manifest["surfaces"]["tk-studio-playable-judge"]["drives"]
                      if d["argv"] == ["contracts/conformance/e2e_playable_verify.py"])
-        # hole 97: the drive budgets from its manifest timeout, which runner.py honours over
-        # DEFAULT_TIMEOUT; the two must agree, and the worst case sits under them
-        self.assertEqual(entry.get("timeout", runner.DEFAULT_TIMEOUT), drive.MANIFEST_TIMEOUT_S)
-        self.assertGreater(drive.MANIFEST_TIMEOUT_S, runner.DEFAULT_TIMEOUT)
-        self.assertLess(worst, drive.MANIFEST_TIMEOUT_S)
+        # hole 97: runner.py honours the manifest timeout over DEFAULT_TIMEOUT, and the worst case
+        # sits under it by the helper's headroom
+        self.assertGreater(entry["timeout"], runner.DEFAULT_TIMEOUT)
+        self.assertEqual(worst + budget.HEADROOM_S, entry["timeout"])
         # The core makes exactly CORE_CALLS judge calls, each under CORE_BOUND_S.
         real, calls = drive._core, []
         drive._core = lambda *argv: (calls.append(argv), real(*argv))[1]
@@ -275,31 +280,88 @@ class DriveBoundsTests(unittest.TestCase):
         self.assertTrue(all(step["ok"] for step in steps), steps)
         self.assertEqual(len(calls), drive.CORE_CALLS)
 
-    def _supervisor_drive(self, module: str):
-        conformance = Path(__file__).resolve().parents[2] / "contracts" / "conformance"
-        sys.path.insert(0, str(conformance))
-        try:
-            drive = __import__(module)
-            import runner  # noqa: E402
-        finally:
-            sys.path.remove(str(conformance))
+    def test_every_bun_suite_drive_bound_derives_from_its_manifest_timeout(self):
+        budget, conformance = self._conformance("_budget")
+        runner, _ = self._conformance("runner")
+        found = {path.stem for path in conformance.glob("e2e_*.py")
+                 if 'shutil.which("bun")' in path.read_text(encoding="utf-8")}
+        self.assertEqual(found, set(self.BUN_DRIVES))  # a new bun drive joins this list and the helper
+        manifest = json.loads((conformance / "manifest.json").read_text(encoding="utf-8"))
+        for module in self.BUN_DRIVES:
+            with self.subTest(drive=module):
+                drive, _ = self._conformance(module)
+                self.assertIn("from _budget import suite_bound", (conformance / f"{module}.py").read_text(encoding="utf-8"))
+                entries = [d for surface in manifest["surfaces"].values() for d in surface.get("drives", [])
+                           if d.get("argv", [None])[0] == f"contracts/conformance/{module}.py"]
+                self.assertEqual(len(entries), 1)
+                other = getattr(drive, "CORE_CALLS", 0) * getattr(drive, "CORE_BOUND_S", 0) + getattr(drive, "TRIAGE_WAIT_S", 0)
+                self.assertEqual(drive.BOUND_S, entries[0]["timeout"] - drive.INSTALL_BOUND_S - other - budget.HEADROOM_S)
+                self.assertGreater(entries[0]["timeout"], runner.DEFAULT_TIMEOUT)  # so the manifest raises the cap
+
+    def test_a_multi_file_suite_raises_bun_s_per_test_timeout_by_the_flag(self):
+        # on bun 1.4.3 the preload default reaches only a run's first file, so a later file's tests
+        # get above bun's 5 s only through the flag
+        _, conformance = self._conformance("_budget")
+        multi_file = []
+        for module in self.BUN_DRIVES:
+            drive, _ = self._conformance(module)
+            if len(getattr(drive, "SUITES", [])) > 1:
+                multi_file.append(module)
+                with self.subTest(drive=module):
+                    self.assertGreater(int(drive.TEST_TIMEOUT_MS), 5000)
+                    self.assertIn('"--timeout", TEST_TIMEOUT_MS', (conformance / f"{module}.py").read_text(encoding="utf-8"))
+        # guard the guard: the walk must keep reading the real multi-file drives
+        self.assertLessEqual({"e2e_paused_exits", "e2e_vertical_slice"}, set(multi_file))
+
+    def _budget_over(self, manifest: dict):
+        budget, _ = self._conformance("_budget")
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "manifest.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        patcher = mock.patch.object(budget, "MANIFEST_PATH", path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return budget
+
+    def test_budget_reads_the_manifest_entry_with_headroom(self):
+        budget = self._budget_over({"surfaces": {"s": {"drives": [
+            {"assertion": "a"}, {"argv": ["contracts/conformance/e2e_x.py"], "timeout": 300}]}}})
+        self.assertEqual(budget.HEADROOM_S, 15)
+        self.assertEqual(budget.suite_bound("e2e_x.py", install_s=40), 245)
+        self.assertEqual(budget.suite_bound("e2e_x.py", install_s=12, other_s=16), 257)
+        self.assertEqual(budget.suite_bound("e2e_x.py", install_s=40, headroom_s=0), 260)
+
+    def test_run_sweep_bound_counts_its_triage_wait(self):
+        budget, conformance = self._conformance("_budget")
+        drive, _ = self._conformance("e2e_run_sweep")
         manifest = json.loads((conformance / "manifest.json").read_text(encoding="utf-8"))
         entries = [d for surface in manifest["surfaces"].values() for d in surface.get("drives", [])
-                   if d.get("argv", [None])[0] == f"contracts/conformance/{module}.py"]
-        self.assertEqual(len(entries), 1, module)
-        return drive, entries[0].get("timeout", runner.DEFAULT_TIMEOUT), runner
+                   if d.get("argv", [None])[0] == "contracts/conformance/e2e_run_sweep.py"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(drive.TRIAGE_WAIT_S, 5)
+        self.assertEqual(drive.BOUND_S, entries[0]["timeout"] - drive.INSTALL_BOUND_S - drive.TRIAGE_WAIT_S - budget.HEADROOM_S)
 
-    def test_story_35_3_engine_gate_and_vertical_slice_bounds_below_their_manifest_timeouts(self):
-        # Story 35.3 (DW-70): both bun-suite drives' worst case (the install and the suite each spent to its bound)
-        # sits below the manifest entry's `timeout`, read from manifest.json (never a copy), which raises the
-        # runner's 60 s cap; each drive's own copy of that timeout matches it.
-        for module in ("e2e_engine_gate", "e2e_vertical_slice"):
-            with self.subTest(drive=module):
-                drive, timeout, runner = self._supervisor_drive(module)
-                worst = drive.BOUND_S + drive.INSTALL_BOUND_S
-                self.assertGreater(worst, runner.DEFAULT_TIMEOUT)  # so the manifest raises the cap
-                self.assertLess(worst, timeout)
-                self.assertEqual(drive.MANIFEST_TIMEOUT_S, timeout)
+    def test_budget_refuses_a_bound_that_is_not_positive(self):
+        budget = self._budget_over({"surfaces": {"s": {"drives": [
+            {"argv": ["contracts/conformance/e2e_x.py"], "timeout": 60}]}}})
+        self.assertEqual(budget.suite_bound("e2e_x.py", install_s=44), 1)
+        for install_s in (45, 100):  # exactly zero, then below it
+            with self.subTest(install_s=install_s), self.assertRaisesRegex(ValueError, "e2e_x.py"):
+                budget.suite_bound("e2e_x.py", install_s=install_s)
+
+    def test_budget_falls_back_to_the_runner_default(self):
+        runner, _ = self._conformance("runner")
+        budget = self._budget_over({"surfaces": {"s": {"drives": [
+            {"argv": ["contracts/conformance/e2e_no_timeout.py"]}]}}})
+        for script in ("e2e_absent.py", "e2e_no_timeout.py"):
+            with self.subTest(script=script):
+                self.assertEqual(budget.suite_bound(script, install_s=10), runner.DEFAULT_TIMEOUT - 10 - budget.HEADROOM_S)
+
+    def test_budget_has_no_main(self):
+        # test_utf8_guard demands the stdout guard of any conformance module with a main()
+        budget, _ = self._conformance("_budget")
+        self.assertFalse(hasattr(budget, "main"))
 
 
 if __name__ == "__main__":
