@@ -230,6 +230,9 @@ DRIFT: the pins guard exempts `A - B` only for a literal-bound `A`, so `want - h
 | review | 1 | 2026-10-31T10:26:22Z | 2026-10-31T10:50:19Z | d22b26d0-006f-43a9-a561-e4b26a8eca2a | claude-opus-5-5 | medium | 3045238 | 100326 | 5.7258 | completed |
 | review | 2 | 2026-10-31T10:50:19Z | 2026-10-31T11:26:24Z | e03b84ca-a7cc-4f05-8e7a-498671d83abe | claude-opus-5-5 | medium | 4195002 | 112624 | 7.4278 | completed |
 | gate | 1 | 2026-10-31T11:26:25Z | 2026-10-31T11:32:29Z | 831d6d67-4e84-4073-80d6-58dd28e8a4d9 | claude-opus-5-5 | medium | 1438768 | 22812 | 2.0904 | completed |
+| host-leg | 1 | 2026-10-31T11:33:00Z | 2026-10-31T12:15:50Z | — | — | — | — | — | — | green |
+| close-out | 1 | 2026-10-31T12:15:50Z | 2026-10-31T12:15:57Z | — | — | — | — | — | — | PR |
+| merge | — | 2026-10-31T12:17:18Z | 2026-10-31T12:17:18Z | — | — | — | — | — | — | merged |
 
 ## Auto Run Result
 
