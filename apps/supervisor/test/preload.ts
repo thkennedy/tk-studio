@@ -11,7 +11,7 @@
 //
 // Per-suite `beforeAll` hooks that clear the same variables stay as they are: they also cover the
 // backup, work and sign-in variables, and restoring an absent value is a no-op.
-import { afterAll } from "bun:test";
+import { afterAll, setDefaultTimeout } from "bun:test";
 import { cleanupTemp } from "./tmp";
 
 export const NOTIFIER_VARS = [
@@ -20,6 +20,12 @@ export const NOTIFIER_VARS = [
 
 for (const name of NOTIFIER_VARS) delete process.env[name];
 process.env.TK_SUPERVISOR_UNDER_TEST = "1";
+
+// Hole 108 (2026-10-31): the win32 host's git runs the fixture-heavy tests (several git-backed fixtures in one
+// test) past bun's 5 s default while the Linux sandbox gate stays under it; the default is 30 s for every runner
+// that loads this preload (the engine's gate, verify_host.py, the conformance drives, a hand run). A test that
+// names its own timeout keeps it.
+setDefaultTimeout(30_000);
 
 // Story 33.4 (holes 63, 64, 70): every temp folder and fixture queue a suite makes through test/tmp.ts is
 // closed and removed at the end of the `bun test` process (a preload's `afterAll` runs once, after its last
