@@ -718,30 +718,67 @@ def _current_status(client: JiraClient, key: str) -> tuple[str, str]:
     return st.get("name"), (st.get("statusCategory") or {}).get("key")
 
 
+# Hole 109: within a status category the picker prefers the status whose name
+# is the canonical's own, so `review`/`in-progress` land in `In Progress`, not
+# in the first In Progress-category transition the site lists (on a
+# company-managed project with the setup's global transitions that is
+# `Blocked - Awaiting User`, which every PR-open promotion landed in).
+PREFERRED_STATUS_NAMES = {"new": ("To Do", "Backlog"),
+                          "indeterminate": ("In Progress",),
+                          "done": ("Done",)}
+
+
 def _transition_to_category(client: JiraClient, key: str, target: str,
-                            notes: list[str], entity_id: str) -> str | None:
+                            notes: list[str], entity_id: str,
+                            canonical: str | None = None) -> str | None:
     """Move the issue into the target status category; returns the resulting
-    backend status name, or None when no transition reaches the category."""
+    backend status name, or None when no transition reaches the category.
+    The pick within the category: the canonical's preferred name first
+    (`PREFERRED_STATUS_NAMES`), then any other status of the category that
+    is neither a dropped name (hole 100) nor a block status (hole 109); the
+    block statuses are a route only for canonical `blocked`."""
     status, data = client.request("GET", f"/issue/{key}/transitions")
     if status != 200 or not isinstance(data, dict):
         raise JiraError(f"promote: GET /issue/{key}/transitions returned "
                         f"{status}")
     dropped_route = None
+    reserved_route = None
+    candidates: list[tuple[int, dict, str]] = []
+    block_names = {BLOCKED_STATUS, RESOLVED_STATUS}
+    preferred = PREFERRED_STATUS_NAMES.get(target, ())
     for tr in data.get("transitions") or []:
         to = tr.get("to") or {}
         if ((to.get("statusCategory") or {}).get("key")) != target:
             continue
-        if to.get("name") in DROPPED_STATUS_NAMES:
+        name = to.get("name")
+        if name in DROPPED_STATUS_NAMES:
             # hole 100: a dropped-reserved status is never the pick, even
             # when it is the first (or the only) route into the category
-            dropped_route = to.get("name")
+            dropped_route = name
             continue
+        if name in block_names:
+            if canonical == "blocked":
+                candidates.append((0 if name == BLOCKED_STATUS else 1, tr, name))
+            else:
+                reserved_route = reserved_route or name
+            continue
+        rank = preferred.index(name) if name in preferred else len(preferred)
+        candidates.append((rank, tr, name))
+    candidates.sort(key=lambda c: c[0])
+    for _rank, tr, name in candidates:
         posted, _ = client.request("POST", f"/issue/{key}/transitions",
                                    {"transition": {"id": tr.get("id")}})
         if posted not in (200, 204):
             raise JiraError(f"promote: transition on {key} returned "
                             f"{posted}")
-        return to.get("name")
+        return name
+    if reserved_route is not None:
+        notes.append(f"{entity_id}: {key}'s only transition into status "
+                     f"category {target!r} is the block status "
+                     f"{reserved_route!r} — backend status left as-is "
+                     f"(hole 109: a promote never lands in a block status "
+                     f"unless the entity is blocked)")
+        return None
     if dropped_route is not None:
         notes.append(f"{entity_id}: {key}'s only transition into status "
                      f"category {target!r} is the dropped status "
@@ -905,7 +942,7 @@ def promote(plan_dir: Path, client: JiraClient | None, project_key: str,
         target = TO_BACKEND_CATEGORY[front["status"]]
         if backend_category != target:
             moved = _transition_to_category(client, key, target, notes,
-                                            front["id"])
+                                            front["id"], front["status"])
             if moved is not None:
                 backend_status = moved
 
