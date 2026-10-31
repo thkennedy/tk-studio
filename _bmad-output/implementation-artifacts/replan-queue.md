@@ -506,3 +506,24 @@
 - What no longer holds: "the set of remaining non-trivial SCCs equals the allowlist `{queue, sandbox}`, `{api, cli}`, `{board, engagement, inbox, log, office, page, registry}` exactly" (plans/36-7.md Settled shape 1).
 - Suggested adjustment: Cut `sweep → board` by moving `DEFERRED_REL` to a leaf; otherwise `sweep → board → worktree → sweep` survives the planned cuts. Re-derive the SCCs from the tree first, as 36-3 to 36-6 edit the same modules.
 - Status: closed — applied to the unstarted 36-7 entry's invoke_dev_with and to plans/36-7.md (Risks) by the 36-2 gate session (2026-10-30)
+
+## 36-4-the-host-leg-goes-red-for-code-only — scope: stories — from 36-3-a-paused-or-resumed-run-is-never-parked — 2026-10-31
+
+- What changed: 36.3 added `contracts/conformance/e2e_paused_exits.py`, a fifth bun-suite drive (`BOUND_S` 240, `INSTALL_BOUND_S` 40, `MANIFEST_TIMEOUT_S` 300, a module assert), registered in `manifest.json` at `timeout: 300`.
+- What no longer holds: "Four drives run bun suites" and "the four `MANIFEST_TIMEOUT_S` copies and their module asserts go" (plans/36-4.md); AC2's "every conformance drive that runs a bun suite" holds and now takes in the fifth.
+- Suggested adjustment: Add `e2e_paused_exits.py` to Files and bring it onto `_budget.py` with the others; take the anchors from the plan's refreshed paragraph.
+- Status: closed — applied to the unstarted 36-4 entry's invoke_dev_with and to plans/36-4.md (Anchors after 36.3, Settled shape 2, Files) by the 36-3 gate session (2026-10-31)
+
+## 36-6-setup-and-the-launch-check-by-evidence — scope: stories — from 36-3-a-paused-or-resumed-run-is-never-parked — 2026-10-31
+
+- What changed: the tier-routed stop is `sweep.ts stopEngine(run, deps, {graceful})` (`stopEngineAt` beneath it), and `cli.ts launchStopGraceful(root, id, where)` routes through it; `closeout.ts` no longer holds the stopper. A resume's `unblockTracked` leaves the issue in `Block Resolved`, canonical `blocked`, and DW-151 records that a later status can hold an AD-5 conflict there. `callStatus` already answers `partial` with `conflict`, but only a `done` record is re-asked (`openConflicts`, `claimPlanPhase`).
+- What no longer holds: "The graceful stop today: `closeout.ts launchStopGraceful` (:919, host-side `launch.py stop --graceful`, refused on sbx with `bmad-loop is not on PATH`, DW-120)" (plans/36-6.md); AC4's "a resume included" can now meet that conflict.
+- Suggested adjustment: AC5 arms through `stopEngine(run, deps, {graceful: true})`, recording a refusal and never retrying. AC4's `in-progress` call on a resume reads the conflict as 36.3's `partial` shape (one event, never stopping the launch), is not re-asked, and has a test for an issue reading `Block Resolved`.
+- Status: closed — applied to the unstarted 36-6 entry's invoke_dev_with and to plans/36-6.md (Risks) by the 36-3 gate session (2026-10-31)
+
+## 36-7-the-cycles-cut-and-the-docs-caught-up — scope: stories — from 36-3-a-paused-or-resumed-run-is-never-parked — 2026-10-31
+
+- What changed: `closeout.ts:121` imports `isSweep, stopEngine` from `sweep.ts`; the `import("./cli")` dodge is gone, as `ResumeDeps.launchStop` now defaults to `stopEngine`. `closeout.ts` has a value edge to `hostverify.ts`. `engineState`, `ENGINE_STATE` and `globLiteral` moved into `worktree.ts`, re-exported from `closeout.ts`. `queue.ts` exports `openConflicts`, which `claimPlanPhase` reads.
+- What no longer holds: "`closeout → sweep` is `isSweep` only" and "Cut: the dep becomes required (an absent dep answers `{ok: false, detail: "no stopper injected"}`)" (plans/36-7.md); moving `isSweep` alone leaves `closeout → sweep → planstatus → closeout`.
+- Suggested adjustment: Move `stopEngine` and `stopEngineAt` to a leaf with the runner seams (or inject `stopEngine` into `closeout.ts`), keeping the sbx default that DW-120's no-injection test pins. Keep the test's no-`import("./…")` check on `closeout.ts`. Re-derive the SCCs first (the 36-2 entry's rule).
+- Status: closed — applied to the unstarted 36-7 entry's invoke_dev_with and to plans/36-7.md (Risks) by the 36-3 gate session (2026-10-31)

@@ -455,6 +455,18 @@ describe("checkout lock", () => {
     expect(fx.queue.lock(fx.checkout)).toMatchObject({ kind: "run", run_id: b.run_id, owner_pid: B.pid });
   });
 
+  test("Story 36.3: a paused holder ended at the story boundary frees the lock: the waiter claims", async () => {
+    const fx = fixture();
+    const a = fx.enqueue("run-epic", A).run;
+    expect((await fx.queue.claim(a.run_id, A)).claimed).toBe(true);
+    fx.queue.markPaused(a.run_id, { engine: { paused_stage: "escalation" } });
+    const c = fx.enqueue("job-c", B).run;
+    expect(await fx.queue.claim(c.run_id, B)).toMatchObject({ claimed: false, why: "lock", holder: { run_id: a.run_id } });
+    fx.queue.endEngine(a.run_id, "complete", "story boundary: 9-1-x landed under a graceful stop");
+    expect(fx.queue.get(a.run_id)).toMatchObject({ state: "complete" });
+    expect((await fx.queue.claim(c.run_id, B)).claimed).toBe(true);
+  });
+
   test("Story 31.7: a validate-resolution run claims past a paused holder without taking its lock; others still wait", async () => {
     const fx = fixture();
     const a = fx.enqueue("run-epic", A).run;

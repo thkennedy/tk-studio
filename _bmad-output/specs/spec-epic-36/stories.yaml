@@ -130,7 +130,9 @@
     spec folder; the engine resolves it by the glob
     `36-4-the-host-leg-goes-red-for-code-only-*.md`, and a file named
     `36-4-the-host-leg-goes-red-for-code-only.md` is read as pending (loop deficiency 1,
-    story 21-6).
+    story 21-6). Replan (36-3 gate, 2026-10-31): five drives run bun suites, not four:
+    `e2e_paused_exits.py` comes onto `_budget.py` too and is in Files; see plans/36-4.md
+    Anchors after 36.3.
 
 - id: "36-5-the-supervisors-own-faults"
   title: "The Supervisor's Own Faults"
@@ -195,7 +197,11 @@
     the spec folder; the engine resolves it by the glob
     `36-6-setup-and-the-launch-check-by-evidence-*.md`, and a file named
     `36-6-setup-and-the-launch-check-by-evidence.md` is read as pending (loop deficiency
-    1, story 21-6).
+    1, story 21-6). Replan (36-3 gate, 2026-10-31): arm through `sweep.ts
+    stopEngine(run, deps, {graceful: true})`, a refusal recorded and never retried; the
+    `in-progress` call on a resume can hold an AD-5 conflict over `Block Resolved`, read
+    as 36.3's `partial` with `conflict`, never stopping the launch; see plans/36-6.md
+    Risks.
 
 - id: "36-7-the-cycles-cut-and-the-docs-caught-up"
   title: "The Cycles Cut and the Docs Caught Up"
@@ -228,4 +234,6 @@
     1, story 21-6). Replan (36-2 gate, 2026-10-30): `sweep.ts` imports `DEFERRED_REL`
     from `board.ts`, merging the sweep and board SCCs; cut that edge through a leaf and
     re-derive the SCCs from the tree before fixing the allowlist; see plans/36-7.md
-    Risks.
+    Risks. Replan (36-3 gate, 2026-10-31): `closeout.ts` now imports `stopEngine` from
+    `sweep.ts`, so that cut moves or injects it too, keeping the sbx default; its
+    `import("./cli")` dodge is already gone; see plans/36-7.md Risks.

@@ -8,6 +8,10 @@
  *
  *   {phase: "review"|"done", pr, owner, directory, story_key, id, ok, previous_status?, error?, blocked?, skipped?, reason?, stage?}
  *
+ *   conflict  Story 36.3 (DW-130): `status: "partial"` and `conflict: [{id, canonical, backend, fields}]` when the re-sync holds an
+ *             AD-5 conflict (`sync.projection.conflicts`): one notifier line per distinct conflict; a `done` one keeps `stage: true`
+ *             and `ok: true` (the rows stay owed) and is re-asked each tick, counted against `PLAN_RETRY_LIMIT`, until the pull-back
+ *             answers without one. The loop never resolves it (AD-5).
  *   stage     `true` on every `done` event a stage-capable merge pass records (Story 35.8, additive): the stage pass owes
  *             only those, so a run merged before 35.8 gets no supervisor rows and is never back-filled.
  *
@@ -97,8 +101,9 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { frontmatter, jiraBound } from "./closeout";
 import { legVerdict, type HostVerifyResult } from "./hostverify";
-import { canonicalPr } from "./hygiene";
-import { isTerminal, selfOwner, type Owner, type Queue, type QueueEvent, type QueueRun } from "./queue";
+import { notifier } from "./env";
+import { canonicalPr, sendText } from "./hygiene";
+import { isTerminal, openConflicts, selfOwner, type Owner, type Queue, type QueueEvent, type QueueRun } from "./queue";
 import { lastJsonObject, registryShow, type RunResult } from "./server";
 import { ledgerPass } from "./sweep";
 import { gh, runBranch, runner, studioScript, uvRunner, type WorktreeDeps } from "./worktree";
@@ -268,7 +273,14 @@ export function planEntity(directory: string, story: string): { id: string } | {
   return { reason: hits.length ? `several plan entities for story ${story}` : `no plan entity for story ${story}` };
 }
 
+/** One AD-5 conflict the re-sync holds (`sync.projection.conflicts`, `jirabackend.pull_back`): the entity `id`, `canonical`
+ * its local file path, `backend` its issue key, `fields` a line per field naming both sides. The loop never resolves it. */
+export type PlanConflict = { id?: unknown; canonical?: unknown; backend?: unknown; fields?: unknown };
+
 export type StatusResult = { ok: boolean; previous_status?: unknown; error?: string; blocked?: true; reason?: string;
+  /** Story 36.3: the status landed but the re-sync holds an AD-5 conflict: `status: "partial"`, `ok` stays true so the
+   * stage pass's rows stay owed. */
+  status?: "partial"; conflict?: PlanConflict[];
   /** A transient failure (the runner threw, or no JSON answer): never recorded as such — see the header. */
   transient?: true };
 
@@ -281,12 +293,33 @@ export async function callStatus(directory: string, id: string, phase: Phase, no
       ["status", "--directory", directory, "--id", id, "--status", phase, "--note", note.replace(/[\r\n]+/g, " "), "--caller", PLAN_CALLER], 120);
   } catch (e) { return { ok: false, error: `plansync.py status: ${clip(message(e))}`, transient: true }; }
   const out = lastJsonObject(r.stdout) as Record<string, any> | null;
-  if (r.exit === 0 && out?.ok === true) return { ok: true, ...(out.previous_status !== undefined ? { previous_status: out.previous_status } : {}) };
+  if (r.exit === 0 && out?.ok === true) {
+    // The re-sync's conflicts cover the whole project: only the entity this call moved makes the record `partial`.
+    const conflicts = out.sync?.projection?.conflicts;
+    const held = Array.isArray(conflicts) ? (conflicts as PlanConflict[]).filter((c) => c?.id === id) : [];
+    return {
+      ok: true, ...(out.previous_status !== undefined ? { previous_status: out.previous_status } : {}),
+      ...(held.length ? { status: "partial" as const, conflict: held } : {}),
+    };
+  }
   if (!out) return { ok: false, error: `plansync.py status ${failed(r)}`, transient: true };
   return {
     ok: false, error: out.error ? clip(String(out.error)) : out.blocked ? "blocked" : "refused",
     ...(out.blocked === true ? { blocked: true as const } : {}), ...(typeof out.reason === "string" ? { reason: clip(out.reason) } : {}),
   };
+}
+
+/** Story 36.3: a held conflict's one notifier line (per distinct conflict of the entity), naming the issue and both sides
+ * from `fields`; `canonical` is a local path, never sent. Never throws. */
+async function tellConflict(queue: Queue, run: QueueRun, id: string, phase: Phase, res: StatusResult, deps: PlanStatusDeps): Promise<void> {
+  if (!res.conflict) return;
+  try {
+    const held = JSON.stringify(res.conflict);
+    if (queue.events(run.run_id).some((e) => e.kind === "plan-status" && e.detail?.id === id && JSON.stringify(e.detail?.conflict) === held)) return;
+    const sides = res.conflict.map((c) => `${String(c.backend ?? "?")} (${String(c.id ?? id)}): ${(Array.isArray(c.fields) ? c.fields : []).map(String).join(", ")}`).join("; ");
+    const selected = notifier(deps.hygiene?.env ?? deps.env ?? process.env);
+    if (selected.kind !== "none") await sendText(selected, `supervisor: run ${run.run_id} plan-status ${phase} holds an AD-5 conflict on ${sides}: not promoted until a human picks a side`, deps.hygiene?.fetch ?? fetch);
+  } catch { /* not told: the record still names it */ }
 }
 
 /** A verb call's result as recorded (`transient` is never part of an event). */
@@ -338,7 +371,7 @@ async function leased(queue: Queue, runId: string, phase: Phase, deps: PlanStatu
     else {
       const tries = queue.events(runId).filter((e) => e.kind === "plan-lease" && e.detail?.phase === phase && e.detail?.owner === null && e.detail?.settled !== true).length;
       if (tries >= PLAN_RETRY_LIMIT) {
-        recorded = record(queue, runId, { ...worked.detail, phase, ok: false, skipped: true, reason: `gave up after ${tries + 1} attempts: ${worked.retry}` });
+        recorded = record(queue, runId, { ...worked.detail, phase, ok: false, skipped: true, gave_up: true, reason: `gave up after ${tries + 1} attempts: ${worked.retry}` });
       }
     }
   } finally {
@@ -365,6 +398,7 @@ async function reviewRun(queue: Queue, run: QueueRun, pr: string, deps: PlanStat
     const res = await callStatus(owner.directory, entity.id, "review", `run ${run.run_id} PR ${pr}`, deps);
     // Transient with nothing recorded yet: a retry (the call is repeated next tick); else the phase is settled by this pass.
     if (res.transient && !any) return { retry: res.error ?? "plansync.py status failed", detail: at };
+    await tellConflict(queue, run, entity.id, "review", res, deps);
     any = record(queue, run.run_id, { ...at, story_key: s.story_key, id: entity.id, ...shown(res) }) || any;
   }
   return any;
@@ -390,7 +424,8 @@ async function mergeRuns(queue: Queue, deps: PlanStatusDeps, out: string[], merg
     try {
       const events = queue.events(run.run_id);
       const seen = planEvents(events, "review");
-      if (!seen.length || planEvents(events, "done").length) continue;
+      // Story 36.3: a `done` record holding an AD-5 conflict is re-asked until the pull-back answers without one.
+      if (!seen.length || (planEvents(events, "done").length && !openConflicts(events).length)) continue;
       const pr = canonicalPr(seen[0]!.detail?.pr) ?? runPr(events);
       if (!pr) continue;
       let r: RunResult;
@@ -404,9 +439,11 @@ async function mergeRuns(queue: Queue, deps: PlanStatusDeps, out: string[], merg
       const work = async (): Promise<Worked> => {
         // Story 35.8: `stage: true` marks a done event this (stage-capable) pass recorded — the only ones the stage pass owes.
         if (state === "CLOSED") return record(queue, run.run_id, { phase: "done", pr, stage: true, ok: false, skipped: true, reason: "pr closed unmerged" });
-        let any = false;
-        for (const rev of planEvents(queue.events(run.run_id), "review")) {
+        let any = false, held = false;
+        const before = queue.events(run.run_id), reask = planEvents(before, "done").length ? openConflicts(before) : undefined;
+        for (const rev of planEvents(before, "review")) {
           const d = (rev.detail ?? {}) as Record<string, unknown>;
+          if (reask && !(typeof d.id === "string" && reask.includes(d.id))) continue;
           const keep = { phase: "done" as const, pr, stage: true, ...(d.owner !== undefined ? { owner: d.owner } : {}), ...(d.directory !== undefined ? { directory: d.directory } : {}),
             ...(d.story_key !== undefined ? { story_key: d.story_key } : {}) };
           if (typeof d.id !== "string" || typeof d.directory !== "string") {
@@ -414,10 +451,16 @@ async function mergeRuns(queue: Queue, deps: PlanStatusDeps, out: string[], merg
             continue;
           }
           const res = await callStatus(d.directory, d.id, "done", `run ${run.run_id} PR ${pr}`, deps);
-          if (res.transient && !any) return { retry: res.error ?? "plansync.py status failed", detail: { phase: "done", pr, stage: true, ...(d.owner !== undefined ? { owner: d.owner } : {}) } };
-          any = record(queue, run.run_id, { ...keep, id: d.id, ...shown(res) }) || any;
+          // Story 36.3: during a re-ask a transient answer is always a retry: its record would replace the conflict as the newest and drop it unresolved.
+          if (res.transient && (!any || reask)) return { retry: res.error ?? "plansync.py status failed", detail: { phase: "done", pr, stage: true, ...(d.owner !== undefined ? { owner: d.owner } : {}) } };
+          await tellConflict(queue, run, d.id, "done", res, deps);
+          // The same conflict again is not recorded twice; the retry below still counts it.
+          const last = before.findLast((e) => e.kind === "plan-status" && e.detail?.phase === "done" && e.detail?.id === d.id)?.detail;
+          if (!(res.conflict && JSON.stringify(last?.conflict) === JSON.stringify(res.conflict))) any = record(queue, run.run_id, { ...keep, id: d.id, ...shown(res) }) || any;
+          if (res.conflict) held = true;
         }
-        return any;
+        // A held conflict is an error retry: counted against `PLAN_RETRY_LIMIT` (the give-up ends the phase), the rows owed meanwhile.
+        return held ? { retry: "an AD-5 conflict is held: a human picks a side", detail: { phase: "done", pr, stage: true } } : any;
       };
       if (await leased(queue, run.run_id, "done", deps, work)) out.push(run.run_id);
     } catch { /* the next tick tries again */ }
@@ -552,7 +595,9 @@ function stageTodo(events: readonly QueueEvent[]): { story_key: string; id: stri
   const done = planEvents(events, "done").map((e) => (e.detail ?? {}) as Record<string, unknown>)
     .filter((d) => d.ok === true && d.stage === true && typeof d.directory === "string" && typeof d.id === "string" && typeof d.story_key === "string");
   const leg = lastSeq(events, (e) => e.kind === "host-verify");
-  return (done as { story_key: string; id: string; directory: string }[]).filter((d) => {
+  return (done as { story_key: string; id: string; directory: string }[]).filter((d, i, all) => {
+    // Story 36.3: a re-asked story's `partial` and clean records owe one set of rows.
+    if (all.findIndex((x) => x.story_key === d.story_key) !== i) return false;
     const settled = lastSeq(events, (e) => e.kind === "stage-post" && e.detail?.story_key === d.story_key && (e.detail?.ok === true || e.detail?.settled === true));
     return !settled || leg > settled;
   });

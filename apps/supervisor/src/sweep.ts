@@ -37,7 +37,10 @@
  *              ledger had nothing open, never an escalation). A paused sweep is closed out the same way once its engine is stopped
  *              (`stopSweepEngine`, before the close-out is taken; a failed stop is noted once as `engine-stop
  *              {engine_run_id, error}`, the run and its worktree left as they are and the stop retried next tick),
- *              never relaunched through `closeOutPaused`. Story 36.2 (DW-118): after the `blocked` rules and the host
+ *              never relaunched through `closeOutPaused`. Story 36.3 (DW-121): the retry is bounded, `SWEEP_STOP_DEADLINE_MS`
+ *              from the first such note, then one notifier line and an explicit `blocked` end; the stopped tree's WIP is
+ *              committed (`wipCommit`), the host leg skipped and the PR a draft, a WIP sweep with every bundle landed
+ *              ending `partial`. Story 36.2 (DW-118): after the `blocked` rules and the host
  *              leg's verdict, an engine that ended other than `finished` caps the end at `partial` (`engine ended
  *              '<status>' after <n>/<m> bundles`), even with every bundle landed; that paused-sweep stop is not
  *              penalised, on the tick of the stop or a later one (`engineEndStatus`: a `stopped` status with an `engine-stop` note
@@ -68,7 +71,7 @@ import { pluginRoot, sbxBin } from "./env";
 import { inconclusiveReason, legVerdict, redReason, type HostVerifyResult } from "./hostverify";
 import { registerSweepLine } from "./hygiene";
 import { PLAN_RETRY_LIMIT, runPr, type PlanStatusDeps } from "./planstatus";
-import { isTerminal, selfOwner, servedRoot, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
+import { isTerminal, selfOwner, servedRoot, type EngineWhere, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
 import { projectKeyOf, studioRunDir } from "./sandbox";
 import { lastJsonObject, runProcess, toVmPath, type RunResult } from "./server";
 import { gh, studioScript, uvRunner, type WorktreeDeps } from "./worktree";
@@ -84,6 +87,8 @@ export const isSweep = (defn: Record<string, any> | null | undefined): boolean =
 export const SWEEP_TRIAGE = "sweep-triage";
 /** A paused sweep's failed engine stop, noted once per engine run (the watch retries the stop each tick). */
 export const SWEEP_ENGINE_STOP = "engine-stop";
+/** Story 36.3 (DW-121): how long a paused sweep's stop may go unanswered before the run ends `blocked`. */
+export const SWEEP_STOP_DEADLINE_MS = 30 * 60_000;
 /** The plan lease phase the ledger pass holds while it calls. */
 export const LEDGER_LEASE = "ledger";
 /** One ledger pass attempt's event. */
@@ -507,22 +512,39 @@ export function sweepCostText(s: SweepSummary, workerUsd: number | undefined): s
   return [head, ...(lines.length ? ["", ...lines] : [])].join("\n");
 }
 
-/** A paused sweep's engine stopped (`launch.py stop`; on sbx inside the run's sandbox): `stopped`, else the failure.
- * Never throws. */
-export async function stopSweepEngine(run: Pick<QueueRun, "worktree" | "prefix" | "engine_run_id" | "tier" | "sandbox">, deps: WorktreeDeps = {}): Promise<string> {
-  const served = servedRoot(run), eid = run.engine_run_id;
-  if (!served || !eid) return "not stopped: no engine recorded";
-  const env = deps.env ?? process.env;
+/** Story 36.3 (DW-120): `launch.py stop` for the engine at `root`, on the tier it runs on (`sbx exec` inside the sandbox,
+ * else the host's `uvRunner`), `--graceful` on request: `stopped`, else the failure. Never throws. */
+export async function stopEngineAt(root: string, eid: string, where: EngineWhere, deps: WorktreeDeps = {}, opts: { graceful?: boolean } = {}): Promise<string> {
+  const env = deps.env ?? process.env, graceful = opts.graceful ? ["--graceful"] : [];
   let r: RunResult;
   try {
-    if (run.tier === "sbx" && run.sandbox) {
-      const argv = ["exec", run.sandbox, "uv", "run", `${toVmPath(pluginRoot(env)).replace(/\/+$/, "")}/lib/launch.py`, "stop", "--directory", toVmPath(served), "--run-id", eid];
+    if (where.tier === "sbx" && where.sandbox) {
+      const argv = ["exec", where.sandbox, "uv", "run", `${toVmPath(pluginRoot(env)).replace(/\/+$/, "")}/lib/launch.py`, "stop", "--directory", toVmPath(root), "--run-id", eid, ...graceful];
       r = await (deps.sbx?.run ?? ((b, a, o) => runProcess(b, a, { timeoutS: o.timeoutS })))(sbxBin(env), argv, { timeoutS: 120 });
     } else {
-      r = await uvRunner(deps)(served, studioScript(deps, "lib", "launch.py"), ["stop", "--directory", served, "--run-id", eid], 120);
+      r = await uvRunner(deps)(root, studioScript(deps, "lib", "launch.py"), ["stop", "--directory", root, "--run-id", eid, ...graceful], 120);
     }
   } catch (e) { return `stop failed: ${clip(message(e))}`; }
   return r.exit === 0 ? "stopped" : `stop failed: exit ${r.exit}: ${clip(r.stderr || r.stdout)}`;
+}
+
+/** Story 36.3: a run's engine stopped on the run's tier (`stopEngineAt` at its served root). Never throws. */
+export async function stopEngine(run: Pick<QueueRun, "worktree" | "prefix" | "engine_run_id" | "tier" | "sandbox">, deps: WorktreeDeps = {}, opts: { graceful?: boolean } = {}): Promise<string> {
+  const served = servedRoot(run), eid = run.engine_run_id;
+  if (!served || !eid) return "not stopped: no engine recorded";
+  return stopEngineAt(served, eid, { tier: run.tier, sandbox: run.sandbox }, deps, opts);
+}
+
+/** A paused sweep's engine stopped (the hard stop, `stopEngine`). */
+export const stopSweepEngine = (run: Pick<QueueRun, "worktree" | "prefix" | "engine_run_id" | "tier" | "sandbox">, deps: WorktreeDeps = {}): Promise<string> =>
+  stopEngine(run, deps);
+
+/** Story 36.3 (DW-121): is this engine's unanswered stop past `SWEEP_STOP_DEADLINE_MS`? The clock starts at the first
+ * `engine-stop` note carrying `error` (a `{stopped: true}` note is a stop that succeeded; no new event, so a supervisor
+ * restart keeps it). */
+export function sweepStopPastDeadline(events: readonly QueueEvent[], engineRunId: string | null | undefined, now: number): boolean {
+  const first = events.find((e) => e.kind === SWEEP_ENGINE_STOP && e.detail?.engine_run_id === engineRunId && e.detail?.error !== undefined);
+  return !!first && now - Date.parse(first.at) > SWEEP_STOP_DEADLINE_MS;
 }
 
 // ------------------------------------------------------------ the ledger pass

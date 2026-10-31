@@ -1799,5 +1799,197 @@ class EngagementCloseTests(EngagementTestCase):
                          [jirabackend.RESOLVED_STATUS, "Done"])
 
 
+class UnblockTests(TrackTestCase):
+    """Story 36.3 (DW-130, hole 101)."""
+
+    def unblock(self, story="ST-001", **kwargs):
+        kwargs.setdefault("reason", "the supervisor resumed the run")
+        return track.unblock(self.root, story, transport=self.fake,
+                             sleep=self.sleeps.append, **kwargs)
+
+    RESOLVED = "Resolved: the supervisor resumed the run"
+
+    def test_blocked_moves_to_block_resolved_with_the_comment_and_no_mention(self):
+        self.block("ST-001")
+        result = self.unblock()
+        self.assert_track_block(result, "complete")
+        self.assertEqual(self.fake.status[f"{KEY}-1"], jirabackend.RESOLVED_STATUS)
+        self.assertEqual(self.fake.posted[f"{KEY}-1"][-1], self.RESOLVED)
+        self.assertNotIn("accountid", self.fake.posted[f"{KEY}-1"][-1])
+        (entry,) = result["issues"]
+        self.assertEqual(entry, {"issue": f"{KEY}-1", "entity": "ST-001", "role": "story",
+                                 "from": BLOCKED, "to": jirabackend.RESOLVED_STATUS,
+                                 "transitioned": True, "commented": True})
+        self.assertEqual(result["skipped"], [])
+
+    def test_an_issue_not_blocked_is_skipped_nothing_written(self):
+        result = self.unblock()
+        self.assert_track_block(result, "complete")
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(result["skipped"], [f"transition: {KEY}-1 is not blocked (In Progress)"])
+        self.assertEqual(result["issues"][0]["to"], None)
+
+    def test_idempotent_a_second_unblock_writes_nothing(self):
+        self.block("ST-001")
+        self.unblock()
+        before = len(self.writes())
+        result = self.unblock()
+        self.assertEqual(len(self.writes()), before)
+        self.assertEqual(len(result["skipped"]), 1)
+
+    def test_dependents_block_moved_move_too(self):
+        self.depends("ST-002", "ST-001")
+        self.block("ST-001")
+        self.assertEqual(self.fake.status[f"{KEY}-2"], BLOCKED)
+        result = self.unblock()
+        self.assertEqual(self.fake.status[f"{KEY}-2"], jirabackend.RESOLVED_STATUS)
+        self.assertEqual([i["role"] for i in result["issues"]], ["story", "dependent"])
+
+    def test_a_dependent_blocked_by_something_else_stays(self):
+        self.depends("ST-002", "ST-001")
+        self.block("ST-001")
+        self.fake.status[f"{KEY}-2"] = BLOCKED
+        self.fake.posted[f"{KEY}-2"] = []
+        self.seed_comment(f"{KEY}-2", AGENT, "[~accountid:o] Blocked: its own reason", 0)
+        result = self.unblock()
+        self.assertEqual(self.fake.status[f"{KEY}-2"], BLOCKED)
+        self.assertIn("something other", result["skipped"][0])
+
+    def seed_dependent(self, *blockers):
+        """ST-002 reads Blocked, its agent comments naming each of `blockers`."""
+        self.depends("ST-002", "ST-001")
+        self.fake.status[f"{KEY}-2"] = BLOCKED
+        for i, blocker in enumerate(blockers):
+            self.seed_comment(f"{KEY}-2", AGENT,
+                              f"[~accountid:o] Blocked: x\nResolves when: y\nBlocked by: {blocker}",
+                              60 - i)
+
+    def test_story_36_3_a_key_that_only_contains_the_story_key_is_no_match(self):
+        self.seed_dependent(f"{KEY}-12")
+        self.fake.status[f"{KEY}-1"] = BLOCKED
+        result = self.unblock()
+        self.assertEqual(self.fake.status[f"{KEY}-2"], BLOCKED)
+        self.assertIn("something other", result["skipped"][0])
+
+    def test_story_36_3_a_dependent_blocked_by_a_then_b_stays_while_the_other_is_open(self):
+        for blockers in ((f"{KEY}-1", f"{KEY}-7"), (f"{KEY}-7", f"{KEY}-1")):
+            with self.subTest(blockers=blockers):
+                self.fake.comment_store.pop(f"{KEY}-2", None)
+                self.seed_dependent(*blockers)
+                self.fake.status[f"{KEY}-1"] = BLOCKED
+                self.fake.status[f"{KEY}-7"] = BLOCKED
+                result = self.unblock()
+                self.assertEqual(self.fake.status[f"{KEY}-1"], jirabackend.RESOLVED_STATUS)
+                self.assertEqual(self.fake.status[f"{KEY}-2"], BLOCKED)
+                self.assertIn(f"still blocked by {KEY}-7", " ".join(result["skipped"]))
+                self.assertEqual(result["status"], "complete")
+
+    def test_story_36_3_the_dependent_moves_on_the_last_of_its_blocks(self):
+        self.seed_dependent(f"{KEY}-7", f"{KEY}-1")
+        self.fake.status[f"{KEY}-1"] = BLOCKED
+        self.fake.status[f"{KEY}-7"] = jirabackend.RESOLVED_STATUS
+        self.unblock()
+        self.assertEqual(self.fake.status[f"{KEY}-2"], jirabackend.RESOLVED_STATUS)
+
+    def test_story_36_3_a_block_before_the_last_resolved_comment_no_longer_holds(self):
+        self.seed_dependent(f"{KEY}-7")
+        self.seed_comment(f"{KEY}-2", AGENT, "Resolved: an earlier unblock", 30)
+        self.seed_comment(f"{KEY}-2", AGENT, f"[~accountid:o] Blocked: x\nBlocked by: {KEY}-1", 20)
+        self.fake.status[f"{KEY}-1"] = BLOCKED
+        self.fake.status[f"{KEY}-7"] = BLOCKED
+        self.unblock()
+        self.assertEqual(self.fake.status[f"{KEY}-2"], jirabackend.RESOLVED_STATUS)
+
+    def test_a_temporary_failure_retries_and_the_retry_does_not_post_twice(self):
+        self.block("ST-001")
+        with unittest.mock.patch.object(jirabackend, "transition_to_name",
+                                        side_effect=jirabackend.RateLimited("429")):
+            result = self.unblock()
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["retry"])
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(self.fake.status[f"{KEY}-1"], BLOCKED)
+        again = self.unblock()
+        self.assertEqual(again["status"], "complete")
+        self.assertEqual(self.fake.posted[f"{KEY}-1"].count(self.RESOLVED), 1)
+        self.assertEqual(self.fake.status[f"{KEY}-1"], jirabackend.RESOLVED_STATUS)
+
+    def test_no_transition_is_refused_by_name(self):
+        self.block("ST-001")
+        self.fake.no_resolved.add(f"{KEY}-1")
+        result = self.unblock()
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("NoTransition", result["reason"])
+
+    def test_refusals_before_any_call(self):
+        for result in (self.unblock(reason=" "), self.unblock(source="other"),
+                       self.unblock(story="nonsense")):
+            self.assertEqual(result["status"], "blocked")
+        self.assertEqual(self.fake.calls, [])
+
+    def test_dry_run_writes_nothing(self):
+        self.block("ST-001")
+        before = len(self.writes())
+        result = self.unblock(dry_run=True)
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(len(self.writes()), before)
+
+    def test_the_cli(self):
+        self.block("ST-001")
+        out = io.StringIO()
+        with unittest.mock.patch.object(jirabackend, "client_for", _client_with(self.fake)), \
+                contextlib.redirect_stdout(out):
+            code = track.main(["unblock", "--directory", str(self.root), "--story", "ST-001",
+                               "--reason", "resumed", "--source", "run"])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out.getvalue())["issues"][0]["to"], jirabackend.RESOLVED_STATUS)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = track.main(["unblock", "--directory", str(self.root), "--story", "ST-001",
+                               "--engagement", ENG, "--reason", "x"])
+        self.assertEqual(code, 2)
+
+
+class EngagementUnblockTests(EngagementTestCase):
+    """Story 36.3 (DW-47): `Block Resolved`, never `Done`."""
+
+    def unblock_eng(self, kind="cap", reason="go by the owner", **kwargs):
+        return track.unblock_engagement(self.root, ENG, kind, reason, transport=self.fake,
+                                        sleep=self.sleeps.append, **kwargs)
+
+    def test_moves_to_block_resolved_never_done(self):
+        self.block_eng(kind="cap", reason="reached its cap")
+        result = self.unblock_eng()
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual((result["engagement"], result["kind"]), (ENG, "cap"))
+        self.assertEqual(self.fake.status[f"{KEY}-100"], jirabackend.RESOLVED_STATUS)
+        self.assertEqual(self.fake.posted[f"{KEY}-100"][-1], "Resolved: go by the owner")
+        self.assertEqual(result["issues"][0]["issue"], f"{KEY}-100")
+
+    def test_not_blocked_is_skipped(self):
+        self.block_eng(kind="ask", reason="landed")
+        self.fake.status[f"{KEY}-100"] = "In Progress"
+        before = len(self.writes())
+        result = self.unblock_eng(kind="ask", reason="continue by the owner")
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(len(self.writes()), before)
+        self.assertEqual(len(result["skipped"]), 1)
+
+    def test_refusals_by_name(self):
+        self.assertIn("UnknownKind", self.unblock_eng(kind="questions")["reason"])
+        self.assertIn("ReasonMissing", self.unblock_eng(reason=" ")["reason"])
+        self.assertIn("NoIssue", self.unblock_eng()["reason"])
+
+    def test_the_cli(self):
+        self.block_eng(kind="cap", reason="reached its cap")
+        out = io.StringIO()
+        with unittest.mock.patch.object(jirabackend, "client_for", _client_with(self.fake)), \
+                contextlib.redirect_stdout(out):
+            code = track.main(["unblock", "--directory", str(self.root), "--engagement", ENG,
+                               "--kind", "cap", "--reason", "go by the owner"])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.fake.status[f"{KEY}-100"], jirabackend.RESOLVED_STATUS)
+
+
 if __name__ == "__main__":
     unittest.main()

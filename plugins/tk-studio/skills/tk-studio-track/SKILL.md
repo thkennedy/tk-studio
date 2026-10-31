@@ -120,6 +120,29 @@ from those statuses. Every Atlassian write goes through the planning adapter
    `source` adds `--source <source>`; `dry_run` adds `--dry-run` (reads
    only, writes nothing).
 
+   The `unblock` verb (Story 36.3) closes a block that was resolved by the
+   operator's resume, or by the owner's `go` or `continue`; the supervisor
+   calls it on the host, with the agent seat:
+
+   ```bash
+   uv run "${CLAUDE_PLUGIN_ROOT}/lib/track.py" unblock --directory <project-root> \
+     --story <ST-NNN | N-M-slug> --reason "<text>" [--source run] [--dry-run]
+   uv run "${CLAUDE_PLUGIN_ROOT}/lib/track.py" unblock --directory <project-root> \
+     --engagement <ENG-NNN> --kind cap|ask --reason "<text>" [--dry-run]
+   ```
+
+   An issue in `Blocked - Awaiting User` gets one `Resolved: <reason>` agent
+   comment with no account mention and moves by name to `Block Resolved`; any
+   other status is named in `skipped[]`, with no move and no comment. `--story`
+   also moves the dependents `block` moved (one blocked by something else is
+   skipped). `--engagement` moves its issue to `Block Resolved`, never `Done`.
+   The result is `{ok, dry_run, story, source, issues: [{issue, entity, role,
+   from, to, transitioned, commented, skipped?, error?}], skipped[], notes[],
+   written: [], retry?}`, plus `engagement` and `kind` on the engagement form.
+   Refusals end `blocked` as `block`'s do, with `NoIssue`, `UnknownKind` and
+   `ReasonMissing` by name; a temporary failure ends `partial` with `ok: false`
+   and `retry: true`.
+
    The `reply` verb (Story 31.6) is the owner's answer from the web's
    Issue screen; only the supervisor's `POST /inbox/{key}/reply` calls it,
    on the host:

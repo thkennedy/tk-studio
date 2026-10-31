@@ -585,6 +585,27 @@ describe("Story 32.3: review fixes (lost re-block, late owner comments, close re
     expect(fake.calls.filter((c) => c.args[0] === "block")).toHaveLength(2);
   });
 
+  test("Story 36.3: a cap or ask block followed by its `unblocked` event: the owed questions block closes after it", async () => {
+    for (const kind of ["cap", "ask"]) {
+      const { root, queue, uv, count } = await engagementWith();
+      cardAnswerAll(root);
+      queue.serviceEvent("engagement-issue", { engagement: ENG, project: "p", issue: ISSUE, action: "blocked", kind }, "2026-10-25T07:30:00.000Z");
+      queue.serviceEvent("engagement-issue", { engagement: ENG, project: "p", issue: ISSUE, action: "unblocked", kind }, "2026-10-25T07:40:00.000Z");
+      const out = await questionsPass(queue, deps(uv, { now: at(8) }), { root, engagement: ENG });
+      expect(out.closed).toEqual([ENG]);
+      expect(count("close")).toBe(1);
+    }
+  });
+
+  test("Story 36.3: an `unblocked` of the other kind clears nothing", async () => {
+    const { root, queue, uv, count } = await engagementWith();
+    cardAnswerAll(root);
+    queue.serviceEvent("engagement-issue", { engagement: ENG, project: "p", issue: ISSUE, action: "unblocked", kind: "ask" }, "2026-10-25T07:20:00.000Z");
+    queue.serviceEvent("engagement-issue", { engagement: ENG, project: "p", issue: ISSUE, action: "blocked", kind: "cap" }, "2026-10-25T07:30:00.000Z");
+    await questionsPass(queue, deps(uv, { now: at(8) }), { root, engagement: ENG });
+    expect(count("close")).toBe(0);
+  });
+
   test("finding 5: parseAnswers ignores a copied question header (`<id>: <text>`): a pasted block comment answers nothing; a quoted header after a real answer does not overwrite it", () => {
     const pasted = "Blocked: ENG-001 needs 2 answer(s)\nscope: How big is the first cut?\n- Small (default)\n- Large\ndb: which database?  \n- sqlite\n- postgres (default)";
     expect(parseAnswers(pasted, QUESTIONS)).toEqual({});

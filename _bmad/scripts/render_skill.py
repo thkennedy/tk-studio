@@ -312,7 +312,18 @@ def _publish(destination: Path, outputs: dict[str, bytes], manifest: dict[str, A
             + b"\n"
         )
         try:
-            os.rename(staging, destination)
+            # tk-studio base patch render-skill-staging-rename-retry: a Windows-mounted sandbox
+            # folder refuses the rename for a moment (EACCES/EPERM, hole 95): five tries, 200 ms apart.
+            import time
+
+            for attempt in range(5):
+                try:
+                    os.rename(staging, destination)
+                    break
+                except PermissionError:
+                    if attempt == 4 or (destination.exists() and any(destination.iterdir())):
+                        raise
+                    time.sleep(0.2)
         except OSError:
             if destination.exists():
                 _verify_existing(destination, manifest)

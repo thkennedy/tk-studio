@@ -66,3 +66,16 @@ The Universe Awaits has run this rule as a local patch since 2026-09-09.
 **Per project.** gds's artifact paths must equal bmm's. In tk-studio,
 `_bmad/custom/config.toml` pins them. The Universe Awaits' install answers
 already match.
+
+## render-skill-staging-rename-retry (2026-10-31, not yet registered)
+
+**Defect.** Hole 95, DW-110. The first render of a skill in a fresh run worktree can fail inside the sandbox with `[Errno 13] Permission denied` on `_publish`'s `os.rename(staging, destination)`. The sbx mount over a Windows folder refuses the rename for a moment.
+
+**The change.** Five tries, 200 ms apart, on `PermissionError` (`EACCES`/`EPERM`), under the marker line `tk-studio base patch render-skill-staging-rename-retry`. Both tracked copies carry it, edited identically: `_bmad/scripts/render_skill.py` and `apps/supervisor/_bmad/scripts/render_skill.py`.
+
+**Registration is owed.** `base-patches/patches.json` has no entry for it yet. An entry needs a filed upstream issue URL, one defect to one issue, and none has been supplied. Until then:
+
+- `tk install` does not re-apply the change, so a reinstall reverts it.
+- `tk activate` does not report it.
+
+To finish: file or locate the BMAD-METHOD issue, then add the second registry entry with `id: render-skill-staging-rename-retry`, `applies_to_core: ["6.11.0"]`, `find` the unpatched `os.rename(staging, destination)` / `except OSError:` region and `replace` the patched one. Never reuse `BMAD-METHOD#2718`: it is another defect's.

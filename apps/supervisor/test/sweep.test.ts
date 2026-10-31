@@ -11,13 +11,13 @@ import { closeOutPaused } from "../src/closeout";
 import { endNotice, noticeText } from "../src/hygiene";
 import { runCost } from "../src/inbox";
 import { mergePass, PLAN_RETRY_LIMIT } from "../src/planstatus";
-import { Queue } from "../src/queue";
+import { Queue, type QueueEvent } from "../src/queue";
 import { runProcess, type RunResult } from "../src/server";
 import {
-  emitTriage, engineCostOf, isSweep, LEDGER_LEASE, LEDGER_RESOLVE, ledgerFingerprint, ledgerPass, recordTriage, summaryFromRecord, SWEEP_ENGINE_STOP, SWEEP_JOB_TYPE, SWEEP_TRIAGE, sweepCostText,
+  emitTriage, engineCostOf, isSweep, stopEngine, SWEEP_STOP_DEADLINE_MS, sweepStopPastDeadline, LEDGER_LEASE, LEDGER_RESOLVE, ledgerFingerprint, ledgerPass, recordTriage, summaryFromRecord, SWEEP_ENGINE_STOP, SWEEP_JOB_TYPE, SWEEP_TRIAGE, sweepCostText,
   sweepEndState, sweepSection, sweepTotalCost, withEngineCost, type SweepSummary,
 } from "../src/sweep";
-import { launchedCloseOutInput, prBody, prepareWorktree, sweepEngines, type WorktreeDeps } from "../src/worktree";
+import { launchedCloseOutInput, prBody, prepareWorktree, sweepEngines, wipMessage, type WorktreeDeps } from "../src/worktree";
 import { fakeGh, gitRepo, testGit } from "./fakes";
 import { tempDir } from "./tmp";
 
@@ -1020,5 +1020,212 @@ describe("Story 36.2: the sweep's records are whole", () => {
     expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.id]);
     expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.body).toContain("not metered (worker turns) + $3.7500 (engine) = $3.7500");
     expect(fx.verbs[0]![fx.verbs[0]!.indexOf("--total-cost-usd") + 1]).toBe("3.75");
+  });
+});
+
+describe("Story 36.3: a paused sweep's bounded stop and its WIP (DW-121)", () => {
+  const PAUSED = { ok: true, run: { status: "running", paused_stage: "review", paused_reason: "escalation", paused_story_key: "dw-b" } };
+  const REFUSED: RunResult = { exit: 2, stdout: "", stderr: "sbx exec: sandbox stopped" };
+  const notifying = (fx: Awaited<ReturnType<typeof sweepFixture>>, now: () => number) => {
+    const sent: string[] = [];
+    const env = { ...fx.deps.env, TK_SUPERVISOR_NOTIFY: "ntfy", TK_SUPERVISOR_NTFY_URL: "https://ntfy.example/t" };
+    const deps: WorktreeDeps = { ...fx.deps, env, clockMs: now, hygiene: { env, fetch: async (_u, init) => { sent.push(String(init?.body ?? "")); return new Response("ok", { status: 200 }); } } };
+    return { deps, sent };
+  };
+  const firstNoteAt = (fx: Awaited<ReturnType<typeof sweepFixture>>) => Date.parse(fx.queue.events(fx.id).find((e) => e.kind === SWEEP_ENGINE_STOP)!.at);
+
+  test("Story 36.3: a stop unanswered under the deadline is retried with one note; past it: one line, an explicit `blocked` end, the WIP committed, lock and pin released", async () => {
+    const fx = await sweepFixture();
+    fx.triage();
+    fx.landed("a"); // `sweepEndState` would read this `partial`
+    fx.answers.launch = PAUSED;
+    fx.answers.stop = REFUSED;
+    fx.commit("a.txt", "bundle a");
+    writeFileSync(join(fx.served, "half.txt"), "half-written");
+    let now = Date.now();
+    const n = notifying(fx, () => now);
+    expect(await sweepEngines(fx.queue, n.deps)).toEqual([]);
+    now = firstNoteAt(fx) + SWEEP_STOP_DEADLINE_MS - 1000;
+    expect(await sweepEngines(fx.queue, n.deps)).toEqual([]);
+    expect(fx.get().state).toBe("running");
+    expect(n.sent).toEqual([]);
+    expect(fx.queue.events(fx.id).filter((e) => e.kind === SWEEP_ENGINE_STOP)).toHaveLength(1);
+    now = firstNoteAt(fx) + SWEEP_STOP_DEADLINE_MS + 1000;
+    expect(await sweepEngines(fx.queue, n.deps)).toEqual([fx.id]);
+    const line = `paused sweep ${fx.id}: stop unanswered for 30 min — ended blocked, lock and pin released`;
+    expect(n.sent).toEqual([line]);
+    expect(fx.get().state).toBe("blocked");
+    expect(fx.get().reason).toContain(line);
+    expect(fx.get().reason).toContain(wipMessage("dw-b", fx.id));
+    expect(fx.queue.lock(fx.root)).toBeNull();
+    expect(existsSync(fx.get().worktree!)).toBe(true); // the unanswered engine may still run there
+    expect(fx.queue.events(fx.id).findLast((e) => e.kind === "ended")!.detail).toMatchObject({ closeout: { worktree: "kept" } });
+    expect(testGit(fx.repo.origin, "log", "-1", "--format=%s", `supervisor/run-${fx.id}`)).toBe(wipMessage("dw-b", fx.id));
+    expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).toContain("--draft");
+    const verify = fx.queue.events(fx.id).filter((e) => e.kind === "host-verify");
+    expect(verify.map((e) => e.detail)).toEqual([{ skipped: true, reason: "paused sweep: WIP committed, leg skipped" }]);
+    expect(await sweepEngines(fx.queue, n.deps)).toEqual([]); // ended: one line, one end
+    expect(n.sent).toHaveLength(1);
+  });
+
+  test("Story 36.3: a clean tree past the deadline still ends `blocked`, no leg, the PR a draft", async () => {
+    const fx = await sweepFixture();
+    fx.triage();
+    fx.answers.launch = PAUSED;
+    fx.answers.stop = REFUSED;
+    fx.commit("a.txt", "bundle a");
+    let now = Date.now();
+    const n = notifying(fx, () => now);
+    await sweepEngines(fx.queue, n.deps);
+    now = firstNoteAt(fx) + SWEEP_STOP_DEADLINE_MS + 1000;
+    expect(await sweepEngines(fx.queue, n.deps)).toEqual([fx.id]);
+    expect(fx.get().state).toBe("blocked");
+    expect(fx.queue.events(fx.id).filter((e) => e.kind === "host-verify").map((e) => e.detail)).toEqual([{ skipped: true, reason: "paused sweep: stop unanswered, leg skipped" }]);
+    expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).toContain("--draft");
+  });
+
+  describe("Story 36.3: the status probe fails after an unanswered stop", () => {
+    const UNKNOWN = { ok: false, error: "sbx exec: sandbox stopped" };
+    const stops = (fx: Awaited<ReturnType<typeof sweepFixture>>) => fx.studio.filter((c) => c.script.endsWith("launch.py") && c.args[0] === "stop").length;
+    /** A first failed stop on a paused engine (one `error` note), with a half-written tree; the status then answers `after`. */
+    const firstFailed = async (after: unknown) => {
+      const fx = await sweepFixture();
+      fx.triage();
+      fx.landed("a");
+      fx.answers.launch = PAUSED;
+      fx.answers.stop = REFUSED;
+      fx.commit("a.txt", "bundle a");
+      writeFileSync(join(fx.served, "half.txt"), "half-written");
+      const clock = { now: Date.now() };
+      const n = notifying(fx, () => clock.now);
+      expect(await sweepEngines(fx.queue, n.deps)).toEqual([]);
+      expect(stops(fx)).toBe(1);
+      fx.answers.launch = after;
+      return { fx, n, clock };
+    };
+
+    test("Story 36.3: `unknown` under the deadline: no end, no stop; past it with the stop still failing: `blocked`, the WIP committed, one line, tree kept", async () => {
+      const { fx, n, clock } = await firstFailed(UNKNOWN);
+      clock.now = firstNoteAt(fx) + SWEEP_STOP_DEADLINE_MS - 1000;
+      expect(await sweepEngines(fx.queue, n.deps)).toEqual([]);
+      expect(fx.get().state).toBe("running");
+      expect(stops(fx)).toBe(1);
+      expect(n.sent).toEqual([]);
+      clock.now = firstNoteAt(fx) + SWEEP_STOP_DEADLINE_MS + 1000;
+      expect(await sweepEngines(fx.queue, n.deps)).toEqual([fx.id]);
+      expect(stops(fx)).toBe(2);
+      const line = `paused sweep ${fx.id}: stop unanswered for 30 min — ended blocked, lock and pin released`;
+      expect(n.sent).toEqual([line]);
+      expect(fx.get().state).toBe("blocked");
+      expect(fx.get().reason).toContain(line);
+      expect(fx.get().reason).toContain(wipMessage("dw-b", fx.id));
+      expect(fx.queue.lock(fx.root)).toBeNull();
+      expect(existsSync(fx.get().worktree!)).toBe(true);
+      expect(testGit(fx.repo.origin, "log", "-1", "--format=%s", `supervisor/run-${fx.id}`)).toBe(wipMessage("dw-b", fx.id));
+      expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).toContain("--draft");
+      expect(fx.queue.events(fx.id).filter((e) => e.kind === "host-verify").map((e) => e.detail)).toEqual([{ skipped: true, reason: "paused sweep: WIP committed, leg skipped" }]);
+      expect(fx.queue.events(fx.id).filter((e) => e.kind === SWEEP_ENGINE_STOP)).toHaveLength(1);
+    });
+
+    test("Story 36.3: `unknown` past the deadline with a WIP commit that fails still ends `blocked`, `wip.error` naming the failure", async () => {
+      const { fx, n, clock } = await firstFailed(UNKNOWN);
+      testGit(fx.served, "checkout", "-q", "-b", "elsewhere");
+      clock.now = firstNoteAt(fx) + SWEEP_STOP_DEADLINE_MS + 1000;
+      expect(await sweepEngines(fx.queue, n.deps)).toEqual([fx.id]);
+      expect(fx.get().state).toBe("blocked");
+      expect(fx.get().reason).toContain("WIP not committed, worktree kept: the worktree is on 'elsewhere'");
+      expect((fx.queue.events(fx.id).findLast((e) => e.kind === "ended")!.detail as any).wip.error).toContain("elsewhere");
+      expect(n.sent).toHaveLength(1);
+      expect(fx.queue.lock(fx.root)).toBeNull();
+    });
+
+    test("Story 36.3: `unknown` past the deadline with the stop answering `stopped`: no end this tick; the next closes it out as usual", async () => {
+      const { fx, n, clock } = await firstFailed(UNKNOWN);
+      fx.answers.stop = { exit: 0, stdout: JSON.stringify({ ok: true }), stderr: "" };
+      clock.now = firstNoteAt(fx) + SWEEP_STOP_DEADLINE_MS + 1000;
+      expect(await sweepEngines(fx.queue, n.deps)).toEqual([]);
+      expect(stops(fx)).toBe(2);
+      expect(fx.get().state).toBe("running");
+      expect(n.sent).toEqual([]);
+      fx.answers.launch = { ok: true, run: { status: "stopped" } };
+      expect(await sweepEngines(fx.queue, n.deps)).toEqual([fx.id]);
+      expect(fx.get().state).not.toBe("blocked");
+      expect(n.sent).toEqual([]);
+    });
+
+    test("Story 36.3: `running` past the deadline is never ended or stopped", async () => {
+      const { fx, n, clock } = await firstFailed({ ok: true, run: { status: "running" } });
+      clock.now = firstNoteAt(fx) + SWEEP_STOP_DEADLINE_MS + 1000;
+      expect(await sweepEngines(fx.queue, n.deps)).toEqual([]);
+      expect(stops(fx)).toBe(1);
+      expect(fx.get().state).toBe("running");
+      expect(n.sent).toEqual([]);
+    });
+  });
+
+  test("Story 36.3: a `{stopped: true}` note starts no deadline; a later failure's `error` note does", () => {
+    const at = (iso: string, detail: Record<string, unknown>) => ({ seq: 1, kind: SWEEP_ENGINE_STOP, at: iso, detail }) as unknown as QueueEvent;
+    const t0 = Date.parse("2026-10-30T00:00:00.000Z");
+    const stopped = at("2026-10-30T00:00:00.000Z", { engine_run_id: "E1", stopped: true });
+    expect(sweepStopPastDeadline([stopped], "E1", t0 + 10 * SWEEP_STOP_DEADLINE_MS)).toBe(false);
+    const failed = at("2026-10-30T01:00:00.000Z", { engine_run_id: "E1", error: "stop failed" });
+    expect(sweepStopPastDeadline([stopped, failed], "E1", t0 + SWEEP_STOP_DEADLINE_MS + 1000)).toBe(false);
+    expect(sweepStopPastDeadline([stopped, failed], "E1", Date.parse(failed.at) + SWEEP_STOP_DEADLINE_MS + 1000)).toBe(true);
+    expect(sweepStopPastDeadline([failed], "E2", Date.parse(failed.at) + SWEEP_STOP_DEADLINE_MS + 1000)).toBe(false);
+  });
+
+  test("Story 36.3: a stop answered with a dirty tree: WIP on the run branch, the leg skipped, the PR a draft, the landed bundle flips and the WIP bundle's stays open", async () => {
+    const fx = await sweepFixture();
+    fx.triage();
+    fx.landed("a");
+    fx.commit("a.txt", "bundle a");
+    fx.answers.launch = PAUSED;
+    writeFileSync(join(fx.served, "half.txt"), "half-written");
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.id]);
+    expect(fx.get().state).toBe("partial");
+    expect(fx.get().reason).toContain(wipMessage("dw-b", fx.id));
+    const ended = fx.queue.events(fx.id).findLast((e) => e.kind === "ended")!.detail as Record<string, any>;
+    expect(ended.sweep.bundles.map((b: Record<string, unknown>) => [b.name, b.landed])).toEqual([["a", true], ["b", false]]);
+    expect(ended.closeout.result).toBe("draft PR");
+    expect(ended.wip).toMatchObject({ committed: true, message: wipMessage("dw-b", fx.id) });
+    expect(testGit(fx.repo.origin, "show", "--name-only", "--format=%s", `supervisor/run-${fx.id}`).split("\n")).toContain("half.txt");
+    expect(fx.queue.events(fx.id).filter((e) => e.kind === "host-verify").map((e) => e.detail)).toEqual([{ skipped: true, reason: "paused sweep: WIP committed, leg skipped" }]);
+    expect(fx.studio.some((s) => s.args[0] === "host-verify")).toBe(false);
+  });
+
+  test("Story 36.3: a WIP sweep whose bundles all landed ends `partial`, naming the WIP; never `complete`", async () => {
+    const fx = await sweepFixture();
+    fx.triage();
+    fx.landed("a");
+    fx.landed("b");
+    fx.commit("a.txt", "bundles");
+    fx.answers.launch = { ok: true, run: { status: "running", paused_stage: "review", paused_reason: "escalation" } };
+    writeFileSync(join(fx.served, "half.txt"), "half-written");
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.id]);
+    expect(fx.get().state).toBe("partial");
+    expect(fx.get().reason).toContain("WIP committed on");
+  });
+
+  test("Story 36.3: a stop answered with a clean tree proceeds as today: the leg runs, the PR ready, every bundle landed `complete`", async () => {
+    const fx = await sweepFixture();
+    fx.triage();
+    fx.landed("a");
+    fx.landed("b");
+    fx.commit("a.txt", "bundles");
+    fx.answers.launch = { ok: true, run: { status: "running", paused_stage: "review", paused_reason: "escalation" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.id]);
+    expect(fx.get().state).toBe("complete");
+    expect((fx.queue.events(fx.id).filter((e) => e.kind === "host-verify")[0]!.detail as Record<string, unknown>).reason).not.toContain("paused sweep");
+    expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).not.toContain("--draft");
+  });
+
+  test("Story 36.3: an sbx-tier sweep's stop goes through `deps.sbx.run`, a hard stop (no `--graceful`)", async () => {
+    const calls: string[][] = [];
+    const answer = await stopEngine({ worktree: tempDir("tk-sup-sweep-stop-"), prefix: "", engine_run_id: "E1", tier: "sbx", sandbox: "claude-p" },
+      { env: { TK_STUDIO_ROOT: "/studio" }, sbx: { run: async (_b, a) => { calls.push(a); return { exit: 0, stdout: "{}", stderr: "" }; } } });
+    expect(answer).toBe("stopped");
+    expect(calls[0]!.slice(0, 2)).toEqual(["exec", "claude-p"]);
+    expect(calls[0]).toContain("stop");
+    expect(calls[0]).not.toContain("--graceful");
   });
 });

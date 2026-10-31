@@ -2923,6 +2923,40 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertIn("Story 35.1, Story 35.8, Story 35.2, Story 35.3, Story 35.4, Story 35.5, Story 35.6, "
                       "Story 35.7 (Epic 35)", stories)
 
+    def test_0_1_31_story_36_3_a_paused_or_resumed_run_is_never_parked(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.31**", header)
+        self.assertEqual(header.count("0.1.31 (Story 36.3, additive)"), 1)
+        self.assertLess(header.index("0.1.31 (Story 36.2, additive)"),
+                        header.index("0.1.31 (Story 36.3, additive)"))
+        clause = " ".join(header[header.index("0.1.31 (Story 36.3, additive)"):].split())
+        for phrase in ("`track.py unblock`", "`track-unblock`", "on the run's tier", "`partial`",
+                       "`SWEEP_STOP_DEADLINE_MS`", "B3/B4 are decided", "35.2's park superseded", "— additive) |"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        self.assertEqual(flat.count("**0.1.31 (Story 36.3, additive).**"), 1)
+        self.assertLess(flat.index("**0.1.31 (Story 36.2, additive).**"),
+                        flat.index("**0.1.31 (Story 36.3, additive).**"))
+        note = flat[flat.index("**0.1.31 (Story 36.3, additive).**"):]
+        note = note[:note.index("## 8. Conformance")]
+        for phrase in ("`graceful-stop` gains `tier`", "`GracefulStopError`", "`track-unblock {story_key, engine_run_id, ok, status, issues: [{key, from, to}], reason, retry?: true}`",
+                       "no account mention", "never `Done`", "`engagement-issue {action: \"unblocked\", kind}`",
+                       "`sync.projection.conflicts`", "`status: \"partial\"`", "`PLAN_RETRY_LIMIT`", "`.staging-*`",
+                       "`EACCES`/`EPERM`", "`SWEEP_STOP_DEADLINE_MS` (30 min)", "`{stopped: true}` note starts no clock",
+                       "`wip: sweep bundle <key> paused (run <id>)`", "paused sweep: WIP committed, leg skipped",
+                       "B3/B4 decided", "`story-boundary` gaining `ended: true`", "`POST /runs/{id}/cancel`", "supersedes",
+                       "409 `StoryLanded`", "keeps `launched.end`",
+                       "queues no `validate-resolution`", "`to: \"Block Resolved\"`", "later than the item's `blocked_since`",
+                       "The end follows the leg", "a recorded `host-verify` reused", "`STUDIO_END_RETRY_LIMIT`",
+                       "`canonical` its local file path", "`backend` its issue key", "never the path", "`gave_up: true`",
+                       "the worktree is kept", "recorded `ok: false` and retried"):
+            self.assertIn(phrase, note)
+        track_row = next(line for line in self.text.splitlines() if line.startswith("| `tk-studio-track`"))
+        self.assertIn("verb `unblock`", track_row)
+        stories = next(line for line in self.text.splitlines() if line.startswith("| Story / rulings"))
+        self.assertIn("Story 36.1, Story 36.2, Story 36.3 (Epic 36)", stories)
+
     def test_0_1_31_story_36_2_the_sweeps_records_are_whole(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))

@@ -14,7 +14,8 @@
  *            `validate-expired` service event `{key, run_id, issue, state}` and lets this pass queue the key again —
  *            at most 3 times: a key with 3 `validate-expired` events stays recorded and expires no more, so a
  *            deterministic refusal that writes no line stops minting runs (only a re-block, a new agent `Blocked:`
- *            comment, is a new key). The definition is resolved as `validate`
+ *            comment, is a new key). Story 36.3: an item the agent seat itself moved (`agentUnblocked`) queues nothing
+ *            and records nothing. The definition is resolved as `validate`
  *            resolves it (`jobrun.py resolve`, injected) with `target.payload` = `{verb: "validate", project_root,
  *            issues: [{issue, story, paused_run, spec}]}`; the run options are `tier: "host"` plus the planner leg's
  *            `model` and `effort` from the served project's `.bmad-loop/routing.current.json` (the paused run's
@@ -204,6 +205,20 @@ export function recordedKeys(queue: Queue): Set<string> {
   return recorded;
 }
 
+/** A Jira or ISO stamp in ms (`…+0000` is not ISO's `+00:00`), else NaN. */
+const stampMs = (at: unknown): number => Date.parse(String(at ?? "").replace(/([+-]\d{2})(\d{2})$/, "$1:$2"));
+
+/** Story 36.3: did the agent seat itself move the item out of its block? A `track-unblock` on the project's runs whose
+ * `issues[]` entry names the issue with `to: "Block Resolved"` (the entry's move, not the event's `ok`: a dependent's refusal
+ * makes it `ok: false` with this entry moved), later than the block's `blocked_since`. No owner's move to validate. */
+export function agentUnblocked(queue: Queue, projectId: string, issue: string, blockedSince: unknown): boolean {
+  const since = stampMs(blockedSince);
+  if (!Number.isFinite(since)) return false;
+  return queue.runs().some((r) => (!r.project_id || r.project_id === projectId) && queue.events(r.run_id).some((e) =>
+    e.kind === "track-unblock" && stampMs(e.at) > since && Array.isArray(e.detail?.issues)
+    && (e.detail!.issues as Record<string, unknown>[]).some((i) => i?.key === issue && i?.to === "Block Resolved")));
+}
+
 async function queueResolved(queue: Queue, deps: ResolutionDeps, out: ResolutionResult): Promise<void> {
   const shown = await deps.registry();
   const projects = shown?.projects && typeof shown.projects === "object" && !Array.isArray(shown.projects)
@@ -219,6 +234,7 @@ async function queueResolved(queue: Queue, deps: ResolutionDeps, out: Resolution
         const key = resolutionKey(project, item as Record<string, any>);
         if (!key || recorded.has(key)) continue;
         const issue = str(item.issue)!;
+        if (agentUnblocked(queue, project, issue, item.blocked_since)) continue; // Story 36.3: no validation of the agent's own move
         const paused = pausedRunFor(queue, issue, project);
         const block = paused ? trackBlockSincePause(queue.events(paused.run_id)) : undefined;
         const story = str(block?.story_key);

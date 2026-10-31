@@ -618,3 +618,85 @@ describe("Story 33.6: other pauses behave as before", () => {
     expect(existsSync(fx.specFile)).toBe(true);
   });
 });
+
+describe("Story 36.3: a failed first render (hole 95, DW-110)", () => {
+  const STAGING = SNAP.replace("172e0a66eabaf094fb43", ".staging-abc123");
+  const reason = devReason(`[Errno 13] Permission denied: '/home/agent/w/${STAGING}' -> '/home/agent/w/${SNAP}'`);
+
+  test("Story 36.3: snapshotFolders collapses a staging folder beside its generation; a different slug is still two", () => {
+    expect(snapshotFolders(`/w/${STAGING} -> /w/${SNAP}`)).toEqual(["bmad-build-auto/widget-4b16bf12e1f0/172e0a66eabaf094fb43"]);
+    expect(snapshotFolders(`/w/${STAGING.replace("widget", "other")} -> /w/${SNAP}`)).toHaveLength(2);
+  });
+
+  for (const shape of ["absent", "empty"] as const) {
+    test(`Story 36.3: an ${shape} generation beside its staging folder counts as the one snapshot: leftovers removed, one auto-resume, attempt 1`, async () => {
+      const fx = await pausedRun({ reason, snapshot: false });
+      const stagingDir = join(fx.wt, ...STAGING.split("/"));
+      writeSnapshot(stagingDir);
+      if (shape === "empty") mkdirSync(fx.snap, { recursive: true });
+      const p = passDeps(fx);
+      await closeOutPaused(fx.queue, p.deps);
+      expect(p.resumed).toEqual([fx.id]);
+      expect(existsSync(fx.snap)).toBe(false);
+      expect(existsSync(stagingDir)).toBe(false);
+      expect(existsSync(fx.specFile)).toBe(false);
+      expect(ev(fx, AUTO_RESUME)[0]!.detail).toMatchObject({ reason: "stale-render-view", snapshot: SNAP, attempt: 1, resumed: true });
+    });
+  }
+
+  test("Story 36.3: the second failure records `attempt: 2`, no second resume", async () => {
+    const fx = await pausedRun({ reason, snapshot: false });
+    const p = passDeps(fx);
+    await closeOutPaused(fx.queue, p.deps);
+    expect(p.resumed).toHaveLength(1);
+    writeFileSync(fx.specFile, spec("blocked"));
+    fx.queue.markLaunched(fx.id, E1, { end: {} });
+    fx.pause();
+    await closeOutPaused(fx.queue, p.deps);
+    await closeOutPaused(fx.queue, p.deps);
+    expect(p.resumed).toHaveLength(1);
+    expect(ev(fx, AUTO_RESUME).map((e) => e.detail!.attempt)).toEqual([1, 2]);
+  });
+
+  test("Story 36.3: a partly written generation beside a staging folder is no failed first render: nothing removed, no resume", async () => {
+    const fx = await pausedRun({ reason, snapshot: false });
+    mkdirSync(fx.snap, { recursive: true });
+    writeFileSync(join(fx.snap, "workflow.md"), "# partial\n");
+    const p = passDeps(fx);
+    await closeOutPaused(fx.queue, p.deps);
+    expect(p.resumed).toEqual([]);
+    expect(existsSync(join(fx.snap, "workflow.md"))).toBe(true);
+    expect(existsSync(fx.specFile)).toBe(true);
+  });
+
+  test("Story 36.3: no staging folder named and no generation: not recognised as a failed first render", async () => {
+    const fx = await pausedRun({ snapshot: false });
+    const p = passDeps(fx);
+    await closeOutPaused(fx.queue, p.deps);
+    expect(p.resumed).toEqual([]);
+  });
+
+  const stagingOnly = devReason(`[Errno 13] Permission denied: '/home/agent/w/${STAGING}'`);
+  for (const shape of ["gone", "empty"] as const) {
+    test(`Story 36.3: a reason naming only a staging folder, ${shape}, and no generation: not recognised, no resume, the spec kept, no attempt`, async () => {
+      const fx = await pausedRun({ reason: stagingOnly, snapshot: false });
+      const stagingDir = join(fx.wt, ...STAGING.split("/"));
+      if (shape === "empty") mkdirSync(stagingDir, { recursive: true });
+      const p = passDeps(fx);
+      await closeOutPaused(fx.queue, p.deps);
+      expect(p.resumed).toEqual([]);
+      expect(existsSync(fx.specFile)).toBe(true);
+      expect(existsSync(stagingDir)).toBe(shape === "empty");
+      expect(ev(fx, AUTO_RESUME)).toHaveLength(0);
+    });
+  }
+
+  test("Story 36.3: a complete staging folder named alone keeps the complete-snapshot handling: one auto-resume", async () => {
+    const fx = await pausedRun({ reason: stagingOnly, snapshot: false });
+    writeSnapshot(join(fx.wt, ...STAGING.split("/")));
+    const p = passDeps(fx);
+    await closeOutPaused(fx.queue, p.deps);
+    expect(p.resumed).toEqual([fx.id]);
+    expect(ev(fx, AUTO_RESUME)[0]!.detail).toMatchObject({ reason: "stale-render-view", snapshot: STAGING, attempt: 1, resumed: true });
+  });
+});

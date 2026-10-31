@@ -803,7 +803,7 @@ describe("Story 27.4: the host verify leg runs before any PR opens", () => {
     expect(hv(fx)).toHaveLength(0);
     expect(fx.argvs.some((a) => a.bin === process.execPath)).toBe(false);
     expect(fx.get().state).toBe("complete");
-    expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).not.toContain("--draft");
+    expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).toContain("--draft"); // Story 36.3 (DW-64): no leg vouches for it
   });
 
   test("a relaunched run: red overrides the engine's own end (`finished` would be `complete`)", async () => {
@@ -939,7 +939,7 @@ describe("Story 27.4: the host verify leg runs before any PR opens", () => {
     const ended = fx.queue.events(fx.run.run_id).find((e) => e.kind === "ended")!;
     expect(ended.detail).toMatchObject({ engine: { gone: "its worktree is gone: no engine can run there" } });
     expect((ended.detail!.closeout as Record<string, unknown>).host_verify).toBeUndefined();
-    expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).not.toContain("--draft");
+    expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).toContain("--draft"); // Story 36.3 (DW-64)
   });
 
   /** A hanging verify command (prints, then sleeps 60s): the leg trips the run's guard. */
@@ -1047,9 +1047,9 @@ describe("Story 27.4: the host verify leg runs before any PR opens", () => {
       expect(fx.argvs.some((a) => a.bin === process.execPath)).toBe(false);
       expect(fx.get()).toMatchObject({ state: "partial", reason: TRIP });
       const ended = fx.queue.events(fx.run.run_id).find((e) => e.kind === "ended")!;
-      expect(ended.detail).toMatchObject({ engine: { status }, closeout: { result: "PR", worktree: "removed" } });
+      expect(ended.detail).toMatchObject({ engine: { status }, closeout: { result: "draft PR", worktree: "removed" } }); // Story 36.3 (DW-64)
       expect((ended.detail!.closeout as Record<string, unknown>).host_verify).toBeUndefined();
-      expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).not.toContain("--draft");
+      expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).toContain("--draft");
       expect(fx.verbs[0]![fx.verbs[0]!.indexOf("--reason") + 1]).toBe(TRIP);
     }
   }, 30_000); // two launched-sbx fixtures through real git: past bun's 5 s default on the win32 host (2026-10-16)
@@ -2620,6 +2620,28 @@ describe("Story 35.1: the re-run's shared motions — the `Legs:` line, the lift
     expect(calls.map((x) => x.argv[1])).toEqual(["edit"]);
     expect(calls[0]!.body).toContain("## Host verify\n\nLegs: 1 — close-out inconclusive 2026-10-27T01:00:00Z\n\n");
     expect(calls[0]!.body).toContain("Playable: inconclusive — infrastructure: sbx: exec failed");
+  });
+
+  test("Story 36.3: a killed close-out on an adopted PR returns it to a draft; a failed `--undo` is recorded and claims no draft", async () => {
+    const fx = await fixture({ baseRef: "main" });
+    const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+    commitIn(wt, "a.txt", "engine: story one");
+    const pr = "https://github.com/acme/widget/pull/42";
+    fx.gh.answer({ open: [pr] });
+    const c = await closeOut(fx.get(), { paused: false, killed: true }, fx.deps);
+    expect(c).toMatchObject({ pr, draft: true });
+    expect(c.error).toBeUndefined();
+    const undo = fx.gh.calls().filter((x) => x.argv[1] === "ready");
+    expect(undo.map((x) => x.argv.includes("--undo"))).toEqual([true]);
+    expect(fx.gh.calls().some((x) => x.argv[1] === "edit")).toBe(true);
+    const gx = await fixture({ baseRef: "main" });
+    const gwt = await prepareWorktree(gx.queue, gx.run, "proj", gx.repo.checkout, gx.deps);
+    commitIn(gwt, "a.txt", "engine: story one");
+    gx.gh.answer({ open: [pr], fail: ["pr ready"] });
+    const d = await closeOut(gx.get(), { paused: false, killed: true }, gx.deps);
+    expect(d.draft).toBeUndefined();
+    expect(d.error).toContain("gh pr ready --undo");
+    expect(gx.gh.calls().some((x) => x.argv[1] === "edit")).toBe(true);
   });
 
   test("Story 35.1: proofCommit on a worktree cut `-B <run branch> <remote tip>` over a stale local branch: committed on the branch, fast-forward of the tip; a detached cut is refused", async () => {

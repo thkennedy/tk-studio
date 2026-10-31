@@ -376,7 +376,7 @@ source_spec: `32-6-approval-autonomy-and-the-first-run-spec.md`
 location: apps/supervisor/src/approve.ts runStep; apps/supervisor/src/questions.ts closeStep
 severity: medium
 reason: runStep only blocks (step 5); questions.ts closeStep skips while the newest block kind is cap/ask. The issue stays Blocked - Awaiting User after the owner answers. Meets DEFERRAL DISCIPLINE (a).
-status: open
+status: resolved 2026-10-31 by this story's PR (36.3: `approve.ts runStep` calls `track.py unblock --engagement --kind cap|ask` once per block after the owner's go or continue, recording `unblocked`; `questions.ts closeStep` closes the owed questions block after it)
 
 ### DW-48: ask autonomy on a project not bound to Jira pauses with no question to the owner and no route to continue.
 origin: spec-deferred f1785296bde4
@@ -514,7 +514,7 @@ source_spec: `33-7-a-resumed-engines-graceful-stop-ends-complete-and-the-pacers-
 location: apps/supervisor/src/worktree.ts closeOut (the !input.verify branch, ~:480-483)
 severity: medium
 reason: Criterion (a), AC1's "the PR not a draft" tied to a complete end. Pre-existing at baseline c5749a6: closeOut's skipped-verify branch runs `gh pr ready` whatever the end state. Pinned as today's behaviour by the closeout.test.ts killed-resumed test comment.
-status: open
+status: resolved 2026-10-31 by this story's PR (36.3: `closeOut`'s `killed` keeps the PR a draft when `sweepEngines` skipped the verify for a killed engine; the remainder stays open: the late terminal close-out, `closeOutNow` and `cancel` still mark a draft ready without a verify)
 
 ### DW-65: A killed relaunch whose engine handled TERM and reads stopped ends `relaunched engine ended 'stopped'` instead of keeping launched.end (the guard trip's reason is lost).
 origin: spec-deferred c8ff9ff15f87
@@ -522,7 +522,7 @@ source_spec: `33-7-a-resumed-engines-graceful-stop-ends-complete-and-the-pacers-
 location: apps/supervisor/src/worktree.ts sweepEngines (the relaunched predicate)
 severity: medium
 reason: Criterion (a), the story's rule "a killed relaunch keeps launched.end". Pre-existing at baseline: the `relaunched` predicate tests only st.detail.killed, set only when the probe did not read ended; killedEngine() is not consulted. Pinned by the closeout.test.ts killed-relaunch test comment.
-status: open
+status: resolved 2026-10-31 by this story's PR (36.3: `relaunched` requires `notKilled`, so a killed relaunch keeps `launched.end` and the guard's reason)
 
 ### DW-66: Follow-up review still recommended for 34-2-spike-a-playable-run-on-the-box after the damping cap was spent
 origin: review-budget-followup
@@ -888,7 +888,7 @@ source_spec: `kb/agent-pc-setup-runbook.md` fixes row "hole 95"; `handoff-phase1
 location: the BMad base's `render_skill.py` (the `_bmad/render/<skill>/<slug>/.staging-* -> <generation>` rename across the sbx mount; a studio-managed base patch); apps/supervisor/src (the hole-65 auto-resume's snapshot rule)
 severity: medium
 reason: The dev session writes a `blocked` spec and bmad-loop pauses the run on a CRITICAL escalation before any work runs, the graceful stop discarded with it. Hole 65's second flavour: a failed first render, not a stale view of a complete one, so the auto-resume does not fire (the reason names two folders, the staging and the generation, and the snapshot is empty). The operator path worked (remove the empty snapshot folder and the untracked `blocked` draft spec, `POST /runs/{id}/resume`, re-arm the stop). The retro's C6 counts hole 95 as filed under DW-95; DW-95 is the `DNI` status, so this is the hole's first entry. Fix: `render_skill.py` retries the rename on EACCES/EPERM a few times (a studio-managed base patch, as d044471), and the auto-resume treats a failed first render (an empty or absent generation named beside its staging folder) as the one snapshot and resumes once.
-status: open
+status: narrowed: patch registration owed the upstream issue URL (36.3: the failed first render auto-resumes once and the staging-rename retry ships in both `render_skill.py` copies; the `base-patches/patches.json` entry waits for a filed BMAD-METHOD issue, so `tk install` does not re-apply the retry yet)
 
 ### DW-111: A host-suite test pinned the exact state of a planning artifact under `_bmad-output` (the live epic-35 SPEC's design-note set), so the loop's own planner turned the host leg red (hole 96).
 origin: operator ledger, hole 96 (2026-10-29T06:53Z, 35.3's first leg); retro-epic-35 C1, C6, AI-8
@@ -929,7 +929,7 @@ source_spec: `_bmad-output/specs/spec-epic-35/RETROSPECTIVE.md`
 location: apps/supervisor/src/queue.ts:1254 (the lock and pin kept); apps/supervisor/src/closeout.ts:818 (the relaunch skipped), :939 (`StoryLanded`); apps/supervisor/test/closeout.test.ts:1437-1470 (asserts the park)
 severity: medium
 reason: Nothing clears a stop the engine never runs again to discard. Reached only when a paused run is resumed with a stop in force and pauses again after landing — not hit in this epic (35.2's CAP-4 refusal by design, DW-83). Fix: end the run at the boundary (push, PR, release), as the retro's open question B3/B4 asks, or repeat the `story-boundary` notifier line each pass so the park stays visible; the owner's answer to that question decides which.
-status: open
+status: resolved 2026-10-31 by this story's PR (36.3: a landed story under a graceful stop archives and ends at the boundary, with push, PR, lock and pin released, and `story-boundary` carries `ended: true`; B3/B4 decided in the contract's 0.1.31 paragraph)
 
 ### DW-116: The `sweep-triage` ledger event lands in the sandbox's own ledger, which the host's `measurepush.py push` never reads and which dies with the sandbox.
 origin: retro-epic-35, B6, AI-3
@@ -969,7 +969,7 @@ source_spec: `_bmad-output/specs/spec-epic-35/RETROSPECTIVE.md`
 location: apps/supervisor/src/closeout.ts:919 (`launchStopGraceful`); plugins/tk-studio/lib/launch.py:213-226; apps/supervisor/src/sweep.ts:334-347 (`stopSweepEngine`'s `sbx exec … launch.py stop` route); apps/supervisor/test/closeout.test.ts:1536-1592 (injects `launchStop`, so the routing is never exercised)
 severity: medium
 reason: Hole 95's resume of 35.2 was spared only because bmad-loop honoured the stop on its own. Fix: route the re-arm by tier as `stopSweepEngine` does; one test without the injection. Before the first real sweep (AI-2).
-status: open
+status: resolved 2026-10-31 by this story's PR (36.3: `stopEngine` routes by tier and `--graceful`; `launchStopGraceful`, `approve.ts` and `cancelRun` pass `where`; `graceful-stop` carries `tier`)
 
 ### DW-121: A paused sweep is either stuck or stripped: a stop that does not answer `stopped` is retried every tick with no bound, and a sweep is never kept paused, so a bundle that paused mid-pass gets the host leg on its half-written tree and `git worktree remove --force` with no record of the WIP.
 origin: retro-epic-35, B3, AI-2, Open questions
@@ -977,7 +977,7 @@ source_spec: `_bmad-output/specs/spec-epic-35/RETROSPECTIVE.md`
 location: apps/supervisor/src/worktree.ts:1012-1021 (the unbounded stop retry: the run holding its checkout lock, worktree and sandbox pin, one `engine-stop` note, no notifier line), :1029 (never kept paused), :1042-1046, :662 (`remove --force`); apps/supervisor/test/sweep.test.ts:252-289 (passes only by flipping the fake; commits `a.txt` first)
 severity: medium
 reason: bmad-loop's `stop` on a run with no live process is unverified from this tree (the retro's open question B3). Fix before the first real sweep: bound the stop retry (a count or a deadline, then a notifier line and a `blocked` end that releases the lock and the pin), and keep a paused bundle's WIP out of the leg (commit it as WIP on the run branch, or keep the sweep paused for the operator); one test each.
-status: open
+status: resolved 2026-10-31 by this story's PR (36.3: `SWEEP_STOP_DEADLINE_MS` bounds the stop from the first `engine-stop` note carrying `error`, then one line and a `blocked` end; `wipCommit` commits the stopped tree, the leg is skipped and the PR stays a draft)
 
 ### DW-122: Two rules for one wait: "the owner checkout has not pulled the merge" is an uncounted, lease-free wait in the stage pass but a counted retry in the ledger pass, bounded by `PLAN_RETRY_LIMIT = 24` ticks.
 origin: retro-epic-35, B5, AI-2, AI-3
@@ -1025,7 +1025,7 @@ source_spec: `_bmad-output/specs/spec-epic-35/stories/35-2-every-story-gets-its-
 location: apps/supervisor/src/closeout.ts (`track.py block` on a `blocked` end, the one `track-block` event per pause); apps/supervisor/src/api.ts (`POST /runs/{id}/resume`) and the hole-65 auto-resume (no counterpart call); plugins/tk-studio/lib/track.py (story-side verbs: `block` in, nothing out — `close` is engagement-only, `reply` is the owner's, `validate --pass` needs the owner's transition); plugins/tk-studio/lib/jirabackend.py `pull_back` (canonical `done` vs backend `Blocked - Awaiting User` with the promoted `draft` is a conflict, held until a human picks a side) and the supervisor's plan-status pass (`ok: true` with the conflict in the projection notes)
 severity: medium
 reason: Story 35.2's run paused on hole 95 (02:52Z); `track.py block` moved TKSTUDIO-183 to `Blocked - Awaiting User` and tagged the owner (comment 10006). The operator resumed the run at 02:54Z (the hole-65 path); the story landed in #258 at 04:51Z and the plan went `done`, but every plan-status pass since promoted nothing for ST-147 (`pull-back conflict — not promoted until a human picks a side (AD-5)`), so the issue read Blocked with the owner tagged for 17 hours while the other seven EP-35 stories read Done. Repaired by hand 19:5xZ: the agent seat commented (10104) and moved the issue `Block Resolved` → `Done`; the next `sync` refreshed the snapshot (`external.jira.status: Done`). Fix: (1) a story-side `track.py unblock --story <key> --reason` (Blocked → `Block Resolved` with a `Resolved:` agent comment, idempotent) and the two resume paths call it once per `track-block` since the latest `paused`, recorded as `track-unblock`; (2) the plan-status pass ends `partial` (notified) when the projection holds a conflict for the story it just moved, never `ok: true`; (3) the "Needs you" tag is withdrawn by the unblock comment naming the resolution.
-status: open
+status: resolved 2026-10-31 by this story's PR (36.3: `track.py unblock` and `track-unblock`, once per block on every resume path; an AD-5 conflict ends the plan-status record `partial`, notified and re-asked up to `PLAN_RETRY_LIMIT`; deferred remainder: a story whose issue reads `Block Resolved` can still hold an AD-5 conflict at `done`, notified and `partial`; the side stays the owner's)
 
 ### DW-131: A sweep's engine cost is unmetered: `## Metered cost` and the job-run line carry the worker's turns only, and a bundle has no Jira story for a stage log, so the sweep's real spend (millions of weighted tokens) is invisible to the quota pacing and the rollup (hole 102).
 origin: hole 102 (the second run-sweep, q-run-sweep-20261029T174706Z-da84bd, PR #290, 2026-10-29 20:02Z)
@@ -1184,4 +1184,20 @@ source_spec: `kb/agent-pc-setup-runbook.md` (the hole-108 row); the fix commits 
 location: apps/supervisor/test/sweep.test.ts (the four-fixture test, now `30_000`); apps/supervisor/test/worktree.test.ts:1055 (the precedent, 2026-10-16); apps/supervisor/test/preload.ts (bunfig.toml's `[test] preload`; bunfig has no timeout key); tools/verify_host.py (`bun test ./<file>` per file with no `--timeout`); plugins/tk-studio/contracts/conformance/e2e_run_sweep.py (`BOUND_S`, now 240) and `e2e_engine_gate.py` (50 s), `e2e_playable_verify.py` (75 s), manifest.json's entry timeouts; the planner's test guidance (no win32 figure)
 severity: medium
 reason: Each recurrence costs a 40-minute host leg and a hand fix on the run branch, and the sandbox gate will never catch it because its git is fast enough; the second case cost two legs because the first leg's tail showed only the supervisor failure. Fix: a suite-wide default for the supervisor tests (`setDefaultTimeout(30_000)` in the preload, which every runner that loads it honours; bunfig has no timeout key) with the per-test `30_000` lines kept; the conformance drives' bounds sized from the host's measured figure with headroom (a drive that bounds a `bun test` names the host figure beside the bound) and the manifest entries following; the host leg's event keeping every suite's own verdict line, not only the last twenty lines; the planner's test guidance naming the host figure so fixture-heavy tests and widened drive filters are written with it.
+status: open
+
+### DW-151: After a successful unblock the issue reads `Block Resolved`, canonical `blocked`, so a later `done` can still hold an AD-5 conflict for a block already closed.
+origin: spec-deferred 7ccf327dfa9d
+source_spec: `36-3-a-paused-or-resumed-run-is-never-parked-spec.md`
+location: plugins/tk-studio/lib/jirabackend.py:609
+severity: medium
+reason: `jirabackend.canonical_status` maps both template statuses to `blocked`; `pull_back` conflicts when the backend status moved since the snapshot and canonical `done` differs. The hand repair of hole 101 moved the issue to `Done` and re-synced; DW-130's fix as written does not. Meets deferral (a): behaviour AC1 names; AC1 pins the target status and AD-5 keeps the side-pick human.
+status: open
+
+### DW-152: Follow-up review still recommended for 36-3-a-paused-or-resumed-run-is-never-parked after the damping cap was spent
+origin: review-budget-followup
+source_spec: `36-3-a-paused-or-resumed-run-is-never-parked-spec.md`
+location: n/a
+severity: low
+reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261031-042417-65bc; this entry preserves the lingering recommendation for a deliberate later review.
 status: open
