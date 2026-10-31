@@ -45,9 +45,9 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 SUITES = ["test/sweep.test.ts"]
 FILTER = "Story 35.7|Story 36.1|Story 36.2"
 TYPE_ID = "run-sweep"
-BOUND_S = 60
+BOUND_S = 240  # the filtered suite runs about 80 s on the win32 host's git (hole 108); under 60 s on the Linux gate
 INSTALL_BOUND_S = 40
-MANIFEST_TIMEOUT_S = 120  # keep in step with manifest.json's entry for this drive
+MANIFEST_TIMEOUT_S = 300  # keep in step with manifest.json's entry for this drive
 assert BOUND_S + INSTALL_BOUND_S < MANIFEST_TIMEOUT_S, "the drive's bounds must sit under the manifest's timeout"
 TAIL = 20
 RID = "20261029-120000-e2e7"
