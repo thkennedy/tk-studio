@@ -801,7 +801,7 @@ describe("Story 36.2: the sweep's records are whole", () => {
     operator.answers.launch = { ok: true, run: { status: "stopped" } };
     await sweepEngines(operator.queue, operator.deps);
     expect(closedOut(operator).detail!.sweep_end).toMatchObject({ state: "partial", reason: "engine ended 'stopped' after 2/2 bundles" });
-  });
+  }, 30_000); // four cancelled() fixtures through real git: past bun's 5 s default on the win32 host (2026-10-31, hole 108)
 
   test("the late close-out's priced engine is its own `job-run` line, `<studio run id>:engine`, and `closed_out` carries `engine_cost_usd`", async () => {
     const fx = await cancelled(["a"]);
