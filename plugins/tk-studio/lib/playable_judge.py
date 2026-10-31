@@ -36,12 +36,14 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
+import _core
+from _core import _write_atomic
+
 INTENT = "tk-studio-playable-judge"
-BLOCK_KEYS = ("status", "intent", "artifacts", "reason")
+BLOCK_KEYS = _core.BLOCK_KEYS
 
 REPORT = "report.json"
 JUDGE = "judge.json"
@@ -71,23 +73,7 @@ class Refusal(Exception):
 def with_block(result: dict, status: str, artifacts: list[str],
                reason: str | None) -> dict:
     """``result`` with the AD-11 block keys appended last, in order."""
-    out = {k: v for k, v in result.items() if k not in BLOCK_KEYS}
-    out.update(status=status, intent=INTENT, artifacts=list(artifacts),
-               reason=reason)
-    return out
-
-
-def _write_atomic(path: Path, data: bytes) -> None:
-    tmp = path.with_name(f"{path.name}.tk-studio-{os.getpid()}.tmp")
-    try:
-        with open(tmp, "wb") as fh:
-            fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-    finally:
-        if tmp.exists():
-            tmp.unlink()
+    return _core.with_block(result, status, artifacts, reason, intent=INTENT)
 
 
 def _inside(path: Path, root: Path) -> bool:

@@ -291,3 +291,10 @@ export class WorkDirMissing extends Error {
 export function workDir(env: Env = process.env): string | undefined {
   return env.TK_SUPERVISOR_WORK?.trim() || undefined;
 }
+
+/** Hole 31: the suite runs under `bun test` with `test/preload.ts` (bunfig.toml), which strips the
+ * operator's notifier variables and sets this marker; a send through the real `fetch` is then refused,
+ * so a test reaches a notifier only through an injected fake. `NODE_ENV=test` counts too. */
+export function underBunTest(env: Env = process.env): boolean {
+  return env.TK_SUPERVISOR_UNDER_TEST === "1" || env.NODE_ENV === "test";
+}

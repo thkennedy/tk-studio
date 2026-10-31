@@ -1167,6 +1167,146 @@ def _publish_scope(root: Path, engagement: str, text: str, space_id: str,
         raise Refused("PublishRefused", str(exc)) from None
 
 
+def _write_and_publish(root: Path, engagement: str, text: str, path: Path,
+                       space_id, site, result: dict, now, transport,
+                       sleep) -> dict:
+    """`scope`'s write and publish, under the scope lock."""
+    # re-checked under the lock: the state may have left scoping
+    # since the unlocked check above
+    fresh = read_record(root, engagement)
+    fresh_state = fresh.get("state")
+    if fresh_state in TERMINAL_STATES:
+        raise Refused("EngagementClosed", f"{engagement} is "
+                      f"{fresh_state}; nothing is written")
+    if fresh_state != "scoping":
+        raise Refused("NotScoping", f"{engagement} is {fresh_state}; "
+                      f"the scope is written only in scoping")
+    try:
+        current = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        current = None
+    rewrote = current != text
+    record_rel = f"_bmad-output/engagements/{engagement}/" \
+                 f"engagement.yaml"
+    if rewrote and fresh.get("quote") is not None:
+        # void first: a quote of the old scope is merged null before
+        # scope.md is replaced, so no later failure can leave it
+        # standing beside the new scope (`go` would pass
+        # `quote-present` at the old story count)
+        try:
+            _merge_record(root, engagement,
+                          {"updated": now or _now()},
+                          void_quote=True)
+        except OSError as exc:
+            raise Refused("ScopeUnwritable", f"{record_rel}: "
+                          f"{exc.__class__.__name__}") from None
+        result["written"].append(record_rel)
+        result["notes"].append("scope.md replaced: the quote is "
+                               "voided")
+    if rewrote:
+        try:
+            atomic_write_text(path, text)
+        except OSError as exc:
+            raise Refused("ScopeUnwritable", f"{scope_rel(engagement)}"
+                          f": {exc.__class__.__name__}") from None
+        result["written"].append(scope_rel(engagement))
+    recorded = fresh.get("scope_page") \
+        if isinstance(fresh.get("scope_page"), dict) else {}
+    try:
+        recorded_version = int(recorded["version"]) \
+            if recorded.get("version") is not None else None
+    except (TypeError, ValueError):
+        recorded_version = None
+    page = _publish_scope(root, engagement, text, space_id, site,
+                          transport, sleep, recorded_version)
+    try:
+        merged = _merge_record(root, engagement, {
+            "scope_page": {"id": page["id"], "url": page["url"],
+                           "version": page["version"]},
+            "updated": now or _now()}, void_quote=rewrote)
+        # a belt: the quote was voided before scope.md was replaced
+        if "quote" in merged and "scope.md replaced: the quote is " \
+                "voided" not in result["notes"]:
+            result["notes"].append("scope.md replaced: the quote is "
+                                   "voided")
+    except OSError as exc:
+        # scope.md (in `written`) and the page are already out; only
+        # the record's scope_page is behind
+        result["notes"].append(f"page {page['id']} published at "
+                               f"version {page['version']}; "
+                               f"scope_page unchanged")
+        raise Refused("ScopeUnwritable", f"{record_rel}: "
+                      f"{exc.__class__.__name__}") from None
+    if record_rel not in result["written"]:
+        result["written"].append(record_rel)
+    return page
+
+
+def _write_and_publish_all(root: Path, engagement: str, text: str, path: Path,
+                           space_id, site, result: dict, now, transport, sleep,
+                           game: bool, docs: dict) -> dict:
+    """The scope (`_write_and_publish`), then a game project's docs (Story
+    34.8), under the scope lock."""
+    page = _write_and_publish(root, engagement, text, path, space_id, site,
+                              result, now, transport, sleep)
+    record_rel = f"_bmad-output/engagements/{engagement}/" \
+                 f"engagement.yaml"
+    if not game:
+        return page
+    pages = {}
+    for kind, name, title, key in GAME_DOCS:
+        body = docs[kind]
+        if body is None:
+            continue  # a revise re-run: the published doc stands
+        rel = doc_rel(engagement, name)
+        doc_path = engagement_dir(root, engagement) / name
+        try:
+            held = doc_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            held = None
+        if held != body:
+            try:
+                atomic_write_text(doc_path, body)
+            except OSError as exc:
+                raise Refused("ScopeUnwritable", f"{rel}: "
+                              f"{exc.__class__.__name__}") from None
+            result["written"].append(rel)
+        prior = read_record(root, engagement).get(key)
+        try:
+            version = int(prior["version"]) \
+                if isinstance(prior, dict) \
+                and prior.get("version") is not None else None
+        except (TypeError, ValueError):
+            version = None
+        pages[key] = _publish_scope(
+            root, engagement, body, space_id, site, transport, sleep,
+            version, title=title.format(engagement=engagement),
+            rel=rel)
+    if not pages:
+        # no game doc published by this call (a flagless revise of a
+        # pre-34.8 scope). Story 35.6 (hole 92): the project is a
+        # game project, so the record still gains `game: true` (its
+        # doc pages, if any, kept as they are)
+        try:
+            _merge_record(root, engagement,
+                          {"game": True, "updated": now or _now()})
+        except OSError as exc:
+            raise Refused("ScopeUnwritable", f"{record_rel}: "
+                          f"{exc.__class__.__name__}") from None
+        return page
+    changes = {key: {"id": p["id"], "url": p["url"],
+                     "version": p["version"]}
+               for key, p in pages.items()}
+    changes.update(game=True, updated=now or _now())
+    try:
+        _merge_record(root, engagement, changes)
+    except OSError as exc:
+        raise Refused("ScopeUnwritable", f"{record_rel}: "
+                      f"{exc.__class__.__name__}") from None
+    result.update({key: p for key, p in pages.items()})
+    return page
+
+
 def scope(project_root: Path, engagement: str, text: str | None = None,
           revise_at: str | None = None, dry_run: bool = False, now=None,
           transport=None, sleep=None, lock_wait_s=SCOPE_LOCK_WAIT_S,
@@ -1245,140 +1385,13 @@ def scope(project_root: Path, engagement: str, text: str | None = None,
         site = plansync._recorded(root, "planning.jira.site")
         path = engagement_dir(root, engagement) / "scope.md"
 
-        def write_and_publish() -> dict:
-            # re-checked under the lock: the state may have left scoping
-            # since the unlocked check above
-            fresh = read_record(root, engagement)
-            fresh_state = fresh.get("state")
-            if fresh_state in TERMINAL_STATES:
-                raise Refused("EngagementClosed", f"{engagement} is "
-                              f"{fresh_state}; nothing is written")
-            if fresh_state != "scoping":
-                raise Refused("NotScoping", f"{engagement} is {fresh_state}; "
-                              f"the scope is written only in scoping")
-            try:
-                current = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                current = None
-            rewrote = current != text
-            record_rel = f"_bmad-output/engagements/{engagement}/" \
-                         f"engagement.yaml"
-            if rewrote and fresh.get("quote") is not None:
-                # void first: a quote of the old scope is merged null before
-                # scope.md is replaced, so no later failure can leave it
-                # standing beside the new scope (`go` would pass
-                # `quote-present` at the old story count)
-                try:
-                    _merge_record(root, engagement,
-                                  {"updated": now or _now()},
-                                  void_quote=True)
-                except OSError as exc:
-                    raise Refused("ScopeUnwritable", f"{record_rel}: "
-                                  f"{exc.__class__.__name__}") from None
-                result["written"].append(record_rel)
-                result["notes"].append("scope.md replaced: the quote is "
-                                       "voided")
-            if rewrote:
-                try:
-                    atomic_write_text(path, text)
-                except OSError as exc:
-                    raise Refused("ScopeUnwritable", f"{scope_rel(engagement)}"
-                                  f": {exc.__class__.__name__}") from None
-                result["written"].append(scope_rel(engagement))
-            recorded = fresh.get("scope_page") \
-                if isinstance(fresh.get("scope_page"), dict) else {}
-            try:
-                recorded_version = int(recorded["version"]) \
-                    if recorded.get("version") is not None else None
-            except (TypeError, ValueError):
-                recorded_version = None
-            page = _publish_scope(root, engagement, text, space_id, site,
-                                  transport, sleep, recorded_version)
-            try:
-                merged = _merge_record(root, engagement, {
-                    "scope_page": {"id": page["id"], "url": page["url"],
-                                   "version": page["version"]},
-                    "updated": now or _now()}, void_quote=rewrote)
-                # a belt: the quote was voided before scope.md was replaced
-                if "quote" in merged and "scope.md replaced: the quote is " \
-                        "voided" not in result["notes"]:
-                    result["notes"].append("scope.md replaced: the quote is "
-                                           "voided")
-            except OSError as exc:
-                # scope.md (in `written`) and the page are already out; only
-                # the record's scope_page is behind
-                result["notes"].append(f"page {page['id']} published at "
-                                       f"version {page['version']}; "
-                                       f"scope_page unchanged")
-                raise Refused("ScopeUnwritable", f"{record_rel}: "
-                              f"{exc.__class__.__name__}") from None
-            if record_rel not in result["written"]:
-                result["written"].append(record_rel)
-            return page
-
-        def write_and_publish_all() -> dict:
-            page = write_and_publish()
-            record_rel = f"_bmad-output/engagements/{engagement}/" \
-                         f"engagement.yaml"
-            if not game:
-                return page
-            pages = {}
-            for kind, name, title, key in GAME_DOCS:
-                body = docs[kind]
-                if body is None:
-                    continue  # a revise re-run: the published doc stands
-                rel = doc_rel(engagement, name)
-                doc_path = engagement_dir(root, engagement) / name
-                try:
-                    held = doc_path.read_text(encoding="utf-8")
-                except (OSError, UnicodeDecodeError):
-                    held = None
-                if held != body:
-                    try:
-                        atomic_write_text(doc_path, body)
-                    except OSError as exc:
-                        raise Refused("ScopeUnwritable", f"{rel}: "
-                                      f"{exc.__class__.__name__}") from None
-                    result["written"].append(rel)
-                prior = read_record(root, engagement).get(key)
-                try:
-                    version = int(prior["version"]) \
-                        if isinstance(prior, dict) \
-                        and prior.get("version") is not None else None
-                except (TypeError, ValueError):
-                    version = None
-                pages[key] = _publish_scope(
-                    root, engagement, body, space_id, site, transport, sleep,
-                    version, title=title.format(engagement=engagement),
-                    rel=rel)
-            if not pages:
-                # no game doc published by this call (a flagless revise of a
-                # pre-34.8 scope). Story 35.6 (hole 92): the project is a
-                # game project, so the record still gains `game: true` (its
-                # doc pages, if any, kept as they are)
-                try:
-                    _merge_record(root, engagement,
-                                  {"game": True, "updated": now or _now()})
-                except OSError as exc:
-                    raise Refused("ScopeUnwritable", f"{record_rel}: "
-                                  f"{exc.__class__.__name__}") from None
-                return page
-            changes = {key: {"id": p["id"], "url": p["url"],
-                             "version": p["version"]}
-                       for key, p in pages.items()}
-            changes.update(game=True, updated=now or _now())
-            try:
-                _merge_record(root, engagement, changes)
-            except OSError as exc:
-                raise Refused("ScopeUnwritable", f"{record_rel}: "
-                              f"{exc.__class__.__name__}") from None
-            result.update({key: p for key, p in pages.items()})
-            return page
-
         try:
-            result["page"] = _with_scope_lock(root, engagement,
-                                              write_and_publish_all,
-                                              wait_s=lock_wait_s)
+            result["page"] = _with_scope_lock(
+                root, engagement,
+                lambda: _write_and_publish_all(
+                    root, engagement, text, path, space_id, site, result, now,
+                    transport, sleep, game, docs),
+                wait_s=lock_wait_s)
         except _Transient as exc:
             result["retry"] = True
             result["notes"].append("scope.md kept; scope_page unchanged; "

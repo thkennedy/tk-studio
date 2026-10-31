@@ -1816,17 +1816,27 @@ class LaunchTestCase(unittest.TestCase):
 
     # ---- Story 35.4: the engine mcp row
 
+    # Story 36.7: every port text carries the forwarder and the host:port-policy case
+    MCP_POLICY = "; a host:port sandbox policy needs the fixed forwarder port (runbook)"
+    MCP_READ_HERE = "the process running this check; the supervisor's own environment decides"
+    MCP_FORWARDER = ("; forwarder port not fixed here (TK_SUPERVISOR_ENGINE_MCP_PORT unset in the "
+                     "process running this check; the supervisor's own environment decides: set, "
+                     "fixed; unset, per-run and engine-mcp-forwarder reports its free port)" + MCP_POLICY)
     MCP_WARNING = ("warning: engine.mcp.start has no {flag}; the verify-only rule "
-                   "(kb/engine-mcp-godot.md) rests on the engine skill alone; port {port}")
+                   "(kb/engine-mcp-godot.md) rests on the engine skill alone; port {port}"
+                   + MCP_FORWARDER)
 
-    def _engine_mcp_row(self, config: str | None):
+    def _engine_mcp_row(self, config: str | None, forwarder: dict | None = None):
         base = Path(tempfile.mkdtemp(dir=self.tmp))
         root, spec = _project(base)
         if config is not None:
             (root / ".tk-studio").mkdir(parents=True, exist_ok=True)
             (root / ".tk-studio" / "config.yaml").write_text(config, encoding="utf-8")
         self._wire(_FakeSubstrate())
-        result = launch.check(root, spec)
+        env = {k: v for k, v in os.environ.items() if k != "TK_SUPERVISOR_ENGINE_MCP_PORT"}
+        env.update(forwarder or {})
+        with mock.patch.dict(os.environ, env, clear=True):
+            result = launch.check(root, spec)
         names = [c["check"] for c in result["checks"]]
         self.assertEqual(names.index("engine mcp"), names.index("story plans") + 1)
         row = next(c for c in result["checks"] if c["check"] == "engine mcp")
@@ -1851,11 +1861,41 @@ class LaunchTestCase(unittest.TestCase):
                       "uvx godot-ai --port {port} --exclude-domains=scene,node"):
             with self.subTest(start=start):
                 result, row = self._engine_mcp_row(self._mcp_config(start, 0))
-                self.assertEqual(row["detail"], "verify-only filter --exclude-domains; port per-run")
+                self.assertEqual(row["detail"], "verify-only filter --exclude-domains; port per-run" + self.MCP_FORWARDER)
                 self.assertTrue(result["ok"], result["gaps"])
         _, row = self._engine_mcp_row(self._mcp_config("srv --deny scene --port 8000", 8000,
                                                        "    filter: --deny\n"))
-        self.assertEqual(row["detail"], "verify-only filter --deny; port fixed 8000 (one flagged run at a time)")
+        self.assertEqual(row["detail"], "verify-only filter --deny; port fixed 8000 (one flagged run at a time)" + self.MCP_FORWARDER)
+
+    def test_engine_mcp_names_the_forwarder_port_and_the_host_port_policy(self):
+        # Story 36.7: per-run, fixed, and blank (per-run, as the supervisor reads it); advisory in each
+        start = "uvx godot-ai --port {port} --exclude-domains scene"
+        for forwarder, want in ((None, self.MCP_FORWARDER),
+                                ({"TK_SUPERVISOR_ENGINE_MCP_PORT": "  "}, self.MCP_FORWARDER),
+                                ({"TK_SUPERVISOR_ENGINE_MCP_PORT": "8788"},
+                                 f"; forwarder fixed 8788 here (TK_SUPERVISOR_ENGINE_MCP_PORT in {self.MCP_READ_HERE})"
+                                 + self.MCP_POLICY)):
+            with self.subTest(forwarder=forwarder):
+                result, row = self._engine_mcp_row(self._mcp_config(start, 0), forwarder)
+                self.assertEqual(row["detail"], "verify-only filter --exclude-domains; port per-run" + want)
+                self.assertTrue(result["ok"], result["gaps"])
+
+    def test_engine_mcp_a_forwarder_port_the_supervisor_refuses_reads_as_refused(self):
+        # engineMcpPort (env.ts): 1-5 ASCII digits in 1-65535; the row stays advisory
+        start = "uvx godot-ai --port {port} --exclude-domains scene"
+        for value in ("abc", "65536", "0", "123456", "80.5", "+80", "\u0663"):
+            with self.subTest(value=value):
+                result, row = self._engine_mcp_row(self._mcp_config(start, 0), {"TK_SUPERVISOR_ENGINE_MCP_PORT": value})
+                self.assertEqual(row["detail"], "verify-only filter --exclude-domains; port per-run; forwarder value "
+                                 f"the supervisor would refuse (TK_SUPERVISOR_ENGINE_MCP_PORT '{value}' is not a port "
+                                 f"number (1-65535), read in {self.MCP_READ_HERE})" + self.MCP_POLICY)
+                self.assertTrue(result["ok"], result["gaps"])
+        # The bounds and the forms it takes read fixed, at the number the supervisor would use
+        for value, port in (("1", 1), ("65535", 65535), ("00080", 80), (" 8788 ", 8788)):
+            with self.subTest(value=value):
+                _, row = self._engine_mcp_row(self._mcp_config(start, 0), {"TK_SUPERVISOR_ENGINE_MCP_PORT": value})
+                self.assertIn(f"; forwarder fixed {port} here (TK_SUPERVISOR_ENGINE_MCP_PORT in {self.MCP_READ_HERE})",
+                              row["detail"])
 
     def test_engine_mcp_filter_missing_is_a_warning_never_a_gap(self):
         result, row = self._engine_mcp_row(self._mcp_config("uvx godot-ai --port {port}", 0))
@@ -1913,7 +1953,7 @@ class LaunchTestCase(unittest.TestCase):
                   "    start: uvx godot-ai --exclude-domains scene --port {port} --x \"oops\n"
                   "    port: 0\n")
         _, row = self._engine_mcp_row(config)
-        self.assertEqual(row["detail"], "verify-only filter --exclude-domains; port per-run")
+        self.assertEqual(row["detail"], "verify-only filter --exclude-domains; port per-run" + self.MCP_FORWARDER)
         self.assertEqual(launch._split_command('a "b c" \'d e'), ["a", "b c", "d e"])
 
     def test_engine_mcp_backslash_is_not_an_escape_as_in_the_pin(self):

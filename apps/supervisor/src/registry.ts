@@ -10,10 +10,10 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { pluginRoot } from "./env";
 import { officeStates } from "./office";
 import { servedRoot, type AgentRecord, type Queue, type QueueRun } from "./queue";
-import { lastJsonObject, registryShow, runUv } from "./server";
+import { registryShow } from "./server";
+import { resolveRoute, RouteResolveFailed, type Route } from "./route";
 
 /** The seven roles (closed by the story), in the order every read lists them. */
 export const ROLES = ["orchestrator", "session", "implementer", "reviewer", "consult", "advisor", "planner"] as const;
@@ -37,19 +37,12 @@ export const OFFLINE = "offline";
 
 /** A route: `{<leg>: {model, effort?, advisor?, …}}` — `pipeline.py resolve`'s `route`, or the top-level legs of
  * `routing.current.json`. */
-export type Route = Record<string, unknown>;
+export { resolveRoute, RouteResolveFailed, type Route };
 
 /** The live leg of a project: the run that supplies its route. */
 export interface LiveLeg { run_id: string; story: string | null }
 
 export type AgentRow = AgentRecord;
-
-export class RouteResolveFailed extends Error {
-  constructor(readonly project: string, detail: string) {
-    super(`RouteResolveFailed: ${project}: ${detail}`);
-    this.name = "RouteResolveFailed";
-  }
-}
 
 export class PersonasInvalid extends Error {
   constructor(path: string, detail: string) {
@@ -84,20 +77,6 @@ export function rowsFor(projectId: string, route: Route | null, personas: Partia
       current_run: live?.run_id ?? null, current_story: live?.story ?? null, jira_account: "",
     };
   });
-}
-
-/** A project's shipped-defaults route: `pipeline.py resolve --directory <root>` through `uv` (the `registryShow`
- * pattern). No JSON or `ok: false` throws the named RouteResolveFailed. */
-export async function resolveRoute(root: string, projectId: string): Promise<Route> {
-  let res;
-  try { res = await runUv(root, join(pluginRoot(), "lib", "pipeline.py"), ["resolve", "--directory", root]); }
-  catch (e) { throw new RouteResolveFailed(projectId, e instanceof Error ? e.message : String(e)); }
-  const parsed = lastJsonObject(res.stdout) as Record<string, any> | null;
-  if (parsed === null) throw new RouteResolveFailed(projectId, `resolve emitted no JSON (exit ${res.exit}): ${res.stderr.slice(0, 400)}`);
-  if (parsed.ok !== true) throw new RouteResolveFailed(projectId, String(parsed.error ?? "resolve refused"));
-  const route = parsed.route;
-  if (!route || typeof route !== "object" || Array.isArray(route)) throw new RouteResolveFailed(projectId, "resolve answered no route");
-  return route as Route;
 }
 
 const LIVE_STATES = new Set(["running", "paused", "external"]);

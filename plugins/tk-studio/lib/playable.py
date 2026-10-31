@@ -26,7 +26,7 @@ the first frame's aspect), laid out `--columns` to a row, written as one
 8-bit RGB PNG (filter 0) atomically to `--out`. No frame, an unreadable
 frame (anything but an 8-bit non-interlaced PNG of colour type 0, 2, 4 or
 6) or a bad flag is a refusal (exit 2) with the same status block
-(`intent: playable`); the PNG decode is `assets.png_pixels`. Story 35.3:
+(`intent: playable`); the PNG decode is `_png.png_pixels`. Story 35.3:
 with `--report FILE` (a run's `report.json`) the frames are the report's
 `frames[].file` only (relative to the report's folder, in report order,
 duplicates once) — the judge's citable set, never every movie frame — and
@@ -87,14 +87,17 @@ import json
 import math
 import os
 import re
-import signal
-import subprocess
+import subprocess  # noqa: F401 - the tests patch `playable.subprocess` (kill_tree moved to _proc)
 import sys
-import time
 from pathlib import Path
 
+import _core
+from _core import _write_atomic
+from _png import png_encode, png_pixels
+from _proc import KILL_TREE_TIMEOUT_S, kill_tree, run_logged
+
 INTENT = "playable"
-BLOCK_KEYS = ("status", "intent", "artifacts", "reason")
+BLOCK_KEYS = _core.BLOCK_KEYS
 
 # The ruled rendering path (kb/playable-verify-on-the-box.md `## Ruling`);
 # launch.py carries the same constant for its `playable path` row.
@@ -148,8 +151,6 @@ MAX_LOG_ERRORS = 20
 # value past these is a refusal here, never a silent mis-parse there.
 SEED_MAX = 2**64 - 1
 INT32_MAX = 2**31 - 1
-# the bounded wait for `taskkill /T` before the plain kill fallback
-KILL_TREE_TIMEOUT_S = 10
 
 
 class Refusal(Exception):
@@ -162,19 +163,17 @@ def resolve_godot(arg: str | None, env=None) -> str:
     """The engine binary: ``--godot`` else ``GODOT`` (stripped), worded
     like the doctor's ``engine`` row."""
     env = os.environ if env is None else env
-    name = "--godot" if arg is not None else "GODOT"
-    value = (arg if arg is not None else env.get("GODOT") or "").strip()
-    if not value:
+    got = _core.resolve_binary(arg, env, "GODOT", flag="--godot", require_absolute=True)
+    if got.path is not None:
+        return got.path
+    if got.problem in ("unset", "empty"):
         raise Refusal("no engine: GODOT is unset (set GODOT to the Godot "
                       "console binary, runbook §2, or pass --godot)")
-    path = Path(value)
-    if not path.is_absolute():
-        raise Refusal(f"no engine: {name} {value} is not an absolute path "
+    if got.problem == "not-absolute":
+        raise Refusal(f"no engine: {got.name} {got.value} is not an absolute path "
                       "(never a bare godot)")
-    if not path.is_file():
-        why = "is not a file" if path.exists() else "does not exist"
-        raise Refusal(f"no engine ({name} names {value}, which {why})")
-    return str(path)
+    why = "is not a file" if got.problem == "not-file" else "does not exist"
+    raise Refusal(f"no engine ({got.name} names {got.value}, which {why})")
 
 
 def resolve_project(directory: str) -> Path:
@@ -387,38 +386,6 @@ def engine_argv(godot: str, project: Path, mode: str, scenario: Path,
             f"{ARG_TICKS}{ticks}", f"{ARG_OUT}{out}"]
 
 
-def kill_tree(proc: subprocess.Popen) -> bool:
-    """Kill ``proc`` and its descendants (on the box ``$GODOT`` is the
-    ``*_console.exe`` wrapper that starts the real engine as a child), then
-    reap it. Windows: ``taskkill /T /F`` bounded by a timeout; POSIX: the
-    process group ``run_engine`` started it in. ``proc.kill()`` is the
-    fallback either way. Returns whether the tree kill was confirmed
-    (taskkill exit 0; ``killpg`` did not raise): when not, only ``proc``
-    is sure to be gone and its descendants may survive."""
-    confirmed = False
-    if os.name == "nt":
-        try:
-            done = subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                  stderr=subprocess.DEVNULL, timeout=KILL_TREE_TIMEOUT_S,
-                                  check=False)
-            confirmed = done.returncode == 0
-        except (OSError, subprocess.SubprocessError):
-            pass
-    else:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-            confirmed = True
-        except (OSError, AttributeError):
-            pass
-    try:
-        proc.kill()
-    except OSError:
-        pass
-    proc.wait()
-    return confirmed
-
-
 # Whether the last overrun's tree kill was confirmed (``run_engine`` keeps
 # its injectable ``(exit | None, timed_out, duration_ms)`` return, so the
 # flag travels here; ``run`` resets it before each start).
@@ -434,19 +401,11 @@ def run_engine(argv: list[str], *, cwd: Path, log_path: Path,
     duration_ms)``; an overrun whose tree kill is not confirmed clears
     ``LAST_TREE_KILL_CONFIRMED``. Module-level so tests inject a fake."""
     global LAST_TREE_KILL_CONFIRMED
-    started = time.monotonic()
-    extra = {} if os.name == "nt" else {"start_new_session": True}
-    with open(log_path, "wb") as log:
-        proc = subprocess.Popen(argv, cwd=str(cwd), stdin=subprocess.DEVNULL,
-                                stdout=log, stderr=subprocess.STDOUT, **extra)
-        try:
-            code: int | None = proc.wait(timeout=timeout_s)
-            timed_out = False
-        except subprocess.TimeoutExpired:
-            if not kill_tree(proc):
-                LAST_TREE_KILL_CONFIRMED = False
-            code, timed_out = None, True
-    return code, timed_out, int((time.monotonic() - started) * 1000)
+    code, timed_out, duration_ms, confirmed = run_logged(
+        argv, cwd=cwd, log_path=log_path, timeout_s=timeout_s, kill=kill_tree)
+    if not confirmed:
+        LAST_TREE_KILL_CONFIRMED = False
+    return code, timed_out, duration_ms
 
 
 # ------------------------------------------------------------------ verdict
@@ -482,19 +441,6 @@ def scan_log_split(log_path: Path) -> tuple[list[str], list[str]]:
             if len(errors) >= MAX_LOG_ERRORS and (marked or len(before) >= MAX_LOG_ERRORS):
                 break
     return errors, (before if marked else errors)
-
-
-def _write_atomic(path: Path, data: bytes) -> None:
-    tmp = path.with_name(f"{path.name}.tk-studio-{os.getpid()}.tmp")
-    try:
-        with open(tmp, "wb") as fh:
-            fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-    finally:
-        if tmp.exists():
-            tmp.unlink()
 
 
 def _base_report(scenario: dict, seed: int, ticks: int, mode: str,
@@ -603,9 +549,7 @@ def judge(report: dict | None, *, scenario: dict, seed: int, ticks: int,
 def with_block(result: dict, status: str, artifacts: list[str],
                reason: str | None) -> dict:
     """``result`` with the AD-11 block keys appended last, in order."""
-    out = {k: v for k, v in result.items() if k not in BLOCK_KEYS}
-    out.update(status=status, intent=INTENT, artifacts=list(artifacts), reason=reason)
-    return out
+    return _core.with_block(result, status, artifacts, reason, intent=INTENT)
 
 
 # --------------------------------------------------------------------- verb
@@ -785,7 +729,6 @@ def sheet(*, frames: str | None = None, out: str, columns: str | int = SHEET_DEF
           width: str | int = SHEET_DEFAULT_WIDTH, report: str | None = None) -> tuple[dict, int]:
     """The contact sheet. Returns ``(result with the status block, exit)``.
     Story 35.3: ``report`` samples only the report's ``frames[]``."""
-    import assets  # within lib/: the 34.6/34.7 PNG reader and writer (lazy: assets imports this module)
     try:
         cols = _int_flag("--columns", columns, 1, SHEET_MAX_COLUMNS)
         cell_w = _int_flag("--width", width, *SHEET_WIDTH_RANGE)
@@ -810,7 +753,7 @@ def sheet(*, frames: str | None = None, out: str, columns: str | int = SHEET_DEF
                 data = paths[name].read_bytes()
             except OSError as exc:
                 raise Refusal(f"frame {name}: {exc}") from None
-            image = assets.png_pixels(data)
+            image = png_pixels(data)
             if image is None:
                 raise Refusal(f"frame {name} is not a readable 8-bit non-interlaced PNG")
             decoded.append(image)
@@ -825,10 +768,7 @@ def sheet(*, frames: str | None = None, out: str, columns: str | int = SHEET_DEF
             for y, row in enumerate(_scaled(w, h, _rgb(w, h, ch, px), cell_w, cell_h)):
                 canvas[r * cell_h + y][c * cell_w * 3:(c + 1) * cell_w * 3] = row
         raw = b"".join(b"\x00" + bytes(row) for row in canvas)
-        ihdr = assets.struct.pack(">IIBBBBB", sheet_w, sheet_h, 8, 2, 0, 0, 0)
-        png = (b"\x89PNG\r\n\x1a\n" + assets._png_chunk(b"IHDR", ihdr)
-               + assets._png_chunk(b"IDAT", assets.zlib.compress(raw, 9))
-               + assets._png_chunk(b"IEND", b""))
+        png = png_encode(raw, sheet_w, sheet_h)
         out_path = Path(out).resolve()
         try:
             out_path.parent.mkdir(parents=True, exist_ok=True)

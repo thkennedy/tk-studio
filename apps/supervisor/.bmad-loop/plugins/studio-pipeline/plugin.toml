@@ -24,7 +24,7 @@
 #   [hooks.pre_commit]  reconcile_gate.py pauses the run on a recorded `escalate`,
 #                       or on score >= min_score with no verdict when fail_closed
 #                       is set, so a human reconciles attended (bmad-loop-resolve).
-#   [hooks.post_commit]  meter_hook.py meters the landed story (ST-24.1): copies its
+#   [hooks.post_commit] meter_hook.py meters the landed story (ST-24.1): copies its
 #                       session + subagent transcripts into <run_dir>/transcripts/,
 #                       prices them from plugins/tk-studio/lib/prices.json and records
 #                       one `observation`. Never blocks: exits 0 on every path.

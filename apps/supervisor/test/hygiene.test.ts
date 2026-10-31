@@ -11,7 +11,7 @@ import {
   underBunTest,
 } from "../src/hygiene";
 import { NOTIFIER_VARS } from "./preload";
-import { END_LEASE_STALE_MS, NOTIFIED_BEFORE, Queue, type Owner, type Probes } from "../src/queue";
+import { END_LEASE_STALE_MS, NOTIFIED_BEFORE, Queue, type Owner, type Probes, type QueueRun } from "../src/queue";
 import type { RunResult } from "../src/server";
 import { ensureTranscript } from "../src/transcript";
 import { tempDir, track } from "./tmp";
@@ -464,6 +464,13 @@ describe("the notification (AC4)", () => {
     const ev = fx.queue.events(r.run_id).find((e) => e.kind === "notify-failed")!;
     expect(String(ev.detail!.error)).toStartWith("NotifierConfigMissing:");
     expect(JSON.stringify(fx.queue.events(r.run_id))).not.toContain(TG_TOKEN);
+  });
+
+  test("Story 36.7 (DW-85): endNotice reads a terminal sweep's line live through hygiene's direct sweep import; a run that is no sweep has none", () => {
+    const run = { run_id: "r", job_id: "run-sweep", project_id: null, studio_run_id: null, state: "cancelled", reason: null } as unknown as QueueRun;
+    const queue = (defn: Record<string, unknown>) => ({ events: () => [], definition: () => defn }) as unknown as Queue;
+    expect(endNotice(queue({ type: "run-sweep" }), run).sweep).toBe("no triage (escalated)");
+    expect(endNotice(queue({ type: "run-epic" }), run).sweep).toBeUndefined();
   });
 
   test("endNotice reads the PR the ending event carries", async () => {

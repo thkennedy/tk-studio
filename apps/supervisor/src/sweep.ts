@@ -66,23 +66,18 @@
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { DEFERRED_REL } from "./board";
-import { sbxBin, studioRoot } from "./env";
 import { inconclusiveReason, legVerdict, redReason, type HostVerifyResult } from "./hostverify";
-import { registerSweepLine } from "./hygiene";
-import { PLAN_RETRY_LIMIT, runPr, type PlanStatusDeps } from "./planstatus";
-import { isTerminal, selfOwner, servedRoot, type EngineWhere, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
+import { DEFERRED_REL, PLAN_RETRY_LIMIT, runPr } from "./planseams";
+import type { PlanStatusDeps } from "./planstatus";
+import { isSweep, isTerminal, selfOwner, servedRoot, SWEEP_JOB_TYPE, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
 import { projectKeyOf, studioRunDir } from "./sandbox";
-import { lastJsonObject, runProcess, toVmPath, type RunResult } from "./server";
-import { gh, studioScript, uvRunner, type WorktreeDeps } from "./worktree";
+import { gh, stopEngine, stopEngineAt, studioScript, uvRunner } from "./runners";
+import { lastJsonObject, type RunResult } from "./server";
+import type { WorktreeDeps } from "./worktree";
 
 type Env = Record<string, string | undefined>;
 
-/** Story 35.7: the shipped job type whose runs are deferred-work sweeps. */
-export const SWEEP_JOB_TYPE = "run-sweep";
-/** A run is a sweep when its resolved definition's `type` or `id` is `run-sweep`. */
-export const isSweep = (defn: Record<string, any> | null | undefined): boolean =>
-  !!defn && (defn.type === SWEEP_JOB_TYPE || defn.id === SWEEP_JOB_TYPE);
+export { isSweep, stopEngine, stopEngineAt, SWEEP_JOB_TYPE };
 /** The queue event the watch notes once per engine run (never the ledger's, never bmad-loop's journal key). */
 export const SWEEP_TRIAGE = "sweep-triage";
 /** A paused sweep's failed engine stop, noted once per engine run (the watch retries the stop each tick). */
@@ -343,9 +338,6 @@ export function sweepNotice(s: SweepSummary): string {
   return `${landed}/${s.bundles.length} bundles; blocked: ${list(s.triage.blocked.map((b) => b.id))}; decisions: ${list(s.triage.decisions.map((d) => d.id))}`;
 }
 
-// A terminal sweep run's inbox line before its close-out records one (a cancel): read live from its worktree.
-registerSweepLine((queue, run) => (isSweep(queue.definition(run)) ? sweepNotice(sweepSummary(queue, run)) : undefined));
-
 /** The PR body's `## Sweep` section (lines), before `## Host verify`. */
 export function sweepSection(s: SweepSummary): string[] {
   if (!s.triage && s.nothing_open) return ["## Sweep", "", "No triage recorded: the ledger had nothing open (`sweep-nothing-open`)."];
@@ -510,29 +502,6 @@ export function sweepCostText(s: SweepSummary, workerUsd: number | undefined): s
     return typeof b.cost_usd === "number" ? `- ${name}: ${usd(b.cost_usd)} (${b.source ?? "unknown"})` : `- ${name}: not metered`;
   });
   return [head, ...(lines.length ? ["", ...lines] : [])].join("\n");
-}
-
-/** Story 36.3 (DW-120): `launch.py stop` for the engine at `root`, on the tier it runs on (`sbx exec` inside the sandbox,
- * else the host's `uvRunner`), `--graceful` on request: `stopped`, else the failure. Never throws. */
-export async function stopEngineAt(root: string, eid: string, where: EngineWhere, deps: WorktreeDeps = {}, opts: { graceful?: boolean } = {}): Promise<string> {
-  const env = deps.env ?? process.env, graceful = opts.graceful ? ["--graceful"] : [];
-  let r: RunResult;
-  try {
-    if (where.tier === "sbx" && where.sandbox) {
-      const argv = ["exec", where.sandbox, "uv", "run", `${toVmPath(studioRoot(env)).replace(/\/+$/, "")}/plugins/tk-studio/lib/launch.py`, "stop", "--directory", toVmPath(root), "--run-id", eid, ...graceful];
-      r = await (deps.sbx?.run ?? ((b, a, o) => runProcess(b, a, { timeoutS: o.timeoutS })))(sbxBin(env), argv, { timeoutS: 120 });
-    } else {
-      r = await uvRunner(deps)(root, studioScript(deps, "lib", "launch.py"), ["stop", "--directory", root, "--run-id", eid, ...graceful], 120);
-    }
-  } catch (e) { return `stop failed: ${clip(message(e))}`; }
-  return r.exit === 0 ? "stopped" : `stop failed: exit ${r.exit}: ${clip(r.stderr || r.stdout)}`;
-}
-
-/** Story 36.3: a run's engine stopped on the run's tier (`stopEngineAt` at its served root). Never throws. */
-export async function stopEngine(run: Pick<QueueRun, "worktree" | "prefix" | "engine_run_id" | "tier" | "sandbox">, deps: WorktreeDeps = {}, opts: { graceful?: boolean } = {}): Promise<string> {
-  const served = servedRoot(run), eid = run.engine_run_id;
-  if (!served || !eid) return "not stopped: no engine recorded";
-  return stopEngineAt(served, eid, { tier: run.tier, sandbox: run.sandbox }, deps, opts);
 }
 
 /** A paused sweep's engine stopped (the hard stop, `stopEngine`). */

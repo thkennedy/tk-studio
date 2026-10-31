@@ -104,7 +104,9 @@ import { basename, join } from "node:path";
 import { armStop, frontmatter, isRunEpic, jiraBound, resumePidRewritten, rhythmOf, runDirOf, stopArmed, stopArmedSinceResume } from "./closeout";
 import { legVerdict, type HostVerifyResult } from "./hostverify";
 import { notifier } from "./env";
-import { canonicalPr, sendText } from "./hygiene";
+import { atRef as readAtRef, type AtRef } from "./gitshow";
+import { sendText } from "./hygiene";
+import { canonicalPr, PLAN_RETRY_LIMIT, runPr } from "./planseams";
 import { isTerminal, openConflicts, selfOwner, type Owner, type Queue, type QueueEvent, type QueueRun } from "./queue";
 import { lastJsonObject, registryShow, type RunResult } from "./server";
 import { ledgerPass } from "./sweep";
@@ -113,8 +115,7 @@ import { gh, runBranch, runner, studioScript, uvRunner, type WorktreeDeps } from
 export const PLAN_CALLER = "tk-studio-supervisor";
 export const EPICS_REL = "_bmad-output/planning-artifacts/epics.md";
 export const PLAN_REL = join("_bmad-output", "planning-artifacts", "plan");
-/** Story 27.5: the released plan leases a phase may carry before its next retry gives up (a skipped `plan-status`). */
-export const PLAN_RETRY_LIMIT = 24;
+export { PLAN_RETRY_LIMIT, runPr };
 
 export interface PlanStatusDeps extends WorktreeDeps {
   /** A registry entry's root by project id (default: `registry.py show --project-id`, `registryRoot`); undefined when
@@ -147,33 +148,11 @@ export async function registryRoot(projectId: string, show: (id: string) => Prom
   return typeof root === "string" && root.trim() ? root : undefined;
 }
 
-/** The run's PR: `ended.detail.pr`, else the latest `closed_out.detail.pr` (a late close-out). */
-export function runPr(events: readonly QueueEvent[]): string | undefined {
-  const ended = canonicalPr(events.findLast((e) => e.kind === "ended")?.detail?.pr);
-  if (ended) return ended;
-  for (let i = events.length - 1; i >= 0; i--) {
-    const e = events[i]!;
-    if (e.kind !== "closed_out") continue;
-    const pr = canonicalPr(e.detail?.pr);
-    if (pr) return pr;
-  }
-  return undefined;
-}
-
 const git = (deps: WorktreeDeps, cwd: string, args: string[]) => runner(deps)("git", args, { cwd, timeoutS: 60 });
 
-type AtRef = { text: string } | { absent: true } | { error: string };
-
-/** A file at `ref` (`git show <ref>:<path>` in the checkout `root`): its text; `absent` when git says the path does
- * not exist at that ref; `error` on any other failure (the read is retried next tick). */
-async function atRef(root: string, ref: string, path: string, deps: WorktreeDeps): Promise<AtRef> {
-  let r: RunResult;
-  try { r = await git(deps, root, ["show", `${ref}:${path}`]); }
-  catch (e) { return { error: `git show: ${clip(message(e))}` }; }
-  if (r.exit === 0) return { text: r.stdout };
-  if (/does not exist in|exists on disk, but not in/i.test(r.stderr)) return { absent: true };
-  return { error: `git show ${failed(r)}` };
-}
+/** A file at `ref` (`git show <ref>:<path>` in the checkout `root`), through the run's spawner (`gitshow.ts`). */
+const atRef = (root: string, ref: string, path: string, deps: WorktreeDeps): Promise<AtRef> =>
+  readAtRef(root, ref, path, (args) => git(deps, root, args));
 
 /** A file at the run branch (`git show supervisor/run-<id>:<path>`), as `atRef`. */
 export const atBranch = (run: Pick<QueueRun, "run_id" | "root">, path: string, deps: WorktreeDeps): Promise<AtRef> =>

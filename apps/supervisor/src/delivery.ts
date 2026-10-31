@@ -64,6 +64,7 @@ import {
 import { jobRunCosts } from "./board";
 import { findSpec, frontmatter, jiraBound } from "./closeout";
 import { readEngagement, type Engagement } from "./engagement";
+import { atRef } from "./gitshow";
 import { canonicalPr, type EndNotice } from "./hygiene";
 import { runPr } from "./planstatus";
 import { isTerminal, servedRoot, type Queue, type QueueEvent, type QueueRun } from "./queue";
@@ -175,8 +176,8 @@ async function specAtRef(deps: DeliveryDeps, root: string, ref: string, key: str
   if (r.exit !== 0) return null;
   const path = specPathIn(r.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean), key);
   if (!path) return null;
-  try { r = await git(["show", `${ref}:./${path}`]); } catch { return null; }
-  return r.exit === 0 ? r.stdout : null;
+  const read = await atRef(root, ref, `./${path}`, git);
+  return "text" in read ? read.text : null;
 }
 
 /** The spec frontmatter `status` of a story: `findSpec(servedRoot(run) ?? root, key)` (Story 28.5: the project at

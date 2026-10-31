@@ -509,6 +509,12 @@ export interface QueueRun {
   created: string; updated: string;
 }
 
+/** Story 35.7: the shipped job type whose runs are deferred-work sweeps. */
+export const SWEEP_JOB_TYPE = "run-sweep";
+/** A run is a sweep when its resolved definition's `type` or `id` is `run-sweep`. */
+export const isSweep = (defn: Record<string, any> | null | undefined): boolean =>
+  !!defn && (defn.type === SWEEP_JOB_TYPE || defn.id === SWEEP_JOB_TYPE);
+
 /** Story 31.7: the shipped job the resolution pass queues; its claim never waits on a paused lock holder. */
 export const VALIDATE_RESOLUTION_JOB = "validate-resolution";
 /** Story 32.2: the shipped job the chat route queues (`chat.ts`), one run per owner line (`enqueue`'s `stack`). */

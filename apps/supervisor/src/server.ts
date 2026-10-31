@@ -20,8 +20,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { load as loadYaml } from "js-yaml";
-import { claudeBin, pluginRoot as envPluginRoot, sbxBin, studioRoot as envStudioRoot } from "./env";
-import { underBunTest } from "./hygiene";
+import { claudeBin, pluginRoot as envPluginRoot, sbxBin, studioRoot as envStudioRoot, underBunTest } from "./env";
 
 const CONSUMED_CONTRACT = "0.1.18";
 /** Pre-1.0 contract semver: the compatibility line is major.minor (`0.1`) —

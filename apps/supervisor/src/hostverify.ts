@@ -116,6 +116,8 @@ import { load as loadYaml } from "js-yaml";
 import { buildWorkerEnv, invokeSkill, lastJsonObject, runProcess, type RunResult, type Spawner } from "./server";
 import { servedRoot, type QueueEvent, type QueueRun } from "./queue";
 import { pluginRoot, studioHome } from "./env";
+import { showAtBase } from "./gitshow";
+import { resolveRoute } from "./route";
 import { pinSandbox, studioRunDir } from "./sandbox";
 import type { WorktreeDeps } from "./worktree";
 
@@ -278,21 +280,16 @@ export async function verifyCommand(run: Run, deps: Deps = {}): Promise<VerifyCo
   const base = run.base_ref ?? "";
   // Story 28.5: a project below its git top-level reads its own config at the base (`<prefix>.tk-studio/…`).
   const configPath = `${run.prefix ?? ""}${CONFIG_PATH}`;
-  let res: RunResult;
-  try {
-    const args = ["show", `${base}:${configPath}`];
-    // `LC_ALL=C`: git's "does not exist" message (the no-config skip below) is matched in English.
-    const env = { ...(deps.env ?? process.env), LC_ALL: "C" };
-    res = deps.run ? await deps.run("git", args, { cwd: run.root, timeoutS: 60, env })
-      : await runProcess("git", args, { cwd: run.root, timeoutS: 60, env });
-  } catch (e) { return { skipped: true, reason: `config unreadable: git show: ${clip(message(e))}` }; }
-  if (res.exit !== 0) {
-    const err = `${res.stderr}${res.stdout}`;
-    if (/does not exist|exists on disk, but not in/i.test(err)) return { skipped: true, reason: `no ${configPath} at ${base}` };
-    return { skipped: true, reason: `config unreadable: git show exited ${res.exit}: ${clip(err)}` };
-  }
+  // `showAtBase`'s `LC_ALL=C`: git's "does not exist" message (the no-config skip below) is matched in English.
+  const spawn = deps.run;
+  const shown = await showAtBase(run.root, base, configPath, {
+    ...(deps.env ? { env: deps.env } : {}), clip,
+    ...(spawn ? { git: (args: string[], o: { cwd: string; timeoutS: number; env: Record<string, string | undefined> }) => spawn("git", args, o) } : {}),
+  });
+  if ("missing" in shown) return { skipped: true, reason: `no ${configPath} at ${base}` };
+  if ("error" in shown) return { skipped: true, reason: `config unreadable: ${shown.error}` };
   let config: unknown;
-  try { config = loadYaml(res.stdout); }
+  try { config = loadYaml(shown.text); }
   catch (e) { return { skipped: true, reason: `config unreadable: ${clip(message(e))}` }; }
   const verify = config && typeof config === "object" ? (config as Record<string, unknown>).verify : undefined;
   if (!verify || typeof verify !== "object" || !("host" in verify)) return { skipped: true, reason: "no verify.host" };
@@ -613,11 +610,7 @@ const defaultJudge = (deps: Deps): PlayableJudge => (root, args) =>
     vmHostRoot: root,
     pin: (sb) => pinSandbox(sb, { ...(deps.env ? { env: deps.env } : {}), ...(deps.sbx ?? {}) }),
   });
-const defaultRoute: PlayableRoute = async (root, projectId) => {
-  // Loaded on use: registry.ts reaches this module through office.ts and board.ts.
-  const { resolveRoute } = await import("./registry");
-  return resolveRoute(root, projectId);
-};
+const defaultRoute: PlayableRoute = (root, projectId) => resolveRoute(root, projectId);
 
 /** The `playable-verify` leg's `{model, effort}` from the project's route, or the shipped default (a route without
  * the leg, an older served project, or an unresolvable route). Never throws. */

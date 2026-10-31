@@ -114,7 +114,7 @@ import {
 } from "./server";
 import { serve as serveApi } from "./api";
 import { notifier, pluginRoot, tlsConfig, WorkDirMissing, workDir } from "./env";
-import { engineMcpEnv, engineMcpRefusalText, recoverEngineMcps, startEngineMcp, type EngineMcpDeps } from "./enginemcp";
+import { engineMcpEnv, engineMcpRefusalText, recoverEngineMcps, startEngineMcp, stopEngineMcp, type EngineMcpDeps } from "./enginemcp";
 import { canonicalPr, prUrl, recordClaimRefusal, snapshotOnce, sweepEnds, underBunTest, type HygieneDeps } from "./hygiene";
 import { rebuildAgents, type RebuildDeps, type RebuildResult } from "./registry";
 import {
@@ -605,7 +605,7 @@ export async function driveResumes(
     if (!s) {
       r.error = "resume: no rebuilt run to drive";
       try { await queue.endDriven(r.run_id, "blocked", r.error); } catch { /* already ended */ }
-      await releasePin(queue, r.run_id, sandbox); // Story 27.2: the last holder's end stops an outstanding pin
+      await releasePin(queue, r.run_id, withMcpStop(sandbox)); // Story 27.2: the last holder's end stops an outstanding pin
       continue;
     }
     let summary: RunSummary;
@@ -613,7 +613,7 @@ export async function driveResumes(
     catch (e) {
       r.error = message(e);
       try { await queue.endDriven(r.run_id, "blocked", r.error); } catch { /* already ended */ }
-      await releasePin(queue, r.run_id, sandbox);
+      await releasePin(queue, r.run_id, withMcpStop(sandbox));
       continue;
     }
     r.summary = await mirror(queue, r.run_id, { jobId: s.jobId, defn: s.defn }, summary, verbRunner);
@@ -621,7 +621,9 @@ export async function driveResumes(
 }
 
 /** Story 27.2: the sandbox seams a run's worktree deps carry (the env, and the injected `sbx` spawners). */
-const sbxDeps = (w: WorktreeDeps | undefined): SandboxDeps => ({ ...(w?.env ? { env: w.env } : {}), ...(w?.sbx ?? {}) });
+const sbxDeps = (w: WorktreeDeps | undefined): SandboxDeps => withMcpStop({ ...(w?.env ? { env: w.env } : {}), ...(w?.sbx ?? {}) });
+/** Story 36.7 (DW-85): the one-way seam: the release stops the run's engine MCP through the injected stopper. */
+const withMcpStop = (sandbox: SandboxDeps): SandboxDeps => ({ stopEngineMcp, ...sandbox });
 
 /** Story 27.2: where the queue places its own runs of a job on a checkout — the job's supervisor config
  * (`TK_SUPERVISOR_CONFIG`, keyed by the checkout's project id) resolved as `runJob` resolves a fresh run —
@@ -674,7 +676,7 @@ export async function detectExternal(
         else if (isTerminal(listed.state)) queue.endExternal(r.run_id, listed.state);
         else continue;
         out.ended.push(r.run_id);
-        await releasePin(queue, r.run_id, sandbox); // Story 27.2: the last holder's end stops an outstanding pin
+        await releasePin(queue, r.run_id, withMcpStop(sandbox)); // Story 27.2: the last holder's end stops an outstanding pin
       } catch { /* the queue is busy: the next tick asks again */ }
     }
     const named = new Set(queue.runs().map((r) => r.studio_run_id).filter((id): id is string => !!id));

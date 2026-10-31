@@ -70,7 +70,9 @@ import { existsSync, statSync } from "node:fs";
 import { connect, createServer } from "node:net";
 import { load as loadYaml } from "js-yaml";
 import { dirname } from "node:path";
+import { ENGINE_MCP_START, ENGINE_MCP_STOP } from "./enginemcp-kinds";
 import { apiBind, engineMcpPort } from "./env";
+import { showAtBase as gitShowAtBase } from "./gitshow";
 import { splitCommand } from "./hostverify";
 import { isGodot } from "./hygiene";
 import {
@@ -80,8 +82,7 @@ import { buildWorkerEnv, runProcess, type RunResult } from "./server";
 
 type Env = Record<string, string | undefined>;
 
-export const ENGINE_MCP_START = "engine-mcp-start";
-export const ENGINE_MCP_STOP = "engine-mcp-stop";
+export { ENGINE_MCP_START, ENGINE_MCP_STOP };
 /** The two names the sandbox gets by `-e` (values in the spawn env only). */
 export const ENGINE_MCP_URL_ENV = "TK_ENGINE_MCP_URL";
 export const ENGINE_MCP_BEARER_ENV = "TK_ENGINE_MCP_BEARER";
@@ -193,18 +194,13 @@ const startFailedResolves = (configured: number, env: Env) =>
     ? "TK_SUPERVISOR_BIND (a tailnet address, 100.64.0.0/10):TK_SUPERVISOR_ENGINE_MCP_PORT free to bind"
     : "TK_SUPERVISOR_BIND (a tailnet address, 100.64.0.0/10) free to bind (a per-run port; TK_SUPERVISOR_ENGINE_MCP_PORT unset)");
 
-async function showAtBase(run: QueueRun, path: string, deps: EngineMcpDeps): Promise<{ text: string } | { missing: true } | { error: string }> {
-  const env = { ...(deps.env ?? process.env), LC_ALL: "C" };
-  const args = ["show", `${run.base_ref ?? ""}:${run.prefix ?? ""}${path}`];
-  let res: RunResult;
-  try {
-    res = deps.git ? await deps.git(args, { cwd: run.root, env }) : await runProcess("git", args, { cwd: run.root, timeoutS: 60, env });
-  } catch (e) { return { error: `git show: ${clip(message(e))}` }; }
-  if (res.exit === 0) return { text: res.stdout };
-  const err = `${res.stderr}${res.stdout}`;
-  if (/does not exist|exists on disk, but not in/i.test(err)) return { missing: true };
-  return { error: `git show exited ${res.exit}: ${clip(err)}` };
-}
+const showAtBase = (run: QueueRun, path: string, deps: EngineMcpDeps) => {
+  const git = deps.git;
+  return gitShowAtBase(run.root, run.base_ref ?? "", `${run.prefix ?? ""}${path}`, {
+    ...(deps.env ? { env: deps.env } : {}), clip,
+    ...(git ? { git: (args: string[], o: { cwd: string; env: Env }) => git(args, { cwd: o.cwd, env: o.env }) } : {}),
+  });
+};
 
 /** `engine.mcp` from a parsed config, or why it is malformed (null: absent). */
 export function parseEngineMcp(config: unknown): EngineMcpConfig | { malformed: string } | null {
