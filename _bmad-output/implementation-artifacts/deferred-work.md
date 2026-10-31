@@ -1145,4 +1145,19 @@ source_spec: `36-2-the-sweeps-records-are-whole-spec.md`
 location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261030-204855-1dd5; this entry preserves the lingering recommendation for a deliberate later review.
+
+### DW-146: A story being built never reads In Progress in Jira: the plan-status pass sets `review` when the run's PR opens and `done` at the merge, nothing at the launch, so the issue reads Backlog for the whole build (hole 104).
+origin: hole 104 (found by the owner 2026-10-30 20:3xZ while Epic 36's run 1, q-run-epic-36-20261030T201456Z-e76900, built 36.1 with TKSTUDIO-191 in Backlog)
+source_spec: `_bmad-output/planning-artifacts/epics.md` Story 36.6 (the added acceptance criterion; first placed in 36.3, moved 2026-10-31 because 36.3 was already being built from the bootstrapped plan); `kb/agent-pc-setup-runbook.md` (the hole-104 row)
+location: apps/supervisor/src/planstatus.ts (`Phase = "review" | "done"`, Story 27.5); plugins/tk-studio/skills/tk-studio-launch and `launch.py` (no status call at the engine's start); plugins/tk-studio/lib/plansync.py `status` (the verb exists; `in-progress` is a canonical status, `TO_BACKEND_CATEGORY` maps it to the indeterminate category); plugins/tk-studio/lib/jirabackend.py
+severity: medium
+reason: The owner reads Jira to see what is being worked on; the loop's only mid-run In Progress-category status is a block, so a healthy build looks idle for about two hours a story and a blocked one looks busy. The verb and the mapping exist (the review phase proves the round trip); what is missing is one call at the launch. Fix (Story 36.6): the launch calls `plansync.py status --status in-progress` for the story it starts, recorded as a `plan-status` event with `phase: in-progress`; a refusal never stops the launch; the review and done phases follow as now; the contract names the third phase.
+status: open
+
+### DW-147: The `run-epic` job declares one story per run with a graceful stop after each, but nothing in the loop arms that stop: the operator issues `launch.py stop --graceful` inside the sandbox after every POST by hand, and a missed arming builds several stories in one run (hole 105).
+origin: hole 105 (Epic 36's run 1, q-run-epic-36-20261030T201456Z-e76900, 2026-10-30 23:5xZ: the operator missed the arming, the engine built 36.1 and 36.2 and started 36.3 in one run, three hours with no PR and no pull-back)
+source_spec: `_bmad-output/planning-artifacts/epics.md` Story 36.6 (the added acceptance criterion); `kb/agent-pc-setup-runbook.md` (the hole-105 row)
+location: plugins/tk-studio/lib/launch.py (`stop(…, graceful=True)` exists; `launch`/`submit` never calls it); plugins/tk-studio/jobs/run-epic.json and `.tk-studio/jobs/run-epic-N.json` (the rhythm lives in the description's prose, no field); apps/supervisor/src/queue.ts (the launched path records `launched` and `engine-pid`, arms nothing); the handoff's "with the stop armed" lines (day-7k to 7t, an operator step every launch)
+severity: medium
+reason: The one-story-per-run rhythm is what gives every story its own PR, host leg, pull-back and stage rows; it held through Epic 35 only because the operator armed the stop by hand after each POST (the host has no `bmad-loop`, so the arming runs as `sbx exec claude-tk-studio uv run …/launch.py stop --directory <worktree> --run-id <engine> --graceful`). Fix (Story 36.6): the job declaration carries the rhythm as a field; the launch arms the graceful stop itself at the engine's start and records a `stop-armed` event; the launch check names a `run-epic` job without a rhythm; the contract names the field and the event.
 status: open
