@@ -25,6 +25,7 @@ sys.path.insert(0, str(PLUGIN_ROOT / "lib"))
 sys.path.insert(0, str(PLUGIN_ROOT / "contracts" / "conformance"))
 
 import runner  # noqa: E402
+import e2e_text_encoding  # noqa: E402
 
 SKILL_TEMPLATE = """\
 ---
@@ -935,6 +936,152 @@ class ConformanceRealPluginTestCase(unittest.TestCase):
             "permissions"]["deny"]
         self.assertIn("Bash", denied)
         self.assertIn("PowerShell", denied)
+
+
+class TextEncodingDriveTestCase(unittest.TestCase):
+    """Story 36.4 (DW-132, hole 103): a text-mode open with no `encoding=` fails the run naming the call site."""
+
+    def _tree(self, files: dict[str, str]) -> Path:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        plugin = Path(tmp.name) / "plugins" / "tk-studio"
+        (plugin / "lib").mkdir(parents=True)
+        for rel, text in files.items():
+            path = Path(tmp.name) / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        return plugin
+
+    def _hits(self, source: str) -> list[str]:
+        return e2e_text_encoding.hits_in(source, "f.py")
+
+    def test_the_real_tree_is_green_and_the_drive_is_registered(self):
+        report = e2e_text_encoding.run()
+        self.assertTrue(report["ok"], json.dumps(report, indent=2))
+        self.assertEqual(report["steps"][0]["step"], "lib")
+        drives = runner.load_manifest()["surfaces"]["tk-studio-activate"]["drives"]
+        entry = next(d for d in drives if d.get("argv") == ["contracts/conformance/e2e_text_encoding.py"])
+        self.assertEqual((entry["assertion"], entry["expect"]), ("headless-clean", "ok"))
+
+    def test_a_planted_call_fails_the_drive_naming_the_call_site(self):
+        plugin = self._tree({"plugins/tk-studio/lib/tests/test_bad.py":
+                             'from pathlib import Path\ntext = Path("x").read_text()\n'})
+        proc = subprocess.run(
+            [sys.executable, str(Path(e2e_text_encoding.__file__)), "--plugin-root", str(plugin)],
+            capture_output=True, encoding="utf-8", stdin=subprocess.DEVNULL, timeout=60)
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        report = json.loads(proc.stdout)
+        self.assertFalse(report["ok"])
+        lib = next(s for s in report["steps"] if s["step"] == "lib")
+        self.assertFalse(lib["ok"])
+        self.assertIn("lib/tests/test_bad.py:2 Path('x').read_text()", lib["detail"])
+
+    def test_every_root_is_scanned_when_it_exists(self):
+        plugin = self._tree({"apps/supervisor/package.json": "{}",
+                             "tools/installer/cli/a.py": 'p.write_text("x")\n',
+                             "apps/supervisor/scripts/b.py": 'open("x")\n'})
+        report = e2e_text_encoding.run(plugin)
+        steps = {s["step"]: s for s in report["steps"]}
+        self.assertFalse(report["ok"])
+        self.assertTrue(steps["lib"]["ok"])
+        self.assertIn("tools/installer/cli/a.py:1", steps["tools/installer"]["detail"])
+        self.assertIn("apps/supervisor/scripts/b.py:1", steps["apps/*/scripts"]["detail"])
+
+    def test_an_absent_root_is_a_not_run_step_and_ok(self):
+        report = e2e_text_encoding.run(self._tree({"plugins/tk-studio/lib/a.py": "x = 1\n"}))
+        self.assertTrue(report["ok"])
+        steps = {s["step"]: s for s in report["steps"]}
+        self.assertIn("not_run", steps["tools/installer"])
+        self.assertIn("not_run", steps["apps/*/scripts"])
+        self.assertTrue(steps["tools/installer"]["ok"] and steps["apps/*/scripts"]["ok"])
+
+    def test_an_absent_lib_is_red_never_a_scan_of_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(e2e_text_encoding.run(Path(tmp))["ok"])
+
+    def test_flagged_shapes(self):
+        for source in ('p.read_text()', 'p.read_text("utf-8")', 'p.write_text(t)', 'p.write_text(t, "utf-8")',
+                       'open(p)', 'open(p, "w")', 'open(p, mode="r")', 'open(p, m)', 'p.open()', 'p.open("w")',
+                       '(a / "b").open("a+")', 'p.open(mode="r")', 'Path.open(p, "w")', 'io.open(p)',
+                       'p.read_text(errors="replace")', 'p.open(m)', 'p.open("r" if a else "w")', 'p.open(mode=m)',
+                       'pathlib.Path.open(p, "w")', 'pathlib.Path.open(p)', 'pathlib.Path("x").open(m)',
+                       'request.path.open("w")', 'request.path.open(m)', 'os.environ.path.open("w")',
+                       'open(p, encoding=None)', 'p.read_text(encoding=None)', 'p.write_text(t, encoding=None)',
+                       'p.open("w", encoding=None)', 'open(p, "r" if a else "wb")',
+                       # a name bound by a call that makes no opener is still a candidate Path
+                       'tmp = tempfile.mkdtemp(); tmp = Path(tmp); tmp.open("w")',
+                       'root = os.getcwd()\nroot.open("w")', 'p = os.getenv("X")\np.open("w")',
+                       'with tempfile.TemporaryDirectory() as t:\n    t.open("w")',
+                       'u = webbrowser.get()\nu.open("w")',
+                       # a compressed-file opener in text mode uses the locale encoding
+                       'gzip.open(p, "rt")', 'bz2.open(p, "wt")', 'lzma.open(p, "rt")', 'gzip.open(p, mode="rt")',
+                       'gzip.open(p, m)', 'bz2.open(p, mode=m)', 'gzip.open(p, "rt" if a else "rb")',
+                       'gzip.open(p, "rt", encoding=None)', 'gzip.open(p, "rt", 9, "utf-8")',
+                       # codecs reads like `io.open`
+                       'codecs.open(p, "r")', 'codecs.open(p)', 'codecs.open(p, m)', 'codecs.open(p, "r", "utf-8")',
+                       # an import alias reads as the name it stands for
+                       'import gzip as gz\ngz.open(p, "rt")', 'import pathlib as pl\npl.Path.open(p, "w")',
+                       'from pathlib import Path as P\nP.open(p, "w")', 'import io as i\ni.open(p, "r")',
+                       'import codecs as c\nc.open(p, "r")', 'from io import open as o\no(p)',
+                       'from gzip import open as gopen\ngopen(p, "rt")', 'from io import open as o\no(p, "w")',
+                       # `zipfile.Path` opens text in the locale encoding, unlike a `ZipFile` member
+                       'zipfile.Path(p).open("r")', 'zp = zipfile.Path(p)\nzp.open("w")',
+                       'import zipfile as zf\nzf.Path(p).open("r")', 'from zipfile import Path as ZP\nZP(p).open("r")',
+                       # an annotation with no value binds nothing
+                       'z: zipfile.ZipFile\nz.open(name)'):
+            with self.subTest(source=source):
+                self.assertEqual(len(self._hits(source)), 1, source)
+
+    def test_exempt_shapes(self):
+        for source in ('open(p, "rb")', 'open(p, mode="wb")', 'open(p, "a+b")', 'p.open("rb")', 'p.open(mode="wb")',
+                       'Path.open(p, "rb")', 'open(p, encoding="utf-8")', 'open(p, "w", encoding="utf-8")',
+                       'p.read_text(encoding="utf-8")', 'p.write_text(t, encoding=enc)', 'p.open("w", encoding="utf-8")',
+                       'os.open(p, os.O_RDONLY)', 'os.fdopen(fd, "w")', 'tempfile.NamedTemporaryFile("w")',
+                       'tarfile.open(p)', 'tarfile.open(p, "r:gz")', 'zipfile.ZipFile(p).open("m.txt")',
+                       'opener.open(url, timeout=5)', 'archive.open("member.txt")', 'urllib.request.urlopen(url)',
+                       'webbrowser.open(url)', 'p.read_bytes()', 'p.write_bytes(b)', 'open(p, **kwargs)',
+                       'p.read_text(**kwargs)', 'p.open(**kwargs)', 'x = "open(p); p.read_text()"',
+                       'pathlib.Path.open(p, "rb")', 'open(p, "rb" if a else "wb")', 'p.open("rb" if a else "wb")',
+                       'request.open(url)', 'urllib.request.build_opener().open(url)', 'zipfile.ZipFile(p).open(name)',
+                       'z = zipfile.ZipFile(p)\nz.open(name)', 'with zipfile.ZipFile(p) as z:\n    z.open(name)',
+                       'with tarfile.open(p) as t:\n    t.open(name)', 'tempfile.TemporaryFile().open(m)',
+                       'archive.open(name, "r")', 'p.open(encoding=enc)', 'open(p, encoding=enc)',
+                       # a name holding an opener object stays exempt
+                       'z = zipfile.ZipFile(p); z.open(m)', 't = tarfile.open(p)\nt.open(m)',
+                       'g = gzip.open(p)\ng.open(m)', 's = shelve.open(p)\ns.open(m)', 'd = dbm.open(p)\nd.open(m)',
+                       'o = urllib.request.build_opener()\no.open(url)',
+                       # a compressed-file opener: an absent mode is `rb`
+                       'gzip.open(p, "rb")', 'gzip.open(p)', 'bz2.open(p)', 'lzma.open(p, "wb")',
+                       'gzip.open(p, mode="rb")', 'bz2.open(p, "rb" if a else "wb")',
+                       'gzip.open(p, "rt", encoding="utf-8")', 'lzma.open(p, m, encoding=enc)',
+                       'gzip.open(p, "rt", **kwargs)',
+                       'codecs.open(p, "r", encoding="utf-8")', 'codecs.open(p, "rb")', 'codecs.open(p, encoding=enc)',
+                       # an aliased binary or exempt call stays exempt
+                       'import gzip as gz\ngz.open(p, "rb")', 'import gzip as gz\ngz.open(p)',
+                       'import zipfile as zf\nzf.ZipFile(p).open("x")', 'import zipfile as zf\nzf.ZipFile(p).open(name)',
+                       'import zipfile as zf\nz = zf.ZipFile(p)\nz.open(name)', 'from zipfile import ZipFile as ZF\nZF(p).open(name)',
+                       'import pathlib as pl\npl.Path.open(p, "rb")', 'import os as o\no.open(p, flags)',
+                       'from gzip import open as gopen\ngopen(p)', 'from gzip import open as gopen\ngopen(p, "rb")',
+                       'from io import open as o\no(p, "rb")', 'from io import open as o\no(p, encoding="utf-8")',
+                       'from os import open as o\no(p, flags)', 'from webbrowser import open as wo\nwo(url)',
+                       'from mylib import open as o\no(p)',
+                       'zipfile.Path(p).open("rb")', 'zipfile.Path(p).open("r", encoding="utf-8")',
+                       # an annotated binding holds its opener object like a plain one
+                       'z: zipfile.ZipFile = zipfile.ZipFile(p)\nz.open(name)'):
+            with self.subTest(source=source):
+                self.assertEqual(self._hits(source), [], source)
+
+    def test_agents_md_carries_the_managed_block_and_the_pitfall(self):
+        repo_root = e2e_text_encoding._checkout(PLUGIN_ROOT)
+        agents = repo_root / "AGENTS.md" if repo_root else None
+        if agents is None or not agents.is_file():
+            self.skipTest("no AGENTS.md: an archive run has no repo root")
+        text = agents.read_text(encoding="utf-8")
+        self.assertIn("<!-- bmad:context -->", text)
+        self.assertIn("<!-- /bmad:context -->", text)
+        for phrase in ('`encoding="utf-8"`', "Linux defaults to UTF-8", "the Windows host to cp1252",
+                       "the sandbox gate passes what the host leg fails", "`e2e_text_encoding`"):
+            self.assertIn(phrase, text)
 
 
 if __name__ == "__main__":

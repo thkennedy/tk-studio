@@ -512,14 +512,14 @@ class SetupStatusMappingTests(JiraTestCase):
     def test_a_legacy_snapshot_with_a_pending_local_change_is_untouched(self):
         key = self._legacy_snapshot("done")
         before_text = (plansync.plan_dir(self.root) / "ST-001.md").read_text(
-            "utf-8")
+            encoding="utf-8")
         result = jirabackend.apply_statuses(
             plansync.plan_dir(self.root),
             {key: (jirabackend.BLOCKED_STATUS, "indeterminate")})
         self.assertEqual(result["conflicts"], [])
         self.assertEqual(result["applied"], [])
         self.assertEqual((plansync.plan_dir(self.root) / "ST-001.md")
-                         .read_text("utf-8"), before_text)
+                         .read_text(encoding="utf-8"), before_text)
         _, front, _ = self._canonical("ST-001")
         self.assertEqual(front["status"], "done")
 
@@ -606,7 +606,7 @@ class RateLimitTests(unittest.TestCase):
 
     def test_the_budget_sits_well_under_the_job_guard(self):
         job = json.loads((Path(__file__).resolve().parents[2] / "jobs" /
-                          "atlassian-sync-back.json").read_text("utf-8"))
+                          "atlassian-sync-back.json").read_text(encoding="utf-8"))
         guard = job["guards"]["max_wall_clock_seconds"]
         # two clients (Jira, Confluence) per tick
         self.assertLess(2 * jirabackend.RETRY_WAIT_BUDGET, guard * 0.75)
@@ -724,11 +724,11 @@ class DroppedPullBackTests(JiraTestCase):
     def test_a_legacy_dni_snapshot_with_a_local_change_is_untouched(self):
         key = self._legacy_dni_snapshot("in-progress")
         path = plansync.plan_dir(self.root) / "ST-001.md"
-        before = path.read_text("utf-8")
+        before = path.read_text(encoding="utf-8")
         result = jirabackend.apply_statuses(plansync.plan_dir(self.root),
                                             {key: ("DNI", "done")})
         self.assertEqual(result["applied"], [])
-        self.assertEqual(path.read_text("utf-8"), before)
+        self.assertEqual(path.read_text(encoding="utf-8"), before)
 
     def test_a_non_canonical_landed_name_is_a_loud_note(self):
         key = self._landed()
@@ -792,13 +792,13 @@ class DroppedPullBackTests(JiraTestCase):
         # Jira moves to `Closed` while a local `in-progress` is unpromoted:
         # a conflict, never "kept as `done`"
         key, path = self._edit_landed("in-progress", "Done")
-        before = path.read_text("utf-8")
+        before = path.read_text(encoding="utf-8")
         result = jirabackend.apply_statuses(plansync.plan_dir(self.root),
                                             {key: ("Closed", "done")})
         self.assertEqual([c["id"] for c in result["conflicts"]], ["ST-001"])
         self.assertEqual(self._dw114(result["notes"]), [])
         self.assertEqual(result["applied"], [])
-        self.assertEqual(path.read_text("utf-8"), before)
+        self.assertEqual(path.read_text(encoding="utf-8"), before)
 
     def test_closed_under_an_unpromoted_review_claims_no_done(self):
         # Jira stays `Closed` while a local `review` is unpromoted: no note
@@ -815,12 +815,12 @@ class DroppedPullBackTests(JiraTestCase):
         _, front, _ = self._canonical("ST-001")
         self.assertEqual(front["status"], "review")
         self.assertNotIn("status_note", front["external"]["jira"])
-        before = path.read_text("utf-8")
+        before = path.read_text(encoding="utf-8")
         again = jirabackend.apply_statuses(plansync.plan_dir(self.root),
                                            {key: ("Closed", "done")})
         self.assertEqual(self._dw114(again["notes"]), [])
         self.assertEqual(again["applied"], [])
-        self.assertEqual(path.read_text("utf-8"), before)
+        self.assertEqual(path.read_text(encoding="utf-8"), before)
 
     def test_a_missing_note_alone_is_written(self):
         # a snapshot already on `Closed` (canonical `done`) but without its
@@ -836,12 +836,12 @@ class DroppedPullBackTests(JiraTestCase):
         self.assertEqual(front["external"]["jira"]["status_note"],
                          jirabackend._landed_status_note("Closed", "done"))
         # the second pass repeats the note line but writes nothing
-        before = path.read_text("utf-8")
+        before = path.read_text(encoding="utf-8")
         again = jirabackend.apply_statuses(plansync.plan_dir(self.root),
                                            {key: ("Closed", "done")})
         self.assertEqual(again["applied"], [])
         self.assertEqual(len(self._dw114(again["notes"])), 1)
-        self.assertEqual(path.read_text("utf-8"), before)
+        self.assertEqual(path.read_text(encoding="utf-8"), before)
 
     def test_a_conflict_over_an_existing_note_leaves_the_file_byte_identical(self):
         # a snapshot on `Closed` carrying its `status_note`, a local

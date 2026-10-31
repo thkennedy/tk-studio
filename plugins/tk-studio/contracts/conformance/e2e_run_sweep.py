@@ -41,14 +41,16 @@ import tempfile
 import time
 from pathlib import Path
 
+from _budget import suite_bound  # the sibling helper: the suite's bound derives from the manifest entry's timeout
+
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 SUITES = ["test/sweep.test.ts"]
 FILTER = "Story 35.7|Story 36.1|Story 36.2"
 TYPE_ID = "run-sweep"
-BOUND_S = 240  # the filtered suite runs about 80 s on the win32 host's git (hole 108); under 60 s on the Linux gate
 INSTALL_BOUND_S = 40
-MANIFEST_TIMEOUT_S = 300  # keep in step with manifest.json's entry for this drive
-assert BOUND_S + INSTALL_BOUND_S < MANIFEST_TIMEOUT_S, "the drive's bounds must sit under the manifest's timeout"
+# The filtered suite runs about 80 s on the win32 host's git (hole 108); under 60 s on the Linux gate.
+TRIAGE_WAIT_S = 5  # lib_steps' launch.sweep waits this long before the suite starts
+BOUND_S = suite_bound("e2e_run_sweep.py", install_s=INSTALL_BOUND_S, other_s=TRIAGE_WAIT_S)
 TAIL = 20
 RID = "20261029-120000-e2e7"
 
@@ -136,7 +138,7 @@ def lib_steps() -> list[dict]:
         launch._bmad_loop_binary = lambda: "bmad-loop"
 
         root = _project(base)
-        result = launch.sweep(root, run_id=RID, triage_wait_s=5)
+        result = launch.sweep(root, run_id=RID, triage_wait_s=TRIAGE_WAIT_S)
         block = launch.with_block(result, *launch.sweep_block(result))
         events = []
         if ledger.ledger_path().is_file():

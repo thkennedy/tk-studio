@@ -893,7 +893,7 @@ class ValidateTestCase(TrackTestCase):
     def lines(self):
         path = self.root / "_bmad-output" / "tracking" / self.ISSUE / \
             "validation.jsonl"
-        return [json.loads(l) for l in path.read_text("utf-8").splitlines()] \
+        return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines()] \
             if path.is_file() else []
 
     def spec(self, text=SPEC_TEXT):
@@ -1026,7 +1026,7 @@ class ValidatePassTests(ValidateTestCase):
         result = self.validate(passed=True, to="In Progress",
                                ruling="Use the second option.\n", spec=spec)
         self.assert_validate_block(result, "complete")
-        text = spec.read_text("utf-8")
+        text = spec.read_text(encoding="utf-8")
         line = (f"**Ruling (owner, {self.ISSUE} comment c2, "
                 f"{NOW.date().isoformat()}):** Use the second option.")
         self.assertIn(line, text)
@@ -1040,7 +1040,7 @@ class ValidatePassTests(ValidateTestCase):
         self.fake.status[self.ISSUE] = RESOLVED
         self.validate(passed=True, to="In Progress",
                       ruling="Use the second option.", spec=spec)
-        self.assertEqual(spec.read_text("utf-8").count(line), 1)
+        self.assertEqual(spec.read_text(encoding="utf-8").count(line), 1)
 
     def test_else_inside_frozen_after_approval(self):
         spec = self.spec(SPEC_TEXT.replace("intent-contract",
@@ -1048,7 +1048,7 @@ class ValidatePassTests(ValidateTestCase):
         result = self.validate(passed=True, to="In Progress",
                                ruling="Ship it.", spec=spec)
         self.assert_validate_block(result, "complete")
-        text = spec.read_text("utf-8")
+        text = spec.read_text(encoding="utf-8")
         self.assertLess(text.index("Ship it."),
                         text.index("</frozen-after-approval>"))
 
@@ -1059,7 +1059,7 @@ class ValidatePassTests(ValidateTestCase):
         result = self.validate(passed=True, to="In Progress",
                                ruling="Ship it.", spec=spec)
         self.assert_validate_block(result, "complete")
-        text = spec.read_text("utf-8")
+        text = spec.read_text(encoding="utf-8")
         self.assertLess(text.index("Ship it."),
                         text.index("\n</intent-contract>\n"))
         self.assertTrue(text.endswith(prose))
@@ -1076,7 +1076,7 @@ class ValidatePassTests(ValidateTestCase):
                                ruling="Use the second option.", spec=spec)
         self.assert_validate_block(result, "blocked")
         self.assertIn("no transition reaches 'In Progress'", result["reason"])
-        self.assertEqual(spec.read_text("utf-8"), SPEC_TEXT)
+        self.assertEqual(spec.read_text(encoding="utf-8"), SPEC_TEXT)
         self.assertEqual(self.fake.status[self.ISSUE], RESOLVED)
         self.assertEqual(self.writes(), [])
         self.assertEqual(self.lines(), [])
@@ -1126,7 +1126,7 @@ class ValidatePassTests(ValidateTestCase):
                 self.assert_validate_block(result, "blocked")
                 self.assertIn("owner_resolved", result["reason"])
                 self.assertFalse(result["owner_resolved"])
-                self.assertEqual(spec.read_text("utf-8"), SPEC_TEXT)
+                self.assertEqual(spec.read_text(encoding="utf-8"), SPEC_TEXT)
                 self.assertEqual(self.fake.status[self.ISSUE], RESOLVED)
                 self.assertEqual(self.writes(), [])
                 self.assertEqual(self.lines(), [])
@@ -1337,7 +1337,7 @@ class ValidateTransientTests(ValidateTestCase):
                                         ruling="Use the second option.",
                                         spec=spec))
         self.assertEqual(self.fake.status[self.ISSUE], "In Progress")
-        ruled = spec.read_text("utf-8")
+        ruled = spec.read_text(encoding="utf-8")
         self.assertIn("Use the second option.", ruled)  # kept for the retry
         self.fake._jira = real
         transitions = len([c for c in self.writes()
@@ -1348,7 +1348,7 @@ class ValidateTransientTests(ValidateTestCase):
         self.assertEqual(len([c for c in self.writes()
                               if c[1].endswith("/transitions")]),
                          transitions)
-        self.assertEqual(spec.read_text("utf-8"), ruled)
+        self.assertEqual(spec.read_text(encoding="utf-8"), ruled)
         (line,) = self.lines()
         self.assertEqual((line["outcome"], line["to"], line["transition_id"],
                           line["ruling"]),
@@ -1396,7 +1396,7 @@ class ValidateCliTests(ValidateTestCase):
         self.assertEqual(code, 0, out.getvalue())
         result = json.loads(out.getvalue())
         self.assert_validate_block(result, "complete")
-        self.assertIn("Use the second option.", spec.read_text("utf-8"))
+        self.assertIn("Use the second option.", spec.read_text(encoding="utf-8"))
         self.assertEqual(self.fake.status[self.ISSUE], "In Progress")
 
     def test_cli_unreadable_follow_up_file_is_refused(self):

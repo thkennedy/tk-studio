@@ -23,8 +23,10 @@ process.env.TK_SUPERVISOR_UNDER_TEST = "1";
 
 // Hole 108 (2026-10-31): the win32 host's git runs the fixture-heavy tests (several git-backed fixtures in one
 // test) past bun's 5 s default while the Linux sandbox gate stays under it; the default is 30 s for every runner
-// that loads this preload (the engine's gate, verify_host.py, the conformance drives, a hand run). A test that
-// names its own timeout keeps it.
+// that loads this preload. A test that names its own timeout keeps it. Story 36.4: on bun 1.4.3 the default reaches
+// only the first file of a multi-file `bun test` (later files read bun's 5 s), so it covers verify_host.py's
+// one-file-per-process runs and the one-file drives; a multi-file drive also passes `--timeout`, and a hand run of
+// the whole suite stays at 5 s past its first file.
 setDefaultTimeout(30_000);
 
 // Story 33.4 (holes 63, 64, 70): every temp folder and fixture queue a suite makes through test/tmp.ts is

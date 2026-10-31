@@ -1651,6 +1651,8 @@ class LaunchTestCase(unittest.TestCase):
         self.assertIn("unsupported YAML construct", row["detail"])
 
     def test_spec_open_questions_reads_the_real_spec_shapes(self):
+        # Story 36.4 (hole 96): only what cannot change, the capability count and the story map;
+        # the planner rewrites a live SPEC's questions and notes, so those shapes read the fixture below
         repo = Path(__file__).resolve().parents[4]
         for epic in (34, 35):
             path = repo / "_bmad-output" / "specs" / f"spec-epic-{epic}" / "SPEC.md"
@@ -1662,25 +1664,18 @@ class LaunchTestCase(unittest.TestCase):
                 self.assertEqual(parsed["caps"]["CAP-16"], {34: "34-8", 35: "35-7"}[epic])
                 # every capability line is mapped (16 in Epic 34, 18 in Epic 35)
                 self.assertEqual(len(parsed["caps"]), {34: 16, 35: 18}[epic])
-                self.assertEqual(parsed["noted_stories"], set())
-                if epic == 34:
-                    # the real multi-CAP lines map to each CAP named
-                    self.assertEqual(set(parsed["questions"]),
-                                     {"CAP-3", "CAP-4", "CAP-5", "CAP-9", "CAP-10",
-                                      "CAP-11", "CAP-13", "CAP-16"})
-                    self.assertEqual(parsed["questions"]["CAP-9"], parsed["questions"]["CAP-10"])
-                    self.assertTrue(parsed["questions"]["CAP-9"][0].startswith(
-                        "the engine MCP's host port"))
-                    self.assertTrue(parsed["questions"]["CAP-4"][0].startswith(
-                        "when the rendering path 34.2 picks"))
-                    self.assertTrue({"CAP-1", "CAP-2", "CAP-7", "CAP-8", "CAP-9", "CAP-10",
-                                     "CAP-13", "CAP-16"} <= parsed["noted_caps"])
-                else:
-                    self.assertEqual(set(parsed["questions"]), {"CAP-1", "CAP-2", "CAP-3", "CAP-7"})
-                    # the planner adds a design note per story it plans, so the
-                    # noted set only grows: pin the notes the spec carried at distillation
-                    self.assertTrue({"CAP-1", "CAP-2", "CAP-3", "CAP-4", "CAP-17", "CAP-18"}
-                                    <= parsed["noted_caps"])
+
+    def test_spec_open_questions_reads_the_fixture_shapes(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "open-questions" / "SPEC.md"
+        parsed = launch.spec_open_questions(fixture.read_text(encoding="utf-8"))
+        self.assertEqual(parsed["noted_stories"], set())
+        # the multi-CAP lines map to each CAP named
+        self.assertEqual(set(parsed["questions"]),
+                         {"CAP-3", "CAP-4", "CAP-5", "CAP-9", "CAP-10", "CAP-11", "CAP-16"})
+        self.assertEqual(parsed["questions"]["CAP-9"], parsed["questions"]["CAP-10"])
+        self.assertTrue(parsed["questions"]["CAP-9"][0].startswith("the engine MCP's host port"))
+        self.assertTrue(parsed["questions"]["CAP-4"][0].startswith("when the rendering path 34.2 picks"))
+        self.assertEqual(parsed["noted_caps"], {"CAP-1", "CAP-2", "CAP-9", "CAP-10", "CAP-16"})
 
     def test_spec_open_questions_cap_lists_in_questions_and_notes(self):
         text = ("## Capabilities\n\n- **CAP-4** (2.2)\n- **CAP-5** (2.2)\n- **CAP-9** (2.2)\n"

@@ -39,19 +39,21 @@ import tempfile
 import time
 from pathlib import Path
 
+from _budget import suite_bound  # the sibling helper: the suite's bound derives from the manifest entry's timeout
+
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 SUITES = ["test/approve.test.ts", "test/hostverify.test.ts", "test/hostleg.test.ts"]
 # bun's `-t` is a regex: Story 34.8's cases, Story 35.1's re-run (the body rewrite, both flips, the slice commit) and
 # Story 36.1's (`legHistory` on an inconclusive leg, the `FRAMES_DIR` pins).
 FILTER = "Story 34.8|Story 35.1|Story 36.1"
 TYPE_ID = "run-vertical-slice"
-# Below the manifest's `timeout: 240` for this drive (the runner honours it since Story 35.1's
+# Derived from the manifest's `timeout` for this drive (the runner honours it since Story 35.1's
 # fix-forward), with the install's bound beside it: the suite step measured about 100 s on the
 # Windows host with the Story 35.1 filter (hole 87's lesson: bounds follow the box, not the planner).
-BOUND_S = 180
 INSTALL_BOUND_S = 40
-MANIFEST_TIMEOUT_S = 240  # keep in step with manifest.json's entry for this drive
-assert BOUND_S + INSTALL_BOUND_S < MANIFEST_TIMEOUT_S, "the drive's bounds must sit under the manifest's timeout"
+BOUND_S = suite_bound("e2e_vertical_slice.py", install_s=INSTALL_BOUND_S)
+# A multi-file run needs the flag: the preload's `setDefaultTimeout` reaches only the first file (bun 1.4.3).
+TEST_TIMEOUT_MS = "30000"
 TAIL = 20
 
 
@@ -133,7 +135,7 @@ def suite_steps() -> list[dict]:
         started = time.monotonic()
         try:
             proc = subprocess.run(
-                [bun, "test", *SUITES, "-t", FILTER], cwd=str(supervisor), env=env,
+                [bun, "test", "--timeout", TEST_TIMEOUT_MS, *SUITES, "-t", FILTER], cwd=str(supervisor), env=env,
                 stdin=subprocess.DEVNULL, capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=BOUND_S)
         except subprocess.TimeoutExpired:

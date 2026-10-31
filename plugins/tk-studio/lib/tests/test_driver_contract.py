@@ -956,7 +956,7 @@ class DriverContractTestCase(unittest.TestCase):
                        "no `model`"):
             self.assertIn(phrase, flat)
         manifest = json.loads((PLUGIN_ROOT / "contracts" / "conformance"
-                               / "manifest.json").read_text("utf-8"))
+                               / "manifest.json").read_text(encoding="utf-8"))
         drives = manifest["surfaces"]["tk-studio-track"]["drives"]
         validate = [d for d in drives if d["argv"][1] == "validate"]
         self.assertEqual(len(validate), 1)
@@ -1051,7 +1051,7 @@ class DriverContractTestCase(unittest.TestCase):
                        "the served registry root"):
             self.assertIn(phrase, flat)
         manifest = json.loads((PLUGIN_ROOT / "contracts" / "conformance"
-                               / "manifest.json").read_text("utf-8"))
+                               / "manifest.json").read_text(encoding="utf-8"))
         drives = manifest["surfaces"]["tk-studio-engage"]["drives"]
         # relaxed only to admit Story 35.6's closeout drive after it
         self.assertEqual([(d["argv"][:2], d["expect"], d["status"],
@@ -2923,6 +2923,36 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertIn("Story 35.1, Story 35.8, Story 35.2, Story 35.3, Story 35.4, Story 35.5, Story 35.6, "
                       "Story 35.7 (Epic 35)", stories)
 
+    def test_0_1_31_story_36_4_the_host_leg_goes_red_for_code_only(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.31**", header)
+        self.assertNotIn("**0.1.32**", header)
+        self.assertEqual(header.count("0.1.31 (Story 36.4, additive)"), 1)
+        self.assertLess(header.index("0.1.31 (Story 36.3, additive)"),
+                        header.index("0.1.31 (Story 36.4, additive)"))
+        # a sibling clause, never spliced inside 36.3's: 36.3 closes itself first
+        self.assertIn("35.2's park superseded) — additive; 0.1.31 (Story 36.4, additive): ", header)
+        clause = " ".join(header[header.index("0.1.31 (Story 36.4, additive)"):].split())
+        for phrase in ("names its `encoding=`", "binary modes exempt", "`e2e_text_encoding`",
+                       "manifest `timeout`", "`_budget.py`", "— additive) |"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        self.assertEqual(flat.count("**0.1.31 (Story 36.4, additive).**"), 1)
+        self.assertLess(flat.index("**0.1.31 (Story 36.3, additive).**"),
+                        flat.index("**0.1.31 (Story 36.4, additive).**"))
+        note = flat[flat.index("**0.1.31 (Story 36.4, additive).**"):]
+        note = note[:note.index("## 8. Conformance")]
+        for phrase in ("`plugins/tk-studio/lib`", "`tools/installer`", "`apps/*/scripts`", "`encoding=` keyword",
+                       "Binary modes", "`e2e_text_encoding.py`", "`<file>:<line> <call>`", "`not_run`",
+                       "`suite_bound(script, *, install_s, other_s, headroom_s)`", "`HEADROOM_S` 15",
+                       "an absent `lib` is red", "a compressed-file opener (`gzip`, `bz2`, `lzma`) in text mode is not"):
+            self.assertIn(phrase, note)
+        section8 = flat[flat.index("## 8. Conformance"):]
+        self.assertIn("derives its suite's bound from that `timeout` through `_budget.py`", section8)
+        stories = next(line for line in self.text.splitlines() if line.startswith("| Story / rulings"))
+        self.assertRegex(stories, r"Story 36\.1, Story 36\.2, Story 36\.3, Story 36\.4(, Story 36\.\d+)* \(Epic 36\)")
+
     def test_0_1_31_story_36_3_a_paused_or_resumed_run_is_never_parked(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
@@ -2955,7 +2985,7 @@ class DriverContractTestCase(unittest.TestCase):
         track_row = next(line for line in self.text.splitlines() if line.startswith("| `tk-studio-track`"))
         self.assertIn("verb `unblock`", track_row)
         stories = next(line for line in self.text.splitlines() if line.startswith("| Story / rulings"))
-        self.assertIn("Story 36.1, Story 36.2, Story 36.3 (Epic 36)", stories)
+        self.assertRegex(stories, r"Story 36\.1, Story 36\.2, Story 36\.3(, Story 36\.\d+)* \(Epic 36\)")
 
     def test_0_1_31_story_36_2_the_sweeps_records_are_whole(self):
         header = next(line for line in self.text.splitlines()

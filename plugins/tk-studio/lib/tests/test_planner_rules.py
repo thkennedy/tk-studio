@@ -47,6 +47,8 @@ def _flat(text: str) -> str:
 
 STORY = {"dotted": "26.2", "num": "2", "title": "The Planner Settles Schema Shape and the Spec File Name",
          "heading": "### Story 26.2: The Planner Settles Schema Shape and the Spec File Name", "want": ""}
+# 5 x 10 + "abcde" joined by hyphens is exactly 60, the slug() cap; "xyz" would overflow it
+WORST_CASE_TITLE = " ".join(["abcdefghij"] * 5 + ["abcde", "xyz"])
 
 
 @unittest.skipUnless(TRANSCRIBE.is_file(), "studio-pipeline plugin not in this checkout")
@@ -83,13 +85,17 @@ class SpecFileNameTest(unittest.TestCase):
             hits = [p.name for p in stories.glob(f"{self.key}-*.md")]
         self.assertEqual(hits, [f"{self.key}-spec.md"])
 
-    def test_worst_case_path_under_200(self):
-        # 5 x 10 + "abcde" joined by hyphens is exactly 60, the slug() cap; "xyz" would overflow it
-        title = " ".join(["abcdefghij"] * 5 + ["abcde", "xyz"])
-        story = dict(STORY, num="99", title=title)
+    def _worst_case_key(self):
+        story = dict(STORY, num="99", title=WORST_CASE_TITLE)
         key, _ = self.mod.entry(99, story, {})
-        self.assertEqual(len(self.mod.slug(title)), 60)
-        self.assertEqual(len(key), len("99-99-") + 60)  # 66
+        return key
+
+    def test_worst_case_slug_and_key_lengths(self):
+        self.assertEqual(len(self.mod.slug(WORST_CASE_TITLE)), 60)
+        self.assertEqual(len(self._worst_case_key()), len("99-99-") + 60)  # 66
+
+    def test_worst_case_path_under_200(self):
+        key = self._worst_case_key()
         path = REPO_ROOT / "_bmad-output" / "specs" / "spec-epic-99" / "stories" / f"{key}-spec.md"
         self.assertLess(len(str(path)), 200, str(path))
 
@@ -139,6 +145,18 @@ class SettledShapeRuleTest(unittest.TestCase):
         self.assertIn("\n## Settled shape\n", section3)
         self.assertLess(section3.index("\n## Settled shape\n"), section3.index("\n## Files\n"))
         self.assertIn("there is never a second dated section", flat)
+
+    @unittest.skipUnless(TASK_PLANNING.is_file(), "studio-pipeline plugin not in this checkout")
+    def test_task_planning_carries_the_stories_row_regex_rule(self):
+        # Story 36.4 (C8): a contract test pinning the Stories row uses one prefix regex, so
+        # appending a story is never a deviation
+        section3 = _flat(TASK_PLANNING.read_text(encoding="utf-8").split("## 3.", 1)[1].split("\n## 4.", 1)[0])
+        self.assertIn("**Contract tests (the Stories row).**", section3)
+        self.assertIn("uses one prefix regex ending in an optional later-stories group", section3)
+        self.assertIn(r"`Story N\.1, …, Story N\.k(, Story N\.m)* \(Epic N\)`", section3)
+        self.assertIn("never a literal of the whole row, so appending a story is never a deviation", section3)
+        self.assertLess(section3.index("**Open questions (Story 35.2).**"),
+                        section3.index("**Contract tests (the Stories row).**"))
 
     @unittest.skipUnless(TASK_PLANNING.is_file(), "studio-pipeline plugin not in this checkout")
     def test_task_planning_plans_every_story_and_refuses_open_questions(self):

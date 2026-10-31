@@ -554,7 +554,7 @@ class QuestionsTestCase(EngageTestCase):
         code, result = run("--run-id", "r1")
         self.assertEqual(code, 0)
         self.assert_status_block_last(result, "complete")
-        self.assertEqual(json.loads(self.written().read_text("utf-8"))
+        self.assertEqual(json.loads(self.written().read_text(encoding="utf-8"))
                          ["run_id"], "r1")
 
 
@@ -797,7 +797,7 @@ class ScopePublishTests(ScopeTestCase):
                 self.assertTrue(result["ok"])
                 self.assertIs(result["retry"], True)
                 self.assertIsNone(self.record()["scope_page"])
-                self.assertEqual(self.scope_file().read_text("utf-8"), SCOPE)
+                self.assertEqual(self.scope_file().read_text(encoding="utf-8"), SCOPE)
         self.assertTrue(self.sleeps)  # the 429 was retried before giving up
         del self.fake.force[FOLDERS_GET]
         self.assertEqual(self.scope()["page"]["action"], "created")
@@ -839,7 +839,7 @@ class ScopePublishTests(ScopeTestCase):
                          "_bmad-output/engagements/ENG-001/engagement.yaml: "
                          "OSError")
         self.assertEqual(result["written"], [SCOPE_REL])  # honestly landed
-        self.assertEqual(self.scope_file().read_text("utf-8"), SCOPE)
+        self.assertEqual(self.scope_file().read_text(encoding="utf-8"), SCOPE)
         self.assertIsNone(self.record()["scope_page"])
 
     def test_a_scope_lock_the_os_refuses_is_scope_unwritable(self):
@@ -1076,7 +1076,7 @@ class ScopeReviseTests(ScopeTestCase):
         self.assertEqual((result["source"], result["revise_at"]),
                          ("revise", REVISE_AT))
         # not shape-checked (D9): the owner's text as written
-        self.assertEqual(self.scope_file().read_text("utf-8"), self.BODY)
+        self.assertEqual(self.scope_file().read_text(encoding="utf-8"), self.BODY)
         page = self.fake.page(SCOPE_TITLE)
         self.assertIn("Just the CSV button", page["body"])
         self.assertEqual(self.record()["scope_page"]["id"], page["id"])
@@ -1087,7 +1087,7 @@ class ScopeReviseTests(ScopeTestCase):
                               revise_at="2026-10-25T05:40:00.000Z",
                               transport=self.fake, now=NOW)
         self.assertEqual(second["page"]["action"], "updated")
-        self.assertEqual(self.scope_file().read_text("utf-8"),
+        self.assertEqual(self.scope_file().read_text(encoding="utf-8"),
                          "Second thoughts.\n")
 
     def test_a_revise_with_no_body_or_no_line_is_revise_not_found(self):
@@ -1211,7 +1211,7 @@ class ScopeVoidsQuoteTests(ScopeTestCase):
             "_bmad-output/engagements/ENG-001/scope.md"])
         self.assertIn("scope.md replaced: the quote is voided",
                       result["notes"])
-        self.assertEqual(self.scope_file().read_text("utf-8"), SCOPE)
+        self.assertEqual(self.scope_file().read_text(encoding="utf-8"), SCOPE)
         record = self.record()
         self.assertIsNone(record["quote"])
         self.assertIsNone(record["scope_page"])
@@ -1241,7 +1241,7 @@ class ScopeVoidsQuoteTests(ScopeTestCase):
         self.assertIn("ScopeUnwritable: _bmad-output/engagements/ENG-001/"
                       "engagement.yaml: PermissionError", result["reason"])
         self.assertEqual(result["written"], [])
-        self.assertEqual(self.scope_file().read_text("utf-8"), SCOPE)
+        self.assertEqual(self.scope_file().read_text(encoding="utf-8"), SCOPE)
         self.assertEqual(self.record(), before)  # quote and page kept
         self.assertFalse((self.dir / "scope.lock").exists())
 
@@ -1263,7 +1263,7 @@ class ScopeVoidsQuoteTests(ScopeTestCase):
         self.assert_status_block_last(result, "blocked")
         self.assertIn("EngagementRecordUnreadable", result["reason"])
         self.assertEqual(result["written"], [])
-        self.assertEqual(self.scope_file().read_text("utf-8"), SCOPE)
+        self.assertEqual(self.scope_file().read_text(encoding="utf-8"), SCOPE)
         self.assertEqual(self.record()["quote"], self.QUOTE)
 
     def test_a_failed_void_of_a_page_revision_leaves_scope_md_unchanged(self):
@@ -1283,7 +1283,7 @@ class ScopeVoidsQuoteTests(ScopeTestCase):
         self.assertIs(out["applied"], False)
         self.assertIs(out["retry"], True)
         self.assertEqual(out["written"], [])
-        self.assertEqual(self.scope_file().read_text("utf-8"), SCOPE)
+        self.assertEqual(self.scope_file().read_text(encoding="utf-8"), SCOPE)
         self.assertEqual(self.record()["quote"], self.QUOTE)
         self.assertEqual(self.record()["scope_page"]["version"], 1)
 
@@ -1299,7 +1299,7 @@ class ScopeVoidsQuoteTests(ScopeTestCase):
         self.assertIsNone(record["quote"])
         self.assertEqual(record["scope_page"]["version"], 2)
         self.assertEqual(record["updated"], "2026-10-25T08:00:00.000Z")
-        self.assertIn("Owner edit.", self.scope_file().read_text("utf-8"))
+        self.assertIn("Owner edit.", self.scope_file().read_text(encoding="utf-8"))
         # a revision already applied changes nothing, quote or not
         self.set_record(quote=self.QUOTE)
         again = engage.apply_page_revision(self.root, ENG, page)
@@ -1357,7 +1357,7 @@ class ScopeVoidsQuoteTests(ScopeTestCase):
                 record = self.record()
                 self.assertIsNone(record["quote"])  # the void landed
                 self.assertEqual(record["scope_page"]["version"], version)
-                self.assertEqual(self.scope_file().read_text("utf-8") == SCOPE,
+                self.assertEqual(self.scope_file().read_text(encoding="utf-8") == SCOPE,
                                  fail_at == "scope.md")
 
     def add_revise(self, body, at):
@@ -1381,7 +1381,7 @@ class ScopeVoidsQuoteTests(ScopeTestCase):
         self.assertEqual(record["state"], "scoping")
         self.assertIn("scope.md replaced: the quote is voided",
                       result["notes"])
-        self.assertEqual(self.scope_file().read_text("utf-8"),
+        self.assertEqual(self.scope_file().read_text(encoding="utf-8"),
                          "Just the CSV button, please.\n")
         # a revise body equal to scope.md replaces nothing: the quote stays
         self.set_record(quote=self.QUOTE)
@@ -1488,7 +1488,7 @@ class QuoteVerbTests(QuoteTestCase):
                          (0, False))
         self.assertEqual(basis["prices_date"],
                          json.loads(Path(engage.__file__).with_name(
-                             "prices.json").read_text())["date"])
+                             "prices.json").read_text(encoding="utf-8"))["date"])
         self.assertIsNone(basis["window_tokens"])
         self.assertEqual(basis["cap_tokens"], want["cap_tokens"])
         self.assertEqual(q["band50"]["share"], "share unknown")
@@ -1726,7 +1726,7 @@ class QuoteRefusalTests(QuoteTestCase):
         self.assertIn("_bmad-output/engagements/ENG-001/scope.lock is held",
                       result["reason"])
         self.assertIsNone(self.record().get("quote"))
-        self.assertEqual((self.dir / "scope.lock").read_text("utf-8"),
+        self.assertEqual((self.dir / "scope.lock").read_text(encoding="utf-8"),
                          "other")  # never removed by the refused quote
 
     def test_an_os_refusal_is_quote_unwritable(self):
@@ -1886,7 +1886,7 @@ class CloseoutRenderTests(CloseoutTestCase):
         self.set_record(state="scoping")
         self.scope()  # the scope's page: the folder the closeout joins
         self.set_record(state="in-progress")
-        with (self.measurements / "u-m.jsonl").open("w") as handle:
+        with (self.measurements / "u-m.jsonl").open("w", encoding="utf-8") as handle:
             handle.write(json.dumps(meter_line("41-1-csv-button", 1.25,
                                                120_000,
                                                project="tk-studio")) + "\n")

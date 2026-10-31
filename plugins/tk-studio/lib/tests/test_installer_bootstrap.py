@@ -254,7 +254,7 @@ class Scripts(unittest.TestCase):
                         self.sh.index("# 5. long paths for git")]
         mark = re.search(r'^MARK="([^"]+)"$', self.sh, re.M).group(1)
         with tempfile.TemporaryDirectory() as home:
-            Path(home, ".bash_profile").write_text("# mine\n")
+            Path(home, ".bash_profile").write_text("# mine\n", encoding="utf-8")
             env = {"HOME": home, "SHELL": "/usr/bin/zsh",
                    "PATH": "/usr/bin:/bin", "BIN": "/opt/tk/bin",
                    "MARK": mark}
@@ -264,7 +264,7 @@ class Scripts(unittest.TestCase):
                 self.assertEqual(proc.returncode, 0, proc.stderr)
             for name in (".profile", ".zprofile", ".bash_profile"):
                 with self.subTest(profile=name):
-                    text = Path(home, name).read_text()
+                    text = Path(home, name).read_text(encoding="utf-8")
                     self.assertEqual(text.count(mark), 1)
                     self.assertIn('export PATH="/opt/tk/bin:$PATH"', text)
             self.assertFalse(Path(home, ".bash_login").exists())
@@ -373,7 +373,7 @@ class Scripts(unittest.TestCase):
                                     cli_version="0.1.0")
                 uv = ctx.root / "tools" / "uv-0.13.1" / apps._exe(plat, "uv")
                 uv.parent.mkdir(parents=True)
-                uv.write_text("uv")
+                uv.write_text("uv", encoding="utf-8")
                 with mock.patch.object(apps.os, "getpid", return_value=1):
                     leg = apps.cli_leg(ctx, entry, None)
                 if plat.windows:
