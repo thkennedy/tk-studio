@@ -323,6 +323,10 @@ def _publish(destination: Path, outputs: dict[str, bytes], manifest: dict[str, A
                 except PermissionError:
                     if attempt == 4 or (destination.exists() and any(destination.iterdir())):
                         raise
+                    if destination.is_dir():
+                        # the failed rename may leave the empty folder behind: a POSIX rename
+                        # replaces an empty directory, a Windows rename refuses it (WinError 183)
+                        os.rmdir(destination)
                     time.sleep(0.2)
         except OSError:
             if destination.exists():

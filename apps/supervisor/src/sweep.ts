@@ -67,7 +67,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DEFERRED_REL } from "./board";
-import { pluginRoot, sbxBin } from "./env";
+import { sbxBin, studioRoot } from "./env";
 import { inconclusiveReason, legVerdict, redReason, type HostVerifyResult } from "./hostverify";
 import { registerSweepLine } from "./hygiene";
 import { PLAN_RETRY_LIMIT, runPr, type PlanStatusDeps } from "./planstatus";
@@ -519,7 +519,7 @@ export async function stopEngineAt(root: string, eid: string, where: EngineWhere
   let r: RunResult;
   try {
     if (where.tier === "sbx" && where.sandbox) {
-      const argv = ["exec", where.sandbox, "uv", "run", `${toVmPath(pluginRoot(env)).replace(/\/+$/, "")}/lib/launch.py`, "stop", "--directory", toVmPath(root), "--run-id", eid, ...graceful];
+      const argv = ["exec", where.sandbox, "uv", "run", `${toVmPath(studioRoot(env)).replace(/\/+$/, "")}/plugins/tk-studio/lib/launch.py`, "stop", "--directory", toVmPath(root), "--run-id", eid, ...graceful];
       r = await (deps.sbx?.run ?? ((b, a, o) => runProcess(b, a, { timeoutS: o.timeoutS })))(sbxBin(env), argv, { timeoutS: 120 });
     } else {
       r = await uvRunner(deps)(root, studioScript(deps, "lib", "launch.py"), ["stop", "--directory", root, "--run-id", eid, ...graceful], 120);

@@ -71,7 +71,7 @@ already match.
 
 **Defect.** Hole 95, DW-110. The first render of a skill in a fresh run worktree can fail inside the sandbox with `[Errno 13] Permission denied` on `_publish`'s `os.rename(staging, destination)`. The sbx mount over a Windows folder refuses the rename for a moment.
 
-**The change.** Five tries, 200 ms apart, on `PermissionError` (`EACCES`/`EPERM`), under the marker line `tk-studio base patch render-skill-staging-rename-retry`. Both tracked copies carry it, edited identically: `_bmad/scripts/render_skill.py` and `apps/supervisor/_bmad/scripts/render_skill.py`.
+**The change.** Five tries, 200 ms apart, on `PermissionError` (`EACCES`/`EPERM`), under the marker line `tk-studio base patch render-skill-staging-rename-retry`. A failed try that left the empty generation folder behind has it cleared before the next try (a POSIX rename replaces an empty directory, a Windows rename refuses it, WinError 183; 2026-10-31, the 36.3 host leg); a non-empty folder is another writer's generation and ends the retry. Both tracked copies carry it, edited identically: `_bmad/scripts/render_skill.py` and `apps/supervisor/_bmad/scripts/render_skill.py`.
 
 **Registration is owed.** `base-patches/patches.json` has no entry for it yet. An entry needs a filed upstream issue URL, one defect to one issue, and none has been supplied. Until then:
 
