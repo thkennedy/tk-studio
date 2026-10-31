@@ -1,0 +1,231 @@
+# stories.yaml: Epic 36 of this project, transcribed 1:1 from _bmad-output/planning-artifacts/epics.md
+# by .bmad-loop/plugins/studio-pipeline/transcribe.py on 2026-10-30. The epics document is
+# the plan; the studio gate may append remediation entries (`<key>-r<n>`) and revise
+# UNSTARTED entries' invoke_dev_with, nothing else.
+
+- id: "36-1-one-verdict-for-every-consumer"
+  title: "One Verdict for Every Consumer"
+  description: >-
+    I want the host leg's verdict (green, red, inconclusive) derived once and read by
+    the board, the plan status, the stage log, the rollup and the sweep, with a test
+    feeding an inconclusive leg to each, and the slice path's regression gaps closed, So
+    that an inconclusive leg files a run under `needs_you` on every screen, never green
+    on one and red on another (AI-1; DW-100, DW-91). Canonical: ST-154.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 36.1: One
+    Verdict for Every Consumer", the authoritative specification (user story and
+    acceptance criteria). Read the epic's own narrative (the paragraphs under "## Epic
+    36:") for scope, rulings and the repo the story targets; transcribe the story into
+    the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/36-1.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/36-1-one-verdict-for-every-consumer-spec.md` in the spec
+    folder; the engine resolves it by the glob
+    `36-1-one-verdict-for-every-consumer-*.md`, and a file named
+    `36-1-one-verdict-for-every-consumer.md` is read as pending (loop deficiency 1,
+    story 21-6).
+
+- id: "36-2-the-sweeps-records-are-whole"
+  title: "The Sweep's Records Are Whole"
+  description: >-
+    I want a sweep's cost, its triage and its summary to reach the records a story's do:
+    the engine's per-bundle cost priced into `## Metered cost` and the job-run line, the
+    `sweep-triage` event in the host's ledger, `## Sweep` surviving a re-run, the
+    engine's own `failed`/`blocked` end kept, and the ledger pass's `pending` a wait
+    rather than a counted retry, So that the sweeps' real spend reaches the quota pacing
+    and the rollup, and a fourth sweep's end state and body are true (hole 102; AI-2's
+    B5, B9, B10; DW-116, DW-118, DW-122, DW-123, DW-131; DW-67 and DW-119, the same cost
+    shape on the re-run and the resume). Canonical: ST-155.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 36.2: The
+    Sweep's Records Are Whole", the authoritative specification (user story and
+    acceptance criteria). Read the epic's own narrative (the paragraphs under "## Epic
+    36:") for scope, rulings and the repo the story targets; transcribe the story into
+    the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/36-2.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/36-2-the-sweeps-records-are-whole-spec.md` in the spec
+    folder; the engine resolves it by the glob `36-2-the-sweeps-records-are-whole-*.md`,
+    and a file named `36-2-the-sweeps-records-are-whole.md` is read as pending (loop
+    deficiency 1, story 21-6).
+
+- id: "36-3-a-paused-or-resumed-run-is-never-parked"
+  title: "A Paused or Resumed Run Is Never Parked"
+  description: >-
+    I want every pause to have a bounded, recorded exit: the resume's stop re-arm routed
+    by tier, the story's Jira block closed by the resume, a failed first render
+    auto-resumed once, a paused sweep's stop retry bounded and its WIP kept out of the
+    leg, a story-boundary refusal ending the run rather than parking it, a killed
+    resumed engine's PR left a draft with its guard reason kept, and an engagement's cap
+    or ask block closed by the owner's go, So that the operator path for a pause is the
+    API, never a hand edit of the worktree or the issue (holes 95 and 101; AI-2's B2,
+    B3; the retrospective's B3/B4 decided; DW-110, DW-115, DW-120, DW-121, DW-130;
+    DW-64, DW-65, DW-47). Canonical: ST-156.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 36.3: A
+    Paused or Resumed Run Is Never Parked", the authoritative specification (user story
+    and acceptance criteria). Read the epic's own narrative (the paragraphs under "##
+    Epic 36:") for scope, rulings and the repo the story targets; transcribe the story
+    into the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/36-3.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/36-3-a-paused-or-resumed-run-is-never-parked-spec.md` in
+    the spec folder; the engine resolves it by the glob
+    `36-3-a-paused-or-resumed-run-is-never-parked-*.md`, and a file named
+    `36-3-a-paused-or-resumed-run-is-never-parked.md` is read as pending (loop
+    deficiency 1, story 21-6). Replan (36-2 gate, 2026-10-30): the paused-sweep
+    deadline starts only from an `engine-stop` note carrying `error`, as 36.2's note
+    may be `{stopped: true}`; set the deadline's `blocked` end explicitly, not through
+    `sweepEndState`, whose engine cap reads it `partial`; plans/36-3.md Settled shape 5
+    and its refreshed anchors carry the detail.
+
+- id: "36-4-the-host-leg-goes-red-for-code-only"
+  title: "The Host Leg Goes Red for Code Only"
+  description: >-
+    I want the host leg to fail only on what the story or the bundle changed: no host
+    test pinning a live planning artifact, every drive budgeting from its manifest
+    timeout with headroom and git- or uv-spawning tests above bun's 5 s, every text read
+    and write under the lib and the installer naming its encoding, an in-process drain
+    test for the claim-path `TierRequired`, and the planner's Stories-row regex rule in
+    its contract-test guidance, So that a leg's red means the code, never the box, the
+    clock or the planner (holes 96, 97, 103; AI-8; DW-111, DW-112, DW-132). Canonical:
+    ST-157.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 36.4: The
+    Host Leg Goes Red for Code Only", the authoritative specification (user story and
+    acceptance criteria). Read the epic's own narrative (the paragraphs under "## Epic
+    36:") for scope, rulings and the repo the story targets; transcribe the story into
+    the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/36-4.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/36-4-the-host-leg-goes-red-for-code-only-spec.md` in the
+    spec folder; the engine resolves it by the glob
+    `36-4-the-host-leg-goes-red-for-code-only-*.md`, and a file named
+    `36-4-the-host-leg-goes-red-for-code-only.md` is read as pending (loop deficiency 1,
+    story 21-6).
+
+- id: "36-5-the-supervisors-own-faults"
+  title: "The Supervisor's Own Faults"
+  description: >-
+    I want the supervisor to stop causing the blocks it then refuses to clear: a run
+    that blocks before any engine starts releases the checkout lock and an `on_status
+    [blocked]` stop skips a block of the supervisor's own making, the tick never
+    respawns holds, `submit` refuses a sandbox-tier job whose target skill is absent
+    from the skills store, a core's own `blocked` status lifts into the run state, the
+    pin-restart bounded per sandbox with the engine sandbox's `/tmp` pruned at the pin,
+    a pacer pass visible while it runs, and doctor reading a process-level end over the
+    routine tee lines, So that the supervisor's own faults are recorded as its own and
+    never cost a hand-deleted lock row, a 1.26 USD host claim or 133 hold events (holes
+    90, 94, 98; DW-105, DW-109, DW-113, DW-38; DW-55, DW-56, DW-58, DW-60, DW-63).
+    Canonical: ST-158.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 36.5: The
+    Supervisor's Own Faults", the authoritative specification (user story and acceptance
+    criteria). Read the epic's own narrative (the paragraphs under "## Epic 36:") for
+    scope, rulings and the repo the story targets; transcribe the story into the spec's
+    intent contract and never re-derive, generalise or extend it. Plan: plans/36-5.md
+    when present (its Code Map is the investigation). Project rules and the verify gate:
+    the studio customization (_bmad/custom/bmad-build-auto.toml). Routing:
+    .bmad-loop/routing.current.json; pass the model, effort and advisor of implementer
+    and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/36-5-the-supervisors-own-faults-spec.md` in the spec
+    folder; the engine resolves it by the glob `36-5-the-supervisors-own-faults-*.md`,
+    and a file named `36-5-the-supervisors-own-faults.md` is read as pending (loop
+    deficiency 1, story 21-6).
+
+- id: "36-6-setup-and-the-launch-check-by-evidence"
+  title: "Setup and the Launch Check, by Evidence"
+  description: >-
+    I want `plansync setup` to write the workflow it needs without my hand (uppercase
+    transition types, the version from the v3 search, any status in the To Do category,
+    the global transitions it adds carrying ids), the launch check to refuse writing a
+    tracked `policy.toml` and to know whether the engine sandbox has Godot, and
+    `scope`'s game-project rule to read the registry rather than a name prefix, So that
+    a fresh project's setup needs no manual workflow edit and a game project is one by
+    evidence (hole 92; DW-127, DW-62, DW-71, DW-90). Canonical: ST-159.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 36.6: Setup
+    and the Launch Check, by Evidence", the authoritative specification (user story and
+    acceptance criteria). Read the epic's own narrative (the paragraphs under "## Epic
+    36:") for scope, rulings and the repo the story targets; transcribe the story into
+    the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/36-6.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/36-6-setup-and-the-launch-check-by-evidence-spec.md` in
+    the spec folder; the engine resolves it by the glob
+    `36-6-setup-and-the-launch-check-by-evidence-*.md`, and a file named
+    `36-6-setup-and-the-launch-check-by-evidence.md` is read as pending (loop deficiency
+    1, story 21-6).
+
+- id: "36-7-the-cycles-cut-and-the-docs-caught-up"
+  title: "The Cycles Cut and the Docs Caught Up"
+  description: >-
+    I want the supervisor's eleven-module import cycle and the lib's `assets` ↔
+    `playable` cycle cut to one-way seams with the dynamic-import dodges removed, the
+    duplication the ledger names folded into shared helpers, `assets.py` split along its
+    concerns as far as one story carries, and the docs the retrospective lists landed,
+    So that the next epic adds surface on a module graph a reader can hold and the
+    READMEs name every verb that ships (AI-7; DW-85, DW-86, DW-87). Canonical: ST-160.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 36.7: The
+    Cycles Cut and the Docs Caught Up", the authoritative specification (user story and
+    acceptance criteria). Read the epic's own narrative (the paragraphs under "## Epic
+    36:") for scope, rulings and the repo the story targets; transcribe the story into
+    the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/36-7.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/36-7-the-cycles-cut-and-the-docs-caught-up-spec.md` in the
+    spec folder; the engine resolves it by the glob
+    `36-7-the-cycles-cut-and-the-docs-caught-up-*.md`, and a file named
+    `36-7-the-cycles-cut-and-the-docs-caught-up.md` is read as pending (loop deficiency
+    1, story 21-6). Replan (36-2 gate, 2026-10-30): `sweep.ts` imports `DEFERRED_REL`
+    from `board.ts`, merging the sweep and board SCCs; cut that edge through a leaf and
+    re-derive the SCCs from the tree before fixing the allowlist; see plans/36-7.md
+    Risks.

@@ -538,7 +538,7 @@ source_spec: `34-3-the-playable-verify-leg-spec.md`
 location: apps/supervisor/src/hostleg.ts runLeg
 severity: medium
 reason: consult ruling 2026-10-27 (deviation-gt-0); AC3 "the leg's cost lands in the ledger's job-run as its own line" holds on the close-out path only; worktree.ts finishStudio
-status: open
+status: resolved 2026-10-30 by this story's PR (36.2: `hostleg.ts runLeg` emits the judge's cost as its own `job-run` line, `<run_id>:verify-<n>`)
 
 ### DW-68: The judge's "reads only report.json and the frames, never the code or the spec" rests on the SKILL.md instruction alone; the session runs with the whole worktree mounted and no deny profile.
 origin: spec-deferred 61e45ce3bee5
@@ -732,7 +732,7 @@ source_spec: `34-8-the-run-vertical-slice-job-and-the-engagements-game-path-spec
 location: apps/supervisor/src/worktree.ts:917, :848, :445-448; apps/supervisor/test/hostverify.test.ts:902-909
 severity: medium
 reason: Every `host_commit` assertion calls `closeOut` directly and the one sheet test always harness-fails. Fix: one test story that drives the sweep to a slice close-out with a passing playable run and pins the frame-name contract in one place.
-status: open
+status: resolved 2026-10-30 by this story's PR (36.1: `sweepEngines` driven to `closeOut` with `slice: true` on a passing playable run asserts the sheet; `FRAMES_DIR` is the one literal `MEDIA`, `legProof` and `proofCommit` read, the bare-name contract with `playable.py sheet` pinned on both sides)
 
 ### DW-92: Smaller slice-path edges: `playable` without `verify.engine` reads `skipped: engine gate not green`; a `.mcp.json` with a BOM is refused; a moment at tick ≥ `--ticks` is never captured; `enginemcp.ts` reads the config at `run.prefix` but starts in the top level; the closeout page takes the last `host-verify`'s sheet; the `scoping` revise path never gains `game: true`.
 origin: retro epic-34 (_bmad-output/specs/spec-epic-34/RETROSPECTIVE.md), B15
@@ -806,7 +806,7 @@ source_spec: `35-3-the-slice-path-hardened-spec.md`
 location: apps/supervisor/src/board.ts:262 (hostVerifyOf); apps/supervisor/src/planstatus.ts:444
 severity: medium
 reason: `apps/supervisor/src/board.ts hostVerifyOf` (~:262) and `planstatus.ts` (~:444) show an inconclusive host-verify leg as green (board, files the run under done instead of needs_you) or red (planstatus); the contract says they read the latest host-verify through `green`. Found by 35.3's review; outside 35.3's Files. EP-35 retro (B1, AI-1): every consumer outside 35.3's Files misreads it — `board.ts:262` `isRed(d) ? "red" : "green"` shows an inconclusive leg green; `planstatus.ts:454` writes the leg's Stage Log row as `red`, which `stage-post` mirrors to Jira and `report.py` counts (a new consumer: #255 merged before #261 widened the verdict); the verdict is derived three times (`hostverify.ts:871-872`, `:881` inline, `planstatus.ts:454`) and only the first two know `inconclusive`; no test feeds an inconclusive leg to board, planstatus or sweep (`planstatus.test.ts:462-700` covers green/red/skipped). Fix: one exported `legVerdict` read by `hostVerifyOf`, `supervisorRows` and the sweep; tests feeding an inconclusive leg to each. DW-101 was the same finding filed twice by the run (both review layers); merged into this entry by the EP-35 retro hygiene (C7).
-status: open
+status: resolved 2026-10-30 by this story's PR (36.1: board, plan status, `legHistory` and the sweep's end state read `legVerdict`; the board files an inconclusive run under `needs_you`)
 
 ### DW-101: board.ts hostVerifyOf and planstatus.ts misread an inconclusive host-verify leg (green on the board, filed under done; red in planstatus).
 origin: spec-deferred ad45d836e227
@@ -937,7 +937,7 @@ source_spec: `_bmad-output/specs/spec-epic-35/RETROSPECTIVE.md`
 location: plugins/tk-studio/lib/launch.py:1576 (the emit into the process's `ledger_path()`, ledger.py:167); apps/supervisor/src/sweep.ts:8-13 (the queue event's payload) vs plugins/tk-studio/contracts/taxonomy.v1.json
 severity: medium
 reason: `run-sweep` requires the sbx tier, so the event lives in the VM's `~/.tk-studio/measurements/` unless exported by hand (runbook `:769-784`); the same name in the queue store carries a different payload. Fix: emit the ledger event from the host side (the supervisor's watch has the payload when it copies `triage.json`), or have the host's push read the sandbox's ledger; one payload shape for both records. Until then the first real sweep's operator exports the sandbox's ledger (AI-3).
-status: open
+status: resolved 2026-10-30 by this story's PR (36.2: `sweep.ts emitTriage` emits the lib-shaped `sweep-triage` from the host once per engine run; the queue note gains `ledger`)
 
 ### DW-117: The re-run refuses the runs it exists for: `git worktree add -B` is refused when the run branch is held by another worktree (an ended run whose close-out kept its worktree on error), and a local branch left ahead by a failed push is refused too.
 origin: retro-epic-35, B7
@@ -953,7 +953,7 @@ source_spec: `_bmad-output/specs/spec-epic-35/RETROSPECTIVE.md`
 location: apps/supervisor/src/worktree.ts:1078; apps/supervisor/test/sweep.test.ts:184-189, :325, :377 (pin bundles and the leg only)
 severity: low
 reason: CAP-16's end state is by bundles and the leg; the engine's own terminal state is not an input. Fix: keep the engine's `failed`/`blocked` end (`partial` at best when every bundle landed), one test with a failed engine after a landed bundle. Before the first real sweep (AI-2).
-status: open
+status: resolved 2026-10-30 by this story's PR (36.2: `sweepEndState` caps an engine that ended other than `finished` at `partial`, naming its status and n/m)
 
 ### DW-119: A resumed run's worker cost is lost: PR #258's `## Metered cost` reads `not metered` and the 35.2 run's `job-run` line carries no `total_cost_usd` (the hole-95 resume path; EP-34's C4 shape on 34.5).
 origin: retro-epic-35, C5
@@ -961,7 +961,7 @@ source_spec: `_bmad-output/specs/spec-epic-35/RETROSPECTIVE.md`
 location: apps/supervisor/src/closeout.ts (the meter on a resumed run's close-out); the ledger's `job-run` line for `run-epic-35-20261029T023931Z` (04:50:44Z); PR #258's body
 severity: low
 reason: The engine cost is in the Stage Log (35.8), so the loss is the worker's launch-session cost only, but the `job-run` line is what `measurepush` and the per-run table read, and DW-83's resume shape (34.5, PR #213) lost it the same way. Fix: a resumed run meters its worker session(s) at the close-out as a first-launch run does (the resumed session's transcript, or the sum of the sessions), and the PR body reads the number.
-status: open
+status: resolved 2026-10-30 by this story's PR (36.2: `handBack` carries `worker_cost_usd` forward, so the resumed run's body and `job-run` line read the number)
 
 ### DW-120: The resume's stop re-arm runs on the host for a sandbox run: `closeout.ts` calls `launchStopGraceful`, which is `launch.py stop` through `uv` on the host and needs `bmad-loop` on the host PATH, while every `run-epic` is sbx-tier since 35.5.
 origin: retro-epic-35, B2, AI-2
@@ -985,7 +985,7 @@ source_spec: `_bmad-output/specs/spec-epic-35/RETROSPECTIVE.md`
 location: apps/supervisor/src/planstatus.ts:513 (`waiting: true`); apps/supervisor/src/sweep.ts:414-420 (the counted retry); apps/supervisor/test/sweep.test.ts:423-424 (pins the give-up)
 severity: medium
 reason: Pull within about 24 minutes of a sweep merge or the ledger flip gives up for good, although `ledger-resolve`'s `pending` is retried, never refused, by design. Fix: treat a `pending`-only answer as the stage pass's wait (uncounted, no lease) and keep the retry count for errors; until then the first real sweep's operator pulls the merge inside the window (AI-3).
-status: open
+status: resolved 2026-10-30 by this story's PR (36.2: `pending` is an uncounted wait, one `waiting: true` record and the lease released settled; errors still count; the flip's status line names the bundle once)
 
 ### DW-123: A sweep PR loses `## Sweep` on a re-run: `rewriteBody` renders `prBody` without `sweep`; the close-out alone passes it.
 origin: retro-epic-35, B10, AI-2
@@ -993,7 +993,7 @@ source_spec: `_bmad-output/specs/spec-epic-35/RETROSPECTIVE.md`
 location: apps/supervisor/src/hostleg.ts:209 (`rewriteBody`); apps/supervisor/src/worktree.ts:973 (the close-out passes `sweep`); apps/supervisor/test/hostleg.test.ts (builds no sweep run), test/sweep.test.ts (re-runs no leg)
 severity: low
 reason: The 35-7 spec names it a residual risk; no test. Fix: pass `sweepSummary(queue, run)` when `isSweep`; one test that re-runs a sweep's leg and reads `## Sweep` back. Before the first real sweep (AI-2).
-status: open
+status: resolved 2026-10-30 by this story's PR (36.2: `rewriteBody` renders `## Sweep` and the priced cost from `summaryFromRecord`)
 
 ### DW-127: The `POST /workflows/update` transitions keep the legacy `from`/`to` keys copied from `GET /workflow/search` and new GLOBAL transitions carry no `id`; the live endpoint may want `toStatusReference`/`l
 origin: spec-deferred af7f5c7070ac
@@ -1033,7 +1033,7 @@ source_spec: `_bmad-output/specs/spec-epic-35/stories/35-7-the-run-sweep-job-typ
 location: apps/supervisor/src/closeout.ts and hostleg.ts (`## Metered cost` from the worker's `accounted` events only); plugins/tk-studio/lib/jobrun.py finish (`total_cost_usd` from the worker); plugins/tk-studio/lib/plansync.py stage-post (posts per story issue; a bundle has none); the engine run's `journal.jsonl` / `state.json` (per-bundle token totals, priced by nothing)
 severity: medium
 reason: The second sweep landed five bundles in 1 h 42 min of engine time (7,036,449 weighted tokens, 46,573,870 raw incl. cache reads per the engine's ATTENTION line) and reported `$0.7246 (total_cost_usd)`: the worker's three turns. A story run's engine cost reaches the stage log through its Jira issue (35.5: the 35.7 run's 34.52 USD); a sweep's bundles post nowhere. Fix: the close-out reads the engine run's journal (per-bundle token totals) and prices them with the routing's model rates into `## Metered cost` (worker + engine, one line per bundle) and the job-run line's cost; the stage log posts a sweep's bundles to the rollup page or the measurements ledger instead of a story issue; the sweep's `ended` event carries `engine_cost_usd`.
-status: open
+status: resolved 2026-10-30 by this story's PR (36.2: `meter.py price-run` prices the engine per bundle into `## Metered cost`, the `job-run` total and `ended.engine_cost_usd`; a bundle's Jira stage-log row is not part of this fix; the engine's own `sweep-triage` session stays unpriced, DW-136)
 
 ### DW-132: The sandbox gate passes a test that writes non-ASCII text through `Path.write_text` (or `open`) with no encoding, and the Windows host leg fails it: Linux defaults to UTF-8, the host to cp1252, so a bundle green in the engine lands red on the host (hole 103).
 origin: hole 103 (the third run-sweep, q-run-sweep-20261029T200840Z-2846e6, PR #293, 2026-10-29 22:43Z)
@@ -1043,7 +1043,110 @@ severity: medium
 reason: The DW-17 bundle's Hermes tests rewrite a fixture that holds an em dash through `write_text(text)`; the engine's gate ran them on Linux and passed, the close-out's host leg ran them on Windows and twelve failed (`'utf-8' codec can't decode byte 0x97`), so the sweep ended `partial` on a red leg with every bundle sound, and the operator fixed one line and re-ran the leg (`POST /runs/{id}/verify`). The host leg is the gate of record, but a difference the engine cannot see should not cost a leg. Fix: a conformance rule that rejects `write_text`, `read_text`, `open` and `Path.open` without an explicit `encoding=` under `plugins/tk-studio/lib`, `tools/installer` and `apps/*/scripts` (text mode only; binary calls exempt), and a pitfall line in AGENTS.md so the engine never writes one; optionally the sandbox runs the lib suite with `PYTHONUTF8=0` and `LC_ALL=C` once to shake out the rest.
 status: open
 
-### DW-133: A story being built never reads In Progress in Jira: the plan-status pass sets `review` when the run's PR opens and `done` at the merge, nothing at the launch, so the issue reads Backlog for the whole build (hole 104).
+### DW-133: The re-run verb exits 1 on an inconclusive leg, but no contract note states it: the re-run exit list in the 0.1.28 note still reads "1 red or skipped".
+origin: review of story 36-1
+source_spec: `36-1-one-verdict-for-every-consumer-spec.md`
+location: apps/supervisor/src/cli.ts:2658, :2667; plugins/tk-studio/contracts/driver-contract.md:396
+severity: low
+reason: `cli.ts` derives `green` from the leg and returns `green ? 0 : 1`, so an inconclusive leg exits 1, and no contract note states this. The contract's re-run exit list (`driver-contract.md:396`, in the 0.1.28 note) still reads "1 red or skipped"; that note is history and stays as written, so the statement belongs in a current version's note.
+status: open
+
+### DW-134: The 0.1.31 note says an inconclusive leg ends a sweep `partial` unconditionally, while `sweepEndState`'s `blocked` rules (no triage, no bundle landed) apply first.
+origin: spec-deferred 6a5dfd428d7c
+source_spec: `36-1-one-verdict-for-every-consumer-spec.md`
+location: plugins/tk-studio/contracts/driver-contract.md:2114
+severity: medium
+reason: Edge Case Hunter; `apps/supervisor/src/sweep.ts:311-314` return `blocked` before the verdict is read. Meets deferral rule (b), a contract statement left imprecise. The consult ruled the 0.1.31 paragraph is not edited in this story; a later 36.x clause can state the precedence.
+status: resolved 2026-10-30 by this story's PR (36.2: the 36.2 contract paragraph states the order: `blocked` rules first, then the leg's reason, then the engine's end)
+
+### DW-135: The re-run verb exits 1 on an inconclusive leg, but no contract note states it. Filed as DW-133.
+origin: spec-deferred 96c53f15da28
+source_spec: `36-1-one-verdict-for-every-consumer-spec.md`
+location: apps/supervisor/src/cli.ts:2667
+severity: low
+reason: `apps/supervisor/src/cli.ts:2658, :2667`; `driver-contract.md:396` reads "1 red or skipped" and is 0.1.28 history. Meets deferral rule (b).
+status: open
+
+### DW-136: A sweep's engine cost leaves out the engine's own `sweep-triage` session: `engine_cost_usd` and `(engine)` total the bundles only, so they understate the engine's full spend.
+origin: consult ruling 2026-10-30 (deviation-gt-0) on story 36-2
+source_spec: `36-2-the-sweeps-records-are-whole-spec.md`
+location: plugins/tk-studio/lib/meter.py price-run (keys: triaged bundles, then other `dw*-` tasks and transcripts); apps/supervisor/src/sweep.ts `BUNDLE_KEY_RE`, `withEngineCost`
+severity: medium
+reason: Both pinned texts say per bundle, and the triage session is no bundle, so `price-run` never names it and the body, the `job-run` total and `ended.engine_cost_usd` omit its spend. The consult ruled against a triage line and against widening `BUNDLE_KEY_RE` in 36.2; the 36.2 contract paragraph states the exclusion. Fix: price the triage session under its own line and add it to the engine total.
+status: open
+
+### DW-137: `emitTriage` appends the ledger's `sweep-triage` line before patching the note, so a failed patch re-emits on the next tick, against the contract's "once per engine run".
+origin: review of story 36-2
+source_spec: `36-2-the-sweeps-records-are-whole-spec.md`
+location: apps/supervisor/src/sweep.ts emitTriage
+severity: low
+reason: `ledgerEmit` runs, then `queue.patchEventDetail(note.seq, {ledger: …})`; a busy queue throws at the patch, `emitTriage` swallows it, and the note still has no `ledger`, so the next tick emits a second line. Deferred from this story by the review's order.
+status: open
+
+### DW-138: `judgeJobRun` derives `n` from recorded `host-verify` events but emits before that event is noted, so a failed note reuses a `run_id` on the next re-run and last-line-wins readers drop the earlier judge's cost.
+origin: review of story 36-2
+source_spec: `36-2-the-sweeps-records-are-whole-spec.md`
+location: apps/supervisor/src/hostleg.ts judgeJobRun, runLeg
+severity: low
+reason: `runLeg` emits `<id>:verify-<n>` and then notes the leg; when that note throws, the count does not move, the next re-run emits the same `<id>:verify-<n>`, and `jobRunCosts` and `runCost` keep only the last line, so the earlier judge's cost is lost to them. Deferred from this story by the review's order.
+status: open
+
+### DW-139: On a late-closed sweep, `runCost` and the `jobRunCosts` readers keyed by the bare run id return the worker-only own line, so the API and delivery `cost_usd` read less than the PR body.
+origin: consult ruling 2026-10-30 on story 36-2
+source_spec: `36-2-the-sweeps-records-are-whole-spec.md`
+location: apps/supervisor/src/inbox.ts runCost; apps/supervisor/src/board.ts jobRunCosts; apps/supervisor/src/api.ts:1263; apps/supervisor/src/delivery.ts:247
+severity: medium
+reason: A late close-out emits the priced engine as its own `job-run` line under `<run_id>:engine`, leaving the run's own line at the worker's cost, while these readers match `run_id` exactly, so they miss the engine line that the PR body's total includes. The consult left the readers and `spendByEpic` unchanged in 36.2; the 36.2 contract paragraph states the gap. Deferred from this story.
+status: open
+
+### DW-140: The engine's own `sweep-triage` session is not priced, so `engine_cost_usd` and `total_cost_usd` understate a sweep's full engine spend. Filed as DW-136.
+origin: spec-deferred 82ccef92b342
+source_spec: `36-2-the-sweeps-records-are-whole-spec.md`
+location: plugins/tk-studio/lib/meter.py:95
+severity: medium
+reason: `meter.py` `BUNDLE_KEY_RE`; ordered by the first consult. Meets deferral rule (b): the contract paragraph states the exclusion, and the open question is the operator's.
+status: open
+
+### DW-141: `emitTriage` appends the ledger line before patching the note, so a failed patch re-emits on the next tick. Filed as DW-137.
+origin: spec-deferred cd694828ef9c
+source_spec: `36-2-the-sweeps-records-are-whole-spec.md`
+location: apps/supervisor/src/sweep.ts emitTriage
+severity: low
+reason: Both review layers. Meets deferral rule (b): the contract says once per engine run.
+status: open
+
+### DW-142: `judgeJobRun` derives `n` from `host-verify` events but emits before that event is noted, so a failed note reuses a `run_id` and last-line-wins readers drop the earlier judge's cost. Filed as DW-138.
+origin: spec-deferred 82b6a7cd8e20
+source_spec: `36-2-the-sweeps-records-are-whole-spec.md`
+location: apps/supervisor/src/hostleg.ts judgeJobRun
+severity: low
+reason: Both review layers. Meets deferral rule (a): AC1 names the re-run judge's own line.
+status: open
+
+### DW-143: On a late-closed sweep, `runCost` and the bare-id `jobRunCosts` readers return the worker-only own line, so API and delivery `cost_usd` read less than the PR body. Filed as DW-139.
+origin: spec-deferred 783a1b339cea
+source_spec: `36-2-the-sweeps-records-are-whole-spec.md`
+location: apps/supervisor/src/inbox.ts runCost
+severity: medium
+reason: Ordered by the second consult, with one sentence in the contract paragraph. Meets deferral rule (a): AC1 names the job-run cost.
+status: open
+
+### DW-144: A failed host `sweep-triage` emit is never retried: `emitTriage` notes `ledger: "error: …"`, and every later tick answers `seen`, so one transient failure keeps the event out of the host's ledger.
+origin: spec-deferred 5b3442e01081
+source_spec: `36-2-the-sweeps-records-are-whole-spec.md`
+location: apps/supervisor/src/sweep.ts emitTriage
+severity: medium
+reason: Blind Hunter, confirmed at `sweep.ts emitTriage`. The failure is recorded as the matrix asks, and the queue note still holds the payload, but no later pass delivers it. Meets deferral rule (a): AC2 names the host's event.
+status: open
+
+### DW-145: Follow-up review still recommended for 36-2-the-sweeps-records-are-whole after the damping cap was spent
+origin: review-budget-followup
+source_spec: `36-2-the-sweeps-records-are-whole-spec.md`
+location: n/a
+severity: low
+reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261030-204855-1dd5; this entry preserves the lingering recommendation for a deliberate later review.
+
+### DW-146: A story being built never reads In Progress in Jira: the plan-status pass sets `review` when the run's PR opens and `done` at the merge, nothing at the launch, so the issue reads Backlog for the whole build (hole 104).
 origin: hole 104 (found by the owner 2026-10-30 20:3xZ while Epic 36's run 1, q-run-epic-36-20261030T201456Z-e76900, built 36.1 with TKSTUDIO-191 in Backlog)
 source_spec: `_bmad-output/planning-artifacts/epics.md` Story 36.6 (the added acceptance criterion; first placed in 36.3, moved 2026-10-31 because 36.3 was already being built from the bootstrapped plan); `kb/agent-pc-setup-runbook.md` (the hole-104 row)
 location: apps/supervisor/src/planstatus.ts (`Phase = "review" | "done"`, Story 27.5); plugins/tk-studio/skills/tk-studio-launch and `launch.py` (no status call at the engine's start); plugins/tk-studio/lib/plansync.py `status` (the verb exists; `in-progress` is a canonical status, `TO_BACKEND_CATEGORY` maps it to the indeterminate category); plugins/tk-studio/lib/jirabackend.py
@@ -1051,7 +1154,7 @@ severity: medium
 reason: The owner reads Jira to see what is being worked on; the loop's only mid-run In Progress-category status is a block, so a healthy build looks idle for about two hours a story and a blocked one looks busy. The verb and the mapping exist (the review phase proves the round trip); what is missing is one call at the launch. Fix (Story 36.6): the launch calls `plansync.py status --status in-progress` for the story it starts, recorded as a `plan-status` event with `phase: in-progress`; a refusal never stops the launch; the review and done phases follow as now; the contract names the third phase.
 status: open
 
-### DW-134: The `run-epic` job declares one story per run with a graceful stop after each, but nothing in the loop arms that stop: the operator issues `launch.py stop --graceful` inside the sandbox after every POST by hand, and a missed arming builds several stories in one run (hole 105).
+### DW-147: The `run-epic` job declares one story per run with a graceful stop after each, but nothing in the loop arms that stop: the operator issues `launch.py stop --graceful` inside the sandbox after every POST by hand, and a missed arming builds several stories in one run (hole 105).
 origin: hole 105 (Epic 36's run 1, q-run-epic-36-20261030T201456Z-e76900, 2026-10-30 23:5xZ: the operator missed the arming, the engine built 36.1 and 36.2 and started 36.3 in one run, three hours with no PR and no pull-back)
 source_spec: `_bmad-output/planning-artifacts/epics.md` Story 36.6 (the added acceptance criterion); `kb/agent-pc-setup-runbook.md` (the hole-105 row)
 location: plugins/tk-studio/lib/launch.py (`stop(…, graceful=True)` exists; `launch`/`submit` never calls it); plugins/tk-studio/jobs/run-epic.json and `.tk-studio/jobs/run-epic-N.json` (the rhythm lives in the description's prose, no field); apps/supervisor/src/queue.ts (the launched path records `launched` and `engine-pid`, arms nothing); the handoff's "with the stop armed" lines (day-7k to 7t, an operator step every launch)

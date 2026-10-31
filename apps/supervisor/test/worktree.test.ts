@@ -13,8 +13,9 @@ import {
   baseBranch, closeOut, closeOutDetail, COPIED_RUNTIME, engineStatus, isDefaultBranch, launchedCloseOutInput, openPrUrl, originRepo, prBody, prepareWorktree, runBranch, sweepEngines, worktreePath, WorktreeFailed, type WorktreeDeps,
   driftingPlanes, worktreeClean, editPrBody, markPrDraft, markPrReady, proofCommit, proofCommitDue,
 } from "../src/worktree";
-import { legVerdict } from "../src/hostverify";
+import { FRAMES_DIR, legVerdict, type PlayableJudge } from "../src/hostverify";
 import { fakeGh, fakeSbx, gitRepo, testGit } from "./fakes";
+import { sliceRecorder } from "./helpers/slice";
 import { tempDir, track } from "./tmp";
 
 const me = { pid: process.pid, host: hostname(), nonce: "worktree-test" };
@@ -240,6 +241,18 @@ describe("AC3: the close-out pushes the run branch and opens a PR against base_r
     expect(at("Engine run: E1")).toBeLessThan(at("- abc123 one"));
     expect(at("- def456 two")).toBeLessThan(at("$1.5000"));
     expect(prBody({ commits: [], runId: "q-1" })).toContain("not metered");
+  });
+
+  test("Story 36.2: a priced sweep's `## Metered cost`: worker + engine = total, one line per bundle, a later cycle named; an unpriced summary keeps the plain figure", () => {
+    const bundle = { dw_ids: ["DW-1"], landed: true };
+    const sweep = { engine_cost_usd: 3, bundles: [
+      { ...bundle, name: "a", cycle: 1, key: "dw-a", cost_usd: 1, source: "metered" },
+      { ...bundle, name: "b", cycle: 2, key: "dw2-b", cost_usd: 2, source: "sessions" },
+      { ...bundle, name: "c", cycle: 1, key: "dw-c", cost_usd: null },
+    ] };
+    expect(prBody({ commits: [], runId: "q-1", costUsd: 0.5, sweep })).toContain(
+      "## Metered cost\n\n$0.5000 (worker turns) + $3.0000 (engine) = $3.5000\n\n- a: $1.0000 (metered)\n- b (cycle 2): $2.0000 (sessions)\n- c: not metered\n\n## Sweep");
+    expect(prBody({ commits: [], runId: "q-1", costUsd: 0.5, sweep: { bundles: [] } })).toContain("## Metered cost\n\n$0.5000 (total_cost_usd)");
   });
 
   test("engine completes with commits: pushed (no force), `gh pr create --base <base_ref>` with the body, the worktree removed", async () => {
@@ -2472,6 +2485,60 @@ describe("Story 34.8: a slice run's proof folder and host-side commit, before th
       if (defn.type === "run-vertical-slice") expect(ev.detail!.assets).toEqual({ verdict: "skipped", reason: "no manifest", manifest: "assets/manifest.yaml", art_path: "art/greybox", steps: [] });
       else expect("assets" in ev.detail!).toBe(false);
     }
+  }, 30_000);
+});
+
+describe("Story 36.1: the sweep drives a slice run to its close-out on a passing playable run", () => {
+  const config = `vcs: git\nverify:\n  host: "uv run tools/verify_host.py"\n  engine: "bash scripts/engine-gate.sh"\nplayable:\n  scenario: scenarios/smoke.json\n  seed: 7\n  ticks: 120\n`;
+  const defn = { id: "run-epic-41", type: "run-vertical-slice", target: { skill: "tk-studio-launch" } };
+
+  test("sweepEngines to closeOut with `slice: true`: the leg passes, the sheet and frames/<name> committed under the proof folder, the PR embeds the sheet", async () => {
+    const fx = await fixture({ baseRef: "main", files: { ".tk-studio/config.yaml": config } });
+    const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+    fx.queue.markVerbStarted(fx.run.run_id, "wake", [], { target: "skill", definition: defn });
+    await mirror(fx.queue, fx.run.run_id, { jobId: "j", defn }, {
+      ok: true, job_id: "j", run_id: "j-20261016T101010Z", target: "skill", state: "complete",
+      status_block: { status: "complete", intent: "tk-studio-launch", artifacts: [".bmad-loop/runs/E1"] }, total_cost_usd: 0.25, finish_deferred: true,
+    }, async () => ({}), fx.deps);
+    fx.queue.db.run("UPDATE runs SET tier = 'sbx', sandbox = 'tk-sbx' WHERE run_id = ?", [fx.run.run_id]);
+    commitIn(wt, "a.txt", "engine: story one");
+    mkdirSync(join(wt, "assets"), { recursive: true });
+    writeFileSync(join(wt, "assets", "manifest.yaml"), "schema: 1\n");
+    testGit(wt, "remote", "set-url", "origin", "https://github.com/acme/tua.git");
+    testGit(wt, "remote", "set-url", "--push", "origin", fx.repo.origin);
+
+    const sbx = fakeSbx();
+    sbx.answer({ launch_status: { ok: true, run: { status: "finished" } } as any });
+    const env = { ...fx.deps.env, SBX_BIN: sbx.bin, TK_STUDIO_HOME: tempDir("tk-sup-36-home-") };
+    const { steps, run } = sliceRecorder(config, { passing: true, through: fx.deps.run as any });
+    const judge: PlayableJudge = async (root, args) => {
+      writeFileSync(join(root, args.payload.media, "judge.json"), JSON.stringify({ verdict: "pass", findings: [] }));
+      return { status_block: { status: "complete", intent: "tk-studio-playable-judge", artifacts: ["judge.json"], reason: null }, total_cost_usd: 0.1 };
+    };
+    const deps: WorktreeDeps = { ...fx.deps, env, run: run as any, judge, route: async () => ({ "playable-verify": { model: "claude-opus-5", effort: "high" } }) };
+
+    expect(await sweepEngines(fx.queue, deps)).toEqual([fx.run.run_id]);
+
+    const leg = fx.queue.events(fx.run.run_id).find((e) => e.kind === "host-verify")!.detail as any;
+    expect(steps.some((a) => a[3] === "sheet")).toBe(true);
+    expect(leg).toMatchObject({ green: true, playable: { verdict: "pass", exit: 0, sampled: ["tick-000000.png", "tick-000030.png"] } });
+    expect(legVerdict(leg)).toBe("green");
+    expect(fx.get().state).toBe("complete");
+
+    const branch = runBranch(fx.run.run_id);
+    const proof = `.tk-studio/proof/${fx.run.run_id}`;
+    expect(FRAMES_DIR).toBe("frames");
+    expect(testGit(fx.repo.origin, "log", "-1", "--format=%s", branch)).toBe(`host leg: placed assets and proof (run ${fx.run.run_id})`);
+    expect(testGit(fx.repo.origin, "show", "--name-only", "--format=", branch).split("\n").sort()).toEqual([
+      `${proof}/contact-sheet.png`, `${proof}/frames/tick-000000.png`, `${proof}/frames/tick-000030.png`, `${proof}/report.json`, "assets/manifest.yaml",
+    ]);
+    expect(testGit(fx.repo.origin, "show", `${branch}:${proof}/contact-sheet.png`)).toBe("sheet-png");
+    const head = testGit(fx.repo.origin, "rev-parse", branch);
+    const body = fx.gh.calls().find((x) => x.argv[1] === "create")!.body!;
+    expect(body).toContain(`![contact sheet](https://github.com/acme/tua/blob/${head}/${proof}/contact-sheet.png?raw=true)`);
+    expect(body).toContain(`- \`${proof}/frames/tick-000000.png\``);
+    const ended = fx.queue.events(fx.run.run_id).findLast((e) => e.kind === "ended")!.detail as any;
+    expect(ended.closeout).toMatchObject({ host_verify: "green", host_commit: head });
   }, 30_000);
 });
 

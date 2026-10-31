@@ -126,6 +126,7 @@ import {
   type WorkerKill,
 } from "./queue";
 import { rerunHostLeg, VerifyRefused, type HostLegStarted } from "./hostleg";
+import { emitTriage, engineCostOf, engineJobRun, isSweep, recordTriage, sweepRecord, sweepSummary, withEngineCost, type SweepSummary } from "./sweep";
 import { closeOutPaused, launchedSinceMove, resumePaused, type PausedDeps, type ResumeAnswer, type ResumeDeps as EngineResumeDeps } from "./closeout";
 import { mergePass, reviewPass, type PlanStatusDeps } from "./planstatus";
 import { resolutionPass, withQueuedPayload, withStoredPayload, type ResolutionDeps } from "./resolution";
@@ -1197,8 +1198,26 @@ async function cancelQueueRun(
         : `the run is ${state}: the engine-end sweep closes it out`;
     }
     // AC3: the PR body carries the launch status block and the metered cost (read before the removal).
-    const input = { ...launchedCloseOutInput(queue.events(runId), current), engineRunId: current.engine_run_id ?? engine?.id ?? null };
+    // Story 36.2: a sweep closed out here goes as the late close-out's does (the triage recorded, the engine priced,
+    // its run dir still there), since the removal below means the late one never runs. Every skip path stays with that one.
+    let sweep: SweepSummary | undefined;
+    if (isSweep(queue.definition(current)) && !skip && !pendingCloseOut(queue.events(runId))) {
+      recordTriage(queue, current, deps.worktree?.env);
+      await emitTriage(queue, current, deps.worktree);
+      sweep = withEngineCost(sweepSummary(queue, current), await engineCostOf(current, deps.worktree));
+    }
+    const input = { ...launchedCloseOutInput(queue.events(runId), current, { workerOnly: !!sweep }), engineRunId: current.engine_run_id ?? engine?.id ?? null, ...(sweep ? { sweep } : {}) };
     Object.assign(detail, await closeOutNow(queue, runId, input, deps.worktree, skip));
+    if (sweep) {
+      // The run stays `cancelled` (no `sweepEndState`). Its close-out is not `skipped`, so no late close-out follows:
+      // the engine's line goes out here, whether the worktree was removed or kept.
+      detail.sweep = sweepRecord(sweep);
+      const usd = sweep.engine_cost_usd;
+      if (usd !== undefined) {
+        detail.engine_cost_usd = usd;
+        detail.engine_job_run = await engineJobRun(current, usd, deps.worktree);
+      }
+    }
     // Closed out with its engine confirmed dead (stopped, the probe empty): the lock is released, never
     // handed to that engine at a worktree the close-out removed.
     engineDead = !!engine && !skip;
@@ -1704,7 +1723,7 @@ async function finishStudioRun(
 /** Story 27.1: the close-out of a run ending now with its worktree cut (never throws): the
  * `ended` detail (`pr` or `no_changes`, and the `closeout` record); `{}` for a run with no worktree. */
 async function closeOutNow(
-  queue: Queue, runId: string, input: { statusBlock?: unknown; engineRunId?: string | null; costUsd?: number }, deps: WorktreeDeps = {},
+  queue: Queue, runId: string, input: { statusBlock?: unknown; engineRunId?: string | null; costUsd?: number; sweep?: SweepSummary }, deps: WorktreeDeps = {},
   skip?: string,
 ): Promise<Record<string, unknown>> {
   const run = queue.get(runId);

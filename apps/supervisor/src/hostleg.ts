@@ -33,7 +33,8 @@
  *             (`gh pr list`); `gh pr view <pr> --json state,isDraft,body`. Story 35.1 (hole 88, DW-82): an open PR's body
  *             is regenerated (`prBody` from the record, `launchedCloseOutInput`: the launch status block, the engine run,
  *             the recorded cost — the worktree gone, the old body's `## Metered cost` carried back unchanged, the
- *             record-only figure only when the old body has no such section; the commits `git log --oneline <base_ref>..HEAD`; its `## Host verify` the latest
+ *             record-only figure only when the old body has no such section; Story 36.2: a sweep's `## Sweep` and its priced
+ *             cost rendered from its record (`summaryFromRecord`, DW-123); the commits `git log --oneline <base_ref>..HEAD`; its `## Host verify` the latest
  *             leg's section under a `Legs: <k> — …` history line) and `gh pr edit --body-file`; then green marks an
  *             open draft ready (`gh pr ready <pr>`) only once the body is `edited` (a failed edit leaves the PR as it
  *             was, `pr_ready` unset), red turns an open ready PR back to a draft (`gh pr ready <pr>
@@ -42,8 +43,12 @@
  *             `inconclusiveReason`). A PR not open, or unreadable,
  *             is never edited; an unreadable one is `pr_body: "error: gh pr view …"` whatever the verdict.
  *             The worktree is then removed (best effort).
+ *   the judge Story 36.2 (DW-67): a re-run whose leg carries `playable.judge.cost_usd` emits that cost as its own `job-run`
+ *             line in the host's ledger, `{job_id, run_id: "<studio run id>:verify-<n>", state: "complete",
+ *             total_cost_usd}` (`n` counts the run's re-run legs, this one included): a distinct id, so the run's own
+ *             line stands and the readers (keyed by `run_id`) neither drop nor double-count. `rerun.job_run` records it.
  *   result    one `host-verify` event: the leg's detail plus `rerun {by, head, worktree, pr, pr_ready?, commit?,
- *             pushed?, pr_body?, pr_draft?}` (its presence is `rerun: true`). It closes the lease. The run's state,
+ *             pushed?, pr_body?, pr_draft?, job_run?}` (its presence is `rerun: true`). It closes the lease. The run's state,
  *             its `ended` event and its engine are never touched (CAP-15).
  *
  * The refusals, the lease, the cut and materialise answer synchronously; the leg itself is the handle's `done`.
@@ -55,6 +60,7 @@ import { canonicalPr } from "./hygiene";
 import { hostVerify, inconclusiveReason, isInconclusive, isRed, isSlice, legHistory, legVerdict, redReason, type HostVerifyResult, type PrProof } from "./hostverify";
 import { isTerminal, selfOwner, servedRoot, type Owner, type Queue, type QueueEvent, type QueueRun, type RunState } from "./queue";
 import { lastJsonObject, type RunResult } from "./server";
+import { isSweep, ledgerEmit, sweepCostText, summaryFromRecord } from "./sweep";
 import {
   editPrBody, gh, launchedCloseOutInput, markPrDraft, markPrReady, materialise, meteredCost, meteredCostSection, openPrUrl, originWebUrl,
   prBody, priorPr, proofCommit, proofCommitDue, runBranch, runner, type WorktreeDeps,
@@ -88,6 +94,9 @@ export interface HostLegRerun {
   pr_body?: string;
   /** Story 35.1: on red with a PR: `undone` (an open ready PR back to a draft), `already`, `not open`, or `error: <clipped>`. */
   pr_draft?: string;
+  /** Story 36.2: the judge's own `job-run` line: its `run_id`, `error: <clipped>` (a failed emit: the leg still finishes)
+   * or `skipped: <why>`; unset when the leg had no judge cost. */
+  job_run?: string;
 }
 /** The re-run's result; Story 35.1: a red leg's `reason` is `redReason` (a skipped one's is its own). */
 export type HostLegResult = HostVerifyResult & { rerun: HostLegRerun; reason?: string };
@@ -203,10 +212,14 @@ async function rewriteBody(
     if (log.exit !== 0) return `error: git log ${failed(log)}`;
     const commits = log.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
     const legs = legHistory(events, { leg: "re-run", verdict: legVerdict(verify), recorded_at: new Date().toISOString(), by });
-    const input = launchedCloseOutInput(events, run);
-    const metered = run.worktree && existsSync(run.worktree) ? meteredCost(servedRoot(run)!, input.engineRunId) : undefined;
-    const costText = metered === undefined ? meteredCostSection(oldBody) : undefined;
-    const body = prBody({ ...input, ...(costText ? { costText } : {}), commits, runId: run.run_id, verify, ...(proof ? { proof } : {}), legs });
+    // Story 36.2: a sweep's worker figure is the launch worker's alone, as at its close-out.
+    const isSweepRun = isSweep(queue.definition(run));
+    const input = launchedCloseOutInput(events, run, { workerOnly: isSweepRun });
+    const metered = !isSweepRun && run.worktree && existsSync(run.worktree) ? meteredCost(servedRoot(run)!, input.engineRunId) : undefined;
+    // Story 36.2: a sweep's `## Sweep` and priced cost from its record (the worktree is gone); an older record has no price.
+    const sweep = isSweepRun ? summaryFromRecord(events) : undefined;
+    const costText = (sweep ? sweepCostText(sweep, input.costUsd) : undefined) ?? (metered === undefined ? meteredCostSection(oldBody) : undefined);
+    const body = prBody({ ...input, ...(costText ? { costText } : {}), commits, runId: run.run_id, verify, ...(proof ? { proof } : {}), legs, ...(sweep ? { sweep } : {}) });
     const e = await editPrBody(deps, run.root, pr, body);
     return e ? `error: ${e}` : "edited";
   } catch (e) { return `error: ${clip(message(e))}`; }
@@ -271,8 +284,22 @@ export async function rerunHostLeg(queue: Queue, runId: string, opts: { by: "api
   return { run_id: run.run_id, state: run.state, head, done };
 }
 
-/** The leg in the cut worktree, (a slice) the proof commit and push, the PR body and its flip, the removal, and the
- * one `host-verify` event (it closes the lease). */
+/** Story 36.2 (DW-67): the judge's own `job-run` line (see the header): `rerun.job_run`'s value, or undefined with no
+ * judge cost. Never throws. */
+async function judgeJobRun(queue: Queue, run: QueueRun, verify: HostVerifyResult, deps: HostLegDeps): Promise<string | undefined> {
+  const cost = verify.skipped ? undefined : verify.playable?.judge?.cost_usd;
+  if (typeof cost !== "number" || !Number.isFinite(cost) || cost < 0) return undefined;
+  if (!run.studio_run_id) return "skipped: no studio run recorded";
+  try {
+    const n = queue.events(run.run_id).filter((e) => e.kind === "host-verify" && e.detail?.rerun).length + 1;
+    const runId = `${run.studio_run_id}:verify-${n}`;
+    const failure = await ledgerEmit(deps, run, "job-run", { job_id: run.job_id, run_id: runId, state: "complete", total_cost_usd: cost });
+    return failure === undefined ? runId : `error: ${failure}`;
+  } catch (e) { return `error: ${clip(message(e))}`; }
+}
+
+/** The leg in the cut worktree, (a slice) the proof commit and push, the PR body and its flip, the removal, the judge's
+ * `job-run` line, and the one `host-verify` event (it closes the lease). */
 async function runLeg(
   queue: Queue, run: QueueRun, path: string, at: { by: "api" | "cli"; head: string; branch: string }, deps: HostLegDeps,
 ): Promise<HostLegResult> {
@@ -323,6 +350,8 @@ async function runLeg(
     verify = { skipped: true, reason: `re-run failed: ${clip(message(e))}` };
     rerun.worktree = existsSync(path) ? await removeWorktree(run.root, path, deps) : "removed";
   }
+  const jobRun = await judgeJobRun(queue, run, verify, deps);
+  if (jobRun !== undefined) rerun.job_run = jobRun;
   // Story 35.3: an inconclusive leg names its reason too (it flips no PR: neither green nor red above).
   const result = { ...verify, ...(isRed(verify) ? { reason: redReason(verify) } : isInconclusive(verify) ? { reason: inconclusiveReason(verify) } : {}), rerun } as HostLegResult;
   try { queue.note(run.run_id, "host-verify", result as unknown as Record<string, unknown>); }

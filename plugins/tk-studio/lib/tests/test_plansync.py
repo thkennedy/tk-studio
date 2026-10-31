@@ -924,7 +924,7 @@ class LedgerResolveTests(PlanSyncTestCase):
         self.assertEqual(out["status"], "complete")
         text = path.read_text(encoding="utf-8")
         self.assertIn("status: resolved 2026-10-29 by thkennedy/tk-studio#300 "
-                      "(sweep bundle dw-alpha; resolved by sweep bundle dw-alpha)\n"
+                      "(sweep bundle dw-alpha)\n"
                       "resolution: resolved by sweep bundle dw-alpha\n", text)
         self.assertIn("status: resolved 2026-10-28 by thkennedy/tk-studio#300 "
                       "(sweep; already resolved: plugins/tk-studio/lib/x.py:12)\n", text)
@@ -955,7 +955,29 @@ class LedgerResolveTests(PlanSyncTestCase):
         self.assertEqual(text, LEDGER_DOC.replace(
             "status: done 2026-10-29",
             "status: resolved 2026-11-01 by thkennedy/tk-studio#300 "
-            "(sweep bundle dw-alpha; resolved by sweep bundle dw-alpha)"))
+            "(sweep bundle dw-alpha)"))
+
+    def test_the_status_line_names_the_bundle_once(self):
+        # Story 36.2: the engine's own `resolved by sweep bundle <key>` adds nothing (the doubled note of #290, #293)
+        for resolution in ("resolved by sweep bundle dw-alpha", "resolved by sweep bundle dw2-alpha."):
+            status = plansync.resolved_status("2026-10-30", "thkennedy/tk-studio#300", resolution)
+            self.assertEqual(status.count("sweep bundle"), 1, status)
+            self.assertTrue(status.endswith(")") and ";" not in status, status)
+        # a resolution that says more keeps its text, the clause gone wherever it stands
+        for resolution in ("fixed the gate; resolved by sweep bundle dw-alpha",
+                           "fixed the gate. resolved by sweep bundle dw-alpha.",
+                           "resolved by sweep bundle dw-alpha; fixed the gate"):
+            self.assertEqual(plansync.resolved_status("2026-10-30", "thkennedy/tk-studio#300", resolution),
+                             "resolved 2026-10-30 by thkennedy/tk-studio#300 "
+                             "(sweep bundle dw-alpha; fixed the gate)")
+        self.assertEqual(plansync.resolved_status("2026-10-30", "thkennedy/tk-studio#300",
+                                                  "fixed the gate; resolved by sweep bundle dw-alpha, with a test"),
+                         "resolved 2026-10-30 by thkennedy/tk-studio#300 "
+                         "(sweep bundle dw-alpha; fixed the gate; with a test)")
+        # no clause: the text is untouched, its own full stop kept
+        self.assertEqual(plansync.resolved_status("2026-10-30", "thkennedy/tk-studio#300", "fixed in sweep bundle dw-alpha."),
+                         "resolved 2026-10-30 by thkennedy/tk-studio#300 "
+                         "(sweep bundle dw-alpha; fixed in sweep bundle dw-alpha.)")
 
     def test_a_long_resolution_keeps_its_bundle_name_past_the_clip(self):
         long = "x" * 200 + " resolved by sweep bundle dw-late-name"

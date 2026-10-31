@@ -6,7 +6,7 @@ import { fetchAgents, NONE, safeHref } from "../office/model";
 
 // ------------------------------------------------------------ the answer (mirrored from apps/supervisor/src/board.ts)
 
-export type HostVerifyOutcome = "green" | "red" | "skipped";
+export type HostVerifyOutcome = "green" | "red" | "skipped" | "inconclusive";
 export interface BoardFinding { id: string; title: string; severity: string | null }
 export interface BoardStoryRun { run_id: string; state: string; pr: string | null; host_verify: HostVerifyOutcome | null; ended_at: string | null }
 export interface BoardStory { id: string; key: string; title: string; status: string; findings: BoardFinding[]; run: BoardStoryRun | null }

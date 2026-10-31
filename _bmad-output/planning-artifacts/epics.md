@@ -3450,7 +3450,7 @@ So that the supervisor's own faults are recorded as its own and never cost a han
 
 As the owner,
 I want `plansync setup` to write the workflow it needs without my hand (uppercase transition types, the version from the v3 search, any status in the To Do category, the global transitions it adds carrying ids), the launch check to refuse writing a tracked `policy.toml` and to know whether the engine sandbox has Godot, `scope`'s game-project rule to read the registry rather than a name prefix, the launch to mark the story it starts In Progress and to arm the one-story-per-run stop itself from the job's declared rhythm,
-So that a fresh project's setup needs no manual workflow edit, a game project is one by evidence, and a story being built reads In Progress from its launch with no operator step between the POST and the stop (holes 92, 104 and 105; DW-127, DW-62, DW-71, DW-90, DW-133, DW-134).
+So that a fresh project's setup needs no manual workflow edit, a game project is one by evidence, and a story being built reads In Progress from its launch with no operator step between the POST and the stop (holes 92, 104 and 105; DW-127, DW-62, DW-71, DW-90, DW-146, DW-147).
 
 **Acceptance Criteria:**
 
@@ -3468,11 +3468,11 @@ So that a fresh project's setup needs no manual workflow edit, a game project is
 
 **Given** a story the launch is about to run (`tk-studio-launch` for a `run-epic` job: the first story and every later one, a resume included)
 **When** the engine starts on it
-**Then** the launch calls `plansync.py status --directory <owner root> --id ST-NNN --status in-progress` once (the verb the review and done phases use), recorded as a `plan-status` event with `phase: in-progress`, `ok` and `previous_status`, so the story's issue reads In Progress from the build's start instead of Backlog; a refusal or a blocked re-sync is one event and never stops the launch; the review phase at PR open and the done phase at the merge follow as now, a block's `Blocked - Awaiting User` wins while it stands, and the plan-status suite covers the third phase with a fake; the contract names it (hole 104, DW-133)
+**Then** the launch calls `plansync.py status --directory <owner root> --id ST-NNN --status in-progress` once (the verb the review and done phases use), recorded as a `plan-status` event with `phase: in-progress`, `ok` and `previous_status`, so the story's issue reads In Progress from the build's start instead of Backlog; a refusal or a blocked re-sync is one event and never stops the launch; the review phase at PR open and the done phase at the merge follow as now, a block's `Blocked - Awaiting User` wins while it stands, and the plan-status suite covers the third phase with a fake; the contract names it (hole 104, DW-146)
 
 **Given** a `run-epic` job whose declaration names its rhythm (one story per run, or a stories-per-run figure; the shipped `run-epic.json` and the project instances carry it as a field, not prose)
 **When** the launch starts the engine
-**Then** the launch arms the graceful stop itself from that figure (the `launch.py stop --graceful` the operator issued by hand after every Epic 35 launch), recorded as a `stop-armed` event with the figure and the engine id; a job with no rhythm declared runs to the epic's end and the launch check says so; a `run-epic` instance that declares one story per run never builds two stories in one run again; the launch suite covers the arming with a fake; the contract names the field and the event (hole 105, DW-134)
+**Then** the launch arms the graceful stop itself from that figure (the `launch.py stop --graceful` the operator issued by hand after every Epic 35 launch), recorded as a `stop-armed` event with the figure and the engine id; a job with no rhythm declared runs to the epic's end and the launch check says so; a `run-epic` instance that declares one story per run never builds two stories in one run again; the launch suite covers the arming with a fake; the contract names the field and the event (hole 105, DW-147)
 
 ### Story 36.7: The Cycles Cut and the Docs Caught Up
 

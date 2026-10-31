@@ -1032,6 +1032,21 @@ class ContactSheetTests(unittest.TestCase):
             code = playable.main(["sheet", *argv])
         return code, json.loads(buf.getvalue())
 
+    def test_story_36_1_the_sheets_frames_are_bare_names_and_the_directory_is_frames(self):
+        # DW-91: the other side of the supervisor's `FRAMES_DIR` (hostverify.test.ts, Story 36.1): `proofCommit` joins
+        # `frames/<name>` from these names, so a path here or a renamed directory breaks the proof folder.
+        self.assertEqual(playable.FRAMES, "frames")
+        self._frames(3)
+        code, out = self._main("--frames", str(self.frames), "--out", str(self.out))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out["frames"], [f"frame_{i:04d}.png" for i in range(3)])
+        report = self.tmp / "report.json"
+        report.write_text(json.dumps({"frames": [{"tick": i, "file": f"{playable.FRAMES}/frame_{i:04d}.png"}
+                                                 for i in range(3)]}), encoding="utf-8")
+        code, out = self._main("--report", str(report), "--out", str(self.out))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out["frames"], [f"frame_{i:04d}.png" for i in range(3)])
+
     def test_no_frame_is_a_refusal_with_the_block(self):
         code, out = self._main("--frames", str(self.frames), "--out", str(self.out))
         self.assertEqual(code, 2)

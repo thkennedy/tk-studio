@@ -18,7 +18,7 @@ proof committed and pushed on the run branch):
     locate the checkout (walk up from the plugin root to the folder holding
     `apps/supervisor/package.json`) → find `bun` on PATH → `bun test
     test/approve.test.ts test/hostverify.test.ts test/hostleg.test.ts
-    -t "Story 34.8|Story 35.1"` from
+    -t "Story 34.8|Story 35.1|Story 36.1"` from
     `apps/supervisor` under a fresh temp folder (`TMPDIR`/`TEMP`/`TMP`,
     removed afterwards: the Story 33.4 rule), `TK_SUPERVISOR_*` stripped,
     bounded at `BOUND_S` → judge its exit
@@ -41,8 +41,9 @@ from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 SUITES = ["test/approve.test.ts", "test/hostverify.test.ts", "test/hostleg.test.ts"]
-# bun's `-t` is a regex: Story 34.8's cases and Story 35.1's re-run (the body rewrite, both flips, the slice commit).
-FILTER = "Story 34.8|Story 35.1"
+# bun's `-t` is a regex: Story 34.8's cases, Story 35.1's re-run (the body rewrite, both flips, the slice commit) and
+# Story 36.1's (`legHistory` on an inconclusive leg, the `FRAMES_DIR` pins).
+FILTER = "Story 34.8|Story 35.1|Story 36.1"
 TYPE_ID = "run-vertical-slice"
 # Below the manifest's `timeout: 240` for this drive (the runner honours it since Story 35.1's
 # fix-forward), with the install's bound beside it: the suite step measured about 100 s on the

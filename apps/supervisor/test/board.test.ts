@@ -22,6 +22,7 @@ const PR = (n: number) => `https://github.com/o/r/pull/${n}`;
 const S2 = "30-2-the-supervisor-serves-the-web", S3 = "30-3-the-live-stream-in-the-browser", S4 = "30-4-the-office-screen";
 const RED = { command: "bun test", argv: ["bun", "test"], cwd: ".", exit: 1, duration_ms: 5, green: false, stdout_tail: [], stderr_tail: ["1 fail"] };
 const GREEN = { ...RED, exit: 0, green: true, stderr_tail: [] };
+const INCONCLUSIVE = { ...RED, exit: 0, stderr_tail: [], playable: { verdict: "inconclusive", reason: "infrastructure: sbx: x" } };
 
 /** A project root holding the fixture at its real paths. */
 function fixtureRoot(): string {
@@ -346,6 +347,43 @@ describe("the runs and the triage (AC1, AC2)", () => {
     expect(ids(b.triage.working)).toEqual([resumed.run_id]);
     expect(ids(b.triage.needs_you)).toEqual([redAfter.run_id]);
     expect(b.triage.needs_you[0]).toMatchObject({ state: "running" });
+  });
+
+  test("Story 36.1: an inconclusive leg: `host_verify: inconclusive`; needs you live and ended today, not when older, not before the latest `launched`", async () => {
+    const w = world();
+    const live = await w.claim(w.enqueue());
+    w.queue.note(live.run_id, "host-verify", INCONCLUSIVE);
+    w.queue.note(live.run_id, "plan-status", { phase: "review", pr: PR(5), story_key: S3, id: "ST-110", ok: true });
+    const today = await w.claim(w.enqueue());
+    w.queue.note(today.run_id, "host-verify", INCONCLUSIVE);
+    w.queue.end(today.run_id, "partial", "host verify inconclusive (playable): infrastructure: sbx: x", { detail: { pr: PR(8) } });
+    const older = await w.claim(w.enqueue());
+    w.queue.note(older.run_id, "host-verify", INCONCLUSIVE);
+    w.queue.end(older.run_id, "partial", "host verify inconclusive (playable): infrastructure: sbx: x", { detail: { pr: PR(9) } });
+    const twoDaysAgo = new Date(Date.now() - 2 * 86_400_000).toISOString();
+    w.queue.db.query("UPDATE events SET at = ? WHERE run_id = ? AND kind = 'ended'").run(twoDaysAgo, older.run_id);
+    // Before the latest launch: a relaunched run, no new leg yet, works.
+    const before = await w.claim(w.enqueue());
+    w.queue.note(before.run_id, "host-verify", INCONCLUSIVE);
+    w.queue.recordWorktree(before.run_id, tempDir("tk-sup-board-wt-"), { branch: "b", base_ref: "main" });
+    w.queue.markLaunched(before.run_id, "20261030-000001-board", { end: {} });
+    // Ended today, its inconclusive leg before the latest launch: done.
+    const beforeEnded = await w.claim(w.enqueue());
+    w.queue.note(beforeEnded.run_id, "host-verify", INCONCLUSIVE);
+    w.queue.recordWorktree(beforeEnded.run_id, tempDir("tk-sup-board-wt-"), { branch: "b", base_ref: "main" });
+    w.queue.markLaunched(beforeEnded.run_id, "20261030-000002-board", { end: {} });
+    w.queue.end(beforeEnded.run_id, "complete", null, { detail: { pr: PR(10) } });
+
+    const b = await w.board();
+    expect(storyOf(b, "ST-110").run).toMatchObject({ run_id: live.run_id, host_verify: "inconclusive" });
+    expect(ids(b.triage.needs_you)).toEqual([live.run_id, today.run_id]);
+    expect(ids(b.triage.working)).toEqual([before.run_id]);
+    expect(ids(b.triage.done)).toEqual([beforeEnded.run_id]);
+    expect(b.triage.needs_you[1]).toEqual({ run_id: today.run_id, state: "partial", story_key: null, pr: PR(8), ruling: null });
+    // no reason field beside the verdict: the reason stays in the event
+    expect(Object.keys(storyOf(b, "ST-110").run!).sort()).toEqual(["ended_at", "host_verify", "pr", "run_id", "state"]);
+    // an older ended run: never needs you (Done itself lists only the host's local day)
+    expect(ids(b.triage.needs_you)).not.toContain(older.run_id);
   });
 
   test("a paused run's ruling by the office's full rule: state.json's paused_reason, else the journal's escalation", async () => {

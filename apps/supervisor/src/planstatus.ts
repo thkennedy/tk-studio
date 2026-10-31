@@ -59,7 +59,7 @@
  * merged before 35.8 gets no supervisor rows and is never back-filled), the supervisor's own Stage Log rows are built
  * from the run's queue events (the host clock): each `host-verify` leg a `host-leg` row (pass n over the close-out's
  * legs) or, carrying `rerun`, a `re-run` row (pass n), started at its `started_at` (else the event's `at`) and ended at
- * the event's `at`, the verdict its outcome; each close-out (an `ended`, `closed_out` or `paused` event carrying
+ * the event's `at`, its outcome read through `legVerdict`; each close-out (an `ended`, `closed_out` or `paused` event carrying
  * `closeout` — a paused close-out is recorded on its `paused` transition; one row per close-out record, so a busy
  * queue's `closed_out {closeout, pending}` and the `ended` later written from it are one) a `close-out` row from the
  * leg before it to the event, its `closeout.result` the outcome; the `merge` row at gh's `mergedAt` (the merge pass's
@@ -96,6 +96,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { frontmatter, jiraBound } from "./closeout";
+import { legVerdict, type HostVerifyResult } from "./hostverify";
 import { canonicalPr } from "./hygiene";
 import { isTerminal, selfOwner, type Owner, type Queue, type QueueEvent, type QueueRun } from "./queue";
 import { lastJsonObject, registryShow, type RunResult } from "./server";
@@ -451,7 +452,7 @@ export function supervisorRows(events: readonly QueueEvent[], mergedAt?: string)
     const d = e.detail && typeof e.detail === "object" ? e.detail as Record<string, any> : undefined;
     if (!d) continue;
     if (e.kind === "host-verify") {
-      const outcome = d.skipped === true ? "skipped" : d.green === true ? "green" : "red";
+      const outcome = legVerdict(d as HostVerifyResult);
       const started = typeof d.started_at === "string" && d.started_at ? d.started_at : e.at;
       // a close-out spans from the leg before it — a host leg or a re-run's
       if (d.rerun && typeof d.rerun === "object") rows.push({ stage: "re-run", pass: ++reruns, started, ended: e.at, outcome });

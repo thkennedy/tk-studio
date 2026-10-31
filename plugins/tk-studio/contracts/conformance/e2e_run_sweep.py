@@ -22,7 +22,7 @@ then the supervisor half (the triage record, the `## Sweep` PR body, the
 inbox line, the end-state rule, the paused sweep, the ledger pass) the way
 the supervisor's own gate runs it: locate the checkout (the folder holding
 `apps/supervisor/package.json`) → find `bun` → `bun test test/sweep.test.ts
--t "Story 35.7"` from `apps/supervisor` under a fresh temp folder,
+-t "Story 35.7|Story 36.1"` from `apps/supervisor` under a fresh temp folder,
 `TK_SUPERVISOR_*` stripped, bounded at `BOUND_S`. No checkout or no `bun`:
 that step is `ok: true` with `not_run` naming which (the `cli_drives`
 precedent). Prints one JSON object {ok, steps[]} and exits nonzero on a red
@@ -43,11 +43,11 @@ from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 SUITES = ["test/sweep.test.ts"]
-FILTER = "Story 35.7"
+FILTER = "Story 35.7|Story 36.1|Story 36.2"
 TYPE_ID = "run-sweep"
-BOUND_S = 60
+BOUND_S = 240  # the filtered suite runs about 80 s on the win32 host's git (hole 108); under 60 s on the Linux gate
 INSTALL_BOUND_S = 40
-MANIFEST_TIMEOUT_S = 120  # keep in step with manifest.json's entry for this drive
+MANIFEST_TIMEOUT_S = 300  # keep in step with manifest.json's entry for this drive
 assert BOUND_S + INSTALL_BOUND_S < MANIFEST_TIMEOUT_S, "the drive's bounds must sit under the manifest's timeout"
 TAIL = 20
 RID = "20261029-120000-e2e7"
@@ -168,7 +168,7 @@ def lib_steps() -> list[dict]:
         text = path.read_text(encoding="utf-8")
         again = plansync.ledger_resolve(led_root, "thkennedy/tk-studio#300", ["DW-1"])
         ok = (first["ok"] and first["resolved"] == ["DW-1"] and first["pending"] == ["DW-2"]
-              and "status: resolved 2026-10-29 by thkennedy/tk-studio#300 (sweep bundle dw-a; " in text
+              and "status: resolved 2026-10-29 by thkennedy/tk-studio#300 (sweep bundle dw-a)" in text
               and again["unchanged"] == ["DW-1"] and again["resolved"] == []
               and path.read_text(encoding="utf-8") == text)
         steps.append({"step": "ledger-resolve", "ok": bool(ok),

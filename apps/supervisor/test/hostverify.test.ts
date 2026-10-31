@@ -6,11 +6,12 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, delimiter, dirname, join } from "node:path";
 import {
-  gitUsrBin, hostVerify, inconclusiveReason, isInconclusive, isRed, pathKey, playableConfig, prSection, redReason, splitCommand, tail,
+  FRAMES_DIR, gitUsrBin, hostVerify, inconclusiveReason, isInconclusive, isRed, legHistory, legVerdict, pathKey, playableConfig, prSection, redReason, splitCommand, tail,
   TOOL_WALL_MARGIN_S, verifyCommand, wallClockTrip, type HostVerifyRan, type PlayableJudge,
 } from "../src/hostverify";
 import { studioRunDir } from "../src/sandbox";
 import { fakeBin, gitRepo, testGit } from "./fakes";
+import { SLICE_REPORT, sliceRecorder } from "./helpers/slice";
 import { tempDir } from "./tmp";
 
 /** `"<bun>" -e "<script>"` as one command line (the script uses single quotes only). */
@@ -1072,11 +1073,7 @@ describe("hole 77: a shell script's own lines reach the capture", () => {
 describe("Story 34.8: a slice run's assets step, contact sheet and PR section", () => {
   const PLAYABLE = "playable:\n  scenario: scenarios/smoke.json\n  seed: 7\n  ticks: 120\n";
   const base = verifyKeys({ host: "uv run tools/verify_host.py", engine: "bash scripts/engine-gate.sh" });
-  const REPORT = {
-    schema: 1, verdict: "pass", failed: null, seed: 7, ticks: 120, ticks_run: 120, capture_every: 30, mode: "movie",
-    frames: [{ tick: 0, file: "frames/tick-000000.png" }, { tick: 30, file: "frames/tick-000030.png" }],
-    moments: [], frame_time_ms: { max: 20, mean: 16.6 }, log_errors: [],
-  };
+  const REPORT = SLICE_REPORT;
   const legEnv = () => ({ TK_STUDIO_ROOT: tempDir("tk-sup-vs-studio-"), TK_STUDIO_HOME: tempDir("tk-sup-vs-home-"), PATH: "/usr/bin", GODOT: "/opt/godot/godot" });
   /** A slice fixture: the base config, the run's 34.3 fields, and (unless `manifest: false`) the manifest in the worktree. */
   function fixture(config: string, o: { manifest?: boolean } = {}) {
@@ -1084,54 +1081,7 @@ describe("Story 34.8: a slice run's assets step, contact sheet and PR section", 
     if (o.manifest !== false) { mkdirSync(join(fx.wt, "assets"), { recursive: true }); writeFileSync(join(fx.wt, "assets", "manifest.yaml"), "schema: 1\n"); }
     return { ...fx, run: { ...fx.run, sandbox: "tk-sbx", engine_run_id: "20261027-eng", studio_run_id: "run-77", project_id: "acme" } };
   }
-  /** The runner: the config; the host and engine steps exit per `exits`; `assets.py <verb>` exits per `assets`; `playable.py
-   * run` writes the report and frames; `playable.py sheet` writes the sheet and names the sampled frames. */
-  /** Story 35.3: `blocks` a verb's own stdout block (null: none, a crash's traceback), `timeouts` each step's guard. */
-  function recorder(config: string, o: { exits?: number[]; assets?: Record<string, number>; sheet?: number; blocks?: Record<string, Record<string, unknown> | null>; report?: Record<string, unknown> } = {}) {
-    const steps: string[][] = [];
-    const timeouts: number[] = [];
-    let plain = 0;
-    const run = async (bin: string, args: string[], ro: { timeoutS: number }) => {
-      if (bin === "git") return { exit: 0, stdout: config, stderr: "" };
-      const spec = JSON.parse(readFileSync(args[2]!, "utf-8"));
-      const argv = spec.argv as string[];
-      steps.push(argv);
-      timeouts.push(ro.timeoutS);
-      const script = String(argv[2] ?? "");
-      const status = (exit: number, block?: Record<string, unknown>) => {
-        writeFileSync(spec.out, block ? JSON.stringify(block, null, 2) + "\n" : `step\n`);
-        writeFileSync(spec.status, JSON.stringify({ exit, signal: null }));
-        return { exit: 0, stdout: "", stderr: "" };
-      };
-      if (script.endsWith("assets.py")) {
-        const exit = o.assets?.[argv[3]!] ?? 0;
-        const own = o.blocks?.[argv[3]!];
-        if (own === null) {
-          writeFileSync(spec.err, "Traceback (most recent call last):\nKeyError: 'colour'\n");
-          return status(exit);
-        }
-        return status(exit, own ?? { ok: exit === 0, entries: [], status: exit === 0 ? "complete" : exit === 1 ? "partial" : "blocked", intent: "assets", artifacts: [], reason: exit ? `${argv[3]} not ok` : null });
-      }
-      if (script.endsWith("playable.py") && argv[3] === "sheet") {
-        const out = argv[argv.indexOf("--out") + 1]!;
-        expect(argv).not.toContain("--frames"); // Story 35.3: the report's citable frames only
-        expect(existsSync(argv[argv.indexOf("--report") + 1]!)).toBe(true);
-        const exit = o.sheet ?? 0;
-        if (exit === 0) writeFileSync(out, "sheet-png");
-        return status(exit, { ok: exit === 0, frames: ["tick-000000.png", "tick-000030.png"], status: exit === 0 ? "complete" : "blocked", intent: "playable", artifacts: [], reason: null });
-      }
-      if (script.endsWith("playable.py")) {
-        const out = argv[argv.indexOf("--out") + 1]!;
-        mkdirSync(join(out, "frames"), { recursive: true });
-        for (const f of REPORT.frames) writeFileSync(join(out, f.file), "png");
-        writeFileSync(join(out, "report.json"), JSON.stringify(o.report ?? REPORT));
-        writeFileSync(join(out, "log.txt"), "log\n");
-        return status(1, { ok: false, verdict: "fail", failed: null, status: "partial", intent: "playable", artifacts: [], reason: "harness" });
-      }
-      return status(o.exits?.[plain++] ?? 0);
-    };
-    return { steps, timeouts, run };
-  }
+  const recorder = sliceRecorder;
   const verbs = (steps: string[][]) => steps.map((a) => String(a[2] ?? "").endsWith("assets.py") || String(a[2] ?? "").endsWith("playable.py")
     ? `${String(a[2]).split(/[\\/]/).at(-1)} ${a[3]}` : String(a.at(-1)));
 
@@ -1400,5 +1350,37 @@ describe("Story 34.8: a slice run's assets step, contact sheet and PR section", 
     expect(lines).toContain("- `/store/frames/tick-000000.png`");
     expect(lines.filter((l) => l === "Frames:")).toHaveLength(1);
     expect(lines.some((l) => l.startsWith("![contact sheet]"))).toBe(false);
+  });
+});
+
+describe("Story 36.1: one verdict, one frames literal", () => {
+  const INCONCLUSIVE = { command: "c", argv: ["c"], cwd: "/w", exit: 0, duration_ms: 1, green: false, stdout_tail: [], stderr_tail: [],
+    playable: { verdict: "inconclusive", reason: "infrastructure: sbx: x" } };
+  const event = (seq: number, detail: Record<string, unknown>, kind = "host-verify") =>
+    ({ seq, run_id: "r", at: `2026-10-30T0${seq}:00:00Z`, kind, from_state: "running", to_state: "running", detail }) as any;
+
+  test("legHistory reads a raw inconclusive event through legVerdict, beside the other three", () => {
+    const details = [INCONCLUSIVE, { ...INCONCLUSIVE, green: true }, { ...INCONCLUSIVE, playable: { verdict: "fail" } }, { skipped: true, reason: "x" }];
+    const legs = legHistory(details.map((d, i) => event(i + 1, d)));
+    expect(legs.map((l) => l.verdict)).toEqual(["inconclusive", "green", "red", "skipped"]);
+    expect(legs.map((l) => l.verdict)).toEqual(details.map((d) => legVerdict(d as any)));
+    expect(legHistory([event(1, { ...INCONCLUSIVE, rerun: { by: "cli" } })])).toEqual([{ leg: "re-run", verdict: "inconclusive", recorded_at: "2026-10-30T01:00:00Z", by: "cli" }]);
+  });
+
+  test("FRAMES_DIR is `frames`, and the media copy and a slice leg's own proof sit under it", async () => {
+    expect(FRAMES_DIR).toBe("frames"); // playable.py FRAMES, pinned on its side by test_playable.py
+    const config = `${verifyKeys({ host: "uv run tools/verify_host.py", engine: "bash scripts/engine-gate.sh" })}playable:\n  scenario: scenarios/smoke.json\n  seed: 7\n  ticks: 120\n`;
+    const fx = project(config);
+    const run = { ...fx.run, sandbox: "tk-sbx", engine_run_id: "20261030-eng", studio_run_id: "run-36", project_id: "acme" };
+    const env = { TK_STUDIO_ROOT: tempDir("tk-sup-36-studio-"), TK_STUDIO_HOME: tempDir("tk-sup-36-home-"), PATH: "/usr/bin", GODOT: "/opt/godot/godot" };
+    const { run: runner } = sliceRecorder(config);
+    const v = await hostVerify(run, 60, { env, run: runner as any }, { slice: true }) as HostVerifyRan;
+    const p = v.playable!;
+    // the recorder's sheet answers bare names, the report `frames/<name>`
+    expect(p.sampled).toEqual(["tick-000000.png", "tick-000030.png"]);
+    expect(SLICE_REPORT.frames.map((f) => f.file)).toEqual(["frames/tick-000000.png", "frames/tick-000030.png"]);
+    expect(p.leg_frames!.map((f) => basename(dirname(f)))).toEqual([FRAMES_DIR, FRAMES_DIR]);
+    expect(p.leg_frames!.every((f) => existsSync(f))).toBe(true);
+    expect(existsSync(join(p.media!, FRAMES_DIR, "tick-000000.png"))).toBe(true);
   });
 });

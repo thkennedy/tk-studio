@@ -492,3 +492,17 @@
 - What no longer holds: plans/35-2.md "The 35.1 paragraph runs :1531-1598; add `**0.1.30 (Story 35.2, additive).**` before `## 8. Conformance` (:1600)."
 - Suggested adjustment: Put the 35.2 paragraph and header clause after 35.8's, and pin the order 35.8 < 35.2 and the Stories row `Story 35.1, Story 35.8, Story 35.2 (Epic 35)` (relax 35.8's exact-row check only to admit 35.2). In the §1 bootstrap rewrite, keep §3's Stage Log bracket, one `stage --start/--stop` per plan written. Re-render the nested `task-planning.md` with `nest_pipeline.py`, a test-pinned mirror (score 1 per the 35-8 consult rule).
 - Status: closed — applied to the unstarted 35-2 entry's invoke_dev_with by the gate session (2026-10-29)
+
+## 36-3-a-paused-or-resumed-run-is-never-parked — scope: stories — from 36-2-the-sweeps-records-are-whole — 2026-10-30
+
+- What changed: the one `engine-stop` note per engine run can now be `{stopped: true}`; `engineEndStatus` exempts a `stopped` engine with any such note; `sweepEndState` caps any other non-`finished` end at `partial`.
+- What no longer holds: "a **deadline**, `SWEEP_STOP_DEADLINE_MS = 30 min` from the first `engine-stop` note's `at` for that engine run id" and "a `blocked` end through the sweep tail" (plans/36-3.md Settled shape 5).
+- Suggested adjustment: Start the deadline only from a note carrying `error`. Set the deadline's `blocked` end explicitly, not through `sweepEndState`, which would read `partial` for a `paused` engine with bundles landed. A WIP-committed sweep must not read `complete`.
+- Status: closed — applied to the unstarted 36-3 entry's invoke_dev_with and to plans/36-3.md (Settled shape 5) by the 36-2 gate session (2026-10-30)
+
+## 36-7-the-cycles-cut-and-the-docs-caught-up — scope: stories — from 36-2-the-sweeps-records-are-whole — 2026-10-30
+
+- What changed: `sweep.ts:66` imports `DEFERRED_REL` from `board.ts`, with `board.ts` importing `closeout`, `planstatus` and `worktree`, so the two SCCs are now one of eleven modules.
+- What no longer holds: "the set of remaining non-trivial SCCs equals the allowlist `{queue, sandbox}`, `{api, cli}`, `{board, engagement, inbox, log, office, page, registry}` exactly" (plans/36-7.md Settled shape 1).
+- Suggested adjustment: Cut `sweep → board` by moving `DEFERRED_REL` to a leaf; otherwise `sweep → board → worktree → sweep` survives the planned cuts. Re-derive the SCCs from the tree first, as 36-3 to 36-6 edit the same modules.
+- Status: closed — applied to the unstarted 36-7 entry's invoke_dev_with and to plans/36-7.md (Risks) by the 36-2 gate session (2026-10-30)
