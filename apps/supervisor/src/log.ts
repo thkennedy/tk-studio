@@ -127,7 +127,12 @@ export const SLOW_PASS_MS = 600_000;
 /** The pacer steps a `--pass` may time. */
 export const PASS_TAGS = ["tick", "drain"] as const;
 /** The last pass of each pacer step: `GET /status`'s `pacer` (contract 0.1.28) and the page's line. */
-export type Pacer = { last_tick_ms: number | null; last_drain_ms: number | null; last_pass_at: string | null };
+export type Pacer = {
+  last_tick_ms: number | null; last_drain_ms: number | null; last_pass_at: string | null;
+  /** Story 36.5 (CAP-15, DW-63): a pass past SLOW_PASS_MS, written while it runs and removed at its end. */
+  running?: PacerRunning;
+};
+export type PacerRunning = { tag: string; started_at: string; elapsed_ms: number; ids: string[] };
 
 const NO_PACER: Pacer = { last_tick_ms: null, last_drain_ms: null, last_pass_at: null };
 /** The queue run id shape (`queue.ts` `mintRunId`: `q-<job id>-<yyyymmddThhmmssZ>-<6 hex>`). */
@@ -150,21 +155,38 @@ export function readPacer(env: Env = process.env): Pacer {
     const raw = JSON.parse(readFileSync(path, "utf8"));
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ...NO_PACER };
     const ms = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+    const r = raw.running;
+    const running = r && typeof r.tag === "string" && typeof r.started_at === "string" && ms(r.elapsed_ms) !== null
+      && Array.isArray(r.ids) && r.ids.every((id: unknown) => typeof id === "string") ? { running: { tag: r.tag, started_at: r.started_at, elapsed_ms: r.elapsed_ms, ids: r.ids } } : {};
     return {
       last_tick_ms: ms(raw.last_tick_ms), last_drain_ms: ms(raw.last_drain_ms),
       last_pass_at: typeof raw.last_pass_at === "string" && raw.last_pass_at ? raw.last_pass_at : null,
+      ...running,
     };
   } catch { return { ...NO_PACER }; }
 }
 
 /** Records one pass (read-modify-write: only its step's field and `last_pass_at`), atomically (a temp file, then a
- * rename). Nothing is written with the work folder unset; a failure is swallowed (the log line still stands). */
+ * rename), its own `running` member removed (another step's stays). Nothing is written with the work folder unset; a
+ * failure is swallowed (the log line still stands). */
 export function writePacer(env: Env, tag: (typeof PASS_TAGS)[number], ms: number, at: string): void {
+  updatePacer(env, (cur) => {
+    const { running, ...rest } = cur;
+    return { ...rest, ...(running && running.tag !== tag ? { running } : {}), [`last_${tag}_ms`]: ms, last_pass_at: at };
+  });
+}
+
+/** Story 36.5 (DW-63): the pass still running past SLOW_PASS_MS (the same atomic read-modify-write). */
+export function writePacerRunning(env: Env, running: PacerRunning): void {
+  updatePacer(env, (cur) => ({ ...cur, running }));
+}
+
+function updatePacer(env: Env, change: (cur: Pacer) => Pacer): void {
   const path = pacerPath(env);
   if (!path) return;
   const tmp = `${path}.tmp-${process.pid}`;
   try {
-    const next: Pacer = { ...readPacer(env), [`last_${tag}_ms`]: ms, last_pass_at: at };
+    const next = change(readPacer(env));
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(tmp, JSON.stringify(next) + "\n");
     renameSync(tmp, path);
@@ -201,6 +223,9 @@ export interface TeeIo {
   cwd?: string;
   /** The slow-pass notifier send's fetch (default the global; Story 33.7). */
   fetch?: (input: string, init?: RequestInit) => Promise<Response>;
+  /** Story 36.5: the slow-pass timer's seam (default the globals; the tests drive a fake clock). */
+  setTimeout?: (fn: () => void, ms: number) => unknown;
+  clearTimeout?: (timer: unknown) => void;
 }
 
 const USAGE = `usage: bun src/log.ts --tag <${LOG_TAGS.join("|")}> [--pass] -- <bun script> [args...]  (--pass only with ${PASS_TAGS.join("|")})`;
@@ -228,25 +253,31 @@ export function runUnderLog(argv: string[], env: Env, now: () => number, io: Tee
     let errorLine: string | null = null;
     const runIds: string[] = [];
     let started = 0;
+    // Story 36.5 (DW-63): the warning and its one notifier line, once: from the timer while the pass runs, else from `finish`.
+    let warned = false;
+    let sent: Promise<unknown> = Promise.resolve();
+    let timer: unknown;
+    const warn = (ms: number) => {
+      warned = true;
+      const warning = slowPassLine(tag, ms, runIds);
+      log(warning);
+      sent = (async () => {
+        try {
+          const n = notifier(env);
+          if (n.kind !== "none") await sendText(n, clipUtf8(warning, NOTICE_MAX_BYTES), io.fetch ?? fetch);
+        } catch { /* a notifier unset, misconfigured or failing: the log line stands */ }
+      })();
+    };
     const finish = (code: number, why: string) => {
       if (settled) return;
       settled = true;
+      if (timer !== undefined) (io.clearTimeout ?? ((t) => clearTimeout(t as ReturnType<typeof setTimeout>)))(timer);
       if (code !== 0 && errorLine !== null && !/^uncaught:/i.test(errorLine)) log(`uncaught: ${errorLine}`);
-      let sent: Promise<unknown> = Promise.resolve();
       if (pass) {
         const end = now();
         const ms = Math.max(0, end - started);
         log(`pass: ${ms} ms, exit ${code}`);
-        if (ms > SLOW_PASS_MS) {
-          const warning = slowPassLine(tag, ms, runIds);
-          log(warning);
-          sent = (async () => {
-            try {
-              const n = notifier(env);
-              if (n.kind !== "none") await sendText(n, clipUtf8(warning, NOTICE_MAX_BYTES), io.fetch ?? fetch);
-            } catch { /* a notifier unset, misconfigured or failing: the log line stands */ }
-          })();
-        }
+        if (ms > SLOW_PASS_MS && !warned) warn(ms);
         writePacer(env, tag as (typeof PASS_TAGS)[number], ms, new Date(end).toISOString());
       }
       void sent.then(() => {
@@ -286,6 +317,15 @@ export function runUnderLog(argv: string[], env: Env, now: () => number, io: Tee
       });
       return done;
     };
+    if (pass) {
+      timer = (io.setTimeout ?? ((fn, ms) => setTimeout(fn, ms)))(() => {
+        if (settled || warned) return;
+        const at = now();
+        const elapsed = Math.max(0, at - started);
+        warn(elapsed);
+        writePacerRunning(env, { tag, started_at: new Date(started).toISOString(), elapsed_ms: elapsed, ids: [...runIds] });
+      }, SLOW_PASS_MS);
+    }
     const flushed = Promise.all([pump(child.stdout, io.stdout, false), pump(child.stderr, io.stderr, true)]);
     child.on("error", (e) => {
       log(`uncaught: ${e.message}`);

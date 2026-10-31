@@ -638,9 +638,13 @@ def _age(seconds: float) -> str:
 
 
 def _last_end(text: str) -> tuple[str, str, float | None] | None:
-    """The last line whose text after the tag starts with ``stopped`` or
-    ``uncaught``: the line, its kind and its stamp (epoch seconds, None when
-    the stamp does not parse)."""
+    """The last process-level end: a keeper, pacer or serve line, any
+    ``uncaught``, any stop but a clean exit; only when the text holds none, the
+    last routine ``[tick]``/``[drain] stopped (exit 0)`` (Story 36.5, DW-55: one
+    such line closes every pass). Starts with ``stopped`` or ``uncaught``: the
+    line, its kind and its stamp (epoch seconds, None when the stamp does not
+    parse)."""
+    routine = None
     for line in reversed(text.splitlines()):
         m = LOG_LINE.fullmatch(line.strip())
         if not m:
@@ -654,8 +658,13 @@ def _last_end(text: str) -> tuple[str, str, float | None] | None:
                 m.group(1).replace("Z", "+00:00")).timestamp()
         except ValueError:
             stamp = None
-        return line.strip(), kind, stamp
-    return None
+        found = line.strip(), kind, stamp
+        if (m.group(2) in ("tick", "drain")
+                and m.group(3).strip() == "stopped (exit 0)"):
+            routine = routine or found
+            continue
+        return found
+    return routine
 
 
 _SECRET_NAME = re.compile(r"^TK_SUPERVISOR_.*(?:TOKEN|SECRET)", re.IGNORECASE)

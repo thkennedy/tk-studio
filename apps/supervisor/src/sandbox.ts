@@ -9,8 +9,10 @@
  *             matched to the engine run id (and the worktree's VM path); neither naming exactly one pid
  *             → `engine pid: unknown` (no hold, nothing killed — a pid is never guessed).
  *   hold      one `sbx exec <sb> tail --pid=<pid> -f /dev/null` held open for the engine's life
- *             (operator-decisions §6): the supervisor's own child through `runProcess` (argv only; on
- *             win32 not detached, so it stays in the console session). It ends when the engine pid ends.
+ *             (operator-decisions §6): argv only, spawned detached and unref'd with its stdio ignored (Story 36.5,
+ *             DW-109), so it outlives the process that spawned it, and it ends when the engine pid ends. Its recorded
+ *             host pid + start time is the adoption rule: any later process (tick or serve) that finds it alive spawns
+ *             none, so a run's `hold` events count the real restarts.
  *   kill      `sbx exec <sb> kill -TERM -- -<pid>` (the engine's process group), a bounded wait, then
  *             `kill -KILL -- -<pid>` (sent to the group even when the leader went on TERM); liveness
  *             `sbx exec <sb> cat /proc/<pid>/stat`, its start time (field 22) compared with the recorded one. A pid still alive after the wait is the
@@ -29,7 +31,10 @@
  *             (`sbx stop`, `sbx run -d --name`), probed again and recorded `pin-restart`; the caller's
  *             preflight then judges. The pin record `<studioHome>/sandboxes/<sb>.pin` is written on every
  *             pin and removed when the release stopped the sandbox (the launch check's "started outside
- *             the supervisor" warning reads its absence).
+ *             the supervisor" warning reads its absence). Story 36.5: the episode is per sandbox across the queue
+ *             (`Queue.openPinRestartOn`), and a pin prunes the VM's old `/tmp` leftovers (`pruneEngineTmp`).
+ *   store     Story 36.5 (DW-113): `sbx skills ls`, else the host store folder: is a job's target skill in the
+ *             shared skills store the sandboxes load (`skillInStore`)?
  *   starter   `<studioHome>/projects/<project key>/starter.lock`: JSON naming the queue as the only
  *             starter of runs on the checkout, written atomically per tick and per claim; never in the
  *             checkout's tree. Story 28.6: `serve` also rewrites every served project's lock each
@@ -40,12 +45,13 @@
  *
  * Every `sbx` call is argv only — never `bash`, `sh` or a `-c` string, never a pattern kill.
  */
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { ENGINE_MCP_START, ENGINE_MCP_STOP, stopEngineMcp } from "./enginemcp";
 import { sbxBin, studioHome } from "./env";
 import {
-  checkoutKey, isTerminal, parseStatGroup, probeRecordedWorker, processStartTime, servedRoot, type Queue, type QueueRun, type WorkerKill,
+  checkoutKey, isTerminal, parseStatGroup, probeRecordedWorker, processStartTime, servedRoot, workerMayRun, type Queue, type QueueRun, type WorkerKill,
 } from "./queue";
 import { maxLoginPreflight, readProjectConfig, runProcess, toVmPath, type RunResult, type Spawner } from "./server";
 
@@ -59,7 +65,7 @@ export interface SandboxDeps {
   env?: Env;
   /** A bounded argv-only `sbx` call (default `runProcess`). */
   run?: (bin: string, args: string[], opts: { timeoutS: number }) => Promise<RunResult>;
-  /** Spawns the long-lived hold (default `runProcess`, not awaited). */
+  /** Spawns the long-lived hold (default `defaultHold`, detached and unref'd). */
   hold?: (bin: string, args: string[]) => HoldChild;
   /** Reads a host file; null when it cannot be read (default `readFileSync`). */
   readFile?: (path: string) => string | null;
@@ -100,6 +106,11 @@ export const pgrepArgv = (sb: string): string[] => ["exec", sb, "pgrep", "-a", "
 /** bmad-loop's agent session for an engine run (`runs.session_name`: `bmad-loop-<id>`), killed by its exact
  * name (`=`, as bmad-loop's own tmux backend targets it — never a prefix match). */
 export const agentSessionArgv = (sb: string, engineRunId: string): string[] => ["exec", sb, "tmux", "kill-session", "-t", `=bmad-loop-${engineRunId}`];
+/** Story 36.5 (DW-60): the day-old test and tool leftovers in the VM's `/tmp`. The globs are `find`'s inside the VM. */
+export const pruneTmpArgv = (sb: string): string[] =>
+  ["exec", sb, "find", "/tmp", "-maxdepth", "1", "(", "-name", "tk-sup-*", "-o", "-name", "tmp.*", ")", "-mmin", "+1440", "-exec", "rm", "-rf", "--", "{}", "+"];
+/** Story 36.5 (DW-113): the shared skills store's listing. */
+export const skillsLsArgv = (): string[] => ["skills", "ls"];
 
 // ------------------------------------------------------------ the launch core's status, in the VM (hole 38)
 
@@ -240,14 +251,9 @@ export const RESTART_BLOCKING_STATES = ["running", "paused", "external"] as cons
 
 export const PIN_RESTART = "pin-restart";
 
-/** The seq of `runId`'s `pin-restart` for `sb` in its open episode (since its latest `claim-refusal-cleared`, else the
- * run's start), else null. */
-export function openPinRestart(queue: Queue, runId: string, sb: string): number | null {
-  const events = queue.events(runId);
-  const cleared = events.findLastIndex((e) => e.kind === "claim-refusal-cleared");
-  const hit = events.slice(cleared + 1).findLast((e) => e.kind === PIN_RESTART && e.detail?.sandbox === sb);
-  return hit ? hit.seq : null;
-}
+/** Story 36.5 (DW-56, DW-58): the seq of the open `pin-restart` on `sb`, any run's since the sandbox's last healed
+ * signal (`Queue.openPinRestartOn`), else null. */
+export const openPinRestart = (queue: Queue, sb: string): number | null => queue.openPinRestartOn(sb);
 
 export interface PinContext {
   /** The sandboxes restarted in this pass (`drainQueue`'s, shared by the pass's resumes and drained runs; else one per
@@ -257,14 +263,18 @@ export interface PinContext {
   spawner?: Spawner;
   /** The pin record's clock (default now). */
   now?: () => Date;
+  /** Story 36.5: filled by the pin: `probe_clean` when its login probe found the sandbox logged in (a running sandbox's
+   * probe, or a cold pin's while a restart episode stands open on it). */
+  report?: { probe_clean?: true };
 }
 
 /** Story 33.3: the pin both sites call in place of the bare `pinSandbox`. `sbx ls` first (was `sb` running before this
  * pin?), then `sbx run -d --name <sb>`. Only when it was running: probe the login (`maxLoginPreflight`, the
- * preflight's own argv) and, when it says not logged in and (c) this pass has not restarted `sb`, (d) `runId`'s open
- * episode carries no `pin-restart` for it and (e) no other run holds it running/paused/external nor an ended run's
+ * preflight's own argv) and, when it says not logged in and (c) this pass has not restarted `sb`, (d) no run's open
+ * `pin-restart` stands on it since the sandbox's last healed signal (Story 36.5) and (e) no other run holds it running/paused/external nor an ended run's
  * engine is alive there, stop and start it once, probe again and record `pin-restart {sandbox, probe_before,
- * probe_after, pass_at}` (a repeat in the episode patches it in place). A failed stop or start is the pin's failure.
+ * probe_after, pass_at}`. A failed stop or start is the pin's failure. Story 36.5: a cold pin never restarts, but with
+ * an episode open on `sb` it probes too, so a clean answer can close that episode.
  * The pin record is written once pinned. Null when pinned, else the failure; the caller records `pinned`/`pin-failed`
  * and its preflight judges the login. Never throws. */
 export async function pinWithRestart(queue: Queue, runId: string, sb: string, deps: SandboxDeps = {}, ctx: PinContext = {}): Promise<string | null> {
@@ -273,12 +283,17 @@ export async function pinWithRestart(queue: Queue, runId: string, sb: string, de
   const failed = await pinSandbox(sb, deps);
   if (failed) return failed;
   try {
-    if (!running) ctx.restarted?.add(sb); // cold-pinned in this pass: a later run in the pass does not restart it
-    else {
+    if (!running) {
+      ctx.restarted?.add(sb); // cold-pinned in this pass: a later run in the pass does not restart it
+      // Story 36.5: later pins may all be cold, so an open episode needs its healed signal here too; none open, no probe.
+      if (ctx.report && openPinRestart(queue, sb) !== null
+        && !(await maxLoginPreflight(ctx.spawner ?? probeSpawner(deps), { tier: "sbx", sandbox: sb }))) ctx.report.probe_clean = true;
+    } else {
       const spawner = ctx.spawner ?? probeSpawner(deps);
       const probeBefore = await maxLoginPreflight(spawner, { tier: "sbx", sandbox: sb });
       const restarted = ctx.restarted ?? new Set<string>();
-      if (probeBefore && !restarted.has(sb) && openPinRestart(queue, runId, sb) === null
+      if (!probeBefore && ctx.report) ctx.report.probe_clean = true;
+      if (probeBefore && !restarted.has(sb) && openPinRestart(queue, sb) === null
         && !(await sandboxHolders(queue, sb, runId, RESTART_BLOCKING_STATES)).length) {
         restarted.add(sb);
         const stopFailed = await restartStep(releaseArgv(sb), deps);
@@ -287,16 +302,77 @@ export async function pinWithRestart(queue: Queue, runId: string, sb: string, de
         if (startFailed) { removePinRecord(sb, env); return startFailed; } // stopped and not restarted: no pin stands
         const probeAfter = await maxLoginPreflight(spawner, { tier: "sbx", sandbox: sb });
         const detail = { sandbox: sb, probe_before: probeBefore, probe_after: probeAfter, pass_at: new Date().toISOString() };
-        try {
-          const seq = openPinRestart(queue, runId, sb);
-          if (seq !== null) queue.patchEventDetail(seq, detail);
-          else queue.note(runId, PIN_RESTART, detail);
-        } catch { /* the run ended meanwhile: the restart stands */ }
+        try { queue.note(runId, PIN_RESTART, detail); }
+        catch { /* the run ended meanwhile: the restart stands */ }
       }
     }
   } catch { /* a probe or holder lookup that throws leaves the pin as it is: the preflight judges */ }
   writePinRecord(sb, runId, env, ctx.now);
   return null;
+}
+
+/** Story 36.5 (DW-60): after a successful pin, the day-old `tk-sup-*` and `tmp.*` in the engine sandbox's `/tmp` go, best
+ * effort, unless another live run holds the sandbox. Answers the `pinned` detail's `tmp_pruned`. Never throws. */
+export async function pruneEngineTmp(queue: Queue, runId: string, sb: string, deps: SandboxDeps = {}): Promise<true | string> {
+  try {
+    const holders = await sandboxHolders(queue, sb, runId, RESTART_BLOCKING_STATES);
+    if (holders.length) return `skipped: held by ${holders.join(", ")}`;
+    const r = await call(deps, pruneTmpArgv(sb), 60);
+    return r.exit === 0 ? true : `error: exit ${r.exit}: ${clip(r.stderr || r.stdout, 200)}`;
+  } catch (e) { return `error: ${clip(message(e), 200)}`; }
+}
+
+// ------------------------------------------------------------ Story 36.5: the shared skills store
+
+/** The plugin folder the engine sandboxes load from the store (runbook §3.8). */
+const STORE_PLUGIN = "tk-studio";
+const STORE_SUBPATH = ["DockerSandboxes", "sandboxes", "state", "agent-skills"];
+
+/** `%LOCALAPPDATA%\\DockerSandboxes\\sandboxes\\state\\agent-skills`: resolved, or as the variable (null `dir`: not readable). */
+function skillsStore(env: Env): { dir: string | null; shown: string } {
+  const base = env.LOCALAPPDATA?.trim();
+  return base ? { dir: join(base, ...STORE_SUBPATH), shown: join(base, ...STORE_SUBPATH) } : { dir: null, shown: `%LOCALAPPDATA%\\${STORE_SUBPATH.join("\\")}` };
+}
+
+/** One name per line, each line's first whitespace-separated token (tolerant: the output is pinned to the operator's
+ * capture when it lands). */
+export const parseSkillsList = (out: string): string[] =>
+  (out ?? "").split(/\r?\n/).map((l) => l.trim().split(/\s+/)[0] ?? "").filter(Boolean);
+
+export type SkillInStore =
+  | { in_store: true }
+  /** Neither the listing nor the store folder could answer: nothing proves the skill absent. */
+  | { in_store: "unknown"; why: string }
+  | { in_store: false; store: string; release: string; via: "sbx skills ls" | "store folder"; text: string };
+
+/** Is `skill` in the shared skills store? `sbx skills ls` names it; a listing that does not (or a verb that is missing)
+ * reads the host's store folder (`<skill>/`, `<plugin>/skills/<skill>/`). The release named on a refusal is the store's
+ * `<plugin>/.claude-plugin/plugin.json` version, else `unknown`. Never throws. */
+export async function skillInStore(skill: string, deps: SandboxDeps = {}): Promise<SkillInStore> {
+  const store = skillsStore(deps.env ?? process.env);
+  let listed: string[] | null = null, why = "";
+  try {
+    const r = await call(deps, skillsLsArgv(), 30);
+    if (r.exit === 0) listed = parseSkillsList(r.stdout);
+    else why = `sbx skills ls exited ${r.exit}: ${clip(r.stderr || r.stdout, 200)}`;
+  } catch (e) { why = `sbx skills ls: ${clip(message(e), 200)}`; }
+  if (listed?.includes(skill)) return { in_store: true };
+  const entries = store.dir ? listHost(deps, store.dir) : [];
+  if (entries.includes(skill)) return { in_store: true };
+  const plugins = [STORE_PLUGIN, ...entries.filter((e) => e !== STORE_PLUGIN)];
+  if (store.dir && plugins.some((p) => listHost(deps, join(store.dir!, p, "skills")).includes(skill))) return { in_store: true };
+  if (listed === null && !entries.length) return { in_store: "unknown", why: `${why}; no store folder at ${store.shown}` };
+  const via = listed === null ? "store folder" : "sbx skills ls";
+  let release = "unknown";
+  for (const p of store.dir ? plugins : []) {
+    try {
+      const version = JSON.parse(readHost(deps, join(store.dir!, p, ".claude-plugin", "plugin.json")) ?? "null")?.version;
+      if (typeof version === "string" && version) { release = version; break; }
+    } catch { /* an unreadable plugin.json names no release */ }
+  }
+  const said = listed === null ? `; read from the store folder: ${why}` : "";
+  return { in_store: false, store: store.shown, release, via,
+    text: `${skill} is not in the sbx skills store (${store.shown}; plugin ${release}${said}); import the release: tk-studio update, then sbx skills import --force` };
 }
 
 // ------------------------------------------------------------ Story 33.3: the supervisor's pin record
@@ -404,11 +480,13 @@ export async function lookupEnginePid(worktree: string | null, engineRunId: stri
 /** The holds this process spawned, by queue run id. */
 const holds = new Map<string, HoldChild>();
 
-const defaultHold = (b: string, args: string[]): HoldChild => {
-  let pid: number | undefined;
-  const done = runProcess(b, args, { timeoutS: HOLD_TIMEOUT_S, onSpawn: (p) => { pid = p; } }).catch(() => undefined);
-  return { get pid() { return pid; }, done };
-};
+/** Story 36.5 (DW-109): the hold, detached and unref'd so it outlives this process; `done` settles on its `exit`. */
+export function defaultHold(b: string, args: string[], spawner: typeof spawn = spawn): HoldChild {
+  const child = spawner(b, args, { detached: true, stdio: "ignore", windowsHide: true });
+  const done = new Promise<void>((ok) => { child.once("exit", () => ok()); child.once("error", () => ok()); });
+  child.unref();
+  return { pid: child.pid, done };
+}
 
 /** Spawn the hold for a run's engine (one per run in this process). Answers the hold's host pid. */
 export function startHold(runId: string, sb: string, pid: number, deps: SandboxDeps = {}): HoldChild {
@@ -449,7 +527,8 @@ function spawnRecordedHold(queue: Queue, runId: string, sb: string, pid: number,
 
 /** The restart rule for holds (`recoverQueue`): every launched or paused sbx run with a recorded engine pid
  * that still runs as recorded (its start time matched) has its hold respawned — unless a hold recorded for it
- * still runs (this process's, or another's by host pid + start time). Answers the run ids held again. */
+ * may still run (this process's, or another's by host pid + start time: `workerMayRun`, so only a dead or reused pid
+ * counts as gone). Answers the run ids held again. */
 export async function respawnHolds(queue: Queue, deps: SandboxDeps = {}): Promise<string[]> {
   const out: string[] = [];
   let runs: QueueRun[];
@@ -461,7 +540,7 @@ export async function respawnHolds(queue: Queue, deps: SandboxDeps = {}): Promis
     try {
       if (holding(r.run_id)) continue;
       const last = queue.events(r.run_id).findLast((e) => e.kind === "hold")?.detail as Record<string, any> | null | undefined;
-      const alive = deps.holdAlive ?? ((p: number, s: string | null) => probeRecordedWorker(p, s).outcome === "running");
+      const alive = deps.holdAlive ?? ((p: number, s: string | null) => workerMayRun(probeRecordedWorker(p, s)));
       if (typeof last?.pid === "number" && alive(last.pid, typeof last.start === "string" ? last.start : null)) continue;
       const probe = await probeEngine(r.sandbox!, r.engine_pid!, deps);
       if (!("alive" in probe) || !probe.alive || !sameStart(probe.start, r.engine_start)) continue;

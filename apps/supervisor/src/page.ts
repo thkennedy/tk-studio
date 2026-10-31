@@ -512,6 +512,8 @@ ${l.reason ? `<p class="reason">${t(l.reason)}</p>` : ""}
     : pc.last_tick_ms === null && pc.last_drain_ms === null && pc.last_pass_at === null
       ? `<p class="meta">pacer: no pass recorded</p>`
       : `<p class="meta">${t(`pacer: last tick ${pc.last_tick_ms ?? "-"} ms · last drain ${pc.last_drain_ms ?? "-"} ms · last pass ${pc.last_pass_at ?? "-"}`)}</p>`;
+  // Story 36.5: a pass past the slow bound, while it runs.
+  const running = pc?.running ? `<p class="meta">${t(`pacer: ${pc.running.tag} running since ${pc.running.started_at} (${pc.running.elapsed_ms} ms at the warning), driving ${pc.running.ids.join(", ") || "no run named"}`)}</p>` : "";
 
   const registry = data.registry.ok
     ? (Object.keys(data.registry.projects).length ? Object.entries(data.registry.projects).map(([id, e]) =>
@@ -549,7 +551,7 @@ ${lines ? `<ul>${lines}</ul>` : note(elsewhere(r.project))}</div>`;
 <section id="locks"><h2>Kept locks</h2>${locks}</section>
 <section id="status-blocks"><h2>Latest status blocks</h2>${blocks}</section>
 <section id="workspaces"><h2>Run workspaces</h2>${workspaces}</section>
-<section id="log"><h2>Supervisor log</h2>${pacer}${log}</section>
+<section id="log"><h2>Supervisor log</h2>${pacer}${running}${log}</section>
 <section id="ledger"><h2>Ledger tail</h2>${ledger}</section>
 <section id="registry"><h2>Registry projects</h2>${registry}</section>
 <section id="agents"><h2>Agents</h2>${agents}</section>

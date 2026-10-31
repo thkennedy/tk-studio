@@ -1035,6 +1035,30 @@ class SupervisorLog(DoctorCase):
                          f"{newest}; last uncaught line 5m ago")
         self.assertIsNone(check["fix"])
 
+    def test_story_36_5_a_process_level_end_ranks_above_the_routine_lines(self):
+        self.run_cli(["install", "--roster", str(self.full_roster())])
+        routine = [f"{stamp(NOW - 60)} [tick] stopped (exit 0)",
+                   f"{stamp(NOW - 30)} [drain] stopped (exit 0)"]
+        for line in (f"{stamp(NOW - 300)} [keeper] stopped (exit 75)",
+                     f"{stamp(NOW - 300)} [pacer] stopped (exit 0)",
+                     f"{stamp(NOW - 300)} [serve] stopped (signal SIGTERM)",
+                     f"{stamp(NOW - 300)} [drain] uncaught: boom",
+                     f"{stamp(NOW - 300)} [tick] stopped (exit 3)",
+                     f"{stamp(NOW - 300)} [tick] stopped (spawn failed)"):
+            self.supervisor_log([line] + routine)
+            check = self.check()
+            kind = "uncaught" if "uncaught" in line else "stopped"
+            self.assertTrue(check["detail"].endswith(
+                f"; last {kind} line 5m ago"), (line, check))
+
+    def test_story_36_5_only_routine_lines_fall_back_to_the_routine_line(self):
+        self.run_cli(["install", "--roster", str(self.full_roster())])
+        self.supervisor_log([f"{stamp(NOW - 300)} [drain] stopped (exit 0)",
+                             f"{stamp(NOW - 60)} [tick] stopped (exit 0)"])
+        check = self.check()
+        self.assertTrue(check["detail"].endswith("; last stopped line 1m ago"),
+                        check)
+
     def test_api_down_warns_with_the_line_verbatim_its_age_and_the_start(self):
         self.run_cli(["install", "--roster", str(self.full_roster())])
         self.host.calls.clear()

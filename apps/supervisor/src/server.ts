@@ -760,6 +760,16 @@ export function balancedJsonObjects(text: string): unknown[] {
   return found;
 }
 
+/** The §3 `status` values (`contracts/status-block.schema.json`). */
+const STATUS_BLOCK_VALUES: readonly unknown[] = ["complete", "partial", "blocked"];
+
+/** Story 36.5 (hole 98): with no status block, a balanced object with a §3 `status` and no string `intent`; any other
+ * `status` (a worker quoting a tool's `{"status":"success"}`) is no block at all. */
+export function hasMalformedStatusBlock(text: string): boolean {
+  return balancedJsonObjects(text).some((v) => !!v && typeof v === "object"
+    && STATUS_BLOCK_VALUES.includes((v as Record<string, unknown>).status) && typeof (v as Record<string, unknown>).intent !== "string");
+}
+
 /** §3: the LAST balanced JSON object whose `status` and `intent` are strings. */
 export function extractStatusBlock(text: string): { status: string; intent: string; [k: string]: unknown } | null {
   const blocks = balancedJsonObjects(text).filter(isStatusBlock);
@@ -768,7 +778,13 @@ export function extractStatusBlock(text: string): { status: string; intent: stri
 
 /** AD-11: a headless run without a status block is a named conformance failure. */
 export const MISSING_STATUS_BLOCK = "conformance failure (AD-11): run terminated without a JSON status block (§3)";
+/** Story 36.5 (DW-113, hole 98): a block the worker did write, missing its `intent`: named, and never resumed. */
+export const MALFORMED_STATUS_BLOCK = "conformance failure (AD-11): status block malformed: missing intent";
 export const MAX_LOGIN_MISSING = "harness auth: Max login missing or expired";
+
+/** Story 36.5 (CAP-13, DW-105): why a run blocked when the block is the supervisor's own, set where the block is built
+ * (never read back from its reason). It rides the run's end detail and `run.json`, never the §3 status block. */
+export type OwnBlock = "placement" | "lock" | "pin" | "auth" | "worktree" | "engine-mcp" | "render";
 
 export interface WorkerResult {
   text: string; isError: boolean; totalCostUsd?: number;
@@ -1069,6 +1085,8 @@ export interface InvokeOptions {
   /** Story 27.2: on the sbx tier, pins the sandbox (`sbx run -d --name <sb>`) before the login preflight;
    * answers null when pinned, else the failure — the run then ends `blocked` naming the pin. */
   pin?: (sandbox: string) => Promise<string | null>;
+  /** Story 36.5: read after a failed `pin`: the failure's `own_block` when it is not the pin's own (default `pin`). */
+  pinOwnBlock?: () => OwnBlock | undefined;
   /** Story 34.5: read after the pin — the run's live engine MCP env (`TK_ENGINE_MCP_URL`, `TK_ENGINE_MCP_BEARER`), passed
    * into the sandbox by name (`sbx exec -e <NAME>`), the values in the spawn env only; undefined: none. sbx tier only. */
   engineMcpEnv?: () => Record<string, string> | undefined;
@@ -1136,7 +1154,7 @@ export async function invokeSkill(
   if (vmRoot && opts.pin) {
     const pinFailed = await opts.pin(sandbox!);
     if (pinFailed) {
-      return { status_block: { status: "blocked", intent: skill, artifacts: [], reason: pinFailed }, pin: pinFailed, ran: false };
+      return { status_block: { status: "blocked", intent: skill, artifacts: [], reason: pinFailed }, pin: pinFailed, own_block: opts.pinOwnBlock?.() ?? ("pin" satisfies OwnBlock), ran: false };
     }
   }
   // Story 34.5: the run's engine MCP (started by the pin) reaches the sandbox by name, never a file or an argv value.
@@ -1148,7 +1166,7 @@ export async function invokeSkill(
   if (gaps.length) {
     return {
       status_block: { status: "blocked", intent: skill, artifacts: [], reason: `auth preflight: ${gaps.join("; ")}` },
-      preflight: gaps, ran: false,
+      preflight: gaps, ran: false, own_block: "auth" satisfies OwnBlock,
     };
   }
   if (!driftByRoot.has(root)) {
@@ -1186,9 +1204,14 @@ export async function invokeSkill(
   const authFailed = failed && [worker.text, res.stderr].some((s) => AUTH_FAIL_RE.test(s) || IS_ERROR_AUTH_RE.test(s));
   const authReason = `${MAX_LOGIN_MISSING} — worker answered 401/auth failure (§1)`;
   const authBlock = { status: "blocked", intent: skill, artifacts: [], reason: authReason };
+  // Story 36.5: the Max login gone is the supervisor's own block where its `authBlock` becomes the status block — except
+  // where this worker ran the launch core, which may have started an engine before the 401: there the launch-orphan rule
+  // still judges the lock. A `blocked` the worker wrote stays the worker's own, so its `on_status` stop still fires.
+  const authOwn = () => { if (skill !== "tk-studio-launch") result.own_block = "auth" satisfies OwnBlock; };
   if (block) {
     if (authFailed && block.status !== "blocked") {
       result.status_block = authBlock;
+      authOwn();
       result.run_status_block = block; // the run's own block, preserved for inspection
     } else if (authFailed) {
       // Already blocked: the reason still names the Max login, the worker's own after it.
@@ -1199,10 +1222,12 @@ export async function invokeSkill(
     }
   } else if (authFailed) {
     result.status_block = authBlock;
+    authOwn();
     result.stderr_tail = res.stderr.slice(-1000);
   } else {
-    // §3 / AD-11: a run ending without a status block is itself a conformance failure.
-    result.conformance_failure = MISSING_STATUS_BLOCK;
+    // §3 / AD-11: a run ending without a status block is itself a conformance failure; one that wrote a block
+    // missing its `intent` is named malformed (Story 36.5), and `finishRun` does not resume it.
+    result.conformance_failure = hasMalformedStatusBlock(worker.text) ? MALFORMED_STATUS_BLOCK : MISSING_STATUS_BLOCK;
     result.stderr_tail = res.stderr.slice(-1000);
   }
   return result;

@@ -391,3 +391,80 @@ describe("a pacer pass (Story 33.7, AC2)", () => {
     expect(pacerPath({})).toBeUndefined();
   });
 });
+
+describe("Story 36.5 (M12, DW-63): the pacer pass, visible while it runs", () => {
+  const NTFY = { TK_SUPERVISOR_NOTIFY: "ntfy", TK_SUPERVISOR_NTFY_URL: "https://ntfy.invalid/pacer-topic" };
+  const ID = "q-run-epic-36-20261031T121930Z-29f699";
+  const childScript = (body: string) => { const p = join(tempDir("tk-sup-log-script-"), "child.ts"); writeFileSync(p, body); return p; };
+  const lines = (w: { dir: string }) => readdirSync(w.dir).filter((n) => n.startsWith("supervisor-")).sort().flatMap((n) => fileLines(join(w.dir, n)));
+
+  test("the timer fires while the child runs: warning, one send and `running` before the exit; `finish` repeats none and removes `running`", async () => {
+    const w = work(NTFY);
+    const c = clock(T0);
+    const sends: string[] = [];
+    let fire: (() => void) | undefined, armed = 0, cleared = 0;
+    const seen: { warned: boolean; running: unknown }[] = [];
+    const child = childScript(`console.log("driving ${ID}"); console.log("next"); await new Promise((r) => setTimeout(r, 400)); console.log("done");`);
+    const code = await runUnderLog(["--tag", "drain", "--pass", "--", child], w.env, c.now, {
+      stdout: (s) => {
+        if (!s.startsWith("next")) return; // the ids are collected after each line's echo
+        c.set(T0 + SLOW_PASS_MS + 5);
+        fire!();
+        fire!(); // a second firing is a no-op
+        seen.push({ warned: lines(w).some((l) => l.includes("warning: pass drain")), running: readPacer(w.env).running });
+        c.set(T0 + SLOW_PASS_MS + 9);
+      },
+      stderr: () => {},
+      fetch: async (_u, init) => { sends.push(String(init?.body ?? "")); return new Response("ok"); },
+      setTimeout: (fn, ms) => { expect(ms).toBe(SLOW_PASS_MS); armed++; fire = fn; return 1; },
+      clearTimeout: () => { cleared++; },
+    });
+    expect(code).toBe(0);
+    expect(armed).toBe(1);
+    expect(cleared).toBe(1);
+    expect(seen).toEqual([{ warned: true, running: { tag: "drain", started_at: new Date(T0).toISOString(), elapsed_ms: SLOW_PASS_MS + 5, ids: [ID] } }]);
+    expect(sends).toHaveLength(1);
+    expect(sends[0]).toBe(`warning: pass drain took ${SLOW_PASS_MS + 5} ms (over 10 min), driving ${ID}`);
+    expect(lines(w).filter((l) => l.includes("warning: pass"))).toHaveLength(1);
+    const end = readPacer(w.env);
+    expect(end).toEqual({ last_tick_ms: null, last_drain_ms: SLOW_PASS_MS + 9, last_pass_at: new Date(T0 + SLOW_PASS_MS + 9).toISOString() });
+    expect(Object.keys(JSON.parse(readFileSync(pacerPath(w.env)!, "utf-8")))).toEqual(["last_tick_ms", "last_drain_ms", "last_pass_at"]);
+  });
+
+  test("a short pass: no timer output, the timer cleared, exact old keys; a later other step keeps a `running` it does not own", async () => {
+    const w = work(NTFY);
+    const c = clock(T0);
+    const sends: string[] = [];
+    let cleared = 0;
+    const io = {
+      stdout: () => {}, stderr: () => {}, fetch: async (_u: string, init?: RequestInit) => { sends.push(String(init?.body)); return new Response("ok"); },
+      setTimeout: () => 7, clearTimeout: (t: unknown) => { expect(t).toBe(7); cleared++; },
+    };
+    expect(await runUnderLog(["--tag", "tick", "--pass", "--", childScript(`console.log("t");`)], w.env, c.now, io)).toBe(0);
+    expect(cleared).toBe(1);
+    expect(sends).toEqual([]);
+    expect(lines(w).some((l) => l.includes("warning:"))).toBe(false);
+    expect(Object.keys(readPacer(w.env))).toEqual(["last_tick_ms", "last_drain_ms", "last_pass_at"]);
+
+    const running = { tag: "drain", started_at: "2026-10-31T00:00:00.000Z", elapsed_ms: 600001, ids: [ID] };
+    writeFileSync(pacerPath(w.env)!, JSON.stringify({ ...readPacer(w.env), running }));
+    expect(readPacer(w.env).running).toEqual(running);
+    await runUnderLog(["--tag", "tick", "--pass", "--", childScript(`console.log("t");`)], w.env, c.now, io);
+    expect(readPacer(w.env).running).toEqual(running);
+    // an invalid member reads as absent
+    writeFileSync(pacerPath(w.env)!, JSON.stringify({ last_tick_ms: 1, running: { tag: 3 } }));
+    expect(Object.keys(readPacer(w.env))).toEqual(["last_tick_ms", "last_drain_ms", "last_pass_at"]);
+  });
+
+  test("a fake clock past the bound with no timer firing: `finish` warns, once", async () => {
+    const w = work(NTFY);
+    const c = clock(T0);
+    const sends: string[] = [];
+    await runUnderLog(["--tag", "tick", "--pass", "--", childScript(`console.log("t");`)], w.env, c.now, {
+      stdout: () => { c.set(T0 + SLOW_PASS_MS + 1); }, stderr: () => {}, setTimeout: () => 1, clearTimeout: () => {},
+      fetch: async (_u, init) => { sends.push(String(init?.body)); return new Response("ok"); },
+    });
+    expect(sends).toHaveLength(1);
+    expect(lines(w).filter((l) => l.includes("warning:"))).toHaveLength(1);
+  });
+});

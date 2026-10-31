@@ -109,8 +109,8 @@ import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import {
-  buildWorkerCommand, checkTier, finishStateFor, invokeSkill, lastJsonObject, maxLoginPreflight, MISSING_STATUS_BLOCK,
-  readProjectConfig, registryShow, requireCompatible, resolveStudioRoot, runJobVerb, runProcess, runUv, SbxSandboxMissing, TierRequired, toVmPath, WORKER_RECORD_FAILED, type Spawner, type Tier,
+  buildWorkerCommand, checkTier, finishStateFor, invokeSkill, lastJsonObject, MALFORMED_STATUS_BLOCK, maxLoginPreflight, MISSING_STATUS_BLOCK,
+  readProjectConfig, registryShow, requireCompatible, resolveStudioRoot, runJobVerb, runProcess, runUv, SbxSandboxMissing, TierRequired, toVmPath, WORKER_RECORD_FAILED, type OwnBlock, type Spawner, type Tier,
 } from "./server";
 import { serve as serveApi } from "./api";
 import { notifier, pluginRoot, tlsConfig, WorkDirMissing, workDir } from "./env";
@@ -118,7 +118,7 @@ import { engineMcpEnv, engineMcpRefusalText, recoverEngineMcps, startEngineMcp, 
 import { canonicalPr, prUrl, recordClaimRefusal, snapshotOnce, sweepEnds, underBunTest, type HygieneDeps } from "./hygiene";
 import { rebuildAgents, type RebuildDeps, type RebuildResult } from "./registry";
 import {
-  closeOut, closeOutDetail, launchedCloseOutInput, meteredCost, pendingCloseOut, prepareWorktree, priorPr, sweepEngines, type WorktreeDeps,
+  closeOut, closeOutDetail, launchedCloseOutInput, meteredCost, pendingCloseOut, prepareWorktree, priorPr, sweepEngines, WorktreeFailed, type WorktreeDeps,
 } from "./worktree";
 import {
   checkoutKey, defaultProbes, engineRoot, type EngineWhere, servedRoot, isTerminal, LAUNCH_SKILL, VALIDATE_RESOLUTION_JOB, ENGAGEMENT_CHAT_JOB, ORPHANED_REASON, probeLaunchEngine, processStartTime, Queue, RunTerminal, selfOwner, STUDIO_END_RETRY_LIMIT, workerMayRun,
@@ -138,7 +138,7 @@ import { closeoutPass } from "./delivery";
 import { ledgerPath } from "./board";
 import { CERT_CHECK_MS, CERT_RENEW_EXIT, certCheck, recordCertStart } from "./cert";
 import {
-  holdEngine, killRunEngine, pinWithRestart, releasePin, respawnHolds, STARTER_LOCK_REFRESH_MS, studioRunDir, writeStarterLock, writeStarterLocks, type PinContext,
+  holdEngine, killRunEngine, pinWithRestart, pruneEngineTmp, releasePin, respawnHolds, skillInStore, STARTER_LOCK_REFRESH_MS, studioRunDir, writeStarterLock, writeStarterLocks, type PinContext,
   type SandboxDeps,
 } from "./sandbox";
 import { jobOptions, loadSupervisorConfig, type JobOptions } from "./config";
@@ -189,6 +189,9 @@ export interface RunSummary {
   /** Story 27.5 (DW-23): `finish` was refused (the studio run already terminal): the refusal and the run's actual
    * state — `mirror` records them as a `finish-refused` event; the reason stays the worker's own. */
   finish_refused?: { error: string; actual_state: string };
+  /** Story 36.5 (CAP-13): the block is the supervisor's own, set where it was built: the end's `own_block`, the lock
+   * released when no engine started, and never the job's `stop.on_status`. */
+  own_block?: OwnBlock;
 }
 
 /** A tripped guard: the job guard's name (or the tick's `--timeout-cap-s`) and its value. */
@@ -219,6 +222,8 @@ export class StartError extends Error {
    * `show`, `resolve`, `wake`/`submit`), `problems[]`, a registry root that is not the checkout,
    * an unreadable project config, or a missing checkout directory. */
   refused?: boolean;
+  /** Story 36.5: thrown where the block is the supervisor's own (`endAfterDriveFailure` records it). */
+  ownBlock?: OwnBlock;
 }
 
 function refusal(msg: string, problems?: string[]): StartError {
@@ -452,6 +457,16 @@ function requireTier(v: Pick<Validated, "jobId" | "projectId" | "defn">, options
   }
 }
 
+/** Story 36.5 (DW-113): a sandbox-tier job whose target skill is absent from the skills store: the store's answer, else
+ * null (not sbx, no target skill, or in the store). Neither source readable proves nothing: one line, no refusal. */
+async function skillMissing(defn: Record<string, any> | null | undefined, options: WorkerOptions, deps: SandboxDeps): Promise<{ skill: string; text: string } | null> {
+  const skill = defn?.target?.skill;
+  if (options.tier !== "sbx" || typeof skill !== "string" || !skill) return null;
+  const found = await skillInStore(skill, deps);
+  if (found.in_store === "unknown") console.error(`[skills-store] ${skill} not checked: ${found.why}`);
+  return found.in_store === false ? { skill, text: found.text } : null;
+}
+
 const explicitLayer = (permissionMode: string | undefined, opts: RunOptions): OptionLayer =>
   ({ permissionMode, tier: opts.tier, sandbox: opts.sandbox, model: opts.model, effort: opts.effort });
 
@@ -499,7 +514,7 @@ export function studioRunEnder(verbRunner: VerbRunner = runJobVerb): StudioEnder
     try {
       const st = answered(await verbRunner(root, ["status", "--directory", root, "--job-id", run.job_id, "--run-id", sid]), "status");
       const state = (st.runs ?? [])[0]?.state;
-      if (isTerminal(state)) return { ok: true, detail: `studio run ${sid} already ${state}`, state };
+      if (isTerminal(state)) return { ok: true, detail: `studio run ${sid} already ${state}`, state, ...(typeof (st.runs ?? [])[0]?.own_block === "string" ? { own_block: st.runs[0].own_block } : {}) };
     } catch { /* end it anyway: the ending verb decides */ }
     const verb = run.target === "core" ? "cancel" : "finish";
     try {
@@ -1013,6 +1028,9 @@ export async function submitJob(
       v = await validate(jobId, directory, undefined, opts.guardCapS);
       // Story 35.5: a job that requires a tier its placement lacks (TierRequired, nothing queued or spawned).
       requireTier(v, options, placementSource(explicit, stored, config));
+      // Story 36.5 (DW-113, hole 98): a sandbox-tier job whose target skill the store lacks (nothing queued or spawned).
+      const absent = await skillMissing(v.defn, options, sbxDeps(opts.worktree));
+      if (absent) throw refusal(`skills-store:SkillMissing: ${absent.text}`);
       // Story 34.5: a run its job definition flags needs the work folder too (the same refusal, nothing queued).
       if (v.defn?.editor_in_the_loop === true && !workDir(opts.hygiene?.env)) throw refusal(new WorkDirMissing().message);
     }
@@ -1112,7 +1130,11 @@ async function cancelQueueRun(
 ): Promise<QueueRun> {
   const run = queue.get(runId);
   if (!run) throw new Error(`queue run '${runId}' not found`);
-  if (isTerminal(run.state)) throw new RunTerminal(runId, run.state);
+  if (isTerminal(run.state)) {
+    // Story 36.5 (DW-105): an ended run an unverified engine holder still names: the cancel frees the checkout.
+    if (queue.releaseTerminalEngineLock(runId)) return run;
+    throw new RunTerminal(runId, run.state);
+  }
   // Story 27.2: an `external` run was started outside the queue — nothing here may stop it, so the queue run
   // is never ended under the studio run it mirrors (it stays live for the pacer until that run ends).
   if (run.state === "external") throw new ExternalRunRefused(runId, run.studio_run_id);
@@ -1292,6 +1314,9 @@ export interface ClaimRefused { reason: string; resolves: string }
  * the key is stored on the `claim-refused` event only, never on a summary or a 0.1.28 surface. */
 interface KeyedRefusal extends ClaimRefused { key: string }
 
+/** What resolves a `skill-missing:<skill>` claim refusal. */
+export const SKILL_MISSING_RESOLVES = "release the plugin carrying the skill and import it (`sbx skills import --force`, runbook §3.8), or cancel the run; the next drain pass claims the run";
+
 /** What resolves a lock wait (the reason names the holder). */
 export const LOCK_RESOLVES = "the checkout lock's holder ends or is cancelled; the next drain pass claims the run";
 
@@ -1343,15 +1368,20 @@ function refusedClaim(queue: Queue, runId: string, jobId: string, r: ClaimRefuse
  * vary per pass). Story 33.3: through `pinWithRestart` (a running, logged-out sandbox restarted once; `ctx` carries
  * the pass's restarted set and the probe's spawner). Null when pinned, else the failure. Never throws. */
 export async function pinBeforeClaim(queue: Queue, runId: string, sb: string, deps: SandboxDeps = {}, ctx: PinContext = {}): Promise<string | null> {
-  const failed = await pinWithRestart(queue, runId, sb, deps, ctx);
+  const report: NonNullable<PinContext["report"]> = {};
+  const failed = await pinWithRestart(queue, runId, sb, deps, { ...ctx, report });
   try {
     const last = queue.events(runId).findLast((e) => e.kind === "pinned" || e.kind === "pin-failed" || e.kind === "pin-released");
     if (failed) {
       if (last?.kind === "pin-failed" && last.detail?.sandbox === sb) {
         if (last.detail?.error !== failed) queue.patchEventDetail(last.seq, { error: failed });
       } else queue.note(runId, "pin-failed", { sandbox: sb, error: failed });
-    } else if (!(last?.kind === "pinned" && last.detail?.sandbox === sb && queue.pinOutstanding(sb))) {
-      queue.note(runId, "pinned", { sandbox: sb });
+    } else {
+      // Story 36.5: the prune's outcome rides `pinned`; a clean probe closing an open restart episode is its healed signal.
+      const tmp_pruned = await pruneEngineTmp(queue, runId, sb, deps);
+      const heals = report.probe_clean && queue.openPinRestartOn(sb) !== null;
+      if (last?.kind === "pinned" && last.detail?.sandbox === sb && queue.pinOutstanding(sb) && !heals) queue.patchEventDetail(last.seq, { tmp_pruned });
+      else queue.note(runId, "pinned", { sandbox: sb, tmp_pruned, ...report });
     }
   } catch { /* the run ended meanwhile: the pin answer still stands */ }
   return failed;
@@ -1435,6 +1465,14 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
         // definition here, and from the freshly resolved one after `validate` below.
         try { requireTier({ jobId, projectId: projectIdOf(root), defn: (stored ? queue.definition(stored) : null) ?? {} }, options, placementSource(explicit, stored, config)); }
         catch (e) { const r = await claimRefusal(e); if (r) return r; throw e; }
+        // Story 36.5 (DW-113): after `requireTier`, a target skill the store lacks: `skill-missing:<skill>`, left `queued`.
+        const storeRefused = async (defn: Record<string, any> | null | undefined): Promise<RunSummary | null> => {
+          const absent = await skillMissing(defn, options, sbxDeps(opts.worktree));
+          return absent ? refusedClaim(queue, opts.runId!, jobId, await recordedRefusal(queue, opts.runId!, { key: `skill-missing:${absent.skill}`, reason: absent.text, resolves: SKILL_MISSING_RESOLVES }, opts.hygiene)) : null;
+        };
+        const storedDefn = stored ? queue.definition(stored) : null;
+        const absentStored = await storeRefused(storedDefn);
+        if (absentStored) return absentStored;
         // Story 33.2: the drain's gate before the claim — the pin (moved here from the drive), then the preflight.
         const refused = await claimGate(queue, opts.runId, options, {
           sbx: sbxDeps(opts.worktree), ...(opts.hygiene ? { hygiene: opts.hygiene } : {}), ...(opts.restarted ? { restarted: opts.restarted } : {}),
@@ -1443,6 +1481,11 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
         v = await validate(jobId, directory, permissionMode, opts.guardCapS);
         try { requireTier(v, options, placementSource(explicit, stored, config)); }
         catch (e) { const r = await claimRefusal(e); if (r) return r; throw e; }
+        // A stored definition naming no skill (a legacy row): the resolved one is checked instead.
+        if (typeof storedDefn?.target?.skill !== "string") {
+          const absentResolved = await storeRefused(v.defn);
+          if (absentResolved) return absentResolved;
+        }
       } else {
         // Story 35.5 (AC4): validated (the registry and `resolve`, no claude) and the requires-tier check made before the
         // login preflight spawns `claude auth status` — a TierRequired refusal starts no process and is never masked.
@@ -1503,7 +1546,9 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
     try {
       // The effective options: explicit, else recorded on the run, else the config, else the
       // default — re-checked after the claim (an invalid stored value ends the run `blocked`).
-      const eff = resolveWorkerOptions(explicit, storedLayer(claim.run), config, v.root);
+      let eff: ReturnType<typeof resolveWorkerOptions>;
+      try { eff = resolveWorkerOptions(explicit, storedLayer(claim.run), config, v.root); }
+      catch (e) { const err = e instanceof StartError ? e : new StartError(message(e)); err.ownBlock = "placement"; throw err; }
       // Story 27.1: the run's own worktree, cut from its base and materialised, once per queue run.
       const workRoot = await prepareWorktree(queue, claim.run, v.projectId, v.root, { ...opts.worktree, tier: eff.tier });
       // Story 22.3: a flagged Godot run is snapshot before the minting verb, once per queue run.
@@ -1515,13 +1560,13 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
       // is claimed by now, so no `claim-refused` event: those are recorded on a queued run only).
       if (prePinned) {
         const mcp = await startEngineMcp(queue, run.run_id, { env: opts.worktree?.env ?? process.env, ...opts.engineMcp });
-        if ("refused" in mcp) throw new StartError(engineMcpRefusalText(mcp.refused));
+        if ("refused" in mcp) { const err = new StartError(engineMcpRefusalText(mcp.refused)); err.ownBlock = "engine-mcp"; throw err; }
       }
       summary = await drive(queue, run.run_id, { ...v, ...eff, workRoot }, opts.worktree, prePinned);
     }
     catch (e) {
       const err = e instanceof StartError ? e : new StartError(message(e));
-      await endAfterDriveFailure(queue, run.run_id, err.message, opts.worktree, owner);
+      await endAfterDriveFailure(queue, run.run_id, err.message, opts.worktree, owner, e instanceof WorktreeFailed ? "worktree" : err.ownBlock);
       err.runId = run.run_id;
       throw err;
     }
@@ -1548,7 +1593,7 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
  * still works it: its recorded worker, or an engine in the worktree (`closeout: skipped`, the worktree
  * kept; the engine-end sweep closes it out once they are dead). Never throws. */
 export async function endAfterDriveFailure(
-  queue: Queue, runId: string, reason: string, deps: WorktreeDeps = {}, self: Owner = selfOwner(),
+  queue: Queue, runId: string, reason: string, deps: WorktreeDeps = {}, self: Owner = selfOwner(), ownBlock?: OwnBlock,
 ): Promise<void> {
   const cur = queue.get(runId);
   let skip: string | undefined;
@@ -1560,7 +1605,7 @@ export async function endAfterDriveFailure(
   // Closed out with nothing live around it: the lock is released, never handed to an engine at a removed worktree.
   const closedOut = !skip && (closed.closeout as { result?: string } | undefined)?.result !== undefined;
   try {
-    await queue.endDriven(runId, "blocked", reason, { ...(Object.keys(closed).length ? { detail: closed } : {}), ...(closedOut ? { keepEngine: true } : {}) });
+    await queue.endDriven(runId, "blocked", reason, { ...(Object.keys(closed).length ? { detail: closed } : {}), ...(closedOut ? { keepEngine: true } : {}), ...(ownBlock ? { ownBlock } : {}) });
   } catch { /* already ended */ }
   // Story 27.2: nothing left in the sandbox — its pin is released (a skipped close-out: the sweep's late one does).
   if (!skip) await releasePin(queue, runId, sbxDeps(deps));
@@ -1662,7 +1707,8 @@ export async function mirror(
     // AC4: a studio outcome in `stop.on_status` stops the job recurring — the
     // `stopped` event is written in the same transaction as `ended`.
     const onStatus = v.defn?.stop?.on_status;
-    const stop = studioOutcome && Array.isArray(onStatus) && onStatus.includes(studioOutcome.state)
+    // Story 36.5 (DW-105): a block that is the supervisor's own never stops the job.
+    const stop = !s.own_block && studioOutcome && Array.isArray(onStatus) && onStatus.includes(studioOutcome.state)
       ? { stop: { condition: "on_status" as const, state: studioOutcome.state, job_id: v.jobId } } : {};
     // Story 27.1 (operator-decisions §2): a launch that started an engine in the run's worktree
     // writes `launched`; the run stays `running` and `ended` waits for the engine's end (the sweep).
@@ -1686,7 +1732,9 @@ export async function mirror(
     // An engine its status block names but that is not waited for (a `blocked` launch, no deferred
     // finish), or — a launch run naming none — one the launch core may still have started (the
     // launch-orphan rule): probed in the worktree first; an engine found keeps the worktree and takes the lock.
-    const probed = now?.worktree && !isTerminal(now.state) && (engine || (now.verb_started && v.defn?.target?.skill === LAUNCH_SKILL))
+    // Story 36.5: not for the supervisor's own block with no engine or worker on the record: `writeEnd` releases the lock, no probe.
+    const ownRelease = !!s.own_block && !engine && !!now && queue.ownBlockRulesOutEngine(now);
+    const probed = !ownRelease && now?.worktree && !isTerminal(now.state) && (engine || (now.verb_started && v.defn?.target?.skill === LAUNCH_SKILL))
       ? await queue.launchEngineAt(engineRoot(now), { tier: now.tier, sandbox: now.sandbox }) : undefined;
     // Every other end with a worktree closes out first: push + PR, or "no changes".
     // Never while something may still work the worktree: an sbx worker that may still run in the VM, or an engine.
@@ -1703,7 +1751,7 @@ export async function mirror(
       : engine ? { engineRunId: engine } : probed?.holder ? { engineRunId: probed.holder.id } : {};
     await queue.endDriven(queueRunId, terminal ? (s.state as "complete") : "blocked", endReason,
       { ...engineEnd, ...(Object.keys(ended).length ? { detail: ended } : {}), ...stop,
-        ...(s.hold_lock ? { holdLock: s.hold_lock } : {}) });
+        ...(s.hold_lock ? { holdLock: s.hold_lock } : {}), ...(s.own_block ? { ownBlock: s.own_block } : {}) });
     // Story 27.2: an end with nothing left in the sandbox releases its pin (a skipped close-out: the sweep's late one does).
     if (!skip) await releasePin(queue, queueRunId, sbxDeps(worktree));
   } catch (e) {
@@ -1791,6 +1839,8 @@ export interface RunRecorder {
   /** Story 27.2: pin the sbx sandbox before the worker's login preflight (`pinned`/`pin-failed` recorded):
    * null when pinned, else the failure. */
   pin?(sandbox: string): Promise<string | null>;
+  /** Story 36.5: the last failed `pin`'s `own_block` when it was not the pin's own. */
+  pinOwnBlock?(): OwnBlock | undefined;
   /** Story 34.5: the run's live engine MCP env for the worker's sandbox (`InvokeOptions.engineMcpEnv`). */
   engineMcpEnv?(): Record<string, string> | undefined;
   /** Story 27.2: a tripped guard on an sbx launch run kills its in-VM engine by its recorded pid (recorded
@@ -1805,17 +1855,23 @@ export interface RunRecorder {
 export function queueRecorder(
   queue: Queue, runId: string, sbx: SandboxDeps = {}, restarted: Set<string> = new Set<string>(), mcp: EngineMcpDeps = { env: sbx.env ?? process.env },
 ): RunRecorder {
+  let pinOwnBlock: OwnBlock | undefined;
   return {
     pin: async (sb) => {
-      const failed = await pinWithRestart(queue, runId, sb, sbx, { restarted });
-      try { queue.note(runId, failed ? "pin-failed" : "pinned", { sandbox: sb, ...(failed ? { error: failed } : {}) }); }
+      const report: NonNullable<PinContext["report"]> = {};
+      const failed = await pinWithRestart(queue, runId, sb, sbx, { restarted, report });
+      const tmp_pruned = failed ? undefined : await pruneEngineTmp(queue, runId, sb, sbx); // Story 36.5 (DW-60)
+      try { queue.note(runId, failed ? "pin-failed" : "pinned", { sandbox: sb, ...(failed ? { error: failed } : { tmp_pruned, ...report }) }); }
       catch { /* the run ended meanwhile: the pin answer still stands */ }
       if (failed) return failed;
       // Story 34.5: a flagged run's engine MCP starts with its pin (once per run); a refusal fails the pin, so the run
       // ends `blocked` naming it.
       const started = await startEngineMcp(queue, runId, mcp);
-      return "refused" in started ? engineMcpRefusalText(started.refused) : null;
+      if (!("refused" in started)) return null;
+      pinOwnBlock = "engine-mcp";
+      return engineMcpRefusalText(started.refused);
     },
+    pinOwnBlock: () => pinOwnBlock,
     engineMcpEnv: () => engineMcpEnv(runId),
     killEngine: async (why, engineRunId) => {
       const r = queue.get(runId);
@@ -2073,7 +2129,7 @@ export interface ResumeInput {
 /** `accountAttempted`: the check ran `account` (or its counts) for this iteration — succeeded or failed —
  * so the iteration is never accounted again; `accounted`: what it accounted (absent for a job
  * with no `max_turns`/`max_tokens`, which is never accounted). */
-type ResumeRefusal = { ok: false; cause: string; trips?: GuardTrip[]; studioState?: TerminalState; accounted?: Accounted; accountAttempted?: boolean };
+type ResumeRefusal = { ok: false; cause: string; trips?: GuardTrip[]; studioState?: TerminalState; own_block?: OwnBlock; accounted?: Accounted; accountAttempted?: boolean };
 export type ResumeVerdict = { ok: true; remainingS: number; restored: boolean; accounted?: Accounted; accountAttempted?: boolean } | ResumeRefusal;
 
 /** Story 21.6: a `tk-studio-launch` run is never resumed beside the engine it may
@@ -2104,7 +2160,7 @@ export async function resumeCheck(
 
 /** Eligibility, in order, touching no studio counter: a session id recorded; the
  * resume count below the cap; the studio run still resumable (`status` answers
- * queued/running — a terminal one is answered as `studioState`); `neverResume`;
+ * queued/running — a terminal one is answered as `studioState`, with its `own_block`); `neverResume`;
  * the transcript exists (restored from the backup first on the host). */
 export async function resumeEligible(
   i: ResumeInput, verbRunner: VerbRunner = runJobVerb, transcripts: TranscriptChecks = defaultTranscriptChecks,
@@ -2115,8 +2171,9 @@ export async function resumeEligible(
   let st: Record<string, any>;
   try { st = answered(await verbRunner(i.root, ["status", "--directory", i.root, "--job-id", i.jobId, "--run-id", i.studioRunId]), "status"); }
   catch (e) { return { ok: false, cause: `studio run status failed: ${message(e)}` }; }
-  const state = (st.runs ?? [])[0]?.state;
-  if (isTerminal(state)) return { ok: false, cause: `studio run ${i.studioRunId} already ${state}`, studioState: state };
+  const studioRun = (st.runs ?? [])[0];
+  const state = studioRun?.state;
+  if (isTerminal(state)) return { ok: false, cause: `studio run ${i.studioRunId} already ${state}`, studioState: state, ...(typeof studioRun.own_block === "string" ? { own_block: studioRun.own_block as OwnBlock } : {}) };
   if (state !== "queued" && state !== "running") return { ok: false, cause: `studio run ${i.studioRunId} is ${state ?? "unknown"}, not resumable` };
   if (i.neverResume) return { ok: false, ...i.neverResume };
   let restored = false;
@@ -2272,7 +2329,7 @@ export function restartResumer(queue: Queue, verbRunner: VerbRunner, prepared: M
     }
     const verdict = await resumeEligible(input, verbRunner, deps.transcripts);
     if (!verdict.ok) {
-      return { resume: false, cause: verdict.cause, ...(verdict.trips ? { trips: verdict.trips } : {}), ...(verdict.studioState ? { studioState: verdict.studioState } : {}) };
+      return { resume: false, cause: verdict.cause, ...(verdict.trips ? { trips: verdict.trips } : {}), ...(verdict.studioState ? { studioState: verdict.studioState } : {}), ...(verdict.own_block ? { own_block: verdict.own_block } : {}) };
     }
     let wake: unknown = null;
     try { wake = JSON.parse(run.wake ?? "null"); } catch { /* unreadable: none */ }
@@ -2373,6 +2430,7 @@ export async function finishRun(
   try { cost = rec?.costSoFar?.(); } catch { cost = undefined; }
   let pendingCost: number | undefined;
   let invoked: Record<string, unknown> | undefined, tripped: GuardTrip[] | undefined, account: RunSummary["account"];
+  let ownBlock: OwnBlock | undefined;
   const routing = (woke.routing ?? {}) as Record<string, unknown>;
   const knowledge = directive.knowledge && typeof directive.knowledge === "object" ? directive.knowledge : undefined;
   // Story 32.2: an engagement-chat run keeps the queue run id its overlaid payload carries (the contract: every chat
@@ -2405,7 +2463,7 @@ export async function finishRun(
     try { rec?.accounted([], { turns: 0, tokens: 0 }, c); } catch { /* not recorded: the sum misses it on a restart */ }
   };
   for (;;) {
-    accountedLast = false; tripped = undefined; block = undefined; reason = undefined;
+    accountedLast = false; tripped = undefined; block = undefined; reason = undefined; ownBlock = undefined;
     try {
       const startedMs = clockMs();
       const spawnGuardS = timeoutS; // the guard this spawn runs under (sbx: its in-VM `timeout`)
@@ -2418,7 +2476,7 @@ export async function finishRun(
       }, undefined, {
         ...(workRoot !== undefined ? { vmHostRoot: workRoot } : registryRoot !== undefined ? { vmHostRoot: registryRoot } : {}),
         ...(sid ? { sessionId: sid, ...(resuming ? { resume: true } : {}) } : {}), ...recording,
-        ...(rec?.pin ? { pin: (sb: string) => rec.pin!(sb) } : {}),
+        ...(rec?.pin ? { pin: (sb: string) => rec.pin!(sb), ...(rec.pinOwnBlock ? { pinOwnBlock: () => rec.pinOwnBlock!() } : {}) } : {}),
         ...(rec?.engineMcpEnv ? { engineMcpEnv: () => rec.engineMcpEnv!() } : {}),
       });
       // The worker's own time, from its spawn (invokeSkill's worker_elapsed_s) —
@@ -2427,6 +2485,7 @@ export async function finishRun(
       const elapsedS = typeof out.worker_elapsed_s === "number" && Number.isFinite(out.worker_elapsed_s)
         ? out.worker_elapsed_s : (clockMs() - startedMs) / 1000;
       invoked = out;
+      ownBlock = out.own_block as OwnBlock | undefined;
       if (typeof out.total_cost_usd === "number") { cost = (cost ?? 0) + out.total_cost_usd; pendingCost = out.total_cost_usd; }
       block = out.status_block as Record<string, unknown> | undefined;
       if (block) {
@@ -2442,6 +2501,10 @@ export async function finishRun(
         tripped = [wallClockGuard(s.jobGuardS, guardS)];
         state = "partial";
         reason = guardReason(tripped);
+      } else if (out.conformance_failure === MALFORMED_STATUS_BLOCK) {
+        // Story 36.5 (hole 98): the worker wrote a block missing its `intent`: named, ended `partial`, never resumed.
+        state = "partial";
+        reason = MALFORMED_STATUS_BLOCK;
       } else if (out.ran !== false) {
         // AC2: a silent exit — the resume-or-partial rule, capped at RESUME_CAP.
         const failure = String(out.conformance_failure ?? MISSING_STATUS_BLOCK);
@@ -2539,10 +2602,13 @@ export async function finishRun(
     engineKill = await rec.killEngine(guardReason(tripped), launchedEngine(directive.skill, block));
     if (engineKill && workerMayRun(engineKill) && !vmHold) vmHold = `engine may still run in the VM: ${engineKill.outcome} (pid ${engineKill.pid})`;
   }
+  // Story 36.5: the marker stands only while the run still ends the block it was set on.
+  const recordedOwn = state === "blocked" ? ownBlock : undefined;
   const extras = {
     ...(block ? { status_block: block } : {}), ...(cost !== undefined ? { total_cost_usd: cost } : {}),
     ...(tripped?.length ? { guards_tripped: tripped } : {}), ...(account ? { account } : {}),
     ...(vmHold ? { hold_lock: vmHold } : {}), ...(engineKill ? { engine_kill: engineKill } : {}),
+    ...(recordedOwn ? { own_block: recordedOwn } : {}),
   };
   // Story 27.1 (operator-decisions §2): a launch that started an engine in the run's worktree is not
   // finished at launch return — the studio run ends with the engine (`sweepEngines` calls `finish`).
@@ -2556,21 +2622,27 @@ export async function finishRun(
       ...(reason ? ["--reason", reason] : []),
       ...(block ? ["--status-block", JSON.stringify(block)] : []),
       ...(cost !== undefined ? ["--total-cost-usd", String(cost)] : []),
+      ...(recordedOwn ? ["--own-block", recordedOwn] : []),
     ]), "finish");
   } catch (e) {
     // The run's real state, not the stale wake/submit answer: it may have
     // been ended by someone else (the refusal's usual cause).
-    let actual = "unknown";
+    let actual = "unknown", runOwn: OwnBlock | undefined;
     try {
       const status = answered(await verbRunner(root, ["status", "--directory", root, "--job-id", jobId, "--run-id", runId]), "status");
       const run = (status.runs ?? [])[0];
       if (typeof run?.state === "string") actual = run.state;
-    } catch { /* stays unknown */ }
+      if (typeof run?.own_block === "string") runOwn = run.own_block as OwnBlock;
+    } catch { /* stays unknown, no marker */ }
+    // Story 36.5: this `finish` did not land, so the marker is the one the studio run itself carries; none, or an
+    // unreadable status, drops it, and `mirror` treats the block as the run's own (the on_status stop, no own release).
+    const { own_block: _unlanded, ...landed } = extras;
+    const failedExtras = { ...landed, ...(runOwn !== undefined ? { own_block: runOwn } : {}) };
     // Story 27.5 (DW-23): a refusal on an already-terminal studio run keeps the worker's own (status-block)
     // reason; the refusal rides `finish_refused`, recorded by `mirror` as a `finish-refused` event. Any other
     // failure (a timeout, a `uv` that failed to spawn, the run still running/unknown) keeps `finish failed: …`.
-    if (!isTerminal(actual)) return { ...base, ok: false, target: "skill", state: actual, reason: `finish failed: ${message(e)}`, ...extras };
-    return { ...base, ok: false, target: "skill", state: actual, ...(reason ? { reason } : {}), ...extras,
+    if (!isTerminal(actual)) return { ...base, ok: false, target: "skill", state: actual, reason: `finish failed: ${message(e)}`, ...failedExtras };
+    return { ...base, ok: false, target: "skill", state: actual, ...(reason ? { reason } : {}), ...failedExtras,
       finish_refused: { error: `finish failed: ${message(e)}`, actual_state: actual } };
   }
   return { ...base, ok: state === "complete", target: "skill", state, ...(reason ? { reason } : {}), ...extras, finish };

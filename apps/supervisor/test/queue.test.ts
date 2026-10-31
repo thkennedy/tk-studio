@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join, resolve } from "node:path";
-import { resolveCheckout, studioOps, studioRunFinder, watchCertificate } from "../src/cli";
+import { cancelRun, mirror, resolveCheckout, restartResumer, studioOps, studioRunFinder, watchCertificate } from "../src/cli";
 import {
   canonicalPath, checkoutKey, defaultOwnerAlive, END_LEASE_STALE_MS, ENGAGEMENT_CHAT_JOB, lockKeyOf, launchStatusProbe, NOTIFIED_BEFORE, ORPHANED_REASON, processStartTime, Queue, QueueDbMissing, QueueDbPlacementRefused,
   queueDbPath, REQUEUED_REASON, runPowerShell, RunTerminal, selfOwner, type EngineProbe, type Owner, type Probes,
@@ -12,6 +12,7 @@ import { filetimeToIso, processCreationTime } from "../src/winproc";
 import { gitRepo } from "./fakes";
 import { gatherPage, renderPage } from "../src/page";
 import { CERT_CHECK_MS, CERT_RENEW_EXIT, certCheck, certNotAfter, FORCE_WITHIN_DAYS, recordCertStart } from "../src/cert";
+import { shouldWake } from "../src/tick";
 import { tempDir, track } from "./tmp";
 
 const REPO = resolve(import.meta.dir, "..");
@@ -1917,5 +1918,232 @@ describe("Story 33.8: the host-leg re-run's lease (`takeVerifyLeg`, `releaseVeri
     queue.note(run.run_id, "host-verify", { green: false });
     queue.releaseVerifyLeg(run.run_id, B); // closed by the result: nothing appended
     expect(legs(queue, run.run_id)).toHaveLength(3);
+  });
+});
+
+describe("Story 36.5 (DW-105): the supervisor's own block", () => {
+  const LAUNCH = { id: "run-epic", trigger: "one-shot", target: { skill: "tk-studio-launch" }, stop: { on_status: ["blocked"] } };
+  const failedProbe = () => ({ live: true, detail: "launch status probe failed (exit 1): no bmad-loop on the host" });
+  async function drivenLaunch(engine: (id: string | null) => EngineProbe = failedProbe) {
+    const fx = fixture(new Set([A.pid, B.pid]), engine);
+    const r = fx.enqueue("run-epic", A, "skill", "tk-studio-launch").run;
+    await fx.queue.claim(r.run_id, A);
+    fx.queue.markVerbStarted(r.run_id, "submit", [], { target: "skill", definition: LAUNCH });
+    fx.queue.setStudioRun(r.run_id, "run-epic-20260928T101010Z");
+    return { fx, r };
+  }
+
+  test("M1: an own block with no engine (hole 90's pin, hole 93's worktree): lock released, no probe, no `{id: null}` holder, the next claim queues no `lock-wait`", async () => {
+    for (const kind of ["pin", "worktree"] as const) {
+      const { fx, r } = await drivenLaunch();
+      await fx.queue.endDriven(r.run_id, "blocked", "sbx pin failed: exited 1", { ownBlock: kind });
+      expect(fx.engineCalls).toEqual([]);
+      expect(fx.queue.lock(fx.checkout)).toBeNull();
+      expect(fx.queue.get(r.run_id)).toMatchObject({ state: "blocked", engine_run_id: null });
+      expect(fx.queue.events(r.run_id).at(-1)).toMatchObject({ kind: "ended", detail: { own_block: kind, lock: "released" } });
+      const b = fx.enqueue("studio-health", B).run;
+      expect((await fx.queue.claim(b.run_id, B)).claimed).toBe(true);
+      expect(fx.queue.events(b.run_id).map((e) => e.kind)).not.toContain("lock-wait");
+    }
+  });
+
+  test("M1 through `mirror`: no probe, the lock released, `own_block` on `ended`, no `stopped`", async () => {
+    const { fx, r } = await drivenLaunch();
+    await mirror(fx.queue, r.run_id, { jobId: "run-epic", defn: LAUNCH }, { ok: false, job_id: "run-epic", run_id: "run-epic-20260928T101010Z", state: "blocked", reason: "sbx pin failed: x", own_block: "pin" },
+      async () => ({ ok: true }));
+    expect(fx.engineCalls).toEqual([]);
+    expect(fx.queue.lock(fx.checkout)).toBeNull();
+    const evs = fx.queue.events(r.run_id);
+    expect(evs.at(-1)).toMatchObject({ kind: "ended", detail: { own_block: "pin" } });
+    expect(evs.map((e) => e.kind)).not.toContain("stopped");
+  });
+
+  test("M2: the veto: a recorded engine name, or a named engine on the end, keeps the engine holder", async () => {
+    const recorded = await drivenLaunch();
+    recorded.fx.queue.db.query("UPDATE runs SET engine_run_id = 'E9' WHERE run_id = ?").run(recorded.r.run_id);
+    await recorded.fx.queue.endDriven(recorded.r.run_id, "blocked", "sbx pin failed", { ownBlock: "pin" });
+    expect(recorded.fx.engineCalls).toHaveLength(1);
+    expect(recorded.fx.queue.lock(recorded.fx.checkout)).toMatchObject({ kind: "engine", engine_run_id: null });
+
+    const named = await drivenLaunch();
+    await named.fx.queue.endDriven(named.r.run_id, "blocked", "sbx pin failed", { ownBlock: "pin", engineRunId: "E1" });
+    expect(named.fx.queue.lock(named.fx.checkout)).toMatchObject({ kind: "engine", engine_run_id: "E1" });
+  });
+
+  test("M2: a `launched` event vetoes too", async () => {
+    const { fx, r } = await drivenLaunch();
+    fx.queue.recordWorktree(r.run_id, tempDir("tk-sup-veto-wt-"), { branch: "b", base_ref: "main" });
+    fx.queue.markLaunched(r.run_id, "E2", { end: { state: "complete", reason: null } });
+    expect(fx.queue.noEngineRecorded(fx.queue.get(r.run_id)!)).toBe(false);
+    fx.queue.end(r.run_id, "blocked", "sbx pin failed", { ownBlock: "pin", engineRunId: null });
+    expect(fx.queue.lock(fx.checkout)).toMatchObject({ kind: "engine", engine_run_id: null });
+  });
+
+  test("Story 36.5 (M2): `endDriven`, a worker on the record and the probe live: the lock goes to the engine, named or unverified, never released", async () => {
+    const named = await drivenLaunch(() => ({ live: true, run_ids: ["E3"] }));
+    named.fx.queue.setWorker(named.r.run_id, 4242, null);
+    await named.fx.queue.endDriven(named.r.run_id, "blocked", "sbx pin failed", { ownBlock: "pin" });
+    expect(named.fx.engineCalls).toHaveLength(1);
+    expect(named.fx.queue.lock(named.fx.checkout)).toMatchObject({ kind: "engine", engine_run_id: "E3" });
+    expect(named.fx.queue.events(named.r.run_id).at(-1)).toMatchObject({ kind: "ended", detail: { own_block: "pin", lock: { handed_to_engine: "E3" } } });
+
+    const unverified = await drivenLaunch();
+    unverified.fx.queue.setWorker(unverified.r.run_id, 4242, null);
+    await unverified.fx.queue.endDriven(unverified.r.run_id, "blocked", "sbx pin failed", { ownBlock: "pin" });
+    expect(unverified.fx.engineCalls).toHaveLength(1);
+    expect(unverified.fx.queue.lock(unverified.fx.checkout)).toMatchObject({ kind: "engine", engine_run_id: null });
+  });
+
+  test("Story 36.5 (M2): `mirror`, a worker on the record and the probe live: the lock goes to the engine, no `stopped`", async () => {
+    const { fx, r } = await drivenLaunch(() => ({ live: true, run_ids: ["E3"] }));
+    const worktree = tempDir("tk-sup-own-wt-");
+    fx.queue.recordWorktree(r.run_id, worktree, { branch: "b", base_ref: "main" }); // `mirror`'s own probe needs a worktree
+    fx.queue.setWorker(r.run_id, 4242, null);
+    await mirror(fx.queue, r.run_id, { jobId: "run-epic", defn: LAUNCH }, { ok: false, job_id: "run-epic", run_id: "run-epic-20260928T101010Z", state: "blocked", reason: "sbx pin failed: x", own_block: "pin" },
+      async () => ({ ok: true }));
+    expect(fx.engineCalls).toHaveLength(1);
+    expect(fx.engineCalls[0]![0]).toBe(worktree);
+    expect(fx.queue.lock(fx.checkout)).toMatchObject({ kind: "engine", engine_run_id: "E3" });
+    const evs = fx.queue.events(r.run_id);
+    // `mirror`'s own probe found it, so the close-out never touches the worktree beside the engine.
+    expect(evs.at(-1)).toMatchObject({ kind: "ended", detail: { own_block: "pin", lock: { handed_to_engine: "E3" }, closeout: { result: "skipped", worktree: "kept" } } });
+    expect(evs.map((e) => e.kind)).not.toContain("stopped");
+  });
+
+  test("Story 36.5 (M2): a worker on the record and the probe empty: the probe is called, the lock released, no `stopped`", async () => {
+    const { fx, r } = await drivenLaunch(() => ({ live: false, run_ids: [] }));
+    fx.queue.setWorker(r.run_id, 4242, null);
+    await mirror(fx.queue, r.run_id, { jobId: "run-epic", defn: LAUNCH }, { ok: false, job_id: "run-epic", run_id: "run-epic-20260928T101010Z", state: "blocked", reason: "sbx pin failed: x", own_block: "pin" },
+      async () => ({ ok: true }));
+    expect(fx.engineCalls).toHaveLength(1);
+    expect(fx.queue.lock(fx.checkout)).toBeNull();
+    const evs = fx.queue.events(r.run_id);
+    expect(evs.at(-1)).toMatchObject({ kind: "ended", detail: { own_block: "pin", lock: "released" } });
+    expect(evs.map((e) => e.kind)).not.toContain("stopped");
+  });
+
+  test("Story 36.5 (M2): `recover`, a dead owner, a worker on the record and the probe live: the probe is called, the lock goes to the engine, no `stopped`", async () => {
+    const { fx, r } = await drivenLaunch(() => ({ live: true, run_ids: ["E3"] }));
+    fx.queue.setWorker(r.run_id, 4242, null);
+    const ops = {
+      end: async () => ({ ok: true, detail: "already", state: "blocked", own_block: "pin" as const }),
+      find: async () => ({ ok: true as const, run_id: null }),
+    };
+    fx.alive.delete(A.pid);
+    await fx.queue.recover(ops, B);
+    expect(fx.engineCalls).toHaveLength(1);
+    expect(fx.queue.lock(fx.checkout)).toMatchObject({ kind: "engine", engine_run_id: "E3" });
+    const evs = fx.queue.events(r.run_id);
+    expect(evs.at(-1)).toMatchObject({ kind: "orphaned", detail: { own_block: "pin", lock: { handed_to_engine: "E3" } } });
+    expect(evs.map((e) => e.kind)).not.toContain("stopped");
+  });
+
+  test("no marker: a failed probe still hands the lock to an unverified engine (fail closed)", async () => {
+    const { fx, r } = await drivenLaunch();
+    await fx.queue.endDriven(r.run_id, "blocked", MISSING_BLOCK);
+    expect(fx.queue.lock(fx.checkout)).toMatchObject({ kind: "engine", engine_run_id: null });
+  });
+
+  test("M3: `cancel` on a terminal run an unverified engine row names: released with `lock-released {holder: {id: null}, own_block}`; again, or a run with no row: RunTerminal", async () => {
+    const { fx, r } = await drivenLaunch();
+    await fx.queue.endDriven(r.run_id, "blocked", MISSING_BLOCK);
+    expect(fx.queue.lock(fx.checkout)).not.toBeNull();
+    expect(await cancelRun(fx.queue, r.run_id, { hygiene: { env: {} }, agents: false })).toMatchObject({ run_id: r.run_id, state: "blocked" });
+    expect(fx.queue.lock(fx.checkout)).toBeNull();
+    expect(fx.queue.events(r.run_id).findLast((e) => e.kind === "lock-released")!.detail).toMatchObject({ holder: { id: null } });
+    await expect(cancelRun(fx.queue, r.run_id, { hygiene: { env: {} }, agents: false })).rejects.toThrow(RunTerminal);
+
+    // the own_block a legacy row's end recorded is named; a named engine keeps its row
+    const own = await drivenLaunch();
+    own.fx.queue.end(own.r.run_id, "blocked", "x", { detail: { own_block: "pin" }, engineRunId: null });
+    expect(own.fx.queue.releaseTerminalEngineLock(own.r.run_id)).toMatchObject({ holder: { id: null }, own_block: "pin" });
+    const live = await drivenLaunch();
+    live.fx.queue.end(live.r.run_id, "complete", null, { engineRunId: "E7" });
+    expect(live.fx.queue.releaseTerminalEngineLock(live.r.run_id)).toBeNull();
+    expect(live.fx.queue.lock(live.fx.checkout)).toMatchObject({ engine_run_id: "E7" });
+  });
+
+  test("M4: `mirror` skips the stop for an own block, the next submission is woken; the engine's own `blocked` still stops", async () => {
+    const defn = { id: "j", trigger: "one-shot", target: { skill: "tk-studio-activate" }, stop: { on_status: ["blocked"] } };
+    const fx = fixture();
+    const verbs = async () => ({ ok: true });
+    const own = fx.enqueue("j", A).run;
+    await fx.queue.claim(own.run_id, A);
+    await mirror(fx.queue, own.run_id, { jobId: "j", defn }, { ok: false, job_id: "j", run_id: "s-1", state: "blocked", reason: "auth preflight: x", own_block: "auth" }, verbs);
+    expect(fx.queue.pacing("j", fx.checkout).stopped).toBeNull();
+    expect(shouldWake(defn, fx.queue.pacing("j", fx.checkout), Date.now()).wake).toBe(true);
+    const engine = fx.enqueue("j", A).run;
+    await fx.queue.claim(engine.run_id, A);
+    await mirror(fx.queue, engine.run_id, { jobId: "j", defn }, { ok: false, job_id: "j", run_id: "s-2", state: "blocked", reason: "the story is blocked" }, verbs);
+    expect(fx.queue.pacing("j", fx.checkout).stopped).toMatchObject({ run_id: engine.run_id, kind: "stopped" });
+    expect(shouldWake(defn, fx.queue.pacing("j", fx.checkout), Date.now()).wake).toBe(false);
+  });
+
+  test("M4: `recover`'s twin: a studio run carrying `own_block` writes no `stopped` and releases the lock with no probe; without it the stop fires", async () => {
+    const orphan = async (own?: "pin") => {
+      const { fx, r } = await drivenLaunch();
+      const ops = {
+        end: async () => ({ ok: true, detail: "already", state: "blocked", ...(own ? { own_block: own } : {}) }),
+        find: async () => ({ ok: true as const, run_id: null }),
+      };
+      fx.alive.delete(A.pid);
+      await fx.queue.recover(ops, B);
+      return { fx, r };
+    };
+    const a = await orphan("pin");
+    expect(a.fx.engineCalls).toEqual([]);
+    expect(a.fx.queue.lock(a.fx.checkout)).toBeNull();
+    const evs = a.fx.queue.events(a.r.run_id);
+    expect(evs.at(-1)).toMatchObject({ kind: "orphaned", detail: { own_block: "pin", lock: "released" } });
+    expect(evs.map((e) => e.kind)).not.toContain("stopped");
+    const b = await orphan();
+    expect(b.fx.queue.events(b.r.run_id).map((e) => e.kind)).toContain("stopped");
+  });
+
+  test("Story 36.5 (M4): `recover`'s already-terminal branch through `ops.resume`: the marker carried, no `stopped`, no probe, the lock released; without it the stop fires", async () => {
+    const orphan = async (own?: "pin") => {
+      const { fx, r } = await drivenLaunch();
+      let ended = 0;
+      const ops = {
+        end: async () => { ended++; return { ok: true, detail: "ended" }; },
+        find: async () => ({ ok: true as const, run_id: null }),
+        resume: async () => ({ resume: false as const, cause: "studio run already blocked", studioState: "blocked" as const, ...(own ? { own_block: own } : {}) }),
+      };
+      fx.alive.delete(A.pid);
+      await fx.queue.recover(ops, B);
+      expect(ended).toBe(0); // the already-terminal branch, never `ops.end`
+      return { fx, r };
+    };
+    const own = await orphan("pin");
+    expect(own.fx.engineCalls).toEqual([]);
+    expect(own.fx.queue.lock(own.fx.checkout)).toBeNull();
+    expect(own.fx.queue.get(own.r.run_id)!.state).toBe("blocked");
+    const evs = own.fx.queue.events(own.r.run_id);
+    expect(evs.at(-1)).toMatchObject({ kind: "orphaned", detail: { own_block: "pin", lock: "released", studio: { state: "blocked", own_block: "pin" } } });
+    expect(evs.map((e) => e.kind)).not.toContain("stopped");
+    const engine = await orphan();
+    expect(engine.fx.queue.events(engine.r.run_id).map((e) => e.kind)).toContain("stopped");
+  });
+
+  test("Story 36.5 (M4): the real `restartResumer` forwards `own_block` from `status` `runs[0]`: no `stopped`, the lock released", async () => {
+    const orphan = async (own?: "pin") => {
+      const { fx, r } = await drivenLaunch(() => ({ live: false }));
+      fx.queue.setSession(r.run_id, "sid-1"); // with no session the eligibility answers first, and `ops.end` carries the marker
+      const verbs = async (_root: string, args: string[]): Promise<Record<string, any>> => {
+        if (args[0] === "status") return { job_id: "run-epic", runs: [{ run_id: "run-epic-20260928T101010Z", state: "blocked", ...(own ? { own_block: own } : {}) }] };
+        throw new Error(`unexpected verb ${args[0]}`);
+      };
+      const ops = { ...studioOps(verbs), resume: restartResumer(fx.queue, verbs, new Map()) };
+      fx.alive.delete(A.pid);
+      await fx.queue.recover(ops, B);
+      return { fx, r };
+    };
+    const own = await orphan("pin");
+    expect(own.fx.queue.lock(own.fx.checkout)).toBeNull();
+    const evs = own.fx.queue.events(own.r.run_id);
+    expect(evs.at(-1)).toMatchObject({ kind: "orphaned", detail: { own_block: "pin", lock: "released", studio: { state: "blocked", own_block: "pin" } } });
+    expect(evs.map((e) => e.kind)).not.toContain("stopped");
+    const engine = await orphan();
+    expect(engine.fx.queue.events(engine.r.run_id).map((e) => e.kind)).toContain("stopped");
   });
 });

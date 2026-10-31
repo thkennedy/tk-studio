@@ -261,8 +261,11 @@ def evaluate_stop(defn: dict, runs: list[dict]) -> str | None:
         return f"stop: max_runs ({stop['max_runs']}) reached"
     if "until" in stop and _now() >= _parse_iso(stop["until"]):
         return f"stop: until ({stop['until']}) passed"
-    if "on_status" in stop and counted:
-        last_state = counted[-1].get("state")
+    # Story 36.5 (DW-105): a block the supervisor caused (`own_block`) is not
+    # the job's outcome, so the condition reads the last run without one.
+    outcomes = [r for r in counted if not r.get("own_block")]
+    if "on_status" in stop and outcomes:
+        last_state = outcomes[-1].get("state")
         if last_state in stop["on_status"]:
             return f"stop: on_status — last run ended {last_state}"
     return None
@@ -390,6 +393,28 @@ def _finalize_run(key: str, record: dict, summary: dict,
 
 
 PROJECT_ROOT_TOKEN = "{project_root}"
+CORE_LIFTED_STATES = ("complete", "partial", "blocked")
+OWN_BLOCK_KINDS = ("placement", "lock", "pin", "auth", "worktree",
+                   "engine-mcp", "render")
+
+
+def _lifted_outcome(parsed) -> dict:
+    """A core's parsed answer as the run's state and reason (DW-38): its own
+    terminal `status` with the block's `reason`; else `ok: false` is blocked;
+    else complete."""
+    block = parsed if isinstance(parsed, dict) else {}
+    status = block.get("status")
+    if status not in CORE_LIFTED_STATES:
+        if block.get("ok") is False:
+            return {"state": "blocked",
+                    "reason": "core answered ok: false without a status"}
+        return {"state": "complete"}
+    reason = block.get("reason")
+    if not (isinstance(reason, str) and reason):
+        if status == "complete":
+            return {"state": status}
+        reason = f"core answered status {status} without a reason"
+    return {"state": status, "reason": reason}
 
 
 def execute_core(key: str, record: dict,
@@ -401,8 +426,10 @@ def execute_core(key: str, record: dict,
     `wake` pass it); no other templating, and a definition without the
     token runs exactly as before.
 
-    Outcome mapping: machine-readable stdout → complete; timeout → partial
-    with the guard named; anything unparseable → blocked, never a guess.
+    Outcome mapping: machine-readable stdout → complete, or the core's own
+    terminal `status` lifted into the run state (Story 36.5, DW-38; `ok:
+    false` with no status → blocked); timeout → partial with the guard named;
+    anything unparseable → blocked, never a guess.
     Every terminal path lands summary.json in the workspace; a parsed
     result additionally lands in full as output.json (run.json keeps only
     the compact status block).
@@ -420,6 +447,7 @@ def execute_core(key: str, record: dict,
     try:
         proc = subprocess.run(
             argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
             timeout=timeout, cwd=str(PLUGIN_ROOT))
     except subprocess.TimeoutExpired:
         record = joblib.update_run(key, record["run_id"], {
@@ -446,7 +474,7 @@ def execute_core(key: str, record: dict,
     if isinstance(parsed, dict):
         joblib.write_workspace_json(key, record["run_id"], "output.json", parsed)
     record = joblib.update_run(key, record["run_id"], {
-        "state": "complete", "status_block": {"summary": summary}})
+        **_lifted_outcome(parsed), "status_block": {"summary": summary}})
     _finalize_run(key, record, summary, detail=headline)
     return record
 
@@ -528,6 +556,7 @@ def status(project_root: Path, job_id: str, run_id: str | None = None) -> dict:
          **({"started": r["started"]} if r.get("started") else {}),
          **({"ended": r["ended"]} if r.get("ended") else {}),
          **({"reason": r["reason"]} if r.get("reason") else {}),
+         **({"own_block": r["own_block"]} if r.get("own_block") else {}),
          **({"error": r["error"]} if r.get("error") else {})}
         for r in runs]}
 
@@ -681,14 +710,16 @@ def _validate_cost(value, field: str = "total_cost_usd") -> float:
 def finish(project_root: Path, run_id: str, state: str,
            reason: str | None = None, status_block: dict | None = None,
            total_cost_usd: float | None = None,
-           playable_verify_cost_usd: float | None = None) -> dict:
+           playable_verify_cost_usd: float | None = None,
+           own_block: str | None = None) -> dict:
     """Terminal-ize a skill-target run; emits the job-run event (the
     wrapper's one job-level emission for this run — AD-12). An optional
     total_cost_usd (the worker's --output-format json result) lands in
     run.json and the event; it is validated before anything is written.
     Story 34.3: an optional playable_verify_cost_usd (the playable-verify
     judge's cost, also counted in total_cost_usd) lands the same way, as
-    its own field.
+    its own field. Story 36.5: an optional own_block (the supervisor's own
+    block, one of OWN_BLOCK_KINDS) lands in run.json for evaluate_stop.
     A repeat finish on a run already terminal in the requested state is a
     no-op (DW-5, AD-12): run.json is not rewritten, nothing is captured or
     landed, no second job-run event is emitted; the current record's
@@ -698,6 +729,9 @@ def finish(project_root: Path, run_id: str, state: str,
     pv_cost = (None if playable_verify_cost_usd is None
                else _validate_cost(playable_verify_cost_usd,
                                    "playable_verify_cost_usd"))
+    if own_block is not None and own_block not in OWN_BLOCK_KINDS:
+        raise JobRunError(f"own_block must be one of "
+                          f"{'|'.join(OWN_BLOCK_KINDS)}, got {own_block!r}")
     key = joblib.project_key(Path(project_root))
     current = joblib.read_run(key, run_id)
     if (current["state"] in joblib.TERMINAL_STATES
@@ -709,6 +743,8 @@ def finish(project_root: Path, run_id: str, state: str,
         changes["total_cost_usd"] = cost
     if pv_cost is not None:
         changes["playable_verify_cost_usd"] = pv_cost
+    if own_block is not None:
+        changes["own_block"] = own_block
     if reason is not None:
         changes["reason"] = reason
     if status_block is not None:
@@ -756,6 +792,11 @@ def main(argv: list[str] | None = None) -> int:
                                  choices=list(joblib.TERMINAL_STATES))
                 cmd.add_argument("--reason")
                 cmd.add_argument("--status-block", help="JSON object")
+                # a string, validated by the module: a bad value answers
+                # with the JSON status block, never argparse usage (AD-11)
+                cmd.add_argument("--own-block",
+                                 help="the block is the supervisor's own "
+                                      "(Story 36.5): evaluate_stop skips it")
                 # a string, validated by the module: a bad value answers
                 # with the JSON status block, never argparse usage (AD-11)
                 cmd.add_argument("--total-cost-usd",
@@ -817,7 +858,8 @@ def main(argv: list[str] | None = None) -> int:
             result = finish(Path(args.directory), args.run_id, args.state,
                             reason=args.reason, status_block=block,
                             total_cost_usd=cost,
-                            playable_verify_cost_usd=pv_cost)
+                            playable_verify_cost_usd=pv_cost,
+                            own_block=args.own_block)
     except (JobRunError, joblib.JobError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
         return 2

@@ -56,7 +56,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pluginRoot } from "./env";
 import { processCreationTime } from "./winproc";
 import { probeEngine, sameStart, vmLaunchStatus, type ProbeResult, type SandboxDeps } from "./sandbox";
-import { lastJsonObject, runUv, SBX_GUARD_KILL_AFTER_S, type RunResult } from "./server";
+import { lastJsonObject, runUv, SBX_GUARD_KILL_AFTER_S, type OwnBlock, type RunResult } from "./server";
 
 type Env = Record<string, string | undefined>;
 
@@ -586,7 +586,7 @@ export type ClaimResult =
 
 /** Ends a minted studio run for an orphaned queue run (injected: the contract verbs live in cli.ts);
  * `state`: the studio run's terminal state once ended (or already). */
-export type StudioEnder = (run: QueueRun, reason: string) => Promise<{ ok: boolean; detail: string; state?: string }>;
+export type StudioEnder = (run: QueueRun, reason: string) => Promise<{ ok: boolean; detail: string; state?: string; own_block?: OwnBlock }>;
 /** Looks up the job's studio run absent from the pre-verb snapshot (the 21-1
  * adoption rule): `run_id` null when none exists; `ok: false` when the lookup failed. */
 export type StudioFinder = (run: QueueRun, snapshot: string[]) =>
@@ -599,7 +599,7 @@ export interface TripRecord { guard: string; value: number }
  * run's own terminal state when it already ended (the queue run ends in it). */
 export type ResumeDecision =
   | { resume: true; detail?: Record<string, unknown> }
-  | { resume: false; cause?: string; trips?: TripRecord[]; studioState?: TerminalState };
+  | { resume: false; cause?: string; trips?: TripRecord[]; studioState?: TerminalState; own_block?: OwnBlock };
 export type StudioResumer = (run: QueueRun) => Promise<ResumeDecision>;
 export interface StudioOps { end: StudioEnder; find: StudioFinder; resume?: StudioResumer }
 
@@ -1065,6 +1065,49 @@ export class Queue {
         { sandbox: sb, pid: w.pid, start: w.start, probe: p.alive ? `start time differs (now ${p.start})` : "not running" });
     } catch { /* the queue is busy: the next check probes again */ }
     return undefined;
+  }
+
+  /** Story 36.5 (DW-56, DW-58): the seq of the latest `pin-restart` on any run recording sandbox `sb` that left it logged
+   * out (`probe_after` not null) and that is later than the sandbox's last healed signal — a `pin-restart` with
+   * `probe_after: null`, or a `pinned` whose probe was clean (`probe_clean`); else null. */
+  openPinRestartOn(sb: string): number | null {
+    const rows = this.db.query(
+      `SELECT e.seq, e.kind, e.detail FROM events e JOIN runs r ON r.run_id = e.run_id
+        WHERE r.sandbox = ? AND e.kind IN ('pin-restart', 'pinned') ORDER BY e.seq DESC`,
+    ).all(sb) as { seq: number; kind: string; detail: string | null }[];
+    for (const row of rows) {
+      let detail: Record<string, unknown> = {};
+      try { detail = JSON.parse(row.detail ?? "{}") ?? {}; } catch { /* an unreadable detail heals nothing */ }
+      if (row.kind === "pinned") { if (detail.probe_clean === true) return null; continue; }
+      return detail.probe_after === null ? null : row.seq;
+    }
+    return null;
+  }
+
+  /** Story 36.5: no engine ever started for this run, by its own record: no `launched` event, no engine name. */
+  noEngineRecorded(run: QueueRun): boolean {
+    return !run.engine_run_id && !this.events(run.run_id).some((e) => e.kind === "launched");
+  }
+
+  /** Story 36.5: the supervisor's own block rules an engine out only with no engine and no worker on the record: a
+   * recorded worker may have started one (a resumed leg's failed pin), so that end still takes the launch probe. */
+  ownBlockRulesOutEngine(run: QueueRun): boolean {
+    return this.noEngineRecorded(run) && run.worker_pid == null;
+  }
+
+  /** Story 36.5 (DW-105): `cancel` on a terminal run that still names an unverified engine on its checkout's lock, with no
+   * engine on its own record: the row is released (`lock-released {holder: {id: null}, own_block}`). Answers that detail;
+   * null when there is no such row (a named engine keeps its lock: the veto of Settled shape 1). */
+  releaseTerminalEngineLock(runId: string): Record<string, unknown> | null {
+    return this.db.transaction(() => {
+      const run = this.get(runId);
+      if (!run || !isTerminal(run.state) || !this.noEngineRecorded(run)) return null;
+      if (!this.db.query("DELETE FROM locks WHERE checkout = ? AND run_id = ? AND kind = 'engine' AND engine_run_id IS NULL").run(lockKeyOf(run), runId).changes) return null;
+      const own = this.events(runId).findLast((e) => e.kind === "ended" || e.kind === "orphaned")?.detail?.own_block;
+      const detail = { holder: { id: null }, ...(own ? { own_block: own } : {}), why: "cancel: an unverified engine holder on an ended run" };
+      this.event(runId, "lock-released", run.state, run.state, detail);
+      return detail;
+    }).immediate();
   }
 
   /** Story 27.2: is a pin on sandbox `sb` still outstanding — some run recording that sandbox pinned it
@@ -1873,12 +1916,14 @@ export class Queue {
    * transaction, by the launch-orphan rule `recover` uses — the core may have
    * started an engine that still works the checkout. */
   async endDriven(runId: string, state: TerminalState, reason?: string | null,
-    opts: { engineRunId?: string | null; detail?: Record<string, unknown>; stop?: StopDetail; holdLock?: string; keepEngine?: boolean } = {}): Promise<QueueRun> {
+    opts: { engineRunId?: string | null; detail?: Record<string, unknown>; stop?: StopDetail; holdLock?: string; keepEngine?: boolean; ownBlock?: OwnBlock } = {}): Promise<QueueRun> {
     try {
       // An engine already named (Story 27.1: `null` — one the caller's own probe found unverified), or one
-      // the caller's probe confirmed dead (`keepEngine`), is not probed again.
+      // the caller's probe confirmed dead (`keepEngine`), is not probed again; nor is one the run's own block
+      // rules out (Story 36.5: `writeEnd` releases the lock).
       const run = opts.engineRunId !== undefined || opts.keepEngine ? null : this.get(runId);
-      if (run && run.verb_started && !isTerminal(run.state) && this.definition(run)?.target?.skill === LAUNCH_SKILL) {
+      const ownBlocked = !!run && !!opts.ownBlock && this.ownBlockRulesOutEngine(run);
+      if (run && !ownBlocked && run.verb_started && !isTerminal(run.state) && this.definition(run)?.target?.skill === LAUNCH_SKILL) {
         const { holder, engine } = await this.launchEngine(engineRoot(run), { tier: run.tier, sandbox: run.sandbox });
         return this.end(runId, state, reason, { ...opts, ...(holder ? { engineRunId: holder.id } : {}), detail: { ...opts.detail, engine } });
       }
@@ -1921,7 +1966,7 @@ export class Queue {
    * the caller confirmed the run's engine dead (its worktree closed out) — the engine id is kept on
    * the run and its lock released, never handed to that engine. */
   end(runId: string, state: TerminalState, reason?: string | null,
-    opts: { engineRunId?: string | null; detail?: Record<string, unknown>; from?: RunState; stop?: StopDetail; holdLock?: string; driverLive?: boolean; keepEngine?: boolean } = {}): QueueRun {
+    opts: { engineRunId?: string | null; detail?: Record<string, unknown>; from?: RunState; stop?: StopDetail; holdLock?: string; driverLive?: boolean; keepEngine?: boolean; ownBlock?: OwnBlock } = {}): QueueRun {
     if (!isTerminal(state)) throw new Error(`end: '${state}' is not a terminal state`);
     return this.db.transaction(() => {
       const run = this.must(runId);
@@ -2127,20 +2172,24 @@ export class Queue {
   private writeEnd(run: QueueRun, state: TerminalState, reason: string | null | undefined,
     opts: { kind: "ended" | "orphaned"; engineRunId?: string | null; detail?: Record<string, unknown>; stop?: StopDetail; holdLock?: string; driverLive?: boolean;
       /** Story 27.1 (`endEngine`): the engine's life is over — its id stays on the run, any lock this run holds is released. */
-      keepEngine?: boolean }): void {
+      keepEngine?: boolean;
+      /** Story 36.5 (DW-105): the block is the supervisor's own, recorded as `own_block`. With no engine or worker on
+       * the run's record and no engine named by this end, the lock is released as for `keepEngine`; an engine's lock never is. */
+      ownBlock?: OwnBlock }): void {
     const runId = run.run_id;
+    const keepEngine = opts.keepEngine || (!!opts.ownBlock && typeof opts.engineRunId !== "string" && this.ownBlockRulesOutEngine(run));
     this.db.query(
       `UPDATE runs SET state = ?, reason = ?, owner_pid = NULL, owner_host = NULL, owner_nonce = NULL, owner_start = NULL,
          engine_run_id = ?, updated = ? WHERE run_id = ?`,
-    ).run(state, reason ?? null, opts.keepEngine ? run.engine_run_id ?? opts.engineRunId ?? null : opts.engineRunId ?? null, now(), runId);
-    const detail: Record<string, unknown> = { ...(opts.detail ?? {}) };
+    ).run(state, reason ?? null, keepEngine ? run.engine_run_id ?? opts.engineRunId ?? null : opts.engineRunId ?? null, now(), runId);
+    const detail: Record<string, unknown> = { ...(opts.detail ?? {}), ...(opts.ownBlock ? { own_block: opts.ownBlock } : {}) };
     const held = this.db.query("SELECT * FROM locks WHERE checkout = ?").get(lockKeyOf(run)) as LockRow | null;
     const hasWorker = run.worker_pid !== null && run.worker_pid !== undefined;
     if (opts.holdLock && (hasWorker || opts.driverLive) && held?.kind === "run" && held.run_id === runId) {
       // Its recorded worker may still run: the lock stays with the ended run (freed by `claim`/`recover`
       // once `recordedWorker` says it may no longer run — sbx: at its in-VM deadline).
       detail.lock = { held: opts.holdLock, ...(hasWorker && run.tier === "sbx" ? { until: new Date(this.sbxDeadline(run).ms).toISOString() } : {}) };
-    } else if (opts.keepEngine) {
+    } else if (keepEngine) {
       if (this.db.query("DELETE FROM locks WHERE checkout = ? AND run_id = ?").run(lockKeyOf(run), runId).changes) detail.lock = "released";
     } else if (opts.engineRunId !== undefined) {
       const lock = held;
@@ -2412,10 +2461,10 @@ export class Queue {
       const reason = end.lookupFailed ? `${ORPHANED_REASON}; studio run lookup failed: ${end.lookupFailed.slice(0, 300)}`
         : cause ? `${ORPHANED_REASON}; ${cause}` : ORPHANED_REASON;
       const already = lockCause ? undefined : noResume?.studioState;
-      let studio: { ok: boolean; detail: string; state?: string } | null = null;
+      let studio: { ok: boolean; detail: string; state?: string; own_block?: OwnBlock } | null = null;
       // The run as this recoverer leaves it before the end transaction (the end mark below re-owns it).
       let mine = c;
-      if (studioRunId && already) studio = { ok: true, detail: `studio run ${studioRunId} already ${already}`, state: already };
+      if (studioRunId && already) studio = { ok: true, detail: `studio run ${studioRunId} already ${already}`, state: already, ...(noResume?.own_block ? { own_block: noResume.own_block } : {}) };
       else if (studioRunId) {
         // Before the studio run is ended: mark the queue run this recoverer's (owner = self, state
         // and lock untouched) in one transaction, so no other recoverer resumes or ends it under this
@@ -2438,12 +2487,14 @@ export class Queue {
       const studioOutcome = studioRunId && studio?.ok && isTerminal(studio.state) ? { run_id: studioRunId, state: studio.state } : undefined;
       const defn = this.definition(c);
       const onStatus = defn?.stop?.on_status;
-      const stop: StopDetail | undefined = studioOutcome && Array.isArray(onStatus) && onStatus.includes(studioOutcome.state)
+      // Story 36.5: the studio run recorded the block as the supervisor's own: never the job's stop, and (no engine or worker recorded) no engine to probe for.
+      const ownBlock = studio?.ok ? studio.own_block : undefined;
+      const stop: StopDetail | undefined = !ownBlock && studioOutcome && Array.isArray(onStatus) && onStatus.includes(studioOutcome.state)
         ? { condition: "on_status", state: studioOutcome.state, job_id: c.job_id } : undefined;
       // A launch run may have started a detached engine before the handover: probe before releasing the lock.
       let engine: Record<string, unknown> | undefined;
       let engineHolder: { id: string | null } | undefined;
-      if (defn?.target?.skill === LAUNCH_SKILL) ({ holder: engineHolder, engine } = await this.launchEngine(engineRoot(c), { tier: c.tier, sandbox: c.sandbox }));
+      if (defn?.target?.skill === LAUNCH_SKILL && !(ownBlock && this.ownBlockRulesOutEngine(c))) ({ holder: engineHolder, engine } = await this.launchEngine(engineRoot(c), { tier: c.tier, sandbox: c.sandbox }));
       const trips = noResume?.trips?.length ? noResume.trips : undefined;
       const done = this.db.transaction(() => {
         const cur = this.get(c.run_id);
@@ -2451,7 +2502,7 @@ export class Queue {
         if (!unchanged(mine, cur)) return false;
         if (studioRunId !== c.studio_run_id) this.db.query("UPDATE runs SET studio_run_id = ? WHERE run_id = ?").run(studioRunId, c.run_id);
         this.writeEnd(cur!, state, reason, {
-          kind: "orphaned", ...(engineHolder ? { engineRunId: engineHolder.id } : {}), ...(stop ? { stop } : {}),
+          kind: "orphaned", ...(engineHolder ? { engineRunId: engineHolder.id } : {}), ...(stop ? { stop } : {}), ...(ownBlock ? { ownBlock } : {}),
           detail: {
             dead_owner: deadOwner(c), studio_run_id: studioRunId, studio, ...workerDetail,
             ...(end!.lookup ? { lookup: end!.lookup } : {}), ...(engine ? { engine } : {}),
