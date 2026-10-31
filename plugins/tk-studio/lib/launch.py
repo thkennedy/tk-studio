@@ -161,13 +161,14 @@ import tomllib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import config as configlib
 import job as joblib
 import jobrun
 import ledger
 import miniyaml
 import sandbox_login
 import store as storelib
-from pipeline import LEGACY_BEGIN_RE
+from pipeline import LEGACY_BEGIN_RE, policy_dirties_tree
 
 # statuses `bmad-loop list --json` reports for a run whose engine is gone;
 # anything else owns the checkout (a paused engine is still a live process)
@@ -198,6 +199,13 @@ ENGINE_GATE_HOST = "engine gate: host leg (verify.engine, Story 34.1)"
 ENGINE_GATE_NONE = ("warning: engine gate: none (set verify.engine for the host "
                     "leg, or add the gate to engine.verify_commands only in a "
                     "WITH_GODOT sandbox)")
+# Story 36.6 (DW-71): the provisioning's marker inside the sandbox, read over
+# `sbx exec` (a bare exec has no shell, so `sh -c` expands the home)
+PROVISIONED_REL = ".tk-studio/provisioned"
+GATE_NO_GODOT_WARNING = ("warning: sandbox {sb} has no WITH_GODOT record; an "
+                         "engine.verify_commands gate there refuses")
+# Story 36.6 (hole 105): the advisory row naming the run-epic job's rhythm
+RHYTHM_CHECK = "run rhythm"
 # policy `[limits]` key -> the band field its largest band is compared with
 BUDGET_COMPARED = (("max_tokens_per_story", "weighted_tokens"),
                    ("max_review_cycles", "review_cycles_max"))
@@ -581,7 +589,7 @@ def _write_atomic(path: Path, data: bytes) -> None:
             tmp.unlink()
 
 
-def engine_gate_clause(root: Path) -> str | None:
+def engine_gate_clause(root: Path, env=None) -> str | None:
     """Story 34.4: where the engine gate runs, read from the tracked
     ``.tk-studio/config.yaml`` only (never config.local.yaml or the user
     tier). ``engine.verify_commands`` is the in-sandbox list and
@@ -590,7 +598,9 @@ def engine_gate_clause(root: Path) -> str | None:
     whatever the working set; only without it does a working set carrying
     the engine skill give the sandbox-only or none clause. None when there
     is nothing to say (no config, unparseable, no ``verify.engine`` and no
-    working set carrying the engine skill)."""
+    working set carrying the engine skill). Story 36.6: a clause over a
+    non-empty ``engine.verify_commands`` also names each running sandbox's
+    provisioned state (``_gate_sandbox_parts``), advisory like the rest."""
     config = root / CONFIG_REL
     if not config.is_file():
         return None
@@ -610,13 +620,122 @@ def engine_gate_clause(root: Path) -> str | None:
         # the 34.1 host leg runs verify.engine whenever it is set, so a
         # command in both keys runs in both places
         if any(c.strip() == gate.strip() for c in listed):
-            return ENGINE_GATE_BOTH
-        return ENGINE_GATE_HOST
+            return _with_gate_sandboxes(ENGINE_GATE_BOTH, listed, root, env)
+        return _with_gate_sandboxes(ENGINE_GATE_HOST, listed, root, env)
     working_set = doc.get("working_set")
     if isinstance(working_set, dict) and any(
             isinstance(v, list) and ENGINE_SKILL in v for v in working_set.values()):
-        return ENGINE_GATE_SANDBOX_ONLY if listed else ENGINE_GATE_NONE
+        return (_with_gate_sandboxes(ENGINE_GATE_SANDBOX_ONLY, listed, root, env)
+                if listed else ENGINE_GATE_NONE)
     return None
+
+
+def _with_gate_sandboxes(clause: str, listed: list[str], root: Path, env) -> str:
+    return "; ".join([clause, *_gate_sandbox_parts(root, env)]) if listed else clause
+
+
+def _supervisor_project_id(root: Path) -> str:
+    """The id the supervisor keys ``<project-id>/<job-id>`` by: the tracked
+    ``project_id``, else the root's basename (``cli.ts`` ``projectIdOf``,
+    raw: ``config.project_key``'s ``safe_name`` would not match its key).
+    A run's git worktree has no basename of its own to offer, so with no
+    tracked id it answers the main checkout's, named by its ``.git`` file."""
+    root = Path(root).resolve()
+    pid = configlib.tracked_project_id(root)
+    if pid:
+        return pid
+    try:
+        gitfile = (root / ".git").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return root.name
+    m = re.match(r"gitdir:\s*(.+?)[/\\]\.git[/\\]worktrees[/\\]", gitfile)
+    return re.split(r"[/\\]", m.group(1))[-1] if m else root.name
+
+
+# a key of the supervisor config's `jobs` mapping, block or flow: quoted, or
+# plain up to the `: `; only a key with a `/` is a job's (`tier:` is not)
+_JOB_KEY = re.compile(
+    r"""(?:^|(?<=[\n{,]))[ \t]*(?:"([^"\n]+)"[ \t]*:|'([^'\n]+)'[ \t]*:|"""
+    r"""([^\s"'{},:#][^"'{},:#\n]*?)[ \t]*:(?=\s))""")
+
+
+def _project_sandboxes(text: str, project: str) -> list[str]:
+    """The ``sandbox`` values of this project's ``jobs`` keys only: each
+    entry's text handed to ``sandbox_login.config_sandboxes``, which reads
+    any of the config's block or flow forms. The job id follows the key's
+    last ``/``, as ``config.ts`` splits it."""
+    start = re.search(r"(?m)^jobs\s*:", text)
+    if start is None:
+        return []
+    body = re.sub(r"(?m)(^|\s)#.*$", r"\1", text[start.end():])
+    keys = [(m.group(1) or m.group(2) or m.group(3), m)
+            for m in _JOB_KEY.finditer(body)]
+    keys = [(k, m) for k, m in keys if "/" in k]
+    names: list[str] = []
+    for i, (key, m) in enumerate(keys):
+        if key.rpartition("/")[0] != project:
+            continue
+        end = keys[i + 1][1].start() if i + 1 < len(keys) else len(body)
+        entry = 'jobs:\n  "entry":' + body[m.end():end]
+        names += [n for n in sandbox_login.config_sandboxes(entry) if n not in names]
+    return names
+
+
+def _provisioned_godot(marker: str) -> str | None:
+    """``<ver>`` from the marker's ``WITH_GODOT=<ver>`` line, or None."""
+    for line in (marker or "").splitlines():
+        key, _, value = line.partition("=")
+        if key.strip() == "WITH_GODOT" and value.strip():
+            return value.strip()
+    return None
+
+
+def _gate_sandbox_parts(root: Path, env=None) -> list[str]:
+    """Story 36.6 (DW-71): what each running engine sandbox of this project
+    (``_project_sandboxes``; another project's gate is not this one's) says of
+    Godot, read the way ``engine_sandbox_inode_row`` reads (config, ``sbx daemon
+    status``, ``sbx ls``, one budget): the provisioning's marker, else a
+    ``godot`` executable (a sandbox provisioned before the marker existed:
+    not warned), else the warning when ``test -x`` answers a plain no. Not
+    running, sbx absent, daemon down or an exec that fails otherwise say
+    nothing: never a guess, and never pins or starts a sandbox."""
+    env = os.environ if env is None else env
+    path = (env.get("TK_SUPERVISOR_CONFIG") or "").strip()
+    try:
+        text = Path(path).read_text(encoding="utf-8-sig") if path else ""
+    except (OSError, UnicodeDecodeError):
+        text = ""
+    sandboxes = _project_sandboxes(text, _supervisor_project_id(root))
+    if not sandboxes:
+        return []
+    deadline = sandbox_login.Deadline(sandbox_login.BUDGET_S)
+
+    def in_sandbox(sb: str, command: str):
+        return sandbox_login._call(run_sbx, ["sbx", "exec", sb, "sh", "-c", command], deadline)[0]
+
+    parts = []
+    try:
+        daemon, why = sandbox_login._call(run_sbx, ["sbx", "daemon", "status"], deadline)
+        if why == "absent" or daemon is None or daemon.returncode != 0:
+            return []
+        ls, _ = sandbox_login._call(run_sbx, ["sbx", "ls"], deadline)
+        listing = (ls.stdout or "") if ls is not None and ls.returncode == 0 else ""
+        for sb in sandboxes:
+            line = sandbox_login._listed(listing, sb)
+            if line is None or "running" not in line.lower().split():
+                continue
+            cat = in_sandbox(sb, f'cat "$HOME/{PROVISIONED_REL}"')
+            version = (_provisioned_godot(cat.stdout)
+                       if cat is not None and cat.returncode == 0 else None)
+            if version:
+                parts.append(f"sandbox {sb}: provisioned WITH_GODOT {version}")
+                continue
+            godot = in_sandbox(sb, 'test -x "$HOME/.local/bin/godot"')
+            if godot is not None and godot.returncode == 1:
+                parts.append(GATE_NO_GODOT_WARNING.format(sb=sb))
+    except sandbox_login._Spent:
+        pass
+    return parts
 
 
 def reconcile_verify_commands(root: Path) -> tuple[dict, dict]:
@@ -671,6 +790,11 @@ def reconcile_verify_commands(root: Path) -> tuple[dict, dict]:
     if not added:
         return (_verify_key(source, tracked, "unchanged", kept=kept),
                 row(True, f"unchanged ({len(tracked)} tracked, {len(kept)} operator)"))
+    # Story 36.6 (DW-62): never a write that dirties the engine's tree
+    if policy_dirties_tree(root):
+        return refused(source, tracked,
+                       f"{POLICY_REL} is tracked (or not gitignored); add "
+                       f"{len(added)} command(s) from {source} by hand")
     new_text = _place_verify_commands(text, data, desired)
     if new_text is None:
         return refused(source, tracked,
@@ -1312,6 +1436,49 @@ def engine_mcp_row(root: Path) -> dict:
                f"(kb/engine-mcp-godot.md) rests on the engine skill alone; {port_text}")
 
 
+# ----------------------------------------------- the run-epic job's rhythm
+
+def run_rhythm_row(root: Path, spec_rel: str) -> dict:
+    """Story 36.6 (hole 105, AC5): the advisory ``run rhythm`` row: the
+    resolved ``stop.after_stories`` of the project's ``run-epic`` instance
+    whose ``target.payload.epic`` is the ``spec-epic-<N>`` folder's. With no
+    field declared the run goes to the epic's end, and this row says so,
+    adding that an engagement's autonomy (a minted ``run-epic-<N>`` declares
+    no rhythm) can still stop it at a story boundary."""
+    def row(detail: str) -> dict:
+        return {"check": RHYTHM_CHECK, "ok": True, "detail": detail}
+
+    m = re.fullmatch(r"spec-epic-(\d+)", Path(spec_rel).name)
+    if not m:
+        return row("not an epic spec folder; no rhythm read")
+    epic = int(m.group(1))
+    defn = None
+    try:
+        paths = sorted(joblib.instances_dir(root).glob("*.json"))
+    except OSError:
+        paths = []
+    for path in paths:
+        entry = joblib.load_instance(root, path.stem)
+        candidate = entry.get("definition")
+        if not isinstance(candidate, dict) or candidate.get("type") != "run-epic":
+            continue
+        target = candidate.get("target")
+        payload = target.get("payload") if isinstance(target, dict) else None
+        if isinstance(payload, dict) and payload.get("epic") == epic:
+            defn = candidate
+            break
+    if defn is None:
+        return row(f"no run-epic instance names epic {epic}; no rhythm read")
+    stop = defn.get("stop")
+    figure = stop.get("after_stories") if isinstance(stop, dict) else None
+    if figure is None:
+        return row(f"{defn.get('id')}: no stop.after_stories declared; the run "
+                   "goes to the epic's end; an engagement's autonomy can still stop "
+                   "the run at a story boundary")
+    return row(f"{defn.get('id')}: stop.after_stories {figure}; the launch arms "
+               "the graceful stop")
+
+
 # --------------------------------------------------------------------- verbs
 
 def check(project_root: Path, spec_folder: str) -> dict:
@@ -1380,6 +1547,8 @@ def check(project_root: Path, spec_folder: str) -> dict:
     checks.append(story_plans_row(folder_abs, spec_md, manifest))
     # Story 35.4: advisory too — the engine MCP's verify-only filter and port
     checks.append(engine_mcp_row(root))
+    # Story 36.6: advisory too — the run-epic job's rhythm
+    checks.append(run_rhythm_row(root, rel))
 
     try:
         live = live_runs(list_runs(root))

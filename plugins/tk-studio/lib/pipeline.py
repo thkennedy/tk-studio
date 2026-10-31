@@ -429,6 +429,24 @@ def unignored_writes(project_root: Path) -> list[str]:
     return [r for r in rels if r not in ignored]
 
 
+def policy_dirties_tree(project_root: Path) -> bool:
+    """Story 36.6 (DW-62): would writing `.bmad-loop/policy.toml` dirty the
+    tree the engine's preflight refuses? True when git does not ignore it
+    (`unignored_writes`) or tracks it (`git ls-files --error-unmatch`:
+    `check-ignore --no-index` reads a tracked file matching an ignore pattern
+    as ignored). False when git is unavailable or the root is not a
+    repository — never a guess."""
+    rel = POLICY_REL.as_posix()
+    if rel in unignored_writes(project_root):
+        return True
+    try:
+        proc = subprocess.run(["git", "ls-files", "--error-unmatch", "--", rel],
+                              cwd=project_root, capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
 def apply(project_root: Path, story: str, runtime: dict | None = None,
           dry_run: bool = False) -> dict:
     res = resolve(project_root, story, runtime)

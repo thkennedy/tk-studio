@@ -76,7 +76,8 @@
  *                            HOME from `sbx exec <sb> printenv HOME`; a run dir already gone counts done;
  *                4. relaunch the epic rebuilt (`deps.relaunch`: `rebuildStarted`, a fresh session id), the run
  *                            moved `paused` → `running` with a `close-out` event `{story_key, verdict, commit,
- *                            meter, archive}` (`Queue.resumeFromPause`), then driven through `finishRun` with
+ *                            meter, archive, stories_done?}` (`Queue.resumeFromPause`; Story 36.6: `stories_done`, the
+ *                            engine journal's `story-done` keys, read before the archive), then driven through `finishRun` with
  *                            the pinning recorder and `mirror` (the new `launched`). Nothing story-specific is
  *                            passed: `tk-studio-launch` skips done stories itself. The pin is never released here.
  *   stop       Story 35.2: a graceful stop is in force for a paused run when its engine run dir holds
@@ -111,7 +112,7 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { load as loadYaml } from "js-yaml";
-import { notifier, sbxBin } from "./env";
+import { notifier, pluginRoot, sbxBin, studioRoot } from "./env";
 import { canonicalPr, isWithin, notify, NOTICE_MAX_BYTES, sendText, TRUNCATED_MARKER, type EndNotice } from "./hygiene";
 import { hostVerify, inconclusiveReason, isInconclusive, isRed, isSlice, legHistory, redReason, type HostVerifyResult, type LegHistoryEntry } from "./hostverify";
 import { engineRoot, isTerminal, RunTerminal, selfOwner, servedRoot, STUDIO_END_RETRY_LIMIT, type EngineWhere, type Owner, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
@@ -245,7 +246,12 @@ export interface PausedDeps extends WorktreeDeps {
   resume?: (queue: Queue, runId: string) => Promise<unknown>;
   /** Story 35.2: the graceful stop the auto-resume's resume re-arms (default `stopEngine` on the run's tier). */
   launchStop?: GracefulStopper;
+  /** Story 36.6: the auto-resume's in-progress calls (see `ResumeDeps`). */
+  startedStories?: StoriesStarter;
 }
+
+/** Story 36.6: a run's in-progress calls for the stories its journal started. Never throws. */
+export type StoriesStarter = (queue: Queue, run: QueueRun) => Promise<unknown>;
 
 /** Story 35.2: a graceful stop of a launched engine (`cli.ts` `launchStopGraceful`). A failure is returned, never thrown. */
 export type GracefulStopper = (root: string, engineRunId: string, where?: EngineWhere) => Promise<{ ok: boolean; detail: string }>;
@@ -302,7 +308,7 @@ async function commitStep(run: QueueRun, key: string, deps: WorktreeDeps): Promi
 }
 
 /** The engine run's dir under the root the run serves (Story 28.5: `<worktree>/<prefix>`). */
-const runDirOf = (run: QueueRun) => join(servedRoot(run)!, ".bmad-loop", "runs", run.engine_run_id!);
+export const runDirOf = (run: QueueRun) => join(servedRoot(run)!, ".bmad-loop", "runs", run.engine_run_id!);
 
 async function meterStep(run: QueueRun, deps: WorktreeDeps): Promise<Step> {
   const dir = runDirOf(run);
@@ -592,6 +598,7 @@ async function closeOutLanded(queue: Queue, run: QueueRun, l: Extract<Landing, {
       return await endAtBoundary(queue, run, key, leg, archive.ok ? undefined : archive.error, deps);
     } catch (e) { return boundaryThrew(queue, run, key, e, deps); }
   }
+  const storiesDone = journalStoriesDone(runDirOf(run)); // Story 36.6: read before the archive moves the journal
   const archive = await archiveStep(run, deps);
   if (!archive.ok) { noteFailed(queue, run, key, "archive", archive.error); return false; }
   if (!deps.relaunch) { noteFailed(queue, run, key, "relaunch", "no relaunch driver"); return false; }
@@ -601,6 +608,7 @@ async function closeOutLanded(queue: Queue, run: QueueRun, l: Extract<Landing, {
   try {
     queue.resumeFromPause(run.run_id, "close-out", {
       story_key: key, verdict: l.verdict, commit: commit.value, meter: meter.value, archive: archive.value,
+      ...(storiesDone.length ? { stories_done: storiesDone } : {}),
     }, deps.self ?? selfOwner());
   } catch (e) { noteFailed(queue, run, key, "relaunch", clip(message(e))); return false; }
   let why: string | undefined;
@@ -1003,6 +1011,9 @@ export interface ResumeDeps extends WorktreeDeps {
   self?: Owner;
   /** Story 35.2: the re-arm of a graceful stop in force (default `stopEngine` on the run's tier). */
   launchStop?: GracefulStopper;
+  /** Story 36.6: the resumed run's in-progress calls (`cli.ts`, `planstatus.ts` `startedStories`; injected: a value import
+   * of `planstatus` here would add an import cycle). Never throws. */
+  startedStories?: StoriesStarter;
 }
 
 export interface ResumeAnswer { ok: true; run_id: string; state: "running"; engine_run_id: string }
@@ -1081,6 +1092,134 @@ async function rearmStop(queue: Queue, run: QueueRun, deps: ResumeDeps, pidRewri
   const notify = ok ? undefined : await sendLine(deps, rearmFailedLine(run.run_id, id, detail));
   try { queue.note(run.run_id, "graceful-stop", { engine_run_id: id, rearmed: true, ok, detail, tier: run.tier, ...(notify ? { notify } : {}) }); }
   catch { /* not recorded */ }
+}
+
+// ------------------------------------------------------------ Story 36.6: the run-epic job's launch duties
+
+/** The shipped job type whose launches owe the in-progress call and the rhythm's stop. */
+export const RUN_EPIC_JOB_TYPE = "run-epic";
+/** A run is a run-epic when its resolved definition's `type` or `id` is `run-epic`. */
+export const isRunEpic = (defn: Record<string, any> | null | undefined): boolean =>
+  !!defn && (defn.type === RUN_EPIC_JOB_TYPE || defn.id === RUN_EPIC_JOB_TYPE);
+/** The queue event of one arming of the rhythm's graceful stop. */
+export const STOP_ARMED = "stop-armed";
+
+/** The job's declared rhythm (`stop.after_stories`, an integer > 0); undefined when none: the run goes to the epic's end. */
+export function rhythmOf(defn: Record<string, any> | null | undefined): number | undefined {
+  const n = defn?.stop?.after_stories;
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+/** Has this engine's stop been armed (a recorded refusal included: never retried)? On a launch and in the pass. */
+export const stopArmed = (events: readonly QueueEvent[], engineRunId: string): boolean =>
+  events.some((e) => e.kind === STOP_ARMED && e.detail?.engine_run_id === engineRunId);
+
+/** The pass's once-only check for a figure N > 1: a `stop-armed`, or a resume's own `graceful-stop` (a stop in force stays
+ * `rearmStop`'s, a refusal unretried), since the latest `engine-resume`. Not per engine for a stop that landed: a relaunched
+ * engine counts the stories of the engines before it, so the boundary an earlier engine armed is not armed again. An
+ * earlier engine's `ok: false` `stop-armed` or `graceful-stop` (refused, or a re-arm skipped) armed nothing, so it does not
+ * count for `engineRunId`: this engine owes its own. */
+export const stopArmedSinceResume = (events: readonly QueueEvent[], engineRunId: string): boolean => {
+  const since = events.findLast((e) => e.kind === "engine-resume")?.seq ?? 0;
+  return events.some((e) => e.seq > since && (e.kind === "graceful-stop" || e.kind === STOP_ARMED)
+    && (e.detail?.ok !== false || e.detail?.engine_run_id === engineRunId));
+};
+
+/** Has the latest resume rewritten `engine.pid` (true with no resume)? bmad-loop clears `stop-request.json` just before that
+ * write, so a stop sent earlier could be deleted while recorded ok (`rearmStop`). */
+export const resumePidRewritten = (events: readonly QueueEvent[]): boolean => {
+  const since = events.findLast((e) => e.kind === "engine-resume")?.seq;
+  return since === undefined || events.some((e) => e.kind === "engine-pid" && e.seq > since && typeof e.detail?.pid === "number");
+};
+
+/** Is the launched path free to arm? No when the latest `engine-pid` event records no numeric pid (`holdEngine`'s unknown,
+ * `engine_pid: "unknown"`): an engine not yet up can refuse the stop, a refusal is permanent, and bmad-loop clears
+ * `stop-request.json` just before writing `engine.pid`, so an early stop could be deleted while recorded ok. The pass arms
+ * it on the first tick that shows this engine's `story-start` (`backstopOwed`). No such event (a non-sbx run): free, as ever. */
+export const enginePidKnown = (events: readonly QueueEvent[]): boolean => {
+  const latest = events.findLast((e) => e.kind === "engine-pid");
+  return !latest || typeof latest.detail?.pid === "number";
+};
+
+/** The graceful stop as a command the operator can run on the run's tier (`stopEngineAt`'s argv): on sbx through `sbx exec`
+ * with the VM paths (the host has no `bmad-loop`), else `uv run` on the host. A path that cannot be derived is left as a
+ * placeholder or as recorded. Never throws. */
+export function gracefulStopCommand(run: Pick<QueueRun, "root" | "worktree" | "prefix" | "tier" | "sandbox">, engineRunId: string, env: Env = process.env): string {
+  const attempt = (f: () => string, otherwise: string) => { try { return f(); } catch { return otherwise; } };
+  const arg = (s: string) => (/\s/.test(s) ? `"${s}"` : s);
+  const root = engineRoot(run), stop = (script: string, dir: string) => `uv run ${arg(script)} stop --directory ${arg(dir)} --run-id ${engineRunId} --graceful`;
+  if (run.tier === "sbx" && run.sandbox) {
+    const studio = attempt(() => toVmPath(studioRoot(env)).replace(/\/+$/, ""), "<studio-root>");
+    return `MSYS_NO_PATHCONV=1 sbx exec ${run.sandbox} ${stop(`${studio}/plugins/tk-studio/lib/launch.py`, attempt(() => toVmPath(root), root))}`;
+  }
+  return stop(join(attempt(() => pluginRoot(env), join("<studio-root>", "plugins", "tk-studio")), "lib", "launch.py"), root);
+}
+
+/** The notifier line of a refused arming: the engine runs with no graceful stop, the refusal is never retried, and the line
+ * ends with the command that issues it by hand. */
+export const armRefusedLine = (run: Pick<QueueRun, "run_id" | "root" | "worktree" | "prefix" | "tier" | "sandbox">, engineRunId: string, detail: string, env: Env = process.env): string =>
+  oneLine(`supervisor: run ${run.run_id}: the graceful stop was not armed on engine ${engineRunId} (${detail}): it may carry into the next story; re-issue \`${gracefulStopCommand(run, engineRunId, env)}\``);
+
+/** Engines being armed in this process: the launched path and the pass can both reach `armStop` while the other awaits it. */
+const arming = new Set<string>();
+
+/** The `story-done` keys of an engine run dir's journal, for the `close-out` event: the archive moves the journal and the
+ * relaunched engine starts a fresh one. A missing or unreadable journal has none. Never throws. */
+function journalStoriesDone(runDir: string): string[] {
+  let text: string;
+  try { text = readFileSync(join(runDir, "journal.jsonl"), "utf-8"); } catch { return []; }
+  const keys = new Set<string>();
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const e = JSON.parse(line);
+      if (e?.kind === "story-done" && typeof e.story_key === "string" && e.story_key) keys.add(e.story_key);
+    } catch { /* an unparsable line is skipped */ }
+  }
+  return [...keys];
+}
+
+/** The rhythm's graceful stop on the run's tier (`deps.launchStop` when injected, else `stopEngine`), recorded as one
+ * `stop-armed {figure, engine_run_id, ok, detail, tier}`; a refusal is `ok: false`, never retried, and sends one notifier
+ * line (`armRefusedLine`), its outcome the event's `notify`. Never throws. */
+export async function armStop(queue: Queue, run: QueueRun, figure: number, deps: WorktreeDeps & Pick<PausedDeps, "hygiene"> & { launchStop?: GracefulStopper } = {}): Promise<void> {
+  const id = run.engine_run_id;
+  if (!id || arming.has(id)) return;
+  arming.add(id);
+  try {
+    let r: { ok: boolean; detail: string };
+    try {
+      if (deps.launchStop) r = await deps.launchStop(engineRoot(run), id, { tier: run.tier, sandbox: run.sandbox });
+      else {
+        const answer = await stopEngine(run, deps, { graceful: true });
+        r = answer === "stopped" ? { ok: true, detail: `engine ${id} stopping gracefully` } : { ok: false, detail: answer };
+      }
+    } catch (e) { r = { ok: false, detail: clip(message(e)) }; }
+    const ok = r.ok === true, detail = clip(String(r.detail ?? ""), 500);
+    const notify = ok ? undefined : await sendLine(deps, armRefusedLine(run, id, detail, envOf(deps)));
+    try { queue.note(run.run_id, STOP_ARMED, { figure, engine_run_id: id, ok, detail, tier: run.tier, ...(notify ? { notify } : {}) }); }
+    catch { /* not recorded */ }
+  } finally { arming.delete(id); }
+}
+
+/** A resumed run-epic's duties, after `unblockTracked`: with figure 1 and no stop in force (one in force stays `rearmStop`'s),
+ * the stop armed once since this `engine-resume`, only once the resume rewrote `engine.pid` (`rearmStop`'s reason; else one
+ * notifier line, no arming); then the in-progress calls. Never throws: the resume has already happened. */
+async function resumeDuties(queue: Queue, run: QueueRun, stopInForce: boolean, pidRewritten: boolean, deps: ResumeDeps): Promise<void> {
+  try {
+    const defn = queue.definition(run);
+    if (!isRunEpic(defn)) return;
+    const figure = rhythmOf(defn);
+    if (!stopInForce && figure) {
+      if (!pidRewritten) await sendLine(deps, rearmFailedLine(run.run_id, run.engine_run_id!, REARM_SKIPPED));
+      else if (figure === 1) { // a figure N > 1 is re-armed by the pass, when its count is met
+        const events = queue.events(run.run_id);
+        const since = events.findLast((e) => e.kind === "engine-resume")?.seq ?? 0;
+        if (!events.some((e) => e.kind === STOP_ARMED && e.seq > since)) await armStop(queue, run, 1, deps);
+      }
+    }
+    await deps.startedStories?.(queue, run);
+  } catch { /* the next tick's pass still calls */ }
 }
 
 // ------------------------------------------------------------ Story 36.3: the resume closes the block
@@ -1221,5 +1360,6 @@ export async function resumePaused(queue: Queue, runId: string, opts: { restoreP
   } catch { /* ended meanwhile */ }
   if (stop) await rearmStop(queue, run, deps, found !== null);
   await unblockTracked(queue, run, events, deps);
+  await resumeDuties(queue, run, !!stop, found !== null, deps);
   return { ok: true, run_id: runId, state: "running", engine_run_id: id };
 }

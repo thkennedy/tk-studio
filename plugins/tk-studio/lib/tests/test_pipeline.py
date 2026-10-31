@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -496,6 +497,33 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertFalse(out["ok"])
         self.assertIn("gpt-9", out["error"])
+
+
+class PolicyDirtiesTreeTests(unittest.TestCase):
+    """Story 36.6 (DW-62): the tracked check beside `unignored_writes`."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        policy = self.root / ".bmad-loop" / "policy.toml"
+        policy.parent.mkdir(parents=True)
+        policy.write_text("[limits]\n", encoding="utf-8")
+
+    def _git(self, *args):
+        subprocess.run(["git", *args], cwd=str(self.root), check=True,
+                       capture_output=True, stdin=subprocess.DEVNULL)
+
+    def test_no_repository_is_no_hazard(self):
+        self.assertFalse(pipeline.policy_dirties_tree(self.root))
+
+    def test_unignored_and_tracked_are_hazards_ignored_is_not(self):
+        self._git("init", "-q")
+        self.assertTrue(pipeline.policy_dirties_tree(self.root))
+        (self.root / ".gitignore").write_text(".bmad-loop/\n", encoding="utf-8")
+        self.assertFalse(pipeline.policy_dirties_tree(self.root))
+        self._git("add", "-f", "--", ".bmad-loop/policy.toml")
+        self.assertTrue(pipeline.policy_dirties_tree(self.root))
 
 
 if __name__ == "__main__":

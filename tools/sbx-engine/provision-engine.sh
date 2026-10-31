@@ -81,6 +81,11 @@ fi
 # asks for on the VM's Ubuntu.
 if [ -n "${WITH_GODOT:-}" ]; then
   step godot
+  # Story 36.6 (DW-71): the provisioning's own record, one key=value line per option; `launch.py check`
+  # reads it over `sbx exec` (the engine-gate clause), and takes an executable shim with no marker for an
+  # older sandbox that has Godot. So both go first: whichever step fails below, a re-provision that fails
+  # leaves neither from an earlier one, and they are written only once the binary answers.
+  rm -f "$HOME/.tk-studio/provisioned" "$HOME/.local/bin/godot"
   GD_DIR="$HOME/godot/Godot_v${WITH_GODOT}-stable_mono_linux_x86_64"
   GD_BIN="$GD_DIR/Godot_v${WITH_GODOT}-stable_mono_linux.x86_64"
   [ -x "$GD_BIN" ] || {
@@ -89,11 +94,15 @@ if [ -n "${WITH_GODOT:-}" ]; then
       && unzip -q -o /tmp/godot.zip -d "$HOME/godot" && chmod +x "$GD_BIN" && rm -f /tmp/godot.zip
   }
   dpkg -s libfontconfig1 >/dev/null 2>&1 || apt_install libfontconfig1 || exit 1
+  GD_VERSION="$("$GD_BIN" --version 2>&1)" || {
+    echo "godot: $GD_BIN --version failed; no provisioned marker written:"; echo "$GD_VERSION" | tail -n 20; exit 1; }
+  echo "$GD_VERSION" | tail -2
   mkdir -p "$HOME/.local/bin"
   printf '#!/usr/bin/env bash\nexec "%s" "$@"\n' "$GD_BIN" > "$HOME/.local/bin/godot"
   chmod +x "$HOME/.local/bin/godot"
   grep -q 'export GODOT=' ~/.profile 2>/dev/null || echo "export GODOT=\"$GD_BIN\"" >> ~/.profile
-  "$HOME/.local/bin/godot" --version 2>&1 | tail -2
+  mkdir -p "$HOME/.tk-studio"
+  printf 'WITH_GODOT=%s\ndate=%s\n' "$WITH_GODOT" "$(date -u +%F)" > "$HOME/.tk-studio/provisioned"
 fi
 
 if [ "${WITH_BUN:-0}" = 1 ]; then

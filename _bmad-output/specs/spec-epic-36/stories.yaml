@@ -244,3 +244,7 @@
     `import("./cli")` dodge is already gone; see plans/36-7.md Risks. Replan (36-4 gate, 2026-10-31): on
     bun 1.4.3 the preload's 30 s default reaches only a run's first file, so run the
     whole suite with `--timeout 30000`; see plans/36-7.md Risks.
+    Replan (36-6 gate, 2026-10-31): `planstatus.ts` takes more from `closeout.ts` and
+    `stopEngine` gains a second caller in `armStop`; keep the `startedStories` and
+    `JournalReader` seams, as they avoid cycles, and put `bun` on PATH for the suites;
+    see plans/36-7.md Risks.

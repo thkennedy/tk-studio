@@ -2,11 +2,14 @@
 // merges — pinned against a real throwaway repository (the run branch carrying the specs the run marked done), the
 // fake planning adapter under a temp TK_STUDIO_ROOT (`fakePlansync`) and the fake `gh` (`pr view`).
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { atBranch, mergePass, PLAN_RETRY_LIMIT, planEntity, planOwner, registryRoot, reviewPass, specKey, stagePass, storyNumber, supervisorRows, type PlanStatusDeps } from "../src/planstatus";
-import { openConflicts, Queue, type QueueEvent } from "../src/queue";
+import { mirror, recoverQueue, resumeRun, type RunSummary } from "../src/cli";
+import { armRefusedLine, armStop, enginePidKnown, gracefulStopCommand, resumePaused } from "../src/closeout";
+import { readJournal } from "../src/office";
+import { atBranch, LAUNCH_ARM_GRACE_MS, launchedPass, mergePass, PLAN_CALLER, PLAN_RETRY_LIMIT, planEntity, planOwner, registryRoot, reviewPass, specKey, STAGE_LEASE, stagePass, startedStories, storyNumber, supervisorRows, type PlanStatusDeps } from "../src/planstatus";
+import { openConflicts, Queue, type QueueEvent, type QueueRun } from "../src/queue";
 import { runProcess, runUv, type RunResult } from "../src/server";
 import { runBranch } from "../src/worktree";
 import { fakeGh, fakePlansync, gitRepo, testGit } from "./fakes";
@@ -934,5 +937,697 @@ describe("Story 36.3: an AD-5 conflict ends the pass `partial` (DW-130)", () => 
     await mergePass(fx.queue, deps);
     expect(doneEvents(fx)[0]!.status).toBeUndefined();
     expect(doneEvents(fx)[0]!.conflict).toBeUndefined();
+  }, 60_000);
+});
+
+// Story 36.6 (AC4, AC5; holes 104, 105): the launched path, the resume and the pass beside `reviewPass`, with a fake `uv`.
+describe("Story 36.6: the story being built reads In Progress; the launch arms the job's rhythm", () => {
+  const E1 = "20261031-120000-ab12";
+  const K1 = "27-5-the-plan-follows-the-run", K2 = "27-1-the-other-story", K3 = "27-9-the-third-story";
+  const BLOCK = { status: "complete", intent: "tk-studio-launch", artifacts: [`.bmad-loop/runs/${E1}`] };
+  const epicDefn = (after?: number) => ({ id: "run-epic-27", type: "run-epic", target: { skill: "tk-studio-launch" }, stop: { on_status: ["blocked"], ...(after ? { after_stories: after } : {}) } });
+
+  /** A `running` queue run, not yet launched unless `launched`, its engine's run dir in a kept worktree, a fake `uv` answering
+   * `plansync.py status` with `status()` and `launch.py stop` with `stop()`. */
+  async function launchedRun(opts: { defn?: Record<string, unknown>; launched?: boolean } = {}) {
+    const repo = gitRepo({ "_bmad-output/planning-artifacts/plan/ST-097.md": entity("ST-097", "27.5"), "_bmad-output/planning-artifacts/plan/ST-093.md": entity("ST-093", "27.1"), "_bmad-output/planning-artifacts/plan/ST-099.md": entity("ST-099", "27.9") });
+    const queue = new Queue(":memory:", { ownerAlive: (o) => o.nonce === me.nonce, engineLive: async () => ({ live: false, run_ids: [] }) });
+    const definition = opts.defn ?? epicDefn(1);
+    const run0 = queue.enqueue({ jobId: "run-epic-27", root: repo.checkout, projectId: "proj", definition, owner: me, base_ref: "main" }).run;
+    if (!(await queue.claim(run0.run_id, me)).claimed) throw new Error("not claimed");
+    const wt = join(tempDir("tk-sup-ps-launch-"), "wt");
+    const runDir = join(wt, ".bmad-loop", "runs", E1);
+    mkdirSync(runDir, { recursive: true });
+    testGit(repo.checkout, "branch", runBranch(run0.run_id), "main");
+    queue.recordWorktree(run0.run_id, wt, { branch: runBranch(run0.run_id), base_ref: "main" });
+    if (opts.launched !== false) queue.markLaunched(run0.run_id, E1, { status_block: BLOCK, end: { state: "complete", reason: null } });
+    const calls: { script: string; args: string[] }[] = [];
+    const answers = {
+      status: (): RunResult | Error => ({ exit: 0, stdout: JSON.stringify({ ok: true, previous_status: "planned" }), stderr: "" }),
+      stop: (): RunResult => ({ exit: 0, stdout: "{}", stderr: "" }),
+    };
+    const deps: PlanStatusDeps = {
+      env: { ...process.env, TK_STUDIO_ROOT: tempDir("tk-sup-ps-studio-"), TK_SUPERVISOR_NOTIFY: "" },
+      uv: async (_root: string, script: string, args: string[]) => {
+        calls.push({ script: script.split(/[\\/]/).at(-1)!, args });
+        const a = script.endsWith("launch.py") ? answers.stop() : answers.status();
+        if (a instanceof Error) throw a;
+        return a;
+      },
+    };
+    const journal = (...lines: Record<string, unknown>[]) => appendFileSync(join(runDir, "journal.jsonl"), lines.map((l) => JSON.stringify(l) + "\n").join(""), "utf-8");
+    /** A relaunched engine's own (fresh) journal. */
+    const journalAt = (engine: string, ...lines: Record<string, unknown>[]) => {
+      const dir = join(wt, ".bmad-loop", "runs", engine);
+      mkdirSync(dir, { recursive: true });
+      appendFileSync(join(dir, "journal.jsonl"), lines.map((l) => JSON.stringify(l) + "\n").join(""), "utf-8");
+    };
+    const ev = (kind: string) => queue.events(run0.run_id).filter((e) => e.kind === kind);
+    const statusCalls = () => calls.filter((c) => c.script === "plansync.py");
+    const stops = () => calls.filter((c) => c.script === "launch.py");
+    const pass = () => launchedPass(queue, deps, readJournal);
+    return { repo, queue, runId: run0.run_id, wt, runDir, deps, answers, journal, journalAt, ev, calls, statusCalls, stops, pass, definition };
+  }
+  const start = (key: string) => ({ kind: "story-start", story_key: key });
+  const done = (key: string) => ({ kind: "story-done", story_key: key });
+
+  test("M14: one `plan-status` `in-progress` for the first story, the verb the other phases use", async () => {
+    const fx = await launchedRun();
+    fx.journal(start(K1));
+    await fx.pass();
+    const [e, ...rest] = fx.ev("plan-status");
+    expect(rest).toEqual([]);
+    expect(e!.detail).toMatchObject({ phase: "in-progress", ok: true, previous_status: "planned", story_key: K1, id: "ST-097" });
+    expect(fx.statusCalls()).toHaveLength(1);
+    const a = fx.statusCalls()[0]!.args;
+    expect(a.slice(0, 7)).toEqual(["status", "--directory", fx.repo.checkout, "--id", "ST-097", "--status", "in-progress"]);
+    expect(a.slice(-2)).toEqual(["--caller", PLAN_CALLER]);
+  }, 60_000);
+
+  test("M15, M16: a later `story-start` is one more event; a repeat pass or a repeated start records none", async () => {
+    const fx = await launchedRun();
+    fx.journal(start(K1));
+    await fx.pass();
+    await fx.pass();
+    expect(fx.statusCalls()).toHaveLength(1);
+    fx.journal(done(K1), start(K2), start(K1));
+    await fx.pass();
+    await fx.pass();
+    expect(fx.ev("plan-status").map((e) => e.detail?.story_key)).toEqual([K1, K2]);
+    expect(fx.statusCalls()).toHaveLength(2);
+  }, 60_000);
+
+  test("M17: a resume over Block Resolved holds a conflict: `partial` with `conflict`, one event, not re-asked", async () => {
+    const fx = await launchedRun();
+    const conflict = [{ id: "ST-097", canonical: "plan/ST-097.md", backend: "TK-9", fields: ["status: in-progress / blocked"] }];
+    fx.answers.status = () => ({ exit: 0, stdout: JSON.stringify({ ok: true, previous_status: "blocked", sync: { projection: { conflicts: conflict } } }), stderr: "" });
+    fx.journal(start(K1));
+    await fx.pass();
+    await fx.pass();
+    expect(fx.statusCalls()).toHaveLength(1);
+    expect(fx.ev("plan-status")).toHaveLength(1);
+    expect(fx.ev("plan-status")[0]!.detail).toMatchObject({ phase: "in-progress", ok: true, status: "partial", conflict, previous_status: "blocked" });
+    expect(fx.queue.get(fx.runId)!.state).toBe("running");
+  }, 60_000);
+
+  test.each([
+    ["refused", { ok: false, error: "status of ST-097 is pinned" }],
+    ["blocked", { ok: false, blocked: true, reason: "the issue is Blocked" }],
+  ] as const)("M18: a %s answer is one `ok: false` event, never retried, the run goes on", async (_n, answer) => {
+    const fx = await launchedRun();
+    fx.answers.status = () => ({ exit: 2, stdout: JSON.stringify(answer), stderr: "" });
+    fx.journal(start(K1));
+    await fx.pass();
+    await fx.pass();
+    expect(fx.statusCalls()).toHaveLength(1);
+    expect(fx.ev("plan-status")).toHaveLength(1);
+    expect(fx.ev("plan-status")[0]!.detail).toMatchObject({ phase: "in-progress", ok: false, story_key: K1 });
+    expect(fx.queue.get(fx.runId)!.state).toBe("running");
+  }, 60_000);
+
+  test("M19: a runner that throws records nothing and is asked again, bounded by PLAN_RETRY_LIMIT, then one give-up", async () => {
+    const fx = await launchedRun();
+    fx.answers.status = () => new Error("spawn failed");
+    fx.journal(start(K1));
+    await fx.pass();
+    expect(fx.ev("plan-status")).toEqual([]);
+    expect(fx.statusCalls()).toHaveLength(1);
+    for (let i = 0; i < PLAN_RETRY_LIMIT; i++) await fx.pass();
+    expect(fx.statusCalls()).toHaveLength(PLAN_RETRY_LIMIT + 1);
+    expect(fx.ev("plan-status")).toHaveLength(1);
+    expect(fx.ev("plan-status")[0]!.detail).toMatchObject({ phase: "in-progress", story_key: K1, ok: false, skipped: true, gave_up: true });
+    await fx.pass();
+    expect(fx.statusCalls()).toHaveLength(PLAN_RETRY_LIMIT + 1);
+  }, 120_000);
+
+  test("the third phase leaves the other phases alone: `review` still claims, no stage row is owed, `done` opens no conflict", async () => {
+    const fx = await launchedRun();
+    fx.journal(start(K1));
+    await fx.pass();
+    expect(fx.ev("plan-status")[0]!.detail).toMatchObject({ phase: "in-progress", ok: true, id: "ST-097", story_key: K1 });
+    expect(fx.queue.claimPlanPhase(fx.runId, "review", me)).toBe(true);
+    expect(openConflicts(fx.queue.events(fx.runId))).toEqual([]);
+    fx.queue.releasePlanPhase(fx.runId, "review", me);
+    // no stage row is owed: even carrying every field `stageTodo` reads, with the owner's spec present, the in-progress
+    // record is passed over on a terminal run; the same record as `done` is owed, so the pass did read this run
+    write(fx.repo.checkout, { [`_bmad-output/specs/spec-epic-27/stories/${K1}.md`]: spec("done") });
+    const record = { ok: true, stage: true, id: "ST-097", directory: fx.repo.checkout, story_key: K1 };
+    fx.queue.note(fx.runId, "plan-status", { ...record, phase: "in-progress" });
+    fx.queue.end(fx.runId, "complete", "ended");
+    const before = fx.calls.length, kinds = () => fx.queue.events(fx.runId).map((e) => e.kind);
+    await stagePass(fx.queue, fx.deps);
+    expect(fx.calls.length).toBe(before);
+    expect(kinds()).not.toContain("stage-post");
+    expect(fx.queue.events(fx.runId).filter((e) => e.kind === "plan-lease" && e.detail?.phase === STAGE_LEASE)).toEqual([]);
+    fx.queue.note(fx.runId, "plan-status", { ...record, phase: "done" });
+    await stagePass(fx.queue, fx.deps);
+    expect(fx.queue.events(fx.runId).filter((e) => e.kind === "plan-lease" && e.detail?.phase === STAGE_LEASE).length).toBeGreaterThan(0);
+  }, 60_000);
+
+  /** The launched path: `mirror` on a launch's return for a running run. */
+  const launchOf = async (fx: Awaited<ReturnType<typeof launchedRun>>) => mirror(fx.queue, fx.runId, { jobId: "run-epic-27", defn: fx.definition as Record<string, any> },
+    { ok: true, state: "complete", target: "skill", run_id: "studio-1", finish_deferred: true, status_block: BLOCK } as unknown as RunSummary, undefined, fx.deps);
+
+  test("M20: figure 1 is armed once on the launched path, with the story the journal already started", async () => {
+    const fx = await launchedRun({ launched: false });
+    fx.journal(start(K1));
+    await launchOf(fx);
+    const armed = fx.ev("stop-armed");
+    expect(armed).toHaveLength(1);
+    expect(armed[0]!.detail).toMatchObject({ figure: 1, engine_run_id: E1, ok: true, tier: null });
+    expect(fx.stops()).toHaveLength(1);
+    expect(fx.stops()[0]!.args).toEqual(["stop", "--directory", fx.wt, "--run-id", E1, "--graceful"]);
+    expect(fx.ev("plan-status").map((e) => e.detail?.story_key)).toEqual([K1]);
+    // the pass neither re-arms nor re-asks
+    fx.journal(done(K1));
+    await fx.pass();
+    expect(fx.stops()).toHaveLength(1);
+    expect(fx.statusCalls()).toHaveLength(1);
+  }, 60_000);
+
+  test("M20: with no `story-start` yet the launch does not arm: a stop now would end the run with no story built", async () => {
+    const fx = await launchedRun({ launched: false });
+    await launchOf(fx);
+    expect(fx.ev("stop-armed")).toEqual([]);
+    expect(fx.stops()).toEqual([]);
+    expect(fx.statusCalls()).toEqual([]);
+    await fx.pass();
+    expect(fx.stops()).toEqual([]);
+  }, 60_000);
+
+  test("M20: the first tick that shows a `story-start` arms, with no grace wait, and makes the in-progress call; once", async () => {
+    const fx = await launchedRun({ launched: false });
+    await launchOf(fx);
+    fx.journal(start(K1));
+    await fx.pass(); // the clock is at the launch: well inside LAUNCH_ARM_GRACE_MS
+    expect(fx.ev("stop-armed")).toHaveLength(1);
+    expect(fx.ev("stop-armed")[0]!.detail).toMatchObject({ figure: 1, engine_run_id: E1, ok: true, tier: null });
+    expect(fx.stops()).toHaveLength(1);
+    expect(fx.statusCalls()).toHaveLength(1);
+    await fx.pass();
+    await lateTick(fx);
+    expect(fx.stops()).toHaveLength(1);
+    expect(fx.ev("stop-armed")).toHaveLength(1);
+  }, 60_000);
+
+  test("figure 1: a readable journal with no `story-start`, or a missing file, never arms, however long since the launch", async () => {
+    const missing = await launchedRun();
+    expect(existsSync(join(missing.runDir, "journal.jsonl"))).toBe(false);
+    await lateTick(missing);
+    expect(missing.stops()).toEqual([]);
+    expect(missing.ev("stop-armed")).toEqual([]);
+    const readable = await launchedRun();
+    readable.journal({ kind: "stories-validated", count: 3 });
+    await lateTick(readable);
+    expect(readable.stops()).toEqual([]);
+    expect(readable.ev("stop-armed")).toEqual([]);
+  }, 60_000);
+
+  test("figure 1's grace backstop: only a journal read that returns `problem` arms blind, once, after the grace", async () => {
+    const fx = await launchedRun();
+    mkdirSync(join(fx.runDir, "journal.jsonl")); // a directory in its place: `readJournal` names a problem
+    expect(readJournal(fx.runDir).problem).toContain("JournalUnreadable");
+    await fx.pass();
+    expect(fx.ev("stop-armed")).toEqual([]);
+    await lateTick(fx);
+    await lateTick(fx);
+    expect(fx.stops()).toHaveLength(1);
+    expect(fx.ev("stop-armed")).toHaveLength(1);
+    expect(fx.ev("stop-armed")[0]!.detail).toMatchObject({ figure: 1, engine_run_id: E1, ok: true });
+  }, 60_000);
+
+  test("the launched path's and the pass's armings at once are one `stop-armed`", async () => {
+    const fx = await launchedRun();
+    fx.journal(start(K1));
+    await Promise.all([armStop(fx.queue, fx.queue.get(fx.runId)!, 1, fx.deps), fx.pass()]);
+    expect(fx.stops()).toHaveLength(1);
+    expect(fx.ev("stop-armed")).toHaveLength(1);
+  }, 60_000);
+
+  test("M20: a refused arming is one `ok: false` event, never retried, and never stops the launch", async () => {
+    const fx = await launchedRun({ launched: false });
+    fx.journal(start(K1));
+    fx.answers.stop = () => ({ exit: 1, stdout: "", stderr: "GracefulStopError: the engine is gone" });
+    const s = await launchOf(fx);
+    expect(s).toMatchObject({ ok: true, state: "complete" });
+    expect(fx.ev("stop-armed")).toHaveLength(1);
+    expect(fx.ev("stop-armed")[0]!.detail).toMatchObject({ figure: 1, engine_run_id: E1, ok: false });
+    expect(String(fx.ev("stop-armed")[0]!.detail!.detail)).toContain("GracefulStopError");
+    await fx.pass();
+    expect(fx.stops()).toHaveLength(1);
+    expect(fx.queue.get(fx.runId)!.state).toBe("running");
+  }, 60_000);
+
+  /** Records the notifier's lines on `fx.deps`, the deps every path hands `armStop`. */
+  const notified = (fx: Awaited<ReturnType<typeof launchedRun>>) => {
+    const sent: string[] = [];
+    Object.assign(fx.deps, { hygiene: { env: { TK_SUPERVISOR_NOTIFY: "ntfy", TK_SUPERVISOR_NTFY_URL: "https://ntfy.example/t" }, fetch: (async (_u: unknown, init: { body?: unknown }) => { sent.push(String(init?.body)); return new Response("ok"); }) as unknown as typeof fetch } });
+    return sent;
+  };
+  const REFUSED = () => ({ exit: 1, stdout: "", stderr: "GracefulStopError: the engine is gone" });
+
+  test("a refused arming on the launched path: one notifier line naming the run, the engine and the re-issue, one event, no retry", async () => {
+    const fx = await launchedRun({ launched: false });
+    fx.journal(start(K1));
+    const sent = notified(fx);
+    fx.answers.stop = REFUSED;
+    await launchOf(fx);
+    await fx.pass();
+    await lateTick(fx);
+    expect(fx.stops()).toHaveLength(1);
+    expect(fx.ev("stop-armed")).toHaveLength(1);
+    const d = fx.ev("stop-armed")[0]!.detail!;
+    expect(d).toMatchObject({ ok: false, notify: { ok: true, via: "ntfy" } });
+    expect(sent).toEqual([armRefusedLine(fx.queue.get(fx.runId)!, E1, d.detail as string, fx.deps.env)]);
+    for (const part of [fx.runId, E1, `re-issue \`uv run `, `launch.py stop --directory ${fx.wt} --run-id ${E1} --graceful\``]) expect(sent[0]).toContain(part);
+    expect(sent[0]).not.toContain("sbx exec");
+  }, 60_000);
+
+  test("a refused arming's command runs on the run's tier: `launch.py stop` with `--directory`, through `sbx exec` on sbx, the VM paths", () => {
+    const run = { run_id: "q1", root: "C:\\work\\p", worktree: null, prefix: null, tier: "sbx", sandbox: "claude-p" };
+    const env = { TK_STUDIO_ROOT: "C:\\GitHub\\tk-studio" };
+    const sbx = `MSYS_NO_PATHCONV=1 sbx exec claude-p uv run /c/GitHub/tk-studio/plugins/tk-studio/lib/launch.py stop --directory /c/work/p --run-id ${E1} --graceful`;
+    expect(gracefulStopCommand(run, E1, env)).toBe(sbx);
+    expect(armRefusedLine(run, E1, "refused", env)).toEndWith(`re-issue \`${sbx}\``);
+    const host = gracefulStopCommand({ ...run, root: "/w/my p", tier: "host", sandbox: null }, E1, { TK_STUDIO_ROOT: "/s" });
+    expect(host).toBe(`uv run ${join("/s", "plugins", "tk-studio", "lib", "launch.py")} stop --directory "/w/my p" --run-id ${E1} --graceful`);
+    expect(gracefulStopCommand(run, E1, {})).toContain("<studio-root>/plugins/tk-studio/lib/launch.py stop --directory /c/work/p");
+  });
+
+  test("a refused arming from the pass and on a resume reaches the notifier; a good arming sends nothing", async () => {
+    const backstop = await launchedRun();
+    backstop.journal(start(K1));
+    const byPass = notified(backstop);
+    backstop.answers.stop = REFUSED;
+    await lateTick(backstop);
+    await lateTick(backstop);
+    expect(byPass).toHaveLength(1);
+    const res = await launchedRun();
+    res.answers.stop = REFUSED;
+    const { sent, finish } = await resumed(res);
+    expect(res.ev("stop-armed")[0]!.detail).toMatchObject({ ok: false, notify: { ok: true } });
+    expect(sent).toHaveLength(1);
+    finish({ exit: 0, stdout: "", stderr: "" });
+    const good = await launchedRun({ launched: false });
+    good.journal(start(K1));
+    const none = notified(good);
+    await launchOf(good);
+    expect(none).toEqual([]);
+    expect(good.ev("stop-armed")[0]!.detail).toMatchObject({ ok: true });
+    expect(good.ev("stop-armed")[0]!.detail!.notify).toBeUndefined();
+  }, 60_000);
+
+  test("a refused arming whose send fails never throws and is not sent again", async () => {
+    const fx = await launchedRun({ launched: false });
+    fx.journal(start(K1));
+    let tries = 0;
+    Object.assign(fx.deps, { hygiene: { env: { TK_SUPERVISOR_NOTIFY: "ntfy", TK_SUPERVISOR_NTFY_URL: "https://ntfy.example/t" }, fetch: (async () => { tries++; throw new Error("down"); }) as unknown as typeof fetch } });
+    fx.answers.stop = REFUSED;
+    await launchOf(fx);
+    await lateTick(fx);
+    expect(tries).toBe(1);
+    expect(fx.ev("stop-armed")).toHaveLength(1);
+    expect(fx.ev("stop-armed")[0]!.detail).toMatchObject({ ok: false, notify: { ok: false } });
+    const bad = await launchedRun({ launched: false });
+    bad.journal(start(K1));
+    Object.assign(bad.deps, { hygiene: { env: { TK_SUPERVISOR_NOTIFY: "ntfy" } } }); // no URL: the notifier's own throw
+    bad.answers.stop = REFUSED;
+    await launchOf(bad);
+    expect(bad.ev("stop-armed")[0]!.detail).toMatchObject({ ok: false, notify: { ok: false } });
+  }, 60_000);
+
+  test("`enginePidKnown` reads the latest `engine-pid`: none, a pid, unknown, unknown then a pid", async () => {
+    const fx = await launchedRun();
+    const known = () => enginePidKnown(fx.queue.events(fx.runId));
+    expect(known()).toBe(true);
+    fx.queue.recordEnginePid(fx.runId, { pid: 7, start: "1.0", source: "t" });
+    expect(known()).toBe(true);
+    fx.queue.recordEnginePid(fx.runId, null, { why: "not yet up" });
+    expect(fx.ev("engine-pid").at(-1)!.detail).toMatchObject({ engine_pid: "unknown", why: "not yet up" });
+    expect(known()).toBe(false);
+    fx.queue.recordEnginePid(fx.runId, { pid: 8, start: "2.0", source: "t" });
+    expect(known()).toBe(true);
+  }, 60_000);
+
+  test("the launched path with an unknown engine pid does not arm though a story started; the next tick's pass arms it, once", async () => {
+    const fx = await launchedRun({ launched: false });
+    fx.queue.recordEnginePid(fx.runId, null, { why: "not yet up" });
+    fx.journal(start(K1));
+    await launchOf(fx);
+    expect(fx.ev("stop-armed")).toEqual([]);
+    expect(fx.stops()).toEqual([]);
+    expect(fx.statusCalls()).toHaveLength(1); // the in-progress call still runs
+    await fx.pass();
+    await fx.pass();
+    expect(fx.stops()).toHaveLength(1);
+    expect(fx.ev("stop-armed")).toHaveLength(1);
+    expect(fx.ev("stop-armed")[0]!.detail).toMatchObject({ figure: 1, engine_run_id: E1, ok: true });
+  }, 60_000);
+
+  test("the launched path with a recorded engine pid and a `story-start` arms at once", async () => {
+    const fx = await launchedRun({ launched: false });
+    fx.journal(start(K1));
+    fx.queue.recordEnginePid(fx.runId, { pid: 7, start: "1.0", source: "t" });
+    await launchOf(fx);
+    expect(fx.ev("stop-armed")).toHaveLength(1);
+  }, 60_000);
+
+  test("figure 1 is per engine: a relaunched engine whose pid was unknown is armed on its own `story-start`, though an earlier engine's stop was", async () => {
+    const fx = await launchedRun({ launched: false });
+    fx.journal(start(K1));
+    await launchOf(fx);
+    expect(fx.ev("stop-armed")).toHaveLength(1);
+    relaunched(fx, { story_key: K1, stories_done: [K1] });
+    fx.queue.recordEnginePid(fx.runId, null, { why: "not yet up" });
+    await lateTick(fx);
+    expect(fx.ev("stop-armed")).toHaveLength(1); // the earlier engine's `story-start` is in the archived journal, not this one
+    fx.journalAt(E2, start(K2));
+    await fx.pass();
+    expect(fx.ev("stop-armed")).toHaveLength(2);
+    expect(fx.ev("stop-armed")[1]!.detail).toMatchObject({ figure: 1, engine_run_id: E2, ok: true });
+    await lateTick(fx);
+    expect(fx.ev("stop-armed")).toHaveLength(2);
+  }, 60_000);
+
+  test("the wiring: a recover tick's `afterCloseOuts` runs `launchedPass`", async () => {
+    const fx = await launchedRun();
+    fx.journal(start(K1));
+    const verbs = async (_root: string, a: string[]) => a[0] === "status" ? { ok: true, runs: [] } : { ok: true, state: "partial" };
+    const was = process.env.TK_STUDIO_ROOT;
+    process.env.TK_STUDIO_ROOT = join(import.meta.dir, "..", "..", ".."); // `recoverQueue`'s `requireStudio`
+    try { await recoverQueue({ queue: fx.queue, owner: me, worktree: fx.deps, hygiene: { env: {} } }, verbs); }
+    finally { if (was === undefined) delete process.env.TK_STUDIO_ROOT; else process.env.TK_STUDIO_ROOT = was; }
+    expect(fx.ev("plan-status").map((e) => [e.detail?.phase, e.detail?.story_key])).toEqual([["in-progress", K1]]);
+    expect(fx.queue.get(fx.runId)!.state).toBe("running");
+  }, 60_000);
+
+  test("the wiring: `resumeRun` hands the resume the in-progress calls", async () => {
+    const fx = await launchedRun({ defn: epicDefn() });
+    fx.journal(start(K1));
+    const { finish } = await resumed(fx, { viaCli: true });
+    expect(fx.ev("plan-status").map((e) => [e.detail?.phase, e.detail?.story_key])).toEqual([["in-progress", K1]]);
+    finish({ exit: 0, stdout: "", stderr: "" });
+  }, 60_000);
+
+  test("M21: figure 3 is not armed at launch; armed once when 2 stories have `story-done`", async () => {
+    const fx = await launchedRun({ launched: false, defn: epicDefn(3) });
+    await launchOf(fx);
+    expect(fx.ev("stop-armed")).toEqual([]);
+    fx.journal(start(K1), done(K1), start(K2));
+    await fx.pass();
+    expect(fx.ev("stop-armed")).toEqual([]);
+    fx.journal(done(K2));
+    await fx.pass();
+    expect(fx.ev("stop-armed")).toEqual([]); // no story in flight: a stop now would end the run a story short
+    fx.journal(start(K3));
+    await fx.pass();
+    await fx.pass();
+    expect(fx.ev("stop-armed")).toHaveLength(1);
+    expect(fx.ev("stop-armed")[0]!.detail).toMatchObject({ figure: 3, engine_run_id: E1, ok: true });
+    expect(fx.stops()).toHaveLength(1);
+    expect(fx.ev("plan-status").map((e) => e.detail?.story_key)).toEqual([K1, K2, K3]);
+  }, 60_000);
+
+  const K4 = "27-2-the-fourth-story";
+  test.each([["story-deferred"], ["story-skipped"]] as const)("figure 3 with K1 closed by `%s`, K2 and K3 done: not armed until K4's `story-start`", async (kind) => {
+    const fx = await launchedRun({ defn: epicDefn(3) });
+    fx.journal(start(K1), { kind, story_key: K1, reason: "held" }, start(K2), done(K2), start(K3), done(K3));
+    await fx.pass();
+    expect(fx.ev("stop-armed")).toEqual([]); // nothing in flight: a stop now would end the run a story short
+    expect(fx.stops()).toEqual([]);
+    fx.journal(start(K4));
+    await fx.pass();
+    await fx.pass();
+    expect(fx.ev("stop-armed")).toHaveLength(1);
+    expect(fx.ev("stop-armed")[0]!.detail).toMatchObject({ figure: 3, engine_run_id: E1, ok: true });
+    expect(fx.stops()).toHaveLength(1);
+  }, 60_000);
+
+  test("figure 3: a `story-escalated` key still counts as in flight", async () => {
+    const fx = await launchedRun({ defn: epicDefn(3) });
+    fx.journal(start(K1), { kind: "story-escalated", story_key: K1, reason: "a ruling" }, start(K2), done(K2), start(K3), done(K3));
+    await fx.pass();
+    expect(fx.ev("stop-armed")).toHaveLength(1);
+    expect(fx.ev("stop-armed")[0]!.detail).toMatchObject({ figure: 3, engine_run_id: E1, ok: true });
+    expect(fx.stops()).toHaveLength(1);
+  }, 60_000);
+
+  /** The pass with the clock past the launched path's grace. */
+  const lateTick = (fx: Awaited<ReturnType<typeof launchedRun>>) =>
+    launchedPass(fx.queue, { ...fx.deps, now: () => Date.now() + LAUNCH_ARM_GRACE_MS + 1000 }, readJournal);
+
+  test("figure 1: a death between `markLaunched` and `armStop` is armed by the pass once, on the first tick showing a `story-start`", async () => {
+    const fx = await launchedRun(); // launched, the launched path never reached
+    fx.journal(start(K1));
+    await fx.pass();
+    await fx.pass();
+    expect(fx.ev("stop-armed")).toHaveLength(1);
+    expect(fx.ev("stop-armed")[0]!.detail).toMatchObject({ figure: 1, engine_run_id: E1, ok: true });
+    expect(fx.stops()).toHaveLength(1);
+  }, 60_000);
+
+  test("figure 1's backstop: a recorded refusal stays unretried; the launched path's arming is not repeated", async () => {
+    const fx = await launchedRun({ launched: false });
+    fx.journal(start(K1));
+    fx.answers.stop = () => ({ exit: 1, stdout: "", stderr: "GracefulStopError: the engine is gone" });
+    await launchOf(fx);
+    expect(fx.ev("stop-armed")[0]!.detail).toMatchObject({ ok: false });
+    await lateTick(fx);
+    expect(fx.stops()).toHaveLength(1);
+    expect(fx.ev("stop-armed")).toHaveLength(1);
+  }, 60_000);
+
+  test("figure 1's backstop: not after a resume, which arms or says why not; no rhythm is never armed", async () => {
+    const fx = await launchedRun();
+    fx.journal(start(K1));
+    const { finish } = await resumed(fx, { rewrite: false });
+    await lateTick(fx);
+    expect(fx.stops()).toEqual([]);
+    finish({ exit: 0, stdout: "", stderr: "" });
+    const none = await launchedRun({ defn: epicDefn() });
+    none.journal(start(K1));
+    await lateTick(none);
+    expect(none.stops()).toEqual([]);
+  }, 60_000);
+
+  const E2 = "20261031-130000-cd34";
+  /** The close-out's relaunch of a landed story: the run back to `running` under a new engine and a fresh journal. */
+  const relaunched = (fx: Awaited<ReturnType<typeof launchedRun>>, detail: Record<string, unknown>) => {
+    fx.queue.markPaused(fx.runId, { engine: { run_id: E1, status: "running", paused_stage: "commit" }, pr: PR, closeout: { result: "draft PR", worktree: "kept" } });
+    fx.queue.resumeFromPause(fx.runId, "close-out", detail, me);
+    fx.queue.markLaunched(fx.runId, E2, { status_block: BLOCK, end: { state: "complete", reason: null } });
+  };
+
+  test("figure N: an earlier engine's finished stories count, from the `close-out` events, and a story in both counts once", async () => {
+    const fx = await launchedRun({ defn: epicDefn(3) });
+    fx.journal(start(K1), done(K1), start(K2));
+    await fx.pass();
+    expect(fx.ev("stop-armed")).toEqual([]);
+    relaunched(fx, { story_key: K2, stories_done: [K1] });
+    fx.journalAt(E2, start(K3));
+    await fx.pass();
+    await fx.pass();
+    expect(fx.ev("stop-armed")).toHaveLength(1);
+    expect(fx.ev("stop-armed")[0]!.detail).toMatchObject({ figure: 3, engine_run_id: E2 });
+    const one = await launchedRun({ defn: epicDefn(3) });
+    relaunched(one, { story_key: K1, stories_done: [K1] });
+    one.journalAt(E2, start(K2));
+    await one.pass();
+    expect(one.ev("stop-armed")).toEqual([]);
+  }, 60_000);
+
+  test("figure N: a boundary an earlier engine armed is not armed again under the relaunched engine", async () => {
+    const fx = await launchedRun({ defn: epicDefn(2) });
+    fx.journal(start(K1), done(K1), start(K2));
+    await fx.pass();
+    expect(fx.ev("stop-armed")).toHaveLength(1);
+    relaunched(fx, { story_key: K2, stories_done: [K1, K2] });
+    fx.journalAt(E2, start(K3));
+    await fx.pass();
+    expect(fx.ev("stop-armed")).toHaveLength(1);
+    expect(fx.stops()).toHaveLength(1);
+  }, 60_000);
+
+  test("figure N: an earlier engine's refused `stop-armed` does not count: the relaunched engine is armed, once", async () => {
+    const fx = await launchedRun({ defn: epicDefn(2) });
+    fx.answers.stop = REFUSED;
+    fx.journal(start(K1), done(K1), start(K2));
+    await fx.pass();
+    await fx.pass();
+    expect(fx.ev("stop-armed").map((e) => e.detail?.ok)).toEqual([false]); // this engine's refusal is not retried
+    expect(fx.stops()).toHaveLength(1);
+    fx.answers.stop = () => ({ exit: 0, stdout: "{}", stderr: "" });
+    relaunched(fx, { story_key: K2, stories_done: [K1, K2] });
+    fx.journalAt(E2, start(K3));
+    await fx.pass();
+    await fx.pass();
+    expect(fx.ev("stop-armed").map((e) => [e.detail?.engine_run_id, e.detail?.ok])).toEqual([[E1, false], [E2, true]]);
+    expect(fx.stops()).toHaveLength(2);
+  }, 60_000);
+
+  test("figure N: a relaunched engine at N-1 is not armed until its own `story-start`", async () => {
+    const fx = await launchedRun({ defn: epicDefn(2) });
+    fx.journal(start(K1), done(K1));
+    await fx.pass();
+    expect(fx.ev("stop-armed")).toEqual([]); // nothing in flight under the first engine either
+    relaunched(fx, { story_key: K1, stories_done: [K1] });
+    await fx.pass();
+    await lateTick(fx);
+    expect(fx.ev("stop-armed")).toEqual([]);
+    expect(fx.stops()).toEqual([]);
+    fx.journalAt(E2, start(K2));
+    await fx.pass();
+    expect(fx.ev("stop-armed")).toHaveLength(1);
+    expect(fx.ev("stop-armed")[0]!.detail).toMatchObject({ figure: 2, engine_run_id: E2, ok: true });
+  }, 60_000);
+
+  test("figure N on a resume: a stop consumed before the pause is re-armed once; a refusal is not retried", async () => {
+    const fx = await launchedRun({ defn: epicDefn(2) });
+    fx.journal(start(K1), done(K1), start(K2));
+    await fx.pass();
+    expect(fx.ev("stop-armed")).toHaveLength(1);
+    const { finish } = await resumed(fx);
+    expect(fx.ev("stop-armed")).toHaveLength(1); // the pass's, when its count is met
+    fx.answers.stop = () => ({ exit: 1, stdout: "", stderr: "GracefulStopError: refused" });
+    await fx.pass();
+    await fx.pass();
+    expect(fx.ev("stop-armed")).toHaveLength(2);
+    expect(fx.ev("stop-armed")[1]!.detail).toMatchObject({ figure: 2, ok: false });
+    finish({ exit: 0, stdout: "", stderr: "" });
+  }, 60_000);
+
+  test("figure N on a resume: a stop in force stays `rearmStop`'s; `engine.pid` not rewritten: no arming, one notifier line", async () => {
+    const fx = await launchedRun({ defn: epicDefn(2) });
+    fx.journal(start(K1), done(K1), start(K2));
+    const held = await resumed(fx, { before: () => writeFileSync(join(fx.runDir, "stop-request.json"), "{}") });
+    await fx.pass();
+    expect(fx.ev("stop-armed")).toEqual([]);
+    expect(fx.ev("graceful-stop")).toHaveLength(1);
+    held.finish({ exit: 0, stdout: "", stderr: "" });
+    const stale = await launchedRun({ defn: epicDefn(2) });
+    stale.journal(start(K1), done(K1), start(K2));
+    const { sent, finish } = await resumed(stale, { rewrite: false });
+    await stale.pass();
+    expect(stale.ev("stop-armed")).toEqual([]);
+    expect(stale.stops()).toEqual([]);
+    expect(sent).toHaveLength(1);
+    finish({ exit: 0, stdout: "", stderr: "" });
+  }, 60_000);
+
+  test("figure N: an earlier engine's refused re-arm does not count: unretried under that engine, the relaunched engine armed once", async () => {
+    const fx = await launchedRun({ defn: epicDefn(2) });
+    fx.answers.stop = REFUSED;
+    fx.journal(start(K1), done(K1), start(K2));
+    const { finish } = await resumed(fx, { before: () => writeFileSync(join(fx.runDir, "stop-request.json"), "{}") });
+    expect(fx.ev("graceful-stop").map((e) => [e.detail?.engine_run_id, e.detail?.rearmed, e.detail?.ok])).toEqual([[E1, true, false]]);
+    await fx.pass();
+    expect(fx.ev("stop-armed")).toEqual([]); // this engine's refusal is not retried
+    expect(fx.stops()).toHaveLength(1);
+    fx.answers.stop = () => ({ exit: 0, stdout: "{}", stderr: "" });
+    relaunched(fx, { story_key: K2, stories_done: [K1, K2] });
+    fx.journalAt(E2, start(K3));
+    await fx.pass();
+    await fx.pass();
+    expect(fx.ev("stop-armed").map((e) => [e.detail?.engine_run_id, e.detail?.ok])).toEqual([[E2, true]]);
+    expect(fx.stops()).toHaveLength(2);
+    finish({ exit: 0, stdout: "", stderr: "" });
+  }, 60_000);
+
+  test("M22: no rhythm declared: no arming, no `stop-armed`; the in-progress call still runs", async () => {
+    const fx = await launchedRun({ launched: false, defn: epicDefn() });
+    fx.journal(start(K1), done(K1));
+    await launchOf(fx);
+    await fx.pass();
+    expect(fx.ev("stop-armed")).toEqual([]);
+    expect(fx.stops()).toEqual([]);
+    expect(fx.statusCalls()).toHaveLength(1);
+  }, 60_000);
+
+  test.each([
+    ["a sweep", { id: "run-sweep", target: { skill: "tk-studio-launch" }, stop: { on_status: ["blocked"], after_stories: 1 } }],
+    ["another launch job", { id: "run-vertical-slice", target: { skill: "tk-studio-launch" }, stop: { on_status: ["blocked"], after_stories: 1 } }],
+  ] as const)("M24: %s: neither call", async (_n, defn) => {
+    const fx = await launchedRun({ launched: false, defn });
+    fx.journal(start(K1));
+    await launchOf(fx);
+    await fx.pass();
+    expect(fx.calls).toEqual([]);
+    expect(fx.ev("stop-armed")).toEqual([]);
+    expect(fx.ev("plan-status")).toEqual([]);
+  }, 60_000);
+
+  /** A paused launched run resumed with an injected child; `rewrite` says whether the resume rewrites `engine.pid`. */
+  async function resumed(fx: Awaited<ReturnType<typeof launchedRun>>, o: { rewrite?: boolean; before?: () => void; viaCli?: boolean } = {}) {
+    writeFileSync(join(fx.runDir, "engine.pid"), "6509 125610.0");
+    fx.queue.markPaused(fx.runId, { engine: { run_id: E1, status: "running", paused_stage: "escalation", paused_reason: "a ruling" }, pr: PR, closeout: { result: "draft PR", worktree: "kept" } });
+    o.before?.();
+    const sent: string[] = [];
+    let finish!: (r: unknown) => void;
+    const spawn = () => { if (o.rewrite !== false) writeFileSync(join(fx.runDir, "engine.pid"), "7001 200000.0"); return { pid: 4242, done: new Promise<unknown>((res) => { finish = res; }) }; };
+    const deps = {
+      ...fx.deps, spawn, pidPolls: 2, pollMs: 1, self: me,
+      env: { ...fx.deps.env, TK_SUPERVISOR_NOTIFY: "ntfy", TK_SUPERVISOR_NTFY_URL: "https://ntfy.example/t" },
+      hygiene: { env: { TK_SUPERVISOR_NOTIFY: "ntfy", TK_SUPERVISOR_NTFY_URL: "https://ntfy.example/t" }, fetch: (async (_u: unknown, init: { body?: unknown }) => { sent.push(String(init?.body)); return new Response("ok"); }) as unknown as typeof fetch },
+      startedStories: (q: Queue, run: QueueRun) => startedStories(q, run, fx.deps, readJournal),
+    };
+    if (o.viaCli) { const { startedStories: _own, ...rest } = deps; await resumeRun(fx.queue, fx.runId, undefined, rest); }
+    else await resumePaused(fx.queue, fx.runId, {}, deps);
+    return { sent, finish };
+  }
+
+  test("M23: a resume with no stop in force arms figure 1 after `engine.pid` is rewritten, one `stop-armed` since that `engine-resume`, though an arming was consumed before the pause", async () => {
+    const fx = await launchedRun({ launched: false });
+    fx.journal(start(K1));
+    await launchOf(fx);
+    expect(fx.ev("stop-armed")).toHaveLength(1);
+    const { finish } = await resumed(fx);
+    const k = fx.queue.events(fx.runId).map((e) => e.kind);
+    expect(fx.ev("stop-armed")).toHaveLength(2);
+    expect(k.lastIndexOf("stop-armed")).toBeGreaterThan(k.lastIndexOf("engine-resume"));
+    expect(k.lastIndexOf("stop-armed")).toBeGreaterThan(k.lastIndexOf("engine-pid"));
+    expect(fx.ev("graceful-stop")).toEqual([]);
+    finish({ exit: 0, stdout: "", stderr: "" });
+  }, 60_000);
+
+  test("M23: a stop in force stays `rearmStop`'s: no `stop-armed`", async () => {
+    const fx = await launchedRun();
+    const { finish } = await resumed(fx, { before: () => writeFileSync(join(fx.runDir, "stop-request.json"), "{}") });
+    expect(fx.ev("stop-armed")).toEqual([]);
+    expect(fx.ev("graceful-stop")).toHaveLength(1);
+    finish({ exit: 0, stdout: "", stderr: "" });
+  }, 60_000);
+
+  test("M23: `engine.pid` not rewritten: no arming, one notifier line", async () => {
+    const fx = await launchedRun();
+    const { sent, finish } = await resumed(fx, { rewrite: false });
+    expect(fx.ev("stop-armed")).toEqual([]);
+    expect(fx.stops()).toEqual([]);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain("engine.pid not rewritten");
+    finish({ exit: 0, stdout: "", stderr: "" });
+  }, 60_000);
+
+  test("M16 on a resume: an event already recorded is no second call; a story with none is called, once", async () => {
+    const fx = await launchedRun();
+    fx.journal(start(K1));
+    await fx.pass();
+    const { finish } = await resumed(fx);
+    expect(fx.statusCalls()).toHaveLength(1);
+    const again = await launchedRun();
+    again.journal(start(K1));
+    const second = await resumed(again);
+    expect(again.statusCalls()).toHaveLength(1);
+    expect(again.ev("plan-status")[0]!.detail).toMatchObject({ phase: "in-progress", story_key: K1 });
+    finish({ exit: 0, stdout: "", stderr: "" });
+    second.finish({ exit: 0, stdout: "", stderr: "" });
+  }, 60_000);
+
+  test("M24 on a resume: not a run-epic: neither call", async () => {
+    const fx = await launchedRun({ defn: { id: "run-sweep", target: { skill: "tk-studio-launch" }, stop: { on_status: ["blocked"], after_stories: 1 } } });
+    fx.journal(start(K1));
+    const { finish } = await resumed(fx);
+    expect(fx.ev("stop-armed")).toEqual([]);
+    expect(fx.statusCalls()).toEqual([]);
+    finish({ exit: 0, stdout: "", stderr: "" });
   }, 60_000);
 });

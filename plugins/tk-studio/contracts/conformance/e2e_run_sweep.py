@@ -180,6 +180,8 @@ def lib_steps() -> list[dict]:
         types = job.load_types()
         entry = types.get(TYPE_ID)
         epic = types["run-epic"]["definition"]
+        # Story 36.6: the rhythm (`stop.after_stories`) is run-epic's alone
+        epic = {**epic, "stop": {k: v for k, v in epic["stop"].items() if k != "after_stories"}}
         ok = (entry is not None and not entry["problems"] and entry["definition"]["target"]
               == {"skill": "tk-studio-launch", "payload": {"verb": "sweep"}}
               and set(entry["definition"]) == set(epic)

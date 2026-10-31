@@ -90,10 +90,11 @@ an owner's edit of the page back through `apply_page_revision` (Settled
 shape 3). The `reply` memory carries `scope {path, text}` (null while
 there is none), so the planner's next turn reads the current scope.
 
-Story 34.8 (user flow F9): a game project is one whose tracked
-`.tk-studio/config.yaml` `working_set` has any role's list holding `gds`
-or an entry starting `gds-` (`is_game_project`; decided here only, never
-re-derived by the supervisor). On a game project `scope` takes the
+Story 34.8 (user flow F9), Story 36.6 (DW-90): a game project is one whose
+tracked `.tk-studio/config.yaml` `working_set` has any role's list holding
+`gds` or an entry starting `gds-`, and whose `_bmad/_config/manifest.yaml`
+lists the `gds` module installed (`is_game_project`; decided here only,
+never re-derived by the supervisor). On a game project `scope` takes the
 planner's quick-flow game brief and GDD (`--brief-file`, `--gdd-file`, the
 `gds-create-game-brief` Fast path and the `gds-gdd` Express path): both
 are required (`GameDocsMissing: brief | gdd`) unless `--revise-at` re-runs
@@ -793,9 +794,12 @@ def doc_rel(engagement: str, name: str) -> str:
 def is_game_project(root: Path) -> bool:
     """Story 34.8: the tracked `.tk-studio/config.yaml` `working_set` has a
     role's list holding `gds` or an entry starting `gds-` (never the local
-    overlay or the user tier). An absent or unreadable config is not a game
+    overlay or the user tier). Story 36.6 (DW-90): and the installed-module
+    manifest lists `gds`, so the plugin-shipped `gds-engine-godot-4` alone is
+    not enough. An absent or unreadable config or manifest is not a game
     project."""
     import miniyaml
+    from inventory import MANIFEST_REL, read_manifest_modules
     path = Path(root) / ".tk-studio" / configlib.TRACKED_NAME
     try:
         doc = miniyaml.load(path) if path.is_file() else None
@@ -804,10 +808,16 @@ def is_game_project(root: Path) -> bool:
     sets = doc.get("working_set") if isinstance(doc, dict) else None
     if not isinstance(sets, dict):
         return False
-    return any(isinstance(entry, str) and (entry == GDS_RESOURCE
+    if not any(isinstance(entry, str) and (entry == GDS_RESOURCE
                                            or entry.startswith("gds-"))
                for names in sets.values() if isinstance(names, list)
-               for entry in names)
+               for entry in names):
+        return False
+    try:
+        modules = read_manifest_modules(Path(root) / MANIFEST_REL)
+    except (OSError, UnicodeDecodeError):
+        return False
+    return any(module.get("name") == GDS_RESOURCE for module in modules)
 
 
 def read_scope(root: Path, engagement: str) -> dict | None:

@@ -498,7 +498,7 @@ source_spec: `33-5-the-roster-gate-inside-the-engine-tracked-spec.md`
 location: plugins/tk-studio/lib/launch.py (reconcile_verify_commands)
 severity: medium
 reason: reconcile_verify_commands has no pipeline.unignored_writes guard (pipeline.py:415 reports this hazard for apply). tk-studio ignores the file (.gitignore:8), but a served project that opts in through engine.verify_commands with a tracked policy would be dirtied. Meets deferral (a): it is a defect in the reconciliation the criteria name. Refusing or reporting it is a design choice the plan does not settle.
-status: open
+status: resolved 2026-10-31 by this story's PR (36.6: the `verify commands` row refuses a tracked or unignored policy before the write, `pipeline.policy_dirties_tree`)
 
 ### DW-63: A pacer pass that hangs or runs long is invisible until it ends: the slow-pass warning, the notifier line and pacer.json are written only when the child closes.
 origin: spec-deferred 9d30780dcdae
@@ -570,7 +570,7 @@ source_spec: `34-4-engine-knowledge-pinned-per-project-spec.md`
 location: plugins/tk-studio/lib/launch.py engine_gate_clause
 severity: low
 reason: Edge/blind review of 34-4; consult 11:12:22Z ruled no change in this story: nothing in the tracked config records how the sandbox was provisioned, so the WITH_GODOT rule is text in the skill and the kb row only.
-status: open
+status: resolved 2026-10-31 by this story's PR (36.6: `provision-engine.sh` writes `~/.tk-studio/provisioned`; `engine_gate_clause` reads it over `sbx exec` and warns on a gate without it)
 
 ### DW-72: Once an operator confirms gds-engine-godot-4 into working_set.<role>, orchestrate.py routing shows it as kind unknown, status missing ("re-run onboarding or install it"), because inventory.py has no p
 origin: spec-deferred c0a1e6088bbb
@@ -724,7 +724,7 @@ source_spec: `34-8-the-run-vertical-slice-job-and-the-engagements-game-path-spec
 location: plugins/tk-studio/lib/engage.py:797-799
 severity: medium
 reason: Now that the plugin itself ships a `gds-` skill, the prefix no longer means the gds module is installed. Fix: decide whether a game project requires the `gds` module (registry evidence) rather than a name; the contract's CAP-15 rule follows.
-status: open
+status: resolved 2026-10-31 by this story's PR (36.6: `is_game_project` also needs the manifest's `gds` module)
 
 ### DW-91: Regression gaps on the slice path: the sweep → `closeOut` `slice` flag has no end-to-end test; the sheet on a passing slice run is asserted nowhere; the bare-name contract between `sheet`'s `frames` and `proofCommit` is pinned by two independent literals.
 origin: retro epic-34 (_bmad-output/specs/spec-epic-34/RETROSPECTIVE.md), B14
@@ -1001,7 +1001,7 @@ source_spec: `spec-dw-atlassian-round-trip.md`
 location: plugins/tk-studio/lib/jirabackend.py update_workflow
 severity: medium
 reason: Both review layers flagged it. The test fake checks only uppercase types and the version, so any transition shape passes. The spec's Design Notes kept the body shape ungraded (kb §2 Q1 grade C), so the first live setup may still be refused and fall back to the owner steps. Deferral class (a): a defect in the workflow-update behaviour DW-107 names.
-status: open
+status: resolved 2026-10-31 by this story's PR (36.6: every transition in `POST /workflows/update` is v3-shaped with an id, no `from`/`to`; the site's answer is the operator's attended rerun)
 
 ### DW-128: A _land_summary failure inside _finalize_run raises before _emit_job_event, leaving a terminal run with no job-run event; with DW-5 a same-state retry no longer repairs it.
 origin: spec-deferred 10fc2e0ce39e
@@ -1152,7 +1152,7 @@ source_spec: `_bmad-output/planning-artifacts/epics.md` Story 36.6 (the added ac
 location: apps/supervisor/src/planstatus.ts (`Phase = "review" | "done"`, Story 27.5); plugins/tk-studio/skills/tk-studio-launch and `launch.py` (no status call at the engine's start); plugins/tk-studio/lib/plansync.py `status` (the verb exists; `in-progress` is a canonical status, `TO_BACKEND_CATEGORY` maps it to the indeterminate category); plugins/tk-studio/lib/jirabackend.py
 severity: medium
 reason: The owner reads Jira to see what is being worked on; the loop's only mid-run In Progress-category status is a block, so a healthy build looks idle for about two hours a story and a blocked one looks busy. The verb and the mapping exist (the review phase proves the round trip); what is missing is one call at the launch. Fix (Story 36.6): the launch calls `plansync.py status --status in-progress` for the story it starts, recorded as a `plan-status` event with `phase: in-progress`; a refusal never stops the launch; the review and done phases follow as now; the contract names the third phase.
-status: open
+status: resolved 2026-10-31 by this story's PR (36.6: the `in-progress` plan phase from the launched path, the resume and `launchedPass`)
 
 ### DW-147: The `run-epic` job declares one story per run with a graceful stop after each, but nothing in the loop arms that stop: the operator issues `launch.py stop --graceful` inside the sandbox after every POST by hand, and a missed arming builds several stories in one run (hole 105).
 origin: hole 105 (Epic 36's run 1, q-run-epic-36-20261030T201456Z-e76900, 2026-10-30 23:5xZ: the operator missed the arming, the engine built 36.1 and 36.2 and started 36.3 in one run, three hours with no PR and no pull-back)
@@ -1160,7 +1160,7 @@ source_spec: `_bmad-output/planning-artifacts/epics.md` Story 36.6 (the added ac
 location: plugins/tk-studio/lib/launch.py (`stop(…, graceful=True)` exists; `launch`/`submit` never calls it); plugins/tk-studio/jobs/run-epic.json and `.tk-studio/jobs/run-epic-N.json` (the rhythm lives in the description's prose, no field); apps/supervisor/src/queue.ts (the launched path records `launched` and `engine-pid`, arms nothing); the handoff's "with the stop armed" lines (day-7k to 7t, an operator step every launch)
 severity: medium
 reason: The one-story-per-run rhythm is what gives every story its own PR, host leg, pull-back and stage rows; it held through Epic 35 only because the operator armed the stop by hand after each POST (the host has no `bmad-loop`, so the arming runs as `sbx exec claude-tk-studio uv run …/launch.py stop --directory <worktree> --run-id <engine> --graceful`). Fix (Story 36.6): the job declaration carries the rhythm as a field; the launch arms the graceful stop itself at the engine's start and records a `stop-armed` event; the launch check names a `run-epic` job without a rhythm; the contract names the field and the event.
-status: open
+status: resolved 2026-10-31 by this story's PR (36.6: `stop.after_stories` on the job; the launched path, the resume and `launchedPass` arm the stop, recorded `stop-armed`; the `run rhythm` check row)
 
 ### DW-148: A dev session that hits the engine's clock with its work uncommitted parks the run for a manual `git reset` (`rollback_on_failure false`), discards the pending graceful stop, and closes the run out as a draft PR with no host leg for the stories already landed on the branch (hole 106).
 origin: hole 106 (Epic 36's run 1, q-run-epic-36-20261030T201456Z-e76900, 2026-10-31 01:15Z: Story 36.3's first dev attempt, band L, 23:44 to 01:14Z, 6.3M tokens, `session-end status timeout expired_clock both`)
@@ -1248,4 +1248,44 @@ source_spec: `36-5-the-supervisors-own-faults-spec.md`
 location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261031-122053-c9d8; this entry preserves the lingering recommendation for a deliberate later review.
+status: open
+
+### DW-159: `run-vertical-slice` game-project runs get no In Progress and no rhythm: the launched duties filter on `isRunEpic`.
+origin: spec-deferred, consult ruling 2026-10-31T17:47:31Z (deviation-gt-0) on Story 36.6's job filter
+source_spec: `36-6-setup-and-the-launch-check-by-evidence-spec.md`
+location: apps/supervisor/src/closeout.ts `isRunEpic`
+severity: medium
+reason: `isRunEpic` is true only when a run's resolved definition has `type` or `id` `run-epic`, so a `run-vertical-slice` run on a game project takes neither the `in-progress` plan call nor the `stop.after_stories` rhythm. The story's M24 keeps the field off that job, so the gap is outside 36.6.
+status: open
+
+### DW-160: `plansync setup` posts copied transitions without their `screen` and `rules`, which can erase a site's configuration, and the v3 update schema may have spellings that would carry them.
+origin: spec-deferred d598570a16ed
+source_spec: `36-6-setup-and-the-launch-check-by-evidence-spec.md`
+location: plugins/tk-studio/lib/jirabackend.py:1638
+severity: medium
+reason: Deferral class (a), AC1. `_v3_transition` sends a whitelist, so `POST /workflows/update` omits them, and the loss is named only afterwards in `notes` with the setup still `complete`. From a reviewer's and this session's memory, not verified (Atlassian's docs page answered 403 here), the v3 schema has `conditions`, `validators`, `actions`, `triggers` and `transitionScreen`. The consult of 2026-10-31T17:47:31Z ruled that a loss or a v3 spelling found by the operator's live call becomes a follow-up. The legacy rule shapes do not map one to one, so a mapping needs the site's real read.
+status: open
+
+### DW-161: A figure 1 run whose arming was refused still relaunches at close-out, so one queue run can build a second story.
+origin: spec-deferred 9e39164515b6
+source_spec: `36-6-setup-and-the-launch-check-by-evidence-spec.md`
+location: apps/supervisor/src/closeout.ts:577
+severity: medium
+reason: Deferral class (a), AC5's "never builds two stories in one run". `closeOutLanded` reads only `gracefulStopInForce` and `storyBoundaryRecorded`, never the job's rhythm. It needs a double fault: a refused stop, which already sends one notifier line, and then a pause that lands the story. The fix means ending at a boundary with no stop in force, and the `story-boundary` event's `graceful_stop` and `StopInForce.source` have no value for that today.
+status: open
+
+### DW-162: `rearmFailedLine` still prints a `launch.py stop` command with no `--directory`, which fails argument parsing.
+origin: spec-deferred 37db24c63664
+source_spec: `36-6-setup-and-the-launch-check-by-evidence-spec.md`
+location: apps/supervisor/src/closeout.ts:1068
+severity: low
+reason: Deferral class (a), filed by the consult of 2026-10-31T19:40:00Z. `launch.py stop` declares `--directory` as required, and on the sbx tier the host has no `bmad-loop`. The line predates this story; `armRefusedLine` was fixed here and `gracefulStopCommand` is the form to reuse.
+status: open
+
+### DW-163: Follow-up review still recommended for 36-6-setup-and-the-launch-check-by-evidence after the damping cap was spent
+origin: review-budget-followup
+source_spec: `36-6-setup-and-the-launch-check-by-evidence-spec.md`
+location: n/a
+severity: low
+reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261031-170810-6825; this entry preserves the lingering recommendation for a deliberate later review.
 status: open

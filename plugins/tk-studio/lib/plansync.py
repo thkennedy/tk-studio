@@ -1486,6 +1486,11 @@ def setup(project_root: Path, dry_run: bool = False,
                                     [tr for _, tr in absent])
                                 if done:
                                     created.extend(lb for lb, _ in absent)
+                                    if detail:
+                                        notes.append(
+                                            "workflow update dropped screen/"
+                                            "rules from copied transitions: "
+                                            f"{detail}")
                                 else:
                                     notes.append(
                                         f"workflow update refused: {detail}")

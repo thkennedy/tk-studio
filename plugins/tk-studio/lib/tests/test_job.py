@@ -180,6 +180,26 @@ class JobTestCase(unittest.TestCase):
         for defn in bad:
             self.assertNotEqual(joblib.validate_definition(defn), [], defn)
 
+    def test_story_36_6_after_stories_is_a_rhythm_never_a_stop_condition(self):
+        # M25
+        for figure in (0, -1, True, "1", 1.5):
+            with self.subTest(figure=figure):
+                problems = joblib.validate_definition(
+                    self._defn(stop={"max_runs": 3, "after_stories": figure}))
+                self.assertTrue(any("after_stories must be an integer > 0" in p
+                                    for p in problems), problems)
+        alone = joblib.validate_definition(self._defn(stop={"after_stories": 1}))
+        self.assertTrue(any("at least one" in p and "after_stories" not in p
+                            for p in alone), alone)
+        self.assertEqual(joblib.validate_definition(
+            self._defn(stop={"max_runs": 3, "after_stories": 1})), [])
+
+    def test_story_36_6_run_epic_declares_its_rhythm(self):
+        types = joblib.load_types()
+        self.assertEqual(types["run-epic"]["definition"]["stop"],
+                         {"on_status": ["blocked"], "after_stories": 1})
+        self.assertEqual(types["run-epic"]["problems"], [])
+
     def test_cadence_rules(self):
         bad = [
             self._defn(cadence={"mode": "fixed"}),  # one-shot takes no cadence
@@ -339,7 +359,7 @@ class JobTestCase(unittest.TestCase):
         defn, epic = entry["definition"], types["run-epic"]["definition"]
         self.assertEqual(defn["id"], "run-sweep")
         self.assertEqual(set(defn), set(epic))
-        for key in ("job_schema_version", "trigger", "requires", "guards", "stop", "effort"):
+        for key in ("job_schema_version", "trigger", "requires", "guards", "effort"):
             self.assertEqual(defn[key], epic[key], key)
         self.assertEqual(defn["target"], {"skill": "tk-studio-launch",
                                           "payload": {"verb": "sweep"}})
@@ -362,8 +382,11 @@ class JobTestCase(unittest.TestCase):
         self.assertNotEqual(defn["description"], epic["description"])
         # run-epic's shape: the launch surface, its payload, one-shot, the same
         # guards and stop condition per the job schema, the planner effort
-        for key in ("job_schema_version", "target", "trigger", "guards", "stop", "effort"):
+        for key in ("job_schema_version", "target", "trigger", "guards", "effort"):
             self.assertEqual(defn[key], epic[key], key)
+        # the same stop condition; the rhythm is run-epic's alone (Story 36.6)
+        self.assertEqual(defn["stop"]["on_status"], epic["stop"]["on_status"])
+        self.assertNotIn("after_stories", defn["stop"])
         self.assertEqual(defn["target"]["skill"], "tk-studio-launch")
         self.assertEqual(set(defn), set(epic))
         self.assertEqual(joblib.validate_definition(defn), [])

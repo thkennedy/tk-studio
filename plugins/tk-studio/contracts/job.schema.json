@@ -54,7 +54,8 @@
         "fields": {
           "max_runs": { "type": "number", "required": false, "note": "integer > 0: stop scheduling after this many runs" },
           "until": { "type": "string", "format": "ISO-8601 UTC", "required": false, "note": "stop scheduling at this time" },
-          "on_status": { "type": "array", "items": "string", "enum": ["partial", "blocked"], "required": false, "note": "stop scheduling after a run ends in one of these states" }
+          "on_status": { "type": "array", "items": "string", "enum": ["partial", "blocked"], "required": false, "note": "stop scheduling after a run ends in one of these states" },
+          "after_stories": { "type": "number", "required": false, "note": "integer > 0: a run-epic job's rhythm (Story 36.6): the launch arms the engine's graceful stop so a run builds this many stories (1 at launch; N > 1 once N-1 stories are done). A rhythm alone is no stop condition: it does not satisfy the at-least-one rule (AD-10). Absent: the run goes to the epic's end" }
         }
       },
       "model": { "type": "string", "required": false, "note": "Claude model override the wrapper passes down (driver-contract §5 runtime override); absent = the target resource's customize.toml default resolves (AD-14)" },

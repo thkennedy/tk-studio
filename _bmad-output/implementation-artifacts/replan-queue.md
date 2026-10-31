@@ -548,3 +548,10 @@
 - What no longer holds: "bun test                                                   # the whole suite: behaviour pinned by the existing suites" (plans/36-7.md Verify) as a 30 s run past its first file.
 - Suggested adjustment: Run the whole suite with `--timeout 30000`. Moved and new modules keep the `encoding=` keyword.
 - Status: closed — applied to the unstarted 36-7 entry's invoke_dev_with and to plans/36-7.md (Verify, Risks) by the 36-4 gate session (2026-10-31)
+
+## 36-7-the-cycles-cut-and-the-docs-caught-up — scope: stories — from 36-6-setup-and-the-launch-check-by-evidence — 2026-10-31
+
+- What changed: `planstatus.ts` takes six more names from `closeout.ts`, `armStop` is a second default caller of `stopEngine`, `startedStories` and a `JournalReader` parameter are injected to avoid cycles, and `cli.ts` value-imports `office`.
+- What no longer holds: "`planstatus → closeout` is `frontmatter, jiraBound` :98, kept" (the edge is kept, the list is wider)
+- Suggested adjustment: cut `stopEngine` for both callers, keep the injected seams, confirm the SCCs at HEAD before the allowlist, use the refreshed anchors.
+- Status: closed — applied to the unstarted 36-7 entry's invoke_dev_with and to plans/36-7.md (Risks) by the 36-6 gate session (2026-10-31)
