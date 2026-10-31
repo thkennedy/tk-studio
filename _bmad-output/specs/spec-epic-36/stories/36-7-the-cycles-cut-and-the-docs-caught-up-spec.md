@@ -282,6 +282,9 @@ DRIFT: `plugins/tk-studio/skills/tk-studio-launch/SKILL.md:61` edited, outside t
 | review | 1 | 2026-10-31T21:57:18Z | 2026-10-31T22:10:58Z | 35cfc603-93bc-4269-99a4-35a3a5a7596f | claude-opus-5-5 | medium | 3885250 | 64322 | 4.9650 | completed |
 | review | 2 | 2026-10-31T22:10:58Z | 2026-10-31T22:25:16Z | 3c731e7d-96ee-43d6-b022-3960cc3d2f39 | claude-opus-5-5 | medium | 3864529 | 61530 | 5.0467 | completed |
 | gate | 1 | 2026-10-31T22:25:16Z | 2026-10-31T22:29:45Z | bcb89cf4-7aaa-44c6-b66e-011c333883ca | claude-opus-5-5 | medium | 1132966 | 17651 | 1.4575 | completed |
+| host-leg | 1 | 2026-10-31T22:30:20Z | 2026-10-31T23:19:45Z | — | — | — | — | — | — | green |
+| close-out | 1 | 2026-10-31T23:19:45Z | 2026-10-31T23:19:52Z | — | — | — | — | — | — | PR |
+| merge | — | 2026-10-31T23:20:39Z | 2026-10-31T23:20:39Z | — | — | — | — | — | — | merged |
 
 ## Reconcile
 
