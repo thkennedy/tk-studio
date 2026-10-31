@@ -1351,3 +1351,55 @@ class DroppedStatusPickTests(JiraTestCase):
         self.assertEqual(self.fake.issues[key]["status"], "To Do")
         self.assertIn("dropped status 'DNI'", json.dumps(result))
 
+
+class BlockStatusPickTests(JiraTestCase):
+    """Hole 109: the setup's global transitions list `Blocked - Awaiting User`
+    before `In Progress`, so a promote into the In Progress category (the
+    review phase at PR open) landed every story in the block status. The
+    picker prefers the canonical's own name and takes a block status only for
+    canonical `blocked`."""
+
+    LIVE = {"To Do": "new", "Blocked - Awaiting User": "indeterminate",
+            "DNI": "done", "Backlog": "new",
+            "Selected for Development": "new",
+            "In Progress": "indeterminate", "Done": "done"}
+
+    def test_review_promotes_into_in_progress_not_the_block_status(self):
+        self.fake.STATUSES = dict(self.LIVE)
+        self._project()
+        self._set_canonical("ST-001", status="review")
+        self._project()
+        key = self._jira_key("ST-001")
+        self.assertEqual(self.fake.issues[key]["status"], "In Progress")
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["external"]["jira"]["status"], "In Progress")
+        self.assertEqual(front["external"]["jira"]["canonical_status"], "review")
+
+    def test_in_progress_prefers_the_name_over_block_resolved_too(self):
+        self.fake.STATUSES = {"To Do": "new", "Block Resolved": "indeterminate",
+                              "Blocked - Awaiting User": "indeterminate",
+                              "In Progress": "indeterminate", "Done": "done"}
+        self._project()
+        self._set_canonical("ST-001", status="in-progress")
+        self._project()
+        key = self._jira_key("ST-001")
+        self.assertEqual(self.fake.issues[key]["status"], "In Progress")
+
+    def test_only_a_block_route_into_the_category_is_a_note_not_a_move(self):
+        self.fake.STATUSES = {"To Do": "new", "Blocked - Awaiting User": "indeterminate",
+                              "Done": "done"}
+        self._project()
+        self._set_canonical("ST-001", status="review")
+        result = self._project()
+        key = self._jira_key("ST-001")
+        self.assertEqual(self.fake.issues[key]["status"], "To Do")
+        self.assertIn("block status 'Blocked - Awaiting User'", json.dumps(result))
+
+    def test_a_blocked_canonical_still_lands_in_the_block_status(self):
+        self.fake.STATUSES = dict(self.LIVE)
+        self._project()
+        self._set_canonical("ST-001", status="blocked")
+        self._project()
+        key = self._jira_key("ST-001")
+        self.assertEqual(self.fake.issues[key]["status"], "Blocked - Awaiting User")
+
