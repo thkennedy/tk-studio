@@ -227,6 +227,10 @@ The launch-401 entry's "may affect: none" above is replaced by this residual, pe
 | review | 1 | 2026-10-31T13:50:25Z | 2026-10-31T14:45:16Z | e0e14913-3303-4032-881b-0c7033349138 | claude-opus-5-5 | medium | 7829751 | 140103 | 9.1286 | completed |
 | review | 2 | 2026-10-31T14:45:17Z | 2026-10-31T15:27:06Z | 7f68f94e-5739-46b8-a95a-d7988aff017e | claude-opus-5-5 | medium | 4980545 | 101480 | 7.2225 | completed |
 | gate | 1 | 2026-10-31T15:27:07Z | 2026-10-31T15:31:16Z | 6dbe3824-4080-4b9e-8d8a-f303936422bf | claude-opus-5-5 | medium | 1318216 | 25304 | 2.0565 | completed |
+| host-leg | 1 | 2026-10-31T15:31:30Z | 2026-10-31T16:14:39Z | — | — | — | — | — | — | red |
+| close-out | 1 | 2026-10-31T16:14:39Z | 2026-10-31T16:14:45Z | — | — | — | — | — | — | draft PR |
+| re-run | 1 | 2026-10-31T16:17:01Z | 2026-10-31T17:03:08Z | — | — | — | — | — | — | green |
+| merge | — | 2026-10-31T17:03:45Z | 2026-10-31T17:03:45Z | — | — | — | — | — | — | merged |
 
 ## Deviation Summary, pass 2
 
