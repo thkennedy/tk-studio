@@ -261,6 +261,9 @@ describe("the pacer line (Story 33.7, AC2)", () => {
       expect(await page()).toStartWith('<section id="log"><h2>Supervisor log</h2><p class="meta">pacer: last tick 812 ms · last drain 4021 ms · last pass 2026-10-27T02:00:04.021Z</p>');
       writeFileSync(join(work, "supervisor", "pacer.json"), JSON.stringify({ last_tick_ms: 812, last_drain_ms: null, last_pass_at: "2026-10-27T02:00:00.812Z" }));
       expect(await page()).toContain('<p class="meta">pacer: last tick 812 ms · last drain - ms · last pass 2026-10-27T02:00:00.812Z</p>');
+      // Story 36.5 (M12): the optional `running` member, its own line while the pass runs.
+      writeFileSync(join(work, "supervisor", "pacer.json"), JSON.stringify({ last_tick_ms: 812, last_drain_ms: null, last_pass_at: "2026-10-27T02:00:00.812Z", running: { tag: "drain", started_at: "2026-10-27T02:00:01.000Z", elapsed_ms: 600001, ids: ["q-a"] } }));
+      expect(await page()).toContain('<p class="meta">pacer: drain running since 2026-10-27T02:00:01.000Z (600001 ms at the warning), driving q-a</p>');
     } finally { rmSync(work, { recursive: true, force: true }); }
   });
 });

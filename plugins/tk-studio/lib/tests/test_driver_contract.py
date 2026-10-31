@@ -2953,6 +2953,35 @@ class DriverContractTestCase(unittest.TestCase):
         stories = next(line for line in self.text.splitlines() if line.startswith("| Story / rulings"))
         self.assertRegex(stories, r"Story 36\.1, Story 36\.2, Story 36\.3, Story 36\.4(, Story 36\.\d+)* \(Epic 36\)")
 
+    def test_0_1_31_story_36_5_the_supervisors_own_faults(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.31**", header)
+        self.assertNotIn("**0.1.32**", header)
+        self.assertEqual(header.count("0.1.31 (Story 36.5, additive)"), 1)
+        self.assertLess(header.index("0.1.31 (Story 36.4, additive)"),
+                        header.index("0.1.31 (Story 36.5, additive)"))
+        clause = " ".join(header[header.index("0.1.31 (Story 36.5, additive)"):].split())
+        for phrase in ("`own_block`", "`skills-store:SkillMissing`", "a core's own `status` lifts into the run `state`",
+                       "per sandbox", "`pacer.running`", "— additive) |"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        self.assertEqual(flat.count("**0.1.31 (Story 36.5, additive).**"), 1)
+        self.assertLess(flat.index("**0.1.31 (Story 36.4, additive).**"),
+                        flat.index("**0.1.31 (Story 36.5, additive).**"))
+        note = flat[flat.index("**0.1.31 (Story 36.5, additive).**"):]
+        note = note[:note.index("## 8. Conformance")]
+        for phrase in ("`jobrun.py finish --own-block <kind>`", "`lock-released {holder: {id: null}, own_block}`",
+                       "`skill-missing:<skill>`", "`POST /jobs` 400", "status block malformed: missing intent",
+                       "core answered ok: false without a status", "**Guard (d)**", "`probe_after`",
+                       "`tmp_pruned: true", "`running? {tag, started_at, elapsed_ms, ids}`"):
+            self.assertIn(phrase, note)
+        self.assertIn("(no code path sets `lock` or `render` today; both are declared and honoured: "
+                      "a lock refusal leaves the run `queued`, and no supervisor rename-race end exists)", note)
+        self.assertIn("a listing that lacks the skill also defers to the host store folder;", note)
+        stories = next(line for line in self.text.splitlines() if line.startswith("| Story / rulings"))
+        self.assertRegex(stories, r"Story 36\.1, Story 36\.2, Story 36\.3, Story 36\.4, Story 36\.5(, Story 36\.\d+)* \(Epic 36\)")
+
     def test_0_1_31_story_36_3_a_paused_or_resumed_run_is_never_parked(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))

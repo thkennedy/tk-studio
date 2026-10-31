@@ -16,6 +16,7 @@ import io
 import json
 import math
 import os
+import subprocess
 import tempfile
 import unittest
 from datetime import timedelta, timezone
@@ -29,7 +30,9 @@ import config as configlib  # noqa: E402
 import job as joblib  # noqa: E402
 import jobrun  # noqa: E402
 import ledger  # noqa: E402
+import plansync  # noqa: E402
 import reconcile as reconcilelib  # noqa: E402
+import syncback  # noqa: E402
 
 
 class JobRunTestCase(unittest.TestCase):
@@ -361,6 +364,16 @@ class JobRunTestCase(unittest.TestCase):
                 self.assertIn("total_cost_usd", out["error"])
                 self._assert_refused_untouched(run_id)
 
+    def test_story_36_5_cli_finish_refuses_bad_own_block_with_json(self):
+        run_id = self._queued_skill_run()
+        code, out = self._cli("finish", "--directory", str(self.root),
+                              "--run-id", run_id, "--state", "blocked",
+                              "--own-block", "nonsense")
+        self.assertEqual(code, 2)
+        self.assertFalse(out["ok"])
+        self.assertIn("own_block", out["error"])
+        self._assert_refused_untouched(run_id)
+
     def test_job_run_taxonomy_declares_optional_cost(self):
         base = {"job_id": "a", "run_id": "b", "state": "complete"}
         ledger.validate("job-run", dict(base, total_cost_usd=1.5))
@@ -456,6 +469,157 @@ class JobRunTestCase(unittest.TestCase):
         self.assertIn("stop: on_status",
                       jobrun.evaluate_stop(on_status, runs))
         self.assertIsNone(jobrun.evaluate_stop(on_status, []))
+
+    def _core_answers(self, job_id: str, stdout: str, **overrides) -> dict:
+        """Story 36.5: submit a core job whose process prints `stdout`."""
+        self._declare(job_id, self._core_defn(job_id, **overrides))
+        done = subprocess.CompletedProcess([], 0, stdout=stdout, stderr="")
+        with mock.patch.object(jobrun.subprocess, "run", return_value=done):
+            result = jobrun.submit(self.root, job_id)
+        return joblib.read_run("proj", result["run_id"])
+
+    def test_story_36_5_a_core_status_lifts_into_the_run_state(self):
+        for i, (block, state, reason) in enumerate((
+            ({"ok": False, "status": "blocked", "reason": "no binding"},
+             "blocked", "no binding"),
+            ({"ok": True, "status": "partial", "reason": "half"},
+             "partial", "half"),
+            ({"ok": True, "status": "complete", "reason": None},
+             "complete", None),
+            ({"status": "blocked"}, "blocked",
+             "core answered status blocked without a reason"),
+            ({"ok": False}, "blocked",
+             "core answered ok: false without a status"),
+            ({"ok": True}, "complete", None),
+            ({"ok": True, "status": "running"}, "complete", None),
+        )):
+            record = self._core_answers(f"core-{i}", json.dumps(block))
+            self.assertEqual(record["state"], state, block)
+            self.assertEqual(record.get("reason"), reason, block)
+            self.assertIn("summary", record["status_block"])
+        events = [e for e in self._ledger_events() if e["event"] == "job-run"]
+        self.assertEqual(events[0]["payload"]["state"], "blocked")
+
+    def test_story_36_5_a_blocked_core_fires_on_status_on_the_next_submit(self):
+        record = self._core_answers(
+            "sync", json.dumps({"ok": False, "status": "blocked",
+                                "reason": "no binding"}),
+            stop={"on_status": ["blocked"]})
+        self.assertEqual(record["state"], "blocked")
+        again = jobrun.submit(self.root, "sync")
+        self.assertFalse(again["accepted"])
+        self.assertIn("stop: on_status", again["reason"])
+
+    def test_story_36_5_every_shipped_core_stops_on_its_real_blocked_output(self):
+        """AC2: each core in plugins/tk-studio/jobs, on the output shape its own
+        code prints (UTF-8 bytes, `ensure_ascii=False`, indented), through
+        `execute_core` to a `blocked` run and a refused next submission. A
+        U+201D in the text: its 0x9D has no cp1252 decoding, so the fake decodes
+        as the Windows host's default would when no encoding is named."""
+        shipped = {}
+        for path in sorted((jobrun.PLUGIN_ROOT / "jobs").glob("*.json")):
+            defn = json.loads(path.read_text(encoding="utf-8"))
+            if "core" in defn["target"]:
+                shipped[defn["id"]] = defn
+        self.assertLessEqual({"atlassian-sync-back", "maintenance-conformance"},
+                             set(shipped))
+        refused = "sync-back refused: no \u201cplanning.jira\u201d binding"
+        runner_report = {
+            "conformance_version": "0.1.31", "ok": True, "surfaces_checked": 1,
+            "checks_run": 1, "harness_pass": {"declared": 0, "state": "none declared"},
+            "harness_loadable": {"state": "skipped"}, "failures": [],
+            "surfaces": {}, "cli_drives": []}
+        real = {
+            "atlassian-sync-back": (
+                plansync._finish_sync_back(
+                    syncback.new_result(False), "complete", None),
+                plansync._finish_sync_back(
+                    syncback.new_result(False), "blocked", refused),
+                2, refused),
+            "maintenance-conformance": (
+                runner_report,
+                {**runner_report, "ok": False,
+                 "failures": [{"surface": "tk-studio-activate",
+                               "detail": "\u201cbroken\u201d"}]},
+                1, "core answered ok: false without a status"),
+        }
+        self.assertEqual(set(real), set(shipped),
+                         "a shipped core with no real output shape here")
+        self.assertNotIn("status", real["maintenance-conformance"][1])
+        for job_id, (clean, blocked, exit_code, reason) in real.items():
+            defn = shipped[job_id]
+            with self.subTest(job_id):
+                self.assertEqual(defn["stop"]["on_status"], ["blocked"])
+                self._declare(job_id, defn)
+                calls = []
+
+                def answering(block, code):
+                    def fake_run(argv, **kwargs):
+                        calls.append(argv)
+                        raw = json.dumps(block, ensure_ascii=False, indent=2)
+                        return subprocess.CompletedProcess(
+                            argv, code, stderr="",
+                            stdout=raw.encode("utf-8").decode(
+                                kwargs.get("encoding") or "cp1252",
+                                kwargs.get("errors") or "strict"))
+                    return fake_run
+
+                with mock.patch.object(jobrun.subprocess, "run",
+                                       side_effect=answering(clean, 0)):
+                    first = jobrun.wake(self.root, job_id)
+                self.assertEqual(first["state"], "complete")
+                # the joined path carries the host's separators (backslashes on win32; hole 110's class)
+                self.assertTrue(calls[0][1].replace("\\", "/").endswith(defn["target"]["core"][0]))
+                self.assertNotIn("{project_root}", calls[0])
+                with mock.patch.object(jobrun.subprocess, "run",
+                                       side_effect=answering(blocked, exit_code)):
+                    woke = jobrun.wake(self.root, job_id)
+                self.assertTrue(woke["woken"])
+                record = joblib.read_run("proj", woke["run_id"])
+                self.assertEqual(record["state"], "blocked")
+                self.assertEqual(record["reason"], reason)
+                self.assertEqual(record["status_block"]["summary"]["exit_code"],
+                                 exit_code)
+                expected = "stop: on_status \u2014 last run ended blocked"
+                again = jobrun.submit(self.root, job_id)
+                self.assertFalse(again["accepted"])
+                self.assertEqual(again["reason"], expected)
+                self.assertFalse(jobrun.wake(self.root, job_id)["woken"])
+                self.assertEqual(len(calls), 2, "the refused turns spawned nothing")
+
+    def test_story_36_5_evaluate_stop_skips_an_own_block(self):
+        on_status = dict(self._core_defn("gated"),
+                         stop={"on_status": ["blocked"]})
+        own = {"run_id": "y", "state": "blocked", "own_block": "pin"}
+        self.assertIsNone(jobrun.evaluate_stop(on_status, [own]))
+        # the engine's own block before it still stands; no marker still stops
+        engine = {"run_id": "x", "state": "blocked"}
+        self.assertIn("stop: on_status",
+                      jobrun.evaluate_stop(on_status, [engine, own]))
+        self.assertIn("stop: on_status",
+                      jobrun.evaluate_stop(on_status, [own, engine]))
+
+    def test_story_36_5_finish_own_block_lands_in_run_json_and_wakes_the_next(self):
+        self._declare("eng", self._skill_defn(
+            "eng", stop={"on_status": ["blocked"]}))
+        first = jobrun.submit(self.root, "eng")
+        code, out = self._cli(
+            "finish", "--directory", str(self.root), "--run-id",
+            first["run_id"], "--state", "blocked", "--reason",
+            "sbx pin failed", "--own-block", "pin")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(
+            joblib.read_run("proj", first["run_id"])["own_block"], "pin")
+        shown = jobrun.status(self.root, "eng", first["run_id"])["runs"][0]
+        self.assertEqual(shown["own_block"], "pin")
+        second = jobrun.submit(self.root, "eng")
+        self.assertTrue(second["accepted"], second)
+        # the engine's own block, with no marker, stops the next one
+        jobrun.finish(self.root, second["run_id"], "blocked", reason="stuck")
+        self.assertFalse(jobrun.submit(self.root, "eng")["accepted"])
+        with self.assertRaises(jobrun.JobRunError):
+            jobrun.finish(self.root, second["run_id"], "blocked",
+                          reason="stuck", own_block="nonsense")
 
     def test_wake_refuses_one_shot(self):
         self._declare("checkup", self._core_defn("checkup"))

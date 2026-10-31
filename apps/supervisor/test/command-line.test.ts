@@ -1363,7 +1363,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: worker tiers (Story 21.4)", () => {
     expect(sub.status).toBe(0);
     const queued = JSON.parse(sub.stdout);
     expect(fx.queue((q) => q.get(queued.run_id))).toMatchObject({ state: "queued", tier: "sbx", sandbox: "s-stored", model: "m-stored", effort: "low" });
-    expect(fx.sbxCalls()).toEqual([]); // submit spawns no worker and no probe
+    expect(fx.sbxCalls().map((c) => c.args)).toEqual([["skills", "ls"]]); // submit's one sbx call is the store listing: still no worker and no login probe
     const drained = fx.bare("drain");
     expect(drained.status).toBe(0);
     expect(JSON.parse(drained.stdout).runs[0]).toMatchObject({ run_id: queued.run_id, summary: { ok: true, state: "complete" } });
@@ -1391,9 +1391,9 @@ describe.skipIf(!canRunE2E)("CLI end to end: worker tiers (Story 21.4)", () => {
     expect(ks).not.toContain("claim-refused");
     expect(ks).toContain("claimed");
     expect(ks.indexOf("pin-restart")).toBeLessThan(ks.indexOf("claimed"));
-    // The gate's sbx verbs: the listing, the pin, the probe, the restart (stop, start), the second probe, the preflight.
+    // The sbx verbs: the two store listings (`skills ls`, at submit and at the claim), the gate's sandbox listing (`ls`), the pin, the probe, the restart (stop, start), the second probe, the /tmp prune, the preflight.
     const verbs = fx.sbxCalls().map((c) => c.args[0] === "exec" ? (c.args.includes("auth") ? "auth" : "exec") : c.args[0]);
-    expect(verbs.slice(0, 7)).toEqual(["ls", "run", "auth", "stop", "run", "auth", "auth"]);
+    expect(verbs.slice(0, 10)).toEqual(["skills", "skills", "ls", "run", "auth", "stop", "run", "auth", "exec", "auth"]);
   }, 180_000);
 
   test("Story 33.2 (ruling D, re-pinned): an invalid stored tier leaves the drained run `queued` with one `claim-refused` naming it; once it clears the next drain claims it (`claim-refusal-cleared`)", () => {
@@ -1459,8 +1459,9 @@ describe.skipIf(!canRunE2E)("CLI end to end: worker tiers (Story 21.4)", () => {
     const refused = () => fx.queue((q) => q.events(queued.run_id).filter((e) => e.kind === "claim-refused"));
     expect(refused()).toHaveLength(1);
     expect(refused()[0]!.detail).toMatchObject({ key: "placement:TierRequired", resolves: expect.stringContaining("TK_SUPERVISOR_CONFIG entry jobs.<project-id>/<job-id>") });
-    // Before the claim gate: no `claude` at all (not even `auth status`), no `sbx`.
-    expect([fx.calls(), fx.sbxCalls()]).toEqual([[], []]);
+    // Before the claim gate: no `claude` at all (not even `auth status`); the only `sbx` is the submit's store listing, the refused claim adds none.
+    expect(fx.calls()).toEqual([]);
+    expect(fx.sbxCalls().map((c) => c.args)).toEqual([["skills", "ls"]]);
     // A stored definition that predates `requires`: the fresh `resolve` carries it, refused the same way (same key, so
     // no second event), the run still `queued` and no worker spawned.
     fx.queue((q) => {

@@ -256,7 +256,7 @@ const BOOLEAN_FIELDS = ["editor_in_the_loop"] as const;
 const REQUIRED_FIELDS = ["project", "job"] as const;
 
 /** The refusal names the submit path raises (each a 400 naming it; nothing queued). */
-export const NAMED_REFUSALS = ["HostBypassRefused", "TierRefused", "TierRequired", "SbxSandboxMissing", "SupervisorConfigInvalid", "VmPathUnderivable", "WorkDirMissing"] as const;
+export const NAMED_REFUSALS = ["HostBypassRefused", "TierRefused", "TierRequired", "SbxSandboxMissing", "SupervisorConfigInvalid", "VmPathUnderivable", "WorkDirMissing", "skills-store:SkillMissing"] as const;
 
 const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json; charset=utf-8", ...headers } });
@@ -745,7 +745,12 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
   async function postCancel(runId: string): Promise<Response> {
     const run = queue.get(runId);
     if (!run) return fail(404, "RunNotFound", { run_id: runId });
-    if (isTerminal(run.state)) return fail(409, "RunTerminal", { run_id: runId, state: run.state });
+    if (isTerminal(run.state)) {
+      // Story 36.5 (DW-105): an ended run an unverified engine holder still names: the row is released (200), else the 409.
+      const released = queue.releaseTerminalEngineLock(runId);
+      if (!released) return fail(409, "RunTerminal", { run_id: runId, state: run.state });
+      return json(200, { ok: true, run_id: runId, studio_run_id: run.studio_run_id, state: run.state, effects: { lock_released: released }, run, events: queue.events(runId) });
+    }
     try {
       const ended = await cancel(runId);
       const events = queue.events(runId);

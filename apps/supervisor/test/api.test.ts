@@ -465,6 +465,10 @@ describe("read routes (AC4)", () => {
       const pacer = await status(env);
       expect(pacer).toEqual({ last_tick_ms: 812, last_drain_ms: 4021, last_pass_at: "2026-10-27T02:00:04.021Z" });
       expect(Object.keys(pacer)).toEqual(["last_tick_ms", "last_drain_ms", "last_pass_at"]);
+      // Story 36.5 (M12): `running` rides along while a slow pass runs.
+      const running = { tag: "drain", started_at: "2026-10-27T02:00:01.000Z", elapsed_ms: 600001, ids: [] };
+      writeFileSync(join(work, "supervisor", "pacer.json"), JSON.stringify({ last_tick_ms: 812, last_drain_ms: 4021, last_pass_at: "2026-10-27T02:00:04.021Z", running }));
+      expect((await status(env)).running).toEqual(running);
     } finally { rmSync(work, { recursive: true, force: true }); }
   });
 
@@ -656,6 +660,22 @@ describe("cancel (AC4, AC5)", () => {
     expect(stops).toEqual([[fx.checkout, "eng-1"]]);
     expect(fx.queue.lock(fx.checkout)).toMatchObject({ kind: "engine", engine_run_id: "eng-1" });
     expect(lifecycle(fx.queue, run.run_id).at(-1)!.detail).toMatchObject({ engine_stop: { engine_run_id: "eng-1", ok: true } });
+  });
+
+  test("Story 36.5 (M3): a terminal run an unverified engine row names → 200, the row released, by name; again → the 409", async () => {
+    const fx = fixture();
+    const run = fx.enqueue();
+    fx.queue.end(run.run_id, "blocked", "launch status probe failed", { engineRunId: null, detail: { own_block: "pin" } });
+    expect(fx.queue.lock(fx.checkout)).toMatchObject({ kind: "engine", engine_run_id: null, run_id: run.run_id });
+    const res = await fx.call("POST", `/runs/${run.run_id}/cancel`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, any>;
+    expect(body).toMatchObject({ ok: true, run_id: run.run_id, state: "blocked", effects: { lock_released: { holder: { id: null }, own_block: "pin" } } });
+    expect(fx.queue.lock(fx.checkout)).toBeNull();
+    expect(fx.queue.events(run.run_id).findLast((e) => e.kind === "lock-released")!.detail).toMatchObject({ holder: { id: null }, own_block: "pin" });
+    const again = await fx.call("POST", `/runs/${run.run_id}/cancel`);
+    expect(again.status).toBe(409);
+    expect(await again.json()).toMatchObject({ error: "RunTerminal", state: "blocked" });
   });
 
   test("a run ended by its driver during the cancel is the same 409", async () => {
@@ -1047,6 +1067,59 @@ describe.skipIf(!canRunE2E)("POST /jobs through the real submit path", () => {
       const body = await ok.json() as Record<string, any>;
       expect(queue.get(body.run_id)).toMatchObject({ state: "queued", editor_in_the_loop: 1 });
     } finally { if (prev === undefined) delete process.env.TK_SUPERVISOR_WORK; else process.env.TK_SUPERVISOR_WORK = prev; }
+  }, 60_000);
+
+  test("Story 36.5 (M5): a sandbox-tier job whose target skill the store lacks → 400 skills-store:SkillMissing by name, naming the store, the release and the import, nothing queued", async () => {
+    writeFileSync(join(project, ".tk-studio", "jobs", "run-epic-36.json"),
+      JSON.stringify({ job_schema_version: 1, id: "run-epic-36", type: "run-epic", target: { payload: { epic: 36 } } }));
+    const cfg = join(tempDir("tk-sup-api-cfg-"), "supervisor.yaml");
+    writeFileSync(cfg, `jobs:\n  "${projectId}/run-epic-36":\n    tier: sbx\n    sandbox: claude-p\n`);
+    const sbx = fakeBin(join(tempDir("tk-sup-api-sbx-"), "fake-sbx.js"), `console.log("some-other-skill 1.0");`);
+    const prev = { cfg: process.env.TK_SUPERVISOR_CONFIG, sbx: process.env.SBX_BIN, local: process.env.LOCALAPPDATA };
+    try {
+      process.env.TK_SUPERVISOR_CONFIG = cfg;
+      process.env.SBX_BIN = sbx;
+      process.env.LOCALAPPDATA = tempDir("tk-sup-api-local-"); // an empty store folder: the host's real store never answers
+      const { queue, post } = real();
+      const res = await post({ project: projectId, job: "run-epic-36" });
+      expect(res.status).toBe(400);
+      const body = await res.json() as Record<string, string>;
+      expect(body.error).toBe("skills-store:SkillMissing");
+      expect(body.detail).toStartWith("skills-store:SkillMissing: tk-studio-launch is not in the sbx skills store (");
+      expect(body.detail).toContain("plugin unknown");
+      expect(body.detail).toContain("import the release: tk-studio update, then sbx skills import --force");
+      expect(queue.runs()).toEqual([]);
+    } finally {
+      if (prev.cfg === undefined) delete process.env.TK_SUPERVISOR_CONFIG; else process.env.TK_SUPERVISOR_CONFIG = prev.cfg;
+      if (prev.sbx === undefined) delete process.env.SBX_BIN; else process.env.SBX_BIN = prev.sbx;
+      if (prev.local === undefined) delete process.env.LOCALAPPDATA; else process.env.LOCALAPPDATA = prev.local;
+    }
+  }, 60_000);
+
+  test("Story 36.5 (M5): `SBX_BIN` unrunnable and no store folder → not refused by `skills-store:SkillMissing`, the `[skills-store]` line logged", async () => {
+    writeFileSync(join(project, ".tk-studio", "jobs", "run-epic-36.json"),
+      JSON.stringify({ job_schema_version: 1, id: "run-epic-36", type: "run-epic", target: { payload: { epic: 36 } } }));
+    const cfg = join(tempDir("tk-sup-api-cfg-"), "supervisor.yaml");
+    writeFileSync(cfg, `jobs:\n  "${projectId}/run-epic-36":\n    tier: sbx\n    sandbox: claude-p\n`);
+    const prev = { cfg: process.env.TK_SUPERVISOR_CONFIG, sbx: process.env.SBX_BIN, local: process.env.LOCALAPPDATA };
+    const err = console.error;
+    const lines: string[] = [];
+    try {
+      process.env.TK_SUPERVISOR_CONFIG = cfg;
+      process.env.SBX_BIN = join(tempDir("tk-sup-api-nosbx-"), "no-such-sbx");
+      process.env.LOCALAPPDATA = join(tempDir("tk-sup-api-local-"), "absent"); // no store folder: the host's real store never answers
+      console.error = (...a: unknown[]) => { lines.push(a.join(" ")); };
+      const { post } = real();
+      const res = await post({ project: projectId, job: "run-epic-36" });
+      const body = await res.json() as Record<string, string>;
+      expect(body.error).not.toBe("skills-store:SkillMissing");
+      expect(lines.filter((l) => l.startsWith("[skills-store] tk-studio-launch not checked:"))).toHaveLength(1);
+    } finally {
+      console.error = err;
+      if (prev.cfg === undefined) delete process.env.TK_SUPERVISOR_CONFIG; else process.env.TK_SUPERVISOR_CONFIG = prev.cfg;
+      if (prev.sbx === undefined) delete process.env.SBX_BIN; else process.env.SBX_BIN = prev.sbx;
+      if (prev.local === undefined) delete process.env.LOCALAPPDATA; else process.env.LOCALAPPDATA = prev.local;
+    }
   }, 60_000);
 
   test("Story 35.5: an unplaced run-epic instance → 400 TierRequired naming the per-job config entry, nothing queued; placed by the config → queued on sbx", async () => {

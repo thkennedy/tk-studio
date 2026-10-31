@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  buildKnowledgeInjection, buildSkillPrompt, invokeSkill, judgeAuthStatus, MAX_LOGIN_MISSING, maxLoginPreflight, MISSING_STATUS_BLOCK,
+  buildKnowledgeInjection, buildSkillPrompt, invokeSkill, judgeAuthStatus, MAX_LOGIN_MISSING, MALFORMED_STATUS_BLOCK, maxLoginPreflight, MISSING_STATUS_BLOCK,
   type RunResult, type Spawner,
 } from "../src/server";
 import { tempDir } from "./tmp";
@@ -175,5 +175,45 @@ describe("headless prompt (§1: the skill line comes first)", () => {
     for (const inj of [injection, buildKnowledgeInjection(undefined)]) {
       expect(buildSkillPrompt("tk-studio-detect", { directory: "d" }, inj)).toStartWith(`/tk-studio:tk-studio-detect {"directory":"d"}\n`);
     }
+  });
+});
+
+describe("Story 36.5: what `invokeSkill` builds", () => {
+  test("M7: a block missing `intent` is the malformed failure, no `status_block`; no block at all keeps MISSING_STATUS_BLOCK", async () => {
+    const { spawner } = fakeSpawner(LOGGED_IN, worker(`/tk-studio:tk-studio-evals is not a command\n{"status":"blocked","reason":"no such skill"}`));
+    const out = await invokeSkill(root, "tk-studio-evals", {}, spawner);
+    expect(out.status_block).toBeUndefined();
+    expect(out.conformance_failure).toBe(MALFORMED_STATUS_BLOCK);
+    expect(out.ran).toBe(true);
+    const absent = await invokeSkill(root, "tk-studio-evals", {}, fakeSpawner(LOGGED_IN, worker("nothing here")).spawner);
+    expect(absent.conformance_failure).toBe(MISSING_STATUS_BLOCK);
+  });
+
+  test("M4: `own_block` is set where the block is built: the pin (or the failure's own kind), the auth preflight and a worker's 401; never for a block the worker wrote, nor a launch worker's 401", async () => {
+    const vm = "/c/tk-sup-own-block";
+    const sbx = { tier: "sbx", sandbox: "s" };
+    const pin = await invokeSkill(vm, "tk-studio-activate", sbx, fakeSpawner(LOGGED_IN, worker("x")).spawner, { pin: async () => "sbx pin failed: x" });
+    expect(pin).toMatchObject({ ran: false, own_block: "pin", status_block: { status: "blocked", reason: "sbx pin failed: x" } });
+    const mcp = await invokeSkill(vm, "tk-studio-activate", sbx, fakeSpawner(LOGGED_IN, worker("x")).spawner, { pin: async () => "refused", pinOwnBlock: () => "engine-mcp" });
+    expect(mcp).toMatchObject({ ran: false, own_block: "engine-mcp" });
+    const auth = await invokeSkill(root, "tk-studio-activate", {}, fakeSpawner({ exit: 1, stdout: "", stderr: "not logged in" }, worker("x")).spawner);
+    expect(auth).toMatchObject({ ran: false, own_block: "auth" });
+    const gone: RunResult = { exit: 1, stdout: "Error: OAuth token has expired. Please run /login", stderr: "" };
+    expect((await invokeSkill(root, "tk-studio-activate", {}, fakeSpawner(LOGGED_IN, gone).spawner)).own_block).toBe("auth");
+    expect((await invokeSkill(root, "tk-studio-launch", {}, fakeSpawner(LOGGED_IN, gone).spawner)).own_block).toBeUndefined();
+    const own = worker(`{"status":"blocked","intent":"tk-studio-activate","artifacts":[],"reason":"sbx pin failed: said by the worker"}`);
+    expect((await invokeSkill(root, "tk-studio-activate", {}, fakeSpawner(LOGGED_IN, own).spawner)).own_block).toBeUndefined();
+    // A worker that exits non-zero with its own `blocked`, its reason reading like an auth failure: still the worker's.
+    const ownAuth: RunResult = { exit: 1, stderr: "", stdout: `{"status":"blocked","intent":"tk-studio-activate","artifacts":[],"reason":"Jira authentication failed"}` };
+    const worded = await invokeSkill(root, "tk-studio-activate", {}, fakeSpawner(LOGGED_IN, ownAuth).spawner);
+    expect(worded.own_block).toBeUndefined();
+    expect((worded.status_block as Record<string, unknown>).status).toBe("blocked");
+    const wordedReason = String((worded.status_block as Record<string, unknown>).reason);
+    expect(wordedReason).toContain(MAX_LOGIN_MISSING); // the already-blocked branch keeps its reason text
+    expect(wordedReason).toContain("Jira authentication failed");
+    // A worker block that is not `blocked` under the same failure: the supervisor's `authBlock` replaces it, marked.
+    const ownPartial: RunResult = { exit: 1, stderr: "", stdout: `{"status":"partial","intent":"tk-studio-activate","artifacts":[],"reason":"Jira authentication failed"}` };
+    const replaced = await invokeSkill(root, "tk-studio-activate", {}, fakeSpawner(LOGGED_IN, ownPartial).spawner);
+    expect(replaced).toMatchObject({ own_block: "auth", status_block: { status: "blocked" }, run_status_block: { status: "partial" } });
   });
 });

@@ -77,6 +77,7 @@
       "reason": { "type": "string", "required": false, "note": "required by §4 semantics when state is partial|blocked|cancelled — names the guard, stop condition, or gap" },
       "status_block": { "type": "object", "required": false, "note": "the terminal §3 JSON status block of the run" },
       "total_cost_usd": { "type": "number", "required": false, "note": "0.1.18 (ST-061): the run's cost as the worker reported it (--output-format json), recorded by finish; a non-negative finite number, absent when not given, never zero-filled" },
+      "own_block": { "type": "string", "enum": ["placement", "lock", "pin", "auth", "worktree", "engine-mcp", "render"], "required": false, "note": "0.1.31 (Story 36.5): the block is the supervisor's own, set where it was built (`jobrun.py finish --own-block`); `evaluate_stop` skips the run for `stop.on_status`" },
       "job": { "type": "object", "required": false, "note": "resolved definition snapshot at submit time — resumability means a fresh process continues from the workspace alone, never re-reading project config mid-run" },
       "checkpoint": { "type": "object", "required": false, "note": "free-form resumable progress state, owned by the executing wrapper" },
       "counters": { "type": "object", "required": false, "note": "budget accounting toward guards: tokens, turns, wall_clock_seconds" }

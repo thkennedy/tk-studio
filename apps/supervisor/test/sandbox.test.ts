@@ -2,13 +2,14 @@
 // kill-by-pid, the starter lock and external-run detection, pinned with a fake `sbx` (never a real one).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { cancelRun, claimGate, detectExternal, pinBeforeClaim, driveResumes, ExternalRunRefused, finishRun, mirror, queueRecorder, recoverQueue, watchStarterLocks, type ResumedRun, type Started } from "../src/cli";
 import { checkoutKey, Queue, workerMayRun, type Owner, type Probes, type QueueRun, type StudioOps } from "../src/queue";
 import {
-  holdArgv, holdEngine, killEngine, killRunEngine, lookupEnginePid, pinRecordPath, pinSandbox, pinWithRestart, probeEngine, releasePin, respawnHolds, sandboxHolders,
+  defaultHold, holdArgv, holdEngine, killEngine, killRunEngine, lookupEnginePid, pinRecordPath, pinSandbox, pinWithRestart, probeEngine, parseSkillsList, pruneEngineTmp, pruneTmpArgv, releasePin, respawnHolds, sandboxHolders, skillInStore, skillsLsArgv,
   STARTER, STARTER_LOCK_REFRESH_MS, starterLockPath, writeStarterLock, writeStarterLocks, type HoldChild, type SandboxDeps,
 } from "../src/sandbox";
 import { invokeSkill, MISSING_STATUS_BLOCK, runProcess, toVmPath, type RunResult, type Spawner } from "../src/server";
@@ -123,11 +124,11 @@ describe("pin: `sbx run -d --name <sb>` before the preflight's `sbx exec`", () =
       pin: async (sb) => { spawnedAtPin = spawned.length; return rec.pin!(sb); },
     }));
     // Story 33.3: `sbx ls` first (the sandbox is not listed: no probe, no restart), then the pin.
-    expect(calls).toEqual([["ls"], ["run", "-d", "--name", SB]]);
+    expect(calls).toEqual([["ls"], ["run", "-d", "--name", SB], pruneTmpArgv(SB)]);
     expect(spawnedAtPin).toBe(0); // nothing spawned before the pin
     expect(spawned[0]).toEqual(["exec", SB, "env", "-u", "ANTHROPIC_API_KEY", "claude", "auth", "status", "--json"]);
     expect(out).toMatchObject({ ran: true, status_block: BLOCK });
-    expect(q.events(run.run_id).find((e) => e.kind === "pinned")?.detail).toEqual({ sandbox: SB });
+    expect(q.events(run.run_id).find((e) => e.kind === "pinned")?.detail).toMatchObject({ sandbox: SB, tmp_pruned: expect.stringContaining("error:") });
   });
 
   test("Story 33.2 (ruling D, re-pinned): the drain's pin runs before the claim — a failed pin leaves the run `queued` with one `claim-refused` naming the pin (a repeat pass updates `pass_at`), no preflight, no claim", async () => {
@@ -246,7 +247,7 @@ describe("Story 33.3: the pin restarts a running, logged-out sandbox once", () =
     const run = queuedOn(q);
     const { out, calls } = await during(() => gateOf(q, run.run_id));
     expect(out).toBeNull();
-    expect(calls).toEqual([["ls"], ["run", "-d", "--name", SB], AUTH, ["stop", SB], ["run", "-d", "--name", SB], AUTH, AUTH]);
+    expect(calls).toEqual([["ls"], ["run", "-d", "--name", SB], AUTH, ["stop", SB], ["run", "-d", "--name", SB], AUTH, pruneTmpArgv(SB), AUTH]);
     const r = restarts(q, run.run_id);
     expect(r).toHaveLength(1);
     expect(r[0]!.detail).toMatchObject({ sandbox: SB, probe_before: GAP, probe_after: null });
@@ -282,7 +283,7 @@ describe("Story 33.3: the pin restarts a running, logged-out sandbox once", () =
     expect(q.events(b.run_id).find((e) => e.kind === "claim-refused")?.detail).toMatchObject({ key: "max-login" });
   });
 
-  test("Same episode, a later pass: the run's open episode already carries a `pin-restart` → no second restart; a new episode (after `claim-refusal-cleared`) may restart again", async () => {
+  test("Same episode, a later pass: the run's open episode already carries a `pin-restart` → no second restart; Story 36.5: `claim-refusal-cleared` does not reopen it (only a healed signal does)", async () => {
     sbx.answer({ ls: { [SB]: "running" }, auth: ["out"] });
     const q = newQueue();
     const run = queuedOn(q);
@@ -293,10 +294,10 @@ describe("Story 33.3: the pin restarts a running, logged-out sandbox once", () =
     expect(stops(calls)).toHaveLength(1);
     expect(restarts(q, run.run_id)).toHaveLength(1);
     expect(q.events(run.run_id).filter((e) => e.kind === "claim-refused")).toHaveLength(1);
-    expect(q.clearClaimRefusals(run.run_id)).toBe(true); // the episode closes
+    expect(q.clearClaimRefusals(run.run_id)).toBe(true); // written as before, and no longer a healed signal
     const again = await during(() => gateOf(q, run.run_id));
-    expect(stops(again.calls)).toHaveLength(1);
-    expect(restarts(q, run.run_id)).toHaveLength(2);
+    expect(stops(again.calls)).toEqual([]);
+    expect(restarts(q, run.run_id)).toHaveLength(1);
   });
 
   test.each(["running", "paused", "external"])("Live holder: another run holds the sandbox `%s` → no restart, no event; the preflight refuses `max-login`", async (state) => {
@@ -350,7 +351,7 @@ describe("Story 33.3: the pin restarts a running, logged-out sandbox once", () =
       const loggedIn: Spawner = async (_c, args) => { spawned.push(args); return { exit: 0, stderr: "", stdout: JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }) }; };
       const { out, calls } = await during(() => claimGate(q, run.run_id, { tier: "sbx", sandbox: SB }, { sbx: deps, spawner: loggedIn, hygiene: { env: {} } }));
       expect(out).toBeNull();
-      expect(calls).toEqual([["ls"], ["run", "-d", "--name", SB]]);
+      expect(calls).toEqual([["ls"], ["run", "-d", "--name", SB], pruneTmpArgv(SB)]);
       expect(spawned).toEqual([AUTH]); // the preflight's own probe only
       expect(restarts(q, run.run_id)).toHaveLength(0);
     }
@@ -458,7 +459,7 @@ describe("Story 33.3: the pin restarts a running, logged-out sandbox once", () =
     expect(q.events(drained.run_id).find((e) => e.kind === "claim-refused")?.detail).toMatchObject({ key: "max-login" });
   });
 
-  test("Without the pass's set (each resume's recorder its own, as outside a drain): the same resume and gate each restart — the case the shared set closes", async () => {
+  test("Without the pass's set (each resume's recorder its own, as outside a drain): Story 36.5: the per-sandbox bound still holds, the resume's restart counting for the gate", async () => {
     sbx.answer({ ls: { [SB]: "running" }, auth: ["out"] });
     const q = newQueue();
     const { run: resumedRun } = await sbxRun(q, { pinned: false });
@@ -466,9 +467,9 @@ describe("Story 33.3: the pin restarts a running, logged-out sandbox once", () =
     q.end(resumedRun.run_id, "blocked", "auth preflight: still logged out");
     const drained = queuedOn(q, "other-job");
     const { calls } = await during(() => gateOf(q, drained.run_id));
-    expect(stops(calls)).toEqual([["stop", SB]]);
+    expect(stops(calls)).toEqual([]);
     expect(restarts(q, resumedRun.run_id)).toHaveLength(1);
-    expect(restarts(q, drained.run_id)).toHaveLength(1);
+    expect(restarts(q, drained.run_id)).toHaveLength(0);
   });
 
   test("Pin record: written on a pin (`{sandbox, since, run_id, supervisor_pid}`), rewritten after a restart, removed when the release stopped the sandbox", async () => {
@@ -1529,5 +1530,323 @@ describe("no shell in any sbx argv", () => {
   test("src/sandbox.ts names no `bash`, `sh`, `-c` or `-lc` argv item", () => {
     const src = readFileSync(join(import.meta.dir, "..", "src", "sandbox.ts"), "utf-8");
     expect(src.match(/"(bash|sh|-c|-lc)"/g)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------- Story 36.5: the supervisor's own faults
+
+describe("Story 36.5 (M10, DW-56, DW-58): the pin-restart episode is bounded per sandbox across the queue", () => {
+  const GAP = "harness auth: Max login missing or expired (not logged in)";
+  const AUTH = ["exec", SB, "env", "-u", "ANTHROPIC_API_KEY", "claude", "auth", "status", "--json"];
+  const viaSbx: Spawner = (_cmd, args, o) => runProcess(sbx.bin, args, { timeoutS: o.timeoutS });
+  const queuedOn = (q: Queue, job: string) => q.enqueue({ jobId: job, root: tempDir("tk-sup-bound-"), projectId: "p36", definition: LAUNCH, tier: "sbx", sandbox: SB }).run;
+  const gate = (q: Queue, id: string) => claimGate(q, id, { tier: "sbx", sandbox: SB }, { sbx: deps, spawner: viaSbx, hygiene: { env: {} }, restarted: new Set() });
+
+  test("several queued runs across passes: one `sbx stop`, one open `pin-restart`, another run's counting", async () => {
+    sbx.answer({ ls: { [SB]: "running" }, auth: ["out"] });
+    const q = newQueue();
+    const a = queuedOn(q, "a"), b = queuedOn(q, "b"), c = queuedOn(q, "c");
+    const { calls } = await during(async () => { for (const r of [a, b, c, a, b]) await gate(q, r.run_id); });
+    expect(calls.filter((x) => x[0] === "stop")).toEqual([["stop", SB]]);
+    expect([a, b, c].map((r) => q.events(r.run_id).filter((e) => e.kind === "pin-restart").length)).toEqual([1, 0, 0]);
+    const seq = q.events(a.run_id).find((e) => e.kind === "pin-restart")!.seq;
+    expect(q.openPinRestartOn(SB)).toBe(seq);
+    expect(q.openPinRestartOn("another-sandbox")).toBeNull();
+  });
+
+  test("a healed restart (`probe_after: null`) closes the episode: a later logout restarts again", async () => {
+    sbx.answer({ ls: { [SB]: "running" }, auth: ["out", "in"] });
+    const q = newQueue();
+    const a = queuedOn(q, "a"), b = queuedOn(q, "b");
+    await gate(q, a.run_id);
+    expect(q.events(a.run_id).find((e) => e.kind === "pin-restart")!.detail).toMatchObject({ probe_after: null });
+    expect(q.openPinRestartOn(SB)).toBeNull();
+    sbx.answer({ ls: { [SB]: "running" }, auth: ["out"] });
+    const { calls } = await during(() => gate(q, b.run_id));
+    expect(calls.filter((x) => x[0] === "stop")).toEqual([["stop", SB]]);
+  });
+
+  test("a clean `pinned` is the healed signal, even on a pin already standing: a later logout restarts again", async () => {
+    sbx.answer({ ls: { [SB]: "running" }, auth: ["out"] });
+    const q = newQueue();
+    const a = queuedOn(q, "a"), b = queuedOn(q, "b");
+    await gate(q, a.run_id);
+    expect(q.openPinRestartOn(SB)).not.toBeNull();
+    sbx.answer({ ls: { [SB]: "running" }, auth: ["in"] }); // the operator logged the sandbox in
+    expect(await gate(q, a.run_id)).toBeNull();
+    expect(q.events(a.run_id).findLast((e) => e.kind === "pinned")!.detail).toMatchObject({ sandbox: SB, probe_clean: true });
+    expect(q.openPinRestartOn(SB)).toBeNull();
+    sbx.answer({ ls: { [SB]: "running" }, auth: ["out"] });
+    const { calls } = await during(() => gate(q, b.run_id));
+    expect(calls.filter((x) => x[0] === "stop")).toEqual([["stop", SB]]);
+    expect(AUTH[1]).toBe(SB);
+  });
+
+  test("Story 36.5: a cold pin with an open episode and a clean probe heals: `probe_clean` on `pinned`, and a later logout restarts again", async () => {
+    sbx.answer({ ls: { [SB]: "running" }, auth: ["out"] });
+    const q = newQueue();
+    const a = queuedOn(q, "a"), b = queuedOn(q, "b");
+    await gate(q, a.run_id);
+    expect(q.openPinRestartOn(SB)).not.toBeNull();
+    sbx.answer({ ls: { [SB]: "stopped" }, auth: ["in"] }); // the operator logged in; the sandbox stopped since
+    expect(await gate(q, a.run_id)).toBeNull();
+    expect(q.events(a.run_id).findLast((e) => e.kind === "pinned")!.detail).toMatchObject({ sandbox: SB, probe_clean: true });
+    expect(q.openPinRestartOn(SB)).toBeNull();
+    sbx.answer({ ls: { [SB]: "running" }, auth: ["out"] });
+    const { calls } = await during(() => gate(q, b.run_id));
+    expect(calls.filter((x) => x[0] === "stop")).toEqual([["stop", SB]]);
+  });
+
+  test("Story 36.5: the drive's recorder carries a cold pin's clean probe to `pinned` too", async () => {
+    sbx.answer({ ls: { [SB]: "running" }, auth: ["out"] });
+    const q = newQueue();
+    const a = queuedOn(q, "a"), b = queuedOn(q, "b");
+    await gate(q, a.run_id);
+    expect(q.openPinRestartOn(SB)).not.toBeNull();
+    sbx.answer({ ls: { [SB]: "stopped" }, auth: ["in"] });
+    expect(await queueRecorder(q, b.run_id, deps).pin!(SB)).toBeNull();
+    expect(q.events(b.run_id).findLast((e) => e.kind === "pinned")!.detail).toMatchObject({ sandbox: SB, probe_clean: true });
+    expect(q.openPinRestartOn(SB)).toBeNull();
+  });
+
+  test("Story 36.5: a cold pin still logged out does not heal: no `probe_clean`, the episode stays open, no second restart", async () => {
+    sbx.answer({ ls: { [SB]: "running" }, auth: ["out"] });
+    const q = newQueue();
+    const a = queuedOn(q, "a");
+    await gate(q, a.run_id);
+    const seq = q.openPinRestartOn(SB);
+    expect(seq).not.toBeNull();
+    sbx.answer({ ls: { [SB]: "stopped" }, auth: ["out"] });
+    const report: { probe_clean?: true } = {};
+    const { out, calls } = await during(() => pinWithRestart(q, a.run_id, SB, deps, { spawner: viaSbx, report }));
+    expect(out).toBeNull();
+    expect(report).toEqual({});
+    expect(calls.filter((x) => x[0] === "stop")).toEqual([]);
+    expect(q.openPinRestartOn(SB)).toBe(seq);
+  });
+
+  test("Story 36.5: a cold pin with no open episode runs no probe; a cold pin's probe that throws leaves the pin standing, unhealed", async () => {
+    sbx.answer({ ls: { [SB]: "stopped" }, auth: ["in"] });
+    const q = newQueue();
+    const a = queuedOn(q, "a");
+    let probes = 0;
+    const counted: Spawner = async () => { probes++; return { exit: 0, stderr: "", stdout: JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }) }; };
+    const none: { probe_clean?: true } = {};
+    expect(await pinWithRestart(q, a.run_id, SB, deps, { spawner: counted, report: none })).toBeNull();
+    expect(probes).toBe(0);
+    expect(none).toEqual({});
+
+    sbx.answer({ ls: { [SB]: "running" }, auth: ["out"] });
+    await gate(q, a.run_id);
+    const seq = q.openPinRestartOn(SB);
+    expect(seq).not.toBeNull();
+    sbx.answer({ ls: { [SB]: "stopped" }, auth: ["in"] });
+    const thrown: { probe_clean?: true } = {};
+    const throwing: Spawner = async () => { throw new Error("probe exploded"); };
+    expect(await pinWithRestart(q, a.run_id, SB, deps, { spawner: throwing, report: thrown })).toBeNull();
+    expect(thrown).toEqual({});
+    expect(q.openPinRestartOn(SB)).toBe(seq);
+  });
+});
+
+describe("Story 36.5 (M11, DW-60): the pin prunes the engine sandbox's /tmp", () => {
+  const ok0 = async (_b: string, args: string[]): Promise<RunResult> => {
+    calls.push(args);
+    return args[0] === "exec" && args[2] === "find" ? answer : { exit: 0, stdout: "", stderr: "" };
+  };
+  let calls: string[][] = [];
+  let answer: RunResult = { exit: 0, stdout: "", stderr: "" };
+  const fakeDeps = (): SandboxDeps => ({ env: deps.env, run: ok0 });
+  const queued = (q: Queue, job = "a") => q.enqueue({ jobId: job, root: tempDir("tk-sup-prune-"), projectId: "p36", definition: LAUNCH, tier: "sbx", sandbox: SB }).run;
+
+  test("the argv is `find`'s, with no shell, and a successful pin records `tmp_pruned: true`; a repeat pass patches, never a second `pinned`", async () => {
+    expect(pruneTmpArgv(SB)).toEqual(["exec", SB, "find", "/tmp", "-maxdepth", "1", "(", "-name", "tk-sup-*", "-o", "-name", "tmp.*", ")", "-mmin", "+1440", "-exec", "rm", "-rf", "--", "{}", "+"]);
+    calls = []; answer = { exit: 0, stdout: "", stderr: "" };
+    const q = newQueue();
+    const run = queued(q);
+    expect(await pinBeforeClaim(q, run.run_id, SB, fakeDeps())).toBeNull();
+    expect(calls).toContainEqual(pruneTmpArgv(SB));
+    expect(q.events(run.run_id).find((e) => e.kind === "pinned")!.detail).toEqual({ sandbox: SB, tmp_pruned: true });
+    answer = { exit: 1, stdout: "", stderr: "rm: busy" };
+    expect(await pinBeforeClaim(q, run.run_id, SB, fakeDeps())).toBeNull();
+    const pinned = q.events(run.run_id).filter((e) => e.kind === "pinned");
+    expect(pinned).toHaveLength(1);
+    expect(pinned[0]!.detail!.tmp_pruned).toBe("error: exit 1: rm: busy");
+  });
+
+  test("a failed prune never fails the pin; a live other run skips it, naming the holder; the drive's pin site records it too", async () => {
+    calls = []; answer = { exit: 2, stdout: "", stderr: "boom" };
+    const q = newQueue();
+    const a = queued(q);
+    expect(await pinBeforeClaim(q, a.run_id, SB, fakeDeps())).toBeNull();
+    expect(q.events(a.run_id).find((e) => e.kind === "pinned")!.detail!.tmp_pruned).toBe("error: exit 2: boom");
+
+    const held = newQueue();
+    const { run: live } = await sbxRun(held, { job: "live" });
+    const other = queued(held, "b");
+    calls = [];
+    expect(await pruneEngineTmp(held, other.run_id, SB, fakeDeps())).toBe(`skipped: held by ${live.run_id}`);
+    expect(calls).toEqual([]);
+
+    answer = { exit: 0, stdout: "", stderr: "" };
+    const drive = newQueue();
+    const { run } = await sbxRun(drive, { pinned: false });
+    expect(await queueRecorder(drive, run.run_id, fakeDeps()).pin!(SB)).toBeNull();
+    expect(drive.events(run.run_id).find((e) => e.kind === "pinned")!.detail).toMatchObject({ sandbox: SB, tmp_pruned: true });
+  });
+});
+
+describe("Story 36.5 (M8, DW-109): the hold is detached and recorded; later processes adopt it", () => {
+  async function recorded(q: Queue) {
+    const { run } = await sbxRun(q);
+    launched(q, run.run_id);
+    q.recordEnginePid(run.run_id, { pid: 6509, start: "125610.0", source: "engine.pid" });
+    return run;
+  }
+  const holds = (q: Queue, id: string) => q.events(id).filter((e) => e.kind === "hold");
+
+  test("a tick beside a live recorded hold spawns none, across ticks, and writes no `hold` event", async () => {
+    sbx.answer({ procs: { 6509: { start: "125610" } } });
+    const q = newQueue();
+    const run = await recorded(q);
+    q.note(run.run_id, "hold", { sandbox: SB, engine_pid: 6509, pid: 31337, start: "1" });
+    const { spawned, hold } = fakeHold();
+    for (let tick = 0; tick < 3; tick++) expect(await respawnHolds(q, { ...deps, hold, holdAlive: (pid) => pid === 31337 })).toEqual([]);
+    expect(spawned).toEqual([]);
+    expect(holds(q, run.run_id)).toHaveLength(1);
+  });
+
+  test("a tick's `recoverQueue` beside a live recorded hold spawns none", async () => {
+    sbx.answer({ procs: { 6509: { start: "125610" } } });
+    const q = newQueue();
+    const run = await recorded(q);
+    q.note(run.run_id, "hold", { sandbox: SB, engine_pid: 6509, pid: 31337, start: "1" });
+    const prev = process.env.TK_STUDIO_ROOT;
+    process.env.TK_STUDIO_ROOT = resolve(import.meta.dir, "..", "..", "..");
+    const studio = fakeStudioRoot();
+    process.env.TK_STUDIO_ROOT = studio.root;
+    try {
+      const { spawned, hold } = fakeHold();
+      const wdeps: WorktreeDeps = { ...sweepWith("running"), sbx: { ...deps, hold, holdAlive: (pid) => pid === 31337 } };
+      wdeps.env = { ...wdeps.env, TK_STUDIO_ROOT: studio.root, TK_STUDIO_HOME: tempDir("tk-sup-sbx-tick-home-") };
+      await recoverQueue({ queue: q, owner: me, worktree: wdeps, hygiene: { env: {} } }, async () => ({ ok: true, runs: [] }));
+      expect(spawned).toEqual([]);
+      expect(holds(q, run.run_id)).toHaveLength(1);
+    } finally { if (prev === undefined) delete process.env.TK_STUDIO_ROOT; else process.env.TK_STUDIO_ROOT = prev; }
+  });
+
+  test("a dead hold with a live engine: exactly one respawn and one event; the new hold is then adopted", async () => {
+    sbx.answer({ procs: { 6509: { start: "125610" } } });
+    const q = newQueue();
+    const run = await recorded(q);
+    q.note(run.run_id, "hold", { sandbox: SB, engine_pid: 6509, pid: 31337, start: "1" });
+    const { spawned, hold } = fakeHold();
+    const later = { ...deps, hold, holdAlive: (pid: number) => pid === 424242 };
+    expect(await respawnHolds(q, later)).toEqual([run.run_id]);
+    expect(await respawnHolds(q, later)).toEqual([]);
+    expect(spawned).toHaveLength(1);
+    expect(holds(q, run.run_id).map((e) => e.detail!.pid)).toEqual([31337, 424242]);
+  });
+
+  describe("Story 36.5 (AC2): through the real probe (no `holdAlive` seam)", () => {
+    const realHold = (q: Queue, id: string, detail: Record<string, unknown>) => q.note(id, "hold", { sandbox: SB, engine_pid: 6509, ...detail });
+
+    test("a live hold whose start time is unrecorded (`start time unreadable`) may still run: no spawn across ticks", async () => {
+      sbx.answer({ procs: { 6509: { start: "125610" } } });
+      const q = newQueue();
+      const run = await recorded(q);
+      realHold(q, run.run_id, { pid: process.pid });
+      const { spawned, hold } = fakeHold();
+      for (let tick = 0; tick < 3; tick++) expect(await respawnHolds(q, { ...deps, hold })).toEqual([]);
+      expect(spawned).toEqual([]);
+    });
+
+    test("a reused pid (`start time differs`) reads as dead: one respawn", async () => {
+      sbx.answer({ procs: { 6509: { start: "125610" } } });
+      const q = newQueue();
+      const run = await recorded(q);
+      realHold(q, run.run_id, { pid: process.pid, start: "not this process's start" });
+      const { spawned, hold } = fakeHold();
+      expect(await respawnHolds(q, { ...deps, hold })).toEqual([run.run_id]);
+      expect(await respawnHolds(q, { ...deps, hold })).toEqual([]);
+      expect(spawned).toHaveLength(1);
+    });
+
+    test("a dead pid (`not running`) reads as dead: one respawn", async () => {
+      sbx.answer({ procs: { 6509: { start: "125610" } } });
+      const q = newQueue();
+      const run = await recorded(q);
+      const dead = spawnSync(process.execPath, ["--version"]).pid; // exited and reaped by the time spawnSync returns
+      realHold(q, run.run_id, { pid: dead, start: "1" });
+      const { spawned, hold } = fakeHold();
+      expect(await respawnHolds(q, { ...deps, hold })).toEqual([run.run_id]);
+      expect(await respawnHolds(q, { ...deps, hold })).toEqual([]);
+      expect(spawned).toHaveLength(1);
+    });
+  });
+
+  test("`defaultHold`: detached, stdio ignored, hidden and unref'd; `done` settles on the child's exit", async () => {
+    let opts: Record<string, unknown> = {}, unrefs = 0;
+    const handlers: Record<string, () => void> = {};
+    const fake = ((_b: string, _a: string[], o: Record<string, unknown>) => {
+      opts = o;
+      return { pid: 77, once: (ev: string, fn: () => void) => { handlers[ev] = fn; }, unref: () => { unrefs++; } };
+    }) as unknown as Parameters<typeof defaultHold>[2];
+    const held = defaultHold("sbx", holdArgv(SB, 6509), fake);
+    expect(opts).toEqual({ detached: true, stdio: "ignore", windowsHide: true });
+    expect(unrefs).toBe(1);
+    expect(held.pid).toBe(77);
+    let settled = false;
+    void held.done.then(() => { settled = true; });
+    await Bun.sleep(5);
+    expect(settled).toBe(false);
+    handlers.exit!();
+    await held.done;
+    expect(settled).toBe(true);
+    // A real child: a pid at once, `done` at its exit.
+    const real = defaultHold(process.execPath, ["-e", "0"]);
+    expect(typeof real.pid).toBe("number");
+    await real.done;
+  });
+});
+
+describe("Story 36.5 (M5, DW-113): the shared skills store", () => {
+  const SKILL = "tk-studio-evals";
+  const LOCAL = "/fake/localappdata";
+  const STORE = join(LOCAL, "DockerSandboxes", "sandboxes", "state", "agent-skills");
+  const fake = (ls: RunResult | "throw", dirs: Record<string, string[]> = {}, plugin: string | null = null): SandboxDeps => ({
+    env: { LOCALAPPDATA: LOCAL },
+    run: async (_b, args) => { expect(args).toEqual(skillsLsArgv()); if (ls === "throw") throw new Error("ENOENT sbx"); return ls; },
+    listDir: (p) => dirs[p] ?? [],
+    readFile: () => plugin,
+  });
+
+  test("the tolerant parse: one name per line, the first token", () => {
+    expect(parseSkillsList("tk-studio-launch   0.3.9\r\n\n  tk-studio-evals\n")).toEqual(["tk-studio-launch", "tk-studio-evals"]);
+    expect(skillsLsArgv()).toEqual(["skills", "ls"]);
+  });
+
+  test("listed: in the store; a listing that names only the plugin defers to the store folder's skill", async () => {
+    expect(await skillInStore(SKILL, fake({ exit: 0, stdout: `${SKILL} x\n`, stderr: "" }))).toEqual({ in_store: true });
+    expect(await skillInStore(SKILL, fake({ exit: 0, stdout: "tk-studio\n", stderr: "" }, { [STORE]: ["tk-studio"], [join(STORE, "tk-studio", "skills")]: [SKILL] }))).toEqual({ in_store: true });
+  });
+
+  test("absent: names the store, the release from its plugin.json (or `unknown`) and the import", async () => {
+    const out = await skillInStore(SKILL, fake({ exit: 0, stdout: "other\n", stderr: "" }, { [STORE]: ["tk-studio"] }, JSON.stringify({ version: "0.3.7" })));
+    expect(out).toMatchObject({ in_store: false, release: "0.3.7", via: "sbx skills ls" });
+    if (out.in_store !== false) throw new Error("unreachable");
+    expect(out.text).toBe(`${SKILL} is not in the sbx skills store (${STORE}; plugin 0.3.7); import the release: tk-studio update, then sbx skills import --force`);
+    const unknown = await skillInStore(SKILL, fake({ exit: 0, stdout: "", stderr: "" }));
+    expect(unknown).toMatchObject({ in_store: false, release: "unknown" });
+  });
+
+  test("the verb missing: the host store folder decides, and the refusal says so; neither source proves nothing", async () => {
+    const missing: RunResult = { exit: 2, stdout: "", stderr: "unknown command skills" };
+    const out = await skillInStore(SKILL, fake(missing, { [STORE]: ["tk-studio"] }));
+    expect(out).toMatchObject({ in_store: false, via: "store folder" });
+    if (out.in_store !== false) throw new Error("unreachable");
+    expect(out.text).toContain("read from the store folder: sbx skills ls exited 2: unknown command skills");
+    expect(await skillInStore(SKILL, fake(missing, { [STORE]: ["tk-studio"], [join(STORE, "tk-studio", "skills")]: [SKILL] }))).toEqual({ in_store: true });
+    expect(await skillInStore(SKILL, fake("throw"))).toMatchObject({ in_store: "unknown", why: expect.stringContaining("ENOENT sbx") });
   });
 });

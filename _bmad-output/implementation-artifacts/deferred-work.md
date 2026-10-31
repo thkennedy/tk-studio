@@ -304,7 +304,7 @@ source_spec: `31-4-sync-back-on-a-timer-spec.md`
 location: plugins/tk-studio/lib/jobrun.py execute_core; plugins/tk-studio/jobs/atlassian-sync-back.json
 severity: medium
 reason: jobrun.execute_core marks any parsed JSON output `complete`; a sync-back refusal (exit 2, status blocked) is recorded as a complete run, with `blocked` visible only in summary.json's lifted `status`. Consult ruling (option b): a runner-wide seam, not patched in a feature story. Meets (b): a contract/schema invariant left unpinned.
-status: open
+status: resolved 2026-10-31 by this story's PR (36.5: a core's own `status` lifts into the run `state`; `ok: false` with no status is `blocked`)
 
 ### DW-39: Follow-up review still recommended for 31-4-sync-back-on-a-timer after the damping cap was spent
 origin: review-budget-followup
@@ -440,7 +440,7 @@ source_spec: `33-1-the-supervisors-log-file-spec.md`
 location: tools/installer/cli/tk_studio_cli/doctor.py (check_supervisor_log, _last_end)
 severity: medium
 reason: The tee writes `stopped (exit <code>)` around every tick and drain step (src/log.ts), about every 60 s; `_last_end` in doctor.py takes the last line starting with `stopped`/`uncaught`, whatever the tag or code. AC2 names that literal line, so the code meets the criterion; ranking process-level ends (keeper/pacer/serve, or non-zero exits) first needs a planner ruling. The same noise shortens the 20-line /status tail. Meets deferral (a): a defect in behaviour the story's criteria name.
-status: open
+status: resolved 2026-10-31 by this story's PR (36.5: `_last_end` ranks a keeper, pacer or serve end, any `uncaught` and a non-zero exit above the routine tee lines)
 
 ### DW-56: The pin-restart episode is bounded only by claim-refusal-cleared or run start, so a run whose restart healed at its claim cannot be restarted at a later relaunch or resume.
 origin: spec-deferred ea7728db7fd4
@@ -448,7 +448,7 @@ source_spec: `33-3-the-pin-restarts-a-logged-out-sandbox-spec.md`
 location: apps/supervisor/src/sandbox.ts openPinRestart
 severity: medium
 reason: clearClaimRefusals writes claim-refusal-cleared only when refusals were open (queue.ts:2202-2211); openPinRestart then still finds the old pin-restart; the run ends blocked naming the renewal (fail-safe). Consult ruling B, deferral criterion (a).
-status: open
+status: resolved 2026-10-31 by this story's PR (36.5: the bound reads `Queue.openPinRestartOn`, a healed signal reopens it, so a healed restart no longer lingers)
 
 ### DW-57: The launch check treats any .pin file as pinned by the supervisor, so a record left by a manual sbx stop, reboot or kept release hides AC2's started-outside warning.
 origin: spec-deferred 9c932b6c59fb
@@ -465,7 +465,7 @@ source_spec: `33-3-the-pin-restarts-a-logged-out-sandbox-spec.md`
 location: apps/supervisor/src/sandbox.ts openPinRestart / pinWithRestart
 severity: medium
 reason: openPinRestart reads queue.events(runId) only and the per-pass set is fresh each pass: runs A, B, C queued on S give a stop/start in pass 1 (A), pass 2 (B) and pass 3 (C), each able to cut off an operator's interactive `/login` renewal. Spec-conformant (Settled shape 2 guards (c)/(d) verbatim), so not a patch; deferral criterion (a), AC1's "stops and starts the sandbox once". Proposed: bound guard (d) per sandbox across the queue (any run's open pin-restart on S since S's last healed probe).
-status: open
+status: resolved 2026-10-31 by this story's PR (36.5: guard (d) is per sandbox across the queue, any run's open `pin-restart` counting)
 
 ### DW-59: `tk-studio-launch check` has no inode warning for the engine sandbox, so a /tmp filling up again (hole 70: 1.3 M inodes while 33-1 ran) is seen only when the engine fails to write.
 origin: spec-deferred 33-4 (plans/33-4.md Settled shape 6, the replan suggestion from 33-1)
@@ -482,7 +482,7 @@ source_spec: `33-4-the-host-leg-runs-the-supervisors-suites-spec.md`
 location: apps/supervisor/src/cli.ts (pinBeforeClaim), apps/supervisor/src/sandbox.ts (the pin, reshaped by 33-3)
 severity: low
 reason: Evidence hole 70 (1.3 M inodes in the sandbox's /tmp while 33-1 ran). Story 33.4's `tmp.ts` stops new leaks from the suites; folders left by older runs, killed processes or other tools stay. Proposed: when the pin starts or adopts the sandbox, prune `/tmp/tk-sup-*` and `/tmp/tmp.*` older than a day through `sbx exec` (argv only, never a shell glob from the host). Outside 33-4's AC1/AC2 and its oversize band, and the pin was reshaped by 33-3, so deferred. DRIFT: the /tmp prune at the pin deferred — affects: none.
-status: open
+status: resolved 2026-10-31 by this story's PR (36.5: the pin prunes `tk-sup-*` and `tmp.*` from the VM's `/tmp`, recorded as `tmp_pruned`)
 
 ### DW-61: Follow-up review still recommended for 33-4-the-host-leg-runs-the-supervisors-suites after the damping cap was spent
 origin: review-budget-followup
@@ -506,7 +506,7 @@ source_spec: `33-7-a-resumed-engines-graceful-stop-ends-complete-and-the-pacers-
 location: apps/supervisor/src/log.ts (runUnderLog finish)
 severity: medium
 reason: Criterion (a), AC2's slow-pass visibility. Settled shape 3/4 write at pass end, which meets AC2 as written; a 30-minute tick is still seen only at minute 30, and a tick that never returns leaves `pacer` on stale values. Consult ruling 2026-10-27: reject as a 33.7 fix, record as deferred.
-status: open
+status: resolved 2026-10-31 by this story's PR (36.5: the slow-pass warning, the notifier line and `pacer.running` are written while the pass runs)
 
 ### DW-64: A resumed or relaunched engine the supervisor killed, whose host verify was skipped, still has its open PR marked ready even though the run ends partial.
 origin: spec-deferred 0f1fc9058132
@@ -847,7 +847,7 @@ source_spec: `kb/agent-pc-setup-runbook.md` fixes row "hole 90"; `handoff-phase1
 location: apps/supervisor/src (the checkout lock a run that blocked before any engine started keeps as an unverified engine holder; `cancel` answering `RunTerminal`; the `stop.on_status [blocked]` check at submit); kb/agent-pc-setup-runbook.md §4.6 planning checklist
 severity: medium
 reason: The host-tier claim half is done: Story 35.5 (#267) made `run-epic`, `run-vertical-slice`, `maintenance-evals` and `run-sweep` declare `requires: {tier: sbx}` and `submit` refuse a host placement `placement:TierRequired` before anything is queued; the runbook's §4.6 checklist carries the config entry to add before an engine job's first `POST /jobs`. Still owed: the first launch ran the launch skill as a host `claude -p` for five turns (1.26 USD) before blocking, then kept the checkout lock as an unverified engine holder that every claim re-probed on the host, `cancel` answered `RunTerminal`, and the operator deleted the lock row by hand; and the job's `stop.on_status [blocked]` refused the next submission (`not-woken`) after a block the loop itself caused — again after hole 93 (#249, #250) — lifted only through the instance's `max_runs` (`stop: {}` is refused by AD-10). Fix: a run that ends before its engine started releases its checkout lock (or `cancel` on a terminal run releases it, named in the answer), and an `on_status [blocked]` stop distinguishes a block before the engine started (infrastructure: tier, materialise, render) from the engine's own `blocked`, or the README's lift rule becomes a verb.
-status: open
+status: resolved 2026-10-31 by this story's PR (36.5: `own_block` releases the lock of a run with no engine, `cancel` answers an ended run's unverified lock row, all three stop evaluators skip it)
 
 ### DW-106: `plansync setup` could not adopt the owner's Confluence space (the key compare was exact, the API answers lowercase) nor list its folders (two scopes missing, the 401 folded into a token message) (hole 91).
 origin: operator ledger, hole 91 (2026-10-28); retro-epic-35 C6, AI-5
@@ -880,7 +880,7 @@ source_spec: `kb/agent-pc-setup-runbook.md` fixes row "hole 94"; `handoff-phase1
 location: apps/supervisor/src (the tick's restart rule `recoverQueue` → `respawnHolds`; the serve process's own holds)
 severity: medium
 reason: The tick runs the restart rule in its own short-lived process, so the `sbx exec <sandbox> tail --pid=<engine>` hold it spawns dies with the tick: 133 `hold` events on the 35.8 run, 82 on 35.1, one per tick, the engine unheld for most of every minute though the supervisor never restarted between 23:41Z and 02:32Z (the sandbox stayed up because the engine's own processes keep it busy). Fix: the tick never respawns holds (the serve process, which lives, owns them), or the tick's holds are detached and recorded so the serve process adopts them; one test that a tick beside a live serve spawns no hold.
-status: open
+status: resolved 2026-10-31 by this story's PR (36.5: the hold is detached and recorded, later processes adopt it by pid and start time; the win32 proof is the operator's)
 
 ### DW-110: The first render of `bmad-build-auto` in a fresh run worktree fails inside the sandbox with `[Errno 13] Permission denied` on `render_skill.py`'s staging rename, and the auto-resume does not fire on a failed first render (hole 95).
 origin: operator ledger, hole 95 (2026-10-29T02:52Z, the 35.2 run); retro-epic-35 C6, AI-5, AI-10
@@ -912,7 +912,7 @@ source_spec: `kb/agent-pc-setup-runbook.md` fixes row "hole 98"; `handoff-phase1
 location: apps/supervisor/src/cli.ts `submit` (the placement resolve, beside `TierRequired`); apps/supervisor/src/worktree.ts (materialise's drift check judges the worktree's base, never the store); the supervisor's status-block reader (a `blocked` block without `intent` or `artifacts` read as no block)
 severity: medium
 reason: The store was at 0.3.7 (the last `sbx skills import --force`), so the sandbox's claude had no `/tk-studio:tk-studio-evals`; the worker answered a `blocked` block without `intent` or `artifacts`, which the supervisor reported as no status block (`resume cap reached (1)`, 0.27 USD). The operator released plugin 0.3.8 on the motion, updated the box and re-imported the store. Fix: `submit` refuses a sandbox-tier job whose target skill is absent from the skills store (`sbx skills ls` or the store's `plugin.json` skills), naming the release and the import; a story that ships a new skill says in its spec that the job waits for the release; a block missing `intent` is reported as malformed, not absent.
-status: open
+status: resolved 2026-10-31 by this story's PR (36.5: `submit` refuses `skills-store:SkillMissing`, a claim refuses `skill-missing:<skill>`, a block missing `intent` is malformed, not resumed; the real `sbx skills ls` capture is the operator's)
 
 ### DW-114: A landed story's pull-back snapshot whose backend status is not the category's canonical name reads as a silent `done`: five stories sat in Jira `DNI` while the plan read `done` (hole 100).
 origin: operator ledger, hole 100 (2026-10-29T13:5xZ); retro-epic-35 C6, C9, AI-5
@@ -1232,4 +1232,20 @@ source_spec: `36-4-the-host-leg-goes-red-for-code-only-spec.md`
 location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261031-091634-c382; this entry preserves the lingering recommendation for a deliberate later review.
+status: open
+
+### DW-157: Runs carrying own_block still count toward stop.max_runs in evaluate_stop, so repeated supervisor faults can stop a job through max_runs.
+origin: spec-deferred 8209a52f4be7
+source_spec: `36-5-the-supervisors-own-faults-spec.md`
+location: plugins/tk-studio/lib/jobrun.py evaluate_stop
+severity: medium
+reason: evaluate_stop's new filter applies only to on_status; counted still includes own-marked runs. AC1 names on_status, so whether max_runs should change is outside this story; deferral rule (a), the criterion's "next submission is woken".
+status: open
+
+### DW-158: Follow-up review still recommended for 36-5-the-supervisors-own-faults after the damping cap was spent
+origin: review-budget-followup
+source_spec: `36-5-the-supervisors-own-faults-spec.md`
+location: n/a
+severity: low
+reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261031-122053-c9d8; this entry preserves the lingering recommendation for a deliberate later review.
 status: open
