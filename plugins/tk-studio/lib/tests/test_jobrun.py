@@ -568,7 +568,8 @@ class JobRunTestCase(unittest.TestCase):
                                        side_effect=answering(clean, 0)):
                     first = jobrun.wake(self.root, job_id)
                 self.assertEqual(first["state"], "complete")
-                self.assertTrue(calls[0][1].endswith(defn["target"]["core"][0]))
+                # the joined path carries the host's separators (backslashes on win32; hole 110's class)
+                self.assertTrue(calls[0][1].replace("\\", "/").endswith(defn["target"]["core"][0]))
                 self.assertNotIn("{project_root}", calls[0])
                 with mock.patch.object(jobrun.subprocess, "run",
                                        side_effect=answering(blocked, exit_code)):
