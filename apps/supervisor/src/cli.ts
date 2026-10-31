@@ -127,8 +127,9 @@ import {
 } from "./queue";
 import { rerunHostLeg, VerifyRefused, type HostLegStarted } from "./hostleg";
 import { emitTriage, engineCostOf, engineJobRun, isSweep, recordTriage, stopEngineAt, sweepRecord, sweepSummary, withEngineCost, type SweepSummary } from "./sweep";
-import { closeOutPaused, launchedSinceMove, resumePaused, type PausedDeps, type ResumeAnswer, type ResumeDeps as EngineResumeDeps } from "./closeout";
-import { mergePass, reviewPass, type PlanStatusDeps } from "./planstatus";
+import { armStop, closeOutPaused, enginePidKnown, isRunEpic, launchedSinceMove, resumePaused, rhythmOf, runDirOf, stopArmed, type PausedDeps, type ResumeAnswer, type ResumeDeps as EngineResumeDeps } from "./closeout";
+import { readJournal } from "./office";
+import { launchedPass, mergePass, reviewPass, startedStories, storyStarted, type PlanStatusDeps } from "./planstatus";
 import { resolutionPass, withQueuedPayload, withStoredPayload, type ResolutionDeps } from "./resolution";
 import { chatSpendPass, type ChatDeps, type ChatSpendDeps } from "./chat";
 import { questionsPass, type QuestionsDeps } from "./questions";
@@ -765,6 +766,7 @@ export async function closeOutOrphans(queue: Queue, deps: WorktreeDeps = {}): Pr
 async function afterCloseOuts(queue: Queue, opts: RunOptions & { plan?: PlanStatusDeps }): Promise<void> {
   try { await closeOutOrphans(queue, opts.worktree); } catch { /* the next tick */ }
   const plan: PlanStatusDeps = { ...(opts.worktree ?? {}), ...(opts.plan ?? {}) };
+  try { await launchedPass(queue, plan, readJournal); } catch { /* the next tick */ } // Story 36.6: later stories, a rhythm N > 1
   try { await reviewPass(queue, plan); } catch { /* the next tick */ }
   try { await mergePass(queue, plan); } catch { /* the next tick */ }
 }
@@ -1668,6 +1670,20 @@ export function launchedEngine(skill: unknown, block: unknown): string | undefin
  * named — never left `queued`. A launch run that names no engine has the
  * launch core probed before its lock is released (`Queue.endDriven`). The
  * summary's `run_id` becomes the queue id. */
+/** Story 36.6: a launched run-epic's duties on the launched path, after `holdEngine`: a rhythm of one story arms the graceful
+ * stop (once per engine) only if this engine's journal shows a `story-start` and its pid is known (`enginePidKnown`): a stop
+ * before the first `story-start` ends the run with no story built, so otherwise `launchedPass` arms it on the first tick that
+ * shows one. Then the in-progress call for the story the journal already started (else that tick makes it). Never throws: a failure here never stops the launch. */
+async function launchDuties(queue: Queue, queueRunId: string, defn: Record<string, any> | undefined, worktree: WorktreeDeps): Promise<void> {
+  try {
+    const run = queue.get(queueRunId);
+    if (!run?.engine_run_id || !isRunEpic(defn)) return;
+    const events = queue.events(queueRunId);
+    if (rhythmOf(defn) === 1 && !stopArmed(events, run.engine_run_id) && enginePidKnown(events) && storyStarted(readJournal(runDirOf(run)).entries)) await armStop(queue, run, 1, worktree);
+    await startedStories(queue, run, worktree, readJournal);
+  } catch { /* recorded where it can be; the launch goes on */ }
+}
+
 export async function mirror(
   queue: Queue, queueRunId: string, v: Pick<Validated, "jobId" | "defn">, s: RunSummary, verbRunner: VerbRunner = runJobVerb,
   worktree: WorktreeDeps = {},
@@ -1722,6 +1738,7 @@ export async function mirror(
       // Story 27.2 (AC1): an sbx engine's in-VM pid recorded on the run and the supervisor's own `sbx exec`
       // held open for its life (the pin is kept: released only at the deferred `ended`).
       await holdEngine(queue, queueRunId, sbxDeps(worktree));
+      await launchDuties(queue, queueRunId, v.defn, worktree);
       return { ...s, run_id: queueRunId, studio_run_id: studioRunId, ...(reason !== undefined ? { reason } : {}) };
     }
     // A deferred finish whose run can no longer wait for its engine: finished now, never left open
@@ -2276,13 +2293,14 @@ const pausedDeps = (opts: RunOptions): PausedDeps => ({
   ...(opts.worktree ?? {}), ...(opts.hygiene ? { hygiene: opts.hygiene } : {}), ...(opts.owner ? { self: opts.owner } : {}),
   relaunch: relauncher({ ...(opts.worktree ? { worktree: opts.worktree } : {}) }),
   launchStop: launchStopGraceful, // Story 35.2: the auto-resume's re-arm of a graceful stop in force
+  startedStories: (q, run) => startedStories(q, run, opts.worktree ?? {}, readJournal), // Story 36.6
 });
 
 /** Story 27.3: the `resume` verb `POST /runs/{id}/resume` calls — `bmad-loop resolve … --resume` for a paused
  * run whose story did not land (`resumePaused`; throws `ResumeRefused`). */
 export function resumeRun(queue: Queue, runId: string, restorePatch?: string, deps: EngineResumeDeps = {}): Promise<ResumeAnswer> {
   // Story 35.2: a graceful stop in force is re-armed on the resumed engine (`launchStopGraceful` unless injected).
-  return resumePaused(queue, runId, restorePatch !== undefined ? { restorePatch } : {}, { launchStop: launchStopGraceful, ...deps });
+  return resumePaused(queue, runId, restorePatch !== undefined ? { restorePatch } : {}, { launchStop: launchStopGraceful, startedStories: (q, run) => startedStories(q, run, deps, readJournal), ...deps });
 }
 
 export interface ResumeDeps {

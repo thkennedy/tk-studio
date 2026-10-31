@@ -183,7 +183,10 @@ presses through the supervisor's `POST /engagements/{id}/input`.
 4a. A game project's brief and GDD (Story 34.8, user flow F9) — only in
    `scoping`, before step 4's `scope` call. A game project is one
    whose tracked `.tk-studio/config.yaml` `working_set` has any role's list
-   holding `gds` or an entry starting `gds-`; `engage.py` decides it (the
+   holding `gds` or an entry starting `gds-`, and whose
+   `_bmad/_config/manifest.yaml` lists the `gds` module (Story 36.6; the
+   plugin-shipped `gds-engine-godot-4` alone is not enough); `engage.py`
+   decides it (the
    `scope` result's `game`), so never guess: a game project's `scope`
    without both docs is refused `GameDocsMissing: brief | gdd`, and the
    flags on any other project are refused `NotAGameProject` (exit 2). In

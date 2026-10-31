@@ -203,10 +203,17 @@ class FakeAtlassian(FakeJira):
                          for e in body["statuses"]]
         if method == "GET" and path == "/workflow/search":
             # the legacy shape: lowercase types, no version
+            # (a stored v3 transition reads back with `from`/`to`)
+            def as_legacy(t):
+                t = {**t, "type": t["type"].lower()} if t.get("type") else t
+                if "toStatusReference" not in t:
+                    return t
+                t = dict(t)
+                links = t.pop("links")
+                return {**t, "to": t.pop("toStatusReference"),
+                        "from": [link["fromStatusReference"] for link in links]}
             legacy = [{"id": w["id"], "statuses": w["statuses"],
-                       "transitions": [
-                           {**t, "type": t["type"].lower()} if t.get("type")
-                           else t for t in w["transitions"]]}
+                       "transitions": [as_legacy(t) for t in w["transitions"]]}
                       for w in self.workflows
                       if q.get("queryString", "") in w["id"]["name"]]
             return 200, self._page(legacy, q)
@@ -225,6 +232,18 @@ class FakeAtlassian(FakeJira):
             if any(t.get("type") != str(t.get("type")).upper()
                    for t in flow["transitions"]):
                 return 400, {"errorMessages": ["bad transition type"]}
+            # the v3 transition shape (DW-127)
+            allowed = {"id", "name", "description", "properties", "type",
+                       "toStatusReference", "links"}
+            for t in flow["transitions"]:
+                if set(t) - allowed or not t.get("id") \
+                        or not isinstance(t["id"], str) \
+                        or not t.get("toStatusReference") \
+                        or not isinstance(t.get("links"), list):
+                    return 400, {"errorMessages": ["bad transition shape"]}
+            ids = [t["id"] for t in flow["transitions"]]
+            if len(ids) != len(set(ids)):
+                return 400, {"errorMessages": ["duplicate transition id"]}
             target["version"] = {
                 "versionNumber": target["version"]["versionNumber"] + 1,
                 "id": f"v{target['version']['versionNumber'] + 1}"}
@@ -1208,8 +1227,8 @@ class DW107SetupTests(SetupTestCase):
     """DW-95 / DW-107 (hole 92): setup accepts any To Do-category status,
     creates `DNI` in the Done category, and sends a workflow update whose
     body fixes the type case (uppercase) and the `/workflows/search`
-    version; the rest of its shape, the GLOBAL transitions included, is
-    ungraded (kb §2 Q1) until the operator's attended rerun."""
+    version. Story 36.6 (DW-127): every transition is v3-shaped with an id;
+    the site's answer stays the operator's attended rerun."""
 
     def _steps(self, result):
         return " ".join(result["owner_steps"])
@@ -1234,7 +1253,7 @@ class DW107SetupTests(SetupTestCase):
         # the single update, with a GLOBAL transition into Backlog
         self.assertEqual(len(self.fake.update_bodies), 1)
         backlog = self.fake.status("Backlog")["id"]
-        self.assertIn(backlog, [t["to"] for t in
+        self.assertIn(backlog, [t["toStatusReference"] for t in
                                 self._globals(self.fake.update_bodies[0])])
         self.assertIn("global transition -> Backlog", result["created"])
         # the rerun is complete with no further writes
@@ -1288,7 +1307,7 @@ class DW107SetupTests(SetupTestCase):
         backlog = self.fake.status("Backlog")["id"]
         flow = self.fake.update_bodies[0]["workflows"][0]
         self.assertIn({"statusReference": backlog}, flow["statuses"])
-        self.assertIn(backlog, [t["to"] for t in self._globals(
+        self.assertIn(backlog, [t["toStatusReference"] for t in self._globals(
             self.fake.update_bodies[0])])
 
     def test_workflow_update_body(self):
@@ -1317,19 +1336,137 @@ class DW107SetupTests(SetupTestCase):
                          "DNI")}
         self.assertIn({"statusReference": ids["DNI"]}, flow["statuses"])
         directed = [t for t in flow["transitions"] if t["type"] == "DIRECTED"]
-        self.assertEqual([(t["from"], t["to"]) for t in directed],
-                         [([ids["Blocked - Awaiting User"]],
+        self.assertEqual([(t["links"], t["toStatusReference"]) for t in directed],
+                         [([{"fromStatusReference": ids["Blocked - Awaiting User"]}],
                            ids["Block Resolved"])])
-        into = sorted(t["to"] for t in flow["transitions"]
+        into = sorted(t["toStatusReference"] for t in flow["transitions"]
                       if t["type"] == "GLOBAL")
         self.assertEqual(into, sorted([ids["To Do"],
                                        ids["Blocked - Awaiting User"],
                                        ids["DNI"]]))
         for t in flow["transitions"]:
             if t["type"] == "GLOBAL":
-                self.assertEqual(t["from"], [])
+                self.assertEqual(t["links"], [])
         self.assertIn("global transition -> To Do", result["found"])
         self.assertIn("global transition -> DNI", result["created"])
+
+    def test_story_36_6_every_transition_is_v3_shaped_with_an_id(self):
+        # M1: copied ones keep their ids, new ones number above the copied max
+        result = self._setup(owner_account_id="acc-owner")
+        self.assert_block_last(result, "complete")
+        flow = self.fake.update_bodies[0]["workflows"][0]
+        byid = {t["id"]: t for t in flow["transitions"]}
+        self.assertEqual(len(byid), len(flow["transitions"]))
+        self.assertEqual(byid["11"]["name"], "Create")
+        self.assertEqual(byid["11"]["type"], "INITIAL")
+        self.assertEqual(byid["11"]["links"], [])
+        for t in flow["transitions"]:
+            self.assertNotIn("from", t)
+            self.assertNotIn("to", t)
+            self.assertEqual(t["type"], t["type"].upper())
+            self.assertTrue(t["id"].isdecimal())
+            if t is not byid["11"]:
+                self.assertGreater(int(t["id"]), 11)
+
+    def test_story_36_6_readers_and_the_payload_take_either_shape(self):
+        # M2: an already-updated workflow reads found in either shape
+        v3 = {"transitions": [
+            {"id": "5", "name": "x", "type": "DIRECTED", "toStatusReference": "2",
+             "links": [{"fromStatusReference": "1"}]},
+            {"id": "6", "name": "y", "type": "GLOBAL", "toStatusReference": "3",
+             "links": []}]}
+        legacy = {"transitions": [
+            {"id": "5", "name": "x", "type": "directed", "from": ["1"], "to": "2"},
+            {"id": "6", "name": "y", "type": "global", "from": [], "to": "3"}]}
+        for flow in (v3, legacy):
+            with self.subTest(flow=flow):
+                self.assertTrue(jirabackend.has_resolution_transition(flow, "1", "2"))
+                self.assertFalse(jirabackend.has_resolution_transition(flow, "1", "3"))
+                self.assertTrue(jirabackend.has_global_transition(flow, "3"))
+                self.assertFalse(jirabackend.has_global_transition(flow, "2"))
+                self.assertEqual(
+                    [jirabackend._v3_transition(t) for t in flow["transitions"]],
+                    v3["transitions"])
+
+    def test_story_36_6_a_refused_payload_keeps_the_owner_steps(self):
+        self.fake.force[("POST", "/workflows/update")] = (400, {"errorMessages": ["no"]})
+        result = self._setup(owner_account_id="acc-owner")
+        self.assert_block_last(result, "partial")
+        self.assertTrue(any("workflow update refused" in n for n in result["notes"]))
+        self.assertIn("Settings > Work items > Workflows", self._steps(result))
+
+    def _copied_transitions(self, *extra):
+        original = self.fake.add_project
+
+        def add_project(key="TKSTUDIO"):
+            original(key)
+            todo = self.fake.status("To Do")["id"]
+            self.fake.workflow["transitions"].extend(
+                {"from": [], "to": todo, "type": "GLOBAL", **tr} for tr in extra)
+        self.fake.add_project = add_project
+
+    def test_story_36_6_the_workflow_read_expands_the_rules(self):
+        # the dropped-`rules` note reads `transitions.rules`: unexpanded, a live site sends none
+        seen = []
+
+        class Client:
+            def request(self, method, path, query=None, **_):
+                seen.append((method, path, query))
+                return 200, {"values": [], "isLast": True}
+
+        jirabackend.find_workflow(Client(), "TKS")
+        self.assertEqual(seen[0][:2], ("GET", "/workflow/search"))
+        expand = seen[0][2]["expand"].split(",")
+        self.assertIn("transitions.rules", expand)
+        self.assertIn("transitions.properties", expand)
+
+    def test_story_36_6_a_copied_transitions_properties_reach_the_post(self):
+        props = {"jira.issue.editable": "false"}
+        self._copied_transitions({"id": "12", "name": "With properties", "properties": props})
+        result = self._setup(owner_account_id="acc-owner")
+        self.assert_block_last(result, "complete")
+        sent = {t["name"]: t for t in self.fake.update_bodies[0]["workflows"][0]["transitions"]}
+        self.assertEqual(sent["With properties"]["properties"], props)
+
+    def test_story_36_6_a_dropped_screen_or_rules_is_reported(self):
+        self._copied_transitions(
+            {"id": "12", "name": "With screen", "screen": {"id": "9"}},
+            {"id": "13", "name": "With rules", "rules": {"validators": [{"type": "x"}]}},
+            {"id": "14", "name": "Empty keys", "screen": {}, "rules": None})
+        result = self._setup(owner_account_id="acc-owner")
+        self.assert_block_last(result, "complete")
+        self.assertIn("workflow update dropped screen/rules from copied "
+                      "transitions: With screen, With rules", result["notes"])
+        self.assertNotIn("Empty keys", " ".join(result["notes"]))
+        sent = self.fake.update_bodies[0]["workflows"][0]["transitions"]
+        self.assertIn("With screen", [t["name"] for t in sent])
+        for tr in sent:
+            self.assertFalse({"screen", "rules"} & set(tr), tr)
+
+    def test_story_36_6_empty_containers_are_no_lost_configuration(self):
+        empty = {"conditions": [], "validators": [], "postFunctions": []}
+        kept = {"conditions": [], "validators": [], "postFunctions": [{"type": "x"}]}
+        self.assertEqual(jirabackend._dropped_config([
+            {"name": "Empty rules", "rules": empty},
+            {"name": "Nested empties", "rules": {"conditions": [{"rules": [{}]}], "note": ""}, "screen": {"id": None}},
+            {"name": "Populated rules", "rules": kept},
+            {"name": "Populated screen", "rules": empty, "screen": {"id": "9"}},
+        ]), ["Populated rules", "Populated screen"])
+
+    def test_story_36_6_no_lost_configuration_reports_nothing(self):
+        self._copied_transitions({"id": "12", "name": "Plain"})
+        result = self._setup(owner_account_id="acc-owner")
+        self.assert_block_last(result, "complete")
+        self.assertEqual(len(self.fake.update_bodies), 1)
+        self.assertFalse([n for n in result["notes"] if "dropped" in n])
+
+    def test_story_36_6_a_refusal_reports_no_drop(self):
+        self._copied_transitions({"id": "12", "name": "With screen",
+                                  "screen": {"id": "9"}})
+        self.fake.force[("POST", "/workflows/update")] = (400, {"errorMessages": ["no"]})
+        result = self._setup(owner_account_id="acc-owner")
+        self.assertFalse([n for n in result["notes"] if "dropped" in n])
+        self.assertTrue(any("workflow update refused" in n for n in result["notes"]))
 
     def test_no_exact_name_in_workflows_search_writes_nothing(self):
         self.fake.force[("GET", "/workflows/search")] = (200, {

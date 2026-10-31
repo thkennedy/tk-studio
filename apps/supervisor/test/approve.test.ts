@@ -154,7 +154,9 @@ describe("Story 32.6: the approve pass (AC1)", () => {
     expect(show("_bmad-output/planning-artifacts/epics.md")).toBe(EPICS
       + `\n## Epic 41: Report exports\n\nengagement: ${ENG}\n\nThe export epic.\n\n### Story 41.1: CSV button\n\n${STORY_1}\n\n### Story 41.2: Filtered export\n\n${STORY_2}\n`);
     expect(show(".tk-studio/config.yaml")).toBe(CONFIG.replace("  - run-epic-40\n", "  - run-epic-40\n  - run-epic-41\n"));
-    expect(JSON.parse(show(".tk-studio/jobs/run-epic-41.json"))).toMatchObject({ job_schema_version: 1, id: "run-epic-41", type: "run-epic", target: { payload: { epic: 41 } } });
+    const minted = JSON.parse(show(".tk-studio/jobs/run-epic-41.json"));
+    expect(minted).toMatchObject({ job_schema_version: 1, id: "run-epic-41", type: "run-epic", target: { payload: { epic: 41 } } });
+    expect(minted.stop).toEqual({ on_status: ["blocked"] }); // Story 36.6: no rhythm: the engagement's autonomy sets it
     // the band re-keyed from the predicted EP-033 to the minted EP-034 (test_quote.py pins this literal)
     expect(show(".tk-studio/budget-bands.yaml")).toBe(BANDS_HEAD + "  EP-034:\n    usd_estimate: 40.0\n");
     // the worktree is gone; plansync ran sync in it
@@ -1131,6 +1133,7 @@ describe("Story 34.8: approve's type rule (AC1)", () => {
     expect(steps(queue).slice(0, 3)).toEqual([["append", true], ["sync", true], ["job", true]]);
     const job = JSON.parse(git(origin, "show", "engagement/ENG-001:.tk-studio/jobs/run-epic-41.json"));
     expect(job).toMatchObject({ job_schema_version: 1, id: "run-epic-41", type: "run-vertical-slice", target: { payload: { epic: 41 } } });
+    expect(job).not.toHaveProperty("stop"); // Story 36.6: the slice mint keeps its type's
     expect(approveEvents(queue).find((d) => d.step === "job")!.detail.jobs).toEqual(["run-epic-41"]);
   });
 

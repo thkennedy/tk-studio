@@ -9,6 +9,7 @@
     }
   },
   "stop": {
-    "max_runs": 12
+    "max_runs": 12,
+    "after_stories": 1
   }
 }

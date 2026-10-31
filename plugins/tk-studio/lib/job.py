@@ -205,9 +205,15 @@ def _validate_stop(stop: object, problems: list[str]) -> None:
     unknown = set(stop) - set(STOP_KEYS)
     if unknown:
         problems.append(f"stop has unknown field(s): {', '.join(sorted(unknown))}")
-    if not set(stop) & set(STOP_KEYS):
+    # Story 36.6: a rhythm alone (`after_stories`) is no stop condition
+    conditions = [k for k in STOP_KEYS if k != "after_stories"]
+    if not set(stop) & set(conditions):
         problems.append("stop must set at least one of "
-                        f"{'|'.join(STOP_KEYS)} — a job never runs away (AD-10)")
+                        f"{'|'.join(conditions)} — a job never runs away (AD-10)")
+    if "after_stories" in stop and not (isinstance(stop["after_stories"], int)
+                                        and not isinstance(stop["after_stories"], bool)
+                                        and stop["after_stories"] > 0):
+        problems.append("stop.after_stories must be an integer > 0")
     if "max_runs" in stop and not (isinstance(stop["max_runs"], int)
                                    and not isinstance(stop["max_runs"], bool)
                                    and stop["max_runs"] > 0):

@@ -86,6 +86,14 @@ check's `verify commands` row names the placement:
   absent `engine.verify_commands`, but a working set carries
   `gds-engine-godot-4`.
 
+Over a non-empty `engine.verify_commands` the clause also reads each running
+engine sandbox (Story 36.6): `WITH_GODOT` provisioning writes
+`~/.tk-studio/provisioned` in the sandbox, read over `sbx exec`, giving
+`sandbox <sb>: provisioned WITH_GODOT <ver>`. A sandbox with no marker but a
+`godot` executable (provisioned earlier) is not warned; one with neither reads
+`warning: sandbox <sb> has no WITH_GODOT record; an engine.verify_commands gate
+there refuses`. A sandbox not running, or `sbx` absent or down, says nothing.
+
 The clause never turns the row red.
 
 ## The eval case

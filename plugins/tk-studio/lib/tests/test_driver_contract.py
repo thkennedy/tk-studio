@@ -2397,6 +2397,7 @@ class DriverContractTestCase(unittest.TestCase):
         shipped = json.loads((PLUGIN_ROOT / "jobs" / "run-vertical-slice.json")
                              .read_text(encoding="utf-8"))
         epic = json.loads((PLUGIN_ROOT / "jobs" / "run-epic.json").read_text(encoding="utf-8"))
+        self.assertEqual(epic["stop"].pop("after_stories"), 1)  # Story 36.6: run-epic's alone
         self.assertEqual(shipped["id"], "run-vertical-slice")
         self.assertEqual({k: v for k, v in shipped.items() if k not in ("id", "description")},
                          {k: v for k, v in epic.items() if k not in ("id", "description")})
@@ -2981,6 +2982,45 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertIn("a listing that lacks the skill also defers to the host store folder;", note)
         stories = next(line for line in self.text.splitlines() if line.startswith("| Story / rulings"))
         self.assertRegex(stories, r"Story 36\.1, Story 36\.2, Story 36\.3, Story 36\.4, Story 36\.5(, Story 36\.\d+)* \(Epic 36\)")
+
+    def test_0_1_31_story_36_6_setup_and_launch_by_evidence(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.31**", header)
+        self.assertNotIn("**0.1.32**", header)
+        self.assertEqual(header.count("0.1.31 (Story 36.6, additive)"), 1)
+        self.assertLess(header.index("0.1.31 (Story 36.5, additive)"),
+                        header.index("0.1.31 (Story 36.6, additive)"))
+        clause = " ".join(header[header.index("0.1.31 (Story 36.6, additive)"):].split())
+        for phrase in ("v3-shaped transitions with ids", "refuses a tracked or unignored policy",
+                       "`WITH_GODOT` marker", "a game project's manifest lists `gds`",
+                       "the `in-progress` plan phase", "`stop.after_stories`", "`stop-armed`",
+                       "— additive) |"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        self.assertEqual(flat.count("**0.1.31 (Story 36.6, additive).**"), 1)
+        self.assertLess(flat.index("**0.1.31 (Story 36.5, additive).**"),
+                        flat.index("**0.1.31 (Story 36.6, additive).**"))
+        note = flat[flat.index("**0.1.31 (Story 36.6, additive).**"):]
+        note = note[:note.index("## 8. Conformance")]
+        for phrase in ("`toStatusReference` and `links: [{fromStatusReference}]`",
+                       "no legacy `from`/`to`", "`pipeline.policy_dirties_tree`",
+                       "`workflow update dropped screen/rules from copied transitions: <names>`",
+                       "`$HOME/.tk-studio/provisioned`", "`sandbox <sb>: provisioned WITH_GODOT <ver>`",
+                       "warning: sandbox <sb> has no WITH_GODOT record",
+                       "whose `_bmad/_config/manifest.yaml` lists the `gds` module",
+                       "`plansync.py status --directory <owner root> --id ST-NNN --status in-progress`",
+                       "`status: \"partial\"` with `conflict`", "`PLAN_RETRY_LIMIT`",
+                       "`stop-armed {figure, engine_run_id, ok, detail, tier}`",
+                       "a rhythm alone is no stop condition", "`run rhythm` row",
+                       "the arming waits for that entry", "inherits `after_stories: 1`",
+                       "only a journal read that returns `problem` arms blind",
+                       "are not mapped by this code",
+                       "**The serve process:**"):
+            self.assertIn(phrase, note)
+        self.assertIn("whose `_bmad/_config/manifest.yaml` lists the `gds` module — unless", flat)
+        stories = next(line for line in self.text.splitlines() if line.startswith("| Story / rulings"))
+        self.assertRegex(stories, r"Story 36\.5, Story 36\.6(, Story 36\.\d+)* \(Epic 36\)")
 
     def test_0_1_31_story_36_3_a_paused_or_resumed_run_is_never_parked(self):
         header = next(line for line in self.text.splitlines()

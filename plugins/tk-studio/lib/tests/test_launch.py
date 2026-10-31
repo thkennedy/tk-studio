@@ -18,6 +18,8 @@ import io
 import json
 import os
 import re
+import shutil
+import subprocess
 import tempfile
 import time
 import unittest
@@ -155,7 +157,10 @@ class _FakeSbx:
     output text (rc 0) or `(rc, text)`; an unscripted exec fails (rc 1).
     Records every argv."""
 
-    def __init__(self, rows=None, *, daemon_rc=0, ls_rc=0, uptime=None, df=None):
+    def __init__(self, rows=None, *, daemon_rc=0, ls_rc=0, uptime=None, df=None,
+                 marker=None, godot=None):
+        self.marker = marker or {}
+        self.godot = godot or {}
         self.rows = rows or {}
         self.daemon_rc = daemon_rc
         self.ls_rc = ls_rc
@@ -188,6 +193,10 @@ class _FakeSbx:
             return self._scripted(args, self.uptime, args[2])
         if args[1:2] == ["exec"] and args[3:] == ["df", "-i", "/"]:
             return self._scripted(args, self.df, args[2])
+        if args[1:2] == ["exec"] and args[3:5] == ["sh", "-c"] and "provisioned" in args[5]:
+            return self._scripted(args, self.marker, args[2])
+        if args[1:2] == ["exec"] and args[3:5] == ["sh", "-c"] and args[5].startswith("test -x"):
+            return self._scripted(args, self.godot, args[2])
         return subprocess.CompletedProcess(args, 2, "", "unsupported")
 
 
@@ -1112,6 +1121,279 @@ class LaunchTestCase(unittest.TestCase):
         self.assertFalse(row["ok"])  # the policy refusal stays a gap
 
 
+    # ---- Story 36.6 (DW-62): a tracked policy is never written
+
+    def _tracked_project(self, *, track=True, ignore=None, policy=None):
+        root, spec, path = self._verify_project(policy or self.LIMITS, plugin=[self.ROSTER])
+        _git(root, "init", "-q")
+        _git(root, "config", "user.email", "t@example.invalid")
+        _git(root, "config", "user.name", "t")
+        if ignore is not None:
+            (root / ".gitignore").write_text(ignore, encoding="utf-8")
+        _git(root, "add", "-A", "--", ".")
+        if track:
+            _git(root, "add", "-f", "--", ".bmad-loop/policy.toml")
+        _git(root, "commit", "-q", "-m", "fixture")
+        return root, spec, path
+
+    @staticmethod
+    def _porcelain(root):
+        import subprocess
+        return subprocess.run(["git", "status", "--porcelain"], cwd=str(root), check=True,
+                              capture_output=True, text=True, encoding="utf-8").stdout
+
+    def test_story_36_6_a_tracked_policy_is_refused_and_the_tree_stays_clean(self):
+        # M3
+        root, spec, path = self._tracked_project()
+        before = path.read_bytes()
+        result, row, key = self._verify_check(root, spec)
+        self.assertEqual(key["policy"], "refused")
+        self.assertFalse(row["ok"])
+        self.assertIn(".bmad-loop/policy.toml is tracked (or not gitignored); add 1 command(s) "
+                      f"from {self.PLUGIN_SRC} by hand — fix it by hand", row["detail"])
+        self.assertTrue(any(g.startswith("verify commands: refused") for g in result["gaps"]))
+        self.assertFalse(result["ok"])
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(self._porcelain(root), "")
+
+    def test_story_36_6_a_tracked_policy_with_nothing_to_add_is_unchanged(self):
+        # M4
+        policy = self.LIMITS + "\n[verify]\ncommands = " + json.dumps([self.ROSTER]) + "\n"
+        root, spec, _ = self._tracked_project(policy=policy)
+        _, row, key = self._verify_check(root, spec)
+        self.assertEqual(key["policy"], "unchanged")
+        self.assertTrue(row["ok"])
+        self.assertEqual(self._porcelain(root), "")
+
+    def test_story_36_6_a_tracked_policy_matching_an_ignore_pattern_is_refused(self):
+        # M5: the `ls-files` leg (`check-ignore --no-index` reads it ignored)
+        root, spec, path = self._tracked_project(ignore=".bmad-loop/\n")
+        before = path.read_bytes()
+        _, row, key = self._verify_check(root, spec)
+        self.assertEqual(key["policy"], "refused")
+        self.assertFalse(row["ok"])
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(self._porcelain(root), "")
+
+    def test_story_36_6_an_ignored_untracked_policy_is_written_as_ever(self):
+        # M6
+        root, spec, path = self._tracked_project(track=False, ignore=".bmad-loop/\n")
+        _, row, key = self._verify_check(root, spec)
+        self.assertEqual(key["policy"], "written")
+        self.assertTrue(row["ok"])
+        self.assertIn(self.ROSTER, path.read_text(encoding="utf-8"))
+        self.assertEqual(self._porcelain(root), "")
+
+    # ---- Story 36.6 (DW-71): the engine-gate clause reads the provisioned state
+
+    GATE_CONFIG = ("project_id: p\nengine:\n  verify_commands:\n    - make check\n"
+                   "working_set:\n  developer:\n    - gds-engine-godot-4\n")
+    NO_GODOT = ("warning: sandbox claude-p has no WITH_GODOT record; an "
+                "engine.verify_commands gate there refuses")
+    P_ONLY = 'jobs:\n  "p/run-epic":\n    tier: sbx\n    sandbox: claude-p\n'
+
+    def _gate_row(self, sbx, config=None, supervisor_config=None):
+        base = Path(tempfile.mkdtemp(dir=self.tmp))
+        supervisor = base / "supervisor.yaml"
+        supervisor.write_text(supervisor_config or self.P_ONLY, encoding="utf-8")
+        os.environ["TK_SUPERVISOR_CONFIG"] = str(supervisor)
+        self.addCleanup(os.environ.pop, "TK_SUPERVISOR_CONFIG", None)
+        launch.run_sbx = sbx
+        root, spec, _ = self._verify_project(self.LIMITS, config=config or self.GATE_CONFIG)
+        result, row, _ = self._verify_check(root, spec)
+        self.assertTrue(row["ok"])
+        self.assertTrue(result["ok"], result["gaps"])
+        return row["detail"]
+
+    def test_story_36_6_gate_with_the_marker_names_the_version(self):
+        # M7
+        detail = self._gate_row(_FakeSbx({"claude-p": "running"},
+                                         marker={"claude-p": "WITH_GODOT=4.7.2\ndate=2026-10-31\n"}))
+        self.assertIn("sandbox claude-p: provisioned WITH_GODOT 4.7.2", detail)
+        self.assertNotIn("warning", detail)
+
+    def test_story_36_6_gate_host_and_both_clauses_read_the_sandboxes(self):
+        # the clause follows `engine.verify_commands` whichever branch names it
+        listed = "engine:\n  verify_commands:\n    - make check\n"
+        for clause, gate in ((launch.ENGINE_GATE_HOST, "make host"),
+                             (launch.ENGINE_GATE_BOTH, "make check")):
+            config = f"project_id: p\nverify:\n  engine: {gate}\n{listed}"
+            with self.subTest(clause=clause):
+                detail = self._gate_row(_FakeSbx({"claude-p": "running"},
+                                                 marker={"claude-p": "WITH_GODOT=4.7.2\n"}), config=config)
+                self.assertIn(clause + "; sandbox claude-p: provisioned WITH_GODOT 4.7.2", detail)
+                detail = self._gate_row(_FakeSbx({"claude-p": "running"}, godot={"claude-p": (1, "")}), config=config)
+                self.assertIn(clause + "; " + self.NO_GODOT, detail)
+
+    def test_story_36_6_gate_host_with_no_list_probes_nothing(self):
+        sbx = _FakeSbx({"claude-p": "running"}, godot={"claude-p": (1, "")})
+        detail = self._gate_row(sbx, config="project_id: p\nverify:\n  engine: make host\n")
+        self.assertIn(launch.ENGINE_GATE_HOST, detail)
+        self.assertNotIn("WITH_GODOT", detail)
+        self.assertFalse([c for c in sbx.execs() if "sh" in c])
+
+    def test_story_36_6_gate_on_an_older_sandbox_with_godot_is_not_warned(self):
+        # M8
+        detail = self._gate_row(_FakeSbx({"claude-p": "running"}, godot={"claude-p": ""}))
+        self.assertNotIn("warning", detail)
+        self.assertNotIn("provisioned WITH_GODOT", detail)
+
+    def test_story_36_6_gate_without_a_record_warns(self):
+        # M9
+        detail = self._gate_row(_FakeSbx({"claude-p": "running"}, godot={"claude-p": (1, "")}))
+        self.assertIn(self.NO_GODOT, detail)
+
+    def test_story_36_6_gate_probes_only_this_projects_sandboxes(self):
+        # another project's Godot-less sandbox draws no warning and no exec,
+        # whichever form its key takes; `p-two/x` is not `p`'s, `a/b/c` is `a/b`'s
+        for form in ('jobs:\n  "other/run-epic":\n    tier: sbx\n    sandbox: claude-o\n'
+                     '  "p/run-epic":\n    tier: sbx\n    sandbox: claude-p\n'
+                     '  "p-two/run-epic":\n    sandbox: claude-o\n',
+                     'jobs:\n  "other/a": {tier: sbx, sandbox: claude-o}\n'
+                     "  'p/run-epic': {tier: sbx,\n    sandbox: claude-p}\n",
+                     'jobs: {"other/a": {sandbox: claude-o}, "p/a": {sandbox: claude-p}}\n',
+                     'jobs:\n  # "p/old":\n  #   sandbox: claude-o\n'
+                     '  p/run-epic:\n    sandbox: claude-p # the one\n'
+                     '  p/j/k:\n    sandbox: claude-o\n'):
+            with self.subTest(form=form):
+                sbx = _FakeSbx({"claude-p": "running", "claude-o": "running"},
+                               marker={"claude-p": "WITH_GODOT=4.7.2\n"},
+                               godot={"claude-o": (1, "")})
+                detail = self._gate_row(sbx, supervisor_config=form)
+                self.assertIn("sandbox claude-p: provisioned WITH_GODOT 4.7.2", detail)
+                self.assertNotIn("claude-o", detail)
+                self.assertFalse([c for c in sbx.execs() if "claude-o" in c and "sh" in c])
+
+    def test_story_36_6_gate_with_only_another_projects_sandbox_says_nothing(self):
+        sbx = _FakeSbx({"claude-o": "running"}, godot={"claude-o": (1, "")})
+        detail = self._gate_row(sbx, supervisor_config=(
+            'jobs:\n  "other/run-epic":\n    tier: sbx\n    sandbox: claude-o\n'))
+        self.assertNotIn("warning", detail)
+        self.assertFalse([c for c in sbx.execs() if "sh" in c])  # the gate's probes; the inode row reads all
+
+    def test_story_36_6_project_id_is_the_supervisors_key(self):
+        base = Path(tempfile.mkdtemp(dir=self.tmp))
+        tracked = base / "tracked"
+        (tracked / ".tk-studio").mkdir(parents=True)
+        (tracked / ".tk-studio" / "config.yaml").write_text("project_id: The Id\n", encoding="utf-8")
+        self.assertEqual(launch._supervisor_project_id(tracked), "The Id")  # raw, not safe_name
+        plain = base / "served"
+        plain.mkdir()
+        self.assertEqual(launch._supervisor_project_id(plain), "served")
+        # a run's worktree answers its main checkout's basename, either separator
+        for gitdir in ("/c/GitHub/served/.git/worktrees/q-run",
+                       "C:\\GitHub\\served\\.git\\worktrees\\q-run"):
+            with self.subTest(gitdir=gitdir):
+                worktree = base / "q-run"
+                worktree.mkdir(exist_ok=True)
+                (worktree / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+                self.assertEqual(launch._supervisor_project_id(worktree), "served")
+
+    def test_story_36_6_gate_with_a_refused_exec_says_nothing_of_godot(self):
+        # the exec itself refused (not `test -x`'s plain no): no claim
+        detail = self._gate_row(_FakeSbx({"claude-p": "running"}, godot={"claude-p": (125, "")}))
+        self.assertNotIn("warning", detail)
+
+    def test_story_36_6_gate_unknowable_says_nothing_of_godot(self):
+        # M10: not running, sbx absent, daemon down; never an exec
+        for sbx in (_FakeSbx({"claude-p": "stopped"}), _absent_sbx,
+                    _FakeSbx({"claude-p": "running"}, daemon_rc=1)):
+            with self.subTest(sbx=sbx):
+                detail = self._gate_row(sbx)
+                self.assertNotIn("WITH_GODOT", detail)
+                self.assertNotIn("warning", detail)
+                if isinstance(sbx, _FakeSbx):
+                    self.assertFalse([c for c in sbx.execs() if "sh" in c])
+
+    def test_story_36_6_the_provisioning_writes_the_marker(self):
+        script = (Path(launch.__file__).resolve().parents[3] / "tools" / "sbx-engine"
+                  / "provision-engine.sh").read_text(encoding="utf-8")
+        block = script[script.index('if [ -n "${WITH_GODOT:-}" ]; then'):]
+        block = block[:block.index("\nfi\n")]
+        self.assertIn('> "$HOME/.tk-studio/provisioned"', block)
+        self.assertIn("WITH_GODOT=%s", block)
+
+    @unittest.skipIf(os.name == "nt" or not shutil.which("bash"), "the provisioning runs in a Linux sandbox")
+    def test_story_36_6_the_marker_follows_a_godot_that_answers(self):
+        # the script's own Godot block, whole, over an earlier provisioning's marker and shim: the binary
+        # answers (rc 0), fails (rc 3), or the download fails (rc None: a fake curl, no binary)
+        script = (Path(launch.__file__).resolve().parents[3] / "tools" / "sbx-engine"
+                  / "provision-engine.sh").read_text(encoding="utf-8")
+        block = script[script.index('if [ -n "${WITH_GODOT:-}" ]; then'):]
+        block = block[:block.index("\nfi\n") + 4]
+        for rc in (0, 3, None):
+            with self.subTest(rc=rc):
+                ok = rc == 0
+                home = Path(tempfile.mkdtemp(dir=self.tmp))
+                (home / ".tk-studio").mkdir()
+                marker = home / ".tk-studio" / "provisioned"
+                marker.write_text("WITH_GODOT=old\n", encoding="utf-8")
+                (home / ".local" / "bin").mkdir(parents=True)
+                shim = home / ".local" / "bin" / "godot"
+                shim.write_text("#!/bin/sh\n", encoding="utf-8")
+                shim.chmod(0o755)
+                tools = home / "tools"
+                tools.mkdir()
+                for tool, code in (("curl", 22), ("dpkg", 0)):
+                    (tools / tool).write_text(f"#!/bin/sh\nexit {code}\n", encoding="utf-8")
+                    (tools / tool).chmod(0o755)
+                if rc is not None:
+                    gd = home / "godot" / "Godot_v4.7.2-stable_mono_linux_x86_64"
+                    gd.mkdir(parents=True)
+                    fake = gd / "Godot_v4.7.2-stable_mono_linux.x86_64"
+                    fake.write_text(f"#!/bin/sh\necho 4.7.2.stable\nexit {rc}\n", encoding="utf-8")
+                    fake.chmod(0o755)
+                done = subprocess.run(["bash", "-c", "step() { :; }\n" + block], capture_output=True, text=True,
+                                      encoding="utf-8", timeout=60,
+                                      env={**os.environ, "HOME": str(home), "WITH_GODOT": "4.7.2",
+                                           "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}"})
+                self.assertEqual(done.returncode == 0, ok, done.stdout)
+                self.assertEqual(marker.exists(), ok)
+                self.assertEqual(shim.exists(), ok)
+                self.assertEqual((home / ".profile").exists(), ok)
+                if ok:
+                    self.assertIn("WITH_GODOT=4.7.2", marker.read_text(encoding="utf-8"))
+                    self.assertIn("Godot_v4.7.2", shim.read_text(encoding="utf-8"))
+                else:
+                    self.assertIn("--version failed", done.stdout)
+
+    # ---- Story 36.6 (hole 105): the run rhythm row
+
+    def _rhythm_row(self, instance=None):
+        root, spec = _project(Path(tempfile.mkdtemp(dir=self.tmp)))
+        if instance is not None:
+            jobs = root / ".tk-studio" / "jobs"
+            jobs.mkdir(parents=True, exist_ok=True)
+            (jobs / "run-epic-7.json").write_text(json.dumps(instance), encoding="utf-8")
+        self._wire(_FakeSubstrate())
+        result = launch.check(root, spec)
+        return result, next(c for c in result["checks"] if c["check"] == "run rhythm"), spec
+
+    @staticmethod
+    def _rhythm_instance(spec, stop=None):
+        epic = int(Path(spec).name.rsplit("-", 1)[1])
+        out = {"job_schema_version": 1, "id": "run-epic-7", "type": "run-epic",
+               "description": "x", "target": {"payload": {"epic": epic}}}
+        return {**out, **({"stop": stop} if stop else {})}
+
+    def test_story_36_6_the_rhythm_row(self):
+        _, row, spec = self._rhythm_row()
+        self.assertTrue(row["ok"])
+        self.assertIn("no run-epic instance", row["detail"])
+        # the shipped field reaches an instance with no `stop` of its own
+        _, row, _ = self._rhythm_row(self._rhythm_instance(spec))
+        self.assertIn("stop.after_stories 1; the launch arms", row["detail"])
+        _, row, _ = self._rhythm_row(self._rhythm_instance(spec, {"max_runs": 2, "after_stories": 3}))
+        self.assertIn("stop.after_stories 3", row["detail"])
+
+    def test_story_36_6_no_rhythm_says_the_run_goes_to_the_epics_end(self):
+        # M22: an instance whose own `stop` carries no field; advisory
+        _, _, spec = self._rhythm_row()
+        result, row, _ = self._rhythm_row(self._rhythm_instance(spec, {"max_runs": 2}))
+        self.assertTrue(row["ok"])
+        self.assertIn("no stop.after_stories declared; the run goes to the epic's end", row["detail"])
+        self.assertIn("an engagement's autonomy can still stop the run at a story boundary", row["detail"])
+        self.assertTrue(result["ok"], result["gaps"])
 
     # ---- the engine sandbox row (Story 33.3)
 

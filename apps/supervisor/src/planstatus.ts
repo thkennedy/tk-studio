@@ -8,6 +8,8 @@
  *
  *   {phase: "review"|"done", pr, owner, directory, story_key, id, ok, previous_status?, error?, blocked?, skipped?, reason?, stage?}
  *
+ *   in-progress Story 36.6 (hole 104): `{phase: "in-progress", story_key, id, ...}` once per story of a running launched
+ *             run-epic, from the launched path, the resume and `launchedPass` (see `storyInProgress`).
  *   conflict  Story 36.3 (DW-130): `status: "partial"` and `conflict: [{id, canonical, backend, fields}]` when the re-sync holds an
  *             AD-5 conflict (`sync.projection.conflicts`): one notifier line per distinct conflict; a `done` one keeps `stage: true`
  *             and `ok: true` (the rows stay owed) and is re-asked each tick, counted against `PLAN_RETRY_LIMIT`, until the pull-back
@@ -99,7 +101,7 @@
  */
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
-import { frontmatter, jiraBound } from "./closeout";
+import { armStop, frontmatter, isRunEpic, jiraBound, resumePidRewritten, rhythmOf, runDirOf, stopArmed, stopArmedSinceResume } from "./closeout";
 import { legVerdict, type HostVerifyResult } from "./hostverify";
 import { notifier } from "./env";
 import { canonicalPr, sendText } from "./hygiene";
@@ -121,9 +123,11 @@ export interface PlanStatusDeps extends WorktreeDeps {
   registry?: (projectId: string) => Promise<string | undefined>;
   /** This process, the plan lease's owner (default `selfOwner()`). */
   self?: Owner;
+  /** The clock of the launched pass's backstop (default `Date.now`). */
+  now?: () => number;
 }
 
-export type Phase = "review" | "done";
+export type Phase = "in-progress" | "review" | "done";
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const clip = (s: string, n = 300) => s.replace(/\/\/[^/@\s]+@/g, "//[redacted]@").trim().slice(0, n);
@@ -361,22 +365,22 @@ type Worked = boolean | { retry: string; detail: Record<string, unknown> };
  * give-up skip instead (see the header). Once something is recorded the lease is let go of settled (`settled: true`:
  * the phase is no longer in progress — the `done` claim waits on exactly that for `review`). False when the lease was
  * refused (another pass holds it, the phase is recorded, or — for `done` — the review is still in progress). */
-async function leased(queue: Queue, runId: string, phase: Phase, deps: PlanStatusDeps, work: () => Promise<Worked>): Promise<boolean> {
+async function leased(queue: Queue, runId: string, phase: Phase, deps: PlanStatusDeps, work: () => Promise<Worked>, lease: string = phase): Promise<boolean> {
   const self = deps.self ?? selfOwner();
-  if (!queue.claimPlanPhase(runId, phase, self)) return false;
+  if (!queue.claimPlanPhase(runId, lease, self)) return false;
   let recorded = false;
   try {
     const worked = await work();
     if (typeof worked === "boolean") recorded = worked;
     else {
-      const tries = queue.events(runId).filter((e) => e.kind === "plan-lease" && e.detail?.phase === phase && e.detail?.owner === null && e.detail?.settled !== true).length;
+      const tries = queue.events(runId).filter((e) => e.kind === "plan-lease" && e.detail?.phase === lease && e.detail?.owner === null && e.detail?.settled !== true).length;
       if (tries >= PLAN_RETRY_LIMIT) {
         recorded = record(queue, runId, { ...worked.detail, phase, ok: false, skipped: true, gave_up: true, reason: `gave up after ${tries + 1} attempts: ${worked.retry}` });
       }
     }
   } finally {
     // Settled once recorded (a failed append leaves the lease naming this process: a `done` claim then waits for it to exit).
-    try { queue.releasePlanPhase(runId, phase, self, recorded); } catch { /* a dead owner's lease is re-taken */ }
+    try { queue.releasePlanPhase(runId, lease, self, recorded); } catch { /* a dead owner's lease is re-taken */ }
   }
   return recorded;
 }
@@ -402,6 +406,126 @@ async function reviewRun(queue: Queue, run: QueueRun, pr: string, deps: PlanStat
     any = record(queue, run.run_id, { ...at, story_key: s.story_key, id: entity.id, ...shown(res) }) || any;
   }
   return any;
+}
+
+// ------------------------------------------------------------ Story 36.6: the story being built reads In Progress
+
+/** The journal the launched pass reads (`office.ts` `readJournal`, passed in: a value import of `office` here would add an
+ * import cycle). `problem` names a read that failed; a missing file is `{entries: []}` with none. */
+export type JournalReader = (dir: string) => { entries: readonly Record<string, any>[]; problem?: string };
+
+const storyKeys = (entries: readonly Record<string, any>[], kind: string): string[] =>
+  [...new Set(entries.filter((e) => e.kind === kind && typeof e.story_key === "string" && e.story_key).map((e) => e.story_key as string))];
+
+/** Has this engine's journal a `story-start`? bmad-loop honours a graceful stop just before it journals one, so a stop sent
+ * earlier ends the run with no story built; one sent after lands at that story's end. */
+export const storyStarted = (entries: readonly Record<string, any>[]): boolean => storyKeys(entries, "story-start").length > 0;
+
+/** Is a story in flight: a `story-start` with no `story-done`, `story-deferred` or `story-skipped` after it? A `story-escalated`
+ * leaves its key open: the story is held for a ruling, not finished. */
+const storyInFlight = (entries: readonly Record<string, any>[]): boolean => {
+  const open = new Set<unknown>();
+  for (const e of entries) {
+    if (e.kind === "story-start") open.add(e.story_key);
+    else if (e.kind === "story-done" || e.kind === "story-deferred" || e.kind === "story-skipped") open.delete(e.story_key);
+  }
+  return open.size > 0;
+};
+
+const progressRecorded = (events: readonly QueueEvent[], storyKey: string) =>
+  planEvents(events, "in-progress").some((e) => e.detail?.story_key === storyKey);
+
+/** One story's `plansync.py status … in-progress`, at most once per story of a run: the recorded `plan-status` is the once-only
+ * check (a `Queue.claimPlanPhase` on the phase refuses after any record, so the lease is per story). A refusal, a blocked
+ * re-sync or a held conflict is one event (`status: "partial"` with `conflict`), never re-asked; a transient failure records
+ * nothing and is asked again, bounded by `PLAN_RETRY_LIMIT` then one give-up. Answers whether it recorded. Never throws. */
+export async function storyInProgress(queue: Queue, run: QueueRun, storyKey: string, deps: PlanStatusDeps = {}): Promise<boolean> {
+  try {
+    if (progressRecorded(queue.events(run.run_id), storyKey)) return false;
+    const base = { phase: "in-progress" as const, story_key: storyKey };
+    return await leased(queue, run.run_id, "in-progress", deps, async () => {
+      if (progressRecorded(queue.events(run.run_id), storyKey)) return true; // settled by another pass, read under the lease
+      const owner = await planOwner(run, deps);
+      if ("retry" in owner) return { retry: owner.retry, detail: { ...base, ...(owner.owner !== undefined ? { owner: owner.owner } : {}) } };
+      if (!owner.ok) return record(queue, run.run_id, { ...base, owner: owner.owner, ok: false, skipped: true, reason: owner.reason });
+      const at = { ...base, owner: owner.owner, directory: owner.directory };
+      const story = storyNumber(storyKey);
+      const entity = story ? planEntity(owner.directory, story) : { reason: `no story number in ${storyKey}` };
+      if ("reason" in entity) return record(queue, run.run_id, { ...at, ok: false, skipped: true, reason: entity.reason });
+      const res = await callStatus(owner.directory, entity.id, "in-progress", `run ${run.run_id} story ${storyKey}`, deps);
+      if (res.transient) return { retry: res.error ?? "plansync.py status failed", detail: at };
+      await tellConflict(queue, run, entity.id, "in-progress", res, deps);
+      return record(queue, run.run_id, { ...at, id: entity.id, ...shown(res) });
+    }, `in-progress:${storyKey}`);
+  } catch { return false; }
+}
+
+/** The in-progress call for each story the run's engine journal started. Never throws. */
+export async function startedStories(queue: Queue, run: QueueRun, deps: PlanStatusDeps, journal: JournalReader): Promise<void> {
+  try {
+    if (!run.engine_run_id) return;
+    for (const key of storyKeys(journal(runDirOf(run)).entries, "story-start")) await storyInProgress(queue, run, key, deps);
+  } catch { /* the next tick tries again */ }
+}
+
+/** How long after its `launched` a figure 1 run whose journal cannot be read waits before the blind arming (`backstopOwed`):
+ * an arming sent before the engine is up would be a refusal, and a refusal is never retried. */
+export const LAUNCH_ARM_GRACE_MS = 5 * 60_000;
+
+/** Figure 1 in the pass: the launched path armed nothing (no `story-start` yet, an unknown engine pid: `enginePidKnown`, or a
+ * process that died before `armStop`). Owed on the first tick whose journal shows this engine's `story-start`, with no wait.
+ * A readable journal with none, or a missing file, never arms however long since the launch: the stop would end the run with
+ * no story built. Only a journal read that returns `problem` arms blind, after `LAUNCH_ARM_GRACE_MS`. This engine's
+ * `stop-armed` settles it (a refusal is never retried); a resume of this engine settles it too (it armed, re-armed, or told
+ * the operator why not). Per engine: a relaunched engine owes its own arming, as on the launched path (`stopArmed`). */
+const backstopOwed = (events: readonly QueueEvent[], engineRunId: string, read: ReturnType<JournalReader>, now: number): boolean => {
+  if (stopArmed(events, engineRunId) || events.some((e) => e.kind === "engine-resume" && e.detail?.engine_run_id === engineRunId)) return false;
+  if (storyStarted(read.entries)) return true;
+  if (!read.problem) return false;
+  const launched = events.findLast((e) => e.kind === "launched");
+  return !!launched && now - Date.parse(launched.at) >= LAUNCH_ARM_GRACE_MS;
+};
+
+/** This queue run's finished stories: the current journal's `story-done`, and the engines' before it as their `close-out`
+ * events recorded them (a relaunch starts a fresh journal under a new engine id; the old one is archived). */
+const finishedStories = (events: readonly QueueEvent[], entries: readonly Record<string, any>[]): number => {
+  const keys = new Set(storyKeys(entries, "story-done"));
+  for (const e of events) {
+    if (e.kind !== "close-out") continue;
+    for (const key of [e.detail?.story_key, ...(Array.isArray(e.detail?.stories_done) ? e.detail.stories_done : [])]) {
+      if (typeof key === "string" && key) keys.add(key);
+    }
+  }
+  return keys.size;
+};
+
+/** The launched pass (beside `reviewPass`, no timer of its own): over the running launched run-epic runs, the in-progress
+ * call once per new journal `story-start`, and the rhythm's graceful stop: figure 1 when the launched path left it
+ * (`backstopOwed`; a resume arms its own), and a figure N > 1 armed once N-1 of this queue run's stories have finished and
+ * this engine's journal shows a story in flight (a stop between stories would end the run a story short, or a relaunched
+ * engine's with none built), once since the latest `engine-resume` and only after that resume rewrote `engine.pid`.
+ * Answers the runs it visited. Never throws. */
+export async function launchedPass(queue: Queue, deps: PlanStatusDeps, journal: JournalReader): Promise<string[]> {
+  const out: string[] = [];
+  let runs: QueueRun[];
+  try { runs = queue.runs().filter((r) => r.state === "running" && r.engine_run_id && r.worktree); } catch { return out; }
+  for (const run of runs) {
+    try {
+      const defn = queue.definition(run);
+      if (!isRunEpic(defn) || !queue.events(run.run_id).some((e) => e.kind === "launched")) continue;
+      await startedStories(queue, run, deps, journal);
+      const figure = rhythmOf(defn);
+      if (figure) {
+        const events = queue.events(run.run_id);
+        const read = journal(runDirOf(run));
+        const owed = figure === 1 ? backstopOwed(events, run.engine_run_id!, read, (deps.now ?? Date.now)())
+          : !stopArmedSinceResume(events, run.engine_run_id!) && resumePidRewritten(events) && storyInFlight(read.entries) && finishedStories(events, read.entries) >= figure - 1;
+        if (owed) await armStop(queue, run, figure, deps);
+      }
+      out.push(run.run_id);
+    } catch { /* the next tick tries again */ }
+  }
+  return out;
 }
 
 /** The merge pass (see the header). Answers the runs it recorded. Never throws. */

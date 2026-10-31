@@ -4,13 +4,14 @@
 // for the operator. Pinned against a real throwaway repository and worktree (real git for the untracked check), an
 // injected resume, an injected notifier and an injected `track.py`. Never a real sandbox, engine or ledger.
 import { describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import {
   AUTO_RESUME, autoResumedLine, autoResumeRefusedLine, closeOutPaused, RENDER_HALT_MESSAGES, ResumeRefused, secondHaltLine,
   resolveArgs, snapshotComplete, snapshotFolders, staleRenderView, type PausedDeps,
 } from "../src/closeout";
+import { recoverQueue } from "../src/cli";
 import { NOTICE_MAX_BYTES } from "../src/hygiene";
 import { Queue, type Owner } from "../src/queue";
 import type { HoldChild } from "../src/sandbox";
@@ -57,11 +58,11 @@ function writeSnapshot(dir: string, o: { outputs?: Record<string, string>; files
 
 /** One paused host launch run: a real worktree on `supervisor/run-<id>`, the story's spec (untracked unless
  * `tracked`), a complete snapshot at `SNAP` and the run paused at `stage` with `reason`. */
-async function pausedRun(o: { status?: string; stage?: string; reason?: string; tracked?: boolean; snapshot?: boolean } = {}) {
+async function pausedRun(o: { status?: string; stage?: string; reason?: string; tracked?: boolean; snapshot?: boolean; definition?: Record<string, unknown> } = {}) {
   const repo = gitRepo();
   const work = tempDir("tk-sup-ar-work-");
   const queue = new Queue(":memory:", { ownerAlive: (x) => x.nonce === me.nonce || x.nonce === other.nonce, engineLive: async () => ({ live: false }) });
-  const run0 = queue.enqueue({ jobId: "launch-33", root: repo.checkout, projectId: "p33", definition: LAUNCH, owner: me, tier: "host" }).run;
+  const run0 = queue.enqueue({ jobId: "launch-33", root: repo.checkout, projectId: "p33", definition: o.definition ?? LAUNCH, owner: me, tier: "host" }).run;
   expect((await queue.claim(run0.run_id, me)).claimed).toBe(true);
   const wt = join(work, "worktrees", "p33", run0.run_id);
   testGit(repo.checkout, "worktree", "add", "--relative-paths", wt, "-b", `supervisor/run-${run0.run_id}`, "main");
@@ -699,4 +700,46 @@ describe("Story 36.3: a failed first render (hole 95, DW-110)", () => {
     expect(p.resumed).toEqual([fx.id]);
     expect(ev(fx, AUTO_RESUME)[0]!.detail).toMatchObject({ reason: "stale-render-view", snapshot: STAGING, attempt: 1, resumed: true });
   });
+});
+
+// Story 36.6 (AC4's "a resume included"): the auto-resume's wiring as `recoverQueue` builds it (`cli.ts` `pausedDeps`), with
+// no `resume` seam: the real `resumePaused`, an injected child, a fake `uv` behind the in-progress call. The re-arm seam is the
+// real `launchStopGraceful`, so its `launch.py stop` meets no engine in this temp worktree and is not asserted `ok`.
+describe("Story 36.6: an auto-resume owes the launch duties", () => {
+  async function autoResumed(definition: Record<string, unknown>) {
+    const fx = await pausedRun({ definition });
+    const runDir = join(fx.wt, ".bmad-loop", "runs", E1);
+    mkdirSync(runDir, { recursive: true });
+    appendFileSync(join(runDir, "journal.jsonl"), JSON.stringify({ kind: "story-start", story_key: KEY }) + "\n", "utf-8");
+    writeFileSync(join(runDir, "engine.pid"), "6509 125610.0");
+    const p = passDeps(fx), { resume: _none, ...deps } = p.deps;
+    const worktree = {
+      ...deps, pidPolls: 2, pollMs: 1,
+      spawn: () => { writeFileSync(join(runDir, "engine.pid"), "7001 200000.0"); return { pid: 4242, done: new Promise<never>(() => {}) }; },
+    };
+    const was = process.env.TK_STUDIO_ROOT;
+    process.env.TK_STUDIO_ROOT = join(import.meta.dir, "..", "..", ".."); // `recoverQueue`'s `requireStudio`, `launchStopGraceful`'s plugin root
+    try {
+      await recoverQueue({ queue: fx.queue, owner: me, worktree, hygiene: deps.hygiene! }, async (_root, a) => a[0] === "status" ? { ok: true, runs: [] } : { ok: true, state: "partial" });
+    } finally { if (was === undefined) delete process.env.TK_STUDIO_ROOT; else process.env.TK_STUDIO_ROOT = was; }
+    expect(ev(fx, AUTO_RESUME)[0]!.detail).toMatchObject({ reason: "stale-render-view", attempt: 1, resumed: true });
+    return fx;
+  }
+  const EPIC = (stop: Record<string, unknown>) => ({ id: "run-epic-9", type: "run-epic", target: { skill: "tk-studio-launch" }, guards: { max_wall_clock_seconds: 600 }, stop });
+
+  test("`pausedDeps.startedStories`: the resumed run's in-progress call is recorded", async () => {
+    const fx = await autoResumed(EPIC({ on_status: ["blocked"] }));
+    expect(ev(fx, "plan-status").map((e) => [e.detail?.phase, e.detail?.story_key])).toEqual([["in-progress", KEY]]);
+    expect(ev(fx, "stop-armed")).toEqual([]); // no rhythm declared
+  }, 120_000);
+
+  test("figure 1 is armed on the auto-resume, after `engine.pid` is rewritten, once since its `engine-resume`", async () => {
+    const fx = await autoResumed(EPIC({ on_status: ["blocked"], after_stories: 1 }));
+    expect(ev(fx, "stop-armed")).toHaveLength(1);
+    expect(ev(fx, "stop-armed")[0]!.detail).toMatchObject({ figure: 1, engine_run_id: E1, tier: "host" });
+    const k = kinds(fx);
+    expect(k.lastIndexOf("stop-armed")).toBeGreaterThan(k.lastIndexOf("engine-pid"));
+    expect(k.lastIndexOf("engine-pid")).toBeGreaterThan(k.lastIndexOf("engine-resume"));
+    expect(ev(fx, "plan-status").map((e) => e.detail?.story_key)).toEqual([KEY]);
+  }, 120_000);
 });

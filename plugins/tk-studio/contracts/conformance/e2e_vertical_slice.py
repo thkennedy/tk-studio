@@ -78,6 +78,8 @@ def type_steps() -> list[dict]:
                                                   else "; ".join(entry["problems"]))})
         return steps
     defn, epic = entry["definition"], types["run-epic"]["definition"]
+    # Story 36.6: the rhythm (`stop.after_stories`) is run-epic's alone
+    epic = {**epic, "stop": {k: v for k, v in epic["stop"].items() if k != "after_stories"}}
     same = {k: v for k, v in defn.items() if k not in ("id", "description")} \
         == {k: v for k, v in epic.items() if k not in ("id", "description")}
     steps.append({"step": "type", "ok": same and defn["id"] == TYPE_ID

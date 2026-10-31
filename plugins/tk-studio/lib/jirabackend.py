@@ -1537,7 +1537,7 @@ def find_workflow(client: JiraClient, project_key: str) -> tuple[dict | None, st
     wanted = WORKFLOW_NAME.format(key=project_key)
     values = _paged_values(client, "/workflow/search",
                            {"queryString": project_key,
-                            "expand": "statuses,transitions"},
+                            "expand": "statuses,transitions,transitions.rules,transitions.properties"},
                            scope=SCOPE_READ)
     exact = [w for w in values if (w.get("id") or {}).get("name") == wanted]
     if len(exact) == 1:
@@ -1552,7 +1552,7 @@ def find_workflow_version(client: JiraClient,
     `find_workflow`'s, read from `GET /workflows/search` (DW-107: the
     legacy `/workflow/search` carries none; the update needs it). This
     fixes the version only; the rest of the update body shape is ungraded
-    (kb §2 Q1) pending the operator's attended `plansync setup` rerun.
+    (DW-127: `update_workflow`) pending the operator's attended rerun.
     None and a note when none or several match exactly."""
     wanted = WORKFLOW_NAME.format(key=project_key)
     values = _paged_values(client, "/workflows/search",
@@ -1570,35 +1570,53 @@ def _is_type(tr: dict, kind: str) -> bool:
     return str(tr.get("type") or "").upper() == kind
 
 
+def _transition_target(tr: dict) -> str:
+    """The status a transition goes to, from either shape: the v3
+    `toStatusReference` or the legacy `to`."""
+    return str(tr.get("toStatusReference") or tr.get("to") or "")
+
+
+def _transition_sources(tr: dict) -> list[str]:
+    """The statuses a transition comes from, from either shape: the v3
+    `links[].fromStatusReference` or the legacy `from`."""
+    links = [link.get("fromStatusReference") for link in tr.get("links") or []
+             if isinstance(link, dict)]
+    return [str(s) for s in [*links, *(tr.get("from") or [])] if s]
+
+
 def has_resolution_transition(workflow: dict, blocked_id: str,
                               resolved_id: str) -> bool:
-    for tr in workflow.get("transitions") or []:
-        sources = [str(s) for s in tr.get("from") or []]
-        if str(tr.get("to")) == str(resolved_id) and str(blocked_id) in sources:
-            return True
-    return False
+    """Either shape, so a rerun reports it found and writes nothing."""
+    return any(_transition_target(tr) == str(resolved_id)
+               and str(blocked_id) in _transition_sources(tr)
+               for tr in workflow.get("transitions") or [])
 
 
 def has_global_transition(workflow: dict, to_id: str) -> bool:
-    """A GLOBAL transition (any type spelling) into `to_id`."""
-    return any(_is_type(tr, "GLOBAL") and str(tr.get("to")) == str(to_id)
+    """A GLOBAL transition (any type spelling, either shape) into `to_id`."""
+    return any(_is_type(tr, "GLOBAL") and _transition_target(tr) == str(to_id)
                for tr in workflow.get("transitions") or [])
+
+
+def _links(sources: list[str]) -> list[dict]:
+    return [{"fromStatusReference": s} for s in sources]
 
 
 def workflow_transitions(workflow: dict, have: dict[str, dict]
                          ) -> list[tuple[str, dict, bool]]:
     """`(label, transition, present)` for every transition the template
-    needs on the workflow (DW-107): DIRECTED `Blocked - Awaiting User` ->
-    `Block Resolved`, and a GLOBAL (`from: []`) transition into the To
-    Do-category status, `Blocked - Awaiting User` and `DNI`. A status not in
-    `have` is skipped. The workflow is complete when every one is present."""
+    needs on the workflow (DW-107, DW-127), v3-shaped: DIRECTED `Blocked -
+    Awaiting User` -> `Block Resolved`, and a GLOBAL (empty `links`)
+    transition into the To Do-category status, `Blocked - Awaiting User` and
+    `DNI`. `update_workflow` gives each its id. A status not in `have` is
+    skipped. The workflow is complete when every one is present."""
     ids = {n: str(e.get("id")) for n, e in have.items()}
     out: list[tuple[str, dict, bool]] = []
     if BLOCKED_STATUS in ids and RESOLVED_STATUS in ids:
         out.append((f"transition {BLOCKED_STATUS} -> {RESOLVED_STATUS}",
                     {"name": RESOLVED_STATUS, "type": "DIRECTED",
-                     "from": [ids[BLOCKED_STATUS]],
-                     "to": ids[RESOLVED_STATUS]},
+                     "toStatusReference": ids[RESOLVED_STATUS],
+                     "links": _links([ids[BLOCKED_STATUS]])},
                     has_resolution_transition(workflow, ids[BLOCKED_STATUS],
                                               ids[RESOLVED_STATUS])))
     for slot in (TODO_STATUS, BLOCKED_STATUS, DNI_STATUS):
@@ -1606,40 +1624,89 @@ def workflow_transitions(workflow: dict, have: dict[str, dict]
             continue
         name = have[slot].get("name") or slot
         out.append((f"global transition -> {name}",
-                    {"name": name, "type": "GLOBAL", "from": [],
-                     "to": ids[slot]},
+                    {"name": name, "type": "GLOBAL",
+                     "toStatusReference": ids[slot], "links": []},
                     has_global_transition(workflow, ids[slot])))
+    return out
+
+
+def _v3_transition(tr: dict) -> dict:
+    """A transition as `POST /workflows/update` takes it (DW-127), from
+    either read's shape: `id` (when it has one), `name`, `description`,
+    `properties`, the uppercase `type`, `toStatusReference` and `links` in
+    place of the legacy `to` / `from`. The legacy-only keys (`screen`,
+    `rules`) are not mapped by this code and are dropped; whether the v3
+    schema has a place for them is for the operator's live call to decide.
+    `update_workflow` reports the copied transitions that lose one
+    (`_dropped_config`)."""
+    out = {k: tr[k] for k in ("name", "description", "properties") if k in tr}
+    if tr.get("id") not in (None, ""):
+        out["id"] = str(tr["id"])
+    if tr.get("type"):
+        out["type"] = str(tr["type"]).upper()
+    out["toStatusReference"] = _transition_target(tr)
+    out["links"] = _links(_transition_sources(tr))
+    return out
+
+
+def _holds_value(value) -> bool:
+    """A non-empty value at some depth: `{"conditions": [], "validators": []}`
+    holds none; a `None`, an empty string or an empty container is empty."""
+    if isinstance(value, dict):
+        return any(_holds_value(v) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_holds_value(v) for v in value)
+    return value is not None and value != ""
+
+
+def _dropped_config(transitions: list[dict]) -> list[str]:
+    """The names of the copied transitions whose `screen` or `rules`, holding
+    a value (`_holds_value`), `_v3_transition` does not carry."""
+    return [str(tr.get("name") or tr.get("id")) for tr in transitions
+            if _holds_value(tr.get("screen")) or _holds_value(tr.get("rules"))]
+
+
+def _with_fresh_ids(transitions: list[dict]) -> list[dict]:
+    """Every transition with an id: a copied one keeps its own, the others
+    take numeric strings above the highest numeric id present."""
+    top = max((int(t["id"]) for t in transitions
+               if str(t.get("id", "")).isdecimal()), default=0)
+    out = []
+    for tr in transitions:
+        if "id" not in tr:
+            top += 1
+            tr = {**tr, "id": str(top)}
+        out.append(tr)
     return out
 
 
 def update_workflow(client: JiraClient, workflow: dict, version,
                     status_ids: list[str],
                     transitions: list[dict]) -> tuple[bool, str]:
-    """The workflow update (DW-107): `status_ids` on the workflow, the
-    existing transitions with their types uppercased (the legacy search
-    spells them `initial` / `directed` / `global`) plus `transitions`, and
-    the `version` from `GET /workflows/search`. It fixes the type case and
-    the version; the rest of the body shape is ungraded (kb §2 Q1) pending
-    the operator's attended `plansync setup` rerun."""
+    """The workflow update (DW-107, DW-127): `status_ids` on the workflow,
+    the existing transitions plus `transitions`, every one v3-shaped with an
+    id (`_v3_transition`, `_with_fresh_ids`), and the `version` from `GET
+    /workflows/search`. Unverified until the operator's attended `plansync
+    setup` rerun: whether the site wants `statusReference` as the status id
+    (what this sends) or a workflow-scoped UUID. On success the second value
+    names the copied transitions whose `screen` or `rules` the update dropped
+    (comma-separated, empty when none); on a refusal it is the refusal."""
     ident = workflow.get("id") or {}
     on_flow = {str(s.get("id")) for s in workflow.get("statuses") or []}
     statuses = [{"statusReference": sid}
                 for sid in sorted(on_flow | {str(i) for i in status_ids})]
-    existing = []
-    for tr in workflow.get("transitions") or []:
-        tr = dict(tr)
-        if tr.get("type"):
-            tr["type"] = str(tr["type"]).upper()
-        existing.append(tr)
+    payload = _with_fresh_ids([
+        _v3_transition(tr)
+        for tr in [*(workflow.get("transitions") or []), *transitions]])
     body = {"workflows": [{
         "id": ident.get("entityId"), "version": version,
         "statuses": statuses,
-        "transitions": existing + list(transitions)}]}
+        "transitions": payload}]}
     status, data = client.request("POST", "/workflows/update", body,
                                   scope=SCOPE_CONFIGURATION)
     if status not in (200, 201, 204):
         return False, _refusal(status, data)
-    return True, ""
+    return True, ", ".join(_dropped_config(workflow.get("transitions") or []))
 
 
 def find_filter(client: JiraClient, agent_account_id: str | None) -> dict | None:

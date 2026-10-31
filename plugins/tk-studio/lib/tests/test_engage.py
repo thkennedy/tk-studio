@@ -2182,15 +2182,52 @@ GDD_REL = "_bmad-output/engagements/ENG-001/gdd.md"
 
 
 class GameScopeTests(ScopeTestCase):
-    def make_game(self, entry="gds"):
+    def make_game(self, entry="gds", module="gds"):
         with self.config.open("a", encoding="utf-8") as handle:
             handle.write(f"working_set:\n  developer:\n    - {entry}\n")
+        if module is not None:
+            self.write_manifest(module)
+
+    def write_manifest(self, module):
+        path = self.root / "_bmad" / "_config" / "manifest.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "installation:\n  version: 6.0.0\nmodules:\n"
+            f"  - name: {module}\n    version: 1.0.0\n    source: external\n"
+            "ides:\n  - claude-code\n", encoding="utf-8")
 
     def test_detection_reads_the_tracked_working_set_only(self):
         self.assertFalse(engage.is_game_project(self.root))
         self.make_game("gds-engine-godot-4")
         self.assertTrue(engage.is_game_project(self.root))
         self.assertFalse(engage.is_game_project(self.root / "nowhere"))
+
+    def test_story_36_6_the_engine_skill_alone_is_not_a_game_project(self):
+        # M11: no manifest at all, then a manifest without `gds`
+        self.make_game("gds-engine-godot-4", module=None)
+        self.assertFalse(engage.is_game_project(self.root))
+        self.write_manifest("bmm")
+        self.assertFalse(engage.is_game_project(self.root))
+        result = self.scope(brief=BRIEF, gdd=GDD)
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("NotAGameProject", result["reason"])
+
+    def test_story_36_6_the_engine_skill_with_the_module_is_a_game_project(self):
+        # M12: the module installed; `GameDocsMissing` as ever without docs
+        self.make_game("gds-engine-godot-4")
+        self.assertTrue(engage.is_game_project(self.root))
+        result = self.scope()
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("GameDocsMissing", result["reason"])
+
+    def test_story_36_6_a_gds_entry_without_a_manifest_is_not_a_game_project(self):
+        # M13
+        self.make_game("gds", module=None)
+        self.assertFalse(engage.is_game_project(self.root))
+
+    def test_story_36_6_the_module_without_a_working_set_entry_is_not_a_game_project(self):
+        self.write_manifest("gds")
+        self.assertFalse(engage.is_game_project(self.root))
 
     def test_a_game_scope_publishes_brief_and_gdd_beside_the_scope(self):
         self.make_game()

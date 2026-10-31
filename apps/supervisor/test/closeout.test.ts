@@ -217,9 +217,12 @@ describe("AC1: a landed story with a closable verdict is closed out and the epic
   test("commit → meter → archive → relaunch (`close-out`), the pinning recorder, a new `launched`; the story never re-driven", async () => {
     const fx = await pausedRun({ verdict: "no-impact" });
     const p = passDeps(fx);
+    // Story 36.6: the engine's finished stories, recorded on the `close-out` before the archive moves the journal.
+    writeFileSync(join(fx.runDir, "journal.jsonl"), [{ kind: "story-done", story_key: "27-1-an-earlier-story" }, { kind: "story-start", story_key: KEY }, { kind: "story-done", story_key: "27-1-an-earlier-story" }].map((l) => JSON.stringify(l) + "\n").join("") + "not json\n", "utf-8");
     const headBefore = testGit(fx.wt, "rev-parse", "HEAD");
     const out = await closeOutPaused(fx.queue, p.deps);
     expect(out).toEqual({ closed: [fx.run.run_id], awaiting: [] });
+    expect(ev(fx.queue, fx.run.run_id, "close-out")[0]!.detail!.stories_done).toEqual(["27-1-an-earlier-story"]);
 
     // The order: the harvest commit, the meter, the archive (VM home first), then the relaunch.
     const steps = p.order.filter((s) => s.startsWith("git commit") || s.startsWith("uv meter.py") || s.includes("bmad-loop") || s === "rebuild" || s === "invoke" || s.startsWith("sbx run"));
