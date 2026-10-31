@@ -320,6 +320,13 @@ Gate: Part A adjust-stories; Part B story accepted, planned 36-3-a-paused-or-res
 | review | 1 | 2026-10-30T22:42:44Z | 2026-10-30T23:10:25Z | 1e140d24-7c8e-4d0e-85e0-dca445b3825b | claude-opus-5-5 | medium | 4607925 | 93644 | 6.8778 | completed |
 | review | 2 | 2026-10-30T23:10:25Z | 2026-10-30T23:37:29Z | 05e826da-b41f-43e2-b304-8b661e1a018e | claude-opus-5-5 | medium | 5535503 | 101136 | 7.3185 | completed |
 | gate | 1 | 2026-10-30T23:37:30Z | 2026-10-30T23:44:37Z | c3ca5f2f-d29f-42c8-a9b8-4cb00322bcba | claude-opus-5-5 | medium | 1798632 | 26910 | 2.1275 | completed |
+| close-out | 1 | 2026-10-31T01:15:03Z | 2026-10-31T01:15:03Z | — | — | — | — | — | — | draft PR |
+| close-out | 2 | 2026-10-31T01:17:10Z | 2026-10-31T01:17:10Z | — | — | — | — | — | — | skipped |
+| close-out | 3 | 2026-10-31T01:19:36Z | 2026-10-31T01:19:36Z | — | — | — | — | — | — | PR |
+| re-run | 1 | 2026-10-31T01:19:32Z | 2026-10-31T01:58:23Z | — | — | — | — | — | — | red |
+| re-run | 2 | 2026-10-31T02:02:10Z | 2026-10-31T02:41:13Z | — | — | — | — | — | — | red |
+| re-run | 3 | 2026-10-31T03:36:17Z | 2026-10-31T04:16:30Z | — | — | — | — | — | — | green |
+| merge | — | 2026-10-31T04:17:48Z | 2026-10-31T04:17:48Z | — | — | — | — | — | — | merged |
 
 ## Auto Run Result
 

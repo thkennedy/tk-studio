@@ -178,6 +178,13 @@ DRIFT: typecheck run through `bun node_modules/typescript/bin/tsc --noEmit` — 
 | plan | — | 2026-10-30T20:25:52Z | 2026-10-30T20:48:43Z | — | claude-opus-5-5 | high | — | — | — | done |
 | dev | 1 | 2026-10-30T20:48:56Z | 2026-10-30T21:26:33Z | ff9b33ff-c68e-460f-b983-d17eb24a84aa | claude-opus-5-5 | medium | 5017382 | 113055 | 7.4161 | completed |
 | gate | 1 | 2026-10-30T21:26:34Z | 2026-10-30T21:29:33Z | 16cfca46-7af7-42ad-ac4c-cc45f69d699d | claude-opus-5-5 | medium | 924498 | 12773 | 1.2670 | completed |
+| close-out | 1 | 2026-10-31T01:15:03Z | 2026-10-31T01:15:03Z | — | — | — | — | — | — | draft PR |
+| close-out | 2 | 2026-10-31T01:17:10Z | 2026-10-31T01:17:10Z | — | — | — | — | — | — | skipped |
+| close-out | 3 | 2026-10-31T01:19:36Z | 2026-10-31T01:19:36Z | — | — | — | — | — | — | PR |
+| re-run | 1 | 2026-10-31T01:19:32Z | 2026-10-31T01:58:23Z | — | — | — | — | — | — | red |
+| re-run | 2 | 2026-10-31T02:02:10Z | 2026-10-31T02:41:13Z | — | — | — | — | — | — | red |
+| re-run | 3 | 2026-10-31T03:36:17Z | 2026-10-31T04:16:30Z | — | — | — | — | — | — | green |
+| merge | — | 2026-10-31T04:17:48Z | 2026-10-31T04:17:48Z | — | — | — | — | — | — | merged |
 
 ## Auto Run Result
 

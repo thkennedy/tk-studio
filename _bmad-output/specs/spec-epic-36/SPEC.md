@@ -85,6 +85,12 @@ A pain to solve. Epic 35 closed on 2026-10-29 `accepted-with-open-items` (`spec-
 - **CAP-21** (36.7)
   - **intent:** The root and `apps/supervisor` READMEs carry rows for `tk-studio-evals`, `maintenance-evals`, `run-sweep`, `evals.py` and `report.py` and the EP-34 rows for `tk-studio-playable-judge`, `tk-studio-track` and `tk-studio-engage`; `apps/supervisor/README.md:332` and the `engine mcp` advisory name the per-run forwarder port and the host:port-policy case; the Windows notes carry the `utf-8-sig` bullet and the encoding rule of 36.4; the mirror's hook comments are aligned (AI-7); the contract (0.1.31, additive) is unchanged in surface.
   - **success:** Every named row and bullet is present; DW-85, DW-86 and DW-87 close or narrow by this PR.
+- **CAP-22** (36.6)
+  - **intent:** A story the launch is about to run reads In Progress from the build's start: the supervisor's launched path calls `plansync.py status --directory <owner root> --id ST-NNN --status in-progress` once for the story (the verb the review and done phases use, through `planstatus.ts`'s runner, since the launch inside the sandbox writes no queue event), recorded as a `plan-status` event with `phase: in-progress`, `ok` and `previous_status`; a refusal or a blocked re-sync is one event and never stops the launch; the review phase at PR open and the done phase at the merge follow as now, and a block's `Blocked - Awaiting User` wins while it stands (hole 104, DW-146; added 2026-10-31 after the SPEC's bootstrap, from epics.md Story 36.6).
+  - **success:** The plan-status suite covers the third phase with a fake; the contract (0.1.31, additive) names it; a launched story's issue reads In Progress before its first dev pass ends.
+- **CAP-23** (36.6)
+  - **intent:** A `run-epic` job declares its rhythm as a field (one story per run, or a stories-per-run figure; the shipped `run-epic.json` and the project instances carry it, not the description's prose), and the launched path arms the graceful stop itself from that figure on the run's tier (the tier-routed re-arm 36.3 lands for DW-120; the `launch.py stop --graceful` the operator issued by hand after every Epic 35 launch), recorded as a `stop-armed` event with the figure and the engine id; a job with no rhythm declared runs to the epic's end and the launch check says so (hole 105, DW-147; added 2026-10-31 after the SPEC's bootstrap, from epics.md Story 36.6).
+  - **success:** The launch suite covers the arming with a fake; a `run-epic` instance that declares one story per run never builds two stories in one run again; the contract names the field and the event.
 
 ## Constraints
 
@@ -113,12 +119,13 @@ A pain to solve. Epic 35 closed on 2026-10-29 `accepted-with-open-items` (`spec-
 
 ## Assumptions
 
-- One contract bump, 0.1.31, opens at 36.1 and every later story extends its entry additively (36.2 the priced cost and the event, 36.3 `track-unblock` and the bounded stop, 36.4 the encoding rule, 36.5 the refusal and the lifted status, 36.6 the setup and launch rules, 36.7 unchanged in surface), as 0.1.30 did in Epic 35.
+- One contract bump, 0.1.31, opens at 36.1 and every later story extends its entry additively (36.2 the priced cost and the event, 36.3 `track-unblock` and the bounded stop, 36.4 the encoding rule, 36.5 the refusal and the lifted status, 36.6 the setup and launch rules with the `in-progress` plan-status phase and the `stop-armed` event (CAP-22, CAP-23), 36.7 unchanged in surface), as 0.1.30 did in Epic 35.
 - The either/or choices the stories hand to the planner (36.3 a paused bundle's WIP committed vs the sweep kept paused, a count vs a deadline for the bounded stop; 36.5 a tick that spawns no hold vs one that detaches and records; 36.6 a refused vs a reported tracked-policy write, the tracked config vs the sandbox's own marker for `WITH_GODOT`) are settled in the story's plan and the contract, never left to the dev session and never open questions for the human.
 - The one pricing table in lib (CAP-4) is `meter.py`'s existing price table (`load_prices`, `_rates`, `price`; the `prices.json` the stage-log rows and engagement quotes already read, its rates from `kb/execution-pipeline-model-routing.md`); 36.2 brings the close-out and `report.py` onto it rather than adding a second table.
 - The runbook is `kb/agent-pc-setup-runbook.md` and the holes are rows of its fixes table; the Windows notes are the `plugins/tk-studio/README.md` section 35.5 added; the mirror is the nested studio-pipeline plugin copy whose hook comments differ from the root's (retrospective A4); the line numbers the stories cite are anchors at the planning date, not pins.
 - The operator steps (36.4's nt `kill_tree` tests, 36.5's hold count on a live run, 36.6's live `plansync setup`) are asked through the consult log and the story records the criterion `unverifiable-here` until the evidence lands, as Epics 34 and 35 did; the engine never waits on the host.
 - The ledger entries each story names (DW-38 to DW-132 as listed per CAP) are read as they stand in `deferred-work.md`; the spec transcribes the epic's reading of them and never re-derives their scope.
+- CAP-22 and CAP-23 (added 2026-10-31 after this SPEC's bootstrap; holes 104 and 105; epics.md Story 36.6 is the source, moved from 36.3 on the owner's call because 36.3 was already being built): both supervisor-side on the launched path (the launch inside the sandbox writes no queue event); CAP-23 reuses the tier-routed re-arm 36.3 lands (DW-120), so 36.6 runs after 36.3.
 
 ## Open Questions
 
