@@ -93,28 +93,34 @@
  *              re-read from `engine.pid` (`Queue.recordEnginePid`). When the child exits, the run is handed back
  *              to the engine-end sweep with a fresh `launched` event (the same engine id). Story 35.2: with a
  *              graceful stop in force before the resume (the resume clears the file), the stop is re-armed once
- *              on the resumed engine after the pid re-read (`deps.launchStop`, default `launchStopGraceful`) and
+ *              on the resumed engine after the pid re-read (`deps.launchStop`, default `stopEngine`) and
  *              recorded `graceful-stop {engine_run_id, rearmed: true, ok, detail}`; when `engine.pid` was never
  *              rewritten no call is made and `graceful-stop {engine_run_id, rearmed: false, ok: false, detail:
  *              "engine.pid not rewritten by the resume: re-arm skipped"}` is recorded; a skipped or `ok: false`
  *              re-arm also sends one notifier line (`rearmFailedLine`: re-issue `launch.py stop --graceful`), its
- *              outcome the event's `notify`; the answer is unchanged.
+ *              outcome the event's `notify`; the answer is unchanged. Story 36.3: the re-arm runs on the run's tier
+ *              (`stopEngine`, `graceful-stop` gaining `tier`); once the engine is spawned, each `track-block` since the
+ *              latest `paused` (and an earlier one whose unblock failed) gets one `track.py unblock` and one `track-unblock`.
+ *   boundary   Story 36.3 (DW-115, B3/B4 decided, superseding 35.2's park): a story landed under a graceful stop commits,
+ *              meters, archives and ends the run (`endAtBoundary`: push, PR, `finish`, `endEngine`, the pin released),
+ *              `story-boundary` gaining `ended: true`; the event is written before the archive, so a retry after the run
+ *              dir moved still ends rather than relaunches. A resume on the ended run answers `StoryLanded`.
  *
  * Every command is argv only — never a shell.
  */
 import { existsSync, lstatSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { load as loadYaml } from "js-yaml";
 import { notifier, sbxBin } from "./env";
 import { canonicalPr, isWithin, notify, NOTICE_MAX_BYTES, sendText, TRUNCATED_MARKER, type EndNotice } from "./hygiene";
-import { engineRoot, selfOwner, servedRoot, type Owner, type Queue, type QueueEvent, type QueueRun } from "./queue";
+import { hostVerify, inconclusiveReason, isInconclusive, isRed, isSlice, legHistory, redReason, type HostVerifyResult, type LegHistoryEntry } from "./hostverify";
+import { engineRoot, isTerminal, RunTerminal, selfOwner, servedRoot, STUDIO_END_RETRY_LIMIT, type EngineWhere, type Owner, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
 import { HOLD_TIMEOUT_S, parseEnginePid, sameStart, type HoldChild } from "./sandbox";
 import { lastJsonObject, runProcess, toVmPath, type RunResult } from "./server";
-import { COPIED_RUNTIME, meteredCost, runner, studioScript, uvRunner, type WorktreeDeps } from "./worktree";
-import { isSweep } from "./sweep";
+import { applyTransition, closeOut, closeOutDetail, engineState, finishStudio, killedEngine, launchedCloseOutInput, meteredCost, priorPr, recordedVerify, release, runner, studioScript, uvRunner, type PendingTransition, type WorktreeDeps } from "./worktree";
+import { isSweep, stopEngine } from "./sweep";
 
 type Env = Record<string, string | undefined>;
-type Fetch = (input: string, init?: RequestInit) => Promise<Response>;
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 /** Command output for an event: URL userinfo redacted, clipped. */
@@ -230,8 +236,6 @@ export const resolveArgs = (project: string, engineRunId: string, restorePatch?:
 // ------------------------------------------------------------ deps
 
 export interface PausedDeps extends WorktreeDeps {
-  /** The notifier's environment and HTTP client (default `env` above and the global `fetch`). */
-  hygiene?: { env?: Env; fetch?: Fetch };
   /** The relaunch, in two stages: rebuild (may throw: a failed `relaunch` step, the run still paused),
    * then the drive it answers, run after the `close-out` move (`cli.ts` `relauncher`). */
   relaunch?: (queue: Queue, run: QueueRun) => Promise<() => Promise<unknown>>;
@@ -239,12 +243,12 @@ export interface PausedDeps extends WorktreeDeps {
   self?: Owner;
   /** Story 33.6: the auto-resume's resume (default `resumePaused` under this process; throws `ResumeRefused`). */
   resume?: (queue: Queue, runId: string) => Promise<unknown>;
-  /** Story 35.2: the graceful stop the auto-resume's resume re-arms (default `cli.ts` `launchStopGraceful`). */
+  /** Story 35.2: the graceful stop the auto-resume's resume re-arms (default `stopEngine` on the run's tier). */
   launchStop?: GracefulStopper;
 }
 
 /** Story 35.2: a graceful stop of a launched engine (`cli.ts` `launchStopGraceful`). A failure is returned, never thrown. */
-export type GracefulStopper = (root: string, engineRunId: string) => Promise<{ ok: boolean; detail: string }>;
+export type GracefulStopper = (root: string, engineRunId: string, where?: EngineWhere) => Promise<{ ok: boolean; detail: string }>;
 
 const envOf = (deps: WorktreeDeps): Env => deps.env ?? process.env;
 
@@ -270,27 +274,8 @@ const sbxRun = (run: QueueRun): string | undefined => (run.tier === "sbx" && run
 
 type Step = { ok: true; value: unknown } | { ok: false; error: string };
 
-/** The engine's runtime state (`.bmad-loop/runs`, `.bmad-loop/archive`) and the supervisor's own materialised
- * copies (`COPIED_RUNTIME`: policy, routing, the machine-local overlay), never staged by the harvest commit
- * (pathspec magic, argv only). Wildcarded (the last character bracketed): a literal pathspec naming a
- * gitignored path fails `git add` (exit 1). */
-const ENGINE_STATE = [
-  ":(exclude,glob).bmad-loop/run[s]/**", ":(exclude,glob).bmad-loop/archiv[e]/**",
-  ...COPIED_RUNTIME.map((rel) => `:(exclude,glob)${rel.slice(0, -1)}[${rel.slice(-1)}]`),
-];
-
-/** A literal path as a `glob` pathspec fragment: its glob metacharacters (`*`, `?`, `[`, `]`, `\`) backslash-escaped. */
-// Bracket classes, never backslash escapes: git on Windows reads a backslash in a pathspec as a
-// path separator, so `apps/s\[u\]p/...` excluded nothing there and the engine state was committed
-// (found by the win32 host gate, 2026-10-17; probed on the box: `[[]`, `[]]`, `[*]`, `[?]` match
-// one literal character on both hosts). A literal backslash (never in a win32 path) is `[\\]`.
-const globLiteral = (path: string): string =>
-  path.replace(/[*?[\]\\]/g, (c) => (c === "\\" ? "[\\\\]" : `[${c}]`));
-
-/** The engine-state excludes for a project at `prefix` below the worktree top (`""`: the top). The prefix is
- * the project's literal path, so a project folder named with a glob metacharacter still excludes only itself. */
-export const engineState = (prefix?: string | null): string[] =>
-  prefix ? ENGINE_STATE.map((p) => p.replace(":(exclude,glob)", () => `:(exclude,glob)${globLiteral(prefix)}`)) : ENGINE_STATE;
+// Story 36.3: lifted to `worktree.ts` (`wipCommit` stages the same way; `closeout.ts` already imports it, no new edge).
+export { engineState };
 
 async function commitStep(run: QueueRun, key: string, deps: WorktreeDeps): Promise<Step> {
   const wt = run.worktree!, exec = runner(deps);
@@ -439,7 +424,7 @@ export const storyBoundaryReason = (stop: StopInForce): string =>
 
 /** The `story-boundary` notifier line. */
 export const storyBoundaryLine = (runId: string, key: string, reason: string): string =>
-  oneLine(`supervisor: run ${runId} stays paused: story ${key} landed, not relaunched: ${reason}`);
+  oneLine(`supervisor: run ${runId} ends at the story boundary: story ${key} landed, not relaunched: ${reason}`);
 
 /** One `story-boundary` (story key, engine run id) recorded since the run's latest `paused` event. */
 export function storyBoundaryRecorded(events: readonly QueueEvent[], storyKey: string, engineRunId: string | null): boolean {
@@ -447,26 +432,166 @@ export function storyBoundaryRecorded(events: readonly QueueEvent[], storyKey: s
   return events.slice(pause + 1).some((e) => e.kind === STORY_BOUNDARY && e.detail?.story_key === storyKey && e.detail?.engine_run_id === engineRunId);
 }
 
-/** Story 35.2: the refused relaunch's one record and one notifier line for this pause. Never throws. */
-async function noteStoryBoundary(queue: Queue, run: QueueRun, key: string, stop: StopInForce, deps: PausedDeps): Promise<void> {
+/** Story 36.3: the end a boundary gives (`endEngine`'s reason). */
+export const storyBoundaryEnd = (key: string): string => `story boundary: ${key} landed under a graceful stop`;
+
+/** Story 36.3: what the boundary's end follows: the leg's verdict, for `closeOut`; `killed`: no leg ran, none recorded. */
+interface BoundaryLeg { verify?: HostVerifyResult; slice: boolean; legs: readonly LegHistoryEntry[]; killed: boolean }
+
+/** Story 36.3: the host leg of a story landed under a graceful stop, as the engine sweep's tail runs it, before the archive:
+ * a `host-verify` already recorded is reused (a retried pass never re-runs it); an engine the supervisor killed runs none;
+ * else one leg, one `host-verify`. */
+async function boundaryLeg(queue: Queue, run: QueueRun, deps: PausedDeps): Promise<BoundaryLeg> {
+  const slice = isSlice(queue.definition(run));
+  let verify = recordedVerify(queue.events(run.run_id)), killed = false;
+  if (!verify) {
+    killed = !!(await killedEngine(queue, run));
+    if (!killed) {
+      const guardS = run.worker_guard_s ?? (Number(queue.definition(run)?.guards?.max_wall_clock_seconds) || 600);
+      verify = await hostVerify(run, guardS, deps, slice ? { slice } : {});
+      queue.note(run.run_id, "host-verify", verify as Record<string, unknown>);
+    }
+  }
+  return { ...(verify ? { verify } : {}), slice, legs: verify ? legHistory(queue.events(run.run_id)) : [], killed };
+}
+
+/** Story 36.3 (DW-115, B3/B4 decided): the close-out tail of a story landed under a graceful stop: push and PR, the
+ * studio run finished, the engine's end written, the pin released. The end follows the leg: green or skipped, the PR ready
+ * and `complete`; red, inconclusive or no leg (a kill), the PR a draft and `partial` naming why. An archive or a close-out
+ * that failed still ends the run, `partial` naming the failure (as the engine sweep's tail records one, never a park). A
+ * meter give-up (`meterGaveUp`) names the meter and keeps the worktree, its unharvested run dir with it. A write the queue
+ * refused is recorded `pending`, written by the next engine sweep. Answers true. */
+async function endAtBoundary(queue: Queue, run: QueueRun, key: string, leg: BoundaryLeg, archiveError: string | undefined, deps: PausedDeps, o: { meterError?: string; keepWorktree?: boolean; notify?: Record<string, unknown> } = {}): Promise<boolean> {
+  const events = queue.events(run.run_id);
+  const launched = (events.findLast((e) => e.kind === "launched")?.detail ?? {}) as Record<string, any>;
+  const input = launchedCloseOutInput(events, run);
+  const existingPr = priorPr(events);
+  const { verify, slice, legs, killed } = leg;
+  const c = await closeOut(run, { paused: false, ...input, engineRunId: run.engine_run_id, ...(existingPr ? { existingPr } : {}), ...(verify ? { verify } : {}), ...(slice ? { slice } : {}), ...(legs.length ? { legs } : {}), ...(o.keepWorktree ? { keepWorktree: true } : {}),
+    // no green leg vouches for the tree: an inconclusive one returns the PR to a draft here, as a kill does (a red one's own branch does)
+    ...(killed || isInconclusive(verify) ? { killed: true } : {}) }, deps);
+  const why = [
+    ...(isRed(verify) ? [redReason(verify)] : isInconclusive(verify) ? [inconclusiveReason(verify)] : killed ? ["the supervisor killed the engine: no host leg ran"] : []),
+    ...(o.meterError ? [`meter failed: ${o.meterError}`] : []),
+    ...(archiveError ? [`archive failed: ${archiveError}`] : []),
+    ...(c.error ? [`close-out failed: ${c.error}`] : []),
+  ];
+  const state: TerminalState = why.length ? "partial" : "complete";
+  const reason = [storyBoundaryEnd(key), ...why].join("; ");
+  // Story 34.3: the playable-verify judge's cost, its own ledger line (as the engine sweep's tail).
+  const judgeCost = verify && !verify.skipped ? verify.playable?.judge?.cost_usd : undefined;
+  const finish = await finishStudio(run, state, reason, launched.status_block, c.pr, input.costUsd, deps,
+    typeof judgeCost === "number" && Number.isFinite(judgeCost) && judgeCost >= 0 ? judgeCost : undefined);
+  const end = (launched.end ?? {}) as { detail?: Record<string, unknown>; stop?: any };
+  const next: PendingTransition = { phase: "ended", state, reason, detail: { ...(end.detail ?? {}), ...closeOutDetail(c), finish, ...(o.notify ? { notify: o.notify } : {}), story_boundary: { story_key: key, ended: true } }, ...(end.stop ? { stop: end.stop } : {}) };
+  try { applyTransition(queue, run.run_id, next); }
+  catch (e) {
+    if (e instanceof RunTerminal) queue.note(run.run_id, "closed_out", { ...closeOutDetail(c), finish, raced: clip(message(e)) });
+    else { queue.note(run.run_id, "closed_out", { ...closeOutDetail(c), pending: next }); return true; } // the engine sweep writes it
+  }
+  await release(queue, run.run_id, deps);
+  return true;
+}
+
+/** The boundary's give-up line: the close-out never finished, so the run is ended as it stands. */
+export const boundaryGaveUpLine = (runId: string, key: string, tries: number, error: string): string =>
+  oneLine(`supervisor: run ${runId} ended partial at the story boundary: story ${key}'s close-out threw ${tries} times (${error}): check its branch and PR; the worktree is kept`);
+
+/** Story 36.3: one bounded failure at the boundary recorded (`attempt`, counted across the steps); answers the count. */
+function countBoundaryFailure(queue: Queue, run: QueueRun, key: string, step: string, error: string): number {
+  const tries = queue.events(run.run_id).filter((x) => x.kind === "close-out-failed" && typeof x.detail?.attempt === "number").length + 1;
+  queue.note(run.run_id, "close-out-failed", { story_key: key, engine_run_id: run.engine_run_id, step, error, attempt: tries });
+  return tries;
+}
+
+/** Story 36.3: the give-up's one notifier line: sent unless a `close-out-failed {step: "give-up-line"}` says it went, then
+ * that note recorded (`notify`, no `attempt`: it uses up no try), whatever the answer: a failed answer is not re-sent, and a
+ * death before the send still sends on the next pass. Answers the outcome when this call sent the line. */
+async function sendGiveUpLine(queue: Queue, run: QueueRun, key: string, tries: number, error: string, deps: PausedDeps): Promise<Record<string, unknown> | undefined> {
+  if (queue.events(run.run_id).some((e) => e.kind === "close-out-failed" && e.detail?.step === "give-up-line")) return undefined;
+  const notify = await sendLine(deps, boundaryGaveUpLine(run.run_id, key, tries, error));
+  queue.note(run.run_id, "close-out-failed", { story_key: key, engine_run_id: run.engine_run_id, step: "give-up-line", notify });
+  return notify;
+}
+
+/** Story 36.3: a boundary end that threw, or a commit step that failed under a stop in force (`step`), is bounded: each is
+ * counted, retried by the next pass up to `STUDIO_END_RETRY_LIMIT`, then one notifier line (`sendGiveUpLine`, so a retried
+ * give-up or a throw during a meter give-up, whose answer is `sent`, sends no second) and a recorded `partial` end that
+ * releases the lock and the pin, never a park (`resume` is refused on it). The end runs no close-out, so the worktree and
+ * any uncommitted work stay (and no late close-out takes it: that wants a `closeout: skipped`). Answers whether the run
+ * ended. Never throws. */
+async function boundaryThrew(queue: Queue, run: QueueRun, key: string, e: unknown, deps: PausedDeps, step = "boundary-end", sent?: Record<string, unknown>): Promise<boolean> {
+  try {
+    const raw = clip(message(e));
+    const tries = countBoundaryFailure(queue, run, key, step, raw);
+    if (tries <= STUDIO_END_RETRY_LIMIT) return false;
+    const error = step === "boundary-end" ? raw : `${step} failed: ${raw}`;
+    const notify = (await sendGiveUpLine(queue, run, key, tries, error, deps)) ?? sent;
+    const reason = `${storyBoundaryEnd(key)}; close-out gave up after ${tries} attempts: ${error}`;
+    const finish = await finishStudio(run, "partial", reason, undefined, undefined, undefined, deps);
+    applyTransition(queue, run.run_id, { phase: "ended", state: "partial", reason, detail: { finish, notify, story_boundary: { story_key: key, ended: true, gave_up: true } } });
+    await release(queue, run.run_id, deps);
+    return true;
+  } catch { return false; /* the queue is busy: the next pass */ }
+}
+
+/** Story 35.2: the boundary's one record and one notifier line for this pause (`line: false`: the record alone, a give-up's
+ * own line said it). Never throws. */
+async function noteStoryBoundary(queue: Queue, run: QueueRun, key: string, stop: StopInForce, deps: PausedDeps, line = true): Promise<void> {
   try {
     if (storyBoundaryRecorded(queue.events(run.run_id), key, run.engine_run_id)) return;
     const reason = storyBoundaryReason(stop);
-    await sendLine(deps, storyBoundaryLine(run.run_id, key, reason));
-    queue.note(run.run_id, STORY_BOUNDARY, { story_key: key, engine_run_id: run.engine_run_id, code: STORY_BOUNDARY_CODE, reason, graceful_stop: "kept" });
+    if (line) await sendLine(deps, storyBoundaryLine(run.run_id, key, reason));
+    queue.note(run.run_id, STORY_BOUNDARY, { story_key: key, engine_run_id: run.engine_run_id, code: STORY_BOUNDARY_CODE, reason, graceful_stop: "kept", ended: true });
   } catch { /* not recorded: the next pass tries again */ }
+}
+
+/** Story 36.3: a meter step that failed under a stop in force is counted and retried up to `STUDIO_END_RETRY_LIMIT`, then
+ * given up: one notifier line, `story-boundary` recorded if a stop was read, the leg, then the end with the push and the PR,
+ * `partial` naming the meter. No archive and no engine cost: the archive would move the unharvested run dir and the
+ * close-out's `worktree remove --force` delete it, so both stay and the harvest is repeatable by hand. A throw goes to
+ * `boundaryThrew`, already over the limit, so it stays bounded. Never throws. */
+async function meterGaveUp(queue: Queue, run: QueueRun, key: string, stop: StopInForce | undefined, error: string, deps: PausedDeps): Promise<boolean> {
+  let notify: Record<string, unknown> | undefined;
+  try {
+    const tries = countBoundaryFailure(queue, run, key, "meter", error);
+    if (tries <= STUDIO_END_RETRY_LIMIT) return false;
+    notify = await sendGiveUpLine(queue, run, key, tries, `meter failed: ${error}`, deps);
+    if (stop) await noteStoryBoundary(queue, run, key, stop, deps, false);
+    const leg = await boundaryLeg(queue, run, deps);
+    return await endAtBoundary(queue, run, key, leg, undefined, deps, { meterError: error, keepWorktree: true, ...(notify ? { notify } : {}) });
+  } catch (e) { return boundaryThrew(queue, run, key, e, deps, "boundary-end", notify); }
 }
 
 async function closeOutLanded(queue: Queue, run: QueueRun, l: Extract<Landing, { outcome: "close-out" }>, deps: PausedDeps): Promise<boolean> {
   const key = l.story_key;
-  const commit = await commitStep(run, key, deps);
-  if (!commit.ok) { noteFailed(queue, run, key, "commit", commit.error); return false; }
-  const meter = await meterStep(run, deps);
-  if (!meter.ok) { noteFailed(queue, run, key, "meter", meter.error); return false; }
-  noteEngineCost(queue, run);
-  // Story 35.2: read before the archive moves the run dir; a stop in force keeps the run paused.
+  // Story 35.2: read before the archive moves the run dir. Story 36.3: a stop in force ends the run at the boundary; the
+  // event, written before the archive, is what a retried pass reads once the run dir has moved. Read before the commit and
+  // the meter too: under a stop their failure is bounded (`boundaryThrew`, `meterGaveUp`), never retried for ever on a run `resume` refuses.
   const stop = gracefulStopInForce(runDirOf(run));
-  if (stop) { await noteStoryBoundary(queue, run, key, stop, deps); return false; }
+  const stopped = !!stop || storyBoundaryRecorded(queue.events(run.run_id), key, run.engine_run_id);
+  const stepFailed = async (step: string, error: string): Promise<boolean> => {
+    if (stopped) return boundaryThrew(queue, run, key, error, deps, step);
+    noteFailed(queue, run, key, step, error);
+    return false;
+  };
+  const commit = await commitStep(run, key, deps);
+  if (!commit.ok) return stepFailed("commit", commit.error);
+  const meter = await meterStep(run, deps);
+  if (!meter.ok) return stopped ? meterGaveUp(queue, run, key, stop, meter.error, deps) : stepFailed("meter", meter.error);
+  noteEngineCost(queue, run);
+  if (stop) await noteStoryBoundary(queue, run, key, stop, deps);
+  const boundary = storyBoundaryRecorded(queue.events(run.run_id), key, run.engine_run_id);
+  if (stop && !boundary) return false; // not recorded: the next pass tries again, before anything moves
+  if (boundary) {
+    try {
+      const leg = await boundaryLeg(queue, run, deps);
+      // A failed archive never stops the end: recorded, and the end `partial` naming it (the lock and pin still released).
+      const archive = await archiveStep(run, deps);
+      if (!archive.ok) noteFailed(queue, run, key, "archive", archive.error);
+      return await endAtBoundary(queue, run, key, leg, archive.ok ? undefined : archive.error, deps);
+    } catch (e) { return boundaryThrew(queue, run, key, e, deps); }
+  }
   const archive = await archiveStep(run, deps);
   if (!archive.ok) { noteFailed(queue, run, key, "archive", archive.error); return false; }
   if (!deps.relaunch) { noteFailed(queue, run, key, "relaunch", "no relaunch driver"); return false; }
@@ -645,12 +770,27 @@ export function snapshotFolders(reason: string): string[] | undefined {
     if (segs.some((s) => s === "" || s === "." || s === "..")) return undefined;
     out.add(segs.join("/"));
   }
+  // Story 36.3: a failed first render's reason names `.staging-*` and its generation: one snapshot, the generation.
+  const all = [...out], named = all.filter((f) => !isStaging(f));
+  return all.filter((f) => !isStaging(f) || !named.some((n) => parentOf(n) === parentOf(f)));
+}
+
+const isStaging = (folder: string): boolean => folder.slice(folder.lastIndexOf("/") + 1).startsWith(".staging-");
+const parentOf = (folder: string): string => folder.slice(0, folder.lastIndexOf("/"));
+
+/** Story 36.3: the `.staging-*` folders a reason names beside `generation` (`<skill>/<slug>/<generation>`). */
+function stagingFolders(reason: string, generation: string): string[] {
+  const out = new Set<string>();
+  for (const m of reason.matchAll(SNAPSHOT_RE)) {
+    const folder = `${m[1]!}/${m[2]!}/${m[3]!.replace(/\.+$/, "")}`;
+    if (isStaging(folder) && parentOf(folder) === parentOf(generation)) out.add(folder);
+  }
   return [...out];
 }
 
 /** A recognised stale-render halt: the story, its snapshot (relative to the served root, `/` separators) and the
- * two paths the auto-resume removes. */
-export interface StaleRender { story_key: string; snapshot: string; dir: string; spec: string }
+ * two paths the auto-resume removes. Story 36.3: `staging`, the staging folders the reason named beside the generation. */
+export interface StaleRender { story_key: string; snapshot: string; dir: string; spec: string; staging?: string[] }
 
 /** Story 33.6: is the paused run's latest pause a stale render view (see the header)? Reads only (one argv-only
  * `git ls-files`). The folder check (`snapshotComplete`) is separate. */
@@ -670,8 +810,20 @@ export async function staleRenderView(run: Pick<QueueRun, "worktree" | "prefix">
     const r = await runner(deps)("git", ["-C", served, "ls-files", "--error-unmatch", "--", rel], { cwd: served, timeoutS: 30 });
     if (r.exit !== 1) return undefined; // 0 tracked; 128, a timeout or anything else: unknown — never removed
   } catch { return undefined; }
-  return { story_key: key, snapshot: relative(served, dir).split("\\").join("/"), dir, spec };
+  const staging = stagingFolders(reason, folders[0]!).map((f) => resolve(base, ...f.split("/"))).filter((p) => isWithin(base, p));
+  return { story_key: key, snapshot: relative(served, dir).split("\\").join("/"), dir, spec, ...(staging.length ? { staging } : {}) };
 }
+
+/** Story 36.3 (DW-110, hole 95): a failed first render: the reason names a staging folder and the generation beside it
+ * is empty or absent, so nothing of the snapshot's can be read as complete; it counts as the one snapshot. A reason
+ * naming a staging folder alone names no generation (`dir` is that folder): never one. */
+export function failedFirstRender(s: StaleRender): boolean {
+  if (!s.staging?.length || isStaging(basename(s.dir))) return false;
+  try { return !existsSync(s.dir) || (lstatSync(s.dir).isDirectory() && readdirSync(s.dir).length === 0); } catch { return false; }
+}
+
+/** The auto-resume's folder check: a complete snapshot, or a failed first render. */
+const snapshotReady = (s: StaleRender): boolean => snapshotComplete(s.dir) || failedFirstRender(s);
 
 /** Story 33.6: the host sees the snapshot complete — `manifest.json` parses to an object whose `outputs` is a
  * non-empty object, and each of its keys is a relative path inside `dir` naming a non-empty regular file. No hash
@@ -739,12 +891,16 @@ async function sendLine(deps: Pick<PausedDeps, "hygiene" | "env">, text: string)
  * next pass tries again. */
 async function autoResume(queue: Queue, run: QueueRun, s: StaleRender, deps: PausedDeps, self: Owner): Promise<void> {
   const aside = `${s.dir}.stale-${process.pid}-${Date.now()}`;
-  try { renameSync(s.dir, aside); } catch { return; /* nothing changed: the next pass tries again */ }
+  // Story 36.3: a failed first render's generation may be absent: nothing to rename aside.
+  const present = existsSync(s.dir);
+  if (present) { try { renameSync(s.dir, aside); } catch { return; /* nothing changed: the next pass tries again */ } }
   try { rmSync(s.spec); } catch {
-    try { renameSync(aside, s.dir); } catch { /* best effort */ }
+    if (present) { try { renameSync(aside, s.dir); } catch { /* best effort */ } }
     return;
   }
-  try { rmSync(aside, { recursive: true, force: true }); } catch { /* a leftover is harmless */ }
+  for (const path of present ? [aside, ...(s.staging ?? [])] : (s.staging ?? [])) {
+    try { rmSync(path, { recursive: true, force: true }); } catch { /* a leftover is harmless */ }
+  }
   const resume = deps.resume ?? ((q: Queue, id: string) => resumePaused(q, id, {}, { ...deps, self }));
   let error: string | undefined;
   try { await resume(queue, run.run_id); }
@@ -788,7 +944,7 @@ export async function closeOutPaused(queue: Queue, deps: PausedDeps = {}): Promi
         // Story 33.6: a stale render view is auto-resumed once per story; a second one is recorded for the
         // operator, then falls through to the block below unchanged.
         const s = await staleRenderView(r, queue.events(r.run_id), deps);
-        if (s && snapshotComplete(s.dir)) {
+        if (s && snapshotReady(s)) {
           const seen = autoResumeAttempt(queue.events(r.run_id), s.story_key);
           if (!seen || !secondHaltRecorded(queue.events(r.run_id), s.story_key)) {
             const run = queue.takeForCloseOut(r.run_id, self);
@@ -798,7 +954,7 @@ export async function closeOutPaused(queue: Queue, deps: PausedDeps = {}): Promi
             // between the read above and the take; a recorded attempt 1 makes this the attempt-2 path.
             const events = queue.events(r.run_id), first = autoResumeAttempt(events, s.story_key);
             if (!first) { await autoResume(queue, run, s, deps, self); continue; }
-            if (!secondHaltRecorded(events, s.story_key) && snapshotComplete(s.dir)) await noteSecondHalt(queue, run, s, first, deps);
+            if (!secondHaltRecorded(events, s.story_key) && snapshotReady(s)) await noteSecondHalt(queue, run, s, first, deps);
           }
         }
         // Story 31.5: a dev session's `blocked` end, or an engine-raised escalation (paused at stage `escalation`,
@@ -814,8 +970,6 @@ export async function closeOutPaused(queue: Queue, deps: PausedDeps = {}): Promi
       }
       if (l.outcome === "awaiting-ruling" && rulingRecorded(queue.events(r.run_id), l.story_key, r.engine_run_id)
         && !trackOwed(r, queue.events(r.run_id), l.story_key)) continue;
-      // Story 35.2: a relaunch refused at the story boundary is not retried while this pause lasts.
-      if (l.outcome === "close-out" && storyBoundaryRecorded(queue.events(r.run_id), l.story_key, r.engine_run_id)) continue;
       const run = queue.takeForCloseOut(r.run_id, self);
       if (!run || run.state !== "paused") continue;
       taken = true;
@@ -847,10 +1001,8 @@ export interface ResumeDeps extends WorktreeDeps {
   pollMs?: number;
   sleep?: (ms: number) => Promise<void>;
   self?: Owner;
-  /** Story 35.2: the re-arm of a graceful stop in force (default `cli.ts` `launchStopGraceful`). */
+  /** Story 35.2: the re-arm of a graceful stop in force (default `stopEngine` on the run's tier). */
   launchStop?: GracefulStopper;
-  /** Story 35.2: the notifier a skipped or failed re-arm tells (as `PausedDeps.hygiene`). */
-  hygiene?: { env?: Env; fetch?: Fetch };
 }
 
 export interface ResumeAnswer { ok: true; run_id: string; state: "running"; engine_run_id: string }
@@ -918,13 +1070,84 @@ async function rearmStop(queue: Queue, run: QueueRun, deps: ResumeDeps, pidRewri
   }
   let r: { ok: boolean; detail: string };
   try {
-    const stopper = deps.launchStop ?? (await import("./cli")).launchStopGraceful;
-    r = await stopper(engineRoot(run), id);
+    // Story 36.3 (DW-120): on the run's tier, an injected seam told where; a refusal (a dead engine's `GracefulStopError`) is `ok: false`, never retried.
+    if (deps.launchStop) r = await deps.launchStop(engineRoot(run), id, { tier: run.tier, sandbox: run.sandbox });
+    else {
+      const answer = await stopEngine(run, deps, { graceful: true });
+      r = answer === "stopped" ? { ok: true, detail: `engine ${id} stopping gracefully` } : { ok: false, detail: answer };
+    }
   } catch (e) { r = { ok: false, detail: clip(message(e)) }; }
   const ok = r.ok === true, detail = clip(String(r.detail ?? ""), 500);
   const notify = ok ? undefined : await sendLine(deps, rearmFailedLine(run.run_id, id, detail));
-  try { queue.note(run.run_id, "graceful-stop", { engine_run_id: id, rearmed: true, ok, detail, ...(notify ? { notify } : {}) }); }
+  try { queue.note(run.run_id, "graceful-stop", { engine_run_id: id, rearmed: true, ok, detail, tier: run.tier, ...(notify ? { notify } : {}) }); }
   catch { /* not recorded */ }
+}
+
+// ------------------------------------------------------------ Story 36.3: the resume closes the block
+
+/** The queue event a resume's `track.py unblock` records. */
+export const TRACK_UNBLOCK = "track-unblock";
+
+/** `track.py unblock` argv (argv only, no shell). */
+export const unblockArgs = (root: string, storyKey: string, reason: string): string[] =>
+  ["unblock", "--directory", root, "--story", storyKey, "--reason", reason, "--source", "run"];
+
+/** The notifier line of a failed unblock (one for each block). */
+export const unblockFailedLine = (runId: string, key: string, detail: string): string =>
+  oneLine(`supervisor: run ${runId} resumed, but story ${key}'s Jira block was not closed (${detail}): the next resume retries it`);
+
+type UnblockKey = { story_key: string; engine_run_id: string | null };
+
+/** What the resume owes: one per `track-block` since the latest `paused`, and each earlier block whose unblock failed and
+ * has not succeeded since (a failure's retry). A `paused` a failed resume wrote (`resume_failed`, `backToPaused`) does not
+ * reset the window: the issue stays Blocked. A block answered `ok: false` by name (no `retry`) with no `issues[]` entry
+ * `transitioned` moved nothing and owes nothing (a refused comment after the move still owes); one an unblock has since
+ * closed owes nothing. Reads only. */
+export function unblocksOwed(events: readonly QueueEvent[]): UnblockKey[] {
+  const same = (e: QueueEvent, k: UnblockKey) => e.detail?.story_key === k.story_key && (e.detail?.engine_run_id ?? null) === k.engine_run_id;
+  const keyOf = (e: QueueEvent): UnblockKey => ({ story_key: String(e.detail?.story_key), engine_run_id: (e.detail?.engine_run_id as string | null | undefined) ?? null });
+  const pause = events.findLastIndex((e) => e.kind === "paused" && e.detail?.resume_failed === undefined);
+  const out: UnblockKey[] = [];
+  const add = (k: UnblockKey) => { if (!out.some((o) => o.story_key === k.story_key && o.engine_run_id === k.engine_run_id)) out.push(k); };
+  const movedNothing = (e: QueueEvent) => e.detail?.ok === false && e.detail.retry !== true
+    && !(Array.isArray(e.detail.issues) && e.detail.issues.some((i: Record<string, unknown>) => i?.transitioned === true));
+  for (const e of events.slice(pause + 1)) {
+    if (e.kind !== "track-block" || typeof e.detail?.story_key !== "string" || movedNothing(e)) continue;
+    const k = keyOf(e);
+    if (!events.some((x) => x.kind === TRACK_UNBLOCK && x.detail?.ok === true && x.seq > e.seq && same(x, k))) add(k);
+  }
+  for (const e of events) {
+    if (e.kind !== TRACK_UNBLOCK || e.detail?.ok === true) continue;
+    const k = keyOf(e);
+    if (!events.some((x) => x.kind === TRACK_UNBLOCK && x.detail?.ok === true && x.seq > e.seq && same(x, k))) add(k);
+  }
+  return out;
+}
+
+/** Story 36.3 (DW-130, hole 101): the resumed run's Jira blocks closed, one `track-unblock` per block. A failure is
+ * recorded `ok: false, retry: true` and notified once; the resume proceeds. Never throws. */
+async function unblockTracked(queue: Queue, run: QueueRun, events: readonly QueueEvent[], deps: ResumeDeps): Promise<void> {
+  for (const k of unblocksOwed(events)) {
+    const reason = `the supervisor resumed run ${run.run_id}`;
+    let out: Record<string, any> | null = null, why = "";
+    try {
+      const r = await uvRunner(deps)(run.root, studioScript(deps, "lib", "track.py"), unblockArgs(run.root, k.story_key, reason), 120);
+      out = lastJsonObject(r.stdout) as Record<string, any> | null;
+      why = out?.reason ? String(out.reason) : failed(r);
+    } catch (e) { why = message(e); }
+    // `partial` with `ok: true`: a dependent refused by name, still Blocked: a failure, retried.
+    const ok = out?.ok === true && out.retry !== true && out.status !== "partial";
+    const issues = Array.isArray(out?.issues)
+      ? out!.issues.map((i: Record<string, unknown>) => ({ key: i?.issue ?? null, from: i?.from ?? null, to: i?.to ?? null })) : [];
+    const told = events.some((e) => e.kind === TRACK_UNBLOCK && e.detail?.ok !== true && e.detail?.story_key === k.story_key && (e.detail?.engine_run_id ?? null) === k.engine_run_id);
+    if (!ok && !told) await sendLine(deps, unblockFailedLine(run.run_id, k.story_key, clip(why)));
+    try {
+      queue.note(run.run_id, TRACK_UNBLOCK, {
+        story_key: k.story_key, engine_run_id: k.engine_run_id, ok, status: typeof out?.status === "string" ? out.status : "failed", issues,
+        reason: clip(ok ? reason : why, 500), ...(ok ? {} : { retry: true }),
+      });
+    } catch { /* not recorded */ }
+  }
 }
 
 /** `POST /runs/{id}/resume` (see the header). Throws `ResumeRefused`. */
@@ -932,6 +1155,14 @@ export async function resumePaused(queue: Queue, runId: string, opts: { restoreP
   const run = queue.get(runId);
   if (!run) throw new ResumeRefused("RunNotFound", `queue run '${runId}' not found`);
   if (run.state === "external") throw new ResumeRefused("ExternalRun", `queue run '${runId}' is external — started outside the queue, never resumed here`);
+  // Story 36.3: the run ended at a story boundary: the refusal names the end. A commit give-up writes no `story-boundary`
+  // event: its end is on the `ended` record's `story_boundary`.
+  if (isTerminal(run.state)) {
+    const events = queue.events(runId);
+    const boundary = events.findLast((e) => e.kind === STORY_BOUNDARY && e.detail?.ended === true)?.detail
+      ?? events.findLast((e) => e.kind === "ended" && (e.detail?.story_boundary as Record<string, unknown> | undefined)?.ended === true)?.detail?.story_boundary as Record<string, unknown> | undefined;
+    if (boundary) throw new ResumeRefused("StoryLanded", `story ${String(boundary.story_key)} landed under a graceful stop: the run ended ${run.state} at the story boundary`);
+  }
   if (run.state !== "paused") throw new ResumeRefused("RunNotPaused", `queue run '${runId}' is ${run.state}, not paused`);
   if (!run.worktree || !run.engine_run_id || !existsSync(run.worktree)) {
     throw new ResumeRefused("RunNotPaused", `queue run '${runId}' has no worktree or engine to resume`);
@@ -989,5 +1220,6 @@ export async function resumePaused(queue: Queue, runId: string, opts: { restoreP
     else queue.recordEnginePid(runId, null, { ...(sb ? { sandbox: sb } : {}), why: "engine.pid was not rewritten by the resume", resumed: true });
   } catch { /* ended meanwhile */ }
   if (stop) await rearmStop(queue, run, deps, found !== null);
+  await unblockTracked(queue, run, events, deps);
   return { ok: true, run_id: runId, state: "running", engine_run_id: id };
 }

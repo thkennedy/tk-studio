@@ -85,13 +85,13 @@
 import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { ghBin, pluginRoot, WorkDirMissing, workDir } from "./env";
-import { canonicalPr, isWithin } from "./hygiene";
+import { ghBin, notifier, pluginRoot, WorkDirMissing, workDir } from "./env";
+import { canonicalPr, isWithin, sendText } from "./hygiene";
 import { CONTACT_SHEET, FRAMES_DIR, hostVerify, inconclusiveReason, isInconclusive, isRed, isSlice, legHistory, legVerdict, prSection, redReason, type HostVerifyResult, type LegHistoryEntry, type PlayableJudge, type PlayableRoute, type PrProof } from "./hostverify";
 import { accountedCostOf, isTerminal, RunTerminal, servedRoot, type EngineWhere, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
 import { releasePin, sameStart, vmLaunchStatus, type SandboxDeps } from "./sandbox";
 import { lastJsonObject, runJobVerb, runProcess, runUv, toVmPath, type RunResult, type Tier } from "./server";
-import { emitTriage, engineCostOf, engineEndStatus, engineJobRun, isSweep, recordTriage, stopSweepEngine, SWEEP_ENGINE_STOP, sweepCostText, sweepEndState, sweepNotice, sweepRecord, sweepSection, sweepSummary, sweepTotalCost, withEngineCost, type SweepSummary } from "./sweep";
+import { emitTriage, engineCostOf, engineEndStatus, engineJobRun, isSweep, recordTriage, stopSweepEngine, SWEEP_ENGINE_STOP, sweepStopPastDeadline, sweepCostText, sweepEndState, sweepNotice, sweepRecord, sweepSection, sweepSummary, sweepTotalCost, withEngineCost, type SweepSummary } from "./sweep";
 
 type Env = Record<string, string | undefined>;
 /** An argv-only spawner (never a shell). `env`: variables added to the child's environment. */
@@ -114,6 +114,10 @@ export interface WorktreeDeps {
   judge?: PlayableJudge;
   /** Story 34.3: the route reader that picks the judge's model and effort (default `resolveRoute`). */
   route?: PlayableRoute;
+  /** Story 36.3: the notifier's environment and HTTP client (default `env` above and the global `fetch`). */
+  hygiene?: { env?: Env; fetch?: (input: string, init?: RequestInit) => Promise<Response> };
+  /** Story 36.3: the paused-sweep deadline's clock, epoch ms (default `Date.now`). */
+  clockMs?: () => number;
 }
 
 /** The `sbx` seams of a worktree run (the pin's env and the injected runner), for the pin, the release and
@@ -121,7 +125,7 @@ export interface WorktreeDeps {
 const sbxOf = (deps: WorktreeDeps): SandboxDeps => ({ ...(deps.env ? { env: deps.env } : {}), ...(deps.sbx ?? {}) });
 
 /** Story 27.2: the deferred `ended` releases the run's pin (`sbx stop`, when no other run records its sandbox). */
-const release = (queue: Queue, runId: string, deps: WorktreeDeps) => releasePin(queue, runId, sbxOf(deps));
+export const release = (queue: Queue, runId: string, deps: WorktreeDeps) => releasePin(queue, runId, sbxOf(deps));
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 /** Command output for an event: URL userinfo redacted, clipped. */
@@ -574,6 +578,59 @@ export async function proofCommit(
   return { sha, frames, ...(sheet ? { sheet } : {}), ...(tip ? { head: tip } : {}), ...(skippedIgnored.length ? { skipped_ignored: skippedIgnored } : {}) };
 }
 
+/** The engine's runtime state (`.bmad-loop/runs`, `.bmad-loop/archive`) and the supervisor's own materialised
+ * copies (`COPIED_RUNTIME`: policy, routing, the machine-local overlay), never staged by a run-branch commit
+ * (pathspec magic, argv only). Wildcarded (the last character bracketed): a literal pathspec naming a
+ * gitignored path fails `git add` (exit 1). */
+const ENGINE_STATE = [
+  ":(exclude,glob).bmad-loop/run[s]/**", ":(exclude,glob).bmad-loop/archiv[e]/**",
+  ...COPIED_RUNTIME.map((rel) => `:(exclude,glob)${rel.slice(0, -1)}[${rel.slice(-1)}]`),
+];
+
+/** A literal path as a `glob` pathspec fragment: its glob metacharacters (`*`, `?`, `[`, `]`, `\\`) backslash-escaped. */
+// Bracket classes, never backslash escapes: git on Windows reads a backslash in a pathspec as a
+// path separator, so `apps/s\\[u\\]p/...` excluded nothing there and the engine state was committed
+// (found by the win32 host gate, 2026-10-17; probed on the box: `[[]`, `[]]`, `[*]`, `[?]` match
+// one literal character on both hosts). A literal backslash (never in a win32 path) is `[\\\\]`.
+const globLiteral = (path: string): string =>
+  path.replace(/[*?[\]\\]/g, (c) => (c === "\\" ? "[\\\\]" : `[${c}]`));
+
+/** The engine-state excludes for a project at `prefix` below the worktree top (`""`: the top). The prefix is
+ * the project's literal path, so a project folder named with a glob metacharacter still excludes only itself. */
+export const engineState = (prefix?: string | null): string[] =>
+  prefix ? ENGINE_STATE.map((p) => p.replace(":(exclude,glob)", () => `:(exclude,glob)${globLiteral(prefix)}`)) : ENGINE_STATE;
+
+/** Story 36.3: a paused bundle's WIP commit's message. */
+export const wipMessage = (bundleKey: string, runId: string) => `wip: sweep bundle ${bundleKey} paused (run ${runId})`;
+
+/** Story 36.3 (DW-121): the stopped sweep's half-written tree committed as WIP on the run branch, never anywhere else
+ * (everything but the engine's runtime state, as the harvest commit). `committed` also reads true when the tip already
+ * is a WIP commit (an earlier close-out of this stop that did not finish); `error`: nothing is known of the tree. Never throws. */
+export async function wipCommit(
+  run: Pick<QueueRun, "run_id" | "worktree" | "prefix">, bundleKey: string, deps: WorktreeDeps = {},
+): Promise<{ committed: boolean; sha?: string; message?: string; error?: string }> {
+  const wt = run.worktree!, branch = runBranch(run.run_id);
+  try {
+    const at = await git(deps, wt, ["rev-parse", "--abbrev-ref", "HEAD"], 30);
+    if (at.exit !== 0) return { committed: false, error: `git rev-parse --abbrev-ref HEAD ${failed(at)}` };
+    if (at.stdout.trim() !== branch) return { committed: false, error: `the worktree is on '${clip(at.stdout.trim() || "?")}', not the run branch '${branch}'` };
+    const add = await git(deps, wt, ["add", "-A", "--", ".", ...engineState(run.prefix)], 120);
+    if (add.exit !== 0) return { committed: false, error: `git add -A ${failed(add)}` };
+    const diff = await git(deps, wt, ["diff", "--cached", "--quiet"], 60);
+    if (diff.exit !== 0 && diff.exit !== 1) return { committed: false, error: `git diff --cached --quiet ${failed(diff)}` };
+    if (diff.exit === 0) {
+      const tip = await git(deps, wt, ["log", "-1", "--format=%H%x00%s"], 30);
+      const [sha, subject] = tip.stdout.trim().split("\0");
+      return tip.exit === 0 && subject?.startsWith("wip: sweep bundle ") ? { committed: true, sha: sha!, message: subject } : { committed: false };
+    }
+    const msg = wipMessage(bundleKey, run.run_id);
+    const c = await git(deps, wt, ["commit", "-m", msg]);
+    if (c.exit !== 0) return { committed: false, error: `git commit ${failed(c)}` };
+    const head = await git(deps, wt, ["rev-parse", "HEAD"], 30);
+    return { committed: true, ...(head.exit === 0 ? { sha: head.stdout.trim() } : {}), message: msg };
+  } catch (e) { return { committed: false, error: `git: ${clip(message(e))}` }; }
+}
+
 /** `https://<host>/<owner>/<repo>` of origin (a GitHub remote), else undefined. */
 export async function originWebUrl(deps: WorktreeDeps, cwd: string): Promise<string | undefined> {
   const repo = await originGhRepo(deps, cwd);
@@ -621,7 +678,11 @@ export async function markPrDraft(deps: WorktreeDeps, cwd: string, pr: string): 
 /** The close-out of a run's worktree (see the header). Never throws: a failure is `error`. */
 export async function closeOut(
   run: Pick<QueueRun, "run_id" | "job_id" | "root" | "worktree" | "base_ref" | "prefix">,
-  input: { paused: boolean; statusBlock?: unknown; engineRunId?: string | null; costUsd?: number; existingPr?: string; verify?: HostVerifyResult; slice?: boolean; legs?: readonly LegHistoryEntry[]; sweep?: SweepSummary },
+  input: { paused: boolean; statusBlock?: unknown; engineRunId?: string | null; costUsd?: number; existingPr?: string; verify?: HostVerifyResult; slice?: boolean; legs?: readonly LegHistoryEntry[]; sweep?: SweepSummary;
+    /** Story 36.3: no green leg vouches for the tree (an engine the supervisor killed, a sweep's WIP): never marked ready, a new PR a draft. */
+    killed?: boolean;
+    /** Story 36.3: the worktree stays (a sweep's WIP that could not be committed, an engine that may still be live there, or a run dir a meter give-up left unharvested), whatever else the close-out did. */
+    keepWorktree?: boolean },
   deps: WorktreeDeps = {},
 ): Promise<CloseOut> {
   const wt = run.worktree!, base = run.base_ref ?? "", branch = runBranch(run.run_id);
@@ -649,7 +710,7 @@ export async function closeOut(
     return out;
   };
   const finish = async (): Promise<CloseOut> => {
-    if (input.paused) { out.worktree = "kept"; return out; } // a paused run keeps it for the resume
+    if (input.paused || input.keepWorktree) { out.worktree = "kept"; return out; } // a paused run keeps it for the resume
     if (out.error) { out.worktree = "kept"; return out; }
     if (gone) {
       try { await git(deps, run.root, ["worktree", "prune"]); } catch { /* its record only: the directory is gone */ }
@@ -726,9 +787,17 @@ export async function closeOut(
         else out.draft = true;
         await editBody(existingPr, errors);
         if (errors.length) out.error = errors.join("; ");
-      } else if (inconclusive && !input.paused) {
+      } else if (inconclusive && !input.paused && !input.killed) {
         // Story 35.3: an inconclusive verify on a PR already open: never marked ready (nor undone), its body regenerated.
         const errors: string[] = [];
+        await editBody(existingPr, errors);
+        if (errors.length) out.error = errors.join("; ");
+      } else if (!input.paused && input.killed) {
+        // Story 36.3 (DW-64): nothing vouches for the tree: the PR stays or returns to a draft (an adopted one may be ready), its body regenerated.
+        const errors: string[] = [];
+        const u = await markPrDraft(deps, at, existingPr);
+        if (u) errors.push(u);
+        else out.draft = true;
         await editBody(existingPr, errors);
         if (errors.length) out.error = errors.join("; ");
       } else if (!input.paused) {
@@ -747,7 +816,7 @@ export async function closeOut(
         }
       } else out.draft = true;
     } else {
-      const draft = input.paused || red || inconclusive;
+      const draft = input.paused || red || inconclusive || !!input.killed;
       const r = await withBodyFile(body(), (bodyFile) => gh(deps, at, [
         "pr", "create", "--base", baseBranch(base), "--head", branch, "--title", `supervisor: ${run.job_id} (${run.run_id})`, "--body-file", bodyFile,
         ...(draft ? ["--draft"] : []),
@@ -805,7 +874,7 @@ export function priorPr(events: readonly QueueEvent[]): string | undefined {
 
 /** Story 27.4: the `host-verify` recorded for the latest engine completion (after the latest `launched`): a
  * close-out that crashed, or whose transition and record both failed, perhaps after removing the worktree. */
-function recordedVerify(events: readonly QueueEvent[]): HostVerifyResult | undefined {
+export function recordedVerify(events: readonly QueueEvent[]): HostVerifyResult | undefined {
   const at = events.findLastIndex((e) => e.kind === "host-verify");
   const d = at > events.findLastIndex((e) => e.kind === "launched") ? events[at]!.detail : undefined;
   return d && typeof d === "object" ? d as unknown as HostVerifyResult : undefined;
@@ -826,7 +895,7 @@ export function pendingCloseOut(events: readonly QueueEvent[]): PendingTransitio
 }
 
 /** Write a close-out's state transition: `paused` (`markPaused`) or the engine's end (`endEngine`). */
-function applyTransition(queue: Queue, runId: string, t: PendingTransition): void {
+export function applyTransition(queue: Queue, runId: string, t: PendingTransition): void {
   if (t.phase === "paused") queue.markPaused(runId, t.detail);
   else queue.endEngine(runId, t.state, t.reason, { detail: t.detail, ...(t.stop ? { stop: t.stop } : {}) });
 }
@@ -912,7 +981,7 @@ export async function engineStatus(worktree: string, engineRunId: string, deps: 
  * playable-verify judge's cost (`playableCost`) goes as its own `--playable-verify-cost-usd` and is added into
  * `--total-cost-usd` when the engine's cost is metered; an unmetered engine cost leaves `--total-cost-usd` absent
  * (never zero-filled with the judge's alone). Never throws. */
-async function finishStudio(
+export async function finishStudio(
   run: QueueRun, state: string, reason: string | null, block: unknown, pr: string | undefined, engineCost: number | undefined, deps: WorktreeDeps,
   playableCost?: number,
 ): Promise<{ ok: boolean; detail: string }> {
@@ -936,7 +1005,7 @@ async function finishStudio(
  * alive (`Queue.engineAliveAfterKill`, re-probed here first). An engine killed on TERM-ignore never writes a
  * terminal state, so its status would answer in-progress forever. Undefined: no such kill — or one still
  * alive or unreadable — and the engine's own status decides. Never throws. */
-async function killedEngine(queue: Queue, r: QueueRun): Promise<Record<string, unknown> | undefined> {
+export async function killedEngine(queue: Queue, r: QueueRun): Promise<Record<string, unknown> | undefined> {
   try {
     if (await queue.engineAliveAfterKill(r)) return undefined;
     const ev = queue.events(r.run_id).findLast((e) => e.kind === "engine-kill" || e.kind === "engine-gone");
@@ -946,6 +1015,14 @@ async function killedEngine(queue: Queue, r: QueueRun): Promise<Record<string, u
     if (ev.kind === "engine-kill" && w.outcome !== "killed" && w.outcome !== "not running") return undefined;
     return { pid: w.pid, start: w.start, by: ev.kind, ...(ev.kind === "engine-kill" ? { outcome: w.outcome } : { probe: d.probe }) };
   } catch { return undefined; }
+}
+
+/** One line through the notifier, its outcome for the record. Never throws. */
+async function notifyText(deps: WorktreeDeps, text: string): Promise<Record<string, unknown>> {
+  try {
+    const selected = notifier(deps.hygiene?.env ?? deps.env ?? process.env);
+    return selected.kind === "none" ? { ok: false, skipped: "no notifier configured (TK_SUPERVISOR_NOTIFY is unset)" } : await sendText(selected, text, deps.hygiene?.fetch ?? fetch);
+  } catch (e) { return { ok: false, error: clip(message(e)) }; }
 }
 
 /** The engine-end sweep (see the header). Idempotent: a run is taken atomically before its
@@ -1018,27 +1095,39 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
       // no engine can run there, so it is closed out (from the checkout) and ended, never probed forever.
       let st: EnginePhase = existsSync(r.worktree!) ? await engineStatus(servedRoot(r)!, r.engine_run_id!, deps, { tier: r.tier, sandbox: r.sandbox })
         : { phase: "ended", detail: { run_id: r.engine_run_id, status: "unknown", gone: "its worktree is gone: no engine can run there" } };
+      const sweep = isSweep(queue.definition(r));
+      let engineStop: string | undefined, stopUnanswered = false;
       if (st.phase === "running" || st.phase === "unknown") {
         // An engine the supervisor killed (a tripped guard, its leader dead on KILL) never writes its end:
         // ended here, its launch's recorded end (the trip's state and guard reason) finishing the run.
         const killed = await killedEngine(queue, r);
-        if (!killed) continue;
-        st = { phase: "ended", detail: { ...st.detail, run_id: r.engine_run_id, killed } };
+        if (killed) st = { phase: "ended", detail: { ...st.detail, run_id: r.engine_run_id, killed } };
+        else {
+          // Story 36.3 (DW-121): a sweep whose status probe fails once its stop went unanswered would never reach the paused
+          // branch below, so its deadline is read here too: asked once more, then the `blocked` end. `running` is never ended.
+          if (!sweep || st.phase !== "unknown" || !sweepStopPastDeadline(queue.events(r.run_id), r.engine_run_id, (deps.clockMs ?? Date.now)())) continue;
+          engineStop = await stopSweepEngine(r, deps);
+          if (engineStop === "stopped") continue; // the next tick reads its end and closes it out as usual
+          stopUnanswered = true;
+        }
       }
       if (st.phase === "paused" && r.state === "paused") continue;
       // Story 35.7: a sweep is never kept paused: its paused engine is stopped, before the take, and the run
       // closed out as an end only once the stop answered `stopped`. A failed stop leaves the run, its worktree
       // and its branch as they are (one `engine-stop` note per engine run); the next watch tick retries it.
-      const sweep = isSweep(queue.definition(r));
-      let engineStop: string | undefined;
       if (sweep && st.phase === "paused") {
         engineStop = await stopSweepEngine(r, deps);
         // Story 36.2: one note per engine run, a stop that answered `stopped` too: a later tick's `stopped` status is known
         // for the supervisor's own stop (`engineEndStatus`) if this tick's close-out never finishes.
-        if (!queue.events(r.run_id).some((e) => e.kind === SWEEP_ENGINE_STOP && e.detail?.engine_run_id === r.engine_run_id)) {
+        // Story 36.3: a first `error` note after a `stopped` one too: it alone starts the deadline's clock.
+        if (!queue.events(r.run_id).some((e) => e.kind === SWEEP_ENGINE_STOP && e.detail?.engine_run_id === r.engine_run_id && (engineStop === "stopped" || e.detail?.error !== undefined))) {
           queue.note(r.run_id, SWEEP_ENGINE_STOP, { engine_run_id: r.engine_run_id, ...(engineStop === "stopped" ? { stopped: true } : { error: engineStop }), engine: st.detail });
         }
-        if (engineStop !== "stopped") continue;
+        if (engineStop !== "stopped") {
+          // Story 36.3 (DW-121): retried under the deadline; past it the run ends `blocked` below.
+          if (!sweepStopPastDeadline(queue.events(r.run_id), r.engine_run_id, (deps.clockMs ?? Date.now)())) continue;
+          stopUnanswered = true;
+        }
       }
       const run = queue.takeForCloseOut(r.run_id);
       if (!run) continue;
@@ -1059,6 +1148,15 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
       const notKilled = !st.detail.killed && !(await killedEngine(queue, run));
       // Story 34.8: a slice run, decided once here from the resolved definition, passed to the leg and the close-out.
       const slice = isSlice(queue.definition(run));
+      // Story 36.3 (DW-121): a sweep the supervisor stopped (this tick or an earlier one) has its half-written tree
+      // committed as WIP first; with WIP, or a stop never answered, no leg runs and the PR stays a draft.
+      const stoppedSweep = sweep && (st.phase === "paused" || stopUnanswered || engineEndStatus(events, run.engine_run_id, String(st.detail.status ?? "unknown")) === undefined);
+      const wip = stoppedSweep && existsSync(run.worktree!)
+        ? await wipCommit(run, String(st.detail.paused_story_key ?? sweepSummary(queue, run).bundles.find((b) => !b.landed)?.key ?? "unknown"), deps) : undefined;
+      if (wip?.committed || wip?.error || stopUnanswered) {
+        verify = { skipped: true, reason: wip?.committed ? "paused sweep: WIP committed, leg skipped" : wip?.error ? `paused sweep: WIP not committed (${wip.error}), leg skipped` : "paused sweep: stop unanswered, leg skipped" };
+        queue.note(run.run_id, "host-verify", verify as Record<string, unknown>);
+      }
       if (!verify && !paused && notKilled) {
         const guardS = run.worker_guard_s ?? (Number(queue.definition(run)?.guards?.max_wall_clock_seconds) || 600);
         verify = await hostVerify(run, guardS, deps, slice ? { slice } : {});
@@ -1068,7 +1166,7 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
       // `launched` after a `close-out`, from the relaunch's `mirror`): the end is the engine's own terminal
       // status, never the launch's recorded end. A killed relaunch keeps its recorded end (the trip's).
       const resumed = launched.resumed === true;
-      const relaunched = !resumed && !st.detail.killed && events.findLastIndex((e) => e.kind === "close-out") >= 0
+      const relaunched = !resumed && notKilled && events.findLastIndex((e) => e.kind === "close-out") >= 0
         && events.findLastIndex((e) => e.kind === "launched") > events.findLastIndex((e) => e.kind === "close-out");
       // Story 33.7 (hole 59): such an engine's graceful stop reads its journal (did the story it was driving
       // land?) before the close-out, which may remove the worktree. An engine the supervisor killed (it
@@ -1082,7 +1180,9 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
       // Story 35.7: the sweep's summary (the triage, each bundle landed or not), read before the worktree goes.
       // Story 36.2: and the engine priced per bundle, its run dir still there.
       const summary = sweep ? withEngineCost(sweepSummary(queue, run, st.phase === "paused" ? st.detail : undefined), await engineCostOf(run, deps)) : undefined;
-      const c = await closeOut(run, { paused, ...input, engineRunId: run.engine_run_id, ...(existingPr ? { existingPr } : {}), ...(verify ? { verify } : {}), ...(slice ? { slice } : {}), ...(legs.length ? { legs } : {}), ...(summary ? { sweep: summary } : {}) }, deps);
+      // Story 36.3 (DW-64): a kill with no recorded leg (the leg a kill skips) stays a draft; so does a sweep's WIP or unanswered stop.
+      const forceDraft = (!notKilled && !verify) || !!wip?.committed || !!wip?.error || stopUnanswered;
+      const c = await closeOut(run, { paused, ...input, engineRunId: run.engine_run_id, ...(existingPr ? { existingPr } : {}), ...(verify ? { verify } : {}), ...(slice ? { slice } : {}), ...(legs.length ? { legs } : {}), ...(summary ? { sweep: summary } : {}), ...(forceDraft ? { killed: true } : {}), ...(wip?.error || stopUnanswered ? { keepWorktree: true } : {}) }, deps);
       let next: PendingTransition;
       if (paused) next = { phase: "paused", detail: { engine: st.detail, ...closeOutDetail(c) } };
       else {
@@ -1099,13 +1199,24 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         // Story 36.2: the engine's own end kept, unless it is the supervisor's paused-sweep stop (this tick's or an earlier one's).
         if (summary && notKilled) ({ state, reason } = sweepEndState(summary, verify, engineEndStatus(events, run.engine_run_id, String(st.detail.status ?? "unknown"), engineStop === "stopped")));
         else if (summary) reason = `${reason ? `${reason}; ` : ""}sweep: ${sweepNotice(summary)}`;
+        // Story 36.3 (DW-121): a WIP sweep is never `complete` (`engineEndStatus` exempts the stop), and the WIP is named;
+        // a stop past its deadline ends `blocked` explicitly (`sweepEndState` would read landed bundles `partial`).
+        const wipNote = wip?.committed ? `WIP committed on ${runBranch(run.run_id)}: ${wip.message ?? "wip"}` : wip?.error ? `WIP not committed, worktree kept: ${wip.error}` : undefined;
+        if (wipNote) { reason = `${reason ? `${reason}; ` : ""}${wipNote}`; if (state === "complete") state = "partial"; }
+        let notifyLine: Record<string, unknown> | undefined;
+        if (stopUnanswered) {
+          const line = `paused sweep ${run.run_id}: stop unanswered for 30 min — ended blocked, lock and pin released`;
+          state = "blocked";
+          reason = `${line}${wipNote ? `; ${wipNote}` : ""}`;
+          notifyLine = await notifyText(deps, line);
+        }
         // Story 34.3: the playable-verify judge's cost, its own ledger line (and counted in the total).
         const judgeCost = verify && !verify.skipped ? verify.playable?.judge?.cost_usd : undefined;
         const finish = await finishStudio(run, state, reason, launched.status_block, c.pr, sweepTotalCost(summary, input.costUsd), deps,
           typeof judgeCost === "number" && Number.isFinite(judgeCost) && judgeCost >= 0 ? judgeCost : undefined);
         next = { phase: "ended", state, reason, detail: { ...(end.detail ?? {}), engine: st.detail, ...closeOutDetail(c), finish,
           ...(summary ? { sweep: sweepRecord(summary) } : {}), ...(summary?.engine_cost_usd !== undefined ? { engine_cost_usd: summary.engine_cost_usd } : {}),
-          ...(engineStop ? { engine_stop: engineStop } : {}) }, ...(end.stop ? { stop: end.stop } : {}) };
+          ...(engineStop ? { engine_stop: engineStop } : {}), ...(wip?.committed || wip?.error ? { wip } : {}), ...(notifyLine ? { notify: notifyLine } : {}) }, ...(end.stop ? { stop: end.stop } : {}) };
       }
       try { applyTransition(queue, run.run_id, next); }
       catch (e) {

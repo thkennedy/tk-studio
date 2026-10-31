@@ -11,10 +11,13 @@ installed 6.11.0 renderer text.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
+import os
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
@@ -124,6 +127,118 @@ class BasePatchTests(unittest.TestCase):
         self.assertIn(self.patch["marker"], text)
         restored = text.replace(self.patch["replace"], self.patch["find"], 1)
         self.assertEqual(restored.count(self.patch["find"]), 1)
+
+
+class StagingRenameRetryTests(unittest.TestCase):
+    """Story 36.3 (DW-110, hole 95). The registry entry waits for its upstream
+    issue URL, so the pin is on the two tracked copies themselves."""
+
+    MARKER = "tk-studio base patch render-skill-staging-rename-retry"
+    COPIES = ("_bmad/scripts/render_skill.py", "apps/supervisor/_bmad/scripts/render_skill.py")
+
+    def _renderer(self):
+        repo = PLUGIN_ROOT.parents[1]
+        path = repo / self.COPIES[0]
+        if not path.is_file():
+            self.skipTest("no installed base in this checkout")
+        sys.path.insert(0, str(path.parent))
+        self.addCleanup(sys.path.remove, str(path.parent))
+        spec = importlib.util.spec_from_file_location("render_skill_under_test", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_both_tracked_copies_carry_it_identically(self):
+        repo = PLUGIN_ROOT.parents[1]
+        texts = [(repo / rel).read_text(encoding="utf-8") for rel in self.COPIES if (repo / rel).is_file()]
+        if not texts:
+            self.skipTest("no installed base in this checkout")
+        for text in texts:
+            self.assertEqual(text.count(self.MARKER), 1)
+        self.assertEqual(len(set(texts)), 1)
+
+    def test_no_registry_entry_without_an_upstream_issue(self):
+        ids = [p["id"] for p in basepatch.load()]
+        self.assertNotIn("render-skill-staging-rename-retry", ids)
+
+    def _publish(self, rename, module):
+        with tempfile.TemporaryDirectory() as tmp, \
+                unittest.mock.patch.object(module.os, "rename", rename), \
+                unittest.mock.patch("time.sleep") as sleep:
+            destination = Path(tmp) / "skill" / "generation"
+            try:
+                module._publish(destination, {"a.md": b"a"}, {"outputs": {"a.md": "x"}})
+            finally:
+                self.sleeps = sleep.call_count
+
+    def test_the_rename_retries_on_permission_error_then_lands(self):
+        module = self._renderer()
+        real, calls = os.rename, []
+
+        def flaky(src, dst):
+            calls.append(src)
+            if len(calls) < 3:
+                raise PermissionError(13, "Permission denied")
+            real(src, dst)
+
+        self._publish(flaky, module)
+        self.assertEqual((len(calls), self.sleeps), (3, 2))
+
+    def test_the_retry_goes_on_over_an_empty_destination(self):
+        """Story 36.3: the mounted rename left an empty generation folder (hole 95)."""
+        module = self._renderer()
+        real, calls, landed = os.rename, [], []
+
+        def leaves_it_empty(src, dst):
+            calls.append(src)
+            if len(calls) == 1:
+                Path(dst).mkdir()
+                raise PermissionError(13, "Permission denied")
+            real(src, dst)
+            landed.extend(sorted(os.listdir(dst)))
+
+        self._publish(leaves_it_empty, module)
+        self.assertEqual((len(calls), self.sleeps), (2, 1))
+        self.assertEqual(landed, ["a.md", "manifest.json"])
+
+    def test_a_non_empty_destination_raises_at_the_first_failure(self):
+        """Story 36.3: another writer's generation: no retry over it."""
+        module = self._renderer()
+        calls = []
+
+        def someone_elses(src, dst):
+            calls.append(src)
+            Path(dst).mkdir()
+            (Path(dst) / "other.md").write_bytes(b"other")
+            raise PermissionError(13, "Permission denied")
+
+        with self.assertRaises(Exception):
+            self._publish(someone_elses, module)
+        self.assertEqual(len(calls), 1)
+
+    def test_the_retry_is_bounded_at_five_tries(self):
+        module = self._renderer()
+        calls = []
+
+        def refused(src, dst):
+            calls.append(src)
+            raise PermissionError(13, "Permission denied")
+
+        with self.assertRaises(PermissionError):
+            self._publish(refused, module)
+        self.assertEqual((len(calls), self.sleeps), (5, 4))
+
+    def test_another_oserror_is_not_retried(self):
+        module = self._renderer()
+        calls = []
+
+        def broken(src, dst):
+            calls.append(src)
+            raise OSError(28, "No space left on device")
+
+        with self.assertRaises(OSError):
+            self._publish(broken, module)
+        self.assertEqual(len(calls), 1)
 
 
 if __name__ == "__main__":

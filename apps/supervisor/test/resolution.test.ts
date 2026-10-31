@@ -259,6 +259,60 @@ describe("Story 31.7: the resolution pass queues validate-resolution once per bl
   });
 });
 
+describe("Story 36.3: the agent seat's own unblock queues no validation", () => {
+  const unblockOn = (q: Queue, runId: string, entry: Record<string, unknown>, ok = true) =>
+    q.note(runId, "track-unblock", { story_key: STORY, engine_run_id: "20261025-010101-ab12", ok, status: ok ? "complete" : "partial", issues: [entry], reason: "resumed" });
+  const MOVED = { key: ISSUE, from: "Blocked - Awaiting User", to: "Block Resolved" };
+
+  test("Story 36.3: a moved entry queues nothing, no mint, no `validate-queued`", async () => {
+    const q = newQueue(), root = project();
+    const { run } = await pausedRun(q, root);
+    unblockOn(q, run.run_id, MOVED);
+    const { d } = deps(root);
+    expect((await resolutionPass(q, d)).queued).toEqual([]);
+    expect(validationRuns(q)).toEqual([]);
+    expect(q.serviceEvents("validate-queued")).toEqual([]);
+  });
+
+  test("Story 36.3: the entry's `to`, not the event's `ok`: a moved entry on an `ok: false` event queues nothing", async () => {
+    const q = newQueue(), root = project();
+    const { run } = await pausedRun(q, root);
+    unblockOn(q, run.run_id, MOVED, false);
+    expect((await resolutionPass(q, deps(root).d)).queued).toEqual([]);
+  });
+
+  test("Story 36.3: an entry with `to: null` (the agent moved nothing) still queues", async () => {
+    const q = newQueue(), root = project();
+    const { run } = await pausedRun(q, root);
+    unblockOn(q, run.run_id, { key: ISSUE, from: "Block Resolved", to: null });
+    expect((await resolutionPass(q, deps(root).d)).queued.length).toBe(1);
+  });
+
+  test("Story 36.3: a block comment newer than the unblock still queues", async () => {
+    const q = newQueue(), root = project({ items: [{ ...item(), blocked_since: "2099-01-01T00:00:00.000+0000" }] });
+    const { run } = await pausedRun(q, root);
+    unblockOn(q, run.run_id, MOVED);
+    expect((await resolutionPass(q, deps(root).d)).queued.length).toBe(1);
+  });
+
+  test("Story 36.3: a dependent's moved entry queues nothing for the dependent's item", async () => {
+    const q = newQueue(), root = project({ items: [{ ...item(), issue: "TKS-8", entity: "ST-008" }] });
+    const { run } = await pausedRun(q, root);
+    unblockOn(q, run.run_id, { key: "TKS-8", from: "Blocked - Awaiting User", to: "Block Resolved" });
+    expect((await resolutionPass(q, deps(root).d)).queued).toEqual([]);
+    expect(validationRuns(q)).toEqual([]);
+  });
+
+  test("Story 36.3: another project's or another issue's entry does not exempt the item", async () => {
+    const q = newQueue(), root = project();
+    const other = q.enqueue({ jobId: "run-epic", root: project(), projectId: "p-other", definition: { id: "run-epic" }, owner: me, tier: "host" }).run;
+    unblockOn(q, other.run_id, MOVED);
+    const { run } = await pausedRun(q, root);
+    unblockOn(q, run.run_id, { key: "TKS-77", from: "Blocked - Awaiting User", to: "Block Resolved" });
+    expect((await resolutionPass(q, deps(root).d)).queued.length).toBe(1);
+  });
+});
+
 describe("Story 31.7: the resolution pass re-arms the paused run on a pass", () => {
   test("a pass line after the run ended: resumePaused, one validate-resumed; never twice", async () => {
     const q = newQueue(), root = project();

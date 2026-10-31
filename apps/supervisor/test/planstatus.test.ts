@@ -6,8 +6,8 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { atBranch, mergePass, PLAN_RETRY_LIMIT, planEntity, planOwner, registryRoot, reviewPass, specKey, stagePass, storyNumber, supervisorRows, type PlanStatusDeps } from "../src/planstatus";
-import { Queue, type QueueEvent } from "../src/queue";
-import { runProcess, runUv } from "../src/server";
+import { openConflicts, Queue, type QueueEvent } from "../src/queue";
+import { runProcess, runUv, type RunResult } from "../src/server";
 import { runBranch } from "../src/worktree";
 import { fakeGh, fakePlansync, gitRepo, testGit } from "./fakes";
 import { tempDir } from "./tmp";
@@ -797,3 +797,142 @@ describe("Story 35.8: the stage pass — the supervisor's Stage Log rows after t
 function expectOnlyExternalEvents(queue: Queue, runId: string): void {
   expect(queue.events(runId).map((e) => e.kind)).toEqual(["external", "ended", "closed_out"]);
 }
+
+describe("Story 36.3: an AD-5 conflict ends the pass `partial` (DW-130)", () => {
+  // The shape `jirabackend.pull_back` emits: `canonical` the entity's file, `backend` the issue key, both sides in `fields`.
+  const CONFLICT = { id: "ST-097", canonical: "/home/agent/repo/plan/ST-097.md", backend: "TKS-97", fields: ["status: canonical='done' backend='Blocked - Awaiting User' (promoted: 'draft')"] };
+  /** The fixture with `plansync.py status` answering a held conflict while `held.now`, every other call the fake's; a notifier into `sent`. */
+  async function conflicted(heldAt: "review" | "done" = "done") {
+    const fx = await fixture();
+    const held: { now: boolean; answer?: (id: string) => RunResult | undefined } = { now: true };
+    const sent: string[] = [], statuses: string[][] = [];
+    const env = { ...fx.deps.env, TK_SUPERVISOR_NOTIFY: "ntfy", TK_SUPERVISOR_NTFY_URL: "https://ntfy.example/t" };
+    const deps: PlanStatusDeps = {
+      ...fx.deps, env,
+      hygiene: { env, fetch: async (_u, init) => { sent.push(String(init?.body ?? "")); return new Response("ok", { status: 200 }); } },
+      uv: async (root, script, args, t) => {
+        if (args[0] !== "status") return runUv(root, script, args, t);
+        statuses.push(args);
+        const phase = args[args.indexOf("--status") + 1];
+        const given = phase === "done" ? held.answer?.(args[args.indexOf("--id") + 1]!) : undefined;
+        if (given) return given;
+        const conflicts = phase === heldAt && held.now ? [CONFLICT] : [];
+        return { exit: 0, stdout: JSON.stringify({ ok: true, previous_status: "review", sync: { ok: true, projection: { conflicts } } }), stderr: "" };
+      },
+    };
+    await reviewPass(fx.queue, deps);
+    fx.gh.answer({ view: "MERGED" });
+    return { fx, deps, held, sent, statuses };
+  }
+  const doneEvents = (fx: Awaited<ReturnType<typeof fixture>>) => fx.plan().filter((e) => e.detail!.phase === "done").map((e) => e.detail!);
+  const doneCalls = (s: string[][]) => s.filter((a) => a[a.indexOf("--status") + 1] === "done");
+
+  test("Story 36.3: a `review` pass holding the conflict: the record `partial` with `conflict`, one notifier line", async () => {
+    const { fx, deps, sent } = await conflicted("review");
+    await reviewPass(fx.queue, deps);
+    const review = fx.plan().filter((e) => e.detail!.phase === "review").map((e) => e.detail!);
+    expect(review).toHaveLength(1);
+    expect(review[0]).toMatchObject({ phase: "review", id: "ST-097", ok: true, status: "partial", conflict: [CONFLICT] });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain("plan-status review holds an AD-5 conflict");
+    expect(sent[0]).toContain("TKS-97 (ST-097)");
+  }, 60_000);
+
+  test("Story 36.3: the `done` record is `partial` naming the conflict, `stage: true` kept, one notifier line naming both sides; rows still owed", async () => {
+    const { fx, deps, sent } = await conflicted();
+    write(fx.repo.checkout, { "_bmad-output/specs/spec-epic-27/stories/27-5-the-plan-follows-the-run-spec.md": spec("done") }); // pulled: the stage pass's precondition
+    await mergePass(fx.queue, deps);
+    expect(doneEvents(fx)).toHaveLength(1);
+    expect(doneEvents(fx)[0]).toMatchObject({ phase: "done", stage: true, id: "ST-097", ok: true, status: "partial", conflict: [CONFLICT] });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain("AD-5 conflict");
+    expect(sent[0]).toContain("TKS-97 (ST-097)");
+    expect(sent[0]).toContain("canonical='done'");
+    expect(sent[0]).toContain("backend='Blocked - Awaiting User'");
+    expect(sent[0]).not.toContain("/home/agent");
+    // owed: the pass's `stage --append` went out for the story
+    expect(fx.plansync.calls().some((a) => a[0] === "stage")).toBe(true);
+  }, 60_000);
+
+  test("Story 36.3: re-asked on later ticks, the same conflict not recorded or told twice, until the pull-back answers without one", async () => {
+    const { fx, deps, held, sent, statuses } = await conflicted();
+    await mergePass(fx.queue, deps);
+    await mergePass(fx.queue, deps);
+    expect(doneCalls(statuses)).toHaveLength(2);
+    expect(doneEvents(fx)).toHaveLength(1);
+    expect(sent).toHaveLength(1);
+    held.now = false;
+    await mergePass(fx.queue, deps);
+    expect(doneCalls(statuses)).toHaveLength(3);
+    expect(doneEvents(fx).at(-1)).toMatchObject({ id: "ST-097", ok: true, stage: true });
+    expect(doneEvents(fx).at(-1)!.conflict).toBeUndefined();
+    await mergePass(fx.queue, deps);
+    expect(doneCalls(statuses)).toHaveLength(3); // settled
+  }, 60_000);
+
+  test("Story 36.3: the re-ask is bounded by `PLAN_RETRY_LIMIT`: a give-up record ends it, never auto-resolved", async () => {
+    const { fx, deps, statuses } = await conflicted();
+    for (let i = 0; i < PLAN_RETRY_LIMIT + 2; i++) await mergePass(fx.queue, deps);
+    const n = doneCalls(statuses).length;
+    expect(doneEvents(fx).at(-1)).toMatchObject({ ok: false, skipped: true, reason: expect.stringContaining("AD-5 conflict") });
+    await mergePass(fx.queue, deps);
+    expect(doneCalls(statuses)).toHaveLength(n);
+  }, 120_000);
+
+  const conflictOn = (id: string): RunResult => ({ exit: 0, stdout: JSON.stringify({ ok: true, sync: { projection: { conflicts: [{ ...CONFLICT, id }] } } }), stderr: "" });
+  const clean: RunResult = { exit: 0, stdout: JSON.stringify({ ok: true, sync: { projection: { conflicts: [] } } }), stderr: "" };
+
+  test("Story 36.3: another entity's conflict in the project neither makes the record `partial` nor notifies", async () => {
+    const { fx, deps, held, sent } = await conflicted();
+    held.answer = () => conflictOn("ST-999");
+    await mergePass(fx.queue, deps);
+    expect(doneEvents(fx)).toHaveLength(1);
+    expect(doneEvents(fx)[0]!.status).toBeUndefined();
+    expect(doneEvents(fx)[0]!.conflict).toBeUndefined();
+    expect(sent).toEqual([]);
+  }, 60_000);
+
+  test("Story 36.3: an idless skip recorded after a conflict is no give-up: the conflict is still re-asked; a give-up is `gave_up: true`", async () => {
+    const { fx, deps, held, statuses } = await conflicted();
+    const review = fx.plan().find((e) => e.detail!.phase === "review")!.detail!;
+    fx.queue.note(fx.runId, "plan-status", { phase: "review", pr: review.pr, story_key: "27-6-no-entity", ok: false, skipped: true, reason: "no plan entity for story 27.6" });
+    await mergePass(fx.queue, deps);
+    expect(doneEvents(fx).at(-1)).toMatchObject({ story_key: "27-6-no-entity", skipped: true });
+    expect(doneEvents(fx).at(-1)!.gave_up).toBeUndefined();
+    expect(openConflicts(fx.queue.events(fx.runId))).toEqual(["ST-097"]);
+    held.now = false;
+    await mergePass(fx.queue, deps);
+    expect(doneCalls(statuses)).toHaveLength(2);
+    expect(doneEvents(fx).at(-1)).toMatchObject({ id: "ST-097", ok: true });
+    fx.queue.note(fx.runId, "plan-status", { phase: "done", id: "ST-097", ok: true, status: "partial", conflict: [CONFLICT] });
+    expect(openConflicts(fx.queue.events(fx.runId))).toEqual(["ST-097"]);
+    fx.queue.note(fx.runId, "plan-status", { phase: "done", ok: false, skipped: true, gave_up: true, reason: "gave up" });
+    expect(openConflicts(fx.queue.events(fx.runId))).toEqual([]);
+  }, 60_000);
+
+  test("Story 36.3: two conflicts re-asked, the first clean and the second transient: the second stays open, retried", async () => {
+    const { fx, deps, held, statuses } = await conflicted();
+    const review = fx.plan().find((e) => e.detail!.phase === "review")!.detail!;
+    fx.queue.note(fx.runId, "plan-status", { ...review, story_key: "27-6-the-second", id: "ST-098" });
+    held.answer = (id) => conflictOn(id);
+    await mergePass(fx.queue, deps);
+    expect(openConflicts(fx.queue.events(fx.runId)).sort()).toEqual(["ST-097", "ST-098"]);
+    held.answer = (id) => id === "ST-097" ? clean : { exit: 1, stdout: "Traceback", stderr: "" };
+    await mergePass(fx.queue, deps);
+    expect(openConflicts(fx.queue.events(fx.runId))).toEqual(["ST-098"]);
+    expect(doneEvents(fx).filter((d) => d.id === "ST-098").map((d) => d.error)).toEqual([undefined]);
+    const asked = doneCalls(statuses).length;
+    held.answer = () => clean;
+    await mergePass(fx.queue, deps);
+    expect(doneCalls(statuses)).toHaveLength(asked + 1);
+    expect(openConflicts(fx.queue.events(fx.runId))).toEqual([]);
+  }, 60_000);
+
+  test("Story 36.3: a clean answer records no status or conflict", async () => {
+    const { fx, deps, held } = await conflicted();
+    held.now = false;
+    await mergePass(fx.queue, deps);
+    expect(doneEvents(fx)[0]!.status).toBeUndefined();
+    expect(doneEvents(fx)[0]!.conflict).toBeUndefined();
+  }, 60_000);
+});

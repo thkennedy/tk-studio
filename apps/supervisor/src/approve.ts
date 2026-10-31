@@ -95,7 +95,7 @@ import { readComments } from "./inbox";
 import { readInbox } from "./office";
 import { runPr } from "./planstatus";
 import { blockKind } from "./questions";
-import { engineRoot, isTerminal, type Queue, type QueueRun } from "./queue";
+import { engineRoot, isTerminal, type EngineWhere, type Queue, type QueueRun } from "./queue";
 import { lastJsonObject, type RunResult } from "./server";
 import { defaultBranch, gh, runner, studioScript, uvRunner, type WorktreeDeps } from "./worktree";
 
@@ -107,7 +107,7 @@ export type Submitter = (
   jobId: string, root: string, o: { baseRef?: string; payload: Record<string, unknown> },
 ) => Promise<{ run_id: string; placement?: Record<string, unknown> | null }>;
 /** Stop a launched engine gracefully (production: `cli.ts` `launchStopGraceful`). Never throws. */
-export type GracefulStop = (root: string, engineRunId: string) => Promise<{ ok: boolean; detail: string }>;
+export type GracefulStop = (root: string, engineRunId: string, where?: EngineWhere) => Promise<{ ok: boolean; detail: string }>;
 
 export interface ApproveDeps extends WorktreeDeps {
   /** The clock (ISO stamps for the records and the events; default now). */
@@ -928,7 +928,7 @@ export const stops = (queue: Queue, project: string, id: string) => eventsFor(qu
  * this run and reason not repeated). A run with no engine yet is not stopped (nothing recorded). */
 async function stopRun(queue: Queue, deps: ApproveDeps, t: Target, project: string, run: QueueRun, reason: string, storyKey?: string): Promise<boolean> {
   if (!run.engine_run_id) return false;
-  const r = deps.launchStop ? await deps.launchStop(engineRoot(run), run.engine_run_id) : { ok: false, detail: "no graceful stop wired" };
+  const r = deps.launchStop ? await deps.launchStop(engineRoot(run), run.engine_run_id, { tier: run.tier, sandbox: run.sandbox }) : { ok: false, detail: "no graceful stop wired" };
   const detail = {
     engagement: t.engagement, project, run_id: run.run_id, engine_run_id: run.engine_run_id, reason,
     ...(storyKey ? { story_key: storyKey } : {}), ok: r.ok, detail: clip(r.detail),
@@ -994,6 +994,34 @@ async function blockIssue(queue: Queue, deps: ApproveDeps, t: Target, project: s
   const issue = Array.isArray(r.issues) && typeof r.issues[0]?.issue === "string" ? r.issues[0].issue : null;
   queue.serviceEvent("engagement-issue", { engagement: t.engagement, project, issue, action: "blocked", kind }, at);
   return true;
+}
+
+/** Story 36.3 (DW-47): the owner's `go` or `continue` closes the `cap` or `ask` block it answered, once per `blocked`
+ * event: `track.py unblock --engagement` (`Block Resolved`, never `Done`), `engagement-issue {action: "unblocked", kind}`.
+ * A refusal by name is recorded and owes no further call; a transient failure emits nothing (the next pass calls again).
+ * The kinds share one issue: a block older than the engagement's newest is left to the newer block's own answer. */
+async function unblockAnswered(queue: Queue, deps: ApproveDeps, t: Target, project: string, record: Engagement): Promise<void> {
+  const answers = { cap: { verb: "go", word: "go" }, ask: { verb: "run-resumed", word: "continue" } } as const;
+  const all = eventsFor(queue, "engagement-issue", project, t.engagement);
+  const newest = all.findLast((e) => e.detail?.action === "blocked");
+  for (const kind of ["cap", "ask"] as const) {
+    const events = all.filter((e) => blockKind(e) === kind);
+    const at = events.findLastIndex((e) => e.detail?.action === "blocked");
+    if (at < 0 || events[at]!.seq !== newest?.seq || events.slice(at + 1).some((e) => e.detail?.action === "unblocked" || (e.detail?.action === "refused" && e.detail?.step === "unblock"))) continue;
+    const { verb, word } = answers[kind];
+    if (!record.inputs.some((l) => l.verb === verb && l.at >= events[at]!.at)) continue;
+    let r: RunResult;
+    try { r = await uvRunner(deps)(t.root, studioScript(deps, "lib", "track.py"), ["unblock", "--directory", t.root, "--engagement", t.engagement, "--kind", kind, "--reason", `${word} by the owner`], 120); }
+    catch { continue; }
+    const out = lastJsonObject(r.stdout) as Record<string, any> | null;
+    if (!out || typeof out.status !== "string" || out.retry === true) continue;
+    if (out.ok !== true) {
+      if (out.status === "blocked") queue.serviceEvent("engagement-issue", { engagement: t.engagement, project, action: "refused", kind, step: "unblock", reason: typeof out.reason === "string" && out.reason ? out.reason : "track refused" }, nowIso(deps));
+      continue;
+    }
+    const issue = Array.isArray(out.issues) && typeof out.issues[0]?.issue === "string" ? out.issues[0].issue : null;
+    queue.serviceEvent("engagement-issue", { engagement: t.engagement, project, issue, action: "unblocked", kind }, nowIso(deps));
+  }
 }
 
 const usd = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? `$${Math.round(v * 100) / 100}` : "unknown");
@@ -1130,6 +1158,8 @@ async function runStep(queue: Queue, deps: ApproveDeps, t: Target, out: Engageme
     }
   }
   reread();
+  // Story 36.3 (DW-47): the block a `go` or `continue` answered closes.
+  if (jiraBound(t.root)) await unblockAnswered(queue, deps, t, project, record);
   // 7. the resubmit: in-progress, the newest linked run stopped by this pass and ended, not resubmitted yet; never
   // at or past the cap (an ask `continue` over the cap: the next pass's cap step makes it partial)
   if (record.state !== "in-progress" || !links.length) return; // no run of this cycle: nothing to resubmit (F1)

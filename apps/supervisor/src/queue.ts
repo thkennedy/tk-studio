@@ -62,6 +62,16 @@ type Env = Record<string, string | undefined>;
 
 export const TERMINAL_STATES = ["complete", "partial", "blocked", "cancelled"] as const;
 export type TerminalState = (typeof TERMINAL_STATES)[number];
+/** Story 36.3 (DW-130): the plan ids whose newest `done` record still holds an AD-5 conflict; none once a give-up (a
+ * `done` record marked `gave_up: true`) ends the phase. */
+export function openConflicts(events: readonly QueueEvent[]): string[] {
+  const done = events.filter((e) => e.kind === "plan-status" && e.detail?.phase === "done");
+  if (done.at(-1)?.detail?.gave_up === true) return [];
+  const newest = new Map<string, QueueEvent>();
+  for (const e of done) if (typeof e.detail?.id === "string") newest.set(e.detail.id, e);
+  return [...newest].filter(([, e]) => Array.isArray(e.detail?.conflict) && (e.detail!.conflict as unknown[]).length > 0).map(([id]) => id);
+}
+
 /** Story 27.1: `paused` — a launch run whose engine paused: it keeps its worktree and its checkout
  * lock, and its draft PR is recorded on the `paused` event; it is never terminal.
  * Story 27.2: `external` — a studio run started outside the queue (`jobrun.py` by hand, MCP `tk_job`),
@@ -2029,7 +2039,8 @@ export class Queue {
       const run = this.get(runId);
       if (!run) return false;
       const evs = this.events(runId);
-      if (evs.some((e) => e.kind === "plan-status" && e.detail?.phase === phase)) return false;
+      // Story 36.3: a `done` record holding an AD-5 conflict is not final: the pass re-asks it (`openConflicts`).
+      if (evs.some((e) => e.kind === "plan-status" && e.detail?.phase === phase) && !(phase === "done" && openConflicts(evs).length)) return false;
       const held = (p: string) => {
         const lease = evs.findLast((e) => e.kind === "plan-lease" && e.detail?.phase === p)?.detail?.owner as Owner | null | undefined;
         return !!lease && this.ownerLive(lease, self);

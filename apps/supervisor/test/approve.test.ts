@@ -1201,3 +1201,95 @@ describe.skipIf(!canRunChain)("Story 35.5: the production submitter on the host 
     expect(queue.serviceEvents(RUN_QUEUED_EVENT)).toEqual([]);
   }, 180_000);
 });
+
+describe("Story 36.3: go or continue closes the cap or ask block (DW-47)", () => {
+  const unblocks = (fx: ReturnType<typeof approveDeps>) => fx.uvCalls.filter((c) => c.script === "track.py" && c.args[0] === "unblock").map((c) => c.args);
+  const issueEvents = (q: Queue) => q.serviceEvents("engagement-issue").map((e) => e.detail as Record<string, unknown>);
+
+  async function capped(track?: () => Record<string, unknown>) {
+    const queue = newQueue();
+    const { root, run } = linkedRoot(queue, { state: "in-progress", runsUsd: 41.5 });
+    const fx = approveDeps(queue, track ? { track } : {});
+    await launch(queue, run);
+    await engagementRunPass(queue, fx.deps);
+    expect(readEngagement(root, ENG)!.state).toBe("partial");
+    queue.end(run, "partial", null, { detail: { pr: PR } });
+    return { queue, root, run, fx };
+  }
+  const goOn = (root: string) => {
+    const go = applyInput(readEngagement(root, ENG)!, { verb: "go", payload: { cap: 80 }, source: "bearer", at: "2026-10-25T08:00:00.000Z" });
+    if (go.ok) writeEngagement(root, go.record);
+  };
+
+  test("Story 36.3: the owner's go {cap}: one unblock --kind cap, `unblocked` recorded, not again on the next pass", async () => {
+    const { queue, root, fx } = await capped();
+    await engagementRunPass(queue, fx.deps);
+    expect(unblocks(fx)).toEqual([]); // no go yet
+    goOn(root);
+    await engagementRunPass(queue, fx.deps, { root, engagement: ENG });
+    await engagementRunPass(queue, fx.deps, { root, engagement: ENG });
+    expect(unblocks(fx)).toEqual([["unblock", "--directory", root, "--engagement", ENG, "--kind", "cap", "--reason", "go by the owner"]]);
+    expect(issueEvents(queue).at(-1)).toEqual({ engagement: ENG, project: "p", issue: ISSUE, action: "unblocked", kind: "cap" });
+    expect(fx.uvCalls.filter((c) => c.script === "track.py" && c.args[0] === "close")).toEqual([]); // never `Done`
+  });
+
+  test("Story 36.3: a transient unblock is called again on the next pass; a refusal by name once", async () => {
+    let answer: Record<string, unknown> = { ok: true, status: "complete", issues: [{ issue: ISSUE }] };
+    const { queue, root, fx } = await capped(() => answer);
+    goOn(root);
+    answer = { ok: false, status: "partial", retry: true };
+    await engagementRunPass(queue, fx.deps, { root, engagement: ENG });
+    expect(issueEvents(queue).some((e) => e.action === "unblocked")).toBe(false);
+    expect(unblocks(fx)).toHaveLength(1);
+    answer = { ok: false, status: "blocked", reason: "track refused: NoIssue" };
+    await engagementRunPass(queue, fx.deps, { root, engagement: ENG });
+    await engagementRunPass(queue, fx.deps, { root, engagement: ENG });
+    expect(unblocks(fx)).toHaveLength(2);
+    expect(issueEvents(queue).at(-1)).toMatchObject({ action: "refused", kind: "cap", step: "unblock", reason: "track refused: NoIssue" });
+  });
+
+  test("Story 36.3: a cap's transient unblock retried after an ask block opened on the shared issue is not made; the ask's answer closes it", async () => {
+    let answer: Record<string, unknown> = { ok: true, status: "complete", issues: [{ issue: ISSUE }] };
+    const { queue, root, fx } = await capped(() => answer);
+    goOn(root);
+    answer = { ok: false, status: "partial", retry: true };
+    await engagementRunPass(queue, fx.deps, { root, engagement: ENG });
+    expect(unblocks(fx).map((a) => a[a.indexOf("--kind") + 1])).toEqual(["cap"]);
+    queue.serviceEvent("engagement-issue", { engagement: ENG, project: "p", issue: ISSUE, action: "blocked", kind: "ask" }, "2026-10-25T08:30:00.000Z");
+    answer = { ok: true, status: "complete", issues: [{ issue: ISSUE }] };
+    await engagementRunPass(queue, fx.deps, { root, engagement: ENG });
+    expect(unblocks(fx).map((a) => a[a.indexOf("--kind") + 1])).toEqual(["cap"]); // the newer block unanswered: no move
+    const record = readEngagement(root, ENG)!;
+    writeEngagement(root, { ...record, inputs: [...record.inputs, { verb: "run-resumed", from: "paused", to: "in-progress", payload: {}, source: "bearer", at: "2026-10-25T08:40:00.000Z" }] });
+    await engagementRunPass(queue, fx.deps, { root, engagement: ENG });
+    await engagementRunPass(queue, fx.deps, { root, engagement: ENG });
+    expect(unblocks(fx).map((a) => a[a.indexOf("--kind") + 1])).toEqual(["cap", "ask"]);
+    expect(issueEvents(queue).filter((e) => e.action === "unblocked").map((e) => e.kind)).toEqual(["ask"]);
+  });
+
+  test("Story 36.3: the owner's continue: one unblock --kind ask, `unblocked` recorded", async () => {
+    const queue = newQueue();
+    const { root, run } = linkedRoot(queue, { state: "in-progress", autonomy: "ask" });
+    const fx = approveDeps(queue);
+    await launch(queue, run);
+    queue.serviceEvent(RUN_STOP_EVENT, { engagement: ENG, project: "p", run_id: run, engine_run_id: "E1", reason: "ask", story_key: "41-1-csv-button", ok: true, detail: "stopped" }, "2026-10-25T06:30:00.000Z");
+    await engagementRunPass(queue, fx.deps);
+    expect(readEngagement(root, ENG)!.state).toBe("paused");
+    expect(issueEvents(queue).at(-1)).toMatchObject({ action: "blocked", kind: "ask" });
+    continueOn(root);
+    await engagementRunPass(queue, fx.deps, { root, engagement: ENG });
+    expect(readEngagement(root, ENG)!.state).toBe("in-progress");
+    expect(unblocks(fx)).toEqual([["unblock", "--directory", root, "--engagement", ENG, "--kind", "ask", "--reason", "continue by the owner"]]);
+    expect(issueEvents(queue).at(-1)).toMatchObject({ action: "unblocked", kind: "ask" });
+  });
+
+  test("Story 36.3: a linked run's stop is told its tier", async () => {
+    const queue = newQueue();
+    const { run } = linkedRoot(queue, { state: "in-progress", runsUsd: 41.5 });
+    const where: unknown[] = [];
+    const fx = approveDeps(queue, { launchStop: async (_r, e, w) => { where.push(w); return { ok: true, detail: `engine ${e}` }; } });
+    await launch(queue, run);
+    await engagementRunPass(queue, fx.deps);
+    expect(where).toEqual([{ tier: queue.get(run)!.tier, sandbox: queue.get(run)!.sandbox }]);
+  });
+});

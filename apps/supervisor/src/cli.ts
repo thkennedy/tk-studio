@@ -121,12 +121,12 @@ import {
   closeOut, closeOutDetail, launchedCloseOutInput, meteredCost, pendingCloseOut, prepareWorktree, priorPr, sweepEngines, type WorktreeDeps,
 } from "./worktree";
 import {
-  checkoutKey, defaultProbes, engineRoot, servedRoot, isTerminal, LAUNCH_SKILL, VALIDATE_RESOLUTION_JOB, ENGAGEMENT_CHAT_JOB, ORPHANED_REASON, probeLaunchEngine, processStartTime, Queue, RunTerminal, selfOwner, STUDIO_END_RETRY_LIMIT, workerMayRun,
+  checkoutKey, defaultProbes, engineRoot, type EngineWhere, servedRoot, isTerminal, LAUNCH_SKILL, VALIDATE_RESOLUTION_JOB, ENGAGEMENT_CHAT_JOB, ORPHANED_REASON, probeLaunchEngine, processStartTime, Queue, RunTerminal, selfOwner, STUDIO_END_RETRY_LIMIT, workerMayRun,
   type Holder, type LaunchEngine, type Owner, type QueueRun, type RecoverReport, type RunState, type StudioEnder, type StudioFinder, type StudioOps, type StudioResumer, type TerminalState,
   type WorkerKill,
 } from "./queue";
 import { rerunHostLeg, VerifyRefused, type HostLegStarted } from "./hostleg";
-import { emitTriage, engineCostOf, engineJobRun, isSweep, recordTriage, sweepRecord, sweepSummary, withEngineCost, type SweepSummary } from "./sweep";
+import { emitTriage, engineCostOf, engineJobRun, isSweep, recordTriage, stopEngineAt, sweepRecord, sweepSummary, withEngineCost, type SweepSummary } from "./sweep";
 import { closeOutPaused, launchedSinceMove, resumePaused, type PausedDeps, type ResumeAnswer, type ResumeDeps as EngineResumeDeps } from "./closeout";
 import { mergePass, reviewPass, type PlanStatusDeps } from "./planstatus";
 import { resolutionPass, withQueuedPayload, withStoredPayload, type ResolutionDeps } from "./resolution";
@@ -1047,10 +1047,15 @@ export async function submitProject(projectId: string, jobId: string, opts: RunO
 }
 
 /** Stops a launched bmad-loop engine gracefully (tk-studio-launch `stop --graceful`). A failure is returned, never thrown. */
-export type LaunchStopper = (root: string, engineRunId: string) => Promise<{ ok: boolean; detail: string }>;
+export type LaunchStopper = (root: string, engineRunId: string, where?: EngineWhere) => Promise<{ ok: boolean; detail: string }>;
 
-/** tk-studio `lib/launch.py stop --directory <root> --run-id <id> --graceful` (driver contract §tk-studio-launch). */
-export const launchStopGraceful: LaunchStopper = async (root, engineRunId) => {
+/** tk-studio `lib/launch.py stop --directory <root> --run-id <id> --graceful` (driver contract §tk-studio-launch).
+ * Story 36.3 (DW-120): on the tier `where` names (`stopEngineAt`: an sbx run's engine lives in its sandbox). */
+export const launchStopGraceful: LaunchStopper = async (root, engineRunId, where) => {
+  if (where?.tier === "sbx" && where.sandbox) {
+    const answer = await stopEngineAt(root, engineRunId, where, {}, { graceful: true });
+    return answer === "stopped" ? { ok: true, detail: `engine ${engineRunId} stopping gracefully` } : { ok: false, detail: answer };
+  }
   try {
     const res = await runUv(root, join(pluginRoot(), "lib", "launch.py"), ["stop", "--directory", root, "--run-id", engineRunId, "--graceful"]);
     const out = lastJsonObject(res.stdout) as Record<string, any> | null;
@@ -1121,7 +1126,7 @@ async function cancelQueueRun(
   };
   const stopEngine = async (root: string, id: string | null) => {
     detail.engine_stop = id
-      ? { engine_run_id: id, ...await (deps.launchStop ?? launchStopGraceful)(root, id) }
+      ? { engine_run_id: id, ...await (deps.launchStop ?? launchStopGraceful)(root, id, { tier: run.tier, sandbox: run.sandbox }) }
       : { engine_run_id: null, ok: false, detail: "an unverified engine: no run id to stop" };
   };
   // Story 27.2 (AC2): an sbx engine still live after the stop is killed by its recorded in-VM pid

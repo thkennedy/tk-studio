@@ -174,6 +174,32 @@ outcome appends one line to `_bmad-output/tracking/<KEY>/validation.jsonl`
 follow_up_comment_id?}`, atomic, local memory, never promoted). A temporary
 failure ends `partial` with `ok: false` and `retry: true` and appends no
 line.
+
+The `unblock` verb (Story 36.3, DW-130, hole 101) closes a block the operator
+resolved by resuming the run, or the owner by answering `go` or `continue`:
+
+  uv run track.py unblock --directory ROOT --story <ST-NNN | N-M-slug>
+      --reason TEXT [--source run] [--dry-run]
+  uv run track.py unblock --directory ROOT --engagement ENG-NNN
+      --kind cap|ask --reason TEXT [--dry-run]
+
+An issue in `Blocked - Awaiting User` gets one agent comment `Resolved:
+<reason>`, with no account mention, then moves by name to `Block Resolved`
+(the comment first, so a retry after a temporary failure neither loses it nor
+posts it twice: it is skipped when the newest agent comment already says
+this). An issue in any other status is idempotent: named in `skipped[]` (on
+its entry and on the result), no move, no comment. `--story` also moves the
+dependents `block` moved (a Blocked dependent whose agent comments since the
+last `Resolved:` name `Blocked by: <the story's key>` on a line of its own,
+and no other story whose issue still reads Blocked; one blocked by something
+else is skipped). `--engagement` moves its one issue to `Block Resolved` and never to
+`Done` (`close` would finish an engagement still in flight). The result is
+`{ok, dry_run, story, source, issues: [{issue, entity, role, from, to,
+transitioned, commented, skipped?, error?}], skipped[], notes, written: []}`,
+with `engagement` and `kind` on the engagement form; `to` is null for an issue
+not moved. Refusals end `blocked` (exit 2) as `block`'s do (`NoIssue` for an
+engagement with no issue, `UnknownKind`, `ReasonMissing`); a temporary failure
+ends `partial` with `ok: false` and `retry: true`.
 """
 from __future__ import annotations
 
@@ -1416,6 +1442,255 @@ def validate(project_root: Path, issue: str, check: bool = False,
     return _finish(result, "complete", None)
 
 
+# ----------------------------------------------------------------- unblock
+
+UNBLOCK_KINDS = ("cap", "ask")
+
+
+def unblock_comment(reason: str) -> str:
+    """The unblock comment: names the resolution, mentions nobody."""
+    return f"Resolved: {reason.strip()}"
+
+
+def _open_blocks(client, key: str, owner: str) -> tuple[set[str], bool]:
+    """What the agent's comments since its last `Resolved:` hold on an issue:
+    the keys named by an exact `Blocked by: <key>` line, and whether a
+    `Blocked:` comment with no such line (the issue's own block) is among
+    them. Jira lists oldest first."""
+    named: set[str] = set()
+    own = False
+    for c in jirabackend.issue_comments(client, key):
+        author = (c.get("author") or {}).get("accountId")
+        body = c.get("body")
+        if not author or author == owner or not isinstance(body, str):
+            continue
+        if body.strip().startswith("Resolved:"):
+            named, own = set(), False
+            continue
+        by = [line.strip()[len("Blocked by: "):].strip()
+              for line in body.splitlines()
+              if line.strip().startswith("Blocked by: ")]
+        if by:
+            named.update(by)
+        elif "Blocked: " in body:
+            own = True
+    return named, own
+
+
+def _unblock_issue(client, owner: str, front: dict, key: str, role: str,
+                   body: str, dry_run: bool, notes: list[str],
+                   blocked_by: str | None = None) -> dict:
+    """Comment on and move one issue out of `Blocked - Awaiting User`; the
+    issue's entry. Not Blocked (or, for a dependent, blocked by something
+    else, or by another story whose issue still reads Blocked): named in the
+    entry's `skipped`, nothing written. A refused
+    transition sets `error`; a temporary failure raises (the caller's retry
+    path)."""
+    name, _ = jirabackend._current_status(client, key)
+    entry = {"issue": key, "entity": front["id"], "role": role, "from": name,
+             "to": None, "transitioned": False, "commented": False}
+    if name != jirabackend.BLOCKED_STATUS:
+        entry["skipped"] = [f"transition: {key} is not blocked ({name})"]
+        return entry
+    newest = newest_agent_body(client, key, owner)
+    said = newest == body.strip()
+    if blocked_by and not said:
+        named, own = _open_blocks(client, key, owner)
+        if own or blocked_by not in named:
+            entry["skipped"] = [f"transition: {key} is blocked by something "
+                                f"other than {blocked_by}"]
+            return entry
+        # A dependent blocked by A then B moves on the last of them: unblocking
+        # one moves no comment for the other, so another's block reads as open
+        # only while its own issue still reads Blocked.
+        others = [other for other in sorted(named - {blocked_by})
+                  if jirabackend._current_status(client, other)[0]
+                  == jirabackend.BLOCKED_STATUS]
+        if others:
+            entry["skipped"] = [f"transition: {key} is still blocked by "
+                                f"{', '.join(others)}"]
+            return entry
+    if dry_run:
+        notes.append(f"dry run: {key} would get the resolved comment and move "
+                     f"from {name!r} to {jirabackend.RESOLVED_STATUS!r}")
+        return entry
+    if said:
+        entry["skipped"] = [f"comment: {key}'s newest agent comment already "
+                            f"says this"]
+    else:
+        try:
+            jirabackend.add_comment(client, key, body)
+        except jirabackend.JiraError as exc:
+            if transient(exc):
+                raise
+            entry["error"] = f"resolved comment refused: {exc}"
+            return entry
+        entry["commented"] = True
+    if jirabackend.transition_to_name(client, key, jirabackend.RESOLVED_STATUS,
+                                      notes, front["id"]) is None:
+        entry["error"] = (f"NoTransition: no transition reaches "
+                          f"{jirabackend.RESOLVED_STATUS!r} from {name!r}")
+        return entry
+    entry["transitioned"] = True
+    entry["to"] = jirabackend.RESOLVED_STATUS
+    return entry
+
+
+def _collect_skipped(result: dict, entry: dict) -> None:
+    result["skipped"].extend(entry.get("skipped") or [])
+
+
+def unblock(project_root: Path, story: str, reason: str, source: str = "run",
+            dry_run: bool = False, transport=None, sleep=None) -> dict:
+    """`unblock --story` (see the module docstring)."""
+    root = Path(project_root).resolve()
+    result = _result(story, source, dry_run)
+    result["skipped"] = []
+
+    def refuse(why: str) -> dict:
+        return _finish(result, "blocked", f"track refused: {why}")
+
+    if source not in SOURCES:
+        return refuse(f"--source {source!r} is not one of {', '.join(SOURCES)}")
+    if not (reason or "").strip():
+        return refuse("ReasonMissing: --reason must name something; no "
+                      "Atlassian call made")
+    settings, owner, gap = _agent_seat(root)
+    if gap:
+        return refuse(gap)
+    front, dependents, gap = resolve_story(plansync.plan_dir(root), story)
+    if gap:
+        return refuse(gap + "; no Atlassian call made")
+    key = _jira_key(front)
+    if key is None:
+        return refuse(f"{front['id']} was never promoted (no "
+                      f"external.jira.key); no Atlassian call made")
+    client = jirabackend.client_for(settings, transport)
+    if sleep is not None:
+        client.sleep = sleep
+    notes = result["notes"]
+    body = unblock_comment(reason)
+    retry_now = "a temporary failure; call again on the next pass"
+    try:
+        entry = _unblock_issue(client, owner, front, key, "story", body,
+                               dry_run, notes)
+    except jirabackend.JiraError as exc:
+        result["issues"].append({"issue": key, "entity": front["id"],
+                                 "role": "story", "from": None, "to": None,
+                                 "transitioned": False, "commented": False,
+                                 "error": str(exc)})
+        if transient(exc):
+            result["retry"] = True
+            return _finish(result, "partial",
+                           f"track retry: {key}: {exc} — {retry_now}", ok=False)
+        return refuse(f"{key}: {exc}")
+    result["issues"].append(entry)
+    _collect_skipped(result, entry)
+    if "error" in entry:
+        return refuse(f"{key} ({front['id']}): {entry['error']}")
+    failed, retry = [], []
+    for dep in dependents:
+        if dep.get("status") in FINISHED:
+            notes.append(f"{dep['id']}: a dependent already "
+                         f"{dep.get('status')!r} — not moved")
+            continue
+        dep_key = _jira_key(dep)
+        if dep_key is None:
+            notes.append(f"{dep['id']}: a dependent never promoted — not "
+                         f"moved")
+            continue
+        try:
+            dep_entry = _unblock_issue(client, owner, dep, dep_key,
+                                       "dependent", body, dry_run, notes,
+                                       blocked_by=key)
+        except jirabackend.JiraError as exc:
+            dep_entry = {"issue": dep_key, "entity": dep["id"],
+                         "role": "dependent", "from": None, "to": None,
+                         "transitioned": False, "commented": False,
+                         "error": str(exc)}
+            if transient(exc):
+                retry.append(f"{dep_key} ({dep['id']}): {exc}")
+        result["issues"].append(dep_entry)
+        _collect_skipped(result, dep_entry)
+        if "error" in dep_entry:
+            failed.append(f"{dep_key} ({dep['id']}): {dep_entry['error']}")
+    if retry:
+        result["retry"] = True
+        return _finish(result, "partial", "track retry: dependent(s) failed ("
+                       + "; ".join(failed) + f") — {retry_now}", ok=False)
+    if failed:
+        return _finish(result, "partial", f"track partial: {key} is handled, "
+                       "but dependent(s) failed: " + "; ".join(failed))
+    if dry_run and any(n.startswith("dry run:") for n in notes):
+        return _finish(result, "partial", "dry run: nothing written; a real "
+                       "run would move and comment as `notes[]` names")
+    return _finish(result, "complete", None)
+
+
+def unblock_engagement(project_root: Path, engagement: str, kind: str,
+                       reason: str, dry_run: bool = False, transport=None,
+                       sleep=None) -> dict:
+    """`unblock --engagement` (see the module docstring)."""
+    root = Path(project_root).resolve()
+    result = _result(None, "engagement", dry_run)
+    result.update({"engagement": engagement, "kind": kind, "skipped": []})
+
+    def refuse(why: str) -> dict:
+        return _finish(result, "blocked", f"track refused: {why}")
+
+    if kind not in UNBLOCK_KINDS:
+        return refuse(f"UnknownKind: --kind {kind!r} is not one of "
+                      f"{', '.join(UNBLOCK_KINDS)}; no Atlassian call made")
+    if not str(reason or "").strip():
+        return refuse(f"ReasonMissing: --kind {kind} needs --reason; no "
+                      f"Atlassian call made")
+    if not ENGAGEMENT_ID_RE.match(engagement or ""):
+        return refuse(f"EngagementNotFound: --engagement {engagement!r} is "
+                      f"not an engagement id (ENG-001); no Atlassian call "
+                      f"made")
+    settings, owner, gap = _agent_seat(root)
+    if gap:
+        return refuse(gap)
+    if not (root / ENGAGEMENTS_REL / engagement).is_dir():
+        return refuse(f"EngagementNotFound: no _bmad-output/engagements/"
+                      f"{engagement}/; no Atlassian call made")
+
+    def run() -> dict:
+        project_key = str(plansync._recorded(root,
+                                             "planning.jira.project_key"))
+        client = jirabackend.client_for(settings, transport)
+        if sleep is not None:
+            client.sleep = sleep
+        notes = result["notes"]
+        try:
+            key = find_engagement_issue(client, project_key, engagement)
+            if key is None:
+                return refuse(f"NoIssue: no issue "
+                              f"{engagement_summary(engagement)!r} in "
+                              f"{project_key}")
+            entry = _unblock_issue(client, owner, {"id": engagement}, key,
+                                   "engagement", unblock_comment(reason),
+                                   dry_run, notes)
+        except jirabackend.JiraError as exc:
+            if transient(exc):
+                result["retry"] = True
+                return _finish(result, "partial", f"track retry: "
+                               f"{engagement}: {exc} — a temporary failure; "
+                               f"call again", ok=False)
+            return refuse(f"{engagement}: {exc}")
+        result["issues"].append(entry)
+        _collect_skipped(result, entry)
+        if "error" in entry:
+            return refuse(f"{key} ({engagement}): {entry['error']}")
+        if dry_run and any(n.startswith("dry run:") for n in notes):
+            return _finish(result, "partial", "dry run: nothing written; a "
+                           "real run would move and comment as `notes[]` "
+                           "names")
+        return _finish(result, "complete", None)
+
+    return _locked(root, engagement, result, dry_run, run)
+
+
 # --------------------------------------------------------------------- CLI
 
 def main(argv: list[str] | None = None) -> int:
@@ -1441,6 +1716,18 @@ def main(argv: list[str] | None = None) -> int:
     # Validated in code, not argparse choices: a refusal stays JSON (exit 2).
     blk.add_argument("--source")
     blk.add_argument("--dry-run", action="store_true")
+    unb = sub.add_parser("unblock")
+    unb.add_argument("--directory", required=True,
+                     help="project root (walks up to the nearest)")
+    # Exactly one of --story and --engagement, validated in code: a refusal
+    # stays JSON (exit 2).
+    unb.add_argument("--story",
+                     help="entity id (ST-NNN) or loop story key (N-M-slug)")
+    unb.add_argument("--engagement", help="ENG-NNN")
+    unb.add_argument("--kind", help="cap or ask (--engagement)")
+    unb.add_argument("--reason")
+    unb.add_argument("--source")
+    unb.add_argument("--dry-run", action="store_true")
     cls = sub.add_parser("close")
     cls.add_argument("--directory", required=True,
                      help="project root (walks up to the nearest)")
@@ -1514,6 +1801,25 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
         result = reply(directory, args.issue, body, done=args.done,
                        dry_run=args.dry_run)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 2 if result.get("status") == "blocked" else 0
+    if args.command == "unblock":
+        if args.engagement is not None and args.story is None \
+                and args.source in (None, "engagement"):
+            result = unblock_engagement(directory, args.engagement,
+                                        args.kind or "", args.reason or "",
+                                        dry_run=args.dry_run)
+        elif args.story is not None and args.engagement is None \
+                and args.kind is None:
+            result = unblock(directory, args.story, args.reason or "",
+                             source=args.source or "run",
+                             dry_run=args.dry_run)
+        else:
+            result = _finish(_result(args.story, args.source or "run",
+                                     args.dry_run), "blocked",
+                             "track refused: give --story with --reason, or "
+                             "--engagement with --kind and --reason; no "
+                             "Atlassian call made")
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 2 if result.get("status") == "blocked" else 0
     if args.command == "close":

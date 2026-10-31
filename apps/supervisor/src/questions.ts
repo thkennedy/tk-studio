@@ -351,12 +351,18 @@ function jiraAnswersStep(queue: Queue, deps: QuestionsDeps, t: Target, record: E
  * `engagement-issue {…, action: "refused", step: "close", reason}` and owes no further call; a transient failure
  * emits nothing (the next pass calls again). Story 32.6: only a `questions` block is closed here — the newest `blocked`
  * counted is a `questions` one, and nothing is closed while the issue's newest block is a `cap` or `ask` one (the
- * same Jira issue, blocked for the owner's `go {cap}` or `continue`). */
+ * same Jira issue, blocked for the owner's `go {cap}` or `continue`); Story 36.3 (DW-47): until its `unblocked` event (or the
+ * unblock's named refusal) follows it. */
 async function closeStep(queue: Queue, deps: QuestionsDeps, t: Target, record: Engagement, out: QuestionsResult): Promise<void> {
   if (!record.inputs.some((l) => l.verb === "questions")) return;
   const issueEvents = eventsFor(queue, "engagement-issue", record.project, t.engagement);
-  const newestBlock = issueEvents.findLast((e) => e.detail?.action === "blocked");
-  if (newestBlock && blockKind(newestBlock) !== "questions") return;
+  const newestAt = issueEvents.findLastIndex((e) => e.detail?.action === "blocked");
+  const newestBlock = newestAt >= 0 ? issueEvents[newestAt]! : undefined;
+  if (newestBlock && blockKind(newestBlock) !== "questions") {
+    const kind = blockKind(newestBlock);
+    const cleared = issueEvents.slice(newestAt + 1).some((e) => blockKind(e) === kind && (e.detail?.action === "unblocked" || (e.detail?.action === "refused" && e.detail?.step === "unblock")));
+    if (!cleared) return;
+  }
   const lastBlocked = issueEvents.findLastIndex((e) => e.detail?.action === "blocked" && blockKind(e) === "questions");
   const settled = issueEvents.slice(lastBlocked + 1)
     .some((e) => e.detail?.action === "closed" || (e.detail?.action === "refused" && e.detail?.step === "close"));

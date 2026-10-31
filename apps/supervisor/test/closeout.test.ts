@@ -3,17 +3,17 @@
 // the fake `sbx` (its in-VM `bmad-loop archive|resolve`), a fake `meter.py` under a temp TK_STUDIO_ROOT and a
 // fake launch worker (the engine). Never a real sandbox, engine or ledger.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { createApi } from "../src/api";
-import { closeOutOrphans, relauncher, type Started } from "../src/cli";
-import { closableVerdict, closeOutPaused, ESCALATION_BLOCKED_REASON, findSpec, frontmatter, gracefulStopInForce, harvestMessage, jiraBound, landing, launchedSinceMove, NOT_HANDED, REARM_SKIPPED, rearmFailedLine, resumePaused, ResumeRefused, trackArgs, type PausedDeps } from "../src/closeout";
+import { closeOutOrphans, launchStopGraceful, relauncher, type Started } from "../src/cli";
+import { closableVerdict, closeOutPaused, ESCALATION_BLOCKED_REASON, findSpec, frontmatter, gracefulStopInForce, harvestMessage, jiraBound, landing, launchedSinceMove, NOT_HANDED, REARM_SKIPPED, rearmFailedLine, resumePaused, ResumeRefused, trackArgs, unblocksOwed, type PausedDeps } from "../src/closeout";
 import { renderPage, type PageData } from "../src/page";
-import { Queue, type Owner, type Probes } from "../src/queue";
+import { Queue, STUDIO_END_RETRY_LIMIT, type Owner, type Probes } from "../src/queue";
 import { runProcess, toVmPath, type RunResult } from "../src/server";
 import { COPIED_RUNTIME, launchedCloseOutInput, prBody, storyLandedBeforeStop, sweepEngines } from "../src/worktree";
-import { fakeGh, fakeSbx, fakeStudioRoot, gitRepo, RUNTIME_GITIGNORE, testGit } from "./fakes";
+import { fakeBin, fakeGh, fakeSbx, fakeStudioRoot, gitRepo, RUNTIME_GITIGNORE, testGit } from "./fakes";
 import { tempDir } from "./tmp";
 
 const SB = "claude-p";
@@ -1148,23 +1148,25 @@ describe("AC3: a story with no landed work is left for the resume", () => {
       expect(stateOf(r.finish)).toBe("partial");
       expect(r.finish[r.finish.indexOf("--reason") + 1]).toBe("resumed engine ended 'stopped'");
       expect(ev(s.fx.queue, s.fx.run.run_id, "host-verify")).toHaveLength(0);
-      // Deliberately no draft assertion: `closeOut` marks a resumed/relaunched run's PR ready on a skipped verify
-      // whatever the end state — pre-existing, deferred in the 33-7 spec ("a killed engine's PR marked ready on a partial end").
+      // Story 36.3 (DW-64): the close-out skipped the host verify: the PR stays a draft, its body still edited.
+      expect(ev(s.fx.queue, s.fx.run.run_id, "ended").at(-1)!.detail).toMatchObject({ pr: PR, closeout: { result: "draft PR" } });
+      expect(r.prCalls).not.toContainEqual(["pr", "ready", PR]);
+      expect(r.prCalls.some((c) => c[1] === "edit")).toBe(true);
     });
 
-    test("a relaunched engine the supervisor killed that ended `stopped` with a landed journal never ends `complete`, no host verify", async () => {
+    test("Story 36.3: a relaunched engine the supervisor killed that ended `stopped` with a landed journal keeps `launched.end`, the guard's reason, no host verify, the PR a draft", async () => {
       const s = await relaunched();
       journal(s.fx.wt, s.engine, [at("run-start"), at("story-start", { story_key: KEY }), at("story-done", { story_key: KEY }), at("run-stop", { graceful: true })]);
+      const trip = "guard tripped: max_turns exceeded";
+      s.fx.queue.markLaunched(s.fx.run.run_id, E2, { end: { state: "partial", reason: trip } });
       killedBySupervisor(s);
       const r = await sweepStopped(s);
-      // Its status read `stopped` (not `running`), so the relaunch's end is still the engine's own: `partial`, never `complete`.
-      // This pins today's pre-existing behaviour: `relaunched` tests only `st.detail.killed`, so a killed relaunch whose engine
-      // handled TERM and reads `stopped` does not keep `launched.end` — deferred in the 33-7 spec
-      // ("a killed TERM-handling relaunch loses launched.end").
-      expect(s.fx.get()).toMatchObject({ state: "partial", reason: "relaunched engine ended 'stopped'" });
+      // DW-65: its status reads `stopped`, but `relaunched` requires `notKilled`: the recorded end is kept, never `complete`.
+      expect(s.fx.get()).toMatchObject({ state: "partial", reason: trip });
       expect(stateOf(r.finish)).toBe("partial");
-      expect(r.finish[r.finish.indexOf("--reason") + 1]).toBe("relaunched engine ended 'stopped'");
+      expect(r.finish[r.finish.indexOf("--reason") + 1]).toBe(trip);
       expect(ev(s.fx.queue, s.fx.run.run_id, "host-verify")).toHaveLength(0);
+      expect(r.prCalls).not.toContainEqual(["pr", "ready", PR]);
     });
 
     test("storyLandedBeforeStop: the segment after the latest `run-start`/`run-resume`, unparsable lines skipped, an empty `story_key` not counted", () => {
@@ -1458,31 +1460,39 @@ describe("Story 35.2: no relaunch across a story boundary while a graceful stop 
   const mainSteps = (order: string[]) =>
     order.filter((s) => s.startsWith("git commit") || s.startsWith("uv meter.py") || s.includes("bmad-loop") || s === "rebuild" || s === "invoke");
 
-  /** The refused relaunch: committed and metered, never archived or relaunched, still paused, one record and one
-   * line; a second pass does nothing. */
-  async function expectRefused(setup: (runDir: string) => void, requested: string) {
+  /** Story 36.3 (DW-115): the boundary ends the run: committed, metered, archived, pushed, the PR ready, the end written, the
+   * lock and the pin released, one record and one line; a second pass does nothing. */
+  async function expectEnded(setup: (runDir: string) => void, requested: string) {
     const fx = await pausedRun({ verdict: "no-impact" });
     writeFileSync(join(fx.runDir, "run.json"), JSON.stringify({ total_cost_usd: 1.25 }));
     setup(fx.runDir);
     const p = passDeps(fx);
-    const headBefore = testGit(fx.wt, "rev-parse", "HEAD");
-    expect(await closeOutPaused(fx.queue, p.deps)).toEqual({ closed: [], awaiting: [] });
-    expect(mainSteps(p.order)).toEqual(["git commit", "uv meter.py harvest"]);
-    expect(testGit(fx.wt, "log", "-1", "--format=%s")).toBe(harvestMessage(KEY, fx.run.run_id, E1));
-    expect(testGit(fx.wt, "rev-parse", "HEAD~1")).toBe(headBefore);
-    expect(existsSync(fx.runDir)).toBe(true); // never archived
+    const gh = fakeGh();
+    const finishes: string[][] = [];
+    const deps: PausedDeps = { ...p.deps, env: { ...p.deps.env, GH_BIN: gh.bin }, verbs: async (_r, args) => { finishes.push(args); return { ok: true, state: "complete" }; } };
+    const branch = `supervisor/run-${fx.run.run_id}`;
+    fx.queue.db.run("UPDATE runs SET base_ref = 'main' WHERE run_id = ?", [fx.run.run_id]);
+    expect(await closeOutPaused(fx.queue, deps)).toEqual({ closed: [fx.run.run_id], awaiting: [] });
+    expect(mainSteps(p.order)).toEqual(["git commit", "uv meter.py harvest", `sbx exec ${SB} /home/agent/.local/bin/bmad-loop archive`]);
+    expect(testGit(fx.repo.checkout, "log", "-1", "--format=%s", branch)).toBe(harvestMessage(KEY, fx.run.run_id, E1));
+    expect(testGit(fx.repo.origin, "rev-parse", "--verify", `refs/heads/${branch}`)).toBe(testGit(fx.repo.checkout, "rev-parse", branch));
+    expect(gh.calls().map((c) => c.argv.slice(0, 2))).toContainEqual(["pr", "ready"]);
     expect(p.invoked).toHaveLength(0);
-    expect(fx.get()).toMatchObject({ state: "paused", engine_run_id: E1, owner_pid: null });
+    const end = `story boundary: ${KEY} landed under a graceful stop`;
+    expect(fx.get()).toMatchObject({ state: "complete", reason: end });
+    expect(ev(fx.queue, fx.run.run_id, "ended").at(-1)!.detail).toMatchObject({ pr: PR, story_boundary: { story_key: KEY, ended: true } });
+    expect(finishes[0]!.slice(finishes[0]!.indexOf("--state"), finishes[0]!.indexOf("--state") + 4)).toEqual(["--state", "complete", "--reason", end]);
     expect(ev(fx.queue, fx.run.run_id, "accounted").map((e) => e.detail)).toEqual([{ cost_usd: 1.25, engine_run_id: E1, source: "engine" }]);
     const reason = `a graceful stop is in force (requested ${requested}): relaunching would start the next story in this run`;
     expect(ev(fx.queue, fx.run.run_id, "story-boundary").map((e) => e.detail)).toEqual([
-      { story_key: KEY, engine_run_id: E1, code: "StoryBoundary", reason, graceful_stop: "kept" },
+      { story_key: KEY, engine_run_id: E1, code: "StoryBoundary", reason, graceful_stop: "kept", ended: true },
     ]);
     expect(kinds(fx.queue, fx.run.run_id)).not.toContain("close-out");
     expect(kinds(fx.queue, fx.run.run_id)).not.toContain("close-out-failed");
     expect(p.sent).toHaveLength(1);
-    expect(p.sent[0]).toContain(`story ${KEY} landed, not relaunched`);
-    expect(p.sent[0]).toContain("a graceful stop is in force");
+    expect(p.sent[0]).toContain(`ends at the story boundary: story ${KEY} landed, not relaunched`);
+    expect(fx.queue.lock(fx.run.root)).toBeNull();
+    expect(sbx.calls().some((c) => c.argv[0] === "stop" && c.argv[1] === SB)).toBe(true);
     // The second pass: nothing run, nothing recorded, nothing sent.
     const before = kinds(fx.queue, fx.run.run_id);
     const again = passDeps(fx);
@@ -1493,17 +1503,350 @@ describe("Story 35.2: no relaunch across a story boundary while a graceful stop 
     return fx;
   }
 
-  test("Story 35.2: landed with `stop-request.json` present: committed and metered, not archived or relaunched, paused, one `story-boundary` and one line", async () => {
-    await expectRefused((dir) => writeFileSync(join(dir, "stop-request.json"), JSON.stringify({ requested_at: "2026-10-29T01:02:03Z", mode: "graceful" })), "2026-10-29T01:02:03Z");
+  test("Story 36.3: landed with `stop-request.json` present: the run ends at the boundary, pushed with its PR, lock and pin released, one `story-boundary` and one line", async () => {
+    await expectEnded((dir) => writeFileSync(join(dir, "stop-request.json"), JSON.stringify({ requested_at: "2026-10-29T01:02:03Z", mode: "graceful" })), "2026-10-29T01:02:03Z");
   });
 
-  test("Story 35.2: any `stop-request.json` content counts (existence only)", async () => {
-    await expectRefused((dir) => writeFileSync(join(dir, "stop-request.json"), "not json"), "at an unknown time");
+  test("Story 36.3: any `stop-request.json` content counts (existence only)", async () => {
+    await expectEnded((dir) => writeFileSync(join(dir, "stop-request.json"), "not json"), "at an unknown time");
   });
 
-  test("Story 35.2: landed with the stop discarded at the pause (journal `stop-request-discarded`, no later resume): refused the same way", async () => {
-    await expectRefused((dir) => journal(dir, ["run-start", "story-start", "run-resume", "story-done", "stop-request-discarded"]),
+  test("Story 36.3: landed with the stop discarded at the pause (journal `stop-request-discarded`, no later resume): ended the same way", async () => {
+    await expectEnded((dir) => journal(dir, ["run-start", "story-start", "run-resume", "story-done", "stop-request-discarded"]),
       "before the pause, discarded at pause");
+  });
+
+  test("Story 36.3: a resume on a run ended at the boundary is refused `StoryLanded`, naming the end", async () => {
+    const fx = await expectEnded((dir) => writeFileSync(join(dir, "stop-request.json"), "{}"), "at an unknown time");
+    const refused = await resumePaused(fx.queue, fx.run.run_id, {}, passDeps(fx).deps).catch((e) => e);
+    expect(refused).toBeInstanceOf(ResumeRefused);
+    expect(refused.code).toBe("StoryLanded");
+    expect(refused.message).toContain("the run ended complete at the story boundary");
+  });
+
+  test("Story 36.3: an archive that fails after the boundary is recorded does not stop the end: `partial` naming it, lock and pin released, never relaunched", async () => {
+    const fx = await pausedRun({ verdict: "no-impact" });
+    writeFileSync(join(fx.runDir, "stop-request.json"), "{}");
+    const p = passDeps(fx);
+    const gh = fakeGh();
+    const deps: PausedDeps = { ...p.deps, env: { ...p.deps.env, GH_BIN: gh.bin }, verbs: async () => ({ ok: true }) };
+    sbx.answer({ archive: "fail" });
+    try { expect(await closeOutPaused(fx.queue, deps)).toEqual({ closed: [fx.run.run_id], awaiting: [] }); }
+    finally { sbx.answer({}); }
+    expect(fx.get().state).toBe("partial");
+    expect(fx.get().reason).toContain(`story boundary: ${KEY} landed under a graceful stop; archive failed: bmad-loop archive`);
+    expect(ev(fx.queue, fx.run.run_id, "close-out-failed").map((e) => e.detail?.step)).toEqual(["archive"]);
+    expect(fx.queue.lock(fx.run.root)).toBeNull();
+    expect(p.invoked).toHaveLength(0);
+    expect(ev(fx.queue, fx.run.run_id, "story-boundary")).toHaveLength(1);
+  });
+
+  /** A landed story under a stop, `verify.host` at the base when given, gh faked; `readies`: its `gh pr ready` calls. */
+  async function atBoundary(host?: string) {
+    const fx = await pausedRun({ verdict: "no-impact" });
+    writeFileSync(join(fx.runDir, "stop-request.json"), "{}");
+    fx.queue.db.run("UPDATE runs SET base_ref = 'main' WHERE run_id = ?", [fx.run.run_id]);
+    if (host) {
+      mkdirSync(join(fx.repo.checkout, ".tk-studio"), { recursive: true });
+      writeFileSync(join(fx.repo.checkout, ".tk-studio", "config.yaml"), `vcs: git\nverify:\n  host: ${JSON.stringify(host)}\n`);
+      testGit(fx.repo.checkout, "add", ".tk-studio/config.yaml");
+      testGit(fx.repo.checkout, "commit", "-q", "-m", "the base's verify");
+    }
+    const p = passDeps(fx);
+    const gh = fakeGh();
+    const finishes: string[][] = [];
+    const deps: PausedDeps = { ...p.deps, env: { ...p.deps.env, GH_BIN: gh.bin }, verbs: async (_r, args) => { finishes.push(args); return { ok: true }; } };
+    const readies = () => gh.calls().filter((c) => c.argv[1] === "ready").map((c) => c.argv.includes("--undo") ? "undo" : "ready");
+    return { fx, p, deps, gh, readies, finishes };
+  }
+  const bunCmd = (script: string) => `"${process.execPath}" -e "${script}"`;
+  const verifies = (fx: Awaited<ReturnType<typeof pausedRun>>) => ev(fx.queue, fx.run.run_id, "host-verify");
+  const end = `story boundary: ${KEY} landed under a graceful stop`;
+
+  test("Story 36.3: the boundary runs the leg: green, one `host-verify`, the PR ready, `complete`", async () => {
+    const b = await atBoundary(bunCmd("console.log('ok')"));
+    expect(await closeOutPaused(b.fx.queue, b.deps)).toEqual({ closed: [b.fx.run.run_id], awaiting: [] });
+    expect(verifies(b.fx).map((e) => e.detail?.green)).toEqual([true]);
+    expect(b.readies()).toEqual(["ready"]);
+    expect(b.fx.get()).toMatchObject({ state: "complete", reason: end });
+    expect(ev(b.fx.queue, b.fx.run.run_id, "ended").at(-1)!.detail).toMatchObject({ closeout: { host_verify: "green" } });
+    expect(b.gh.calls().find((c) => c.argv[1] === "edit")!.body).toContain("## Host verify");
+  }, 60_000);
+
+  test("Story 36.3: the boundary's red leg: the PR back to a draft, `partial` with the boundary and the red reason, pushed, lock and pin released, never parked", async () => {
+    const b = await atBoundary(bunCmd("process.exit(3)"));
+    expect(await closeOutPaused(b.fx.queue, b.deps)).toEqual({ closed: [b.fx.run.run_id], awaiting: [] });
+    expect(verifies(b.fx).map((e) => e.detail?.green)).toEqual([false]);
+    expect(b.readies()).toEqual(["undo"]);
+    expect(b.fx.get().state).toBe("partial");
+    expect(b.fx.get().reason).toContain(`${end}; host verify red:`);
+    expect(b.finishes[0]).toContain("partial");
+    expect(testGit(b.fx.repo.origin, "rev-parse", "--verify", `refs/heads/supervisor/run-${b.fx.run.run_id}`)).toBeTruthy();
+    expect(b.fx.queue.lock(b.fx.run.root)).toBeNull();
+    expect(sbx.calls().some((c) => c.argv[0] === "stop" && c.argv[1] === SB)).toBe(true);
+  }, 60_000);
+
+  test("Story 36.3: the boundary's inconclusive leg: recorded, reused, the PR a draft, `partial` with the inconclusive reason", async () => {
+    const b = await atBoundary();
+    b.fx.queue.note(b.fx.run.run_id, "host-verify", { command: "c", argv: ["c"], cwd: "/w", exit: 0, duration_ms: 1, green: false, stdout_tail: [], stderr_tail: [],
+      engine: { verdict: "green", command: "e", duration_ms: 1, godot_dir: null }, playable: { verdict: "inconclusive", reason: "infrastructure: sbx" } });
+    expect(await closeOutPaused(b.fx.queue, b.deps)).toEqual({ closed: [b.fx.run.run_id], awaiting: [] });
+    expect(verifies(b.fx)).toHaveLength(1);
+    expect(b.readies()).toEqual(["undo"]);
+    expect(b.fx.get()).toMatchObject({ state: "partial", reason: `${end}; host verify inconclusive (playable): infrastructure: sbx` });
+  }, 60_000);
+
+  test("Story 36.3: a killed engine at the boundary runs no leg: the PR a draft, `partial` naming it", async () => {
+    const b = await atBoundary(bunCmd("process.exit(3)"));
+    b.fx.queue.recordEnginePid(b.fx.run.run_id, { pid: 6509, start: "125610.0", source: "engine.pid" });
+    b.fx.queue.note(b.fx.run.run_id, "engine-kill", { why: "test", sandbox: SB, worker: { pid: 6509, start: "125610.0", outcome: "killed" } });
+    expect(await closeOutPaused(b.fx.queue, b.deps)).toEqual({ closed: [b.fx.run.run_id], awaiting: [] });
+    expect(verifies(b.fx)).toHaveLength(0);
+    expect(b.readies()).toEqual(["undo"]);
+    expect(b.fx.get()).toMatchObject({ state: "partial", reason: `${end}; the supervisor killed the engine: no host leg ran` });
+  }, 60_000);
+
+  /** The end's writes refused once per arm: `endEngine` and the `closed_out` record both throw, so `endAtBoundary` throws. */
+  function throwingEnd(fx: Awaited<ReturnType<typeof pausedRun>>) {
+    const end0 = fx.queue.endEngine.bind(fx.queue), note0 = fx.queue.note.bind(fx.queue);
+    const arm = { boom: true };
+    (fx.queue as any).endEngine = (...a: Parameters<typeof end0>) => { if (arm.boom) { arm.boom = false; throw new Error("database is locked"); } return end0(...a); };
+    (fx.queue as any).note = (id: string, kind: string, detail: Record<string, unknown>) => { if (kind === "closed_out") throw new Error("database is locked"); return note0(id, kind, detail); };
+    return arm;
+  }
+
+  test("Story 36.3: a retried boundary end does not re-run the leg; the throw is counted and the run stays for the next pass", async () => {
+    const b = await atBoundary(bunCmd("console.log('ok')"));
+    testGit(b.fx.repo.checkout, "remote", "set-url", "origin", join(b.fx.wt, "no-such-origin")); // the worktree stays: a retry reads it
+    const arm = throwingEnd(b.fx);
+    expect(await closeOutPaused(b.fx.queue, b.deps)).toEqual({ closed: [], awaiting: [] });
+    expect(b.fx.get().state).toBe("paused");
+    expect(ev(b.fx.queue, b.fx.run.run_id, "close-out-failed").map((e) => [e.detail?.step, e.detail?.attempt])).toEqual([["boundary-end", 1]]);
+    expect(arm.boom).toBe(false);
+    expect(await closeOutPaused(b.fx.queue, b.deps)).toEqual({ closed: [b.fx.run.run_id], awaiting: [] });
+    expect(verifies(b.fx)).toHaveLength(1);
+    expect(b.fx.get().state).toBe("partial"); // the push still fails
+  }, 60_000);
+
+  test("Story 36.3: a boundary end that keeps throwing is bounded by `STUDIO_END_RETRY_LIMIT`: one line, a recorded `partial` end, lock and pin released", async () => {
+    const b = await atBoundary();
+    testGit(b.fx.repo.checkout, "remote", "set-url", "origin", join(b.fx.wt, "no-such-origin"));
+    for (let i = 1; i <= STUDIO_END_RETRY_LIMIT; i++) b.fx.queue.note(b.fx.run.run_id, "close-out-failed", { story_key: KEY, step: "boundary-end", error: "earlier", attempt: i });
+    throwingEnd(b.fx);
+    expect(await closeOutPaused(b.fx.queue, b.deps)).toEqual({ closed: [b.fx.run.run_id], awaiting: [] });
+    expect(b.fx.get().state).toBe("partial");
+    expect(b.fx.get().reason).toContain(`${end}; close-out gave up after ${STUDIO_END_RETRY_LIMIT + 1} attempts: database is locked`);
+    expect(ev(b.fx.queue, b.fx.run.run_id, "ended").at(-1)!.detail).toMatchObject({ story_boundary: { story_key: KEY, ended: true, gave_up: true } });
+    expect(b.p.sent.filter((s) => s.includes("close-out threw"))).toHaveLength(1);
+    expect(b.fx.queue.lock(b.fx.run.root)).toBeNull();
+    expect(existsSync(b.fx.wt)).toBe(true);
+    expect(sbx.calls().some((c) => c.argv[0] === "stop" && c.argv[1] === SB)).toBe(true);
+  }, 60_000);
+
+  describe("Story 36.3: a commit or meter failure under a stop in force is bounded", () => {
+    const failing = {
+      commit: (fx: Awaited<ReturnType<typeof pausedRun>>) => { testGit(fx.wt, "checkout", "-q", "-b", "elsewhere"); return () => {}; },
+      meter: (_fx: Awaited<ReturnType<typeof pausedRun>>) => { studio.answer({ meter: "fail" }); return () => studio.answer({}); },
+    };
+    for (const step of ["commit", "meter"] as const) {
+      test(`Story 36.3: ${step} failing with a stop in force: retried under the limit, then \`partial\` naming it, lock and pin released, the tree kept`, async () => {
+        const fx = await pausedRun({ verdict: "no-impact" });
+        writeFileSync(join(fx.runDir, "stop-request.json"), "{}");
+        writeFileSync(join(fx.wt, "uncommitted.txt"), "work");
+        const p = passDeps(fx);
+        const deps: PausedDeps = { ...p.deps, verbs: async () => ({ ok: true }) };
+        const restore = failing[step](fx);
+        try {
+          expect(await closeOutPaused(fx.queue, deps)).toEqual({ closed: [], awaiting: [] });
+          expect(fx.get().state).toBe("paused");
+          expect(ev(fx.queue, fx.run.run_id, "close-out-failed").map((e) => [e.detail?.step, e.detail?.attempt])).toEqual([[step, 1]]);
+          expect(p.sent).toEqual([]);
+          for (let i = 2; i <= STUDIO_END_RETRY_LIMIT; i++) fx.queue.note(fx.run.run_id, "close-out-failed", { story_key: KEY, step, error: "earlier", attempt: i });
+          expect(await closeOutPaused(fx.queue, deps)).toEqual({ closed: [fx.run.run_id], awaiting: [] });
+        } finally { restore(); }
+        expect(fx.get().state).toBe("partial");
+        if (step === "commit") {
+          expect(fx.get().reason).toContain(`story boundary: ${KEY} landed under a graceful stop; close-out gave up after ${STUDIO_END_RETRY_LIMIT + 1} attempts: commit failed: `);
+          expect(ev(fx.queue, fx.run.run_id, "ended").at(-1)!.detail).toMatchObject({ story_boundary: { story_key: KEY, ended: true, gave_up: true } });
+        } else {
+          expect(fx.get().reason).toContain(`story boundary: ${KEY} landed under a graceful stop; meter failed: meter.py harvest`);
+          expect(ev(fx.queue, fx.run.run_id, "ended").at(-1)!.detail).toMatchObject({ story_boundary: { story_key: KEY, ended: true } });
+          expect(existsSync(fx.runDir)).toBe(true);
+        }
+        expect(p.sent).toHaveLength(1);
+        expect(fx.queue.lock(fx.run.root)).toBeNull();
+        expect(sbx.calls().some((c) => c.argv[0] === "stop" && c.argv[1] === SB)).toBe(true);
+        expect(p.invoked).toHaveLength(0);
+        expect(existsSync(fx.wt)).toBe(true);
+        if (step === "commit") expect(readFileSync(join(fx.wt, "uncommitted.txt"), "utf-8")).toBe("work");
+        const before = kinds(fx.queue, fx.run.run_id);
+        expect(await closeOutPaused(fx.queue, deps)).toEqual({ closed: [], awaiting: [] });
+        expect(await sweepEngines(fx.queue, deps)).toEqual([]); // no late close-out takes the tree
+        expect(kinds(fx.queue, fx.run.run_id)).toEqual(before);
+        expect(existsSync(fx.wt)).toBe(true);
+      }, 60_000);
+
+      test(`Story 36.3: ${step} failing with no stop: unchanged, one uncounted record, still paused past the limit's count`, async () => {
+        const fx = await pausedRun({ verdict: "no-impact" });
+        const p = passDeps(fx);
+        for (let i = 1; i <= STUDIO_END_RETRY_LIMIT; i++) fx.queue.note(fx.run.run_id, "close-out-failed", { story_key: KEY, step: "boundary-end", error: "earlier", attempt: i });
+        const restore = failing[step](fx);
+        try {
+          expect(await closeOutPaused(fx.queue, p.deps)).toEqual({ closed: [], awaiting: [] });
+          expect(await closeOutPaused(fx.queue, p.deps)).toEqual({ closed: [], awaiting: [] });
+        } finally { restore(); }
+        expect(fx.get().state).toBe("paused");
+        const mine = ev(fx.queue, fx.run.run_id, "close-out-failed").filter((e) => e.detail?.step === step);
+        expect(mine).toHaveLength(1);
+        expect(mine[0]!.detail?.attempt).toBeUndefined();
+        expect(p.sent).toEqual([]);
+      }, 60_000);
+    }
+  });
+
+  /** `atBoundary` with its attempts spent, so the next failure is the give-up. */
+  async function spentBoundary() {
+    const b = await atBoundary();
+    for (let i = 1; i <= STUDIO_END_RETRY_LIMIT; i++) b.fx.queue.note(b.fx.run.run_id, "close-out-failed", { story_key: KEY, step: "meter", error: "earlier", attempt: i });
+    return b;
+  }
+  const originBranch = (fx: Awaited<ReturnType<typeof pausedRun>>) => runProcess("git", ["rev-parse", "--verify", "--quiet", `refs/heads/supervisor/run-${fx.run.run_id}`], { cwd: fx.repo.origin, timeoutS: 30 });
+
+  test("Story 36.3: the meter give-up pushes and opens the PR, ends `partial` naming the meter, runs the leg, skips the archive and the engine cost, keeps the run dir and the worktree", async () => {
+    const b = await spentBoundary();
+    writeFileSync(join(b.fx.runDir, "run.json"), JSON.stringify({ total_cost_usd: 1.5 }));
+    b.fx.queue.db.run("UPDATE events SET detail = json_remove(detail, '$.pr') WHERE run_id = ? AND kind = 'paused'", [b.fx.run.run_id]); // no PR yet: this end opens it
+    studio.answer({ meter: "fail" });
+    try { expect(await closeOutPaused(b.fx.queue, b.deps)).toEqual({ closed: [b.fx.run.run_id], awaiting: [] }); }
+    finally { studio.answer({}); }
+    expect(b.fx.get().state).toBe("partial");
+    expect(b.fx.get().reason).toContain(`${end}; meter failed: meter.py harvest`);
+    expect(verifies(b.fx)).toHaveLength(1);
+    expect((await originBranch(b.fx)).exit).toBe(0);
+    expect(b.gh.calls().some((c) => c.argv[1] === "create")).toBe(true);
+    expect(ev(b.fx.queue, b.fx.run.run_id, "ended").at(-1)!.detail).toMatchObject({ closeout: { worktree: "kept" }, story_boundary: { story_key: KEY, ended: true } });
+    expect(ev(b.fx.queue, b.fx.run.run_id, "story-boundary")).toHaveLength(1);
+    expect(b.p.sent.filter((s) => s.includes("close-out threw") && s.includes("meter failed"))).toHaveLength(1);
+    expect(b.p.sent).toHaveLength(1);
+    expect(b.p.order.some((s) => s.includes("archive"))).toBe(false);
+    expect(ev(b.fx.queue, b.fx.run.run_id, "accounted").filter((e) => e.detail?.source === "engine")).toHaveLength(0);
+    expect(existsSync(b.fx.runDir)).toBe(true);
+    expect(existsSync(b.fx.wt)).toBe(true);
+    expect(b.fx.queue.lock(b.fx.run.root)).toBeNull();
+    expect(sbx.calls().some((c) => c.argv[0] === "stop" && c.argv[1] === SB)).toBe(true);
+  }, 60_000);
+
+  test("Story 36.3: a throw during the meter give-up ends the run on that pass: one line, `partial`, the run dir and the worktree kept", async () => {
+    const b = await spentBoundary();
+    testGit(b.fx.repo.checkout, "remote", "set-url", "origin", join(b.fx.wt, "no-such-origin"));
+    throwingEnd(b.fx);
+    studio.answer({ meter: "fail" });
+    try { expect(await closeOutPaused(b.fx.queue, b.deps)).toEqual({ closed: [b.fx.run.run_id], awaiting: [] }); }
+    finally { studio.answer({}); }
+    expect(b.fx.get().state).toBe("partial");
+    expect(b.fx.get().reason).toContain(`${end}; close-out gave up after ${STUDIO_END_RETRY_LIMIT + 2} attempts: database is locked`);
+    expect(ev(b.fx.queue, b.fx.run.run_id, "ended").at(-1)!.detail).toMatchObject({ story_boundary: { story_key: KEY, ended: true, gave_up: true } });
+    expect(b.p.sent.filter((s) => s.includes("close-out threw"))).toHaveLength(1);
+    expect(existsSync(b.fx.runDir)).toBe(true);
+    expect(existsSync(b.fx.wt)).toBe(true);
+    expect(b.fx.queue.lock(b.fx.run.root)).toBeNull();
+  }, 60_000);
+
+  describe("Story 36.3: the give-up line is sent by what the queue recorded, never by the count", () => {
+    const giveUpLines = (fx: Awaited<ReturnType<typeof pausedRun>>) => ev(fx.queue, fx.run.run_id, "close-out-failed").filter((e) => e.detail?.step === "give-up-line");
+    const failing = {
+      commit: (fx: Awaited<ReturnType<typeof pausedRun>>) => { testGit(fx.wt, "checkout", "-q", "-b", "elsewhere"); return () => {}; },
+      meter: (_fx: Awaited<ReturnType<typeof pausedRun>>) => { studio.answer({ meter: "fail" }); return () => studio.answer({}); },
+    };
+    for (const step of ["commit", "meter"] as const) {
+      test(`Story 36.3: ${step}: attempts past the limit with no recorded line (a death between the count and the send) send exactly one line`, async () => {
+        const b = await spentBoundary();
+        b.fx.queue.note(b.fx.run.run_id, "close-out-failed", { story_key: KEY, step, error: "died", attempt: STUDIO_END_RETRY_LIMIT + 1 });
+        const restore = failing[step](b.fx);
+        try { expect(await closeOutPaused(b.fx.queue, b.deps)).toEqual({ closed: [b.fx.run.run_id], awaiting: [] }); }
+        finally { restore(); }
+        expect(b.fx.get().state).toBe("partial");
+        expect(b.p.sent.filter((s) => s.includes("close-out threw"))).toHaveLength(1);
+        expect(b.p.sent).toHaveLength(1);
+        const notes = giveUpLines(b.fx);
+        expect(notes).toHaveLength(1);
+        expect(notes[0]!.detail).toMatchObject({ story_key: KEY, notify: { ok: true } });
+        expect(notes[0]!.detail?.attempt).toBeUndefined();
+        expect(ev(b.fx.queue, b.fx.run.run_id, "ended").at(-1)!.detail?.notify).toMatchObject({ ok: true });
+      }, 60_000);
+
+      test(`Story 36.3: ${step}: a 503 notifier is recorded and not re-sent on the retried give-up, and the note uses up no try`, async () => {
+        const b = await spentBoundary();
+        let posts = 0;
+        const deps: PausedDeps = { ...b.deps, hygiene: { ...b.deps.hygiene, fetch: async () => { posts++; return new Response("no", { status: 503 }); } } };
+        const end0 = b.fx.queue.endEngine.bind(b.fx.queue), note0 = b.fx.queue.note.bind(b.fx.queue);
+        let refuse = true; // every end write of the first pass refused, so the give-up retries
+        (b.fx.queue as any).endEngine = (...a: Parameters<typeof end0>) => { if (refuse) throw new Error("database is locked"); return end0(...a); };
+        (b.fx.queue as any).note = (id: string, kind: string, detail: Record<string, unknown>) => { if (refuse && kind === "closed_out") throw new Error("database is locked"); return note0(id, kind, detail); };
+        const restore = failing[step](b.fx);
+        try {
+          expect(await closeOutPaused(b.fx.queue, deps)).toEqual({ closed: [], awaiting: [] });
+          expect(b.fx.get().state).toBe("paused");
+          expect(posts).toBe(1);
+          expect(giveUpLines(b.fx).map((e) => e.detail?.notify)).toEqual([{ ok: false, via: "ntfy", error: "HTTP 503" }]);
+          refuse = false;
+          expect(await closeOutPaused(b.fx.queue, deps)).toEqual({ closed: [b.fx.run.run_id], awaiting: [] });
+        } finally { restore(); }
+        expect(b.fx.get().state).toBe("partial");
+        expect(posts).toBe(1);
+        expect(giveUpLines(b.fx)).toHaveLength(1);
+        expect(ev(b.fx.queue, b.fx.run.run_id, "ended").at(-1)!.detail?.notify).toBeUndefined(); // the retrying pass sent none
+        const attempts = ev(b.fx.queue, b.fx.run.run_id, "close-out-failed").map((e) => e.detail?.attempt).filter((a) => a !== undefined);
+        expect(attempts).toEqual(attempts.map((_, i) => i + 1));
+      }, 60_000);
+    }
+
+    test("Story 36.3: a throw during the meter give-up keeps the line's answer on the `ended` detail, and sends no second", async () => {
+      const b = await spentBoundary();
+      testGit(b.fx.repo.checkout, "remote", "set-url", "origin", join(b.fx.wt, "no-such-origin"));
+      throwingEnd(b.fx);
+      studio.answer({ meter: "fail" });
+      try { expect(await closeOutPaused(b.fx.queue, b.deps)).toEqual({ closed: [b.fx.run.run_id], awaiting: [] }); }
+      finally { studio.answer({}); }
+      expect(b.p.sent).toHaveLength(1);
+      expect(giveUpLines(b.fx)).toHaveLength(1);
+      expect(ev(b.fx.queue, b.fx.run.run_id, "ended").at(-1)!.detail).toMatchObject({ notify: { ok: true }, story_boundary: { gave_up: true } });
+    }, 60_000);
+  });
+
+  test("Story 36.3: the commit give-up runs no close-out: nothing pushed, no leg, no PR call, the tree kept", async () => {
+    const b = await spentBoundary();
+    writeFileSync(join(b.fx.wt, "uncommitted.txt"), "work");
+    testGit(b.fx.wt, "checkout", "-q", "-b", "elsewhere");
+    expect(await closeOutPaused(b.fx.queue, b.deps)).toEqual({ closed: [b.fx.run.run_id], awaiting: [] });
+    expect(b.fx.get().state).toBe("partial");
+    expect(b.fx.get().reason).toContain(`${end}; close-out gave up after ${STUDIO_END_RETRY_LIMIT + 1} attempts: commit failed: `);
+    expect((await originBranch(b.fx)).exit).not.toBe(0);
+    expect(b.gh.calls()).toHaveLength(0);
+    expect(verifies(b.fx)).toHaveLength(0);
+    expect(b.p.sent).toHaveLength(1);
+    expect(readFileSync(join(b.fx.wt, "uncommitted.txt"), "utf-8")).toBe("work");
+    expect(existsSync(b.fx.runDir)).toBe(true);
+    expect(b.fx.queue.lock(b.fx.run.root)).toBeNull();
+    // The end is on the `ended` record alone (no `story-boundary` event on this path), and the resume still names it.
+    expect(ev(b.fx.queue, b.fx.run.run_id, "story-boundary")).toHaveLength(0);
+    const refused = await resumePaused(b.fx.queue, b.fx.run.run_id, {}, b.deps).catch((e) => e);
+    expect(refused).toBeInstanceOf(ResumeRefused);
+    expect(refused.code).toBe("StoryLanded");
+    expect(refused.message).toContain(`story ${KEY} landed under a graceful stop: the run ended partial at the story boundary`);
+  }, 60_000);
+
+  test("Story 36.3: a failed close-out still ends the run, `partial` naming the failure, never a park", async () => {
+    const fx = await pausedRun({ verdict: "no-impact" });
+    writeFileSync(join(fx.runDir, "stop-request.json"), "{}");
+    const p = passDeps(fx);
+    testGit(fx.repo.checkout, "remote", "set-url", "origin", join(fx.wt, "no-such-origin"));
+    fx.queue.db.run("UPDATE runs SET base_ref = 'main' WHERE run_id = ?", [fx.run.run_id]);
+    expect(await closeOutPaused(fx.queue, { ...p.deps, verbs: async () => ({ ok: true }) })).toEqual({ closed: [fx.run.run_id], awaiting: [] });
+    expect(fx.get().state).toBe("partial");
+    expect(fx.get().reason).toContain(`story boundary: ${KEY} landed under a graceful stop; close-out failed: git push`);
+    expect(existsSync(fx.wt)).toBe(true);
+    expect(fx.queue.lock(fx.run.root)).toBeNull();
   });
 
   test("Story 35.2: a stale discard (a `run-resume` or `run-start` after it) or no stop at all: relaunched as today", async () => {
@@ -1557,7 +1900,7 @@ describe("Story 35.2: no relaunch across a story boundary while a graceful stop 
     expect(calls).toEqual([{ root: fx.wt, id: E1 }]);
     expect(sent).toEqual([]); // a re-arm that holds tells nobody
     const gs = ev(fx.queue, fx.run.run_id, "graceful-stop");
-    expect(gs.map((e) => e.detail)).toEqual([{ engine_run_id: E1, rearmed: true, ok: true, detail: `engine ${E1} stopping gracefully` }]);
+    expect(gs.map((e) => e.detail)).toEqual([{ engine_run_id: E1, rearmed: true, ok: true, detail: `engine ${E1} stopping gracefully`, tier: "sbx" }]);
     const evs = fx.queue.events(fx.run.run_id);
     expect(evs.findIndex((e) => e.kind === "graceful-stop")).toBeGreaterThan(evs.findIndex((e) => e.kind === "engine-pid" && e.detail?.resumed === true));
   });
@@ -1566,10 +1909,10 @@ describe("Story 35.2: no relaunch across a story boundary while a graceful stop 
     const { fx, answer, calls } = await resumeWith((dir) => journal(dir, ["run-start", "stop-request-discarded"]), async () => ({ ok: false, detail: "launch stop refused: no such run" }));
     expect(answer).toMatchObject({ ok: true, state: "running" });
     expect(calls).toHaveLength(1);
-    expect(ev(fx.queue, fx.run.run_id, "graceful-stop").map((e) => e.detail)).toEqual([{ engine_run_id: E1, rearmed: true, ok: false, detail: "launch stop refused: no such run", notify: { ok: true, via: "ntfy" } }]);
+    expect(ev(fx.queue, fx.run.run_id, "graceful-stop").map((e) => e.detail)).toEqual([{ engine_run_id: E1, rearmed: true, ok: false, detail: "launch stop refused: no such run", tier: "sbx", notify: { ok: true, via: "ntfy" } }]);
     const thrown = await resumeWith((dir) => writeFileSync(join(dir, "stop-request.json"), "{}"), async () => { throw new Error("uv missing"); });
     expect(thrown.answer).toMatchObject({ ok: true, state: "running" });
-    expect(ev(thrown.fx.queue, thrown.fx.run.run_id, "graceful-stop").map((e) => e.detail)).toEqual([{ engine_run_id: E1, rearmed: true, ok: false, detail: "uv missing", notify: { ok: true, via: "ntfy" } }]);
+    expect(ev(thrown.fx.queue, thrown.fx.run.run_id, "graceful-stop").map((e) => e.detail)).toEqual([{ engine_run_id: E1, rearmed: true, ok: false, detail: "uv missing", tier: "sbx", notify: { ok: true, via: "ntfy" } }]);
   });
 
   test("Story 35.2: an `ok: false` re-arm (returned or thrown) sends one notifier line naming the re-issue, recorded on the event", async () => {
@@ -1623,5 +1966,221 @@ describe("Story 35.2: no relaunch across a story boundary while a graceful stop 
       expect(calls).toEqual([]);
       expect(ev(fx.queue, fx.run.run_id, "graceful-stop")).toHaveLength(0);
     }
+  });
+});
+
+describe("Story 36.3: the re-arm on the run's tier, and the resume closes the block", () => {
+  const STOP = { exit: 0, stdout: JSON.stringify({ ok: true, graceful: true }), stderr: "" };
+
+  /** A resume with no `launchStop` injected: an sbx stop answered through `deps.sbx.run`. */
+  async function resumeSbx(stopAnswer: RunResult = STOP) {
+    const fx = await pausedRun({ status: "in-progress" });
+    writeFileSync(join(fx.runDir, "stop-request.json"), "{}");
+    const p = passDeps(fx);
+    const stops: string[][] = [];
+    const run0 = p.deps.sbx!.run!;
+    const deps: PausedDeps = { ...p.deps, sbx: { ...p.deps.sbx, run: async (b, a, o) => { if (a.includes("stop") && a.includes("--run-id")) { stops.push(a); return stopAnswer; } return run0(b, a, o); } } };
+    sbx.answer({ resume_pid: "7001 200000" });
+    let answer;
+    try { answer = await resumePaused(fx.queue, fx.run.run_id, {}, { ...deps, pidPolls: 40, pollMs: 25 }); }
+    finally { sbx.answer({}); }
+    for (let i = 0; i < 100 && !handedBack(fx); i++) await Bun.sleep(20);
+    return { fx, p, stops, answer };
+  }
+
+  test("Story 36.3: DW-120: an sbx re-arm with no host injection runs `sbx exec … launch.py stop --graceful`; the event carries the tier", async () => {
+    const { fx, p, stops, answer } = await resumeSbx();
+    expect(answer).toMatchObject({ ok: true, state: "running" });
+    expect(stops).toHaveLength(1);
+    expect(stops[0]!.slice(0, 4)).toEqual(["exec", SB, "uv", "run"]);
+    expect(stops[0]!.at(4)).toEndWith("/lib/launch.py");
+    expect(stops[0]!.slice(5)).toEqual(["stop", "--directory", toVmPath(fx.wt), "--run-id", E1, "--graceful"]);
+    expect(p.order.some((o) => o.startsWith("uv launch.py"))).toBe(false); // never the host
+    expect(ev(fx.queue, fx.run.run_id, "graceful-stop").map((e) => e.detail)).toEqual([{ engine_run_id: E1, rearmed: true, ok: true, detail: `engine ${E1} stopping gracefully`, tier: "sbx" }]);
+  });
+
+  test("Story 36.3: DW-120: a refused re-arm (a dead engine) records `ok: false`, one line, and the resume proceeds; one call, no retry", async () => {
+    const { fx, p, stops, answer } = await resumeSbx({ exit: 2, stdout: "", stderr: "GracefulStopError: the engine is not running" });
+    expect(answer).toMatchObject({ ok: true, state: "running" });
+    expect(stops).toHaveLength(1);
+    expect(ev(fx.queue, fx.run.run_id, "graceful-stop")[0]!.detail).toMatchObject({ rearmed: true, ok: false, tier: "sbx", detail: expect.stringContaining("GracefulStopError") });
+    expect(p.sent).toHaveLength(1);
+  });
+
+  test("Story 36.3: DW-120: a host run's re-arm stays on the host's runner", async () => {
+    const fx = await pausedRun({ status: "in-progress", tier: "host" });
+    writeFileSync(join(fx.runDir, "stop-request.json"), "{}");
+    const p = passDeps(fx);
+    const stops: string[][] = [];
+    const uv = p.deps.uv!;
+    const deps: PausedDeps = { ...p.deps, uv: async (root, script, args, t) => { if (script.endsWith("launch.py")) { stops.push(args); return STOP; } return uv(root, script, args, t); } };
+    const spawn = () => { writeFileSync(join(fx.runDir, "engine.pid"), "7001 200000"); return { pid: 7001, done: Promise.resolve({ exit: 0, stdout: "", stderr: "" }) }; };
+    await resumePaused(fx.queue, fx.run.run_id, {}, { ...deps, spawn, pidPolls: 3, pollMs: 5 });
+    expect(stops).toEqual([["stop", "--directory", fx.wt, "--run-id", E1, "--graceful"]]);
+    expect(ev(fx.queue, fx.run.run_id, "graceful-stop")[0]!.detail).toMatchObject({ ok: true, tier: "host" });
+  });
+
+  // The route production takes: `launchStopGraceful`, the real one, against a fake `sbx` picked through `SBX_BIN` (it reads
+  // `process.env`, so the fake and the studio root are set there and restored).
+  async function withFakeSbxStop<T>(body: (log: () => string[][], answer: (exit: number) => void) => Promise<T>): Promise<T> {
+    const dir = tempDir("tk-sup-co-stop-");
+    const bin = fakeBin(join(dir, "sbx.js"), `const fs = require("node:fs");
+fs.appendFileSync(${JSON.stringify(join(dir, "argv"))}, JSON.stringify(process.argv.slice(2)) + "\\n");
+const exit = Number(fs.readFileSync(${JSON.stringify(join(dir, "exit"))}, "utf-8"));
+if (exit) console.error("fake sbx: sandbox unreachable");
+process.exit(exit);
+`);
+    const answer = (exit: number) => writeFileSync(join(dir, "exit"), String(exit));
+    const log = () => existsSync(join(dir, "argv")) ? readFileSync(join(dir, "argv"), "utf-8").trim().split("\n").map((l) => JSON.parse(l) as string[]) : [];
+    answer(0);
+    const prev = { sbx: process.env.SBX_BIN, root: process.env.TK_STUDIO_ROOT };
+    process.env.SBX_BIN = bin;
+    process.env.TK_STUDIO_ROOT = studio.root;
+    try { return await body(log, answer); }
+    finally {
+      if (prev.sbx === undefined) delete process.env.SBX_BIN; else process.env.SBX_BIN = prev.sbx;
+      if (prev.root === undefined) delete process.env.TK_STUDIO_ROOT; else process.env.TK_STUDIO_ROOT = prev.root;
+    }
+  }
+  const stopArgv = (root: string, id: string) => ["exec", SB, "uv", "run", `${toVmPath(studio.root)}/plugins/tk-studio/lib/launch.py`, "stop", "--directory", toVmPath(root), "--run-id", id, "--graceful"];
+
+  test("Story 36.3: DW-120: launchStopGraceful with an sbx `where` runs `sbx exec <sandbox> … launch.py stop --run-id <id> --graceful`; a failed `sbx` is `ok: false`, never a throw", async () => {
+    const root = tempDir("tk-sup-co-stop-root-"), where = { tier: "sbx", sandbox: SB } as const;
+    await withFakeSbxStop(async (log, answer) => {
+      expect(await launchStopGraceful(root, "eng-9", where)).toEqual({ ok: true, detail: "engine eng-9 stopping gracefully" });
+      expect(log()).toEqual([stopArgv(root, "eng-9")]);
+      answer(3);
+      expect(await launchStopGraceful(root, "eng-9", where)).toEqual({ ok: false, detail: "stop failed: exit 3: fake sbx: sandbox unreachable" });
+      process.env.SBX_BIN = join(root, "no-such-sbx");
+      const gone = await launchStopGraceful(root, "eng-9", where);
+      expect(gone.ok).toBe(false);
+      expect(gone.detail).toStartWith("stop failed: ");
+    });
+  });
+
+  test("Story 36.3: DW-120: a resume wired with the real launchStopGraceful re-arms an sbx run in its sandbox", async () => {
+    const fx = await pausedRun({ status: "in-progress" });
+    writeFileSync(join(fx.runDir, "stop-request.json"), "{}");
+    const p = passDeps(fx);
+    const spawn = () => { writeFileSync(join(fx.runDir, "engine.pid"), "7001 200000"); return { pid: 7001, done: Promise.resolve({ exit: 0, stdout: "", stderr: "" }) }; };
+    await withFakeSbxStop(async (log) => {
+      await resumePaused(fx.queue, fx.run.run_id, {}, { ...p.deps, spawn, pidPolls: 3, pollMs: 5, launchStop: launchStopGraceful });
+      expect(log()).toEqual([stopArgv(fx.wt, E1)]);
+    });
+    expect(p.order.some((o) => o.startsWith("uv launch.py"))).toBe(false); // never the host
+    expect(ev(fx.queue, fx.run.run_id, "graceful-stop").map((e) => e.detail)).toEqual([{ engine_run_id: E1, rearmed: true, ok: true, detail: `engine ${E1} stopping gracefully`, tier: "sbx" }]);
+  });
+
+  const UNBLOCKED = { ok: true, status: "complete", issues: [{ issue: "TKS-1", entity: "ST-001", role: "story", from: "Blocked - Awaiting User", to: "Block Resolved", transitioned: true, commented: true }], skipped: [] };
+  const BLOCK = (engine = E1) => ({ story_key: KEY, engine_run_id: engine, ok: true, status: "complete", reason: "r", issues: [] });
+
+  /** One resume of the paused run with `track.py` answered by `answer`; waits for the hand-back. */
+  async function resumeOnce(fx: Awaited<ReturnType<typeof pausedRun>>, answer: () => RunResult | Promise<RunResult>) {
+    const p = passDeps(fx);
+    const calls: string[][] = [];
+    const uv = p.deps.uv!;
+    const deps: PausedDeps = { ...p.deps, uv: async (root, script, args, t) => { if (script.endsWith("track.py")) { calls.push(args); return answer(); } return uv(root, script, args, t); } };
+    const moves = ev(fx.queue, fx.run.run_id, "launched").length;
+    sbx.answer({ resume_pid: "7001 200000" });
+    try { await resumePaused(fx.queue, fx.run.run_id, {}, { ...deps, pidPolls: 2, pollMs: 5 }); }
+    finally { sbx.answer({}); }
+    for (let i = 0; i < 200 && ev(fx.queue, fx.run.run_id, "launched").length === moves; i++) await Bun.sleep(10);
+    return { calls, sent: p.sent };
+  }
+  const ok = (out: unknown): RunResult => ({ exit: 0, stdout: JSON.stringify(out), stderr: "" });
+  const pauseAgain = (fx: Awaited<ReturnType<typeof pausedRun>>) => fx.queue.markPaused(fx.run.run_id, { engine: { run_id: E1, status: "running", paused_stage: "escalation", paused_reason: "again", paused_story_key: KEY }, pr: PR });
+
+  test("Story 36.3: DW-130: a resume after a `track-block` calls one story-side unblock, records one `track-unblock`; a second resume with no new block records none", async () => {
+    const fx = await pausedRun({ status: "in-progress" });
+    fx.queue.note(fx.run.run_id, "track-block", BLOCK());
+    const first = await resumeOnce(fx, () => ok(UNBLOCKED));
+    expect(first.calls).toEqual([["unblock", "--directory", fx.run.root, "--story", KEY, "--reason", `the supervisor resumed run ${fx.run.run_id}`, "--source", "run"]]);
+    expect(first.sent).toEqual([]);
+    expect(ev(fx.queue, fx.run.run_id, "track-unblock").map((e) => e.detail)).toEqual([{
+      story_key: KEY, engine_run_id: E1, ok: true, status: "complete", issues: [{ key: "TKS-1", from: "Blocked - Awaiting User", to: "Block Resolved" }], reason: `the supervisor resumed run ${fx.run.run_id}`,
+    }]);
+    pauseAgain(fx);
+    const second = await resumeOnce(fx, () => ok(UNBLOCKED));
+    expect(second.calls).toEqual([]);
+    expect(ev(fx.queue, fx.run.run_id, "track-unblock")).toHaveLength(1);
+  });
+
+  test("Story 36.3: DW-130: an issue already moved (31.7) answers `skipped[]`: `ok: true`, nothing moved", async () => {
+    const fx = await pausedRun({ status: "in-progress" });
+    fx.queue.note(fx.run.run_id, "track-block", BLOCK());
+    await resumeOnce(fx, () => ok({ ok: true, status: "complete", issues: [{ issue: "TKS-1", from: "In Progress", to: null }], skipped: ["transition: TKS-1 is not blocked (In Progress)"] }));
+    expect(ev(fx.queue, fx.run.run_id, "track-unblock")[0]!.detail).toMatchObject({ ok: true, issues: [{ key: "TKS-1", from: "In Progress", to: null }] });
+  });
+
+  test("Story 36.3: DW-130: a failed unblock is recorded `ok: false, retry: true`, one line; the resume proceeds and the next resume retries it", async () => {
+    const fx = await pausedRun({ status: "in-progress" });
+    fx.queue.note(fx.run.run_id, "track-block", BLOCK());
+    const first = await resumeOnce(fx, () => ok({ ok: false, status: "partial", retry: true, reason: "track retry: TKS-1: 503", issues: [] }));
+    expect(fx.get().state).toBe("running");
+    expect(ev(fx.queue, fx.run.run_id, "track-unblock").map((e) => e.detail)).toEqual([{ story_key: KEY, engine_run_id: E1, ok: false, status: "partial", issues: [], reason: "track retry: TKS-1: 503", retry: true }]);
+    expect(first.sent).toHaveLength(1);
+    expect(first.sent[0]).toContain(`story ${KEY}'s Jira block was not closed`);
+    // a second failure is not told again
+    pauseAgain(fx);
+    const second = await resumeOnce(fx, () => { throw new Error("uv missing"); });
+    expect(second.calls).toHaveLength(1);
+    expect(second.sent).toEqual([]);
+    expect(ev(fx.queue, fx.run.run_id, "track-unblock").at(-1)!.detail).toMatchObject({ ok: false, retry: true, reason: "uv missing" });
+    pauseAgain(fx);
+    const third = await resumeOnce(fx, () => ok(UNBLOCKED));
+    expect(third.calls).toHaveLength(1);
+    expect(ev(fx.queue, fx.run.run_id, "track-unblock").at(-1)!.detail).toMatchObject({ ok: true });
+    pauseAgain(fx);
+    expect((await resumeOnce(fx, () => ok(UNBLOCKED))).calls).toEqual([]);
+  });
+
+  test("Story 36.3: a spawn that fails puts the run back paused with the block still open", async () => {
+    const fx = await pausedRun({ status: "in-progress" });
+    fx.queue.note(fx.run.run_id, "track-block", BLOCK());
+    const p = passDeps(fx);
+    const spawn = () => { throw new Error("no bin"); };
+    await expect(resumePaused(fx.queue, fx.run.run_id, {}, { ...p.deps, spawn })).rejects.toThrow("could not be spawned");
+    expect(ev(fx.queue, fx.run.run_id, "track-unblock")).toHaveLength(0);
+    expect(fx.get().state).toBe("paused");
+    // the failed spawn's `paused` does not reset the window: the issue is still Blocked, the retried resume owes the unblock
+    expect(unblocksOwed(fx.queue.events(fx.run.run_id))).toEqual([{ story_key: KEY, engine_run_id: E1 }]);
+    const retried = await resumeOnce(fx, () => ok(UNBLOCKED));
+    expect(retried.calls).toHaveLength(1);
+    expect(ev(fx.queue, fx.run.run_id, "track-unblock").map((e) => e.detail?.ok)).toEqual([true]);
+  });
+
+  test("Story 36.3: DW-130: an unblock closed before a later failed resume's `paused` is not owed again", async () => {
+    const fx = await pausedRun({ status: "in-progress" });
+    fx.queue.note(fx.run.run_id, "track-block", BLOCK());
+    await resumeOnce(fx, () => ok(UNBLOCKED));
+    fx.queue.markPaused(fx.run.run_id, { engine: { run_id: E1 }, resume_failed: "could not be handed" });
+    expect(unblocksOwed(fx.queue.events(fx.run.run_id))).toEqual([]);
+  });
+
+  test("Story 36.3: DW-130: an `ok: false` block refused by name owes no unblock; a transient one does", async () => {
+    const fx = await pausedRun({ status: "in-progress" });
+    fx.queue.note(fx.run.run_id, "track-block", { ...BLOCK(), ok: false, status: "blocked", issues: [{ issue: "TKS-1", role: "story", transitioned: false, commented: false }] });
+    expect(unblocksOwed(fx.queue.events(fx.run.run_id))).toEqual([]);
+    fx.queue.note(fx.run.run_id, "track-block", { ...BLOCK(), ok: false, status: "partial", retry: true });
+    expect(unblocksOwed(fx.queue.events(fx.run.run_id))).toEqual([{ story_key: KEY, engine_run_id: E1 }]);
+  });
+
+  test("Story 36.3: DW-130: an `ok: false` block whose move landed and whose comment was refused still owes the unblock (hole 101)", async () => {
+    const fx = await pausedRun({ status: "in-progress" });
+    fx.queue.note(fx.run.run_id, "track-block", { ...BLOCK(), ok: false, status: "blocked", issues: [{ issue: "TKS-1", role: "story", transitioned: true, commented: false }] });
+    expect(unblocksOwed(fx.queue.events(fx.run.run_id))).toEqual([{ story_key: KEY, engine_run_id: E1 }]);
+  });
+
+  test("Story 36.3: DW-130: `partial` with `ok: true` (a dependent refused by name) is recorded `ok: false`, told once, retried by the next resume", async () => {
+    const fx = await pausedRun({ status: "in-progress" });
+    fx.queue.note(fx.run.run_id, "track-block", BLOCK());
+    const partial = { ok: true, status: "partial", reason: "track partial: TKS-1 is handled, but dependent(s) failed", issues: [UNBLOCKED.issues[0], { issue: "TKS-2", from: "Blocked - Awaiting User", to: null, error: "NoTransition" }] };
+    const first = await resumeOnce(fx, () => ok(partial));
+    expect(ev(fx.queue, fx.run.run_id, "track-unblock").at(-1)!.detail).toMatchObject({ ok: false, retry: true, status: "partial" });
+    expect(first.sent).toHaveLength(1);
+    pauseAgain(fx);
+    const second = await resumeOnce(fx, () => ok(partial));
+    expect(second.calls).toHaveLength(1);
+    expect(second.sent).toEqual([]);
   });
 });
