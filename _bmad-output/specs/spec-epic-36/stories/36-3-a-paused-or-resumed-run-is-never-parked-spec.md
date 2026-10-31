@@ -314,4 +314,8 @@ Studio: activated as developer; working set bmm, tea, bmb, bmad-loop, gds; drift
 | review | 1 | 2026-10-31T05:36:14Z | 2026-10-31T06:38:23Z | 5aec9229-2bd8-4dbd-9cb9-23eb5b42e625 | claude-opus-5-5 | medium | 8332962 | 170881 | 10.1689 | completed |
 | review | 2 | 2026-10-31T06:38:23Z | 2026-10-31T06:59:21Z | 814834bf-e075-4769-b043-71744c985bb5 | claude-opus-5-5 | medium | 4688020 | 92426 | 6.2574 | completed |
 | gate | 1 | 2026-10-31T06:59:22Z | 2026-10-31T07:05:31Z | 3971569c-542b-4258-9696-16a50af0bb4b | claude-opus-5-5 | medium | 1544956 | 27164 | 2.3750 | completed |
+| host-leg | 1 | 2026-10-31T07:06:07Z | 2026-10-31T07:48:35Z | — | — | — | — | — | — | red |
+| close-out | 1 | 2026-10-31T07:48:35Z | 2026-10-31T07:48:42Z | — | — | — | — | — | — | draft PR |
+| re-run | 1 | 2026-10-31T08:26:32Z | 2026-10-31T09:09:49Z | — | — | — | — | — | — | green |
+| merge | — | 2026-10-31T09:12:13Z | 2026-10-31T09:12:13Z | — | — | — | — | — | — | merged |
 
