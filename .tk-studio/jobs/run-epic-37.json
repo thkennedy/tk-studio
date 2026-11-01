@@ -1,0 +1,15 @@
+{
+  "job_schema_version": 1,
+  "id": "run-epic-37",
+  "type": "run-epic",
+  "description": "tk-studio Epic 37 (loop hygiene 4: the ledger's one id source, the Windows classes out of the host leg, a timed-out session keeps its stop and its records, the status edges and the rhythm for every job, the sweep's bugs and cost lines before a fourth sweep, one stop path and the gate's blind spots, the records reconciled and the proofs captured) through the supervisor queue (declared 2026-10-31 with the epic, planned from the EP-36 retrospective's AI-1 to AI-8 and DW-133 to DW-164 on Tim's go). Extends the shipped run-epic type: one-shot; the first launch bootstraps _bmad-output/specs/spec-epic-37 from epics.md (Story 26.1). Submit it with POST /jobs {project: tk-studio, job: run-epic-37} only after tk-studio/run-epic-37 is placed {tier: sbx, sandbox: claude-tk-studio} in the supervisor's per-job config (hole 90) and the previous landing's docs are merged (hole 107, until 37.1 lands); tools/verify_host.py is the host verify leg; the close-out opens the PR. One story per run (after_stories 1: the launch arms the stop and marks the story In Progress, Story 36.6), in the epic's order (37.1 first); a story whose proof needs the host asks through the consult log and the operator does that step on the box; a story that changes the serve process says so and the operator restarts the supervisor through the scheduled task after the merge. Stop: max_runs 12 for this epic (hole 93): an on_status [blocked] stop refuses every resubmission after an operator-side block.",
+  "target": {
+    "payload": {
+      "epic": 37
+    }
+  },
+  "stop": {
+    "max_runs": 12,
+    "after_stories": 1
+  }
+}
