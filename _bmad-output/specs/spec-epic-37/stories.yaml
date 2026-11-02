@@ -1,0 +1,268 @@
+# stories.yaml: Epic 37 of this project, transcribed 1:1 from _bmad-output/planning-artifacts/epics.md
+# by .bmad-loop/plugins/studio-pipeline/transcribe.py on 2026-11-02. The epics document is
+# the plan; the studio gate may append remediation entries (`<key>-r<n>`) and revise
+# UNSTARTED entries' invoke_dev_with, nothing else.
+
+- id: "37-1-one-id-source-for-the-ledger"
+  title: "One Id Source for the Ledger"
+  description: >-
+    I want every deferred-work id minted from one source the engine's harvest and the
+    operator's hand-filed entries both call, the ledger's parse refusing a duplicate
+    heading, and the entries Epic 36 left doubled or unfinished put right, So that two
+    writers on two branches never mint the same id again and the gate, not the merge,
+    catches a collision (AI-1; DW-149; DW-135, DW-140 to DW-143, DW-145, DW-154's text).
+    Canonical: ST-161.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 37.1: One
+    Id Source for the Ledger", the authoritative specification (user story and
+    acceptance criteria). Read the epic's own narrative (the paragraphs under "## Epic
+    37:") for scope, rulings and the repo the story targets; transcribe the story into
+    the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/37-1.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/37-1-one-id-source-for-the-ledger-spec.md` in the spec
+    folder; the engine resolves it by the glob `37-1-one-id-source-for-the-ledger-*.md`,
+    and a file named `37-1-one-id-source-for-the-ledger.md` is read as pending (loop
+    deficiency 1, story 21-6).
+
+- id: "37-2-the-windows-classes-out-of-the-host-leg"
+  title: "The Windows Classes Out of the Host Leg"
+  description: >-
+    I want the engine's gate to catch the Windows-only classes the host leg keeps going
+    red on (a path join that reaches `toVmPath` or an `sbx exec` argv, a POSIX-suffix
+    assertion on a joined path, a rename onto an existing folder, a `subprocess` call
+    with `text=True` and no encoding, a git-backed time bound under the host's figure),
+    the per-file bun timeout to hold past the first file, and the leg's event to keep
+    every suite's own verdict line, So that a story green in the sandbox lands green on
+    the host and a red leg names every failing suite (AI-2; DW-150, DW-154, DW-155; the
+    retrospective's B6, B7, C2). Canonical: ST-162.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 37.2: The
+    Windows Classes Out of the Host Leg", the authoritative specification (user story
+    and acceptance criteria). Read the epic's own narrative (the paragraphs under "##
+    Epic 37:") for scope, rulings and the repo the story targets; transcribe the story
+    into the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/37-2.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/37-2-the-windows-classes-out-of-the-host-leg-spec.md` in
+    the spec folder; the engine resolves it by the glob
+    `37-2-the-windows-classes-out-of-the-host-leg-*.md`, and a file named
+    `37-2-the-windows-classes-out-of-the-host-leg.md` is read as pending (loop
+    deficiency 1, story 21-6).
+    Gate note from 37-1 (2026-11-02): Close a ledger entry as `status: resolved <date>
+    by Story N.M`, never `by this story's PR`, which
+    `test_no_placeholder_pr_number_remains` fails (contract 0.1.32, Story 37.1). A
+    hand-filed entry takes its id from `plansync.py deferred mint`. Before the
+    `pre_commit` hook fires, a counter and marker behind a harvested id are expected: do
+    not flag or hand-fix them; the hook's `.tk-studio/plan-counter.yaml` and marker-line
+    writes are not a Files deviation. Ledger line anchors moved: re-grep by id.
+
+- id: "37-3-a-timed-out-session-keeps-its-stop-and-its-records"
+  title: "A Timed-Out Session Keeps Its Stop and Its Records"
+  description: >-
+    I want a dev session that hits the engine's clock to leave the run resumable with
+    its stop kept and the stories already landed gated, the planner to split a story the
+    clock threatens, every attempt to leave its Stage Log row, and every run (cancelled
+    ones too) to leave its worker cost in the ledger, So that a clock is a pause with a
+    bounded exit and never a hand `git reset`, a discarded stop or an unmetered run
+    (AI-3; DW-148, DW-157, DW-161; the retrospective's C3, C6). Canonical: ST-163.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 37.3: A
+    Timed-Out Session Keeps Its Stop and Its Records", the authoritative specification
+    (user story and acceptance criteria). Read the epic's own narrative (the paragraphs
+    under "## Epic 37:") for scope, rulings and the repo the story targets; transcribe
+    the story into the spec's intent contract and never re-derive, generalise or extend
+    it. Plan: plans/37-3.md when present (its Code Map is the investigation). Project
+    rules and the verify gate: the studio customization
+    (_bmad/custom/bmad-build-auto.toml). Routing: .bmad-loop/routing.current.json; pass
+    the model, effort and advisor of implementer and reviewers explicitly on every
+    subagent launch. Advisor: when routing.current.json gives the session an advisor
+    other than `off`, consult the advisor on: verify-red, halt, deviation above 0, a
+    high-severity finding, a tripwire, a file outside Files, and before declaring the
+    story done; append a `## Consult Log` entry per advisor call. Deviations: one
+    `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto Run Result.
+    Spec file: write the executor spec as
+    `stories/37-3-a-timed-out-session-keeps-its-stop-and-its-records-spec.md` in the
+    spec folder; the engine resolves it by the glob
+    `37-3-a-timed-out-session-keeps-its-stop-and-its-records-*.md`, and a file named
+    `37-3-a-timed-out-session-keeps-its-stop-and-its-records.md` is read as pending
+    (loop deficiency 1, story 21-6).
+    Gate note from 37-1 (2026-11-02): Close a ledger entry as `status: resolved <date>
+    by Story N.M`, never `by this story's PR`, which
+    `test_no_placeholder_pr_number_remains` fails (contract 0.1.32, Story 37.1). A
+    hand-filed entry takes its id from `plansync.py deferred mint`. Before the
+    `pre_commit` hook fires, a counter and marker behind a harvested id are expected: do
+    not flag or hand-fix them; the hook's `.tk-studio/plan-counter.yaml` and marker-line
+    writes are not a Files deviation. Ledger line anchors moved: re-grep by id.
+
+- id: "37-4-the-status-edges-and-the-rhythm-for-every-job"
+  title: "The Status Edges and the Rhythm for Every Job"
+  description: >-
+    I want the Jira status round trip right at its edges (a block status left for a
+    non-blocked canonical, the picker's tie broken by name, one spelling of the story
+    key across the phases), `plansync setup` to keep a copied transition's screen and
+    rules, and the launch-time duties to apply to every job type that runs stories, So
+    that an issue reads what the loop means at every step and a game project's
+    vertical-slice run reads In Progress and stops per story too (AI-4; DW-151, DW-159,
+    DW-160; the retrospective's B1, B2, A4). Canonical: ST-164.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 37.4: The
+    Status Edges and the Rhythm for Every Job", the authoritative specification (user
+    story and acceptance criteria). Read the epic's own narrative (the paragraphs under
+    "## Epic 37:") for scope, rulings and the repo the story targets; transcribe the
+    story into the spec's intent contract and never re-derive, generalise or extend it.
+    Plan: plans/37-4.md when present (its Code Map is the investigation). Project rules
+    and the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as
+    `stories/37-4-the-status-edges-and-the-rhythm-for-every-job-spec.md` in the spec
+    folder; the engine resolves it by the glob
+    `37-4-the-status-edges-and-the-rhythm-for-every-job-*.md`, and a file named
+    `37-4-the-status-edges-and-the-rhythm-for-every-job.md` is read as pending (loop
+    deficiency 1, story 21-6).
+    Gate note from 37-1 (2026-11-02): Close a ledger entry as `status: resolved <date>
+    by Story N.M`, never `by this story's PR`, which
+    `test_no_placeholder_pr_number_remains` fails (contract 0.1.32, Story 37.1). A
+    hand-filed entry takes its id from `plansync.py deferred mint`. Before the
+    `pre_commit` hook fires, a counter and marker behind a harvested id are expected: do
+    not flag or hand-fix them; the hook's `.tk-studio/plan-counter.yaml` and marker-line
+    writes are not a Files deviation. Ledger line anchors moved: re-grep by id.
+
+- id: "37-5-the-sweeps-bugs-and-cost-lines-before-a-fourth-sweep"
+  title: "The Sweep's Bugs and Cost Lines Before a Fourth Sweep"
+  description: >-
+    I want the sweep's three end-rule bugs fixed (a passing re-run never marks a
+    half-finished sweep's draft ready, a ledger wait on an id that never flips ends with
+    a line, the stop deadline starts on an `unknown` probe) and its cost lines whole
+    (the engine's own `sweep-triage` session priced, the triage emit ordered and
+    retried, the re-run count derived after the event is noted, the late-closed readers
+    returning the full line), So that the fourth sweep, once Tim raises `max_runs`, runs
+    on rules proven by tests, not by the sweep (AI-5; DW-136 to DW-139, DW-144; the
+    retrospective's B3, B4, B5). Canonical: ST-165.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 37.5: The
+    Sweep's Bugs and Cost Lines Before a Fourth Sweep", the authoritative specification
+    (user story and acceptance criteria). Read the epic's own narrative (the paragraphs
+    under "## Epic 37:") for scope, rulings and the repo the story targets; transcribe
+    the story into the spec's intent contract and never re-derive, generalise or extend
+    it. Plan: plans/37-5.md when present (its Code Map is the investigation). Project
+    rules and the verify gate: the studio customization
+    (_bmad/custom/bmad-build-auto.toml). Routing: .bmad-loop/routing.current.json; pass
+    the model, effort and advisor of implementer and reviewers explicitly on every
+    subagent launch. Advisor: when routing.current.json gives the session an advisor
+    other than `off`, consult the advisor on: verify-red, halt, deviation above 0, a
+    high-severity finding, a tripwire, a file outside Files, and before declaring the
+    story done; append a `## Consult Log` entry per advisor call. Deviations: one
+    `DRIFT: <what> - <why> - affects: <keys|none>` line each in the Auto Run Result.
+    Spec file: write the executor spec as
+    `stories/37-5-the-sweeps-bugs-and-cost-lines-before-a-fourth-sweep-spec.md` in the
+    spec folder; the engine resolves it by the glob
+    `37-5-the-sweeps-bugs-and-cost-lines-before-a-fourth-sweep-*.md`, and a file named
+    `37-5-the-sweeps-bugs-and-cost-lines-before-a-fourth-sweep.md` is read as pending
+    (loop deficiency 1, story 21-6).
+    Gate note from 37-1 (2026-11-02): Close a ledger entry as `status: resolved <date>
+    by Story N.M`, never `by this story's PR`, which
+    `test_no_placeholder_pr_number_remains` fails (contract 0.1.32, Story 37.1). A
+    hand-filed entry takes its id from `plansync.py deferred mint`. Before the
+    `pre_commit` hook fires, a counter and marker behind a harvested id are expected: do
+    not flag or hand-fix them; the hook's `.tk-studio/plan-counter.yaml` and marker-line
+    writes are not a Files deviation. Ledger line anchors moved: re-grep by id.
+
+- id: "37-6-one-stop-path-and-the-gates-blind-spots"
+  title: "One Stop Path and the Gate's Blind Spots"
+  description: >-
+    I want one stop path for an engine (one command builder for `armStop`, `rearmStop`,
+    `launchStopGraceful` and `stopEngineAt`, routed by tier, with `--directory` always
+    present), the cycle test to scan dynamic imports and name its one allowed residual,
+    the submit-time store test's skip reported by the host leg, and the re-run verb's
+    inconclusive exit stated in the contract, So that the stop cannot drift between its
+    four callers and the gate's known blind spots are closed or named (AI-8; DW-133,
+    DW-162, DW-164; the retrospective's A1, A2, B8). Canonical: ST-166.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 37.6: One
+    Stop Path and the Gate's Blind Spots", the authoritative specification (user story
+    and acceptance criteria). Read the epic's own narrative (the paragraphs under "##
+    Epic 37:") for scope, rulings and the repo the story targets; transcribe the story
+    into the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/37-6.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/37-6-one-stop-path-and-the-gates-blind-spots-spec.md` in
+    the spec folder; the engine resolves it by the glob
+    `37-6-one-stop-path-and-the-gates-blind-spots-*.md`, and a file named
+    `37-6-one-stop-path-and-the-gates-blind-spots.md` is read as pending (loop
+    deficiency 1, story 21-6).
+    Gate note from 37-1 (2026-11-02): Close a ledger entry as `status: resolved <date>
+    by Story N.M`, never `by this story's PR`, which
+    `test_no_placeholder_pr_number_remains` fails (contract 0.1.32, Story 37.1). A
+    hand-filed entry takes its id from `plansync.py deferred mint`. Before the
+    `pre_commit` hook fires, a counter and marker behind a harvested id are expected: do
+    not flag or hand-fix them; the hook's `.tk-studio/plan-counter.yaml` and marker-line
+    writes are not a Files deviation. Ledger line anchors moved: re-grep by id. DW-135
+    is already resolved by Story 37.1 as a duplicate of DW-133: leave it; AC3's DW-135
+    clause is met by that closure.
+
+- id: "37-7-the-records-reconciled-and-the-proofs-captured"
+  title: "The Records Reconciled and the Proofs Captured"
+  description: >-
+    I want the Epic 36 SPEC, `stories.yaml` and the handoff to read what was built, and
+    the operator proofs the epic left owed captured through the consult log (the nt
+    `kill_tree` tests on the host, the live `plansync setup` against the owner's site
+    after 37.4's fix, an `sbx skills ls` capture for 36.5's parser, CAP-14's hold count
+    from the queue), So that the next retrospective audits records that are true and the
+    open items of Epic 36 are closed or named (AI-6, AI-7; the retrospective's A5, C1).
+    Canonical: ST-167.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 37.7: The
+    Records Reconciled and the Proofs Captured", the authoritative specification (user
+    story and acceptance criteria). Read the epic's own narrative (the paragraphs under
+    "## Epic 37:") for scope, rulings and the repo the story targets; transcribe the
+    story into the spec's intent contract and never re-derive, generalise or extend it.
+    Plan: plans/37-7.md when present (its Code Map is the investigation). Project rules
+    and the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as
+    `stories/37-7-the-records-reconciled-and-the-proofs-captured-spec.md` in the spec
+    folder; the engine resolves it by the glob
+    `37-7-the-records-reconciled-and-the-proofs-captured-*.md`, and a file named
+    `37-7-the-records-reconciled-and-the-proofs-captured.md` is read as pending (loop
+    deficiency 1, story 21-6).
+    Gate note from 37-1 (2026-11-02): Story 37.1 filed DW-168 for the four operator
+    proofs, owned here: cite it in the asks and leave it `open` (CAP-21: no other
+    entry's status changes by this story). A hand-filed entry takes its id from
+    `plansync.py deferred mint`. Before the `pre_commit` hook fires, a counter and
+    marker behind a harvested id are expected: do not flag or hand-fix them; the hook's
+    `.tk-studio/plan-counter.yaml` and marker-line writes are not a Files deviation.
+    Ledger line anchors moved: re-grep by id.

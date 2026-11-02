@@ -15,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import dwledger  # noqa: E402
 import interchange  # noqa: E402
 import miniyaml  # noqa: E402
 import plansync  # noqa: E402
@@ -1005,6 +1006,171 @@ class LedgerResolveTests(PlanSyncTestCase):
             code, out = self._cli(*args)
             self.assertEqual(code, 2, args)
             self.assertEqual(out["status"], "blocked")
+
+    def test_a_duplicate_heading_is_refused_by_name_and_not_retried(self):
+        path = self._ledger("# Deferred Work\n\n### DW-7: one\nstatus: done 2026-10-29\n\n"
+                            "### DW-7: two\nstatus: open\n")
+        before = path.read_bytes()
+        code, out = self._cli("--pr", "thkennedy/tk-studio#300", "--ids", "DW-7")
+        self.assertEqual(code, 2)
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["status"], "blocked")
+        self.assertEqual(out["reason"], "LedgerDuplicateId: DW-7 at lines 3 and 6")
+        self.assertNotIn("retryable", out)
+        self.assertEqual(list(out)[-4:], ["status", "intent", "artifacts", "reason"])
+        self.assertEqual(path.read_bytes(), before)
+
+
+class DeferredMintTests(PlanSyncTestCase):
+    """Story 37.1: `plansync.py deferred mint`, the ledger's one id source."""
+
+    DOC = "# Deferred Work\n\n### DW-163: a\nstatus: open\n\n### DW-164: b\nstatus: open\n"
+
+    def _ledger(self, text: str = DOC) -> Path:
+        path = self.impl / "deferred-work.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8", newline="\n")
+        return path
+
+    def _counter(self, extra: str = "") -> Path:
+        path = plansync.counter_path(self.root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"counter_version: 1\nnext:\n  epic: 38\n  story: 168\n  task: 1\n{extra}",
+                        encoding="utf-8", newline="\n")
+        return path
+
+    def _cli(self, *args: str) -> tuple[int, dict]:
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = plansync.main(["deferred", "mint", "--directory", str(self.root), *args])
+        return code, json.loads(out.getvalue())
+
+    def test_the_seed_is_the_ledgers_highest_plus_one_and_other_keys_are_kept(self):
+        path, counter = self._ledger(), self._counter()
+        code, out = self._cli()
+        self.assertEqual(code, 0)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["ids"], ["DW-165"])
+        self.assertEqual(out["next"], 166)
+        self.assertEqual(out["written"], [plansync.COUNTER_REL.as_posix(), plansync.LEDGER_REL.as_posix()])
+        self.assertEqual(list(out)[-4:], ["status", "intent", "artifacts", "reason"])
+        self.assertEqual(plansync.load_counter(self.root)["next"],
+                         {"epic": 38, "story": 168, "task": 1, "deferred-work": 166})
+        self.assertTrue(counter.is_file())
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("last minted DW-165;", text)
+        self.assertTrue(text.endswith(self.DOC.split("\n\n", 1)[1]), text)
+
+    def test_the_seed_reads_a_dw_id_in_body_text_above_the_highest_heading(self):
+        self._ledger(self.DOC + "reason: see DW-200\n")
+        self._counter()
+        _, out = self._cli()
+        self.assertEqual(out["ids"], ["DW-201"])
+
+    def test_a_block_is_consecutive_ids_and_the_marker_moves_on_the_next_mint(self):
+        path = self._ledger()
+        self._counter()
+        _, out = self._cli("--count", "3")
+        self.assertEqual(out["ids"], ["DW-165", "DW-166", "DW-167"])
+        self.assertEqual(out["next"], 168)
+        _, again = self._cli()
+        self.assertEqual(again["ids"], ["DW-168"])
+        text = path.read_text(encoding="utf-8")
+        self.assertEqual(text.count("deferred-work counter:"), 1)
+        self.assertIn("last minted DW-168;", text)
+
+    def test_the_counter_mints_above_the_ledger_and_skips_what_the_ledger_holds(self):
+        self._ledger()
+        self._counter("  deferred-work: 300\n")
+        _, out = self._cli()
+        self.assertEqual(out["ids"], ["DW-300"])
+        self._counter("  deferred-work: 2\n")
+        _, behind = self._cli()
+        self.assertEqual(behind["ids"], ["DW-301"])
+
+    def test_a_dry_run_answers_and_changes_nothing(self):
+        path, counter = self._ledger(), self._counter()
+        before = path.read_bytes(), counter.read_bytes()
+        code, out = self._cli("--count", "2", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertEqual(out["ids"], ["DW-165", "DW-166"])
+        self.assertEqual(out["written"], [])
+        self.assertEqual((path.read_bytes(), counter.read_bytes()), before)
+
+    def test_refusals_end_blocked_with_nothing_written(self):
+        path, counter = self._ledger(), self._counter()
+        before = path.read_bytes(), counter.read_bytes()
+        for count in ("0", "-1", "many"):
+            code, out = self._cli("--count", count)
+            self.assertEqual(code, 2, count)
+            self.assertEqual(out["status"], "blocked")
+            self.assertIn("--count", out["reason"])
+        self.assertEqual((path.read_bytes(), counter.read_bytes()), before)
+        for bad in ("0", "nope", "true"):
+            self._counter(f"  deferred-work: {bad}\n")
+            before = path.read_bytes(), counter.read_bytes()
+            code, out = self._cli()
+            self.assertEqual(code, 2, bad)
+            self.assertEqual(out["status"], "blocked")
+            self.assertIn("next.deferred-work", out["reason"])
+            self.assertEqual((path.read_bytes(), counter.read_bytes()), before)
+
+    def test_a_duplicate_heading_refuses_the_mint(self):
+        path = self._ledger("### DW-7: one\nstatus: open\n\n### DW-7: two\nstatus: open\n")
+        counter = self._counter()
+        before = path.read_bytes(), counter.read_bytes()
+        code, out = self._cli()
+        self.assertEqual(code, 2)
+        self.assertEqual(out["status"], "blocked")
+        self.assertEqual(out["reason"], "LedgerDuplicateId: DW-7 at lines 1 and 4")
+        self.assertEqual((path.read_bytes(), counter.read_bytes()), before)
+
+    def test_no_ledger_is_refused(self):
+        self._counter()
+        code, out = self._cli()
+        self.assertEqual(code, 2)
+        self.assertIn("no ledger", out["reason"])
+
+    def test_a_marker_write_failure_names_the_counter_and_says_the_ids_are_burned(self):
+        path, counter = self._ledger(), self._counter()
+        before = path.read_bytes()
+        real_write = plansync._atomic_write
+
+        def fail_on_ledger(target, content):
+            if Path(target) == path:
+                raise PermissionError("sharing violation")
+            real_write(target, content)
+
+        with mock.patch.object(plansync, "_atomic_write", side_effect=fail_on_ledger):
+            code, out = self._cli("--count", "2")
+        self.assertEqual(code, 2)
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["status"], "blocked")
+        self.assertEqual(out["written"], [plansync.COUNTER_REL.as_posix()])
+        self.assertEqual(out["artifacts"], [plansync.COUNTER_REL.as_posix()])
+        self.assertIn("burned", out["reason"])
+        self.assertIn("DW-165, DW-166", out["reason"])
+        self.assertEqual(plansync.load_counter(self.root)["next"]["deferred-work"], 167)
+        self.assertTrue(counter.is_file())
+        self.assertEqual(path.read_bytes(), before)
+
+
+class RealLedgerContentTests(unittest.TestCase):
+    """The tracked ledger is whole: the host leg's suite holds this, the engine's gate does not."""
+
+    @classmethod
+    def setUpClass(cls):
+        repo_root = Path(__file__).resolve().parents[4]
+        ledger = repo_root / "_bmad-output" / "implementation-artifacts" / "deferred-work.md"
+        cls.text = ledger.read_text(encoding="utf-8")
+
+    def test_every_entry_has_a_status_line(self):
+        missing = [e.id for e in dwledger.parse_ledger(self.text) if e.status is None]
+        self.assertFalse(missing, missing)
+
+    def test_no_placeholder_pr_number_remains(self):
+        self.assertNotIn("by this story's PR", self.text,
+                         "an entry closed from inside a run has no PR number yet: write `by Story N.M`")
 
 
 if __name__ == "__main__":

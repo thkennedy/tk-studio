@@ -245,6 +245,18 @@
           "marker": "no open plan row"
         },
         {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/plansync.py", "ledger-resolve", "--directory", "contracts/conformance/fixtures/ledger-duplicate", "--pr", "thkennedy/tk-studio#1", "--ids", "DW-1", "--dry-run"],
+          "expect": "refusal",
+          "marker": "LedgerDuplicateId"
+        },
+        {
+          "assertion": "blocked-on-ambiguity",
+          "argv": ["lib/plansync.py", "deferred", "mint", "--directory", "contracts/conformance/fixtures/ledger-duplicate", "--dry-run"],
+          "expect": "refusal",
+          "marker": "LedgerDuplicateId"
+        },
+        {
           "assertion": "headless-clean",
           "argv": ["contracts/conformance/e2e_stage_log.py"],
           "timeout": 120,

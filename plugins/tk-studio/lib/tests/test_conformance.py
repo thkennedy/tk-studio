@@ -869,6 +869,39 @@ class ConformanceRealPluginTestCase(unittest.TestCase):
                              "auth-preflight"):
                 self.assertIn(required, names, f"{surface} missing {required}")
 
+    def test_shipped_ledger_duplicate_drive_refuses_by_name(self):
+        # Story 37.1: the runner's half of the refusal, over a fixture with its own root
+        manifest = runner.load_manifest()
+        drive = next(d for d in manifest["surfaces"]["tk-studio-plan-sync"]["drives"]
+                     if d.get("marker") == "LedgerDuplicateId")
+        self.assertEqual(drive["expect"], "refusal")
+        fixture = PLUGIN_ROOT / "contracts" / "conformance" / "fixtures" / "ledger-duplicate"
+        self.assertEqual(drive["argv"][:4], ["lib/plansync.py", "ledger-resolve", "--directory",
+                                             "contracts/conformance/fixtures/ledger-duplicate"])
+        self.assertTrue((fixture / ".tk-studio" / "config.yaml").is_file())
+        proc = subprocess.run(
+            [sys.executable, str(PLUGIN_ROOT / drive["argv"][0]), *drive["argv"][1:]],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8",
+            cwd=str(PLUGIN_ROOT), timeout=60)
+        self.assertEqual(proc.returncode, 2, proc.stdout)
+        self.assertIn("LedgerDuplicateId: DW-1 at lines 3 and 7", proc.stdout)
+
+    def test_shipped_deferred_mint_drive_refuses_by_name(self):
+        # Story 37.1: the mint surface the contract's plan-sync row names refuses
+        # a duplicate id with a terminal status block, not only in unit tests
+        manifest = runner.load_manifest()
+        drive = next(d for d in manifest["surfaces"]["tk-studio-plan-sync"]["drives"]
+                     if d["argv"][1:3] == ["deferred", "mint"])
+        self.assertEqual(drive["expect"], "refusal")
+        self.assertEqual(drive["marker"], "LedgerDuplicateId")
+        proc = subprocess.run(
+            [sys.executable, str(PLUGIN_ROOT / drive["argv"][0]), *drive["argv"][1:]],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8",
+            cwd=str(PLUGIN_ROOT), timeout=60)
+        self.assertEqual(proc.returncode, 2, proc.stdout)
+        self.assertIn("LedgerDuplicateId: DW-1 at lines 3 and 7", proc.stdout)
+        self.assertEqual(json.loads(proc.stdout)["status"], "blocked")
+
     def test_shipped_nested_root_drive_reports_the_nested_root(self):
         # Story 28.2 (driver contract 0.1.22): the activate surface is driven
         # from inside a nested studio project; the runner judges `json`, and

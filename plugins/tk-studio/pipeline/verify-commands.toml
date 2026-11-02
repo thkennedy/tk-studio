@@ -15,4 +15,8 @@
 #
 # The roster gate: a skill added without its released-roster row fails here,
 # inside the engine, never first on the host leg.
-commands = ["uv run --directory plugins/tk-studio/lib python -m unittest tests.test_release_roster"]
+# The ledger gate (Story 37.1): a duplicate `### DW-N:` heading fails here too.
+commands = [
+  "uv run --directory plugins/tk-studio/lib python -m unittest tests.test_release_roster",
+  "uv run --directory plugins/tk-studio/lib python -m unittest tests.test_dwledger",
+]
