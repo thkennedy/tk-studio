@@ -214,6 +214,9 @@ DRIFT: the heading regex drops the trailing space — a doubled heading must not
 | review | 1 | 2026-11-02T21:51:47Z | 2026-11-02T22:03:21Z | d75217a8-203a-465d-ba45-26c01a7d9080 | claude-opus-5-5 | medium | 3376479 | 66134 | 4.3468 | completed |
 | review | 2 | 2026-11-02T22:03:21Z | 2026-11-02T22:12:56Z | 4e56f9bb-551b-4581-a7f1-bdf7ae3c427d | claude-opus-5-5 | medium | 2672271 | 57103 | 3.9925 | completed |
 | gate | 1 | 2026-11-02T22:12:57Z | 2026-11-02T22:16:35Z | ab3c309f-29db-4dad-a5dd-967ecfc655af | claude-opus-5-5 | medium | 1150344 | 23619 | 1.8528 | completed |
+| host-leg | 1 | 2026-11-02T22:16:39Z | 2026-11-02T23:02:20Z | — | — | — | — | — | — | green |
+| close-out | 1 | 2026-11-02T23:02:20Z | 2026-11-02T23:02:28Z | — | — | — | — | — | — | PR |
+| merge | — | 2026-11-02T23:03:12Z | 2026-11-02T23:03:12Z | — | — | — | — | — | — | merged |
 
 ## Deviation Summary (continued)
 
