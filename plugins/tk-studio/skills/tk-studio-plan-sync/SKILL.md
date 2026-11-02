@@ -169,6 +169,19 @@ committed per-project counter at `.tk-studio/plan-counter.yaml`).
    and is not retried. `stage --from-pass --repo-root <root>` also flushes
    the planner's buffer left under the project root. Both end with the
    status block.
+   `deferred mint --directory <root> [--count N] [--dry-run]` (Story 37.1) is
+   the deferred-work ledger's one id source: the operator's docs pass runs it,
+   then writes its entries under the answered `ids`, never minting from the
+   ledger's highest heading. It reads `next.deferred-work` in
+   `.tk-studio/plan-counter.yaml` (seeded when absent, one past the highest
+   `DW-N` in the ledger), bumps it, keeps the ledger header's marker line and
+   names both files in `written[]`; the engine's harvest reads the marker, and
+   the studio-pipeline `pre_commit` hook bumps the counter after a harvest. It
+   and `ledger-resolve` refuse a duplicate `### DW-N:` heading by name
+   (`LedgerDuplicateId`), and both end with the status block. An entry closed
+   from inside a run, where no PR number exists yet, reads `by Story N.M`,
+   never `by this story's PR`, which `test_no_placeholder_pr_number_remains`
+   fails.
 
    `normalize --directory <root>` runs the canonicalization pass
    alone. Add `--dry-run` to preview without writing (under `jira` a
@@ -213,6 +226,9 @@ committed per-project counter at `.tk-studio/plan-counter.yaml`).
      matching the story, or a row field outside the Stage Log's columns;
      `stage-post` with an absent agent-seat variable or an entity with no
      `external.jira.key` — each named, no Atlassian call.
+   - **deferred refusal** — `LedgerDuplicateId: DW-N at lines a and b`, a bad
+     `next.deferred-work`, a bad `--count` or no ledger — named, nothing
+     written.
 
 3. Report:
    - **Attended:** summarize actions (created/repaired/unchanged, minted

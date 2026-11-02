@@ -555,3 +555,45 @@
 - What no longer holds: "`planstatus → closeout` is `frontmatter, jiraBound` :98, kept" (the edge is kept, the list is wider)
 - Suggested adjustment: cut `stopEngine` for both callers, keep the injected seams, confirm the SCCs at HEAD before the allowlist, use the refreshed anchors.
 - Status: closed — applied to the unstarted 36-7 entry's invoke_dev_with and to plans/36-7.md (Risks) by the 36-6 gate session (2026-10-31)
+
+## 37-2-the-windows-classes-out-of-the-host-leg — scope: stories — from 37-1-one-id-source-for-the-ledger — 2026-11-02
+
+- What changed: 37.1 made `by this story's PR` a test failure, so a closure from inside a run reads `by Story N.M`; ledger anchors moved; the hook writes the counter and marker.
+- What no longer holds: "`deferred-work.md`: DW-150 (:1181), DW-154 (:1213, re-homed here by 37.1), DW-155 (:1221) resolved." (its anchors or its closure form; no criterion changes)
+- Suggested adjustment: Close a ledger entry as `status: resolved <date> by Story N.M`, never `by this story's PR`, which `test_no_placeholder_pr_number_remains` fails (contract 0.1.32, Story 37.1). A hand-filed entry takes its id from `plansync.py deferred mint`. Before the `pre_commit` hook fires, a counter and marker behind a harvested id are expected: do not flag or hand-fix them; the hook's `.tk-studio/plan-counter.yaml` and marker-line writes are not a Files deviation. Ledger line anchors moved: re-grep by id.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the 37-1 gate session (2026-11-02)
+
+## 37-3-a-timed-out-session-keeps-its-stop-and-its-records — scope: stories — from 37-1-one-id-source-for-the-ledger — 2026-11-02
+
+- What changed: 37.1 made `by this story's PR` a test failure, so a closure from inside a run reads `by Story N.M`; ledger anchors moved; the hook writes the counter and marker.
+- What no longer holds: "DW-148, DW-157, DW-161 resolved." (its anchors or its closure form; no criterion changes)
+- Suggested adjustment: Close a ledger entry as `status: resolved <date> by Story N.M`, never `by this story's PR`, which `test_no_placeholder_pr_number_remains` fails (contract 0.1.32, Story 37.1). A hand-filed entry takes its id from `plansync.py deferred mint`. Before the `pre_commit` hook fires, a counter and marker behind a harvested id are expected: do not flag or hand-fix them; the hook's `.tk-studio/plan-counter.yaml` and marker-line writes are not a Files deviation. Ledger line anchors moved: re-grep by id.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the 37-1 gate session (2026-11-02)
+
+## 37-4-the-status-edges-and-the-rhythm-for-every-job — scope: stories — from 37-1-one-id-source-for-the-ledger — 2026-11-02
+
+- What changed: 37.1 made `by this story's PR` a test failure, so a closure from inside a run reads `by Story N.M`; ledger anchors moved; the hook writes the counter and marker.
+- What no longer holds: "DW-151, DW-159, DW-160 resolved." (its anchors or its closure form; no criterion changes)
+- Suggested adjustment: Close a ledger entry as `status: resolved <date> by Story N.M`, never `by this story's PR`, which `test_no_placeholder_pr_number_remains` fails (contract 0.1.32, Story 37.1). A hand-filed entry takes its id from `plansync.py deferred mint`. Before the `pre_commit` hook fires, a counter and marker behind a harvested id are expected: do not flag or hand-fix them; the hook's `.tk-studio/plan-counter.yaml` and marker-line writes are not a Files deviation. Ledger line anchors moved: re-grep by id.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the 37-1 gate session (2026-11-02)
+
+## 37-5-the-sweeps-bugs-and-cost-lines-before-a-fourth-sweep — scope: stories — from 37-1-one-id-source-for-the-ledger — 2026-11-02
+
+- What changed: 37.1 made `by this story's PR` a test failure, so a closure from inside a run reads `by Story N.M`; ledger anchors moved; the hook writes the counter and marker.
+- What no longer holds: "DW-136 to DW-139, DW-144 resolved." (its anchors or its closure form; no criterion changes)
+- Suggested adjustment: Close a ledger entry as `status: resolved <date> by Story N.M`, never `by this story's PR`, which `test_no_placeholder_pr_number_remains` fails (contract 0.1.32, Story 37.1). A hand-filed entry takes its id from `plansync.py deferred mint`. Before the `pre_commit` hook fires, a counter and marker behind a harvested id are expected: do not flag or hand-fix them; the hook's `.tk-studio/plan-counter.yaml` and marker-line writes are not a Files deviation. Ledger line anchors moved: re-grep by id.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the 37-1 gate session (2026-11-02)
+
+## 37-6-one-stop-path-and-the-gates-blind-spots — scope: stories — from 37-1-one-id-source-for-the-ledger — 2026-11-02
+
+- What changed: 37.1 made `by this story's PR` a test failure, so a closure from inside a run reads `by Story N.M`; ledger anchors moved; the hook writes the counter and marker.
+- What no longer holds: "DW-133, DW-162, DW-164 resolved (DW-135 already a duplicate)." (its anchors or its closure form; no criterion changes)
+- Suggested adjustment: Close a ledger entry as `status: resolved <date> by Story N.M`, never `by this story's PR`, which `test_no_placeholder_pr_number_remains` fails (contract 0.1.32, Story 37.1). A hand-filed entry takes its id from `plansync.py deferred mint`. Before the `pre_commit` hook fires, a counter and marker behind a harvested id are expected: do not flag or hand-fix them; the hook's `.tk-studio/plan-counter.yaml` and marker-line writes are not a Files deviation. Ledger line anchors moved: re-grep by id. DW-135 is already resolved by Story 37.1 as a duplicate of DW-133: leave it; AC3's DW-135 clause is met by that closure.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the 37-1 gate session (2026-11-02)
+
+## 37-7-the-records-reconciled-and-the-proofs-captured — scope: stories — from 37-1-one-id-source-for-the-ledger — 2026-11-02
+
+- What changed: 37.1 filed DW-168 for the four operator proofs, owned by this story, and moved the ledger's line anchors.
+- What no longer holds: "DW-145 `:1142-1147` (37.1 gave it `status: open`)" (its anchors or its closure form; no criterion changes)
+- Suggested adjustment: Story 37.1 filed DW-168 for the four operator proofs, owned here: cite it in the asks and leave it `open` (CAP-21: no other entry's status changes by this story). A hand-filed entry takes its id from `plansync.py deferred mint`. Before the `pre_commit` hook fires, a counter and marker behind a harvested id are expected: do not flag or hand-fix them; the hook's `.tk-studio/plan-counter.yaml` and marker-line writes are not a Files deviation. Ledger line anchors moved: re-grep by id.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the 37-1 gate session (2026-11-02)

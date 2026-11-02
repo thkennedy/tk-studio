@@ -122,7 +122,8 @@ Guarantees:
 `sweep` (Story 35.7, the `run-sweep` job type) starts one deferred-work
 sweep: it refuses, naming the gap and spawning nothing, a project with no
 `.bmad-loop/policy.toml` or no `_bmad-output/implementation-artifacts/
-deferred-work.md`, a live engine owning the checkout (as `start`: the run
+deferred-work.md`, a ledger with a duplicate heading (`LedgerDuplicateId`
+naming both lines, Story 37.1), a live engine owning the checkout (as `start`: the run
 ids and statuses named), a dirty tree (`git status --porcelain`, the paths
 named) and an existing run dir; then spawns `bmad-loop sweep --project <root>
 --no-prompt --run-id <rid> [--max-bundles <n>]` detached, polls for its
@@ -165,6 +166,7 @@ from pathlib import Path
 
 import _core
 import config as configlib
+import dwledger
 import job as joblib
 import jobrun
 import ledger
@@ -1833,6 +1835,13 @@ def sweep(project_root: Path, *, run_id: str | None = None, max_bundles: int | N
         gaps.append(f"no {LEDGER_REL}")
     if gaps:
         raise LaunchError("sweep refused: " + "; ".join(gaps))
+    # the triage's refusal (Story 37.1): the stock skill is never forked (AD-4), so it lands here
+    try:
+        dwledger.parse_ledger((root / LEDGER_REL).read_text(encoding="utf-8"))
+    except dwledger.LedgerDuplicateId as exc:
+        raise LaunchError(f"sweep refused: {exc}") from exc
+    except (OSError, UnicodeDecodeError) as exc:
+        raise LaunchError(f"sweep refused: {LEDGER_REL} unreadable: {exc}") from exc
     # one engine per checkout, as `start`: a retried sweep never spawns a second engine
     live = live_runs(list_runs(root))
     if live:

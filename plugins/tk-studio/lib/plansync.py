@@ -69,6 +69,7 @@ CLI:
   uv run plansync.py ledger-resolve --directory ROOT --pr OWNER/REPO#N
                                     --ids DW-a,DW-b [--date YYYY-MM-DD]
                                     [--dry-run]
+  uv run plansync.py deferred mint --directory ROOT [--count N] [--dry-run]
 
 `stage` (Story 35.8) writes the story spec's append-only `## Stage Log`
 table (stage, pass, started, ended, session_id, model, effort, tokens_in,
@@ -133,6 +134,17 @@ answer but a refusal (no ledger, a malformed `--pr` or id); the result
 names `resolved[]`, `pending[]`, `unchanged[]` and ends with the AD-11
 status block (`partial` while anything is pending).
 
+`deferred mint` (Story 37.1, DW-149) is the one id source for the ledger: it
+answers `ids` from `next.deferred-work` in the counter and bumps it in one
+atomic write, seeding an absent key first (the migration) as one past the
+highest `DW-N` anywhere in the ledger text. A counter behind the ledger skips
+the ids the ledger holds. It keeps the ledger header's marker line (lib/
+dwledger.py), which the engine's harvest reads, and names both files in
+`written[]`. A bad counter, a bad `--count`, no ledger or a duplicate heading
+is a refusal with nothing written. A duplicate heading is refused by name here
+and in `ledger-resolve` (`LedgerDuplicateId: DW-N at lines a and b`; `blocked`,
+exit 2, no `retryable`).
+
 `status` is the driver's status pull-back (Story 26.5, AD-5 status-class
 only): it sets one canonical story's `status`, stamps `updated`, replaces
 the entity's `external.driver` snapshot (caller, status, note,
@@ -164,6 +176,7 @@ from pathlib import Path
 import backlogmd
 import config as configlib
 import confluence
+import dwledger
 import interchange
 import jirabackend
 import mdstorage
@@ -3262,8 +3275,6 @@ def stage_rows(project_root: Path) -> list[dict]:
 # ------------------------------------------- Story 35.7: the sweep's ledger flip
 
 LEDGER_REL = IMPL_REL / "deferred-work.md"
-_DW_HEAD_RE = re.compile(r"^### (DW-\d+): ", re.MULTILINE)
-_ANY_HEAD_RE = re.compile(r"^#{1,6} ", re.MULTILINE)
 _DW_STATUS_RE = re.compile(r"^status:[ \t]*(.*)$", re.MULTILINE)
 _DW_RESOLUTION_RE = re.compile(r"^resolution:[ \t]*(.*)$", re.MULTILINE)
 _DW_ID_RE = re.compile(r"^DW-\d+$")
@@ -3285,14 +3296,8 @@ def pr_ref(pr: str) -> str:
 
 
 def _ledger_spans(text: str) -> dict[str, tuple[int, int]]:
-    """Each `### DW-NN:` entry's span (it ends at the next heading of any level)."""
-    spans: dict[str, tuple[int, int]] = {}
-    heads = list(_DW_HEAD_RE.finditer(text))
-    for i, m in enumerate(heads):
-        end = heads[i + 1].start() if i + 1 < len(heads) else len(text)
-        other = _ANY_HEAD_RE.search(text, m.end(), end)
-        spans.setdefault(m.group(1), (m.start(), other.start() if other else end))
-    return spans
+    """Each `### DW-NN:` entry's span; a duplicate heading is refused by name."""
+    return {e.id: (e.start, e.end) for e in dwledger.parse_ledger(text)}
 
 
 def resolved_status(date: str, ref: str, resolution: str) -> str:
@@ -3361,6 +3366,49 @@ def ledger_resolve(project_root: Path, pr: str, ids: list[str], date: str | None
                   f"pending (still open at the owner root): {', '.join(pending)}" if pending else None)
     result["ok"] = True  # every answer but a refusal: `pending` is retried, never refused
     return result
+
+
+DEFERRED_KEY = "deferred-work"
+
+
+def mint_deferred(project_root: Path, count: int = 1, *, dry_run: bool = False) -> dict:
+    """The ledger's one id source (see the module docstring)."""
+    root = Path(project_root)
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        raise PlanSyncError(f"deferred mint: --count must be an int >= 1: {count!r}")
+    path = root / LEDGER_REL
+    if not path.is_file():
+        raise PlanSyncError(f"deferred mint: no ledger at {LEDGER_REL.as_posix()}")
+    text = path.read_text(encoding="utf-8")
+    dwledger.parse_ledger(text)  # a duplicate heading refuses before anything is written
+    counter = load_counter(root)
+    nxt = counter["next"]
+    above = dwledger.highest_id(text) + 1
+    start = above
+    if DEFERRED_KEY in nxt:
+        current = nxt[DEFERRED_KEY]
+        if isinstance(current, bool) or not isinstance(current, int) or current < 1:
+            raise PlanSyncError(f"{counter_path(root)}: next.{DEFERRED_KEY} must be an int >= 1, "
+                                f"got {current!r}")
+        start = max(current, above)  # ids are never reused: a counter behind the ledger skips them
+    ids = [f"DW-{n}" for n in range(start, start + count)]
+    following = start + count
+    written: list[str] = []
+    if not dry_run:
+        # the counter first: a failure before the marker burns ids, never doubles one
+        nxt[DEFERRED_KEY] = following
+        save_counter(root, counter)
+        try:
+            _atomic_write(path, dwledger.with_marker(text, following - 1))
+        except Exception as exc:  # the counter moved: `written` says so, as staging derives from it
+            reason = (f"deferred mint: {', '.join(ids)} burned: the counter moved to {following} but the "
+                      f"ledger's marker write failed ({type(exc).__name__}: {exc})")
+            result = {"ids": ids, "next": following, "dry_run": dry_run,
+                      "written": [COUNTER_REL.as_posix()], "error": reason}
+            return _finish_stage(result, "blocked", reason)
+        written = [COUNTER_REL.as_posix(), LEDGER_REL.as_posix()]
+    result = {"ok": True, "ids": ids, "next": following, "dry_run": dry_run, "written": written}
+    return _finish_stage(result, "complete", None)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -3436,6 +3484,13 @@ def main(argv: list[str] | None = None) -> int:
     lrs.add_argument("--ids", required=True, help="comma-separated DW ids")
     lrs.add_argument("--date", default=None, help="YYYY-MM-DD (default: the engine's done date)")
     lrs.add_argument("--dry-run", action="store_true")
+    dfr = sub.add_parser("deferred")
+    dfr_sub = dfr.add_subparsers(dest="deferred_command", required=True)
+    mnt = dfr_sub.add_parser("mint")
+    mnt.add_argument("--directory", required=True, help="project root (walks up to the nearest)")
+    # Validated in code, not argparse's type: a refusal stays JSON (exit 2).
+    mnt.add_argument("--count", default="1", help="how many ids (default 1)")
+    mnt.add_argument("--dry-run", action="store_true")
     spo = sub.add_parser("stage-post")
     spo.add_argument("--directory", required=True, help="project root (walks up to the nearest)")
     spo.add_argument("--id", required=True, dest="entity_id",
@@ -3449,6 +3504,8 @@ def main(argv: list[str] | None = None) -> int:
         return _stage_main(args)
     if args.command == "ledger-resolve":
         return _ledger_resolve_main(args)
+    if args.command == "deferred":
+        return _deferred_main(args)
     # --directory walks up to the nearest project root (driver contract
     # 0.1.22): from inside a nested project the nested counter is minted.
     args.directory = configlib.find_project_root(Path(args.directory))
@@ -3499,7 +3556,7 @@ def _ledger_resolve_main(args) -> int:
     ids = [i.strip() for i in (args.ids or "").split(",") if i.strip()]
     try:
         result = ledger_resolve(root, args.pr, ids, date=args.date, dry_run=args.dry_run)
-    except PlanSyncError as exc:
+    except (PlanSyncError, dwledger.LedgerDuplicateId) as exc:
         result = _finish_stage({"written": []}, "blocked", str(exc))
         result["error"] = str(exc)
     except Exception as exc:  # never a traceback: the caller retries
@@ -3507,6 +3564,29 @@ def _ledger_resolve_main(args) -> int:
                                f"ledger-resolve: {type(exc).__name__}: {exc}")
         result["error"] = result["reason"]
         result["retryable"] = True
+    block = {k: result.pop(k) for k in ("status", "intent", "artifacts", "reason")}
+    result.update(block)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result.get("ok") else 2
+
+
+def _deferred_main(args) -> int:
+    """`deferred mint`: every answer ends in the JSON status block (AD-11); a
+    refusal exits 2 and carries no `retryable`."""
+    root = configlib.find_project_root(Path(args.directory))
+    try:
+        try:
+            count = int(args.count)
+        except ValueError:
+            raise PlanSyncError(f"deferred mint: --count must be an int >= 1: {args.count!r}") from None
+        result = mint_deferred(root, count, dry_run=args.dry_run)
+    except (PlanSyncError, dwledger.LedgerDuplicateId) as exc:
+        result = _finish_stage({"written": []}, "blocked", str(exc))
+        result["error"] = str(exc)
+    except Exception as exc:  # never a traceback
+        result = _finish_stage({"written": []}, "blocked",
+                               f"deferred mint: {type(exc).__name__}: {exc}")
+        result["error"] = result["reason"]
     block = {k: result.pop(k) for k in ("status", "intent", "artifacts", "reason")}
     result.update(block)
     print(json.dumps(result, ensure_ascii=False, indent=2))

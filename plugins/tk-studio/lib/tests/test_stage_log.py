@@ -23,6 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import config as configlib  # noqa: E402
+import dwledger  # noqa: E402
 import interchange  # noqa: E402
 import jirabackend  # noqa: E402
 import ledger  # noqa: E402
@@ -353,12 +354,152 @@ class NestedPipelineCopyTests(unittest.TestCase):
         self.assertEqual((self.NESTED / "meter_hook.py").read_bytes(),
                          (self.ROOT_COPY / "meter_hook.py").read_bytes())
 
+    def test_the_nested_gate_is_the_root_gate(self):
+        self.assertEqual((self.NESTED / "reconcile_gate.py").read_bytes(),
+                         (self.ROOT_COPY / "reconcile_gate.py").read_bytes())
+
     def test_the_nested_manifest_declares_the_same_post_session_hook(self):
         import tomllib
         nested = tomllib.loads((self.NESTED / "plugin.toml").read_text(encoding="utf-8"))
         root = tomllib.loads((self.ROOT_COPY / "plugin.toml").read_text(encoding="utf-8"))
         self.assertEqual(nested["hooks"]["post_session"], root["hooks"]["post_session"])
         self.assertEqual(nested["hooks"]["post_commit"], root["hooks"]["post_commit"])
+
+
+class PreCommitCounterBumpTests(unittest.TestCase):
+    """Story 37.1: the `pre_commit` hook lands the counter's bump in the story commit."""
+
+    HOOK = REPO_ROOT / ".bmad-loop" / "plugins" / "studio-pipeline" / "reconcile_gate.py"
+    COUNTER = "counter_version: 1\nnext:\n  epic: 38\n  story: 168\n  task: 1\n"
+    DOC = "# Deferred Work\n\n### DW-164: a\nstatus: open\n"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name) / "wt"
+        self.ledger = self.root / "_bmad-output" / "implementation-artifacts" / "deferred-work.md"
+        self.ledger.parent.mkdir(parents=True)
+        self.counter = plansync.counter_path(self.root)
+        self.counter.parent.mkdir(parents=True)
+        self.run_dir = Path(self._tmp.name) / "run"
+        self.run_dir.mkdir()
+
+    def _seed(self, doc: str, extra: str = "", journal: str = "") -> None:
+        self.ledger.write_text(doc, encoding="utf-8", newline="\n")
+        self.counter.write_text(self.COUNTER + extra, encoding="utf-8", newline="\n")
+        (self.run_dir / "journal.jsonl").write_text(journal, encoding="utf-8", newline="\n")
+
+    def _hook(self) -> subprocess.CompletedProcess:
+        env = {**os.environ, "BMAD_LOOP_WORKTREE": str(self.root), "BMAD_LOOP_RUN_DIR": str(self.run_dir),
+               "BMAD_LOOP_STORY_KEY": "37-1-none", "BMAD_LOOP_STAGE": "pre_commit"}
+        proc = subprocess.run([sys.executable, str(self.HOOK)], env=env, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=60, stdin=subprocess.DEVNULL)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("veto", proc.stdout)
+        return proc
+
+    def test_a_journal_harvest_bumps_the_counter_and_the_marker(self):
+        event = json.dumps({"kind": "spec-deferrals-harvested", "story_key": "k", "dw_ids": ["DW-164"]})
+        self._seed(self.DOC, journal="not json\n" + event + "\n")
+        proc = self._hook()
+        self.assertIn("next.deferred-work = 165", proc.stdout)
+        counter = plansync.load_counter(self.root)["next"]
+        self.assertEqual(counter, {"epic": 38, "story": 168, "task": 1, "deferred-work": 165})
+        self.assertIn(dwledger.marker_line(164), self.ledger.read_text(encoding="utf-8"))
+        # the hook's inline marker is the parser's, and the ledger still parses
+        self.assertEqual([e.id for e in dwledger.parse_ledger(self.ledger.read_text(encoding="utf-8"))], ["DW-164"])
+        self.assertEqual(self.ledger.read_text(encoding="utf-8"), dwledger.with_marker(self.DOC, 164))
+
+    def test_a_heading_at_or_above_the_counter_bumps_with_no_journal_event_and_renumbers_nothing(self):
+        doc = dwledger.with_marker(self.DOC, 164) + "\n### DW-165: harvested\nstatus: open\n\n### DW-166: too\nstatus: open\n"
+        self._seed(doc, "  deferred-work: 165\n")
+        self._hook()
+        self.assertEqual(plansync.load_counter(self.root)["next"]["deferred-work"], 167)
+        after = self.ledger.read_text(encoding="utf-8")
+        self.assertEqual(after, doc.replace("DW-164;", "DW-166;"))
+        self.assertEqual(plansync.mint_deferred(self.root, dry_run=True)["ids"], ["DW-167"])
+
+    def test_no_harvest_writes_nothing_and_says_nothing(self):
+        doc = dwledger.with_marker(self.DOC, 164)
+        for extra, text in (("", self.DOC), ("  deferred-work: 165\n", doc)):
+            self._seed(text, extra, journal=json.dumps({"kind": "story-done"}) + "\n")
+            before = self.ledger.read_bytes(), self.counter.read_bytes()
+            proc = self._hook()
+            self.assertNotIn("studio-ledger counter", proc.stdout)
+            self.assertEqual((self.ledger.read_bytes(), self.counter.read_bytes()), before)
+
+    def test_a_counter_ahead_of_the_ledger_is_never_lowered(self):
+        event = json.dumps({"kind": "spec-deferrals-harvested"})
+        self._seed(self.DOC, "  deferred-work: 300\n", journal=event + "\n")
+        self._hook()
+        self.assertEqual(plansync.load_counter(self.root)["next"]["deferred-work"], 300)
+        self.assertIn(dwledger.marker_line(299), self.ledger.read_text(encoding="utf-8"))
+
+    def test_a_bad_counter_is_left_with_a_line_and_never_a_veto(self):
+        event = json.dumps({"kind": "spec-deferrals-harvested"})
+        self._seed(self.DOC, "  deferred-work: nope\n", journal=event + "\n")
+        before = self.ledger.read_bytes(), self.counter.read_bytes()
+        proc = self._hook()
+        self.assertIn("left as it is", proc.stdout)
+        self.assertEqual((self.ledger.read_bytes(), self.counter.read_bytes()), before)
+
+    def test_a_bad_counter_with_no_harvest_writes_nothing_and_says_nothing(self):
+        for bad in ("nope", "0"):
+            self._seed(self.DOC, f"  deferred-work: {bad}\n", journal=json.dumps({"kind": "story-done"}) + "\n")
+            before = self.ledger.read_bytes(), self.counter.read_bytes()
+            proc = self._hook()
+            self.assertNotIn("studio-ledger counter", proc.stdout, bad)
+            self.assertEqual((self.ledger.read_bytes(), self.counter.read_bytes()), before, bad)
+
+    def test_the_gate_below_still_runs_after_the_bump(self):
+        event = json.dumps({"kind": "spec-deferrals-harvested"})
+        self._seed(self.DOC, journal=event + "\n")
+        proc = self._hook()
+        self.assertIn("nothing to check", proc.stdout)
+
+    @staticmethod
+    def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
+        # a GIT_DIR inherited from a calling git hook must not point these at the real repository
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        return subprocess.run(["git", *args], cwd=str(cwd), env=env, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=60, stdin=subprocess.DEVNULL)
+
+    def _commit_all(self, message: str) -> None:
+        for args in (("add", "-A"),
+                     ("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false",
+                      "commit", "--no-verify", "-m", message)):
+            proc = self._git(self.root, *args)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_the_bump_lands_in_the_story_commit_of_a_real_repository(self):
+        proc = self._git(self.root, "init")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self._seed(dwledger.with_marker(self.DOC, 164), "  deferred-work: 165\n")
+        self._commit_all("seed")
+        with self.ledger.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write("\n### DW-165: harvested\nstatus: open\n")
+        self._hook()
+        self._commit_all("story")  # what the engine's finalize_commit does
+        names = self._git(self.root, "show", "--name-only", "--format=", "HEAD")
+        self.assertEqual(names.returncode, 0, names.stderr)
+        self.assertIn(".tk-studio/plan-counter.yaml", names.stdout.splitlines())
+        self.assertIn(self.ledger.relative_to(self.root).as_posix(), names.stdout.splitlines())
+        committed = self._git(self.root, "show", "HEAD:.tk-studio/plan-counter.yaml")
+        self.assertEqual(committed.returncode, 0, committed.stderr)
+        self.assertIn("  deferred-work: 166", committed.stdout.splitlines())
+
+    def test_the_real_counter_is_tracked_and_not_ignored(self):
+        try:
+            top = self._git(REPO_ROOT, "rev-parse", "--show-toplevel")
+        except OSError as exc:
+            self.skipTest(f"no git: {exc}")
+        if top.returncode != 0 or Path(top.stdout.strip()).resolve() != REPO_ROOT.resolve():
+            self.skipTest("REPO_ROOT is not a git checkout")
+        path = ".tk-studio/plan-counter.yaml"
+        tracked = self._git(REPO_ROOT, "ls-files", "--error-unmatch", path)
+        self.assertEqual(tracked.returncode, 0, tracked.stderr)
+        ignored = self._git(REPO_ROOT, "check-ignore", path)
+        self.assertEqual(ignored.returncode, 1, ignored.stdout + ignored.stderr)
 
 
 class OperatorAndSupervisorTests(StageFixture):

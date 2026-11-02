@@ -14,6 +14,15 @@ object; `{"veto": {"action": "pause", "reason": ...}}` is honoured at pre_commit
 hook is declared blocking=false, so a crash here can never defer the unit —
 exit 0 on every path and never raise. Stdlib only: it runs under
 `uv run --no-project python`, so PyYAML is not guaranteed.
+
+The counter bump (Story 37.1, DW-149) runs first, as this is the one seam before
+the engine squashes the tree into the story commit. After a harvest (the journal's
+`spec-deferrals-harvested`, or a `### DW-N:` heading at or above the counter) it
+sets `next.deferred-work` in `.tk-studio/plan-counter.yaml` to the greater of the
+counter and the ledger's highest + 1, and the ledger's marker line to one below that
+value. It never renumbers an id, never lowers the counter and never vetoes; with no
+harvest it writes and prints nothing, a bad counter included. It keeps the marker's
+text from lib/dwledger.py inline, as this hook imports no plugin module.
 """
 
 from __future__ import annotations
@@ -25,6 +34,16 @@ import sys
 from pathlib import Path
 
 ARTIFACTS = Path("_bmad-output") / "implementation-artifacts"
+LEDGER = ARTIFACTS / "deferred-work.md"
+COUNTER = Path(".tk-studio") / "plan-counter.yaml"
+HARVEST_EVENT = "spec-deferrals-harvested"
+MARKER = "<!-- deferred-work counter: last minted DW-{}; mint through plansync.py deferred mint -->"
+MARKER_RE = re.compile(r"^<!-- deferred-work counter: last minted DW-\d+; mint through plansync\.py deferred mint -->$", re.M)
+HEAD_RE = re.compile(r"^### DW-(\d+):", re.M)
+ANY_ID_RE = re.compile(r"\bDW-(\d+)\b")
+COUNTER_RE = re.compile(r"^([ \t]+)deferred-work:[ \t]*(.*?)[ \t]*$", re.M)
+NEXT_RE = re.compile(r"^next:[ \t]*$", re.M)
+TITLE_RE = re.compile(r"\A# [^\n]*(?:\n+|\Z)")
 
 
 def _frontmatter(text: str) -> dict[str, str]:
@@ -56,9 +75,96 @@ def _bool(value: str | None, default: bool) -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _harvested(env) -> bool:
+    """The run's journal holds a harvest (read only; bad lines skipped)."""
+    run_dir = env.get("BMAD_LOOP_RUN_DIR")
+    if not run_dir:
+        return False
+    try:
+        lines = (Path(run_dir) / "journal.jsonl").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return False
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and entry.get("kind") == HARVEST_EVENT:
+            return True
+    return False
+
+
+def _write(path: Path, text: str) -> None:
+    tmp = path.with_name(f"{path.name}.studio-{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def _with_marker(text: str, last: int) -> str:
+    """lib/dwledger.py with_marker, inline (pinned equal by test_stage_log)."""
+    line = MARKER.format(last)
+    if MARKER_RE.search(text):
+        return MARKER_RE.sub(lambda _: line, text, count=1)
+    title = TITLE_RE.match(text)
+    at = title.end() if title else 0
+    head = text[:at]
+    if head and not head.endswith("\n\n"):
+        head = head.rstrip("\n") + "\n\n"
+    return f"{head}{line}\n\n{text[at:]}"
+
+
+def bump_counter(root: Path, env) -> str | None:
+    """The post-harvest bump: one advisory line, or None when nothing changed."""
+    ledger, counter = root / LEDGER, root / COUNTER
+    if not ledger.is_file() or not counter.is_file():
+        return None
+    text = ledger.read_text(encoding="utf-8")
+    counted = counter.read_text(encoding="utf-8")
+    found = COUNTER_RE.search(counted)
+    current = None
+    if found:
+        current = int(found.group(2)) if found.group(2).isdigit() else 0
+    bad = current is not None and current < 1
+    heads = [int(n) for n in HEAD_RE.findall(text)]
+    above = current is not None and not bad and bool(heads) and max(heads) >= current
+    if not above and not _harvested(env):
+        return None
+    if bad:
+        return f"studio-ledger counter: next.deferred-work is not an int >= 1 ({found.group(2)!r}); left as it is"
+    target = max(current or 1, max((int(n) for n in ANY_ID_RE.findall(text)), default=0) + 1)
+    if found:
+        new_counted = counted[:found.start(2)] + str(target) + counted[found.end(2):]
+    else:
+        at = NEXT_RE.search(counted)
+        if at is None:
+            return "studio-ledger counter: no `next:` block in the counter; left as it is"
+        new_counted = f"{counted[:at.end()]}\n  deferred-work: {target}{counted[at.end():]}"
+    new_text = _with_marker(text, target - 1)
+    if new_counted == counted and new_text == text:
+        return None
+    if new_counted != counted:
+        _write(counter, new_counted)
+    if new_text != text:
+        _write(ledger, new_text)
+    return f"studio-ledger counter: next.deferred-work = {target} (the greater of the counter and the ledger's highest + 1), in this commit"
+
+
 def main() -> int:
     env = os.environ
     root = Path(env.get("BMAD_LOOP_WORKTREE") or env.get("BMAD_LOOP_REPO_ROOT") or ".")
+    try:
+        note = bump_counter(root, env)
+        if note:
+            print(note)
+    except Exception as e:  # never a veto, and the gate below still runs
+        print(f"studio-ledger counter: skipped ({e})")
     key = env.get("BMAD_LOOP_STORY_KEY", "")
     min_score_raw = env.get("BMAD_LOOP_SETTING_MIN_SCORE", "2")
     fail_closed = _bool(env.get("BMAD_LOOP_SETTING_FAIL_CLOSED"), False)

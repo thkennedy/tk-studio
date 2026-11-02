@@ -2356,6 +2356,29 @@ class SweepVerbTestCase(unittest.TestCase):
             self.assertIn(gap, parsed["reason"])
             self.assertEqual(fake.spawned, [])
 
+    def test_sweep_refuses_a_duplicate_ledger_heading_before_any_engine_spawns(self):
+        root = self._sweep_project()
+        led = root / "_bmad-output" / "implementation-artifacts" / "deferred-work.md"
+        led.write_text("# Deferred Work\n\n### DW-7: one\nstatus: open\n\n### DW-7: two\nstatus: open\n",
+                       encoding="utf-8")
+        _git(root, "add", "-A")
+        _git(root, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "dup")
+        fake = self._wire(_SweepSubstrate(triage=TRIAGE))
+        code, parsed = self._cli(["sweep", "--directory", str(root)])
+        self.assertEqual(code, 2)
+        self.assertEqual(parsed["status"], "blocked")
+        self.assertIn("LedgerDuplicateId: DW-7 at lines 3 and 6", parsed["reason"])
+        self.assertEqual(fake.spawned, [])
+        self.assertFalse((root / ".bmad-loop" / "runs").exists())
+
+    def test_the_tracked_gate_carries_the_ledger_command_beside_the_roster(self):
+        import tomllib
+        toml = (Path(__file__).resolve().parents[2] / "pipeline" / "verify-commands.toml").read_text(encoding="utf-8")
+        commands = tomllib.loads(toml)["commands"]
+        self.assertEqual(commands, [
+            "uv run --directory plugins/tk-studio/lib python -m unittest tests.test_release_roster",
+            "uv run --directory plugins/tk-studio/lib python -m unittest tests.test_dwledger"])
+
     def test_sweep_refuses_an_existing_run_dir_as_start_does(self):
         root = self._sweep_project()
         (root / ".bmad-loop" / "runs" / self.RID).mkdir(parents=True)
