@@ -317,7 +317,7 @@ class ProvenanceTests(PublishTestCase):
         return subprocess.run(
             ["git", "-c", "user.name=T", "-c", "user.email=t@example.com",
              "-c", "commit.gpgsign=false", *args], cwd=self.root,
-            capture_output=True, text=True, check=True).stdout.strip()
+            capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
 
     def test_footer_names_the_last_commit_that_touched_the_source(self):
         self.git("init", "-q")

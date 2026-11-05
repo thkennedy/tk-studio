@@ -850,12 +850,12 @@ describe("AC3: a story with no landed work is left for the resume", () => {
       finally { sbx.answer({}); }
       expect(answer).toEqual({ ok: true, run_id: fx.run.run_id, state: "running", engine_run_id: E1 });
       const want = ["exec", SB, "/home/agent/.local/bin/bmad-loop", "resolve", "--project", toVmPath(fx.wt), "--no-interactive", "--resume",
-        ...(patch ? ["--restore-patch", toVmPath(join(fx.wt, patch))] : []), E1];
+        ...(patch ? ["--restore-patch", toVmPath(join(fx.wt, patch))] : []), E1]; // win-ok: fx.wt is a real host temp path, as the code joins it
       expect(sbx.calls().map((c) => c.argv)).toContainEqual(want);
       const er = ev(fx.queue, fx.run.run_id, "engine-resume");
       expect(er).toHaveLength(1);
       expect(er[0]).toMatchObject({ from_state: "paused", to_state: "running" });
-      expect(er[0]!.detail).toMatchObject({ engine_run_id: E1, argv: want.slice(0), ...(patch ? { restore_patch: toVmPath(join(fx.wt, patch)) } : {}) });
+      expect(er[0]!.detail).toMatchObject({ engine_run_id: E1, argv: want.slice(0), ...(patch ? { restore_patch: toVmPath(join(fx.wt, patch)) } : {}) }); // win-ok: a host temp path
       expect(ev(fx.queue, fx.run.run_id, "engine-pid").at(-1)!.detail).toMatchObject({ pid: 7001, start: "200000", source: "engine.pid", resumed: true });
       expect(fx.get()).toMatchObject({ engine_pid: 7001, engine_start: "200000" });
       // The child (the hold) exits: the run is handed back to the engine-end sweep with a fresh `launched`.

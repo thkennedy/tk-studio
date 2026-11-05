@@ -3169,6 +3169,46 @@ class DriverContractTestCase(unittest.TestCase):
         # a prefix with a trailing optional group for later stories (the C8 rule), never the whole row
         self.assertRegex(stories, r"Story 36\.7 \(Epic 36\), Story 37\.1(, Story 37\.\d+)* \(Epic 37\)")
 
+    def test_0_1_32_story_37_2_the_windows_classes_out_of_the_host_leg(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertEqual(header.count("0.1.32 (Story 37.2, additive)"), 1)
+        self.assertLess(header.index("0.1.32 (Story 37.1, additive)"),
+                        header.index("0.1.32 (Story 37.2, additive)"))
+        clause = " ".join(header[header.index("0.1.32 (Story 37.2, additive)"):].split())
+        for phrase in ("the Windows classes out of the host leg", "`e2e_windows_semantics`", "30 000 ms host figure",
+                       "`--timeout`", "`verdicts`", "`red`", "— additive) |"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        self.assertEqual(flat.count("**0.1.32 (Story 37.2, additive).**"), 1)
+        self.assertLess(flat.index("**0.1.32 (Story 37.1, additive).**"), flat.index("**0.1.32 (Story 37.2, additive).**"))
+        note = flat[flat.index("**0.1.32 (Story 37.2, additive).**"):]
+        note = note[:note.index("## 8. Conformance")]
+        for phrase in ("`e2e_windows_semantics.py` (under `tk-studio-activate`", "the 0.1.31 encoding drive and its steps unchanged",
+                       "`plugins/tk-studio/lib`, `apps/supervisor/src`, `apps/supervisor/test`, `_bmad/scripts` and `tools`",
+                       "the POSIX tail after `toVmPath(studioRoot(env))` is the rule", "WinError 183",
+                       "the host decodes cp1252", "`win-ok: <reason>`", "`_budget.HOST_TEST_TIMEOUT_MS = 30_000`",
+                       "`bun_test_args()`", "`SUPERVISOR_TEST_TIMEOUT_MS` (pinned equal by its test)",
+                       "No engine gate runs bun", "applies to `verify_host.py` and the drives",
+                       "`verdicts?: string[]`", "the `(cwd …)` headers and the `== <suite> failed (rc=N); last …` tail headers excluded",
+                       "absent on a green leg", "under `Verdicts:`", "`verdicts` and `red`", "`[\"lib suite\", \"supervisor\"]`",
+                       "**The serve process:**", "Every other field, kind and route is unchanged.",
+                       "a TypeScript `renameSync` from a tmp file (never a dir or folder source) exempt",
+                       "a Python `os.rename`/`Path.rename` from a tmp path is not",
+                       "a bun drive whose derived suite bound (its `BOUND_S = suite_bound(…)`: the manifest `timeout` less",
+                       "a bun drive with no manifest entry, no `BOUND_S = suite_bound(…)` or `suite_bound` arguments",
+                       "the scan stopping at the first tail header", "a gate's reason line (`<app> changed since <sha>`, `…; running anyway`) never",
+                       "the supervisor gate's own refusals"):
+            self.assertIn(phrase, note)
+        self.assertNotIn("manifest `timeout` is under the figure plus", note)
+        self.assertNotIn("or a tmp-to-file rename exempt", note)
+        self.assertIn("`{ok, run_id, state, head, green, skipped?, reason?, verdicts?, red?, pr, pr_ready?, worktree}`", flat)
+        conformance = flat[flat.index("## 8. Conformance"):]
+        self.assertIn("`e2e_windows_semantics.py` fails the Windows classes", conformance[:2000])
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertRegex(stories, r"Story 37\.1, Story 37\.2(, Story 37\.\d+)* \(Epic 37\)")
+
     def test_story_35_7_the_skill_sweep_waits_540_s_inside_the_bash_cap(self):
         # the skill's one sweep call must print its block inside the Bash tool's 600 s cap
         skill = (PLUGIN_ROOT / "skills" / "tk-studio-launch" / "SKILL.md").read_text(encoding="utf-8")

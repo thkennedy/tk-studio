@@ -986,7 +986,7 @@ def swap(ctx: Ctx, plan: Plan) -> None:
     except Refusal:
         if plan.previous is not None:
             try:
-                os.rename(plan.previous, plan.old_slot)
+                os.rename(plan.previous, plan.old_slot)  # win-ok: undoes this function's rename; old_slot is gone
                 plan.previous = None
             except OSError:
                 pass
@@ -1008,7 +1008,7 @@ def rollback(ctx: Ctx, swapped: list[Plan], snapshot: bytes | None) -> str:
         if plan.previous is None:
             continue
         try:
-            os.rename(plan.previous, plan.old_slot)
+            os.rename(plan.previous, plan.old_slot)  # win-ok: undoes swap()'s rename; old_slot was moved aside
             notes.append(f"{plan.app} slot {plan.old_slot} renamed back")
             plan.previous = None
         except OSError as exc:
@@ -1400,7 +1400,7 @@ def cli_leg(ctx: Ctx, entry: dict | None, uv_entry: dict | None) -> dict:
     if failed:
         if moved and not exe.exists():
             try:
-                os.rename(old, exe)
+                os.rename(old, exe)  # win-ok: guarded by `not exe.exists()`; a file, never a folder
             except OSError:
                 pass
         raise Refusal("CliUpdateFailed", f"uv tool install --force {wheel}: "

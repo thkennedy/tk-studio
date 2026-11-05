@@ -126,6 +126,7 @@ import {
   type WorkerKill,
 } from "./queue";
 import { rerunHostLeg, VerifyRefused, type HostLegStarted } from "./hostleg";
+import { redSuites } from "./hostverify";
 import { emitTriage, engineCostOf, engineJobRun, isSweep, recordTriage, stopEngineAt, sweepRecord, sweepSummary, withEngineCost, type SweepSummary } from "./sweep";
 import { armStop, closeOutPaused, enginePidKnown, isRunEpic, launchedSinceMove, resumePaused, rhythmOf, runDirOf, stopArmed, type PausedDeps, type ResumeAnswer, type ResumeDeps as EngineResumeDeps } from "./closeout";
 import { readJournal } from "./office";
@@ -2758,9 +2759,10 @@ const USAGE = [
 export interface VerifyVerbSeams { queue?: Queue; leg?: (queue: Queue, runId: string) => Promise<HostLegStarted> }
 
 /** Story 33.8: `bun src/cli.ts verify <run id>` — an ended run's host leg re-run in the foreground (`hostleg.ts`). One
- * JSON object: `{ok: true, run_id, state, head, rerun: true, green, skipped?, reason?, pr, pr_ready?, pr_draft?, pr_body?,
- * commit?, pushed?, worktree}` (Story 35.1: `rerun: true`, a red leg's `reason`, and the `rerun` member's new fields — the
- * body rewrite, the red flip, a slice run's commit and push); exit 0 green, 1 red or skipped, 2 a refusal
+ * JSON object: `{ok: true, run_id, state, head, rerun: true, green, skipped?, reason?, verdicts?, red?, pr, pr_ready?, pr_draft?,
+ * pr_body?, commit?, pushed?, worktree}` (Story 35.1: `rerun: true`, a red leg's `reason`, and the `rerun` member's new fields —
+ * the body rewrite, the red flip, a slice run's commit and push; Story 37.2: a red leg's `verdicts` and the suites they name
+ * red, absent on green or when none printed); exit 0 green, 1 red or skipped, 2 a refusal
  * (`{ok: false, error, detail}`) or a usage error. */
 export async function verifyVerb(args: string[], seams: VerifyVerbSeams = {}): Promise<number> {
   if (args.length !== 1 || !args[0]!.trim()) { console.error(USAGE); return 2; }
@@ -2772,10 +2774,13 @@ export async function verifyVerb(args: string[], seams: VerifyVerbSeams = {}): P
     const started = await (seams.leg ?? ((q: Queue, id: string) => rerunHostLeg(q, id, { by: "cli" })))(queue, runId);
     const r = await started.done;
     const green = !r.skipped && r.green;
+    // Story 37.2 (DW-150): a red leg's verdict lines, and the suites they name red; absent otherwise.
+    const verdicts = !r.skipped && !green ? r.verdicts ?? [] : [];
     const x = r.rerun;
     console.log(JSON.stringify({
       ok: true, run_id: started.run_id, state: started.state, head: started.head, rerun: true, green,
-      ...(r.skipped ? { skipped: true, reason: r.reason } : r.reason !== undefined ? { reason: r.reason } : {}), pr: x.pr,
+      ...(r.skipped ? { skipped: true, reason: r.reason } : r.reason !== undefined ? { reason: r.reason } : {}),
+      ...(verdicts.length ? { verdicts, red: redSuites(verdicts) } : {}), pr: x.pr,
       ...(x.pr_ready !== undefined ? { pr_ready: x.pr_ready } : {}), ...(x.pr_draft !== undefined ? { pr_draft: x.pr_draft } : {}),
       ...(x.pr_body !== undefined ? { pr_body: x.pr_body } : {}), ...(x.commit !== undefined ? { commit: x.commit } : {}),
       ...(x.pushed !== undefined ? { pushed: x.pushed } : {}), worktree: x.worktree,

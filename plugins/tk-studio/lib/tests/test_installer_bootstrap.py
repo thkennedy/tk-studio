@@ -260,7 +260,8 @@ class Scripts(unittest.TestCase):
                    "MARK": mark}
             for _ in range(2):
                 proc = subprocess.run(["sh", "-c", "set -eu\n" + block],
-                                      env=env, capture_output=True, text=True)
+                                      env=env, capture_output=True, text=True,
+                                      encoding="utf-8")
                 self.assertEqual(proc.returncode, 0, proc.stderr)
             for name in (".profile", ".zprofile", ".bash_profile"):
                 with self.subTest(profile=name):
@@ -433,7 +434,7 @@ class Scripts(unittest.TestCase):
     @unittest.skipIf(shutil.which("bash") is None, "bash not on PATH")
     def test_bash_n_install_sh(self):
         proc = subprocess.run(["bash", "-n", str(SH)], capture_output=True,
-                              text=True)
+                              text=True, encoding="utf-8")
         self.assertEqual(proc.returncode, 0, proc.stderr)
 
 

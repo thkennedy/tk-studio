@@ -709,7 +709,7 @@ class PlayableTestCase(unittest.TestCase):
 
         def nt_alive(pid: int) -> bool:
             done = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True,
-                                  text=True, timeout=10, check=False)
+                                  text=True, encoding="utf-8", errors="replace", timeout=10, check=False)
             return str(pid) in done.stdout
 
         self.assertTrue(playable.kill_tree(proc))

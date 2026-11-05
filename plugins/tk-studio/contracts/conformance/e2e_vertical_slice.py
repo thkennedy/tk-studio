@@ -39,7 +39,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from _budget import suite_bound  # the sibling helper: the suite's bound derives from the manifest entry's timeout
+from _budget import bun_test_args, suite_bound  # the sibling helper: the suite's bound derives from the manifest entry's timeout
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 SUITES = ["test/approve.test.ts", "test/hostverify.test.ts", "test/hostleg.test.ts"]
@@ -51,9 +51,9 @@ TYPE_ID = "run-vertical-slice"
 # fix-forward), with the install's bound beside it: the suite step measured about 100 s on the
 # Windows host with the Story 35.1 filter (hole 87's lesson: bounds follow the box, not the planner).
 INSTALL_BOUND_S = 40
+# The host figure (DW-150): each test inside BOUND_S holds `_budget.HOST_TEST_TIMEOUT_MS` (30 000 ms, passed by
+# `bun_test_args()`), and the bounds step of e2e_windows_semantics holds BOUND_S >= that figure + HEADROOM_S.
 BOUND_S = suite_bound("e2e_vertical_slice.py", install_s=INSTALL_BOUND_S)
-# A multi-file run needs the flag: the preload's `setDefaultTimeout` reaches only the first file (bun 1.4.3).
-TEST_TIMEOUT_MS = "30000"
 TAIL = 20
 
 
@@ -137,7 +137,7 @@ def suite_steps() -> list[dict]:
         started = time.monotonic()
         try:
             proc = subprocess.run(
-                [bun, "test", "--timeout", TEST_TIMEOUT_MS, *SUITES, "-t", FILTER], cwd=str(supervisor), env=env,
+                [bun, "test", *bun_test_args(), *SUITES, "-t", FILTER], cwd=str(supervisor), env=env,
                 stdin=subprocess.DEVNULL, capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=BOUND_S)
         except subprocess.TimeoutExpired:

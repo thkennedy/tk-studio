@@ -241,7 +241,7 @@ def score_case(doc: object, case: str, runs: int) -> dict:
 def cli_version(cli: str) -> str:
     try:
         res = subprocess.run([*_cli_argv(cli), "--version"], capture_output=True, text=True,
-                             timeout=VERSION_TIMEOUT_S)
+                             encoding="utf-8", errors="replace", timeout=VERSION_TIMEOUT_S)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise Refusal(f"claude CLI unavailable: {cli}: {exc}")
     if res.returncode != 0:

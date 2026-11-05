@@ -290,26 +290,36 @@ class DriveBoundsTests(unittest.TestCase):
         for module in self.BUN_DRIVES:
             with self.subTest(drive=module):
                 drive, _ = self._conformance(module)
-                self.assertIn("from _budget import suite_bound", (conformance / f"{module}.py").read_text(encoding="utf-8"))
+                self.assertRegex((conformance / f"{module}.py").read_text(encoding="utf-8"),
+                                 r"from _budget import (?:\w+, )*suite_bound\b")
                 entries = [d for surface in manifest["surfaces"].values() for d in surface.get("drives", [])
                            if d.get("argv", [None])[0] == f"contracts/conformance/{module}.py"]
                 self.assertEqual(len(entries), 1)
-                other = getattr(drive, "CORE_CALLS", 0) * getattr(drive, "CORE_BOUND_S", 0) + getattr(drive, "TRIAGE_WAIT_S", 0)
+                other = (getattr(drive, "CORE_CALLS", 0) * getattr(drive, "CORE_BOUND_S", 0) + getattr(drive, "TRIAGE_WAIT_S", 0)
+                         + getattr(drive, "GIT_STEPS", 0) * getattr(drive, "GIT_BOUND_S", 0))  # Story 37.2 (B7): the git steps
                 self.assertEqual(drive.BOUND_S, entries[0]["timeout"] - drive.INSTALL_BOUND_S - other - budget.HEADROOM_S)
                 self.assertGreater(entries[0]["timeout"], runner.DEFAULT_TIMEOUT)  # so the manifest raises the cap
 
-    def test_a_multi_file_suite_raises_bun_s_per_test_timeout_by_the_flag(self):
+    def test_every_bun_drive_passes_the_timeout_from_the_budget_s_host_figure(self):
         # on bun 1.4.3 the preload default reaches only a run's first file, so a later file's tests
-        # get above bun's 5 s only through the flag
-        _, conformance = self._conformance("_budget")
+        # get above bun's 5 s only through the flag (DW-155); Story 37.2: every bun drive, one file
+        # or many, takes it from `_budget`'s host figure, never a copy
+        budget, conformance = self._conformance("_budget")
+        self.assertEqual(budget.HOST_TEST_TIMEOUT_MS, 30_000)
+        self.assertEqual(budget.bun_test_args(), ["--timeout", "30000"])
         multi_file = []
         for module in self.BUN_DRIVES:
             drive, _ = self._conformance(module)
+            text = (conformance / f"{module}.py").read_text(encoding="utf-8")
             if len(getattr(drive, "SUITES", [])) > 1:
                 multi_file.append(module)
-                with self.subTest(drive=module):
-                    self.assertGreater(int(drive.TEST_TIMEOUT_MS), 5000)
-                    self.assertIn('"--timeout", TEST_TIMEOUT_MS', (conformance / f"{module}.py").read_text(encoding="utf-8"))
+            with self.subTest(drive=module):
+                self.assertRegex(text, r"from _budget import (?:\w+, )*bun_test_args\b")
+                self.assertIn('[bun, "test", *bun_test_args(), ', text)
+                self.assertNotRegex(text, r"(?m)^\s*\w*TEST_TIMEOUT_MS\s*=")  # no copy of the figure
+                # DW-150: the bound line names the host figure beside it
+                self.assertRegex(text, r"_budget\.HOST_TEST_TIMEOUT_MS`[^\n]*\n[^\n]*\nBOUND_S = suite_bound\(")
+                self.assertEqual(text.count('"test"'), text.count("*bun_test_args()"))
         # guard the guard: the walk must keep reading the real multi-file drives
         self.assertLessEqual({"e2e_paused_exits", "e2e_vertical_slice"}, set(multi_file))
 
@@ -340,7 +350,13 @@ class DriveBoundsTests(unittest.TestCase):
                    if d.get("argv", [None])[0] == "contracts/conformance/e2e_run_sweep.py"]
         self.assertEqual(len(entries), 1)
         self.assertEqual(drive.TRIAGE_WAIT_S, 5)
-        self.assertEqual(drive.BOUND_S, entries[0]["timeout"] - drive.INSTALL_BOUND_S - drive.TRIAGE_WAIT_S - budget.HEADROOM_S)
+        # Story 37.2 (B7): the drive's own git steps are bounded and counted before the suite
+        self.assertEqual((drive.GIT_STEPS, drive.GIT_BOUND_S), (3, 20))
+        self.assertEqual(drive.BOUND_S, entries[0]["timeout"] - drive.INSTALL_BOUND_S - drive.TRIAGE_WAIT_S
+                         - drive.GIT_STEPS * drive.GIT_BOUND_S - budget.HEADROOM_S)
+        self.assertIn("timeout=GIT_BOUND_S", (conformance / "e2e_run_sweep.py").read_text(encoding="utf-8"))
+        # the suite bound still holds the host figure with headroom
+        self.assertGreater(drive.BOUND_S, budget.HOST_TEST_TIMEOUT_MS / 1000 + budget.HEADROOM_S)
 
     def test_budget_refuses_a_bound_that_is_not_positive(self):
         budget = self._budget_over({"surfaces": {"s": {"drives": [

@@ -420,7 +420,7 @@ def unignored_writes(project_root: Path) -> list[str]:
     try:
         proc = subprocess.run(["git", "check-ignore", "--no-index", *rels],
                               cwd=project_root, capture_output=True, text=True,
-                              timeout=30)
+                              encoding="utf-8", errors="replace", timeout=30)
     except (OSError, subprocess.SubprocessError):
         return []
     if proc.returncode not in (0, 1):

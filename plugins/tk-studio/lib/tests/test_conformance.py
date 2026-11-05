@@ -26,6 +26,7 @@ sys.path.insert(0, str(PLUGIN_ROOT / "contracts" / "conformance"))
 
 import runner  # noqa: E402
 import e2e_text_encoding  # noqa: E402
+import e2e_windows_semantics  # noqa: E402
 
 SKILL_TEMPLATE = """\
 ---
@@ -118,7 +119,7 @@ class ConformanceHarnessTestCase(unittest.TestCase):
         d.mkdir()
         (d / "SKILL.md").write_text(
             SKILL_TEMPLATE.format(name="tk-studio-other"), encoding="utf-8")
-        os.rename(d / "SKILL.md", d / "SKILL.md")  # keep dir shape explicit
+        os.rename(d / "SKILL.md", d / "SKILL.md")  # keep dir shape explicit; win-ok: a file renamed onto itself
         self._write_manifest({"tk-studio-fake": self._entry()})
         report = self._run()
         self.assertIn("status-block",
@@ -1115,6 +1116,341 @@ class TextEncodingDriveTestCase(unittest.TestCase):
         for phrase in ('`encoding="utf-8"`', "Linux defaults to UTF-8", "the Windows host to cp1252",
                        "the sandbox gate passes what the host leg fails", "`e2e_text_encoding`"):
             self.assertIn(phrase, text)
+
+
+class WindowsSemanticsDriveTestCase(unittest.TestCase):
+    """Story 37.2 (holes 108, 110; DW-154, DW-155): the Windows-only classes fail the run naming the call site."""
+
+    SCOPES = ["plugins/tk-studio/lib", "apps/supervisor/src", "apps/supervisor/test", "_bmad/scripts", "tools"]
+
+    def _tree(self, files: dict[str, str]) -> Path:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        plugin = Path(tmp.name) / "plugins" / "tk-studio"
+        (plugin / "lib").mkdir(parents=True)
+        for rel, text in files.items():
+            path = Path(tmp.name) / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        return plugin
+
+    def _py(self, source: str) -> list[str]:
+        return e2e_windows_semantics.python_hits(source, "f.py")
+
+    def _ts(self, source: str) -> list[str]:
+        return e2e_windows_semantics.ts_hits(source, "f.ts")
+
+    def test_the_real_tree_is_green_and_the_drive_is_registered(self):
+        report = e2e_windows_semantics.run()
+        self.assertTrue(report["ok"], json.dumps(report, indent=2))
+        names = [s["step"] for s in report["steps"]]
+        self.assertEqual(names, [*self.SCOPES, "bounds"])
+        if e2e_text_encoding._checkout(PLUGIN_ROOT) is not None:
+            self.assertFalse(any("not_run" in s for s in report["steps"]), report["steps"])
+        drives = runner.load_manifest()["surfaces"]["tk-studio-activate"]["drives"]
+        entry = next(d for d in drives if d.get("argv") == ["contracts/conformance/e2e_windows_semantics.py"])
+        self.assertEqual((entry["assertion"], entry["expect"]), ("headless-clean", "ok"))
+        self.assertGreater(entry["timeout"], runner.DEFAULT_TIMEOUT)
+        # the encoding drive stays as it was: never widened (Settled shape 1)
+        self.assertEqual([s["step"] for s in e2e_text_encoding.run()["steps"]], ["lib", "tools/installer", "apps/*/scripts"])
+
+    def test_a_planted_site_of_each_class_fails_the_drive_naming_the_site_and_the_rule(self):
+        plugin = self._tree({
+            "apps/supervisor/package.json": "{}",
+            "apps/supervisor/src/stop.ts": 'const a = toVmPath(join(root, "x"));\n',
+            "apps/supervisor/test/p.test.ts": 'expect(join(a, b)).toContain("x/y");\n',
+            "_bmad/scripts/r.py": "import os\n\ndef move(staging, destination):\n    os.rename(staging, destination)\n",
+            "tools/t.py": 'import subprocess\nsubprocess.run(["git", "status"], text=True)\n',
+            "plugins/tk-studio/lib/tests/test_j.py": 'def t(self):\n    self.assertTrue(str(Path(a) / b).endswith("x/y"))\n',
+        })
+        proc = subprocess.run(
+            [sys.executable, str(Path(e2e_windows_semantics.__file__)), "--plugin-root", str(plugin)],
+            capture_output=True, encoding="utf-8", stdin=subprocess.DEVNULL, timeout=60)
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        report = json.loads(proc.stdout)
+        self.assertFalse(report["ok"])
+        steps = {s["step"]: s for s in report["steps"]}
+        for step, site, rule in (
+                ("apps/supervisor/src", "apps/supervisor/src/stop.ts:1 class (a)", "toVmPath(studioRoot(env))"),
+                ("apps/supervisor/test", "apps/supervisor/test/p.test.ts:1 class (b)", "backslashes on win32"),
+                ("_bmad/scripts", "_bmad/scripts/r.py:4 class (c)", "WinError 183"),
+                ("tools", "tools/t.py:2 class (d)", "cp1252"),
+                ("plugins/tk-studio/lib", "plugins/tk-studio/lib/tests/test_j.py:2 class (b)", "hole 110")):
+            with self.subTest(step=step):
+                self.assertFalse(steps[step]["ok"])
+                self.assertIn(site, steps[step]["detail"])
+                self.assertIn(rule, steps[step]["detail"])
+
+    def test_the_regression_shapes_stay_flagged_un_fixed_and_pass_fixed(self):
+        # 6d0a0cc (#313): the joined core path asserted against a POSIX-relative core
+        unfixed = 'def t(self, calls, defn):\n    self.assertTrue(calls[0][1].endswith(defn["target"]["core"][0]))\n'
+        fixed = unfixed.replace("calls[0][1].endswith", 'calls[0][1].replace("\\\\", "/").endswith')
+        self.assertEqual(len(self._py(unfixed)), 1)
+        self.assertIn("class (b)", self._py(unfixed)[0])
+        self.assertEqual(self._py(fixed), [])
+        # bcfa691 (#307): render_skill.py's staging-rename retry with no empty-folder clear
+        retry = ("import os\n\ndef stage(staging, destination):\n    for attempt in range(5):\n        try:\n"
+                 "            os.rename(staging, destination)\n            break\n        except PermissionError:\n"
+                 "            pass\n")
+        cleared = retry.replace("            pass\n", "            if destination.is_dir():\n"
+                                "                os.rmdir(destination)\n")
+        self.assertEqual(len(self._py(retry)), 1)
+        self.assertIn("WinError 183", self._py(retry)[0])
+        self.assertEqual(self._py(cleared), [])
+        # bcfa691 (#307): sweep.ts stopEngineAt through pluginRoot(env), a path.join, into toVmPath
+        stop = ('const argv = ["exec", where.sandbox, "uv", "run", `${toVmPath(pluginRoot(env)).replace(/\\/+$/, "")}'
+                '/lib/launch.py`, "stop"];\n')
+        tail = stop.replace("toVmPath(pluginRoot(env))", "toVmPath(studioRoot(env))").replace("/lib/launch", "/plugins/tk-studio/lib/launch")
+        self.assertEqual(len(self._ts(stop)), 1)
+        self.assertEqual(self._ts(tail), [])
+
+    def test_every_scope_is_scanned_when_it_exists(self):
+        plugin = self._tree({"apps/supervisor/package.json": "{}",
+                             "_bmad/scripts/a.py": 'subprocess.Popen(cmd, universal_newlines=True)\n',
+                             "tools/installer/cli/b.py": 'p.rename(q)\n'})
+        report = e2e_windows_semantics.run(plugin)
+        steps = {s["step"]: s for s in report["steps"]}
+        self.assertFalse(report["ok"])
+        self.assertTrue(steps["plugins/tk-studio/lib"]["ok"])
+        self.assertIn("_bmad/scripts/a.py:1 class (d)", steps["_bmad/scripts"]["detail"])
+        self.assertIn("tools/installer/cli/b.py:1 class (c)", steps["tools"]["detail"])
+        self.assertIn("not_run", steps["apps/supervisor/src"])
+        self.assertIn("not_run", steps["apps/supervisor/test"])
+
+    def test_an_absent_scope_is_a_not_run_step_and_ok(self):
+        report = e2e_windows_semantics.run(self._tree({"plugins/tk-studio/lib/a.py": "x = 1\n"}))
+        steps = {s["step"]: s for s in report["steps"]}
+        for step in self.SCOPES[1:]:
+            with self.subTest(step=step):
+                self.assertTrue(steps[step]["ok"])
+                self.assertIn("not_run", steps[step])
+        self.assertTrue(steps["plugins/tk-studio/lib"]["ok"])
+        self.assertNotIn("not_run", steps["plugins/tk-studio/lib"])
+
+    def test_an_unparsable_python_file_is_a_red_hit(self):
+        plugin = self._tree({"plugins/tk-studio/lib/bad.py": "def (:\n"})
+        lib = next(s for s in e2e_windows_semantics.run(plugin)["steps"] if s["step"] == "plugins/tk-studio/lib")
+        self.assertFalse(lib["ok"])
+        self.assertIn("bad.py:1 unparsable", lib["detail"])
+
+    def test_flagged_python_shapes(self):
+        for source in (
+                # (b)
+                'self.assertTrue(str(Path(a) / b).endswith("x/y"))', 'assert os.path.join(a, b).endswith("x/y")',
+                'self.assertTrue(Path(a).resolve().__str__().endswith("a/b"))',
+                'self.assertTrue(argv[2].endswith(rel))', 'self.assertTrue(calls[0][1].endswith(f"{d}/x"))',
+                # (c)
+                'os.rename(a, b)', 'Path(a).rename(b)', 'import os as o\no.rename(a, b)',
+                'def f(a, b):\n    shutil.rmtree(c)\n    os.rename(a, b)',
+                # (c): Python's rename refuses any existing destination, so a tmp source is no exemption
+                'os.rename(tmp, path)', 'tmp_path.rename(path)', 'os.rename(attempt_dir, dst)',
+                'os.rename(staging_tmp_dir, dst)', 'os.rename(a, rapid_dir)',
+                # (c): by keyword
+                'os.rename(src=a, dst=b)', 'os.rename(a, dst=b)', 'p.rename(target=q)',
+                # (d)
+                'subprocess.run(c, text=True)', 'subprocess.Popen(c, universal_newlines=True)',
+                'subprocess.check_output(c, text=True)', 'subprocess.check_call(c, text=True)',
+                'subprocess.call(c, text=True)', 'import subprocess as sp\nsp.run(c, text=True)',
+                'from subprocess import run\nrun(c, text=True)', 'from subprocess import Popen as P\nP(c, text=True)',
+                'subprocess.run(c, text=True, encoding=None)', 'subprocess.run(c, text=flag)',
+                'mod.subprocess.run(c, text=True)'):
+            with self.subTest(source=source):
+                self.assertEqual(len(self._py(source)), 1, source)
+
+    def test_exempt_python_shapes(self):
+        for source in (
+                # (b): a normalised subject, a subject that is no join, a suffix with no `/`, no assertion
+                'self.assertTrue(str(Path(a) / b).replace("\\\\", "/").endswith("x/y"))',
+                'self.assertTrue(Path(a, b).as_posix().endswith("x/y"))',
+                'self.assertTrue(url.endswith("/transitions"))', 'self.assertTrue(c[1].endswith("/comment"))',
+                'self.assertTrue(os.path.join(a, b).endswith("x"))', 'ok = str(Path(a) / b).endswith("x/y")',
+                # (c): the clear, a pid or random part, tmp-to-file, the inline win-ok
+                'def f(a, b):\n    os.rename(a, b)\n    if b.is_dir():\n        os.rmdir(b)',
+                'def f(a, b):\n    shutil.rmtree(b)\n    os.rename(a, b)', 'def f(a, b):\n    _remove(b)\n    os.rename(a, b)',
+                'def f(a, b):\n    b.unlink()\n    a.rename(b)',
+                'os.rename(a, f"{a}.{os.getpid()}")', 'def f(a):\n    aside = f"{a}.{uuid.uuid4().hex}"\n    os.rename(a, aside)',
+                'os.rename(a, f"{a}.{lock_pid}")', 'os.rename(a, b)  # win-ok: b never exists here',
+                'os.replace(a, b)',
+                # (d): encoding named, **kwargs, text off, another callee's `text=`
+                'subprocess.run(c, text=True, encoding="utf-8")', 'subprocess.run(c, universal_newlines=True, encoding=e)',
+                'subprocess.run(c, **kwargs)', 'subprocess.run(c, text=False)', 'subprocess.run(c, capture_output=True)',
+                'self.subTest(text="x")', 'engage.scope(text=True)', 'run(c, text=True)',
+                'subprocess.run(c, text=True)  # win-ok: the child prints ASCII only'):
+            with self.subTest(source=source):
+                self.assertEqual(self._py(source), [], source)
+
+    def test_flagged_and_exempt_typescript_shapes(self):
+        for source in ('toVmPath(join(root, "x"))', 'toVmPath(resolve(root))', 'toVmPath(pluginRoot(env))',
+                       'toVmPath(studioScript(env, "x"))', 'join(toVmPath(root), "x")', '["exec", sb, join(a, "b")]',
+                       'expect(join(a, b)).toContain("x/y")', 'expect(resolve(a)).toEndWith("/x")',
+                       'expect(join(a, b)).toBe("a/b")', 'expect(join(a, b)).not.toContain("x/y")',
+                       'renameSync(src, dst);', 'function f() {\n  rmSync(other);\n  renameSync(src, dst);\n}',
+                       # a join through the node:path namespace
+                       'toVmPath(path.join(root, "x"))', 'expect(path.resolve(a)).toContain("x/y")',
+                       'toVmPath(nodePath.resolve(root))',
+                       # a renameSync with no trailing semicolon, in an arrow or an expression
+                       'const f = () => renameSync(a, b)', 'ok ? renameSync(a, b) : null', 'renameSync(a, join(d, "x"))',
+                       # no tmp token (attempt, templates), a tmp folder, no pid token (rapid)
+                       'renameSync(attempt_dir, dst);', 'renameSync(templates, dst);', 'renameSync(staging_tmp_dir, dst);',
+                       'renameSync(tmpDir, dst);', 'renameSync(a, rapid);'):
+            with self.subTest(source=source):
+                self.assertEqual(len(self._ts(source)), 1, source)
+        for source in ('`${toVmPath(studioRoot(env)).replace(/\\/+$/, "")}/plugins/tk-studio`', 'toVmPath(root)',
+                       '`${toVmPath(root)}/${rel.split(sep).join("/")}`', 'parts.join("/")',
+                       'expect(join(a, b).replace(/\\\\/g, "/")).toContain("x/y")', 'expect(argv[3]).toEndWith("/lib/launch.py")',
+                       'expect(join(a, b)).toContain("x")', 'toVmPath(join(fx.wt, p)); // win-ok: a host temp path',
+                       'renameSync(tmp, path);', 'function f() {\n  rmSync(media, { recursive: true });\n  renameSync(dir, media);\n}',
+                       'function f() {\n  const aside = `${lock}.stale-${process.pid}`;\n  renameSync(lock, aside);\n}',
+                       'renameSync(a, b); // win-ok: b is a file the caller removed',
+                       # an array's join and posix.join stay exempt; a tmp file token; comment lines
+                       'toVmPath(parts.join("/"))', 'toVmPath(posix.join(a, "b"))', 'toVmPath(path.posix.join(a, "b"))',
+                       'renameSync(`${path}.tmp`, path)', 'renameSync(tmpFile, path)',
+                       'renameSync(a, `${b}.${process.pid}`)', ' * toVmPath(join(root, "x")) in a JSDoc line',
+                       '/* renameSync(a, b) */', '/** toVmPath(join(a, b)) */', '// renameSync(a, b)',
+                       # a call split across lines is out of the line scan's reach (the drive's docstring)
+                       'renameSync(\n  a,\n  b,\n);'):
+            with self.subTest(source=source):
+                self.assertEqual(self._ts(source), [], source)
+
+    def test_a_sibling_method_or_arrow_clear_does_not_exempt_a_typescript_rename(self):
+        # (i) a class method's clear is no clear of its sibling method's rename; (ii) nor a sibling arrow's
+        sibling_method = ("export class Mover {\n  clean() {\n    rmSync(dst);\n  }\n"
+                          "  move() {\n    renameSync(src, dst);\n  }\n}\n")
+        sibling_arrow = ("export function f() {\n  const a = () => rmSync(out);\n"
+                         "  const b = () => renameSync(src, out);\n}\n")
+        plugin = self._tree({"apps/supervisor/package.json": "{}",
+                             "apps/supervisor/src/mover.ts": sibling_method,
+                             "apps/supervisor/src/arrows.ts": sibling_arrow})
+        detail = next(s for s in e2e_windows_semantics.run(plugin)["steps"] if s["step"] == "apps/supervisor/src")
+        self.assertFalse(detail["ok"])
+        self.assertIn("apps/supervisor/src/mover.ts:6 class (c)", detail["detail"])
+        self.assertIn("apps/supervisor/src/arrows.ts:3 class (c)", detail["detail"])
+        self.assertIn("WinError 183", detail["detail"])
+        # a clear earlier in the same method or the same arrow body stays exempt
+        for source in ("export class Mover {\n  move() {\n    rmSync(dst);\n    renameSync(src, dst);\n  }\n}\n",
+                       "export class Mover {\n  async move(src: string): Promise<void> {\n    if (existsSync(dst)) {\n"
+                       "      rmSync(dst, { recursive: true });\n    }\n    renameSync(src, dst);\n  }\n}\n",
+                       "export function f() {\n  const b = () => {\n    rmSync(out);\n    renameSync(src, out);\n  };\n}\n",
+                       "export function f() {\n  const b = () => { rmSync(out); renameSync(src, out); };\n}\n"):
+            with self.subTest(source=source):
+                self.assertEqual(self._ts(source), [], source)
+        # a control block is no function: the clear before the `if` still guards the rename in it
+        self.assertEqual(self._ts("function f() {\n  rmSync(dst);\n  if (ok) {\n    renameSync(src, dst);\n  }\n}\n"), [])
+        # a sibling method's clear before a control-keyword block stays a hit
+        self.assertEqual(len(self._ts("class M {\n  a() {\n    rmSync(dst);\n  }\n  b() {\n"
+                                      "    for (const x of xs) {\n      renameSync(src, dst);\n    }\n  }\n}\n")), 1)
+
+    def test_a_bare_os_rename_import_is_read_through(self):
+        plugin = self._tree({"apps/supervisor/package.json": "{}",
+                             "_bmad/scripts/m.py": "from os import rename\n\ndef move(src, dst):\n    rename(src, dst)\n"})
+        step = next(s for s in e2e_windows_semantics.run(plugin)["steps"] if s["step"] == "_bmad/scripts")
+        self.assertFalse(step["ok"])
+        self.assertIn("_bmad/scripts/m.py:4 class (c)", step["detail"])
+        self.assertIn("WinError 183", step["detail"])
+        for source in ("from os import rename as mv\nmv(a, b)", "from os import rename\nrename(src=a, dst=b)"):
+            with self.subTest(source=source):
+                self.assertEqual(len(self._py(source)), 1, source)
+        for source in ("from os import rename\n\ndef move(src, dst):\n    if os.path.isdir(dst):\n"
+                       "        os.rmdir(dst)\n    rename(src, dst)\n",
+                       "from os import rename as mv\n\ndef move(src, dst):\n    shutil.rmtree(dst)\n    mv(src, dst)\n",
+                       "rename(a, b)", "from shutil import move as rename\nrename(a, b)"):
+            with self.subTest(source=source):
+                self.assertEqual(self._py(source), [], source)
+
+    def test_the_bounds_step_names_the_host_figure(self):
+        flagged = {'subprocess.run([bun, "test", *SUITES])': "--timeout",
+                   'subprocess.run(["bun", "test", f"./{rel}"])': "30 000 ms host figure",
+                   'subprocess.run(["git", "init"], check=True)': "timeout="}
+        for source, phrase in flagged.items():
+            with self.subTest(source=source):
+                hits = e2e_windows_semantics.bounds_hits(source, "d.py", drive=True)
+                self.assertEqual(len(hits), 1, hits)
+                self.assertIn(phrase, hits[0])
+                self.assertIn("30 000 ms", hits[0])
+        for source in ('subprocess.run([bun, "test", *bun_test_args(), *SUITES])',
+                       'subprocess.run(["bun", "test", "--timeout", str(T), f"./{rel}"])',
+                       'subprocess.run(["git", "init"], check=True, timeout=GIT_BOUND_S)',
+                       'subprocess.run([bun, "install", "--frozen-lockfile"])'):
+            with self.subTest(source=source):
+                self.assertEqual(e2e_windows_semantics.bounds_hits(source, "d.py", drive=True), [])
+        # a git call outside a drive (verify_host.py's own, bounded by GIT_TIMEOUT) is the leg's, not this rule's
+        self.assertEqual(e2e_windows_semantics.bounds_hits('subprocess.run(["git", "x"])', "v.py", drive=False), [])
+
+    def _drives(self, manifest: dict | None, drives: dict[str, str]) -> Path:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        plugin = Path(tmp.name)
+        folder = plugin / "contracts" / "conformance"
+        folder.mkdir(parents=True)
+        if manifest is not None:
+            entries = [{"argv": [f"contracts/conformance/{name}"], "timeout": t} for name, t in manifest.items()]
+            (folder / "manifest.json").write_text(json.dumps({"surfaces": {"s": {"drives": entries}}}), encoding="utf-8")
+        for name, text in drives.items():
+            (folder / name).write_text(text, encoding="utf-8")
+        return plugin
+
+    def test_the_bounds_step_checks_each_derived_suite_bound_under_the_plugin_root_manifest(self):
+        drive = ('import subprocess\nINSTALL_BOUND_S = 40\nGIT_BOUND_S = 5\n'
+                 'BOUND_S = suite_bound("d.py", install_s=INSTALL_BOUND_S, other_s=2 * GIT_BOUND_S)\n'
+                 'subprocess.run([bun, "test", *bun_test_args()], timeout=BOUND_S)\n')
+        # 60 - 40 - 10 - 15 = -5: the manifest timeout alone (60 > 45) would pass it
+        step = e2e_windows_semantics.bounds_step(self._drives({"d.py": 60}, {"d.py": drive}), None)
+        self.assertFalse(step["ok"])
+        self.assertIn("contracts/conformance/d.py: suite bound -5 s", step["detail"])
+        self.assertIn("30 000 ms host figure", step["detail"])
+        # 120 - 40 - 10 - 15 = 55 >= 30 + 15: green, read from this plugin root's manifest, not the module's
+        self.assertTrue(e2e_windows_semantics.bounds_step(self._drives({"d.py": 120}, {"d.py": drive}), None)["ok"])
+        # a bun drive missing from the manifest, or with no derived bound, is a red hit, never an exception
+        for manifest, text, phrase in (({}, drive, "no manifest entry"), (None, drive, "no manifest entry"),
+                                       ({"d.py": 120}, drive.replace("BOUND_S = suite_bound", "BOUND_S = max"),
+                                        "no `BOUND_S = suite_bound"),
+                                       ({"d.py": 120}, drive.replace("2 * GIT_BOUND_S", "f()"), "no module constants")):
+            with self.subTest(phrase=phrase, manifest=manifest):
+                step = e2e_windows_semantics.bounds_step(self._drives(manifest, {"d.py": text}), None)
+                self.assertFalse(step["ok"])
+                self.assertIn(phrase, step["detail"])
+                self.assertIn("30 000 ms", step["detail"])
+        # a drive that runs no bun is no bun drive
+        self.assertTrue(e2e_windows_semantics.bounds_step(self._drives({}, {"e.py": "x = 1\n"}), None)["ok"])
+
+    def test_the_bounds_step_reads_a_twice_registered_drive_as_the_budget_does(self):
+        # _budget._manifest_timeout: the first entry with a `timeout` wins; None only when no entry names one
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        manifest = Path(tmp.name) / "manifest.json"
+        argv = lambda name: [f"contracts/conformance/{name}"]  # noqa: E731
+        manifest.write_text(json.dumps({"surfaces": {
+            "s": {"drives": [{"argv": argv("d.py")}, {"argv": argv("d.py"), "timeout": 120},
+                             {"argv": argv("e.py")}]},
+            "t": {"drives": [{"argv": argv("d.py"), "timeout": 60}, {"argv": argv("d.py")},
+                             {"argv": argv("e.py")}]}}}), encoding="utf-8")
+        self.assertEqual(e2e_windows_semantics._manifest_timeouts(manifest), {"d.py": 120, "e.py": None})
+
+    def test_the_host_figure_is_the_preload_s(self):
+        import _budget  # noqa: E402 - the sibling helper, on sys.path above
+        self.assertEqual(_budget.HOST_TEST_TIMEOUT_MS, 30_000)
+        self.assertEqual(_budget.bun_test_args(), ["--timeout", "30000"])
+        checkout = e2e_text_encoding._checkout(PLUGIN_ROOT)
+        preload = checkout / "apps" / "supervisor" / "test" / "preload.ts" if checkout else None
+        if preload is None or not preload.is_file():
+            self.skipTest("no checkout: an archive run has no supervisor")
+        self.assertIn("setDefaultTimeout(30_000)", preload.read_text(encoding="utf-8"))
+
+    def test_agents_md_carries_the_second_pitfall(self):
+        repo_root = e2e_text_encoding._checkout(PLUGIN_ROOT)
+        agents = repo_root / "AGENTS.md" if repo_root else None
+        if agents is None or not agents.is_file():
+            self.skipTest("no AGENTS.md: an archive run has no repo root")
+        text = agents.read_text(encoding="utf-8")
+        block = text[text.index("<!-- bmad:context -->"):text.index("<!-- /bmad:context -->")]
+        pitfalls = [line for line in block.splitlines() if line.startswith("- ")]
+        self.assertGreaterEqual(len(pitfalls), 2, pitfalls)  # pitfall lines are added by design (bmad-project-context)
+        windows = [line for line in pitfalls if "`e2e_windows_semantics`" in line]
+        self.assertTrue(windows, f"no pitfall line names `e2e_windows_semantics`: {pitfalls}")
+        for phrase in ("`toVmPath(studioRoot(env))`", "WinError 183", "cp1252", "`--timeout`", "holes 108, 110",
+                       "`e2e_windows_semantics`", "`win-ok: <reason>`",
+                       "(for `bun test`: a conformance bun drive's or `tools/verify_host.py`'s without `--timeout`)"):
+            self.assertIn(phrase, windows[0])
 
 
 if __name__ == "__main__":

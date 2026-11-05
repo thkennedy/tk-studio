@@ -79,7 +79,7 @@ class IndexTests(KbTestCase):
         self._write("old.md", "# Old\n")
         kb.generate_index(self.project)
         self.assertIn("old.md", self._index())
-        (self.project / "kb" / "old.md").rename(self.project / "kb" / "new.md")
+        (self.project / "kb" / "old.md").rename(self.project / "kb" / "new.md")  # win-ok: new.md never exists here
         result = kb.generate_index(self.project)
         self.assertTrue(result["changed"])
         text = self._index()
@@ -181,7 +181,7 @@ class IndexTitleTests(KbTestCase):
         subprocess.run(["git", "-c", "commit.gpgsign=false",
                         "-c", "core.hooksPath=" + os.devnull, *args],
                        cwd=cwd, check=True, env=self._git_env(),
-                       capture_output=True, text=True, timeout=30)
+                       capture_output=True, text=True, encoding="utf-8", timeout=30)
 
     def _generate_isolated(self, root: Path) -> None:
         with mock.patch.dict(os.environ, self._git_env(), clear=True):

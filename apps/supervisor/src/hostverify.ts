@@ -14,9 +14,13 @@
  *            `detached` on win32, the tree killed on timeout), the worker's env (`buildWorkerEnv`), under the
  *            host-tier worker's wall-clock guard; both streams go to files, so a timeout keeps their tails.
  *   result   a `host-verify` event: `{command, argv, cwd, exit, duration_ms, signal?, guard?, error?, green,
- *            stdout_tail, stderr_tail, engine}`, or `{skipped: true, reason}` (no `engine`). Green is exit 0; a
+ *            stdout_tail, stderr_tail, verdicts?, engine}`, or `{skipped: true, reason}` (no `engine`). Green is exit 0; a
  *            timeout, a spawn failure or a non-zero exit is red: the run ends `partial` naming the command, the
- *            PR a draft.
+ *            PR a draft. Story 37.2 (DW-150): on a red host command, `verdicts` lists every suite's own verdict line
+ *            from its stdout (`tools/verify_host.py`'s `== <lib suite|conformance|supervisor|studio-web>: …`; the
+ *            `(cwd …)` headers and the `== <suite> failed (rc=N); last …` tail headers excluded; the gate-level
+ *            `ok`/`FAILED`/`skipped` lines always, a per-file `supervisor` line only with a fail, an `rc=` or a
+ *            timeout), beside the 20-line tails a lib failure can hide behind; absent on green or when none print.
  *   engine   Story 34.1: the engine gate. `verify: {engine: "<one command line>"}` beside `host` in the same
  *            base config, split the same way, runs only after the host command is green, in the same cwd, as its
  *            own step through the same wrapper under the same full guard. Its env is the host step's (worker env,
@@ -129,6 +133,8 @@ export type HostVerifyRan = {
   started_at?: string;
   /** The signal that killed the command (not the guard), when one did. */
   signal?: string; guard?: string; error?: string; green: boolean; stdout_tail: string[]; stderr_tail: string[];
+  /** Story 37.2 (DW-150): every suite's own verdict line (`verdictLines`), only on a red host command that printed one. */
+  verdicts?: string[];
   /** Hole 46 (win32): Git's `usr\bin` put first on the leg's PATH, when it was there. */
   git_bash?: string;
   /** Hole 52 (win32): the command's first token as spawned, when it was a bare name found in that `usr\bin`. */
@@ -313,6 +319,51 @@ export async function verifyCommand(run: Run, deps: Deps = {}): Promise<VerifyCo
   };
 }
 
+/** Story 37.2 (DW-150): a `tools/verify_host.py` line naming one of its suites. */
+const SUITE_LINE = /^== (lib suite|conformance|supervisor|studio-web): (.*)$/;
+/** A suite's gate-level verdict (`== lib suite: FAILED rc=1 in 3s`, `== supervisor: ok in 90s; …`, `skipped (…)`). */
+const GATE_VERDICT = /^(?:ok|FAILED|skipped)\b/;
+/** A per-file (or install, tsc) `supervisor` line that failed: a non-zero fail count, an `rc=`, a timeout, `FAILED`. */
+const SUPERVISOR_RED = /\b[1-9]\d* fail\b|\brc=|timed out|\bFAILED\b/;
+/** The supervisor gate's own refusals (`verify_host.py` `run_supervisor_gate`): the temp folder not made, inside a
+ * checkout or not removed, or no test files — a gate-level cause, kept as a verdict. */
+const SUPERVISOR_REFUSAL = /^(?:cannot create the temp folder |the temp folder .* is inside a git checkout |no test\/\*\.test\.ts files under |could not remove )/;
+/** The reason `verify_host.py` prints before a gate runs (`app_changed`): `<rel> changed since <sha>`, or a git
+ * failure `…; running anyway` (which can carry an `rc=` or `timed out`) — never a verdict. */
+const GATE_REASON = /; running anyway$|^\S+ changed since \S*$/;
+/** `verify_host.py`'s failing-gate tail header (`== <name> failed (rc=N); last N lines:`, no `: ` after the name, so
+ * a reason line's `git ls-files failed (rc=N)` never matches): the tails after it repeat child output (and the
+ * supervisor's refusals), so the scan stops there. */
+const TAIL_HEADER = /^== [^:]+ failed \(rc=-?\d+\); last \d+ lines:$/;
+
+/** Story 37.2 (DW-150): every suite's own verdict line in a leg's stdout, in order, each clipped and redacted. The
+ * `(cwd …)` headers and the reasons a gate runs never match, and the scan stops at the first `== <suite> failed
+ * (rc=N); last …` tail header; a per-file `supervisor` line only when it failed, its gate refusals always. */
+export function verdictLines(stdout: string): string[] {
+  const lines: string[] = [];
+  for (const raw of stdout.split(/\r?\n/)) {
+    const line = raw.replace(/\s+$/, "");
+    if (TAIL_HEADER.test(line)) break;
+    const m = SUITE_LINE.exec(line);
+    if (!m || line.includes("(cwd ")) continue;
+    const rest = m[2]!;
+    if (GATE_VERDICT.test(rest)) { lines.push(clip(line)); continue; }
+    if (m[1] !== "supervisor" || GATE_REASON.test(rest)) continue;
+    if (SUPERVISOR_RED.test(rest) || SUPERVISOR_REFUSAL.test(rest)) lines.push(clip(line));
+  }
+  return lines;
+}
+
+/** Story 37.2: the suites a leg's verdict lines name red (any line not `ok`/`skipped`), each once, in order. */
+export function redSuites(verdicts: readonly string[]): string[] {
+  const red: string[] = [];
+  for (const line of verdicts) {
+    const m = SUITE_LINE.exec(line);
+    if (m && !/^(?:ok|skipped)\b/.test(m[2]!) && !red.includes(m[1]!)) red.push(m[1]!);
+  }
+  return red;
+}
+
 /** The last `TAIL_LINES` non-empty-ended lines of a stream, each clipped and redacted. */
 export function tail(text: string, n = TAIL_LINES): string[] {
   const t = text.replace(/\s+$/, "");
@@ -452,7 +503,10 @@ export async function hostVerify(run: Run, guardS: number, deps: Deps = {}, opts
   const argv = [...cmd.argv];
   const resolved = resolveBare(argv, gitBash);
   if (resolved) argv[0] = resolved;
-  const host = await runStep(argv, cwd, env, guardS, deps);
+  // Story 37.2 (DW-150): the whole stdout, so a red leg names every suite's verdict, not only the tail's.
+  const hostOut: { stdout?: string } = {};
+  const host = await runStep(argv, cwd, env, guardS, deps, hostOut);
+  const verdicts = stepGreen(host) ? [] : verdictLines(hostOut.stdout ?? "");
   // Story 34.8: the assets step (a slice run only), after a green host command, before the engine gate.
   let assets: AssetsStep | undefined;
   if (opts.slice) {
@@ -495,7 +549,8 @@ export async function hostVerify(run: Run, guardS: number, deps: Deps = {}, opts
     command: cmd.command, argv: cmd.argv, cwd, exit: host.exit, duration_ms: host.duration_ms, started_at: startedAt, ...(gitBash ? { git_bash: gitBash } : {}), ...(resolved ? { resolved } : {}),
     ...(host.signal ? { signal: host.signal } : {}), ...(host.guard ? { guard: host.guard } : {}), ...(host.error ? { error: host.error } : {}),
     green: stepGreen(host) && assets?.verdict !== "red" && engine.verdict !== "red" && playable.verdict !== "fail" && playable.verdict !== "inconclusive",
-    stdout_tail: host.stdout_tail, stderr_tail: host.stderr_tail, engine, playable, ...(assets ? { assets } : {}),
+    stdout_tail: host.stdout_tail, stderr_tail: host.stderr_tail, ...(verdicts.length ? { verdicts } : {}), engine, playable,
+    ...(assets ? { assets } : {}),
   };
 }
 
@@ -902,7 +957,10 @@ export function prSection(v: HostVerifyResult, proof?: PrProof, legs?: readonly 
   };
   const hostGreen = v.exit === 0 && !v.guard && !v.error;
   const hostLines = hostGreen ? [`Green: \`${v.command}\` (${secs(v.duration_ms)})`]
-    : [`**Red:** \`${v.command}\` — ${how(v)} (${secs(v.duration_ms)})`, "", ...fence("stderr (last lines)", v.stderr_tail), ...fence("stdout (last lines)", v.stdout_tail)].slice(0, -1);
+    : [`**Red:** \`${v.command}\` — ${how(v)} (${secs(v.duration_ms)})`, "",
+      // Story 37.2 (DW-150): every suite's own verdict, so a lib failure never hides behind the tail.
+      ...(v.verdicts?.length ? ["Verdicts:", "", ...v.verdicts.map((l) => `- \`${l.replace(/`/g, "'")}\``), ""] : []),
+      ...fence("stderr (last lines)", v.stderr_tail), ...fence("stdout (last lines)", v.stdout_tail)].slice(0, -1);
   const e = v.engine;
   if (!e) return [...head, ...hostLines];
   // Story 34.3: then one `Playable: pass | fail | skipped (<reason>)` line; on fail the reason, the findings and

@@ -104,7 +104,7 @@ SHIM_TOOLS = ("git", "uv", "ssh-keygen")
 
 def git(cwd: Path, *args: str) -> str:
     return subprocess.run(["git", *IDENTITY, *args], cwd=str(cwd), check=True,
-                          capture_output=True, text=True).stdout
+                          capture_output=True, text=True, encoding="utf-8").stdout
 
 
 def commit(repo: Path, files: dict[str, str], message: str) -> None:

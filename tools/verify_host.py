@@ -14,7 +14,7 @@ is unavailable.
 
 The studio-web gate is `bun run verify` in apps/studio-web. The supervisor gate (holes 51, 56, 63, 64)
 runs every apps/supervisor/test/*.test.ts but the e2e suite (command-line.test.ts) in its own
-`bun test <file>`, each under a 420 s timeout (the tree killed past it), with every TK_SUPERVISOR_*, TK_ATLASSIAN_* and TK_STUDIO_ATLASSIAN_*
+`bun test --timeout 30000 <file>` (Story 37.2: the per-test figure on the command, DW-155), each under a 420 s timeout (the tree killed past it), with every TK_SUPERVISOR_*, TK_ATLASSIAN_* and TK_STUDIO_ATLASSIAN_*
 variable stripped from the environment and TMPDIR/TEMP/TMP at a per-run folder
 `<tempfile.gettempdir()>/tk-verify-supervisor-<UTC stamp>-<pid>/` (the gate's own temp folder, outside
 any git checkout: the suites' queues refuse a path inside one, and the gate fails before the first file
@@ -63,6 +63,9 @@ SUPERVISOR = ROOT / "apps" / "supervisor"
 SUPERVISOR_GATE = "supervisor"
 SUPERVISOR_E2E = "command-line.test.ts"  # spawns `bun src/cli.ts`; run by hand, type-checked by tsc
 SUPERVISOR_FILE_TIMEOUT = 420
+# Story 37.2 (DW-155, hole 108): the per-test timeout on every file's command, the preload's figure; equal to the
+# conformance `_budget.HOST_TEST_TIMEOUT_MS` (pinned by test_verify_host.py; no cross-tree import).
+SUPERVISOR_TEST_TIMEOUT_MS = 30_000
 SUPERVISOR_INSTALL_TIMEOUT = 300  # hole 80: `bun install --frozen-lockfile` when a fresh worktree has no node_modules
 SUPERVISOR_ENV_PREFIXES = ("TK_SUPERVISOR_", "TK_ATLASSIAN_", "TK_STUDIO_ATLASSIAN_")  # the box's seats never shape a test
 TEMP_PREFIX = "tk-verify-supervisor"
@@ -296,7 +299,8 @@ def run_supervisor_gate() -> tuple[int, str]:
         for rel in files:
             t0 = time.monotonic()
             try:
-                rc, out = spawn(["bun", "test", f"./{rel}"], SUPERVISOR, env, SUPERVISOR_FILE_TIMEOUT)
+                rc, out = spawn(["bun", "test", "--timeout", str(SUPERVISOR_TEST_TIMEOUT_MS), f"./{rel}"], SUPERVISOR, env,
+                           SUPERVISOR_FILE_TIMEOUT)
             except OSError as exc:
                 rc, out = 127, f"cannot start 'bun': {exc}"
             seconds = time.monotonic() - t0

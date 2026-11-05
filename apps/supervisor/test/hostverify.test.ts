@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { basename, delimiter, dirname, join } from "node:path";
 import {
   FRAMES_DIR, gitUsrBin, hostVerify, inconclusiveReason, isInconclusive, isRed, legHistory, legVerdict, pathKey, playableConfig, prSection, redReason, splitCommand, tail,
-  TOOL_WALL_MARGIN_S, verifyCommand, wallClockTrip, type HostVerifyRan, type PlayableJudge,
+  redSuites, TOOL_WALL_MARGIN_S, verdictLines, verifyCommand, wallClockTrip, type HostVerifyRan, type PlayableJudge,
 } from "../src/hostverify";
 import { studioRunDir } from "../src/sandbox";
 import { fakeBin, gitRepo, testGit } from "./fakes";
@@ -126,6 +126,107 @@ describe("Story 35.8: a ran leg carries its started_at (the Stage Log's host-leg
     expect(prSection(v).join("\n")).not.toContain(v.started_at!);
     rmSync(fx.wt, { recursive: true, force: true });
     expect(await hostVerify(fx.run, 60)).toEqual({ skipped: true, reason: "worktree gone" });
+  });
+});
+
+describe("Story 37.2 (DW-150): a red leg names every suite's own verdict", () => {
+  /** A fake `tools/verify_host.py`: a lib failure hidden behind a supervisor failure, past the 20-line tail. */
+  const FAKE_LEG = [
+    "console.log('== lib suite: uv run python -m unittest discover tests  (cwd plugins/tk-studio/lib)')",
+    "console.log('== lib suite: FAILED rc=1 in 3s')",
+    "console.log('== conformance: uv run python contracts/conformance/runner.py run  (cwd plugins/tk-studio)')",
+    "console.log('== conformance: ok in 9s')",
+    "console.log('== supervisor: apps/supervisor changed since 0123456789ab')",
+    "console.log('== supervisor: test/a.test.ts 5 pass, 0 fail in 1s')",
+    "console.log('== supervisor: test/x.test.ts 3 pass, 1 fail in 2s rc=1')",
+    "console.log('== studio-web: skipped (apps/studio-web unchanged since 0123456789ab)')",
+    "console.log('== lib suite failed (rc=1); last 2 lines:')", "console.log('FAIL: test_x (tests.test_x.X)')",
+    "console.log('== supervisor failed (rc=1); last 2 lines:')", "for (let i = 0; i < 25; i++) console.log('(fail) case ' + i)",
+    "console.log('verify_host: FAILED (lib suite, supervisor)')", "process.exit(1)",
+  ].join("; ");
+  const WANT = ["== lib suite: FAILED rc=1 in 3s", "== conformance: ok in 9s", "== supervisor: test/x.test.ts 3 pass, 1 fail in 2s rc=1",
+    "== studio-web: skipped (apps/studio-web unchanged since 0123456789ab)"];
+
+  test("the verdict lines: gate-level always, a per-file supervisor line only failed; headers and tail headers excluded", async () => {
+    const v = await hostVerify(project(hostKey(bunCmd(FAKE_LEG))).run, 60) as HostVerifyRan;
+    expect(v.green).toBe(false);
+    expect(v.verdicts).toEqual(WANT);
+    expect(redSuites(v.verdicts!)).toEqual(["lib suite", "supervisor"]);
+    // the tail alone hides the lib failure: the list is what names it
+    expect(v.stdout_tail.some((l) => l.startsWith("== lib suite"))).toBe(false);
+    const section = prSection(v).join("\n");
+    expect(section).toContain(`Verdicts:\n\n${WANT.map((l) => `- \`${l}\``).join("\n")}\n\nstderr (last lines):`);
+  });
+
+  test("the parse: a timed-out per-file line, the supervisor total, install and tsc failures count; a passing file never", () => {
+    expect(verdictLines([
+      "== supervisor: test/slow.test.ts ? pass, ? fail in 420s (timed out after 420s)",
+      "== supervisor: test/ok.test.ts 12 pass, 0 fail in 4s",
+      "== supervisor: tsc FAILED rc=2 in 30s",
+      "== supervisor: bun install (node_modules absent) FAILED rc=1 in 5s",
+      "== supervisor: FAILED in 500s; 39 files, 900 pass, 1 fail; slowest test/slow.test.ts 420s",
+      "== supervisor: skipped (apps/supervisor unchanged since 0123456789ab)",
+      "\r", "== other: FAILED rc=1 in 1s", "verify_host: FAILED (supervisor)",
+    ].join("\r\n"))).toEqual([
+      "== supervisor: test/slow.test.ts ? pass, ? fail in 420s (timed out after 420s)",
+      "== supervisor: tsc FAILED rc=2 in 30s",
+      "== supervisor: bun install (node_modules absent) FAILED rc=1 in 5s",
+      "== supervisor: FAILED in 500s; 39 files, 900 pass, 1 fail; slowest test/slow.test.ts 420s",
+      "== supervisor: skipped (apps/supervisor unchanged since 0123456789ab)",
+    ]);
+    expect(redSuites(["== conformance: ok in 9s", "== studio-web: skipped (x)"])).toEqual([]);
+  });
+
+  test("a supervisor reason line is never a verdict, even with an rc= or a timeout; a green supervisor is not named red", () => {
+    const v = verdictLines([
+      "== lib suite: FAILED rc=1 in 3s",
+      "== supervisor: git ls-files failed (rc=128); running anyway",
+      "== supervisor: git diff failed (rc=129); running anyway",
+      "== supervisor: git unavailable (Command '['git']' timed out after 30 seconds); running anyway",
+      "== supervisor: no merge base with main or origin/main; running anyway",
+      "== supervisor: apps/supervisor changed since 0123456789ab",
+      "== supervisor: ok in 90s; 39 files, 900 pass, 0 fail; slowest test/a.test.ts 9s",
+    ].join("\n"));
+    expect(v).toEqual(["== lib suite: FAILED rc=1 in 3s", "== supervisor: ok in 90s; 39 files, 900 pass, 0 fail; slowest test/a.test.ts 9s"]);
+    expect(redSuites(v)).toEqual(["lib suite"]);
+  });
+
+  test("the scan stops at the first failing-gate tail header: the supervisor's repeated refusals and echoed child lines never count", () => {
+    expect(verdictLines([
+      "== supervisor: bun install (node_modules absent) FAILED rc=1 in 5s",
+      "== supervisor: FAILED in 5s; 0 files, 0 pass, 0 fail; slowest none",
+      "== studio-web: skipped (apps/studio-web unchanged since 0123456789ab)",
+      "", "== supervisor failed (rc=1); last 3 lines:",
+      "== supervisor: bun install (node_modules absent) FAILED rc=1 in 5s",
+      "--- bun install", "== conformance: FAILED rc=9 in 1s",
+      "", "== lib suite failed (rc=1); last 1 lines:", "== lib suite: FAILED rc=1 in 3s",
+    ].join("\n"))).toEqual([
+      "== supervisor: bun install (node_modules absent) FAILED rc=1 in 5s",
+      "== supervisor: FAILED in 5s; 0 files, 0 pass, 0 fail; slowest none",
+      "== studio-web: skipped (apps/studio-web unchanged since 0123456789ab)",
+    ]);
+  });
+
+  test("the supervisor gate's own refusals are verdicts, and name the supervisor red", () => {
+    const refusals = [
+      "== supervisor: cannot create the temp folder /tmp/tk-sup-x: [Errno 13] Permission denied",
+      "== supervisor: the temp folder /repo/tmp/tk-sup-x is inside a git checkout (/repo); the suites' queues refuse it, set TMP/TEMP/TMPDIR outside any checkout",
+      "== supervisor: no test/*.test.ts files under /repo/apps/supervisor/test",
+      "== supervisor: could not remove /tmp/tk-sup-x: [WinError 32] in use",
+    ];
+    const v = verdictLines([...refusals, "== supervisor: FAILED in 0s; 0 files, 0 pass, 0 fail; slowest none"].join("\n"));
+    expect(v).toEqual([...refusals, "== supervisor: FAILED in 0s; 0 files, 0 pass, 0 fail; slowest none"]);
+    expect(redSuites(refusals)).toEqual(["supervisor"]);
+  });
+
+  test("absent on a green leg, and on a red command printing no verdict line; the PR section unchanged", async () => {
+    const green = await hostVerify(project(hostKey(bunCmd("console.log('== lib suite: ok in 3s')"))).run, 60) as HostVerifyRan;
+    expect(green.green).toBe(true);
+    expect("verdicts" in green).toBe(false);
+    const bare = await hostVerify(project(hostKey(bunCmd("console.log('plain'); process.exit(1)"))).run, 60) as HostVerifyRan;
+    expect(bare.green).toBe(false);
+    expect("verdicts" in bare).toBe(false);
+    expect(prSection(bare).join("\n")).not.toContain("Verdicts:");
   });
 });
 

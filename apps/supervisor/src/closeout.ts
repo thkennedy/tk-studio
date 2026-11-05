@@ -903,7 +903,7 @@ async function autoResume(queue: Queue, run: QueueRun, s: StaleRender, deps: Pau
   const present = existsSync(s.dir);
   if (present) { try { renameSync(s.dir, aside); } catch { return; /* nothing changed: the next pass tries again */ } }
   try { rmSync(s.spec); } catch {
-    if (present) { try { renameSync(aside, s.dir); } catch { /* best effort */ } }
+    if (present) { try { renameSync(aside, s.dir); } catch { /* best effort */ } } // win-ok: undoes the rename above; s.dir was moved aside
     return;
   }
   for (const path of present ? [aside, ...(s.staging ?? [])] : (s.staging ?? [])) {

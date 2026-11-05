@@ -207,11 +207,11 @@ class Sources(unittest.TestCase):
         for name, needle in (("advisor.txt", "'advisor'"), ("floor.txt", "'floor'"), ("desk.txt", "'desk'")):
             with self.subTest(name):
                 moved = self.tmp / name
-                (self.assets / name).rename(moved)
+                (self.assets / name).rename(moved)  # win-ok: a file moved to a fresh name in the temp folder
                 code, err = self.export()
                 self.assertNotEqual(code, 0)
                 self.assertIn(needle, err)
-                moved.rename(self.assets / name)
+                moved.rename(self.assets / name)  # win-ok: the file put back where the line above moved it from
         self.edit("consult.txt", "[blocked.0]", "[xblocked.0]")
         code, err = self.export()
         self.assertNotEqual(code, 0)

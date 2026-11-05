@@ -1,6 +1,6 @@
 # Deferred Work
 
-<!-- deferred-work counter: last minted DW-169; mint through plansync.py deferred mint -->
+<!-- deferred-work counter: last minted DW-173; mint through plansync.py deferred mint -->
 
 ### DW-124: Contract §4 `submit` admitted a full job definition but the CLI/skill surface was id-only
 origin: migrated from legacy ledger ("Deferred from: code review of feat/tk-studio-connector (2026-08-06)"), 2026-10-29
@@ -1188,7 +1188,7 @@ source_spec: `kb/agent-pc-setup-runbook.md` (the hole-108 row); the fix commits 
 location: apps/supervisor/test/sweep.test.ts (the four-fixture test, now `30_000`); apps/supervisor/test/worktree.test.ts:1055 (the precedent, 2026-10-16); apps/supervisor/test/preload.ts (bunfig.toml's `[test] preload`; bunfig has no timeout key); tools/verify_host.py (`bun test ./<file>` per file with no `--timeout`); plugins/tk-studio/contracts/conformance/e2e_run_sweep.py (`BOUND_S`, now 240) and `e2e_engine_gate.py` (50 s), `e2e_playable_verify.py` (75 s), manifest.json's entry timeouts; the planner's test guidance (no win32 figure)
 severity: medium
 reason: Each recurrence costs a 40-minute host leg and a hand fix on the run branch, and the sandbox gate will never catch it because its git is fast enough; the second case cost two legs because the first leg's tail showed only the supervisor failure. Fix: a suite-wide default for the supervisor tests (`setDefaultTimeout(30_000)` in the preload, which every runner that loads it honours; bunfig has no timeout key) with the per-test `30_000` lines kept; the conformance drives' bounds sized from the host's measured figure with headroom (a drive that bounds a `bun test` names the host figure beside the bound) and the manifest entries following; the host leg's event keeping every suite's own verdict line, not only the last twenty lines; the planner's test guidance naming the host figure so fixture-heavy tests and widened drive filters are written with it.
-status: open
+status: resolved 2026-11-05 by Story 37.2 (`_budget.HOST_TEST_TIMEOUT_MS`, 30 000 ms, on every drive's and `verify_host.py`'s `bun test` as `--timeout`, each bun drive's `BOUND_S` line naming it and the `e2e_windows_semantics` bounds step holding each derived suite bound to it plus `HEADROOM_S`; the red leg's `verdicts`; remainder: the planner's test guidance naming the host figure, DW-172)
 
 ### DW-151: After a successful unblock the issue reads `Block Resolved`, canonical `blocked`, so a later `done` can still hold an AD-5 conflict for a block already closed.
 origin: spec-deferred 7ccf327dfa9d
@@ -1220,7 +1220,7 @@ source_spec: `kb/agent-pc-setup-runbook.md` (the hole-110 row); `kb/bmad-base-pa
 location: apps/supervisor/src/sweep.ts `stopEngineAt` (now `toVmPath(studioRoot(env))` + the POSIX tail, as sandbox.ts:119); `_bmad/scripts/render_skill.py` and `apps/supervisor/_bmad/scripts/render_skill.py` `_publish` (the retry clears an empty destination before the next try; a Windows rename refuses an existing directory, WinError 183, a POSIX rename replaces an empty one); apps/supervisor/test/sweep.test.ts (the test's `/studio` root is POSIX by design); plugins/tk-studio/lib/tests/test_basepatch.py
 severity: medium
 reason: The engine's gate runs on Linux and the host leg on Windows; every class of difference so far (encoding, hole 103; time bounds, hole 108; path joins and rename semantics, hole 110) costs a 40-minute red leg and a hand fix on the run branch, and the leg's 20-line tail hides earlier suites' failures behind the last one. Both were fixed by hand on the run branch at `bcfa691` (#307), and the class recurred at `6d0a0cc` (#313: a POSIX-suffix assertion the host's backslash join failed). Fix to make (Story 37.2): the engine's gate runs a Windows-semantics check for the known classes (a `path.join`/`resolve` whose result reaches `toVmPath` or an `sbx exec` argv; `os.rename`/`Path.rename` onto a path that may exist; text-mode opens without an encoding; `bun test` bounds under the host figure), or the planner's test guidance names them with the host figures; the leg's event keeps every suite's own verdict line.
-status: open
+status: resolved 2026-11-05 by Story 37.2
 
 ### DW-155: A bare multi-file `bun test` reads bun's 5 s past its first file on bun 1.4.3: the preload's `setDefaultTimeout` reaches only the first file, and a bunfig `[test] timeout` does not help.
 origin: spec-deferred, consult ruling 2026-10-31T09:48:21Z (deviation-gt-0) on Story 36.4's preload default
@@ -1228,7 +1228,7 @@ source_spec: `36-4-the-host-leg-goes-red-for-code-only-spec.md`
 location: apps/supervisor/test/preload.ts (`setDefaultTimeout(30_000)`); apps/supervisor (any bare multi-file `bun test`); plugins/tk-studio/contracts/conformance/e2e_paused_exits.py and e2e_vertical_slice.py (the two multi-file drives, which pass `--timeout 30000`)
 severity: medium
 reason: Measured on bun 1.4.3 outside the repo: 3 files of 6 s tests under the preload, the first file passes and the next two time out at 5000 ms; `[test] timeout = 30000` in a throwaway `bunfig.toml` still failed all three at 5000 ms. So a git- or uv-spawning test past a run's first file reads bun's 5 s unless the run passes `--timeout`. May affect 36-5 and 36-7, whose plans run the whole suite. Fix to make: run the whole suite with an explicit `--timeout`, or per file, or re-measure on a later bun.
-status: open
+status: resolved 2026-11-05 by Story 37.2
 
 ### DW-156: Follow-up review still recommended for 36-4-the-host-leg-goes-red-for-code-only after the damping cap was spent
 origin: review-budget-followup
@@ -1356,4 +1356,20 @@ source_spec: `apps/supervisor/README.md` (the `run-sweep` paragraph: decisions "
 location: plugins/tk-studio/lib/track.py `block` (no `--source sweep`); plugins/tk-studio/lib/launch.py `sweep` (the triage's `decisions [{id, question}]` carry no options or default); apps/supervisor/src/sweep.ts (the `sweep-triage` event); the inbox tick (syncback.py / inbox.py: a `Block Resolved` decision item has no ingest); `_bmad-output/tracking/decisions-jira.json` (the hand-posted mapping, local)
 severity: medium
 reason: The triage names each decision as a bare question, the engine skips it, the PR lists it, and nothing asks the owner anywhere he answers; the October sweeps left 68 unanswered and the fourth sweep is gated on them. On 2026-11-05 the 71 ids were re-verified against `main` (47 live, 24 resolved since; three subagents, evidence per entry), grouped into 19 related decisions, each with lettered options and a recommended default, and posted as Tasks TKSTUDIO-206 to 224 (label `tk-studio-decision`, assignee the owner, `Blocked - Awaiting User`, the mention comment) by a scratch script. Fix to make (beside Story 37.5, before the fourth sweep): the triage carries `options[]` and `default` per decision; `track.py block --source sweep` posts one issue per related group from the run's `triage.json` in the engagement-questions shape; the inbox tick ingests a decision item at `Block Resolved` (`<id>: <letter>` lines, `all:`, `default`), writes `decision:` onto the ledger entry and answers `bmad-loop decisions` in the sandbox, replies naming what is still open and re-blocks when a line is missing; the studio web's inbox shows the same items. The nineteen hand-posted issues are ingested by hand on their answers until the verb exists.
+status: open
+
+### DW-172: DW-150's remainder: the planner's test guidance does not name the 30 000 ms host figure, so fixture-heavy tests and widened drive filters are still planned on the Linux gate's timings.
+origin: DW-150's resolution (Story 37.2 review pass 1, 2026-11-05)
+source_spec: `37-2-the-windows-classes-out-of-the-host-leg-spec.md`
+location: the planner's test guidance (the plan template the planner tier writes from; Story 37.3 changes the same guidance for its split rule); plugins/tk-studio/contracts/conformance/_budget.py `HOST_TEST_TIMEOUT_MS` (the figure to name)
+severity: low
+reason: Story 37.2 put the host figure on every `bun test` command and every drive's bound, and its `bounds` step catches a bound under it, so the gate now trips; what is left is the planning half: a plan that adds git-backed fixtures or widens a drive's filter is not told the host's figure before it is written, so the first sign is still a red step. Fix to make: the planner's test guidance names `_budget.HOST_TEST_TIMEOUT_MS` (30 000 ms per test on the Windows host) and the derived suite bound beside it, pinned by the guidance's test.
+status: open
+
+### DW-173: `apps/supervisor/test/guards.test.ts` fails 2 tests when the box has `TK_ATLASSIAN_*` set: the sbx argv cases assert fixed positions that the env's `-e NAME` passthrough shifts (retrospective C7, the class `tier.test.ts` now pins).
+origin: Story 37.2 pass 1 deviation, consult ruling 2026-11-05T22:38Z (accept-deviation score 1: file the guards.test.ts env failures as a ledger entry, never skipped by name)
+source_spec: `37-2-the-windows-classes-out-of-the-host-leg-spec.md`
+location: apps/supervisor/test/guards.test.ts "sbx: the in-VM wall-clock guard rides the argv (no shell)" ("buildSbxCommand puts `timeout -k <s> <guardS>` before `env`; the prompt stays one argv item" and "invokeSkill passes its timeout (the guard) to the in-VM `timeout`"); apps/supervisor/src/server.ts `sbxEnvPassthrough`; apps/supervisor/test/tier.test.ts (the pin to copy: save and delete `TK_*ATLASSIAN*` in `beforeAll`, restore in `afterAll`)
+severity: low
+reason: Reproduced on the agent PC 2026-11-05: `bun test --timeout 30000 test/guards.test.ts` is 55 pass, 2 fail with the box's `TK_ATLASSIAN_*` variables set and 57 pass, 0 fail with them unset. `tools/verify_host.py` strips those variables, so the host leg stays green, but a hand run on the box reads two false reds. Fix to make: pin the env in the file as `tier.test.ts` does (restored after, so a multi-file run is unchanged), or assert the argv around the passthrough pairs; never skip the tests by name.
 status: open

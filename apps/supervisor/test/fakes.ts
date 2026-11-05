@@ -23,7 +23,7 @@ export function fakeLauncher(): string {
   const built = join(dir, "launcher.exe");
   const res = spawnSync(process.execPath, ["build", "--compile", src, "--outfile", built], { encoding: "utf-8" });
   if (res.status !== 0 || !existsSync(built)) throw new Error(`fake launcher build failed: ${res.stdout}${res.stderr}`);
-  try { renameSync(built, exe); } catch { if (!existsSync(exe)) copyFileSync(built, exe); } // another test file won the race
+  try { renameSync(built, exe); } catch { if (!existsSync(exe)) copyFileSync(built, exe); } // another test file won the race; win-ok: a file, the failure handled
   return exe;
 }
 
@@ -362,7 +362,7 @@ if (cmd[0] === a.home + "/.local/bin/bmad-loop" && cmd[1] === "archive" && cmd[2
   if (a.archive === "fail") { console.error("fake bmad-loop: archive refused"); process.exit(1); }
   const runs = require("node:path").join(host(cmd[3]), ".bmad-loop"), from = runs + "/runs/" + cmd[4];
   if (!fs.existsSync(from)) { console.error("no run " + cmd[4]); process.exit(1); }
-  fs.mkdirSync(runs + "/archive", { recursive: true }); fs.renameSync(from, runs + "/archive/" + cmd[4]);
+  fs.mkdirSync(runs + "/archive", { recursive: true }); fs.renameSync(from, runs + "/archive/" + cmd[4]); // win-ok: a fake; each run id is archived once
   console.log("run " + cmd[4] + " archived"); process.exit(0);
 }
 if (cmd[0] === a.home + "/.local/bin/bmad-loop" && cmd[1] === "resolve" && cmd[2] === "--project" && cmd[4] === "--no-interactive" && cmd[5] === "--resume"
