@@ -238,6 +238,9 @@ DRIFT: the 0.1.32 Block Resolved rule was narrowed from "never re-maps a non-`bl
 | dev | 1 | 2026-11-06T05:19:50Z | 2026-11-06T06:08:57Z | c5078666-a86e-49e0-ad84-59935cef7696 | claude-opus-5-5 | medium | 23560804 | 137338 | 12.1503 | completed |
 | review | 1 | 2026-11-06T06:08:58Z | 2026-11-06T06:27:21Z | 74c4bf51-c110-4d68-8f27-38a6f4a58058 | claude-opus-5-5 | medium | 9506546 | 75711 | 5.9738 | completed |
 | gate | 1 | 2026-11-06T06:27:22Z | 2026-11-06T06:31:04Z | b59eb7c8-e579-4d42-93a1-1c733d94ac2c | claude-opus-5-5 | medium | 3145164 | 21397 | 2.0016 | completed |
+| host-leg | 1 | 2026-11-06T06:31:44Z | 2026-11-06T07:28:09Z | — | — | — | — | — | — | green |
+| close-out | 1 | 2026-11-06T07:28:09Z | 2026-11-06T07:28:17Z | — | — | — | — | — | — | PR |
+| merge | — | 2026-11-06T07:29:41Z | 2026-11-06T07:29:41Z | — | — | — | — | — | — | merged |
 
 
 ## Reconcile
