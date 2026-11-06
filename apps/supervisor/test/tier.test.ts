@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { placementRefusal, resolveWorkerOptions } from "../src/cli";
@@ -26,9 +26,20 @@ function fakeSpawner(auth: RunResult = LOGGED_IN, worker: RunResult = WORKER) {
 }
 
 let root: string;
+const pinned: Record<string, string | undefined> = {};
 beforeAll(() => {
+  // Story 37.2 (C7): the box's own seat never shapes a worker argv. A `TK_ATLASSIAN_*` in `process.env` inserts
+  // `-e NAME` pairs (`sbxEnvPassthrough`) and shifts the fixed-position argv the sbx cases assert, so the env is
+  // pinned here (the preload's style): every `TK_*ATLASSIAN*` variable removed for this file, and put back in
+  // `afterAll` so a later file of a multi-file `bun test` (one process) sees the box's env unchanged.
+  for (const name of Object.keys(process.env)) {
+    if (/^TK_.*ATLASSIAN/.test(name)) { pinned[name] = process.env[name]; delete process.env[name]; }
+  }
   process.env.TK_STUDIO_HOME = tempDir("tk-sup-store-");
   root = tempDir("tk-sup-tier-proj-");
+});
+afterAll(() => {
+  for (const [name, value] of Object.entries(pinned)) if (value !== undefined) process.env[name] = value;
 });
 
 describe("toVmPath: the host root as the sbx microVM mounts it", () => {

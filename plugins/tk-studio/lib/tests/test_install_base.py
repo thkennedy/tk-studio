@@ -238,7 +238,7 @@ class InstallBaseTestCase(unittest.TestCase):
         self.assertEqual(self.emit.call_args.args[1]["outcome"], "success")
 
     def test_outside_a_git_top_level_normalization_is_skipped(self):
-        (self.repo / ".git").rename(self.repo.parent / "moved.git")
+        (self.repo / ".git").rename(self.repo.parent / "moved.git")  # win-ok: a fresh name in the test's own temp folder
 
         code, result = self._install()
 

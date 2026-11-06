@@ -38,7 +38,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from _budget import suite_bound  # the sibling helper: the suite's bound derives from the manifest entry's timeout
+from _budget import bun_test_args, suite_bound  # the sibling helper: the suite's bound derives from the manifest entry's timeout
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 SUITE = "test/hostverify.test.ts"
@@ -72,6 +72,8 @@ JUDGE_CORE = PLUGIN_ROOT / "lib" / "playable_judge.py"
 # Each `playable_judge.py` call (stdlib, local files only): prepare, two verdicts, the refusal.
 CORE_BOUND_S = 4
 CORE_CALLS = 4
+# The host figure (DW-150): each test inside BOUND_S holds `_budget.HOST_TEST_TIMEOUT_MS` (30 000 ms, passed by
+# `bun_test_args()`), and the bounds step of e2e_windows_semantics holds BOUND_S >= that figure + HEADROOM_S.
 BOUND_S = suite_bound("e2e_playable_verify.py", install_s=INSTALL_BOUND_S, other_s=CORE_CALLS * CORE_BOUND_S)
 REPORT = {
     "schema": 1, "verdict": "pass", "failed": None, "seed": 1, "ticks": 60,
@@ -180,7 +182,7 @@ def run() -> dict:
         started = time.monotonic()
         try:
             proc = subprocess.run(
-                [bun, "test", SUITE, "-t", FILTER], cwd=str(supervisor), env=env,
+                [bun, "test", *bun_test_args(), SUITE, "-t", FILTER], cwd=str(supervisor), env=env,
                 stdin=subprocess.DEVNULL, capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=BOUND_S)
         except subprocess.TimeoutExpired:

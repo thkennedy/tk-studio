@@ -9,7 +9,14 @@ that `timeout`, never a copy of it:
 
 `install_s` is the drive's `bun install` bound, `other_s` any other bound it
 spends before the suite, and `headroom_s` what is left for the drive's own
-Python and its temp-folder removal. Stdlib-only; a helper, not a CLI: no main.
+Python and its temp-folder removal.
+
+Story 37.2 (DW-155, hole 108): the host figure. `HOST_TEST_TIMEOUT_MS` is the per-test
+timeout the supervisor's preload sets (`setDefaultTimeout(30_000)`), which reaches only
+the first file of a multi-file `bun test` on bun 1.4.3; every bun drive passes it on the
+command through `bun_test_args()`, so it holds for every file. `tools/verify_host.py`
+carries its own `SUPERVISOR_TEST_TIMEOUT_MS`, pinned equal by a test (no cross-tree
+import). Stdlib-only; a helper, not a CLI: no main.
 """
 from __future__ import annotations
 
@@ -18,6 +25,12 @@ from pathlib import Path
 
 MANIFEST_PATH = Path(__file__).resolve().parent / "manifest.json"
 HEADROOM_S = 15
+HOST_TEST_TIMEOUT_MS = 30_000  # the preload's figure; a git-backed test on the Windows host runs past bun's 5 s
+
+
+def bun_test_args() -> list[str]:
+    """`["--timeout", "<host figure>"]`, the flags every drive's `bun test` argv carries (DW-155)."""
+    return ["--timeout", str(HOST_TEST_TIMEOUT_MS)]
 
 
 def _manifest_timeout(script: str) -> int:

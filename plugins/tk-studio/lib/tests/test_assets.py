@@ -1180,7 +1180,7 @@ class CliTests(Base):
     def test_greybox_script_refuses_outside_blender(self):
         proc = subprocess.run([sys.executable, str(assets.GREYBOX_SCRIPT), "--", "--spec", "x"],
                               stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                              timeout=30)
+                              encoding="utf-8", timeout=30)
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("runs only inside Blender", proc.stderr)
 

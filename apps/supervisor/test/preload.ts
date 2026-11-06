@@ -26,7 +26,10 @@ process.env.TK_SUPERVISOR_UNDER_TEST = "1";
 // that loads this preload. A test that names its own timeout keeps it. Story 36.4: on bun 1.4.3 the default reaches
 // only the first file of a multi-file `bun test` (later files read bun's 5 s), so it covers verify_host.py's
 // one-file-per-process runs and the one-file drives; a multi-file drive also passes `--timeout`, and a hand run of
-// the whole suite stays at 5 s past its first file.
+// the whole suite stays at 5 s past its first file. Story 37.2 (DW-155): so the figure is on the command, not only
+// here: every conformance drive's `bun test` passes `--timeout` from `_budget.HOST_TEST_TIMEOUT_MS` (this 30 s) and
+// verify_host.py passes its own `SUPERVISOR_TEST_TIMEOUT_MS` on every per-file command, pinned equal by its test;
+// a hand run of several files should pass `--timeout 30000` too.
 setDefaultTimeout(30_000);
 
 // Story 33.4 (holes 63, 64, 70): every temp folder and fixture queue a suite makes through test/tmp.ts is

@@ -207,7 +207,7 @@ def make_link(link: Path, target: Path) -> None:
         try:
             proc = subprocess.run(["cmd", "/c", "mklink", "/J", str(link),
                                    str(target)], capture_output=True,
-                                  text=True)
+                                  text=True, encoding="utf-8", errors="replace")
         except OSError as exc:
             raise Refusal("LinkFailed", f"mklink /J {link} {target}: "
                           f"{exc}") from None
@@ -223,7 +223,7 @@ def make_link(link: Path, target: Path) -> None:
 
 
 def _rename(src: Path, dst: Path) -> None:
-    os.rename(src, dst)
+    os.rename(src, dst)  # win-ok: the seam; _swap's protocol keeps every destination absent (_must_remove first)
 
 
 def _must_remove(path: Path) -> None:

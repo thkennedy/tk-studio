@@ -101,7 +101,7 @@ class VerifyHostCase(unittest.TestCase):
         """Each file passes in 5 s, queue.test.ts in 30 s; tsc passes in 9 s."""
         self.calls.append(("spawn", tuple(argv), cwd, dict(env), timeout, Path(env["TMPDIR"]).is_dir()))
         if argv[:2] == ["bun", "test"]:
-            self.clock.now += 30 if argv[2].endswith("queue.test.ts") else 5
+            self.clock.now += 30 if argv[-1].endswith("queue.test.ts") else 5
             return 0, bun_out(97, 0)
         self.clock.now += 9
         return 0, ""
@@ -153,13 +153,31 @@ class TestSkipAndStudioWeb(VerifyHostCase):
 class TestSupervisorGate(VerifyHostCase):
     CHANGED = {"apps/supervisor": "apps/supervisor/src/queue.ts\n"}
 
+    def test_story_37_2_every_file_carries_the_timeout_equal_to_the_budget_s_host_figure(self):
+        # DW-155: the preload's setDefaultTimeout reaches only a bare multi-file run's first file; the leg runs
+        # one file per process and names the figure on every command, equal to the conformance drives'
+        conformance = REPO_ROOT / "plugins" / "tk-studio" / "contracts" / "conformance"
+        spec = importlib.util.spec_from_file_location("budget_under_test", conformance / "_budget.py")
+        budget = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(budget)
+        self.assertEqual(vh.SUPERVISOR_TEST_TIMEOUT_MS, budget.HOST_TEST_TIMEOUT_MS)
+        self.assertEqual(vh.SUPERVISOR_TEST_TIMEOUT_MS, 30_000)
+        self.run_main(self.CHANGED)
+        files = [c[1] for c in self.spawns() if c[1][:2] == ("bun", "test")]
+        self.assertEqual(len(files), 2)
+        for argv in files:
+            with self.subTest(argv=argv):
+                self.assertEqual(argv[2:4], ("--timeout", str(budget.HOST_TEST_TIMEOUT_MS)))
+                self.assertTrue(argv[-1].startswith("./test/"), argv)
+
     def test_runs_after_conformance_each_file_but_the_e2e_then_tsc(self):
         rc, out = self.run_main({**self.CHANGED, "apps/studio-web": "apps/studio-web/x\n"})
         self.assertEqual(rc, 0)
         order = [c[1] for c in self.calls]
         self.assertEqual(order, [
             "lib suite", "conformance",
-            ("bun", "test", "./test/api.test.ts"), ("bun", "test", "./test/queue.test.ts"),
+            ("bun", "test", "--timeout", "30000", "./test/api.test.ts"),
+            ("bun", "test", "--timeout", "30000", "./test/queue.test.ts"),
             ("bunx", "tsc", "--noEmit", "-p", "apps/supervisor"),
             "studio-web",
         ])

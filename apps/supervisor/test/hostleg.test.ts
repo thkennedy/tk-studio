@@ -343,6 +343,40 @@ describe("AC1: the cli verb `verify <run id>`", () => {
     expect(ok.value).toBe(0);
     expect(JSON.parse(ok.out)).toEqual({ ok: true, run_id: fx.id, state: "partial", head: fx.tip, rerun: true, green: true, pr: PR, pr_ready: "marked", pr_body: "edited", worktree: "removed" });
   }, 60_000);
+
+  test("Story 37.2 (DW-150): a red leg answers its `verdicts` and the suites they name `red`; green and skipped answer neither", async () => {
+    const queue = new Queue(":memory:");
+    const verdicts = ["== lib suite: FAILED rc=1 in 3s", "== conformance: ok in 9s", "== supervisor: test/x.test.ts 3 pass, 1 fail in 2s rc=1"];
+    const red = await captured(() => verifyVerb(["q-1"], { queue, leg: leg({ green: false, verdicts } as Partial<HostLegResult>) }));
+    expect(red.value).toBe(1);
+    expect(JSON.parse(red.out)).toMatchObject({ ok: true, green: false, verdicts, red: ["lib suite", "supervisor"], pr: PR });
+    // a red command that printed no verdict line (not verify_host.py): the answer as before
+    const bare = JSON.parse((await captured(() => verifyVerb(["q-1"], { queue, leg: leg({ green: false } as Partial<HostLegResult>) }))).out);
+    expect("verdicts" in bare || "red" in bare).toBe(false);
+    const skipped = JSON.parse((await captured(() => verifyVerb(["q-1"], { queue, leg: leg({ skipped: true, reason: "no verify.host" } as Partial<HostLegResult>) }))).out);
+    expect("verdicts" in skipped || "red" in skipped).toBe(false);
+    queue.close();
+  });
+
+  test("Story 37.2: through the real leg, a fake verify_host red on a lib failure behind a supervisor failure names both", async () => {
+    const script = [
+      "console.log('== lib suite: uv run python -m unittest discover tests  (cwd plugins/tk-studio/lib)')",
+      "console.log('== lib suite: FAILED rc=1 in 3s')", "console.log('== conformance: ok in 9s')",
+      "console.log('== supervisor: test/x.test.ts 3 pass, 1 fail in 2s rc=1')",
+      "console.log('== lib suite failed (rc=1); last 1 lines:')", "for (let i = 0; i < 30; i++) console.log('noise ' + i)",
+      "process.exit(1)",
+    ].join("; ");
+    const fx = await fixture({ config: `vcs: git\nverify:\n  host: ${JSON.stringify(`"${process.execPath}" -e "${script}"`)}\n` });
+    const r = await captured(() => verifyVerb([fx.id], { queue: fx.queue, leg: (q, id) => rerunHostLeg(q, id, { by: "cli" }, fx.deps) }));
+    expect(r.value).toBe(1);
+    const answer = JSON.parse(r.out);
+    expect(answer.verdicts).toEqual(["== lib suite: FAILED rc=1 in 3s", "== conformance: ok in 9s", "== supervisor: test/x.test.ts 3 pass, 1 fail in 2s rc=1"]);
+    expect(answer.red).toEqual(["lib suite", "supervisor"]);
+    // the event carries the list beside the 20-line tail the lib failure fell out of
+    const detail = fx.hostVerifies().at(-1)!.detail as { verdicts?: string[]; stdout_tail: string[] };
+    expect(detail.verdicts).toEqual(answer.verdicts);
+    expect(detail.stdout_tail.some((l) => l.includes("lib suite"))).toBe(false);
+  }, 60_000);
 });
 
 describe("Story 34.8: a slice run's re-verify runs the assets step", () => {

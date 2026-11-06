@@ -41,7 +41,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from _budget import suite_bound  # the sibling helper: the suite's bound derives from the manifest entry's timeout
+from _budget import bun_test_args, suite_bound  # the sibling helper: the suite's bound derives from the manifest entry's timeout
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 SUITES = ["test/sweep.test.ts"]
@@ -50,7 +50,13 @@ TYPE_ID = "run-sweep"
 INSTALL_BOUND_S = 40
 # The filtered suite runs about 80 s on the win32 host's git (hole 108); under 60 s on the Linux gate.
 TRIAGE_WAIT_S = 5  # lib_steps' launch.sweep waits this long before the suite starts
-BOUND_S = suite_bound("e2e_run_sweep.py", install_s=INSTALL_BOUND_S, other_s=TRIAGE_WAIT_S)
+# Story 37.2 (B7): the drive's own git steps are bounded too, and their bound is spent before the suite.
+GIT_BOUND_S = 20
+GIT_STEPS = 3  # `_project`'s init, add and commit
+# The host figure (DW-150): each test inside BOUND_S holds `_budget.HOST_TEST_TIMEOUT_MS` (30 000 ms, passed by
+# `bun_test_args()`), and the bounds step of e2e_windows_semantics holds BOUND_S >= that figure + HEADROOM_S.
+BOUND_S = suite_bound("e2e_run_sweep.py", install_s=INSTALL_BOUND_S,
+                      other_s=TRIAGE_WAIT_S + GIT_STEPS * GIT_BOUND_S)
 TAIL = 20
 RID = "20261029-120000-e2e7"
 
@@ -81,7 +87,7 @@ status: open
 
 def _git(root: Path, *args: str) -> None:
     subprocess.run(["git", "-c", "user.email=e2e@tk", "-c", "user.name=e2e", *args],
-                   cwd=str(root), check=True, capture_output=True, stdin=subprocess.DEVNULL)
+                   cwd=str(root), check=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=GIT_BOUND_S)
 
 
 def _project(base: Path) -> Path:
@@ -245,7 +251,7 @@ def suite_steps() -> list[dict]:
         started = time.monotonic()
         try:
             proc = subprocess.run(
-                [bun, "test", *SUITES, "-t", FILTER], cwd=str(supervisor), env=env,
+                [bun, "test", *bun_test_args(), *SUITES, "-t", FILTER], cwd=str(supervisor), env=env,
                 stdin=subprocess.DEVNULL, capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=BOUND_S)
         except subprocess.TimeoutExpired:

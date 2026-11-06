@@ -639,7 +639,7 @@ class LastLineJson(LegCase):
         def broken(src, dst):
             if Path(src).name in (".tk-studio.new", ".tk-studio.previous"):
                 raise OSError("simulated")
-            os.rename(src, dst)
+            os.rename(src, dst)  # win-ok: stands in for the _rename seam, whose protocol keeps dst absent
 
         with mock.patch.object(plugin_leg, "_rename", broken):
             result, code = self.main_json(*self.install_argv())
@@ -703,7 +703,7 @@ class PreviousKeptWithoutTarget(LegCase):
 
     def test_lone_retired_restored_as_previous(self):
         # A failed restore left the only previous (0.2.14) at retired.
-        os.rename(self.previous, self.retired)
+        os.rename(self.previous, self.retired)  # win-ok: the fixture never makes retired
         real = plugin_leg._rename
 
         def locked(src, dst):
@@ -718,7 +718,7 @@ class PreviousKeptWithoutTarget(LegCase):
         # restored it there, so the folder is not lost
         self.assertEqual(self.folder_version(self.previous), "0.2.14")
         self.assertFalse(self.retired.exists())
-        os.rename(self.previous, self.retired)
+        os.rename(self.previous, self.retired)  # win-ok: the fixture never makes retired
         result, code = self.install("0.2.16")
         # success: previous = the superseded target, the old one cleaned
         self.assertEqual((code, result["status"]), (0, "complete"))
@@ -728,7 +728,7 @@ class PreviousKeptWithoutTarget(LegCase):
         self.assertFalse(self.retired.exists())
 
     def test_lone_retired_restore_failure_is_named(self):
-        os.rename(self.previous, self.retired)
+        os.rename(self.previous, self.retired)  # win-ok: the fixture never makes retired
         real = plugin_leg._rename
 
         def broken(src, dst):
