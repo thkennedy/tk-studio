@@ -191,6 +191,9 @@ DRIFT: `hostverify.ts verdictLines` excludes `<rel> skip: …` lines, with a `ho
 | dev | 1 | 2026-11-06T11:44:53Z | 2026-11-06T12:27:27Z | 4d788f5f-c499-4667-8db6-d7d2304672b5 | claude-opus-5-5 | medium | 19485201 | 119027 | 10.7083 | completed |
 | review | 1 | 2026-11-06T12:27:27Z | 2026-11-06T12:41:21Z | b7aca2ce-d86b-44c8-91a0-6cb7e484ca3d | claude-opus-5-5 | medium | 4222448 | 40492 | 3.5484 | completed |
 | gate | 1 | 2026-11-06T12:41:22Z | 2026-11-06T12:43:43Z | f916ac7f-da07-43f7-a618-eff33bd39f72 | claude-opus-5-5 | medium | 1797462 | 11483 | 1.2591 | completed |
+| host-leg | 1 | 2026-11-06T12:44:21Z | 2026-11-06T13:38:46Z | — | — | — | — | — | — | green |
+| close-out | 1 | 2026-11-06T13:38:46Z | 2026-11-06T13:38:55Z | — | — | — | — | — | — | PR |
+| merge | — | 2026-11-06T13:40:18Z | 2026-11-06T13:40:18Z | — | — | — | — | — | — | merged |
 
 ## Auto Run Result
 
