@@ -107,7 +107,7 @@ tree at its root.
   requires every release URL to be
   `https://github.com/<owner>/<repo>/releases/download/<tag>/<asset>`, so
   today this roster is refused `RosterEntryInvalid` before anything is
-  written. Use route (b) until the guard admits a local URL.
+  written. Route (a) is retired (Tim, 2026-11-05, TKSTUDIO-212 / DW-15): the guard keeps its GitHub-only rule and route (b), the manual extract, is the documented offline path.
 
 - **(b) Manual extract: not yet run on a box.** After the digest check
   above, with Claude Code closed, extract the zip into the folder (the
