@@ -279,7 +279,14 @@ jobs:
     tier: sbx                        # host | sbx
     sandbox: claude-<project>        # required for sbx
     permission_mode: acceptEdits     # auto | acceptEdits | default | plan | bypassPermissions (sbx only)
+logins:                              # DW-170: the sign-in source per host tool (optional)
+  sbx:
+    item: "op://<vault>/<item>"      # the owner's 1Password item (username + credential fields)
+    username_field: username         # optional, the default
+    secret_field: credential         # optional, the default
 ```
+
+**Signing the sandbox tier in again (DW-170, hole 111).** Every `sbx` call needs a live Docker sign-in, and the browser-session one lapses silently. When the drain's pin fails with `not signed in`, `claimGate` runs the studio verb `uv run <plugin>/lib/login.py sbx` once per drain pass per sandbox (a `relogin` event, `{sandbox, tool, ok, reason, pass_at}`, patched in place while the outcome repeats) and pins again when it answered `complete`. The verb reads the item named by `logins.sbx` with the 1Password CLI under the owner's service-account token (`OP_SERVICE_ACCOUNT_TOKEN`, a User variable; `TK_OP_BIN` pins the `op` binary when it is not on PATH) and pipes the credential into `sbx login --username <username> --password-stdin`: no value on an argument, in an event or in a log (the answer carries lengths). `logins` absent or the token unset: the verb refuses by name (`LoginNotConfigured`, `TokenMissing`), the refusal rides the `relogin` event, and the run waits `queued` on the `pin-failed` refusal as before, its `resolves` naming the verb. `tk-studio doctor`'s `docker-login` check reads the same sign-in from the sandbox-login check's `sbx ls`.
 
 A host tree kill stops only the host `sbx exec` process, so the VM side enforces the same wall-clock guard itself: GNU `timeout -k 10 <guard-s>` inside the VM ends the worker's process group (see Guards).
 

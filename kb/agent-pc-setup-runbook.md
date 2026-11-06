@@ -465,7 +465,7 @@ initialised once before the first sandbox, and `sbx` needs a Docker sign-in:
 
 ```powershell
 sbx version
-sbx login
+sbx login     # or headless, with a Docker personal access token: echo $PAT | sbx login --username <docker id> --password-stdin
 cd $HOME
 sbx daemon start -d
 sbx policy init balanced

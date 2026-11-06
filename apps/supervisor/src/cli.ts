@@ -113,7 +113,7 @@ import {
   readProjectConfig, registryShow, requireCompatible, resolveStudioRoot, runJobVerb, runProcess, runUv, SbxSandboxMissing, TierRequired, toVmPath, WORKER_RECORD_FAILED, type OwnBlock, type Spawner, type Tier,
 } from "./server";
 import { serve as serveApi } from "./api";
-import { notifier, pluginRoot, tlsConfig, WorkDirMissing, workDir } from "./env";
+import { notifier, pluginRoot, studioRoot, tlsConfig, WorkDirMissing, workDir } from "./env";
 import { engineMcpEnv, engineMcpRefusalText, recoverEngineMcps, startEngineMcp, stopEngineMcp, type EngineMcpDeps } from "./enginemcp";
 import { canonicalPr, prUrl, recordClaimRefusal, snapshotOnce, sweepEnds, underBunTest, type HygieneDeps } from "./hygiene";
 import { rebuildAgents, type RebuildDeps, type RebuildResult } from "./registry";
@@ -299,6 +299,8 @@ export interface RunOptions {
   /** Story 33.3: the sandboxes the pin restarted in this drain pass (`drainQueue` owns it and shares it with the
    * pass's resumes and drained runs; one restart per pass). */
   restarted?: Set<string>;
+  /** DW-170: the sandboxes this drain pass signed in again (`drainQueue` owns it; one relogin per pass). */
+  relogged?: Set<string>;
   /** Explicit worker options (the submission's flags); each wins over the stored run and the config. */
   tier?: string;
   sandbox?: string;
@@ -960,13 +962,14 @@ export async function drainQueue(opts: RunOptions = {}, verbRunner: VerbRunner =
   try {
     // Story 33.3: one pass, one restart per sandbox — shared by the pass's resumes and every run it gates.
     const restarted = new Set<string>();
+    const relogged = new Set<string>(); // DW-170: one relogin per sandbox per pass
     const { report: recovered, prepared } = await recoverWithResume(queue, owner, verbRunner);
     await driveResumes(queue, recovered.resumed, prepared, verbRunner, invokeSkill, sbxDeps(opts.worktree), restarted);
     const runs: DrainReport["runs"] = [];
     for (const r of queue.drainable(owner)) {
       try {
         // `undefined` mode: runJob drives the run under the mode recorded on it (else the default).
-        const summary = await runJob(r.job_id, r.root, undefined, { ...opts, queue, owner, skipRecover: true, runId: r.run_id, restarted });
+        const summary = await runJob(r.job_id, r.root, undefined, { ...opts, queue, owner, skipRecover: true, runId: r.run_id, restarted, relogged });
         // Report the run's actual queue state when the summary does not (Story 33.2: a refused claim — no Max
         // login, a failed pin, a refused placement — answers `queued` with its `claim_refused`).
         const now = queue.get(r.run_id)?.state;
@@ -1333,9 +1336,47 @@ export const loginResolves = (options: Pick<WorkerOptions, "tier" | "sandbox">):
     ? `renew the sandbox's Max login: ${renewalSteps(options.sandbox)}; the next drain pass claims the run`
     : "log the host's claude in to the Max subscription (`claude`, then `/login`); the next drain pass claims the run";
 
-/** What resolves a failed pin. */
-export const pinResolves = (sb: string): string =>
-  `make \`sbx run -d --name ${sb}\` succeed (\`sbx daemon status\` running, the sandbox listed by \`sbx ls\`); the next drain pass pins it again`;
+/** What resolves a failed pin. DW-170: a pin refused for a lapsed Docker sign-in names the sign-in verb too. */
+export const pinResolves = (sb: string, failed = ""): string =>
+  `make \`sbx run -d --name ${sb}\` succeed (\`sbx daemon status\` running, the sandbox listed by \`sbx ls\`${
+    NOT_SIGNED_IN.test(failed) ? "; the Docker sign-in lapsed: `uv run <plugin>/lib/login.py sbx` signs it in from the owner's 1Password item (`logins.sbx` in TK_SUPERVISOR_CONFIG, read with OP_SERVICE_ACCOUNT_TOKEN) — the drain runs it once per pass itself — or `sbx login` by hand" : ""
+  }); the next drain pass pins it again`;
+
+/** DW-170 (hole 111): the pin failure that means the sandbox tier's Docker sign-in lapsed (`sbx`'s own wording). */
+export const NOT_SIGNED_IN = /not signed in/i;
+
+/** DW-170: a relogin's answer — `ok` when the verb's status block reads `complete`; `reason` the block's reason or the
+ * process failure, clipped. Never a value: the verb prints lengths only. */
+export interface ReloginResult { ok: boolean; reason: string | null }
+export type ReloginRunner = (tool: string) => Promise<ReloginResult>;
+
+/** The default relogin: `uv run <plugin>/lib/login.py <tool>` at the studio root (the verb reads TK_SUPERVISOR_CONFIG
+ * and the owner's token from the User environment itself). Never throws. */
+export async function defaultRelogin(tool: string, env: NodeJS.ProcessEnv = process.env): Promise<ReloginResult> {
+  try {
+    const r = await runUv(studioRoot(env), join(pluginRoot(env), "lib", "login.py"), [tool], 180);
+    const text = r.stdout.trim();
+    const start = text.lastIndexOf("\n{") >= 0 ? text.lastIndexOf("\n{") + 1 : text.indexOf("{");
+    let block: Record<string, unknown> | null = null;
+    if (start >= 0) { try { block = JSON.parse(text.slice(start)); } catch { block = null; } }
+    if (block && block.status === "complete") return { ok: true, reason: null };
+    const reason = typeof block?.reason === "string" ? block.reason : `login.py ${tool} exited ${r.exit}: ${(r.stderr || r.stdout).trim().slice(0, 300)}`;
+    return { ok: false, reason: reason.slice(0, 400) };
+  } catch (e) { return { ok: false, reason: `login.py ${tool}: ${e instanceof Error ? e.message : String(e)}`.slice(0, 400) }; }
+}
+
+/** DW-170: one `relogin` event per outcome episode on a sandbox — the newest `relogin` for it since the last `pinned`
+ * is patched in place (`pass_at`, and `reason` when it changed) while `ok` repeats; a changed `ok` writes a new one. */
+function noteRelogin(queue: Queue, runId: string, sb: string, tool: string, result: ReloginResult): void {
+  try {
+    const events = queue.events(runId);
+    const lastPinned = events.findLast((e) => e.kind === "pinned" && e.detail?.sandbox === sb)?.seq ?? -1;
+    const last = events.findLast((e) => e.kind === "relogin" && e.detail?.sandbox === sb && e.seq > lastPinned);
+    const pass_at = new Date().toISOString();
+    if (last && last.detail?.ok === result.ok) queue.patchEventDetail(last.seq, { reason: result.reason, pass_at });
+    else queue.note(runId, "relogin", { sandbox: sb, tool, ok: result.ok, reason: result.reason, pass_at });
+  } catch { /* the run ended meanwhile: the relogin stands */ }
+}
 
 /** Story 33.2 (ruling D): the placement refusals a drained run waits out `queued` — TierRefused and SbxSandboxMissing —
  * with what resolves each; any other refusal (a broken registry entry, `resolve`, `problems[]`) is null (it still ends
@@ -1400,11 +1441,17 @@ export interface ClaimGateDeps {
   hygiene?: HygieneDeps;
   /** Story 33.3: the sandboxes the pin restarted in this drain pass (default: a set of this gate's own). */
   restarted?: Set<string>;
+  /** DW-170: the sign-in verb (default `defaultRelogin`: `login.py <tool>` through `uv`). */
+  relogin?: ReloginRunner;
+  /** DW-170: the sandboxes this drain pass signed in again (default: a set of this gate's own). */
+  relogged?: Set<string>;
 }
 
 /** Story 33.2: the drain's gate before it claims queued run `runId` under its resolved `options` — on sbx the pin
  * (`pinBeforeClaim`), then the Max-login preflight. A refusal is recorded on the run (`claim-refused`, one per distinct
- * reason, the notifier line when it is new) and answered; the run stays `queued`. Null: the claim may proceed. */
+ * reason, the notifier line when it is new) and answered; the run stays `queued`. Null: the claim may proceed.
+ * DW-170 (hole 111): a pin refused because the sandbox tier is not signed in to Docker runs the sign-in verb once per
+ * pass per sandbox (`relogin` event) and pins again when it answered `complete`. */
 export async function claimGate(queue: Queue, runId: string, options: WorkerOptions, deps: ClaimGateDeps = {}): Promise<ClaimRefused | null> {
   if (options.tier === "sbx" && options.sandbox) {
     // The pin is found through the run's recorded sandbox (`pinOutstanding`, `releasePin`): a queued run whose stored
@@ -1413,10 +1460,18 @@ export async function claimGate(queue: Queue, runId: string, options: WorkerOpti
     if (stored?.state === "queued" && (stored.tier !== options.tier || stored.sandbox !== options.sandbox)) {
       try { queue.recordRunOptions(runId, { tier: options.tier, sandbox: options.sandbox }); } catch { /* the run moved on meanwhile */ }
     }
-    const failed = await pinBeforeClaim(queue, runId, options.sandbox, deps.sbx ?? {}, {
-      ...(deps.restarted ? { restarted: deps.restarted } : {}), ...(deps.spawner ? { spawner: deps.spawner } : {}),
-    });
-    if (failed) return recordedRefusal(queue, runId, { key: `pin-failed:${options.sandbox}`, reason: failed, resolves: pinResolves(options.sandbox) }, deps.hygiene);
+    const pinCtx = { ...(deps.restarted ? { restarted: deps.restarted } : {}), ...(deps.spawner ? { spawner: deps.spawner } : {}) };
+    let failed = await pinBeforeClaim(queue, runId, options.sandbox, deps.sbx ?? {}, pinCtx);
+    if (failed && NOT_SIGNED_IN.test(failed)) {
+      const relogged = deps.relogged ?? new Set<string>();
+      if (!relogged.has(options.sandbox)) {
+        relogged.add(options.sandbox);
+        const result = await (deps.relogin ?? defaultRelogin)("sbx");
+        noteRelogin(queue, runId, options.sandbox, "sbx", result);
+        if (result.ok) failed = await pinBeforeClaim(queue, runId, options.sandbox, deps.sbx ?? {}, pinCtx);
+      }
+    }
+    if (failed) return recordedRefusal(queue, runId, { key: `pin-failed:${options.sandbox}`, reason: failed, resolves: pinResolves(options.sandbox, failed) }, deps.hygiene);
   }
   const login = await maxLoginPreflight(deps.spawner, { tier: options.tier, sandbox: options.sandbox });
   if (login) return recordedRefusal(queue, runId, { key: "max-login", reason: login, resolves: loginResolves(options) }, deps.hygiene);
@@ -1480,6 +1535,7 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
         // Story 33.2: the drain's gate before the claim — the pin (moved here from the drive), then the preflight.
         const refused = await claimGate(queue, opts.runId, options, {
           sbx: sbxDeps(opts.worktree), ...(opts.hygiene ? { hygiene: opts.hygiene } : {}), ...(opts.restarted ? { restarted: opts.restarted } : {}),
+          ...(opts.relogged ? { relogged: opts.relogged } : {}),
         });
         if (refused) return refusedClaim(queue, opts.runId, jobId, refused);
         v = await validate(jobId, directory, permissionMode, opts.guardCapS);
