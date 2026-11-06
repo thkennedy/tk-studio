@@ -890,4 +890,121 @@ describe("Story 35.1: a slice re-run commits and pushes its placed art and proof
     expect("commit" in r.rerun || "pushed" in r.rerun).toBe(false);
     expect(fx.argvs.some((a) => a.bin === "git" && (a.args[0] === "commit" || a.args[0] === "push"))).toBe(false);
   }, 60_000);
+  test("Story 37.5 (DW-138): the judge's `n` is derived after the `host-verify` is noted: a note that fails emits nothing, so its `n` is never reused; `rerun.job_run` patched onto the event", async () => {
+    const fx = await sliceFixture({ studioRunId: "studio-1" });
+    const emits: string[][] = [];
+    const inner = fx.deps.uv!;
+    fx.deps.uv = async (root, script, args, t) => {
+      if (script.endsWith("ledger.py")) { emits.push(args); return { exit: 0, stdout: JSON.stringify({ ok: true }), stderr: "" }; }
+      return inner(root, script, args, t);
+    };
+    const note = fx.queue.note.bind(fx.queue);
+    let busy = true;
+    (fx.queue as any).note = (id: string, kind: string, detail: Record<string, unknown>) => {
+      if (kind === "host-verify" && busy) { busy = false; throw new Error("database is locked"); }
+      return note(id, kind, detail);
+    };
+    await expect((await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done).rejects.toThrow("database is locked");
+    expect(emits).toEqual([]); // never emitted for a leg that was not recorded
+    const r = await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done;
+    expect(r.rerun.job_run).toBe("studio-1:verify-1");
+    expect(emits.map((a) => JSON.parse(a[a.indexOf("--payload") + 1]!).run_id)).toEqual(["studio-1:verify-1"]);
+    const recorded = fx.hostVerifies().filter((e) => e.detail?.rerun);
+    expect(recorded).toHaveLength(1);
+    expect((recorded[0]!.detail as any).rerun).toMatchObject({ job_run: "studio-1:verify-1", pr_body: r.rerun.pr_body, worktree: r.rerun.worktree });
+    expect(recorded[0]!.detail).toEqual(r as unknown as Record<string, unknown>);
+  }, 120_000);
+
+  test("Story 37.5 (DW-138): a `seq` lookup that throws after a recorded `host-verify` still emits the judge's line; the re-run resolves, the event unpatched", async () => {
+    const fx = await sliceFixture({ studioRunId: "studio-1" });
+    const emits: string[][] = [];
+    const inner = fx.deps.uv!;
+    fx.deps.uv = async (root, script, args, t) => {
+      if (script.endsWith("ledger.py")) { emits.push(args); return { exit: 0, stdout: JSON.stringify({ ok: true }), stderr: "" }; }
+      return inner(root, script, args, t);
+    };
+    const note = fx.queue.note.bind(fx.queue);
+    const events = fx.queue.events.bind(fx.queue);
+    let armed = false;
+    (fx.queue as any).note = (id: string, kind: string, detail: Record<string, unknown>) => {
+      const out = note(id, kind, detail);
+      if (kind === "host-verify") armed = true;
+      return out;
+    };
+    (fx.queue as any).events = (id: string) => {
+      if (armed) { armed = false; throw new Error("database is locked"); }
+      return events(id);
+    };
+    const r = await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done; // resolves, never rejects
+    expect(r.rerun.job_run).toBe("studio-1:verify-1");
+    expect(emits.map((a) => JSON.parse(a[a.indexOf("--payload") + 1]!).run_id)).toEqual(["studio-1:verify-1"]);
+    const recorded = fx.hostVerifies().filter((e) => e.detail?.rerun);
+    expect(recorded).toHaveLength(1); // the `host-verify` event recorded
+    expect("job_run" in (recorded[0]!.detail as any).rerun).toBe(false); // the patch skipped: `seq` unknown
+  }, 120_000);
+});
+
+describe("Story 37.5 (B3): a sweep's green re-run never marks a half-finished sweep's draft ready", () => {
+  const SWEEP_DEF = { id: "run-sweep", target: { skill: "tk-studio-launch" } };
+  const bundle = (name: string, landed: boolean) => ({ name, dw_ids: [`DW-${name}`], landed, ...(landed ? {} : { why: "paused at review" }) });
+  /** A sweep run's `ended` record (the bundles as given; `triage: false` for none), its PR an open draft. */
+  const sweepRun = async (bundles: ReturnType<typeof bundle>[], triage = true) => {
+    const fx = await fixture({ definition: SWEEP_DEF });
+    fx.queue.note(fx.id, "sweep-triage", { engine_run_id: "E1", bundles: bundles.map((b) => ({ name: b.name, dw_ids: b.dw_ids })), blocked: [], decisions: [], already_resolved: [], skip: [] });
+    const ended = fx.queue.events(fx.id).find((e) => e.kind === "ended")!;
+    fx.queue.patchEventDetail(ended.seq, { sweep: { notice: "n", triage, already_resolved: [], bundles: triage ? bundles : [] } });
+    fx.answers.view = { state: "OPEN", isDraft: true, body: "old" };
+    return fx;
+  };
+
+  test("a bundle not landed holds the draft: no `gh pr ready`, `pr_ready: held: b not landed`", async () => {
+    const fx = await sweepRun([bundle("a", true), bundle("b", false)]);
+    const r = await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done;
+    expect(r).toMatchObject({ green: true, rerun: { pr_body: "edited", pr_ready: "held: b not landed" } });
+    expect("ready_override" in r.rerun).toBe(false);
+    expect(fx.gh.some((a) => a[1] === "ready")).toBe(false);
+    expect(fx.hostVerifies().at(-1)!.detail).toMatchObject({ rerun: { pr_ready: "held: b not landed" } });
+  }, 60_000);
+
+  test("no triage recorded holds the draft too", async () => {
+    const fx = await sweepRun([], false);
+    const r = await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done;
+    expect(r.rerun.pr_ready).toBe("held: no triage recorded");
+    expect(fx.gh.some((a) => a[1] === "ready")).toBe(false);
+  }, 60_000);
+
+  test("every bundle landed and no `wip:` tip: the draft marked ready", async () => {
+    const fx = await sweepRun([bundle("a", true), bundle("b", true)]);
+    const r = await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done;
+    expect(r.rerun.pr_ready).toBe("marked");
+    expect("ready_override" in r.rerun).toBe(false);
+    expect(fx.gh.filter((a) => a[1] === "ready").map((a) => a.slice(0, 3))).toEqual([["pr", "ready", PR]]);
+  }, 60_000);
+
+  test("every bundle landed but the tip a `wip:` commit (Story 36.3): held", async () => {
+    const fx = await sweepRun([bundle("a", true), bundle("b", true)]);
+    const tmp = join(fx.work, "wip-cut");
+    testGit(fx.repo.checkout, "worktree", "add", "-q", tmp, fx.branch);
+    writeFileSync(join(tmp, "half.txt"), "half-written");
+    testGit(tmp, "add", "half.txt");
+    testGit(tmp, "commit", "-q", "-m", `wip: sweep bundle dw-b paused (run ${fx.id})`);
+    testGit(tmp, "push", "-q", "origin", fx.branch);
+    testGit(fx.repo.checkout, "worktree", "remove", "--force", tmp);
+    const r = await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done;
+    expect(r.rerun.pr_ready).toBe(`held: the tip is a WIP commit (wip: sweep bundle dw-b paused (run ${fx.id}))`);
+    expect(fx.gh.some((a) => a[1] === "ready")).toBe(false);
+  }, 60_000);
+
+  test("`ready: true` overrides the hold: marked ready, `rerun.ready_override: true`", async () => {
+    const fx = await sweepRun([bundle("a", true), bundle("b", false)]);
+    const r = await (await rerunHostLeg(fx.queue, fx.id, { by: "api", ready: true }, fx.deps)).done;
+    expect(r.rerun).toMatchObject({ pr_ready: "marked", ready_override: true });
+    expect(fx.gh.filter((a) => a[1] === "ready").map((a) => a.slice(0, 3))).toEqual([["pr", "ready", PR]]);
+  }, 60_000);
+
+  test("a non-sweep run is never held", async () => {
+    const fx = await fixture();
+    const r = await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done;
+    expect(r.rerun.pr_ready).toBe("marked");
+  }, 60_000);
 });

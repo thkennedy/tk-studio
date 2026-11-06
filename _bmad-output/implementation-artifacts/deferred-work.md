@@ -1150,7 +1150,8 @@ source_spec: `36-2-the-sweeps-records-are-whole-spec.md`
 location: plugins/tk-studio/lib/meter.py price-run (keys: triaged bundles, then other `dw*-` tasks and transcripts); apps/supervisor/src/sweep.ts `BUNDLE_KEY_RE`, `withEngineCost`
 severity: medium
 reason: Both pinned texts say per bundle, and the triage session is no bundle, so `price-run` never names it and the body, the `job-run` total and `ended.engine_cost_usd` omit its spend. The consult ruled against a triage line and against widening `BUNDLE_KEY_RE` in 36.2; the 36.2 contract paragraph states the exclusion. Fix: price the triage session under its own line and add it to the engine total.
-status: open
+status: resolved 2026-11-06 by Story 37.5
+resolution: Story 37.5 priced the engine's own triage sessions (`sweep-triage`, `sweep-triage-<N>`, `sweep-migrate`) into `price-run`'s `triage` member and `usd_total`, so `engine_cost_usd`, `(engine)` and `total_cost_usd` include it; the record's `triage_cost_usd` and a `- triage:` line.
 
 ### DW-137: `emitTriage` appends the ledger's `sweep-triage` line before patching the note, so a failed patch re-emits on the next tick, against the contract's "once per engine run".
 origin: review of story 36-2
@@ -1158,7 +1159,8 @@ source_spec: `36-2-the-sweeps-records-are-whole-spec.md`
 location: apps/supervisor/src/sweep.ts emitTriage
 severity: low
 reason: `ledgerEmit` runs, then `queue.patchEventDetail(note.seq, {ledger: …})`; a busy queue throws at the patch, `emitTriage` swallows it, and the note still has no `ledger`, so the next tick emits a second line. Deferred from this story by the review's order.
-status: open
+status: resolved 2026-11-06 by Story 37.5
+resolution: Story 37.5: `emitTriage` patches `ledger: "emitting"` before the emit, then `emitted` or `error: …`; a crash between the two is retried (one possible duplicate line, never a lost one).
 
 ### DW-138: `judgeJobRun` derives `n` from recorded `host-verify` events but emits before that event is noted, so a failed note reuses a `run_id` on the next re-run and last-line-wins readers drop the earlier judge's cost.
 origin: review of story 36-2
@@ -1166,7 +1168,8 @@ source_spec: `36-2-the-sweeps-records-are-whole-spec.md`
 location: apps/supervisor/src/hostleg.ts judgeJobRun, runLeg
 severity: low
 reason: `runLeg` emits `<id>:verify-<n>` and then notes the leg; when that note throws, the count does not move, the next re-run emits the same `<id>:verify-<n>`, and `jobRunCosts` and `runCost` keep only the last line, so the earlier judge's cost is lost to them. Deferred from this story by the review's order.
-status: open
+status: resolved 2026-11-06 by Story 37.5
+resolution: Story 37.5: `runLeg` notes the `host-verify` first, then `judgeJobRun` derives `n` including it and emits; `rerun` is patched onto the event whole; a failed note emits no line.
 
 ### DW-139: On a late-closed sweep, `runCost` and the `jobRunCosts` readers keyed by the bare run id return the worker-only own line, so the API and delivery `cost_usd` read less than the PR body.
 origin: consult ruling 2026-10-30 on story 36-2
@@ -1174,7 +1177,8 @@ source_spec: `36-2-the-sweeps-records-are-whole-spec.md`
 location: apps/supervisor/src/inbox.ts runCost; apps/supervisor/src/board.ts jobRunCosts; apps/supervisor/src/api.ts:1263; apps/supervisor/src/delivery.ts:247
 severity: medium
 reason: A late close-out emits the priced engine as its own `job-run` line under `<run_id>:engine`, leaving the run's own line at the worker's cost, while these readers match `run_id` exactly, so they miss the engine line that the PR body's total includes. The consult left the readers and `spendByEpic` unchanged in 36.2; the 36.2 contract paragraph states the gap. Deferred from this story.
-status: open
+status: resolved 2026-11-06 by Story 37.5
+resolution: Story 37.5: `runCost` and `jobRunCosts` by the bare run id answer the run's own line plus its `:engine` line (`jobRunCosts` folds it in, so a sum still counts each dollar once); `:verify-<n>` lines stay their own.
 
 ### DW-140: The engine's own `sweep-triage` session is not priced, so `engine_cost_usd` and `total_cost_usd` understate a sweep's full engine spend. Filed as DW-136.
 origin: spec-deferred 82ccef92b342
@@ -1214,7 +1218,8 @@ source_spec: `36-2-the-sweeps-records-are-whole-spec.md`
 location: apps/supervisor/src/sweep.ts emitTriage
 severity: medium
 reason: Blind Hunter, confirmed at `sweep.ts emitTriage`. The failure is recorded as the matrix asks, and the queue note still holds the payload, but no later pass delivers it. Meets deferral rule (a): AC2 names the host's event.
-status: open
+status: resolved 2026-11-06 by Story 37.5
+resolution: Story 37.5: the ledger pass retries an `emitting` or `error` triage note on a terminal sweep run each tick until it lands, bounded by `PLAN_RETRY_LIMIT` errors (`ledger_errors`).
 
 ### DW-145: Follow-up review still recommended for 36-2-the-sweeps-records-are-whole after the damping cap was spent
 origin: review-budget-followup

@@ -45,7 +45,7 @@ from _budget import bun_test_args, suite_bound  # the sibling helper: the suite'
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 SUITES = ["test/sweep.test.ts"]
-FILTER = "Story 35.7|Story 36.1|Story 36.2"
+FILTER = "Story 35.7|Story 36.1|Story 36.2|Story 37.5"
 TYPE_ID = "run-sweep"
 INSTALL_BOUND_S = 40
 # The filtered suite runs about 80 s on the win32 host's git (hole 108); under 60 s on the Linux gate.

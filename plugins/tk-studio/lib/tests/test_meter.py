@@ -1093,7 +1093,62 @@ class PriceRunTest(MeterTest):
         self.assertEqual(rc, 0)
         self.assertEqual(out["bundles"], [{"key": "dw-a", "usd": 22.0, "source": "sessions",
                                            "bound": "upper", "ttl": "unknown"}])
-        self.assertEqual(out["usd_total"], 22.0)
+        # Story 37.5 (DW-136): the engine's own triage is priced too, never as a bundle, and counted in the total.
+        self.assertEqual(out["triage"], {"usd": 11.0, "source": "sessions", "bound": "upper"})
+        self.assertEqual(out["usd_total"], 33.0)
+
+    def test_every_cycles_triage_and_the_migrate_are_priced_into_the_triage_member(self):
+        """Story 37.5 (DW-136): `sweep-triage`, `sweep-triage-<N>` and `sweep-migrate`, an empty model taking the
+        routing's `triage` leg."""
+        routing = self.tmp / "routing.json"
+        routing.write_text(json.dumps({"triage": {"model": "model-b"}}), encoding="utf-8")
+        self.state({"dw-a": {"sessions": [{"role": "dev", "model": "model-a", "usage": self.USAGE}]},
+                    "sweep-triage": {"sessions": [{"role": "triage", "model": "model-a", "usage": self.USAGE}]},
+                    "sweep-triage-2": {"sessions": [{"role": "triage", "model": "", "usage": self.USAGE}]},
+                    "sweep-migrate": {"sessions": [{"role": "triage", "model": "model-a", "usage": self.USAGE}]}})
+        rc, out = self.cli("--routing", str(routing))
+        self.assertEqual(rc, 0, out)
+        self.assertEqual([b["key"] for b in out["bundles"]], ["dw-a"])
+        self.assertEqual(out["triage"], {"usd": 132.0, "source": "sessions", "bound": "upper"})
+        self.assertEqual(out["usd_total"], 143.0)
+
+    def test_a_triage_with_no_model_and_no_triage_leg_reads_null_never_a_refusal(self):
+        """Story 37.5 (DW-136): never a guess, never a refusal of the whole run."""
+        routing = self.tmp / "routing.json"
+        routing.write_text(json.dumps({"session": {"model": "model-a"}}), encoding="utf-8")
+        self.state({"dw-a": {"sessions": [{"role": "dev", "model": "model-a", "usage": self.USAGE}]},
+                    "sweep-triage": {"sessions": [{"role": "triage", "model": "", "usage": self.USAGE}]}})
+        rc, out = self.cli("--routing", str(routing))
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["triage"], {"usd": None})
+        self.assertEqual(out["usd_total"], 11.0)
+
+    def test_a_triage_model_missing_from_the_table_reads_null_and_the_bundles_stay_priced(self):
+        """Story 37.5 review: an unpriceable triage reads `usd: null`, never a refusal of `price-run`."""
+        self.state({"dw-a": {"sessions": [{"role": "dev", "model": "model-a", "usage": self.USAGE}]},
+                    "sweep-triage": {"sessions": [{"role": "triage", "model": "model-z", "usage": self.USAGE}]}})
+        rc, out = self.cli()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["bundles"], [{"key": "dw-a", "usd": 11.0, "source": "sessions",
+                                           "bound": "upper", "ttl": "unknown"}])
+        self.assertEqual(out["triage"], {"usd": None})
+        self.assertEqual(out["usd_total"], 11.0)
+
+    def test_one_unpriceable_triage_session_nulls_the_member_never_a_partial_upper_bound(self):
+        """Story 37.5 review: a partial sum would understate while claiming an upper bound."""
+        routing = self.tmp / "routing.json"
+        routing.write_text(json.dumps({"session": {"model": "model-a"}}), encoding="utf-8")
+        for unpriced in ({"role": "triage", "model": "", "usage": self.USAGE},          # no model, no triage leg
+                         {"role": "triage", "model": "model-z", "usage": self.USAGE}):  # a model the table lacks
+            with self.subTest(unpriced=unpriced["model"]):
+                self.state({"dw-a": {"sessions": [{"role": "dev", "model": "model-a", "usage": self.USAGE}]},
+                            "sweep-triage": {"sessions": [{"role": "triage", "model": "model-a",
+                                                           "usage": self.USAGE}]},
+                            "sweep-triage-2": {"sessions": [unpriced]}})
+                rc, out = self.cli("--routing", str(routing))
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(out["triage"], {"usd": None})
+                self.assertEqual(out["usd_total"], 11.0)
 
     def test_an_empty_model_takes_the_routings_model_for_its_role(self):
         routing = self.tmp / "routing.json"

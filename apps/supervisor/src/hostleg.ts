@@ -40,15 +40,20 @@
  *             was, `pr_ready` unset), red turns an open ready PR back to a draft (`gh pr ready <pr>
  *             --undo`, the event's `reason` is `redReason`), skipped flips nothing; Story 35.3: an inconclusive leg
  *             flips nothing either (never marked ready; the event's `reason` is `host verify inconclusive (playable): <reason>`,
- *             `inconclusiveReason`). A PR not open, or unreadable,
+ *             `inconclusiveReason`). Story 37.5 (B3): a sweep run's green holds a draft as a draft while its record names
+ *             a bundle `landed: false`, has no triage, or the cut tip is a `wip:` commit (`rerun.pr_ready: "held: <cause>"`,
+ *             e.g. `held: b not landed`), unless the re-run carried `ready: true` (`POST /runs/{id}/verify` body
+ *             `{ready: true}`): then it is marked ready and `rerun.ready_override: true`. A PR not open, or unreadable,
  *             is never edited; an unreadable one is `pr_body: "error: gh pr view …"` whatever the verdict.
  *             The worktree is then removed (best effort).
  *   the judge Story 36.2 (DW-67): a re-run whose leg carries `playable.judge.cost_usd` emits that cost as its own `job-run`
  *             line in the host's ledger, `{job_id, run_id: "<studio run id>:verify-<n>", state: "complete",
  *             total_cost_usd}` (`n` counts the run's re-run legs, this one included): a distinct id, so the run's own
  *             line stands and the readers (keyed by `run_id`) neither drop nor double-count. `rerun.job_run` records it.
+ *             Story 37.5 (DW-138): the `host-verify` event is noted first, `n` derived after it (the count including it),
+ *             then the line emitted and `rerun` patched onto the event whole; a note that fails emits nothing.
  *   result    one `host-verify` event: the leg's detail plus `rerun {by, head, worktree, pr, pr_ready?, commit?,
- *             pushed?, pr_body?, pr_draft?, job_run?}` (its presence is `rerun: true`). It closes the lease. The run's state,
+ *             pushed?, pr_body?, pr_draft?, job_run?, ready_override?}` (its presence is `rerun: true`). It closes the lease. The run's state,
  *             its `ended` event and its engine are never touched (CAP-15).
  *
  * The refusals, the lease, the cut and materialise answer synchronously; the leg itself is the handle's `done`.
@@ -97,6 +102,8 @@ export interface HostLegRerun {
   /** Story 36.2: the judge's own `job-run` line: its `run_id`, `error: <clipped>` (a failed emit: the leg still finishes)
    * or `skipped: <why>`; unset when the leg had no judge cost. */
   job_run?: string;
+  /** Story 37.5 (B3): the re-run carried `ready: true` and a sweep's draft was marked ready whatever its record says. */
+  ready_override?: true;
 }
 /** The re-run's result; Story 35.1: a red leg's `reason` is `redReason` (a skipped one's is its own). */
 export type HostLegResult = HostVerifyResult & { rerun: HostLegRerun; reason?: string };
@@ -238,8 +245,9 @@ async function refuseAheadBranch(root: string, branch: string, tip: string, deps
   throw new Error(`the local run branch '${branch}' is not an ancestor of origin's tip ${tip.slice(0, 12)} (never moved here): ${ahead || `git merge-base --is-ancestor ${failed(anc)}`}`);
 }
 
-/** Re-run an ended run's host leg (see the header). Throws `VerifyRefused`; answers once the leg is started. */
-export async function rerunHostLeg(queue: Queue, runId: string, opts: { by: "api" | "cli" }, deps: HostLegDeps = {}): Promise<HostLegStarted> {
+/** Re-run an ended run's host leg (see the header). Throws `VerifyRefused`; answers once the leg is started. Story 37.5:
+ * `ready` marks a sweep's draft ready on green whatever its record says (B3). */
+export async function rerunHostLeg(queue: Queue, runId: string, opts: { by: "api" | "cli"; ready?: boolean }, deps: HostLegDeps = {}): Promise<HostLegStarted> {
   const run = queue.get(runId);
   if (!run) throw new VerifyRefused("RunNotFound", `queue run '${runId}' not found`);
   if (run.state === "external") throw new VerifyRefused("ExternalRun", `queue run '${runId}' was started outside the queue`);
@@ -280,18 +288,32 @@ export async function rerunHostLeg(queue: Queue, runId: string, opts: { by: "api
     try { queue.releaseVerifyLeg(runId, self); } catch { /* a dead owner's lease is taken over */ }
     throw new VerifyRefused("VerifyFailed", clip(message(e)));
   }
-  const done = runLeg(queue, run, path, { by: opts.by, head, branch }, deps);
+  const done = runLeg(queue, run, path, { by: opts.by, head, branch, ...(opts.ready === true ? { ready: true } : {}) }, deps);
   return { run_id: run.run_id, state: run.state, head, done };
 }
 
+/** Story 37.5 (B3): why a sweep run's green holds its draft (see the header), or undefined. Never throws. */
+async function sweepReadyHold(queue: Queue, run: QueueRun, path: string, head: string, deps: HostLegDeps): Promise<string | undefined> {
+  try {
+    const s = summaryFromRecord(queue.events(run.run_id));
+    if (!s?.triage) return "held: no triage recorded";
+    const open = s.bundles.filter((b) => !b.landed).map((b) => b.name);
+    if (open.length) return `held: ${open.join(", ")} not landed`;
+    const tip = await git(deps, path, ["log", "-1", "--format=%s", head], 30);
+    if (tip.exit !== 0) return `held: the tip unreadable (git log ${failed(tip)})`;
+    const subject = tip.stdout.trim();
+    return subject.startsWith("wip: ") ? `held: the tip is a WIP commit (${clip(subject, 120)})` : undefined;
+  } catch (e) { return `held: ${clip(message(e))}`; }
+}
+
 /** Story 36.2 (DW-67): the judge's own `job-run` line (see the header): `rerun.job_run`'s value, or undefined with no
- * judge cost. Never throws. */
+ * judge cost. Story 37.5 (DW-138): called once the leg's `host-verify` is noted, so `n` counts it. Never throws. */
 async function judgeJobRun(queue: Queue, run: QueueRun, verify: HostVerifyResult, deps: HostLegDeps): Promise<string | undefined> {
   const cost = verify.skipped ? undefined : verify.playable?.judge?.cost_usd;
   if (typeof cost !== "number" || !Number.isFinite(cost) || cost < 0) return undefined;
   if (!run.studio_run_id) return "skipped: no studio run recorded";
   try {
-    const n = queue.events(run.run_id).filter((e) => e.kind === "host-verify" && e.detail?.rerun).length + 1;
+    const n = queue.events(run.run_id).filter((e) => e.kind === "host-verify" && e.detail?.rerun).length;
     const runId = `${run.studio_run_id}:verify-${n}`;
     const failure = await ledgerEmit(deps, run, "job-run", { job_id: run.job_id, run_id: runId, state: "complete", total_cost_usd: cost });
     return failure === undefined ? runId : `error: ${failure}`;
@@ -301,7 +323,7 @@ async function judgeJobRun(queue: Queue, run: QueueRun, verify: HostVerifyResult
 /** The leg in the cut worktree, (a slice) the proof commit and push, the PR body and its flip, the removal, the judge's
  * `job-run` line, and the one `host-verify` event (it closes the lease). */
 async function runLeg(
-  queue: Queue, run: QueueRun, path: string, at: { by: "api" | "cli"; head: string; branch: string }, deps: HostLegDeps,
+  queue: Queue, run: QueueRun, path: string, at: { by: "api" | "cli"; head: string; branch: string; ready?: boolean }, deps: HostLegDeps,
 ): Promise<HostLegResult> {
   let verify: HostVerifyResult;
   const rerun: HostLegRerun = { by: at.by, head: at.head, worktree: "kept", pr: null };
@@ -341,7 +363,14 @@ async function runLeg(
         // Story 35.1 (consult F1): a failed body edit leaves the PR as it was on green (no flip, `pr_ready` unset);
         // red still turns it back to a draft.
         if (green) {
-          if (rerun.pr_body === "edited") rerun.pr_ready = state.draft ? outcome(await markPrReady(deps, run.root, rerun.pr), "marked") : "already";
+          // Story 37.5 (B3): a sweep's draft held while its record names work unfinished, unless `ready: true`.
+          const sweepRun = state.draft && rerun.pr_body === "edited" && isSweep(queue.definition(run));
+          const held = sweepRun && !at.ready ? await sweepReadyHold(queue, run, path, at.head, deps) : undefined;
+          if (held) rerun.pr_ready = held;
+          else if (rerun.pr_body === "edited") {
+            rerun.pr_ready = state.draft ? outcome(await markPrReady(deps, run.root, rerun.pr), "marked") : "already";
+            if (sweepRun && at.ready) rerun.ready_override = true;
+          }
         } else if (red) rerun.pr_draft = state.draft ? "already" : outcome(await markPrDraft(deps, run.root, rerun.pr), "undone");
       }
     }
@@ -350,15 +379,24 @@ async function runLeg(
     verify = { skipped: true, reason: `re-run failed: ${clip(message(e))}` };
     rerun.worktree = existsSync(path) ? await removeWorktree(run.root, path, deps) : "removed";
   }
-  const jobRun = await judgeJobRun(queue, run, verify, deps);
-  if (jobRun !== undefined) rerun.job_run = jobRun;
   // Story 35.3: an inconclusive leg names its reason too (it flips no PR: neither green nor red above).
   const result = { ...verify, ...(isRed(verify) ? { reason: redReason(verify) } : isInconclusive(verify) ? { reason: inconclusiveReason(verify) } : {}), rerun } as HostLegResult;
-  try { queue.note(run.run_id, "host-verify", result as unknown as Record<string, unknown>); }
-  catch (e) {
-    // Not recorded (the queue busy): the lease is let go of, so the next re-run is not `VerifyRunning`.
+  let seq: number | undefined;
+  try {
+    queue.note(run.run_id, "host-verify", result as unknown as Record<string, unknown>);
+  } catch (e) {
+    // Not recorded (the queue busy): the lease is let go of, so the next re-run is not `VerifyRunning`; no judge line
+    // is emitted, so its `n` is never taken (Story 37.5, DW-138).
     try { queue.releaseVerifyLeg(run.run_id, deps.self ?? selfOwner()); } catch { /* re-taken once this owner is dead */ }
     throw e;
+  }
+  // Recorded: a failed `seq` lookup leaves `seq` undefined (the judge's line still emitted, the event left unpatched).
+  try { seq = queue.events(run.run_id).findLast((e) => e.kind === "host-verify" && e.detail?.rerun)?.seq; } catch { /* unpatched */ }
+  // Story 37.5 (DW-138): the judge's line after the note (`n` counts this leg), `rerun` patched on whole (a shallow merge).
+  const jobRun = await judgeJobRun(queue, run, verify, deps);
+  if (jobRun !== undefined) {
+    rerun.job_run = jobRun;
+    if (seq !== undefined) { try { queue.patchEventDetail(seq, { rerun: { ...rerun } }); } catch { /* the line stands; the event lacks `job_run` */ } }
   }
   return result;
 }
