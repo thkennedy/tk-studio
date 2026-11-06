@@ -110,7 +110,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import {
   buildWorkerCommand, checkTier, finishStateFor, invokeSkill, lastJsonObject, MALFORMED_STATUS_BLOCK, maxLoginPreflight, MISSING_STATUS_BLOCK,
-  readProjectConfig, registryShow, requireCompatible, resolveStudioRoot, runJobVerb, runProcess, runUv, SbxSandboxMissing, TierRequired, toVmPath, WORKER_RECORD_FAILED, type OwnBlock, type Spawner, type Tier,
+  readProjectConfig, registryShow, requireCompatible, resolveStudioRoot, runJobVerb, runProcess, runUv, SbxSandboxMissing, TierRequired, toVmPath, WORKER_RECORD_FAILED, type OwnBlock, type RunResult, type Spawner, type Tier,
 } from "./server";
 import { serve as serveApi } from "./api";
 import { notifier, pluginRoot, studioRoot, tlsConfig, WorkDirMissing, workDir } from "./env";
@@ -127,9 +127,10 @@ import {
 } from "./queue";
 import { rerunHostLeg, VerifyRefused, type HostLegStarted } from "./hostleg";
 import { redSuites } from "./hostverify";
-import { emitTriage, engineCostOf, engineJobRun, isSweep, recordTriage, stopEngineAt, sweepRecord, sweepSummary, withEngineCost, type SweepSummary } from "./sweep";
+import { emitTriage, engineCostOf, engineJobRun, isSweep, recordTriage, sweepRecord, sweepSummary, withEngineCost, type SweepSummary } from "./sweep";
 import { armStop, closeOutPaused, enginePidKnown, launchedSinceMove, resumePaused, rhythmOf, runDirOf, runsStories, stopArmed, type PausedDeps, type ResumeAnswer, type ResumeDeps as EngineResumeDeps } from "./closeout";
 import { readJournal } from "./office";
+import { runEngineStop } from "./runners";
 import { launchedPass, mergePass, reviewPass, startedStories, storyStarted, type PlanStatusDeps } from "./planstatus";
 import { resolutionPass, withQueuedPayload, withStoredPayload, type ResolutionDeps } from "./resolution";
 import { chatSpendPass, type ChatDeps, type ChatSpendDeps } from "./chat";
@@ -629,7 +630,7 @@ export async function driveResumes(
 /** Story 27.2: the sandbox seams a run's worktree deps carry (the env, and the injected `sbx` spawners). */
 const sbxDeps = (w: WorktreeDeps | undefined): SandboxDeps => withMcpStop({ ...(w?.env ? { env: w.env } : {}), ...(w?.sbx ?? {}) });
 /** Story 36.7 (DW-85): the one-way seam: the release stops the run's engine MCP through the injected stopper. */
-const withMcpStop = (sandbox: SandboxDeps): SandboxDeps => ({ stopEngineMcp, ...sandbox });
+export const withMcpStop = (sandbox: SandboxDeps): SandboxDeps => ({ stopEngineMcp, ...sandbox });
 
 /** Story 27.2: where the queue places its own runs of a job on a checkout — the job's supervisor config
  * (`TK_SUPERVISOR_CONFIG`, keyed by the checkout's project id) resolved as `runJob` resolves a fresh run —
@@ -1079,21 +1080,17 @@ export async function submitProject(projectId: string, jobId: string, opts: RunO
 export type LaunchStopper = (root: string, engineRunId: string, where?: EngineWhere) => Promise<{ ok: boolean; detail: string }>;
 
 /** tk-studio `lib/launch.py stop --directory <root> --run-id <id> --graceful` (driver contract §tk-studio-launch).
- * Story 36.3 (DW-120): on the tier `where` names (`stopEngineAt`: an sbx run's engine lives in its sandbox). */
+ * Story 36.3 (DW-120): on the tier `where` names (an sbx run's engine lives in its sandbox). Story 37.6 (AC1): both tiers
+ * run the one builder (`runners.ts engineStopArgv`, through `runEngineStop`); exit 0 is stopped (`launch.py` exits 0
+ * exactly when `ok: true`), a JSON `error` is the refusal's detail, anything else `launch stop failed: …`. */
 export const launchStopGraceful: LaunchStopper = async (root, engineRunId, where) => {
-  if (where?.tier === "sbx" && where.sandbox) {
-    const answer = await stopEngineAt(root, engineRunId, where, {}, { graceful: true });
-    return answer === "stopped" ? { ok: true, detail: `engine ${engineRunId} stopping gracefully` } : { ok: false, detail: answer };
-  }
-  try {
-    const res = await runUv(root, join(pluginRoot(), "lib", "launch.py"), ["stop", "--directory", root, "--run-id", engineRunId, "--graceful"]);
-    const out = lastJsonObject(res.stdout) as Record<string, any> | null;
-    if (!out) return { ok: false, detail: `launch stop emitted no JSON (exit ${res.exit}): ${res.stderr.trim().slice(0, 300)}` };
-    if (out.ok !== true) return { ok: false, detail: `launch stop refused: ${String(out.error ?? "refused").slice(0, 300)}` };
-    return { ok: true, detail: `engine ${engineRunId} stopping gracefully` };
-  } catch (e) {
-    return { ok: false, detail: `launch stop failed: ${message(e)}` };
-  }
+  let res: RunResult;
+  try { res = await runEngineStop(root, engineRunId, where ?? {}, {}, { graceful: true }); }
+  catch (e) { return { ok: false, detail: `launch stop failed: ${message(e).slice(0, 300)}` }; }
+  if (res.exit === 0) return { ok: true, detail: `engine ${engineRunId} stopping gracefully` };
+  const out = lastJsonObject(res.stdout) as Record<string, any> | null;
+  if (out && out.ok !== true) return { ok: false, detail: `launch stop refused: ${String(out.error ?? "refused").slice(0, 300)}` };
+  return { ok: false, detail: `launch stop failed: exit ${res.exit}: ${(res.stderr || res.stdout).trim().slice(0, 300)}` };
 };
 
 /** The reason a cancelled queue run ends with. */

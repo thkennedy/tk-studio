@@ -5,18 +5,29 @@
  * a re-export loads its module.
  *
  * The named cycles and dynamic-import dodges are gone, and the non-trivial SCCs equal the allowlist exactly: a new
- * cycle, or a cut one left on the list, fails until the allowlist is edited knowingly. `enginemcp.ts`'s `./api` dynamic
- * import is a stated residual of DW-85, outside the three files the dodge check reads.
+ * cycle, or a cut one left on the list, fails until the allowlist is edited knowingly. Story 37.6 (AC2, A1): a dynamic
+ * import of a sibling (`await import("./x")`, comments stripped) is an edge too, and no file has one: the one residual,
+ * `enginemcp.ts`'s `./api` import of `checkBind`, is cut (the check lives in the leaf `bind.ts`, imported statically).
+ * No residual is left.
  */
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { withMcpStop } from "../src/cli";
+import { stopEngineMcp } from "../src/enginemcp";
 
 const SRC = join(import.meta.dir, "..", "src");
 
 type Graph = Record<string, string[]>;
 
-/** The `./x` modules a source loads at run time. */
+/** Source with its comments dropped: whole-line `//` and `/* … *\/` lines, and a trailing ` // …`. */
+const code = (source: string): string =>
+  source.split("\n").filter((l) => !/^\s*(\/\/|\/?\*)/.test(l)).map((l) => l.replace(/\s\/\/.*$/, "")).join("\n");
+
+/** A dynamic import of a sibling (`import("./x")`, `await` or not), over comment-stripped source. */
+const DYNAMIC = /\bimport\(\s*["'`]\.\/([\w.-]+?)(?:\.ts)?["'`]\s*\)/g;
+
+/** The `./x` modules a source loads at run time (Story 37.6: a dynamic import counts). */
 export function valueImports(source: string): string[] {
   const out = new Set<string>();
   const statement = /^(?:import|export)\s+(type\s+)?([^;"']*?)\s*from\s+["']\.\/([\w.-]+?)(?:\.ts)?["']/gm;
@@ -31,6 +42,7 @@ export function valueImports(source: string): string[] {
     out.add(m[3]!);
   }
   for (const m of source.matchAll(/^import\s+["']\.\/([\w.-]+?)(?:\.ts)?["']/gm)) out.add(m[1]!);
+  for (const m of code(source).matchAll(DYNAMIC)) out.add(m[1]!);
   return [...out].sort();
 }
 
@@ -122,10 +134,18 @@ describe("Story 36.7: the supervisor's import graph (DW-85)", () => {
     expect(cycles(tree())).toEqual(ALLOWLIST);
   });
 
-  test("no dynamic import of a sibling in closeout, hostverify or hygiene", () => {
-    for (const m of ["closeout", "hostverify", "hygiene"]) {
-      expect(`${m}: ${readFileSync(join(SRC, `${m}.ts`), "utf-8").match(/\bimport\(\s*["']\.\//g)}`).toBe(`${m}: null`);
-    }
+  test("Story 37.6: no dynamic import of a sibling in any file (comments stripped)", () => {
+    const files = readdirSync(SRC).filter((n) => n.endsWith(".ts"));
+    expect(files.length).toBeGreaterThan(0);
+    for (const f of files) expect(`${f}: ${code(readFileSync(join(SRC, f), "utf-8")).match(DYNAMIC)}`).toBe(`${f}: null`);
+  });
+
+  test("Story 37.6: the `enginemcp -> api` residual is cut: enginemcp imports the leaf `bind`, never `api`", () => {
+    const g = tree();
+    expect(g.enginemcp).not.toContain("api");
+    expect(g.enginemcp).toContain("bind");
+    expect(g.bind).toEqual([]);
+    expect(g.api).toContain("bind");
   });
 
   test("the `registerSweepLine` dodge is gone: hygiene imports the sweep directly", () => {
@@ -146,6 +166,12 @@ describe("Story 36.7: the supervisor's import graph (DW-85)", () => {
   test("the run's engine MCP stops at its release: every `releasePin(` in cli.ts carries the stop", () => {
     expect(releaseWiringFaults(readFileSync(join(SRC, "cli.ts"), "utf-8"))).toEqual([]);
   });
+
+  test("Story 37.6 (DW-164): `withMcpStop` injects `stopEngineMcp`; an injected stopper is kept", () => {
+    expect(withMcpStop({}).stopEngineMcp).toBe(stopEngineMcp);
+    const own = async () => true;
+    expect(withMcpStop({ stopEngineMcp: own }).stopEngineMcp).toBe(own);
+  });
 });
 
 describe("the check itself", () => {
@@ -155,6 +181,14 @@ describe("the check itself", () => {
     const out = faults(edge(tree(), from, to));
     expect(out.length).toBeGreaterThan(0);
     expect(out.join("\n")).toContain(from);
+  });
+
+  test("Story 37.6: a planted `await import(\"./api\")` in enginemcp is scanned as an edge and fails it", () => {
+    const planted = `${readFileSync(join(SRC, "enginemcp.ts"), "utf-8")}\nconst late = async () => (await import("./api")).checkBind;\n`;
+    expect(valueImports(planted)).toContain("api");
+    const out = faults({ ...tree(), enginemcp: valueImports(planted) });
+    expect(out.length).toBeGreaterThan(0);
+    expect(out.join("\n")).toContain("enginemcp");
   });
 
   test("a synthetic named back-edge names its SCC", () => {
@@ -176,6 +210,13 @@ describe("the check itself", () => {
     expect(valueImports('import "./a";\n')).toEqual(["a"]);
     expect(valueImports('import { join } from "node:path";\n')).toEqual([]);
     expect(valueImports(' * import { a } from "./a";\n')).toEqual([]);
+    expect(valueImports('const a = await import("./a");\n')).toEqual(["a"]);
+    expect(valueImports('const a = await import(`./a`);\n')).toEqual(["a"]);
+    expect(valueImports('const a = (await import(\'./a.ts\')).x;\n')).toEqual(["a"]);
+    expect(valueImports('// const a = await import("./a");\n')).toEqual([]);
+    expect(valueImports(' * (await import("./a"))\n')).toEqual([]);
+    expect(valueImports('f(); // await import("./a")\n')).toEqual([]);
+    expect(valueImports('await import("node:fs");\n')).toEqual([]);
   });
 
   test("a planted release with no MCP stop fails the wiring check; the wired forms pass", () => {

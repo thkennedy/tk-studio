@@ -1960,6 +1960,9 @@ describe("Story 35.2: no relaunch across a story boundary while a graceful stop 
     expect(gracefulStopInForce(dir)).toEqual({ source: "stop-request" });
   });
 
+  /** The env `passDeps` hands the re-arm's line (the studio root and the fake `sbx`). */
+  const rearmEnv = () => ({ TK_STUDIO_ROOT: studio.root, SBX_BIN: sbx.bin });
+
   async function resumeWith(setup: (runDir: string) => void, stopper?: (root: string, id: string) => Promise<{ ok: boolean; detail: string }>, o: { resumePid?: string; pidPolls?: number } = {}) {
     const fx = await pausedRun({ status: "in-progress" });
     setup(fx.runDir);
@@ -2002,9 +2005,10 @@ describe("Story 35.2: no relaunch across a story boundary while a graceful stop 
     ]) {
       const { fx, sent } = await resumeWith((dir) => writeFileSync(join(dir, "stop-request.json"), "{}"), stopper);
       expect(sent).toHaveLength(1);
-      expect(sent[0]).toBe(rearmFailedLine(fx.run.run_id, E1, ev(fx.queue, fx.run.run_id, "graceful-stop")[0]!.detail!.detail as string));
+      expect(sent[0]).toBe(rearmFailedLine(fx.get(), E1, ev(fx.queue, fx.run.run_id, "graceful-stop")[0]!.detail!.detail as string, rearmEnv()));
       expect(sent[0]).toContain(`graceful stop was not re-armed on resumed engine ${E1}`);
-      expect(sent[0]).toContain(`re-issue \`launch.py stop --graceful --run-id ${E1}\``);
+      // Story 37.6 (DW-162): the builder's command on the run's tier, `--directory` included.
+      expect(sent[0]).toEndWith(`re-issue \`MSYS_NO_PATHCONV=1 ${sbx.bin} exec ${SB} uv run ${toVmPath(studio.root)}/plugins/tk-studio/lib/launch.py stop --directory ${toVmPath(fx.wt)} --run-id ${E1} --graceful\``);
       const gs = ev(fx.queue, fx.run.run_id, "graceful-stop");
       expect(gs).toHaveLength(1);
       expect(gs[0]!.detail).toMatchObject({ rearmed: true, ok: false, notify: { ok: true, via: "ntfy" } });
@@ -2024,8 +2028,8 @@ describe("Story 35.2: no relaunch across a story boundary while a graceful stop 
 
   test("Story 35.2: a skipped re-arm sends one notifier line naming the re-issue; a failed send is recorded, never thrown", async () => {
     const { fx, sent } = await resumeWith((dir) => writeFileSync(join(dir, "stop-request.json"), "{}"), undefined, { resumePid: "6509 125610.0", pidPolls: 3 });
-    expect(sent).toEqual([rearmFailedLine(fx.run.run_id, E1, REARM_SKIPPED)]);
-    expect(sent[0]).toContain(`re-issue \`launch.py stop --graceful --run-id ${E1}\``);
+    expect(sent).toEqual([rearmFailedLine(fx.get(), E1, REARM_SKIPPED, rearmEnv())]);
+    expect(sent[0]).toContain(`launch.py stop --directory ${toVmPath(fx.wt)} --run-id ${E1} --graceful\``);
     expect(ev(fx.queue, fx.run.run_id, "graceful-stop").map((e) => e.detail?.notify)).toEqual([{ ok: true, via: "ntfy" }]);
     // no notifier configured: the event records the skip
     const quiet = await pausedRun({ status: "in-progress" });
@@ -2107,7 +2111,8 @@ describe("Story 36.3: the re-arm on the run's tier, and the resume closes the bl
     const bin = fakeBin(join(dir, "sbx.js"), `const fs = require("node:fs");
 fs.appendFileSync(${JSON.stringify(join(dir, "argv"))}, JSON.stringify(process.argv.slice(2)) + "\\n");
 const exit = Number(fs.readFileSync(${JSON.stringify(join(dir, "exit"))}, "utf-8"));
-if (exit) console.error("fake sbx: sandbox unreachable");
+if (exit === 2) console.log(JSON.stringify({ ok: false, error: "no such run" })); // launch.py's refusal, through \`sbx exec\`
+else if (exit) console.error("fake sbx: sandbox unreachable");
 process.exit(exit);
 `);
     const answer = (exit: number) => writeFileSync(join(dir, "exit"), String(exit));
@@ -2130,11 +2135,15 @@ process.exit(exit);
       expect(await launchStopGraceful(root, "eng-9", where)).toEqual({ ok: true, detail: "engine eng-9 stopping gracefully" });
       expect(log()).toEqual([stopArgv(root, "eng-9")]);
       answer(3);
-      expect(await launchStopGraceful(root, "eng-9", where)).toEqual({ ok: false, detail: "stop failed: exit 3: fake sbx: sandbox unreachable" });
+      expect(await launchStopGraceful(root, "eng-9", where)).toEqual({ ok: false, detail: "launch stop failed: exit 3: fake sbx: sandbox unreachable" });
+      // Story 37.6 (AC1): an sbx `launch.py` refusal (exit 2, a JSON `error` on stdout) reads the same as the host's.
+      answer(2);
+      expect(await launchStopGraceful(root, "eng-9", where)).toEqual({ ok: false, detail: "launch stop refused: no such run" });
+      expect(log().at(-1)).toEqual(stopArgv(root, "eng-9"));
       process.env.SBX_BIN = join(root, "no-such-sbx");
       const gone = await launchStopGraceful(root, "eng-9", where);
       expect(gone.ok).toBe(false);
-      expect(gone.detail).toStartWith("stop failed: ");
+      expect(gone.detail).toStartWith("launch stop failed: ");
     });
   });
 

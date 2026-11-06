@@ -1226,6 +1226,19 @@ describe("Story 36.6: the story being built reads In Progress; the launch arms t
     expect(gracefulStopCommand(run, E1, {})).toContain("<studio-root>/plugins/tk-studio/lib/launch.py stop --directory /c/work/p");
   });
 
+  test("Story 37.6: an sbx run's arming runs the builder's argv through `sbx exec`, `--directory` the VM root; the event carries the tier", async () => {
+    const queue = new Queue(":memory:", { ownerAlive: (o) => o.nonce === me.nonce, engineLive: async () => ({ live: false, run_ids: [] }) });
+    const run0 = queue.enqueue({ jobId: "run-epic-27", root: "C:\\work\\p", projectId: "proj", definition: epicDefn(1), owner: me, tier: "sbx", sandbox: "claude-p" }).run;
+    if (!(await queue.claim(run0.run_id, me)).claimed) throw new Error("not claimed");
+    queue.recordWorktree(run0.run_id, "C:\\work\\p", { branch: runBranch(run0.run_id), base_ref: "main" });
+    queue.markLaunched(run0.run_id, E1, { status_block: BLOCK, end: { state: "complete", reason: null } });
+    const calls: { bin: string; argv: string[] }[] = [];
+    const env = { TK_STUDIO_ROOT: "C:\\GitHub\\tk-studio", SBX_BIN: "sbx-fake", TK_SUPERVISOR_NOTIFY: "" };
+    await armStop(queue, queue.get(run0.run_id)!, 1, { env, sbx: { run: async (bin, argv) => { calls.push({ bin, argv }); return { exit: 0, stdout: "{}", stderr: "" }; } } });
+    expect(calls).toEqual([{ bin: "sbx-fake", argv: ["exec", "claude-p", "uv", "run", "/c/GitHub/tk-studio/plugins/tk-studio/lib/launch.py", "stop", "--directory", "/c/work/p", "--run-id", E1, "--graceful"] }]);
+    expect(queue.events(run0.run_id).filter((e) => e.kind === "stop-armed").map((e) => e.detail)).toEqual([{ figure: 1, engine_run_id: E1, ok: true, detail: `engine ${E1} stopping gracefully`, tier: "sbx" }]);
+  });
+
   test("a refused arming from the pass and on a resume reaches the notifier; a good arming sends nothing", async () => {
     const backstop = await launchedRun();
     backstop.journal(start(K1));

@@ -191,6 +191,22 @@ describe("Story 37.2 (DW-150): a red leg names every suite's own verdict", () =>
     expect(redSuites(v)).toEqual(["lib suite"]);
   });
 
+  test("Story 37.6 (B8): a named skip line is never a verdict, even when the test's name reads `timed out`; a timed-out file still is", () => {
+    const v = verdictLines([
+      "== supervisor: test/guards.test.ts 20 pass, 0 fail, 1 skip in 3s",
+      "== supervisor: test/guards.test.ts skip: kill_tree on win32 > a worker that spawned a grandchild: both are gone after the trip; the error still reads `timed out`",
+      "== supervisor: test/api.test.ts 95 pass, 0 fail, 2 skip in 5s",
+      "== supervisor: test/api.test.ts skip: 2 test(s), names not reported",
+      "== supervisor: test/odd.test.ts skip: a > rc=1 and 1 fail, FAILED",
+      "== supervisor: ok in 90s; 39 files, 900 pass, 0 fail, 3 skip; slowest test/a.test.ts 9s",
+    ].join("\n"));
+    expect(v).toEqual(["== supervisor: ok in 90s; 39 files, 900 pass, 0 fail, 3 skip; slowest test/a.test.ts 9s"]);
+    expect(redSuites(v)).toEqual([]);
+    const timedOut = "== supervisor: test/slow.test.ts ? pass, ? fail in 420s (timed out after 420s)";
+    expect(verdictLines(timedOut)).toEqual([timedOut]);
+    expect(redSuites(verdictLines(timedOut))).toEqual(["supervisor"]);
+  });
+
   test("the scan stops at the first failing-gate tail header: the supervisor's repeated refusals and echoed child lines never count", () => {
     expect(verdictLines([
       "== supervisor: bun install (node_modules absent) FAILED rc=1 in 5s",

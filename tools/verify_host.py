@@ -76,6 +76,10 @@ DRAIN_TIMEOUT = 10  # the bound on reading what a killed tree left in the pipe
 
 _PASS = re.compile(r"^\s*(\d+) pass\s*$", re.MULTILINE)
 _FAIL = re.compile(r"^\s*(\d+) fail\s*$", re.MULTILINE)
+# Story 37.6 (B8): bun's skip count, and the per-test `(skip) <describe> > <test>` lines of its default reporter
+# (observed bun 1.4.3; it prints them only outside an AI-agent env, the count line always).
+_SKIP = re.compile(r"^\s*(\d+) skip\s*$", re.MULTILINE)
+_SKIPPED = re.compile(r"^\(skip\) (.+?)\s*$", re.MULTILINE)
 
 
 def _git(*args: str) -> subprocess.CompletedProcess:
@@ -196,6 +200,13 @@ def bun_counts(out: str) -> tuple[int | None, int | None]:
     return (int(p[-1]) if p else None, int(f[-1]) if f else None)
 
 
+def bun_skips(out: str) -> tuple[int, list[str]]:
+    """Story 37.6 (B8): bun's ` <n> skip` summary count (the last; 0 when absent) and the names of its `(skip) <name>`
+    lines, in order. Only that observed line shape feeds the names; never a guessed one."""
+    s = _SKIP.findall(out)
+    return (int(s[-1]) if s else 0), _SKIPPED.findall(out)
+
+
 def temp_base() -> Path:
     """The gate's own temp folder (tempfile.gettempdir(), from this process's TMPDIR/TEMP/TMP, which
     the gate never overrides; only the children's environment points at the per-run folder)."""
@@ -253,7 +264,7 @@ def run_supervisor_gate() -> tuple[int, str]:
     failed = False
     tails: list[str] = []
     timings: list[tuple[str, float]] = []
-    total_pass = total_fail = 0
+    total_pass = total_fail = total_skip = 0
     files = supervisor_files()
 
     def refuse(message: str) -> None:
@@ -306,14 +317,23 @@ def run_supervisor_gate() -> tuple[int, str]:
             seconds = time.monotonic() - t0
             timings.append((rel, seconds))
             p, f = bun_counts(out)
+            skips, skipped = bun_skips(out)
             total_pass += p or 0
             total_fail += f or 0
-            line = f"== {SUPERVISOR_GATE}: {rel} {'?' if p is None else p} pass, {'?' if f is None else f} fail in {seconds:.0f}s"
+            total_skip += skips
+            # Story 37.6 (B8): `, S skip` only when bun skipped any (skip 0 leaves the line, and 37.2's verdicts, as they were)
+            skip = f", {skips} skip" if skips else ""
+            line = f"== {SUPERVISOR_GATE}: {rel} {'?' if p is None else p} pass, {'?' if f is None else f} fail{skip} in {seconds:.0f}s"
             if rc is None:
                 line += f" (timed out after {SUPERVISOR_FILE_TIMEOUT}s)"
             elif rc != 0:
                 line += f" rc={rc}"
             print(line, flush=True)
+            # One named line per skipped test, never a silent skip; bun quiet (an AI-agent env) still says how many.
+            for name in skipped:
+                print(f"== {SUPERVISOR_GATE}: {rel} skip: {name}", flush=True)
+            if skips and not skipped:
+                print(f"== {SUPERVISOR_GATE}: {rel} skip: {skips} test(s), names not reported", flush=True)
             if rc != 0:
                 failed = True
                 tails.append(f"--- {rel}\n{out.rstrip()}")
@@ -347,7 +367,7 @@ def run_supervisor_gate() -> tuple[int, str]:
     slowest = max(timings, key=lambda t: t[1]) if timings else None
     slow = f"slowest {slowest[0]} {slowest[1]:.0f}s" if slowest else "slowest none"
     print(f"== {SUPERVISOR_GATE}: {'FAILED' if failed else 'ok'} in {time.monotonic() - started:.0f}s; "
-          f"{len(files)} files, {total_pass} pass, {total_fail} fail; {slow}", flush=True)
+          f"{len(files)} files, {total_pass} pass, {total_fail} fail{f', {total_skip} skip' if total_skip else ''}; {slow}", flush=True)
     return (1 if failed else 0), "\n".join(tails)
 
 

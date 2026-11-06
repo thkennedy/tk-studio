@@ -50,6 +50,11 @@ def bun_out(p: int, f: int) -> str:
     return f"bun test v1.4.3\n\n {p} pass\n {f} fail\n {p * 2} expect() calls\nRan {p + f} tests across 1 file. [10ms]\n"
 
 
+def bun_skip_out(p: int, f: int, k: int) -> str:
+    """Story 37.6: bun's summary with skipped tests (bun 1.4.3 prints ` <k> skip` between pass and fail)."""
+    return f"bun test v1.4.3\n\n {p} pass\n {k} skip\n {f} fail\n {p * 2} expect() calls\nRan {p + f + k} tests across 1 file. [10ms]\n"
+
+
 class Clock:
     def __init__(self):
         self.now = 1000.0
@@ -259,6 +264,41 @@ class TestSupervisorGate(VerifyHostCase):
             "== supervisor: ok in 44s; 2 files, 194 pass, 0 fail; slowest test/queue.test.ts 30s",
         ])
 
+    def test_skipped_tests_are_counted_and_named_never_silent(self):
+        # Story 37.6 (B8): bun 1.4.3's default reporter prints `(skip) <describe> > <test>` and ` <n> skip`.
+        def spawn(argv, cwd, env, timeout):
+            self.clock.now += 3
+            if argv[1] != "test":
+                return 0, ""
+            if argv[-1].endswith("api.test.ts"):
+                return 0, ("(skip) POST /jobs through the real submit path > enqueues\n"
+                           "(skip) POST /jobs through the real submit path > SkillMissing\n"
+                           "(pass) other [1.00ms]\n" + bun_skip_out(95, 0, 2))
+            return 0, bun_out(97, 0)
+        rc, out = self.run_main(self.CHANGED, spawn=spawn)
+        self.assertEqual(rc, 0)
+        lines = [l for l in out.splitlines() if l.startswith("== supervisor:")]
+        self.assertEqual(lines[1:4], [
+            "== supervisor: test/api.test.ts 95 pass, 0 fail, 2 skip in 3s",
+            "== supervisor: test/api.test.ts skip: POST /jobs through the real submit path > enqueues",
+            "== supervisor: test/api.test.ts skip: POST /jobs through the real submit path > SkillMissing",
+        ])
+        self.assertIn("== supervisor: test/queue.test.ts 97 pass, 0 fail in 3s", lines)
+        self.assertIn("== supervisor: ok in 9s; 2 files, 192 pass, 0 fail, 2 skip; slowest", out)
+
+    def test_a_skip_count_with_no_names_still_names_the_skip(self):
+        # bun prints no per-test lines under an AI-agent env: the count line keeps the skip from being silent.
+        def spawn(argv, cwd, env, timeout):
+            self.clock.now += 1
+            if argv[1] != "test":
+                return 0, ""
+            return 0, bun_skip_out(5, 0, 7) if argv[-1].endswith("api.test.ts") else bun_out(5, 0)
+        rc, out = self.run_main(self.CHANGED, spawn=spawn)
+        self.assertEqual(rc, 0)
+        self.assertIn("== supervisor: test/api.test.ts 5 pass, 0 fail, 7 skip in 1s", out)
+        self.assertIn("== supervisor: test/api.test.ts skip: 7 test(s), names not reported", out)
+        self.assertNotIn("test/queue.test.ts skip", out)
+
     def test_a_failing_file_fails_the_gate_and_its_tail_is_repeated(self):
         def spawn(argv, cwd, env, timeout):
             self.clock.now += 2
@@ -438,6 +478,14 @@ class TestSpawn(unittest.TestCase):
         self.assertEqual(vh.bun_counts(bun_out(12, 3)), (12, 3))
         self.assertEqual(vh.bun_counts(" 4 pass\n 1 skip\n 0 fail\n"), (4, 0))
         self.assertEqual(vh.bun_counts("error: crashed\n"), (None, None))
+
+    def test_bun_skips(self):
+        # Story 37.6 (B8): the count and the observed `(skip) <name>` lines only.
+        self.assertEqual(vh.bun_skips(bun_out(12, 3)), (0, []))
+        self.assertEqual(vh.bun_skips("(skip) a > b\n(skip) a > c d\n(pass) ok [0.03ms]\n 1 pass\n 2 skip\n 0 fail\n"),
+                         (2, ["a > b", "a > c d"]))
+        self.assertEqual(vh.bun_skips(" 4 pass\n 1 skip\n 0 fail\n"), (1, []))
+        self.assertEqual(vh.bun_skips("skip a > b\n[skip] a\n (skip) indented\n"), (0, []), "no guessed shape")
 
 
 if __name__ == "__main__":

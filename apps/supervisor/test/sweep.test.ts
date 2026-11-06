@@ -12,7 +12,8 @@ import { endNotice, noticeText } from "../src/hygiene";
 import { runCost } from "../src/inbox";
 import { mergePass, PLAN_RETRY_LIMIT } from "../src/planstatus";
 import { Queue, type QueueEvent } from "../src/queue";
-import { runProcess, type RunResult } from "../src/server";
+import { engineStopArgv } from "../src/runners";
+import { runProcess, toVmPath, type RunResult } from "../src/server";
 import {
   emitTriage, engineCostOf, isSweep, stopEngine, SWEEP_ENGINE_PROBE, SWEEP_LEDGER_WAIT_MS, SWEEP_STOP_DEADLINE_MS, sweepRecord, sweepStopPastDeadline, LEDGER_LEASE, LEDGER_RESOLVE, ledgerFingerprint, ledgerPass, recordTriage, summaryFromRecord, SWEEP_ENGINE_STOP, SWEEP_JOB_TYPE, SWEEP_TRIAGE, sweepCostText,
   sweepEndState, sweepSection, sweepTotalCost, withEngineCost, type SweepSummary,
@@ -1222,12 +1223,16 @@ describe("Story 36.3: a paused sweep's bounded stop and its WIP (DW-121)", () =>
 
   test("Story 36.3: an sbx-tier sweep's stop goes through `deps.sbx.run`, a hard stop (no `--graceful`)", async () => {
     const calls: string[][] = [];
-    const answer = await stopEngine({ worktree: tempDir("tk-sup-sweep-stop-"), prefix: "", engine_run_id: "E1", tier: "sbx", sandbox: "claude-p" },
+    const wt = tempDir("tk-sup-sweep-stop-");
+    const answer = await stopEngine({ worktree: wt, prefix: "", engine_run_id: "E1", tier: "sbx", sandbox: "claude-p" },
       { env: { TK_STUDIO_ROOT: "/studio" }, sbx: { run: async (_b, a) => { calls.push(a); return { exit: 0, stdout: "{}", stderr: "" }; } } });
     expect(answer).toBe("stopped");
     expect(calls[0]!.slice(0, 2)).toEqual(["exec", "claude-p"]);
     expect(calls[0]).toContain("stop");
     expect(calls[0]).not.toContain("--graceful");
+    // Story 37.6 (AC1): the one builder's argv, `--directory` the VM root.
+    expect(calls[0]).toEqual(engineStopArgv(wt, "E1", { tier: "sbx", sandbox: "claude-p" }, { env: { TK_STUDIO_ROOT: "/studio" } }).argv);
+    expect(calls[0]).toEqual(["exec", "claude-p", "uv", "run", "/studio/plugins/tk-studio/lib/launch.py", "stop", "--directory", toVmPath(wt), "--run-id", "E1"]);
   });
 });
 

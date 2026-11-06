@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { hostVerifyOf, jobRunCosts } from "../src/board";
 import { main, verifyVerb } from "../src/cli";
 import { rerunHostLeg, VerifyRefused, type HostLegResult, type HostLegStarted } from "../src/hostleg";
+import { isInconclusive, type HostVerifyResult } from "../src/hostverify";
 import { runCost } from "../src/inbox";
 import { Queue, type Owner } from "../src/queue";
 import { runProcess, type RunResult } from "../src/server";
@@ -306,7 +307,7 @@ describe("AC1: the cli verb `verify <run id>`", () => {
     }
   });
 
-  test("green 0, red or skipped 1, a refusal 2 — one JSON object each", async () => {
+  test("green 0, red, inconclusive or skipped 1, a refusal 2 — one JSON object each", async () => {
     const queue = new Queue(":memory:");
     const green = await captured(() => verifyVerb(["q-1"], { queue, leg: leg({ green: true, rerun: { by: "cli", head: "abc123", worktree: "removed", pr: PR, pr_ready: "marked" } } as Partial<HostLegResult>) }));
     expect(green.value).toBe(0);
@@ -314,6 +315,13 @@ describe("AC1: the cli verb `verify <run id>`", () => {
     const red = await captured(() => verifyVerb(["q-1"], { queue, leg: leg({ green: false } as Partial<HostLegResult>) }));
     expect(red.value).toBe(1);
     expect(JSON.parse(red.out)).toMatchObject({ ok: true, green: false, pr: PR });
+    // Story 37.6 (DW-133): an inconclusive leg did not pass: exit 1, as red.
+    const why = "host verify inconclusive (playable): infrastructure: judge unreachable";
+    const inconclusiveLeg = { green: false, reason: why, playable: { verdict: "inconclusive" } } as Partial<HostLegResult>;
+    expect(isInconclusive(inconclusiveLeg as HostVerifyResult)).toBe(true);
+    const inconclusive = await captured(() => verifyVerb(["q-1"], { queue, leg: leg(inconclusiveLeg) }));
+    expect(inconclusive.value).toBe(1);
+    expect(JSON.parse(inconclusive.out)).toMatchObject({ ok: true, green: false, reason: why, pr: PR });
     const skipped = await captured(() => verifyVerb(["q-1"], { queue, leg: leg({ skipped: true, reason: "no verify.host" } as Partial<HostLegResult>) }));
     expect(skipped.value).toBe(1);
     expect(JSON.parse(skipped.out)).toMatchObject({ ok: true, green: false, skipped: true, reason: "no verify.host" });
