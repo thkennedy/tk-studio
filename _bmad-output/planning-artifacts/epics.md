@@ -3637,3 +3637,147 @@ So that the next retrospective audits records that are true and the open items o
 **Given** the Epic 36 retrospective's AI-9 (the owner's decisions) and the follow-up-review entries the cap spent (DW-145, 152, 156, 158, 163)
 **When** this story lands
 **Then** the handoff carries one list of what stays Tim's (the 68 triage decisions in PR #293, the fourth sweep's `max_runs`, the TUA reachability proof, the attended engagement, the pre-36.6 engagement jobs' rhythm) and the follow-up-review entries read `status: open (owner's decision: a review pass costs N USD)` with the figure from the stage logs; nothing else is decided here
+
+## Epic 38: Loop Hygiene 5, the Leg's Own Clock, the Silent Run and the Sweep's Path
+
+Epic 37 closed on 2026-11-06 with the retrospective's verdict `accepted-with-open-items` (`_bmad-output/specs/spec-epic-37/RETROSPECTIVE.md`, PR #344): seven stories in eight runs, every PR merged on a green host leg, six on the first leg, no leg red on code or on a Windows class. What it left: the host leg is now the epic's largest stage (22 274 s over seven legs against 18 331 s of dev) and still runs under the engine's worker guard, which its own green legs exceed (hole 113, DW-174: 37.5's leg ran 3752 s against the shipped 3600, green only under the job's 7200 interim); a run that did no work ended `complete` after a 35-minute leg with its two halted dev attempts in no record and its story left `in-progress` (hole 114, DW-180); three new defects sit on the fourth sweep's path (the retrospective's B1, B2, B4); the sweeps' owner decisions still have no source and no sink (hole 112, DW-171: nineteen issues hand-posted); Story 37.3's pause path (B5 to B8) and Epic 36's Jira-block fix (B3) are half done; and the gate has named blind spots (B9, DW-167, DW-172, DW-173, DW-183). The retrospective's AI-10 orders the next plan: AI-1, AI-2 and AI-3 land before any new surface. Epic 38 takes AI-1 to AI-7 and the loop's own open deferred-work entries DW-165 to DW-177, DW-180, DW-182 and DW-183; the follow-up-review entries the cap spent (DW-145, 152, 156, 158, 163, 181), the owner's designs (DW-178 the check-in model, DW-179 the nightly hygiene pass: new surface, candidates for Epic 39 on Tim's word), TKSTUDIO-220 to 224 and the sweep-domain entries from DW-26 to DW-129 stay Tim's or the fourth sweep's. Seven stories in dependency order: the host leg's own guard first, the silent run second, the sweep's path third, then the owner's decisions through Jira with the block edge closed, the pause path finished, the gate's coverage widened, and the records reconciled with the policy's bands. The contract moves to 0.1.34 (additive) at 38.1 and every later story extends its entry; one story per run (`after_stories: 1`), the launch marking the story In Progress and arming the stop itself (Story 36.6); the `run-epic-38` instance carries the DW-174 interim (`max_wall_clock_seconds 7200`) until 38.1 lands, since 38.1's own leg runs under the code before it, and 38.1 drops it; the operator records CAP-14 (b)/(c) on 38.1's run, the first live run after Epic 37, and 38.7 carries it; the next run is queued only after the landing's docs PR has merged (37.5's hand-merge rule). Where a story's proof needs the host or a live site, the engine asks through the consult log and the operator does the step on the box; the engine never runs on the host.
+
+### Story 38.1: The Host Leg's Own Guard and Its Measure
+
+As the operator,
+I want the host verify leg to run under a guard of its own, sized to the host gate and recorded per suite, a leg that ends on the guard with every verdict so far green to read `inconclusive (guard)`, and an operator's own gate to refuse to start beside a live leg,
+So that the epic's largest stage is bounded by its own history and never by the engine's clock, and a time bound is never reported as a fault (AI-1; DW-174; the retrospective's C2, C4).
+
+**Acceptance Criteria:**
+
+**Given** `closeout.ts:481` and `hostleg.ts:331` (`guardS = run.worker_guard_s ?? guards.max_wall_clock_seconds ?? 600`) and the shipped `run-epic` and `run-vertical-slice` types' `guards`
+**When** the close-out or the re-run verb starts the leg
+**Then** the guard is the job's `guards.host_verify_seconds` (the shipped types carry 7200; an instance may override; a job without one gets its type's), read by both callers in place of `worker_guard_s`, validated by `job.py validate` and `job.schema.json`; the `host-verify` event names `guard: host_verify_seconds (Ns)`; the supervisor suites pin both callers from one table; `run-epic-38.json` drops its interim `max_wall_clock_seconds 7200` by this story's PR so the engine's clock returns to the type's figure; the contract (0.1.34, additive) names the key
+
+**Given** `verify_host.py`'s suite lines (`== lib suite: … in Ns`, the per-file supervisor lines, conformance, the studio web)
+**When** the leg ends green, red or on the guard
+**Then** the script prints one `== durations:` summary line (suite to seconds) at its end and the leg records `suite_durations` on the `host-verify` event beside `verdicts`, the PR body's `## Host verify` lists them, and a leg ended on the guard with every verdict so far green is reported `inconclusive (guard)` (Story 35.3's shape): the run ends `partial` with the reason naming the guard and the suites still unrun, the PR body says "timed out", never "failed", and the re-run verb's exit 1 covers it; `test_verify_host` and `hostleg.test` pin each
+
+**Given** an operator's own `tools/verify_host.py` on the box while a leg is live (hole 113: two gates on one box halve each other)
+**When** the script starts
+**Then** it reads the queue read-only (a live `host-verify-leg` lease or a run in its close-out, `queue.db` under `mode=ro` at the configured path, or `GET /runs`) and refuses to start naming the lease's run id and the remedy, `--beside-leg` overriding with a printed warning; the runbook's hole-113 row reads fixed with the rule in code; the retrospective's open question (a leg narrowed to the suites a diff can affect, the whole leg at the epic's end) is recorded in the handoff as Tim's, with the per-suite durations this story measures as its evidence, not decided here
+
+### Story 38.2: A Run That Does No Work Says So
+
+As the loop,
+I want a run whose engine lands no story to end `partial` with the engine's last record as its reason and no host leg, the hole-65 auto-resume to key on the render failure's signature whatever status word the session wrote, the plan-status pass to return the story to `draft`, a halted dev attempt to leave its Stage Log row, and the renderer to re-read its outputs after the staging rename,
+So that a silent run is never `complete` and a stale render snapshot costs one resume, not a 35-minute leg and a hand re-queue (AI-2; DW-180; hole 114; the retrospective's C3).
+
+**Acceptance Criteria:**
+
+**Given** `closeout.ts`'s "no changes" end (`no_changes: true`, the run `complete`) and the leg over a tree equal to the base
+**When** the engine ends with no commits and the story's spec not `done`
+**Then** the run ends `partial` with the engine's last record as the reason (the session's `halted`/HALT text and the attempt count), the close-out skips the host leg when the tree equals the base (one `host-verify` note `skipped: no changes`), the notifier line reads `partial: no story landed`, and the `job-run` ledger line carries the worker's cost; the supervisor suites pin it with a fake
+
+**Given** the hole-65 auto-resume (`closeout.ts`, Story 33.6: keyed on a `blocked` draft and a CRITICAL escalation) and the first 37.6 run's two halted attempts (`refs/attempt-preserve-dirty/20261106-102516-76a4-*`, `status: 'halted'`, five of ten generation files `-?????????` from inside the sandbox)
+**When** a dev session halts on the render failure's signature (the HALT text naming a generation file, a generation folder with unreadable entries)
+**Then** the auto-resume fires on the signature whatever status word the session wrote (`halted` included), removes the snapshot and resumes once (a second pause of the story pauses with the owner told, as today), and the plan-status pass returns the story to `draft` with the halt note when a run ends without a PR, so a plan entry never reads `in-progress` for a story no run holds; `closeout.test` and `planstatus.test.ts` pin each; the retrospective's open question (a HALT on a missing skill file as a CRITICAL escalation) is answered by the signature keying on the supervisor's side, not by the engine
+
+**Given** the halted attempt's Stage Log (Story 37.3 gives a timed-out attempt its row; the 37-6 log goes from its plan row to the second run's dev row) and `_bmad/scripts/render_skill.py`'s `_publish` (the staging rename across the sbx mount; DW-110's retry patch in `kb/bmad-base-patches.md`)
+**When** an attempt ends halted, and when a render's rename lands
+**Then** the attempt writes its row (`outcome: halted`, start and stop, tokens and cost from the session record) through the timeout row's path and `test_stage_log` pins it; both tracked copies of `render_skill.py` verify every output by reading it after the rename and, on a stat failure, remove the generation and write the outputs straight into a fresh destination, registered as a base patch beside DW-110's with a test for both branches; the runbook's hole-65 and hole-114 rows read fixed; the contract names the `partial` rule (0.1.34, additive)
+
+### Story 38.3: The Sweep's Path Cleared
+
+As the operator,
+I want the sweep's paused-engine deadline to reset on a `running` probe, a ledger refusal to end the ledger pass with a notifier line and a named remedy, a missing id to be a refusal by name with a remedy that runs from any root, and a bundle's engine passes to leave their stage-log rows,
+So that the fourth sweep waits only on Tim's figure (AI-3; the retrospective's B1, B2, B4; DW-165).
+
+**Acceptance Criteria:**
+
+**Given** `sweepStopPastDeadline` (`sweep.ts:576-578`: measured from the first `unknown` or erroring note, a `running` probe never clears it, `sweep.test.ts:1316` pinning that as intended) and the stop at `worktree.ts:1173-1186`
+**When** an early `unknown` probe is followed by `running` probes and a later blip
+**Then** the deadline measures from the first note of the latest non-`running` streak (a `running` probe resets it; the rule named in the README), so a healthy engine is never stopped on an old blip, and `stopUnanswered`'s `blocked` end releases the lock and the pin only after a stop confirmed or the engine's own exit; `sweep.test.ts` pins the reset and the `:1316` case is rewritten to the new rule
+
+**Given** `ledgerPass` (`sweep.ts:716-718`: a non-retryable refusal read as `settled` with no notifier line) and `LedgerDuplicateId` (`plansync.py ledger-resolve`, exit 2)
+**When** `ledger-resolve` refuses
+**Then** the pass ends with a `ledger-resolve {ok: false, settled: true, ended: "refused", reason}` note and one notifier line naming the refusal and the remedy (as B4's wait end does), never a silent settle; pinned with a fake refusal
+
+**Given** B4's remedy line (`sweep.ts:629-630`: `ledger-resolve --ids <old ids>` with a relative plugin path; a missing id stays `pending`, `plansync.py:3481-3483`) and a sweep bundle's engine passes (DW-165: no Jira story, so no stage-log row anywhere)
+**When** an id in the sweep's record no longer names an open entry, and when a bundle's passes end
+**Then** `ledger-resolve` refuses a missing id by name (`LedgerMissingId`, exit 2, naming the id and the counter) instead of `pending`, the remedy line carries the verb's absolute path under the studio install and the run's `root` (`--directory`), and the test runs the remedy under a fixture root rather than reading the line's text; a bundle's passes write their Stage Log rows into the sweep PR body's `## Stage Log` (the story-doc shape: stage, start, stop, model, tokens, cost) and DW-165 closes with the Jira half declared not owed (a bundle has no issue) on the entry; the contract names the refusal and the rows (0.1.34, additive)
+
+### Story 38.4: The Owner's Decisions Have a Source and a Sink
+
+As the owner,
+I want the sweep's decisions to reach me as Jira issues in the form I answer (lettered options, a default, related ones grouped), my answers ingested at `Block Resolved` (the ledger's `decision:` lines written, the engine's `bmad-loop decisions` answered, a reply naming what is still open), the studio's inbox to show the same items, and an issue to leave `Blocked - Awaiting User` once no block stands,
+So that no decision is hand-posted again and an issue reads what the loop means at every edge (DW-171, hole 112; AI-4, the retrospective's B3).
+
+**Acceptance Criteria:**
+
+**Given** the triage's `decisions [{id, question}]` (`launch.py:1789-1800`), the `sweep-triage` event (`sweep.ts`) and `track.py block` (`--source run|engagement`, the engagement form's questions block)
+**When** a sweep's triage names decisions
+**Then** each carries `options[] {letter, text}` and `default` (the sweep skill's triage emits them; a drive pins the shape), `track.py block --source sweep` posts one Task per related group from the run's `triage.json` (the `tk-studio-decision` label, the owner assigned, `Blocked - Awaiting User`, the mention comment, the `<id>: <letter>` / `all: <letter>` answer form: the 2026-11-05 hand posting's shape recorded in `_bmad-output/tracking/decisions-jira.json`), the sweep's close-out calls it when the project is bound and the PR body lists the issue keys in place of the bare questions, and a dry run names what it would post; the lib suite pins the grouping and the issue body with a fake
+
+**Given** an answered decision issue at `Block Resolved` and the inbox tick (`syncback.py`, `inbox.py`)
+**When** the tick reads it
+**Then** the ingest parses the owner's comment lines (`<id>: <letter>`, `all: <letter>`; a missing line takes `default` only when the comment says `default`), writes `decision: <letter> — <text> (TKSTUDIO-N, <date>)` onto each ledger entry through the ledger verb, answers `bmad-loop decisions` in the sandbox when an open sweep record exists (else records the answer for the next triage to read), replies on the issue naming what was ingested and what is still open, and moves it to Done or re-blocks with the missing ids named; the five hand-posted issues still open (TKSTUDIO-220 to 224) are ingested by the verb when they return; the studio web's inbox lists the decision items with their state (DW-178's check-in UI is not built here); the lib suite pins the parse, the reply and the re-block with a fake
+
+**Given** an issue in `Blocked - Awaiting User` whose canonical is `in-progress` or `review` with no block standing (`jirabackend.py:993-997`; EP-36 B1's sequence: block, cancel, re-drive without `track unblock`)
+**When** the plan-status pass promotes
+**Then** the promote leaves `Blocked - Awaiting User` when no block stands (the block's record on the plan entry resolved, or the issue's last block comment answered), or every cancel and re-drive path calls `track unblock` first (one of the two, named in the contract), a same-category test pins the exit; the contract names the decision shapes and the edge (0.1.34, additive); DW-171 closes by this PR and the runbook's hole-112 row reads fixed
+
+### Story 38.5: The Pause Path Finished
+
+As the loop,
+I want a pause to tell the owner before its leg runs, one leg per set of commits across a pause and the boundary, no stub policy where the checkout has none and a TOML-aware rollback edit, a bound on a job's own-block resubmissions, an engine-clock pause that blocks with no owner mention, the late close-out paths covered, and a split story's spec resolved unambiguously,
+So that Story 37.3's clock-as-pause holds on the paths its first cut left (AI-5; the retrospective's B5 to B8; DW-166, DW-176, DW-177).
+
+**Acceptance Criteria:**
+
+**Given** `worktree.ts:1221, :1245` (`if (!verify && notKilled) hostVerify(...)` inline in the engines loop, before `closeOutPaused`'s `awaiting-ruling` notice), `recordedVerify` (`worktree.ts:941`: legs before the latest `paused` ignored) and `closeOutLanded → boundaryLeg` (`closeout.ts:477-483`)
+**When** a run pauses on a ruling with commits landed and later ends at the boundary on the same commits
+**Then** the `awaiting-ruling` notice and the issue's block go out before the leg, the leg runs off the engines loop in its own pass (other runs' ticks never wait behind it), and the boundary end reuses a leg recorded for the same head (`recordedVerify` matches by commit, not by position after `paused`), so one commit set gets one leg; the supervisor suites pin pause-then-boundary
+
+**Given** `runWorktreeRollback` (`worktree.ts:241-258, :330`: a stub policy written where the checkout has none; the text edit at `:227-233` matching only a bare boolean under `[scm]`) and `launch.py sweep`'s gap check (`launch.py:1848-1849`)
+**When** the pin writes the run worktree's policy
+**Then** a checkout with no `.bmad-loop/policy.toml` is refused by name (`WorktreeFailed("policy: none in the checkout")`), never given a stub; the edit parses the file (`Bun.TOML.parse`) and sets `scm.rollback_on_failure = true` whatever the file's form (a quoted value, a dotted key, an inline table), every other byte kept where the form allows and the file re-serialised when not, verified by a parse after the write; the suites pin the four forms
+
+**Given** an `own_block` run (`jobrun.py:263-265`: counted toward neither `max_runs` nor `on_status`; `cli.ts:1800`), the paused-run pass's `track.py block` for an engine-clock pause (`closeout.ts`; DW-176), DW-64's remainder (the late terminal close-out, `closeOutNow`, `cancel`; DW-166) and the `<key>-s2` spec glob (DW-177: `plansync._stage_target`, `closeout.findSpec`, `task-planning.md` section 3)
+**When** these paths run
+**Then** a cadence job's `own_block` runs are bounded (`stop.max_own_blocks`, default 3, the stop line naming the cause) and `test_jobrun` pins it; an engine-clock pause (the journal's `session-end status timeout` or `paused_reason`) blocks the issue with `no owner action` and no mention (`track.py block --kind engine`) or sends only the notifier line; the late terminal close-out, `closeOutNow` and `cancel` each leave the records DW-64 named (the plan status, the stage row, the `job-run` line), pinned; a split story's spec resolves by the exact `<key>-spec.md` first and by the prefix glob only when one file matches, `-s2` and `-r<n>` excluded from the first half's glob, in `_stage_target`, `findSpec` and the planning doc; DW-166, DW-176 and DW-177 close by this PR; the contract names the rules (0.1.34, additive)
+
+### Story 38.6: The Gate's Coverage Widened
+
+As the loop,
+I want the Windows-class drives to scan every folder of host-run Python, every bare `bun test` to carry the host figure, the suites no gate runs to run under one, the gate's tooling probes pinned by behaviour, the planner told the host figure, the supervisor's env-dependent cases pinned, and the skills listing's parser pinned to the real format,
+So that the gate's known blind spots are closed, not named (AI-7; the retrospective's B9, B10, A5, C7; DW-167, DW-172, DW-173, DW-183).
+
+**Acceptance Criteria:**
+
+**Given** `e2e_windows_semantics.py:631-633` and `e2e_text_encoding`'s scan roots (neither scans `plugins/tk-studio/skills/*/scripts` nor `.bmad-loop/plugins`; the `apps/*/scripts` step at `e2e_text_encoding.py:259-263` is vacuous) and `apps/supervisor/.tk-studio/config.yaml:58` (`host: bun test`, no `--timeout`)
+**When** the gate runs
+**Then** both drives scan `plugins/tk-studio/skills/*/scripts` and `.bmad-loop/plugins` (`drift_check.py`, `install_base.py`, `reconcile_gate.py`, `meter_hook.py` among the sites) and the vacuous step goes, each drive's fixture adding a site under the new roots; the nested project's verify command names `--timeout` from `_budget.HOST_TEST_TIMEOUT_MS` and a drive step rejects a bare `bun test` in any `.tk-studio/config.yaml` verify command (`win-ok` exempting a proven one); the drives are green on `main` after the fixes
+
+**Given** `command-line.test.ts` (no gate runs it: `verify_host.py:16, :64`; DW-167), the `api.test.ts` store test that skips without `TK_STUDIO_ROOT` (EP-36 B8), the `_budget` guard found by the literal `shutil.which("bun")` (`test_playable_judge.py:287`), `guards.test.ts`'s two env-dependent cases (DW-173) and CAP-5's argv-only pin (`test_verify_host.py:161`)
+**When** the host leg runs
+**Then** the e2e suite runs under the leg in its own step with `TK_STUDIO_ROOT` set and the bun timeout (or its exclusion is a named skip line with the reason, never silent), the store test runs under the leg (`TK_STUDIO_ROOT` is set there since 37.6: the skip's cause found and removed, or the skip named), the `_budget` guard is pinned by behaviour (a fake `bun` on PATH), `guards.test.ts` pins the env as `tier.test.ts` does (saved in `beforeAll`, restored after; never skipped by name), and a behavioural slow-second-file test proves the per-file timeout holds past the first file (two fixture files, the second over the figure, the run red on it)
+
+**Given** the planner's test guidance (DW-172; `task-planning.md`'s test rules) and `parseSkillsList`/`skillInStore` (`sandbox.ts:342-359`; DW-183: the real listing is `SKILL STORE` then the store entries `synced` and `tk-studio`)
+**When** a plan is written, and when the pin checks the store
+**Then** the guidance names `_budget.HOST_TEST_TIMEOUT_MS` (30 000 ms a test on the host) and the derived suite bound, pinned by the guidance's test; `parseSkillsList` is pinned to the 2026-11-06 capture (the header skipped, each first token a store entry), the listing check becomes a plugin-folder check (`tk-studio` present) with the `skills/` walk as the skill check, one fixture from the capture; DW-167, DW-172, DW-173 and DW-183 close by this PR; the contract names the e2e step (0.1.34, additive)
+
+### Story 38.7: The Records Reconciled and the Policy's Bands
+
+As the owner,
+I want the Epic 37 records to read what was built (the 24 `by Story 37.x` statuses with their PR numbers and a test that requires one, DW-168 closed or narrowed to what is still owed, an `eol=lf` rule for the sources, the SPEC's version and open questions, the contract's paragraph-order note and its `deferred mint` marker-failure answer), the follow-up-review cap to carry my R5 ruling per band, the 36-6 ask's v3 spelling corrected with the setup's folder step handed to my numbered steps, and CAP-14 (b)/(c) recorded from this epic's first live run,
+So that the next retrospective audits true records and the owner's decided items live in the policy, not the ledger (AI-6; the retrospective's A4, A5, C9; DW-168, DW-169, DW-175, DW-182).
+
+**Acceptance Criteria:**
+
+**Given** the 24 `resolved <date> by Story 37.x` statuses (DW-133, DW-135 to 144, DW-148 to 151, DW-154, DW-155, DW-157, DW-159 to 162, DW-164), `test_plansync.py:1171-1172` (forbids only the old phrase) and `.gitattributes` (no rule for `*.py`, `*.ts`, `*.md`; the `fc1e2aa`/`e0512c4` CRLF round trip)
+**When** this story's docs pass runs
+**Then** every such status names its PR (`thkennedy/tk-studio#326` to `#342` by the story's landing), the test requires a PR reference on every `resolved … by Story` status outside a run branch (the in-loop form `by Story N.M` allowed only until the close-out fills it at merge), `.gitattributes` carries `*.py text eol=lf`, `*.ts text eol=lf` and `*.md text eol=lf` with `git ls-files --eol` clean after a renormalise, DW-110's `narrowed:` first word and DW-23/24's bare `status: resolved` read as the parse wants, and the ledger tests pass
+
+**Given** `spec-epic-37/SPEC.md` (`:92, :106, :117` say 0.1.32 under a 0.1.33 header; `:128-131` the four open questions unannotated; `:29` parsers that do not exist; `:35, :74` either/or choices since settled; `:137` `#<PR>`; `:39`), the 36-4 spec `:261`, the contract's 0.1.32 paragraphs before the 0.1.33 one, DW-168 and DW-169
+**When** this story lands
+**Then** each line reads as built with its source cited; the contract carries one note that the 0.1.32 story paragraphs predate 0.1.33's header (the order kept) and its 0.1.32 paragraph states the `deferred mint` answer when the marker write fails after the counter write (`blocked`, exit 2, `written` naming the counter only, the ids burned; DW-169) with its pin test; DW-168 reads narrowed to CAP-14 (b)/(c) and DW-182, or closed when the operator has recorded (b)/(c) from this epic's first live run (the per-tick `hold` events; the latest hold's pid and `detail.start` against `tasklist` / `Get-Process … StartTime` while in flight) in the 36-5 spec's Consult Log, which this story asks for through its own consult log in the Epic 34/35 form
+
+**Given** `[limits] max_followup_reviews = 1` (`.bmad-loop/policy.toml:10`, one global figure; `routing.toml`'s band table with no field; `launch.py:221` `BUDGET_NOT_COMPARED`), Tim's R5 (TKSTUDIO-211: the cap 2 for band L only; DW-175) and DW-182's three parts
+**When** this story lands
+**Then** a per-band override (`[limits.by_band] L = { max_followup_reviews = 2 }`, or a column in `routing.toml`'s band table) is read by the engine's cap check (a base patch beside the others in `kb/bmad-base-patches.md` when the engine does not read it), `launch.py` compares it like the other band figures (`BUDGET_COMPARED`) and the loop's README names the policy; the 36-6 ask's v3 read reads `expand=values.transitions` wherever quoted (the 36-6 spec `:263`, 37-7's CAP-16) and `find_workflow_version` uses it; the setup's folder step hands the five folders to the owner's numbered steps when the children read is refused by scope (no unadopted folder created) and a `setup --verify-workflow` form (one global transition removed and restored on a scratch project key) exists behind its flag, the live call staying Tim's; the follow-up-review entries (DW-145, 152, 156, 158, 163, 181) stay `open (owner's decision …)` and the handoff carries one list of what stays Tim's (TKSTUDIO-220 to 224, the fourth sweep's `max_runs` once 38.3 lands, DW-178, DW-179, the pre-36.6 engagement jobs' rhythm, the TUA reachability proof, the attended engagement); nothing else is decided here; the contract names the band override (0.1.34, additive)
