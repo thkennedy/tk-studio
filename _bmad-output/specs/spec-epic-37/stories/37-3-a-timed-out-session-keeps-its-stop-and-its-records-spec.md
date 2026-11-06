@@ -184,6 +184,9 @@ DRIFT: `withRunWorktreeRollback("")` drops the leading blank line — a missing 
 | review | 1 | 2026-11-06T03:05:16Z | 2026-11-06T03:36:28Z | 9cdbf38f-de05-4760-9d95-d77e7e05cb3b | claude-opus-5-5 | medium | 12847686 | 104608 | 8.4080 | completed |
 | review | 2 | 2026-11-06T03:36:28Z | 2026-11-06T04:04:13Z | dace38a0-74ac-494a-9800-6e49f4f888de | claude-opus-5-5 | medium | 7950496 | 82136 | 6.0554 | completed |
 | gate | 1 | 2026-11-06T04:04:14Z | 2026-11-06T04:07:20Z | 2242f957-47db-48ec-a8ef-e2eaae9aaf15 | claude-opus-5-5 | medium | 2051736 | 15587 | 1.4335 | completed |
+| host-leg | 1 | 2026-11-06T04:08:22Z | 2026-11-06T05:05:19Z | — | — | — | — | — | — | green |
+| close-out | 1 | 2026-11-06T05:05:19Z | 2026-11-06T05:05:26Z | — | — | — | — | — | — | PR |
+| merge | — | 2026-11-06T05:07:12Z | 2026-11-06T05:07:12Z | — | — | — | — | — | — | merged |
 
 ## Review Triage Log
 
