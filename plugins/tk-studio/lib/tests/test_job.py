@@ -384,9 +384,11 @@ class JobTestCase(unittest.TestCase):
         # guards and stop condition per the job schema, the planner effort
         for key in ("job_schema_version", "target", "trigger", "guards", "effort"):
             self.assertEqual(defn[key], epic[key], key)
-        # the same stop condition; the rhythm is run-epic's alone (Story 36.6)
+        # the same stop condition and, since Story 37.4 (DW-159), the same
+        # one-story rhythm: every story run carries it
         self.assertEqual(defn["stop"]["on_status"], epic["stop"]["on_status"])
-        self.assertNotIn("after_stories", defn["stop"])
+        self.assertEqual(defn["stop"]["after_stories"], 1)
+        self.assertEqual(defn["stop"], epic["stop"])
         self.assertEqual(defn["target"]["skill"], "tk-studio-launch")
         self.assertEqual(set(defn), set(epic))
         self.assertEqual(joblib.validate_definition(defn), [])
@@ -410,7 +412,7 @@ class JobTestCase(unittest.TestCase):
         self.assertEqual(defn["target"], {"skill": "tk-studio-launch", "payload": {
             "verb": "start", "bootstrap": True, "epic": 41}})
         self.assertEqual(defn["guards"], {"max_turns": 80, "max_wall_clock_seconds": 3600})
-        self.assertEqual(defn["stop"], {"on_status": ["blocked"]})
+        self.assertEqual(defn["stop"], {"on_status": ["blocked"], "after_stories": 1})
         self.assertEqual(defn["effort"], "high")
         # a run-epic instance resolves as run-epic, never as a slice
         resolved, problems = joblib.resolve_instance(

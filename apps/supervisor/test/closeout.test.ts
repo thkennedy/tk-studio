@@ -1869,7 +1869,8 @@ describe("Story 35.2: no relaunch across a story boundary while a graceful stop 
   });
 
   /** Story 37.3 (DW-161): a run-epic with the one-story rhythm, as the shipped job declares it. */
-  const RUN_EPIC_1 = { ...LAUNCH, id: "run-epic", type: "run-epic", stop: { on_status: ["blocked"], after_stories: 1 } };
+  // Story 37.4: the duties go by target (`runsStories`): the launch's `start` verb
+  const RUN_EPIC_1 = { ...LAUNCH, target: { skill: "tk-studio-launch", payload: { verb: "start" } }, id: "run-epic", type: "run-epic", stop: { on_status: ["blocked"], after_stories: 1 } };
 
   test("Story 37.3 (DW-161): a figure-1 run whose arming was refused (`stop-armed ok: false`) ends at the boundary with its line, never relaunched", async () => {
     const fx = await pausedRun({ verdict: "no-impact", definition: RUN_EPIC_1 });
@@ -1932,6 +1933,16 @@ describe("Story 35.2: no relaunch across a story boundary while a graceful stop 
     expect(await closeOutPaused(ok.queue, p.deps)).toEqual({ closed: [ok.run.run_id], awaiting: [] });
     expect(p.invoked).toHaveLength(1);
     expect(ev(ok.queue, ok.run.run_id, "story-boundary")).toHaveLength(0);
+  });
+
+  test("Story 37.4 (DW-159): a figure-1 vertical-slice run whose arming was refused owes the boundary too; a sweep does not", async () => {
+    const slice = { ...RUN_EPIC_1, id: "run-epic-27", type: "run-vertical-slice", target: { skill: "tk-studio-launch", payload: { verb: "start", bootstrap: true, epic: 27 } } };
+    const fx = await pausedRun({ verdict: "no-impact", definition: slice });
+    fx.queue.note(fx.run.run_id, "stop-armed", { figure: 1, engine_run_id: E1, ok: false, detail: "no sandbox", tier: "sbx" });
+    expect(armingRefusedStop(fx.queue, fx.get())).toEqual({ source: "arming-refused", detail: "no sandbox" });
+    const sweep = await pausedRun({ verdict: "no-impact", definition: { ...RUN_EPIC_1, id: "run-sweep", type: "run-sweep", target: { skill: "tk-studio-launch", payload: { verb: "sweep" } } } });
+    sweep.queue.note(sweep.run.run_id, "stop-armed", { figure: 1, engine_run_id: E1, ok: false, detail: "no sandbox", tier: "sbx" });
+    expect(armingRefusedStop(sweep.queue, sweep.get())).toBeUndefined();
   });
 
   test("Story 35.2: the reader — a missing, garbage or unreadable journal is no stop; it never throws", () => {

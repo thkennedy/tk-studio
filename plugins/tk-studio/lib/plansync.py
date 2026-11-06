@@ -1477,7 +1477,22 @@ def setup(project_root: Path, dry_run: bool = False,
                         needed = jirabackend.workflow_transitions(flow, have)
                         found += [lb for lb, _, ok in needed if ok]
                         absent = [(lb, tr) for lb, tr, ok in needed if not ok]
-                        if absent and dry_run:
+                        refused = jirabackend.refused_transitions(
+                            [*(flow.get("transitions") or []),
+                             *(tr for _, tr in absent)]) if absent else []
+                        if refused:
+                            # Story 37.4 (DW-160): a transition the update
+                            # cannot accept is named and left unchanged —
+                            # nothing is posted for the workflow; a dry run
+                            # reports the same refusal, nothing as would-post
+                            result["refused_transitions"] = refused
+                            notes.append(
+                                "workflow update not posted: transitions "
+                                "with fields the update does not accept "
+                                "are left unchanged: " + ", ".join(refused))
+                            groups.append(
+                                _company_status_steps(site, key, have))
+                        elif absent and dry_run:
                             would.extend(lb for lb, _ in absent)
                         elif absent:
                             version, why = jirabackend.find_workflow_version(
@@ -1498,12 +1513,9 @@ def setup(project_root: Path, dry_run: bool = False,
                                      if n in have],
                                     [tr for _, tr in absent])
                                 if done:
+                                    # the copied transitions carry their
+                                    # screen and rules (Story 37.4)
                                     created.extend(lb for lb, _ in absent)
-                                    if detail:
-                                        notes.append(
-                                            "workflow update dropped screen/"
-                                            "rules from copied transitions: "
-                                            f"{detail}")
                                 else:
                                     notes.append(
                                         f"workflow update refused: {detail}")

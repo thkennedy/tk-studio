@@ -1271,7 +1271,7 @@ source_spec: `36-3-a-paused-or-resumed-run-is-never-parked-spec.md`
 location: plugins/tk-studio/lib/jirabackend.py:609
 severity: medium
 reason: `jirabackend.canonical_status` maps both template statuses to `blocked`; `pull_back` conflicts when the backend status moved since the snapshot and canonical `done` differs. The hand repair of hole 101 moved the issue to `Done` and re-synced; DW-130's fix as written does not. Meets deferral (a): behaviour AC1 names; AC1 pins the target status and AD-5 keeps the side-pick human.
-status: open
+status: resolved 2026-11-06 by Story 37.4
 
 ### DW-152: Follow-up review still recommended for 36-3-a-paused-or-resumed-run-is-never-parked after the damping cap was spent
 origin: review-budget-followup
@@ -1335,7 +1335,7 @@ source_spec: `36-6-setup-and-the-launch-check-by-evidence-spec.md`
 location: apps/supervisor/src/closeout.ts `isRunEpic`
 severity: medium
 reason: `isRunEpic` is true only when a run's resolved definition has `type` or `id` `run-epic`, so a `run-vertical-slice` run on a game project takes neither the `in-progress` plan call nor the `stop.after_stories` rhythm. The story's M24 keeps the field off that job, so the gap is outside 36.6.
-status: open
+status: resolved 2026-11-06 by Story 37.4
 
 ### DW-160: `plansync setup` posts copied transitions without their `screen` and `rules`, which can erase a site's configuration, and the v3 update schema may have spellings that would carry them.
 origin: spec-deferred d598570a16ed
@@ -1343,7 +1343,7 @@ source_spec: `36-6-setup-and-the-launch-check-by-evidence-spec.md`
 location: plugins/tk-studio/lib/jirabackend.py:1638
 severity: medium
 reason: Deferral class (a), AC1. `_v3_transition` sends a whitelist, so `POST /workflows/update` omits them, and the loss is named only afterwards in `notes` with the setup still `complete`. From a reviewer's and this session's memory, not verified (Atlassian's docs page answered 403 here), the v3 schema has `conditions`, `validators`, `actions`, `triggers` and `transitionScreen`. The consult of 2026-10-31T17:47:31Z ruled that a loss or a v3 spelling found by the operator's live call becomes a follow-up. The legacy rule shapes do not map one to one, so a mapping needs the site's real read.
-status: open
+status: resolved 2026-11-06 by Story 37.4
 
 ### DW-161: A figure 1 run whose arming was refused still relaunches at close-out, so one queue run can build a second story.
 origin: spec-deferred 9e39164515b6

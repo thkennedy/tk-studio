@@ -309,7 +309,9 @@ class HappyTickTests(SyncBackTestCase):
 
 
 class StatusMappingTests(SyncBackTestCase):
-    def test_both_setup_statuses_map_to_blocked(self):
+    def test_the_block_maps_to_blocked_and_holds_while_resolved(self):
+        # Story 37.4: a still-`blocked` entity keeps `blocked` while the
+        # owner's resolution (`Block Resolved`) awaits validation
         self.fake.issue(f"{KEY}-1", jirabackend.BLOCKED_STATUS,
                         "indeterminate", 30)
         self.run_tick()
@@ -324,8 +326,10 @@ class StatusMappingTests(SyncBackTestCase):
                         "indeterminate", 5)
         self.run_tick(minutes_later=10)
         front, _ = self.entity("ST-001")
-        self.assertEqual(front["status"], "blocked")  # never in-progress
+        self.assertEqual(front["status"], "blocked")  # held, not resolved
         self.assertEqual(front["external"]["jira"]["status"], "Block Resolved")
+        self.assertEqual(front["external"]["jira"]["canonical_status"],
+                         "blocked")
 
     def test_only_status_changes(self):
         _, body_before = self.entity("ST-001")

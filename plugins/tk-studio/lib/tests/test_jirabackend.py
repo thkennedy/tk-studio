@@ -56,6 +56,10 @@ class FakeJira:
         # Story 31.7: each issue's histories, oldest first, served by the
         # pinned `GET /issue/{key}/changelog` shape (two per page)
         self.changelogs: dict[str, list[dict]] = {}
+        # Story 37.4 (B2): an explicit transition list `[(id, name)]`, in the
+        # site's order, for GET and POST; None derives it from `STATUSES`
+        self.routes: list[tuple[str, str]] | None = None
+        self.posted_transitions: list[str] = []
 
     def history(self, key, hid, account_id, to_name, created,
                 field="status"):
@@ -132,14 +136,17 @@ class FakeJira:
             return 204, None
         trans_m = re.match(r"^/issue/([^/]+)/transitions$", path)
         if trans_m:
-            names = list(self.STATUSES)
+            routes = self.routes if self.routes is not None else [
+                (str(i + 1), name) for i, name in enumerate(self.STATUSES)]
             if method == "GET":
                 return 200, {"transitions": [
-                    {"id": str(i + 1),
+                    {"id": tid,
                      "to": {"name": name,
                             "statusCategory": {"key": self.STATUSES[name]}}}
-                    for i, name in enumerate(names)]}
-            target = names[int(body["transition"]["id"]) - 1]
+                    for tid, name in routes]}
+            tid = str(body["transition"]["id"])
+            self.posted_transitions.append(tid)
+            target = dict(routes)[tid]
             self.issues[trans_m.group(1)]["status"] = target
             return 204, None
         return 400, {"errorMessages": [f"unhandled {method} {path}"]}
@@ -398,9 +405,11 @@ class PullBackTests(JiraTestCase):
 
 
 class SetupStatusMappingTests(JiraTestCase):
-    """Story 31.4: the two template statuses map onto canonical `blocked` by
-    name (AD-22, AD-6); every other status keeps the category mapping, and
-    `sync` and `sync-back` share it so neither flips an entity."""
+    """Story 31.4: the template statuses map by name (AD-22, AD-6) — Story
+    37.4 (DW-151): `Blocked - Awaiting User` onto canonical `blocked`,
+    `Block Resolved` onto canonical `in-progress`; every other status keeps
+    the category mapping, and `sync` and `sync-back` share it so neither
+    flips an entity."""
 
     def setUp(self):
         super().setUp()
@@ -412,14 +421,14 @@ class SetupStatusMappingTests(JiraTestCase):
         self.assertEqual(jirabackend.canonical_status(
             "Blocked - Awaiting User", "indeterminate"), "blocked")
         self.assertEqual(jirabackend.canonical_status(
-            "Block Resolved", "indeterminate"), "blocked")
+            "Block Resolved", "indeterminate"), "in-progress")
         self.assertEqual(jirabackend.canonical_status(
             "In Progress", "indeterminate"), "in-progress")
         self.assertEqual(jirabackend.canonical_status("To Do", "new"), "ready")
         self.assertEqual(jirabackend.canonical_status("Done", "done"), "done")
         self.assertIsNone(jirabackend.canonical_status("Odd", "weird"))
 
-    def test_pull_back_maps_both_setup_statuses_to_blocked(self):
+    def test_pull_back_maps_the_block_to_blocked_and_holds_it_while_resolved(self):
         self._project()
         key = self._jira_key("ST-001")
         self.fake.issues[key]["status"] = jirabackend.BLOCKED_STATUS
@@ -428,12 +437,30 @@ class SetupStatusMappingTests(JiraTestCase):
         self.assertEqual(front["status"], "blocked")
         self.assertEqual(front["external"]["jira"]["status"],
                          "Blocked - Awaiting User")
+        # Story 37.4: a still-`blocked` entity keeps `blocked` while the
+        # owner's resolution awaits validation
         self.fake.issues[key]["status"] = jirabackend.RESOLVED_STATUS
         result = self._project()
         self.assertEqual(result["conflicts"], [])
         _, front, _ = self._canonical("ST-001")
         self.assertEqual(front["status"], "blocked")
         self.assertEqual(front["external"]["jira"]["status"], "Block Resolved")
+        self.assertEqual(front["external"]["jira"]["canonical_status"],
+                         "blocked")
+
+    def test_pull_back_maps_block_resolved_to_in_progress_for_a_non_blocked_entity(self):
+        # Story 37.4 (AC1): `Block Resolved` is canonical `in-progress`
+        self._project()
+        key = self._jira_key("ST-001")
+        _, front, _ = self._canonical("ST-001")
+        self.assertNotEqual(front["status"], "blocked")
+        self.fake.issues[key]["status"] = jirabackend.RESOLVED_STATUS
+        applied = jirabackend.pull_back(plansync.plan_dir(self.root), self.client)
+        self.assertEqual(applied["conflicts"], [])
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["status"], "in-progress")
+        self.assertEqual(front["external"]["jira"]["canonical_status"],
+                         "in-progress")
 
     def test_promote_leaves_a_blocked_entity_untouched(self):
         self._project()
@@ -1403,3 +1430,201 @@ class BlockStatusPickTests(JiraTestCase):
         key = self._jira_key("ST-001")
         self.assertEqual(self.fake.issues[key]["status"], "Blocked - Awaiting User")
 
+
+
+class BlockResolvedExitTests(JiraTestCase):
+    """Story 37.4 (DW-151, B1, B2): an issue an unblock left in `Block
+    Resolved` is moved on for any non-`blocked` canonical, never held as an
+    AD-5 conflict; `Blocked - Awaiting User` keeps winning while the block
+    stands; the picker breaks a tie by the exact name, then by the lowest
+    numeric transition id, never by the site's list order."""
+
+    SITE = {"To Do": "new", "In Progress": "indeterminate",
+            "Blocked - Awaiting User": "indeterminate",
+            "Block Resolved": "indeterminate", "Done": "done"}
+
+    def setUp(self):
+        super().setUp()
+        self.fake.STATUSES = dict(self.SITE)
+
+    def _resolved(self) -> str:
+        """ST-001 blocked through the pull-back, then unblocked in Jira
+        (`track-unblock`'s move to `Block Resolved`)."""
+        self._project()
+        key = self._jira_key("ST-001")
+        self.fake.issues[key]["status"] = jirabackend.BLOCKED_STATUS
+        self._project()
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["status"], "blocked")
+        self.fake.issues[key]["status"] = jirabackend.RESOLVED_STATUS
+        return key
+
+    def _resolved_to(self, status: str):
+        key = self._resolved()
+        self._set_canonical("ST-001", status=status)
+        result = self._project()
+        self.assertEqual(result["conflicts"], [])
+        self.assertEqual(self.fake.issues[key]["status"], "In Progress")
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["status"], status)
+        self.assertEqual(front["external"]["jira"]["status"], "In Progress")
+        self.assertEqual(front["external"]["jira"]["canonical_status"], status)
+
+    def test_resolved_to_review_lands_in_progress(self):
+        self._resolved_to("review")
+
+    def test_resolved_to_in_progress_lands_in_progress(self):
+        self._resolved_to("in-progress")
+
+    def test_a_blocked_entity_in_block_resolved_is_held_awaiting_validation(self):
+        # the owner's own move into `Block Resolved` (`track.py reply`;
+        # `validate` needs the live status): the sync keeps the entity
+        # `blocked`, posts no transition and holds no conflict — twice
+        key = self._resolved()
+        for _ in range(2):
+            self.fake.posted_transitions.clear()
+            result = self._project()
+            self.assertEqual(result["conflicts"], [])
+            self.assertEqual(self.fake.posted_transitions, [])
+            self.assertEqual(self.fake.issues[key]["status"], jirabackend.RESOLVED_STATUS)
+            _, front, _ = self._canonical("ST-001")
+            self.assertEqual(front["status"], "blocked")
+            self.assertEqual(front["external"]["jira"]["canonical_status"], "blocked")
+        # the exit follows once the local status is non-`blocked`
+        self._set_canonical("ST-001", status="in-progress")
+        self._project()
+        self.assertEqual(self.fake.issues[key]["status"], "In Progress")
+
+    def test_a_non_blocked_status_with_no_route_out_is_not_remapped(self):
+        # promote finds no route out of `Block Resolved` (only the block
+        # statuses in the category): the snapshot keeps `Block Resolved` with
+        # canonical `review`; the next pull-back never rewrites it to
+        # `in-progress`, and the stuck pass does not rewrite the file
+        key = self._resolved()
+        self.fake.routes = [("1", "To Do"), ("3", "Blocked - Awaiting User"),
+                            ("5", "Done")]
+        self._set_canonical("ST-001", status="review")
+        result = self._project()
+        self.assertEqual(result["conflicts"], [])
+        self.assertIn("block status", json.dumps(result))
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["status"], "review")
+        self.assertEqual(front["external"]["jira"]["status"], "Block Resolved")
+        self.assertEqual(front["external"]["jira"]["canonical_status"], "review")
+        path, _, _ = self._canonical("ST-001")
+        before = path.read_text(encoding="utf-8")
+        result = self._project()
+        self.assertEqual(result["conflicts"], [])
+        self.assertEqual(result["pull_back"]["applied"], [])
+        self.assertEqual(path.read_text(encoding="utf-8"), before)
+        self.assertEqual(self.fake.issues[key]["status"], jirabackend.RESOLVED_STATUS)
+
+    def _promoted_then_resolved(self, status: str, landed: str) -> str:
+        """ST-001 promoted as `status` (Jira in `landed`), then moved into
+        `Block Resolved` in Jira between syncs; the pull-back keeps the
+        promoted status and only the snapshot records `Block Resolved`."""
+        self._project()
+        self._set_canonical("ST-001", status=status)
+        self._project()
+        key = self._jira_key("ST-001")
+        self.assertEqual(self.fake.issues[key]["status"], landed)
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["external"]["jira"]["status"], landed)
+        self.assertEqual(front["external"]["jira"]["canonical_status"], status)
+        self.fake.issues[key]["status"] = jirabackend.RESOLVED_STATUS
+        applied = jirabackend.pull_back(plansync.plan_dir(self.root), self.client)
+        self.assertEqual(applied["conflicts"], [])
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["status"], status)
+        self.assertEqual(front["external"]["jira"]["status"], "Block Resolved")
+        self.assertEqual(front["external"]["jira"]["canonical_status"], status)
+        return key
+
+    def test_a_promoted_review_is_not_pulled_back_off_block_resolved(self):
+        key = self._promoted_then_resolved("review", "In Progress")
+        result = self._project()
+        self.assertEqual(result["conflicts"], [])
+        self.assertEqual(self.fake.issues[key]["status"], "In Progress")
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["status"], "review")
+        self.assertEqual(front["external"]["jira"]["status"], "In Progress")
+        self.assertEqual(front["external"]["jira"]["canonical_status"], "review")
+
+    def test_a_promoted_done_is_not_pulled_back_off_block_resolved(self):
+        key = self._promoted_then_resolved("done", "Done")
+        result = self._project()
+        self.assertEqual(result["conflicts"], [])
+        self.assertEqual(self.fake.issues[key]["status"], "Done")
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["status"], "done")
+        self.assertEqual(front["external"]["jira"]["status"], "Done")
+        self.assertEqual(front["external"]["jira"]["canonical_status"], "done")
+
+    def test_a_promoted_review_with_no_route_out_stays_stable(self):
+        # the refreshed snapshot meets a promote with no route out: the
+        # stuck pass leaves the file unwritten and the next pull-back
+        # changes nothing
+        key = self._promoted_then_resolved("review", "In Progress")
+        self.fake.routes = [("1", "To Do"), ("3", "Blocked - Awaiting User"),
+                            ("5", "Done")]
+        path, _, _ = self._canonical("ST-001")
+        before = path.read_text(encoding="utf-8")
+        for _ in range(2):
+            result = self._project()
+            self.assertEqual(result["conflicts"], [])
+            self.assertEqual(result["pull_back"]["applied"], [])
+            self.assertEqual(path.read_text(encoding="utf-8"), before)
+        self.assertEqual(self.fake.issues[key]["status"], jirabackend.RESOLVED_STATUS)
+
+    def test_resolved_to_done_lands_done_with_no_conflict(self):
+        key = self._resolved()
+        self._set_canonical("ST-001", status="done")
+        result = self._project()
+        self.assertEqual(result["conflicts"], [])
+        self.assertEqual(self.fake.issues[key]["status"], "Done")
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["status"], "done")
+        self.assertEqual(front["external"]["jira"]["canonical_status"], "done")
+
+    def test_a_standing_block_is_left_unchanged(self):
+        self._project()
+        key = self._jira_key("ST-001")
+        self.fake.issues[key]["status"] = jirabackend.BLOCKED_STATUS
+        self._project()
+        self.fake.calls.clear()
+        result = self._project()
+        self.assertEqual(result["conflicts"], [])
+        self.assertEqual(self.fake.writes(), [])
+        self.assertEqual(self.fake.issues[key]["status"], jirabackend.BLOCKED_STATUS)
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["status"], "blocked")
+
+    def test_b2_a_name_tie_picks_the_exact_block_name(self):
+        # `In Progress` (preferred rank 0) listed before the block status
+        self._project()
+        key = self._jira_key("ST-001")
+        self.fake.routes = [("1", "To Do"), ("2", "In Progress"),
+                            ("3", "Blocked - Awaiting User"), ("4", "Done")]
+        self._set_canonical("ST-001", status="blocked")
+        self._project()
+        self.assertEqual(self.fake.issues[key]["status"], "Blocked - Awaiting User")
+        self.assertEqual(self.fake.posted_transitions, ["3"])
+
+    def test_b2_an_id_tie_posts_the_lowest_numeric_id(self):
+        self._project()
+        key = self._jira_key("ST-001")
+        self.fake.routes = [("1", "To Do"), ("x9", "In Progress"),
+                            ("31", "In Progress"), ("7", "In Progress"),
+                            ("4", "Done")]
+        self._set_canonical("ST-001", status="in-progress")
+        self._project()
+        self.assertEqual(self.fake.posted_transitions, ["7"])
+        self.assertEqual(self.fake.issues[key]["status"], "In Progress")
+
+    def test_b2_a_non_numeric_id_ranks_last(self):
+        self._project()
+        self.fake.routes = [("1", "To Do"), ("x9", "In Progress"),
+                            ("31", "In Progress"), ("4", "Done")]
+        self._set_canonical("ST-001", status="review")
+        self._project()
+        self.assertEqual(self.fake.posted_transitions, ["31"])

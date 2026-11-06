@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { mirror, recoverQueue, resumeRun, type RunSummary } from "../src/cli";
 import { armRefusedLine, armStop, enginePidKnown, gracefulStopCommand, resumePaused } from "../src/closeout";
 import { readJournal } from "../src/office";
-import { atBranch, LAUNCH_ARM_GRACE_MS, launchedPass, mergePass, PLAN_CALLER, PLAN_RETRY_LIMIT, planEntity, planOwner, registryRoot, reviewPass, specKey, STAGE_LEASE, stagePass, startedStories, storyNumber, supervisorRows, type PlanStatusDeps } from "../src/planstatus";
+import { atBranch, LAUNCH_ARM_GRACE_MS, launchedPass, mergePass, PLAN_CALLER, PLAN_RETRY_LIMIT, planEntity, planOwner, registryRoot, reviewPass, specKey, STAGE_LEASE, stagePass, startedStories, storyInProgress, storyNumber, supervisorRows, type PlanStatusDeps } from "../src/planstatus";
 import { openConflicts, Queue, type QueueEvent, type QueueRun } from "../src/queue";
 import { runProcess, runUv, type RunResult } from "../src/server";
 import { runBranch } from "../src/worktree";
@@ -164,11 +164,23 @@ describe("the review pass (PR open) and the merge pass (PR merged)", () => {
     // Story 35.8: the stage pass's `stage --append` call rides the merge; only the status calls here.
     expect(fx.plansync.calls().filter((a) => a[0] === "status").map((a) => a[a.indexOf("--status") + 1])).toEqual(["review", "done"]);
     expect(fx.plan().at(-1)!.detail).toEqual({
-      phase: "done", pr: PR, stage: true, owner: "proj", directory: fx.repo.checkout, story_key: "27-5-the-plan-follows-the-run-spec", id: "ST-097", ok: true, previous_status: "draft",
+      phase: "done", pr: PR, stage: true, owner: "proj", directory: fx.repo.checkout, story_key: "27-5-the-plan-follows-the-run", id: "ST-097", ok: true, previous_status: "draft",
     });
     expect(fx.gh.calls().filter((c) => c.argv[0] === "pr" && c.argv[1] === "view").map((c) => c.argv)).toEqual([
       ["pr", "view", PR, "--json", "state,mergedAt"], ["pr", "view", PR, "--json", "state,mergedAt"],
     ]);
+  }, 60_000);
+
+  test("Story 37.4 (A4): the in-progress, review and done phases spell one story_key: the story's key, no `-spec`", async () => {
+    const fx = await fixture();
+    await reviewPass(fx.queue, fx.deps);
+    fx.gh.answer({ view: "MERGED" });
+    await mergePass(fx.queue, fx.deps);
+    // the journal's `story-start` key, as the in-progress phase records it
+    await storyInProgress(fx.queue, fx.queue.get(fx.runId)!, "27-5-the-plan-follows-the-run", fx.deps);
+    const keys = fx.plan().map((e) => [e.detail!.phase, e.detail!.story_key]);
+    expect(keys.map(([phase]) => phase).sort()).toEqual(["done", "in-progress", "review"]);
+    expect(new Set(keys.map(([, key]) => key))).toEqual(new Set(["27-5-the-plan-follows-the-run"]));
   }, 60_000);
 
   test("closed unmerged: one done event `pr closed unmerged`, no done call, never asked again", async () => {
@@ -202,7 +214,7 @@ describe("the review pass (PR open) and the merge pass (PR merged)", () => {
     const fx = await fixture({ plan: { "_bmad-output/planning-artifacts/plan/ST-093.md": entity("ST-093", "27.1") } });
     await reviewPass(fx.queue, fx.deps);
     expect(fx.plansync.calls()).toEqual([]);
-    expect(fx.plan()[0]!.detail).toMatchObject({ phase: "review", story_key: "27-5-the-plan-follows-the-run-spec", ok: false, skipped: true, reason: "no plan entity for story 27.5" });
+    expect(fx.plan()[0]!.detail).toMatchObject({ phase: "review", story_key: "27-5-the-plan-follows-the-run", ok: false, skipped: true, reason: "no plan entity for story 27.5" });
   }, 60_000);
 
   test("late PR: no PR on `ended` (close-out skipped), the PR on the latest `closed_out` → the review keyed on it", async () => {
@@ -324,7 +336,7 @@ describe("Story 27.5 follow-up patches: bounded retries, the base's done specs",
     expect(leases(fx).map((e) => e.detail!.owner)).toEqual([expect.anything(), null]);
     broken = false;
     await reviewPass(fx.queue, fx.deps);
-    expect(fx.plan().map((e) => e.detail)).toEqual([expect.objectContaining({ phase: "review", story_key: "27-5-the-plan-follows-the-run-spec", id: "ST-097", ok: true })]);
+    expect(fx.plan().map((e) => e.detail)).toEqual([expect.objectContaining({ phase: "review", story_key: "27-5-the-plan-follows-the-run", id: "ST-097", ok: true })]);
   }, 60_000);
 
   test("a spec already done at the merge-base, merely edited by the run, is not reviewed; one new or not done at the base still is", async () => {
@@ -342,7 +354,7 @@ describe("Story 27.5 follow-up patches: bounded retries, the base's done specs",
     });
     await reviewPass(fx.queue, fx.deps);
     expect(fx.plansync.calls().map((a) => a[a.indexOf("--id") + 1]).sort()).toEqual(["ST-097", "ST-098"]);
-    expect(fx.plan().map((e) => e.detail!.story_key)).not.toContain("27-1-done-before-spec");
+    expect(fx.plan().map((e) => e.detail!.story_key)).not.toContain("27-1-done-before");
   }, 60_000);
 
   test("the run's PR already merged into base_ref (its tip now reads `done`) before the review pass → the story is still reviewed (read at the merge-base)", async () => {
@@ -353,7 +365,7 @@ describe("Story 27.5 follow-up patches: bounded retries, the base's done specs",
     testGit(fx.repo.checkout, "commit", "-q", "-m", "the run's PR, squash-merged");
     await reviewPass(fx.queue, fx.deps);
     expect(fx.plansync.calls()).toEqual([["status", "--directory", fx.repo.checkout, "--id", "ST-097", "--status", "review", "--note", `run ${fx.runId} PR ${PR}`, "--caller", "tk-studio-supervisor"]]);
-    expect(fx.plan().map((e) => e.detail)).toEqual([expect.objectContaining({ phase: "review", story_key: "27-5-the-plan-follows-the-run-spec", id: "ST-097", ok: true })]);
+    expect(fx.plan().map((e) => e.detail)).toEqual([expect.objectContaining({ phase: "review", story_key: "27-5-the-plan-follows-the-run", id: "ST-097", ok: true })]);
   }, 60_000);
 });
 
@@ -375,7 +387,7 @@ describe("Story 27.5 second follow-up: done waits for the review, transient verb
     // Process `other` is inside its review pass: it holds the review lease and has recorded 27.5, still calling for 27.6.
     expect(fx.queue.claimPlanPhase(fx.runId, "review", other)).toBe(true);
     const at = { phase: "review", pr: PR, owner: "proj", directory: fx.repo.checkout };
-    fx.queue.note(fx.runId, "plan-status", { ...at, story_key: "27-5-the-plan-follows-the-run-spec", id: "ST-097", ok: true, previous_status: "draft" });
+    fx.queue.note(fx.runId, "plan-status", { ...at, story_key: "27-5-the-plan-follows-the-run", id: "ST-097", ok: true, previous_status: "draft" });
     fx.gh.answer({ view: "MERGED" });
     expect(await mergePass(fx.queue, fx.deps)).toEqual([]);
     expect(fx.plansync.calls()).toEqual([]);
@@ -383,12 +395,12 @@ describe("Story 27.5 second follow-up: done waits for the review, transient verb
     expect(leases(fx, "done")).toEqual([]); // the done lease was never taken
     expect(fx.queue.claimPlanPhase(fx.runId, "done", me)).toBe(false);
     // `other` records 27.6 and lets its lease go settled: the review phase is no longer in progress.
-    fx.queue.note(fx.runId, "plan-status", { ...at, story_key: "27-6-the-next-story-spec", id: "ST-098", ok: true, previous_status: "draft" });
+    fx.queue.note(fx.runId, "plan-status", { ...at, story_key: "27-6-the-next-story", id: "ST-098", ok: true, previous_status: "draft" });
     fx.queue.releasePlanPhase(fx.runId, "review", other, true);
     expect(await mergePass(fx.queue, fx.deps)).toEqual([fx.runId]);
     expect(statuses(fx, "done")).toEqual(["ST-097", "ST-098"]);
     expect(fx.plan().filter((e) => e.detail!.phase === "done").map((e) => [e.detail!.story_key, e.detail!.ok]))
-      .toEqual([["27-5-the-plan-follows-the-run-spec", true], ["27-6-the-next-story-spec", true]]);
+      .toEqual([["27-5-the-plan-follows-the-run", true], ["27-6-the-next-story", true]]);
   }, 60_000);
 
   test("plansync exits non-zero with no JSON (a traceback): nothing recorded, the lease let go, the next pass calls again — for review and for done; a refusal stays final", async () => {
@@ -534,8 +546,8 @@ describe("Story 35.8: the stage pass — the supervisor's Stage Log rows after t
     legs(fx);
     bind(fx);
     // the pre-35.8 supervisor's review and done events, as it recorded them
-    fx.queue.note(fx.runId, "plan-status", { phase: "review", pr: PR, owner: "proj", directory: fx.repo.checkout, story_key: "27-5-the-plan-follows-the-run-spec", id: "ST-097", ok: true, previous_status: "draft" });
-    fx.queue.note(fx.runId, "plan-status", { phase: "done", pr: PR, owner: "proj", directory: fx.repo.checkout, story_key: "27-5-the-plan-follows-the-run-spec", id: "ST-097", ok: true, previous_status: "review" });
+    fx.queue.note(fx.runId, "plan-status", { phase: "review", pr: PR, owner: "proj", directory: fx.repo.checkout, story_key: "27-5-the-plan-follows-the-run", id: "ST-097", ok: true, previous_status: "draft" });
+    fx.queue.note(fx.runId, "plan-status", { phase: "done", pr: PR, owner: "proj", directory: fx.repo.checkout, story_key: "27-5-the-plan-follows-the-run", id: "ST-097", ok: true, previous_status: "review" });
     fx.gh.answer({ view: "MERGED" });
     const events = fx.queue.events(fx.runId).length;
     await mergePass(fx.queue, fx.deps);
@@ -559,13 +571,13 @@ describe("Story 35.8: the stage pass — the supervisor's Stage Log rows after t
     const appends = stageCalls(fx, "stage");
     expect(appends).toHaveLength(1);
     const argv = appends[0]!;
-    expect(argv.slice(0, 6)).toEqual(["stage", "--append", "--directory", fx.repo.checkout, "--story", "27-5-the-plan-follows-the-run-spec"]);
+    expect(argv.slice(0, 6)).toEqual(["stage", "--append", "--directory", fx.repo.checkout, "--story", "27-5-the-plan-follows-the-run"]);
     expect(JSON.parse(argv[argv.indexOf("--row-json") + 1]!).map((r: Record<string, unknown>) => [r.stage, r.pass ?? null, r.outcome])).toEqual([
       ["host-leg", 1, "green"], ["close-out", 1, "PR"], ["re-run", 1, "red"], ["merge", null, "merged"],
     ]);
     expect(stageCalls(fx, "stage-post")).toEqual([]);
     expect(stagePosts(fx).map((e) => e.detail)).toEqual([{
-      story_key: "27-5-the-plan-follows-the-run-spec", id: "ST-097", directory: fx.repo.checkout, appended: 4,
+      story_key: "27-5-the-plan-follows-the-run", id: "ST-097", directory: fx.repo.checkout, appended: 4,
       posted: "skipped: not bound", ok: true, merged_at: MERGED_AT,
     }]);
     expect(fx.queue.get(fx.runId)).toEqual(before); // the run's state never changes
@@ -583,7 +595,7 @@ describe("Story 35.8: the stage pass — the supervisor's Stage Log rows after t
     fx.plansync.stage("post-fail");
     fx.gh.answer({ view: "MERGED" });
     await mergePass(fx.queue, fx.deps);
-    expect(stageCalls(fx, "stage-post")).toEqual([["stage-post", "--directory", fx.repo.checkout, "--story", "27-5-the-plan-follows-the-run-spec", "--id", "ST-097"]]);
+    expect(stageCalls(fx, "stage-post")).toEqual([["stage-post", "--directory", fx.repo.checkout, "--story", "27-5-the-plan-follows-the-run", "--id", "ST-097"]]);
     expect(stagePosts(fx).map((e) => e.detail)).toEqual([expect.objectContaining({ ok: false, appended: 4, detail: "stage-post failed: Jira answered 503", merged_at: MERGED_AT })]);
     expect(fx.queue.get(fx.runId)).toEqual(before);
     await mergePass(fx.queue, fx.deps); // retried: called again, the same failure not recorded twice
@@ -647,7 +659,7 @@ describe("Story 35.8: the stage pass — the supervisor's Stage Log rows after t
     await mergePass(fx.queue, fx.deps);
     expect(stagePosts(fx).map((e) => e.detail)).toEqual([expect.objectContaining({
       ok: false, appended: 4, posted: "not attempted", waiting: true,
-      detail: `waiting for the owner checkout: rows buffered, no spec for 27-5-the-plan-follows-the-run-spec under ${fx.repo.checkout} yet`,
+      detail: `waiting for the owner checkout: rows buffered, no spec for 27-5-the-plan-follows-the-run under ${fx.repo.checkout} yet`,
     })]);
     for (let i = 0; i <= PLAN_RETRY_LIMIT + 1; i++) await stagePass(fx.queue, fx.deps); // asked again, never given up
     expect(stageCalls(fx, "stage")).toHaveLength(PLAN_RETRY_LIMIT + 3);
@@ -788,7 +800,7 @@ describe("Story 35.8: the stage pass — the supervisor's Stage Log rows after t
     const real = fx.queue.claimPlanPhase.bind(fx.queue);
     fx.queue.claimPlanPhase = (runId, phase, self) => {
       const ok = real(runId, phase, self);
-      if (ok && phase === "stage") fx.queue.note(runId, "stage-post", { story_key: "27-5-the-plan-follows-the-run-spec", ok: true });
+      if (ok && phase === "stage") fx.queue.note(runId, "stage-post", { story_key: "27-5-the-plan-follows-the-run", ok: true });
       return ok;
     };
     await stagePass(fx.queue, fx.deps);
@@ -945,7 +957,7 @@ describe("Story 36.6: the story being built reads In Progress; the launch arms t
   const E1 = "20261031-120000-ab12";
   const K1 = "27-5-the-plan-follows-the-run", K2 = "27-1-the-other-story", K3 = "27-9-the-third-story";
   const BLOCK = { status: "complete", intent: "tk-studio-launch", artifacts: [`.bmad-loop/runs/${E1}`] };
-  const epicDefn = (after?: number) => ({ id: "run-epic-27", type: "run-epic", target: { skill: "tk-studio-launch" }, stop: { on_status: ["blocked"], ...(after ? { after_stories: after } : {}) } });
+  const epicDefn = (after?: number) => ({ id: "run-epic-27", type: "run-epic", target: { skill: "tk-studio-launch", payload: { verb: "start", epic: 27 } }, stop: { on_status: ["blocked"], ...(after ? { after_stories: after } : {}) } });
 
   /** A `running` queue run, not yet launched unless `launched`, its engine's run dir in a kept worktree, a fake `uv` answering
    * `plansync.py status` with `status()` and `launch.py stop` with `stop()`. */
@@ -1543,9 +1555,11 @@ describe("Story 36.6: the story being built reads In Progress; the launch arms t
     expect(fx.statusCalls()).toHaveLength(1);
   }, 60_000);
 
+  // Story 37.4 (DW-159): the duties apply by the job's target (`runsStories`), not by its type: a sweep's `verb: "sweep"`
+  // and a launch target with no `start` verb owe neither.
   test.each([
-    ["a sweep", { id: "run-sweep", target: { skill: "tk-studio-launch" }, stop: { on_status: ["blocked"], after_stories: 1 } }],
-    ["another launch job", { id: "run-vertical-slice", target: { skill: "tk-studio-launch" }, stop: { on_status: ["blocked"], after_stories: 1 } }],
+    ["a sweep", { id: "run-sweep", target: { skill: "tk-studio-launch", payload: { verb: "sweep" } }, stop: { on_status: ["blocked"], after_stories: 1 } }],
+    ["a launch target with no start verb", { id: "run-other", target: { skill: "tk-studio-launch" }, stop: { on_status: ["blocked"], after_stories: 1 } }],
   ] as const)("M24: %s: neither call", async (_n, defn) => {
     const fx = await launchedRun({ launched: false, defn });
     fx.journal(start(K1));
@@ -1554,6 +1568,31 @@ describe("Story 36.6: the story being built reads In Progress; the launch arms t
     expect(fx.calls).toEqual([]);
     expect(fx.ev("stop-armed")).toEqual([]);
     expect(fx.ev("plan-status")).toEqual([]);
+  }, 60_000);
+
+  /** Story 37.4 (DW-159): a game project's `run-vertical-slice` run, resolved as the shipped type's target and rhythm. */
+  const sliceDefn = { id: "run-epic-27", type: "run-vertical-slice", target: { skill: "tk-studio-launch", payload: { verb: "start", bootstrap: true, epic: 27 } }, stop: { on_status: ["blocked"], after_stories: 1 } };
+
+  test("Story 37.4 (DW-159): a vertical-slice run is marked In Progress and armed on the launched path, by its target", async () => {
+    const fx = await launchedRun({ launched: false, defn: sliceDefn });
+    fx.journal(start(K1));
+    await launchOf(fx);
+    expect(fx.ev("stop-armed")).toHaveLength(1);
+    expect(fx.ev("stop-armed")[0]!.detail).toMatchObject({ figure: 1, engine_run_id: E1, ok: true });
+    expect(fx.stops()).toHaveLength(1);
+    expect(fx.ev("plan-status").map((e) => e.detail)).toEqual([expect.objectContaining({ phase: "in-progress", ok: true, story_key: K1, id: "ST-097" })]);
+  }, 60_000);
+
+  test("Story 37.4 (DW-159): a vertical-slice run is marked In Progress and armed by the pass, once", async () => {
+    const fx = await launchedRun({ defn: sliceDefn });
+    fx.journal(start(K1));
+    await fx.pass();
+    await fx.pass();
+    expect(fx.ev("stop-armed")).toHaveLength(1);
+    expect(fx.ev("stop-armed")[0]!.detail).toMatchObject({ figure: 1, engine_run_id: E1, ok: true });
+    expect(fx.stops()).toHaveLength(1);
+    expect(fx.ev("plan-status").map((e) => e.detail?.story_key)).toEqual([K1]);
+    expect(fx.statusCalls()).toHaveLength(1);
   }, 60_000);
 
   /** A paused launched run resumed with an injected child; `rewrite` says whether the resume rewrites `engine.pid`. */
@@ -1622,12 +1661,26 @@ describe("Story 36.6: the story being built reads In Progress; the launch arms t
     second.finish({ exit: 0, stdout: "", stderr: "" });
   }, 60_000);
 
-  test("M24 on a resume: not a run-epic: neither call", async () => {
-    const fx = await launchedRun({ defn: { id: "run-sweep", target: { skill: "tk-studio-launch" }, stop: { on_status: ["blocked"], after_stories: 1 } } });
+  test("M24 on a resume: a sweep (no story run): neither call", async () => {
+    const fx = await launchedRun({ defn: { id: "run-sweep", target: { skill: "tk-studio-launch", payload: { verb: "sweep" } }, stop: { on_status: ["blocked"], after_stories: 1 } } });
     fx.journal(start(K1));
     const { finish } = await resumed(fx);
     expect(fx.ev("stop-armed")).toEqual([]);
     expect(fx.statusCalls()).toEqual([]);
+    finish({ exit: 0, stdout: "", stderr: "" });
+  }, 60_000);
+
+  test("Story 37.4 (DW-159): a resumed vertical-slice run gets its in-progress call and its re-armed stop, by its target", async () => {
+    const fx = await launchedRun({ defn: sliceDefn });
+    fx.journal(start(K1));
+    const { finish } = await resumed(fx);
+    const k = fx.queue.events(fx.runId).map((e) => e.kind);
+    expect(fx.ev("stop-armed")).toHaveLength(1);
+    expect(fx.ev("stop-armed")[0]!.detail).toMatchObject({ figure: 1, engine_run_id: E1, ok: true });
+    expect(k.lastIndexOf("stop-armed")).toBeGreaterThan(k.lastIndexOf("engine-resume"));
+    expect(fx.stops()).toHaveLength(1);
+    expect(fx.statusCalls()).toHaveLength(1);
+    expect(fx.ev("plan-status").map((e) => e.detail)).toEqual([expect.objectContaining({ phase: "in-progress", ok: true, story_key: K1, id: "ST-097" })]);
     finish({ exit: 0, stdout: "", stderr: "" });
   }, 60_000);
 });

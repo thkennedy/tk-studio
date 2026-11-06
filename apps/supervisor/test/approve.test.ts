@@ -1133,7 +1133,8 @@ describe("Story 34.8: approve's type rule (AC1)", () => {
     expect(steps(queue).slice(0, 3)).toEqual([["append", true], ["sync", true], ["job", true]]);
     const job = JSON.parse(git(origin, "show", "engagement/ENG-001:.tk-studio/jobs/run-epic-41.json"));
     expect(job).toMatchObject({ job_schema_version: 1, id: "run-epic-41", type: "run-vertical-slice", target: { payload: { epic: 41 } } });
-    expect(job).not.toHaveProperty("stop"); // Story 36.6: the slice mint keeps its type's
+    // Story 37.4 (DW-159): the slice mint carries an explicit `stop` with the one-story rhythm
+    expect(job.stop).toEqual({ on_status: ["blocked"], after_stories: 1 });
     expect(approveEvents(queue).find((d) => d.step === "job")!.detail.jobs).toEqual(["run-epic-41"]);
   });
 

@@ -18,7 +18,8 @@
     "max_wall_clock_seconds": 3600
   },
   "stop": {
-    "on_status": ["blocked"]
+    "on_status": ["blocked"],
+    "after_stories": 1
   },
   "effort": "high"
 }

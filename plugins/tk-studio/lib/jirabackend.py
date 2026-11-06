@@ -126,15 +126,19 @@ class RateLimited(JiraError):
 
 
 def canonical_status(name: str | None, category: str | None) -> str | None:
-    """The canonical status for a Jira status: by name first — the two
-    template statuses (`SETUP_STATUSES`) are canonical `blocked` (AD-22,
-    AD-6) and the dropped names (`DROPPED_STATUS_NAMES`, DW-95) canonical
-    `dropped` — then by status category. None when neither maps.
-    `pull_back` and the sync-back share it, so `sync` and `sync-back` never
-    flip an entity between `in-progress` and `blocked`, and a `DNI` issue
-    never pulls back as `done`."""
-    if name in SETUP_STATUSES:
+    """The canonical status for a Jira status: by name first — the block
+    status (`BLOCKED_STATUS`) is canonical `blocked` (AD-22, AD-6), the
+    resolved one (`RESOLVED_STATUS`) canonical `in-progress` (Story 37.4,
+    DW-151: a resolved block is work resumed, not a block) and the dropped
+    names (`DROPPED_STATUS_NAMES`, DW-95) canonical `dropped` — then by
+    status category. None when neither maps. `pull_back` and the sync-back
+    share it, so `sync` and `sync-back` never flip an entity between
+    `in-progress` and `blocked`, and a `DNI` issue never pulls back as
+    `done`."""
+    if name == BLOCKED_STATUS:
         return "blocked"
+    if name == RESOLVED_STATUS:
+        return "in-progress"
     if name in DROPPED_STATUS_NAMES:
         return "dropped"
     return FROM_BACKEND_CATEGORY.get(category)
@@ -601,12 +605,38 @@ def apply_statuses(plan_dir: Path, statuses: dict, dry_run: bool = False,
         changes: dict[str, object] = {}
         conflict_fields: list[str] = []
         refresh = False
-        if b_status != snapshot.get("status"):
+        if b_status == RESOLVED_STATUS and front["status"] == "blocked":
+            # Story 37.4: the owner's resolution awaits validation (`track.py
+            # validate` reads the live `Block Resolved`): a still-`blocked`
+            # entity keeps `blocked`, its snapshot records canonical
+            # `blocked`, never a conflict, so promote never moves the issue
+            # on; the exit follows once the local status is non-`blocked`
+            if snapshot.get("status") != b_status or \
+                    snapshot.get("canonical_status") != "blocked":
+                refresh = True
+        elif b_status != snapshot.get("status"):
             mapped = canonical_status(b_status, b_category)
             if mapped is None:
                 notes.append(f"{front['id']}: backend status {b_status!r} "
                              f"(category {b_category!r}) has no canonical "
                              f"mapping — left as-is")
+            elif b_status == RESOLVED_STATUS and front["status"] != mapped \
+                    and front["status"] != "blocked" and (
+                        front["status"] != snapshot.get("canonical_status")
+                        or front["status"] in RESOLVED_HELD_STATUSES):
+                # Story 37.4 (DW-151): the move into `Block Resolved` is the
+                # block's resolution, never a both-changed conflict — the
+                # local non-`blocked` status wins and stays unpromoted, and
+                # a promoted `review`/`done` is never pulled back to
+                # `in-progress`. An unpromoted local change needs nothing
+                # here (promote's `status_changed` moves the issue out); a
+                # promoted `review`/`done` only refreshes the snapshot
+                # (`status` records `Block Resolved`, the canonical stays
+                # the local status), so promote's `resolved_exit` moves the
+                # issue out on the next pass. A promoted `draft`/`ready`
+                # falls through: work resumed, it maps to `in-progress`
+                if front["status"] == snapshot.get("canonical_status"):
+                    refresh = True
             elif front["status"] != snapshot.get("canonical_status") and \
                     front["status"] != mapped:
                 conflict_fields.append(
@@ -632,10 +662,14 @@ def apply_statuses(plan_dir: Path, statuses: dict, dry_run: bool = False,
             # differing from its canonical status is the AD-5 round trip
             # of an unrepresentable status, not a stale mapping. The
             # dropped names qualify the same way (hole 100: a `DNI`
-            # snapshot pulled back by category as `done`)
+            # snapshot pulled back by category as `done`). `Block Resolved`
+            # never re-maps (Story 37.4): a `blocked` entity is held above,
+            # and a non-`blocked` local status wins over it (the resolution
+            # rule), e.g. a `review` whose promote found no route out
             mapped = canonical_status(b_status, b_category)
             promoted = snapshot.get("canonical_status")
-            name_mapped = b_status in SETUP_STATUSES \
+            name_mapped = (b_status in SETUP_STATUSES
+                           and b_status != RESOLVED_STATUS) \
                 or b_status in DROPPED_STATUS_NAMES
             if name_mapped and mapped != promoted and \
                     front["status"] == promoted:
@@ -736,7 +770,11 @@ def _transition_to_category(client: JiraClient, key: str, target: str,
     The pick within the category: the canonical's preferred name first
     (`PREFERRED_STATUS_NAMES`), then any other status of the category that
     is neither a dropped name (hole 100) nor a block status (hole 109); the
-    block statuses are a route only for canonical `blocked`."""
+    block statuses are a route only for canonical `blocked`. A tie breaks by
+    the exact name (`Blocked - Awaiting User` for `blocked`, else the first
+    preferred name), then by the lowest numeric transition id — a
+    non-numeric id ranks last — never by the site's list order (Story 37.4,
+    B2)."""
     status, data = client.request("GET", f"/issue/{key}/transitions")
     if status != 200 or not isinstance(data, dict):
         raise JiraError(f"promote: GET /issue/{key}/transitions returned "
@@ -764,7 +802,12 @@ def _transition_to_category(client: JiraClient, key: str, target: str,
             continue
         rank = preferred.index(name) if name in preferred else len(preferred)
         candidates.append((rank, tr, name))
-    candidates.sort(key=lambda c: c[0])
+    exact = BLOCKED_STATUS if canonical == "blocked" \
+        else (preferred[0] if preferred else None)
+    candidates.sort(key=lambda c: (
+        c[0], 0 if c[2] == exact else 1,
+        int(c[1].get("id")) if str(c[1].get("id")).isdecimal()
+        else float("inf")))
     for _rank, tr, name in candidates:
         posted, _ = client.request("POST", f"/issue/{key}/transitions",
                                    {"transition": {"id": tr.get("id")}})
@@ -871,7 +914,13 @@ def promote(plan_dir: Path, client: JiraClient | None, project_key: str,
             front["title"], ",".join(_labels(front)),
             front.get("parent") or "", body, *([link] if link else []))
         fields_changed = snapshot.get("content_hash") != content_hash
-        status_changed = snapshot.get("canonical_status") != front["status"]
+        # Story 37.4 (DW-151): an issue left in `Block Resolved` by an
+        # unblock is moved on for any non-`blocked` canonical, even when the
+        # canonical status already matches the snapshot
+        resolved_exit = snapshot.get("status") == RESOLVED_STATUS \
+            and front["status"] != "blocked"
+        status_changed = snapshot.get("canonical_status") != front["status"] \
+            or resolved_exit
         assignee_changed = (front.get("assignee") or None) != \
             (snapshot.get("canonical_assignee") or None)
         key = snapshot.get("key")
@@ -940,11 +989,26 @@ def promote(plan_dir: Path, client: JiraClient | None, project_key: str,
 
         backend_status, backend_category = _current_status(client, key)
         target = TO_BACKEND_CATEGORY[front["status"]]
-        if backend_category != target:
+        exit_stuck = False
+        # `Blocked - Awaiting User` keeps winning while the block stands;
+        # `Block Resolved` is left for any non-`blocked` canonical (37.4)
+        if backend_category != target or (
+                backend_status == RESOLVED_STATUS
+                and front["status"] != "blocked"):
             moved = _transition_to_category(client, key, target, notes,
                                             front["id"], front["status"])
             if moved is not None:
                 backend_status = moved
+            else:
+                exit_stuck = resolved_exit
+
+        # Story 37.4: an exit from `Block Resolved` with no route (the note
+        # above says why) and nothing else to record leaves the file as it
+        # is, so a pass that cannot move the issue does not rewrite it
+        if exit_stuck and not fields_changed and not assignee_changed \
+                and backend_status == snapshot.get("status") \
+                and snapshot.get("canonical_status") == front["status"]:
+            continue
 
         snapshot.update({"key": key, "synced_at": _now_iso(),
                          "content_hash": content_hash,
@@ -1119,6 +1183,9 @@ def project(project_root: Path, plan_dir: Path, dry_run: bool = False,
 BLOCKED_STATUS = "Blocked - Awaiting User"
 RESOLVED_STATUS = "Block Resolved"
 SETUP_STATUSES = (BLOCKED_STATUS, RESOLVED_STATUS)
+# Story 37.4: the canonical statuses past `in-progress` a pull-back never
+# re-maps off `Block Resolved` (apply_statuses' resolution rule)
+RESOLVED_HELD_STATUSES = ("review", "done")
 TEMPLATE_STATUSES = ("To Do", "In Progress", BLOCKED_STATUS, RESOLVED_STATUS,
                      "Done")
 TODO_STATUS = "To Do"   # the slot any To Do-category status fills (DW-107)
@@ -1630,16 +1697,26 @@ def workflow_transitions(workflow: dict, have: dict[str, dict]
     return out
 
 
+# Story 37.4 (DW-160): the transition keys `update_workflow` carries — the
+# v3 keys, the legacy `to` / `from` it maps onto them, and `screen` / `rules`
+# carried as the read returns them. A copied transition with any other key
+# is refused by name (`refused_transitions`), never stripped.
+CARRIED_CONFIG_KEYS = ("screen", "rules")
+CARRIED_TRANSITION_KEYS = frozenset({
+    "id", "name", "description", "properties", "type", "toStatusReference",
+    "links", "to", "from", *CARRIED_CONFIG_KEYS})
+
+
 def _v3_transition(tr: dict) -> dict:
     """A transition as `POST /workflows/update` takes it (DW-127), from
     either read's shape: `id` (when it has one), `name`, `description`,
     `properties`, the uppercase `type`, `toStatusReference` and `links` in
-    place of the legacy `to` / `from`. The legacy-only keys (`screen`,
-    `rules`) are not mapped by this code and are dropped; whether the v3
-    schema has a place for them is for the operator's live call to decide.
-    `update_workflow` reports the copied transitions that lose one
-    (`_dropped_config`)."""
-    out = {k: tr[k] for k in ("name", "description", "properties") if k in tr}
+    place of the legacy `to` / `from`, and the transition's `screen` and
+    `rules` (validators, conditions, post functions) as the read returns
+    them (Story 37.4, DW-160). Whether the live site accepts those
+    spellings is the operator's attended call (CAP-16)."""
+    out = {k: tr[k] for k in ("name", "description", "properties",
+                              *CARRIED_CONFIG_KEYS) if k in tr}
     if tr.get("id") not in (None, ""):
         out["id"] = str(tr["id"])
     if tr.get("type"):
@@ -1649,21 +1726,13 @@ def _v3_transition(tr: dict) -> dict:
     return out
 
 
-def _holds_value(value) -> bool:
-    """A non-empty value at some depth: `{"conditions": [], "validators": []}`
-    holds none; a `None`, an empty string or an empty container is empty."""
-    if isinstance(value, dict):
-        return any(_holds_value(v) for v in value.values())
-    if isinstance(value, (list, tuple)):
-        return any(_holds_value(v) for v in value)
-    return value is not None and value != ""
-
-
-def _dropped_config(transitions: list[dict]) -> list[str]:
-    """The names of the copied transitions whose `screen` or `rules`, holding
-    a value (`_holds_value`), `_v3_transition` does not carry."""
+def refused_transitions(transitions: list[dict]) -> list[str]:
+    """The names of the transitions holding a key the update cannot accept
+    (outside `CARRIED_TRANSITION_KEYS`, Story 37.4): `update_workflow`
+    posts nothing for a workflow that has one — posting the list without
+    it could delete it, and stripping its fields would change it."""
     return [str(tr.get("name") or tr.get("id")) for tr in transitions
-            if _holds_value(tr.get("screen")) or _holds_value(tr.get("rules"))]
+            if set(tr) - CARRIED_TRANSITION_KEYS]
 
 
 def _with_fresh_ids(transitions: list[dict]) -> list[dict]:
@@ -1689,15 +1758,20 @@ def update_workflow(client: JiraClient, workflow: dict, version,
     /workflows/search`. Unverified until the operator's attended `plansync
     setup` rerun: whether the site wants `statusReference` as the status id
     (what this sends) or a workflow-scoped UUID. On success the second value
-    names the copied transitions whose `screen` or `rules` the update dropped
-    (comma-separated, empty when none); on a refusal it is the refusal."""
+    is empty (Story 37.4 carries `screen` and `rules`, so nothing is
+    dropped); on a refusal it is the refusal. A transition holding a key the
+    update cannot accept (`refused_transitions`) posts nothing for the
+    workflow and answers False with the names (Story 37.4, DW-160)."""
+    every = [*(workflow.get("transitions") or []), *transitions]
+    refused = refused_transitions(every)
+    if refused:
+        return False, ("transitions with fields the update does not accept, "
+                       "left unchanged: " + ", ".join(refused))
     ident = workflow.get("id") or {}
     on_flow = {str(s.get("id")) for s in workflow.get("statuses") or []}
     statuses = [{"statusReference": sid}
                 for sid in sorted(on_flow | {str(i) for i in status_ids})]
-    payload = _with_fresh_ids([
-        _v3_transition(tr)
-        for tr in [*(workflow.get("transitions") or []), *transitions]])
+    payload = _with_fresh_ids([_v3_transition(tr) for tr in every])
     body = {"workflows": [{
         "id": ident.get("entityId"), "version": version,
         "statuses": statuses,
@@ -1706,7 +1780,7 @@ def update_workflow(client: JiraClient, workflow: dict, version,
                                   scope=SCOPE_CONFIGURATION)
     if status not in (200, 201, 204):
         return False, _refusal(status, data)
-    return True, ", ".join(_dropped_config(workflow.get("transitions") or []))
+    return True, ""
 
 
 def find_filter(client: JiraClient, agent_account_id: str | None) -> dict | None:

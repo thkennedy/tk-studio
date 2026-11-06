@@ -725,7 +725,7 @@ describe("Story 36.6: an auto-resume owes the launch duties", () => {
     expect(ev(fx, AUTO_RESUME)[0]!.detail).toMatchObject({ reason: "stale-render-view", attempt: 1, resumed: true });
     return fx;
   }
-  const EPIC = (stop: Record<string, unknown>) => ({ id: "run-epic-9", type: "run-epic", target: { skill: "tk-studio-launch" }, guards: { max_wall_clock_seconds: 600 }, stop });
+  const EPIC = (stop: Record<string, unknown>) => ({ id: "run-epic-9", type: "run-epic", target: { skill: "tk-studio-launch", payload: { verb: "start", epic: 9 } }, guards: { max_wall_clock_seconds: 600 }, stop });
 
   test("`pausedDeps.startedStories`: the resumed run's in-progress call is recorded", async () => {
     const fx = await autoResumed(EPIC({ on_status: ["blocked"] }));

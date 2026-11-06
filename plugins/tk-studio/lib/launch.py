@@ -1474,13 +1474,29 @@ def engine_mcp_row(root: Path) -> dict:
 
 # ----------------------------------------------- the run-epic job's rhythm
 
+def runs_stories(defn) -> bool:
+    """Story 37.4 (DW-159): a job runs stories when its ``target`` is the
+    launch's ``start`` — ``tk-studio-launch`` with ``payload.verb ==
+    "start"`` — whatever its type (``run-epic``, ``run-vertical-slice``, a
+    later one); a sweep (``verb: "sweep"``) does not. The twin of the
+    supervisor's ``runsStories``."""
+    target = defn.get("target") if isinstance(defn, dict) else None
+    if not isinstance(target, dict) or target.get("skill") != "tk-studio-launch":
+        return False
+    payload = target.get("payload")
+    return isinstance(payload, dict) and payload.get("verb") == "start"
+
+
 def run_rhythm_row(root: Path, spec_rel: str) -> dict:
     """Story 36.6 (hole 105, AC5): the advisory ``run rhythm`` row: the
-    resolved ``stop.after_stories`` of the project's ``run-epic`` instance
-    whose ``target.payload.epic`` is the ``spec-epic-<N>`` folder's. With no
+    resolved ``stop.after_stories`` of the project's story-running instance
+    (``runs_stories``, Story 37.4: by ``target``, not by type) whose
+    ``target.payload.epic`` is the ``spec-epic-<N>`` folder's. With no
     field declared the run goes to the epic's end, and this row says so,
-    adding that an engagement's autonomy (a minted ``run-epic-<N>`` declares
-    no rhythm) can still stop it at a story boundary."""
+    adding that an engagement's autonomy can still stop it at a story
+    boundary (an engagement's ``run-epic`` mint declares no rhythm; a game
+    engagement's ``run-vertical-slice`` mint declares ``stop {on_status:
+    ["blocked"], after_stories: 1}``, Story 37.4)."""
     def row(detail: str) -> dict:
         return {"check": RHYTHM_CHECK, "ok": True, "detail": detail}
 
@@ -1496,7 +1512,7 @@ def run_rhythm_row(root: Path, spec_rel: str) -> dict:
     for path in paths:
         entry = joblib.load_instance(root, path.stem)
         candidate = entry.get("definition")
-        if not isinstance(candidate, dict) or candidate.get("type") != "run-epic":
+        if not runs_stories(candidate):
             continue
         target = candidate.get("target")
         payload = target.get("payload") if isinstance(target, dict) else None

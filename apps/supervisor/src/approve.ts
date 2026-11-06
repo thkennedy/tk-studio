@@ -707,8 +707,9 @@ async function worktreeSteps(queue: Queue, deps: ApproveDeps, t: Target, record:
           description: `${project} Epic ${e.n} (${e.title}) for engagement ${id} through the supervisor queue (declared ${at} by the approve pass, Story 32.6).`,
           target: { payload: { epic: e.n } },
           // Story 36.6: an engagement's instance declares no rhythm (its autonomy sets it): its own `stop` replaces the
-          // shipped `run-epic` one whole, so no `after_stories` comes through. The slice mint stays with its type's `stop`.
-          ...(jobType === "run-epic" ? { stop: { on_status: ["blocked"] } } : {}),
+          // shipped `run-epic` one whole, so no `after_stories` comes through. Story 37.4 (DW-159): the slice mint carries
+          // an explicit `stop` with the one-story rhythm, so the run is armed by its target like any story run.
+          stop: jobType === "run-epic" ? { on_status: ["blocked"] } : { on_status: ["blocked"], after_stories: 1 },
         };
         atomicWrite(jobPath, JSON.stringify(job, null, 2) + "\n");
       }
