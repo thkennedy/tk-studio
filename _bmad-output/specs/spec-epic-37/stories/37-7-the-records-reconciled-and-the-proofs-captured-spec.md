@@ -215,6 +215,9 @@ Process note (this session, not a story deviation): the first `bmad-loop validat
 | review | 1 | 2026-11-06T14:09:20Z | 2026-11-06T14:17:22Z | c61fa14c-fd70-4fcf-a895-8c674c234250 | claude-opus-5-5 | medium | 4570267 | 38540 | 3.4333 | completed |
 | review | 2 | 2026-11-06T14:17:23Z | 2026-11-06T14:29:17Z | c70af0ab-148a-4668-a60f-66d758157c84 | claude-opus-5-5 | medium | 5273275 | 47192 | 3.9174 | completed |
 | gate | 1 | 2026-11-06T14:29:18Z | 2026-11-06T14:30:29Z | b061fee8-8293-4a09-980b-1d878b97b91a | claude-opus-5-5 | medium | 1097223 | 5894 | 0.9653 | completed |
+| host-leg | 1 | 2026-11-06T14:30:56Z | 2026-11-06T15:06:10Z | — | — | — | — | — | — | green |
+| close-out | 1 | 2026-11-06T15:06:10Z | 2026-11-06T15:06:17Z | — | — | — | — | — | — | PR |
+| merge | — | 2026-11-06T15:08:30Z | 2026-11-06T15:08:30Z | — | — | — | — | — | — | merged |
 
 
 ## Auto Run Result
