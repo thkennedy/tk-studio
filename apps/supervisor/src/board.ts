@@ -191,9 +191,16 @@ export const readFindings = (root: string): OpenFinding[] => cachedFile(findings
 
 interface JobRunCost { project: string | null; job_id: string; cost: number }
 
-/** The ledger's `job-run` events by `payload.run_id`, the last line winning. */
+/** Story 37.5: the suffix of a sweep's priced-engine `job-run` line (`sweep.ts engineJobRun`). */
+const ENGINE_SUFFIX = ":engine";
+
+/** The ledger's `job-run` events by `payload.run_id`, the last line winning. Story 37.5 (DW-139): a `<id>:engine` line
+ * (a late-closed sweep's priced engine) is folded into its bare id's entry — own plus engine, each the last line
+ * winning — and never kept as its own entry, so a sum over the map counts each dollar once; `:verify-<n>` lines stay
+ * their own entries. */
 export function jobRunCosts(text: string): Map<string, JobRunCost> {
   const out = new Map<string, JobRunCost>();
+  const engines = new Map<string, JobRunCost>();
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
     let o: any;
@@ -202,8 +209,14 @@ export function jobRunCosts(text: string): Map<string, JobRunCost> {
     const runId = str(o.payload.run_id), jobId = str(o.payload.job_id);
     if (!runId || !jobId) continue;
     const c = o.payload.total_cost_usd;
-    out.delete(runId);
-    out.set(runId, { project: str(o.project), job_id: jobId, cost: typeof c === "number" && Number.isFinite(c) && c > 0 ? c : 0 });
+    const into = runId.endsWith(ENGINE_SUFFIX) ? engines : out;
+    const key = runId.endsWith(ENGINE_SUFFIX) ? runId.slice(0, -ENGINE_SUFFIX.length) : runId;
+    into.delete(key);
+    into.set(key, { project: str(o.project), job_id: jobId, cost: typeof c === "number" && Number.isFinite(c) && c > 0 ? c : 0 });
+  }
+  for (const [id, e] of engines) {
+    const own = out.get(id);
+    out.set(id, own ? { ...own, cost: Math.round((own.cost + e.cost) * 1e6) / 1e6 } : e);
   }
   return out;
 }

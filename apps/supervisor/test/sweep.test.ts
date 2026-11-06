@@ -14,7 +14,7 @@ import { mergePass, PLAN_RETRY_LIMIT } from "../src/planstatus";
 import { Queue, type QueueEvent } from "../src/queue";
 import { runProcess, type RunResult } from "../src/server";
 import {
-  emitTriage, engineCostOf, isSweep, stopEngine, SWEEP_STOP_DEADLINE_MS, sweepStopPastDeadline, LEDGER_LEASE, LEDGER_RESOLVE, ledgerFingerprint, ledgerPass, recordTriage, summaryFromRecord, SWEEP_ENGINE_STOP, SWEEP_JOB_TYPE, SWEEP_TRIAGE, sweepCostText,
+  emitTriage, engineCostOf, isSweep, stopEngine, SWEEP_ENGINE_PROBE, SWEEP_LEDGER_WAIT_MS, SWEEP_STOP_DEADLINE_MS, sweepRecord, sweepStopPastDeadline, LEDGER_LEASE, LEDGER_RESOLVE, ledgerFingerprint, ledgerPass, recordTriage, summaryFromRecord, SWEEP_ENGINE_STOP, SWEEP_JOB_TYPE, SWEEP_TRIAGE, sweepCostText,
   sweepEndState, sweepSection, sweepTotalCost, withEngineCost, type SweepSummary,
 } from "../src/sweep";
 import { launchedCloseOutInput, prBody, prepareWorktree, sweepEngines, wipMessage, type WorktreeDeps } from "../src/worktree";
@@ -584,14 +584,14 @@ describe("Story 36.2: the sweep's records are whole", () => {
     expect(await emitTriage(fx.queue, fx.get(), fx.deps)).toBe("seen");
   });
 
-  test("a failed triage emit is noted on the note, never thrown nor retried; a triage in error emits nothing", async () => {
+  test("a failed triage emit is noted on the note, never thrown nor retried by the live tick (Story 37.5: the ledger pass retries it once the run ends); a triage in error emits nothing", async () => {
     const fx = await sweepFixture();
     fx.triage();
     fx.answers.emit = { exit: 2, stdout: JSON.stringify({ ok: false, error: "ledger refused" }), stderr: "" };
     expect(await sweepEngines(fx.queue, fx.deps)).toEqual([]);
     expect(await sweepEngines(fx.queue, fx.deps)).toEqual([]);
     expect(fx.studio.filter((s) => s.script.endsWith("ledger.py"))).toHaveLength(1);
-    expect(fx.queue.events(fx.id).find((e) => e.kind === SWEEP_TRIAGE)!.detail!.ledger).toBe("error: ledger refused");
+    expect(fx.queue.events(fx.id).find((e) => e.kind === SWEEP_TRIAGE)!.detail).toMatchObject({ ledger: "error: ledger refused", ledger_errors: 1 });
     const fy = await sweepFixture();
     fy.queue.note(fy.id, SWEEP_TRIAGE, { engine_run_id: "E1", error: "not json" });
     expect(await emitTriage(fy.queue, fy.get(), fy.deps)).toBe("absent");
@@ -936,12 +936,13 @@ describe("Story 36.2: the sweep's records are whole", () => {
     const line = (job_id: string, run_id: string, total_cost_usd: number) => JSON.stringify({ event: "job-run", project: "proj", payload: { job_id, run_id, state: "cancelled", total_cost_usd } });
     const text = [line("run-epic-9", "s-1", 0.5), line("run-epic-9", "s-1:engine", 3.75), line("run-sweep", "s-2", 0.5), line("run-sweep", "s-2:engine", 3.75)].join("\n");
     const costs = jobRunCosts(text);
-    expect(costs.get("s-2")!.cost).toBe(0.5);
-    expect(costs.get("s-2:engine")!.cost).toBe(3.75);
+    // Story 37.5 (DW-139): the bare id answers the full line (own + `:engine`), the `:engine` line folded into it
+    expect(costs.get("s-2")!.cost).toBe(4.25);
+    expect(costs.get("s-2:engine")).toBeUndefined();
     expect([...costs.values()].reduce((sum, c) => sum + c.cost, 0)).toBe(8.5);
     const file = join(tempDir("tk-sup-sweep-ledger-"), "l.jsonl");
     writeFileSync(file, text);
-    expect(runCost(file, "s-2")).toBe(0.5); // the exact id: the run's own line
+    expect(runCost(file, "s-2")).toBe(4.25); // Story 37.5 (DW-139): the bare id, own + `:engine` (was the worker's 0.5)
     expect(runCost(file, "s-2:engine")).toBe(3.75);
     expect(spendByEpic(file, "proj").get("9")).toBe(4.25); // each once; a `run-sweep` job is no epic's
     expect(spendByEpic(file, "proj").size).toBe(1);
@@ -1227,5 +1228,327 @@ describe("Story 36.3: a paused sweep's bounded stop and its WIP (DW-121)", () =>
     expect(calls[0]!.slice(0, 2)).toEqual(["exec", "claude-p"]);
     expect(calls[0]).toContain("stop");
     expect(calls[0]).not.toContain("--graceful");
+  });
+});
+
+describe("Story 37.5: the sweep's end-rule bugs and cost lines before a fourth sweep", () => {
+  const PENDING = { exit: 0, out: { ok: true, resolved: [], pending: ["DW-1", "DW-2"], unchanged: [] } };
+  const merged = async () => {
+    const fx = await sweepFixture();
+    fx.triage();
+    fx.landed("a");
+    fx.commit("a.txt", "sweep bundle dw-a");
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.id]);
+    fx.gh.answer({ view: "MERGED" });
+    ownerLedger(fx.root, "never pulled");
+    return fx;
+  };
+  const records = (fx: Awaited<ReturnType<typeof sweepFixture>>) => fx.queue.events(fx.id).filter((e) => e.kind === LEDGER_RESOLVE);
+
+  test("B4: an unchanged wait past `SWEEP_LEDGER_WAIT_MS` ends with one `ended: \"wait\"` record and one notifier line, never again", async () => {
+    const fx = await merged();
+    fx.answers.ledger.push(PENDING);
+    const lines: string[] = [];
+    const notify = async (text: string) => { lines.push(text); return { ok: true }; };
+    expect(await ledgerPass(fx.queue, fx.deps, notify)).toEqual([fx.id]);
+    const first = records(fx)[0]!;
+    expect(first.detail).toMatchObject({ waiting: true, pending: ["DW-1", "DW-2"] });
+    let now = Date.parse(first.at) + SWEEP_LEDGER_WAIT_MS - 1000;
+    const deps = { ...fx.deps, now: () => now };
+    expect(await ledgerPass(fx.queue, deps, notify)).toEqual([]); // under the bound: quiet
+    expect(records(fx)).toHaveLength(1);
+    expect(lines).toEqual([]);
+    now = Date.parse(first.at) + SWEEP_LEDGER_WAIT_MS + 1000;
+    expect(await ledgerPass(fx.queue, deps, notify)).toEqual([fx.id]);
+    expect(records(fx)).toHaveLength(2);
+    expect(records(fx)[1]!.detail).toMatchObject({ waiting: false, settled: true, ended: "wait", pending: ["DW-1", "DW-2"], ok: true, notify: { ok: true } });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain(`sweep ${fx.id}`);
+    expect(lines[0]).toContain("DW-1, DW-2");
+    // the settled run is never flipped again on its own: the line carries the manual remedy, the PR and the pending ids
+    expect(lines[0]).toEndWith(`; once the owner checkout has pulled, flip them by hand: uv run plugins/tk-studio/lib/plansync.py ledger-resolve --directory "${fx.root}" --pr ${String(first.detail!.pr)} --ids DW-1,DW-2`);
+    // the lease released settled, the one plansync call only
+    expect(fx.queue.events(fx.id).filter((e) => e.kind === "plan-lease" && e.detail?.phase === LEDGER_LEASE && e.detail?.owner === null).at(-1)!.detail?.settled).toBe(true);
+    for (let i = 0; i < 3; i++) expect(await ledgerPass(fx.queue, deps, notify)).toEqual([]);
+    expect(records(fx)).toHaveLength(2);
+    expect(lines).toHaveLength(1);
+    expect(fx.studio.filter((c) => c.script.endsWith("plansync.py"))).toHaveLength(1);
+  });
+
+  test("B4: a changed `pending` set is a new record and a new clock", async () => {
+    const fx = await merged();
+    fx.answers.ledger.push(PENDING, { exit: 0, out: { ok: true, resolved: ["DW-1"], pending: ["DW-2"], unchanged: [] } });
+    const lines: string[] = [];
+    const notify = async (text: string) => { lines.push(text); return { ok: true }; };
+    await ledgerPass(fx.queue, fx.deps, notify);
+    // the first wait's record two hours old
+    const old = new Date(Date.now() - 2 * SWEEP_LEDGER_WAIT_MS).toISOString();
+    fx.queue.db.query("UPDATE events SET at = ? WHERE seq = ?").run(old, records(fx)[0]!.seq);
+    ownerLedger(fx.root, "pulled once, one id still open");
+    const deps = { ...fx.deps, now: () => Date.now() + 1000 };
+    expect(await ledgerPass(fx.queue, deps, notify)).toEqual([fx.id]); // changed: a call, a new record
+    expect(records(fx).map((e) => e.detail?.pending)).toEqual([["DW-1", "DW-2"], ["DW-2"]]);
+    expect(await ledgerPass(fx.queue, deps, notify)).toEqual([]); // the new clock has not run out
+    expect(records(fx)).toHaveLength(2);
+    expect(lines).toEqual([]);
+  });
+
+  test("B4: the merge pass injects the notifier (the cycle rule: `sweep.ts` imports neither `hygiene` nor `worktree`)", async () => {
+    const fx = await merged();
+    fx.answers.ledger.push(PENDING);
+    await ledgerPass(fx.queue, fx.deps);
+    const sent: string[] = [];
+    const env = { ...fx.deps.env, TK_SUPERVISOR_NOTIFY: "ntfy", TK_SUPERVISOR_NTFY_URL: "https://ntfy.example/t" };
+    const at = Date.parse(records(fx)[0]!.at);
+    const deps = { ...fx.deps, env, now: () => at + SWEEP_LEDGER_WAIT_MS + 1000, hygiene: { env, fetch: (async (_u: unknown, init?: RequestInit) => { sent.push(String(init?.body ?? "")); return new Response("ok", { status: 200 }); }) as typeof fetch } };
+    await mergePass(fx.queue, deps);
+    expect(records(fx).at(-1)!.detail).toMatchObject({ ended: "wait", settled: true });
+    expect(sent.filter((t) => t.includes("stopped waiting"))).toHaveLength(1);
+    expect(readFileSync(resolve(import.meta.dir, "../src/sweep.ts"), "utf-8")).not.toMatch(/^import (?!type)[^;]*from "\.\/(hygiene|worktree)"/m);
+  });
+
+  test("B5: a probe answering `unknown` from the start (never paused) notes one `engine-probe`; the deadline runs from it, a `running` probe never resets it; past it: the stop, then `blocked`", async () => {
+    const fx = await sweepFixture();
+    fx.triage();
+    fx.landed("a");
+    fx.commit("a.txt", "bundle a");
+    const UNKNOWN = { ok: false, error: "sbx exec: sandbox stopped" };
+    fx.answers.launch = UNKNOWN;
+    fx.answers.stop = { exit: 2, stdout: "", stderr: "sbx exec: sandbox stopped" };
+    const sent: string[] = [];
+    let now = Date.now();
+    const env = { ...fx.deps.env, TK_SUPERVISOR_NOTIFY: "ntfy", TK_SUPERVISOR_NTFY_URL: "https://ntfy.example/t" };
+    const deps: WorktreeDeps = { ...fx.deps, env, clockMs: () => now, hygiene: { env, fetch: async (_u, init) => { sent.push(String(init?.body ?? "")); return new Response("ok", { status: 200 }); } } };
+    const probes = () => fx.queue.events(fx.id).filter((e) => e.kind === SWEEP_ENGINE_PROBE);
+    const stops = () => fx.studio.filter((c) => c.script.endsWith("launch.py") && c.args[0] === "stop").length;
+    expect(await sweepEngines(fx.queue, deps)).toEqual([]);
+    expect(probes()).toHaveLength(1);
+    expect(probes()[0]!.detail).toMatchObject({ engine_run_id: "E1", phase: "unknown" });
+    expect(typeof probes()[0]!.detail!.error).toBe("string");
+    expect(fx.queue.events(fx.id).some((e) => e.kind === SWEEP_ENGINE_STOP)).toBe(false); // never an `engine-stop` note
+    fx.answers.launch = { ok: true, run: { status: "running" } };
+    expect(await sweepEngines(fx.queue, deps)).toEqual([]); // `running`: no reset, no stop
+    fx.answers.launch = UNKNOWN;
+    now = Date.parse(probes()[0]!.at) + SWEEP_STOP_DEADLINE_MS - 1000;
+    expect(await sweepEngines(fx.queue, deps)).toEqual([]);
+    expect(probes()).toHaveLength(1);
+    expect(stops()).toBe(0);
+    now = Date.parse(probes()[0]!.at) + SWEEP_STOP_DEADLINE_MS + 1000;
+    expect(await sweepEngines(fx.queue, deps)).toEqual([fx.id]);
+    expect(stops()).toBe(1);
+    expect(fx.get().state).toBe("blocked");
+    // never paused nor asked to stop: the line names the probe, never a stop left unanswered
+    expect(sent).toEqual([`sweep ${fx.id}: the status probe answered \`unknown\` for 30 min — ended blocked, lock and pin released`]);
+  });
+
+  test("B5: a probe-only stop that answered `stopped` notes `engine-stop {stopped: true}` once; the next tick's `stopped` end commits the WIP and is not penalised", async () => {
+    const fx = await sweepFixture();
+    fx.triage();
+    fx.landed("a");
+    fx.commit("a.txt", "bundle a");
+    fx.answers.launch = { ok: false, error: "sbx exec: sandbox stopped" };
+    fx.answers.stop = { exit: 0, stdout: JSON.stringify({ ok: true }), stderr: "" };
+    let now = Date.now();
+    const deps: WorktreeDeps = { ...fx.deps, clockMs: () => now };
+    const stopNotes = () => fx.queue.events(fx.id).filter((e) => e.kind === SWEEP_ENGINE_STOP);
+    expect(await sweepEngines(fx.queue, deps)).toEqual([]);
+    expect(stopNotes()).toHaveLength(0); // the probe alone: an `engine-probe` note, never an `engine-stop` one
+    now = Date.parse(fx.queue.events(fx.id).find((e) => e.kind === SWEEP_ENGINE_PROBE)!.at) + SWEEP_STOP_DEADLINE_MS + 1000;
+    expect(await sweepEngines(fx.queue, deps)).toEqual([]); // the stop answered `stopped`: no end this tick
+    expect(stopNotes().map((e) => e.detail)).toEqual([expect.objectContaining({ engine_run_id: "E1", stopped: true })]);
+    fx.answers.launch = { ok: true, run: { status: "stopped" } };
+    writeFileSync(join(fx.served, "half.txt"), "half-written");
+    expect(await sweepEngines(fx.queue, deps)).toEqual([fx.id]);
+    expect(fx.get().state).toBe("partial");
+    expect(fx.get().reason).toContain(wipMessage("dw-b", fx.id));
+    expect(fx.get().reason).not.toContain("engine ended 'stopped'"); // the supervisor's own stop: exempted
+    expect(testGit(fx.repo.origin, "log", "-1", "--format=%s", `supervisor/run-${fx.id}`)).toBe(wipMessage("dw-b", fx.id));
+    expect(fx.queue.events(fx.id).filter((e) => e.kind === "host-verify").map((e) => e.detail)).toEqual([{ skipped: true, reason: "paused sweep: WIP committed, leg skipped" }]);
+    expect(fx.studio.some((s) => s.args[0] === "host-verify")).toBe(false);
+  });
+
+  test("B5: a probe-only stop that answered `stopped`, the next tick's probe still `unknown`: ended `blocked` on that tick, no second stop, the probe line", async () => {
+    const fx = await sweepFixture();
+    fx.triage();
+    fx.landed("a");
+    fx.commit("a.txt", "bundle a");
+    fx.answers.launch = { ok: false, error: "sbx exec: sandbox stopped" };
+    fx.answers.stop = { exit: 0, stdout: JSON.stringify({ ok: true }), stderr: "" };
+    const sent: string[] = [];
+    let now = Date.now();
+    const env = { ...fx.deps.env, TK_SUPERVISOR_NOTIFY: "ntfy", TK_SUPERVISOR_NTFY_URL: "https://ntfy.example/t" };
+    const deps: WorktreeDeps = { ...fx.deps, env, clockMs: () => now, hygiene: { env, fetch: async (_u, init) => { sent.push(String(init?.body ?? "")); return new Response("ok", { status: 200 }); } } };
+    const stopNotes = () => fx.queue.events(fx.id).filter((e) => e.kind === SWEEP_ENGINE_STOP);
+    const stops = () => fx.studio.filter((c) => c.script.endsWith("launch.py") && c.args[0] === "stop").length;
+    expect(await sweepEngines(fx.queue, deps)).toEqual([]);
+    now = Date.parse(fx.queue.events(fx.id).find((e) => e.kind === SWEEP_ENGINE_PROBE)!.at) + SWEEP_STOP_DEADLINE_MS + 1000;
+    expect(await sweepEngines(fx.queue, deps)).toEqual([]); // the stop answered `stopped`: noted, no end this tick
+    expect(stops()).toBe(1);
+    expect(stopNotes().map((e) => e.detail)).toEqual([expect.objectContaining({ engine_run_id: "E1", stopped: true })]);
+    writeFileSync(join(fx.served, "half.txt"), "half-written");
+    expect(await sweepEngines(fx.queue, deps)).toEqual([fx.id]); // still `unknown`: asked once more, then the `blocked` end
+    expect(fx.get().state).toBe("blocked");
+    expect(stops()).toBe(1); // never a second stop
+    expect(stopNotes()).toHaveLength(1);
+    // its stop answered, the engine never paused: the line names the probe, never a stop left unanswered
+    expect(sent).toEqual([`sweep ${fx.id}: the status probe answered \`unknown\` for 30 min — ended blocked, lock and pin released`]);
+    expect(fx.get().reason).toContain(wipMessage("dw-b", fx.id));
+    expect(testGit(fx.repo.origin, "log", "-1", "--format=%s", `supervisor/run-${fx.id}`)).toBe(wipMessage("dw-b", fx.id));
+    expect(fx.queue.events(fx.id).filter((e) => e.kind === "host-verify").map((e) => e.detail)).toEqual([{ skipped: true, reason: "paused sweep: WIP committed, leg skipped" }]);
+    expect(existsSync(fx.served)).toBe(true); // the worktree kept
+  });
+
+  test("B5: `sweepStopPastDeadline` takes the earlier of the `engine-probe` note and the first `engine-stop` error", () => {
+    const ev = (kind: string, iso: string, detail: Record<string, unknown>) => ({ seq: 1, kind, at: iso, detail }) as unknown as QueueEvent;
+    const probe = ev(SWEEP_ENGINE_PROBE, "2026-11-06T00:00:00.000Z", { engine_run_id: "E1", phase: "unknown", error: "x" });
+    const stop = ev(SWEEP_ENGINE_STOP, "2026-11-06T00:20:00.000Z", { engine_run_id: "E1", error: "stop failed" });
+    const t = Date.parse(probe.at) + SWEEP_STOP_DEADLINE_MS + 1000;
+    expect(sweepStopPastDeadline([probe, stop], "E1", t)).toBe(true);
+    expect(sweepStopPastDeadline([stop], "E1", t)).toBe(false);
+    expect(sweepStopPastDeadline([probe], "E2", t)).toBe(false);
+  });
+
+  test("DW-137: the note is patched `emitting` before the emit, then `emitted`", async () => {
+    const fx = await sweepFixture();
+    fx.triage();
+    const during: unknown[] = [];
+    const inner = fx.deps.uv!;
+    const deps: WorktreeDeps = { ...fx.deps, uv: async (root, script, args, t) => {
+      if (script.endsWith("ledger.py")) during.push(fx.queue.events(fx.id).find((e) => e.kind === SWEEP_TRIAGE)!.detail!.ledger);
+      return inner(root, script, args, t);
+    } };
+    expect(await sweepEngines(fx.queue, deps)).toEqual([]);
+    expect(during).toEqual(["emitting"]);
+    expect(fx.queue.events(fx.id).find((e) => e.kind === SWEEP_TRIAGE)!.detail!.ledger).toBe("emitted");
+  });
+
+  test("DW-144: a failed emit is retried by the ledger pass on the ended run until it lands, then never again; an `emitting` marker too", async () => {
+    const fx = await sweepFixture();
+    fx.triage();
+    fx.answers.emit = { exit: 2, stdout: JSON.stringify({ ok: false, error: "ledger refused" }), stderr: "" };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([]);
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.id]); // ended: no tick of the watch revisits it
+    const emits = () => fx.studio.filter((s) => s.script.endsWith("ledger.py") && s.args.includes(SWEEP_TRIAGE)).length;
+    const ledger = () => fx.queue.events(fx.id).find((e) => e.kind === SWEEP_TRIAGE)!.detail!.ledger;
+    expect(emits()).toBe(1);
+    await ledgerPass(fx.queue, fx.deps);
+    expect(emits()).toBe(2);
+    expect(ledger()).toBe("error: ledger refused");
+    fx.answers.emit = { exit: 0, stdout: JSON.stringify({ ok: true }), stderr: "" };
+    await ledgerPass(fx.queue, fx.deps);
+    expect(emits()).toBe(3);
+    expect(ledger()).toBe("emitted");
+    await ledgerPass(fx.queue, fx.deps);
+    expect(emits()).toBe(3); // never doubled after `emitted`
+    // a crash between the marker and the emit reads `emitting`: retried
+    const note = fx.queue.events(fx.id).find((e) => e.kind === SWEEP_TRIAGE)!;
+    fx.queue.patchEventDetail(note.seq, { ledger: "emitting" });
+    await ledgerPass(fx.queue, fx.deps);
+    expect(emits()).toBe(4);
+    expect(ledger()).toBe("emitted");
+  });
+
+  test("DW-144: the retry is bounded by `PLAN_RETRY_LIMIT` errors", async () => {
+    const fx = await sweepFixture();
+    fx.triage();
+    fx.answers.emit = { exit: 2, stdout: JSON.stringify({ ok: false, error: "ledger refused" }), stderr: "" };
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.id]);
+    for (let i = 0; i < PLAN_RETRY_LIMIT + 5; i++) await ledgerPass(fx.queue, fx.deps);
+    expect(fx.studio.filter((s) => s.script.endsWith("ledger.py") && s.args.includes(SWEEP_TRIAGE))).toHaveLength(PLAN_RETRY_LIMIT);
+    expect(fx.queue.events(fx.id).find((e) => e.kind === SWEEP_TRIAGE)!.detail).toMatchObject({ ledger_errors: PLAN_RETRY_LIMIT });
+  });
+
+  test("DW-144: an `emitting` note whose `emitted` patch keeps failing is re-emitted at most `PLAN_RETRY_LIMIT` times, then never again", async () => {
+    const fx = await sweepFixture();
+    fx.triage();
+    const patch = fx.queue.patchEventDetail.bind(fx.queue);
+    fx.queue.patchEventDetail = (seq, p) => { if (p.ledger === "emitted") throw new Error("database is locked"); patch(seq, p); };
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.id]);
+    const emits = () => fx.studio.filter((s) => s.script.endsWith("ledger.py") && s.args.includes(SWEEP_TRIAGE)).length;
+    const note = () => fx.queue.events(fx.id).find((e) => e.kind === SWEEP_TRIAGE)!;
+    expect(emits()).toBe(1); // the first emit: its marker counts nothing
+    expect(note().detail!.ledger).toBe("emitting");
+    expect(note().detail!.ledger_errors).toBeUndefined();
+    await ledgerPass(fx.queue, fx.deps);
+    expect(emits()).toBe(2);
+    expect(note().detail).toMatchObject({ ledger: "emitting", ledger_errors: 1 }); // the retry counted
+    for (let i = 0; i < PLAN_RETRY_LIMIT + 5; i++) await ledgerPass(fx.queue, fx.deps);
+    expect(emits()).toBe(1 + PLAN_RETRY_LIMIT);
+    expect(note().detail).toMatchObject({ ledger: "emitting", ledger_errors: PLAN_RETRY_LIMIT });
+  });
+
+  test("DW-144: the retry runs under the ledger lease:while another holder has it, no retry emits; the note is re-read under it", async () => {
+    const fx = await sweepFixture();
+    fx.triage();
+    fx.answers.emit = { exit: 2, stdout: JSON.stringify({ ok: false, error: "ledger refused" }), stderr: "" };
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.id]);
+    const emits = () => fx.studio.filter((s) => s.script.endsWith("ledger.py") && s.args.includes(SWEEP_TRIAGE)).length;
+    const note = () => fx.queue.events(fx.id).find((e) => e.kind === SWEEP_TRIAGE)!;
+    expect(emits()).toBe(1);
+    // an overlapping run/recover/drain process holds the lease (a live owner): this pass emits nothing
+    const holder = { ...me, pid: me.pid + 1 };
+    expect(fx.queue.claimPlanPhase(fx.id, LEDGER_LEASE, holder)).toBe(true);
+    fx.answers.emit = { exit: 0, stdout: JSON.stringify({ ok: true }), stderr: "" };
+    await ledgerPass(fx.queue, fx.deps);
+    expect(emits()).toBe(1);
+    expect(note().detail).toMatchObject({ ledger: "error: ledger refused", ledger_errors: 1 });
+    // the holder lets go, but lands the emit between this pass's first read and its lease: re-read under it, not due
+    fx.queue.releasePlanPhase(fx.id, LEDGER_LEASE, holder, true);
+    const claim = fx.queue.claimPlanPhase.bind(fx.queue);
+    fx.queue.claimPlanPhase = (runId, phase, self) => {
+      if (phase === LEDGER_LEASE) fx.queue.patchEventDetail(note().seq, { ledger: "emitted" });
+      return claim(runId, phase, self);
+    };
+    await ledgerPass(fx.queue, fx.deps);
+    fx.queue.claimPlanPhase = claim;
+    expect(emits()).toBe(1);
+    // the lease free and the emit due again: retried once, the lease released settled (never a ledger-resolve try)
+    fx.queue.patchEventDetail(note().seq, { ledger: "emitting" });
+    await ledgerPass(fx.queue, fx.deps);
+    expect(emits()).toBe(2);
+    expect(note().detail!.ledger).toBe("emitted");
+    const lease = fx.queue.events(fx.id).findLast((e) => e.kind === "plan-lease" && e.detail?.phase === LEDGER_LEASE)!;
+    expect(lease.detail).toMatchObject({ owner: null, settled: true });
+  });
+
+  test("DW-136: the priced triage goes into `engine_cost_usd` and the total, a `- triage:` line, the record's `triage_cost_usd`", async () => {
+    const fx = await sweepFixture();
+    fx.triage();
+    fx.landed("a");
+    fx.commit("a.txt", "sweep bundle dw-a");
+    fx.answers.price = { exit: 0, stdout: JSON.stringify({ ok: true, usd_total: 4.75, prices_date: "2026-10-01",
+      bundles: [{ key: "dw-a", usd: 3.75, source: "metered" }, { key: "dw-b", usd: null }], triage: { usd: 1, source: "sessions", bound: "upper" } }), stderr: "" };
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.id]);
+    expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.body).toContain(
+      "## Metered cost\n\n$0.5000 (worker turns) + $4.7500 (engine) = $5.2500\n\n- a: $3.7500 (metered)\n- b: not metered\n- triage: $1.0000 (sessions)\n\n## Sweep");
+    expect(fx.verbs[0]![fx.verbs[0]!.indexOf("--total-cost-usd") + 1]).toBe("5.25");
+    const ended = fx.queue.events(fx.id).findLast((e) => e.kind === "ended")!;
+    expect(ended.detail).toMatchObject({ engine_cost_usd: 4.75, sweep: { engine_cost_usd: 4.75, triage_cost_usd: 1 } });
+    // the record round-trips it (a re-run's body); an unpriced triage reads `not metered`
+    const back = summaryFromRecord(fx.queue.events(fx.id))!;
+    expect(back.triage_cost_usd).toBe(1);
+    const unpriced = withEngineCost(summary([true]), { usd: 2, bundles: [{ key: "dw-a", usd: 2, source: "sessions" }], triage: { usd: null } });
+    expect(sweepRecord(unpriced).triage_cost_usd).toBeNull();
+    expect(sweepCostText(unpriced, 0.5)).toBe("$0.5000 (worker turns) + $2.0000 (engine) = $2.5000\n\n- a: $2.0000 (sessions)\n- triage: not metered");
+    // no `triage` member (an older verb, or no triage session): no line
+    expect(sweepCostText(withEngineCost(summary([true]), { usd: 2, bundles: [{ key: "dw-a", usd: 2, source: "sessions" }] }), 0.5)).not.toContain("triage");
+  });
+
+  test("DW-139: a late-closed sweep's readers by the bare run id answer the full line; `:verify-<n>` stays out", () => {
+    const line = (run_id: string, total_cost_usd: number) => JSON.stringify({ event: "job-run", project: "proj", payload: { job_id: "run-sweep", run_id, state: "complete", total_cost_usd } });
+    const text = [line("s-2", 0.5), line("s-2:engine", 3.75), line("s-2:verify-1", 0.25)].join("\n");
+    const costs = jobRunCosts(text);
+    expect(costs.get("s-2")!.cost).toBe(4.25);
+    expect(costs.get("s-2:verify-1")!.cost).toBe(0.25);
+    expect([...costs.values()].reduce((sum, c) => sum + c.cost, 0)).toBe(4.5);
+    const file = join(tempDir("tk-sup-sweep-ledger-"), "l.jsonl");
+    writeFileSync(file, text);
+    expect(runCost(file, "s-2")).toBe(4.25);
   });
 });

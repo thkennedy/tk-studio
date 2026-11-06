@@ -15,11 +15,19 @@
  *              `emitTriage`, right after it, puts the ledger's `sweep-triage` event in the host's ledger once per engine
  *              run (`ledger.py emit`, the lib's payload `{run_id, bundles: <count>, dw_ids, blocked, decisions,
  *              already_resolved, skip}`, a projection of the note), the note gaining `ledger: "emitted" | "error: …"`.
+ *              Story 37.5 (DW-137, DW-144): the note is patched `ledger: "emitting"` before the emit, then `emitted` or
+ *              `error: …` (`ledger_errors` counting the failures); a crash between the marker and the emit reads
+ *              `emitting` and is retried (one possible duplicate line, never a lost one). `ledgerPass` retries an
+ *              `emitting` or `error` note on a terminal sweep run each tick until it lands, bounded by `PLAN_RETRY_LIMIT`
+ *              errors; never again after `emitted`.
  *   cost       Story 36.2 (hole 102, DW-131): `engineCostOf` calls `meter.py price-run` before the worktree goes;
  *              `withEngineCost` puts each bundle's `cost_usd`/`source` and `engine_cost_usd` on the summary, so the record
  *              and a re-run's body carry them. `## Metered cost` (`sweepCostText`): `$<worker> (worker turns) + $<engine>
  *              (engine) = $<total>`, one `- <bundle>: $<usd> (<source>)` line per bundle (`- <bundle>: not metered`). A verb
  *              that fails never blocks the close-out: the worker's cost stands and the body says the engine is not priced.
+ *              Story 37.5 (DW-136): the verb's `triage` member (the engine's own `sweep-triage` sessions) is the record's
+ *              `triage_cost_usd` (null: `not metered`) and a `- triage: $<usd> (sessions)` line; `engine_cost_usd` (the
+ *              verb's `usd_total`) includes it, so every total the close-out takes does.
  *   cycles     under `[sweep] repeat = true` the engine re-triages per cycle into `triage-<N>.json` (N ≥ 2): the summary
  *              reads `triage.json` then `triage-2.json`, … to the first missing; each bundle carries its cycle and key
  *              (`dw-<name>` for cycle 1, `dw<N>-<name>` for N), and blocked, decisions, already_resolved and skip are
@@ -40,7 +48,16 @@
  *              never relaunched through `closeOutPaused`. Story 36.3 (DW-121): the retry is bounded, `SWEEP_STOP_DEADLINE_MS`
  *              from the first such note, then one notifier line and an explicit `blocked` end; the stopped tree's WIP is
  *              committed (`wipCommit`), the host leg skipped and the PR a draft, a WIP sweep with every bundle landed
- *              ending `partial`. Story 36.2 (DW-118): after the `blocked` rules and the host
+ *              ending `partial`. Story 37.5 (B5): a status probe answering `unknown` notes once per engine run `engine-probe
+ *              {engine_run_id, phase: "unknown", error}` (its own kind, never standing in for an `engine-stop` note, which
+ *              `engineEndStatus` reads as the supervisor's own stop; on that path an `engine-stop {stopped: true}` note is
+ *              written once, only for a stop that answered `stopped`, so the next tick's `stopped` end is the supervisor's own
+ *              stop: its WIP committed, its end not penalised; a later tick whose probe still answers `unknown` ends the run
+ *              `blocked`, with no second stop: asked once more, then the `blocked` end), and the deadline's clock starts at the
+ *              earlier of that note and the first `engine-stop` error note; a `running` probe never resets it; whenever no stop
+ *              was left unanswered (no `engine-stop` note carrying `error`: never paused nor asked to stop, the probe path's
+ *              unanswered stop writing none and ending the run on that tick, or a stop that answered `stopped`) the
+ *              line names the probe ("the status probe answered `unknown` for 30 min"). Story 36.2 (DW-118): after the `blocked` rules and the host
  *              leg's verdict, an engine that ended other than `finished` caps the end at `partial` (`engine ended
  *              '<status>' after <n>/<m> bundles`), even with every bundle landed; that paused-sweep stop is not
  *              penalised, on the tick of the stop or a later one (`engineEndStatus`: a `stopped` status with an `engine-stop` note
@@ -58,7 +75,17 @@
  *              `waiting: true` record while it lasts, the lease released settled so it is never counted, no give-up;
  *              only errors count to `PLAN_RETRY_LIMIT`. The record holds the owner ledger's `fingerprint` (size and mtime,
  *              `pending` being read from that file alone); while it is unchanged the pass skips the run before `gh` and the
- *              lease. The supervisor commits nothing: the rewrite lands at the owner
+ *              lease. Story 37.5 (B4): the wait is bounded, `SWEEP_LEDGER_WAIT_MS` from the waiting record's `at` (a changed
+ *              `pending` set is a new record and a new clock), checked before that skip: past it one record `{…, waiting:
+ *              false, settled: true, ended: "wait", pending}` and one notifier line through the `notify` callback
+ *              `planstatus.mergePass` injects (the record's `notify` outcome), never again; a missing id stays `pending`.
+ *              The settled run is never flipped again on its own, so the line carries the manual remedy (`uv run
+ *              plugins/tk-studio/lib/plansync.py ledger-resolve --directory <root> --pr <pr> --ids <pending>`). Story 37.5
+ *              (DW-144): a terminal sweep's unlanded triage emit is retried first, under the same lease (the note re-read
+ *              under it, the lease released settled), so two overlapping passes never both emit; an `emitting` note's
+ *              retry counts into `ledger_errors` (its marker `{ledger: "emitting", ledger_errors: n + 1}` patched
+ *              before the emit) under the same `PLAN_RETRY_LIMIT` bound as a failed emit.
+ *              The supervisor commits nothing: the rewrite lands at the owner
  *              root as the Stage Log rows do.
  *   re-run     Story 36.2 (DW-123): `summaryFromRecord` rebuilds the summary from the run's `ended` (else raced
  *              `closed_out`) `sweep` record: the worktree is gone by then. The record's merged `blocked`, `decisions` and `skip`
@@ -84,6 +111,10 @@ export const SWEEP_TRIAGE = "sweep-triage";
 export const SWEEP_ENGINE_STOP = "engine-stop";
 /** Story 36.3 (DW-121): how long a paused sweep's stop may go unanswered before the run ends `blocked`. */
 export const SWEEP_STOP_DEADLINE_MS = 30 * 60_000;
+/** Story 37.5 (B5): a sweep's first `unknown` status probe, noted once per engine run (starts the deadline's clock). */
+export const SWEEP_ENGINE_PROBE = "engine-probe";
+/** Story 37.5 (B4): how long a merged sweep's ledger pass waits on an unchanged `pending` set before it ends the wait. */
+export const SWEEP_LEDGER_WAIT_MS = 60 * 60_000;
 /** The plan lease phase the ledger pass holds while it calls. */
 export const LEDGER_LEASE = "ledger";
 /** One ledger pass attempt's event. */
@@ -203,22 +234,37 @@ export async function ledgerEmit(
   } catch (e) { return clip(message(e)); }
 }
 
-/** Story 36.2 (DW-116): the note's ledger event, once per engine run (see the header): a note already carrying `ledger`
- * is never emitted again, a failed emit is noted, never thrown. Answers what it did. Never throws. */
+/** Story 37.5: may this note's emit be retried (`emitting` or `error`, under `PLAN_RETRY_LIMIT` counted attempts:
+ * a failed emit, or an `emitting` retry, each counts into `ledger_errors`)? */
+export const triageEmitDue = (detail: Record<string, unknown> | null | undefined): boolean => {
+  const ledger = detail?.ledger;
+  return typeof ledger === "string" && (ledger === "emitting" || ledger.startsWith("error")) && (Number(detail?.ledger_errors) || 0) < PLAN_RETRY_LIMIT;
+};
+
+/** Story 36.2 (DW-116): the note's ledger event, once per engine run (see the header). Story 37.5 (DW-137, DW-144): the
+ * note patched `emitting` before the emit, then `emitted` or `error: …`; a note already carrying `ledger` is `seen`
+ * unless `retry` (the ledger pass on a terminal run) and `triageEmitDue`; the retry of a note already `emitting` counts its
+ * attempt in the marker (`ledger_errors + 1`), so a lost `emitted` patch re-emits at most `PLAN_RETRY_LIMIT` times.
+ * Answers what it did. Never throws. */
 export async function emitTriage(
-  queue: Queue, run: Pick<QueueRun, "run_id" | "engine_run_id" | "project_id" | "root">, deps: WorktreeDeps = {},
+  queue: Queue, run: Pick<QueueRun, "run_id" | "engine_run_id" | "project_id" | "root">, deps: WorktreeDeps = {}, opts: { retry?: boolean } = {},
 ): Promise<"emitted" | "error" | "seen" | "absent"> {
   try {
     const note = triageNote(queue.events(run.run_id), run.engine_run_id);
     if (!note || typeof note.detail?.error === "string") return "absent";
-    if (note.detail?.ledger !== undefined) return "seen";
+    if (note.detail?.ledger !== undefined && !(opts.retry && triageEmitDue(note.detail))) return "seen";
     const t = parseTriage(note.detail);
     if (!t) return "absent";
+    let errors = Number(note.detail?.ledger_errors) || 0;
+    // a retry of a note already `emitting` (its `emitted` patch lost, or a crash after the marker) counts its attempt
+    if (note.detail?.ledger === "emitting") errors += 1;
+    queue.patchEventDetail(note.seq, { ledger: "emitting", ...(note.detail?.ledger === "emitting" ? { ledger_errors: errors } : {}) }); // a throw here: nothing emitted, `absent`
     const failure = await ledgerEmit(deps, run, SWEEP_TRIAGE, {
       run_id: run.engine_run_id, bundles: t.bundles.length, dw_ids: t.bundles.flatMap((b) => b.dw_ids), blocked: t.blocked.map((b) => b.id),
       decisions: t.decisions.map((d) => d.id), already_resolved: t.already_resolved, skip: t.skip,
     });
-    queue.patchEventDetail(note.seq, { ledger: failure === undefined ? "emitted" : `error: ${failure}` });
+    try { queue.patchEventDetail(note.seq, failure === undefined ? { ledger: "emitted" } : { ledger: `error: ${failure}`, ledger_errors: errors + 1 }); }
+    catch { /* left `emitting`: the ledger pass retries it once the run ends */ }
     return failure === undefined ? "emitted" : "error";
   } catch { return "absent"; }
 }
@@ -230,8 +276,12 @@ export type BundleOutcome = {
 };
 /** A sweep's close-out view: the triage (undefined: none was ever written; every cycle's, merged) and each bundle's
  * outcome. `nothing_open`: no triage because the engine journaled `sweep-nothing-open`. Story 36.2: `engine_cost_usd`
- * the priced bundles' sum; `engine_cost_error` why the engine could not be priced. */
-export type SweepSummary = { triage?: Triage; bundles: BundleOutcome[]; triage_error?: string; nothing_open?: boolean; engine_cost_usd?: number; engine_cost_error?: string };
+ * the priced bundles' sum (Story 37.5: and the priced triage); `engine_cost_error` why the engine could not be priced. */
+export type SweepSummary = {
+  triage?: Triage; bundles: BundleOutcome[]; triage_error?: string; nothing_open?: boolean; engine_cost_usd?: number; engine_cost_error?: string;
+  /** Story 37.5 (DW-136): the engine's own triage sessions priced (null: `not metered`; unset: the run has none, or never priced). */
+  triage_cost_usd?: number | null;
+};
 
 /** The engine's task key of a cycle's bundle (`sweep.py _bundle_key`). */
 export const bundleKey = (name: string, cycle: number) => (cycle === 1 ? `dw-${name}` : `dw${cycle}-${name}`);
@@ -398,6 +448,7 @@ export function sweepRecord(s: SweepSummary): Record<string, unknown> {
     already_resolved: s.triage?.already_resolved ?? [],
     ...(s.triage ? { blocked: s.triage.blocked, decisions: s.triage.decisions, skip: s.triage.skip } : {}),
     ...(s.engine_cost_usd !== undefined ? { engine_cost_usd: s.engine_cost_usd } : {}),
+    ...(s.triage_cost_usd !== undefined ? { triage_cost_usd: s.triage_cost_usd } : {}),
     ...(s.engine_cost_error ? { engine_cost_error: s.engine_cost_error } : {}),
   };
 }
@@ -418,6 +469,7 @@ export function summaryFromRecord(events: readonly QueueEvent[]): SweepSummary |
   });
   const cost = {
     ...(finite(rec.engine_cost_usd) ? { engine_cost_usd: rec.engine_cost_usd } : {}),
+    ...(finite(rec.triage_cost_usd) || rec.triage_cost_usd === null ? { triage_cost_usd: rec.triage_cost_usd as number | null } : {}),
     ...(typeof rec.engine_cost_error === "string" ? { engine_cost_error: rec.engine_cost_error } : {}),
   };
   const note = events.findLast((e) => e.kind === SWEEP_TRIAGE);
@@ -439,7 +491,11 @@ export function summaryFromRecord(events: readonly QueueEvent[]): SweepSummary |
 // ------------------------------------------------------------ the engine's cost
 
 /** `meter.py price-run`'s answer: each bundle key's priced figure and the run's total, or why there is none. */
-export type EngineCost = { bundles: { key: string; usd: number | null; source?: string }[]; usd?: number; error?: string };
+export type EngineCost = {
+  bundles: { key: string; usd: number | null; source?: string }[]; usd?: number; error?: string;
+  /** Story 37.5 (DW-136): the verb's `triage` member (the engine's own triage sessions), when the run has one. */
+  triage?: { usd: number | null; source?: string };
+};
 
 /** Story 36.2: the engine run priced per bundle (`meter.py price-run`, the lib's one table), read from the host while the
  * run dir is there. A failure is the answer's `error`: it never blocks the close-out. Never throws. */
@@ -455,7 +511,9 @@ export async function engineCostOf(run: Pick<QueueRun, "worktree" | "prefix" | "
     const o = lastJsonObject(r.stdout) as Record<string, unknown> | null;
     if (r.exit !== 0 || o?.ok !== true) return { bundles: [], error: clip(String(o?.error ?? `meter.py price-run exit ${r.exit}: ${r.stderr || r.stdout}`)) };
     const bundles = objects(o.bundles).map((b) => ({ key: str(b.key), usd: finite(b.usd) ? b.usd : null, ...(typeof b.source === "string" ? { source: b.source } : {}) }));
-    return { bundles, ...(finite(o.usd_total) ? { usd: o.usd_total } : {}) };
+    const t = o.triage && typeof o.triage === "object" && !Array.isArray(o.triage) ? o.triage as Record<string, unknown> : undefined;
+    const triage = t ? { usd: finite(t.usd) ? t.usd : null, ...(typeof t.source === "string" ? { source: t.source } : {}) } : undefined;
+    return { bundles, ...(finite(o.usd_total) ? { usd: o.usd_total } : {}), ...(triage ? { triage } : {}) };
   } catch (e) { return { bundles: [], error: `meter.py price-run: ${clip(message(e))}` }; }
 }
 
@@ -465,6 +523,7 @@ export function withEngineCost(s: SweepSummary, cost: EngineCost): SweepSummary 
   const byKey = new Map(cost.bundles.map((b) => [b.key, b]));
   return {
     ...s, ...(cost.usd !== undefined ? { engine_cost_usd: cost.usd } : {}),
+    ...(cost.triage ? { triage_cost_usd: cost.triage.usd } : {}),
     bundles: s.bundles.map((b) => {
       const c = byKey.get(b.key);
       return { ...b, cost_usd: c?.usd ?? null, ...(c?.source ? { source: c.source } : {}) };
@@ -501,6 +560,8 @@ export function sweepCostText(s: SweepSummary, workerUsd: number | undefined): s
     const name = `${b.name}${b.cycle > 1 ? ` (cycle ${b.cycle})` : ""}`;
     return typeof b.cost_usd === "number" ? `- ${name}: ${usd(b.cost_usd)} (${b.source ?? "unknown"})` : `- ${name}: not metered`;
   });
+  // Story 37.5 (DW-136): the engine's own triage, priced into the engine's figure above.
+  if (s.triage_cost_usd !== undefined) lines.push(typeof s.triage_cost_usd === "number" ? `- triage: ${usd(s.triage_cost_usd)} (sessions)` : "- triage: not metered");
   return [head, ...(lines.length ? ["", ...lines] : [])].join("\n");
 }
 
@@ -510,10 +571,20 @@ export const stopSweepEngine = (run: Pick<QueueRun, "worktree" | "prefix" | "eng
 
 /** Story 36.3 (DW-121): is this engine's unanswered stop past `SWEEP_STOP_DEADLINE_MS`? The clock starts at the first
  * `engine-stop` note carrying `error` (a `{stopped: true}` note is a stop that succeeded; no new event, so a supervisor
- * restart keeps it). */
+ * restart keeps it). Story 37.5 (B5): or at this engine run's `engine-probe` note (its first `unknown` probe), whichever
+ * is earlier. */
 export function sweepStopPastDeadline(events: readonly QueueEvent[], engineRunId: string | null | undefined, now: number): boolean {
-  const first = events.find((e) => e.kind === SWEEP_ENGINE_STOP && e.detail?.engine_run_id === engineRunId && e.detail?.error !== undefined);
+  const first = events.find((e) => ((e.kind === SWEEP_ENGINE_STOP && e.detail?.error !== undefined) || e.kind === SWEEP_ENGINE_PROBE) && e.detail?.engine_run_id === engineRunId);
   return !!first && now - Date.parse(first.at) > SWEEP_STOP_DEADLINE_MS;
+}
+
+/** Story 37.5 (B5): a sweep's `unknown` status probe noted once per engine run (`engine-probe`), its own kind that never
+ * stands in for an `engine-stop` note. Never throws. */
+export function noteEngineProbe(queue: Queue, run: Pick<QueueRun, "run_id" | "engine_run_id">, error: unknown): void {
+  try {
+    if (queue.events(run.run_id).some((e) => e.kind === SWEEP_ENGINE_PROBE && e.detail?.engine_run_id === run.engine_run_id)) return;
+    queue.note(run.run_id, SWEEP_ENGINE_PROBE, { engine_run_id: run.engine_run_id, phase: "unknown", error: typeof error === "string" ? error : "unknown" });
+  } catch { /* a busy queue: noted on the next unknown probe */ }
 }
 
 // ------------------------------------------------------------ the ledger pass
@@ -539,22 +610,74 @@ export function ledgerFingerprint(directory: string): string {
 
 const ledgerSettled = (events: readonly QueueEvent[]) => events.some((e) => e.kind === LEDGER_RESOLVE && e.detail?.settled === true);
 
-/** The ledger pass (see the header). Answers the runs it recorded on. Never throws. */
-export async function ledgerPass(queue: Queue, deps: PlanStatusDeps = {}): Promise<string[]> {
+/** Story 37.5 (B4): one line through the notifier, its outcome for the record (`planstatus.mergePass` injects it). */
+export type LedgerNotify = (text: string) => Promise<Record<string, unknown>>;
+
+/** Story 37.5 (B4): the bounded wait's end (see the header): one `ended: "wait"` record under the lease, then one
+ * notifier line, its outcome patched on the record. Never throws. */
+async function endLedgerWait(queue: Queue, run: QueueRun, last: QueueEvent, deps: PlanStatusDeps, notify: LedgerNotify | undefined): Promise<boolean> {
+  const self = deps.self ?? selfOwner();
+  if (!queue.claimPlanPhase(run.run_id, LEDGER_LEASE, self)) return false;
+  let settle = false;
+  try {
+    if (ledgerSettled(queue.events(run.run_id))) { settle = true; return false; }
+    const pending = Array.isArray(last.detail?.pending) ? last.detail!.pending as unknown[] : [];
+    queue.note(run.run_id, LEDGER_RESOLVE, { ...last.detail, waiting: false, settled: true, ended: "wait", pending });
+    settle = true;
+    const rec = queue.events(run.run_id).findLast((e) => e.kind === LEDGER_RESOLVE && e.detail?.ended === "wait");
+    // the run is settled: nothing flips these automatically again, so the line carries the manual remedy
+    const remedy = `uv run plugins/tk-studio/lib/plansync.py ledger-resolve --directory "${run.root}" --pr ${String(last.detail?.pr ?? "<pr>")} --ids ${pending.map(String).join(",")}`;
+    const line = `sweep ${run.run_id}: the ledger pass stopped waiting after ${SWEEP_LEDGER_WAIT_MS / 60_000} min on ${pending.length} id(s) the owner ledger never flipped: ${pending.map(String).join(", ")}; once the owner checkout has pulled, flip them by hand: ${remedy}`;
+    let outcome: Record<string, unknown>;
+    try { outcome = notify ? await notify(line) : { ok: false, skipped: "no notifier injected" }; }
+    catch (e) { outcome = { ok: false, error: clip(message(e)) }; }
+    if (rec) { try { queue.patchEventDetail(rec.seq, { notify: outcome }); } catch { /* the record stands */ } }
+    return true;
+  } finally {
+    try { queue.releasePlanPhase(run.run_id, LEDGER_LEASE, self, settle); } catch { /* a dead owner's lease is re-taken */ }
+  }
+}
+
+/** Story 37.5 (DW-144): the terminal sweep's triage emit retried under the ledger lease (two overlapping passes never
+ * both emit), the note re-read after the lease is taken; the lease released `settled` (never a ledger-resolve try).
+ * Answers whether it emitted or failed. Never throws. */
+async function retryTriageEmit(queue: Queue, run: QueueRun, deps: PlanStatusDeps): Promise<boolean> {
+  const self = deps.self ?? selfOwner();
+  try { if (!queue.claimPlanPhase(run.run_id, LEDGER_LEASE, self)) return false; } catch { return false; }
+  try {
+    if (!triageEmitDue(triageNote(queue.events(run.run_id), run.engine_run_id)?.detail)) return false;
+    const r = await emitTriage(queue, run, deps, { retry: true });
+    return r === "emitted" || r === "error";
+  } finally {
+    try { queue.releasePlanPhase(run.run_id, LEDGER_LEASE, self, true); } catch { /* a dead owner's lease is re-taken */ }
+  }
+}
+
+/** The ledger pass (see the header). Story 37.5: `notify` (injected by `planstatus.mergePass`) tells a wait's end; a
+ * terminal sweep's unlanded triage emit is retried first (DW-144). Answers the runs it recorded on. Never throws. */
+export async function ledgerPass(queue: Queue, deps: PlanStatusDeps = {}, notify?: LedgerNotify): Promise<string[]> {
   const out: string[] = [];
   let runs: QueueRun[];
   try { runs = queue.runs().filter((r) => isTerminal(r.state) && r.worktree); } catch { return out; }
   for (const run of runs) {
     try {
       if (!isSweep(queue.definition(run))) continue;
+      // Story 37.5 (DW-137, DW-144): a triage emit that never landed (`emitting`, or `error` under the bound), retried
+      // each tick on the ended run (no other tick revisits it), whatever the ledger-resolve stage, under the lease.
+      if (triageEmitDue(triageNote(queue.events(run.run_id), run.engine_run_id)?.detail)) await retryTriageEmit(queue, run, deps);
       const events = queue.events(run.run_id);
       if (ledgerSettled(events)) continue;
       const ids = ledgerIds(events);
       const pr = runPr(events);
       if (!ids || !pr) continue;
       // Still waiting on an owner ledger that has not changed: no `gh`, no lease, no call (the stage pass's shape).
-      const lastResolve = events.findLast((e) => e.kind === LEDGER_RESOLVE)?.detail;
-      if (lastResolve?.waiting === true && lastResolve.fingerprint === ledgerFingerprint(run.root)) continue;
+      // Story 37.5 (B4): checked first, the wait's bound from the waiting record's `at` (the first of this `pending` set).
+      const lastEvent = events.findLast((e) => e.kind === LEDGER_RESOLVE);
+      const lastResolve = lastEvent?.detail;
+      if (lastResolve?.waiting === true && lastResolve.fingerprint === ledgerFingerprint(run.root)) {
+        if ((deps.now ?? Date.now)() - Date.parse(lastEvent!.at) > SWEEP_LEDGER_WAIT_MS && await endLedgerWait(queue, run, lastEvent!, deps, notify)) out.push(run.run_id);
+        continue;
+      }
       let view: Record<string, unknown> | null = null;
       try {
         const r = await gh(deps, run.root, ["pr", "view", pr, "--json", "state,mergedAt"]);

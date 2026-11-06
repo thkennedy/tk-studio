@@ -1322,6 +1322,23 @@ describe("Story 33.8: POST /runs/{id}/verify — an ended run's host leg re-run 
     expect((await fx.call("POST", "/runs/q-1/verify", { auth: null })).status).toBe(401);
   });
 
+  test("Story 37.5 (B3): `{ready: true}` reaches the re-run as `ready`, `{ready: false}` as none; a `ready` not a boolean or another key beside it is 400 SchemaError", async () => {
+    const seen: [string, unknown][] = [];
+    const fx = fixture({ verify: async (id, opts) => { seen.push([id, opts]); return started(id); } });
+    for (const body of [JSON.stringify({ ready: true }), JSON.stringify({ ready: false })]) {
+      const r = await fx.call("POST", "/runs/q-1/verify", { body });
+      expect(r.status).toBe(202);
+      expect(await r.json()).toEqual({ ok: true, run_id: "q-1", state: "partial", verify: "started", head: "abc123" });
+    }
+    expect(seen).toEqual([["q-1", { ready: true }], ["q-1", undefined]]);
+    for (const body of [JSON.stringify({ ready: "x" }), JSON.stringify({ ready: 1 }), JSON.stringify({ ready: null }), JSON.stringify({ ready: true, x: 1 })]) {
+      const r = await fx.call("POST", "/runs/q-1/verify", { body });
+      expect(r.status).toBe(400);
+      expect(await r.json()).toMatchObject({ ok: false, error: "SchemaError" });
+    }
+    expect(seen).toHaveLength(2);
+  });
+
   test("the refusals by name: 404 RunNotFound, 409 ExternalRun | RunNotEnded | NoBranch | VerifyRunning, 500 VerifyFailed; the detail redacted", async () => {
     for (const [code, status] of [["RunNotFound", 404], ["ExternalRun", 409], ["RunNotEnded", 409], ["NoBranch", 409], ["VerifyRunning", 409], ["VerifyFailed", 500], ["SchemaError", 400]] as const) {
       const fx = fixture({ verify: async () => { throw new VerifyRefused(code, `why, near ${TOKEN}`); } });

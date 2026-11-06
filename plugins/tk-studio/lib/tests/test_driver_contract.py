@@ -3307,6 +3307,68 @@ class DriverContractTestCase(unittest.TestCase):
                        if line.startswith("| Story / rulings"))
         self.assertRegex(stories, r"Story 37\.1, Story 37\.2, Story 37\.3, Story 37\.4(, Story 37\.\d+)* \(Epic 37\)")
 
+    def test_0_1_32_story_37_5_the_sweeps_bugs_and_cost_lines(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.33**", header)
+        self.assertEqual(header.count("0.1.32 (Story 37.5, additive)"), 1)
+        self.assertLess(header.index("0.1.32 (Story 37.4, additive)"),
+                        header.index("0.1.32 (Story 37.5, additive)"))
+        self.assertLess(header.index("0.1.32 (Story 37.5, additive)"),
+                        header.index("0.1.33 (DW-170, additive)"))
+        clause = " ".join(header[header.index("0.1.32 (Story 37.5, additive)"):header.index("0.1.33 (DW-170, additive)")].split())
+        for phrase in ("the sweep's bugs and cost lines before a fourth sweep", "`rerun.pr_ready: \"held: …\"`",
+                       "`{ready?: boolean}`", "`rerun.ready_override`", "`SWEEP_LEDGER_WAIT_MS`", "`ended: \"wait\"`",
+                       "`engine-probe`", "`triage_cost_usd`", "`ledger: \"emitting\"`", "the judge's `n` derived after its note",
+                       "`:engine`", "— additive;"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        self.assertIn("the body empty or `{}`; 0.1.32, Story 37.5: or `{ready?: boolean}`", flat)
+        self.assertEqual(flat.count("**0.1.32 (Story 37.5, additive).**"), 1)
+        self.assertLess(flat.index("**0.1.32 (Story 37.4, additive).**"), flat.index("**0.1.32 (Story 37.5, additive).**"))
+        self.assertLess(flat.index("**0.1.32 (Story 37.5, additive).**"), flat.index("**0.1.33 (DW-170, hole 111, additive).**"))
+        note = flat[flat.index("**0.1.32 (Story 37.5, additive).**"):flat.index("**0.1.33 (DW-170, hole 111, additive).**")]
+        for phrase in ("B3, B4 and B5", "DW-136, DW-137, DW-138, DW-139, DW-144",
+                       "**The ready flip (B3):**", "`held: <bundle>[, <bundle>…] not landed`", "`held: no triage recorded`",
+                       "a `wip:` commit", "`{}` or `{ready?: boolean}`", "`400 SchemaError`", "`rerun.ready_override: true`",
+                       "**The ledger wait's bound (B4):**", "`SWEEP_LEDGER_WAIT_MS` (60 min)",
+                       "checked before the unchanged-fingerprint skip",
+                       "`ledger-resolve {…, waiting: false, settled: true, ended: \"wait\", pending}`",
+                       "one notifier line", "`notify` callback `planstatus.mergePass` injects",
+                       "A missing id stays `pending` (no `missing[]`)",
+                       "the line carries the manual remedy, `uv run plugins/tk-studio/lib/plansync.py ledger-resolve "
+                       "--directory <root> --pr <pr> --ids <pending>`",
+                       "the status probe answered `unknown` for 30 min", "never a stop left unanswered",
+                       "**The stop deadline's clock (B5):**", "`engine-probe {engine_run_id, phase: \"unknown\", error}`",
+                       "never stands in for an `engine-stop` note",
+                       "only for a stop that answered `stopped`", "the earlier of that note and the first `engine-stop` note carrying `error`",
+                       "a `running` probe never resets it",
+                       "a later tick whose probe still answers `unknown` ends the run `blocked`, with no second stop "
+                       "(asked once more, then the `blocked` end)",
+                       "Whenever no stop was left unanswered (no `engine-stop` note carrying `error`",
+                       "the deadline's line names the probe",
+                       "**The priced triage (DW-136):**", "`triage {usd, source: \"sessions\", bound: \"upper\"}`",
+                       "(never a bundle)", "`usd_total` includes it", "`total_cost_usd`", "`triage {usd: null}`, never a refusal",
+                       "or a model the price table lacks", "never a partial sum",
+                       "`triage_cost_usd?`", "`- triage: $<usd> (sessions)`",
+                       "This supersedes by statement the 0.1.31 Story 36.2 sentence that the engine's own `sweep-triage` session is not priced",
+                       "**The ordered, retried emit (DW-137, DW-144):**", "`ledger: \"emitting\"` before `ledger.py emit`",
+                       "one possible duplicate line, never a lost one", "bounded by `PLAN_RETRY_LIMIT` errors",
+                       "never again after `emitted`",
+                       "the retry of a note already `emitting` counts into `ledger_errors` under the same bound",
+                       "under its `plan-lease {phase: \"ledger\"}` with the note re-read once the lease is taken",
+                       "so overlapping passes never both emit",
+                       "**The judge's `n` (DW-138):**", "noted first", "a note that fails emits no line, so no `n` is reused",
+                       "**The bare-id readers (DW-139):**", "plus its `<run_id>:engine` line", "`:verify-<n>` lines stay their own",
+                       "folds the `:engine` line into the bare id's entry and keeps no `<run_id>:engine` entry",
+                       "**The serve process:**", "stays the operator's", "Every other field, kind and route is unchanged."):
+            self.assertIn(phrase, note)
+        # 36.2's pinned sentence stays, superseded by statement
+        self.assertIn("engine's own `sweep-triage` session is not priced", flat)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertRegex(stories, r"Story 37\.4, Story 37\.5(, Story 37\.\d+)* \(Epic 37\)")
+
     def test_0_1_33_dw_170_the_sandbox_tier_signs_itself_in_again(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))

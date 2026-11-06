@@ -101,7 +101,10 @@
  * Story 35.7 — the ledger pass (`ledgerPass`, `sweep.ts`, after the stage pass in every merge pass): a merged `run-sweep`
  * run's landed bundles and already-resolved entries are flipped to `resolved … by #N` through `plansync.py
  * ledger-resolve` under its `plan-lease {phase: "ledger"}` (one `ledger-resolve` event per attempt, `pending` retried,
- * bounded by `PLAN_RETRY_LIMIT`). A sweep's review pass finding no `N.M` spec is expected.
+ * bounded by `PLAN_RETRY_LIMIT`). A sweep's review pass finding no `N.M` spec is expected. Story 37.5 (B4): the pass's
+ * wait on `pending` ends after `SWEEP_LEDGER_WAIT_MS` with one `ended: "wait"` record and one notifier line, sent through
+ * the `notify` callback this pass injects (`sweep.ts` imports neither `hygiene` nor `worktree`); and a terminal sweep's
+ * unlanded triage emit is retried there (DW-144).
  */
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
@@ -511,6 +514,14 @@ export async function launchedPass(queue: Queue, deps: PlanStatusDeps, journal: 
   return out;
 }
 
+/** Story 37.5 (B4): one line through the notifier for the ledger pass, its outcome for the record. Never throws. */
+async function ledgerNotify(deps: PlanStatusDeps, text: string): Promise<Record<string, unknown>> {
+  try {
+    const selected = notifier(deps.hygiene?.env ?? deps.env ?? process.env);
+    return selected.kind === "none" ? { ok: false, skipped: "no notifier configured (TK_SUPERVISOR_NOTIFY is unset)" } : await sendText(selected, text, deps.hygiene?.fetch ?? fetch);
+  } catch (e) { return { ok: false, error: clip(message(e)) }; }
+}
+
 /** The merge pass (see the header). Answers the runs it recorded. Never throws. */
 export async function mergePass(queue: Queue, deps: PlanStatusDeps = {}): Promise<string[]> {
   const out: string[] = [];
@@ -520,7 +531,8 @@ export async function mergePass(queue: Queue, deps: PlanStatusDeps = {}): Promis
   finally {
     try { await stagePass(queue, deps, merged); } catch { /* the next tick tries again */ }
     // Story 35.7: a merged sweep's ledger entries flipped to `resolved … by #N` (`sweep.ts`).
-    try { await ledgerPass(queue, deps); } catch { /* the next tick tries again */ }
+    // Story 37.5 (B4): the notifier reaches it as a callback (`sweep.ts` never imports `hygiene`: the cycle rule).
+    try { await ledgerPass(queue, deps, (text) => ledgerNotify(deps, text)); } catch { /* the next tick tries again */ }
   }
 }
 

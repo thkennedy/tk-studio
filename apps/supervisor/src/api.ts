@@ -22,10 +22,12 @@
  *                            resumed (`resumeRun`: `bmad-loop resolve … --resume`); 200 {ok, run_id, state, engine_run_id},
  *                            400 SchemaError | MalformedJson, 404 RunNotFound, 409 RunNotPaused | ExternalRun | StoryLanded,
  *                            500 ResumeFailed
- *   POST /runs/{id}/verify   {} (Story 33.8, `hostleg.ts`, bearer only): an ended run's host leg re-run — a fresh worktree
+ *   POST /runs/{id}/verify   {} or {ready?: boolean} (Story 33.8, `hostleg.ts`, bearer only; Story 37.5: `ready: true` marks a
+ *                            sweep's draft ready on green whatever its record says): an ended run's host leg re-run — a fresh worktree
  *                            cut on its run branch at the pushed tip, `verify.host` run there as the close-out does (Story
  *                            35.1: a whole leg — a slice run's placed art and proof committed and pushed, an open PR's body
- *                            regenerated with the latest leg and its `Legs:` history, a draft marked ready on green, a
+ *                            regenerated with the latest leg and its `Legs:` history, a draft marked ready on green (Story
+ *                            37.5: a sweep's held while its record names a bundle unfinished, `rerun.pr_ready: "held: …"`), a
  *                            ready PR back to a draft on red), a new `host-verify` event (`rerun`), the worktree removed;
  *                            the run's state unchanged. 202 {ok, run_id, state, verify: "started", head}, 400 SchemaError |
  *                            MalformedJson, 404 RunNotFound, 409 ExternalRun | RunNotEnded | NoBranch | VerifyRunning,
@@ -180,8 +182,9 @@ export interface ApiDeps {
   cancel?: (runId: string) => Promise<QueueRun>;
   /** Story 27.3: the resume (default: `resumeRun` on this queue). */
   resume?: (runId: string, body: ResumeBody) => Promise<ResumeAnswer>;
-  /** Story 33.8: the host-leg re-run (default: `rerunHostLeg` on this queue, `by: "api"`); its `done` is not awaited. */
-  verify?: (runId: string) => Promise<HostLegStarted>;
+  /** Story 33.8: the host-leg re-run (default: `rerunHostLeg` on this queue, `by: "api"`); its `done` is not awaited.
+   * Story 37.5: `opts.ready` is the body's `ready: true`. */
+  verify?: (runId: string, opts?: { ready?: boolean }) => Promise<HostLegStarted>;
   /** SSE: how often new events are polled for (ms, default 1000). */
   pollMs?: number;
   /** SSE: a keepalive comment after this long without an event (ms, default 15000). */
@@ -337,7 +340,7 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
   // Story 29.2: the cancel's agent-registry rebuild is started, not awaited: the answer never waits on it (Story 22.3).
   const cancel = deps.cancel ?? ((id: string) => cancelRun(queue, id, { agents: deps.agents, detachRebuild: (p) => { deps.onAgentsRebuild?.(p); } }));
   const resume = deps.resume ?? ((id: string, b: ResumeBody) => resumeRun(queue, id, b.restore_patch));
-  const verify = deps.verify ?? ((id: string) => rerunHostLeg(queue, id, { by: "api" }));
+  const verify = deps.verify ?? ((id: string, o?: { ready?: boolean }) => rerunHostLeg(queue, id, { by: "api", ...(o?.ready ? { ready: true } : {}) }));
   const pollMs = deps.pollMs ?? 1000, keepaliveMs = deps.keepaliveMs ?? 15000;
   const clock = deps.now ?? Date.now;
   // Story 32.1: the served roots the registry last named (project id → root), refreshed on every registry read here;
@@ -799,11 +802,14 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
       try { raw = JSON.parse(text); }
       catch (e) { return fail(400, "MalformedJson", { detail: `the body is not JSON: ${e instanceof Error ? e.message : String(e)}` }); }
     }
-    if (!raw || typeof raw !== "object" || Array.isArray(raw) || Object.keys(raw).length) {
-      return fail(400, "SchemaError", { detail: "the body must be empty or {}" });
+    // Story 37.5 (B3): `{}` or `{ready?: boolean}`; any other key, or a `ready` not a boolean, is refused.
+    const keys = raw && typeof raw === "object" && !Array.isArray(raw) ? Object.keys(raw) : undefined;
+    const ready = keys ? (raw as Record<string, unknown>).ready : undefined;
+    if (!keys || keys.some((k) => k !== "ready") || (keys.length && typeof ready !== "boolean")) {
+      return fail(400, "SchemaError", { detail: "the body must be empty, {} or {ready: boolean}" });
     }
     try {
-      const started = await verify(runId);
+      const started = await (ready === true ? verify(runId, { ready: true }) : verify(runId));
       started.done.catch(() => { /* the leg's result (or its failure) is the run's `host-verify` event */ });
       return json(202, { ok: true, run_id: started.run_id, state: started.state, verify: "started", head: started.head });
     } catch (e) {

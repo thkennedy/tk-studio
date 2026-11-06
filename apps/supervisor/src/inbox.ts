@@ -142,20 +142,27 @@ export function readComments(root: string, key: string): IssueComment[] | null {
   }).map((x) => x.c);
 }
 
-/** The ledger's `job-run` `total_cost_usd` for `studioRunId`, the last line winning; null when absent or unmetered. */
+/** The ledger's `job-run` `total_cost_usd` for `studioRunId`, the last line winning; null when absent or unmetered.
+ * Story 37.5 (DW-139): a bare run id answers its own line plus its `<id>:engine` line (a late-closed sweep's priced
+ * engine, each the last line winning), the known parts summed; a `:verify-<n>` line is never added. */
 export function runCost(ledgerFile: string, studioRunId: string): number | null {
   let text: string;
   try { if (!statSync(ledgerFile).isFile()) return null; text = readFileSync(ledgerFile, "utf-8"); } catch { return null; }
-  let cost: number | null = null;
+  const engineId = studioRunId.includes(":") ? undefined : `${studioRunId}:engine`;
+  let cost: number | null = null, engine: number | null = null;
   for (const line of text.split("\n")) {
     if (!line.trim() || !line.includes(studioRunId)) continue;
     let o: any;
     try { o = JSON.parse(line); } catch { continue; }
-    if (!o || o.event !== "job-run" || !isObject(o.payload) || o.payload.run_id !== studioRunId) continue;
+    if (!o || o.event !== "job-run" || !isObject(o.payload)) continue;
+    const id = o.payload.run_id;
+    if (id !== studioRunId && (engineId === undefined || id !== engineId)) continue;
     const c = o.payload.total_cost_usd;
-    cost = typeof c === "number" && Number.isFinite(c) && c >= 0 ? c : null;
+    const v = typeof c === "number" && Number.isFinite(c) && c >= 0 ? c : null;
+    if (id === studioRunId) cost = v; else engine = v;
   }
-  return cost;
+  if (engine === null) return cost;
+  return Math.round(((cost ?? 0) + engine) * 1e6) / 1e6;
 }
 
 /** The issue read (see the header). Never throws: a registry, board or file read that fails is IssueReadFailed. */

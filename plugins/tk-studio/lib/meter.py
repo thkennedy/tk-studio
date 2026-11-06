@@ -45,7 +45,13 @@ else its `state.json` `tasks[key].sessions[].usage` at the table's rates
 (`source: sessions`, `bound: upper`, `ttl: unknown`: no `message.id` dedupe, no
 subagents, cache writes at the 5m rate), each session's own model winning and
 the routing's model for its role only when that is empty. A bundle with
-neither reads `usd: null`, never a guess. Nothing is recorded.
+neither reads `usd: null`, never a guess. Nothing is recorded. Story 37.5
+(DW-136): the engine's own triage sessions (`tasks["sweep-triage"]`,
+`sweep-triage-<N>` for cycle N, `sweep-migrate`) are priced the same way into
+a `triage {usd, source: "sessions", bound: "upper"}` member (never a bundle),
+`usd_total` including it; any triage session with usage that cannot be priced
+(no model and no `triage` routing leg, or a model the price table lacks) makes
+the member read `usd: null` (never a partial sum, never a refusal of the run).
 
 CLI:
   uv run meter.py story --run-dir D --story-key K [--repo-root R]
@@ -93,6 +99,9 @@ USAGE_FIELDS = ("input", "output", "cache_read", "cache_write")
 STORY_EPIC_RE = re.compile(r"^(\d+)-")
 # A sweep bundle's engine task key (`dw-<name>`, `dw<N>-<name>` for cycle N).
 BUNDLE_KEY_RE = re.compile(r"^dw\d*-.+$")
+# Story 37.5 (DW-136): the engine's own triage task keys (bmad-loop `sweep.py`
+# `TRIAGE_KEY`, `sweep-triage-<N>` for cycle N, the legacy-ledger migrate).
+TRIAGE_KEY_RE = re.compile(r"^sweep-(triage(-\d+)?|migrate)$")
 # The table prices standard usage only; any other value of these usage fields
 # is a premium the table does not carry (usage field -> accepted values; an
 # absent field is standard).
@@ -876,10 +885,42 @@ def _session_usd(key: str, session: dict, prices: dict, routing: dict) -> float 
     return sum(tokens[f] * rates[f] for f in RATE_FIELDS) / MTOK
 
 
+def _triage_usd(tasks: dict, prices: dict, routing: dict) -> dict | None:
+    """Story 37.5 (DW-136): the engine's own triage sessions priced (see the module
+    docstring); None when the run has no triage task. A session with usage that
+    cannot be priced (no model and no `triage` routing leg, or a model the price
+    table lacks) makes the whole member unpriced (`usd: null`): never a refusal
+    of `price-run`, and never a partial sum reported as an upper bound."""
+    keys = [k for k in tasks if isinstance(k, str) and TRIAGE_KEY_RE.match(k)]
+    if not keys:
+        return None
+    priced: list[float] = []
+    unpriced = False
+    for key in keys:
+        task = tasks.get(key)
+        sessions = task.get("sessions") if isinstance(task, dict) else None
+        for session in sessions if isinstance(sessions, list) else []:
+            if not isinstance(session, dict):
+                continue
+            model = session.get("model") if isinstance(session.get("model"), str) else ""
+            try:
+                usd = _session_usd(key, session if model else {**session, "role": "triage"},
+                                   prices, routing)
+            except MeterError:
+                unpriced = True  # nothing (or nothing the table knows) names a model
+                continue
+            if usd is not None:
+                priced.append(usd)
+    if unpriced or not priced:
+        return {"usd": None}
+    return {"usd": round(sum(priced), 6), "source": "sessions", "bound": "upper"}
+
+
 def price_run(run_dir: Path, routing_path: Path | None = None,
               prices_path: Path | None = None) -> dict:
     """Price an engine run per bundle (see the module docstring). `usd_total` is
-    the priced bundles' sum, None when no bundle could be priced (never zero-filled)."""
+    the priced bundles' sum plus the priced triage (Story 37.5), None when
+    nothing could be priced (never zero-filled)."""
     run_dir = Path(run_dir)
     if not run_dir.is_dir():
         raise MeterError(f"run dir not found: {run_dir}")
@@ -904,7 +945,11 @@ def price_run(run_dir: Path, routing_path: Path | None = None,
         else:
             bundles.append({"key": key, "usd": None})
     known = [b["usd"] for b in bundles if b["usd"] is not None]
-    return {"bundles": bundles, "usd_total": round(sum(known), 6) if known else None,
+    triage = _triage_usd(tasks, prices, routing)
+    if triage is not None and triage["usd"] is not None:
+        known.append(triage["usd"])
+    return {"bundles": bundles, **({"triage": triage} if triage is not None else {}),
+            "usd_total": round(sum(known), 6) if known else None,
             "prices_date": prices["date"]}
 
 

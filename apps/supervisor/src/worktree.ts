@@ -96,7 +96,7 @@ import { accountedCostOf, isTerminal, RunTerminal, servedRoot, type EngineWhere,
 import { gh, originGhRepo, originRepo, runner, studioScript, uvRunner } from "./runners";
 import { releasePin, sameStart, vmLaunchStatus, type SandboxDeps } from "./sandbox";
 import { lastJsonObject, runJobVerb, runProcess, toVmPath, type RunResult, type Tier } from "./server";
-import { emitTriage, engineCostOf, engineEndStatus, engineJobRun, isSweep, recordTriage, stopSweepEngine, SWEEP_ENGINE_STOP, sweepStopPastDeadline, sweepCostText, sweepEndState, sweepNotice, sweepRecord, sweepSection, sweepSummary, sweepTotalCost, withEngineCost, type SweepSummary } from "./sweep";
+import { emitTriage, engineCostOf, engineEndStatus, engineJobRun, isSweep, noteEngineProbe, recordTriage, stopSweepEngine, SWEEP_ENGINE_STOP, sweepStopPastDeadline, sweepCostText, sweepEndState, sweepNotice, sweepRecord, sweepSection, sweepSummary, sweepTotalCost, withEngineCost, type SweepSummary } from "./sweep";
 
 type Env = Record<string, string | undefined>;
 /** An argv-only spawner (never a shell). `env`: variables added to the child's environment. */
@@ -1168,9 +1168,21 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         else {
           // Story 36.3 (DW-121): a sweep whose status probe fails once its stop went unanswered would never reach the paused
           // branch below, so its deadline is read here too: asked once more, then the `blocked` end. `running` is never ended.
+          // Story 37.5 (B5): the first `unknown` probe notes `engine-probe` once per engine run, so a probe that answers
+          // `unknown` from the start starts the deadline's clock too (its own kind, never standing in for an `engine-stop` note).
+          if (sweep && st.phase === "unknown") noteEngineProbe(queue, r, st.detail.error);
           if (!sweep || st.phase !== "unknown" || !sweepStopPastDeadline(queue.events(r.run_id), r.engine_run_id, (deps.clockMs ?? Date.now)())) continue;
-          engineStop = await stopSweepEngine(r, deps);
-          if (engineStop === "stopped") continue; // the next tick reads its end and closes it out as usual
+          // Asked once more, then the `blocked` end: a stop that already answered `stopped` on an earlier tick, the probe
+          // still answering `unknown`, ends the run `blocked` on this tick, with no second stop.
+          const answered = queue.events(r.run_id).some((e) => e.kind === SWEEP_ENGINE_STOP && e.detail?.engine_run_id === r.engine_run_id && e.detail?.stopped === true);
+          if (!answered) engineStop = await stopSweepEngine(r, deps);
+          if (!answered && engineStop === "stopped") {
+            // A stop that answered `stopped` is noted once, so the next tick's `stopped` status is known for the
+            // supervisor's own stop (`engineEndStatus`): its WIP committed, its end not penalised. An unanswered stop
+            // writes no note: it ends the run `blocked` on this tick.
+            queue.note(r.run_id, SWEEP_ENGINE_STOP, { engine_run_id: r.engine_run_id, stopped: true, engine: st.detail });
+            continue; // the next tick reads its end and closes it out as usual
+          }
           stopUnanswered = true;
         }
       }
@@ -1276,7 +1288,13 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         if (wipNote) { reason = `${reason ? `${reason}; ` : ""}${wipNote}`; if (state === "complete") state = "partial"; }
         let notifyLine: Record<string, unknown> | undefined;
         if (stopUnanswered) {
-          const line = `paused sweep ${run.run_id}: stop unanswered for 30 min — ended blocked, lock and pin released`;
+          // Story 37.5 (B5): the line names the probe whenever no stop was left unanswered (no `engine-stop` note carrying
+          // `error`): never paused nor asked to stop (the clock is the `engine-probe` note's, and this tick's unanswered stop
+          // is not noted), or a stop that answered `stopped` while the probe still answered `unknown`.
+          const asked = events.some((e) => e.kind === SWEEP_ENGINE_STOP && e.detail?.engine_run_id === run.engine_run_id && e.detail?.error !== undefined);
+          const line = asked
+            ? `paused sweep ${run.run_id}: stop unanswered for 30 min — ended blocked, lock and pin released`
+            : `sweep ${run.run_id}: the status probe answered \`unknown\` for 30 min — ended blocked, lock and pin released`;
           state = "blocked";
           reason = `${line}${wipNote ? `; ${wipNote}` : ""}`;
           notifyLine = await notifyText(deps, line);

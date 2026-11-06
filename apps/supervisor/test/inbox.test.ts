@@ -140,6 +140,15 @@ describe("Story 31.6: the issue read", () => {
     expect(runCost(file, "s")).toBeNull();
     expect(runCost(join(home, "missing.jsonl"), "r")).toBeNull();
   });
+
+  test("Story 37.5 (DW-139): a bare run id answers its own line plus its `:engine` line (each the last line winning), never a `:verify-<n>` line", () => {
+    const file = join(tempDir("tk-sup-ledger-"), "l.jsonl");
+    writeFileSync(file, [jobRun("s-2", 0.5), jobRun("s-2:engine", 1), jobRun("s-2:engine", 3.75), jobRun("s-2:verify-1", 0.25), jobRun("s-3:engine", 2)].join("\n"));
+    expect(runCost(file, "s-2")).toBe(4.25);
+    expect(runCost(file, "s-2:engine")).toBe(3.75);
+    expect(runCost(file, "s-2:verify-1")).toBe(0.25);
+    expect(runCost(file, "s-3")).toBe(2); // the run's own line refused or absent: the priced engine alone
+  });
 });
 
 describe("Story 31.6: the reply", () => {
