@@ -55,6 +55,9 @@ class DoctorHost(FakeHost):
         self.longpaths: str | None = "true"     # None: unset (exit 1)
         # Story 33.2: `sbx ls` and the two in-sandbox reads
         self.sbx_ls = "SANDBOX            AGENT   STATUS\n"
+        # DW-170: an `sbx ls` refused by a lapsed Docker sign-in
+        self.sbx_ls_rc = 0
+        self.sbx_ls_err = ""
         self.auth_out = json.dumps({"loggedIn": True,
                                     "authMethod": "claude.ai"})
         self.expiry_out = ""
@@ -71,6 +74,8 @@ class DoctorHost(FakeHost):
             return done(args, 0, self.claude_out)
         if name == "sbx" and args[1:2] == ["ls"]:
             self.calls.append((args, env))
+            if self.sbx_ls_rc:
+                return done(args, self.sbx_ls_rc, "", self.sbx_ls_err)
             return done(args, 0, self.sbx_ls)
         if name == "sbx" and args[1:2] == ["exec"]:
             self.calls.append((args, env))
@@ -314,7 +319,7 @@ class AllPassing(DoctorCase):
         self.assertEqual(set(statuses.values()), {"pass"}, statuses)
         self.assertEqual(sorted(statuses), sorted(
             ["claude-code", "plugin", "store", "sbx-daemon",
-             "sandbox-login", "folder-trust:proj", "path-launcher",
+             "sandbox-login", "docker-login", "folder-trust:proj", "path-launcher",
              "tailscale-cert", "supervisor", "supervisor-log",
              "supervisor-temp", "studio-web", "engine"]))
         for check in result["checks"]:
@@ -529,6 +534,53 @@ class Sbx(DoctorCase):
             "sbx-daemon"]
         self.assertEqual(check["status"], "skipped")
         self.assertNotIn("sbx daemon status", self.commands())
+
+
+class DockerLogin(DoctorCase):
+    """DW-170 (hole 111): the Docker sign-in behind `sbx`, read from the
+    sandbox-login check's `sbx ls` — no second process; a lapsed sign-in
+    fails naming `tk-studio login sbx`."""
+
+    def check(self) -> dict:
+        return self.checks(self.doctor(roster=self.full_roster())[0])[
+            "docker-login"]
+
+    def sbx_commands(self) -> list[str]:
+        return [c for c in self.commands() if c.startswith("sbx")]
+
+    def test_passes_when_sbx_ls_answers(self):
+        self.engine_sandbox()
+        check = self.check()
+        self.assertEqual(check["status"], "pass")
+        self.assertEqual(self.sbx_commands().count("sbx ls"), 1)
+
+    def test_fails_naming_the_login_verb_when_the_sign_in_lapsed(self):
+        self.engine_sandbox()
+        self.host.sbx_ls_rc = 1
+        self.host.sbx_ls_err = "error: not signed in to Docker\n  try: sbx login"
+        check = self.check()
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("not signed in to Docker", check["detail"])
+        self.assertIn("login.py sbx", check["fix"])
+        self.assertIn("logins.sbx", check["fix"])
+        self.assertEqual(self.sbx_commands().count("sbx ls"), 1)
+        # the sandbox-login check itself skipped on the same read
+        login = self.checks(self.doctor(roster=self.full_roster())[0])[
+            "sandbox-login"]
+        self.assertEqual(login["status"], "skipped")
+
+    def test_skipped_when_the_sandbox_login_did_not_read(self):
+        check = self.check()   # no TK_SUPERVISOR_CONFIG: nothing read
+        self.assertEqual(check["status"], "skipped")
+        self.assertIn("not read:", check["detail"])
+        self.assertNotIn("sbx ls", self.sbx_commands())
+        self.engine_sandbox()
+        self.host.sbx_ls_rc = 1
+        self.host.sbx_ls_err = "daemon unavailable"
+        self.host.calls.clear()
+        check = self.check()   # an `sbx ls` that fails for another reason
+        self.assertEqual(check["status"], "skipped")
+        self.assertIn("sbx ls failed", check["detail"])
 
 
 class SandboxLogin(DoctorCase):
