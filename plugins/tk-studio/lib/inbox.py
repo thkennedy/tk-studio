@@ -10,8 +10,10 @@
 One item per issue whose Jira status, read by name, is one of the two setup
 statuses: `Blocked - Awaiting User` is `open`, `Block Resolved` is
 `resolved`. `validating` is 31.7's to write; an item already `validating`
-keeps it while its status is still `Block Resolved`. Canonical `blocked`
-alone never makes an item (both setup statuses map onto it, AD-6).
+keeps it while its status is still `Block Resolved`. The canonical status
+alone never makes an item: `Blocked - Awaiting User` maps onto canonical
+`blocked` and `Block Resolved` onto canonical `in-progress` (Story 37.4,
+DW-151; AD-6), so the item is read from the name.
 
   reason_comment  the issue's newest comment in its comment log whose
                   `author` is `agent`, whose `mentions` include `owner` and

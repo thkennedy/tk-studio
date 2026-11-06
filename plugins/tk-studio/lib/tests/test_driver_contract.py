@@ -2397,7 +2397,9 @@ class DriverContractTestCase(unittest.TestCase):
         shipped = json.loads((PLUGIN_ROOT / "jobs" / "run-vertical-slice.json")
                              .read_text(encoding="utf-8"))
         epic = json.loads((PLUGIN_ROOT / "jobs" / "run-epic.json").read_text(encoding="utf-8"))
-        self.assertEqual(epic["stop"].pop("after_stories"), 1)  # Story 36.6: run-epic's alone
+        # Story 37.4 (DW-159): the rhythm is every story run's (Story 36.6 kept it run-epic's)
+        self.assertEqual(epic["stop"]["after_stories"], 1)
+        self.assertEqual(shipped["stop"]["after_stories"], 1)
         self.assertEqual(shipped["id"], "run-vertical-slice")
         self.assertEqual({k: v for k, v in shipped.items() if k not in ("id", "description")},
                          {k: v for k, v in epic.items() if k not in ("id", "description")})
@@ -3257,6 +3259,53 @@ class DriverContractTestCase(unittest.TestCase):
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
         self.assertRegex(stories, r"Story 37\.1, Story 37\.2, Story 37\.3(, Story 37\.\d+)* \(Epic 37\)")
+
+    def test_0_1_32_story_37_4_the_status_edges_and_the_rhythm_for_every_job(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.33**", header)
+        self.assertEqual(header.count("0.1.32 (Story 37.4, additive)"), 1)
+        self.assertLess(header.index("0.1.32 (Story 37.3, additive)"),
+                        header.index("0.1.32 (Story 37.4, additive)"))
+        self.assertLess(header.index("0.1.32 (Story 37.4, additive)"),
+                        header.index("0.1.33 (DW-170, additive)"))
+        clause = " ".join(header[header.index("0.1.32 (Story 37.4, additive)"):header.index("0.1.33 (DW-170, additive)")].split())
+        for phrase in ("the status edges and the rhythm for every job", "`Block Resolved` is canonical `in-progress`",
+                       "wins while the block stands", "the lowest numeric transition id", "no `-spec` suffix",
+                       "`screen` and `rules`", "`refused_transitions`", "(`runsStories`)",
+                       "`run-vertical-slice` carrying `after_stories: 1`", "— additive;"):
+            self.assertIn(phrase, clause)
+        # the 0.1.26 clause is kept as history; 37.4 supersedes it by statement
+        self.assertIn("`Blocked - Awaiting User` and `Block Resolved` are canonical `blocked`", header)
+        flat = " ".join(self.text.split())
+        self.assertEqual(flat.count("**0.1.32 (Story 37.4, additive).**"), 1)
+        self.assertLess(flat.index("**0.1.32 (Story 37.3, additive).**"), flat.index("**0.1.32 (Story 37.4, additive).**"))
+        self.assertLess(flat.index("**0.1.32 (Story 37.4, additive).**"), flat.index("**0.1.33 (DW-170, hole 111, additive).**"))
+        note = flat[flat.index("**0.1.32 (Story 37.4, additive).**"):flat.index("**0.1.33 (DW-170, hole 111, additive).**")]
+        for phrase in ("`Block Resolved` onto canonical `in-progress`",
+                       "This supersedes by statement the 0.1.26 clause \"`Blocked - Awaiting User` and `Block Resolved` are canonical `blocked`\"",
+                       "the backend status is `Block Resolved` and the canonical is not `blocked`",
+                       "never a both-changed conflict", "`Blocked - Awaiting User` keeps winning while the block stands",
+                       "a pull-back never re-maps a promoted `review` or `done` off `Block Resolved`",
+                       "a promoted `draft` or `ready` maps to `in-progress`, work resumed",
+                       "A still-`blocked` entity whose issue is in `Block Resolved` keeps `blocked` while the owner's resolution awaits validation",
+                       "the exit follows once the local status is non-`blocked`",
+                       "`(rank, 0 if the name is the exact name else 1, the transition id as an integer when it is all digits else last)`",
+                       "a tie never follows the site's list order", "`doneStories` strips the spec stem's `-spec` suffix",
+                       "`ownerSpecPresent` and `plansync.py stage_story` keep their strip",
+                       "also carries its `screen` and `rules` (validators, conditions, post functions)",
+                       "this supersedes 0.1.31's \"not carried\"", "nothing is posted for the workflow",
+                       "`refused_transitions: [<name>, …]`", "(Story 36.6's CAP-16)",
+                       "`runsStories(defn)`: `target.skill` is `tk-studio-launch` and `target.payload.verb` is `start`",
+                       "a sweep (`verb: \"sweep\"`) owes none",
+                       "This supersedes by statement 0.1.31's \"A `run-epic` job's type or id selects both duties\" and 37.3's \"a run-epic with the one-story rhythm\"",
+                       "(`runs_stories`)", "The shipped `run-vertical-slice` carries `stop.after_stories: 1`",
+                       "an explicit `stop {on_status: [\"blocked\"], after_stories: 1}`",
+                       "**The serve process:**", "Every other field, kind and route is unchanged."):
+            self.assertIn(phrase, note)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertRegex(stories, r"Story 37\.1, Story 37\.2, Story 37\.3, Story 37\.4(, Story 37\.\d+)* \(Epic 37\)")
 
     def test_0_1_33_dw_170_the_sandbox_tier_signs_itself_in_again(self):
         header = next(line for line in self.text.splitlines()

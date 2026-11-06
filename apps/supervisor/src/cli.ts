@@ -128,7 +128,7 @@ import {
 import { rerunHostLeg, VerifyRefused, type HostLegStarted } from "./hostleg";
 import { redSuites } from "./hostverify";
 import { emitTriage, engineCostOf, engineJobRun, isSweep, recordTriage, stopEngineAt, sweepRecord, sweepSummary, withEngineCost, type SweepSummary } from "./sweep";
-import { armStop, closeOutPaused, enginePidKnown, isRunEpic, launchedSinceMove, resumePaused, rhythmOf, runDirOf, stopArmed, type PausedDeps, type ResumeAnswer, type ResumeDeps as EngineResumeDeps } from "./closeout";
+import { armStop, closeOutPaused, enginePidKnown, launchedSinceMove, resumePaused, rhythmOf, runDirOf, runsStories, stopArmed, type PausedDeps, type ResumeAnswer, type ResumeDeps as EngineResumeDeps } from "./closeout";
 import { readJournal } from "./office";
 import { launchedPass, mergePass, reviewPass, startedStories, storyStarted, type PlanStatusDeps } from "./planstatus";
 import { resolutionPass, withQueuedPayload, withStoredPayload, type ResolutionDeps } from "./resolution";
@@ -1746,14 +1746,14 @@ export function launchedEngine(skill: unknown, block: unknown): string | undefin
  * named — never left `queued`. A launch run that names no engine has the
  * launch core probed before its lock is released (`Queue.endDriven`). The
  * summary's `run_id` becomes the queue id. */
-/** Story 36.6: a launched run-epic's duties on the launched path, after `holdEngine`: a rhythm of one story arms the graceful
+/** Story 36.6: a launched story run's duties (`runsStories`, Story 37.4: by target) on the launched path, after `holdEngine`: a rhythm of one story arms the graceful
  * stop (once per engine) only if this engine's journal shows a `story-start` and its pid is known (`enginePidKnown`): a stop
  * before the first `story-start` ends the run with no story built, so otherwise `launchedPass` arms it on the first tick that
  * shows one. Then the in-progress call for the story the journal already started (else that tick makes it). Never throws: a failure here never stops the launch. */
 async function launchDuties(queue: Queue, queueRunId: string, defn: Record<string, any> | undefined, worktree: WorktreeDeps): Promise<void> {
   try {
     const run = queue.get(queueRunId);
-    if (!run?.engine_run_id || !isRunEpic(defn)) return;
+    if (!run?.engine_run_id || !runsStories(defn)) return;
     const events = queue.events(queueRunId);
     if (rhythmOf(defn) === 1 && !stopArmed(events, run.engine_run_id) && enginePidKnown(events) && storyStarted(readJournal(runDirOf(run)).entries)) await armStop(queue, run, 1, worktree);
     await startedStories(queue, run, worktree, readJournal);

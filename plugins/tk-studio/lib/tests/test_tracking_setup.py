@@ -232,9 +232,10 @@ class FakeAtlassian(FakeJira):
             if any(t.get("type") != str(t.get("type")).upper()
                    for t in flow["transitions"]):
                 return 400, {"errorMessages": ["bad transition type"]}
-            # the v3 transition shape (DW-127)
+            # the v3 transition shape (DW-127), with the copied `screen` and
+            # `rules` under the read's spellings (Story 37.4, DW-160)
             allowed = {"id", "name", "description", "properties", "type",
-                       "toStatusReference", "links"}
+                       "toStatusReference", "links", "screen", "rules"}
             for t in flow["transitions"]:
                 if set(t) - allowed or not t.get("id") \
                         or not isinstance(t["id"], str) \
@@ -1428,30 +1429,74 @@ class DW107SetupTests(SetupTestCase):
         sent = {t["name"]: t for t in self.fake.update_bodies[0]["workflows"][0]["transitions"]}
         self.assertEqual(sent["With properties"]["properties"], props)
 
-    def test_story_36_6_a_dropped_screen_or_rules_is_reported(self):
+    def test_story_37_4_a_copied_screen_and_rules_are_carried_as_read(self):
+        # DW-160: each copied transition carries its `screen` and `rules`
+        # (validators, conditions, post functions) as the read returns them
+        rules = {"conditions": [{"type": "c"}], "validators": [{"type": "v"}],
+                 "postFunctions": [{"type": "p"}]}
         self._copied_transitions(
             {"id": "12", "name": "With screen", "screen": {"id": "9"}},
-            {"id": "13", "name": "With rules", "rules": {"validators": [{"type": "x"}]}},
-            {"id": "14", "name": "Empty keys", "screen": {}, "rules": None})
+            {"id": "13", "name": "With rules", "rules": rules},
+            {"id": "14", "name": "Both", "screen": {"id": "8"}, "rules": rules})
         result = self._setup(owner_account_id="acc-owner")
         self.assert_block_last(result, "complete")
-        self.assertIn("workflow update dropped screen/rules from copied "
-                      "transitions: With screen, With rules", result["notes"])
-        self.assertNotIn("Empty keys", " ".join(result["notes"]))
-        sent = self.fake.update_bodies[0]["workflows"][0]["transitions"]
-        self.assertIn("With screen", [t["name"] for t in sent])
-        for tr in sent:
-            self.assertFalse({"screen", "rules"} & set(tr), tr)
+        self.assertNotIn("refused_transitions", result)
+        self.assertFalse([n for n in result["notes"] if "dropped" in n])
+        sent = {t["name"]: t for t in self.fake.update_bodies[0]["workflows"][0]["transitions"]}
+        self.assertEqual(sent["With screen"]["screen"], {"id": "9"})
+        self.assertNotIn("rules", sent["With screen"])
+        self.assertEqual(sent["With rules"]["rules"], rules)
+        self.assertEqual((sent["Both"]["screen"], sent["Both"]["rules"]), ({"id": "8"}, rules))
 
-    def test_story_36_6_empty_containers_are_no_lost_configuration(self):
+    def test_story_37_4_a_field_the_update_cannot_accept_posts_nothing(self):
+        # a transition whose read has a field outside the accepted set is
+        # named and left unchanged: nothing is posted for the workflow
+        self._copied_transitions(
+            {"id": "12", "name": "With triggers", "triggers": [{"ruleKey": "t"}]},
+            {"id": "13", "name": "Plain"})
+        result = self._setup(owner_account_id="acc-owner")
+        self.assert_block_last(result, "partial")
+        self.assertEqual(result["refused_transitions"], ["With triggers"])
+        self.assertNotIn(("POST", "/workflows/update"), self.fake.calls)
+        self.assertEqual(self.fake.update_bodies, [])
+        self.assertIn("workflow update not posted: transitions with fields the "
+                      "update does not accept are left unchanged: With triggers",
+                      result["notes"])
+        self.assertIn("Settings > Work items > Workflows", self._steps(result))
+        self.assertEqual(jirabackend.refused_transitions([
+            {"name": "ok", "to": "1", "from": [], "screen": {}, "rules": None},
+            {"name": "odd", "toStatusReference": "1", "links": [], "triggers": []},
+        ]), ["odd"])
+
+    def test_story_37_4_a_dry_run_reports_the_same_refusal(self):
+        # the statuses exist (a first run whose workflow update was refused);
+        # the dry run then names the refused transition, posts nothing and
+        # lists none of the workflow's transitions as would-create
+        self.fake.force[("POST", "/workflows/update")] = (400, {"errorMessages": ["no"]})
+        self._setup(owner_account_id="acc-owner")
+        del self.fake.force[("POST", "/workflows/update")]
+        todo = self.fake.status("To Do")["id"]
+        self.fake.workflow["transitions"].append(
+            {"id": "12", "name": "With triggers", "from": [], "to": todo,
+             "type": "GLOBAL", "triggers": [{"ruleKey": "t"}]})
+        calls = len(self.fake.calls)
+        result = self._setup(dry_run=True, owner_account_id="acc-owner")
+        self.assert_block_last(result, "partial")
+        self.assertEqual(result["refused_transitions"], ["With triggers"])
+        self.assertIn("workflow update not posted: transitions with fields the "
+                      "update does not accept are left unchanged: With triggers",
+                      result["notes"])
+        self.assertFalse([w for w in result["would_create"] if "transition" in w])
+        self.assertNotIn(("POST", "/workflows/update"), self.fake.calls[calls:])
+
+    def test_story_37_4_empty_containers_are_carried_unchanged(self):
         empty = {"conditions": [], "validators": [], "postFunctions": []}
-        kept = {"conditions": [], "validators": [], "postFunctions": [{"type": "x"}]}
-        self.assertEqual(jirabackend._dropped_config([
-            {"name": "Empty rules", "rules": empty},
-            {"name": "Nested empties", "rules": {"conditions": [{"rules": [{}]}], "note": ""}, "screen": {"id": None}},
-            {"name": "Populated rules", "rules": kept},
-            {"name": "Populated screen", "rules": empty, "screen": {"id": "9"}},
-        ]), ["Populated rules", "Populated screen"])
+        self._copied_transitions(
+            {"id": "12", "name": "Empty rules", "rules": empty, "screen": {}})
+        result = self._setup(owner_account_id="acc-owner")
+        self.assert_block_last(result, "complete")
+        sent = {t["name"]: t for t in self.fake.update_bodies[0]["workflows"][0]["transitions"]}
+        self.assertEqual((sent["Empty rules"]["rules"], sent["Empty rules"]["screen"]), (empty, {}))
 
     def test_story_36_6_no_lost_configuration_reports_nothing(self):
         self._copied_transitions({"id": "12", "name": "Plain"})

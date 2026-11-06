@@ -9,7 +9,11 @@
  *   {phase: "review"|"done", pr, owner, directory, story_key, id, ok, previous_status?, error?, blocked?, skipped?, reason?, stage?}
  *
  *   in-progress Story 36.6 (hole 104): `{phase: "in-progress", story_key, id, ...}` once per story of a running launched
- *             run-epic, from the launched path, the resume and `launchedPass` (see `storyInProgress`).
+ *             run that runs stories (`runsStories`, Story 37.4: by the job's `target`, not its type — `run-epic`,
+ *             `run-vertical-slice`), from the launched path, the resume and `launchedPass` (see `storyInProgress`).
+ *   story_key Story 37.4 (A4): one spelling across the `in-progress`, `review` and `done` phases — the story's key, never
+ *             the spec stem's `-spec` suffix (`doneStories` strips it); events recorded before 37.4 may still carry it,
+ *             so the readers (`ownerSpecPresent`, `plansync.py stage_story`) keep their strip.
  *   conflict  Story 36.3 (DW-130): `status: "partial"` and `conflict: [{id, canonical, backend, fields}]` when the re-sync holds an
  *             AD-5 conflict (`sync.projection.conflicts`): one notifier line per distinct conflict; a `done` one keeps `stage: true`
  *             and `ok: true` (the rows stay owed) and is re-asked each tick, counted against `PLAN_RETRY_LIMIT`, until the pull-back
@@ -101,7 +105,7 @@
  */
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
-import { armStop, frontmatter, isRunEpic, jiraBound, resumePidRewritten, rhythmOf, runDirOf, stopArmed, stopArmedSinceResume } from "./closeout";
+import { armStop, frontmatter, jiraBound, resumePidRewritten, rhythmOf, runDirOf, runsStories, stopArmed, stopArmedSinceResume } from "./closeout";
 import { legVerdict, type HostVerifyResult } from "./hostverify";
 import { notifier } from "./env";
 import { atRef as readAtRef, type AtRef } from "./gitshow";
@@ -235,7 +239,7 @@ export async function doneStories(run: Pick<QueueRun, "run_id" | "root" | "base_
     if ("error" in before) return { stories: [], retry: `${path} at the merge-base ${mergeBase.slice(0, 12)}: ${before.error}` };
     if (isDone(before)) continue;
     seen.add(story);
-    stories.push({ story_key: key, story, path });
+    stories.push({ story_key: key.replace(/-spec$/, ""), story, path }); // Story 37.4 (A4): the one spelling
   }
   return { stories };
 }
@@ -478,7 +482,7 @@ const finishedStories = (events: readonly QueueEvent[], entries: readonly Record
   return keys.size;
 };
 
-/** The launched pass (beside `reviewPass`, no timer of its own): over the running launched run-epic runs, the in-progress
+/** The launched pass (beside `reviewPass`, no timer of its own): over the running launched story runs (`runsStories`), the in-progress
  * call once per new journal `story-start`, and the rhythm's graceful stop: figure 1 when the launched path left it
  * (`backstopOwed`; a resume arms its own), and a figure N > 1 armed once N-1 of this queue run's stories have finished and
  * this engine's journal shows a story in flight (a stop between stories would end the run a story short, or a relaunched
@@ -491,7 +495,7 @@ export async function launchedPass(queue: Queue, deps: PlanStatusDeps, journal: 
   for (const run of runs) {
     try {
       const defn = queue.definition(run);
-      if (!isRunEpic(defn) || !queue.events(run.run_id).some((e) => e.kind === "launched")) continue;
+      if (!runsStories(defn) || !queue.events(run.run_id).some((e) => e.kind === "launched")) continue;
       await startedStories(queue, run, deps, journal);
       const figure = rhythmOf(defn);
       if (figure) {

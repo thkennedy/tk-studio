@@ -404,7 +404,7 @@ export function armingRefusedStop(queue: Queue, run: QueueRun): StopInForce | un
   const id = run.engine_run_id;
   if (!id) return undefined;
   const defn = queue.definition(run);
-  if (!isRunEpic(defn) || rhythmOf(defn) !== 1) return undefined; // the one predicate call (37.4 replaces it)
+  if (!runsStories(defn) || rhythmOf(defn) !== 1) return undefined; // Story 37.4: by target, not by type
   const refused = queue.events(run.run_id).findLast((e) => e.kind === STOP_ARMED && e.detail?.engine_run_id === id);
   if (!refused || refused.detail?.ok !== false) return undefined;
   return { source: "arming-refused", detail: String(refused.detail?.detail ?? "") || "no detail" };
@@ -1122,13 +1122,13 @@ async function rearmStop(queue: Queue, run: QueueRun, deps: ResumeDeps, pidRewri
   catch { /* not recorded */ }
 }
 
-// ------------------------------------------------------------ Story 36.6: the run-epic job's launch duties
+// ------------------------------------------------------------ Story 36.6: a story run's launch duties
 
-/** The shipped job type whose launches owe the in-progress call and the rhythm's stop. */
-export const RUN_EPIC_JOB_TYPE = "run-epic";
-/** A run is a run-epic when its resolved definition's `type` or `id` is `run-epic`. */
-export const isRunEpic = (defn: Record<string, any> | null | undefined): boolean =>
-  !!defn && (defn.type === RUN_EPIC_JOB_TYPE || defn.id === RUN_EPIC_JOB_TYPE);
+/** Story 37.4 (DW-159): a run owes the in-progress call and the rhythm's stop when its resolved definition runs stories —
+ * its `target` is `tk-studio-launch` with `payload.verb` `start` (`run-epic`, `run-vertical-slice`, any later type); a
+ * sweep (`verb: "sweep"`) does not. By target, never by type or id. The twin of `launch.py runs_stories`. */
+export const runsStories = (defn: Record<string, any> | null | undefined): boolean =>
+  defn?.target?.skill === "tk-studio-launch" && defn?.target?.payload?.verb === "start";
 /** The queue event of one arming of the rhythm's graceful stop. */
 export const STOP_ARMED = "stop-armed";
 
@@ -1230,13 +1230,13 @@ export async function armStop(queue: Queue, run: QueueRun, figure: number, deps:
   } finally { arming.delete(id); }
 }
 
-/** A resumed run-epic's duties, after `unblockTracked`: with figure 1 and no stop in force (one in force stays `rearmStop`'s),
+/** A resumed story run's duties (`runsStories`), after `unblockTracked`: with figure 1 and no stop in force (one in force stays `rearmStop`'s),
  * the stop armed once since this `engine-resume`, only once the resume rewrote `engine.pid` (`rearmStop`'s reason; else one
  * notifier line, no arming); then the in-progress calls. Never throws: the resume has already happened. */
 async function resumeDuties(queue: Queue, run: QueueRun, stopInForce: boolean, pidRewritten: boolean, deps: ResumeDeps): Promise<void> {
   try {
     const defn = queue.definition(run);
-    if (!isRunEpic(defn)) return;
+    if (!runsStories(defn)) return;
     const figure = rhythmOf(defn);
     if (!stopInForce && figure) {
       if (!pidRewritten) await sendLine(deps, rearmFailedLine(run.run_id, run.engine_run_id!, REARM_SKIPPED));

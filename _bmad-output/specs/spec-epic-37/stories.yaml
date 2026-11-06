@@ -195,6 +195,13 @@
     `pre_commit` hook fires, a counter and marker behind a harvested id are expected: do
     not flag or hand-fix them; the hook's `.tk-studio/plan-counter.yaml` and marker-line
     writes are not a Files deviation. Ledger line anchors moved: re-grep by id.
+    Gate note from 37-4 (2026-11-06): The contract header is 0.1.33. Add the 37.5
+    clause after 37.4's and before `0.1.33 (DW-170, additive)`, and the paragraph after
+    37.4's paragraph and before DW-170's, never just "before `## 8. Conformance`". Put
+    `test_0_1_32_story_37_5_…` after `test_0_1_32_story_37_4_…` and before
+    `test_0_1_33_dw_170_…`. `planstatus.ts` anchors moved by 4: `ledgerPass` at :523,
+    header :101-104. Every `bun test` names `--timeout 30000`. A sweep (`verb: "sweep"`)
+    is outside `runsStories`: no in-progress or arming duty applies to it.
 
 - id: "37-6-one-stop-path-and-the-gates-blind-spots"
   title: "One Stop Path and the Gate's Blind Spots"
@@ -235,6 +242,14 @@
     writes are not a Files deviation. Ledger line anchors moved: re-grep by id. DW-135
     is already resolved by Story 37.1 as a duplicate of DW-133: leave it; AC3's DW-135
     clause is met by that closure.
+    Gate note from 37-4 (2026-11-06): `isRunEpic` is gone. `closeout.ts` exports
+    `runsStories(defn)` (target `tk-studio-launch`, `payload.verb: "start"`), which gates
+    `armingRefusedStop` :407, `resumeDuties` :1239, `cli.ts launchDuties` :1756 and
+    `planstatus.ts launchedPass` :498. Keep that gate when folding `armStop`/`rearmStop`,
+    and give any arming fixture `target {skill: "tk-studio-launch", payload {verb:
+    "start"}}`, as `closeout.test.ts` `RUN_EPIC_1` does. The contract header is 0.1.33.
+    Add the 37.6 clause and paragraph after the last 37.x one and before DW-170's, and
+    the test before `test_0_1_33_dw_170_…`. Every `bun test` names `--timeout 30000`.
 
 - id: "37-7-the-records-reconciled-and-the-proofs-captured"
   title: "The Records Reconciled and the Proofs Captured"
@@ -274,3 +289,9 @@
     marker behind a harvested id are expected: do not flag or hand-fix them; the hook's
     `.tk-studio/plan-counter.yaml` and marker-line writes are not a Files deviation.
     Ledger line anchors moved: re-grep by id.
+    Gate note from 37-4 (2026-11-06): The live `plansync setup` (CAP-16's ask, gated on
+    37.4 on `main`) now answers one of three ways. `ok`. `partial` with
+    `refused_transitions: [names]`, nothing posted for that workflow, `--dry-run`
+    included. Or the site's "workflow update refused". Have the ask run `--dry-run`
+    first and record the answer verbatim. A non-empty `refused_transitions` is a named
+    residual for the owner, not a 37.7 fix. DW-160 is resolved by Story 37.4.

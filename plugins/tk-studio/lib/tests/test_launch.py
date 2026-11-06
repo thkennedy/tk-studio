@@ -1386,6 +1386,23 @@ class LaunchTestCase(unittest.TestCase):
         _, row, _ = self._rhythm_row(self._rhythm_instance(spec, {"max_runs": 2, "after_stories": 3}))
         self.assertIn("stop.after_stories 3", row["detail"])
 
+    def test_story_37_4_the_rhythm_row_reads_a_vertical_slice_by_its_target(self):
+        # DW-159: the row follows `runs_stories` (the launch's `start` verb),
+        # not the `run-epic` type: a slice instance gets the shipped rhythm
+        _, _, spec = self._rhythm_row()
+        epic = int(Path(spec).name.rsplit("-", 1)[1])
+        slice_instance = {"job_schema_version": 1, "id": "run-epic-7",
+                          "type": "run-vertical-slice", "description": "x",
+                          "target": {"payload": {"epic": epic}}}
+        _, row, _ = self._rhythm_row(slice_instance)
+        self.assertIn("run-epic-7: stop.after_stories 1; the launch arms", row["detail"])
+        self.assertTrue(launch.runs_stories(
+            {"target": {"skill": "tk-studio-launch", "payload": {"verb": "start"}}}))
+        for defn in ({"target": {"skill": "tk-studio-launch", "payload": {"verb": "sweep"}}},
+                     {"type": "run-epic", "target": {"skill": "tk-studio-launch"}},
+                     {"target": {"skill": "other", "payload": {"verb": "start"}}}, None):
+            self.assertFalse(launch.runs_stories(defn), defn)
+
     def test_story_36_6_no_rhythm_says_the_run_goes_to_the_epics_end(self):
         # M22: an instance whose own `stop` carries no field; advisory
         _, _, spec = self._rhythm_row()

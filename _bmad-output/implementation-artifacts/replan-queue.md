@@ -597,3 +597,24 @@
 - What no longer holds: "DW-145 `:1142-1147` (37.1 gave it `status: open`)" (its anchors or its closure form; no criterion changes)
 - Suggested adjustment: Story 37.1 filed DW-168 for the four operator proofs, owned here: cite it in the asks and leave it `open` (CAP-21: no other entry's status changes by this story). A hand-filed entry takes its id from `plansync.py deferred mint`. Before the `pre_commit` hook fires, a counter and marker behind a harvested id are expected: do not flag or hand-fix them; the hook's `.tk-studio/plan-counter.yaml` and marker-line writes are not a Files deviation. Ledger line anchors moved: re-grep by id.
 - Status: closed — applied to the unstarted entry's invoke_dev_with by the 37-1 gate session (2026-11-02)
+
+## 37-5-the-sweeps-bugs-and-cost-lines-before-a-fourth-sweep — scope: stories — from 37-4-the-status-edges-and-the-rhythm-for-every-job — 2026-11-06
+
+- What changed: 37.4 added its `0.1.32 (Story 37.4, additive)` clause and paragraph after 37.3's, before `0.1.33 (DW-170, hole 111, additive)`; `test_0_1_32_story_37_4_…` sits before `test_0_1_33_dw_170_…`; `planstatus.ts` grew 4 lines (`runsStories` import).
+- What no longer holds: "a `**0.1.32 (Story 37.5, additive).**` paragraph before `## 8. Conformance`" and "`planstatus.ts` (modify) — the `notify` callback into `ledgerPass` (:519); header :97-100".
+- Suggested adjustment: Put the 37.5 clause after 37.4's and before `0.1.33 (DW-170…)`, and the paragraph after 37.4's and before DW-170's. Put the test after `test_0_1_32_story_37_4_…`. `ledgerPass` is now at `planstatus.ts:523` and the header at :101-104. Every `bun test` names `--timeout 30000`. A sweep's `verb: "sweep"` is outside `runsStories`, so no in-progress or arming duty applies to it.
+- Status: closed — applied to the unstarted entry's invoke_dev_with and to plans/37-5.md (Code Map, Files, Verify, Risks) by the 37-4 gate session (2026-11-06)
+
+## 37-6-one-stop-path-and-the-gates-blind-spots — scope: stories — from 37-4-the-status-edges-and-the-rhythm-for-every-job — 2026-11-06
+
+- What changed: `isRunEpic` is gone. `closeout.ts` exports `runsStories(defn)` (target `tk-studio-launch` with `payload.verb: "start"`), which gates `armingRefusedStop` :407, `resumeDuties` :1239, `cli.ts launchDuties` :1756 and `planstatus.ts launchedPass` :498. The 37.4 contract paragraph sits before `0.1.33 (DW-170…)`.
+- What no longer holds: "the `**0.1.32 (Story 37.6, additive).**` paragraph before `## 8. Conformance`" (plans/37-6.md Code Map); fixtures that arm a `run-epic` by type alone.
+- Suggested adjustment: Keep the `runsStories` gate when folding `armStop`/`rearmStop`. Give any arming fixture `target {skill: "tk-studio-launch", payload {verb: "start"}}`, as `closeout.test.ts` `RUN_EPIC_1` does. Put the 37.6 clause and paragraph after the last 37.x one (37.5's once landed) and before DW-170's, and the test before `test_0_1_33_dw_170_…`. Every `bun test` names `--timeout 30000`.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the 37-4 gate session (2026-11-06)
+
+## 37-7-the-records-reconciled-and-the-proofs-captured — scope: stories — from 37-4-the-status-edges-and-the-rhythm-for-every-job — 2026-11-06
+
+- What changed: 37.4 made `plansync setup` carry `screen`/`rules` as read. Before any post, a key check refuses a transition whose fields fall outside the carried set (`jirabackend.refused_transitions`). For that workflow it answers `partial` with `refused_transitions: [names]` and posts nothing, `--dry-run` included. A site 400 still reads "workflow update refused". DW-160 is resolved by Story 37.4.
+- What no longer holds: "the live `setup` ask gated on 37.4 being on `main`" (plans/37-7.md Settled shape 3) still holds, but the ask's expected answer is now one of three: `ok`, `partial` with `refused_transitions`, or the site's refusal.
+- Suggested adjustment: Have the CAP-16 ask run `--dry-run` first and record the answer verbatim, `refused_transitions` included. A non-empty `refused_transitions` is a named residual for the owner, not a 37.7 fix.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the 37-4 gate session (2026-11-06)
