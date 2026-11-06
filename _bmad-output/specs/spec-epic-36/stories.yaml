@@ -177,10 +177,13 @@
     I want `plansync setup` to write the workflow it needs without my hand (uppercase
     transition types, the version from the v3 search, any status in the To Do category,
     the global transitions it adds carrying ids), the launch check to refuse writing a
-    tracked `policy.toml` and to know whether the engine sandbox has Godot, and
-    `scope`'s game-project rule to read the registry rather than a name prefix, So that
-    a fresh project's setup needs no manual workflow edit and a game project is one by
-    evidence (hole 92; DW-127, DW-62, DW-71, DW-90). Canonical: ST-159.
+    tracked `policy.toml` and to know whether the engine sandbox has Godot, `scope`'s
+    game-project rule to read the registry rather than a name prefix, the launch to mark
+    the story it starts In Progress and to arm the one-story-per-run stop itself from
+    the job's declared rhythm, So that a fresh project's setup needs no manual workflow
+    edit, a game project is one by evidence, and a story being built reads In Progress
+    from its launch with no operator step between the POST and the stop (holes 92, 104
+    and 105; DW-127, DW-62, DW-71, DW-90, DW-146, DW-147). Canonical: ST-159.
   invoke_dev_with: >-
     Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 36.6: Setup
     and the Launch Check, by Evidence", the authoritative specification (user story and
@@ -207,6 +210,13 @@
     Risks. Replan (36-4 gate, 2026-10-31): on bun 1.4.3 the preload's 30 s default
     reaches only a run's first file, so run multi-file suites with `--timeout 30000`;
     see plans/36-6.md Risks.
+    Reconciled (37.7, 2026-11-06): the description above is re-transcribed from epics.md
+    "### Story 36.6" (:3449-3453), which added the launch marking In Progress, arming
+    the stop, holes 104 and 105 and DW-146, DW-147 after the bootstrap; the order 36-1
+    to 36-7 is final (landed in that order, #302 carried 36.1 and 36.2); the statuses
+    live in each stories/36-N-*-spec.md frontmatter, all `status: 'done'`, never in this
+    file (stories-schema.md:20) (recorded by the EP-37 docs pass, Story 37.7,
+    RETROSPECTIVE A5 :49, AI-7 :116, 2026-11-06).
 
 - id: "36-7-the-cycles-cut-and-the-docs-caught-up"
   title: "The Cycles Cut and the Docs Caught Up"

@@ -314,8 +314,8 @@ After the source patches, before the last change (one test added to `status-bloc
 Reported by the implementer and not repeated here: each new test failed with its fix reverted or its check broken. Two limits: in the first refused-finish test the `own_block` assertion trips first, so its stop assertions were not seen failing on their own; in the recorded-worker test only the `closeout: skipped` assertion catches the mutated `mirror` site, because `endDriven` has its own probe and veto.
 
 **Unverifiable here (the operator's, through the Consult Log).**
-- `sbx skills ls` on the host: paste the output. The parser stays unpinned until then.
-- On a live sandbox run on the Windows host, count the run's `hold` events across several ticks: they must not grow per tick, and the recorded hold pid must outlive the tick that spawned it. A hold that dies with the tick means Settled shape 3 fails there.
+- `sbx skills ls` on the host: paste the output. The parser stays unpinned until then. No ask was filed in this spec's Consult Log; Story 37.7 files it in `37-7-the-records-reconciled-and-the-proofs-captured-spec.md` § Consult Log (DW-168) (recorded by the EP-37 docs pass, Story 37.7, RETROSPECTIVE A5 `:49`, AI-6 `:115`, 2026-11-06).
+- On a live sandbox run on the Windows host, count the run's `hold` events across several ticks: they must not grow per tick, and the recorded hold pid must outlive the tick that spawned it. A hold that dies with the tick means Settled shape 3 fails there. Asked by Story 37.7 in `37-7-the-records-reconciled-and-the-proofs-captured-spec.md` § Consult Log (DW-168), read from the host's `queue.db` `hold` events read-only (recorded by the EP-37 docs pass, Story 37.7, RETROSPECTIVE A5 `:49`, AI-6 `:115`, 2026-11-06).
 
 **Residual risks.**
 - New: a no-op `finish` on an own-marked run returns no marker, so `mirror` can still stop where `evaluate_stop` skips (consult ruling).

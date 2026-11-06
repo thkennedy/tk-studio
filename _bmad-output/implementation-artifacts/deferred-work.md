@@ -1,6 +1,6 @@
 # Deferred Work
 
-<!-- deferred-work counter: last minted DW-180; mint through plansync.py deferred mint -->
+<!-- deferred-work counter: last minted DW-181; mint through plansync.py deferred mint -->
 
 ### DW-124: Contract §4 `submit` admitted a full job definition but the CLI/skill surface was id-only
 origin: migrated from legacy ledger ("Deferred from: code review of feat/tk-studio-connector (2026-08-06)"), 2026-10-29
@@ -1227,7 +1227,7 @@ source_spec: `36-2-the-sweeps-records-are-whole-spec.md`
 location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261030-204855-1dd5; this entry preserves the lingering recommendation for a deliberate later review.
-status: open
+status: open (owner's decision: a review pass costs 7.32 USD; the epic's mean 7.46)
 
 ### DW-146: A story being built never reads In Progress in Jira: the plan-status pass sets `review` when the run's PR opens and `done` at the merge, nothing at the launch, so the issue reads Backlog for the whole build (hole 104).
 origin: hole 104 (found by the owner 2026-10-30 20:3xZ while Epic 36's run 1, q-run-epic-36-20261030T201456Z-e76900, built 36.1 with TKSTUDIO-191 in Backlog)
@@ -1284,7 +1284,7 @@ source_spec: `36-3-a-paused-or-resumed-run-is-never-parked-spec.md`
 location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261031-042417-65bc; this entry preserves the lingering recommendation for a deliberate later review.
-status: open
+status: open (owner's decision: a review pass costs 6.26 USD; the epic's mean 7.46)
 
 ### DW-153: The Jira promote's category picker took the first transition into the target category, and the setup's global transitions list `Blocked - Awaiting User` before `In Progress`, so every review promotion at PR open landed the story's issue in the block status until the merge (hole 109).
 origin: hole 109 (found 2026-10-31 04:2xZ answering the owner's question why nothing ever read In Progress: TKSTUDIO-191 and 192 Backlog → Blocked - Awaiting User at 01:20Z, TKSTUDIO-189 on 2026-10-29, every Epic 35 story since the first sync)
@@ -1316,7 +1316,7 @@ source_spec: `36-4-the-host-leg-goes-red-for-code-only-spec.md`
 location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261031-091634-c382; this entry preserves the lingering recommendation for a deliberate later review.
-status: open
+status: open (owner's decision: a review pass costs 7.43 USD; the epic's mean 7.46)
 
 ### DW-157: Runs carrying own_block still count toward stop.max_runs in evaluate_stop, so repeated supervisor faults can stop a job through max_runs.
 origin: spec-deferred 8209a52f4be7
@@ -1332,7 +1332,7 @@ source_spec: `36-5-the-supervisors-own-faults-spec.md`
 location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261031-122053-c9d8; this entry preserves the lingering recommendation for a deliberate later review.
-status: open
+status: open (owner's decision: a review pass costs 7.22 USD; the epic's mean 7.46)
 
 ### DW-159: `run-vertical-slice` game-project runs get no In Progress and no rhythm: the launched duties filter on `isRunEpic`.
 origin: spec-deferred, consult ruling 2026-10-31T17:47:31Z (deviation-gt-0) on Story 36.6's job filter
@@ -1372,7 +1372,7 @@ source_spec: `36-6-setup-and-the-launch-check-by-evidence-spec.md`
 location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261031-170810-6825; this entry preserves the lingering recommendation for a deliberate later review.
-status: open
+status: open (owner's decision: a review pass costs 10.50 USD; the epic's mean 7.46)
 
 ### DW-164: `withMcpStop` in `cli.ts` is not checked to inject `stopEngineMcp`; only its call sites and `sbxDeps` are pinned.
 origin: spec-deferred 9ed3801f2c8f
@@ -1510,4 +1510,12 @@ source_spec: `kb/agent-pc-setup-runbook.md` fixes rows "hole 65" and "hole 114";
 location: apps/supervisor/src/closeout.ts (the "no changes" end: `no_changes: true`, result "no changes", the run `complete`); apps/supervisor/src/hostleg.ts (the leg runs on a close-out whose tree equals the base); apps/supervisor/src/resume.ts and the paused-run pass (the hole-65 auto-resume keyed on a `blocked` spec and a CRITICAL escalation); apps/supervisor/src/planstatus.ts (no edge from `in-progress` back when a run ends without a PR); the BMad base's `_bmad/scripts/render_skill.py` (`_publish`: staging then `os.rename` across the sbx mount)
 severity: medium
 reason: The engine rendered `bmad-build-auto` into the fresh worktree at 10:25:16Z and nine seconds later the dev session's `ls -la` of `_bmad/render/bmad-build-auto/q-run-epic-37-20261106t102330z-04109a-ac68fc677deb/f1a1d5587ffb3976eb54/` showed five of its ten files as `-????????? ? ? ? ? ?` (`manifest.json`, `compile-epic-context.md`, `spec-template.md`, `step-01-clarify-and-route.md`, `step-04-review.md`; `workflow.md`, `step-02`, `step-03` readable) — hole 65's stale view after the staging rename, and still so 22 minutes later, so not a cache that clears. The session followed the skill's HALT rule, wrote `status: 'halted'` into the story spec and stopped; the engine re-drove the story once itself (`refs/attempt-preserve-dirty/20261106-102516-76a4-30591ecc-1` and `-2` in the checkout's `.git`), hit the same folder, then stopped on the armed `after_stories` stop. Because the word was `halted`, not `blocked`, there was no CRITICAL escalation, no pause and no auto-resume (Story 33.6 keys on the `blocked` draft). The close-out found the worktree equal to `main` (both attempts' records left with the removed worktree; the sessions' transcripts remain in the sandbox under `/home/agent/.claude/projects/-c-agent-work-worktrees-tk-studio-q-run-epic-37-20261106T102330Z-04109a/`), reported `no_changes: true`, deleted the branch — and ran the host leg anyway: 2134 s (10:57:47 to 11:33:22Z, the supervisor and studio-web suites skipped as unchanged since 30591ec) over a tree identical to `main`. The run ended `complete`, the notifier said `complete`, ST-166 stayed `in-progress` in the served checkout, and nothing said that Story 37.6 had not started; 1.22 USD of worker and the engine's two sessions were the cost. Fix to make: (1) a run whose engine ends with no story landed (no commits and the story's spec not `done`) ends `partial` (or a named `halted`) with the engine's last record as the reason, never `complete`, and the close-out skips the host leg when the tree equals the base; (2) the hole-65 auto-resume keys on the render-failure signature (the HALT text, a generation folder with unreadable entries), whatever status word the session wrote, removes the snapshot and resumes once; (3) the plan-status pass returns the story to `draft` (or marks it `in-progress` with the halt note) when the run ends without a PR; (4) `render_skill.py` (the base patch beside DW-110's retry) verifies every output by reading it after the rename and, on a stat failure, removes the generation and writes the outputs straight into a fresh destination — the stale view follows the rename across the sbx mount. Operator path meanwhile: queue the job again (a fresh worktree renders anew; hole 65 has hit twice in 30 runs); a recurrence makes (4) the hand fix. The second 37.6 run (`q-run-epic-37-20261106T114252Z-88d9f5`, queued 11:42Z) rendered cleanly — all ten files of its generation readable from inside the sandbox two minutes after the launch — and the story landed (#340, 2026-11-06 13:40Z): the operator path held; the four fixes stay to make.
+status: open
+
+### DW-181: Follow-up review still recommended for 37-7-the-records-reconciled-and-the-proofs-captured after the damping cap was spent
+origin: review-budget-followup
+source_spec: `37-7-the-records-reconciled-and-the-proofs-captured-spec.md`
+location: n/a
+severity: low
+reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261106-134720-e093; this entry preserves the lingering recommendation for a deliberate later review.
 status: open
