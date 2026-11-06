@@ -142,29 +142,13 @@ import { readLogTail, readPacer } from "./log";
 import { readAgents, type RebuildResult } from "./registry";
 import { contentType, resolveWebPath, WEB_BUILD_COMMAND, webRoot, type WebOptions } from "./web";
 import { registryShow } from "./server";
+import { ApiBindRefused, checkBind } from "./bind";
 import { isTerminal, Queue, RunTerminal, type QueueEvent, type QueueRun } from "./queue";
 
 type Env = Record<string, string | undefined>;
 
-export class ApiBindRefused extends Error {
-  constructor(addr: string, why: string) {
-    super(`ApiBindRefused: TK_SUPERVISOR_BIND '${addr}' ${why} — the API binds only a Tailscale address (inside 100.64.0.0/10)`);
-    this.name = "ApiBindRefused";
-  }
-}
-
-/** The bind address checked: an IPv4 literal inside 100.64.0.0/10 (never 0.0.0.0, localhost, or a LAN address). */
-export function checkBind(addr: string): string {
-  const a = addr.trim();
-  if (a === "0.0.0.0") throw new ApiBindRefused(a, "is every interface");
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(a);
-  const octets = m ? m.slice(1).map(Number) : [];
-  if (!m || m.slice(1).some((o) => o.length > 1 && o.startsWith("0")) || octets.some((o) => o > 255)) {
-    throw new ApiBindRefused(a, "is not an IPv4 literal");
-  }
-  if (octets[0] !== 100 || octets[1] < 64 || octets[1] > 127) throw new ApiBindRefused(a, "lies outside 100.64.0.0/10");
-  return a;
-}
+// Story 37.6: the bind check lives in the leaf `bind.ts` (enginemcp imports it statically); re-exported here.
+export { ApiBindRefused, checkBind };
 
 /** The submission body, validated. */
 export interface SubmitBody {

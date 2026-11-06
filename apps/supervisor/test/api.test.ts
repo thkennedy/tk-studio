@@ -1031,7 +1031,8 @@ describe("cancel races with the driver (AC4, AC5)", () => {
 });
 
 // The real `launchStopGraceful` against a fake `uv` on PATH: the argv it sends and how it reads the answer.
-// win32 too (DW-5): the fake is a bun script behind `fakeBin` (`uv.exe` there).
+// win32 too (DW-5): the fake is a bun script behind `fakeBin` (`uv.exe` there). Story 37.6: exit 0 is stopped (as
+// `launch.py`: 0 exactly when `ok: true`, a refusal 2), a JSON `error` the refusal's detail, no JSON `launch stop failed`.
 describe("launchStopGraceful through runUv (AC4)", () => {
   test("stop --directory <root> --run-id <id> --graceful on lib/launch.py; ok, refused, no JSON", async () => {
     const bin = tempDir("tk-sup-api-uv-");
@@ -1041,19 +1042,19 @@ describe("launchStopGraceful through runUv (AC4)", () => {
     fakeBin(join(bin, "uv"), `const fs = require("node:fs");
 fs.writeFileSync(${JSON.stringify(join(bin, "argv"))}, process.argv.slice(2).map((a) => a + "\\n").join(""));
 process.stdout.write(fs.readFileSync(${JSON.stringify(join(bin, "out"))}, "utf-8"));
+process.exitCode = Number(fs.readFileSync(${JSON.stringify(join(bin, "exit"))}, "utf-8"));
 `);
     const prev = { path: process.env.PATH, root: process.env.TK_STUDIO_ROOT };
     process.env.PATH = `${bin}${delimiter}${prev.path ?? ""}`;
     process.env.TK_STUDIO_ROOT = studio;
-    const answer = (out: string) => { writeFileSync(join(bin, "out"), out); return launchStopGraceful(root, "eng-9"); };
+    const answer = (out: string, exit = 0) => { writeFileSync(join(bin, "out"), out); writeFileSync(join(bin, "exit"), String(exit)); return launchStopGraceful(root, "eng-9"); };
     try {
       expect(await answer('{"ok":true}\n')).toEqual({ ok: true, detail: "engine eng-9 stopping gracefully" });
       expect(readFileSync(join(bin, "argv"), "utf-8").split("\n").slice(0, -1)).toEqual(
         ["run", join(studio, "plugins", "tk-studio", "lib", "launch.py"), "stop", "--directory", root, "--run-id", "eng-9", "--graceful"]);
-      expect(await answer('{"ok":false,"error":"x"}\n')).toEqual({ ok: false, detail: "launch stop refused: x" });
-      const none = await answer("not json\n");
-      expect(none.ok).toBe(false);
-      expect(none.detail).toContain("no JSON");
+      expect(await answer('{"ok":false,"error":"x"}\n', 2)).toEqual({ ok: false, detail: "launch stop refused: x" });
+      const none = await answer("not json\n", 1);
+      expect(none).toEqual({ ok: false, detail: "launch stop failed: exit 1: not json" });
     } finally {
       process.env.PATH = prev.path;
       if (prev.root === undefined) delete process.env.TK_STUDIO_ROOT; else process.env.TK_STUDIO_ROOT = prev.root;

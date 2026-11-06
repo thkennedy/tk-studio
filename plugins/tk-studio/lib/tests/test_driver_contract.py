@@ -3369,6 +3369,52 @@ class DriverContractTestCase(unittest.TestCase):
                        if line.startswith("| Story / rulings"))
         self.assertRegex(stories, r"Story 37\.4, Story 37\.5(, Story 37\.\d+)* \(Epic 37\)")
 
+    def test_0_1_32_story_37_6_one_stop_path_and_the_gates_blind_spots(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.33**", header)
+        self.assertEqual(header.count("0.1.32 (Story 37.6, additive)"), 1)
+        self.assertLess(header.index("0.1.32 (Story 37.5, additive)"),
+                        header.index("0.1.32 (Story 37.6, additive)"))
+        self.assertLess(header.index("0.1.32 (Story 37.6, additive)"),
+                        header.index("0.1.33 (DW-170, additive)"))
+        clause = " ".join(header[header.index("0.1.32 (Story 37.6, additive)"):header.index("0.1.33 (DW-170, additive)")].split())
+        for phrase in ("one stop path and the gate's blind spots", "`engineStopArgv`", "`--directory` on both tiers",
+                       "`rearmFailedLine`", "dynamic imports", "`enginemcp → api` residual cut", "`withMcpStop` pinned",
+                       "named skip lines", "(0 green; 1 red, inconclusive or skipped; 2 refused)", "— additive;"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        self.assertEqual(flat.count("**0.1.32 (Story 37.6, additive).**"), 1)
+        self.assertLess(flat.index("**0.1.32 (Story 37.5, additive).**"), flat.index("**0.1.32 (Story 37.6, additive).**"))
+        self.assertLess(flat.index("**0.1.32 (Story 37.6, additive).**"), flat.index("**0.1.33 (DW-170, hole 111, additive).**"))
+        note = flat[flat.index("**0.1.32 (Story 37.6, additive).**"):flat.index("**0.1.33 (DW-170, hole 111, additive).**")]
+        for phrase in ("AI-8, A1, A2 and B8", "DW-133, DW-162, DW-164",
+                       "**The one stop argv (AC1):**", "`runners.ts engineStopArgv(root, eid, where, {graceful?, env?})`",
+                       "`--directory` always present",
+                       "`uv run <plugin>/lib/launch.py stop --directory <root> --run-id <eid> [--graceful]`",
+                       "`sbx exec <sb> uv run <vm studio>/plugins/tk-studio/lib/launch.py stop --directory <vm root> --run-id <eid> [--graceful]`",
+                       "never a `path.join`", "the sweep's hard stop, no `--graceful`",
+                       "`engineRoot(run)` for an injected stopper, `servedRoot(run)` otherwise",
+                       "success on both tiers is exit 0", "`launch stop refused: <error>`", "`launch stop failed: …`",
+                       "`MSYS_NO_PATHCONV=1`", "`<studio-root>` placeholders",
+                       "`rearmFailedLine` names it", "`--directory` included (DW-162)",
+                       "**The cycle test (A1, DW-164):**", "`await import(\"./x\")`, over comment-stripped source",
+                       "cut, not allowlisted", "the leaf `bind.ts`", "imports it statically",
+                       "`withMcpStop` is exported and pinned to inject `stopEngineMcp`",
+                       "**The named skip (B8):**", "`, <S> skip`", "`== supervisor: <rel> skip: <describe > test>`",
+                       "`== supervisor: <rel> skip: <S> test(s), names not reported`", "a skip is never silent",
+                       "the skip lines are not verdicts",
+                       "**The three exits (DW-133):**",
+                       "exits 0 green; 1 red, inconclusive or skipped (the leg did not pass); 2 refused",
+                       "the 0.1.28 line stays as history",
+                       "**The serve process:**", "Every other field, kind and route is unchanged."):
+            self.assertIn(phrase, note)
+        # 0.1.28's exit list stays as history
+        self.assertIn("exit 0 green, 1 red or skipped, 2 a refusal", flat)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertRegex(stories, r"Story 37\.5, Story 37\.6(, Story 37\.\d+)* \(Epic 37\)")
+
     def test_0_1_33_dw_170_the_sandbox_tier_signs_itself_in_again(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))

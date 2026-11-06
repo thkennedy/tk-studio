@@ -331,6 +331,9 @@ const SUPERVISOR_REFUSAL = /^(?:cannot create the temp folder |the temp folder .
 /** The reason `verify_host.py` prints before a gate runs (`app_changed`): `<rel> changed since <sha>`, or a git
  * failure `…; running anyway` (which can carry an `rc=` or `timed out`) — never a verdict. */
 const GATE_REASON = /; running anyway$|^\S+ changed since \S*$/;
+/** Story 37.6 (B8): a named skip line (`<rel> skip: <name>`, or its count fallback) is never a verdict, whatever the test's
+ * name holds (`timed out`, `rc=`, `1 fail`, `FAILED`). */
+const SKIP_LINE = /^\S+ skip: /;
 /** `verify_host.py`'s failing-gate tail header (`== <name> failed (rc=N); last N lines:`, no `: ` after the name, so
  * a reason line's `git ls-files failed (rc=N)` never matches): the tails after it repeat child output (and the
  * supervisor's refusals), so the scan stops there. */
@@ -348,7 +351,7 @@ export function verdictLines(stdout: string): string[] {
     if (!m || line.includes("(cwd ")) continue;
     const rest = m[2]!;
     if (GATE_VERDICT.test(rest)) { lines.push(clip(line)); continue; }
-    if (m[1] !== "supervisor" || GATE_REASON.test(rest)) continue;
+    if (m[1] !== "supervisor" || GATE_REASON.test(rest) || SKIP_LINE.test(rest)) continue;
     if (SUPERVISOR_RED.test(rest) || SUPERVISOR_REFUSAL.test(rest)) lines.push(clip(line));
   }
   return lines;

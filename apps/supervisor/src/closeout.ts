@@ -115,14 +115,14 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { load as loadYaml } from "js-yaml";
-import { notifier, pluginRoot, sbxBin, studioRoot } from "./env";
+import { notifier, sbxBin } from "./env";
 import { canonicalPr, isWithin, notify, NOTICE_MAX_BYTES, sendText, TRUNCATED_MARKER, type EndNotice } from "./hygiene";
 import { hostVerify, inconclusiveReason, isInconclusive, isRed, isSlice, legHistory, redReason, type HostVerifyResult, type LegHistoryEntry } from "./hostverify";
 import { engineRoot, isSweep, isTerminal, RunTerminal, selfOwner, servedRoot, STUDIO_END_RETRY_LIMIT, type EngineWhere, type Owner, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
 import { HOLD_TIMEOUT_S, parseEnginePid, sameStart, type HoldChild } from "./sandbox";
 import { lastJsonObject, runProcess, toVmPath, type RunResult } from "./server";
 import { applyTransition, closeOut, closeOutDetail, engineState, finishStudio, killedEngine, launchedCloseOutInput, meteredCost, priorPr, recordedVerify, release, runner, studioScript, uvRunner, type PendingTransition, type WorktreeDeps } from "./worktree";
-import { stopEngine } from "./runners";
+import { engineStopArgv, stopEngine } from "./runners";
 
 type Env = Record<string, string | undefined>;
 
@@ -1091,22 +1091,15 @@ function handBack(queue: Queue, runId: string, engineRunId: string, result: unkn
 /** The `graceful-stop` detail when the resume never rewrote `engine.pid`. */
 export const REARM_SKIPPED = "engine.pid not rewritten by the resume: re-arm skipped";
 
-/** The notifier line of a re-arm skipped or failed: the resumed engine runs with no graceful stop. */
-export const rearmFailedLine = (runId: string, engineRunId: string, detail: string): string =>
-  oneLine(`supervisor: run ${runId}: the graceful stop was not re-armed on resumed engine ${engineRunId} (${detail}): it may carry into the next story; re-issue \`launch.py stop --graceful --run-id ${engineRunId}\``);
+/** The notifier line of a re-arm skipped or failed: the resumed engine runs with no graceful stop. Story 37.6 (DW-162): it
+ * ends with the builder's command on the run's tier (`gracefulStopCommand`, `--directory` included). */
+export const rearmFailedLine = (run: Pick<QueueRun, "run_id" | "root" | "worktree" | "prefix" | "tier" | "sandbox">, engineRunId: string, detail: string, env: Env = process.env): string =>
+  oneLine(`supervisor: run ${run.run_id}: the graceful stop was not re-armed on resumed engine ${engineRunId} (${detail}): it may carry into the next story; re-issue \`${gracefulStopCommand(run, engineRunId, env)}\``);
 
-/** Story 35.2: re-arm a graceful stop in force on the resumed engine, once, and record it. Only once the resume
- * rewrote `engine.pid`: bmad-loop clears `stop-request.json` just before that write, so a stop sent earlier could
- * be deleted while recorded ok — unrewritten, the call is skipped and `rearmed: false` recorded. A skipped or
- * failed (`ok: false`) re-arm also sends one notifier line, its outcome the event's `notify`. Never throws. */
-async function rearmStop(queue: Queue, run: QueueRun, deps: ResumeDeps, pidRewritten: boolean): Promise<void> {
-  const id = run.engine_run_id!;
-  if (!pidRewritten) {
-    const notify = await sendLine(deps, rearmFailedLine(run.run_id, id, REARM_SKIPPED));
-    try { queue.note(run.run_id, "graceful-stop", { engine_run_id: id, rearmed: false, ok: false, detail: REARM_SKIPPED, notify }); }
-    catch { /* not recorded */ }
-    return;
-  }
+/** Story 37.6 (A2): the one graceful stop `armStop` and `rearmStop` send, on the run's tier. The root rule stays explicit:
+ * an injected seam (`deps.launchStop`) is told `engineRoot(run)`; the default `stopEngine` resolves `servedRoot(run)`. A
+ * refusal or a throw is `ok: false` (never retried), the detail clipped. Never throws. */
+async function gracefulStop(run: QueueRun, id: string, deps: WorktreeDeps & { launchStop?: GracefulStopper }): Promise<{ ok: boolean; detail: string }> {
   let r: { ok: boolean; detail: string };
   try {
     // Story 36.3 (DW-120): on the run's tier, an injected seam told where; a refusal (a dead engine's `GracefulStopError`) is `ok: false`, never retried.
@@ -1116,8 +1109,23 @@ async function rearmStop(queue: Queue, run: QueueRun, deps: ResumeDeps, pidRewri
       r = answer === "stopped" ? { ok: true, detail: `engine ${id} stopping gracefully` } : { ok: false, detail: answer };
     }
   } catch (e) { r = { ok: false, detail: clip(message(e)) }; }
-  const ok = r.ok === true, detail = clip(String(r.detail ?? ""), 500);
-  const notify = ok ? undefined : await sendLine(deps, rearmFailedLine(run.run_id, id, detail));
+  return { ok: r.ok === true, detail: clip(String(r.detail ?? ""), 500) };
+}
+
+/** Story 35.2: re-arm a graceful stop in force on the resumed engine, once, and record it. Only once the resume
+ * rewrote `engine.pid`: bmad-loop clears `stop-request.json` just before that write, so a stop sent earlier could
+ * be deleted while recorded ok — unrewritten, the call is skipped and `rearmed: false` recorded. A skipped or
+ * failed (`ok: false`) re-arm also sends one notifier line, its outcome the event's `notify`. Never throws. */
+export async function rearmStop(queue: Queue, run: QueueRun, deps: ResumeDeps, pidRewritten: boolean): Promise<void> {
+  const id = run.engine_run_id!;
+  if (!pidRewritten) {
+    const notify = await sendLine(deps, rearmFailedLine(run, id, REARM_SKIPPED, envOf(deps)));
+    try { queue.note(run.run_id, "graceful-stop", { engine_run_id: id, rearmed: false, ok: false, detail: REARM_SKIPPED, notify }); }
+    catch { /* not recorded */ }
+    return;
+  }
+  const { ok, detail } = await gracefulStop(run, id, deps);
+  const notify = ok ? undefined : await sendLine(deps, rearmFailedLine(run, id, detail, envOf(deps)));
   try { queue.note(run.run_id, "graceful-stop", { engine_run_id: id, rearmed: true, ok, detail, tier: run.tier, ...(notify ? { notify } : {}) }); }
   catch { /* not recorded */ }
 }
@@ -1169,18 +1177,15 @@ export const enginePidKnown = (events: readonly QueueEvent[]): boolean => {
   return !latest || typeof latest.detail?.pid === "number";
 };
 
-/** The graceful stop as a command the operator can run on the run's tier (`stopEngineAt`'s argv): on sbx through `sbx exec`
- * with the VM paths (the host has no `bmad-loop`), else `uv run` on the host. A path that cannot be derived is left as a
- * placeholder or as recorded. Never throws. */
+/** The graceful stop as a command the operator can run on the run's tier: Story 37.6 (AC1), the builder's argv
+ * (`runners.ts engineStopArgv`) joined as text, on sbx through `sbx exec` with the VM paths (the host has no `bmad-loop`)
+ * behind `MSYS_NO_PATHCONV=1`, else `uv run` on the host; an argument with whitespace quoted. A path that cannot be
+ * derived is left as a placeholder (`<studio-root>`) or as recorded. Never throws. */
 export function gracefulStopCommand(run: Pick<QueueRun, "root" | "worktree" | "prefix" | "tier" | "sandbox">, engineRunId: string, env: Env = process.env): string {
-  const attempt = (f: () => string, otherwise: string) => { try { return f(); } catch { return otherwise; } };
   const arg = (s: string) => (/\s/.test(s) ? `"${s}"` : s);
-  const root = engineRoot(run), stop = (script: string, dir: string) => `uv run ${arg(script)} stop --directory ${arg(dir)} --run-id ${engineRunId} --graceful`;
-  if (run.tier === "sbx" && run.sandbox) {
-    const studio = attempt(() => toVmPath(studioRoot(env)).replace(/\/+$/, ""), "<studio-root>");
-    return `MSYS_NO_PATHCONV=1 sbx exec ${run.sandbox} ${stop(`${studio}/plugins/tk-studio/lib/launch.py`, attempt(() => toVmPath(root), root))}`;
-  }
-  return stop(join(attempt(() => pluginRoot(env), join("<studio-root>", "plugins", "tk-studio")), "lib", "launch.py"), root);
+  const cmd = engineStopArgv(engineRoot(run), engineRunId, { tier: run.tier, sandbox: run.sandbox }, { graceful: true, env, placeholders: true });
+  const text = [cmd.bin, ...cmd.argv].map(arg).join(" ");
+  return run.tier === "sbx" && run.sandbox ? `MSYS_NO_PATHCONV=1 ${text}` : text;
 }
 
 /** The notifier line of a refused arming: the engine runs with no graceful stop, the refusal is never retried, and the line
@@ -1215,15 +1220,7 @@ export async function armStop(queue: Queue, run: QueueRun, figure: number, deps:
   if (!id || arming.has(id)) return;
   arming.add(id);
   try {
-    let r: { ok: boolean; detail: string };
-    try {
-      if (deps.launchStop) r = await deps.launchStop(engineRoot(run), id, { tier: run.tier, sandbox: run.sandbox });
-      else {
-        const answer = await stopEngine(run, deps, { graceful: true });
-        r = answer === "stopped" ? { ok: true, detail: `engine ${id} stopping gracefully` } : { ok: false, detail: answer };
-      }
-    } catch (e) { r = { ok: false, detail: clip(message(e)) }; }
-    const ok = r.ok === true, detail = clip(String(r.detail ?? ""), 500);
+    const { ok, detail } = await gracefulStop(run, id, deps);
     const notify = ok ? undefined : await sendLine(deps, armRefusedLine(run, id, detail, envOf(deps)));
     try { queue.note(run.run_id, STOP_ARMED, { figure, engine_run_id: id, ok, detail, tier: run.tier, ...(notify ? { notify } : {}) }); }
     catch { /* not recorded */ }
@@ -1239,7 +1236,7 @@ async function resumeDuties(queue: Queue, run: QueueRun, stopInForce: boolean, p
     if (!runsStories(defn)) return;
     const figure = rhythmOf(defn);
     if (!stopInForce && figure) {
-      if (!pidRewritten) await sendLine(deps, rearmFailedLine(run.run_id, run.engine_run_id!, REARM_SKIPPED));
+      if (!pidRewritten) await sendLine(deps, rearmFailedLine(run, run.engine_run_id!, REARM_SKIPPED, envOf(deps)));
       else if (figure === 1) { // a figure N > 1 is re-armed by the pass, when its count is met
         const events = queue.events(run.run_id);
         const since = events.findLast((e) => e.kind === "engine-resume")?.seq ?? 0;

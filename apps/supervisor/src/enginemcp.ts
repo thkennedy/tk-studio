@@ -17,7 +17,7 @@
  *   refusals  checked in this order, nothing started on any, the run ending `blocked` with the key in its reason: `engine-mcp:no-config` (no or a malformed
  *             `engine.mcp`), `engine-mcp:no-mcp-json` (no `.mcp.json` at the base, or no `mcpServers.<name>`),
  *             `engine-mcp:no-engine` (`GODOT` unset or naming no file), `engine-mcp:start-failed` (a forwarder
- *             bind outside the tailnet (`checkBind`, 100.64.0.0/10) or a loopback port already answering, both
+ *             bind outside the tailnet (bind.ts `checkBind`, 100.64.0.0/10) or a loopback port already answering, both
  *             refused before anything is spawned; the child exits, or its port does not answer within the bound;
  *             the forwarder cannot bind — whatever was spawned is killed).
  *   start     the measured launch shape of the pick (`hi-godot/godot-ai`, `kb/engine-mcp-godot.md`), in this order:
@@ -71,6 +71,7 @@ import { connect, createServer } from "node:net";
 import { load as loadYaml } from "js-yaml";
 import { dirname } from "node:path";
 import { ENGINE_MCP_START, ENGINE_MCP_STOP } from "./enginemcp-kinds";
+import { checkBind } from "./bind";
 import { apiBind, engineMcpPort } from "./env";
 import { showAtBase as gitShowAtBase } from "./gitshow";
 import { splitCommand } from "./hostverify";
@@ -126,7 +127,7 @@ export interface EngineMcpDeps {
   spawn?: (argv: string[], opts: { cwd: string; env: Env }) => McpChild;
   /** Spawns the editor child (default: as `spawn`, its window shown). */
   spawnEditor?: (argv: string[], opts: { cwd: string; env: Env }) => McpChild;
-  /** The forwarder bind's tailnet check (default api.ts `checkBind`, 100.64.0.0/10). Tests only may pass another,
+  /** The forwarder bind's tailnet check (default bind.ts `checkBind`, 100.64.0.0/10). Tests only may pass another,
    * to bind loopback. */
   checkBind?: (addr: string) => string;
   /** The bound on the port's first answer (ms, default 60 000) and its poll interval (ms, default 100). */
@@ -465,7 +466,7 @@ export async function startEngineMcp(queue: Queue, runId: string, deps: EngineMc
   // The forwarder binds the tailnet address only — refused before anything is spawned.
   let bind: string, port: number;
   try { bind = apiBind(env); } catch (e) { return failed(`no forwarder bind: ${clip(message(e))}`); }
-  try { bind = (deps.checkBind ?? (await import("./api")).checkBind)(bind); }
+  try { bind = (deps.checkBind ?? checkBind)(bind); }
   catch (e) { return failed(`the forwarder bind '${bind}' is refused: ${clip(message(e))}`); }
   // The forwarder's port: a set TK_SUPERVISOR_ENGINE_MCP_PORT keeps it fixed; unset is 0, a per-run bind.
   try { port = engineMcpPort(env); } catch (e) { return failed(clip(message(e))); }

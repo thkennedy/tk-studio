@@ -65,7 +65,7 @@ export function supervisorConfigPath(env: Env = process.env): string | undefined
 // ------------------------------------------------------------ the HTTP API (Story 22.1)
 //
 //   TK_SUPERVISOR_BIND   the Tailscale address the API binds (required; inside 100.64.0.0/10 —
-//                        checked by api.ts `checkBind`)
+//                        checked by bind.ts `checkBind`)
 //   TK_SUPERVISOR_PORT   the API's port (optional, default 8787)
 //   TK_SUPERVISOR_TOKEN  the bearer token (required) — never logged, never rendered
 //   TK_SUPERVISOR_ENGINE_MCP_PORT  Story 34.5: the engine MCP forwarder's port on TK_SUPERVISOR_BIND (optional,
@@ -96,7 +96,7 @@ export class ApiTokenMissing extends Error {
   }
 }
 
-/** The address the API binds, as set (unchecked here: `checkBind` refuses a non-tailnet address). */
+/** The address the API binds, as set (unchecked here: bind.ts `checkBind` refuses a non-tailnet address). */
 export function apiBind(env: Env = process.env): string {
   const bind = env.TK_SUPERVISOR_BIND?.trim();
   if (!bind) throw new ApiBindMissing();

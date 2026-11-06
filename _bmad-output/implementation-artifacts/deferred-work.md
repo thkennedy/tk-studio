@@ -1126,7 +1126,7 @@ source_spec: `36-1-one-verdict-for-every-consumer-spec.md`
 location: apps/supervisor/src/cli.ts:2658, :2667; plugins/tk-studio/contracts/driver-contract.md:396
 severity: low
 reason: `cli.ts` derives `green` from the leg and returns `green ? 0 : 1`, so an inconclusive leg exits 1, and no contract note states this. The contract's re-run exit list (`driver-contract.md:396`, in the 0.1.28 note) still reads "1 red or skipped"; that note is history and stays as written, so the statement belongs in a current version's note.
-status: open
+status: resolved 2026-11-06 by Story 37.6
 
 ### DW-134: The 0.1.31 note says an inconclusive leg ends a sweep `partial` unconditionally, while `sweepEndState`'s `blocked` rules (no triage, no bundle landed) apply first.
 origin: spec-deferred 6a5dfd428d7c
@@ -1364,7 +1364,7 @@ source_spec: `36-6-setup-and-the-launch-check-by-evidence-spec.md`
 location: apps/supervisor/src/closeout.ts:1068
 severity: low
 reason: Deferral class (a), filed by the consult of 2026-10-31T19:40:00Z. `launch.py stop` declares `--directory` as required, and on the sbx tier the host has no `bmad-loop`. The line predates this story; `armRefusedLine` was fixed here and `gracefulStopCommand` is the form to reuse.
-status: open
+status: resolved 2026-11-06 by Story 37.6
 
 ### DW-163: Follow-up review still recommended for 36-6-setup-and-the-launch-check-by-evidence after the damping cap was spent
 origin: review-budget-followup
@@ -1380,7 +1380,7 @@ source_spec: `36-7-the-cycles-cut-and-the-docs-caught-up-spec.md`
 location: apps/supervisor/src/cli.ts:626
 severity: low
 reason: Category (b), a contract line left partly unpinned: "the run's engine MCP stops at its release". The patch's `releaseWiringFaults` covers the callers, so removing the injection from `withMcpStop`'s body fails no test.
-status: open
+status: resolved 2026-11-06 by Story 37.6
 
 ### DW-165: DW-131's Jira stage-log half has no entry: a sweep bundle has no Jira story, so its engine passes post no stage-log row.
 origin: retrospective C8 (`_bmad-output/specs/spec-epic-36/RETROSPECTIVE.md`:77)
