@@ -234,6 +234,10 @@ DRIFT: the contract's `verdicts` sentence describes the patched line rules (tail
 | review | 1 | 2026-11-05T22:58:50Z | 2026-11-05T23:18:11Z | 320e67ef-a33e-45c3-a5ec-6c1b83147db9 | claude-opus-5-5 | medium | 8297455 | 67571 | 5.7676 | completed |
 | review | 2 | 2026-11-05T23:18:11Z | 2026-11-05T23:37:12Z | d4fe1c79-c29b-40f6-8532-d3229f525ba9 | claude-opus-5-5 | medium | 9704628 | 80190 | 6.0487 | completed |
 | gate | 1 | 2026-11-05T23:37:13Z | 2026-11-05T23:40:02Z | 2a739513-5d65-458c-b185-1b76cc2ae4c0 | claude-opus-5-5 | medium | 2087165 | 12202 | 1.4235 | completed |
+| host-leg | 1 | 2026-11-05T23:40:09Z | 2026-11-06T00:40:09Z | — | — | — | — | — | — | red |
+| close-out | 1 | 2026-11-06T00:40:09Z | 2026-11-06T00:40:17Z | — | — | — | — | — | — | draft PR |
+| re-run | 1 | 2026-11-06T01:09:21Z | 2026-11-06T01:58:42Z | — | — | — | — | — | — | green |
+| merge | — | 2026-11-06T02:00:05Z | 2026-11-06T02:00:05Z | — | — | — | — | — | — | merged |
 
 ## Auto Run Result
 
