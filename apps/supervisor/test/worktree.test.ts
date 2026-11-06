@@ -11,9 +11,9 @@ import { checkoutKey, Queue, selfOwner, servedRoot } from "../src/queue";
 import { invokeSkill, runProcess, toVmPath, type RunResult, type Spawner } from "../src/server";
 import {
   baseBranch, closeOut, closeOutDetail, COPIED_RUNTIME, engineStatus, isDefaultBranch, launchedCloseOutInput, openPrUrl, originRepo, prBody, prepareWorktree, runBranch, sweepEngines, worktreePath, WorktreeFailed, type WorktreeDeps,
-  driftingPlanes, worktreeClean, editPrBody, markPrDraft, markPrReady, proofCommit, proofCommitDue,
+  driftingPlanes, worktreeClean, editPrBody, markPrDraft, markPrReady, proofCommit, proofCommitDue, treeClean, withRunWorktreeRollback,
 } from "../src/worktree";
-import { FRAMES_DIR, legVerdict, type PlayableJudge } from "../src/hostverify";
+import { FRAMES_DIR, legVerdict, type HostVerifyResult, type PlayableJudge } from "../src/hostverify";
 import { fakeGh, fakeSbx, gitRepo, testGit } from "./fakes";
 import { sliceRecorder } from "./helpers/slice";
 import { tempDir, track } from "./tmp";
@@ -192,10 +192,60 @@ describe("AC2: the untracked runtime is materialised by the studio's own motions
     for (const rel of [".bmad-loop/policy.toml", ".bmad-loop/routing.current.json"]) {
       expect(lstatSync(join(wt, rel)).isFile()).toBe(true);
       expect(lstatSync(join(wt, rel)).isSymbolicLink()).toBe(false);
-      expect(readFileSync(join(wt, rel), "utf-8")).toBe(readFileSync(join(fx.repo.checkout, rel), "utf-8"));
     }
+    expect(readFileSync(join(wt, ".bmad-loop", "routing.current.json"), "utf-8")).toBe(readFileSync(join(fx.repo.checkout, ".bmad-loop", "routing.current.json"), "utf-8"));
+    // Story 37.3 (DW-148): the worktree's policy differs by the engine's rollback alone; the checkout's copy is untouched.
+    expect(readFileSync(join(wt, ".bmad-loop", "policy.toml"), "utf-8")).toBe("policy = 1\n\n[scm]\nrollback_on_failure = true\n");
+    expect(readFileSync(join(fx.repo.checkout, ".bmad-loop", "policy.toml"), "utf-8")).toBe("policy = 1\n");
     expect(existsSync(join(wt, ".tk-studio", "config.local.yaml"))).toBe(false); // absent in the checkout: skipped silently
     expect(fx.head()).toEqual(fx.headBefore);
+  });
+
+  test("Story 37.3 (DW-148): the run worktree's policy reads `[scm] rollback_on_failure = true` (TOML-parsed), every other byte equal; the checkout keeps `false`", async () => {
+    const fx = await fixture({ baseRef: "main" });
+    const POLICY = "[run]\nsession_timeout_min = 90\n\n[scm]\nisolation = \"none\"           # none | worktree\nrollback_on_failure = false  # in-place recovery\npreserve_keep = 20\n\n[other]\nrollback_on_failure = false\n";
+    mkdirSync(join(fx.repo.checkout, ".bmad-loop"), { recursive: true });
+    writeFileSync(join(fx.repo.checkout, ".bmad-loop", "policy.toml"), POLICY);
+    const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+    const copy = readFileSync(join(wt, ".bmad-loop", "policy.toml"), "utf-8");
+    expect(copy).toBe(POLICY.replace("rollback_on_failure = false  # in-place", "rollback_on_failure = true  # in-place"));
+    const parsed = Bun.TOML.parse(copy) as any;
+    expect(parsed.scm).toEqual({ isolation: "none", rollback_on_failure: true, preserve_keep: 20 });
+    expect(parsed.other.rollback_on_failure).toBe(false); // only the `[scm]` table's key
+    expect(readFileSync(join(fx.repo.checkout, ".bmad-loop", "policy.toml"), "utf-8")).toBe(POLICY);
+    expect(existsSync(join(wt, ".bmad-loop", `policy.toml.tmp-${process.pid}`))).toBe(false);
+    expect(fx.queue.events(fx.run.run_id).find((e) => e.kind === "materialised")!.detail).toMatchObject({ copied: [".bmad-loop/policy.toml"] });
+  });
+
+  test("Story 37.3: the rollback edit's shapes — the key added under `[scm]`, the table appended, `true` kept as is", () => {
+    expect(withRunWorktreeRollback("[scm]\nisolation = \"none\"\n")).toBe("[scm]\nrollback_on_failure = true\nisolation = \"none\"\n");
+    expect(withRunWorktreeRollback("a = 1")).toBe("a = 1\n\n[scm]\nrollback_on_failure = true\n");
+    expect(withRunWorktreeRollback("")).toBe("[scm]\nrollback_on_failure = true\n"); // no policy: the table alone
+    expect(withRunWorktreeRollback("[scm]\nrollback_on_failure = true\n")).toBe("[scm]\nrollback_on_failure = true\n");
+    expect(withRunWorktreeRollback("[scm]\r\nrollback_on_failure = false\r\n")).toBe("[scm]\r\nrollback_on_failure = true\r\n");
+  });
+
+  test("Story 37.3: a copied policy that does not parse after the edit → `worktree policy` refused by name, the copy restored", async () => {
+    const fx = await fixture({ baseRef: "main" });
+    const BROKEN = "[scm]\nrollback_on_failure = maybe\n"; // no boolean to replace: the key added twice, which TOML refuses
+    mkdirSync(join(fx.repo.checkout, ".bmad-loop"), { recursive: true });
+    writeFileSync(join(fx.repo.checkout, ".bmad-loop", "policy.toml"), BROKEN);
+    await expect(prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps)).rejects.toThrow(/^worktree policy: \.bmad-loop\/policy\.toml rollback_on_failure = true refused \(does not parse: /);
+    const wt = worktreePath(fx.work, "proj", fx.run.run_id);
+    expect(readFileSync(join(wt, ".bmad-loop", "policy.toml"), "utf-8")).toBe(BROKEN);
+  });
+
+  test("Story 37.3 (DW-148): a checkout with no policy → the run worktree gets one holding only `[scm] rollback_on_failure = true`, unlisted in `copied`; the checkout still has none", async () => {
+    const fx = await fixture({ baseRef: "main" });
+    expect(existsSync(join(fx.repo.checkout, ".bmad-loop", "policy.toml"))).toBe(false);
+    const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+    const written = readFileSync(join(wt, ".bmad-loop", "policy.toml"), "utf-8");
+    expect(written).toBe("[scm]\nrollback_on_failure = true\n");
+    expect((Bun.TOML.parse(written) as any).scm).toEqual({ rollback_on_failure: true });
+    expect(existsSync(join(wt, ".bmad-loop", `policy.toml.tmp-${process.pid}`))).toBe(false);
+    const detail = fx.queue.events(fx.run.run_id).find((e) => e.kind === "materialised")!.detail as { copied: string[] };
+    expect(detail.copied).not.toContain(".bmad-loop/policy.toml");
+    expect(existsSync(join(fx.repo.checkout, ".bmad-loop", "policy.toml"))).toBe(false);
   });
 
   test("materialise: `tk install` at the pin runs only when the fresh worktree reports drift (hole 42), then `tk activate` clean", async () => {
@@ -366,6 +416,8 @@ describe("AC3: the engine-end sweep (operator-decisions §2)", () => {
     expect(pausedEv).toMatchObject({ kind: "paused", from_state: "running", to_state: "paused" });
     expect(pausedEv.detail).toMatchObject({ pr: "https://github.com/acme/widget/pull/42", closeout: { result: "draft PR", worktree: "kept" }, engine: { paused_stage: "review" } });
     expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).toContain("--draft");
+    // Story 37.3 (DW-148): the pause gets the leg for the landed commits; a skipped one (here the host tier) is no green, so a draft.
+    expect(fx.queue.events(fx.run.run_id).filter((e) => e.kind === "host-verify").map((e) => e.detail)).toEqual([expect.objectContaining({ skipped: true })]);
     expect(existsSync(fx.wt)).toBe(true);
     // The lock is kept: another run on the checkout waits on the paused run.
     const other = fx.queue.enqueue({ jobId: "k", root: fx.repo.checkout, definition: { id: "k" }, owner: me }).run;
@@ -400,7 +452,8 @@ describe("AC3: the engine-end sweep (operator-decisions §2)", () => {
     expect(fx.gh.calls().at(-2)!.argv).toEqual(["pr", "ready", "https://github.com/acme/widget/pull/42"]);
     expect(fx.gh.calls().at(-1)!.argv.slice(0, 4)).toEqual(["pr", "edit", "https://github.com/acme/widget/pull/42", "--body-file"]);
     // Story 35.1: the close-out's first body carries `Legs: 1 — close-out …` under the heading.
-    expect(fx.gh.calls().at(-1)!.body).toMatch(/## Host verify\n\nLegs: 1 — close-out skipped \S+\n\nSkipped: host-tier run: the worker ran on the host/);
+    // Story 37.3 (DW-148): the pause ran its own leg (skipped: host tier), so the body's history names both.
+    expect(fx.gh.calls().at(-1)!.body).toMatch(/## Host verify\n\nLegs: 2 — close-out skipped \S+; close-out skipped \S+\n\nSkipped: host-tier run: the worker ran on the host/);
     expect(existsSync(fx.wt)).toBe(false);
     expect(fx.queue.lock(fx.repo.checkout)).toBeNull();
     expect(fx.head()).toEqual(fx.headBefore);
@@ -752,16 +805,17 @@ describe("Story 27.4: the host verify leg runs before any PR opens", () => {
     expect(flag(fx.verbs[0]!, "--total-cost-usd")).toBe("0.25");
   });
 
-  test("red on a paused run's existing draft: no `host-verify` on the pause; at the end no `gh pr ready`, `gh pr edit <pr> --body-file` with the failures", async () => {
+  test("red on a paused run's existing draft: the pause's leg red (a draft); at the end a fresh leg, no `gh pr ready`, `gh pr edit <pr> --body-file` with the failures", async () => {
     const fx = await launchedSbx(RED);
     fx.answers.launch = { ok: true, run: { status: "running", paused_stage: "review", paused_reason: "escalation" } };
     expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
     expect(fx.get().state).toBe("paused");
-    expect(hv(fx)).toHaveLength(0); // a paused stop runs no leg
+    // Story 37.3 (DW-148): a clean paused tree runs the leg for the landed commits; red keeps the draft.
+    expect(hv(fx).map((e) => e.detail!.green)).toEqual([false]);
     expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).toContain("--draft");
     fx.answers.launch = { ok: true, run: { status: "finished" } };
     expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
-    expect(hv(fx)).toHaveLength(1);
+    expect(hv(fx)).toHaveLength(2); // the pause's leg is never reused for the end
     expect(fx.get().state).toBe("partial");
     const pr = "https://github.com/acme/widget/pull/42";
     expect(prCalls(fx).map((c) => c.argv[1])).toEqual(["list", "create", "ready", "edit"]);
@@ -862,20 +916,76 @@ describe("Story 27.4: the host verify leg runs before any PR opens", () => {
     expect(prCalls(fx).map((c) => c.argv[1])).toEqual(["list", "ready", "edit"]);
   });
 
-  test("green on a paused run's existing draft: at the end `gh pr ready <pr>` then `gh pr edit <pr> --body-file` carrying the green `## Host verify`", async () => {
+  test("Story 37.3 (DW-148): a dirty paused tree skips the leg (`paused: dirty tree`), the PR a draft, the uncommitted work left in place", async () => {
+    const fx = await launchedSbx(bunCmd("console.log('all green')"));
+    writeFileSync(join(fx.wt, "half.txt"), "half-written"); // the attempt's uncommitted work
+    fx.answers.launch = { ok: true, run: { status: "running", paused_stage: "dev", paused_reason: "rollback-manual-required" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(fx.get().state).toBe("paused");
+    expect(hv(fx).map((e) => e.detail)).toEqual([{ skipped: true, reason: "paused: dirty tree" }]);
+    expect(fx.argvs.some((a) => a.bin === process.execPath)).toBe(false); // the leg's command never ran
+    expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).toContain("--draft");
+    expect(fx.queue.events(fx.run.run_id).at(-1)!.detail).toMatchObject({ closeout: { result: "draft PR", host_verify: "skipped", worktree: "kept" } });
+    expect(readFileSync(join(fx.wt, "half.txt"), "utf-8")).toBe("half-written");
+    expect(testGit(fx.wt, "status", "--porcelain")).toContain("half.txt"); // never committed nor stashed
+  });
+
+  test("Story 37.3 (DW-148): a paused tree whose only uncommitted change is under `_bmad-output/` (the engine's protected artifacts) reads clean: the leg runs, the PR ready; a code file reads dirty", async () => {
+    const fx = await launchedSbx(bunCmd("console.log('all green')"));
+    mkdirSync(join(fx.wt, "_bmad-output", "specs", "spec-epic-1", "stages"), { recursive: true });
+    writeFileSync(join(fx.wt, "_bmad-output", "specs", "spec-epic-1", "stages", "1-1-x.jsonl"), "{}\n"); // the paused story's stage buffer
+    expect(await treeClean(fx.get(), fx.deps)).toBe(true);
+    fx.answers.launch = { ok: true, run: { status: "running", paused_stage: "review", paused_reason: "escalation" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(fx.get().state).toBe("paused");
+    expect(hv(fx).map((e) => e.detail!.green)).toEqual([true]);
+    expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).not.toContain("--draft");
+    expect(testGit(fx.wt, "status", "--porcelain")).toContain("_bmad-output/"); // left in place, never committed
+    writeFileSync(join(fx.wt, "code.ts"), "half-written");
+    expect(await treeClean(fx.get(), fx.deps)).toBe(false);
+  });
+
+  test("Story 37.3 (DW-148): pause 1 green → the PR opened ready; resumed, pause 2 on a dirty tree → `gh pr ready --undo` and `gh pr edit`, a draft again", async () => {
     const fx = await launchedSbx(bunCmd("console.log('all green')"));
     fx.answers.launch = { ok: true, run: { status: "running", paused_stage: "review", paused_reason: "escalation" } };
     expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
     expect(fx.get().state).toBe("paused");
+    expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).not.toContain("--draft");
+    // The engine resumed (`POST /runs/{id}/resume`) and its driver let go; then it pauses again with uncommitted work.
+    const launched = fx.queue.events(fx.run.run_id).findLast((e) => e.kind === "launched")!.detail!;
+    fx.queue.resumeFromPause(fx.run.run_id, "engine-resume", {});
+    fx.queue.note(fx.run.run_id, "launched", launched);
+    fx.queue.db.run("UPDATE runs SET owner_pid = NULL, owner_nonce = NULL WHERE run_id = ?", [fx.run.run_id]); // its driver gone
+    writeFileSync(join(fx.wt, "half.txt"), "half-written");
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(fx.get().state).toBe("paused");
+    expect(hv(fx).map((e) => e.detail!.reason ?? e.detail!.green)).toEqual([true, "paused: dirty tree"]);
+    const pr = "https://github.com/acme/widget/pull/42";
+    expect(prCalls(fx).map((c) => c.argv[1])).toEqual(["list", "create", "ready", "edit"]);
+    expect(prCalls(fx)[2]!.argv).toEqual(["pr", "ready", pr, "--undo"]);
+    expect(prCalls(fx)[3]!.argv.slice(0, 4)).toEqual(["pr", "edit", pr, "--body-file"]);
+    expect(fx.queue.events(fx.run.run_id).at(-1)!.detail).toMatchObject({ pr, closeout: { result: "draft PR", host_verify: "skipped", worktree: "kept" } });
+  });
+
+  test("green on a paused run: the pause's leg green opens the PR ready (DW-148); at the end `gh pr ready <pr>` then `gh pr edit <pr> --body-file` carrying the green `## Host verify`", async () => {
+    const fx = await launchedSbx(bunCmd("console.log('all green')"));
+    fx.answers.launch = { ok: true, run: { status: "running", paused_stage: "review", paused_reason: "escalation" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(fx.get().state).toBe("paused");
+    // Story 37.3 (DW-148): the clean paused tree's leg green: the PR opened ready, the worktree kept for the resume.
+    expect(hv(fx).map((e) => e.detail!.green)).toEqual([true]);
+    expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).not.toContain("--draft");
+    expect(fx.queue.events(fx.run.run_id).at(-1)!.detail).toMatchObject({ closeout: { result: "PR", host_verify: "green", worktree: "kept" } });
+    expect(fx.verbs).toEqual([]);
     fx.answers.launch = { ok: true, run: { status: "finished" } };
     expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
-    expect(hv(fx).map((e) => e.detail!.green)).toEqual([true]);
+    expect(hv(fx).map((e) => e.detail!.green)).toEqual([true, true]);
     const pr = "https://github.com/acme/widget/pull/42";
     expect(prCalls(fx).map((c) => c.argv[1])).toEqual(["list", "create", "ready", "edit"]);
     expect(prCalls(fx)[2]!.argv).toEqual(["pr", "ready", pr]);
     const edit = prCalls(fx)[3]!;
     expect(edit.argv.slice(0, 4)).toEqual(["pr", "edit", pr, "--body-file"]);
-    expect(edit.body).toMatch(/## Host verify\n\nLegs: 1 — close-out green \S+\n\nGreen: `/);
+    expect(edit.body).toMatch(/## Host verify\n\nLegs: 2 — close-out green \S+; close-out green \S+\n\nGreen: `/);
     expect(fx.get().state).toBe("complete");
     const ended = fx.queue.events(fx.run.run_id).find((e) => e.kind === "ended")!;
     expect(ended.detail).toMatchObject({ pr, closeout: { result: "PR", host_verify: "green", worktree: "removed" } });
@@ -1679,7 +1789,68 @@ describe("review pass 3: P1–P9", () => {
     fx.gh.answer({ open: [URL] });
     const out = await closeOut(fx.get(), { paused: true }, fx.deps);
     expect(out).toMatchObject({ pr: URL, draft: true, worktree: "kept" });
-    expect(fx.gh.calls().filter((c) => c.argv[0] === "pr").map((c) => c.argv[1])).toEqual(["list"]);
+    // Story 37.3 (DW-148): no green leg vouches for the pause: `gh pr ready --undo` (a no-op on a draft), the body regenerated.
+    const pr = fx.gh.calls().filter((c) => c.argv[0] === "pr");
+    expect(pr.map((c) => c.argv[1])).toEqual(["list", "ready", "edit"]);
+    expect(pr[1]!.argv).toEqual(["pr", "ready", URL, "--undo"]);
+  });
+
+  test("Story 37.3 (DW-148): a pause whose leg ran green on an already-open draft PR: `gh pr ready` then `gh pr edit` (never `--undo`)", async () => {
+    const fx = await fixture({ baseRef: "main" });
+    const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+    commitIn(wt, "a.txt", "work");
+    const out = await closeOut(fx.get(), { paused: true, existingPr: URL, verify: { command: "x", argv: ["x"], cwd: wt, exit: 0, duration_ms: 1, green: true, stdout_tail: [], stderr_tail: [] } }, fx.deps);
+    expect(out).toMatchObject({ pr: URL, worktree: "kept", host_verify: "green" });
+    expect(out.draft).toBeUndefined();
+    expect(out.error).toBeUndefined();
+    const pr = fx.gh.calls().filter((c) => c.argv[0] === "pr");
+    expect(pr.map((c) => c.argv[1])).toEqual(["ready", "edit"]);
+    expect(pr[0]!.argv).toEqual(["pr", "ready", URL]);
+    expect(pr[1]!.argv.slice(0, 4)).toEqual(["pr", "edit", URL, "--body-file"]);
+  });
+
+  test("Story 37.3 (DW-148): a PR an earlier green pause made ready, paused again non-green (dirty skip, red): returned to a draft (`gh pr ready --undo`), its body regenerated; `draft` only when the undo answers", async () => {
+    for (const kind of ["dirty", "red"] as const) {
+      const fx = await fixture({ baseRef: "main" });
+      const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+      commitIn(wt, "a.txt", "work");
+      const verify: HostVerifyResult = kind === "dirty" ? { skipped: true, reason: "paused: dirty tree" }
+        : { command: "x", argv: ["x"], cwd: wt, exit: 1, duration_ms: 1, green: false, stdout_tail: [], stderr_tail: ["1 failing"] };
+      const out = await closeOut(fx.get(), { paused: true, existingPr: URL, verify }, fx.deps);
+      expect(out).toMatchObject({ pr: URL, draft: true, worktree: "kept" });
+      expect(out.error).toBeUndefined();
+      const pr = fx.gh.calls().filter((c) => c.argv[0] === "pr");
+      expect(pr.map((c) => c.argv[1])).toEqual(["ready", "edit"]);
+      expect(pr[0]!.argv).toEqual(["pr", "ready", URL, "--undo"]);
+      expect(pr[1]!.argv.slice(0, 4)).toEqual(["pr", "edit", URL, "--body-file"]);
+    }
+    // The undo refused: never recorded a draft, the failure named (the body still regenerated).
+    const fx = await fixture({ baseRef: "main" });
+    const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+    commitIn(wt, "a.txt", "work");
+    fx.gh.answer({ fail: ["pr ready"] });
+    const out = await closeOut(fx.get(), { paused: true, existingPr: URL, verify: { skipped: true, reason: "paused: dirty tree" } }, fx.deps);
+    expect(out.draft).toBeUndefined();
+    expect(out.error).toMatch(/^gh pr ready --undo /);
+    expect(fx.gh.calls().filter((c) => c.argv[0] === "pr").map((c) => c.argv[1])).toEqual(["ready", "edit"]);
+  });
+
+  test("Story 37.3 (DW-148): a paused close-out on an existing PR with an inconclusive leg, or a killed engine: `gh pr ready --undo`, `draft`, the body regenerated", async () => {
+    const inconclusive: HostVerifyResult = { command: "c", argv: ["c"], cwd: "/w", exit: 0, duration_ms: 1, green: false, stdout_tail: [], stderr_tail: [],
+      engine: { verdict: "green", command: "e", duration_ms: 1, godot_dir: null },
+      playable: { verdict: "inconclusive", reason: "infrastructure: sbx: exec failed" } };
+    for (const kind of ["inconclusive", "killed"] as const) {
+      const fx = await fixture({ baseRef: "main" });
+      const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+      commitIn(wt, "a.txt", "work");
+      const out = await closeOut(fx.get(), kind === "inconclusive" ? { paused: true, existingPr: URL, verify: inconclusive } : { paused: true, existingPr: URL, killed: true }, fx.deps);
+      expect(out).toMatchObject({ pr: URL, draft: true, worktree: "kept" });
+      expect(out.error).toBeUndefined();
+      const pr = fx.gh.calls().filter((c) => c.argv[0] === "pr");
+      expect(pr.map((c) => c.argv[1])).toEqual(["ready", "edit"]);
+      expect(pr[0]!.argv).toEqual(["pr", "ready", URL, "--undo"]);
+      expect(pr[1]!.argv.slice(0, 4)).toEqual(["pr", "edit", URL, "--body-file"]);
+    }
   });
 
   test("P2 (b): a close-out whose recorded worktree is gone reads the commits and pushes the branch from the checkout; the removal counts as done", async () => {
@@ -1943,7 +2114,7 @@ describe("Story 28.5 (DW-25): a project below its git top-level is served at <wo
     expect(install).toMatchObject({ root: served, args: ["--directory", served] });
     expect(fx.studio.find((s) => s.script.endsWith("drift_check.py"))).toMatchObject({ root: served, args: ["--directory", served] });
     // The copied runtime from the project root lands under the served root.
-    expect(readFileSync(join(served, ".bmad-loop", "policy.toml"), "utf-8")).toBe("nested = true\n");
+    expect(readFileSync(join(served, ".bmad-loop", "policy.toml"), "utf-8")).toBe("nested = true\n\n[scm]\nrollback_on_failure = true\n"); // Story 37.3: the rollback on
     expect(existsSync(join(wt, ".bmad-loop", "policy.toml"))).toBe(false);
     // Once per queue run: a resumed or adopted run answers the served root again.
     expect(await prepareWorktree(fx.queue, fx.get(), "proj", fx.root, fx.deps)).toBe(served);
@@ -2485,6 +2656,38 @@ describe("Story 34.8: a slice run's proof folder and host-side commit, before th
       if (defn.type === "run-vertical-slice") expect(ev.detail!.assets).toEqual({ verdict: "skipped", reason: "no manifest", manifest: "assets/manifest.yaml", art_path: "art/greybox", steps: [] });
       else expect("assets" in ev.detail!).toBe(false);
     }
+  }, 30_000);
+  test("Story 37.3 (DW-148): a clean paused slice run's leg is the code leg only: no assets verb, the tree still clean, green → the PR ready", async () => {
+    const config = `vcs: git\nverify:\n  host: ${JSON.stringify(`"${process.execPath}" -e "console.log('ok')"`)}\n`;
+    const defn = { id: "run-epic-41", type: "run-vertical-slice", target: { skill: "tk-studio-launch" } };
+    const fx = await fixture({ baseRef: "main", files: { ".tk-studio/config.yaml": config, "assets/manifest.yaml": "schema: 1\n" } });
+    const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+    fx.queue.markVerbStarted(fx.run.run_id, "wake", [], { target: "skill", definition: defn });
+    await mirror(fx.queue, fx.run.run_id, { jobId: "j", defn }, {
+      ok: true, job_id: "j", run_id: "j-20261016T101010Z", target: "skill", state: "complete",
+      status_block: { status: "complete", intent: "tk-studio-launch", artifacts: [".bmad-loop/runs/E1"] }, total_cost_usd: 0.25, finish_deferred: true,
+    }, async () => ({}), fx.deps);
+    (fx.queue as any).db.query("UPDATE runs SET tier = 'sbx' WHERE run_id = ?").run(fx.run.run_id);
+    commitIn(wt, "a.txt", "engine: story one");
+    // Every step the leg spawns, its argv read from the spec file before it runs.
+    const spawned: string[][] = [];
+    const run: WorktreeDeps["run"] = async (bin, args, o) => {
+      if (bin === process.execPath && args[2] && existsSync(args[2])) { try { spawned.push(JSON.parse(readFileSync(args[2], "utf-8")).argv); } catch { /* not a step spec */ } }
+      return fx.deps.run!(bin, args, o);
+    };
+    fx.answers.launch = { ok: true, run: { status: "running", paused_stage: "review", paused_reason: "escalation" } };
+    expect(await sweepEngines(fx.queue, { ...fx.deps, run })).toEqual([fx.run.run_id]);
+    expect(fx.get().state).toBe("paused");
+    const ev = fx.queue.events(fx.run.run_id).filter((e) => e.kind === "host-verify");
+    expect(ev.map((e) => e.detail!.green)).toEqual([true]);
+    expect("assets" in ev[0]!.detail!).toBe(false);
+    expect(spawned.length).toBeGreaterThan(0);
+    expect(spawned.some((a) => a.some((x) => String(x).endsWith("assets.py")))).toBe(false);
+    expect(await treeClean(fx.get(), fx.deps)).toBe(true);
+    const c = fx.queue.events(fx.run.run_id).at(-1)!.detail as any;
+    expect(c.closeout).toMatchObject({ result: "PR", host_verify: "green", worktree: "kept" });
+    expect(c.closeout.host_commit).toBeUndefined(); // the slice proof stays with the final close-out
+    expect(fx.gh.calls().find((x) => x.argv[1] === "create")!.argv).not.toContain("--draft");
   }, 30_000);
 });
 

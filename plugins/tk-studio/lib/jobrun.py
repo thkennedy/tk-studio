@@ -257,13 +257,14 @@ def evaluate_stop(defn: dict, runs: list[dict]) -> str | None:
     """The stop condition that currently forbids scheduling, or None."""
     stop = defn["stop"]
     counted = [r for r in runs if "error" not in r]
-    if "max_runs" in stop and len(counted) >= stop["max_runs"]:
+    # Story 36.5 (DW-105): a block the supervisor caused (`own_block`) is not
+    # the job's outcome, so the condition reads the last run without one.
+    # Story 37.3 (DW-157): nor is it one of the job's runs toward `max_runs`.
+    outcomes = [r for r in counted if not r.get("own_block")]
+    if "max_runs" in stop and len(outcomes) >= stop["max_runs"]:
         return f"stop: max_runs ({stop['max_runs']}) reached"
     if "until" in stop and _now() >= _parse_iso(stop["until"]):
         return f"stop: until ({stop['until']}) passed"
-    # Story 36.5 (DW-105): a block the supervisor caused (`own_block`) is not
-    # the job's outcome, so the condition reads the last run without one.
-    outcomes = [r for r in counted if not r.get("own_block")]
     if "on_status" in stop and outcomes:
         last_state = outcomes[-1].get("state")
         if last_state in stop["on_status"]:

@@ -3209,6 +3209,55 @@ class DriverContractTestCase(unittest.TestCase):
                        if line.startswith("| Story / rulings"))
         self.assertRegex(stories, r"Story 37\.1, Story 37\.2(, Story 37\.\d+)* \(Epic 37\)")
 
+    def test_0_1_32_story_37_3_a_timed_out_session_keeps_its_stop_and_its_records(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.33**", header)
+        self.assertEqual(header.count("0.1.32 (Story 37.3, additive)"), 1)
+        self.assertLess(header.index("0.1.32 (Story 37.2, additive)"),
+                        header.index("0.1.32 (Story 37.3, additive)"))
+        self.assertLess(header.index("0.1.32 (Story 37.3, additive)"),
+                        header.index("0.1.33 (DW-170, additive)"))
+        clause = " ".join(header[header.index("0.1.32 (Story 37.3, additive)"):header.index("0.1.33 (DW-170, additive)")].split())
+        for phrase in ("a timed-out session keeps its stop and its records", "`rollback_on_failure`",
+                       "never a main checkout", "the PR ready on green", "`paused: dirty tree`", "`timeout` Stage Log row",
+                       "`finish --total-cost-usd`", "`own_block` outside `stop.max_runs`", "`arming-refused`", "— additive;"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        self.assertEqual(flat.count("**0.1.32 (Story 37.3, additive).**"), 1)
+        self.assertLess(flat.index("**0.1.32 (Story 37.2, additive).**"), flat.index("**0.1.32 (Story 37.3, additive).**"))
+        self.assertLess(flat.index("**0.1.32 (Story 37.3, additive).**"), flat.index("**0.1.33 (DW-170, hole 111, additive).**"))
+        note = flat[flat.index("**0.1.32 (Story 37.3, additive).**"):flat.index("**0.1.33 (DW-170, hole 111, additive).**")]
+        for phrase in ("sets `[scm] rollback_on_failure = true` in the run worktree's copy of `.bmad-loop/policy.toml`",
+                       "verified with `Bun.TOML.parse`", "so a main checkout keeps `false`",
+                       "the engine's rule, never re-implemented or filtered here", "`verify.py safe_rollback`",
+                       "only the untracked files new since that baseline removed", "`attempt-preserve/*`",
+                       "`kb/bmad-base-patches.md` §`run-worktree-rollback` as a policy setting, not a registered patch",
+                       "`stop-request-discarded` never follows a timeout", "the engine is not edited",
+                       "on green the PR opens ready", "`host-verify {skipped: true, reason: \"paused: dirty tree\"}`",
+                       "commits and stashes nothing", "This supersedes, for a paused run that is not a sweep, 0.1.31's pause close-out as a draft with no leg",
+                       "\"the PR stays a draft\", is unchanged", "`outcome` the session's status (`timeout`)",
+                       "`meter._session_usd`", "`report.py rollup` counts it in `by_stage`", "`<key>-s2` (`Split: …`)",
+                       "carries `--total-cost-usd <x>`", "`launchedCloseOutInput(…).costUsd`", "so the `job-run` line and the body agree",
+                       "no figure, no flag", "only runs without `own_block`", "`StopInForce.source = \"arming-refused\"`",
+                       "`story boundary: <key> landed; the one-story stop arming was refused (<detail>)`", "never a relaunch",
+                       "**The serve process:**", "Every other field, kind and route is unchanged.",
+                       "its `story-boundary` event records `graceful_stop: \"arming-refused\"`",
+                       "a pending request or a discarded one keeps `\"kept\"`",
+                       "an earlier session with no session id or no start stamp, from the journal else its transcript, is skipped",
+                       "`_backfill_rows`", "else the worker's `accounted` figure (`Queue.accountedCost(run, \"worker\")`",
+                       "reads that one rule (`cancelCostUsd`)",
+                       "returns to a draft (`gh pr ready --undo`, its body regenerated with `gh pr edit`)",
+                       "the key's value replaced inside `[scm]`, the key added under the header when missing, or the table "
+                       "appended when absent, the rest of the file unchanged",
+                       "the materialised copies and the BMAD artifact folder `_bmad-output/`",
+                       "A paused slice run's leg is the code leg only (no assets step; the slice proof stays with the final close-out)."):
+            self.assertIn(phrase, note)
+        self.assertNotIn("one line edited", note)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertRegex(stories, r"Story 37\.1, Story 37\.2, Story 37\.3(, Story 37\.\d+)* \(Epic 37\)")
+
     def test_0_1_33_dw_170_the_sandbox_tier_signs_itself_in_again(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))

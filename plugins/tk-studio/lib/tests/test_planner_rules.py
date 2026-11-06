@@ -159,6 +159,35 @@ class SettledShapeRuleTest(unittest.TestCase):
                         section3.index("**Contract tests (the Stories row).**"))
 
     @unittest.skipUnless(TASK_PLANNING.is_file(), "studio-pipeline plugin not in this checkout")
+    def test_story_37_3_task_planning_splits_a_story_over_the_dev_clock(self):
+        # Story 37.3 (AC2, CAP-8): a plan over the dev clock is split (two plans, a `<key>-s2`
+        # follow-on entry) or names the halt consult's split candidates under Risks
+        section3 = _flat(TASK_PLANNING.read_text(encoding="utf-8").split("## 3.", 1)[1].split("\n## 4.", 1)[0])
+        self.assertIn("**Over the dev clock (Story 37.3).**", section3)
+        self.assertIn("When the plan's Files list or its estimated passes exceed the dev clock "
+                      "(`session_timeout_min` in `.bmad-loop/policy.toml`, one dev session's limit)", section3)
+        self.assertIn("split it here: write two plans, `plans/<N>-<M>.md` for the part that fits the clock "
+                      "and `plans/<N>-<M>-s2.md` for the rest", section3)
+        self.assertIn("append a follow-on entry to `stories.yaml` right after the story's own", section3)
+        self.assertIn("Its id is `<key>-s2`, its description starts `Split:`", section3)
+        self.assertIn("(the remediation entry's shape, section 2)", section3)
+        self.assertIn("record `oversize` under Risks with the halt consult's split candidates", section3)
+        self.assertIn("asking the dev session to halt if the Files list grows past the band", section3)
+        self.assertNotIn("do not split it here", section3)
+        self.assertIn("The second plan's frontmatter reads `story: \"<N>-<M>-s2\"` and `key: \"<key>-s2\"`.", section3)
+        # the `-s2` entry's plan is its own: section 2's refresh-in-place never reaches the first half's plan
+        section2 = _flat(TASK_PLANNING.read_text(encoding="utf-8").split("## 2.", 1)[1].split("\n## 3.", 1)[0])
+        self.assertIn("A `<key>-s2` entry's plan is `plans/<N>-<M>-s2.md` (Story 37.3): that is the plan refreshed "
+                      "in place, and the first half's `plans/<N>-<M>.md` is never rewritten.", section2)
+        self.assertIn("Also read its `plans/<N>-<M>.md` (a `<key>-s2` story's is `plans/<N>-<M>-s2.md`)", section2)
+        # a relaunch (section 1) judges a `-s2` entry by its own plan, not its first half's
+        section1 = _flat(TASK_PLANNING.read_text(encoding="utf-8").split("## 1.", 1)[1].split("\n## 2.", 1)[0])
+        self.assertIn("A `<key>-s2` entry is judged by, and planned into, its own `plans/<N>-<M>-s2.md` "
+                      "(Story 37.3), never its first half's plan.", section1)
+        self.assertIn("Every entry's `invoke_dev_with` already names `plans/<N>-<M>.md` "
+                      "(a `<key>-s2` entry's names `plans/<N>-<M>-s2.md`)", section3)
+
+    @unittest.skipUnless(TASK_PLANNING.is_file(), "studio-pipeline plugin not in this checkout")
     def test_task_planning_plans_every_story_and_refuses_open_questions(self):
         # Story 35.2: the bootstrap plans every manifest entry in list order (section 3
         # each, the named story first); an un-noted open question of the story's CAPs is

@@ -30,7 +30,7 @@
  *                  in force (`gracefulStopInForce`, read before the archive) the commit, the meter and the engine
  *                  cost still run, but neither the archive nor the relaunch: the run stays `paused`, one
  *                  `story-boundary` event `{story_key, engine_run_id, code: "StoryBoundary", reason, graceful_stop:
- *                  "kept"}` and one notifier line once since the latest `paused`, and the pass skips the run after;
+ *                  "kept"}` (Story 37.3: `"arming-refused"` for a figure-1 run whose arming was refused) and one notifier line once since the latest `paused`, and the pass skips the run after;
  *                - landed with no verdict, or `escalate`: left `paused` for a human — one `awaiting-ruling`
  *                  event and one notification per (story key, engine run id); the page says "awaiting a
  *                  ruling"; Story 31.5: for a project with a `planning.jira` binding (`planning.jira.project_key`
@@ -106,6 +106,9 @@
  *              meters, archives and ends the run (`endAtBoundary`: push, PR, `finish`, `endEngine`, the pin released),
  *              `story-boundary` gaining `ended: true`; the event is written before the archive, so a retry after the run
  *              dir moved still ends rather than relaunches. A resume on the ended run answers `StoryLanded`.
+ *              Story 37.3 (DW-161): a figure-1 run-epic whose arming was refused for this engine (`stop-armed ok: false`)
+ *              ends there too (`StopInForce.source = "arming-refused"`, the end `story boundary: <key> landed; the
+ *              one-story stop arming was refused (<detail>)`), never relaunched.
  *
  * Every command is argv only — never a shell.
  */
@@ -390,8 +393,22 @@ export const STORY_BOUNDARY = "story-boundary";
 export const STORY_BOUNDARY_CODE = "StoryBoundary";
 
 /** Where a graceful stop in force was read: the pending `stop-request.json` (its `requested_at`, when it names
- * one) or a `stop-request-discarded` journal entry no `run-resume`/`run-start` follows (its time, when given). */
-export interface StopInForce { source: "stop-request" | "journal"; at?: string }
+ * one) or a `stop-request-discarded` journal entry no `run-resume`/`run-start` follows (its time, when given).
+ * Story 37.3 (DW-161): or `arming-refused`, a figure-1 run whose one-story stop arming was refused for this engine
+ * (`stop-armed ok: false`, its `detail`): the stop it owed is kept by ending the run at the boundary, never a relaunch. */
+export interface StopInForce { source: "stop-request" | "journal" | "arming-refused"; at?: string; detail?: string }
+
+/** Story 37.3 (DW-161): the stop a figure-1 run owed when its arming was refused for this engine (`stop-armed ok: false`),
+ * read from the queue (stable across the archive); undefined for any other run, an `ok: true` arming or no arming. */
+export function armingRefusedStop(queue: Queue, run: QueueRun): StopInForce | undefined {
+  const id = run.engine_run_id;
+  if (!id) return undefined;
+  const defn = queue.definition(run);
+  if (!isRunEpic(defn) || rhythmOf(defn) !== 1) return undefined; // the one predicate call (37.4 replaces it)
+  const refused = queue.events(run.run_id).findLast((e) => e.kind === STOP_ARMED && e.detail?.engine_run_id === id);
+  if (!refused || refused.detail?.ok !== false) return undefined;
+  return { source: "arming-refused", detail: String(refused.detail?.detail ?? "") || "no detail" };
+}
 
 /** Story 35.2: is a graceful stop in force for the engine run dir (see the header)? Reads only. Never throws. */
 export function gracefulStopInForce(runDir: string): StopInForce | undefined {
@@ -425,8 +442,9 @@ export function gracefulStopInForce(runDir: string): StopInForce | undefined {
 }
 
 /** The `story-boundary` reason a stop in force gives. */
-export const storyBoundaryReason = (stop: StopInForce): string =>
-  `a graceful stop is in force (requested ${stop.source === "stop-request" ? stop.at ?? "at an unknown time" : "before the pause, discarded at pause"}): relaunching would start the next story in this run`;
+export const storyBoundaryReason = (stop: StopInForce): string => stop.source === "arming-refused"
+  ? `the one-story stop arming was refused (${stop.detail ?? "no detail"}): relaunching would start the next story in this run`
+  : `a graceful stop is in force (requested ${stop.source === "stop-request" ? stop.at ?? "at an unknown time" : "before the pause, discarded at pause"}): relaunching would start the next story in this run`;
 
 /** The `story-boundary` notifier line. */
 export const storyBoundaryLine = (runId: string, key: string, reason: string): string =>
@@ -440,6 +458,13 @@ export function storyBoundaryRecorded(events: readonly QueueEvent[], storyKey: s
 
 /** Story 36.3: the end a boundary gives (`endEngine`'s reason). */
 export const storyBoundaryEnd = (key: string): string => `story boundary: ${key} landed under a graceful stop`;
+
+/** Story 37.3 (DW-161): the end of a figure-1 run whose arming was refused (`endEngine`'s reason). */
+export const armingRefusedEnd = (key: string, detail: string): string => `story boundary: ${key} landed; the one-story stop arming was refused (${detail})`;
+
+/** The end reason a stop gives at the boundary. */
+const boundaryEndOf = (key: string, stop: StopInForce | undefined): string =>
+  stop?.source === "arming-refused" ? armingRefusedEnd(key, stop.detail ?? "no detail") : storyBoundaryEnd(key);
 
 /** Story 36.3: what the boundary's end follows: the leg's verdict, for `closeOut`; `killed`: no leg ran, none recorded. */
 interface BoundaryLeg { verify?: HostVerifyResult; slice: boolean; legs: readonly LegHistoryEntry[]; killed: boolean }
@@ -467,7 +492,7 @@ async function boundaryLeg(queue: Queue, run: QueueRun, deps: PausedDeps): Promi
  * that failed still ends the run, `partial` naming the failure (as the engine sweep's tail records one, never a park). A
  * meter give-up (`meterGaveUp`) names the meter and keeps the worktree, its unharvested run dir with it. A write the queue
  * refused is recorded `pending`, written by the next engine sweep. Answers true. */
-async function endAtBoundary(queue: Queue, run: QueueRun, key: string, leg: BoundaryLeg, archiveError: string | undefined, deps: PausedDeps, o: { meterError?: string; keepWorktree?: boolean; notify?: Record<string, unknown> } = {}): Promise<boolean> {
+async function endAtBoundary(queue: Queue, run: QueueRun, key: string, leg: BoundaryLeg, archiveError: string | undefined, deps: PausedDeps, o: { meterError?: string; keepWorktree?: boolean; notify?: Record<string, unknown>; stop?: StopInForce } = {}): Promise<boolean> {
   const events = queue.events(run.run_id);
   const launched = (events.findLast((e) => e.kind === "launched")?.detail ?? {}) as Record<string, any>;
   const input = launchedCloseOutInput(events, run);
@@ -483,7 +508,7 @@ async function endAtBoundary(queue: Queue, run: QueueRun, key: string, leg: Boun
     ...(c.error ? [`close-out failed: ${c.error}`] : []),
   ];
   const state: TerminalState = why.length ? "partial" : "complete";
-  const reason = [storyBoundaryEnd(key), ...why].join("; ");
+  const reason = [boundaryEndOf(key, o.stop), ...why].join("; ");
   // Story 34.3: the playable-verify judge's cost, its own ledger line (as the engine sweep's tail).
   const judgeCost = verify && !verify.skipped ? verify.playable?.judge?.cost_usd : undefined;
   const finish = await finishStudio(run, state, reason, launched.status_block, c.pr, input.costUsd, deps,
@@ -526,14 +551,14 @@ async function sendGiveUpLine(queue: Queue, run: QueueRun, key: string, tries: n
  * releases the lock and the pin, never a park (`resume` is refused on it). The end runs no close-out, so the worktree and
  * any uncommitted work stay (and no late close-out takes it: that wants a `closeout: skipped`). Answers whether the run
  * ended. Never throws. */
-async function boundaryThrew(queue: Queue, run: QueueRun, key: string, e: unknown, deps: PausedDeps, step = "boundary-end", sent?: Record<string, unknown>): Promise<boolean> {
+async function boundaryThrew(queue: Queue, run: QueueRun, key: string, e: unknown, deps: PausedDeps, step = "boundary-end", sent?: Record<string, unknown>, stop?: StopInForce): Promise<boolean> {
   try {
     const raw = clip(message(e));
     const tries = countBoundaryFailure(queue, run, key, step, raw);
     if (tries <= STUDIO_END_RETRY_LIMIT) return false;
     const error = step === "boundary-end" ? raw : `${step} failed: ${raw}`;
     const notify = (await sendGiveUpLine(queue, run, key, tries, error, deps)) ?? sent;
-    const reason = `${storyBoundaryEnd(key)}; close-out gave up after ${tries} attempts: ${error}`;
+    const reason = `${boundaryEndOf(key, stop)}; close-out gave up after ${tries} attempts: ${error}`; // Story 37.3: the stop's own end
     const finish = await finishStudio(run, "partial", reason, undefined, undefined, undefined, deps);
     applyTransition(queue, run.run_id, { phase: "ended", state: "partial", reason, detail: { finish, notify, story_boundary: { story_key: key, ended: true, gave_up: true } } });
     await release(queue, run.run_id, deps);
@@ -548,7 +573,9 @@ async function noteStoryBoundary(queue: Queue, run: QueueRun, key: string, stop:
     if (storyBoundaryRecorded(queue.events(run.run_id), key, run.engine_run_id)) return;
     const reason = storyBoundaryReason(stop);
     if (line) await sendLine(deps, storyBoundaryLine(run.run_id, key, reason));
-    queue.note(run.run_id, STORY_BOUNDARY, { story_key: key, engine_run_id: run.engine_run_id, code: STORY_BOUNDARY_CODE, reason, graceful_stop: "kept", ended: true });
+    // Story 37.3 (DW-161): a refused arming kept no stop (none was armed): `graceful_stop: "arming-refused"`, never "kept".
+    const graceful = stop.source === "arming-refused" ? "arming-refused" : "kept";
+    queue.note(run.run_id, STORY_BOUNDARY, { story_key: key, engine_run_id: run.engine_run_id, code: STORY_BOUNDARY_CODE, reason, graceful_stop: graceful, ended: true });
   } catch { /* not recorded: the next pass tries again */ }
 }
 
@@ -565,8 +592,8 @@ async function meterGaveUp(queue: Queue, run: QueueRun, key: string, stop: StopI
     notify = await sendGiveUpLine(queue, run, key, tries, `meter failed: ${error}`, deps);
     if (stop) await noteStoryBoundary(queue, run, key, stop, deps, false);
     const leg = await boundaryLeg(queue, run, deps);
-    return await endAtBoundary(queue, run, key, leg, undefined, deps, { meterError: error, keepWorktree: true, ...(notify ? { notify } : {}) });
-  } catch (e) { return boundaryThrew(queue, run, key, e, deps, "boundary-end", notify); }
+    return await endAtBoundary(queue, run, key, leg, undefined, deps, { meterError: error, keepWorktree: true, ...(notify ? { notify } : {}), ...(stop ? { stop } : {}) });
+  } catch (e) { return boundaryThrew(queue, run, key, e, deps, "boundary-end", notify, stop); }
 }
 
 async function closeOutLanded(queue: Queue, run: QueueRun, l: Extract<Landing, { outcome: "close-out" }>, deps: PausedDeps): Promise<boolean> {
@@ -574,10 +601,11 @@ async function closeOutLanded(queue: Queue, run: QueueRun, l: Extract<Landing, {
   // Story 35.2: read before the archive moves the run dir. Story 36.3: a stop in force ends the run at the boundary; the
   // event, written before the archive, is what a retried pass reads once the run dir has moved. Read before the commit and
   // the meter too: under a stop their failure is bounded (`boundaryThrew`, `meterGaveUp`), never retried for ever on a run `resume` refuses.
-  const stop = gracefulStopInForce(runDirOf(run));
+  // Story 37.3 (DW-161): a figure-1 run whose arming was refused keeps the stop it owed: the boundary, never a relaunch.
+  const stop = gracefulStopInForce(runDirOf(run)) ?? armingRefusedStop(queue, run);
   const stopped = !!stop || storyBoundaryRecorded(queue.events(run.run_id), key, run.engine_run_id);
   const stepFailed = async (step: string, error: string): Promise<boolean> => {
-    if (stopped) return boundaryThrew(queue, run, key, error, deps, step);
+    if (stopped) return boundaryThrew(queue, run, key, error, deps, step, undefined, stop);
     noteFailed(queue, run, key, step, error);
     return false;
   };
@@ -595,8 +623,8 @@ async function closeOutLanded(queue: Queue, run: QueueRun, l: Extract<Landing, {
       // A failed archive never stops the end: recorded, and the end `partial` naming it (the lock and pin still released).
       const archive = await archiveStep(run, deps);
       if (!archive.ok) noteFailed(queue, run, key, "archive", archive.error);
-      return await endAtBoundary(queue, run, key, leg, archive.ok ? undefined : archive.error, deps);
-    } catch (e) { return boundaryThrew(queue, run, key, e, deps); }
+      return await endAtBoundary(queue, run, key, leg, archive.ok ? undefined : archive.error, deps, stop ? { stop } : {});
+    } catch (e) { return boundaryThrew(queue, run, key, e, deps, "boundary-end", undefined, stop); }
   }
   const storiesDone = journalStoriesDone(runDirOf(run)); // Story 36.6: read before the archive moves the journal
   const archive = await archiveStep(run, deps);

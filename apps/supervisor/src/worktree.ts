@@ -32,6 +32,9 @@
  *              `paused` run, has `launch.py status --directory <worktree> --run-id <engine>` probed;
  *              an ended engine is closed out and the run ended (`ended`, the PR URL in its detail), a
  *              paused one closed out as a draft and the run paused (`paused`, the URL on that event).
+ *              Story 37.3 (DW-148): a paused run (not a sweep) on a clean tree gets the host leg for the commits already
+ *              landed and its PR opens (or is marked) ready on green; a dirty paused tree skips the leg
+ *              (`paused: dirty tree`) and the PR stays a draft (one an earlier green pause marked ready returns to a draft). The pause's leg is never reused for the engine's later end.
  *              Story 27.4: an engine that ended on its own (not paused, not killed) first gets the host
  *              verify leg (`hostverify.ts`, a `host-verify` event); red ends the run `partial` naming the
  *              command and opens the PR as a draft carrying the failures (an open PR: `gh pr ready --undo` and
@@ -82,7 +85,7 @@
  * origin's repository (`GH_REPO`, parsed from `git remote get-url origin`). Credentials never reach an
  * event: a failing command's output is clipped and any URL userinfo redacted.
  */
-import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { stopEngineMcp } from "./enginemcp";
@@ -211,6 +214,49 @@ export const isDefaultBranch = (branch: string, theDefault: string): boolean => 
 /** The untracked runtime copied from the checkout into a worktree, each only when present. */
 export const COPIED_RUNTIME = [".bmad-loop/policy.toml", ".bmad-loop/routing.current.json", ".tk-studio/config.local.yaml"] as const;
 
+/** Story 37.3: the engine policy `materialise` edits (or writes) in a run worktree. */
+const RUN_POLICY = ".bmad-loop/policy.toml";
+
+/** Story 37.3 (DW-148): `[scm] rollback_on_failure = true` in a policy's text, every other byte kept: the key's value
+ * replaced inside `[scm]`, the key added right under the table header when the table lacks it, the table appended when
+ * the policy has none. What the engine then removes on a failed attempt is its own rule (`verify.py safe_rollback`). */
+export function withRunWorktreeRollback(text: string): string {
+  const lines = text.split("\n");
+  const header = (l: string) => /^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(#.*)?\r?$/.exec(l);
+  const scm = lines.findIndex((l) => header(l)?.[1] === "scm");
+  if (scm < 0) return `${text}${text === "" ? "" : text.endsWith("\n") ? "\n" : "\n\n"}[scm]\nrollback_on_failure = true\n`;
+  for (let i = scm + 1; i < lines.length && !header(lines[i]!); i++) {
+    const m = /^(\s*rollback_on_failure\s*=\s*)(true|false)\b/.exec(lines[i]!);
+    if (m) { lines[i] = `${m[1]}true${lines[i]!.slice(m[0].length)}`; return lines.join("\n"); }
+  }
+  const eol = lines[scm]!.endsWith("\r") ? "\r" : "";
+  lines.splice(scm + 1, 0, `rollback_on_failure = true${eol}`);
+  return lines.join("\n");
+}
+
+/** Story 37.3 (DW-148): the run worktree's policy (copied, or already there) edited atomically (a tmp file renamed onto
+ * it) and verified with `Bun.TOML.parse`; a worktree with none gets one holding only `[scm] rollback_on_failure = true`
+ * (the engine default is false). A policy that does not parse to `scm.rollback_on_failure = true` is restored (one that
+ * did not exist removed) and refused by name. */
+function runWorktreeRollback(policy: string): void {
+  const original = existsSync(policy) ? readFileSync(policy, "utf-8") : null;
+  const edited = withRunWorktreeRollback(original ?? "");
+  if (edited === original) return;
+  const tmp = `${policy}.tmp-${process.pid}`;
+  try {
+    mkdirSync(dirname(policy), { recursive: true });
+    writeFileSync(tmp, edited, "utf-8");
+    renameSync(tmp, policy); // a tmp file renamed onto a file: replaced on win32 too
+  } catch (e) { rmSync(tmp, { force: true }); throw new WorktreeFailed("policy", `${RUN_POLICY}: ${clip(message(e))}`); }
+  let ok = false, why = "scm.rollback_on_failure is not true";
+  try { ok = (Bun.TOML.parse(readFileSync(policy, "utf-8")) as any)?.scm?.rollback_on_failure === true; }
+  catch (e) { why = `does not parse: ${clip(message(e))}`; }
+  if (ok) return;
+  if (original === null) rmSync(policy, { force: true });
+  else writeFileSync(policy, original, "utf-8");
+  throw new WorktreeFailed("policy", `${RUN_POLICY} rollback_on_failure = true refused (${why}); ${original === null ? "the written policy removed" : "the original restored"}`);
+}
+
 /** What `materialise` did about the base: `tk install` ran because the fresh worktree reported drift, or
  * was skipped because the worktree was already at the pin (hole 42). */
 export type MaterialiseInstall = "ran" | "skipped: drift-clean";
@@ -246,7 +292,9 @@ export function driftingPlanes(out: Record<string, any> | null | undefined): str
  * of a project whose committed base is at the pin is already clean, and the install would only re-render
  * committed config into a dirty tree the launch refuses), the policy/routing/overlay files copied from the
  * checkout (when present), and `tk activate` clean inside it on the planes materialise judges (hole 75:
- * the `sandbox-login` plane is reported, never judged). Throws `WorktreeFailed` naming the step. */
+ * the `sandbox-login` plane is reported, never judged). Story 37.3 (DW-148): the worktree's policy then reads
+ * `[scm] rollback_on_failure = true` — copied or not, written when it has none (`runWorktreeRollback`; the
+ * checkout's copy untouched). Throws `WorktreeFailed` naming the step. */
 export async function materialise(checkout: string, worktree: string, deps: WorktreeDeps = {}): Promise<{ copied: string[]; install: MaterialiseInstall }> {
   const uv = uvRunner(deps);
   const driftCheck = async (): Promise<{ out: Record<string, any> | null; res: RunResult }> => {
@@ -277,6 +325,9 @@ export async function materialise(checkout: string, worktree: string, deps: Work
       copied.push(rel);
     }
   } catch (e) { throw new WorktreeFailed("copy", clip(message(e))); }
+  // Story 37.3 (DW-148): the run worktree's policy turns the engine's own rollback on (never a main checkout's), whether
+  // copied, already in the worktree, or absent (then written with only that table; `copied` never lists it).
+  runWorktreeRollback(join(worktree, RUN_POLICY));
   const { out: drift, res: last } = await driftCheck();
   if (!worktreeClean(drift)) throw new WorktreeFailed("activate drift", drift ? driftingPlanes(drift) : failed(last));
   return { copied, install };
@@ -570,6 +621,26 @@ const globLiteral = (path: string): string =>
 export const engineState = (prefix?: string | null): string[] =>
   prefix ? ENGINE_STATE.map((p) => p.replace(":(exclude,glob)", () => `:(exclude,glob)${globLiteral(prefix)}`)) : ENGINE_STATE;
 
+/** Story 37.3 (DW-148): the skipped leg's reason on a paused run whose worktree holds uncommitted work. */
+export const PAUSED_DIRTY = "paused: dirty tree";
+
+/** Story 37.3 (DW-148): the engine's protected BMAD artifact folder (`_protected_relpaths`: `output_folder`, holding
+ * `implementation_artifacts` and `planning_artifacts` in this layout), the last character bracketed as `ENGINE_STATE`. */
+const BMAD_ARTIFACTS = ":(exclude,glob)_bmad-outpu[t]/**";
+
+/** Story 37.3 (DW-148): does the run's worktree hold nothing uncommitted (the engine's runtime state and the materialised
+ * copies aside, as `wipCommit` stages, and the BMAD artifact folder `_bmad-output/` at the project's prefix, which the
+ * engine itself never counts as an attempt's dirtiness and keeps through a rollback: a pause's spec or stage buffer there
+ * leaves the tree clean)? A failed probe reads dirty (the leg never judges an unknown tree). Never throws. */
+export async function treeClean(run: Pick<QueueRun, "worktree" | "prefix">, deps: WorktreeDeps = {}): Promise<boolean> {
+  if (!run.worktree || !existsSync(run.worktree)) return false;
+  const artifacts = run.prefix ? BMAD_ARTIFACTS.replace(":(exclude,glob)", () => `:(exclude,glob)${globLiteral(run.prefix!)}`) : BMAD_ARTIFACTS;
+  try {
+    const st = await git(deps, run.worktree, ["status", "--porcelain", "--untracked-files=all", "--", ".", ...engineState(run.prefix), artifacts], 60);
+    return st.exit === 0 && st.stdout.trim() === "";
+  } catch { return false; }
+}
+
 /** Story 36.3: a paused bundle's WIP commit's message. */
 export const wipMessage = (bundleKey: string, runId: string) => `wip: sweep bundle ${bundleKey} paused (run ${runId})`;
 
@@ -666,6 +737,9 @@ export async function closeOut(
   // Story 35.3: an inconclusive leg (the judge's infrastructure failed) is neither: only green marks a PR ready, so it
   // opens a new PR as a draft and never marks an open one ready (the body still regenerated).
   const inconclusive = isInconclusive(input.verify);
+  // Story 37.3 (DW-148): a paused run's leg that ran green on the landed commits opens (or marks) the PR ready; a pause
+  // with no leg, a skipped one (a dirty tree) or a killed engine stays a draft.
+  const pausedGreen = input.paused && !input.killed && !!input.verify && !input.verify.skipped && input.verify.green === true && !inconclusive;
   if (input.verify) out.host_verify = legVerdict(input.verify);
   // Hole 34: a "no changes" end leaves the run branch at base_ref and never pushed; it is deleted with
   // the worktree (a branch that carried commits is on origin by then and stays, as the resume paths and
@@ -784,9 +858,26 @@ export async function closeOut(
           await editBody(existingPr, errors);
           if (errors.length) out.error = errors.join("; ");
         }
-      } else out.draft = true;
+      } else if (pausedGreen) {
+        // Story 37.3 (DW-148): a pause whose leg ran green on the landed commits: marked ready, its body regenerated.
+        const errors: string[] = [];
+        const r = await markPrReady(deps, at, existingPr);
+        if (r) errors.push(r);
+        await editBody(existingPr, errors);
+        if (errors.length) out.error = errors.join("; ");
+      } else {
+        // Story 37.3 (DW-148): a pause no green leg vouches for (no leg, a skipped one such as a dirty tree, inconclusive,
+        // a killed engine): a PR an earlier green pause marked ready returns to a draft (`gh pr ready --undo`, a no-op on a
+        // draft), its body regenerated; `draft` only once the undo answered. A failure of either is recorded, never thrown.
+        const errors: string[] = [];
+        const u = await markPrDraft(deps, at, existingPr);
+        if (u) errors.push(u);
+        else out.draft = true;
+        await editBody(existingPr, errors);
+        if (errors.length) out.error = errors.join("; ");
+      }
     } else {
-      const draft = input.paused || red || inconclusive || !!input.killed;
+      const draft = (input.paused && !pausedGreen) || red || inconclusive || !!input.killed;
       const r = await withBodyFile(body(), (bodyFile) => gh(deps, at, [
         "pr", "create", "--base", baseBranch(base), "--head", branch, "--title", `supervisor: ${run.job_id} (${run.run_id})`, "--body-file", bodyFile,
         ...(draft ? ["--draft"] : []),
@@ -846,7 +937,9 @@ export function priorPr(events: readonly QueueEvent[]): string | undefined {
  * close-out that crashed, or whose transition and record both failed, perhaps after removing the worktree. */
 export function recordedVerify(events: readonly QueueEvent[]): HostVerifyResult | undefined {
   const at = events.findLastIndex((e) => e.kind === "host-verify");
-  const d = at > events.findLastIndex((e) => e.kind === "launched") ? events[at]!.detail : undefined;
+  // Story 37.3 (DW-148): a pause's leg vouched for the commits landed at the pause, never for the engine's later end.
+  const since = Math.max(events.findLastIndex((e) => e.kind === "launched"), events.findLastIndex((e) => e.kind === "paused"));
+  const d = at > since ? events[at]!.detail : undefined;
   return d && typeof d === "object" ? d as unknown as HostVerifyResult : undefined;
 }
 
@@ -1112,7 +1205,8 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
       // run before the close-out pushes and opens the PR; one `host-verify` event, skipped or ran.
       // A `host-verify` already recorded for this engine completion is reused whatever a later kill says: the
       // leg never re-run (nor replaced by a `worktree gone` skip), no second event.
-      let verify = paused ? undefined : recordedVerify(events);
+      // Story 37.3 (DW-148): a pause (not a sweep's) gets the leg too, for the commits already landed.
+      let verify = recordedVerify(events);
       // An engine the supervisor killed runs no leg, its status ended (it handled TERM, or its worktree is
       // gone) or not (its end and reason computed as before).
       const notKilled = !st.detail.killed && !(await killedEngine(queue, run));
@@ -1127,9 +1221,16 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         verify = { skipped: true, reason: wip?.committed ? "paused sweep: WIP committed, leg skipped" : wip?.error ? `paused sweep: WIP not committed (${wip.error}), leg skipped` : "paused sweep: stop unanswered, leg skipped" };
         queue.note(run.run_id, "host-verify", verify as Record<string, unknown>);
       }
-      if (!verify && !paused && notKilled) {
+      // Story 37.3 (DW-148): never the leg on a half-written tree: a dirty paused tree skips it and the PR stays a draft.
+      if (!verify && paused && notKilled && !(await treeClean(run, deps))) {
+        verify = { skipped: true, reason: PAUSED_DIRTY };
+        queue.note(run.run_id, "host-verify", verify as Record<string, unknown>);
+      }
+      if (!verify && notKilled) {
         const guardS = run.worker_guard_s ?? (Number(queue.definition(run)?.guards?.max_wall_clock_seconds) || 600);
-        verify = await hostVerify(run, guardS, deps, slice ? { slice } : {});
+        // Story 37.3 (DW-148): a paused slice run's leg is the code leg only: no assets verb writes into the tree the engine
+        // resumes, and the slice proof stays with the final close-out (`!input.paused` in its commit guard).
+        verify = await hostVerify(run, guardS, deps, slice && !paused ? { slice } : {});
         queue.note(run.run_id, "host-verify", verify as Record<string, unknown>);
       }
       // A resumed run (its `launched` written when the resolve child exited) or a relaunched one (its latest

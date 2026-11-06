@@ -269,6 +269,139 @@ class EnginePassTests(StageFixture):
         self.assertEqual([r["stage"] for r in self.table()], ["dev"])
 
 
+    def test_story_37_3_a_timed_out_pass_then_its_retry_writes_both_rows(self):
+        """DW-148: the timed-out attempt's row (lost with the rollback's reset,
+        or never written) is backfilled by the retry's pass: `outcome: timeout`,
+        its tokens from state.json `usage`, its cost by `meter._session_usd`."""
+        import meter
+        self.spec.write_text(SPEC_TEXT, encoding="utf-8", newline="\n")
+        self.add_pass("dev", "dev", "2026-10-28T23:41:00Z", "2026-10-29T01:11:00Z",
+                      [usage_line("t1", inp=1, out=1)], status="timeout")
+        timed_out = self.state["tasks"][KEY]["sessions"][0]
+        # the transcript is gone with the removed worktree; the session record keeps its usage
+        Path(timed_out["transcript_path"]).unlink()
+        timed_out["usage"] = {"input_tokens": 100_000, "output_tokens": 50_000,
+                              "cache_read_tokens": 1_000_000, "cache_creation_tokens": 200_000}
+        self._save_state()
+        # no hook row for pass 1 (the spec as the reset left it); pass 2 is the retry
+        self.add_pass("dev", "dev", "2026-10-29T01:12:00Z", "2026-10-29T01:40:00Z",
+                      [usage_line("d2", inp=10_000, out=1_000)])
+        result = self.from_pass("dev", "dev-running")
+        self.assertEqual(result["appended"], 2)
+        rows = self.table()
+        self.assertEqual([(r["stage"], r["pass"], r["session_id"], r["outcome"]) for r in rows],
+                         [("dev", "1", "sess-dev-1", "timeout"), ("dev", "2", "sess-dev-2", "completed")])
+        first = rows[0]
+        self.assertEqual((first["started"], first["ended"]), ("2026-10-28T23:41:00Z", "2026-10-29T01:11:00Z"))
+        self.assertEqual((first["tokens_in"], first["tokens_out"]), (str(1_300_000), "50000"))
+        expected = meter._session_usd(KEY, timed_out, meter.load_prices(None), {})
+        self.assertEqual(first["cost_usd"], f"{expected:.4f}")
+        # the hook again: nothing more (both on record by session id)
+        self.assertEqual(self.from_pass("dev", "dev-running")["appended"], 0)
+
+    def test_story_37_3_a_backfilled_session_with_its_transcript_takes_tokens_and_cost_from_it(self):
+        """DW-148, the transcript branch: a timed-out session whose transcript
+        survives is backfilled from the transcript (`meter.price`), never from
+        its state.json `usage`."""
+        self.spec.write_text(SPEC_TEXT, encoding="utf-8", newline="\n")
+        self.add_pass("dev", "dev", "2026-10-28T23:41:00Z", "2026-10-29T01:11:00Z",
+                      [usage_line("t1", inp=100_000, out=50_000, cr=1_000_000, cw5=200_000)],
+                      status="timeout")
+        timed_out = self.state["tasks"][KEY]["sessions"][0]
+        self.assertTrue(Path(timed_out["transcript_path"]).is_file())
+        # a different session-record figure: the transcript must win
+        timed_out["usage"] = {"input_tokens": 7, "output_tokens": 3,
+                              "cache_read_tokens": 0, "cache_creation_tokens": 0}
+        self._save_state()
+        self.add_pass("dev", "dev", "2026-10-29T01:12:00Z", "2026-10-29T01:40:00Z",
+                      [usage_line("d2", inp=10, out=1)])
+        self.assertEqual(self.from_pass("dev", "dev-running")["appended"], 2)
+        first = self.table()[0]
+        self.assertEqual((first["session_id"], first["outcome"]), ("sess-dev-1", "timeout"))
+        self.assertEqual((first["tokens_in"], first["tokens_out"]), (str(100_000 + 1_000_000 + 200_000), "50000"))
+        self.assertEqual(first["cost_usd"], "2.6000")  # 0.4 + 1.0 + 1.0 + 0.2 at prices.json
+        self.assertEqual(first["model"], MODEL)
+
+    def test_story_37_3_a_backfilled_session_with_no_figure_reads_no_value(self):
+        self.spec.write_text(SPEC_TEXT, encoding="utf-8", newline="\n")
+        self.add_pass("dev", "dev", "2026-10-28T23:41:00Z", "2026-10-29T01:11:00Z",
+                      [usage_line("t1", inp=1, out=1)], status="timeout")
+        Path(self.state["tasks"][KEY]["sessions"][0]["transcript_path"]).unlink()
+        self.add_pass("dev", "dev", "2026-10-29T01:12:00Z", "2026-10-29T01:40:00Z",
+                      [usage_line("d2", inp=10, out=1)])
+        self.from_pass("dev", "dev-running")
+        first = self.table()[0]
+        self.assertEqual(first["outcome"], "timeout")
+        self.assertEqual((first["tokens_in"], first["tokens_out"], first["cost_usd"]),
+                         (plansync.NO_VALUE, plansync.NO_VALUE, plansync.NO_VALUE))
+
+    def _retry_in_the_same_task(self, start, end, lines):
+        """The engine's retry of a timed-out attempt: a second session record
+        sharing the first's task id (task ids are per task), its own journal
+        pair, and a hook-relay event per session naming its transcript."""
+        sessions = self.state["tasks"][KEY]["sessions"]
+        first = sessions[0]
+        task_id = first["task_id"]
+        transcript = self.claude / "sess-dev-retry.jsonl"
+        transcript.write_text("".join(json.dumps(r) + "\n" for r in lines), encoding="utf-8")
+        sessions.append({"task_id": task_id, "role": "dev", "status": "completed", "model": MODEL,
+                         "session_id": "sess-dev-retry", "transcript_path": str(transcript),
+                         "usage": None})
+        self._save_state()
+        with (self.run_dir / "journal.jsonl").open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": epoch(start), "kind": "session-start", "task_id": task_id,
+                                "role": "dev", "model": MODEL, "story_key": KEY}) + "\n")
+            f.write(json.dumps({"ts": epoch(end), "kind": "session-end", "task_id": task_id,
+                                "status": "completed", "tokens": 1}) + "\n")
+        events = self.run_dir / "events"
+        events.mkdir(exist_ok=True)
+        for n, path in enumerate((first["transcript_path"], str(transcript)), 1):
+            (events / f"{n:04d}-stop.json").write_text(json.dumps(
+                {"task_id": task_id, "transcript_path": path}), encoding="utf-8")
+        return task_id
+
+    def test_story_37_3_a_backfill_never_takes_the_same_task_retrys_transcript(self):
+        """A timed-out dev session whose transcript is gone, retried in the SAME
+        task id: the backfilled row's tokens and cost come from its own session
+        record's `usage` — never the retry's transcript (counted once, on the
+        retry's row) — and the retry's row is unchanged."""
+        import meter
+        self.spec.write_text(SPEC_TEXT, encoding="utf-8", newline="\n")
+        self.add_pass("dev", "dev", "2026-10-28T23:41:00Z", "2026-10-29T01:11:00Z",
+                      [usage_line("t1", inp=1, out=1)], status="timeout")
+        timed_out = self.state["tasks"][KEY]["sessions"][0]
+        Path(timed_out["transcript_path"]).unlink()
+        timed_out["usage"] = {"input_tokens": 100_000, "output_tokens": 50_000,
+                              "cache_read_tokens": 1_000_000, "cache_creation_tokens": 200_000}
+        self._save_state()
+        self._retry_in_the_same_task("2026-10-29T01:12:00Z", "2026-10-29T01:40:00Z",
+                                     [usage_line("d2", inp=10_000, out=1_000)])
+        self.assertEqual(self.from_pass("dev", "dev-running")["appended"], 2)
+        backfilled, retry = self.table()
+        self.assertEqual((backfilled["session_id"], backfilled["outcome"]), ("sess-dev-1", "timeout"))
+        self.assertEqual((backfilled["tokens_in"], backfilled["tokens_out"]), (str(1_300_000), "50000"))
+        expected = meter._session_usd(KEY, timed_out, meter.load_prices(None), {})
+        self.assertEqual(backfilled["cost_usd"], f"{expected:.4f}")
+        self.assertEqual((retry["session_id"], retry["pass"], retry["outcome"]),
+                         ("sess-dev-retry", "2", "completed"))
+        self.assertEqual((retry["tokens_in"], retry["tokens_out"]), ("10000", "1000"))
+
+    def test_story_37_3_a_backfill_takes_its_own_journal_pair_not_the_tasks_last(self):
+        """The k-th `session-start` of a task id (with its `session-end`) is the
+        k-th session record's: the backfilled row the first pair, the retry's
+        row (the current pass) the second."""
+        self.spec.write_text(SPEC_TEXT, encoding="utf-8", newline="\n")
+        self.add_pass("dev", "dev", "2026-10-28T23:41:00Z", "2026-10-29T01:11:00Z",
+                      [usage_line("t1", inp=1, out=1, ts="2026-10-28T23:45:00Z")], status="timeout")
+        self._retry_in_the_same_task("2026-10-29T01:12:00Z", "2026-10-29T01:40:00Z",
+                                     [usage_line("d2", inp=10, out=1, ts="2026-10-29T01:20:00Z")])
+        self.from_pass("dev", "dev-running")
+        backfilled, retry = self.table()
+        self.assertEqual((backfilled["session_id"], backfilled["started"], backfilled["ended"]),
+                         ("sess-dev-1", "2026-10-28T23:41:00Z", "2026-10-29T01:11:00Z"))
+        self.assertEqual((retry["session_id"], retry["started"], retry["ended"]),
+                         ("sess-dev-retry", "2026-10-29T01:12:00Z", "2026-10-29T01:40:00Z"))
+
     def test_a_gate_whose_label_lacks_gate_is_counted_from_the_recorded_evidence(self):
         """Fix 8: earlier sessions are classed like the current one — their Stage Log
         row (by session id), else the journal's pre_commit_gate workflow."""
@@ -286,8 +419,9 @@ class EnginePassTests(StageFixture):
         self.add_pass("studio-pipeline.check", "review", "2026-10-29T00:40:00Z", "2026-10-29T00:45:00Z",
                       [usage_line("g3", inp=1, out=1)], workflow_stage="pre_commit_gate")
         self.from_pass("review", "pre_commit_gate")
+        # Story 37.3 (DW-148): gate 2, not on record, is backfilled as the gate by the same evidence
         self.assertEqual([(r["stage"], r["pass"]) for r in self.table()],
-                         [("dev", "1"), ("gate", "1"), ("gate", "3")])
+                         [("dev", "1"), ("gate", "1"), ("gate", "2"), ("gate", "3")])
         # a review session after the gates is review 1, not counted with them
         self.add_pass("review", "review", "2026-10-29T00:50:00Z", "2026-10-29T00:55:00Z",
                       [usage_line("r1", inp=1, out=1)])
@@ -827,6 +961,22 @@ class RollupTests(StageFixture):
     def _story(self, key, rows):
         (self.stories / f"{key}-spec.md").write_text(SPEC_TEXT, encoding="utf-8", newline="\n")
         plansync.stage_append(self.root, rows, story=key)
+
+    def test_story_37_3_the_rollup_counts_a_timeout_dev_row(self):
+        """AC2: a timed-out attempt's row (outcome `timeout`) is a dev row the rollup counts."""
+        self.spec.write_text(SPEC_TEXT, encoding="utf-8", newline="\n")
+        self.add_pass("dev", "dev", "2026-10-28T23:41:00Z", "2026-10-29T01:11:00Z",
+                      [usage_line("t1", inp=1_000, out=100)], status="timeout")
+        self.add_pass("dev", "dev", "2026-10-29T01:12:00Z", "2026-10-29T01:40:00Z",
+                      [usage_line("d2", inp=2_000, out=200)])
+        self.from_pass("dev", "dev-running")
+        self.assertEqual([r["outcome"] for r in self.table()], ["timeout", "completed"])
+        code, out = self.cli(report.main, ["rollup", "--directory", str(self.root), "--epic", "35"])
+        self.assertEqual(code, 0, out)
+        dev = out["rollup"]["by_stage"]["dev"]
+        self.assertEqual(dev["rows"], 2)
+        self.assertEqual(dev["tokens_in"], 3_000)
+        self.assertEqual(dev["seconds"], 90 * 60 + 28 * 60)
 
     def test_story_36_1_an_inconclusive_leg_counts_as_neither_green_nor_red(self):
         self.engine_passes()
