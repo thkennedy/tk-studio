@@ -62,7 +62,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20260928-093644-829a; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-207, R1): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-9: Follow-up review still recommended for 25-1-the-roster-and-the-release-motion-for-every-app after the damping cap was spent
 origin: review-budget-followup
@@ -71,7 +72,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261014-195634-b06c; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-207, R1): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-10: Follow-up review still recommended for 25-2-the-installer-writes-the-skills-dir-plugin after the damping cap was spent
 origin: review-budget-followup
@@ -80,7 +82,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261014-204241-9620; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-207, R1): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-11: consolidate.py's drift-category fix text still names the retired marketplace flow ("tk install / /plugin marketplace update").
 origin: spec-deferred b64f5df6107d
@@ -107,7 +110,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261014-221445-84de; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-207, R1): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-14: Follow-up review still recommended for 25-6-sandboxes-read-the-host-skills-folder after the damping cap was spent
 origin: review-budget-followup
@@ -116,7 +120,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261014-221445-84de; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-207, R1): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-15: roster_guard refuses a file:// plugin URL, so the offline route (a) (a local roster + `tk-studio install --roster <path>`) cannot run; the runbook documents route (b), a manual extract, instead
 origin: spec-deferred fd9d78aa9946
@@ -125,7 +130,8 @@ location: tools/installer/cli/tk_studio_cli/roster_guard.py:140
 severity: low
 reason: tools/installer/cli/tk_studio_cli/plugin_leg.py:153-163 → roster_guard.py:140-145 (https://github.com/.../releases/download only); plugin_leg.py:86-87 default_fetch accepts file://
 decision: owner 2026-11-05 (TKSTUDIO-212): A — keep the roster guard as is; route (a) marked retired in kb/offline-install-runbook.md, route (b) (the manual extract) stays the documented offline path; flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-16: Follow-up review still recommended for 25-7-the-docs-and-the-release-say-the-installer-is-the-way-in after the damping cap was spent
 origin: review-budget-followup
@@ -134,7 +140,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261014-221445-84de; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-207, R1): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-17: doctor's hermes-logins check cannot read Hermes's config.yaml (miniyaml refuses the flow mapping `{}`), so it warns instead of reporting `auth.adopt_external_logins`
 origin: attended host verification 2026-10-15 (first `tk-studio doctor --json` on TIM-PC-2 after Epic 25)
@@ -152,7 +159,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261015-192821-0e4a; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-207, R1): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-19: `_bmad/custom/bmad-build-auto.toml:67` still tells the executor to name the spec `<entry id>-<slug of the title>.md`, contradicting the dispatch note's `stories/<id>-spec.md` (transcribe.py:141).
 origin: spec-deferred a31b80ebdcd5
@@ -178,7 +186,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261015-192821-0e4a; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-207, R1): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-22: Follow-up review still recommended for 28-2-a-nested-studio-project-is-a-first-class-root after the damping cap was spent
 origin: review-budget-followup
@@ -187,7 +196,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261016-204648-7e02; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-207, R1): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-23: rehearse.py refused the real supervisor repository: a release tag and GitHub-signed merges that the ADR premise (2026-10-09) never anticipated
 origin: attended-closeout
@@ -236,7 +246,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261018-010738-a250; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-207, R1): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-29: A run entering the live set after the snapshot shows the HUD's current-story phase as "—" until that story next changes.
 origin: spec-deferred 19add04c7f42
@@ -263,7 +274,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261019-195216-0564; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-207, R1): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-32: An open, focused Board tab with no run deltas keeps yesterday's Done items past local midnight.
 origin: spec-deferred 21ebd940c6e4
@@ -272,7 +284,8 @@ location: apps/studio-web/src/board/BoardScreen.tsx
 severity: low
 reason: Category (a), AC2 "Done (ended today)". The Board refetches on project-scoped office.run/office.progress deltas, window focus and visibility, never on a timer (spec Never). A tab that stays focused and visible across midnight with no run activity is not refetched until the next delta or focus change. Raised by both review layers.
 decision: owner 2026-11-05 (TKSTUDIO-206): A — accept and close: the spec's 'no refetch timer' holds and any touch of the tab refreshes it; flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-33: Follow-up review still recommended for 30-5-the-board-screen after the damping cap was spent
 origin: review-budget-followup
@@ -281,7 +294,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261019-212444-d031; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-207, R1): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-34: office.json is compared byte-for-byte with LF output, but .gitattributes does not pin it to eol=lf, so a Windows checkout with core.autocrlf=true would make the reproducibility test and --check fail.
 origin: spec-deferred bb2825ce3b72
@@ -299,7 +313,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261024-165853-5939; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-208, R2): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-36: kb/atlassian-free-tier.md §1 step 5 omits the Confluence write:space and write:folder scopes that tracking setup's space and folder creates need.
 origin: spec-deferred f19d1703ed46
@@ -317,7 +332,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261024-180647-0fb9; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-208, R2): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-38: Core job runs map only "no JSON" to run state blocked; a core's own `status` is never lifted into the run `state`, so `stop.on_status: ["blocked"]` on atlassian-sync-back (and every shipped core cron
 origin: spec-deferred ba9345de7ba2
@@ -334,7 +350,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261024-202524-0409; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-208, R2): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-40: Follow-up review still recommended for 31-5-the-two-statuses-and-the-inbox-items after the damping cap was spent
 origin: review-budget-followup
@@ -343,7 +360,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261024-214054-7ffb; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-208, R2): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-41: Follow-up review still recommended for 31-7-validation-of-a-resolution after the damping cap was spent
 origin: review-budget-followup
@@ -352,7 +370,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261025-012645-0c9e; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-208, R2): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-42: Follow-up review still recommended for 32-2-the-planner-leg-behind-the-chat-route after the damping cap was spent
 origin: review-budget-followup
@@ -361,7 +380,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261025-050704-6024; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-209, R3): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-43: Follow-up review still recommended for 32-3-clarifying-questions-through-the-inbox after the damping cap was spent
 origin: review-budget-followup
@@ -370,7 +390,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261025-070741-b0dd; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-209, R3): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-44: Follow-up review still recommended for 32-4-the-scope-of-work-on-confluence after the damping cap was spent
 origin: review-budget-followup
@@ -379,7 +400,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261025-090544-b945; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-209, R3): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-45: Follow-up review still recommended for 32-5-the-quote-band after the damping cap was spent
 origin: review-budget-followup
@@ -388,7 +410,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261025-104418-de9f; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-209, R3): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-46: The served root's uncommitted budget-bands.yaml (left by 32.5's quote) can block the plan pull-back after the approve PR merges, so the queued step keeps retrying.
 origin: spec-deferred cba1228d3bf4
@@ -463,7 +486,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261026-144134-5b90; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-210, R4): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-55: tk-studio doctor's "newest log's last stopped/uncaught line" is usually a routine `[tick]`/`[drain] stopped (exit 0)` tee line, so it hides a keeper/serve death while the pacer keeps stepping.
 origin: spec-deferred dde29a7d69c8
@@ -522,7 +546,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261026-223210-ba4c; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-210, R4): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-62: launch.py check writes .bmad-loop/policy.toml even when git does not ignore it, so a served project whose policy is tracked gets a dirty tree that the engine's preflight then blocks.
 origin: spec-deferred 2b9ce18e8959
@@ -563,7 +588,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261027-072100-dd0a; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-210, R4): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-67: A 33.8 `verify` re-run (POST /runs/{id}/verify) runs the playable-verify judge, but its cost never reaches the `job-run` ledger (there is no `finish` on that path).
 origin: spec-deferred 7a69cf579b3c
@@ -621,7 +647,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261027-105550-228c; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-210, R4): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-74: assets.py facts reads bounds and triangles from POSITION accessor min/max and meshes only, ignoring node transforms and instancing.
 origin: spec-deferred e213416e493c
@@ -638,7 +665,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261027-160949-d39b; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-210, R4): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-76: A green slice re-run (POST /runs/{id}/verify) marks the PR ready without committing the placed art or the proof.
 origin: spec-deferred aae84adbccd3
@@ -818,7 +846,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261028-234105-ee1e; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-210, R4): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-98: Story 35.2's spec and plan pinned two contradictions into its intent contract; both were fixed in its review, the source wording is still wrong.
 origin: review of 35-2-every-story-gets-its-plan-and-its-records (consult: accept-deviation, score 2)
@@ -835,7 +864,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261029-024051-cdae; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-210, R4): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-100: The board and the plan status misread an inconclusive host-verify leg: green on the board, red in planstatus.
 origin: review of 35-3-the-slice-path-hardened
@@ -860,7 +890,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261029-045514-f337; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-210, R4): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-103: The tk-studio-playable-judge-verdict eval case cannot reach its media fixture from the eval harness's working directory
 origin: operator run q-maintenance-evals-20261029T121940Z-40fe02 (hole 99, 2026-10-29)
@@ -878,7 +909,8 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261029-135846-4d12; this entry preserves the lingering recommendation for a deliberate later review.
 decision: owner 2026-11-05 (TKSTUDIO-210, R4): A — close as accepted, later work reviewed the same surfaces (three sweeps and three releases since); flipped resolved in the day-8m docs PR
-status: open
+resolution: owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line
+status: resolved 2026-11-06 by thkennedy/tk-studio#332 (sweep; owner decision 2026-11-05 (TKSTUDIO-206..210, 212): closed as accepted; see the entry's decision: line)
 
 ### DW-105: An engine job absent from the supervisor's per-job config claimed on the host tier; the blocked run's stale checkout lock and the job's `on_status [blocked]` stop then refused the resubmission (hole 90).
 origin: operator ledger, hole 90 (2026-10-27T23:3xZ, two records); retro-epic-35 C6, AI-5
