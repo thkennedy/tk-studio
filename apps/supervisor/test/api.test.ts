@@ -620,10 +620,61 @@ describe("cancel (AC4, AC5)", () => {
     expect(ended.state).toBe("cancelled");
     expect(calls.map((c) => c[0])).toEqual(["status", "finish"]);
     expect(calls[1]).toContain(CANCELLED_REASON);
+    expect(calls[1]).not.toContain("--total-cost-usd"); // Story 37.3 (C6): no figure recorded, so no flag
     expect(kills).toEqual([5151]);
     expect(fx.queue.lock(fx.checkout)).toBeNull();
     const ev = lifecycle(fx.queue, run.run_id).at(-1)!;
     expect(ev.detail).toMatchObject({ lock: "released", studio: { ok: true }, worker: { outcome: "killed" } });
+  });
+
+  test("Story 37.3 (C6): a cancelled launched run's `finish` carries `--total-cost-usd`: the worker's `accounted` figure plus the archived engine's, the PR body's sum", async () => {
+    const fx = fixture({ killWorker: async (pid, start) => ({ pid, start, outcome: "killed" }) });
+    const run = fx.enqueue();
+    await fx.queue.claim(run.run_id, A);
+    fx.queue.setStudioRun(run.run_id, "studio-health-20260928T000000Z");
+    fx.queue.setWorker(run.run_id, 5152, "778");
+    fx.queue.note(run.run_id, "launched", { worker_cost_usd: 1.5 });
+    fx.queue.note(run.run_id, "accounted", { cost_usd: 0.25, engine_run_id: "E0", source: "engine" });
+    const calls: string[][] = [];
+    const verbRunner = async (_root: string, args: string[]) => {
+      calls.push(args);
+      return args[0] === "status" ? { ok: true, runs: [{ run_id: "studio-health-20260928T000000Z", state: "running" }] } : { ok: true, state: "partial" };
+    };
+    expect((await cancelRun(fx.queue, run.run_id, { verbRunner, launchStop: async () => { throw new Error("no engine"); } })).state).toBe("cancelled");
+    expect(calls[1]).toEqual(["finish", "--directory", fx.checkout, "--run-id", "studio-health-20260928T000000Z", "--state", "partial", "--reason", CANCELLED_REASON, "--total-cost-usd", "1.75"]);
+  });
+
+  /** Story 37.3 (C6): a cancel's `finish` args with the run's events seeded (`seed`), the studio run running. */
+  async function cancelFinish(jobId: string, seed: (q: Queue, runId: string) => void): Promise<string[]> {
+    const fx = fixture({ killWorker: async (pid, start) => ({ pid, start, outcome: "killed" }) });
+    const run = fx.enqueue(jobId);
+    await fx.queue.claim(run.run_id, A);
+    fx.queue.setStudioRun(run.run_id, "studio-health-20260928T000000Z");
+    fx.queue.setWorker(run.run_id, 5153, "779");
+    seed(fx.queue, run.run_id);
+    const calls: string[][] = [];
+    const verbRunner = async (_root: string, args: string[]) => {
+      calls.push(args);
+      return args[0] === "status" ? { ok: true, runs: [{ run_id: "studio-health-20260928T000000Z", state: "running" }] } : { ok: true, state: "partial" };
+    };
+    expect((await cancelRun(fx.queue, run.run_id, { verbRunner, launchStop: async () => { throw new Error("no engine"); } })).state).toBe("cancelled");
+    return calls.find((c) => c[0] === "finish")!;
+  }
+
+  test("Story 37.3 (C6): a non-launch skill run (worker `accounted` events, no `launched`): the `finish` carries the worker's `accounted` figure", async () => {
+    const finish = await cancelFinish("studio-health", (q, id) => {
+      q.note(id, "accounted", { cost_usd: 0.5, message_ids: ["m1"] });
+      q.note(id, "accounted", { cost_usd: 0.25, message_ids: ["m2"] });
+    });
+    expect(finish.slice(-2)).toEqual(["--total-cost-usd", "0.75"]);
+  });
+
+  test("Story 37.3 (C6): a sweep cancel's cost is the worker figure alone (`workerOnly`): the archived engine has its own ledger line", async () => {
+    const finish = await cancelFinish("run-sweep", (q, id) => {
+      q.note(id, "launched", { worker_cost_usd: 1.5 });
+      q.note(id, "accounted", { cost_usd: 0.25, engine_run_id: "E0", source: "engine" });
+    });
+    expect(finish.slice(-2)).toEqual(["--total-cost-usd", "1.5"]);
   });
 
   test("a core run's studio end is `cancel`; an sbx worker within its in-VM deadline keeps the lock (holdLock)", async () => {
@@ -799,6 +850,7 @@ describe("cancel races with the driver (AC4, AC5)", () => {
     expect(err).toBeInstanceOf(RunTerminal);
     expect(calls.map((c) => c[0])).toEqual(["status", "finish"]);
     expect(calls[1]).toEqual(expect.arrayContaining([sid, CANCELLED_REASON]));
+    expect(calls[1]).not.toContain("--total-cost-usd"); // Story 37.3 (C6): no figure recorded
     expect(fx.queue.get(run.run_id)!.studio_run_id).toBeNull();
     // A run still running (another checkout) records the studio run and its wake, no verb called.
     const other = fixture();
@@ -903,6 +955,20 @@ describe("cancel races with the driver (AC4, AC5)", () => {
     expect(fx.queue.get(run.run_id)).toMatchObject({ state: "cancelled", studio_run_id: null });
     expect(out).toMatchObject({ run_id: run.run_id, studio_run_id: sid, state: "running" });
     expect(out.reason).toContain("queue: RunTerminal");
+  });
+
+  test("Story 37.3 (C6): mirror's cancelled-meanwhile end (an unrecorded studio run) carries the cancel's cost as the cancel does", async () => {
+    const sid = "studio-health-20260928T000007Z";
+    const fx = fixture();
+    const run = fx.enqueue();
+    await fx.queue.claim(run.run_id, A);
+    fx.queue.note(run.run_id, "accounted", { cost_usd: 0.5, message_ids: ["m1"] });
+    await cancelRun(fx.queue, run.run_id, { verbRunner: async () => { throw new Error("no studio run yet: never called"); } });
+    const calls: string[][] = [];
+    const summary: RunSummary = { ok: false, job_id: "studio-health", run_id: sid, state: "running", reason: "wake timed out" };
+    await mirror(fx.queue, run.run_id, { jobId: "studio-health", defn: { id: "studio-health" } }, summary, studioVerbs(sid, calls));
+    expect(calls.map((c) => c[0])).toEqual(["status", "finish"]);
+    expect(calls[1]).toEqual(["finish", "--directory", fx.checkout, "--run-id", sid, "--state", "partial", "--reason", CANCELLED_REASON, "--total-cost-usd", "0.5"]);
   });
 
   test("a running run whose dead driver started its minting verb: the studio run looked up by the restart rule's finder and ended", async () => {
@@ -1333,6 +1399,21 @@ describe("Story 27.5: the cancel's end re-reads the run (DW-12, DW-13)", () => {
     expect(fx.queue.cancelledLeftovers()).toEqual([]);
   });
 
+  test("Story 37.3 (C6): the cancel's late re-read ends the late studio run with the cancel's cost (`--total-cost-usd`)", async () => {
+    const sid = "run-epic-20261016T000003Z";
+    let probes = 0;
+    const fx = fixture({ engine: () => { if (++probes === 2) fx.queue.setStudioRun(run.run_id, sid); return { live: false }; } });
+    const run = fx.enqueue("run-epic", { skill: "tk-studio-launch" });
+    await fx.queue.claim(run.run_id, A);
+    fx.queue.markVerbStarted(run.run_id, "wake", [], LAUNCH);
+    fx.queue.note(run.run_id, "accounted", { cost_usd: 0.75, message_ids: ["m1"] });
+    const calls: string[][] = [];
+    expect(await cancelRun(fx.queue, run.run_id, { verbRunner: studioVerbs(calls) })).toMatchObject({ state: "cancelled", studio_run_id: sid });
+    expect(lifecycle(fx.queue, run.run_id).find((e) => e.kind === "ended")!.detail).toMatchObject({ late_studio_run_id: sid });
+    expect(calls.map((c) => c[0])).toEqual(["status", "finish"]);
+    expect(calls[1]).toEqual(["finish", "--directory", fx.checkout, "--run-id", sid, "--state", "partial", "--reason", CANCELLED_REASON, "--total-cost-usd", "0.75"]);
+  });
+
   test("a claim inside the window: the run ends cancelled keeping its lock for the claiming driver, whose own end frees it", async () => {
     const fx = fixture();
     const run = fx.enqueue();
@@ -1373,6 +1454,29 @@ describe("Story 27.5: the cancel's end re-reads the run (DW-12, DW-13)", () => {
     expect(fx.queue.events(run.run_id).map((e) => e.kind)).not.toContain("pin-released");
     expect(sbx).toEqual([]);
     expect(fx.queue.lock(fx.checkout)).toMatchObject({ kind: "run", run_id: run.run_id, owner_pid: A.pid });
+  });
+
+  test("Story 37.3 (C6): the late enders (`recordMinted`, the recovery's `endCancelledLeftovers`) carry the cancel's cost as the cancel does", async () => {
+    // recordMinted: the cancel landed inside the minting verb; the worker's `accounted` figure rides the driver's `finish`.
+    const minted = fixture();
+    const m = minted.enqueue();
+    await minted.queue.claim(m.run_id, A);
+    minted.queue.markVerbStarted(m.run_id, "wake", [], { target: "skill", definition: { id: "studio-health", target: { skill: "tk-studio-activate" } } });
+    minted.queue.note(m.run_id, "accounted", { cost_usd: 0.5, message_ids: ["m1"] });
+    await cancelRun(minted.queue, m.run_id, { verbRunner: async () => { throw new Error("no studio run yet: never called"); } });
+    const mintCalls: string[][] = [];
+    await recordMinted(minted.queue, m.run_id, { runId: "studio-health-20261016T000009Z", woke: {} }, studioVerbs(mintCalls)).catch(() => {});
+    expect(mintCalls.find((c) => c[0] === "finish")!.slice(-2)).toEqual(["--total-cost-usd", "0.5"]);
+    // endCancelledLeftovers: the cancel's own ender failed; the recovery's `finish` carries the launch's worker figure.
+    const fx = fixture();
+    const run = fx.enqueue();
+    await fx.queue.claim(run.run_id, A);
+    fx.queue.setStudioRun(run.run_id, "studio-health-20261016T000008Z");
+    fx.queue.note(run.run_id, "launched", { worker_cost_usd: 2 });
+    await cancelRun(fx.queue, run.run_id, { verbRunner: async () => { throw new Error("studio unreachable"); } });
+    const calls: string[][] = [];
+    expect(await endCancelledLeftovers(fx.queue, studioVerbs(calls))).toEqual([run.run_id]);
+    expect(calls.find((c) => c[0] === "finish")!.slice(-2)).toEqual(["--total-cost-usd", "2"]);
   });
 
   test("the next recovery ends a cancelled run's studio run the cancel left open (`studio-run-ended`, once)", async () => {

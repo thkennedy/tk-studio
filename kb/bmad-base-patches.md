@@ -79,3 +79,20 @@ already match.
 - `tk activate` does not report it.
 
 To finish: file or locate the BMAD-METHOD issue, then add the second registry entry with `id: render-skill-staging-rename-retry`, `applies_to_core: ["6.11.0"]`, `find` the unpatched `os.rename(staging, destination)` / `except OSError:` region and `replace` the patched one. Never reuse `BMAD-METHOD#2718`: it is another defect's.
+
+## run-worktree-rollback (2026-11-06, a policy setting the engine already implements, not a registered patch)
+
+**Defect.** Hole 106, DW-148. A dev session that hits the engine's clock (`session_timeout_min`) with its work uncommitted, under `[scm] rollback_on_failure = false`, pauses the run for a hand `git reset` (`rollback-manual-required`), and the pause discards the pending graceful stop (`stop-request-discarded`).
+
+**The change.** No engine file is touched and nothing goes in `base-patches/patches.json`. The supervisor's `materialise` (`apps/supervisor/src/worktree.ts`) sets `rollback_on_failure = true` in the `[scm]` table of the run worktree's copy of `.bmad-loop/policy.toml`, right after copying it from the checkout. The edit touches the setting alone: the key's value is replaced inside `[scm]`, the key is added under the `[scm]` header when it is missing, or an `[scm]` table is appended when the policy has none, and every other byte is kept. A tmp file is renamed onto the copy, and the copy is re-read with `Bun.TOML.parse`. A copy that does not parse is restored, and the materialise is refused by name (`worktree policy`). Only a run's own worktree is written. A main checkout's policy keeps `false`: `pipeline.py`'s managed block and `launch.py`'s reconcile never write the setting, and a worktree materialised before 2026-11-06 is never upgraded.
+
+**What the engine then does is its own rule.** The studio does not re-implement or filter any of it. With budget left, a failed attempt is retried; without, it is deferred. bmad-loop 0.9.1 then rolls the attempt back:
+
+- The attempt's commits are parked on `attempt-preserve/*` refs.
+- Its uncommitted tree is parked on `refs/attempt-preserve-dirty/*`, visible from the main checkout.
+- `verify.py safe_rollback` resets to the attempt's baseline, `git reset --hard` to HEAD at the attempt's start, so stories landed earlier stay.
+- The same step removes only the untracked files new since that baseline. Ignored files are excluded, `.bmad-loop/` and the BMAD artifact folders are kept, and `policy.toml` is restored.
+
+A timeout no longer pauses, so the next item boundary honours the pending stop.
+
+**Per project.** Every run worktree the supervisor cuts. To set the key by hand on a main checkout, read the engine's warning in its policy comment first.

@@ -19,7 +19,7 @@ You are headless (AD-11): never ask, never wait. Every uncertainty is resolved h
 
 ## 1. Bootstrap: transcribe the epic, then plan every story
 
-If `stories.yaml` already has `- id:` entries, skip the transcription and plan, through section 3, every entry that has no `plans/<N>-<M>.md` yet, in list order, the named story first.
+If `stories.yaml` already has `- id:` entries, skip the transcription and plan, through section 3, every entry that has no `plans/<N>-<M>.md` yet, in list order, the named story first. A `<key>-s2` entry is judged by, and planned into, its own `plans/<N>-<M>-s2.md` (Story 37.3), never its first half's plan.
 
 Otherwise, from the project root, run:
 
@@ -35,7 +35,7 @@ Then plan every manifest entry in list order, each through section 3, the story 
 
 Skip this section when bootstrapping.
 
-**Audit.** The finished story is the unit that was just committed. Read its spec (`stories/<key>-*.md`): the Auto Run Result, the Deviation Summary, and the `DRIFT:` lines. Also read its `plans/<N>-<M>.md` and its acceptance criteria in `epics.md`. Judge each criterion as one of:
+**Audit.** The finished story is the unit that was just committed. Read its spec (`stories/<key>-*.md`): the Auto Run Result, the Deviation Summary, and the `DRIFT:` lines. Also read its `plans/<N>-<M>.md` (a `<key>-s2` story's is `plans/<N>-<M>-s2.md`) and its acceptance criteria in `epics.md`. Judge each criterion as one of:
 
 - `met`
 - `met-with-deviation`
@@ -61,7 +61,7 @@ Cite the evidence for each: a test, a file, or an Auto Run Result line. Then app
 
 **Replan queue.** For every `Status: open` entry that names an unstarted story (one with no `stories/<key>-*.md` yet), revise that entry's `invoke_dev_with` in place with the suggested adjustment. Never touch a started entry. Then set the queue entry to `Status: closed — <what you did>`.
 
-**Next story.** It is the first entry in `stories.yaml` with no spec file. Only when no entry lacks a spec file, record `epic complete: no next story` and stop. Otherwise plan it in section 3. When its `plans/<N>-<M>.md` already exists (the bootstrap plans every entry, Story 35.2), re-run section 3's open-question rule against it (write the design note, or `escalate`) and refresh that plan in place instead of writing a new one.
+**Next story.** It is the first entry in `stories.yaml` with no spec file. Only when no entry lacks a spec file, record `epic complete: no next story` and stop. Otherwise plan it in section 3. When its `plans/<N>-<M>.md` already exists (the bootstrap plans every entry, Story 35.2), re-run section 3's open-question rule against it (write the design note, or `escalate`) and refresh that plan in place instead of writing a new one. A `<key>-s2` entry's plan is `plans/<N>-<M>-s2.md` (Story 37.3): that is the plan refreshed in place, and the first half's `plans/<N>-<M>.md` is never rewritten.
 
 ## 3. Write the story plan
 
@@ -81,7 +81,9 @@ The spec does not exist yet, so the row waits in `<spec folder>/stages/<id>.json
 
 Read the story's section in `epics.md`, the epic narrative, `SPEC.md` and its companions, and the code the story touches. Investigate yourself, or through foreground subagents that return distilled summaries. Never read a subagent's transcript or output file.
 
-Size the story in a band from `budget-bands.yaml`. If it plainly exceeds the largest band, do not split it here. Record `oversize` under Risks, and add a note to its `invoke_dev_with` asking the dev session to halt if the Files list grows past the band.
+Size the story in a band from `budget-bands.yaml`.
+
+**Over the dev clock (Story 37.3).** When the plan's Files list or its estimated passes exceed the dev clock (`session_timeout_min` in `.bmad-loop/policy.toml`, one dev session's limit), or the story plainly exceeds the largest band, split it here: write two plans, `plans/<N>-<M>.md` for the part that fits the clock and `plans/<N>-<M>-s2.md` for the rest, and append a follow-on entry to `stories.yaml` right after the story's own. Its id is `<key>-s2`, its description starts `Split:` and names what moved to the second plan, and its `invoke_dev_with` points at the same story section and the second plan (the remediation entry's shape, section 2). The second plan's frontmatter reads `story: "<N>-<M>-s2"` and `key: "<key>-s2"`. When the split is not clean, do not split it: record `oversize` under Risks with the halt consult's split candidates (each a named part of the Files list), and add a note to its `invoke_dev_with` asking the dev session to halt if the Files list grows past the band.
 
 Create `plans/<N>-<M>.md` (a sibling of `stories.yaml`, outside `stories/`):
 
@@ -118,7 +120,7 @@ repo: <the repo the epic narrative names for this story>
 <anything a dev session must not decide alone, phrased as a Block If; settled shapes (the `## Settled shape` section) are not Block Ifs>
 ```
 
-Every entry's `invoke_dev_with` already names `plans/<N>-<M>.md`, so the dev session starts from this Code Map.
+Every entry's `invoke_dev_with` already names `plans/<N>-<M>.md` (a `<key>-s2` entry's names `plans/<N>-<M>-s2.md`), so the dev session starts from this Code Map.
 
 **Settled shape.** When a story's acceptance criteria need a schema entry, a file or a tag for an artifact that only a later story or an operator action produces, settle its shape here. Append one bullet to `<spec_folder>/SPEC.md` under the existing `## Design notes (settled shape, planner, <date>)` section, whatever its date. Create the section, dated today, only when none exists; there is never a second dated section:
 

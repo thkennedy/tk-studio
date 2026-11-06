@@ -511,8 +511,11 @@ function openQueue(opts: RunOptions): { queue: Queue; owned: boolean } {
 
 /** Ends a minted studio run for an orphaned queue run (the restart rule): a
  * non-terminal skill run is finished `partial` with the reason, a core run is
- * cancelled (never finished — AC5b). A failure is returned, never thrown. */
-export function studioRunEnder(verbRunner: VerbRunner = runJobVerb): StudioEnder {
+ * cancelled (never finished — AC5b). A failure is returned, never thrown.
+ * Story 37.3 (C6): `costUsd` (the cancel's, `launchedCloseOutInput(...).costUsd`) rides the `finish` as
+ * `--total-cost-usd`, so the `job-run` line carries the worker's cost; omitted when no figure exists. */
+export function studioRunEnder(verbRunner: VerbRunner = runJobVerb, opts: { costUsd?: number | undefined } = {}): StudioEnder {
+  const cost = typeof opts.costUsd === "number" && Number.isFinite(opts.costUsd) && opts.costUsd >= 0 ? ["--total-cost-usd", String(opts.costUsd)] : [];
   return async (run, reason) => {
     const root = run.root, sid = run.studio_run_id!;
     try {
@@ -523,7 +526,7 @@ export function studioRunEnder(verbRunner: VerbRunner = runJobVerb): StudioEnder
     const verb = run.target === "core" ? "cancel" : "finish";
     try {
       const out = answered(await verbRunner(root, verb === "finish"
-        ? ["finish", "--directory", root, "--run-id", sid, "--state", "partial", "--reason", reason]
+        ? ["finish", "--directory", root, "--run-id", sid, "--state", "partial", "--reason", reason, ...cost]
         : ["cancel", "--directory", root, "--job-id", run.job_id, "--run-id", sid]), verb);
       if (verb === "cancel" && out.cancelled !== true) throw new Error(`cancel: ${out.reason ?? "not cancelled"}`);
       // §4: `finish` answers the run's state; `cancel` ends a resumable run `partial` (reason `cancelled`).
@@ -925,7 +928,7 @@ export async function endCancelledLeftovers(queue: Queue, verbRunner: VerbRunner
   try { runs = queue.cancelledLeftovers(); } catch { return out; }
   for (const r of runs) {
     try {
-      const res = await studioRunEnder(verbRunner)(r, CANCELLED_REASON);
+      const res = await studioRunEnder(verbRunner, { costUsd: cancelCostUsd(queue, r) })(r, CANCELLED_REASON); // Story 37.3 (C6)
       if (!res.ok) {
         // Retried by the next recovery, bounded (the operator reads each attempt on the run's events).
         const attempt = queue.events(r.run_id).filter((e) => e.kind === "studio-run-end-failed" && e.detail?.studio_run_id === r.studio_run_id).length + 1;
@@ -1096,6 +1099,18 @@ export const launchStopGraceful: LaunchStopper = async (root, engineRunId, where
 /** The reason a cancelled queue run ends with. */
 export const CANCELLED_REASON = "cancelled: operator request";
 
+/** Story 37.3 (C6): the cost a cancelled run's `finish` carries (`--total-cost-usd`), the one rule every cancel end reads:
+ * the figure the PR body reads (`launchedCloseOutInput(...).costUsd`: the metered engine, else the launch's worker figure,
+ * plus any archived engine; a sweep's worker figure alone, `workerOnly`), else the worker's `accounted` figure
+ * (`Queue.accountedCost`: a skill run with no `launched` event); undefined when neither exists. Never throws. */
+export function cancelCostUsd(queue: Queue, run: QueueRun): number | undefined {
+  try {
+    const events = queue.events(run.run_id);
+    return launchedCloseOutInput(events, run, { workerOnly: isSweep(queue.definition(run)) }).costUsd
+      ?? queue.accountedCost(run.run_id, "worker", events);
+  } catch { return undefined; }
+}
+
 /** Cancel a queue run (Story 22.1): a launched engine is stopped gracefully (launch
  * `stop --graceful`; the launch core probed again once the worker is dead), the studio run
  * named after those awaits ended (`studioRunEnder`: core → `cancel`, skill →
@@ -1173,7 +1188,9 @@ async function cancelQueueRun(
   const verbs = deps.verbRunner ?? runJobVerb;
   // Story 27.5 (DW-13): the studio run this cancel ended — `Queue.endReread` compares it inside the end transaction.
   let acted: string | null = named.studio_run_id;
-  if (named.studio_run_id) detail.studio = await studioRunEnder(verbs)(named, CANCELLED_REASON);
+  // Story 37.3 (C6): the cancel's `finish` carries its cost (`cancelCostUsd`), read now while the worktree stands.
+  const ender = studioRunEnder(verbs, { costUsd: cancelCostUsd(queue, named) });
+  if (named.studio_run_id) detail.studio = await ender(named, CANCELLED_REASON);
   else if (named.state === "running" && named.verb_started && !queue.ownerAlive(named)) {
     // Its driver died inside the minting verb: once cancelled, `recover` never looks the
     // studio run up — looked up here by the restart rule's finder, and ended when found.
@@ -1187,7 +1204,7 @@ async function cancelQueueRun(
       detail.lookup = { ok: true, adopted: found.run_id };
       try { queue.setStudioRun(runId, found.run_id); } catch { /* ended meanwhile: `Queue.end` below refuses */ }
       acted = found.run_id;
-      detail.studio = await studioRunEnder(verbs)({ ...named, studio_run_id: found.run_id }, CANCELLED_REASON);
+      detail.studio = await ender({ ...named, studio_run_id: found.run_id }, CANCELLED_REASON);
     } else detail.lookup = { ok: true, adopted: null };
   }
   const current = queue.get(runId) ?? named;
@@ -1274,7 +1291,7 @@ async function cancelQueueRun(
   if (late) {
     // A driver recorded its studio run between the cancel's read and its end: ended now by the same ender (a failure
     // is left for the next `recover`, `endCancelledLeftovers`).
-    const res = await studioRunEnder(verbs)({ ...ended, studio_run_id: late }, CANCELLED_REASON);
+    const res = await ender({ ...ended, studio_run_id: late }, CANCELLED_REASON);
     if (res.ok) {
       try { queue.note(runId, "studio-run-ended", { studio_run_id: late, late: true, by: "cancel", detail: res.detail, ...(res.state ? { state: res.state } : {}) }); }
       catch { /* the queue is busy: `recover` reads the studio run again */ }
@@ -1706,7 +1723,7 @@ export async function recordMinted(
   } catch (e) {
     const run = queue.get(queueRunId);
     if (e instanceof RunTerminal && run?.state === "cancelled") {
-      await studioRunEnder(verbRunner)({ ...run, studio_run_id: started.runId }, CANCELLED_REASON);
+      await studioRunEnder(verbRunner, { costUsd: cancelCostUsd(queue, run) })({ ...run, studio_run_id: started.runId }, CANCELLED_REASON); // Story 37.3 (C6)
     }
     throw e;
   }
@@ -1758,7 +1775,7 @@ export async function mirror(
         // lock kept for this driver is freed (`endDriven`).
         const run = queue.get(queueRunId);
         if (!(e instanceof RunTerminal && run?.state === "cancelled")) throw e;
-        await studioRunEnder(verbRunner)({ ...run, studio_run_id: studioRunId }, CANCELLED_REASON);
+        await studioRunEnder(verbRunner, { costUsd: cancelCostUsd(queue, run) })({ ...run, studio_run_id: studioRunId }, CANCELLED_REASON); // Story 37.3 (C6)
       }
     }
     if (s.finish_refused) {

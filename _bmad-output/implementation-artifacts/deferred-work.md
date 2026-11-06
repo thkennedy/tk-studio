@@ -1,6 +1,6 @@
 # Deferred Work
 
-<!-- deferred-work counter: last minted DW-175; mint through plansync.py deferred mint -->
+<!-- deferred-work counter: last minted DW-177; mint through plansync.py deferred mint -->
 
 ### DW-124: Contract §4 `submit` admitted a full job definition but the CLI/skill surface was id-only
 origin: migrated from legacy ledger ("Deferred from: code review of feat/tk-studio-connector (2026-08-06)"), 2026-10-29
@@ -1240,7 +1240,8 @@ source_spec: `kb/agent-pc-setup-runbook.md` (the hole-106 row); the engine journ
 location: .bmad-loop/policy.toml (`session_timeout_min = 90`, `max_dev_attempts = 2`, `[scm] rollback_on_failure = false`, whose comment warns about a main checkout the run's own worktree never is); apps/supervisor/src/closeout.ts (the pause close-out: a draft PR, the worktree kept, no host leg for the landed commits, the stop request not re-armed); apps/supervisor/src/queue.ts (`cancel` on a paused sbx run calls the launch core's stop on the host, refused `bmad-loop is not on PATH`, DW-120); the planner (a band-L story planned over the dev clock)
 severity: medium
 reason: The pause cost the operator the sanctioned path: the engine asked for a hand `git reset --hard` in its worktree, the stop request it was holding was discarded, the two stories already built sat in a draft PR with no gate for an hour, and the story's issue was blocked with the owner tagged (hole 101). The operator cancelled the run, removed the kept worktree by hand, re-ran the host leg over `POST /runs/{id}/verify` and re-queued the story. Fix to make: `rollback_on_failure true` for a run's own worktree (nothing pre-existing to protect there; the auto-rollback keeps a resolved escalation's re-drive path), or the pause close-out runs the host leg for the landed commits and keeps the stop request so the resume stops where it was told; the planner splits a story whose plan exceeds the dev clock (the band-L stories 36.3 and 36.6 are the first candidates); the paused run's issue block says `no owner action` when the pause is an engine clock.
-status: open
+status: resolved 2026-11-06 by Story 37.3
+resolution: Story 37.3 built the run worktree's rollback, the kept stop, the paused close-out's host leg (ready on green, a dirty tree a draft), the backfilled `timeout` Stage Log row and the planner's split rule; the remainder, the paused run's issue block saying `no owner action` when the pause is an engine clock, is DW-176.
 
 ### DW-149: Deferred-work ids are minted from the ledger's highest heading on whichever branch writes, so an engine run harvesting deferrals on its branch and an operator docs pass filing on `main` mint the same ids and collide at the merge (hole 107).
 origin: hole 107 (PR 302, 2026-10-31 01:3xZ: the engine filed DW-133 to DW-145 on the run branch while the operator filed DW-133 and DW-134 on `main` in PRs #298 and #300)
@@ -1312,7 +1313,7 @@ source_spec: `36-5-the-supervisors-own-faults-spec.md`
 location: plugins/tk-studio/lib/jobrun.py evaluate_stop
 severity: medium
 reason: evaluate_stop's new filter applies only to on_status; counted still includes own-marked runs. AC1 names on_status, so whether max_runs should change is outside this story; deferral rule (a), the criterion's "next submission is woken".
-status: open
+status: resolved 2026-11-06 by Story 37.3
 
 ### DW-158: Follow-up review still recommended for 36-5-the-supervisors-own-faults after the damping cap was spent
 origin: review-budget-followup
@@ -1344,7 +1345,7 @@ source_spec: `36-6-setup-and-the-launch-check-by-evidence-spec.md`
 location: apps/supervisor/src/closeout.ts:577
 severity: medium
 reason: Deferral class (a), AC5's "never builds two stories in one run". `closeOutLanded` reads only `gracefulStopInForce` and `storyBoundaryRecorded`, never the job's rhythm. It needs a double fault: a refused stop, which already sends one notifier line, and then a pause that lands the story. The fix means ending at a boundary with no stop in force, and the `story-boundary` event's `graceful_stop` and `StopInForce.source` have no value for that today.
-status: open
+status: resolved 2026-11-06 by Story 37.3
 
 ### DW-162: `rearmFailedLine` still prints a `launch.py stop` command with no `--directory`, which fails argument parsing.
 origin: spec-deferred 37db24c63664
@@ -1457,4 +1458,20 @@ source_spec: `.bmad-loop/policy.toml` (`[limits]`, the `max_followup_reviews` co
 location: .bmad-loop/policy.toml `[limits] max_followup_reviews`; .bmad-loop/routing.toml (the band table: no follow-up field); the engine's cap check (bmad-loop, in the sandbox; patched through basepatch if needed); plugins/tk-studio/lib/launch.py `BUDGET_NOT_COMPARED`
 severity: low
 reason: Every follow-up review the three sweeps asked about (30 ids, R1 to R4) was closed as accepted on the same day, and the policy question behind them got answer B: pay for a second follow-up round only where the story is large (band L), not everywhere. The policy file has one figure for every band; raising it to 2 would also pay on band-S and band-M stories (about 7.5 USD a round, Epic 36's average), and leaving it at 1 ignores the decision. Fix to make: a per-band override (`[limits.by_band] L = { max_followup_reviews = 2 }` or a `max_followup_reviews` column in routing.toml's band table) read by the engine's cap check, `launch.py` comparing it like the other band figures (`BUDGET_COMPARED`), the loop's README naming the policy; until then the global figure stays 1 and the decision is recorded here.
+status: open
+
+### DW-176: DW-148's remainder: a run paused by the engine's clock still blocks the story's issue with the owner @mentioned, never `no owner action`, though the pause asks nothing of the owner.
+origin: DW-148's resolution (Story 37.3 review, 2026-11-06: the one part of DW-148's "Fix to make" the story did not build)
+source_spec: `37-3-a-timed-out-session-keeps-its-stop-and-its-records-spec.md`; DW-148 (hole 106)
+location: apps/supervisor/src/closeout.ts (the paused-run pass's `track.py block` call for a landing left `paused`: `--reason <the landing's reason> --resolves "a ruling in the spec (<spec path>)"`); plugins/tk-studio/lib/track.py `block` (the comment always @mentions `planning.jira.owner_account_id`)
+severity: low
+reason: Story 37.3 turns the engine's rollback on in a run worktree, so a timed-out dev session is retried or deferred rather than paused, and the pause close-out now runs the host leg; but a pause that does reach the paused-run pass for an engine reason (an engine clock, a budget, a rollback the engine refused) still goes through the same block as an escalation: the issue moves to `Blocked - Awaiting User` with the owner tagged (hole 101's class), though nothing is the owner's to answer. Fix to make: the paused-run pass tells an engine-clock pause from a ruling (the journal's `session-end status timeout` / `paused_reason`), and blocks it with a comment that says `no owner action` and carries no mention (a `track.py block --kind engine` or a `--no-mention` form), or skips the block and sends only the notifier line; the contract names the rule.
+status: open
+
+### DW-177: A split story's `<key>-s2` spec matches the first half's `<key>-*.md` prefix glob once both specs exist, so a spec lookup by the first half's key is ambiguous.
+origin: spec-deferred 256a8ba5f54a
+source_spec: `37-3-a-timed-out-session-keeps-its-stop-and-its-records-spec.md`
+location: .bmad-loop/plugins/studio-pipeline/task-planning.md section 3; plugins/tk-studio/lib/plansync.py _stage_target; apps/supervisor/src/closeout.ts findSpec
+severity: medium
+reason: task-planning.md section 3 (both copies) mints `<key>-s2` entries (plan Settled shape 3); `plansync._stage_target` globs `<sid>-*.md` and raises "several specs match"; `closeout.findSpec` matches `${key}-` and returns undefined on two hits; the engine resolves a spec by the glob `<id>-*.md` (story 21-6). The `<key>-r<n>` remediation ids share the collision (no such spec exists on disk yet). The engine's glob is outside this repo.
 status: open

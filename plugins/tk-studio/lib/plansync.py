@@ -2806,6 +2806,23 @@ def _journal_span(run_dir: Path, task_id: str) -> tuple[float | None, float | No
     return start, end
 
 
+def _journal_spans(run_dir: Path, task_id: str) -> list[tuple[float, float | None]]:
+    """Every `session-start` ts of the task in journal order, each with the
+    `session-end` after it (before the task's next start), else None."""
+    spans: list[list] = []
+    for entry in _read_jsonl_file(Path(run_dir) / "journal.jsonl"):
+        if entry.get("task_id") != task_id:
+            continue
+        ts = entry.get("ts")
+        if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+            continue
+        if entry.get("kind") == "session-start":
+            spans.append([ts, None])
+        elif entry.get("kind") == "session-end" and spans and spans[-1][1] is None:
+            spans[-1][1] = ts
+    return [(start, end) for start, end in spans]
+
+
 def _message_text(record: dict) -> str:
     message = record.get("message")
     content = message.get("content") if isinstance(message, dict) else None
@@ -2883,9 +2900,10 @@ def _load_prices(prices_path: Path | None) -> dict | None:
         return None
 
 
-def _subagent_transcripts(transcript: Path | None, copy_dir: Path) -> list[Path]:
+def _subagent_transcripts(transcript: Path | None,
+                          copy_dir: Path | None) -> list[Path]:
     found: dict[str, Path] = {}
-    dirs = [copy_dir]
+    dirs = [copy_dir] if copy_dir is not None else []
     if transcript is not None:
         dirs.insert(0, Path(transcript).with_suffix("") / "subagents")
     for folder in dirs:
@@ -2893,6 +2911,117 @@ def _subagent_transcripts(transcript: Path | None, copy_dir: Path) -> list[Path]
             for path in sorted(folder.glob("agent-*.jsonl")):
                 found.setdefault(path.name, path)
     return list(found.values())
+
+
+def _pass_transcript(run_dir: Path, task_key: str,
+                     session: dict) -> tuple[Path | None, Path]:
+    """A session's transcript (its recorded path, else the meter's session
+    list, each also under the run dir's copy) and the copy folder."""
+    import meter
+    task_id = session["task_id"]
+    candidates = [session.get("transcript_path")]
+    candidates += list(reversed(meter._story_sessions(run_dir, task_key)
+                                .get(task_id, [])))
+    copy_dir = run_dir / "transcripts" / task_key / task_id
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate:
+            for path in (Path(candidate), copy_dir / Path(candidate).name):
+                if path.is_file():
+                    return path, copy_dir
+    return None, copy_dir
+
+
+def _session_transcript(run_dir: Path, task_key: str,
+                        session: dict) -> tuple[Path | None, Path]:
+    """Story 37.3: a backfilled session's own transcript only — its recorded
+    path (or the same-named copy under the run dir), else a meter event
+    path whose file stem is its session id; never another session's (the
+    engine's task ids are per task, so a retry shares the timed-out
+    attempt's)."""
+    import meter
+    task_id = session["task_id"]
+    sid = session.get("session_id")
+    candidates = [session.get("transcript_path")]
+    if isinstance(sid, str) and sid:
+        candidates += [c for c in meter._story_sessions(run_dir, task_key).get(task_id, [])
+                       if isinstance(c, str) and c
+                       and Path(c.replace("\\", "/")).stem == sid]
+    copy_dir = run_dir / "transcripts" / task_key / task_id
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate:
+            for path in (Path(candidate), copy_dir / Path(candidate).name):
+                if path.is_file():
+                    return path, copy_dir
+    return None, copy_dir
+
+
+def _backfill_rows(worktree: Path, run_dir: Path, task_key: str,
+                   sessions: list[dict], doc: "_StageDoc",
+                   recorded: dict[str, str], gates: set[str],
+                   prices: dict | None) -> list[dict]:
+    """Story 37.3 (DW-148): one row per earlier session (all but the
+    current) whose session id no Stage Log row names, as its own pass would
+    have written it; a session with no id or no start stamp is skipped.
+    A retry shares its task id, so each backfilled session reads only its
+    own transcript (`_session_transcript`) and its own journal span — the
+    k-th `session-start` of the task id for its k-th session record, else
+    its transcript's span; never the task's last (the current pass's)."""
+    import meter
+    on_record = {r["session_id"] for r in doc.rows()}
+    current_id = sessions[-1].get("session_id")
+    routing = None
+    rows = []
+    for i, session in enumerate(sessions[:-1]):
+        sid = session.get("session_id")
+        if not isinstance(sid, str) or not sid or sid in on_record or sid == current_id:
+            continue
+        stage = _session_stage(session, task_key, recorded, gates)
+        number = sum(1 for s in sessions[:i + 1]
+                     if _session_stage(s, task_key, recorded, gates) == stage)
+        task_id = session["task_id"]
+        transcript, copy_dir = _session_transcript(run_dir, task_key, session)
+        records = _read_jsonl_file(transcript) if transcript else []
+        # the run dir's subagents copy is shared by the task's sessions: read
+        # it only when no other session shares this task id
+        shared = sum(1 for s in sessions if s["task_id"] == task_id) > 1
+        sub_copy = None if shared else copy_dir / "subagents"
+        helpers = [sub for sub in _subagent_transcripts(transcript, sub_copy)
+                   if not _first_user_text(_read_jsonl_file(sub)).lstrip()
+                   .startswith(CONSULT_MARKER)]
+        # the k-th journal span of the task id is its k-th session record's
+        ordinal = sum(1 for s in sessions[:i] if s["task_id"] == task_id)
+        spans = _journal_spans(run_dir, task_id)
+        start_ts, end_ts = spans[ordinal] if ordinal < len(spans) else (None, None)
+        first, last = _transcript_span(records)
+        started = start_ts if start_ts is not None else first
+        ended = end_ts if end_ts is not None else last
+        if started is None:
+            continue
+        paths = ([transcript] if transcript else []) + helpers
+        tokens_in, tokens_out, seen_model, metered = _usage_totals(paths)
+        cost = _usage_cost(paths, prices) if metered else None
+        usage = session.get("usage") if isinstance(session.get("usage"), dict) else None
+        if not metered and usage:
+            tokens_in = sum(int(usage.get(k) or 0) for k in (
+                "input_tokens", "cache_read_tokens", "cache_creation_tokens"))
+            tokens_out = int(usage.get("output_tokens") or 0)
+            metered = True
+            if prices is not None:
+                if routing is None:
+                    routing = meter._route_file(Path(worktree) / ROUTING_CURRENT_REL) or {}
+                try:
+                    cost = meter._session_usd(task_key, session, prices, routing)
+                except meter.MeterError:
+                    cost = None
+        rows.append(stage_row({
+            "stage": stage, "pass": number, "started": started, "ended": ended,
+            "session_id": sid, "model": session.get("model") or seen_model,
+            "effort": _routing_effort(worktree, stage),
+            "tokens_in": tokens_in if metered else None,
+            "tokens_out": tokens_out if metered else None,
+            "cost_usd": cost, "outcome": session.get("status")}))
+        on_record.add(sid)
+    return rows
 
 
 def stage_from_pass(worktree: Path, run_dir: Path, story: str,
@@ -2914,7 +3043,12 @@ def stage_from_pass(worktree: Path, run_dir: Path, story: str,
     same evidence (`_session_stage`). `repo_root` (the run's
     BMAD_LOOP_REPO_ROOT, when it is not the worktree): its buffered rows —
     the planner's plan row, written from the project root — are flushed
-    with the worktree's, and removed there once moved."""
+    with the worktree's, and removed there once moved. Story 37.3 (DW-148):
+    an earlier session of the story not on record by session id (a timed-out
+    attempt whose row the rollback's reset reverted, or whose hook never
+    wrote) is backfilled first, its outcome its own status (`timeout`), its
+    tokens from its transcript else its state.json `usage`, its cost by
+    `meter.price` else `meter._session_usd` (`—` when unpriced)."""
     worktree, run_dir = Path(worktree), Path(run_dir)
     state = _read_json_file(run_dir / "state.json")
     if state is None:
@@ -2948,19 +3082,7 @@ def stage_from_pass(worktree: Path, run_dir: Path, story: str,
                                    phase=phase if s is current else None)
                  == stage)
 
-    transcript = None
-    candidates = [current.get("transcript_path")]
-    candidates += list(reversed(meter._story_sessions(run_dir, task_key)
-                                .get(task_id, [])))
-    copy_dir = run_dir / "transcripts" / task_key / task_id
-    for candidate in candidates:
-        if isinstance(candidate, str) and candidate:
-            for path in (Path(candidate), copy_dir / Path(candidate).name):
-                if path.is_file():
-                    transcript = path
-                    break
-        if transcript is not None:
-            break
+    transcript, copy_dir = _pass_transcript(run_dir, task_key, current)
     records = _read_jsonl_file(transcript) if transcript else []
     consults, helpers = [], []
     for sub in _subagent_transcripts(transcript, copy_dir / "subagents"):
@@ -2988,14 +3110,16 @@ def stage_from_pass(worktree: Path, run_dir: Path, story: str,
                 "input_tokens", "cache_read_tokens", "cache_creation_tokens"))
             tokens_out = int(usage.get("output_tokens") or 0)
             metered = True
-    rows = [stage_row({
+    rows = _backfill_rows(worktree, run_dir, task_key, sessions, doc,
+                          recorded, gates, prices)
+    rows.append(stage_row({
         "stage": stage, "pass": number, "started": started, "ended": ended,
         "session_id": current.get("session_id"),
         "model": current.get("model") or seen_model,
         "effort": _routing_effort(worktree, stage),
         "tokens_in": tokens_in if metered else None,
         "tokens_out": tokens_out if metered else None,
-        "cost_usd": cost, "outcome": current.get("status")})]
+        "cost_usd": cost, "outcome": current.get("status")}))
 
     on_record = [r for r in doc.rows() if r["stage"] == "consult"]
     seen_ids = {r["session_id"] for r in on_record}

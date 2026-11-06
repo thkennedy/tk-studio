@@ -147,6 +147,14 @@
     `pre_commit` hook fires, a counter and marker behind a harvested id are expected: do
     not flag or hand-fix them; the hook's `.tk-studio/plan-counter.yaml` and marker-line
     writes are not a Files deviation. Ledger line anchors moved: re-grep by id.
+    Gate note from 37-3 (2026-11-06): `isRunEpic` has a fourth caller, Story 37.3's
+    `closeout.ts armingRefusedStop` (DW-161's `arming-refused` end, marked "37.4
+    replaces it"): `runsStories` replaces it there too, and `closeout.test.ts`'s
+    `RUN_EPIC_1` fixture gains `payload {verb: "start"}`. The contract header is
+    0.1.33: add the 37.4 clause after 37.3's and before `0.1.33 (DW-170, additive)`,
+    and the paragraph after 37.3's and before DW-170's (plans/37-4.md "Anchors after
+    37.3"). Every `bun test` names `--timeout 30000`; `guards.test.ts`'s 2 sbx-argv
+    fails are a baseline fault, carried.
 
 - id: "37-5-the-sweeps-bugs-and-cost-lines-before-a-fourth-sweep"
   title: "The Sweep's Bugs and Cost Lines Before a Fourth Sweep"

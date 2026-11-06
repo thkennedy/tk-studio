@@ -8,7 +8,7 @@ import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { createApi } from "../src/api";
 import { closeOutOrphans, launchStopGraceful, relauncher, type Started } from "../src/cli";
-import { closableVerdict, closeOutPaused, ESCALATION_BLOCKED_REASON, findSpec, frontmatter, gracefulStopInForce, harvestMessage, jiraBound, landing, launchedSinceMove, NOT_HANDED, REARM_SKIPPED, rearmFailedLine, resumePaused, ResumeRefused, trackArgs, unblocksOwed, type PausedDeps } from "../src/closeout";
+import { armingRefusedStop, closableVerdict, closeOutPaused, ESCALATION_BLOCKED_REASON, findSpec, frontmatter, gracefulStopInForce, harvestMessage, jiraBound, landing, launchedSinceMove, NOT_HANDED, REARM_SKIPPED, rearmFailedLine, resumePaused, ResumeRefused, trackArgs, unblocksOwed, type PausedDeps } from "../src/closeout";
 import { renderPage, type PageData } from "../src/page";
 import { Queue, STUDIO_END_RETRY_LIMIT, type Owner, type Probes } from "../src/queue";
 import { runProcess, toVmPath, type RunResult } from "../src/server";
@@ -47,13 +47,13 @@ const spec = (status: string, verdict?: string) =>
 
 /** One paused sbx launch run: a real worktree on `supervisor/run-<id>` (cut from a real repo), engine E1's run
  * dir, the story's spec (uncommitted: the engine's staged harvest), the run launched then paused at `stage`. */
-async function pausedRun(opts: { status?: string; verdict?: string; stage?: string; key?: string | null; tier?: "sbx" | "host"; spec?: boolean; paused?: boolean } = {}) {
+async function pausedRun(opts: { status?: string; verdict?: string; stage?: string; key?: string | null; tier?: "sbx" | "host"; spec?: boolean; paused?: boolean; definition?: Record<string, unknown> } = {}) {
   const repo = gitRepo();
   const work = tempDir("tk-sup-co-work-");
   const queue = new Queue(":memory:", { ownerAlive: (o) => o.nonce === me.nonce, engineLive: async () => ({ live: false }) });
   const tier = opts.tier ?? "sbx";
   const run0 = queue.enqueue({
-    jobId: "launch-27", root: repo.checkout, projectId: "p27", definition: LAUNCH, owner: me, tier, ...(tier === "sbx" ? { sandbox: SB } : {}),
+    jobId: "launch-27", root: repo.checkout, projectId: "p27", definition: opts.definition ?? LAUNCH, owner: me, tier, ...(tier === "sbx" ? { sandbox: SB } : {}),
   }).run;
   expect((await queue.claim(run0.run_id, me)).claimed).toBe(true);
   const wt = join(work, "worktrees", "p27", run0.run_id);
@@ -1866,6 +1866,72 @@ describe("Story 35.2: no relaunch across a story boundary while a graceful stop 
       expect(ev(fx.queue, fx.run.run_id, "story-boundary")).toHaveLength(0);
       expect(fx.get()).toMatchObject({ state: "running", engine_run_id: E2 });
     }
+  });
+
+  /** Story 37.3 (DW-161): a run-epic with the one-story rhythm, as the shipped job declares it. */
+  const RUN_EPIC_1 = { ...LAUNCH, id: "run-epic", type: "run-epic", stop: { on_status: ["blocked"], after_stories: 1 } };
+
+  test("Story 37.3 (DW-161): a figure-1 run whose arming was refused (`stop-armed ok: false`) ends at the boundary with its line, never relaunched", async () => {
+    const fx = await pausedRun({ verdict: "no-impact", definition: RUN_EPIC_1 });
+    writeFileSync(join(fx.runDir, "run.json"), JSON.stringify({ total_cost_usd: 1.25 }));
+    fx.queue.note(fx.run.run_id, "stop-armed", { figure: 1, engine_run_id: E1, ok: false, detail: "engine not reachable", tier: "sbx" });
+    const p = passDeps(fx);
+    const gh = fakeGh();
+    const finishes: string[][] = [];
+    const deps: PausedDeps = { ...p.deps, env: { ...p.deps.env, GH_BIN: gh.bin }, verbs: async (_r, args) => { finishes.push(args); return { ok: true, state: "complete" }; } };
+    fx.queue.db.run("UPDATE runs SET base_ref = 'main' WHERE run_id = ?", [fx.run.run_id]);
+    expect(await closeOutPaused(fx.queue, deps)).toEqual({ closed: [fx.run.run_id], awaiting: [] });
+    expect(mainSteps(p.order)).toEqual(["git commit", "uv meter.py harvest", `sbx exec ${SB} /home/agent/.local/bin/bmad-loop archive`]);
+    expect(p.invoked).toHaveLength(0); // never relaunched
+    const end = `story boundary: ${KEY} landed; the one-story stop arming was refused (engine not reachable)`;
+    expect(fx.get()).toMatchObject({ state: "complete", reason: end });
+    expect(finishes[0]!.slice(finishes[0]!.indexOf("--state"), finishes[0]!.indexOf("--state") + 4)).toEqual(["--state", "complete", "--reason", end]);
+    const reason = "the one-story stop arming was refused (engine not reachable): relaunching would start the next story in this run";
+    expect(ev(fx.queue, fx.run.run_id, "story-boundary").map((e) => e.detail)).toEqual([
+      { story_key: KEY, engine_run_id: E1, code: "StoryBoundary", reason, graceful_stop: "arming-refused", ended: true }, // nothing was kept
+    ]);
+    expect(p.sent).toHaveLength(1);
+    expect(p.sent[0]).toContain(`ends at the story boundary: story ${KEY} landed, not relaunched: ${reason}`);
+    expect(fx.queue.lock(fx.run.root)).toBeNull();
+    expect(kinds(fx.queue, fx.run.run_id)).not.toContain("close-out");
+  });
+
+  test("Story 37.3 (DW-161): a refused arming's commit give-up ends with the arming-refused line, never `landed under a graceful stop`", async () => {
+    const fx = await pausedRun({ verdict: "no-impact", definition: RUN_EPIC_1 });
+    fx.queue.note(fx.run.run_id, "stop-armed", { figure: 1, engine_run_id: E1, ok: false, detail: "engine not reachable", tier: "sbx" });
+    const p = passDeps(fx);
+    const deps: PausedDeps = { ...p.deps, verbs: async () => ({ ok: true }) };
+    testGit(fx.wt, "checkout", "-q", "-b", "elsewhere"); // the commit step fails
+    for (let i = 1; i <= STUDIO_END_RETRY_LIMIT; i++) fx.queue.note(fx.run.run_id, "close-out-failed", { story_key: KEY, step: "commit", error: "earlier", attempt: i });
+    expect(await closeOutPaused(fx.queue, deps)).toEqual({ closed: [fx.run.run_id], awaiting: [] });
+    expect(fx.get().state).toBe("partial");
+    expect(fx.get().reason).toStartWith(`story boundary: ${KEY} landed; the one-story stop arming was refused (engine not reachable); close-out gave up after ${STUDIO_END_RETRY_LIMIT + 1} attempts: commit failed: `);
+    expect(fx.get().reason).not.toContain("under a graceful stop");
+    expect(p.invoked).toHaveLength(0);
+  }, 60_000);
+
+  test("Story 37.3 (DW-161): an `ok: true` arming, another engine's refusal, or a figure other than 1: the boundary is not ended by it", async () => {
+    const cases: [Record<string, unknown>, Record<string, unknown>][] = [
+      [RUN_EPIC_1, { figure: 1, engine_run_id: E1, ok: true, detail: `engine ${E1} stopping gracefully`, tier: "sbx" }],
+      [RUN_EPIC_1, { figure: 1, engine_run_id: "E0", ok: false, detail: "refused", tier: "sbx" }],
+      [{ ...RUN_EPIC_1, stop: { after_stories: 2 } }, { figure: 2, engine_run_id: E1, ok: false, detail: "refused", tier: "sbx" }],
+      [LAUNCH, { figure: 1, engine_run_id: E1, ok: false, detail: "refused", tier: "sbx" }],
+    ];
+    for (const [definition, armed] of cases) {
+      const fx = await pausedRun({ verdict: "no-impact", definition });
+      fx.queue.note(fx.run.run_id, "stop-armed", armed);
+      expect(armingRefusedStop(fx.queue, fx.get())).toBeUndefined();
+    }
+    const fx = await pausedRun({ verdict: "no-impact", definition: RUN_EPIC_1 });
+    fx.queue.note(fx.run.run_id, "stop-armed", { figure: 1, engine_run_id: E1, ok: false, detail: "no sandbox", tier: "sbx" });
+    expect(armingRefusedStop(fx.queue, fx.get())).toEqual({ source: "arming-refused", detail: "no sandbox" });
+    // The `ok: true` control relaunches as today (no stop in force, no boundary).
+    const ok = await pausedRun({ verdict: "no-impact", definition: RUN_EPIC_1 });
+    ok.queue.note(ok.run.run_id, "stop-armed", { figure: 1, engine_run_id: E1, ok: true, detail: "armed", tier: "sbx" });
+    const p = passDeps(ok);
+    expect(await closeOutPaused(ok.queue, p.deps)).toEqual({ closed: [ok.run.run_id], awaiting: [] });
+    expect(p.invoked).toHaveLength(1);
+    expect(ev(ok.queue, ok.run.run_id, "story-boundary")).toHaveLength(0);
   });
 
   test("Story 35.2: the reader — a missing, garbage or unreadable journal is no stop; it never throws", () => {

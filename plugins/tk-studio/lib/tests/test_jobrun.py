@@ -599,6 +599,19 @@ class JobRunTestCase(unittest.TestCase):
         self.assertIn("stop: on_status",
                       jobrun.evaluate_stop(on_status, [own, engine]))
 
+    def test_story_37_3_max_runs_skips_an_own_block(self):
+        """DW-157: a run carrying `own_block` is not counted toward max_runs."""
+        capped = dict(self._core_defn("capped"), stop={"max_runs": 2})
+        done = {"run_id": "a", "state": "complete"}
+        own = {"run_id": "b", "state": "blocked", "own_block": "pin"}
+        self.assertIsNone(jobrun.evaluate_stop(capped, [done, own]))
+        self.assertIsNone(jobrun.evaluate_stop(capped, [own, own, done]))
+        self.assertIn("stop: max_runs (2) reached",
+                      jobrun.evaluate_stop(capped, [done, own, done]))
+        # an own block with on_status still reads past it, as 36.5 has it
+        both = dict(capped, stop={"max_runs": 2, "on_status": ["blocked"]})
+        self.assertIsNone(jobrun.evaluate_stop(both, [done, own]))
+
     def test_story_36_5_finish_own_block_lands_in_run_json_and_wakes_the_next(self):
         self._declare("eng", self._skill_defn(
             "eng", stop={"on_status": ["blocked"]}))
