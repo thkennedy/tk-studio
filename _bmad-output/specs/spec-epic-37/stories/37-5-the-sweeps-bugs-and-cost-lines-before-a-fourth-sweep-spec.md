@@ -282,6 +282,9 @@ DRIFT: sweep.test.ts:587 retitled rather than flipped — the live tick still ne
 | review | 1 | 2026-11-06T08:29:04Z | 2026-11-06T08:52:13Z | 7a3f2bba-f220-464a-9eb7-3bde4b49984e | claude-opus-5-5 | medium | 6276178 | 62163 | 5.0063 | completed |
 | review | 2 | 2026-11-06T08:52:13Z | 2026-11-06T09:12:01Z | 7f9e44f4-77bd-48bc-8f36-9daea92fe8d4 | claude-opus-5-5 | medium | 7501516 | 69148 | 5.1289 | completed |
 | gate | 1 | 2026-11-06T09:12:01Z | 2026-11-06T09:14:31Z | f4aebcba-a2d6-4ccc-bbaf-06d2414f9cd7 | claude-opus-5-5 | medium | 2425421 | 13167 | 1.4878 | completed |
+| host-leg | 1 | 2026-11-06T09:14:58Z | 2026-11-06T10:17:30Z | — | — | — | — | — | — | green |
+| close-out | 1 | 2026-11-06T10:17:30Z | 2026-11-06T10:17:37Z | — | — | — | — | — | — | PR |
+| merge | — | 2026-11-06T10:20:32Z | 2026-11-06T10:20:32Z | — | — | — | — | — | — | merged |
 
 ## Reconcile
 
