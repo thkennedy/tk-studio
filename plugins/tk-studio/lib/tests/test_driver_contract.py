@@ -110,7 +110,7 @@ class DriverContractTestCase(unittest.TestCase):
         # engine gate, `verify.engine` and `engine` on `host-verify` (Story
         # 34.1, additive); 0.1.30 opens Epic 35's entry with the re-run as a
         # whole leg (Story 35.1, additive)
-        self.assertRegex(self.text, r"\*\*0\.1\.32\*\*")
+        self.assertRegex(self.text, r"\*\*0\.1\.33\*\*")
         self.assertIn("### 5.1 Execution-pipeline legs", self.text)
         self.assertIn("lib/pipeline.py", self.text)
         self.assertIn("Change policy", self.text)
@@ -384,7 +384,7 @@ class DriverContractTestCase(unittest.TestCase):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
         # 0.1.28 (Story 33.1) heads the header now; the 0.1.24 clause stays
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         for older in ("**0.1.22**", "**0.1.23**", "**0.1.24**"):
             self.assertNotIn(older, header)
         self.assertNotIn("0.2.0 (", header)
@@ -469,7 +469,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_25_extends_the_office_projection_additively(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertNotIn("**0.1.24**", header)
         self.assertNotIn("0.2.0 (", header)
         self.assertLess(header.index("0.1.24 (Story 29.4)"),
@@ -514,7 +514,7 @@ class DriverContractTestCase(unittest.TestCase):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
         # 0.1.28 (Story 33.1) heads the header now; the 0.1.25 clauses stay
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertNotIn("**0.1.25**", header)
         self.assertLess(header.index("0.1.25 (Story 30.4)"),
                         header.index("0.1.25 (Story 30.5)"))
@@ -566,7 +566,7 @@ class DriverContractTestCase(unittest.TestCase):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
         # 0.1.28 (Story 33.1) heads the header now; the 0.1.25 clauses stay
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertNotIn("**0.1.25**", header)
         self.assertLess(header.index("0.1.25 (Story 30.5)"),
                         header.index("0.1.25 (Story 30.6)"))
@@ -619,7 +619,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_26_opens_epic_31_with_the_setup_verb(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertNotIn("**0.1.25**", header)
         self.assertNotIn("0.2.0 (", header)
         self.assertLess(header.index("0.1.25 (Story 30.6)"),
@@ -667,7 +667,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_26_names_publish(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertLess(header.index("0.1.26 (Story 31.2)"),
                         header.index("0.1.26 (Story 31.3)"))
         clause = " ".join(header[header.index("0.1.26 (Story 31.3)"):].split())
@@ -704,7 +704,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_26_names_sync_back(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertLess(header.index("0.1.26 (Story 31.3)"),
                         header.index("0.1.26 (Story 31.4)"))
         clause = " ".join(header[header.index("0.1.26 (Story 31.4)"):].split())
@@ -790,7 +790,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_26_names_track_and_the_inbox(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertLess(header.index("0.1.26 (Story 31.4)"),
                         header.index("0.1.26 (Story 31.5)"))
         clause = " ".join(header[header.index("0.1.26 (Story 31.5)"):].split())
@@ -856,7 +856,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_26_names_reply_and_the_issue_read(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertLess(header.index("0.1.26 (Story 31.5)"),
                         header.index("0.1.26 (Story 31.6)"))
         clause = " ".join(header[header.index("0.1.26 (Story 31.6)"):].split())
@@ -919,7 +919,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_26_names_validate_and_its_job(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertLess(header.index("0.1.26 (Story 31.6)"),
                         header.index("0.1.26 (Story 31.7)"))
         clause = " ".join(header[header.index("0.1.26 (Story 31.7)"):].split())
@@ -971,7 +971,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_27_opens_the_engagement_entry(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertNotIn("**0.1.26**", header)
         for older in ("0.1.26 (Story 31.2)", "0.1.26 (Story 31.7)"):
             self.assertLess(header.index(older),
@@ -1008,7 +1008,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_27_story_32_2_adds_the_chat_and_the_engage_surface(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertLess(header.index("0.1.27 (Story 32.1)"),
                         header.index("0.1.27 (Story 32.2) adds to this same "
                                      "entry"))
@@ -1069,7 +1069,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_27_story_32_3_adds_the_questions(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertLess(header.index("0.1.27 (Story 32.2) adds to this same "
                                      "entry"),
                         header.index("0.1.27 (Story 32.3) adds to this same "
@@ -1131,7 +1131,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_27_story_32_4_adds_the_scope_of_work(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertLess(header.index("0.1.27 (Story 32.3) adds to this same "
                                      "entry"),
                         header.index("0.1.27 (Story 32.4) adds to this same "
@@ -1183,7 +1183,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_27_story_32_5_adds_the_quote(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertLess(header.index("0.1.27 (Story 32.4) adds to this same "
                                      "entry"),
                         header.index("0.1.27 (Story 32.5) adds to this same "
@@ -1310,7 +1310,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_27_story_32_6_adds_approval_and_the_first_run(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertLess(header.index("0.1.27 (Story 32.5) adds to this same "
                                      "entry"),
                         header.index("0.1.27 (Story 32.6) adds to this same "
@@ -1396,7 +1396,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_27_story_32_7_adds_the_run_cost_read(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertLess(header.index("0.1.27 (Story 32.6) adds to this same "
                                      "entry"),
                         header.index("0.1.27 (Story 32.7) adds to this same "
@@ -1432,7 +1432,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_27_story_32_8_adds_delivery_and_change_requests(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertLess(header.index("0.1.27 (Story 32.7) adds to this same "
                                      "entry"),
                         header.index("0.1.27 (Story 32.8) adds to this same "
@@ -1805,7 +1805,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_28_story_33_1_adds_the_supervisor_log_to_status(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertNotIn("**0.1.27**", header)
         self.assertEqual(header.count("0.1.28 (Story 33.1"), 1)
         self.assertLess(header.index("0.1.27 (Story 32.8)"),
@@ -1961,7 +1961,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_29_story_34_1_engine_gate(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertNotIn("**0.1.28**", header)
         self.assertEqual(header.count("0.1.29 (Story 34.1"), 1)
         self.assertLess(header.index("0.1.28 (Story 33.8"),
@@ -2011,7 +2011,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_29_story_34_2_playable_path_row(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertNotIn("**0.1.29**", header)
         self.assertEqual(header.count("Story 34.2, additive"), 1)
         self.assertLess(header.index("0.1.29 (Story 34.1"),
@@ -2052,7 +2052,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_29_story_34_3_playable_verify_leg(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertNotIn("**0.1.29**", header)
         self.assertEqual(header.count("Story 34.3, additive"), 1)
         self.assertLess(header.index("Story 34.2, additive"),
@@ -2099,7 +2099,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_29_story_34_4_engine_skill(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertNotIn("**0.1.29**", header)
         self.assertEqual(header.count("Story 34.4, additive"), 1)
         self.assertLess(header.index("Story 34.3, additive"),
@@ -2141,7 +2141,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_29_story_34_5_engine_mcp(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertNotIn("**0.1.29**", header)
         self.assertEqual(header.count("Story 34.5, additive"), 1)
         self.assertLess(header.index("Story 34.4, additive"),
@@ -2189,7 +2189,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_29_story_34_6_asset_manifest(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertNotIn("**0.1.29**", header)
         self.assertEqual(header.count("Story 34.6, additive"), 1)
         self.assertLess(header.index("Story 34.5, additive"),
@@ -2249,7 +2249,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_29_story_34_7_asset_ladder(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertNotIn("**0.1.29**", header)
         self.assertEqual(header.count("Story 34.7, additive"), 1)
         self.assertLess(header.index("Story 34.6, additive"),
@@ -2329,7 +2329,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_29_story_34_8_vertical_slice(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertNotIn("**0.1.29**", header)
         self.assertEqual(header.count("Story 34.8, additive"), 1)
         self.assertLess(header.index("Story 34.7, additive"),
@@ -2413,7 +2413,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_30_story_35_1_rerun_whole_leg(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertNotIn("**0.1.29**", header)
         self.assertEqual(header.count("0.1.30 (Story 35.1, additive)"), 1)
         self.assertLess(header.index("Story 34.8, additive"),
@@ -2471,7 +2471,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_30_story_35_8_stage_log(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertEqual(header.count("0.1.30 (Story 35.8, additive)"), 1)
         self.assertLess(header.index("0.1.30 (Story 35.1, additive)"),
                         header.index("0.1.30 (Story 35.8, additive)"))
@@ -2548,7 +2548,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_30_story_35_2_plans_and_records(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertEqual(header.count("0.1.30 (Story 35.2, additive)"), 1)
         self.assertLess(header.index("0.1.30 (Story 35.8, additive)"),
                         header.index("0.1.30 (Story 35.2, additive)"))
@@ -2617,7 +2617,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_30_story_35_3_slice_hardened(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertEqual(header.count("0.1.30 (Story 35.3, additive)"), 1)
         self.assertLess(header.index("0.1.30 (Story 35.2, additive)"),
                         header.index("0.1.30 (Story 35.3, additive)"))
@@ -2677,7 +2677,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_30_story_35_4_engine_mcp_ports(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertEqual(header.count("0.1.30 (Story 35.4, additive)"), 1)
         self.assertLess(header.index("0.1.30 (Story 35.3, additive)"),
                         header.index("0.1.30 (Story 35.4, additive)"))
@@ -2744,7 +2744,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_30_story_35_5_sandbox_and_host(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertEqual(header.count("0.1.30 (Story 35.5, additive)"), 1)
         self.assertLess(header.index("0.1.30 (Story 35.4, additive)"),
                         header.index("0.1.30 (Story 35.5, additive)"))
@@ -2808,7 +2808,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_30_story_35_6_closeout_carries_the_proof(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertEqual(header.count("0.1.30 (Story 35.6, additive)"), 1)
         self.assertLess(header.index("0.1.30 (Story 35.5, additive)"),
                         header.index("0.1.30 (Story 35.6, additive)"))
@@ -2865,7 +2865,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_30_story_35_7_the_run_sweep_job_type(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertEqual(header.count("0.1.30 (Story 35.7, additive)"), 1)
         self.assertLess(header.index("0.1.30 (Story 35.6, additive)"),
                         header.index("0.1.30 (Story 35.7, additive)"))
@@ -2927,7 +2927,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_31_story_36_4_the_host_leg_goes_red_for_code_only(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertEqual(header.count("0.1.31 (Story 36.4, additive)"), 1)
         self.assertLess(header.index("0.1.31 (Story 36.3, additive)"),
                         header.index("0.1.31 (Story 36.4, additive)"))
@@ -2956,7 +2956,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_31_story_36_5_the_supervisors_own_faults(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertEqual(header.count("0.1.31 (Story 36.5, additive)"), 1)
         self.assertLess(header.index("0.1.31 (Story 36.4, additive)"),
                         header.index("0.1.31 (Story 36.5, additive)"))
@@ -2984,7 +2984,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_31_story_36_7_no_surface_change(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertEqual(header.count("0.1.31 (Story 36.7, additive)"), 1)
         self.assertIn("36.7: no surface change; the module graph and the docs", header)
         stories = next(line for line in self.text.splitlines() if line.startswith("| Story / rulings"))
@@ -2993,7 +2993,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_31_story_36_6_setup_and_launch_by_evidence(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertEqual(header.count("0.1.31 (Story 36.6, additive)"), 1)
         self.assertLess(header.index("0.1.31 (Story 36.5, additive)"),
                         header.index("0.1.31 (Story 36.6, additive)"))
@@ -3031,7 +3031,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_31_story_36_3_a_paused_or_resumed_run_is_never_parked(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertEqual(header.count("0.1.31 (Story 36.3, additive)"), 1)
         self.assertLess(header.index("0.1.31 (Story 36.2, additive)"),
                         header.index("0.1.31 (Story 36.3, additive)"))
@@ -3065,7 +3065,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_31_story_36_2_the_sweeps_records_are_whole(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertEqual(header.count("0.1.31 (Story 36.2, additive)"), 1)
         self.assertLess(header.index("0.1.31 (Story 36.1, additive)"),
                         header.index("0.1.31 (Story 36.2, additive)"))
@@ -3103,7 +3103,7 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_31_story_36_1_one_verdict(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertNotIn("**0.1.30**", header)
         self.assertEqual(header.count("0.1.31 (Story 36.1, additive)"), 1)
         self.assertLess(header.index("0.1.30 (Story 35.7, additive)"),
@@ -3137,9 +3137,9 @@ class DriverContractTestCase(unittest.TestCase):
     def test_0_1_32_story_37_1_one_id_source(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))
-        self.assertIn("**0.1.32**", header)
+        self.assertIn("**0.1.33**", header)
         self.assertNotIn("**0.1.31**", header)
-        self.assertNotIn("**0.1.33**", header)
+        self.assertNotIn("**0.1.32**", header)
         self.assertEqual(header.count("0.1.32 (Story 37.1, additive)"), 1)
         self.assertLess(header.index("0.1.31 (Story 36.7, additive)"),
                         header.index("0.1.32 (Story 37.1, additive)"))
@@ -3208,6 +3208,37 @@ class DriverContractTestCase(unittest.TestCase):
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
         self.assertRegex(stories, r"Story 37\.1, Story 37\.2(, Story 37\.\d+)* \(Epic 37\)")
+
+    def test_0_1_33_dw_170_the_sandbox_tier_signs_itself_in_again(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.33**", header)
+        self.assertNotIn("**0.1.34**", header)
+        self.assertEqual(header.count("0.1.33 (DW-170, additive)"), 1)
+        self.assertLess(header.index("0.1.32 (Story 37.1, additive)"),
+                        header.index("0.1.33 (DW-170, additive)"))
+        clause = " ".join(header[header.index("0.1.33 (DW-170, additive)"):].split())
+        for phrase in ("the sandbox tier signs itself in again", "`tk-studio-login`", "`lib/login.py`",
+                       "`logins` key", "`relogin`", "`docker-login`", "— additive) |"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        self.assertEqual(flat.count("**0.1.33 (DW-170, hole 111, additive).**"), 1)
+        note = flat[flat.index("**0.1.33 (DW-170, hole 111, additive).**"):]
+        note = note[:note.index("## 8. Conformance")]
+        for phrase in ("`uv run <plugin>/lib/login.py <tool> [--config PATH] [--dry-run]`", "intent `tk-studio-login`",
+                       "`logins.<tool>`", "`item: op://<vault>/<item>`", "`OP_SERVICE_ACCOUNT_TOKEN`", "`TK_OP_BIN`",
+                       "`sbx login --username <username> --password-stdin`", "username_length, secret_length",
+                       "the username masked", "the secret, the token and the username scrubbed",
+                       "`ToolUnknown`, `ConfigMissing`, `LoginNotConfigured`, `OpMissing`, `TokenMissing`, `ReadRefused`, `LoginFailed`",
+                       "no value ever appears in its output", "`not signed in`", "once per drain pass per sandbox",
+                       "one `relogin` event per outcome episode", "pins again on `complete`",
+                       "`pin-failed:<sandbox>` refusal's `resolves` names the verb", "top-level `logins` key",
+                       "`docker-login` check", "Every other field, kind and route is unchanged."):
+            self.assertIn(phrase, note)
+        row = next(line for line in self.text.splitlines()
+                   if line.startswith("| `tk-studio-login`"))
+        for phrase in ("0.1.33, DW-170", "`lib/login.py <tool>`", "`ToolUnknown`", "`LoginFailed`", "no value"):
+            self.assertIn(phrase, row)
 
     def test_story_35_7_the_skill_sweep_waits_540_s_inside_the_bash_cap(self):
         # the skill's one sweep call must print its block inside the Bash tool's 600 s cap

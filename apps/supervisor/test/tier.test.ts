@@ -76,8 +76,18 @@ describe("supervisor per-job config", () => {
   const load = (text: string) => loadSupervisorConfig("cfg.yaml", () => text);
 
   test("unset → no config; empty file → no jobs", () => {
-    expect(loadSupervisorConfig(undefined)).toEqual({ jobs: {} });
-    expect(load("")).toEqual({ jobs: {} });
+    expect(loadSupervisorConfig(undefined)).toEqual({ jobs: {}, logins: {} });
+    expect(load("")).toEqual({ jobs: {}, logins: {} });
+  });
+
+  test("DW-170: `logins` names a tool's 1Password item with its field labels (defaults left to the verb)", () => {
+    const cfg = load("jobs:\n  p/j:\n    tier: sbx\n    sandbox: claude-p\nlogins:\n  sbx:\n    item: \"op://Agent PC/Docker Hub Personal Access Token\"\n  gh:\n    item: op://Agent PC/GitHub token\n    secret_field: token\n");
+    expect(cfg.logins).toEqual({
+      sbx: { item: "op://Agent PC/Docker Hub Personal Access Token" },
+      gh: { item: "op://Agent PC/GitHub token", secret_field: "token" },
+    });
+    expect(jobOptions(cfg, "p", "j")).toEqual({ tier: "sbx", sandbox: "claude-p" });
+    expect(load("logins:\n").logins).toEqual({});
   });
 
   test("parses tier, permission_mode and sandbox keyed <project-id>/<job-id>", () => {
@@ -92,6 +102,11 @@ describe("supervisor per-job config", () => {
     ["an unknown permission mode", "jobs:\n  p/j:\n    permission_mode: yolo\n", "permission_mode 'yolo'"],
     ["an unknown job key", "jobs:\n  p/j:\n    model: claude-opus\n", "unknown key 'model'"],
     ["an unknown top-level key", "tiers: {}\n", "unknown top-level key 'tiers'"],
+    ["a logins that is not a mapping", "logins: [sbx]\n", "`logins` that is not a mapping"],
+    ["a login without an item", "logins:\n  sbx:\n    username_field: u\n", "login 'sbx' names no item"],
+    ["a login item that is not an op:// reference", "logins:\n  sbx:\n    item: C:/secrets/pat.txt\n", "expected an op://<vault>/<item> reference"],
+    ["an unknown login key", "logins:\n  sbx:\n    item: op://v/i\n    password: x\n", "login 'sbx' carries unknown key 'password'"],
+    ["a login that is not a mapping", "logins:\n  sbx: op://v/i\n", "login 'sbx' that is not a mapping"],
     ["an empty sandbox", "jobs:\n  p/j:\n    sandbox: ''\n", "sandbox"],
     ["a job key without a project id", "jobs:\n  j:\n    tier: sbx\n", "'<project-id>/<job-id>'"],
     ["a job key with an empty project id", "jobs:\n  /j:\n    tier: sbx\n", "'<project-id>/<job-id>'"],

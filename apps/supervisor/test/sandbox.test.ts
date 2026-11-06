@@ -191,6 +191,69 @@ describe("pin: `sbx run -d --name <sb>` before the preflight's `sbx exec`", () =
     expect(failed[0]!.detail).toEqual({ sandbox: SB, error: second });
   });
 
+  // DW-170 (hole 111): a pin refused for a lapsed Docker sign-in runs the sign-in verb once per pass and pins again.
+  const NOT_SIGNED = "error: not signed in to Docker\n  try: sbx login";
+  const LOGGED_IN_SPAWNER: Spawner = async () => LOGGED_IN;
+  /** `sbx ls` answers nothing (a cold pin); the pin fails `not signed in` until `signedIn` flips. */
+  const signInDeps = (state: { signedIn: boolean }): SandboxDeps => ({
+    ...deps, run: async (_bin, args) => args[0] === "run" && !state.signedIn ? { exit: 1, stderr: NOT_SIGNED, stdout: "" } : ok,
+  });
+
+  test("DW-170: a `not signed in` pin runs the relogin once, pins again on its `complete` and the claim proceeds; one `relogin` event", async () => {
+    const q = newQueue();
+    const run = q.enqueue({ jobId: "launch-27", root: tempDir("tk-sup-gate-"), projectId: "p27", definition: LAUNCH, tier: "sbx", sandbox: SB }).run;
+    const state = { signedIn: false };
+    const tools: string[] = [];
+    const relogin = async (tool: string) => { tools.push(tool); state.signedIn = true; return { ok: true, reason: null }; };
+    const out = await claimGate(q, run.run_id, { tier: "sbx", sandbox: SB }, { sbx: signInDeps(state), spawner: LOGGED_IN_SPAWNER, hygiene: { env: {} }, relogin });
+    expect(out).toBeNull();
+    expect(tools).toEqual(["sbx"]);
+    expect(kinds(q, run.run_id).filter((k) => k === "relogin")).toHaveLength(1);
+    expect(q.events(run.run_id).find((e) => e.kind === "relogin")?.detail).toMatchObject({ sandbox: SB, tool: "sbx", ok: true, reason: null });
+    expect(kinds(q, run.run_id).filter((k) => k === "pinned")).toHaveLength(1);
+    expect(kinds(q, run.run_id)).not.toContain("claim-refused");
+  });
+
+  test("DW-170: a relogin that refuses leaves the `pin-failed` refusal naming the verb; once per pass per sandbox, a new pass tries again; the event is patched while the outcome repeats", async () => {
+    const q = newQueue();
+    const run = q.enqueue({ jobId: "launch-27", root: tempDir("tk-sup-gate-"), projectId: "p27", definition: LAUNCH, tier: "sbx", sandbox: SB }).run;
+    const state = { signedIn: false };
+    let calls = 0;
+    const relogin = async () => { calls += 1; return { ok: false, reason: `TokenMissing: OP_SERVICE_ACCOUNT_TOKEN is not set (call ${calls})` }; };
+    const pass1 = new Set<string>();
+    const gate = (relogged: Set<string>) => claimGate(q, run.run_id, { tier: "sbx", sandbox: SB }, { sbx: signInDeps(state), spawner: LOGGED_IN_SPAWNER, hygiene: { env: {} }, relogin, relogged });
+    const out = await gate(pass1);
+    expect(out?.reason).toStartWith("sbx pin failed:");
+    expect(out?.reason).toContain("not signed in to Docker");
+    expect(out?.resolves).toContain("login.py sbx");
+    expect(out?.resolves).toContain("logins.sbx");
+    expect(calls).toBe(1);
+    await gate(pass1); // the same pass: no second relogin
+    expect(calls).toBe(1);
+    await gate(new Set<string>()); // a new pass: once more
+    expect(calls).toBe(2);
+    const relogins = q.events(run.run_id).filter((e) => e.kind === "relogin");
+    expect(relogins).toHaveLength(1); // the repeated `ok: false` patched in place, its reason the latest
+    expect(relogins[0]!.detail).toMatchObject({ sandbox: SB, tool: "sbx", ok: false, reason: expect.stringContaining("(call 2)") });
+    expect(kinds(q, run.run_id).filter((k) => k === "claim-refused")).toHaveLength(1);
+    expect(q.get(run.run_id)?.state).toBe("queued");
+    // the sign-in comes back by hand: the pin stands, the claim proceeds, no relogin runs
+    state.signedIn = true;
+    expect(await gate(new Set<string>())).toBeNull();
+    expect(calls).toBe(2);
+  });
+
+  test("DW-170: a pin that fails for any other reason never runs the relogin, and its `resolves` keeps the pin wording only", async () => {
+    const q = newQueue();
+    const run = q.enqueue({ jobId: "launch-27", root: tempDir("tk-sup-gate-"), projectId: "p27", definition: LAUNCH, tier: "sbx", sandbox: SB }).run;
+    const busy: SandboxDeps = { ...deps, run: async (_bin, args) => args[0] === "run" ? { exit: 1, stderr: "sandbox busy (pid 101)", stdout: "" } : ok };
+    let calls = 0;
+    const out = await claimGate(q, run.run_id, { tier: "sbx", sandbox: SB }, { sbx: busy, spawner: LOGGED_IN_SPAWNER, hygiene: { env: {} }, relogin: async () => { calls += 1; return { ok: true, reason: null }; } });
+    expect(calls).toBe(0);
+    expect(out?.resolves).not.toContain("login.py");
+    expect(kinds(q, run.run_id)).not.toContain("relogin");
+  });
+
   test("Story 33.2: a queued run with no stored sandbox (config supplies it) records it before the pin — a refused preflight twice leaves one `pinned`", async () => {
     sbx.answer({});
     const q = newQueue();

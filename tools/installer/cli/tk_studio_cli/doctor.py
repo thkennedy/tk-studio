@@ -343,6 +343,36 @@ def check_sandbox_login(ctx, sbx: dict, clock=time.monotonic) -> dict:
                   sandboxes=reading["sandboxes"])
 
 
+# --- the engine sandbox's Docker sign-in (DW-170, hole 111) -------------------
+
+FIX_DOCKER_LOGIN = ("sign the sandbox tier in again: `uv run <plugin>/lib/"
+                    "login.py sbx` (the 1Password item named by `logins.sbx` in "
+                    "TK_SUPERVISOR_CONFIG, read with OP_SERVICE_ACCOUNT_TOKEN; "
+                    "the supervisor runs it itself on a `pin-failed` that says "
+                    "not signed in), or `sbx login` by hand; the next drain "
+                    "pass pins the sandbox again")
+NOT_SIGNED_IN = "not signed in"
+
+
+def check_docker_login(sandbox_login_check: dict) -> dict:
+    """The Docker sign-in behind every `sbx` call, read from the sandbox-login
+    check's own `sbx ls` (no second process): that check skips with `sbx ls
+    failed (... not signed in to Docker ...)` when the sign-in has lapsed
+    (hole 111) — a fail here; any other skip is not a reading (skipped,
+    the reason carried); a sandbox-login that read anything means `sbx ls`
+    answered, so the sign-in stands (pass)."""
+    name = "docker-login"
+    status, detail = sandbox_login_check["status"], sandbox_login_check["detail"]
+    if status == SKIPPED:
+        if "sbx ls failed" in detail and NOT_SIGNED_IN in detail.lower():
+            return _check(name, FAIL, "the engine sandbox's Docker sign-in has "
+                          f"lapsed: {detail}", FIX_DOCKER_LOGIN)
+        return _check(name, SKIPPED, f"not read: {detail}",
+                      sandbox_login_check.get("fix") or "")
+    return _check(name, PASS, "sbx ls answered: the sandbox tier is signed "
+                  "in to Docker")
+
+
 # --- folder trust (holes 14 and 15) ------------------------------------------
 
 def _norm(path: str, windows: bool) -> str:
@@ -1325,9 +1355,11 @@ def run_doctor(ctx, *, roster: str | None, channel: str, fetch,
         check_store(ctx),
     ]
     sbx = check_sbx(ctx)
+    sandbox_login_check = check_sandbox_login(ctx, sbx)   # Story 33.2: gated on sbx-daemon
     checks += [
         sbx,
-        check_sandbox_login(ctx, sbx),   # Story 33.2: gated on sbx-daemon
+        sandbox_login_check,
+        check_docker_login(sandbox_login_check),   # DW-170: from the same `sbx ls`
         *check_folder_trust(ctx),
         check_long_paths(ctx),
         check_path_launcher(ctx),
