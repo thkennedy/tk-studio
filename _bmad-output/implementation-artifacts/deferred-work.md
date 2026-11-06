@@ -1,6 +1,6 @@
 # Deferred Work
 
-<!-- deferred-work counter: last minted DW-181; mint through plansync.py deferred mint -->
+<!-- deferred-work counter: last minted DW-183; mint through plansync.py deferred mint -->
 
 ### DW-124: Contract §4 `submit` admitted a full job definition but the CLI/skill surface was id-only
 origin: migrated from legacy ledger ("Deferred from: code review of feat/tk-studio-connector (2026-08-06)"), 2026-10-29
@@ -1411,7 +1411,7 @@ origin: retrospective C8 (`_bmad-output/specs/spec-epic-36/RETROSPECTIVE.md`:77)
 source_spec: `36-4-the-host-leg-goes-red-for-code-only-spec.md` (:83, :141, :260); `36-5-the-supervisors-own-faults-spec.md` (:317, :318); `36-6-setup-and-the-launch-check-by-evidence-spec.md` (:263, :306, :311)
 location: plugins/tk-studio/lib (`kill_tree`, `plansync.py setup`); the `sbx skills ls` parser; `queue.db` `hold` events
 severity: medium
-reason: Each needs the host or a live site, so the engine cannot prove it: the specs record them asked or `unverifiable-here`. Owned by Story 37.7, which asks through the consult log; the live `plansync setup` waits for Story 37.4 on `main`.
+reason: Each needs the host or a live site, so the engine cannot prove it: the specs record them asked or `unverifiable-here`. Owned by Story 37.7, which asks through the consult log; the live `plansync setup` waits for Story 37.4 on `main`. Answered 2026-11-06 on the box in the owning specs' Consult Logs: CAP-11 proven (117 tests OK, both nt tests ran, 36-4 spec), CAP-13 captured (`sbx skills ls` exit 0; the listing names the store's entries, not skills: DW-183; 36-5 spec), CAP-14 (a) read (one `hold` per run on all ten runs since 36.5; 36-5 spec). Still owed: CAP-14 (b) and (c) on the next live sandbox run, and CAP-16's live update, which this site cannot exercise as it stands (the dry run found every transition; the live call was not made for its side effects alone: DW-182; 36-6 spec).
 status: open
 
 ### DW-169: The contract's 0.1.32 paragraph does not describe the `deferred mint` answer when the marker write fails after the counter write.
@@ -1518,4 +1518,20 @@ source_spec: `37-7-the-records-reconciled-and-the-proofs-captured-spec.md`
 location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261106-134720-e093; this entry preserves the lingering recommendation for a deliberate later review.
+status: open
+
+### DW-182: The live `plansync setup` cannot exercise `POST /workflows/update` on the owner's site (every transition is already present, so nothing is posted), and the 36-6 ask's v3 read spelling (`/workflows/search?expand=statuses,transitions`) is refused by the site: the update's body shape stays unverified, and the proof needs a site state with a missing transition.
+origin: operator session 2026-11-06 (CAP-16's proof through 37-7's Consult Log ask; the 36-6 consult of 2026-10-31T17:47:31Z: a lost configuration or a v3 spelling becomes a follow-up DW, not a block)
+source_spec: `36-6-setup-and-the-launch-check-by-evidence-spec.md` § Consult Log (the 2026-10-31 ask and the 2026-11-06 answer); `37-7-the-records-reconciled-and-the-proofs-captured-spec.md` § Consult Log (CAP-16); DW-107 and DW-127 (resolved; the body shape "unverified until the operator's attended rerun"); DW-106 (the Confluence scope gap)
+location: plugins/tk-studio/lib/plansync.py setup (the workflow step: the update posted only for transitions `workflow_transitions` finds absent; the Confluence folders created without adoption when the children read is refused); plugins/tk-studio/lib/jirabackend.py `update_workflow`, `find_workflow_version` (`/workflows/search`, `queryString` only); plugins/tk-studio/lib/confluence.py `find_folders` (`/spaces/{id}/direct-children`)
+severity: low
+reason: The dry run on 2026-11-06 found every Jira item (the six statuses, the Blocked -> Block Resolved transition, the three global transitions, the filter, the space), so a live `setup` would post nothing for the workflow and could not answer what DW-107/DW-127 left open (whether the site takes `statusReference` as the status id and the v3 transition shape); its only live effect would be five Confluence folders (Brief, GDD, Scope of Work, Decisions, Records) created without adoption, since the children read is refused by scope (DW-106) and existing folders cannot be seen — so the operator did not make the call. The ask's v3 read, `GET /workflows/search?expand=statuses,transitions`, is a 400 on this site ("supported parameters are: [usage, values.transitions]"); `expand=values.transitions` answers (version 2, 9 transitions, 5 with `properties`). Fix to make: (1) a way to exercise the update for real — a `setup --verify-workflow` that removes and restores one global transition on a scratch project key, or the owner's say that the dry run's "found" list is proof enough, which closes DW-107/127's unverified clause; (2) the 36-6 ask's v3 read corrected to `expand=values.transitions` wherever it is quoted (36-6 spec `:263`, 37-7's CAP-16 ask); (3) the folder step: with the children read refused by scope, hand the five folders to the owner's numbered steps instead of creating unadopted (possibly duplicate) folders, or add `read:custom-content:confluence` and `read:hierarchical-content:confluence` to the Confluence key (DW-106).
+status: open
+
+### DW-183: `sbx skills ls` names the store's top-level entries (the plugin folder `tk-studio` and `synced`), not skills: `skillInStore`'s listing check never matches a job's target skill and the host folder walk does all the work; the parser is unpinned against the real format.
+origin: operator session 2026-11-06 (CAP-13's capture through 37-7's Consult Log ask; the 36-5 consult of 2026-10-31T13:09:40Z: "if the listing names plugins and not skills, say so, since the ruling re-pins the check then")
+source_spec: `36-5-the-supervisors-own-faults-spec.md` § Consult Log (the 2026-11-06 capture) and "Unverifiable here" (the parser row); `37-7-the-records-reconciled-and-the-proofs-captured-spec.md` § Consult Log (CAP-13)
+location: apps/supervisor/src/sandbox.ts `skillInStore` :354 (`listed?.includes(skill)`), `parseSkillsList` (first token per line: the header's `SKILL` lands in the list), `skillsLsArgv`; apps/supervisor/test (the parser's fixture)
+severity: low
+reason: The real output on 2026-11-06 is three lines — `SKILL       STORE`, then `synced <store path>` and `tk-studio <store path>` — the store folder's entries, where `tk-studio` is the plugin folder whose `skills/` holds `tk-studio-launch` and the rest. So the listing can never contain a target skill's name; `in_store: true` comes from the walk of `<store>/tk-studio/skills/` on the host, and the listing check is dead weight that would also accept a plugin named like a skill. Fix to make: pin `parseSkillsList` to this capture (skip the header line; the first token is a store entry, not a skill); make the listing check a plugin-folder check (`tk-studio` present) and keep the `skills/` walk as the skill check, or drop the listing from the decision and keep it as evidence in the refusal text; one fixture from the capture.
 status: open
