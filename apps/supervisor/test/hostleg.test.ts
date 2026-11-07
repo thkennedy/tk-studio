@@ -14,7 +14,7 @@ import { Queue, type Owner } from "../src/queue";
 import { runProcess, type RunResult } from "../src/server";
 import { sweepRecord, type SweepSummary } from "../src/sweep";
 import { runBranch, type WorktreeDeps } from "../src/worktree";
-import { gitRepo, RUNTIME_GITIGNORE, testGit } from "./fakes";
+import { gitRepo, LEG_GUARD_ROWS, RUNTIME_GITIGNORE, testGit } from "./fakes";
 import { tempDir } from "./tmp";
 
 const me: Owner = { pid: process.pid, host: hostname(), nonce: "hostleg-test" };
@@ -30,7 +30,7 @@ type GhView = { state: string; isDraft: boolean; body?: string };
 const LAUNCH_BLOCK = { status: "complete", intent: "tk-studio-launch", artifacts: [".bmad-loop/runs/E1"] };
 
 /** An ended sbx run with its branch pushed to origin and its worktree removed, as a close-out leaves one. */
-async function fixture(o: { code?: number; pr?: string | null; push?: boolean; worktree?: boolean; definition?: Record<string, unknown>; config?: string; files?: Record<string, string>; engine?: boolean; studioRunId?: string } = {}) {
+async function fixture(o: { code?: number; pr?: string | null; push?: boolean; worktree?: boolean; definition?: Record<string, unknown>; config?: string; files?: Record<string, string>; engine?: boolean; studioRunId?: string; workerGuardS?: number } = {}) {
   const repo = gitRepo({ ".tk-studio/config.yaml": o.config ?? verifyConfig(o.code ?? 0), ...(o.files ?? {}) });
   const work = tempDir("tk-sup-hostleg-work-");
   const alive = new Set<string>([me.nonce]);
@@ -79,6 +79,8 @@ async function fixture(o: { code?: number; pr?: string | null; push?: boolean; w
   // Story 35.1: a slice re-run's playable step needs the engine run id and the sandbox (the judge's tier).
   if (o.engine) queue.db.query("UPDATE runs SET engine_run_id = 'E1', sandbox = 'tk-sbx' WHERE run_id = ?").run(id);
   if (o.studioRunId) queue.db.query("UPDATE runs SET studio_run_id = ? WHERE run_id = ?").run(o.studioRunId, id);
+  // Story 38.1: the run's worker guard, set while the run is live (a terminal run is immutable — the queue's trigger).
+  if (o.workerGuardS !== undefined) queue.db.query("UPDATE runs SET worker_guard_s = ? WHERE run_id = ?").run(o.workerGuardS, id);
   const branch = runBranch(id);
   const wt = join(work, "worktrees", "proj", id);
   let tip = "";
@@ -1014,5 +1016,54 @@ describe("Story 37.5 (B3): a sweep's green re-run never marks a half-finished sw
     const fx = await fixture();
     const r = await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done;
     expect(r.rerun.pr_ready).toBe("marked");
+  }, 60_000);
+});
+
+describe("Story 38.1: the re-run's own guard, its measure and `inconclusive (guard)`", () => {
+  /** `verify.host` as a bun one-liner running `script` (single quotes only inside). */
+  const scriptConfig = (script: string) => `vcs: git\nverify:\n  host: ${JSON.stringify(`"${process.execPath}" -e "${script}"`)}\n`;
+  const DEFN = { id: "j", target: { skill: "tk-studio-launch" } };
+
+  // AC1: the re-run reads `legGuard`, never `worker_guard_s`: the one table's rows.
+  for (const row of LEG_GUARD_ROWS) {
+    test(`the re-run's guard — ${row.name} → \`${row.trip}\`, red`, async () => {
+      const fx = await fixture({ definition: { ...DEFN, guards: row.guards }, config: scriptConfig("console.error('hung here'); setTimeout(() => {}, 60000)"), workerGuardS: row.workerGuardS });
+      expect(fx.queue.db.query("SELECT worker_guard_s FROM runs WHERE run_id = ?").get(fx.id)).toEqual({ worker_guard_s: row.workerGuardS });
+      const r = await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done;
+      expect(r).toMatchObject({ green: false, exit: null, guard: row.trip, stderr_tail: ["hung here"] });
+      expect(r.reason).toContain(`timed out (${row.trip}); last lines: hung here`);
+      expect(fx.hostVerifies().at(-1)!.detail).toMatchObject({ guard: row.trip });
+    }, 30_000);
+  }
+
+  test("AC2: a re-run ended on the guard with every verdict so far green — `inconclusive (guard)`: no flip, the body Timed out, `suite_durations` recorded, the verb's exit 1", async () => {
+    const fx = await fixture({
+      definition: { ...DEFN, guards: { max_wall_clock_seconds: 50, host_verify_seconds: 1 } },
+      config: scriptConfig("console.log('== lib suite: ok in 3s'); console.log('== conformance: ok in 9s'); setTimeout(() => {}, 60000)"),
+      workerGuardS: 50,
+    });
+    expect(fx.queue.db.query("SELECT worker_guard_s FROM runs WHERE run_id = ?").get(fx.id)).toEqual({ worker_guard_s: 50 });
+    const r = await captured(() => verifyVerb([fx.id], { queue: fx.queue, leg: (q, id) => rerunHostLeg(q, id, { by: "cli" }, fx.deps) }));
+    expect(r.value).toBe(1);
+    const answer = JSON.parse(r.out);
+    const reason = "host verify inconclusive (guard): timed out (guard: host_verify_seconds (1s)) with every verdict so far green; unrun: supervisor, studio-web";
+    expect(answer).toMatchObject({ ok: true, green: false, reason, suite_durations: { "lib suite": 3, conformance: 9 } });
+    expect(answer.red ?? []).toEqual([]);
+    const detail = fx.hostVerifies().at(-1)!.detail as Record<string, unknown>;
+    expect(isInconclusive(detail as HostVerifyResult)).toBe(true);
+    expect(detail).toMatchObject({ guard: "guard: host_verify_seconds (1s)", reason, suite_durations: { "lib suite": 3, conformance: 9 } });
+    // no flip: neither ready nor `--undo`
+    expect(fx.gh.some((a) => a[0] === "pr" && a[1] === "ready")).toBe(false);
+    expect((detail.rerun as Record<string, unknown>).pr_ready).toBeUndefined();
+    expect((detail.rerun as Record<string, unknown>).pr_draft).toBeUndefined();
+    // the body's `## Host verify`, up to its first fence: "timed out", never "failed" or "Red"
+    const body = fx.bodies.at(-1)!;
+    const section = body.slice(body.indexOf("## Host verify"), body.indexOf("stderr (last lines):"));
+    expect(section).toContain("**Timed out:** `");
+    expect(section).toContain("— guard: host_verify_seconds (1s) (");
+    expect(section).toContain("every verdict so far green; unrun: supervisor, studio-web");
+    expect(section).toContain("Durations: lib suite 3s, conformance 9s");
+    expect(section).not.toContain("failed");
+    expect(section).not.toContain("Red");
   }, 60_000);
 });

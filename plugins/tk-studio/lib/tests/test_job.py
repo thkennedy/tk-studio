@@ -180,6 +180,50 @@ class JobTestCase(unittest.TestCase):
         for defn in bad:
             self.assertNotEqual(joblib.validate_definition(defn), [], defn)
 
+    # ---------------- Story 38.1: the host leg's own guard
+
+    def test_story_38_1_host_verify_seconds_is_a_guard_key_and_its_value_shapes(self):
+        self.assertIn("host_verify_seconds", joblib.GUARD_KEYS)
+        for figure in (7200, 1, 90.5):
+            self.assertEqual(joblib.validate_definition(
+                self._defn(guards={"max_turns": 5, "host_verify_seconds": figure})), [], figure)
+        for figure in (0, -1, True, "x"):
+            with self.subTest(figure=figure):
+                problems = joblib.validate_definition(
+                    self._defn(guards={"max_turns": 5, "host_verify_seconds": figure}))
+                self.assertIn("guards.host_verify_seconds must be a number > 0", problems)
+
+    def test_story_38_1_host_verify_seconds_alone_is_no_job_guard(self):
+        # it bounds the leg, never the job: the at-least-one rule (AD-10) ignores it
+        problems = joblib.validate_definition(self._defn(guards={"host_verify_seconds": 60}))
+        self.assertTrue(any("guards must set at least one of" in p
+                            and "host_verify_seconds" not in p for p in problems), problems)
+
+    def test_story_38_1_guards_merge_key_wise_instance_keys_winning(self):
+        types = joblib.load_types()
+        base = {"job_schema_version": 1, "id": "run-epic-90", "type": "run-epic"}
+        resolved, problems = joblib.resolve_instance(dict(base, guards={"max_turns": 50}), types)
+        self.assertEqual(problems, [])
+        self.assertEqual(resolved["guards"], {"max_turns": 50, "max_wall_clock_seconds": 3600,
+                                              "host_verify_seconds": 7200})
+        resolved, _ = joblib.resolve_instance(dict(base, guards={"host_verify_seconds": 9000}), types)
+        self.assertEqual(resolved["guards"], {"max_turns": 80, "max_wall_clock_seconds": 3600,
+                                              "host_verify_seconds": 9000})
+        # a job without one gets its type's
+        resolved, _ = joblib.resolve_instance(base, types)
+        self.assertEqual(resolved["guards"]["host_verify_seconds"], 7200)
+        for type_id in ("run-epic", "run-vertical-slice", "run-sweep"):
+            self.assertEqual(types[type_id]["definition"]["guards"]["host_verify_seconds"], 7200, type_id)
+
+    def test_story_38_1_run_epic_38_drops_the_interim(self):
+        repo_root = Path(__file__).resolve().parents[4]
+        raw = json.loads((repo_root / ".tk-studio" / "jobs" / "run-epic-38.json").read_text(encoding="utf-8"))
+        self.assertNotIn("max_wall_clock_seconds", raw["guards"])
+        entry = joblib.load_instance(repo_root, "run-epic-38")
+        self.assertEqual(entry["problems"], [])
+        self.assertEqual(entry["definition"]["guards"], {"max_turns": 80, "max_wall_clock_seconds": 3600,
+                                                         "host_verify_seconds": 7200})
+
     def test_story_36_6_after_stories_is_a_rhythm_never_a_stop_condition(self):
         # M25
         for figure in (0, -1, True, "1", 1.5):
@@ -363,7 +407,7 @@ class JobTestCase(unittest.TestCase):
             self.assertEqual(defn[key], epic[key], key)
         self.assertEqual(defn["target"], {"skill": "tk-studio-launch",
                                           "payload": {"verb": "sweep"}})
-        self.assertEqual(defn["guards"], {"max_turns": 80, "max_wall_clock_seconds": 3600})
+        self.assertEqual(defn["guards"], {"max_turns": 80, "max_wall_clock_seconds": 3600, "host_verify_seconds": 7200})
         self.assertEqual(defn["stop"], {"on_status": ["blocked"]})
         self.assertEqual(defn["effort"], "high")
         self.assertNotEqual(defn["description"], epic["description"])
@@ -411,7 +455,7 @@ class JobTestCase(unittest.TestCase):
         self.assertEqual(defn["type"], "run-vertical-slice")
         self.assertEqual(defn["target"], {"skill": "tk-studio-launch", "payload": {
             "verb": "start", "bootstrap": True, "epic": 41}})
-        self.assertEqual(defn["guards"], {"max_turns": 80, "max_wall_clock_seconds": 3600})
+        self.assertEqual(defn["guards"], {"max_turns": 80, "max_wall_clock_seconds": 3600, "host_verify_seconds": 7200})
         self.assertEqual(defn["stop"], {"on_status": ["blocked"], "after_stories": 1})
         self.assertEqual(defn["effort"], "high")
         # a run-epic instance resolves as run-epic, never as a slice

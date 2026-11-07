@@ -15,7 +15,8 @@
   },
   "guards": {
     "max_turns": 80,
-    "max_wall_clock_seconds": 3600
+    "max_wall_clock_seconds": 3600,
+    "host_verify_seconds": 7200
   },
   "stop": {
     "on_status": ["blocked"],

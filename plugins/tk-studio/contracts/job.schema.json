@@ -7,7 +7,7 @@
       "job_schema_version": { "type": "number", "const": 1 },
       "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$", "note": "stable job identity; must equal the definition file's stem" },
       "description": { "type": "string", "required": false },
-      "type": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$", "required": false, "note": "id of a shipped generic job type this instance extends: instance fields override the type's, target keys overlay the type's target, payload shallow-merges with instance keys winning" },
+      "type": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$", "required": false, "note": "id of a shipped generic job type this instance extends: instance fields override the type's, target keys overlay the type's target, payload shallow-merges with instance keys winning; guards merge key-wise (instance keys win; Story 38.1)" },
       "target": {
         "type": "object",
         "note": "what the job executes; at least one of skill|core",
@@ -41,11 +41,12 @@
       },
       "guards": {
         "type": "object",
-        "note": "budget guards — at least one required, values > 0; a guard hit ends the run partial with the guard named in reason (§4)",
+        "note": "budget guards — at least one required, values > 0; a guard hit ends the run partial with the guard named in reason (§4); host_verify_seconds does not satisfy the at-least-one rule (Story 38.1)",
         "fields": {
           "max_tokens": { "type": "number", "required": false },
           "max_turns": { "type": "number", "required": false },
-          "max_wall_clock_seconds": { "type": "number", "required": false }
+          "max_wall_clock_seconds": { "type": "number", "required": false },
+          "host_verify_seconds": { "type": "number", "required": false, "note": "the host verify leg's own wall clock in seconds (> 0), read in place of the worker's guard by the close-out and the re-run; bounds the leg, never the job, so it does not satisfy the at-least-one rule (Story 38.1)" }
         }
       },
       "stop": {
