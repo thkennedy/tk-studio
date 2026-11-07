@@ -13,7 +13,8 @@ resolution: Resolved 2026-08-07 (ST-039, contract 0.1.7, shipped as 1.7.0 and re
 origin: migrated from legacy ledger ("Deferred from: code review of feat/tk-studio-connector (2026-08-06)"), 2026-10-29
 location: ClaudeOS/connectors/tk-studio/server.test.ts
 reason: Legacy item DW-2. The connector test suite is live-integration by design: it asserts against the real registry and studio install, so it cannot run on a machine without an onboarded tk-studio. Acceptable for the personal ClaudeOS repo (no CI); add a fixture/mock path only if the repo ever grows CI.
-status: open
+decision: owner 2026-11-07 (TKSTUDIO-223): A — closed as accepted: ClaudeOS has no CI as of 2026-11-05, revisit only if that changes; and Tim's wider ruling in the same answer: "ClaudeOS integration is not desired right now so let's not complicate things. tk-studio's scope has grown to be its own development suite so ClaudeOS should not be part of any tk-studio work right now" — no tk-studio story, sweep or design touches ClaudeOS until he says otherwise; flipped resolved in the day-8v docs PR
+status: resolved 2026-11-07 by the day-8v docs PR (owner decision 2026-11-07 (TKSTUDIO-223): closed as accepted, ClaudeOS out of tk-studio's scope; see the entry's decision: line)
 
 ### DW-126: Contract §8/§6 PATCH-level wording drift (unrunnable-core assertion, four-plane health)
 origin: migrated from legacy ledger ("Deferred from: AD-11/AD-13 hardening PRs (2026-08-06)"), 2026-10-29
@@ -610,6 +611,7 @@ source_spec: `34-3-the-playable-verify-leg-spec.md`
 location: apps/supervisor/src/hostverify.ts defaultJudge; plugins/tk-studio/skills/tk-studio-playable-judge/SKILL.md
 severity: medium
 reason: Review pass 1 (blind hunter). AC1 names the read-only rule; enforcing it needs a deny-profile design for invokeSkill's `deny_profile`, which this story's plan does not settle. Deferral class (a).
+decision: owner 2026-11-07 (TKSTUDIO-224): A — ship the judge deny profile: no Edit/Write/Bash and no Read of the project's code, `plugins`, `apps` and `_bmad-output` folders, passed by `defaultJudge` and pinned by a test; best effort, not a seal; stays open for the sweep bundle
 status: open
 
 ### DW-69: A 33.8 re-run on an ended run pins (starts) the stopped sandbox for the judge and nothing releases it; it carries no pin record, so the launch check warns "started outside the supervisor" until the ne
@@ -769,6 +771,7 @@ source_spec: `_bmad-output/specs/spec-epic-34/RETROSPECTIVE.md`
 location: plugins/tk-studio/lib/assets.py; apps/supervisor/src/enginemcp.ts:345-361; plugins/tk-studio/lib/engage.py:1150-1373; Epic 35: plugins/tk-studio/lib/plansync.py:2116-3301 (the stage log and `ledger-resolve`), lib/report.py (no `test_report.py`); apps/supervisor/src/planstatus.ts (the stage pass), hostverify.ts (no section markers)
 severity: low
 reason: `assets.py` holds a YAML-subset reader beside the imported `miniyaml`, the validator, a PNG codec, a GLB parser, two Blender runners, the kit indexer, the matcher, two gates, the manifest rewriter, a Meshy client and the CLI. Fix: split `assets.py` by section before the next ladder story. Epic 35 (retro-epic-35 A3): `plansync.py` 2,138 → 3,508 lines (126 defs/classes, 12 sections), 99 % of the growth the stage log (`:2116-3202`, 35.8) and `ledger-resolve` (`:3205-3301`, 35.7) — two products inside the plan-sync module, consumed as a sub-API by report.py, measurepush.py, `planstatus.ts` and the engine hook, the `# ---- stage log` marker the natural seam; `planstatus.ts` 369 → 631, the stage pass 42 % of the file and the one supervisor pass not in its own module (the shape 35.7 chose for `ledgerPass`); `hostverify.ts` 735 → 943 with five step kinds, the judge-process layer and the PR renderer and no section markers; `report.py` test-to-code ≈ 0.4. Fix, added: `lib/stagelog.py` (the stage log and `ledger-resolve` out of plansync.py, which also closes DW-85's private reach) and `src/stagepass.ts` beside `sweep.ts`; section markers in `hostverify.ts`; a `test_report.py`. Lands before Epic 36 adds surface on `sweep.ts`/`planstatus.ts` (AI-10).
+decision: owner 2026-11-07 (TKSTUDIO-220): A — one split story: the stage log and `ledger-resolve` out of `plansync.py` into `lib/stagelog.py` (which also removes `report.py`'s reach into `plansync._stage_target`) and the stage pass out of `planstatus.ts` into `src/stagepass.ts`; the rest of the list (the asset generator/index/mirror split, `hostverify.ts` markers, a `test_report.py`, the `enginemcp.ts` entry) closed as accepted; stays open for that split story (the next sweep bundle or the next hygiene epic)
 status: open — narrowed 2026-10-31 by thkennedy/tk-studio#319 (36.7: `assets.py` split along `lib/_png.py`, `lib/_proc.py`, `lib/_core.py` and `lib/_glb.py`; `engage.py scope` back under 149 lines, its two closures lifted to module level; remaining: the assets manifest reader and validator, the generator/index/mirror/match/write-back/placement split (blocked by the tests' patch targets through `assets.`), `plansync.py` → `lib/stagelog.py`, `src/stagepass.ts`, `hostverify.ts` section markers, a `test_report.py`, `report.py`'s reach into `plansync._stage_target`, `enginemcp.ts` as a process entry)
 
 ### DW-88: The judge's rubric ids live three times with no cross-pin.
@@ -1022,6 +1025,7 @@ source_spec: `_bmad-output/specs/spec-epic-35/RETROSPECTIVE.md`
 location: apps/supervisor/src/hostleg.ts:253-262 (the `-B` refusal), :217-232 (the branch ahead); apps/supervisor/src/worktree.ts:652 (the worktree kept on error); apps/supervisor/test/hostleg.test.ts:727 (pins the refusal, not its origin)
 severity: medium
 reason: 35.1's CAP-2 cut (`supervisor/run-<id>` reset to origin's tip, never detached) holds for a slice re-run that must commit, but a non-slice re-run after a close-out error meets the run's own kept worktree. Fix: cut detached when no slice commit is due; name the kept worktree in the `VerifyFailed` reason (and offer its removal); a test whose refusal comes from a close-out that kept its worktree.
+decision: owner 2026-11-07 (TKSTUDIO-221): A — the re-run cuts a detached checkout when no slice commit is due, so a plain re-run always works; the refusal (naming the kept worktree's path) stays only when a slice must commit onto the run branch; a test born from a close-out that kept its worktree pins it; stays open for the sweep bundle
 status: open
 
 ### DW-118: The sweep's end rule overrides the engine's own end: `sweepEndState` applies whenever a summary exists and the engine was not killed, so an engine that ended `failed`/`blocked` after its last bundle reads `complete` by bundle count.
@@ -1094,6 +1098,7 @@ source_spec: `spec-dw-5-job-finish-idempotence.md`
 location: plugins/tk-studio/lib/jobrun.py:701
 severity: low
 reason: The read_run check in finish and the write in update_run are separate, unlocked steps, and update_run accepts a same-state terminal rewrite (job.py:586). This race predates DW-5 (which only closes the sequential repeat); closing it needs a check inside update_run or a lock, which the DW-5 spec forbids changing (deferral class b, AD-12).
+decision: owner 2026-11-07 (TKSTUDIO-222): A — accept it: `finish` is single-writer and a concurrent finish on one run is not supported, written into `jobrun.py`'s docstring and the contract's §4, then closed; stays open for that docstring and contract line (the sweep bundle)
 status: open
 
 ### DW-130: A block the operator resolved by resuming the run leaves its Jira issue in `Blocked - Awaiting User`: no resume path transitions out of the block, and the Done promotion then holds as an AD-5 conflict with the owner still tagged (hole 101).

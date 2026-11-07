@@ -183,6 +183,9 @@ Verify after pass 2: lib suite 2930 OK (4 skipped); conformance `ok: true`; `bun
 | plan | — | 2026-11-07T20:38:28Z | 2026-11-07T21:02:55Z | — | claude-opus-5-5 | high | — | — | — | done |
 | dev | 1 | 2026-11-07T21:03:21Z | 2026-11-07T21:51:30Z | 28985d50-a57c-4a69-8003-1c8eaaaeb0db | claude-opus-5-5 | medium | 29466392 | 175105 | 14.3533 | completed |
 | gate | 1 | 2026-11-07T21:51:31Z | 2026-11-07T21:55:15Z | a0e30952-787d-435f-92e4-df01cedcda98 | claude-opus-5-5 | medium | 1762011 | 14005 | 1.3871 | completed |
+| host-leg | 1 | 2026-11-07T21:55:25Z | 2026-11-07T22:57:52Z | — | — | — | — | — | — | green |
+| close-out | 1 | 2026-11-07T22:57:52Z | 2026-11-07T22:58:00Z | — | — | — | — | — | — | PR |
+| merge | — | 2026-11-07T23:00:45Z | 2026-11-07T23:00:45Z | — | — | — | — | — | — | merged |
 
 ## Auto Run Result
 
